@@ -105,7 +105,7 @@ mkdir -p "$CLEAN_HOME/.claude" "$CLEAN_HOME/.codex"
   - [ ] `paseo plugin ls --json | jq '[.[] | select(.id=="paseo-bm")] | length'` → `0`.
   - [ ] Không còn file tạm atomic do paseo-bm để lại: `ls -a "$REAL_PASEO_HOME" | grep -E '^\.config\.json\..*\.tmp$'` → rỗng.
   - [ ] Cấu hình khớp bản trước khi cài, bỏ qua khoá `plugins` mà Paseo để lại:
-    `test -s "$EVID/config.before.json" && test -s "$REAL_PASEO_HOME/config.json" && diff <(jq -S 'del(.plugins)' "$EVID/config.before.json") <(jq -S 'del(.plugins)' "$REAL_PASEO_HOME/config.json")` → rỗng, mã 0. (Luôn kèm `test -s`: nếu biến chưa đặt, cả hai `jq` đều lỗi, hai đầu vào đều rỗng và `diff` báo "giống nhau" — kết luận sai.) Khác biệt được chấp nhận duy nhất: container rỗng `agents.providers` / `daemon.mcp` nếu chính paseo-bm đã tạo chúng (ghi rõ vào biên bản).
+    `test -s "$EVID/config.before.json" && test -s "$REAL_PASEO_HOME/config.json" && diff <(jq -S 'del(.plugins)' "$EVID/config.before.json") <(jq -S 'del(.plugins)' "$REAL_PASEO_HOME/config.json")` → rỗng, mã 0. (Luôn kèm `test -s`: nếu biến chưa đặt, cả hai `jq` đều lỗi, hai đầu vào đều rỗng và `diff` báo "giống nhau" — kết luận sai.)
   - [ ] Hai công tắc trở về đúng giá trị ở `switches.before.json` (chạy lại đúng lệnh `jq` ở bước 3 lên `config.json` hiện tại rồi `diff`).
   - [ ] `bm doctor --json > "$EVID/doctor-after-uninstall.json"` → `install-record` báo chưa cài, mã 0.
   - Skills do CLI `skills` cài **không** tính là thứ paseo-bm tạo (ADR-003); chúng nằm trong `HOME` sạch và bị xoá ở bước 8.
@@ -176,6 +176,5 @@ Kiểm bổ sung theo điều kiện ra của WP-120 (không phải chỉ số r
 - M-5 chỉ đạt khi gỡ **tương tác**: không có cờ để bỏ backup hay tắt lại `pluginsEnabled` khi không có TTY.
 - File tạm atomic (`.config.json.*.tmp`, `.install.json.*.tmp`) có thể bị bỏ lại nếu tiến trình bị giết đúng lúc đổi tên; không cơ chế nào dọn chúng. Bước 7 kiểm để phát hiện, không để che.
 - Trong HOME tạm, các CLI provider do Paseo gọi (Codex, OpenCode, bun) tự tạo thư mục của chúng (`.codex/tmp`, `.cache/opencode`, `Library/Caches/bun`…). Các thư mục này không do paseo-bm tạo và không tính vào M-4/M-5.
-- Container rỗng `agents.providers` / `daemon.mcp` do paseo-bm tạo có thể còn lại sau khi gỡ (cố ý, `src/paseo/config.ts` không dọn container).
 - M-2 đo trên lượt **cập nhật** không tương tác, vì lượt cài đầu tiên phải tương tác để đếm M-1; bản ghi thời gian CI (`install.timing`) là số đo bổ sung.
 - Tiền đề HOME sạch đã được kiểm đọc-chỉ trên daemon thật khi soạn checklist (Paseo CLI tôn trọng `PASEO_HOME`); `paseo plugin install` và `daemon reload` dưới HOME tạm chưa được thử và sẽ lần đầu được kiểm ở bước 4.

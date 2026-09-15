@@ -37,18 +37,19 @@ import { backupStamp } from "../../fsops.js";
 import { installPaths, paseoConfigFile } from "../../layout.js";
 import type { PaseoAdapter } from "../../paseo/adapter.js";
 import { isPaseoCliError, isPluginRunning } from "../../paseo/adapter.js";
-import type { ApplyConfigEditResult } from "../../paseo/config.js";
+import type { ApplyConfigEditResult, ConfigEdit } from "../../paseo/config.js";
 import {
   MCP_INJECT_PATH,
   PLUGINS_ENABLED_PATH,
   applyConfigEdit,
+  editConfig,
   isConfigMutationError,
   readConfigSnapshot,
   readMcpInject,
   readPluginsEnabled,
 } from "../../paseo/config.js";
 import type { InstallRecord } from "../../record.js";
-import { toIsoUtc, writeRecord } from "../../record.js";
+import { toIsoUtc, withCreatedConfigContainers, writeRecord } from "../../record.js";
 import type { InstallStepInput, TrustBoundaryOutcome, TrustBoundaryStep } from "./index.js";
 import { DEFAULT_PLUGIN_ID } from "./planner.js";
 import { pluginLogsCommand } from "./register.js";
@@ -74,6 +75,9 @@ export const ENABLE_LATER_COMMAND = "npx paseo-bm install --apply --enable-plugi
 
 /** Reason recorded in `backups[]` for the copy of Paseo's config taken here. */
 export const CONFIG_BACKUP_REASON = "paseo-config";
+
+/** The one edit this step makes: both switches on. */
+const TRUST_EDIT: ConfigEdit = { pluginsEnabled: true, mcpInject: { action: "set", value: true } };
 
 /** A failure the install command turns into `result.error` and an exit code. */
 export interface TrustBoundaryFailure {
@@ -159,12 +163,19 @@ async function runTrustBoundary(
   let intentRecord = record;
   try {
     const snapshot = await readConfigSnapshot(configFile, input.fs);
-    intentRecord = withSwitchOwnership(record, {
-      pluginsEnabledChanged: readPluginsEnabled(snapshot.config).value !== true,
-      mcpChanged: readMcpInject(snapshot.config).value !== true,
-      mcpPrevious: readMcpInject(snapshot.config),
+    // Containers too: `daemon` and `daemon.mcp` exist only because of this
+    // write when they are absent now, and uninstall must know that (bm-tm2).
+    intentRecord = withCreatedConfigContainers(
+      withSwitchOwnership(record, {
+        pluginsEnabledChanged: readPluginsEnabled(snapshot.config).value !== true,
+        pluginsPrevious: readPluginsEnabled(snapshot.config),
+        mcpChanged: readMcpInject(snapshot.config).value !== true,
+        mcpPrevious: readMcpInject(snapshot.config),
+        now,
+      }),
+      editConfig(snapshot.config, TRUST_EDIT).createdContainers,
       now,
-    });
+    );
     if (intentRecord !== record) await writeRecord(input.fsops, intentRecord);
   } catch (error) {
     if (!isConfigMutationError(error)) throw error;
@@ -177,7 +188,7 @@ async function runTrustBoundary(
     result = await applyConfigEdit({
       paseoHome: input.paseoHome,
       installHome: input.installHome,
-      edit: { pluginsEnabled: true, mcpInject: { action: "set", value: true } },
+      edit: TRUST_EDIT,
       adapter: input.adapter,
       fs: input.fs,
       backupDir: backupDirAbs,
@@ -205,12 +216,17 @@ async function runTrustBoundary(
   }
 
   const finalRecord = withBackup(
-    withSwitchOwnership(record, {
-      pluginsEnabledChanged: result.changedPaths.includes(PLUGINS_ENABLED_PATH),
-      mcpChanged: result.changedPaths.includes(MCP_INJECT_PATH),
-      mcpPrevious: result.before.mcpInject,
+    withCreatedConfigContainers(
+      withSwitchOwnership(record, {
+        pluginsEnabledChanged: result.changedPaths.includes(PLUGINS_ENABLED_PATH),
+        pluginsPrevious: result.before.pluginsEnabled,
+        mcpChanged: result.changedPaths.includes(MCP_INJECT_PATH),
+        mcpPrevious: result.before.mcpInject,
+        now,
+      }),
+      result.createdContainers,
       now,
-    }),
+    ),
     result.backupPath === undefined ? undefined : backupDirRel,
     now,
   );
@@ -247,6 +263,7 @@ async function runTrustBoundary(
 
 interface Ownership {
   readonly pluginsEnabledChanged: boolean;
+  readonly pluginsPrevious: { readonly present: boolean; readonly value: boolean | null };
   readonly mcpChanged: boolean;
   readonly mcpPrevious: { readonly present: boolean; readonly value: boolean | null };
   readonly now: Date;
@@ -256,18 +273,43 @@ interface Ownership {
  * `setByUs` only for a switch this run turns on, never cleared by a later run.
  * `previous` is the state before paseo-bm first set the switch: once paseo-bm
  * owns it, a later re-enable keeps the original state for uninstall.
+ *
+ * `pluginsEnabledPrevious` follows the same rule (bead bm-tm2). A record that
+ * already owns the switch but predates the field gets none: the state from
+ * before the first install is no longer observable, and guessing it is what
+ * the bead forbids. A key holding a non-boolean is not recorded either — the
+ * record has no faithful way to describe it.
  */
 function withSwitchOwnership(record: InstallRecord, change: Ownership): InstallRecord {
   const paseo = record.paseo;
+  const takesPlugins = change.pluginsEnabledChanged && !paseo.pluginsEnabledSetByUs;
   const pluginsEnabledSetByUs = paseo.pluginsEnabledSetByUs || change.pluginsEnabledChanged;
+  const describable = !change.pluginsPrevious.present || change.pluginsPrevious.value !== null;
+  const pluginsEnabledPrevious =
+    takesPlugins && describable
+      ? { present: change.pluginsPrevious.present, value: change.pluginsPrevious.value }
+      : paseo.pluginsEnabledPrevious;
   const mcpInject =
     change.mcpChanged && !paseo.mcpInject.setByUs
       ? { setByUs: true, previous: { present: change.mcpPrevious.present, value: change.mcpPrevious.value } }
       : paseo.mcpInject;
-  if (pluginsEnabledSetByUs === paseo.pluginsEnabledSetByUs && mcpInject === paseo.mcpInject) {
+  if (
+    pluginsEnabledSetByUs === paseo.pluginsEnabledSetByUs &&
+    pluginsEnabledPrevious === paseo.pluginsEnabledPrevious &&
+    mcpInject === paseo.mcpInject
+  ) {
     return record;
   }
-  return { ...record, updatedAt: toIsoUtc(change.now), paseo: { ...paseo, pluginsEnabledSetByUs, mcpInject } };
+  return {
+    ...record,
+    updatedAt: toIsoUtc(change.now),
+    paseo: {
+      ...paseo,
+      pluginsEnabledSetByUs,
+      ...(pluginsEnabledPrevious === undefined ? {} : { pluginsEnabledPrevious }),
+      mcpInject,
+    },
+  };
 }
 
 /** Adds the config backup to `backups[]` so it can be listed, restored and kept by `--prune`. */

@@ -23,7 +23,7 @@ import { resolveLayout } from "../src/layout.js";
 import type { PaseoAdapter, PluginSummary } from "../src/paseo/adapter.js";
 import { PaseoCliError } from "../src/paseo/adapter.js";
 import { ScriptedPrompter } from "../src/prompter.js";
-import type { InstallRecord, McpInjectPrevious, RoleRecord } from "../src/record.js";
+import type { ConfigContainerPath, InstallRecord, McpInjectPrevious, RoleRecord } from "../src/record.js";
 import { createRecord, parseRecord, serializeRecord } from "../src/record.js";
 import type { WriteScopeHarness } from "./helpers/write-scope.js";
 import { startWriteScope } from "./helpers/write-scope.js";
@@ -126,6 +126,12 @@ function put(relativePath: string, text: string): void {
 
 interface SeedOptions {
   readonly pluginsEnabledSetByUs?: boolean;
+  /** `paseo.pluginsEnabledPrevious`; omitted means a record from before bm-tm2. */
+  readonly pluginsEnabledPrevious?: McpInjectPrevious;
+  /** `paseo.createdConfigContainers`; omitted means none recorded. */
+  readonly createdConfigContainers?: readonly ConfigContainerPath[];
+  /** The installed `config.json`; defaults to {@link installedConfig}. */
+  readonly config?: Record<string, unknown>;
   readonly mcpSetByUs?: boolean;
   readonly mcpPrevious?: McpInjectPrevious;
   /** What `injectIntoAgents` holds right now; defaults to `true`, the value install set. */
@@ -160,6 +166,11 @@ function seed(options: SeedOptions = {}): InstallRecord {
   });
   const record: InstallRecord = {
     ...base,
+    paseo: {
+      ...base.paseo,
+      ...(options.pluginsEnabledPrevious === undefined ? {} : { pluginsEnabledPrevious: options.pluginsEnabledPrevious }),
+      ...(options.createdConfigContainers === undefined ? {} : { createdConfigContainers: options.createdConfigContainers }),
+    },
     roles: ROLES,
     files,
     versions: [{ version: VERSION, dir: `plugin/${VERSION}`, installedAt: INSTALLED_AT, active: true }],
@@ -168,7 +179,7 @@ function seed(options: SeedOptions = {}): InstallRecord {
   writeFileSync(join(installHome, "install.json"), serializeRecord(record), { mode: 0o600 });
   writeFileSync(
     configFile(),
-    `${JSON.stringify(installedConfig(options.mcpCurrent ?? { present: true, value: true }), null, 2)}\n`,
+    `${JSON.stringify(options.config ?? installedConfig(options.mcpCurrent ?? { present: true, value: true }), null, 2)}\n`,
   );
   return record;
 }
@@ -515,6 +526,133 @@ describe("Paseo's config", () => {
 
     expect(prompter.counts.confirm).toBe(2);
     expect(readConfig()["pluginsEnabled"]).toBe(true);
+  });
+});
+
+describe("pluginsEnabled goes back to its recorded previous state (bm-tm2)", () => {
+  /** Answers: uninstall yes, turn plugins off yes, drop backups no. */
+  const turnOff = (): ScriptedPrompter => new ScriptedPrompter({ confirm: [true, true, false] });
+
+  it("absent before paseo-bm: the key is removed, not set to false", async () => {
+    seed({ pluginsEnabledSetByUs: true, pluginsEnabledPrevious: { present: false, value: null } });
+    const prompter = turnOff();
+
+    const { document } = await uninstall({ prompter });
+
+    expect(prompter.counts.confirm).toBe(3);
+    expect("pluginsEnabled" in readConfig()).toBe(false);
+    expect(document.actions).toContainEqual(
+      expect.objectContaining({ kind: "config", target: "paseoHome/config.json#pluginsEnabled", reason: "restore-previous", to: null }),
+    );
+  });
+
+  it("false before paseo-bm: it is false again", async () => {
+    seed({ pluginsEnabledSetByUs: true, pluginsEnabledPrevious: { present: true, value: false } });
+
+    await uninstall({ prompter: turnOff() });
+
+    expect(readConfig()["pluginsEnabled"]).toBe(false);
+  });
+
+  it("true before paseo-bm: paseo-bm did not set it, so nothing is offered and it stays on", async () => {
+    seed({ pluginsEnabledSetByUs: false });
+    const prompter = new ScriptedPrompter({ confirm: [true, false] });
+
+    const { document } = await uninstall({ prompter });
+
+    expect(prompter.counts.confirm).toBe(2);
+    expect(readConfig()["pluginsEnabled"]).toBe(true);
+    expect(document.actions).toContainEqual(
+      expect.objectContaining({ kind: "keep", target: "paseoHome/config.json#pluginsEnabled", reason: "not-set-by-paseo-bm" }),
+    );
+  });
+
+  it("changed by someone else after the install: not offered and not touched", async () => {
+    seed({
+      pluginsEnabledSetByUs: true,
+      pluginsEnabledPrevious: { present: false, value: null },
+      config: { ...installedConfig({ present: true, value: true }), pluginsEnabled: false },
+    });
+    const prompter = new ScriptedPrompter({ confirm: [true, false] });
+
+    const { document } = await uninstall({ prompter });
+
+    expect(prompter.counts.confirm).toBe(2);
+    expect(readConfig()["pluginsEnabled"]).toBe(false);
+    expect(document.actions).toContainEqual(
+      expect.objectContaining({ kind: "keep", target: "paseoHome/config.json#pluginsEnabled", reason: "changed-since-install" }),
+    );
+  });
+});
+
+describe("config containers paseo-bm created (bm-tm2)", () => {
+  /** An installed config where agents, agents.providers, daemon.mcp and daemon.agentProfiles hold only paseo-bm's. */
+  function onlyOurs(extraProviders: Record<string, unknown> = {}): Record<string, unknown> {
+    const installed = installedConfig({ present: true, value: true });
+    const daemon = installed["daemon"] as { agentProfiles: { id: string }[] };
+    const providers = (installed["agents"] as { providers: Record<string, unknown> }).providers;
+    delete providers["room-worker"];
+    return {
+      ...installed,
+      agents: { providers: { ...providers, ...extraProviders } },
+      daemon: {
+        listen: "127.0.0.1:7777",
+        mcp: { injectIntoAgents: true },
+        agentProfiles: daemon.agentProfiles.filter((profile) => profile.id.startsWith("bm-")),
+      },
+    };
+  }
+
+  it("created by paseo-bm and empty after the bm-* entries go: removed, innermost first", async () => {
+    seed({ config: onlyOurs(), createdConfigContainers: ["agents", "agents.providers", "daemon.agentProfiles", "daemon.mcp"] });
+
+    const { document } = await uninstall();
+
+    // `daemon` existed before (it was not recorded) and still holds `listen`.
+    expect(readConfig()).toEqual({ pluginsEnabled: true, plugins: {}, daemon: { listen: "127.0.0.1:7777" } });
+    for (const path of ["agents", "agents.providers", "daemon.agentProfiles", "daemon.mcp"]) {
+      expect(document.actions).toContainEqual(
+        expect.objectContaining({ kind: "config", target: `paseoHome/config.json#${path}`, reason: "created-by-paseo-bm" }),
+      );
+    }
+  });
+
+  it("existed before paseo-bm: kept even though it is empty now", async () => {
+    seed({ config: onlyOurs(), createdConfigContainers: ["daemon.agentProfiles"] });
+
+    await uninstall();
+
+    const config = readConfig();
+    expect(config["agents"]).toEqual({ providers: {} });
+    expect(config["daemon"]).toEqual({ listen: "127.0.0.1:7777", mcp: {} });
+  });
+
+  it("created by paseo-bm but holding someone else's entry: kept", async () => {
+    seed({ config: onlyOurs({ mine: { extends: "claude" } }), createdConfigContainers: ["agents", "agents.providers"] });
+
+    const { document } = await uninstall();
+
+    expect(readConfig()["agents"]).toEqual({ providers: { mine: { extends: "claude" } } });
+    expect(document.actions).toContainEqual(
+      expect.objectContaining({ kind: "keep", target: "paseoHome/config.json#agents.providers", reason: "not-empty" }),
+    );
+  });
+
+  it("a record from before bm-tm2 is read and uninstalled as before: false, and no container removed", async () => {
+    seed({ config: onlyOurs(), pluginsEnabledSetByUs: true });
+    const raw = readFileSync(join(installHome, "install.json"), "utf8");
+    expect(raw).not.toContain("pluginsEnabledPrevious");
+    expect(raw).not.toContain("createdConfigContainers");
+
+    const { outcome, document } = await uninstall({ prompter: new ScriptedPrompter({ confirm: [true, true, false] }) });
+
+    expect(outcome.exitCode).toBe(EXIT_CODES.ok);
+    const config = readConfig();
+    expect(config["pluginsEnabled"]).toBe(false);
+    expect(config["agents"]).toEqual({ providers: {} });
+    expect(config["daemon"]).toEqual({ listen: "127.0.0.1:7777", mcp: {}, agentProfiles: [] });
+    const action = document.actions.find((entry) => entry.target === "paseoHome/config.json#pluginsEnabled") as { detail?: string } | undefined;
+    expect(action?.detail).toMatch(/does not record the state from before paseo-bm/);
   });
 });
 

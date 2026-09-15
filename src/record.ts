@@ -19,7 +19,10 @@
  * 3. **`paseo.mcpInject` stores the state, not a flag.** It keeps
  *    `{ setByUs, previous: { present, value } }`, because "the key was absent"
  *    is a different world from "the key was `false`", and a single boolean
- *    cannot undo the first one correctly (ADR-006 decision 8).
+ *    cannot undo the first one correctly (ADR-006 decision 8). The optional
+ *    `paseo.pluginsEnabledPrevious` does the same for `pluginsEnabled`, and
+ *    `paseo.createdConfigContainers` lists the containers of Paseo's config
+ *    that only exist because paseo-bm created them (bead bm-tm2).
  *
  * Writing goes through {@link FsOps}, so it inherits atomic replace, "only
  * write when the bytes differ", and mode `0600` (ADR-002 decisions 2, 3, 8).
@@ -66,6 +69,31 @@ export interface McpInjectPrevious {
   readonly value: boolean | null;
 }
 
+/** `{ present, value }` of one boolean key before paseo-bm touched it. */
+export type PreviousKeyState = McpInjectPrevious;
+
+/**
+ * The closed set of `config.json` containers paseo-bm can bring into existence
+ * on its way to a key it writes (Design §3.2, §3.4; bead bm-tm2). Only these may
+ * appear in `paseo.createdConfigContainers`, so a record can never point the
+ * uninstaller at an arbitrary key of Paseo's file.
+ */
+export const CONFIG_CONTAINER_PATHS = [
+  "agents",
+  "agents.providers",
+  "daemon",
+  "daemon.agentProfiles",
+  "daemon.mcp",
+] as const;
+
+/** One entry of {@link CONFIG_CONTAINER_PATHS}. */
+export type ConfigContainerPath = (typeof CONFIG_CONTAINER_PATHS)[number];
+
+/** True when a string names one of the containers paseo-bm can create. */
+export function isConfigContainerPath(value: string): value is ConfigContainerPath {
+  return (CONFIG_CONTAINER_PATHS as readonly string[]).includes(value);
+}
+
 /** Ownership of the global MCP switch (ADR-006 decisions 3, 7, 8). */
 export interface McpInjectRecord {
   /** True only when this installer was the one that turned the switch on. */
@@ -89,7 +117,19 @@ export interface PaseoRecord {
   readonly pluginDir: string | null;
   /** True only when this installer was the one that set `pluginsEnabled`. */
   readonly pluginsEnabledSetByUs: boolean;
+  /**
+   * `{ present, value }` of `pluginsEnabled` before paseo-bm first turned it on.
+   * Optional: a record written before bead bm-tm2 has none, and uninstall then
+   * keeps the old behaviour (turn it off with `false`) instead of guessing.
+   */
+  readonly pluginsEnabledPrevious?: PreviousKeyState | undefined;
   readonly mcpInject: McpInjectRecord;
+  /**
+   * `config.json` containers that did not exist until paseo-bm created them, in
+   * {@link CONFIG_CONTAINER_PATHS} order. Uninstall removes one only when it is
+   * empty again. Optional; absent means "none recorded".
+   */
+  readonly createdConfigContainers?: readonly ConfigContainerPath[] | undefined;
 }
 
 /** One registered role: the derived provider, its profile, and the tool grant. */
@@ -327,6 +367,29 @@ export function createRecord(input: CreateRecordInput): InstallRecord {
   });
 }
 
+/**
+ * The record with `created` merged into `paseo.createdConfigContainers`. Merging
+ * never drops an entry: a container paseo-bm created on the first install stays
+ * paseo-bm's across every later install and update. Returns the same object
+ * when nothing new is added, so callers can skip the write.
+ */
+export function withCreatedConfigContainers(
+  record: InstallRecord,
+  created: readonly ConfigContainerPath[],
+  at: Date | string = new Date(),
+): InstallRecord {
+  const known = new Set<ConfigContainerPath>(record.paseo.createdConfigContainers ?? []);
+  if (created.every((path) => known.has(path))) {
+    return record;
+  }
+  for (const path of created) known.add(path);
+  return {
+    ...record,
+    updatedAt: toIsoUtc(at),
+    paseo: { ...record.paseo, createdConfigContainers: CONFIG_CONTAINER_PATHS.filter((path) => known.has(path)) },
+  };
+}
+
 /** The same record with a new `updatedAt`. `installedAt` never moves. */
 export function touchRecord(record: InstallRecord, at: Date | string = new Date()): InstallRecord {
   return { ...record, updatedAt: toIsoUtc(at) };
@@ -353,6 +416,16 @@ export function serializeRecord(record: InstallRecord): string {
       pluginId: valid.paseo.pluginId,
       pluginDir: valid.paseo.pluginDir,
       pluginsEnabledSetByUs: valid.paseo.pluginsEnabledSetByUs,
+      // Optional fields are written only when they carry something, so a
+      // record that never used them serializes exactly as before bm-tm2.
+      ...(valid.paseo.pluginsEnabledPrevious === undefined
+        ? {}
+        : {
+            pluginsEnabledPrevious: {
+              present: valid.paseo.pluginsEnabledPrevious.present,
+              value: valid.paseo.pluginsEnabledPrevious.value,
+            },
+          }),
       mcpInject: {
         setByUs: valid.paseo.mcpInject.setByUs,
         previous: {
@@ -360,6 +433,9 @@ export function serializeRecord(record: InstallRecord): string {
           value: valid.paseo.mcpInject.previous.value,
         },
       },
+      ...((valid.paseo.createdConfigContainers ?? []).length === 0
+        ? {}
+        : { createdConfigContainers: [...(valid.paseo.createdConfigContainers ?? [])] }),
     },
     roles: valid.roles.map((role) => ({
       role: role.role,
@@ -445,28 +521,15 @@ export function validateRecord(value: unknown, context: RecordContext = {}): Ins
 
   const paseo = asObject(root["paseo"], "paseo", context);
   const mcpInject = asObject(paseo["mcpInject"], "paseo.mcpInject", context);
-  const previous = asObject(mcpInject["previous"], "paseo.mcpInject.previous", context);
-  const present = asBoolean(previous["present"], "paseo.mcpInject.previous.present", context);
-  const previousValue = asNullableBoolean(previous["value"], "paseo.mcpInject.previous.value", context);
-
-  // The whole point of storing `{ present, value }` instead of a boolean is
-  // that "absent" and "false" are different. A record claiming the key was
-  // absent *and* held a value describes neither, so it cannot be undone.
-  if (!present && previousValue !== null) {
-    throw invalid(
-      `paseo.mcpInject.previous says the key was absent but still records the value ${String(previousValue)}; ` +
-        "an absent key must record `value: null`",
-      "paseo.mcpInject.previous.value",
-      context,
-    );
-  }
-  if (present && previousValue === null) {
-    throw invalid(
-      "paseo.mcpInject.previous says the key was present but records no value",
-      "paseo.mcpInject.previous.value",
-      context,
-    );
-  }
+  const { present, value: previousValue } = readPrevious(mcpInject["previous"], "paseo.mcpInject.previous", context);
+  const pluginsEnabledPrevious =
+    paseo["pluginsEnabledPrevious"] === undefined
+      ? undefined
+      : readPrevious(paseo["pluginsEnabledPrevious"], "paseo.pluginsEnabledPrevious", context);
+  const createdConfigContainers =
+    paseo["createdConfigContainers"] === undefined
+      ? undefined
+      : readContainers(paseo["createdConfigContainers"], "paseo.createdConfigContainers", context);
 
   const skills = asObject(root["skills"], "skills", context);
 
@@ -495,10 +558,12 @@ export function validateRecord(value: unknown, context: RecordContext = {}): Ins
         "paseo.pluginsEnabledSetByUs",
         context,
       ),
+      ...(pluginsEnabledPrevious === undefined ? {} : { pluginsEnabledPrevious }),
       mcpInject: {
         setByUs: asBoolean(mcpInject["setByUs"], "paseo.mcpInject.setByUs", context),
         previous: { present, value: previousValue },
       },
+      ...(createdConfigContainers === undefined ? {} : { createdConfigContainers }),
     },
     roles,
     files: asArray(root["files"], "files", context).map((entry, index) =>
@@ -585,6 +650,46 @@ export async function writeRecord(
   const target = options.path === undefined ? recordPath(fsops.root) : options.path;
   const text = serializeRecord(record);
   return fsops.writeFileAtomic(target, text, { mode: FILE_MODE });
+}
+
+/**
+ * `{ present, value }` of one key. The whole point of storing it instead of a
+ * boolean is that "absent" and "false" are different, so a value that claims
+ * both — or neither — is refused: it could not be undone faithfully.
+ */
+function readPrevious(value: unknown, field: string, context: RecordContext): PreviousKeyState {
+  const entry = asObject(value, field, context);
+  const present = asBoolean(entry["present"], `${field}.present`, context);
+  const previousValue = asNullableBoolean(entry["value"], `${field}.value`, context);
+  if (!present && previousValue !== null) {
+    throw invalid(
+      `${field} says the key was absent but still records the value ${String(previousValue)}; ` +
+        "an absent key must record `value: null`",
+      `${field}.value`,
+      context,
+    );
+  }
+  if (present && previousValue === null) {
+    throw invalid(`${field} says the key was present but records no value`, `${field}.value`, context);
+  }
+  return { present, value: previousValue };
+}
+
+/** A list of container paths from the closed set, deduplicated, in canonical order. */
+function readContainers(value: unknown, field: string, context: RecordContext): ConfigContainerPath[] {
+  const found = new Set<ConfigContainerPath>();
+  for (const [index, entry] of asArray(value, field, context).entries()) {
+    const path = asNonEmptyString(entry, `${field}[${index}]`, context);
+    if (!isConfigContainerPath(path)) {
+      throw invalid(
+        `${field}[${index}] must be one of ${CONFIG_CONTAINER_PATHS.join(", ")}, found ${JSON.stringify(path)}`,
+        `${field}[${index}]`,
+        context,
+      );
+    }
+    found.add(path);
+  }
+  return CONFIG_CONTAINER_PATHS.filter((path) => found.has(path));
 }
 
 function readRole(value: unknown, field: string, context: RecordContext): RoleRecord {

@@ -52,7 +52,7 @@ import {
 import type { Prompter } from "../../prompter.js";
 import { PromptUnavailableError } from "../../prompter.js";
 import type { InstallRecord, RoleName, RoleRecord } from "../../record.js";
-import { ROLE_NAMES, roleId, toIsoUtc, writeRecord } from "../../record.js";
+import { ROLE_NAMES, roleId, toIsoUtc, withCreatedConfigContainers, writeRecord } from "../../record.js";
 import type { ProviderCatalog, RoleSelection } from "../../roles/config.js";
 import { RoleConfigError, configureRoles, loadProviderCatalog, toRoleRecord, validateRoleSpecs } from "../../roles/config.js";
 import type { LoginSpawner, ProviderLoginReport } from "../../roles/login.js";
@@ -237,10 +237,20 @@ async function applyRoles(input: RolesApplyInput, spawnLogin: LoginSpawner | und
   let record = input.record;
   const backupDirs: string[] = [];
   const notes: string[] = [];
+  let intentWritten = false;
 
   if (actions.some((action) => action.kind === "config")) {
     const stamp = await freeBackupStamp(input.installHome, input.now, input.fs);
     const backupDirRel = `backups/${stamp}`;
+    // Before touching config.json: the containers this write will create
+    // (`agents`, `agents.providers`, `daemon`, `daemon.agentProfiles`) go into
+    // the record, so uninstall can remove them once empty (bead bm-tm2).
+    const predicted = editConfig(config, roleRegistrationEdit(plan.selections)).createdContainers;
+    const intentRecord = withCreatedConfigContainers(record, predicted, input.now);
+    if (intentRecord !== record) {
+      await writeRecord(input.fsops, intentRecord);
+      intentWritten = true;
+    }
     try {
       const result = await registerRoles({
         paseoHome: input.paseoHome,
@@ -251,17 +261,22 @@ async function applyRoles(input: RolesApplyInput, spawnLogin: LoginSpawner | und
         backupDir: installPaths(input.installHome).backupDir(stamp),
         now: input.now,
       });
+      // Corrected from what the write actually created, merged into what the
+      // record already held — never from the prediction alone.
+      record = withCreatedConfigContainers(record, result.config.createdContainers, input.now);
       if (result.config.backupPath !== undefined) {
         record = withBackup(record, backupDirRel, input.now);
         backupDirs.push(backupDirRel);
       }
     } catch (error) {
       if (!isConfigMutationError(error)) throw error;
+      // Nothing was created (not written, or rolled back): the record must
+      // not keep the containers it announced before the write.
       if (error.backupPath !== undefined) {
         record = withBackup(record, backupDirRel, input.now);
         backupDirs.push(backupDirRel);
       }
-      if (record !== input.record) await writeRecord(input.fsops, record);
+      if (record !== input.record || intentWritten) await writeRecord(input.fsops, record);
       return {
         record,
         roles,
@@ -288,7 +303,9 @@ async function applyRoles(input: RolesApplyInput, spawnLogin: LoginSpawner | und
   if (JSON.stringify(record.roles) !== JSON.stringify(roleRecords)) {
     record = { ...record, updatedAt: toIsoUtc(input.now), roles: roleRecords };
   }
-  if (record !== input.record) {
+  // Also after an announced intent: the containers it named may not all have
+  // been created, and the record on disk must say what really happened.
+  if (record !== input.record || intentWritten) {
     await writeRecord(input.fsops, record);
   }
 
