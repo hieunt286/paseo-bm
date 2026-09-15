@@ -161,9 +161,13 @@ describe("role instruction files", () => {
 
   it.each(roleFiles)("roles/%s is written in English", (file) => {
     // Agent-facing content is English (REQ-032a). Vietnamese-only letters are
-    // the cheapest reliable signal that the rule was broken.
+    // the cheapest reliable signal that the rule was broken. Inline code spans
+    // are literal sample data — e.g. a quoted user request that demonstrates
+    // how diacritics are stripped from a label slug — not prose, so they are
+    // removed before the check.
     const vietnameseLetters =
       /[ăâđêôơưĂÂĐÊÔƠƯàáảãạằắẳẵặầấẩẫậèéẻẽẹềếểễệìíỉĩịòóỏõọồốổỗộờớởỡợùúủũụỳýỷỹỵ]/;
-    expect(read(join("roles", file))).not.toMatch(vietnameseLetters);
+    const prose = read(join("roles", file)).replace(/`[^`\n]*`/g, "");
+    expect(prose).not.toMatch(vietnameseLetters);
   });
 });
