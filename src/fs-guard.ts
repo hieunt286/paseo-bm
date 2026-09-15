@@ -133,7 +133,8 @@ export interface NodeFsApi {
   /** Read-only, never guarded. */
   readFile(path: string): Promise<Buffer>;
   chmod(path: string, mode: number): Promise<void>;
-  mkdir(path: string, options: { recursive: true; mode?: number }): Promise<string | undefined>;
+  /** `recursive: false` fails with `EEXIST` instead of merging into an existing directory. */
+  mkdir(path: string, options: { recursive?: boolean; mode?: number }): Promise<string | undefined>;
   /** Guarded when `flags` asks for write access. */
   open(path: string, flags: string, mode?: number): Promise<FileHandle>;
   rename(from: string, to: string): Promise<void>;
