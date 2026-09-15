@@ -1,24 +1,14 @@
-import { readVersion } from "./version.js";
+import { runCli } from "./cli.js";
+import type { CommandHandlers } from "./cli.js";
+import { doctorCommand } from "./commands/doctor.js";
+import { installCommand } from "./commands/install/index.js";
+import { uninstallCommand } from "./commands/uninstall.js";
 
-const USAGE = `paseo-bm — Beads Management for Paseo
+/** The handler table: one entry per command of Design §4.1. */
+export const handlers: CommandHandlers = {
+  install: installCommand,
+  doctor: doctorCommand,
+  uninstall: uninstallCommand,
+};
 
-Usage:
-  npx paseo-bm [command] [options]
-
-Commands are not implemented yet; this build only reports its own version.
-
-Options:
-  -h, --help     Show this message
-  -v, --version  Print the version and exit
-`;
-
-export function run(argv: readonly string[]): number {
-  if (argv.includes("-v") || argv.includes("--version")) {
-    process.stdout.write(`${readVersion()}\n`);
-    return 0;
-  }
-  process.stdout.write(USAGE);
-  return 0;
-}
-
-process.exitCode = run(process.argv.slice(2));
+process.exitCode = await runCli(process.argv.slice(2), { handlers });

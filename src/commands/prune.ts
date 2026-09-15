@@ -6,8 +6,9 @@
  * any of them is therefore only ever an explicit user request, and this module
  * is the only code that does it. Even then, one backup always stays (owner
  * decision 2026-09-15): the newest backup that holds the Paseo config copy
- * (`paseo-config.json`, written by `src/paseo/config.ts`), so
- * `uninstall --restore-backups` can still restore it. Older config backups and
+ * (`paseo-config.json`, written by `src/paseo/config.ts`), as the last
+ * known-good copy for manual recovery; uninstall never restores the whole config
+ * file (ADR-006 decision 8). Older config backups and
  * payload backups are pruned as usual. It follows the same split as install:
  *
  * - {@link planPrune} **only reads**. It decides what would be removed and what
@@ -75,8 +76,9 @@ export type PruneReason =
   /** The caller asked to keep this backup, e.g. the one this run took. */
   | "current-backup"
   /**
-   * The newest backup holding the Paseo config copy. Always kept so
-   * `uninstall --restore-backups` can still restore it.
+   * The newest backup holding the Paseo config copy. Always kept as the last
+ * known-good copy for manual recovery; uninstall never restores the whole config
+ * file (ADR-006 decision 8).
    */
   | "latest-config-backup"
   /** No version is active or registered, so none can safely be called old. */
@@ -516,7 +518,7 @@ async function latestConfigBackupDir(record: InstallRecord, fsops: FsOps, fs: No
 }
 
 /** Entries directly under `plugin/` or `backups/` that the record does not name. */
-async function listUnrecorded(fsops: FsOps, parent: string, known: ReadonlySet<string>): Promise<string[]> {
+export async function listUnrecorded(fsops: FsOps, parent: string, known: ReadonlySet<string>): Promise<string[]> {
   let entries: Dirent[];
   try {
     entries = await readdir(fsops.resolvePath(parent), { withFileTypes: true });
@@ -532,7 +534,7 @@ async function listUnrecorded(fsops: FsOps, parent: string, known: ReadonlySet<s
     .sort();
 }
 
-interface Walked {
+export interface Walked {
   /** Regular files, relative to the install home, sorted. */
   readonly files: string[];
   /** Directories, deepest first, the starting directory last. */
@@ -541,7 +543,8 @@ interface Walked {
   readonly odd: PruneKept[];
 }
 
-async function walk(fsops: FsOps, start: string): Promise<Walked> {
+/** Every entry under `start`, never following a symlink. Shared with uninstall. */
+export async function walk(fsops: FsOps, start: string): Promise<Walked> {
   const files: string[] = [];
   const dirs: string[] = [];
   const odd: PruneKept[] = [];
@@ -628,7 +631,7 @@ function pruneActions(plan: Omit<PrunePlan, "actions" | "summary">): FileAction[
           backup.dir,
           backup.reason,
           backup.reason === "latest-config-backup"
-            ? `${origin}; the newest copy of the Paseo config, kept so uninstall --restore-backups can still restore it`
+            ? `${origin}; the newest copy of the Paseo config, kept as the last known-good copy for manual recovery`
             : origin,
         );
         break;
@@ -647,14 +650,14 @@ function pruneActions(plan: Omit<PrunePlan, "actions" | "summary">): FileAction[
 // ---------------------------------------------------------------------------
 // Applying
 
-type RemoveOutcome = "removed" | Extract<PruneReason, "changed-since-preview" | "symlink">;
+export type RemoveOutcome = "removed" | Extract<PruneReason, "changed-since-preview" | "symlink">;
 
 /**
  * Removes one file, after checking again that it is a regular file reached
  * without a symlink and, for payload files, that its bytes still match the
  * record. A file already gone counts as removed.
  */
-async function removeFile(
+export async function removeFile(
   fsops: FsOps,
   fs: NodeFsApi,
   path: string,
@@ -684,7 +687,7 @@ async function removeFile(
 }
 
 /** `rmdir` each directory, deepest first. A non-empty or missing one is left. */
-async function removeEmptyDirs(fsops: FsOps, dirs: readonly string[]): Promise<string[]> {
+export async function removeEmptyDirs(fsops: FsOps, dirs: readonly string[]): Promise<string[]> {
   const removed: string[] = [];
   for (const dir of dirs) {
     try {
@@ -709,10 +712,10 @@ async function removeEmptyDirs(fsops: FsOps, dirs: readonly string[]): Promise<s
 // ---------------------------------------------------------------------------
 // Helpers
 
-type EntryType = "missing" | "file" | "directory" | "symlink" | "other";
+export type EntryType = "missing" | "file" | "directory" | "symlink" | "other";
 
 /** What is at a recorded path, without following a symlink anywhere on the way. */
-async function entryType(fsops: FsOps, fs: NodeFsApi, path: string): Promise<EntryType> {
+export async function entryType(fsops: FsOps, fs: NodeFsApi, path: string): Promise<EntryType> {
   let absolute: string;
   try {
     absolute = fsops.resolvePath(path);
@@ -745,12 +748,12 @@ function pluginDirCandidates(record: InstallRecord, fs: NodeFsApi): Set<string> 
   return new Set([resolve(pluginDir), canonicalPath(pluginDir, fs)]);
 }
 
-function normalizeDir(dir: string): string {
+export function normalizeDir(dir: string): string {
   return posix.normalize(dir).replace(/\/+$/, "");
 }
 
 /** True for `parent/<one segment>` and nothing else. */
-function isDirectChild(dir: string, parent: string): boolean {
+export function isDirectChild(dir: string, parent: string): boolean {
   const parts = dir.split("/");
   return parts.length === 2 && parts[0] === parent && parts[1] !== undefined && parts[1] !== "" && parts[1] !== "." && parts[1] !== "..";
 }

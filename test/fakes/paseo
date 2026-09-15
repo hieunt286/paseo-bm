@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /*
- * Stand-in for the `paseo` CLI, used by test/paseo-adapter.test.ts.
+ * Stand-in for the `paseo` CLI, used by test/paseo-adapter.test.ts and the
+ * command-flow tests.
  *
  * It is driven entirely by environment variables so each test can script one
  * invocation, and it records the argv it received so a test can assert that the
@@ -16,6 +17,11 @@
  *   BM_FAKE_EXIT       exit code in `ok` mode               (default: 0)
  *   BM_FAKE_TOUCH      file created on start; a test uses its ABSENCE to show
  *                      that shell metacharacters in an argument never ran
+ *   BM_FAKE_SCRIPT     path to a JSON file scripting several subcommands in
+ *                      one run: { "<argv[0]> <argv[1]>": { stdout, stderr,
+ *                      exit } }, e.g. "daemon status", "plugin install". A
+ *                      subcommand with no entry falls back to the variables
+ *                      above. Only read when set, so older tests are unchanged.
  */
 const fs = require("node:fs");
 
@@ -34,6 +40,18 @@ if (process.env.BM_FAKE_PID_FILE) {
 
 if (process.env.BM_FAKE_TOUCH) {
   fs.writeFileSync(process.env.BM_FAKE_TOUCH, "the fake CLI ran\n");
+}
+
+let scripted;
+if (process.env.BM_FAKE_SCRIPT) {
+  const script = JSON.parse(fs.readFileSync(process.env.BM_FAKE_SCRIPT, "utf8"));
+  scripted = script[argv.slice(0, 2).join(" ")];
+}
+
+if (scripted) {
+  if (scripted.stderr) process.stderr.write(scripted.stderr);
+  if (scripted.stdout) process.stdout.write(scripted.stdout);
+  process.exit(Number(scripted.exit || 0));
 }
 
 if (process.env.BM_FAKE_STDERR) {
