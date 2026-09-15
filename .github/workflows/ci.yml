@@ -46,6 +46,12 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Packs the real tarball, installs it offline into a temp project and runs
+      # the installed bin (--version, --help). Catches files missing from the
+      # package.json `files` field, which a source-tree run cannot see.
+      - name: Smoke test packed package
+        run: npm run smoke:packed
+
       # Cheap guard for the packaging rule in AGENTS.md: downloading the package
       # must never run code on the installing machine.
       - name: Assert no npm install lifecycle scripts
