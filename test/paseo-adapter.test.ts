@@ -1,10 +1,12 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import {
   PASEO_CALL_TIMEOUT_MS,
+  PASEO_KILL_GRACE_MS,
   PaseoCliError,
   createPaseoAdapter,
   isPaseoCliError,
@@ -21,6 +23,9 @@ import type { PaseoAdapter } from "../src/paseo/adapter.js";
 const FAKE_DIR = fileURLToPath(new URL("./fakes/", import.meta.url));
 const FAKE_PASEO = join(FAKE_DIR, "paseo");
 const ADAPTER_SOURCE = fileURLToPath(new URL("../src/paseo/adapter.ts", import.meta.url));
+
+/** Vitest's own limit for the deadline tests: generous, since it bounds child start-up only. */
+const TIMER_TEST_TIMEOUT_MS = 60_000;
 
 const temporaryDirs: string[] = [];
 
@@ -351,44 +356,131 @@ describe("the 15-second deadline", () => {
     expect(createPaseoAdapter({ timeoutMs: 250 }).timeoutMs).toBe(250);
   });
 
-  it("stops a hung call at the deadline and reports it", async () => {
-    const dir = workDir();
-    const pidFile = join(dir, "pid");
-    const adapter = adapterFor({ mode: "hang", pidFile }, { timeoutMs: 300, killGraceMs: 100 });
-
-    const startedAt = Date.now();
-    const error = await expectPaseoError(() => adapter.daemonStatus());
-    const elapsed = Date.now() - startedAt;
-
-    expect(error.code).toBe("E_DAEMON_UNREACHABLE");
-    expect(error.reason).toBe("timeout");
-    expect(error.timeoutMs).toBe(300);
-    expect(error.message).toContain("did not finish within 300 ms");
-    expect(elapsed).toBeGreaterThanOrEqual(295);
-    expect(elapsed).toBeLessThan(5_000);
-
-    const pid = Number(readFileSync(pidFile, "utf8"));
-    expect(Number.isInteger(pid)).toBe(true);
-    expect(isProcessAlive(pid), `the timed-out child ${pid} is still running`).toBe(false);
+  /*
+   * These two tests do not depend on wall-clock time (bm-izm). The adapter's
+   * deadline and grace timers are faked, so the product defaults (15 s, 2 s)
+   * are used as-is and fire only when the test advances them — and the test
+   * advances them only after an observable event: the child has started, the
+   * child has received SIGTERM. Starting a Node child on a loaded machine can
+   * take longer than any small real deadline, which is what made the earlier
+   * real-time versions flaky. Only `setTimeout`/`clearTimeout` are faked;
+   * polling below uses `node:timers/promises`, which the fake does not touch.
+   */
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
-  it("kills a child that ignores the polite request to stop", async () => {
-    const dir = workDir();
-    const pidFile = join(dir, "pid");
-    const adapter = adapterFor({ mode: "hang-ignore-term", pidFile }, { timeoutMs: 200, killGraceMs: 150 });
+  it(
+    "stops a hung call at the deadline and reports it",
+    async () => {
+      const dir = workDir();
+      const pidFile = join(dir, "pid");
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const adapter = adapterFor({ mode: "hang", pidFile });
 
-    const startedAt = Date.now();
-    const error = await expectPaseoError(() => adapter.pluginList());
-    const elapsed = Date.now() - startedAt;
+      const call = settle(adapter.daemonStatus());
+      const pid = Number(await waitForFile(pidFile));
+      expect(Number.isInteger(pid)).toBe(true);
 
-    expect(error.reason).toBe("timeout");
-    expect(error.signal).toBe("SIGKILL");
-    // Only the escalation could have ended it, so it cannot have died early.
-    expect(elapsed).toBeGreaterThanOrEqual(345);
-    expect(elapsed).toBeLessThan(5_000);
-    expect(isProcessAlive(Number(readFileSync(pidFile, "utf8")))).toBe(false);
-  });
+      // One millisecond short of the deadline nothing has been sent.
+      vi.advanceTimersByTime(PASEO_CALL_TIMEOUT_MS - 1);
+      expect(call.settled).toBe(false);
+      expect(isProcessAlive(pid)).toBe(true);
+
+      vi.advanceTimersByTime(1);
+      const error = await expectPaseoError(() => call.promise);
+
+      expect(error.code).toBe("E_DAEMON_UNREACHABLE");
+      expect(error.reason).toBe("timeout");
+      expect(error.timeoutMs).toBe(15_000);
+      expect(error.message).toContain("did not finish within 15000 ms");
+      // The polite request was enough for a child that honours it.
+      expect(error.signal).toBe("SIGTERM");
+      expect(isProcessAlive(pid), `the timed-out child ${pid} is still running`).toBe(false);
+    },
+    TIMER_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "kills a child that ignores the polite request to stop",
+    async () => {
+      const dir = workDir();
+      const readyFile = join(dir, "ready");
+      const termFile = join(dir, "got-sigterm");
+      const executable = stubbornChild(dir, readyFile, termFile);
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const adapter = createPaseoAdapter({ executable, env: fakeEnv({}) });
+
+      const call = settle(adapter.pluginList());
+      // The child writes this only after its SIGTERM handler is installed.
+      const pid = Number(await waitForFile(readyFile));
+
+      vi.advanceTimersByTime(PASEO_CALL_TIMEOUT_MS);
+      // The child received SIGTERM, ignored it, and is still running.
+      await waitForFile(termFile);
+      expect(isProcessAlive(pid)).toBe(true);
+      expect(call.settled).toBe(false);
+
+      vi.advanceTimersByTime(PASEO_KILL_GRACE_MS);
+      const error = await expectPaseoError(() => call.promise);
+
+      expect(error.reason).toBe("timeout");
+      expect(error.code).toBe("E_DAEMON_UNREACHABLE");
+      // Only the escalation could have ended it.
+      expect(error.signal).toBe("SIGKILL");
+      expect(isProcessAlive(pid)).toBe(false);
+    },
+    TIMER_TEST_TIMEOUT_MS,
+  );
 });
+
+/** Track whether a promise has settled, without leaving a rejection unhandled. */
+function settle<T>(promise: Promise<T>): { promise: Promise<T>; settled: boolean } {
+  const tracked = { promise, settled: false };
+  promise.then(
+    () => {
+      tracked.settled = true;
+    },
+    () => {
+      tracked.settled = true;
+    },
+  );
+  return tracked;
+}
+
+/** Wait until `path` exists with content; polls on real timers, bounded only by Vitest's limit. */
+async function waitForFile(path: string): Promise<string> {
+  for (;;) {
+    if (existsSync(path)) {
+      const content = readFileSync(path, "utf8");
+      if (content.length > 0) return content;
+    }
+    await sleep(10);
+  }
+}
+
+/**
+ * A child that ignores SIGTERM, written for this test so that readiness is
+ * reported only AFTER the handler is installed, and the handler records that
+ * the signal arrived. (The shared fake writes its pid file before installing
+ * its handler, so it cannot tell the two moments apart.)
+ */
+function stubbornChild(dir: string, readyFile: string, termFile: string): string {
+  const path = join(dir, "stubborn-paseo");
+  writeFileSync(
+    path,
+    [
+      `#!${process.execPath}`,
+      `const fs = require("node:fs");`,
+      `process.on("SIGTERM", () => { fs.writeFileSync(${JSON.stringify(termFile)}, "SIGTERM"); });`,
+      `fs.writeFileSync(${JSON.stringify(readyFile)}, String(process.pid));`,
+      `setInterval(() => {}, 1000);`,
+      "",
+    ].join("\n"),
+  );
+  chmodSync(path, 0o755);
+  return path;
+}
 
 /** Signal 0 checks for existence without delivering anything. */
 function isProcessAlive(pid: number): boolean {
