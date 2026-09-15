@@ -4,10 +4,10 @@
 |---|---|
 | Mã | `plan-v2-delta-20260915-m10` |
 | Plan gốc | [paseo-bm Implementation Plan bản 2](paseo-bm-implementation-plan-v2.md) (Active, Plan-ready PASS) — **không sửa tại chỗ** |
-| Status | **Draft — chờ owner duyệt** |
+| Status | **Accepted** — áp dụng PRD và plan; checklist điều phối áp dụng cùng `bm-bdk` |
 | Owner | hieu.nt10 |
 | Created | 2026-09-15 |
-| Accepted | (điền khi owner duyệt) |
+| Accepted | 2026-09-15 — owner hieu.nt10 chọn (b), ngưỡng 60 giây |
 | Applied | (điền khi đã sửa các tài liệu ở §6) |
 | Bead | `bm-l66` (chặn `bm-wp-117-9vy.2`) |
 | Nguồn | [Biên bản nghiệm thu điều phối 2026-09-15](../operations/paseo-bm-orchestration-run-20260915.md) (commit `c047142`) |
@@ -176,9 +176,9 @@ Delta này không đủ. Cần một ADR thay thế ADR-005 quyết định 2 v�
 
 ## 9. Duyệt
 
-- [ ] Owner chọn phương án: (a) / **(b)** / (c). Nếu (b), ngưỡng: ______ giây
-- [ ] Trả lời câu hỏi mở 2 và 3
-- Approved-by: ______________________, ngày ____-__-__
+- [x] Owner chọn phương án **(b)**, ngưỡng **60 giây**
+- [x] Câu hỏi mở 2: trong nghiệm thu chạy lại, **Manager cũng chạy chế độ không hỏi quyền** (người chạy đặt mode cho Manager trước khi gửi yêu cầu). Câu hỏi mở 3: **owner duyệt kèm dòng Revision History**, PRD giữ Accepted
+- Approved-by: hieu.nt10 (trả lời trong phiên làm việc với Claude), ngày 2026-09-15
 
 Sau khi duyệt:
 1. Sửa các vị trí 1–7 ở §6.
@@ -191,3 +191,4 @@ Sau khi duyệt:
 | Date | Author | Change |
 |---|---|---|
 | 2026-09-15 | hieu.nt10 (soạn bởi Claude) | Tạo bản Draft từ biên bản nghiệm thu điều phối 2026-09-15 |
+| 2026-09-15 | hieu.nt10 (soạn bởi Claude) | Owner duyệt (b) 60 giây; áp dụng vị trí 1–3 (PRD) và 7 (plan); vị trí 4–6 (checklist) áp dụng cùng `bm-bdk` |
