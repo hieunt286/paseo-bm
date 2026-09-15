@@ -100,7 +100,7 @@ mkdir -p "$EVID" "$CLEAN_HOME"
   - [ ] `paseo plugin ls --json | jq '[.[] | select(.id=="paseo-bm")] | length'` → `0`.
   - [ ] Không còn file tạm atomic do paseo-bm để lại: `ls -a "$REAL_PASEO_HOME" | grep -E '^\.config\.json\..*\.tmp$'` → rỗng.
   - [ ] Cấu hình khớp bản trước khi cài, bỏ qua khoá `plugins` mà Paseo để lại:
-    `diff <(jq -S 'del(.plugins)' "$EVID/config.before.json") <(jq -S 'del(.plugins)' "$REAL_PASEO_HOME/config.json")` → rỗng. Khác biệt được chấp nhận duy nhất: container rỗng `agents.providers` / `daemon.mcp` nếu chính paseo-bm đã tạo chúng (ghi rõ vào biên bản).
+    `test -s "$EVID/config.before.json" && test -s "$REAL_PASEO_HOME/config.json" && diff <(jq -S 'del(.plugins)' "$EVID/config.before.json") <(jq -S 'del(.plugins)' "$REAL_PASEO_HOME/config.json")` → rỗng, mã 0. (Luôn kèm `test -s`: nếu biến chưa đặt, cả hai `jq` đều lỗi, hai đầu vào đều rỗng và `diff` báo "giống nhau" — kết luận sai.) Khác biệt được chấp nhận duy nhất: container rỗng `agents.providers` / `daemon.mcp` nếu chính paseo-bm đã tạo chúng (ghi rõ vào biên bản).
   - [ ] Hai công tắc trở về đúng giá trị ở `switches.before.json` (chạy lại đúng lệnh `jq` ở bước 3 lên `config.json` hiện tại rồi `diff`).
   - [ ] `bm doctor --json > "$EVID/doctor-after-uninstall.json"` → `install-record` báo chưa cài, mã 0.
   - Skills do CLI `skills` cài **không** tính là thứ paseo-bm tạo (ADR-003); chúng nằm trong `HOME` sạch và bị xoá ở bước 8.
