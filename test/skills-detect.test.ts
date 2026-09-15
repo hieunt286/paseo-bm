@@ -189,33 +189,37 @@ describe("detectSkills — the M-8 layout matrix", () => {
   });
 
   it("layout 2: partially installed — reports exactly which skills are missing, per agent", async () => {
-    makeSkillsDir(join(home, ".agents"), REQUIRED_SKILLS);
+    // The shared directory lacks polishing-beads. Codex counts the union of its
+    // own directory and the shared one (bm-ozd); Claude counts only its own.
+    const shared = makeSkillsDir(
+      join(home, ".agents"),
+      REQUIRED_SKILLS.filter((skill) => skill !== "polishing-beads"),
+    );
     makeSkillsDir(join(home, ".claude"), ["feature-workflow", "implementing-beads"]);
-    makeSkillsDir(join(home, ".codex"), ["feature-workflow"]);
+    const codexSkills = makeSkillsDir(join(home, ".codex"), ["feature-workflow"]);
 
     const detection = await detectSkills(layoutFor());
 
-    expect(entryFor(detection, "agents").status).toBe("complete");
+    const agents = entryFor(detection, "agents");
+    expect(agents.status).toBe("incomplete");
+    expect(agents.missing).toEqual(["polishing-beads"]);
     const claude = entryFor(detection, "claude");
     expect(claude.status).toBe("incomplete");
     expect(claude.present).toEqual(["feature-workflow", "implementing-beads"]);
     expect(claude.missing).toEqual(["reviewing-plan", "converting-plan-to-beads", "polishing-beads"]);
-    expect(entryFor(detection, "codex").missing).toEqual([
-      "reviewing-plan",
-      "converting-plan-to-beads",
-      "polishing-beads",
-      "implementing-beads",
-    ]);
+    const codex = entryFor(detection, "codex");
+    expect(codex.status).toBe("incomplete");
+    expect(codex.present).toEqual(["feature-workflow", "reviewing-plan", "converting-plan-to-beads", "implementing-beads"]);
+    expect(codex.missing).toEqual(["polishing-beads"]);
+    expect(codex.foundIn).toEqual([codexSkills, shared]);
 
     expect(hasMissingRequiredSkills(detection)).toBe(true);
-    expect(agentsMissingSkills(detection).map((entry) => entry.agent)).toEqual(["claude", "codex"]);
-    expect(missingRequiredSkills(detection)).toEqual([
-      "reviewing-plan",
-      "converting-plan-to-beads",
-      "polishing-beads",
-      "implementing-beads",
-    ]);
+    expect(agentsMissingSkills(detection).map((entry) => entry.agent)).toEqual(["agents", "claude", "codex"]);
+    expect(missingRequiredSkills(detection)).toEqual(["reviewing-plan", "converting-plan-to-beads", "polishing-beads"]);
     expect(missingSkillsDetail(detection)).toContain("Claude Code (claude) is missing");
+    expect(skillsChecks(detection).find((check) => check.id === "skills-codex")?.message).toBe(
+      `Codex: missing polishing-beads in ${codexSkills} or ${shared}`,
+    );
   });
 
   it("layout 3: nothing installed — empty skills directory and no skills directory are different facts", async () => {
@@ -241,9 +245,10 @@ describe("detectSkills — the M-8 layout matrix", () => {
   });
 
   it("layout 4: symlinks — a symlinked skills directory, symlinked skills and a symlinked SKILL.md all count", async () => {
-    // The real machine layout of ADR-003: `~/.agents/skills` is the store and
-    // `~/.claude/skills` is a symlink pointing at it.
-    const store = makeSkillsDir(join(home, ".agents"), REQUIRED_SKILLS);
+    // `~/.claude/skills` is a symlink pointing at a store. The store sits outside
+    // `~/.agents` here: Codex also counts `~/.agents/skills` (bm-ozd), and a full
+    // shared directory would hide the per-skill symlink cases below.
+    const store = makeSkillsDir(join(scratch, "store"), REQUIRED_SKILLS);
     mkdirSync(join(home, ".claude"), { recursive: true });
     symlinkSync(store, join(home, ".claude", "skills"), "dir");
 
@@ -297,16 +302,35 @@ describe("detectSkills — the M-8 layout matrix", () => {
     expect(claude.present).toEqual(["feature-workflow"]);
     expect(claude.missing).toHaveLength(4);
 
+    // Codex at CODEX_HOME has no skills directory, but reads the shared one,
+    // which is fully stocked (bm-ozd). The stocked default ~/.codex/skills is
+    // never among the directories searched or found.
     const codex = entryFor(detection, "codex");
     expect(codex.home).toBe(codexElsewhere);
     expect(codex.homeSource).toBe("env");
-    expect(codex.status).toBe("no-skills-dir");
+    expect(codex.skillsDir).toBe(join(codexElsewhere, "skills"));
+    expect(codex.searchedDirs).toEqual([join(codexElsewhere, "skills"), join(home, ".agents", "skills")]);
+    expect(codex.status).toBe("complete");
+    expect(codex.foundIn).toEqual([join(home, ".agents", "skills")]);
 
     // The shared directory has no environment override and stays at the default.
     const shared = entryFor(detection, "agents");
     expect(shared.home).toBe(join(home, ".agents"));
     expect(shared.homeSource).toBe("default");
     expect(shared.status).toBe("complete");
+  });
+
+  it("layout 5b: CODEX_HOME with an empty shared directory reports the relocated Codex home only", async () => {
+    makeSkillsDir(join(home, ".codex"), REQUIRED_SKILLS);
+    const codexElsewhere = join(scratch, "xdg", "codex");
+    mkdirSync(codexElsewhere, { recursive: true });
+
+    const detection = await detectSkills(layoutFor({ CODEX_HOME: codexElsewhere }));
+
+    const codex = entryFor(detection, "codex");
+    expect(codex.status).toBe("no-skills-dir");
+    expect(codex.missing).toEqual([...REQUIRED_SKILLS]);
+    expect(existsSync(codex.skillsDir)).toBe(false);
   });
 
   it("layout 6: an agent that is not installed is skipped, and no directory is created for it", async () => {
@@ -329,6 +353,107 @@ describe("detectSkills — the M-8 layout matrix", () => {
     const check = skillsChecks(detection).find((candidate) => candidate.id === "skills-codex");
     expect(check?.severity).toBe("ok");
     expect(check?.message).toContain("skipped");
+  });
+});
+
+describe("detectSkills — Codex reads the shared directory (bug bm-ozd, skills CLI 1.5.26)", () => {
+  function codexCheck(detection: SkillsDetection) {
+    return skillsChecks(detection).find((check) => check.id === "skills-codex");
+  }
+
+  it("skills only in ~/.agents/skills, Codex home present without skills → Codex complete, no warning", async () => {
+    // Exactly what the real skills CLI leaves behind (acceptance run 2026-09-15).
+    const shared = makeSkillsDir(join(home, ".agents"), REQUIRED_SKILLS);
+    makeSkillsDir(join(home, ".claude"), REQUIRED_SKILLS);
+    mkdirSync(join(home, ".codex"), { recursive: true });
+
+    const detection = await detectSkills(layoutFor());
+
+    const codex = entryFor(detection, "codex");
+    expect(codex.status).toBe("complete");
+    expect(codex.present).toEqual([...REQUIRED_SKILLS]);
+    expect(codex.missing).toEqual([]);
+    expect(codex.searchedDirs).toEqual([join(home, ".codex", "skills"), shared]);
+    expect(codex.foundIn).toEqual([shared]);
+    expect(hasMissingRequiredSkills(detection)).toBe(false);
+    expect(missingSkillsDetail(detection)).toBeNull();
+    expect(codexCheck(detection)).toEqual({
+      id: "skills-codex",
+      severity: "ok",
+      message: `Codex: all 5 required skills are installed in ${shared}`,
+      remediation: "",
+    });
+    expect(existsSync(join(home, ".codex", "skills"))).toBe(false);
+  });
+
+  it("skills in a symlinked shared directory still count for Codex", async () => {
+    const store = makeSkillsDir(join(scratch, "store"), REQUIRED_SKILLS);
+    mkdirSync(join(home, ".agents"), { recursive: true });
+    symlinkSync(store, join(home, ".agents", "skills"), "dir");
+    mkdirSync(join(home, ".codex"), { recursive: true });
+
+    const detection = await detectSkills(layoutFor());
+
+    expect(entryFor(detection, "codex").status).toBe("complete");
+  });
+
+  it("skills only in $CODEX_HOME/skills → Codex complete, found there", async () => {
+    const codexElsewhere = join(scratch, "xdg", "codex");
+    const codexSkills = makeSkillsDir(codexElsewhere, REQUIRED_SKILLS);
+
+    const detection = await detectSkills(layoutFor({ CODEX_HOME: codexElsewhere }));
+
+    const codex = entryFor(detection, "codex");
+    expect(codex.status).toBe("complete");
+    expect(codex.foundIn).toEqual([codexSkills]);
+    expect(codexCheck(detection)?.message).toBe(`Codex: all 5 required skills are installed in ${codexSkills}`);
+  });
+
+  it("skills in neither directory → Codex missing all of them, and the warning names both places", async () => {
+    makeSkillsDir(join(home, ".agents"));
+    mkdirSync(join(home, ".codex"), { recursive: true });
+
+    const detection = await detectSkills(layoutFor());
+
+    const codex = entryFor(detection, "codex");
+    expect(codex.status).toBe("no-skills-dir");
+    expect(codex.missing).toEqual([...REQUIRED_SKILLS]);
+    expect(codex.foundIn).toEqual([]);
+    expect(agentsMissingSkills(detection).map((entry) => entry.agent)).toEqual(["agents", "codex"]);
+    expect(missingSkillsDetail(detection)).toContain("Codex (codex) is missing");
+    const check = codexCheck(detection);
+    expect(check?.severity).toBe("warn");
+    expect(check?.message).toBe(
+      `Codex: no skills directory at ${join(home, ".codex", "skills")} and no required skills in ${join(home, ".agents", "skills")}, so all 5 required skills are missing`,
+    );
+  });
+
+  it("Codex not installed → skipped even when the shared directory is full", async () => {
+    makeSkillsDir(join(home, ".agents"), REQUIRED_SKILLS);
+
+    const detection = await detectSkills(layoutFor());
+
+    const codex = entryFor(detection, "codex");
+    expect(codex.status).toBe("agent-not-installed");
+    expect(codex.present).toEqual([]);
+    expect(codex.missing).toEqual([]);
+    expect(codexCheck(detection)?.message).toContain("skipped");
+    expect(existsSync(join(home, ".codex"))).toBe(false);
+  });
+
+  it("Claude Code does not read the shared directory", async () => {
+    makeSkillsDir(join(home, ".agents"), REQUIRED_SKILLS);
+    const claudeSkills = makeSkillsDir(join(home, ".claude"));
+
+    const detection = await detectSkills(layoutFor());
+
+    const claude = entryFor(detection, "claude");
+    expect(claude.searchedDirs).toEqual([claudeSkills]);
+    expect(claude.status).toBe("incomplete");
+    expect(claude.missing).toEqual([...REQUIRED_SKILLS]);
+    expect(skillsChecks(detection).find((check) => check.id === "skills-claude")?.message).toBe(
+      `Claude Code: missing ${REQUIRED_SKILLS.join(", ")} in ${claudeSkills}`,
+    );
   });
 });
 
@@ -363,7 +488,9 @@ describe("detection is read-only", () => {
 
     expect(entryFor(detection, "agents").status).toBe("complete");
     expect(entryFor(detection, "claude").missing).toHaveLength(4);
-    expect(entryFor(detection, "codex").status).toBe("no-skills-dir");
+    // No ~/.codex/skills, but the read-only shared directory is complete (bm-ozd).
+    expect(entryFor(detection, "codex").status).toBe("complete");
+    expect(existsSync(join(home, ".codex", "skills"))).toBe(false);
   });
 
   it("the write guard in this file actually bites", async () => {

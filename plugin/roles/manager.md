@@ -76,6 +76,10 @@ For every new request from the user:
 
    The required skills are: `feature-workflow`, `reviewing-plan`,
    `converting-plan-to-beads`, `polishing-beads`, `implementing-beads`.
+   For Claude Code a skill counts only when it is in its own directory. For
+   Codex a skill counts when it is in `~/.agents/skills` **or** in
+   `~/.codex/skills` (`$CODEX_HOME/skills`): the skills CLI installs Codex skills
+   only into `~/.agents/skills`, so an absent `~/.codex/skills` is normal.
    If any required skill is missing for the agent the Worker will run on, tell
    the user in your reply that the Worker will follow the workflow with lower
    quality, and point them to `npx paseo-bm doctor` for the exact install

@@ -508,6 +508,51 @@ describe("skills-assist — the child env drops the npm exec context of paseo-bm
   }, 20_000);
 });
 
+describe("skills-assist — Codex skills in the shared directory count (bug bm-ozd)", () => {
+  function report(run: RunResult): PlanReport {
+    return JSON.parse(run.out) as PlanReport;
+  }
+
+  it("a rerun after the CLI installed Codex skills only into ~/.agents/skills does not ask, run the CLI or warn", async () => {
+    // Codex is installed; Claude Code already has its links (the real CLI makes
+    // them). The fake CLI then does what skills 1.5.26 does for Codex: it
+    // writes only into ~/.agents/skills and never creates ~/.codex/skills.
+    mkdirSync(join(home, ".codex"), { recursive: true });
+    for (const skill of REQUIRED_SKILLS) {
+      mkdirSync(join(home, ".claude", "skills", skill), { recursive: true });
+      writeFileSync(join(home, ".claude", "skills", skill, "SKILL.md"), `# ${skill}\n`);
+    }
+
+    const first = await install(["install"], {
+      tty: TTY,
+      confirm: [true, true],
+      npxInstallInto: join(home, ".agents", "skills"),
+    });
+    expect(first.code).toBe(EXIT_CODES.ok);
+    expect(first.prompter.confirmMessages).toEqual([APPLY_QUESTION, SKILLS_QUESTION]);
+    expect(first.err).toContain("Skills before: Codex (codex) is missing");
+    expect(first.err).toContain("Skills after: all required skills are installed");
+    expect(npxCalls()).toHaveLength(1);
+    expect(existsSync(join(home, ".codex", "skills"))).toBe(false);
+
+    scope?.restore();
+    const second = await install(["install"], { tty: TTY, confirm: [true] });
+    expect(second.code).toBe(EXIT_CODES.ok);
+    expect(second.prompter.confirmMessages).toEqual([APPLY_QUESTION]);
+    expect(second.err).not.toContain("is missing");
+    expect(npxCalls()).toHaveLength(1); // the fake CLI did not run again
+    expect(record().skills.lastStatus.filter((entry) => entry.agent === "codex").every((entry) => entry.present)).toBe(true);
+
+    scope?.restore();
+    const json = await install(["install", "--apply", "--json"]);
+    expect(json.code).toBe(EXIT_CODES.ok);
+    expect(report(json).warnings.map((warning) => warning.code)).not.toContain("W_SKILLS_MISSING");
+    expect(report(json).skills?.suggestedCommand).toBeNull();
+    expect(report(json).skills?.byAgent["codex"]).toEqual({ present: [...REQUIRED_SKILLS], missing: [] });
+    expect(npxCalls()).toHaveLength(1);
+  }, 30_000);
+});
+
 describe("skills CLI agent names (owner decision 2026-09-15)", () => {
   it("maps claude to claude-code and passes other names through", () => {
     expect(toSkillsCliAgents(["claude", "codex"])).toEqual(["claude-code", "codex"]);
