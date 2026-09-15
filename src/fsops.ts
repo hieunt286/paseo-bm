@@ -25,10 +25,10 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import type { Stats } from "node:fs";
-import { realpathSync } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
-import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import type { NodeFsApi } from "./fs-guard.js";
+import { canonicalPath, nodeFs } from "./fs-guard.js";
 import { PathGuardError, assertSafeWritePath, isWithinRoot } from "./paths-guard.js";
 
 /** Mode every directory paseo-bm creates gets (ADR-002 decision 8). */
@@ -97,6 +97,12 @@ export interface BackupOptions {
 export interface FsOpsOptions {
   /** The install home. Everything this helper writes stays inside it. */
   root: string;
+  /**
+   * The filesystem seam (`src/fs-guard.ts`). Defaults to the real filesystem;
+   * tests inject a guarded one so an out-of-scope write fails the test instead
+   * of reaching the disk (Design §10, M-4).
+   */
+  fs?: NodeFsApi;
 }
 
 export interface FsOps {
@@ -135,33 +141,14 @@ export function backupStamp(at: Date = new Date()): string {
  * are appended. Called once per helper so the symlink guard only ever inspects
  * segments below the root (see the module comment).
  */
-export function canonicalRoot(input: string): string {
-  const resolved = resolve(input);
-  const pending: string[] = [];
-  let current = resolved;
-
-  for (;;) {
-    try {
-      const real = realpathSync(current);
-      return pending.length === 0 ? real : resolve(real, pending.join(sep));
-    } catch (error) {
-      if (!isErrnoCode(error, "ENOENT")) {
-        throw error;
-      }
-      const parent = dirname(current);
-      if (parent === current) {
-        // Nothing on this path exists; the lexical form is the best we have.
-        return resolved;
-      }
-      pending.unshift(basename(current));
-      current = parent;
-    }
-  }
+export function canonicalRoot(input: string, fs: NodeFsApi = nodeFs): string {
+  return canonicalPath(input, fs);
 }
 
 /** Creates the fs helper bound to one install home. */
 export function createFsOps(options: FsOpsOptions): FsOps {
-  const root = canonicalRoot(options.root);
+  const fs = options.fs ?? nodeFs;
+  const root = canonicalRoot(options.root, fs);
   const declaredRoot = resolve(options.root);
 
   /**
@@ -186,10 +173,10 @@ export function createFsOps(options: FsOpsOptions): FsOps {
     const resolved = resolvePath(target);
     // `mkdir` applies the umask, so the created directories are chmod'ed back
     // to exactly `mode` afterwards.
-    const created = await mkdir(resolved, { recursive: true, mode });
+    const created = await fs.mkdir(resolved, { recursive: true, mode });
     if (created !== undefined) {
       for (const dir of pathsFrom(created, resolved)) {
-        await chmod(dir, mode);
+        await fs.chmod(dir, mode);
       }
     }
     return resolved;
@@ -197,7 +184,7 @@ export function createFsOps(options: FsOpsOptions): FsOps {
 
   const hashFile = async (target: string): Promise<string | undefined> => {
     const resolved = rebase(resolve(target));
-    const content = await readFileOrUndefined(resolved);
+    const content = await readFileOrUndefined(fs, resolved);
     return content === undefined ? undefined : sha256(content);
   };
 
@@ -211,7 +198,7 @@ export function createFsOps(options: FsOpsOptions): FsOps {
     const content = toBuffer(data);
     const digest = sha256(content);
 
-    const existing = await lstatOrUndefined(resolved);
+    const existing = await lstatOrUndefined(fs, resolved);
     if (existing !== undefined && !existing.isFile()) {
       throw new FsOpsError(
         "target-not-a-file",
@@ -221,7 +208,7 @@ export function createFsOps(options: FsOpsOptions): FsOps {
     }
 
     if (existing !== undefined) {
-      const current = await readFileOrUndefined(resolved);
+      const current = await readFileOrUndefined(fs, resolved);
       if (current !== undefined && sha256(current) === digest) {
         // Identical content: do not touch the file at all (ADR-002 decision 3).
         const currentMode = existing.mode & 0o7777;
@@ -229,13 +216,13 @@ export function createFsOps(options: FsOpsOptions): FsOps {
           return { path: resolved, sha256: digest, mode: currentMode, outcome: "unchanged", rewritten: false };
         }
         // `chmod` fixes the permissions without rewriting content or mtime.
-        await chmod(resolved, mode);
+        await fs.chmod(resolved, mode);
         return { path: resolved, sha256: digest, mode, outcome: "mode-changed", rewritten: false };
       }
     }
 
     await ensureDir(dirname(resolved));
-    await writeThroughTemp(resolved, content, mode);
+    await writeThroughTemp(fs, resolved, content, mode);
 
     return {
       path: resolved,
@@ -273,7 +260,7 @@ export function createFsOps(options: FsOpsOptions): FsOps {
       );
     }
 
-    const content = await readFileOrUndefined(resolvedSource);
+    const content = await readFileOrUndefined(fs, resolvedSource);
     if (content === undefined) {
       // Nothing to back up. Callers treat this as "there was no previous file".
       return undefined;
@@ -289,7 +276,7 @@ export function createFsOps(options: FsOpsOptions): FsOps {
     resolvePath,
     ensureDir,
     chmodPath: async (target, mode) => {
-      await chmod(resolvePath(target), mode);
+      await fs.chmod(resolvePath(target), mode);
     },
     hashFile,
     writeFileAtomic,
@@ -304,30 +291,35 @@ export function createFsOps(options: FsOpsOptions): FsOps {
  * destination directory never keeps a half-written file and the previous
  * version of the target is untouched.
  */
-async function writeThroughTemp(target: string, content: Buffer, mode: number): Promise<void> {
+async function writeThroughTemp(
+  fs: NodeFsApi,
+  target: string,
+  content: Buffer,
+  mode: number,
+): Promise<void> {
   const directory = dirname(target);
   const temp = join(directory, `.${basename(target)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
 
   let handle: FileHandle | undefined;
   try {
     // `wx` never reuses an existing file, so a stale temp can't be picked up.
-    handle = await open(temp, "wx", mode);
+    handle = await fs.open(temp, "wx", mode);
     await handle.writeFile(content);
     // The umask can strip bits from the mode given to `open`.
     await handle.chmod(mode);
     await handle.sync();
     await handle.close();
     handle = undefined;
-    await rename(temp, target);
+    await fs.rename(temp, target);
   } catch (error) {
     if (handle !== undefined) {
       await handle.close().catch(() => undefined);
     }
-    await rm(temp, { force: true }).catch(() => undefined);
+    await fs.rm(temp, { force: true }).catch(() => undefined);
     throw error;
   }
 
-  await syncDirectory(directory);
+  await syncDirectory(fs, directory);
 }
 
 /**
@@ -335,10 +327,10 @@ async function writeThroughTemp(target: string, content: Buffer, mode: number): 
  * platform or filesystem allows it; a refusal here does not make the write any
  * less atomic, so it is ignored.
  */
-async function syncDirectory(directory: string): Promise<void> {
+async function syncDirectory(fs: NodeFsApi, directory: string): Promise<void> {
   let handle: FileHandle | undefined;
   try {
-    handle = await open(directory, "r");
+    handle = await fs.open(directory, "r");
     await handle.sync();
   } catch {
     return;
@@ -366,9 +358,9 @@ function toBuffer(data: string | Uint8Array): Buffer {
   return typeof data === "string" ? Buffer.from(data, "utf8") : Buffer.from(data);
 }
 
-async function readFileOrUndefined(target: string): Promise<Buffer | undefined> {
+async function readFileOrUndefined(fs: NodeFsApi, target: string): Promise<Buffer | undefined> {
   try {
-    return await readFile(target);
+    return await fs.readFile(target);
   } catch (error) {
     if (isErrnoCode(error, "ENOENT")) {
       return undefined;
@@ -377,9 +369,9 @@ async function readFileOrUndefined(target: string): Promise<Buffer | undefined> 
   }
 }
 
-async function lstatOrUndefined(target: string): Promise<Stats | undefined> {
+async function lstatOrUndefined(fs: NodeFsApi, target: string): Promise<Stats | undefined> {
   try {
-    return await lstat(target);
+    return await fs.lstat(target);
   } catch (error) {
     if (isErrnoCode(error, "ENOENT")) {
       return undefined;
