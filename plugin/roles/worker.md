@@ -34,6 +34,13 @@ this file, not the skill.** In particular:
    `requestId` are allowed, but they never replace `feature:*`.
 4. **Report to Manager with Paseo's `send_agent_prompt` tool**, addressed to
    Manager's agent id. **Do not use `SendMessage`** or any other messaging tool.
+5. **Every bead you create or update keeps the headings the tracker's lint
+   requires** (with `br`: `## Acceptance Criteria` for tasks and features,
+   `## Steps to Reproduce` and `## Acceptance Criteria` for bugs,
+   `## Success Criteria` for epics), and never
+   drops a heading it already has. A separate acceptance-criteria field
+   never replaces the heading. Run the lint again before you send the
+   `beads-done` report.
 
 ## Responsibilities
 
@@ -238,6 +245,18 @@ labels and add any missing `feature:*` label first.
 
 - Create or update beads following Step 2, with self-contained descriptions,
   acceptance criteria, and the derived labels.
+- **Every bead description you write keeps the template headings the tracker's
+  lint requires** (with `br`: `## Acceptance Criteria` for tasks and features,
+  `## Steps to Reproduce` and `## Acceptance Criteria` for bugs,
+  `## Success Criteria` for epics). Write the
+  criteria under that heading in the description; a separate field such as
+  `--acceptance-criteria` never replaces the heading.
+- **When you rewrite an existing description, never drop a heading it already
+  has.**
+- After each round of bead changes, run the tracker's lint (with `br`:
+  `br lint -s all`; use the equivalent with `bd`). Before sending `beads-done`,
+  fix every warning on the beads you created or updated; mention warnings on
+  other beads in your report instead of fixing them.
 - The round of bead changes is one review batch; polish it at most once
   (Medium and Large only).
 - Record the list of bead ids that belong to this request, then send a
