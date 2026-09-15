@@ -59,6 +59,12 @@ describe("roles/manager.md content", () => {
     expect(workflow).toContain("npx paseo-bm doctor");
   });
 
+  it("counts Codex skills found in the shared directory (bug bm-ozd)", () => {
+    const workflow = section("Workflow");
+    expect(workflow).toMatch(/For\s+Codex a skill counts when it is in `~\/\.agents\/skills` \*\*or\*\* in\s+`~\/\.codex\/skills`/);
+    expect(workflow).toMatch(/For Claude Code a skill counts only when it is in its own directory/);
+  });
+
   it("supervises the guardrail budgets per size tier", () => {
     const reporting = section("Reporting");
     expect(reporting).toMatch(/\| Total review \+ polish calls per `requestId` \| \*\*1\*\* \| \*\*6\*\* \| \*\*10\*\* \|/);

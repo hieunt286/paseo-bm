@@ -99,6 +99,17 @@ export interface AgentSkillsDetection {
   readonly homeSource: PathSource;
   /** `<home>/skills`. Reported even when it does not exist; never created. */
   readonly skillsDir: string;
+  /**
+   * Every directory looked in for this agent, in lookup order: `skillsDir`
+   * first, then the shared `~/.agents/skills` for an agent that reads it
+   * (Codex, see `READS_SHARED_SKILLS_DIR`). Never created.
+   */
+  readonly searchedDirs: readonly string[];
+  /**
+   * The directories in `searchedDirs` that actually hold at least one required
+   * skill, so `doctor` can say where the skills were found (bug bm-ozd).
+   */
+  readonly foundIn: readonly string[];
   readonly status: AgentSkillsStatus;
   /** Required skills found, in `REQUIRED_SKILLS` order. */
   readonly present: readonly string[];
@@ -148,30 +159,66 @@ async function hasSkill(skillsDir: string, name: string): Promise<boolean> {
   return (await statKind(join(skillsDir, name, SKILL_MARKER_FILE))) === "file";
 }
 
+/**
+ * Split `names` into present and missing across `dirs`: a skill is present when
+ * any of the directories holds it. `foundIn` lists, in `dirs` order, the
+ * directories that hold at least one of `names`.
+ */
 async function partition(
-  skillsDir: string,
+  dirs: readonly string[],
   names: readonly string[],
-): Promise<{ present: string[]; missing: string[] }> {
-  const found = await Promise.all(names.map((name) => hasSkill(skillsDir, name)));
+): Promise<{ present: string[]; missing: string[]; foundIn: string[] }> {
+  const found = await Promise.all(
+    names.map(async (name) => {
+      const hits = await Promise.all(dirs.map((dir) => hasSkill(dir, name)));
+      return dirs.filter((_, index) => hits[index] === true);
+    }),
+  );
   const present: string[] = [];
   const missing: string[] = [];
+  const holding = new Set<string>();
   names.forEach((name, index) => {
-    (found[index] === true ? present : missing).push(name);
+    const where = found[index] ?? [];
+    (where.length > 0 ? present : missing).push(name);
+    for (const dir of where) holding.add(dir);
   });
-  return { present, missing };
+  return { present, missing, foundIn: dirs.filter((dir) => holding.has(dir)) };
 }
+
+/**
+ * Agents whose skills also count when they sit only in the shared
+ * `~/.agents/skills` directory (bug bm-ozd).
+ *
+ * Based on the `skills` CLI 1.5.26 (`dist/cli.mjs`): Codex is declared with
+ * `skillsDir: ".agents/skills"`, which makes it a "universal" agent
+ * (`isUniversalAgent`). For a global install the installer copies each skill
+ * into the canonical `~/.agents/skills` and returns right there for universal
+ * agents, so no link is ever created in `$CODEX_HOME/skills`. Codex itself reads
+ * `~/.agents/skills`. Claude Code is not universal: the CLI links each skill
+ * into `$CLAUDE_CONFIG_DIR/skills`, so Claude keeps looking only there.
+ * `agents` is the shared directory itself and has nothing to fall back to.
+ */
+export const READS_SHARED_SKILLS_DIR: Readonly<Record<SkillAgentId, boolean>> = {
+  agents: false,
+  claude: false,
+  codex: true,
+};
 
 async function detectAgent(
   agent: SkillAgentId,
   home: ResolvedPath,
+  sharedSkillsDir: string,
 ): Promise<AgentSkillsDetection> {
   const skillsDir = join(home.path, SKILLS_DIR_NAME);
+  const searchedDirs =
+    READS_SHARED_SKILLS_DIR[agent] && sharedSkillsDir !== skillsDir ? [skillsDir, sharedSkillsDir] : [skillsDir];
   const base = {
     agent,
     label: SKILL_AGENT_LABELS[agent],
     home: home.path,
     homeSource: home.source,
     skillsDir,
+    searchedDirs,
   } as const;
 
   if ((await statKind(home.path)) !== "dir") {
@@ -182,26 +229,34 @@ async function detectAgent(
       status: "agent-not-installed",
       present: [],
       missing: [],
+      foundIn: [],
       optionalPresent: [],
       optionalMissing: [],
     };
   }
 
-  if ((await statKind(skillsDir)) !== "dir") {
+  // A missing directory simply yields no skills, so looking before knowing
+  // whether `skillsDir` exists is safe and still read-only.
+  const required = await partition(searchedDirs, REQUIRED_SKILLS);
+  const optional = await partition(searchedDirs, OPTIONAL_SKILLS);
+
+  if ((await statKind(skillsDir)) !== "dir" && required.present.length === 0) {
+    // The agent's own directory is absent and no shared directory it reads
+    // holds a required skill either.
     return {
       ...base,
       status: "no-skills-dir",
       present: [],
       missing: [...REQUIRED_SKILLS],
-      optionalPresent: [],
-      optionalMissing: [...OPTIONAL_SKILLS],
+      foundIn: [],
+      optionalPresent: optional.present,
+      optionalMissing: optional.missing,
     };
   }
 
-  const required = await partition(skillsDir, REQUIRED_SKILLS);
-  const optional = await partition(skillsDir, OPTIONAL_SKILLS);
   return {
     ...base,
+    foundIn: required.foundIn,
     status: required.missing.length === 0 ? "complete" : "incomplete",
     present: required.present,
     missing: required.missing,
@@ -223,8 +278,9 @@ export async function detectSkills(layout: Layout): Promise<SkillsDetection> {
     claude: layout.claudeHome,
     codex: layout.codexHome,
   };
+  const sharedSkillsDir = join(layout.agentsHome.path, SKILLS_DIR_NAME);
   const agents = await Promise.all(
-    SKILL_AGENT_IDS.map((agent) => detectAgent(agent, homes[agent])),
+    SKILL_AGENT_IDS.map((agent) => detectAgent(agent, homes[agent], sharedSkillsDir)),
   );
   return { required: [...REQUIRED_SKILLS], optional: [...OPTIONAL_SKILLS], agents };
 }
@@ -300,7 +356,7 @@ export function skillsChecks(detection: SkillsDetection): readonly Check[] {
         return {
           id,
           severity: "ok" as const,
-          message: `${entry.label}: all ${detection.required.length} required skills are installed in ${entry.skillsDir}`,
+          message: `${entry.label}: all ${detection.required.length} required skills are installed in ${entry.foundIn.join(" and ")}`,
           remediation: "",
         };
       case "agent-not-installed":
@@ -314,14 +370,17 @@ export function skillsChecks(detection: SkillsDetection): readonly Check[] {
         return {
           id,
           severity: "warn" as const,
-          message: `${entry.label}: no skills directory at ${entry.skillsDir}, so all ${entry.missing.length} required skills are missing`,
+          message:
+            entry.searchedDirs.length > 1
+              ? `${entry.label}: no skills directory at ${entry.skillsDir} and no required skills in ${entry.searchedDirs.slice(1).join(" or ")}, so all ${entry.missing.length} required skills are missing`
+              : `${entry.label}: no skills directory at ${entry.skillsDir}, so all ${entry.missing.length} required skills are missing`,
           remediation,
         };
       case "incomplete":
         return {
           id,
           severity: "warn" as const,
-          message: `${entry.label}: missing ${entry.missing.join(", ")} in ${entry.skillsDir}`,
+          message: `${entry.label}: missing ${entry.missing.join(", ")} in ${entry.searchedDirs.join(" or ")}`,
           remediation,
         };
     }
