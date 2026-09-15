@@ -28,8 +28,12 @@ export CLEAN_HOME=$RUN/home                 # HOME sạch cho paseo-bm
 export REPO=/Users/Shared/work/self/paseo-plugins/paseo-bm
 # Chạy paseo-bm trong HOME sạch nhưng với daemon thật:
 bm() { HOME="$CLEAN_HOME" PASEO_HOME="$REAL_PASEO_HOME" npx --yes --package "$TARBALL" paseo-bm "$@"; }
+# Lệnh TƯƠNG TÁC có ghi log: dùng `script`, KHÔNG dùng `| tee`.
+bmlog() { local log="$1"; shift; script -q "$log" env HOME="$CLEAN_HOME" PASEO_HOME="$REAL_PASEO_HOME" npx --yes --package "$TARBALL" paseo-bm "$@"; }
 mkdir -p "$EVID" "$CLEAN_HOME"
 ```
+
+> **Bẫy đã gặp ở lượt chạy đầu (2026-09-15):** `bm install 2>&1 | tee file` làm stdout không còn là terminal, nên paseo-bm coi là **không có TTY**: không hỏi gì, dùng vai trò mặc định và thoát mã 6; một lệnh `--apply` sau đó cài thật mà không có đồng ý. Mọi lệnh cần trả lời câu hỏi phải chạy qua `bmlog` (dùng `script -q`, giữ nguyên TTY mà vẫn ghi log).
 
 ## 3. Chuẩn bị và backup
 
@@ -52,7 +56,7 @@ mkdir -p "$EVID" "$CLEAN_HOME"
 ## 4. Cài lần đầu (M-1, M-7, M-9)
 
 - [ ] Chạy **tương tác** và đo tổng thời gian cho biên bản (không dùng cho M-2 vì có thời gian người trả lời):
-  `time bm install 2>&1 | tee "$EVID/install-1.log"`
+  `time bmlog "$EVID/install-1.log" install`
 - [ ] **Đếm số lần xác nhận** (M-1): áp dụng; bật plugin kèm quyền công cụ agent (một câu hỏi cho cả hai); cài skills. Câu hỏi cấu hình vai trò (tên, provider, model) **không** tính là xác nhận. Ghi từng câu theo thứ tự vào `$EVID/m1-prompts.txt`.
 - [ ] Trả lời: đồng ý áp dụng; đồng ý câu cảnh báo tin cậy; chọn provider/model cho ba vai trò (ghi lại); đăng nhập provider nếu được mời; **đồng ý cài skills**.
 - [ ] Mã thoát 0: `echo $?` ngay sau lệnh (hoặc đọc dòng "Exit code" trong log).
@@ -64,7 +68,7 @@ mkdir -p "$EVID" "$CLEAN_HOME"
 ## 5. Chạy lại cùng phiên bản (M-3) và `doctor`
 
 - [ ] Ghi hash trước: `shasum -a 256 "$REAL_PASEO_HOME/config.json" > "$EVID/config.rerun-before.sha256"; find "$CLEAN_HOME/.paseo-bm" -type f -print0 | sort -z | xargs -0 shasum -a 256 > "$EVID/installhome.rerun-before.sha256"`.
-- [ ] Chạy lại **tương tác**: `bm install 2>&1 | tee "$EVID/install-rerun.log"` → **không có câu hỏi nào**, báo cáo toàn `skip`, mã 0.
+- [ ] Chạy lại **tương tác**: `bmlog "$EVID/install-rerun.log" install` → **không có câu hỏi nào**, báo cáo toàn `skip`, mã 0.
 - [ ] Chạy lại không tương tác: `bm install --apply --json > "$EVID/install-rerun.json"; jq '[.actions[] | select(.kind != "skip")] | length' "$EVID/install-rerun.json"` → `0`.
 - [ ] Hash sau khớp hash trước cho `config.json` và mọi file trong install home ngoài `.lock`.
 - [ ] **`doctor`** (độ trễ và trạng thái): `time bm doctor --json > "$EVID/doctor-1.json"` → mã 0, thời gian ≤ 5 giây; `jq -r '.checks[] | "\(.id) \(.severity)"' "$EVID/doctor-1.json"` cho `plugin-status ok`, `plugins-enabled ok`, `agent-tools ok`, `role-bm-manager ok`, `role-bm-worker ok`, `role-bm-reviewer ok`.
@@ -87,7 +91,7 @@ mkdir -p "$EVID" "$CLEAN_HOME"
 
 ## 7. Gỡ (M-5)
 
-- [ ] Chạy **tương tác** (M-5 chỉ đạt được khi tương tác, vì bỏ backup và tắt lại `pluginsEnabled` chỉ được hỏi qua prompt): `bm uninstall --apply 2>&1 | tee "$EVID/uninstall.log"`.
+- [ ] Chạy **tương tác** (M-5 chỉ đạt được khi tương tác, vì bỏ backup và tắt lại `pluginsEnabled` chỉ được hỏi qua prompt): `bmlog "$EVID/uninstall.log" uninstall --apply`.
 - [ ] Trả lời: **bỏ backup**; **tắt lại** `pluginsEnabled` nếu được đề nghị (chỉ được đề nghị khi chính paseo-bm đã bật và không còn plugin nào khác).
 - [ ] Mã thoát 0.
 - [ ] **M-5 — không còn thứ do paseo-bm tạo:**

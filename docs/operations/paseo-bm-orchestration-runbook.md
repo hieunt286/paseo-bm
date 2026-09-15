@@ -27,7 +27,7 @@ npm pack --pack-destination ~/bm-acceptance/20260915
 npx --yes --package ~/bm-acceptance/20260915/paseo-bm-0.1.0-alpha.0.tgz paseo-bm install
 ```
 
-- Cài **tương tác**. Đếm số lần được hỏi **xác nhận** (áp dụng; bật plugin kèm quyền công cụ; cài skills) — mong đợi đúng 3 (M-1). Câu hỏi cấu hình vai trò không tính là xác nhận.
+- Cài **tương tác**, chạy trực tiếp trong terminal — **không** thêm `| tee` hay chuyển hướng stdout, nếu không paseo-bm sẽ coi là không có TTY và không hỏi gì. Đếm số lần được hỏi **xác nhận** (áp dụng; bật plugin kèm quyền công cụ; cài skills) — mong đợi đúng 3 (M-1). Câu hỏi cấu hình vai trò không tính là xác nhận.
 - Chọn provider/model cho Manager, Worker, Reviewer; ghi lại vào mục 7 của checklist.
 - Sau đó chạy `npx --yes --package ~/bm-acceptance/20260915/paseo-bm-0.1.0-alpha.0.tgz paseo-bm doctor` — mong đợi mã 0.
 - Kiểm nhanh trong Paseo: plugin `paseo-bm` ở `status: running`; ba profile `bm-*` có trong bộ chọn.
