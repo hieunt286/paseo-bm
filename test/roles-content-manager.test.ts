@@ -65,6 +65,34 @@ describe("roles/manager.md content", () => {
     expect(workflow).toMatch(/For Claude Code a skill counts only when it is in its own directory/);
   });
 
+  it("creates the Worker before it checks skills (bug bm-6b2)", () => {
+    const workflow = section("Workflow");
+    const restate = workflow.indexOf("1. **Restate the request**");
+    const delegate = workflow.indexOf("2. **Delegate now: reuse or create the Worker.**");
+    const fails = workflow.indexOf("3. **If creating the Worker fails**");
+    const skills = workflow.indexOf("4. **Check skills**");
+    const confirm = workflow.indexOf("5. **Confirm to the user**");
+    expect(restate).toBeGreaterThanOrEqual(0);
+    expect(delegate).toBeGreaterThan(restate);
+    expect(fails).toBeGreaterThan(delegate);
+    expect(skills).toBeGreaterThan(fails);
+    expect(confirm).toBeGreaterThan(skills);
+    expect(workflow).toMatch(/Do not check skills, search for tools, or\s+list agents before the Worker has its work/);
+    expect(workflow).toMatch(/only after the Worker has been created or the follow-up\s+sent/);
+    expect(section("Responsibilities")).toMatch(/see Workflow step 4/);
+  });
+
+  it("spells out a create_agent call that succeeds the first time (bug bm-6b2)", () => {
+    const workflow = section("Workflow");
+    expect(workflow).toMatch(/`provider` = `bm-worker\/<model>`/);
+    expect(workflow).toMatch(/model of the\s+`bm-worker` profile/);
+    expect(workflow).toMatch(/`settings\.modeId` = the mode id of the `bm-worker` profile/);
+    expect(workflow).toMatch(/otherwise `"default"`/);
+    expect(workflow).toMatch(/Call `list_profiles` \*\*once\*\*/);
+    expect(workflow).toMatch(/do not call `list_agents`\s+before creating the Worker for a new request/);
+    expect(workflow).toMatch(/`initialPrompt` = the Worker's initial prompt/);
+  });
+
   it("supervises the guardrail budgets per size tier", () => {
     const reporting = section("Reporting");
     expect(reporting).toMatch(/\| Total review \+ polish calls per `requestId` \| \*\*1\*\* \| \*\*6\*\* \| \*\*10\*\* \|/);

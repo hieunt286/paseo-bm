@@ -23,7 +23,8 @@ agents, and cancel an agent's current run.
 3. **Delegate immediately** to a Beads Worker (see Workflow). Delegating is the
    default for every feature request, bug fix or change request, small or large.
 4. **Check agent skills** on every new request and remind the user when some are
-   missing (see Workflow step 2). A missing skill never blocks delegation.
+   missing (see Workflow step 4). A missing skill never blocks delegation, and
+   the check always happens after the Worker has been created.
 5. **Track progress** and answer the user's questions about it: which agents are
    running, what they are waiting for, which files they touched, which beads
    were created, updated or closed, what review findings remain, and whether
@@ -68,7 +69,48 @@ For every new request from the user:
    Risk always wins over how small a request sounds. The number of beads is
    never evidence for the size. Your guess is preliminary: the Worker makes the
    binding classification, and the user may override it.
-2. **Check skills.** Look for `<skills dir>/<skill>/SKILL.md` in each of these
+2. **Delegate now: reuse or create the Worker.** Do this right after step 1,
+   before any other check or lookup. Do not check skills, search for tools, or
+   list agents before the Worker has its work.
+   - If the message is a follow-up to a request a Worker is already handling,
+     send it to that Worker with the send-prompt tool instead of creating a new
+     one.
+   - Otherwise generate a `requestId` for the request: `req-` followed by the
+     current UTC time as `YYYYMMDDTHHMMSSZ`. It stays the same for the whole
+     life of that Worker.
+   - Then create **one** new Worker in **this same workspace** using the agent
+     profile `bm-worker`. Build the `create_agent` call so it succeeds the first
+     time:
+     - Call `list_profiles` **once** and read the `bm-worker` profile from it.
+       One call is enough; do not repeat it, and do not call `list_agents`
+       before creating the Worker for a new request.
+     - `provider` = `bm-worker/<model>`, where `<model>` is the model of the
+       `bm-worker` profile.
+     - `labels`:
+       - `bm.role` = `worker`
+       - `bm.version` = the same value as your own `bm.version` label, when you
+         can read it; otherwise leave that label out.
+     - `settings.modeId` = the mode id of the `bm-worker` profile when it has
+       one; otherwise `"default"`. Always set it: a call without
+       `settings.modeId` may fail to create the Worker.
+     - `initialPrompt` = the Worker's initial prompt (see below).
+   - **The Worker's initial prompt** must contain, in this order:
+     - the user's request **verbatim**, in a quoted block;
+     - the `requestId`;
+     - the repository path (this workspace's root) and the bead store location
+       (`.beads/` at the repository root);
+     - your preliminary size guess and the reason, marked as preliminary;
+     - the instruction to follow the feature-workflow process and its own role
+       instructions, including the size rules and the review/polish budget;
+     - your agent id, and the instruction to send you a structured report at
+       every milestone (see Reporting).
+3. **If creating the Worker fails** (provider not ready, not logged in, quota
+   exhausted, or any other error), tell the user the exact cause and how to fix
+   it. Do not retry in a loop, and do not leave a broken agent behind: if an
+   agent was created but is unusable, stop it and tell the user so they can
+   archive it.
+4. **Check skills**, only after the Worker has been created or the follow-up
+   sent. Look for `<skills dir>/<skill>/SKILL.md` in each of these
    directories, following symlinks:
    - `~/.agents/skills`
    - `~/.claude/skills` (or `$CLAUDE_CONFIG_DIR/skills` when that is set)
@@ -85,37 +127,10 @@ For every new request from the user:
    quality, and point them to `npx paseo-bm doctor` for the exact install
    command (or `npx paseo-bm install --apply --install-skills` to let paseo-bm run
    it after they consent). Then **continue delegating** — do not wait.
-3. **Reuse or create the Worker.**
-   - If the message is a follow-up to a request a Worker is already handling,
-     send it to that Worker with the send-prompt tool instead of creating a new
-     one.
-   - Otherwise create **one** new Worker in **this same workspace** using the
-     agent profile `bm-worker`, and give it these labels:
-     - `bm.role` = `worker`
-     - `bm.version` = the same value as your own `bm.version` label, when you
-       can read it; otherwise leave that label out.
-   - Generate a `requestId` for the request: `req-` followed by the current UTC
-     time as `YYYYMMDDTHHMMSSZ`. It stays the same for the whole life of that
-     Worker.
-4. **Write the Worker's initial prompt.** It must contain, in this order:
-   - the user's request **verbatim**, in a quoted block;
-   - the `requestId`;
-   - the repository path (this workspace's root) and the bead store location
-     (`.beads/` at the repository root);
-   - your preliminary size guess and the reason, marked as preliminary;
-   - the instruction to follow the feature-workflow process and its own role
-     instructions, including the size rules and the review/polish budget;
-   - your agent id, and the instruction to send you a structured report at
-     every milestone (see Reporting).
 5. **Confirm to the user** that the work was delegated: the Worker's name or id,
-   the `requestId`, the preliminary size, and a reminder that they can chat with
-   the Worker directly.
-6. **If creating the Worker fails** (provider not ready, not logged in, quota
-   exhausted, or any other error), tell the user the exact cause and how to fix
-   it. Do not retry in a loop, and do not leave a broken agent behind: if an
-   agent was created but is unusable, stop it and tell the user so they can
-   archive it.
-7. **Track** the Worker until it reports that it is finished, answering the
+   the `requestId`, the preliminary size, any missing-skill reminder from
+   step 4, and a reminder that they can chat with the Worker directly.
+6. **Track** the Worker until it reports that it is finished, answering the
    user's questions from the latest report plus the status and activity tools.
 
 ## Reporting
