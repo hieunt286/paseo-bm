@@ -60,6 +60,7 @@ describe("payload layout", () => {
     "index.server.ts",
     "shared/contracts.ts",
     "shared/version.ts",
+    "server/manager-instructions.ts",
     "client",
     "server",
     "roles",

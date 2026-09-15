@@ -1,20 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import {
   listWorkspaceAgents,
   type AgentDirectoryPaseo,
   type ListedAgentSnapshot,
 } from "../plugin/server/manager";
-import { describeRoles } from "../plugin/server/roles";
-import contribute, { INSTALL_RECORD_URL, readInstallRecord } from "../plugin/index.server";
+import { describeRoles, type RolesConfigPaseo } from "../plugin/server/roles";
+import contribute from "../plugin/index.server";
 import { agentsListRpc, rolesDescribeRpc } from "../plugin/shared/contracts";
 
 /**
- * WP-112 `agents.list` and `roles.describe` against a fake Paseo SDK and an
- * in-memory install record. No daemon, no real HOME.
+ * WP-112 `agents.list` and `roles.describe` against a fake Paseo SDK. Since
+ * bm-dnc `roles.describe` reads the daemon configuration in effect
+ * (`paseo.config.get()`), not `install.json`. No daemon, no real HOME.
  */
 
 const WS = "ws-1";
@@ -139,65 +136,92 @@ describe("agents.list — tree", () => {
   });
 });
 
-function record(overrides: Record<string, unknown> = {}) {
+type DaemonConfig = Awaited<ReturnType<RolesConfigPaseo["config"]["get"]>>["config"];
+
+/** Daemon config as `paseo.config.get()` returns it, shaped like the installer writes it (ADR-006). */
+function daemonConfig(overrides: Partial<DaemonConfig> = {}): DaemonConfig {
   return {
-    schemaVersion: 1,
-    version: "0.1.0",
-    installedAt: "2026-09-15T08:00:00.000Z",
-    updatedAt: "2026-09-15T08:00:00.000Z",
-    installHome: "/home/u/.paseo-bm",
-    paseo: {
-      home: "/home/u/.paseo",
-      pluginId: "paseo-bm",
-      pluginDir: "/home/u/.paseo-bm/plugin/0.1.0",
-      pluginsEnabledSetByUs: true,
-      mcpInject: { setByUs: true, previous: { present: false, value: null } },
+    providers: {
+      claude: { enabled: true },
+      "room-worker": { extends: "claude", label: "Room Worker", paseoTools: { enabled: true } },
+      "bm-reviewer": { extends: "claude", label: "Beads Reviewer" },
+      "bm-manager": { extends: "codex", label: "Beads Manager", paseoTools: { enabled: true } },
+      "bm-worker": { extends: "codex", label: "Beads Worker", paseoTools: { enabled: true } },
     },
-    roles: [
-      { role: "reviewer", providerId: "bm-reviewer", profileId: "bm-reviewer", baseProvider: "claude", model: "opus", modeId: null, thinkingOptionId: null, paseoTools: false },
-      { role: "manager", providerId: "bm-manager", profileId: "bm-manager", baseProvider: "codex", model: "gpt-5.6-sol", modeId: "full-access", thinkingOptionId: "high", paseoTools: true },
-      { role: "worker", providerId: "bm-worker", profileId: "bm-worker", baseProvider: "codex", model: "gpt-5.6-sol", modeId: null, thinkingOptionId: null, paseoTools: true },
+    agentProfiles: [
+      { id: "room-worker", provider: "room-worker", model: "haiku" },
+      { id: "bm-reviewer", provider: "bm-reviewer", model: "opus" },
+      { id: "bm-manager", provider: "bm-manager", model: "gpt-5.6-sol" },
+      { id: "bm-worker", provider: "bm-worker", model: "gpt-5.6-sol" },
     ],
-    files: [],
-    versions: [
-      { version: "0.0.9", dir: "plugin/0.0.9", installedAt: "2026-09-01T08:00:00.000Z", active: false },
-      { version: "0.1.0", dir: "plugin/0.1.0", installedAt: "2026-09-15T08:00:00.000Z", active: true },
-    ],
-    backups: [],
-    skills: { agents: [], lastStatus: [], assistDeclinedAt: null, lastCommand: null, assistOutcome: null },
     ...overrides,
   };
 }
 
-const fromText = (text: string | null) => ({ readRecord: async () => text });
+function fakeConfig(config: DaemonConfig) {
+  let reads = 0;
+  const paseo: RolesConfigPaseo = {
+    config: {
+      async get() {
+        reads += 1;
+        return { config };
+      },
+    },
+  };
+  return { paseo, reads: () => reads };
+}
 
 describe("roles.describe", () => {
-  it("returns the three roles from install.json, instructions in the active payload", async () => {
-    const output = await describeRoles(fromText(JSON.stringify(record())));
+  it("returns the three roles from the Paseo config in effect, in role order, ignoring foreign entries", async () => {
+    const fake = fakeConfig(daemonConfig());
+    const output = await describeRoles({ paseo: fake.paseo });
 
     expect(rolesDescribeRpc.output.parse(output)).toEqual({
       roles: [
-        { role: "manager", provider: "codex", model: "gpt-5.6-sol", paseoTools: true, instructionsPath: "/home/u/.paseo-bm/plugin/0.1.0/roles/manager.md" },
-        { role: "worker", provider: "codex", model: "gpt-5.6-sol", paseoTools: true, instructionsPath: "/home/u/.paseo-bm/plugin/0.1.0/roles/worker.md" },
-        { role: "reviewer", provider: "claude", model: "opus", paseoTools: false, instructionsPath: "/home/u/.paseo-bm/plugin/0.1.0/roles/reviewer.md" },
+        { role: "manager", provider: "codex", model: "gpt-5.6-sol", paseoTools: true, instructionsPath: "roles/manager.md" },
+        { role: "worker", provider: "codex", model: "gpt-5.6-sol", paseoTools: true, instructionsPath: "roles/worker.md" },
+        { role: "reviewer", provider: "claude", model: "opus", paseoTools: false, instructionsPath: "roles/reviewer.md" },
       ],
     });
+    expect(fake.reads()).toBe(1);
   });
 
-  it("no install record: empty roles", async () => {
-    expect(await describeRoles(fromText(null))).toEqual({ roles: [] });
-  });
-
-  it("record from a newer schema: E_RECORD_SCHEMA_TOO_NEW", async () => {
-    await expect(describeRoles(fromText(JSON.stringify(record({ schemaVersion: 2 }))))).rejects.toThrow(
-      /^E_RECORD_SCHEMA_TOO_NEW: /,
+  it("paseoTools follows the stored {enabled} shape: only enabled === true grants", async () => {
+    const { paseo } = fakeConfig(
+      daemonConfig({
+        providers: {
+          "bm-manager": { extends: "codex", paseoTools: { enabled: false } },
+          "bm-worker": { extends: "codex", paseoTools: {} },
+          "bm-reviewer": { extends: "claude", paseoTools: true },
+        },
+      }),
     );
+    const { roles } = await describeRoles({ paseo });
+    expect(roles.map((r) => [r.role, r.paseoTools])).toEqual([
+      ["manager", false],
+      ["worker", false],
+      ["reviewer", false],
+    ]);
   });
 
-  it("damaged record: error naming the field", async () => {
-    await expect(describeRoles(fromText("{"))).rejects.toThrow(/not valid JSON/);
-    const bad = record({ roles: [{ role: "manager", baseProvider: "codex", model: 5, paseoTools: true }] });
-    await expect(describeRoles(fromText(JSON.stringify(bad)))).rejects.toThrow(/roles\.0\.model/);
+  it("no bm-* providers or profiles (paseo-bm roles not registered): empty roles", async () => {
+    const { paseo } = fakeConfig({ providers: { claude: {} }, agentProfiles: [] });
+    expect(await describeRoles({ paseo })).toEqual({ roles: [] });
+    const bare = fakeConfig({});
+    expect(await describeRoles({ paseo: bare.paseo })).toEqual({ roles: [] });
+  });
+
+  it("half-registered role: reports what is there, empty strings for the rest, no error", async () => {
+    const { paseo } = fakeConfig({
+      providers: { "bm-worker": { label: "Beads Worker", paseoTools: { enabled: true } } },
+      agentProfiles: [{ id: "bm-manager", provider: "bm-manager" }],
+    });
+    expect(await describeRoles({ paseo })).toEqual({
+      roles: [
+        { role: "manager", provider: "", model: "", paseoTools: false, instructionsPath: "roles/manager.md" },
+        { role: "worker", provider: "", model: "", paseoTools: true, instructionsPath: "roles/worker.md" },
+      ],
+    });
   });
 });
 
@@ -220,21 +244,13 @@ describe("plugin server entry — agents.list and roles.describe", () => {
     expect(output.agents.map((a: { id: string }) => a.id)).toEqual(["mgr"]);
   });
 
-  it("locates install.json two levels above the payload entry", () => {
-    const entry = new URL("../plugin/index.server.ts", import.meta.url);
-    expect(INSTALL_RECORD_URL.href).toBe(new URL("../../install.json", entry).href);
-  });
-
-  it("reads the record, and returns null when it is absent", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "bm-record-"));
-    try {
-      const file = join(dir, "install.json");
-      expect(await readInstallRecord(pathToFileURL(file))).toBeNull();
-      writeFileSync(file, JSON.stringify(record()));
-      const text = await readInstallRecord(pathToFileURL(file));
-      expect((await describeRoles(fromText(text))).roles).toHaveLength(3);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+  it("wires the handler's paseo into roles.describe (config in effect, no file read)", async () => {
+    const handle = vi.fn();
+    contribute({ handle } as unknown as Parameters<typeof contribute>[0]);
+    const describeHandler = handle.mock.calls.find(([c]) => c === rolesDescribeRpc)![1];
+    const fake = fakeConfig(daemonConfig());
+    const output = await describeHandler({}, { paseo: fake.paseo });
+    expect(rolesDescribeRpc.output.parse(output).roles.map((r) => r.role)).toEqual(["manager", "worker", "reviewer"]);
+    expect(fake.reads()).toBe(1);
   });
 });

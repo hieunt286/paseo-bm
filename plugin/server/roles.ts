@@ -1,100 +1,96 @@
 /**
- * `roles.describe` on the daemon side (WP-112, design §5, §3.2, REQ-032d).
+ * `roles.describe` on the daemon side (design §5, REQ-032d; errata bm-dnc).
  *
- * The answer comes from the install record, `<install home>/install.json`. The
- * plugin runs inside the daemon and does not import the CLI's `src/record.ts`,
- * so this module validates only the fields it reads, with Zod, and never
- * writes. Reading the file is injected (index.server.ts supplies the real one),
- * which keeps this module free of Node imports and testable without a disk.
+ * The answer comes from the configuration Paseo has in effect right now, read
+ * through the plugin SDK's `paseo.config.get()` — not from `install.json`. The
+ * server entry runs as a CommonJS bundle in a worker that knows nothing about
+ * where the payload or the install home live, so reading a file is not an
+ * option; the daemon configuration is also exactly what Paseo uses when it
+ * starts a role, so it works for any install home.
+ *
+ * SDK facts this relies on (checked, not guessed):
+ * - `PaseoApi.config.get(): Promise<{ requestId; config: MutableDaemonConfig }>`
+ *   (@getpaseo/client 0.8.0 `dist/index.d.ts`, `PaseoConfigActions`).
+ * - `MutableDaemonConfig.providers` is the daemon's view of `agents.providers`
+ *   (a loose record: `paseoTools?: { enabled?: boolean }`, plus pass-through
+ *   keys such as `extends`); `MutableDaemonConfig.agentProfiles` is
+ *   `daemon.agentProfiles` (`{ id, provider, model?, … }[]`)
+ *   (@getpaseo/protocol 0.8.0 `dist/messages.d.ts`, `MutableDaemonConfigSchema`).
+ * - The Paseo 0.8 daemon fills `providers` from `agents.providers` parsed with
+ *   `ProviderOverrideSchema`, which declares `extends`.
+ *
+ * Read-only: nothing is patched.
  */
-import { z } from "zod";
-import type { RoleDescriptor } from "../shared/contracts";
-import { bmRoleSchema } from "../shared/contracts";
+import type { BmRole, RoleDescriptor } from "../shared/contracts";
 
-/** Record schema version this plugin understands (design §3.2, ADR-002 decision 9). */
-export const SUPPORTED_RECORD_SCHEMA_VERSION = 1;
+const ROLE_ORDER: readonly BmRole[] = ["manager", "worker", "reviewer"];
 
-/** The part of `install.json` schema v1 this RPC reads. Other fields are ignored. */
-const recordSubsetSchema = z.object({
-  installHome: z.string().min(1),
-  roles: z.array(
-    z.object({
-      role: bmRoleSchema,
-      baseProvider: z.string(),
-      model: z.string(),
-      paseoTools: z.boolean(),
-    }),
-  ),
-  versions: z.array(z.object({ dir: z.string().min(1), active: z.boolean() })),
-});
+/** Derived provider id and agent profile id of a role, as the installer registers them (ADR-006). */
+export function roleConfigId(role: BmRole): string {
+  return `bm-${role}`;
+}
 
-const ROLE_ORDER = ["manager", "worker", "reviewer"] as const;
+/** Name of a role's instructions inside the payload (embedded in the bundle for the Manager). */
+export function roleInstructionsName(role: BmRole): string {
+  return `roles/${role}.md`;
+}
+
+/** Minimal SDK view `roles.describe` needs. `PaseoApi` is structurally assignable. */
+export interface RolesConfigPaseo {
+  config: {
+    get(): Promise<{
+      config: {
+        providers?: Record<string, unknown>;
+        agentProfiles?: ReadonlyArray<{ id: string; provider: string; model?: string }>;
+      };
+    }>;
+  };
+}
 
 export interface DescribeRolesDeps {
-  /** Text of `install.json`, or `null` when the file does not exist. */
-  readRecord: () => Promise<string | null>;
+  paseo: RolesConfigPaseo;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 /**
  * Handler body of `roles.describe`.
  *
- * - No record → `{ roles: [] }` (nothing is registered that paseo-bm owns).
- * - `schemaVersion` above 1 → throws `E_RECORD_SCHEMA_TOO_NEW: …`.
- * - Unparseable or invalid record → throws a plain error naming the field; the
- *   registry has no code for this (see WP-112 report).
+ * For each role, in the order manager, worker, reviewer:
+ * - `provider` is `extends` of the derived provider `agents.providers.bm-<role>`
+ *   (the user's own tool), or `""` when the entry or the key is missing;
+ * - `model` is `model` of the agent profile `bm-<role>`, or `""`;
+ * - `paseoTools` is true only when `paseoTools.enabled === true` on the derived
+ *   provider (the shape Paseo stores; an absent key means not granted);
+ * - `instructionsPath` is the instructions name, e.g. `roles/manager.md`.
  *
- * `provider` is the role's `baseProvider` (the user's own tool, as in the §4.4
- * JSON example); `instructionsPath` is `roles/<role>.md` inside the active
- * payload version `<installHome>/<versions[active].dir>`.
+ * A role with neither a derived provider nor a profile is not registered and
+ * is left out, so a daemon without paseo-bm roles yields `{ roles: [] }`.
  */
 export async function describeRoles(deps: DescribeRolesDeps): Promise<{ roles: RoleDescriptor[] }> {
-  const text = await deps.readRecord();
-  if (text === null) return { roles: [] };
+  const { config } = await deps.paseo.config.get();
+  const providers = asRecord(config.providers) ?? {};
+  const profiles = config.agentProfiles ?? [];
 
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch {
-    throw new Error("install.json is not valid JSON; run `npx paseo-bm doctor`.");
-  }
+  const roles: RoleDescriptor[] = [];
+  for (const role of ROLE_ORDER) {
+    const id = roleConfigId(role);
+    const provider = asRecord(providers[id]);
+    const profile = profiles.find((entry) => entry.id === id);
+    if (!provider && !profile) continue;
 
-  const schemaVersion =
-    typeof raw === "object" && raw !== null ? (raw as { schemaVersion?: unknown }).schemaVersion : undefined;
-  if (typeof schemaVersion !== "number") {
-    throw new Error("install.json is not a valid install record: schemaVersion is missing.");
+    const base = provider?.["extends"];
+    roles.push({
+      role,
+      provider: typeof base === "string" ? base : "",
+      model: typeof profile?.model === "string" ? profile.model : "",
+      paseoTools: asRecord(provider?.["paseoTools"])?.["enabled"] === true,
+      instructionsPath: roleInstructionsName(role),
+    });
   }
-  if (schemaVersion > SUPPORTED_RECORD_SCHEMA_VERSION) {
-    throw new Error(
-      `E_RECORD_SCHEMA_TOO_NEW: install.json uses schema ${schemaVersion}; this plugin understands ${SUPPORTED_RECORD_SCHEMA_VERSION}. Upgrade paseo-bm.`,
-    );
-  }
-
-  const parsed = recordSubsetSchema.safeParse(raw);
-  if (!parsed.success) {
-    const issue = parsed.error.issues[0];
-    const path = issue ? issue.path.join(".") : "";
-    throw new Error(
-      `install.json is not a valid install record: ${path || "(root)"} ${issue?.message ?? ""}`.trim(),
-    );
-  }
-  const record = parsed.data;
-
-  const active = record.versions.find((version) => version.active);
-  if (!active) {
-    throw new Error("install.json is not a valid install record: no active payload version.");
-  }
-  const payloadDir = `${record.installHome.replace(/\/+$/, "")}/${active.dir.replace(/^\/+|\/+$/g, "")}`;
-
-  const roles = [...record.roles]
-    .sort((a, b) => ROLE_ORDER.indexOf(a.role) - ROLE_ORDER.indexOf(b.role))
-    .map(
-      (entry): RoleDescriptor => ({
-        role: entry.role,
-        provider: entry.baseProvider,
-        model: entry.model,
-        paseoTools: entry.paseoTools,
-        instructionsPath: `${payloadDir}/roles/${entry.role}.md`,
-      }),
-    );
   return { roles };
 }

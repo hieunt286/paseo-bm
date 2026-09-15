@@ -506,6 +506,48 @@ describe("configureRoles — the interactive flow asks for all three roles", () 
     expect(redone.selections.every((selection) => selection.provider === "claude")).toBe(true);
   });
 
+  it("a reused record keeps the names already registered, defaulting only where none is known (bm-lev)", async () => {
+    const existing: readonly RoleRecord[] = ["manager", "worker", "reviewer"].map((role) => ({
+      role: role as RoleRecord["role"],
+      providerId: `bm-${role}`,
+      profileId: `bm-${role}`,
+      baseProvider: "codex",
+      model: "gpt-5.6-sol",
+      modeId: null,
+      thinkingOptionId: null,
+      paseoTools: role !== "reviewer",
+    }));
+    const quiet = new ScriptedPrompter({});
+    const reused = await configureRoles({
+      specs: [],
+      catalog: catalog(),
+      prompter: quiet,
+      existing,
+      existingNames: { manager: "Hieu", worker: "   " },
+    });
+    expect(quiet.counts.total).toBe(0);
+    expect(reused.selections.map((selection) => selection.displayName)).toEqual([
+      "Hieu",
+      DEFAULT_ROLE_DISPLAY_NAMES.worker,
+      DEFAULT_ROLE_DISPLAY_NAMES.reviewer,
+    ]);
+
+    // --reconfigure asks again, and the question still offers the default name.
+    const asked = new ScriptedPrompter({
+      input: ["", "", ""],
+      select: ["codex", "gpt-5.6-sol", "codex", "gpt-5.6-sol", "codex", "gpt-5.6-sol"],
+    });
+    const redone = await configureRoles({
+      specs: [],
+      catalog: catalog(),
+      prompter: asked,
+      existing,
+      existingNames: { manager: "Hieu" },
+      reconfigure: true,
+    });
+    expect(redone.selections[0]?.source).toBe("prompt");
+  });
+
   it("asks again, with a warning, when a recorded provider has disappeared", async () => {
     const existing: readonly RoleRecord[] = [
       {

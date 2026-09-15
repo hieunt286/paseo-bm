@@ -138,9 +138,11 @@ function healthyConfig(): unknown {
     pluginsEnabled: true,
     agents: {
       providers: {
-        "bm-manager": { extends: "claude", label: "Beads Manager", paseoTools: true },
-        "bm-worker": { extends: "codex", label: "Beads Worker", paseoTools: true },
-        "bm-reviewer": { extends: "codex", label: "Beads Reviewer", paseoTools: false },
+        // The shape `roleProviderEntry` writes: an object for Manager and
+        // Worker, and no key at all for the Reviewer (ADR-006).
+        "bm-manager": { extends: "claude", label: "Beads Manager", paseoTools: { enabled: true } },
+        "bm-worker": { extends: "codex", label: "Beads Worker", paseoTools: { enabled: true } },
+        "bm-reviewer": { extends: "codex", label: "Beads Reviewer" },
       },
     },
     daemon: {
@@ -412,6 +414,94 @@ describe("runDoctor — a healthy install", () => {
   });
 });
 
+/* ------------------------------------------- roles: the paseoTools shape */
+
+/** A healthy world whose three provider entries carry the given `paseoTools` values. */
+function worldWithPaseoTools(tools: { manager?: unknown; worker?: unknown; reviewer?: unknown }): World {
+  const world = makeWorld();
+  installSkills(world);
+  const entry = (label: string, value: unknown): Record<string, unknown> =>
+    value === undefined ? { extends: "codex", label } : { extends: "codex", label, paseoTools: value };
+  writePaseoConfig(world, {
+    ...(healthyConfig() as Record<string, unknown>),
+    agents: {
+      providers: {
+        "bm-manager": entry("Beads Manager", tools.manager),
+        "bm-worker": entry("Beads Worker", tools.worker),
+        "bm-reviewer": entry("Beads Reviewer", tools.reviewer),
+      },
+    },
+  });
+  installOnDisk(world, makeRecord(world));
+  return world;
+}
+
+describe("runDoctor — reads paseoTools in the shape Paseo stores it (bm-ym3)", () => {
+  it("treats `{ enabled: true }` as on: Manager and Worker roles are ok", async () => {
+    const world = worldWithPaseoTools({ manager: { enabled: true }, worker: { enabled: true } });
+    const { adapter } = recordingAdapter();
+    const { checks, exitCode, report } = await runDoctor({
+      adapter,
+      layout: world.layout,
+      version: PACKAGE_VERSION,
+      env: world.env,
+    });
+
+    expect(severityOf(checks, "role-bm-manager")).toBe("ok");
+    expect(severityOf(checks, "role-bm-worker")).toBe("ok");
+    expect(severityOf(checks, "role-bm-reviewer")).toBe("ok");
+    expect(exitCode).toBe(EXIT_CODES.ok);
+    expect(report.roles.map((role) => role.paseoTools)).toEqual([true, true, false]);
+  });
+
+  it("still accepts a bare `true` for compatibility", async () => {
+    const world = worldWithPaseoTools({ manager: true, worker: true });
+    const { adapter } = recordingAdapter();
+    const { checks } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
+
+    expect(severityOf(checks, "role-bm-manager")).toBe("ok");
+    expect(severityOf(checks, "role-bm-worker")).toBe("ok");
+  });
+
+  it("treats `{ enabled: false }` as off: an error where the record says true, ok for the Reviewer", async () => {
+    const world = worldWithPaseoTools({ manager: { enabled: false }, worker: { enabled: false }, reviewer: { enabled: false } });
+    const { adapter } = recordingAdapter();
+    const { checks, exitCode } = await runDoctor({
+      adapter,
+      layout: world.layout,
+      version: PACKAGE_VERSION,
+      env: world.env,
+    });
+
+    expect(severityOf(checks, "role-bm-manager")).toBe("error");
+    expect(find(checks, "role-bm-manager").message).toBe(
+      "The `bm-manager` role is recorded with paseoTools true, but Paseo's configuration has false.",
+    );
+    expect(severityOf(checks, "role-bm-worker")).toBe("error");
+    expect(severityOf(checks, "role-bm-reviewer")).toBe("ok");
+    expect(exitCode).toBe(EXIT_CODES.doctorDrift);
+  });
+
+  it("treats an absent key as off: an error where the record says true, ok for the Reviewer", async () => {
+    const world = worldWithPaseoTools({});
+    const { adapter } = recordingAdapter();
+    const { checks } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
+
+    expect(severityOf(checks, "role-bm-manager")).toBe("error");
+    expect(severityOf(checks, "role-bm-worker")).toBe("error");
+    expect(severityOf(checks, "role-bm-reviewer")).toBe("ok");
+  });
+
+  it("flags a Reviewer whose provider has `{ enabled: true }` against a record of false", async () => {
+    const world = worldWithPaseoTools({ manager: { enabled: true }, worker: { enabled: true }, reviewer: { enabled: true } });
+    const { adapter } = recordingAdapter();
+    const { checks } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
+
+    expect(severityOf(checks, "role-bm-reviewer")).toBe("error");
+    expect(find(checks, "role-bm-reviewer").message).toContain("recorded with paseoTools false");
+  });
+});
+
 /* -------------------------------------------------------------- state: drift */
 
 async function driftWorld(): Promise<World> {
@@ -421,8 +511,8 @@ async function driftWorld(): Promise<World> {
     pluginsEnabled: false,
     agents: {
       providers: {
-        "bm-manager": { paseoTools: true },
-        "bm-worker": { paseoTools: true },
+        "bm-manager": { paseoTools: { enabled: true } },
+        "bm-worker": { paseoTools: { enabled: true } },
       },
     },
     daemon: { mcp: { injectIntoAgents: false }, agentProfiles: [{ id: "bm-manager" }, { id: "bm-worker" }] },

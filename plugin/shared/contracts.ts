@@ -89,9 +89,12 @@ export const agentsListRpc = defineRpc({
 /**
  * One row of the effective role configuration the panel shows (REQ-032d).
  *
- * `paseoTools` is whether the role's profile currently has the Paseo agent tools
- * granted; `instructionsPath` is the on-disk path of the role's `roles/*.md`
- * inside the install home.
+ * Read from the Paseo configuration in effect (errata bm-dnc): `provider` is the
+ * base provider the role's derived provider extends, `model` comes from the
+ * role's agent profile, `paseoTools` is whether the derived provider currently
+ * has the Paseo agent tools enabled, and `instructionsPath` is the name of the
+ * role's instructions inside the payload (e.g. `roles/manager.md`), not an
+ * on-disk path.
  */
 export const roleDescriptorSchema = z.object({
   role: bmRoleSchema,

@@ -364,6 +364,38 @@ describe("install-roles — re-install", () => {
     expect(installedRecord().roles.every((entry) => entry.baseProvider === "codex")).toBe(true);
   });
 
+  it("keeps the names chosen interactively: a non-interactive re-run plans no change and leaves config.json byte-identical (bm-lev)", async () => {
+    const first = await install(["install"], {
+      tty: TTY,
+      answers: {
+        input: ["Hieu", "Cuong", "Duy"],
+        select: ["claude", "claude-opus-5", "codex", "gpt-5.6-sol", "claude", "claude-opus-5"],
+        confirm: [true],
+      },
+    });
+    expect(first.code).toBe(EXIT_CODES.ok);
+    expect(config().agents?.providers?.["bm-worker"]?.["label"]).toBe("Cuong");
+    const before = configText();
+    scope?.restore();
+    rmSync(argvLog, { force: true });
+    // The daemon now has the plugin, as a real one would after the first run.
+    script({
+      "plugin ls": {
+        stdout: JSON.stringify([{ id: "paseo-bm", path: join(installHome, "plugin", VERSION), enabled: true, status: "running" }]),
+      },
+    });
+
+    const again = await install(["install", "--apply", "--json"]);
+    const report = JSON.parse(again.out) as PlanReport;
+    expect(again.code).toBe(EXIT_CODES.ok);
+    expect(report.actions.filter((action) => action.kind !== "skip")).toEqual([]);
+    expect(configText()).toBe(before);
+    expect(configWrites()).toBe(0);
+    expect(subcommands()).not.toContain("daemon reload");
+    const names = (config().daemon.agentProfiles ?? []).slice(1).map((profile) => profile["name"]);
+    expect(names).toEqual(["Hieu", "Cuong", "Duy"]);
+  });
+
   it("--prune keeps the config backup taken by the role step", async () => {
     await install(["install", "--apply"]);
     scope?.restore();
@@ -389,6 +421,19 @@ describe("install-roles — no terminal", () => {
     expect(report.roles).toHaveLength(3);
     expect(installedRecord().roles).toHaveLength(3);
     expect(Object.keys(config().agents?.providers ?? {})).toEqual(["bm-manager", "bm-worker", "bm-reviewer"]);
+  });
+
+  it.each([
+    ["install --apply", ["install", "--apply"]],
+    ["install --apply --json", ["install", "--apply", "--json"]],
+    ["install (preview)", ["install"]],
+  ])("%s prints each default-role warning exactly once (bm-os3)", async (_label, argv) => {
+    const run = await install(argv);
+    const everything = `${run.out}${run.err}`;
+    for (const role of ["Manager", "Worker", "Reviewer"]) {
+      const needle = `No terminal to ask on and no --role for the ${role},`;
+      expect(everything.split(needle).length - 1).toBe(1);
+    }
   });
 });
 

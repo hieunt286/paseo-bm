@@ -5,6 +5,9 @@
  * or runs anything: it records its argv and behaves as scripted.
  *
  *   BM_FAKE_NPX_ARGV_LOG   append one JSON line per invocation
+ *   BM_FAKE_NPX_ENV_LOG    append one JSON line per invocation: every env key,
+ *                          plus the values of PATH and npm_* only (the test
+ *                          sets those; no other value is ever written)
  *   BM_FAKE_NPX_PID_FILE   write this process's pid
  *   BM_FAKE_NPX_MODE       ok | fail | hang | hang-quiet       (default ok)
  *                          hang: print on both streams, then sleep forever
@@ -22,6 +25,12 @@ const env = process.env;
 
 if (env.BM_FAKE_NPX_ARGV_LOG) {
   fs.appendFileSync(env.BM_FAKE_NPX_ARGV_LOG, JSON.stringify({ argv, argc: argv.length }) + "\n");
+}
+if (env.BM_FAKE_NPX_ENV_LOG) {
+  const keys = Object.keys(env).sort();
+  const values = {};
+  for (const key of keys) if (key === "PATH" || key.startsWith("npm_")) values[key] = env[key];
+  fs.appendFileSync(env.BM_FAKE_NPX_ENV_LOG, JSON.stringify({ keys, values }) + "\n");
 }
 if (env.BM_FAKE_NPX_PID_FILE) {
   fs.writeFileSync(env.BM_FAKE_NPX_PID_FILE, String(process.pid));

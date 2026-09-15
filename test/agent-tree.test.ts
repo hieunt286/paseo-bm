@@ -179,9 +179,9 @@ const DATASETS: Record<string, AgentNode[]> = {
 };
 
 const ROLES: RoleDescriptor[] = [
-  { role: "reviewer", provider: "codex", model: "gpt-5", paseoTools: false, instructionsPath: "/h/.paseo-bm/v1/roles/reviewer.md" },
-  { role: "manager", provider: "claude", model: "opus", paseoTools: true, instructionsPath: "/h/.paseo-bm/v1/roles/manager.md" },
-  { role: "worker", provider: "claude", model: "", paseoTools: true, instructionsPath: "/h/.paseo-bm/v1/roles/worker.md" },
+  { role: "reviewer", provider: "codex", model: "gpt-5", paseoTools: false, instructionsPath: "roles/reviewer.md" },
+  { role: "manager", provider: "claude", model: "opus", paseoTools: true, instructionsPath: "roles/manager.md" },
+  { role: "worker", provider: "claude", model: "", paseoTools: true, instructionsPath: "roles/worker.md" },
 ];
 
 function view(overrides: Record<string, unknown> = {}) {
@@ -401,7 +401,7 @@ describe("role configuration (roles.describe)", () => {
           { label: "Provider", value: "claude" },
           { label: "Model", value: "opus" },
           { label: "Paseo tools", value: "Granted" },
-          { label: "Instructions", value: "/h/.paseo-bm/v1/roles/manager.md" },
+          { label: "Instructions", value: "roles/manager.md" },
         ],
       },
       {
@@ -410,7 +410,7 @@ describe("role configuration (roles.describe)", () => {
           { label: "Provider", value: "claude" },
           { label: "Model", value: "(provider default)" },
           { label: "Paseo tools", value: "Granted" },
-          { label: "Instructions", value: "/h/.paseo-bm/v1/roles/worker.md" },
+          { label: "Instructions", value: "roles/worker.md" },
         ],
       },
       {
@@ -419,21 +419,21 @@ describe("role configuration (roles.describe)", () => {
           { label: "Provider", value: "codex" },
           { label: "Model", value: "gpt-5" },
           { label: "Paseo tools", value: "Not granted" },
-          { label: "Instructions", value: "/h/.paseo-bm/v1/roles/reviewer.md" },
+          { label: "Instructions", value: "roles/reviewer.md" },
         ],
       },
     ]);
     const shown = texts(view());
-    for (const text of ["Role configuration", "codex", "gpt-5", "Not granted", "/h/.paseo-bm/v1/roles/worker.md"]) {
+    for (const text of ["Role configuration", "codex", "gpt-5", "Not granted", "roles/worker.md"]) {
       expect(shown).toContain(text);
     }
   });
 
-  it("roles: [] shows an explicit not-installed / unreadable-record state", () => {
+  it("roles: [] shows an explicit not-installed / roles-not-registered state", () => {
     const shown = texts(view({ roles: { status: "success", data: [] } }));
     expect(shown).toContain(NO_ROLES_TEXT);
     expect(NO_ROLES_TEXT).toMatch(/not installed/);
-    expect(NO_ROLES_TEXT).toMatch(/could not be read/);
+    expect(NO_ROLES_TEXT).toMatch(/not registered with Paseo/);
   });
 });
 

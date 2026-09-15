@@ -480,6 +480,14 @@ export interface ConfigureRolesOptions {
   readonly prompter: Prompter;
   /** `roles[]` from an existing install, reused unless `--reconfigure` is set. */
   readonly existing?: readonly RoleRecord[];
+  /**
+   * The names the roles already carry in Paseo's `config.json` — the `name` of
+   * each `bm-<role>` agent profile, or the derived provider's `label`. `roles[]`
+   * has no name field (Design §3.2), so this is the only place a name the user
+   * chose survives between runs. Used only when a recorded entry is reused;
+   * without it that reuse would reset every name to its default (bug bm-lev).
+   */
+  readonly existingNames?: Readonly<Partial<Record<RoleName, string>>>;
   /** `--reconfigure`: ask the whole configuration again even though it exists. */
   readonly reconfigure?: boolean;
 }
@@ -593,9 +601,15 @@ export async function configureRoles(options: ConfigureRolesOptions): Promise<Ro
 
     // 2. What the last install recorded, unless the user asked to redo it.
     if (recorded !== undefined && recordedIsUsable && !reconfigure) {
+      // Taken verbatim, not trimmed: any change would differ from config.json
+      // and turn a no-op re-run into a rewrite.
+      const existingName = options.existingNames?.[role];
       selections.push({
         role,
-        displayName: DEFAULT_ROLE_DISPLAY_NAMES[role],
+        displayName:
+          existingName === undefined || existingName.trim().length === 0
+            ? DEFAULT_ROLE_DISPLAY_NAMES[role]
+            : existingName,
         provider: recorded.baseProvider,
         model: recorded.model,
         paseoTools,
