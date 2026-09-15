@@ -26,7 +26,8 @@
     "verify": "npm run typecheck && npm run typecheck:plugin && npm run lint && npm run test && npm run build",
     "prepack": "npm run build",
     "generate:plugin-version": "node scripts/generate-plugin-version.mjs",
-    "typecheck:plugin": "tsc -p plugin/tsconfig.json"
+    "typecheck:plugin": "tsc -p plugin/tsconfig.json",
+    "smoke:packed": "node scripts/smoke-packed.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.12.0",

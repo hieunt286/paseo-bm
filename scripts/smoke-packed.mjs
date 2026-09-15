@@ -1,0 +1,231 @@
+#!/usr/bin/env node
+// Smoke test for the packed npm package (bead bm-wp-101-b51.3, Design §10
+// "Gói đã đóng").
+//
+// Everything here runs against the real tarball produced by `npm pack`, never
+// against the source tree: the failure this guards against is a file that works
+// in the repo but was left out of the `files` field, which only shows up when a
+// user runs `npx paseo-bm`.
+//
+// Steps:
+//   1. `npm pack` into an empty temp directory (this runs `prepack`, i.e. the
+//      real build, exactly as a publish would).
+//   2. Extract the tarball and assert its contents: dist/index.js, the plugin/
+//      payload, and no install lifecycle scripts in the packed package.json.
+//   3. Install the tarball into an isolated temp project, offline, with a
+//      throwaway npm cache and userconfig (the package has no runtime
+//      dependencies, so nothing needs the network).
+//   4. Run the installed `paseo-bm` bin with a fake HOME and a PATH that holds
+//      only a fake `paseo` plus the node binary; assert `--version` prints the
+//      package version and `--help` exits 0 with usage text.
+//   5. Assert the run wrote nothing into the installed package or the working
+//      directory, and that the installed layout satisfies findPayloadRoot
+//      (package.json and plugin/paseo-plugin.json side by side above dist/).
+//
+// Flags: --keep  leave the temp directory in place for inspection.
+
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const keep = process.argv.includes("--keep");
+const failures = [];
+
+function check(condition, message) {
+  if (condition) {
+    console.log(`ok   ${message}`);
+  } else {
+    console.log(`FAIL ${message}`);
+    failures.push(message);
+  }
+}
+
+function run(command, args, options = {}) {
+  const result = spawnSync(command, args, { encoding: "utf8", ...options });
+  if (result.error) throw result.error;
+  return result;
+}
+
+function mustRun(label, command, args, options = {}) {
+  const result = run(command, args, { stdio: ["ignore", "pipe", "pipe"], ...options });
+  if (result.status !== 0) {
+    console.error(result.stdout);
+    console.error(result.stderr);
+    throw new Error(`${label} failed with exit code ${result.status}`);
+  }
+  return result;
+}
+
+/** Map of POSIX-relative path -> sha256 for every file under `root`. */
+function snapshot(root) {
+  const out = new Map();
+  const walk = (dir, prefix) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const abs = join(dir, entry.name);
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) walk(abs, rel);
+      else if (entry.isFile()) out.set(rel, createHash("sha256").update(readFileSync(abs)).digest("hex"));
+      else out.set(rel, `<${entry.isSymbolicLink() ? "symlink" : "special"}>`);
+    }
+  };
+  if (existsSync(root)) walk(root, "");
+  return out;
+}
+
+function sameSnapshot(a, b) {
+  if (a.size !== b.size) return false;
+  for (const [key, value] of a) if (b.get(key) !== value) return false;
+  return true;
+}
+
+const work = mkdtempSync(join(tmpdir(), "paseo-bm-smoke-"));
+const packDir = join(work, "pack");
+const extractDir = join(work, "extract");
+const projectDir = join(work, "project");
+const npmCache = join(work, "npm-cache");
+const npmUserconfig = join(work, "npmrc");
+const fakeHome = join(work, "home");
+const fakeBin = join(work, "bin");
+const neutralCwd = join(work, "cwd");
+for (const dir of [packDir, extractDir, projectDir, npmCache, fakeHome, fakeBin, neutralCwd]) {
+  mkdirSync(dir, { recursive: true });
+}
+writeFileSync(npmUserconfig, "");
+
+const npmEnv = {
+  ...process.env,
+  npm_config_cache: npmCache,
+  npm_config_userconfig: npmUserconfig,
+  npm_config_audit: "false",
+  npm_config_fund: "false",
+  npm_config_update_notifier: "false",
+};
+
+try {
+  const sourceManifest = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
+  const expectedVersion = sourceManifest.version;
+  console.log(`paseo-bm smoke (packed) — expecting version ${expectedVersion}`);
+  console.log(`work dir: ${work}`);
+
+  // 1. Pack. prepack output goes to stderr so the tarball name is the only thing we need.
+  console.log("\n# npm pack");
+  const pack = run("npm", ["pack", "--pack-destination", packDir], {
+    cwd: repoRoot,
+    env: npmEnv,
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+  process.stdout.write(pack.stdout);
+  if (pack.status !== 0) throw new Error(`npm pack failed with exit code ${pack.status}`);
+  const tarballs = readdirSync(packDir).filter((name) => name.endsWith(".tgz"));
+  if (tarballs.length !== 1) throw new Error(`expected exactly one tarball, found: ${tarballs.join(", ") || "none"}`);
+  const tarball = join(packDir, tarballs[0]);
+
+  // 2. Inspect the tarball itself, independently of what npm reported.
+  console.log("\n# tarball contents");
+  mustRun("tar extract", "tar", ["-xzf", tarball, "-C", extractDir]);
+  const packed = join(extractDir, "package");
+  const packedManifest = JSON.parse(readFileSync(join(packed, "package.json"), "utf8"));
+  check(packedManifest.version === expectedVersion, `packed package.json version is ${expectedVersion}`);
+  check(existsSync(join(packed, "dist", "index.js")), "tarball contains dist/index.js");
+  check(existsSync(join(packed, "plugin", "paseo-plugin.json")), "tarball contains plugin/paseo-plugin.json");
+  for (const entry of ["index.server.ts", "index.client.tsx", "roles/manager.md", "roles/worker.md", "roles/reviewer.md"]) {
+    check(existsSync(join(packed, "plugin", entry)), `tarball contains plugin/${entry}`);
+  }
+  // Every built file must ship. Checking only the bin is not enough: npm always
+  // packs the `bin` target even when dist/ is missing from `files`, so a
+  // bin-only check stays green while chunks and sourcemaps are silently dropped.
+  const repoDist = snapshot(join(repoRoot, "dist"));
+  const packedDist = snapshot(join(packed, "dist"));
+  const missingDist = [...repoDist.keys()].filter((path) => !packedDist.has(path));
+  check(
+    repoDist.size > 0 && missingDist.length === 0,
+    `every built file under dist/ is in the tarball${missingDist.length ? ` (missing: ${missingDist.join(", ")})` : ""}`,
+  );
+  // Every payload file in the repo must ship: the payload has no include list of its own.
+  const repoPayload = snapshot(join(repoRoot, "plugin"));
+  const packedPayload = snapshot(join(packed, "plugin"));
+  const missing = [...repoPayload.keys()].filter((path) => !packedPayload.has(path));
+  check(missing.length === 0, `every file under plugin/ is in the tarball${missing.length ? ` (missing: ${missing.join(", ")})` : ""}`);
+  const lifecycle = ["preinstall", "install", "postinstall", "prepare"].filter(
+    (name) => name in (packedManifest.scripts ?? {}),
+  );
+  check(lifecycle.length === 0, `packed package.json has no install lifecycle scripts${lifecycle.length ? ` (found: ${lifecycle.join(", ")})` : ""}`);
+  check(
+    Object.keys(packedManifest.dependencies ?? {}).length === 0,
+    "packed package.json has no runtime dependencies (offline install possible)",
+  );
+
+  // 3. Install the tarball into an isolated project, offline.
+  console.log("\n# npm install <tarball> (offline, isolated cache)");
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "smoke-project", private: true }, null, 2));
+  mustRun("npm install", "npm", ["install", "--offline", "--no-save", "--no-package-lock", tarball], {
+    cwd: projectDir,
+    env: npmEnv,
+  });
+  const installed = join(projectDir, "node_modules", "paseo-bm");
+  const bin = join(projectDir, "node_modules", ".bin", "paseo-bm");
+  check(existsSync(bin), "installed package exposes node_modules/.bin/paseo-bm");
+  check(
+    existsSync(join(installed, "package.json")) && existsSync(join(installed, "plugin", "paseo-plugin.json")),
+    "installed layout satisfies findPayloadRoot (package.json + plugin/paseo-plugin.json above dist/)",
+  );
+
+  // 4. Run the installed bin with a fake HOME and a PATH holding only a fake paseo and node.
+  console.log("\n# run installed paseo-bm");
+  const fakePaseo = join(fakeBin, "paseo");
+  copyFileSync(join(repoRoot, "test", "fakes", "paseo"), fakePaseo);
+  chmodSync(fakePaseo, 0o755);
+  const fakeLog = join(work, "fake-paseo-argv.jsonl");
+  const cliEnv = {
+    HOME: fakeHome,
+    PATH: [fakeBin, dirname(process.execPath), "/usr/bin", "/bin"].join(":"),
+    BM_FAKE_ARGV_LOG: fakeLog,
+    NO_COLOR: "1",
+  };
+  const installedBefore = snapshot(installed);
+  const cwdBefore = snapshot(neutralCwd);
+
+  if (existsSync(bin)) {
+    const version = run(bin, ["--version"], { cwd: neutralCwd, env: cliEnv });
+    console.log(`$ paseo-bm --version -> exit ${version.status}, stdout ${JSON.stringify(version.stdout)}`);
+    if (version.stderr) console.log(`  stderr: ${version.stderr}`);
+    check(version.status === 0, "paseo-bm --version exits 0");
+    check(version.stdout.trim() === expectedVersion, `paseo-bm --version prints ${expectedVersion}`);
+
+    const help = run(bin, ["--help"], { cwd: neutralCwd, env: cliEnv });
+    console.log(`$ paseo-bm --help -> exit ${help.status}`);
+    if (help.stderr) console.log(`  stderr: ${help.stderr}`);
+    check(help.status === 0, "paseo-bm --help exits 0");
+    check(/usage/i.test(help.stdout) && help.stdout.includes("paseo-bm"), "paseo-bm --help prints usage text");
+  }
+
+  // 5. No stray writes.
+  check(sameSnapshot(installedBefore, snapshot(installed)), "running the bin did not modify the installed package");
+  check(sameSnapshot(cwdBefore, snapshot(neutralCwd)), "running the bin did not write into the working directory");
+} catch (error) {
+  failures.push(error instanceof Error ? error.message : String(error));
+  console.error(`FAIL ${error instanceof Error ? error.message : String(error)}`);
+} finally {
+  if (keep) console.log(`\nkept work dir: ${work}`);
+  else rmSync(work, { recursive: true, force: true });
+}
+
+if (failures.length > 0) {
+  console.error(`\nsmoke (packed): ${failures.length} failure(s)`);
+  process.exit(1);
+}
+console.log("\nsmoke (packed): all checks passed");
