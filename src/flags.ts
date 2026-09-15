@@ -6,6 +6,8 @@
  * typed shape, or into a usage error that the caller reports with exit code 2.
  */
 
+import type { ErrorCode } from "./errors.js";
+
 /**
  * Exit codes live in `./exit-codes.ts` (Technical Design §4.3) and are
  * re-exported here so that the command-line contract can be imported from one
@@ -38,7 +40,11 @@ export interface Flags {
   readonly enablePlugins: boolean;
   readonly installSkills: boolean;
   readonly skillsAgents: string | undefined;
-  /** Raw `<role>=<provider>/<model>` strings; format checked by a later bead. */
+  /**
+   * Raw `<role>=<provider>/<model>` strings, in the order they were typed. The
+   * syntax is checked by `parseRoleSpecs()` in `src/roles/config.ts`, which
+   * `runCli()` runs immediately after parsing.
+   */
   readonly role: readonly string[];
   readonly reconfigure: boolean;
   readonly skipSkillsCheck: boolean;
@@ -219,6 +225,12 @@ const SPEC_BY_FLAG = new Map<string, FlagSpec>(FLAG_SPECS.map((spec) => [spec.fl
 export interface UsageError {
   readonly message: string;
   readonly hint?: string;
+  /**
+   * Registry code, when the misuse has one — `E_BAD_ROLE_SPEC` for a malformed
+   * `--role`. Plain argv mistakes (an unknown flag, a missing value) have no
+   * code and leave this undefined.
+   */
+  readonly code?: ErrorCode;
 }
 
 export interface ParsedCommandLine {
@@ -241,8 +253,14 @@ type RawValue = boolean | string | string[];
 
 /**
  * Turn argv (already stripped of `node` and the script path) into a validated
- * command line. Value formats such as `--role` and `--skills-agents` are *not*
- * checked here; that validation is a separate bead and also runs at parse time.
+ * command line.
+ *
+ * Value formats such as `--role` and `--skills-agents` are *not* checked here.
+ * They are still checked at parse time — `runCli()` runs them the moment this
+ * function returns, before preflight and before anything is written — but they
+ * live in their own modules (`src/roles/config.ts` for `--role`) so that this
+ * one stays a pure argv-to-shape function with no knowledge of roles,
+ * providers or agents.
  */
 export function parseCommandLine(argv: readonly string[]): ParseResult {
   const meta = scanForHelp(argv);

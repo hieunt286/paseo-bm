@@ -22,6 +22,8 @@ import type {
 } from "./flags.js";
 import { createPrompter, detectTty } from "./prompter.js";
 import type { Prompter, TtyInfo } from "./prompter.js";
+import { parseRoleSpecs } from "./roles/config.js";
+import type { RoleSpec } from "./roles/config.js";
 import { readVersion } from "./version.js";
 
 export type Writer = (text: string) => void;
@@ -32,6 +34,12 @@ export interface CommandContext {
   /** False for a bare `paseo-bm`: run the wizard on a TTY, preview otherwise. */
   readonly explicitCommand: boolean;
   readonly flags: Flags;
+  /**
+   * `--role` after its syntax has been checked (Design §7). Empty when the
+   * flag was not used. Whether each provider and model actually exists is a
+   * separate, later check against Paseo — see `src/roles/config.ts`.
+   */
+  readonly roleSpecs: readonly RoleSpec[];
   readonly homes: HomeOverrides;
   readonly tty: TtyInfo;
   readonly prompter: Prompter;
@@ -88,11 +96,24 @@ export async function runCli(argv: readonly string[], deps: CliDependencies): Pr
     return EXIT_CODES.ok;
   }
 
+  // Value-format checks belong here, not inside `parseCommandLine`: Design §7
+  // requires them at parse time, before preflight and before anything is
+  // written, and doing them after the parser keeps the parser free of any
+  // knowledge about roles and providers. Only the syntax is judged now; the
+  // existence of a provider/model pair needs a daemon and is checked later
+  // with `E_PROVIDER_UNAVAILABLE`.
+  const roles = parseRoleSpecs(parsed.flags.role);
+  if (!roles.ok) {
+    reportUsageError(stderr, roles.error);
+    return EXIT_CODES.usage;
+  }
+
   const prompter = (deps.createPrompter ?? ((info: TtyInfo) => createPrompter(info)))(tty);
   const context: CommandContext = {
     command: parsed.command,
     explicitCommand: parsed.explicitCommand,
     flags: parsed.flags,
+    roleSpecs: roles.specs,
     homes: homeFlagOverrides(parsed.flags),
     tty,
     prompter,
@@ -109,9 +130,14 @@ export async function runCli(argv: readonly string[], deps: CliDependencies): Pr
   }
 }
 
-/** Write a misuse message the same way for every cause of exit code 2. */
+/**
+ * Write a misuse message the same way for every cause of exit code 2. A misuse
+ * that carries a registry code prints it, so `E_BAD_ROLE_SPEC` is visible to a
+ * reader and greppable in a transcript.
+ */
 export function reportUsageError(stderr: Writer, error: UsageError): void {
-  stderr(`error: ${error.message}\n`);
+  const prefix = error.code === undefined ? "error:" : `error: ${error.code}:`;
+  stderr(`${prefix} ${error.message}\n`);
   if (error.hint !== undefined) {
     stderr(`${error.hint}\n`);
   }
