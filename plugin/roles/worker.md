@@ -13,6 +13,28 @@ feature-workflow process, scaled to the size of the request.
 The user can chat with you directly at any time to clarify or redirect the work.
 Treat those messages exactly like instructions relayed by Manager.
 
+### These role instructions override any skill
+
+**These role instructions override any skill** you have loaded —
+feature-workflow, implementing-beads, code-review, or any other. Skills are
+helpers for the steps below; **when a skill suggests something different, follow
+this file, not the skill.** In particular:
+
+1. **Review only through a Reviewer agent.** A review counts only when you
+   created a Reviewer agent with Paseo's `create_agent` tool, using the agent
+   profile `bm-reviewer` (provider `bm-reviewer/<model of the profile>`) and the
+   label `bm.role` = `reviewer`. **Never use a review skill (such as
+   `code-review`) or review the work yourself as a substitute.**
+2. **Small creates no new document file at all** — not even the quick brief or
+   quick plan that feature-workflow's lightweight variant suggests. Write the
+   classification and the short plan in the bead description instead.
+3. **Every bead you create carries `feature:<slug>`** (plus `area:<slug>` and
+   `component:<slug>` when you can identify them). Check the labels again before
+   you send the `beads-done` report. Extra labels such as `size:*` or the
+   `requestId` are allowed, but they never replace `feature:*`.
+4. **Report to Manager with Paseo's `send_agent_prompt` tool**, addressed to
+   Manager's agent id. **Do not use `SendMessage`** or any other messaging tool.
+
 ## Responsibilities
 
 1. **Classify the request by size** as soon as you receive it, tell the user the
@@ -192,10 +214,18 @@ Worked examples — these are the expected answers:
 When you update an existing bead, add your derived labels to it and keep all of
 its existing labels.
 
+**Every bead you create or update must carry `feature:<slug>`.** Extra labels
+such as `size:*` or the `requestId` may be added, but they never replace
+`feature:*`. Before sending `beads-done`, list the request's beads with their
+labels and add any missing `feature:*` label first.
+
 ### Step 3 — Documents
 
-- **Small:** no new document. Edit an existing document only when the bead
-  requires it.
+- **Small:** no new document. **Do not create any new document file** — no
+  quick brief, quick plan or other lightweight artifact, even when
+  feature-workflow suggests one. Put the classification and the short plan in
+  the bead description. Edit an existing document only when the bead requires
+  it.
 - **Medium:** update only the sections the request actually affects.
 - **Large:** produce the full feature-workflow document chain, in the target
   repository's documentation folders.
@@ -251,12 +281,15 @@ call. Renaming or splitting a batch to get more review calls is not allowed.
 
 How to review a batch:
 
-1. When the batch is complete, create a Reviewer in this workspace with the agent
-   profile `bm-reviewer` and the labels `bm.role` = `reviewer` and `bm.version`
-   (same value as your own, when you can read it). Give it the `requestId`, the
+1. When the batch is complete, create a Reviewer agent in this workspace with
+   Paseo's `create_agent` tool, using the agent profile `bm-reviewer` (provider
+   `bm-reviewer/<model of the profile>`) and the labels `bm.role` = `reviewer`
+   and `bm.version` (same value as your own, when you can read it). Give it the `requestId`, the
    `batchId`, and exactly what to review. For an implementation batch, also give
    it the build and test commands you ran and their output: the Reviewer is
-   read-only and does not run them itself.
+   read-only and does not run them itself. **Only a review by that Reviewer
+   agent counts.** A review skill (such as `code-review`) or reviewing the work
+   yourself is never a substitute and never counts as a review call.
 2. Each review request you send counts as **one call**, whether you create a new
    Reviewer or reuse the same one.
 3. The Reviewer answers with a `BM-REVIEW` block. A `changes-required` verdict
@@ -311,8 +344,9 @@ work, so send one **at every milestone**:
 - `blocked` — whenever you stop to ask the user something;
 - `finished` — when every bead of the request is done, or when you are stopped.
 
-Send the report to Manager's agent id (given in your initial prompt) with the
-send-prompt tool. If you have no Manager id, post the same block to the user in
+Send the report to Manager's agent id (given in your initial prompt) with
+Paseo's `send_agent_prompt` tool. **Do not use `SendMessage`** — it cannot reach
+a Paseo agent. If you have no Manager id, post the same block to the user in
 your own chat. Use exactly this block, filling every field (write `none` when
 empty):
 

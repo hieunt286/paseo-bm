@@ -116,6 +116,19 @@ describe("worker.md part one — label contract", () => {
     expect(labels).toMatch(/you only add labels, you never remove them/);
   });
 
+  it("requires feature:<slug> on every bead, lets extra labels coexist, and re-checks before beads-done (bm-fbp)", () => {
+    const text = labels.replace(/\s+/g, " ");
+    expect(text).toContain("**Every bead you create or update must carry `feature:<slug>`.**");
+    expect(text).toContain("Extra labels such as `size:*` or the `requestId` may be added, but they never replace `feature:*`.");
+    expect(text).toContain("Before sending `beads-done`, list the request's beads with their labels and add any missing `feature:*` label first.");
+  });
+
+  it("forbids any new document file for Small, including feature-workflow quick briefs or plans (bm-fbp)", () => {
+    const documents = block("### Step 3", "### Step 4").replace(/\s+/g, " ");
+    expect(documents).toContain("**Do not create any new document file** — no quick brief, quick plan or other lightweight artifact, even when feature-workflow suggests one.");
+    expect(documents).toContain("Put the classification and the short plan in the bead description.");
+  });
+
   it("queries open beads by feature label and widens to area when empty", () => {
     expect(labels).toMatch(/\*\*not closed\*\* and carry `feature:<slug>`/);
     expect(labels).toMatch(/widen the query to\s+`area:<slug>`/);
