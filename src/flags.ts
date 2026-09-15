@@ -1,35 +1,18 @@
 /**
  * Command and flag registry — the single source of truth for the command-line
- * contract in Technical Design §4.1 (commands), §4.2 (flags) and §4.3 (exit
- * codes). Nothing here executes a command; it only turns argv into a validated,
+ * contract in Technical Design §4.1 (commands) and §4.2 (flags); the exit-code
+ * table of §4.3 is owned by `./exit-codes.ts` and re-exported below for
+ * convenience. Nothing here executes a command; it only turns argv into a validated,
  * typed shape, or into a usage error that the caller reports with exit code 2.
  */
 
 /**
- * Exit codes, Technical Design §4.3.
- *
- * TODO(bm-wp-102-5mr.7): fold this table into the shared error-code registry in
- * `src/errors.ts` (that module is owned by another bead and does not exist yet),
- * so exit codes and `E_*` / `W_*` codes live in one place.
+ * Exit codes live in `./exit-codes.ts` (Technical Design §4.3) and are
+ * re-exported here so that the command-line contract can be imported from one
+ * module. There is deliberately no second copy of the table: two copies drift.
  */
-export const EXIT_CODES = {
-  /** Success, an intentional preview, or a healthy `doctor`. */
-  ok: 0,
-  /** `doctor` found drift inside what paseo-bm owns. */
-  doctorDrift: 1,
-  /** Misuse of a command or flag. */
-  usage: 2,
-  /** Environment precondition failed — nothing was written. */
-  preflight: 3,
-  /** Installed, but a trust boundary was not consented to. */
-  consentMissing: 4,
-  /** Stopped on a conflict that needs a human decision. */
-  conflict: 5,
-  /** No TTY and no `--apply`: the preview was printed, nothing was written. */
-  noTtyNoApply: 6,
-} as const;
-
-export type ExitCode = (typeof EXIT_CODES)[keyof typeof EXIT_CODES];
+export { EXIT_CODES, EXIT_CODE_SPECS, exitCodeMeaning, isExitCode, previewExitCode } from "./exit-codes.js";
+export type { ExitCode, ExitCodeName, ExitCodeSpec, PreviewSituation } from "./exit-codes.js";
 
 /** Executable commands. Design §4.1 also lists `configure`, which is Phase 2. */
 export const COMMANDS = ["install", "doctor", "uninstall"] as const;

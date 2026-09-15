@@ -1,0 +1,60 @@
+#!/usr/bin/env node
+/*
+ * Stand-in for the `paseo` CLI, used by test/paseo-adapter.test.ts.
+ *
+ * It is driven entirely by environment variables so each test can script one
+ * invocation, and it records the argv it received so a test can assert that the
+ * adapter passed an argument vector and never went through a command
+ * interpreter: a value containing spaces, quotes or `;` must arrive as exactly
+ * one element.
+ *
+ *   BM_FAKE_ARGV_LOG   append one JSON line per invocation
+ *   BM_FAKE_PID_FILE   write this process's pid (lets a test watch it die)
+ *   BM_FAKE_MODE       ok | hang | hang-ignore-term        (default: ok)
+ *   BM_FAKE_STDOUT     text written to stdout in `ok` mode
+ *   BM_FAKE_STDERR     text written to stderr
+ *   BM_FAKE_EXIT       exit code in `ok` mode               (default: 0)
+ *   BM_FAKE_TOUCH      file created on start; a test uses its ABSENCE to show
+ *                      that shell metacharacters in an argument never ran
+ */
+const fs = require("node:fs");
+
+const argv = process.argv.slice(2);
+
+if (process.env.BM_FAKE_ARGV_LOG) {
+  fs.appendFileSync(
+    process.env.BM_FAKE_ARGV_LOG,
+    JSON.stringify({ argv, argc: argv.length, cwd: process.cwd(), pid: process.pid }) + "\n",
+  );
+}
+
+if (process.env.BM_FAKE_PID_FILE) {
+  fs.writeFileSync(process.env.BM_FAKE_PID_FILE, String(process.pid));
+}
+
+if (process.env.BM_FAKE_TOUCH) {
+  fs.writeFileSync(process.env.BM_FAKE_TOUCH, "the fake CLI ran\n");
+}
+
+if (process.env.BM_FAKE_STDERR) {
+  process.stderr.write(process.env.BM_FAKE_STDERR);
+}
+
+const mode = process.env.BM_FAKE_MODE || "ok";
+
+if (mode === "hang" || mode === "hang-ignore-term") {
+  if (mode === "hang-ignore-term") {
+    // Refuse the polite request, so only an outright kill ends this process.
+    process.on("SIGTERM", () => {});
+    process.on("SIGINT", () => {});
+  }
+  // Stay alive without burning CPU; the adapter's deadline must end this.
+  setInterval(() => {}, 1000);
+  return;
+}
+
+if (process.env.BM_FAKE_STDOUT) {
+  process.stdout.write(process.env.BM_FAKE_STDOUT);
+}
+
+process.exit(Number(process.env.BM_FAKE_EXIT || "0"));

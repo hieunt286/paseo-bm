@@ -1,0 +1,131 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`renderHumanReport — doctor and uninstall > renders checks with a severity marker and a fix 1`] = `
+"paseo-bm 0.1.0 — doctor (read-only, nothing is written)
+Paseo CLI 0.8.0, daemon 0.8.0, home /fake/home/.paseo, plugins enabled: yes
+
+Checks
+  [ok]    paseo-cli      Paseo CLI 0.8.0 and daemon 0.8.0 agree.
+  [error] plugin-status  The paseo-bm plugin is registered but its status is disabled.
+                         Fix: Run \`npx paseo-bm install --apply\` and consent to enabling plugins.
+  [warn]  skills         codex is missing 1 of 2 required skills.
+                         Fix: Run the printed \`skills add\` command.
+
+1 ok, 1 warning, 1 error
+
+Agent roles
+  manager   claude/opus-5      Paseo tools: yes; signed in: yes
+  worker    codex/gpt-5.6-sol  Paseo tools: yes; signed in: no
+  reviewer  codex/gpt-5.6-sol  Paseo tools: no; signed in: unknown
+
+Agent skills
+  source: cuongntr/agent-skills
+  claude: 2 present, none missing
+  codex: 1 present, missing: implementing-beads
+  run it yourself: npx -y skills add cuongntr/agent-skills --agent codex implementing-beads
+
+Warnings (these never change the exit code)
+  W_PROVIDER_NOT_LOGGED_IN  The provider chosen for an agent role has no active login session, so that role cannot start a session yet.
+    worker uses codex
+    Fix: Run that tool's own login command — paseo-bm never handles credentials — then run \`paseo-bm doctor\` to confirm. The role stays registered either way.
+
+Plugin status: disabled
+Exit code 1 — doctor found drift in what paseo-bm owns
+"
+`;
+
+exports[`renderHumanReport — doctor and uninstall > renders the uninstall kinds delete, keep and config 1`] = `
+"paseo-bm 0.1.0 — uninstall (preview, nothing has been written)
+Paseo CLI 0.8.0, daemon 0.8.0, home /fake/home/.paseo, plugins enabled: yes
+
+Planned changes
+  Install home
+    delete   installHome/plugin/0.1.0                           owned payload
+    keep     installHome/plugin/0.1.0/roles/reviewer.md         user-modified
+  Paseo config
+    config   paseoHome/config.json#daemon.mcp.injectIntoAgents  restoring the value paseo-bm found; true -> null; consent: interactive
+
+3 actions: 1 delete, 1 keep, 1 config
+
+Plugin status: running
+Exit code 0 — success, an intentional preview, or a healthy doctor
+"
+`;
+
+exports[`renderHumanReport — install > renders a preview grouped by destination 1`] = `
+"paseo-bm 0.1.0 — install (preview, nothing has been written)
+Paseo CLI 0.8.0, daemon 0.8.0, home /fake/home/.paseo, plugins enabled: no
+
+Planned changes
+  Install home
+    create   installHome/plugin/0.1.0/roles/worker.md               missing
+    update   installHome/install.json                               outdated
+    skip     installHome/plugin/0.1.0/roles/manager.md              unchanged
+    conflict installHome/plugin/0.1.0/roles/reviewer.md             user-modified; re-run with --force to overwrite; a backup is taken first
+  Paseo config
+    config   paseoHome/config.json#pluginsEnabled                   not enabled yet; false -> true; consent: interactive
+    config   paseoHome/config.json#daemon.agentProfiles[bm-worker]  missing; null -> {"id":"bm-worker","label":"Beads Worker"}; consent: interactive
+  Paseo daemon
+    create   paseoDaemon/plugins[paseo-bm]                          missing
+
+7 actions: 2 create, 1 update, 1 skip, 1 conflict, 2 config — a conflict needs your decision
+
+Agent roles
+  manager   claude/opus-5      Paseo tools: yes; signed in: yes
+  worker    codex/gpt-5.6-sol  Paseo tools: yes; signed in: no
+  reviewer  codex/gpt-5.6-sol  Paseo tools: no; signed in: unknown
+
+Agent skills
+  source: cuongntr/agent-skills
+  claude: 2 present, none missing
+  codex: 1 present, missing: implementing-beads
+  run it yourself: npx -y skills add cuongntr/agent-skills --agent codex implementing-beads
+
+Warnings (these never change the exit code)
+  W_BEADS_CLI_MISSING  The beads CLI (\`br\` or \`bd\`) was not found, so Worker will not be able to manage beads.
+    looked for br and bd on PATH
+    Fix: Install the beads CLI and make sure it is on PATH. paseo-bm installs fine without it; only the beads part of the workflow is unavailable.
+
+Plugin status: disabled
+Exit code 0 — success, an intentional preview, or a healthy doctor
+"
+`;
+
+exports[`renderHumanReport — install > renders the applied run from the same plan, changing only the wording 1`] = `
+"paseo-bm 0.1.0 — install (applied)
+Paseo CLI 0.8.0, daemon 0.8.0, home /fake/home/.paseo, plugins enabled: no
+
+Changes made
+  Install home
+    create   installHome/plugin/0.1.0/roles/worker.md               missing
+    update   installHome/install.json                               outdated
+    skip     installHome/plugin/0.1.0/roles/manager.md              unchanged
+    conflict installHome/plugin/0.1.0/roles/reviewer.md             user-modified; re-run with --force to overwrite; a backup is taken first
+  Paseo config
+    config   paseoHome/config.json#pluginsEnabled                   not enabled yet; false -> true; consent: interactive
+    config   paseoHome/config.json#daemon.agentProfiles[bm-worker]  missing; null -> {"id":"bm-worker","label":"Beads Worker"}; consent: interactive
+  Paseo daemon
+    create   paseoDaemon/plugins[paseo-bm]                          missing
+
+7 actions: 2 create, 1 update, 1 skip, 1 conflict, 2 config — a conflict needs your decision
+
+Agent roles
+  manager   claude/opus-5      Paseo tools: yes; signed in: yes
+  worker    codex/gpt-5.6-sol  Paseo tools: yes; signed in: no
+  reviewer  codex/gpt-5.6-sol  Paseo tools: no; signed in: unknown
+
+Agent skills
+  source: cuongntr/agent-skills
+  claude: 2 present, none missing
+  codex: 1 present, missing: implementing-beads
+  run it yourself: npx -y skills add cuongntr/agent-skills --agent codex implementing-beads
+
+Warnings (these never change the exit code)
+  W_BEADS_CLI_MISSING  The beads CLI (\`br\` or \`bd\`) was not found, so Worker will not be able to manage beads.
+    looked for br and bd on PATH
+    Fix: Install the beads CLI and make sure it is on PATH. paseo-bm installs fine without it; only the beads part of the workflow is unavailable.
+
+Plugin status: running
+Exit code 0 — success, an intentional preview, or a healthy doctor
+"
+`;
