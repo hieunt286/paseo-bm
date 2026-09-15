@@ -1,0 +1,116 @@
+name: Release
+
+# IMPORTANT: npm's trusted publisher configuration for `paseo-bm` refers to this
+# workflow by its file name (`release.yml`). Renaming or moving this file breaks
+# publishing until the trusted publisher entry on npmjs.com is updated too.
+#
+# Authentication is OpenID Connect (trusted publishing): there is no NPM_TOKEN
+# and no other secret in this workflow, by design.
+#
+# Scope today (bead bm-wp-101-b51.4): verify the tag, re-run every check, and
+# stop at `npm publish --dry-run`. The real publish step is added by WP-118,
+# because a publish cannot be undone after 72 hours and needs a human approval.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to check, e.g. v0.1.0-alpha.0 (defaults to v<package.json version>)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: release (dry-run)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required by npm trusted publishing and provenance.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      # Trusted publishing needs npm >= 11.5.1.
+      - name: Use npm 11
+        run: |
+          npm install -g npm@11
+          node -e '
+            const [a, b, c] = process.argv[1].split(".").map(Number);
+            const ok = a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1)));
+            if (!ok) { console.error("npm " + process.argv[1] + " is older than 11.5.1"); process.exit(1); }
+            console.log("npm " + process.argv[1]);
+          ' "$(npm --version)"
+
+      - name: Resolve version, tag and dist-tag
+        id: meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          node -e '
+            const version = require("./package.json").version;
+            const expected = "v" + version;
+            const env = process.env;
+            const tag = env.EVENT_NAME === "release" ? env.RELEASE_TAG : (env.INPUT_TAG || expected);
+            if (tag !== expected) {
+              console.error(`Tag ${tag} does not match package.json version (expected ${expected}).`);
+              process.exit(1);
+            }
+            const prerelease = version.includes("-");
+            if (env.EVENT_NAME === "release" && String(prerelease) !== env.RELEASE_PRERELEASE) {
+              console.error(`GitHub release prerelease=${env.RELEASE_PRERELEASE} but version ${version} prerelease=${prerelease}.`);
+              process.exit(1);
+            }
+            if (!prerelease) {
+              console.error(`Phase 1 publishes prereleases only, under dist-tag next; ${version} is not a prerelease.`);
+              process.exit(1);
+            }
+            const distTag = "next";
+            console.log(`version=${version}`);
+            console.log(`tag=${tag}`);
+            console.log(`dist-tag=${distTag}`);
+            require("fs").appendFileSync(env.GITHUB_OUTPUT, `version=${version}\ndist_tag=${distTag}\n`);
+          '
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck && npm run typecheck:plugin
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Smoke test packed package
+        run: npm run smoke:packed
+
+      - name: Publish (dry-run)
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          DIST_TAG: ${{ steps.meta.outputs.dist_tag }}
+        run: |
+          echo "Dry-run publish of paseo-bm@${VERSION} with dist-tag ${DIST_TAG}"
+          npm publish --dry-run --provenance --access public --tag "${DIST_TAG}"
