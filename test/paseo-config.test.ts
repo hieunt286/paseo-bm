@@ -500,6 +500,101 @@ describe("pluginsEnabled", () => {
   });
 });
 
+/* ------------------------------------- previous state + containers (bm-tm2) */
+
+describe("pluginsEnabled restore (bm-tm2)", () => {
+  const restore = (previous: { present: boolean; value: boolean | null }): ConfigEdit => ({
+    pluginsEnabled: { action: "restore", previous, expect: true },
+  });
+
+  it("deletes the key when it was absent before paseo-bm", () => {
+    const result = editConfig({ pluginsEnabled: true, other: 1 }, restore({ present: false, value: null }));
+    expect(result.config).toEqual({ other: 1 });
+    expect(result.changedPaths).toEqual([PLUGINS_ENABLED_PATH]);
+  });
+
+  it("puts false back when it was false before paseo-bm", () => {
+    const result = editConfig({ pluginsEnabled: true }, restore({ present: true, value: false }));
+    expect(result.config).toEqual({ pluginsEnabled: false });
+    expect(result.changedPaths).toEqual([PLUGINS_ENABLED_PATH]);
+  });
+
+  it("does not touch it when it no longer holds the value paseo-bm set", () => {
+    const result = editConfig({ pluginsEnabled: false }, restore({ present: false, value: null }));
+    expect(result.config).toEqual({ pluginsEnabled: false });
+    expect(result.changedPaths).toEqual([]);
+    expect(result.skippedPaths).toEqual([PLUGINS_ENABLED_PATH]);
+  });
+});
+
+describe("containers paseo-bm creates (bm-tm2)", () => {
+  const INSTALL_EDIT: ConfigEdit = {
+    pluginsEnabled: true,
+    mcpInject: { action: "set", value: true },
+    providers: { "bm-worker": { extends: "claude", label: "Beads Worker" } },
+    profiles: [{ id: "bm-worker", provider: "bm-worker" }],
+  };
+  const UNINSTALL_EDIT: ConfigEdit = {
+    removeProviders: ["bm-worker"],
+    removeProfiles: ["bm-worker"],
+    mcpInject: { action: "restore", previous: { present: false, value: null }, expect: true },
+    pluginsEnabled: { action: "restore", previous: { present: false, value: null }, expect: true },
+  };
+
+  it("reports every container that was absent and now exists, and only those", () => {
+    expect(editConfig({}, INSTALL_EDIT).createdContainers).toEqual([
+      "agents",
+      "agents.providers",
+      "daemon",
+      "daemon.agentProfiles",
+      "daemon.mcp",
+    ]);
+    expect(editConfig({ daemon: { listen: "127.0.0.1:7777" }, agents: {} }, INSTALL_EDIT).createdContainers).toEqual([
+      "agents.providers",
+      "daemon.agentProfiles",
+      "daemon.mcp",
+    ]);
+    expect(editConfig(JSON.parse(FIXTURE_TEXT) as PaseoConfig, ROLE_EDIT).createdContainers).toEqual([]);
+  });
+
+  it("created by paseo-bm and empty again: removed innermost first, back to the exact config from before", () => {
+    const before = { keep: true };
+    const installed = editConfig(before, INSTALL_EDIT);
+
+    const result = editConfig(installed.config, { ...UNINSTALL_EDIT, removeEmptyContainers: installed.createdContainers });
+
+    expect(result.config).toEqual(before);
+    expect(result.changedPaths).toEqual(expect.arrayContaining(["daemon.mcp", "daemon.agentProfiles", "daemon", "agents.providers", "agents"]));
+  });
+
+  it("existed before paseo-bm (not recorded): kept even though it is empty", () => {
+    const before = { agents: { providers: {} }, daemon: { mcp: {} } };
+    const installed = editConfig(before, INSTALL_EDIT);
+    expect(installed.createdContainers).toEqual(["daemon.agentProfiles"]);
+
+    const result = editConfig(installed.config, { ...UNINSTALL_EDIT, removeEmptyContainers: installed.createdContainers });
+
+    expect(result.config).toEqual(before);
+  });
+
+  it("created by paseo-bm but holding someone else's entry: kept, and so is every parent", () => {
+    const installed = editConfig({}, INSTALL_EDIT);
+    const withMine = structuredClone(installed.config) as { agents: { providers: Record<string, unknown> } };
+    withMine.agents.providers["mine"] = { extends: "claude" };
+
+    const result = editConfig(withMine, { ...UNINSTALL_EDIT, removeEmptyContainers: installed.createdContainers });
+
+    expect(result.config).toEqual({ agents: { providers: { mine: { extends: "claude" } } } });
+    expect(result.changedPaths).not.toContain("agents");
+    expect(result.changedPaths).not.toContain("agents.providers");
+  });
+
+  it("refuses to remove a container outside the closed set", () => {
+    const edit = { removeEmptyContainers: ["plugins"] } as unknown as ConfigEdit;
+    expect(() => editConfig({ plugins: {} }, edit)).toThrow(/only removes the containers it can create/);
+  });
+});
+
 /* ------------------------------------------------------- backup + reload */
 
 describe("backup and reload", () => {

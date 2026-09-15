@@ -17,10 +17,12 @@
  *    `<install home>/backups/<stamp>/paseo-config.json` before anything is
  *    written, and that copy is what a failed reload is rolled back to.
  * 3. **Per-key previous state, not a boolean flag.** `{ present, value }` of
- *    `daemon.mcp.injectIntoAgents` is reported back so the install record can
- *    keep it: "the key was absent" is a different state from "the key was
- *    `false`" (ADR-006 decision 8). Uninstall restores *that key*, never the
- *    whole backup file, because a full restore would throw away every unrelated
+ *    `daemon.mcp.injectIntoAgents` and `pluginsEnabled` is reported back so the
+ *    install record can keep it: "the key was absent" is a different state from
+ *    "the key was `false`" (ADR-006 decision 8). The containers an edit creates
+ *    are reported too, so uninstall can remove them once they are empty again
+ *    (bead bm-tm2). Uninstall restores *those keys*, never the whole backup
+ *    file, because a full restore would throw away every unrelated
  *    configuration change made since the install.
  * 4. **Concurrent-write detection.** The Paseo app can write this file while its
  *    Settings screen is open. The bytes on disk are compared with the bytes that
@@ -45,7 +47,8 @@ import { diagnostic } from "../errors.js";
 import type { FsOps } from "../fsops.js";
 import { FILE_MODE, backupStamp, createFsOps, sha256 } from "../fsops.js";
 import { installPaths, paseoConfigFile } from "../layout.js";
-import type { McpInjectPrevious, McpInjectRecord } from "../record.js";
+import type { ConfigContainerPath, McpInjectPrevious, McpInjectRecord } from "../record.js";
+import { CONFIG_CONTAINER_PATHS, isConfigContainerPath } from "../record.js";
 import type { DaemonReload, PaseoAdapter } from "./adapter.js";
 
 /** Prefix every key paseo-bm owns inside Paseo's config carries (ADR-006). */
@@ -175,17 +178,23 @@ export interface ConfigSnapshot {
   readonly mode: number;
 }
 
+/**
+ * Uninstall: put a boolean key back exactly as `previous` describes it — absent
+ * means the key is deleted — but only while it still holds `expect`, the value
+ * paseo-bm itself wrote. Anything else means the user changed it afterwards and
+ * it is left alone (ADR-006 decision 8).
+ */
+export interface KeyRestoreEdit {
+  readonly action: "restore";
+  readonly previous: McpInjectPrevious;
+  readonly expect: boolean;
+}
+
 /** What to do with the global MCP switch. */
 export type McpInjectEdit =
   /** Install: put the switch in a known state. */
   | { readonly action: "set"; readonly value: boolean }
-  /**
-   * Uninstall: put the key back exactly as `previous` describes it, but only
-   * while it still holds `expect` — the value paseo-bm itself wrote. Anything
-   * else means the user changed it afterwards and it is left alone
-   * (ADR-006 decision 8).
-   */
-  | { readonly action: "restore"; readonly previous: McpInjectPrevious; readonly expect: boolean };
+  | KeyRestoreEdit;
 
 /**
  * The closed set of changes this module can make. It is declarative on purpose:
@@ -193,7 +202,8 @@ export type McpInjectEdit =
  * else" is enforced by the shape of the API and not by review.
  */
 export interface ConfigEdit {
-  readonly pluginsEnabled?: boolean;
+  /** A value to set, or — on uninstall — the recorded previous state to restore. */
+  readonly pluginsEnabled?: boolean | KeyRestoreEdit;
   readonly mcpInject?: McpInjectEdit;
   /** `agents.providers.<id>`; every id must start with `bm-`. */
   readonly providers?: Readonly<Record<string, JsonValue>>;
@@ -201,6 +211,12 @@ export interface ConfigEdit {
   /** `daemon.agentProfiles[]` entries; every `id` must start with `bm-`. */
   readonly profiles?: readonly AgentProfileEntry[];
   readonly removeProfiles?: readonly string[];
+  /**
+   * Containers paseo-bm recorded as created by itself. Applied after every
+   * other change, innermost first: each one is removed only when it is now an
+   * empty object or an empty array. Must come from `CONFIG_CONTAINER_PATHS`.
+   */
+  readonly removeEmptyContainers?: readonly ConfigContainerPath[];
 }
 
 export interface ConfigEditResult {
@@ -210,6 +226,11 @@ export interface ConfigEditResult {
   readonly changedPaths: readonly string[];
   /** Keys the edit asked for but deliberately did not touch. */
   readonly skippedPaths: readonly string[];
+  /**
+   * Containers from `CONFIG_CONTAINER_PATHS` that were absent in the input and
+   * exist in the result — what the install record must remember (bm-tm2).
+   */
+  readonly createdContainers: readonly ConfigContainerPath[];
 }
 
 export interface ApplyConfigEditOptions {
@@ -248,6 +269,8 @@ export interface ApplyConfigEditResult {
   };
   readonly changedPaths: readonly string[];
   readonly skippedPaths: readonly string[];
+  /** Containers the write brought into existence; empty when nothing was written. */
+  readonly createdContainers: readonly ConfigContainerPath[];
   /** True when bytes were actually replaced. */
   readonly written: boolean;
   /** 1 normally, 2 when a concurrent write forced the single retry. */
@@ -383,21 +406,31 @@ export function editConfig(config: PaseoConfig, edit: ConfigEdit): ConfigEditRes
   const next = structuredClone(config) as PaseoConfig;
   const changedPaths: string[] = [];
   const skippedPaths: string[] = [];
+  const existedBefore = CONFIG_CONTAINER_PATHS.filter((path) => containerExists(config, path));
 
   if (edit.pluginsEnabled !== undefined) {
-    if (setBooleanKey(next, PLUGINS_ENABLED_PATH, edit.pluginsEnabled)) {
-      changedPaths.push(PLUGINS_ENABLED_PATH);
-    }
+    const pluginsEdit = edit.pluginsEnabled;
+    applyBooleanEdit(
+      next,
+      PLUGINS_ENABLED_PATH,
+      typeof pluginsEdit === "boolean" ? { action: "set", value: pluginsEdit } : pluginsEdit,
+      changedPaths,
+      skippedPaths,
+    );
   }
 
   if (edit.mcpInject !== undefined) {
-    applyMcpInject(next, edit.mcpInject, changedPaths, skippedPaths);
+    applyBooleanEdit(next, MCP_INJECT_PATH, edit.mcpInject, changedPaths, skippedPaths);
   }
 
   applyProviders(next, edit, changedPaths);
   applyProfiles(next, edit, changedPaths);
+  applyEmptyContainerRemoval(next, edit.removeEmptyContainers ?? [], changedPaths);
 
-  return { config: next, changedPaths, skippedPaths };
+  const createdContainers = CONFIG_CONTAINER_PATHS.filter(
+    (path) => !existedBefore.includes(path) && containerExists(next, path),
+  );
+  return { config: next, changedPaths, skippedPaths, createdContainers };
 }
 
 /**
@@ -480,6 +513,7 @@ export async function applyConfigEdit(options: ApplyConfigEditOptions): Promise<
       before,
       changedPaths: edited.changedPaths,
       skippedPaths: edited.skippedPaths,
+      createdContainers: [],
       written: false,
       attempts,
       reload: undefined,
@@ -516,6 +550,7 @@ export async function applyConfigEdit(options: ApplyConfigEditOptions): Promise<
     before,
     changedPaths: edited.changedPaths,
     skippedPaths: edited.skippedPaths,
+    createdContainers: edited.createdContainers,
     written: true,
     attempts,
     reload,
@@ -536,29 +571,31 @@ export function mcpInjectRecordFrom(result: Pick<ApplyConfigEditResult, "before"
 
 /* ------------------------------------------------------------------ edits */
 
-function applyMcpInject(
+/** `set` or per-key `restore` of one boolean switch (`pluginsEnabled`, the MCP switch). */
+function applyBooleanEdit(
   config: PaseoConfig,
+  path: string,
   edit: McpInjectEdit,
   changedPaths: string[],
   skippedPaths: string[],
 ): void {
   if (edit.action === "set") {
-    if (setBooleanKey(config, MCP_INJECT_PATH, edit.value)) {
-      changedPaths.push(MCP_INJECT_PATH);
+    if (setBooleanKey(config, path, edit.value)) {
+      changedPaths.push(path);
     }
     return;
   }
 
-  const current = readBooleanKey(config, MCP_INJECT_PATH);
+  const current = readBooleanKey(config, path);
   if (!current.present || current.value !== edit.expect) {
     // Somebody changed the switch after paseo-bm set it. Leave it alone.
-    skippedPaths.push(MCP_INJECT_PATH);
+    skippedPaths.push(path);
     return;
   }
 
   if (!edit.previous.present) {
-    if (deleteKey(config, MCP_INJECT_PATH)) {
-      changedPaths.push(MCP_INJECT_PATH);
+    if (deleteKey(config, path)) {
+      changedPaths.push(path);
     }
     return;
   }
@@ -566,13 +603,47 @@ function applyMcpInject(
   if (typeof edit.previous.value !== "boolean") {
     // The key existed but held something the record cannot describe, so there
     // is nothing faithful to restore.
-    skippedPaths.push(MCP_INJECT_PATH);
+    skippedPaths.push(path);
     return;
   }
 
-  if (setBooleanKey(config, MCP_INJECT_PATH, edit.previous.value)) {
-    changedPaths.push(MCP_INJECT_PATH);
+  if (setBooleanKey(config, path, edit.previous.value)) {
+    changedPaths.push(path);
   }
+}
+
+/**
+ * Removes the recorded containers that are now empty, deepest first, so that
+ * `daemon` can go once `daemon.mcp` and `daemon.agentProfiles` have. A container
+ * holding anything — a user's key, a `room-*` entry — stays, and so does one
+ * that is not in the list: it existed before paseo-bm and is not ours to tidy.
+ */
+function applyEmptyContainerRemoval(
+  config: PaseoConfig,
+  containers: readonly ConfigContainerPath[],
+  changedPaths: string[],
+): void {
+  const deepestFirst = [...new Set(containers)].sort((a, b) => b.split(".").length - a.split(".").length);
+  for (const path of deepestFirst) {
+    const { parents, leaf } = splitPath(path);
+    const parent = findParent(config, parents);
+    if (parent === undefined || !Object.prototype.hasOwnProperty.call(parent, leaf)) {
+      continue;
+    }
+    const value = parent[leaf];
+    const empty = Array.isArray(value) ? value.length === 0 : isPlainObject(value) && Object.keys(value).length === 0;
+    if (empty) {
+      delete parent[leaf];
+      changedPaths.push(path);
+    }
+  }
+}
+
+/** True when a container key is there at all (any value but `undefined`). */
+function containerExists(config: PaseoConfig, path: string): boolean {
+  const { parents, leaf } = splitPath(path);
+  const parent = findParent(config, parents);
+  return parent !== undefined && Object.prototype.hasOwnProperty.call(parent, leaf) && parent[leaf] !== undefined;
 }
 
 function applyProviders(config: PaseoConfig, edit: ConfigEdit, changedPaths: string[]): void {
@@ -690,6 +761,17 @@ function assertOnlyOurKeys(edit: ConfigEdit): void {
     ...(edit.profiles ?? []).map((profile) => profile.id),
     ...(edit.removeProfiles ?? []),
   ];
+  for (const path of edit.removeEmptyContainers ?? []) {
+    if (!isConfigContainerPath(path)) {
+      throw new ConfigMutationError({
+        reason: "not-ours",
+        message:
+          `Refusing to remove "${String(path)}" from Paseo's config: paseo-bm only removes the containers ` +
+          `it can create itself (${CONFIG_CONTAINER_PATHS.join(", ")}).`,
+        field: String(path),
+      });
+    }
+  }
   for (const id of ids) {
     if (!isOurs(id)) {
       throw new ConfigMutationError({
@@ -871,9 +953,10 @@ function setBooleanKey(config: PaseoConfig, path: string, value: boolean): boole
 }
 
 /**
- * Removes one leaf key. Any object created on the way to it is left behind
- * rather than pruned: an empty `daemon.mcp` is inert, and deleting containers
- * paseo-bm does not own is exactly the kind of tidying ADR-004 forbids.
+ * Removes one leaf key. Any object on the way to it is left behind here: only
+ * `removeEmptyContainers` prunes, and only the containers the install record
+ * says paseo-bm created — deleting a container paseo-bm does not own is exactly
+ * the kind of tidying ADR-004 forbids.
  */
 function deleteKey(config: PaseoConfig, path: string): boolean {
   const { parents, leaf } = splitPath(path);

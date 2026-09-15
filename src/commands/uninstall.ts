@@ -8,7 +8,9 @@
  *   light preflight → read install.json → {@link planUninstall} (reads only)
  *   → preview → confirm → {@link applyUninstall} (decides nothing):
  *   `paseo plugin remove` → drop the `bm-*` providers and profiles → put
- *   `daemon.mcp.injectIntoAgents` back → restore backups when asked → delete
+ *   `daemon.mcp.injectIntoAgents` (and, when chosen, `pluginsEnabled`) back to
+ *   the recorded previous state → remove the config containers paseo-bm
+ *   created that are empty again → restore backups when asked → delete
  *   the payload by `versions[]` → keep user-modified files → backups by choice
  *   → install.json → report.
  *
@@ -116,7 +118,11 @@ export type UninstallReason =
   | "not-set-by-paseo-bm"
   | "set-by-paseo-bm"
   | "other-plugins-installed"
-  | "paseo-unavailable";
+  | "paseo-unavailable"
+  /** A config container paseo-bm created that is empty again after the bm-* entries went. */
+  | "created-by-paseo-bm"
+  /** A config container paseo-bm created that still holds something else. */
+  | "not-empty";
 
 /** Choices that change the plan. Flags give the first two; the prompt the other two. */
 export interface UninstallChoices {
@@ -257,6 +263,8 @@ export async function planUninstall(input: PlanUninstallInput): Promise<Uninstal
     const others = (paseo.plugins ?? []).filter((plugin) => plugin.id !== pluginId);
     const pluginsEnabled = readBooleanKey(config, PLUGINS_ENABLED_PATH);
     offerPluginsOff = record.paseo.pluginsEnabledSetByUs && pluginsEnabled.value === true && others.length === 0;
+    const pluginsPrevious = record.paseo.pluginsEnabledPrevious;
+    const createdContainers = record.paseo.createdConfigContainers ?? [];
 
     const edit: ConfigEdit = {
       removeProviders: bmProviderIds(config),
@@ -264,7 +272,16 @@ export async function planUninstall(input: PlanUninstallInput): Promise<Uninstal
       ...(record.paseo.mcpInject.setByUs
         ? { mcpInject: { action: "restore" as const, previous: record.paseo.mcpInject.previous, expect: true } }
         : {}),
-      ...(offerPluginsOff && choices.turnOffPlugins ? { pluginsEnabled: false } : {}),
+      // Turning plugins off again restores the recorded previous state — the
+      // key goes when it was absent (bm-tm2). A record from before that field
+      // has no previous state, so the old `false` stays: nothing is guessed.
+      ...(offerPluginsOff && choices.turnOffPlugins
+        ? {
+            pluginsEnabled:
+              pluginsPrevious === undefined ? false : { action: "restore" as const, previous: pluginsPrevious, expect: true },
+          }
+        : {}),
+      ...(createdContainers.length > 0 ? { removeEmptyContainers: createdContainers } : {}),
     };
     const edited = editConfig(config, edit);
     if (edited.changedPaths.length > 0) {
@@ -283,6 +300,18 @@ export async function planUninstall(input: PlanUninstallInput): Promise<Uninstal
 
     actions.push(mcpAction(record, config, edited.skippedPaths.includes(MCP_INJECT_PATH)));
     actions.push(pluginsEnabledAction(record, pluginsEnabled.value, offerPluginsOff, choices.turnOffPlugins, others.length));
+
+    for (const path of createdContainers) {
+      if (edited.changedPaths.includes(path)) {
+        actions.push(
+          configAction(path, path === AGENT_PROFILES_PATH ? [] : {}, null, "created-by-paseo-bm", "paseo-bm created this container and nothing else is left in it"),
+        );
+      } else if (hasKey(edited.config, path)) {
+        actions.push(
+          keep(`paseoHome/config.json#${path}`, "paseo-config", "not-empty", "paseo-bm created this container, but it now holds entries paseo-bm did not write, so it stays"),
+        );
+      }
+    }
   }
 
   /* -- restores -------------------------------------------------------------- */
@@ -570,7 +599,25 @@ function pluginsEnabledAction(
     );
   }
   if (turnOff) {
-    return configAction(PLUGINS_ENABLED_PATH, current, false, "set-by-paseo-bm", "you chose to turn plugins off again");
+    const previous = record.paseo.pluginsEnabledPrevious;
+    if (previous === undefined) {
+      return configAction(
+        PLUGINS_ENABLED_PATH,
+        current,
+        false,
+        "set-by-paseo-bm",
+        "you chose to turn plugins off again; install.json does not record the state from before paseo-bm, so it is set to false rather than guessed",
+      );
+    }
+    return configAction(
+      PLUGINS_ENABLED_PATH,
+      current,
+      previous.present ? previous.value : null,
+      "restore-previous",
+      previous.present
+        ? "you chose to turn plugins off again: back to the value it had before paseo-bm"
+        : "you chose to turn plugins off again: the key did not exist before paseo-bm, so it is removed",
+    );
   }
   return keep(target, "paseo-config", "set-by-paseo-bm", "kept on by default; an interactive uninstall asks whether to turn it off");
 }
@@ -657,6 +704,11 @@ export async function applyUninstall(input: ApplyUninstallInput): Promise<ApplyU
       if (result.skippedPaths.includes(MCP_INJECT_PATH) && !plan.actions.some((a) => a.reason === "changed-since-install" && a.target.endsWith(MCP_INJECT_PATH))) {
         extraActions.push(
           keep(`paseoHome/config.json#${MCP_INJECT_PATH}`, "paseo-config", "changed-since-install", "changed by someone else after the preview; left alone"),
+        );
+      }
+      if (result.skippedPaths.includes(PLUGINS_ENABLED_PATH)) {
+        extraActions.push(
+          keep(`paseoHome/config.json#${PLUGINS_ENABLED_PATH}`, "paseo-config", "changed-since-install", "changed by someone else after the preview; left alone"),
         );
       }
     }
@@ -1156,6 +1208,14 @@ function arrayAt(config: Record<string, unknown>, path: string): unknown[] {
   const parent = segments.length === 0 ? config : objectAt(config, segments.join("."));
   const value = parent?.[leaf];
   return Array.isArray(value) ? value : [];
+}
+
+/** True when a dotted key exists in the config, whatever it holds. */
+function hasKey(config: Record<string, unknown>, path: string): boolean {
+  const segments = path.split(".");
+  const leaf = segments.pop() ?? path;
+  const parent = segments.length === 0 ? config : objectAt(config, segments.join("."));
+  return parent !== undefined && Object.prototype.hasOwnProperty.call(parent, leaf);
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

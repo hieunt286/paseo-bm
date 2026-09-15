@@ -21,6 +21,7 @@ import {
   serializeRecord,
   touchRecord,
   validateRecord,
+  withCreatedConfigContainers,
   writeRecord,
 } from "../src/record.js";
 
@@ -521,6 +522,91 @@ describe("createRecord and touchRecord", () => {
     expect(touched.updatedAt).toBe("2026-09-16T00:00:00.000Z");
     expect(touched.installedAt).toBe(record.installedAt);
     expect(touched.files).toEqual(record.files);
+  });
+});
+
+describe("pluginsEnabledPrevious and createdConfigContainers (bm-tm2)", () => {
+  const withNewFields = (): InstallRecord =>
+    fullRecord({
+      paseo: {
+        ...fullRecord().paseo,
+        pluginsEnabledPrevious: { present: false, value: null },
+        createdConfigContainers: ["agents", "agents.providers", "daemon.mcp"],
+      },
+    });
+
+  it("round-trips both optional fields and writes them in place", async () => {
+    const record = withNewFields();
+    await writeRecord(fsops, record);
+    const read = await readRecord(fsops);
+
+    expect(read).toEqual(record);
+    expect(read?.paseo.pluginsEnabledPrevious).toEqual({ present: false, value: null });
+    expect(read?.paseo.createdConfigContainers).toEqual(["agents", "agents.providers", "daemon.mcp"]);
+    const paseo = (JSON.parse(serializeRecord(record)) as { paseo: object }).paseo;
+    expect(Object.keys(paseo)).toEqual([
+      "home",
+      "pluginId",
+      "pluginDir",
+      "pluginsEnabledSetByUs",
+      "pluginsEnabledPrevious",
+      "mcpInject",
+      "createdConfigContainers",
+    ]);
+  });
+
+  it("keeps 'pluginsEnabled was absent' distinct from 'it was false'", () => {
+    const absent = serializeRecord(withNewFields());
+    const wasFalse = serializeRecord(
+      fullRecord({ paseo: { ...withNewFields().paseo, pluginsEnabledPrevious: { present: true, value: false } } }),
+    );
+    expect(absent).not.toBe(wasFalse);
+    expect(parseRecord(wasFalse).paseo.pluginsEnabledPrevious).toEqual({ present: true, value: false });
+  });
+
+  it("reads a record written before bm-tm2 and serializes it byte for byte as before", () => {
+    const old = serializeRecord(fullRecord());
+    const parsed = parseRecord(old);
+
+    expect(parsed.paseo.pluginsEnabledPrevious).toBeUndefined();
+    expect(parsed.paseo.createdConfigContainers).toBeUndefined();
+    expect(serializeRecord(parsed)).toBe(old);
+    expect(old).not.toContain("pluginsEnabledPrevious");
+    expect(old).not.toContain("createdConfigContainers");
+  });
+
+  it("refuses a container outside the closed set, naming the field", () => {
+    const text = serializeRecord(withNewFields()).replace('"daemon.mcp"', '"plugins"');
+    const error = (() => {
+      try {
+        parseRecord(text);
+        return undefined;
+      } catch (caught) {
+        return caught as RecordError;
+      }
+    })();
+    expect(isRecordError(error)).toBe(true);
+    expect(error?.field).toBe("paseo.createdConfigContainers[2]");
+  });
+
+  it("refuses a pluginsEnabledPrevious that is absent and valued at once", () => {
+    const value = JSON.parse(serializeRecord(withNewFields())) as { paseo: Record<string, unknown> };
+    value.paseo["pluginsEnabledPrevious"] = { present: false, value: false };
+    expect(() => validateRecord(value)).toThrow(/paseo\.pluginsEnabledPrevious says the key was absent/);
+  });
+
+  it("merges created containers without ever dropping one, in canonical order", () => {
+    const base = fullRecord();
+    const first = withCreatedConfigContainers(base, ["daemon.mcp", "daemon"], "2026-09-16T00:00:00.000Z");
+    expect(first.paseo.createdConfigContainers).toEqual(["daemon", "daemon.mcp"]);
+    expect(first.updatedAt).toBe("2026-09-16T00:00:00.000Z");
+
+    const second = withCreatedConfigContainers(first, ["agents"], "2026-09-17T00:00:00.000Z");
+    expect(second.paseo.createdConfigContainers).toEqual(["agents", "daemon", "daemon.mcp"]);
+
+    // Nothing new (including an empty list): the very same object comes back.
+    expect(withCreatedConfigContainers(second, ["daemon"])).toBe(second);
+    expect(withCreatedConfigContainers(base, [])).toBe(base);
   });
 });
 
