@@ -72,6 +72,15 @@ interface SeedOptions {
   readonly pluginDir?: string | null;
   readonly versions?: readonly string[];
   readonly backups?: readonly string[];
+  /** Full control over each backup; replaces `backups` when given. */
+  readonly backupSpecs?: readonly BackupSpec[];
+}
+
+interface BackupSpec {
+  readonly stamp: string;
+  readonly at: string;
+  /** Holds a `paseo-config.json` copy. */
+  readonly config: boolean;
 }
 
 /** Writes payload dirs, backups and the record they are described by. */
@@ -86,10 +95,15 @@ async function seed(options: SeedOptions = {}): Promise<InstallRecord> {
       files.push({ path: relativePath, sha256: sha256(text), mode: 0o600 });
     }
   }
-  const backups = (options.backups ?? ["20260914T090000Z"]).map((stamp) => {
-    put(`backups/${stamp}/paseo-config.json`, '{ "pluginsEnabled": false }\n');
+  const specs: readonly BackupSpec[] =
+    options.backupSpecs ??
+    (options.backups ?? ["20260914T090000Z"]).map((stamp) => ({ stamp, at: NOW.toISOString(), config: true }));
+  const backups = specs.map(({ stamp, at, config }) => {
+    if (config) {
+      put(`backups/${stamp}/paseo-config.json`, '{ "pluginsEnabled": false }\n');
+    }
     put(`backups/${stamp}/plugin/0.0.9/roles/worker.md`, "# my edited worker\n");
-    return { at: NOW.toISOString(), dir: `backups/${stamp}`, reason: "user-modified" };
+    return { at, dir: `backups/${stamp}`, reason: config ? "paseo-config" : "user-modified" };
   });
 
   const base = createRecord({ version: active ?? "0.1.0", installHome, paseo: { home: paseoHome }, at: NOW });
@@ -197,8 +211,8 @@ describe("without --prune", () => {
 });
 
 describe("with --prune", () => {
-  it("removes the inactive version and the backups, keeps the active version, updates the record", async () => {
-    await seed();
+  it("removes the inactive version and payload backups, keeps the active version, updates the record", async () => {
+    await seed({ backupSpecs: [{ stamp: "20260914T090000Z", at: NOW.toISOString(), config: false }] });
 
     const { plan, result, writes } = await run();
 
@@ -210,7 +224,6 @@ describe("with --prune", () => {
     const deleted = plan.actions.filter((a) => a.kind === "delete").map((a) => a.target);
     expect(deleted).toEqual([
       "installHome/plugin/0.0.9",
-      "installHome/backups/20260914T090000Z/paseo-config.json",
       "installHome/backups/20260914T090000Z/plugin/0.0.9/roles/worker.md",
       "installHome/backups/20260914T090000Z",
     ]);
@@ -325,6 +338,7 @@ describe("with --prune", () => {
     ]);
     expect(plan.backups[0]?.decision).toBe("keep");
     expect(readFileSync(join(outside, "keep.txt"), "utf8")).toBe("outside\n");
+    expect(existsSync(join(installHome, "backups/20260914T090000Z/link"))).toBe(true);
     expect(existsSync(join(installHome, "backups/20260914T090000Z/paseo-config.json"))).toBe(true);
     expectAllInsideInstallHome(writes);
   });
@@ -381,6 +395,20 @@ describe("with --prune", () => {
     expect(tree()).toEqual(before);
   });
 
+  it("does not follow a symlinked backup directory or config file when looking for the config backup", async () => {
+    await seed({ backupSpecs: [{ stamp: "20260914T090000Z", at: NOW.toISOString(), config: false }] });
+    const outside = join(fakeHome, "elsewhere");
+    mkdirSync(outside);
+    writeFileSync(join(outside, "paseo-config.json"), "{}\n");
+    symlinkSync(join(outside, "paseo-config.json"), join(installHome, "backups/20260914T090000Z/paseo-config.json"));
+
+    const { plan } = await run();
+
+    // The symlink does not make it a config backup; it is kept only because it holds a symlink.
+    expect(plan.backups.map((b) => [b.decision, b.reason])).toEqual([["keep", "symlink"]]);
+    expect(readFileSync(join(outside, "paseo-config.json"), "utf8")).toBe("{}\n");
+  });
+
   it("is idempotent: a second prune removes nothing more", async () => {
     await seed();
     await run();
@@ -390,5 +418,98 @@ describe("with --prune", () => {
     expect(result.recordWritten).toBe(false);
     expect(writes).toEqual([]);
     expect(tree()).toEqual(before);
+  });
+});
+
+describe("with --prune, the newest Paseo config backup", () => {
+  const OLD_PAYLOAD = "20260901T080000Z";
+  const OLD_CONFIG = "20260910T080000Z";
+  const NEW_CONFIG = "20260912T080000Z";
+
+  it("is the only backup left out of payload, old config and new config backups", async () => {
+    await seed({
+      backupSpecs: [
+        { stamp: OLD_PAYLOAD, at: "2026-09-01T08:00:00.000Z", config: false },
+        // Recorded out of order on purpose: `at` decides, not position.
+        { stamp: NEW_CONFIG, at: "2026-09-12T08:00:00.000Z", config: true },
+        { stamp: OLD_CONFIG, at: "2026-09-10T08:00:00.000Z", config: true },
+      ],
+    });
+
+    const { plan, result } = await run();
+
+    expect(plan.backups.map((b) => [b.dir, b.decision, b.reason])).toEqual([
+      [`backups/${OLD_PAYLOAD}`, "delete", "backup"],
+      [`backups/${NEW_CONFIG}`, "keep", "latest-config-backup"],
+      [`backups/${OLD_CONFIG}`, "delete", "backup"],
+    ]);
+    const keptAction = plan.actions.find((a) => a.target === `installHome/backups/${NEW_CONFIG}`);
+    expect(keptAction).toMatchObject({ kind: "keep", reason: "latest-config-backup" });
+    expect(keptAction?.detail).toContain("--restore-backups");
+    expect(plan.actions.some((a) => a.kind === "delete" && a.target.startsWith(`installHome/backups/${NEW_CONFIG}`))).toBe(false);
+
+    expect(existsSync(join(installHome, `backups/${OLD_PAYLOAD}`))).toBe(false);
+    expect(existsSync(join(installHome, `backups/${OLD_CONFIG}`))).toBe(false);
+    // The whole directory stays, payload copies included.
+    expect(readFileSync(join(installHome, `backups/${NEW_CONFIG}/paseo-config.json`), "utf8")).toBe('{ "pluginsEnabled": false }\n');
+    expect(existsSync(join(installHome, `backups/${NEW_CONFIG}/plugin/0.0.9/roles/worker.md`))).toBe(true);
+
+    expect(result.removedBackups.map((b) => b.dir)).toEqual([`backups/${OLD_PAYLOAD}`, `backups/${OLD_CONFIG}`]);
+    const record = await readRecord(createFsOps({ root: installHome }));
+    expect(record?.backups.map((b) => b.dir)).toEqual([`backups/${NEW_CONFIG}`]);
+  });
+
+  it("breaks a tie on `at` with the larger directory name", async () => {
+    const at = "2026-09-12T08:00:00.000Z";
+    await seed({
+      backupSpecs: [
+        { stamp: `${NEW_CONFIG}-2`, at, config: true },
+        { stamp: NEW_CONFIG, at, config: true },
+      ],
+    });
+    const { plan } = await run();
+    expect(plan.backups.map((b) => [b.dir, b.reason])).toEqual([
+      [`backups/${NEW_CONFIG}-2`, "latest-config-backup"],
+      [`backups/${NEW_CONFIG}`, "backup"],
+    ]);
+  });
+
+  it("is kept when it is the only config backup", async () => {
+    await seed();
+    const before = readFileSync(join(installHome, "backups/20260914T090000Z/paseo-config.json"), "utf8");
+
+    const { plan, result } = await run();
+
+    expect(plan.backups.map((b) => [b.decision, b.reason])).toEqual([["keep", "latest-config-backup"]]);
+    expect(plan.actions.filter((a) => a.kind === "delete").map((a) => a.target)).toEqual(["installHome/plugin/0.0.9"]);
+    expect(readFileSync(join(installHome, "backups/20260914T090000Z/paseo-config.json"), "utf8")).toBe(before);
+    expect(existsSync(join(installHome, "backups/20260914T090000Z/plugin/0.0.9/roles/worker.md"))).toBe(true);
+    expect(result.removedBackups).toEqual([]);
+    expect(result.removedFiles.some((path) => path.startsWith("backups/"))).toBe(false);
+    // The version prune still writes the record, and the backup entry survives it.
+    expect(result.recordWritten).toBe(true);
+    expect(result.record?.backups.map((b) => b.dir)).toEqual(["backups/20260914T090000Z"]);
+    const record = await readRecord(createFsOps({ root: installHome }));
+    expect(record?.backups.map((b) => b.dir)).toEqual(["backups/20260914T090000Z"]);
+  });
+
+  it("changes nothing when no backup holds a config copy: every backup is pruned as before", async () => {
+    await seed({
+      backupSpecs: [
+        { stamp: OLD_PAYLOAD, at: "2026-09-01T08:00:00.000Z", config: false },
+        { stamp: OLD_CONFIG, at: "2026-09-10T08:00:00.000Z", config: false },
+      ],
+    });
+
+    const { plan, result } = await run();
+
+    expect(plan.backups.map((b) => [b.decision, b.reason])).toEqual([
+      ["delete", "backup"],
+      ["delete", "backup"],
+    ]);
+    expect(plan.actions.some((a) => a.reason === "latest-config-backup")).toBe(false);
+    expect(existsSync(join(installHome, `backups/${OLD_PAYLOAD}`))).toBe(false);
+    expect(existsSync(join(installHome, `backups/${OLD_CONFIG}`))).toBe(false);
+    expect(result.record?.backups).toEqual([]);
   });
 });

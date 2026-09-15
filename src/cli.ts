@@ -7,6 +7,7 @@
 import {
   COMMAND_SPECS,
   EXIT_CODES,
+  EXIT_CODE_SPECS,
   FLAG_SPECS,
   parseCommandLine,
   homeFlagOverrides,
@@ -14,7 +15,6 @@ import {
 import type {
   CommandName,
   Environment,
-  ExitCode,
   Flags,
   FlagSpec,
   HomeOverrides,
@@ -206,8 +206,8 @@ export function renderHelp(topic?: CommandName): string {
   lines.push("plugins, to open Paseo tool access for agents, or to run the skills CLI.");
   lines.push("");
   lines.push("Exit codes:");
-  for (const [code, meaning] of EXIT_CODE_MEANINGS) {
-    lines.push(`  ${String(code).padEnd(4)}${meaning}`);
+  for (const spec of EXIT_CODE_SPECS) {
+    lines.push(`  ${String(spec.code).padEnd(4)}${spec.meaning}`);
   }
   lines.push("");
   return lines.join("\n");
@@ -231,13 +231,3 @@ function renderFlag(spec: FlagSpec, showCommands: boolean): string[] {
   }
   return lines;
 }
-
-const EXIT_CODE_MEANINGS: readonly (readonly [ExitCode, string])[] = [
-  [EXIT_CODES.ok, "success, an intentional preview, or a healthy doctor"],
-  [EXIT_CODES.doctorDrift, "doctor found drift in what paseo-bm owns"],
-  [EXIT_CODES.usage, "misuse of a command or flag"],
-  [EXIT_CODES.preflight, "environment precondition failed; nothing was written"],
-  [EXIT_CODES.consentMissing, "installed, but a trust boundary was not consented to"],
-  [EXIT_CODES.conflict, "stopped on a conflict that needs a human decision"],
-  [EXIT_CODES.noTtyNoApply, "no terminal and no --apply; preview printed, nothing written"],
-];

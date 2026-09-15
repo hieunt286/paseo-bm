@@ -221,6 +221,9 @@ function renderResult(report: Report): string[] {
   if (report.result.pluginState !== null) {
     lines.push(`Plugin status: ${report.result.pluginState}`);
   }
+  if (report.result.error !== undefined) {
+    lines.push(`Error ${report.result.error.code}: ${report.result.error.message}`);
+  }
   lines.push(`Exit code ${report.result.exitCode} — ${exitCodeMeaning(report.result.exitCode)}`);
   return lines;
 }

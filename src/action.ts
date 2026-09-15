@@ -15,7 +15,7 @@
  * and §3.4 (the config keys paseo-bm owns).
  */
 
-import type { WarningCode } from "./errors.js";
+import type { ErrorCode, WarningCode } from "./errors.js";
 import type { ExitCode } from "./exit-codes.js";
 import type { CommandName } from "./flags.js";
 
@@ -267,6 +267,17 @@ export interface ReportResult {
    * Never derived from the plugin's `enabled` field, which is always true.
    */
   readonly pluginState: string | null;
+  /**
+   * Present only when the run failed with a registry error (Design §4.4 errata
+   * 2026-09-15): the code scripts match on, and its message. Omitted on success.
+   */
+  readonly error?: ReportError | undefined;
+}
+
+/** The failure a run ended with, as carried in `result.error`. */
+export interface ReportError {
+  readonly code: ErrorCode;
+  readonly message: string;
 }
 
 /** Fields every report carries, Design §4.4. */

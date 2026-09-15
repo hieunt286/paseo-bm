@@ -87,6 +87,7 @@ describe("flag registry", () => {
       consentMissing: 4,
       conflict: 5,
       noTtyNoApply: 6,
+      pluginLoadFailed: 7,
     });
   });
 });

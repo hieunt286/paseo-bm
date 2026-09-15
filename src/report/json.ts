@@ -70,10 +70,16 @@ export function toJsonDocument(report: Report): JsonObject {
   }));
   document.skills = report.skills === null ? null : skillsToJson(report.skills);
   document.warnings = report.warnings.map(warningToJson);
-  document.result = {
+  const result: Record<string, JsonValue> = {
     exitCode: report.result.exitCode,
     pluginState: report.result.pluginState,
   };
+  // Only a failed run carries an error; a success omits the key entirely, so
+  // `"error" in result` is a reliable test for failure.
+  if (report.result.error !== undefined) {
+    result.error = { code: report.result.error.code, message: report.result.error.message };
+  }
+  document.result = result;
 
   return document;
 }

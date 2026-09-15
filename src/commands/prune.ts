@@ -4,7 +4,11 @@
  *
  * The owner decided to keep every payload version and every backup. Removing
  * any of them is therefore only ever an explicit user request, and this module
- * is the only code that does it. It follows the same split as install:
+ * is the only code that does it. Even then, one backup always stays (owner
+ * decision 2026-09-15): the newest backup that holds the Paseo config copy
+ * (`paseo-config.json`, written by `src/paseo/config.ts`), so
+ * `uninstall --restore-backups` can still restore it. Older config backups and
+ * payload backups are pruned as usual. It follows the same split as install:
  *
  * - {@link planPrune} **only reads**. It decides what would be removed and what
  *   is kept, and says why, as report `Action`s. Without `--prune` it does not
@@ -29,10 +33,14 @@
  *    special entry stays (ADR-002 decision 7), and so does the version's
  *    `versions[]` entry — otherwise the next install would treat the directory
  *    as a partial payload and wipe what the user kept.
- * 4. Symlinks are never followed. Every path goes through `FsOps.resolvePath`
+ * 4. The newest config backup stays whole: among the recorded backups that
+ *    hold a regular `paseo-config.json` (checked with `lstat`, no symlink
+ *    followed), the one with the latest `at` — the larger directory name on a
+ *    tie — is kept with reason `latest-config-backup`.
+ * 5. Symlinks are never followed. Every path goes through `FsOps.resolvePath`
  *    (inside the install home, no symlink segment); a backup that contains a
  *    symlink or special file is kept whole.
- * 5. Removal is file by file (`unlink`) and directories go with `rmdir`, which
+ * 6. Removal is file by file (`unlink`) and directories go with `rmdir`, which
  *    refuses a non-empty directory. Nothing is removed recursively, so a file
  *    that appeared after the preview cannot be swept away with its directory.
  */
@@ -46,6 +54,7 @@ import type { NodeFsApi } from "../fs-guard.js";
 import { canonicalPath, nodeFs } from "../fs-guard.js";
 import type { FsOps } from "../fsops.js";
 import { installHomeLabel } from "../ownership.js";
+import { CONFIG_BACKUP_NAME } from "../paseo/config.js";
 import { PathGuardError } from "../paths-guard.js";
 import type { BackupRecord, FileRecord, InstallRecord, VersionRecord } from "../record.js";
 import { toIsoUtc, writeRecord } from "../record.js";
@@ -65,6 +74,11 @@ export type PruneReason =
   | "current-install"
   /** The caller asked to keep this backup, e.g. the one this run took. */
   | "current-backup"
+  /**
+   * The newest backup holding the Paseo config copy. Always kept so
+   * `uninstall --restore-backups` can still restore it.
+   */
+  | "latest-config-backup"
   /** No version is active or registered, so none can safely be called old. */
   | "no-active-version"
   /** The record entry does not point directly under `plugin/` or `backups/`. */
@@ -408,6 +422,7 @@ async function planBackups(
 ): Promise<PruneBackupPlan[]> {
   const plans: PruneBackupPlan[] = [];
   const seen = new Set<string>();
+  const latestConfig = await latestConfigBackupDir(record, fsops, fs);
 
   for (const backup of record.backups) {
     const dir = normalizeDir(backup.dir);
@@ -428,6 +443,11 @@ async function planBackups(
     }
     if (keepBackups.has(dir)) {
       plans.push(keep("current-backup"));
+      continue;
+    }
+    if (dir === latestConfig) {
+      // Every entry naming this directory keeps it, duplicates included.
+      plans.push(keep("latest-config-backup"));
       continue;
     }
     if (seen.has(dir)) {
@@ -464,6 +484,35 @@ async function planBackups(
     });
   }
   return plans;
+}
+
+/**
+ * The recorded backup directory holding the newest Paseo config copy: a regular
+ * `<dir>/paseo-config.json`, reached without a symlink. Newest by `at`; on a tie
+ * (or an unparseable `at`), the larger directory name wins. `undefined` when no
+ * recorded backup holds one.
+ */
+async function latestConfigBackupDir(record: InstallRecord, fsops: FsOps, fs: NodeFsApi): Promise<string | undefined> {
+  let best: { dir: string; at: number } | undefined;
+  const holdsConfig = new Map<string, boolean>();
+  for (const backup of record.backups) {
+    const dir = normalizeDir(backup.dir);
+    if (!isDirectChild(dir, "backups")) {
+      continue;
+    }
+    if (!holdsConfig.has(dir)) {
+      holdsConfig.set(dir, (await entryType(fsops, fs, posix.join(dir, CONFIG_BACKUP_NAME))) === "file");
+    }
+    if (holdsConfig.get(dir) !== true) {
+      continue;
+    }
+    const parsed = Date.parse(backup.at);
+    const at = Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
+    if (best === undefined || at > best.at || (at === best.at && dir > best.dir)) {
+      best = { dir, at };
+    }
+  }
+  return best?.dir;
 }
 
 /** Entries directly under `plugin/` or `backups/` that the record does not name. */
@@ -574,7 +623,14 @@ function pruneActions(plan: Omit<PrunePlan, "actions" | "summary">): FileAction[
         action("delete", backup.dir, backup.reason, "already gone from disk; only the install.json entry is removed");
         break;
       case "keep":
-        action("keep", backup.dir, backup.reason, origin);
+        action(
+          "keep",
+          backup.dir,
+          backup.reason,
+          backup.reason === "latest-config-backup"
+            ? `${origin}; the newest copy of the Paseo config, kept so uninstall --restore-backups can still restore it`
+            : origin,
+        );
         break;
     }
     for (const entry of backup.kept) {

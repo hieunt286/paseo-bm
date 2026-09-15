@@ -428,10 +428,10 @@ export function nearestExistingAncestor(target: string, probe: FsProbe = realFsP
  * Can the install home be written? Answered without writing: find the nearest
  * existing ancestor and ask the OS about its permissions.
  *
- * Note the code used here. The registry has no "target is not writable" entry
- * (Technical Design §4.4), so this reports the closest registered meaning,
- * `E_CONFLICT`: something not owned by paseo-bm is in the way and a human has
- * to decide. The exit code is still 3 — nothing was written.
+ * A permission problem is `E_TARGET_NOT_WRITABLE` (Design §4.4 errata
+ * 2026-09-15); something that is in the way — no usable ancestor, or a file
+ * where a directory should be — is `E_CONFLICT`. Either way the exit code is
+ * 3: nothing was written.
  */
 export function checkInstallHomeWritable(target: string, probe: FsProbe = realFsProbe): PreflightFinding {
   const absolute = resolve(target);
@@ -445,10 +445,10 @@ export function checkInstallHomeWritable(target: string, probe: FsProbe = realFs
   }
   if (!probe.isWritableDirectory(ancestor)) {
     return ancestor === absolute
-      ? fail("install-home", "E_CONFLICT", `The install home \`${absolute}\` is not writable.`)
+      ? fail("install-home", "E_TARGET_NOT_WRITABLE", `The install home \`${absolute}\` is not writable.`)
       : fail(
           "install-home",
-          "E_CONFLICT",
+          "E_TARGET_NOT_WRITABLE",
           `The install home \`${absolute}\` cannot be created because \`${ancestor}\` is not writable.`,
         );
   }

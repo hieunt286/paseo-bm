@@ -3,8 +3,8 @@ import { isAbsolute, parse, relative, resolve, sep } from "node:path";
 
 /**
  * Why a path was refused. These are guard-level reasons, not user-facing error
- * codes: the error-code registry in Design §4.4 has no entry for path guards,
- * so callers map these onto whatever code fits their command.
+ * codes; {@link pathGuardErrorCode} maps each one onto the registry code a
+ * command reports it with (Design §4.4 errata 2026-09-15).
  */
 export type PathGuardReason =
   | "empty-path"
@@ -159,4 +159,23 @@ export function assertSafeWritePath(root: string, candidate: string): string {
   const resolvedRoot = resolve(root);
   const resolvedCandidate = assertWithinRoot(resolvedRoot, candidate);
   return assertNoSymlinkInPath(resolvedCandidate, { root: resolvedRoot });
+}
+
+/**
+ * The registry code a refused path is reported with. An empty path can only
+ * come from an empty install home setting, so it is reported as an unusable
+ * install home rather than as an escape.
+ */
+export function pathGuardErrorCode(
+  reason: PathGuardReason,
+): "E_UNSAFE_INSTALL_HOME" | "E_PATH_ESCAPE" | "E_SYMLINK_IN_PATH" {
+  switch (reason) {
+    case "empty-path":
+    case "unsafe-install-home":
+      return "E_UNSAFE_INSTALL_HOME";
+    case "outside-root":
+      return "E_PATH_ESCAPE";
+    case "symlink-in-path":
+      return "E_SYMLINK_IN_PATH";
+  }
 }

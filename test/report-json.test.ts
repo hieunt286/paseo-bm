@@ -289,3 +289,27 @@ describe("renderJsonReport — uninstall", () => {
     expect(document.actions.map((action) => action.kind)).toEqual(["delete", "keep", "config"]);
   });
 });
+
+describe("result.error (Design §4.4 errata 2026-09-15)", () => {
+  it("carries the registry code and message on a failed run", () => {
+    const failed = {
+      ...installReport(),
+      result: {
+        exitCode: EXIT_CODES.preflight,
+        pluginState: null,
+        error: { code: "E_TARGET_NOT_WRITABLE" as const, message: "The install home is not writable." },
+      },
+    };
+    const document = JSON.parse(renderJsonReport(failed)) as { result: Record<string, unknown> };
+    expect(document.result).toEqual({
+      exitCode: EXIT_CODES.preflight,
+      pluginState: null,
+      error: { code: "E_TARGET_NOT_WRITABLE", message: "The install home is not writable." },
+    });
+  });
+
+  it("omits the key entirely on success", () => {
+    const document = JSON.parse(renderJsonReport(installReport())) as { result: Record<string, unknown> };
+    expect(Object.keys(document.result)).toEqual(["exitCode", "pluginState"]);
+  });
+});
