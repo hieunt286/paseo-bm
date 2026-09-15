@@ -445,7 +445,7 @@ describe("with --prune, the newest Paseo config backup", () => {
     ]);
     const keptAction = plan.actions.find((a) => a.target === `installHome/backups/${NEW_CONFIG}`);
     expect(keptAction).toMatchObject({ kind: "keep", reason: "latest-config-backup" });
-    expect(keptAction?.detail).toContain("--restore-backups");
+    expect(keptAction?.detail).toContain("last known-good copy for manual recovery");
     expect(plan.actions.some((a) => a.kind === "delete" && a.target.startsWith(`installHome/backups/${NEW_CONFIG}`))).toBe(false);
 
     expect(existsSync(join(installHome, `backups/${OLD_PAYLOAD}`))).toBe(false);
