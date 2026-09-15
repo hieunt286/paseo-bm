@@ -1,0 +1,25 @@
+#!/usr/bin/env node
+/*
+ * Stand-in for a provider tool's login command, used by test/provider-login.test.ts.
+ * It never touches a real credential. It writes nothing to stdout, because the
+ * login runner inherits stdio and the test output should stay clean.
+ *
+ *   BM_FAKE_LOGIN_ARGV_LOG  append one JSON line per invocation
+ *   BM_FAKE_LOGIN_EXIT      exit code (default 0)
+ *   BM_FAKE_LOGIN_MODE      ok | hang                      (default ok)
+ *   BM_FAKE_LOGIN_TOUCH     file created on start (proves the fake ran)
+ */
+const fs = require("node:fs");
+
+const argv = process.argv.slice(2);
+if (process.env.BM_FAKE_LOGIN_ARGV_LOG) {
+  fs.appendFileSync(process.env.BM_FAKE_LOGIN_ARGV_LOG, JSON.stringify({ argv, argc: argv.length }) + "\n");
+}
+if (process.env.BM_FAKE_LOGIN_TOUCH) {
+  fs.writeFileSync(process.env.BM_FAKE_LOGIN_TOUCH, "the fake login ran\n");
+}
+if (process.env.BM_FAKE_LOGIN_MODE === "hang") {
+  setInterval(() => {}, 1000);
+  return;
+}
+process.exit(Number(process.env.BM_FAKE_LOGIN_EXIT || "0"));
