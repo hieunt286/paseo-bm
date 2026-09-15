@@ -560,13 +560,25 @@ export async function runInstall(options: InstallOptions): Promise<InstallOutcom
       const active = record.versions.some((entry) => entry.version === plan1.version && entry.active);
       if ((daemonAction !== undefined && isWritingAction(daemonAction)) || record.paseo.pluginId === null || !active) {
         try {
-          const registered = await registerPlugin({ adapter, fsops, record, version: plan1.version, now: clock() });
+          // bm-vey: Paseo 0.8 refuses an id that is already configured, so the
+          // step needs what `plugin ls` reported (to replace a registration from
+          // another directory) and the version recorded before the applier ran
+          // (to put it back when the new one does not get registered).
+          const registered = await registerPlugin({
+            adapter,
+            fsops,
+            record,
+            version: plan1.version,
+            current: listed,
+            previousVersion: record1?.version,
+            now: clock(),
+          });
           record = registered.record;
           plugin = registered.plugin;
           pluginState = registered.plugin.status;
         } catch (error) {
           if (isPluginRegistrationError(error) && error.code !== undefined) {
-            pluginState = error.status ?? null;
+            pluginState = error.pluginState;
             throw stop(EXIT_CODES.pluginLoadFailed, error.code, error.message);
           }
           if (isPaseoCliError(error)) {

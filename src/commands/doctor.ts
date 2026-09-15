@@ -35,7 +35,8 @@
  * plugin is live, so every decision below goes through `isPluginRunning()`.
  */
 
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
+import { resolve } from "node:path";
 
 import type { Check, DoctorReport, PaseoFacts, ReportWarning, RoleReport, SkillsReport } from "../action.js";
 import { hasCheckErrors } from "../action.js";
@@ -102,6 +103,7 @@ export const DOCTOR_CHECK_IDS = [
   "files-modified",
   "plugin-registered",
   "plugin-status",
+  "plugin-path",
   "plugins-enabled",
   "agent-tools",
   "role-bm-manager",
@@ -417,6 +419,9 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorOutcome> 
     if (plugins !== null) {
       const found = pluginChecks(record, plugins, checks);
       pluginState = found?.status ?? null;
+      if (found !== undefined) {
+        checks.push(await pluginPathCheck(record, found, installHome));
+      }
     }
 
     checks.push(...switchChecks(config));
@@ -494,8 +499,34 @@ async function loadRecord(file: string): Promise<InstallRecord | undefined> {
   return parseRecord(text, { path: file });
 }
 
-/** Is the installed payload the one this package would install today? */
+/**
+ * Is the installed payload the one this package would install today?
+ *
+ * First the record has to agree with itself: `version` names the payload
+ * install last *meant* to put in place, `versions[].active` the one that is
+ * actually in place. They drift apart when an update copies the new payload
+ * and records its version but fails before the switch-over (bm-p48); comparing
+ * only `version` with the running package would then report a healthy install
+ * while the old payload is still the live one.
+ */
 function versionCheck(record: InstallRecord, version: string): Check {
+  const active = record.versions.find((entry) => entry.active);
+  if (active === undefined) {
+    return check(
+      "install-version",
+      "error",
+      `The install record says version ${record.version}, but marks no payload version active.`,
+      "Run `npx paseo-bm install --apply` to put the current payload in place and register it. Nothing is changed by `doctor`.",
+    );
+  }
+  if (active.version !== record.version) {
+    return check(
+      "install-version",
+      "error",
+      `The install record says version ${record.version}, but the active payload is version ${active.version}: an update did not finish.`,
+      "Run `npx paseo-bm install --apply` to finish the update. Earlier versions are kept; only `--prune` removes them.",
+    );
+  }
   if (record.version === version) {
     return check("install-version", "ok", `The installed payload is version ${record.version}, the version running now.`);
   }
@@ -603,6 +634,79 @@ function pluginChecks(
         ),
   );
   return found;
+}
+
+/**
+ * Is Paseo loading the plugin from the payload version the record calls active?
+ *
+ * Only asked once the plugin is known to be registered. The expected directory
+ * is the active `versions[].dir` under the install home doctor inspected,
+ * spelled with `path.resolve` — the spelling install hands to
+ * `paseo plugin install` and the planner compares against. When the two
+ * spellings differ, both sides are canonicalised with `realpath` (a read) so a
+ * symlinked home such as macOS's `/var` → `/private/var` is not reported as
+ * drift; a side that cannot be resolved keeps its `path.resolve` spelling.
+ *
+ * Older or future Paseo builds may not report `path`. That is not evidence of
+ * drift either way, so it is a warning (exit code unchanged), never an `ok`.
+ */
+async function pluginPathCheck(record: InstallRecord, found: PluginSummary, installHome: string): Promise<Check> {
+  const pluginId = found.id;
+  const active = record.versions.find((entry) => entry.active);
+  if (active === undefined) {
+    return check(
+      "plugin-path",
+      "error",
+      `Paseo loads the plugin \`${pluginId}\`, but the install record marks no payload version active to compare it with.`,
+      RUN_INSTALL,
+    );
+  }
+
+  let expected: string;
+  try {
+    expected = resolveRecordedPath(installHome, active.dir);
+  } catch (error) {
+    return check(
+      "plugin-path",
+      "error",
+      `The active payload directory \`${active.dir}\` in the install record is not inside ${installHome}: ${error instanceof Error ? error.message : String(error)}`,
+      BROKEN_RECORD,
+    );
+  }
+
+  if (found.path === undefined) {
+    return check(
+      "plugin-path",
+      "warn",
+      `Paseo did not report which directory the plugin \`${pluginId}\` is loaded from, so it could not be compared with the active payload ${expected}.`,
+      "Nothing to do unless the plugin misbehaves; `npx paseo-bm install --apply` registers the active payload again.",
+    );
+  }
+
+  const actual = resolve(found.path);
+  if (actual === expected || (await canonical(actual)) === (await canonical(expected))) {
+    return check(
+      "plugin-path",
+      "ok",
+      `Paseo loads the plugin \`${pluginId}\` from the active payload (version ${active.version}).`,
+    );
+  }
+
+  return check(
+    "plugin-path",
+    "error",
+    `Paseo loads the plugin \`${pluginId}\` from ${actual}, but the active payload (version ${active.version}) is ${expected}.`,
+    "Run `npx paseo-bm install --apply` to register the active payload with Paseo. Nothing is changed by `doctor`.",
+  );
+}
+
+/** `realpath`, or the input unchanged when it cannot be resolved. Read-only. */
+async function canonical(path: string): Promise<string> {
+  try {
+    return await realpath(path);
+  } catch {
+    return path;
+  }
 }
 
 /** The two switches of one trust boundary, Design §3.4 and REQ-006 / REQ-031c. */

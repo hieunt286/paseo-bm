@@ -223,6 +223,17 @@ function installOnDisk(world: World, record: InstallRecord, files = payload(reco
 interface AdapterScript {
   readonly daemon?: DaemonStatus | Error;
   readonly plugins?: readonly PluginSummary[] | Error;
+  /**
+   * When `plugins` is not scripted, the default `paseo-bm` entry reports this
+   * world's active payload directory as its `path` — what a healthy install
+   * looks like to `paseo plugin ls`.
+   */
+  readonly world?: World;
+}
+
+/** The directory install hands to `paseo plugin install` for `version`. */
+function activePluginDir(world: World, version: string = PACKAGE_VERSION): string {
+  return join(world.layout.installHome.path, "plugin", version);
 }
 
 interface RecordingAdapter {
@@ -277,7 +288,8 @@ function recordingAdapter(script: AdapterScript = {}): RecordingAdapter {
     },
     async pluginList() {
       note(["plugin", "ls", "--json"]);
-      const answer = script.plugins ?? [plugin()];
+      const answer =
+        script.plugins ?? [plugin(script.world === undefined ? {} : { path: activePluginDir(script.world) })];
       if (answer instanceof Error) throw answer;
       return answer;
     },
@@ -337,7 +349,7 @@ async function healthyWorld(): Promise<World> {
 describe("runDoctor — a healthy install", () => {
   it("reports every check as ok and exits 0", async () => {
     const world = await healthyWorld();
-    const { adapter } = recordingAdapter();
+    const { adapter } = recordingAdapter({ world });
 
     const outcome = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
 
@@ -349,7 +361,7 @@ describe("runDoctor — a healthy install", () => {
 
   it("covers every item the bead lists", async () => {
     const world = await healthyWorld();
-    const { adapter } = recordingAdapter();
+    const { adapter } = recordingAdapter({ world });
     const { checks } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
 
     const ids = checks.map((entry) => entry.id);
@@ -362,6 +374,7 @@ describe("runDoctor — a healthy install", () => {
       "files-modified",
       "plugin-registered",
       "plugin-status",
+      "plugin-path",
       "plugins-enabled",
       "agent-tools",
       "role-bm-manager",
@@ -390,7 +403,7 @@ describe("runDoctor — a healthy install", () => {
       backups: [{ at: INSTALLED_AT, dir: "backups/20260915T101500Z", reason: "config" }],
     });
 
-    const { adapter } = recordingAdapter();
+    const { adapter } = recordingAdapter({ world });
     const { checks, exitCode } = await runDoctor({
       adapter,
       layout: world.layout,
@@ -407,7 +420,7 @@ describe("runDoctor — a healthy install", () => {
 
   it("renders the JSON document of Design §4.4", async () => {
     const world = await healthyWorld();
-    const { adapter } = recordingAdapter();
+    const { adapter } = recordingAdapter({ world });
     const { report } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
 
     expect(stable(renderJsonReport(report, { redact: (text) => text }), world)).toMatchSnapshot();
@@ -439,7 +452,7 @@ function worldWithPaseoTools(tools: { manager?: unknown; worker?: unknown; revie
 describe("runDoctor — reads paseoTools in the shape Paseo stores it (bm-ym3)", () => {
   it("treats `{ enabled: true }` as on: Manager and Worker roles are ok", async () => {
     const world = worldWithPaseoTools({ manager: { enabled: true }, worker: { enabled: true } });
-    const { adapter } = recordingAdapter();
+    const { adapter } = recordingAdapter({ world });
     const { checks, exitCode, report } = await runDoctor({
       adapter,
       layout: world.layout,
@@ -456,7 +469,7 @@ describe("runDoctor — reads paseoTools in the shape Paseo stores it (bm-ym3)",
 
   it("still accepts a bare `true` for compatibility", async () => {
     const world = worldWithPaseoTools({ manager: true, worker: true });
-    const { adapter } = recordingAdapter();
+    const { adapter } = recordingAdapter({ world });
     const { checks } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
 
     expect(severityOf(checks, "role-bm-manager")).toBe("ok");
@@ -465,7 +478,7 @@ describe("runDoctor — reads paseoTools in the shape Paseo stores it (bm-ym3)",
 
   it("treats `{ enabled: false }` as off: an error where the record says true, ok for the Reviewer", async () => {
     const world = worldWithPaseoTools({ manager: { enabled: false }, worker: { enabled: false }, reviewer: { enabled: false } });
-    const { adapter } = recordingAdapter();
+    const { adapter } = recordingAdapter({ world });
     const { checks, exitCode } = await runDoctor({
       adapter,
       layout: world.layout,
@@ -484,7 +497,7 @@ describe("runDoctor — reads paseoTools in the shape Paseo stores it (bm-ym3)",
 
   it("treats an absent key as off: an error where the record says true, ok for the Reviewer", async () => {
     const world = worldWithPaseoTools({});
-    const { adapter } = recordingAdapter();
+    const { adapter } = recordingAdapter({ world });
     const { checks } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
 
     expect(severityOf(checks, "role-bm-manager")).toBe("error");
@@ -494,7 +507,7 @@ describe("runDoctor — reads paseoTools in the shape Paseo stores it (bm-ym3)",
 
   it("flags a Reviewer whose provider has `{ enabled: true }` against a record of false", async () => {
     const world = worldWithPaseoTools({ manager: { enabled: true }, worker: { enabled: true }, reviewer: { enabled: true } });
-    const { adapter } = recordingAdapter();
+    const { adapter } = recordingAdapter({ world });
     const { checks } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
 
     expect(severityOf(checks, "role-bm-reviewer")).toBe("error");
@@ -622,7 +635,7 @@ describe("runDoctor — an install that has drifted", () => {
     mkdirSync(world.layout.installHome.path, { recursive: true });
     writeFileSync(join(world.layout.installHome.path, "install.json"), "{ not json\n");
 
-    const { adapter } = recordingAdapter();
+    const { adapter } = recordingAdapter({ world });
     const { checks, exitCode, installed } = await runDoctor({
       adapter,
       layout: world.layout,
@@ -638,10 +651,186 @@ describe("runDoctor — an install that has drifted", () => {
 
   it("renders the JSON document of Design §4.4", async () => {
     const world = await driftWorld();
-    const { adapter } = recordingAdapter({ plugins: [plugin({ enabled: true, status: "disabled" })] });
+    const { adapter } = recordingAdapter({
+      plugins: [plugin({ enabled: true, status: "disabled", path: activePluginDir(world, "0.0.9") })],
+    });
     const { report } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
 
     expect(stable(renderJsonReport(report, { redact: (text) => text }), world)).toMatchSnapshot();
+  });
+});
+
+/* ------------------------------- the payload Paseo loads vs. the active one */
+
+/**
+ * bm-p48. Acceptance run 5 (doctor-2.json): an update to 0.1.0-alpha.1 copied
+ * and recorded the new payload but failed to register it, so `version` said
+ * alpha.1, `versions[].active` still said alpha.0, and Paseo kept loading
+ * `plugin/0.1.0-alpha.0`. Doctor reported all of that as healthy.
+ */
+describe("runDoctor — the plugin Paseo loads is the active payload (bm-p48)", () => {
+  const OLD = "0.1.0-alpha.0";
+  const NEW = "0.1.0-alpha.1";
+
+  /** The state the failed update left behind: both payloads on disk, the old one active. */
+  function failedUpdateWorld(): World {
+    const world = makeWorld();
+    installSkills(world);
+    writePaseoConfig(world, healthyConfig());
+    const base = makeRecord(world, { version: NEW });
+    const record: InstallRecord = {
+      ...base,
+      paseo: { ...base.paseo, pluginDir: activePluginDir(world, OLD) },
+      files: [...payload(OLD), ...payload(NEW)].map((file) => ({
+        path: file.path,
+        sha256: hash(file.content),
+        mode: 0o600,
+      })),
+      versions: [
+        { version: OLD, dir: `plugin/${OLD}`, installedAt: INSTALLED_AT, active: true },
+        { version: NEW, dir: `plugin/${NEW}`, installedAt: INSTALLED_AT, active: false },
+      ],
+    };
+    installOnDisk(world, record, [...payload(OLD), ...payload(NEW)]);
+    return world;
+  }
+
+  it("is ok when Paseo loads the active payload directory", async () => {
+    const world = await healthyWorld();
+    const { adapter } = recordingAdapter({ world });
+    const { checks, exitCode } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
+
+    expect(find(checks, "plugin-path")).toEqual({
+      id: "plugin-path",
+      severity: "ok",
+      message: "Paseo loads the plugin `paseo-bm` from the active payload (version 0.1.0).",
+      remediation: "",
+    });
+    expect(exitCode).toBe(EXIT_CODES.ok);
+  });
+
+  it("is ok when Paseo spells the same directory differently", async () => {
+    const world = await healthyWorld();
+    const spelled = `${world.layout.installHome.path}/plugin/./x/../${PACKAGE_VERSION}/`;
+    const { adapter } = recordingAdapter({ plugins: [plugin({ path: spelled })] });
+    const { checks } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
+
+    expect(severityOf(checks, "plugin-path")).toBe("ok");
+  });
+
+  it("is an error when Paseo loads another directory than the active payload", async () => {
+    const world = makeWorld();
+    installSkills(world);
+    writePaseoConfig(world, healthyConfig());
+    installOnDisk(world, makeRecord(world));
+    const { adapter } = recordingAdapter({ plugins: [plugin({ path: activePluginDir(world, "0.0.9") })] });
+
+    const { checks, exitCode } = await runDoctor({
+      adapter,
+      layout: world.layout,
+      version: PACKAGE_VERSION,
+      env: world.env,
+    });
+
+    const finding = find(checks, "plugin-path");
+    expect(finding.severity).toBe("error");
+    expect(stable(finding.message, world)).toBe(
+      "Paseo loads the plugin `paseo-bm` from <HOME>/.paseo-bm/plugin/0.0.9, but the active payload (version 0.1.0) is <HOME>/.paseo-bm/plugin/0.1.0.",
+    );
+    expect(finding.remediation).toContain("npx paseo-bm install --apply");
+    // Registration and liveness are still reported as they are.
+    expect(severityOf(checks, "plugin-registered")).toBe("ok");
+    expect(severityOf(checks, "plugin-status")).toBe("ok");
+    expect(exitCode).toBe(EXIT_CODES.doctorDrift);
+  });
+
+  it("is an error when the record's version is not the active payload", async () => {
+    const world = failedUpdateWorld();
+    // Paseo is consistent with `active` here, so only the record disagrees with itself.
+    const { adapter } = recordingAdapter({ plugins: [plugin({ path: activePluginDir(world, OLD) })] });
+
+    const { checks, exitCode } = await runDoctor({ adapter, layout: world.layout, version: NEW, env: world.env });
+
+    const finding = find(checks, "install-version");
+    expect(finding.severity).toBe("error");
+    expect(finding.message).toBe(
+      "The install record says version 0.1.0-alpha.1, but the active payload is version 0.1.0-alpha.0: an update did not finish.",
+    );
+    expect(finding.remediation).toContain("npx paseo-bm install --apply");
+    expect(severityOf(checks, "plugin-path")).toBe("ok");
+    expect(exitCode).toBe(EXIT_CODES.doctorDrift);
+  });
+
+  it("reproduces doctor-2.json: both deviations are reported, neither as ok", async () => {
+    const world = failedUpdateWorld();
+    // What Paseo actually reported: still loading the old payload, and running.
+    const { adapter } = recordingAdapter({ plugins: [plugin({ path: activePluginDir(world, OLD) })] });
+
+    const { checks, exitCode } = await runDoctor({ adapter, layout: world.layout, version: NEW, env: world.env });
+
+    expect(severityOf(checks, "install-version")).toBe("error");
+    expect(exitCode).toBe(EXIT_CODES.doctorDrift);
+
+    // …and if Paseo had been left on the new directory while the record still
+    // calls the old one active, that is a path deviation.
+    const { adapter: onNew } = recordingAdapter({ plugins: [plugin({ path: activePluginDir(world, NEW) })] });
+    const second = await runDoctor({ adapter: onNew, layout: world.layout, version: NEW, env: world.env });
+    expect(severityOf(second.checks, "plugin-path")).toBe("error");
+    expect(severityOf(second.checks, "install-version")).toBe("error");
+  });
+
+  it("is an error when the record marks no payload version active", async () => {
+    const world = makeWorld();
+    installSkills(world);
+    writePaseoConfig(world, healthyConfig());
+    const base = makeRecord(world);
+    installOnDisk(world, { ...base, versions: base.versions.map((entry) => ({ ...entry, active: false })) });
+    const { adapter } = recordingAdapter({ world });
+
+    const { checks, exitCode } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
+
+    expect(severityOf(checks, "install-version")).toBe("error");
+    expect(severityOf(checks, "plugin-path")).toBe("error");
+    expect(exitCode).toBe(EXIT_CODES.doctorDrift);
+  });
+
+  it("warns, without concluding either way, when Paseo does not report a path", async () => {
+    const world = await healthyWorld();
+    const { adapter } = recordingAdapter({ plugins: [plugin({ path: undefined })] });
+
+    const { checks, exitCode } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
+
+    const finding = find(checks, "plugin-path");
+    expect(finding.severity).toBe("warn");
+    expect(finding.remediation).not.toBe("");
+    expect(exitCode).toBe(EXIT_CODES.ok);
+  });
+
+  it("does not compare paths for a plugin that is not registered", async () => {
+    const world = await healthyWorld();
+    const { adapter } = recordingAdapter({ plugins: [plugin({ id: "someone-elses", path: "/elsewhere" })] });
+
+    const { checks } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
+
+    expect(severityOf(checks, "plugin-registered")).toBe("error");
+    expect(checks.some((entry) => entry.id === "plugin-path")).toBe(false);
+  });
+
+  it("stays read-only and within the two allow-listed calls while finding the deviation", async () => {
+    const world = failedUpdateWorld();
+    const { adapter, calls } = recordingAdapter({ plugins: [plugin({ path: activePluginDir(world, NEW) })] });
+    const scope = startWriteScope({
+      installHome: world.layout.installHome.path,
+      paseoHome: world.layout.paseoHome.path,
+      watch: [world.home],
+    });
+    try {
+      await runDoctor({ adapter, layout: world.layout, version: NEW, env: world.env });
+      expect(scope.writes).toEqual([]);
+    } finally {
+      scope.restore();
+    }
+    expect(calls.map((argv) => argv.join(" "))).toEqual(["daemon status --json", "plugin ls --json"]);
   });
 });
 
@@ -650,7 +839,7 @@ describe("runDoctor — an install that has drifted", () => {
 describe("runDoctor — nothing installed yet", () => {
   it("says so without calling it drift", async () => {
     const world = makeWorld();
-    const { adapter } = recordingAdapter();
+    const { adapter } = recordingAdapter({ world });
 
     const { checks, exitCode, installed, report } = await runDoctor({
       adapter,
@@ -669,7 +858,7 @@ describe("runDoctor — nothing installed yet", () => {
 
   it("does not report ownership checks for a scope that does not exist", async () => {
     const world = makeWorld();
-    const { adapter } = recordingAdapter();
+    const { adapter } = recordingAdapter({ world });
     const { checks } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
 
     const ids = checks.map((entry) => entry.id);
@@ -680,7 +869,7 @@ describe("runDoctor — nothing installed yet", () => {
 
   it("renders the JSON document of Design §4.4", async () => {
     const world = makeWorld();
-    const { adapter } = recordingAdapter();
+    const { adapter } = recordingAdapter({ world });
     const { report } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
 
     expect(stable(renderJsonReport(report, { redact: (text) => text }), world)).toMatchSnapshot();
@@ -696,7 +885,7 @@ describe("runDoctor — warnings are not drift (Design §4.3)", () => {
     writePaseoConfig(world, healthyConfig());
     installOnDisk(world, makeRecord(world));
 
-    const { adapter } = recordingAdapter();
+    const { adapter } = recordingAdapter({ world });
     const { checks, exitCode, report } = await runDoctor({
       adapter,
       layout: world.layout,
@@ -716,7 +905,7 @@ describe("runDoctor — warnings are not drift (Design §4.3)", () => {
     writePaseoConfig(world, healthyConfig());
     installOnDisk(world, makeRecord(world));
 
-    const { adapter } = recordingAdapter();
+    const { adapter } = recordingAdapter({ world });
     const { checks, exitCode, report } = await runDoctor({
       adapter,
       layout: world.layout,
@@ -732,7 +921,7 @@ describe("runDoctor — warnings are not drift (Design §4.3)", () => {
 
   it("drops the skills section entirely under --skip-skills-check", async () => {
     const world = await healthyWorld();
-    const { adapter } = recordingAdapter();
+    const { adapter } = recordingAdapter({ world });
     const { checks, report } = await runDoctor({
       adapter,
       layout: world.layout,
@@ -751,7 +940,7 @@ describe("runDoctor — warnings are not drift (Design §4.3)", () => {
 describe("doctor is read-only", () => {
   it("performs zero writes", async () => {
     const world = await healthyWorld();
-    const { adapter } = recordingAdapter();
+    const { adapter } = recordingAdapter({ world });
 
     // Started only after the fixture is on disk, so the fixture's own writes
     // are never mistaken for doctor's.
@@ -804,7 +993,7 @@ describe("doctor is read-only", () => {
 
   it("never takes the process lock", async () => {
     const world = await healthyWorld();
-    const { adapter } = recordingAdapter();
+    const { adapter } = recordingAdapter({ world });
     const scope = startWriteScope({
       installHome: world.layout.installHome.path,
       paseoHome: world.layout.paseoHome.path,
@@ -829,7 +1018,7 @@ describe("doctor's external-command allow-list", () => {
 
   it("makes exactly those two calls and no other, in a healthy run", async () => {
     const world = await healthyWorld();
-    const { adapter, calls } = recordingAdapter();
+    const { adapter, calls } = recordingAdapter({ world });
 
     await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
 
@@ -856,7 +1045,7 @@ describe("doctor's external-command allow-list", () => {
 
   it("spawns nothing at all when the adapter is in-memory — so no `skills` CLI", async () => {
     const world = await healthyWorld();
-    const { adapter } = recordingAdapter();
+    const { adapter } = recordingAdapter({ world });
 
     await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
 
@@ -917,7 +1106,9 @@ describe("runDoctor — against a simulated daemon", () => {
         cliVersion: "0.8.0",
         daemonVersion: "0.8.0",
       }),
-      BM_DOCTOR_PLUGINS: JSON.stringify([{ id: PLUGIN_ID, status: "running", enabled: true }]),
+      BM_DOCTOR_PLUGINS: JSON.stringify([
+        { id: PLUGIN_ID, path: activePluginDir(world), status: "running", enabled: true },
+      ]),
     };
 
     const adapter = createPaseoAdapter({ executable: fakeCli, env: childEnv, timeoutMs: 5_000 });
@@ -953,7 +1144,7 @@ describe("runDoctor — against a simulated daemon", () => {
 describe("the doctor report", () => {
   it("is always a preview and always carries checks instead of actions", async () => {
     const world = await healthyWorld();
-    const { adapter } = recordingAdapter();
+    const { adapter } = recordingAdapter({ world });
     const { report } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
 
     const doctor: DoctorReport = report;
@@ -977,7 +1168,7 @@ describe("the doctor report", () => {
 
   it("leaves `loggedIn` null: asking would be a third command", async () => {
     const world = await healthyWorld();
-    const { adapter } = recordingAdapter();
+    const { adapter } = recordingAdapter({ world });
     const { report } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
 
     expect(report.roles).toHaveLength(3);

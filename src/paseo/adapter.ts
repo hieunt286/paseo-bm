@@ -468,6 +468,51 @@ export function parseJsonOutput(invocation: PaseoInvocation): unknown {
   });
 }
 
+/** Most characters of Paseo's own failure text carried into a paseo-bm message. */
+const MAX_REASON_CHARS = 2_000;
+
+/**
+ * Paseo's own words for a failed call, verbatim, or `undefined` when it gave
+ * none. A failing `paseo … --json` prints `{"error": {"message": "…"}}`
+ * (seen on Paseo 0.8.0: `{"error": {"name": "DaemonRpcError", "code":
+ * "handler_error", "message": "Request failed: …"}}`), so stdout and then
+ * stderr are searched for that document; otherwise stderr's text is used.
+ * Only `message` is taken from the JSON — nothing else Paseo printed is copied.
+ * The text still passes through the report's redactor on the way out.
+ */
+export function paseoFailureDetail(error: PaseoCliError): string | undefined {
+  for (const stream of [error.stdout, error.stderr]) {
+    const message = errorMessageIn(stream);
+    if (message !== undefined) return clip(message);
+  }
+  const stderr = error.stderr.trim();
+  return stderr.length > 0 ? clip(stderr) : undefined;
+}
+
+function errorMessageIn(text: string): string | undefined {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return undefined;
+  const lines = trimmed.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const candidate = lines.slice(index).join("\n").trim();
+    if (!candidate.startsWith("{")) continue;
+    const parsed = tryParse(candidate);
+    if (!parsed.ok) continue;
+    const record = asRecord(parsed.value);
+    const inner = record?.["error"];
+    if (typeof inner === "string" && inner.trim().length > 0) return inner.trim();
+    const innerMessage = asNonEmptyString(asRecord(inner)?.["message"]);
+    if (innerMessage !== undefined) return innerMessage.trim();
+    const message = asNonEmptyString(record?.["message"]);
+    if (message !== undefined) return message.trim();
+  }
+  return undefined;
+}
+
+function clip(text: string): string {
+  return text.length > MAX_REASON_CHARS ? `${text.slice(0, MAX_REASON_CHARS)}…` : text;
+}
+
 function tryParse(text: string): { ok: true; value: unknown } | { ok: false } {
   try {
     return { ok: true, value: JSON.parse(text) as unknown };
