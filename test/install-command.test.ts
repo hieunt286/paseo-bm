@@ -384,6 +384,46 @@ describe("install — situations that need an explicit answer", () => {
     expect(scope?.writes).toEqual([]);
   });
 
+  it("an update between two prereleases without a terminal is an upgrade: exit 0, side by side (bm-d3q)", async () => {
+    const previous = "0.1.0-alpha.0";
+    const next = "0.1.0-alpha.1";
+    writePayload(previous);
+    script({
+      "plugin install": {
+        stdout: JSON.stringify({ id: "paseo-bm", path: join(installHome, "plugin", previous), enabled: true, status: "running" }),
+      },
+    });
+    const first = await install(["install", "--apply", "--yes", "--skip-skills-check", "--json"], { version: previous, guard: false });
+    expect(first.code).toBe(EXIT_CODES.ok);
+
+    writePayload(next);
+    script({
+      "plugin ls": {
+        stdout: JSON.stringify([{ id: "paseo-bm", path: join(installHome, "plugin", previous), enabled: true, status: "running" }]),
+      },
+      "plugin install": {
+        stdout: JSON.stringify({ id: "paseo-bm", path: join(installHome, "plugin", next), enabled: true, status: "running" }),
+      },
+    });
+    const run = await install(["install", "--apply", "--yes", "--skip-skills-check", "--json"], { version: next });
+    const report = json(run.out);
+    expect(run.code).toBe(EXIT_CODES.ok);
+    expect(report.mode).toBe("applied");
+    expect("error" in report.result).toBe(false);
+    expect(run.prompter.counts.total).toBe(0);
+    expect(existsSync(join(installHome, "plugin", previous, "index.server.ts"))).toBe(true);
+    expect(existsSync(join(installHome, "plugin", next, "index.server.ts"))).toBe(true);
+    const record = installedRecord() as { version: string; versions: { version: string; active: boolean }[] };
+    expect(record.version).toBe(next);
+    expect(record.versions).toHaveLength(2);
+    expect(record.versions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ version: previous, active: false }),
+        expect.objectContaining({ version: next, active: true }),
+      ]),
+    );
+  });
+
   it("--apply removes a partial payload of the same version before planning", async () => {
     seedInstalled("0.1.0");
     mkdirSync(join(installHome, "plugin", VERSION), { recursive: true });

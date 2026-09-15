@@ -258,11 +258,51 @@ export function parseVersion(text: string): ParsedVersion | null {
   };
 }
 
+const NUMERIC_IDENTIFIER = /^\d+$/;
+
+/** Orders two digit-only strings by value, without the precision limit of `Number`. */
+function compareNumericIdentifiers(left: string, right: string): number {
+  const a = left.replace(/^0+(?=\d)/, "");
+  const b = right.replace(/^0+(?=\d)/, "");
+  if (a.length !== b.length) return a.length < b.length ? -1 : 1;
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
+}
+
 /**
- * Semver precedence, far enough for one comparison against a fixed floor:
- * numbers first, then "a prerelease is below the release it leads to". The
- * identifiers inside a prerelease are never compared, because the only
- * question asked here is "is this at least 0.8.0?".
+ * SemVer 2.0.0 §11 precedence for two prerelease strings: dot-separated
+ * identifiers compared left to right; digit-only identifiers by numeric value,
+ * the rest by ASCII; a numeric identifier is below an alphanumeric one; when
+ * every shared identifier is equal, the shorter list is lower.
+ */
+function comparePrereleases(left: string, right: string): number {
+  const a = left.split(".");
+  const b = right.split(".");
+  const shared = Math.min(a.length, b.length);
+  for (let index = 0; index < shared; index += 1) {
+    const x = a[index] ?? "";
+    const y = b[index] ?? "";
+    if (x === y) continue;
+    const xNumeric = NUMERIC_IDENTIFIER.test(x);
+    const yNumeric = NUMERIC_IDENTIFIER.test(y);
+    if (xNumeric && yNumeric) {
+      const order = compareNumericIdentifiers(x, y);
+      if (order !== 0) return order;
+      continue;
+    }
+    if (xNumeric) return -1;
+    if (yNumeric) return 1;
+    return x < y ? -1 : 1;
+  }
+  if (a.length === b.length) return 0;
+  return a.length < b.length ? -1 : 1;
+}
+
+/**
+ * SemVer 2.0.0 §11 precedence: major, minor, patch by value; a prerelease is
+ * below the release it leads to; two prereleases compare identifier by
+ * identifier. Build metadata is not part of {@link ParsedVersion}, so it never
+ * affects the order. Returns -1, 0 or 1.
  */
 export function compareVersions(left: ParsedVersion, right: ParsedVersion): number {
   if (left.major !== right.major) return left.major < right.major ? -1 : 1;
@@ -271,7 +311,7 @@ export function compareVersions(left: ParsedVersion, right: ParsedVersion): numb
   if (left.prerelease === right.prerelease) return 0;
   if (left.prerelease === null) return 1;
   if (right.prerelease === null) return -1;
-  return 0;
+  return comparePrereleases(left.prerelease, right.prerelease);
 }
 
 /** True when a version string is at least {@link MINIMUM_PASEO_VERSION}. */

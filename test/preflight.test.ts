@@ -656,6 +656,33 @@ describe("version parsing", () => {
     expect(compareVersions(release, release)).toBe(0);
   });
 
+  it("orders prereleases by SemVer 2.0.0 §11 (bm-d3q)", () => {
+    const ordered = [
+      "1.0.0-alpha",
+      "1.0.0-alpha.1",
+      "1.0.0-alpha.beta",
+      "1.0.0-beta",
+      "1.0.0-beta.2",
+      "1.0.0-beta.11",
+      "1.0.0-rc.1",
+      "1.0.0",
+    ];
+    for (let i = 0; i < ordered.length; i += 1) {
+      for (let j = 0; j < ordered.length; j += 1) {
+        const left = parseVersion(ordered[i]!)!;
+        const right = parseVersion(ordered[j]!)!;
+        expect(compareVersions(left, right), `${ordered[i]} vs ${ordered[j]}`).toBe(Math.sign(i - j));
+      }
+    }
+    const alpha0 = parseVersion("0.1.0-alpha.0")!;
+    const alpha1 = parseVersion("0.1.0-alpha.1")!;
+    expect(compareVersions(alpha0, alpha1)).toBe(-1);
+    expect(compareVersions(alpha1, alpha0)).toBe(1);
+    expect(compareVersions(parseVersion("0.1.0-alpha.9")!, parseVersion("0.1.0-alpha.10")!)).toBe(-1);
+    // Build metadata never affects precedence.
+    expect(compareVersions(parseVersion("1.0.0-rc.1+build.1")!, parseVersion("1.0.0-rc.1+build.2")!)).toBe(0);
+  });
+
   it("answers the only question that matters: at least 0.8.0?", () => {
     expect(MINIMUM_PASEO_VERSION).toBe("0.8.0");
     expect(meetsMinimumPaseoVersion("0.8.0")).toBe(true);
