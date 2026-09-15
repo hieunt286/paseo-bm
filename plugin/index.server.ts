@@ -1,6 +1,7 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { MANAGER_INSTRUCTIONS } from "./server/manager-instructions";
 import { ensureManager, listWorkspaceAgents } from "./server/manager";
+import { registerRoleHook } from "./server/role-hook";
 import { describeRoles } from "./server/roles";
 import { agentsListRpc, managerEnsureRpc, rolesDescribeRpc } from "./shared/contracts";
 
@@ -23,6 +24,11 @@ export function readManagerInstructions(): Promise<string> {
  * WP-112 registers `manager.ensure`, `agents.list` and `roles.describe`. All
  * three only read or create; there is deliberately no RPC that deletes or archives agents:
  * their lifecycle belongs to the user (ADR-005).
+ *
+ * It also registers a `before("agent.create")` hook that puts the role
+ * instructions into the system prompt of every `bm-manager`, `bm-worker` and
+ * `bm-reviewer` agent, whoever creates it: Paseo's `create_agent` tool has no
+ * system-prompt parameter (bm-hld). The returned cleanup removes that hook.
  *
  * This entry must never import from `client/`: that is a compile error.
  *
@@ -47,5 +53,8 @@ export default function contribute(server: PluginServerContext): () => void {
   });
   server.handle(agentsListRpc, (input, { paseo }) => listWorkspaceAgents(input, { paseo }));
   server.handle(rolesDescribeRpc, (_input, { paseo }) => describeRoles({ paseo }));
-  return () => {};
+  const removeRoleHook = registerRoleHook(server);
+  return () => {
+    removeRoleHook();
+  };
 }

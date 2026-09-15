@@ -22,6 +22,8 @@ import { build } from "esbuild";
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const entry = join(repoRoot, "plugin", "index.server.ts");
 const managerMd = readFileSync(join(repoRoot, "plugin", "roles", "manager.md"), "utf8");
+const workerMd = readFileSync(join(repoRoot, "plugin", "roles", "worker.md"), "utf8");
+const reviewerMd = readFileSync(join(repoRoot, "plugin", "roles", "reviewer.md"), "utf8");
 
 async function bundleServerEntry(): Promise<string> {
   const result = await build({
@@ -40,6 +42,7 @@ async function bundleServerEntry(): Promise<string> {
 }
 
 type Handler = (input: unknown, context: { paseo: unknown }) => unknown;
+type BeforeHandler = (input: { request: unknown }, context: unknown) => unknown;
 
 /**
  * Evaluates the bundle exactly as Paseo 0.8 does (read from app.asar,
@@ -78,12 +81,19 @@ function loadBundle(code: string): (server: unknown) => () => void {
 
 function fakeServer() {
   const handlers = new Map<string, Handler>();
+  const beforeHooks = new Map<string, BeforeHandler>();
   const server = {
     handle: vi.fn((contract: { name: string }, handler: Handler) => {
       handlers.set(contract.name, handler);
     }),
+    before: vi.fn((name: string, handler: BeforeHandler) => {
+      beforeHooks.set(name, handler);
+      return () => {
+        beforeHooks.delete(name);
+      };
+    }),
   };
-  return { server, handlers };
+  return { server, handlers, beforeHooks };
 }
 
 function fakePaseo() {
@@ -162,11 +172,23 @@ describe("no run-time file location in the plugin payload", () => {
   );
 });
 
-describe("embedded Manager instructions", () => {
+describe("embedded role instructions", () => {
   it("server/manager-instructions.ts matches roles/manager.md byte for byte (run `npm run build` after editing the markdown)", async () => {
     const generated = await import("../plugin/server/manager-instructions");
     expect(Buffer.from(generated.MANAGER_INSTRUCTIONS, "utf8").equals(readFileSync(join(repoRoot, "plugin", "roles", "manager.md")))).toBe(true);
     expect(generated.MANAGER_INSTRUCTIONS_NAME).toBe("roles/manager.md");
+  });
+
+  it("server/worker-instructions.ts matches roles/worker.md byte for byte (run `npm run build` after editing the markdown)", async () => {
+    const generated = await import("../plugin/server/worker-instructions");
+    expect(Buffer.from(generated.WORKER_INSTRUCTIONS, "utf8").equals(readFileSync(join(repoRoot, "plugin", "roles", "worker.md")))).toBe(true);
+    expect(generated.WORKER_INSTRUCTIONS_NAME).toBe("roles/worker.md");
+  });
+
+  it("server/reviewer-instructions.ts matches roles/reviewer.md byte for byte (run `npm run build` after editing the markdown)", async () => {
+    const generated = await import("../plugin/server/reviewer-instructions");
+    expect(Buffer.from(generated.REVIEWER_INSTRUCTIONS, "utf8").equals(readFileSync(join(repoRoot, "plugin", "roles", "reviewer.md")))).toBe(true);
+    expect(generated.REVIEWER_INSTRUCTIONS_NAME).toBe("roles/reviewer.md");
   });
 });
 
@@ -175,10 +197,11 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
     const code = await bundleServerEntry();
     const contribute = loadBundle(code);
 
-    const { server, handlers } = fakeServer();
+    const { server, handlers, beforeHooks } = fakeServer();
     const cleanup = contribute(server);
     expect(typeof cleanup).toBe("function");
     expect([...handlers.keys()].sort()).toEqual(["agents.list", "manager.ensure", "roles.describe"]);
+    expect([...beforeHooks.keys()]).toEqual(["agent.create"]);
 
     const { paseo, created } = fakePaseo();
     const ensured = await handlers.get("manager.ensure")!({ workspaceId: "ws-1" }, { paseo });
@@ -194,6 +217,18 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
         { role: "reviewer", provider: "claude", model: "sonnet", paseoTools: false, instructionsPath: "roles/reviewer.md" },
       ],
     });
+
+    // bm-hld: the before("agent.create") hook injects role instructions from the bundle.
+    const hook = beforeHooks.get("agent.create")!;
+    const run = (config: Record<string, unknown>) =>
+      hook({ request: { config } }, { paseo }) as { config: { systemPrompt?: string } } | undefined;
+    expect(run({ provider: "bm-worker/gpt-5.6-sol", cwd: "/repo" })?.config.systemPrompt).toBe(workerMd);
+    expect(run({ provider: "bm-reviewer", cwd: "/repo" })?.config.systemPrompt).toBe(reviewerMd);
+    expect(run({ provider: "bm-manager", cwd: "/repo", systemPrompt: managerMd })).toBeUndefined();
+    expect(run({ provider: "claude", cwd: "/repo" })).toBeUndefined();
+
+    cleanup();
+    expect(beforeHooks.size).toBe(0);
   });
 });
 

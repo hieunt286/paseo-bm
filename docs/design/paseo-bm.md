@@ -96,7 +96,7 @@ Surface chỉ hiển thị dữ liệu lấy từ RPC và hằng số lúc build
 
 ### 2.5 Bộ chỉ dẫn vai trò
 
-Ba file Markdown đóng cùng gói, được copy vào thư mục cài đặt và có hash trong hồ sơ như mọi file payload khác.
+Ba file Markdown đóng cùng gói, được copy vào thư mục cài đặt và có hash trong hồ sơ như mọi file payload khác. Nội dung của chúng được nhúng vào bundle server lúc build và nạp làm system prompt của agent `bm-*` qua hook `before("agent.create")` (xem cuối §2.6).
 
 **Toàn bộ nội dung dành cho agent viết bằng tiếng Anh** — ba file `roles/*.md` và mọi prompt hệ thống. Tài liệu dự án (PRD, design, plan này) vẫn giữ tiếng Việt cho người đọc.
 
@@ -181,7 +181,7 @@ Phát hiện rủi ro thuộc mức cao hơn khi đang làm thì **nâng mức v
 
 **Ngôn ngữ (REQ-032a, Q-027).** Chỉ dẫn vai trò và prompt hệ thống: **tiếng Anh**. Tài liệu Worker tạo cho repo đích: **theo ngôn ngữ đang có của repo đó**, mặc định tiếng Anh nếu repo chưa có tài liệu nào.
 
-Chỉ dẫn được nạp vào agent qua nội dung prompt khởi tạo do plugin dựng, chứ không phụ thuộc việc người dùng đã cài skills hay chưa. Skills của bên thứ ba (feature-workflow…) là thứ **nâng chất lượng** chứ không phải điều kiện để chạy — nhưng thiếu thì Worker làm kém đi, nên phải cảnh báo (REQ-007j).
+Chỉ dẫn được nạp vào agent làm **system prompt qua hook server `before("agent.create")` của plugin**, nhận diện vai trò theo `config.provider` (`bm-manager`, `bm-worker`, `bm-reviewer`, kể cả dạng `<id>/<model>`); nếu config đã có system prompt khác thì chỉ dẫn vai trò đứng trước, phần cũ giữ phía sau, và không nhân đôi khi đã có. Lý do: công cụ `create_agent` của Paseo không có tham số system prompt, nên Worker do Manager tạo và Reviewer do Worker tạo sẽ không có chỉ dẫn nếu chỉ dựa vào prompt khởi tạo (bm-hld). Nội dung ba file `roles/*.md` được nhúng vào bundle lúc build (`plugin/server/{manager,worker,reviewer}-instructions.ts`). Cơ chế này không phụ thuộc việc người dùng đã cài skills hay chưa. Skills của bên thứ ba (feature-workflow…) là thứ **nâng chất lượng** chứ không phải điều kiện để chạy — nhưng thiếu thì Worker làm kém đi, nên phải cảnh báo (REQ-007j).
 
 ## 3. Data Model
 
@@ -547,3 +547,4 @@ CI **không** chạy agent thật: không xác định, tốn tiền, và cần 
 | 2026-09-15 | hieu.nt10 (soạn bởi Claude) | **Errata bm-tm2 theo quyết định owner (ghi trạng thái trước và khôi phục đúng).** §3.2 thêm hai trường tuỳ chọn `paseo.pluginsEnabledPrevious` và `paseo.createdConfigContainers` (`schemaVersion` vẫn 1, hồ sơ cũ vẫn đọc được và gỡ như trước). Lý do: nghiệm thu Phase 1a thấy sau khi gỡ `config.json` có `pluginsEnabled: false` và `agents.providers: {}` dù trước khi cài không có hai khoá đó, trái M-5 |
 | 2026-09-15 | hieu.nt10 (soạn bởi Claude) | **Errata bm-vey (cập nhật phiên bản).** §9.1: Paseo 0.8 từ chối `plugin install` khi id `paseo-bm` đã cấu hình và không có lệnh đổi đường dẫn plugin dạng thư mục, nên khi plugin đang trỏ thư mục khác thì cập nhật = `plugin remove` rồi `plugin install <dir mới>`; trỏ đúng rồi thì không gọi Paseo. Đăng ký bản mới lỗi → cài lại thư mục cũ (remove trước vì Paseo giữ mục lỗi), hồ sơ giữ `paseo.pluginDir`/`versions[].active` và ghi trả `version` cũ, lỗi `E_PLUGIN_LOAD_FAILED` (mã 7) kèm nguyên văn lý do Paseo và kết quả đường lùi. Lý do: nghiệm thu Phase 1a lượt 5 cập nhật 0.1.0-alpha.0 → 0.1.0-alpha.1 thoát mã 7 |
 | 2026-09-15 | hieu.nt10 (soạn bởi Claude) | **Errata bm-p48.** §4.4: thêm check `plugin-path` của `doctor` và mở rộng `install-version` để phát hiện plugin chạy từ thư mục khác phiên bản active hoặc hồ sơ ghi phiên bản khác bản active |
+| 2026-09-15 | hieu.nt10 (soạn bởi Claude) | **Errata bm-hld.** §2.5/§2.6: chỉ dẫn vai trò được nạp làm system prompt qua hook `before("agent.create")` của plugin theo provider `bm-*` (Worker ← `roles/worker.md`, Reviewer ← `roles/reviewer.md`, Manager ← `roles/manager.md` nếu chưa có), thay cho câu cũ "nạp qua nội dung prompt khởi tạo do plugin dựng". Lý do: nghiệm thu F-1 thấy Worker do Manager tạo bằng `create_agent` không có system prompt, vì công cụ này không có tham số đó; `worker.md` và `reviewer.md` giờ được nhúng vào bundle như `manager.md` |
