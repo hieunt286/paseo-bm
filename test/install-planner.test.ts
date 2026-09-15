@@ -284,6 +284,26 @@ describe("classifySituation and payloadDestination", () => {
     });
   });
 
+  it("orders two prereleases of the same release by SemVer §11 (bm-d3q)", () => {
+    expect(classifySituation("0.1.0-alpha.0", "0.1.0-alpha.1")).toEqual({
+      situation: "upgrade",
+      installedVersion: "0.1.0-alpha.0",
+      requiresConfirmation: false,
+      confirmationReason: null,
+    });
+    expect(classifySituation("0.1.0-alpha.1", "0.1.0-alpha.0")).toMatchObject({
+      situation: "downgrade",
+      requiresConfirmation: true,
+      confirmationReason: "downgrade",
+    });
+    expect(classifySituation("0.1.0-alpha.1", "0.1.0")).toMatchObject({ situation: "upgrade", requiresConfirmation: false });
+    expect(classifySituation("0.1.0-alpha.1", "not-a-version")).toMatchObject({
+      situation: "upgrade",
+      requiresConfirmation: true,
+      confirmationReason: "unknown-version-order",
+    });
+  });
+
   it("keeps payload paths inside the version directory", () => {
     expect(payloadDestination("0.1.0", "./roles\\worker.md")).toBe("plugin/0.1.0/roles/worker.md");
     expect(() => payloadDestination("0.1.0", "../install.json")).toThrow();

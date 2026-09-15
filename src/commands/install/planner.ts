@@ -142,7 +142,10 @@ export interface InstallPlan extends SituationVerdict {
 
 /**
  * Decides which of the four situations applies. Equal strings are a reinstall;
- * otherwise semver order decides, and an order that cannot be established is
+ * otherwise SemVer 2.0.0 precedence decides, prereleases included, so
+ * `0.1.0-alpha.0` -> `0.1.0-alpha.1` is a plain upgrade. Only an order that
+ * cannot be established (a string that is not SemVer, or two different
+ * strings of equal precedence such as a build-metadata-only difference) is
  * treated as needing confirmation.
  */
 export function classifySituation(installedVersion: string | null | undefined, version: string): SituationVerdict {
