@@ -269,7 +269,7 @@ Ghi atomic, quyền `0600`, không chứa bí mật.
 | `--yes` | install, uninstall | Bỏ qua xác nhận áp dụng; **không** ngầm đồng ý bất kỳ ranh giới tin cậy nào |
 | `--enable-plugins` | install | Đồng ý **cả hai việc trong cùng một ranh giới tin cậy**: bật `pluginsEnabled` và mở quyền công cụ Paseo cho agent (REQ-006, REQ-031c). Gộp vì bật plugin mà không mở quyền thì Manager không tạo được Worker. Cảnh báo phải nêu đủ cả hai hệ quả |
 | `--install-skills` | install | Đồng ý cho chạy CLI `skills` |
-| `--skills-agents <list>` | install, doctor | Danh sách agent đích cho CLI `skills`, mặc định `claude,codex` |
+| `--skills-agents <list>` | install, doctor | Danh sách agent đích cho CLI `skills`, mặc định `claude,codex`. Khi dựng lệnh cho CLI `skills`, `claude` được đổi thành `claude-code` (tên CLI `skills` 1.5.26 dùng); tên khác giữ nguyên *(errata 2026-09-15)* |
 | `--role <role>=<provider>/<model>` | install | Chọn công cụ cho vai trò, lặp lại được. Ví dụ `--role worker=codex/gpt-5.6-sol` |
 | `--reconfigure` | install | Hỏi lại toàn bộ cấu hình vai trò dù đã có |
 | `--skip-skills-check` | install, doctor | Bỏ hẳn phần skills |
@@ -400,12 +400,14 @@ cli → preflight ─(đạt)→ record.load → planner ─→ report(xem trư�
                                                         ▼ backup → sửa 1 trường → reload → xác minh
         → cấu hình vai trò: hỏi tên + provider/model cho Worker và Reviewer (và Manager)
         → provider chưa đăng nhập? → mời chạy lệnh login của chính công cụ đó
-        → mở quyền công cụ cho Manager/Worker? → cảnh báo → đồng ý? ──không──→ bỏ qua (mã 4)
+        → (mở quyền công cụ đã gộp vào câu hỏi bật plugin ở trên — ADR-006 quyết định 4)
         → backup → ghi agents.providers.bm-* và daemon.agentProfiles[bm-*] → reload → xác minh
         → chốt install.json (files[] + versions[] + roles[] + ai bật cái gì)
         → skills: dò → thiếu? → hiện lệnh → đồng ý? → chạy CLI skills → dò lại
         → report(tóm tắt: plugin running, vai trò đã đăng ký, trạng thái đăng nhập, skills)
 ```
+
+*Errata 2026-09-15:* quyền công cụ (`daemon.mcp.injectIntoAgents`) được bật cùng `pluginsEnabled` sau **một** cảnh báo và **một** lần đồng ý (ADR-006 quyết định 3, 4). Câu hỏi cấu hình vai trò và kiểm tồn tại provider/model chạy **trước** bản xem trước, để bản xem trước liệt kê được vai trò sẽ đăng ký và `E_PROVIDER_UNAVAILABLE` ra trước mọi thao tác ghi; thứ tự **ghi** giữ như sơ đồ.
 
 **Thứ tự "đăng ký plugin trước, bật công tắc sau" đã kiểm chứng** (2026-09-14): `paseo plugin install` thành công với mã 0 ngay cả khi `pluginsEnabled` chưa đặt, trả `status: "disabled"`. Nghiệm thu phải đọc `status`, không đọc `enabled`.
 
@@ -520,3 +522,4 @@ CI **không** chạy agent thật: không xác định, tốn tiền, và cần 
 | 2026-09-15 | hieu.nt10 (soạn bởi Claude) | Chốt Q-021, Q-023, Q-024 và quy tắc ngôn ngữ: nội dung dành cho agent viết tiếng Anh; Worker gán nhãn khi tạo bead và truy vấn theo nhãn; Worker **đi tiếp tới khi implement xong**, không giới hạn cứng, vướng thì hỏi; `daemon.mcp.injectIntoAgents` trở thành bước tiêu chuẩn có cảnh báo trong luồng cài. Cập nhật §2.5, §3.4, §9.2 |
 | 2026-09-15 | hieu.nt10 (soạn bởi Claude) | **Bản 2 — viết lại theo PRD có phần điều phối.** Kiến trúc chuyển thành ba lớp (§2.1); thêm §2.2 lý do vẫn cần plugin, §2.5 bộ chỉ dẫn vai trò, §5 hợp đồng RPC, §9.2 luồng giao việc. Bổ sung `roles[]` và hai trường mới vào hồ sơ; §3.4 liệt kê đủ phần ghi vào `config.json`; thêm cờ `--enable-agent-tools`, `--role`, `--reconfigure`; mã 4 mở rộng cho ranh giới quyền công cụ; thêm ranh giới tin cậy thứ ba ở §7; thêm tầng test hợp nhất cấu hình, test chỉ dẫn vai trò và bộ nghiệm thu 5 yêu cầu mẫu; gỡ `--prune` khỏi `doctor` theo phát hiện của lượt polish. Liên kết ADR-005 và ADR-006 |
 | 2026-09-15 | hieu.nt10 (soạn bởi Claude) | **Errata theo quyết định của owner khi implement.** §4.3 thêm mã thoát 7 (đã chép file nhưng Paseo không cài/nạp được plugin — trước đây không có dòng nào đúng nghĩa, mã 3 sai vì đã ghi). §4.4 thêm năm mã lỗi: ba mã cho chốt đường dẫn (`E_UNSAFE_INSTALL_HOME`, `E_PATH_ESCAPE`, `E_SYMLINK_IN_PATH`), `E_TARGET_NOT_WRITABLE` (preflight trước đây mượn `E_CONFLICT`, sai hướng khắc phục) và `E_PLUGIN_LOAD_FAILED`; thêm `result.error { code, message }` chỉ có mặt khi thất bại. `--prune` luôn giữ backup cấu hình Paseo mới nhất làm bản sao an toàn gần nhất để khôi phục thủ công (lệnh gỡ không khôi phục nguyên file cấu hình — ADR-006 quyết định 8; `--restore-backups` chỉ khôi phục file payload) |
+| 2026-09-15 | hieu.nt10 (soạn bởi Claude) | **Errata khi implement (tiếp).** §4.2: CLI `skills` 1.5.26 gọi agent Claude là `claude-code` và từ chối `claude`; owner chốt giữ mặc định `claude,codex` phía paseo-bm và đổi `claude` → `claude-code` khi dựng lệnh `skills`. §9.1: bỏ bước hỏi quyền công cụ riêng (đã gộp theo ADR-006 quyết định 4) và ghi rõ câu hỏi vai trò chạy trước bản xem trước |

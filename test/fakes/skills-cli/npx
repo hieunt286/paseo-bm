@@ -1,0 +1,64 @@
+#!/usr/bin/env node
+/*
+ * Stand-in for `npx`, used only by test/skills-assist.test.ts. It lives in its
+ * own directory so no other test ever finds it on PATH, and it never downloads
+ * or runs anything: it records its argv and behaves as scripted.
+ *
+ *   BM_FAKE_NPX_ARGV_LOG   append one JSON line per invocation
+ *   BM_FAKE_NPX_PID_FILE   write this process's pid
+ *   BM_FAKE_NPX_MODE       ok | fail | hang | hang-quiet       (default ok)
+ *                          hang: print on both streams, then sleep forever
+ *                          hang-quiet: sleep forever, printing nothing
+ *   BM_FAKE_NPX_SIGNAL_LOG append the name of every SIGINT/SIGTERM received
+ *   BM_FAKE_NPX_INSTALL    in ok mode, create <dir>/<skill>/SKILL.md for each
+ *                          `-s` value under this directory (simulates the real
+ *                          CLI writing skills; paseo-bm itself never does)
+ */
+const fs = require("node:fs");
+const path = require("node:path");
+
+const argv = process.argv.slice(2);
+const env = process.env;
+
+if (env.BM_FAKE_NPX_ARGV_LOG) {
+  fs.appendFileSync(env.BM_FAKE_NPX_ARGV_LOG, JSON.stringify({ argv, argc: argv.length }) + "\n");
+}
+if (env.BM_FAKE_NPX_PID_FILE) {
+  fs.writeFileSync(env.BM_FAKE_NPX_PID_FILE, String(process.pid));
+}
+
+const mode = env.BM_FAKE_NPX_MODE || "ok";
+
+if (mode === "hang" || mode === "hang-quiet") {
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    process.on(signal, () => {
+      if (env.BM_FAKE_NPX_SIGNAL_LOG) fs.appendFileSync(env.BM_FAKE_NPX_SIGNAL_LOG, signal + "\n");
+      process.exit(signal === "SIGINT" ? 130 : 143);
+    });
+  }
+  if (mode === "hang") {
+    process.stdout.write("fake skills: stdout line\n");
+    process.stderr.write("fake skills: stderr line\n");
+  }
+  setInterval(() => {}, 1000);
+  return;
+}
+
+process.stdout.write("fake skills: installing\n");
+process.stderr.write("fake skills: progress on stderr\n");
+
+if (mode === "fail") {
+  process.exit(1);
+}
+
+if (env.BM_FAKE_NPX_INSTALL) {
+  const at = argv.indexOf("-s");
+  const skills = [];
+  for (let i = at + 1; at >= 0 && i < argv.length && !argv[i].startsWith("-"); i++) skills.push(argv[i]);
+  for (const skill of skills) {
+    const dir = path.join(env.BM_FAKE_NPX_INSTALL, skill);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "SKILL.md"), "# " + skill + "\n");
+  }
+}
+process.exit(0);
