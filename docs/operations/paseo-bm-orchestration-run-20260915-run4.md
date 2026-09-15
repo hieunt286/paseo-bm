@@ -65,7 +65,7 @@
 | Kiểm chứng Q-028 | mọi Reviewer | Reviewer chạy `auto`, 0 lần gọi công cụ agent trong cả 15 Reviewer; lượt 2 đã ghi Reviewer có công cụ cộng tác sẵn của Codex nhưng không có công cụ agent của Paseo |
 | Bằng chứng M-13 | mọi fixture | Đủ theo checklist §5 |
 | Chi phí quan sát được | mọi fixture | Mục 6 |
-| Máy và repo thử trở về trạng thái ban đầu | — | **Chưa**: paseo-bm vẫn cài để xử lý `bm-wq6`; bản sao cấu hình ở `~/bm-acceptance/20260915/config.before-orch.json` |
+| Máy và repo thử trở về trạng thái ban đầu | — | **Đạt** (16:21Z, sau lượt 5): `paseo-bm uninstall --apply` tương tác (xác nhận gỡ; tắt lại plugins; giữ backups theo quyết định owner) mã 0; `paseo plugin ls` không còn `paseo-bm`; `~/.paseo/config.json` **giống hệt** `config.before-orch.json` ngoài khoá `plugins: {}` do Paseo để lại; `pluginsEnabled` về lại không đặt, `daemon.mcp.injectIntoAgents` giữ `true` như trước; `~/.paseo-bm` chỉ còn `backups/`. Repo nháp nằm ngoài repo sản phẩm (`~/bm-acceptance/20260915`), agent của fixture để owner tự lưu trữ trong Paseo. Bằng chứng: `evidence-run5/uninstall-transcript.txt` |
 
 ## 5. Khoảng trống sản phẩm `bm-wq6` (REQ-026f)
 
