@@ -26,7 +26,7 @@ export interface CommandSpec {
 }
 
 export const COMMAND_SPECS: readonly CommandSpec[] = [
-  { name: "install", summary: "Install or update paseo-bm (preview only without --apply)" },
+  { name: "install", summary: "Install or update paseo-bm (without --apply: asks before writing on a terminal, preview only otherwise)" },
   { name: "doctor", summary: "Read-only health check; never writes anything" },
   { name: "uninstall", summary: "Remove what paseo-bm owns (preview only without --apply)" },
 ];

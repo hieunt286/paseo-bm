@@ -114,3 +114,30 @@ jobs:
         run: |
           echo "Dry-run publish of paseo-bm@${VERSION} with dist-tag ${DIST_TAG}"
           npm publish --dry-run --provenance --access public --tag "${DIST_TAG}"
+
+      # The real publish (bead bm-wp-118-4s4.2) runs only when a human publishes a
+      # GitHub Release; a manual workflow run stays a dry-run. It cannot be undone
+      # after 72 hours, so the Release itself is the approval point. The version
+      # must be a prerelease (checked above) and always goes to dist-tag `next`.
+      - name: Publish to npm
+        if: github.event_name == 'release'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          DIST_TAG: ${{ steps.meta.outputs.dist_tag }}
+        run: |
+          echo "Publishing paseo-bm@${VERSION} with dist-tag ${DIST_TAG}"
+          npm publish --provenance --access public --tag "${DIST_TAG}"
+
+      - name: Verify published version
+        if: github.event_name == 'release'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          DIST_TAG: ${{ steps.meta.outputs.dist_tag }}
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            published=$(npm view "paseo-bm@${DIST_TAG}" version 2>/dev/null || true)
+            if [ "$published" = "$VERSION" ]; then echo "npm dist-tag ${DIST_TAG} -> ${published}"; exit 0; fi
+            echo "attempt ${attempt}: dist-tag ${DIST_TAG} -> '${published}', waiting"; sleep 10
+          done
+          echo "paseo-bm@${DIST_TAG} does not resolve to ${VERSION}" >&2
+          exit 1
