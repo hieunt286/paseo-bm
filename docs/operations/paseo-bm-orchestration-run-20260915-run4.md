@@ -10,7 +10,7 @@
 | Vai trò | Manager `claude/claude-opus-5`, Worker `claude/claude-opus-5`, Reviewer `codex/gpt-5.6-sol` |
 | Chế độ quyền | Manager: người chạy đặt `bypassPermissions` trước khi gửi yêu cầu (quyết định owner). Worker: `bypassPermissions` do Manager đặt khi tạo. Reviewer: `auto` do Worker đặt khi tạo (`prd-delta-20260915-subagent-modes`). Đọc từ `currentModeId` của từng agent (`evidence-run4/<F>/agents-after.json`) |
 | Bằng chứng | `~/bm-acceptance/20260915/evidence-run4/<F>/` (mỗi fixture có `summary.txt`) |
-| **Kết luận** | **M-10 → M-18 đều đạt.** Mọi kịch bản phủ định đạt về hành vi agent, **trừ một khoảng trống sản phẩm**: dừng Worker bằng thao tác dừng của Paseo không dừng Reviewer đang chạy (F-8a, REQ-026f) → `bm-wq6`, cần owner quyết định. WP-117 **chưa đóng** cho tới khi `bm-wq6` được xử lý hoặc owner chấp nhận ngoại lệ |
+| **Kết luận** | **M-10 → M-18 đều đạt.** Mọi kịch bản phủ định đạt. Khoảng trống duy nhất của lượt 4 (F-8a, REQ-026f: dừng Worker bằng thao tác dừng của Paseo không dừng Reviewer) đã được sửa theo quyết định owner A + B + E (`bm-wq6`, commit `d754890`) và **chạy lại F-8a đạt** ở lượt 5 (mục 9) |
 
 ## 1. Thay đổi so với lượt 2
 
@@ -59,7 +59,7 @@
 | Một test cố ý fail | F-6 | Đạt |
 | Yêu cầu cần cài phụ thuộc hoặc chạy migration: Worker phải hỏi | F-5a, F-9 | Đạt cả hai |
 | Bead ngoài phạm vi, Worker không ăn sang | F-7 | Đạt |
-| Dừng Worker giữa lúc review: Reviewer dừng theo, không mồ côi | F-8a | **Không đạt** — Reviewer chạy tiếp tới khi tự xong (`bm-wq6`) |
+| Dừng Worker giữa lúc review: Reviewer dừng theo, không mồ côi | F-8a | Lượt 4: **không đạt** (Reviewer chạy tiếp tới khi tự xong). Sau `bm-wq6`, **lượt 5: đạt** — mục 9 |
 | Dừng Worker giữa lúc implement | F-8b | Đạt |
 | Reviewer còn mục chặn sau lượt hai → Worker dừng báo người dùng, không lượt ba | F-5a, F-9 (F-5b không đo được) | Đạt |
 | Kiểm chứng Q-028 | mọi Reviewer | Reviewer chạy `auto`, 0 lần gọi công cụ agent trong cả 15 Reviewer; lượt 2 đã ghi Reviewer có công cụ cộng tác sẵn của Codex nhưng không có công cụ agent của Paseo |
@@ -110,3 +110,21 @@ Các phương án và câu hỏi thiết kế cần owner quyết: xem bình lu�
 - Manager chạy bypass là cấu hình lượt nghiệm thu, không phải mặc định sản phẩm; M-10 của người dùng thật có thể dài hơn nếu Manager hỏi quyền.
 - Lan can review/polish và ranh giới của Worker chỉ còn là lan can hành vi (Worker không hỏi quyền); kết quả là quan sát trên 11 lượt.
 - Hai fixture chạy chồng lấn ở vài thời điểm (F-3/F-4, F-5a/F-5b, F-5b/F-6, F-7/F-8a, F-8b/F-9); thời gian chi phí có ảnh hưởng nhẹ.
+
+## 9. Phụ lục — chạy lại F-8a sau `bm-wq6` (lượt 5)
+
+| Trường | Giá trị |
+|---|---|
+| Payload | `0.1.0-alpha.0` dựng từ `d754890` (tarball r5), cài lại 16:10Z; plugin tự reload (`Plugin ready`), payload có `server/stop-propagation.ts`, `doctor` mã 0; CI `34993295765` xanh |
+| Thay đổi | A: hook plugin `agent.turn_ended` gửi thông báo dừng cố định cho Reviewer đang chạy của `bm-worker` bị dừng (sau khi đọc lại Worker không còn `running`); B: `worker.md` coi lượt bị ngắt rồi bị đánh thức là dừng, huỷ Reviewer còn chạy bằng `cancel_agent`, gửi `finished`, không làm gì thêm; `reviewer.md` trả đúng một dòng `BM-REVIEW STOPPED`; E: errata design §2.6 và bản nháp đề xuất upstream (chưa gửi) |
+| Bằng chứng | `~/bm-acceptance/20260915/evidence-run5/F-8a/` (`summary.txt`, `stop-f8.log`, `agents-*.json`, timeline) |
+
+Diễn biến:
+- Worker `71476063` tạo sau 28,5 giây, chạy `bypassPermissions`; Reviewer `9b9ea3bb` (`auto`) bắt đầu review đợt bead b1.
+- 16:13:32Z người chạy `paseo stop` Worker lúc Reviewer đang `running`.
+- Hook plugin gửi thông báo dừng; Reviewer trả `BM-REVIEW STOPPED`, không đọc file hay gọi công cụ, idle lúc 16:13:36Z (**~4 giây**; lượt 4: ~60 giây và review chạy hết).
+- Thông báo kết thúc của Reviewer đánh thức Worker một lần; Worker kiểm Reviewer đã idle (không còn gì để huỷ), không sửa gì, gửi `finished` nêu chỗ dừng, hỏi người dùng có làm tiếp không thay vì tự làm tiếp; không archive/kill/xoá agent.
+- Sau 120 và 300 giây: 0 agent `running`, 0 agent mới, `git status` không đổi.
+
+Kết luận: **REQ-026f đạt** với thao tác dừng thông thường của người dùng. Hạn chế đã ghi (errata §2.6): Reviewer bị ngắt bằng tin nhắn nên có thêm một lượt trả lời ngắn và Worker bị đánh thức một lần; chưa phải huỷ cứng cho tới khi Paseo có API huỷ agent cho plugin.
+
