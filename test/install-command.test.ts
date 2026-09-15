@@ -513,6 +513,75 @@ describe("install — situations that need an explicit answer", () => {
     expect(subcommands()).not.toContain("plugin install");
     expect(json(run.out).actions.filter((action) => action.kind !== "skip")).toEqual([]);
   });
+
+  describe("the same version again with different payload bytes (bm-i52)", () => {
+    const FLAGS = ["install", "--apply", "--yes", "--skip-skills-check", "--json"];
+
+    type DaemonState = { plugins: Record<string, { path: string; status: string }>; reloadFailures?: Record<string, string> };
+
+    async function installOnce(): Promise<void> {
+      writeFileSync(stateFile, JSON.stringify({ plugins: {} }));
+      const first = await install(FLAGS, { guard: false, state: true });
+      expect(first.code).toBe(EXIT_CODES.ok);
+      rmSync(argvLog, { force: true });
+    }
+
+    function pluginCalls(): string[][] {
+      return calls().filter((argv) => argv[0] === "plugin" && ["install", "remove", "reload"].includes(argv[1] ?? ""));
+    }
+
+    function changePayload(): void {
+      writeFileSync(join(payloadRoot, "index.server.ts"), 'export const version = "rebuilt";\n');
+    }
+
+    it("payload changed: the plugin is reloaded in place and the run waits for running", async () => {
+      await installOnce();
+      changePayload();
+
+      const run = await install(FLAGS, { state: true });
+      const report = json(run.out);
+      expect(run.code).toBe(EXIT_CODES.ok);
+      expect("error" in report.result).toBe(false);
+      expect(report.result.pluginState).toBe("running");
+      expect(pluginCalls()).toEqual([["plugin", "reload", "paseo-bm", "--json"]]);
+      // The wait read `plugin ls` after the reload.
+      expect(subcommands().slice(subcommands().indexOf("plugin reload"))).toContain("plugin ls");
+      expect(run.err).toContain("plugin was reloaded");
+      expect(readFileSync(join(installHome, "plugin", VERSION, "index.server.ts"), "utf8")).toBe(
+        'export const version = "rebuilt";\n',
+      );
+      const daemon = JSON.parse(readFileSync(stateFile, "utf8")) as DaemonState;
+      expect(daemon.plugins["paseo-bm"]).toEqual({ path: join(installHome, "plugin", VERSION), status: "running" });
+    });
+
+    it("payload unchanged: no reload, no install, no remove", async () => {
+      await installOnce();
+      const run = await install(FLAGS, { state: true });
+      expect(run.code).toBe(EXIT_CODES.ok);
+      expect(pluginCalls()).toEqual([]);
+      expect(run.err).not.toContain("plugin was reloaded");
+    });
+
+    it("the reload fails: exit 7 with E_PLUGIN_LOAD_FAILED and Paseo's reason, the new payload kept", async () => {
+      await installOnce();
+      const reason = "Plugin failed to start: paseo-bm";
+      const state = JSON.parse(readFileSync(stateFile, "utf8")) as DaemonState;
+      writeFileSync(stateFile, JSON.stringify({ ...state, reloadFailures: { "paseo-bm": reason } }));
+      changePayload();
+
+      const run = await install(FLAGS, { state: true });
+      const report = json(run.out);
+      expect(run.code).toBe(EXIT_CODES.pluginLoadFailed);
+      expect(report.mode).toBe("applied");
+      expect(report.result.error?.code).toBe("E_PLUGIN_LOAD_FAILED");
+      expect(report.result.error?.message).toContain(`Request failed: ${reason}`);
+      expect(run.err).toContain("paseo plugin logs paseo-bm");
+      expect(pluginCalls()).toEqual([["plugin", "reload", "paseo-bm", "--json"]]);
+      expect(readFileSync(join(installHome, "plugin", VERSION, "index.server.ts"), "utf8")).toBe(
+        'export const version = "rebuilt";\n',
+      );
+    });
+  });
 });
 
 describe("install --prune", () => {
