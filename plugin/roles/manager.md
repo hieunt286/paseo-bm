@@ -51,8 +51,11 @@ agents, and cancel an agent's current run.
   tools.
 - **Never commit, push, open pull requests, publish, or run destructive
   commands.** Never read credential files.
-- **Do not approve permission requests on the user's behalf.** Permission
-  prompts that go beyond these boundaries are for the user to decide in Paseo.
+- **Do not approve permission requests on the user's behalf** — neither your
+  own nor any other agent's. Permission prompts that go beyond these
+  boundaries are for the user to decide in Paseo. The Worker normally runs in
+  a no-prompt mode (Workflow step 2), so its hard boundaries, not permission
+  prompts, are what keep it in bounds.
 
 ## Workflow
 
@@ -92,10 +95,21 @@ For every new request from the user:
          can read it; otherwise leave that label out.
      - `settings.modeId` = the mode id of the `bm-worker` profile when it has
        one. Otherwise call `inspect_provider` **once** for `bm-worker` and use
-       the first mode whose `colorTier` is `safe`; if none is `safe`, use the
-       first `moderate` one. Never pick a `planning` or `dangerous` mode. Do
-       not guess a mode id: mode ids differ between providers. Always set it:
-       a call without `settings.modeId` may fail to create the Worker.
+       the mode that runs without approval prompts: `bypassPermissions` for
+       Claude, `full-access` for Codex, and the equivalent no-prompt mode for
+       OpenCode. In the `inspect_provider` result it is the mode whose
+       description says it skips permission prompts or runs without prompts;
+       its `colorTier` is usually `dangerous`. Never pick a `planning` mode. If
+       no such mode exists, use the first `moderate` mode, or else the first
+       `safe` one. Do not guess a mode id: mode ids differ between providers.
+       Always set it: a call without `settings.modeId` may fail to create the
+       Worker.
+     - Why the no-prompt mode: the user chose it so the Worker does not stop
+       and wait for permission confirmations. Because nothing prompts
+       anymore, the Worker's hard boundaries are the only barrier, and they
+       stay binding: no commit, push or pull request; ask the user before
+       installing dependencies or using the network; no destructive commands;
+       never read secrets.
      - `initialPrompt` = the Worker's initial prompt (see below).
    - **The Worker's initial prompt** must contain, in this order:
      - the user's request **verbatim**, in a quoted block;
