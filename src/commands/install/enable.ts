@@ -35,8 +35,6 @@ import type { ExitCode } from "../../exit-codes.js";
 import { EXIT_CODES } from "../../exit-codes.js";
 import { backupStamp } from "../../fsops.js";
 import { installPaths, paseoConfigFile } from "../../layout.js";
-import type { PaseoAdapter } from "../../paseo/adapter.js";
-import { isPaseoCliError, isPluginRunning } from "../../paseo/adapter.js";
 import type { ApplyConfigEditResult, ConfigEdit } from "../../paseo/config.js";
 import {
   MCP_INJECT_PATH,
@@ -52,13 +50,10 @@ import type { InstallRecord } from "../../record.js";
 import { toIsoUtc, withCreatedConfigContainers, writeRecord } from "../../record.js";
 import type { InstallStepInput, TrustBoundaryOutcome, TrustBoundaryStep } from "./index.js";
 import { DEFAULT_PLUGIN_ID } from "./planner.js";
-import { pluginLogsCommand } from "./register.js";
+import { PLUGIN_RUNNING_TIMEOUT_MS, pluginLogsCommand, waitForPluginRunning } from "./register.js";
 
-/** Design §8: total wait for the plugin to report `running`. */
-export const PLUGIN_RUNNING_TIMEOUT_MS = 30_000;
-
-/** Design §8: interval between two `plugin ls` polls. */
-export const PLUGIN_POLL_INTERVAL_MS = 500;
+// Design §8 wait values; they live with the shared poll in ./register.js (bm-i52).
+export { PLUGIN_POLL_INTERVAL_MS, PLUGIN_RUNNING_TIMEOUT_MS } from "./register.js";
 
 /** The single question for both switches. */
 export const TRUST_QUESTION = "Enable Paseo plugins and grant Paseo tools to agents?";
@@ -237,7 +232,7 @@ async function runTrustBoundary(
 
   /* -- 5. poll `plugin ls` until status is running --------------------------- */
   const pluginId = record.paseo.pluginId ?? DEFAULT_PLUGIN_ID;
-  const polled = await pollRunning(input.adapter, pluginId, clock, sleep);
+  const polled = await waitForPluginRunning(input.adapter, pluginId, clock, sleep);
   if (polled.running) {
     return { consented: true, record: finalRecord, pluginState: polled.status, pluginsEnabled: true, warnings: [], backupDirs, notes };
   }
@@ -331,36 +326,4 @@ function withBackup(record: InstallRecord, dir: string | undefined, now: Date): 
     updatedAt: toIsoUtc(now),
     backups: [...record.backups, { at: toIsoUtc(now), dir, reason: CONFIG_BACKUP_REASON }],
   };
-}
-
-interface PollResult {
-  readonly running: boolean;
-  /** Last `status` seen; `null` when the plugin was never listed. */
-  readonly status: string | null;
-}
-
-/** Polls `plugin ls` until the plugin's `status` is `running` or the deadline passes. */
-async function pollRunning(
-  adapter: PaseoAdapter,
-  pluginId: string,
-  clock: () => number,
-  sleep: (ms: number) => Promise<void>,
-): Promise<PollResult> {
-  const deadline = clock() + PLUGIN_RUNNING_TIMEOUT_MS;
-  let status: string | null = null;
-  for (;;) {
-    try {
-      const plugin = (await adapter.pluginList()).find((entry) => entry.id === pluginId);
-      if (plugin !== undefined) {
-        status = plugin.status;
-        if (isPluginRunning(plugin)) return { running: true, status };
-      }
-    } catch (error) {
-      // A slow or confused CLI during a reload is not yet a verdict; the deadline is.
-      if (!isPaseoCliError(error)) throw error;
-    }
-    const remaining = deadline - clock();
-    if (remaining <= 0) return { running: false, status };
-    await sleep(Math.min(PLUGIN_POLL_INTERVAL_MS, remaining));
-  }
 }

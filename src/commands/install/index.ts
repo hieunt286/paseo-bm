@@ -558,7 +558,19 @@ export async function runInstall(options: InstallOptions): Promise<InstallOutcom
       let plugin: PluginSummary | null = listed;
       const daemonAction = plan1.actions.find((action) => action.location === "paseo-daemon");
       const active = record.versions.some((entry) => entry.version === plan1.version && entry.active);
-      if ((daemonAction !== undefined && isWritingAction(daemonAction)) || record.paseo.pluginId === null || !active) {
+      // bm-i52: bytes written into plugin/<version>/ that Paseo may already run
+      // from. A chmod-only or byte-identical write does not change the bundle.
+      const versionPrefix = `${installHomeLabel(plan1.versionDir)}/`;
+      const payloadChanged = result.applied.some(
+        (entry) =>
+          entry.action.target.startsWith(versionPrefix) && (entry.outcome === "created" || entry.outcome === "updated"),
+      );
+      if (
+        (daemonAction !== undefined && isWritingAction(daemonAction)) ||
+        record.paseo.pluginId === null ||
+        !active ||
+        payloadChanged
+      ) {
         try {
           // bm-vey: Paseo 0.8 refuses an id that is already configured, so the
           // step needs what `plugin ls` reported (to replace a registration from
@@ -571,11 +583,15 @@ export async function runInstall(options: InstallOptions): Promise<InstallOutcom
             version: plan1.version,
             current: listed,
             previousVersion: record1?.version,
+            payloadChanged,
             now: clock(),
           });
           record = registered.record;
           plugin = registered.plugin;
           pluginState = registered.plugin.status;
+          if (registered.reloaded) {
+            notes.push(`The ${DEFAULT_PLUGIN_ID} plugin was reloaded so Paseo runs the payload files that changed.`);
+          }
         } catch (error) {
           if (isPluginRegistrationError(error) && error.code !== undefined) {
             pluginState = error.pluginState;

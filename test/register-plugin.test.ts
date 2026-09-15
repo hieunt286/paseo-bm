@@ -246,6 +246,10 @@ interface FakePlugin {
 interface FakeState {
   plugins: Record<string, FakePlugin>;
   installFailures?: Record<string, string>;
+  /** bm-i52: statuses the `plugin ls` calls after a reload report, one by one. */
+  reloadStatuses?: string[];
+  /** bm-i52: plugin id → reason `plugin reload` fails with. */
+  reloadFailures?: Record<string, string>;
 }
 
 let stateFile: string;
@@ -429,8 +433,167 @@ describe("registerPlugin — updating an existing registration (bm-vey)", () => 
 
     expect(calls()).toEqual([]);
     expect(result.replacedDir).toBeNull();
+    expect(result.reloaded).toBe(false);
     expect(result.record.paseo.pluginDir).toBe(newDir);
     expect(result.record.versions.find((v) => v.active)?.version).toBe("0.2.0");
     expect(daemonPlugins()["paseo-bm"]).toEqual({ path: newDir, status: "running" });
+  });
+});
+
+/* ------------------------------------------------------------------------
+ * Payload rewritten in the directory Paseo runs (bm-i52): a repair, or the
+ * same version again with different bytes. The fake's `plugin reload` queues
+ * `reloadStatuses` for the following `plugin ls` calls.
+ * ---------------------------------------------------------------------- */
+
+const RELOAD = ["plugin", "reload", "paseo-bm", "--json"];
+const LS = ["plugin", "ls", "--json"];
+
+function fakeTime(step?: number): { clock: () => number; sleep: (ms: number) => Promise<void>; sleeps: number[] } {
+  let now = 0;
+  const sleeps: number[] = [];
+  return {
+    clock: () => now,
+    sleep: (ms) => {
+      sleeps.push(ms);
+      now += step ?? ms;
+      return Promise.resolve();
+    },
+    sleeps,
+  };
+}
+
+describe("registerPlugin — payload changed in the registered directory (bm-i52)", () => {
+  it("reloads the plugin and waits until plugin ls reports running", async () => {
+    const { record, oldDir } = await seedUpdate();
+    const time = fakeTime();
+
+    const result = await registerPlugin({
+      adapter: stateAdapter({
+        plugins: { "paseo-bm": { path: oldDir, status: "running" } },
+        reloadStatuses: ["stopping", "running"],
+      }),
+      fsops,
+      record,
+      version: "0.1.0",
+      current: current(oldDir),
+      payloadChanged: true,
+      clock: time.clock,
+      sleep: time.sleep,
+    });
+
+    expect(calls()).toEqual([RELOAD, LS, LS]);
+    expect(time.sleeps).toEqual([500]);
+    expect(result.reloaded).toBe(true);
+    expect(result.running).toBe(true);
+    expect(result.plugin.status).toBe("running");
+    expect(result.replacedDir).toBeNull();
+    expect(daemonPlugins()["paseo-bm"]).toEqual({ path: oldDir, status: "running" });
+  });
+
+  it("repairs a plugin Paseo reports as failed: reload, then running", async () => {
+    const { record, oldDir } = await seedUpdate();
+    const result = await registerPlugin({
+      adapter: stateAdapter({ plugins: { "paseo-bm": { path: oldDir, status: "failed" } } }),
+      fsops,
+      record,
+      version: "0.1.0",
+      current: current(oldDir, "failed"),
+      payloadChanged: true,
+      ...fakeTime(),
+    });
+    expect(calls()).toEqual([RELOAD, LS]);
+    expect(result.reloaded).toBe(true);
+    expect(result.plugin.status).toBe("running");
+  });
+
+  it("no payload file changed: no reload and no Paseo call", async () => {
+    const { record, oldDir } = await seedUpdate();
+    const result = await registerPlugin({
+      adapter: stateAdapter({ plugins: { "paseo-bm": { path: oldDir, status: "running" } } }),
+      fsops,
+      record,
+      version: "0.1.0",
+      current: current(oldDir),
+      payloadChanged: false,
+      ...fakeTime(),
+    });
+    expect(calls()).toEqual([]);
+    expect(result.reloaded).toBe(false);
+  });
+
+  it("a disabled plugin is not reloaded: it loads the new files once plugins are enabled", async () => {
+    const { record, oldDir } = await seedUpdate();
+    const result = await registerPlugin({
+      adapter: stateAdapter({ plugins: { "paseo-bm": { path: oldDir, status: "disabled" } } }),
+      fsops,
+      record,
+      version: "0.1.0",
+      current: current(oldDir, "disabled"),
+      payloadChanged: true,
+      ...fakeTime(),
+    });
+    expect(calls()).toEqual([]);
+    expect(result.reloaded).toBe(false);
+    expect(result.plugin.status).toBe("disabled");
+  });
+
+  it("the reload fails: E_PLUGIN_LOAD_FAILED with Paseo's reason verbatim and the logs command", async () => {
+    const { record, oldDir } = await seedUpdate();
+    const reason = "Cannot find module './server/role-hook.js'";
+
+    const error = await registerPlugin({
+      adapter: stateAdapter({
+        plugins: { "paseo-bm": { path: oldDir, status: "running" } },
+        reloadFailures: { "paseo-bm": reason },
+      }),
+      fsops,
+      record,
+      version: "0.1.0",
+      current: current(oldDir),
+      payloadChanged: true,
+      ...fakeTime(),
+    }).catch((caught: unknown) => caught);
+
+    expect(isPluginRegistrationError(error)).toBe(true);
+    const failure = error as PluginRegistrationError;
+    expect(failure.code).toBe("E_PLUGIN_LOAD_FAILED");
+    expect(failure.reason).toBe("load-failed");
+    expect(failure.paseoDetail).toBe(`Request failed: ${reason}`);
+    expect(failure.message).toContain(`Request failed: ${reason}`);
+    expect(failure.message).toContain("paseo plugin logs paseo-bm");
+    expect(calls()).toEqual([RELOAD]);
+    // Never a daemon restart or stop, and the registration is not touched.
+    expect(daemonPlugins()["paseo-bm"]?.path).toBe(oldDir);
+  });
+
+  it("the plugin never reaches running: E_PLUGIN_LOAD_FAILED after 30 seconds with the last status", async () => {
+    const { record, oldDir } = await seedUpdate();
+    // Each sleep jumps 15 s, so the 30-second deadline passes after a few polls.
+    const time = fakeTime(15_000);
+
+    const error = await registerPlugin({
+      adapter: stateAdapter({
+        plugins: { "paseo-bm": { path: oldDir, status: "running" } },
+        reloadStatuses: ["failed"],
+      }),
+      fsops,
+      record,
+      version: "0.1.0",
+      current: current(oldDir),
+      payloadChanged: true,
+      clock: time.clock,
+      sleep: time.sleep,
+    }).catch((caught: unknown) => caught);
+
+    const failure = error as PluginRegistrationError;
+    expect(failure.code).toBe("E_PLUGIN_LOAD_FAILED");
+    expect(failure.reason).toBe("load-failed");
+    expect(failure.status).toBe("failed");
+    expect(failure.pluginState).toBe("failed");
+    expect(failure.message).toContain('did not reach status "running" within 30 seconds');
+    expect(failure.message).toContain('its last status was "failed"');
+    expect(calls()[0]).toEqual(RELOAD);
+    expect(calls().slice(1).every((argv) => argv.join(" ") === LS.join(" "))).toBe(true);
   });
 });
