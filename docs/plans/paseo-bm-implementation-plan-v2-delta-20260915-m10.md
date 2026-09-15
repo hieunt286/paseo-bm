@@ -4,11 +4,11 @@
 |---|---|
 | Mã | `plan-v2-delta-20260915-m10` |
 | Plan gốc | [paseo-bm Implementation Plan bản 2](paseo-bm-implementation-plan-v2.md) (Active, Plan-ready PASS) — **không sửa tại chỗ** |
-| Status | **Accepted** — áp dụng PRD và plan; checklist điều phối áp dụng cùng `bm-bdk` |
+| Status | **Accepted, Applied** |
 | Owner | hieu.nt10 |
 | Created | 2026-09-15 |
 | Accepted | 2026-09-15 — owner hieu.nt10 chọn (b), ngưỡng 60 giây |
-| Applied | (điền khi đã sửa các tài liệu ở §6) |
+| Applied | 2026-09-15 — vị trí 1–3 (PRD), 4–6 (checklist điều phối), 7 (plan) |
 | Bead | `bm-l66` (chặn `bm-wp-117-9vy.2`) |
 | Nguồn | [Biên bản nghiệm thu điều phối 2026-09-15](../operations/paseo-bm-orchestration-run-20260915.md) (commit `c047142`) |
 
@@ -192,3 +192,4 @@ Sau khi duyệt:
 |---|---|---|
 | 2026-09-15 | hieu.nt10 (soạn bởi Claude) | Tạo bản Draft từ biên bản nghiệm thu điều phối 2026-09-15 |
 | 2026-09-15 | hieu.nt10 (soạn bởi Claude) | Owner duyệt (b) 60 giây; áp dụng vị trí 1–3 (PRD) và 7 (plan); vị trí 4–6 (checklist) áp dụng cùng `bm-bdk` |
+| 2026-09-15 | hieu.nt10 (soạn bởi Claude) | Áp dụng vị trí 4–6 vào checklist điều phối; ghi chế độ Manager khi nghiệm thu vào checklist mục 2 và runbook bước 2 |
