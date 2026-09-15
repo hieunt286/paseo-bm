@@ -117,25 +117,27 @@ describe("worker.md part two — review batches", () => {
     );
   });
 
-  it("always sets settings.modeId, from the profile or the no-prompt mode of inspect_provider (bm-cvr, bm-msy)", () => {
+  it("always sets settings.modeId, from the profile or the provider's auto mode without full or network access (bm-cvr, bm-msy)", () => {
     const text = flat(batches);
     expect(text).toContain("Always set `settings.modeId`: a call without it can fail.");
     expect(text).toContain("Use the mode id of the `bm-reviewer` profile when it has one.");
     expect(text).toContain("call `inspect_provider` **once** for `bm-reviewer`");
+    // Owner approval of prd-delta-20260915-subagent-modes: the Reviewer uses Codex `auto`, not `full-access`.
     expect(text).toContain(
-      "use the mode that runs without approval prompts: `bypassPermissions` for Claude, `full-access` for Codex, and the equivalent no-prompt mode for OpenCode.",
+      "use the provider's automatic mode that does **not** grant full or network access: `auto` for Codex (\"Default Permissions\") and `auto` for Claude (\"Auto mode\");",
     );
-    expect(text).toContain("its `colorTier` is usually `dangerous`. Never pick a `planning` mode.");
-    expect(text).toContain("If no such mode exists, use the first `moderate` mode, or else the first `safe` one.");
-    expect(text).not.toContain("Never pick a `planning` or `dangerous` mode");
+    expect(text).toContain(
+      "**Never give the Reviewer a `dangerous` or full-access mode** (such as Codex `full-access` or Claude `bypassPermissions`), and never a `planning` mode.",
+    );
+    expect(text).toContain("If no such mode exists, use the first `safe` one.");
     expect(text).not.toContain("the first mode whose `colorTier` is `safe`");
   });
 
-  it("says why the Reviewer runs without prompts and keeps its read-only rules binding (bm-msy)", () => {
+  it("says why the Reviewer runs in auto mode and keeps its read-only rules binding (bm-msy)", () => {
     const text = flat(batches);
-    expect(text).toContain("The user chose the no-prompt mode so the Reviewer does not stop and wait for confirmations.");
+    expect(text).toContain("it only reads, so it rarely stops for a confirmation, and the network stays closed to it.");
     expect(text).toContain(
-      "its role instructions are the only barrier, and they stay binding: the Reviewer is read-only, never runs a state-changing or network command, never reads secrets, never commits or pushes, and never creates agents.",
+      "Its role instructions stay binding: the Reviewer is read-only, never runs a state-changing or network command, never reads secrets, never commits or pushes, and never creates agents.",
     );
   });
 

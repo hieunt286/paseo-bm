@@ -319,16 +319,16 @@ How to review a batch:
    and `bm.version` (same value as your own, when you can read it). Always set
    `settings.modeId`: a call without it can fail. Use the mode id of the
    `bm-reviewer` profile when it has one. Otherwise call `inspect_provider`
-   **once** for `bm-reviewer` and use the mode that runs without approval
-   prompts: `bypassPermissions` for Claude, `full-access` for Codex, and the
-   equivalent no-prompt mode for OpenCode. In the `inspect_provider` result it
-   is the mode whose description says it skips permission prompts or runs
-   without prompts; its `colorTier` is usually `dangerous`. Never pick a
-   `planning` mode. If no such mode exists, use the first `moderate` mode, or
-   else the first `safe` one. Do not guess a mode id: mode ids differ between
-   providers. The user chose the no-prompt mode so the Reviewer does not stop
-   and wait for confirmations. Because nothing prompts it, its role
-   instructions are the only barrier, and they stay binding: the Reviewer is
+   **once** for `bm-reviewer` and use the provider's automatic mode that does
+   **not** grant full or network access: `auto` for Codex ("Default
+   Permissions") and `auto` for Claude ("Auto mode"); for another provider, the
+   first `moderate` mode that does not grant full or network access. **Never
+   give the Reviewer a `dangerous` or full-access mode** (such as Codex
+   `full-access` or Claude `bypassPermissions`), and never a `planning` mode.
+   If no such mode exists, use the first `safe` one. Do not guess a mode id:
+   mode ids differ between providers. The user chose this for the Reviewer: it
+   only reads, so it rarely stops for a confirmation, and the network stays
+   closed to it. Its role instructions stay binding: the Reviewer is
    read-only, never runs a state-changing or network command, never reads
    secrets, never commits or pushes, and never creates agents. Never ask it to
    break any of these. Give it the `requestId`, the

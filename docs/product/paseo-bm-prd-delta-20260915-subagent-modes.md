@@ -4,11 +4,11 @@
 |---|---|
 | Mã | `prd-delta-20260915-subagent-modes` |
 | Tài liệu gốc | [paseo-bm PRD](paseo-bm-prd.md) (Accepted 2026-09-15) — **không sửa tại chỗ khi chưa duyệt** |
-| Status | **Draft — chờ owner duyệt** |
+| Status | **Accepted, Applied** (PRD REQ-026c, NFR Quyền, Revision History; design §2.6 và §7) |
 | Owner | hieu.nt10 |
 | Created | 2026-09-15 |
-| Accepted | (điền khi owner duyệt) |
-| Applied | (điền khi đã sửa các tài liệu ở §4) |
+| Accepted | 2026-09-15 — owner hieu.nt10, kèm điều chỉnh: Reviewer dùng chế độ tự động không mở mạng |
+| Applied | 2026-09-15 |
 | Bead | `bm-msy` (chặn `bm-wp-117-9vy.2`) |
 | Nguồn | Quyết định của owner sau [biên bản nghiệm thu điều phối 2026-09-15](../operations/paseo-bm-orchestration-run-20260915.md): "khi spawn các sub agents nên cho chế độ by pass với Claude hoặc chế độ tương tự với OpenCode hoặc Codex để tránh phải chờ đợi confirm" |
 
@@ -52,9 +52,9 @@ Owner quyết định Beads Worker (do Manager tạo) và Reviewer (do Worker t�
 
 ## 7. Duyệt
 
-- [ ] Owner đồng ý các thay đổi ở §4 và chấp nhận rủi ro ở §3
-- [ ] Trả lời câu hỏi mở 1 và 2
-- Approved-by: ______________________, ngày ____-__-__
+- [x] Owner đồng ý và chấp nhận rủi ro ở §3, **với điều chỉnh**: Reviewer (chỉ đọc) **không** dùng `full-access`, mà dùng chế độ tự động không mở toàn quyền hay quyền mạng (Codex `auto`, Claude `auto`); Worker giữ chế độ không hỏi quyền. Vì vậy rủi ro mở mạng cho Reviewer ở §3 **không còn áp dụng**; PRD REQ-026c và NFR Quyền được viết theo điều chỉnh này
+- [x] Câu hỏi mở 1: như trên. Câu hỏi mở 2: trong nghiệm thu chạy lại, Manager cũng chạy chế độ không hỏi quyền (cấu hình lượt nghiệm thu, không đổi sản phẩm)
+- Approved-by: hieu.nt10 (trả lời trong phiên làm việc với Claude), ngày 2026-09-15
 
 Sau khi duyệt: sửa các vị trí 1–4 ở §4, đổi Status thành Accepted rồi Applied, đóng `bm-msy` kèm bằng chứng.
 
@@ -63,3 +63,4 @@ Sau khi duyệt: sửa các vị trí 1–4 ở §4, đổi Status thành Accept
 | Date | Author | Change |
 |---|---|---|
 | 2026-09-15 | hieu.nt10 (soạn bởi Claude) | Tạo bản Draft theo quyết định owner và các dòng xung đột do `bm-msy` phát hiện |
+| 2026-09-15 | hieu.nt10 (soạn bởi Claude) | Owner duyệt kèm điều chỉnh Reviewer dùng `auto`; áp dụng PRD, design và `worker.md` |
