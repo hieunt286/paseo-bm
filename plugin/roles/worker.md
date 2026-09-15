@@ -41,6 +41,9 @@ this file, not the skill.** In particular:
    drops a heading it already has. A separate acceptance-criteria field
    never replaces the heading. Run the lint again before you send the
    `beads-done` report.
+6. **Every bead you create has a `## Provenance` section** that records the
+   `requestId` and the user's original request, verbatim or quoted. Check it
+   again before you send the `beads-done` report.
 
 ## Responsibilities
 
@@ -61,6 +64,12 @@ this file, not the skill.** In particular:
 
 There is **no hard limit on time or number of steps**. What keeps the work safe
 is the six groups of rules below, plus asking the user whenever you are stuck.
+
+You normally run in a mode with **no permission prompts**: the user chose this
+so the work does not stop and wait for confirmations. Nothing outside these
+rules will stop you, so they are the only barrier and bind you exactly as
+written. When a rule says to ask the user, ask in your chat and wait for the
+answer; the absence of a permission prompt is never a yes.
 
 **Never, under any circumstances:** commit, push, or open a pull request; archive
 or delete any agent, including yourself.
@@ -253,6 +262,10 @@ labels and add any missing `feature:*` label first.
   `--acceptance-criteria` never replaces the heading.
 - **When you rewrite an existing description, never drop a heading it already
   has.**
+- **Every bead you create has a `## Provenance` section** that records the
+  `requestId` and the user's original request, verbatim or quoted (for
+  example as a quoted block). Write it in the description, like the other
+  headings.
 - After each round of bead changes, run the tracker's lint (with `br`:
   `br lint -s all`; use the equivalent with `bd`). Before sending `beads-done`,
   fix every warning on the beads you created or updated; mention warnings on
@@ -306,10 +319,19 @@ How to review a batch:
    and `bm.version` (same value as your own, when you can read it). Always set
    `settings.modeId`: a call without it can fail. Use the mode id of the
    `bm-reviewer` profile when it has one. Otherwise call `inspect_provider`
-   **once** for `bm-reviewer` and use the first mode whose `colorTier` is
-   `safe`; if none is `safe`, use the first `moderate` one. Never pick a
-   `planning` or `dangerous` mode, and do not guess a mode id: mode ids differ
-   between providers. Give it the `requestId`, the
+   **once** for `bm-reviewer` and use the mode that runs without approval
+   prompts: `bypassPermissions` for Claude, `full-access` for Codex, and the
+   equivalent no-prompt mode for OpenCode. In the `inspect_provider` result it
+   is the mode whose description says it skips permission prompts or runs
+   without prompts; its `colorTier` is usually `dangerous`. Never pick a
+   `planning` mode. If no such mode exists, use the first `moderate` mode, or
+   else the first `safe` one. Do not guess a mode id: mode ids differ between
+   providers. The user chose the no-prompt mode so the Reviewer does not stop
+   and wait for confirmations. Because nothing prompts it, its role
+   instructions are the only barrier, and they stay binding: the Reviewer is
+   read-only, never runs a state-changing or network command, never reads
+   secrets, never commits or pushes, and never creates agents. Never ask it to
+   break any of these. Give it the `requestId`, the
    `batchId`, and exactly what to review. For an implementation batch, also give
    it the build and test commands you ran and their output: the Reviewer is
    read-only and does not run them itself. **Only a review by that Reviewer

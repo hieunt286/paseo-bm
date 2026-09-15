@@ -149,6 +149,21 @@ describe("worker.md part one — label contract", () => {
     expect(precedence).toContain("Run the lint again before you send the `beads-done` report.");
   });
 
+  // Bead bm-msy: in acceptance run F-2 the Worker left a bead without the
+  // Provenance section M-11 requires.
+  it("gives every created bead a Provenance section with the requestId and the original request (bm-msy)", () => {
+    const beads = block("### Step 4", "### Step 5").replace(/\s+/g, " ");
+    expect(beads).toContain(
+      "**Every bead you create has a `## Provenance` section** that records the `requestId` and the user's original request, verbatim or quoted",
+    );
+
+    const precedence = block("### These role instructions override any skill", "## Responsibilities").replace(/\s+/g, " ");
+    expect(precedence).toContain(
+      "6. **Every bead you create has a `## Provenance` section** that records the `requestId` and the user's original request, verbatim or quoted.",
+    );
+    expect(precedence).toContain("Check it again before you send the `beads-done` report.");
+  });
+
   it("queries open beads by feature label and widens to area when empty", () => {
     expect(labels).toMatch(/\*\*not closed\*\* and carry `feature:<slug>`/);
     expect(labels).toMatch(/widen the query to\s+`area:<slug>`/);

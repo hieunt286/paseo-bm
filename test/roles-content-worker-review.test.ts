@@ -117,12 +117,33 @@ describe("worker.md part two — review batches", () => {
     );
   });
 
-  it("always sets settings.modeId, from the profile or the first safe mode of inspect_provider (bm-cvr)", () => {
+  it("always sets settings.modeId, from the profile or the no-prompt mode of inspect_provider (bm-cvr, bm-msy)", () => {
     const text = flat(batches);
     expect(text).toContain("Always set `settings.modeId`: a call without it can fail.");
+    expect(text).toContain("Use the mode id of the `bm-reviewer` profile when it has one.");
     expect(text).toContain("call `inspect_provider` **once** for `bm-reviewer`");
-    expect(text).toContain("the first mode whose `colorTier` is `safe`; if none is `safe`, use the first `moderate` one.");
-    expect(text).toContain("Never pick a `planning` or `dangerous` mode");
+    expect(text).toContain(
+      "use the mode that runs without approval prompts: `bypassPermissions` for Claude, `full-access` for Codex, and the equivalent no-prompt mode for OpenCode.",
+    );
+    expect(text).toContain("its `colorTier` is usually `dangerous`. Never pick a `planning` mode.");
+    expect(text).toContain("If no such mode exists, use the first `moderate` mode, or else the first `safe` one.");
+    expect(text).not.toContain("Never pick a `planning` or `dangerous` mode");
+    expect(text).not.toContain("the first mode whose `colorTier` is `safe`");
+  });
+
+  it("says why the Reviewer runs without prompts and keeps its read-only rules binding (bm-msy)", () => {
+    const text = flat(batches);
+    expect(text).toContain("The user chose the no-prompt mode so the Reviewer does not stop and wait for confirmations.");
+    expect(text).toContain(
+      "its role instructions are the only barrier, and they stay binding: the Reviewer is read-only, never runs a state-changing or network command, never reads secrets, never commits or pushes, and never creates agents.",
+    );
+  });
+
+  it("keeps the Worker's own hard boundaries binding without permission prompts (bm-msy)", () => {
+    const boundaries = flat(between(worker, "## Hard boundaries", "### 1. Scope boundary"));
+    expect(boundaries).toContain("the user chose this so the work does not stop and wait for confirmations.");
+    expect(boundaries).toContain("they are the only barrier and bind you exactly as written.");
+    expect(boundaries).toContain("the absence of a permission prompt is never a yes.");
   });
 });
 

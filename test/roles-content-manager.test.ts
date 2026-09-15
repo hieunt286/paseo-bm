@@ -82,7 +82,7 @@ describe("roles/manager.md content", () => {
     expect(section("Responsibilities")).toMatch(/see Workflow step 4/);
   });
 
-  it("spells out a create_agent call that succeeds the first time (bug bm-6b2)", () => {
+  it("spells out a create_agent call that succeeds the first time, in the no-prompt mode (bug bm-6b2, bm-msy)", () => {
     const workflow = section("Workflow");
     expect(workflow).toMatch(/`provider` = `bm-worker\/<model>`/);
     expect(workflow).toMatch(/model of the\s+`bm-worker` profile/);
@@ -90,11 +90,35 @@ describe("roles/manager.md content", () => {
     // bm-cvr: mode ids differ per provider, so no fixed fallback like "default".
     expect(workflow).not.toMatch(/`"default"`/);
     expect(workflow).toMatch(/call `inspect_provider` \*\*once\*\* for `bm-worker`/);
-    expect(workflow).toMatch(/`colorTier` is `safe`/);
-    expect(workflow).toMatch(/Never pick a `planning` or `dangerous` mode/);
+    expect(workflow).toMatch(/Always set it:\s+a call without `settings\.modeId` may fail/);
+    // bm-msy: the owner chose the provider's no-prompt mode for sub-agents.
+    const flat = workflow.replace(/\s+/g, " ");
+    expect(flat).toContain(
+      "use the mode that runs without approval prompts: `bypassPermissions` for Claude, `full-access` for Codex, and the equivalent no-prompt mode for OpenCode.",
+    );
+    expect(flat).toContain("its `colorTier` is usually `dangerous`. Never pick a `planning` mode.");
+    expect(flat).toContain("If no such mode exists, use the first `moderate` mode, or else the first `safe` one.");
+    expect(flat).not.toContain("Never pick a `planning` or `dangerous` mode");
     expect(workflow).toMatch(/Call `list_profiles` \*\*once\*\*/);
     expect(workflow).toMatch(/do not call `list_agents`\s+before creating the Worker for a new request/);
     expect(workflow).toMatch(/`initialPrompt` = the Worker's initial prompt/);
+  });
+
+  it("explains the no-prompt mode choice and keeps the Worker's hard boundaries binding (bm-msy)", () => {
+    const flat = section("Workflow").replace(/\s+/g, " ");
+    expect(flat).toContain("the user chose it so the Worker does not stop and wait for permission confirmations.");
+    expect(flat).toContain("the Worker's hard boundaries are the only barrier, and they stay binding:");
+    for (const rule of [
+      "no commit, push or pull request",
+      "ask the user before installing dependencies or using the network",
+      "no destructive commands",
+      "never read secrets",
+    ]) {
+      expect(flat, rule).toContain(rule);
+    }
+    const boundaries = section("Hard boundaries").replace(/\s+/g, " ");
+    expect(boundaries).toContain("**Do not approve permission requests on the user's behalf** — neither your own nor any other agent's.");
+    expect(boundaries).toContain("its hard boundaries, not permission prompts, are what keep it in bounds.");
   });
 
   it("supervises the guardrail budgets per size tier", () => {
