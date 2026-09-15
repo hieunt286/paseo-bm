@@ -42,6 +42,8 @@ let paseoHome: string;
 let payloadRoot: string;
 let argvLog: string;
 let scriptFile: string;
+/** The fake daemon's plugin catalogue (BM_FAKE_STATE), for runs that opt in with `state: true`. */
+let stateFile: string;
 let scope: WriteScopeHarness | undefined;
 
 interface Scripted {
@@ -127,6 +129,7 @@ beforeEach(() => {
   payloadRoot = join(outside, "package", "plugin");
   argvLog = join(outside, "argv.log");
   scriptFile = join(outside, "script.json");
+  stateFile = join(outside, "paseo-state.json");
   writePayload(VERSION);
   writePaseoConfig({ pluginsEnabled: true, daemon: { mcp: { injectIntoAgents: true } } });
   script();
@@ -148,7 +151,7 @@ interface RunResult {
 
 async function install(
   argv: readonly string[],
-  options: { tty?: TtyInfo; confirm?: boolean[]; version?: string; guard?: boolean } = {},
+  options: { tty?: TtyInfo; confirm?: boolean[]; version?: string; guard?: boolean; state?: boolean } = {},
 ): Promise<RunResult> {
   const tty = options.tty ?? NO_TTY;
   const prompter = new ScriptedPrompter({ confirm: options.confirm ?? [] }, { interactive: tty.interactive });
@@ -176,7 +179,12 @@ async function install(
     stderr: (text) => {
       err += text;
     },
-    env: { PATH: `${FAKE_DIR}:${process.env["PATH"] ?? ""}`, BM_FAKE_ARGV_LOG: argvLog, BM_FAKE_SCRIPT: scriptFile },
+    env: {
+      PATH: `${FAKE_DIR}:${process.env["PATH"] ?? ""}`,
+      BM_FAKE_ARGV_LOG: argvLog,
+      BM_FAKE_SCRIPT: scriptFile,
+      ...(options.state === true ? { BM_FAKE_STATE: stateFile } : {}),
+    },
     tty,
     createPrompter: () => prompter,
     version: options.version ?? VERSION,
@@ -384,37 +392,47 @@ describe("install — situations that need an explicit answer", () => {
     expect(scope?.writes).toEqual([]);
   });
 
-  it("an update between two prereleases without a terminal is an upgrade: exit 0, side by side (bm-d3q)", async () => {
+  it("an update between two prereleases without a terminal is an upgrade: exit 0, side by side (bm-d3q, bm-vey)", async () => {
     const previous = "0.1.0-alpha.0";
     const next = "0.1.0-alpha.1";
+    // The fake daemon behaves like Paseo 0.8: an id that is already configured is refused.
+    writeFileSync(stateFile, JSON.stringify({ plugins: {} }));
     writePayload(previous);
-    script({
-      "plugin install": {
-        stdout: JSON.stringify({ id: "paseo-bm", path: join(installHome, "plugin", previous), enabled: true, status: "running" }),
-      },
+    const first = await install(["install", "--apply", "--yes", "--skip-skills-check", "--json"], {
+      version: previous,
+      guard: false,
+      state: true,
     });
-    const first = await install(["install", "--apply", "--yes", "--skip-skills-check", "--json"], { version: previous, guard: false });
     expect(first.code).toBe(EXIT_CODES.ok);
+    rmSync(argvLog, { force: true });
 
     writePayload(next);
-    script({
-      "plugin ls": {
-        stdout: JSON.stringify([{ id: "paseo-bm", path: join(installHome, "plugin", previous), enabled: true, status: "running" }]),
-      },
-      "plugin install": {
-        stdout: JSON.stringify({ id: "paseo-bm", path: join(installHome, "plugin", next), enabled: true, status: "running" }),
-      },
-    });
-    const run = await install(["install", "--apply", "--yes", "--skip-skills-check", "--json"], { version: next });
+    const run = await install(["install", "--apply", "--yes", "--skip-skills-check", "--json"], { version: next, state: true });
     const report = json(run.out);
     expect(run.code).toBe(EXIT_CODES.ok);
     expect(report.mode).toBe("applied");
     expect("error" in report.result).toBe(false);
+    expect(report.result.pluginState).toBe("running");
     expect(run.prompter.counts.total).toBe(0);
     expect(existsSync(join(installHome, "plugin", previous, "index.server.ts"))).toBe(true);
     expect(existsSync(join(installHome, "plugin", next, "index.server.ts"))).toBe(true);
-    const record = installedRecord() as { version: string; versions: { version: string; active: boolean }[] };
+
+    // Paseo 0.8 cannot re-point a directory plugin: remove, then install the new directory.
+    const registration = calls().filter((argv) => argv[0] === "plugin" && (argv[1] === "remove" || argv[1] === "install"));
+    expect(registration).toEqual([
+      ["plugin", "remove", "paseo-bm", "--json"],
+      ["plugin", "install", join(installHome, "plugin", next), "--id", "paseo-bm", "--json"],
+    ]);
+    const daemon = JSON.parse(readFileSync(stateFile, "utf8")) as { plugins: Record<string, { path: string; status: string }> };
+    expect(daemon.plugins["paseo-bm"]).toEqual({ path: join(installHome, "plugin", next), status: "running" });
+
+    const record = installedRecord() as {
+      version: string;
+      paseo: { pluginDir: string };
+      versions: { version: string; active: boolean }[];
+    };
     expect(record.version).toBe(next);
+    expect(record.paseo.pluginDir).toBe(join(installHome, "plugin", next));
     expect(record.versions).toHaveLength(2);
     expect(record.versions).toEqual(
       expect.arrayContaining([
@@ -422,6 +440,46 @@ describe("install — situations that need an explicit answer", () => {
         expect.objectContaining({ version: next, active: true }),
       ]),
     );
+  });
+
+  it("an update whose new plugin fails to start: exit 7 with Paseo's reason, the old version registered and recorded (bm-vey)", async () => {
+    const previous = "0.1.0-alpha.0";
+    const next = "0.1.0-alpha.1";
+    const reason = "Plugin failed to start: paseo-bm";
+    writeFileSync(
+      stateFile,
+      JSON.stringify({ plugins: {}, installFailures: { [join(installHome, "plugin", next)]: reason } }),
+    );
+    writePayload(previous);
+    const first = await install(["install", "--apply", "--yes", "--skip-skills-check", "--json"], {
+      version: previous,
+      guard: false,
+      state: true,
+    });
+    expect(first.code).toBe(EXIT_CODES.ok);
+    const before = installedRecord() as { version: string; paseo: { pluginDir: string } };
+
+    writePayload(next);
+    const run = await install(["install", "--apply", "--yes", "--skip-skills-check", "--json"], { version: next, state: true });
+    const report = json(run.out);
+    expect(run.code).toBe(EXIT_CODES.pluginLoadFailed);
+    expect(report.result.error?.code).toBe("E_PLUGIN_LOAD_FAILED");
+    expect(report.result.error?.message).toContain(`Request failed: ${reason}`);
+    expect(report.result.error?.message).toContain("was restored");
+    expect(report.result.pluginState).toBe("running");
+
+    const daemon = JSON.parse(readFileSync(stateFile, "utf8")) as { plugins: Record<string, { path: string; status: string }> };
+    expect(daemon.plugins["paseo-bm"]).toEqual({ path: join(installHome, "plugin", previous), status: "running" });
+    const record = installedRecord() as {
+      version: string;
+      paseo: { pluginDir: string };
+      versions: { version: string; active: boolean }[];
+    };
+    expect(record.version).toBe(previous);
+    expect(record.paseo.pluginDir).toBe(before.paseo.pluginDir);
+    expect(record.versions.filter((entry) => entry.active).map((entry) => entry.version)).toEqual([previous]);
+    // The new payload stays on disk for the next attempt.
+    expect(existsSync(join(installHome, "plugin", next, "index.server.ts"))).toBe(true);
   });
 
   it("--apply removes a partial payload of the same version before planning", async () => {

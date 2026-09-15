@@ -22,8 +22,27 @@
  *                      exit } }, e.g. "daemon status", "plugin install". A
  *                      subcommand with no entry falls back to the variables
  *                      above. Only read when set, so older tests are unchanged.
+ *   BM_FAKE_STATE      path to a JSON file standing in for the daemon's plugin
+ *                      catalogue (bm-vey). When set, `plugin ls`, `plugin
+ *                      install` and `plugin remove` are answered from it and
+ *                      change it, ahead of BM_FAKE_SCRIPT, the way Paseo 0.8
+ *                      behaves:
+ *                        { "plugins": { "<id>": { "path", "status" } },
+ *                          "status": "running",          // status of a new install
+ *                          "installFailures": { "<dir>": "<reason>" } }
+ *                      - install of an id that is already configured fails
+ *                        with Paseo's "already configured" error, changing
+ *                        nothing;
+ *                      - install of a directory listed in installFailures
+ *                        fails with that reason, and the entry stays
+ *                        configured with status "failed" (Paseo 0.8 writes the
+ *                        entry before starting the plugin and keeps it);
+ *                      - remove deletes the entry, and fails when there is none.
+ *                      Failures print Paseo's JSON error document on stdout
+ *                      and exit 1.
  */
 const fs = require("node:fs");
+const path = require("node:path");
 
 const argv = process.argv.slice(2);
 
@@ -40,6 +59,52 @@ if (process.env.BM_FAKE_PID_FILE) {
 
 if (process.env.BM_FAKE_TOUCH) {
   fs.writeFileSync(process.env.BM_FAKE_TOUCH, "the fake CLI ran\n");
+}
+
+if (process.env.BM_FAKE_STATE && argv[0] === "plugin" && ["ls", "install", "remove"].includes(argv[1])) {
+  const statePath = process.env.BM_FAKE_STATE;
+  const state = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, "utf8")) : {};
+  state.plugins = state.plugins || {};
+  const save = () => fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
+  const fail = (message) => {
+    process.stdout.write(
+      JSON.stringify({ error: { name: "DaemonRpcError", code: "handler_error", message: `Request failed: ${message}` } }) + "\n",
+    );
+    process.exit(1);
+  };
+  const summary = (id) => ({ id, path: state.plugins[id].path, enabled: true, status: state.plugins[id].status });
+
+  if (argv[1] === "ls") {
+    process.stdout.write(JSON.stringify(Object.keys(state.plugins).map(summary)));
+    process.exit(0);
+  }
+  if (argv[1] === "install") {
+    const directory = path.resolve(argv[2]);
+    const idAt = argv.indexOf("--id");
+    const id = idAt >= 0 ? argv[idAt + 1] : "paseo-bm";
+    if (state.plugins[id]) {
+      fail(`Plugin ID "${id}" is already configured; choose another ID with --id`);
+    }
+    const failure = (state.installFailures || {})[directory];
+    if (failure !== undefined) {
+      state.plugins[id] = { path: directory, status: "failed" };
+      save();
+      fail(failure);
+    }
+    state.plugins[id] = { path: directory, status: state.status || "running" };
+    save();
+    process.stdout.write(JSON.stringify(summary(id)));
+    process.exit(0);
+  }
+  // remove
+  const id = argv[2];
+  if (!state.plugins[id]) {
+    fail(`Plugin "${id}" is not configured`);
+  }
+  delete state.plugins[id];
+  save();
+  process.stdout.write(JSON.stringify({ id }));
+  process.exit(0);
 }
 
 let scripted;

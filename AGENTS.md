@@ -111,6 +111,7 @@ Checked against a live daemon, Paseo CLI/daemon 0.8.0:
 - An agent created by another agent is still a first-class agent in the workspace — it only carries a `paseo.parent-agent-id` label. The user can open, message, stop, archive or delete it directly.
 - `daemon.mcp.injectIntoAgents` defaults to **off**, and turning it on grants Paseo tools to **every** agent on the machine, not just ours.
 - Never run `paseo daemon restart` or `stop`: it can kill a running agent.
+- `paseo plugin install` refuses an id that is already configured (`Plugin ID "<id>" is already configured; choose another ID with --id`), and there is no command that changes a directory plugin's path (`update` is Git-only). A directory plugin can only be re-pointed by `paseo plugin remove <id>` followed by `paseo plugin install <new dir> --id <id>`. If the new plugin fails to start, Paseo keeps the `plugins[id]` entry it already wrote, so a fallback must `remove` again before reinstalling the old directory. On failure, `--json` prints `{"error": {"name": "DaemonRpcError", "code": "handler_error", "message": "Request failed: <reason>"}}` and exits non-zero.
 - A `daemon.agentProfiles[]` entry is `{ id, name, provider, model?, icon?, color?, modeId?, thinkingOptionId?, featureValues?, notes? }` (Zod schema in the Paseo 0.8 app bundle, passthrough). The key is **`provider`** and it is required — there is no `providerId`. `providerId` exists only in our own `install.json` role records.
 
 ## Safety boundaries when working in this repo

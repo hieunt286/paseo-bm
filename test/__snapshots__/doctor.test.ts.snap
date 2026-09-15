@@ -62,6 +62,12 @@ exports[`runDoctor — a healthy install > renders the JSON document of Design �
       "remediation": ""
     },
     {
+      "id": "plugin-path",
+      "severity": "ok",
+      "message": "Paseo loads the plugin \`paseo-bm\` from the active payload (version 0.1.0).",
+      "remediation": ""
+    },
+    {
       "id": "plugins-enabled",
       "severity": "ok",
       "message": "Paseo's plugin switch (\`pluginsEnabled\`) is on.",
@@ -253,6 +259,12 @@ exports[`runDoctor — an install that has drifted > renders the JSON document o
       "severity": "error",
       "message": "Paseo reports the plugin \`paseo-bm\` with status \`disabled\`, not running.",
       "remediation": "Run \`npx paseo-bm install --apply --enable-plugins\` to consent to both halves of that trust boundary: enabling plugins and granting Paseo tools to agents."
+    },
+    {
+      "id": "plugin-path",
+      "severity": "ok",
+      "message": "Paseo loads the plugin \`paseo-bm\` from the active payload (version 0.0.9).",
+      "remediation": ""
     },
     {
       "id": "plugins-enabled",

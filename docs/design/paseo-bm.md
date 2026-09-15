@@ -326,7 +326,7 @@ Cảnh báo về skills và beads CLI không bao giờ đổi mã thoát. Kiểm
 
 `result.error` **chỉ có mặt khi lệnh thất bại** với một mã lỗi trong sổ đăng ký; lệnh thành công thì không có khoá này, nên script kiểm `"error" in result` là biết lệnh lỗi hay không *(errata 2026-09-15)*.
 
-`doctor` thay `actions[]` bằng `checks[]` gồm `{ id, severity: "ok" | "warn" | "error", message, remediation }`. `uninstall` dùng `actions[]` với `kind: "delete" | "keep" | "config"`.
+`doctor` thay `actions[]` bằng `checks[]` gồm `{ id, severity: "ok" | "warn" | "error", message, remediation }`. Check `plugin-path` (đứng sau `plugin-status`) so thư mục Paseo đang nạp plugin với thư mục của phiên bản active trong `install.json`: lệch là `error`, Paseo không báo đường dẫn là `warn`; `install-version` báo `error` cả khi `version` của hồ sơ khác phiên bản active *(errata bm-p48, 2026-09-15 — sau lần cập nhật hỏng, doctor từng báo `ok` dù plugin vẫn chạy bản cũ)*. `uninstall` dùng `actions[]` với `kind: "delete" | "keep" | "config"`.
 
 Khi bật `--json`, stdout chỉ chứa đúng một tài liệu JSON; output của tiến trình con đi ra **stderr**.
 
@@ -410,6 +410,24 @@ cli → preflight ─(đạt)→ record.load → planner ─→ report(xem trư�
 ```
 
 *Errata 2026-09-15:* quyền công cụ (`daemon.mcp.injectIntoAgents`) được bật cùng `pluginsEnabled` sau **một** cảnh báo và **một** lần đồng ý (ADR-006 quyết định 3, 4). Câu hỏi cấu hình vai trò và kiểm tồn tại provider/model chạy **trước** bản xem trước, để bản xem trước liệt kê được vai trò sẽ đăng ký và `E_PROVIDER_UNAVAILABLE` ra trước mọi thao tác ghi; thứ tự **ghi** giữ như sơ đồ.
+
+*Errata 2026-09-15 (bm-vey) — cập nhật sang phiên bản mới:* Paseo 0.8 từ chối `paseo plugin install` khi id đã được cấu hình (`Plugin ID "paseo-bm" is already configured; choose another ID with --id`) và không có lệnh đổi đường dẫn của plugin dạng thư mục (`update` chỉ cho Git). Vì vậy bước `paseo plugin install <dir> --id paseo-bm --json` trong sơ đồ trên được thay bằng:
+
+```
+đọc `paseo plugin ls --json` (đã có trong luồng) → thư mục Paseo đang dùng (thiếu thì lấy paseo.pluginDir của hồ sơ)
+  ├─ chưa cấu hình ─────────────→ install <dir mới>
+  ├─ đã trỏ đúng <dir mới> ─────→ không gọi Paseo (idempotent)
+  └─ trỏ thư mục khác ──────────→ remove paseo-bm → install <dir mới>
+                                        │ lỗi
+                                        ▼
+                  remove paseo-bm (Paseo 0.8 giữ mục của plugin không khởi động được; lỗi ở bước này được bỏ qua)
+                  → install <dir cũ> → báo E_PLUGIN_LOAD_FAILED (mã 7) kèm kết quả đường lùi
+```
+
+- Hai đường dẫn được so sau `path.resolve`, không `realpath`, giống cách planner so (`resolve(state.dir) !== versionDirAbsolute`).
+- Thành công: `versions[].active` và `paseo.pluginDir` chuyển sang bản mới.
+- Đăng ký bản mới lỗi (kể cả khi `remove` lỗi): hồ sơ giữ `paseo.pluginDir` và `versions[].active` cũ, còn `version` (applier đã ghi bản mới trước bước đăng ký) được ghi trả về bản cũ; payload mới vẫn giữ trên đĩa. Thông điệp lỗi chứa **nguyên văn** lý do Paseo (trường `error.message` trong JSON lỗi của `--json`, không có thì lấy stderr) và nói rõ đường lùi đã khôi phục bản cũ hay cũng lỗi — nếu cũng lỗi thì có cả hai lý do và lệnh để đăng ký lại thư mục cũ.
+- Plugin vắng mặt vài giây giữa `remove` và `install`; chấp nhận vì có đường lùi. Không bao giờ restart/stop daemon và không sửa tay khoá `plugins` trong `config.json`.
 
 **Thứ tự "đăng ký plugin trước, bật công tắc sau" đã kiểm chứng** (2026-09-14): `paseo plugin install` thành công với mã 0 ngay cả khi `pluginsEnabled` chưa đặt, trả `status: "disabled"`. Nghiệm thu phải đọc `status`, không đọc `enabled`.
 
@@ -527,3 +545,5 @@ CI **không** chạy agent thật: không xác định, tốn tiền, và cần 
 | 2026-09-15 | hieu.nt10 (soạn bởi Claude) | **Errata khi implement (tiếp).** §4.2: CLI `skills` 1.5.26 gọi agent Claude là `claude-code` và từ chối `claude`; owner chốt giữ mặc định `claude,codex` phía paseo-bm và đổi `claude` → `claude-code` khi dựng lệnh `skills`. §9.1: bỏ bước hỏi quyền công cụ riêng (đã gộp theo ADR-006 quyết định 4) và ghi rõ câu hỏi vai trò chạy trước bản xem trước |
 | 2026-09-15 | hieu.nt10 (soạn bởi Claude) | **Errata bm-dnc theo quyết định owner.** §5: `roles.describe` đọc cấu hình Paseo đang có hiệu lực (`agents.providers.bm-*`, `daemon.agentProfiles[bm-*]`) qua SDK thay vì `install.json`; `instructionsPath` là tên chỉ dẫn nhúng. Lý do: Paseo 0.8 biên dịch `index.server.ts` thành bundle CJS bằng esbuild và fork tiến trình con không đặt cwd, nên mã server không biết thư mục payload (`import.meta.url` rỗng → plugin không nạp được với lỗi `Invalid URL`). Nội dung `roles/manager.md` được nhúng vào bundle lúc build (`plugin/server/manager-instructions.ts` sinh bởi `scripts/generate-role-instructions.mjs`); file md vẫn nằm trong payload |
 | 2026-09-15 | hieu.nt10 (soạn bởi Claude) | **Errata bm-tm2 theo quyết định owner (ghi trạng thái trước và khôi phục đúng).** §3.2 thêm hai trường tuỳ chọn `paseo.pluginsEnabledPrevious` và `paseo.createdConfigContainers` (`schemaVersion` vẫn 1, hồ sơ cũ vẫn đọc được và gỡ như trước). Lý do: nghiệm thu Phase 1a thấy sau khi gỡ `config.json` có `pluginsEnabled: false` và `agents.providers: {}` dù trước khi cài không có hai khoá đó, trái M-5 |
+| 2026-09-15 | hieu.nt10 (soạn bởi Claude) | **Errata bm-vey (cập nhật phiên bản).** §9.1: Paseo 0.8 từ chối `plugin install` khi id `paseo-bm` đã cấu hình và không có lệnh đổi đường dẫn plugin dạng thư mục, nên khi plugin đang trỏ thư mục khác thì cập nhật = `plugin remove` rồi `plugin install <dir mới>`; trỏ đúng rồi thì không gọi Paseo. Đăng ký bản mới lỗi → cài lại thư mục cũ (remove trước vì Paseo giữ mục lỗi), hồ sơ giữ `paseo.pluginDir`/`versions[].active` và ghi trả `version` cũ, lỗi `E_PLUGIN_LOAD_FAILED` (mã 7) kèm nguyên văn lý do Paseo và kết quả đường lùi. Lý do: nghiệm thu Phase 1a lượt 5 cập nhật 0.1.0-alpha.0 → 0.1.0-alpha.1 thoát mã 7 |
+| 2026-09-15 | hieu.nt10 (soạn bởi Claude) | **Errata bm-p48.** §4.4: thêm check `plugin-path` của `doctor` và mở rộng `install-version` để phát hiện plugin chạy từ thư mục khác phiên bản active hoặc hồ sơ ghi phiên bản khác bản active |
