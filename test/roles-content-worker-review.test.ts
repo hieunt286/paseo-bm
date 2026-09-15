@@ -53,6 +53,12 @@ describe("worker.md — role instructions override any skill (bm-fbp)", () => {
     expect(text).toContain("**Never use a review skill (such as `code-review`) or review the work yourself as a substitute.**");
   });
 
+  it("point 7: a stop cancels running Reviewers with cancel_agent and nothing else, even when a skill would continue (bm-wq6)", () => {
+    expect(text).toContain("7. **When you are stopped, cancel your running Reviewers and do nothing else.**");
+    expect(text).toContain("Use Paseo's `cancel_agent` tool, never archive, kill or delete an agent");
+    expect(text).toContain("even when a skill would continue the work (Hard boundaries group 6)");
+  });
+
   it("point 2: Small creates no new document file, not even a feature-workflow quick brief or plan", () => {
     expect(text).toContain("**Small creates no new document file at all**");
     expect(text).toContain("not even the quick brief or quick plan that feature-workflow's lightweight variant suggests");

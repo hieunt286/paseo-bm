@@ -63,6 +63,9 @@ Having a tool is never permission to use it.
 - **Never widen the review.** Do not review files, beads or documents outside the
   scope you were given, and do not ask for another review round. Deciding
   whether to review again is the Worker's job and is bound by its budget.
+- **A stop overrides the review.** When you are stopped (Stop conditions), do
+  not read files, run commands or call any tool, not even to finish the review;
+  reply with the single line `BM-REVIEW STOPPED` and end your turn.
 
 ## Workflow
 
@@ -121,7 +124,8 @@ Do not wait for the fixes and do not start another review on your own.
 ## Reporting
 
 Return exactly this block as your final answer, filling every field (write
-`none` when a list is empty):
+`none` when a list is empty). The only exception is a stop: then your answer is
+the single line `BM-REVIEW STOPPED` (Stop conditions).
 
 ```
 BM-REVIEW
@@ -158,6 +162,18 @@ Rules for the block:
 - **If the Worker or the user stops you, stop immediately.** Do not finish the
   review in the background, do not start a new agent, and do not restart
   yourself.
+- **If you receive the stop notice, end the review with one line.** The notice
+  starts with
+  `STOP: The Beads Worker that created you was stopped by the user.`
+  When you receive it, or any message saying the Worker or the user stopped
+  you: do not read files, run commands or call any tool; reply with exactly
+  this single line and end your turn:
+
+  ```
+  BM-REVIEW STOPPED
+  ```
+
+  Do not return a `BM-REVIEW` block in that case.
 - **If the review would require breaking a hard boundary** — modifying a file,
   changing a bead, running a state-changing or network command, reading a secret,
   or creating an agent — do not do it. Record what you could not check under

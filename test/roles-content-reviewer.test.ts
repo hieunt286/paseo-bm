@@ -115,6 +115,25 @@ describe("roles/reviewer.md content", () => {
     expect(stop).toMatch(/\*\*After you return the result, stop\.\*\*/);
     expect(stop).toMatch(/\*\*If the Worker or the user stops you, stop immediately\.\*\*/);
   });
+
+  // Bug bm-wq6: the paseo-bm plugin sends this notice to a running Reviewer
+  // whose Worker was stopped; the first sentence must match it byte for byte.
+  it("recognises the plugin's stop notice and replies with a single BM-REVIEW STOPPED line (bm-wq6)", () => {
+    expect(text).toContain("The Beads Worker that created you was stopped by the user.");
+    expect(text).toContain("BM-REVIEW STOPPED");
+
+    const stop = section(text, "Stop conditions");
+    expect(stop).toContain("**If you receive the stop notice, end the review with one line.**");
+    expect(stop).toContain("`STOP: The Beads Worker that created you was stopped by the user.`");
+    expect(stop).toMatch(/or any message saying the Worker or the user stopped\s+you: do not read files, run commands or call any tool/);
+    expect(stop).toMatch(/reply with exactly\s+this single line and end your turn:\s+```\s+BM-REVIEW STOPPED\s+```/);
+    expect(stop).toMatch(/Do not return a `BM-REVIEW` block in that case\./);
+
+    const boundaries = section(text, "Hard boundaries");
+    expect(boundaries).toMatch(/\*\*A stop overrides the review\.\*\*/);
+    expect(boundaries).toMatch(/reply with the single line `BM-REVIEW STOPPED` and end your turn/);
+    expect(section(text, "Reporting")).toMatch(/The only exception is a stop: then your answer is\s+the single line `BM-REVIEW STOPPED`/);
+  });
 });
 
 describe("worker.md agrees with the Reviewer on batches and re-review", () => {

@@ -1,5 +1,6 @@
 import type { PluginBeforeRequests, PluginServerContext } from "@getpaseo/plugin/server";
 import { MANAGER_INSTRUCTIONS } from "./manager-instructions";
+import { providerId } from "./provider-id";
 import { REVIEWER_INSTRUCTIONS } from "./reviewer-instructions";
 import { WORKER_INSTRUCTIONS } from "./worker-instructions";
 
@@ -23,16 +24,6 @@ export const ROLE_PROMPT_SEPARATOR = "\n\n---\n\n";
 
 /** The `agent.create` before-request the daemon hands to the hook. */
 export type AgentCreateRequest = PluginBeforeRequests["agent.create"];
-
-/**
- * Provider id of a config: `bm-worker` and `bm-worker/<model>` both name the
- * `bm-worker` provider.
- */
-function providerId(provider: unknown): string | null {
-  if (typeof provider !== "string") return null;
-  const slash = provider.indexOf("/");
-  return slash === -1 ? provider : provider.slice(0, slash);
-}
 
 /**
  * Returns the request with the role instructions in `config.systemPrompt`, or

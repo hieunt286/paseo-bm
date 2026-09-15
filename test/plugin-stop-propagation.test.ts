@@ -1,0 +1,362 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import contribute from "../plugin/index.server";
+import {
+  REVIEWER_STOP_NOTICE,
+  STOP_RECHECK_MS,
+  propagateWorkerStop,
+} from "../plugin/server/stop-propagation";
+
+/**
+ * bm-wq6 (REQ-026f): when the user stops a Beads Worker, Paseo only cancels the
+ * Worker's turn. The plugin hears `agent.turn_ended` with a canceled outcome and
+ * interrupts each running Reviewer of that Worker with a fixed stop notice.
+ */
+
+const WORKER = "worker-1";
+const WS = "ws-1";
+
+type Snapshot = {
+  id: string;
+  workspaceId?: string;
+  status: string;
+  labels: Record<string, string>;
+  archivedAt?: string | null;
+};
+type Event = {
+  agent: { id: string; workspaceId: string | null; parentAgentId: string | null; provider: string; cwd: string; title: string | null };
+  turnId: string | null;
+  outcome: { kind: "completed" } | { kind: "failed"; error: { message: string } } | { kind: "canceled"; reason: string };
+  timeline: readonly unknown[];
+};
+type OnHandler = (event: Event, context: { paseo: unknown; signal: AbortSignal }) => Promise<void> | void;
+
+function reviewer(id: string, overrides: Partial<Snapshot> = {}, labels: Record<string, string> = {}): Snapshot {
+  return {
+    id,
+    workspaceId: WS,
+    status: "running",
+    labels: { "bm.role": "reviewer", "paseo.parent-agent-id": WORKER, ...labels },
+    ...overrides,
+  };
+}
+
+function event(provider = "bm-worker", outcome: Event["outcome"] = { kind: "canceled", reason: "interrupted" }): Event {
+  return {
+    agent: { id: WORKER, workspaceId: WS, parentAgentId: "manager-1", provider, cwd: "/repo", title: "Beads Worker" },
+    turnId: "turn-1",
+    outcome,
+    timeline: [],
+  };
+}
+
+/**
+ * Fake `paseo`: `list` ignores the filter (so client-side filtering is
+ * exercised) and pages two entries at a time; `ref(id).refresh()` walks a
+ * per-agent status script, sticking on its last value.
+ */
+function fakePaseo(options: {
+  agents: Snapshot[];
+  statuses?: Record<string, string[]>;
+  listError?: Error;
+  sendError?: Record<string, Error>;
+}) {
+  const listCalls: unknown[] = [];
+  const sends: Array<{ id: string; text: string }> = [];
+  const refreshes: string[] = [];
+  const scripts = new Map(Object.entries(options.statuses ?? {}).map(([id, list]) => [id, [...list]]));
+  const byId = new Map(options.agents.map((agent) => [agent.id, agent]));
+  const handles = new Map<string, { refresh: ReturnType<typeof vi.fn>; send: ReturnType<typeof vi.fn> }>();
+
+  const statusOf = (id: string): string => {
+    const script = scripts.get(id);
+    if (script && script.length > 1) return script.shift()!;
+    if (script && script.length === 1) return script[0]!;
+    return byId.get(id)?.status ?? "idle";
+  };
+
+  const paseo = {
+    agents: {
+      list: vi.fn(async (opts: { page: { limit: number; cursor?: string } }) => {
+        listCalls.push(opts);
+        if (options.listError) throw options.listError;
+        const start = opts.page.cursor === undefined ? 0 : Number(opts.page.cursor);
+        const entries = options.agents.slice(start, start + 2).map((agent) => ({ agent }));
+        const next = start + 2 < options.agents.length ? String(start + 2) : null;
+        return { entries, pageInfo: { nextCursor: next, hasMore: next !== null } };
+      }),
+      ref: vi.fn((id: string) => {
+        let handle = handles.get(id);
+        if (!handle) {
+          handle = {
+            refresh: vi.fn(async () => {
+              refreshes.push(id);
+              const base = byId.get(id) ?? { id, workspaceId: WS, labels: {}, status: "idle" };
+              return { agent: { ...base, status: statusOf(id) }, project: null };
+            }),
+            send: vi.fn(async (text: string) => {
+              const error = options.sendError?.[id];
+              if (error) throw error;
+              sends.push({ id, text });
+            }),
+          };
+          handles.set(id, handle);
+        }
+        return handle;
+      }),
+    },
+  };
+  return { paseo, sends, listCalls, refreshes };
+}
+
+function fakeServer(options: { withOn?: boolean } = {}) {
+  const hooks = new Map<string, OnHandler>();
+  const removers: string[] = [];
+  const server: Record<string, unknown> = {
+    handle: vi.fn(),
+    before: vi.fn(() => () => {}),
+  };
+  if (options.withOn !== false) {
+    server.on = vi.fn((name: string, handler: OnHandler) => {
+      hooks.set(name, handler);
+      return () => {
+        removers.push(name);
+        hooks.delete(name);
+      };
+    });
+  }
+  return { server, hooks, removers };
+}
+
+function setup() {
+  const fake = fakeServer();
+  const cleanup = contribute(fake.server as unknown as Parameters<typeof contribute>[0]);
+  const hook = fake.hooks.get("agent.turn_ended");
+  expect(hook).toBeTypeOf("function");
+  const run = async (ev: Event, paseo: unknown, signal = new AbortController().signal) => {
+    const pending = Promise.resolve(hook!(ev, { paseo, signal }));
+    await vi.advanceTimersByTimeAsync(STOP_RECHECK_MS * 4);
+    await expect(pending).resolves.toBeUndefined();
+  };
+  return { ...fake, cleanup, run };
+}
+
+beforeEach(() => {
+  vi.useFakeTimers();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+describe("on(\"agent.turn_ended\") stop propagation", () => {
+  it("exports the exact stop notice", () => {
+    expect(REVIEWER_STOP_NOTICE).toBe(
+      'STOP: The Beads Worker that created you was stopped by the user. Stop this review now: do not read files, run commands or call any tool; reply with the single line "BM-REVIEW STOPPED" and end your turn.',
+    );
+    expect(STOP_RECHECK_MS).toBe(500);
+  });
+
+  it("registers exactly one agent.turn_ended hook", () => {
+    const { server, hooks } = setup();
+    expect(server.on).toHaveBeenCalledTimes(1);
+    expect([...hooks.keys()]).toEqual(["agent.turn_ended"]);
+  });
+
+  it("sends the notice only to the stopped Worker's running Reviewers (idle Worker on refresh)", async () => {
+    const { run } = setup();
+    const { paseo, sends, listCalls } = fakePaseo({
+      agents: [
+        reviewer("rev-a"),
+        reviewer("rev-other-worker", {}, { "paseo.parent-agent-id": "worker-2" }),
+        reviewer("rev-idle", { status: "idle" }),
+        reviewer("rev-archived", { archivedAt: "2026-09-15T12:00:00.000Z" }),
+        reviewer("child-not-reviewer", {}, { "bm.role": "worker" }),
+        reviewer("child-unlabeled", {}, { "bm.role": "" }),
+        reviewer("rev-other-ws", { workspaceId: "ws-2" }),
+        reviewer("rev-b"),
+      ],
+      statuses: { [WORKER]: ["idle"] },
+    });
+    await run(event(), paseo);
+    expect(sends).toEqual([
+      { id: "rev-a", text: REVIEWER_STOP_NOTICE },
+      { id: "rev-b", text: REVIEWER_STOP_NOTICE },
+    ]);
+    expect(listCalls.length).toBe(4);
+    expect(listCalls[0]).toEqual({
+      filter: { labels: { "paseo.parent-agent-id": WORKER, "bm.role": "reviewer" }, includeArchived: false },
+      page: { limit: 200 },
+    });
+    expect(listCalls[1]).toEqual(expect.objectContaining({ page: { limit: 200, cursor: "2" } }));
+  });
+
+  it("recognises a bm-worker/<model> provider", async () => {
+    const { run } = setup();
+    const { paseo, sends } = fakePaseo({ agents: [reviewer("rev-a")], statuses: { [WORKER]: ["idle"] } });
+    await run(event("bm-worker/gpt-5.6-sol"), paseo);
+    expect(sends).toEqual([{ id: "rev-a", text: REVIEWER_STOP_NOTICE }]);
+  });
+
+  it("does nothing when the Worker is still running after the re-check (a message replaced the turn)", async () => {
+    const { run } = setup();
+    const { paseo, sends, refreshes } = fakePaseo({
+      agents: [reviewer("rev-a")],
+      statuses: { [WORKER]: ["running", "running"] },
+    });
+    await run(event(), paseo);
+    expect(refreshes.filter((id) => id === WORKER)).toHaveLength(2);
+    expect(paseo.agents.list).not.toHaveBeenCalled();
+    expect(sends).toEqual([]);
+  });
+
+  it("waits STOP_RECHECK_MS once, then sends when the Worker has gone idle", async () => {
+    const { hooks } = setup();
+    const { paseo, sends, refreshes } = fakePaseo({
+      agents: [reviewer("rev-a")],
+      statuses: { [WORKER]: ["running", "idle"] },
+    });
+    const pending = Promise.resolve(hooks.get("agent.turn_ended")!(event(), { paseo, signal: new AbortController().signal }));
+    await vi.advanceTimersByTimeAsync(STOP_RECHECK_MS - 1);
+    expect(refreshes.filter((id) => id === WORKER)).toHaveLength(1);
+    expect(sends).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    await pending;
+    expect(refreshes.filter((id) => id === WORKER)).toHaveLength(2);
+    expect(sends).toEqual([{ id: "rev-a", text: REVIEWER_STOP_NOTICE }]);
+  });
+
+  it.each([
+    ["completed outcome", event("bm-worker", { kind: "completed" })],
+    ["failed outcome", event("bm-worker", { kind: "failed", error: { message: "boom" } })],
+    ["bm-reviewer", event("bm-reviewer")],
+    ["bm-manager", event("bm-manager/opus")],
+    ["claude", event("claude")],
+    ["bm-workers", event("bm-workers")],
+  ])("ignores %s", async (_name, ev) => {
+    const { run } = setup();
+    const { paseo, sends } = fakePaseo({ agents: [reviewer("rev-a")], statuses: { [WORKER]: ["idle"] } });
+    await run(ev, paseo);
+    expect(paseo.agents.ref).not.toHaveBeenCalled();
+    expect(paseo.agents.list).not.toHaveBeenCalled();
+    expect(sends).toEqual([]);
+  });
+
+  it("skips a Reviewer that became idle before the send", async () => {
+    const { run } = setup();
+    const { paseo, sends } = fakePaseo({
+      agents: [reviewer("rev-a"), reviewer("rev-b")],
+      statuses: { [WORKER]: ["idle"], "rev-a": ["idle"] },
+    });
+    await run(event(), paseo);
+    expect(sends).toEqual([{ id: "rev-b", text: REVIEWER_STOP_NOTICE }]);
+  });
+
+  it("resolves and logs when list rejects", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { run } = setup();
+    const { paseo, sends } = fakePaseo({ agents: [reviewer("rev-a")], statuses: { [WORKER]: ["idle"] }, listError: new Error("daemon gone") });
+    await run(event(), paseo);
+    expect(sends).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toMatch(/^\[paseo-bm\] stop propagation: .*daemon gone/);
+  });
+
+  it("resolves, logs and carries on with the next Reviewer when send rejects", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { run } = setup();
+    const { paseo, sends } = fakePaseo({
+      agents: [reviewer("rev-a"), reviewer("rev-b")],
+      statuses: { [WORKER]: ["idle"] },
+      sendError: { "rev-a": new Error("send refused") },
+    });
+    await run(event(), paseo);
+    expect(sends).toEqual([{ id: "rev-b", text: REVIEWER_STOP_NOTICE }]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toMatch(/^\[paseo-bm\] stop propagation: .*rev-a.*send refused/);
+  });
+
+  it("resolves and logs when the Worker cannot be re-read", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { paseo, sends } = fakePaseo({ agents: [reviewer("rev-a")] });
+    const broken = {
+      agents: {
+        ...paseo.agents,
+        ref: (id: string) => ({ ...paseo.agents.ref(id), refresh: async () => Promise.reject(new Error("no snapshot")) }),
+      },
+    };
+    const { run } = setup();
+    await run(event(), broken);
+    expect(sends).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toMatch(/^\[paseo-bm\] stop propagation: .*no snapshot/);
+  });
+
+  it("sends nothing when the signal is already aborted", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { run } = setup();
+    const { paseo, sends } = fakePaseo({ agents: [reviewer("rev-a")], statuses: { [WORKER]: ["idle"] } });
+    const controller = new AbortController();
+    controller.abort();
+    await run(event(), paseo, controller.signal);
+    expect(sends).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("sends nothing when the signal aborts during the re-check wait", async () => {
+    const { paseo, sends } = fakePaseo({
+      agents: [reviewer("rev-a")],
+      statuses: { [WORKER]: ["running", "idle"] },
+    });
+    const controller = new AbortController();
+    const pending = propagateWorkerStop(event() as never, { paseo, signal: controller.signal });
+    await vi.advanceTimersByTimeAsync(STOP_RECHECK_MS / 2);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(STOP_RECHECK_MS);
+    await expect(pending).resolves.toBeUndefined();
+    expect(sends).toEqual([]);
+    expect(paseo.agents.list).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["undefined event", undefined],
+    ["empty event", {}],
+    ["event without agent", { outcome: { kind: "canceled", reason: "x" } }],
+  ])("never throws on a malformed event (%s)", async (_name, ev) => {
+    const { run } = setup();
+    const { paseo, sends } = fakePaseo({ agents: [reviewer("rev-a")] });
+    await run(ev as unknown as Event, paseo);
+    expect(sends).toEqual([]);
+  });
+
+  it("removes the hook on cleanup", () => {
+    const { cleanup, hooks, removers } = setup();
+    cleanup();
+    expect(removers).toEqual(["agent.turn_ended"]);
+    expect(hooks.size).toBe(0);
+  });
+
+  it("skips the hook safely, with one log line, on a host without on()", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { server } = fakeServer({ withOn: false });
+    let cleanup: () => void = () => {};
+    expect(() => {
+      cleanup = contribute(server as unknown as Parameters<typeof contribute>[0]);
+    }).not.toThrow();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toMatch(/agent\.turn_ended/);
+    expect(() => cleanup()).not.toThrow();
+  });
+
+  it("logs only the role hook's line on a host with no lifecycle hooks at all", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const server = { handle: vi.fn() };
+    let cleanup: () => void = () => {};
+    expect(() => {
+      cleanup = contribute(server as unknown as Parameters<typeof contribute>[0]);
+    }).not.toThrow();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toMatch(/agent\.create/);
+    expect(() => cleanup()).not.toThrow();
+  });
+});

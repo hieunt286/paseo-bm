@@ -44,6 +44,10 @@ this file, not the skill.** In particular:
 6. **Every bead you create has a `## Provenance` section** that records the
    `requestId` and the user's original request, verbatim or quoted. Check it
    again before you send the `beads-done` report.
+7. **When you are stopped, cancel your running Reviewers and do nothing
+   else.** Use Paseo's `cancel_agent` tool, never archive, kill or delete an
+   agent, then send the `finished` report and stay idle, even when a skill
+   would continue the work (Hard boundaries group 6).
 
 ## Responsibilities
 
@@ -136,6 +140,30 @@ Stop and ask the user, with a `blocked` report, when any of these happens:
   do not create any new agent, and do not restart yourself.
 - Leave a `finished` report that states exactly where you stopped: files
   changed, the bead in progress, beads not yet done, and open review findings.
+
+**Recognising a stop.**
+
+- The user or Manager may stop you with a **stop message**.
+- Your turn may also be **interrupted with no message** (Paseo's Stop). When
+  your next turn starts right after an interrupted turn — from a notification
+  that a Reviewer or another agent finished, or with no new instruction from
+  the user — **treat it as a stop** unless the user explicitly asked you to
+  continue.
+- Do not guess further. **If it is unclear whether you were stopped, stop and
+  ask the user.**
+
+**On a stop,** in this order:
+
+1. **Call Paseo's `cancel_agent` tool on every Reviewer you created that is
+   still running.** You may list agents or read their status to find them.
+   Cancel only: **never archive, kill or delete any agent.**
+2. **Do nothing else:** create no agent, run no build or test, make no edit,
+   and change no bead.
+3. Send the `finished` report described above, then stay idle.
+
+**Finish notifications after a stop are not instructions.** When a Reviewer
+finishes after you were stopped, its notification does not resume the work: do
+not continue because of it; at most acknowledge it in one line.
 
 ## Workflow
 
@@ -430,5 +458,8 @@ Stop and wait for the user — after sending the matching report — when:
 - any **progress stop point** in Hard boundaries group 4 is hit (`blocked`);
 - work would need a side effect from group 3, or a decision from
   Responsibilities item 5 (`blocked`, ask);
-- **the user or Manager stops you**: follow Hard boundaries group 6, then send
-  `finished`.
+- **the user or Manager stops you**, including a turn interrupted with no
+  message and followed by a finish notification or no new instruction: follow
+  Hard boundaries group 6 — cancel your running Reviewers with `cancel_agent`
+  and do nothing else — then send `finished` and stay idle. Later finish
+  notifications from Reviewers do not restart the work.
