@@ -1,0 +1,480 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`runDoctor — a healthy install > renders the JSON document of Design §4.4 1`] = `
+"{
+  "schemaVersion": 1,
+  "command": "doctor",
+  "mode": "preview",
+  "paseoBmVersion": "0.1.0",
+  "paseo": {
+    "cliVersion": "0.8.0",
+    "daemonVersion": "0.8.0",
+    "home": "/fake/paseo",
+    "pluginsEnabled": true
+  },
+  "checks": [
+    {
+      "id": "paseo-daemon",
+      "severity": "ok",
+      "message": "The Paseo daemon answered (daemon 0.8.0).",
+      "remediation": ""
+    },
+    {
+      "id": "paseo-version",
+      "severity": "ok",
+      "message": "Paseo 0.8.0 is supported, and the CLI and daemon agree.",
+      "remediation": ""
+    },
+    {
+      "id": "install-record",
+      "severity": "ok",
+      "message": "The install record at <HOME>/.paseo-bm/install.json is readable.",
+      "remediation": ""
+    },
+    {
+      "id": "install-version",
+      "severity": "ok",
+      "message": "The installed payload is version 0.1.0, the version running now.",
+      "remediation": ""
+    },
+    {
+      "id": "files-missing",
+      "severity": "ok",
+      "message": "All 2 recorded files are present.",
+      "remediation": ""
+    },
+    {
+      "id": "files-modified",
+      "severity": "ok",
+      "message": "No recorded file has been changed since it was installed.",
+      "remediation": ""
+    },
+    {
+      "id": "plugin-registered",
+      "severity": "ok",
+      "message": "Paseo lists the plugin \`paseo-bm\`.",
+      "remediation": ""
+    },
+    {
+      "id": "plugin-status",
+      "severity": "ok",
+      "message": "Paseo reports the plugin \`paseo-bm\` as running.",
+      "remediation": ""
+    },
+    {
+      "id": "plugins-enabled",
+      "severity": "ok",
+      "message": "Paseo's plugin switch (\`pluginsEnabled\`) is on.",
+      "remediation": ""
+    },
+    {
+      "id": "agent-tools",
+      "severity": "ok",
+      "message": "Paseo's agent tool switch (\`daemon.mcp.injectIntoAgents\`) is on.",
+      "remediation": ""
+    },
+    {
+      "id": "role-bm-manager",
+      "severity": "ok",
+      "message": "The \`bm-manager\` role is configured as claude/claude-opus-5 (Paseo tools: yes).",
+      "remediation": ""
+    },
+    {
+      "id": "role-bm-worker",
+      "severity": "ok",
+      "message": "The \`bm-worker\` role is configured as codex/gpt-5.6-sol (Paseo tools: yes).",
+      "remediation": ""
+    },
+    {
+      "id": "role-bm-reviewer",
+      "severity": "ok",
+      "message": "The \`bm-reviewer\` role is configured as codex/gpt-5.6-sol (Paseo tools: no).",
+      "remediation": ""
+    },
+    {
+      "id": "payload-versions",
+      "severity": "ok",
+      "message": "1 payload version is kept (active: 0.1.0).",
+      "remediation": ""
+    },
+    {
+      "id": "backups",
+      "severity": "ok",
+      "message": "0 backups are kept.",
+      "remediation": ""
+    },
+    {
+      "id": "beads-cli",
+      "severity": "ok",
+      "message": "The beads CLI is available (\`<HOME>/bin/br\`).",
+      "remediation": ""
+    },
+    {
+      "id": "skills-agents",
+      "severity": "ok",
+      "message": "shared agent home: not installed (<HOME>/.agents does not exist), skipped",
+      "remediation": ""
+    },
+    {
+      "id": "skills-claude",
+      "severity": "ok",
+      "message": "Claude Code: all 5 required skills are installed in <HOME>/.claude/skills",
+      "remediation": ""
+    },
+    {
+      "id": "skills-codex",
+      "severity": "ok",
+      "message": "Codex: not installed (<HOME>/.codex does not exist), skipped",
+      "remediation": ""
+    }
+  ],
+  "roles": [
+    {
+      "role": "manager",
+      "provider": "claude",
+      "model": "claude-opus-5",
+      "paseoTools": true,
+      "loggedIn": null
+    },
+    {
+      "role": "worker",
+      "provider": "codex",
+      "model": "gpt-5.6-sol",
+      "paseoTools": true,
+      "loggedIn": null
+    },
+    {
+      "role": "reviewer",
+      "provider": "codex",
+      "model": "gpt-5.6-sol",
+      "paseoTools": false,
+      "loggedIn": null
+    }
+  ],
+  "skills": {
+    "source": "cuongntr/agent-skills",
+    "required": [
+      "feature-workflow",
+      "reviewing-plan",
+      "converting-plan-to-beads",
+      "polishing-beads",
+      "implementing-beads"
+    ],
+    "byAgent": {
+      "agents": {
+        "present": [],
+        "missing": []
+      },
+      "claude": {
+        "present": [
+          "feature-workflow",
+          "reviewing-plan",
+          "converting-plan-to-beads",
+          "polishing-beads",
+          "implementing-beads"
+        ],
+        "missing": []
+      },
+      "codex": {
+        "present": [],
+        "missing": []
+      }
+    },
+    "suggestedCommand": null,
+    "assisted": false,
+    "outcome": null
+  },
+  "warnings": [],
+  "result": {
+    "exitCode": 0,
+    "pluginState": "running"
+  }
+}
+"
+`;
+
+exports[`runDoctor — an install that has drifted > renders the JSON document of Design §4.4 1`] = `
+"{
+  "schemaVersion": 1,
+  "command": "doctor",
+  "mode": "preview",
+  "paseoBmVersion": "0.1.0",
+  "paseo": {
+    "cliVersion": "0.8.0",
+    "daemonVersion": "0.8.0",
+    "home": "/fake/paseo",
+    "pluginsEnabled": false
+  },
+  "checks": [
+    {
+      "id": "paseo-daemon",
+      "severity": "ok",
+      "message": "The Paseo daemon answered (daemon 0.8.0).",
+      "remediation": ""
+    },
+    {
+      "id": "paseo-version",
+      "severity": "ok",
+      "message": "Paseo 0.8.0 is supported, and the CLI and daemon agree.",
+      "remediation": ""
+    },
+    {
+      "id": "install-record",
+      "severity": "ok",
+      "message": "The install record at <HOME>/.paseo-bm/install.json is readable.",
+      "remediation": ""
+    },
+    {
+      "id": "install-version",
+      "severity": "error",
+      "message": "The installed payload is version 0.0.9, but this paseo-bm is 0.1.0.",
+      "remediation": "Run \`npx paseo-bm install --apply\` to install the current payload. Earlier versions are kept; only \`--prune\` removes them."
+    },
+    {
+      "id": "files-missing",
+      "severity": "error",
+      "message": "1 recorded file is gone: plugin/0.0.9/index.server.js.",
+      "remediation": "Run \`npx paseo-bm install --apply\` to put it back. Nothing is changed by \`doctor\`."
+    },
+    {
+      "id": "files-modified",
+      "severity": "error",
+      "message": "1 recorded file no longer matches the hash paseo-bm wrote: plugin/0.0.9/roles/worker.md.",
+      "remediation": "Keep your edits, or run \`npx paseo-bm install --apply --force\` to restore the shipped copy. A backup is always taken before overwriting."
+    },
+    {
+      "id": "plugin-registered",
+      "severity": "ok",
+      "message": "Paseo lists the plugin \`paseo-bm\`.",
+      "remediation": ""
+    },
+    {
+      "id": "plugin-status",
+      "severity": "error",
+      "message": "Paseo reports the plugin \`paseo-bm\` with status \`disabled\`, not running.",
+      "remediation": "Run \`npx paseo-bm install --apply --enable-plugins\` to consent to both halves of that trust boundary: enabling plugins and granting Paseo tools to agents."
+    },
+    {
+      "id": "plugins-enabled",
+      "severity": "error",
+      "message": "Paseo's plugin switch (\`pluginsEnabled\`) is off, so the installed plugin does nothing.",
+      "remediation": "Run \`npx paseo-bm install --apply --enable-plugins\` to consent to both halves of that trust boundary: enabling plugins and granting Paseo tools to agents."
+    },
+    {
+      "id": "agent-tools",
+      "severity": "error",
+      "message": "Paseo's agent tool switch (\`daemon.mcp.injectIntoAgents\`) is off, so Beads Manager cannot create Beads Worker.",
+      "remediation": "Run \`npx paseo-bm install --apply --enable-plugins\` to consent to both halves of that trust boundary: enabling plugins and granting Paseo tools to agents."
+    },
+    {
+      "id": "role-bm-manager",
+      "severity": "ok",
+      "message": "The \`bm-manager\` role is configured as claude/claude-opus-5 (Paseo tools: yes).",
+      "remediation": ""
+    },
+    {
+      "id": "role-bm-worker",
+      "severity": "ok",
+      "message": "The \`bm-worker\` role is configured as codex/gpt-5.6-sol (Paseo tools: yes).",
+      "remediation": ""
+    },
+    {
+      "id": "role-bm-reviewer",
+      "severity": "error",
+      "message": "The \`bm-reviewer\` role is recorded but Paseo's configuration is missing agents.providers.bm-reviewer and daemon.agentProfiles[bm-reviewer].",
+      "remediation": "Run \`npx paseo-bm install --apply\` to put it back. Nothing is changed by \`doctor\`."
+    },
+    {
+      "id": "payload-versions",
+      "severity": "ok",
+      "message": "1 payload version is kept (active: 0.0.9).",
+      "remediation": ""
+    },
+    {
+      "id": "backups",
+      "severity": "ok",
+      "message": "0 backups are kept.",
+      "remediation": ""
+    },
+    {
+      "id": "beads-cli",
+      "severity": "ok",
+      "message": "The beads CLI is available (\`<HOME>/bin/br\`).",
+      "remediation": ""
+    },
+    {
+      "id": "skills-agents",
+      "severity": "ok",
+      "message": "shared agent home: not installed (<HOME>/.agents does not exist), skipped",
+      "remediation": ""
+    },
+    {
+      "id": "skills-claude",
+      "severity": "ok",
+      "message": "Claude Code: all 5 required skills are installed in <HOME>/.claude/skills",
+      "remediation": ""
+    },
+    {
+      "id": "skills-codex",
+      "severity": "ok",
+      "message": "Codex: not installed (<HOME>/.codex does not exist), skipped",
+      "remediation": ""
+    }
+  ],
+  "roles": [
+    {
+      "role": "manager",
+      "provider": "claude",
+      "model": "claude-opus-5",
+      "paseoTools": true,
+      "loggedIn": null
+    },
+    {
+      "role": "worker",
+      "provider": "codex",
+      "model": "gpt-5.6-sol",
+      "paseoTools": true,
+      "loggedIn": null
+    },
+    {
+      "role": "reviewer",
+      "provider": "codex",
+      "model": "gpt-5.6-sol",
+      "paseoTools": false,
+      "loggedIn": null
+    }
+  ],
+  "skills": {
+    "source": "cuongntr/agent-skills",
+    "required": [
+      "feature-workflow",
+      "reviewing-plan",
+      "converting-plan-to-beads",
+      "polishing-beads",
+      "implementing-beads"
+    ],
+    "byAgent": {
+      "agents": {
+        "present": [],
+        "missing": []
+      },
+      "claude": {
+        "present": [
+          "feature-workflow",
+          "reviewing-plan",
+          "converting-plan-to-beads",
+          "polishing-beads",
+          "implementing-beads"
+        ],
+        "missing": []
+      },
+      "codex": {
+        "present": [],
+        "missing": []
+      }
+    },
+    "suggestedCommand": null,
+    "assisted": false,
+    "outcome": null
+  },
+  "warnings": [],
+  "result": {
+    "exitCode": 1,
+    "pluginState": "disabled"
+  }
+}
+"
+`;
+
+exports[`runDoctor — nothing installed yet > renders the JSON document of Design §4.4 1`] = `
+"{
+  "schemaVersion": 1,
+  "command": "doctor",
+  "mode": "preview",
+  "paseoBmVersion": "0.1.0",
+  "paseo": {
+    "cliVersion": "0.8.0",
+    "daemonVersion": "0.8.0",
+    "home": "/fake/paseo",
+    "pluginsEnabled": false
+  },
+  "checks": [
+    {
+      "id": "paseo-daemon",
+      "severity": "ok",
+      "message": "The Paseo daemon answered (daemon 0.8.0).",
+      "remediation": ""
+    },
+    {
+      "id": "paseo-version",
+      "severity": "ok",
+      "message": "Paseo 0.8.0 is supported, and the CLI and daemon agree.",
+      "remediation": ""
+    },
+    {
+      "id": "install-record",
+      "severity": "warn",
+      "message": "paseo-bm is not installed here: there is no install record at <HOME>/.paseo-bm/install.json.",
+      "remediation": "Run \`npx paseo-bm install --apply\` to install it. Nothing else is reported because nothing is owned yet."
+    },
+    {
+      "id": "beads-cli",
+      "severity": "ok",
+      "message": "The beads CLI is available (\`<HOME>/bin/br\`).",
+      "remediation": ""
+    },
+    {
+      "id": "skills-agents",
+      "severity": "ok",
+      "message": "shared agent home: not installed (<HOME>/.agents does not exist), skipped",
+      "remediation": ""
+    },
+    {
+      "id": "skills-claude",
+      "severity": "ok",
+      "message": "Claude Code: not installed (<HOME>/.claude does not exist), skipped",
+      "remediation": ""
+    },
+    {
+      "id": "skills-codex",
+      "severity": "ok",
+      "message": "Codex: not installed (<HOME>/.codex does not exist), skipped",
+      "remediation": ""
+    }
+  ],
+  "roles": [],
+  "skills": {
+    "source": "cuongntr/agent-skills",
+    "required": [
+      "feature-workflow",
+      "reviewing-plan",
+      "converting-plan-to-beads",
+      "polishing-beads",
+      "implementing-beads"
+    ],
+    "byAgent": {
+      "agents": {
+        "present": [],
+        "missing": []
+      },
+      "claude": {
+        "present": [],
+        "missing": []
+      },
+      "codex": {
+        "present": [],
+        "missing": []
+      }
+    },
+    "suggestedCommand": null,
+    "assisted": false,
+    "outcome": null
+  },
+  "warnings": [],
+  "result": {
+    "exitCode": 0,
+    "pluginState": null
+  }
+}
+"
+`;

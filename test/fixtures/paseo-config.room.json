@@ -1,0 +1,171 @@
+{
+  "version": 1,
+  "daemon": {
+    "listen": "127.0.0.1:7777",
+    "logLevel": "info",
+    "agentProfiles": [
+      {
+        "id": "my-default",
+        "name": "Default",
+        "providerId": "anthropic",
+        "model": "claude-opus-5"
+      },
+      {
+        "id": "room-architect",
+        "name": "Room Architect",
+        "providerId": "room-architect",
+        "model": "claude-opus-5",
+        "notes": "paseo-room Architect role."
+      },
+      {
+        "id": "room-builder",
+        "name": "Room Builder",
+        "providerId": "room-builder",
+        "model": "gpt-5.6-sol",
+        "notes": "paseo-room Builder role."
+      },
+      {
+        "id": "room-tester",
+        "name": "Room Tester",
+        "providerId": "room-tester",
+        "model": "claude-sonnet-5",
+        "notes": "paseo-room Tester role."
+      },
+      {
+        "id": "room-scribe",
+        "name": "Room Scribe",
+        "providerId": "room-scribe",
+        "model": "gpt-5.6-mini",
+        "notes": "paseo-room Scribe role."
+      },
+      {
+        "id": "room-scout",
+        "name": "Room Scout",
+        "providerId": "room-scout",
+        "model": "claude-haiku-5",
+        "notes": "paseo-room Scout role."
+      },
+      {
+        "id": "room-sentinel",
+        "name": "Room Sentinel",
+        "providerId": "room-sentinel",
+        "model": "gpt-5.6-sol",
+        "notes": "paseo-room Sentinel role."
+      }
+    ]
+  },
+  "app": {
+    "theme": "system",
+    "telemetry": false
+  },
+  "agents": {
+    "defaultProfileId": "my-default",
+    "providers": {
+      "anthropic": {
+        "label": "Claude Code",
+        "command": {
+          "bin": "claude"
+        }
+      },
+      "openai": {
+        "label": "Codex",
+        "command": {
+          "bin": "codex"
+        }
+      },
+      "room-architect": {
+        "extends": "anthropic",
+        "label": "Room Architect",
+        "command": {
+          "bin": "claude",
+          "args": [
+            "--room",
+            "architect"
+          ]
+        },
+        "env": {
+          "ROOM_ROLE": "architect"
+        },
+        "defaultModel": "claude-opus-5"
+      },
+      "room-builder": {
+        "extends": "openai",
+        "label": "Room Builder",
+        "command": {
+          "bin": "codex",
+          "args": [
+            "--room",
+            "builder"
+          ]
+        },
+        "env": {
+          "ROOM_ROLE": "builder"
+        },
+        "defaultModel": "gpt-5.6-sol"
+      },
+      "room-tester": {
+        "extends": "anthropic",
+        "label": "Room Tester",
+        "command": {
+          "bin": "claude",
+          "args": [
+            "--room",
+            "tester"
+          ]
+        },
+        "env": {
+          "ROOM_ROLE": "tester"
+        },
+        "defaultModel": "claude-sonnet-5"
+      },
+      "room-scribe": {
+        "extends": "openai",
+        "label": "Room Scribe",
+        "command": {
+          "bin": "codex",
+          "args": [
+            "--room",
+            "scribe"
+          ]
+        },
+        "env": {
+          "ROOM_ROLE": "scribe"
+        },
+        "defaultModel": "gpt-5.6-mini"
+      },
+      "room-scout": {
+        "extends": "anthropic",
+        "label": "Room Scout",
+        "command": {
+          "bin": "claude",
+          "args": [
+            "--room",
+            "scout"
+          ]
+        },
+        "env": {
+          "ROOM_ROLE": "scout"
+        },
+        "defaultModel": "claude-haiku-5"
+      },
+      "room-sentinel": {
+        "extends": "openai",
+        "label": "Room Sentinel",
+        "command": {
+          "bin": "codex",
+          "args": [
+            "--room",
+            "sentinel"
+          ]
+        },
+        "env": {
+          "ROOM_ROLE": "sentinel"
+        },
+        "defaultModel": "gpt-5.6-sol"
+      }
+    }
+  },
+  "features": {
+    "experimentalPanels": false
+  }
+}
