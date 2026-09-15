@@ -16,14 +16,19 @@ import { DIAGNOSTICS } from "../errors.js";
 import { exitCodeMeaning } from "../exit-codes.js";
 import { groupActionsByLocation, isConfigAction, isDoctorReport, summarizeActions, summarizeChecks } from "../action.js";
 import type { Action, Check, JsonValue, Report, ReportWarning, SkillsReport } from "../action.js";
+import { createRedactor } from "../redact.js";
+import type { Redactor } from "../redact.js";
 import type { OutputWriter } from "./json.js";
 
 export interface HumanRenderOptions {
   /**
-   * Last-pass filter over the finished text. This is the seam where secret
-   * masking is installed (its own bead); nothing here masks anything.
+   * Last-pass filter over the finished text — the single place this channel
+   * can mask a secret. Defaults to {@link createRedactor}, so the safe
+   * behaviour is what you get by forgetting about it; pass your own only to
+   * change what counts as a secret, or `(text) => text` in a test that wants
+   * the raw rendering.
    */
-  readonly redact?: (text: string) => string;
+  readonly redact?: Redactor;
   /** Longest a rendered config value may be before it is cut short. Default 72. */
   readonly maxValueLength?: number;
 }
@@ -60,7 +65,8 @@ export function renderHumanReport(report: Report, options: HumanRenderOptions = 
   blocks.push(renderResult(report));
 
   const text = `${blocks.map((block) => block.join("\n")).join("\n\n")}\n`;
-  return options.redact === undefined ? text : options.redact(text);
+  const redact = options.redact ?? createRedactor();
+  return redact(text);
 }
 
 /** Write the report to a sink — stdout for a normal run, stderr under `--json`. */

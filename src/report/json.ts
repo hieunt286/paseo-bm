@@ -13,6 +13,8 @@
  */
 
 import { DIAGNOSTICS } from "../errors.js";
+import { createJsonRedactor } from "../redact.js";
+import type { Redactor } from "../redact.js";
 import { REPORT_SCHEMA_VERSION, isConfigAction, isDoctorReport } from "../action.js";
 import type { Action, Check, JsonObject, JsonValue, Report, ReportWarning, SkillsReport } from "../action.js";
 
@@ -23,10 +25,13 @@ export interface JsonRenderOptions {
   /** Spaces per indent level; `0` renders one compact line. Default 2. */
   readonly indent?: number;
   /**
-   * Last-pass filter over the finished document text. This is the seam where
-   * secret masking is installed (its own bead); nothing here masks anything.
+   * Last-pass filter over the finished document text — the single place this
+   * channel can mask a secret. Defaults to {@link createJsonRedactor}, which
+   * masks inside the values so the result is still exactly one parseable
+   * document; pass `(text) => text` only in a test that wants the raw
+   * rendering.
    */
-  readonly redact?: (text: string) => string;
+  readonly redact?: Redactor;
 }
 
 /**
@@ -140,7 +145,8 @@ function warningToJson(warning: ReportWarning): JsonObject {
 export function renderJsonReport(report: Report, options: JsonRenderOptions = {}): string {
   const indent = options.indent ?? 2;
   const text = `${JSON.stringify(toJsonDocument(report), null, indent)}\n`;
-  return options.redact === undefined ? text : options.redact(text);
+  const redact = options.redact ?? createJsonRedactor({ indent });
+  return redact(text);
 }
 
 /**
