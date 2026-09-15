@@ -4,8 +4,6 @@ import { ensureManager, listWorkspaceAgents } from "./server/manager";
 import { describeRoles } from "./server/roles";
 import { agentsListRpc, managerEnsureRpc, rolesDescribeRpc } from "./shared/contracts";
 
-type ServerContribution = (server: PluginServerContext) => () => void;
-
 /**
  * Text of `roles/manager.md`.
  *
@@ -27,8 +25,14 @@ export function readManagerInstructions(): Promise<string> {
  * their lifecycle belongs to the user (ADR-005).
  *
  * This entry must never import from `client/`: that is a compile error.
+ *
+ * Declared as a hoisted `export default function`, not `const` + `export
+ * default`: Paseo 0.8 rewrites esbuild's export getters into eager copies
+ * (makeHermesInteropEager), so a late-bound default export is copied while
+ * still undefined and the daemon refuses the plugin ("must default export a
+ * function"). Guarded by test/plugin-bundle-cjs.test.ts.
  */
-const contribute: ServerContribution = (server) => {
+export default function contribute(server: PluginServerContext): () => void {
   server.handle(managerEnsureRpc, async (input, { paseo }) => {
     const result = await ensureManager(input, {
       paseo,
@@ -44,6 +48,4 @@ const contribute: ServerContribution = (server) => {
   server.handle(agentsListRpc, (input, { paseo }) => listWorkspaceAgents(input, { paseo }));
   server.handle(rolesDescribeRpc, (_input, { paseo }) => describeRoles({ paseo }));
   return () => {};
-};
-
-export default contribute;
+}

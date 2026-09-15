@@ -8,8 +8,6 @@ import { ManagerLauncherSurface } from "./client/launcher";
 import { AGENT_TREE_ICON, AGENT_TREE_PANEL_ID } from "./client/agent-tree";
 import { AgentTreePanel } from "./client/tree";
 
-type ClientContribution = (client: PluginClientContext) => () => void;
-
 /**
  * Client entry of the paseo-bm plugin (design §2.4).
  *
@@ -19,8 +17,14 @@ type ClientContribution = (client: PluginClientContext) => () => void;
  * panel (agent tree + role configuration).
  *
  * This entry must never import from `server/`: that is a compile error.
+ *
+ * Declared as a hoisted `export default function`, not `const` + `export
+ * default`: Paseo 0.8 rewrites esbuild's export getters into eager copies
+ * (makeHermesInteropEager), so a late-bound default export is copied while
+ * still undefined and the daemon refuses the plugin ("must default export a
+ * function"). Guarded by test/plugin-bundle-cjs.test.ts.
  */
-const contribute: ClientContribution = (client) => {
+export default function contribute(client: PluginClientContext): () => void {
   // Register the surface before the sidebar item that points at it.
   const removers = [
     client.addSurface(LAUNCHER_SURFACE_ID, ManagerLauncherSurface),
@@ -49,6 +53,4 @@ const contribute: ClientContribution = (client) => {
   return () => {
     for (const remove of removers) void remove();
   };
-};
-
-export default contribute;
+}
