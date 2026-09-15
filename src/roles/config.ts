@@ -484,8 +484,10 @@ export interface ConfigureRolesOptions {
    * The names the roles already carry in Paseo's `config.json` — the `name` of
    * each `bm-<role>` agent profile, or the derived provider's `label`. `roles[]`
    * has no name field (Design §3.2), so this is the only place a name the user
-   * chose survives between runs. Used only when a recorded entry is reused;
-   * without it that reuse would reset every name to its default (bug bm-lev).
+   * chose survives between runs. Used when a recorded entry is reused and when
+   * `--role` replaces a role's provider/model; without it either path would
+   * reset the name to its default (bugs bm-lev, bm-6uy). Questions asked under
+   * `--reconfigure` still offer the default.
    */
   readonly existingNames?: Readonly<Partial<Record<RoleName, string>>>;
   /** `--reconfigure`: ask the whole configuration again even though it exists. */
@@ -585,12 +587,19 @@ export async function configureRoles(options: ConfigureRolesOptions): Promise<Ro
       });
     }
 
-    // 1. --role decides, and is never second-guessed by a question.
+    // Taken verbatim, not trimmed: any change would differ from config.json
+    // and turn a no-op re-run into a rewrite.
+    const existingName = options.existingNames?.[role];
+    const keptName =
+      existingName === undefined || existingName.trim().length === 0 ? DEFAULT_ROLE_DISPLAY_NAMES[role] : existingName;
+
+    // 1. --role decides, and is never second-guessed by a question. It sets the
+    //    provider and model only; a name already registered stays (bug bm-6uy).
     const spec = findRoleSpec(specs, role);
     if (spec !== undefined) {
       selections.push({
         role,
-        displayName: DEFAULT_ROLE_DISPLAY_NAMES[role],
+        displayName: keptName,
         provider: spec.provider,
         model: spec.model,
         paseoTools,
@@ -601,15 +610,9 @@ export async function configureRoles(options: ConfigureRolesOptions): Promise<Ro
 
     // 2. What the last install recorded, unless the user asked to redo it.
     if (recorded !== undefined && recordedIsUsable && !reconfigure) {
-      // Taken verbatim, not trimmed: any change would differ from config.json
-      // and turn a no-op re-run into a rewrite.
-      const existingName = options.existingNames?.[role];
       selections.push({
         role,
-        displayName:
-          existingName === undefined || existingName.trim().length === 0
-            ? DEFAULT_ROLE_DISPLAY_NAMES[role]
-            : existingName,
+        displayName: keptName,
         provider: recorded.baseProvider,
         model: recorded.model,
         paseoTools,

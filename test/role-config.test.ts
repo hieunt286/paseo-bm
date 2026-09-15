@@ -548,6 +548,43 @@ describe("configureRoles — the interactive flow asks for all three roles", () 
     expect(redone.selections[0]?.source).toBe("prompt");
   });
 
+  it("--role changes provider/model but keeps a registered name, defaulting only where none is known (bm-6uy)", async () => {
+    const existing: readonly RoleRecord[] = ["manager", "worker", "reviewer"].map((role) => ({
+      role: role as RoleRecord["role"],
+      providerId: `bm-${role}`,
+      profileId: `bm-${role}`,
+      baseProvider: "codex",
+      model: "gpt-5.6-sol",
+      modeId: null,
+      thinkingOptionId: null,
+      paseoTools: role !== "reviewer",
+    }));
+    const specs = [
+      { role: "manager", provider: "claude", model: "claude-opus-5" },
+      { role: "worker", provider: "claude", model: "claude-opus-5" },
+    ] as const;
+    const quiet = new ScriptedPrompter({});
+    const configured = await configureRoles({
+      specs,
+      catalog: catalog(),
+      prompter: quiet,
+      existing,
+      existingNames: { manager: "Hieu", worker: "  " },
+    });
+    expect(quiet.counts.total).toBe(0);
+    expect(
+      configured.selections.map((selection) => [selection.displayName, selection.provider, selection.model, selection.source]),
+    ).toEqual([
+      ["Hieu", "claude", "claude-opus-5", "flag"],
+      [DEFAULT_ROLE_DISPLAY_NAMES.worker, "claude", "claude-opus-5", "flag"],
+      [DEFAULT_ROLE_DISPLAY_NAMES.reviewer, "codex", "gpt-5.6-sol", "record"],
+    ]);
+
+    // No names known at all: --role takes the default name, as before.
+    const fresh = await configureRoles({ specs, catalog: catalog(), prompter: new ScriptedPrompter({}), existing });
+    expect(fresh.selections[0]?.displayName).toBe(DEFAULT_ROLE_DISPLAY_NAMES.manager);
+  });
+
   it("asks again, with a warning, when a recorded provider has disappeared", async () => {
     const existing: readonly RoleRecord[] = [
       {

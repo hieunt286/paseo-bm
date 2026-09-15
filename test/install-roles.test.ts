@@ -396,6 +396,35 @@ describe("install-roles — re-install", () => {
     expect(names).toEqual(["Hieu", "Cuong", "Duy"]);
   });
 
+  it("a re-run with --role changes that role's provider/model and keeps its chosen name (bm-6uy)", async () => {
+    const first = await install(["install"], {
+      tty: TTY,
+      answers: {
+        input: ["Hieu", "Cuong", "Duy"],
+        select: ["claude", "claude-opus-5", "codex", "gpt-5.6-sol", "claude", "claude-opus-5"],
+        confirm: [true],
+      },
+    });
+    expect(first.code).toBe(EXIT_CODES.ok);
+    scope?.restore();
+    script({
+      "plugin ls": {
+        stdout: JSON.stringify([{ id: "paseo-bm", path: join(installHome, "plugin", VERSION), enabled: true, status: "running" }]),
+      },
+    });
+
+    const again = await install(["install", "--apply", "--json", "--role=manager=codex/gpt-5.6-sol"]);
+    expect(again.code).toBe(EXIT_CODES.ok);
+    const profiles = (config().daemon.agentProfiles ?? []).slice(1);
+    expect(profiles.map((profile) => [profile["id"], profile["name"], profile["model"]])).toEqual([
+      ["bm-manager", "Hieu", "gpt-5.6-sol"],
+      ["bm-worker", "Cuong", "gpt-5.6-sol"],
+      ["bm-reviewer", "Duy", "claude-opus-5"],
+    ]);
+    expect(config().agents?.providers?.["bm-manager"]).toEqual({ extends: "codex", label: "Hieu", paseoTools: { enabled: true } });
+    expect(installedRecord().roles.find((entry) => entry.role === "manager")?.baseProvider).toBe("codex");
+  });
+
   it("--prune keeps the config backup taken by the role step", async () => {
     await install(["install", "--apply"]);
     scope?.restore();
