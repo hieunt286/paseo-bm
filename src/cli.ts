@@ -23,6 +23,7 @@ import type {
 import { createPrompter, detectTty } from "./prompter.js";
 import type { Prompter, TtyInfo } from "./prompter.js";
 import { parseRoleSpecs } from "./roles/config.js";
+import { parseSkillsAgents } from "./skills/agents.js";
 import type { RoleSpec } from "./roles/config.js";
 import { readVersion } from "./version.js";
 
@@ -40,6 +41,11 @@ export interface CommandContext {
    * separate, later check against Paseo — see `src/roles/config.ts`.
    */
   readonly roleSpecs: readonly RoleSpec[];
+  /**
+   * `--skills-agents` after validation (Design §7), or the default
+   * `claude,codex` when the flag was not used.
+   */
+  readonly skillsAgents: readonly string[];
   readonly homes: HomeOverrides;
   readonly tty: TtyInfo;
   readonly prompter: Prompter;
@@ -107,6 +113,11 @@ export async function runCli(argv: readonly string[], deps: CliDependencies): Pr
     reportUsageError(stderr, roles.error);
     return EXIT_CODES.usage;
   }
+  const skillsAgents = parseSkillsAgents(parsed.flags.skillsAgents);
+  if (!skillsAgents.ok) {
+    reportUsageError(stderr, skillsAgents.error);
+    return EXIT_CODES.usage;
+  }
 
   const prompter = (deps.createPrompter ?? ((info: TtyInfo) => createPrompter(info)))(tty);
   const context: CommandContext = {
@@ -114,6 +125,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies): Pr
     explicitCommand: parsed.explicitCommand,
     flags: parsed.flags,
     roleSpecs: roles.specs,
+    skillsAgents: skillsAgents.agents,
     homes: homeFlagOverrides(parsed.flags),
     tty,
     prompter,

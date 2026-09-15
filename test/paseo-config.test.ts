@@ -246,9 +246,9 @@ const BM_PROVIDERS = {
 } as const;
 
 const BM_PROFILES = [
-  { id: "bm-manager", name: "Beads Manager", providerId: "bm-manager", model: "claude-opus-5" },
-  { id: "bm-worker", name: "Beads Worker", providerId: "bm-worker", model: "gpt-5.6-sol" },
-  { id: "bm-reviewer", name: "Beads Reviewer", providerId: "bm-reviewer", model: "claude-sonnet-5" },
+  { id: "bm-manager", name: "Beads Manager", provider: "bm-manager", model: "claude-opus-5" },
+  { id: "bm-worker", name: "Beads Worker", provider: "bm-worker", model: "gpt-5.6-sol" },
+  { id: "bm-reviewer", name: "Beads Reviewer", provider: "bm-reviewer", model: "claude-sonnet-5" },
 ];
 
 const ROLE_EDIT: ConfigEdit = { providers: BM_PROVIDERS, profiles: BM_PROFILES };
@@ -335,7 +335,7 @@ describe("writing next to paseo-room", () => {
       profilesOf(config).splice(3, 0, {
         id: "bm-worker",
         name: "Beads Worker",
-        providerId: "bm-worker",
+        provider: "bm-worker",
         model: "gpt-5.5-old",
       });
     });
@@ -567,7 +567,7 @@ describe("concurrent writes", () => {
       if (count === 1) {
         writeFromElsewhere((config) => {
           (config["app"] as Record<string, unknown>)["theme"] = "dark";
-          profilesOf(config).push({ id: "other-added", name: "Added elsewhere", providerId: "anthropic" });
+          profilesOf(config).push({ id: "other-added", name: "Added elsewhere", provider: "anthropic" });
         });
       }
     });
