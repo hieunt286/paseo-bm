@@ -116,6 +116,14 @@ describe("worker.md part two — review batches", () => {
       "A review skill (such as `code-review`) or reviewing the work yourself is never a substitute and never counts as a review call.",
     );
   });
+
+  it("always sets settings.modeId, from the profile or the first safe mode of inspect_provider (bm-cvr)", () => {
+    const text = flat(batches);
+    expect(text).toContain("Always set `settings.modeId`: a call without it can fail.");
+    expect(text).toContain("call `inspect_provider` **once** for `bm-reviewer`");
+    expect(text).toContain("the first mode whose `colorTier` is `safe`; if none is `safe`, use the first `moderate` one.");
+    expect(text).toContain("Never pick a `planning` or `dangerous` mode");
+  });
 });
 
 describe("worker.md part two — guardrail", () => {

@@ -91,8 +91,11 @@ For every new request from the user:
        - `bm.version` = the same value as your own `bm.version` label, when you
          can read it; otherwise leave that label out.
      - `settings.modeId` = the mode id of the `bm-worker` profile when it has
-       one; otherwise `"default"`. Always set it: a call without
-       `settings.modeId` may fail to create the Worker.
+       one. Otherwise call `inspect_provider` **once** for `bm-worker` and use
+       the first mode whose `colorTier` is `safe`; if none is `safe`, use the
+       first `moderate` one. Never pick a `planning` or `dangerous` mode. Do
+       not guess a mode id: mode ids differ between providers. Always set it:
+       a call without `settings.modeId` may fail to create the Worker.
      - `initialPrompt` = the Worker's initial prompt (see below).
    - **The Worker's initial prompt** must contain, in this order:
      - the user's request **verbatim**, in a quoted block;

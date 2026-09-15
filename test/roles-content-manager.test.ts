@@ -87,7 +87,11 @@ describe("roles/manager.md content", () => {
     expect(workflow).toMatch(/`provider` = `bm-worker\/<model>`/);
     expect(workflow).toMatch(/model of the\s+`bm-worker` profile/);
     expect(workflow).toMatch(/`settings\.modeId` = the mode id of the `bm-worker` profile/);
-    expect(workflow).toMatch(/otherwise `"default"`/);
+    // bm-cvr: mode ids differ per provider, so no fixed fallback like "default".
+    expect(workflow).not.toMatch(/`"default"`/);
+    expect(workflow).toMatch(/call `inspect_provider` \*\*once\*\* for `bm-worker`/);
+    expect(workflow).toMatch(/`colorTier` is `safe`/);
+    expect(workflow).toMatch(/Never pick a `planning` or `dangerous` mode/);
     expect(workflow).toMatch(/Call `list_profiles` \*\*once\*\*/);
     expect(workflow).toMatch(/do not call `list_agents`\s+before creating the Worker for a new request/);
     expect(workflow).toMatch(/`initialPrompt` = the Worker's initial prompt/);

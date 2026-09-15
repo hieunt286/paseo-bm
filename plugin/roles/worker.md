@@ -284,7 +284,13 @@ How to review a batch:
 1. When the batch is complete, create a Reviewer agent in this workspace with
    Paseo's `create_agent` tool, using the agent profile `bm-reviewer` (provider
    `bm-reviewer/<model of the profile>`) and the labels `bm.role` = `reviewer`
-   and `bm.version` (same value as your own, when you can read it). Give it the `requestId`, the
+   and `bm.version` (same value as your own, when you can read it). Always set
+   `settings.modeId`: a call without it can fail. Use the mode id of the
+   `bm-reviewer` profile when it has one. Otherwise call `inspect_provider`
+   **once** for `bm-reviewer` and use the first mode whose `colorTier` is
+   `safe`; if none is `safe`, use the first `moderate` one. Never pick a
+   `planning` or `dangerous` mode, and do not guess a mode id: mode ids differ
+   between providers. Give it the `requestId`, the
    `batchId`, and exactly what to review. For an implementation batch, also give
    it the build and test commands you ran and their output: the Reviewer is
    read-only and does not run them itself. **Only a review by that Reviewer
