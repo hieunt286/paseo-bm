@@ -44,7 +44,9 @@ mkdir -p "$EVID" "$CLEAN_HOME"
   `jq -S '{providers: ((.agents.providers // {}) | with_entries(select(.key|startswith("room-")))), profiles: [(.daemon.agentProfiles // [])[] | select(.id|startswith("room-"))]}' "$EVID/config.before.json" > "$EVID/room.before.json"`.
   Nếu cả hai rỗng, ghi "không có mục room-* trên máy này" vào biên bản; phép kiểm room-* khi đó dựa vào test tự động `npm test -- role-registration` (fixture 6 provider + 6 profile `room-*`).
 - [ ] Ghi danh sách plugin: `paseo plugin ls --json > "$EVID/plugins.before.json"`.
-- [ ] **Kiểm tiền đề HOME sạch:** `HOME="$CLEAN_HOME" PASEO_HOME="$REAL_PASEO_HOME" paseo daemon status --json` phải trả trạng thái daemon như khi chạy bình thường. Nếu không, **dừng** — HOME sạch không dùng được với daemon này, cần quyết định lại cách chạy.
+- [ ] **Kiểm tiền đề HOME sạch:** `HOME="$CLEAN_HOME" PASEO_HOME="$REAL_PASEO_HOME" paseo daemon status --json | jq '{home, localDaemon, pid}'` phải cho `home` đúng bằng `$REAL_PASEO_HOME`, `localDaemon: "running"` và `pid` giống lần chạy bình thường. Nếu không, **dừng** — HOME sạch không dùng được với daemon này, cần quyết định lại cách chạy.
+  - **Bẫy đã gặp khi soạn checklist (2026-09-15):** **không** viết `HOME="$CLEAN_HOME" PASEO_HOME="$HOME/.paseo" …` trên cùng một dòng — bash mở `$HOME` *sau* khi đã gán `HOME` mới, nên `PASEO_HOME` trỏ vào HOME tạm; Paseo CLI khi đó tạo một `.paseo` mới trong HOME tạm và báo `localDaemon: "stopped"`. Luôn dùng biến `REAL_PASEO_HOME` đã tính sẵn ở mục 2.
+  - Kiểm chứng đọc-chỉ lúc soạn: với `REAL_PASEO_HOME` tính sẵn, `daemon status` báo `home` thật, `localDaemon: "running"`, không tạo file nào trong HOME tạm và không đổi mtime file trong `~/.paseo`.
 - [ ] Tạo mốc thời gian: `touch "$EVID/start.marker"`.
 
 ## 4. Cài lần đầu (M-1, M-7, M-9)
@@ -166,4 +168,4 @@ Kiểm bổ sung theo điều kiện ra của WP-120 (không phải chỉ số r
 - File tạm atomic (`.config.json.*.tmp`, `.install.json.*.tmp`) có thể bị bỏ lại nếu tiến trình bị giết đúng lúc đổi tên; không cơ chế nào dọn chúng. Bước 7 kiểm để phát hiện, không để che.
 - Container rỗng `agents.providers` / `daemon.mcp` do paseo-bm tạo có thể còn lại sau khi gỡ (cố ý, `src/paseo/config.ts` không dọn container).
 - M-2 đo trên lượt **cập nhật** không tương tác, vì lượt cài đầu tiên phải tương tác để đếm M-1; bản ghi thời gian CI (`install.timing`) là số đo bổ sung.
-- Tiền đề HOME sạch (bước 3) chưa được kiểm trên daemon thật; nếu Paseo không chấp nhận `HOME` khác với `PASEO_HOME` thật, phải quyết định lại cách chạy trước khi tiếp tục.
+- Tiền đề HOME sạch đã được kiểm đọc-chỉ trên daemon thật khi soạn checklist (Paseo CLI tôn trọng `PASEO_HOME`); `paseo plugin install` và `daemon reload` dưới HOME tạm chưa được thử và sẽ lần đầu được kiểm ở bước 4.
