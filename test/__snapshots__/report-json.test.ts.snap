@@ -1,0 +1,265 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`renderJsonReport — doctor > renders checks[] instead of actions[] 1`] = `
+"{
+  "schemaVersion": 1,
+  "command": "doctor",
+  "mode": "preview",
+  "paseoBmVersion": "0.1.0",
+  "paseo": {
+    "cliVersion": "0.8.0",
+    "daemonVersion": "0.8.0",
+    "home": "/fake/home/.paseo",
+    "pluginsEnabled": true
+  },
+  "checks": [
+    {
+      "id": "paseo-cli",
+      "severity": "ok",
+      "message": "Paseo CLI 0.8.0 and daemon 0.8.0 agree.",
+      "remediation": ""
+    },
+    {
+      "id": "plugin-status",
+      "severity": "error",
+      "message": "The paseo-bm plugin is registered but its status is disabled.",
+      "remediation": "Run \`npx paseo-bm install --apply\` and consent to enabling plugins."
+    },
+    {
+      "id": "skills",
+      "severity": "warn",
+      "message": "codex is missing 1 of 2 required skills.",
+      "remediation": "Run the printed \`skills add\` command."
+    }
+  ],
+  "roles": [
+    {
+      "role": "manager",
+      "provider": "claude",
+      "model": "opus-5",
+      "paseoTools": true,
+      "loggedIn": true
+    },
+    {
+      "role": "worker",
+      "provider": "codex",
+      "model": "gpt-5.6-sol",
+      "paseoTools": true,
+      "loggedIn": false
+    },
+    {
+      "role": "reviewer",
+      "provider": "codex",
+      "model": "gpt-5.6-sol",
+      "paseoTools": false,
+      "loggedIn": null
+    }
+  ],
+  "skills": {
+    "source": "cuongntr/agent-skills",
+    "required": [
+      "feature-workflow",
+      "implementing-beads"
+    ],
+    "byAgent": {
+      "claude": {
+        "present": [
+          "feature-workflow",
+          "implementing-beads"
+        ],
+        "missing": []
+      },
+      "codex": {
+        "present": [
+          "feature-workflow"
+        ],
+        "missing": [
+          "implementing-beads"
+        ]
+      }
+    },
+    "suggestedCommand": "npx -y skills add cuongntr/agent-skills --agent codex implementing-beads",
+    "assisted": false,
+    "outcome": null
+  },
+  "warnings": [
+    {
+      "code": "W_PROVIDER_NOT_LOGGED_IN",
+      "message": "The provider chosen for an agent role has no active login session, so that role cannot start a session yet.",
+      "detail": "worker uses codex"
+    }
+  ],
+  "result": {
+    "exitCode": 1,
+    "pluginState": "disabled"
+  }
+}
+"
+`;
+
+exports[`renderJsonReport — install > renders the shape of Design §4.4 1`] = `
+"{
+  "schemaVersion": 1,
+  "command": "install",
+  "mode": "preview",
+  "paseoBmVersion": "0.1.0",
+  "paseo": {
+    "cliVersion": "0.8.0",
+    "daemonVersion": "0.8.0",
+    "home": "/fake/home/.paseo",
+    "pluginsEnabled": false
+  },
+  "actions": [
+    {
+      "kind": "create",
+      "target": "installHome/plugin/0.1.0/roles/worker.md",
+      "reason": "missing"
+    },
+    {
+      "kind": "update",
+      "target": "installHome/install.json",
+      "reason": "outdated"
+    },
+    {
+      "kind": "skip",
+      "target": "installHome/plugin/0.1.0/roles/manager.md",
+      "reason": "unchanged"
+    },
+    {
+      "kind": "conflict",
+      "target": "installHome/plugin/0.1.0/roles/reviewer.md",
+      "reason": "user-modified",
+      "detail": "re-run with --force to overwrite; a backup is taken first"
+    },
+    {
+      "kind": "create",
+      "target": "paseoDaemon/plugins[paseo-bm]",
+      "reason": "missing"
+    },
+    {
+      "kind": "config",
+      "target": "paseoHome/config.json#pluginsEnabled",
+      "reason": "not enabled yet",
+      "from": false,
+      "to": true,
+      "consent": "interactive"
+    },
+    {
+      "kind": "config",
+      "target": "paseoHome/config.json#daemon.agentProfiles[bm-worker]",
+      "reason": "missing",
+      "from": null,
+      "to": {
+        "id": "bm-worker",
+        "label": "Beads Worker"
+      },
+      "consent": "interactive"
+    }
+  ],
+  "roles": [
+    {
+      "role": "manager",
+      "provider": "claude",
+      "model": "opus-5",
+      "paseoTools": true,
+      "loggedIn": true
+    },
+    {
+      "role": "worker",
+      "provider": "codex",
+      "model": "gpt-5.6-sol",
+      "paseoTools": true,
+      "loggedIn": false
+    },
+    {
+      "role": "reviewer",
+      "provider": "codex",
+      "model": "gpt-5.6-sol",
+      "paseoTools": false,
+      "loggedIn": null
+    }
+  ],
+  "skills": {
+    "source": "cuongntr/agent-skills",
+    "required": [
+      "feature-workflow",
+      "implementing-beads"
+    ],
+    "byAgent": {
+      "claude": {
+        "present": [
+          "feature-workflow",
+          "implementing-beads"
+        ],
+        "missing": []
+      },
+      "codex": {
+        "present": [
+          "feature-workflow"
+        ],
+        "missing": [
+          "implementing-beads"
+        ]
+      }
+    },
+    "suggestedCommand": "npx -y skills add cuongntr/agent-skills --agent codex implementing-beads",
+    "assisted": false,
+    "outcome": null
+  },
+  "warnings": [
+    {
+      "code": "W_BEADS_CLI_MISSING",
+      "message": "The beads CLI (\`br\` or \`bd\`) was not found, so Worker will not be able to manage beads.",
+      "detail": "looked for br and bd on PATH"
+    }
+  ],
+  "result": {
+    "exitCode": 0,
+    "pluginState": "disabled"
+  }
+}
+"
+`;
+
+exports[`renderJsonReport — uninstall > renders delete, keep and config actions 1`] = `
+"{
+  "schemaVersion": 1,
+  "command": "uninstall",
+  "mode": "preview",
+  "paseoBmVersion": "0.1.0",
+  "paseo": {
+    "cliVersion": "0.8.0",
+    "daemonVersion": "0.8.0",
+    "home": "/fake/home/.paseo",
+    "pluginsEnabled": true
+  },
+  "actions": [
+    {
+      "kind": "delete",
+      "target": "installHome/plugin/0.1.0",
+      "reason": "owned payload"
+    },
+    {
+      "kind": "keep",
+      "target": "installHome/plugin/0.1.0/roles/reviewer.md",
+      "reason": "user-modified"
+    },
+    {
+      "kind": "config",
+      "target": "paseoHome/config.json#daemon.mcp.injectIntoAgents",
+      "reason": "restoring the value paseo-bm found",
+      "from": true,
+      "to": null,
+      "consent": "interactive"
+    }
+  ],
+  "roles": [],
+  "skills": null,
+  "warnings": [],
+  "result": {
+    "exitCode": 0,
+    "pluginState": "running"
+  }
+}
+"
+`;
