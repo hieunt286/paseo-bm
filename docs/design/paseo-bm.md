@@ -293,6 +293,7 @@ Thứ tự ưu tiên: cờ > biến môi trường > mặc định.
 | 4 | Đã cài nhưng một ranh giới tin cậy chưa được đồng ý (plugin chưa bật, hoặc quyền công cụ chưa mở) |
 | 5 | Dừng vì xung đột cần người quyết định |
 | 6 | Không có TTY và không có `--apply`: đã in bản xem trước, chưa ghi gì |
+| 7 | Đã chép file và ghi hồ sơ, nhưng Paseo không cài được hoặc không nạp được plugin — xem `paseo plugin logs paseo-bm` *(errata 2026-09-15)* |
 
 Cảnh báo về skills và beads CLI không bao giờ đổi mã thoát. Kiểm định `--skills-agents` và `--role` chạy **lúc phân tích tham số**, trước preflight và trước mọi thao tác ghi.
 
@@ -316,14 +317,18 @@ Cảnh báo về skills và beads CLI không bao giờ đổi mã thoát. Kiểm
               "suggestedCommand": "npx -y skills add …", "assisted": false, "outcome": null },
   "warnings": [{ "code": "W_BEADS_CLI_MISSING", "message": "…" }],
   "result": { "exitCode": 0, "pluginState": "running" }
+  // Khi lệnh thất bại với một mã trong sổ đăng ký (errata 2026-09-15):
+  // "result": { "exitCode": 3, "pluginState": null, "error": { "code": "E_TARGET_NOT_WRITABLE", "message": "…" } }
 }
 ```
+
+`result.error` **chỉ có mặt khi lệnh thất bại** với một mã lỗi trong sổ đăng ký; lệnh thành công thì không có khoá này, nên script kiểm `"error" in result` là biết lệnh lỗi hay không *(errata 2026-09-15)*.
 
 `doctor` thay `actions[]` bằng `checks[]` gồm `{ id, severity: "ok" | "warn" | "error", message, remediation }`. `uninstall` dùng `actions[]` với `kind: "delete" | "keep" | "config"`.
 
 Khi bật `--json`, stdout chỉ chứa đúng một tài liệu JSON; output của tiến trình con đi ra **stderr**.
 
-**Sổ đăng ký mã lỗi** là một hằng số duy nhất, đủ cho Phase 1, mỗi mục có thông điệp và cách khắc phục: `E_DAEMON_UNREACHABLE`, `E_VERSION_MISMATCH`, `E_UNSUPPORTED_OS`, `E_NODE_TOO_OLD`, `E_PASEO_CLI_MISSING`, `E_PASEO_OUTPUT_UNEXPECTED`, `E_CONFLICT`, `E_BAD_SKILLS_AGENTS`, `E_BAD_ROLE_SPEC`, `E_CONFIG_CONCURRENT_WRITE`, `E_RECORD_SCHEMA_TOO_NEW`, `E_LOCKED`, `E_PROVIDER_UNAVAILABLE`, `W_SKILLS_MISSING`, `W_BEADS_CLI_MISSING`, `W_SKILLS_ASSIST_FAILED`, `W_PROVIDER_NOT_LOGGED_IN`. Không được đặt mã tại chỗ.
+**Sổ đăng ký mã lỗi** là một hằng số duy nhất, đủ cho Phase 1, mỗi mục có thông điệp và cách khắc phục: `E_DAEMON_UNREACHABLE`, `E_VERSION_MISMATCH`, `E_UNSUPPORTED_OS`, `E_NODE_TOO_OLD`, `E_PASEO_CLI_MISSING`, `E_PASEO_OUTPUT_UNEXPECTED`, `E_CONFLICT`, `E_BAD_SKILLS_AGENTS`, `E_BAD_ROLE_SPEC`, `E_CONFIG_CONCURRENT_WRITE`, `E_RECORD_SCHEMA_TOO_NEW`, `E_LOCKED`, `E_PROVIDER_UNAVAILABLE`, `E_UNSAFE_INSTALL_HOME`, `E_PATH_ESCAPE`, `E_SYMLINK_IN_PATH`, `E_TARGET_NOT_WRITABLE`, `E_PLUGIN_LOAD_FAILED`, `W_SKILLS_MISSING`, `W_BEADS_CLI_MISSING`, `W_SKILLS_ASSIST_FAILED`, `W_PROVIDER_NOT_LOGGED_IN`. Không được đặt mã tại chỗ. Năm mã `E_UNSAFE_INSTALL_HOME`, `E_PATH_ESCAPE`, `E_SYMLINK_IN_PATH`, `E_TARGET_NOT_WRITABLE` (mã thoát 3, chưa ghi gì) và `E_PLUGIN_LOAD_FAILED` (mã thoát 7) được bổ sung theo errata 2026-09-15.
 
 ## 5. Hợp đồng RPC của plugin
 
@@ -514,3 +519,4 @@ CI **không** chạy agent thật: không xác định, tốn tiền, và cần 
 | 2026-09-15 | hieu.nt10 (soạn bởi Claude) | Sau lượt review độc lập bằng Codex: thêm **§2.6 Hợp đồng hành vi giữa các agent** (hợp đồng nhãn đủ để implement, báo cáo Worker → Manager, định nghĩa lô review, quy tắc dừng và lan truyền, quy tắc ngôn ngữ); sửa §1 và §11 vốn còn nói Worker dừng ở beads và implement thuộc Phase 3; đổi `mcpInjectSetByUs` thành bản ghi trạng thái trước theo từng khoá; gộp `--enable-agent-tools` vào `--enable-plugins` thành một ranh giới tin cậy; chốt Q-020 và Q-027; thêm Q-028 về việc Reviewer có thật sự bị từ chối công cụ hay không |
 | 2026-09-15 | hieu.nt10 (soạn bởi Claude) | Chốt Q-021, Q-023, Q-024 và quy tắc ngôn ngữ: nội dung dành cho agent viết tiếng Anh; Worker gán nhãn khi tạo bead và truy vấn theo nhãn; Worker **đi tiếp tới khi implement xong**, không giới hạn cứng, vướng thì hỏi; `daemon.mcp.injectIntoAgents` trở thành bước tiêu chuẩn có cảnh báo trong luồng cài. Cập nhật §2.5, §3.4, §9.2 |
 | 2026-09-15 | hieu.nt10 (soạn bởi Claude) | **Bản 2 — viết lại theo PRD có phần điều phối.** Kiến trúc chuyển thành ba lớp (§2.1); thêm §2.2 lý do vẫn cần plugin, §2.5 bộ chỉ dẫn vai trò, §5 hợp đồng RPC, §9.2 luồng giao việc. Bổ sung `roles[]` và hai trường mới vào hồ sơ; §3.4 liệt kê đủ phần ghi vào `config.json`; thêm cờ `--enable-agent-tools`, `--role`, `--reconfigure`; mã 4 mở rộng cho ranh giới quyền công cụ; thêm ranh giới tin cậy thứ ba ở §7; thêm tầng test hợp nhất cấu hình, test chỉ dẫn vai trò và bộ nghiệm thu 5 yêu cầu mẫu; gỡ `--prune` khỏi `doctor` theo phát hiện của lượt polish. Liên kết ADR-005 và ADR-006 |
+| 2026-09-15 | hieu.nt10 (soạn bởi Claude) | **Errata theo quyết định của owner khi implement.** §4.3 thêm mã thoát 7 (đã chép file nhưng Paseo không cài/nạp được plugin — trước đây không có dòng nào đúng nghĩa, mã 3 sai vì đã ghi). §4.4 thêm năm mã lỗi: ba mã cho chốt đường dẫn (`E_UNSAFE_INSTALL_HOME`, `E_PATH_ESCAPE`, `E_SYMLINK_IN_PATH`), `E_TARGET_NOT_WRITABLE` (preflight trước đây mượn `E_CONFLICT`, sai hướng khắc phục) và `E_PLUGIN_LOAD_FAILED`; thêm `result.error { code, message }` chỉ có mặt khi thất bại. `--prune` luôn giữ backup cấu hình Paseo mới nhất để `uninstall --restore-backups` vẫn khôi phục được |

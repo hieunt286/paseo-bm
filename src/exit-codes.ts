@@ -31,6 +31,11 @@ export const EXIT_CODES = {
   conflict: 5,
   /** No TTY and no `--apply`: the preview was printed, nothing was written. */
   noTtyNoApply: 6,
+  /**
+   * Files were installed, but Paseo could not install or load the plugin
+   * (Design §4.3 errata 2026-09-15). Unlike 3, something was written.
+   */
+  pluginLoadFailed: 7,
 } as const;
 
 /** The names above, e.g. `"noTtyNoApply"`. */
@@ -64,11 +69,16 @@ export const EXIT_CODE_SPECS: readonly ExitCodeSpec[] = [
     name: "noTtyNoApply",
     meaning: "no terminal and no --apply; preview printed, nothing written",
   },
+  {
+    code: EXIT_CODES.pluginLoadFailed,
+    name: "pluginLoadFailed",
+    meaning: "files installed, but Paseo could not install or load the plugin",
+  },
 ];
 
 const SPEC_BY_CODE = new Map<number, ExitCodeSpec>(EXIT_CODE_SPECS.map((spec) => [spec.code, spec]));
 
-/** True when a number is one of the seven codes paseo-bm may exit with. */
+/** True when a number is one of the eight codes paseo-bm may exit with. */
 export function isExitCode(value: number): value is ExitCode {
   return SPEC_BY_CODE.has(value);
 }

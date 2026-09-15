@@ -107,6 +107,36 @@ export const DIAGNOSTICS = {
     remediation:
       "Check which providers and models Paseo offers, then pick an existing pair for the role, for example `--role worker=<provider>/<model>`. Nothing was written.",
   },
+  E_UNSAFE_INSTALL_HOME: {
+    code: "E_UNSAFE_INSTALL_HOME",
+    message: "The install home is not a safe place for paseo-bm to own, for example an empty path, the home directory itself, or a directory that belongs to Paseo or to an agent.",
+    remediation:
+      "Point `--home` (or `PASEO_BM_HOME`) at a dedicated directory such as `~/.paseo-bm`, then run the command again. Nothing was written.",
+  },
+  E_PATH_ESCAPE: {
+    code: "E_PATH_ESCAPE",
+    message: "A path paseo-bm was about to use resolves outside the directory it is allowed to write to, so the operation was refused.",
+    remediation:
+      "Check the reported path and the install record for an entry that points outside the install home. paseo-bm never follows such a path; nothing outside the install home was written.",
+  },
+  E_SYMLINK_IN_PATH: {
+    code: "E_SYMLINK_IN_PATH",
+    message: "A path paseo-bm was about to write to goes through a symbolic link, so the operation was refused.",
+    remediation:
+      "Replace the reported symlink with a real directory, or choose another `--home`. paseo-bm never writes through a symlink, so nothing was written through it.",
+  },
+  E_TARGET_NOT_WRITABLE: {
+    code: "E_TARGET_NOT_WRITABLE",
+    message: "The install home, or the nearest existing directory above it, is not writable by the current user.",
+    remediation:
+      "Fix the permissions on the reported directory, or point `--home` at a directory you own, then run the command again. Nothing was written.",
+  },
+  E_PLUGIN_LOAD_FAILED: {
+    code: "E_PLUGIN_LOAD_FAILED",
+    message: "paseo-bm installed its files, but Paseo could not install or load the plugin.",
+    remediation:
+      "Run `paseo plugin logs paseo-bm` to see why, fix the cause, then run `npx paseo-bm install --apply` again. The installed files were kept.",
+  },
   W_SKILLS_MISSING: {
     code: "W_SKILLS_MISSING",
     message: "Some agent skills that the paseo-bm roles rely on are not installed for the selected agents.",

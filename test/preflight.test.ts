@@ -360,7 +360,7 @@ describe("runPreflight — every failing branch stops before the first write", (
     {
       name: "the install home cannot be created",
       checkId: "install-home",
-      code: "E_CONFLICT",
+      code: "E_TARGET_NOT_WRITABLE",
       // Permission bits mean nothing to root, which can write anywhere.
       skip: () => process.getuid?.() === 0,
       build: (sandbox) => {

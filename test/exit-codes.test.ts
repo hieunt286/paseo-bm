@@ -17,6 +17,7 @@ const DESIGN_EXIT_TABLE: readonly (readonly [number, string])[] = [
   [4, "consentMissing"],
   [5, "conflict"],
   [6, "noTtyNoApply"],
+  [7, "pluginLoadFailed"],
 ];
 
 describe("exit-code table", () => {
@@ -40,11 +41,11 @@ describe("exit-code table", () => {
     }
   });
 
-  it("recognises only the seven codes", () => {
+  it("recognises only the eight codes", () => {
     for (const [code] of DESIGN_EXIT_TABLE) {
       expect(isExitCode(code), String(code)).toBe(true);
     }
-    expect(isExitCode(7)).toBe(false);
+    expect(isExitCode(8)).toBe(false);
     expect(isExitCode(-1)).toBe(false);
   });
 });
