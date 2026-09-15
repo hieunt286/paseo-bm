@@ -129,6 +129,26 @@ describe("worker.md part one — label contract", () => {
     expect(documents).toContain("Put the classification and the short plan in the bead description.");
   });
 
+  // Bug bm-n6e: in acceptance run F-4 the Worker rewrote a lint-clean bead and
+  // moved its criteria into the separate acceptance_criteria field, so
+  // `br lint -s all` warned "Missing ## Acceptance Criteria".
+  it("keeps the template headings the tracker's lint requires, never drops one, and lints before beads-done (bm-n6e)", () => {
+    const beads = block("### Step 4", "### Step 5").replace(/\s+/g, " ");
+    expect(beads).toContain(
+      "**Every bead description you write keeps the template headings the tracker's lint requires** (with `br`: `## Acceptance Criteria` for tasks and features, `## Steps to Reproduce` and `## Acceptance Criteria` for bugs, `## Success Criteria` for epics).",
+    );
+    expect(beads).toContain("a separate field such as `--acceptance-criteria` never replaces the heading.");
+    expect(beads).toContain("**When you rewrite an existing description, never drop a heading it already has.**");
+    expect(beads).toContain("After each round of bead changes, run the tracker's lint (with `br`: `br lint -s all`; use the equivalent with `bd`).");
+    expect(beads).toContain("Before sending `beads-done`, fix every warning on the beads you created or updated;");
+    expect(beads.indexOf("run the tracker's lint")).toBeLessThan(beads.indexOf("then send a `beads-done` report"));
+
+    const precedence = block("### These role instructions override any skill", "## Responsibilities").replace(/\s+/g, " ");
+    expect(precedence).toContain("5. **Every bead you create or update keeps the headings the tracker's lint requires**");
+    expect(precedence).toContain("and never drops a heading it already has. A separate acceptance-criteria field never replaces the heading.");
+    expect(precedence).toContain("Run the lint again before you send the `beads-done` report.");
+  });
+
   it("queries open beads by feature label and widens to area when empty", () => {
     expect(labels).toMatch(/\*\*not closed\*\* and carry `feature:<slug>`/);
     expect(labels).toMatch(/widen the query to\s+`area:<slug>`/);
