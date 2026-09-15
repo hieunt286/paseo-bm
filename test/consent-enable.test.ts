@@ -8,7 +8,7 @@
  * fake clock, so no test waits for real.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -29,8 +29,15 @@ import {
   createTrustBoundaryStep,
 } from "../src/commands/install/enable.js";
 import { APPLY_QUESTION, createInstallCommand } from "../src/commands/install/index.js";
+import { ROLE_NAMES } from "../src/record.js";
+import { DEFAULT_ROLE_DISPLAY_NAMES, roleGrantsPaseoTools } from "../src/roles/config.js";
+import { roleRegistrationEdit } from "../src/roles/register.js";
 import type { WriteScopeHarness } from "./helpers/write-scope.js";
 import { startWriteScope } from "./helpers/write-scope.js";
+
+// The role step (bm-wp-107-2r5.4) adds three fake-CLI calls per install; the
+// slowest scenario came close to the default 5 seconds when the suite runs in parallel.
+vi.setConfig({ testTimeout: 30_000 });
 
 const FAKE_DIR = fileURLToPath(new URL("./fakes/", import.meta.url));
 const VERSION = "0.2.0";
@@ -60,6 +67,10 @@ function script(overrides: Record<string, Scripted> = {}): void {
     "plugin install": {
       stdout: JSON.stringify({ id: "paseo-bm", path: join(installHome, "plugin", VERSION), enabled: true, status: "disabled" }),
     },
+    // The role step (bm-wp-107-2r5.4): one provider with one model, logged in.
+    "provider ls": { stdout: JSON.stringify([{ provider: "claude", label: "Claude", status: "available" }]) },
+    "provider models": { stdout: JSON.stringify([{ id: "claude-opus-5", model: "Opus 5" }]) },
+    "provider diagnostic": { stdout: JSON.stringify({ provider: "claude", diagnostic: 'Auth: {"loggedIn": true}' }) },
   };
   writeFileSync(scriptFile, JSON.stringify({ ...base, ...overrides }));
 }
@@ -68,9 +79,26 @@ function configText(): string {
   return readFileSync(join(paseoHome, "config.json"), "utf8");
 }
 
+/**
+ * `config` plus the bm-* entries the role step writes by default for the
+ * scripted catalogue, so only the trust-boundary step writes config.json here
+ * (the role step is proven in test/install-roles.test.ts).
+ */
 function writePaseoConfig(config: Record<string, unknown>): void {
+  const edit = roleRegistrationEdit(
+    ROLE_NAMES.map((role) => ({
+      role,
+      displayName: DEFAULT_ROLE_DISPLAY_NAMES[role],
+      provider: "claude",
+      model: "claude-opus-5",
+      paseoTools: roleGrantsPaseoTools(role),
+      source: "default" as const,
+    })),
+  );
+  const daemon = (config["daemon"] ?? {}) as Record<string, unknown>;
+  const seeded = { ...config, agents: { providers: edit.providers }, daemon: { ...daemon, agentProfiles: edit.profiles } };
   mkdirSync(paseoHome, { recursive: true });
-  writeFileSync(join(paseoHome, "config.json"), `${JSON.stringify(config, null, 2)}\n`);
+  writeFileSync(join(paseoHome, "config.json"), `${JSON.stringify(seeded, null, 2)}\n`);
 }
 
 function writePayload(): void {

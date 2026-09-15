@@ -19,7 +19,9 @@ import type { CommandHandlers } from "../src/cli.js";
 import { EXIT_CODES } from "../src/exit-codes.js";
 import { ScriptedPrompter } from "../src/prompter.js";
 import type { TtyInfo } from "../src/prompter.js";
-import { createRecord, serializeRecord } from "../src/record.js";
+import { ROLE_NAMES, createRecord, serializeRecord } from "../src/record.js";
+import { DEFAULT_ROLE_DISPLAY_NAMES, roleGrantsPaseoTools } from "../src/roles/config.js";
+import { roleRegistrationEdit } from "../src/roles/register.js";
 import {
   APPLY_QUESTION,
   DOWNGRADE_QUESTION,
@@ -55,14 +57,41 @@ function script(overrides: Record<string, Scripted> = {}): void {
     "plugin install": {
       stdout: JSON.stringify({ id: "paseo-bm", path: join(installHome, "plugin", VERSION), enabled: true, status: "running" }),
     },
+    // The role step (bm-wp-107-2r5.4): one provider with one model, logged in.
+    "provider ls": { stdout: JSON.stringify([{ provider: "claude", label: "Claude", status: "available" }]) },
+    "provider models": { stdout: JSON.stringify([{ id: "claude-opus-5", model: "Opus 5" }]) },
+    "provider diagnostic": { stdout: JSON.stringify({ provider: "claude", diagnostic: 'Auth: {"loggedIn": true}' }) },
   };
   writeFileSync(scriptFile, JSON.stringify({ ...base, ...overrides }));
 }
 
+/**
+ * `config` plus the bm-* entries the role step would write by default for the
+ * scripted catalogue, so these flow tests never write Paseo's config (the role
+ * step itself is proven in test/install-roles.test.ts).
+ */
+function withDefaultRoles(config: Record<string, unknown>): Record<string, unknown> {
+  const edit = roleRegistrationEdit(
+    ROLE_NAMES.map((role) => ({
+      role,
+      displayName: DEFAULT_ROLE_DISPLAY_NAMES[role],
+      provider: "claude",
+      model: "claude-opus-5",
+      paseoTools: roleGrantsPaseoTools(role),
+      source: "default" as const,
+    })),
+  );
+  const daemon = (config["daemon"] ?? {}) as Record<string, unknown>;
+  return { ...config, agents: { providers: edit.providers }, daemon: { ...daemon, agentProfiles: edit.profiles } };
+}
+
 function writePaseoConfig(config: Record<string, unknown>): void {
   mkdirSync(paseoHome, { recursive: true });
-  writeFileSync(join(paseoHome, "config.json"), `${JSON.stringify(config, null, 2)}\n`);
+  writeFileSync(join(paseoHome, "config.json"), `${JSON.stringify(withDefaultRoles(config), null, 2)}\n`);
 }
+
+/** What the role step reads from Paseo before the preview. */
+const ROLE_READS = ["provider ls", "provider models"];
 
 function writePayload(version: string): void {
   const files: Record<string, string> = {
@@ -196,7 +225,7 @@ describe("install — interactive flow with a scripted prompter", () => {
     expect(run.prompter.counts.confirm).toBe(1);
     expect(scope?.writes).toEqual([]);
     expect(existsSync(installHome)).toBe(false);
-    expect(subcommands()).toEqual(["daemon status", "plugin ls"]);
+    expect(subcommands()).toEqual(["daemon status", "plugin ls", ...ROLE_READS]);
     expect(run.err).toContain("Nothing was written.");
   });
 
@@ -210,7 +239,8 @@ describe("install — interactive flow with a scripted prompter", () => {
   it("--yes skips only the apply confirmation", async () => {
     const run = await install(["install", "--apply", "--yes"], { tty: TTY });
     expect(run.code).toBe(EXIT_CODES.ok);
-    expect(run.prompter.counts.total).toBe(0);
+    // No confirmation; the role questions of a first install are not confirmations.
+    expect(run.prompter.counts.confirm).toBe(0);
     expect(existsSync(join(installHome, "install.json"))).toBe(true);
   });
 
@@ -221,7 +251,7 @@ describe("install — interactive flow with a scripted prompter", () => {
     expect(run.code).toBe(EXIT_CODES.consentMissing);
     expect(run.prompter.counts.confirm).toBe(1);
     expect(existsSync(join(installHome, "install.json"))).toBe(true);
-    expect(JSON.parse(readFileSync(join(paseoHome, "config.json"), "utf8"))).toEqual({});
+    expect(JSON.parse(readFileSync(join(paseoHome, "config.json"), "utf8"))).toEqual(withDefaultRoles({}));
   });
 });
 
@@ -234,7 +264,7 @@ describe("install — no terminal", () => {
     expect(scope?.writes).toEqual([]);
     expect(existsSync(installHome)).toBe(false);
     expect(run.out).toContain("Planned changes");
-    expect(subcommands()).toEqual(["daemon status", "plugin ls"]);
+    expect(subcommands()).toEqual(["daemon status", "plugin ls", ...ROLE_READS]);
   });
 
   it("a bare `paseo-bm` behaves the same", async () => {

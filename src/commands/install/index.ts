@@ -6,10 +6,12 @@
  * This file composes modules that already exist and decides nothing they
  * already decide:
  *
- *     layout → preflight → record → plan (read-only) → preview
- *            → [downgrade question] → apply confirmation (default No)
+ *     layout → preflight → record → plan (read-only)
+ *            → roles plan (catalogue, --role existence, questions; read-only)
+ *            → preview → [downgrade question] → apply confirmation (default No)
  *            → lock → clean partial payload → re-plan → applier
- *            → plugin registration → trust boundary step → --prune
+ *            → plugin registration → trust boundary step
+ *            → roles apply (login, bm-* entries, roles[]) → --prune
  *            → skills step → summary
  *
  * Rules the flow is built around:
@@ -64,6 +66,7 @@ import { isRecordError, readRecord } from "../../record.js";
 import { createRedactor } from "../../redact.js";
 import { writeHumanReport } from "../../report/human.js";
 import { writeJsonReport } from "../../report/json.js";
+import { assistSkills } from "../../skills/assist.js";
 import { detectSkills, skillsChecks, toSkillsByAgent } from "../../skills/detect.js";
 import { DEFAULT_SKILLS_SOURCE } from "../doctor.js";
 import type { PrunePlan } from "../prune.js";
@@ -76,6 +79,8 @@ import type { InstallPlan, PaseoSwitchState, PluginRegistrationState } from "./p
 import { DEFAULT_PLUGIN_ID, planInstall } from "./planner.js";
 import { enableTrustBoundary } from "./enable.js";
 import { isPluginRegistrationError, registerPlugin } from "./register.js";
+import type { RolesPlan, RolesStep } from "./roles-step.js";
+import { defaultRolesStep } from "./roles-step.js";
 
 /* ------------------------------------------------------------ questions */
 
@@ -156,6 +161,8 @@ export type SkillsStep = (input: SkillsStepInput) => Promise<SkillsStepOutcome>;
 export interface InstallSteps {
   readonly trustBoundary?: TrustBoundaryStep;
   readonly skills?: SkillsStep;
+  /** bm-wp-107-2r5.4: roles decided before the preview, registered after the trust boundary. */
+  readonly roles?: RolesStep;
 }
 
 /**
@@ -268,7 +275,8 @@ export async function runInstall(options: InstallOptions): Promise<InstallOutcom
   const clock = options.now ?? (() => new Date());
   const adapter = options.adapter ?? createPaseoAdapter({ env: context.env as NodeJS.ProcessEnv });
   const trustBoundary = options.steps?.trustBoundary ?? enableTrustBoundary;
-  const skillsStep = options.steps?.skills ?? detectOnlySkills;
+  const skillsStep = options.steps?.skills ?? assistSkills;
+  const rolesStep = options.steps?.roles ?? defaultRolesStep;
   // Under --json stdout belongs to one document, and a question would be
   // written into it, so a --json run never asks.
   const interactive = context.tty.interactive && context.prompter.interactive && !flags.json;
@@ -392,7 +400,18 @@ export async function runInstall(options: InstallOptions): Promise<InstallOutcom
           })
         : null;
     let pruned = await prunePreview(plan);
-    actions = [...plan.actions, ...(pruned?.actions ?? [])];
+
+    /* -- 3b. roles: catalogue, --role existence, decision; still no writes -- */
+    // Decided before the preview so the preview lists what will be registered,
+    // and so E_PROVIDER_UNAVAILABLE stops the run before anything is written.
+    const rolesPlanned = await rolesStep.plan({ context, interactive, adapter, paseoHome, fs, record: record0 });
+    if (!rolesPlanned.ok) {
+      throw stop(rolesPlanned.failure.exitCode, rolesPlanned.failure.code, rolesPlanned.failure.detail);
+    }
+    const rolesPlan: RolesPlan = rolesPlanned.plan;
+    roles = rolesPlan.roles;
+    notes.push(...rolesPlan.notes);
+    actions = [...plan.actions, ...rolesPlan.actions, ...(pruned?.actions ?? [])];
 
     if (partial.length > 0) {
       notes.push(
@@ -434,7 +453,7 @@ export async function runInstall(options: InstallOptions): Promise<InstallOutcom
           force = true;
           plan = await makePlan(record0, readOps);
           pruned = await prunePreview(plan);
-          actions = [...plan.actions, ...(pruned?.actions ?? [])];
+          actions = [...plan.actions, ...rolesPlan.actions, ...(pruned?.actions ?? [])];
           blocking = blockingConflicts(plan, partial);
           previewShown = false;
         }
@@ -496,7 +515,7 @@ export async function runInstall(options: InstallOptions): Promise<InstallOutcom
         notes.push("The install home changed after the preview was shown; the new plan is shown below.");
         plan = plan1;
         pruned = await prunePreview(plan);
-        actions = [...plan.actions, ...(pruned?.actions ?? [])];
+        actions = [...plan.actions, ...rolesPlan.actions, ...(pruned?.actions ?? [])];
         showPreview();
         if (!(await context.prompter.confirm({ message: APPLY_QUESTION, defaultValue: false }))) {
           notes.push("Nothing was written.");
@@ -577,6 +596,28 @@ export async function runInstall(options: InstallOptions): Promise<InstallOutcom
         throw stop(trust.failure.exitCode, trust.failure.code, trust.failure.detail);
       }
 
+      /* -- 8b. roles (bm-wp-107-2r5.4): login, bm-* entries, roles[] ------ */
+      const rolesApplied = await rolesStep.apply({
+        context,
+        interactive,
+        adapter,
+        installHome,
+        paseoHome,
+        fsops,
+        fs,
+        record,
+        plan: rolesPlan,
+        now: clock(),
+      });
+      record = rolesApplied.record;
+      roles = rolesApplied.roles;
+      actions = [...actions, ...rolesApplied.actions];
+      warnings.push(...rolesApplied.warnings);
+      notes.push(...rolesApplied.notes);
+      if (rolesApplied.failure !== undefined) {
+        throw stop(rolesApplied.failure.exitCode, rolesApplied.failure.code, rolesApplied.failure.detail);
+      }
+
       /* -- 9. --prune, after registration has fixed the active version --- */
       if (flags.prune) {
         const prunePlan = await planPrune({
@@ -585,7 +626,11 @@ export async function runInstall(options: InstallOptions): Promise<InstallOutcom
           fsops,
           fs,
           keepVersions: [plan1.version],
-          keepBackups: [...(result.backup === null ? [] : [result.backup.dir]), ...trust.backupDirs],
+          keepBackups: [
+            ...(result.backup === null ? [] : [result.backup.dir]),
+            ...trust.backupDirs,
+            ...rolesApplied.backupDirs,
+          ],
         });
         const prunedResult = await applyPrune({ plan: prunePlan, record, fsops, fs, now: clock() });
         record = prunedResult.record ?? record;
