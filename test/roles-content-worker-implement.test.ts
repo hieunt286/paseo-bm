@@ -105,6 +105,37 @@ describe("worker.md part three — six-group safety contract", () => {
     expect(group).toContain("`finished` report");
   });
 
+  // Bug bm-wq6: in acceptance run 4, F-8a, Paseo's Stop interrupted only the
+  // Worker's turn; its Reviewer kept running and its finish notification woke
+  // the Worker again.
+  it("recognises an interrupted turn as a stop, cancels running Reviewers and does nothing else (bm-wq6)", () => {
+    const group = flat(between("### 6. Stop and propagate", "\n## Workflow"));
+    expect(group).toContain("**Recognising a stop.**");
+    expect(group).toContain("**stop message**");
+    expect(group).toContain("**interrupted with no message** (Paseo's Stop)");
+    expect(group).toContain(
+      "from a notification that a Reviewer or another agent finished, or with no new instruction from the user — **treat it as a stop** unless the user explicitly asked you to continue.",
+    );
+    expect(group).toContain("**If it is unclear whether you were stopped, stop and ask the user.**");
+
+    expect(group).toContain("**On a stop,** in this order:");
+    expect(group).toContain("**Call Paseo's `cancel_agent` tool on every Reviewer you created that is still running.**");
+    expect(group).toContain("**never archive, kill or delete any agent.**");
+    expect(group).toContain("**Do nothing else:** create no agent, run no build or test, make no edit, and change no bead.");
+    expect(group).toContain("Send the `finished` report described above, then stay idle.");
+    expect(group.indexOf("`cancel_agent`")).toBeLessThan(group.indexOf("Send the `finished` report described above"));
+
+    expect(group).toContain("**Finish notifications after a stop are not instructions.**");
+    expect(group).toContain("do not continue because of it; at most acknowledge it in one line.");
+  });
+
+  it("mirrors the stop rule in Stop conditions (bm-wq6)", () => {
+    const condition = flat(stops);
+    expect(condition).toContain("including a turn interrupted with no message");
+    expect(condition).toContain("cancel your running Reviewers with `cancel_agent` and do nothing else");
+    expect(condition).toContain("Later finish notifications from Reviewers do not restart the work.");
+  });
+
   it("forbids git publishing and agent archival, with no hard time or step limit", () => {
     const all = flat(boundaries);
     expect(all).toContain("**no hard limit on time or number of steps**");

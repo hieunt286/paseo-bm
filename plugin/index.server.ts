@@ -3,6 +3,7 @@ import { MANAGER_INSTRUCTIONS } from "./server/manager-instructions";
 import { ensureManager, listWorkspaceAgents } from "./server/manager";
 import { registerRoleHook } from "./server/role-hook";
 import { describeRoles } from "./server/roles";
+import { registerStopPropagation } from "./server/stop-propagation";
 import { agentsListRpc, managerEnsureRpc, rolesDescribeRpc } from "./shared/contracts";
 
 /**
@@ -28,7 +29,9 @@ export function readManagerInstructions(): Promise<string> {
  * It also registers a `before("agent.create")` hook that puts the role
  * instructions into the system prompt of every `bm-manager`, `bm-worker` and
  * `bm-reviewer` agent, whoever creates it: Paseo's `create_agent` tool has no
- * system-prompt parameter (bm-hld). The returned cleanup removes that hook.
+ * system-prompt parameter (bm-hld). It also registers an `on("agent.turn_ended")`
+ * hook that sends a stop notice to the running Reviewers of a Worker the user
+ * stopped (bm-wq6, REQ-026f). The returned cleanup removes both hooks.
  *
  * This entry must never import from `client/`: that is a compile error.
  *
@@ -54,7 +57,9 @@ export default function contribute(server: PluginServerContext): () => void {
   server.handle(agentsListRpc, (input, { paseo }) => listWorkspaceAgents(input, { paseo }));
   server.handle(rolesDescribeRpc, (_input, { paseo }) => describeRoles({ paseo }));
   const removeRoleHook = registerRoleHook(server);
+  const removeStopPropagation = registerStopPropagation(server);
   return () => {
     removeRoleHook();
+    removeStopPropagation();
   };
 }

@@ -43,6 +43,7 @@ async function bundleServerEntry(): Promise<string> {
 
 type Handler = (input: unknown, context: { paseo: unknown }) => unknown;
 type BeforeHandler = (input: { request: unknown }, context: unknown) => unknown;
+type OnHandler = (event: unknown, context: { paseo: unknown; signal: AbortSignal }) => unknown;
 
 /**
  * Evaluates the bundle exactly as Paseo 0.8 does (read from app.asar,
@@ -82,6 +83,7 @@ function loadBundle(code: string): (server: unknown) => () => void {
 function fakeServer() {
   const handlers = new Map<string, Handler>();
   const beforeHooks = new Map<string, BeforeHandler>();
+  const onHooks = new Map<string, OnHandler>();
   const server = {
     handle: vi.fn((contract: { name: string }, handler: Handler) => {
       handlers.set(contract.name, handler);
@@ -92,8 +94,14 @@ function fakeServer() {
         beforeHooks.delete(name);
       };
     }),
+    on: vi.fn((name: string, handler: OnHandler) => {
+      onHooks.set(name, handler);
+      return () => {
+        onHooks.delete(name);
+      };
+    }),
   };
-  return { server, handlers, beforeHooks };
+  return { server, handlers, beforeHooks, onHooks };
 }
 
 function fakePaseo() {
@@ -197,11 +205,13 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
     const code = await bundleServerEntry();
     const contribute = loadBundle(code);
 
-    const { server, handlers, beforeHooks } = fakeServer();
+    const { server, handlers, beforeHooks, onHooks } = fakeServer();
     const cleanup = contribute(server);
     expect(typeof cleanup).toBe("function");
     expect([...handlers.keys()].sort()).toEqual(["agents.list", "manager.ensure", "roles.describe"]);
     expect([...beforeHooks.keys()]).toEqual(["agent.create"]);
+    // bm-wq6: the agent.turn_ended hook that propagates a Worker stop to its Reviewers.
+    expect([...onHooks.keys()]).toEqual(["agent.turn_ended"]);
 
     const { paseo, created } = fakePaseo();
     const ensured = await handlers.get("manager.ensure")!({ workspaceId: "ws-1" }, { paseo });
@@ -227,8 +237,19 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
     expect(run({ provider: "bm-manager", cwd: "/repo", systemPrompt: managerMd })).toBeUndefined();
     expect(run({ provider: "claude", cwd: "/repo" })).toBeUndefined();
 
+    // The bundled hook resolves on an event it ignores, without touching Paseo.
+    await expect(
+      Promise.resolve(
+        onHooks.get("agent.turn_ended")!(
+          { agent: { id: "a-1", provider: "claude", workspaceId: "ws-1" }, outcome: { kind: "canceled", reason: "x" } },
+          { paseo, signal: new AbortController().signal },
+        ),
+      ),
+    ).resolves.toBeUndefined();
+
     cleanup();
     expect(beforeHooks.size).toBe(0);
+    expect(onHooks.size).toBe(0);
   });
 });
 
