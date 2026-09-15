@@ -144,7 +144,7 @@ Ngoài ra, **hành động của agent không đảo ngược tự động đư�
 - **Outcome:** `doctor` không ghi, chỉ gọi hai lệnh Paseo chỉ-đọc, không gọi CLI `skills`, không chạm mạng; báo thêm trạng thái ba vai trò và quyền công cụ. `uninstall` gỡ theo hồ sơ, xoá mục `bm-*` trong `agents.providers` và `agentProfiles`, trả `injectIntoAgents` về cũ nếu chính ta bật, tự xoá payload, giữ file `user-modified`, `--restore-backups`, xử lý nhánh daemon không chạy, **không đụng agent đang tồn tại**. `--prune` chỉ chạy khi được yêu cầu.
 - **Requirement / AC coverage:** REQ-011, REQ-012 (a→h); Design Q-016.
 - **Design refs:** Design §4.1, §9.4.
-- **Prerequisites:** WP-105, WP-107, WP-109, WP-110.
+- **Prerequisites:** WP-105, WP-107, WP-110.
 - **Exit condition:** M-5 theo phát biểu chính xác (HOME giả, không file sửa tay, daemon chạy, người dùng bỏ backup → install home không còn và `config.json` không còn khoá nào do paseo-bm ghi; khoá `plugins: {}` do Paseo để lại không tính); ba nhánh được phép giữ lại có test riêng; mục `room-*` vẫn nguyên sau khi gỡ; `doctor` sau gỡ báo "chưa cài" và mã 0; test bảng cho phép gọi lệnh ngoài của `doctor` đúng bằng hai lệnh; ảnh chụp JSON cho `doctor` ba trạng thái và `uninstall` hai chế độ.
 
 #### WP-120: Nghiệm thu Phase 1a trên daemon thật
@@ -291,7 +291,7 @@ Theo Design §10. Khung **Vitest**, Node 22 và 24, macOS và Linux.
 - **Auth / security (kích hoạt):**
   - Bốn ranh giới: bật plugin không sandbox; chạy tiến trình ngoài (CLI `skills`, lệnh login); **mở quyền tạo agent cho Manager và Worker**; và hành động của chính agent trong repo người dùng.
   - Chính sách: mỗi ranh giới có đồng ý riêng; `--yes` không bao giờ ngầm định đồng ý; quyền công cụ mở hẹp nhất theo ADR-006; Worker không git và phải dừng lại hỏi.
-  - **Bằng chứng phủ định bắt buộc:** test chặn ghi ngoài phạm vi; test đầu vào xấu của `--skills-agents` và `--role`; test `config.json` chỉ đổi đúng phần `bm-*` và các khoá đã khai báo; test không đọc file credential; và trong nghiệm thu, `git reflog` chứng minh M-13 bằng 0.
+  - **Bằng chứng phủ định bắt buộc:** test chặn ghi ngoài phạm vi; test đầu vào xấu của `--skills-agents` và `--role`; test `config.json` chỉ đổi đúng phần `bm-*` và các khoá đã khai báo; test không đọc file credential; và trong nghiệm thu, M-13 được chứng minh bằng ảnh chụp hệ thống file trước/sau cộng timeline lệnh và tool call cộng kiểm remote và pull request — `git reflog` một mình không đủ.
   - **Yêu cầu rà soát:** owner review mã ba chỗ trước bản phát hành đầu — sửa `config.json` (WP-107, WP-109), chạy tiến trình ngoài (WP-106, WP-110), và plugin tạo agent (WP-112).
 - **Public contract:** CLI, JSON, mã thoát là hợp đồng công khai từ bản đầu; trong cùng major chỉ thêm, không đổi nghĩa.
 - **Dữ liệu bền vững:** `install.json` schema v1; quy tắc từ chối schema cao hơn nằm ở WP-102.
