@@ -14,9 +14,9 @@ import { build } from "esbuild";
  * bundle `import.meta` is empty, and neither `__dirname` nor `process.cwd()`
  * points at the payload. So the server entry may not locate anything on disk.
  *
- * The bundle is evaluated here with a CommonJS wrapper whose `require` resolves
- * the externals from this repository, `__dirname` pointing somewhere unrelated,
- * and a fake Paseo SDK. No daemon is contacted.
+ * The bundle is evaluated through the same wrapper and interop transform the
+ * daemon applies (see loadBundle), with a fake Paseo SDK. No daemon is
+ * contacted.
  */
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -41,17 +41,39 @@ async function bundleServerEntry(): Promise<string> {
 
 type Handler = (input: unknown, context: { paseo: unknown }) => unknown;
 
-/** Evaluates the CJS bundle and returns its default export, as Paseo's worker would. */
+/**
+ * Evaluates the bundle exactly as Paseo 0.8 does (read from app.asar,
+ * plugins/compiler.js and the plugin worker):
+ *
+ *   compileTarget -> wrapCommonJsBundle(makeHermesInteropEager(output))
+ *   worker        -> factory = globalThis.eval(bundle); exports = factory(runtimeRequire);
+ *                    setup = Reflect.get(exports, "default"); must be a function
+ *
+ * `makeHermesInteropEager` turns esbuild's lazy export getters into eager
+ * copies, so a default export bound late (`const x = ...; export default x;`)
+ * is copied while still undefined. Only a hoisted `export default function`
+ * survives — which is what Paseo's own plugin template uses.
+ */
+function makeHermesInteropEager(code: string): string {
+  return code.replaceAll("get: () => from[key]", "value: from[key]");
+}
+
+function wrapCommonJsBundle(code: string): string {
+  return `(function(require) {\nconst module = { exports: {} };\nconst exports = module.exports;\n${code}\nreturn module.exports;\n})`;
+}
+
 function loadBundle(code: string): (server: unknown) => () => void {
-  const module = { exports: {} as Record<string, unknown> };
   const requireFromRepo = createRequire(join(repoRoot, "package.json"));
-  const unrelatedDir = "/nonexistent/paseo-worker";
-  const wrapper = new Function("exports", "require", "module", "__filename", "__dirname", code);
-  wrapper(module.exports, requireFromRepo, module, join(unrelatedDir, "index.js"), unrelatedDir);
-  const exported = module.exports as { default?: unknown };
-  const contribute = exported.default ?? module.exports;
-  expect(typeof contribute).toBe("function");
-  return contribute as (server: unknown) => () => void;
+  const runtimeRequire = (name: string): unknown => (name === "@getpaseo/plugin/server" ? {} : requireFromRepo(name));
+  const evaluate = globalThis.eval as (source: string) => unknown;
+  const factory = evaluate(wrapCommonJsBundle(makeHermesInteropEager(code)));
+  expect(typeof factory).toBe("function");
+  const exported = (factory as (req: typeof runtimeRequire) => unknown)(runtimeRequire);
+  const setup = exported !== null && typeof exported === "object" ? Reflect.get(exported, "default") : undefined;
+  if (typeof setup !== "function") {
+    throw new Error("Plugin server bundle must default export a function");
+  }
+  return setup as (server: unknown) => () => void;
 }
 
 function fakeServer() {
@@ -173,4 +195,15 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
       ],
     });
   });
+});
+
+describe("entry default exports survive Paseo's eager interop", () => {
+  it.each(["index.server.ts", "index.client.tsx"])(
+    "plugin/%s default-exports a hoisted function declaration",
+    (name) => {
+      const source = readFileSync(join(repoRoot, "plugin", name), "utf8");
+      expect(source).toMatch(/^export default function contribute\(/m);
+      expect(source).not.toMatch(/^export default [A-Za-z_$][\w$]*;\s*$/m);
+    },
+  );
 });
