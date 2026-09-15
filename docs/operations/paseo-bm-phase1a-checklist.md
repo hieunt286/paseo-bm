@@ -31,7 +31,12 @@ bm() { HOME="$CLEAN_HOME" PASEO_HOME="$REAL_PASEO_HOME" npx --yes --package "$TA
 # Lệnh TƯƠNG TÁC có ghi log: dùng `script`, KHÔNG dùng `| tee`.
 bmlog() { local log="$1"; shift; script -q "$log" env HOME="$CLEAN_HOME" PASEO_HOME="$REAL_PASEO_HOME" npx --yes --package "$TARBALL" paseo-bm "$@"; }
 mkdir -p "$EVID" "$CLEAN_HOME"
+# Mô phỏng máy đã có Claude Code và Codex: không có hai thư mục này thì paseo-bm
+# (và CLI skills) coi hai agent là CHƯA CÀI và bỏ qua bước skills — M-9 không đo được.
+mkdir -p "$CLEAN_HOME/.claude" "$CLEAN_HOME/.codex"
 ```
+
+> **Bẫy đã gặp ở lượt 4 (2026-09-15):** HOME sạch hoàn toàn không có `.claude`/`.codex`, nên lần cài đầu bỏ qua bước skills. Trong lần chạy lại, các CLI provider mà Paseo gọi để liệt kê model (Codex, OpenCode) tự tạo `~/.codex`, `~/.cache/opencode`… trong HOME tạm; Codex đổi sang "đã cài mà thiếu skills" và install hỏi lại. Đây là hiện tượng của HOME tạm, không phải paseo-bm ghi ra ngoài phạm vi. Tạo sẵn hai thư mục trên trước bước 4.
 
 > **Bẫy đã gặp ở lượt chạy đầu (2026-09-15):** `bm install 2>&1 | tee file` làm stdout không còn là terminal, nên paseo-bm coi là **không có TTY**: không hỏi gì, dùng vai trò mặc định và thoát mã 6; một lệnh `--apply` sau đó cài thật mà không có đồng ý. Mọi lệnh cần trả lời câu hỏi phải chạy qua `bmlog` (dùng `script -q`, giữ nguyên TTY mà vẫn ghi log).
 
@@ -170,6 +175,7 @@ Kiểm bổ sung theo điều kiện ra của WP-120 (không phải chỉ số r
 
 - M-5 chỉ đạt khi gỡ **tương tác**: không có cờ để bỏ backup hay tắt lại `pluginsEnabled` khi không có TTY.
 - File tạm atomic (`.config.json.*.tmp`, `.install.json.*.tmp`) có thể bị bỏ lại nếu tiến trình bị giết đúng lúc đổi tên; không cơ chế nào dọn chúng. Bước 7 kiểm để phát hiện, không để che.
+- Trong HOME tạm, các CLI provider do Paseo gọi (Codex, OpenCode, bun) tự tạo thư mục của chúng (`.codex/tmp`, `.cache/opencode`, `Library/Caches/bun`…). Các thư mục này không do paseo-bm tạo và không tính vào M-4/M-5.
 - Container rỗng `agents.providers` / `daemon.mcp` do paseo-bm tạo có thể còn lại sau khi gỡ (cố ý, `src/paseo/config.ts` không dọn container).
 - M-2 đo trên lượt **cập nhật** không tương tác, vì lượt cài đầu tiên phải tương tác để đếm M-1; bản ghi thời gian CI (`install.timing`) là số đo bổ sung.
 - Tiền đề HOME sạch đã được kiểm đọc-chỉ trên daemon thật khi soạn checklist (Paseo CLI tôn trọng `PASEO_HOME`); `paseo plugin install` và `daemon reload` dưới HOME tạm chưa được thử và sẽ lần đầu được kiểm ở bước 4.
