@@ -485,7 +485,12 @@ export async function runInstall(options: InstallOptions): Promise<InstallOutcom
       }
     }
 
-    if (interactive && !flags.yes) {
+    // REQ-009: a re-run with nothing to write asks no apply confirmation. The
+    // state is re-planned under the lock below; if it changed in between, the
+    // new plan is shown and the question is asked after all.
+    const nothingToWrite = partial.length === 0 && !actions.some((action) => isWritingAction(action));
+    const confirmationSkipped = interactive && !flags.yes && nothingToWrite;
+    if (interactive && !flags.yes && !nothingToWrite) {
       if (!previewShown) showPreview();
       if (!(await context.prompter.confirm({ message: APPLY_QUESTION, defaultValue: false }))) {
         notes.push("Nothing was written.");
@@ -511,7 +516,7 @@ export async function runInstall(options: InstallOptions): Promise<InstallOutcom
       const removed = await removePartialPayloadDirs({ installHome, record: record1, fsops, fs });
       let plan1 = await makePlan(record1, fsops);
 
-      if (previewShown && removed.length === 0 && !sameActions(plan, plan1)) {
+      if ((previewShown || confirmationSkipped) && removed.length === 0 && !sameActions(plan, plan1)) {
         notes.push("The install home changed after the preview was shown; the new plan is shown below.");
         plan = plan1;
         pruned = await prunePreview(plan);

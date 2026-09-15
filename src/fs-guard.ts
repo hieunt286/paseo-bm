@@ -396,10 +396,33 @@ export function isWriteFlags(flags: string | number | undefined): boolean {
   return /[waxs+]/.test(flags.replace(/^r/, ""));
 }
 
+/**
+ * The temporary file an atomic write of `target` goes through (Design §8:
+ * temp → fsync → rename, in the destination directory). `src/fsops.ts` names
+ * its temp files with this, so the guard below can recognise them.
+ */
+export function atomicTempPath(target: string, pid: number, token: string): string {
+  return resolve(dirname(target), `.${basename(target)}.${pid}.${token}.tmp`);
+}
+
+/**
+ * True when `candidate` is an atomic-write temp file of `file`. An allowed
+ * single file (Paseo's `config.json`) cannot be written atomically without its
+ * sibling temp file, so that sibling belongs to the scope too — and nothing else
+ * in the directory does.
+ */
+export function isAtomicTempOf(file: string, candidate: string): boolean {
+  if (dirname(candidate) !== dirname(file)) {
+    return false;
+  }
+  const name = basename(file).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^\\.${name}\\.\\d+\\.[0-9a-f]+\\.tmp$`).test(basename(candidate));
+}
+
 function inScope(scope: WriteScope, resolved: string): boolean {
   return (
     scope.roots.some((root) => isWithinRoot(root, resolved)) ||
-    scope.files.some((file) => file === resolved)
+    scope.files.some((file) => file === resolved || isAtomicTempOf(file, resolved))
   );
 }
 

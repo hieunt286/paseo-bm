@@ -26,9 +26,9 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { Stats } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, relative, resolve, sep } from "node:path";
 import type { NodeFsApi } from "./fs-guard.js";
-import { canonicalPath, nodeFs } from "./fs-guard.js";
+import { atomicTempPath, canonicalPath, nodeFs } from "./fs-guard.js";
 import { PathGuardError, assertSafeWritePath, isWithinRoot } from "./paths-guard.js";
 
 /** Mode every directory paseo-bm creates gets (ADR-002 decision 8). */
@@ -171,6 +171,12 @@ export function createFsOps(options: FsOpsOptions): FsOps {
 
   const ensureDir = async (target: string, mode: number = DIR_MODE): Promise<string> => {
     const resolved = resolvePath(target);
+    // An existing directory needs nothing. Skipping `mkdir` keeps a write of a
+    // single allowed file (Paseo's `config.json`) from issuing a `mkdir -p` on
+    // a directory paseo-bm does not own. A symlink still goes through `mkdir`.
+    if ((await lstatOrUndefined(fs, resolved))?.isDirectory() === true) {
+      return resolved;
+    }
     // `mkdir` applies the umask, so the created directories are chmod'ed back
     // to exactly `mode` afterwards.
     const created = await fs.mkdir(resolved, { recursive: true, mode });
@@ -298,7 +304,7 @@ async function writeThroughTemp(
   mode: number,
 ): Promise<void> {
   const directory = dirname(target);
-  const temp = join(directory, `.${basename(target)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+  const temp = atomicTempPath(target, process.pid, randomBytes(6).toString("hex"));
 
   let handle: FileHandle | undefined;
   try {

@@ -211,6 +211,67 @@ try {
     if (help.stderr) console.log(`  stderr: ${help.stderr}`);
     check(help.status === 0, "paseo-bm --help exits 0");
     check(/usage/i.test(help.stdout) && help.stdout.includes("paseo-bm"), "paseo-bm --help prints usage text");
+
+    // Install preview and doctor from the packed package (carry-over from
+    // bm-wp-101-b51.3, bead bm-wp-105-6ec.5). stdin/stdout are pipes, so there
+    // is no TTY. Exit codes come from Design §4.3 (src/exit-codes.ts):
+    //   install, no TTY and no --apply -> 6 (preview printed, nothing written);
+    //   doctor where paseo-bm is not installed -> 0 (nothing owned can deviate;
+    //   "not installed" is a warning, and warnings never change the exit code).
+    const scriptFile = join(work, "fake-paseo-script.json");
+    writeFileSync(
+      scriptFile,
+      JSON.stringify({
+        "daemon status": { stdout: JSON.stringify({ home: join(fakeHome, ".paseo"), cliVersion: "0.8.0", daemonVersion: "0.8.0" }) },
+        "plugin ls": { stdout: "[]" },
+        "provider ls": { stdout: JSON.stringify([{ provider: "claude", label: "Claude", status: "available" }]) },
+        "provider models": { stdout: JSON.stringify([{ id: "claude-opus-5", model: "Opus 5" }]) },
+        "provider diagnostic": { stdout: JSON.stringify({ provider: "claude", diagnostic: 'Auth: {"loggedIn": true}' }) },
+      }),
+    );
+    const flowEnv = { ...cliEnv, BM_FAKE_SCRIPT: scriptFile };
+    const ignoredInWork = new Set(["fake-paseo-argv.jsonl"]);
+    const workSnapshot = () => new Map([...snapshot(work)].filter(([path]) => !ignoredInWork.has(path)));
+    const workBefore = workSnapshot();
+
+    const preview = run(bin, ["install"], { cwd: neutralCwd, env: flowEnv });
+    console.log(`$ paseo-bm install -> exit ${preview.status}`);
+    if (preview.status !== 6) console.log(`  stdout: ${preview.stdout}\n  stderr: ${preview.stderr}`);
+    check(preview.status === 6, "paseo-bm install without a TTY and without --apply exits 6");
+    check(preview.stdout.includes("Planned changes"), "paseo-bm install prints the preview");
+
+    const previewJson = run(bin, ["install", "--json"], { cwd: neutralCwd, env: flowEnv });
+    let previewReport;
+    try {
+      previewReport = JSON.parse(previewJson.stdout);
+    } catch {
+      previewReport = undefined;
+    }
+    console.log(`$ paseo-bm install --json -> exit ${previewJson.status}`);
+    check(
+      previewJson.status === 6 && previewReport?.mode === "preview" && previewReport?.result?.exitCode === 6,
+      "paseo-bm install --json prints one preview document with result.exitCode 6",
+    );
+
+    const doctor = run(bin, ["doctor", "--json"], { cwd: neutralCwd, env: flowEnv });
+    let doctorReport;
+    try {
+      doctorReport = JSON.parse(doctor.stdout);
+    } catch {
+      doctorReport = undefined;
+    }
+    console.log(`$ paseo-bm doctor --json -> exit ${doctor.status}`);
+    if (doctor.status !== 0) console.log(`  stdout: ${doctor.stdout}\n  stderr: ${doctor.stderr}`);
+    check(doctor.status === 0 && doctorReport?.result?.exitCode === 0, "paseo-bm doctor on a machine without paseo-bm exits 0");
+    check(
+      doctorReport?.checks?.some((entry) => entry.id === "install-record" && entry.severity === "warn") === true,
+      "paseo-bm doctor reports that paseo-bm is not installed",
+    );
+
+    const argvLog = existsSync(fakeLog) ? readFileSync(fakeLog, "utf8") : "";
+    check(argvLog.includes('"daemon","status"'), "install and doctor talked to the fake paseo, not a real one");
+    check(!existsSync(join(fakeHome, ".paseo-bm")), "the install preview created no install home");
+    check(sameSnapshot(workBefore, workSnapshot()), "install preview and doctor wrote nothing, inside the fake HOME or anywhere else in the work dir");
   }
 
   // 5. No stray writes.
