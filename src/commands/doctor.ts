@@ -138,7 +138,7 @@ export interface PaseoConfigFacts {
   readonly agentProviderIds: readonly string[];
   /** Ids of `daemon.agentProfiles[]` entries. */
   readonly agentProfileIds: readonly string[];
-  /** `agents.providers.<id>.paseoTools`, per provider id. */
+  /** Whether `agents.providers.<id>.paseoTools` is switched on, per provider id. */
   readonly providerPaseoTools: Readonly<Record<string, boolean>>;
 }
 
@@ -230,6 +230,17 @@ function asRecordObject(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
+/**
+ * Paseo stores the switch as `paseoTools: { enabled: boolean }` — the shape
+ * `roleProviderEntry` in `src/roles/register.ts` writes (ADR-006). A bare
+ * `paseoTools: true` is accepted too, for compatibility. Anything else, or an
+ * absent key, means off.
+ */
+function paseoToolsEnabled(value: unknown): boolean {
+  if (value === true) return true;
+  return asRecordObject(value)?.["enabled"] === true;
+}
+
 const MISSING_CONFIG = (path: string, present: boolean, readable: boolean): PaseoConfigFacts => ({
   path,
   present,
@@ -276,7 +287,7 @@ export const readPaseoConfigFacts: PaseoConfigReader = async (configFile) => {
 
   const providerPaseoTools: Record<string, boolean> = {};
   for (const [id, value] of Object.entries(providers)) {
-    providerPaseoTools[id] = asRecordObject(value)?.["paseoTools"] === true;
+    providerPaseoTools[id] = paseoToolsEnabled(asRecordObject(value)?.["paseoTools"]);
   }
 
   return {

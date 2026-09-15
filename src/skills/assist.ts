@@ -121,6 +121,33 @@ export function formatSkillsCommand(command: SkillsCommand): string {
 
 /* ------------------------------------------------------------ the runner */
 
+/* ------------------------------------------------------ the child's env */
+
+/**
+ * Variables npm sets for the `npx`/`npm exec` that started paseo-bm itself
+ * (bug bm-zxa). Inherited by the inner `npx -y skills add …`, they describe
+ * *our* invocation, not the one we start: `npm_config_package` makes the inner
+ * `npx` look for a `skills` binary inside the paseo-bm package (exit 127), and
+ * `npm_config_call` would replace the command outright. Every other variable,
+ * including the user's own `npm_config_*` (registry, proxy, cache), is kept.
+ */
+export const NPM_EXEC_CONTEXT_VARS: readonly string[] = [
+  "npm_config_package",
+  "npm_config_call",
+  "npm_command",
+  "npm_lifecycle_event",
+  "npm_lifecycle_script",
+];
+
+/** A copy of `env` without {@link NPM_EXEC_CONTEXT_VARS}. Never reads or prints a value. */
+export function skillsChildEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = { ...env };
+  for (const name of NPM_EXEC_CONTEXT_VARS) {
+    delete out[name];
+  }
+  return out;
+}
+
 /** Timer seam, so tests never wait 300 real seconds. */
 export interface SkillsTimers {
   setTimeout(callback: () => void, ms: number): unknown;
@@ -180,6 +207,8 @@ export type SkillsRunner = (command: SkillsCommand, options: SkillsRunOptions) =
  *   (stderr only under `--json`) and so silence can be measured.
  * - Not `detached`: Ctrl+C on the terminal reaches the child anyway, and the
  *   SIGINT paseo-bm hears is forwarded to it for runs without a terminal.
+ * - The env is {@link skillsChildEnv}: npm's exec context of paseo-bm's own
+ *   `npx` is dropped so the inner `npx` resolves the `skills` package.
  */
 export function runSkillsCommand(command: SkillsCommand, options: SkillsRunOptions): Promise<SkillsRunResult> {
   const { timers } = options;
@@ -187,7 +216,7 @@ export function runSkillsCommand(command: SkillsCommand, options: SkillsRunOptio
     const child = spawn(command.executable, [...command.args], {
       stdio: ["ignore", "pipe", "pipe"],
       shell: false,
-      ...(options.env === undefined ? {} : { env: options.env }),
+      env: skillsChildEnv(options.env ?? process.env),
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
     });
 

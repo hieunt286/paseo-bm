@@ -51,8 +51,8 @@ import {
 } from "../../paseo/config.js";
 import type { Prompter } from "../../prompter.js";
 import { PromptUnavailableError } from "../../prompter.js";
-import type { InstallRecord, RoleRecord } from "../../record.js";
-import { roleId, toIsoUtc, writeRecord } from "../../record.js";
+import type { InstallRecord, RoleName, RoleRecord } from "../../record.js";
+import { ROLE_NAMES, roleId, toIsoUtc, writeRecord } from "../../record.js";
 import type { ProviderCatalog, RoleSelection } from "../../roles/config.js";
 import { RoleConfigError, configureRoles, loadProviderCatalog, toRoleRecord, validateRoleSpecs } from "../../roles/config.js";
 import type { LoginSpawner, ProviderLoginReport } from "../../roles/login.js";
@@ -176,6 +176,10 @@ async function planRoles(
     };
   }
 
+  // Read before deciding: a reused roles[] entry takes its name from here,
+  // because roles[] itself has no name field (Design §3.2, bug bm-lev).
+  const config = await readConfigOrEmpty(input.paseoHome, input.fs);
+
   let configuration;
   try {
     configuration = await configureRoles({
@@ -183,6 +187,7 @@ async function planRoles(
       catalog,
       prompter: input.interactive ? context.prompter : nonInteractive(context.prompter),
       existing: input.record?.roles ?? [],
+      existingNames: registeredRoleNames(config),
       reconfigure: context.flags.reconfigure,
     });
   } catch (error) {
@@ -195,7 +200,6 @@ async function planRoles(
     throw error;
   }
 
-  const config = await readConfigOrEmpty(input.paseoHome, input.fs);
   return {
     ok: true,
     plan: {
@@ -313,6 +317,30 @@ async function readConfigOrEmpty(paseoHome: string, fs: NodeFsApi): Promise<Pase
     if (isConfigMutationError(error)) return {};
     throw error;
   }
+}
+
+/**
+ * The name each role already carries in Paseo's config: the `name` of its
+ * `bm-<role>` agent profile, else the `label` of its derived provider. A role
+ * with neither is left out, so `configureRoles` falls back to the default name.
+ */
+function registeredRoleNames(config: PaseoConfig): Partial<Record<RoleName, string>> {
+  const providers = asObject(asObject(config["agents"])?.["providers"]);
+  const profiles = asObject(config["daemon"])?.["agentProfiles"];
+  const names: Partial<Record<RoleName, string>> = {};
+  for (const role of ROLE_NAMES) {
+    const id = roleId(role);
+    const profile = Array.isArray(profiles)
+      ? asObject(profiles.find((entry) => asObject(entry)?.["id"] === id))
+      : undefined;
+    const name = nonBlank(profile?.["name"]) ?? nonBlank(asObject(providers?.[id])?.["label"]);
+    if (name !== undefined) names[role] = name;
+  }
+  return names;
+}
+
+function nonBlank(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
 
 /**

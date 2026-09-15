@@ -32,7 +32,7 @@ import { APPLY_QUESTION, createInstallCommand } from "../src/commands/install/in
 import { createRolesStep } from "../src/commands/install/roles-step.js";
 import { REQUIRED_SKILLS } from "../src/skills/detect.js";
 import type { SignalSource, SkillsTimers } from "../src/skills/assist.js";
-import { SKILLS_QUESTION, SKILLS_SILENCE_WARNING_MS, SKILLS_SOURCE, SKILLS_TIMEOUT_MS, createSkillsAssistStep, formatSkillsCommand, skillsAddCommand, toSkillsCliAgents } from "../src/skills/assist.js";
+import { NPM_EXEC_CONTEXT_VARS, SKILLS_QUESTION, SKILLS_SILENCE_WARNING_MS, SKILLS_SOURCE, SKILLS_TIMEOUT_MS, createSkillsAssistStep, formatSkillsCommand, skillsAddCommand, skillsChildEnv, toSkillsCliAgents } from "../src/skills/assist.js";
 import type { WriteScopeHarness } from "./helpers/write-scope.js";
 import { startWriteScope } from "./helpers/write-scope.js";
 
@@ -54,6 +54,7 @@ let scriptFile: string;
 let npxLog: string;
 let npxPid: string;
 let npxSignals: string;
+let npxEnvLog: string;
 let scope: WriteScopeHarness | undefined;
 
 function writePaseoConfig(config: Record<string, unknown>): void {
@@ -72,6 +73,7 @@ beforeEach(() => {
   npxLog = join(outside, "npx-argv.log");
   npxPid = join(outside, "npx.pid");
   npxSignals = join(outside, "npx-signals.log");
+  npxEnvLog = join(outside, "npx-env.log");
 
   for (const [path, text] of Object.entries({
     "paseo-plugin.json": '{ "id": "paseo-bm" }\n',
@@ -142,6 +144,8 @@ interface RunOptions {
   /** Lock hooks sharing the signal emitter, so the lock's own SIGINT handler is exercised. */
   lockHooks?: ProcessHooks;
   onStarted?: () => void;
+  /** Extra variables in the parent env, e.g. the npm exec context of paseo-bm's own npx. */
+  extraEnv?: Record<string, string>;
 }
 
 interface RunResult {
@@ -162,8 +166,10 @@ async function install(argv: readonly string[], options: RunOptions = {}): Promi
     BM_FAKE_NPX_ARGV_LOG: npxLog,
     BM_FAKE_NPX_PID_FILE: npxPid,
     BM_FAKE_NPX_SIGNAL_LOG: npxSignals,
+    BM_FAKE_NPX_ENV_LOG: npxEnvLog,
     BM_FAKE_NPX_MODE: options.npxMode ?? "ok",
     ...(options.npxInstallInto === undefined ? {} : { BM_FAKE_NPX_INSTALL: options.npxInstallInto }),
+    ...options.extraEnv,
   };
 
   // After a reload the plugin reports running, as in test/consent-enable.test.ts.
@@ -453,6 +459,52 @@ describe("skills-assist — declining is remembered", () => {
     expect(npxCalls()).toEqual([]);
     expect(report.skills?.suggestedCommand).toBe(COMMAND_TEXT);
     expect(existsSync(join(installHome, "install.json"))).toBe(false);
+  }, 20_000);
+});
+
+describe("skills-assist — the child env drops the npm exec context of paseo-bm's own npx (bug bm-zxa)", () => {
+  // What `npx --yes --package <tarball> paseo-bm` puts in paseo-bm's env. Fake values.
+  const NPM_CONTEXT: Record<string, string> = {
+    npm_config_package: "/tmp/paseo-bm-0.0.0.tgz",
+    npm_config_call: "fake-call",
+    npm_command: "exec",
+    npm_lifecycle_event: "npx",
+    npm_lifecycle_script: "paseo-bm",
+  };
+  const KEPT: Record<string, string> = {
+    npm_config_registry: "https://registry.example.invalid/",
+    npm_config_yes: "true",
+    BM_FAKE_KEEP_ME: "kept",
+  };
+
+  it("skillsChildEnv removes exactly the five exec-context variables and copies the rest", () => {
+    const parent = { PATH: "/bin", ...NPM_CONTEXT, ...KEPT };
+    const child = skillsChildEnv(parent);
+    expect([...NPM_EXEC_CONTEXT_VARS].sort()).toEqual(Object.keys(NPM_CONTEXT).sort());
+    expect(child).toEqual({ PATH: "/bin", ...KEPT });
+    // The parent is not mutated.
+    expect(parent).toMatchObject(NPM_CONTEXT);
+  });
+
+  it("the fake npx started by install does not see them, and still sees PATH and the user's npm_config_*", async () => {
+    const run = await install(["install", "--apply", "--json", "--install-skills"], {
+      extraEnv: { ...NPM_CONTEXT, ...KEPT },
+      npxInstallInto: join(home, ".claude", "skills"),
+    });
+    expect(run.code).toBe(EXIT_CODES.ok);
+    expect(npxCalls()).toEqual([EXPECTED_ARGV]);
+
+    const lines = readFileSync(npxEnvLog, "utf8").trim().split("\n");
+    expect(lines).toHaveLength(1);
+    const seen = JSON.parse(lines[0] as string) as { keys: string[]; values: Record<string, string> };
+    for (const name of Object.keys(NPM_CONTEXT)) {
+      expect(seen.keys).not.toContain(name);
+    }
+    expect(seen.keys).toEqual(expect.arrayContaining(["PATH", ...Object.keys(KEPT)]));
+    expect(seen.values["PATH"]?.startsWith(`${FAKE_NPX_DIR}:`)).toBe(true);
+    expect(seen.values["npm_config_registry"]).toBe(KEPT["npm_config_registry"]);
+    expect(seen.values["npm_config_yes"]).toBe("true");
+    expect(JSON.parse(run.out)).toMatchObject({ skills: { outcome: "ok" } });
   }, 20_000);
 });
 

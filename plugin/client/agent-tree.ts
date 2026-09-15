@@ -205,7 +205,7 @@ export function roleConfigRows(roles: readonly RoleDescriptor[]): RoleConfigRow[
 }
 
 export const NO_ROLES_TEXT =
-  "No role configuration found: paseo-bm is not installed on this host, or its install record could not be read. Run `npx paseo-bm doctor`.";
+  "No role configuration found: paseo-bm is not installed on this host, or its roles are not registered with Paseo. Run `npx paseo-bm doctor`.";
 
 // ---------------------------------------------------------------------------
 // Errors.
