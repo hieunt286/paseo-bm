@@ -11,4 +11,17 @@ export default tseslint.config(
       "@typescript-eslint/consistent-type-imports": "error",
     },
   },
+  {
+    // Plain Node scripts are not part of the TypeScript program, so eslint does
+    // not pick up Node's globals for them.
+    files: ["scripts/**/*.mjs"],
+    languageOptions: {
+      globals: {
+        URL: "readonly",
+        console: "readonly",
+        process: "readonly",
+        __dirname: "readonly",
+      },
+    },
+  },
 );
