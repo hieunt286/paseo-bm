@@ -133,11 +133,18 @@ jobs:
         env:
           VERSION: ${{ steps.meta.outputs.version }}
           DIST_TAG: ${{ steps.meta.outputs.dist_tag }}
+        # npm answers "Your package is being processed and may take a few minutes
+        # to become available", so a short wait fails a healthy publish (bm-90a).
         run: |
-          for attempt in 1 2 3 4 5 6; do
+          last=""
+          for attempt in $(seq 1 20); do
             published=$(npm view "paseo-bm@${DIST_TAG}" version 2>/dev/null || true)
-            if [ "$published" = "$VERSION" ]; then echo "npm dist-tag ${DIST_TAG} -> ${published}"; exit 0; fi
-            echo "attempt ${attempt}: dist-tag ${DIST_TAG} -> '${published}', waiting"; sleep 10
+            if [ "$published" = "$VERSION" ]; then
+              echo "npm dist-tag ${DIST_TAG} -> ${published} (after $((attempt * 15))s)"
+              exit 0
+            fi
+            last="$published"
+            sleep 15
           done
-          echo "paseo-bm@${DIST_TAG} does not resolve to ${VERSION}" >&2
+          echo "paseo-bm@${DIST_TAG} still resolves to '${last}' after 5 minutes, expected ${VERSION}" >&2
           exit 1
