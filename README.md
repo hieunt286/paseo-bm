@@ -72,7 +72,7 @@ While paseo-bm is in prerelease, every build is published under the npm dist-tag
 npx paseo-bm@next
 ```
 
-There is no stable release yet, so `npx paseo-bm` without `@next` does not resolve. Once a stable version is published, `npx paseo-bm` installs it.
+`npx paseo-bm` without `@next` currently resolves to the same prerelease, because no stable version exists yet. Pin `@next` if you want prereleases once a stable release is out.
 
 ### What the interactive install asks
 
