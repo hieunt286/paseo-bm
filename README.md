@@ -6,6 +6,8 @@ After installing, you open **Beads Manager** in a Paseo workspace and describe w
 
 > **Status:** prerelease (`0.1.0-alpha.*`). Command names, flags, exit codes and the `--json` shape are treated as a public contract, but expect rough edges.
 
+> **Run it, don't add it as a dependency.** `paseo-bm` is a command-line tool you run once with `npx`; it exports nothing to `import`. The `npm i paseo-bm` box on the npm website is generated automatically for every package — running it inside a project only adds a useless dependency.
+
 ## Contents
 
 - [Before you install: read these warnings](#before-you-install-read-these-warnings)
@@ -66,13 +68,19 @@ No `sudo` is needed. The npm package has no install scripts, so downloading it c
 
 ## Install
 
-While paseo-bm is in prerelease, every build is published under the npm dist-tag `next`, so run:
+Run the installer with `npx`, from any directory:
+
+```bash
+npx paseo-bm
+```
+
+That is the whole install: `npx` downloads the package, runs it once and leaves nothing behind in your project. Do **not** run `npm i paseo-bm` — see the note at the top.
+
+Every build is also published under the npm dist-tag `next`. While no stable version exists, `npx paseo-bm` and `npx paseo-bm@next` fetch the same prerelease; once a stable release is out, `@next` is how you keep getting prereleases:
 
 ```bash
 npx paseo-bm@next
 ```
-
-`npx paseo-bm` without `@next` currently resolves to the same prerelease, because no stable version exists yet. Pin `@next` if you want prereleases once a stable release is out.
 
 ### What the interactive install asks
 
@@ -261,7 +269,7 @@ Warnings about skills, the beads CLI or provider logins never change the exit co
 
 ## Updating
 
-Run the installer again with the newer version, for example `npx paseo-bm@latest` (or `npx paseo-bm@next` for prereleases):
+Run the installer again with the newer version — `npx paseo-bm` takes the newest release, and `npx paseo-bm@next` the newest prerelease:
 
 - **New version.** The payload is copied into a new `~/.paseo-bm/plugin/<new version>/`. Because Paseo 0.8 cannot re-point a directory plugin, paseo-bm runs `paseo plugin remove paseo-bm` and then `paseo plugin install <new dir>`. The plugin is absent for a few seconds in between. If the new version fails to register or load, paseo-bm reinstalls the previous directory, keeps the record on the old version, and exits `7` with Paseo's own error message. Older versions stay on disk until `--prune`.
 - **Same version.**
@@ -427,7 +435,7 @@ Exit `5` also covers a downgrade attempted without a terminal.
 | `E_CONFIG_CONCURRENT_WRITE` | Something else changed `config.json` during the write, for example Paseo's settings screen or another run. Close it and retry. |
 | `E_TARGET_NOT_WRITABLE`, `E_UNSAFE_INSTALL_HOME`, `E_SYMLINK_IN_PATH`, `E_PATH_ESCAPE` | Point `--home` at a dedicated directory you own, such as `~/.paseo-bm`, with no symlinks in the path. |
 | `E_PROVIDER_UNAVAILABLE` | The provider or model given for a role does not exist in Paseo. Pick an existing pair with `--role`. |
-| `E_RECORD_SCHEMA_TOO_NEW` | `install.json` was written by a newer paseo-bm. Upgrade with `npx paseo-bm@latest`. Do not edit the record. |
+| `E_RECORD_SCHEMA_TOO_NEW` | `install.json` was written by a newer paseo-bm. Upgrade by running `npx paseo-bm` again. Do not edit the record. |
 
 **Roles do not work, or the provider is not logged in: `W_PROVIDER_NOT_LOGGED_IN`**
 
