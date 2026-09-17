@@ -3,4 +3,4 @@
 // which the build runs before packing. Design ref: docs/design/paseo-bm.md §2.4.
 
 /** Version of the paseo-bm payload, baked in at build time. */
-export const PLUGIN_VERSION = "0.1.0-alpha.0";
+export const PLUGIN_VERSION = "0.2.0-alpha.0";

@@ -67,6 +67,7 @@ import { createRedactor } from "../../redact.js";
 import { writeHumanReport } from "../../report/human.js";
 import { writeJsonReport } from "../../report/json.js";
 import { assistSkills } from "../../skills/assist.js";
+import { beadsToolsPreviewLines, installBeadsTools, missingBeadsTools, planBeadsTools, type BeadsToolsStep } from "../../beads-tools.js";
 import { detectSkills, skillsChecks, toSkillsByAgent } from "../../skills/detect.js";
 import { DEFAULT_SKILLS_SOURCE } from "../doctor.js";
 import type { PrunePlan } from "../prune.js";
@@ -163,6 +164,8 @@ export interface InstallSteps {
   readonly skills?: SkillsStep;
   /** bm-wp-107-2r5.4: roles decided before the preview, registered after the trust boundary. */
   readonly roles?: RolesStep;
+  /** Installing missing `br` / `bv` (delta 20260916-setup-screen). */
+  readonly beadsTools?: BeadsToolsStep;
 }
 
 /**
@@ -277,6 +280,7 @@ export async function runInstall(options: InstallOptions): Promise<InstallOutcom
   const trustBoundary = options.steps?.trustBoundary ?? enableTrustBoundary;
   const skillsStep = options.steps?.skills ?? assistSkills;
   const rolesStep = options.steps?.roles ?? defaultRolesStep;
+  const beadsToolsStep = options.steps?.beadsTools ?? installBeadsTools;
   // Under --json stdout belongs to one document, and a question would be
   // written into it, so a --json run never asks.
   const interactive = context.tty.interactive && context.prompter.interactive && !flags.json;
@@ -314,6 +318,13 @@ export async function runInstall(options: InstallOptions): Promise<InstallOutcom
     skills = outcome.skills;
     warnings.push(...outcome.warnings);
     notes.push(...outcome.notes);
+    const tools = await beadsToolsStep({ context, interactive, apply });
+    // An installed tool's preflight warning no longer describes this machine.
+    for (let index = warnings.length - 1; index >= 0; index -= 1) {
+      if (tools.resolvedWarnings.includes(warnings[index]!.code)) warnings.splice(index, 1);
+    }
+    warnings.push(...tools.warnings);
+    notes.push(...tools.notes);
   };
 
   try {
@@ -436,6 +447,10 @@ export async function runInstall(options: InstallOptions): Promise<InstallOutcom
       if (!interactive) return;
       const preview = finish(previewExitCode({ interactive, apply: flags.apply })).report;
       writeHumanReport(preview, context.stdout);
+      // Installing a missing beads tool is part of what "apply" means on a
+      // terminal, so the exact commands are shown before the question.
+      const toolLines = beadsToolsPreviewLines(planBeadsTools(missingBeadsTools(context.env), context.env));
+      if (toolLines.length > 0) context.stdout(`${toolLines.join("\n")}\n`);
       previewShown = true;
     };
 

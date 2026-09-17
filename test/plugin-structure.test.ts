@@ -116,12 +116,22 @@ describe("Paseo 0.8 import boundaries", () => {
 describe("shared/contracts.ts", () => {
   const source = read("shared/contracts.ts");
 
-  it.each(["manager.ensure", "agents.list", "roles.describe"])(
-    "defines the %s RPC",
-    (name) => {
-      expect(source).toContain(`name: "${name}"`);
-    },
-  );
+  it.each([
+    "manager.ensure",
+    "agents.list",
+    "roles.describe",
+    "traces.list",
+    "traces.get",
+    "traces.delete",
+    "traces.reassign",
+    "beads.stats",
+    "beads.list",
+    "beads.get",
+    "beads.action",
+    "traces.workspaces",
+  ])("defines the %s RPC", (name) => {
+    expect(source).toContain(`name: "${name}"`);
+  });
 });
 
 describe("shared/version.ts", () => {
@@ -137,14 +147,11 @@ describe("shared/version.ts", () => {
 
 describe("role instruction files", () => {
   const roleFiles = ["manager.md", "worker.md", "reviewer.md"];
-  const requiredHeadings = [
-    "## Role",
-    "## Responsibilities",
-    "## Hard boundaries",
-    "## Workflow",
-    "## Reporting",
-    "## Stop conditions",
-  ];
+  // Short files with the hard rules first (owner feedback, 2026-09-16).
+  const requiredHeadings = ["## RULES", "## Stop"];
+  // manager.md carries its stop handling inside the section that tells the user
+  // what happens at each Worker phase (delta 20260917c §4.5).
+  const STOP_ALIASES = ["## When to stop and report", "## Talking to the user"];
 
   it.each(roleFiles)("roles/%s exists", (file) => {
     expect(exists(join("roles", file))).toBe(true);
@@ -153,12 +160,12 @@ describe("role instruction files", () => {
   it.each(roleFiles)("roles/%s carries every required heading, in order", (file) => {
     const lines = read(join("roles", file)).split("\n");
     const found = requiredHeadings.filter((heading) =>
-      lines.some((line) => line.trim() === heading),
+      lines.some((line) => line.trim() === heading || (heading === "## Stop" && STOP_ALIASES.includes(line.trim()))),
     );
     expect(found).toEqual(requiredHeadings);
 
     const positions = requiredHeadings.map((heading) =>
-      lines.findIndex((line) => line.trim() === heading),
+      lines.findIndex((line) => line.trim() === heading || (heading === "## Stop" && STOP_ALIASES.includes(line.trim()))),
     );
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
   });

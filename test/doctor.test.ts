@@ -102,8 +102,11 @@ function makeWorld(options: { beads?: boolean } = {}): World {
   const binDir = join(home, "bin");
   mkdirSync(binDir, { recursive: true });
   if (options.beads !== false) {
-    writeFileSync(join(binDir, "br"), "#!/bin/sh\nexit 0\n");
-    chmodSync(join(binDir, "br"), 0o755);
+    // A healthy machine has both beads tools (delta 20260916-setup-screen).
+    for (const tool of ["br", "bv"]) {
+      writeFileSync(join(binDir, tool), "#!/bin/sh\nexit 0\n");
+      chmodSync(join(binDir, tool), 0o755);
+    }
   }
 
   const env: Record<string, string | undefined> = { PATH: binDir };
@@ -383,6 +386,7 @@ describe("runDoctor — a healthy install", () => {
       "payload-versions",
       "backups",
       "beads-cli",
+      "beads-viewer",
       "skills-agents",
       "skills-claude",
       "skills-codex",
@@ -894,8 +898,10 @@ describe("runDoctor — warnings are not drift (Design §4.3)", () => {
     });
 
     expect(severityOf(checks, "beads-cli")).toBe("warn");
+    expect(severityOf(checks, "beads-viewer")).toBe("warn");
     expect(exitCode).toBe(EXIT_CODES.ok);
     expect(report.warnings.map((entry) => entry.code)).toContain("W_BEADS_CLI_MISSING");
+    expect(report.warnings.map((entry) => entry.code)).toContain("W_BEADS_VIEWER_MISSING");
   });
 
   it("keeps exit 0 when agent skills are missing", async () => {

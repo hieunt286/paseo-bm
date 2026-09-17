@@ -84,7 +84,7 @@ Agent skills
 Warnings (these never change the exit code)
   W_BEADS_CLI_MISSING  The beads CLI (\`br\` or \`bd\`) was not found, so Worker will not be able to manage beads.
     looked for br and bd on PATH
-    Fix: Install the beads CLI and make sure it is on PATH. paseo-bm installs fine without it; only the beads part of the workflow is unavailable.
+    Fix: Install br (beads_rust) and make sure it is on PATH: \`brew install dicklesworthstone/tap/br\`, or \`curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh | bash -s -- --skip-skills\`. The Beads Manager Setup screen can also install it. paseo-bm installs fine without it; only the beads part of the workflow is unavailable.
 
 Plugin status: disabled
 Exit code 0 — success, an intentional preview, or a healthy doctor
@@ -123,7 +123,7 @@ Agent skills
 Warnings (these never change the exit code)
   W_BEADS_CLI_MISSING  The beads CLI (\`br\` or \`bd\`) was not found, so Worker will not be able to manage beads.
     looked for br and bd on PATH
-    Fix: Install the beads CLI and make sure it is on PATH. paseo-bm installs fine without it; only the beads part of the workflow is unavailable.
+    Fix: Install br (beads_rust) and make sure it is on PATH: \`brew install dicklesworthstone/tap/br\`, or \`curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh | bash -s -- --skip-skills\`. The Beads Manager Setup screen can also install it. paseo-bm installs fine without it; only the beads part of the workflow is unavailable.
 
 Plugin status: running
 Exit code 0 — success, an intentional preview, or a healthy doctor

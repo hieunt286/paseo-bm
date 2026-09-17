@@ -1,9 +1,23 @@
-import { describe, expect, it, vi } from "vitest";
-import { readFileSync, readdirSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { tmpdir } from "node:os";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+
+// The entry resolves the install home from $HOME when Paseo's config names no
+// plugin path; point it at an empty directory so this machine's real
+// ~/.paseo-bm (and any role-extras.json in it) never leaks into the test.
+const realHome = process.env.HOME;
+const isolatedHome = mkdtempSync(join(tmpdir(), "bm-isolated-home-"));
+beforeAll(() => {
+  process.env.HOME = isolatedHome;
+});
+afterAll(() => {
+  process.env.HOME = realHome;
+  rmSync(isolatedHome, { recursive: true, force: true });
+});
 
 /**
  * Regression for bm-dnc: the plugin must load the way Paseo 0.8 loads it.
@@ -83,7 +97,9 @@ function loadBundle(code: string): (server: unknown) => () => void {
 function fakeServer() {
   const handlers = new Map<string, Handler>();
   const beforeHooks = new Map<string, BeforeHandler>();
-  const onHooks = new Map<string, OnHandler>();
+  // Two features now hook agent.turn_ended (bm-wq6 stop propagation and the
+  // WP-205 trace collector), so this is a multimap, not a map.
+  const onHooks = new Map<string, OnHandler[]>();
   const server = {
     handle: vi.fn((contract: { name: string }, handler: Handler) => {
       handlers.set(contract.name, handler);
@@ -95,9 +111,12 @@ function fakeServer() {
       };
     }),
     on: vi.fn((name: string, handler: OnHandler) => {
-      onHooks.set(name, handler);
+      const existing = onHooks.get(name) ?? [];
+      onHooks.set(name, [...existing, handler]);
       return () => {
-        onHooks.delete(name);
+        const left = (onHooks.get(name) ?? []).filter((entry) => entry !== handler);
+        if (left.length === 0) onHooks.delete(name);
+        else onHooks.set(name, left);
       };
     }),
   };
@@ -201,17 +220,43 @@ describe("embedded role instructions", () => {
 });
 
 describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
-  it("loads, registers the three RPCs, and manager.ensure / roles.describe run without throwing", async () => {
+  it("loads, registers every RPC, and manager.ensure / roles.describe run without throwing", async () => {
     const code = await bundleServerEntry();
     const contribute = loadBundle(code);
 
     const { server, handlers, beforeHooks, onHooks } = fakeServer();
     const cleanup = contribute(server);
     expect(typeof cleanup).toBe("function");
-    expect([...handlers.keys()].sort()).toEqual(["agents.list", "manager.ensure", "roles.describe"]);
+    // Phase 1's three, plus the Dashboard handlers registered so far (WP-208,
+    // WP-210). All five Dashboard RPCs are registered.
+    expect([...handlers.keys()].sort()).toEqual([
+      "agents.list",
+      "beads.action",
+      "beads.get",
+      "beads.list",
+      "beads.lookup",
+      "beads.stats",
+      "chat.beads",
+      "chat.peers",
+      "manager.ensure",
+      "roles.describe",
+      "roles.instructions",
+      "roles.save-extra",
+      "setup.install-tool",
+      "setup.status",
+      "traces.delete",
+      "traces.get",
+      "traces.list",
+      "traces.reassign",
+      "traces.workspaces",
+      "workspaces.overview",
+    ]);
     expect([...beforeHooks.keys()]).toEqual(["agent.create"]);
-    // bm-wq6: the agent.turn_ended hook that propagates a Worker stop to its Reviewers.
-    expect([...onHooks.keys()]).toEqual(["agent.turn_ended"]);
+    // bm-wq6 propagates a Worker stop to its Reviewers on agent.turn_ended;
+    // WP-205 adds the trace collector on turn_started and turn_ended.
+    expect([...onHooks.keys()].sort()).toEqual(["agent.turn_ended", "agent.turn_started"]);
+    expect(onHooks.get("agent.turn_ended")).toHaveLength(2);
+    expect(onHooks.get("agent.turn_started")).toHaveLength(1);
 
     const { paseo, created } = fakePaseo();
     const ensured = await handlers.get("manager.ensure")!({ workspaceId: "ws-1" }, { paseo });
@@ -230,22 +275,31 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
 
     // bm-hld: the before("agent.create") hook injects role instructions from the bundle.
     const hook = beforeHooks.get("agent.create")!;
-    const run = (config: Record<string, unknown>) =>
-      hook({ request: { config } }, { paseo }) as { config: { systemPrompt?: string } } | undefined;
-    expect(run({ provider: "bm-worker/gpt-5.6-sol", cwd: "/repo" })?.config.systemPrompt).toBe(workerMd);
-    expect(run({ provider: "bm-reviewer", cwd: "/repo" })?.config.systemPrompt).toBe(reviewerMd);
-    expect(run({ provider: "bm-manager", cwd: "/repo", systemPrompt: managerMd })).toBeUndefined();
-    expect(run({ provider: "claude", cwd: "/repo" })).toBeUndefined();
+    const run = async (config: Record<string, unknown>) =>
+      (await hook({ request: { config } }, { paseo })) as { config: { systemPrompt?: string } } | undefined;
+    expect((await run({ provider: "bm-worker/gpt-5.6-sol", cwd: "/repo" }))?.config.systemPrompt).toBe(workerMd);
+    expect((await run({ provider: "bm-reviewer", cwd: "/repo" }))?.config.systemPrompt).toBe(reviewerMd);
+    expect(await run({ provider: "bm-manager", cwd: "/repo", systemPrompt: managerMd })).toBeUndefined();
+    // Another provider's agent is answered at once, without a lookup.
+    expect(hook({ request: { config: { provider: "claude", cwd: "/repo" } } }, { paseo })).toBeUndefined();
 
-    // The bundled hook resolves on an event it ignores, without touching Paseo.
-    await expect(
-      Promise.resolve(
-        onHooks.get("agent.turn_ended")!(
-          { agent: { id: "a-1", provider: "claude", workspaceId: "ws-1" }, outcome: { kind: "canceled", reason: "x" } },
-          { paseo, signal: new AbortController().signal },
+    // Every bundled turn_ended hook resolves on an event it ignores (a non-bm
+    // provider), without touching Paseo and without throwing into the turn.
+    for (const handler of onHooks.get("agent.turn_ended")!) {
+      await expect(
+        Promise.resolve(
+          handler(
+            {
+              agent: { id: "a-1", provider: "claude", workspaceId: "ws-1", parentAgentId: null, cwd: "/repo", title: null },
+              turnId: "t-1",
+              outcome: { kind: "canceled", reason: "x" },
+              timeline: [],
+            },
+            { paseo, signal: new AbortController().signal },
+          ),
         ),
-      ),
-    ).resolves.toBeUndefined();
+      ).resolves.toBeUndefined();
+    }
 
     cleanup();
     expect(beforeHooks.size).toBe(0);

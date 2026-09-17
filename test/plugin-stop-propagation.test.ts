@@ -109,7 +109,11 @@ function fakePaseo(options: {
 }
 
 function fakeServer(options: { withOn?: boolean } = {}) {
-  const hooks = new Map<string, OnHandler>();
+  // Since WP-205 the server entry registers three lifecycle hooks: this one on
+  // agent.turn_ended, plus the trace collector on turn_started and turn_ended.
+  // The fake therefore keeps every handler per name, and `setup()` picks the
+  // stop-propagation one (the first turn_ended handler the entry registers).
+  const hooks = new Map<string, OnHandler[]>();
   const removers: string[] = [];
   const server: Record<string, unknown> = {
     handle: vi.fn(),
@@ -117,10 +121,12 @@ function fakeServer(options: { withOn?: boolean } = {}) {
   };
   if (options.withOn !== false) {
     server.on = vi.fn((name: string, handler: OnHandler) => {
-      hooks.set(name, handler);
+      hooks.set(name, [...(hooks.get(name) ?? []), handler]);
       return () => {
         removers.push(name);
-        hooks.delete(name);
+        const left = (hooks.get(name) ?? []).filter((entry) => entry !== handler);
+        if (left.length === 0) hooks.delete(name);
+        else hooks.set(name, left);
       };
     });
   }
@@ -130,7 +136,7 @@ function fakeServer(options: { withOn?: boolean } = {}) {
 function setup() {
   const fake = fakeServer();
   const cleanup = contribute(fake.server as unknown as Parameters<typeof contribute>[0]);
-  const hook = fake.hooks.get("agent.turn_ended");
+  const hook = fake.hooks.get("agent.turn_ended")?.[0];
   expect(hook).toBeTypeOf("function");
   const run = async (ev: Event, paseo: unknown, signal = new AbortController().signal) => {
     const pending = Promise.resolve(hook!(ev, { paseo, signal }));
@@ -157,10 +163,12 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     expect(STOP_RECHECK_MS).toBe(500);
   });
 
-  it("registers exactly one agent.turn_ended hook", () => {
+  it("registers its agent.turn_ended hook alongside the trace collector's two", () => {
     const { server, hooks } = setup();
-    expect(server.on).toHaveBeenCalledTimes(1);
-    expect([...hooks.keys()]).toEqual(["agent.turn_ended"]);
+    // One here (bm-wq6) plus the WP-205 collector's turn_started and turn_ended.
+    expect(server.on).toHaveBeenCalledTimes(3);
+    expect([...hooks.keys()].sort()).toEqual(["agent.turn_ended", "agent.turn_started"]);
+    expect(hooks.get("agent.turn_ended")).toHaveLength(2);
   });
 
   it("sends the notice only to the stopped Worker's running Reviewers (idle Worker on refresh)", async () => {
@@ -216,7 +224,7 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
       agents: [reviewer("rev-a")],
       statuses: { [WORKER]: ["running", "idle"] },
     });
-    const pending = Promise.resolve(hooks.get("agent.turn_ended")!(event(), { paseo, signal: new AbortController().signal }));
+    const pending = Promise.resolve(hooks.get("agent.turn_ended")![0]!(event(), { paseo, signal: new AbortController().signal }));
     await vi.advanceTimersByTimeAsync(STOP_RECHECK_MS - 1);
     expect(refreshes.filter((id) => id === WORKER)).toHaveLength(1);
     expect(sends).toEqual([]);
@@ -332,7 +340,13 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
   it("removes the hook on cleanup", () => {
     const { cleanup, hooks, removers } = setup();
     cleanup();
-    expect(removers).toEqual(["agent.turn_ended"]);
+    // Three removals: this hook plus the WP-205 collector's turn_started and
+    // turn_ended. The map must end up empty either way.
+    expect([...removers].sort()).toEqual([
+      "agent.turn_ended",
+      "agent.turn_ended",
+      "agent.turn_started",
+    ]);
     expect(hooks.size).toBe(0);
   });
 
@@ -343,8 +357,10 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     expect(() => {
       cleanup = contribute(server as unknown as Parameters<typeof contribute>[0]);
     }).not.toThrow();
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0]![0])).toMatch(/agent\.turn_ended/);
+    // Two lines now: this hook's, and the trace collector's (also on()).
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(warn.mock.calls.map((call) => String(call[0])).join(" ")).toMatch(/agent\.turn_ended/);
+    expect(warn.mock.calls.map((call) => String(call[0])).join(" ")).toMatch(/no trace history/);
     expect(() => cleanup()).not.toThrow();
   });
 
@@ -355,6 +371,8 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     expect(() => {
       cleanup = contribute(server as unknown as Parameters<typeof contribute>[0]);
     }).not.toThrow();
+    // Both on()-based features stay quiet here so one missing host capability
+    // does not become three log lines; the role hook's line is the useful one.
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]![0])).toMatch(/agent\.create/);
     expect(() => cleanup()).not.toThrow();

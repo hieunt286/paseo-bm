@@ -41,6 +41,9 @@ const REQUIRED_CODES = [
   "W_BEADS_CLI_MISSING",
   "W_SKILLS_ASSIST_FAILED",
   "W_PROVIDER_NOT_LOGGED_IN",
+  // Setup screen delta, 2026-09-16.
+  "W_BEADS_TOOLS_INSTALL_FAILED",
+  "W_BEADS_VIEWER_MISSING",
 ] as const;
 
 const SRC_DIR = fileURLToPath(new URL("../src/", import.meta.url));

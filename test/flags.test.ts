@@ -17,6 +17,8 @@ const DESIGN_FLAG_TABLE: readonly (readonly [string, readonly CommandName[]])[] 
   ["--yes", ["install", "uninstall"]],
   ["--enable-plugins", ["install"]],
   ["--install-skills", ["install"]],
+  // Setup screen delta, 2026-09-16 (owner decision: installs missing br / bv).
+  ["--install-beads-tools", ["install"]],
   ["--skills-agents", ["install", "doctor"]],
   ["--role", ["install"]],
   ["--reconfigure", ["install"]],
@@ -125,6 +127,7 @@ describe("parseCommandLine — every registered flag", () => {
       yes: false,
       enablePlugins: false,
       installSkills: false,
+      installBeadsTools: false,
       skillsAgents: undefined,
       role: [],
       reconfigure: false,

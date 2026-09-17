@@ -1,5 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
-import { readFileSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
   ensureManager,
@@ -12,6 +14,19 @@ import {
 import contribute, { readManagerInstructions } from "../plugin/index.server";
 import { managerEnsureRpc } from "../plugin/shared/contracts";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
+
+// The entry resolves the install home from $HOME when Paseo's config names no
+// plugin path; point it at an empty directory so this machine's real
+// ~/.paseo-bm (and any role-extras.json in it) never leaks into the test.
+const realHome = process.env.HOME;
+const isolatedHome = mkdtempSync(join(tmpdir(), "bm-isolated-home-"));
+beforeAll(() => {
+  process.env.HOME = isolatedHome;
+});
+afterAll(() => {
+  process.env.HOME = realHome;
+  rmSync(isolatedHome, { recursive: true, force: true });
+});
 
 /**
  * WP-112 `manager.ensure` against a fake Paseo SDK. No daemon is contacted and

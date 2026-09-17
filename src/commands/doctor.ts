@@ -52,7 +52,7 @@ import { paseoConfigFile, resolveLayout } from "../layout.js";
 import type { DaemonStatus, PaseoAdapter, PluginSummary } from "../paseo/adapter.js";
 import { createPaseoAdapter, isPaseoCliError, isPluginRunning } from "../paseo/adapter.js";
 import type { FsProbe } from "../preflight.js";
-import { checkBeadsCli, checkDaemon, checkPaseoVersion, realFsProbe, toCheck } from "../preflight.js";
+import { checkBeadsCli, checkBeadsViewer, checkDaemon, checkPaseoVersion, realFsProbe, toCheck } from "../preflight.js";
 import type { InstallRecord } from "../record.js";
 import { ROLE_NAMES, isRecordError, parseRecord, recordPath, resolveRecordedPath, roleId } from "../record.js";
 import { writeHumanReport } from "../report/human.js";
@@ -112,6 +112,7 @@ export const DOCTOR_CHECK_IDS = [
   "payload-versions",
   "backups",
   "beads-cli",
+  "beads-viewer",
 ] as const;
 
 export type DoctorCheckId = (typeof DOCTOR_CHECK_IDS)[number];
@@ -435,6 +436,11 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorOutcome> 
   checks.push(toCheck(beads.finding));
   if (beads.path === null) {
     warnings.push({ code: "W_BEADS_CLI_MISSING", detail: "looked for br and bd on PATH" });
+  }
+  const viewer = checkBeadsViewer({ env, fs: probe });
+  checks.push(toCheck(viewer.finding));
+  if (viewer.path === null) {
+    warnings.push({ code: "W_BEADS_VIEWER_MISSING", detail: "looked for bv on PATH" });
   }
 
   let skills: SkillsReport | null = null;

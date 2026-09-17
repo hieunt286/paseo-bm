@@ -63,7 +63,8 @@ export type PreflightCheckId =
   | "paseo-daemon"
   | "paseo-version"
   | "install-home"
-  | "beads-cli";
+  | "beads-cli"
+  | "beads-viewer";
 
 /**
  * One check's outcome. It is a report `Check` plus the registry code, so the
@@ -160,6 +161,7 @@ const OK_MESSAGES: Readonly<Record<PreflightCheckId, string>> = {
   "paseo-version": "The Paseo CLI and daemon agree on a supported version.",
   "install-home": "The install home can be written.",
   "beads-cli": "The beads CLI is available.",
+  "beads-viewer": "The beads viewer is available.",
 };
 
 function ok(id: PreflightCheckId, message?: string): PreflightFinding {
@@ -536,6 +538,19 @@ export function checkBeadsCli(
   return { finding: flag("beads-cli", "W_BEADS_CLI_MISSING", "warn"), path: null };
 }
 
+/**
+ * The beads viewer `bv`. A warning, never a block, like the beads CLI. Only
+ * looked for: running a bare `bv` would open its interactive TUI.
+ */
+export function checkBeadsViewer(
+  options: { env?: Readonly<Record<string, string | undefined>>; fs?: FsProbe } = {},
+): { finding: PreflightFinding; path: string | null } {
+  const found = findExecutableOnPath("bv", options);
+  return found === null
+    ? { finding: flag("beads-viewer", "W_BEADS_VIEWER_MISSING", "warn"), path: null }
+    : { finding: ok("beads-viewer", `The beads viewer is available (\`${found}\`).`), path: found };
+}
+
 /* ----------------------------------------------------------------- the gate */
 
 /**
@@ -612,6 +627,7 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
     const beads = checkBeadsCli({ env, fs: probe });
     beadsCli = beads.path;
     record(beads.finding);
+    record(checkBeadsViewer({ env, fs: probe }).finding);
   }
 
   return settle(null);

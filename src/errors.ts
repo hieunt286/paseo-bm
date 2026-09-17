@@ -147,7 +147,7 @@ export const DIAGNOSTICS = {
     code: "W_BEADS_CLI_MISSING",
     message: "The beads CLI (`br` or `bd`) was not found, so Worker will not be able to manage beads.",
     remediation:
-      "Install the beads CLI and make sure it is on PATH. paseo-bm installs fine without it; only the beads part of the workflow is unavailable.",
+      "Install br (beads_rust) and make sure it is on PATH: `brew install dicklesworthstone/tap/br`, or `curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh | bash -s -- --skip-skills`. The Beads Manager Setup screen can also install it. paseo-bm installs fine without it; only the beads part of the workflow is unavailable.",
   },
   W_SKILLS_ASSIST_FAILED: {
     code: "W_SKILLS_ASSIST_FAILED",
@@ -160,6 +160,18 @@ export const DIAGNOSTICS = {
     message: "The provider chosen for an agent role has no active login session, so that role cannot start a session yet.",
     remediation:
       "Run that tool's own login command — paseo-bm never handles credentials — then run `paseo-bm doctor` to confirm. The role stays registered either way.",
+  },
+  W_BEADS_TOOLS_INSTALL_FAILED: {
+    code: "W_BEADS_TOOLS_INSTALL_FAILED",
+    message: "paseo-bm tried to install a missing beads tool (`br` or `bv`) and it is still not available.",
+    remediation:
+      "Run the printed install command yourself to see the failure, make sure the tool is on PATH, then run `paseo-bm doctor`. This never blocks the install or changes the exit code.",
+  },
+  W_BEADS_VIEWER_MISSING: {
+    code: "W_BEADS_VIEWER_MISSING",
+    message: "The beads viewer (`bv`) was not found, so agents cannot use its triage and dependency views.",
+    remediation:
+      "Install bv (beads_viewer) and make sure it is on PATH: `brew install dicklesworthstone/tap/bv`, or the pinned script in the beads_viewer README. The Beads Manager Setup screen can also install it. This never blocks the install or changes the exit code.",
   },
 } as const satisfies Readonly<Record<string, DiagnosticDeclaration>>;
 
