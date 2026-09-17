@@ -114,6 +114,10 @@ Ba file Markdown đóng cùng gói, được copy vào thư mục cài đặt v�
 
 Bốn hợp đồng dưới đây phải cụ thể tới mức hai lần chạy khác nhau cho ra kết quả giống nhau. Chúng nằm trong `roles/*.md` và là thứ quyết định sản phẩm chạy được hay không.
 
+*(Errata 2026-09-17, [delta simplify-roles](./paseo-bm-delta-20260917b-simplify-roles.md): **cách trình bày** của ba file `roles/*.md` đã đổi — khối `## RULES` nay là 5 / 4 / 5 giới hạn theo LOẠI hành vi thay vì 19 / 8 / 11 gạch đầu dòng cấm theo từng ca, và mọi chi tiết "cách làm" chuyển xuống đúng bước dùng nó, viết ở thể khẳng định. **Nội dung mọi hợp đồng dưới đây không đổi**: nhãn, báo cáo, lô review, quy tắc dừng, ngân sách, mức. Bảng §4.3 của delta đó truy từng luật cũ tới chỗ mới.)*
+
+*(Errata 2026-09-17, [delta context-engineering](./paseo-bm-delta-20260917c-context-engineering.md): ba file vai trò viết lại theo **ba tầng** — thường trú (danh tính, một vòng "việc tiếp theo", giới hạn, hợp đồng phát ra mọi lần), theo lần gọi (tiêu chí giai đoạn nằm trong brief Worker gửi Reviewer), ép bằng mã (plugin lo mode và đếm ngân sách). Hai thay đổi **nội dung**: (1) §F — ngân sách review do plugin đếm, `BM-REPORT` bỏ dòng `guardrail:`, Manager nhận thông báo `BM-BUDGET` và **hỏi người dùng** thay vì tự huỷ; (2) Worker thôi chọn mode cho Reviewer (hook hạ `full-access` thừa kế về `auto`), còn Manager truyền mode Worker lấy từ mục `## Runtime facts` plugin ghi vào chỉ dẫn, vì daemon từ chối tạo Worker thiếu mode **trước** khi hook chạy.)*
+
 **A. Hợp đồng nhãn (REQ-033).** Không đủ nếu chỉ nói "gán nhãn phù hợp".
 
 | Mục | Quy định |
@@ -162,6 +166,8 @@ Vài ca biên để tránh cãi nhau: "sửa một dòng chữ trong response AP
 
 Phát hiện rủi ro thuộc mức cao hơn khi đang làm thì **nâng mức và báo người dùng** rồi mới đi tiếp; không tự âm thầm nới việc. Người dùng ghi đè được mức phân loại.
 
+> Errata 2026-09-17: skill theo mức (Lớn đủ 5 skill, Vừa theo điều kiện, Nhỏ giữ đường nhanh), hợp đồng bead leaf và các vòng hỏi quyết định/rủi ro đã được bổ sung bằng [delta workflow-skills](./paseo-bm-delta-20260917-workflow-skills.md) §4.1–§4.5 (`design-delta-20260917-workflow-skills`).
+
 **F. Lan can hành vi cho review và polish (REQ-037).** Vòng review là thứ dễ chạy vô hạn nhất: mỗi lần sửa lại đẻ ra thứ để review tiếp.
 
 > **Nói thẳng về giới hạn của cơ chế này.** Đây **không phải** cơ chế chặn bằng mã. Cả hai lớp — chỉ dẫn cho Worker và giám sát của Manager — đều là agent làm theo lời dặn. Worker tự đếm rồi tự báo; Manager tin vào con số đó cộng với những gì công cụ Paseo nhìn thấy. Một Worker cố tình phớt lờ thì Phase 1 không có gì chặn được nó. Owner chấp nhận có ý thức hạn chế này (2026-09-15); cơ chế chặn bằng mã — tắt công cụ tạo agent của Paseo cho vai trò Worker rồi bắt nó đi qua một công cụ có kiểm ngân sách — được hoãn sang Phase 3 và chỉ làm nếu số liệu thực tế cho thấy cần.
@@ -175,6 +181,10 @@ Phát hiện rủi ro thuộc mức cao hơn khi đang làm thì **nâng mức v
 | Một "lượt" | **Một lần gọi** review hoặc polish, bất kể có tái dùng cùng một agent hay không |
 
 **Ngân sách:**
+
+> Errata 2026-09-16: bảng dưới đây đã được thay bằng [delta review-budget](./paseo-bm-delta-20260916-review-budget.md) §4 (review gom theo giai đoạn, tổng 1 / 4 / 6, bỏ polish).
+>
+> Errata 2026-09-17: polish quay lại cho Vừa và Lớn dưới dạng lượt `polishing-beads` của chính Worker, cùng `reviewing-plan`; các lượt skill này **không** tính vào ngân sách review 1 / 4 / 6. Xem [delta workflow-skills](./paseo-bm-delta-20260917-workflow-skills.md) §4.2 (`design-delta-20260917-workflow-skills`).
 
 | | Nhỏ | Vừa | Lớn |
 |---|---|---|---|
@@ -210,8 +220,15 @@ Cả hai vai trò: không bao giờ chọn mode `planning`. Lý do: các lượt
     20260915T101500Z/
       paseo-config.json             bản sao config.json trước khi sửa
       plugin/0.1.0/...              bản sao file bị ghi đè có chủ đích
+  traces/                           (0700) lưu vết Dashboard — dữ liệu do paseo-bm tạo
+    meta.json                       (0600) { schemaVersion, createdAt, updatedAt }
+    <workspaceId>/                  (0700) một thư mục cho mỗi workspace
+      meta.json                     (0600) tên và đường dẫn cuối biết được của workspace
+      events-<YYYYMM>.jsonl         (0600) nối thêm, một bản ghi lượt một dòng
   .lock
 ```
+
+`traces/` là **dữ liệu do paseo-bm tạo nhưng thuộc người dùng**: không có hash trong `install.json`, không được backup, cài và cập nhật không bao giờ chạm. Xem §3.3 loại `user-data`, [ADR-007](../adr/ADR-007-dashboard-trace-store.md), và [Technical Design Dashboard](paseo-bm-dashboard.md) §3.
 
 ### 3.2 `install.json`
 
@@ -248,6 +265,9 @@ Ghi atomic, quyền `0600`, không chứa bí mật.
 | `user-modified` | có trong `files[]`, hash không khớp bản ghi | giữ; hỏi khi tương tác; `--force` mới ghi đè, luôn backup |
 | `conflict` | tồn tại trên đĩa, không có trong `files[]` | bỏ qua, báo |
 | `missing` | có trong `files[]` nhưng không còn trên đĩa | tạo lại |
+| `user-data` | nằm trong `<install home>/traces/` | không hash, không backup, không so sánh; cài và cập nhật (gồm cả `--prune`) **không bao giờ** chạm; chỉ lệnh gỡ được xoá và phải hỏi trước |
+
+Loại `user-data` là **dữ liệu tích luỹ**, không phải tài sản phiên bản, nên nó đứng ngoài mọi quy tắc hash, backup và `--prune` *(delta `design-delta-20260916-trace-store`)*.
 
 **Phạm vi thực tế:** nâng cấp luôn copy sang `plugin/<version mới>/` nên mọi đích đều là `missing`. Ba trạng thái xung đột chỉ xảy ra khi cài lại cùng phiên bản, sửa chữa trong thư mục đang hoạt động, hoặc với chính `install.json`. Quy tắc này áp dụng cho cả `roles/*.md`.
 
@@ -343,7 +363,7 @@ Cảnh báo về skills và beads CLI không bao giờ đổi mã thoát. Kiểm
 
 Khi bật `--json`, stdout chỉ chứa đúng một tài liệu JSON; output của tiến trình con đi ra **stderr**.
 
-**Sổ đăng ký mã lỗi** là một hằng số duy nhất, đủ cho Phase 1, mỗi mục có thông điệp và cách khắc phục: `E_DAEMON_UNREACHABLE`, `E_VERSION_MISMATCH`, `E_UNSUPPORTED_OS`, `E_NODE_TOO_OLD`, `E_PASEO_CLI_MISSING`, `E_PASEO_OUTPUT_UNEXPECTED`, `E_CONFLICT`, `E_BAD_SKILLS_AGENTS`, `E_BAD_ROLE_SPEC`, `E_CONFIG_CONCURRENT_WRITE`, `E_RECORD_SCHEMA_TOO_NEW`, `E_LOCKED`, `E_PROVIDER_UNAVAILABLE`, `E_UNSAFE_INSTALL_HOME`, `E_PATH_ESCAPE`, `E_SYMLINK_IN_PATH`, `E_TARGET_NOT_WRITABLE`, `E_PLUGIN_LOAD_FAILED`, `W_SKILLS_MISSING`, `W_BEADS_CLI_MISSING`, `W_SKILLS_ASSIST_FAILED`, `W_PROVIDER_NOT_LOGGED_IN`. Không được đặt mã tại chỗ. Năm mã `E_UNSAFE_INSTALL_HOME`, `E_PATH_ESCAPE`, `E_SYMLINK_IN_PATH`, `E_TARGET_NOT_WRITABLE` (mã thoát 3, chưa ghi gì) và `E_PLUGIN_LOAD_FAILED` (mã thoát 7) được bổ sung theo errata 2026-09-15.
+**Sổ đăng ký mã lỗi** là một hằng số duy nhất, đủ cho Phase 1, mỗi mục có thông điệp và cách khắc phục: `E_DAEMON_UNREACHABLE`, `E_VERSION_MISMATCH`, `E_UNSUPPORTED_OS`, `E_NODE_TOO_OLD`, `E_PASEO_CLI_MISSING`, `E_PASEO_OUTPUT_UNEXPECTED`, `E_CONFLICT`, `E_BAD_SKILLS_AGENTS`, `E_BAD_ROLE_SPEC`, `E_CONFIG_CONCURRENT_WRITE`, `E_RECORD_SCHEMA_TOO_NEW`, `E_LOCKED`, `E_PROVIDER_UNAVAILABLE`, `E_UNSAFE_INSTALL_HOME`, `E_PATH_ESCAPE`, `E_SYMLINK_IN_PATH`, `E_TARGET_NOT_WRITABLE`, `E_PLUGIN_LOAD_FAILED`, `E_TIMELINE_UNAVAILABLE`, `E_BEADS_STORE_UNREADABLE`, `E_TRACE_NOT_FOUND`, `E_TRACE_STORE_UNWRITABLE`, `E_TRACE_STORE_SCHEMA_TOO_NEW`, `E_TRACE_REASSIGN_INVALID`, `W_SKILLS_MISSING`, `W_BEADS_CLI_MISSING`, `W_SKILLS_ASSIST_FAILED`, `W_PROVIDER_NOT_LOGGED_IN`. Không được đặt mã tại chỗ. Sáu mã `E_TIMELINE_UNAVAILABLE` → `E_TRACE_REASSIGN_INVALID` thuộc các RPC của Dashboard (delta `design-delta-20260916-trace-store`); chúng đi qua kênh RPC của plugin nên **không** có mã thoát CLI. Năm mã `E_UNSAFE_INSTALL_HOME`, `E_PATH_ESCAPE`, `E_SYMLINK_IN_PATH`, `E_TARGET_NOT_WRITABLE` (mã thoát 3, chưa ghi gì) và `E_PLUGIN_LOAD_FAILED` (mã thoát 7) được bổ sung theo errata 2026-09-15.
 
 ## 5. Hợp đồng RPC của plugin
 
@@ -354,6 +374,8 @@ Ba RPC, định nghĩa bằng Zod trong `shared/contracts.ts`, xử lý trong `i
 | `manager.ensure` | `{ workspaceId }` | `{ agentId, created }` | Tìm Manager còn sống của workspace (theo nhãn `bm.role=manager`); có thì trả về, chưa có thì tạo bằng profile `bm-manager` với chỉ dẫn từ `roles/manager.md` |
 | `agents.list` | `{ workspaceId }` | `{ agents: [{ id, role, title, status, parentId, updatedAt }] }` | Dựng cây từ nhãn `bm.role` và `paseo.parent-agent-id` |
 | `roles.describe` | `{}` | `{ roles: [{ role, provider, model, paseoTools, instructionsPath }] }` | Để panel hiển thị cấu hình đang có hiệu lực (REQ-032d). Nguồn dữ liệu là **cấu hình Paseo đang có hiệu lực**, đọc qua `paseo.config.get()` của SDK — không đọc `install.json`: `provider` = `extends` của `agents.providers.bm-<vai trò>`, `model` lấy từ `daemon.agentProfiles[bm-<vai trò>]`, `paseoTools` = `paseoTools.enabled === true` của provider dẫn xuất, `instructionsPath` = tên chỉ dẫn nhúng trong bundle (ví dụ `roles/manager.md`), không phải đường dẫn trên đĩa. Vai trò không có cả provider lẫn profile thì bị bỏ qua (errata 2026-09-15) |
+
+Các RPC của Dashboard (`traces.list`, `traces.get`, `traces.delete`, `traces.reassign`, `beads.stats`) được định nghĩa ở [Technical Design Dashboard](paseo-bm-dashboard.md) §5; ba RPC trên không đổi *(delta `design-delta-20260916-trace-store`)*.
 
 Plugin **không** có RPC xoá agent: theo ADR-005, vòng đời do người dùng quyết định qua chính giao diện Paseo.
 
@@ -398,7 +420,7 @@ Không telemetry. CLI `skills` có kênh thu thập riêng của nó; README ph�
 - **Agent mồ côi:** Worker vẫn chạy khi Manager đã bị xoá thì không bị ảnh hưởng; panel hiển thị nó ở nhánh "không có Manager" thay vì giấu đi.
 - **Worker chết giữa chừng:** tài liệu và beads đã ghi vẫn hợp lệ; người dùng thấy trạng thái lỗi và đọc được agent đó để biết dừng ở đâu. paseo-bm không tự dọn.
 - **Dọn rác:** chỉ thư mục payload dở dang (không có trong `versions[]`) mới bị dọn.
-- **Không tác vụ nền, không cron, không watcher.**
+- **Không tác vụ nền, không cron, không watcher.** Bộ thu thập lưu vết của Dashboard bám hook `agent.turn_ended` của Paseo nên vẫn nằm trong quy tắc này: nó chạy theo sự kiện, không có đồng hồ, không quét đĩa, và lỗi ghi bị nuốt để không ảnh hưởng agent *(delta `design-delta-20260916-trace-store`)*.
 
 ## 9. Interaction Flow
 
@@ -549,6 +571,7 @@ CI **không** chạy agent thật: không xác định, tốn tiền, và cần 
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-09-16 | hieu.nt10 (soạn bởi Claude) | **Áp dụng delta `design-delta-20260916-trace-store`** do owner duyệt: §3.1 thêm `traces/` vào bố cục thư mục cài đặt; §3.3 thêm loại quyền sở hữu thứ sáu `user-data` (không hash, không backup, cập nhật không chạm, chỉ lệnh gỡ được xoá sau khi hỏi); §4.4 thêm sáu mã lỗi của RPC Dashboard; §5 thêm con trỏ sang Technical Design Dashboard; §8 làm rõ rằng bộ thu thập bám hook sự kiện nên quy tắc "không tác vụ nền" vẫn giữ. Nội dung Phase 1 không đổi |
 | 2026-09-14 | hieu.nt10 (soạn bởi Claude) | Bản 1: kiến trúc CLI, bố cục thư mục cài đặt, hợp đồng dòng lệnh/JSON/mã thoát, chiến lược kiểm thử; liên kết ADR-001 → ADR-004 |
 | 2026-09-14 | hieu.nt10 (soạn bởi Claude) | Chốt Q-014 → Q-017; thêm `versions[]`, `skills.agents[]`; phân biệt `enabled` với `status`; ghi nhận hành vi của `paseo plugin remove` |
 | 2026-09-15 | hieu.nt10 (soạn bởi Claude) | Sau lượt review plan: thêm mã thoát 6; định nghĩa lại bất biến của `doctor`; thêm ba cờ còn thiếu; hình dạng JSON cho `doctor`/`uninstall`; sổ mã lỗi; số timeout cụ thể; tên biến môi trường cần che |
@@ -567,3 +590,5 @@ CI **không** chạy agent thật: không xác định, tốn tiền, và cần 
 | 2026-09-15 | hieu.nt10 (soạn bởi Claude) | **Errata bm-msy theo quyết định owner.** §2.6: Worker và Reviewer được tạo ở mode không hỏi quyền của provider (mode của profile nếu có; không thì Claude `bypassPermissions`, Codex `full-access`, OpenCode tương đương, qua `inspect_provider`), thay quy tắc bm-cvr chọn mode `safe`/`moderate` và cấm `dangerous`. Rủi ro ghi nhận: cổng tác dụng phụ của Worker và quy tắc chỉ đọc của Reviewer chỉ còn là ràng buộc hành vi, không có lời hỏi quyền làm lớp thứ hai; câu phê duyệt trong Paseo ở §7 không còn áp cho hai vai trò này. Manager không đổi. Mọi bead Worker tạo có mục `## Provenance` (`requestId` và yêu cầu gốc). Lý do: nghiệm thu điều phối F-3/F-4/F-5 có 20–42 lời hỏi quyền; F-2 để lại bead thiếu Provenance (M-11) |
 | 2026-09-15 | hieu.nt10 (soạn bởi Claude) | **Errata bm-msy sau khi owner duyệt `prd-delta-20260915-subagent-modes`.** §2.6: Reviewer **không** dùng mode không hỏi quyền mà dùng mode tự động không mở toàn quyền hay mạng (Codex `auto`, Claude `auto`), không bao giờ `dangerous`; Worker giữ mode không hỏi quyền. §7: câu "Vượt ranh giới thì để người dùng phê duyệt trong Paseo" chỉ còn áp cho Manager |
 | 2026-09-15 | hieu.nt10 (soạn bởi Claude) | **Errata bm-wq6 theo quyết định owner (A + B + E).** §2.6 D: Stop của Paseo chỉ ngắt lượt của Worker và Paseo 0.8 không cho plugin huỷ agent (`PaseoAgentHandle` không có `cancel`, `cancelAgent` chỉ ở `DaemonClient` nội bộ). (A) plugin bắt `agent.turn_ended` với `canceled` của `bm-worker`, đọc lại trạng thái, Worker không `running` thì gửi thông báo dừng cố định tới Reviewer con đang chạy; (B) `worker.md` coi lượt ngay sau lượt bị ngắt là dừng, `cancel_agent` Reviewer đang chạy rồi báo `finished`, `reviewer.md` trả `BM-REVIEW STOPPED`; (E) ghi nhận giới hạn và soạn đề nghị gửi Paseo. Rủi ro: Reviewer chạy thêm một lượt ngắn, Worker bị đánh thức một lần, phụ thuộc agent làm theo chỉ dẫn; REQ-026f đạt về hành vi, chưa phải huỷ cứng. Lý do: nghiệm thu điều phối lượt 4, F-8a |
+| 2026-09-17 | hieu.nt10 (soạn bởi Claude) | **Errata `design-delta-20260917b-simplify-roles`.** §2.6: ba file vai trò viết lại theo bố cục giới hạn-theo-loại (Worker 5, Reviewer 4, Manager 5), luồng làm việc thành mục cấp một của `worker.md`, chi tiết công cụ và văn phong chuyển sang thể khẳng định ở đúng bước. Không quyết định nào đổi; `BM-REPORT`, `BM-REVIEW`, tên nhãn, ngân sách 1/4/6 giữ nguyên từng ký tự. Lý do: owner thấy hai file Worker/Reviewer "cấm đoán rất nhiều" và cấm vụn theo từng ca |
+| 2026-09-17 | hieu.nt10 (soạn bởi Claude) | **Errata `design-delta-20260917c-context-engineering`.** §2.6: ba file vai trò theo ba tầng (thường trú / theo lần gọi / ép bằng mã); §F ngân sách review do plugin đếm và Manager hỏi người dùng khi vượt; hook `before("agent.create")` chọn và hạ mode của Worker/Reviewer, Manager nhận mode Worker cụ thể qua `## Runtime facts`. Lý do: owner yêu cầu chỉ dẫn giúp agent làm giỏi thay vì một khung kiểm soát dày; review b1 phát hiện daemon chọn mode trước hook (K10) |

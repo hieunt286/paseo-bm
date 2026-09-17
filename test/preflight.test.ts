@@ -461,6 +461,7 @@ describe("runPreflight — a healthy environment", () => {
       "paseo-version",
       "install-home",
       "beads-cli",
+      "beads-viewer",
     ]);
     expect(result.checks).toEqual(result.findings.map(toCheck));
   });
@@ -477,17 +478,22 @@ describe("runPreflight — a healthy environment", () => {
 
     expect(result.ok).toBe(true);
     expect(result.failure).toBeNull();
-    expect(result.warnings).toEqual([{ code: "W_BEADS_CLI_MISSING" }]);
+    expect(result.warnings).toEqual([{ code: "W_BEADS_CLI_MISSING" }, { code: "W_BEADS_VIEWER_MISSING" }]);
     const beads = result.findings.find((finding) => finding.id === "beads-cli");
     expect(beads?.severity).toBe("warn");
     expect(beads?.remediation).toBe(diagnostic("W_BEADS_CLI_MISSING").remediation);
+    expect(result.findings.find((finding) => finding.id === "beads-viewer")?.remediation).toBe(
+      diagnostic("W_BEADS_VIEWER_MISSING").remediation,
+    );
   });
 
-  it("reports no warning when `br` is on PATH", async () => {
+  it("reports no warning when `br` and `bv` are on PATH", async () => {
     const sandbox = makeSandbox();
     const br = join(sandbox.emptyBin, "br");
-    writeFileSync(br, "#!/bin/sh\nexit 0\n");
-    chmodSync(br, 0o755);
+    for (const tool of [br, join(sandbox.emptyBin, "bv")]) {
+      writeFileSync(tool, "#!/bin/sh\nexit 0\n");
+      chmodSync(tool, 0o755);
+    }
 
     const result = await runPreflight({
       adapter: healthyAdapter(sandbox, { cli: "0.8.0", daemon: "0.8.0" }),

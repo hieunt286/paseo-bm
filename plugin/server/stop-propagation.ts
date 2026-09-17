@@ -1,5 +1,6 @@
 import type { PluginLifecycleEvents, PluginServerContext } from "@getpaseo/plugin/server";
 import { MANAGER_ROLE_LABEL, PARENT_AGENT_LABEL } from "./manager";
+import { REVIEWER_STOP_NOTICE_PREFIX } from "./notices";
 import { providerId } from "./provider-id";
 
 /**
@@ -45,7 +46,7 @@ export const STOP_RECHECK_MS = 500;
  * recognises it verbatim; do not reword it without changing the role.
  */
 export const REVIEWER_STOP_NOTICE =
-  'STOP: The Beads Worker that created you was stopped by the user. Stop this review now: do not read files, run commands or call any tool; reply with the single line "BM-REVIEW STOPPED" and end your turn.';
+  `${REVIEWER_STOP_NOTICE_PREFIX} by the user. Stop this review now: do not read files, run commands or call any tool; reply with the single line "BM-REVIEW STOPPED" and end your turn.`;
 
 /** Largest page the daemon directory query accepts (protocol: `limit.max(200)`). */
 const LIST_PAGE_LIMIT = 200;

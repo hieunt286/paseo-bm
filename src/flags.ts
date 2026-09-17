@@ -39,6 +39,7 @@ export interface Flags {
   readonly yes: boolean;
   readonly enablePlugins: boolean;
   readonly installSkills: boolean;
+  readonly installBeadsTools: boolean;
   readonly skillsAgents: string | undefined;
   /**
    * Raw `<role>=<provider>/<model>` strings, in the order they were typed. The
@@ -105,6 +106,13 @@ export const FLAG_SPECS: readonly FlagSpec[] = [
     kind: "boolean",
     commands: ["install"],
     summary: "Consent to running the third-party skills CLI",
+  },
+  {
+    flag: "--install-beads-tools",
+    key: "installBeadsTools",
+    kind: "boolean",
+    commands: ["install"],
+    summary: "Consent to installing missing br and bv without a terminal (a terminal install does it anyway)",
   },
   {
     flag: "--skills-agents",
@@ -418,6 +426,7 @@ function assemble(raw: ReadonlyMap<FlagKey, RawValue>): Flags {
     yes: readBoolean(raw, "yes"),
     enablePlugins: readBoolean(raw, "enablePlugins"),
     installSkills: readBoolean(raw, "installSkills"),
+    installBeadsTools: readBoolean(raw, "installBeadsTools"),
     skillsAgents: readValue(raw, "skillsAgents"),
     role: readList(raw, "role"),
     reconfigure: readBoolean(raw, "reconfigure"),

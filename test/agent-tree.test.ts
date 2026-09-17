@@ -50,6 +50,8 @@ const { AgentTreePanel, AgentTreeView } = (await import(treePath)) as {
   AgentTreePanel: unknown;
   AgentTreeView: (props: Record<string, unknown>) => unknown;
 };
+const chatBeadsPath = "../plugin/client/bead-chips.tsx";
+const { ChatBeadsPanel } = (await import(chatBeadsPath)) as { ChatBeadsPanel: unknown };
 
 // --- minimal element-tree renderer ------------------------------------------
 
@@ -211,17 +213,34 @@ describe("client entry registration", () => {
         panels.push(item);
         return () => removed.push(`panel:${String(item.id)}`);
       },
+      // WP-211 registers the Dashboard settings screen from the same entry.
+      addSettingsScreen: (item: { id: string }) => () => removed.push(`settings:${item.id}`),
+      // The chat cards (delta 20260916-chat-cards).
+      addTimelineTransformer: (item: { id: string }) => () => removed.push(`transformer:${item.id}`),
+      addTimelineRenderer: (item: { kind: string }) => () => removed.push(`renderer:${item.kind}`),
     };
 
     const cleanup = clientContribute(client);
     expect(panels).toEqual([
+      { id: "bm-chat-beads", title: "Beads in this chat", icon: "ListChecks", context: "agent", Component: ChatBeadsPanel },
       { id: AGENT_TREE_PANEL_ID, title: "Beads agents", icon: "ListTree", context: "workspace", Component: AgentTreePanel },
     ]);
     expect(AGENT_TREE_ICON).toBe("ListTree");
 
     cleanup();
     expect(removed.sort()).toEqual(
-      ["surface:beads-manager", "sidebar:beads-manager", "command:open-beads-manager", `panel:${AGENT_TREE_PANEL_ID}`].sort(),
+      [
+        "surface:beads-manager",
+        "sidebar:beads-manager",
+        "command:open-beads-manager",
+        "command:open-beads-dashboard",
+        "settings:paseo-bm-settings",
+        `panel:${AGENT_TREE_PANEL_ID}`,
+        "panel:bm-chat-beads",
+        "transformer:bm-chat-received",
+        "transformer:bm-chat-sent",
+        "renderer:bm-message",
+      ].sort(),
     );
   });
 });

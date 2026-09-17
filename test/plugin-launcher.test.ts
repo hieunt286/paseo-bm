@@ -135,6 +135,9 @@ function fakeClient() {
   const surfaces = new Map<string, unknown>();
   const sidebarItems: Array<{ id: string; title: string; icon: string; surface: string }> = [];
   const commandItems: CommandItem[] = [];
+  const settingsScreens: Array<{ id: string }> = [];
+  const transformers: Array<{ id: string; query: { itemType: string }; transform: (input: { item: unknown; phase: string }) => unknown }> = [];
+  const renderers: Array<{ kind: string; version: number }> = [];
   const client = {
     addSurface: (id: string, Component: unknown) => {
       surfaces.set(id, Component);
@@ -150,8 +153,22 @@ function fakeClient() {
     },
     // The agent-tree panel bead registers a workspace panel from the same entry.
     addWorkspacePanel: (item: { id: string }) => () => removed.push(`panel:${item.id}`),
+    // WP-211 adds the Dashboard settings screen from the same entry.
+    addSettingsScreen: (item: { id: string }) => {
+      settingsScreens.push(item);
+      return () => removed.push(`settings:${item.id}`);
+    },
+    // The chat cards (delta 20260916-chat-cards).
+    addTimelineTransformer: (item: (typeof transformers)[number]) => {
+      transformers.push(item);
+      return () => removed.push(`transformer:${item.id}`);
+    },
+    addTimelineRenderer: (item: (typeof renderers)[number]) => {
+      renderers.push(item);
+      return () => removed.push(`renderer:${item.kind}`);
+    },
   };
-  return { client, surfaces, sidebarItems, commandItems, removed };
+  return { client, surfaces, sidebarItems, commandItems, settingsScreens, transformers, renderers, removed };
 }
 
 const theme = {
@@ -173,6 +190,21 @@ const theme = {
 // -----------------------------------------------------------------------------
 
 describe("client entry registrations", () => {
+  it("registers the chat cards: two transformers and one renderer that agree on kind and version", () => {
+    const fake = fakeClient();
+    clientContribute(fake.client);
+    expect(fake.transformers.map((entry) => [entry.id, entry.query.itemType])).toEqual([
+      ["bm-chat-received", "user_message"],
+      ["bm-chat-sent", "assistant_message"],
+    ]);
+    expect(fake.renderers).toMatchObject([{ kind: "bm-message", version: 1 }]);
+    const report = { type: "user_message", text: "BM-REPORT\nrequestId: req-20260916T062244Z\nphase: finished" };
+    expect(fake.transformers[0]!.transform({ item: report, phase: "complete" })).toMatchObject({
+      items: [{ type: "plugin", kind: "bm-message", version: 1, data: { type: "report", phase: "finished" } }],
+    });
+    expect(fake.transformers[1]!.transform({ item: { type: "assistant_message", text: "hello" }, phase: "complete" })).toBeUndefined();
+  });
+
   it("registers the surface, a sidebar item pointing at it, and a workspace Command Center item", () => {
     const fake = fakeClient();
     const cleanup = clientContribute(fake.client);
@@ -181,7 +213,13 @@ describe("client entry registrations", () => {
     expect(fake.sidebarItems).toEqual([
       { id: LAUNCHER_SURFACE_ID, title: "Beads Manager", icon: "Bot", surface: LAUNCHER_SURFACE_ID },
     ]);
-    expect(fake.commandItems).toHaveLength(1);
+    // Two now: "Open Beads Manager" (WP-113) and "Open Beads Dashboard" (WP-211).
+    expect(fake.commandItems).toHaveLength(2);
+    expect(fake.commandItems.map((item) => item.id)).toEqual([
+      "open-beads-manager",
+      "open-beads-dashboard",
+    ]);
+    expect(fake.settingsScreens.map((screen) => screen.id)).toEqual(["paseo-bm-settings"]);
     expect(fake.commandItems[0]).toMatchObject({
       id: "open-beads-manager",
       title: "Open Beads Manager",
@@ -196,7 +234,13 @@ describe("client entry registrations", () => {
         `surface:${LAUNCHER_SURFACE_ID}`,
         `sidebar:${LAUNCHER_SURFACE_ID}`,
         "command:open-beads-manager",
+        "command:open-beads-dashboard",
+        "settings:paseo-bm-settings",
         "panel:beads-agents",
+        "panel:bm-chat-beads",
+        "transformer:bm-chat-received",
+        "transformer:bm-chat-sent",
+        "renderer:bm-message",
       ].sort(),
     );
   });

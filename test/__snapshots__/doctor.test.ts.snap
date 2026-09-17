@@ -116,6 +116,12 @@ exports[`runDoctor — a healthy install > renders the JSON document of Design �
       "remediation": ""
     },
     {
+      "id": "beads-viewer",
+      "severity": "ok",
+      "message": "The beads viewer is available (\`<HOME>/bin/bv\`).",
+      "remediation": ""
+    },
+    {
       "id": "skills-agents",
       "severity": "ok",
       "message": "shared agent home: not installed (<HOME>/.agents does not exist), skipped",
@@ -315,6 +321,12 @@ exports[`runDoctor — an install that has drifted > renders the JSON document o
       "remediation": ""
     },
     {
+      "id": "beads-viewer",
+      "severity": "ok",
+      "message": "The beads viewer is available (\`<HOME>/bin/bv\`).",
+      "remediation": ""
+    },
+    {
       "id": "skills-agents",
       "severity": "ok",
       "message": "shared agent home: not installed (<HOME>/.agents does not exist), skipped",
@@ -433,6 +445,12 @@ exports[`runDoctor — nothing installed yet > renders the JSON document of Desi
       "id": "beads-cli",
       "severity": "ok",
       "message": "The beads CLI is available (\`<HOME>/bin/br\`).",
+      "remediation": ""
+    },
+    {
+      "id": "beads-viewer",
+      "severity": "ok",
+      "message": "The beads viewer is available (\`<HOME>/bin/bv\`).",
       "remediation": ""
     },
     {

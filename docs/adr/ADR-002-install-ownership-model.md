@@ -2,7 +2,7 @@
 
 | Trường | Giá trị |
 |---|---|
-| Status | Accepted |
+| Status | Accepted (bổ sung 2026-09-16 — xem mục cuối) |
 | Date | 2026-09-14 |
 | Owner | hieu.nt10 |
 | Liên quan | [PRD REQ-004, REQ-008, REQ-009, REQ-010, REQ-012](../product/paseo-bm-prd.md#6-functional-requirements), [ADR-001](ADR-001-plugin-distribution.md), [Technical Design](../design/paseo-bm.md) |
@@ -52,3 +52,14 @@ Khác biệt quan trọng về phạm vi: paseo-bm chỉ ghi **một cây thư m
 | Journal giao dịch đầy đủ như trình cài skills của Paseo | Phù hợp khi ghi vào thư mục dùng chung với công cụ khác. paseo-bm chỉ ghi trong thư mục của chính mình nên chi phí không tương xứng |
 | Dựa vào `mtime`/kích thước thay cho hash | Không tin cậy khi copy hay checkout; dễ vừa bỏ sót vừa báo nhầm |
 | Ghi đè trực tiếp rồi sửa nếu lỗi | Không có điểm khôi phục; đúng thứ mà REQ-010c cấm |
+
+## Bổ sung 2026-09-16 — loại `user-data` đứng ngoài mô hình hash
+
+Theo delta [`design-delta-20260916-trace-store`](../design/paseo-bm-delta-20260916-trace-store.md) do owner duyệt, thư mục `<install home>/traces/` (kho lưu vết của Dashboard) là **dữ liệu do paseo-bm tạo nhưng thuộc người dùng**, và **không** áp mô hình hồ sơ–hash của ADR này:
+
+- không nằm trong `files[]`, không có `sha256`, không sinh `backups[]`;
+- không có bốn trạng thái `unchanged` / `outdated` / `user-modified` / `conflict` — nó không phải tài sản phiên bản nên không có "bản đúng" để so;
+- cài và cập nhật (gồm cả `--prune`) **không bao giờ** chạm tới nó (PRD REQ-010f);
+- chỉ lệnh gỡ được xoá, và phải hỏi riêng (PRD REQ-012i).
+
+Lý do quyết định này không làm yếu ADR-002: mô hình hash tồn tại để trả lời "file này của ai và có bị sửa tay không". Với dữ liệu tích luỹ thì câu hỏi đó vô nghĩa — mọi thay đổi đều là dữ liệu mới hợp lệ. Áp hash lên nó sẽ luôn báo `user-modified` và biến một tính năng đúng thành một cảnh báo sai. Chi tiết ở [ADR-007](ADR-007-dashboard-trace-store.md) và [Technical Design](../design/paseo-bm.md) §3.3.

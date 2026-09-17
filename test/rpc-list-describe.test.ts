@@ -226,7 +226,7 @@ describe("roles.describe", () => {
 });
 
 describe("plugin server entry — agents.list and roles.describe", () => {
-  it("registers both handlers", async () => {
+  it("registers every handler: Phase 1 and the Dashboard", async () => {
     const handle = vi.fn();
     contribute({ handle } as unknown as Parameters<typeof contribute>[0]);
     const contracts = handle.mock.calls.map(([contract]) => contract);
@@ -234,8 +234,25 @@ describe("plugin server entry — agents.list and roles.describe", () => {
     expect(contracts).toContain(rolesDescribeRpc);
     expect(contracts.map((c: { name: string }) => c.name).sort()).toEqual([
       "agents.list",
+      "beads.action",
+      "beads.get",
+      "beads.list",
+      "beads.lookup",
+      "beads.stats",
+      "chat.beads",
+      "chat.peers",
       "manager.ensure",
       "roles.describe",
+      "roles.instructions",
+      "roles.save-extra",
+      "setup.install-tool",
+      "setup.status",
+      "traces.delete",
+      "traces.get",
+      "traces.list",
+      "traces.reassign",
+      "traces.workspaces",
+      "workspaces.overview",
     ]);
 
     const listHandler = handle.mock.calls.find(([c]) => c === agentsListRpc)![1];
