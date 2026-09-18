@@ -7,12 +7,72 @@
  * import.
  */
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
+import type { ReactNode } from "react";
+import type { BeadRow } from "../shared/contracts";
+import { beadTitleTone } from "./beads-model";
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import { Pressable, Text, View } from "react-native";
 import { ROLE_MARK, barShare, toneColor, type Badge, type Bar, type GraphNode, type Tone, type dashboardStyles } from "./dashboard-model";
 
 export type Styles = ReturnType<typeof dashboardStyles>;
 export type Theme = PluginSurfaceProps["theme"];
+
+/** Props of the two per-workspace screens, Beads and Metric. */
+export interface WorkspaceScreenProps extends PluginSurfaceProps {
+  workspaceId: string;
+  /** Omitted inside the workspace's own "Beads" tab: the tab already says where it is. */
+  workspaceLabel?: string;
+  /** Omitted inside the "Beads" tab, which has no screen to go back to. */
+  onBack?: () => void;
+  /** What the ← says to a screen reader; the surface names where it leads. */
+  backLabel?: string;
+  /** The Beads Manager surface's status strip; the "Beads" tab has none. */
+  status?: ReactNode;
+}
+
+/**
+ * The first row of the Beads and Metric screens: an optional ←, the title (or
+ * a spacer when the screen sits in its own workspace tab), then the screen's
+ * own buttons. The surface's status strip, when given, sits right under it, so
+ * a slash command's notice is seen on these screens too. Hook-free, so tests
+ * can expand it.
+ */
+export function WorkspaceScreenHeader({
+  title,
+  onBack,
+  backLabel,
+  right,
+  status,
+  styles,
+}: {
+  title: string | null;
+  onBack?: () => void;
+  backLabel: string;
+  right: ReactNode;
+  status?: ReactNode;
+  styles: Styles;
+}) {
+  return (
+    <>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+        {onBack === undefined ? null : (
+          <Pressable accessibilityRole="button" accessibilityLabel={backLabel} onPress={onBack} style={styles.secondaryButton}>
+            <Text style={styles.secondaryButtonText}>←</Text>
+          </Pressable>
+        )}
+        {title === null ? (
+          <View style={{ flex: 1 }} />
+        ) : (
+          <Text style={[styles.title, { flex: 1 }]} numberOfLines={1}>
+            {title}
+          </Text>
+        )}
+        {right}
+      </View>
+      {status}
+    </>
+  );
+}
 
 export function StatCards({
   cards,
@@ -122,6 +182,43 @@ export function Chip({
  */
 export function beadTitleStyle(styles: Styles, theme: Theme, tone: Tone | null) {
   return [styles.sectionTitle, { fontWeight: "400" as const, color: tone === null ? theme.colors.foreground : toneColor(theme, tone) }];
+}
+
+/**
+ * One bead row, shared by the Beads screen and the "Beads in this chat" panel:
+ * the title coloured by status (not bold) with ▸ / ▾, then what the list shows
+ * about the bead (`meta`), and the detail once the row is open. The detail is
+ * passed in, so this file never imports the Beads screen. Hook-free.
+ */
+export function BeadRowCard({
+  bead,
+  open,
+  onToggle,
+  meta,
+  detail,
+  styles,
+  theme,
+}: {
+  bead: Pick<BeadRow, "title" | "status" | "ready">;
+  open: boolean;
+  onToggle: () => void;
+  meta: ReactNode;
+  detail: ReactNode;
+  styles: Styles;
+  theme: Theme;
+}) {
+  return (
+    <View style={styles.card}>
+      <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} onPress={onToggle}>
+        {/* The title is what a reader scans for; the id comes second. */}
+        <Text style={beadTitleStyle(styles, theme, beadTitleTone(bead))} numberOfLines={open ? undefined : 2}>
+          {`${open ? "▾" : "▸"} ${bead.title ?? "(untitled)"}`}
+        </Text>
+        {meta}
+      </Pressable>
+      {open ? detail : null}
+    </View>
+  );
 }
 
 /** A small role icon on a soft, round tint of the role's colour. */

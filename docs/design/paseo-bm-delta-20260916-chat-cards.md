@@ -7,6 +7,8 @@
 | Gốc | [Technical Design Dashboard](./paseo-bm-dashboard.md); [delta owner-feedback](./paseo-bm-delta-20260916-owner-feedback.md) §7 (icon theo vai trò) |
 | Bead | `bm-1fv` |
 
+> **Đã được thay một phần** (errata 2026-09-18, hieu.nt10, soạn bởi Beads Worker, theo [delta 20260918f](./paseo-bm-delta-20260918f-ui-review.md) §4.12): viền theo màu vai trò ở §4 mục 4 đã bỏ, chỉ biểu tượng còn màu vai trò; nút gửi câu trả lời riêng ở §8 đã thay bằng ô Reply với một nút Send. Cả hai theo [delta 20260918d-card-replies](./paseo-bm-delta-20260918d-card-replies.md) (REQ-059 c, i).
+
 ## 1. Owner yêu cầu gì
 
 > "tôi cần nhận diện thẻ nhận và phản hồi của 3 agents: Worker, Review và Manager nhìn cho gọn gàng, nhận tin từ ai, phản hồi từ yêu cầu nào. nội dung khi ấn expand show dạng view markdown. Thẻ nhận diện có màu, Icon, Header tên của phiên Agent làm việc. Giúp tôi kiểm soát và trả lời nhanh chóng, chính xác với Worker hơn"

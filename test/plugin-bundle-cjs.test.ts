@@ -243,8 +243,6 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
       "chat.beads",
       "chat.peers",
       "chat.waiting",
-      "launcher.order.get",
-      "launcher.order.set",
       "manager.ensure",
       "roles.describe",
       "roles.instructions",

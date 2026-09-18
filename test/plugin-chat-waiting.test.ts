@@ -39,9 +39,11 @@ const manager = { id: "m1", workspaceId: "wks_a" };
 const worker = (overrides: Partial<WaitingCandidate> = {}): WaitingCandidate => ({
   id: "w1",
   workspaceId: "wks_a",
+  role: "worker",
   title: "Card replies",
   status: "idle",
   requestId: REQ,
+  archived: false,
   ...overrides,
 });
 
@@ -128,6 +130,58 @@ describe("chat.waiting", () => {
       ["m1", "w1", REQ],
       ["m2", "w2", OTHER],
     ]);
+  });
+
+  it("reads a trace store only for a workspace that has a live Manager, at most once (delta 20260918f F11)", async () => {
+    // Opening the trace store resolves the install home through
+    // `config.get`, so its calls count the trace-store reads.
+    const configGet = vi.fn(async () => ({ config: {} }));
+    const list = [
+      entry("m1", "manager", "wks_a"),
+      entry("w1", "worker", "wks_a"),
+      entry("w2", "worker", "wks_a"),
+      // No Manager here: nobody can show a pill for these, so nothing is read.
+      entry("w8", "worker", "wks_x"),
+      entry("w9", "worker", "wks_y"),
+    ];
+    const sdk = paseo({ m1: [] });
+    const result = await handleChatWaiting(
+      {
+        ...sdk,
+        agents: {
+          ...sdk.agents,
+          list: vi.fn(async ({ filter }: { filter: { labels?: Record<string, string> } }) => ({
+            entries: list.filter((e) => filter.labels === undefined || e.agent.labels["bm.role"] === filter.labels["bm.role"]),
+          })),
+        },
+        config: { get: configGet },
+      } as DashboardPaseo,
+      { homedir: () => "/nonexistent-bm-home" },
+    );
+    expect(result.waiting).toEqual([]);
+    expect(configGet).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives one pill, for the live Worker, when an archived Worker has the same request (delta 20260918f F12)", async () => {
+    const sdk = paseo({ m1: [agentMessage(ASKING)] });
+    const list = [
+      entry("m1", "manager", "wks_a"),
+      entry("w0", "worker", "wks_a", { "bm.requestId": REQ }, { archivedAt: "2026-09-18T00:00:00.000Z" }),
+      entry("w1", "worker", "wks_a", { "bm.requestId": REQ }),
+    ];
+    const result = await handleChatWaiting(
+      {
+        ...sdk,
+        agents: {
+          ...sdk.agents,
+          list: vi.fn(async ({ filter }: { filter: { labels?: Record<string, string> } }) => ({
+            entries: list.filter((e) => filter.labels === undefined || e.agent.labels["bm.role"] === filter.labels["bm.role"]),
+          })),
+        },
+      } as DashboardPaseo,
+      { homedir: () => "/nonexistent-bm-home" },
+    );
+    expect(result.waiting.map((w) => w.workerId)).toEqual(["w1"]);
   });
 
   it("keeps the other Managers when one timeline cannot be read", async () => {

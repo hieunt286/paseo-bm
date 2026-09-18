@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { actionMessage, getBeadDetail, listBeadRows, runBeadAction } from "../plugin/server/bead-actions";
 import { clearBeadsCache } from "../plugin/server/beads-store";
 import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store";
@@ -22,6 +23,7 @@ import {
   beadTitleTone,
   closedBeadsVisibility,
   doneText,
+  beadListItems,
   groupBeads,
   beadsOverview,
   facetsOf,
@@ -35,7 +37,7 @@ import {
 import { TRACE_STORE_SCHEMA_VERSION, type BeadRow, type BeadStats } from "../plugin/shared/contracts";
 
 /**
- * The Beads screen (design delta 20260916-beads-screen): list, detail, six
+ * The Beads screen (design delta 20260916-beads-screen): list, detail, five
  * overview sections, filters, and three actions that go to the Manager.
  */
 let workspace: string;
@@ -280,7 +282,7 @@ describe("workspaces.overview", () => {
   });
 });
 
-describe("the six overview sections", () => {
+describe("the five overview sections", () => {
   const rows = (): BeadRow[] => listBeadRows(workspace);
   const stats: BeadStats = {
     total: 4, open: 2, inProgress: 1, blocked: 2, closed: 1, ready: 0,
@@ -450,6 +452,13 @@ describe("a bead title and its chip say the status in one colour (delta 20260918
 });
 
 describe("the Beads list in four groups, closed beads behind the eye (delta 20260918e, Q9, Q10)", () => {
+  // `closedBeadsVisibility` lives for the whole test run, like an app session:
+  // put it back after each case, so a failing assertion cannot leak `true` into
+  // the next one (delta 20260918f S11).
+  afterEach(() => {
+    closedBeadsVisibility.set(false);
+  });
+
   // Only status and readiness decide a group; the rest of a row is not read.
   const row = (id: string, status: string, ready = false) => ({ id, status, ready }) as unknown as BeadRow;
   const sorted = [
@@ -491,6 +500,33 @@ describe("the Beads list in four groups, closed beads behind the eye (delta 2026
       ["blocked", 2, 1],
     ]);
     expect(three.truncated).toBe(2);
+  });
+
+  it("lays the groups out as one flat list keyed by bead id, so a bead that changes group keeps its row (delta 20260918f F9)", () => {
+    const items = beadListItems(groupBeads(sorted, { showClosed: true, limit: 200 }));
+    expect(items.map((item) => item.key)).toEqual([
+      "group:in_progress", "p1", "p2",
+      "group:blocked", "b1", "b2",
+      "group:ready", "r1", "r2",
+      "group:closed", "c1", "c2",
+    ]);
+    expect(items[0]).toEqual({ kind: "group", key: "group:in_progress", label: "In progress", total: 2, tone: "warning" });
+    expect(items[1]).toMatchObject({ kind: "bead", key: "p1" });
+
+    // p1 finishes: same key, now under Closed.
+    const after = beadListItems(groupBeads(sorted.map((bead) => (bead.id === "p1" ? row("p1", "closed") : bead)), { showClosed: true, limit: 200 }));
+    expect(after.filter((item) => item.key === "p1")).toHaveLength(1);
+    expect(after.findIndex((item) => item.key === "p1")).toBeGreaterThan(after.findIndex((item) => item.key === "group:closed"));
+
+    // The limit and the empty groups are exactly those of groupBeads.
+    const limited = beadListItems(groupBeads(sorted, { showClosed: false, limit: 3 }));
+    expect(limited.map((item) => item.key)).toEqual(["group:in_progress", "p1", "p2", "group:blocked", "b1"]);
+  });
+
+  it("draws those items as siblings under one parent, with no View per group", () => {
+    const screen = readFileSync(fileURLToPath(new URL("../plugin/client/beads-screen.tsx", import.meta.url)), "utf8");
+    expect(screen).toMatch(/beadListItems\(grouped\)\.map\(/);
+    expect(screen).not.toMatch(/grouped\.groups\.map\(/);
   });
 
   it("hides closed beads by default and remembers the choice for the session", () => {

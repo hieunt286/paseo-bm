@@ -24,6 +24,19 @@ export interface WaitingPill {
   entry: WaitingWorker;
 }
 
+/**
+ * FNV-1a 32-bit over the UTF-16 code units of `text`, as 8 hex digits. Small
+ * and dependency-free; it only has to notice that a report's text changed.
+ */
+export function fnv1a32Hex(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
 export function pillIdOf(workerId: string): string {
   return `bm-waiting-${workerId}`;
 }
@@ -40,7 +53,10 @@ export function pillOf(entry: WaitingWorker): WaitingPill | null {
   const label = `${name} · ${count} ${count === 1 ? "question" : "questions"}`;
   return {
     id: pillIdOf(entry.workerId),
-    key: [entry.managerId, entry.workspaceId, label, entry.at ?? ""].join("|"),
+    // The text's hash too: without a timestamp, a new report with the same
+    // number of questions would otherwise never reach the popover (delta
+    // 20260918f F14).
+    key: [entry.managerId, entry.workspaceId, entry.requestId, label, entry.at ?? "", fnv1a32Hex(entry.text)].join("|"),
     label,
     title: `Questions from ${name} about ${entry.requestId}`,
     entry,

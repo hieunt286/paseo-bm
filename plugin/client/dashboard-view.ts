@@ -14,6 +14,7 @@
 import type { WorkspaceOverview } from "../shared/contracts";
 import { STATUS_TONE } from "./beads-model";
 import type { Tone } from "./dashboard-model";
+import { createSlot, type Slot } from "./slot";
 
 /**
  * The views of the Beads Manager surface. Setup is the main screen and the
@@ -37,48 +38,35 @@ export function backOf(view: DashboardViewName): DashboardViewName | null {
   }
 }
 
-export interface DashboardRequests {
-  /** Records that the user asked for the Dashboard of this workspace. */
-  request(workspaceId: string): void;
-  /** Returns and clears the pending request. */
-  take(): string | null;
-  /** Reads the pending request without clearing it. */
-  peek(): string | null;
-  subscribe(listener: () => void): () => void;
+/**
+ * What each ← says to a screen reader: where it leads (delta 20260918f F4,
+ * owner decision Q6 a). `null` on the main screen, which has no ←.
+ */
+export function backLabelOf(view: DashboardViewName): string | null {
+  switch (backOf(view)) {
+    case "setup":
+      return "Back to Beads Manager setup";
+    case "workspaces":
+      return "Back to workspaces";
+    default:
+      return null;
+  }
 }
 
-export function createDashboardRequests(): DashboardRequests {
-  let pending: string | null = null;
-  const listeners = new Set<() => void>();
-  return {
-    request(workspaceId) {
-      pending = workspaceId;
-      for (const listener of listeners) listener();
-    },
-    take() {
-      const value = pending;
-      pending = null;
-      return value;
-    },
-    peek: () => pending,
-    subscribe(listener) {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
-  };
+/** How often the per-workspace figures are refreshed while the workspace list shows. */
+export const OVERVIEW_POLL_MS = 10_000;
+
+/**
+ * Whether the surface reads the per-workspace figures (`workspaces.overview`,
+ * which touches every workspace's bead store) and how often. Only the
+ * workspace list shows them (delta 20260918f F5).
+ */
+export function overviewPolling(view: DashboardViewName): { enabled: boolean; refetchInterval: number | false } {
+  return view === "workspaces" ? { enabled: true, refetchInterval: OVERVIEW_POLL_MS } : { enabled: false, refetchInterval: false };
 }
 
-/** One queue per loaded client bundle, like `launchRequests`. */
-export const dashboardRequests = createDashboardRequests();
-
-export interface NoticeQueue {
-  post(text: string): void;
-  take(): string | null;
-  peek(): string | null;
-  subscribe(listener: () => void): () => void;
-}
+/** The workspace whose Dashboard the Command Center asked for; one per loaded client bundle, like `launchRequests`. */
+export const dashboardRequests: Slot<string> = createSlot<string>();
 
 /**
  * How a slash command says something back to the user.
@@ -90,42 +78,18 @@ export interface NoticeQueue {
  * "Asked 2 Workers to stop" in the colour of a failure, which is a lie about
  * what happened.
  *
- * So a command posts here and opens the Beads Manager surface, which draws the
- * line as an ordinary notice.
+ * So a command puts its line here and opens the Beads Manager surface, which
+ * draws it as an ordinary notice; tapping it takes it, which hides it.
  */
-export function createNoticeQueue(): NoticeQueue {
-  let pending: string | null = null;
-  const listeners = new Set<() => void>();
-  return {
-    post(text) {
-      pending = text;
-      for (const listener of listeners) listener();
-    },
-    take() {
-      const value = pending;
-      pending = null;
-      return value;
-    },
-    peek: () => pending,
-    subscribe(listener) {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
-  };
-}
+export const launcherNotices: Slot<string> = createSlot<string>();
 
-/** One per loaded client bundle, like the queues above. */
-export const launcherNotices = createNoticeQueue();
-
-/** Body of the workspace Command Center item "Open Beads Dashboard". */
+/** Body of the workspace Command Center item "Open Beads Metric". */
 export function selectDashboardFromCommandCenter(
   context: { workspace: { id: string }; openSurface(id: string): void },
   surfaceId: string,
-  requests: DashboardRequests = dashboardRequests,
+  requests: Slot<string> = dashboardRequests,
 ): void {
-  requests.request(context.workspace.id);
+  requests.put(context.workspace.id);
   context.openSurface(surfaceId);
 }
 

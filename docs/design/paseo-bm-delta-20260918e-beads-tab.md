@@ -3,6 +3,7 @@
 | Trường | Giá trị |
 |---|---|
 | Mã | `design-delta-20260918e-beads-tab` |
+| Errata | 2026-09-18, theo [delta 20260918f](./paseo-bm-delta-20260918f-ui-review.md) §4.12: "màu cả dòng" trong tiêu đề và §1 ý 3 là thiết kế ban đầu; batch `b4` đã chuyển màu sang tên bead (§4.4) |
 | Tài liệu gốc | [Technical Design Dashboard](./paseo-bm-dashboard.md) (surface Beads Manager, màn Metric); [delta 20260916-beads-screen](./paseo-bm-delta-20260916-beads-screen.md) (màn Beads); [delta 20260916-setup-screen](./paseo-bm-delta-20260916-setup-screen.md) (màn Setup); [delta 20260917e](./paseo-bm-delta-20260917e-manager-screen-and-commands.md) §4.1, §4.2, §4.4 (danh sách workspace, thông báo của slash command) |
 | PRD | [prd-delta-20260918e-beads-tab](../product/paseo-bm-prd-delta-20260918e-beads-tab.md) — REQ-060 (a)–(i); quyết định Q1–Q3; Routing Decision ở §0 của tài liệu đó |
 | Plan | [plan-delta-20260918e-beads-tab](../plans/paseo-bm-implementation-plan-delta-20260918e-beads-tab.md) |
@@ -403,8 +404,8 @@ Mỗi kết quả hoàn tác bằng cách revert file của chính nó (bảng f
 | Rủi ro | Giảm nhẹ |
 |---|---|
 | App gốc iOS/Android chưa được đọc trực tiếp; F2 dựa trên bundle web | Owner kiểm trên điện thoại (điều kiện ra của phase). Nếu mobile không hiện mục, đó là giới hạn của Paseo: ghi lại và báo owner, không vá vòng |
-| Tô 0.12 quá nhạt hoặc quá đậm ở một theme | Một hằng số `ROW_TINT_OPACITY`; vạch trái 4 px vẫn cho màu đậm nếu nền quá nhạt |
-| Đỏ cho block, vàng cho đang làm lệch với màu các con số trên dòng workspace (in progress xanh, blocked vàng) | Ngoài phạm vi (PRD delta §7); ghi là gợi ý cho owner |
+| Tô 0.12 quá nhạt hoặc quá đậm ở một theme | Một hằng số `ROW_TINT_OPACITY`; vạch trái 4 px vẫn cho màu đậm nếu nền quá nhạt. *(Errata 2026-09-18: không còn áp dụng — batch `b4` bỏ `ROW_TINT_OPACITY` và vạch trái, §4.4)* |
+| Đỏ cho block, vàng cho đang làm lệch với màu các con số trên dòng workspace (in progress xanh, blocked vàng) | Ngoài phạm vi (PRD delta §7); ghi là gợi ý cho owner. *(Errata 2026-09-18: batch `b5` đã làm, §4.5, REQ-060 n)* |
 | Một Worker khác (`req-20260918T041426Z`) đang sửa cùng repo | Delta này không sửa `chat-cards.ts`, `chat-card.tsx`, `roles/*.md` hay `contracts.ts`. Chạy `git status` trước mỗi bead; file của bead bị sửa ở đoạn khác thì làm tiếp, cùng đoạn thì dừng và hỏi |
 
 ## 9. Câu hỏi mở
@@ -417,13 +418,14 @@ Owner đã xác nhận các điểm Worker chọn thêm ngoài lời owner (Q4�
 - `BeadInline` bỏ đậm nhưng không tô;
 - dòng đầu màn trong tab chỉ còn Refresh;
 - tên và thứ tự mục;
-- độ mờ 0.12 và vạch 4 px;
+- độ mờ 0.12 và vạch 4 px *(errata 2026-09-18: bỏ ở batch `b4`, §4.4)*;
 - dòng phiên bản và dải trạng thái ở màn chính.
 
 ## 10. Revision History
 
 | Ngày | Người | Thay đổi |
 |---|---|---|
+| 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Errata theo [delta 20260918f](./paseo-bm-delta-20260918f-ui-review.md) §4.12: dòng Errata ở bảng đầu (tiêu đề và §1 ý 3 "màu cả dòng"); §8 và §9 ghi `ROW_TINT_OPACITY`, 0.12 / 4 px đã bỏ ở `b4` và màu con số trên dòng workspace đã làm ở `b5`. Không đổi phạm vi |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Batch `b5`: thêm §4.5 (bỏ `activity` của `beadsOverview`; `workspaceStats` đọc tone từ `STATUS_TONE`); §6 thêm ca và đối chứng âm. Status giữ Active |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Batch `b4` (Q8–Q12): thêm §4.4 (màu ở tên, `groupBeads`, `closedBeadsVisibility`, `doneText`, bỏ biểu đồ 14 ngày); §4.3 ghi rõ phần khung dòng bị thay; §6 thêm và sửa ca test, thêm đối chứng âm. Status giữ Active |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Đã implement (WP-260 → WP-263). Ghi thêm cho §6: `test/agent-tree.test.ts` cũng ghim danh sách panel đăng ký và nay có `bm-beads`. Status giữ Active |

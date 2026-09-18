@@ -46,7 +46,6 @@ import {
   showsQuestions,
   startsOpen,
   stillWaiting,
-  visibleBeads,
   statusChip,
   summaryOf,
   questionHeading,
@@ -131,7 +130,6 @@ export function ChatCardView({ theme, layout, agentId, item, timestamp }: Plugin
   const canReply = counterpart.id !== null && counterpart.id !== agentId;
   const controls = replyControls(canReply, replyAt !== null || how !== null);
   const beadIds = useMemo(() => beadIdCandidates(card.text), [card.text]);
-  const beads = visibleBeads(beadIds, beadsOpen);
   const workspaceId = peers.data?.workspaceId ?? null;
 
   // Not a paseo-bm chat, or a block this agent only quoted: plain text, no card.
@@ -199,7 +197,9 @@ export function ChatCardView({ theme, layout, agentId, item, timestamp }: Plugin
   // off, and the card says why. A running recipient is not a reason: the user
   // may prepare answers while it works; Send refuses at send time.
   const target = peers.isSuccess ? replyTarget(card, peers.data.owner, peers.data.peers) : null;
-  const unreachable = canReply ? null : target !== null && "reason" in target ? target.reason : "Cannot tell who to send this to.";
+  // The question form draws only once peers are known, and with no one to reply
+  // to `replyTarget` always gives its reason, so there is no other case to word.
+  const unreachable = canReply || target === null || !("reason" in target) ? null : target.reason;
 
   return (
     <View style={[styles.card, { gap: 6, marginVertical: 4 }, outline === null ? null : { borderColor: toneColor(theme, outline) }]}>
@@ -239,21 +239,14 @@ export function ChatCardView({ theme, layout, agentId, item, timestamp }: Plugin
       </View>
 
       {workspaceId === null || beadIds.length === 0 ? null : (
-        <View style={{ gap: 4 }}>
-          <BeadChips workspaceId={workspaceId} ids={beads.shown} styles={styles} theme={theme} />
-          {/* Two chips, then "…" on the next line for the rest (delta 20260918d §4.7). */}
-          {beads.hidden === 0 ? null : (
-            <View style={styles.chipRow}>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={`Show all ${beadIds.length} beads`}
-                onPress={() => setBeadsOpen(true)}
-              >
-                <Chip badge={{ text: "…", tone: "muted" }} styles={styles} theme={theme} />
-              </Pressable>
-            </View>
-          )}
-        </View>
+        <BeadChips
+          workspaceId={workspaceId}
+          ids={beadIds}
+          expanded={beadsOpen}
+          onExpand={() => setBeadsOpen(true)}
+          styles={styles}
+          theme={theme}
+        />
       )}
 
       {peers.isSuccess && showsQuestions(card, peers.data.owner) ? (

@@ -42,6 +42,8 @@
 
 ### 4.1 Thứ tự ghim bằng kéo-thả (mục 1)
 
+> **Đã gỡ** (2026-09-18, hieu.nt10, soạn bởi Beads Worker): ghim, kéo-thả và RPC `launcher.order.*` bị gỡ bởi [delta 20260918f](./paseo-bm-delta-20260918f-ui-review.md) §4.5, owner chốt Q11 c và duyệt [prd-delta-20260918f-remove-pinning](../product/paseo-bm-prd-delta-20260918f-remove-pinning.md) (Q14 a). Danh sách Workspaces xếp theo hoạt động gần nhất. File `launcher-order.json` đã có trên máy không bị đọc hay xoá.
+
 **Hành vi.** Nhấn giữ một dòng để nhấc lên, kéo tới chỗ muốn, thả. Dòng vừa thả trở thành **đã ghim** và nằm ở đúng vị trí đó. Danh sách chia hai khối: khối ghim ở trên theo thứ tự owner đặt, khối còn lại ở dưới theo `activity_at desc` như hiện nay. Mỗi dòng đã ghim có một nút bỏ ghim; bỏ ghim thì nó rơi về khối dưới.
 
 **Lưu ở đâu.** Một file JSON trong install home: `<install home>/ui/launcher-order.json`, hình dạng `{ "schemaVersion": 1, "pinned": ["wks_…", "wks_…"] }`. Ghi qua đường đã có của kho vết (`install-home.ts` + bộ kiểm no-follow và mutex ở `trace-store.ts` §3.8), không mở đường ghi mới.

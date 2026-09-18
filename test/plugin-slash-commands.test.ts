@@ -212,7 +212,7 @@ describe("/bm-worker-new", () => {
     expect(launchRequests.take()).toBe("ws-1");
   });
 
-  it("does not reword, prefix or truncate a real request", async () => {
+  it("sends the request verbatim after the BM-NEW-REQUEST line: not reworded or truncated", async () => {
     const request = "Fix the login bug: 5 wrong passwords should lock the account for 15m.";
     const { context, sent } = commandContext(request);
 

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { allNodes, pressables, renderTree, textOf, texts, type RNode } from "./helpers/element-tree";
 import serverContribute from "../plugin/index.server";
 import { agentsListRpc, type AgentNode, type RoleDescriptor } from "../plugin/shared/contracts";
 import type { AgentDirectoryPaseo, ListedAgentSnapshot } from "../plugin/server/manager";
@@ -55,69 +56,6 @@ const chatBeadsPath = "../plugin/client/bead-chips.tsx";
 const { ChatBeadsPanel } = (await import(chatBeadsPath)) as { ChatBeadsPanel: unknown };
 const beadsTabPath = "../plugin/client/beads-tab.tsx";
 const { BeadsTabPanel } = (await import(beadsTabPath)) as { BeadsTabPanel: unknown };
-
-// --- minimal element-tree renderer ------------------------------------------
-
-interface RNode {
-  type: string;
-  props: Record<string, unknown>;
-  children: Array<RNode | string>;
-}
-
-interface ElementLike {
-  type: unknown;
-  props: Record<string, unknown> & { children?: unknown };
-}
-
-function isElement(value: unknown): value is ElementLike {
-  return typeof value === "object" && value !== null && "type" in value && "props" in value;
-}
-
-function renderTree(value: unknown): Array<RNode | string> {
-  if (value === null || value === undefined || typeof value === "boolean") return [];
-  if (typeof value === "string" || typeof value === "number") return [String(value)];
-  if (Array.isArray(value)) return value.flatMap(renderTree);
-  if (!isElement(value)) throw new Error(`unexpected render value: ${String(value)}`);
-  const { type, props } = value;
-  if (typeof type === "function") {
-    const primitive = type as { primitive?: boolean; displayName?: string };
-    if (primitive.primitive) {
-      const { children, ...rest } = props;
-      return [{ type: primitive.displayName!, props: rest, children: renderTree(children) }];
-    }
-    return renderTree((type as (p: unknown) => unknown)(props));
-  }
-  if (typeof type === "symbol") return renderTree(props.children); // Fragment
-  throw new Error(`host element <${String(type)}> rendered; only React Native primitives are allowed`);
-}
-
-function walk(nodes: Array<RNode | string>, visit: (node: RNode) => void) {
-  for (const node of nodes) {
-    if (typeof node === "string") continue;
-    visit(node);
-    walk(node.children, visit);
-  }
-}
-
-function allNodes(nodes: Array<RNode | string>): RNode[] {
-  const out: RNode[] = [];
-  walk(nodes, (node) => out.push(node));
-  return out;
-}
-
-function textOf(node: RNode | string): string {
-  return typeof node === "string" ? node : node.children.map(textOf).join("");
-}
-
-function texts(nodes: Array<RNode | string>): string[] {
-  return allNodes(nodes)
-    .filter((node) => node.type === "Text")
-    .map(textOf);
-}
-
-function pressables(nodes: Array<RNode | string>): RNode[] {
-  return allNodes(nodes).filter((node) => node.type === "Pressable");
-}
 
 // --- fixtures ----------------------------------------------------------------
 

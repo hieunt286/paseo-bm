@@ -21,12 +21,12 @@ import { dashboardStyles } from "./dashboard-model";
 import { BEADS_TAB_VIEWS, DEFAULT_BEADS_TAB_VIEW, type BeadsTabView } from "./dashboard-view";
 
 export function BeadsTabPanel(props: PluginWorkspacePanelProps) {
-  const { theme, layout, workspaceId } = props;
+  const { theme, layout } = props;
   const styles = useMemo(() => dashboardStyles(theme, layout.compact), [theme, layout.compact]);
   // Lives as long as this tab: a reload opens on Beads again (PRD delta §6).
   const [view, setView] = useState<BeadsTabView>(DEFAULT_BEADS_TAB_VIEW);
   // The same outer padding as the screens below, so the row lines up with them.
-  const padding = layout.compact ? 12 : 24;
+  const padding = styles.content.padding;
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
@@ -48,9 +48,9 @@ export function BeadsTabPanel(props: PluginWorkspacePanelProps) {
       </View>
       <View style={{ flex: 1 }}>
         {view === "beads" ? (
-          <BeadsScreen {...props} workspaceId={workspaceId} />
+          <BeadsScreen {...props} />
         ) : (
-          <DashboardPanel {...props} workspaceId={workspaceId} />
+          <DashboardPanel {...props} />
         )}
       </View>
     </View>

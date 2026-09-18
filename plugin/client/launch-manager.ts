@@ -15,9 +15,13 @@
  *   and `openSurface(id)`, but no way to open an agent.
  * So the Command Center item queues its workspace with `selectFromCommandCenter`
  * and opens the surface, which runs the launch; opened from the sidebar the
- * surface lets the user pick the workspace.
+ * surface shows Setup, and its Workspaces list opens a workspace's Manager.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
+import type { z } from "zod";
+import type { managerEnsureRpc } from "../shared/contracts";
+import type { Tone } from "./dashboard-model";
+import { createSlot, type Slot } from "./slot";
 
 /** Surface id shared by the sidebar item and the Command Center item. */
 export const LAUNCHER_SURFACE_ID = "beads-manager";
@@ -29,13 +33,8 @@ export const LAUNCHER_ICON = "Bot";
 // Launch controller.
 // ---------------------------------------------------------------------------
 
-export interface EnsureManagerOutput {
-  agentId: string;
-  created: boolean;
-  otherManagerIds: string[];
-  /** Why an existing Manager was not switched to its mode (delta 20260918 §4.1); absent from an older server. */
-  modeNotice?: string | null;
-}
+/** What `manager.ensure` answers, as its contract says (delta 20260918f S6). */
+export type EnsureManagerOutput = z.infer<typeof managerEnsureRpc.output>;
 
 export interface LaunchDeps {
   /** Calls the `manager.ensure` RPC. */
@@ -134,59 +133,34 @@ export function createManagerLauncher(): ManagerLauncher {
 // Hand-off from the Command Center item to the surface.
 // ---------------------------------------------------------------------------
 
-export interface LaunchRequests {
-  /** Records the workspace a Command Center selection asked for. */
-  request(workspaceId: string): void;
-  /** Returns and clears the pending request. */
-  take(): string | null;
-  subscribe(listener: () => void): () => void;
-}
-
-export function createLaunchRequests(): LaunchRequests {
-  let pending: string | null = null;
-  const listeners = new Set<() => void>();
-  return {
-    request(workspaceId) {
-      pending = workspaceId;
-      for (const listener of listeners) listener();
-    },
-    take() {
-      const value = pending;
-      pending = null;
-      return value;
-    },
-    subscribe(listener) {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
-  };
-}
-
 /** One launcher and one request queue per loaded client bundle. */
 export const managerLauncher = createManagerLauncher();
-export const launchRequests = createLaunchRequests();
+/** The workspace a Command Center selection asked for; the surface takes it. */
+export const launchRequests: Slot<string> = createSlot<string>();
 
 /** Body of the workspace Command Center item. */
 export function selectFromCommandCenter(
   context: { workspace: { id: string }; openSurface(id: string): void },
-  requests: LaunchRequests = launchRequests,
+  requests: Slot<string> = launchRequests,
 ): void {
-  requests.request(context.workspace.id);
+  requests.put(context.workspace.id);
   context.openSurface(LAUNCHER_SURFACE_ID);
 }
 
 /**
  * Runs the pending Command Center request, if any. Without `openAgent` (older
- * Paseo hosts) the request stays queued and nothing is called.
+ * Paseo hosts) the request stays queued and nothing is called. While another
+ * launch is pending it stays queued too: taking it now would only get "busy"
+ * back and lose it. The surface runs this again when the launcher's state
+ * changes.
  */
 export async function runPendingRequest(
-  requests: LaunchRequests,
+  requests: Slot<string>,
   launcher: ManagerLauncher,
   deps: Pick<LaunchDeps, "ensure"> & { openAgent?: LaunchDeps["openAgent"] },
 ): Promise<LaunchOutcome | null> {
   if (!deps.openAgent) return null;
+  if (launcher.getState().status === "pending") return null;
   const workspaceId = requests.take();
   if (workspaceId === null) return null;
   return launcher.launch(workspaceId, { ensure: deps.ensure, openAgent: deps.openAgent });
@@ -196,7 +170,8 @@ export async function runPendingRequest(
 // Presentation: user-facing text (English) and styles from theme.colors.
 // ---------------------------------------------------------------------------
 
-export type NoticeTone = "muted" | "warning" | "danger";
+/** The tones a launcher notice uses; colours come from `toneColor` in `dashboard-model.ts`. */
+export type NoticeTone = Extract<Tone, "muted" | "warning" | "danger">;
 
 export interface LauncherNotice {
   tone: NoticeTone;
@@ -277,17 +252,6 @@ export function launcherStatusLines(input: {
     lines.push({ key: `launch-${index}`, text: notice.text, tone: notice.tone, dismissable: false });
   });
   return lines;
-}
-
-export function toneColor(theme: PluginTheme, tone: NoticeTone): string {
-  switch (tone) {
-    case "muted":
-      return theme.colors.foregroundMuted;
-    case "warning":
-      return theme.colors.statusWarning;
-    case "danger":
-      return theme.colors.statusDanger;
-  }
 }
 
 export function launcherStyles(theme: PluginTheme, compact: boolean) {

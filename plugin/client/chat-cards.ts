@@ -15,7 +15,8 @@ import { z } from "zod";
 import { looksLikeReport, parseReports, parseReviews, requestIdFromText } from "../shared/bm-report";
 import { answersText, parseQuestions, type Pick, type Question } from "../shared/bm-questions";
 import { checkBlocks, issueText } from "../shared/bm-format";
-import type { ChatPeer, WaitingWorker } from "../shared/contracts";
+import type { BeadRow, ChatPeer, WaitingWorker } from "../shared/contracts";
+import { soleWorkerOf } from "../shared/sole-worker";
 import type { Badge, GraphNode } from "./dashboard-model";
 import { errorMessageOf } from "./launch-manager";
 
@@ -187,7 +188,11 @@ export function partiesOf(card: ChatCard, owner: ChatPeer | null, peers: readonl
   const self = owner === null ? party(undefined, null) : party(owner, ownerRole);
   const byId = (id: string | null) => (id === null ? undefined : peers.find((peer) => peer.id === id));
   const ofRole = (role: ChatRole) => peers.filter((peer) => peer.role === role);
+  // The one live Worker of the request (the rule `chat.waiting` uses too); an
+  // old card of a Worker that has since been archived keeps its name
+  // (delta 20260918f F12).
   const workerOf = (requestId: string | null) =>
+    soleWorkerOf(peers, requestId) ??
     only(ofRole("worker").filter((peer) => requestId !== null && peer.requestId === requestId));
   const manager = () => {
     const parent = byId(owner?.parentId ?? null);
@@ -554,10 +559,20 @@ export function answeredHow(input: {
 /** How many related-bead chips a card shows before folding the rest behind "…". */
 export const BEAD_CHIPS_SHOWN = 2;
 
-/** The bead ids a card shows, and how many are folded behind the "…" chip. */
-export function visibleBeads(ids: readonly string[], expanded: boolean): { shown: string[]; hidden: number } {
-  if (expanded || ids.length <= BEAD_CHIPS_SHOWN) return { shown: [...ids], hidden: 0 };
-  return { shown: ids.slice(0, BEAD_CHIPS_SHOWN), hidden: ids.length - BEAD_CHIPS_SHOWN };
+/** The items a card shows, and how many are folded behind the "…" chip. */
+export function visibleBeads<T>(items: readonly T[], expanded: boolean): { shown: T[]; hidden: number } {
+  if (expanded || items.length <= BEAD_CHIPS_SHOWN) return { shown: [...items], hidden: 0 };
+  return { shown: items.slice(0, BEAD_CHIPS_SHOWN), hidden: items.length - BEAD_CHIPS_SHOWN };
+}
+
+/**
+ * The chips of a card's related beads: the first two beads the store REALLY
+ * has, and how many more it has (delta 20260918f F10). Folding must come after
+ * the lookup: the candidates are only a shape test, so `BM-REPORT`,
+ * `BM-QUESTIONS` or `local-first` come first and would take the two places.
+ */
+export function beadChipsView(found: readonly BeadRow[], expanded: boolean): { shown: BeadRow[]; hidden: number } {
+  return visibleBeads(found, expanded);
 }
 
 /**
@@ -594,6 +609,8 @@ export function replyTarget(card: ChatCard, owner: ChatPeer | null, peers: reado
   }
   if (owner !== null && peer.id === owner.id) return { reason: "This is your own message." };
   const name = partyName({ role: counterpart.role, id: peer.id, title: peer.title });
+  // Paseo brings an archived agent back when it gets a message (ADR-005).
+  if (peer.archived) return { reason: `${name} is archived.` };
   if (peer.status === "idle" || peer.status === "error") return { peer };
   if (peer.status === "running" || peer.status === "initializing") {
     return { reason: `${name} is working; a message now would replace its turn. Send when it stops.` };

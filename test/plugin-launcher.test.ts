@@ -4,10 +4,10 @@ import { fileURLToPath } from "node:url";
 import type { ManagerAgentHandle, ManagerAgentSnapshot, ManagerPaseo } from "../plugin/server/manager";
 import serverContribute from "../plugin/index.server";
 import { managerEnsureRpc } from "../plugin/shared/contracts";
+import { createSlot } from "../plugin/client/slot";
 import {
   LAUNCHER_ICON,
   LAUNCHER_SURFACE_ID,
-  createLaunchRequests,
   createManagerLauncher,
   OLD_HOST_WARNING,
   describeLauncherState,
@@ -17,9 +17,9 @@ import {
   launcherStyles,
   runPendingRequest,
   selectFromCommandCenter,
-  toneColor,
   type EnsureManagerOutput,
 } from "../plugin/client/launch-manager";
+import { toneColor } from "../plugin/client/dashboard-model";
 
 /**
  * WP-113 launcher: sidebar item + Command Center item -> `manager.ensure` -> open agent.
@@ -223,7 +223,7 @@ describe("client entry registrations", () => {
     expect(fake.sidebarItems).toEqual([
       { id: LAUNCHER_SURFACE_ID, title: "Beads Manager", icon: "Bot", surface: LAUNCHER_SURFACE_ID },
     ]);
-    // Two now: "Open Beads Manager" (WP-113) and "Open Beads Dashboard" (WP-211).
+    // Two now: "Open Beads Manager" (WP-113) and "Open Beads Metric" (WP-211).
     expect(fake.commandItems).toHaveLength(2);
     expect(fake.commandItems.map((item) => item.id)).toEqual([
       "open-beads-manager",
@@ -291,7 +291,7 @@ describe("full path: select -> manager.ensure (real handler) -> open agent", () 
     const openAgent = (input: { agentId: string }) => {
       opened.push(input.agentId);
     };
-    const requests = createLaunchRequests();
+    const requests = createSlot<string>();
     const launcher = createManagerLauncher();
     const openSurface = vi.fn();
     const select = () => selectFromCommandCenter({ workspace: { id: WS }, openSurface }, requests);
@@ -331,9 +331,9 @@ describe("full path: select -> manager.ensure (real handler) -> open agent", () 
   });
 
   it("does not run a queued request on a host without navigation.openAgent", async () => {
-    const requests = createLaunchRequests();
+    const requests = createSlot<string>();
     const ensure = vi.fn();
-    requests.request(WS);
+    requests.put(WS);
     expect(await runPendingRequest(requests, createManagerLauncher(), { ensure })).toBeNull();
     expect(ensure).not.toHaveBeenCalled();
   });
@@ -357,10 +357,36 @@ describe("pending and error states", () => {
     expect(ensure).toHaveBeenCalledTimes(1);
     expect(openAgent).not.toHaveBeenCalled();
 
-    resolve({ agentId: "mgr-1", created: false, otherManagerIds: [] });
+    resolve({ agentId: "mgr-1", created: false, otherManagerIds: [], modeNotice: null });
     expect(await first).toBe("opened");
     expect(openAgent).toHaveBeenCalledTimes(1);
     expect(seen).toEqual(["pending", "opened"]);
+  });
+
+  it("keeps a request that arrives while a launch is pending, and runs it once that launch ends (delta 20260918f F2)", async () => {
+    let resolve!: (value: EnsureManagerOutput) => void;
+    const ensure = vi.fn(
+      (input: { workspaceId: string }) =>
+        input.workspaceId === WS
+          ? new Promise<EnsureManagerOutput>((r) => (resolve = r))
+          : Promise.resolve({ agentId: "mgr-2", created: false, otherManagerIds: [], modeNotice: null }),
+    );
+    const openAgent = vi.fn();
+    const launcher = createManagerLauncher();
+    const requests = createSlot<string>();
+
+    const first = launcher.launch(WS, { ensure, openAgent });
+    requests.put("ws-2");
+    // Pending: the request must stay queued, not be taken and answered "busy".
+    expect(await runPendingRequest(requests, launcher, { ensure, openAgent })).toBeNull();
+    expect(requests.peek()).toBe("ws-2");
+
+    resolve({ agentId: "mgr-1", created: false, otherManagerIds: [], modeNotice: null });
+    expect(await first).toBe("opened");
+    expect(await runPendingRequest(requests, launcher, { ensure, openAgent })).toBe("opened");
+    expect(ensure).toHaveBeenLastCalledWith({ workspaceId: "ws-2" });
+    expect(openAgent).toHaveBeenLastCalledWith({ agentId: "mgr-2" });
+    expect(requests.peek()).toBeNull();
   });
 
   it("shows the server's error code and opens nothing when manager.ensure fails", async () => {
@@ -461,7 +487,9 @@ describe("pending and error states", () => {
     const launcher = createManagerLauncher();
 
     await launcher.launch(WS, {
-      ensure: async () => ({ agentId: "mgr-1", created: true, otherManagerIds: [], ...extra }),
+      // `as`: the contract makes modeNotice required, but the launcher still copes
+      // with a server that leaves it out.
+      ensure: async () => ({ agentId: "mgr-1", created: true, otherManagerIds: [], ...extra }) as EnsureManagerOutput,
       openAgent: () => {},
     });
 
@@ -556,5 +584,21 @@ describe("the status strip on the main screen and the workspace list (delta 2026
     expect(source).toMatch(/<SetupScreen\b.*\bstatus=\{status\}/);
     const listBranch = source.slice(source.indexOf("<ScrollView style={styles.screen}"));
     expect(listBranch).toMatch(/^\s*\{status\}\s*$/m);
+  });
+});
+
+describe("the workspace list order (delta 20260918f §4.5: pinning removed)", () => {
+  const launcher = readFileSync(fileURLToPath(new URL("../plugin/client/launcher.tsx", import.meta.url)), "utf8");
+
+  it("renders workspaces.data in the order it arrives (most recent activity first), with no pinning", () => {
+    expect(launcher).toMatch(/sort: \[\{ key: "activity_at", direction: "desc" \}\]/);
+    expect(launcher).toMatch(/\{\(workspaces\.data \?\? \[\]\)\.map\(\(workspace\) =>/);
+    expect(launcher).not.toMatch(/orderRows|pinnedOrder|savePinned|PinControls|DragHandle|PanResponder/);
+  });
+
+  it("never asks for the native driver", () => {
+    // Paseo's renderer is react-native-web, which has none (P3). Moved here
+    // from the removed pinning tests: the running dot animates too.
+    expect(launcher).not.toMatch(/useNativeDriver: true/);
   });
 });

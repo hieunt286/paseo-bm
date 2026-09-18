@@ -22,7 +22,6 @@ import { inferWorkflowSteps } from "./workflow-steps";
 import { mergeExtras, readLiveExtras } from "./live-timeline";
 import { getBeadDetail, listBeadRows, runBeadAction, type BeadActionPaseo } from "./bead-actions";
 import { beadWorkOf } from "./bead-work";
-import { readLauncherOrder, writeLauncherOrder } from "./launcher-order";
 import { readAnswerMarks, writeAnswerMark } from "./answer-marks";
 import { stopAllInWorkspace, type StopPaseo } from "./stop-propagation";
 import {
@@ -54,8 +53,6 @@ import {
   beadsGetRpc,
   beadsActionRpc,
   workspacesOverviewRpc,
-  launcherOrderGetRpc,
-  launcherOrderSetRpc,
   answersMarkRpc,
   answersMarksRpc,
   agentsStopAllRpc,
@@ -454,25 +451,6 @@ export async function handleAgentsStopAll(
   return stopAllInWorkspace(paseo, input.workspaceId);
 }
 
-/** `launcher.order.get` handler: the order the owner pinned. Read-only. */
-export async function handleLauncherOrderGet(
-  paseo: DashboardPaseo,
-  deps: { homedir?: () => string } = {},
-): Promise<{ pinned: string[]; notices: string[] }> {
-  const { pinned, notices } = readLauncherOrder(await requireLocation(paseo, deps));
-  return { pinned, notices };
-}
-
-/** `launcher.order.set` handler: replaces the pinned order. */
-export async function handleLauncherOrderSet(
-  input: { pinned: string[] },
-  paseo: DashboardPaseo,
-  deps: { homedir?: () => string } = {},
-): Promise<{ pinned: string[]; notices: string[] }> {
-  const { pinned, notices } = writeLauncherOrder(await requireLocation(paseo, deps), input.pinned);
-  return { pinned, notices };
-}
-
 /** `answers.marks` handler: the cards marked as answered (delta 20260918d §4.9). */
 export async function handleAnswerMarksGet(
   paseo: DashboardPaseo,
@@ -606,8 +584,6 @@ export function registerDashboardRpcs(
   server.handle(beadsListRpc, (input, context) => handleBeadsList(input, sdk(context)));
   server.handle(beadsGetRpc, (input, context) => handleBeadsGet(input, sdk(context)));
   server.handle(workspacesOverviewRpc, (_input, context) => handleWorkspacesOverview(sdk(context)));
-  server.handle(launcherOrderGetRpc, (_input, context) => handleLauncherOrderGet(sdk(context)));
-  server.handle(launcherOrderSetRpc, (input, context) => handleLauncherOrderSet(input, sdk(context)));
   server.handle(answersMarksRpc, (_input, context) => handleAnswerMarksGet(sdk(context)));
   server.handle(answersMarkRpc, (input, context) => handleAnswerMarkSet(input, sdk(context)));
   server.handle(agentsStopAllRpc, (input, context) => handleAgentsStopAll(input, context.paseo as StopPaseo));
