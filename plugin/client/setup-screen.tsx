@@ -3,13 +3,17 @@
  * additional instructions per role with a full preview, the agent skills with
  * a Test button, and the beads tools `br` / `bv` with a confirmed Install.
  *
+ * It is the surface's MAIN screen (owner decision Q1, delta 20260918e §4.2):
+ * no back button, and a "Workspaces" button to the workspace list. The surface
+ * hands it the status strip, so what a slash command reported is seen here.
+ *
  * Wording lives in `setup-model.ts`. Client rules: React Native primitives
  * only, colours from the theme, no Node import, no `server/` import.
  */
 import { type PluginSurfaceProps, useRpc } from "@getpaseo/plugin/client";
 import { copyText } from "@getpaseo/plugin/client/react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import {
   rolesInstructionsRpc,
@@ -31,9 +35,12 @@ import {
   type SetupRole,
 } from "./setup-model";
 import { Chip, RoleMark, type Styles, type Theme } from "./ui";
+import { PLUGIN_VERSION } from "../shared/version";
 
 export interface SetupScreenProps extends PluginSurfaceProps {
-  onBack: () => void;
+  onOpenWorkspaces: () => void;
+  /** The surface's status strip (slash-command notice, launch state), drawn under the header. */
+  status?: ReactNode;
 }
 
 function CopyButton({ text, styles }: { text: string; styles: Styles }) {
@@ -245,7 +252,7 @@ function ToolCard({ tool, styles, theme, onInstalled }: {
   );
 }
 
-export function SetupScreen({ theme, layout, onBack }: SetupScreenProps) {
+export function SetupScreen({ theme, layout, onOpenWorkspaces, status: statusStrip }: SetupScreenProps) {
   const styles = useMemo(() => dashboardStyles(theme, layout.compact), [theme, layout.compact]);
   const getStatus = useRpc(setupStatusRpc);
   const status = useQuery({ queryKey: ["paseo-bm", "setup", "status"], queryFn: () => getStatus({}) });
@@ -255,11 +262,20 @@ export function SetupScreen({ theme, layout, onBack }: SetupScreenProps) {
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-        <Pressable accessibilityRole="button" accessibilityLabel="Back" onPress={onBack} style={styles.secondaryButton}>
-          <Text style={styles.secondaryButtonText}>←</Text>
+        <Text style={[styles.title, { flex: 1 }]} numberOfLines={1}>
+          Beads Manager
+        </Text>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Open the workspace list: Beads Manager, metrics and beads of each workspace"
+          onPress={onOpenWorkspaces}
+          style={styles.secondaryButton}
+        >
+          <Text style={styles.secondaryButtonText}>Workspaces</Text>
         </Pressable>
-        <Text style={[styles.title, { flex: 1 }]}>Setup</Text>
       </View>
+      <Text style={styles.body}>Setup for this machine: beads tools, agent skills and extra instructions for each role.</Text>
+      {statusStrip}
       {status.isPending ? <ActivityIndicator color={styles.spinner.color} /> : null}
       {status.isError ? (
         <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{errorMessageOf(status.error)}</Text>
@@ -309,6 +325,8 @@ export function SetupScreen({ theme, layout, onBack }: SetupScreenProps) {
       {SETUP_ROLES.map((entry) => (
         <RoleCard key={entry.role} {...entry} styles={styles} theme={theme} compact={layout.compact} />
       ))}
+
+      <Text style={[styles.body, { fontSize: 11 }]}>{`paseo-bm ${PLUGIN_VERSION}`}</Text>
     </ScrollView>
   );
 }

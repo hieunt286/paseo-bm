@@ -11,6 +11,8 @@
 | Thiết kế | [design-delta-20260918c-question-cards](../design/paseo-bm-delta-20260918c-question-cards.md) |
 | Plan | [plan-delta-20260918c-question-cards](../plans/paseo-bm-implementation-plan-delta-20260918c-question-cards.md) |
 
+> **Đã được thay một phần:** REQ-059 (b)–(f) được sửa bởi [prd-delta-20260918d-card-replies](paseo-bm-prd-delta-20260918d-card-replies.md) (2026-09-18) — Manager không nhắc lại thẻ, câu trả lời đi qua ô Reply, thẻ câu hỏi trình bày lại.
+
 ## 0. Routing Decision
 
 - Variant preset: brownfield
@@ -193,6 +195,7 @@ Hệ quả:
 
 | Ngày | Người | Thay đổi |
 |---|---|---|
+| 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Thêm dòng trỏ: REQ-059 (b)–(f) được sửa bởi delta `prd-delta-20260918d-card-replies`. Không đổi nội dung nào khác |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Batch `b4`: quyết định Q49–Q51 (§1.3); thêm ý (b′) về dòng tóm tắt |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Áp vào PRD gốc (REQ-059) và trỏ từ delta chat-cards §8; Status → Accepted, Applied |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Owner xác nhận Q45–Q48 (§1.2); Status → Accepted |

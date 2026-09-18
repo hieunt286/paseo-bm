@@ -160,10 +160,27 @@ export async function profileModeOf(
 }
 
 /**
+ * The last mode list read successfully per provider in this plugin run, and
+ * when (delta 20260918g §4.9): the Worker's Runtime facts fall back on it when
+ * a lookup fails.
+ */
+const lastModes = new Map<string, { modes: ProviderMode[]; at: string }>();
+
+/** The last list `modesFor` read for `provider` in this run, or null. */
+export function lastModesOf(provider: string): { modes: ProviderMode[]; at: string } | null {
+  return lastModes.get(provider) ?? null;
+}
+
+/** Forgets every remembered list; for tests. */
+export function forgetModes(): void {
+  lastModes.clear();
+}
+
+/**
  * The provider's modes, or `null` when they cannot be read. Every `null` is
  * logged: a silent miss would leave a Reviewer in the full-access mode it
  * inherits from a no-prompt Worker, or a Manager without the Worker mode it
- * must pass.
+ * must pass. A list that was read is remembered (`lastModesOf`).
  */
 export async function modesFor(
   paseo: unknown,
@@ -192,6 +209,7 @@ export async function modesFor(
       log(`[paseo-bm] could not read the modes of ${provider} (${reason}); its mode is left to its creator.`);
       return null;
     }
+    lastModes.set(provider, { modes, at: new Date().toISOString() });
     return modes;
   } catch (error) {
     log(`[paseo-bm] could not read the modes of ${provider} (${error instanceof Error ? error.message : String(error)}); its mode is left to its creator.`);

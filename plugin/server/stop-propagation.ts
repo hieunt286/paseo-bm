@@ -1,6 +1,7 @@
 import type { PluginLifecycleEvents, PluginServerContext } from "@getpaseo/plugin/server";
-import { MANAGER_ROLE_LABEL, PARENT_AGENT_LABEL } from "./manager";
+import { PARENT_AGENT_LABEL } from "./manager";
 import { REVIEWER_STOP_NOTICE_PREFIX, WORKER_STOP_NOTICE } from "./notices";
+import { listAllAgents, roleOfAgent } from "./agent-role";
 import { providerId } from "./provider-id";
 
 /**
@@ -48,9 +49,6 @@ export const STOP_RECHECK_MS = 500;
 export const REVIEWER_STOP_NOTICE =
   `${REVIEWER_STOP_NOTICE_PREFIX} by the user. Stop this review now: do not read files, run commands or call any tool; reply with the single line "BM-REVIEW STOPPED" and end your turn.`;
 
-/** Largest page the daemon directory query accepts (protocol: `limit.max(200)`). */
-const LIST_PAGE_LIMIT = 200;
-
 const LOG_PREFIX = "[paseo-bm] stop propagation:";
 
 // ---------------------------------------------------------------------------
@@ -64,6 +62,8 @@ export interface StopAgentSnapshot {
   workspaceId?: string;
   status: string;
   labels: Record<string, string>;
+  /** Provider selection; decides the role when the `bm.role` label is missing (delta 20260918g). */
+  provider?: string;
   archivedAt?: string | null;
 }
 
@@ -75,7 +75,7 @@ export interface StopAgentHandle {
 export interface StopPaseo {
   agents: {
     list(options: {
-      filter: { labels: Record<string, string>; includeArchived: boolean };
+      filter: { labels?: Record<string, string>; includeArchived: boolean };
       page: { limit: number; cursor?: string };
     }): Promise<{
       entries: Array<{ agent: StopAgentSnapshot }>;
@@ -137,7 +137,8 @@ function isRunningReviewerOf(
   const labels = agent.labels ?? {};
   return (
     labels[PARENT_AGENT_LABEL] === workerId &&
-    labels[MANAGER_ROLE_LABEL] === REVIEWER_ROLE_VALUE &&
+    // By label, or by the bm-reviewer provider when the label is missing (delta 20260918g §4.2).
+    roleOfAgent(agent)?.role === REVIEWER_ROLE_VALUE &&
     !agent.archivedAt &&
     agent.status === "running" &&
     (workspaceId === null || agent.workspaceId === workspaceId)
@@ -155,23 +156,13 @@ async function listRunningReviewers(
   workerId: string,
   workspaceId: string | null,
 ): Promise<StopAgentSnapshot[]> {
-  const found: StopAgentSnapshot[] = [];
-  let cursor: string | undefined;
-  for (;;) {
-    const page = await paseo.agents.list({
-      filter: {
-        labels: { [PARENT_AGENT_LABEL]: workerId, [MANAGER_ROLE_LABEL]: REVIEWER_ROLE_VALUE },
-        includeArchived: false,
-      },
-      page: cursor === undefined ? { limit: LIST_PAGE_LIMIT } : { limit: LIST_PAGE_LIMIT, cursor },
-    });
-    for (const { agent } of page.entries) {
-      if (isRunningReviewerOf(agent, workerId, workspaceId)) found.push(agent);
-    }
-    if (!page.pageInfo.hasMore || !page.pageInfo.nextCursor) break;
-    cursor = page.pageInfo.nextCursor;
-  }
-  return found;
+  // Filtered on the parent only: a Reviewer without the bm.role label is still
+  // a Reviewer when its provider is bm-reviewer (delta 20260918g §4.2).
+  const children = await listAllAgents((options) => paseo.agents.list(options), {
+    labels: { [PARENT_AGENT_LABEL]: workerId },
+    includeArchived: false,
+  });
+  return children.filter((agent) => isRunningReviewerOf(agent, workerId, workspaceId));
 }
 
 /**
@@ -289,29 +280,17 @@ export interface StopAllResult {
 /**
  * Every non-archived agent of one role in one workspace, walking all pages.
  *
- * The role label is re-checked here even though it is in the filter. The daemon
- * is the only thing that applies that filter, and a filter that silently
- * matched too much would send stop notices to agents this command never
- * promised to touch — the Manager above all.
+ * Listed with no label filter and decided by `roleOfAgent` (delta 20260918g
+ * §4.2): a Worker or Reviewer started without the bm.role label is found by its
+ * provider. The role is decided per agent here, never by the daemon's filter, so
+ * nothing this command never promised to touch — the Manager above all — can
+ * slip in: a Manager's role is `manager` by label and by provider alike.
  */
 async function listByRole(paseo: StopPaseo, role: string, workspaceId: string): Promise<StopAgentSnapshot[]> {
-  const found: StopAgentSnapshot[] = [];
-  let cursor: string | undefined;
-  for (;;) {
-    const page = await paseo.agents.list({
-      filter: { labels: { [MANAGER_ROLE_LABEL]: role }, includeArchived: false },
-      page: cursor === undefined ? { limit: LIST_PAGE_LIMIT } : { limit: LIST_PAGE_LIMIT, cursor },
-    });
-    for (const { agent } of page.entries) {
-      const labels = agent?.labels ?? {};
-      if (agent && labels[MANAGER_ROLE_LABEL] === role && !agent.archivedAt && agent.workspaceId === workspaceId) {
-        found.push(agent);
-      }
-    }
-    if (!page.pageInfo.hasMore || !page.pageInfo.nextCursor) break;
-    cursor = page.pageInfo.nextCursor;
-  }
-  return found;
+  const all = await listAllAgents((options) => paseo.agents.list(options), { includeArchived: false });
+  return all.filter(
+    (agent) => agent && roleOfAgent(agent)?.role === role && !agent.archivedAt && agent.workspaceId === workspaceId,
+  );
 }
 
 /**
@@ -325,7 +304,8 @@ async function listByRole(paseo: StopPaseo, role: string, workspaceId: string): 
  *
  * Three rules the loop exists to keep:
  * - **The Manager is never touched.** It is the user's point of contact, and the
- *   command's own name only promises Workers. Its label is never queried.
+ *   command's own name only promises Workers. Only the worker and reviewer
+ *   roles are ever collected, by label or by provider.
  * - **One workspace only** (owner decision Q28). A machine-wide stop is too
  *   large a consequence for one mistyped line.
  * - **An archived agent is skipped**, because `send()` would UN-archive it, and

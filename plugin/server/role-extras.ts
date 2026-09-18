@@ -19,7 +19,7 @@ import { MANAGER_INSTRUCTIONS } from "./manager-instructions";
 import { REVIEWER_INSTRUCTIONS } from "./reviewer-instructions";
 import { WORKER_INSTRUCTIONS } from "./worker-instructions";
 import { writeStoreFileAtomically } from "./trace-store";
-import { chooseModeId, modesFor, profileModeOf } from "./role-mode";
+import { chooseModeId, lastModesOf, modesFor, profileModeOf } from "./role-mode";
 import { DashboardError } from "../shared/contracts";
 
 export type Role = "manager" | "worker" | "reviewer";
@@ -55,22 +55,30 @@ const EMPTY: RoleExtras = { manager: "", worker: "", reviewer: "" };
 
 /**
  * Facts the plugin resolves when it builds a role's instructions (delta
- * 20260917c §4.6, owner decision Q22). Today there is one: the mode the Manager
- * must pass when it creates a Worker, because Paseo refuses that creation
- * without one before any hook runs (K10).
+ * 20260917c §4.6, owner decision Q22, errata 2026-09-18). Each is the mode an
+ * agent must pass when it creates its child, because Paseo refuses that
+ * creation without one before any hook runs (K10): the Manager passes the
+ * Worker mode, and the Worker — refused as `bypassPermissions` too — passes
+ * the Reviewer mode.
  */
 export interface RuntimeFacts {
   workerModeId?: string | null;
+  reviewerModeId?: string | null;
 }
 
-/** Agent-facing, so English. `roles/manager.md` points at this heading. */
+/** Reviewer mode the Worker is told when no mode list could ever be read (owner decision Q9 a). */
+export const REVIEWER_FALLBACK_MODE = "auto";
+
+/** Agent-facing, so English. `roles/manager.md` and `roles/worker.md` point at this heading. */
 export const RUNTIME_FACTS_HEADING = "## Runtime facts";
 
 /** The Runtime facts section for a role, or "" when there is nothing to state. */
 export function runtimeFactsText(role: Role, facts: RuntimeFacts = {}): string {
-  const workerMode = typeof facts.workerModeId === "string" ? facts.workerModeId.trim() : "";
-  if (role !== "manager" || workerMode === "") return "";
-  return `${RUNTIME_FACTS_HEADING}\n\nWorker mode: \`${workerMode}\` — pass it as \`settings.modeId\` when you create a Worker.`;
+  const trimmed = (value: string | null | undefined) => (typeof value === "string" ? value.trim() : "");
+  const child = role === "manager" ? "Worker" : role === "worker" ? "Reviewer" : null;
+  const mode = role === "manager" ? trimmed(facts.workerModeId) : role === "worker" ? trimmed(facts.reviewerModeId) : "";
+  if (child === null || mode === "") return "";
+  return `${RUNTIME_FACTS_HEADING}\n\n${child} mode: \`${mode}\` — pass it as \`settings.modeId\` when you create a ${child}.`;
 }
 
 /**
@@ -90,14 +98,40 @@ export function fullInstructions(role: Role, extra: string, facts: RuntimeFacts 
 
 /**
  * The Runtime facts that apply to a role now. For the Manager: the Worker mode
- * the hook's own rule picks from `listModes("bm-worker")`, so what the Manager
+ * the hook's own rule picks from `listModes("bm-worker")`; for the Worker: the
+ * Reviewer mode it picks from `listModes("bm-reviewer")`. So what the creator
  * passes and what the hook would choose are the same value. `{}` when it cannot
- * be read — the failure is logged, and the Manager's creation attempt then
- * fails loudly with Paseo's list of modes rather than silently.
+ * be read — the failure is logged, and the creation attempt then fails loudly
+ * with Paseo's list of modes rather than silently.
  */
-export async function runtimeFactsOf(role: Role, paseo: unknown, cwd?: string): Promise<RuntimeFacts> {
-  if (role !== "manager") return {};
+export async function runtimeFactsOf(
+  role: Role,
+  paseo: unknown,
+  cwd?: string,
+  log: (message: string) => void = (message) => console.warn(message),
+): Promise<RuntimeFacts> {
+  if (role === "reviewer") return {};
   try {
+    if (role === "worker") {
+      const profileModeId = await profileModeOf(paseo, "bm-reviewer");
+      const modes = await modesFor(paseo, "bm-reviewer", undefined, cwd);
+      if (modes === null) {
+        // Unlike the Manager's case, the profile's own mode is NOT passed blind:
+        // its tier is unknown, and a Reviewer must never run in a dangerous one.
+        // The fallback is the last list read in this run, through the same
+        // rule, else `auto` — the rule's first choice, listed by Claude and
+        // Codex; a provider without it makes Paseo refuse the creation loudly
+        // (delta 20260918g §4.9, owner decisions Q4 a and Q9 a).
+        const last = lastModesOf("bm-reviewer");
+        const fromLast = last === null ? undefined : chooseModeId("reviewer", last.modes, undefined, profileModeId);
+        const reviewerModeId = fromLast ?? REVIEWER_FALLBACK_MODE;
+        const source = fromLast === undefined ? "static fallback" : `last list read at ${last!.at}`;
+        log(`[paseo-bm] could not read the modes of bm-reviewer; the Worker is told to pass the fallback Reviewer mode "${reviewerModeId}" (${source}).`);
+        return { reviewerModeId };
+      }
+      const reviewerModeId = chooseModeId("reviewer", modes, undefined, profileModeId);
+      return reviewerModeId === undefined ? {} : { reviewerModeId };
+    }
     const profileModeId = await profileModeOf(paseo, "bm-worker");
     const modes = await modesFor(paseo, "bm-worker", undefined, cwd);
     if (modes === null) {
@@ -107,7 +141,8 @@ export async function runtimeFactsOf(role: Role, paseo: unknown, cwd?: string): 
     }
     const workerModeId = chooseModeId("worker", modes, undefined, profileModeId);
     return workerModeId === undefined ? {} : { workerModeId };
-  } catch {
+  } catch (error) {
+    log(`[paseo-bm] reading the Runtime facts of ${role} failed: ${error instanceof Error ? error.message : String(error)}`);
     return {};
   }
 }

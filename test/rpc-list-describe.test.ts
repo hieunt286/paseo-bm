@@ -64,9 +64,9 @@ describe("agents.list — tree", () => {
 
     expect(agentsListRpc.output.parse(output)).toEqual({
       agents: [
-        { id: "mgr", role: "manager", title: "Beads Manager", status: "running", parentId: null, updatedAt: "2026-09-15T09:00:00.000Z" },
-        { id: "wrk", role: "worker", title: "wrk", status: "idle", parentId: "mgr", updatedAt: "2026-09-15T09:00:00.000Z" },
-        { id: "rev", role: "reviewer", title: "rev", status: "idle", parentId: "wrk", updatedAt: "2026-09-15T09:00:00.000Z" },
+        { id: "mgr", role: "manager", title: "Beads Manager", status: "running", parentId: null, updatedAt: "2026-09-15T09:00:00.000Z", labelled: true },
+        { id: "wrk", role: "worker", title: "wrk", status: "idle", parentId: "mgr", updatedAt: "2026-09-15T09:00:00.000Z", labelled: true },
+        { id: "rev", role: "reviewer", title: "rev", status: "idle", parentId: "wrk", updatedAt: "2026-09-15T09:00:00.000Z", labelled: true },
       ],
     });
     // No label filter (unlabeled children must be reachable), archived excluded.
@@ -91,6 +91,21 @@ describe("agents.list — tree", () => {
     ]);
     expect(agents[1]!.title).toBeNull();
     expect(() => agentsListRpc.output.parse({ agents })).not.toThrow();
+  });
+
+  it("a Manager started outside Beads Manager (no labels, bm-manager provider) is a manager root, labelled: false (delta 20260918g)", async () => {
+    const { paseo } = fakeDirectory([
+      agent({ id: "user-mgr", createdAt: t(1), provider: "bm-manager/claude-opus-5", labels: {} }),
+      agent({ id: "wrk", createdAt: t(2), provider: "bm-worker/claude-opus-5", labels: { "bm.role": "worker", "paseo.parent-agent-id": "user-mgr" } }),
+      agent({ id: "plain", createdAt: t(3), provider: "claude", labels: {} }),
+    ]);
+
+    const { agents } = await listWorkspaceAgents({ workspaceId: WS }, { paseo });
+
+    expect(agents.map((a) => [a.id, a.role, a.parentId, a.labelled])).toEqual([
+      ["user-mgr", "manager", null, false],
+      ["wrk", "worker", "user-mgr", true],
+    ]);
   });
 
   it("orphaned Worker (Manager deleted or archived) still listed as a root with its Reviewer", async () => {
@@ -241,6 +256,8 @@ describe("plugin server entry — agents.list and roles.describe", () => {
     expect(contracts.map((c: { name: string }) => c.name).sort()).toEqual([
       "agents.list",
       "agents.stop-all",
+      "answers.mark",
+      "answers.marks",
       "beads.action",
       "beads.get",
       "beads.list",
@@ -248,6 +265,7 @@ describe("plugin server entry — agents.list and roles.describe", () => {
       "beads.stats",
       "chat.beads",
       "chat.peers",
+      "chat.waiting",
       "launcher.order.get",
       "launcher.order.set",
       "manager.ensure",

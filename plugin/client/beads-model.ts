@@ -5,7 +5,7 @@
  * Pure: no React, no React Native, no `server/` import.
  */
 import type { BeadAction, BeadRow, BeadStats, BeadWork } from "../shared/contracts";
-import { formatDuration, type Badge, type Bar, type OverviewCard } from "./dashboard-model";
+import { formatDuration, type Badge, type Bar, type OverviewCard, type Tone } from "./dashboard-model";
 
 const DAY_MS = 86_400_000;
 
@@ -13,25 +13,42 @@ export function priorityLabel(priority: number | null): string {
   return priority === null ? "P?" : `P${priority}`;
 }
 
-export function statusBadge(bead: Pick<BeadRow, "status" | "ready">): Badge {
-  switch (bead.status) {
-    case "closed":
-      return { text: "Closed", tone: "success" };
-    case "in_progress":
-      return { text: "In progress", tone: "info" };
-    case "blocked":
-      return { text: "Blocked", tone: "warning" };
-    default:
-      return bead.ready ? { text: "Ready", tone: "info" } : { text: "Blocked", tone: "warning" };
-  }
-}
+export type StatusBucket = "ready" | "blocked" | "in_progress" | "closed";
 
 /** The bucket a bead is filtered and counted under. */
-export function statusBucket(bead: Pick<BeadRow, "status" | "ready">): "ready" | "blocked" | "in_progress" | "closed" {
+export function statusBucket(bead: Pick<BeadRow, "status" | "ready">): StatusBucket {
   if (bead.status === "closed") return "closed";
   if (bead.status === "in_progress") return "in_progress";
   if (bead.status === "blocked") return "blocked";
   return bead.ready ? "ready" : "blocked";
+}
+
+/**
+ * The one colour of each status (owner decisions Q3 and Q8, delta 20260918e):
+ * the title and the chip of a bead both read it, so they cannot disagree.
+ */
+export const STATUS_TONE: Readonly<Record<StatusBucket, Tone>> = {
+  ready: "info", // accent: not started
+  in_progress: "warning",
+  blocked: "danger",
+  closed: "success",
+};
+
+const STATUS_TEXT: Readonly<Record<StatusBucket, string>> = {
+  ready: "Ready",
+  in_progress: "In progress",
+  blocked: "Blocked",
+  closed: "Closed",
+};
+
+export function statusBadge(bead: Pick<BeadRow, "status" | "ready">): Badge {
+  const bucket = statusBucket(bead);
+  return { text: STATUS_TEXT[bucket], tone: STATUS_TONE[bucket] };
+}
+
+/** The colour of a bead's title in a list: only the title is coloured, never the row (Q8). */
+export function beadTitleTone(bead: Pick<BeadRow, "status" | "ready">): Tone {
+  return STATUS_TONE[statusBucket(bead)];
 }
 
 function median(values: readonly number[]): number | null {
@@ -59,31 +76,19 @@ export interface BeadsOverview {
   status: OverviewCard[];
   /** 2. Progress, epics excluded. */
   progress: { closed: number; total: number; share: number; label: string };
-  /** 3. Created and closed per day, oldest first. */
-  activity: Array<{ day: string; created: number; closed: number }>;
-  /** 4. By type. */
+  /** 3. By type. (The per-day created/closed count was dropped at the owner's request, delta 20260918e REQ-060 m.) */
   byType: Bar[];
-  /** 5. By priority. */
+  /** 4. By priority. */
   byPriority: Bar[];
-  /** 6. Time. */
+  /** 5. Time. */
   timing: OverviewCard[];
 }
 
 const STALE_MS = 7 * DAY_MS;
 
-export function beadsOverview(beads: readonly BeadRow[], stats: BeadStats, now: Date, days = 14): BeadsOverview {
+export function beadsOverview(beads: readonly BeadRow[], stats: BeadStats, now: Date): BeadsOverview {
   const work = beads.filter((bead) => bead.issueType !== "epic");
   const closedWork = work.filter((bead) => bead.status === "closed").length;
-
-  const activity: BeadsOverview["activity"] = [];
-  for (let offset = days - 1; offset >= 0; offset -= 1) {
-    const day = new Date(now.getTime() - offset * DAY_MS).toISOString().slice(0, 10);
-    activity.push({
-      day: day.slice(5),
-      created: beads.filter((bead) => bead.createdAt?.slice(0, 10) === day).length,
-      closed: beads.filter((bead) => bead.closedAt?.slice(0, 10) === day).length,
-    });
-  }
 
   const count = (key: (bead: BeadRow) => string, order?: readonly string[]): Bar[] => {
     const counts = new Map<string, number>();
@@ -134,7 +139,6 @@ export function beadsOverview(beads: readonly BeadRow[], stats: BeadStats, now: 
           ? "No work beads yet"
           : `${Math.round((closedWork / work.length) * 100)}% done · ${closedWork}/${work.length} (epics not counted)`,
     },
-    activity,
     byType: count((bead) => bead.issueType),
     byPriority: count((bead) => priorityLabel(bead.priority), ["P0", "P1", "P2", "P3", "P4", "P?"]),
     timing: [
@@ -146,6 +150,18 @@ export function beadsOverview(beads: readonly BeadRow[], stats: BeadStats, now: 
       },
       { label: "Stale", value: String(stale), hint: "open, no update for 7+ days" },
     ],
+  };
+}
+
+/**
+ * The done / total figure at the top of the Beads screen (owner decision Q11):
+ * it reads `beadsOverview(...).progress`, so it counts exactly like the
+ * Progress card — every bead but epics, whatever the filters show.
+ */
+export function doneText(progress: { closed: number; total: number }): { text: string; label: string } {
+  return {
+    text: `✓ ${progress.closed} / ${progress.total} done`,
+    label: `${progress.closed} of ${progress.total} beads done, epics not counted`,
   };
 }
 
@@ -332,6 +348,84 @@ export function filterBeads(beads: readonly BeadRow[], filter: BeadFilter): Bead
     return true;
   });
 }
+
+// ---------------------------------------------------------------------------
+// Groups and the closed-beads toggle (delta 20260918e §4.4, owner Q9 and Q10).
+// ---------------------------------------------------------------------------
+
+/** The order of the list's groups: work in progress first, then what is stuck. */
+export const STATUS_GROUP_ORDER: readonly StatusBucket[] = ["in_progress", "blocked", "ready", "closed"];
+
+export interface BeadGroup {
+  bucket: StatusBucket;
+  /** The chip's words, so a group header and its rows' chips read the same. */
+  label: string;
+  tone: Tone;
+  /** Every bead of the group, even when the list limit shows fewer. */
+  total: number;
+  beads: BeadRow[];
+}
+
+/**
+ * Splits an already filtered and sorted list into its status groups, keeping
+ * the order inside each group. Empty groups are dropped, and so is Closed while
+ * closed beads are hidden. The list limit is spent in display order: a group
+ * the limit leaves empty is dropped too, and its beads count as truncated.
+ */
+export function groupBeads(
+  beads: readonly BeadRow[],
+  options: { showClosed: boolean; limit: number },
+): { groups: BeadGroup[]; visible: number; closed: number; truncated: number } {
+  const byBucket = new Map<StatusBucket, BeadRow[]>(STATUS_GROUP_ORDER.map((bucket) => [bucket, []]));
+  for (const bead of beads) byBucket.get(statusBucket(bead))!.push(bead);
+  const closed = byBucket.get("closed")!.length;
+  const groups: BeadGroup[] = [];
+  let visible = 0;
+  let budget = options.limit;
+  for (const bucket of STATUS_GROUP_ORDER) {
+    if (bucket === "closed" && !options.showClosed) continue;
+    const all = byBucket.get(bucket)!;
+    visible += all.length;
+    const taken = all.slice(0, Math.max(0, budget));
+    budget -= taken.length;
+    if (taken.length === 0) continue;
+    groups.push({ bucket, label: STATUS_TEXT[bucket], tone: STATUS_TONE[bucket], total: all.length, beads: taken });
+  }
+  const drawn = groups.reduce((sum, group) => sum + group.beads.length, 0);
+  return { groups, visible, closed, truncated: visible - drawn };
+}
+
+/** A boolean that outlives the screen but not the app session: one per loaded client bundle. */
+export interface SessionToggle {
+  get(): boolean;
+  set(value: boolean): void;
+  subscribe(listener: () => void): () => void;
+}
+
+export function createSessionToggle(initial: boolean): SessionToggle {
+  let value = initial;
+  const listeners = new Set<() => void>();
+  return {
+    get: () => value,
+    set(next) {
+      value = next;
+      for (const listener of listeners) listener();
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+}
+
+/**
+ * Whether the Beads screen shows closed beads. Hidden by default, remembered
+ * while the app runs, back to hidden after a reload (owner decision Q9). The
+ * screen on the surface and the one in the "Beads" tab share it.
+ */
+export const closedBeadsVisibility = createSessionToggle(false);
 
 export function toggle(set: ReadonlySet<string>, value: string): Set<string> {
   const next = new Set(set);

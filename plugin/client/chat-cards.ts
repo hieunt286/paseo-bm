@@ -14,7 +14,8 @@
 import { z } from "zod";
 import { looksLikeReport, parseReports, parseReviews, requestIdFromText } from "../shared/bm-report";
 import { answersText, parseQuestions, type Pick, type Question } from "../shared/bm-questions";
-import type { ChatPeer } from "../shared/contracts";
+import { checkBlocks, issueText } from "../shared/bm-format";
+import type { ChatPeer, WaitingWorker } from "../shared/contracts";
 import type { Badge, GraphNode } from "./dashboard-model";
 import { errorMessageOf } from "./launch-manager";
 
@@ -45,6 +46,11 @@ export const chatCardSchema = z.object({
   text: z.string(),
   /** The report's `BM-QUESTIONS`; empty for every other card and for old-style reports. */
   questions: z.array(questionSchema).default([]),
+  /**
+   * Where the message's BM-* blocks break their template (delta 20260918g
+   * §4.8), one `<kind> <field>: <issue>` line each; empty when they follow it.
+   */
+  formatIssues: z.array(z.string()).default([]),
 });
 
 export type ChatCard = z.infer<typeof chatCardSchema>;
@@ -118,6 +124,12 @@ export function toChatCard(item: ChatItem, phase: "streaming" | "complete"): Cha
   // A block naming another request is not this Worker's to be answered here.
   const asked = report === undefined ? null : parseQuestions(text);
   const questions = asked !== null && (asked.requestId === null || asked.requestId === requestId) ? asked.questions : [];
+  // A received message is another agent's block, checked against its
+  // template. Of this chat's own messages only a Reviewer's review is one: a
+  // Worker quoting its report in its own chat has sent nothing.
+  const formatIssues = checkBlocks(text)
+    .filter((block) => direction === "received" || block.kind === "BM-REVIEW")
+    .flatMap((block) => block.issues.map(issueText));
   return {
     type: report !== undefined ? "report" : review !== undefined ? "review" : "message",
     direction,
@@ -136,6 +148,7 @@ export function toChatCard(item: ChatItem, phase: "streaming" | "complete"): Cha
     gist: gistOf(text),
     text,
     questions,
+    formatIssues,
   };
 }
 
@@ -230,6 +243,19 @@ export function drawAsCard(card: ChatCard, owner: ChatPeer | null): boolean {
   return card.type === "review" ? owner.role === "reviewer" : owner.role === "worker";
 }
 
+/**
+ * What a card says in the chat of an agent that carries no `bm.role` label —
+ * started outside Beads Manager and recognised by its provider (delta
+ * 20260918g §4.4, owner decision Q1 a) — or null for every other chat.
+ */
+export function ownerWarning(owner: ChatPeer | null): { chip: Badge; line: string } | null {
+  if (owner === null || owner.labelled !== false) return null;
+  return {
+    chip: { text: "Not started by paseo-bm", tone: "warning" },
+    line: "This agent has no bm.role label: it was started outside Beads Manager, and paseo-bm recognised it by its provider.",
+  };
+}
+
 /** The graph node kind whose icon and colour a role uses (`ROLE_MARK`). */
 export function markOf(role: ChatRole | null): GraphNode["kind"] | null {
   return role === "manager" ? "request" : role;
@@ -250,6 +276,24 @@ export function statusChip(card: ChatCard): Badge | null {
     return { text: card.blocking ? `${card.verdict} · ${card.blocking} blocking` : card.verdict, tone };
   }
   return null;
+}
+
+/**
+ * A `finished` report's card opens with its whole message showing, in every
+ * chat that draws it: the Manager does not repeat the result, so it must be
+ * readable without a tap (delta 20260918d §4.10, Q1 a of req-20260918T074311Z).
+ */
+export function startsOpen(card: ChatCard): boolean {
+  return card.type === "report" && card.phase === "finished";
+}
+
+/**
+ * The tone of the outline around the whole card, or null for the usual border:
+ * only a `finished` report stands out (delta 20260918d §4.10, Q2 a of
+ * req-20260918T074311Z — the one exception to "no coloured border", Q11).
+ */
+export function outlineTone(card: ChatCard): "success" | null {
+  return card.type === "report" && card.phase === "finished" ? "success" : null;
 }
 
 /**
@@ -331,6 +375,16 @@ export function markdownOf(text: string): string {
   return out.join("\n");
 }
 
+/**
+ * The Markdown of a message shown as plain text instead of a card (delta
+ * 20260918g §4.8, owner decision Q3 a): laid out like the card's opened
+ * message, one field per line and questions apart from their options, never
+ * the raw text that Markdown runs together into one paragraph.
+ */
+export function fallbackMarkdown(card: { text: string }): string {
+  return markdownOf(card.text);
+}
+
 /** The reply as sent: it names the request, so the agent knows what it answers. */
 export function replyText(card: ChatCard, answer: string): string {
   const about = [card.requestId === null ? null : `\`${card.requestId}\``, card.batchId === null ? null : `batch ${card.batchId}`]
@@ -374,6 +428,15 @@ export function topicOf(question: Question): { topic: string | null; rest: strin
   return at <= 0 ? { topic: null, rest: question.text } : { topic: question.text.slice(0, at), rest: question.text.slice(at + 3) };
 }
 
+/**
+ * A question as the card draws it (delta 20260918d §4.4): a bold heading
+ * `Q6 · Storage`, then the question itself on its own line.
+ */
+export function questionHeading(question: Question): { heading: string; body: string } {
+  const { topic, rest } = topicOf(question);
+  return topic === null ? { heading: question.id, body: rest } : { heading: `${question.id} · ${topic}`, body: rest };
+}
+
 /** Fills the recommended option into every question still unanswered; never overwrites a pick. */
 export function recommendedPicks(questions: readonly Question[], picks: Readonly<Picks>): Picks {
   const next: Picks = { ...picks };
@@ -385,77 +448,185 @@ export function recommendedPicks(questions: readonly Question[], picks: Readonly
   return next;
 }
 
-/** Every question has an existing option, or the user's own non-blank words. */
-export function formComplete(questions: readonly Question[], picks: Readonly<Picks>): boolean {
-  return (
-    questions.length > 0 &&
-    questions.every((question) => {
-      const pick = picks[question.id];
-      if (pick === undefined) return false;
-      return "key" in pick ? choosable(question) && question.options.some((option) => option.key === pick.key) : pick.other.trim() !== "";
-    })
-  );
+/**
+ * A pick that answers its question: an existing option of a question with at
+ * least two options, or the user's own non-blank words.
+ */
+export function isAnswered(question: Question, pick: Pick | undefined): boolean {
+  if (pick === undefined) return false;
+  if ("key" in pick) return choosable(question) && question.options.some((option) => option.key === pick.key);
+  return pick.other.trim() !== "";
 }
 
-/** `Q1 a, Q2 other`: what the card says it sent. */
+/**
+ * The `BM-ANSWERS` block for the answered questions only, in question order;
+ * "" when none is answered or the card names no request (delta 20260918d §4.1).
+ * An unanswered question gets no line and stays open: the Worker asks again.
+ */
+export function answersDraft(card: ChatCard, picks: Readonly<Picks>): string {
+  if (card.requestId === null) return "";
+  const answered = card.questions.filter((question) => isAnswered(question, picks[question.id]));
+  return answered.length === 0 ? "" : answersText(card.requestId, answered, picks);
+}
+
+const ANSWERS_HEAD = "BM-ANSWERS";
+const ANSWERS_LINE = /^\s*(requestId|Q\d+)\s*:/;
+
+/**
+ * The Reply box `text` with its `BM-ANSWERS` block replaced by `block`, or
+ * removed when `block` is "". The block always ends up at the very start; the
+ * user's own words — above or below the old block — follow it, in order
+ * (delta 20260918d §4.1, owner decision Q4).
+ */
+export function withAnswersBlock(text: string, block: string): string {
+  const lines = text.split("\n");
+  const head = lines.findIndex((line) => line.trim() === ANSWERS_HEAD);
+  let rest = lines;
+  if (head !== -1) {
+    let end = head + 1;
+    while (end < lines.length && ANSWERS_LINE.test(lines[end]!)) end += 1;
+    while (end < lines.length && lines[end]!.trim() === "") end += 1;
+    rest = [...lines.slice(0, head), ...lines.slice(end)];
+  }
+  let first = 0;
+  while (first < rest.length && rest[first]!.trim() === "") first += 1;
+  let last = rest.length;
+  while (last > first && rest[last - 1]!.trim() === "") last -= 1;
+  const words = rest.slice(first, last).join("\n");
+  if (block === "") return words;
+  return words === "" ? block : `${block}\n\n${words}`;
+}
+
+/** `Q1 a, Q2 other`: the answered questions, as the card says it sent them. */
 export function answerSummary(questions: readonly Question[], picks: Readonly<Picks>): string {
   return questions
+    .filter((question) => isAnswered(question, picks[question.id]))
     .map((question) => {
-      const pick = picks[question.id];
-      return pick === undefined ? null : `${question.id} ${"key" in pick ? pick.key : "other"}`;
+      const pick = picks[question.id]!;
+      return `${question.id} ${"key" in pick ? pick.key : "other"}`;
     })
-    .filter((part) => part !== null)
     .join(", ");
 }
 
-export type AnswerTarget = { worker: ChatPeer } | { reason: string };
-
 /**
- * The Worker the answers go to, or why they cannot go now. The Worker is the
- * one `partiesOf` finds — the only Worker of the report's request — never an
- * id read from the message. Only an `idle` or `error` Worker is sent to: a
- * message to a running one would replace the turn it is in.
+ * What a sent Reply answered: the summary when the current answers block went
+ * out whole in `text`, else null (the user deleted it, or picked nothing).
  */
-export function answerTarget(card: ChatCard, owner: ChatPeer | null, peers: readonly ChatPeer[]): AnswerTarget {
-  const { from } = partiesOf(card, owner, peers);
-  const worker = from.id === null ? undefined : peers.find((peer) => peer.id === from.id && peer.role === "worker");
-  if (worker === undefined) {
-    return { reason: `Cannot tell which Worker asked this: no single Worker has \`${card.requestId ?? "this request"}\`.` };
-  }
-  const name = partyName({ role: "worker", id: worker.id, title: worker.title });
-  if (worker.status === "idle" || worker.status === "error") return { worker };
-  if (worker.status === "running" || worker.status === "initializing") {
-    return { reason: `${name} is working; a message now would replace its turn. Send when it stops.` };
-  }
-  return { reason: `${name} is ${worker.status}.` };
+export function sentSummary(card: ChatCard, picks: Readonly<Picks>, text: string): string | null {
+  const draft = answersDraft(card, picks);
+  return draft !== "" && text.includes(draft) ? answerSummary(card.questions, picks) : null;
 }
 
-export interface SendAnswersInput {
+// ---------------------------------------------------------------------------
+// Is a question card answered? (delta 20260918d §4.9, batch b6)
+// ---------------------------------------------------------------------------
+
+/** The report of `card` is one `chat.waiting` still lists for this Manager's chat. */
+export function stillWaiting(card: ChatCard, chatAgentId: string, waiting: readonly WaitingWorker[]): boolean {
+  return waiting.some((entry) => entry.managerId === chatAgentId && entry.requestId === card.requestId && entry.text === card.text);
+}
+
+export type AnsweredHow = "sent" | "marked" | "moved-on";
+
+/**
+ * Why a question card counts as answered, or null: answers sent from a copy of
+ * it in this session; the user's saved mark; or `chat.waiting` no longer
+ * listing its report — the Worker is working, has reported since, or is gone
+ * (owner decision Q17). `waiting` is null while it is unknown, and then
+ * nothing is derived from it.
+ */
+export function answeredHow(input: {
+  sent: boolean;
+  marked: boolean;
+  waiting: readonly WaitingWorker[] | null;
+  stillWaitingNow: boolean;
+}): AnsweredHow | null {
+  if (input.sent) return "sent";
+  if (input.marked) return "marked";
+  if (input.waiting !== null && !input.stillWaitingNow) return "moved-on";
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Related beads on a card (delta 20260918d §4.7, batch b4).
+// ---------------------------------------------------------------------------
+
+/** How many related-bead chips a card shows before folding the rest behind "…". */
+export const BEAD_CHIPS_SHOWN = 2;
+
+/** The bead ids a card shows, and how many are folded behind the "…" chip. */
+export function visibleBeads(ids: readonly string[], expanded: boolean): { shown: string[]; hidden: number } {
+  if (expanded || ids.length <= BEAD_CHIPS_SHOWN) return { shown: [...ids], hidden: 0 };
+  return { shown: ids.slice(0, BEAD_CHIPS_SHOWN), hidden: ids.length - BEAD_CHIPS_SHOWN };
+}
+
+/**
+ * What a card offers for replying (delta 20260918d §4.7, owner decision Q14):
+ * the Reply button, or — once a reply went out from this card — the small
+ * "Answered" chip, which reopens the Reply box.
+ */
+export function replyControls(canReply: boolean, replied: boolean): { replyButton: boolean; answeredChip: boolean } {
+  return { replyButton: canReply && !replied, answeredChip: canReply && replied };
+}
+
+// ---------------------------------------------------------------------------
+// Replying from any card (delta 20260918d-card-replies §4.2).
+// ---------------------------------------------------------------------------
+
+export type ReplyTarget = { peer: ChatPeer } | { reason: string };
+
+/**
+ * The agent a card's Reply goes to, or why it cannot go now. The recipient is
+ * the one `partiesOf` finds — the sender of a received card, the addressee of
+ * a sent one — and must be in `peers`, because its status is read there.
+ * Only an `idle` or `error` agent is sent to: a message to a running one would
+ * replace the turn it is in and throw that work away.
+ */
+export function replyTarget(card: ChatCard, owner: ChatPeer | null, peers: readonly ChatPeer[]): ReplyTarget {
+  const { from, to } = partiesOf(card, owner, peers);
+  const counterpart = card.direction === "received" ? from : to;
+  const peer = counterpart.id === null ? undefined : peers.find((candidate) => candidate.id === counterpart.id);
+  if (peer === undefined) {
+    if (card.type === "report" && card.direction === "received") {
+      return { reason: `Cannot tell which Worker asked this: no single Worker has \`${card.requestId ?? "this request"}\`.` };
+    }
+    return { reason: `Cannot tell which ${roleName(counterpart.role)} to send this to.` };
+  }
+  if (owner !== null && peer.id === owner.id) return { reason: "This is your own message." };
+  const name = partyName({ role: counterpart.role, id: peer.id, title: peer.title });
+  if (peer.status === "idle" || peer.status === "error") return { peer };
+  if (peer.status === "running" || peer.status === "initializing") {
+    return { reason: `${name} is working; a message now would replace its turn. Send when it stops.` };
+  }
+  return { reason: `${name} is ${peer.status}.` };
+}
+
+export interface SendReplyInput {
   card: ChatCard;
-  picks: Readonly<Picks>;
+  /** What is in the Reply box. */
+  text: string;
   /** Fresh `chat.peers` for the chat: the cached one can be half a minute old. */
   refreshPeers: () => Promise<{ owner: ChatPeer | null; peers: ChatPeer[] }>;
   send: (agentId: string, text: string) => Promise<void>;
 }
 
-export type SendAnswersResult = { ok: true; to: ChatPeer; text: string } | { ok: false; reason: string };
+export type SendReplyResult = { ok: true; to: ChatPeer; text: string } | { ok: false; reason: string };
 
 /**
- * The whole send path of the question card, kept here so it is tested without
- * a renderer: re-read who is where and in what state, then send ONE
- * `BM-ANSWERS` message to the asking Worker. `send` is called at most once.
+ * The whole send path of a card's Reply box, kept here so it is tested without
+ * a renderer: re-read who is where and in what state, then send ONE message.
+ * `send` is called at most once.
  */
-export async function sendAnswers(input: SendAnswersInput): Promise<SendAnswersResult> {
-  const { card, picks } = input;
-  if (!formComplete(card.questions, picks)) return { ok: false, reason: "Answer every question first." };
+export async function sendReply(input: SendReplyInput): Promise<SendReplyResult> {
+  const { card, text } = input;
+  if (text.trim() === "") return { ok: false, reason: "Write a reply first." };
   try {
     const fresh = await input.refreshPeers();
-    const target = answerTarget(card, fresh.owner, fresh.peers);
+    const target = replyTarget(card, fresh.owner, fresh.peers);
     if ("reason" in target) return { ok: false, reason: target.reason };
-    if (card.requestId === null) return { ok: false, reason: "This report names no request." };
-    const text = answersText(card.requestId, card.questions, picks);
-    await input.send(target.worker.id, text);
-    return { ok: true, to: target.worker, text };
+    const message = replyText(card, text);
+    await input.send(target.peer.id, message);
+    return { ok: true, to: target.peer, text: message };
   } catch (failure) {
     return { ok: false, reason: errorMessageOf(failure) };
   }

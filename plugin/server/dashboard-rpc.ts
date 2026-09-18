@@ -14,6 +14,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { listAllAgents, roleOfAgent } from "./agent-role";
 import { beadStats, lookupBeads } from "./beads-store";
 import { resolveInstallHome } from "./install-home";
 import { priceUsage } from "./cost";
@@ -22,6 +23,7 @@ import { mergeExtras, readLiveExtras } from "./live-timeline";
 import { getBeadDetail, listBeadRows, runBeadAction, type BeadActionPaseo } from "./bead-actions";
 import { beadWorkOf } from "./bead-work";
 import { readLauncherOrder, writeLauncherOrder } from "./launcher-order";
+import { readAnswerMarks, writeAnswerMark } from "./answer-marks";
 import { stopAllInWorkspace, type StopPaseo } from "./stop-propagation";
 import {
   detail,
@@ -54,6 +56,8 @@ import {
   workspacesOverviewRpc,
   launcherOrderGetRpc,
   launcherOrderSetRpc,
+  answersMarkRpc,
+  answersMarksRpc,
   agentsStopAllRpc,
   tracesGetRpc,
   tracesListRpc,
@@ -76,9 +80,9 @@ export interface DashboardPaseo {
     /** Absent on hosts (and fakes) without per-agent timeline access. */
     ref?(agentId: string): { timeline: { refetch(options: Record<string, unknown>): Promise<unknown> } };
     list(options: {
-      filter: { labels: Record<string, string>; includeArchived: boolean };
+      filter: { labels?: Record<string, string>; includeArchived: boolean };
       page: { limit: number; cursor?: string };
-    }): Promise<{ entries: Array<Record<string, unknown>> }>;
+    }): Promise<{ entries: Array<Record<string, unknown>>; pageInfo?: { nextCursor: string | null; hasMore: boolean } }>;
   };
   workspaces: {
     list(options?: unknown): Promise<{ entries: Array<Record<string, unknown>> }>;
@@ -283,41 +287,48 @@ export async function agentFactsOf(
 }
 
 /**
- * Every paseo-bm agent on this host, with its workspace. `agents.list` is
- * filtered by `bm.role` label exactly as `manager.ts` does; the daemon's
- * directory filter has no workspace key.
+ * Every paseo-bm agent on this host, with its workspace. One walk over every
+ * page of `agents.list`, no label filter: the role comes from `roleOfAgent`, so
+ * an agent started from Paseo's own new-agent flow with a paseo-bm profile
+ * (no `bm.role` label) is found too, marked `labelled: false` (delta 20260918g
+ * §4.2). The daemon's directory filter has no workspace key.
  */
 export async function bmAgentsOf(paseo: DashboardPaseo): Promise<Array<{ workspaceId: string | null; facts: AgentFacts }>> {
+  let listed: Array<Record<string, unknown>>;
+  try {
+    listed = await listAllAgents(
+      async (options) => {
+        const result = await paseo.agents.list(options);
+        // Entries are `{ agent }` on the SDK; older fakes hand the agent itself.
+        return {
+          entries: result.entries.map((entry) => ({ agent: (entry["agent"] ?? entry) as Record<string, unknown> })),
+          ...(result.pageInfo === undefined ? {} : { pageInfo: result.pageInfo }),
+        };
+      },
+      { includeArchived: true },
+    );
+  } catch {
+    return [];
+  }
   const out: Array<{ workspaceId: string | null; facts: AgentFacts }> = [];
-  for (const role of ["manager", "worker", "reviewer"] as const) {
-    let entries: Array<Record<string, unknown>>;
-    try {
-      const result = await paseo.agents.list({
-        filter: { labels: { "bm.role": role }, includeArchived: true },
-        page: { limit: 200 },
-      });
-      entries = result.entries;
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      const agent = (entry["agent"] ?? entry) as Record<string, unknown>;
-      const labels = (agent["labels"] ?? {}) as Record<string, string>;
-      const id = String(agent["id"] ?? "");
-      if (id === "") continue;
-      const facts: AgentFacts = {
-        id,
-        role,
-        status: String(agent["status"] ?? "closed"),
-        parentAgentId: labels["paseo.parent-agent-id"] ?? (agent["parentAgentId"] as string | null) ?? null,
-        createdAt: typeof agent["createdAt"] === "string" ? (agent["createdAt"] as string) : null,
-        requestIdLabel: labels["bm.requestId"] ?? null,
-        batchIdLabel: labels["bm.batchId"] ?? null,
-        archived: typeof agent["archivedAt"] === "string" && agent["archivedAt"] !== "",
-        title: typeof agent["title"] === "string" ? (agent["title"] as string) : null,
-      };
-      out.push({ workspaceId: typeof agent["workspaceId"] === "string" ? agent["workspaceId"] : null, facts });
-    }
+  for (const agent of listed) {
+    const fact = roleOfAgent(agent);
+    const id = String(agent["id"] ?? "");
+    if (fact === null || id === "") continue;
+    const labels = (agent["labels"] ?? {}) as Record<string, string>;
+    const facts: AgentFacts = {
+      id,
+      role: fact.role,
+      labelled: fact.labelled,
+      status: String(agent["status"] ?? "closed"),
+      parentAgentId: labels["paseo.parent-agent-id"] ?? (agent["parentAgentId"] as string | null) ?? null,
+      createdAt: typeof agent["createdAt"] === "string" ? (agent["createdAt"] as string) : null,
+      requestIdLabel: labels["bm.requestId"] ?? null,
+      batchIdLabel: labels["bm.batchId"] ?? null,
+      archived: typeof agent["archivedAt"] === "string" && agent["archivedAt"] !== "",
+      title: typeof agent["title"] === "string" ? (agent["title"] as string) : null,
+    };
+    out.push({ workspaceId: typeof agent["workspaceId"] === "string" ? agent["workspaceId"] : null, facts });
   }
   return out;
 }
@@ -462,6 +473,25 @@ export async function handleLauncherOrderSet(
   return { pinned, notices };
 }
 
+/** `answers.marks` handler: the cards marked as answered (delta 20260918d §4.9). */
+export async function handleAnswerMarksGet(
+  paseo: DashboardPaseo,
+  deps: { homedir?: () => string } = {},
+): Promise<{ keys: string[]; notices: string[] }> {
+  const { keys, notices } = readAnswerMarks(await requireLocation(paseo, deps));
+  return { keys, notices };
+}
+
+/** `answers.mark` handler: marks one card as answered, or removes the mark. */
+export async function handleAnswerMarkSet(
+  input: { key: string; marked: boolean },
+  paseo: DashboardPaseo,
+  deps: { homedir?: () => string } = {},
+): Promise<{ keys: string[]; notices: string[] }> {
+  const { keys, notices } = writeAnswerMark(await requireLocation(paseo, deps), input.key, input.marked);
+  return { keys, notices };
+}
+
 /**
  * `workspaces.overview` handler: bead counts and running agents per listed
  * workspace. Read-only.
@@ -578,6 +608,8 @@ export function registerDashboardRpcs(
   server.handle(workspacesOverviewRpc, (_input, context) => handleWorkspacesOverview(sdk(context)));
   server.handle(launcherOrderGetRpc, (_input, context) => handleLauncherOrderGet(sdk(context)));
   server.handle(launcherOrderSetRpc, (input, context) => handleLauncherOrderSet(input, sdk(context)));
+  server.handle(answersMarksRpc, (_input, context) => handleAnswerMarksGet(sdk(context)));
+  server.handle(answersMarkRpc, (input, context) => handleAnswerMarkSet(input, sdk(context)));
   server.handle(agentsStopAllRpc, (input, context) => handleAgentsStopAll(input, context.paseo as StopPaseo));
   const ensureManager = deps.ensureManager;
   if (ensureManager !== undefined) {

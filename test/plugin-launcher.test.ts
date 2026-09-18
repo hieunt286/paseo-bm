@@ -9,8 +9,10 @@ import {
   LAUNCHER_SURFACE_ID,
   createLaunchRequests,
   createManagerLauncher,
+  OLD_HOST_WARNING,
   describeLauncherState,
   errorCodeOf,
+  launcherStatusLines,
   launchRequests,
   launcherStyles,
   runPendingRequest,
@@ -45,8 +47,10 @@ vi.mock("react-native", () => ({
 type ClientEntry = (client: unknown) => () => void;
 const clientEntryPath = "../plugin/index.client.tsx";
 const surfacePath = "../plugin/client/launcher.tsx";
+const beadsTabPath = "../plugin/client/beads-tab.tsx";
 const { default: clientContribute } = (await import(clientEntryPath)) as { default: ClientEntry };
 const { ManagerLauncherSurface } = (await import(surfacePath)) as { ManagerLauncherSurface: unknown };
+const { BeadsTabPanel } = (await import(beadsTabPath)) as { BeadsTabPanel: unknown };
 
 const WS = "ws-1";
 
@@ -61,7 +65,7 @@ function fakePaseo(initial: ManagerAgentSnapshot[] = []) {
         const entries = store
           .filter(
             (a) =>
-              Object.entries(filter.labels).every(([k, v]) => a.labels[k] === v) &&
+              Object.entries(filter.labels ?? {}).every(([k, v]) => a.labels[k] === v) &&
               (filter.includeArchived || !a.archivedAt),
           )
           .map((agent) => ({ agent: { ...agent } }));
@@ -136,6 +140,7 @@ function fakeClient() {
   const sidebarItems: Array<{ id: string; title: string; icon: string; surface: string }> = [];
   const commandItems: CommandItem[] = [];
   const settingsScreens: Array<{ id: string }> = [];
+  const panels: Array<{ id: string; title: string; icon: string; context: string; locations?: unknown; Component: unknown }> = [];
   const transformers: Array<{ id: string; query: { itemType: string }; transform: (input: { item: unknown; phase: string }) => unknown }> = [];
   const renderers: Array<{ kind: string; version: number }> = [];
   const client = {
@@ -152,7 +157,10 @@ function fakeClient() {
       return () => removed.push(`command:${item.id}`);
     },
     // The agent-tree panel bead registers a workspace panel from the same entry.
-    addWorkspacePanel: (item: { id: string }) => () => removed.push(`panel:${item.id}`),
+    addWorkspacePanel: (item: (typeof panels)[number]) => {
+      panels.push(item);
+      return () => removed.push(`panel:${item.id}`);
+    },
     // WP-240 adds /bm-worker-new and /bm-worker-stop-all from the same entry.
     addSlashCommand: (item: { name: string }) => () => removed.push(`slash:${item.name}`),
     // WP-211 adds the Dashboard settings screen from the same entry.
@@ -170,7 +178,7 @@ function fakeClient() {
       return () => removed.push(`renderer:${item.kind}`);
     },
   };
-  return { client, surfaces, sidebarItems, commandItems, settingsScreens, transformers, renderers, removed };
+  return { client, surfaces, sidebarItems, commandItems, settingsScreens, panels, transformers, renderers, removed };
 }
 
 const theme = {
@@ -240,6 +248,7 @@ describe("client entry registrations", () => {
         "slash:bm-worker-new",
         "slash:bm-worker-stop-all",
         "settings:paseo-bm-settings",
+        "panel:bm-beads",
         "panel:beads-agents",
         "panel:bm-chat-beads",
         "transformer:bm-chat-received",
@@ -247,6 +256,19 @@ describe("client entry registrations", () => {
         "renderer:bm-message",
       ].sort(),
     );
+  });
+
+  it("adds one \"Beads\" tab to the workspace + menu, ahead of \"Beads agents\" (delta 20260918e)", () => {
+    const fake = fakeClient();
+    clientContribute(fake.client);
+
+    const tabs = fake.panels.filter((panel) => panel.id === "bm-beads");
+    expect(tabs).toHaveLength(1);
+    expect(tabs[0]).toEqual({ id: "bm-beads", title: "Beads", icon: "ListChecks", context: "workspace", Component: BeadsTabPanel });
+    // No `locations`: Paseo's default, ["workspace"], puts it in the "+" menu.
+    expect("locations" in tabs[0]!).toBe(false);
+    const ids = fake.panels.map((panel) => panel.id);
+    expect(ids.indexOf("bm-beads")).toBeLessThan(ids.indexOf("beads-agents"));
   });
 
   it("the registered Command Center item queues its workspace and opens the launcher surface", async () => {
@@ -489,5 +511,50 @@ describe("layout and theme (structural)", () => {
       expect(source, file).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(/);
       expect(source, file).not.toMatch(/color:\s*["'][a-z]+["']/);
     }
+  });
+});
+
+describe("the status strip on the main screen and the workspace list (delta 20260918e)", () => {
+  const opened = {
+    status: "opened" as const,
+    workspaceId: WS,
+    agentId: "m-1",
+    created: false,
+    otherManagerIds: ["m-0"],
+    modeNotice: null,
+  };
+
+  it("says nothing when there is nothing to say", () => {
+    expect(launcherStatusLines({ commandNotice: null, canOpenAgents: true, state: { status: "idle" } })).toEqual([]);
+  });
+
+  it("puts a slash command's notice first, the old-host warning next, then the launch state", () => {
+    const lines = launcherStatusLines({ commandNotice: "Asked 1 Worker to stop.", canOpenAgents: false, state: opened });
+    expect(lines.map((line) => [line.text, line.tone, line.dismissable])).toEqual([
+      ["Asked 1 Worker to stop.", "muted", true],
+      [OLD_HOST_WARNING, "warning", false],
+      ...describeLauncherState(opened).map((notice) => [notice.text, notice.tone, false]),
+    ]);
+    expect(OLD_HOST_WARNING).toBe("This Paseo version cannot open agents from plugins. Update Paseo to use this launcher.");
+    expect(new Set(lines.map((line) => line.key)).size).toBe(lines.length);
+  });
+
+  it.each([
+    { status: "pending" as const, workspaceId: WS },
+    { status: "error" as const, workspaceId: WS, code: "E_X", message: "boom" },
+  ])("carries the $status launch state as it is described today", (state) => {
+    const lines = launcherStatusLines({ commandNotice: null, canOpenAgents: true, state });
+    expect(lines.map((line) => ({ text: line.text, tone: line.tone }))).toEqual(describeLauncherState(state));
+    expect(lines.every((line) => !line.dismissable)).toBe(true);
+  });
+
+  it("is built once and placed on both the main screen and the workspace list", () => {
+    // The repo renders no React component in tests, so where the strip goes is
+    // checked on the source, like test/plugin-structure.test.ts reads files.
+    const source = readFileSync(fileURLToPath(new URL("../plugin/client/launcher.tsx", import.meta.url)), "utf8");
+    expect(source.match(/<LauncherStatus\b/g)).toHaveLength(1);
+    expect(source).toMatch(/<SetupScreen\b.*\bstatus=\{status\}/);
+    const listBranch = source.slice(source.indexOf("<ScrollView style={styles.screen}"));
+    expect(listBranch).toMatch(/^\s*\{status\}\s*$/m);
   });
 });

@@ -22,6 +22,7 @@ type Snapshot = {
   workspaceId?: string;
   status: string;
   labels: Record<string, string>;
+  provider?: string;
   archivedAt?: string | null;
 };
 type Event = {
@@ -168,10 +169,12 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
 
   it("registers its agent.turn_ended hook alongside the trace collector's two", () => {
     const { server, hooks } = setup();
-    // One here (bm-wq6) plus the WP-205 collector's turn_started and turn_ended.
-    expect(server.on).toHaveBeenCalledTimes(3);
-    expect([...hooks.keys()].sort()).toEqual(["agent.turn_ended", "agent.turn_started"]);
-    expect(hooks.get("agent.turn_ended")).toHaveLength(2);
+    // One here (bm-wq6) plus the WP-205 collector's turn_started and turn_ended,
+    // plus delta 20260918g's agent.created labelling, its turn_started scan and
+    // its turn_ended BM-FORMAT check.
+    expect(server.on).toHaveBeenCalledTimes(6);
+    expect([...hooks.keys()].sort()).toEqual(["agent.created", "agent.turn_ended", "agent.turn_started"]);
+    expect(hooks.get("agent.turn_ended")).toHaveLength(3);
   });
 
   it("sends the notice only to the stopped Worker's running Reviewers (idle Worker on refresh)", async () => {
@@ -195,11 +198,25 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
       { id: "rev-b", text: REVIEWER_STOP_NOTICE },
     ]);
     expect(listCalls.length).toBe(4);
+    // Parent label only since delta 20260918g §4.2: the reviewer role is decided
+    // per agent (label, else bm-reviewer provider), not by the daemon's filter.
     expect(listCalls[0]).toEqual({
-      filter: { labels: { "paseo.parent-agent-id": WORKER, "bm.role": "reviewer" }, includeArchived: false },
+      filter: { labels: { "paseo.parent-agent-id": WORKER }, includeArchived: false },
       page: { limit: 200 },
     });
     expect(listCalls[1]).toEqual(expect.objectContaining({ page: { limit: 200, cursor: "2" } }));
+  });
+
+  it("stops a running Reviewer of the Worker that carries no bm.role label, by its bm-reviewer provider (delta 20260918g)", async () => {
+    const { paseo, sends } = fakePaseo({
+      agents: [
+        reviewer("rev-plain", { labels: { "paseo.parent-agent-id": WORKER }, provider: "bm-reviewer/gpt-5.6-sol" }),
+        { id: "m-plain", workspaceId: WS, status: "running", labels: { "paseo.parent-agent-id": WORKER }, provider: "bm-manager" },
+      ],
+      statuses: { [WORKER]: ["idle"] },
+    });
+    await propagateWorkerStop(event() as never, { paseo: paseo as never });
+    expect(sends).toEqual([{ id: "rev-plain", text: REVIEWER_STOP_NOTICE }]);
   });
 
   it("recognises a bm-worker/<model> provider", async () => {
@@ -343,11 +360,15 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
   it("removes the hook on cleanup", () => {
     const { cleanup, hooks, removers } = setup();
     cleanup();
-    // Three removals: this hook plus the WP-205 collector's turn_started and
-    // turn_ended. The map must end up empty either way.
+    // Six removals: this hook, the WP-205 collector's turn_started and
+    // turn_ended, and delta 20260918g's agent.created, turn_started scan and
+    // turn_ended BM-FORMAT check. The map must end up empty.
     expect([...removers].sort()).toEqual([
+      "agent.created",
       "agent.turn_ended",
       "agent.turn_ended",
+      "agent.turn_ended",
+      "agent.turn_started",
       "agent.turn_started",
     ]);
     expect(hooks.size).toBe(0);
@@ -464,6 +485,38 @@ describe("stopAllInWorkspace", () => {
     expect(sends.map((s) => s.id)).toEqual(["w2"]);
     expect(result).toEqual({ workers: 1, reviewers: 0, skipped: 1 });
     expect(logged.join(" ")).toMatch(/could not ask w1 to stop/);
+  });
+
+  it("asks a running Worker and Reviewer that carry no bm.role label, by their provider (delta 20260918g)", async () => {
+    const { paseo, sends } = fakePaseo({
+      agents: [
+        worker("w-plain", { labels: {}, provider: "bm-worker/claude-opus-5" }),
+        reviewer("rev-plain", { labels: { "paseo.parent-agent-id": WORKER }, provider: "bm-reviewer/gpt-5.6-sol" }),
+        worker("claude-1", { labels: {}, provider: "claude" }),
+      ],
+    });
+    const result = await stopAllInWorkspace(paseo as never, WS);
+    expect(result).toEqual({ workers: 1, reviewers: 1, skipped: 0 });
+    expect(sends).toEqual(
+      expect.arrayContaining([
+        { id: "w-plain", text: WORKER_STOP_NOTICE },
+        { id: "rev-plain", text: REVIEWER_STOP_NOTICE },
+      ]),
+    );
+    expect(sends).toHaveLength(2);
+  });
+
+  it("never asks a Manager, labelled or recognised only by its bm-manager provider", async () => {
+    const { paseo, sends } = fakePaseo({
+      agents: [
+        managerAgent("m-labelled"),
+        { id: "m-plain", workspaceId: WS, status: "running", labels: {}, provider: "bm-manager/claude-opus-5" },
+        worker("w1"),
+      ],
+    });
+    const result = await stopAllInWorkspace(paseo as never, WS);
+    expect(sends.map((s) => s.id)).toEqual(["w1"]);
+    expect(result).toEqual({ workers: 1, reviewers: 0, skipped: 0 });
   });
 
   it("walks every page", async () => {

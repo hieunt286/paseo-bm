@@ -206,8 +206,8 @@ describe("traces.delete handler", () => {
     const paseo = fakePaseo();
     paseo.agents.list = vi.fn(async ({ filter }) => ({
       entries:
-        filter.labels["bm.role"] === "worker"
-          ? [{ id: "agent-running", workspaceId: WS, status: "running", labels: { "bm.requestId": "req-B" } }]
+        filter.labels === undefined || filter.labels["bm.role"] === "worker"
+          ? [{ id: "agent-running", workspaceId: WS, status: "running", labels: { "bm.role": "worker", "bm.requestId": "req-B" } }]
           : [],
     }));
     const all = await handleTracesDelete({ workspaceId: WS, scope: { allOfWorkspace: true }, dryRun: true }, paseo);

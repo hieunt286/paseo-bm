@@ -241,6 +241,44 @@ export function describeLauncherState(state: LauncherState): LauncherNotice[] {
   }
 }
 
+/** Said when the host cannot open an agent from a plugin (no `navigation.openAgent`). */
+export const OLD_HOST_WARNING = "This Paseo version cannot open agents from plugins. Update Paseo to use this launcher.";
+
+/** One line of the status strip at the top of the Beads Manager surface. */
+export interface StatusLine {
+  key: string;
+  text: string;
+  tone: NoticeTone;
+  /** Only a slash command's notice can be dismissed; the others follow the state. */
+  dismissable: boolean;
+}
+
+/**
+ * Everything the Beads Manager surface has to say before its content, in order:
+ * what a slash command reported, a host too old to open agents, then the state
+ * of the last Manager launch. The surface draws these on BOTH its main screen
+ * (Setup) and the workspace list (delta 20260918e §4.2): `/bm-worker-stop-all`
+ * opens the surface on the main screen, and a Command Center launch can fail
+ * while any view is showing.
+ */
+export function launcherStatusLines(input: {
+  commandNotice: string | null;
+  canOpenAgents: boolean;
+  state: LauncherState;
+}): StatusLine[] {
+  const lines: StatusLine[] = [];
+  if (input.commandNotice !== null) {
+    lines.push({ key: "command-notice", text: input.commandNotice, tone: "muted", dismissable: true });
+  }
+  if (!input.canOpenAgents) {
+    lines.push({ key: "old-host", text: OLD_HOST_WARNING, tone: "warning", dismissable: false });
+  }
+  describeLauncherState(input.state).forEach((notice, index) => {
+    lines.push({ key: `launch-${index}`, text: notice.text, tone: notice.tone, dismissable: false });
+  });
+  return lines;
+}
+
 export function toneColor(theme: PluginTheme, tone: NoticeTone): string {
   switch (tone) {
     case "muted":

@@ -96,7 +96,7 @@ function fakePaseo(options: FakeOptions = {}) {
         listFilters.push(filter);
         const matching = store.filter(
           (a) =>
-            Object.entries(filter.labels).every(([k, v]) => a.labels[k] === v) &&
+            Object.entries(filter.labels ?? {}).every(([k, v]) => a.labels[k] === v) &&
             (filter.includeArchived || !a.archivedAt),
         );
         const start = page.cursor ? Number(page.cursor) : 0;
@@ -174,7 +174,7 @@ const deps = (paseo: ManagerPaseo) => ({
 });
 
 describe("manager.ensure — no Manager yet", () => {
-  it("looks up by label first, then creates one from bm-manager with manager.md and both labels", async () => {
+  it("looks up the workspace's Managers first, then creates one from bm-manager with manager.md and both labels", async () => {
     const fake = fakePaseo({
       agents: [
         // Not a Manager, and a Manager of another workspace: neither counts.
@@ -187,10 +187,10 @@ describe("manager.ensure — no Manager yet", () => {
 
     expect(result).toEqual({ agentId: "created-1", created: true, otherManagerIds: [], modeNotice: null });
     expect(fake.calls.indexOf("list")).toBeLessThan(fake.calls.indexOf("create"));
-    expect(fake.listFilters[0]).toEqual({
-      labels: { "bm.role": "manager" },
-      includeArchived: false,
-    });
+    // No label filter since delta 20260918g §4.2–§4.3: a Manager started from
+    // Paseo's own new-agent flow carries no bm.role label and is recognised by
+    // its bm-manager provider, which a label filter would hide from this lookup.
+    expect(fake.listFilters[0]).toEqual({ includeArchived: false });
 
     expect(fake.createCalls).toHaveLength(1);
     const { workspaceId, options } = fake.createCalls[0]!;
@@ -476,6 +476,60 @@ describe("manager.ensure — two live Managers", () => {
     expect(fake.createCalls).toHaveLength(0);
     expect(fake.archived).toEqual([]);
     expect(fake.liveManagers().map((a) => a.id).sort()).toEqual(["mgr-new", "mgr-old"]);
+  });
+});
+
+describe("manager.ensure — a Manager without the bm.role label (delta 20260918g §4.3)", () => {
+  /** A Manager started from Paseo's own new-agent flow with the Manager profile: no labels at all. */
+  const unlabelled = (overrides: Partial<ManagerAgentSnapshot> & { id: string }) =>
+    agent({ provider: "bm-manager/claude-opus-5", labels: {}, currentModeId: "default", ...overrides });
+
+  it("opens it instead of creating a second Manager, and never switches its mode", async () => {
+    const runs: string[][] = [];
+    const cli: PaseoCliDeps = {
+      find: () => "/opt/fake/paseo",
+      run: async (file, args) => {
+        runs.push([file, ...args]);
+        return { code: 0, output: "{}", timedOut: false };
+      },
+    };
+    const fake = fakePaseo({
+      agents: [unlabelled({ id: "user-mgr" })],
+      profiles: [{ id: "bm-manager", provider: "bm-manager", model: "claude-opus-5" }],
+      modes: [
+        { id: "default", colorTier: "safe" },
+        { id: "bypassPermissions", colorTier: "dangerous" },
+      ],
+    });
+
+    const result = await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), cli, log: () => {} });
+
+    expect(result).toEqual({ agentId: "user-mgr", created: false, otherManagerIds: [], modeNotice: null });
+    expect(fake.createCalls).toEqual([]);
+    expect(runs).toEqual([]);
+  });
+
+  it("prefers a labelled Manager over a newer unlabelled one, and reports the unlabelled one", async () => {
+    const fake = fakePaseo({
+      agents: [
+        agent({ id: "bm-mgr", createdAt: "2026-09-15T08:00:00.000Z" }),
+        unlabelled({ id: "user-mgr", createdAt: "2026-09-15T10:00:00.000Z" }),
+      ],
+    });
+
+    const result = await ensureManager({ workspaceId: WS }, deps(fake.paseo));
+
+    expect(result).toEqual({ agentId: "bm-mgr", created: false, otherManagerIds: ["user-mgr"], modeNotice: null });
+    expect(fake.createCalls).toEqual([]);
+  });
+
+  it("does not take another provider's unlabelled agent for a Manager", async () => {
+    const fake = fakePaseo({ agents: [agent({ id: "plain-claude", provider: "claude", labels: {} })] });
+
+    const result = await ensureManager({ workspaceId: WS }, deps(fake.paseo));
+
+    expect(result.created).toBe(true);
+    expect(fake.createCalls).toHaveLength(1);
   });
 });
 

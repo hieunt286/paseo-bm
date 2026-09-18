@@ -233,6 +233,8 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
     expect([...handlers.keys()].sort()).toEqual([
       "agents.list",
       "agents.stop-all",
+      "answers.mark",
+      "answers.marks",
       "beads.action",
       "beads.get",
       "beads.list",
@@ -240,6 +242,7 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
       "beads.stats",
       "chat.beads",
       "chat.peers",
+      "chat.waiting",
       "launcher.order.get",
       "launcher.order.set",
       "manager.ensure",
@@ -257,10 +260,14 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
     ]);
     expect([...beforeHooks.keys()]).toEqual(["agent.create"]);
     // bm-wq6 propagates a Worker stop to its Reviewers on agent.turn_ended;
-    // WP-205 adds the trace collector on turn_started and turn_ended.
-    expect([...onHooks.keys()].sort()).toEqual(["agent.turn_ended", "agent.turn_started"]);
-    expect(onHooks.get("agent.turn_ended")).toHaveLength(2);
-    expect(onHooks.get("agent.turn_started")).toHaveLength(1);
+    // WP-205 adds the trace collector on turn_started and turn_ended; delta
+    // 20260918g labels a bm-* agent created without bm.role on agent.created,
+    // and starts its once-per-run label scan on agent.turn_started too; its
+    // BM-FORMAT check runs on agent.turn_ended.
+    expect([...onHooks.keys()].sort()).toEqual(["agent.created", "agent.turn_ended", "agent.turn_started"]);
+    expect(onHooks.get("agent.turn_ended")).toHaveLength(3);
+    expect(onHooks.get("agent.turn_started")).toHaveLength(2);
+    expect(onHooks.get("agent.created")).toHaveLength(1);
 
     const { paseo, created } = fakePaseo();
     const ensured = await handlers.get("manager.ensure")!({ workspaceId: "ws-1" }, { paseo });
@@ -281,7 +288,11 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
     const hook = beforeHooks.get("agent.create")!;
     const run = async (config: Record<string, unknown>) =>
       (await hook({ request: { config } }, { paseo })) as { config: { systemPrompt?: string } } | undefined;
-    expect((await run({ provider: "bm-worker/gpt-5.6-sol", cwd: "/repo" }))?.config.systemPrompt).toBe(workerMd);
+    // This fake host lists no modes, so the bundled hook also gives the Worker
+    // the fallback Reviewer mode `auto` (delta 20260918g §4.9, Q4 a / Q9 a).
+    expect((await run({ provider: "bm-worker/gpt-5.6-sol", cwd: "/repo" }))?.config.systemPrompt).toBe(
+      `${workerMd.trimEnd()}\n\n## Runtime facts\n\nReviewer mode: \`auto\` — pass it as \`settings.modeId\` when you create a Reviewer.\n`,
+    );
     expect((await run({ provider: "bm-reviewer", cwd: "/repo" }))?.config.systemPrompt).toBe(reviewerMd);
     expect(await run({ provider: "bm-manager", cwd: "/repo", systemPrompt: managerMd })).toBeUndefined();
     // Another provider's agent is answered at once, without a lookup.

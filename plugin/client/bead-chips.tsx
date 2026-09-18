@@ -13,10 +13,10 @@ import { useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
 import { beadsLookupRpc, chatBeadsRpc, type BeadRow } from "../shared/contracts";
 import { BeadDetailPanel } from "./beads-screen";
-import { beadChipText, formatClock, statusBadge } from "./beads-model";
+import { beadChipText, beadTitleTone, formatClock, statusBadge } from "./beads-model";
 import { dashboardStyles, toneColor } from "./dashboard-model";
 import { errorMessageOf } from "./launch-manager";
-import { Chip, type Styles, type Theme } from "./ui";
+import { Chip, beadTitleStyle, type Styles, type Theme } from "./ui";
 
 /** Chips for the ids a message names; only ids the bead store has are shown. */
 export function BeadChips({ workspaceId, ids, styles, theme }: { workspaceId: string; ids: readonly string[]; styles: Styles; theme: Theme }) {
@@ -53,7 +53,7 @@ export function BeadChips({ workspaceId, ids, styles, theme }: { workspaceId: st
 function BeadInline({ workspaceId, bead, styles, theme }: { workspaceId: string; bead: BeadRow; styles: Styles; theme: Theme }) {
   return (
     <View style={[styles.card, { backgroundColor: theme.colors.surface0, gap: 2 }]}>
-      <Text style={styles.sectionTitle}>{bead.title ?? "(untitled)"}</Text>
+      <Text style={beadTitleStyle(styles, theme, null)}>{bead.title ?? "(untitled)"}</Text>
       <Text style={[styles.body, { fontSize: 12 }]} selectable>
         {`${bead.id} · ${statusBadge(bead).text}`}
       </Text>
@@ -91,7 +91,7 @@ export function ChatBeadsPanel({ theme, layout, workspaceId, agentId }: PluginAg
         return (
           <View key={bead.id} style={styles.card}>
             <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} onPress={() => setOpenId(open ? null : bead.id)}>
-              <Text style={[styles.sectionTitle, { fontWeight: "600" }]} numberOfLines={open ? undefined : 2}>
+              <Text style={beadTitleStyle(styles, theme, beadTitleTone(bead))} numberOfLines={open ? undefined : 2}>
                 {`${open ? "▾" : "▸"} ${bead.title ?? "(untitled)"}`}
               </Text>
               <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 2 }}>

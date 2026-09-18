@@ -93,3 +93,23 @@ export function setAgentLabel(agentId: string, key: string, value: string, deps:
   }
   return runPaseo(["agent", "update", agentId, "--label", `${key}=${value}`, "--json"], deps);
 }
+
+/**
+ * `paseo agent update <id> --label <k>=<v> [--label <k>=<v> …] --json`: one
+ * command for several labels. Paseo adds or sets each label and removes none
+ * (`paseo agent update --help`, 0.8.0). Every key and value is checked first.
+ */
+export function setAgentLabels(agentId: string, labels: Readonly<Record<string, string>>, deps: PaseoCliDeps = {}): Promise<CliResult> {
+  if (!isSafeAgentId(agentId)) return Promise.resolve({ ok: false, reason: `refusing an unexpected agent id "${agentId}"` });
+  const entries = Object.entries(labels);
+  if (entries.length === 0) return Promise.resolve({ ok: false, reason: "no label to set" });
+  const args = ["agent", "update", agentId];
+  for (const [key, value] of entries) {
+    if (!TOKEN.test(key) || !TOKEN.test(value)) {
+      return Promise.resolve({ ok: false, reason: `refusing an unexpected label "${key}=${value}"` });
+    }
+    args.push("--label", `${key}=${value}`);
+  }
+  args.push("--json");
+  return runPaseo(args, deps);
+}

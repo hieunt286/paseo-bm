@@ -25,6 +25,7 @@
 import type { AgentNode } from "../shared/contracts";
 import { PLUGIN_VERSION } from "../shared/version";
 import { setAgentLabel, setAgentMode, type PaseoCliDeps } from "./paseo-cli";
+import { listAllAgents, roleOfAgent } from "./agent-role";
 import { providerId } from "./provider-id";
 import { managerModeFor, modesFor } from "./role-mode";
 
@@ -45,9 +46,6 @@ export const MANAGER_PROFILE_ID = "bm-manager";
 
 /** Title given to a freshly created Manager. */
 export const MANAGER_TITLE = "Beads Manager";
-
-/** Largest page the daemon directory query accepts (protocol: `limit.max(200)`). */
-const LIST_PAGE_LIMIT = 200;
 
 /**
  * Error codes this RPC can report. Taken from the single Phase 1 registry in
@@ -81,6 +79,8 @@ export interface ManagerAgentSnapshot {
   createdAt: string;
   status: string;
   labels: Record<string, string>;
+  /** Provider selection (`bm-manager` or `bm-manager/<model>`); decides the role when the label is missing. */
+  provider?: string;
   archivedAt?: string | null;
   providerUnavailable?: boolean;
   lastError?: string;
@@ -106,7 +106,7 @@ export interface ManagerAgentProfile {
 export interface ManagerPaseo {
   agents: {
     list(options: {
-      filter: { labels: Record<string, string>; includeArchived: boolean };
+      filter: { labels?: Record<string, string>; includeArchived: boolean };
       page: { limit: number; cursor?: string };
     }): Promise<{
       entries: Array<{ agent: ManagerAgentSnapshot }>;
@@ -178,51 +178,26 @@ function newestFirst(a: ManagerAgentSnapshot, b: ManagerAgentSnapshot): number {
   return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
 }
 
-/**
- * Walks every page of an `agents.list` query and returns all snapshots.
- * Shared by `manager.ensure` and `agents.list` so paging lives in one place.
- */
-async function listAllAgents<Filter, Snapshot>(
-  list: (options: {
-    filter: Filter;
-    page: { limit: number; cursor?: string };
-  }) => Promise<{
-    entries: Array<{ agent: Snapshot }>;
-    pageInfo: { nextCursor: string | null; hasMore: boolean };
-  }>,
-  filter: Filter,
-): Promise<Snapshot[]> {
-  const found: Snapshot[] = [];
-  let cursor: string | undefined;
-  for (;;) {
-    const page = await list({
-      filter,
-      page: cursor === undefined ? { limit: LIST_PAGE_LIMIT } : { limit: LIST_PAGE_LIMIT, cursor },
-    });
-    for (const { agent } of page.entries) found.push(agent);
-    if (!page.pageInfo.hasMore || !page.pageInfo.nextCursor) break;
-    cursor = page.pageInfo.nextCursor;
-  }
-  return found;
+/** True when the Manager carries the `bm.role=manager` label; false when only its provider says so. */
+function labelledManager(agent: ManagerAgentSnapshot): boolean {
+  return roleOfAgent(agent)?.labelled === true;
 }
 
-/** Every live Manager of the workspace, newest first. */
+/**
+ * Every live Manager of the workspace: labelled Managers first, then the ones
+ * recognised only by their `bm-manager` provider (started from Paseo's own
+ * new-agent flow), each group newest first (delta 20260918g §4.3). Listing
+ * with no label filter is what lets the second group be found at all; without
+ * it `manager.ensure` created a second Manager next to the user's own.
+ */
 export async function findLiveManagers(
   paseo: ManagerPaseo,
   workspaceId: string,
 ): Promise<ManagerAgentSnapshot[]> {
-  const all = await listAllAgents((options) => paseo.agents.list(options), {
-    labels: { [MANAGER_ROLE_LABEL]: MANAGER_ROLE_VALUE },
-    includeArchived: false,
-  });
+  const all = await listAllAgents((options) => paseo.agents.list(options), { includeArchived: false });
   return all
-    .filter(
-      (agent) =>
-        agent.workspaceId === workspaceId &&
-        agent.labels[MANAGER_ROLE_LABEL] === MANAGER_ROLE_VALUE &&
-        isLive(agent),
-    )
-    .sort(newestFirst);
+    .filter((agent) => agent.workspaceId === workspaceId && roleOfAgent(agent)?.role === "manager" && isLive(agent))
+    .sort((a, b) => Number(labelledManager(b)) - Number(labelledManager(a)) || newestFirst(a, b));
 }
 
 function providerSelection(profile: ManagerAgentProfile): string {
@@ -255,7 +230,9 @@ export async function ensureManager(
       agentId: chosen.id,
       created: false,
       otherManagerIds: others.map((agent) => agent.id),
-      modeNotice: await switchOnce(chosen, deps),
+      // A Manager recognised only by its provider was created by the user in a
+      // mode they chose: paseo-bm never switches it (delta 20260918g §4.3).
+      modeNotice: labelledManager(chosen) ? await switchOnce(chosen, deps) : null,
     };
   }
 
@@ -392,6 +369,8 @@ export interface ListedAgentSnapshot {
   createdAt: string;
   updatedAt: string;
   labels: Record<string, string>;
+  /** Provider selection; decides the role when the `bm.role` label is missing. */
+  provider?: string;
   archivedAt?: string | null;
 }
 
@@ -412,11 +391,9 @@ export interface AgentDirectoryPaseo {
   };
 }
 
-const KNOWN_ROLES: ReadonlySet<string> = new Set(["manager", "worker", "reviewer"]);
-
+/** The label's role, else the provider's (delta 20260918g §4.1), else `unknown`. */
 function roleOf(agent: ListedAgentSnapshot): AgentNode["role"] {
-  const value = agent.labels[MANAGER_ROLE_LABEL];
-  return value !== undefined && KNOWN_ROLES.has(value) ? (value as AgentNode["role"]) : "unknown";
+  return roleOfAgent(agent)?.role ?? "unknown";
 }
 
 /** Oldest first by `createdAt`, ties by id, so the list order is stable. */
@@ -430,11 +407,11 @@ function oldestFirst(a: ListedAgentSnapshot, b: ListedAgentSnapshot): number {
  * Handler body of `agents.list`: the non-archived paseo-bm agents of one
  * workspace, flat, oldest first.
  *
- * Membership: an agent carrying any `bm.role` label, plus every agent that
- * descends from one through `paseo.parent-agent-id` (a Worker or Reviewer that
- * forgot to label itself still shows up, with role `unknown`). A `bm.role`
- * value outside the three roles is also `unknown`; nothing here throws on
- * labels.
+ * Membership: an agent with a paseo-bm role — by its `bm.role` label or, when
+ * that is missing, by its `bm-*` provider (delta 20260918g) — plus every agent
+ * that descends from one through `paseo.parent-agent-id` (an agent of another
+ * provider under a Worker still shows up, with role `unknown`). A node without a
+ * valid label is `labelled: false`; nothing here throws on labels.
  *
  * `parentId` is the parent label only when that parent is in the result. A
  * parent that was deleted or archived yields `null`, so an orphaned Worker is a
@@ -451,8 +428,12 @@ export async function listWorkspaceAgents(
     (agent) => agent.workspaceId === input.workspaceId && !agent.archivedAt,
   );
 
+  // Roots: every agent with a paseo-bm role, by label or by provider, and — as
+  // before delta 20260918g — any agent carrying a `bm.role` label at all.
   const members = new Set(
-    inWorkspace.filter((agent) => agent.labels[MANAGER_ROLE_LABEL] !== undefined).map((a) => a.id),
+    inWorkspace
+      .filter((agent) => roleOfAgent(agent) !== null || agent.labels[MANAGER_ROLE_LABEL] !== undefined)
+      .map((a) => a.id),
   );
   // Pull in descendants until the set stops growing (depth is small; bounded by n passes).
   for (let grew = true; grew; ) {
@@ -478,6 +459,7 @@ export async function listWorkspaceAgents(
         status: agent.status,
         parentId: parent !== undefined && members.has(parent) ? parent : null,
         updatedAt: agent.updatedAt,
+        labelled: roleOfAgent(agent)?.labelled ?? false,
       };
     });
   return { agents };

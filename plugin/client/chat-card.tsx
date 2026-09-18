@@ -1,46 +1,60 @@
 /**
  * One chat card: a message between the Manager, a Worker and a Reviewer
- * (delta 20260916-chat-cards). Header with the sender's role icon, colour and
- * session name, the recipient, the request and its status; the full message as
- * Markdown on demand; and a reply that goes straight to the other agent.
+ * (delta 20260916-chat-cards). Header with the sender's role icon and
+ * session name, the time under it, the recipient, the request and its status;
+ * the full message as Markdown on demand; and a reply that goes straight to
+ * the other agent.
  *
  * A received report that carries a `BM-QUESTIONS` block also shows its
- * questions with option buttons, and sends the chosen answers to the asking
- * Worker (delta 20260918c-question-cards §4.4).
+ * questions with option buttons (delta 20260918c-question-cards §4.4). A pick
+ * writes the answers into the Reply box, whose one Send goes to the asking
+ * Worker; every Reply re-reads its recipient's status first (delta
+ * 20260918d-card-replies §4.1–§4.3).
  *
  * All wording and decisions live in `chat-cards.ts`, tested without a
  * renderer. Client rules: React Native primitives only, colours from the theme.
  */
 import { type PluginTimelineItemProps, usePaseo, useRpc } from "@getpaseo/plugin/client";
-import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useState, useSyncExternalStore } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
-import { chatPeersRpc, type ChatPeer } from "../shared/contracts";
+import { answersMarkRpc, answersMarksRpc, chatPeersRpc, chatWaitingRpc } from "../shared/contracts";
+import { errorMessageOf } from "./launch-manager";
+import { answeredRecord, answersVersion, repliedAt, setAnswered, setReplied, subscribeAnswers } from "./answer-state";
+import { WAITING_POLL_MS } from "./waiting-pills-model";
 import type { Question } from "../shared/bm-questions";
 import {
-  answerSummary,
+  answeredHow,
   answeredKey,
+  answersDraft,
   choosable,
   drawAsCard,
-  formComplete,
+  fallbackMarkdown,
   markOf,
   markdownOf,
+  ownerWarning,
+  outlineTone,
   partiesOf,
   partyName,
   quickReplies,
   recommendedPicks,
-  replyText,
+  replyControls,
+  replyTarget,
   roleName,
-  sendAnswers,
+  sendReply,
+  sentSummary,
   showsQuestions,
+  startsOpen,
+  stillWaiting,
+  visibleBeads,
   statusChip,
   summaryOf,
-  topicOf,
+  questionHeading,
+  withAnswersBlock,
   type ChatCard,
   type Picks,
 } from "./chat-cards";
-import { ROLE_MARK, dashboardStyles, toneColor } from "./dashboard-model";
-import { errorMessageOf } from "./launch-manager";
+import { dashboardStyles, toneColor } from "./dashboard-model";
 import { MarkdownView } from "./markdown-view";
 import { Chip, RoleMark } from "./ui";
 import { BeadChips } from "./bead-chips";
@@ -49,12 +63,8 @@ import { beadIdCandidates } from "../shared/bead-ids";
 /** Peers change rarely; one lookup per chat is plenty. */
 const PEERS_STALE_MS = 30_000;
 
-/**
- * Questions answered from a card in this app session, by `answeredKey`. The
- * chat list may unmount a card while scrolling, so this cannot live in the
- * card's own state; it is not kept across a reload (REQ-059d).
- */
-const answered = new Map<string, { at: Date; summary: string; to: string }>();
+/** Shared by every card, so a mark shows on all copies at once. */
+const ANSWER_MARKS_QUERY = ["paseo-bm", "answer-marks"] as const;
 
 function clock(date: Date): string {
   const two = (value: number) => String(value).padStart(2, "0");
@@ -71,59 +81,153 @@ export function ChatCardView({ theme, layout, agentId, item, timestamp }: Plugin
     queryFn: () => listPeers({ agentId }),
     staleTime: PEERS_STALE_MS,
   });
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(() => startsOpen(card));
   const [replying, setReplying] = useState(false);
   const [answer, setAnswer] = useState("");
   const [sending, setSending] = useState(false);
   const [outcome, setOutcome] = useState<{ text: string; tone: "success" | "danger" } | null>(null);
+  const [picks, setPicks] = useState<Picks>({});
+  const [beadsOpen, setBeadsOpen] = useState(false);
+  const [marking, setMarking] = useState(false);
+  // Every copy of this card (the chat's, a waiting pill's popover) reads the
+  // same session state and redraws when any copy writes (delta 20260918d §4.9).
+  useSyncExternalStore(subscribeAnswers, answersVersion, answersVersion);
+  const key = answeredKey(agentId, card);
+  const done = answeredRecord(key);
+  const replyAt = repliedAt(key);
+  // A question card also learns it was answered elsewhere: `chat.waiting` no
+  // longer lists its report (owner decision Q17). Every card shares one query.
+  const asksHere = peers.isSuccess && showsQuestions(card, peers.data.owner);
+  const listWaiting = useRpc(chatWaitingRpc);
+  const waiting = useQuery({
+    queryKey: ["paseo-bm", "chat-waiting"],
+    queryFn: () => listWaiting({}),
+    refetchInterval: WAITING_POLL_MS,
+    enabled: asksHere,
+  });
+  const waitingNow = waiting.isSuccess ? waiting.data.waiting : null;
+  // "Mark as answered" is saved in the install home, so it survives a reload
+  // (owner decision Q16 a); every card shares one query of the marks.
+  const listMarks = useRpc(answersMarksRpc);
+  const saveMark = useRpc(answersMarkRpc);
+  const queryClient = useQueryClient();
+  const marks = useQuery({ queryKey: ANSWER_MARKS_QUERY, queryFn: () => listMarks({}), enabled: asksHere });
+  const marked = marks.data?.keys.includes(key) ?? false;
+  const how = asksHere
+    ? answeredHow({
+        sent: done !== null,
+        marked,
+        waiting: waitingNow,
+        stillWaitingNow: waitingNow !== null && stillWaiting(card, agentId, waitingNow),
+      })
+    : null;
 
   const { from, to } = partiesOf(card, peers.data?.owner ?? null, peers.data?.peers ?? []);
   const counterpart = card.direction === "received" ? from : to;
   const fromMark = markOf(from.role);
-  const colour = fromMark === null ? theme.colors.border : toneColor(theme, ROLE_MARK[fromMark].tone);
   const chip = statusChip(card);
+  const warning = peers.isSuccess ? ownerWarning(peers.data.owner) : null;
+  const outline = outlineTone(card);
   const canReply = counterpart.id !== null && counterpart.id !== agentId;
+  const controls = replyControls(canReply, replyAt !== null || how !== null);
   const beadIds = useMemo(() => beadIdCandidates(card.text), [card.text]);
+  const beads = visibleBeads(beadIds, beadsOpen);
   const workspaceId = peers.data?.workspaceId ?? null;
 
   // Not a paseo-bm chat, or a block this agent only quoted: plain text, no card.
   if (peers.isSuccess && !drawAsCard(card, peers.data.owner)) {
     return (
       <View style={{ marginVertical: 4 }}>
-        <MarkdownView source={card.text} theme={theme} compact={layout.compact} />
+        <MarkdownView source={fallbackMarkdown(card)} theme={theme} compact={layout.compact} />
       </View>
     );
   }
 
-  const send = async () => {
-    if (counterpart.id === null || answer.trim() === "") return;
-    setSending(true);
+  const refreshPeers = async () => {
+    const fresh = await peers.refetch({ throwOnError: true });
+    return { owner: fresh.data?.owner ?? null, peers: fresh.data?.peers ?? [] };
+  };
+
+  // A pick rewrites the answers block at the top of the Reply box and opens it;
+  // the user's own words stay (delta 20260918d §4.1).
+  const changePicks = (next: Picks) => {
+    setPicks(next);
+    setAnswer((current) => withAnswersBlock(current, answersDraft(card, next)));
+    setReplying(true);
+    setOutcome(null);
+  };
+
+  const markAnswered = async () => {
+    setMarking(true);
     setOutcome(null);
     try {
-      await paseo.agents.ref(counterpart.id).send(replyText(card, answer));
-      setOutcome({ text: `Sent to ${partyName(counterpart)}.`, tone: "success" });
-      setAnswer("");
-      setReplying(false);
+      queryClient.setQueryData(ANSWER_MARKS_QUERY, await saveMark({ key, marked: true }));
     } catch (failure) {
       setOutcome({ text: errorMessageOf(failure), tone: "danger" });
     } finally {
-      setSending(false);
+      setMarking(false);
     }
   };
 
+  // Every Reply re-reads the recipient's status first (delta 20260918d §4.2).
+  const send = async () => {
+    if (answer.trim() === "") return;
+    setSending(true);
+    setOutcome(null);
+    const result = await sendReply({
+      card,
+      text: answer,
+      refreshPeers,
+      send: (id, text) => paseo.agents.ref(id).send(text).then(() => undefined),
+    });
+    setSending(false);
+    if (!result.ok) {
+      setOutcome({ text: result.reason, tone: "danger" });
+      return;
+    }
+    const to = partyName({ role: counterpart.role, id: result.to.id, title: result.to.title });
+    setOutcome({ text: `Sent to ${to}.`, tone: "success" });
+    const at = new Date();
+    setReplied(key, at);
+    const summary = sentSummary(card, picks, answer);
+    if (summary !== null) setAnswered(key, { at, summary, to });
+    setAnswer("");
+    setReplying(false);
+  };
+
+  // Without a single recipient the options cannot be sent anywhere, so they are
+  // off, and the card says why. A running recipient is not a reason: the user
+  // may prepare answers while it works; Send refuses at send time.
+  const target = peers.isSuccess ? replyTarget(card, peers.data.owner, peers.data.peers) : null;
+  const unreachable = canReply ? null : target !== null && "reason" in target ? target.reason : "Cannot tell who to send this to.";
+
   return (
-    <View style={[styles.card, { gap: 6, borderLeftWidth: 3, borderLeftColor: colour, marginVertical: 4 }]}>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        {fromMark === null ? null : <RoleMark kind={fromMark} theme={theme} />}
-        <Text style={[styles.sectionTitle, { color: colour }]} numberOfLines={1}>
-          {partyName(from)}
-        </Text>
-        <Text style={styles.body} numberOfLines={1}>
-          {`→ ${partyName(to)}`}
-        </Text>
-        <View style={{ flex: 1 }} />
-        {chip === null ? null : <Chip badge={chip} styles={styles} theme={theme} />}
-        <Text style={styles.body}>{clock(timestamp)}</Text>
+    <View style={[styles.card, { gap: 6, marginVertical: 4 }, outline === null ? null : { borderColor: toneColor(theme, outline) }]}>
+      {/* No coloured border and a plain-colour name: only the role icon keeps its
+          colour; the time sits under the sender (delta 20260918d §4.7, Q11).
+          A finished report is the one exception: its whole outline takes the
+          success colour, at the usual width (§4.10). */}
+      <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
+        <View style={{ flex: 1, gap: 2 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            {fromMark === null ? null : <RoleMark kind={fromMark} theme={theme} />}
+            <Text style={[styles.sectionTitle, { color: theme.colors.foreground }]} numberOfLines={1}>
+              {partyName(from)}
+            </Text>
+            <Text style={styles.body} numberOfLines={1}>
+              {`→ ${partyName(to)}`}
+            </Text>
+          </View>
+          <Text style={styles.body}>{clock(timestamp)}</Text>
+        </View>
+        <View style={{ alignItems: "flex-end", gap: 4 }}>
+          {chip === null ? null : <Chip badge={chip} styles={styles} theme={theme} />}
+          {warning === null ? null : <Chip badge={warning.chip} styles={styles} theme={theme} />}
+          {card.formatIssues.length === 0 ? null : <Chip badge={{ text: "template error", tone: "danger" }} styles={styles} theme={theme} />}
+          {controls.answeredChip ? (
+            <Chip badge={{ text: "Answered", tone: "success" }} onPress={() => setReplying(true)} styles={styles} theme={theme} />
+          ) : null}
+        </View>
       </View>
 
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -135,21 +239,43 @@ export function ChatCardView({ theme, layout, agentId, item, timestamp }: Plugin
       </View>
 
       {workspaceId === null || beadIds.length === 0 ? null : (
-        <BeadChips workspaceId={workspaceId} ids={beadIds} styles={styles} theme={theme} />
+        <View style={{ gap: 4 }}>
+          <BeadChips workspaceId={workspaceId} ids={beads.shown} styles={styles} theme={theme} />
+          {/* Two chips, then "…" on the next line for the rest (delta 20260918d §4.7). */}
+          {beads.hidden === 0 ? null : (
+            <View style={styles.chipRow}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Show all ${beadIds.length} beads`}
+                onPress={() => setBeadsOpen(true)}
+              >
+                <Chip badge={{ text: "…", tone: "muted" }} styles={styles} theme={theme} />
+              </Pressable>
+            </View>
+          )}
+        </View>
       )}
 
       {peers.isSuccess && showsQuestions(card, peers.data.owner) ? (
         <QuestionForm
           card={card}
-          agentId={agentId}
           styles={styles}
           theme={theme}
           recipient={partyName(from)}
-          refreshPeers={async () => {
-            const fresh = await peers.refetch({ throwOnError: true });
-            return { owner: fresh.data?.owner ?? null, peers: fresh.data?.peers ?? [] };
-          }}
-          send={(id, text) => paseo.agents.ref(id).send(text).then(() => undefined)}
+          picks={picks}
+          onChange={changePicks}
+          answeredLine={
+            how === "sent" && done !== null
+              ? `Answered at ${clock(done.at)} → ${done.to}: ${done.summary}`
+              : how === "marked"
+                ? "Marked as answered."
+                : how === "moved-on"
+                  ? `No longer waiting: ${partyName(from)} is working or has reported since.`
+                  : null
+          }
+          unreachable={unreachable}
+          marking={marking}
+          onMarkAnswered={() => void markAnswered()}
         />
       ) : null}
 
@@ -162,7 +288,7 @@ export function ChatCardView({ theme, layout, agentId, item, timestamp }: Plugin
         >
           <Text style={styles.secondaryButtonText}>{open ? "▾ Hide message" : "▸ Show message"}</Text>
         </Pressable>
-        {canReply ? (
+        {controls.replyButton ? (
           <Pressable accessibilityRole="button" onPress={() => setReplying(!replying)} style={styles.button}>
             <Text style={styles.buttonText}>{`Reply to ${roleName(counterpart.role)}`}</Text>
           </Pressable>
@@ -171,6 +297,15 @@ export function ChatCardView({ theme, layout, agentId, item, timestamp }: Plugin
 
       {open ? (
         <View style={[styles.card, { backgroundColor: theme.colors.surface0 }]}>
+          {warning === null ? null : <Text style={styles.body}>{warning.line}</Text>}
+          {card.formatIssues.length === 0 ? null : (
+            <View style={{ gap: 2 }}>
+              <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>This message breaks the template:</Text>
+              {card.formatIssues.map((line, index) => (
+                <Text key={`${index}:${line}`} style={styles.body}>{`• ${line}`}</Text>
+              ))}
+            </View>
+          )}
           <MarkdownView source={markdownOf(card.text)} theme={theme} compact={layout.compact} />
         </View>
       ) : null}
@@ -215,147 +350,150 @@ export function ChatCardView({ theme, layout, agentId, item, timestamp }: Plugin
 type Styles = ReturnType<typeof dashboardStyles>;
 type Theme = PluginTimelineItemProps<ChatCard>["theme"];
 
+/** One option of a question: a full-width row, outlined, filled when chosen (delta 20260918d §4.4). */
+function optionRow(theme: Theme, selected: boolean) {
+  return {
+    alignSelf: "stretch" as const,
+    flexDirection: "row" as const,
+    alignItems: "flex-start" as const,
+    gap: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: selected ? toneColor(theme, "info") : theme.colors.border,
+    backgroundColor: selected ? theme.colors.surface2 : "transparent",
+  };
+}
+
 /**
  * The questions of a Worker's `blocked` report, answered with one tap per
- * question. Nothing is pre-selected; "Use recommendations" fills the Worker's
+ * question. Draw-only: the picks live in the card, which writes them into the
+ * Reply box. Nothing is pre-selected; "Use recommendations" fills the Worker's
  * recommendations in and sends nothing.
  */
 function QuestionForm({
   card,
-  agentId,
   styles,
   theme,
   recipient,
-  refreshPeers,
-  send,
+  picks,
+  onChange,
+  answeredLine,
+  unreachable,
+  marking,
+  onMarkAnswered,
 }: {
   card: ChatCard;
-  agentId: string;
   styles: Styles;
   theme: Theme;
   recipient: string;
-  refreshPeers: () => Promise<{ owner: ChatPeer | null; peers: ChatPeer[] }>;
-  send: (agentId: string, text: string) => Promise<void>;
+  picks: Picks;
+  onChange: (next: Picks) => void;
+  /** What replaces the options once the card counts as answered, or null. */
+  answeredLine: string | null;
+  /** Why the options are off, or null when they can be sent. */
+  unreachable: string | null;
+  /** True while "Mark as answered" is being saved. */
+  marking: boolean;
+  onMarkAnswered: () => void;
 }) {
-  const key = answeredKey(agentId, card);
-  const [picks, setPicks] = useState<Picks>({});
-  const [sending, setSending] = useState(false);
-  const [problem, setProblem] = useState<string | null>(null);
-  const [done, setDone] = useState(() => answered.get(key) ?? null);
-
-  if (done !== null) {
-    return (
-      <Text style={[styles.body, { color: toneColor(theme, "success") }]}>
-        {`Answered at ${clock(done.at)} → ${done.to}: ${done.summary}`}
-      </Text>
-    );
+  if (answeredLine !== null) {
+    return <Text style={[styles.body, { color: toneColor(theme, "success") }]}>{answeredLine}</Text>;
   }
 
-  const pick = (question: Question, next: Picks[string]) => {
-    setProblem(null);
-    setPicks({ ...picks, [question.id]: next });
-  };
-  const complete = formComplete(card.questions, picks);
-
-  const submit = async () => {
-    setSending(true);
-    setProblem(null);
-    const result = await sendAnswers({ card, picks, refreshPeers, send });
-    setSending(false);
-    if (!result.ok) {
-      setProblem(result.reason);
-      return;
-    }
-    const record = {
-      at: new Date(),
-      summary: answerSummary(card.questions, picks),
-      to: partyName({ role: "worker", id: result.to.id, title: result.to.title }),
-    };
-    answered.set(key, record);
-    setDone(record);
-  };
+  const off = unreachable !== null;
+  const pick = (question: Question, next: Picks[string]) => onChange({ ...picks, [question.id]: next });
 
   return (
     <View style={{ gap: 8 }}>
-      {card.questions.map((question) => {
-        const { topic, rest } = topicOf(question);
+      {card.questions.map((question, index) => {
+        const { heading, body } = questionHeading(question);
         const current = picks[question.id];
         const other = current !== undefined && "other" in current ? current : null;
         return (
-          <View key={question.id} style={{ gap: 4 }}>
-            <Text style={styles.mono}>
-              <Text style={{ fontWeight: "600" }}>{`${question.id} `}</Text>
-              {topic === null ? null : <Text style={{ fontWeight: "600" }}>{`${topic} — `}</Text>}
-              {rest}
-            </Text>
-            {choosable(question)
-              ? question.options.map((option) => {
-                  const selected = current !== undefined && "key" in current && current.key === option.key;
-                  return (
-                    <Pressable
-                      key={option.key}
-                      accessibilityRole="button"
-                      accessibilityState={{ selected }}
-                      onPress={() => pick(question, { key: option.key })}
-                      style={{
-                        flexDirection: "row",
-                        alignItems: "center",
-                        flexWrap: "wrap",
-                        gap: 6,
-                        paddingVertical: 4,
-                        paddingHorizontal: 8,
-                        borderRadius: 6,
-                        borderWidth: 1,
-                        borderColor: selected ? toneColor(theme, "info") : theme.colors.border,
-                        backgroundColor: selected ? theme.colors.surface2 : "transparent",
-                      }}
-                    >
-                      <Text style={[styles.body, { flexShrink: 1 }]}>{`${selected ? "●" : "○"} ${option.key} — ${option.text}`}</Text>
-                      {option.recommended ? <Chip badge={{ text: "recommended", tone: "success" }} styles={styles} theme={theme} /> : null}
-                    </Pressable>
-                  );
-                })
-              : null}
-            <Pressable
-              accessibilityRole="button"
-              accessibilityState={{ selected: other !== null }}
-              onPress={() => pick(question, { other: other?.other ?? "" })}
-              style={styles.secondaryButton}
-            >
-              <Text style={styles.secondaryButtonText}>{`${other !== null ? "●" : "○"} Other…`}</Text>
-            </Pressable>
-            {other === null ? null : (
-              <TextInput
-                value={other.other}
-                onChangeText={(text) => pick(question, { other: text })}
-                multiline
-                placeholder={`Your answer to ${question.id}`}
-                placeholderTextColor={theme.colors.foregroundMuted}
-                style={[styles.mono, { minHeight: 48, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 8, padding: 8 }]}
-              />
-            )}
+          <View
+            key={question.id}
+            style={[
+              { gap: 6, paddingVertical: 8 },
+              // A divider between questions (delta 20260918d §4.4, owner decision Q5).
+              index === 0 ? null : { borderTopWidth: 1, borderTopColor: theme.colors.border },
+            ]}
+          >
+            <Text style={[styles.body, { color: theme.colors.foreground, fontWeight: "600" }]}>{heading}</Text>
+            <Text style={[styles.body, { color: theme.colors.foreground }]}>{body}</Text>
+            <View style={{ gap: 8 }}>
+              {choosable(question)
+                ? question.options.map((option) => {
+                    const selected = current !== undefined && "key" in current && current.key === option.key;
+                    return (
+                      <Pressable
+                        key={option.key}
+                        accessibilityRole="button"
+                        accessibilityState={{ selected, disabled: off }}
+                        disabled={off}
+                        onPress={() => pick(question, { key: option.key })}
+                        style={optionRow(theme, selected)}
+                      >
+                        <Text style={[styles.body, { width: 14, color: theme.colors.foreground }]}>{selected ? "●" : "○"}</Text>
+                        <Text style={[styles.body, { width: 16, color: theme.colors.foreground, fontWeight: "600" }]}>{option.key}</Text>
+                        <Text style={[styles.body, { flex: 1, color: theme.colors.foreground }]}>{option.text}</Text>
+                        {option.recommended ? <Chip badge={{ text: "recommended", tone: "success" }} styles={styles} theme={theme} /> : null}
+                      </Pressable>
+                    );
+                  })
+                : null}
+              <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ selected: other !== null, disabled: off }}
+                disabled={off}
+                onPress={() => pick(question, { other: other?.other ?? "" })}
+                style={optionRow(theme, other !== null)}
+              >
+                <Text style={[styles.body, { width: 14, color: theme.colors.foreground }]}>{other !== null ? "●" : "○"}</Text>
+                <Text style={[styles.body, { flex: 1, color: theme.colors.foreground }]}>Other…</Text>
+              </Pressable>
+              {other === null ? null : (
+                <TextInput
+                  value={other.other}
+                  onChangeText={(text) => pick(question, { other: text })}
+                  editable={!off}
+                  multiline
+                  placeholder={`Your answer to ${question.id}`}
+                  placeholderTextColor={theme.colors.foregroundMuted}
+                  style={[styles.mono, { minHeight: 48, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 8, padding: 8 }]}
+                />
+              )}
+            </View>
           </View>
         );
       })}
       <Text style={styles.body}>{`Answers go to ${recipient}${card.requestId === null ? "" : ` · ${card.requestId}`}`}</Text>
+      {unreachable === null ? null : <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{unreachable}</Text>}
       <View style={styles.chipRow}>
-        <Pressable accessibilityRole="button" onPress={() => setPicks(recommendedPicks(card.questions, picks))} style={styles.secondaryButton}>
-          <Text style={styles.secondaryButtonText}>Use recommendations</Text>
-        </Pressable>
-        <Pressable accessibilityRole="button" onPress={() => setPicks({})} style={styles.secondaryButton}>
-          <Text style={styles.secondaryButtonText}>Clear</Text>
-        </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityState={{ disabled: sending || !complete }}
-          disabled={sending || !complete}
-          onPress={() => void submit()}
-          style={[styles.button, { opacity: sending || !complete ? 0.5 : 1 }]}
+          accessibilityState={{ disabled: off }}
+          disabled={off}
+          onPress={() => onChange(recommendedPicks(card.questions, picks))}
+          style={styles.secondaryButton}
         >
-          <Text style={styles.buttonText}>{sending ? "Sending…" : `Send answers to ${recipient}`}</Text>
+          <Text style={styles.secondaryButtonText}>Use recommendations</Text>
+        </Pressable>
+        <Pressable accessibilityRole="button" accessibilityState={{ disabled: off }} disabled={off} onPress={() => onChange({})} style={styles.secondaryButton}>
+          <Text style={styles.secondaryButtonText}>Clear</Text>
+        </Pressable>
+        {/* Saved in the install home: the card stays answered after a reload (Q16 a). */}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ disabled: marking }}
+          disabled={marking}
+          onPress={onMarkAnswered}
+          style={[styles.secondaryButton, { opacity: marking ? 0.5 : 1 }]}
+        >
+          <Text style={styles.secondaryButtonText}>{marking ? "Marking…" : "Mark as answered"}</Text>
         </Pressable>
       </View>
-      {problem === null ? null : <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{problem}</Text>}
     </View>
   );
 }

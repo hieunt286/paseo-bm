@@ -8,8 +8,9 @@
  * Node import, no `server/` import.
  */
 import { type PluginSurfaceProps, useRpc } from "@getpaseo/plugin/client";
+import { Icon } from "@getpaseo/plugin/client/react-native";
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useMemo, useState, useSyncExternalStore } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { beadsActionRpc, beadsGetRpc, beadsListRpc, type BeadAction, type BeadRow } from "../shared/contracts";
 import { MarkdownView } from "./markdown-view";
@@ -24,7 +25,11 @@ import {
   type SortKey,
   actionSpec,
   actionsFor,
+  beadTitleTone,
   beadsOverview,
+  closedBeadsVisibility,
+  doneText,
+  groupBeads,
   facetsOf,
   filterBeads,
   priorityLabel,
@@ -35,12 +40,14 @@ import {
 } from "./beads-model";
 import { dashboardStyles, toneColor, type Badge } from "./dashboard-model";
 import { errorMessageOf } from "./launch-manager";
-import { BarChart, Chip, RoleMark, StatCards, type Styles, type Theme } from "./ui";
+import { BarChart, Chip, RoleMark, StatCards, beadTitleStyle, type Styles, type Theme } from "./ui";
 
 export interface BeadsScreenProps extends PluginSurfaceProps {
   workspaceId: string;
-  workspaceLabel: string;
-  onBack: () => void;
+  /** Omitted inside the workspace's own "Beads" tab: the tab already says where it is. */
+  workspaceLabel?: string;
+  /** Omitted inside the "Beads" tab, which has no screen to go back to. */
+  onBack?: () => void;
 }
 
 const LIST_LIMIT = 200;
@@ -278,18 +285,33 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
   const rows = beads.data?.beads ?? [];
   const facets = useMemo(() => facetsOf(rows, filter), [rows, filter]);
   const shown = useMemo(() => sortBeads(filterBeads(rows, filter), sortKey, descending), [rows, filter, sortKey, descending]);
+  // Closed beads are hidden until asked for, for the rest of the app session (Q9).
+  const showClosed = useSyncExternalStore(closedBeadsVisibility.subscribe, closedBeadsVisibility.get, closedBeadsVisibility.get);
+  const grouped = useMemo(() => groupBeads(shown, { showClosed, limit: LIST_LIMIT }), [shown, showClosed]);
   const active = activeFilters(filter);
   const overview = beads.data === undefined ? null : beadsOverview(rows, beads.data.stats, new Date());
-  const activityMax = Math.max(1, ...(overview?.activity ?? []).flatMap((entry) => [entry.created, entry.closed]));
+  // Done / total at a glance, counted like the Progress card (Q11).
+  const done = overview === null ? null : doneText(overview.progress);
   const now = new Date();
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-        <Pressable accessibilityRole="button" accessibilityLabel="Back" onPress={onBack} style={styles.secondaryButton}>
-          <Text style={styles.secondaryButtonText}>←</Text>
-        </Pressable>
-        <Text style={[styles.title, { flex: 1 }]} numberOfLines={1}>{`Beads · ${workspaceLabel}`}</Text>
+        {onBack === undefined ? null : (
+          <Pressable accessibilityRole="button" accessibilityLabel="Back" onPress={onBack} style={styles.secondaryButton}>
+            <Text style={styles.secondaryButtonText}>←</Text>
+          </Pressable>
+        )}
+        {workspaceLabel === undefined ? (
+          <View style={{ flex: 1 }} />
+        ) : (
+          <Text style={[styles.title, { flex: 1 }]} numberOfLines={1}>{`Beads · ${workspaceLabel}`}</Text>
+        )}
+        {done === null ? null : (
+          <Text style={styles.body} accessibilityLabel={done.label}>
+            {done.text}
+          </Text>
+        )}
         <Pressable accessibilityRole="button" onPress={() => void beads.refetch()} style={styles.secondaryButton}>
           <Text style={styles.secondaryButtonText}>Refresh</Text>
         </Pressable>
@@ -317,27 +339,8 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
             <Text style={styles.body}>{overview.progress.label}</Text>
           </View>
 
+          {/* The 14-day created/closed chart was dropped at the owner's request (delta 20260918e, REQ-060 m). */}
           <View style={styles.cards}>
-            {/* 3. Activity */}
-            <View style={[styles.card, { flexGrow: 1, minWidth: 260 }]}>
-              <Text style={styles.sectionTitle}>Created / closed, last 14 days</Text>
-              {overview.activity.map((day) => (
-                <View key={day.day} style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                  <Text style={[styles.body, { width: 44 }]}>{day.day}</Text>
-                  <View style={{ flex: 1, gap: 2 }}>
-                    <View style={[styles.barFill, { width: `${Math.round((day.created / activityMax) * 100)}%`, height: 5 }]} />
-                    <View
-                      style={[
-                        styles.barFill,
-                        { width: `${Math.round((day.closed / activityMax) * 100)}%`, height: 5, backgroundColor: toneColor(theme, "success") },
-                      ]}
-                    />
-                  </View>
-                  <Text style={[styles.body, { minWidth: 44, textAlign: "right" }]}>{`+${day.created} / ✓${day.closed}`}</Text>
-                </View>
-              ))}
-            </View>
-            {/* 4 and 5 */}
             <BarChart title="By type" bars={overview.byType} styles={styles} labelWidth={70} />
             <BarChart title="By priority" bars={overview.byPriority} styles={styles} labelWidth={70} />
           </View>
@@ -445,47 +448,71 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
         })}
       </View>
 
-      {/* List */}
-      <Text style={styles.sectionTitle}>{`${shown.length} of ${rows.length} beads`}</Text>
+      {/* List: status groups, closed beads behind the eye (delta 20260918e §4.4) */}
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+        <Text style={[styles.sectionTitle, { flex: 1 }]}>{`${grouped.visible} of ${rows.length} beads`}</Text>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ selected: showClosed }}
+          accessibilityLabel={`${showClosed ? "Hide" : "Show"} closed beads (${grouped.closed})`}
+          onPress={() => closedBeadsVisibility.set(!showClosed)}
+          style={[styles.secondaryButton, { flexDirection: "row", alignItems: "center", gap: 6 }]}
+        >
+          <Icon name={showClosed ? "Eye" : "EyeOff"} size={16} color={theme.colors.foreground} />
+          <Text style={styles.secondaryButtonText}>{`Closed ${grouped.closed}`}</Text>
+        </Pressable>
+      </View>
       {beads.data !== undefined && rows.length === 0 ? (
         <Text style={styles.body}>This workspace has no beads yet.</Text>
       ) : null}
-      {shown.slice(0, LIST_LIMIT).map((bead) => {
-        const open = openId === bead.id;
-        const work = workSummary(bead, now);
-        return (
-          <View key={bead.id} style={styles.card}>
-            <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} onPress={() => setOpenId(open ? null : bead.id)}>
-              {/* The title is what a reader scans for; the id comes second. */}
-              <Text style={[styles.sectionTitle, { fontWeight: "600" }]} numberOfLines={open ? undefined : 2}>
-                {`${open ? "▾" : "▸"} ${bead.title ?? "(untitled)"}`}
-              </Text>
-              <View style={{ flexDirection: "row", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 2 }}>
-                <Text style={[styles.body, { fontSize: 12 }]} selectable numberOfLines={1}>
-                  {bead.id}
-                </Text>
-                <View style={{ flex: 1 }} />
-                <Chip badge={{ text: `${priorityLabel(bead.priority)} · ${bead.issueType}`, tone: "muted" }} styles={styles} theme={theme} />
-                <Chip badge={statusBadge(bead)} styles={styles} theme={theme} />
-              </View>
-              {work === null ? null : (
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4 }}>
-                  <RoleMark kind="worker" theme={theme} size={16} />
-                  <Text style={[styles.body, { flex: 1, color: toneColor(theme, work.tone) }]} numberOfLines={1}>
-                    {work.headline}
-                  </Text>
-                </View>
-              )}
-            </Pressable>
-            {open ? (
-              <BeadDetailPanel workspaceId={workspaceId} bead={bead} styles={styles} theme={theme} navigation={navigation} />
-            ) : null}
-          </View>
-        );
-      })}
-      {shown.length > LIST_LIMIT ? (
+      {grouped.visible === 0 && grouped.closed > 0 ? (
+        <Text style={styles.body}>{`All ${grouped.closed} matching beads are closed. Show them with the eye button.`}</Text>
+      ) : null}
+      {grouped.groups.map((group) => (
+        <View key={group.bucket} style={{ gap: layout.compact ? 6 : 8 }}>
+          {/* A line of its own between groups, then the group's name and size. */}
+          <View style={{ height: 1, backgroundColor: theme.colors.border, marginTop: 4 }} />
+          <Text style={[styles.sectionTitle, { color: toneColor(theme, group.tone) }]}>{`${group.label} · ${group.total}`}</Text>
+          {group.beads.map(renderRow)}
+        </View>
+      ))}
+      {grouped.truncated > 0 ? (
         <Text style={styles.body}>{`Showing the first ${LIST_LIMIT}. Narrow the filters to see the rest.`}</Text>
       ) : null}
     </ScrollView>
   );
+
+  function renderRow(bead: BeadRow) {
+    const open = openId === bead.id;
+    const work = workSummary(bead, now);
+    return (
+      <View key={bead.id} style={styles.card}>
+        <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} onPress={() => setOpenId(open ? null : bead.id)}>
+          {/* The title is what a reader scans for; the id comes second. */}
+          <Text style={beadTitleStyle(styles, theme, beadTitleTone(bead))} numberOfLines={open ? undefined : 2}>
+            {`${open ? "▾" : "▸"} ${bead.title ?? "(untitled)"}`}
+          </Text>
+          <View style={{ flexDirection: "row", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 2 }}>
+            <Text style={[styles.body, { fontSize: 12 }]} selectable numberOfLines={1}>
+              {bead.id}
+            </Text>
+            <View style={{ flex: 1 }} />
+            <Chip badge={{ text: `${priorityLabel(bead.priority)} · ${bead.issueType}`, tone: "muted" }} styles={styles} theme={theme} />
+            <Chip badge={statusBadge(bead)} styles={styles} theme={theme} />
+          </View>
+          {work === null ? null : (
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4 }}>
+              <RoleMark kind="worker" theme={theme} size={16} />
+              <Text style={[styles.body, { flex: 1, color: toneColor(theme, work.tone) }]} numberOfLines={1}>
+                {work.headline}
+              </Text>
+            </View>
+          )}
+        </Pressable>
+        {open ? (
+          <BeadDetailPanel workspaceId={workspaceId} bead={bead} styles={styles} theme={theme} navigation={navigation} />
+        ) : null}
+      </View>
+    );
+  }
 }

@@ -43,8 +43,10 @@ import { BarChart, Chip, RoleLegend, RoleMark, StatCards, type Styles, type Them
 
 export interface DashboardProps extends PluginSurfaceProps {
   workspaceId: string;
-  workspaceLabel: string;
-  onBack: () => void;
+  /** Omitted inside the workspace's own "Beads" tab: the tab already says where it is. */
+  workspaceLabel?: string;
+  /** Omitted inside the "Beads" tab, which has no screen to go back to. */
+  onBack?: () => void;
 }
 
 
@@ -229,10 +231,16 @@ export function DashboardPanel({ theme, layout, navigation, workspaceId, workspa
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-        <Pressable accessibilityRole="button" accessibilityLabel="Back to Beads Manager" onPress={onBack} style={styles.secondaryButton}>
-          <Text style={styles.secondaryButtonText}>←</Text>
-        </Pressable>
-        <Text style={[styles.title, { flex: 1 }]} numberOfLines={1}>{`Metric · ${workspaceLabel}`}</Text>
+        {onBack === undefined ? null : (
+          <Pressable accessibilityRole="button" accessibilityLabel="Back to Beads Manager" onPress={onBack} style={styles.secondaryButton}>
+            <Text style={styles.secondaryButtonText}>←</Text>
+          </Pressable>
+        )}
+        {workspaceLabel === undefined ? (
+          <View style={{ flex: 1 }} />
+        ) : (
+          <Text style={[styles.title, { flex: 1 }]} numberOfLines={1}>{`Metric · ${workspaceLabel}`}</Text>
+        )}
         <Pressable accessibilityRole="button" accessibilityLabel="Refresh" onPress={refresh} style={styles.secondaryButton}>
           <Text style={styles.secondaryButtonText}>Refresh</Text>
         </Pressable>
