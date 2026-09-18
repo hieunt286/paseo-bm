@@ -1,4 +1,5 @@
 import type { PluginBeforeRequests, PluginServerContext } from "@getpaseo/plugin/server";
+import { ROLE_BY_PROVIDER } from "./agent-role";
 import { providerId } from "./provider-id";
 import { LOOKUP_TIMEOUT_MS, ROLE_GETS_MODE, TIMED_OUT, chooseModeId, modesFor, profileModeOf, withTimeout, type ProviderMode } from "./role-mode";
 import {
@@ -7,7 +8,6 @@ import {
   installHomeOf,
   readRoleExtras,
   runtimeFactsOf,
-  type Role,
   type RoleExtras,
   type RuntimeFacts,
 } from "./role-extras";
@@ -24,12 +24,10 @@ import {
  * The same hook sets the start mode of Workers and Reviewers (delta 20260917c
  * §4.6): what the role files used to teach in a paragraph each is one lookup
  * here, and it cannot be got wrong by an agent.
+ *
+ * Provider ids map to roles through `ROLE_BY_PROVIDER` (agent-role.ts), the
+ * same map every lookup uses to tell paseo-bm agents apart (delta 20260918g).
  */
-const ROLE_BY_PROVIDER: Readonly<Record<string, Role>> = {
-  "bm-manager": "manager",
-  "bm-worker": "worker",
-  "bm-reviewer": "reviewer",
-};
 
 export { chooseModeId, type ProviderMode } from "./role-mode";
 

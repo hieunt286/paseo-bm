@@ -142,10 +142,22 @@ describe("all three files", () => {
   // 29 lines; the file measured 171. Dropping the example or the "ask back"
   // and "not while running" rules to fit 160 would cut the very safeguards the
   // delta exists for.
+  //
+  // Delta 20260918d-card-replies rewrote "Talking to the user" (the Manager
+  // no longer repeats what a report's card shows) inside the same ceiling:
+  // 173 lines, RULES untouched.
+  //
+  // worker.md 394 -> 397 and manager.md 174 -> 176 for delta
+  // 20260918g-agent-conventions (owner decision Q14 a, raised just enough): each
+  // file gains one verbatim rule for the plugin's BM-FORMAT notice — the sender
+  // of a block that breaks its template must resend the whole corrected block,
+  // not take the notice for the user's words or redo work. The rules were
+  // appended to an existing paragraph and that paragraph re-wrapped (+3 and +2
+  // lines); RULES untouched. reviewer.md took its rule within its ceiling.
   it.each([
-    ["worker.md", worker, 394],
+    ["worker.md", worker, 397],
     ["reviewer.md", reviewer, 164],
-    ["manager.md", manager, 174],
+    ["manager.md", manager, 176],
   ])("%s leads with the hard limits and stays under %i lines", (_name, text, limit) => {
     const headings = text.split("\n").filter((line) => line.startsWith("## "));
     expect(headings[0]).toBe("## RULES");
@@ -473,11 +485,15 @@ describe("worker.md — the workflow", () => {
       "`bm.batchId` = the batch id",
       "`bm.version`",
     );
-    // delta 20260917c K10: the plugin picks the Reviewer's mode, so no prompt
-    // teaches mode selection any more.
+    // delta 20260917c K10, errata 2026-09-18 (owner decision Q1a of
+    // req-20260918T035101Z): Paseo refuses a Reviewer that a `bypassPermissions`
+    // Worker creates without a mode, before any hook runs. So the Worker passes
+    // the concrete value the plugin writes into its Runtime facts, like the
+    // Manager does for the Worker — never a selection rule of its own.
     expect(W).not.toMatch(/inspect_provider/);
-    expect(W).not.toMatch(/settings\.modeId/);
-    rule(W, "the plugin sets the Reviewer's mode", /plugin sets the Reviewer's\s+mode/i);
+    rule(W, "the Reviewer mode comes from the Runtime facts", /`settings\.modeId` = the Reviewer\s+mode in your `## Runtime facts`/);
+    rule(W, "a missing mode line ends in blocked, not a guess", /missing: send `blocked` with Paseo's refusal/);
+    expect(W).not.toMatch(/plugin sets the Reviewer's\s+mode/i);
     // Review b3: "cannot write or reach the network" was false of Codex auto.
     expect(W).not.toMatch(/cannot write or reach the network/);
     // The stage criteria moved here from reviewer.md: one Reviewer, one stage.
@@ -888,12 +904,23 @@ describe("manager.md — how it runs a request", () => {
   it("reports each Worker phase the way the user needs it", () => {
     rule(M, "a Large beads-done waits for the user", /For a \*\*Large\*\* request say the Worker is waiting for the user's confirmation/);
     rule(M, "never announces implementation early", /never say it started implementing before the user answered/);
-    // Delta 20260918c-question-cards: the questions come from the report's
-    // `BM-QUESTIONS` block, or from `blockers` for a Worker that has none.
-    rule(M, "every blocked question reaches the user", /show the user EVERY question — from the report's `BM-QUESTIONS` block, else from `blockers`/);
+    // Delta 20260918d-card-replies (owner decision Q1): every report reaches
+    // the user as a card, so the Manager says only what the card does not. The
+    // questions of a `BM-QUESTIONS` block are on the card's buttons and are
+    // never repeated; a report without the block has no buttons, so its
+    // questions from `blockers` are still shown in full. This pair replaces the
+    // single 20260918c rule "show the user EVERY question — from the block,
+    // else from `blockers`": each half is now pinned on its own.
+    rule(M, "the card is never repeated", /Never repeat what the card shows/);
+    rule(M, "a question block's questions and options are not repeated", /`BM-QUESTIONS` block's questions and options: never repeat them/);
+    rule(M, "a report without the block still gets every question from blockers", /A report without that block has no buttons: show its questions from `blockers` in full/);
     rule(M, "questions keep their options and recommendation", /with its options and the Worker's recommendation/);
     rule(M, "an already-answered question is not relayed twice", /If the user tells you they already answered the Worker, do not relay it again/);
-    rule(M, "every waiting Worker gets a letter, with its name and request", /every Worker still waiting under a letter \(A, B, …\) with its name and `requestId`/);
+    // The waiting line names the Worker, its request and its questions by the
+    // Worker's own ids (the owner's Q1 wording); the letter labels are for
+    // answering in the chat.
+    rule(M, "every waiting Worker gets a letter", /every Worker still waiting under a letter \(A, B, …\)/);
+    verbatim(manager, "`A · <name> · <requestId>: Q6, Q7`");
     rule(M, "a question is labelled by the Worker's letter and its own number", /A6 = Worker A's Q6/);
     rule(M, "old reports keep the Worker's own numbers", /old reports keep the Worker's numbers/);
     rule(M, "the user answers in the card or in the chat", /answers in the Worker's card or here as `A6 a, B1 b`/);
@@ -907,7 +934,9 @@ describe("manager.md — how it runs a request", () => {
     rule(M, "an answer that fits no single question is asked back, not guessed", /fits no single open question: ask the user, send nothing for it/);
     rule(M, "the Manager never picks for the user", /never pick an option for them/);
     rule(M, "a Worker that reported again is not answered again", /reported again has had its answers[^.]{0,40}relay nothing more/);
-    rule(M, "suggestions become questions for the user", /`Suggestion \(not done\)` items as questions/);
+    // Delta 20260918d: the card lists the suggestions; the Manager counts them
+    // and still asks the user which, if any, becomes new work.
+    rule(M, "suggestions are counted and put to the user", /how many `Suggestion \(not done\)` items[^.]{0,60}ask which, if any, becomes new work — the user decides/);
     // The Manager can only relay them because the Worker puts them in `blockers`.
     rule(W, "the Worker puts its suggestions in blockers", /goes in `blockers`[^.]{0,80}`none\. Suggestion \(not done\): …`/i);
     rule(M, "a turn that ended without a report is not news", /A Paseo notice that the Worker ended a turn WITHOUT a new `BM-REPORT`/);
@@ -915,9 +944,9 @@ describe("manager.md — how it runs a request", () => {
     rule(M, "otherwise one status line", /otherwise reply with ONE status line/);
   });
 
-  it("keeps its replies short, on topic, and shows a blocked list in full", () => {
+  it("keeps its replies short, on topic, and shows an old-style question list in full", () => {
     rule(M, "replies stay short", /keep replies to the user to a few lines/i);
-    rule(M, "a blocked question list is shown in full", /which you show in full/);
+    rule(M, "an old-style blocked list is shown in full", /which you show in full/);
     rule(
       M,
       "notices that are not about the request never reach the user",
@@ -943,9 +972,12 @@ describe("across the three files (delta 20260917c)", () => {
       expect(prose(text), name).not.toMatch(/inspect_provider/);
       expect(prose(text), name).not.toMatch(/colorTier|bypassPermissions|full-access/);
     }
-    // The one place a mode is still passed names the section the plugin writes.
+    // The only places a mode is still passed name the section the plugin
+    // writes: the Manager for its Worker and, since errata 2026-09-18 of
+    // delta 20260917c §4.6, the Worker for its Reviewer.
     verbatim(M, `\`${RUNTIME_FACTS_HEADING}\``);
-    expect(W).not.toMatch(/settings\.modeId/);
+    verbatim(W, `\`${RUNTIME_FACTS_HEADING}\``);
+    expect(W.match(/settings\.modeId/g)).toHaveLength(1);
     expect(R).not.toMatch(/settings\.modeId/);
   });
 
@@ -1002,5 +1034,35 @@ describe("the RULES budget", () => {
     expect(block.length, `${name}: RULES block length`).toBeLessThanOrEqual(lines);
     // A sixth limit must not arrive disguised as a bullet under the numbers.
     expect(block.filter((line) => /^[-*] /.test(line)).length, `${name}: stray bullets`).toBe(0);
+  });
+});
+
+describe("the plugin's BM-FORMAT notice (delta 20260918g §4.10, REQ-061 j)", () => {
+  // Verbatim from the design: each role learns what the notice is and what to
+  // send back, and that it is not the user's words.
+  it.each([
+    [
+      "worker.md",
+      worker,
+      "A message that starts with `BM-FORMAT` comes from the plugin, not the user: your last block broke the template. Send the whole corrected block again, to the same agent, in one message, changing nothing else; do not redo work, then carry on where you were.",
+    ],
+    [
+      "manager.md",
+      manager,
+      "A message that starts with `BM-FORMAT` is the plugin's: your last `BM-ANSWERS` broke the template. Send the corrected block again to that Worker once it is not running; say nothing to the user about it.",
+    ],
+    [
+      "reviewer.md",
+      reviewer,
+      "A message that starts with `BM-FORMAT` is the plugin's: answer with the whole corrected `BM-REVIEW` block only; do not review again.",
+    ],
+  ])("%s carries its rule word for word", (_name, text, rule) => {
+    expect(text.replace(/\s+/g, " ")).toContain(rule);
+  });
+
+  it("sits where each role already hears about the plugin's messages", () => {
+    expect(between(worker, "## Reporting", "## Stop").replace(/\s+/g, " ")).toContain("starts with `BM-FORMAT`");
+    expect(between(manager, "## Talking to the user").replace(/\s+/g, " ")).toContain("starts with `BM-FORMAT`");
+    expect(between(reviewer, "## Your answer", "## Stop").replace(/\s+/g, " ")).toContain("starts with `BM-FORMAT`");
   });
 });

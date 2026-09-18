@@ -230,7 +230,9 @@ function fakePaseo(options: { managerStatus?: () => string; managerArchivedAt?: 
   };
   const paseo = {
     agents: {
-      list: async (input: { filter: { labels: Record<string, string> } }) => ({ entries: entries[input.filter.labels["bm.role"]!] ?? [] }),
+      list: async (input: { filter: { labels?: Record<string, string> } }) => ({
+        entries: input.filter.labels === undefined ? Object.values(entries).flat() : (entries[input.filter.labels["bm.role"]!] ?? []),
+      }),
       ...(options.reachable === false
         ? {}
         : {

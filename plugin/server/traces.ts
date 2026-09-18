@@ -54,6 +54,11 @@ export interface AgentFacts {
   archived: boolean;
   /** The agent's title in Paseo, when known. */
   title?: string | null;
+  /**
+   * False when the role came from the provider only: the agent carries no valid
+   * `bm.role` label (delta 20260918g §4.1). Absent means labelled.
+   */
+  labelled?: boolean;
 }
 
 /** One reconstructed request, before timing and bead enrichment (WP-206.1.2). */

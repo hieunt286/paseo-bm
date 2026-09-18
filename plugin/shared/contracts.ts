@@ -75,6 +75,12 @@ export const agentNodeSchema = z.object({
   status: z.string(),
   parentId: agentIdSchema.nullable(),
   updatedAt: z.string(),
+  /**
+   * False when the agent has no valid `bm.role` label: its role came from its
+   * provider, or it is an unlabelled descendant (delta 20260918g §4.4).
+   * Defaults to true for older servers.
+   */
+  labelled: z.boolean().default(true),
 });
 
 /**
@@ -121,7 +127,8 @@ export const rolesDescribeRpc = defineRpc({
 });
 
 export type BmRole = z.infer<typeof bmRoleSchema>;
-export type AgentNode = z.infer<typeof agentNodeSchema>;
+/** Input shape: `labelled` may be absent (meaning labelled), as from a server older than delta 20260918g. */
+export type AgentNode = z.input<typeof agentNodeSchema>;
 export type RoleDescriptor = z.infer<typeof roleDescriptorSchema>;
 
 // ---------------------------------------------------------------------------
@@ -749,6 +756,26 @@ export const launcherOrderSetRpc = defineRpc({
   output: launcherOrderOutput,
 });
 
+const answerMarksOutput = z.object({
+  /** Card keys (`answeredKey`) the user marked as answered, oldest first. */
+  keys: z.array(z.string()),
+  notices: z.array(z.string()),
+});
+
+/** `answers.marks` — the cards the user marked as answered (delta 20260918d §4.9). */
+export const answersMarksRpc = defineRpc({
+  name: "answers.marks",
+  input: z.object({}),
+  output: answerMarksOutput,
+});
+
+/** `answers.mark` — marks one card as answered, or removes the mark (delta 20260918d §4.9). */
+export const answersMarkRpc = defineRpc({
+  name: "answers.mark",
+  input: z.object({ key: z.string().min(1).max(400), marked: z.boolean() }),
+  output: answerMarksOutput,
+});
+
 // ---------------------------------------------------------------------------
 // Setup screen (delta 20260916-setup-screen).
 // ---------------------------------------------------------------------------
@@ -828,6 +855,36 @@ export const chatPeerSchema = z.object({
   /** `bm.requestId` / `bm.batchId` labels. */
   requestId: z.string().nullable(),
   batchId: z.string().nullable(),
+  /**
+   * False when the agent has no `bm.role` label and was recognised by its
+   * provider only (delta 20260918g §4.4). Defaults to true for older servers.
+   */
+  labelled: z.boolean().default(true),
+});
+
+/** One Worker waiting for the user's answer in a Manager's chat (delta 20260918d §4.8). */
+export const waitingWorkerSchema = z.object({
+  managerId: agentIdSchema,
+  workspaceId: workspaceIdSchema,
+  workerId: agentIdSchema,
+  workerTitle: z.string().nullable(),
+  requestId: z.string(),
+  /** The report message as the Manager received it: the client builds the same card from it. */
+  text: z.string(),
+  at: z.string().nullable(),
+});
+
+export type WaitingWorker = z.infer<typeof waitingWorkerSchema>;
+
+/**
+ * `chat.waiting` — for every paseo-bm Manager, the idle Workers whose latest
+ * report to it is `blocked` with a `BM-QUESTIONS` block (delta 20260918d §4.8,
+ * REQ-059 j). Read-only.
+ */
+export const chatWaitingRpc = defineRpc({
+  name: "chat.waiting",
+  input: z.object({}),
+  output: z.object({ waiting: z.array(waitingWorkerSchema) }),
 });
 
 /**
@@ -940,7 +997,8 @@ export const tracesWorkspacesRpc = defineRpc({
 });
 
 export type BeadRow = z.infer<typeof beadRowSchema>;
-export type ChatPeer = z.infer<typeof chatPeerSchema>;
+/** Input shape: `labelled` may be absent (meaning labelled), as from a server older than delta 20260918g. */
+export type ChatPeer = z.input<typeof chatPeerSchema>;
 export type BeadWork = z.infer<typeof beadWorkSchema>;
 export type BeadDetail = z.infer<typeof beadDetailSchema>;
 export type BeadAction = z.infer<typeof beadActionSchema>;

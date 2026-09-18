@@ -19,10 +19,15 @@ import {
   previewValues,
   sortBeads,
   actionsFor,
+  beadTitleTone,
+  closedBeadsVisibility,
+  doneText,
+  groupBeads,
   beadsOverview,
   facetsOf,
   filterBeads,
   formatDays,
+  statusBadge,
   statusBucket,
   toggle,
   workSummary,
@@ -184,8 +189,12 @@ describe("list and get handlers", () => {
     clearTraceStoreCache();
     const paseo = fakePaseo();
     paseo.config.get = vi.fn(async () => ({ config: { plugins: { "paseo-bm": { source: "directory", path: join(home, "plugin", "0.2.0") } } } }));
-    paseo.agents.list = vi.fn(async ({ filter }: { filter: { labels: Record<string, string> } }) => ({
-      entries: filter.labels["bm.role"] === "worker" ? [{ id: "w1", workspaceId: WS, status: "idle", title: "Worker for C", labels: {} }] : [],
+    // A daemon answers a bm.role=worker query with agents that carry that label.
+    paseo.agents.list = vi.fn(async ({ filter }: { filter: { labels?: Record<string, string> } }) => ({
+      entries:
+        filter.labels === undefined || filter.labels["bm.role"] === "worker"
+          ? [{ id: "w1", workspaceId: WS, status: "idle", title: "Worker for C", labels: { "bm.role": "worker" } }]
+          : [],
     })) as never;
     const list = await handleBeadsList({ workspaceId: WS }, paseo, { homedir: () => join(workspace, "no-home") });
     expect(list.beads.find((row) => row.id === "demo-c")?.work?.started).toEqual({
@@ -222,8 +231,12 @@ describe("workspaces.overview", () => {
         { id: "m2", workspaceId: "wks_nobeads", status: "running", labels: {} },
       ],
     };
-    paseo.agents.list = vi.fn(async ({ filter }: { filter: { labels: Record<string, string> } }) => ({
-      entries: byRole[filter.labels["bm.role"] ?? ""] ?? [],
+    // Each agent carries the bm.role label of its group, as the daemon's would.
+    const labelled = Object.entries(byRole).flatMap(([role, agents]) =>
+      agents.map((agent) => ({ ...agent, labels: { ...(agent["labels"] as Record<string, string>), "bm.role": role } })),
+    );
+    paseo.agents.list = vi.fn(async ({ filter }: { filter: { labels?: Record<string, string> } }) => ({
+      entries: labelled.filter((agent) => filter.labels === undefined || agent.labels["bm.role"] === filter.labels["bm.role"]),
     })) as never;
     const { workspaces } = await handleWorkspacesOverview(paseo);
     expect(workspaces).toEqual([
@@ -250,10 +263,10 @@ describe("workspaces.overview", () => {
   it("reports a workspace as busy when only a Reviewer is running", async () => {
     const paseo = fakePaseo();
     paseo.workspaces.list = vi.fn(async () => ({ entries: [{ id: WS, directory: workspace }] }));
-    paseo.agents.list = vi.fn(async ({ filter }: { filter: { labels: Record<string, string> } }) => ({
+    paseo.agents.list = vi.fn(async ({ filter }: { filter: { labels?: Record<string, string> } }) => ({
       entries:
-        filter.labels["bm.role"] === "reviewer"
-          ? [{ id: "r1", workspaceId: WS, status: "running", labels: {} }]
+        filter.labels === undefined || filter.labels["bm.role"] === "reviewer"
+          ? [{ id: "r1", workspaceId: WS, status: "running", labels: { "bm.role": "reviewer" } }]
           : [],
     })) as never;
     const { workspaces } = await handleWorkspacesOverview(paseo);
@@ -274,16 +287,14 @@ describe("the six overview sections", () => {
     readAt: "", source: "", skippedLines: 0, present: true,
   };
 
-  it("summarises status, progress, activity, type, priority and time", () => {
-    const view = beadsOverview(rows(), stats, new Date("2026-09-16T12:00:00.000Z"), 7);
+  it("summarises status, progress, type, priority and time", () => {
+    const view = beadsOverview(rows(), stats, new Date("2026-09-16T12:00:00.000Z"));
     expect(view.status.map((card) => [card.label, card.value])).toEqual([
       ["Total", "4"], ["Ready", "0"], ["In progress", "1"], ["Blocked", "2"], ["Closed", "1"],
     ]);
     // The epic is not work: 1 of 3.
     expect(view.progress).toMatchObject({ closed: 1, total: 3 });
     expect(view.progress.label).toContain("33% done");
-    expect(view.activity).toHaveLength(7);
-    expect(view.activity.find((day) => day.day === "09-12")).toEqual({ day: "09-12", created: 0, closed: 1 });
     expect(view.byType.map((bar) => [bar.label, bar.value])).toEqual([["task", 2], ["epic", 1], ["bug", 1]]);
     expect(view.byPriority.map((bar) => bar.label)).toEqual(["P1", "P2"]);
     const timing = Object.fromEntries(view.timing.map((card) => [card.label, card.value]));
@@ -291,7 +302,7 @@ describe("the six overview sections", () => {
     expect(timing["Longest in progress"]).toBe("1.1d");
     // Last updated six days ago: not stale yet.
     expect(timing["Stale"]).toBe("0");
-    const later = beadsOverview(rows(), stats, new Date("2026-09-18T12:00:00.000Z"), 7);
+    const later = beadsOverview(rows(), stats, new Date("2026-09-18T12:00:00.000Z"));
     expect(later.timing.find((card) => card.label === "Stale")?.value).toBe("2");
   });
 
@@ -405,5 +416,111 @@ describe("an in-progress bead says who is on it", () => {
   it("says when nobody was recorded, and says nothing for other statuses", () => {
     expect(workSummary({ status: "in_progress", work: null }, now)?.headline).toBe("In progress · no Worker recorded on it");
     expect(workSummary({ status: "open", work: null }, now)).toBeNull();
+  });
+});
+
+describe("a bead title and its chip say the status in one colour (delta 20260918e, Q8)", () => {
+  // One bead per bucket, including an open bead that is not ready: it is
+  // "blocked" although its status is "open".
+  const samples = [
+    { name: "ready", bead: { status: "open", ready: true } },
+    { name: "in_progress", bead: { status: "in_progress", ready: false } },
+    { name: "blocked (status)", bead: { status: "blocked", ready: false } },
+    { name: "blocked (open, not ready)", bead: { status: "open", ready: false } },
+    { name: "closed", bead: { status: "closed", ready: false } },
+  ] as const;
+
+  it("gives the four statuses four different title colours", () => {
+    const tones = Object.fromEntries(samples.map(({ name, bead }) => [name, beadTitleTone(bead)]));
+    expect(tones).toEqual({
+      ready: "info",
+      in_progress: "warning",
+      "blocked (status)": "danger",
+      "blocked (open, not ready)": "danger",
+      closed: "success",
+    });
+    expect(new Set(Object.values(tones)).size).toBe(4);
+  });
+
+  it.each(samples)("colours the chip of a $name bead like its title, with the same words as before", ({ bead }) => {
+    expect(statusBadge(bead).tone).toBe(beadTitleTone(bead));
+    const words = { ready: "Ready", in_progress: "In progress", blocked: "Blocked", closed: "Closed" } as const;
+    expect(statusBadge(bead).text).toBe(words[statusBucket(bead)]);
+  });
+});
+
+describe("the Beads list in four groups, closed beads behind the eye (delta 20260918e, Q9, Q10)", () => {
+  // Only status and readiness decide a group; the rest of a row is not read.
+  const row = (id: string, status: string, ready = false) => ({ id, status, ready }) as unknown as BeadRow;
+  const sorted = [
+    row("r1", "open", true),
+    row("c1", "closed"),
+    row("p1", "in_progress"),
+    row("b1", "open", false),
+    row("r2", "open", true),
+    row("p2", "in_progress"),
+    row("b2", "blocked"),
+    row("c2", "closed"),
+  ];
+
+  it("puts work in progress first, then blocked, ready and closed, keeping the sort inside each group", () => {
+    const { groups, visible, closed, truncated } = groupBeads(sorted, { showClosed: true, limit: 200 });
+    expect(groups.map((group) => [group.bucket, group.label, group.tone, group.total, group.beads.map((bead) => bead.id)])).toEqual([
+      ["in_progress", "In progress", "warning", 2, ["p1", "p2"]],
+      ["blocked", "Blocked", "danger", 2, ["b1", "b2"]],
+      ["ready", "Ready", "info", 2, ["r1", "r2"]],
+      ["closed", "Closed", "success", 2, ["c1", "c2"]],
+    ]);
+    expect({ visible, closed, truncated }).toEqual({ visible: 8, closed: 2, truncated: 0 });
+  });
+
+  it("drops empty groups, and the Closed group while closed beads are hidden, still counting them", () => {
+    const hidden = groupBeads(sorted.filter((bead) => bead.id !== "b1" && bead.id !== "b2"), { showClosed: false, limit: 200 });
+    expect(hidden.groups.map((group) => group.bucket)).toEqual(["in_progress", "ready"]);
+    expect({ visible: hidden.visible, closed: hidden.closed }).toEqual({ visible: 4, closed: 2 });
+    expect(groupBeads([row("c1", "closed")], { showClosed: false, limit: 200 })).toEqual({ groups: [], visible: 0, closed: 1, truncated: 0 });
+  });
+
+  it("spends the list limit in group order and says how many it cut", () => {
+    const three = groupBeads([row("p1", "in_progress"), row("p2", "in_progress"), row("b1", "blocked"), row("b2", "blocked"), row("r1", "open", true)], {
+      showClosed: true,
+      limit: 3,
+    });
+    expect(three.groups.map((group) => [group.bucket, group.total, group.beads.length])).toEqual([
+      ["in_progress", 2, 2],
+      ["blocked", 2, 1],
+    ]);
+    expect(three.truncated).toBe(2);
+  });
+
+  it("hides closed beads by default and remembers the choice for the session", () => {
+    expect(closedBeadsVisibility.get()).toBe(false);
+    const heard = vi.fn();
+    const stop = closedBeadsVisibility.subscribe(heard);
+    closedBeadsVisibility.set(true);
+    expect(heard).toHaveBeenCalledTimes(1);
+    expect(closedBeadsVisibility.get()).toBe(true);
+    stop();
+    closedBeadsVisibility.set(false);
+    expect(heard).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("done / total at the top of the Beads screen (delta 20260918e, Q11)", () => {
+  const row = (id: string, issueType: string, status: string) =>
+    ({ id, issueType, status, ready: false, priority: 2, createdAt: null, updatedAt: null, closedAt: null, work: null, labels: [] }) as unknown as BeadRow;
+  const stats: BeadStats = {
+    total: 5, open: 2, inProgress: 0, blocked: 0, closed: 3, ready: 2,
+    readAt: "", source: "", skippedLines: 0, present: true,
+  };
+
+  it("counts closed beads over all beads, leaving epics out like the Progress card", () => {
+    const beads = [row("t1", "task", "closed"), row("t2", "bug", "closed"), row("t3", "task", "open"), row("e1", "epic", "closed"), row("e2", "epic", "open")];
+    const done = doneText(beadsOverview(beads, stats, new Date("2026-09-18T12:00:00.000Z")).progress);
+    expect(done).toEqual({ text: "✓ 2 / 3 done", label: "2 of 3 beads done, epics not counted" });
+  });
+
+  it("writes the figure the same way for any counts", () => {
+    expect(doneText({ closed: 12, total: 40 })).toEqual({ text: "✓ 12 / 40 done", label: "12 of 40 beads done, epics not counted" });
   });
 });

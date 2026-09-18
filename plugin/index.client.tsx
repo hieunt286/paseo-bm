@@ -10,11 +10,13 @@ import { ManagerLauncherSurface } from "./client/launcher";
 import { AGENT_TREE_ICON, AGENT_TREE_PANEL_ID } from "./client/agent-tree";
 import { AgentTreePanel } from "./client/tree";
 import { DASHBOARD_ICON } from "./client/dashboard-model";
-import { launcherNotices, selectDashboardFromCommandCenter } from "./client/dashboard-view";
+import { BEADS_TAB_PANEL_ID, launcherNotices, selectDashboardFromCommandCenter } from "./client/dashboard-view";
 import { DashboardSettingsScreen, SETTINGS_ICON, SETTINGS_SCREEN_ID } from "./client/settings";
 import { CHAT_CARD_KIND, CHAT_CARD_VERSION, chatCardSchema, toChatCard } from "./client/chat-cards";
 import { ChatCardView } from "./client/chat-card";
 import { ChatBeadsPanel } from "./client/bead-chips";
+import { BeadsTabPanel } from "./client/beads-tab";
+import { registerWaitingPills } from "./client/waiting-pills";
 
 /** A chat item as a paseo-bm card, or nothing (the item stays Paseo's). */
 function chatCardItems(item: { type: string }, phase: "streaming" | "complete") {
@@ -118,8 +120,9 @@ async function runWorkerStopAll(context: WorkspaceCommand): Promise<void> {
  * panel (agent tree + role configuration).
  *
  * It also turns messages between the Manager, Workers and Reviewers into chat
- * cards (delta 20260916-chat-cards), and registers the two slash commands of
- * delta 20260917e §4.4.
+ * cards (delta 20260916-chat-cards), registers the two slash commands of
+ * delta 20260917e §4.4, and adds the "Beads" tab that Paseo lists in the "+"
+ * menu of every workspace (delta 20260918e §4.1).
  *
  * This entry must never import from `server/`: that is a compile error.
  *
@@ -200,6 +203,15 @@ export default function contribute(client: PluginClientContext): () => void {
       context: "agent",
       Component: ChatBeadsPanel,
     }),
+    // Before "Beads agents", so it leads paseo-bm's entries in the "+" menu.
+    // No `locations`: Paseo's default, ["workspace"], is the tab bar.
+    client.addWorkspacePanel({
+      id: BEADS_TAB_PANEL_ID,
+      title: "Beads",
+      icon: "ListChecks",
+      context: "workspace",
+      Component: BeadsTabPanel,
+    }),
     client.addWorkspacePanel({
       id: AGENT_TREE_PANEL_ID,
       title: "Beads agents",
@@ -207,6 +219,8 @@ export default function contribute(client: PluginClientContext): () => void {
       context: "workspace",
       Component: AgentTreePanel,
     }),
+    // A pill per Worker waiting for the user's answer (delta 20260918d §4.8).
+    registerWaitingPills(client),
   ];
   return () => {
     for (const remove of removers) void remove();

@@ -313,8 +313,8 @@ skill pass is your own work, never a review.
 **Create the Reviewer** with Paseo's `create_agent`: profile `bm-reviewer`,
 provider `bm-reviewer/<model of the profile>`, labels `bm.role` = `reviewer`,
 `bm.requestId` = this request's `req-…`, `bm.batchId` = the batch id,
-`bm.version` = your own if you can read it. The plugin sets the Reviewer's
-mode, so you do not choose one.
+`bm.version` = your own if you can read it; `settings.modeId` = the Reviewer
+mode in your `## Runtime facts` (missing: send `blocked` with Paseo's refusal).
 
 **What to put in the message**, because the Reviewer knows only what you tell
 it: the `requestId`, the `batchId`, the stage (`documents`, `beads`, `plan` or
@@ -370,7 +370,10 @@ Keep reports and replies to a few lines; a numbered question list may be longer.
 Talk to the user in the user's language; the `BM-REPORT` block stays in English.
 Everything you noticed but did not do — extra tests, refactors, docs, cleanups,
 related bugs, other beads — goes in `blockers`, after `none` when nothing is
-blocking: `none. Suggestion (not done): …`.
+blocking: `none. Suggestion (not done): …`. A message that starts with
+`BM-FORMAT` comes from the plugin, not the user: your last block broke the
+template. Send the whole corrected block again, to the same agent, in one
+message, changing nothing else; do not redo work, then carry on where you were.
 
 ## Stop
 

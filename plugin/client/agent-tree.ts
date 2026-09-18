@@ -149,10 +149,21 @@ function agentLabel(agent: AgentNode): string {
   return title ? title : `Untitled agent (${agent.id})`;
 }
 
+/**
+ * The role text of a row: `Manager`, or `Manager · no label` for a paseo-bm
+ * agent with no valid `bm.role` label — started outside Beads Manager and
+ * recognised by its provider (delta 20260918g §4.4). An `Unknown role` row
+ * already says as much, so it gets no mark.
+ */
+export function rowRoleLabel(agent: Pick<AgentNode, "role" | "labelled">): string {
+  const role = roleLabel(agent.role);
+  return agent.labelled === false && agent.role !== "unknown" ? `${role} · no label` : role;
+}
+
 function flatten(nodes: readonly AgentTreeNode[], depth: number, out: AgentRow[]): AgentRow[] {
   for (const { agent, children } of nodes) {
     const label = agentLabel(agent);
-    const role = roleLabel(agent.role);
+    const role = rowRoleLabel(agent);
     out.push({
       agentId: agent.id,
       depth,

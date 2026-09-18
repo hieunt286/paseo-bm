@@ -12,9 +12,30 @@
  */
 
 import type { WorkspaceOverview } from "../shared/contracts";
+import { STATUS_TONE } from "./beads-model";
 import type { Tone } from "./dashboard-model";
 
-export type DashboardViewName = "launcher" | "dashboard" | "beads" | "settings";
+/**
+ * The views of the Beads Manager surface. Setup is the main screen and the
+ * workspace list is one tap away (owner decision Q1, delta 20260918e §4.2).
+ */
+export type DashboardViewName = "setup" | "workspaces" | "dashboard" | "beads";
+
+/** Where the surface opens. */
+export const SURFACE_HOME_VIEW: DashboardViewName = "setup";
+
+/** Where ← leads from a view; `null` on the main screen, which has no ←. */
+export function backOf(view: DashboardViewName): DashboardViewName | null {
+  switch (view) {
+    case "dashboard":
+    case "beads":
+      return "workspaces";
+    case "workspaces":
+      return "setup";
+    case "setup":
+      return null;
+  }
+}
 
 export interface DashboardRequests {
   /** Records that the user asked for the Dashboard of this workspace. */
@@ -167,6 +188,8 @@ export interface WorkspaceStat {
  * The four figures of a workspace row: beads in total, in progress, blocked,
  * and Workers running now. A figure that is zero stays grey so the ones that
  * need attention stand out; a workspace without a bead store says so once.
+ * In progress and blocked take the bead status colours (`STATUS_TONE`), so a
+ * row reads like the Beads screen it opens (delta 20260918e, REQ-060 n).
  */
 export function workspaceStats(overview: WorkspaceOverview | undefined): WorkspaceStat[] {
   if (overview === undefined) return [];
@@ -188,14 +211,14 @@ export function workspaceStats(overview: WorkspaceOverview | undefined): Workspa
       icon: "CircleDot",
       value: String(beads.inProgress),
       label: `${beads.inProgress} in progress`,
-      tone: beads.inProgress > 0 ? "info" : "muted",
+      tone: beads.inProgress > 0 ? STATUS_TONE.in_progress : "muted",
     },
     {
       key: "blocked",
       icon: "Ban",
       value: String(beads.blocked),
       label: `${beads.blocked} blocked`,
-      tone: beads.blocked > 0 ? "warning" : "muted",
+      tone: beads.blocked > 0 ? STATUS_TONE.blocked : "muted",
     },
     running,
   ];
@@ -207,3 +230,22 @@ export const WORKSPACE_ACTIONS = [
   { key: "metric", label: "Metric", icon: "ChartColumn" },
   { key: "beads", label: "Beads", icon: "ListChecks" },
 ] as const;
+
+// ---------------------------------------------------------------------------
+// The "Beads" tab of a workspace (delta 20260918e §4.1): one entry in the "+"
+// menu of the tab bar, with the Beads and Metric screens as two sub-tabs.
+// ---------------------------------------------------------------------------
+
+/** Workspace panel id; Paseo lists every workspace panel in the "+" menu. */
+export const BEADS_TAB_PANEL_ID = "bm-beads";
+
+/** The two sub-tabs, in the order they are drawn. */
+export const BEADS_TAB_VIEWS = [
+  { key: "beads", label: "Beads" },
+  { key: "metric", label: "Metric" },
+] as const;
+
+export type BeadsTabView = (typeof BEADS_TAB_VIEWS)[number]["key"];
+
+/** The sub-tab a new "Beads" tab opens on (owner decision Q2). */
+export const DEFAULT_BEADS_TAB_VIEW: BeadsTabView = "beads";

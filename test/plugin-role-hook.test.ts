@@ -1,11 +1,11 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { tmpdir } from "node:os";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import contribute from "../plugin/index.server";
 import { ROLE_PROMPT_SEPARATOR, applyRoleInstructions, chooseModeId, type ProviderMode } from "../plugin/server/role-hook";
-import { LOOKUP_TIMEOUT_MS, TIMED_OUT, withTimeout } from "../plugin/server/role-mode";
+import { LOOKUP_TIMEOUT_MS, TIMED_OUT, forgetModes, withTimeout } from "../plugin/server/role-mode";
 
 // The entry resolves the install home from $HOME when Paseo's config names no
 // plugin path; point it at an empty directory so this machine's real
@@ -31,6 +31,16 @@ const roleMd = (role: string) => readFileSync(join(repoRoot, "plugin", "roles", 
 const managerMd = roleMd("manager");
 const workerMd = roleMd("worker");
 const reviewerMd = roleMd("reviewer");
+/**
+ * What a Worker gets on a host that cannot read the bm-reviewer modes: its role
+ * text plus the fallback Reviewer mode `auto` (delta 20260918g §4.9, owner
+ * decisions Q4 a and Q9 a), because Paseo refuses a Reviewer created without
+ * a mode. Before that delta it got the role text alone.
+ */
+const workerWithFallback = `${workerMd.trimEnd()}\n\n## Runtime facts\n\nReviewer mode: \`auto\` — pass it as \`settings.modeId\` when you create a Reviewer.\n`;
+
+// The fallback prefers a list read earlier in the run; start every test without one.
+beforeEach(() => forgetModes());
 
 type Request = { config?: Record<string, unknown>; env?: Record<string, string> };
 type BeforeHandler = (input: { request: Request }, context: unknown) => unknown;
@@ -79,13 +89,14 @@ describe("before(\"agent.create\") role hook", () => {
     const { run } = setup();
     const request = { config: { provider: "bm-worker", cwd: "/repo", modeId: "default", model: "gpt-5.6-sol" }, env: { A: "1" } };
     const result = (await run(request));
-    expect(result).toEqual({ config: { ...request.config, systemPrompt: workerMd }, env: { A: "1" } });
+    // This host lists no modes, so the Worker also gets the fallback Reviewer mode.
+    expect(result).toEqual({ config: { ...request.config, systemPrompt: workerWithFallback }, env: { A: "1" } });
     expect(request.config).not.toHaveProperty("systemPrompt");
   });
 
   it("recognises a provider given as <id>/<model>", async () => {
     const { run } = setup();
-    expect((await run({ config: { provider: "bm-worker/gpt-5.6-sol", cwd: "/repo" } }))?.config?.systemPrompt).toBe(workerMd);
+    expect((await run({ config: { provider: "bm-worker/gpt-5.6-sol", cwd: "/repo" } }))?.config?.systemPrompt).toBe(workerWithFallback);
   });
 
   it("gives bm-reviewer the text of roles/reviewer.md", async () => {
@@ -101,7 +112,7 @@ describe("before(\"agent.create\") role hook", () => {
 
   it("does not duplicate instructions that are already in the system prompt", async () => {
     const { run } = setup();
-    expect((await run({ config: { provider: "bm-worker", cwd: "/repo", systemPrompt: workerMd } }))).toBeUndefined();
+    expect((await run({ config: { provider: "bm-worker", cwd: "/repo", systemPrompt: workerWithFallback } }))).toBeUndefined();
     const once = (await run({ config: { provider: "bm-worker", cwd: "/repo", systemPrompt: "extra" } }));
     expect((await run(once!))).toBeUndefined();
   });
@@ -229,6 +240,12 @@ describe("before(\"agent.create\") start mode", () => {
     return { spy, paseo: { providers: { listModes: spy } } };
   }
 
+  // Errata 2026-09-18 of delta 20260917c §4.6 (owner decision Q1a): a Worker's
+  // instructions carry the Reviewer mode it must pass, as the Manager's carry
+  // the Worker mode.
+  const workerWithReviewerMode = (mode: string) =>
+    `${workerMd.trimEnd()}\n\n## Runtime facts\n\nReviewer mode: \`${mode}\` — pass it as \`settings.modeId\` when you create a Reviewer.\n`;
+
   it("starts a Worker created without a mode in the no-prompt mode, looking up the bare provider id", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const { spy, paseo } = paseoWith(async () => ({ provider: "bm-worker", modes: CLAUDE_MODES, error: null }));
@@ -237,7 +254,33 @@ describe("before(\"agent.create\") start mode", () => {
     // The bare provider id, plus the cwd hint so the daemon can answer from the
     // snapshot it already warmed for this directory (review b2).
     expect(spy.mock.calls[0]).toEqual(["bm-worker", { cwd: "/repo" }]);
-    expect(result).toEqual({ config: { provider: "bm-worker/claude-opus-5", cwd: "/repo", systemPrompt: workerMd, modeId: "bypassPermissions" }, env: { A: "1" } });
+    expect(spy.mock.calls[1]).toEqual(["bm-reviewer", { cwd: "/repo" }]);
+    expect(result).toEqual({
+      config: { provider: "bm-worker/claude-opus-5", cwd: "/repo", systemPrompt: workerWithReviewerMode("auto"), modeId: "bypassPermissions" },
+      env: { A: "1" },
+    });
+  });
+
+  it("gives a Worker the Reviewer mode it must pass, as Runtime facts after its role text (errata K10, Q1a)", async () => {
+    const { paseo } = paseoWith(async (provider) => ({ modes: provider === "bm-reviewer" ? CODEX_MODES : [] }));
+    const { run } = setup(paseo);
+    // The Manager passes the Worker mode, as it always must.
+    const result = await run({ config: { provider: "bm-worker", cwd: "/repo", modeId: "bypassPermissions" } });
+    expect(result?.config).toEqual({ provider: "bm-worker", cwd: "/repo", modeId: "bypassPermissions", systemPrompt: workerWithReviewerMode("auto") });
+    // Written once: a Worker whose prompt already carries it is left alone.
+    expect(await run(result!)).toBeUndefined();
+  });
+
+  it("creates the Worker with its role text and the fallback Reviewer mode, and logs both, when the Reviewer's modes cannot be read", async () => {
+    // Before delta 20260918g the Worker got its role text alone here, and its
+    // first Reviewer creation was refused (owner decisions Q4 a, Q9 a).
+    const { paseo } = paseoWith(async () => ({ modes: [], error: "provider not ready" }));
+    const { run } = setup(paseo);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect((await run({ config: { provider: "bm-worker", cwd: "/repo", modeId: "bypassPermissions" } }))?.config?.systemPrompt).toBe(workerWithFallback);
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(String(warn.mock.calls[0]![0])).toMatch(/bm-reviewer.*provider not ready/);
+    expect(String(warn.mock.calls[1]![0])).toBe('[paseo-bm] could not read the modes of bm-reviewer; the Worker is told to pass the fallback Reviewer mode "auto" (static fallback).');
   });
 
   it("gives a Worker the mode its own profile sets, over the plugin's pick (bm-msy)", async () => {
@@ -265,11 +308,12 @@ describe("before(\"agent.create\") start mode", () => {
     expect(String(warn.mock.calls.at(-1)?.[0])).toMatch(/took longer than \d+ ms/);
   }, 20000);
 
-  it("keeps a Worker's chosen mode without a lookup", async () => {
+  it("keeps a Worker's chosen mode without looking up the Worker's modes", async () => {
     const { spy, paseo } = paseoWith(async () => ({ modes: CLAUDE_MODES }));
     const { run } = setup(paseo);
     const result = await run({ config: { provider: "bm-worker", cwd: "/repo", modeId: "default" } });
-    expect(spy).not.toHaveBeenCalled();
+    // The only lookup such a Worker costs is the REVIEWER's modes, for its Runtime facts.
+    expect(spy.mock.calls.map((call) => call[0])).toEqual(["bm-reviewer"]);
     expect(result?.config?.modeId).toBe("default");
   });
 
@@ -329,14 +373,20 @@ describe("before(\"agent.create\") start mode", () => {
     ["listModes reports an error", { providers: { listModes: async () => ({ modes: [], error: "provider not ready" }) } }, /provider not ready/],
     ["listModes returns nothing", { providers: { listModes: async () => undefined } }, /no modes listed/],
     ["the host has no providers api", {}, /cannot list provider modes/],
-  ])("still creates the agent, with its instructions and a log line, when %s", async (_name, paseo, logged) => {
+  ])("still creates the agent, with its instructions and a log line per lookup, when %s", async (_name, paseo, logged) => {
     const { run } = setup(paseo);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const result = await run({ config: { provider: "bm-worker", cwd: "/repo" } });
-    expect(result?.config?.systemPrompt).toBe(workerMd);
+    // The Runtime facts carry the fallback Reviewer mode (delta 20260918g §4.9).
+    expect(result?.config?.systemPrompt).toBe(workerWithFallback);
     expect(result?.config).not.toHaveProperty("modeId");
-    expect(warn).toHaveBeenCalledTimes(1);
+    // One line for the Worker's own mode, one for the Reviewer mode of its Runtime facts, one for the fallback used.
+    expect(warn).toHaveBeenCalledTimes(3);
     expect(String(warn.mock.calls[0]![0])).toMatch(logged);
+    expect(String(warn.mock.calls[0]![0])).toMatch(/bm-worker/);
+    expect(String(warn.mock.calls[1]![0])).toMatch(logged);
+    expect(String(warn.mock.calls[1]![0])).toMatch(/bm-reviewer/);
+    expect(String(warn.mock.calls[2]![0])).toMatch(/fallback Reviewer mode "auto" \(static fallback\)/);
   });
 });
 

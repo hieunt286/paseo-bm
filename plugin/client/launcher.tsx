@@ -25,7 +25,9 @@ import { SetupScreen } from "./setup-screen";
 import { DashboardPanel } from "./dashboard";
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import {
+  SURFACE_HOME_VIEW,
   WORKSPACE_ACTIONS,
+  backOf,
   closedWorkspaces,
   dashboardRequests,
   launcherNotices,
@@ -44,13 +46,14 @@ import {
 import { dropIndex, movePinned, orderRows, pinAt, prunePinned, unpin } from "./pinned-order";
 import { PLUGIN_VERSION } from "../shared/version";
 import {
-  describeLauncherState,
   errorMessageOf,
+  launcherStatusLines,
   launcherStyles,
   launchRequests,
   managerLauncher,
   runPendingRequest,
   toneColor,
+  type StatusLine,
 } from "./launch-manager";
 
 /** How often the per-workspace figures are refreshed while the launcher is open. */
@@ -337,12 +340,57 @@ function RunningDot(props: {
   );
 }
 
+/**
+ * The surface's status strip: a slash command's notice (tap to dismiss), a host
+ * too old to open agents, and the state of the last Manager launch. Built once
+ * by the surface and drawn on both the main screen (Setup) and the workspace
+ * list (delta 20260918e §4.2); the lines come from `launcherStatusLines`.
+ */
+function LauncherStatus({
+  lines,
+  onDismiss,
+  theme,
+  styles,
+}: {
+  lines: readonly StatusLine[];
+  onDismiss: () => void;
+  theme: PluginTheme;
+  styles: ReturnType<typeof launcherStyles>;
+}) {
+  return (
+    <>
+      {lines.map((line) =>
+        line.dismissable ? (
+          <Pressable
+            key={line.key}
+            accessibilityRole="button"
+            accessibilityLabel={`${line.text}. Dismiss.`}
+            onPress={onDismiss}
+            style={styles.row}
+          >
+            <Text style={styles.rowSubtitle}>{line.text}</Text>
+          </Pressable>
+        ) : (
+          <Text
+            key={line.key}
+            accessibilityLiveRegion="polite"
+            style={[styles.notice, { color: toneColor(theme, line.tone) }]}
+          >
+            {line.text}
+          </Text>
+        ),
+      )}
+    </>
+  );
+}
+
 export function ManagerLauncherSurface(props: PluginSurfaceProps) {
   const { theme, layout, navigation } = props;
   const paseo = usePaseo();
   // The Dashboard shares this surface (Q-036), so the view is state here and the
   // Command Center hand-off is a queue, exactly like the launch request below.
-  const [view, setView] = useState<DashboardViewName>("launcher");
+  // It opens on Setup, the main screen (delta 20260918e §4.2).
+  const [view, setView] = useState<DashboardViewName>(SURFACE_HOME_VIEW);
   const [dashboardWorkspace, setDashboardWorkspace] = useState<{ id: string; label: string } | null>(null);
   const ensure = useRpc(managerEnsureRpc);
   const listStored = useRpc(tracesWorkspacesRpc);
@@ -447,9 +495,22 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
   }, [ensure, openAgent]);
 
   const pending = state.status === "pending";
+  // Every ← goes where `backOf` says: Metric and Beads to the workspace list,
+  // the list to Setup. Setup is the main screen and has no ←.
 
-  if (view === "settings") {
-    return <SetupScreen {...props} onBack={() => setView("launcher")} />;
+  // Built ONCE and placed on the main screen and on the workspace list, so a
+  // slash command's notice and a launch error are seen wherever the surface is.
+  const status = (
+    <LauncherStatus
+      lines={launcherStatusLines({ commandNotice, canOpenAgents: openAgent !== undefined, state })}
+      onDismiss={() => launcherNotices.take()}
+      theme={theme}
+      styles={styles}
+    />
+  );
+
+  if (view === "setup") {
+    return <SetupScreen {...props} onOpenWorkspaces={() => setView("workspaces")} status={status} />;
   }
 
   if (view === "beads" && dashboardWorkspace !== null) {
@@ -458,7 +519,7 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
         {...props}
         workspaceId={dashboardWorkspace.id}
         workspaceLabel={dashboardWorkspace.label}
-        onBack={() => setView("launcher")}
+        onBack={() => setView(backOf(view) ?? SURFACE_HOME_VIEW)}
       />
     );
   }
@@ -469,51 +530,27 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
         {...props}
         workspaceId={dashboardWorkspace.id}
         workspaceLabel={dashboardWorkspace.label}
-        onBack={() => setView("launcher")}
+        onBack={() => setView(backOf(view) ?? SURFACE_HOME_VIEW)}
       />
     );
   }
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content} scrollEnabled={!dragging}>
-      {commandNotice === null ? null : (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`${commandNotice}. Dismiss.`}
-          onPress={() => launcherNotices.take()}
-          style={styles.row}
-        >
-          <Text style={styles.rowSubtitle}>{commandNotice}</Text>
-        </Pressable>
-      )}
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-        <Text style={[styles.title, { flex: 1 }]}>Beads Manager</Text>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Setup: beads tools, agent skills and role instructions"
-          onPress={() => setView("settings")}
+          accessibilityLabel="Back to Beads Manager setup"
+          onPress={() => setView(backOf(view) ?? SURFACE_HOME_VIEW)}
           style={styles.iconButton}
         >
-          <Icon name="Settings" size={18} color={styles.rowTitle.color} />
+          <Text style={styles.rowTitle}>←</Text>
         </Pressable>
+        <Text style={[styles.title, { flex: 1 }]}>Workspaces</Text>
       </View>
       <Text style={styles.body}>Chat with a workspace's Beads Manager, or open its metrics or beads.</Text>
 
-      {!openAgent ? (
-        <Text style={[styles.notice, { color: toneColor(theme, "warning") }]}>
-          This Paseo version cannot open agents from plugins. Update Paseo to use this launcher.
-        </Text>
-      ) : null}
-
-      {describeLauncherState(state).map((notice) => (
-        <Text
-          key={notice.text}
-          accessibilityLiveRegion="polite"
-          style={[styles.notice, { color: toneColor(theme, notice.tone) }]}
-        >
-          {notice.text}
-        </Text>
-      ))}
+      {status}
 
       {workspaces.isPending ? <ActivityIndicator color={styles.spinner.color} /> : null}
       {workspaces.isError ? (

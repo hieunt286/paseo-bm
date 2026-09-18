@@ -144,6 +144,8 @@ notChecked: <anything in the scope you could not check, and why>
 - `location`: `file:line`, a bead id, or a document heading.
 - `reason` and `suggestedFix`: one sentence each.
 - No counters: the plugin counts review calls.
+- A message that starts with `BM-FORMAT` is the plugin's: answer with the whole
+  corrected `BM-REVIEW` block only; do not review again.
 
 ## Stop
 

@@ -11,6 +11,8 @@
 | ADR | N/A — không có ADR nào quản chuyện này: không thêm công nghệ, không đảo quyết định nào. [ADR-007](../adr/ADR-007-dashboard-trace-store.md) (kho vết) giữ nguyên vì kho không thêm trường |
 | Request | `req-20260918T021211Z` |
 
+> **Đã được thay một phần:** §4.2 (dạng tin gửi từ thẻ), §4.4 (thẻ câu hỏi: đường gửi và bố cục) và §4.6 (mục `blocked` của `manager.md`) được thay bởi [design-delta-20260918d-card-replies](./paseo-bm-delta-20260918d-card-replies.md) (2026-09-18).
+
 **Thiết kế này sở hữu:**
 
 - định dạng khối `BM-QUESTIONS` và `BM-ANSWERS`;
@@ -316,6 +318,7 @@ Không còn câu nào chặn. Ngưỡng dòng của `manager.md` đã quyết th
 
 | Ngày | Người | Thay đổi |
 |---|---|---|
+| 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Thêm dòng trỏ: §4.2, §4.4, §4.6 được thay bởi delta `design-delta-20260918d-card-replies`. Không đổi nội dung nào khác |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Batch `b4` (Q49–Q51): dòng tóm tắt không quá 2 dòng và phần `blockers` bị cắt ở 160 ký tự (§4.4) |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Đã cài đặt (WP-250 → WP-254). `manager.md` đo được 171 dòng sau khi viết gọn, ngưỡng test thành 174 theo §4.6 và Q46. Status giữ Active |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Errata lúc chuyển thành bead: ghi rõ ràng buộc đã có của test "the RULES budget" — khối `## RULES` của `manager.md` đang ở trần 29 dòng, nên ngoại lệ của luật 2 phải nằm trong số dòng hiện có. Không đổi phạm vi hay hành vi |

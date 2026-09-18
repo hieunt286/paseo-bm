@@ -7,6 +7,8 @@ import { registerDashboardRpcs } from "./server/dashboard-rpc";
 import { registerRoleHook } from "./server/role-hook";
 import { describeRoles } from "./server/roles";
 import { registerStopPropagation } from "./server/stop-propagation";
+import { registerAgentLabels } from "./server/agent-labels";
+import { registerFormatCheck } from "./server/format-check";
 import { currentInstructions } from "./server/role-extras";
 import { registerSetupRpcs } from "./server/setup-rpc";
 import { registerChatRpcs } from "./server/chat-rpc";
@@ -67,7 +69,7 @@ export default function contribute(server: PluginServerContext): () => void {
     });
     if (result.otherManagerIds.length > 0) {
       console.warn(
-        `[paseo-bm] workspace ${input.workspaceId} has ${result.otherManagerIds.length + 1} live Managers; using the newest (${result.agentId}). Left untouched: ${result.otherManagerIds.join(", ")}.`,
+        `[paseo-bm] workspace ${input.workspaceId} has ${result.otherManagerIds.length + 1} live Managers; using ${result.agentId} (labelled Managers first, then the newest). Left untouched: ${result.otherManagerIds.join(", ")}.`,
       );
     }
     if (result.modeNotice !== null) console.warn(`[paseo-bm] ${result.modeNotice}`);
@@ -94,6 +96,10 @@ export default function contribute(server: PluginServerContext): () => void {
   registerChatRpcs(server);
   const removeRoleHook = registerRoleHook(server);
   const removeStopPropagation = registerStopPropagation(server);
+  // delta 20260918g §4.5: a bm-* agent created without its bm.role label gets it.
+  const removeAgentLabels = registerAgentLabels(server);
+  // delta 20260918g §4.7: the sender of a BM-* block that breaks its template is told (BM-FORMAT).
+  const removeFormatCheck = registerFormatCheck(server);
   // delta 20260917c §4.7: the plugin counts the review budget and tells the
   // Manager once per request; it never stops an agent.
   const budgetTold = new Set<string>();
@@ -109,6 +115,8 @@ export default function contribute(server: PluginServerContext): () => void {
   return () => {
     removeRoleHook();
     removeStopPropagation();
+    removeAgentLabels();
+    removeFormatCheck();
     removeCollector();
   };
 }

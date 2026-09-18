@@ -35,10 +35,19 @@ export const WORKER_STOP_NOTICE_MARKER = "BM-STOP";
 export const WORKER_STOP_NOTICE =
   `${WORKER_STOP_NOTICE_MARKER} The user asked every Beads Worker and Reviewer in this workspace to stop. This is a stop: follow your Stop rule.`;
 
+/**
+ * First word of the notice the sender of a block that breaks its template
+ * receives (`format-check.ts`, delta 20260918g §4.7). Listed here so the trace
+ * store never records it as the user's words and `reviewCallsOf` never counts
+ * one sent to a Reviewer as a review call.
+ */
+export const FORMAT_NOTICE_MARKER = "BM-FORMAT";
+
 const PREFIXES: readonly string[] = [
   BUDGET_NOTICE_MARKER,
   REVIEWER_STOP_NOTICE_PREFIX,
   WORKER_STOP_NOTICE_MARKER,
+  FORMAT_NOTICE_MARKER,
 ];
 
 /** True when this text is one of the plugin's own notices, not a person's words. */

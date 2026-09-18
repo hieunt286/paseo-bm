@@ -1,6 +1,7 @@
 /**
  * The pieces the Metric and Beads screens share: stat cards, a bar chart, a
- * chip and the agent role mark. Styling comes from `dashboardStyles`, colours from the theme.
+ * chip, the agent role mark, and the style of a bead title. Styling comes from
+ * `dashboardStyles`, colours from the theme.
  *
  * Client rules: React Native primitives only, no Node import, no `server/`
  * import.
@@ -8,7 +9,7 @@
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import { Pressable, Text, View } from "react-native";
-import { ROLE_MARK, barShare, toneColor, type Badge, type Bar, type GraphNode, type dashboardStyles } from "./dashboard-model";
+import { ROLE_MARK, barShare, toneColor, type Badge, type Bar, type GraphNode, type Tone, type dashboardStyles } from "./dashboard-model";
 
 export type Styles = ReturnType<typeof dashboardStyles>;
 export type Theme = PluginSurfaceProps["theme"];
@@ -112,6 +113,15 @@ export function Chip({
       {body}
     </Pressable>
   );
+}
+
+/**
+ * A bead title in a list: the section size, not bold, in its status colour
+ * (owner decisions Q3 and Q8, delta 20260918e). `null` keeps the plain text
+ * colour, for a bead shown outside a list.
+ */
+export function beadTitleStyle(styles: Styles, theme: Theme, tone: Tone | null) {
+  return [styles.sectionTitle, { fontWeight: "400" as const, color: tone === null ? theme.colors.foreground : toneColor(theme, tone) }];
 }
 
 /** A small role icon on a soft, round tint of the role's colour. */

@@ -13,6 +13,7 @@ import {
   buildAgentTree,
   indentFor,
   roleConfigRows,
+  rowRoleLabel,
   treeStyles,
 } from "../plugin/client/agent-tree";
 
@@ -52,6 +53,8 @@ const { AgentTreePanel, AgentTreeView } = (await import(treePath)) as {
 };
 const chatBeadsPath = "../plugin/client/bead-chips.tsx";
 const { ChatBeadsPanel } = (await import(chatBeadsPath)) as { ChatBeadsPanel: unknown };
+const beadsTabPath = "../plugin/client/beads-tab.tsx";
+const { BeadsTabPanel } = (await import(beadsTabPath)) as { BeadsTabPanel: unknown };
 
 // --- minimal element-tree renderer ------------------------------------------
 
@@ -224,6 +227,8 @@ describe("client entry registration", () => {
     const cleanup = clientContribute(client);
     expect(panels).toEqual([
       { id: "bm-chat-beads", title: "Beads in this chat", icon: "ListChecks", context: "agent", Component: ChatBeadsPanel },
+      // The "Beads" tab of the "+" menu (delta 20260918e), ahead of "Beads agents".
+      { id: "bm-beads", title: "Beads", icon: "ListChecks", context: "workspace", Component: BeadsTabPanel },
       { id: AGENT_TREE_PANEL_ID, title: "Beads agents", icon: "ListTree", context: "workspace", Component: AgentTreePanel },
     ]);
     expect(AGENT_TREE_ICON).toBe("ListTree");
@@ -240,6 +245,7 @@ describe("client entry registration", () => {
         "settings:paseo-bm-settings",
         `panel:${AGENT_TREE_PANEL_ID}`,
         "panel:bm-chat-beads",
+        "panel:bm-beads",
         "transformer:bm-chat-received",
         "transformer:bm-chat-sent",
         "renderer:bm-message",
@@ -535,5 +541,32 @@ describe("no HTML elements", () => {
       );
       expect(source, file).not.toMatch(/className=|onClick=|document\.|window\./);
     }
+  });
+});
+
+describe("rowRoleLabel (delta 20260918g §4.4)", () => {
+  it("marks a paseo-bm agent without a bm.role label, and nothing else", () => {
+    expect(rowRoleLabel({ role: "manager", labelled: false })).toBe("Manager · no label");
+    expect(rowRoleLabel({ role: "worker", labelled: false })).toBe("Worker · no label");
+    expect(rowRoleLabel({ role: "manager", labelled: true })).toBe("Manager");
+    expect(rowRoleLabel({ role: "reviewer" })).toBe("Reviewer");
+    expect(rowRoleLabel({ role: "unknown", labelled: false })).toBe("Unknown role");
+  });
+
+  it("shows the mark in the rows built from the tree", () => {
+    const node = (id: string, role: AgentNode["role"], labelled: boolean, parentId: string | null = null): AgentNode => ({
+      id,
+      role,
+      title: id,
+      status: "idle",
+      parentId,
+      updatedAt: "2026-09-18T07:00:00.000Z",
+      labelled,
+    });
+    const sections = agentSections(buildAgentTree([node("user-mgr", "manager", false), node("wrk", "worker", true, "user-mgr")]));
+    expect(sections[0]!.rows.map((row) => [row.agentId, row.roleLabel])).toEqual([
+      ["user-mgr", "Manager · no label"],
+      ["wrk", "Worker"],
+    ]);
   });
 });

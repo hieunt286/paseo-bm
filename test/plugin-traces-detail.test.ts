@@ -661,14 +661,14 @@ describe("pagination", () => {
 describe("read RPC handlers", () => {
   function fakePaseo(agents: Array<Record<string, unknown>>): DashboardPaseo {
     return {
-      // Honours the bm.role label filter, like the daemon does: returning every
-      // agent for every role query would silently give each agent the first
-      // role queried.
+      // Honours a bm.role label filter when one is given, like the daemon does,
+      // and returns every agent without one (bmAgentsOf lists with none since
+      // delta 20260918g and reads each agent's own label).
       agents: {
         list: vi.fn(async (options) => {
-          const wanted = options.filter.labels["bm.role"];
+          const wanted = options.filter.labels?.["bm.role"];
           const entries = agents
-            .filter((agent) => ((agent["labels"] ?? {}) as Record<string, string>)["bm.role"] === wanted)
+            .filter((agent) => wanted === undefined || ((agent["labels"] ?? {}) as Record<string, string>)["bm.role"] === wanted)
             .map((agent) => ({ agent }));
           return { entries };
         }),
