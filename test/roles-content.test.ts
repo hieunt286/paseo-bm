@@ -121,10 +121,31 @@ describe("all three files", () => {
   // matters, not the length) measured 361 / 153 / 147 after adding the worked
   // examples, the stage criteria in the Worker's brief, the non-code guidance
   // and the user-facing part of the Manager. Ceilings are those plus ten.
+  //
+  // manager.md went 158 -> 160 for delta 20260917f, which added two rules that
+  // fix a defect the owner hit: `/bm-worker-new` must open NEW work instead of
+  // being folded into whatever is running, and a message must never be sent to
+  // a Worker that is `running` because it replaces the turn and throws that
+  // work away. The raise was the last resort, not the first: the duplicate
+  // statement of the turn-replacement hazard was removed from the BM-BUDGET
+  // bullet, the two rules were folded into step 2's paragraph, and the block
+  // was re-wrapped — after which the text still needed one line more than the
+  // old ceiling. Cutting a safeguard to fit a number would be the move W4
+  // forbids, in the other direction.
+  //
+  // manager.md went 160 -> 174 for delta 20260918c-question-cards (owner
+  // decision Q46: measured length + 3). With several Workers asking at once the
+  // Manager must list the questions per Worker, map the user's `A6 a, B1 b`
+  // back to each Worker and send only that Worker's `BM-ANSWERS` block; the
+  // `blocked` bullet grew from 4 to 18 lines, 6 of them the block example the
+  // Manager copies. Rule 2 and rule 3 were re-wrapped so `## RULES` stayed at
+  // 29 lines; the file measured 171. Dropping the example or the "ask back"
+  // and "not while running" rules to fit 160 would cut the very safeguards the
+  // delta exists for.
   it.each([
     ["worker.md", worker, 394],
     ["reviewer.md", reviewer, 164],
-    ["manager.md", manager, 158],
+    ["manager.md", manager, 174],
   ])("%s leads with the hard limits and stays under %i lines", (_name, text, limit) => {
     const headings = text.split("\n").filter((line) => line.startsWith("## "));
     expect(headings[0]).toBe("## RULES");
@@ -386,20 +407,31 @@ describe("worker.md — the workflow", () => {
     // The twelve triggers became one principle with two halves (delta §4.3).
     rule(W, "ask when the answer changes what you build", /would change what you build/);
     rule(W, "ask when you are stuck", /when you are stuck/i);
-    rule(W, "a worked question set is shown", /My recommendation: \(a\)/);
-    rule(W, "the example waits for the answer", /I am waiting for your answers before I start/);
+    // Delta 20260918c-question-cards: the worked example is the `BM-QUESTIONS`
+    // block the Manager's chat card reads, so its shape is pinned.
+    rule(W, "a worked question set is shown", /Q1: Storage — [\s\S]{0,200}\(recommended\)/);
+    verbatim(worker, "```\nBM-QUESTIONS\nrequestId: req-");
+    rule(W, "asking ends the turn and waits for the answer", /Then end the turn and wait/);
     rule(W, "the example does not teach that silence is consent", /Silence is not an answer/);
     // Inside the example itself — the prose around it warns against that phrase.
-    const questions = between(worker, "1. Storage — the request says", "```");
+    const questions = between(worker, "Q1: Storage — the request says", "```");
     expect(questions).not.toMatch(/unless you say otherwise/);
     expect(questions).not.toMatch(/I will (take|go|start)/);
+    expect(questions.match(/\(recommended\)/g), "one recommendation per question").toHaveLength(2);
     // First live run (F7): five points in the chat, four in `blockers`, so the user saw four.
     rule(W, "a point for the user is never left only in the chat", /never a\s+remark left only in your chat/i);
     rule(W, "the example says what makes a question answerable", /every option is named/);
     rule(W, "a moment with nothing to ask is skipped", /skip a moment with nothing to ask/i);
     rule(W, "at most five numbered questions", /at most 5 numbered questions/i);
     rule(W, "each question carries options and a recommendation", /options, your recommendation/);
-    rule(W, "every question goes into blockers", /EVERY question in `blockers`|Every point the user must confirm goes in `blockers`/);
+    rule(W, "every question goes into the BM-QUESTIONS block of the report's message", /in the same message a `BM-QUESTIONS` block with EVERY question/);
+    rule(W, "blockers only points at the block", /`blockers:` saying only `2 questions: Q1, Q2 — see BM-QUESTIONS`/);
+    rule(W, "question ids keep counting across the request", /keep counting across the request/i);
+    rule(W, "exactly one recommendation per question", /exactly one `\(recommended\)`/);
+    rule(W, "answers arrive as a BM-ANSWERS block", /`BM-ANSWERS` block/);
+    rule(W, "an answer is an option pick or the user's own words", /`Q1: a — …` picks that option, `Q2: other — …` is the user's own words/);
+    rule(W, "an answer to a question that is not open is not acted on", /not open[^.]{0,80}do not act on it/i);
+    rule(W, "an unanswered question is asked again, never defaulted", /stays open: ask it again[^.]{0,60}never pick a default/i);
     for (const [name, pattern] of [
       ["deviate from an approved document", /deviat\w* from an approved document/i],
       ["change behaviour existing users rely on", /chang\w* behaviour (for )?existing users|behaviour existing users rely on/i],
@@ -470,6 +502,16 @@ describe("worker.md — the workflow", () => {
     rule(stop, "a finish notification is not a stop", /a finish notification/);
     expect(stop.toLowerCase().indexOf("`cancel_agent`")).toBeLessThan(stop.toLowerCase().indexOf("send `finished`"));
     rule(stop, "nothing else happens on a stop", /do NOTHING else/i);
+    // The plugin's own stop notice (`/bm-worker-stop-all`) is a stop by name,
+    // so the Worker never has to infer it from wording (delta 20260917e §4.4).
+    rule(stop, "a BM-STOP message is always a stop", /starts with `BM-STOP`[^.]{0,60}always a stop/i);
+    // Pinned because the first draft of that delta would have broken both: it
+    // told the Worker to call no further tool (deleting the `cancel_agent`
+    // step) and to report `blocked`, which manager.md renders as a question
+    // list — for a stop that has no questions.
+    rule(stop, "the Reviewers it created are still cancelled", /`cancel_agent`/);
+    rule(stop, "a stop is reported as finished, not blocked", /send `finished`/);
+    expect(stop).not.toMatch(/`blocked`/);
   });
 
   it("reports to Manager with the exact BM-REPORT block", () => {
@@ -693,6 +735,8 @@ describe("manager.md — hard limits", () => {
     rule(MR, "a size the user gave is used", /user stated a size|size the user/i);
     rule(MR, "answers are passed on unchanged", /verbatim/i);
     verbatim(MR, "`Continue <requestId>.`");
+    // Delta 20260918c-question-cards: the one fixed-shape exception.
+    rule(MR, "answers to a Worker's questions go as the BM-ANSWERS block", /answers to its questions as the `BM-ANSWERS` block/);
     // b2 review: "and nothing else" also swallowed the six mandated
     // initialPrompt items, including the Manager's own id the Worker needs.
     rule(MR, "the first prompt follows its own recipe", /FIRST prompt[^.]{0,60}(recipe|step 2)|first prompt is the exception/i);
@@ -820,6 +864,18 @@ describe("manager.md — how it runs a request", () => {
 
   it("keeps the user informed from what it can actually see (delta 20260917c §4.5)", () => {
     rule(M, "a follow-up goes to the Worker that already has the request", /follow-up to an existing request goes to that\s+Worker/i);
+    // Delta 20260917f: the owner typed `/bm-worker-new` and the Manager folded
+    // the words into the Worker already busy, turning parallel work serial.
+    rule(M, "the new-request flag always means new work", /`BM-NEW-REQUEST`\*\*[^.]{0,80}always new work/i);
+    rule(M, "and gets its own Worker even while others run", /NEW Worker even while others run/i);
+    rule(M, "never handed to a Worker that already has a request", /never one that already has\s+a request/i);
+    rule(M, "the request is what follows the flag line", /request is the rest of the message/i);
+    rule(M, "the user is told how many Workers now run", /say how many Workers\s+now run/i);
+    // The hazard the file knew about in one place and not in the relay path.
+    rule(M, "never messages a running Worker", /NEVER send to a Worker that is `running`/);
+    rule(M, "because a message destroys the turn", /replaces the\s+turn it is in and throws that work away/i);
+    rule(M, "the words are held, not dropped", /Hold the user's words/);
+    rule(M, "and sent when that Worker's turn ends", /send when Paseo wakes you at that Worker's turn end/i);
     rule(M, "progress questions are answered from the last report, with its age", /answer from the last report and the\s+agent status, and say how old/i);
     rule(M, "two sources that disagree are both named", /which source said what/i);
     rule(M, "progress is never invented", /never invent progress/i);
@@ -832,9 +888,25 @@ describe("manager.md — how it runs a request", () => {
   it("reports each Worker phase the way the user needs it", () => {
     rule(M, "a Large beads-done waits for the user", /For a \*\*Large\*\* request say the Worker is waiting for the user's confirmation/);
     rule(M, "never announces implementation early", /never say it started implementing before the user answered/);
-    rule(M, "every blocked question reaches the user", /show EVERY question in `blockers`/);
+    // Delta 20260918c-question-cards: the questions come from the report's
+    // `BM-QUESTIONS` block, or from `blockers` for a Worker that has none.
+    rule(M, "every blocked question reaches the user", /show the user EVERY question — from the report's `BM-QUESTIONS` block, else from `blockers`/);
     rule(M, "questions keep their options and recommendation", /with its options and the Worker's recommendation/);
     rule(M, "an already-answered question is not relayed twice", /If the user tells you they already answered the Worker, do not relay it again/);
+    rule(M, "every waiting Worker gets a letter, with its name and request", /every Worker still waiting under a letter \(A, B, …\) with its name and `requestId`/);
+    rule(M, "a question is labelled by the Worker's letter and its own number", /A6 = Worker A's Q6/);
+    rule(M, "old reports keep the Worker's own numbers", /old reports keep the Worker's numbers/);
+    rule(M, "the user answers in the card or in the chat", /answers in the Worker's card or here as `A6 a, B1 b`/);
+    rule(M, "the answer is read against the latest list", /against your latest list/);
+    rule(M, "each Worker gets only its own answers", /send each Worker only its own answers/);
+    rule(M, "never to a running Worker", /once it is not `running`/);
+    verbatim(
+      manager,
+      "`Continue <requestId>.`, then:\n  ```\n  BM-ANSWERS\n  requestId: <requestId>\n  Q6: a — <the option as the Worker wrote it>\n  Q7: other — <the user's own words>\n  ```",
+    );
+    rule(M, "an answer that fits no single question is asked back, not guessed", /fits no single open question: ask the user, send nothing for it/);
+    rule(M, "the Manager never picks for the user", /never pick an option for them/);
+    rule(M, "a Worker that reported again is not answered again", /reported again has had its answers[^.]{0,40}relay nothing more/);
     rule(M, "suggestions become questions for the user", /`Suggestion \(not done\)` items as questions/);
     // The Manager can only relay them because the Worker puts them in `blockers`.
     rule(W, "the Worker puts its suggestions in blockers", /goes in `blockers`[^.]{0,80}`none\. Suggestion \(not done\): …`/i);
@@ -895,7 +967,11 @@ describe("across the three files (delta 20260917c)", () => {
   it("shows worked examples as examples, not as lists of rules (§4.8)", () => {
     const workerBlocks = fenced(worker);
     expect(workerBlocks.some((block) => block.includes("## Primary Proof") && block.includes("## Reversibility")), "a bead").toBe(true);
-    expect(workerBlocks.some((block) => /^1\. .+\n[\s\S]*\(a\)[\s\S]*My recommendation/m.test(block)), "a question set").toBe(true);
+    // Delta 20260918c-question-cards: the question set is the `BM-QUESTIONS` block.
+    expect(
+      workerBlocks.some((block) => /^BM-QUESTIONS\nrequestId: .+\nQ1: .+\n- a: .+\(recommended\)\n- b: /m.test(block)),
+      "a question set",
+    ).toBe(true);
     const pair = fenced(reviewer).find((block) => block.includes("severity: blocking\n") && block.includes("severity: non-blocking\n"));
     expect(pair, "a contrast pair").toBeDefined();
     // An example is concrete: it names a real place, not a placeholder.

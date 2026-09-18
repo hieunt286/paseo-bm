@@ -25,6 +25,7 @@ import type {
   GuardrailReport,
   ParsedReport,
   ParsedReview,
+  RuntimeRow,
   SubAgentTrace,
   Tier,
   TraceBead,
@@ -76,14 +77,99 @@ export interface ReconstructedTrace {
   linking: Confidence;
   agentsMissing: string[];
   notices: string[];
+  /** The request's turns, oldest first. Always at least one (delta 20260917e §4.3). */
+  segments: TraceSegment[];
+}
+
+/**
+ * One turn of the conversation inside a request: what the user asked, and
+ * everything that happened until they asked again.
+ *
+ * The owner asked for a follow-up to show as its own flow instead of being
+ * folded into one hard-to-trace row (delta 20260917e §4.3). A segment opens at
+ * a Manager turn whose first inbound message is the USER's — `origin: "user"`,
+ * which the collector sets only when the timeline item carried a
+ * `clientMessageId`.
+ *
+ * That field, not the wording, is what makes this safe. A Worker's status
+ * update reaches its Manager as a `user_message` too and is indistinguishable
+ * by text — WP-214 defect 9, which is why unnamed turns are folded at all. It
+ * carries `origin: "agent"`, so it never opens a segment. Records written
+ * before `origin` existed have none, and AGENTS.md forbids reading that absence
+ * as `user`: such a request stays a single segment.
+ */
+export interface TraceSegment {
+  /** 1-based, in time order. */
+  index: number;
+  startedAt: string;
+  /** The user's message that opened this segment; null when the opening turn was never captured. */
+  text: string | null;
+  /** Records of this trace inside the segment's window, oldest first. */
+  records: TraceRecord[];
+  /** Reports that arrived while this segment was open. */
+  reports: ParsedReport[];
+}
+
+/**
+ * Splits a finished trace into its turns.
+ *
+ * Boundaries are the Manager turns the USER opened. Everything before the first
+ * such turn still belongs to segment 1, so no record is ever dropped: a request
+ * whose opening turn was not captured, or one written before the `origin` field
+ * existed, comes back as exactly one segment covering everything.
+ */
+function segmentsOf(trace: ReconstructedTrace): TraceSegment[] {
+  const opens: Array<{ at: string; text: string }> = [];
+  for (const record of trace.records) {
+    if (record.role !== "manager") continue;
+    const message = firstUserMessage(record);
+    // `origin` is absent on records written before the collector recorded it.
+    // Absence is NOT "user" (AGENTS.md), so such a record opens nothing.
+    if (message?.origin !== "user") continue;
+    opens.push({ at: message.at, text: message.text });
+  }
+  opens.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+
+  const first = trace.records[0]?.at ?? trace.requestedAt;
+  // The opening segment starts with the trace itself unless the user's first
+  // message is what started it.
+  const heads =
+    opens.length > 0 && opens[0]!.at <= first
+      ? opens
+      : [{ at: first, text: null as string | null }, ...opens];
+
+  const segments: TraceSegment[] = heads.map((head, index) => ({
+    index: index + 1,
+    startedAt: head.at,
+    text: head.text,
+    records: [],
+    reports: [],
+  }));
+
+  const segmentAt = (at: string): TraceSegment => {
+    let chosen = segments[0]!;
+    for (const segment of segments) {
+      if (segment.startedAt <= at) chosen = segment;
+      else break;
+    }
+    return chosen;
+  };
+
+  for (const record of trace.records) segmentAt(record.at).records.push(record);
+  for (const report of trace.reports) segmentAt(report.at).reports.push(report);
+  return segments;
+}
+
+/** First inbound message that is neither a role report nor one of the plugin's own notices. */
+function firstUserMessage(record: TraceRecord): TraceMessage | null {
+  for (const message of record.sent) {
+    if (!looksLikeReport(message.text) && !isPluginNotice(message.text)) return message;
+  }
+  return null;
 }
 
 function firstUserText(record: TraceRecord): string | null {
-  for (const message of record.sent) {
-    // Neither a role report nor one of the plugin's own notices is a request.
-    if (!looksLikeReport(message.text) && !isPluginNotice(message.text)) return message.text;
-  }
-  return null;
+  return firstUserMessage(record)?.text ?? null;
 }
 
 /**
@@ -174,6 +260,7 @@ function openBuckets(records: readonly TraceRecord[]): { buckets: Bucket[]; byRe
         linking: requestId !== null ? "exact" : "unknown",
         agentsMissing: [],
         notices: [],
+        segments: [],
       },
       from: at,
       to: record.at,
@@ -459,6 +546,7 @@ export function reconstructTraces(options: ReconstructOptions): ReconstructedTra
     linking: "unknown",
     agentsMissing: [],
     notices: ["These agents could not be linked to a request."],
+    segments: [],
   };
 
   // Reports that arrived in the Manager's timeline belong to the trace they name.
@@ -600,6 +688,7 @@ export function reconstructTraces(options: ReconstructOptions): ReconstructedTra
       (review) => `${review.agentId}|${review.batchId ?? ""}|${review.verdict ?? ""}|${review.at}`,
     );
     trace.records.sort(byAt);
+    trace.segments = segmentsOf(trace);
 
     const lastGuardrail = [...trace.reports].reverse().find((report) => report.guardrail !== null);
     trace.guardrailReported = lastGuardrail?.guardrail ?? null;
@@ -793,6 +882,16 @@ export function beadActionsOf(trace: ReconstructedTrace): BeadActions {
 }
 
 /**
+ * The model a turn actually ran on (delta 20260918 §4.2): the running model the
+ * collector recorded in `runtime`, else the configured one in `usage`. Records
+ * written before that delta only have the second. Every grouping by model uses
+ * this one definition, so cost, the per-model lines and the overview agree.
+ */
+export function effectiveModel(record: Pick<TraceRecord, "runtime" | "usage">): string | null {
+  return record.runtime?.model ?? record.usage?.model ?? null;
+}
+
+/**
  * Sums the tokens a trace used. Cost is left unpriced here (`unavailable`):
  * WP-209 owns the price table and applies it, so this module never has to know
  * about money.
@@ -807,7 +906,8 @@ export function summariseUsage(trace: ReconstructedTrace): Usage {
     inputTokens += record.usage.inputTokens;
     cachedInputTokens += record.usage.cachedInputTokens;
     outputTokens += record.usage.outputTokens;
-    model = record.usage.model ?? model;
+    // The model the turn ran on, so a part priced below is priced as what ran.
+    model = effectiveModel(record) ?? model;
   }
   return {
     inputTokens,
@@ -818,6 +918,84 @@ export function summariseUsage(trace: ReconstructedTrace): Usage {
     model,
     pricesUpdatedAt: null,
   };
+}
+
+const tokensOf = (usage: Usage) => usage.inputTokens + usage.cachedInputTokens + usage.outputTokens;
+
+/**
+ * A trace's records grouped by the model they ran on (`effectiveModel`, delta
+ * 20260918 §4.3), in order of first appearance, each summed and still unpriced.
+ * Parts without tokens are dropped. `key` is the model without a provider
+ * prefix — `bm-worker/claude-opus-5` and `claude-opus-5` are one model, and the
+ * price table accepts both — or `""` when no model is known.
+ */
+function modelParts(trace: ReconstructedTrace): Array<{ key: string; usage: Usage }> {
+  const byModel = new Map<string, TraceRecord[]>();
+  for (const record of trace.records) {
+    if (record.usage === null) continue;
+    const model = effectiveModel(record) ?? "";
+    const key = model.slice(model.lastIndexOf("/") + 1);
+    byModel.set(key, [...(byModel.get(key) ?? []), record]);
+  }
+  return [...byModel.entries()]
+    .map(([key, records]) => ({ key, usage: summariseUsage({ ...trace, records }) }))
+    .filter((part) => tokensOf(part.usage) > 0);
+}
+
+/**
+ * Tokens and cost of a trace per model it ran on (delta 20260918 §4.3,
+ * REQ-058d): the same parts `usageOfTrace` prices, so the lines add up to its
+ * total. A model without a price keeps `costUsd: null` and shows tokens only.
+ */
+export function usageByModelOf(
+  trace: ReconstructedTrace,
+  price?: (usage: Usage) => Usage,
+): Array<{ model: string | null; usage: Usage }> {
+  return modelParts(trace).map((part) => {
+    const model = part.key === "" ? null : part.key;
+    const usage = { ...part.usage, model };
+    return { model, usage: price === undefined ? usage : price(usage) };
+  });
+}
+
+/**
+ * Tokens and cost per role and model (delta 20260918 §4.3, REQ-058e): the
+ * per-model parts of each role's records, so a role's lines add up to what its
+ * agents used and a model is keyed the same way as everywhere else.
+ */
+export function usageByModelRoleOf(
+  trace: ReconstructedTrace,
+  price?: (usage: Usage) => Usage,
+): Array<{ role: TraceRecord["role"]; model: string | null; usage: Usage }> {
+  const roles = [...new Set(trace.records.map((record) => record.role))];
+  return roles.flatMap((role) =>
+    usageByModelOf({ ...trace, records: trace.records.filter((record) => record.role === role) }, price).map((entry) => ({
+      role,
+      ...entry,
+    })),
+  );
+}
+
+/**
+ * What one agent ran on, turn by turn, folded into one row per distinct
+ * combination in order of first appearance (delta 20260918 §4.3). A turn with
+ * `runtime` gives a recorded row; one without keeps the model its `usage` knew,
+ * and says thinking and mode were not recorded.
+ */
+export function runtimeRowsOf(trace: ReconstructedTrace, agentId: string): RuntimeRow[] {
+  const rows = new Map<string, RuntimeRow>();
+  for (const record of trace.records) {
+    if (record.agentId !== agentId) continue;
+    const runtime = record.runtime ?? null;
+    const row: Omit<RuntimeRow, "turns"> =
+      runtime === null
+        ? { model: record.usage?.model ?? null, thinkingOptionId: null, modeId: null, recorded: false }
+        : { model: effectiveModel(record), thinkingOptionId: runtime.thinkingOptionId, modeId: runtime.modeId, recorded: true };
+    const key = JSON.stringify([row.model, row.thinkingOptionId, row.modeId, row.recorded]);
+    const current = rows.get(key);
+    rows.set(key, current === undefined ? { ...row, turns: 1 } : { ...current, turns: current.turns + 1 });
+  }
+  return [...rows.values()];
 }
 
 /**
@@ -834,19 +1012,7 @@ export function usageOfTrace(
   trace: ReconstructedTrace,
   price?: (usage: Usage) => Usage,
 ): { usage: Usage; notice: string | null } {
-  // `bm-worker/claude-opus-5` and `claude-opus-5` are one model (the price
-  // table accepts both), so group by the id without a provider prefix.
-  const byModel = new Map<string, TraceRecord[]>();
-  for (const record of trace.records) {
-    if (record.usage === null) continue;
-    const model = record.usage.model ?? "";
-    const key = model.slice(model.lastIndexOf("/") + 1);
-    byModel.set(key, [...(byModel.get(key) ?? []), record]);
-  }
-  const tokensOf = (usage: Usage) => usage.inputTokens + usage.cachedInputTokens + usage.outputTokens;
-  const parts = [...byModel.entries()]
-    .map(([key, records]) => ({ key, usage: summariseUsage({ ...trace, records }) }))
-    .filter((part) => tokensOf(part.usage) > 0);
+  const parts = modelParts(trace);
   const total = summariseUsage(trace);
   // No tokens at all: nothing to split, so keep the plain result.
   if (parts.length === 0) return { usage: price === undefined ? total : price(total), notice: null };
@@ -954,6 +1120,7 @@ export function summarise(trace: ReconstructedTrace, deps: SummariseDeps): Trace
     requestId: trace.requestId,
     requestedAt: trace.requestedAt,
     excerpt: trace.requestText === null ? null : (trace.requestText.split("\n")[0]?.slice(0, 200) ?? ""),
+    turn: null,
     state: trace.state,
     workerIds: trace.workerIds,
     reviewerIds: trace.reviewerIds,
@@ -968,6 +1135,7 @@ export function summarise(trace: ReconstructedTrace, deps: SummariseDeps): Trace
       title: deps.agents.get(agentId)?.title ?? null,
       usage: usageOfAgent(trace, agentId, deps.priceUsage),
     })),
+    usageByModelRole: usageByModelRoleOf(trace, deps.priceUsage),
     beadCounts: {
       created: { count: beads.created.ids.length, confidence: beads.created.confidence },
       updated: { count: beads.updated.ids.length, confidence: beads.updated.confidence },
@@ -981,6 +1149,53 @@ export function summarise(trace: ReconstructedTrace, deps: SummariseDeps): Trace
     reassignedFrom: deps.reassignedFrom,
     notices: total.notice === null ? trace.notices : [...trace.notices, total.notice],
   };
+}
+
+/**
+ * One row per turn the user opened, instead of one row per request.
+ *
+ * The owner asked for each follow-up to be its own flow rather than being
+ * folded into a row that is hard to trace (delta 20260917e §4.3, decision Q23:
+ * the Dashboard splits, the `requestId` does not).
+ *
+ * What is split and what is not matters more than the split itself:
+ * - **split**, because it belongs to one turn — when it was asked, what was
+ *   asked, the tokens, the duration, the messages, the beads its reports name;
+ * - **kept whole**, because it belongs to the request — the review calls above
+ *   all. Counting those per turn would hand a user who asks three follow-ups
+ *   three times the reviews their tier allows, which is the very thing the
+ *   budget exists to stop. Also whole: the state, tier, linking, and the agents,
+ *   which are the request's, not a turn's.
+ *
+ * A request nobody followed up returns exactly one row with `turn: null`, so
+ * nothing changes for it.
+ */
+export function summariseSegments(trace: ReconstructedTrace, deps: SummariseDeps): TraceSummary[] {
+  const whole = summarise(trace, deps);
+  if (trace.segments.length <= 1) return [whole];
+  const total = trace.segments.length;
+  return trace.segments.map((segment) => {
+    const part = summarise(
+      {
+        ...trace,
+        records: segment.records,
+        reports: segment.reports,
+        requestedAt: segment.startedAt,
+        requestText: segment.text,
+      },
+      deps,
+    );
+    return {
+      ...part,
+      turn: { index: segment.index, total },
+      // Notices are the request's, and `summarise` derives one of them from the
+      // records it was given — which here are a single turn's. Everything else
+      // request-level (review calls, state, tier, linking, the agents) is
+      // carried through untouched by `summarise`, so it needs no override; the
+      // suite pins that invariant so a future change cannot start splitting it.
+      notices: whole.notices,
+    };
+  });
 }
 
 export interface DetailDeps extends SummariseDeps {
@@ -1090,7 +1305,9 @@ export function detail(trace: ReconstructedTrace, deps: DetailDeps): TraceDetail
       agentId,
       role: deps.agents.get(agentId)?.role ?? trace.records.find((record) => record.agentId === agentId)?.role ?? "unknown",
       usage: usageOfAgent(trace, agentId, deps.priceUsage),
+      runtime: runtimeRowsOf(trace, agentId),
     })),
+    usageByModel: usageByModelOf(trace, deps.priceUsage),
     beads: beadRows,
     workflowSteps:
       deps.workflowSteps?.(trace, (id) => currentById.get(id)?.status ?? null) ?? [],

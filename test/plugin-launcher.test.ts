@@ -110,7 +110,7 @@ type EnsureHandler = (input: unknown, ctx: { paseo: ManagerPaseo }) => Promise<u
 /** Client-side `rpc` wired to the handler `index.server.ts` really registers. */
 function wiredEnsure(paseo: ManagerPaseo) {
   const handle = vi.fn();
-  serverContribute({ handle } as unknown as Parameters<typeof serverContribute>[0]);
+  serverContribute({ handle, registerSettings: vi.fn() } as unknown as Parameters<typeof serverContribute>[0]);
   const registration = handle.mock.calls.find(([contract]) => contract === managerEnsureRpc);
   if (!registration) throw new Error("manager.ensure is not registered");
   const handler = registration[1] as EnsureHandler;
@@ -153,6 +153,8 @@ function fakeClient() {
     },
     // The agent-tree panel bead registers a workspace panel from the same entry.
     addWorkspacePanel: (item: { id: string }) => () => removed.push(`panel:${item.id}`),
+    // WP-240 adds /bm-worker-new and /bm-worker-stop-all from the same entry.
+    addSlashCommand: (item: { name: string }) => () => removed.push(`slash:${item.name}`),
     // WP-211 adds the Dashboard settings screen from the same entry.
     addSettingsScreen: (item: { id: string }) => {
       settingsScreens.push(item);
@@ -235,6 +237,8 @@ describe("client entry registrations", () => {
         `sidebar:${LAUNCHER_SURFACE_ID}`,
         "command:open-beads-manager",
         "command:open-beads-dashboard",
+        "slash:bm-worker-new",
+        "slash:bm-worker-stop-all",
         "settings:paseo-bm-settings",
         "panel:beads-agents",
         "panel:bm-chat-beads",
@@ -406,6 +410,41 @@ describe("pending and error states", () => {
         tone: "warning",
         text: "This workspace has 1 other live Beads Manager (mgr-old). The newest one was opened; nothing was archived or deleted.",
       },
+    ]);
+  });
+
+  it("shows why an existing Manager was not switched to its mode, and still opens it (delta 20260918 §4.1)", async () => {
+    const launcher = createManagerLauncher();
+    const openAgent = vi.fn();
+    const modeNotice = "Beads Manager mgr-1 is busy, so it was not switched to \"bypassPermissions\" yet; paseo-bm will try again the next time you open it.";
+
+    expect(
+      await launcher.launch(WS, {
+        ensure: async () => ({ agentId: "mgr-1", created: false, otherManagerIds: [], modeNotice }),
+        openAgent,
+      }),
+    ).toBe("opened");
+
+    expect(openAgent).toHaveBeenCalledWith({ agentId: "mgr-1" });
+    expect(describeLauncherState(launcher.getState())).toEqual([
+      { tone: "muted", text: "Reopened the existing Beads Manager for this workspace." },
+      { tone: "warning", text: modeNotice },
+    ]);
+  });
+
+  it.each([
+    ["null", { modeNotice: null }],
+    ["absent (an older server)", {}],
+  ])("no mode notice when the server's modeNotice is %s", async (_label, extra) => {
+    const launcher = createManagerLauncher();
+
+    await launcher.launch(WS, {
+      ensure: async () => ({ agentId: "mgr-1", created: true, otherManagerIds: [], ...extra }),
+      openAgent: () => {},
+    });
+
+    expect(describeLauncherState(launcher.getState())).toEqual([
+      { tone: "muted", text: "Started a new Beads Manager for this workspace." },
     ]);
   });
 });

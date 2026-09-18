@@ -210,21 +210,60 @@ describe("workspaces.overview", () => {
         { id: "wks_archived", directory: workspace, archivingAt: "2026-09-16T00:00:00.000Z" },
       ],
     }));
+    const byRole: Record<string, Array<Record<string, unknown>>> = {
+      worker: [
+        { id: "w1", workspaceId: WS, status: "running", labels: {} },
+        { id: "w2", workspaceId: WS, status: "idle", labels: {} },
+        { id: "w3", workspaceId: "wks_nobeads", status: "running", labels: {} },
+      ],
+      reviewer: [{ id: "r1", workspaceId: WS, status: "running", labels: {} }],
+      manager: [
+        { id: "m1", workspaceId: WS, status: "idle", labels: {} },
+        { id: "m2", workspaceId: "wks_nobeads", status: "running", labels: {} },
+      ],
+    };
     paseo.agents.list = vi.fn(async ({ filter }: { filter: { labels: Record<string, string> } }) => ({
-      entries:
-        filter.labels["bm.role"] === "worker"
-          ? [
-              { id: "w1", workspaceId: WS, status: "running", labels: {} },
-              { id: "w2", workspaceId: WS, status: "idle", labels: {} },
-              { id: "w3", workspaceId: "wks_nobeads", status: "running", labels: {} },
-            ]
-          : [{ id: "r1", workspaceId: WS, status: "running", labels: {} }],
+      entries: byRole[filter.labels["bm.role"] ?? ""] ?? [],
     })) as never;
     const { workspaces } = await handleWorkspacesOverview(paseo);
     expect(workspaces).toEqual([
-      { workspaceId: WS, beads: { total: 4, inProgress: 1, blocked: 2, ready: 0 }, runningWorkers: 1 },
-      { workspaceId: "wks_nobeads", beads: null, runningWorkers: 1 },
+      {
+        workspaceId: WS,
+        beads: { total: 4, inProgress: 1, blocked: 2, ready: 0 },
+        runningWorkers: 1,
+        runningAgents: { manager: 0, worker: 1, reviewer: 1 },
+      },
+      {
+        workspaceId: "wks_nobeads",
+        beads: null,
+        runningWorkers: 1,
+        runningAgents: { manager: 1, worker: 1, reviewer: 0 },
+      },
     ]);
+  });
+
+  /**
+   * Owner decision Q25 (delta 20260917e): a Reviewer running is a project at
+   * work. Counting Workers alone left the screen still exactly while a review
+   * was happening — this case goes red if anyone reverts to that.
+   */
+  it("reports a workspace as busy when only a Reviewer is running", async () => {
+    const paseo = fakePaseo();
+    paseo.workspaces.list = vi.fn(async () => ({ entries: [{ id: WS, directory: workspace }] }));
+    paseo.agents.list = vi.fn(async ({ filter }: { filter: { labels: Record<string, string> } }) => ({
+      entries:
+        filter.labels["bm.role"] === "reviewer"
+          ? [{ id: "r1", workspaceId: WS, status: "running", labels: {} }]
+          : [],
+    })) as never;
+    const { workspaces } = await handleWorkspacesOverview(paseo);
+    const row = workspaces[0]!;
+    expect(row.runningAgents).toEqual({ manager: 0, worker: 0, reviewer: 1 });
+    const total = row.runningAgents.manager + row.runningAgents.worker + row.runningAgents.reviewer;
+    expect(total).toBeGreaterThan(0);
+    // `runningWorkers` keeps its old meaning, which is exactly why it cannot
+    // carry the new signal on its own.
+    expect(row.runningWorkers).toBe(0);
   });
 });
 

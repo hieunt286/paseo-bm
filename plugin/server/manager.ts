@@ -24,11 +24,21 @@
  */
 import type { AgentNode } from "../shared/contracts";
 import { PLUGIN_VERSION } from "../shared/version";
+import { setAgentLabel, setAgentMode, type PaseoCliDeps } from "./paseo-cli";
+import { providerId } from "./provider-id";
+import { managerModeFor, modesFor } from "./role-mode";
 
 /** Label key and value that identify a paseo-bm Manager (design §5). */
 export const MANAGER_ROLE_LABEL = "bm.role";
 export const MANAGER_ROLE_VALUE = "manager";
 export const VERSION_LABEL = "bm.version";
+
+/**
+ * "paseo-bm already set this Manager's mode", with the mode as its value
+ * (delta 20260918 §4.1). A Manager that carries it is never switched again, so
+ * a mode the user picks by hand afterwards is respected (owner decision Q36).
+ */
+export const MODE_SET_LABEL = "bm.modeSet";
 
 /** Agent profile id registered by the installer (ADR-006, WP-107). */
 export const MANAGER_PROFILE_ID = "bm-manager";
@@ -74,6 +84,8 @@ export interface ManagerAgentSnapshot {
   archivedAt?: string | null;
   providerUnavailable?: boolean;
   lastError?: string;
+  /** The mode the agent is in now; `agents.list` entries carry it. */
+  currentModeId?: string | null;
 }
 
 export interface ManagerAgentHandle {
@@ -121,6 +133,10 @@ export interface ManagerPaseo {
   config: {
     get(): Promise<{ config: { agentProfiles?: ManagerAgentProfile[] } }>;
   };
+  /** Absent on a host that cannot list modes; the Manager then gets no mode of ours. */
+  providers?: {
+    listModes(provider: string, options?: { cwd?: string }): Promise<unknown>;
+  };
 }
 
 export interface EnsureManagerDeps {
@@ -129,6 +145,10 @@ export interface EnsureManagerDeps {
   readInstructions: () => Promise<string>;
   /** Plugin version written to `bm.version`. Defaults to the baked-in version. */
   version?: string;
+  /** Where a failed mode lookup is reported. Defaults to `console.warn`. */
+  log?: (message: string) => void;
+  /** How the `paseo` CLI is found and run; tests pass a fake runner. */
+  cli?: PaseoCliDeps;
 }
 
 export interface EnsureManagerResult {
@@ -139,6 +159,11 @@ export interface EnsureManagerResult {
    * the panel can tell the user (design §9.3); never deleted or archived here.
    */
   otherManagerIds: string[];
+  /**
+   * Why an existing Manager was not switched to its mode, or `null` when there
+   * was nothing to say (delta 20260918 §4.1). Never blocks returning the Manager.
+   */
+  modeNotice: string | null;
 }
 
 /** A Manager is live when it is neither archived nor closed. */
@@ -230,6 +255,7 @@ export async function ensureManager(
       agentId: chosen.id,
       created: false,
       otherManagerIds: others.map((agent) => agent.id),
+      modeNotice: await switchOnce(chosen, deps),
     };
   }
 
@@ -244,12 +270,30 @@ export async function ensureManager(
 
   const systemPrompt = await deps.readInstructions();
 
+  // The provider's no-prompt mode unless the profile names its own (delta
+  // 20260918 §4.1). `modesFor` is raced against 5 s and logs every miss; a miss
+  // creates the Manager exactly as before, without the label, so the next open
+  // can still switch it.
+  const provider = providerId(profile.provider) ?? profile.provider;
+  const modes = await modesFor(paseo, provider, deps.log);
+  const chosenMode = modes === null ? undefined : managerModeFor(modes, profile.modeId ?? null);
+  // Modes unknown: exactly as before this delta. Modes known: only a mode the
+  // provider lists — a profile mode it does not list would make the creation fail.
+  const modeId = modes === null ? profile.modeId : chosenMode;
+  if (modes !== null && chosenMode === undefined) {
+    (deps.log ?? ((message: string) => console.warn(message)))(
+      `[paseo-bm] ${provider} lists no mode that runs without permission prompts${
+        profile.modeId === undefined ? "" : `, nor the profile's own mode "${profile.modeId}"`
+      }; the Manager starts in the provider's default mode.`,
+    );
+  }
+
   let handle: ManagerAgentHandle;
   try {
     handle = await paseo.workspaces.ref(workspaceId).agents.create({
       config: {
         provider: providerSelection(profile),
-        ...(profile.modeId !== undefined ? { modeId: profile.modeId } : {}),
+        ...(modeId !== undefined ? { modeId } : {}),
         ...(profile.thinkingOptionId !== undefined
           ? { thinkingOptionId: profile.thinkingOptionId }
           : {}),
@@ -260,6 +304,7 @@ export async function ensureManager(
       labels: {
         [MANAGER_ROLE_LABEL]: MANAGER_ROLE_VALUE,
         [VERSION_LABEL]: deps.version ?? PLUGIN_VERSION,
+        ...(chosenMode !== undefined ? { [MODE_SET_LABEL]: chosenMode } : {}),
       },
     });
   } catch (cause) {
@@ -285,7 +330,50 @@ export async function ensureManager(
     );
   }
 
-  return { agentId: handle.id, created: true, otherManagerIds: [] };
+  return { agentId: handle.id, created: true, otherManagerIds: [], modeNotice: null };
+}
+
+/**
+ * Switches a Manager created before delta 20260918 to its mode, once, and marks
+ * it with `bm.modeSet` (§4.1, owner decisions Q36, Q37, Q39). Returns what the
+ * user should be told, or `null`. Never throws: whatever goes wrong, the
+ * Manager is still opened.
+ */
+async function switchOnce(manager: ManagerAgentSnapshot, deps: EnsureManagerDeps): Promise<string | null> {
+  try {
+    // 1. Already handled: a mode the user picked since then is theirs.
+    if (manager.labels[MODE_SET_LABEL] !== undefined) return null;
+
+    // 2. The same target a new Manager would get; no target, nothing to do.
+    const { config } = await deps.paseo.config.get();
+    const profile = config.agentProfiles?.find((entry) => entry.id === MANAGER_PROFILE_ID);
+    if (!profile) return null;
+    const modes = await modesFor(deps.paseo, providerId(profile.provider) ?? profile.provider, deps.log);
+    const target = modes === null ? undefined : managerModeFor(modes, profile.modeId ?? null);
+    if (target === undefined) return null;
+
+    // 3. Switching mid-turn can rebuild a Claude session's query: wait for the next open.
+    if (manager.status === "running") {
+      return `Beads Manager ${manager.id} is busy, so it was not switched to "${target}" yet; paseo-bm will try again the next time you open it.`;
+    }
+
+    // 4. Switch only when it is not already there.
+    if (manager.currentModeId !== target) {
+      const switched = await setAgentMode(manager.id, target, deps.cli);
+      if (!switched.ok) {
+        return `Could not switch Beads Manager ${manager.id} to "${target}": ${switched.reason}. Switch its mode yourself in Paseo.`;
+      }
+    }
+
+    // 5. Mark it, so it is never switched again. A miss here only means the next open marks it.
+    const marked = await setAgentLabel(manager.id, MODE_SET_LABEL, target, deps.cli);
+    if (!marked.ok) {
+      return `Beads Manager ${manager.id} is in "${target}", but could not be marked as done (${marked.reason}); paseo-bm will try again the next time you open it.`;
+    }
+    return null;
+  } catch (error) {
+    return `Could not check the mode of Beads Manager ${manager.id}: ${error instanceof Error ? error.message : String(error)}. Switch its mode yourself in Paseo if it still asks for permission.`;
+  }
 }
 
 // ---------------------------------------------------------------------------

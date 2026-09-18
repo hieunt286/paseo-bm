@@ -39,6 +39,7 @@ import { basename } from "node:path";
 import type { PluginLifecycleEvents, PluginServerContext } from "@getpaseo/plugin/server";
 import { parseReports, parseReviews, requestIdFromText } from "./bm-report";
 import { isPluginNotice } from "./notices";
+import { stripNewRequestMarker } from "../shared/new-request";
 import { resolveInstallHome } from "./install-home";
 import { providerId } from "./provider-id";
 import {
@@ -54,6 +55,7 @@ import {
   type ParsedReview,
   type TraceMessage,
   type TraceRecord,
+  type TraceRuntime,
   type Usage,
 } from "../shared/contracts";
 
@@ -230,13 +232,38 @@ interface RefetchEntry {
   timestamp?: string;
 }
 
+const nonEmpty = (value: unknown): string | null => (typeof value === "string" && value.trim() !== "" ? value : null);
+
+/**
+ * What the agent ran on this turn, from the snapshot `timeline.refetch` returns
+ * (delta 20260918 §4.2). The provider's running values (`runtimeInfo`) come
+ * first and the snapshot's configuration only fills in what they leave empty —
+ * a provider-reported `null` never hides a real fallback. `null` when there is
+ * no snapshot. Never throws: a malformed snapshot costs the fields, not the turn.
+ */
+export function runtimeOf(snapshot: unknown): TraceRuntime | null {
+  try {
+    if (snapshot === null || typeof snapshot !== "object") return null;
+    const agent = snapshot as Record<string, unknown>;
+    const info = (agent["runtimeInfo"] !== null && typeof agent["runtimeInfo"] === "object" ? agent["runtimeInfo"] : {}) as Record<string, unknown>;
+    return {
+      model: nonEmpty(info["model"]) ?? nonEmpty(agent["model"]),
+      thinkingOptionId:
+        nonEmpty(info["thinkingOptionId"]) ?? nonEmpty(agent["effectiveThinkingOptionId"]) ?? nonEmpty(agent["thinkingOptionId"]),
+      modeId: nonEmpty(info["modeId"]) ?? nonEmpty(agent["currentModeId"]),
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Reads `timestamp`s back for one turn with a single `refetch` call (assumption A-2). */
 export async function timestampsForTurn(
   deps: CollectorDeps,
   agentId: string,
   turnId: string | null,
-): Promise<{ entries: RefetchEntry[]; usage: Usage | null; requestIdLabel: string | null }> {
-  if (deps.paseo === undefined) return { entries: [], usage: null, requestIdLabel: null };
+): Promise<{ entries: RefetchEntry[]; usage: Usage | null; requestIdLabel: string | null; runtime: TraceRuntime | null }> {
+  if (deps.paseo === undefined) return { entries: [], usage: null, requestIdLabel: null, runtime: null };
   let payload: unknown;
   try {
     payload = await deps.paseo.agents.ref(agentId).timeline.refetch({
@@ -244,7 +271,7 @@ export async function timestampsForTurn(
       limit: REFETCH_LIMIT,
     });
   } catch {
-    return { entries: [], usage: null, requestIdLabel: null };
+    return { entries: [], usage: null, requestIdLabel: null, runtime: null };
   }
   const asRecord = payload as { entries?: unknown; agent?: unknown } | null;
   const rawEntries = Array.isArray(asRecord?.entries) ? (asRecord?.entries as RefetchEntry[]) : [];
@@ -288,7 +315,7 @@ export async function timestampsForTurn(
           model: typeof snapshot?.model === "string" ? (snapshot.model as string) : null,
           pricesUpdatedAt: null,
         };
-  return { entries, usage, requestIdLabel };
+  return { entries, usage, requestIdLabel, runtime: runtimeOf(asRecord?.agent) };
 }
 
 /** In-memory start marks, keyed by agent and turn. Lost on reload, which is fine. */
@@ -351,7 +378,7 @@ export async function buildRecord(
   const env = deps.env ?? process.env;
 
   const items = Array.isArray(event.timeline) ? event.timeline : [];
-  const { entries, usage, requestIdLabel } = await timestampsForTurn(deps, event.agent.id, event.turnId);
+  const { entries, usage, requestIdLabel, runtime } = await timestampsForTurn(deps, event.agent.id, event.turnId);
 
   // Preferred source: the refetch entries for this turn, which carry both the
   // item and its timestamp. Fallback: the hook payload, which is the whole
@@ -380,7 +407,11 @@ export async function buildRecord(
     if (role === "manager" && relayRequestId === null) relayRequestId = relayRequestIdOf(item);
     const text = textOf(item);
     if (text === null) continue;
-    const safe = redactText(text, env);
+    // `/bm-worker-new` prefixes the user's request with a flag line so the
+    // Manager knows not to fold it into whatever is already running. The flag is
+    // the plugin's, the words after it are the user's, so the flag comes off
+    // here and the message stays theirs (delta 20260917f §4.1).
+    const safe = stripNewRequestMarker(redactText(text, env));
     const message: TraceMessage = { agentId: event.agent.id, at, text: safe, truncated: false };
     if (item.type === "user_message") {
       // Typed in Paseo's app → `clientMessageId`; sent by an agent → none.
@@ -426,6 +457,7 @@ export async function buildRecord(
     reviews,
     evidence,
     usage,
+    runtime,
   };
 
   const cwd = typeof event.agent.cwd === "string" && event.agent.cwd !== "" ? event.agent.cwd : null;

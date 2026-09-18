@@ -111,6 +111,8 @@ Một dòng JSON, đã che bí mật, mỗi dòng độc lập (file hỏng mộ
   usage:   { inputTokens, cachedInputTokens, outputTokens, totalCostUsd | null, model | null } | null }
 ```
 
+*Errata 2026-09-18 ([delta 20260918](paseo-bm-delta-20260918-manager-mode-model-metrics.md) §4.2):* bản ghi có thêm trường **tuỳ chọn** `runtime: { model, thinkingOptionId, modeId } | null` — thứ agent **thật sự chạy** ở lượt đó, lấy từ snapshot của `timeline.refetch`: `runtimeInfo` trước, trường cấu hình (`model`, `effectiveThinkingOptionId` → `thinkingOptionId`, `currentModeId`) chỉ để dự phòng; `null` khi không đọc được snapshot. Là trường cộng thêm: `v` và `schemaVersion` vẫn là 1, không di trú; bản cũ đọc bản ghi mới thì bỏ qua nó. `usage.model` giữ nguồn cũ.
+
 Quy tắc ghi:
 
 - **Nối thêm, không sửa.** Một lượt ghi đúng một dòng; không bao giờ sửa dòng đã ghi. Sửa duy nhất là **xoá** (§3.5).
@@ -235,6 +237,7 @@ usage = { inputTokens, cachedInputTokens, outputTokens,
 | `workspaceState` | enum | `live` , `archived` , `orphaned` , `unknown` (§3.7) |
 | `reassignedFrom` | string hoặc null | `workspaceId` gốc, khi trace đã được gán lại |
 | `notices` | string[] | "dữ liệu có thể thiếu", "kho lưu vết tắt", … |
+| `usageByModelRole` | `[{ role, model \| null, usage }]` | *Thêm 2026-09-18 ([delta 20260918](paseo-bm-delta-20260918-manager-mode-model-metrics.md) §4.3, REQ-058e).* Token và chi phí theo vai trò × model hiệu lực, cho biểu đồ "Tokens by model × role" ở tổng quan. Tuỳ chọn trong lược đồ, server luôn gửi |
 
 ### 4.3 `TraceDetail`
 
@@ -243,12 +246,15 @@ TraceDetail = TraceSummary + {
   sent:     { userRequest, workerInitialPrompts[], reviewRequests[] },
   received: { reports[], reviews[], managerReplies[] },
   timing:   { totalMs|null, managerTurns[], workers[], reviewers[], basis: string },
-  usageByAgent: [{ agentId, role, usage }],
+  usageByAgent: [{ agentId, role, usage, runtime?: [{ model, thinkingOptionId, modeId, recorded, turns }] }],
+  usageByModel?: [{ model|null, usage }],   // errata 2026-09-18, xem dưới
   beads:    [{ id, title|null, statusNow|null, action, confidence, evidence[] }],
   workflowSteps: [{ step, status: "done"|"skipped"|"unknown", confidence, evidence[], note|null }],
   subAgentTraces:[{ agentId, subAgentType|null, description|null, count }],
 }
 ```
+
+*Errata 2026-09-18 ([delta 20260918](paseo-bm-delta-20260918-manager-mode-model-metrics.md) §4.3, REQ-058a–d):* `usageByAgent[].runtime` gộp các lượt của một agent thành một dòng cho mỗi tổ hợp `(model, thinkingOptionId, modeId, recorded)` kèm số lượt, theo thứ tự gặp đầu tiên. Lượt có `runtime` → `recorded: true`; lượt cũ không có `runtime` nhưng có `usage.model` → giữ model đó, thinking/mode `null`, `recorded: false`; không có cả hai → `model: null`. `usageByModel` là token và chi phí theo model hiệu lực, cộng lại đúng bằng `usage` của trace. Hai trường tuỳ chọn trong lược đồ, server luôn gửi.
 
 `workflowSteps` luôn trả đủ danh sách bước cố định, đúng thứ tự: `classify_tier`, `prd`, `design`, `adr`, `plan`, `convert_to_beads`, `polish_beads`, `implement`, `review_batches`, `build_and_tests`, `close_with_evidence`.
 
@@ -285,7 +291,7 @@ Lỗi được ném dưới dạng `Error` có `message` bắt đầu bằng mã
 ## 6. Nhóm trace theo yêu cầu
 
 1. **Lấy agent.** `agents.list` theo nhãn (`bm.role=manager|worker|reviewer`), `includeArchived: true`, phân trang 200; lọc theo `agent.workspaceId`. Dựng cây bằng `parentAgentId`; parent không có trong tập thì node là gốc.
-2. **Đọc kho lưu vết** của workspace. Bucket **khoá theo `requestId`**, nên N lượt Manager của cùng một request luôn là **một** dòng. Một trace mở ra từ lượt Manager có `sent` không phải `BM-REPORT`, **hoặc** từ lượt Manager đọc được `requestId` — trường hợp sau `requestText` để `null` và dòng đó nói rõ là chưa ghi được lời yêu cầu (plugin chỉ thu từ lúc nó được nạp). Lượt Manager **không** nêu `requestId` thuộc về **request mà chính Manager đó nêu ở lượt kế tiếp của nó**; không có lượt nào sau đó của cùng Manager nêu request thì mới mở một dòng tạm. *Errata 2026-09-17:* mã cũ tìm lượt kế tiếp trong **cả workspace**, nên một lượt của Manager đã lưu trữ chui vào request của Manager sau đó, cách 18 giờ — xem [delta 20260917d](paseo-bm-dashboard-delta-20260917d-request-attribution.md) §3 A và §4 A. Xem [delta 20260916-acceptance-fixes](paseo-bm-delta-20260916-acceptance-fixes.md) vị trí 1, 2, 6.
+2. **Đọc kho lưu vết** của workspace. Bucket **khoá theo `requestId`**, nên N lượt Manager của cùng một request luôn là **một** dòng. Một trace mở ra từ lượt Manager có `sent` không phải `BM-REPORT`, **hoặc** từ lượt Manager đọc được `requestId` — trường hợp sau `requestText` để `null` và dòng đó nói rõ là chưa ghi được lời yêu cầu (plugin chỉ thu từ lúc nó được nạp). Lượt Manager **không** nêu `requestId` thuộc về **request mà chính Manager đó nêu ở lượt kế tiếp của nó**; không có lượt nào sau đó của cùng Manager nêu request thì mới mở một dòng tạm. *Errata 2026-09-17 (b):* một request được **tách thành các đoạn** trên màn hình — mỗi lượt Manager mà tin nhắn đầu là lời người dùng thật (`origin === "user"`) mở một đoạn, và danh sách hiện một dòng cho mỗi đoạn; `requestId`, cách Worker báo cáo và ngân sách review **không đổi** (owner chốt Q23). Biểu đồ vẫn đếm request (Q27). Xem [delta 20260917e](paseo-bm-delta-20260917e-manager-screen-and-commands.md) §4.3. *Errata 2026-09-17 (a):* mã cũ tìm lượt kế tiếp trong **cả workspace**, nên một lượt của Manager đã lưu trữ chui vào request của Manager sau đó, cách 18 giờ — xem [delta 20260917d](paseo-bm-dashboard-delta-20260917d-request-attribution.md) §3 A và §4 A. Xem [delta 20260916-acceptance-fixes](paseo-bm-delta-20260916-acceptance-fixes.md) vị trí 1, 2, 6.
 3. **Lấy `requestId`**, dừng ở nguồn đầu tiên có giá trị:
    a. nhãn `bm.requestId` của agent (REQ-051) → `linking: "exact"`;
    b. trường `requestId:` trong một `BM-REPORT` của trace → `"exact"`;
@@ -353,6 +359,7 @@ Thứ tự, dừng ở điều kiện khớp đầu tiên: có agent `status = "
 3. **Model không có trong bảng:** `costUsd: null`, `costBasis: "unavailable"` — giao diện chỉ hiện token.
 4. `shared/prices.ts` có `pricesUpdatedAt` và giao diện **luôn** hiện ngày đó cạnh số tiền, kèm nhãn "estimated". **Không gọi mạng để lấy giá.**
 5. Bảng giá là dữ liệu sẽ cũ: nguồn sự thật là trang giá công bố của từng provider, và giá trên Amazon Bedrock hoặc Google Vertex **khác** giá API gốc. Vì vậy số tiền luôn là *tạm tính*, không phải hoá đơn (REQ-052f).
+6. *Errata 2026-09-18 ([delta 20260918](paseo-bm-delta-20260918-manager-mode-model-metrics.md) §4.3, owner chốt Q38):* mọi phép gộp theo model — tổng tiền của trace, dòng token theo model, biểu đồ model × vai trò — dùng **model hiệu lực** của bản ghi: `runtime.model`, không có thì `usage.model`. Con số chỉ khác trước ở ca profile để trống model: token trước đây "không có giá" nay được định giá theo model đã chạy.
 
 > Khảo sát để điền bảng lần đầu (giá API gốc của Anthropic, kiểm 2026-06-24, USD trên 1 triệu token, in/out): `claude-opus-5` 5/25 · `claude-sonnet-5` 2/10 · `claude-haiku-4-5` 1/5. Phải kiểm lại tại thời điểm implement và ghi đúng `pricesUpdatedAt`; model của provider khác (ví dụ Codex) lấy từ trang giá của chính provider đó.
 
@@ -456,6 +463,8 @@ Kho lưu vết nằm trong thư mục cài đặt, nên tính năng này **phả
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | **Errata theo [delta 20260918](paseo-bm-delta-20260918-manager-mode-model-metrics.md)** (REQ-058, owner chốt Q32, Q38): §3.3 bản ghi thêm trường tuỳ chọn `runtime`; §4.2 `TraceSummary.usageByModelRole`; §4.3 `usageByAgent[].runtime` (một dòng mỗi tổ hợp model/thinking/mode, kèm `recorded` và số lượt; lượt cũ giữ `usage.model`) và `usageByModel`; §9 gộp theo model hiệu lực. Không di trú, `schemaVersion` vẫn 1 |
+| 2026-09-17 | hieu.nt10 (soạn bởi Claude) | **Theo [delta 20260917e](paseo-bm-delta-20260917e-manager-screen-and-commands.md).** §4 bước 2: một request tách thành các đoạn theo lượt người dùng hỏi, dựa vào `origin` chứ không dựa câu chữ; biểu đồ vẫn đếm **request** (Q27). Hai RPC mới `launcher.order.get` / `launcher.order.set` cho thứ tự ghim, lưu trong install home chứ không dùng plugin settings (đường đó đang lỗi). `workspaces.overview` thêm `runningAgents` — errata nằm ở delta 20260916-owner-feedback, nơi RPC đó được định nghĩa |
 | 2026-09-17 | hieu.nt10 (soạn bởi Claude) | **Errata theo [delta 20260917d](paseo-bm-dashboard-delta-20260917d-request-attribution.md)** — lỗi owner báo: câu hỏi vừa gửi không thấy trong Metric. §3.3 và §3.5 bước 4: khoá chống trùng thêm **vân tay nội dung lượt** (Paseo dùng lại turn id trong cùng một agent, nên khoá cũ vứt mất lượt thật). §6 bước 2: lượt Manager vô danh chỉ gộp vào request của **chính Manager đó** (mã cũ tìm trong cả workspace, kéo lượt của Manager đã lưu trữ vào request 18 giờ sau). Sự thật mới: thời điểm tin nhắn trong bản ghi có thể là **giờ lúc ghi**, nên không dùng làm khoá được |
 | 2026-09-16 | hieu.nt10 (soạn bởi Claude) | **Bản 5 — sau nghiệm thu trên daemon thật (WP-214).** Áp dụng [delta 20260916-acceptance-fixes](paseo-bm-delta-20260916-acceptance-fixes.md): §6 (bucket khoá theo `requestId`; trace mở được từ `requestId` không cần lời yêu cầu; lượt Manager vô danh thuộc request được nêu ở lượt sau; id bead chỉ ở tham số vị trí; "mới nhất" là theo thời gian), §7.3 (chỉ báo cáo cuối quyết định; `finished` + `blockers` mới là `stopped`), §6 bước 4b (bản ghi của agent đã bị xoá vẫn thuộc request của nó), §8 (phủ định chính xác của `polish`; polish phải chạm ≥2 bead), §9 (bỏ nguồn `provider` vì `totalCostUsd` là tổng luỹ kế của phiên — đổi một phần Q-035) |
 | 2026-09-16 | hieu.nt10 (soạn bởi Claude) | **Owner duyệt; cổng `design-ready` PASS.** Status Draft → Active. Ngoại lệ "soạn design trước `prd-ready`" đã kết thúc: PRD được duyệt cùng lượt, nên ngoại lệ chỉ còn giá trị lịch sử |

@@ -5,7 +5,7 @@
 | Mã | `design-delta-20260917c-context-engineering` |
 | Tài liệu gốc | [Technical Design](./paseo-bm.md) §2.5, §2.6; [PRD](../product/paseo-bm-prd.md) REQ-026, REQ-032, REQ-034, REQ-036, REQ-037 |
 | Tiếp nối | [delta simplify-roles](./paseo-bm-delta-20260917b-simplify-roles.md) (Applied) — delta đó gộp phần **cấm**; delta này sửa phần **còn lại** |
-| Status | **Accepted** — owner hieu.nt10 chốt 6 quyết định ngày 2026-09-17 (§1.2) |
+| Status | **Applied với ngoại lệ** — 2026-09-17. Owner chốt 6 quyết định (§1.2); WP-227 → WP-234 đã đóng. **Điều kiện ra ở §6 KHÔNG đạt** và được ghi thành ngoại lệ, không ghi thành đạt — xem §12 |
 | Plan | [plan delta 20260917c](../plans/paseo-bm-implementation-plan-delta-20260917c-context-engineering.md) |
 | Nguồn | Owner yêu cầu đánh giá lại toàn bộ chỉ dẫn dưới góc nhìn Context Engineering |
 
@@ -334,3 +334,19 @@ Hai chỗ **cố ý lệch** so với §4.4–§4.5, ghi lại ở đây để l
 
 - `reviewer.md` giữ tiêu đề `## Stop` thay vì gộp vào `## Your answer`: lối dừng do plugin kích hoạt, người đọc cần tìm thấy nó bằng tiêu đề.
 - `worker.md` giữ câu "you run without permission prompts": đó là sự thật về môi trường Worker thật sự chạy, và nó giải thích vì sao Worker không được chờ ai bấm đồng ý.
+
+## 12. Lượt chạy nghiệm thu nói gì — ngoại lệ, không phải đạt
+
+Biên bản đầy đủ: [run-20260917c](../operations/paseo-bm-context-engineering-run-20260917c.md).
+
+**Điều kiện ra ở §6 không đạt.** §6 viết *"nhanh hơn và rẻ hơn mà chất lượng không tụt thì delta đạt"*. Lượt chạy 2026-09-17 cho 41,9 phút (so 41,4) và $21,11 (so $20,18). Không nhanh hơn, không rẻ hơn. Ghi thành **ngoại lệ**, đúng luật của kho: *một cổng không qua được ghi là ngoại lệ, không bao giờ ghi là đạt*.
+
+**Nhưng nỗi lo kèm theo cũng không xảy ra.** §6 dự liệu rằng chất lượng tụt sẽ là bằng chứng phải hoàn lại chữ đã cắt. Chất lượng **không tụt mà tăng**: một lượt review đối kháng độc lập, không sandbox, tìm ra **0 lỗi chặn**, trong khi hai lượt trước mỗi lượt có 1. Độ sẵn sàng bead, số skill và số vòng hỏi đều giữ.
+
+**Nên không hoàn lại gì.** Cách chữa mà §6 kê — trả lại phần chữ đã cắt — nhắm vào một kiểu hỏng đã không xảy ra, và bằng chứng đang nói ngược: lượt chạy với bản chỉ dẫn đã cắt là lượt duy nhất sạch lỗi chặn. Hoàn lại lúc này là làm chỉ dẫn dài trở lại mà không có gì đỡ cho quyết định đó. **Bản chép hoàn tác vẫn được giữ** (`/var/folders/nt/rg1q6ywd7_5cxhcd2v0bqvvc0000gn/T/tmp.Tp64dOfDFx`) cho tới khi owner tự chốt; nó không bị xoá trong bead đóng delta như dự kiến ban đầu.
+
+**Thước đo ở §6 đã sai trọng tâm, và đây là bài học đáng giá nhất của lượt này.** Nó cho rằng mật độ chỉ dẫn đổi lấy tốc độ. Số liệu nói mật độ chỉ dẫn đổi lấy **tính đúng đắn**: cùng số bead, cùng số skill, cùng số vòng hỏi, nhưng không còn lỗi chặn nào — với giá 4,6% chi phí. Lần đo sau phải lấy **số lỗi chặn** làm thước chính, còn thời gian và tiền là ràng buộc không được vượt, chứ không phải mục tiêu.
+
+**Một điều kiện lần đầu được thử thật:** Manager ở mode cài mặc định tạo được Worker (K10). Hai lượt trước chạy Manager không-hỏi-quyền nên không bao giờ chạm tới ca daemon từ chối tạo Worker thiếu mode — đúng ca mà review b1 cảnh báo sẽ làm hỏng mọi lần tạo Worker.
+
+**Một lệch nhỏ của Worker** được ghi ở §4 biên bản: nó ghi hai file vào `/tmp`, ngoài cả workspace lẫn thư mục nháp `mktemp -d` của chính nó, trong khi RULE 1 chỉ cho phép thư mục nháp đó.

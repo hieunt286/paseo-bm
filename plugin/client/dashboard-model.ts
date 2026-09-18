@@ -20,6 +20,7 @@ import type {
   Confidence,
   StoreSize,
   TraceDeleteScope,
+  RuntimeRow,
   TraceDetail,
   TraceSummary,
   Usage,
@@ -492,18 +493,68 @@ export interface Bar {
   hint?: string;
 }
 
-/** Requests per day for the last `days` days, oldest first. */
+/**
+ * How a row says which turn of its request it is.
+ *
+ * Empty for a request nobody followed up, so those rows read exactly as they
+ * always did — a lone "turn 1 of 1" would be noise on the majority of rows.
+ */
+export function turnLabel(turn: TraceSummary["turn"]): string {
+  return turn === null ? "" : `turn ${turn.index} of ${turn.total} · `;
+}
+
+/**
+ * Requests per day for the last `days` days, oldest first.
+ *
+ * Counts REQUESTS, not rows (owner decision Q27). Since delta 20260917e the
+ * list carries one row per question asked, so a single request that went back
+ * and forth ten times would otherwise read as ten requests and the day-to-day
+ * comparison this chart exists for would be meaningless. Only the row that
+ * opens a request is counted.
+ */
 export function requestsPerDay(traces: readonly TraceSummary[], now: Date, days = 7): Bar[] {
+  const opening = traces.filter((trace) => trace.turn === null || trace.turn.index === 1);
   const bars: Bar[] = [];
   for (let offset = days - 1; offset >= 0; offset -= 1) {
     const day = new Date(now.getTime() - offset * 86_400_000).toISOString().slice(0, 10);
-    const value = traces.filter((trace) => trace.requestedAt.slice(0, 10) === day).length;
+    const value = opening.filter((trace) => trace.requestedAt.slice(0, 10) === day).length;
     bars.push({ label: day.slice(5), value, display: String(value) });
   }
   return bars;
 }
 
 /** The Workers that used the most tokens, across the listed requests. */
+/**
+ * Tokens and cost per model and role, over the same rows the overview cards
+ * count (delta 20260918 §4.4, REQ-058e): which model each role actually runs
+ * on, and what it costs. A model without a price shows tokens only; an unknown
+ * model keeps its bar instead of vanishing from the total.
+ */
+export function tokensByModelRole(traces: readonly TraceSummary[]): Bar[] {
+  const byPair = new Map<string, { label: string; tokens: number; cost: number | null }>();
+  for (const trace of traces) {
+    for (const entry of trace.usageByModelRole ?? []) {
+      const label = `${entry.model ?? "unknown model"} · ${entry.role}`;
+      const tokens = entry.usage.inputTokens + entry.usage.cachedInputTokens + entry.usage.outputTokens;
+      const current = byPair.get(label);
+      const cost = entry.usage.costUsd;
+      byPair.set(label, {
+        label,
+        tokens: (current?.tokens ?? 0) + tokens,
+        cost: cost === null ? (current?.cost ?? null) : (current?.cost ?? 0) + cost,
+      });
+    }
+  }
+  return [...byPair.values()]
+    .filter((pair) => pair.tokens > 0)
+    .sort((a, b) => b.tokens - a.tokens)
+    .map((pair) => ({
+      label: pair.label,
+      value: pair.tokens,
+      display: `${formatTokens(pair.tokens)}${pair.cost === null ? "" : ` · $${pair.cost.toFixed(2)}`}`,
+    }));
+}
+
 export function heaviestWorkers(traces: readonly TraceSummary[], limit = 5): Bar[] {
   const byWorker = new Map<string, { title: string | null; tokens: number; cost: number | null; request: string }>();
   for (const trace of traces) {
@@ -613,6 +664,41 @@ function usageLine(usage: Usage): string {
   return `${formatUsage(usage)} · ${formatCost(usage)}`;
 }
 
+const turnsText = (turns: number) => `${turns} turn${turns === 1 ? "" : "s"}`;
+
+/**
+ * One `Model: …` line per combination an agent ran on (delta 20260918 §4.4,
+ * REQ-058 a–c). A turn written before the collector recorded thinking and mode
+ * says so instead of guessing; a recorded `null` thinking option is the
+ * provider's default, which is a different thing.
+ */
+export function runtimeLines(rows: readonly RuntimeRow[] | undefined): string[] {
+  return (rows ?? []).map((row) => {
+    if (!row.recorded) {
+      return row.model === null
+        ? `Model: not recorded · ${turnsText(row.turns)}`
+        : `Model: ${row.model} · thinking/mode: not recorded · ${turnsText(row.turns)}`;
+    }
+    return `Model: ${row.model ?? "not recorded"} · thinking: ${row.thinkingOptionId ?? "provider default"} · mode: ${row.modeId ?? "unknown"} · ${turnsText(row.turns)}`;
+  });
+}
+
+/** The agent's model when it ran on exactly one known model, for a node's subtitle. */
+export function singleModelOf(rows: readonly RuntimeRow[] | undefined): string | null {
+  const models = new Set((rows ?? []).map((row) => row.model).filter((model): model is string => model !== null));
+  return models.size === 1 ? [...models][0]! : null;
+}
+
+/** `Tokens by model: …` for a request; a model without a price shows tokens only (REQ-058d). */
+export function tokensByModelLine(entries: TraceDetail["usageByModel"]): string | null {
+  if (entries === undefined || entries.length === 0) return null;
+  const parts = entries.map(({ model, usage }) => {
+    const tokens = `${formatTokens(usage.inputTokens + usage.cachedInputTokens + usage.outputTokens)} tokens`;
+    return `${model ?? "unknown model"} ${tokens}${usage.costUsd === null ? "" : ` · ${formatCost(usage)}`}`;
+  });
+  return `Tokens by model: ${parts.join(" · ")}`;
+}
+
 /**
  * The nodes of one request, in display order. Reviewers sit under the Worker
  * when the request has exactly one (the normal case); with several Workers the
@@ -621,6 +707,7 @@ function usageLine(usage: Usage): string {
  */
 export function requestGraph(summary: TraceSummary, detail: TraceDetail | null, now: Date): GraphNode[] {
   const usageOf = (agentId: string) => detail?.usageByAgent.find((entry) => entry.agentId === agentId)?.usage;
+  const runtimeOf = (agentId: string) => detail?.usageByAgent.find((entry) => entry.agentId === agentId)?.runtime;
   /** What the user typed to this agent. */
   const agentLines = (agentId: string): string[] => {
     if (detail === null) return [];
@@ -642,6 +729,12 @@ export function requestGraph(summary: TraceSummary, detail: TraceDetail | null, 
     if (reply !== undefined) requestDetails.push(`Answer: ${shorten(reply.text, 400)}`);
     requestDetails.push(`Time: ${duration} (wall clock, includes waiting for you)`);
     requestDetails.push(`Tokens: ${usageLine(summary.usage)}`);
+    const byModel = tokensByModelLine(detail.usageByModel);
+    if (byModel !== null) requestDetails.push(byModel);
+    // The Manager has no node of its own, so what it ran on is listed here.
+    for (const entry of detail.usageByAgent.filter((agent) => agent.role === "manager")) {
+      for (const line of runtimeLines(entry.runtime)) requestDetails.push(`Manager ${shortId(entry.agentId)} — ${line}`);
+    }
     requestDetails.push(`Beads: ${beadClaim(summary.beadCounts)}`);
     for (const bead of detail.beads.filter((entry) => entry.action === "created" || entry.action === "closed")) {
       requestDetails.push(`  ${bead.id} ${bead.action} · now ${bead.statusNow ?? "not in store"}${bead.title === null ? "" : ` · ${shorten(bead.title, 60)}`}`);
@@ -673,11 +766,13 @@ export function requestGraph(summary: TraceSummary, detail: TraceDetail | null, 
 
   const nodes: GraphNode[] = [
     {
-      id: `request:${summary.traceId}`,
+      // Rows of one request share a `traceId`, so the turn has to be part of
+      // the node id or two rows collide (delta 20260917e §4.3).
+      id: `request:${summary.traceId}${summary.turn === null ? "" : `#${summary.turn.index}`}`,
       kind: "request",
       depth: 0,
       title: shorten(excerptLine(summary.excerpt), 90),
-      subtitle: `${summary.tier ?? "size ?"} · ${duration} · ${formatTokens(summary.usage.inputTokens + summary.usage.cachedInputTokens + summary.usage.outputTokens)} tokens · ${formatCost(summary.usage)}${fromYou > 0 ? ` · 💬 ${fromYou} from you` : ""}`,
+      subtitle: `${turnLabel(summary.turn)}${summary.tier ?? "size ?"} · ${duration} · ${formatTokens(summary.usage.inputTokens + summary.usage.cachedInputTokens + summary.usage.outputTokens)} tokens · ${formatCost(summary.usage)}${fromYou > 0 ? ` · 💬 ${fromYou} from you` : ""}`,
       badge: stateBadge(summary.state),
       details: requestDetails,
       chipGroups: requestChips,
@@ -699,13 +794,15 @@ export function requestGraph(summary: TraceSummary, detail: TraceDetail | null, 
       details.push(`Verdict: ${verdict ?? "none recorded"}${review?.blockingCount != null ? ` · ${review.blockingCount} blocking` : ""}`);
       if (timing !== undefined) details.push(`Time: ${timeOf(timing.ms, timing.startedAt, now)}`);
       if (usage !== undefined) details.push(`Tokens: ${usageLine(usage)}`);
+      details.push(...runtimeLines(runtimeOf(agentId)));
     }
+    const reviewerModel = singleModelOf(runtimeOf(agentId));
     return {
       id: `reviewer:${agentId}`,
       kind: "reviewer",
       depth,
       title: `Reviewer ${shortId(agentId)}${batch === null ? "" : ` · batch ${batch}`}`,
-      subtitle: timing === undefined ? "reviewer" : timeOf(timing.ms, timing.startedAt, now),
+      subtitle: `${timing === undefined ? "reviewer" : timeOf(timing.ms, timing.startedAt, now)}${reviewerModel === null ? "" : ` · ${reviewerModel}`}`,
       badge:
         verdict === null
           ? { text: "No verdict", tone: "muted" }
@@ -731,15 +828,17 @@ export function requestGraph(summary: TraceSummary, detail: TraceDetail | null, 
       if (last?.blockers != null) details.push(`Open points: ${shorten(last.blockers, 300)}`);
       if (timing !== undefined) details.push(`Time: ${timeOf(timing.ms, timing.startedAt, now)}`);
       if (usage !== undefined) details.push(`Tokens: ${usageLine(usage)}`);
+      details.push(...runtimeLines(runtimeOf(workerId)));
       details.push(...agentLines(workerId));
     }
     const fromUser = detail?.userMessages.filter((entry) => entry.agentId === workerId).length ?? 0;
+    const workerModel = singleModelOf(runtimeOf(workerId));
     nodes.push({
       id: `worker:${workerId}`,
       kind: "worker",
       depth: 1,
       title: `Worker ${shortId(workerId)}`,
-      subtitle: `${reviewerLine(summary)}${timing === undefined ? "" : ` · ${timeOf(timing.ms, timing.startedAt, now)}`}${fromUser > 0 ? ` · 💬 ${fromUser}` : ""}`,
+      subtitle: `${reviewerLine(summary)}${timing === undefined ? "" : ` · ${timeOf(timing.ms, timing.startedAt, now)}`}${workerModel === null ? "" : ` · ${workerModel}`}${fromUser > 0 ? ` · 💬 ${fromUser}` : ""}`,
       badge: stateBadge(timing?.state ?? summary.state),
       details,
       chipGroups: agentChips(workerId),

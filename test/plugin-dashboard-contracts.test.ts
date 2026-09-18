@@ -43,6 +43,7 @@ const usage = {
 const summary: TraceSummary = {
   traceId: "agent-manager:42",
   requestId: "req-20260916T091500Z",
+  turn: null,
   requestedAt: "2026-09-16T09:15:00.000Z",
   excerpt: "thêm màn hình xuất báo cáo theo tháng",
   state: "completed",
@@ -276,6 +277,30 @@ describe("persisted trace schema v1", () => {
   it("accepts a record whose optional links are null", () => {
     const sparse = { ...record, turnId: null, requestId: null, parentAgentId: null, agentCreatedAt: null, startedAt: null, usage: null };
     expect(traceRecordSchema.parse(sparse).usage).toBeNull();
+  });
+
+  // delta 20260918 §4.2 / §7: `runtime` is an ADDED optional field, so the
+  // store's version does not move and nothing migrates.
+  describe("the added runtime field", () => {
+    const runtime = { model: "claude-opus-5", thinkingOptionId: null, modeId: "bypassPermissions" };
+    const withoutRuntimeField = traceRecordSchema.omit({ runtime: true });
+
+    it("a new record parses with a reader that predates the field, which drops it", () => {
+      const parsed = withoutRuntimeField.parse({ ...record, runtime });
+      expect(parsed).not.toHaveProperty("runtime");
+      expect(parsed.usage).toEqual(record.usage);
+    });
+
+    it("an old record without it parses with the new reader; null is accepted too", () => {
+      expect(traceRecordSchema.parse(record)).not.toHaveProperty("runtime");
+      expect(traceRecordSchema.parse({ ...record, runtime: null }).runtime).toBeNull();
+      expect(traceRecordSchema.parse({ ...record, runtime }).runtime).toEqual(runtime);
+    });
+
+    it("leaves the record and store version at 1", () => {
+      expect(TRACE_STORE_SCHEMA_VERSION).toBe(1);
+      expect(traceRecordSchema.parse({ ...record, runtime }).v).toBe(1);
+    });
   });
 });
 

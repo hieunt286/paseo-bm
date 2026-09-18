@@ -19,7 +19,27 @@ export const BUDGET_NOTICE_MARKER = "BM-BUDGET";
 /** Start of the stop notice a Worker's Reviewers receive (`stop-propagation.ts`). */
 export const REVIEWER_STOP_NOTICE_PREFIX = "STOP: The Beads Worker that created you was stopped";
 
-const PREFIXES: readonly string[] = [BUDGET_NOTICE_MARKER, REVIEWER_STOP_NOTICE_PREFIX];
+/** First word of the stop notice a Worker receives from `/bm-worker-stop-all`. */
+export const WORKER_STOP_NOTICE_MARKER = "BM-STOP";
+
+/**
+ * What `/bm-worker-stop-all` sends to a running Worker.
+ *
+ * It POINTS AT the Worker's own stop rule rather than restating it. Restating
+ * would create a second procedure that drifts from `roles/worker.md`: the first
+ * draft of delta 20260917e did exactly that and its wording would have deleted
+ * the mandatory `cancel_agent` on the Worker's own Reviewers, and asked for a
+ * `blocked` report that `manager.md` renders as a question list — for a stop
+ * that has no questions.
+ */
+export const WORKER_STOP_NOTICE =
+  `${WORKER_STOP_NOTICE_MARKER} The user asked every Beads Worker and Reviewer in this workspace to stop. This is a stop: follow your Stop rule.`;
+
+const PREFIXES: readonly string[] = [
+  BUDGET_NOTICE_MARKER,
+  REVIEWER_STOP_NOTICE_PREFIX,
+  WORKER_STOP_NOTICE_MARKER,
+];
 
 /** True when this text is one of the plugin's own notices, not a person's words. */
 export function isPluginNotice(text: unknown): boolean {
