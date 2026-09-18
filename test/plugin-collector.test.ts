@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { NEW_REQUEST_MARKER } from "../plugin/shared/new-request";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -397,6 +398,68 @@ describe("timestamps (assumption A-2)", () => {
   });
 });
 
+describe("what the agent ran on (delta 20260918 §4.2)", () => {
+  async function recordWith(agent: unknown) {
+    const refetch = vi.fn(async () => ({ entries: [], agent }));
+    const built = await buildRecord(asEvent(turnEnded()), {
+      location: null,
+      paseo: { agents: { ref: () => ({ timeline: { refetch } }) } },
+    });
+    return built!.record;
+  }
+
+  it("takes the running values (runtimeInfo) over the configuration, for all three fields", async () => {
+    const record = await recordWith({
+      model: "claude-sonnet-5",
+      effectiveThinkingOptionId: "low",
+      thinkingOptionId: "low",
+      currentModeId: "default",
+      runtimeInfo: { model: "claude-opus-5", thinkingOptionId: "high", modeId: "bypassPermissions" },
+      lastUsage: { inputTokens: 1, cachedInputTokens: 0, outputTokens: 1 },
+    });
+
+    expect(record.runtime).toEqual({ model: "claude-opus-5", thinkingOptionId: "high", modeId: "bypassPermissions" });
+    // `usage.model` keeps its old source, so an older plugin reads a new record the same way.
+    expect(record.usage?.model).toBe("claude-sonnet-5");
+  });
+
+  it("without runtimeInfo: the configured model, the effective then the chosen thinking option, the current mode", async () => {
+    expect(await recordWith({ model: "claude-opus-5", effectiveThinkingOptionId: "medium", thinkingOptionId: "low", currentModeId: "auto" }))
+      .toMatchObject({ runtime: { model: "claude-opus-5", thinkingOptionId: "medium", modeId: "auto" } });
+    expect(await recordWith({ model: "claude-opus-5", thinkingOptionId: "low", currentModeId: "auto" }))
+      .toMatchObject({ runtime: { thinkingOptionId: "low" } });
+    // No thinking value anywhere: the provider's default, recorded as null.
+    expect(await recordWith({ model: "gpt-5.6-sol", currentModeId: "auto" }))
+      .toMatchObject({ runtime: { model: "gpt-5.6-sol", thinkingOptionId: null, modeId: "auto" } });
+  });
+
+  it("a null the provider reports never hides a real fallback", async () => {
+    const record = await recordWith({
+      model: "claude-opus-5",
+      currentModeId: "auto",
+      runtimeInfo: { model: null, thinkingOptionId: null, modeId: null },
+    });
+
+    expect(record.runtime).toEqual({ model: "claude-opus-5", thinkingOptionId: null, modeId: "auto" });
+  });
+
+  it("no snapshot, or no refetch at all: runtime is null, like usage", async () => {
+    expect((await recordWith(null)).runtime).toBeNull();
+    const failing = await buildRecord(asEvent(turnEnded()), {
+      location: null,
+      paseo: { agents: { ref: () => ({ timeline: { refetch: async () => Promise.reject(new Error("gone")) } }) } },
+    });
+    expect(failing!.record.runtime).toBeNull();
+    expect(failing!.record.usage).toBeNull();
+  });
+
+  it("a malformed snapshot costs the fields, never the turn", async () => {
+    const record = await recordWith({ model: 42, runtimeInfo: "not an object", currentModeId: ["x"] });
+
+    expect(record.runtime).toEqual({ model: null, thinkingOptionId: null, modeId: null });
+  });
+});
+
 describe("evidence extraction", () => {
   it("records shell commands, written files and sub-agent traces", () => {
     const at = "2026-09-16T10:00:00.000Z";
@@ -665,6 +728,26 @@ describe("who wrote a message", () => {
     expect(built?.record.sent.map((message) => message.origin)).toEqual(["user"]);
     const onlyRelayed = await buildRecord(asEvent(turnEnded({ timeline: [relayed] })), { location: null });
     expect(onlyRelayed?.record.sent[0]?.origin).toBe("agent");
+  });
+
+  /**
+   * `/bm-worker-new` puts a flag line in front of the user's request so the
+   * Manager knows not to fold it into whatever is running (delta 20260917f).
+   * The flag is the plugin's, the request is theirs: the line comes off here
+   * and the message stays the user's. Treat it as a plugin notice instead and
+   * `firstUserText` would skip the whole thing, so the Metric screen would show
+   * a request with no words in it.
+   */
+  it("takes the new-request flag off, and still calls the message the user's", async () => {
+    const flagged = {
+      type: "user_message" as const,
+      text: `${NEW_REQUEST_MARKER}\nSửa giúp tôi cái CI đang đỏ`,
+      messageId: "m3",
+      clientMessageId: "c3",
+    };
+    const built = await buildRecord(asEvent(turnEnded({ timeline: [flagged] })), { location: null });
+    expect(built?.record.sent[0]?.text).toBe("Sửa giúp tôi cái CI đang đỏ");
+    expect(built?.record.sent[0]?.origin).toBe("user");
   });
 });
 

@@ -4,7 +4,7 @@
 |---|---|
 | Mã | `plan-delta-20260917c-context-engineering` |
 | Plan gốc | [Implementation Plan v2](paseo-bm-implementation-plan-v2.md) (Active, Plan-ready PASS) — **không sửa tại chỗ**; delta này thêm WP-227 → WP-234 vào Phase 2a-4 |
-| Status | **Active** |
+| Status | **Applied với ngoại lệ** — 2026-09-17, WP-227 → WP-234 đã đóng. Điều kiện ra của delta không đạt và được ghi thành ngoại lệ; xem [delta thiết kế §12](../design/paseo-bm-delta-20260917c-context-engineering.md) và [biên bản lượt chạy](../operations/paseo-bm-context-engineering-run-20260917c.md) |
 | Plan-ready | **PASS — 2026-09-17 — hieu.nt10** (cổng do Claude tự chấm sau một lượt `reviewing-plan`; lần chấm đầu FAIL 4 mục — xem §7) |
 | Owner | hieu.nt10 |
 | Created | 2026-09-17 |

@@ -228,12 +228,19 @@ describe("roles.describe", () => {
 describe("plugin server entry — agents.list and roles.describe", () => {
   it("registers every handler: Phase 1 and the Dashboard", async () => {
     const handle = vi.fn();
-    contribute({ handle } as unknown as Parameters<typeof contribute>[0]);
+    const registerSettings = vi.fn();
+    contribute({ handle, registerSettings } as unknown as Parameters<typeof contribute>[0]);
     const contracts = handle.mock.calls.map(([contract]) => contract);
+    // The settings screen reads `settings.paseo-bm.read`, an RPC the HOST only
+    // contributes once the server declares the definition. Missing this call
+    // left that screen unable to read or save (bm-settings-rpc-stgv).
+    expect(registerSettings).toHaveBeenCalledTimes(1);
+    expect(registerSettings.mock.calls[0]![0]).toMatchObject({ id: "paseo-bm", scope: "host", version: 1 });
     expect(contracts).toContain(agentsListRpc);
     expect(contracts).toContain(rolesDescribeRpc);
     expect(contracts.map((c: { name: string }) => c.name).sort()).toEqual([
       "agents.list",
+      "agents.stop-all",
       "beads.action",
       "beads.get",
       "beads.list",
@@ -241,6 +248,8 @@ describe("plugin server entry — agents.list and roles.describe", () => {
       "beads.stats",
       "chat.beads",
       "chat.peers",
+      "launcher.order.get",
+      "launcher.order.set",
       "manager.ensure",
       "roles.describe",
       "roles.instructions",
@@ -263,7 +272,7 @@ describe("plugin server entry — agents.list and roles.describe", () => {
 
   it("wires the handler's paseo into roles.describe (config in effect, no file read)", async () => {
     const handle = vi.fn();
-    contribute({ handle } as unknown as Parameters<typeof contribute>[0]);
+    contribute({ handle, registerSettings: vi.fn() } as unknown as Parameters<typeof contribute>[0]);
     const describeHandler = handle.mock.calls.find(([c]) => c === rolesDescribeRpc)![1];
     const fake = fakeConfig(daemonConfig());
     const output = await describeHandler({}, { paseo: fake.paseo });

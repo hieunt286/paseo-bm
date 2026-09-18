@@ -11,6 +11,7 @@ import { currentInstructions } from "./server/role-extras";
 import { registerSetupRpcs } from "./server/setup-rpc";
 import { registerChatRpcs } from "./server/chat-rpc";
 import { agentsListRpc, managerEnsureRpc, rolesDescribeRpc } from "./shared/contracts";
+import { dashboardSettings } from "./shared/settings";
 
 /**
  * Text of `roles/manager.md`.
@@ -69,13 +70,25 @@ export default function contribute(server: PluginServerContext): () => void {
         `[paseo-bm] workspace ${input.workspaceId} has ${result.otherManagerIds.length + 1} live Managers; using the newest (${result.agentId}). Left untouched: ${result.otherManagerIds.join(", ")}.`,
       );
     }
+    if (result.modeNotice !== null) console.warn(`[paseo-bm] ${result.modeNotice}`);
     return result;
   });
+  // Without this the Dashboard's settings screen cannot read or save anything:
+  // `useSettings` on the client calls `settings.paseo-bm.read`, an RPC the HOST
+  // only contributes once the server has declared the definition. The owner's
+  // daemon log carried eight `Plugin paseo-bm does not contribute RPC
+  // settings.paseo-bm.read` errors because this one line was missing
+  // (bm-settings-rpc-stgv).
+  server.registerSettings(dashboardSettings);
   server.handle(agentsListRpc, (input, { paseo }) => listWorkspaceAgents(input, { paseo }));
   server.handle(rolesDescribeRpc, (_input, { paseo }) => describeRoles({ paseo }));
   registerDashboardRpcs(server, {
-    ensureManager: (workspaceId, paseo) =>
-      ensureManager({ workspaceId }, { paseo: paseo as never, readInstructions: () => currentInstructions("manager", paseo) }),
+    ensureManager: async (workspaceId, paseo) => {
+      const result = await ensureManager({ workspaceId }, { paseo: paseo as never, readInstructions: () => currentInstructions("manager", paseo) });
+      // This path shows no launcher notice, so the log is the only place a mode problem surfaces.
+      if (result.modeNotice !== null) console.warn(`[paseo-bm] ${result.modeNotice}`);
+      return result;
+    },
   });
   registerSetupRpcs(server);
   registerChatRpcs(server);

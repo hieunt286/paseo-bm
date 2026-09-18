@@ -3,8 +3,8 @@
  *
  * Layout, top to bottom:
  * 1. overview cards — requests, beads, agents, messages, tokens, cost;
- * 2. two small bar charts — requests per day, the five heaviest Workers
- *    (press one to open it);
+ * 2. three small bar charts — requests per day, the five heaviest Workers
+ *    (press one to open it), tokens by model × role;
  * 3. requests as graphs — Manager → Workers → Reviewers, each marked with a
  *    small role icon; tap a request to open its graph, tap a node to expand
  *    what it sent, got back and cost;
@@ -29,6 +29,7 @@ import {
   groupTraces,
   heaviestWorkers,
   overviewCards,
+  tokensByModelRole,
   requestGraph,
   requestsPerDay,
   storageView,
@@ -246,13 +247,20 @@ export function DashboardPanel({ theme, layout, navigation, workspaceId, workspa
       {/* 2. Charts */}
       {rows.length > 0 ? (
         <View style={styles.cards}>
-          <BarChart title="Requests, last 7 days" bars={requestsPerDay(rows, new Date())} styles={styles} />
+          {/* The list has one row per question; this chart counts requests (Q27). */}
+          <BarChart
+            title="Requests, last 7 days — each request counted once"
+            bars={requestsPerDay(rows, new Date())}
+            styles={styles}
+          />
           <BarChart
             title="Top 5 heaviest Workers (tokens)"
             bars={heaviestWorkers(rows)}
             styles={styles}
             onOpen={navigation?.openAgent === undefined ? undefined : (agentId) => navigation.openAgent({ agentId })}
           />
+          {/* Which model each role actually ran on (delta 20260918, REQ-058e). */}
+          <BarChart title="Tokens by model × role" bars={tokensByModelRole(rows)} styles={styles} labelWidth={180} />
         </View>
       ) : null}
 
@@ -276,7 +284,7 @@ export function DashboardPanel({ theme, layout, navigation, workspaceId, workspa
           {group.hint === null ? null : <Text style={styles.body}>{group.hint}</Text>}
           {group.traces.map((trace) => (
             <RequestCard
-              key={trace.traceId}
+              key={`${trace.traceId}#${trace.turn?.index ?? 1}`}
               trace={trace}
               workspaceId={workspaceId}
               styles={styles}

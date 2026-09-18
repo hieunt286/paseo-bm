@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { REVIEWER_STOP_NOTICE } from "../plugin/server/stop-propagation";
+import { BUDGET_NOTICE_MARKER } from "../plugin/server/notices";
 import { requestIdFromText } from "../plugin/server/bm-report";
 import {
   blocksCompletion,
@@ -1061,5 +1062,115 @@ describe("agents from a 0.1.0 Manager", () => {
       }),
     ];
     expect(requestIdOfAgent(worker, mixed).requestId).toBeNull();
+  });
+});
+
+/**
+ * Delta 20260917e §4.3: the owner asked for each of their follow-up messages to
+ * show as its own flow instead of being folded into one row that is hard to
+ * trace. A segment opens at a Manager turn the USER opened — `origin: "user"`,
+ * which the collector sets only when the timeline item carried a
+ * `clientMessageId`.
+ */
+describe("a request is split into the turns the user opened", () => {
+  const REQ = "req-20260917T090000Z";
+  const said = (text: string, at: string, origin?: "user" | "agent") => ({
+    agentId: MANAGER,
+    at,
+    text,
+    truncated: false,
+    ...(origin === undefined ? {} : { origin }),
+  });
+  const turn = (at: string, message: ReturnType<typeof said>, requestId: string | null = null, phase?: "received" | "finished") =>
+    record({
+      at,
+      endedAt: at,
+      requestId,
+      turnId: `foreground-turn-${at.slice(14, 16)}`,
+      sent: [message],
+      reports: phase === undefined ? [] : [report({ requestId: requestId ?? REQ, phase, agentId: MANAGER, at })],
+    });
+
+  const conversation = () => [
+    turn("2026-09-17T09:00:00.000Z", said("Sửa giúp tôi cái CI đang đỏ", "2026-09-17T09:00:00.000Z", "user"), REQ, "received"),
+    // A Worker's status update reaches the Manager as a `user_message` too and
+    // is indistinguishable by wording — WP-214 defect 9. It must not open one.
+    // Every Manager turn of one request carries its id: the collector reads it
+    // from the agent's `bm.requestId` label, not from the message text.
+    turn("2026-09-17T09:05:00.000Z", said("Status update: đang chạy test", "2026-09-17T09:05:00.000Z", "agent"), REQ),
+    turn("2026-09-17T09:10:00.000Z", said("Tiện thể thêm cả test cho case rỗng", "2026-09-17T09:10:00.000Z", "user"), REQ),
+    // A report that lands AFTER the second question: it must not be filed under
+    // the first one.
+    turn("2026-09-17T09:15:00.000Z", said("Status update: xong", "2026-09-17T09:15:00.000Z", "agent"), REQ, "finished"),
+  ];
+
+  const traceOf = (records: TraceRecord[]) =>
+    reconstructTraces({ records, agents: [] }).find((t) => t.requestId === REQ);
+
+  it("opens a segment per user message, and never on a Worker's status update", () => {
+    const trace = traceOf(conversation());
+    expect(trace?.segments.map((s) => s.index)).toEqual([1, 2]);
+    expect(trace?.segments.map((s) => s.text)).toEqual([
+      "Sửa giúp tôi cái CI đang đỏ",
+      "Tiện thể thêm cả test cho case rỗng",
+    ]);
+    expect(trace?.segments[1]?.startedAt).toBe("2026-09-17T09:10:00.000Z");
+  });
+
+  it("keeps the Worker's status update inside the segment it arrived in", () => {
+    const segments = traceOf(conversation())?.segments ?? [];
+    const texts = segments[0]!.records.flatMap((r) => r.sent.map((m) => m.text));
+    expect(texts).toContain("Status update: đang chạy test");
+    expect(segments[1]!.records.flatMap((r) => r.sent.map((m) => m.text))).not.toContain(
+      "Status update: đang chạy test",
+    );
+  });
+
+  it("gives a report to the segment that was open when it arrived", () => {
+    const segments = traceOf(conversation())?.segments ?? [];
+    expect(segments[0]!.reports.map((r) => r.phase)).toEqual(["received"]);
+    // The `finished` report arrived at 09:15, after the second question, so it
+    // belongs to segment 2 — filing every report under segment 1 must go red.
+    expect(segments[1]!.reports.map((r) => r.phase)).toEqual(["finished"]);
+  });
+
+  /**
+   * Owner decision Q23: only the Dashboard splits. The review budget stays a
+   * per-`requestId` count — reset it per segment and a user who asks three
+   * follow-ups would silently get three times the reviews the tier allows.
+   */
+  it("still counts review calls for the whole request, not per segment", () => {
+    const trace = traceOf(conversation());
+    expect(trace?.requestId).toBe(REQ);
+    expect(trace?.segments.length).toBeGreaterThan(1);
+    // One request id, one trace, one place the budget is counted.
+    expect(reconstructTraces({ records: conversation(), agents: [] }).filter((t) => t.requestId === REQ)).toHaveLength(1);
+  });
+
+  it("leaves a request written before `origin` existed as exactly one segment", () => {
+    // No `origin` anywhere: the collector predates the field. Absence is not
+    // "user" (AGENTS.md), so nothing opens a second segment.
+    const old = [
+      turn("2026-09-17T09:00:00.000Z", said("Sửa giúp tôi cái CI đang đỏ", "2026-09-17T09:00:00.000Z"), REQ, "received"),
+      turn("2026-09-17T09:10:00.000Z", said("Tiện thể thêm cả test", "2026-09-17T09:10:00.000Z"), REQ),
+    ];
+    const trace = traceOf(old);
+    expect(trace?.segments).toHaveLength(1);
+    expect(trace?.segments[0]?.records).toHaveLength(2);
+  });
+
+  it("never lets a plugin notice open a segment", () => {
+    const withNotice = [
+      ...conversation(),
+      turn("2026-09-17T09:20:00.000Z", said(`${BUDGET_NOTICE_MARKER} requestId: ${REQ}`, "2026-09-17T09:20:00.000Z", "user"), REQ),
+    ];
+    // Even marked `user`, a notice is the plugin talking, not a person.
+    expect(traceOf(withNotice)?.segments).toHaveLength(2);
+  });
+
+  it("covers every record, so nothing is lost by splitting", () => {
+    const trace = traceOf(conversation());
+    const inSegments = (trace?.segments ?? []).reduce((n, s) => n + s.records.length, 0);
+    expect(inSegments).toBe(trace?.records.length);
   });
 });

@@ -6,10 +6,20 @@
  * Client rules: React Native primitives only, every color from theme.colors,
  * no Node builtin imports.
  */
+import type { PluginTheme } from "@getpaseo/plugin";
 import { type PluginSurfaceProps, usePaseo, useRpc } from "@getpaseo/plugin/client";
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import {
+  AccessibilityInfo,
+  ActivityIndicator,
+  Animated,
+  PanResponder,
+  Pressable,
+  ScrollView,
+  Text,
+  View,
+} from "react-native";
 import { BeadsScreen } from "./beads-screen";
 import { SetupScreen } from "./setup-screen";
 import { DashboardPanel } from "./dashboard";
@@ -18,12 +28,20 @@ import {
   WORKSPACE_ACTIONS,
   closedWorkspaces,
   dashboardRequests,
+  launcherNotices,
   screenTitleOf,
   workspaceStats,
   type DashboardViewName,
 } from "./dashboard-view";
-import { toneColor as dashboardTone } from "./dashboard-model";
-import { managerEnsureRpc, tracesWorkspacesRpc, workspacesOverviewRpc } from "../shared/contracts";
+import { toneColor as dashboardTone, type Tone } from "./dashboard-model";
+import {
+  launcherOrderGetRpc,
+  launcherOrderSetRpc,
+  managerEnsureRpc,
+  tracesWorkspacesRpc,
+  workspacesOverviewRpc,
+} from "../shared/contracts";
+import { dropIndex, movePinned, orderRows, pinAt, prunePinned, unpin } from "./pinned-order";
 import { PLUGIN_VERSION } from "../shared/version";
 import {
   describeLauncherState,
@@ -46,6 +64,279 @@ interface WorkspaceRow {
   screenTitle: string;
 }
 
+/** One breath of the pulse: slow enough to read as "alive", not as an alarm. */
+const PULSE_MS = 900;
+/** The floor of the pulse, and the resting opacity of a dot with nothing to say. */
+const DIM_OPACITY = 0.3;
+/** Roles in the order they appear in the label, with the word the user reads. */
+const DOT_ROLES = [
+  ["manager", "Manager"],
+  ["worker", "Worker"],
+  ["reviewer", "Reviewer"],
+] as const;
+
+/**
+ * The grip that drags a pinned row to a new position.
+ *
+ * A dedicated handle, NOT the whole row, and that is the entire answer to the
+ * risk the design raised (delta 20260917e §7 risk 1): React Native's responder
+ * system gives a touch to the first child that claims it, so a `ScrollView`
+ * only scrolls from touches nothing claimed. A handle that claims on touch-start
+ * therefore cannot fight the scroll — the conflict is removed by construction
+ * rather than by tuning. Scrolling is disabled for the duration anyway, because
+ * a list that shifts under a dragged row is its own kind of wrong.
+ *
+ * `useNativeDriver: false`: Paseo's renderer is react-native-web (P3).
+ */
+function DragHandle({
+  label,
+  index,
+  count,
+  rowHeight,
+  onDrop,
+  onDragging,
+  theme,
+  styles,
+}: {
+  label: string;
+  index: number;
+  count: number;
+  rowHeight: () => number;
+  onDrop: (to: number) => void;
+  onDragging: (dragging: boolean) => void;
+  theme: PluginTheme;
+  styles: ReturnType<typeof launcherStyles>;
+}) {
+  const offset = useRef(new Animated.Value(0)).current;
+  const responder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => true,
+        onPanResponderGrant: () => onDragging(true),
+        onPanResponderMove: (_event, gesture) => offset.setValue(gesture.dy),
+        onPanResponderRelease: (_event, gesture) => {
+          onDragging(false);
+          offset.setValue(0);
+          const to = dropIndex(index, gesture.dy, rowHeight(), count);
+          if (to !== index) onDrop(to);
+        },
+        onPanResponderTerminate: () => {
+          onDragging(false);
+          offset.setValue(0);
+        },
+      }),
+    [index, count, onDrop, onDragging, rowHeight, offset],
+  );
+  return (
+    <Animated.View style={{ transform: [{ translateY: offset }] }} {...responder.panHandlers}>
+      <Text
+        accessibilityLabel={`Drag ${label} to reorder`}
+        style={[styles.rowSubtitle, { color: dashboardTone(theme, "muted") }]}
+      >
+        ⣿
+      </Text>
+    </Animated.View>
+  );
+}
+
+/**
+ * Pin, unpin and reorder controls on a workspace row.
+ *
+ * Buttons rather than only a drag handle, for two reasons that both matter:
+ * a drag cannot be performed with a keyboard or a screen reader, and the design
+ * named up/down buttons as the sanctioned fallback if the gesture turns out to
+ * fight the surrounding `ScrollView` (delta 20260917e §4.1, risk 1). Whatever
+ * happens to the gesture, the owner can always order the list.
+ */
+function PinControls({
+  label,
+  pinned,
+  first,
+  last,
+  onPin,
+  onUnpin,
+  onMove,
+  theme,
+  styles,
+}: {
+  label: string;
+  pinned: boolean;
+  first: boolean;
+  last: boolean;
+  onPin: () => void;
+  onUnpin: () => void;
+  onMove: (delta: number) => void;
+  theme: PluginTheme;
+  styles: ReturnType<typeof launcherStyles>;
+}) {
+  const tint = dashboardTone(theme, pinned ? "info" : "muted");
+  if (!pinned) {
+    return (
+      <Pressable accessibilityRole="button" accessibilityLabel={`Pin ${label} to the top`} onPress={onPin}>
+        <Text style={[styles.rowSubtitle, { color: tint }]}>☆</Text>
+      </Pressable>
+    );
+  }
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+      <Pressable accessibilityRole="button" accessibilityLabel={`Unpin ${label}`} onPress={onUnpin}>
+        <Text style={[styles.rowSubtitle, { color: tint }]}>★</Text>
+      </Pressable>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`Move ${label} up`}
+        accessibilityState={{ disabled: first }}
+        disabled={first}
+        onPress={() => onMove(-1)}
+      >
+        <Text style={[styles.rowSubtitle, { color: first ? dashboardTone(theme, "muted") : tint }]}>▲</Text>
+      </Pressable>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`Move ${label} down`}
+        accessibilityState={{ disabled: last }}
+        disabled={last}
+        onPress={() => onMove(1)}
+      >
+        <Text style={[styles.rowSubtitle, { color: last ? dashboardTone(theme, "muted") : tint }]}>▼</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+/** Running bm agents of one workspace, per role (`workspaces.overview`). */
+export interface RunningAgentCounts {
+  manager: number;
+  worker: number;
+  reviewer: number;
+}
+
+/** Everything the dot beside a project name shows; see `runningDotState`. */
+export interface RunningDotState {
+  total: number;
+  /** True only when the dot pulses: an idle row and reduced motion both say false. */
+  animate: boolean;
+  /** Resting opacity, and the value the pulse returns to. */
+  opacity: number;
+  /** "1 Worker, 1 Reviewer" — read aloud even when the text is not drawn. */
+  label: string;
+  tone: Tone;
+}
+
+/**
+ * The dot that says a bm agent is working in this workspace right now
+ * (delta 20260917e §4.2): it pulses while any of the three roles runs, and
+ * stands still and dim when none does.
+ */
+export function runningDotState(
+  counts: RunningAgentCounts | undefined,
+  reduceMotion: boolean,
+): RunningDotState | null {
+  // The overview has not answered for this row yet. Unknown is not idle, and a
+  // dim dot would claim "nothing is running" before anything was counted.
+  if (counts === undefined) return null;
+  const total = counts.manager + counts.worker + counts.reviewer;
+  if (total === 0) {
+    return { total, animate: false, opacity: DIM_OPACITY, label: "No Beads agent running", tone: "muted" };
+  }
+  return {
+    total,
+    // Reduced motion keeps the signal and drops the motion: the dot goes solid
+    // and no loop is started at all.
+    animate: !reduceMotion,
+    opacity: 1,
+    label: DOT_ROLES.filter(([key]) => counts[key] > 0)
+      .map(([key, name]) => `${counts[key]} ${name}${counts[key] === 1 ? "" : "s"}`)
+      .join(", "),
+    tone: "success",
+  };
+}
+
+/**
+ * Puts a state on an `Animated.Value`: the resting opacity always, the pulse
+ * only when the state asks for one. Returns the stop function, or `undefined`
+ * when there is nothing running to stop — that is the whole reduced-motion
+ * promise, so it is a function the test can call rather than a rendered effect.
+ */
+export function applyDotPulse(value: Animated.Value, state: RunningDotState): (() => void) | undefined {
+  // Set on every change so a dot that stops pulsing lands on its resting
+  // opacity instead of wherever the interrupted loop left it.
+  value.setValue(state.opacity);
+  if (!state.animate) return undefined;
+  const loop = Animated.loop(
+    Animated.sequence([
+      // `useNativeDriver` must be false on react-native-web, which is what
+      // Paseo's renderer is (delta 20260917e P3).
+      Animated.timing(value, { toValue: DIM_OPACITY, duration: PULSE_MS, useNativeDriver: false }),
+      Animated.timing(value, { toValue: 1, duration: PULSE_MS, useNativeDriver: false }),
+    ]),
+  );
+  loop.start();
+  return () => loop.stop();
+}
+
+/**
+ * The operating system's "reduce motion" preference, false when the host cannot
+ * answer. A host that fails the query has not asked for less motion; reading
+ * that absence as a preference would quietly kill the pulse everywhere.
+ */
+export async function readReduceMotion(): Promise<boolean> {
+  try {
+    return await AccessibilityInfo.isReduceMotionEnabled();
+  } catch {
+    return false;
+  }
+}
+
+function useReduceMotion(): boolean {
+  const [reduceMotion, setReduceMotion] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void readReduceMotion().then((value) => {
+      if (live) setReduceMotion(value);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+  return reduceMotion;
+}
+
+function RunningDot(props: {
+  counts: RunningAgentCounts | undefined;
+  theme: PluginTheme;
+  styles: ReturnType<typeof launcherStyles>;
+}) {
+  const { counts, theme, styles } = props;
+  const reduceMotion = useReduceMotion();
+  const state = runningDotState(counts, reduceMotion);
+  const opacity = useRef(new Animated.Value(DIM_OPACITY)).current;
+  // Restarting on `animate` and `opacity` alone keeps the loop through a poll
+  // that only changed the counts, so the dot does not blink back to full.
+  useEffect(() => (state === null ? undefined : applyDotPulse(opacity, state)), [
+    opacity,
+    state?.animate,
+    state?.opacity,
+  ]);
+  if (state === null) return null;
+  return (
+    <View style={styles.stat} accessibilityLabel={state.label}>
+      <Animated.View
+        style={{ width: 8, height: 8, borderRadius: 4, opacity, backgroundColor: dashboardTone(theme, state.tone) }}
+      />
+      {/* An idle row says it with the dim dot alone; spelling out "nothing is
+          running" on every quiet project is noise. The accessibility label
+          above carries the words in both states. */}
+      {state.total === 0 ? null : (
+        <Text style={[styles.statText, { color: dashboardTone(theme, state.tone) }]} numberOfLines={1}>
+          {state.label}
+        </Text>
+      )}
+    </View>
+  );
+}
+
 export function ManagerLauncherSurface(props: PluginSurfaceProps) {
   const { theme, layout, navigation } = props;
   const paseo = usePaseo();
@@ -58,6 +349,14 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
   const stored = useQuery({
     queryKey: ["paseo-bm", "launcher", "stored-workspaces"],
     queryFn: () => listStored({}),
+  });
+  // The order the owner pinned. Kept in the install home, not in plugin
+  // settings: that path errors on this host (delta 20260917e §4.1).
+  const readOrder = useRpc(launcherOrderGetRpc);
+  const writeOrder = useRpc(launcherOrderSetRpc);
+  const pinnedOrder = useQuery({
+    queryKey: ["paseo-bm", "launcher", "pinned-order"],
+    queryFn: () => readOrder({}),
   });
   const listOverview = useRpc(workspacesOverviewRpc);
   // Bead counts and running Workers; refreshed while the screen is open.
@@ -75,6 +374,13 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
     managerLauncher.subscribe,
     managerLauncher.getState,
     managerLauncher.getState,
+  );
+  // What a slash command had to say. It has no channel of its own except an
+  // error toast, which would paint a success red (dashboard-view.ts).
+  const commandNotice = useSyncExternalStore(
+    launcherNotices.subscribe,
+    launcherNotices.peek,
+    launcherNotices.peek,
   );
   const styles = useMemo(() => launcherStyles(theme, layout.compact), [theme, layout.compact]);
 
@@ -94,6 +400,29 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
         }));
     },
   });
+
+  const pinned = pinnedOrder.data?.pinned ?? [];
+  // A dragged row needs the height of one row to turn a distance into a
+  // position; it is measured from the first row that lays out.
+  const rowHeight = useRef(0);
+  const [dragging, setDragging] = useState(false);
+  const ordered = useMemo(
+    () => orderRows(workspaces.data ?? [], pinned),
+    [workspaces.data, pinnedOrder.data],
+  );
+
+  /**
+   * Writes a new pinned order.
+   *
+   * Pruning happens HERE and only here, against a listing that actually
+   * arrived. Pruning on read would erase the owner's order the first time
+   * `workspaces.list` failed.
+   */
+  const savePinned = (next: readonly string[]) => {
+    const known = workspaces.data;
+    const body = known === undefined ? [...next] : prunePinned(next, known.map((row) => row.id));
+    void writeOrder({ pinned: body }).then(() => pinnedOrder.refetch());
+  };
 
   // Open the Dashboard when the Command Center queued one.
   useEffect(() => {
@@ -146,7 +475,17 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
   }
 
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
+    <ScrollView style={styles.screen} contentContainerStyle={styles.content} scrollEnabled={!dragging}>
+      {commandNotice === null ? null : (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`${commandNotice}. Dismiss.`}
+          onPress={() => launcherNotices.take()}
+          style={styles.row}
+        >
+          <Text style={styles.rowSubtitle}>{commandNotice}</Text>
+        </Pressable>
+      )}
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
         <Text style={[styles.title, { flex: 1 }]}>Beads Manager</Text>
         <Pressable
@@ -189,7 +528,9 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
       {/* The rows render even without `navigation.openAgent`: only the Manager
           button needs it, while the Dashboard is read-only and must stay
           reachable on an older host (REQ-040d). */}
-      {workspaces.data?.map((workspace) => {
+      {[...ordered.pinned, ...ordered.rest].map((workspace) => {
+        const pinnedAt = ordered.pinned.findIndex((row) => row.id === workspace.id);
+        const isPinned = pinnedAt >= 0;
         const busyHere = pending && state.workspaceId === workspace.id;
         const open = (view: "dashboard" | "beads") => {
           setDashboardWorkspace({ id: workspace.id, label: workspace.screenTitle });
@@ -197,11 +538,43 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
         };
         const stats = workspaceStats(overviewById.get(workspace.id));
         return (
-          <View key={workspace.id} style={styles.row}>
+          <View
+            key={workspace.id}
+            style={styles.row}
+            onLayout={(event) => {
+              if (rowHeight.current === 0) rowHeight.current = event.nativeEvent.layout.height;
+            }}
+          >
             <View style={{ gap: 4, flexShrink: 1 }}>
-              <Text style={styles.rowTitle} numberOfLines={1}>
-                {workspace.label}
-              </Text>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                {isPinned ? (
+                  <DragHandle
+                    label={workspace.label}
+                    index={pinnedAt}
+                    count={ordered.pinned.length}
+                    rowHeight={() => rowHeight.current}
+                    onDrop={(to) => savePinned(pinAt(pinned, workspace.id, to))}
+                    onDragging={setDragging}
+                    theme={theme}
+                    styles={styles}
+                  />
+                ) : null}
+                <PinControls
+                  label={workspace.label}
+                  pinned={isPinned}
+                  first={pinnedAt === 0}
+                  last={pinnedAt === ordered.pinned.length - 1}
+                  onPin={() => savePinned(pinAt(pinned, workspace.id, ordered.pinned.length))}
+                  onUnpin={() => savePinned(unpin(pinned, workspace.id))}
+                  onMove={(delta) => savePinned(movePinned(pinned, workspace.id, delta))}
+                  theme={theme}
+                  styles={styles}
+                />
+                <Text style={[styles.rowTitle, { flexShrink: 1 }]} numberOfLines={1}>
+                  {workspace.label}
+                </Text>
+                <RunningDot counts={overviewById.get(workspace.id)?.runningAgents} theme={theme} styles={styles} />
+              </View>
               <Text style={styles.rowSubtitle} numberOfLines={1}>
                 {workspace.detail}
               </Text>

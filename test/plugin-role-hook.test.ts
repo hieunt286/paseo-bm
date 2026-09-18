@@ -40,6 +40,7 @@ function fakeServer(options: { withBefore?: boolean } = {}) {
   const removers: string[] = [];
   const server: Record<string, unknown> = {
     handle: vi.fn(),
+    registerSettings: vi.fn(),
   };
   if (options.withBefore !== false) {
     server.before = vi.fn((name: string, handler: BeforeHandler) => {

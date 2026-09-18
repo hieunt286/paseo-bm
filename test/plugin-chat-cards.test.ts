@@ -4,8 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store";
 import {
+  answerTarget,
+  answeredKey,
   chatCardSchema,
   drawAsCard,
+  formComplete,
+  recommendedPicks,
+  sendAnswers,
+  showsQuestions,
+  topicOf,
   markdownOf,
   markOf,
   partiesOf,
@@ -177,6 +184,16 @@ describe("what the card says", () => {
     expect(statusChip(card(INSTRUCTION))).toBeNull();
   });
 
+  it("cuts a long waiting-on text on the summary line (delta 20260918c, Q50)", () => {
+    const long = "\"Continue\" does not tell me the result of the real-daemon check, and everything left waits on it. ".repeat(12);
+    const summary = summaryOf(card(REPORT.replace("blockers: Q1 — keep the old label?", `blockers: ${long}`)));
+    const waiting = summary.slice(summary.indexOf("waiting on: ") + "waiting on: ".length);
+    expect(summary.startsWith("Large · beads 2 created, 1 closed · waiting on: ")).toBe(true);
+    expect(waiting.length).toBeLessThanOrEqual(160);
+    expect(waiting.endsWith("…")).toBe(true);
+    expect(long.startsWith(waiting.slice(0, -1))).toBe(true);
+  });
+
   it("renders report fields as a bold-key list, not one paragraph", () => {
     const blocks = parseMarkdown(markdownOf(["```", REPORT, "```", "", "Anything else?"].join("\n")));
     expect(blocks[0]).toMatchObject({ kind: "paragraph", spans: [{ text: "BM-REPORT", bold: true }] });
@@ -259,5 +276,202 @@ describe("chat.peers", () => {
 
   it("has nothing for an agent that is not paseo-bm's", async () => {
     expect(await handleChatPeers({ agentId: "someone-else" }, paseo(), { homedir: () => "/nonexistent-bm-home" })).toEqual({ owner: null, peers: [], workspaceId: null });
+  });
+});
+
+/**
+ * The question card (delta 20260918c-question-cards §4.4): a Worker's
+ * `blocked` report with a `BM-QUESTIONS` block, seen in the Manager's chat.
+ */
+const QUESTIONS = [
+  "BM-QUESTIONS",
+  "requestId: req-20260916T062244Z",
+  "Q6: Storage — where does the list live?",
+  "- a: the existing table: no migration. (recommended)",
+  "- b: a file on disk: simplest.",
+  "Q7: Sessions — rename the cookie?",
+  "- a: keep it. (recommended)",
+  "- b: rename it.",
+].join("\n");
+const ASKING = `${REPORT.replace("blockers: Q1 — keep the old label?", "blockers: 2 questions: Q6, Q7 — see BM-QUESTIONS")}\n\n${QUESTIONS}`;
+
+describe("a report's questions", () => {
+  it("are read into the card, and change the summary and the quick replies", () => {
+    const asking = card(ASKING);
+    expect(asking.questions.map((question) => question.id)).toEqual(["Q6", "Q7"]);
+    expect(asking.questions[0]!.options).toEqual([
+      { key: "a", text: "the existing table: no migration.", recommended: true },
+      { key: "b", text: "a file on disk: simplest.", recommended: false },
+    ]);
+    expect(summaryOf(asking)).toBe("Large · beads 2 created, 1 closed · 2 questions waiting");
+    expect(quickReplies(asking)).toEqual([]);
+    expect(JSON.parse(JSON.stringify(asking))).toEqual(asking);
+    expect(chatCardSchema.parse(asking).questions).toHaveLength(2);
+  });
+
+  it("are not taken from a block about another request", () => {
+    expect(card(ASKING.replace("requestId: req-20260916T062244Z\nQ6", "requestId: req-20260916T081749Z\nQ6")).questions).toEqual([]);
+  });
+
+  it("leave an old-style report as it was", () => {
+    const old = card(REPORT);
+    expect(old.questions).toEqual([]);
+    expect(summaryOf(old)).toBe("Large · beads 2 created, 1 closed · waiting on: Q1 — keep the old label?");
+    expect(quickReplies(old)).toHaveLength(2);
+    // A card built before the field existed still validates.
+    const before: Partial<ChatCard> = { ...old };
+    delete before.questions;
+    expect(chatCardSchema.parse(before).questions).toEqual([]);
+  });
+
+  it("show buttons only in the Manager's chat, on the report it received", () => {
+    const asking = card(ASKING);
+    expect(showsQuestions(asking, manager)).toBe(true);
+    expect(showsQuestions(asking, worker)).toBe(false);
+    expect(showsQuestions(asking, reviewer)).toBe(false);
+    expect(showsQuestions(asking, null)).toBe(false);
+    expect(showsQuestions(card(ASKING, "assistant_message"), manager)).toBe(false);
+    expect(showsQuestions(card(REPORT), manager)).toBe(false);
+  });
+
+  it("split a question into its topic and the rest", () => {
+    expect(topicOf(card(ASKING).questions[0]!)).toEqual({ topic: "Storage", rest: "where does the list live?" });
+    expect(topicOf({ id: "Q1", text: "No topic here", options: [] })).toEqual({ topic: null, rest: "No topic here" });
+  });
+
+  it("render as nested Markdown when the message is opened", () => {
+    const blocks = parseMarkdown(markdownOf(QUESTIONS));
+    expect(blocks[0]).toMatchObject({ kind: "paragraph", spans: [{ text: "BM-QUESTIONS", bold: true }] });
+    const bullets = blocks.filter((block) => block.kind === "bullet");
+    expect(bullets.map((block) => (block.kind === "bullet" ? block.depth : -1))).toEqual([0, 0, 1, 1, 0, 1, 1]);
+    expect(bullets[1]).toMatchObject({ spans: [{ text: "Q6", bold: true }, { text: ": Storage — where does the list live?" }] });
+    expect(bullets[2]).toMatchObject({ spans: [{ text: "a", bold: true }, { text: ": the existing table: no migration. (recommended)" }] });
+  });
+});
+
+describe("choosing answers", () => {
+  const questions = card(ASKING).questions;
+
+  it("fills recommendations only into empty questions, and never pre-selects", () => {
+    expect(recommendedPicks(questions, {})).toEqual({ Q6: { key: "a" }, Q7: { key: "a" } });
+    expect(recommendedPicks(questions, { Q6: { key: "b" } })).toEqual({ Q6: { key: "b" }, Q7: { key: "a" } });
+    expect(recommendedPicks(questions, { Q7: { other: "later" } })).toEqual({ Q6: { key: "a" }, Q7: { other: "later" } });
+  });
+
+  it("is complete only when every question has an option or the user's own words", () => {
+    expect(formComplete(questions, {})).toBe(false);
+    expect(formComplete(questions, { Q6: { key: "a" } })).toBe(false);
+    expect(formComplete(questions, { Q6: { key: "a" }, Q7: { other: "   " } })).toBe(false);
+    expect(formComplete(questions, { Q6: { key: "z" }, Q7: { key: "a" } })).toBe(false);
+    expect(formComplete(questions, { Q6: { key: "a" }, Q7: { other: "rename next release" } })).toBe(true);
+    // "Use recommendations", then send: two actions answer every question.
+    expect(formComplete(questions, recommendedPicks(questions, {}))).toBe(true);
+  });
+
+  it("answers a question without options only in the user's own words", () => {
+    const lone = [{ id: "Q9", text: "Anything else?", options: [{ key: "a", text: "no", recommended: true }] }];
+    expect(recommendedPicks(lone, {})).toEqual({});
+    expect(formComplete(lone, { Q9: { key: "a" } })).toBe(false);
+    expect(formComplete(lone, { Q9: { other: "no" } })).toBe(true);
+  });
+});
+
+describe("where the answers go", () => {
+  const asking = card(ASKING);
+
+  it("to the one Worker of the request, when it is idle or errored", () => {
+    expect(answerTarget(asking, manager, [worker, otherWorker, reviewer])).toEqual({ worker });
+    expect(answerTarget(asking, manager, [{ ...worker, status: "error" }])).toEqual({ worker: { ...worker, status: "error" } });
+  });
+
+  it("nowhere when no single Worker has the request", () => {
+    expect(answerTarget(asking, manager, [otherWorker])).toEqual({
+      reason: "Cannot tell which Worker asked this: no single Worker has `req-20260916T062244Z`.",
+    });
+    const twin = peer({ id: "w3", requestId: "req-20260916T062244Z" });
+    expect("reason" in answerTarget(asking, manager, [worker, twin])).toBe(true);
+  });
+
+  it("not now when the Worker is running, starting or closed", () => {
+    for (const status of ["running", "initializing"]) {
+      expect(answerTarget(asking, manager, [{ ...worker, status }])).toEqual({
+        reason: "Worker · Contact redesign is working; a message now would replace its turn. Send when it stops.",
+      });
+    }
+    expect(answerTarget(asking, manager, [{ ...worker, status: "closed" }])).toEqual({ reason: "Worker · Contact redesign is closed." });
+  });
+
+  it("keys the answered memory on the chat, the request, the questions and the message", () => {
+    expect(answeredKey("m1", asking)).toBe(answeredKey("m1", card(ASKING)));
+    expect(answeredKey("m1", asking)).not.toBe(answeredKey("m2", asking));
+    expect(answeredKey("m1", asking)).not.toBe(answeredKey("m1", card(`${ASKING}\nThat is all.`)));
+  });
+});
+
+describe("sending the answers", () => {
+  const asking = card(ASKING);
+  const picks = { Q6: { key: "a" }, Q7: { other: "rename it next release" } };
+  const expected = [
+    "BM-ANSWERS",
+    "requestId: req-20260916T062244Z",
+    "Q6: a — the existing table: no migration.",
+    "Q7: other — rename it next release",
+  ].join("\n");
+
+  it("re-reads the peers, then sends one message to the asking Worker", async () => {
+    const refreshPeers = vi.fn(async () => ({ owner: manager, peers: [worker, otherWorker, reviewer] }));
+    const send = vi.fn(async () => undefined);
+    expect(await sendAnswers({ card: asking, picks, refreshPeers, send })).toEqual({ ok: true, to: worker, text: expected });
+    expect(refreshPeers).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith("w1", expected);
+  });
+
+  it("does not send when the Worker started running since the card was drawn", async () => {
+    const send = vi.fn(async () => undefined);
+    const result = await sendAnswers({
+      card: asking,
+      picks,
+      refreshPeers: async () => ({ owner: manager, peers: [{ ...worker, status: "running" }] }),
+      send,
+    });
+    expect(result).toEqual({ ok: false, reason: expect.stringContaining("is working") });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("reports a failed send and a failed refresh", async () => {
+    expect(
+      await sendAnswers({
+        card: asking,
+        picks,
+        refreshPeers: async () => ({ owner: manager, peers: [worker] }),
+        send: async () => {
+          throw new Error("Agent not found");
+        },
+      }),
+    ).toEqual({ ok: false, reason: "Agent not found" });
+    const send = vi.fn(async () => undefined);
+    expect(
+      await sendAnswers({
+        card: asking,
+        picks,
+        refreshPeers: async () => {
+          throw new Error("daemon unreachable");
+        },
+        send,
+      }),
+    ).toEqual({ ok: false, reason: "daemon unreachable" });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("touches nothing while the form is incomplete", async () => {
+    const refreshPeers = vi.fn(async () => ({ owner: manager, peers: [worker] }));
+    const send = vi.fn(async () => undefined);
+    expect(await sendAnswers({ card: asking, picks: { Q6: { key: "a" } }, refreshPeers, send })).toEqual({
+      ok: false,
+      reason: "Answer every question first.",
+    });
+    expect(refreshPeers).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
   });
 });

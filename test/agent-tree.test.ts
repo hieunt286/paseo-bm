@@ -209,6 +209,7 @@ describe("client entry registration", () => {
       addSurface: (id: string) => () => removed.push(`surface:${id}`),
       addSidebarItem: (item: { id: string }) => () => removed.push(`sidebar:${item.id}`),
       addCommandCenterItem: (item: { id: string }) => () => removed.push(`command:${item.id}`),
+      addSlashCommand: (item: { name: string }) => () => removed.push(`slash:${item.name}`),
       addWorkspacePanel: (item: Record<string, unknown>) => {
         panels.push(item);
         return () => removed.push(`panel:${String(item.id)}`);
@@ -232,6 +233,8 @@ describe("client entry registration", () => {
       [
         "surface:beads-manager",
         "sidebar:beads-manager",
+        "slash:bm-worker-new",
+        "slash:bm-worker-stop-all",
         "command:open-beads-manager",
         "command:open-beads-dashboard",
         "settings:paseo-bm-settings",
@@ -333,7 +336,7 @@ describe("tree building: four datasets", () => {
       },
     };
     const handle = vi.fn();
-    serverContribute({ handle } as unknown as Parameters<typeof serverContribute>[0]);
+    serverContribute({ handle, registerSettings: vi.fn() } as unknown as Parameters<typeof serverContribute>[0]);
     const handler = handle.mock.calls.find(([contract]) => contract === agentsListRpc)![1] as (
       input: unknown,
       ctx: { paseo: AgentDirectoryPaseo },

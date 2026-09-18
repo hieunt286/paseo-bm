@@ -21,11 +21,13 @@ import { inferWorkflowSteps } from "./workflow-steps";
 import { mergeExtras, readLiveExtras } from "./live-timeline";
 import { getBeadDetail, listBeadRows, runBeadAction, type BeadActionPaseo } from "./bead-actions";
 import { beadWorkOf } from "./bead-work";
+import { readLauncherOrder, writeLauncherOrder } from "./launcher-order";
+import { stopAllInWorkspace, type StopPaseo } from "./stop-propagation";
 import {
   detail,
   paginate,
   reconstructTraces,
-  summarise,
+  summariseSegments,
   type AgentFacts,
   type ReconstructedTrace,
 } from "./traces";
@@ -50,6 +52,9 @@ import {
   beadsGetRpc,
   beadsActionRpc,
   workspacesOverviewRpc,
+  launcherOrderGetRpc,
+  launcherOrderSetRpc,
+  agentsStopAllRpc,
   tracesGetRpc,
   tracesListRpc,
   tracesWorkspacesRpc,
@@ -333,8 +338,8 @@ export async function handleTracesList(
   const limit = Math.min(input.limit ?? TRACE_LIST_LIMIT, TRACE_LIST_LIMIT);
   const { page, nextCursor, truncated } = paginate(context.traces, limit, input.cursor);
   return {
-    traces: page.map((trace) =>
-      summarise(trace, {
+    traces: page.flatMap((trace) =>
+      summariseSegments(trace, {
         agents: context.agents,
         workspaceState: context.workspaceState,
         reassignedFrom: reassignedFromOf(trace, input.workspaceId),
@@ -427,7 +432,46 @@ export async function handleTracesWorkspaces(
   };
 }
 
-/** `workspaces.overview` handler: bead counts and running Workers per listed workspace. Read-only. */
+/**
+ * `agents.stop-all` handler: asks this workspace's Workers and Reviewers to
+ * stop. The Manager is never asked — it is the user's point of contact.
+ */
+export async function handleAgentsStopAll(
+  input: { workspaceId: string },
+  paseo: StopPaseo,
+): Promise<{ workers: number; reviewers: number; skipped: number }> {
+  return stopAllInWorkspace(paseo, input.workspaceId);
+}
+
+/** `launcher.order.get` handler: the order the owner pinned. Read-only. */
+export async function handleLauncherOrderGet(
+  paseo: DashboardPaseo,
+  deps: { homedir?: () => string } = {},
+): Promise<{ pinned: string[]; notices: string[] }> {
+  const { pinned, notices } = readLauncherOrder(await requireLocation(paseo, deps));
+  return { pinned, notices };
+}
+
+/** `launcher.order.set` handler: replaces the pinned order. */
+export async function handleLauncherOrderSet(
+  input: { pinned: string[] },
+  paseo: DashboardPaseo,
+  deps: { homedir?: () => string } = {},
+): Promise<{ pinned: string[]; notices: string[] }> {
+  const { pinned, notices } = writeLauncherOrder(await requireLocation(paseo, deps), input.pinned);
+  return { pinned, notices };
+}
+
+/**
+ * `workspaces.overview` handler: bead counts and running agents per listed
+ * workspace. Read-only.
+ *
+ * `runningWorkers` is kept exactly as it was — other readers depend on it — and
+ * `runningAgents` is added beside it. Owner decision Q25 (delta 20260917e):
+ * the Manager thinking and a Reviewer running both count as "this project is
+ * busy". Counting Workers alone left the screen still during the parts of a
+ * request where the user most wants to see something happening.
+ */
 export async function handleWorkspacesOverview(paseo: DashboardPaseo): Promise<{ workspaces: WorkspaceOverview[] }> {
   const listed = (await listedWorkspaces(paseo)) ?? [];
   const agents = await bmAgentsOf(paseo);
@@ -446,10 +490,17 @@ export async function handleWorkspacesOverview(paseo: DashboardPaseo): Promise<{
             // An unreadable bead store shows as "no beads", never as an error row.
           }
         }
-        const runningWorkers = agents.filter(
-          (agent) => agent.workspaceId === entry.id && agent.facts.role === "worker" && agent.facts.status === "running",
-        ).length;
-        return { workspaceId: entry.id, beads, runningWorkers };
+        const running = agents.filter(
+          (agent) => agent.workspaceId === entry.id && agent.facts.status === "running",
+        );
+        const runningOf = (role: AgentFacts["role"]): number =>
+          running.filter((agent) => agent.facts.role === role).length;
+        const runningAgents = {
+          manager: runningOf("manager"),
+          worker: runningOf("worker"),
+          reviewer: runningOf("reviewer"),
+        };
+        return { workspaceId: entry.id, beads, runningWorkers: runningAgents.worker, runningAgents };
       }),
   };
 }
@@ -525,6 +576,9 @@ export function registerDashboardRpcs(
   server.handle(beadsListRpc, (input, context) => handleBeadsList(input, sdk(context)));
   server.handle(beadsGetRpc, (input, context) => handleBeadsGet(input, sdk(context)));
   server.handle(workspacesOverviewRpc, (_input, context) => handleWorkspacesOverview(sdk(context)));
+  server.handle(launcherOrderGetRpc, (_input, context) => handleLauncherOrderGet(sdk(context)));
+  server.handle(launcherOrderSetRpc, (input, context) => handleLauncherOrderSet(input, sdk(context)));
+  server.handle(agentsStopAllRpc, (input, context) => handleAgentsStopAll(input, context.paseo as StopPaseo));
   const ensureManager = deps.ensureManager;
   if (ensureManager !== undefined) {
     server.handle(beadsActionRpc, (input, context) =>

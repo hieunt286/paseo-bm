@@ -63,6 +63,7 @@ function trace(overrides: Partial<ReconstructedTrace> = {}): ReconstructedTrace 
     linking: "exact",
     agentsMissing: [],
     notices: [],
+    segments: [],
     ...overrides,
   };
 }

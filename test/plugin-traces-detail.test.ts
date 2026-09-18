@@ -465,6 +465,117 @@ describe("usage and sub-agents", () => {
     });
   });
 
+  describe("what each agent ran on, and tokens by model (delta 20260918 §4.3)", () => {
+    const tokens = (model: string | null, inputTokens: number) => ({
+      inputTokens,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      costUsd: null,
+      costBasis: "unavailable" as const,
+      model,
+      pricesUpdatedAt: null,
+    });
+    const ran = (model: string | null, thinkingOptionId: string | null, modeId: string | null) => ({ model, thinkingOptionId, modeId });
+    const workerTurn = (n: number, overrides: Partial<TraceRecord>) =>
+      record({ agentId: "w1", role: "worker", turnId: `w-${n}`, at: `2026-09-16T10:1${n}:00.000Z`, ...overrides });
+    const show = (records: TraceRecord[], agents: AgentFacts[] = [agent({ id: "w1" })]) => {
+      const built = trace(records, agents);
+      return detail(built.trace, {
+        agents: built.agents,
+        workspaceState: "live",
+        reassignedFrom: null,
+        priceUsage,
+        lookupBeads: () => ({ found: [], missing: [] }),
+      });
+    };
+    const rowsOf = (shown: ReturnType<typeof show>, agentId: string) =>
+      shown.usageByAgent.find((entry) => entry.agentId === agentId)?.runtime;
+
+    it("one row per combination, with its turns, in the order first seen", () => {
+      const shown = show([
+        record({ sent: [msg("x")] }),
+        workerTurn(1, { usage: tokens("claude-opus-5", 10), runtime: ran("claude-opus-5", null, "bypassPermissions") }),
+        workerTurn(2, { usage: tokens("claude-opus-5", 10), runtime: ran("claude-opus-5", "high", "bypassPermissions") }),
+        workerTurn(3, { usage: tokens("claude-opus-5", 10), runtime: ran("claude-opus-5", null, "bypassPermissions") }),
+        workerTurn(4, { usage: tokens("claude-opus-5", 10), runtime: ran("claude-opus-5", null, "bypassPermissions") }),
+      ]);
+
+      expect(rowsOf(shown, "w1")).toEqual([
+        { model: "claude-opus-5", thinkingOptionId: null, modeId: "bypassPermissions", recorded: true, turns: 3 },
+        { model: "claude-opus-5", thinkingOptionId: "high", modeId: "bypassPermissions", recorded: true, turns: 1 },
+      ]);
+    });
+
+    it("an old turn keeps the model it recorded; only thinking and mode are unknown", () => {
+      const shown = show([
+        record({ sent: [msg("x")] }),
+        workerTurn(1, { usage: tokens("claude-opus-5", 10) }),
+        workerTurn(2, { usage: tokens("claude-opus-5", 10) }),
+        workerTurn(3, {}),
+      ]);
+
+      expect(rowsOf(shown, "w1")).toEqual([
+        { model: "claude-opus-5", thinkingOptionId: null, modeId: null, recorded: false, turns: 2 },
+        { model: null, thinkingOptionId: null, modeId: null, recorded: false, turns: 1 },
+      ]);
+    });
+
+    it("the Manager gets its rows too", () => {
+      const shown = show([record({ sent: [msg("x")], usage: tokens("claude-opus-5", 5), runtime: ran("claude-opus-5", null, "bypassPermissions") })], []);
+
+      expect(rowsOf(shown, MANAGER)).toEqual([
+        { model: "claude-opus-5", thinkingOptionId: null, modeId: "bypassPermissions", recorded: true, turns: 1 },
+      ]);
+    });
+
+    it("tokens by model add up to the request's tokens, and their money to its cost", () => {
+      const shown = show(
+        [
+          record({ sent: [msg("x")], usage: tokens("claude-opus-5", 1_000_000), runtime: ran("claude-opus-5", null, "bypassPermissions") }),
+          workerTurn(1, { usage: tokens("claude-opus-5", 1_000_000) }),
+          record({ agentId: "r1", role: "reviewer", turnId: "r", at: "2026-09-16T10:20:00.000Z", usage: tokens("gpt-5.6-sol", 300_000), runtime: ran("gpt-5.6-sol", null, "auto") }),
+        ],
+        [agent({ id: "w1" }), agent({ id: "r1", role: "reviewer", parentAgentId: "w1", batchIdLabel: "b1" })],
+      );
+
+      const byModel = shown.usageByModel ?? [];
+      expect(byModel.map((entry) => entry.model)).toEqual(["claude-opus-5", "gpt-5.6-sol"]);
+      expect(byModel.reduce((sum, entry) => sum + entry.usage.inputTokens, 0)).toBe(shown.usage.inputTokens);
+      expect(byModel[0]!.usage).toMatchObject({ costUsd: 10, costBasis: "estimated" });
+      // No price for the Codex model: tokens only.
+      expect(byModel[1]!.usage).toMatchObject({ inputTokens: 300_000, costUsd: null });
+      expect(shown.usage.costUsd).toBe(byModel.reduce((sum, entry) => sum + (entry.usage.costUsd ?? 0), 0));
+    });
+
+    it("a summary splits its tokens by role and model, and the parts add up (REQ-058e)", () => {
+      const records = [
+        record({ sent: [msg("x")], usage: tokens("claude-opus-5", 1_000_000), runtime: ran("claude-opus-5", null, "bypassPermissions") }),
+        workerTurn(1, { usage: tokens("claude-opus-5", 2_000_000) }),
+        record({ agentId: "r1", role: "reviewer", turnId: "r", at: "2026-09-16T10:20:00.000Z", usage: tokens("gpt-5.6-sol", 300_000) }),
+      ];
+      const built = trace(records, [agent({ id: "w1" }), agent({ id: "r1", role: "reviewer", parentAgentId: "w1", batchIdLabel: "b1" })]);
+      const summary = summarise(built.trace, { agents: built.agents, workspaceState: "live", reassignedFrom: null, priceUsage });
+
+      expect(summary.usageByModelRole?.map((entry) => [entry.role, entry.model, entry.usage.inputTokens, entry.usage.costUsd])).toEqual([
+        ["manager", "claude-opus-5", 1_000_000, 5],
+        ["worker", "claude-opus-5", 2_000_000, 10],
+        ["reviewer", "gpt-5.6-sol", 300_000, null],
+      ]);
+      expect(summary.usageByModelRole!.reduce((sum, entry) => sum + entry.usage.inputTokens, 0)).toBe(summary.usage.inputTokens);
+    });
+
+    it("a profile that names no model is priced as the model that actually ran (Q38)", () => {
+      // `usage.model` is the configured model (null here); `runtime.model` is what ran.
+      const records = [record({ sent: [msg("x")], usage: tokens(null, 1_000_000), runtime: ran("claude-opus-5", null, "bypassPermissions") })];
+      const { trace: built } = trace(records, []);
+
+      const { usage, notice } = usageOfTrace(built, priceUsage);
+
+      expect(usage).toMatchObject({ model: "claude-opus-5", costUsd: 5, costBasis: "estimated" });
+      expect(notice).toBeNull();
+    });
+  });
+
   it("counts provider sub-agent traces per agent", () => {
     const records = [
       record({ sent: [msg("x")] }),
