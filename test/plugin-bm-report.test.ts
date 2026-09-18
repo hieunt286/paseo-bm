@@ -424,3 +424,39 @@ describe("telling a report apart from a user request", () => {
     expect(looksLikeReport("thêm màn hình xuất báo cáo")).toBe(false);
   });
 });
+
+describe("a BM-QUESTIONS block after the report (delta 20260918c-question-cards)", () => {
+  it("reads the report exactly as without the block, fenced or not", () => {
+    const report = [
+      "BM-REPORT",
+      "requestId: req-20260917T010956Z",
+      "phase: blocked",
+      "tier: Large (changed: no)",
+      "filesChanged: docs/a.md",
+      "beadsCreated: bm-a, bm-a.1",
+      "beadsUpdated: none",
+      "beadsClosed: none",
+      "beadsReady: bm-a.1",
+      "reviewFindingsOpen: none",
+      "buildAndTests: not run",
+      "skillsUsed: feature-workflow",
+      "blockers: 2 questions: Q1, Q2 — see BM-QUESTIONS",
+    ].join("\n");
+    const questions = [
+      "BM-QUESTIONS",
+      "requestId: req-20260917T010956Z",
+      "Q1: Storage — where?",
+      "- a: postgres: no migration. (recommended)",
+      "- b: a file: simplest.",
+      "Q2: Sessions — rename the cookie?",
+      "- a: keep it. (recommended)",
+      "- b: rename it.",
+    ].join("\n");
+    const alone = parseReports(report, ctx);
+    expect(alone).toHaveLength(1);
+    expect(alone[0]!.unparsedFields).toEqual([]);
+    expect(parseReports(`${report}\n\n${questions}`, ctx)).toEqual(alone);
+    expect(parseReports(`${report}\n${questions}`, ctx)).toEqual(alone);
+    expect(parseReports(`\`\`\`\n${report}\n${questions}\n\`\`\``, ctx)).toEqual(alone);
+  });
+});

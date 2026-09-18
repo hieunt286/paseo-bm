@@ -33,6 +33,8 @@ export interface EnsureManagerOutput {
   agentId: string;
   created: boolean;
   otherManagerIds: string[];
+  /** Why an existing Manager was not switched to its mode (delta 20260918 §4.1); absent from an older server. */
+  modeNotice?: string | null;
 }
 
 export interface LaunchDeps {
@@ -51,6 +53,7 @@ export type LauncherState =
       agentId: string;
       created: boolean;
       otherManagerIds: string[];
+      modeNotice: string | null;
     }
   | { status: "error"; workspaceId: string; code: string | null; message: string };
 
@@ -111,6 +114,7 @@ export function createManagerLauncher(): ManagerLauncher {
           agentId: result.agentId,
           created: result.created,
           otherManagerIds: [...result.otherManagerIds],
+          modeNotice: result.modeNotice ?? null,
         });
         return "opened";
       } catch (error) {
@@ -221,6 +225,8 @@ export function describeLauncherState(state: LauncherState): LauncherNotice[] {
           text: `This workspace has ${others} other live Beads Manager${others === 1 ? "" : "s"} (${state.otherManagerIds.join(", ")}). The newest one was opened; nothing was archived or deleted.`,
         });
       }
+      // The chat is already open: this only explains why the Manager may still ask for permission.
+      if (state.modeNotice !== null) notices.push({ tone: "warning", text: state.modeNotice });
       return notices;
     }
     case "error":

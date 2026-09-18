@@ -101,6 +101,7 @@ function fakeServer() {
   // WP-205 trace collector), so this is a multimap, not a map.
   const onHooks = new Map<string, OnHandler[]>();
   const server = {
+    registerSettings: vi.fn(),
     handle: vi.fn((contract: { name: string }, handler: Handler) => {
       handlers.set(contract.name, handler);
     }),
@@ -231,6 +232,7 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
     // WP-210). All five Dashboard RPCs are registered.
     expect([...handlers.keys()].sort()).toEqual([
       "agents.list",
+      "agents.stop-all",
       "beads.action",
       "beads.get",
       "beads.list",
@@ -238,6 +240,8 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
       "beads.stats",
       "chat.beads",
       "chat.peers",
+      "launcher.order.get",
+      "launcher.order.set",
       "manager.ensure",
       "roles.describe",
       "roles.instructions",
@@ -260,7 +264,7 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
 
     const { paseo, created } = fakePaseo();
     const ensured = await handlers.get("manager.ensure")!({ workspaceId: "ws-1" }, { paseo });
-    expect(ensured).toEqual({ agentId: "created-1", created: true, otherManagerIds: [] });
+    expect(ensured).toEqual({ agentId: "created-1", created: true, otherManagerIds: [], modeNotice: null });
     expect(created).toHaveLength(1);
     expect(created[0]!.options.config.systemPrompt).toBe(managerMd);
 

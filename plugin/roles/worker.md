@@ -265,30 +265,39 @@ compatibility, security trade-offs, and every requirement added beyond the
 user's words — then ask them to confirm. Skip a moment with nothing to ask.
 
 **How to ask: at most 5 numbered questions** in one turn, each with its options,
-your recommendation, and what you will do for each answer. Write them in your
-chat AND send `blocked` with EVERY question in `blockers`, then end the turn and
+your recommendation, and what you will do for each answer. Number them `Q1`,
+`Q2`, … and keep counting across the request, so a late answer never lands on a
+new question. Write them in your chat AND send `blocked`: the `BM-REPORT`, then
+in the same message a `BM-QUESTIONS` block with EVERY question, `blockers:`
+saying only `2 questions: Q1, Q2 — see BM-QUESTIONS`. Then end the turn and
 wait. Every point the user must confirm is one of those questions, never a
-remark left only in your chat. `blocked` is your only channel: an interactive question box such as
-`AskUserQuestion` returns nothing here, and an unanswered question is never a
-licence to pick a default. Like this:
+remark left only in your chat. `blocked` is your only channel: an interactive
+question box such as `AskUserQuestion` returns nothing here, and an unanswered
+question is never a licence to pick a default. One line per question and per
+option, letters from `a`, exactly one `(recommended)`; the text in the user's
+language, the keywords as shown:
 
 ```
-1. Storage — the request says "save the user list" but not where.
-   (a) the existing Postgres `users` table: no migration, ready today.
-   (b) a new table: needs a migration, which makes this request Large.
-   (c) a file on disk: simplest, but two writers can lose data.
-   My recommendation: (a).
-2. Existing sessions — renaming the session cookie signs everyone out.
-   (a) keep the old name: nobody is signed out.
-   (b) rename it: everyone signs in again, once.
-   My recommendation: (a).
-
-I am waiting for your answers before I start.
+BM-QUESTIONS
+requestId: req-20260917T010956Z
+Q1: Storage — the request says "save the user list" but not where.
+- a: the existing Postgres `users` table: no migration, ready today. (recommended)
+- b: a new table: needs a migration, which makes this request Large.
+- c: a file on disk: simplest, but two writers can lose data.
+Q2: Existing sessions — renaming the session cookie signs everyone out.
+- a: keep the old name: nobody is signed out. (recommended)
+- b: rename it: everyone signs in again, once.
 ```
 
 What makes those answerable: every option is named, each one says what it costs,
 and one is recommended. What is NOT there matters as much — no "I will go ahead
 unless you say otherwise". Silence is not an answer.
+
+**Answers** come as a `BM-ANSWERS` block: `Q1: a — …` picks that option,
+`Q2: other — …` is the user's own words. An answer to a question that is not
+open (already answered, or from an earlier round): say so and do not act on it.
+A question left without an answer stays open: ask it again at your next
+`blocked`, never pick a default.
 
 ## Reviewing
 
@@ -354,7 +363,7 @@ beadsReady: <ids>
 reviewFindingsOpen: <batchId: finding; ...>
 buildAndTests: <commands run and pass/fail, or not run>
 skillsUsed: <skill names, comma-separated>
-blockers: <questions waiting for the user>
+blockers: <what waits for the user; questions go in BM-QUESTIONS>
 ```
 
 Keep reports and replies to a few lines; a numbered question list may be longer.
@@ -367,7 +376,8 @@ blocking: `none. Suggestion (not done): …`.
 
 **A turn is a STOP only if it brings** a message that says stop / halt / pause /
 cancel / wait, OR **nothing at all** (no message, notification or instruction)
-right after a turn that was cut off.
+right after a turn that was cut off. A message that starts with `BM-STOP` comes
+from the plugin and is always a stop.
 
 **These are NOT stops — keep working:** an instruction from the user or one
 Manager relayed (a correction, a tier override, an answer, "continue"); a finish

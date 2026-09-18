@@ -22,6 +22,7 @@ import {
   ROLE_MARK,
   requestGraph,
   requestsPerDay,
+  turnLabel,
   heaviestWorkers,
   stepChip,
   STEP_LEGEND,
@@ -30,6 +31,7 @@ import {
   stateBadge,
   storageView,
   toneColor,
+  tokensByModelRole,
   workspaceStateBadge,
 } from "../plugin/client/dashboard-model";
 import type {
@@ -86,6 +88,7 @@ const counts = (created: number, confidence: TraceSummary["beadCounts"]["created
 const trace = (overrides: Partial<TraceSummary> = {}): TraceSummary => ({
   traceId: "req:req-A",
   requestId: "req-A",
+  turn: null,
   requestedAt: "2026-09-16T10:00:00.000Z",
   excerpt: "thêm màn hình báo cáo",
   state: "completed",
@@ -458,6 +461,55 @@ describe("overview", () => {
     ]);
   });
 
+  describe("tokens by model × role (delta 20260918 §4.4, REQ-058e)", () => {
+    const part = (role: "manager" | "worker" | "reviewer", model: string | null, inputTokens: number, costUsd: number | null) => ({
+      role,
+      model,
+      usage: usage({ inputTokens, cachedInputTokens: 0, outputTokens: 0, costUsd, costBasis: costUsd === null ? "unavailable" : "estimated", model }),
+    });
+    // Each summary's parts add up to its own usage, as the server builds them.
+    const summary = (parts: ReturnType<typeof part>[]) =>
+      trace({
+        usage: usage({
+          inputTokens: parts.reduce((sum, entry) => sum + entry.usage.inputTokens, 0),
+          cachedInputTokens: 0,
+          outputTokens: 0,
+        }),
+        usageByModelRole: parts,
+      });
+    const rows = [
+      summary([part("manager", "claude-opus-5", 1_000, 0.1), part("worker", "claude-opus-5", 30_000, 2), part("reviewer", "gpt-5.6-sol", 5_000, null)]),
+      summary([part("manager", "claude-opus-5", 2_000, 0.2), part("worker", "claude-opus-5", 10_000, 1)]),
+      summary([part("reviewer", "gpt-5.6-sol", 4_000, null), part("worker", null, 500, null)]),
+    ];
+
+    it("one bar per (model, role) pair, summed across requests, heaviest first", () => {
+      const bars = tokensByModelRole(rows);
+
+      expect(bars.map((bar) => [bar.label, bar.value])).toEqual([
+        ["claude-opus-5 · worker", 40_000],
+        ["gpt-5.6-sol · reviewer", 9_000],
+        ["claude-opus-5 · manager", 3_000],
+        ["unknown model · worker", 500],
+      ]);
+      expect(bars[0]!.display).toBe("40k · $3.00");
+      // No price: tokens only.
+      expect(bars[1]!.display).toBe("9.0k");
+    });
+
+    it("counts exactly the tokens the overview's Tokens card counts, on the same rows", () => {
+      const total = tokensByModelRole(rows).reduce((sum, bar) => sum + bar.value, 0);
+      const card = overviewCards(rows, null).find((entry) => entry.label === "Tokens")!;
+
+      expect(formatTokens(total)).toBe(card.value);
+      expect(total).toBe(rows.reduce((sum, row) => sum + row.usage.inputTokens, 0));
+    });
+
+    it("a row from an older server without the field adds nothing and breaks nothing", () => {
+      expect(tokensByModelRole([trace()])).toEqual([]);
+    });
+  });
+
   it("ranks the five heaviest Workers across requests and scales bars to the largest", () => {
     const worker = (agentId: string, title: string | null, inputTokens: number, costUsd: number | null) => ({
       agentId,
@@ -592,6 +644,81 @@ describe("request graph", () => {
     expect(worker!.details.join("\n")).toContain("💬 You → w1 (10:03:00): dùng cột amount_xu");
   });
 
+  describe("which model, thinking and mode each agent ran (delta 20260918 §4.4)", () => {
+    const priced = (model: string, tokens: number, costUsd: number | null) => ({
+      ...detail().usage,
+      inputTokens: tokens,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      model,
+      costUsd,
+      costBasis: costUsd === null ? ("unavailable" as const) : ("estimated" as const),
+      pricesUpdatedAt: costUsd === null ? null : "2026-09-16",
+    });
+    const withRuntime = detail({
+      usageByAgent: [
+        {
+          agentId: "agent-manager",
+          role: "manager",
+          usage: detail().usage,
+          runtime: [{ model: "claude-opus-5", thinkingOptionId: null, modeId: "bypassPermissions", recorded: true, turns: 4 }],
+        },
+        {
+          agentId: "w1",
+          role: "worker",
+          usage: detail().usage,
+          runtime: [
+            { model: "claude-opus-5", thinkingOptionId: null, modeId: "bypassPermissions", recorded: true, turns: 3 },
+            { model: "claude-opus-5", thinkingOptionId: "high", modeId: "bypassPermissions", recorded: true, turns: 1 },
+            { model: "claude-opus-5", thinkingOptionId: null, modeId: null, recorded: false, turns: 2 },
+          ],
+        },
+        {
+          agentId: "rev-1",
+          role: "reviewer",
+          usage: detail().usage,
+          runtime: [{ model: null, thinkingOptionId: null, modeId: null, recorded: false, turns: 1 }],
+        },
+      ],
+      usageByModel: [
+        { model: "claude-opus-5", usage: priced("claude-opus-5", 12_300, 0.12) },
+        { model: "gpt-5.6-sol", usage: priced("gpt-5.6-sol", 300_000, null) },
+      ],
+    });
+    const [root, worker, reviewer] = requestGraph(trace(), withRuntime, now);
+
+    it("a Worker lists one line per combination, with turn counts; an unset thinking option is the provider's default", () => {
+      expect(worker!.details).toEqual(
+        expect.arrayContaining([
+          "Model: claude-opus-5 · thinking: provider default · mode: bypassPermissions · 3 turns",
+          "Model: claude-opus-5 · thinking: high · mode: bypassPermissions · 1 turn",
+          "Model: claude-opus-5 · thinking/mode: not recorded · 2 turns",
+        ]),
+      );
+      // One known model: it goes in the subtitle too.
+      expect(worker!.subtitle).toContain("claude-opus-5");
+    });
+
+    it("a turn with no model at all says so, and a Reviewer without a known model gets no model in its subtitle", () => {
+      expect(reviewer!.details).toContain("Model: not recorded · 1 turn");
+      expect(reviewer!.subtitle).not.toContain("not recorded");
+    });
+
+    it("the Manager's lines and the tokens by model go in the request's details", () => {
+      expect(root!.details).toContain("Manager agent-ma — Model: claude-opus-5 · thinking: provider default · mode: bypassPermissions · 4 turns");
+      const byModel = root!.details.find((line) => line.startsWith("Tokens by model: "));
+      expect(byModel).toContain("claude-opus-5 12k tokens · $0.12 (estimated, prices of 2026-09-16)");
+      // No price for the Codex model: tokens only, never "cost unavailable" noise.
+      expect(byModel).toMatch(/gpt-5\.6-sol 300k tokens$/);
+    });
+
+    it("nothing new before the detail is loaded, or when the server sent no runtime", () => {
+      const bare = requestGraph(trace(), detail(), now);
+      expect(bare.flatMap((node) => node.details).some((line) => line.includes("Model:") || line.startsWith("Tokens by model"))).toBe(false);
+      expect(requestGraph(trace(), null, now).every((node) => node.details.length === 0)).toBe(true);
+    });
+  });
+
   it("shows the workflow steps as chips with a legend", () => {
     const withSteps = detail({
       workflowSteps: [
@@ -629,5 +756,62 @@ describe("styles and the privacy notice", () => {
 
   it("tells the user the screen holds conversation they can delete", () => {
     expect(PRIVACY_NOTICE).toContain("delete");
+  });
+});
+
+
+/**
+ * One row per question (delta 20260917e §4.3), and the chart that must NOT
+ * follow it (owner decision Q27).
+ */
+describe("turns of a request", () => {
+  const turned = (index: number, total: number, at: string) =>
+    trace({ turn: { index, total }, requestedAt: at, traceId: "req:req-A", requestId: "req-A" });
+
+  it("says which turn a row is, and says nothing for a request nobody followed up", () => {
+    expect(turnLabel(null)).toBe("");
+    expect(turnLabel({ index: 2, total: 3 })).toBe("turn 2 of 3 · ");
+  });
+
+  it("counts a request once however many times the user asked", () => {
+    const day = "2026-09-17";
+    const bars = requestsPerDay(
+      [turned(1, 3, `${day}T09:00:00.000Z`), turned(2, 3, `${day}T09:10:00.000Z`), turned(3, 3, `${day}T09:20:00.000Z`)],
+      new Date(`${day}T23:00:00.000Z`),
+    );
+    // Three rows, one request.
+    expect(bars.at(-1)).toEqual({ label: "09-17", value: 1, display: "1" });
+  });
+
+  it("still counts a request that was never followed up", () => {
+    const day = "2026-09-17";
+    const bars = requestsPerDay([trace({ requestedAt: `${day}T09:00:00.000Z` })], new Date(`${day}T23:00:00.000Z`));
+    expect(bars.at(-1)?.value).toBe(1);
+  });
+
+  it("gives each turn of a request its own node id", () => {
+    // Rows of one request share a `traceId` on purpose, so without the turn in
+    // the id two rows would collide as one.
+    const first = requestGraph(turned(1, 2, "2026-09-17T09:00:00.000Z"), null, new Date());
+    const second = requestGraph(turned(2, 2, "2026-09-17T09:10:00.000Z"), null, new Date());
+    expect(first[0]!.id).not.toBe(second[0]!.id);
+    expect(second[0]!.id).toContain("#2");
+  });
+
+  it("leaves the node id of a request nobody followed up unchanged", () => {
+    const only = requestGraph(trace(), null, new Date());
+    expect(only[0]!.id).toBe("request:req:req-A");
+  });
+
+  it("counts two separate requests on the same day as two", () => {
+    const day = "2026-09-17";
+    const bars = requestsPerDay(
+      [
+        trace({ traceId: "req:req-A", requestId: "req-A", requestedAt: `${day}T09:00:00.000Z` }),
+        trace({ traceId: "req:req-B", requestId: "req-B", requestedAt: `${day}T11:00:00.000Z` }),
+      ],
+      new Date(`${day}T23:00:00.000Z`),
+    );
+    expect(bars.at(-1)?.value).toBe(2);
   });
 });

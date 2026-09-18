@@ -4,7 +4,9 @@ import {
   REVIEWER_STOP_NOTICE,
   STOP_RECHECK_MS,
   propagateWorkerStop,
+  stopAllInWorkspace,
 } from "../plugin/server/stop-propagation";
+import { WORKER_STOP_NOTICE } from "../plugin/server/notices";
 
 /**
  * bm-wq6 (REQ-026f): when the user stops a Beads Worker, Paseo only cancels the
@@ -117,6 +119,7 @@ function fakeServer(options: { withOn?: boolean } = {}) {
   const removers: string[] = [];
   const server: Record<string, unknown> = {
     handle: vi.fn(),
+    registerSettings: vi.fn(),
     before: vi.fn(() => () => {}),
   };
   if (options.withOn !== false) {
@@ -366,7 +369,7 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
 
   it("logs only the role hook's line on a host with no lifecycle hooks at all", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const server = { handle: vi.fn() };
+    const server = { handle: vi.fn(), registerSettings: vi.fn() };
     let cleanup: () => void = () => {};
     expect(() => {
       cleanup = contribute(server as unknown as Parameters<typeof contribute>[0]);
@@ -376,5 +379,100 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]![0])).toMatch(/agent\.create/);
     expect(() => cleanup()).not.toThrow();
+  });
+});
+
+
+/**
+ * `/bm-worker-stop-all` (delta 20260917e §4.4).
+ *
+ * Paseo gives plugins no agent cancel, so this ASKS: a `send()` on a running
+ * agent replaces the turn it is in with one carrying a stop notice. Every case
+ * below guards one of the three promises the command makes — the Manager is
+ * never touched, only this workspace is touched, and an archived agent is never
+ * resurrected.
+ */
+describe("stopAllInWorkspace", () => {
+  const worker = (id: string, overrides: Partial<Snapshot> = {}): Snapshot => ({
+    id,
+    workspaceId: WS,
+    status: "running",
+    labels: { "bm.role": "worker" },
+    ...overrides,
+  });
+  const managerAgent = (id: string): Snapshot => ({
+    id,
+    workspaceId: WS,
+    status: "running",
+    labels: { "bm.role": "manager" },
+  });
+
+  it("asks every running Worker and Reviewer of the workspace", async () => {
+    const { paseo, sends } = fakePaseo({ agents: [worker("w1"), reviewer("rev-a")] });
+    const result = await stopAllInWorkspace(paseo as never, WS);
+    expect(result).toEqual({ workers: 1, reviewers: 1, skipped: 0 });
+    expect(sends.map((s) => s.id).sort()).toEqual(["rev-a", "w1"]);
+    expect(sends.find((s) => s.id === "w1")?.text).toBe(WORKER_STOP_NOTICE);
+    expect(sends.find((s) => s.id === "rev-a")?.text).toBe(REVIEWER_STOP_NOTICE);
+  });
+
+  it("never asks the Manager, whatever the daemon's filter returns", async () => {
+    // The fake ignores the label filter on purpose, so this exercises the
+    // client-side check. The Manager is the user's point of contact.
+    const { paseo, sends } = fakePaseo({ agents: [managerAgent("m1"), worker("w1")] });
+    const result = await stopAllInWorkspace(paseo as never, WS);
+    expect(sends.map((s) => s.id)).toEqual(["w1"]);
+    expect(result.workers).toBe(1);
+  });
+
+  it("leaves another workspace alone", async () => {
+    const { paseo, sends } = fakePaseo({
+      agents: [worker("w1"), worker("w-elsewhere", { workspaceId: "wks_other" })],
+    });
+    await stopAllInWorkspace(paseo as never, WS);
+    expect(sends.map((s) => s.id)).toEqual(["w1"]);
+  });
+
+  it("drops an archived agent at the listing, without even re-reading it", async () => {
+    // `send()` un-archives (ADR-005): agents belong to the user. Two layers
+    // catch this — the listing filter and the re-read before the send — so the
+    // assertion is on `refreshes`: without the listing filter the archived
+    // agent would still be re-read, and only the second layer would save it.
+    const { paseo, sends, refreshes } = fakePaseo({
+      agents: [worker("w-archived", { archivedAt: "2026-09-17T00:00:00.000Z" }), worker("w1")],
+    });
+    const result = await stopAllInWorkspace(paseo as never, WS);
+    expect(sends.map((s) => s.id)).toEqual(["w1"]);
+    expect(result.workers).toBe(1);
+    expect(refreshes).not.toContain("w-archived");
+  });
+
+  it("skips an agent that stopped running between the listing and the send", async () => {
+    const { paseo, sends } = fakePaseo({ agents: [worker("w1")], statuses: { w1: ["idle"] } });
+    const result = await stopAllInWorkspace(paseo as never, WS);
+    expect(sends).toEqual([]);
+    expect(result).toEqual({ workers: 0, reviewers: 0, skipped: 1 });
+  });
+
+  it("counts a failed send as skipped and keeps going", async () => {
+    const { paseo, sends } = fakePaseo({
+      agents: [worker("w1"), worker("w2")],
+      sendError: { w1: new Error("agent gone") },
+    });
+    const logged: string[] = [];
+    const result = await stopAllInWorkspace(paseo as never, WS, (message) => logged.push(message));
+    expect(sends.map((s) => s.id)).toEqual(["w2"]);
+    expect(result).toEqual({ workers: 1, reviewers: 0, skipped: 1 });
+    expect(logged.join(" ")).toMatch(/could not ask w1 to stop/);
+  });
+
+  it("walks every page", async () => {
+    // The fake pages two at a time; five agents means three pages.
+    const { paseo, sends } = fakePaseo({
+      agents: [worker("w1"), worker("w2"), worker("w3"), worker("w4"), worker("w5")],
+    });
+    const result = await stopAllInWorkspace(paseo as never, WS);
+    expect(result.workers).toBe(5);
+    expect(sends).toHaveLength(5);
   });
 });

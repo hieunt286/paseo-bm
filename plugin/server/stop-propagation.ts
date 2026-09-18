@@ -1,6 +1,6 @@
 import type { PluginLifecycleEvents, PluginServerContext } from "@getpaseo/plugin/server";
 import { MANAGER_ROLE_LABEL, PARENT_AGENT_LABEL } from "./manager";
-import { REVIEWER_STOP_NOTICE_PREFIX } from "./notices";
+import { REVIEWER_STOP_NOTICE_PREFIX, WORKER_STOP_NOTICE } from "./notices";
 import { providerId } from "./provider-id";
 
 /**
@@ -268,4 +268,106 @@ export function registerStopPropagation(host: StopPropagationHost): () => void {
     propagateWorkerStop(event, { paseo: context?.paseo, signal: context?.signal }),
   );
   return typeof remove === "function" ? remove : () => {};
+}
+
+// ---------------------------------------------------------------------------
+// `/bm-worker-stop-all` (delta 20260917e §4.4).
+// ---------------------------------------------------------------------------
+
+/** Label value of a Beads Worker. */
+export const WORKER_ROLE_VALUE = "worker";
+
+export interface StopAllResult {
+  /** Workers the notice reached. */
+  workers: number;
+  /** Reviewers the notice reached. */
+  reviewers: number;
+  /** Candidates that were archived, closed or no longer running when re-read. */
+  skipped: number;
+}
+
+/**
+ * Every non-archived agent of one role in one workspace, walking all pages.
+ *
+ * The role label is re-checked here even though it is in the filter. The daemon
+ * is the only thing that applies that filter, and a filter that silently
+ * matched too much would send stop notices to agents this command never
+ * promised to touch — the Manager above all.
+ */
+async function listByRole(paseo: StopPaseo, role: string, workspaceId: string): Promise<StopAgentSnapshot[]> {
+  const found: StopAgentSnapshot[] = [];
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await paseo.agents.list({
+      filter: { labels: { [MANAGER_ROLE_LABEL]: role }, includeArchived: false },
+      page: cursor === undefined ? { limit: LIST_PAGE_LIMIT } : { limit: LIST_PAGE_LIMIT, cursor },
+    });
+    for (const { agent } of page.entries) {
+      const labels = agent?.labels ?? {};
+      if (agent && labels[MANAGER_ROLE_LABEL] === role && !agent.archivedAt && agent.workspaceId === workspaceId) {
+        found.push(agent);
+      }
+    }
+    if (!page.pageInfo.hasMore || !page.pageInfo.nextCursor) break;
+    cursor = page.pageInfo.nextCursor;
+  }
+  return found;
+}
+
+/**
+ * Asks every running Worker and Reviewer of one workspace to stop.
+ *
+ * **This asks; it does not force.** Paseo gives plugins no agent cancel, so the
+ * only supported interrupt is `send()` on a running agent, which replaces the
+ * turn it is in with one carrying a stop notice. Everything downstream — the
+ * command's reply to the user, the wording in the role files — has to say
+ * "asked to stop", never "stopped".
+ *
+ * Three rules the loop exists to keep:
+ * - **The Manager is never touched.** It is the user's point of contact, and the
+ *   command's own name only promises Workers. Its label is never queried.
+ * - **One workspace only** (owner decision Q28). A machine-wide stop is too
+ *   large a consequence for one mistyped line.
+ * - **An archived agent is skipped**, because `send()` would UN-archive it, and
+ *   ADR-005 says agents belong to the user. Each candidate is re-read
+ *   immediately before the send, so an agent archived or finished since the
+ *   listing is skipped too rather than resurrected.
+ */
+export async function stopAllInWorkspace(
+  paseo: StopPaseo,
+  workspaceId: string,
+  log: (message: string) => void = (message) => console.warn(message),
+): Promise<StopAllResult> {
+  const result: StopAllResult = { workers: 0, reviewers: 0, skipped: 0 };
+  const targets: Array<{ agent: StopAgentSnapshot; role: string; notice: string }> = [
+    ...(await listByRole(paseo, WORKER_ROLE_VALUE, workspaceId)).map((agent) => ({
+      agent,
+      role: WORKER_ROLE_VALUE,
+      notice: WORKER_STOP_NOTICE,
+    })),
+    ...(await listByRole(paseo, REVIEWER_ROLE_VALUE, workspaceId)).map((agent) => ({
+      agent,
+      role: REVIEWER_ROLE_VALUE,
+      notice: REVIEWER_STOP_NOTICE,
+    })),
+  ];
+
+  for (const target of targets) {
+    // Re-read: the listing is a moment old, and `send()` on an agent archived
+    // in between would bring it back (ADR-005).
+    const fresh = await readStatus(paseo, target.agent.id);
+    if (!fresh || fresh.archivedAt || fresh.status !== "running") {
+      result.skipped += 1;
+      continue;
+    }
+    try {
+      await paseo.agents.ref(target.agent.id).send(target.notice);
+      if (target.role === WORKER_ROLE_VALUE) result.workers += 1;
+      else result.reviewers += 1;
+    } catch (error) {
+      result.skipped += 1;
+      log(`${LOG_PREFIX} could not ask ${target.agent.id} to stop (${error instanceof Error ? error.message : String(error)}).`);
+    }
+  }
+  return result;
 }
