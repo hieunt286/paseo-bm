@@ -39,15 +39,7 @@ import {
   type GraphNode,
 } from "./dashboard-model";
 import { errorMessageOf } from "./launch-manager";
-import { BarChart, Chip, RoleLegend, RoleMark, StatCards, type Styles, type Theme } from "./ui";
-
-export interface DashboardProps extends PluginSurfaceProps {
-  workspaceId: string;
-  /** Omitted inside the workspace's own "Beads" tab: the tab already says where it is. */
-  workspaceLabel?: string;
-  /** Omitted inside the "Beads" tab, which has no screen to go back to. */
-  onBack?: () => void;
-}
+import { BarChart, Chip, RoleLegend, RoleMark, StatCards, WorkspaceScreenHeader, type Styles, type Theme, type WorkspaceScreenProps } from "./ui";
 
 
 function BadgeText({ badge, styles, theme }: { badge: Badge; styles: Styles; theme: Theme }) {
@@ -203,7 +195,7 @@ function RequestCard({ trace, workspaceId, styles, theme, layout, navigation, on
   );
 }
 
-export function DashboardPanel({ theme, layout, navigation, workspaceId, workspaceLabel, onBack }: DashboardProps) {
+export function DashboardPanel({ theme, layout, navigation, workspaceId, workspaceLabel, onBack, backLabel, status }: WorkspaceScreenProps) {
   const styles = useMemo(() => dashboardStyles(theme, layout.compact), [theme, layout.compact]);
   const listTraces = useRpc(tracesListRpc);
   const beadStats = useRpc(beadsStatsRpc);
@@ -230,21 +222,18 @@ export function DashboardPanel({ theme, layout, navigation, workspaceId, workspa
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-        {onBack === undefined ? null : (
-          <Pressable accessibilityRole="button" accessibilityLabel="Back to Beads Manager" onPress={onBack} style={styles.secondaryButton}>
-            <Text style={styles.secondaryButtonText}>←</Text>
+      <WorkspaceScreenHeader
+        title={workspaceLabel === undefined ? null : `Metric · ${workspaceLabel}`}
+        onBack={onBack}
+        backLabel={backLabel ?? "Back to Beads Manager"}
+        status={status}
+        styles={styles}
+        right={
+          <Pressable accessibilityRole="button" accessibilityLabel="Refresh" onPress={refresh} style={styles.secondaryButton}>
+            <Text style={styles.secondaryButtonText}>Refresh</Text>
           </Pressable>
-        )}
-        {workspaceLabel === undefined ? (
-          <View style={{ flex: 1 }} />
-        ) : (
-          <Text style={[styles.title, { flex: 1 }]} numberOfLines={1}>{`Metric · ${workspaceLabel}`}</Text>
-        )}
-        <Pressable accessibilityRole="button" accessibilityLabel="Refresh" onPress={refresh} style={styles.secondaryButton}>
-          <Text style={styles.secondaryButtonText}>Refresh</Text>
-        </Pressable>
-      </View>
+        }
+      />
 
       {/* 1. Overview */}
       <StatCards cards={overviewCards(rows, beads.data?.stats ?? null)} styles={styles} />

@@ -34,6 +34,7 @@ import {
   statusChip,
   summaryOf,
   toChatCard,
+  beadChipsView,
   visibleBeads,
   withAnswersBlock,
   type ChatCard,
@@ -41,6 +42,7 @@ import {
 import { parseMarkdown } from "../plugin/client/markdown";
 import { answeredRecord, answersVersion, repliedAt, setAnswered, setReplied, subscribeAnswers } from "../plugin/client/answer-state";
 import type { Question } from "../plugin/shared/bm-questions";
+import type { BeadRow } from "../plugin/shared/contracts";
 import { handleChatPeers } from "../plugin/server/chat-rpc";
 import type { DashboardPaseo } from "../plugin/server/dashboard-rpc";
 import { TRACE_STORE_SCHEMA_VERSION, type ChatPeer } from "../plugin/shared/contracts";
@@ -141,6 +143,7 @@ const peer = (overrides: Partial<ChatPeer>): ChatPeer => ({
   parentId: null,
   requestId: null,
   batchId: null,
+  archived: false,
   ...overrides,
 });
 const manager = peer({ id: "m1", role: "manager", title: "Beads Manager" });
@@ -256,6 +259,20 @@ describe("chat.peers", () => {
     },
     workspaces: { list: vi.fn(async () => ({ entries: [] })) },
     config: { get: vi.fn(async () => ({ config: {} })) },
+  });
+
+  it("says which agents are archived (delta 20260918f F12)", async () => {
+    const withArchived = paseo();
+    const list = withArchived.agents.list;
+    withArchived.agents.list = vi.fn(async (options: { filter: { labels?: Record<string, string> } }) => {
+      const result = await list(options as never);
+      const old = { agent: { ...entry("w0", "worker", "wks_a", { "bm.requestId": "req-1" }).agent, archivedAt: "2026-09-18T00:00:00.000Z" } };
+      const wantsWorkers = options.filter.labels === undefined || options.filter.labels["bm.role"] === "worker";
+      return wantsWorkers ? { entries: [...result.entries, old] } : result;
+    }) as never;
+    const result = await handleChatPeers({ agentId: "m1" }, withArchived, { homedir: () => "/nonexistent-bm-home" });
+    expect(result.owner?.archived).toBe(false);
+    expect(Object.fromEntries(result.peers.map((p) => [p.id, p.archived]))).toEqual({ w0: true, w1: false, r1: false });
   });
 
   it("returns the owner and the paseo-bm agents of its workspace only", async () => {
@@ -592,6 +609,16 @@ describe("where a reply goes", () => {
     expect(replyTarget(asking, manager, [{ ...worker, status: "error" }])).toEqual({ peer: { ...worker, status: "error" } });
   });
 
+  it("to the live Worker when an archived one has the same request, and never to an archived agent (delta 20260918f F12)", () => {
+    // A broken Worker the Manager replaced keeps the request label; the user archived it.
+    const broken = peer({ id: "w0", title: "Broken", parentId: "m1", requestId: "req-20260916T062244Z", archived: true });
+    expect(replyTarget(asking, manager, [broken, worker, reviewer])).toEqual({ peer: worker });
+    expect(partiesOf(asking, manager, [broken, worker]).from.id).toBe("w1");
+    // Only the archived one: still named on the card, but nothing is sent to it.
+    expect(partiesOf(asking, manager, [broken]).from.id).toBe("w0");
+    expect(replyTarget(asking, manager, [broken])).toEqual({ reason: "Worker · Broken is archived." });
+  });
+
   it("nowhere when no single Worker has the report's request", () => {
     expect(replyTarget(asking, manager, [otherWorker])).toEqual({
       reason: "Cannot tell which Worker asked this: no single Worker has `req-20260916T062244Z`.",
@@ -699,6 +726,25 @@ describe("related beads on a card (delta 20260918d, batch b4)", () => {
   it("shows every bead once the … chip was pressed", () => {
     expect(visibleBeads(ids, true)).toEqual({ shown: ids, hidden: 0 });
     expect(visibleBeads(ids, true).shown).not.toBe(ids);
+  });
+
+  it("counts only beads the store really has: two chips, then … for the rest found (delta 20260918f F10)", () => {
+    // `beadIdCandidates` is a shape test: a report's text yields BM-REPORT,
+    // BM-QUESTIONS and hyphenated words before the real ids. The lookup keeps
+    // the ids the store has, in the order asked; only then are two shown.
+    const found = ["bm-a", "bm-b", "bm-c"].map((id) => ({ id }) as unknown as BeadRow);
+    expect(beadChipsView(found, false)).toEqual({ shown: found.slice(0, 2), hidden: 1 });
+    expect(beadChipsView(found, true)).toEqual({ shown: found, hidden: 0 });
+    expect(beadChipsView([], false)).toEqual({ shown: [], hidden: 0 });
+  });
+
+  it("hands the lookup every candidate, and lets BeadChips fold what it found", () => {
+    const card = readFileSync(fileURLToPath(new URL("../plugin/client/chat-card.tsx", import.meta.url)), "utf8");
+    const chips = readFileSync(fileURLToPath(new URL("../plugin/client/bead-chips.tsx", import.meta.url)), "utf8");
+    expect(card).toMatch(/<BeadChips\b[^>]*\bids=\{beadIds\}/);
+    expect(card).not.toMatch(/visibleBeads\(/);
+    expect(chips).toMatch(/beadChipsView\(/);
+    expect(chips).toMatch(/accessibilityLabel=\{`Show all \$\{/);
   });
 });
 
@@ -832,6 +878,7 @@ describe("ownerWarning (delta 20260918g §4.4)", () => {
     parentId: null,
     requestId: null,
     batchId: null,
+    archived: false,
     ...(labelled === undefined ? {} : { labelled }),
   });
 

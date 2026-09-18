@@ -13,13 +13,32 @@ import { useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
 import { beadsLookupRpc, chatBeadsRpc, type BeadRow } from "../shared/contracts";
 import { BeadDetailPanel } from "./beads-screen";
-import { beadChipText, beadTitleTone, formatClock, statusBadge } from "./beads-model";
+import { beadChipText, formatClock, statusBadge } from "./beads-model";
+import { beadChipsView } from "./chat-cards";
 import { dashboardStyles, toneColor } from "./dashboard-model";
 import { errorMessageOf } from "./launch-manager";
-import { Chip, beadTitleStyle, type Styles, type Theme } from "./ui";
+import { BeadRowCard, Chip, beadTitleStyle, type Styles, type Theme } from "./ui";
 
-/** Chips for the ids a message names; only ids the bead store has are shown. */
-export function BeadChips({ workspaceId, ids, styles, theme }: { workspaceId: string; ids: readonly string[]; styles: Styles; theme: Theme }) {
+/**
+ * Chips for the ids a message names; only ids the bead store has are shown.
+ * All candidates are looked up first; then two chips, and a "…" chip for the
+ * rest found (delta 20260918f F10).
+ */
+export function BeadChips({
+  workspaceId,
+  ids,
+  expanded,
+  onExpand,
+  styles,
+  theme,
+}: {
+  workspaceId: string;
+  ids: readonly string[];
+  expanded: boolean;
+  onExpand: () => void;
+  styles: Styles;
+  theme: Theme;
+}) {
   const lookup = useRpc(beadsLookupRpc);
   const found = useQuery({
     queryKey: ["paseo-bm", "bead-lookup", workspaceId, ids.join(" ")],
@@ -29,12 +48,13 @@ export function BeadChips({ workspaceId, ids, styles, theme }: { workspaceId: st
   });
   const [openId, setOpenId] = useState<string | null>(null);
   const beads = found.data?.beads ?? [];
-  if (beads.length === 0) return null;
+  const view = beadChipsView(beads, expanded);
+  if (view.shown.length === 0) return null;
   const open = beads.find((bead) => bead.id === openId);
   return (
     <View style={{ gap: 6 }}>
       <View style={styles.chipRow}>
-        {beads.map((bead) => (
+        {view.shown.map((bead) => (
           <Chip
             key={bead.id}
             badge={{ text: beadChipText(bead), tone: statusBadge(bead).tone }}
@@ -46,6 +66,14 @@ export function BeadChips({ workspaceId, ids, styles, theme }: { workspaceId: st
         ))}
       </View>
       {open === undefined ? null : <BeadInline workspaceId={workspaceId} bead={open} styles={styles} theme={theme} />}
+      {/* Two chips, then "…" on the next line for the rest (delta 20260918d §4.7). */}
+      {view.hidden === 0 ? null : (
+        <View style={styles.chipRow}>
+          <Pressable accessibilityRole="button" accessibilityLabel={`Show all ${beads.length} beads`} onPress={onExpand}>
+            <Chip badge={{ text: "…", tone: "muted" }} styles={styles} theme={theme} />
+          </Pressable>
+        </View>
+      )}
     </View>
   );
 }
@@ -89,11 +117,14 @@ export function ChatBeadsPanel({ theme, layout, workspaceId, agentId }: PluginAg
       {rows.map(({ bead, mentions, lastMentionedAt }) => {
         const open = bead.id === openId;
         return (
-          <View key={bead.id} style={styles.card}>
-            <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} onPress={() => setOpenId(open ? null : bead.id)}>
-              <Text style={beadTitleStyle(styles, theme, beadTitleTone(bead))} numberOfLines={open ? undefined : 2}>
-                {`${open ? "▾" : "▸"} ${bead.title ?? "(untitled)"}`}
-              </Text>
+          <BeadRowCard
+            key={bead.id}
+            bead={bead}
+            open={open}
+            onToggle={() => setOpenId(open ? null : bead.id)}
+            styles={styles}
+            theme={theme}
+            meta={
               <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 2 }}>
                 <Text style={[styles.body, { fontSize: 12 }]} selectable>
                   {bead.id}
@@ -103,9 +134,9 @@ export function ChatBeadsPanel({ theme, layout, workspaceId, agentId }: PluginAg
                 </Text>
                 <Chip badge={statusBadge(bead)} styles={styles} theme={theme} />
               </View>
-            </Pressable>
-            {open ? <BeadDetailPanel workspaceId={workspaceId} bead={bead} styles={styles} theme={theme} /> : null}
-          </View>
+            }
+            detail={<BeadDetailPanel workspaceId={workspaceId} bead={bead} styles={styles} theme={theme} />}
+          />
         );
       })}
       {beads.data === undefined ? null : (

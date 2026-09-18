@@ -5,11 +5,10 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { beadRowOf } from "./bead-actions";
 import { readBeads } from "./beads-store";
-import { bmAgentsOf, requireLocation, workspaceDirectory, type DashboardPaseo } from "./dashboard-rpc";
+import { bmAgentsOf, workspaceDirectory, type DashboardPaseo } from "./dashboard-rpc";
 import { readTimelinePages } from "./live-timeline";
 import { handleChatWaiting } from "./chat-waiting";
-import { readRecords } from "./trace-store";
-import { requestIdOfAgent, type AgentFacts } from "./traces";
+import { peersOfWorkspace, workspaceRecordsReader } from "./chat-peers";
 import { beadIdCandidates } from "../shared/bead-ids";
 import {
   beadsLookupRpc,
@@ -18,7 +17,6 @@ import {
   chatWaitingRpc,
   type BeadRow,
   type ChatPeer,
-  type TraceRecord,
 } from "../shared/contracts";
 
 /**
@@ -33,30 +31,13 @@ export async function handleChatPeers(
   deps: { homedir?: () => string } = {},
 ): Promise<{ owner: ChatPeer | null; peers: ChatPeer[]; workspaceId: string | null }> {
   const all = await bmAgentsOf(paseo);
-  const owner = all.find((entry) => entry.facts.id === input.agentId);
-  if (owner === undefined || owner.workspaceId === null) return { owner: null, peers: [], workspaceId: null };
-  // Agents created before the `bm.requestId` label existed carry none; their
-  // request is read from what they wrote, the same way the Metric screen does.
-  let records: TraceRecord[] = [];
-  try {
-    records = readRecords(await requireLocation(paseo, deps), owner.workspaceId).records;
-  } catch {
-    // Without a trace store only the labels are known.
-  }
-  const peerOf = ({ facts }: { facts: AgentFacts }): ChatPeer => ({
-    id: facts.id,
-    role: facts.role,
-    title: facts.title ?? null,
-    status: facts.status,
-    parentId: facts.parentAgentId,
-    requestId: facts.requestIdLabel ?? (facts.role === "manager" ? null : requestIdOfAgent(facts, records).requestId),
-    batchId: facts.batchIdLabel,
-    labelled: facts.labelled ?? true,
-  });
+  const found = all.find((entry) => entry.facts.id === input.agentId);
+  if (found === undefined || found.workspaceId === null) return { owner: null, peers: [], workspaceId: null };
+  const peers = await peersOfWorkspace(all, found.workspaceId, workspaceRecordsReader(paseo, found.workspaceId, deps));
   return {
-    owner: peerOf(owner),
-    peers: all.filter((entry) => entry.workspaceId === owner.workspaceId && entry.facts.id !== input.agentId).map(peerOf),
-    workspaceId: owner.workspaceId,
+    owner: peers.find((peer) => peer.id === input.agentId) ?? null,
+    peers: peers.filter((peer) => peer.id !== input.agentId),
+    workspaceId: found.workspaceId,
   };
 }
 

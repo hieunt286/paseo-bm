@@ -877,17 +877,6 @@ export function dashboardStyles(theme: PluginTheme, compact: boolean) {
     sectionTitle: { color: theme.colors.foreground, fontSize: compact ? 14 : 16, fontWeight: "600" as const },
     body: { color: theme.colors.foregroundMuted, fontSize: compact ? 12 : 14 },
     mono: { color: theme.colors.foreground, fontSize: compact ? 11 : 13 },
-    row: {
-      flexDirection: compact ? ("column" as const) : ("row" as const),
-      alignItems: compact ? ("stretch" as const) : ("center" as const),
-      justifyContent: "space-between" as const,
-      gap: compact ? 6 : 12,
-      padding: compact ? 10 : 14,
-      borderRadius: 10,
-      borderWidth: 1,
-      borderColor: theme.colors.border,
-      backgroundColor: theme.colors.surface1,
-    },
     card: {
       gap: compact ? 6 : 8,
       padding: compact ? 10 : 14,

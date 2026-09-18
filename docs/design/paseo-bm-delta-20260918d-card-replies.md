@@ -307,7 +307,7 @@ Chỉ đọc. Tên và hình dạng mới hoàn toàn, không đổi RPC nào đ
 
 **Server** — `plugin/server/chat-waiting.ts` (file mới), đăng ký trong `registerChatRpcs`:
 
-- `waitingOf(entries, workers)` là hàm thuần, test được không cần daemon:
+- `waitingOf(entries, workers)` là hàm thuần, test được không cần daemon *(errata 2026-09-18: chữ ký thật là `waitingOf(manager, entries, workers)`; từ delta 20260918f, Worker được chọn bằng `soleWorkerOf`, không tính agent đã lưu trữ)*:
   - `entries`: các mục timeline của **một** Manager, mới nhất trước;
   - lấy mọi `user_message` **không** có `clientMessageId` (tin một agent gửi, không phải người dùng gõ);
   - với mỗi tin, `parseReports(text)`; báo cáo cuối có `requestId` dạng `req-…` là báo cáo của tin đó;
@@ -322,7 +322,7 @@ Chỉ đọc. Tên và hình dạng mới hoàn toàn, không đổi RPC nào đ
 
 **Client** — `plugin/client/waiting-pills.tsx` (file mới):
 
-- `planPills(current, waiting)` là hàm thuần:
+- `planPills(current, waiting)` là hàm thuần *(errata 2026-09-18: nằm ở `waiting-pills-model.ts`; từ delta 20260918f, khoá pill có thêm `requestId` và băm nội dung)*:
   - `current`: `Map<pillId, key>`;
   - pill id `bm-waiting-<workerId>`; `key` = `managerId|workspaceId|label|at` (đổi thì cập nhật);
   - trả `{ add, update, remove }`.
@@ -547,6 +547,7 @@ Không còn câu nào chặn. Ngưỡng dòng của `manager.md` không nâng; n
 
 | Ngày | Người | Thay đổi |
 |---|---|---|
+| 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Errata theo [delta 20260918f](./paseo-bm-delta-20260918f-ui-review.md) §4.12 (§4.8): chữ ký `waitingOf(manager, entries, workers)`; `planPills` nằm ở `waiting-pills-model.ts`. Không đổi phạm vi |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Request `req-20260918T074311Z` (PRD delta §1.6, Q1–Q4 của request đó): §4.10 — thẻ `finished` mở sẵn tin nhắn và có viền success; §6 thêm một dòng |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Theo review b6: §7 nói đúng dữ liệu lưu bền mới (`answer-marks.json`) và cách hoàn tác |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Batch `b6` (PRD delta §1.5, Q16–Q18): §4.9 — kho trạng thái chung trong phiên, dấu lưu bền `answers.mark(s)`, thẻ tự biết Worker không còn chờ |

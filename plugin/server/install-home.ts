@@ -28,6 +28,13 @@ export const PLUGIN_ID = "paseo-bm";
 /** Directory of the trace store inside the install home (design §3.2). */
 export const TRACES_DIR_NAME = "traces";
 
+/**
+ * Directory inside the install home for UI state that is not trace data
+ * (`answer-marks.json`). The pin order an earlier version kept here is no
+ * longer read, and is left alone (delta 20260918f §4.5).
+ */
+export const UI_DIR_NAME = "ui";
+
 /** Highest `install.json` schema version this code understands (design §3.2). */
 export const SUPPORTED_RECORD_SCHEMA_VERSION = 1;
 

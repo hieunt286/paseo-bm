@@ -102,7 +102,7 @@ async function runWorkerStopAll(context: WorkspaceCommand): Promise<void> {
   // failure. So the summary is posted to the Beads Manager surface, which draws
   // it as an ordinary notice. Staying silent is not an option either: the user
   // must learn the agents were ASKED, not killed (P4).
-  launcherNotices.post(stopAllSummary(result));
+  launcherNotices.put(stopAllSummary(result));
   context.openSurface(LAUNCHER_SURFACE_ID);
 }
 

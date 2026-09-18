@@ -1,5 +1,7 @@
 # Delta-change — Tab "Beads" trong menu "+", Setup là màn chính của Beads Manager, màu cả dòng cho bead
 
+> **Errata** (2026-09-18, theo [delta 20260918f](../design/paseo-bm-delta-20260918f-ui-review.md) §4.12): "màu cả dòng" trong tiêu đề là yêu cầu ban đầu; batch `b4` (Q8) chuyển màu sang tên bead — REQ-060 (g).
+
 | Trường | Giá trị |
 |---|---|
 | Mã | `prd-delta-20260918e-beads-tab` |
@@ -249,6 +251,7 @@ Sau batch `b4`, Worker gợi ý hai việc chưa làm. Owner trả lời:
 
 | Ngày | Người | Thay đổi |
 |---|---|---|
+| 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Errata theo delta 20260918f §4.12: dòng Errata dưới tiêu đề ("màu cả dòng" đã thay ở `b4`). Không đổi yêu cầu |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Ghi quyết định Q13 (cài ngay) và lần cài lên daemon lúc 13:28 (§1.5) |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Batch `b5` (§1.5): (m) mở rộng — bỏ luôn phần tính dữ liệu 14 ngày; thêm (n) màu các con số trên dòng workspace; bỏ dòng tương ứng ở §7; §9 cập nhật. Status giữ Accepted, Applied; dòng REQ-060 của PRD Dashboard được áp lại ở WP-265 |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Batch `b4` theo yêu cầu owner sau khi xong (Q8–Q12, §1.4): (g) màu ở tên thay cho cả dòng; (h) chip cùng màu với tên; thêm (j) ẩn/hiện bead đã đóng, (k) bốn nhóm, (l) thống kê nhanh, (m) bỏ biểu đồ 14 ngày; mục tiêu 3 sửa, thêm mục tiêu 5; §6, §7, §9 cập nhật. Status giữ Accepted, Applied; dòng REQ-060 của PRD Dashboard được áp lại ở WP-264 |

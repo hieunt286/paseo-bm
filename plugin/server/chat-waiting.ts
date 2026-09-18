@@ -8,11 +8,11 @@
  */
 import { parseQuestions } from "../shared/bm-questions";
 import { parseReports } from "../shared/bm-report";
-import type { TraceRecord, WaitingWorker } from "../shared/contracts";
-import { bmAgentsOf, requireLocation, type DashboardPaseo } from "./dashboard-rpc";
+import type { WaitingWorker } from "../shared/contracts";
+import { soleWorkerOf } from "../shared/sole-worker";
+import { peersOfWorkspace, workspaceRecordsReader } from "./chat-peers";
+import { bmAgentsOf, type DashboardPaseo } from "./dashboard-rpc";
 import { readTimelinePages } from "./live-timeline";
-import { readRecords } from "./trace-store";
-import { requestIdOfAgent } from "./traces";
 
 /** How much of a Manager's timeline is read per call: one page, newest first. */
 export const WAITING_TIMELINE_PAGES = 1;
@@ -26,13 +26,15 @@ export interface WaitingEntry {
   timestamp?: unknown;
 }
 
-/** A Worker as `waitingOf` needs it. */
+/** An agent as `waitingOf` needs it: a chat peer and its workspace. */
 export interface WaitingCandidate {
   id: string;
   workspaceId: string | null;
+  role: string;
   title: string | null;
   status: string;
   requestId: string | null;
+  archived: boolean;
 }
 
 /**
@@ -68,9 +70,12 @@ export function waitingOf(
     const asked = parseQuestions(report.text);
     if (asked === null || asked.questions.length === 0) continue;
     if (asked.requestId !== null && asked.requestId !== requestId) continue;
-    const matches = workers.filter((worker) => worker.workspaceId === manager.workspaceId && worker.requestId === requestId);
-    if (matches.length !== 1) continue;
-    const worker = matches[0]!;
+    // The same rule the card uses to pick where a reply goes (delta 20260918f F12).
+    const worker = soleWorkerOf(
+      workers.filter((candidate) => candidate.workspaceId === manager.workspaceId),
+      requestId,
+    );
+    if (worker === null) continue;
     if (worker.status !== "idle" && worker.status !== "error") continue;
     out.push({
       managerId: manager.id,
@@ -96,28 +101,16 @@ export async function handleChatWaiting(
   );
   if (managers.length === 0) return { waiting: [] };
 
-  // Workers made before the `bm.requestId` label existed carry none; their
-  // request is read from what they wrote, as `chat.peers` does.
-  const recordsOf = new Map<string, TraceRecord[]>();
-  const records = async (workspaceId: string): Promise<TraceRecord[]> => {
-    const known = recordsOf.get(workspaceId);
-    if (known !== undefined) return known;
-    let read: TraceRecord[] = [];
-    try {
-      read = readRecords(await requireLocation(paseo, deps), workspaceId).records;
-    } catch {
-      // Without a trace store only the labels are known.
-    }
-    recordsOf.set(workspaceId, read);
-    return read;
-  };
+  // Only a live Manager's chat shows pills, so agents elsewhere are never
+  // looked at and their workspace's trace store never read (delta 20260918f
+  // F11). The peers come from the helper `chat.peers` uses, so a pill and its
+  // card see the same Workers (F12).
+  const managerWorkspaces = new Set(managers.map((manager) => manager.workspaceId!));
   const workers: WaitingCandidate[] = [];
-  for (const entry of all) {
-    if (entry.facts.role !== "worker" || entry.facts.archived) continue;
-    const requestId =
-      entry.facts.requestIdLabel ??
-      (entry.workspaceId === null ? null : requestIdOfAgent(entry.facts, await records(entry.workspaceId)).requestId);
-    workers.push({ id: entry.facts.id, workspaceId: entry.workspaceId, title: entry.facts.title ?? null, status: entry.facts.status, requestId });
+  for (const workspaceId of managerWorkspaces) {
+    for (const peer of await peersOfWorkspace(all, workspaceId, workspaceRecordsReader(paseo, workspaceId, deps))) {
+      if (peer.role === "worker") workers.push({ ...peer, workspaceId });
+    }
   }
 
   const waiting: WaitingWorker[] = [];

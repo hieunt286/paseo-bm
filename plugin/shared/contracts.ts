@@ -719,17 +719,6 @@ export const workspacesOverviewRpc = defineRpc({
 export type WorkspaceOverview = z.infer<typeof workspacesOverviewRpc.output>["workspaces"][number];
 
 /**
- * `launcher.order.get` / `launcher.order.set` — the order the owner pinned on
- * the Beads Manager screen (delta 20260917e §4.1). `notices` carries what could
- * not be read, so a broken preference file explains itself instead of failing
- * the screen.
- */
-const launcherOrderOutput = z.object({
-  pinned: z.array(workspaceIdSchema),
-  notices: z.array(z.string()),
-});
-
-/**
  * `agents.stop-all` — asks every running Worker and Reviewer of one workspace to
  * stop (delta 20260917e §4.4). It ASKS: Paseo gives plugins no agent cancel, so
  * the counts below are notices delivered, not turns killed.
@@ -742,18 +731,6 @@ export const agentsStopAllRpc = defineRpc({
     reviewers: z.number().int().nonnegative(),
     skipped: z.number().int().nonnegative(),
   }),
-});
-
-export const launcherOrderGetRpc = defineRpc({
-  name: "launcher.order.get",
-  input: z.object({}),
-  output: launcherOrderOutput,
-});
-
-export const launcherOrderSetRpc = defineRpc({
-  name: "launcher.order.set",
-  input: z.object({ pinned: z.array(workspaceIdSchema) }),
-  output: launcherOrderOutput,
 });
 
 const answerMarksOutput = z.object({
@@ -860,6 +837,8 @@ export const chatPeerSchema = z.object({
    * provider only (delta 20260918g §4.4). Defaults to true for older servers.
    */
   labelled: z.boolean().default(true),
+  /** Archived in Paseo: never a recipient, since a message would bring it back (delta 20260918f F12). */
+  archived: z.boolean(),
 });
 
 /** One Worker waiting for the user's answer in a Manager's chat (delta 20260918d §4.8). */

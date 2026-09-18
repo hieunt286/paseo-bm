@@ -395,6 +395,25 @@ export function groupBeads(
   return { groups, visible, closed, truncated: visible - drawn };
 }
 
+/** One entry of the Beads list: a group's title line, or a bead row. */
+export type BeadListItem =
+  | { kind: "group"; key: string; label: string; total: number; tone: Tone }
+  | { kind: "bead"; key: string; bead: BeadRow };
+
+/**
+ * The grouped list as one flat run of items: each group's title, then its
+ * beads (delta 20260918f F9). Drawn as siblings under one parent and keyed by
+ * bead id, a bead that moves to another group after a refresh keeps its row,
+ * so an open detail and the result of an action stay put. Order, empty groups
+ * and the row limit are exactly those of `groupBeads`.
+ */
+export function beadListItems(grouped: { groups: readonly BeadGroup[] }): BeadListItem[] {
+  return grouped.groups.flatMap((group): BeadListItem[] => [
+    { kind: "group", key: `group:${group.bucket}`, label: group.label, total: group.total, tone: group.tone },
+    ...group.beads.map((bead): BeadListItem => ({ kind: "bead", key: bead.id, bead })),
+  ]);
+}
+
 /** A boolean that outlives the screen but not the app session: one per loaded client bundle. */
 export interface SessionToggle {
   get(): boolean;

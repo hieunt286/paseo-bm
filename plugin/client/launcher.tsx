@@ -14,7 +14,6 @@ import {
   AccessibilityInfo,
   ActivityIndicator,
   Animated,
-  PanResponder,
   Pressable,
   ScrollView,
   Text,
@@ -27,7 +26,9 @@ import { Icon } from "@getpaseo/plugin/client/react-native";
 import {
   SURFACE_HOME_VIEW,
   WORKSPACE_ACTIONS,
+  backLabelOf,
   backOf,
+  overviewPolling,
   closedWorkspaces,
   dashboardRequests,
   launcherNotices,
@@ -35,15 +36,8 @@ import {
   workspaceStats,
   type DashboardViewName,
 } from "./dashboard-view";
-import { toneColor as dashboardTone, type Tone } from "./dashboard-model";
-import {
-  launcherOrderGetRpc,
-  launcherOrderSetRpc,
-  managerEnsureRpc,
-  tracesWorkspacesRpc,
-  workspacesOverviewRpc,
-} from "../shared/contracts";
-import { dropIndex, movePinned, orderRows, pinAt, prunePinned, unpin } from "./pinned-order";
+import { toneColor, type Tone } from "./dashboard-model";
+import { managerEnsureRpc, tracesWorkspacesRpc, workspacesOverviewRpc } from "../shared/contracts";
 import { PLUGIN_VERSION } from "../shared/version";
 import {
   errorMessageOf,
@@ -52,12 +46,8 @@ import {
   launchRequests,
   managerLauncher,
   runPendingRequest,
-  toneColor,
   type StatusLine,
 } from "./launch-manager";
-
-/** How often the per-workspace figures are refreshed while the launcher is open. */
-const OVERVIEW_POLL_MS = 10_000;
 
 interface WorkspaceRow {
   id: string;
@@ -77,136 +67,6 @@ const DOT_ROLES = [
   ["worker", "Worker"],
   ["reviewer", "Reviewer"],
 ] as const;
-
-/**
- * The grip that drags a pinned row to a new position.
- *
- * A dedicated handle, NOT the whole row, and that is the entire answer to the
- * risk the design raised (delta 20260917e §7 risk 1): React Native's responder
- * system gives a touch to the first child that claims it, so a `ScrollView`
- * only scrolls from touches nothing claimed. A handle that claims on touch-start
- * therefore cannot fight the scroll — the conflict is removed by construction
- * rather than by tuning. Scrolling is disabled for the duration anyway, because
- * a list that shifts under a dragged row is its own kind of wrong.
- *
- * `useNativeDriver: false`: Paseo's renderer is react-native-web (P3).
- */
-function DragHandle({
-  label,
-  index,
-  count,
-  rowHeight,
-  onDrop,
-  onDragging,
-  theme,
-  styles,
-}: {
-  label: string;
-  index: number;
-  count: number;
-  rowHeight: () => number;
-  onDrop: (to: number) => void;
-  onDragging: (dragging: boolean) => void;
-  theme: PluginTheme;
-  styles: ReturnType<typeof launcherStyles>;
-}) {
-  const offset = useRef(new Animated.Value(0)).current;
-  const responder = useMemo(
-    () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => true,
-        onMoveShouldSetPanResponder: () => true,
-        onPanResponderGrant: () => onDragging(true),
-        onPanResponderMove: (_event, gesture) => offset.setValue(gesture.dy),
-        onPanResponderRelease: (_event, gesture) => {
-          onDragging(false);
-          offset.setValue(0);
-          const to = dropIndex(index, gesture.dy, rowHeight(), count);
-          if (to !== index) onDrop(to);
-        },
-        onPanResponderTerminate: () => {
-          onDragging(false);
-          offset.setValue(0);
-        },
-      }),
-    [index, count, onDrop, onDragging, rowHeight, offset],
-  );
-  return (
-    <Animated.View style={{ transform: [{ translateY: offset }] }} {...responder.panHandlers}>
-      <Text
-        accessibilityLabel={`Drag ${label} to reorder`}
-        style={[styles.rowSubtitle, { color: dashboardTone(theme, "muted") }]}
-      >
-        ⣿
-      </Text>
-    </Animated.View>
-  );
-}
-
-/**
- * Pin, unpin and reorder controls on a workspace row.
- *
- * Buttons rather than only a drag handle, for two reasons that both matter:
- * a drag cannot be performed with a keyboard or a screen reader, and the design
- * named up/down buttons as the sanctioned fallback if the gesture turns out to
- * fight the surrounding `ScrollView` (delta 20260917e §4.1, risk 1). Whatever
- * happens to the gesture, the owner can always order the list.
- */
-function PinControls({
-  label,
-  pinned,
-  first,
-  last,
-  onPin,
-  onUnpin,
-  onMove,
-  theme,
-  styles,
-}: {
-  label: string;
-  pinned: boolean;
-  first: boolean;
-  last: boolean;
-  onPin: () => void;
-  onUnpin: () => void;
-  onMove: (delta: number) => void;
-  theme: PluginTheme;
-  styles: ReturnType<typeof launcherStyles>;
-}) {
-  const tint = dashboardTone(theme, pinned ? "info" : "muted");
-  if (!pinned) {
-    return (
-      <Pressable accessibilityRole="button" accessibilityLabel={`Pin ${label} to the top`} onPress={onPin}>
-        <Text style={[styles.rowSubtitle, { color: tint }]}>☆</Text>
-      </Pressable>
-    );
-  }
-  return (
-    <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
-      <Pressable accessibilityRole="button" accessibilityLabel={`Unpin ${label}`} onPress={onUnpin}>
-        <Text style={[styles.rowSubtitle, { color: tint }]}>★</Text>
-      </Pressable>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={`Move ${label} up`}
-        accessibilityState={{ disabled: first }}
-        disabled={first}
-        onPress={() => onMove(-1)}
-      >
-        <Text style={[styles.rowSubtitle, { color: first ? dashboardTone(theme, "muted") : tint }]}>▲</Text>
-      </Pressable>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={`Move ${label} down`}
-        accessibilityState={{ disabled: last }}
-        disabled={last}
-        onPress={() => onMove(1)}
-      >
-        <Text style={[styles.rowSubtitle, { color: last ? dashboardTone(theme, "muted") : tint }]}>▼</Text>
-      </Pressable>
-    </View>
-  );
-}
 
 /** Running bm agents of one workspace, per role (`workspaces.overview`). */
 export interface RunningAgentCounts {
@@ -326,13 +186,13 @@ function RunningDot(props: {
   return (
     <View style={styles.stat} accessibilityLabel={state.label}>
       <Animated.View
-        style={{ width: 8, height: 8, borderRadius: 4, opacity, backgroundColor: dashboardTone(theme, state.tone) }}
+        style={{ width: 8, height: 8, borderRadius: 4, opacity, backgroundColor: toneColor(theme, state.tone) }}
       />
       {/* An idle row says it with the dim dot alone; spelling out "nothing is
           running" on every quiet project is noise. The accessibility label
           above carries the words in both states. */}
       {state.total === 0 ? null : (
-        <Text style={[styles.statText, { color: dashboardTone(theme, state.tone) }]} numberOfLines={1}>
+        <Text style={[styles.statText, { color: toneColor(theme, state.tone) }]} numberOfLines={1}>
           {state.label}
         </Text>
       )}
@@ -398,20 +258,13 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
     queryKey: ["paseo-bm", "launcher", "stored-workspaces"],
     queryFn: () => listStored({}),
   });
-  // The order the owner pinned. Kept in the install home, not in plugin
-  // settings: that path errors on this host (delta 20260917e §4.1).
-  const readOrder = useRpc(launcherOrderGetRpc);
-  const writeOrder = useRpc(launcherOrderSetRpc);
-  const pinnedOrder = useQuery({
-    queryKey: ["paseo-bm", "launcher", "pinned-order"],
-    queryFn: () => readOrder({}),
-  });
   const listOverview = useRpc(workspacesOverviewRpc);
-  // Bead counts and running Workers; refreshed while the screen is open.
+  // Bead counts and running Workers; read and refreshed only while the
+  // workspace list shows them (delta 20260918f F5).
   const overview = useQuery({
     queryKey: ["paseo-bm", "launcher", "overview"],
     queryFn: () => listOverview({}),
-    refetchInterval: OVERVIEW_POLL_MS,
+    ...overviewPolling(view),
   });
   const overviewById = useMemo(
     () => new Map((overview.data?.workspaces ?? []).map((entry) => [entry.workspaceId, entry])),
@@ -449,29 +302,6 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
     },
   });
 
-  const pinned = pinnedOrder.data?.pinned ?? [];
-  // A dragged row needs the height of one row to turn a distance into a
-  // position; it is measured from the first row that lays out.
-  const rowHeight = useRef(0);
-  const [dragging, setDragging] = useState(false);
-  const ordered = useMemo(
-    () => orderRows(workspaces.data ?? [], pinned),
-    [workspaces.data, pinnedOrder.data],
-  );
-
-  /**
-   * Writes a new pinned order.
-   *
-   * Pruning happens HERE and only here, against a listing that actually
-   * arrived. Pruning on read would erase the owner's order the first time
-   * `workspaces.list` failed.
-   */
-  const savePinned = (next: readonly string[]) => {
-    const known = workspaces.data;
-    const body = known === undefined ? [...next] : prunePinned(next, known.map((row) => row.id));
-    void writeOrder({ pinned: body }).then(() => pinnedOrder.refetch());
-  };
-
   // Open the Dashboard when the Command Center queued one.
   useEffect(() => {
     const run = () => {
@@ -485,21 +315,29 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
     return dashboardRequests.subscribe(run);
   }, [workspaces.data]);
 
-  // Run a launch queued by the Command Center item, now and whenever one arrives.
+  // Run a launch queued by the Command Center item, now, whenever one arrives,
+  // and when a pending launch ends (a request that came meanwhile waited).
   useEffect(() => {
     const run = () => {
       void runPendingRequest(launchRequests, managerLauncher, { ensure, openAgent });
     };
     run();
-    return launchRequests.subscribe(run);
+    const stopRequests = launchRequests.subscribe(run);
+    const stopLauncher = managerLauncher.subscribe(run);
+    return () => {
+      stopRequests();
+      stopLauncher();
+    };
   }, [ensure, openAgent]);
 
   const pending = state.status === "pending";
   // Every ← goes where `backOf` says: Metric and Beads to the workspace list,
   // the list to Setup. Setup is the main screen and has no ←.
+  const goBack = () => setView(backOf(view) ?? SURFACE_HOME_VIEW);
 
-  // Built ONCE and placed on the main screen and on the workspace list, so a
-  // slash command's notice and a launch error are seen wherever the surface is.
+  // Built ONCE and placed on every view of the surface (Setup, the workspace
+  // list, Metric, Beads), so a slash command's notice and a launch error are
+  // seen wherever the surface is.
   const status = (
     <LauncherStatus
       lines={launcherStatusLines({ commandNotice, canOpenAgents: openAgent !== undefined, state })}
@@ -519,7 +357,9 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
         {...props}
         workspaceId={dashboardWorkspace.id}
         workspaceLabel={dashboardWorkspace.label}
-        onBack={() => setView(backOf(view) ?? SURFACE_HOME_VIEW)}
+        onBack={goBack}
+        backLabel={backLabelOf(view) ?? undefined}
+        status={status}
       />
     );
   }
@@ -530,18 +370,20 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
         {...props}
         workspaceId={dashboardWorkspace.id}
         workspaceLabel={dashboardWorkspace.label}
-        onBack={() => setView(backOf(view) ?? SURFACE_HOME_VIEW)}
+        onBack={goBack}
+        backLabel={backLabelOf(view) ?? undefined}
+        status={status}
       />
     );
   }
 
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.content} scrollEnabled={!dragging}>
+    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Back to Beads Manager setup"
-          onPress={() => setView(backOf(view) ?? SURFACE_HOME_VIEW)}
+          accessibilityLabel={backLabelOf(view) ?? undefined}
+          onPress={goBack}
           style={styles.iconButton}
         >
           <Text style={styles.rowTitle}>←</Text>
@@ -564,10 +406,10 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
 
       {/* The rows render even without `navigation.openAgent`: only the Manager
           button needs it, while the Dashboard is read-only and must stay
-          reachable on an older host (REQ-040d). */}
-      {[...ordered.pinned, ...ordered.rest].map((workspace) => {
-        const pinnedAt = ordered.pinned.findIndex((row) => row.id === workspace.id);
-        const isPinned = pinnedAt >= 0;
+          reachable on an older host (REQ-040d). They keep the order
+          `workspaces.list` returns: most recent activity first, no pinning
+          (delta 20260918f §4.5). */}
+      {(workspaces.data ?? []).map((workspace) => {
         const busyHere = pending && state.workspaceId === workspace.id;
         const open = (view: "dashboard" | "beads") => {
           setDashboardWorkspace({ id: workspace.id, label: workspace.screenTitle });
@@ -575,38 +417,9 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
         };
         const stats = workspaceStats(overviewById.get(workspace.id));
         return (
-          <View
-            key={workspace.id}
-            style={styles.row}
-            onLayout={(event) => {
-              if (rowHeight.current === 0) rowHeight.current = event.nativeEvent.layout.height;
-            }}
-          >
+          <View key={workspace.id} style={styles.row}>
             <View style={{ gap: 4, flexShrink: 1 }}>
               <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                {isPinned ? (
-                  <DragHandle
-                    label={workspace.label}
-                    index={pinnedAt}
-                    count={ordered.pinned.length}
-                    rowHeight={() => rowHeight.current}
-                    onDrop={(to) => savePinned(pinAt(pinned, workspace.id, to))}
-                    onDragging={setDragging}
-                    theme={theme}
-                    styles={styles}
-                  />
-                ) : null}
-                <PinControls
-                  label={workspace.label}
-                  pinned={isPinned}
-                  first={pinnedAt === 0}
-                  last={pinnedAt === ordered.pinned.length - 1}
-                  onPin={() => savePinned(pinAt(pinned, workspace.id, ordered.pinned.length))}
-                  onUnpin={() => savePinned(unpin(pinned, workspace.id))}
-                  onMove={(delta) => savePinned(movePinned(pinned, workspace.id, delta))}
-                  theme={theme}
-                  styles={styles}
-                />
                 <Text style={[styles.rowTitle, { flexShrink: 1 }]} numberOfLines={1}>
                   {workspace.label}
                 </Text>
@@ -619,8 +432,8 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
                 <View style={styles.stats} accessibilityLabel={stats.map((stat) => stat.label).join(", ")}>
                   {stats.map((stat) => (
                     <View key={stat.key} style={styles.stat}>
-                      <Icon name={stat.icon} size={13} color={dashboardTone(theme, stat.tone)} />
-                      <Text style={[styles.statText, { color: dashboardTone(theme, stat.tone) }]}>{stat.value}</Text>
+                      <Icon name={stat.icon} size={13} color={toneColor(theme, stat.tone)} />
+                      <Text style={[styles.statText, { color: toneColor(theme, stat.tone) }]}>{stat.value}</Text>
                     </View>
                   ))}
                 </View>

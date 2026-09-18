@@ -190,13 +190,17 @@ In the chats of paseo-bm's agents, messages between the agents are shown as comp
 
 Each card carries:
 
-- the sender's role icon and colour, the sender's session name, and the recipient;
+- the sender's role icon (in the role's colour), the sender's name with the time under it, and the recipient;
 - the request id, and a status chip (report phase or review verdict);
-- a one-line summary.
+- a short summary.
 
-Press **Show message** to read the full message as Markdown. Press **Reply to <role>** to answer the other agent straight from the card: the reply names the request it answers, and a report that waits on you offers prefilled answers you can edit before sending.
+Press **Show message** to read the full message as Markdown. Press **Reply to <role>** to answer the other agent straight from the card: the reply names the request it answers. Before sending, the card checks the recipient again and sends nothing if it is working, starting or gone, and says why. Once a reply went out, the Reply button gives way to an **Answered** chip; press it to reply again (the card remembers this until you reload the app).
 
-**Beads named in a message** appear on the card as chips (`title · id`) — only ids that really exist in the workspace's bead store. Press a chip to read that bead right there, with the same detail and actions as the Beads screen.
+**Questions in a card.** When a Worker's `blocked` report carries a `BM-QUESTIONS` block, its card shows each question with its options as full-width rows, the Worker's recommendation marked, and **Other…** for your own words. Each pick writes a `BM-ANSWERS` block at the top of the Reply box, next to anything you typed; **Use recommendations** fills the recommended options in, **Clear** empties the picks, and one **Send** sends it all. A question you leave unanswered stays open. **Mark as answered** tells the card you answered elsewhere; that mark is kept in `~/.paseo-bm/ui/`.
+
+**Questions waiting.** Above the Manager's chat, each Worker waiting for your answer has a pill next to Paseo's own. Press it to answer in a popover showing that report's card. The pill goes away once the Worker runs again or reports something else (it is checked every 15 seconds).
+
+**Beads named in a message** appear on the card as chips (`title · id`) — only ids that really exist in the workspace's bead store. A card shows two chips and a **…** chip for the rest. Press a chip to read that bead right there, with the same detail and actions as the Beads screen.
 
 Only paseo-bm's own messages become cards: messages you type, ordinary replies, tool calls and other agents' chats look as before, and the conversation itself never changes. A Worker's ordinary questions therefore stay plain text; for their beads, open the **Beads in this chat** panel next to the agent. It lists the beads the chat named recently (in messages and `br` commands), newest mention first, and opens each one the same way.
 
@@ -208,7 +212,7 @@ Only paseo-bm's own messages become cards: messages you type, ordinary replies, 
 
 ## The Beads Manager screen
 
-Open **Beads Manager** in Paseo's sidebar. Each workspace on this host has three buttons:
+Open **Beads Manager** in Paseo's sidebar. It opens on **Setup** (below); the **Workspaces** button at the top lists the workspaces on this host, most recent activity first, and ← goes back to Setup. Each workspace in that list has three buttons:
 
 | Button | Opens |
 |---|---|
@@ -216,15 +220,17 @@ Open **Beads Manager** in Paseo's sidebar. Each workspace on this host has three
 | **Metric** | [What each request did](#metric-what-each-request-did). |
 | **Beads** | [The workspace's beads](#beads-the-workspaces-beads). |
 
-Under each workspace name, four small figures show the beads in total, in progress and blocked, and how many Workers are running right now (they refresh every few seconds). The three buttons stay on one line, on a phone too.
+Under each workspace name, four small figures show the beads in total, in progress (yellow) and blocked (red), and how many Workers are running right now (they refresh every few seconds while the list is open). A dot next to the name pulses while one of its paseo-bm agents is working. The three buttons stay on one line, on a phone too. From Metric or Beads, ← goes back to the list.
 
-The **gear button** next to the title opens **Setup**:
+**Setup** is where the screen opens:
 
 - **Beads tools.** Whether `br` and `bv` are on the PATH the Paseo daemon uses, their versions, and whether a newer one is known. A missing tool has an **Install** button that runs the same command as [install](#what-the-interactive-install-asks) after you confirm it. Updating is never run for you: the screen shows the command to copy.
 - **Agent skills.** Each required and optional skill, for Claude Code and for Codex: installed, missing, or broken (unreadable `SKILL.md` or a wrong `name:`). **Test** checks again. The equivalent `skills add` command is shown to copy; the plugin never installs skills.
 - **Additional instructions.** A text box per role (Manager, Worker, Reviewer). What you save is added **after** the built-in instructions, under a heading that says it cannot override the rules. **Preview** shows the full instructions an agent will get. It applies to agents created after you save; running agents keep what they started with. The text is stored in `~/.paseo-bm/role-extras.json`.
 
-**Closed workspaces with history** lists workspaces that were archived or removed from Paseo but still have recorded traces, with their last name, path, last activity and history size. Press **Metric** to read that history.
+**Closed workspaces with history** (at the end of the Workspaces list) lists workspaces that were archived or removed from Paseo but still have recorded traces, with their last name, path, last activity and history size. Press **Metric** to read that history.
+
+**The Beads tab.** Every workspace can also show its beads in a tab of its own: open the **+** menu of the workspace's tab bar (on a phone, the New tab screen) and choose **Beads**. The tab has two sub-tabs, **Beads** and **Metric**, with the same screens as below, without the ← and the title.
 
 The workspace Command Center also has **Open Beads Manager** and **Open Beads Metric**. Two panels complete it: **Beads agents** (per workspace) shows the Manager → Worker → Reviewer tree with each agent's status, and **Beads in this chat** (per agent) lists the beads a chat named — see [Message cards](#message-cards-in-the-chat).
 
@@ -264,18 +270,19 @@ The Beads screen reads `.beads/issues.jsonl` in the workspace directly. It **nev
 **Overview**
 
 1. **Status cards:** total, ready, in progress, blocked, closed. These match `br stats` and `br ready`.
-2. **Progress:** closed out of total.
-3. **Created / closed, last 14 days.**
-4. **By type.**
-5. **By priority.**
-6. **Time:** median time to close, the bead longest in progress, and stale beads (open with no update for 7 days or more).
+2. **Progress:** closed out of total. The same figure sits at the top of the screen as `✓ <closed> / <total> done`.
+3. **By type.**
+4. **By priority.**
+5. **Time:** median time to close, the bead longest in progress, and stale beads (open with no update for 7 days or more).
 
 **List**
 
 - Search by id or title.
 - Filter by status, type, priority and labels. Labels are grouped by category (the part before `:`, such as `feature:` or `area:`). Each group shows its most common values first, and the rest are one tap away. Active filters appear as chips you can remove.
 - Sort by updated, created or closed time, or by priority.
-- Each row shows the bead's **title first**, with its id, type, priority and status on the line below.
+- The list is split into four groups, in this order: **In progress**, **Blocked**, **Ready**, **Closed**, each with its size. Filters apply first, and the sort you chose applies inside each group.
+- **Closed beads are hidden** until you press the eye button (it shows how many there are). The choice lasts until you reload the app.
+- Each row shows the bead's **title first**, coloured by status (accent = ready, yellow = in progress, red = blocked, green = closed), with its id, type, priority and status on the line below.
 - **Beads in progress say who is on them:** the Worker, since when, how long it has been, and whether that Worker is running, idle or gone. This comes from the recorded Worker commands (`br update <id> --status in_progress` or `--claim`) and reports. When no such command was recorded, the screen says the start is not recorded and shows the Worker's last activity instead of guessing.
 
 **Detail**
@@ -546,7 +553,7 @@ Check that `agent-tools` is ok in `doctor` and that the Worker's provider is log
 
 **The Worker cannot create or update beads: `W_BEADS_CLI_MISSING`, `W_BEADS_VIEWER_MISSING`, `W_BEADS_TOOLS_INSTALL_FAILED`**
 
-Open Beads Manager → ⚙ Setup: it shows whether `br` and `bv` are on the `PATH` the Paseo daemon uses (which can differ from your terminal's), and can install a missing one after you confirm. Or run the command the warning printed. A script install puts the tool in `~/.local/bin`; add that directory to your PATH if the warning says so.
+Open Beads Manager (it opens on Setup): it shows whether `br` and `bv` are on the `PATH` the Paseo daemon uses (which can differ from your terminal's), and can install a missing one after you confirm. Or run the command the warning printed. A script install puts the tool in `~/.local/bin`; add that directory to your PATH if the warning says so.
 
 **Metric shows *(unknown)* for a request, or a request has no request text**
 

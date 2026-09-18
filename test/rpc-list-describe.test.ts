@@ -266,8 +266,6 @@ describe("plugin server entry — agents.list and roles.describe", () => {
       "chat.beads",
       "chat.peers",
       "chat.waiting",
-      "launcher.order.get",
-      "launcher.order.set",
       "manager.ensure",
       "roles.describe",
       "roles.instructions",

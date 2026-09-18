@@ -5,6 +5,7 @@ import {
   TRACE_LIST_LIMIT,
   TRACE_STORE_SCHEMA_VERSION,
   beadStatsSchema,
+  chatPeerSchema,
   beadsStatsRpc,
   traceDetailSchema,
   traceDeleteScopeSchema,
@@ -368,5 +369,13 @@ describe("Dashboard error codes", () => {
     expect(error.message).toBe("E_TRACE_NOT_FOUND: trace t-9 is gone");
     expect(error.code).toBe("E_TRACE_NOT_FOUND");
     expect(error.name).toBe("DashboardError");
+  });
+});
+
+describe("chat.peers carries whether an agent is archived (delta 20260918f F12)", () => {
+  const peer = { id: "w1", role: "worker", title: null, status: "idle", parentId: null, requestId: "req-1", batchId: null };
+  it("requires the archived flag", () => {
+    expect(chatPeerSchema.parse({ ...peer, archived: true }).archived).toBe(true);
+    expect(chatPeerSchema.safeParse(peer).success).toBe(false);
   });
 });
