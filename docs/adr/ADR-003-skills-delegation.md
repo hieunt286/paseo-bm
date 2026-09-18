@@ -31,6 +31,7 @@ Nếu paseo-bm tự copy skills, nó sẽ ghi đè lên file do CLI `skills` s�
 7. Không có CLI `skills`, không có mạng, hoặc lệnh lỗi → in hướng dẫn thủ công (chính lệnh đó, để người dùng tự chạy) và tiếp tục.
 8. Gỡ cài đặt paseo-bm **không** gỡ skills; bản tóm tắt chỉ ra lệnh của CLI `skills` để tự gỡ.
 9. README nêu rõ nguồn skills là repo của tác giả khác, và việc cài do một công cụ bên thứ ba thực hiện — công cụ đó có thu thập dữ liệu cài đặt riêng, nằm ngoài cam kết "không telemetry" của paseo-bm.
+   *(Bổ sung 2026-09-18, [delta short-readme](../product/paseo-bm-prd-delta-20260918b-short-readme.md))* README nay ngắn: nó vẫn nêu nguồn skills là repo của tác giả khác; phần về CLI `skills` bên thứ ba, kênh thu thập dữ liệu riêng của nó và việc cài kiểu symlink nằm trong `GUIDE.md` ở gốc repo, được README trỏ tới.
 
 ## Consequences
 
