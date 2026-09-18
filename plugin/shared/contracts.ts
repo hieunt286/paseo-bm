@@ -44,6 +44,11 @@ export const managerEnsureRpc = defineRpc({
     agentId: agentIdSchema,
     created: z.boolean(),
     otherManagerIds: z.array(agentIdSchema),
+    /**
+     * Why an existing Manager was not switched to its no-prompt mode, or `null`
+     * (delta 20260918 §4.1). Added field: a client that does not know it drops it.
+     */
+    modeNotice: z.string().nullable(),
   }),
 });
 
@@ -210,6 +215,15 @@ export const traceSummarySchema = z.object({
   requestedAt: z.string(),
   /** Null when no user turn was captured, so the screen says so rather than showing "". */
   excerpt: z.string().nullable(),
+  /**
+   * Which turn of the request this row is, when the user asked more than once
+   * (delta 20260917e §4.3). `null` for a request that was never followed up, so
+   * those rows look exactly as they always did — no `lượt 1` noise.
+   *
+   * Rows of one request share a `traceId` on purpose: opening any of them leads
+   * to the same request. The list key is the pair.
+   */
+  turn: z.object({ index: z.number().int().positive(), total: z.number().int().positive() }).nullable(),
   state: traceStateSchema,
   workerIds: z.array(agentIdSchema),
   reviewerIds: z.array(agentIdSchema),
@@ -223,6 +237,14 @@ export const traceSummarySchema = z.object({
   userMessageCount: z.number().int().nonnegative(),
   /** Tokens and cost per Worker of this request, for the "heaviest Workers" chart. */
   workerUsage: z.array(z.object({ agentId: agentIdSchema, title: z.string().nullable(), usage: usageSchema })),
+  /**
+   * Tokens and cost per (role, model the agents ran), for the overview's
+   * "model × role" chart (delta 20260918 §4.3, REQ-058e). Always sent by this
+   * server; optional so an older payload still parses.
+   */
+  usageByModelRole: z
+    .array(z.object({ role: agentRoleSchema, model: z.string().nullable(), usage: usageSchema }))
+    .optional(),
   beadCounts: z.object({
     created: beadCountSchema,
     updated: beadCountSchema,
@@ -375,6 +397,21 @@ export const subAgentTraceSchema = z.object({
 });
 
 /** Full detail of one trace (design §4.3). */
+/**
+ * One combination of model, thinking option and mode an agent ran on, and in
+ * how many turns (delta 20260918 §4.3, REQ-058 a–c). `recorded: false` means the
+ * turn predates the collector recording it (or its snapshot could not be read):
+ * the model then comes from `usage` and thinking/mode are unknown — which is not
+ * the same as `recorded: true` with `thinkingOptionId: null`, the provider's default.
+ */
+export const runtimeRowSchema = z.object({
+  model: z.string().nullable(),
+  thinkingOptionId: z.string().nullable(),
+  modeId: z.string().nullable(),
+  recorded: z.boolean(),
+  turns: z.number().int().positive(),
+});
+
 export const traceDetailSchema = traceSummarySchema.extend({
   sent: z.object({
     userRequest: traceMessageSchema.nullable(),
@@ -393,7 +430,17 @@ export const traceDetailSchema = traceSummarySchema.extend({
     reviewers: z.array(agentTimingSchema),
     basis: z.string(),
   }),
-  usageByAgent: z.array(z.object({ agentId: agentIdSchema, role: agentRoleSchema, usage: usageSchema })),
+  usageByAgent: z.array(
+    z.object({
+      agentId: agentIdSchema,
+      role: agentRoleSchema,
+      usage: usageSchema,
+      /** What this agent ran on, one row per distinct combination (delta 20260918 §4.3). */
+      runtime: z.array(runtimeRowSchema).optional(),
+    }),
+  ),
+  /** Tokens and cost per model the agents actually ran (delta 20260918 §4.3, REQ-058d). */
+  usageByModel: z.array(z.object({ model: z.string().nullable(), usage: usageSchema })).optional(),
   beads: z.array(traceBeadSchema),
   workflowSteps: z.array(workflowStepResultSchema),
   subAgentTraces: z.array(subAgentTraceSchema),
@@ -452,6 +499,18 @@ export const traceWorkspaceMetaSchema = z.object({
   lastSeenAt: z.string(),
 });
 
+/**
+ * What the agent actually ran on during one turn (delta 20260918 §4.2): the
+ * running values the provider reports (`runtimeInfo`) first, the snapshot's
+ * configuration only as a fallback. `thinkingOptionId: null` means the
+ * provider's default.
+ */
+export const traceRuntimeSchema = z.object({
+  model: z.string().nullable(),
+  thinkingOptionId: z.string().nullable(),
+  modeId: z.string().nullable(),
+});
+
 /** One line of `events-<YYYYMM>.jsonl`: everything one agent turn produced. */
 export const traceRecordSchema = z.object({
   v: z.number().int().positive(),
@@ -473,6 +532,12 @@ export const traceRecordSchema = z.object({
   reviews: z.array(parsedReviewSchema),
   evidence: z.array(evidenceSchema),
   usage: usageSchema.nullable(),
+  /**
+   * Added by delta 20260918 — optional, so records written before it (and
+   * readers built before it) keep working: `v` stays 1, nothing migrates. `null`
+   * when the snapshot could not be read for this turn.
+   */
+  runtime: traceRuntimeSchema.nullable().optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -631,13 +696,58 @@ export const workspacesOverviewRpc = defineRpc({
             ready: z.number().int().nonnegative(),
           })
           .nullable(),
+        /** Kept for readers that predate `runningAgents`; equals `runningAgents.worker`. */
         runningWorkers: z.number().int().nonnegative(),
+        /** Running agents of this workspace, per role (delta 20260917e §4.2). */
+        runningAgents: z.object({
+          manager: z.number().int().nonnegative(),
+          worker: z.number().int().nonnegative(),
+          reviewer: z.number().int().nonnegative(),
+        }),
       }),
     ),
   }),
 });
 
 export type WorkspaceOverview = z.infer<typeof workspacesOverviewRpc.output>["workspaces"][number];
+
+/**
+ * `launcher.order.get` / `launcher.order.set` — the order the owner pinned on
+ * the Beads Manager screen (delta 20260917e §4.1). `notices` carries what could
+ * not be read, so a broken preference file explains itself instead of failing
+ * the screen.
+ */
+const launcherOrderOutput = z.object({
+  pinned: z.array(workspaceIdSchema),
+  notices: z.array(z.string()),
+});
+
+/**
+ * `agents.stop-all` — asks every running Worker and Reviewer of one workspace to
+ * stop (delta 20260917e §4.4). It ASKS: Paseo gives plugins no agent cancel, so
+ * the counts below are notices delivered, not turns killed.
+ */
+export const agentsStopAllRpc = defineRpc({
+  name: "agents.stop-all",
+  input: z.object({ workspaceId: workspaceIdSchema }),
+  output: z.object({
+    workers: z.number().int().nonnegative(),
+    reviewers: z.number().int().nonnegative(),
+    skipped: z.number().int().nonnegative(),
+  }),
+});
+
+export const launcherOrderGetRpc = defineRpc({
+  name: "launcher.order.get",
+  input: z.object({}),
+  output: launcherOrderOutput,
+});
+
+export const launcherOrderSetRpc = defineRpc({
+  name: "launcher.order.set",
+  input: z.object({ pinned: z.array(workspaceIdSchema) }),
+  output: launcherOrderOutput,
+});
 
 // ---------------------------------------------------------------------------
 // Setup screen (delta 20260916-setup-screen).
@@ -857,6 +967,8 @@ export type SubAgentTrace = z.infer<typeof subAgentTraceSchema>;
 export type BeadStats = z.infer<typeof beadStatsSchema>;
 export type StoreSize = z.infer<typeof storeSizeSchema>;
 export type TraceRecord = z.infer<typeof traceRecordSchema>;
+export type TraceRuntime = z.infer<typeof traceRuntimeSchema>;
+export type RuntimeRow = z.infer<typeof runtimeRowSchema>;
 export type TraceStoreMeta = z.infer<typeof traceStoreMetaSchema>;
 export type TraceWorkspaceMeta = z.infer<typeof traceWorkspaceMetaSchema>;
 export type TraceDeleteScope = z.infer<typeof traceDeleteScopeSchema>;

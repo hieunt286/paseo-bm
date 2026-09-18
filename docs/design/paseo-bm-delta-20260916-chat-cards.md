@@ -91,3 +91,12 @@ Ngày 2026-09-16, owner yêu cầu:
   - lấy mã bead từ tin nhắn và lệnh shell, chỉ giữ mã có thật, đếm số lần nhắc, sắp theo lần nhắc gần nhất, tối đa 30;
   - panel tự làm mới mỗi 15 giây, bấm vào một dòng để mở chi tiết bead.
 - **Kiểm trên daemon thật** (Worker `d91ccf32`, xspace-customer): quét 400 mục trong 36 ms, tìm thấy 7 bead; đứng đầu là `cus-contact-uiux-redesign-u9zv.12` (đang làm, nhắc 5 lần). `beads.lookup` loại đúng `feature-workflow` và `nope-1`.
+
+## 8. Câu hỏi có lựa chọn trên thẻ báo cáo (delta 20260918c)
+
+Ngày 2026-09-18, [delta 20260918c-question-cards](./paseo-bm-delta-20260918c-question-cards.md) đổi thẻ báo cáo trong chat **Manager** khi Worker hỏi:
+
+- Worker đặt câu hỏi trong khối `BM-QUESTIONS` ngay sau `BM-REPORT`. Thẻ đọc khối đó và hiện từng câu với các nút lựa chọn, dấu đề xuất, "Other…", "Use recommendations" và "Clear".
+- Nút gửi đi **thẳng tới Worker duy nhất của request** (như "Reply to Worker" ở §4.5), sau khi đọc lại `chat.peers`. Tin gửi đi là khối `BM-ANSWERS`. Thẻ không gửi khi Worker đang chạy, đang khởi tạo hay đã đóng.
+- Với báo cáo có câu hỏi, dòng tóm tắt là `<n> questions waiting`, và hai câu gợi ý của §4.5 bị ẩn.
+- Báo cáo không có khối (Worker tạo trước bản cập nhật), chat Worker và chat Reviewer vẫn như mục 4.

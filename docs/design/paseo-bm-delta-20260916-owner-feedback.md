@@ -149,6 +149,8 @@ Ngày 2026-09-16, owner yêu cầu màn Beads cho biết một bead đang làm t
 Ngày 2026-09-16, owner gửi ảnh chụp trên điện thoại: mỗi workspace chiếm cả màn hình vì có ba nút full-width. Owner muốn gọn lại, và muốn thấy ngay số bead (tổng, đang làm, bị chặn) cùng số Worker đang chạy.
 
 - RPC mới `workspaces.overview({})`, chỉ đọc, gọi một lần cho cả màn: với mỗi workspace đang có (bỏ qua workspace đã lưu trữ) trả `beads { total, inProgress, blocked, ready }` (null khi không có kho bead) và `runningWorkers`. Màn hình tự làm mới mỗi 10 giây.
+
+  *Errata 2026-09-17:* RPC này thêm `runningAgents { manager, worker, reviewer }`; `runningWorkers` giữ nguyên nghĩa và bằng `runningAgents.worker`. Xem [delta 20260917e](paseo-bm-delta-20260917e-manager-screen-and-commands.md) §4.2.
 - Mỗi dòng gồm:
   - tên (1 dòng) và project;
   - bốn con số kèm icon: `Layers` tổng, `CircleDot` đang làm, `Ban` bị chặn, `Hammer` Worker đang chạy; số bằng 0 hiện màu xám;

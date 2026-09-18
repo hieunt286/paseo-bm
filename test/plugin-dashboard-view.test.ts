@@ -77,6 +77,7 @@ describe("workspace row figures", () => {
       workspaceId: "wks_1",
       beads: { total: 141, inProgress: 2, blocked: 0, ready: 5 },
       runningWorkers: 1,
+      runningAgents: { manager: 0, worker: 1, reviewer: 0 },
     });
     expect(stats.map((stat) => [stat.key, stat.icon, stat.value, stat.tone])).toEqual([
       ["total", "Layers", "141", "muted"],
@@ -88,7 +89,7 @@ describe("workspace row figures", () => {
   });
 
   it("says once that a workspace has no beads, and shows nothing before the figures load", () => {
-    expect(workspaceStats({ workspaceId: "wks_1", beads: null, runningWorkers: 0 }).map((stat) => stat.label)).toEqual([
+    expect(workspaceStats({ workspaceId: "wks_1", beads: null, runningWorkers: 0, runningAgents: { manager: 0, worker: 0, reviewer: 0 } }).map((stat) => stat.label)).toEqual([
       "no beads in this workspace",
       "0 Worker(s) running",
     ]);

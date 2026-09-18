@@ -13,11 +13,20 @@
  */
 import { z } from "zod";
 import { looksLikeReport, parseReports, parseReviews, requestIdFromText } from "../shared/bm-report";
+import { answersText, parseQuestions, type Pick, type Question } from "../shared/bm-questions";
 import type { ChatPeer } from "../shared/contracts";
 import type { Badge, GraphNode } from "./dashboard-model";
+import { errorMessageOf } from "./launch-manager";
 
 export const CHAT_CARD_KIND = "bm-message";
 export const CHAT_CARD_VERSION = 1;
+
+/** A question of a `BM-QUESTIONS` block (delta 20260918c-question-cards §4.4). */
+export const questionSchema = z.object({
+  id: z.string(),
+  text: z.string(),
+  options: z.array(z.object({ key: z.string(), text: z.string(), recommended: z.boolean() })),
+});
 
 export const chatCardSchema = z.object({
   type: z.enum(["report", "review", "message"]),
@@ -34,6 +43,8 @@ export const chatCardSchema = z.object({
   /** First meaningful line of a free-text message. */
   gist: z.string(),
   text: z.string(),
+  /** The report's `BM-QUESTIONS`; empty for every other card and for old-style reports. */
+  questions: z.array(questionSchema).default([]),
 });
 
 export type ChatCard = z.infer<typeof chatCardSchema>;
@@ -104,6 +115,9 @@ export function toChatCard(item: ChatItem, phase: "streaming" | "complete"): Cha
     : undefined;
   if (report === undefined && review === undefined && (direction === "sent" || !namesRequest)) return undefined;
   const requestId = report?.requestId ?? requestIdFromText(text) ?? BARE_REQUEST_ID.exec(text)?.[0] ?? null;
+  // A block naming another request is not this Worker's to be answered here.
+  const asked = report === undefined ? null : parseQuestions(text);
+  const questions = asked !== null && (asked.requestId === null || asked.requestId === requestId) ? asked.questions : [];
   return {
     type: report !== undefined ? "report" : review !== undefined ? "review" : "message",
     direction,
@@ -121,6 +135,7 @@ export function toChatCard(item: ChatItem, phase: "streaming" | "complete"): Cha
     },
     gist: gistOf(text),
     text,
+    questions,
   };
 }
 
@@ -237,6 +252,18 @@ export function statusChip(card: ChatCard): Badge | null {
   return null;
 }
 
+/**
+ * Longest `blockers` text on the summary line (delta 20260918c, Q50): the full
+ * text is one tap away in the opened message, and repeating a 1000-character
+ * paragraph above it made old-style reports hard to answer.
+ */
+export const SUMMARY_BLOCKERS_CHARS = 160;
+
+function shortened(text: string, limit: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length <= limit ? flat : `${flat.slice(0, limit - 1).trimEnd()}…`;
+}
+
 /** One line under the header. */
 export function summaryOf(card: ChatCard): string {
   if (card.type === "report") {
@@ -245,14 +272,22 @@ export function summaryOf(card: ChatCard): string {
       card.beads.updated > 0 ? `${card.beads.updated} updated` : null,
       card.beads.closed > 0 ? `${card.beads.closed} closed` : null,
     ].filter((part) => part !== null);
-    const blockers = card.blockers === null || /^none\b/i.test(card.blockers) ? null : `waiting on: ${card.blockers}`;
+    const count = card.questions.length;
+    const blockers =
+      count > 0
+        ? `${count} ${count === 1 ? "question" : "questions"} waiting`
+        : card.blockers === null || /^none\b/i.test(card.blockers)
+          ? null
+          : `waiting on: ${shortened(card.blockers, SUMMARY_BLOCKERS_CHARS)}`;
     return [card.tier, beads.length === 0 ? null : `beads ${beads.join(", ")}`, blockers].filter((part) => part !== null).join(" · ") || "report";
   }
   if (card.type === "review") return [card.batchId === null ? null : `batch ${card.batchId}`, card.gist].filter((part) => part !== null).join(" · ");
   return card.gist;
 }
 
-const BLOCK_START = /^\s*>?\s*(?:```\s*)?(BM-REPORT|BM-REVIEW)\b/;
+const BLOCK_START = /^\s*>?\s*(?:```\s*)?(BM-REPORT|BM-REVIEW|BM-QUESTIONS|BM-ANSWERS)\b/;
+/** An option line of a `BM-QUESTIONS` block, nested under its question. */
+const OPTION_LINE = /^>?\s*[-*]\s+(?:\(([a-z])\)|([a-z])\s*[:.)])\s*(.*)$/i;
 const FENCE = /^\s*```\s*$/;
 /** A top-level `key: value` line; indented lines belong to a list item above. */
 const FIELD = /^>?\s?([A-Za-z][A-Za-z0-9_]*)\s*:\s*(.*)$/;
@@ -284,6 +319,11 @@ export function markdownOf(text: string): string {
         out.push(`- **${field[1]}**: ${field[2]}`);
         return;
       }
+      const option = OPTION_LINE.exec(line);
+      if (option !== null) {
+        out.push(`  - **${option[1] ?? option[2]}**: ${option[3]}`);
+        return;
+      }
       if (line.trim() === "") inBlock = false;
     }
     out.push(line);
@@ -302,10 +342,133 @@ export function replyText(card: ChatCard, answer: string): string {
 
 /** Prefilled answers for a report that waits on the user. Never sent on their own. */
 export function quickReplies(card: ChatCard): string[] {
-  if (card.type !== "report" || card.phase !== "blocked") return [];
+  // "Continue as you proposed" is ambiguous next to questions with options.
+  if (card.type !== "report" || card.phase !== "blocked" || card.questions.length > 0) return [];
   return ["Continue as you proposed.", "Stop here and send your finished report."];
 }
 
 export function roleName(role: ChatRole | null): string {
   return role === null ? "agent" : ROLE_NAME[role];
+}
+
+// ---------------------------------------------------------------------------
+// Answering a Worker's questions from its card (delta 20260918c-question-cards §4.4).
+// ---------------------------------------------------------------------------
+
+/** The user's answer so far, by question id. */
+export type Picks = Record<string, Pick>;
+
+/** Only the Manager's chat answers a Worker's questions, and only in the report it received. */
+export function showsQuestions(card: ChatCard, owner: ChatPeer | null): boolean {
+  return card.type === "report" && card.direction === "received" && owner?.role === "manager" && card.questions.length > 0;
+}
+
+/** A question with fewer than two options can only be answered in the user's own words. */
+export function choosable(question: Question): boolean {
+  return question.options.length >= 2;
+}
+
+/** The part of a question before its first ` — `: shown in bold. */
+export function topicOf(question: Question): { topic: string | null; rest: string } {
+  const at = question.text.indexOf(" — ");
+  return at <= 0 ? { topic: null, rest: question.text } : { topic: question.text.slice(0, at), rest: question.text.slice(at + 3) };
+}
+
+/** Fills the recommended option into every question still unanswered; never overwrites a pick. */
+export function recommendedPicks(questions: readonly Question[], picks: Readonly<Picks>): Picks {
+  const next: Picks = { ...picks };
+  for (const question of questions) {
+    if (next[question.id] !== undefined || !choosable(question)) continue;
+    const recommended = question.options.find((option) => option.recommended);
+    if (recommended !== undefined) next[question.id] = { key: recommended.key };
+  }
+  return next;
+}
+
+/** Every question has an existing option, or the user's own non-blank words. */
+export function formComplete(questions: readonly Question[], picks: Readonly<Picks>): boolean {
+  return (
+    questions.length > 0 &&
+    questions.every((question) => {
+      const pick = picks[question.id];
+      if (pick === undefined) return false;
+      return "key" in pick ? choosable(question) && question.options.some((option) => option.key === pick.key) : pick.other.trim() !== "";
+    })
+  );
+}
+
+/** `Q1 a, Q2 other`: what the card says it sent. */
+export function answerSummary(questions: readonly Question[], picks: Readonly<Picks>): string {
+  return questions
+    .map((question) => {
+      const pick = picks[question.id];
+      return pick === undefined ? null : `${question.id} ${"key" in pick ? pick.key : "other"}`;
+    })
+    .filter((part) => part !== null)
+    .join(", ");
+}
+
+export type AnswerTarget = { worker: ChatPeer } | { reason: string };
+
+/**
+ * The Worker the answers go to, or why they cannot go now. The Worker is the
+ * one `partiesOf` finds — the only Worker of the report's request — never an
+ * id read from the message. Only an `idle` or `error` Worker is sent to: a
+ * message to a running one would replace the turn it is in.
+ */
+export function answerTarget(card: ChatCard, owner: ChatPeer | null, peers: readonly ChatPeer[]): AnswerTarget {
+  const { from } = partiesOf(card, owner, peers);
+  const worker = from.id === null ? undefined : peers.find((peer) => peer.id === from.id && peer.role === "worker");
+  if (worker === undefined) {
+    return { reason: `Cannot tell which Worker asked this: no single Worker has \`${card.requestId ?? "this request"}\`.` };
+  }
+  const name = partyName({ role: "worker", id: worker.id, title: worker.title });
+  if (worker.status === "idle" || worker.status === "error") return { worker };
+  if (worker.status === "running" || worker.status === "initializing") {
+    return { reason: `${name} is working; a message now would replace its turn. Send when it stops.` };
+  }
+  return { reason: `${name} is ${worker.status}.` };
+}
+
+export interface SendAnswersInput {
+  card: ChatCard;
+  picks: Readonly<Picks>;
+  /** Fresh `chat.peers` for the chat: the cached one can be half a minute old. */
+  refreshPeers: () => Promise<{ owner: ChatPeer | null; peers: ChatPeer[] }>;
+  send: (agentId: string, text: string) => Promise<void>;
+}
+
+export type SendAnswersResult = { ok: true; to: ChatPeer; text: string } | { ok: false; reason: string };
+
+/**
+ * The whole send path of the question card, kept here so it is tested without
+ * a renderer: re-read who is where and in what state, then send ONE
+ * `BM-ANSWERS` message to the asking Worker. `send` is called at most once.
+ */
+export async function sendAnswers(input: SendAnswersInput): Promise<SendAnswersResult> {
+  const { card, picks } = input;
+  if (!formComplete(card.questions, picks)) return { ok: false, reason: "Answer every question first." };
+  try {
+    const fresh = await input.refreshPeers();
+    const target = answerTarget(card, fresh.owner, fresh.peers);
+    if ("reason" in target) return { ok: false, reason: target.reason };
+    if (card.requestId === null) return { ok: false, reason: "This report names no request." };
+    const text = answersText(card.requestId, card.questions, picks);
+    await input.send(target.worker.id, text);
+    return { ok: true, to: target.worker, text };
+  } catch (failure) {
+    return { ok: false, reason: errorMessageOf(failure) };
+  }
+}
+
+/** djb2: short and stable, enough to tell two reports of one request apart. */
+function hashOf(text: string): string {
+  let hash = 5381;
+  for (let index = 0; index < text.length; index += 1) hash = ((hash << 5) + hash + text.charCodeAt(index)) | 0;
+  return (hash >>> 0).toString(36);
+}
+
+/** Key of the "already answered" memory: this chat, this request, these questions, this message. */
+export function answeredKey(agentId: string, card: ChatCard): string {
+  return [agentId, card.requestId ?? "", card.questions.map((question) => question.id).join(","), hashOf(card.text)].join("|");
 }

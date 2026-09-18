@@ -112,6 +112,25 @@ export function chooseModeId(
 }
 
 /**
+ * The mode `manager.ensure` gives a Manager, or `undefined` to leave the
+ * provider's default (delta 20260918 §4.1, owner decisions Q31 and Q36).
+ *
+ * 1. A mode set by hand on the `bm-manager` profile, when the provider lists
+ *    it, always wins — even a `planning` one: the owner's rule is that the
+ *    profile's own mode still wins.
+ * 2. Otherwise the first `dangerous` mode, the one that runs without permission
+ *    prompts (`bypassPermissions` on Claude, `full-access` on Codex).
+ * 3. Otherwise nothing. There is deliberately no fallback to `moderate`: the
+ *    request is "no prompts", and a provider's automatic mode is not that.
+ */
+export function managerModeFor(modes: readonly ProviderMode[], profileModeId: string | null): string | undefined {
+  const usable = modes.filter((mode) => typeof mode?.id === "string" && mode.id !== "");
+  const fromProfile = usable.find((mode) => mode.id === profileModeId);
+  if (fromProfile !== undefined) return fromProfile.id;
+  return firstWithTier(usable, "dangerous");
+}
+
+/**
  * The `modeId` set by hand on a paseo-bm profile, or `null`. Read the same way
  * `manager.ensure` reads the Manager's profile. Never throws.
  */

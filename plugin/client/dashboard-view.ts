@@ -52,6 +52,52 @@ export function createDashboardRequests(): DashboardRequests {
 /** One queue per loaded client bundle, like `launchRequests`. */
 export const dashboardRequests = createDashboardRequests();
 
+export interface NoticeQueue {
+  post(text: string): void;
+  take(): string | null;
+  peek(): string | null;
+  subscribe(listener: () => void): () => void;
+}
+
+/**
+ * How a slash command says something back to the user.
+ *
+ * Paseo 0.8 gives a plugin slash command NO report channel: its context carries
+ * only `paseo`, `rpc`, `openSurface`, `openSettings` and `openPanel`, and the
+ * composer shows nothing unless `onSubmit` REJECTS — in which case the message
+ * lands in an error toast. Reporting a success by throwing would paint
+ * "Asked 2 Workers to stop" in the colour of a failure, which is a lie about
+ * what happened.
+ *
+ * So a command posts here and opens the Beads Manager surface, which draws the
+ * line as an ordinary notice.
+ */
+export function createNoticeQueue(): NoticeQueue {
+  let pending: string | null = null;
+  const listeners = new Set<() => void>();
+  return {
+    post(text) {
+      pending = text;
+      for (const listener of listeners) listener();
+    },
+    take() {
+      const value = pending;
+      pending = null;
+      return value;
+    },
+    peek: () => pending,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+}
+
+/** One per loaded client bundle, like the queues above. */
+export const launcherNotices = createNoticeQueue();
+
 /** Body of the workspace Command Center item "Open Beads Dashboard". */
 export function selectDashboardFromCommandCenter(
   context: { workspace: { id: string }; openSurface(id: string): void },
