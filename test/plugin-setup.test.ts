@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -15,6 +15,7 @@ import { OPTIONAL_SKILLS, REQUIRED_SKILLS, checkSkillAt, skillsStatus } from "..
 import { commandsFor, findTool, installTool, toolsStatus, versionOf } from "../plugin/server/setup-tools";
 import { handleRolesInstructions, handleRolesSaveExtra, handleSetupStatus } from "../plugin/server/setup-rpc";
 import { OPTIONAL_SKILLS as CLI_OPTIONAL, REQUIRED_SKILLS as CLI_REQUIRED } from "../src/skills/detect";
+import { setupStatusSchema } from "../plugin/shared/contracts";
 
 /** Setup screen (delta 20260916-setup-screen). */
 
@@ -108,13 +109,72 @@ describe("skills", () => {
     expect(row("reviewing-plan").problem).toContain("declares name `something-else`");
     expect(row("implementing-beads")).toMatchObject({ claude: "missing", codex: "ok" });
     expect(row("architecture-premise-audit")).toMatchObject({ required: false, claude: "missing", codex: "missing" });
-    expect(status.missingRequired).toEqual({ claude: 4, codex: 0 });
+    expect(status.missingRequired).toEqual({ claude: 4, codex: 0, pi: 5, opencode: 5 });
     expect(status.installCommand).toContain(`-s ${REQUIRED_SKILLS.join(" ")}`);
   });
 
   it("follows CLAUDE_CONFIG_DIR and CODEX_HOME", () => {
     const status = skillsStatus({ homedir: () => root, env: { CLAUDE_CONFIG_DIR: "/cc", CODEX_HOME: "/cx" } });
-    expect(status.dirs).toEqual({ shared: join(root, ".agents", "skills"), claude: "/cc/skills", codex: "/cx/skills" });
+    expect(status.dirs).toEqual({
+      shared: join(root, ".agents", "skills"),
+      claude: "/cc/skills",
+      codex: "/cx/skills",
+      pi: join(root, ".pi", "agent", "skills"),
+      opencode: join(root, ".config", "opencode", "skill"),
+    });
+  });
+
+  describe("Pi and OpenCode (delta 20260921 §4.2.6)", () => {
+    const piDir = () => join(root, ".pi", "agent", "skills");
+    const opencodeDir = () => join(root, ".config", "opencode", "skill");
+
+    it("check each agent's own directory, symlinks included, like Claude's", () => {
+      // Pi: real directories, one declaring the wrong name.
+      for (const name of REQUIRED_SKILLS) skill(piDir(), name);
+      skill(piDir(), "polishing-beads", "polish");
+      // OpenCode: links into a store elsewhere (how the `skills` CLI installs),
+      // one link dangling, and one real directory whose SKILL.md is a link.
+      const store = join(root, "store");
+      for (const name of REQUIRED_SKILLS) skill(store, name);
+      mkdirSync(opencodeDir(), { recursive: true });
+      symlinkSync(join(store, "feature-workflow"), join(opencodeDir(), "feature-workflow"));
+      symlinkSync(join(store, "reviewing-plan"), join(opencodeDir(), "reviewing-plan"));
+      symlinkSync(join(root, "gone"), join(opencodeDir(), "converting-plan-to-beads"));
+      mkdirSync(join(opencodeDir(), "implementing-beads"));
+      symlinkSync(join(store, "implementing-beads", "SKILL.md"), join(opencodeDir(), "implementing-beads", "SKILL.md"));
+      // The shared directory counts for Codex only.
+      skill(join(root, ".agents", "skills"), "polishing-beads");
+
+      const status = skillsStatus({ homedir: () => root, env: {} });
+      const row = (name: string) => status.skills.find((entry) => entry.name === name)!;
+      expect(row("feature-workflow")).toMatchObject({ claude: "missing", codex: "missing", pi: "ok", opencode: "ok" });
+      expect(row("reviewing-plan")).toMatchObject({ pi: "ok", opencode: "ok" });
+      expect(row("converting-plan-to-beads")).toMatchObject({ pi: "ok", opencode: "missing", problem: null });
+      expect(row("polishing-beads")).toMatchObject({ codex: "ok", pi: "broken", opencode: "missing" });
+      expect(row("polishing-beads").problem).toContain("declares name `polish`");
+      expect(row("implementing-beads")).toMatchObject({ pi: "ok", opencode: "ok" });
+      expect(row("architecture-premise-audit")).toMatchObject({ required: false, pi: "missing", opencode: "missing" });
+      expect(status.missingRequired).toEqual({ claude: 5, codex: 4, pi: 1, opencode: 2 });
+    });
+
+    it("without their directories every skill is missing, like an agent that is not installed, and nothing is created", () => {
+      const status = skillsStatus({ homedir: () => root, env: {} });
+      for (const row of status.skills) {
+        expect(row).toMatchObject({ claude: "missing", codex: "missing", pi: "missing", opencode: "missing", problem: null });
+      }
+      expect(status.missingRequired).toEqual({ claude: 5, codex: 5, pi: 5, opencode: 5 });
+      expect(existsSync(join(root, ".pi"))).toBe(false);
+      expect(existsSync(join(root, ".config"))).toBe(false);
+    });
+
+    it("are not moved by an environment variable in this release", () => {
+      const status = skillsStatus({
+        homedir: () => root,
+        env: { XDG_CONFIG_HOME: "/xdg", CLAUDE_CONFIG_DIR: "/cc", CODEX_HOME: "/cx" },
+      });
+      expect(status.dirs.pi).toBe(piDir());
+      expect(status.dirs.opencode).toBe(opencodeDir());
+    });
   });
 
   it("reports a SKILL.md without frontmatter as broken", () => {
@@ -202,5 +262,31 @@ describe("setup.status", () => {
     expect(status.extras).toEqual({ manager: 0, worker: 9, reviewer: 0 });
     expect(status.skills.skills).toHaveLength(REQUIRED_SKILLS.length + OPTIONAL_SKILLS.length);
     expect(status.latestCheckedOn).toBe("2026-09-16");
+    // The payload passes its own contract, the Pi and OpenCode columns intact.
+    expect(setupStatusSchema.parse(status)).toEqual(status);
+    expect(status.skills.missingRequired).toEqual({ claude: 5, codex: 5, pi: 5, opencode: 5 });
+  });
+
+  it("an older payload without the Pi and OpenCode columns still parses", () => {
+    const old = {
+      tools: [],
+      latestCheckedOn: "2026-09-16",
+      skills: {
+        checkedAt: "2026-09-20T00:00:00.000Z",
+        dirs: { shared: "/h/.agents/skills", claude: "/h/.claude/skills", codex: "/h/.codex/skills" },
+        skills: [{ name: "feature-workflow", required: true, claude: "ok", codex: "missing", problem: null }],
+        missingRequired: { claude: 0, codex: 1 },
+        installCommand: "npx -y skills add x",
+      },
+      extras: { manager: 0, worker: 0, reviewer: 0 },
+    };
+    const parsed = setupStatusSchema.parse(old);
+    expect(parsed).toEqual(old);
+    expect(parsed.skills.skills[0]?.pi).toBeUndefined();
+    expect(parsed.skills.missingRequired.opencode).toBeUndefined();
+    // A present column still has to be a known state.
+    const bad = structuredClone(old);
+    Object.assign(bad.skills.skills[0]!, { pi: "installed" });
+    expect(setupStatusSchema.safeParse(bad).success).toBe(false);
   });
 });

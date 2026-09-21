@@ -185,7 +185,7 @@ describe("manager.ensure — no Manager yet", () => {
 
     const result = await ensureManager({ workspaceId: WS }, deps(fake.paseo));
 
-    expect(result).toEqual({ agentId: "created-1", created: true, otherManagerIds: [], modeNotice: null });
+    expect(result).toEqual({ agentId: "created-1", created: true, otherManagerIds: [], modeNotice: null, toolsNotice: null });
     expect(fake.calls.indexOf("list")).toBeLessThan(fake.calls.indexOf("create"));
     // No label filter since delta 20260918g §4.2–§4.3: a Manager started from
     // Paseo's own new-agent flow carries no bm.role label and is recognised by
@@ -345,7 +345,7 @@ describe("manager.ensure — Manager already exists", () => {
     const first = await ensureManager({ workspaceId: WS }, deps(fake.paseo));
     const second = await ensureManager({ workspaceId: WS }, deps(fake.paseo));
 
-    expect(first).toEqual({ agentId: "mgr-existing", created: false, otherManagerIds: [], modeNotice: null });
+    expect(first).toEqual({ agentId: "mgr-existing", created: false, otherManagerIds: [], modeNotice: null, toolsNotice: null });
     expect(second).toEqual(first);
     expect(fake.createCalls).toHaveLength(0);
     expect(fake.calls).not.toContain("config.get");
@@ -402,7 +402,7 @@ describe("manager.ensure — an existing Manager is switched once (delta 2026091
       ["/opt/fake/paseo", "agent", "mode", "mgr-1", "bypassPermissions", "--json"],
       ["/opt/fake/paseo", "agent", "update", "mgr-1", "--label", "bm.modeSet=bypassPermissions", "--json"],
     ]);
-    expect(result).toEqual({ agentId: "mgr-1", created: false, otherManagerIds: [], modeNotice: null });
+    expect(result).toEqual({ agentId: "mgr-1", created: false, otherManagerIds: [], modeNotice: null, toolsNotice: null });
     expect(fake.createCalls).toEqual([]);
   });
 
@@ -472,7 +472,7 @@ describe("manager.ensure — two live Managers", () => {
 
     const result = await ensureManager({ workspaceId: WS }, deps(fake.paseo));
 
-    expect(result).toEqual({ agentId: "mgr-new", created: false, otherManagerIds: ["mgr-old"], modeNotice: null });
+    expect(result).toEqual({ agentId: "mgr-new", created: false, otherManagerIds: ["mgr-old"], modeNotice: null, toolsNotice: null });
     expect(fake.createCalls).toHaveLength(0);
     expect(fake.archived).toEqual([]);
     expect(fake.liveManagers().map((a) => a.id).sort()).toEqual(["mgr-new", "mgr-old"]);
@@ -504,7 +504,7 @@ describe("manager.ensure — a Manager without the bm.role label (delta 20260918
 
     const result = await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), cli, log: () => {} });
 
-    expect(result).toEqual({ agentId: "user-mgr", created: false, otherManagerIds: [], modeNotice: null });
+    expect(result).toEqual({ agentId: "user-mgr", created: false, otherManagerIds: [], modeNotice: null, toolsNotice: null });
     expect(fake.createCalls).toEqual([]);
     expect(runs).toEqual([]);
   });
@@ -519,7 +519,7 @@ describe("manager.ensure — a Manager without the bm.role label (delta 20260918
 
     const result = await ensureManager({ workspaceId: WS }, deps(fake.paseo));
 
-    expect(result).toEqual({ agentId: "bm-mgr", created: false, otherManagerIds: ["user-mgr"], modeNotice: null });
+    expect(result).toEqual({ agentId: "bm-mgr", created: false, otherManagerIds: ["user-mgr"], modeNotice: null, toolsNotice: null });
     expect(fake.createCalls).toEqual([]);
   });
 
@@ -604,6 +604,7 @@ describe("plugin server entry", () => {
       created: false,
       otherManagerIds: ["mgr-old"],
       modeNotice: null,
+      toolsNotice: null,
     });
   });
 
@@ -611,3 +612,103 @@ describe("plugin server entry", () => {
     expect(await readManagerInstructions()).toBe(managerMd);
   });
 });
+
+describe("manager.ensure — posture by provider capability (delta 20260921 §4.2.2, REQ-063)", () => {
+  const openCodeModes: ProviderMode[] = [{ id: "bytes" }, { id: "review" }];
+  const openCodeFeatures = [{ type: "toggle", id: "auto_accept", label: "Auto Accept", value: false }];
+  const openCodeProfile: ManagerAgentProfile = { id: "bm-manager", provider: "bm-manager", model: "anthropic/claude-sonnet-4-6" };
+
+  function withFeatures(fake: ReturnType<typeof fakePaseo>, features: unknown[] = openCodeFeatures) {
+    const listFeatures = vi.fn(async () => ({ features }));
+    (fake.paseo as unknown as { providers: Record<string, unknown> }).providers.listFeatures = listFeatures;
+    return listFeatures;
+  }
+
+  it("creates a Manager on OpenCode in a listed mode with auto-approve on, reading the features in the workspace's directory", async () => {
+    const fake = fakePaseo({ profiles: [openCodeProfile], modes: openCodeModes });
+    const listFeatures = withFeatures(fake);
+    const logs: string[] = [];
+    await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), workspaceDirectory: async () => "/repo", log: (m) => logs.push(m) });
+    const options = fake.createCalls[0]!.options;
+    expect(options.config.modeId).toBe("bytes");
+    expect(options.config.featureValues).toEqual({ auto_accept: true });
+    expect(options.labels?.["bm.modeSet"]).toBe("bytes");
+    expect(listFeatures).toHaveBeenCalledWith({ provider: "bm-manager/anthropic/claude-sonnet-4-6", cwd: "/repo" });
+    expect(logs).toEqual([]);
+  });
+
+  it("keeps the profile's own OpenCode agent and its own auto_accept", async () => {
+    const fake = fakePaseo({ profiles: [{ ...openCodeProfile, modeId: "review", featureValues: { auto_accept: false } }], modes: openCodeModes });
+    withFeatures(fake);
+    await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), workspaceDirectory: async () => "/repo", log: () => {} });
+    const options = fake.createCalls[0]!.options;
+    expect(options.config.modeId).toBe("review");
+    expect(options.config.featureValues).toEqual({ auto_accept: false });
+  });
+
+  it("creates a Manager on Pi (no modes) with no mode, no feature and no label, and says nothing", async () => {
+    const fake = fakePaseo({ profiles: [{ id: "bm-manager", provider: "bm-manager", model: "qwen" }], modes: [] });
+    const listFeatures = withFeatures(fake, []);
+    const logs: string[] = [];
+    await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), log: (m) => logs.push(m) });
+    const options = fake.createCalls[0]!.options;
+    expect(options.config).not.toHaveProperty("modeId");
+    expect(options.config).not.toHaveProperty("featureValues");
+    expect(options.labels).not.toHaveProperty("bm.modeSet");
+    expect(listFeatures).not.toHaveBeenCalled();
+    expect(logs).toEqual([]);
+  });
+
+  it("does not switch an existing labelled Manager on OpenCode, and says why, unless it already auto-approves", async () => {
+    const make = (features?: Array<{ id: string; value: unknown }>) =>
+      fakePaseo({
+        agents: [agent({ id: "mgr-1", currentModeId: "bytes", ...(features ? { features } : {}) })],
+        profiles: [openCodeProfile],
+        modes: openCodeModes,
+      });
+    const cli = { find: () => "/opt/fake/paseo", run: vi.fn(async () => ({ code: 0, output: "{}", timedOut: false })) };
+    const without = await ensureManager({ workspaceId: WS }, { ...deps(make().paseo), cli, log: () => {} });
+    expect(without.created).toBe(false);
+    expect(without.modeNotice).toMatch(/created before paseo-bm could turn on auto-approve/);
+    const withIt = await ensureManager({ workspaceId: WS }, { ...deps(make([{ id: "auto_accept", value: true }]).paseo), cli, log: () => {} });
+    expect(withIt.modeNotice).toBeNull();
+    expect(cli.run).not.toHaveBeenCalled();
+  });
+});
+
+describe("manager.ensure — a new Manager without Paseo tools (delta 20260921 §4.2.4, REQ-063 d)", () => {
+  it("returns toolsNotice when the created Manager reports supportsMcpServers false, and records it for the Setup screen", async () => {
+    const { toolsSeen, forgetTools } = await import("../plugin/server/tools-check");
+    forgetTools();
+    const fake = fakePaseo({ profiles: [{ id: "bm-manager", provider: "bm-manager", model: "qwen" }], modes: [], createdSnapshot: { capabilities: { supportsMcpServers: false } } });
+    const result = await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), log: () => {} });
+    expect(result.toolsNotice).toBe(
+      "This Manager runs on bm-manager/qwen without Paseo tools (on Pi this means pi-mcp-adapter is missing): it cannot create or message a Worker.",
+    );
+    expect(toolsSeen().manager).toMatchObject({ state: "missing", agentId: result.agentId, provider: "bm-manager/qwen" });
+  });
+
+  it("says nothing when the Manager has its tools, when Paseo does not say, or when the Manager already existed", async () => {
+    const withTools = fakePaseo({ createdSnapshot: { capabilities: { supportsMcpServers: true } } });
+    expect((await ensureManager({ workspaceId: WS }, { ...deps(withTools.paseo), log: () => {} })).toolsNotice).toBeNull();
+    const silent = fakePaseo({});
+    expect((await ensureManager({ workspaceId: WS }, { ...deps(silent.paseo), log: () => {} })).toolsNotice).toBeNull();
+    const existing = fakePaseo({ agents: [agent({ id: "mgr-1", labels: { "bm.role": "manager", "bm.modeSet": "x" } })] });
+    expect((await ensureManager({ workspaceId: WS }, { ...deps(existing.paseo), log: () => {} })).toolsNotice).toBeNull();
+  });
+
+  it("an older server's answer without toolsNotice still parses", () => {
+    expect(managerEnsureRpc.output.parse({ agentId: "mgr-1", created: false, otherManagerIds: [], modeNotice: null })).not.toHaveProperty("toolsNotice");
+  });
+});
+
+describe("manager.ensure — review b4: a Manager on Pi gets no feature from its profile", () => {
+  it("drops the profile's featureValues and modeId on a provider without modes", async () => {
+    const fake = fakePaseo({ profiles: [{ id: "bm-manager", provider: "bm-manager", model: "qwen", modeId: "x", featureValues: { fast_mode: true } }], modes: [] });
+    await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), log: () => {} });
+    const options = fake.createCalls[0]!.options;
+    expect(options.config).not.toHaveProperty("modeId");
+    expect(options.config).not.toHaveProperty("featureValues");
+  });
+});
+

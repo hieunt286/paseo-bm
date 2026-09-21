@@ -312,9 +312,9 @@ skill pass is your own work, never a review.
 
 **Create the Reviewer** with Paseo's `create_agent`: profile `bm-reviewer`,
 provider `bm-reviewer/<model of the profile>`, labels `bm.role` = `reviewer`,
-`bm.requestId` = this request's `req-…`, `bm.batchId` = the batch id,
-`bm.version` = your own if you can read it; `settings.modeId` = the Reviewer
-mode in your `## Runtime facts` (missing: send `blocked` with Paseo's refusal).
+`bm.requestId` = the request's `req-…`, `bm.batchId` = the batch id, `bm.version`
+= yours if readable; `settings.modeId` = the Reviewer mode in your `## Runtime
+facts` (`none`: pass no mode; missing: send `blocked` with Paseo's refusal).
 
 **What to put in the message**, because the Reviewer knows only what you tell
 it: the `requestId`, the `batchId`, the stage (`documents`, `beads`, `plan` or

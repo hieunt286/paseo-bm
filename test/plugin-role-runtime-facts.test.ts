@@ -203,3 +203,53 @@ describe("currentInstructions (the manager.ensure path)", () => {
     expect(await currentInstructions("reviewer", api, { homedir: () => "/nonexistent-home-for-test" })).toBe(BASE_INSTRUCTIONS.reviewer);
   });
 });
+
+describe("Runtime facts by provider capability (delta 20260921 §4.2.3, REQ-063 c)", () => {
+  const paseo = (listModes: (provider: string) => unknown, providers?: Record<string, unknown>, profiles: unknown[] = []) => ({
+    providers: { listModes: vi.fn(listModes) },
+    ...(providers === undefined ? {} : { config: { get: async () => ({ config: { providers, agentProfiles: profiles } }) } }),
+  });
+  const OPENCODE = [{ id: "bytes" }, { id: "review" }];
+
+  it("says 'none' for a child whose provider has no modes, word for word", () => {
+    expect(runtimeFactsText("manager", { workerModeNone: true })).toBe(
+      `${RUNTIME_FACTS_HEADING}\n\nWorker mode: none — do not pass \`settings.modeId\` when you create a Worker; Paseo sets it.`,
+    );
+    expect(runtimeFactsText("worker", { reviewerModeNone: true })).toBe(
+      `${RUNTIME_FACTS_HEADING}\n\nReviewer mode: none — do not pass \`settings.modeId\` when you create a Reviewer; Paseo sets it.`,
+    );
+    expect(runtimeFactsText("reviewer", { reviewerModeNone: true })).toBe("");
+  });
+
+  it("names none for a Pi Worker or Reviewer", async () => {
+    expect(await runtimeFactsOf("manager", paseo(async () => ({ modes: [] })))).toEqual({ workerModeNone: true });
+    expect(await runtimeFactsOf("worker", paseo(async () => ({ modes: [] })))).toEqual({ reviewerModeNone: true });
+  });
+
+  it("names the OpenCode agent the hook would pass: the profile's if listed, else the first", async () => {
+    expect(await runtimeFactsOf("manager", paseo(async () => ({ modes: OPENCODE })))).toEqual({ workerModeId: "bytes" });
+    expect(await runtimeFactsOf("worker", paseo(async () => ({ modes: OPENCODE }), {}, [{ id: "bm-reviewer", modeId: "review" }]))).toEqual({
+      reviewerModeId: "review",
+    });
+  });
+
+  it("tells the fallback `auto` only when bm-reviewer runs on Claude or Codex (or its base cannot be read)", async () => {
+    forgetModes();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const failing = async () => {
+      throw new Error("daemon busy");
+    };
+    const log = vi.fn();
+    expect(await runtimeFactsOf("worker", paseo(failing, { "bm-reviewer": { extends: "codex" } }), undefined, log)).toEqual({ reviewerModeId: "auto" });
+    expect(await runtimeFactsOf("worker", paseo(failing, { "bm-reviewer": { extends: "opencode" } }), undefined, log)).toEqual({});
+    expect(log.mock.calls.at(-1)?.[0]).toBe("[paseo-bm] could not read the modes of bm-reviewer (base provider opencode); the Worker is told no Reviewer mode.");
+    warn.mockRestore();
+  });
+
+  it("tells the creators, in their role files, to pass exactly that value and nothing for 'none'", async () => {
+    const { readFileSync } = await import("node:fs");
+    const read = (name: string) => readFileSync(new URL(`../plugin/roles/${name}.md`, import.meta.url), "utf8").replace(/\s+/g, " ");
+    expect(read("manager")).toContain("when it says `none`, pass no `settings.modeId`");
+    expect(read("worker")).toContain("Runtime facts` (`none`: pass no mode;");
+  });
+});

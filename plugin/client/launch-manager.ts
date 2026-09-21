@@ -53,6 +53,8 @@ export type LauncherState =
       created: boolean;
       otherManagerIds: string[];
       modeNotice: string | null;
+      /** Added by delta 20260921 §4.2.4; absent in a state built before it. */
+      toolsNotice?: string | null;
     }
   | { status: "error"; workspaceId: string; code: string | null; message: string };
 
@@ -114,6 +116,7 @@ export function createManagerLauncher(): ManagerLauncher {
           created: result.created,
           otherManagerIds: [...result.otherManagerIds],
           modeNotice: result.modeNotice ?? null,
+          toolsNotice: result.toolsNotice ?? null,
         });
         return "opened";
       } catch (error) {
@@ -202,6 +205,9 @@ export function describeLauncherState(state: LauncherState): LauncherNotice[] {
       }
       // The chat is already open: this only explains why the Manager may still ask for permission.
       if (state.modeNotice !== null) notices.push({ tone: "warning", text: state.modeNotice });
+      // Delta 20260921 §4.2.4: without Paseo tools this Manager cannot run a request.
+      const toolsNotice = state.toolsNotice ?? null;
+      if (toolsNotice !== null) notices.push({ tone: "warning", text: toolsNotice });
       return notices;
     }
     case "error":

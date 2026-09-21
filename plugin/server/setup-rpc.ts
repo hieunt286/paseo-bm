@@ -15,6 +15,7 @@ import {
 } from "./role-extras";
 import { skillsStatus, type SkillDeps } from "./setup-skills";
 import { LATEST_KNOWN, installTool, toolsStatus, type ToolDeps } from "./setup-tools";
+import { toolsSeen } from "./tools-check";
 import {
   DashboardError,
   rolesInstructionsRpc,
@@ -40,6 +41,7 @@ export async function handleSetupStatus(paseo: unknown, deps: SetupDeps = {}): P
     latestCheckedOn: LATEST_KNOWN.checkedOn,
     skills: skillsStatus(deps),
     extras: { manager: extras.manager.length, worker: extras.worker.length, reviewer: extras.reviewer.length },
+    paseoTools: toolsSeen(),
   };
 }
 

@@ -19,7 +19,7 @@ import { MANAGER_INSTRUCTIONS } from "./manager-instructions";
 import { REVIEWER_INSTRUCTIONS } from "./reviewer-instructions";
 import { WORKER_INSTRUCTIONS } from "./worker-instructions";
 import { writeStoreFileAtomically } from "./trace-store";
-import { chooseModeId, lastModesOf, modesFor, profileModeOf } from "./role-mode";
+import { TIMED_OUT, capabilityOf, chooseModeId, lastModesOf, modesFor, profileModeOf, runPostureOf, withTimeout, type ProviderMode } from "./role-mode";
 import { DashboardError } from "../shared/contracts";
 
 export type Role = "manager" | "worker" | "reviewer";
@@ -64,10 +64,23 @@ const EMPTY: RoleExtras = { manager: "", worker: "", reviewer: "" };
 export interface RuntimeFacts {
   workerModeId?: string | null;
   reviewerModeId?: string | null;
+  /** The Worker's provider has no modes at all (Pi): the Manager must pass none (delta 20260921 §4.2.3). */
+  workerModeNone?: boolean;
+  /** The Reviewer's provider has no modes at all (Pi): the Worker must pass none. */
+  reviewerModeNone?: boolean;
 }
 
-/** Reviewer mode the Worker is told when no mode list could ever be read (owner decision Q9 a). */
+/**
+ * Reviewer mode the Worker is told when no mode list could ever be read (owner
+ * decision Q9 a). Only for a `bm-reviewer` whose base provider is one of
+ * `REVIEWER_FALLBACK_PROVIDERS`, or cannot be read at all: another provider
+ * does not list `auto`, and Paseo would refuse the creation on it (delta
+ * 20260921 §4.2.2, F4).
+ */
 export const REVIEWER_FALLBACK_MODE = "auto";
+
+/** Base providers known to list `auto` (proposal §1.1). */
+export const REVIEWER_FALLBACK_PROVIDERS: readonly string[] = ["claude", "codex"];
 
 /** Agent-facing, so English. `roles/manager.md` and `roles/worker.md` point at this heading. */
 export const RUNTIME_FACTS_HEADING = "## Runtime facts";
@@ -76,8 +89,13 @@ export const RUNTIME_FACTS_HEADING = "## Runtime facts";
 export function runtimeFactsText(role: Role, facts: RuntimeFacts = {}): string {
   const trimmed = (value: string | null | undefined) => (typeof value === "string" ? value.trim() : "");
   const child = role === "manager" ? "Worker" : role === "worker" ? "Reviewer" : null;
-  const mode = role === "manager" ? trimmed(facts.workerModeId) : role === "worker" ? trimmed(facts.reviewerModeId) : "";
-  if (child === null || mode === "") return "";
+  if (child === null) return "";
+  const none = role === "manager" ? facts.workerModeNone === true : facts.reviewerModeNone === true;
+  if (none) {
+    return `${RUNTIME_FACTS_HEADING}\n\n${child} mode: none — do not pass \`settings.modeId\` when you create a ${child}; Paseo sets it.`;
+  }
+  const mode = role === "manager" ? trimmed(facts.workerModeId) : trimmed(facts.reviewerModeId);
+  if (mode === "") return "";
   return `${RUNTIME_FACTS_HEADING}\n\n${child} mode: \`${mode}\` — pass it as \`settings.modeId\` when you create a ${child}.`;
 }
 
@@ -115,7 +133,26 @@ export async function runtimeFactsOf(
     if (role === "worker") {
       const profileModeId = await profileModeOf(paseo, "bm-reviewer");
       const modes = await modesFor(paseo, "bm-reviewer", undefined, cwd);
+      // Delta 20260921 §4.2.2–§4.2.3: the value the hook's posture rule gives
+      // the Reviewer on an untiered provider, or "none" for one without modes.
+      const byCapability = childModeByCapability("reviewer", modes, profileModeId);
+      if (byCapability !== undefined) {
+        return byCapability === null ? { reviewerModeNone: true } : { reviewerModeId: byCapability };
+      }
       if (modes === null) {
+        const base = await baseProviderOf(paseo, "bm-reviewer");
+        if (base !== null && !REVIEWER_FALLBACK_PROVIDERS.includes(base)) {
+          // `auto` is Claude's and Codex's; told to a Worker whose Reviewer runs
+          // elsewhere, it would only make Paseo refuse the creation (F4).
+          const last = lastModesOf("bm-reviewer");
+          const fromLast = last === null ? undefined : childModeByCapability("reviewer", last.modes, profileModeId);
+          if (typeof fromLast === "string") {
+            log(`[paseo-bm] could not read the modes of bm-reviewer; the Worker is told to pass the Reviewer mode "${fromLast}" (last list read at ${last!.at}).`);
+            return { reviewerModeId: fromLast };
+          }
+          log(`[paseo-bm] could not read the modes of bm-reviewer (base provider ${base}); the Worker is told no Reviewer mode.`);
+          return {};
+        }
         // Unlike the Manager's case, the profile's own mode is NOT passed blind:
         // its tier is unknown, and a Reviewer must never run in a dangerous one.
         // The fallback is the last list read in this run, through the same
@@ -134,6 +171,10 @@ export async function runtimeFactsOf(
     }
     const profileModeId = await profileModeOf(paseo, "bm-worker");
     const modes = await modesFor(paseo, "bm-worker", undefined, cwd);
+    const byCapability = childModeByCapability("worker", modes, profileModeId);
+    if (byCapability !== undefined) {
+      return byCapability === null ? { workerModeNone: true } : { workerModeId: byCapability };
+    }
     if (modes === null) {
       // A mode the owner set by hand on the profile is still worth passing:
       // Paseo validates it and reports its own error if it is wrong.
@@ -144,6 +185,38 @@ export async function runtimeFactsOf(
   } catch (error) {
     log(`[paseo-bm] reading the Runtime facts of ${role} failed: ${error instanceof Error ? error.message : String(error)}`);
     return {};
+  }
+}
+
+/**
+ * The child mode on an `untiered` provider (the posture rule's mode: the
+ * profile's if listed, else the first listed), `null` for a provider with no
+ * modes, and `undefined` for `tiered` / `unknown`, whose rules stay as they were.
+ */
+function childModeByCapability(
+  role: "worker" | "reviewer",
+  modes: readonly ProviderMode[] | null,
+  profileModeId: string | null,
+): string | null | undefined {
+  const capability = capabilityOf(modes);
+  if (capability === "none") return null;
+  if (capability !== "untiered") return undefined;
+  return runPostureOf(role, "untiered", modes ?? [], null, profileModeId)?.modeId;
+}
+
+/** The `extends` of a paseo-bm provider alias, or `null` when it cannot be read. Never throws. */
+async function baseProviderOf(paseo: unknown, alias: string): Promise<string | null> {
+  const get = (paseo as { config?: { get?: unknown } } | null | undefined)?.config?.get;
+  if (typeof get !== "function") return null;
+  try {
+    const result = await withTimeout(
+      get.call((paseo as { config: unknown }).config) as Promise<{ config?: { providers?: Record<string, { extends?: unknown } | undefined> } }>,
+    );
+    if (result === TIMED_OUT) return null;
+    const base = result?.config?.providers?.[alias]?.extends;
+    return typeof base === "string" && base.trim() !== "" ? base : null;
+  } catch {
+    return null;
   }
 }
 

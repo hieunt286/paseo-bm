@@ -16,6 +16,11 @@
  *    login command is known: print manual instructions and attach
  *    `W_PROVIDER_NOT_LOGGED_IN`. That never blocks the install.
  *
+ * Pi is the one exception to all three (REQ-063 (f), Design delta 20260921
+ * §4.2.5): paseo-bm knows no login command for it, so the installer prints
+ * {@link PI_SIGN_IN_GUIDANCE}, records the state as `unknown`, and starts no
+ * process at all — neither `paseo` nor a login tool.
+ *
  * This file performs no filesystem access at all; `test/provider-login.test.ts`
  * wraps `node:fs` to prove it.
  *
@@ -113,13 +118,21 @@ export interface LoginCommand {
  * `--help` on 2026-09-15: Claude Code 2.1.271 (`claude auth login`), Codex CLI
  * (`codex login`), OpenCode (`opencode providers login`; `auth` is an alias).
  * A provider not listed here — including ids such as `codex-lead` that wrap a
- * listed tool — gets manual instructions instead of a guessed command.
+ * listed tool — gets manual instructions instead of a guessed command. Pi is
+ * deliberately absent too: it gets {@link PI_SIGN_IN_GUIDANCE} instead.
  */
 export const PROVIDER_LOGIN_COMMANDS: Readonly<Record<string, LoginCommand>> = {
   claude: { executable: "claude", args: ["auth", "login"] },
   codex: { executable: "codex", args: ["login"] },
   opencode: { executable: "opencode", args: ["providers", "login"] },
 };
+
+/** The Paseo provider id of Pi. Exact match only, like {@link PROVIDER_LOGIN_COMMANDS}. */
+export const PI_PROVIDER_ID = "pi";
+
+/** What the installer prints for Pi instead of offering a login command (Design delta 20260921 §4.2.5). */
+export const PI_SIGN_IN_GUIDANCE =
+  "Pi has no login command paseo-bm knows; sign in the way Pi's own documentation describes, then run doctor.";
 
 export function loginCommandFor(providerId: string): LoginCommand | undefined {
   return Object.prototype.hasOwnProperty.call(PROVIDER_LOGIN_COMMANDS, providerId)
@@ -237,7 +250,10 @@ export function runLoginCommand(command: LoginCommand, options: LoginRunOptions 
 export type LoginOutcome =
   /** Paseo already reports a login session. */
   | "already-logged-in"
-  /** Paseo cannot tell; nothing is asked and nothing is warned. */
+  /**
+   * Paseo cannot tell; nothing is asked and nothing is warned. For Pi this is
+   * the outcome by design, with {@link PI_SIGN_IN_GUIDANCE} printed.
+   */
   | "unknown"
   /** The login command ran and Paseo now reports a session. */
   | "logged-in"
@@ -342,6 +358,25 @@ export async function ensureProviderLogins(options: EnsureProviderLoginsOptions)
 
   const providers: ProviderLoginResult[] = [];
   for (const [provider, roles] of rolesByProvider) {
+    if (provider === PI_PROVIDER_ID) {
+      // Pi: no login command to offer, and its state is `unknown` like every
+      // provider but Claude. Print the guidance; start no process.
+      print(PI_SIGN_IN_GUIDANCE);
+      providers.push({
+        provider,
+        roles,
+        before: "unknown",
+        after: "unknown",
+        command: null,
+        outcome: "unknown",
+        ran: false,
+        run: null,
+        manualInstructions: [PI_SIGN_IN_GUIDANCE],
+        warning: null,
+      });
+      continue;
+    }
+
     const before = (await checkProviderLogin(options.runner, provider)).state;
     const login = loginCommandFor(provider);
     const command = login === undefined ? null : formatLoginCommand(login);

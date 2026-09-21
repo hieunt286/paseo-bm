@@ -10,6 +10,7 @@ import {
   traceDetailSchema,
   traceDeleteScopeSchema,
   traceRecordSchema,
+  traceRuntimeSchema,
   traceStoreMetaSchema,
   traceSummarySchema,
   traceWorkspaceMetaSchema,
@@ -301,6 +302,36 @@ describe("persisted trace schema v1", () => {
     it("leaves the record and store version at 1", () => {
       expect(TRACE_STORE_SCHEMA_VERSION).toBe(1);
       expect(traceRecordSchema.parse({ ...record, runtime }).v).toBe(1);
+    });
+  });
+
+  // delta 20260921 §4.2.7 (F7): `runtime.provider` is ADDED the same way, as an
+  // optional key inside `runtime`; the version still does not move.
+  describe("the added runtime.provider field", () => {
+    const oldRuntime = { model: "claude-opus-5", thinkingOptionId: null, modeId: "auto" };
+    const newRuntime = { ...oldRuntime, provider: "bm-worker" };
+    /** The reader that shipped with delta 20260918: `runtime` without `provider`. */
+    const oldReader = traceRecordSchema.extend({
+      runtime: traceRuntimeSchema.omit({ provider: true }).nullable().optional(),
+    });
+
+    it("a new record parses with the older reader, which drops the provider", () => {
+      const parsed = oldReader.parse({ ...record, runtime: newRuntime });
+      expect(parsed.runtime).toEqual(oldRuntime);
+      expect(parsed.runtime).not.toHaveProperty("provider");
+      expect(parsed.v).toBe(1);
+    });
+
+    it("an old record without it parses with the new reader; null is accepted too", () => {
+      const parsed = traceRecordSchema.parse({ ...record, runtime: oldRuntime });
+      expect(parsed.runtime).toEqual(oldRuntime);
+      expect(parsed.runtime).not.toHaveProperty("provider");
+      expect(traceRecordSchema.parse({ ...record, runtime: { ...oldRuntime, provider: null } }).runtime?.provider).toBeNull();
+      expect(traceRecordSchema.parse({ ...record, runtime: newRuntime }).runtime).toEqual(newRuntime);
+    });
+
+    it("rejects a provider that is not a string", () => {
+      expect(() => traceRecordSchema.parse({ ...record, runtime: { ...oldRuntime, provider: 42 } })).toThrow();
     });
   });
 });

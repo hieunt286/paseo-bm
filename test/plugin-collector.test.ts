@@ -18,6 +18,7 @@ import {
 } from "../plugin/server/collector";
 import { clearTraceStoreCache, readRecords, withWorkspaceLock } from "../plugin/server/trace-store";
 import { reconstructTraces } from "../plugin/server/traces";
+import { traceRecordSchema, traceRuntimeSchema } from "../plugin/shared/contracts";
 
 /**
  * WP-205: the turn collector.
@@ -418,7 +419,7 @@ describe("what the agent ran on (delta 20260918 §4.2)", () => {
       lastUsage: { inputTokens: 1, cachedInputTokens: 0, outputTokens: 1 },
     });
 
-    expect(record.runtime).toEqual({ model: "claude-opus-5", thinkingOptionId: "high", modeId: "bypassPermissions" });
+    expect(record.runtime).toEqual({ model: "claude-opus-5", thinkingOptionId: "high", modeId: "bypassPermissions", provider: null });
     // `usage.model` keeps its old source, so an older plugin reads a new record the same way.
     expect(record.usage?.model).toBe("claude-sonnet-5");
   });
@@ -440,7 +441,7 @@ describe("what the agent ran on (delta 20260918 §4.2)", () => {
       runtimeInfo: { model: null, thinkingOptionId: null, modeId: null },
     });
 
-    expect(record.runtime).toEqual({ model: "claude-opus-5", thinkingOptionId: null, modeId: "auto" });
+    expect(record.runtime).toEqual({ model: "claude-opus-5", thinkingOptionId: null, modeId: "auto", provider: null });
   });
 
   it("no snapshot, or no refetch at all: runtime is null, like usage", async () => {
@@ -456,7 +457,125 @@ describe("what the agent ran on (delta 20260918 §4.2)", () => {
   it("a malformed snapshot costs the fields, never the turn", async () => {
     const record = await recordWith({ model: 42, runtimeInfo: "not an object", currentModeId: ["x"] });
 
-    expect(record.runtime).toEqual({ model: null, thinkingOptionId: null, modeId: null });
+    expect(record.runtime).toEqual({ model: null, thinkingOptionId: null, modeId: null, provider: null });
+  });
+});
+
+// delta 20260921 §4.2.7 (F7): the provider each turn ran on, so a model the
+// bundled price table does not know can later be priced from its provider.
+describe("the provider of each turn (runtime.provider)", () => {
+  async function recordWith(agent: unknown) {
+    const refetch = vi.fn(async () => ({ entries: [], agent }));
+    const built = await buildRecord(asEvent(turnEnded()), {
+      location: null,
+      paseo: { agents: { ref: () => ({ timeline: { refetch } }) } },
+    });
+    return built!.record;
+  }
+
+  /** The reader a plugin built before this field shipped: `runtime` has three keys. */
+  const oldRecordSchema = traceRecordSchema.extend({
+    runtime: traceRuntimeSchema.omit({ provider: true }).nullable().optional(),
+  });
+
+  it("comes from the snapshot's own provider", async () => {
+    const record = await recordWith({ provider: "bm-worker", model: "claude-opus-5", currentModeId: "bypassPermissions" });
+
+    expect(record.runtime).toEqual({ model: "claude-opus-5", thinkingOptionId: null, modeId: "bypassPermissions", provider: "bm-worker" });
+  });
+
+  it.each([
+    ["bm-worker/claude-opus-5", "bm-worker"],
+    // OpenCode model ids carry a slash of their own (design F2): the provider
+    // is everything before the FIRST one.
+    ["bm-reviewer/anthropic/claude-sonnet-4-6", "bm-reviewer"],
+    ["opencode", "opencode"],
+  ])("a provider selection %s is recorded as the provider id %s", async (provider, expected) => {
+    expect((await recordWith({ provider, model: "m" })).runtime?.provider).toBe(expected);
+  });
+
+  it("is null when the snapshot names none — never guessed from the hook event", async () => {
+    // The event's agent is `bm-worker/claude-opus-5`; only the snapshot counts.
+    expect((await recordWith({ model: "claude-opus-5" })).runtime?.provider).toBeNull();
+    expect((await recordWith({ model: "claude-opus-5", provider: null })).runtime?.provider).toBeNull();
+    expect((await recordWith({ model: "claude-opus-5", provider: "" })).runtime?.provider).toBeNull();
+    expect((await recordWith({ model: "claude-opus-5", provider: 42 })).runtime?.provider).toBeNull();
+  });
+
+  it("runtime stays null, provider and all, when refetch fails or returns no snapshot", async () => {
+    expect((await recordWith(null)).runtime).toBeNull();
+    const failing = await buildRecord(asEvent(turnEnded()), {
+      location: null,
+      paseo: { agents: { ref: () => ({ timeline: { refetch: async () => Promise.reject(new Error("gone")) } }) } },
+    });
+    expect(failing!.record.runtime).toBeNull();
+  });
+
+  it("a new record parses with the reader that predates the field, which drops it", async () => {
+    const record = await recordWith({ provider: "bm-worker", model: "claude-opus-5", currentModeId: "auto" });
+    const onDisk = JSON.parse(JSON.stringify(record)) as unknown;
+
+    const parsed = oldRecordSchema.parse(onDisk);
+    expect(parsed.runtime).toEqual({ model: "claude-opus-5", thinkingOptionId: null, modeId: "auto" });
+    expect(parsed.runtime).not.toHaveProperty("provider");
+    // Everything else reads exactly as the new reader sees it.
+    expect({ ...parsed, runtime: null }).toEqual({ ...traceRecordSchema.parse(onDisk), runtime: null });
+    // The version does not move: an older reader never rejects it as too new.
+    expect(parsed.v).toBe(1);
+  });
+
+  it("an old record without it parses with the new reader, runtime intact", () => {
+    const old = oldRecordSchema.parse({
+      v: 1,
+      kind: "turn",
+      at: "2026-09-18T10:00:00.000Z",
+      workspaceId: WS,
+      agentId: "agent-worker",
+      role: "worker",
+      turnId: "turn-old",
+      requestId: null,
+      parentAgentId: "agent-manager",
+      agentCreatedAt: null,
+      startedAt: null,
+      endedAt: "2026-09-18T10:00:00.000Z",
+      outcome: "completed",
+      sent: [],
+      received: [],
+      reports: [],
+      reviews: [],
+      evidence: [],
+      usage: null,
+      runtime: { model: "claude-opus-5", thinkingOptionId: null, modeId: "auto" },
+    });
+
+    const parsed = traceRecordSchema.parse(JSON.parse(JSON.stringify(old)));
+    expect(parsed.runtime).toEqual({ model: "claude-opus-5", thinkingOptionId: null, modeId: "auto" });
+    expect(parsed.runtime).not.toHaveProperty("provider");
+  });
+
+  it("round-trips through the store, and an old line in the same file still reads", async () => {
+    const snapshot = { provider: "bm-worker/claude-opus-5", model: "claude-opus-5", currentModeId: "auto" };
+    const refetch = vi.fn(async () => ({ entries: [], agent: snapshot }));
+    const now = () => new Date("2026-09-21T10:00:00.000Z");
+    const paseo = { agents: { ref: () => ({ timeline: { refetch } }) } };
+    expect(await collectTurnEnded(asEvent(turnEnded()), { location, now, paseo })).toBe(true);
+
+    // A line written by a plugin built before the field: same file, no provider.
+    const monthlyFile = join(location.tracesDir, WS, "events-202609.jsonl");
+    const [line] = readFileSync(monthlyFile, "utf8").split("\n");
+    const older = JSON.parse(line!) as { turnId: string; at: string; endedAt: string; runtime: Record<string, unknown> };
+    older.turnId = "turn-0";
+    older.at = older.endedAt = "2026-09-20T10:00:00.000Z";
+    delete older.runtime["provider"];
+    writeFileSync(monthlyFile, `${JSON.stringify(older)}\n${line}\n`);
+    clearTraceStoreCache();
+
+    const stored = readRecords(location, WS);
+    expect(stored.skippedLines).toBe(0);
+    expect(stored.records.map((record) => [record.turnId, record.runtime?.provider])).toEqual([
+      ["turn-0", undefined],
+      ["turn-1", "bm-worker"],
+    ]);
   });
 });
 

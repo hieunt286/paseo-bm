@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import contribute from "../plugin/index.server";
 import { ROLE_PROMPT_SEPARATOR, applyRoleInstructions, chooseModeId, type ProviderMode } from "../plugin/server/role-hook";
-import { LOOKUP_TIMEOUT_MS, TIMED_OUT, forgetModes, withTimeout } from "../plugin/server/role-mode";
+import { LOOKUP_TIMEOUT_MS, TIMED_OUT, capabilityOf, forgetModes, modesFor, runPostureOf, withTimeout } from "../plugin/server/role-mode";
 
 // The entry resolves the install home from $HOME when Paseo's config names no
 // plugin path; point it at an empty directory so this machine's real
@@ -262,7 +262,9 @@ describe("before(\"agent.create\") start mode", () => {
   });
 
   it("gives a Worker the Reviewer mode it must pass, as Runtime facts after its role text (errata K10, Q1a)", async () => {
-    const { paseo } = paseoWith(async (provider) => ({ modes: provider === "bm-reviewer" ? CODEX_MODES : [] }));
+    // Delta 20260921 §4.2.1: an empty list now means "a provider without modes"
+    // (Pi), whose mode is removed; the Worker's own list is Claude's here.
+    const { paseo } = paseoWith(async (provider) => ({ modes: provider === "bm-reviewer" ? CODEX_MODES : CLAUDE_MODES }));
     const { run } = setup(paseo);
     // The Manager passes the Worker mode, as it always must.
     const result = await run({ config: { provider: "bm-worker", cwd: "/repo", modeId: "bypassPermissions" } });
@@ -278,9 +280,13 @@ describe("before(\"agent.create\") start mode", () => {
     const { run } = setup(paseo);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     expect((await run({ config: { provider: "bm-worker", cwd: "/repo", modeId: "bypassPermissions" } }))?.config?.systemPrompt).toBe(workerWithFallback);
-    expect(warn).toHaveBeenCalledTimes(2);
-    expect(String(warn.mock.calls[0]![0])).toMatch(/bm-reviewer.*provider not ready/);
-    expect(String(warn.mock.calls[1]![0])).toBe('[paseo-bm] could not read the modes of bm-reviewer; the Worker is told to pass the fallback Reviewer mode "auto" (static fallback).');
+    // Delta 20260921 §4.2.1: the Worker's own modes are looked up too (its
+    // capability class decides its auto-approve), and that failure is logged
+    // first; the Worker keeps the mode its creator chose.
+    expect(warn).toHaveBeenCalledTimes(3);
+    expect(String(warn.mock.calls[0]![0])).toMatch(/modes of bm-worker.*provider not ready/);
+    expect(String(warn.mock.calls[1]![0])).toMatch(/bm-reviewer.*provider not ready/);
+    expect(String(warn.mock.calls[2]![0])).toBe('[paseo-bm] could not read the modes of bm-reviewer; the Worker is told to pass the fallback Reviewer mode "auto" (static fallback).');
   });
 
   it("gives a Worker the mode its own profile sets, over the plugin's pick (bm-msy)", async () => {
@@ -308,13 +314,16 @@ describe("before(\"agent.create\") start mode", () => {
     expect(String(warn.mock.calls.at(-1)?.[0])).toMatch(/took longer than \d+ ms/);
   }, 20000);
 
-  it("keeps a Worker's chosen mode without looking up the Worker's modes", async () => {
+  it("keeps a Worker's chosen mode, looking up its own modes only to learn the provider's class (delta 20260921 §4.2.1)", async () => {
     const { spy, paseo } = paseoWith(async () => ({ modes: CLAUDE_MODES }));
     const { run } = setup(paseo);
     const result = await run({ config: { provider: "bm-worker", cwd: "/repo", modeId: "default" } });
-    // The only lookup such a Worker costs is the REVIEWER's modes, for its Runtime facts.
-    expect(spy.mock.calls.map((call) => call[0])).toEqual(["bm-reviewer"]);
+    // Before delta 20260921 such a Worker cost only the REVIEWER's lookup; it
+    // now also costs its own, because on an untiered provider (OpenCode) the
+    // chosen mode is kept but auto-approve must be turned on.
+    expect(spy.mock.calls.map((call) => call[0])).toEqual(["bm-worker", "bm-reviewer"]);
     expect(result?.config?.modeId).toBe("default");
+    expect(result?.config).not.toHaveProperty("featureValues");
   });
 
   it("starts a Reviewer in auto, and downgrades one created in full-access with one log line", async () => {
@@ -491,4 +500,132 @@ describe("before(\"agent.create\") profile thinking and features (delta 20260921
     expect(result?.config).not.toHaveProperty("thinkingOptionId");
     expect(warn.mock.calls.some((call) => /took longer than \d+ ms/.test(String(call[0])))).toBe(true);
   }, 20000);
+});
+
+describe("run posture by provider capability (delta 20260921 §4.2.1–§4.2.2, REQ-063)", () => {
+  // OpenCode's modes are the user's own OpenCode agents: no colorTier (design F1).
+  const OPENCODE_MODES = [{ id: "bytes", label: "Bytes" }, { id: "review", label: "Review" }];
+  const OPENCODE_FEATURES = [{ type: "toggle", id: "auto_accept", label: "Auto Accept", value: false }];
+  const CLAUDE_FEATURES = [{ type: "toggle", id: "fast_mode", label: "Fast", value: false }];
+
+  it("classifies providers as tiered, untiered, none or unknown", () => {
+    expect(capabilityOf(CLAUDE_MODES)).toBe("tiered");
+    expect(capabilityOf(OPENCODE_MODES)).toBe("untiered");
+    expect(capabilityOf([])).toBe("none");
+    expect(capabilityOf(null)).toBe("unknown");
+  });
+
+  it("tells a provider with no modes (an empty list without error) from a list that cannot be read", async () => {
+    const log = vi.fn();
+    expect(await modesFor({ providers: { listModes: async () => ({ modes: [] }) } }, "bm-worker", log)).toEqual([]);
+    expect(log).not.toHaveBeenCalled();
+    expect(await modesFor({ providers: { listModes: async () => ({ modes: [], error: "not ready" }) } }, "bm-worker", log)).toBeNull();
+    expect(log).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives every cell of the posture table (3 roles × 4 classes)", () => {
+    for (const role of ["manager", "worker", "reviewer"] as const) {
+      expect(runPostureOf(role, "tiered", CLAUDE_MODES, CLAUDE_FEATURES, null)).toBeUndefined();
+      expect(runPostureOf(role, "unknown", [], null, null)).toBeUndefined();
+      expect(runPostureOf(role, "none", [], [], null)).toEqual({});
+      expect(runPostureOf(role, "none", [], [], null, { modeId: "x", featureValues: { a: 1 } })).toEqual({ modeId: null, featureValues: null });
+    }
+    expect(runPostureOf("manager", "untiered", OPENCODE_MODES, OPENCODE_FEATURES, null)).toEqual({ modeId: "bytes", featureValues: { auto_accept: true } });
+    expect(runPostureOf("worker", "untiered", OPENCODE_MODES, OPENCODE_FEATURES, null)).toEqual({ modeId: "bytes", featureValues: { auto_accept: true } });
+    expect(runPostureOf("reviewer", "untiered", OPENCODE_MODES, OPENCODE_FEATURES, null)).toEqual({ modeId: "bytes", featureValues: { auto_accept: false } });
+  });
+
+  it("on an untiered provider always passes a listed mode: the creator's, else the profile's, else the first (design F11)", () => {
+    expect(runPostureOf("worker", "untiered", OPENCODE_MODES, [], "review")).toEqual({ modeId: "review" });
+    expect(runPostureOf("worker", "untiered", OPENCODE_MODES, [], "gone")).toEqual({ modeId: "bytes" });
+    expect(runPostureOf("worker", "untiered", OPENCODE_MODES, [], "review", { modeId: "bytes" })).toEqual({});
+  });
+
+  it("leaves an auto_accept the Worker's profile or creator set, but never lets a Reviewer auto-approve", () => {
+    expect(runPostureOf("worker", "untiered", OPENCODE_MODES, OPENCODE_FEATURES, null, { modeId: "bytes", featureValues: { auto_accept: false } })).toEqual({});
+    expect(
+      runPostureOf("reviewer", "untiered", OPENCODE_MODES, OPENCODE_FEATURES, null, { modeId: "bytes", featureValues: { auto_accept: true, other: 1 } }),
+    ).toEqual({ featureValues: { auto_accept: false, other: 1 } });
+    // The daemon may turn it on by itself (proposal P10) even when the features could not be read.
+    expect(runPostureOf("reviewer", "untiered", OPENCODE_MODES, null, null, { modeId: "bytes", featureValues: { auto_accept: true } })).toEqual({
+      featureValues: { auto_accept: false },
+    });
+  });
+
+  function openCodePaseo(profiles: Array<Record<string, unknown>> = []) {
+    const listModes = vi.fn(async () => ({ modes: OPENCODE_MODES }));
+    const listFeatures = vi.fn(async () => ({ features: OPENCODE_FEATURES }));
+    return { listModes, listFeatures, paseo: { providers: { listModes, listFeatures }, config: { get: async () => ({ config: { agentProfiles: profiles } }) } } };
+  }
+
+  it("creates a Worker on OpenCode with a listed mode and auto-approve on, reading the features of its own selection", async () => {
+    const { listFeatures, paseo } = openCodePaseo();
+    const { run } = setup(paseo);
+    const result = await run({ config: { provider: "bm-worker/anthropic/claude-sonnet-4-6", cwd: "/repo" } });
+    expect(result?.config).toMatchObject({ modeId: "bytes", featureValues: { auto_accept: true } });
+    expect(listFeatures).toHaveBeenCalledWith({ provider: "bm-worker/anthropic/claude-sonnet-4-6", cwd: "/repo" });
+  });
+
+  it("keeps the mode the Manager passed to an OpenCode Worker and still turns auto-approve on", async () => {
+    const { paseo } = openCodePaseo();
+    const { run } = setup(paseo);
+    const result = await run({ config: { provider: "bm-worker", cwd: "/repo", modeId: "review" } });
+    expect(result?.config).toMatchObject({ modeId: "review", featureValues: { auto_accept: true } });
+  });
+
+  it("NEGATIVE: never lets a Reviewer on OpenCode auto-approve, even when its profile says so", async () => {
+    const { paseo } = openCodePaseo([{ id: "bm-reviewer", name: "Reviewer", provider: "bm-reviewer", featureValues: { auto_accept: true } }]);
+    const { run } = setup(paseo);
+    const result = await run({ config: { provider: "bm-reviewer", cwd: "/repo" } });
+    expect(result?.config?.featureValues).toEqual({ auto_accept: false });
+    expect(result?.config?.modeId).toBe("bytes");
+  });
+
+  it("creates Workers and Reviewers on Pi (no modes) without any mode or feature", async () => {
+    const listFeatures = vi.fn();
+    const { run } = setup({ providers: { listModes: async () => ({ modes: [] }), listFeatures } });
+    for (const provider of ["bm-worker", "bm-reviewer"]) {
+      const result = await run({ config: { provider, cwd: "/repo" } });
+      expect(result?.config).not.toHaveProperty("modeId");
+      expect(result?.config).not.toHaveProperty("featureValues");
+    }
+    expect(listFeatures).not.toHaveBeenCalled();
+  });
+
+  it("costs no features round trip on a tiered provider", async () => {
+    const listFeatures = vi.fn();
+    const { run } = setup({ providers: { listModes: async () => ({ modes: CLAUDE_MODES }), listFeatures } });
+    await run({ config: { provider: "bm-worker", cwd: "/repo" } });
+    await run({ config: { provider: "bm-reviewer", cwd: "/repo" } });
+    expect(listFeatures).not.toHaveBeenCalled();
+  });
+});
+
+describe("run posture — review b4 fixes (delta 20260921 §4.2.2)", () => {
+  const OPENCODE_MODES = [{ id: "bytes" }, { id: "review" }];
+
+  it("NEGATIVE: gives an untiered Reviewer auto_accept false even when its features cannot be read or omit the toggle", () => {
+    expect(runPostureOf("reviewer", "untiered", OPENCODE_MODES, null, null)).toEqual({ modeId: "bytes", featureValues: { auto_accept: false } });
+    expect(runPostureOf("reviewer", "untiered", OPENCODE_MODES, [], null, { modeId: "bytes" })).toEqual({ featureValues: { auto_accept: false } });
+  });
+
+  it("NEGATIVE: an OpenCode Reviewer whose features lookup fails still leaves the hook with auto_accept false", async () => {
+    const { run } = setup({
+      providers: { listModes: async () => ({ modes: OPENCODE_MODES }), listFeatures: async () => ({ error: "not ready" }) },
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = await run({ config: { provider: "bm-reviewer", cwd: "/repo" } });
+    warn.mockRestore();
+    expect(result?.config?.featureValues).toEqual({ auto_accept: false });
+  });
+
+  it("removes a creator's mode and a profile's features on Pi (no modes)", async () => {
+    const { run } = setup({
+      providers: { listModes: async () => ({ modes: [] }) },
+      config: { get: async () => ({ config: { agentProfiles: [{ id: "bm-worker", featureValues: { fast_mode: true } }] } }) },
+    });
+    const result = await run({ config: { provider: "bm-worker", cwd: "/repo", modeId: "bypassPermissions" } });
+    expect(result?.config).not.toHaveProperty("modeId");
+    expect(result?.config).not.toHaveProperty("featureValues");
+  });
 });

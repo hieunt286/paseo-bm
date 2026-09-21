@@ -9,6 +9,7 @@ import { describeRoles } from "./server/roles";
 import { registerStopPropagation } from "./server/stop-propagation";
 import { registerAgentLabels } from "./server/agent-labels";
 import { registerFormatCheck } from "./server/format-check";
+import { registerNoticeQueue } from "./server/notice-queue";
 import { currentInstructions } from "./server/role-extras";
 import { registerSetupRpcs } from "./server/setup-rpc";
 import { registerChatRpcs } from "./server/chat-rpc";
@@ -73,6 +74,7 @@ export default function contribute(server: PluginServerContext): () => void {
       );
     }
     if (result.modeNotice !== null) console.warn(`[paseo-bm] ${result.modeNotice}`);
+    if (result.toolsNotice !== null) console.warn(`[paseo-bm] ${result.toolsNotice}`);
     return result;
   });
   // Without this the Dashboard's settings screen cannot read or save anything:
@@ -89,6 +91,7 @@ export default function contribute(server: PluginServerContext): () => void {
       const result = await ensureManager({ workspaceId }, { paseo: paseo as never, readInstructions: () => currentInstructions("manager", paseo) });
       // This path shows no launcher notice, so the log is the only place a mode problem surfaces.
       if (result.modeNotice !== null) console.warn(`[paseo-bm] ${result.modeNotice}`);
+      if (result.toolsNotice !== null) console.warn(`[paseo-bm] ${result.toolsNotice}`);
       return result;
     },
   });
@@ -98,8 +101,14 @@ export default function contribute(server: PluginServerContext): () => void {
   const removeStopPropagation = registerStopPropagation(server);
   // delta 20260918g §4.5: a bm-* agent created without its bm.role label gets it.
   const removeAgentLabels = registerAgentLabels(server);
+  // delta 20260921 §4.2.4 (F13): a plugin notice to an agent that may be running
+  // (BM-TOOLS, BM-SETTINGS, BM-FALLBACK) waits in memory for that agent's next
+  // turn end. The queue adds no hook of its own: it rides on the BM-FORMAT
+  // check's agent.turn_ended hook and runs after it, so a BM-FORMAT notice sent
+  // at the same turn end is never replaced by a queued one.
+  const noticeQueue = registerNoticeQueue(server);
   // delta 20260918g §4.7: the sender of a BM-* block that breaks its template is told (BM-FORMAT).
-  const removeFormatCheck = registerFormatCheck(server);
+  const removeFormatCheck = registerFormatCheck(noticeQueue.host);
   // delta 20260917c §4.7: the plugin counts the review budget and tells the
   // Manager once per request; it never stops an agent.
   const budgetTold = new Set<string>();
@@ -117,6 +126,7 @@ export default function contribute(server: PluginServerContext): () => void {
     removeStopPropagation();
     removeAgentLabels();
     removeFormatCheck();
+    noticeQueue.remove();
     removeCollector();
   };
 }

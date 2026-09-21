@@ -1,7 +1,22 @@
 import type { PluginBeforeRequests, PluginServerContext } from "@getpaseo/plugin/server";
 import { ROLE_BY_PROVIDER } from "./agent-role";
 import { providerId } from "./provider-id";
-import { LOOKUP_TIMEOUT_MS, ROLE_GETS_MODE, TIMED_OUT, chooseModeId, modesFor, profileOf, withTimeout, type ProviderMode, type RoleProfile } from "./role-mode";
+import {
+  LOOKUP_TIMEOUT_MS,
+  ROLE_GETS_MODE,
+  TIMED_OUT,
+  capabilityOf,
+  chooseModeId,
+  featuresFor,
+  modesFor,
+  profileOf,
+  runPostureOf,
+  withTimeout,
+  type ProviderCapability,
+  type ProviderFeature,
+  type ProviderMode,
+  type RoleProfile,
+} from "./role-mode";
 import {
   BASE_INSTRUCTIONS,
   fullInstructions,
@@ -163,7 +178,46 @@ export function applyRoleProfile(request: AgentCreateRequest, profile: RoleProfi
   }
 }
 
-/** Instructions, profile settings and start mode together; `undefined` when none changes. */
+/**
+ * Returns the request with the start mode and auto-approve of a Worker or
+ * Reviewer on an `untiered` or `none` provider (delta 20260921 §4.2.2), or
+ * `undefined` when nothing changes. `tiered` and `unknown` providers keep
+ * `applyRoleMode`. Never throws.
+ */
+export function applyRunPosture(
+  request: AgentCreateRequest,
+  capability: ProviderCapability,
+  modes: readonly ProviderMode[] | null,
+  features: readonly ProviderFeature[] | null,
+  profileModeId: string | null = null,
+): AgentCreateRequest | undefined {
+  try {
+    const config = (request as Partial<AgentCreateRequest> | null | undefined)?.config;
+    if (config === null || typeof config !== "object") return undefined;
+    const id = providerId(config.provider);
+    if (id === null || !Object.prototype.hasOwnProperty.call(ROLE_BY_PROVIDER, id)) return undefined;
+    const role = ROLE_BY_PROVIDER[id]!;
+    if (!ROLE_GETS_MODE[role]) return undefined;
+    const own = config.featureValues;
+    const current = {
+      ...(typeof config.modeId === "string" && config.modeId.trim() !== "" ? { modeId: config.modeId } : {}),
+      ...(own !== null && typeof own === "object" && !Array.isArray(own) ? { featureValues: own } : {}),
+    };
+    const posture = runPostureOf(role, capability, modes ?? [], features, profileModeId, current);
+    if (posture === undefined || (posture.modeId === undefined && posture.featureValues === undefined)) return undefined;
+    const next: Record<string, unknown> = { ...config };
+    // `null` removes the key: a provider without modes gets neither (review b4).
+    if (posture.modeId === null) delete next.modeId;
+    else if (posture.modeId !== undefined) next.modeId = posture.modeId;
+    if (posture.featureValues === null) delete next.featureValues;
+    else if (posture.featureValues !== undefined) next.featureValues = posture.featureValues;
+    return { ...request, config: next as unknown as AgentCreateRequest["config"] };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Instructions, profile settings and start posture together; `undefined` when none changes. */
 export function applyRoleConfig(
   request: AgentCreateRequest,
   extras: Partial<RoleExtras> = {},
@@ -171,26 +225,31 @@ export function applyRoleConfig(
   facts: RuntimeFacts = {},
   profileModeId: string | null = null,
   profile: RoleProfile | null = null,
+  features: readonly ProviderFeature[] | null = null,
 ): AgentCreateRequest | undefined {
   const withInstructions = applyRoleInstructions(request, extras, facts);
   const withProfile = applyRoleProfile(withInstructions ?? request, profile) ?? withInstructions;
-  return applyRoleMode(withProfile ?? request, modes, profileModeId) ?? withProfile;
+  const capability = capabilityOf(modes);
+  const posture =
+    capability === "untiered" || capability === "none"
+      ? applyRunPosture(withProfile ?? request, capability, modes, features, profileModeId)
+      : applyRoleMode(withProfile ?? request, modes, profileModeId);
+  return posture ?? withProfile;
 }
 
 /**
- * The provider id whose modes are worth a lookup, or `null`. A Worker whose
- * creator already chose a mode keeps it, so it costs no round trip; a
- * Reviewer always needs the list, to recognise a mode it must not run in.
+ * The provider id whose modes are worth a lookup, or `null`. A Reviewer needs
+ * the list to recognise a mode it must not run in; a Worker needs it even
+ * when its creator already chose a mode, because the capability class decides
+ * its auto-approve (delta 20260921 §4.2.1: on OpenCode the Worker's chosen
+ * mode is kept but `auto_accept` must still be turned on).
  */
 function modeLookupFor(request: AgentCreateRequest): string | null {
   try {
     const config = (request as Partial<AgentCreateRequest> | null | undefined)?.config;
     const id = providerId(config?.provider);
     if (id === null || !Object.prototype.hasOwnProperty.call(ROLE_BY_PROVIDER, id)) return null;
-    const role = ROLE_BY_PROVIDER[id]!;
-    if (!ROLE_GETS_MODE[role]) return null;
-    const chosen = typeof config?.modeId === "string" && config.modeId.trim() !== "";
-    return role === "worker" && chosen ? null : id;
+    return ROLE_GETS_MODE[ROLE_BY_PROVIDER[id]!] ? id : null;
   } catch {
     return null;
   }
@@ -206,6 +265,7 @@ async function prepare(
   facts: RuntimeFacts;
   profileModeId: string | null;
   profile: RoleProfile | null;
+  features: ProviderFeature[] | null;
 }> {
   let extras: Partial<RoleExtras> = {};
   try {
@@ -225,8 +285,12 @@ async function prepare(
   const lookup = modeLookupFor(request);
   const profileModeId = lookup === null ? null : (profile?.modeId ?? null);
   const modes = lookup === null ? null : await modesFor(paseo, lookup, undefined, cwd);
+  // Only an untiered provider (OpenCode) costs the features round trip: its
+  // auto-approve toggle is the one feature the posture rule sets (§4.2.2).
+  const selection = typeof request?.config?.provider === "string" ? request.config.provider : (id ?? "");
+  const features = capabilityOf(modes) === "untiered" ? await featuresFor(paseo, selection, cwd) : null;
   const facts = role === undefined ? {} : await runtimeFactsOf(role, paseo, cwd);
-  return { extras, modes, facts, profileModeId, profile };
+  return { extras, modes, facts, profileModeId, profile, features };
 }
 
 function isBmRequest(request: AgentCreateRequest): boolean {
@@ -268,7 +332,15 @@ export function registerRoleHook(host: RoleHookHost): () => void {
         );
         return applyRoleInstructions(request);
       }
-      return applyRoleConfig(request, prepared.extras, prepared.modes, prepared.facts, prepared.profileModeId, prepared.profile);
+      return applyRoleConfig(
+        request,
+        prepared.extras,
+        prepared.modes,
+        prepared.facts,
+        prepared.profileModeId,
+        prepared.profile,
+        prepared.features,
+      );
     })();
   });
   return typeof remove === "function" ? remove : () => {};

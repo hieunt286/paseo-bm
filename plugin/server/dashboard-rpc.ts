@@ -18,6 +18,7 @@ import { listAllAgents, roleOfAgent } from "./agent-role";
 import { beadStats, lookupBeads } from "./beads-store";
 import { resolveInstallHome } from "./install-home";
 import { priceUsage } from "./cost";
+import { listedPricesFor } from "./model-costs";
 import { inferWorkflowSteps } from "./workflow-steps";
 import { mergeExtras, readLiveExtras } from "./live-timeline";
 import { getBeadDetail, listBeadRows, runBeadAction, type BeadActionPaseo } from "./bead-actions";
@@ -345,13 +346,21 @@ export async function handleTracesList(
   const context = await readTraceContext(input, paseo, deps);
   const limit = Math.min(input.limit ?? TRACE_LIST_LIMIT, TRACE_LIST_LIMIT);
   const { page, nextCursor, truncated } = paginate(context.traces, limit, input.cursor);
+  // Rates Paseo lists for models the bundled table lacks (delta 20260921
+  // §4.2.7), read before pricing so pricing itself stays synchronous.
+  const listed = await listedPricesFor(
+    paseo,
+    page.flatMap((trace) => trace.records),
+    undefined,
+    context.directory ?? undefined,
+  );
   return {
     traces: page.flatMap((trace) =>
       summariseSegments(trace, {
         agents: context.agents,
         workspaceState: context.workspaceState,
         reassignedFrom: reassignedFromOf(trace, input.workspaceId),
-        priceUsage,
+        priceUsage: (usage) => priceUsage(usage, listed),
       }),
     ),
     nextCursor,
@@ -376,11 +385,12 @@ export async function handleTracesGet(
     );
   }
   const { directory } = context;
+  const listed = await listedPricesFor(paseo, trace.records, undefined, directory ?? undefined);
   const built = detail(trace, {
     agents: context.agents,
     workspaceState: context.workspaceState,
     reassignedFrom: reassignedFromOf(trace, input.workspaceId),
-    priceUsage,
+    priceUsage: (usage) => priceUsage(usage, listed),
     lookupBeads: (ids) => (directory === null ? { found: [], missing: [...ids] } : lookupBeads(directory, ids)),
     workflowSteps: (reconstructed, beadStatus) =>
       inferWorkflowSteps(reconstructed, { beadStatus, workspaceDir: context.evidenceDirectory }),

@@ -49,6 +49,12 @@ export const managerEnsureRpc = defineRpc({
      * (delta 20260918 §4.1). Added field: a client that does not know it drops it.
      */
     modeNotice: z.string().nullable(),
+    /**
+     * Set when the Manager just created has no Paseo tools (delta 20260921
+     * §4.2.4). Optional so an older server's answer still parses; the server
+     * always sends it.
+     */
+    toolsNotice: z.string().nullable().optional(),
   }),
 });
 
@@ -511,11 +517,18 @@ export const traceWorkspaceMetaSchema = z.object({
  * running values the provider reports (`runtimeInfo`) first, the snapshot's
  * configuration only as a fallback. `thinkingOptionId: null` means the
  * provider's default.
+ *
+ * `provider` was added by delta 20260921 §4.2.7 (F7) so a model missing from
+ * the bundled price table can be priced from its provider's model list. It is
+ * optional for the same reason `runtime` is: records written before it, and
+ * readers built before it, keep working — `v` stays 1, nothing migrates. `null`
+ * when the snapshot names no provider.
  */
 export const traceRuntimeSchema = z.object({
   model: z.string().nullable(),
   thinkingOptionId: z.string().nullable(),
   modeId: z.string().nullable(),
+  provider: z.string().nullable().optional(),
 });
 
 /** One line of `events-<YYYYMM>.jsonl`: everything one agent turn produced. */
@@ -760,6 +773,14 @@ export const answersMarkRpc = defineRpc({
 export const setupRoleSchema = z.enum(["manager", "worker", "reviewer"]);
 const skillStateSchema = z.enum(["ok", "missing", "broken"]);
 
+/** One Paseo-tools check (`plugin/server/tools-check.ts`). */
+export const toolsSeenSchema = z.object({
+  state: z.enum(["ok", "missing", "unknown"]),
+  agentId: z.string(),
+  provider: z.string(),
+  at: z.string(),
+});
+
 export const setupStatusSchema = z.object({
   tools: z.array(
     z.object({
@@ -776,23 +797,49 @@ export const setupStatusSchema = z.object({
     }),
   ),
   latestCheckedOn: z.string(),
+  /**
+   * `pi` and `opencode` (delta 20260921 §4.2.6) are optional so a payload
+   * from before them still parses; a client shows those columns only when
+   * they are present.
+   */
   skills: z.object({
     checkedAt: z.string(),
-    dirs: z.object({ shared: z.string(), claude: z.string(), codex: z.string() }),
+    dirs: z.object({
+      shared: z.string(),
+      claude: z.string(),
+      codex: z.string(),
+      pi: z.string().optional(),
+      opencode: z.string().optional(),
+    }),
     skills: z.array(
       z.object({
         name: z.string(),
         required: z.boolean(),
         claude: skillStateSchema,
         codex: skillStateSchema,
+        pi: skillStateSchema.optional(),
+        opencode: skillStateSchema.optional(),
         problem: z.string().nullable(),
       }),
     ),
-    missingRequired: z.object({ claude: z.number().int(), codex: z.number().int() }),
+    missingRequired: z.object({
+      claude: z.number().int(),
+      codex: z.number().int(),
+      pi: z.number().int().optional(),
+      opencode: z.number().int().optional(),
+    }),
     installCommand: z.string(),
   }),
   /** Characters of additional instructions per role; 0 when none. */
   extras: z.object({ manager: z.number().int(), worker: z.number().int(), reviewer: z.number().int() }),
+  /**
+   * The last Paseo-tools check of a new Manager and of a new Worker in this
+   * plugin run, `null` when none ran (delta 20260921 §4.2.4). Optional: an
+   * older server does not send it.
+   */
+  paseoTools: z
+    .object({ manager: toolsSeenSchema.nullable(), worker: toolsSeenSchema.nullable() })
+    .optional(),
 });
 
 export type SetupStatus = z.infer<typeof setupStatusSchema>;

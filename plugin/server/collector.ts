@@ -240,6 +240,11 @@ const nonEmpty = (value: unknown): string | null => (typeof value === "string" &
  * first and the snapshot's configuration only fills in what they leave empty —
  * a provider-reported `null` never hides a real fallback. `null` when there is
  * no snapshot. Never throws: a malformed snapshot costs the fields, not the turn.
+ *
+ * `provider` (delta 20260921 §4.2.7, F7) is the snapshot's own `provider`,
+ * reduced to the provider id the way every other paseo-bm reader does
+ * (`bm-worker/<model>` → `bm-worker`), so a later price lookup can hand it to
+ * `providers.listModels` as is. `null` when the snapshot names none.
  */
 export function runtimeOf(snapshot: unknown): TraceRuntime | null {
   try {
@@ -251,6 +256,7 @@ export function runtimeOf(snapshot: unknown): TraceRuntime | null {
       thinkingOptionId:
         nonEmpty(info["thinkingOptionId"]) ?? nonEmpty(agent["effectiveThinkingOptionId"]) ?? nonEmpty(agent["thinkingOptionId"]),
       modeId: nonEmpty(info["modeId"]) ?? nonEmpty(agent["currentModeId"]),
+      provider: nonEmpty(providerId(agent["provider"])),
     };
   } catch {
     return null;

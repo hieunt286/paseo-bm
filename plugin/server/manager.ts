@@ -27,7 +27,9 @@ import { PLUGIN_VERSION } from "../shared/version";
 import { setAgentLabel, setAgentMode, type PaseoCliDeps } from "./paseo-cli";
 import { listAllAgents, roleOfAgent } from "./agent-role";
 import { providerId } from "./provider-id";
-import { managerModeFor, modesFor } from "./role-mode";
+import { AUTO_APPROVE_FEATURE, capabilityOf, featuresFor, managerModeFor, modesFor, runPostureOf } from "./role-mode";
+import { workspaceDirectory, type DashboardPaseo } from "./dashboard-rpc";
+import { recordTools } from "./tools-check";
 
 /** Label key and value that identify a paseo-bm Manager (design §5). */
 export const MANAGER_ROLE_LABEL = "bm.role";
@@ -86,6 +88,10 @@ export interface ManagerAgentSnapshot {
   lastError?: string;
   /** The mode the agent is in now; `agents.list` entries carry it. */
   currentModeId?: string | null;
+  /** The agent's feature values, when the snapshot carries them (`auto_accept` on OpenCode). */
+  features?: ReadonlyArray<{ id?: string; value?: unknown }>;
+  /** What the agent's provider supports; `supportsMcpServers: false` means no Paseo tools (delta 20260921 §4.2.4). */
+  capabilities?: { supportsMcpServers?: unknown } | null;
 }
 
 export interface ManagerAgentHandle {
@@ -149,6 +155,11 @@ export interface EnsureManagerDeps {
   log?: (message: string) => void;
   /** How the `paseo` CLI is found and run; tests pass a fake runner. */
   cli?: PaseoCliDeps;
+  /**
+   * The workspace's directory, needed to read an untiered provider's features
+   * (delta 20260921 §4.2.2). Defaults to the directory Paseo lists for it.
+   */
+  workspaceDirectory?: (workspaceId: string) => Promise<string | null>;
 }
 
 export interface EnsureManagerResult {
@@ -164,6 +175,12 @@ export interface EnsureManagerResult {
    * was nothing to say (delta 20260918 §4.1). Never blocks returning the Manager.
    */
   modeNotice: string | null;
+  /**
+   * Set when the Manager just created has no Paseo tools (Pi without
+   * pi-mcp-adapter), so it cannot create or message a Worker (delta 20260921
+   * §4.2.4); `null` otherwise, and always for an existing Manager.
+   */
+  toolsNotice: string | null;
 }
 
 /** A Manager is live when it is neither archived nor closed. */
@@ -200,6 +217,17 @@ export async function findLiveManagers(
     .sort((a, b) => Number(labelledManager(b)) - Number(labelledManager(a)) || newestFirst(a, b));
 }
 
+/** The workspace's directory for a features lookup, or `null`. Never throws. */
+async function directoryOf(deps: EnsureManagerDeps, workspaceId: string): Promise<string | null> {
+  try {
+    return deps.workspaceDirectory !== undefined
+      ? await deps.workspaceDirectory(workspaceId)
+      : await workspaceDirectory(deps.paseo as unknown as DashboardPaseo, workspaceId);
+  } catch {
+    return null;
+  }
+}
+
 function providerSelection(profile: ManagerAgentProfile): string {
   return profile.model ? `${profile.provider}/${profile.model}` : profile.provider;
 }
@@ -233,6 +261,7 @@ export async function ensureManager(
       // A Manager recognised only by its provider was created by the user in a
       // mode they chose: paseo-bm never switches it (delta 20260918g §4.3).
       modeNotice: labelledManager(chosen) ? await switchOnce(chosen, deps) : null,
+      toolsNotice: null,
     };
   }
 
@@ -253,11 +282,34 @@ export async function ensureManager(
   // can still switch it.
   const provider = providerId(profile.provider) ?? profile.provider;
   const modes = await modesFor(paseo, provider, deps.log);
-  const chosenMode = modes === null ? undefined : managerModeFor(modes, profile.modeId ?? null);
-  // Modes unknown: exactly as before this delta. Modes known: only a mode the
-  // provider lists — a profile mode it does not list would make the creation fail.
-  const modeId = modes === null ? profile.modeId : chosenMode;
-  if (modes !== null && chosenMode === undefined) {
+  const capability = capabilityOf(modes);
+  let chosenMode: string | undefined;
+  let modeId: string | undefined;
+  let featureValues = profile.featureValues;
+  if (capability === "untiered" || capability === "none") {
+    // Delta 20260921 §4.2.2: OpenCode (untiered) gets a listed mode — the
+    // profile's, else the first — and auto-approve on unless the profile sets
+    // it; Pi (none) gets neither.
+    const features =
+      capability === "untiered"
+        ? await featuresFor(paseo, providerSelection(profile), (await directoryOf(deps, workspaceId)) ?? undefined, deps.log)
+        : null;
+    const posture = runPostureOf("manager", capability, modes ?? [], features, profile.modeId ?? null, {
+      ...(profile.featureValues !== undefined ? { featureValues: profile.featureValues } : {}),
+    });
+    chosenMode = posture?.modeId ?? undefined;
+    modeId = chosenMode;
+    // `null` removes the key: a Manager on a provider without modes (Pi) gets no
+    // mode and no feature, even when its profile sets them (review b4).
+    if (posture?.featureValues === null) featureValues = undefined;
+    else if (posture?.featureValues !== undefined) featureValues = posture.featureValues;
+  } else {
+    chosenMode = modes === null ? undefined : managerModeFor(modes, profile.modeId ?? null);
+    // Modes unknown: exactly as before this delta. Modes known: only a mode the
+    // provider lists — a profile mode it does not list would make the creation fail.
+    modeId = modes === null ? profile.modeId : chosenMode;
+  }
+  if (capability === "tiered" && chosenMode === undefined) {
     (deps.log ?? ((message: string) => console.warn(message)))(
       `[paseo-bm] ${provider} lists no mode that runs without permission prompts${
         profile.modeId === undefined ? "" : `, nor the profile's own mode "${profile.modeId}"`
@@ -274,7 +326,7 @@ export async function ensureManager(
         ...(profile.thinkingOptionId !== undefined
           ? { thinkingOptionId: profile.thinkingOptionId }
           : {}),
-        ...(profile.featureValues !== undefined ? { featureValues: profile.featureValues } : {}),
+        ...(featureValues !== undefined ? { featureValues } : {}),
         systemPrompt,
       },
       title: MANAGER_TITLE,
@@ -307,7 +359,15 @@ export async function ensureManager(
     );
   }
 
-  return { agentId: handle.id, created: true, otherManagerIds: [], modeNotice: null };
+  // Delta 20260921 §4.2.4: a Manager without Paseo tools cannot run a request.
+  const selection = providerSelection(profile);
+  const supports = snapshot?.capabilities?.supportsMcpServers;
+  recordTools("manager", handle.id, selection, supports);
+  const toolsNotice =
+    supports === false
+      ? `This Manager runs on ${selection} without Paseo tools (on Pi this means pi-mcp-adapter is missing): it cannot create or message a Worker.`
+      : null;
+  return { agentId: handle.id, created: true, otherManagerIds: [], modeNotice: null, toolsNotice };
 }
 
 /**
@@ -325,7 +385,16 @@ async function switchOnce(manager: ManagerAgentSnapshot, deps: EnsureManagerDeps
     const { config } = await deps.paseo.config.get();
     const profile = config.agentProfiles?.find((entry) => entry.id === MANAGER_PROFILE_ID);
     if (!profile) return null;
-    const modes = await modesFor(deps.paseo, providerId(profile.provider) ?? profile.provider, deps.log);
+    const provider = providerId(profile.provider) ?? profile.provider;
+    const modes = await modesFor(deps.paseo, provider, deps.log);
+    if (capabilityOf(modes) === "untiered") {
+      // The plugin cannot change the features of an existing agent (proposal
+      // S9), so auto-approve cannot be turned on here (delta 20260921 §4.2.2).
+      const autoApprove = manager.features?.find((feature) => feature?.id === AUTO_APPROVE_FEATURE)?.value === true;
+      return autoApprove
+        ? null
+        : `This Manager runs on ${provider} and was created before paseo-bm could turn on auto-approve for it; it may ask for permissions. Start a new Manager to run without prompts.`;
+    }
     const target = modes === null ? undefined : managerModeFor(modes, profile.modeId ?? null);
     if (target === undefined) return null;
 

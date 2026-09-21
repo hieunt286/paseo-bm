@@ -30,7 +30,9 @@ import {
   extraCounter,
   installWarning,
   setupHeadline,
-  skillBadge,
+  paseoToolsWarnings,
+  skillChips,
+  skillDirsText,
   toolBadge,
   type SetupRole,
 } from "./setup-model";
@@ -281,6 +283,13 @@ export function SetupScreen({ theme, layout, onOpenWorkspaces, status: statusStr
         <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{errorMessageOf(status.error)}</Text>
       ) : null}
       {headline === null ? null : <Text style={[styles.sectionTitle, { color: toneColor(theme, headline.tone) }]}>{headline.text}</Text>}
+      {data === undefined
+        ? null
+        : paseoToolsWarnings(data).map((warning) => (
+            <Text key={warning} style={[styles.body, { color: toneColor(theme, "warning") }]}>
+              {warning}
+            </Text>
+          ))}
 
       {/* 1. Beads tools */}
       <Text style={styles.sectionTitle}>Beads tools</Text>
@@ -300,20 +309,21 @@ export function SetupScreen({ theme, layout, onOpenWorkspaces, status: statusStr
       </View>
       {data === undefined ? null : (
         <View style={[styles.card, { gap: 6 }]}>
-          <Text style={styles.body}>{`Checked ${new Date(data.skills.checkedAt).toLocaleTimeString()} · Claude: ${data.skills.dirs.claude} · Codex: ${data.skills.dirs.shared} or ${data.skills.dirs.codex}`}</Text>
+          <Text style={styles.body}>{`Checked ${new Date(data.skills.checkedAt).toLocaleTimeString()} · ${skillDirsText(data.skills.dirs)}`}</Text>
           {data.skills.skills.map((skill) => (
             <View key={skill.name} style={{ gap: 2 }}>
               <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                 <Text style={[styles.mono, { flex: 1 }]}>{`${skill.name}${skill.required ? "" : " (optional)"}`}</Text>
-                <Chip badge={skillBadge("Claude", skill.claude)} styles={styles} theme={theme} />
-                <Chip badge={skillBadge("Codex", skill.codex)} styles={styles} theme={theme} />
+                {skillChips(skill).map((badge) => (
+                  <Chip key={badge.text} badge={badge} styles={styles} theme={theme} />
+                ))}
               </View>
               {skill.problem === null ? null : (
                 <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{skill.problem}</Text>
               )}
             </View>
           ))}
-          <CommandLine label="Install the required skills (run it yourself, or use `npx paseo-bm install --apply --install-skills`)" command={data.skills.installCommand} styles={styles} theme={theme} />
+          <CommandLine label="Install the required skills for Claude Code and Codex (run it yourself, or use `npx paseo-bm install --apply --install-skills`)" command={data.skills.installCommand} styles={styles} theme={theme} />
         </View>
       )}
 

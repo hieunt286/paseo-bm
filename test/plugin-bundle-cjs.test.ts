@@ -269,7 +269,7 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
 
     const { paseo, created } = fakePaseo();
     const ensured = await handlers.get("manager.ensure")!({ workspaceId: "ws-1" }, { paseo });
-    expect(ensured).toEqual({ agentId: "created-1", created: true, otherManagerIds: [], modeNotice: null });
+    expect(ensured).toEqual({ agentId: "created-1", created: true, otherManagerIds: [], modeNotice: null, toolsNotice: null });
     expect(created).toHaveLength(1);
     expect(created[0]!.options.config.systemPrompt).toBe(managerMd);
 

@@ -9,7 +9,20 @@ import type { Badge, GraphNode } from "./dashboard-model";
 
 export type SetupRole = "manager" | "worker" | "reviewer";
 type Tool = SetupStatus["tools"][number];
-type SkillState = SetupStatus["skills"]["skills"][number]["claude"];
+type SkillRow = SetupStatus["skills"]["skills"][number];
+type SkillState = SkillRow["claude"];
+export type SkillAgent = "Claude" | "Codex" | "Pi" | "OpenCode";
+
+/**
+ * The skill columns, in order. Pi and OpenCode (delta 20260921 §4.2.6) are
+ * optional in the payload: a column the server did not report is not shown.
+ */
+export const SKILL_COLUMNS: ReadonlyArray<{ key: "claude" | "codex" | "pi" | "opencode"; agent: SkillAgent }> = [
+  { key: "claude", agent: "Claude" },
+  { key: "codex", agent: "Codex" },
+  { key: "pi", agent: "Pi" },
+  { key: "opencode", agent: "OpenCode" },
+];
 
 export const SETUP_ROLES: ReadonlyArray<{ role: SetupRole; label: string; mark: GraphNode["kind"] }> = [
   { role: "manager", label: "Manager", mark: "request" },
@@ -38,7 +51,7 @@ export function toolBadge(tool: Tool): Badge {
   return { text: tool.version ?? "Installed", tone: "success" };
 }
 
-export function skillBadge(agent: "Claude" | "Codex", state: SkillState): Badge {
+export function skillBadge(agent: SkillAgent, state: SkillState): Badge {
   switch (state) {
     case "ok":
       return { text: `${agent} ✓`, tone: "success" };
@@ -49,16 +62,55 @@ export function skillBadge(agent: "Claude" | "Codex", state: SkillState): Badge 
   }
 }
 
+/** One chip per skill column the row has, in column order. */
+export function skillChips(skill: SkillRow): Badge[] {
+  return SKILL_COLUMNS.flatMap(({ key, agent }) => {
+    const state = skill[key];
+    return state === undefined ? [] : [skillBadge(agent, state)];
+  });
+}
+
+/** Where each agent's skills were looked for, one entry per reported column. */
+export function skillDirsText(dirs: SetupStatus["skills"]["dirs"]): string {
+  return [
+    `Claude: ${dirs.claude}`,
+    `Codex: ${dirs.shared} or ${dirs.codex}`,
+    ...(dirs.pi === undefined ? [] : [`Pi: ${dirs.pi}`]),
+    ...(dirs.opencode === undefined ? [] : [`OpenCode: ${dirs.opencode}`]),
+  ].join(" · ");
+}
+
 /** One line at the top: is this machine ready for the Beads agents? */
 export function setupHeadline(status: SetupStatus): Badge {
   const missingTools = status.tools.filter((tool) => tool.required && tool.path === null).map((tool) => tool.id);
   const required = status.skills.skills.filter((skill) => skill.required).length;
-  const skills = `skills: Claude ${required - status.skills.missingRequired.claude}/${required}, Codex ${required - status.skills.missingRequired.codex}/${required}`;
+  const counts = SKILL_COLUMNS.flatMap(({ key, agent }) => {
+    const missing = status.skills.missingRequired[key];
+    return missing === undefined ? [] : [{ agent, missing }];
+  });
+  const skills = `skills: ${counts.map((count) => `${count.agent} ${required - count.missing}/${required}`).join(", ")}`;
   if (missingTools.length > 0) {
     return { text: `Missing ${missingTools.join(" and ")} — the Worker cannot manage beads without it · ${skills}`, tone: "danger" };
   }
-  const readyForOne = status.skills.missingRequired.claude === 0 || status.skills.missingRequired.codex === 0;
+  const readyForOne = counts.some((count) => count.missing === 0);
   return { text: `br and bv ready · ${skills}`, tone: readyForOne ? "success" : "warning" };
+}
+
+/**
+ * One warning per role whose last new agent had no Paseo tools (delta 20260921
+ * §4.2.4, REQ-063 d); nothing for `ok`, `unknown` or an older server.
+ */
+export function paseoToolsWarnings(status: SetupStatus): string[] {
+  const seen = status.paseoTools;
+  if (seen === undefined) return [];
+  return (["manager", "worker"] as const).flatMap((role) => {
+    const entry = seen[role];
+    if (entry === null || entry.state !== "missing") return [];
+    const name = role === "manager" ? "Manager" : "Worker";
+    return [
+      `The last ${name} (${entry.agentId}) runs on ${entry.provider} without Paseo tools, so it cannot create or message other agents. On Pi, install the pi-mcp-adapter extension.`,
+    ];
+  });
 }
 
 export function extraCounter(length: number, max: number): string {

@@ -7,6 +7,11 @@
  * Claude Code counts only its own directory; Codex counts the shared
  * `~/.agents/skills` or its own. The plugin payload cannot import `src/`, so
  * the two short lists are repeated here and pinned by a test.
+ *
+ * Pi and OpenCode (delta 20260921 §4.2.6, F8) count only their own
+ * directory, `~/.pi/agent/skills` and `~/.config/opencode/skill` (singular),
+ * checked the same way as Claude's. No environment variable moves them in this
+ * release, and the CLI (`--skills-agents`, `doctor`) does not look at them.
  */
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -28,16 +33,18 @@ export interface SkillRow {
   required: boolean;
   claude: SkillState;
   codex: SkillState;
+  pi: SkillState;
+  opencode: SkillState;
   /** Why a copy is broken, when one is. */
   problem: string | null;
 }
 
 export interface SkillsStatus {
   checkedAt: string;
-  dirs: { shared: string; claude: string; codex: string };
+  dirs: { shared: string; claude: string; codex: string; pi: string; opencode: string };
   skills: SkillRow[];
   /** Required skills not usable, per agent. */
-  missingRequired: { claude: number; codex: number };
+  missingRequired: { claude: number; codex: number; pi: number; opencode: number };
   installCommand: string;
 }
 
@@ -55,6 +62,8 @@ export function skillDirs(deps: SkillDeps = {}): SkillsStatus["dirs"] {
     shared: join(home, ".agents", "skills"),
     claude: join(env.CLAUDE_CONFIG_DIR ?? join(home, ".claude"), "skills"),
     codex: join(env.CODEX_HOME ?? join(home, ".codex"), "skills"),
+    pi: join(home, ".pi", "agent", "skills"),
+    opencode: join(home, ".config", "opencode", "skill"),
   };
 }
 
@@ -85,12 +94,16 @@ export function skillsStatus(deps: SkillDeps = {}): SkillsStatus {
   const rows: SkillRow[] = [...REQUIRED_SKILLS, ...OPTIONAL_SKILLS].map((name) => {
     const claude = checkSkillAt(dirs.claude, name, read);
     const codex = best(checkSkillAt(dirs.shared, name, read), checkSkillAt(dirs.codex, name, read));
+    const pi = checkSkillAt(dirs.pi, name, read);
+    const opencode = checkSkillAt(dirs.opencode, name, read);
     return {
       name,
       required: (REQUIRED_SKILLS as readonly string[]).includes(name),
       claude: claude.state,
       codex: codex.state,
-      problem: claude.problem ?? codex.problem,
+      pi: pi.state,
+      opencode: opencode.state,
+      problem: claude.problem ?? codex.problem ?? pi.problem ?? opencode.problem,
     };
   });
   return {
@@ -100,6 +113,8 @@ export function skillsStatus(deps: SkillDeps = {}): SkillsStatus {
     missingRequired: {
       claude: rows.filter((row) => row.required && row.claude !== "ok").length,
       codex: rows.filter((row) => row.required && row.codex !== "ok").length,
+      pi: rows.filter((row) => row.required && row.pi !== "ok").length,
+      opencode: rows.filter((row) => row.required && row.opencode !== "ok").length,
     },
     installCommand: `npx -y skills add cuongntr/agent-skills -g -a claude-code codex -s ${REQUIRED_SKILLS.join(" ")} -y`,
   };

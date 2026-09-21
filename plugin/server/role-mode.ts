@@ -241,15 +241,157 @@ export async function modesFor(
       return null;
     }
     const modes = Array.isArray(result?.modes) ? (result.modes as ProviderMode[]) : [];
-    if (modes.length === 0) {
-      const reason = typeof result?.error === "string" && result.error !== "" ? result.error : "no modes listed";
-      log(`[paseo-bm] could not read the modes of ${provider} (${reason}); its mode is left to its creator.`);
+    const failure = typeof result?.error === "string" && result.error !== "" ? result.error : null;
+    if (failure !== null || !Array.isArray(result?.modes)) {
+      log(`[paseo-bm] could not read the modes of ${provider} (${failure ?? "no modes listed"}); its mode is left to its creator.`);
       return null;
     }
+    // An empty list WITHOUT an error is an answer, not a failure: the provider
+    // has no modes at all (Pi, delta 20260921 §4.2.1 / F3). Nothing to log,
+    // and nothing worth remembering for the Runtime-facts fallback.
+    if (modes.length === 0) return [];
     lastModes.set(provider, { modes, at: new Date().toISOString() });
     return modes;
   } catch (error) {
     log(`[paseo-bm] could not read the modes of ${provider} (${error instanceof Error ? error.message : String(error)}); its mode is left to its creator.`);
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Run posture by provider capability (delta 20260921 §4.2.1–§4.2.2, REQ-063).
+// ---------------------------------------------------------------------------
+
+/**
+ * How a provider lets paseo-bm choose a role's start mode:
+ * - `tiered`: its modes carry a `colorTier` (Claude, Codex) — the bm-msy rules apply;
+ * - `untiered`: modes without any `colorTier` (OpenCode's modes are the user's
+ *   own OpenCode agents) — a listed mode is always passed, plus auto-approve;
+ * - `none`: an empty list without an error (Pi) — no mode is ever passed;
+ * - `unknown`: the list could not be read — today's behaviour, unchanged.
+ */
+export type ProviderCapability = "tiered" | "untiered" | "none" | "unknown";
+
+/** The capability class of a provider from what `modesFor` returned. */
+export function capabilityOf(modes: readonly ProviderMode[] | null): ProviderCapability {
+  if (modes === null) return "unknown";
+  const usable = modes.filter((mode) => typeof mode?.id === "string" && mode.id !== "");
+  if (usable.length === 0) return "none";
+  return usable.some((mode) => tierOf(mode) !== "") ? "tiered" : "untiered";
+}
+
+/** The toggle that auto-approves a provider's tool-permission prompts (OpenCode, design F1). */
+export const AUTO_APPROVE_FEATURE = "auto_accept";
+
+/** A feature as `providers.listFeatures` returns it (toggle or select). */
+export type ProviderFeature = { type?: string; id?: string; value?: unknown };
+
+/**
+ * The features a provider offers for a draft config, or `null` when they
+ * cannot be read. `provider` is the selection the agent is created with
+ * (`bm-worker` or `bm-worker/<model>`); `cwd` is required by the daemon.
+ * Raced against the lookup budget; every `null` is logged. Never throws.
+ */
+export async function featuresFor(
+  paseo: unknown,
+  provider: string,
+  cwd: string | undefined,
+  log: (message: string) => void = (message) => console.warn(message),
+): Promise<ProviderFeature[] | null> {
+  const providers = (paseo as { providers?: { listFeatures?: unknown } } | null | undefined)?.providers;
+  const listFeatures = providers?.listFeatures;
+  if (typeof listFeatures !== "function" || cwd === undefined) {
+    log(`[paseo-bm] cannot read the features of ${provider}; its auto-approve is left as it is.`);
+    return null;
+  }
+  try {
+    const result = await withTimeout(
+      listFeatures.call(providers, { provider, cwd }) as Promise<{ features?: unknown; error?: unknown } | null | undefined>,
+    );
+    if (result === TIMED_OUT) {
+      log(`[paseo-bm] reading the features of ${provider} took longer than ${LOOKUP_TIMEOUT_MS} ms; its auto-approve is left as it is.`);
+      return null;
+    }
+    if (typeof result?.error === "string" && result.error !== "") {
+      log(`[paseo-bm] could not read the features of ${provider} (${result.error}); its auto-approve is left as it is.`);
+      return null;
+    }
+    return Array.isArray(result?.features) ? (result.features as ProviderFeature[]) : [];
+  } catch (error) {
+    log(`[paseo-bm] could not read the features of ${provider} (${error instanceof Error ? error.message : String(error)}); its auto-approve is left as it is.`);
+    return null;
+  }
+}
+
+/** True when the provider offers the auto-approve toggle. */
+export function offersAutoApprove(features: readonly ProviderFeature[] | null): boolean {
+  return Array.isArray(features) && features.some((feature) => feature?.type === "toggle" && feature.id === AUTO_APPROVE_FEATURE);
+}
+
+/**
+ * What `runPostureOf` asks to change: a start mode and/or the complete feature
+ * values. `null` means REMOVE the key (a provider without modes gets neither).
+ */
+export interface RunPosture {
+  modeId?: string | null;
+  featureValues?: Record<string, unknown> | null;
+}
+
+/**
+ * The start mode and auto-approve a role should get on a provider of this
+ * capability (delta 20260921 §4.2.2), or `undefined` for `tiered` and
+ * `unknown`, whose rules stay where they were (`chooseModeId` in the hook,
+ * `managerModeFor` in `manager.ensure`). `current` is what the request already
+ * carries: the creator's mode and the feature values merged so far (the
+ * profile's under the creator's).
+ *
+ * - `untiered`: a listed mode is always passed — the creator's, else the
+ *   profile's, else the FIRST listed one: the daemon refuses a cross-provider
+ *   child without a mode (design F11). The Manager and the Worker get
+ *   `auto_accept: true` when the provider offers it and nobody set it; the
+ *   Reviewer ALWAYS gets `auto_accept: false`, over the profile and over a
+ *   value the daemon may have set by itself (owner decision Q7 a).
+ * - `none`: no mode and no feature (Pi has neither; its lack of a permission
+ *   layer was accepted by the owner, Q7 a): both are REMOVED from the request,
+ *   whether the creator or the profile set them (review b4).
+ * The Reviewer's `auto_accept: false` is written even when the features could
+ * not be read or do not list the toggle, so no provider default can turn
+ * auto-approve on for it (review b4).
+ */
+export function runPostureOf(
+  role: Role,
+  capability: ProviderCapability,
+  modes: readonly ProviderMode[],
+  features: readonly ProviderFeature[] | null,
+  profileModeId: string | null,
+  current: { modeId?: string; featureValues?: Record<string, unknown> } = {},
+): RunPosture | undefined {
+  if (capability === "none") {
+    const posture: RunPosture = {};
+    if (current.modeId !== undefined) posture.modeId = null;
+    if (current.featureValues !== undefined) posture.featureValues = null;
+    return posture;
+  }
+  if (capability !== "untiered") return undefined;
+  const listed = modes.filter((mode) => typeof mode?.id === "string" && mode.id !== "").map((mode) => mode.id);
+  const posture: RunPosture = {};
+  const keep = current.modeId !== undefined && listed.includes(current.modeId);
+  if (!keep) {
+    const modeId = profileModeId !== null && listed.includes(profileModeId) ? profileModeId : listed[0];
+    if (modeId !== undefined) posture.modeId = modeId;
+  }
+  if (offersAutoApprove(features) || role === "reviewer") {
+    const values = { ...(current.featureValues ?? {}) };
+    const set = Object.prototype.hasOwnProperty.call(values, AUTO_APPROVE_FEATURE);
+    if (role === "reviewer") {
+      if (values[AUTO_APPROVE_FEATURE] !== false) {
+        values[AUTO_APPROVE_FEATURE] = false;
+        posture.featureValues = values;
+      }
+    } else if (!set) {
+      values[AUTO_APPROVE_FEATURE] = true;
+      posture.featureValues = values;
+    }
+  }
+  return posture;
 }

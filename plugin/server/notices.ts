@@ -43,11 +43,18 @@ export const WORKER_STOP_NOTICE =
  */
 export const FORMAT_NOTICE_MARKER = "BM-FORMAT";
 
+/**
+ * First word of the notice a Manager receives when a Worker it created has no
+ * Paseo tools (`tools-check.ts`, delta 20260921 §4.2.4).
+ */
+export const TOOLS_NOTICE_MARKER = "BM-TOOLS";
+
 const PREFIXES: readonly string[] = [
   BUDGET_NOTICE_MARKER,
   REVIEWER_STOP_NOTICE_PREFIX,
   WORKER_STOP_NOTICE_MARKER,
   FORMAT_NOTICE_MARKER,
+  TOOLS_NOTICE_MARKER,
 ];
 
 /** True when this text is one of the plugin's own notices, not a person's words. */

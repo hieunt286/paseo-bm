@@ -8,11 +8,13 @@ import type { PaseoInvocation } from "../src/paseo/adapter.js";
 import { ScriptedPrompter } from "../src/prompter.js";
 import type { RoleSelection } from "../src/roles/config.js";
 import {
+  PI_SIGN_IN_GUIDANCE,
   PROVIDER_LOGIN_COMMANDS,
   checkProviderLogin,
   ensureProviderLogins,
   formatLoginCommand,
   loginChecks,
+  loginCommandFor,
   parseProviderDiagnostic,
   runLoginCommand,
 } from "../src/roles/login.js";
@@ -281,6 +283,91 @@ describe("AC: the login command is printed verbatim before it runs", () => {
   });
 });
 
+describe("AC: Pi gets sign-in guidance instead of a login command (bm-phase-2a-14-any-provider-u2g9.7)", () => {
+  const EXACT_GUIDANCE =
+    "Pi has no login command paseo-bm knows; sign in the way Pi's own documentation describes, then run doctor.";
+
+  it("the guidance is exactly the text of Design delta 20260921 §4.2.5, and Pi has no login command", () => {
+    expect(PI_SIGN_IN_GUIDANCE).toBe(EXACT_GUIDANCE);
+    expect(loginCommandFor("pi")).toBeUndefined();
+    expect(Object.keys(PROVIDER_LOGIN_COMMANDS)).toEqual(["claude", "codex", "opencode"]);
+  });
+
+  for (const interactive of [true, false]) {
+    it(`${interactive ? "interactive" : "non-interactive"}: prints exactly the guidance, asks nothing, starts no process, state unknown`, async () => {
+      const events: string[] = [];
+      const lines: string[] = [];
+      // Even a Paseo that would answer "logged out" is never asked.
+      const runner = fakeRunner({ pi: [false, false] });
+      const prompter = new RecordingPrompter(events, [true], interactive);
+      const report = await ensureProviderLogins({
+        selections: [selection("manager", "pi"), selection("worker", "pi"), selection("reviewer", "pi")],
+        runner,
+        prompter,
+        print: (line) => lines.push(line),
+        spawnLogin: recordingSpawner(events),
+      });
+
+      expect(lines).toEqual([EXACT_GUIDANCE]);
+      expect(runner.calls).toEqual([]);
+      expect(events).toEqual([]);
+      expect(prompter.counts.total).toBe(0);
+      expect(report).toEqual({
+        providers: [
+          {
+            provider: "pi",
+            roles: ["manager", "worker", "reviewer"],
+            before: "unknown",
+            after: "unknown",
+            outcome: "unknown",
+            command: null,
+            ran: false,
+            run: null,
+            manualInstructions: [EXACT_GUIDANCE],
+            warning: null,
+          },
+        ],
+        warnings: [],
+        blocksInstall: false,
+      });
+    });
+  }
+
+  it("other providers beside Pi behave exactly as before", async () => {
+    const events: string[] = [];
+    const lines: string[] = [];
+    const runner = fakeRunner({ claude: [false], pi: [false], codex: [false, true], opencode: [undefined] });
+    const report = await ensureProviderLogins({
+      selections: [
+        selection("manager", "claude"),
+        selection("worker", "pi"),
+        selection("reviewer", "codex"),
+        selection("reviewer", "opencode"),
+      ],
+      runner,
+      prompter: new RecordingPrompter(events, [false, true]),
+      print: (line) => lines.push(line),
+      spawnLogin: recordingSpawner(events),
+    });
+
+    expect(report.providers.map((p) => [p.provider, p.outcome])).toEqual([
+      ["claude", "declined"],
+      ["pi", "unknown"],
+      ["codex", "logged-in"],
+      ["opencode", "unknown"],
+    ]);
+    expect(runner.calls.map((call) => call[2])).toEqual(["claude", "codex", "codex", "opencode"]);
+    expect(events).toEqual([
+      "confirm Run `claude auth login` now?",
+      "confirm Run `codex login` now?",
+      `spawn ${JSON.stringify(["codex", "login"])}`,
+    ]);
+    expect(report.warnings.map((w) => w.provider)).toEqual(["claude"]);
+    expect(lines.filter((line) => line === EXACT_GUIDANCE)).toHaveLength(1);
+    expect(lines.filter((line) => line.includes("Pi") || line.includes('"pi"'))).toEqual([EXACT_GUIDANCE]);
+  });
+});
+
 describe("the real runner: argv array, no command interpreter, inherited stdio", () => {
   it("passes a hostile argument as one element and never evaluates it", async () => {
     const argvLog = join(dir, "argv.log");
@@ -351,6 +438,7 @@ describe("AC: no code path reads a credential file", () => {
       [[selection("worker", "codex")], { codex: [false] }, [false], true],
       [[selection("worker", "opencode")], { opencode: [false] }, [], false],
       [[selection("worker", "copilot")], { copilot: [false] }, [], true],
+      [[selection("worker", "pi")], { pi: [false] }, [], true],
       [[selection("worker", "claude"), selection("reviewer", "codex")], { claude: [true], codex: ["fail"] }, [], true],
     ];
     for (const [selections, script, answers, interactive] of scenarios) {

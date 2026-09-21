@@ -602,3 +602,14 @@ describe("the workspace list order (delta 20260918f §4.5: pinning removed)", ()
     expect(launcher).not.toMatch(/useNativeDriver: true/);
   });
 });
+
+describe("launcher: a Manager without Paseo tools (delta 20260921 §4.2.4)", () => {
+  it("shows the toolsNotice next to the mode notice, and nothing for a state built before it", async () => {
+    const { describeLauncherState } = await import("../plugin/client/launch-manager");
+    const text = "This Manager runs on bm-manager/qwen without Paseo tools (on Pi this means pi-mcp-adapter is missing): it cannot create or message a Worker.";
+    const notices = describeLauncherState({ status: "opened", workspaceId: "ws", agentId: "m", created: true, otherManagerIds: [], modeNotice: null, toolsNotice: text });
+    expect(notices.map((notice) => notice.text)).toContain(text);
+    const before = describeLauncherState({ status: "opened", workspaceId: "ws", agentId: "m", created: true, otherManagerIds: [], modeNotice: null });
+    expect(before.map((notice) => notice.text)).not.toContain(text);
+  });
+});

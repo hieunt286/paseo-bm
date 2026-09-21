@@ -18,6 +18,7 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { listAllAgents, roleOfAgent, roleOfProvider } from "./agent-role";
 import { setAgentLabels, type PaseoCliDeps } from "./paseo-cli";
+import { checkWorkerTools, type ToolsPaseo } from "./tools-check";
 
 /** The snapshot fields this module reads; `PaseoAgent` is structurally assignable. */
 export interface LabelAgentSnapshot {
@@ -161,6 +162,15 @@ export function registerAgentLabels(host: AgentLabelsHost, labeller: AgentLabell
         await labeller.labelAgent(event.agent.id, event.agent.provider, paseo);
       } catch (error) {
         console.warn(`[paseo-bm] labelling a new agent failed: ${describeError(error)}`);
+      }
+      // Delta 20260921 §4.2.4: a Worker without Paseo tools (Pi without
+      // pi-mcp-adapter) is reported to its Manager with BM-TOOLS.
+      const created = (event as { agent?: { id?: unknown; provider?: unknown; parentAgentId?: unknown } } | null)?.agent;
+      if (typeof created?.id === "string" && typeof created.provider === "string" && roleOfProvider(created.provider) === "worker") {
+        await checkWorkerTools(
+          { id: created.id, provider: created.provider, parentAgentId: typeof created.parentAgentId === "string" ? created.parentAgentId : null },
+          (context as { paseo?: unknown } | null)?.paseo as ToolsPaseo,
+        );
       }
     }),
     host.on("agent.turn_started", (_event, context) => {

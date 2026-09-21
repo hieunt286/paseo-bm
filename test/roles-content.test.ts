@@ -831,7 +831,15 @@ describe("manager.md — how it runs a request", () => {
     // any hook runs, so the Manager still passes one — the concrete value the
     // plugin writes into its Runtime facts, not a rule it has to apply.
     rule(M, "the mode comes from the Runtime facts", /`settings\.modeId` = the Worker mode named in the `## Runtime facts` section/);
-    rule(M, "a missing mode fails loudly and is reported", /Paseo refuses to create a Worker\s+without one/);
+    // Delta 20260921 §4.2.3: "Paseo refuses a Worker without one" is only true on
+    // Claude and Codex; the rewritten sentence keeps the rule — a missing
+    // Runtime-facts section fails loudly and is reported.
+    rule(
+      M,
+      "a missing mode fails loudly and is reported",
+      /Paseo refuses to create a Worker\s+without one/,
+      /If that section is missing, the creation fails with\s+Paseo's own list of modes, which you report/,
+    );
     expect(M).not.toMatch(/inspect_provider/);
     expect(M).not.toMatch(/bypassPermissions|full-access|colorTier/);
     rule(M, "the Worker's own instructions are not repeated", /The Worker already has its own instructions/);

@@ -6,6 +6,8 @@ import {
   installWarning,
   setupHeadline,
   skillBadge,
+  skillChips,
+  skillDirsText,
   toolBadge,
 } from "../plugin/client/setup-model";
 import type { SetupStatus } from "../plugin/shared/contracts";
@@ -25,7 +27,7 @@ const tool = (overrides: Partial<Tool>): Tool => ({
   ...overrides,
 });
 
-const status = (tools: Tool[], missing = { claude: 0, codex: 0 }): SetupStatus => ({
+const status = (tools: Tool[], missing: SetupStatus["skills"]["missingRequired"] = { claude: 0, codex: 0 }): SetupStatus => ({
   tools,
   latestCheckedOn: "2026-09-16",
   skills: {
@@ -72,5 +74,39 @@ describe("setup wording", () => {
     expect(installWarning(tool({}))).toContain("Homebrew");
     expect(installWarning(tool({ installCommand: "curl -fsSL x | bash" }))).toContain("install script from GitHub");
     expect(SETUP_ROLES.map((entry) => entry.mark)).toEqual(["request", "worker", "reviewer"]);
+  });
+
+  describe("Pi and OpenCode columns (delta 20260921 §4.2.6)", () => {
+    type Row = SetupStatus["skills"]["skills"][number];
+    const row = (overrides: Partial<Row>): Row => ({ name: "s1", required: true, claude: "ok", codex: "missing", problem: null, ...overrides });
+
+    it("show a chip per reported column, in order, and none for a column an older server did not send", () => {
+      expect(skillChips(row({ pi: "broken", opencode: "missing" }))).toEqual([
+        { text: "Claude ✓", tone: "success" },
+        { text: "Codex missing", tone: "warning" },
+        { text: "Pi broken", tone: "danger" },
+        { text: "OpenCode missing", tone: "warning" },
+      ]);
+      expect(skillChips(row({})).map((badge) => badge.text)).toEqual(["Claude ✓", "Codex missing"]);
+      expect(skillBadge("Pi", "ok")).toEqual({ text: "Pi ✓", tone: "success" });
+      expect(skillBadge("OpenCode", "ok")).toEqual({ text: "OpenCode ✓", tone: "success" });
+    });
+
+    it("name where each agent's skills were looked for", () => {
+      const dirs = { shared: "/h/.agents/skills", claude: "/h/.claude/skills", codex: "/h/.codex/skills" };
+      expect(skillDirsText(dirs)).toBe("Claude: /h/.claude/skills · Codex: /h/.agents/skills or /h/.codex/skills");
+      expect(skillDirsText({ ...dirs, pi: "/h/.pi/agent/skills", opencode: "/h/.config/opencode/skill" })).toBe(
+        "Claude: /h/.claude/skills · Codex: /h/.agents/skills or /h/.codex/skills · Pi: /h/.pi/agent/skills · OpenCode: /h/.config/opencode/skill",
+      );
+    });
+
+    it("count in the headline, and one ready agent is enough", () => {
+      const both = [tool({}), tool({ id: "bv" })];
+      expect(setupHeadline(status(both, { claude: 5, codex: 5, pi: 0, opencode: 2 }))).toEqual({
+        text: "br and bv ready · skills: Claude 0/5, Codex 0/5, Pi 5/5, OpenCode 3/5",
+        tone: "success",
+      });
+      expect(setupHeadline(status(both, { claude: 5, codex: 5, pi: 1, opencode: 2 })).tone).toBe("warning");
+    });
   });
 });
