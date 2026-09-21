@@ -4,7 +4,7 @@
 |---|---|
 | Mã | `plan-delta-20260918-manager-mode-model-metrics` |
 | Plan gốc | [Implementation Plan v2](paseo-bm-implementation-plan-v2.md) (Active, Plan-ready PASS) — **không sửa tại chỗ**; delta này thêm WP-243 → WP-249 vào Phase 2a-6 |
-| Status | **Applied với ngoại lệ** — 2026-09-18. WP-243 → WP-248 và phần tài liệu của WP-249 xong; điều kiện ra 2 (nghiệm thu trên daemon thật) **không đạt, ghi ngoại lệ** theo quyết định owner ("c") — xem §8 |
+| Status | **Applied** — 2026-09-18. WP-243 → WP-249 xong; điều kiện ra 2 đạt với một điểm chưa quan sát (Manager mới mở ở Bypass), owner chấp nhận — xem §8 |
 | Plan-ready | **PASS — 2026-09-18 — hieu.nt10** (Beads Worker tự chấm sau review b1 pass; xem §6) |
 | Owner | hieu.nt10 |
 | Created | 2026-09-18 |
@@ -218,7 +218,7 @@ Vitest, theo quy ước repo: SDK Paseo và bộ chạy CLI là **fake tiêm và
 | # | Điều kiện (§1) | Kết quả | Bằng chứng |
 |---|---|---|---|
 | 1 | `npm run verify` mã 0 | **Đạt** | 94 file / 2091 test, build thành công (sau khi sửa lỗi review b3) |
-| 2 | Owner tự xác nhận ba quan sát trên daemon thật | **Ngoại lệ — chưa làm** | Owner chọn "c" ngày 2026-09-18; bead `bm-wp-249-5qqp.1` để trạng thái `deferred`, mở lại khi owner kiểm |
+| 2 | Owner tự xác nhận ba quan sát trên daemon thật | **Đạt, trừ một điểm chưa quan sát** | Worker kiểm theo lựa chọn của owner (Q1 = b): hai Manager có sẵn được chuyển sang Bypass và gắn nhãn `bm.modeSet` qua CLI từ trong daemon; đổi tay `557cc8e4` về `default`, gọi `manager.ensure` → `modeNotice: null`, mode vẫn `default`, rồi trả về Bypass; mọi lượt sau khi cài có `runtime`, `traces.get` trả `usageByModel`, `usageByModelRole`, `usageByAgent[].runtime`. Chưa quan sát: Manager **mới** mở ở Bypass (chưa có Manager nào được tạo sau khi cài; có unit test) |
 | 3 | Báo cáo WP-248 trả lời đủ R1–R6, mỗi khẳng định có nguồn | **Đạt** | `docs/design/paseo-bm-research-20260918-instructions-by-model.md`; review b3 pass (người review không mở được các URL công khai vì không có mạng) |
 | 4 | PRD, PRD Dashboard, hai thiết kế gốc, `AGENTS.md` mang đúng các dòng của WP-249 | **Đạt** | Bead `bm-wp-249-5qqp.2` |
 
@@ -232,3 +232,4 @@ Vitest, theo quy ước repo: SDK Paseo và bộ chạy CLI là **fake tiêm và
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Cổng `plan-ready-for-beads` PASS sau review b1 pass. Status Draft → **Active**; phạm vi Phase 2a-6 (WP-243 → WP-249) đóng băng |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Errata theo review b2 (không đổi phạm vi): nghiệm thu WP-243 nói rõ "không chọn `planning`" chỉ áp cho lựa chọn tự động; mode tự đặt trên profile luôn thắng (Q31) |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Owner chọn bỏ qua nghiệm thu trên daemon thật ("c"): cạnh WP-249 tài liệu → nghiệm thu được gỡ, bead nghiệm thu để `deferred`. Thêm §8 kết quả điều kiện ra. Status Active → Applied với ngoại lệ |
+| 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Owner yêu cầu làm nốt; nghiệm thu trên daemon thật xong (Q1 = b), §8 dòng 2 cập nhật. Status → Applied |

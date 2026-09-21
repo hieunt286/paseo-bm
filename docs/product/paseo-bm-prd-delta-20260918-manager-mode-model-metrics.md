@@ -4,7 +4,7 @@
 |---|---|
 | Mã | `prd-delta-20260918-manager-mode-model-metrics` |
 | Tài liệu gốc | [paseo-bm PRD](paseo-bm-prd.md) REQ-026 ý (c), NFR **Quyền**; [PRD Dashboard](paseo-bm-dashboard-prd.md) REQ-052 — **không sửa tại chỗ khi chưa duyệt** |
-| Status | **Applied với ngoại lệ** — 2026-09-18. Accepted bởi owner hieu.nt10 (§6); các vị trí 1–3 và 5–6 đã áp vào PRD và PRD Dashboard. **Ngoại lệ:** nghiệm thu trên daemon thật chưa làm, theo quyết định owner (trả lời "c"), ghi là ngoại lệ chứ không phải đạt — bead `bm-wp-249-5qqp.1` để hoãn |
+| Status | **Applied** — 2026-09-18. Accepted bởi owner hieu.nt10 (§6); các vị trí 1–3 và 5–6 đã áp vào PRD và PRD Dashboard; nghiệm thu trên daemon thật xong, còn một điểm chưa quan sát (Manager mới mở ở Bypass) được owner chấp nhận |
 | Owner | hieu.nt10 |
 | Created | 2026-09-18 |
 | Request | `req-20260918T011706Z` |
@@ -125,3 +125,4 @@ Sau khi duyệt: đổi Status thành Accepted; WP đóng delta (plan §3) áp c
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Ghi quyết định vòng hai Q36–Q39; không còn câu hỏi mở |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Owner duyệt §2 và REQ-058 ở bước xác nhận trước khi implement; chọn tự cài bản build để nghiệm thu. Status Draft → Accepted |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Áp vị trí 1–3 vào `paseo-bm-prd.md` và 5–6 vào `paseo-bm-dashboard-prd.md` (WP-249). Owner chọn bỏ qua nghiệm thu trên daemon thật lúc này ("c"): ghi **ngoại lệ**, không ghi đạt. Status Accepted → Applied với ngoại lệ |
+| 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Owner yêu cầu làm nốt; nghiệm thu trên daemon thật xong (Q1 = b). Status → Applied |

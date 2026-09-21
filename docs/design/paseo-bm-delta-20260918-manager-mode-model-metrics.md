@@ -6,7 +6,7 @@
 | Tài liệu gốc | [Technical Design](./paseo-bm.md) §2.6, §5 (`manager.ensure`), §7; [Technical Design Dashboard](./paseo-bm-dashboard.md) §3.3, §4.2, §4.3, §9 |
 | PRD | [prd-delta-20260918-manager-mode-model-metrics](../product/paseo-bm-prd-delta-20260918-manager-mode-model-metrics.md) (Applied với ngoại lệ) — REQ-026c, NFR Quyền, REQ-058 mới; quyết định owner Q31–Q35 và Routing Decision ở §0 của tài liệu đó |
 | Plan | [plan-delta-20260918-manager-mode-model-metrics](../plans/paseo-bm-implementation-plan-delta-20260918-manager-mode-model-metrics.md) |
-| Status | **Applied với ngoại lệ** — 2026-09-18. `design-ready` PASS (review b1); implement WP-243 → WP-248 xong, review b3 pass sau một lần sửa. **Ngoại lệ:** đường gọi `paseo` CLI từ trong daemon chưa nghiệm thu trên daemon thật (quyết định owner "c"; bead `bm-wp-249-5qqp.1` hoãn). Chỗ lệch so với bản Active ở §10 |
+| Status | **Applied** — 2026-09-18. `design-ready` PASS (review b1); implement WP-243 → WP-248 xong, review b3 pass sau một lần sửa; nghiệm thu trên daemon thật xong với **một điểm chưa quan sát** (Manager mới mở ở Bypass — owner chấp nhận, có unit test). Chỗ lệch so với bản Active ở §10 |
 | Owner | hieu.nt10 |
 | ADR | [ADR-006](../adr/ADR-006-role-registration.md) (installer không ghi `modeId` — giữ nguyên); [ADR-007](../adr/ADR-007-dashboard-trace-store.md) (kho vết — chỉ thêm trường tuỳ chọn) |
 | Request | `req-20260918T011706Z` |
@@ -179,7 +179,7 @@ Cả ba trường cùng một luật: giá trị **đang chạy** (`runtimeInfo`
 
 | # | Thiết kế nói | Thực tế | Lý do |
 |---|---|---|---|
-| 1 | §5, §6: đường CLI kiểm trên daemon thật ở nghiệm thu | **Chưa kiểm** | Owner chọn bỏ qua lúc này ("c"); ghi ngoại lệ, không ghi đạt. Mọi lỗi của đường này chỉ thành `modeNotice`, nên Manager vẫn mở được |
+| 1 | §5, §6: đường CLI kiểm trên daemon thật ở nghiệm thu | **Đã kiểm, chạy được** — nghiệm thu trên daemon thật 2026-09-18: hai Manager tạo trước thay đổi được chuyển sang Bypass và gắn nhãn `bm.modeSet` qua lệnh `paseo` gọi từ trong daemon; đổi tay một Manager về "Always Ask" rồi gọi `manager.ensure` thì mode được giữ; mọi lượt sau khi cài ghi model/thinking/mode và `traces.get` trả đủ ba trường mới. Chưa quan sát: một Manager **mới** mở ở Bypass (owner chấp nhận ở câu trả lời Q1 = b; có unit test) | Owner ban đầu chọn bỏ qua ("c"), sau đó yêu cầu làm nốt và chọn để Worker tự kiểm điểm đổi tay (Q1 = b) |
 | 2 | §4.1 bước 3 "không có mode `dangerous` → không chọn" | Bản đầu vẫn truyền `modeId` của profile khi provider **không** liệt kê nó — review b3 bắt; đã sửa: biết danh sách mode thì chỉ truyền mode có trong danh sách, và ghi một dòng log | Truyền một mode provider không có làm việc tạo Manager thất bại |
 | 3 | §4.1 `listModes("bm-manager", { cwd })` | Gọi không kèm `cwd` | `manager.ensure` chỉ nhận `workspaceId`; lượt tra vẫn được giới hạn 5 giây |
 | 4 | §4.3 ba trường RPC mới | `usageByAgent[].runtime`, `usageByModel`, `usageByModelRole` là **tuỳ chọn** trong lược đồ Zod, server luôn gửi; `modeNotice` là bắt buộc (nullable) | Payload của bản cũ và fixture test vẫn hợp lệ |
@@ -196,3 +196,4 @@ Cả ba trường cùng một luật: giá trị **đang chạy** (`runtimeInfo`
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Review b1 re-review pass; cổng `design-ready` PASS. Status Draft → Active |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Errata theo review b2: §4.1 nói rõ "không chọn `planning`" chỉ áp cho lựa chọn tự động; mode tự đặt trên profile luôn thắng, kể cả `planning` (Q31). Không đổi quyết định nào |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | WP-249: thêm §10 (sáu chỗ lệch khi áp dụng); errata vào `paseo-bm.md` §2.6/§7, `paseo-bm-dashboard.md` §3.3/§4.2/§4.3/§9, và ba sự thật vào `AGENTS.md`. Status Active → Applied với ngoại lệ (nghiệm thu trên daemon thật chưa làm, quyết định owner) |
+| 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Nghiệm thu trên daemon thật (owner yêu cầu làm nốt, Q1 = b): đường CLI chạy thật, lựa chọn tay được giữ, dữ liệu Dashboard đúng; còn một điểm chưa quan sát (Manager mới). Status → Applied; §10 dòng 1 cập nhật |
