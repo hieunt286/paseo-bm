@@ -111,7 +111,24 @@ Vì sao cách này đúng đắn hơn:
 - nằm trong `home` mà `beforeEach` tạo và `afterEach` xoá, nên không để lại rác và không đụng gì ngoài thư mục tạm;
 - không có thành phần nào của đường dẫn nằm ngoài quyền kiểm soát của test.
 
-Các phép khẳng định của test **không đổi**: vẫn `collectTurnEnded(...) === false`, vẫn `log` được gọi đúng một lần, vẫn chứa `[paseo-bm]`. Đường đi trong mã sản phẩm cũng vẫn là đường cũ: `assertNoSymlinkOnPath` thoát sớm ở thành phần chưa tồn tại, rồi `ensureStoreDir` ném `E_TRACE_STORE_UNWRITABLE`, rồi collector nuốt và ghi log.
+Các phép khẳng định của test **không đổi**: vẫn `collectTurnEnded(...) === false`, vẫn `log` được gọi đúng một lần, vẫn chứa `[paseo-bm]`.
+
+**Nhưng đường đi trong mã sản phẩm thì ĐỔI**, và phải nói rõ chỗ này:
+
+| | Đường cũ (`/proc/...`) | Đường mới (file thường) |
+|---|---|---|
+| `assertNoSymlinkOnPath` | `lstat` thành phần gốc trả `ENOENT` → `check` trả `false` → **thoát sớm, không ném** | `lstat` file thường: có thật, không phải symlink → đi tiếp; `lstat` thành phần `traces` trả **`ENOTDIR`** (cha là file) → không phải `ENOENT` → **ném `E_TRACE_STORE_UNWRITABLE: cannot inspect …`** |
+| `ensureStoreDir` | chạy tới `mkdirSync(recursive)` → **treo trên Linux** | **không bao giờ chạy tới** |
+
+Tức là lỗi nay phát sinh ở bước soi đường dẫn *trước* `mkdir`, chứ không phải ở `mkdir`. Đo trực tiếp bằng probe (2026-09-21) — thông điệp collector ghi ra:
+
+```
+[paseo-bm] could not record a trace for agent a: E_TRACE_STORE_UNWRITABLE: cannot inspect …/not-a-directory/traces
+```
+
+`cannot inspect` là câu của `assertNoSymlinkOnPath`; câu của `ensureStoreDir` là `cannot create`.
+
+**Hệ quả phải ghi nhận:** test này không còn phủ riêng nhánh hỏng của `mkdirSync` trong `ensureStoreDir` nữa. Điều nó chứng minh — và là điều tên nó nói — vẫn nguyên: collector **nuốt** một lỗi của store và ghi log đúng một lần thay vì ném vào lượt của agent. Kiểm chứng bằng mutation ở review `b3`: bỏ phần `catch` của collector đi thì đúng test này đỏ, nên nó vẫn là một phép kiểm thật chứ không phải một phép kiểm luôn xanh.
 
 ### 4.2 Ma trận node của `release.yml` (kết quả 2)
 
@@ -168,3 +185,4 @@ Không có bằng chứng nào dưới đây thì không được đóng bead t�
 |---|---|---|
 | 2026-09-21 | hieu.nt10 (soạn bởi Beads Worker) | Tạo delta. Chẩn đoán treo CI trên Linux (§2, §3), cách vá test (§4.1), rút ma trận node của `release.yml` theo quyết định Q6: a (§4.2). Status `Draft`, chờ review batch `b1` |
 | 2026-09-21 | hieu.nt10 (soạn bởi Beads Worker) | Review `b1` pass. Thêm §9 Revision History theo phát hiện chặn của Reviewer; Status `Draft` → `Active` |
+| 2026-09-21 | hieu.nt10 (soạn bởi Beads Worker) | Sửa sai sót §4.1 do review `b3` chỉ ra và probe xác nhận: lỗi phát sinh ở `assertNoSymlinkOnPath` (`ENOTDIR`, `cannot inspect`) chứ không phải ở `mkdirSync` trong `ensureStoreDir` như bản đầu viết. Thêm bảng đối chiếu hai đường đi và ghi nhận hệ quả về phạm vi phủ. Không đổi bản vá, không đổi phạm vi |
