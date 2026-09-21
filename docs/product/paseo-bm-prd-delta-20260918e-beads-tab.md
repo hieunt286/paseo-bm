@@ -86,6 +86,40 @@ Sau batch `b4`, Worker gợi ý hai việc chưa làm. Owner trả lời:
 | 3 | Câu hỏi, không phải yêu cầu. Daemon chạy bản plugin **đã cài** trong install home, nên thay đổi trong repo chỉ hiện sau khi cài lại bản mới. Việc cài lên daemon của owner cần owner đồng ý (hỏi ở cuối batch) |
 | Q13 | Owner chọn **(b)**: cài ngay, dù bản cài mang cả phần chưa review của Worker `req-20260918T041426Z`. Worker chạy `node dist/index.js install --apply --yes` lúc 13:28 ngày 2026-09-18, khi không agent bm nào khác đang chạy: 11 file sửa, 3 file mới, plugin nạp lại, trạng thái `running` |
 
+### 1.6 Batch `b6` — mobile không có "+" (2026-09-19)
+
+Owner gửi ảnh điện thoại và viết:
+
+> Đối với bản Mobile tôi không thấy + có menu Beads hãy kiểm tra và fix
+
+Ảnh là sheet "Workspace actions" mở từ nút "…" của workspace, gồm New agent, Copy workspace path, Copy branch name, Import session, Terminal profiles. Không có "Beads".
+
+Worker đọc lại bundle của Paseo.app 0.8.0 và thấy ba điều:
+
+- app mobile **không có nút "+"** để mở tab mới: thanh tab của mobile chỉ liệt kê các tab đã mở;
+- sheet "…" có danh sách mục **cố định**, plugin không thêm vào được;
+- màn "New tab" có liệt kê panel của plugin, nhưng mobile không có đường nào mở tới màn đó.
+
+Vì vậy câu "mục có trong màn New tab của mobile" ở ý (a) và ở thiết kế F2 là **sai** với mobile. Plugin vẫn tới được mobile bằng một nút trên header của workspace: header mobile có vẽ nút của plugin, và nút đó mở được panel.
+
+| # | Câu hỏi | Owner chốt |
+|---|---|---|
+| Q14 | Lối mở tab Beads trên mobile | **(a)** Nút "Beads" (biểu tượng danh sách) trên header của mỗi workspace, bấm mở tab Beads (hai tab con Beads / Metric). Trên mobile nút nằm ngay trên header cạnh "…"; trên desktop cũng hiện ở header phải, thành một lối nhanh cạnh "+". Plugin tự gắn nút cho từng workspace đang mở |
+| Q15 | Cài nút lên daemon | **(a)** Cài ngay. Worker chạy `node dist/index.js install --apply --yes` lúc 11:34 ngày 2026-09-19, khi không agent bm nào khác đang chạy: tạo `client/beads-header-button.ts`, sửa `index.client.tsx`, plugin nạp lại, trạng thái `running` |
+
+### 1.7 Batch `b7` — nút header bị cài đè (2026-09-21)
+
+Owner báo sau khi cài phiên bản paseo-bm mới, điện thoại không còn nút "Beads" trên header. Ảnh chụp: header chỉ có "…" và nút mở panel bên.
+
+Nguyên nhân: bản 0.2.0-alpha.0 đã phát hành được dựng từ commit `65ca95f`, trước khi có batch `b6`, rồi gói đó được cài đè lên daemon. `index.client.tsx` của gói không có dòng đăng ký nút header. Batch `b6` vẫn chưa được commit.
+
+Owner trả lời "Ok, do what we should"; Worker hiểu là chọn hai đề xuất:
+
+| # | Câu hỏi | Owner chốt |
+|---|---|---|
+| Q16 | Khôi phục nút ngay | **(a)** Cài lại từ repo như Q15. Lần cài gói npm 0.2.0-alpha.0 kế tiếp sẽ lại xoá nút, cho tới khi có bản phát hành chứa `b6` |
+| Q17 | Đưa `b6` vào bản phát hành | **(a)** Worker commit riêng các file của `b6` lên nhánh mới `feat/beads-header-button` tách từ `main`, không push. Owner (hoặc request phát hành) merge và phát hành 0.2.0-alpha.1 theo quy trình GitHub prerelease |
+
 ## 2. Bối cảnh — vì sao bây giờ
 
 - **Beads và Metric ở xa chỗ đang làm.** Hôm nay, muốn xem bead của workspace đang mở, người dùng phải:
@@ -138,14 +172,14 @@ Sau batch `b4`, Worker gợi ý hai việc chưa làm. Owner trả lời:
 
 | ID | Tên | Ưu tiên | Tiêu chí chấp nhận |
 |---|---|---|---|
-| REQ-060 | Tab "Beads" trong menu "+", Setup là màn chính, màu trạng thái cho bead, danh sách theo nhóm | P2 | Xem các ý (a)–(n) ngay dưới bảng. (g), (h) sửa và (j)–(m) thêm ở batch `b4`; (m) mở rộng và (n) thêm ở batch `b5` |
+| REQ-060 | Tab "Beads" trong menu "+", Setup là màn chính, màu trạng thái cho bead, danh sách theo nhóm | P2 | Xem các ý (a)–(o) ngay dưới bảng. (g), (h) sửa và (j)–(m) thêm ở batch `b4`; (m) mở rộng và (n) thêm ở batch `b5`; (a) errata và (o) thêm ở batch `b6` |
 
 **Các ý của REQ-060:**
 
 - **(a) Mục "Beads" trong menu "+".**
   - Menu "+" của thanh tab workspace có đúng **một** mục mới tên "Beads", trong nhóm mục của plugin, cạnh "Beads agents".
   - Chọn mục đó thì mở một tab của **chính workspace đang mở**.
-  - Mục có trên desktop và trong màn "New tab" của mobile.
+  - Mục có trong menu "+" của desktop. *Errata batch `b6`:* app mobile của Paseo 0.8 không có "+" (§1.6), nên trên mobile lối vào là nút header ở ý (o).
 - **(b) Hai tab con.**
   - Tab "Beads" có hai tab con "Beads" và "Metric". Mở ra là tab con "Beads".
   - Chuyển tab con không rời tab và không mở màn nào khác.
@@ -199,6 +233,12 @@ Sau batch `b4`, Worker gợi ý hai việc chưa làm. Owner trả lời:
   - Có ở cả trong tab "Beads" lẫn trên surface Beads Manager.
 - **(m) Bỏ biểu đồ "Created / closed, last 14 days"** khỏi màn Beads (batch `b4`, mục 5 của owner). Các thẻ và biểu đồ khác của màn Beads giữ nguyên. Từ batch `b5`, phần tính dữ liệu cho biểu đồ đó cũng bị bỏ: tổng quan của màn Beads không còn tính số tạo/đóng theo ngày.
 - **(n) Màu các con số trên dòng workspace** (batch `b5`). Trong danh sách Workspaces, số bead đang làm dùng màu vàng (warning) và số bead block dùng màu đỏ (danger) khi lớn hơn 0, cùng màu với tên bead ở ý (g). Số bằng 0 vẫn xám; tổng số bead và số Worker đang chạy giữ màu như cũ.
+- **(o) Nút "Beads" trên header của workspace** (batch `b6`, Q14).
+  - Header của mỗi workspace đang mở có một nút chỉ có biểu tượng (danh sách), tên đọc cho trình đọc màn hình và tooltip là "Open the Beads tab: beads and metrics of this workspace".
+  - Bấm nút thì mở tab "Beads" của **chính workspace đó** (hai tab con như ý (b)). Mở tab mới hay đưa về tab đã có là do Paseo quyết định.
+  - Trên mobile nút nằm ngay trên header; trên desktop nút ở header phải, cạnh các nút khác.
+  - Workspace mới mở có nút chậm nhất sau 15 giây; workspace đã đóng hay đang lưu trữ thì nút biến mất.
+  - Không đọc được danh sách workspace (mất kết nối) → các nút đang có giữ nguyên, không nháy.
 
 ## 6. Yêu cầu phi chức năng
 
@@ -234,7 +274,7 @@ Sau batch `b4`, Worker gợi ý hai việc chưa làm. Owner trả lời:
 
 | Phase | Phạm vi | Điều kiện ra |
 |---|---|---|
-| Phase 2a-9 MVP (đợt này) | REQ-060 (a)–(n) | `npm run verify` mã 0. Owner tự kiểm trên daemon thật, trên máy tính và điện thoại: mục "Beads" trong "+", hai tab con, màn chính là Setup, nút "Workspaces", thông báo của `/bm-worker-stop-all` ở màn chính và dải trạng thái ở danh sách workspace; màu tên và chip; bốn nhóm, nút ẩn/hiện bead đã đóng, số `đã làm / tổng`, không còn biểu đồ 14 ngày; số đang làm và số block trên dòng workspace có màu vàng và đỏ. Delta được áp vào PRD Dashboard (dòng REQ-060) |
+| Phase 2a-9 MVP (đợt này) | REQ-060 (a)–(o) | `npm run verify` mã 0. Owner tự kiểm trên daemon thật, trên máy tính và điện thoại: mục "Beads" trong "+", hai tab con, màn chính là Setup, nút "Workspaces", thông báo của `/bm-worker-stop-all` ở màn chính và dải trạng thái ở danh sách workspace; màu tên và chip; bốn nhóm, nút ẩn/hiện bead đã đóng, số `đã làm / tổng`, không còn biểu đồ 14 ngày; số đang làm và số block trên dòng workspace có màu vàng và đỏ; trên điện thoại, nút "Beads" trên header workspace mở tab Beads. Delta được áp vào PRD Dashboard (dòng REQ-060) |
 
 ## 10. Câu hỏi mở
 
@@ -246,11 +286,17 @@ Sau batch `b4`, Worker gợi ý hai việc chưa làm. Owner trả lời:
 | Q8–Q12 | Batch `b4`: màu tên, ẩn/hiện bead đã đóng, nhóm, thống kê nhanh, cách ghi tài liệu | hieu.nt10 | **answered (2026-09-18)** — §1.4 |
 | — | Batch `b5`: bỏ phần tính 14 ngày, màu các con số trên dòng workspace | hieu.nt10 | **answered (2026-09-18)** — §1.5 |
 | Q13 | Cài bản mới lên daemon thế nào | hieu.nt10 | **answered (2026-09-18)** — §1.5 |
+| Q14 | Lối mở tab Beads trên mobile | hieu.nt10 | **answered (2026-09-19)** — §1.6 |
+| Q15 | Cài nút lên daemon | hieu.nt10 | **answered (2026-09-19)** — §1.6 |
+| Q16–Q17 | Khôi phục nút và đưa `b6` vào bản phát hành | hieu.nt10 | **answered (2026-09-21)** — §1.7 |
 
 ## 11. Revision History
 
 | Ngày | Người | Thay đổi |
 |---|---|---|
+| 2026-09-21 | hieu.nt10 (soạn bởi Beads Worker) | Batch `b7` (§1.7): nút header bị bản phát hành 0.2.0-alpha.0 cài đè; quyết định Q16–Q17 |
+| 2026-09-19 | hieu.nt10 (soạn bởi Beads Worker) | Ghi quyết định Q15 và lần cài lên daemon lúc 11:34 (§1.6) |
+| 2026-09-19 | hieu.nt10 (soạn bởi Beads Worker) | Batch `b6` (§1.6, Q14): errata cho (a) — app mobile của Paseo 0.8 không có "+"; thêm (o) nút "Beads" trên header của workspace; §9 cập nhật. Status giữ Accepted, Applied; dòng REQ-060 của PRD Dashboard được áp lại ở WP-266 |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Errata theo delta 20260918f §4.12: dòng Errata dưới tiêu đề ("màu cả dòng" đã thay ở `b4`). Không đổi yêu cầu |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Ghi quyết định Q13 (cài ngay) và lần cài lên daemon lúc 13:28 (§1.5) |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Batch `b5` (§1.5): (m) mở rộng — bỏ luôn phần tính dữ liệu 14 ngày; thêm (n) màu các con số trên dòng workspace; bỏ dòng tương ứng ở §7; §9 cập nhật. Status giữ Accepted, Applied; dòng REQ-060 của PRD Dashboard được áp lại ở WP-265 |

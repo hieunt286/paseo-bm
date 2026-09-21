@@ -47,7 +47,8 @@ Ba kết quả độc lập: không kết quả nào cần mã của kết quả
   Nguồn: `dist/client/contracts.d.ts`.
 - **F2. Menu "+" liệt kê panel của plugin.**
   - Hàm `useWorkspaceTabLaunchCatalog` dựng danh mục tab mới. Nó thêm một nhóm `plugin-panels` gồm mọi panel `context === "workspace"` hỗ trợ vị trí `workspace`. Mỗi mục có nhãn = `title`, icon = `icon`, và mở panel đó trong workspace.
-  - Hai nơi dùng danh mục này: menu thả xuống của nút "+" (`WorkspaceNewTabMenuContent`, `testID` `workspace-new-tab-button`) và màn "New tab" (`testID` `workspace-new-tab-panel`, panel `new_tab`). Mobile mở tab mới bằng màn thứ hai.
+  - Hai nơi dùng danh mục này: menu thả xuống của nút "+" (`WorkspaceNewTabMenuContent`, `testID` `workspace-new-tab-button`) và màn "New tab" (`testID` `workspace-new-tab-panel`, panel `new_tab`). ~~Mobile mở tab mới bằng màn thứ hai.~~
+  - *Errata batch `b6` (2026-09-19):* câu vừa gạch là sai. Trên mobile, `WorkspaceScreen` vẽ thanh chọn tab của mobile (danh sách các tab đã mở, không có lệnh tạo tab mới); lời gọi mở `new_tab` (`onCreateNewTab`) chỉ được trao cho `WorkspaceDesktopTabsRow` và `SplitContainer`. Sheet "…" của mobile (`WorkspaceHeaderMenuMobile`) có danh sách mục cố định. Vậy trên mobile, panel của plugin không tới được bằng "+" — xem F8 và §4.6.
 - **F3. Vị trí mặc định là `["workspace"]`.** Khi `locations` bị bỏ trống, `runPluginClientBundle` gán `["workspace"]`. Panel "Beads agents" (không khai `locations`) đang hiện trong "+" nhờ đó.
 - **F4. Hai màn cần tái dùng đã là component độc lập.**
   - `BeadsScreen` (`beads-screen.tsx`) và `DashboardPanel` (`dashboard.tsx`) nhận `PluginSurfaceProps` + `workspaceId`, `workspaceLabel`, `onBack`.
@@ -66,6 +67,12 @@ Ba kết quả độc lập: không kết quả nào cần mã của kết quả
   - `ManagerLauncherSurface` (`launcher.tsx`) giữ `view: "launcher" | "dashboard" | "beads" | "settings"` (`DashboardViewName` ở `dashboard-view.ts`), mặc định `"launcher"`.
   - Thông báo của `/bm-worker-stop-all` (`launcherNotices`), cảnh báo host cũ và `describeLauncherState(state)` chỉ vẽ trong nhánh `"launcher"`.
   - Mục Command Center "Open Beads Manager" xếp hàng một lần mở Manager (`launchRequests`). Effect của surface chạy nó ở **mọi** view. Mục "Open Beads Metric" đặt view `"dashboard"`.
+
+- **F8. Nút header của plugin có trên mobile** (đọc ngày 2026-09-19 cho batch `b6`).
+  - `client.addHeaderButton({ id, workspaceId, button })` gắn một nút vào header của **một** workspace (`pluginButtonStore.addHeaderButton`: `workspaceId` bắt buộc; trùng `id` trong cùng workspace thì lỗi).
+  - Header của workspace (`ScreenHeader`, phần `right`) vẽ `PluginHeaderButtons`, và mobile cũng gọi header đó (`bs ? null : ds()`). Ở dạng hẹp (`useIsCompactFormFactor` hoặc rộng dưới 1100 px), nút plugin **đầu tiên** hiện thẳng trên header, các nút sau vào một menu "more".
+  - `PluginButton.behavior = { kind: "action", onPress }`. `client.openPanel(panelId, { workspaceId })` mở panel đó trong workspace đó (qua `createPluginWorkspaceActionContext(...).openPanel`).
+  - paseo-bm chưa có nút header nào; `waiting-pills` chỉ dùng composer pill (một chỗ khác).
 
 ## 3. Không đổi
 
@@ -349,6 +356,39 @@ export const closedBeadsVisibility: { get(): boolean; set(show: boolean): void; 
   - ca "summarises status, progress, activity, type, priority and time" bỏ hai dòng kiểm `activity` và đối số `7` cho `days`, vì chính tính năng đó bị owner bỏ (không phải để cho xanh); tên ca đổi theo;
   - ca "workspace row figures" của `test/plugin-dashboard-view.test.ts` kỳ vọng `warning` / `danger` và thêm một dòng kiểm hai tone đó bằng `STATUS_TONE`.
 
+### 4.6 Batch `b6`: nút "Beads" trên header của workspace (REQ-060 o)
+
+**Vì sao cần.** App mobile của Paseo 0.8 không có "+" (errata F2), nên panel `bm-beads` không có lối vào trên điện thoại. Nút header là chỗ plugin chen được vào header mobile (F8).
+
+**Module mới** `plugin/client/beads-header-button.ts` (không JSX):
+
+```ts
+export const BEADS_HEADER_BUTTON_ID = "bm-beads-open";
+export const BEADS_HEADER_POLL_MS = 15_000;
+export function beadsHeaderButton(openTab: () => void): PluginButton
+  // { title: "Open the Beads tab: beads and metrics of this workspace",
+  //   icon: "ListChecks", behavior: { kind: "action", onPress: openTab } }  — không có label: chỉ biểu tượng
+export function planHeaderButtons(
+  shown: ReadonlySet<string>,
+  listed: ReadonlyArray<{ id: string; archivingAt?: string | null }>,
+): { add: string[]; remove: string[] }
+  // add = workspace đang mở (không archivingAt) mà chưa có nút; remove = nút của workspace không còn trong danh sách mở
+export function registerBeadsHeaderButtons(client: PluginClientContext): () => void
+```
+
+**`registerBeadsHeaderButtons`** theo đúng khuôn của `registerWaitingPills`:
+
+- **Đọc danh sách:** `client.paseo.workspaces.list({})` lúc bắt đầu, mỗi `BEADS_HEADER_POLL_MS`, và mỗi khi `client.paseo.workspaces.subscribe(...)` báo có cập nhật workspace.
+  - Chỉ một lần đọc chạy tại một thời điểm (cờ `pending`).
+  - Đọc lỗi thì giữ nguyên các nút.
+  - Toàn bộ nằm trong `try`, nên một client không có `paseo` (client giả trong test) không làm hỏng việc nạp plugin.
+- **Mỗi workspace mới:** gọi `client.addHeaderButton({ id: BEADS_HEADER_BUTTON_ID, workspaceId, button: beadsHeaderButton(() => client.openPanel(BEADS_TAB_PANEL_ID, { workspaceId })) })` và giữ registration.
+- **Mỗi workspace mất đi:** `registration.remove()`.
+- **Cleanup:** dừng timer, bỏ đăng ký theo dõi, gỡ mọi nút. Timer gọi `unref` như `waiting-pills`.
+- **Đăng ký:** `plugin/index.client.tsx` thêm `registerBeadsHeaderButtons(client)` vào danh sách `removers`, ngay sau panel `bm-beads`.
+
+**Desktop.** Nút cũng hiện ở header phải trên desktop (Q14 a): một lối nhanh cạnh "+". Menu "+" và panel giữ nguyên.
+
 ## 5. Luồng lỗi và trường hợp biên
 
 - **Workspace không có `.beads/`.** Tab "Beads" hiện như màn Beads hôm nay: "This workspace has no beads yet." và dòng "Read from …". Tab "Metric" hiện số đo của kho vết như hôm nay.
@@ -369,6 +409,7 @@ Repo không dựng component React trong test (quy ước đã có ở các delt
 | Thống kê nhanh (`b4`) | như trên | `doneText(beadsOverview(...).progress)` với một bộ có epic → epic không được đếm; chữ đúng mẫu `✓ n / m done` |
 | Không còn `activity` (`b5`) | như trên | kiểu `BeadsOverview` không có `activity`; `typecheck` bắt mọi chỗ còn đọc nó |
 | Màu số trên dòng workspace (`b5`) | `test/plugin-dashboard-view.test.ts` | `inProgress` > 0 → `warning`, `blocked` > 0 → `danger`, cùng giá trị với `STATUS_TONE`; số 0 → `muted` |
+| Nút header (`b6`) | `test/plugin-beads-header-button.test.ts` | `planHeaderButtons`: thêm nút cho workspace mở chưa có, bỏ nút của workspace đã mất, bỏ qua workspace có `archivingAt`; `registerBeadsHeaderButtons` với client giả: một nút cho mỗi workspace mở, cùng `id`, chỉ biểu tượng; bấm → `openPanel("bm-beads", { workspaceId })` đúng workspace; workspace biến mất → `remove()`; đọc lỗi → giữ nút; cleanup gỡ hết |
 | Ẩn/hiện (`b4`) | như trên | `closedBeadsVisibility` mặc định `false`; `set` báo cho người nghe và giữ giá trị cho lần `get` sau |
 | Tab con | `test/plugin-dashboard-view.test.ts` | `BEADS_TAB_VIEWS` đúng thứ tự Beads, Metric; `DEFAULT_BEADS_TAB_VIEW === "beads"` |
 | Đường quay lại | như trên | `SURFACE_HOME_VIEW === "setup"`; `backOf` cho đủ bốn view như §4.2 |
@@ -382,6 +423,7 @@ Repo không dựng component React trong test (quy ước đã có ở các delt
   - (`b4`) mặc định `closedBeadsVisibility` là `true` → ca ẩn/hiện đỏ;
   - (`b4`) tạm cho `progress` của `beadsOverview` đếm cả epic → ca thống kê đỏ;
   - (`b5`) trả tone của `inProgress` về `info` → ca màu số trên dòng workspace đỏ;
+  - (`b6`) cho `planHeaderButtons` quên bỏ nút của workspace đã mất → ca nút header đỏ;
   - đổi `in_progress` trong `STATUS_TONE` về `info` → test bảng màu đỏ;
   - cho `statusBadge` trả tone riêng → test bất biến đỏ;
   - bỏ dòng đăng ký panel → test đăng ký đỏ;
@@ -425,6 +467,7 @@ Owner đã xác nhận các điểm Worker chọn thêm ngoài lời owner (Q4�
 
 | Ngày | Người | Thay đổi |
 |---|---|---|
+| 2026-09-19 | hieu.nt10 (soạn bởi Beads Worker) | Batch `b6`: errata F2 (mobile không có "+"); thêm F8 (nút header của plugin có trên mobile) và §4.6 (nút "Beads" trên header); §6 thêm ca và đối chứng âm. Status giữ Active |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Errata theo [delta 20260918f](./paseo-bm-delta-20260918f-ui-review.md) §4.12: dòng Errata ở bảng đầu (tiêu đề và §1 ý 3 "màu cả dòng"); §8 và §9 ghi `ROW_TINT_OPACITY`, 0.12 / 4 px đã bỏ ở `b4` và màu con số trên dòng workspace đã làm ở `b5`. Không đổi phạm vi |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Batch `b5`: thêm §4.5 (bỏ `activity` của `beadsOverview`; `workspaceStats` đọc tone từ `STATUS_TONE`); §6 thêm ca và đối chứng âm. Status giữ Active |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Batch `b4` (Q8–Q12): thêm §4.4 (màu ở tên, `groupBeads`, `closedBeadsVisibility`, `doneText`, bỏ biểu đồ 14 ngày); §4.3 ghi rõ phần khung dòng bị thay; §6 thêm và sửa ca test, thêm đối chứng âm. Status giữ Active |

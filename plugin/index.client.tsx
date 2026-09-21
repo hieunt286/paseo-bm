@@ -16,6 +16,7 @@ import { CHAT_CARD_KIND, CHAT_CARD_VERSION, chatCardSchema, toChatCard } from ".
 import { ChatCardView } from "./client/chat-card";
 import { ChatBeadsPanel } from "./client/bead-chips";
 import { BeadsTabPanel } from "./client/beads-tab";
+import { registerBeadsHeaderButtons } from "./client/beads-header-button";
 import { registerWaitingPills } from "./client/waiting-pills";
 
 /** A chat item as a paseo-bm card, or nothing (the item stays Paseo's). */
@@ -212,6 +213,9 @@ export default function contribute(client: PluginClientContext): () => void {
       context: "workspace",
       Component: BeadsTabPanel,
     }),
+    // The same tab from a button on every workspace header: Paseo 0.8's mobile
+    // app has no "+" menu (delta 20260918e §4.6).
+    registerBeadsHeaderButtons(client),
     client.addWorkspacePanel({
       id: AGENT_TREE_PANEL_ID,
       title: "Beads agents",

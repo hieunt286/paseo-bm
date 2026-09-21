@@ -53,7 +53,7 @@ WP-263 đóng delta và phụ thuộc cả ba.
 
 ```
 WP-260 ──┐
-WP-261 ──┼──> WP-263 ──> WP-264 (batch b4) ──> WP-265 (batch b5)
+WP-261 ──┼──> WP-263 ──> WP-264 (batch b4) ──> WP-265 (batch b5) ──> WP-266 (batch b6)
 WP-262 ──┘
 ```
 
@@ -256,6 +256,39 @@ Owner đồng ý hai gợi ý của Worker sau batch `b4` (PRD delta §1.5).
 
 Cài bản mới lên daemon **không** thuộc WP này: đó là việc ngoài workspace, cần owner đồng ý riêng (PRD delta §1.5 mục 3).
 
+### WP-266 — Batch `b6`: nút "Beads" trên header của workspace (mobile)
+
+Owner báo trên điện thoại không có "+" với mục Beads (PRD delta §1.6); owner chọn Q14 a.
+
+**Kết quả:**
+
+- mỗi workspace đang mở có nút "Beads" (chỉ biểu tượng) trên header, bấm mở tab `bm-beads` của workspace đó, trên cả mobile và desktop;
+- nút theo danh sách workspace: workspace mới có nút, workspace mất đi thì nút mất;
+- dòng REQ-060 của PRD Dashboard áp lại với (a) errata và (o);
+- `npm run verify` mã 0.
+
+**Nguồn:** REQ-060 (a) errata, (o); thiết kế §2 errata F2, F8, §4.6, §6 (các dòng `b6`).
+
+**Phụ thuộc:** WP-265 (đã đóng); dùng panel `bm-beads` của WP-261.
+
+**Phạm vi:**
+
+- file mới `plugin/client/beads-header-button.ts` và `test/plugin-beads-header-button.test.ts`;
+- một dòng trong `plugin/index.client.tsx`;
+- dòng REQ-060 và các dòng revision ở PRD và design Dashboard.
+
+Không sửa `waiting-pills*`, `chat-card*`, hay file nào khác của Worker khác.
+
+**Ranh giới hoàn tác.** Một leaf cho nút (mã + test); một leaf áp tài liệu và kiểm cả gói.
+
+**Điều kiện ra:**
+
+- ca `b6` ở thiết kế §6 xanh, đối chứng âm đỏ rồi hoàn lại;
+- các test đăng ký đang có (`plugin-launcher`, `agent-tree`) vẫn xanh mà không sửa kỳ vọng;
+- `npm run typecheck`, `npm run typecheck:plugin`, `npm run lint` và `npm run verify` mã 0.
+
+Cài bản mới lên daemon không thuộc WP này: cần owner đồng ý riêng.
+
 ## 4. Rủi ro
 
 | Rủi ro | Giảm nhẹ |
@@ -277,6 +310,8 @@ Cài bản mới lên daemon **không** thuộc WP này: đó là việc ngoài 
 
 | Ngày | Người | Thay đổi |
 |---|---|---|
+| 2026-09-19 | hieu.nt10 (soạn bởi Beads Worker) | WP-266 xong (bead `bm-wp-266-beads-header-hs0u.1`–`.2`); dòng REQ-060 của PRD Dashboard áp lại với (a) errata và (o). Status giữ Active |
+| 2026-09-19 | hieu.nt10 (soạn bởi Beads Worker) | Batch `b6`: thêm WP-266 sau WP-265. Status giữ Active |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | WP-265 xong (bead `bm-wp-265-beads-b5-wjd4.1`–`.3`); dòng REQ-060 của PRD Dashboard áp lại với (m), (n). Status giữ Active |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Batch `b5`: thêm WP-265 sau WP-264. Status giữ Active |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | WP-264 xong (bead `bm-wp-264-beads-list-bcr2.1`–`.4`); dòng REQ-060 của PRD Dashboard áp lại; `npm run verify` mã 0 (95 file, 2181 test). Review `b4` sau đó. Status giữ Active |
