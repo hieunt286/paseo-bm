@@ -1,7 +1,7 @@
 import type { PluginBeforeRequests, PluginServerContext } from "@getpaseo/plugin/server";
 import { ROLE_BY_PROVIDER } from "./agent-role";
 import { providerId } from "./provider-id";
-import { LOOKUP_TIMEOUT_MS, ROLE_GETS_MODE, TIMED_OUT, chooseModeId, modesFor, profileModeOf, withTimeout, type ProviderMode } from "./role-mode";
+import { LOOKUP_TIMEOUT_MS, ROLE_GETS_MODE, TIMED_OUT, chooseModeId, modesFor, profileOf, withTimeout, type ProviderMode, type RoleProfile } from "./role-mode";
 import {
   BASE_INSTRUCTIONS,
   fullInstructions,
@@ -105,16 +105,76 @@ export function applyRoleMode(
   }
 }
 
-/** Instructions and start mode together; `undefined` when neither changes. */
+/**
+ * The model a creation request names, or `null`: the daemon's resolved
+ * `config.model` when set, else everything after the FIRST `/` of
+ * `config.provider` (OpenCode model ids contain `/` themselves, so
+ * `bm-worker/anthropic/claude-sonnet-4-6` names `anthropic/claude-sonnet-4-6`).
+ */
+function requestModelOf(config: { provider?: unknown; model?: unknown }): string | null {
+  if (typeof config.model === "string" && config.model.trim() !== "") return config.model;
+  if (typeof config.provider !== "string") return null;
+  const slash = config.provider.indexOf("/");
+  return slash === -1 || slash === config.provider.length - 1 ? null : config.provider.slice(slash + 1);
+}
+
+/**
+ * Returns the request with the thinking level and feature values of the
+ * Worker's or Reviewer's own profile (delta 20260921 §4.1.1, REQ-062 a), or
+ * `undefined` when nothing changes. Never throws.
+ *
+ * - `thinkingOptionId`: the profile's, only when the creator passed none and
+ *   the request's model is the profile's model (or names no model): a
+ *   thinking level belongs to a model and may not exist on another one.
+ * - `featureValues`: the profile's, merged under the creator's, whose keys win.
+ *
+ * The Manager is left alone: `manager.ensure` already passes its profile.
+ */
+export function applyRoleProfile(request: AgentCreateRequest, profile: RoleProfile | null): AgentCreateRequest | undefined {
+  try {
+    if (profile === null) return undefined;
+    const config = (request as Partial<AgentCreateRequest> | null | undefined)?.config;
+    if (config === null || typeof config !== "object") return undefined;
+    const id = providerId(config.provider);
+    if (id === null || !Object.prototype.hasOwnProperty.call(ROLE_BY_PROVIDER, id)) return undefined;
+    const role = ROLE_BY_PROVIDER[id]!;
+    if (role !== "worker" && role !== "reviewer") return undefined;
+
+    const next: Record<string, unknown> = { ...config };
+    let changed = false;
+    const current = typeof config.thinkingOptionId === "string" && config.thinkingOptionId.trim() !== "";
+    const model = requestModelOf(config);
+    if (!current && profile.thinkingOptionId !== null && (model === null || model === profile.model)) {
+      next.thinkingOptionId = profile.thinkingOptionId;
+      changed = true;
+    }
+    if (profile.featureValues !== null) {
+      const own = config.featureValues;
+      const creator = own !== null && typeof own === "object" && !Array.isArray(own) ? own : {};
+      const merged = { ...profile.featureValues, ...creator };
+      if (JSON.stringify(merged) !== JSON.stringify(own ?? null)) {
+        next.featureValues = merged;
+        changed = true;
+      }
+    }
+    return changed ? { ...request, config: next as unknown as AgentCreateRequest["config"] } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Instructions, profile settings and start mode together; `undefined` when none changes. */
 export function applyRoleConfig(
   request: AgentCreateRequest,
   extras: Partial<RoleExtras> = {},
   modes: readonly ProviderMode[] | null = null,
   facts: RuntimeFacts = {},
   profileModeId: string | null = null,
+  profile: RoleProfile | null = null,
 ): AgentCreateRequest | undefined {
   const withInstructions = applyRoleInstructions(request, extras, facts);
-  return applyRoleMode(withInstructions ?? request, modes, profileModeId) ?? withInstructions;
+  const withProfile = applyRoleProfile(withInstructions ?? request, profile) ?? withInstructions;
+  return applyRoleMode(withProfile ?? request, modes, profileModeId) ?? withProfile;
 }
 
 /**
@@ -140,7 +200,13 @@ function modeLookupFor(request: AgentCreateRequest): string | null {
 async function prepare(
   request: AgentCreateRequest,
   paseo: unknown,
-): Promise<{ extras: Partial<RoleExtras>; modes: ProviderMode[] | null; facts: RuntimeFacts; profileModeId: string | null }> {
+): Promise<{
+  extras: Partial<RoleExtras>;
+  modes: ProviderMode[] | null;
+  facts: RuntimeFacts;
+  profileModeId: string | null;
+  profile: RoleProfile | null;
+}> {
   let extras: Partial<RoleExtras> = {};
   try {
     const home = await installHomeOf(paseo);
@@ -149,12 +215,18 @@ async function prepare(
     // Without the additions the agent still gets its base instructions.
   }
   const cwd = typeof request?.config?.cwd === "string" ? request.config.cwd : undefined;
+  const id = providerId(request?.config?.provider);
+  const role = id !== null && Object.prototype.hasOwnProperty.call(ROLE_BY_PROVIDER, id) ? ROLE_BY_PROVIDER[id] : undefined;
+  // The Worker's or Reviewer's own profile: its mode (bm-msy), and its
+  // thinking and features (delta 20260921 §4.1.1). One read, whether or not
+  // the mode needs a lookup: a Worker created WITH a mode still gets the
+  // thinking set on its profile.
+  const profile = role === "worker" || role === "reviewer" ? await profileOf(paseo, id!) : null;
   const lookup = modeLookupFor(request);
-  const profileModeId = lookup === null ? null : await profileModeOf(paseo, lookup);
+  const profileModeId = lookup === null ? null : (profile?.modeId ?? null);
   const modes = lookup === null ? null : await modesFor(paseo, lookup, undefined, cwd);
-  const role = ROLE_BY_PROVIDER[providerId(request?.config?.provider) ?? ""];
   const facts = role === undefined ? {} : await runtimeFactsOf(role, paseo, cwd);
-  return { extras, modes, facts, profileModeId };
+  return { extras, modes, facts, profileModeId, profile };
 }
 
 function isBmRequest(request: AgentCreateRequest): boolean {
@@ -196,7 +268,7 @@ export function registerRoleHook(host: RoleHookHost): () => void {
         );
         return applyRoleInstructions(request);
       }
-      return applyRoleConfig(request, prepared.extras, prepared.modes, prepared.facts, prepared.profileModeId);
+      return applyRoleConfig(request, prepared.extras, prepared.modes, prepared.facts, prepared.profileModeId, prepared.profile);
     })();
   });
   return typeof remove === "function" ? remove : () => {};

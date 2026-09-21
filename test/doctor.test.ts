@@ -519,6 +519,233 @@ describe("runDoctor — reads paseoTools in the shape Paseo stores it (bm-ym3)",
   });
 });
 
+/* ------------------------------ roles: changed in the app (REQ-062 d) */
+
+type RoleName = "manager" | "worker" | "reviewer";
+
+interface RoleSettings {
+  readonly extends?: string | undefined;
+  readonly model?: string | undefined;
+}
+
+/** What `makeRecord` says the installer wrote, per role. */
+const WRITTEN: Readonly<Record<RoleName, Required<RoleSettings>>> = {
+  manager: { extends: "claude", model: "claude-opus-5" },
+  worker: { extends: "codex", model: "gpt-5.6-sol" },
+  reviewer: { extends: "codex", model: "gpt-5.6-sol" },
+};
+
+const LABELS: Readonly<Record<RoleName, string>> = {
+  manager: "Beads Manager",
+  worker: "Beads Worker",
+  reviewer: "Beads Reviewer",
+};
+
+/**
+ * A healthy world whose role aliases and profiles carry `extends` and `model`
+ * exactly as the installer wrote them, with `changes` laid on top. A key set to
+ * `undefined` is left out of `config.json`; a role set to `null` has neither
+ * alias nor profile.
+ */
+function worldWithRoleSettings(
+  changes: Partial<Record<RoleName, RoleSettings | null>> = {},
+  record: (world: World) => InstallRecord = (world) => makeRecord(world),
+): World {
+  const world = makeWorld();
+  installSkills(world);
+  const roles = (["manager", "worker", "reviewer"] as const).filter((role) => changes[role] !== null);
+  const settings = (role: RoleName): RoleSettings => ({ ...WRITTEN[role], ...(changes[role] ?? {}) });
+  writePaseoConfig(world, {
+    ...(healthyConfig() as Record<string, unknown>),
+    agents: {
+      providers: Object.fromEntries(
+        roles.map((role) => [
+          `bm-${role}`,
+          {
+            extends: settings(role).extends,
+            label: LABELS[role],
+            ...(role === "reviewer" ? {} : { paseoTools: { enabled: true } }),
+          },
+        ]),
+      ),
+    },
+    daemon: {
+      mcp: { injectIntoAgents: true },
+      agentProfiles: [
+        { id: "someone-elses", provider: "claude", model: "not-ours" },
+        ...roles.map((role) => ({
+          id: `bm-${role}`,
+          name: LABELS[role],
+          provider: `bm-${role}`,
+          model: settings(role).model,
+        })),
+      ],
+    },
+  });
+  installOnDisk(world, record(world));
+  return world;
+}
+
+function changedInApp(checks: readonly Check[]): readonly Check[] {
+  return checks.filter((entry) => entry.id === "roles.changed-in-app");
+}
+
+describe("runDoctor — a role changed in the app (REQ-062 d)", () => {
+  it("adds no note when alias `extends` and profile `model` equal what the installer wrote", async () => {
+    const world = worldWithRoleSettings();
+    const { adapter } = recordingAdapter({ world });
+    const { checks, exitCode } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
+
+    expect(changedInApp(checks)).toEqual([]);
+    expect(checks.filter((entry) => entry.severity !== "ok")).toEqual([]);
+    expect(exitCode).toBe(EXIT_CODES.ok);
+  });
+
+  it("notes a differing model as info, with the exact message, and keeps exit 0", async () => {
+    const world = worldWithRoleSettings({ worker: { model: "gpt-5.7" } });
+    const { adapter } = recordingAdapter({ world });
+    const { checks, exitCode, report } = await runDoctor({
+      adapter,
+      layout: world.layout,
+      version: PACKAGE_VERSION,
+      env: world.env,
+    });
+
+    const notes = changedInApp(checks);
+    expect(notes).toHaveLength(1);
+    const note = notes[0];
+    expect(note?.message).toBe("bm-worker: base provider or model differs from what the installer wrote (changed in the app).");
+    // Info: a severity that never raises the exit code and is not counted as a warning.
+    expect(note?.severity).toBe("ok");
+    expect(note?.remediation).toContain("The installer wrote codex/gpt-5.6-sol; Paseo's configuration has codex/gpt-5.7.");
+    // The role's own check is unaffected: a change made in the app is not drift.
+    expect(severityOf(checks, "role-bm-worker")).toBe("ok");
+    expect(exitCode).toBe(EXIT_CODES.ok);
+    expect(report.result.exitCode).toBe(EXIT_CODES.ok);
+
+    // …and it is one more check in the JSON document, right after the role checks.
+    const json = JSON.parse(renderJsonReport(report, { redact: (text) => text })) as {
+      checks: Check[];
+      result: { exitCode: number };
+    };
+    expect(json.result.exitCode).toBe(EXIT_CODES.ok);
+    expect(json.checks.filter((entry) => entry.id === "roles.changed-in-app")).toEqual([note]);
+    const ids = json.checks.map((entry) => entry.id);
+    expect(ids.slice(ids.indexOf("role-bm-manager"), ids.indexOf("payload-versions"))).toEqual([
+      "role-bm-manager",
+      "role-bm-worker",
+      "role-bm-reviewer",
+      "roles.changed-in-app",
+    ]);
+  });
+
+  it("notes a differing base provider the same way", async () => {
+    const world = worldWithRoleSettings({ reviewer: { extends: "claude" } });
+    const { adapter } = recordingAdapter({ world });
+    const { checks, exitCode } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
+
+    expect(changedInApp(checks).map((entry) => entry.message)).toEqual([
+      "bm-reviewer: base provider or model differs from what the installer wrote (changed in the app).",
+    ]);
+    expect(exitCode).toBe(EXIT_CODES.ok);
+  });
+
+  it("adds one note per changed role, in role order", async () => {
+    const world = worldWithRoleSettings({
+      worker: { extends: "claude", model: "claude-opus-5" },
+      manager: { model: "claude-sonnet-5" },
+    });
+    const { adapter } = recordingAdapter({ world });
+    const { checks, exitCode } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
+
+    expect(changedInApp(checks).map((entry) => entry.message)).toEqual([
+      "bm-manager: base provider or model differs from what the installer wrote (changed in the app).",
+      "bm-worker: base provider or model differs from what the installer wrote (changed in the app).",
+    ]);
+    expect(exitCode).toBe(EXIT_CODES.ok);
+  });
+
+  it("does not change the exit code of a run that has drifted for another reason", async () => {
+    const world = worldWithRoleSettings({ worker: { model: "gpt-5.7" } });
+    const { adapter } = recordingAdapter({ world, plugins: [plugin({ path: activePluginDir(world), status: "disabled" })] });
+    const { checks, exitCode } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
+
+    expect(changedInApp(checks)).toHaveLength(1);
+    expect(checks.filter((entry) => entry.severity === "error").map((entry) => entry.id)).toEqual(["plugin-status"]);
+    expect(exitCode).toBe(EXIT_CODES.doctorDrift);
+  });
+
+  it("treats an alias without `extends` or a profile without `model` as unchanged", async () => {
+    const world = worldWithRoleSettings({ worker: { extends: undefined, model: undefined } });
+    const { adapter } = recordingAdapter({ world });
+    const { checks, exitCode } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
+
+    expect(changedInApp(checks)).toEqual([]);
+    expect(exitCode).toBe(EXIT_CODES.ok);
+  });
+
+  it("keeps today's error, and adds no note, when the install record has no entry for the role", async () => {
+    const world = worldWithRoleSettings({ worker: { model: "gpt-5.7" } }, (candidate) => {
+      const base = makeRecord(candidate);
+      return { ...base, roles: base.roles.filter((entry) => entry.role !== "worker") };
+    });
+    const { adapter } = recordingAdapter({ world });
+    const { checks, exitCode } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
+
+    expect(find(checks, "role-bm-worker")).toMatchObject({
+      severity: "error",
+      message: "The install record has no entry for the `bm-worker` role.",
+    });
+    expect(changedInApp(checks)).toEqual([]);
+    expect(exitCode).toBe(EXIT_CODES.doctorDrift);
+  });
+
+  it("keeps today's error, and adds no note, when Paseo's configuration lacks the role's profile", async () => {
+    const world = makeWorld();
+    installSkills(world);
+    const config = healthyConfig() as { agents: unknown; daemon: { mcp: unknown; agentProfiles: unknown[] } };
+    writePaseoConfig(world, {
+      ...config,
+      agents: {
+        providers: {
+          "bm-manager": { extends: "claude", label: "Beads Manager", paseoTools: { enabled: true } },
+          // Changed in the app, but its profile is gone: the missing profile is what gets reported.
+          "bm-worker": { extends: "claude", label: "Beads Worker", paseoTools: { enabled: true } },
+          "bm-reviewer": { extends: "codex", label: "Beads Reviewer" },
+        },
+      },
+      daemon: { ...config.daemon, agentProfiles: [{ id: "bm-manager" }, { id: "bm-reviewer" }] },
+    });
+    installOnDisk(world, makeRecord(world));
+    const { adapter } = recordingAdapter({ world });
+    const { checks } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
+
+    expect(find(checks, "role-bm-worker")).toMatchObject({
+      severity: "error",
+      message: "The `bm-worker` role is recorded but Paseo's configuration is missing daemon.agentProfiles[bm-worker].",
+    });
+    expect(changedInApp(checks)).toEqual([]);
+  });
+
+  it("stays read-only and within the two allow-listed calls while noting the change", async () => {
+    const world = worldWithRoleSettings({ worker: { extends: "claude", model: "claude-opus-5" } });
+    const { adapter, calls } = recordingAdapter({ world });
+    const scope = startWriteScope({
+      installHome: world.layout.installHome.path,
+      paseoHome: world.layout.paseoHome.path,
+      watch: [world.home],
+    });
+    try {
+      const { checks } = await runDoctor({ adapter, layout: world.layout, version: PACKAGE_VERSION, env: world.env });
+      expect(changedInApp(checks)).toHaveLength(1);
+      expect(scope.writes).toEqual([]);
+    } finally {
+      scope.restore();
+    }
+    expect(calls.map((argv) => argv.join(" "))).toEqual(["daemon status --json", "plugin ls --json"]);
+  });
+});
+
 /* -------------------------------------------------------------- state: drift */
 
 async function driftWorld(): Promise<World> {

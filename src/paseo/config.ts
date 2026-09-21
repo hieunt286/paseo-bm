@@ -10,9 +10,12 @@
  *    listed in Design §3.4 are touched, and everything else — including key
  *    order — comes back out exactly as it went in. `daemon.agentProfiles` is an
  *    array, so it is merged entry by entry: entries whose `id` starts with
- *    `bm-` are added or replaced in place, every other entry keeps its position
- *    and its content. Replacing the whole array is the paseo-room defect this
- *    module exists to avoid (ADR-006 decision 5).
+ *    `bm-` are added or merged into in place, every other entry keeps its
+ *    position and its content. Replacing the whole array is the paseo-room
+ *    defect this module exists to avoid (ADR-006 decision 5). A `bm-*` entry
+ *    that is already there is not replaced either: it is merged into key by key
+ *    ({@link EntryMergeRule}), so a key the user set on it in Paseo survives
+ *    every re-install (delta 20260921 §4.1.2, ADR-008 D5).
  * 2. **Backup first.** The file is copied to
  *    `<install home>/backups/<stamp>/paseo-config.json` before anything is
  *    written, and that copy is what a failed reload is rolled back to.
@@ -197,6 +200,42 @@ export type McpInjectEdit =
   | KeyRestoreEdit;
 
 /**
+ * What happens to one key of an edit's entry when `config.json` already holds
+ * an entry with that id (delta 20260921 §4.1.2, ADR-008 D5). An entry that is
+ * not there yet is always created whole, exactly as the edit gives it; these
+ * modes only decide how an existing one is merged into.
+ */
+export type EntryKeyMerge =
+  /** Written whatever the file holds. The mode of every key a rule does not name. */
+  | "set"
+  /** Written only when the file's entry lacks the key (absent, or `null`). */
+  | "fill"
+  /** Written only when the entry is created; an existing entry keeps what it has, or has not. */
+  | "create-only"
+  /**
+   * An object merged one level down: each of its keys is set and every other
+   * key of the file's object is kept — `paseoTools.enabled` next to the user's
+   * `disabledTools`. A file value that is not an object is replaced.
+   */
+  | "merge";
+
+/**
+ * How an edit's entry is merged into the entry the file already holds. Every
+ * key of the file's entry that the rule does not write keeps its value and its
+ * place; nothing is ever removed except by {@link EntryMergeRule.drop}.
+ */
+export interface EntryMergeRule {
+  /** Mode per key of the edit's entry; a key not named here is `set`. */
+  readonly keys?: Readonly<Record<string, EntryKeyMerge>>;
+  /**
+   * Keys deleted from the file's entry when this merge changed the value of
+   * `whenChanged` — a thinking level belongs to a model, so it goes when the
+   * model does.
+   */
+  readonly drop?: { readonly whenChanged: string; readonly keys: readonly string[] };
+}
+
+/**
  * The closed set of changes this module can make. It is declarative on purpose:
  * a caller cannot hand in an arbitrary mutation, so "paseo-bm touches nothing
  * else" is enforced by the shape of the API and not by review.
@@ -205,11 +244,21 @@ export interface ConfigEdit {
   /** A value to set, or — on uninstall — the recorded previous state to restore. */
   readonly pluginsEnabled?: boolean | KeyRestoreEdit;
   readonly mcpInject?: McpInjectEdit;
-  /** `agents.providers.<id>`; every id must start with `bm-`. */
+  /**
+   * `agents.providers.<id>`; every id must start with `bm-`. A missing entry is
+   * created exactly like this; an existing one is merged into, never replaced.
+   */
   readonly providers?: Readonly<Record<string, JsonValue>>;
+  /** Per provider id: how its entry merges into an existing one. Absent: every key `set`. */
+  readonly providerMerge?: Readonly<Record<string, EntryMergeRule>>;
   readonly removeProviders?: readonly string[];
-  /** `daemon.agentProfiles[]` entries; every `id` must start with `bm-`. */
+  /**
+   * `daemon.agentProfiles[]` entries; every `id` must start with `bm-`. Created
+   * exactly like this when missing, merged into when already there.
+   */
   readonly profiles?: readonly AgentProfileEntry[];
+  /** Per profile id: how its entry merges into an existing one. Absent: every key `set`. */
+  readonly profileMerge?: Readonly<Record<string, EntryMergeRule>>;
   readonly removeProfiles?: readonly string[];
   /**
    * Containers paseo-bm recorded as created by itself. Applied after every
@@ -678,8 +727,11 @@ function applyProviders(config: PaseoConfig, edit: ConfigEdit, changedPaths: str
   parent[leaf] = providers;
 
   for (const [id, value] of entries) {
-    if (!deepEqual(providers[id], value)) {
-      providers[id] = structuredClone(value);
+    const current = providers[id];
+    const next = mergedEntry(current, value, edit.providerMerge?.[id]);
+    if (!deepEqual(current, next)) {
+      // Assigning an existing key keeps its place among the user's providers.
+      providers[id] = next;
       changedPaths.push(`${PROVIDERS_PATH}.${id}`);
     }
   }
@@ -694,10 +746,11 @@ function applyProviders(config: PaseoConfig, edit: ConfigEdit, changedPaths: str
 /**
  * Merges `daemon.agentProfiles` entry by entry.
  *
- * The array is copied, `bm-*` entries are replaced **at their existing index**
- * or appended at the end, and every other entry is carried over as the very
- * same value. That is the whole point: a profile the user or paseo-room added
- * keeps its position and its content down to the byte.
+ * The array is copied, `bm-*` entries are merged into **at their existing
+ * index** ({@link mergedEntry}) or appended at the end, and every other entry
+ * is carried over as the very same value. That is the whole point: a profile
+ * the user or paseo-room added keeps its position and its content down to the
+ * byte, and a key the user added to a `bm-*` profile stays on it.
  */
 function applyProfiles(config: PaseoConfig, edit: ConfigEdit, changedPaths: string[]): void {
   const additions = edit.profiles ?? [];
@@ -727,8 +780,10 @@ function applyProfiles(config: PaseoConfig, edit: ConfigEdit, changedPaths: stri
       changedPaths.push(profileField(profile.id));
       continue;
     }
-    if (!deepEqual(list[index], profile)) {
-      list[index] = structuredClone(profile);
+    const current = list[index];
+    const next = mergedEntry(current, profile, edit.profileMerge?.[profile.id]);
+    if (!deepEqual(current, next)) {
+      list[index] = next;
       changed = true;
       changedPaths.push(profileField(profile.id));
     }
@@ -753,12 +808,62 @@ function profileField(id: string): string {
   return `${AGENT_PROFILES_PATH}[${id}]`;
 }
 
+/**
+ * The edit's `entry` merged into `current`, the entry the file holds (delta
+ * 20260921 §4.1.2).
+ *
+ * The result starts as a copy of `current`, so every key the rule does not
+ * write keeps its value and its position, and a new key is appended after the
+ * user's. Only `rule.drop` removes anything. When either side is not a JSON
+ * object there is nothing to merge into, and the entry is written whole — as
+ * it is for an id the file does not have yet.
+ */
+function mergedEntry(current: unknown, entry: unknown, rule: EntryMergeRule | undefined): unknown {
+  if (!isPlainObject(current) || !isPlainObject(entry)) {
+    return structuredClone(entry);
+  }
+
+  const merged: Record<string, unknown> = structuredClone(current);
+  for (const [key, value] of Object.entries(entry)) {
+    const mode: EntryKeyMerge = rule?.keys?.[key] ?? "set";
+    const existing = merged[key];
+    switch (mode) {
+      case "create-only":
+        break;
+      case "fill":
+        if (existing === undefined || existing === null) {
+          merged[key] = structuredClone(value);
+        }
+        break;
+      case "merge":
+        merged[key] =
+          isPlainObject(existing) && isPlainObject(value)
+            ? { ...existing, ...structuredClone(value) }
+            : structuredClone(value);
+        break;
+      case "set":
+        merged[key] = structuredClone(value);
+        break;
+    }
+  }
+
+  const drop = rule?.drop;
+  if (drop !== undefined && !deepEqual(current[drop.whenChanged], merged[drop.whenChanged])) {
+    for (const key of drop.keys) {
+      delete merged[key];
+    }
+  }
+  return merged;
+}
+
 /** Rejects any edit that names something outside paseo-bm's `bm-` prefix. */
 function assertOnlyOurKeys(edit: ConfigEdit): void {
   const ids = [
     ...Object.keys(edit.providers ?? {}),
+    ...Object.keys(edit.providerMerge ?? {}),
     ...(edit.removeProviders ?? []),
     ...(edit.profiles ?? []).map((profile) => profile.id),
+    ...Object.keys(edit.profileMerge ?? {}),
     ...(edit.removeProfiles ?? []),
   ];
   for (const path of edit.removeEmptyContainers ?? []) {

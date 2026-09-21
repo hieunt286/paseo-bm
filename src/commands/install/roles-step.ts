@@ -10,8 +10,10 @@
  *   default plus a warning when nothing can be asked;
  * - `ensureProviderLogins` (`src/roles/login.ts`) — `W_PROVIDER_NOT_LOGGED_IN`,
  *   never blocking;
- * - `registerRoles` (`src/roles/register.ts`) — only `bm-*` entries, no write
- *   when they already hold the right value.
+ * - `registerRoles` (`src/roles/register.ts`) — only `bm-*` entries, merged
+ *   into rather than replaced, so what the user set on them in Paseo stays;
+ *   only a role chosen anew (`--role`, `--reconfigure`) gets its provider,
+ *   model and name rewritten; no write when the merge changes nothing.
  *
  * It runs in two halves, because the install flow has two phases:
  *
@@ -361,32 +363,40 @@ function nonBlank(value: unknown): string | undefined {
 }
 
 /**
- * One action per `bm-*` provider and profile. Whether an entry changes is
- * decided by `editConfig` itself, so the preview and the write cannot disagree.
+ * One action per `bm-*` provider and profile. Whether an entry changes, and
+ * what it becomes, is decided by `editConfig` itself — the entry is merged
+ * into, not replaced (delta 20260921 §4.1.2) — so the preview and the write
+ * cannot disagree.
  */
 function roleActions(config: PaseoConfig, selections: readonly RoleSelection[]): Action[] {
-  const edit = roleRegistrationEdit(selections);
-  const changed = new Set(editConfig(config, edit).changedPaths);
-  const providers = asObject(asObject(config["agents"])?.["providers"]);
-  const profiles = asObject(config["daemon"])?.["agentProfiles"];
+  const edited = editConfig(config, roleRegistrationEdit(selections));
+  const changed = new Set(edited.changedPaths);
   const actions: Action[] = [];
 
   for (const selection of selections) {
     const id = roleId(selection.role);
     const providerPath = `${PROVIDERS_PATH}.${id}`;
-    const providerFrom = providers?.[id];
     actions.push(
-      configAction(providerPath, changed.has(providerPath), providerFrom, edit.providers?.[id] ?? null),
+      configAction(providerPath, changed.has(providerPath), providerOf(config, id), providerOf(edited.config, id) ?? null),
     );
 
     const profilePath = `${AGENT_PROFILES_PATH}[${id}]`;
-    const profileFrom = Array.isArray(profiles)
-      ? profiles.find((entry) => asObject(entry)?.["id"] === id)
-      : undefined;
-    const profileTo = (edit.profiles ?? []).find((entry) => entry.id === id) ?? null;
-    actions.push(configAction(profilePath, changed.has(profilePath), profileFrom, profileTo));
+    actions.push(
+      configAction(profilePath, changed.has(profilePath), profileOf(config, id), profileOf(edited.config, id) ?? null),
+    );
   }
   return actions;
+}
+
+/** `agents.providers.<id>`, or `undefined` when it is not there. */
+function providerOf(config: PaseoConfig, id: string): unknown {
+  return asObject(asObject(config["agents"])?.["providers"])?.[id];
+}
+
+/** The `daemon.agentProfiles[]` entry with this id, or `undefined`. */
+function profileOf(config: PaseoConfig, id: string): unknown {
+  const profiles = asObject(config["daemon"])?.["agentProfiles"];
+  return Array.isArray(profiles) ? profiles.find((entry) => asObject(entry)?.["id"] === id) : undefined;
 }
 
 function configAction(key: string, changes: boolean, from: unknown, to: unknown): Action {

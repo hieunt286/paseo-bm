@@ -496,3 +496,155 @@ describe("install-roles — provider not logged in", () => {
     expect(config().agents?.providers?.["bm-reviewer"]).toEqual({ extends: "claude", label: "Beads Reviewer" });
   });
 });
+
+/**
+ * Delta 20260921 §4.1.2, ADR-008 D5: Paseo's config is the source of truth for
+ * a role's settings, so a re-install merges into the `bm-*` entries instead of
+ * replacing them. `config.json` is edited between two runs the way Paseo's
+ * Settings screen would.
+ */
+describe("install-roles — re-install keeps what the user set in Paseo (REQ-062 c, e)", () => {
+  function editInPaseo(mutate: (current: ConfigShape) => void): void {
+    const current = config();
+    mutate(current);
+    writeFileSync(join(paseoHome, "config.json"), `${JSON.stringify(current, null, 2)}\n`);
+  }
+
+  function profile(current: ConfigShape, id: string): Record<string, unknown> {
+    const found = (current.daemon.agentProfiles ?? []).find((entry) => entry["id"] === id);
+    if (found === undefined) throw new Error(`No profile ${id}`);
+    return found;
+  }
+
+  /** The daemon has the plugin after the first run, as a real one would. */
+  function pluginRegistered(): void {
+    script({
+      "plugin ls": {
+        stdout: JSON.stringify([{ id: "paseo-bm", path: join(installHome, "plugin", VERSION), enabled: true, status: "running" }]),
+      },
+    });
+  }
+
+  /** Thinking, mode, features, icon and disabled tools, plus a fallback alias the installer does not own. */
+  function setInPaseo(): void {
+    editInPaseo((current) => {
+      const providers = current.agents?.providers ?? {};
+      providers["bm-manager"]!["paseoTools"] = { enabled: true, disabledTools: ["archive_agent"] };
+      providers["bm-worker"]!["paseoTools"] = { enabled: true, disabledTools: ["kill_agent"] };
+      providers["bm-worker-fallback-1"] = { extends: "codex", label: "Worker fallback" };
+      Object.assign(profile(current, "bm-worker"), {
+        thinkingOptionId: "high",
+        modeId: "acceptEdits",
+        featureValues: { fastMode: true },
+        icon: "hammer",
+      });
+      Object.assign(profile(current, "bm-reviewer"), { thinkingOptionId: "xhigh", modeId: "auto" });
+    });
+  }
+
+  it("keeps user keys: a plain re-install keeps thinking, mode, features, icon and disabledTools, and writes nothing (REQ-009)", async () => {
+    const first = await install(["install", "--apply", "--json"]);
+    expect(first.code).toBe(EXIT_CODES.ok);
+    setInPaseo();
+    const before = configText();
+    scope?.restore();
+    rmSync(argvLog, { force: true });
+    pluginRegistered();
+
+    const again = await install(["install", "--apply", "--json"]);
+    const report = JSON.parse(again.out) as PlanReport;
+
+    expect(again.code).toBe(EXIT_CODES.ok);
+    expect(report.actions.filter((action) => action.kind !== "skip")).toEqual([]);
+    expect(configWrites()).toBe(0);
+    expect(configText()).toBe(before);
+    expect(subcommands()).not.toContain("daemon reload");
+    const kept = config();
+    expect(profile(kept, "bm-worker")).toMatchObject({ thinkingOptionId: "high", modeId: "acceptEdits", featureValues: { fastMode: true }, icon: "hammer" });
+    expect(kept.agents?.providers?.["bm-worker"]?.["paseoTools"]).toEqual({ enabled: true, disabledTools: ["kill_agent"] });
+  });
+
+  it("--role worker=codex/gpt-5.6-sol: model and extends change, thinkingOptionId goes, modeId stays; the other roles are untouched", async () => {
+    const first = await install(["install", "--apply", "--json"]);
+    expect(first.code).toBe(EXIT_CODES.ok);
+    expect(profile(config(), "bm-worker")["model"]).toBe("claude-opus-5");
+    setInPaseo();
+    const before = config();
+    scope?.restore();
+    pluginRegistered();
+
+    const again = await install(["install", "--apply", "--json", "--role=worker=codex/gpt-5.6-sol"]);
+    const report = JSON.parse(again.out) as PlanReport;
+
+    expect(again.code).toBe(EXIT_CODES.ok);
+    const after = config();
+    const worker = profile(after, "bm-worker");
+    expect(worker).toMatchObject({
+      id: "bm-worker",
+      name: "Beads Worker",
+      provider: "bm-worker",
+      model: "gpt-5.6-sol",
+      modeId: "acceptEdits",
+      featureValues: { fastMode: true },
+      icon: "hammer",
+    });
+    expect(worker).not.toHaveProperty("thinkingOptionId");
+    expect(String(worker["notes"])).toContain("paseo-bm Worker");
+    expect(after.agents?.providers?.["bm-worker"]).toEqual({
+      extends: "codex",
+      label: "Beads Worker",
+      paseoTools: { enabled: true, disabledTools: ["kill_agent"] },
+    });
+
+    // Not named: exactly as the user left them, fallback alias included.
+    for (const id of ["bm-manager", "bm-reviewer", "bm-worker-fallback-1"]) {
+      expect(after.agents?.providers?.[id]).toEqual(before.agents?.providers?.[id]);
+    }
+    for (const id of ["bm-manager", "bm-reviewer"]) {
+      expect(profile(after, id)).toEqual(profile(before, id));
+    }
+    expect(after.agents?.providers?.["bm-reviewer"]).not.toHaveProperty("paseoTools");
+    expect(after.daemon.agentProfiles?.[0]).toEqual(USER_PROFILE);
+
+    // The report shows the merged entry that was written, not a replacement.
+    const action = report.actions.find((entry) => entry.target === "paseoHome/config.json#daemon.agentProfiles[bm-worker]");
+    expect(action).toMatchObject({ kind: "config", reason: "outdated", to: worker });
+    // roles[] keeps its shape: what the installer wrote last.
+    expect(installedRecord().roles.find((entry) => entry.role === "worker")).toMatchObject({
+      baseProvider: "codex",
+      model: "gpt-5.6-sol",
+      modeId: null,
+      thinkingOptionId: null,
+    });
+  });
+
+  it("a bm-* entry deleted in Paseo is recreated from roles[], and only that entry is written", async () => {
+    const first = await install(["install", "--apply", "--json", "--role=worker=codex/gpt-5.6-sol"]);
+    expect(first.code).toBe(EXIT_CODES.ok);
+    const original = config();
+    editInPaseo((current) => {
+      delete current.agents?.providers?.["bm-worker"];
+      current.daemon.agentProfiles = (current.daemon.agentProfiles ?? []).filter((entry) => entry["id"] !== "bm-worker");
+    });
+    scope?.restore();
+    pluginRegistered();
+
+    const again = await install(["install", "--apply", "--json"]);
+    const report = JSON.parse(again.out) as PlanReport;
+
+    expect(again.code).toBe(EXIT_CODES.ok);
+    expect(report.actions.filter((action) => action.kind === "config").map((action) => [action.target, action.reason])).toEqual([
+      ["paseoHome/config.json#agents.providers.bm-worker", "missing"],
+      ["paseoHome/config.json#daemon.agentProfiles[bm-worker]", "missing"],
+    ]);
+    // From roles[] (codex / gpt-5.6-sol), not from a catalogue default.
+    const after = config();
+    expect(after.agents?.providers?.["bm-worker"]).toEqual(original.agents?.providers?.["bm-worker"]);
+    expect(profile(after, "bm-worker")).toEqual(profile(original, "bm-worker"));
+    expect(profile(after, "bm-worker")["model"]).toBe("gpt-5.6-sol");
+    for (const id of ["bm-manager", "bm-reviewer"]) {
+      expect(profile(after, id)).toEqual(profile(original, id));
+      expect(after.agents?.providers?.[id]).toEqual(original.agents?.providers?.[id]);
+    }
+  });
+});

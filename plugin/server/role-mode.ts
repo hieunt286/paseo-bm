@@ -131,6 +131,60 @@ export function managerModeFor(modes: readonly ProviderMode[], profileModeId: st
 }
 
 /**
+ * What a paseo-bm profile sets by hand (delta 20260921 §4.1.1). `null` fields
+ * are fields the profile does not set; `featureValues` is `null` when the
+ * profile sets no feature.
+ */
+export interface RoleProfile {
+  model: string | null;
+  modeId: string | null;
+  thinkingOptionId: string | null;
+  featureValues: Record<string, unknown> | null;
+}
+
+const nonEmpty = (value: unknown): string | null => (typeof value === "string" && value.trim() !== "" ? value : null);
+
+/**
+ * The settings of one paseo-bm profile, from ONE `config.get()` under the
+ * lookup budget, or `null` when it cannot be read or does not exist. The
+ * plugin SDK's view is flat: `config.agentProfiles` is `daemon.agentProfiles`.
+ * Never throws.
+ */
+export async function profileOf(
+  paseo: unknown,
+  profileId: string,
+  log: (message: string) => void = (message) => console.warn(message),
+): Promise<RoleProfile | null> {
+  const get = (paseo as { config?: { get?: unknown } } | null | undefined)?.config?.get;
+  if (typeof get !== "function") return null;
+  try {
+    const result = await withTimeout(
+      (get.call((paseo as { config: unknown }).config) as Promise<{
+        config?: { agentProfiles?: Array<Record<string, unknown> | null | undefined> };
+      }>),
+    );
+    if (result === TIMED_OUT) {
+      log(`[paseo-bm] reading the ${profileId} profile took longer than ${LOOKUP_TIMEOUT_MS} ms; its own settings are ignored.`);
+      return null;
+    }
+    const profile = result?.config?.agentProfiles?.find((entry) => entry?.id === profileId);
+    if (profile === null || profile === undefined || typeof profile !== "object") return null;
+    const features = profile.featureValues;
+    return {
+      model: nonEmpty(profile.model),
+      modeId: nonEmpty(profile.modeId),
+      thinkingOptionId: nonEmpty(profile.thinkingOptionId),
+      featureValues:
+        features !== null && typeof features === "object" && !Array.isArray(features) && Object.keys(features).length > 0
+          ? { ...(features as Record<string, unknown>) }
+          : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The `modeId` set by hand on a paseo-bm profile, or `null`. Read the same way
  * `manager.ensure` reads the Manager's profile. Never throws.
  */
@@ -139,24 +193,7 @@ export async function profileModeOf(
   profileId: string,
   log: (message: string) => void = (message) => console.warn(message),
 ): Promise<string | null> {
-  const get = (paseo as { config?: { get?: unknown } } | null | undefined)?.config?.get;
-  if (typeof get !== "function") return null;
-  try {
-    const result = await withTimeout(
-      (get.call((paseo as { config: unknown }).config) as Promise<{
-        config?: { agentProfiles?: Array<{ id?: unknown; modeId?: unknown }> };
-      }>),
-    );
-    if (result === TIMED_OUT) {
-      log(`[paseo-bm] reading the ${profileId} profile took longer than ${LOOKUP_TIMEOUT_MS} ms; its own mode is ignored.`);
-      return null;
-    }
-    const profile = result?.config?.agentProfiles?.find((entry) => entry?.id === profileId);
-    const modeId = profile?.modeId;
-    return typeof modeId === "string" && modeId.trim() !== "" ? modeId : null;
-  } catch {
-    return null;
-  }
+  return (await profileOf(paseo, profileId, log))?.modeId ?? null;
 }
 
 /**

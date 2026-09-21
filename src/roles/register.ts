@@ -20,7 +20,8 @@
  *
  * Adding `command` or `env` here would break that promise silently, which is
  * why {@link roleProviderEntry} builds the object literally rather than
- * spreading anything from the caller.
+ * spreading anything from the caller. These are the keys paseo-bm writes; a key
+ * the user adds to the entry in Paseo is theirs, and the merge keeps it.
  *
  * ## Why the Reviewer is different, and how far that goes
  *
@@ -41,8 +42,27 @@
  * `daemon.agentProfiles` entry by entry and refuses any id outside the `bm-`
  * prefix (ADR-006 decision 5). The array is never replaced: a `room-*` or
  * user-authored entry keeps its position and its bytes. Re-running an install
- * produces the same three entries, so the edit reports no change and no bytes
- * are written at all.
+ * on complete entries changes nothing, so no bytes are written at all.
+ *
+ * ## Merging into our own entries (delta 20260921 §4.1.2, ADR-008 D5)
+ *
+ * Paseo's config, not `install.json`, is the source of truth for a role's
+ * settings: the user can set a thinking level, a mode, features or an icon on
+ * a `bm-*` profile, or `paseoTools.disabledTools` on a `bm-*` provider, in
+ * Paseo. So {@link roleProviderEntry} and {@link roleProfileEntry} are only
+ * what a *missing* entry is created from; an existing one is merged into by
+ * the rules of {@link roleProviderMerge} and {@link roleProfileMerge}:
+ *
+ * - a role taken over from `roles[]` keeps every key; the installer only fills
+ *   a missing `extends`, `name` or `model`, points the profile at `bm-<role>`,
+ *   and turns `paseoTools.enabled` on for the Manager and the Worker;
+ * - a role chosen anew in this run ({@link isNewRoleChoice}: `--role`,
+ *   `--reconfigure`) gets its base provider, model and name written, and
+ *   loses `thinkingOptionId` when its model changes; every other key stays.
+ *
+ * Another `bm-*` id — a future `bm-worker-fallback-1` alias — is never named by
+ * the edit, so it is never touched. `roles[]` keeps its shape and now means
+ * "what the installer wrote last".
  */
 
 import type { RoleName, RoleRecord } from "../record.js";
@@ -53,6 +73,7 @@ import type {
   AgentProfileEntry,
   ApplyConfigEditResult,
   ConfigEdit,
+  EntryMergeRule,
   JsonValue,
 } from "../paseo/config.js";
 import { applyConfigEdit } from "../paseo/config.js";
@@ -81,7 +102,9 @@ export const ROLE_PROFILE_NOTES: Readonly<Record<RoleName, string>> = {
 };
 
 /**
- * One derived provider, exactly as it is written to `agents.providers.<id>`.
+ * One derived provider, exactly as it is created in `agents.providers.<id>`
+ * when the id is missing; an existing one is merged into
+ * ({@link roleProviderMerge}).
  *
  * The absent keys are the point: no `command` and no `env`, so the role reuses
  * the base provider's binary and login session (ADR-006 decision 2). Declared
@@ -97,7 +120,10 @@ export type RoleProviderEntry = {
   readonly paseoTools?: { readonly enabled: true };
 };
 
-/** One agent profile, exactly as it is written into `daemon.agentProfiles[]`. */
+/**
+ * One agent profile, exactly as it is created in `daemon.agentProfiles[]` when
+ * the id is missing; an existing one is merged into ({@link roleProfileMerge}).
+ */
 export type RoleProfileEntry = AgentProfileEntry & {
   readonly id: string;
   readonly name: string;
@@ -133,7 +159,8 @@ export function roleProviderEntry(selection: RoleSelection): RoleProviderEntry {
  * `modeId` and `thinkingOptionId` are deliberately **not** written. Paseo treats
  * them as optional, Phase 1 never asks the user for either, and `toRoleRecord`
  * records them as `null` meaning "not set". Writing an explicit `null` into
- * Paseo's file would claim a choice nobody made.
+ * Paseo's file would claim a choice nobody made. A value the user sets on the
+ * profile in Paseo is kept by {@link roleProfileMerge}.
  */
 export function roleProfileEntry(selection: RoleSelection): RoleProfileEntry {
   const id = roleId(selection.role);
@@ -143,6 +170,65 @@ export function roleProfileEntry(selection: RoleSelection): RoleProfileEntry {
     provider: id,
     model: selection.model,
     notes: ROLE_PROFILE_NOTES[selection.role],
+  };
+}
+
+/**
+ * True when this run chose the role's base provider, model and name anew, so
+ * they are written over what the `bm-*` entries hold; false when the role was
+ * taken over from `install.json` `roles[]`, so the entries keep what they hold
+ * (delta 20260921 §4.1.2).
+ *
+ * Read from {@link RoleSelection.source}, which `configureRoles` sets from the
+ * very decision: `flag` is `--role`; `prompt` and `default` are `--reconfigure`,
+ * or a role `roles[]` has no usable entry for (first install, or its recorded
+ * provider is gone from Paseo — the run then says it configures the role
+ * again); `record` is everything else.
+ */
+export function isNewRoleChoice(selection: RoleSelection): boolean {
+  return selection.source !== "record";
+}
+
+/**
+ * How {@link roleProviderEntry} merges into a `bm-<role>` provider that is
+ * already there. Every key it does not name — a `paseoTools.disabledTools`,
+ * anything the user added — is kept.
+ *
+ * `paseoTools` is merged one level down for the Manager and the Worker, so only
+ * `enabled: true` is ensured. The Reviewer's entry has no `paseoTools`, so the
+ * merge never adds one (ADR-006 decision 3); one the user put there is kept.
+ */
+export function roleProviderMerge(selection: RoleSelection): EntryMergeRule {
+  const chosen = isNewRoleChoice(selection);
+  return {
+    keys: {
+      extends: chosen ? "set" : "fill",
+      label: chosen ? "set" : "create-only",
+      paseoTools: "merge",
+    },
+  };
+}
+
+/**
+ * How {@link roleProfileEntry} merges into a `bm-<role>` profile that is
+ * already there. `modeId`, `featureValues`, `icon`, `color`, `notes` and any
+ * other key the user set are kept. The profile always points at its derived
+ * provider: a `bm-<role>` profile on another provider would bypass the role.
+ *
+ * When the model is written and differs from the profile's, `thinkingOptionId`
+ * goes with it: a thinking level belongs to a model.
+ */
+export function roleProfileMerge(selection: RoleSelection): EntryMergeRule {
+  const chosen = isNewRoleChoice(selection);
+  return {
+    keys: {
+      id: "set",
+      name: chosen ? "set" : "fill",
+      provider: "set",
+      model: chosen ? "set" : "fill",
+      notes: "create-only",
+    },
+    ...(chosen ? { drop: { whenChanged: "model", keys: ["thinkingOptionId"] } } : {}),
   };
 }
 
@@ -162,13 +248,19 @@ export class RoleRegistrationError extends Error {
  * consent (ADR-006 decision 4) and belong to the install flow, which is free to
  * merge this edit with them into a single write.
  *
+ * `providers` and `profiles` hold the entries a missing id is created from;
+ * `providerMerge` and `profileMerge` say how each merges into an entry that is
+ * already there, so nothing the user set on it is lost.
+ *
  * Order follows the order of `selections`, which `configureRoles` fixes as
  * manager, worker, reviewer — so a re-run produces a byte-identical edit.
  */
 export function roleRegistrationEdit(selections: readonly RoleSelection[]): ConfigEdit {
   const seen = new Set<RoleName>();
   const providers: Record<string, JsonValue> = {};
+  const providerMerge: Record<string, EntryMergeRule> = {};
   const profiles: RoleProfileEntry[] = [];
+  const profileMerge: Record<string, EntryMergeRule> = {};
 
   for (const selection of selections) {
     if (seen.has(selection.role)) {
@@ -178,11 +270,14 @@ export function roleRegistrationEdit(selections: readonly RoleSelection[]): Conf
       );
     }
     seen.add(selection.role);
-    providers[roleId(selection.role)] = roleProviderEntry(selection);
+    const id = roleId(selection.role);
+    providers[id] = roleProviderEntry(selection);
+    providerMerge[id] = roleProviderMerge(selection);
     profiles.push(roleProfileEntry(selection));
+    profileMerge[id] = roleProfileMerge(selection);
   }
 
-  return { providers, profiles };
+  return { providers, profiles, providerMerge, profileMerge };
 }
 
 export interface RegisterRolesOptions {
@@ -212,8 +307,8 @@ export interface RoleRegistrationResult {
   /** `daemon.agentProfiles[]` ids written, in order. */
   readonly profileIds: readonly string[];
   /**
-   * True when the file actually changed. False on a re-run where all six
-   * entries already held the right value — no bytes written, no reload.
+   * True when the file actually changed. False on a re-run where the merge
+   * changed none of the six entries — no bytes written, no reload.
    */
   readonly changed: boolean;
 }
@@ -223,8 +318,9 @@ export interface RoleRegistrationResult {
  * install record needs to remember.
  *
  * Idempotent by construction: {@link roleRegistrationEdit} is a pure function of
- * the selections, and `applyConfigEdit` compares entry by entry and writes
- * nothing when every entry already matches.
+ * the selections, the merge changes nothing in an entry that already holds what
+ * it would write, and `applyConfigEdit` compares entry by entry and writes
+ * nothing when no entry changed (REQ-009).
  */
 export async function registerRoles(options: RegisterRolesOptions): Promise<RoleRegistrationResult> {
   const edit = roleRegistrationEdit(options.selections);

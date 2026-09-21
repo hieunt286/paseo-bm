@@ -6,6 +6,7 @@
 | Date | 2026-09-14 |
 | Owner | hieu.nt10 |
 | Liên quan | [PRD REQ-005, REQ-006, REQ-010d](../product/paseo-bm-prd.md#6-functional-requirements), [ADR-001](ADR-001-plugin-distribution.md), [ADR-002](ADR-002-install-ownership-model.md), [Technical Design](../design/paseo-bm.md) |
+| Sửa đổi bởi | [ADR-008](ADR-008-role-settings-written-by-plugin.md), quyết định 1 (Proposed 2026-09-21; có hiệu lực khi ADR-008 Accepted) |
 
 ## Context
 

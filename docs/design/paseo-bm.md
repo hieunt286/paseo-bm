@@ -236,6 +236,8 @@ Cả hai vai trò: không bao giờ chọn mode `planning`. Lý do: các lượt
 
 ### 3.2 `install.json`
 
+*(Errata 2026-09-22, [delta 20260921-worker-fallback-and-role-settings](./paseo-bm-delta-20260921-worker-fallback-and-role-settings.md) §4.1.2, ADR-008 QĐ5: `roles[]` giữ nguyên hình dạng nhưng chỉ còn nghĩa "trình cài đã ghi gì lần cuối". Nguồn sự thật của cấu hình vai trò là cấu hình Paseo; cài lại **gộp** vào mục `bm-*` thay vì thay nguyên, nên thinking, mode, feature người dùng đặt trên đó còn nguyên. `doctor` báo `roles.changed-in-app` khi provider gốc hay model khác bản ghi.)*
+
 | Trường | Kiểu | Ghi chú |
 |---|---|---|
 | `schemaVersion` | number | Bắt đầu từ `1`; lớn hơn mức CLI hiểu → dừng |
@@ -588,6 +590,7 @@ CI **không** chạy agent thật: không xác định, tốn tiền, và cần 
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | **Theo [delta 20260921-worker-fallback-and-role-settings](./paseo-bm-delta-20260921-worker-fallback-and-role-settings.md), phase 2a-13** (REQ-062): errata §3.2 — `roles[]` là lần ghi cuối của trình cài, cài lại gộp mục `bm-*`; hook áp thinking và feature của profile cho Worker và Reviewer (delta §4.1.1) |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | **Theo [delta 20260918g-agent-conventions](./paseo-bm-delta-20260918g-agent-conventions.md)** (REQ-061, `req-20260918T071130Z`): vai của agent do `plugin/server/agent-role.ts` quyết (nhãn `bm.role`, không có thì provider `bm-*`) ở mọi chỗ tìm agent; `agent.created` và một lượt quét mỗi lần nạp gắn nhãn cho agent `bm-*` thiếu nhãn; `plugin/shared/bm-format.ts` kiểm template khối `BM-*`, `plugin/server/format-check.ts` gửi `BM-FORMAT` cho người gửi khối sai; mode Reviewer dự phòng trong `## Runtime facts`. Chi tiết, dữ kiện đã kiểm và errata khi implement nằm ở delta |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | **Errata CI tối giản, release chặt (req-20260918T064258Z, owner chốt Q1a → Q5a).** §10: ma trận macOS + Linux × Node 22 + 24 cùng build, smoke gói đã đóng gói và kiểm tra script vòng đời chuyển từ CI mỗi commit sang `release.yml`, chặn trước bước publish; CI mỗi commit còn một job ubuntu Node 22 (typecheck gốc và plugin, lint, test) và bỏ qua commit chỉ đụng tài liệu/beads. Lý do: owner thấy CI chạy ở mỗi commit là thừa, chỉ bản phát hành mới cần kiểm tra đầy đủ |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | **Errata mode của Reviewer (req-20260918T035101Z, owner chốt Q1a, Q2a).** §2.6: daemon từ chối Reviewer do Worker `bypassPermissions` tạo mà không truyền mode, nên Worker truyền mode Reviewer lấy từ dòng `Reviewer mode` plugin ghi vào mục `## Runtime facts` của nó, như Manager với mode Worker. Sửa kèm K10 và §4.6 của delta 20260917c và dữ kiện tương ứng trong `AGENTS.md` |

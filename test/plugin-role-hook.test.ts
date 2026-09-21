@@ -404,3 +404,91 @@ describe("withTimeout", () => {
     expect(LOOKUP_TIMEOUT_MS).toBeLessThan(30000);
   });
 });
+
+describe("before(\"agent.create\") profile thinking and features (delta 20260921 §4.1.1, REQ-062 a/b)", () => {
+  type Profile = Record<string, unknown>;
+  function paseoWithProfiles(profiles: Profile[], listModes: (provider: string) => unknown = async () => ({ modes: CLAUDE_MODES })) {
+    const get = vi.fn(async () => ({ config: { agentProfiles: profiles } }));
+    return { get, paseo: { providers: { listModes: vi.fn(listModes) }, config: { get } } };
+  }
+  const workerProfile = (extra: Profile = {}) => ({ id: "bm-worker", name: "Worker", provider: "bm-worker", model: "claude-opus-5", ...extra });
+
+  it("gives a Worker created with its mode the thinking set on its profile, when the model is the profile's", async () => {
+    const { paseo } = paseoWithProfiles([workerProfile({ thinkingOptionId: "max" })]);
+    const { run } = setup(paseo);
+    const result = await run({ config: { provider: "bm-worker/claude-opus-5", cwd: "/repo", modeId: "bypassPermissions" } });
+    expect(result?.config?.thinkingOptionId).toBe("max");
+    expect(result?.config?.modeId).toBe("bypassPermissions");
+  });
+
+  it("reads the model from config.model when the provider carries none", async () => {
+    const { paseo } = paseoWithProfiles([workerProfile({ thinkingOptionId: "max" })]);
+    const { run } = setup(paseo);
+    const same = await run({ config: { provider: "bm-worker", model: "claude-opus-5", cwd: "/repo", modeId: "bypassPermissions" } });
+    expect(same?.config?.thinkingOptionId).toBe("max");
+    const other = await run({ config: { provider: "bm-worker", model: "claude-sonnet-5", cwd: "/repo", modeId: "bypassPermissions" } });
+    expect(other?.config).not.toHaveProperty("thinkingOptionId");
+  });
+
+  it("keeps a thinking level the creator passed", async () => {
+    const { paseo } = paseoWithProfiles([workerProfile({ thinkingOptionId: "max" })]);
+    const { run } = setup(paseo);
+    const result = await run({ config: { provider: "bm-worker/claude-opus-5", cwd: "/repo", modeId: "bypassPermissions", thinkingOptionId: "low" } });
+    expect(result?.config?.thinkingOptionId).toBe("low");
+  });
+
+  it("does not set the profile's thinking on a different model", async () => {
+    const { paseo } = paseoWithProfiles([workerProfile({ thinkingOptionId: "max" })]);
+    const { run } = setup(paseo);
+    const result = await run({ config: { provider: "bm-worker/claude-sonnet-5", cwd: "/repo", modeId: "bypassPermissions" } });
+    expect(result?.config).not.toHaveProperty("thinkingOptionId");
+  });
+
+  it("sets the profile's thinking when the request names no model", async () => {
+    const { paseo } = paseoWithProfiles([workerProfile({ thinkingOptionId: "max" })]);
+    const { run } = setup(paseo);
+    const result = await run({ config: { provider: "bm-worker", cwd: "/repo", modeId: "bypassPermissions" } });
+    expect(result?.config?.thinkingOptionId).toBe("max");
+  });
+
+  it("treats everything after the first slash as the model (OpenCode ids contain a slash)", async () => {
+    const { paseo } = paseoWithProfiles([workerProfile({ model: "anthropic/claude-sonnet-4-6", thinkingOptionId: "high" })]);
+    const { run } = setup(paseo);
+    const result = await run({ config: { provider: "bm-worker/anthropic/claude-sonnet-4-6", cwd: "/repo", modeId: "bypassPermissions" } });
+    expect(result?.config?.thinkingOptionId).toBe("high");
+  });
+
+  it("merges the profile's feature values under the creator's, whose keys win", async () => {
+    const { paseo } = paseoWithProfiles([workerProfile({ featureValues: { fast_mode: true, shared: "profile" } })]);
+    const { run } = setup(paseo);
+    const result = await run({ config: { provider: "bm-worker", cwd: "/repo", modeId: "bypassPermissions", featureValues: { shared: "creator" } } });
+    expect(result?.config?.featureValues).toEqual({ fast_mode: true, shared: "creator" });
+  });
+
+  it("gives a Reviewer the thinking of the bm-reviewer profile and still applies the Reviewer mode rule", async () => {
+    const { paseo } = paseoWithProfiles([{ id: "bm-reviewer", name: "Reviewer", provider: "bm-reviewer", model: "gpt-5.6-sol", thinkingOptionId: "high", modeId: "full-access" }], async () => ({ modes: CODEX_MODES }));
+    const { run } = setup(paseo);
+    const result = await run({ config: { provider: "bm-reviewer/gpt-5.6-sol", cwd: "/repo" } });
+    expect(result?.config?.thinkingOptionId).toBe("high");
+    // A dangerous profile mode never reaches the Reviewer (REQ-062 b).
+    expect(result?.config?.modeId).toBe("auto");
+  });
+
+  it("never touches a Manager: manager.ensure already passes its profile", async () => {
+    const { paseo } = paseoWithProfiles([{ id: "bm-manager", name: "Manager", provider: "bm-manager", model: "claude-opus-5", thinkingOptionId: "max", featureValues: { fast_mode: true } }]);
+    const { run } = setup(paseo);
+    const result = await run({ config: { provider: "bm-manager/claude-opus-5", cwd: "/repo" } });
+    expect(result?.config).not.toHaveProperty("thinkingOptionId");
+    expect(result?.config).not.toHaveProperty("featureValues");
+  });
+
+  it("creates the Worker as before, without the profile's settings, when the profile cannot be read in time", async () => {
+    const never = new Promise(() => {});
+    const { run } = setup({ providers: { listModes: async () => ({ modes: CLAUDE_MODES }) }, config: { get: () => never } });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = await run({ config: { provider: "bm-worker/claude-opus-5", cwd: "/repo", modeId: "bypassPermissions" } });
+    expect(result?.config?.systemPrompt).toContain(workerMd.trimEnd());
+    expect(result?.config).not.toHaveProperty("thinkingOptionId");
+    expect(warn.mock.calls.some((call) => /took longer than \d+ ms/.test(String(call[0])))).toBe(true);
+  }, 20000);
+});

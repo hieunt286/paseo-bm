@@ -93,6 +93,10 @@ export const DEFAULT_SKILLS_SOURCE = "cuongntr/agent-skills";
  * lower-kebab `<subject>-<aspect>`, and `<subject>-<item>` when there is one
  * check per item (`role-bm-worker`, `skills-claude`). The ids are part of the
  * `--json` contract of Design §4.4: renaming one is a breaking change.
+ *
+ * One id breaks the convention on purpose: `roles.changed-in-app` is spelled
+ * exactly as delta 20260921 §4.1.3 names it, and appears once per role whose
+ * settings were changed in the app (so it may repeat, or be absent).
  */
 export const DOCTOR_CHECK_IDS = [
   "paseo-daemon",
@@ -109,6 +113,7 @@ export const DOCTOR_CHECK_IDS = [
   "role-bm-manager",
   "role-bm-worker",
   "role-bm-reviewer",
+  "roles.changed-in-app",
   "payload-versions",
   "backups",
   "beads-cli",
@@ -143,6 +148,10 @@ export interface PaseoConfigFacts {
   readonly agentProfileIds: readonly string[];
   /** Whether `agents.providers.<id>.paseoTools` is switched on, per provider id. */
   readonly providerPaseoTools: Readonly<Record<string, boolean>>;
+  /** `agents.providers.<id>.extends`, per provider id; absent when not a non-empty string. */
+  readonly providerExtends: Readonly<Record<string, string>>;
+  /** `daemon.agentProfiles[].model`, per profile id; absent when not a non-empty string. */
+  readonly profileModels: Readonly<Record<string, string>>;
 }
 
 export type PaseoConfigReader = (configFile: string) => Promise<PaseoConfigFacts>;
@@ -253,7 +262,13 @@ const MISSING_CONFIG = (path: string, present: boolean, readable: boolean): Pase
   agentProviderIds: [],
   agentProfileIds: [],
   providerPaseoTools: {},
+  providerExtends: {},
+  profileModels: {},
 });
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
 
 /**
  * Reads the handful of fields doctor reports out of Paseo's `config.json`.
@@ -289,8 +304,21 @@ export const readPaseoConfigFacts: PaseoConfigReader = async (configFile) => {
   const profiles = Array.isArray(daemon?.["agentProfiles"]) ? daemon["agentProfiles"] : [];
 
   const providerPaseoTools: Record<string, boolean> = {};
+  const providerExtends: Record<string, string> = {};
   for (const [id, value] of Object.entries(providers)) {
-    providerPaseoTools[id] = paseoToolsEnabled(asRecordObject(value)?.["paseoTools"]);
+    const provider = asRecordObject(value);
+    providerPaseoTools[id] = paseoToolsEnabled(provider?.["paseoTools"]);
+    const base = nonEmptyString(provider?.["extends"]);
+    if (base !== undefined) providerExtends[id] = base;
+  }
+
+  const profileModels: Record<string, string> = {};
+  for (const entry of profiles) {
+    const profile = asRecordObject(entry);
+    const id = nonEmptyString(profile?.["id"]);
+    const model = nonEmptyString(profile?.["model"]);
+    // A duplicated profile id keeps its first entry.
+    if (id !== undefined && model !== undefined && !(id in profileModels)) profileModels[id] = model;
   }
 
   return {
@@ -304,6 +332,8 @@ export const readPaseoConfigFacts: PaseoConfigReader = async (configFile) => {
       .map((entry) => asRecordObject(entry)?.["id"])
       .filter((id): id is string => typeof id === "string" && id.length > 0),
     providerPaseoTools,
+    providerExtends,
+    profileModels,
   };
 };
 
@@ -745,8 +775,16 @@ function switchChecks(config: PaseoConfigFacts): readonly Check[] {
   ];
 }
 
-/** One check per `bm-*` role: recorded, present in the config, tools as recorded. */
+/**
+ * One check per `bm-*` role — recorded, present in the config, tools as
+ * recorded — followed by one {@link changedInAppChecks} note per role whose
+ * settings were changed in the app.
+ */
 function roleChecks(record: InstallRecord, config: PaseoConfigFacts): readonly Check[] {
+  return [...presenceChecks(record, config), ...changedInAppChecks(record, config)];
+}
+
+function presenceChecks(record: InstallRecord, config: PaseoConfigFacts): readonly Check[] {
   return ROLE_NAMES.map((role) => {
     const id = roleId(role);
     const checkId = `role-${id}`;
@@ -794,6 +832,55 @@ function roleChecks(record: InstallRecord, config: PaseoConfigFacts): readonly C
       `The \`${id}\` role is configured as ${entry.baseProvider}/${entry.model} (Paseo tools: ${entry.paseoTools ? "yes" : "no"}).`,
     );
   });
+}
+
+/**
+ * Severity of `roles.changed-in-app`. Delta 20260921 §4.1.3 calls it an *info*
+ * check that never raises the exit code. The §4.4 JSON contract has no `info`
+ * severity (`ok | warn | error`), so it is `ok`: the severity this file already
+ * gives its other informational checks (`payload-versions`, `backups`). Not
+ * `warn`, because a role changed in the app is normal (REQ-062), not a problem.
+ */
+const CHANGED_IN_APP_SEVERITY: Check["severity"] = "ok";
+
+/**
+ * REQ-062 (d): one `roles.changed-in-app` note per role whose alias `extends`
+ * or profile `model` differs from what `install.json` `roles[]` says the
+ * installer wrote last.
+ *
+ * Only a value that is there and different counts. A role with no record
+ * entry, no alias or no profile already has its own error in
+ * {@link presenceChecks}, so it gets no note; an alias without `extends` or a
+ * profile without `model` is filled from `roles[]` by the next install, so it
+ * is not a change made in the app either.
+ */
+function changedInAppChecks(record: InstallRecord, config: PaseoConfigFacts): readonly Check[] {
+  if (!config.readable) return [];
+
+  const notes: Check[] = [];
+  for (const role of ROLE_NAMES) {
+    const entry = record.roles.find((candidate) => candidate.role === role);
+    if (entry === undefined) continue;
+    if (!config.agentProviderIds.includes(entry.providerId) || !config.agentProfileIds.includes(entry.profileId)) {
+      continue;
+    }
+
+    const base = config.providerExtends[entry.providerId];
+    const model = config.profileModels[entry.profileId];
+    const baseChanged = base !== undefined && base !== entry.baseProvider;
+    const modelChanged = model !== undefined && model !== entry.model;
+    if (!baseChanged && !modelChanged) continue;
+
+    notes.push(
+      check(
+        "roles.changed-in-app",
+        CHANGED_IN_APP_SEVERITY,
+        `${roleId(role)}: base provider or model differs from what the installer wrote (changed in the app).`,
+        `Nothing to do if the change was on purpose: installing again keeps role settings changed in the app. The installer wrote ${entry.baseProvider}/${entry.model}; Paseo's configuration has ${base ?? "(not set)"}/${model ?? "(not set)"}.`,
+      ),
+    );
+  }
+  return notes;
 }
 
 /**
