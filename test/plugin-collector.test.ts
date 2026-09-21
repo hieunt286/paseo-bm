@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NEW_REQUEST_MARKER } from "../plugin/shared/new-request";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -529,7 +529,19 @@ describe("collection end to end", () => {
 
   it("swallows a store failure and logs it", async () => {
     const log = vi.fn();
-    const broken = { tracesDir: "/proc/definitely-not-writable/traces" };
+    // A regular file where a directory component must be: `mkdir -p` through it
+    // fails with ENOTDIR at once, on every platform and for every uid, root
+    // included.
+    //
+    // What stood here before was a path inside the Linux process filesystem,
+    // which hung CI for the full six-hour job limit. That filesystem exists
+    // only on Linux, and under it `mkdirSync(..., { recursive: true })` never
+    // returns; being synchronous, no test timeout can interrupt it. Do not
+    // reach for a system path to get an unwritable directory — see
+    // docs/design/paseo-bm-delta-20260921-ci-linux-hang.md for the diagnosis.
+    const blocker = join(home, "not-a-directory");
+    writeFileSync(blocker, "");
+    const broken = { tracesDir: join(blocker, "traces") };
     expect(await collectTurnEnded(asEvent(turnEnded()), { location: broken, log })).toBe(false);
     expect(log).toHaveBeenCalledTimes(1);
     expect(String(log.mock.calls[0]?.[0])).toContain("[paseo-bm]");

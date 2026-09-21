@@ -29,10 +29,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Per-commit CI (ci.yml) is deliberately minimal, so a release is where the
-  # whole support matrix is checked (Design §10, errata 2026-09-18): macOS and
-  # Linux, Node 22 and 24, including the packed-package smoke test. Manual runs
-  # (dry-run) go through the same matrix.
+  # Per-commit CI (ci.yml) is deliberately minimal, so a release is where both
+  # supported operating systems are checked, including the packed-package smoke
+  # test. Manual runs (dry-run) go through the same matrix.
+  #
+  # One Node version per workflow, not two (delta 20260921, owner decision Q6):
+  # ci.yml runs Node 22 on every commit — the floor `engines` declares — and
+  # this workflow runs Node 24, where most users are. Both levels stay covered,
+  # in two workflows instead of four jobs here. The operating-system dimension
+  # is deliberately kept: it is what caught the Linux-only test hang that made
+  # every main CI run since 4d17d14 burn the full six-hour job limit.
   verify:
     name: verify (${{ matrix.os }}, node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
@@ -42,7 +48,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        node: [22, 24]
+        node: [24]
     steps:
       - uses: actions/checkout@v4
 
