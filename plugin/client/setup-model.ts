@@ -419,11 +419,29 @@ export function applySavedRole(settings: RolesSettings, result: { revision: stri
 // Fallback chains (delta 20260921 §4.3.1, §4.4.3, REQ-065 f).
 // ---------------------------------------------------------------------------
 
-/** The policy row under a role: `On a usage limit: (•) Ask me ( ) Off`. "Auto switch" arrives in phase 2a-18. */
-export const FALLBACK_POLICY_CHOICES: ReadonlyArray<{ id: "ask" | "off"; label: string }> = [
+/**
+ * The policy row under a role: `On a usage limit: (•) Ask me ( ) Auto switch ( ) Off`.
+ * "Ask me" stays the default; "Auto switch" (phase 2a-18, §4.6) is chosen per role.
+ */
+export const FALLBACK_POLICY_CHOICES: ReadonlyArray<{ id: FallbackDraft["policy"]; label: string }> = [
   { id: "ask", label: "Ask me" },
+  { id: "auto", label: "Auto switch" },
   { id: "off", label: "Off" },
 ];
+
+/**
+ * The warning shown under a role's policy while "Auto switch" is chosen (§4.6,
+ * REQ-067 a): the plugin replaces the stopped agent without asking, which can
+ * cost money; for the Manager, the chat being used can be replaced. `null` for
+ * the other policies.
+ */
+export function fallbackPolicyWarning(role: BmRole, policy: FallbackDraft["policy"]): string | null {
+  if (policy !== "auto") return null;
+  const cost = `Auto switch replaces a stopped ${ROLE_NAMES[role]} without asking you; a fallback on a provider that bills by the token can cost money.`;
+  return role === "manager" ? `${cost} The chat you use may be replaced.` : cost;
+}
+
+const ROLE_NAMES: Readonly<Record<BmRole, string>> = { manager: "Manager", worker: "Worker", reviewer: "Reviewer" };
 
 /**
  * The chains to show, in role order: one block per role present in
@@ -438,14 +456,14 @@ export function fallbackBlocks(settings: RolesSettings): FallbackSettings[] {
 
 /** What a chain's block holds while the user edits it. */
 export interface FallbackDraft {
-  policy: "ask" | "off";
+  policy: "ask" | "off" | "auto";
   entries: FallbackEntryInput[];
 }
 
-/** The draft a block starts from: the chain as saved. (A hand-written `auto` reads as Ask me until phase 2a-18.) */
+/** The draft a block starts from: the chain as saved. */
 export function fallbackDraftOf(chain: FallbackSettings): FallbackDraft {
   return {
-    policy: chain.policy === "off" ? "off" : "ask",
+    policy: chain.policy,
     entries: chain.entries.map(({ baseProvider, model, thinkingOptionId, modeId }) => ({ baseProvider, model, thinkingOptionId, modeId })),
   };
 }

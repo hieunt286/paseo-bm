@@ -2,8 +2,9 @@
  * Fallback chains: what the user saves for a role that hits its plan limit
  * (delta 20260921 §4.4.1–§4.4.3, REQ-065 f; ADR-008 D2, D4).
  *
- * A chain has a policy (`ask` shows a card, `off` does nothing; `auto` only
- * from phase 2a-18) and 0–3 entries. It lives in two places, on purpose:
+ * A chain has a policy (`ask` shows a card, `off` does nothing, `auto` decides
+ * at once by the card's rules — phase 2a-18, §4.6) and 0–3 entries. It lives
+ * in two places, on purpose:
  *
  * - entry `n` runs on the alias `bm-<role>-fallback-<n>` in Paseo's config,
  *   so the `agent.create` hook recognises the role (`roleOfProvider`). Written
@@ -233,7 +234,7 @@ function holds(existing: unknown, wanted: Record<string, unknown>): boolean {
 /**
  * Handler body of `roles.save-fallback` (§4.4.3). Runs every check before any
  * write (`E_ROLE_SETTINGS_INVALID`): the role's chain is offered; the policy
- * is `ask` or `off`; at most three entries; each entry passes the checks of a
+ * is `ask`, `off` or `auto` (§4.6); at most three entries; each entry passes the checks of a
  * role save (the Reviewer's mode rule included); no two entries with the same
  * provider and model; no entry equal to the role's own provider and model.
  * Then the aliases (revision-checked, `E_ROLE_SETTINGS_CONFLICT` on a stale
@@ -252,7 +253,7 @@ export function handleRolesSaveFallback(
     if (!(FALLBACK_ROLES as readonly string[]).includes(role)) {
       throw invalid(`fallback chains are not offered for the ${ROLE_LABELS[role] ?? String(role)} in this release`);
     }
-    if (input.policy !== "ask" && input.policy !== "off") throw invalid(`policy "${String(input.policy)}" is not offered in this release`);
+    if (input.policy !== "ask" && input.policy !== "off" && input.policy !== "auto") throw invalid(`policy "${String(input.policy)}" is not a fallback policy`);
     const entries: FallbackEntryInput[] = Array.isArray(input.entries) ? input.entries : [];
     if (entries.length > MAX_FALLBACK_ENTRIES) throw invalid(`at most ${MAX_FALLBACK_ENTRIES} fallbacks per role, got ${entries.length}`);
 

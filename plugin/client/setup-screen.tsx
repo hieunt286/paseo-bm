@@ -52,6 +52,7 @@ import {
   fallbackDraftChanged,
   fallbackDraftOf,
   fallbackEntryText,
+  fallbackPolicyWarning,
   fallbackPriceText,
   moveFallback,
   removeFallback,
@@ -548,6 +549,9 @@ function FallbackBlock({ chain, label, revision, available, optionsOf, styles, t
           );
         })}
       </View>
+      {fallbackPolicyWarning(chain.role, draft.policy) === null ? null : (
+        <Text style={[styles.body, { color: toneColor(theme, "warning") }]}>{fallbackPolicyWarning(chain.role, draft.policy)}</Text>
+      )}
       {draft.entries.map((entry, index) => {
         const saved = editing === null ? chain.entries[index] : undefined;
         const price = saved === undefined ? null : fallbackPriceText(saved);

@@ -14,6 +14,7 @@ import {
   fallbackDraftChanged,
   fallbackDraftOf,
   fallbackEntryText,
+  fallbackPolicyWarning,
   fallbackPriceText,
   moveFallback,
   removeFallback,
@@ -428,11 +429,21 @@ describe("Roles & models", () => {
       expect(rowOptionProviders({ ...settings, fallback: { worker: chain([CODEX, PI]) } })).toEqual(["claude", "codex", "pi"]);
     });
 
-    it("offers Ask me and Off, and reads a saved chain into a draft", () => {
-      expect(FALLBACK_POLICY_CHOICES.map((choice) => choice.label)).toEqual(["Ask me", "Off"]);
+    it("offers Ask me, Auto switch and Off, and reads a saved chain into a draft", () => {
+      // Phase 2a-18 (§4.6) adds Auto switch; Ask me stays first, the default.
+      expect(FALLBACK_POLICY_CHOICES.map((choice) => choice.label)).toEqual(["Ask me", "Auto switch", "Off"]);
       expect(fallbackDraftOf(chain([CODEX, PI], "off"))).toEqual({ policy: "off", entries: [CODEX, PI] });
-      // A hand-written auto reads as Ask me until Auto switch exists (phase 2a-18).
-      expect(fallbackDraftOf(chain([], "auto")).policy).toBe("ask");
+      expect(fallbackDraftOf(chain([], "auto")).policy).toBe("auto");
+    });
+
+    it("warns about cost under Auto switch, and for the Manager that the chat may be replaced", () => {
+      expect(fallbackPolicyWarning("worker", "auto")).toBe(
+        "Auto switch replaces a stopped Worker without asking you; a fallback on a provider that bills by the token can cost money.",
+      );
+      expect(fallbackPolicyWarning("manager", "auto")).toMatch(/can cost money\. The chat you use may be replaced\.$/);
+      expect(fallbackPolicyWarning("reviewer", "ask")).toBeNull();
+      expect(fallbackPolicyWarning("manager", "off")).toBeNull();
+      expect(saveFallbackInput("rev-1", "reviewer", { policy: "auto", entries: [] })).toMatchObject({ policy: "auto" });
     });
 
     it("labels an entry row from roles.options and prices a saved entry", () => {

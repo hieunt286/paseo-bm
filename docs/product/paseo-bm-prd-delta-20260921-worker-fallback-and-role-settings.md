@@ -4,7 +4,7 @@
 |---|---|
 | Mã | `prd-delta-20260921-worker-fallback-and-role-settings` |
 | Tài liệu gốc | [paseo-bm PRD](paseo-bm-prd.md): REQ-020(b), REQ-026(c), REQ-027(d), REQ-028, REQ-031, NFR **Quyền** và **Riêng tư**, §8, §9. **Không sửa tại chỗ khi chưa duyệt** |
-| Status | **Applied — 2a-18 deferred** (2026-09-22): dòng 1–14 của §4 đã áp vào PRD gốc; dòng 15 (REQ-067) chưa áp vì điều kiện vào phase 2a-18 chưa đạt (0 sự cố thật, Q13 a). Trước đó: **Accepted** — owner duyệt §9 ngày 2026-09-22 (Q10 a của `req-20260921T111242Z`); `prd-ready` PASS 2026-09-22 |
+| Status | **Applied** (2026-09-22): dòng 1–15 của §4 đã áp vào PRD gốc; phát hành npm bản mang "Auto switch" chờ một sự cố thật được mẫu nhận đúng loại (REQ-067 c, owner chốt Q17 b). Trước đó: **Applied — 2a-18 deferred** (0 sự cố thật, Q13 a); trước nữa: **Accepted** — owner duyệt §9 ngày 2026-09-22 (Q10 a của `req-20260921T111242Z`); `prd-ready` PASS 2026-09-22 |
 | Owner | hieu.nt10 |
 | Created | 2026-09-21 |
 | Request | `req-20260921T111242Z` |
@@ -194,3 +194,4 @@ Sau khi duyệt: Status → Accepted. Mỗi WP đóng phase áp các dòng ghi p
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Phase 2a-15 xong (beads `bm-phase-2a-15-roles-and-models-kj1p.1` → `.6`): dòng 7, 8, 9 của §4 đã áp vào PRD gốc (REQ-028, §8 Does NOT own, thêm REQ-064); ADR-008 Accepted; checklist nghiệm thu phần 2a-15 và ghi chú phát hành `docs/operations/paseo-bm-release-notes-0.3.0-alpha.1.md` |
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Phase 2a-16 xong (beads `bm-phase-2a-16-fallback-worker-332y.1` → `.12`): dòng 10, 11, 12 của §4 đã áp vào PRD gốc (REQ-031 a, NFR Riêng tư, thêm REQ-065); checklist nghiệm thu phần 2a-16 và ghi chú phát hành `docs/operations/paseo-bm-release-notes-0.3.0-alpha.2.md` |
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Phase 2a-17 xong (beads `bm-phase-2a-17-fallback-reviewer-manager-fnnc.1` → `.6`): dòng 13, 14 của §4 đã áp vào PRD gốc (thêm REQ-066, REQ-020 b); checklist nghiệm thu phần 2a-17 và ghi chú phát hành `docs/operations/paseo-bm-release-notes-0.3.0-alpha.3.md`. Điều kiện vào phase 2a-18 kiểm lúc đóng phase 2a-17 (Q13 a, chỉ đọc `~/.paseo-bm/role-fallback-state.json` trên máy owner): file không tồn tại — **0 sự cố thật**, chưa đạt → Status Accepted → **Applied — 2a-18 deferred**; dòng 15 (REQ-067) không áp |
+| 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Owner chốt Q17 b; phase 2a-18 xong (beads `bm-phase-2a-18-fallback-auto-ny4k.1`, `.2`): dòng 15 của §4 (REQ-067) đã áp vào PRD gốc. Status **Applied — 2a-18 deferred → Applied**; phát hành npm bản mang "Auto switch" chờ một sự cố thật được mẫu nhận đúng loại (REQ-067 c, owner chốt Q17 b) |

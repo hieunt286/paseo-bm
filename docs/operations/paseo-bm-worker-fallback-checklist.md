@@ -93,4 +93,19 @@ Cần một chuỗi dự phòng cho Reviewer và cho Manager (Beads Manager → 
 | 17.5 | Beads Manager mở Manager thay thế | Sau 17.4, mở Beads Manager từ sidebar hay Command Center | Mở Manager mới, không phải Manager cũ; Manager cũ vẫn còn cho tới khi bạn lưu trữ nó | Chưa đo |
 | 17.6 | Worker báo cáo tới Manager mới | Sau 17.4, một Worker đang chạy gửi báo cáo kế tiếp | Worker đã nhận `BM-SETTINGS` với dòng `Manager agent id: …`; báo cáo kế tiếp tới Manager mới | Chưa đo |
 
-**Điều kiện vào phase 2a-18** (kiểm lúc đóng phase 2a-17, 2026-09-22, Q13 a): `~/.paseo-bm/role-fallback-state.json` trên máy owner **không tồn tại** — 0 sự cố thật. Phase 2a-18 (chế độ Tự động) chưa mở. Khi đã có sự cố thật nhận đúng loại, kiểm lại điều kiện này.
+**Điều kiện vào phase 2a-18** (kiểm lúc đóng phase 2a-17, 2026-09-22, Q13 a): `~/.paseo-bm/role-fallback-state.json` trên máy owner **không tồn tại** — 0 sự cố thật. Phase 2a-18 (chế độ Tự động) chưa mở. Khi đã có sự cố thật nhận đúng loại, kiểm lại điều kiện này. *(Owner chốt Q17 b sau đó: điều kiện này thành điều kiện phát hành của phase 2a-18 — mục 18.1.)*
+
+## Phase 2a-18 — `0.3.0-alpha.4` (REQ-067)
+
+Owner chốt Q17 b (2026-09-22): phase 2a-18 được làm ngay; điều kiện "một sự cố thật" ở trên thành **điều kiện phát hành** của bản này. Mục 18.1 phải **Đạt** trước bước phát hành của runbook; chưa đạt thì bản không lên npm. Các mục khác cần một chuỗi dự phòng, và policy **Auto switch** đặt riêng cho vai trò cần kiểm (Beads Manager → Setup → Roles & models). Như 2a-16: sự cố thật là tốt nhất, không thì dựng lượt hỏng bằng một provider giả; không bao giờ cố đẩy một provider tới hạn mức.
+
+| # | Kiểm | Cách làm | Kết quả mong đợi | Kết quả |
+|---|---|---|---|---|
+| 18.1 | Điều kiện phát hành (REQ-067 c) | Đọc `~/.paseo-bm/role-fallback-state.json` (chỉ đọc) | Ít nhất một sự cố có `signal` và `message` do một provider thật sinh ra, và `class` đúng với lỗi đó theo bộ mẫu (mặc định hoặc của file) | Chưa đo (lúc đóng phase 2a-17: file không tồn tại, 0 sự cố) |
+| 18.2 | Lựa chọn và cảnh báo | Chọn **Auto switch** cho Worker, rồi cho Manager; **Save fallbacks** | Dưới dòng policy có cảnh báo chi phí; của Manager có thêm "The chat you use may be replaced."; `role-fallback.json` có `policy: "auto"` cho đúng vai trò đó, vai trò khác không đổi | Chưa đo |
+| 18.3 | Tự chuyển | Worker có Auto switch dừng vì gói của provider, không biết giờ reset (hay giờ reset còn hơn 30 phút) | Không cần bấm: có Worker thay thế như 16.4; chat Manager nhận **một** thẻ, trạng thái đã chuyển — không có thẻ "pending" trước đó | Chưa đo |
+| 18.4 | Tự chờ | Sự cố L1 của Claude hay Codex có giờ reset còn ≤ 30 phút | Sự cố `waiting` ngay, không agent nào được tạo; tới giờ reset agent cũ nhận `BM-RESUME` như 16.7 | Chưa đo |
+| 18.5 | Không ứng viên | Vai trò có Auto switch nhưng chuỗi rỗng (hay mọi ứng viên đã dùng) | Sự cố ở lại `pending`, thẻ như Ask me | Chưa đo |
+| 18.6 | Ask me không đổi | Vai trò để "Ask me" | Như 16.2: thẻ `pending`, không gì tự chạy | Chưa đo |
+
+Rủi ro đã biết: bật Auto switch khi 18.1 chưa đạt thì một lần nhận nhầm tạo ra một agent thừa. Nếu 18.3 tạo agent cho một lượt không phải lỗi gói, ghi nguyên văn lượt đó vào cột Kết quả và đặt lại "Ask me".

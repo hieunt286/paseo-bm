@@ -230,11 +230,53 @@ export function handleFallbackAct(
   });
 }
 
+/** A reset this close is waited for rather than switched away from (§4.6, REQ-067 b). */
+export const AUTO_WAIT_WINDOW_MS = 30 * 60 * 1000;
+
+/**
+ * What the `auto` policy chooses for a new `pending` incident (§4.6): `wait`
+ * when the reset is known and at most 30 minutes away (a reset already past
+ * counts), else `switch` when there is a candidate, else nothing — the
+ * incident stays pending, as with "Ask me".
+ */
+export function autoActionOf(incident: FallbackIncident, now: Date): "wait" | "switch" | null {
+  const resetsAt = incident.resetsAt === null ? Number.NaN : Date.parse(incident.resetsAt);
+  if (!Number.isNaN(resetsAt) && resetsAt - now.getTime() <= AUTO_WAIT_WINDOW_MS) return "wait";
+  return incident.candidate === null ? null : "switch";
+}
+
+/**
+ * Runs the `auto` policy's choice for a new incident through `fallback.act`,
+ * so it takes the same lock, the same checks and the same notices as a click.
+ * Returns true when an action ran (its notice went out, or the failure's did);
+ * false when nothing was chosen and the incident stays pending. Never throws.
+ */
+export async function decideAutomatically(
+  incident: FallbackIncident,
+  paseo: unknown,
+  deps: FallbackRpcDeps & { actions: FallbackActions },
+): Promise<boolean> {
+  const log = deps.log ?? defaultLog;
+  const action = autoActionOf(incident, (deps.now ?? (() => new Date()))());
+  if (action === null) return false;
+  try {
+    await handleFallbackAct({ incidentId: incident.id, action }, paseo, deps);
+  } catch (error) {
+    log(`[paseo-bm] the Auto switch policy could not ${action} for incident ${incident.id}: ${reasonOf(error)}`);
+    // The card shows what became of it; the chat is told the state it is in now.
+    const home = await homeOf(paseo, deps);
+    const now = home === null ? undefined : readIncidents(home, log).incidents.find((entry) => entry.id === incident.id);
+    await notifyFallback(now ?? incident, paseo, deps);
+  }
+  return true;
+}
+
 /**
  * Registers `fallback.incidents` and `fallback.act`, and tells the Manager
- * chat about every new `pending` incident. `onPaseo` hears each handler's SDK
- * handle (the wait timers are set again from it, §4.4.9). Returns the remover
- * of that listener.
+ * chat about every new `pending` incident — after the `auto` policy has run
+ * its choice, if the role has it (§4.6), so the chat hears the chosen state
+ * once. `onPaseo` hears each handler's SDK handle (the wait timers are set
+ * again from it, §4.4.9). Returns the remover of that listener.
  */
 export function registerFallbackRpcs(
   server: PluginServerContext,
@@ -256,7 +298,9 @@ export function registerFallbackRpcs(
     seen(context.paseo);
     return handleFallbackAct(input, context.paseo, { actions });
   });
-  return onFallbackIncident(async (incident, paseo) => {
-    if (incident.status === "pending") await notifyFallback(incident, paseo);
+  return onFallbackIncident(async (incident, paseo, context) => {
+    if (incident.status !== "pending") return;
+    if (context?.policy === "auto" && (await decideAutomatically(incident, paseo, { actions, home: context.home }))) return;
+    await notifyFallback(incident, paseo);
   });
 }

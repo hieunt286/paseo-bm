@@ -288,8 +288,12 @@ interface SnapshotPaseo {
   agents: { ref(agentId: string): { refresh(): Promise<{ agent?: unknown } | null> } };
 }
 
-/** Gets each written incident and the Paseo handle of the hook that wrote it. */
-export type IncidentListener = (incident: FallbackIncident, paseo: unknown) => void | Promise<void>;
+/** Gets each written incident, the Paseo handle of the hook that wrote it, the role's policy then, and the install home. */
+export type IncidentListener = (
+  incident: FallbackIncident,
+  paseo: unknown,
+  context: { policy: FallbackChain["policy"]; home: string },
+) => void | Promise<void>;
 const listeners = new Set<IncidentListener>();
 
 /** Subscribes to every incident written (the BM-FALLBACK notice and the card); returns the remover. */
@@ -438,7 +442,7 @@ export async function recordIncident(
     if (written === null) return null;
     for (const listener of listeners) {
       try {
-        await listener(incident, deps.paseo);
+        await listener(incident, deps.paseo, { policy: chain.policy, home: deps.home });
       } catch (error) {
         log(`[paseo-bm] a fallback incident listener failed: ${reasonOf(error)}`);
       }

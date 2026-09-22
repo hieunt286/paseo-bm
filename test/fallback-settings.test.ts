@@ -158,7 +158,7 @@ describe("roles.save-fallback", () => {
     ["two entries with the same provider and model", { entries: [CODEX, CODEX] }],
     ["an entry equal to the Worker itself", { entries: [{ baseProvider: "claude", model: "claude-opus-5", thinkingOptionId: null, modeId: null }] }],
     ["a role that is not paseo-bm's", { role: "planner" as never, entries: [PI] }],
-    ["the auto policy before phase 2a-18", { policy: "auto" as never }],
+    ["a policy that does not exist", { policy: "sometimes" as never }],
     ["a model the provider does not list", { entries: [{ ...CODEX, model: "gpt-9" }] }],
     ["a bm-* alias as base provider", { entries: [{ ...CODEX, baseProvider: "bm-reviewer" }] }],
     ["four entries", { entries: [CODEX, PI, CODEX, PI] }],
@@ -167,6 +167,13 @@ describe("roles.save-fallback", () => {
     await expect(save(daemon, input)).rejects.toMatchObject({ code: "E_ROLE_SETTINGS_INVALID" });
     expect(daemon.paseo.config.patch).not.toHaveBeenCalled();
     expect(() => readFileSync(join(home, ROLE_FALLBACK_FILE))).toThrow();
+  });
+
+  it("saves the Auto switch policy since phase 2a-18 (§4.6, owner decision Q17 b)", async () => {
+    const daemon = fakeDaemon();
+    const result = await save(daemon, { entries: [CODEX], policy: "auto" });
+    expect(result.fallback.policy).toBe("auto");
+    expect(JSON.parse(readFileSync(join(home, ROLE_FALLBACK_FILE), "utf8")).roles.worker.policy).toBe("auto");
   });
 
   it("warns, never refuses, for an entry on the Worker's own base provider", async () => {

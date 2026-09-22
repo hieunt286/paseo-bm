@@ -1040,15 +1040,16 @@ export const rolesSaveSettingsRpc = defineRpc({
 
 /**
  * `roles.save-fallback` — saves one role's policy and 0–3 fallback entries
- * (delta 20260921 §4.4.3): the aliases through the config writer (so `revision`
- * guards them like `roles.save-settings`), then `role-fallback.json`.
+ * (delta 20260921 §4.4.3, §4.6): the aliases through the config writer (so
+ * `revision` guards them like `roles.save-settings`), then `role-fallback.json`.
  */
 export const rolesSaveFallbackRpc = defineRpc({
   name: "roles.save-fallback",
   input: z.object({
     revision: z.string().min(1),
     role: bmRoleSchema,
-    policy: z.enum(["ask", "off"]),
+    /** `auto` (REQ-067, phase 2a-18): the plugin decides at once, by the same rules as the card's buttons. */
+    policy: z.enum(["ask", "off", "auto"]),
     entries: z.array(fallbackEntryInputSchema).max(3),
   }),
   output: z.object({

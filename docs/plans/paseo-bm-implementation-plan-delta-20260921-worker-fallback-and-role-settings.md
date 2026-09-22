@@ -4,7 +4,7 @@
 |---|---|
 | Mã | `plan-delta-20260921-worker-fallback-and-role-settings` |
 | Plan gốc | [Implementation Plan v2](paseo-bm-implementation-plan-v2.md) (Active, Plan-ready PASS). **Không sửa tại chỗ.** Delta này thêm WP-287 → WP-309 trong sáu phase 2a-13 → 2a-18 (2a-12 thuộc delta 20260921-ci-linux-hang) |
-| Status | **Applied — 2a-18 deferred** (2026-09-22): phase 2a-13 → 2a-17 xong; phase 2a-18 (WP-308, WP-309) chưa mở — điều kiện vào chưa đạt (0 sự cố thật, Q13 a), beads của phase đó để mở. Trước đó: **Active** |
+| Status | **Applied** (2026-09-22): phase 2a-13 → 2a-18 xong (WP-287 → WP-309); phát hành npm bản mang "Auto switch" chờ một sự cố thật được mẫu nhận đúng loại (REQ-067 c, owner chốt Q17 b). Trước đó: **Applied — 2a-18 deferred** (0 sự cố thật, Q13 a); trước nữa: **Active** |
 | Plan-ready | **PASS — 2026-09-22 — hieu.nt10** (Beads Worker tự chấm sau review `b1` và re-review. Mục chặn cuối của re-review được sửa theo gợi ý của Reviewer, owner chốt Q9 a, và **không được review lại** — ghi như một ngoại lệ, không phải một lượt pass của Reviewer) |
 | Owner | hieu.nt10 |
 | Created | 2026-09-21 |
@@ -45,9 +45,9 @@ Toàn bộ PRD delta §7.2, và thêm:
 
 Điều kiện 3 và 4 là việc của owner sau `finished`. WP đóng phase chỉ chuẩn bị và ghi lại.
 
-**Của cả delta:** phase 2a-17 đã phát hành. Phase 2a-18 là tuỳ chọn: nó chỉ mở khi đủ điều kiện vào (§3, trước WP-308). Delta có hai đường đóng, không đường nào phải tự nghĩ ra:
-- **2a-18 chưa đủ điều kiện vào** khi WP-307 chạy: WP-307 đóng delta ở trạng thái **"Applied — 2a-18 deferred"**. REQ-067 **không** được áp vào PRD gốc (dòng 15 của PRD delta §4 ở lại chưa áp). Phase 2a-18 về sau là một request riêng, chạy WP-308 và WP-309.
-- **2a-18 được làm** (đủ điều kiện ngay lúc WP-307 chạy, hoặc mở về sau): WP-309 áp dòng 15, và chuyển ba tài liệu delta sang **"Applied"** từ trạng thái đang có hoặc từ "Applied — 2a-18 deferred".
+**Của cả delta:** phase 2a-17 đã phát hành. Phase 2a-18 làm sau cùng. "Một sự cố thật được bộ mẫu nhận đúng loại" là **điều kiện phát hành npm** của bản mang "Auto switch" (REQ-067 c; §3, trước WP-308), không phải điều kiện vào phase (owner chốt Q17 b, 2026-09-22; trước đó nó là điều kiện vào). Delta đóng qua hai bước:
+- **WP-307** (chạy trước Q17 b, khi điều kiện trên còn là điều kiện vào, và lúc đó có 0 sự cố thật): đóng delta ở trạng thái **"Applied — 2a-18 deferred"**. REQ-067 (dòng 15 của PRD delta §4) chưa áp.
+- **WP-309** (sau WP-308): áp dòng 15, và chuyển ba tài liệu delta từ "Applied — 2a-18 deferred" sang **"Applied"**. Bản npm mang "Auto switch" vẫn chờ điều kiện phát hành (checklist nghiệm thu, mục 18.1).
 
 ### 1.4 Hành vi người dùng đang dựa vào sẽ đổi
 
@@ -97,7 +97,7 @@ Không còn câu hỏi mở.
 | WP-303 → WP-301 | như trên |
 | WP-305 → WP-304 | cả hạ tầng của 2a-16: sự cố, thẻ, `notice-queue`, `fallback.act`, hẹn giờ |
 | WP-306 → WP-304 | như trên, cộng bàn giao (`fallback-handover.ts`) và `soleWorkerOf` / cây agent của WP-302 |
-| WP-308 → WP-307 | cả phase 2a-17, cộng **điều kiện vào**: một sự cố thật |
+| WP-308 → WP-307 | cả phase 2a-17. "Một sự cố thật" là điều kiện phát hành, không phải cạnh phụ thuộc (Q17 b) |
 
 ```
 2a-13: WP-287 ─┬─────────────┐
@@ -111,7 +111,7 @@ Không còn câu hỏi mở.
                                        └─> WP-303 ─┴──> WP-304
 2a-17:  WP-305 ─┬──> WP-307               (WP-305, WP-306 phụ thuộc WP-304)
         WP-306 ─┘
-2a-18:  WP-308 ──> WP-309               (WP-308 phụ thuộc WP-307 + điều kiện vào)
+2a-18:  WP-308 ──> WP-309               (WP-308 phụ thuộc WP-307; phát hành chờ một sự cố thật, Q17 b)
 ```
 
 ## 3. Work packages
@@ -486,19 +486,21 @@ Policy `off` chỉ ghi sự cố.
 - Thiết kế gốc §8 ("Một Manager cho mỗi workspace") có errata trỏ tới delta này.
 - Checklist nghiệm thu 2a-17: "Chuyển" Reviewer và "Chuyển" Manager trên daemon thật.
 - Ghi chú phát hành `0.3.0-alpha.3`.
-- **Đóng delta khi 2a-18 chưa mở** (§1.3): đọc `role-fallback-state.json` trên máy owner (chỉ đọc; owner cho phép) để xét điều kiện vào của 2a-18.
-  - Chưa đủ: PRD delta, design delta và plan delta chuyển sang "Applied — 2a-18 deferred", mỗi tài liệu một dòng revision nêu lý do. REQ-067 và dòng 15 không áp. Bead của WP-308 và WP-309 ở lại, bị chặn bởi điều kiện vào.
-  - Đủ rồi: ba tài liệu giữ trạng thái đang có, và WP-308 được mở.
+- **Đóng delta khi 2a-18 chưa làm** (§1.3): đọc `role-fallback-state.json` trên máy owner (chỉ đọc; owner cho phép) để xét điều kiện "một sự cố thật" — lúc WP-307 chạy, đó còn là điều kiện vào của 2a-18; Q17 b sau đó đổi nó thành điều kiện phát hành.
+  - Chưa đủ (kết quả đã xảy ra: 0 sự cố): PRD delta, design delta và plan delta chuyển sang "Applied — 2a-18 deferred", mỗi tài liệu một dòng revision nêu lý do. REQ-067 và dòng 15 không áp.
+  - Đủ rồi: ba tài liệu giữ trạng thái đang có.
 
 **Nguồn:** PRD delta §4, §5; thiết kế §8. **Phụ thuộc:** WP-305, WP-306.
 
 **Phạm vi:** như WP-304.
 
-**Điều kiện ra:** như WP-289, cộng: kết quả xét điều kiện vào của 2a-18 được ghi trong revision của plan delta, kèm số sự cố thật đã đọc.
+**Điều kiện ra:** như WP-289, cộng: kết quả xét điều kiện "một sự cố thật" được ghi trong revision của plan delta, kèm số sự cố thật đã đọc.
 
 ### Phase 2a-18 — Dự phòng "Tự động"
 
-**Điều kiện vào:** `role-fallback-state.json` trên máy owner có ít nhất một sự cố do provider thật sinh ra, ở bất kỳ vai trò nào, và bộ mẫu (mặc định hoặc của file) phân loại đúng nó. Kiểm bằng cách đọc file đó, **không** chạy provider thật tới hạn mức. Chưa đủ thì phase để "deferred".
+**Điều kiện phát hành** (owner chốt Q17 b, 2026-09-22; trước đó là điều kiện vào phase): `role-fallback-state.json` trên máy owner có ít nhất một sự cố do provider thật sinh ra, ở bất kỳ vai trò nào, và bộ mẫu (mặc định hoặc của file) phân loại đúng nó. Kiểm bằng cách đọc file đó, **không** chạy provider thật tới hạn mức.
+
+WP-308 và WP-309 làm ngay — viết, test, review và commit — với "Auto switch" tắt mặc định, bật riêng từng vai trò, có cảnh báo chi phí. Bản npm mang "Auto switch" chưa phát hành cho tới khi điều kiện trên đạt (REQ-067 c); owner kiểm nó trước bước phát hành (checklist nghiệm thu, mục 18.1).
 
 #### WP-308 — Chính sách "Tự động" cho cả ba vai trò
 
@@ -506,7 +508,7 @@ Policy `off` chỉ ghi sự cố.
 - `role-fallback.json` nhận `policy: "auto"` cho mỗi vai trò; màn hình có lựa chọn Auto switch kèm cảnh báo chi phí, và cảnh báo thay chat cho Manager.
 - Sau khi ghi sự cố: có reset trong ≤ 30 phút → `wait`; không thì có ứng viên → `switch` theo đúng đường của vai trò; không thì `pending`.
 
-**Nguồn:** REQ-067 (a)–(d); thiết kế §4.6. **Phụ thuộc:** WP-307 và điều kiện vào.
+**Nguồn:** REQ-067 (a)–(d); thiết kế §4.6. **Phụ thuộc:** WP-307.
 
 **Phạm vi:** `fallback-settings.ts`; `fallback-detect.ts`; `plugin/client/setup-screen.tsx`, `setup-model.ts`; `contracts.ts`; test.
 
@@ -516,7 +518,7 @@ Policy `off` chỉ ghi sự cố.
 
 **Kết quả:**
 - PRD gốc nhận dòng 15 (REQ-067).
-- Ba tài liệu delta chuyển sang "Applied", từ trạng thái đang có (2a-18 đã đủ điều kiện ngay lúc WP-307 chạy) hoặc từ "Applied — 2a-18 deferred" (2a-18 mở về sau), khớp hai đường đóng ở §1.3.
+- Ba tài liệu delta chuyển từ "Applied — 2a-18 deferred" (trạng thái WP-307 để lại) sang "Applied", khớp §1.3; ghi chú rằng bản npm mang "Auto switch" chờ điều kiện phát hành.
 - Ghi chú phát hành cho bản kế tiếp.
 
 **Phụ thuộc:** WP-308.
@@ -527,7 +529,7 @@ Policy `off` chỉ ghi sự cố.
 
 | Rủi ro | WP | Giảm thiểu |
 |---|---|---|
-| Mẫu nhận dạng sai | 300, 308 | Mẫu là dữ liệu; N2 hẹp (bốn điều kiện); mặc định "Hỏi tôi"; 2a-18 chỉ mở sau một sự cố thật |
+| Mẫu nhận dạng sai | 300, 308 | Mẫu là dữ liệu; N2 hẹp (bốn điều kiện); mặc định "Hỏi tôi"; "Auto switch" tắt mặc định, và bản mang nó chỉ phát hành sau một sự cố thật (Q17 b) |
 | Ghi đè thay đổi song song trong `agentProfiles` | 295, 299 | `revision`, đọc ngay trước khi ghi, mutex (ADR-008 QĐ3); ghi đè trong cửa sổ đó không báo được — owner chấp nhận (Q3, Q15 a) |
 | Tín hiệu `supportsMcpServers` không phản ánh Pi thiếu adapter | 291, 294 | Kiểm trên daemon thật ở nghiệm thu; sai thì dừng và hỏi |
 | Thẻ không hiện khi lượt của Manager cùng provider gốc hỏng | 301, 304 | Pill đọc RPC, không đọc timeline; kiểm trên daemon thật |
@@ -575,3 +577,6 @@ Policy `off` chỉ ghi sự cố.
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | WP-306 (bead `bm-phase-2a-17-fallback-reviewer-manager-fnnc.4`), theo Q14 a: trần `manager.md` nâng 179 → 182 (đo thật: đoạn `BM-HANDOVER role: manager` 3 dòng; gói lại các dòng thông báo của plugin sẽ tách câu `BM-TOOLS` mà `test/tools-check.test.ts` ghim trên một dòng). Lý do ghi trong `test/roles-content.test.ts` |
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | WP-306 (bead `bm-phase-2a-17-fallback-reviewer-manager-fnnc.5`), theo Q14 a: trần `worker.md` nâng 408 → 409 (đo thật: câu `BM-SETTINGS` mở rộng cho id Manager thay thế, thành 2 dòng). Lý do ghi trong `test/roles-content.test.ts` |
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Phase 2a-17 xong (beads `bm-phase-2a-17-fallback-reviewer-manager-fnnc.1` → `.6`): dòng 13–14 của PRD delta §4 đã áp vào PRD gốc; errata §8 vào thiết kế gốc; checklist nghiệm thu phần 2a-17 và ghi chú phát hành `docs/operations/paseo-bm-release-notes-0.3.0-alpha.3.md`. Khi implement: `.2`, `.3` và phần mã của `.4` do sub-agent viết, Worker review và chạy kiểm; errata thiết kế delta §4.5.3. **Kiểm điều kiện vào 2a-18**: file không tồn tại — **0 sự cố thật**, chưa đạt → số sự cố thật đọc được: **0**. PRD delta, design delta và plan delta chuyển **Applied — 2a-18 deferred**; dòng 15 / REQ-067 không áp; beads phase 2a-18 để mở, chặn bởi điều kiện vào (owner dừng ở đây theo Q13 a) |
+| 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Owner chốt Q17 b (người dùng yêu cầu làm nốt bead còn lại): phase 2a-18 làm ngay; điều kiện "một sự cố thật" chuyển thành điều kiện **phát hành** npm (REQ-067 c), không còn là điều kiện vào phase. Errata §3 phase 2a-18 và thiết kế delta §4.6; bead `bm-phase-2a-18-fallback-auto-ny4k.1` sửa cho khớp |
+| 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Phase 2a-18 xong (beads `bm-phase-2a-18-fallback-auto-ny4k.1`, `.2`): WP-308 — `policy: "auto"` cho mọi vai trò, quyết định tự động qua `fallback.act`, lựa chọn "Auto switch" có cảnh báo; WP-309 — dòng 15 (REQ-067) áp vào PRD gốc, ba tài liệu delta **Applied — 2a-18 deferred → Applied**, ghi chú phát hành `docs/operations/paseo-bm-release-notes-0.3.0-alpha.4.md`, checklist phần 2a-18. Phát hành npm bản mang "Auto switch" chờ một sự cố thật được mẫu nhận đúng loại (REQ-067 c, owner chốt Q17 b) |
+| 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Sửa theo review `b8` (lô implementation của phase 2a-18, hai mục chặn ở tài liệu này và thiết kế delta): Q17 b áp vào mọi đoạn đang có hiệu lực, không chỉ đoạn errata — §1.3 (hai bước đóng delta), §2 (bảng phụ thuộc WP-308, sơ đồ phase), WP-307, §3 phase 2a-18 (điều kiện vào → **điều kiện phát hành**, đoạn errata gộp vào), WP-308 (phụ thuộc chỉ còn WP-307), WP-309, §4 rủi ro. Lịch sử "điều kiện vào" chỉ còn ở các dòng revision |

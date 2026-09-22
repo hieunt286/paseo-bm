@@ -9,7 +9,7 @@
 | ADR | [ADR-008](../adr/ADR-008-role-settings-written-by-plugin.md) (mới, Accepted 2026-09-22); sửa đổi [ADR-004](../adr/ADR-004-paseo-config-mutation.md) QĐ1 và [ADR-006](../adr/ADR-006-role-registration.md) QĐ1, QĐ5. [ADR-007](../adr/ADR-007-dashboard-trace-store.md): chỉ thêm một trường tuỳ chọn |
 | Plan | [plan-delta-20260921-worker-fallback-and-role-settings](../plans/paseo-bm-implementation-plan-delta-20260921-worker-fallback-and-role-settings.md) |
 | Nguồn sự thật đã kiểm | [Đề xuất 20260921](./paseo-bm-proposal-20260921-worker-fallback-and-role-settings.md) §1 (S1–S13, P1–P11, M1–M17), cộng §2 dưới đây |
-| Status | **Applied — 2a-18 deferred** (2026-09-22): phase 2a-13 → 2a-17 đã áp; phase 2a-18 chưa mở vì điều kiện vào chưa đạt (0 sự cố thật, Q13 a). Trước đó: **Active** — `design-ready` PASS 2026-09-22 sau review `b1` và re-review |
+| Status | **Applied** (2026-09-22): phase 2a-13 → 2a-18 đã áp; phát hành npm bản mang "Auto switch" chờ một sự cố thật được mẫu nhận đúng loại (REQ-067 c, owner chốt Q17 b) (errata §4.6). Trước đó: **Applied — 2a-18 deferred** (0 sự cố thật, Q13 a); trước nữa: **Active** — `design-ready` PASS 2026-09-22 sau review `b1` và re-review |
 | Owner | hieu.nt10 |
 | Request | `req-20260921T111242Z` |
 
@@ -39,7 +39,7 @@
 | 2a-15 | Màn Roles & models ghi thẳng cấu hình Paseo; agent đang sống được báo mode mới của agent con | REQ-064 |
 | 2a-16 | Hạ tầng dự phòng chung; Worker hết hạn mức → thẻ "Hỏi tôi" → chuyển, chờ reset, hoặc để người dùng | REQ-065 |
 | 2a-17 | Cùng cơ chế cho Reviewer (Worker tạo Reviewer thay thế) và Manager (plugin tạo Manager thay thế) | REQ-066 |
-| 2a-18 | Chế độ Tự động cho cả ba vai trò, chỉ sau một sự cố thật | REQ-067 |
+| 2a-18 | Chế độ Tự động cho cả ba vai trò; phát hành npm chỉ sau một sự cố thật (§4.6) | REQ-067 |
 
 ## 2. Nền tảng — sự thật kiểm thêm trong request này
 
@@ -422,7 +422,7 @@ Phân loại chữ, theo thứ tự, loại đầu tiên khớp thắng:
 | 5 | L3 | `rate[ _]limit`, `overloaded`, `\b429\b`, `\b529\b`, `too many requests` | không dự phòng |
 | — | L6 | không khớp gì | không dự phòng |
 
-- Mẫu mặc định nằm trong `plugin/shared/fallback-patterns.ts`. Đây là **điểm khởi đầu chưa kiểm trên sự cố thật** (đề xuất §1.5): nghiệm thu phase 2a-16 và điều kiện vào phase 2a-18 kiểm lại chúng.
+- Mẫu mặc định nằm trong `plugin/shared/fallback-patterns.ts`. Đây là **điểm khởi đầu chưa kiểm trên sự cố thật** (đề xuất §1.5): nghiệm thu phase 2a-16 và điều kiện phát hành của phase 2a-18 (§4.6) kiểm lại chúng.
 - L1 đứng trước L3 vì thông báo hết hạn mức của gói có thể chứa chữ "rate limit".
 - *(Errata 2026-09-22, Q16 a)* Mẫu `patterns` của người dùng có lượng từ lồng nhau bị bỏ khi biên dịch, log một dòng (§6).
 - *(Errata khi implement, bead `bm-phase-2a-16-fallback-worker-332y.4`)* Điều 2 của N2 chỉ xét tin **của chính agent**: một Worker được đánh thức bằng `BM-REVIEW` của Reviewer vẫn có thể hết hạn mức ngay trong lượt đó (REQ-065 a nói lượt "không có `BM-REPORT`" của agent).
@@ -699,7 +699,7 @@ Người dùng đang chat với chính Manager bị hỏng. Plugin tạo Manager
   - không thì để `pending` như "Hỏi tôi".
 - Thẻ vẫn hiện, với trạng thái đã chọn.
 - Không có kiểm hạn mức trước khi tạo agent (PRD delta REQ-067 d).
-- **Điều kiện vào phase** (plan delta): `role-fallback-state.json` có ít nhất một sự cố với `signal` và `message` từ một provider thật, và bộ mẫu phân loại đúng nó. Thiếu điều kiện thì phase không mở.
+- **Điều kiện phát hành** (plan delta; owner chốt Q17 b, 2026-09-22 — trước đó là điều kiện vào phase): `role-fallback-state.json` có ít nhất một sự cố với `signal` và `message` từ một provider thật, và bộ mẫu phân loại đúng nó. Phase 2a-18 được implement, test, review và commit không chờ điều kiện này; "Auto switch" tắt mặc định (policy mặc định vẫn là "Ask me"), chỉ bật khi người dùng chọn riêng cho từng vai trò, có cảnh báo chi phí. Bản npm mang "Auto switch" **chưa phát hành** cho tới khi điều kiện đạt — đúng REQ-067 (c). Rủi ro owner chấp nhận: bật Auto trước khi mẫu được kiểm thì một lần nhận nhầm tạo ra một agent thừa.
 
 ## 5. Hợp đồng
 
@@ -792,7 +792,7 @@ Nghiệm thu trên daemon thật, do owner làm hoặc owner cho phép làm, ở
   - "Chuyển" Worker trên một sự cố thật, hoặc trên một sự cố giả lập bằng provider giả;
   - `listUsage` trả cửa sổ cho tài khoản owner.
 - 2a-17: "Chuyển" Reviewer (Worker tạo Reviewer mới, lượt review không bị đếm thêm); "Chuyển" Manager (Beads Manager mở Manager mới, Worker đang chạy gửi báo cáo tới nó).
-- 2a-18: điều kiện vào phase (§4.6).
+- 2a-18: điều kiện phát hành (§4.6), trước bước phát hành npm.
 
 ## 9. Backward Compatibility và hoàn tác
 
@@ -815,7 +815,7 @@ Nghiệm thu trên daemon thật, do owner làm hoặc owner cho phép làm, ở
 
 | Rủi ro | Chặn bằng |
 |---|---|
-| Mẫu nhận dạng sai: nhận nhầm, hoặc sót lượt `completed` | Mặc định "Hỏi tôi"; mẫu là dữ liệu sửa được; N2 hẹp (không công cụ, không báo cáo, ≤ 500 ký tự, token ra 0); phase 2a-18 chỉ mở sau một sự cố thật |
+| Mẫu nhận dạng sai: nhận nhầm, hoặc sót lượt `completed` | Mặc định "Hỏi tôi"; mẫu là dữ liệu sửa được; N2 hẹp (không công cụ, không báo cáo, ≤ 500 ký tự, token ra 0); "Auto switch" tắt mặc định, và bản mang nó chỉ phát hành sau một sự cố thật (§4.6) |
 | Tốn tiền khi chuyển sang provider tính theo token | Thẻ hiện giá (§4.2.7); người dùng bấm mới chuyển |
 | Hai Worker cùng sửa một cây (người dùng nhắn lại Worker cũ) | `replaced` loại Worker cũ khỏi thẻ và pill; cây agent ghi rõ; agent cũ không nhận `BM-RESUME` sau khi đã bị thay |
 | Hai Manager trong một workspace sau khi thay | `findLiveManagers` bỏ Manager cũ; thẻ chỉ đường mở Manager mới; Worker được báo id mới |
@@ -853,3 +853,6 @@ Nghiệm thu trên daemon thật, do owner làm hoặc owner cho phép làm, ở
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Owner chốt Q16 a: errata §6 và §4.4.4 — cắt chuỗi 2.000 ký tự không chặn được mẫu backtracking theo hàm mũ; mẫu của người dùng có lượng từ lồng nhau bị bỏ và log. Errata khi implement §4.4.4 điều 2 của N2: chỉ xét khối trong tin của chính agent |
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Phase 2a-16 xong (beads `bm-phase-2a-16-fallback-worker-332y.1` → `.12`): errata §2.6, §3.1, §8 vào thiết kế gốc; GUIDE thêm hai file và alias dự phòng; checklist nghiệm thu phần 2a-16 và ghi chú phát hành `docs/operations/paseo-bm-release-notes-0.3.0-alpha.2.md`. Errata khi implement gom ở §4.4.11 |
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Phase 2a-17 xong (beads `bm-phase-2a-17-fallback-reviewer-manager-fnnc.1` → `.6`): errata §8 vào thiết kế gốc; checklist nghiệm thu phần 2a-17 và ghi chú phát hành `docs/operations/paseo-bm-release-notes-0.3.0-alpha.3.md`; errata khi implement ở §4.5.3. Điều kiện vào phase 2a-18 kiểm lúc đóng phase 2a-17 (Q13 a, chỉ đọc `~/.paseo-bm/role-fallback-state.json` trên máy owner): file không tồn tại — **0 sự cố thật**, chưa đạt → Status Active → **Applied — 2a-18 deferred**; §4.6 chưa implement |
+| 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Owner chốt Q17 b: errata §4.6 — điều kiện "một sự cố thật" chuyển từ điều kiện vào phase thành điều kiện phát hành npm; phase 2a-18 làm ngay, "Auto switch" tắt mặc định |
+| 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Phase 2a-18 xong (beads `bm-phase-2a-18-fallback-auto-ny4k.1`, `.2`): §4.6 implement — `policy: "auto"` cho mọi vai trò, quyết định tự động đi qua đúng `fallback.act` như một lần bấm, thông báo chỉ gửi trạng thái đã chọn; lựa chọn "Auto switch" với cảnh báo chi phí (và cảnh báo thay chat cho Manager). Status **Applied — 2a-18 deferred → Applied** |
+| 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Sửa theo review `b8`: Q17 b áp vào mọi đoạn đang có hiệu lực — §4.6 (điều kiện vào → **điều kiện phát hành**, câu "phase không mở" bỏ, errata gộp vào), bảng phase ở §1, §4.4.4 mẫu mặc định, §8 kiểm trên daemon thật, §10 rủi ro. Lịch sử "điều kiện vào" chỉ còn ở các dòng revision |
