@@ -49,12 +49,20 @@ export const FORMAT_NOTICE_MARKER = "BM-FORMAT";
  */
 export const TOOLS_NOTICE_MARKER = "BM-TOOLS";
 
+/**
+ * First word of the notice a live Manager or Worker receives when the user
+ * changed the start mode of the agents it creates (`settings-notices.ts`,
+ * delta 20260921 §4.3.5).
+ */
+export const SETTINGS_NOTICE_MARKER = "BM-SETTINGS";
+
 const PREFIXES: readonly string[] = [
   BUDGET_NOTICE_MARKER,
   REVIEWER_STOP_NOTICE_PREFIX,
   WORKER_STOP_NOTICE_MARKER,
   FORMAT_NOTICE_MARKER,
   TOOLS_NOTICE_MARKER,
+  SETTINGS_NOTICE_MARKER,
 ];
 
 /** True when this text is one of the plugin's own notices, not a person's words. */

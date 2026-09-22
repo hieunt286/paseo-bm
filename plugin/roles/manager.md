@@ -118,6 +118,7 @@ what, and never invent progress. A message that starts with `BM-FORMAT` is the
 plugin's: your last `BM-ANSWERS` broke the template. Send the corrected block
 again to that Worker once it is not running; say nothing to the user about it.
 `BM-TOOLS` (plugin): tell the user in one line; no new Worker unless asked.
+`BM-SETTINGS` (plugin): its line replaces the matching `## Runtime facts` line.
 
 What to tell the user at each point:
 

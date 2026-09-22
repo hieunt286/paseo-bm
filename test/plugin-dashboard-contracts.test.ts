@@ -392,6 +392,10 @@ describe("Dashboard error codes", () => {
       "E_ROLE_EXTRA_INVALID",
       "E_TOOL_PRESENT",
       "E_TOOL_INSTALL_FAILED",
+      // Worker-fallback-and-role-settings delta 20260921 §5 (ADR-008).
+      "E_ROLE_SETTINGS_INVALID",
+      "E_ROLE_SETTINGS_CONFLICT",
+      "E_ROLE_SETTINGS_WRITE_FAILED",
     ]);
   });
 

@@ -46,3 +46,19 @@ Cần một provider OpenCode và một provider Pi `available` trên daemon. Đ
 | 14.7 | Cột skill Pi và OpenCode | Mở Beads Manager → Setup | Có cột Pi (`~/.pi/agent/skills`) và OpenCode (`~/.config/opencode/skill`) | Chưa đo |
 | 14.8 | Giá theo `metadata.cost` | Sau 14.1, Dashboard → request | Lượt của Worker OpenCode có tiền (không chỉ token) | Chưa đo |
 
+
+## Phase 2a-15 — `0.3.0-alpha.1` (REQ-064, ADR-008)
+
+Trước khi kiểm, chụp mảng `daemon.agentProfiles` và các mục `agents.providers.bm-*` của `~/.paseo/config.json` (bước 2 của phần chuẩn bị); 15.2 so với ảnh đó. Đây là phase đầu tiên plugin tự ghi `config.json` (ADR-008): đọc qua `plugin/server/config-writer.ts` trước khi cài (thiết kế delta §6).
+
+| # | Kiểm | Cách làm | Kết quả mong đợi | Kết quả |
+|---|---|---|---|---|
+| 15.1 | Lưu trên màn → Settings hiện cùng giá trị | Beads Manager → Setup → Roles & models → **Edit** ở Worker → đổi model (và thinking nếu model có) → **Save** | Dòng Worker hiện model mới và chữ "Saved."; Settings → Agent profiles → profile **Worker** (`bm-worker`) hiện đúng model và thinking đó | Chưa đo |
+| 15.2 | 0 profile khác đổi | Sau 15.1, so `~/.paseo/config.json` với ảnh trước | Chỉ `model` / `thinkingOptionId` / `modeId` của `bm-worker` và `extends` của `agents.providers.bm-worker` khác; **mọi** profile không phải `bm-*` giống từng byte, thứ tự mảng giữ nguyên | Chưa đo |
+| 15.3 | Worker kế tiếp chạy model mới | Sau 15.1, giao Manager một yêu cầu Nhỏ | Dashboard → request → nút Worker ghi đúng model đã lưu (`runtimeInfo.model`) | Chưa đo |
+| 15.4 | Đổi provider → Manager đang sống được báo | Có một Manager đang mở. Edit Worker → đổi sang provider khác (ví dụ Codex) → Save; rồi giao Manager một yêu cầu | Chat Manager nhận `BM-SETTINGS …` với dòng `Worker mode` mới (ngay nếu Manager nghỉ, ở cuối lượt nếu đang chạy); Worker kế tiếp được tạo **không lỗi** mode | Chưa đo |
+| 15.5 | Lệch revision → không ghi | Mở Edit ở Worker; trong Settings của Paseo sửa một profile bất kỳ và lưu; quay lại và bấm Save | Form báo đúng câu `The configuration changed elsewhere; reopen Roles & models.`; `config.json` không đổi thêm | Chưa đo |
+| 15.6 | Reviewer không có mode nguy hiểm | Edit Reviewer trên Claude hay Codex | Danh sách Mode **không** có `bypassPermissions` / `full-access` / `plan` | Chưa đo |
+| 15.7 | Cảnh báo không chặn | Edit Worker → Pi (nếu có) → Save | Lưu được, dưới dòng Worker hiện `Pi needs pi-mcp-adapter to give this role Paseo tools.` | Chưa đo |
+
+Rủi ro đã biết (owner chấp nhận, Q3 a, Q15 a): một thay đổi trong Settings của Paseo rơi đúng vào lúc plugin đang ghi (giữa lần đọc và lần ghi của một lần Save) có thể bị đè mà không báo. Không có bước kiểm cho rủi ro này.

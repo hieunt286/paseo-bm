@@ -154,10 +154,18 @@ describe("all three files", () => {
   // not take the notice for the user's words or redo work. The rules were
   // appended to an existing paragraph and that paragraph re-wrapped (+3 and +2
   // lines); RULES untouched. reviewer.md took its rule within its ceiling.
+  //
+  // manager.md 176 -> 177 for delta 20260921 phase 2a-15 (bead kj1p.5, owner
+  // decision Q14 a of that delta, raised just enough): the Manager gains one
+  // line for the plugin's BM-SETTINGS notice — its line replaces the matching
+  // Runtime-facts line, else the next Worker creation passes a mode Paseo
+  // refuses (design F5). The "Talking to the user" paragraph has no wrap slack
+  // left (+1 line). worker.md took the same line within its ceiling: the "Per
+  // bead" paragraph under "Proving a change" was re-wrapped (7 -> 6 lines).
   it.each([
     ["worker.md", worker, 397],
     ["reviewer.md", reviewer, 164],
-    ["manager.md", manager, 176],
+    ["manager.md", manager, 177],
   ])("%s leads with the hard limits and stays under %i lines", (_name, text, limit) => {
     const headings = text.split("\n").filter((line) => line.startsWith("## "));
     expect(headings[0]).toBe("## RULES");
@@ -1066,6 +1074,16 @@ describe("the plugin's BM-FORMAT notice (delta 20260918g §4.10, REQ-061 j)", ()
     ],
   ])("%s carries its rule word for word", (_name, text, rule) => {
     expect(text.replace(/\s+/g, " ")).toContain(rule);
+  });
+
+  // Delta 20260921 §4.3.5 (REQ-064 d): BM-SETTINGS carries a new child mode to
+  // the agents that create that child, so both creators take its line.
+  it.each([
+    ["worker.md", worker, "## Reporting", "## Stop"],
+    ["manager.md", manager, "## Talking to the user", undefined],
+  ])("%s takes a BM-SETTINGS line in place of its Runtime-facts line", (_name, text, from, to) => {
+    const rule = "`BM-SETTINGS` (plugin): its line replaces the matching `## Runtime facts` line.";
+    expect(between(text, from, to).replace(/\s+/g, " ")).toContain(rule);
   });
 
   it("sits where each role already hears about the plugin's messages", () => {

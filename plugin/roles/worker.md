@@ -211,11 +211,10 @@ you tell your own changes from the ones that were already there.
 
 Per bead: `br update <id> --status in_progress` → do the work → run the check
 that proves it → `br close <id> --reason "<the evidence: a command and its
-result, or what you read back>"`. Only **one**
-bead `in_progress` at a time, and only this request's beads (filter by label;
-ignore other beads `bv` suggests). Medium and Large use `implementing-beads`,
-never with parallel sub-agents; its per-bead review advice is met by your one
-implementation batch.
+result, or what you read back>"`. Only **one** bead `in_progress` at a time, and
+only this request's beads (filter by label; ignore other beads `bv` suggests).
+Medium and Large use `implementing-beads`, never with parallel sub-agents; its
+per-bead review advice is met by your one implementation batch.
 
 **Close a bead only with evidence**, right after its check and only after
 reading that check's own result — the exit status, the summary line. Output with
@@ -374,6 +373,7 @@ blocking: `none. Suggestion (not done): …`. A message that starts with
 `BM-FORMAT` comes from the plugin, not the user: your last block broke the
 template. Send the whole corrected block again, to the same agent, in one
 message, changing nothing else; do not redo work, then carry on where you were.
+`BM-SETTINGS` (plugin): its line replaces the matching `## Runtime facts` line.
 
 ## Stop
 

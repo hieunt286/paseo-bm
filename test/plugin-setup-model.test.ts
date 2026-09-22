@@ -1,16 +1,33 @@
 import { describe, expect, it } from "vitest";
 import {
+  ROLES_APPLY_NOTICE,
+  ROLES_CONFLICT_MESSAGE,
   SETUP_ROLES,
+  applySavedRole,
   compareVersions,
   extraCounter,
   installWarning,
+  isSettingsConflict,
+  modeChoices,
+  modelPriceText,
+  providerChoices,
+  providerLabel,
+  roleDraftOf,
+  roleFormView,
+  roleRows,
+  roleSettingText,
+  rowOptionProviders,
+  saveErrorText,
+  saveSettingsInput,
+  savedNotes,
   setupHeadline,
   skillBadge,
   skillChips,
   skillDirsText,
+  thinkingChoices,
   toolBadge,
 } from "../plugin/client/setup-model";
-import type { SetupStatus } from "../plugin/shared/contracts";
+import type { RoleModelOption, RoleSetting, RolesOptions, RolesSettings, SetupStatus } from "../plugin/shared/contracts";
 
 type Tool = SetupStatus["tools"][number];
 const tool = (overrides: Partial<Tool>): Tool => ({
@@ -107,6 +124,266 @@ describe("setup wording", () => {
         tone: "success",
       });
       expect(setupHeadline(status(both, { claude: 5, codex: 5, pi: 1, opencode: 2 })).tone).toBe("warning");
+    });
+  });
+});
+
+/** Roles & models (delta 20260921 §4.3.1, REQ-064 a/d, REQ-063 h). */
+describe("Roles & models", () => {
+  const setting = (overrides: Partial<RoleSetting> & Pick<RoleSetting, "role">): RoleSetting => ({
+    providerId: `bm-${overrides.role}` as RoleSetting["providerId"],
+    baseProvider: "claude",
+    label: null,
+    model: "claude-opus-5",
+    thinkingOptionId: null,
+    modeId: null,
+    featureValues: {},
+    capability: "tiered",
+    ...overrides,
+  });
+
+  const opus: RoleModelOption = {
+    id: "claude-opus-5",
+    label: "Opus 5",
+    thinkingOptions: [
+      { id: "medium", label: "Medium" },
+      { id: "high", label: "High" },
+    ],
+    defaultThinkingOptionId: "medium",
+    cost: { inputUsdPerMTok: 5, cacheReadUsdPerMTok: 0.5, outputUsdPerMTok: 25 },
+  };
+  const haiku: RoleModelOption = { id: "claude-haiku", label: "Haiku", thinkingOptions: [], defaultThinkingOptionId: null, cost: null };
+  const claude: RolesOptions = {
+    provider: "claude",
+    capability: "tiered",
+    models: [opus, haiku],
+    modes: [
+      { id: "plan", label: "Plan", colorTier: "planning" },
+      { id: "default", label: "Default", colorTier: "safe" },
+      { id: "acceptEdits", label: "Accept edits", colorTier: "moderate" },
+      { id: "bypassPermissions", label: "Bypass", colorTier: "dangerous" },
+    ],
+    autoAccept: false,
+  };
+  const codex: RolesOptions = {
+    provider: "codex",
+    capability: "tiered",
+    models: [{ id: "gpt-5.6-sol", label: "GPT-5.6-Sol", thinkingOptions: [{ id: "high", label: "High" }], defaultThinkingOptionId: null, cost: null }],
+    modes: [
+      { id: "auto", label: "Auto", colorTier: "moderate" },
+      { id: "full-access", label: "Full access", colorTier: "DANGEROUS" },
+    ],
+    autoAccept: false,
+  };
+  const opencode: RolesOptions = {
+    provider: "opencode",
+    capability: "untiered",
+    models: [{ id: "big-pickle", label: "Big Pickle", thinkingOptions: [], defaultThinkingOptionId: null, cost: null }],
+    modes: [
+      { id: "build", label: "build", colorTier: null },
+      { id: "plan", label: "plan", colorTier: null },
+    ],
+    autoAccept: true,
+  };
+  const pi: RolesOptions = { provider: "pi", capability: "none", models: [haiku], modes: [], autoAccept: false };
+
+  const settings: RolesSettings = {
+    revision: "rev-1",
+    roles: [
+      setting({ role: "manager", thinkingOptionId: "high", modeId: "bypassPermissions" }),
+      setting({ role: "worker", thinkingOptionId: "high" }),
+      setting({ role: "reviewer", baseProvider: "codex", model: "gpt-5.6-sol", modeId: "auto" }),
+    ],
+    fallback: null,
+    warnings: ["Manager and Worker share the claude plan: if the Worker hits its limit, the Manager stops too."],
+    providers: ["claude", "codex", "opencode", "pi"],
+  };
+  const byProvider = (provider: string) => [claude, codex, opencode, pi].find((entry) => entry.provider === provider);
+
+  describe("rows", () => {
+    it("come from roles.settings, one per role, in its order, labelled from roles.options", () => {
+      const rows = roleRows(settings, byProvider);
+      expect(rows.map((row) => [row.role, row.label, row.mark])).toEqual([
+        ["manager", "Manager", "request"],
+        ["worker", "Worker", "worker"],
+        ["reviewer", "Reviewer", "reviewer"],
+      ]);
+      expect(rows.map((row) => row.text)).toEqual([
+        "Claude · Opus 5 · thinking high · mode Bypass",
+        "Claude · Opus 5 · thinking high",
+        "Codex · GPT-5.6-Sol · thinking provider default · mode Auto",
+      ]);
+      // Whatever order the server sends is the order shown.
+      const reversed = { ...settings, roles: [...settings.roles].reverse() };
+      expect(roleRows(reversed, byProvider).map((row) => row.role)).toEqual(["reviewer", "worker", "manager"]);
+    });
+
+    it("show ids while the options are not loaded, or when they are for another provider", () => {
+      const reviewer = settings.roles[2]!;
+      expect(roleSettingText(reviewer)).toBe("Codex · gpt-5.6-sol · thinking provider default · mode auto");
+      expect(roleSettingText(reviewer, claude)).toBe("Codex · gpt-5.6-sol · thinking provider default · mode auto");
+      expect(roleRows(settings, () => undefined)[0]!.text).toBe("Claude · claude-opus-5 · thinking high · mode bypassPermissions");
+    });
+
+    it("say what the configuration does not set, and name an unknown provider by its id", () => {
+      expect(roleSettingText(setting({ role: "worker", baseProvider: null, model: null, capability: "unknown" }))).toBe(
+        "provider not set · model not set · thinking provider default",
+      );
+      expect(roleSettingText(setting({ role: "worker", baseProvider: "my-acp", model: "m1" }))).toBe("my-acp · m1 · thinking provider default");
+      expect(providerLabel("opencode")).toBe("OpenCode");
+      expect(providerLabel("pi")).toBe("Pi");
+      expect(providerLabel("toString")).toBe("toString");
+    });
+
+    it("look up the options of each distinct base provider once, never of a bm-* alias", () => {
+      const odd = { ...settings, roles: [...settings.roles, setting({ role: "worker", baseProvider: "bm-worker" }), setting({ role: "worker", baseProvider: null })] };
+      expect(rowOptionProviders(odd)).toEqual(["claude", "codex"]);
+    });
+
+    it("always carry the notice that running agents keep their model", () => {
+      expect(ROLES_APPLY_NOTICE).toBe("Changes apply to agents created after you save. Running agents keep their model and thinking.");
+    });
+  });
+
+  describe("Edit form", () => {
+    const form = (role: RoleSetting["role"], draft: Partial<ReturnType<typeof roleDraftOf>> = {}, options: RolesOptions | undefined = claude) => {
+      const saved = settings.roles.find((entry) => entry.role === role)!;
+      return roleFormView({ role, setting: saved, available: settings.providers, draft: { ...roleDraftOf(saved), ...draft }, options });
+    };
+
+    it("offers the available base providers, plus the current one when it is missing, never a bm-* alias", () => {
+      expect(providerChoices(["claude", "codex"], "claude")).toEqual(["claude", "codex"]);
+      expect(providerChoices(["codex", "bm-worker"], "claude")).toEqual(["claude", "codex"]);
+      // Paseo could not say: only the role's current provider.
+      expect(providerChoices([], "claude")).toEqual(["claude"]);
+      expect(providerChoices([], null)).toEqual([]);
+      expect(providerChoices([], "bm-worker")).toEqual([]);
+      expect(form("worker").providers).toEqual(["claude", "codex", "opencode", "pi"]);
+    });
+
+    it("hides Thinking when the model has no levels; empty means the provider default", () => {
+      expect(thinkingChoices(haiku)).toEqual([]);
+      expect(thinkingChoices(null)).toEqual([]);
+      expect(thinkingChoices(opus)).toEqual([
+        { id: null, label: "Provider default (Medium)" },
+        { id: "medium", label: "Medium" },
+        { id: "high", label: "High" },
+      ]);
+      expect(thinkingChoices(codex.models[0])[0]).toEqual({ id: null, label: "Provider default" });
+      const view = form("worker", { model: "claude-haiku" });
+      expect(view.thinking).toEqual([]);
+      // The level the old model had is dropped, so it is saved as "not set".
+      expect(view.draft.thinkingOptionId).toBeNull();
+      expect(saveSettingsInput("rev-1", "worker", view.draft)).toMatchObject({ model: "claude-haiku", thinkingOptionId: null });
+    });
+
+    it("never offers the Reviewer a dangerous or planning mode on a tiered provider", () => {
+      const ids = (choices: ReturnType<typeof modeChoices>) => choices.map((choice) => choice.id);
+      expect(ids(modeChoices("reviewer", claude))).toEqual([null, "default", "acceptEdits"]);
+      expect(ids(modeChoices("reviewer", codex))).toEqual([null, "auto"]);
+      expect(ids(modeChoices("worker", claude))).toEqual([null, "plan", "default", "acceptEdits", "bypassPermissions"]);
+      expect(ids(modeChoices("manager", codex))).toEqual([null, "auto", "full-access"]);
+      // Untiered (OpenCode agents): everything, for every role.
+      expect(ids(modeChoices("reviewer", opencode))).toEqual([null, "build", "plan"]);
+      // A dangerous mode set elsewhere is not kept for the Reviewer.
+      const reviewer = form("reviewer", { baseProvider: "claude", model: "claude-opus-5", modeId: "bypassPermissions" }, claude);
+      expect(reviewer.modes.map((choice) => choice.id)).not.toContain("bypassPermissions");
+      expect(reviewer.draft.modeId).toBeNull();
+    });
+
+    it("hides Mode for a provider without modes (capability none)", () => {
+      expect(modeChoices("worker", pi)).toEqual([]);
+      const view = form("worker", { baseProvider: "pi", model: "claude-haiku", modeId: "default" }, pi);
+      expect(view.modes).toEqual([]);
+      expect(view.draft.modeId).toBeNull();
+      expect(view.modeNote).toBeNull();
+    });
+
+    it("says when Paseo could not list the modes and saving clears the one set", () => {
+      const unknown: RolesOptions = { ...claude, capability: "unknown", modes: [] };
+      const view = form("manager", {}, unknown);
+      expect(view.modes).toEqual([]);
+      expect(view.draft.modeId).toBeNull();
+      expect(view.modeNote).toBe("Paseo could not list the modes of Claude; saving clears the mode `bypassPermissions`.");
+    });
+
+    it("shows the price when the model has a cost", () => {
+      expect(modelPriceText(opus)).toBe("~$5 / $25 per 1M tokens");
+      expect(modelPriceText({ ...opus, cost: { inputUsdPerMTok: 0.25, cacheReadUsdPerMTok: 0.03, outputUsdPerMTok: 1.25 } })).toBe(
+        "~$0.25 / $1.25 per 1M tokens",
+      );
+      expect(modelPriceText(haiku)).toBeNull();
+      expect(form("worker").price).toBe("~$5 / $25 per 1M tokens");
+    });
+
+    it("asks for a model after a provider change, and cannot save while the options load", () => {
+      const loading = form("worker", { baseProvider: "codex" }, undefined);
+      expect(loading.blocker).toBe("Loading the models of Codex…");
+      expect(loading.models).toEqual([]);
+      // Options of the previous provider do not count for the new one.
+      expect(form("worker", { baseProvider: "codex" }, claude).blocker).toBe("Loading the models of Codex…");
+      const picked = form("worker", { baseProvider: "codex" }, codex);
+      expect(picked.draft).toEqual({ baseProvider: "codex", model: null, thinkingOptionId: null, modeId: null });
+      expect(picked.blocker).toBe("Pick a model.");
+      expect(saveSettingsInput("rev-1", "worker", picked.draft)).toBeNull();
+      const none = form("worker", { baseProvider: "codex" }, { ...codex, models: [] });
+      expect(none.blocker).toBe("Paseo lists no model for Codex; pick another provider.");
+      const chosen = form("worker", { baseProvider: "codex", model: "gpt-5.6-sol", thinkingOptionId: "high", modeId: "auto" }, codex);
+      expect(chosen.blocker).toBeNull();
+      expect(chosen.changed).toBe(true);
+    });
+
+    it("sends the revision roles.settings gave, and nothing when nothing changed", () => {
+      const same = form("worker");
+      expect(same.changed).toBe(false);
+      const view = form("worker", { thinkingOptionId: "medium", modeId: "acceptEdits" });
+      expect(view.changed).toBe(true);
+      expect(saveSettingsInput(settings.revision, "worker", view.draft)).toEqual({
+        revision: "rev-1",
+        role: "worker",
+        baseProvider: "claude",
+        model: "claude-opus-5",
+        thinkingOptionId: "medium",
+        modeId: "acceptEdits",
+      });
+    });
+  });
+
+  describe("save", () => {
+    const saved = setting({ role: "worker", baseProvider: "codex", model: "gpt-5.6-sol", thinkingOptionId: "high" });
+
+    it("shows every warning the server returned", () => {
+      const warnings = [
+        "Manager and Worker share the codex plan: if the Worker hits its limit, the Manager stops too.",
+        "Pi needs pi-mcp-adapter to give this role Paseo tools.",
+      ];
+      expect(savedNotes({ warnings })).toEqual([
+        { text: "Saved.", tone: "success" },
+        { text: warnings[0], tone: "warning" },
+        { text: warnings[1], tone: "warning" },
+      ]);
+      expect(savedNotes({ warnings: [] })).toEqual([{ text: "Saved.", tone: "success" }]);
+    });
+
+    it("says exactly that the configuration changed elsewhere on a conflict", () => {
+      const conflict = new Error("E_ROLE_SETTINGS_CONFLICT: the configuration changed elsewhere; reopen Roles & models");
+      expect(saveErrorText(conflict)).toBe("The configuration changed elsewhere; reopen Roles & models.");
+      expect(ROLES_CONFLICT_MESSAGE).toBe("The configuration changed elsewhere; reopen Roles & models.");
+      expect(isSettingsConflict(conflict)).toBe(true);
+      expect(isSettingsConflict(new Error("Request failed: E_ROLE_SETTINGS_CONFLICT: x"))).toBe(true);
+      const invalid = new Error('E_ROLE_SETTINGS_INVALID: model "x" is not listed for codex');
+      expect(isSettingsConflict(invalid)).toBe(false);
+      expect(saveErrorText(invalid)).toBe('E_ROLE_SETTINGS_INVALID: model "x" is not listed for codex');
+      expect(saveErrorText(new Error("E_ROLE_SETTINGS_WRITE_FAILED: Paseo did not keep the saved values"))).toContain("E_ROLE_SETTINGS_WRITE_FAILED");
+    });
+
+    it("puts the saved role and the new revision in place until roles.settings is refetched", () => {
+      const next = applySavedRole(settings, { revision: "rev-2", role: saved });
+      expect(next.revision).toBe("rev-2");
+      expect(next.roles.map((entry) => entry.role)).toEqual(["manager", "worker", "reviewer"]);
+      expect(next.roles[1]).toBe(saved);
+      expect(next.roles[0]).toBe(settings.roles[0]);
+      expect(next.providers).toBe(settings.providers);
     });
   });
 });

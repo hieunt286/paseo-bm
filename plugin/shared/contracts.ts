@@ -1,5 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { modelPriceSchema } from "./prices";
 
 /**
  * RPC contracts for the paseo-bm plugin.
@@ -579,6 +580,10 @@ export const DASHBOARD_ERROR_CODES = [
   "E_ROLE_EXTRA_INVALID",
   "E_TOOL_PRESENT",
   "E_TOOL_INSTALL_FAILED",
+  // Delta 20260921 §4.3.3–§4.3.4 (ADR-008): the plugin's own writes of the role settings.
+  "E_ROLE_SETTINGS_INVALID",
+  "E_ROLE_SETTINGS_CONFLICT",
+  "E_ROLE_SETTINGS_WRITE_FAILED",
 ] as const;
 
 export type DashboardErrorCode = (typeof DASHBOARD_ERROR_CODES)[number];
@@ -868,6 +873,125 @@ export const rolesSaveExtraRpc = defineRpc({
   input: z.object({ role: setupRoleSchema, text: z.string() }),
   output: z.object({ extra: z.string(), full: z.string() }),
 });
+
+// ---------------------------------------------------------------------------
+// Roles & models (delta 20260921 §4.3.2, REQ-064 a/b). Read-only; saving is
+// `roles.save-settings` (§4.3.4). `roles.describe` stays for older clients.
+// ---------------------------------------------------------------------------
+
+/**
+ * How a provider lets paseo-bm choose a role's start mode (delta 20260921
+ * §4.2.1): `tiered` (modes carry a `colorTier`: Claude, Codex), `untiered`
+ * (modes without one: OpenCode), `none` (no modes, no error: Pi), `unknown`
+ * (the modes could not be read).
+ */
+export const providerCapabilitySchema = z.enum(["tiered", "untiered", "none", "unknown"]);
+
+/**
+ * One role as Paseo's configuration has it right now: `baseProvider` and
+ * `label` from the derived provider `bm-<role>` (`extends`, `label`); `model`,
+ * `thinkingOptionId`, `modeId` and `featureValues` from the agent profile
+ * `bm-<role>`. A field the configuration does not set is `null`
+ * (`featureValues`: `{}`); `capability` is that of `baseProvider`.
+ */
+export const roleSettingSchema = z.object({
+  role: bmRoleSchema,
+  providerId: z.enum(["bm-manager", "bm-worker", "bm-reviewer"]),
+  baseProvider: z.string().nullable(),
+  label: z.string().nullable(),
+  model: z.string().nullable(),
+  thinkingOptionId: z.string().nullable(),
+  modeId: z.string().nullable(),
+  featureValues: z.record(z.string(), z.unknown()),
+  capability: providerCapabilitySchema,
+});
+
+/**
+ * `roles.settings` — the three roles, always in the order manager, worker,
+ * reviewer. `revision` is what `roles.save-settings` must send back: sha256 of
+ * the canonical JSON of every `bm-*` provider and the whole profile array
+ * (§4.3.2). `fallback` is always `null` until phase 2a-16 (§4.4.3).
+ * `warnings` are English sentences for the user, e.g. the shared-plan warning
+ * when the Manager and the Worker extend the same base provider.
+ */
+export const rolesSettingsRpc = defineRpc({
+  name: "roles.settings",
+  input: z.object({}),
+  output: z.object({
+    revision: z.string(),
+    roles: z.array(roleSettingSchema),
+    fallback: z.null(),
+    warnings: z.array(z.string()),
+    /** The base providers Paseo reports as available (never a `bm-*` alias), for the Edit form's Provider picker. */
+    providers: z.array(z.string()),
+  }),
+});
+
+/** A model a role can run, as `providers.listModels` lists it; `cost` from its `metadata.cost` (§4.2.7). */
+export const roleModelOptionSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  thinkingOptions: z.array(z.object({ id: z.string(), label: z.string() })),
+  defaultThinkingOptionId: z.string().nullable(),
+  cost: modelPriceSchema.nullable(),
+});
+
+/** A mode as `providers.listModes` lists it; `colorTier` is `null` when the provider gives none. */
+export const roleModeOptionSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  colorTier: z.string().nullable(),
+});
+
+/**
+ * `roles.options` — what the Edit form of Roles & models may offer for one
+ * BASE provider (never a `bm-*` alias: refused with `E_ROLE_SETTINGS_INVALID`).
+ * Only values Paseo lists; a list Paseo cannot give is empty. `autoAccept` is
+ * true when an `untiered` provider offers the `auto_accept` toggle.
+ */
+export const rolesOptionsRpc = defineRpc({
+  name: "roles.options",
+  input: z.object({ provider: z.string().min(1) }),
+  output: z.object({
+    provider: z.string(),
+    capability: providerCapabilitySchema,
+    models: z.array(roleModelOptionSchema),
+    modes: z.array(roleModeOptionSchema),
+    autoAccept: z.boolean(),
+  }),
+});
+
+/**
+ * `roles.save-settings` — writes one role's base provider, model, thinking and
+ * mode into Paseo's config (delta 20260921 §4.3.2–§4.3.4, ADR-008). `null`
+ * thinking / mode means "not set" (the key is removed). `notified` counts the
+ * live agents told a changed child mode (BM-SETTINGS, §4.3.5).
+ */
+export const rolesSaveSettingsRpc = defineRpc({
+  name: "roles.save-settings",
+  input: z.object({
+    revision: z.string().min(1),
+    role: bmRoleSchema,
+    baseProvider: z.string().min(1).max(200),
+    model: z.string().min(1).max(200),
+    thinkingOptionId: z.string().min(1).max(200).nullable(),
+    modeId: z.string().min(1).max(200).nullable(),
+  }),
+  output: z.object({
+    revision: z.string(),
+    role: roleSettingSchema,
+    warnings: z.array(z.string()),
+    notified: z.number().int(),
+  }),
+});
+
+export type ProviderCapabilityClass = z.infer<typeof providerCapabilitySchema>;
+export type RolesSaveSettingsInput = z.infer<typeof rolesSaveSettingsRpc.input>;
+export type RoleSetting = z.infer<typeof roleSettingSchema>;
+export type RolesSettings = z.infer<typeof rolesSettingsRpc.output>;
+export type RoleModelOption = z.infer<typeof roleModelOptionSchema>;
+export type RoleModeOption = z.infer<typeof roleModeOptionSchema>;
+export type RolesOptions = z.infer<typeof rolesOptionsRpc.output>;
 
 /** One paseo-bm agent as a chat card needs it. */
 export const chatPeerSchema = z.object({

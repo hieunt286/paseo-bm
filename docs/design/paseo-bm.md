@@ -289,6 +289,8 @@ Loại `user-data` là **dữ liệu tích luỹ**, không phải tài sản phi
 | `daemon.agentProfiles[]` | Thêm/sửa **chỉ** các mục `id` bắt đầu bằng `bm-`; giữ nguyên mục khác và thứ tự | Như trên |
 | `daemon.mcp.injectIntoAgents` | `true` | **Bước tiêu chuẩn của luồng cài**, hỏi **gộp chung** với việc bật plugin. Cảnh báo nêu đủ hai hệ quả: plugin là mã không sandbox, và mọi agent trên máy được quyền tạo, nhắc, dừng agent khác. Không tương tác thì cần `--enable-plugins`. Ghi trạng thái trước theo §3.2 để hoàn tác đúng (ADR-006 quyết định 3 và 8) |
 
+*(Errata 2026-09-22, [delta 20260921-worker-fallback-and-role-settings](./paseo-bm-delta-20260921-worker-fallback-and-role-settings.md) §4.3, ADR-008: ngoài trình cài, **plugin** cũng ghi các mục `bm-*` ở trên — khi người dùng lưu trên màn "Roles & models" của Beads Manager — qua `config.patch` của SDK, không bao giờ sửa file trực tiếp. Chỉ `extends` của `agents.providers.bm-<vai trò>` và `model` / `thinkingOptionId` / `modeId` của `daemon.agentProfiles[bm-<vai trò>]` đã có; mục khác của mảng giữ nguyên từng byte. Mỗi lần ghi so `revision` trước, rồi đọc lại kiểm chính mục vừa ghi (`plugin/server/config-writer.ts`).)*
+
 ## 4. Hợp đồng dòng lệnh
 
 ### 4.1 Lệnh
@@ -384,6 +386,8 @@ Ba RPC, định nghĩa bằng Zod trong `shared/contracts.ts`, xử lý trong `i
 | `roles.describe` | `{}` | `{ roles: [{ role, provider, model, paseoTools, instructionsPath }] }` | Để panel hiển thị cấu hình đang có hiệu lực (REQ-032d). Nguồn dữ liệu là **cấu hình Paseo đang có hiệu lực**, đọc qua `paseo.config.get()` của SDK — không đọc `install.json`: `provider` = `extends` của `agents.providers.bm-<vai trò>`, `model` lấy từ `daemon.agentProfiles[bm-<vai trò>]`, `paseoTools` = `paseoTools.enabled === true` của provider dẫn xuất, `instructionsPath` = tên chỉ dẫn nhúng trong bundle (ví dụ `roles/manager.md`), không phải đường dẫn trên đĩa. Vai trò không có cả provider lẫn profile thì bị bỏ qua (errata 2026-09-15) |
 
 Các RPC của Dashboard (`traces.list`, `traces.get`, `traces.delete`, `traces.reassign`, `beads.stats`) được định nghĩa ở [Technical Design Dashboard](paseo-bm-dashboard.md) §5; ba RPC trên không đổi *(delta `design-delta-20260916-trace-store`)*.
+
+*(Errata 2026-09-22, [delta 20260921-worker-fallback-and-role-settings](./paseo-bm-delta-20260921-worker-fallback-and-role-settings.md) §4.3.2: thêm ba RPC `roles.settings`, `roles.options`, `roles.save-settings` cho màn "Roles & models" (REQ-064), với ba mã lỗi `E_ROLE_SETTINGS_INVALID`, `E_ROLE_SETTINGS_CONFLICT`, `E_ROLE_SETTINGS_WRITE_FAILED`. `roles.describe` giữ nguyên cho client cũ.)*
 
 Plugin **không** có RPC xoá agent: theo ADR-005, vòng đời do người dùng quyết định qua chính giao diện Paseo.
 
@@ -592,6 +596,7 @@ CI **không** chạy agent thật: không xác định, tốn tiền, và cần 
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | **Theo [delta 20260921-worker-fallback-and-role-settings](./paseo-bm-delta-20260921-worker-fallback-and-role-settings.md), phase 2a-15** (REQ-064, ADR-008 Accepted): errata §3.4 — plugin cũng ghi mục `bm-*` qua `config.patch` khi người dùng lưu trên màn "Roles & models"; errata §5 — ba RPC `roles.settings`, `roles.options`, `roles.save-settings` và ba mã lỗi `E_ROLE_SETTINGS_*` |
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | **Theo [delta 20260921-worker-fallback-and-role-settings](./paseo-bm-delta-20260921-worker-fallback-and-role-settings.md), phase 2a-14** (REQ-063): errata §2.6 — cách chạy theo khả năng provider, Runtime facts "none", `BM-TOOLS`; errata §7 — Reviewer trên Pi / OpenCode |
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | **Theo [delta 20260921-worker-fallback-and-role-settings](./paseo-bm-delta-20260921-worker-fallback-and-role-settings.md), phase 2a-13** (REQ-062): errata §3.2 — `roles[]` là lần ghi cuối của trình cài, cài lại gộp mục `bm-*`; hook áp thinking và feature của profile cho Worker và Reviewer (delta §4.1.1) |
 | 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | **Theo [delta 20260918g-agent-conventions](./paseo-bm-delta-20260918g-agent-conventions.md)** (REQ-061, `req-20260918T071130Z`): vai của agent do `plugin/server/agent-role.ts` quyết (nhãn `bm.role`, không có thì provider `bm-*`) ở mọi chỗ tìm agent; `agent.created` và một lượt quét mỗi lần nạp gắn nhãn cho agent `bm-*` thiếu nhãn; `plugin/shared/bm-format.ts` kiểm template khối `BM-*`, `plugin/server/format-check.ts` gửi `BM-FORMAT` cho người gửi khối sai; mode Reviewer dự phòng trong `## Runtime facts`. Chi tiết, dữ kiện đã kiểm và errata khi implement nằm ở delta |

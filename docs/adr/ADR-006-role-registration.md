@@ -6,7 +6,7 @@
 | Date | 2026-09-15 |
 | Owner | hieu.nt10 |
 | Liên quan | [PRD REQ-027, REQ-031, REQ-032](../product/paseo-bm-prd.md#6-functional-requirements) · [ADR-004](ADR-004-paseo-config-mutation.md) (mở rộng phạm vi) · [ADR-005](ADR-005-manager-as-agent.md) · [Technical Design](../design/paseo-bm.md) |
-| Sửa đổi bởi | [ADR-008](ADR-008-role-settings-written-by-plugin.md), quyết định 1 và 5 (Proposed 2026-09-21; có hiệu lực khi ADR-008 Accepted) |
+| Sửa đổi bởi | [ADR-008](ADR-008-role-settings-written-by-plugin.md), quyết định 1 và 5 (Accepted 2026-09-22) |
 
 ## Context
 

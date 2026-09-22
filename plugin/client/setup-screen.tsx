@@ -2,6 +2,9 @@
  * Setup view of the Beads Manager surface (delta 20260916-setup-screen):
  * additional instructions per role with a full preview, the agent skills with
  * a Test button, and the beads tools `br` / `bv` with a confirmed Install.
+ * Above the instructions, "Roles & models" (delta 20260921 §4.3.1) shows each
+ * role's provider, model, thinking and mode, with an Edit form that saves
+ * through `roles.save-settings`.
  *
  * It is the surface's MAIN screen (owner decision Q1, delta 20260918e §4.2):
  * no back button, and a "Workspaces" button to the workspace list. The surface
@@ -12,28 +15,47 @@
  */
 import { type PluginSurfaceProps, useRpc } from "@getpaseo/plugin/client";
 import { copyText } from "@getpaseo/plugin/client/react-native";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState, type ReactNode } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import {
   rolesInstructionsRpc,
+  rolesOptionsRpc,
   rolesSaveExtraRpc,
+  rolesSaveSettingsRpc,
+  rolesSettingsRpc,
   setupInstallToolRpc,
   setupStatusRpc,
+  type BmRole,
+  type RoleSetting,
+  type RolesSettings,
   type SetupStatus,
 } from "../shared/contracts";
-import { dashboardStyles, toneColor } from "./dashboard-model";
+import { dashboardStyles, toneColor, type Badge } from "./dashboard-model";
 import { errorMessageOf } from "./launch-manager";
 import { MarkdownView } from "./markdown-view";
 import {
+  ROLES_APPLY_NOTICE,
   SETUP_ROLES,
+  applySavedRole,
   extraCounter,
   installWarning,
+  isSettingsConflict,
+  providerLabel,
+  roleDraftOf,
+  roleFormView,
+  roleRows,
+  rowOptionProviders,
+  saveErrorText,
+  saveSettingsInput,
+  savedNotes,
   setupHeadline,
   paseoToolsWarnings,
   skillChips,
   skillDirsText,
   toolBadge,
+  type RoleChoice,
+  type RoleDraft,
   type SetupRole,
 } from "./setup-model";
 import { Chip, RoleMark, type Styles, type Theme } from "./ui";
@@ -172,6 +194,243 @@ function RoleCard({ role, label, mark, styles, theme, compact }: {
   );
 }
 
+const ROLES_SETTINGS_KEY = ["paseo-bm", "setup", "roles-settings"] as const;
+const roleOptionsKey = (provider: string) => ["paseo-bm", "setup", "role-options", provider] as const;
+
+/** One field of the Edit form: a title and a row of chips, the selected one marked. */
+function ChoiceField({ title, choices, selected, onSelect, styles, theme }: {
+  title: string;
+  choices: RoleChoice[];
+  selected: string | null;
+  onSelect: (id: string | null) => void;
+  styles: Styles;
+  theme: Theme;
+}) {
+  return (
+    <View style={{ gap: 4 }}>
+      <Text style={styles.body}>{title}</Text>
+      <View style={styles.chipRow}>
+        {choices.map((choice) => {
+          const on = choice.id === selected;
+          return (
+            <Chip
+              key={choice.id === null ? "(not set)" : `id:${choice.id}`}
+              badge={{ text: choice.label, tone: on ? "info" : "muted" }}
+              selected={on}
+              onPress={() => onSelect(choice.id)}
+              styles={styles}
+              theme={theme}
+            />
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
+/**
+ * The Edit form of one role (design §4.3.1). `revision` is the one the form
+ * was opened with: a save against a configuration changed since then is
+ * refused with `E_ROLE_SETTINGS_CONFLICT`, and only reopening takes the new one.
+ */
+function RoleEditForm({ role, label, setting, available, revision, styles, theme, onClose, onSaved }: {
+  role: BmRole;
+  label: string;
+  setting: RoleSetting;
+  available: readonly string[];
+  revision: string;
+  styles: Styles;
+  theme: Theme;
+  onClose: () => void;
+  onSaved: (notes: Badge[]) => void;
+}) {
+  const getOptions = useRpc(rolesOptionsRpc);
+  const saveSettings = useRpc(rolesSaveSettingsRpc);
+  const queryClient = useQueryClient();
+  const [draft, setDraft] = useState<RoleDraft>(() => roleDraftOf(setting));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const options = useQuery({
+    queryKey: roleOptionsKey(draft.baseProvider),
+    queryFn: () => getOptions({ provider: draft.baseProvider }),
+    enabled: draft.baseProvider !== "",
+  });
+  const view = roleFormView({ role, setting, available, draft, options: options.data });
+  const input = saveSettingsInput(revision, role, view.draft);
+  const canSave = input !== null && view.blocker === null && view.changed && !saving;
+
+  const save = async () => {
+    if (input === null) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const result = await saveSettings(input);
+      queryClient.setQueryData<RolesSettings>(ROLES_SETTINGS_KEY, (old) => (old === undefined ? old : applySavedRole(old, result)));
+      void queryClient.invalidateQueries({ queryKey: ROLES_SETTINGS_KEY });
+      setSaving(false);
+      onSaved(savedNotes(result));
+    } catch (failure) {
+      setError(saveErrorText(failure));
+      setSaving(false);
+      // Show the configuration as it is now; this form keeps its revision, so only reopening saves over it.
+      if (isSettingsConflict(failure)) void queryClient.invalidateQueries({ queryKey: ROLES_SETTINGS_KEY });
+    }
+  };
+
+  return (
+    <View style={[styles.card, { backgroundColor: theme.colors.surface0, gap: 8 }]}>
+      <Text style={styles.sectionTitle}>{`Edit ${label}`}</Text>
+      {view.providers.length === 0 ? (
+        <Text style={styles.body}>Paseo reports no available provider right now.</Text>
+      ) : (
+        <ChoiceField
+          title="Provider"
+          choices={view.providers.map((provider) => ({ id: provider, label: providerLabel(provider) }))}
+          selected={draft.baseProvider === "" ? null : draft.baseProvider}
+          onSelect={(id) => setDraft((current) => ({ ...current, baseProvider: id ?? "" }))}
+          styles={styles}
+          theme={theme}
+        />
+      )}
+      {options.isLoading ? <ActivityIndicator color={styles.spinner.color} /> : null}
+      {options.isError ? (
+        <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{errorMessageOf(options.error)}</Text>
+      ) : null}
+      {view.models.length === 0 ? null : (
+        <ChoiceField
+          title="Model"
+          choices={view.models.map((model) => ({ id: model.id, label: model.label }))}
+          selected={view.draft.model}
+          onSelect={(id) => setDraft((current) => ({ ...current, model: id }))}
+          styles={styles}
+          theme={theme}
+        />
+      )}
+      {view.price === null ? null : <Text style={styles.body}>{view.price}</Text>}
+      {view.thinking.length === 0 ? null : (
+        <ChoiceField
+          title="Thinking"
+          choices={view.thinking}
+          selected={view.draft.thinkingOptionId}
+          onSelect={(id) => setDraft((current) => ({ ...current, thinkingOptionId: id }))}
+          styles={styles}
+          theme={theme}
+        />
+      )}
+      {view.modes.length === 0 ? null : (
+        <ChoiceField
+          title="Mode"
+          choices={view.modes}
+          selected={view.draft.modeId}
+          onSelect={(id) => setDraft((current) => ({ ...current, modeId: id }))}
+          styles={styles}
+          theme={theme}
+        />
+      )}
+      {view.modeNote === null ? null : <Text style={[styles.body, { color: toneColor(theme, "warning") }]}>{view.modeNote}</Text>}
+      {view.blocker === null || options.isError ? null : <Text style={styles.body}>{view.blocker}</Text>}
+      <View style={styles.chipRow}>
+        <Pressable
+          accessibilityRole="button"
+          disabled={!canSave}
+          onPress={() => void save()}
+          style={[styles.button, canSave ? null : { opacity: 0.5 }]}
+        >
+          <Text style={styles.buttonText}>{saving ? "Saving…" : "Save"}</Text>
+        </Pressable>
+        <Pressable accessibilityRole="button" disabled={saving} onPress={onClose} style={styles.secondaryButton}>
+          <Text style={styles.secondaryButtonText}>Cancel</Text>
+        </Pressable>
+      </View>
+      {error === null ? null : <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{error}</Text>}
+    </View>
+  );
+}
+
+/** "Roles & models": one row per role in the order `roles.settings` returns, each with an Edit form. */
+function RolesSection({ styles, theme }: { styles: Styles; theme: Theme }) {
+  const getSettings = useRpc(rolesSettingsRpc);
+  const getOptions = useRpc(rolesOptionsRpc);
+  const settings = useQuery({ queryKey: ROLES_SETTINGS_KEY, queryFn: () => getSettings({}) });
+  const data = settings.data;
+  const providers = data === undefined ? [] : rowOptionProviders(data);
+  const optionQueries = useQueries({
+    queries: providers.map((provider) => ({ queryKey: roleOptionsKey(provider), queryFn: () => getOptions({ provider }) })),
+  });
+  const rows = data === undefined ? [] : roleRows(data, (provider) => optionQueries[providers.indexOf(provider)]?.data);
+  const [editing, setEditing] = useState<{ role: BmRole; revision: string } | null>(null);
+  const [notes, setNotes] = useState<{ role: BmRole; lines: Badge[] } | null>(null);
+
+  return (
+    <>
+      <Text style={styles.sectionTitle}>Roles & models</Text>
+      {settings.isPending ? <ActivityIndicator color={styles.spinner.color} /> : null}
+      {settings.isError ? (
+        <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{errorMessageOf(settings.error)}</Text>
+      ) : null}
+      {data === undefined ? null : (
+        <View style={[styles.card, { gap: 10 }]}>
+          {rows.map((row) => {
+            const open = editing?.role === row.role;
+            return (
+              <View key={row.role} style={{ gap: 6 }}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <RoleMark kind={row.mark} theme={theme} />
+                  <Text style={styles.sectionTitle}>{row.label}</Text>
+                  <Text style={[styles.body, { flex: 1, minWidth: 160 }]} selectable>
+                    {row.text}
+                  </Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={open ? `Close the ${row.label} form` : `Edit the ${row.label} provider, model, thinking and mode`}
+                    accessibilityState={{ expanded: open }}
+                    onPress={() => {
+                      setNotes(null);
+                      setEditing(open ? null : { role: row.role, revision: data.revision });
+                    }}
+                    style={styles.secondaryButton}
+                  >
+                    <Text style={styles.secondaryButtonText}>{open ? "Close" : "Edit"}</Text>
+                  </Pressable>
+                </View>
+                {notes?.role === row.role
+                  ? notes.lines.map((line, index) => (
+                      <Text key={`${index}:${line.text}`} style={[styles.body, { color: toneColor(theme, line.tone) }]}>
+                        {line.text}
+                      </Text>
+                    ))
+                  : null}
+                {open ? (
+                  <RoleEditForm
+                    role={row.role}
+                    label={row.label}
+                    setting={row.setting}
+                    available={data.providers}
+                    revision={editing.revision}
+                    styles={styles}
+                    theme={theme}
+                    onClose={() => setEditing(null)}
+                    onSaved={(lines) => {
+                      setEditing(null);
+                      setNotes({ role: row.role, lines });
+                    }}
+                  />
+                ) : null}
+              </View>
+            );
+          })}
+        </View>
+      )}
+      {data?.warnings.map((warning) => (
+        <Text key={warning} style={[styles.body, { color: toneColor(theme, "warning") }]}>
+          {warning}
+        </Text>
+      ))}
+      <Text style={styles.body}>{ROLES_APPLY_NOTICE}</Text>
+    </>
+  );
+}
+
 function ToolCard({ tool, styles, theme, onInstalled }: {
   tool: SetupStatus["tools"][number];
   styles: Styles;
@@ -276,7 +535,7 @@ export function SetupScreen({ theme, layout, onOpenWorkspaces, status: statusStr
           <Text style={styles.secondaryButtonText}>Workspaces</Text>
         </Pressable>
       </View>
-      <Text style={styles.body}>Setup for this machine: beads tools, agent skills and extra instructions for each role.</Text>
+      <Text style={styles.body}>Setup for this machine: beads tools, agent skills, and each role&apos;s model and extra instructions.</Text>
       {statusStrip}
       {status.isPending ? <ActivityIndicator color={styles.spinner.color} /> : null}
       {status.isError ? (
@@ -327,7 +586,10 @@ export function SetupScreen({ theme, layout, onOpenWorkspaces, status: statusStr
         </View>
       )}
 
-      {/* 3. Additional instructions per role */}
+      {/* 3. Roles & models (delta 20260921 §4.3.1) */}
+      <RolesSection styles={styles} theme={theme} />
+
+      {/* 4. Additional instructions per role */}
       <Text style={styles.sectionTitle}>Additional instructions</Text>
       <Text style={styles.body}>
         Added after each role&apos;s built-in instructions, for agents created from now on. Running agents keep what they started with.

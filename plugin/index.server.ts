@@ -12,6 +12,7 @@ import { registerFormatCheck } from "./server/format-check";
 import { registerNoticeQueue } from "./server/notice-queue";
 import { currentInstructions } from "./server/role-extras";
 import { registerSetupRpcs } from "./server/setup-rpc";
+import { registerRoleSettingsRpcs } from "./server/role-settings-rpc";
 import { registerChatRpcs } from "./server/chat-rpc";
 import { agentsListRpc, managerEnsureRpc, rolesDescribeRpc } from "./shared/contracts";
 import { dashboardSettings } from "./shared/settings";
@@ -96,6 +97,8 @@ export default function contribute(server: PluginServerContext): () => void {
     },
   });
   registerSetupRpcs(server);
+  // delta 20260921 §4.3.2: the read-only data of Roles & models (`roles.settings`, `roles.options`).
+  registerRoleSettingsRpcs(server);
   registerChatRpcs(server);
   const removeRoleHook = registerRoleHook(server);
   const removeStopPropagation = registerStopPropagation(server);

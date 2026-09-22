@@ -2,7 +2,7 @@
 
 | Trường | Giá trị |
 |---|---|
-| Status | **Proposed**. Owner chọn hướng R1 ngày 2026-09-21 (Q3 a của `req-20260921T111242Z`). Chuyển Accepted khi owner duyệt [PRD delta 20260921](../product/paseo-bm-prd-delta-20260921-worker-fallback-and-role-settings.md) §9 |
+| Status | **Accepted** (2026-09-22). Owner chọn hướng R1 ngày 2026-09-21 (Q3 a của `req-20260921T111242Z`) và duyệt [PRD delta 20260921](../product/paseo-bm-prd-delta-20260921-worker-fallback-and-role-settings.md) §9 ngày 2026-09-22 (Q10 a) — điều kiện chuyển Accepted mà ADR này đặt ra. Có hiệu lực từ phase 2a-15, khi plugin bắt đầu ghi cấu hình vai trò (`plugin/server/config-writer.ts`) |
 | Date | 2026-09-21 |
 | Owner | hieu.nt10 |
 | Sửa đổi | [ADR-004](ADR-004-paseo-config-mutation.md) quyết định 1; [ADR-006](ADR-006-role-registration.md) quyết định 1 và 5 |
@@ -36,10 +36,10 @@ Dữ kiện (đề xuất §1, đã kiểm trên Paseo 0.8):
    1. Đọc cấu hình. Tính `revision` (sha256 của mọi alias `bm-*` và toàn bộ mảng profile). Khác `revision` lúc người dùng mở màn hình → **không ghi**.
    2. Dựng mảng từ **đúng bản vừa đọc**, chỉ thay mục `bm-*` tại chỗ.
    3. Ghi bằng **một** lần `patch`.
-   4. Đọc lại. Profile không phải `bm-*` nào khác bản ở bước 1 thì **báo** tên nó; không tự ghi lại, vì ghi lại cũng là thay cả mảng.
+   4. Đọc lại, và kiểm chính mục `bm-*` vừa ghi đã có đúng giá trị; không khớp thì báo lỗi ghi. Không tự ghi lại, vì ghi lại cũng là thay cả mảng. *(Sửa 2026-09-22, owner Q15 a: bản trước hứa "báo profile khác bị ghi đè" ở bước này; việc đó không làm được, vì lần ghi trả profile bị đổi về đúng bản đã đọc.)*
    5. Mọi lần ghi của plugin đi qua một mutex trong tiến trình.
 
-   Rủi ro còn lại, owner chấp nhận ngày 2026-09-21 (Q3 a): một thay đổi trong app rơi đúng vào khoảng giữa bước 1 và bước 3 vẫn bị đè, và chỉ được báo ở bước 4.
+   Rủi ro còn lại, owner chấp nhận ngày 2026-09-21 (Q3 a) và xác nhận lại ngày 2026-09-22 (Q15 a): một thay đổi trong app rơi đúng vào khoảng giữa bước 1 và bước 3 vẫn bị đè, và **không báo được**. Plugin chỉ thu hẹp cửa sổ đó (kiểm `revision`, đọc ngay trước khi ghi).
 4. **Alias dự phòng không có profile.** Model, thinking và mode của mỗi mục dự phòng nằm trong `<install home>/role-fallback.json`. Đó là dữ liệu người dùng, cùng loại với `role-extras.json`. Chuỗi dự phòng là khái niệm riêng của paseo-bm, Paseo không có chỗ cho nó.
 5. **Nguồn sự thật của cấu hình vai trò là config Paseo.** `install.json` `roles[]` giữ hình dạng cũ, nhưng chỉ còn là bản ghi "trình cài đã ghi gì lần cuối". Trình cài **gộp** thay vì thay nguyên mục `bm-*` (REQ-062 c), nên thay đổi làm ở app, trên màn Roles & models hay trong Settings của Paseo, còn nguyên qua mọi lần cài lại.
 6. **Không đổi:**
@@ -57,7 +57,7 @@ Dữ kiện (đề xuất §1, đã kiểm trên Paseo 0.8):
 - Provider registry cập nhật ngay, nên Worker tạo sau khi lưu dùng cấu hình mới.
 
 **Tiêu cực / phải chấp nhận**
-- **Ghi đè song song vẫn có thể xảy ra** trong `agentProfiles`: bước 1 và bước 4 chỉ thu hẹp cửa sổ và báo, không chặn được. Bảo đảm thật cần Paseo có RPC sửa **một** profile theo `id` (đề nghị U3, đề xuất §5.2).
+- **Ghi đè song song vẫn có thể xảy ra** trong `agentProfiles`: bước 1 chỉ thu hẹp cửa sổ, không chặn và không báo được. Bảo đảm thật cần Paseo có RPC sửa **một** profile theo `id` (đề nghị U3, đề xuất §5.2).
 - Plugin phụ thuộc hợp đồng `config.get` / `config.patch` của SDK 0.8. Paseo đổi cách gộp thì phần ghi này có thể hỏng. Giảm thiểu: test với daemon giả, kiểm sau khi ghi.
 - `config.json` có thêm tối đa chín alias `bm-<vai trò>-fallback-*` (ba mỗi vai trò) không có profile. Chúng hiện trong bộ chọn provider của Paseo.
 - Hai bên ghi (trình cài và plugin) có thể chạy cùng lúc. Trình cài đã có kiểm ghi song song trên file (ADR-004 QĐ8), còn plugin có `revision`. Không bên nào khoá được bên kia.

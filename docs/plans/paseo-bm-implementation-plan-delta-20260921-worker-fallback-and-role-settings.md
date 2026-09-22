@@ -11,7 +11,7 @@
 | Request | `req-20260921T111242Z` |
 | Source design | [design-delta-20260921-worker-fallback-and-role-settings](../design/paseo-bm-delta-20260921-worker-fallback-and-role-settings.md). Đây là nguồn duy nhất cho hàm, hợp đồng, chữ thông báo, luật kiểm và kiểm thử |
 | Source PRD | [prd-delta-20260921-worker-fallback-and-role-settings](../product/paseo-bm-prd-delta-20260921-worker-fallback-and-role-settings.md) — REQ-062 → REQ-067; quyết định Q1–Q8 |
-| ADR | [ADR-008](../adr/ADR-008-role-settings-written-by-plugin.md) (Proposed), thực thi ở phase 2a-15, 2a-16 và 2a-17 |
+| ADR | [ADR-008](../adr/ADR-008-role-settings-written-by-plugin.md) (Accepted 2026-09-22), thực thi ở phase 2a-15, 2a-16 và 2a-17 |
 | Routing decision | [PRD delta §0](../product/paseo-bm-prd-delta-20260921-worker-fallback-and-role-settings.md#0-routing-decision) — brownfield, **Large** |
 | Phase | **Phase 2a-13 → 2a-18**, nhãn bead `phase:2a-13` … `phase:2a-18`. Beads mang `feature:paseo-bm`, `feature:worker-fallback` (nhãn các bead của đề xuất đã dùng) và `wp:wp-<số>` |
 
@@ -181,7 +181,7 @@ Không còn câu hỏi mở.
 
 **Điều kiện ra:**
 - các ca 2a-14 phần `capabilityOf`, `modesFor`, `runPostureOf`, Runtime facts và `manager.ensure` của thiết kế §8 xanh;
-- ngưỡng dòng của file vai trò không nâng;
+- ngưỡng dòng của file vai trò chỉ nâng vừa đủ theo đo thật, lý do ghi trong test (Q14 a);
 - `npm run verify` mã 0.
 
 #### WP-291 — Người dùng biết khi Manager hay Worker thiếu công cụ Paseo
@@ -254,7 +254,7 @@ Không còn câu hỏi mở.
 
 **Kết quả:**
 - `roles.settings`, `roles.options`, `roles.save-settings` chạy đúng thiết kế §4.3.2–§4.3.4.
-- Mọi lần ghi đi qua `config-writer.ts`: kiểm `revision`, **một** `patch`, đọc lại, báo profile khác bị đổi, mutex.
+- Mọi lần ghi đi qua `config-writer.ts`: kiểm `revision`, **một** `patch`, đọc lại và kiểm chính mục `bm-*` vừa ghi (Q15 a), mutex.
 - Ba mã lỗi mới vào sổ mã.
 
 **Nguồn:** REQ-064 (b), (c), (e), (f), (g); REQ-063 (h) phần server; thiết kế §4.3.2–§4.3.4; ADR-008 QĐ1–QĐ3. **Phụ thuộc:** WP-294, WP-290.
@@ -450,7 +450,7 @@ Policy `off` chỉ ghi sự cố.
 **Điều kiện ra:**
 - các ca Reviewer của thiết kế §8 (2a-17) xanh, gồm "không gọi `agents.create`" và "vẫn đếm tin thứ hai";
 - các ca đang có của `reviewCallsOf` và `BM-BUDGET` không sửa kỳ vọng;
-- ngưỡng dòng của file vai trò không nâng;
+- ngưỡng dòng của file vai trò chỉ nâng vừa đủ theo đo thật, lý do ghi trong test (Q14 a);
 - `npm run verify` mã 0.
 
 #### WP-306 — Manager dự phòng, với lời bàn giao cho Manager
@@ -528,7 +528,7 @@ Policy `off` chỉ ghi sự cố.
 | Rủi ro | WP | Giảm thiểu |
 |---|---|---|
 | Mẫu nhận dạng sai | 300, 308 | Mẫu là dữ liệu; N2 hẹp (bốn điều kiện); mặc định "Hỏi tôi"; 2a-18 chỉ mở sau một sự cố thật |
-| Ghi đè thay đổi song song trong `agentProfiles` | 295, 299 | `revision`, kiểm sau khi ghi, mutex (ADR-008 QĐ3); rủi ro còn lại owner chấp nhận |
+| Ghi đè thay đổi song song trong `agentProfiles` | 295, 299 | `revision`, đọc ngay trước khi ghi, mutex (ADR-008 QĐ3); ghi đè trong cửa sổ đó không báo được — owner chấp nhận (Q3, Q15 a) |
 | Tín hiệu `supportsMcpServers` không phản ánh Pi thiếu adapter | 291, 294 | Kiểm trên daemon thật ở nghiệm thu; sai thì dừng và hỏi |
 | Thẻ không hiện khi lượt của Manager cùng provider gốc hỏng | 301, 304 | Pill đọc RPC, không đọc timeline; kiểm trên daemon thật |
 | Runtime facts cũ làm lần tạo agent con hỏng | 297 | `BM-SETTINGS`; còn lại thì `blocked` như hôm nay |
@@ -563,3 +563,6 @@ Policy `off` chỉ ghi sự cố.
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Errata khi chuyển thành beads (thiết kế F12, F13): `notice-queue.ts` được tạo ở WP-291 (cho `BM-TOOLS`, vì Manager cha đang chạy lúc Worker vừa được tạo) thay vì WP-297; WP-297 và WP-301 dùng lại. Không đổi phạm vi, phase hay REQ nào |
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Phase 2a-13 xong (beads `bm-phase-2a-13-respect-profile-8u20.1` → `.4`): dòng 1, 2, 16 của PRD delta §4 đã áp vào PRD gốc; errata §3.2 vào thiết kế gốc; checklist nghiệm thu `docs/operations/paseo-bm-worker-fallback-checklist.md` (phần 2a-13) và ghi chú phát hành `docs/operations/paseo-bm-release-notes-0.2.0-alpha.2.md` |
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Phase 2a-14 xong (beads `bm-phase-2a-14-any-provider-u2g9.1` → `.11`): dòng 3–6 của PRD delta §4 đã áp vào PRD gốc; errata §2.6 và §7 vào thiết kế gốc; checklist nghiệm thu phần 2a-14 và ghi chú phát hành `docs/operations/paseo-bm-release-notes-0.3.0-alpha.0.md`. Khi implement: hook tra mode của Worker cả khi bên tạo đã chọn mode (để bật `auto_accept` trên OpenCode); `costOf` nhận thêm `paseo` làm tham số đầu |
+| 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Owner chốt Q14 a: trần dòng của file vai trò được nâng vừa đủ theo đo thật mỗi khi một bead thêm câu (tiền lệ Q14 a của delta 20260918g), lý do ghi trong `test/roles-content.test.ts`; điều kiện "không nâng trần" của WP-297, WP-301 → WP-303, WP-305, WP-306 thay bằng luật này. Q15 a: WP-295 đọc lại để kiểm chính mục `bm-*`, không còn báo profile khác |
+| 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | WP-297 (bead `bm-phase-2a-15-roles-and-models-kj1p.5`), theo Q14 a: trần `manager.md` nâng 176 → 177 (đo thật: thêm đúng 1 dòng cho `BM-SETTINGS`; đoạn "Talking to the user" không còn chỗ gói lại). `worker.md` giữ trần 397: đoạn "Per bead" trong "Proving a change" được gói lại (7 → 6 dòng) để chứa câu mới. Lý do ghi trong `test/roles-content.test.ts` |
+| 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Phase 2a-15 xong (beads `bm-phase-2a-15-roles-and-models-kj1p.1` → `.6`): dòng 7–9 của PRD delta §4 đã áp vào PRD gốc; ADR-008 Accepted, dòng "Sửa đổi bởi" của ADR-004 / ADR-006 bỏ "Proposed"; errata §3.4 và §5 vào thiết kế gốc; checklist nghiệm thu phần 2a-15 và ghi chú phát hành `docs/operations/paseo-bm-release-notes-0.3.0-alpha.1.md`. Khi implement: `roles.settings` trả thêm `providers: string[]` cho trường Provider của form (errata design delta §4.3.2); màn Roles & models do một sub-agent viết, Worker review và chạy kiểm |
