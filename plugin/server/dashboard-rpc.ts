@@ -25,6 +25,9 @@ import { getBeadDetail, listBeadRows, runBeadAction, type BeadActionPaseo } from
 import { beadWorkOf } from "./bead-work";
 import { readAnswerMarks, writeAnswerMark } from "./answer-marks";
 import { stopAllInWorkspace, type StopPaseo } from "./stop-propagation";
+import { readIncidents } from "./fallback-state";
+import { installHomeOf } from "./role-extras";
+import { TIMED_OUT, withTimeout } from "./role-mode";
 import {
   detail,
   paginate,
@@ -45,7 +48,7 @@ import {
   type TraceStoreLocation,
   type WorkspaceClassification,
 } from "./trace-store";
-import type { WorkspaceState } from "../shared/contracts";
+import type { FallbackIncident, WorkspaceState } from "../shared/contracts";
 import {
   TRACE_LIST_LIMIT,
   DashboardError,
@@ -102,6 +105,14 @@ export async function requireLocation(
   paseo: DashboardPaseo,
   deps: { homedir?: () => string } = {},
 ): Promise<TraceStoreLocation> {
+  return (await requireInstallHome(paseo, deps)).location;
+}
+
+/** `requireLocation`, with the install home it was found in. */
+async function requireInstallHome(
+  paseo: DashboardPaseo,
+  deps: { homedir?: () => string },
+): Promise<{ home: string; location: TraceStoreLocation }> {
   const resolution = await resolveInstallHome({
     paseo,
     fs: { readFileSync: (path, encoding) => readFileSync(path, encoding) },
@@ -113,7 +124,45 @@ export async function requireLocation(
       `the paseo-bm trace store is unavailable: ${resolution.reason}`,
     );
   }
-  return { tracesDir: resolution.tracesDir };
+  return { home: resolution.home, location: { tracesDir: resolution.tracesDir } };
+}
+
+/**
+ * Ids of the Reviewers that replaced one stopped on its provider plan: the
+ * `replacementId` of every Reviewer incident that has one (delta 20260921
+ * §4.5.1). Their first message is the old Reviewer's review call sent again,
+ * which `reviewCallsOf` does not count a second time.
+ */
+export function reviewerReplacementIds(incidents: readonly FallbackIncident[]): Set<string> {
+  const out = new Set<string>();
+  for (const incident of incidents) {
+    if (incident.role === "reviewer" && incident.replacementId !== null) out.add(incident.replacementId);
+  }
+  return out;
+}
+
+/**
+ * `reviewerReplacementIds` of `<home>/role-fallback-state.json`. Empty without
+ * a home, or when the file is missing or unusable, so the count stays what it
+ * was before fallback existed. Silent: fallback detection already logs an
+ * unusable file, and a Dashboard refresh or a turn end must not repeat it.
+ * Never throws.
+ */
+export function reviewerReplacementsIn(home: string | null): Set<string> {
+  return home === null ? new Set() : reviewerReplacementIds(readIncidents(home, () => {}).incidents);
+}
+
+/**
+ * `reviewerReplacementsIn` the install home of `paseo`, looked up within the
+ * lookup budget unless `deps.home` names it (tests). Never throws.
+ */
+export async function reviewerReplacementsFor(paseo: unknown, deps: { home?: string | null } = {}): Promise<Set<string>> {
+  try {
+    const found = deps.home !== undefined ? deps.home : await withTimeout(installHomeOf(paseo));
+    return reviewerReplacementsIn(found === TIMED_OUT ? null : found);
+  } catch {
+    return new Set();
+  }
 }
 
 export interface ListedWorkspace {
@@ -254,14 +303,20 @@ export async function readTraceContext(
   notices: string[];
   store: StoreSize;
 }> {
-  const location = await requireLocation(paseo, deps);
+  const { home, location } = await requireInstallHome(paseo, deps);
   const read = readRecords(location, input.workspaceId);
   const agents = await agentFactsOf(paseo, input.workspaceId);
   const listed = await listedWorkspaces(paseo);
   const classified = classifyWorkspaces(location, listed).find(
     (entry) => entry.workspaceId === input.workspaceId,
   );
-  const traces = reconstructTraces({ records: read.records, agents: [...agents.values()] });
+  // The same review count as the BM-BUDGET check: a replacement Reviewer's
+  // first message is not a new call (delta 20260921 §4.5.1).
+  const traces = reconstructTraces({
+    records: read.records,
+    agents: [...agents.values()],
+    replacementIds: reviewerReplacementsIn(home),
+  });
   return {
     location,
     traces,

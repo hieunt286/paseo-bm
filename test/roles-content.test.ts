@@ -179,10 +179,24 @@ describe("all three files", () => {
   // worker.md 402 -> 403 for bead 332y.11 (same decision): one line for the
   // plugin's BM-RESUME notice after a usage reset; re-wrapping it into the
   // handover paragraph saves no line.
+  //
+  // worker.md 403 -> 408 for delta 20260921 phase 2a-17 (bead fnnc.1, same
+  // decision): a four-line paragraph under "Reviewing" — a Reviewer that ends
+  // on a provider error is not a review, create no other one, wait for the
+  // plugin's BM-FALLBACK — plus its blank line. It is its own topic, so it is
+  // not folded into the paragraph before it.
+  //
+  // worker.md 408 -> 409 for bead fnnc.5 (same decision): the BM-SETTINGS
+  // line now also covers a replacement Manager's id and takes two lines.
+  //
+  // manager.md 179 -> 182 for bead fnnc.4 (same decision): three lines for a
+  // replacement Manager starting from BM-HANDOVER role manager. Re-wrapping
+  // the plugin-message lines would split the BM-TOOLS sentence that
+  // test/tools-check.test.ts pins on one line.
   it.each([
-    ["worker.md", worker, 403],
+    ["worker.md", worker, 409],
     ["reviewer.md", reviewer, 164],
-    ["manager.md", manager, 179],
+    ["manager.md", manager, 182],
   ])("%s leads with the hard limits and stays under %i lines", (_name, text, limit) => {
     const headings = text.split("\n").filter((line) => line.startsWith("## "));
     expect(headings[0]).toBe("## RULES");
@@ -1095,11 +1109,12 @@ describe("the plugin's BM-FORMAT notice (delta 20260918g §4.10, REQ-061 j)", ()
 
   // Delta 20260921 §4.3.5 (REQ-064 d): BM-SETTINGS carries a new child mode to
   // the agents that create that child, so both creators take its line.
+  // Since phase 2a-17 (§4.5.2) a Worker's BM-SETTINGS may also carry the id
+  // of a replacement Manager, so its rule names any matching fact.
   it.each([
-    ["worker.md", worker, "## Reporting", "## Stop"],
-    ["manager.md", manager, "## Talking to the user", undefined],
-  ])("%s takes a BM-SETTINGS line in place of its Runtime-facts line", (_name, text, from, to) => {
-    const rule = "`BM-SETTINGS` (plugin): its line replaces the matching `## Runtime facts` line.";
+    ["worker.md", worker, "## Reporting", "## Stop", "`BM-SETTINGS` (plugin): its line replaces the matching fact, including the Manager's agent id you report to."],
+    ["manager.md", manager, "## Talking to the user", undefined, "`BM-SETTINGS` (plugin): its line replaces the matching `## Runtime facts` line."],
+  ])("%s takes a BM-SETTINGS line in place of the fact it names", (_name, text, from, to, rule) => {
     expect(between(text, from, to).replace(/\s+/g, " ")).toContain(rule);
   });
 
@@ -1111,6 +1126,14 @@ describe("the plugin's BM-FORMAT notice (delta 20260918g §4.10, REQ-061 j)", ()
     expect(between(worker, "## Reporting", "## Stop").replace(/\s+/g, " ")).toContain(rule);
   });
 
+  // Delta 20260921 §4.5.1 (REQ-066 b): a Reviewer stopped by its provider plan
+  // is replaced through its Worker, on the plugin's instructions.
+  it("worker.md waits for BM-FALLBACK when a Reviewer ends on a provider error", () => {
+    expect(between(worker, "## Reviewing", "## Reporting").replace(/\s+/g, " ")).toContain(
+      "A Reviewer of yours that ends on a provider error (usage limit, credit or billing, login, provider unavailable) is not a review: create no other Reviewer, end your turn without a report, and wait — the plugin asks the user with a card, then sends you `BM-FALLBACK`.",
+    );
+  });
+
   // Delta 20260921 §4.4.9 (REQ-065 e): after the reset the plugin resumes the Worker.
   it("worker.md carries on after a BM-RESUME", () => {
     expect(between(worker, "## Reporting", "## Stop").replace(/\s+/g, " ")).toContain(
@@ -1120,6 +1143,14 @@ describe("the plugin's BM-FORMAT notice (delta 20260918g §4.10, REQ-061 j)", ()
 
   // Delta 20260921 §4.4.6 (REQ-065 c): the Manager hears about a stopped
   // Worker from the plugin and never creates the replacement itself.
+  // Delta 20260921 §4.5.2 (REQ-066 c): a replacement Manager takes over the
+  // Workers listed in its handover and recreates none.
+  it("manager.md takes over from a BM-HANDOVER role manager", () => {
+    expect(between(manager, "## Talking to the user").replace(/\s+/g, " ")).toContain(
+      "A first message that starts with `BM-HANDOVER` and `role: manager` makes you this workspace's Manager: take the listed Workers as yours, tell the user in one line, and recreate no Worker that exists.",
+    );
+  });
+
   it("manager.md tells the user about a BM-FALLBACK and creates no agent itself", () => {
     const rule =
       "`BM-FALLBACK` (plugin): tell the user in one line and create no agent yourself; on `status: switched`, follow the agent on its `replacement` line.";

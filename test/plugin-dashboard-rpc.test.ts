@@ -6,13 +6,14 @@ import {
   emptyBeadStats,
   handleBeadsStats,
   handleTracesDelete,
+  readTraceContext,
   requireLocation,
   workspaceDirectory,
   type DashboardPaseo,
 } from "../plugin/server/dashboard-rpc";
 import { appendRecord, clearTraceStoreCache, readRecords } from "../plugin/server/trace-store";
 import { clearBeadsCache } from "../plugin/server/beads-store";
-import { TRACE_STORE_SCHEMA_VERSION, type TraceRecord } from "../plugin/shared/contracts";
+import { TRACE_STORE_SCHEMA_VERSION, type FallbackIncident, type TraceRecord } from "../plugin/shared/contracts";
 
 /**
  * WP-208 / WP-210: the Dashboard RPC handlers, against a fake Paseo SDK and a
@@ -229,5 +230,59 @@ describe("traces.delete handler", () => {
     await expect(
       handleTracesDelete({ workspaceId: "../escape", scope: { allOfWorkspace: true } }, fakePaseo()),
     ).rejects.toThrow(/E_TRACE_STORE_UNWRITABLE/);
+  });
+});
+
+describe("review calls of a Reviewer that replaced a stopped one (delta 20260921 §4.5.1)", () => {
+  const incident: FallbackIncident = {
+    id: "fb-00000000000b",
+    role: "reviewer",
+    workspaceId: WS,
+    requestId: "req-A",
+    agentId: "agent-rev-1",
+    agentProvider: "bm-reviewer/gpt-5",
+    agentModel: "gpt-5",
+    parentId: "agent-worker",
+    managerId: "agent-manager",
+    class: "L1",
+    signal: "failed",
+    message: "You've hit your usage limit.",
+    perModelWindow: false,
+    resetsAt: null,
+    candidate: null,
+    status: "switched",
+    detectedAt: "2026-09-16T10:15:00.000Z",
+    decidedAt: "2026-09-16T10:16:00.000Z",
+    waitUntil: null,
+    replacementId: "agent-rev-2",
+    error: null,
+  };
+
+  it("counts the resend once, like the BM-BUDGET check, and as before without a usable incidents file", async () => {
+    const location = { tracesDir: join(home, "traces") };
+    const said = (at: string, text: string) => [{ agentId: null, at, text, truncated: false }];
+    await appendRecord(location, record({ agentId: "agent-manager", role: "manager", turnId: "m-A", at: "2026-09-16T10:00:00.000Z", sent: said("2026-09-16T10:00:00.000Z", "do A") }));
+    // agent-rev-1 got one review call and stopped on its plan; agent-rev-2 got the same message again.
+    for (const [agentId, at] of [["agent-rev-1", "2026-09-16T10:10:00.000Z"], ["agent-rev-2", "2026-09-16T10:20:00.000Z"]] as const) {
+      await appendRecord(location, record({ agentId, role: "reviewer", turnId: `r-${agentId}`, parentAgentId: "agent-worker", at, sent: said(at, "Review batch b1 of req-A.") }));
+    }
+    clearTraceStoreCache();
+    const labels = (role: string) => ({ "bm.role": role, "bm.requestId": "req-A", "paseo.parent-agent-id": role === "worker" ? "agent-manager" : "agent-worker" });
+    const paseo = fakePaseo();
+    paseo.agents.list = vi.fn(async () => ({
+      entries: [
+        { id: "agent-worker", workspaceId: WS, status: "idle", labels: labels("worker") },
+        { id: "agent-rev-1", workspaceId: WS, status: "idle", labels: labels("reviewer") },
+        { id: "agent-rev-2", workspaceId: WS, status: "idle", labels: labels("reviewer") },
+      ],
+    }));
+    const reviewCalls = async () =>
+      (await readTraceContext({ workspaceId: WS }, paseo)).traces.find((trace) => trace.requestId === "req-A")?.reviewCalls;
+
+    expect(await reviewCalls()).toBe(2);
+    writeFileSync(join(home, "role-fallback-state.json"), JSON.stringify({ version: 1, incidents: [incident] }));
+    expect(await reviewCalls()).toBe(1);
+    writeFileSync(join(home, "role-fallback-state.json"), "{ not json");
+    expect(await reviewCalls()).toBe(2);
   });
 });

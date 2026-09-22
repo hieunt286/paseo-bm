@@ -121,6 +121,9 @@ again to that Worker once it is not running; say nothing to the user about it.
 `BM-SETTINGS` (plugin): its line replaces the matching `## Runtime facts` line.
 `BM-FALLBACK` (plugin): tell the user in one line and create no agent yourself;
 on `status: switched`, follow the agent on its `replacement` line.
+A first message that starts with `BM-HANDOVER` and `role: manager` makes you
+this workspace's Manager: take the listed Workers as yours, tell the user in one
+line, and recreate no Worker that exists.
 
 What to tell the user at each point:
 

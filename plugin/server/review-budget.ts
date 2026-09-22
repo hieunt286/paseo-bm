@@ -36,7 +36,7 @@
  */
 import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
 import type { Tier } from "../shared/contracts";
-import { agentFactsOf, type DashboardPaseo } from "./dashboard-rpc";
+import { agentFactsOf, reviewerReplacementsFor, type DashboardPaseo } from "./dashboard-rpc";
 import { BUDGET_NOTICE_MARKER } from "./notices";
 import { roleOfProvider } from "./agent-role";
 import { readRecords, type TraceStoreLocation } from "./trace-store";
@@ -115,6 +115,11 @@ export interface BudgetDeps {
    */
   pending?: Map<string, BudgetOverrun>;
   log?: (message: string) => void;
+  /**
+   * The install home, whose `role-fallback-state.json` names the Reviewers
+   * that replaced a stopped one (delta 20260921 §4.5.1); looked up otherwise.
+   */
+  home?: string | null;
 }
 
 export type BudgetOutcome = "ignored" | "within" | "already-told" | "deferred" | "sent";
@@ -149,8 +154,13 @@ export async function checkReviewBudget(event: TurnEndedEvent, deps: BudgetDeps)
       if (over === undefined) return "within";
     } else {
       const records = readRecords(deps.location, workspaceId).records;
-      const facts = await agentFactsOf(deps.paseo, workspaceId);
-      const trace = reconstructTraces({ records, agents: [...facts.values()] }).find(
+      // A replacement Reviewer's first message is the stopped Reviewer's
+      // review call sent again, not a new one (delta 20260921 §4.5.1).
+      const [facts, replacementIds] = await Promise.all([
+        agentFactsOf(deps.paseo, workspaceId),
+        reviewerReplacementsFor(deps.paseo, { home: deps.home }),
+      ]);
+      const trace = reconstructTraces({ records, agents: [...facts.values()], replacementIds }).find(
         (candidate) => candidate.workerIds.includes(agent.id) || candidate.reviewerIds.includes(agent.id),
       );
       over = trace === undefined ? undefined : (overrunOf(trace) ?? undefined);

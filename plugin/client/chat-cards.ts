@@ -895,6 +895,11 @@ export function listedCostProvider(lookup: FallbackLookup): string | null {
 
 /** The buttons of an incident: none unless it is `pending`, and "I'll handle it" always then. */
 export function fallbackButtons(incident: FallbackIncident, now: Date, cost: ModelPrice | null): FallbackButton[] {
+  // A switched Reviewer is replaced by its Worker; if the new Reviewer never
+  // appeared (the notice queue was lost on a reload), the instructions can go again (§4.5.1).
+  if (incident.role === "reviewer" && incident.status === "switched" && incident.replacementId === null) {
+    return [{ action: "resend", label: "Resend to Worker" }];
+  }
   if (incident.status !== "pending") return [];
   const buttons: FallbackButton[] = [];
   if (incident.candidate !== null) {
@@ -926,6 +931,11 @@ export function fallbackStatusLine(incident: FallbackIncident, now: Date): { tex
     case "pending":
       return null;
     case "switched": {
+      // A timeline card cannot open an agent (REQ-059 i): it points at the usual entries (§4.5.2).
+      if (incident.role === "manager") {
+        const on = incident.candidate === null ? "its fallback" : candidateText(incident.candidate);
+        return { text: `A new Beads Manager is running on ${on}. Open Beads Manager from the sidebar or Command Center to continue with it.`, tone };
+      }
       const to = incident.candidate === null ? "a fallback agent" : candidateText(incident.candidate);
       const agent = incident.replacementId === null ? "" : ` (agent ${incident.replacementId.slice(0, 8)})`;
       return { text: `Switched to ${to}${agent}.`, tone };
@@ -1000,6 +1010,7 @@ const ACTION_WORDS: Readonly<Record<FallbackAction, string>> = {
   switch: "switch to the fallback",
   wait: "wait for the reset",
   dismiss: "record that you handle it",
+  resend: "resend the instructions to the Worker",
 };
 
 /** The error line of a failed button, with the registry code the server sent. */

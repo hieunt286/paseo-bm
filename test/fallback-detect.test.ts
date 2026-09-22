@@ -155,8 +155,8 @@ describe("N2: a completed turn that only said a few words", () => {
 });
 
 describe("which agents are looked at", () => {
-  it.each(["bm-reviewer/gpt-5.6-sol", "bm-manager", "claude", "bm-reviewer-fallback-1"])(
-    "role not in FALLBACK_ROLES (%s) -> null, without a daemon call",
+  it.each(["claude", "codex/gpt-5.6-sol", "bm-planner"])(
+    "not a paseo-bm role (%s) -> null, without a daemon call",
     async (provider) => {
       const { value, refetch } = deps();
       expect(await classifyTurn(asEvent(failed(LIMIT, { agent: { ...turn().agent, provider } })), value)).toBeNull();
@@ -169,8 +169,18 @@ describe("which agents are looked at", () => {
     expect(await classifyTurn(asEvent(failed(LIMIT, { agent })), deps().value)).toMatchObject({ class: "L1" });
   });
 
-  it("the bm.role label wins over the provider: a bm-worker labelled reviewer -> null", async () => {
-    expect(await classifyTurn(asEvent(failed(LIMIT)), deps({ labels: { "bm.role": "reviewer" } }).value)).toBeNull();
+  it("a Reviewer, on its main alias or a fallback one, is looked at since phase 2a-17 (§4.5.1)", async () => {
+    for (const provider of ["bm-reviewer/gpt-5.6-sol", "bm-reviewer-fallback-1"]) {
+      const agent = { ...turn().agent, provider };
+      expect(await classifyTurn(asEvent(failed(LIMIT, { agent })), deps({ labels: { "bm.role": "reviewer" } }).value)).toMatchObject({ class: "L1" });
+    }
+  });
+
+  it("a Manager, on its main alias or a fallback one, is looked at since phase 2a-17 (§4.5.2)", async () => {
+    for (const provider of ["bm-manager", "bm-manager-fallback-1/claude-sonnet-5"]) {
+      const agent = { ...turn().agent, provider };
+      expect(await classifyTurn(asEvent(failed(LIMIT, { agent })), deps({ labels: { "bm.role": "manager" } }).value)).toMatchObject({ class: "L1" });
+    }
   });
 
   it("an agent with a bm.replacedBy label -> null", async () => {

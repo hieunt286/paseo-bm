@@ -9,7 +9,7 @@
 | ADR | [ADR-008](../adr/ADR-008-role-settings-written-by-plugin.md) (mới, Accepted 2026-09-22); sửa đổi [ADR-004](../adr/ADR-004-paseo-config-mutation.md) QĐ1 và [ADR-006](../adr/ADR-006-role-registration.md) QĐ1, QĐ5. [ADR-007](../adr/ADR-007-dashboard-trace-store.md): chỉ thêm một trường tuỳ chọn |
 | Plan | [plan-delta-20260921-worker-fallback-and-role-settings](../plans/paseo-bm-implementation-plan-delta-20260921-worker-fallback-and-role-settings.md) |
 | Nguồn sự thật đã kiểm | [Đề xuất 20260921](./paseo-bm-proposal-20260921-worker-fallback-and-role-settings.md) §1 (S1–S13, P1–P11, M1–M17), cộng §2 dưới đây |
-| Status | **Active** — `design-ready` PASS 2026-09-22 sau review `b1` và re-review |
+| Status | **Applied — 2a-18 deferred** (2026-09-22): phase 2a-13 → 2a-17 đã áp; phase 2a-18 chưa mở vì điều kiện vào chưa đạt (0 sự cố thật, Q13 a). Trước đó: **Active** — `design-ready` PASS 2026-09-22 sau review `b1` và re-review |
 | Owner | hieu.nt10 |
 | Request | `req-20260921T111242Z` |
 
@@ -680,6 +680,16 @@ Người dùng đang chat với chính Manager bị hỏng. Plugin tạo Manager
   `manager.md` thêm một đoạn ngắn: tin khởi đầu bắt đầu bằng `BM-HANDOVER` và `role: manager` thì nhận các Worker trong danh sách là Worker của mình, báo người dùng một dòng, và không tạo lại Worker nào đang có.
 - **Chờ:** §4.4.9 gửi `BM-RESUME` cho chính Manager cũ. Người dùng cũng có thể tự gõ lại vào chat đó.
 
+#### 4.5.3 Errata khi implement phase 2a-17 (không đổi quyết định nào)
+
+- **`FALLBACK_ROLES`** thành `["worker", "reviewer"]` ở bead Reviewer rồi `["worker", "reviewer", "manager"]` ở bead Manager; khối chuỗi trên Roles & models tự hiện theo đó.
+- **"Resend to Worker"** là action `resend` của `fallback.act` (cộng thêm vào hợp đồng): chỉ cho sự cố Reviewer `switched` chưa có `replacementId`; gửi lại đúng tin chỉ dẫn, không đổi trạng thái, không báo lại chat Manager.
+- **Mode của Reviewer thay thế** nêu trong chỉ dẫn: luật Reviewer của hook với provider phân tầng, `runPostureOf` với provider không phân tầng, dòng "do not pass" với provider không có mode; đọc mode không được thì mode của mục, không có thì `auto` cho Claude/Codex.
+- **`BM-SETTINGS` báo id Manager mới** giữ nguyên văn dòng ``Manager agent id: `<newId>` — send every BM-REPORT to this agent from now on.``, nhưng câu mở đầu là "The Beads Manager you report to was replaced. This replaces the Manager agent id you were given:" (câu mở đầu của §4.3.5 nói về cài đặt vai trò, không đúng cho trường hợp này).
+- **Lời bàn giao Manager**: `openIncidents` gồm sự cố `pending` **và** `waiting` của workspace (Worker đang chờ reset không phải Worker bị kẹt); tin của người dùng bỏ thông báo của plugin và các `BM-HANDOVER`, được che bí mật trước khi cắt 1.000 ký tự.
+- **Ngân sách review**: tập `replacementId` lấy từ mọi sự cố Reviewer có `replacementId`, không lọc trạng thái; file hỏng hay không có → đếm như hôm nay.
+- **Mở Manager có sẵn** tốn thêm một lần đọc cấu hình và `role-fallback-state.json` (trong ngân sách tra cứu), để bỏ Manager đã bị thay theo sự cố.
+
 ### 4.6 Phase 2a-18 — Chế độ Tự động (REQ-067)
 
 - `role-fallback.json` nhận `policy: "auto"` cho cả ba vai trò. Màn Roles & models hiện lựa chọn **Auto switch** cho từng vai trò, kèm cảnh báo chi phí. Với Manager, cảnh báo nói thêm: "the chat you use may be replaced".
@@ -842,3 +852,4 @@ Nghiệm thu trên daemon thật, do owner làm hoặc owner cho phép làm, ở
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Phase 2a-15 xong (beads `bm-phase-2a-15-roles-and-models-kj1p.1` → `.6`): errata §3.4 và §5 vào thiết kế gốc; ADR-008 Accepted; checklist nghiệm thu phần 2a-15 và ghi chú phát hành `docs/operations/paseo-bm-release-notes-0.3.0-alpha.1.md`. Khi implement: `roles.settings` trả thêm `providers` (errata §4.3.2); `BM-SETTINGS` đếm `notified` là số đích đã gửi hay xếp hàng |
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Owner chốt Q16 a: errata §6 và §4.4.4 — cắt chuỗi 2.000 ký tự không chặn được mẫu backtracking theo hàm mũ; mẫu của người dùng có lượng từ lồng nhau bị bỏ và log. Errata khi implement §4.4.4 điều 2 của N2: chỉ xét khối trong tin của chính agent |
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Phase 2a-16 xong (beads `bm-phase-2a-16-fallback-worker-332y.1` → `.12`): errata §2.6, §3.1, §8 vào thiết kế gốc; GUIDE thêm hai file và alias dự phòng; checklist nghiệm thu phần 2a-16 và ghi chú phát hành `docs/operations/paseo-bm-release-notes-0.3.0-alpha.2.md`. Errata khi implement gom ở §4.4.11 |
+| 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Phase 2a-17 xong (beads `bm-phase-2a-17-fallback-reviewer-manager-fnnc.1` → `.6`): errata §8 vào thiết kế gốc; checklist nghiệm thu phần 2a-17 và ghi chú phát hành `docs/operations/paseo-bm-release-notes-0.3.0-alpha.3.md`; errata khi implement ở §4.5.3. Điều kiện vào phase 2a-18 kiểm lúc đóng phase 2a-17 (Q13 a, chỉ đọc `~/.paseo-bm/role-fallback-state.json` trên máy owner): file không tồn tại — **0 sự cố thật**, chưa đạt → Status Active → **Applied — 2a-18 deferred**; §4.6 chưa implement |

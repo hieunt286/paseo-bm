@@ -335,6 +335,11 @@ new Reviewer. **Do not fix non-blocking findings**; list them as
 `Suggestion (not done): …`. If blocking findings remain after the re-review,
 stop, send `blocked` with them, and ask the user.
 
+A Reviewer of yours that ends on a provider error (usage limit, credit or
+billing, login, provider unavailable) is not a review: create no other Reviewer,
+end your turn without a report, and wait — the plugin asks the user with a card,
+then sends you `BM-FALLBACK`.
+
 ## Reporting
 
 Manager cannot read your chat; reports are its only view. Send one with Paseo's
@@ -373,7 +378,8 @@ blocking: `none. Suggestion (not done): …`. A message that starts with
 `BM-FORMAT` comes from the plugin, not the user: your last block broke the
 template. Send the whole corrected block again, to the same agent, in one
 message, changing nothing else; do not redo work, then carry on where you were.
-`BM-SETTINGS` (plugin): its line replaces the matching `## Runtime facts` line.
+`BM-SETTINGS` (plugin): its line replaces the matching fact, including the
+Manager's agent id you report to.
 A first message that starts with `BM-HANDOVER` (plugin) hands you a request
 whose Worker stopped: continue it. Read `git status` and `git diff` first; every
 change there is the request's, never revert it. Reopen a closed bead only if a

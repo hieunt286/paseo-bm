@@ -49,6 +49,23 @@ export function settingsNotice(line: string): string {
   ].join("\n");
 }
 
+/**
+ * The line a Worker gets when its Manager was replaced after a plugin fallback
+ * (delta 20260921 §4.5.2, step 5), word for word.
+ */
+export function managerIdLine(managerId: string): string {
+  return `Manager agent id: \`${managerId}\` — send every BM-REPORT to this agent from now on.`;
+}
+
+/** The `BM-SETTINGS` notice that carries `managerIdLine` (agent-facing, so English). */
+export function managerIdNotice(managerId: string): string {
+  return [
+    `${SETTINGS_NOTICE_MARKER} The Beads Manager you report to was replaced. This replaces the Manager agent id you were given:`,
+    managerIdLine(managerId),
+    "Do not reply to this message; carry on with what you were doing.",
+  ].join("\n");
+}
+
 /** The SDK slice this module uses; `PaseoApi` is structurally assignable. */
 export interface SettingsPaseo extends NoticePaseo {
   agents: NoticePaseo["agents"] & {

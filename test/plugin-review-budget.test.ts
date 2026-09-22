@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { looksLikeReport, parseReports, requestIdFromText } from "../plugin/server/bm-report";
@@ -16,7 +16,7 @@ import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store
 import { buildRecord } from "../plugin/server/collector";
 import { reconstructTraces, type ReconstructedTrace } from "../plugin/server/traces";
 import { guardrailMismatch, reviewerLine } from "../plugin/client/dashboard-model";
-import { TRACE_STORE_SCHEMA_VERSION, type TraceRecord, type TraceSummary } from "../plugin/shared/contracts";
+import { TRACE_STORE_SCHEMA_VERSION, type FallbackIncident, type TraceRecord, type TraceSummary } from "../plugin/shared/contracts";
 
 /**
  * delta 20260917c §4.7 (REQ-037 errata): the plugin counts review calls and
@@ -430,6 +430,88 @@ describe("checkReviewBudget", () => {
   it("survives a malformed event", async () => {
     const { paseo } = fakePaseo();
     await expect(checkReviewBudget(undefined as never, { location, paseo, told: new Set(), pending: new Map() })).resolves.toBe("ignored");
+  });
+});
+
+// ── A Reviewer that replaced a stopped one (delta 20260921 §4.5.1) ─────────
+
+/** `agent-rev-1` stopped on its plan; the user chose Switch and `agent-rev-2` replaced it. */
+const reviewerIncident = (overrides: Partial<FallbackIncident> = {}): FallbackIncident => ({
+  id: "fb-00000000000b",
+  role: "reviewer",
+  workspaceId: WS,
+  requestId: REQ,
+  agentId: "agent-rev-1",
+  agentProvider: "bm-reviewer/gpt-5",
+  agentModel: "gpt-5",
+  parentId: WORKER,
+  managerId: MANAGER,
+  class: "L1",
+  signal: "failed",
+  message: "You've hit your usage limit.",
+  perModelWindow: false,
+  resetsAt: null,
+  candidate: null,
+  status: "switched",
+  detectedAt: "2026-09-17T01:06:00.000Z",
+  decidedAt: "2026-09-17T01:06:30.000Z",
+  waitUntil: null,
+  replacementId: "agent-rev-2",
+  error: null,
+  ...overrides,
+});
+
+const writeIncidents = (dir: string, incidents: FallbackIncident[]): void =>
+  writeFileSync(join(dir, "role-fallback-state.json"), `${JSON.stringify({ version: 1, incidents }, null, 2)}\n`);
+
+describe("checkReviewBudget with a replacement Reviewer", () => {
+  /** The Small request's one review call, then the same message resent to the replacement. */
+  async function resent(): Promise<void> {
+    await seedRequest();
+    await reviewCall("agent-rev-1", 5);
+    await reviewCall("agent-rev-2", 7);
+  }
+  const check = (paseo: BudgetPaseo, home?: string | null) =>
+    checkReviewBudget(ended("agent-rev-2", "bm-reviewer"), { location, paseo, told: new Set(), pending: new Map(), ...(home === undefined ? {} : { home }) });
+
+  it("stays within budget: the resend is the same review call; the next message counts", async () => {
+    await resent();
+    writeIncidents(home, [reviewerIncident()]);
+    const { paseo, send, sent } = fakePaseo();
+    expect(await check(paseo, home)).toBe("within");
+    expect(send).not.toHaveBeenCalled();
+
+    // A second message to the replacement is a new call, and over a Small budget.
+    await reviewCall("agent-rev-2", 9);
+    expect(await check(paseo, home)).toBe("sent");
+    expect(sent[0]).toBe(budgetNotice({ requestId: REQ, tier: "Small", calls: 2, budget: 1, managerAgentId: MANAGER }));
+  });
+
+  it("counts the resend as today when the replacement is not recorded, or the file cannot be used", async () => {
+    await resent();
+    const { paseo } = fakePaseo();
+    // No home, no file: over budget, exactly as before fallback existed.
+    expect(await check(paseo, null)).toBe("sent");
+    expect(await check(paseo, home)).toBe("sent");
+    // A Worker incident, or a Reviewer incident with no replacement yet, names no replacement Reviewer.
+    writeIncidents(home, [reviewerIncident({ role: "worker" }), reviewerIncident({ id: "fb-00000000000c", replacementId: null })]);
+    expect(await check(paseo, home)).toBe("sent");
+    writeFileSync(join(home, "role-fallback-state.json"), "{ not json");
+    expect(await check(paseo, home)).toBe("sent");
+  });
+
+  it("finds the install home itself when none is given, as the plugin runs", async () => {
+    await resent();
+    writeFileSync(join(home, "install.json"), JSON.stringify({ schemaVersion: 1 }));
+    const { paseo } = fakePaseo();
+    const installed = {
+      ...paseo,
+      config: { get: async () => ({ config: { plugins: { "paseo-bm": { source: "directory", path: join(home, "plugin", "0.2.0") } } } }) },
+    } as BudgetPaseo;
+    // The request is found and counted: over budget until the incident names the replacement.
+    expect(await check(installed)).toBe("sent");
+    writeIncidents(home, [reviewerIncident()]);
+    expect(await check(installed)).toBe("within");
   });
 });
 

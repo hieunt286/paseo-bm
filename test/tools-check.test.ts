@@ -89,7 +89,9 @@ describe("agent.created runs the check for Workers only", () => {
     await handlers["agent.created"]!({ agent: { id: "w-1", provider: "bm-worker/claude-opus-5", parentAgentId: "m-1" } }, { paseo });
     await handlers["agent.created"]!({ agent: { id: "r-1", provider: "bm-reviewer", parentAgentId: "w-1" } }, { paseo });
     await handlers["agent.created"]!({ agent: { id: "m-1", provider: "bm-manager", parentAgentId: null } }, { paseo });
-    expect(refreshed).toEqual(["w-1"]);
+    // Only the Worker's tools are checked; the Reviewer is read once, for its
+    // bm.replaces label (delta 20260921 §4.5.1), and the Manager not at all.
+    expect(refreshed).toEqual(["w-1", "r-1"]);
     expect(toolsSeen().worker?.state).toBe("ok");
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await expect(handlers["agent.created"]!(null, { paseo })).resolves.toBeUndefined();

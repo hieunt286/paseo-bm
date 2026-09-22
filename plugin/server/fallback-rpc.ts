@@ -32,9 +32,10 @@ const defaultLog = (message: string): void => console.warn(message);
 /**
  * The `BM-FALLBACK` block of an incident, word for word (agent-facing, so
  * English). `baseOf` gives the base provider an alias extends (`null` when
- * unknown, written `unknown`).
+ * unknown, written `unknown`). `closing` replaces the Manager's closing line —
+ * the Worker of a switched Reviewer gets its instructions there (§4.5.1).
  */
-export function fallbackNotice(incident: FallbackIncident, baseOf: (alias: string) => string | null): string {
+export function fallbackNotice(incident: FallbackIncident, baseOf: (alias: string) => string | null, closing?: string): string {
   const alias = providerId(incident.agentProvider) ?? incident.agentProvider;
   const message = incident.message.replace(/\s+/g, " ").trim().slice(0, NOTICE_MESSAGE_CHARS);
   const candidate =
@@ -55,12 +56,13 @@ export function fallbackNotice(incident: FallbackIncident, baseOf: (alias: strin
     `candidate: ${candidate}`,
     `replacement: ${incident.replacementId ?? "none"}`,
     "",
-    `The ${incident.role} stopped because of its provider plan. The user decides on the card in this chat. Tell the user in one line; do not create an agent yourself.`,
+    closing ??
+      `The ${incident.role} stopped because of its provider plan. The user decides on the card in this chat. Tell the user in one line; do not create an agent yourself.`,
   ].join("\n");
 }
 
 /** The `extends` of every alias, from one `config.get()` under the lookup budget; `{}` when unreadable. Never throws. */
-async function aliasBases(paseo: unknown): Promise<Record<string, string>> {
+export async function aliasBases(paseo: unknown): Promise<Record<string, string>> {
   const config = (paseo as { config?: { get?: unknown } } | null | undefined)?.config;
   if (typeof config?.get !== "function") return {};
   try {
@@ -171,6 +173,8 @@ export const dismissIncident: FallbackAction = async (incident, _paseo, deps) =>
 export interface FallbackActions {
   switch?: FallbackAction;
   wait?: FallbackAction;
+  /** Sends a switched Reviewer's instructions to its Worker again (§4.5.1, §7). */
+  resend?: FallbackAction;
 }
 
 let actionQueue: Promise<unknown> = Promise.resolve();
@@ -201,8 +205,16 @@ export function handleFallbackAct(
     if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", "paseo-bm cannot find its install home");
     const found = readIncidents(home, deps.log ?? defaultLog).incidents.find((incident) => incident.id === input.incidentId);
     if (found === undefined) throw new DashboardError("E_FALLBACK_NOT_FOUND", `no fallback incident ${input.incidentId}`);
-    if (found.status !== "pending") throw new DashboardError("E_FALLBACK_NOT_PENDING", `incident ${found.id} is ${found.status}, not pending`);
     const scoped = { ...deps, home };
+    if (input.action === "resend") {
+      // Only a switched Reviewer whose replacement never appeared; the Manager chat already shows `switched`.
+      if (found.role !== "reviewer" || found.status !== "switched" || found.replacementId !== null) {
+        throw new DashboardError("E_FALLBACK_NOT_PENDING", `incident ${found.id} has nothing to resend`);
+      }
+      if (deps.actions?.resend === undefined) throw new DashboardError("E_FALLBACK_CREATE_FAILED", "resending is not available in this build");
+      return { incident: await deps.actions.resend(found, paseo, scoped) };
+    }
+    if (found.status !== "pending") throw new DashboardError("E_FALLBACK_NOT_PENDING", `incident ${found.id} is ${found.status}, not pending`);
     let action: FallbackAction;
     if (input.action === "dismiss") action = dismissIncident;
     else if (input.action === "switch") {

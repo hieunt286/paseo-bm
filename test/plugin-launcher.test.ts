@@ -1,5 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
-import { readFileSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ManagerAgentHandle, ManagerAgentSnapshot, ManagerPaseo } from "../plugin/server/manager";
 import serverContribute from "../plugin/index.server";
@@ -20,6 +22,20 @@ import {
   type EnsureManagerOutput,
 } from "../plugin/client/launch-manager";
 import { toneColor } from "../plugin/client/dashboard-model";
+
+// manager.ensure resolves the install home from $HOME when Paseo's config names
+// no plugin path (the instructions, and the fallback incidents of delta
+// 20260921 §4.5.2); point it at an empty directory so this machine's real
+// ~/.paseo-bm never leaks into the test.
+const realHome = process.env.HOME;
+const isolatedHome = mkdtempSync(join(tmpdir(), "bm-isolated-home-"));
+beforeAll(() => {
+  process.env.HOME = isolatedHome;
+});
+afterAll(() => {
+  process.env.HOME = realHome;
+  rmSync(isolatedHome, { recursive: true, force: true });
+});
 
 /**
  * WP-113 launcher: sidebar item + Command Center item -> `manager.ensure` -> open agent.

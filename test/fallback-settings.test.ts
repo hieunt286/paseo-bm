@@ -157,7 +157,7 @@ describe("roles.save-fallback", () => {
   it.each([
     ["two entries with the same provider and model", { entries: [CODEX, CODEX] }],
     ["an entry equal to the Worker itself", { entries: [{ baseProvider: "claude", model: "claude-opus-5", thinkingOptionId: null, modeId: null }] }],
-    ["a role whose chain is not offered yet", { role: "reviewer" as const, entries: [PI] }],
+    ["a role that is not paseo-bm's", { role: "planner" as never, entries: [PI] }],
     ["the auto policy before phase 2a-18", { policy: "auto" as never }],
     ["a model the provider does not list", { entries: [{ ...CODEX, model: "gpt-9" }] }],
     ["a bm-* alias as base provider", { entries: [{ ...CODEX, baseProvider: "bm-reviewer" }] }],
@@ -222,6 +222,21 @@ describe("roles.save-fallback", () => {
   });
 });
 
+describe("the Reviewer's chain (phase 2a-17, §4.5.1)", () => {
+  it("saves a Reviewer alias WITHOUT Paseo tools (ADR-006 D3)", async () => {
+    const daemon = fakeDaemon();
+    const sonnet = { baseProvider: "claude", model: "claude-sonnet-5", thinkingOptionId: null, modeId: "default" };
+    await save(daemon, { role: "reviewer", entries: [sonnet] });
+    expect(daemon.patches.at(-1)).toEqual({ providers: { "bm-reviewer-fallback-1": { extends: "claude", label: "Reviewer (fallback 1)" } } });
+    expect(daemon.state.providers["bm-reviewer-fallback-1"]).not.toHaveProperty("paseoTools");
+  });
+
+  it("refuses a dangerous mode for a Reviewer entry, as for the Reviewer itself", async () => {
+    const daemon = fakeDaemon();
+    await expect(save(daemon, { role: "reviewer", entries: [{ ...CODEX, modeId: "full-access" }] })).rejects.toMatchObject({ code: "E_ROLE_SETTINGS_INVALID" });
+  });
+});
+
 describe("fallback aliases", () => {
   it("give Manager and Worker aliases Paseo tools, and NEVER a Reviewer alias (ADR-006 D3)", () => {
     expect(fallbackAliasEntry("worker", 1, "codex")).toEqual({ extends: "codex", label: "Worker (fallback 1)", paseoTools: { enabled: true } });
@@ -244,16 +259,20 @@ describe("role-fallback.json and roles.settings", () => {
     expect(logged).toHaveLength(1);
     const daemon = fakeDaemon();
     const settings = await fallbackForSettings(daemon.paseo, { log, home });
-    expect(settings.fallback).toEqual({ worker: { role: "worker", policy: "ask", entries: [], patternsFromFile: false } });
+    expect(settings.fallback).toEqual({
+      worker: { role: "worker", policy: "ask", entries: [], patternsFromFile: false },
+      reviewer: { role: "reviewer", policy: "ask", entries: [], patternsFromFile: false },
+      manager: { role: "manager", policy: "ask", entries: [], patternsFromFile: false },
+    });
     expect(settings.warnings).toHaveLength(1);
     expect(settings.warnings[0]).toMatch(/^role-fallback\.json is not valid/);
   });
 
-  it("shows only the chains this release offers: the Worker's", async () => {
+  it("shows the chain of every role this release offers: all three since phase 2a-17", async () => {
     const daemon = fakeDaemon();
     await save(daemon, { entries: [CODEX] });
     const settings = await fallbackForSettings(daemon.paseo, { log, home });
-    expect(Object.keys(settings.fallback ?? {})).toEqual(["worker"]);
+    expect(Object.keys(settings.fallback ?? {})).toEqual(["worker", "reviewer", "manager"]);
     expect(settings.fallback?.worker?.entries.map((entry) => entry.alias)).toEqual(["bm-worker-fallback-1"]);
   });
 });

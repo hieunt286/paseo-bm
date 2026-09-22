@@ -10,6 +10,9 @@ import { registerStopPropagation } from "./server/stop-propagation";
 import { registerAgentLabels } from "./server/agent-labels";
 import { registerFallbackRpcs } from "./server/fallback-rpc";
 import { registerFallbackDetection, replacementsFor } from "./server/fallback-state";
+import { createManagerSwitch } from "./server/fallback-manager";
+import { createReviewerResend, createReviewerSwitch } from "./server/fallback-reviewer";
+import type { FallbackAction } from "./server/fallback-rpc";
 import { createWorkerSwitch } from "./server/fallback-switch";
 import { createFallbackWaiter } from "./server/fallback-wait";
 import { registerFormatCheck } from "./server/format-check";
@@ -18,7 +21,7 @@ import { currentInstructions } from "./server/role-extras";
 import { registerSetupRpcs } from "./server/setup-rpc";
 import { registerRoleSettingsRpcs } from "./server/role-settings-rpc";
 import { registerChatRpcs } from "./server/chat-rpc";
-import { agentsListRpc, managerEnsureRpc, rolesDescribeRpc } from "./shared/contracts";
+import { agentsListRpc, managerEnsureRpc, rolesDescribeRpc, type FallbackIncident } from "./shared/contracts";
 import { dashboardSettings } from "./shared/settings";
 
 /**
@@ -131,8 +134,20 @@ export default function contribute(server: PluginServerContext): () => void {
   const armWaits = (paseo: unknown) => void fallbackWaiter.ensureArmed(paseo);
   const removeFallbackDetection = registerFallbackDetection(server, { onPaseo: armWaits });
   // delta 20260921 §4.4.6: BM-FALLBACK to the Manager chat, fallback.incidents and fallback.act.
-  // §4.4.7: "Switch" creates the replacement Worker on the candidate's fallback alias.
-  const removeFallbackNotices = registerFallbackRpcs(server, { switch: createWorkerSwitch(), wait: fallbackWaiter.wait }, { onPaseo: armWaits });
+  // "Switch": the plugin creates a replacement Worker (§4.4.7) or Manager
+  // (§4.5.2); for a Reviewer it tells the Worker how to create the
+  // replacement itself (§4.5.1).
+  const switches: Record<FallbackIncident["role"], FallbackAction> = {
+    worker: createWorkerSwitch(),
+    reviewer: createReviewerSwitch(),
+    manager: createManagerSwitch(),
+  };
+  const switchByRole: FallbackAction = (incident, paseo, deps) => switches[incident.role](incident, paseo, deps);
+  const removeFallbackNotices = registerFallbackRpcs(
+    server,
+    { switch: switchByRole, wait: fallbackWaiter.wait, resend: createReviewerResend() },
+    { onPaseo: armWaits },
+  );
   const removeCollector = registerCollector(server, {
     onRecorded: (event, { location, paseo }) =>
       paseo === undefined

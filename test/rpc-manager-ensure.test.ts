@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
+  createManager,
   ensureManager,
   ManagerEnsureError,
   type ManagerAgentHandle,
@@ -14,7 +15,7 @@ import {
 import type { CliOutcome, PaseoCliDeps } from "../plugin/server/paseo-cli";
 import type { ProviderMode } from "../plugin/server/role-mode";
 import contribute, { readManagerInstructions } from "../plugin/index.server";
-import { managerEnsureRpc } from "../plugin/shared/contracts";
+import { managerEnsureRpc, type FallbackIncident } from "../plugin/shared/contracts";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
 
 // The entry resolves the install home from $HOME when Paseo's config names no
@@ -171,6 +172,9 @@ function fakePaseo(options: FakeOptions = {}) {
 const deps = (paseo: ManagerPaseo) => ({
   paseo,
   readInstructions: readManagerInstructions,
+  // No install home, so no fallback incident: without this the replaced-Manager
+  // lookup would read the home through `config.get` (delta 20260921 §4.5.2).
+  home: null,
 });
 
 describe("manager.ensure — no Manager yet", () => {
@@ -712,3 +716,117 @@ describe("manager.ensure — review b4: a Manager on Pi gets no feature from its
   });
 });
 
+describe("manager.ensure — a replaced Manager is skipped (delta 20260921 §4.5.2, REQ-066 c)", () => {
+  const marked = { "bm.role": "manager", "bm.modeSet": "bypassPermissions" };
+  /** The replaced Manager is the newest on purpose: without the rule it is the one opened. */
+  const managers = (replacedLabels: Record<string, string> = {}) => [
+    agent({ id: "mgr-third", createdAt: "2026-09-15T08:00:00.000Z", labels: marked }),
+    agent({ id: "mgr-other", createdAt: "2026-09-15T09:00:00.000Z", labels: marked }),
+    agent({ id: "mgr-replaced", createdAt: "2026-09-15T10:00:00.000Z", labels: { ...marked, ...replacedLabels } }),
+  ];
+  const expected = { agentId: "mgr-other", created: false, otherManagerIds: ["mgr-third"], modeNotice: null, toolsNotice: null };
+
+  const managerIncident = (
+    overrides: Partial<FallbackIncident> & Pick<FallbackIncident, "id" | "agentId" | "status">,
+  ): FallbackIncident => ({
+    role: "manager",
+    workspaceId: WS,
+    requestId: null,
+    agentProvider: "bm-manager/claude-opus-5",
+    agentModel: "claude-opus-5",
+    parentId: null,
+    managerId: overrides.agentId,
+    class: "L1",
+    signal: "failed",
+    message: "You've hit your usage limit.",
+    perModelWindow: false,
+    resetsAt: null,
+    candidate: null,
+    detectedAt: "2026-09-21T09:00:00.000Z",
+    decidedAt: null,
+    waitUntil: null,
+    replacementId: null,
+    error: null,
+    ...overrides,
+  });
+  const incidents = [
+    managerIncident({ id: "fb-000000000001", agentId: "mgr-replaced", status: "switched", replacementId: "mgr-other" }),
+    // Only `switched` counts: a Manager with a pending incident is still listed.
+    managerIncident({ id: "fb-000000000002", agentId: "mgr-third", status: "pending" }),
+  ];
+
+  it("by its bm.replacedBy label: opens the other live Manager and never reports the replaced one", async () => {
+    const fake = fakePaseo({ agents: managers({ "bm.replacedBy": "mgr-other" }) });
+
+    const result = await ensureManager({ workspaceId: WS }, deps(fake.paseo));
+
+    expect(result).toEqual(expected);
+    expect(fake.createCalls).toEqual([]);
+    expect(fake.archived).toEqual([]);
+  });
+
+  it.each([
+    ["passed in", false],
+    ["looked up from $HOME/.paseo-bm", true],
+  ])("by a switched Manager incident only, the label missing — install home %s", async (_label, lookedUp) => {
+    const home = lookedUp ? join(isolatedHome, ".paseo-bm") : mkdtempSync(join(tmpdir(), "bm-fallback-home-"));
+    try {
+      mkdirSync(home, { recursive: true });
+      if (lookedUp) writeFileSync(join(home, "install.json"), JSON.stringify({ schemaVersion: 1 }));
+      writeFileSync(join(home, "role-fallback-state.json"), JSON.stringify({ version: 1, incidents }));
+      const fake = fakePaseo({ agents: managers() });
+
+      const result = await ensureManager(
+        { workspaceId: WS },
+        lookedUp ? { paseo: fake.paseo, readInstructions: readManagerInstructions } : { ...deps(fake.paseo), home },
+      );
+
+      expect(result).toEqual(expected);
+      expect(fake.createCalls).toEqual([]);
+      expect(fake.archived).toEqual([]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("createManager — the one path that creates a Manager (delta 20260921 §4.5.2)", () => {
+  it("creates a replacement like manager.ensure creates a Manager, plus its own labels and first message", async () => {
+    const fake = fakePaseo();
+
+    const result = await createManager(fake.paseo, WS, {
+      providerSelection: "bm-manager-fallback-1/gpt-5.6-sol",
+      modeId: "full-access",
+      labels: { "bm.modeSet": "full-access", "bm.replaces": "mgr-old" },
+      prompt: "BM-HANDOVER\nrole: manager",
+      readInstructions: readManagerInstructions,
+    });
+
+    expect(result).toEqual({ agentId: "created-1", toolsNotice: null });
+    expect(fake.createCalls).toEqual([
+      {
+        workspaceId: WS,
+        options: {
+          config: { provider: "bm-manager-fallback-1/gpt-5.6-sol", modeId: "full-access", systemPrompt: managerMd },
+          title: "Beads Manager",
+          labels: { "bm.role": "manager", "bm.version": PLUGIN_VERSION, "bm.modeSet": "full-access", "bm.replaces": "mgr-old" },
+          prompt: "BM-HANDOVER\nrole: manager",
+        },
+      },
+    ]);
+  });
+
+  it.each([
+    ["bm-manager/gpt-5.6-sol", 'with profile "bm-manager"'],
+    ["bm-manager-fallback-1/gpt-5.6-sol", 'with provider "bm-manager-fallback-1/gpt-5.6-sol"'],
+  ])("a rejected create of %s names %s", async (providerSelection, named) => {
+    const fake = fakePaseo({ createRejects: new Error("usage limit") });
+
+    const error = await createManager(fake.paseo, WS, { providerSelection, labels: {}, readInstructions: readManagerInstructions }).catch(
+      (e: unknown) => e,
+    );
+
+    expect((error as ManagerEnsureError).code).toBe("E_PROVIDER_UNAVAILABLE");
+    expect((error as Error).message).toBe(`E_PROVIDER_UNAVAILABLE: could not create the Manager ${named}: usage limit`);
+  });
+});

@@ -12,8 +12,8 @@
 /** A role that can have a fallback chain. */
 export type FallbackRole = "manager" | "worker" | "reviewer";
 
-/** Roles whose chain is offered in this release (phase 2a-16: the Worker only; 2a-17 adds the other two). */
-export const FALLBACK_ROLES: readonly FallbackRole[] = ["worker"];
+/** Roles whose chain is offered: every role since phase 2a-17 (2a-16 offered the Worker's only). */
+export const FALLBACK_ROLES: readonly FallbackRole[] = ["worker", "reviewer", "manager"];
 
 /** Longest chain per role. */
 export const MAX_FALLBACK_ENTRIES = 3;

@@ -437,8 +437,23 @@ function bucketByTime(buckets: Bucket[], createdAt: string | null): Bucket | nul
   return before.length === 1 ? (before[0] ?? null) : null;
 }
 
-/** Number of review requests a Reviewer received: its inbound non-`BM-REVIEW` messages. */
-export function reviewCallsOf(reviewerIds: readonly string[], records: readonly TraceRecord[]): number | null {
+/**
+ * Number of review requests a Reviewer received: its inbound non-`BM-REVIEW` messages.
+ *
+ * `replacementIds` are Reviewers that took over from one stopped on its
+ * provider plan (delta 20260921 §4.5.1). The Worker sends each of them,
+ * unchanged, the review message the old one got: the same review call, so the
+ * FIRST message each would count is skipped and every later one counts. A
+ * replacement the Worker did not label `bm.replaces` is not in the set and its
+ * resend IS counted — the safe failure: `BM-BUDGET`, and the Manager asks the user.
+ */
+export function reviewCallsOf(
+  reviewerIds: readonly string[],
+  records: readonly TraceRecord[],
+  replacementIds: Iterable<string> = [],
+): number | null {
+  // Replacements whose resend has not been met yet.
+  const resendPending = new Set(replacementIds);
   let calls = 0;
   let seen = false;
   for (const record of records) {
@@ -449,6 +464,7 @@ export function reviewCallsOf(reviewerIds: readonly string[], records: readonly 
       // (stop-propagation.ts) is a review request.
       if (/^\s*>?\s*(?:[-*]\s*)?bm-review\b/im.test(message.text)) continue;
       if (isPluginNotice(message.text)) continue;
+      if (resendPending.delete(record.agentId)) continue;
       calls += 1;
     }
   }
@@ -520,6 +536,11 @@ export function stateOf(
 export interface ReconstructOptions {
   records: readonly TraceRecord[];
   agents: readonly AgentFacts[];
+  /**
+   * Reviewers that replaced a stopped one (delta 20260921 §4.5.1): their first
+   * message is not a new review call (`reviewCallsOf`). None by default.
+   */
+  replacementIds?: Iterable<string>;
 }
 
 /**
@@ -531,6 +552,7 @@ export interface ReconstructOptions {
  */
 export function reconstructTraces(options: ReconstructOptions): ReconstructedTrace[] {
   const { records, agents } = options;
+  const replacementIds = new Set(options.replacementIds ?? []);
   const ordered = [...records].sort(byAt);
   const agentById = new Map(agents.map((agent) => [agent.id, agent]));
   const { buckets, byRequestId: byRequest } = openBuckets(ordered);
@@ -700,7 +722,7 @@ export function reconstructTraces(options: ReconstructOptions): ReconstructedTra
     const lastGuardrail = [...trace.reports].reverse().find((report) => report.guardrail !== null);
     trace.guardrailReported = lastGuardrail?.guardrail ?? null;
     trace.tier = [...trace.reports].reverse().find((report) => report.tier !== null)?.tier ?? null;
-    trace.reviewCalls = reviewCallsOf(trace.reviewerIds, trace.records);
+    trace.reviewCalls = reviewCallsOf(trace.reviewerIds, trace.records, replacementIds);
 
     const missing = [
       ...new Set([

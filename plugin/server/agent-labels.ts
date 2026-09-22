@@ -19,6 +19,7 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { listAllAgents, roleOfAgent, roleOfProvider } from "./agent-role";
 import { setAgentLabels, type PaseoCliDeps } from "./paseo-cli";
 import { checkWorkerTools, type ToolsPaseo } from "./tools-check";
+import { linkReplacementReviewer } from "./fallback-reviewer";
 
 /** The snapshot fields this module reads; `PaseoAgent` is structurally assignable. */
 export interface LabelAgentSnapshot {
@@ -171,6 +172,11 @@ export function registerAgentLabels(host: AgentLabelsHost, labeller: AgentLabell
           { id: created.id, provider: created.provider, parentAgentId: typeof created.parentAgentId === "string" ? created.parentAgentId : null },
           (context as { paseo?: unknown } | null)?.paseo as ToolsPaseo,
         );
+      }
+      // Delta 20260921 §4.5.1: the Reviewer a Worker creates to replace a
+      // stopped one completes its fallback incident.
+      if (typeof created?.id === "string" && roleOfProvider(created.provider) === "reviewer") {
+        await linkReplacementReviewer(created.id, created.provider, (context as { paseo?: unknown } | null)?.paseo);
       }
     }),
     host.on("agent.turn_started", (_event, context) => {

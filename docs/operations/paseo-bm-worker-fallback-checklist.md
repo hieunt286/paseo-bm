@@ -79,3 +79,18 @@ Cần một chuỗi dự phòng cho Worker: Beads Manager → Setup → Roles & 
 | 16.8 | I'll handle it | Bấm **I'll handle it** trên một sự cố khác | Sự cố `dismissed`; không agent nào bị tạo hay dừng | Chưa đo |
 
 Rủi ro đã biết: mẫu nhận dạng mặc định chưa kiểm trên sự cố thật (đề xuất §1.5). Nếu 16.2 không có thẻ, ghi nguyên văn lỗi của lượt hỏng vào cột Kết quả: đó là dữ liệu để sửa mẫu, và là điều kiện vào phase 2a-18.
+
+## Phase 2a-17 — `0.3.0-alpha.3` (REQ-066)
+
+Cần một chuỗi dự phòng cho Reviewer và cho Manager (Beads Manager → Setup → Roles & models, khối dưới dòng Reviewer và dòng Manager). Như 2a-16: sự cố thật là tốt nhất, không thì dựng lượt hỏng bằng một provider giả; không bao giờ cố đẩy một provider tới hạn mức.
+
+| # | Kiểm | Cách làm | Kết quả mong đợi | Kết quả |
+|---|---|---|---|---|
+| 17.1 | Switch một Reviewer | Một Reviewer dừng vì hạn mức / billing / đăng nhập; bấm **Switch to …** trên thẻ trong chat Manager | Worker cha nhận `BM-FALLBACK` với chỉ dẫn `create_agent`; Worker tạo Reviewer trên `bm-reviewer-fallback-1/<model>` có nhãn `bm.replaces` = Reviewer cũ, và gửi nó nguyên văn tin review cũ; Reviewer cũ mang `bm.replacedBy` | Chưa đo |
+| 17.2 | Số lượt review không tăng | Sau 17.1, Dashboard → request | Số lượt review của request **không tăng** vì tin gửi lại; không có `BM-BUDGET` vì tin đó | Chưa đo |
+| 17.3 | Resend to Worker | **Không dựng lại trên daemon thật**: tin chỉ nằm trong hàng chờ khi Worker đang chạy, nên phải nạp lại plugin giữa lượt của Worker — trái cảnh báo ở phần chuẩn bị. Chỉ kiểm bằng test tự động (`test/fallback-reviewer.test.ts`) | Thẻ hiện nút **Resend to Worker** khi sự cố Reviewer `switched` mà chưa có Reviewer thay thế; bấm thì Worker nhận lại đúng chỉ dẫn | Chưa đo (chỉ test tự động) |
+| 17.4 | Switch một Manager | Manager dừng vì gói của provider; bấm **Switch to …** trên thẻ trong chính chat Manager đó | Có Manager mới trên `bm-manager-fallback-1/<model>` với lời bàn giao `BM-HANDOVER` role manager (Worker, câu hỏi đang chờ, ba tin gần nhất của bạn đã che bí mật); thẻ ghi "A new Beads Manager is running on …" | Chưa đo |
+| 17.5 | Beads Manager mở Manager thay thế | Sau 17.4, mở Beads Manager từ sidebar hay Command Center | Mở Manager mới, không phải Manager cũ; Manager cũ vẫn còn cho tới khi bạn lưu trữ nó | Chưa đo |
+| 17.6 | Worker báo cáo tới Manager mới | Sau 17.4, một Worker đang chạy gửi báo cáo kế tiếp | Worker đã nhận `BM-SETTINGS` với dòng `Manager agent id: …`; báo cáo kế tiếp tới Manager mới | Chưa đo |
+
+**Điều kiện vào phase 2a-18** (kiểm lúc đóng phase 2a-17, 2026-09-22, Q13 a): `~/.paseo-bm/role-fallback-state.json` trên máy owner **không tồn tại** — 0 sự cố thật. Phase 2a-18 (chế độ Tự động) chưa mở. Khi đã có sự cố thật nhận đúng loại, kiểm lại điều kiện này.

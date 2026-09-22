@@ -38,8 +38,12 @@ afterAll(() => {
   rmSync(isolatedHome, { recursive: true, force: true });
 });
 
-/** The Worker's chain when nothing is saved: ask, no entry (phase 2a-16 offers the Worker's chain only). */
-const DEFAULT_FALLBACK = { worker: { role: "worker", policy: "ask", entries: [], patternsFromFile: false } };
+/** The chains when nothing is saved: ask, no entry (the Worker's since phase 2a-16, the Reviewer's and the Manager's since 2a-17). */
+const DEFAULT_FALLBACK = {
+  worker: { role: "worker", policy: "ask", entries: [], patternsFromFile: false },
+  reviewer: { role: "reviewer", policy: "ask", entries: [], patternsFromFile: false },
+  manager: { role: "manager", policy: "ask", entries: [], patternsFromFile: false },
+};
 
 const FETCHED_AT = "2026-09-22T08:00:00.000Z";
 

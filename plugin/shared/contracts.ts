@@ -1109,12 +1109,14 @@ export const fallbackIncidentsRpc = defineRpc({
 
 /**
  * `fallback.act` — the user's choice on the card for a `pending` incident:
- * switch to the candidate (§4.4.7), wait for the reset (§4.4.9), or handle it
- * themselves (`dismiss`, §4.4.10). Returns the incident as it is afterwards.
+ * switch to the candidate (§4.4.7, §4.5.1), wait for the reset (§4.4.9), or
+ * handle it themselves (`dismiss`, §4.4.10). `resend` sends a switched
+ * Reviewer's instructions to its Worker again when the notice queue lost them
+ * (§7, "Resend to Worker"). Returns the incident as it is afterwards.
  */
 export const fallbackActRpc = defineRpc({
   name: "fallback.act",
-  input: z.object({ incidentId: z.string().min(1), action: z.enum(["switch", "wait", "dismiss"]) }),
+  input: z.object({ incidentId: z.string().min(1), action: z.enum(["switch", "wait", "dismiss", "resend"]) }),
   output: z.object({ incident: fallbackIncidentSchema }),
 });
 

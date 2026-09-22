@@ -398,6 +398,57 @@ describe("counts stay distinct", () => {
     // Reviewers with no recorded turn: unknown, not zero.
     expect(reviewCallsOf(["rev-unrecorded"], records)).toBeNull();
   });
+
+  describe("a Reviewer that replaced a stopped one (delta 20260921 §4.5.1)", () => {
+    const reviewerTurn = (agentId: string, at: string, ...texts: string[]) =>
+      record({ agentId, role: "reviewer", at, turnId: `turn-${at}`, sent: texts.map((text) => message(text, at)) });
+    // rev-1 stopped on its plan after one review call; rev-2 replaced it, got
+    // the same message again, then one re-review.
+    const records = [
+      reviewerTurn("rev-1", "2026-09-16T10:10:00.000Z", "review batch-1"),
+      reviewerTurn("rev-2", "2026-09-16T10:20:00.000Z", "review batch-1"),
+      reviewerTurn("rev-2", "2026-09-16T10:30:00.000Z", "re-review batch-1"),
+    ];
+
+    it("does not count the replacement's first message, and counts its second", () => {
+      expect(reviewCallsOf(["rev-1", "rev-2"], records, new Set(["rev-2"]))).toBe(2);
+      expect(reviewCallsOf(["rev-2"], records.slice(0, 2), new Set(["rev-2"]))).toBe(0);
+      expect(reviewCallsOf(["rev-2"], records, new Set(["rev-2"]))).toBe(1);
+    });
+
+    it("leaves every other Reviewer, and every call without the set, as it was", () => {
+      expect(reviewCallsOf(["rev-1", "rev-2"], records)).toBe(3);
+      expect(reviewCallsOf(["rev-1", "rev-2"], records, new Set())).toBe(3);
+      expect(reviewCallsOf(["rev-1"], records, new Set(["rev-2"]))).toBe(1);
+      // A replacement id with no turn of its own changes nothing, not even "unknown".
+      expect(reviewCallsOf(["rev-1"], records, new Set(["rev-9"]))).toBe(1);
+      expect(reviewCallsOf(["rev-unrecorded"], records, new Set(["rev-unrecorded"]))).toBeNull();
+    });
+
+    it("skips the first message that would count, not a BM-REVIEW echo or a plugin notice before it", () => {
+      const echoed = [
+        reviewerTurn("rev-2", "2026-09-16T10:20:00.000Z", REVIEWER_STOP_NOTICE, "BM-REVIEW\nverdict: approved", "review batch-1"),
+        reviewerTurn("rev-2", "2026-09-16T10:30:00.000Z", "re-review batch-1"),
+      ];
+      expect(reviewCallsOf(["rev-2"], echoed, new Set(["rev-2"]))).toBe(1);
+    });
+
+    it("reaches the reconstructed trace, and only when the option is given", () => {
+      const all = [managerTurn("req-A", "2026-09-16T10:00:00.000Z"), ...records];
+      const agents = [
+        agent({ id: "w1", requestIdLabel: "req-A" }),
+        agent({ id: "rev-1", role: "reviewer", parentAgentId: "w1" }),
+        agent({ id: "rev-2", role: "reviewer", parentAgentId: "w1" }),
+      ];
+      const counted = (replacementIds?: Iterable<string>) =>
+        reconstructTraces({ records: all, agents, ...(replacementIds === undefined ? {} : { replacementIds }) }).find(
+          (trace) => trace.requestId === "req-A",
+        )?.reviewCalls;
+      expect(counted()).toBe(3);
+      expect(counted(new Set(["rev-2"]))).toBe(2);
+      expect(counted(["rev-2"])).toBe(2);
+    });
+  });
 });
 
 describe("state precedence (design §7.3)", () => {

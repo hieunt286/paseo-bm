@@ -432,7 +432,7 @@ Không telemetry. CLI `skills` có kênh thu thập riêng của nó; README ph�
 - **Cài bên cạnh:** payload mới vào thư mục phiên bản mới; bản cũ giữ lại; chỉ `--prune` xoá.
 - **Khoá tiến trình:** `.lock` cho install và uninstall; `doctor` không lấy khoá.
 - **Timeout:** mỗi lời gọi Paseo CLI 15 giây; chờ plugin `running` tổng 30 giây, poll 500 ms; CLI `skills` 300 giây, cảnh báo sau 60 giây không output; ghi `config.json` thử lại đúng một lần rồi dừng với `E_CONFIG_CONCURRENT_WRITE`.
-- **Một Manager cho mỗi workspace:** `manager.ensure` tìm theo nhãn trước khi tạo. Manager bị người dùng xoá → lần mở sau tạo mới, không báo lỗi.
+- **Một Manager cho mỗi workspace:** `manager.ensure` tìm theo nhãn trước khi tạo. Manager bị người dùng xoá → lần mở sau tạo mới, không báo lỗi. *(Errata 2026-09-22, [delta 20260921-worker-fallback-and-role-settings](./paseo-bm-delta-20260921-worker-fallback-and-role-settings.md) §4.5.2, REQ-066 c: Manager đã bị thay sau một lần "Switch" của thẻ dự phòng — nhãn `bm.replacedBy`, hoặc là agent của một sự cố Manager `switched` — không được mở lại; `manager.ensure` mở Manager thay thế, và `otherManagerIds` không nhắc Manager cũ. Manager cũ vẫn sống cho tới khi người dùng lưu trữ nó.)*
 - **Agent mồ côi:** Worker vẫn chạy khi Manager đã bị xoá thì không bị ảnh hưởng; panel hiển thị nó ở nhánh "không có Manager" thay vì giấu đi.
 - **Worker chết giữa chừng:** tài liệu và beads đã ghi vẫn hợp lệ; người dùng thấy trạng thái lỗi và đọc được agent đó để biết dừng ở đâu. paseo-bm không tự dọn.
 - **Dọn rác:** chỉ thư mục payload dở dang (không có trong `versions[]`) mới bị dọn.
@@ -600,6 +600,7 @@ CI **không** chạy agent thật: không xác định, tốn tiền, và cần 
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | **Theo [delta 20260921-worker-fallback-and-role-settings](./paseo-bm-delta-20260921-worker-fallback-and-role-settings.md), phase 2a-17** (REQ-066): errata §8 — Manager đã bị thay không được mở lại; lối vào mở Manager thay thế |
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | **Theo [delta 20260921-worker-fallback-and-role-settings](./paseo-bm-delta-20260921-worker-fallback-and-role-settings.md), phase 2a-16** (REQ-065): errata §2.6 — Worker dừng vì gói của provider được hỏi bằng thẻ, Switch / Wait / I'll handle it; errata §3.1 — `role-fallback.json` và `role-fallback-state.json`; errata §8 — ngoại lệ hẹn giờ của Q6 a |
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | **Theo [delta 20260921-worker-fallback-and-role-settings](./paseo-bm-delta-20260921-worker-fallback-and-role-settings.md), phase 2a-15** (REQ-064, ADR-008 Accepted): errata §3.4 — plugin cũng ghi mục `bm-*` qua `config.patch` khi người dùng lưu trên màn "Roles & models"; errata §5 — ba RPC `roles.settings`, `roles.options`, `roles.save-settings` và ba mã lỗi `E_ROLE_SETTINGS_*` |
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | **Theo [delta 20260921-worker-fallback-and-role-settings](./paseo-bm-delta-20260921-worker-fallback-and-role-settings.md), phase 2a-14** (REQ-063): errata §2.6 — cách chạy theo khả năng provider, Runtime facts "none", `BM-TOOLS`; errata §7 — Reviewer trên Pi / OpenCode |

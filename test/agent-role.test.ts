@@ -124,8 +124,8 @@ describe("fallback aliases (delta 20260921 §4.4.1, REQ-065 f)", () => {
     expect(positionOfAlias("bm-worker")).toBe(0);
     expect(positionOfAlias("bm-worker-fallback-1")).toBe(1);
     expect(positionOfAlias("claude")).toBeNull();
-    // Phase 2a-16 offers the Worker's chain only; 2a-17 adds the other two roles.
-    expect(FALLBACK_ROLES).toEqual(["worker"]);
+    // Phase 2a-16 offered the Worker's chain; 2a-17 adds the Reviewer's and the Manager's.
+    expect(FALLBACK_ROLES).toEqual(["worker", "reviewer", "manager"]);
   });
 });
 

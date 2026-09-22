@@ -4,7 +4,10 @@
  * One Manager per workspace: look the live Manager up by its `bm.role=manager`
  * label BEFORE creating anything; when there is none, create one from the
  * `bm-manager` agent profile with the instructions in `roles/manager.md` and the
- * labels `bm.role=manager` + `bm.version=<plugin version>`.
+ * labels `bm.role=manager` + `bm.version=<plugin version>`. A Manager another
+ * Manager replaced does not count (delta 20260921 §4.5.2), and `createManager`
+ * is the one code path that creates a Manager, for `manager.ensure` and for a
+ * replacement alike.
  *
  * Lifecycle belongs to the user (ADR-005): this module never deletes or archives
  * a healthy agent. The single exception is cleanup of the exact agent this call
@@ -27,8 +30,10 @@ import { PLUGIN_VERSION } from "../shared/version";
 import { setAgentLabel, setAgentMode, type PaseoCliDeps } from "./paseo-cli";
 import { listAllAgents, roleOfAgent } from "./agent-role";
 import { providerId } from "./provider-id";
-import { AUTO_APPROVE_FEATURE, capabilityOf, featuresFor, managerModeFor, modesFor, runPostureOf } from "./role-mode";
+import { AUTO_APPROVE_FEATURE, TIMED_OUT, capabilityOf, featuresFor, managerModeFor, modesFor, runPostureOf, withTimeout } from "./role-mode";
 import { workspaceDirectory, type DashboardPaseo } from "./dashboard-rpc";
+import { readIncidents } from "./fallback-state";
+import { installHomeOf } from "./role-extras";
 import { recordTools } from "./tools-check";
 
 /** Label key and value that identify a paseo-bm Manager (design §5). */
@@ -42,6 +47,9 @@ export const VERSION_LABEL = "bm.version";
  * a mode the user picks by hand afterwards is respected (owner decision Q36).
  */
 export const MODE_SET_LABEL = "bm.modeSet";
+
+/** Label on an agent another agent replaced, with the replacement's id (delta 20260921 §4.4.8, §4.5.2). */
+const REPLACED_BY_LABEL = "bm.replacedBy";
 
 /** Agent profile id registered by the installer (ADR-006, WP-107). */
 export const MANAGER_PROFILE_ID = "bm-manager";
@@ -132,6 +140,8 @@ export interface ManagerPaseo {
           };
           title?: string;
           labels?: Record<string, string>;
+          /** The agent's first message (a replacement Manager's `BM-HANDOVER`, delta 20260921 §4.5.2). */
+          prompt?: string;
         }): Promise<ManagerAgentHandle>;
       };
     };
@@ -160,14 +170,21 @@ export interface EnsureManagerDeps {
    * (delta 20260921 §4.2.2). Defaults to the directory Paseo lists for it.
    */
   workspaceDirectory?: (workspaceId: string) => Promise<string | null>;
+  /**
+   * The install home, whose `role-fallback-state.json` names the replaced
+   * Managers (delta 20260921 §4.5.2); `null` means none. Looked up within the
+   * lookup budget when absent; tests pass one.
+   */
+  home?: string | null;
 }
 
 export interface EnsureManagerResult {
   agentId: string;
   created: boolean;
   /**
-   * Other live Managers found in the same workspace, newest first. Reported so
-   * the panel can tell the user (design §9.3); never deleted or archived here.
+   * Other live Managers found in the same workspace, newest first, never a
+   * replaced one. Reported so the panel can tell the user (design §9.3); never
+   * deleted or archived here.
    */
   otherManagerIds: string[];
   /**
@@ -206,15 +223,53 @@ function labelledManager(agent: ManagerAgentSnapshot): boolean {
  * new-agent flow), each group newest first (delta 20260918g §4.3). Listing
  * with no label filter is what lets the second group be found at all; without
  * it `manager.ensure` created a second Manager next to the user's own.
+ *
+ * A replaced Manager is left out (delta 20260921 §4.5.2): it carries
+ * `bm.replacedBy`, or — when labelling it failed — it is the `agentId` of a
+ * `switched` Manager incident. So `manager.ensure` opens the replacement and
+ * never reports the old one, which stays alive until the user archives it
+ * (ADR-005). The incidents are only read when a live Manager is found.
  */
 export async function findLiveManagers(
   paseo: ManagerPaseo,
   workspaceId: string,
+  lookup: { home?: string | null; log?: (message: string) => void } = {},
 ): Promise<ManagerAgentSnapshot[]> {
   const all = await listAllAgents((options) => paseo.agents.list(options), { includeArchived: false });
-  return all
-    .filter((agent) => agent.workspaceId === workspaceId && roleOfAgent(agent)?.role === "manager" && isLive(agent))
+  const live = all.filter(
+    (agent) =>
+      agent.workspaceId === workspaceId &&
+      roleOfAgent(agent)?.role === "manager" &&
+      isLive(agent) &&
+      agent.labels?.[REPLACED_BY_LABEL] === undefined,
+  );
+  const replaced = live.length === 0 ? new Set<string>() : await replacedManagerIds(paseo, lookup);
+  return live
+    .filter((agent) => !replaced.has(agent.id))
     .sort((a, b) => Number(labelledManager(b)) - Number(labelledManager(a)) || newestFirst(a, b));
+}
+
+/**
+ * The `agentId` of every `switched` Manager incident in the install home's
+ * `role-fallback-state.json` (delta 20260921 §4.5.2). Empty when the home is
+ * not found within the lookup budget or the file cannot be used; the
+ * `bm.replacedBy` label still applies then. Never throws.
+ */
+async function replacedManagerIds(
+  paseo: ManagerPaseo,
+  lookup: { home?: string | null; log?: (message: string) => void },
+): Promise<Set<string>> {
+  try {
+    const home = lookup.home !== undefined ? lookup.home : await withTimeout(installHomeOf(paseo));
+    if (home === null || home === TIMED_OUT) return new Set();
+    return new Set(
+      readIncidents(home, lookup.log)
+        .incidents.filter((incident) => incident.role === "manager" && incident.status === "switched")
+        .map((incident) => incident.agentId),
+    );
+  } catch {
+    return new Set();
+  }
 }
 
 /** The workspace's directory for a features lookup, or `null`. Never throws. */
@@ -252,7 +307,7 @@ export async function ensureManager(
   const { paseo } = deps;
   const { workspaceId } = input;
 
-  const [chosen, ...others] = await findLiveManagers(paseo, workspaceId);
+  const [chosen, ...others] = await findLiveManagers(paseo, workspaceId, { home: deps.home, log: deps.log });
   if (chosen) {
     return {
       agentId: chosen.id,
@@ -273,8 +328,6 @@ export async function ensureManager(
       `agent profile "${MANAGER_PROFILE_ID}" is not registered on this daemon; re-run \`npx paseo-bm\` to register the roles.`,
     );
   }
-
-  const systemPrompt = await deps.readInstructions();
 
   // The provider's no-prompt mode unless the profile names its own (delta
   // 20260918 §4.1). `modesFor` is raced against 5 s and logs every miss; a miss
@@ -317,29 +370,84 @@ export async function ensureManager(
     );
   }
 
+  const created = await createManager(paseo, workspaceId, {
+    providerSelection: providerSelection(profile),
+    modeId,
+    thinkingOptionId: profile.thinkingOptionId,
+    featureValues,
+    labels: chosenMode !== undefined ? { [MODE_SET_LABEL]: chosenMode } : {},
+    readInstructions: deps.readInstructions,
+    version: deps.version,
+  });
+  return { agentId: created.agentId, created: true, otherManagerIds: [], modeNotice: null, toolsNotice: created.toolsNotice };
+}
+
+/** What `createManager` creates; the caller has already decided the provider, mode and thinking. */
+export interface CreateManagerOptions extends Pick<EnsureManagerDeps, "readInstructions" | "version"> {
+  /** `provider/model`: `bm-manager/<model>` from the profile, or `bm-manager-fallback-<n>/<model>` for a replacement. */
+  providerSelection: string;
+  modeId?: string;
+  thinkingOptionId?: string;
+  featureValues?: Record<string, unknown>;
+  /**
+   * Added to `bm.role=manager` and `bm.version`: `bm.modeSet` when paseo-bm
+   * chose the mode (not for a profile mode passed on unchecked), `bm.replaces`
+   * for a replacement (delta 20260921 §4.5.2).
+   */
+  labels: Record<string, string>;
+  /** The Manager's first message: a replacement's `BM-HANDOVER`. None when absent. */
+  prompt?: string;
+}
+
+export interface CreateManagerResult {
+  agentId: string;
+  /** As `EnsureManagerResult.toolsNotice`. */
+  toolsNotice: string | null;
+}
+
+/**
+ * Creates a Manager in the workspace: the one code path for `manager.ensure`
+ * and for a replacement Manager (delta 20260921 §4.5.2), so both get the same
+ * instructions and Runtime facts (`readInstructions`), the same labels and the
+ * same `toolsNotice`.
+ *
+ * Throws `ManagerEnsureError` (`E_PROVIDER_UNAVAILABLE`) when the SDK rejects
+ * the create, or when the created agent comes back already failed (then that
+ * exact agent is archived before throwing).
+ */
+export async function createManager(
+  paseo: ManagerPaseo,
+  workspaceId: string,
+  options: CreateManagerOptions,
+): Promise<CreateManagerResult> {
+  const { providerSelection: selection, modeId, thinkingOptionId, featureValues, prompt } = options;
+  const systemPrompt = await options.readInstructions();
+  // `manager.ensure` names the profile, as it always has; a replacement names its provider.
+  const alias = providerId(selection) ?? selection;
+  const source = alias === MANAGER_PROFILE_ID ? `profile "${MANAGER_PROFILE_ID}"` : `provider "${selection}"`;
+
   let handle: ManagerAgentHandle;
   try {
     handle = await paseo.workspaces.ref(workspaceId).agents.create({
       config: {
-        provider: providerSelection(profile),
+        provider: selection,
         ...(modeId !== undefined ? { modeId } : {}),
-        ...(profile.thinkingOptionId !== undefined
-          ? { thinkingOptionId: profile.thinkingOptionId }
-          : {}),
+        ...(thinkingOptionId !== undefined ? { thinkingOptionId } : {}),
         ...(featureValues !== undefined ? { featureValues } : {}),
         systemPrompt,
       },
       title: MANAGER_TITLE,
       labels: {
         [MANAGER_ROLE_LABEL]: MANAGER_ROLE_VALUE,
-        [VERSION_LABEL]: deps.version ?? PLUGIN_VERSION,
-        ...(chosenMode !== undefined ? { [MODE_SET_LABEL]: chosenMode } : {}),
+        [VERSION_LABEL]: options.version ?? PLUGIN_VERSION,
+        ...options.labels,
       },
+      ...(prompt !== undefined ? { prompt } : {}),
     });
   } catch (cause) {
     throw new ManagerEnsureError(
       "E_PROVIDER_UNAVAILABLE",
-      `could not create the Manager with profile "${MANAGER_PROFILE_ID}": ${cause instanceof Error ? cause.message : String(cause)}`,
+      `could not create the Manager with ${source}: ${cause instanceof Error ? cause.message : String(cause)}`,
       { cause },
     );
   }
@@ -360,14 +468,13 @@ export async function ensureManager(
   }
 
   // Delta 20260921 §4.2.4: a Manager without Paseo tools cannot run a request.
-  const selection = providerSelection(profile);
   const supports = snapshot?.capabilities?.supportsMcpServers;
   recordTools("manager", handle.id, selection, supports);
   const toolsNotice =
     supports === false
       ? `This Manager runs on ${selection} without Paseo tools (on Pi this means pi-mcp-adapter is missing): it cannot create or message a Worker.`
       : null;
-  return { agentId: handle.id, created: true, otherManagerIds: [], modeNotice: null, toolsNotice };
+  return { agentId: handle.id, toolsNotice };
 }
 
 /**
