@@ -8,6 +8,10 @@ import { registerRoleHook } from "./server/role-hook";
 import { describeRoles } from "./server/roles";
 import { registerStopPropagation } from "./server/stop-propagation";
 import { registerAgentLabels } from "./server/agent-labels";
+import { registerFallbackRpcs } from "./server/fallback-rpc";
+import { registerFallbackDetection, replacementsFor } from "./server/fallback-state";
+import { createWorkerSwitch } from "./server/fallback-switch";
+import { createFallbackWaiter } from "./server/fallback-wait";
 import { registerFormatCheck } from "./server/format-check";
 import { registerNoticeQueue } from "./server/notice-queue";
 import { currentInstructions } from "./server/role-extras";
@@ -85,7 +89,7 @@ export default function contribute(server: PluginServerContext): () => void {
   // settings.paseo-bm.read` errors because this one line was missing
   // (bm-settings-rpc-stgv).
   server.registerSettings(dashboardSettings);
-  server.handle(agentsListRpc, (input, { paseo }) => listWorkspaceAgents(input, { paseo }));
+  server.handle(agentsListRpc, async (input, { paseo }) => listWorkspaceAgents(input, { paseo, replacements: await replacementsFor(paseo) }));
   server.handle(rolesDescribeRpc, (_input, { paseo }) => describeRoles({ paseo }));
   registerDashboardRpcs(server, {
     ensureManager: async (workspaceId, paseo) => {
@@ -118,6 +122,17 @@ export default function contribute(server: PluginServerContext): () => void {
   // Only an overrun found at a Worker's or Reviewer's turn end goes in here, and
   // only what is in here may be sent at a Manager's turn end (review b2).
   const budgetPending = new Map<string, BudgetOverrun>();
+  // delta 20260921 §4.4.4–§4.4.5: a Worker turn that ends on a provider-plan
+  // failure is classified and recorded as a fallback incident. Its own handler,
+  // not the collector's onRecorded, so detection never depends on the trace store.
+  // §4.4.9 (owner decision Q6 a): one timer per Wait click, set again after a
+  // reload at the first hook or fallback RPC that brings an SDK handle.
+  const fallbackWaiter = createFallbackWaiter();
+  const armWaits = (paseo: unknown) => void fallbackWaiter.ensureArmed(paseo);
+  const removeFallbackDetection = registerFallbackDetection(server, { onPaseo: armWaits });
+  // delta 20260921 §4.4.6: BM-FALLBACK to the Manager chat, fallback.incidents and fallback.act.
+  // §4.4.7: "Switch" creates the replacement Worker on the candidate's fallback alias.
+  const removeFallbackNotices = registerFallbackRpcs(server, { switch: createWorkerSwitch(), wait: fallbackWaiter.wait }, { onPaseo: armWaits });
   const removeCollector = registerCollector(server, {
     onRecorded: (event, { location, paseo }) =>
       paseo === undefined
@@ -130,6 +145,9 @@ export default function contribute(server: PluginServerContext): () => void {
     removeAgentLabels();
     removeFormatCheck();
     noticeQueue.remove();
+    removeFallbackDetection();
+    removeFallbackNotices();
+    fallbackWaiter.clear();
     removeCollector();
   };
 }

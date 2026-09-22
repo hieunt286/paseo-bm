@@ -243,11 +243,14 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
       "chat.beads",
       "chat.peers",
       "chat.waiting",
+      "fallback.act",
+      "fallback.incidents",
       "manager.ensure",
       "roles.describe",
       "roles.instructions",
       "roles.options",
       "roles.save-extra",
+      "roles.save-fallback",
       "roles.save-settings",
       "roles.settings",
       "setup.install-tool",
@@ -264,9 +267,10 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
     // WP-205 adds the trace collector on turn_started and turn_ended; delta
     // 20260918g labels a bm-* agent created without bm.role on agent.created,
     // and starts its once-per-run label scan on agent.turn_started too; its
-    // BM-FORMAT check runs on agent.turn_ended.
+    // BM-FORMAT check runs on agent.turn_ended; delta 20260921 adds the
+    // fallback detection on agent.turn_ended.
     expect([...onHooks.keys()].sort()).toEqual(["agent.created", "agent.turn_ended", "agent.turn_started"]);
-    expect(onHooks.get("agent.turn_ended")).toHaveLength(3);
+    expect(onHooks.get("agent.turn_ended")).toHaveLength(4);
     expect(onHooks.get("agent.turn_started")).toHaveLength(2);
     expect(onHooks.get("agent.created")).toHaveLength(1);
 

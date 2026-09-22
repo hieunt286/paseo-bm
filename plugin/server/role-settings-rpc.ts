@@ -17,7 +17,8 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { homedir } from "node:os";
 import { canonicalJson, roleConfigRevision, writeRoleConfig, type ConfigPaseo, type RoleConfigView } from "./config-writer";
-import { costOf } from "./model-costs";
+import { fallbackForSettings, handleRolesSaveFallback } from "./fallback-settings";
+import { asRecord, checkRoleChoice, isRoleAlias, modelOptionsOf, nonEmpty, pickableProviders, reasonOf } from "./role-choices";
 import { childFactLine, notifyChildFactChange, type SettingsPaseo } from "./settings-notices";
 import {
   LOOKUP_TIMEOUT_MS,
@@ -32,6 +33,7 @@ import {
 import {
   DashboardError,
   rolesOptionsRpc,
+  rolesSaveFallbackRpc,
   rolesSaveSettingsRpc,
   rolesSettingsRpc,
   type RolesSaveSettingsInput,
@@ -89,19 +91,6 @@ const PROVIDER_IDS = { manager: "bm-manager", worker: "bm-worker", reviewer: "bm
   BmRole,
   RoleSetting["providerId"]
 >;
-
-const reasonOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
-
-const nonEmpty = (value: unknown): string | null => (typeof value === "string" && value.trim() !== "" ? value : null);
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
-}
-
-/** A `bm-*` role alias (`bm-worker`, `bm-worker/<model>`, `bm-worker-fallback-1`), not a base provider. */
-function isRoleAlias(provider: string): boolean {
-  return /^bm-/i.test(provider.trim());
-}
 
 // ---------------------------------------------------------------------------
 // roles.settings
@@ -163,7 +152,8 @@ export async function handleRolesSettings(paseo: unknown, deps: RoleSettingsDeps
     return {
       revision: roleSettingsRevision({}),
       roles: ROLES.map(emptySetting),
-      fallback: null,
+      // No second config read for the install home: the chains show as the defaults.
+      fallback: (await fallbackForSettings(paseo, { ...deps, home: null })).fallback,
       warnings: [`paseo-bm could not read the Paseo configuration (${read.failure}); reopen Roles & models to try again.`],
       providers: await pickableProviders(paseo),
     };
@@ -208,82 +198,14 @@ export async function handleRolesSettings(paseo: unknown, deps: RoleSettingsDeps
   const worker = roles.find((setting) => setting.role === "worker")?.baseProvider ?? null;
   if (manager !== null && manager === worker) warnings.push(sharedPlanWarning(manager));
 
-  return { revision: roleSettingsRevision(config), roles, fallback: null, warnings, providers: await pickableProviders(paseo) };
-}
-
-/** The base providers the Edit form offers: available ones, never a `bm-*` alias, sorted; `[]` when Paseo cannot say. */
-async function pickableProviders(paseo: unknown): Promise<string[]> {
-  const available = await availableProviders(paseo);
-  return available === null ? [] : [...available].filter((id) => !isRoleAlias(id)).sort();
+  const chains = await fallbackForSettings(paseo, deps);
+  warnings.push(...chains.warnings);
+  return { revision: roleSettingsRevision(config), roles, fallback: chains.fallback, warnings, providers: await pickableProviders(paseo) };
 }
 
 // ---------------------------------------------------------------------------
 // roles.options
 // ---------------------------------------------------------------------------
-
-type ListedModel = Omit<RoleModelOption, "cost">;
-
-/** Paseo's models of `provider`, without prices; `[]` (and one log line) when they cannot be read. Never throws. */
-async function listedModelsOf(paseo: unknown, provider: string, log: (message: string) => void): Promise<ListedModel[]> {
-  const providers = (paseo as { providers?: { listModels?: unknown } } | null | undefined)?.providers;
-  const listModels = providers?.listModels;
-  if (typeof listModels !== "function") {
-    log(`[paseo-bm] this Paseo host cannot list models; Roles & models offers no model of ${provider}.`);
-    return [];
-  }
-  try {
-    const result = await withTimeout(listModels.call(providers, provider) as Promise<{ models?: unknown; error?: unknown } | null | undefined>);
-    if (result === TIMED_OUT) {
-      log(`[paseo-bm] reading the models of ${provider} took longer than ${LOOKUP_TIMEOUT_MS} ms; Roles & models offers none.`);
-      return [];
-    }
-    const failure = nonEmpty(result?.error);
-    if (failure !== null || !Array.isArray(result?.models)) {
-      log(`[paseo-bm] could not read the models of ${provider} (${failure ?? "no models listed"}); Roles & models offers none.`);
-      return [];
-    }
-    const out: ListedModel[] = [];
-    const seen = new Set<string>();
-    for (const raw of result.models as unknown[]) {
-      const model = asRecord(raw);
-      const id = nonEmpty(model?.["id"]);
-      if (model === null || id === null || seen.has(id)) continue;
-      seen.add(id);
-      const thinkingOptions: ListedModel["thinkingOptions"] = [];
-      let flaggedDefault: string | null = null;
-      const optionIds = new Set<string>();
-      for (const rawOption of Array.isArray(model["thinkingOptions"]) ? (model["thinkingOptions"] as unknown[]) : []) {
-        const option = asRecord(rawOption);
-        const optionId = nonEmpty(option?.["id"]);
-        if (option === null || optionId === null || optionIds.has(optionId)) continue;
-        optionIds.add(optionId);
-        thinkingOptions.push({ id: optionId, label: nonEmpty(option["label"]) ?? optionId });
-        if (flaggedDefault === null && option["isDefault"] === true) flaggedDefault = optionId;
-      }
-      out.push({
-        id,
-        label: nonEmpty(model["label"]) ?? id,
-        thinkingOptions,
-        defaultThinkingOptionId: nonEmpty(model["defaultThinkingOptionId"]) ?? flaggedDefault,
-      });
-    }
-    return out;
-  } catch (error) {
-    log(`[paseo-bm] could not read the models of ${provider} (${reasonOf(error)}); Roles & models offers none.`);
-    return [];
-  }
-}
-
-/** The models with their listed rates (`costOf`, §4.2.7); a model without one has `cost: null`. */
-async function modelOptionsOf(paseo: unknown, provider: string, log: (message: string) => void): Promise<RoleModelOption[]> {
-  const models = await listedModelsOf(paseo, provider, log);
-  return Promise.all(
-    models.map(async (model) => ({
-      ...model,
-      cost: await costOf(paseo, provider, model.id, log).catch(() => null),
-    })),
-  );
-}
 
 /**
  * Handler body of `roles.options`. `provider` must be a base provider: a
@@ -337,24 +259,6 @@ export async function handleRolesOptions(
 // roles.save-settings (delta 20260921 §4.3.3–§4.3.4, REQ-064, REQ-063 h)
 // ---------------------------------------------------------------------------
 
-/** The base providers Paseo reports as available, or `null` when it cannot say. Never throws. */
-async function availableProviders(paseo: unknown): Promise<Set<string> | null> {
-  const providers = (paseo as { providers?: { listAvailable?: unknown } } | null | undefined)?.providers;
-  const listAvailable = providers?.listAvailable;
-  if (typeof listAvailable !== "function") return null;
-  try {
-    const result = await withTimeout(listAvailable.call(providers) as Promise<{ providers?: unknown } | null | undefined>);
-    if (result === TIMED_OUT || !Array.isArray(result?.providers)) return null;
-    const ids = new Set<string>();
-    for (const entry of result.providers as Array<{ provider?: unknown; available?: unknown }>) {
-      if (entry?.available === true && typeof entry.provider === "string") ids.add(entry.provider);
-    }
-    return ids;
-  } catch {
-    return null;
-  }
-}
-
 /** The warnings of a saved role (REQ-063 h and the §4.3.3 notes); never blocking. */
 function saveWarnings(input: RolesSaveSettingsInput, capability: ProviderCapability, cost: RoleModelOption["cost"]): string[] {
   const warnings: string[] = [];
@@ -389,27 +293,7 @@ export async function handleRolesSaveSettings(
   deps: RoleSettingsDeps = {},
 ): Promise<{ revision: string; role: RoleSetting; warnings: string[]; notified: number }> {
   const log = deps.log ?? defaultLog;
-  const invalid = (detail: string) => new DashboardError("E_ROLE_SETTINGS_INVALID", detail);
-  if (isRoleAlias(input.baseProvider)) throw invalid(`"${input.baseProvider}" is a paseo-bm role alias, not a base provider`);
-  const available = await availableProviders(paseo);
-  if (available === null) throw invalid("Paseo cannot say which providers are available right now; try again");
-  if (!available.has(input.baseProvider)) throw invalid(`provider "${input.baseProvider}" is not available in Paseo`);
-
-  const [models, modes] = await Promise.all([modelOptionsOf(paseo, input.baseProvider, log), modesFor(paseo, input.baseProvider, log)]);
-  const model = models.find((entry) => entry.id === input.model);
-  if (model === undefined) throw invalid(`model "${input.model}" is not listed for ${input.baseProvider}`);
-  if (input.thinkingOptionId !== null && !model.thinkingOptions.some((option) => option.id === input.thinkingOptionId)) {
-    throw invalid(`thinking "${input.thinkingOptionId}" is not offered by ${input.model}`);
-  }
-  const capability = capabilityOf(modes);
-  if (input.modeId !== null) {
-    const mode = (modes ?? []).find((entry) => entry?.id === input.modeId);
-    if (mode === undefined) throw invalid(`mode "${input.modeId}" is not listed for ${input.baseProvider}`);
-    const tier = typeof mode.colorTier === "string" ? mode.colorTier.toLowerCase() : "";
-    if (input.role === "reviewer" && (tier === "dangerous" || tier === "planning")) {
-      throw invalid(`the Reviewer never runs in a ${tier} mode ("${input.modeId}")`);
-    }
-  }
+  const { model, capability } = await checkRoleChoice(input.role, input, paseo, log);
 
   const id = PROVIDER_IDS[input.role];
   // The creator's child line before the write, to tell live agents a change (§4.3.5).
@@ -432,9 +316,10 @@ export async function handleRolesSaveSettings(
 // Registration.
 // ---------------------------------------------------------------------------
 
-/** Registers `roles.settings`, `roles.options` and `roles.save-settings`. */
+/** Registers `roles.settings`, `roles.options`, `roles.save-settings` and `roles.save-fallback` (§4.4.3). */
 export function registerRoleSettingsRpcs(server: PluginServerContext): void {
   server.handle(rolesSettingsRpc, (_input, context) => handleRolesSettings(context.paseo));
   server.handle(rolesOptionsRpc, (input, context) => handleRolesOptions(input, context.paseo));
   server.handle(rolesSaveSettingsRpc, (input, context) => handleRolesSaveSettings(input, context.paseo));
+  server.handle(rolesSaveFallbackRpc, (input, context) => handleRolesSaveFallback(input, context.paseo));
 }

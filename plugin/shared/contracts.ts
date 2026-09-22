@@ -88,6 +88,12 @@ export const agentNodeSchema = z.object({
    * Defaults to true for older servers.
    */
   labelled: z.boolean().default(true),
+  /**
+   * The agent that replaced this one after a fallback switch: its `bm.replacedBy`
+   * label, else the replacement of a `switched` incident (delta 20260921
+   * §4.4.8). Defaults to null for older servers.
+   */
+  replacedBy: z.string().nullable().default(null),
 });
 
 /**
@@ -584,6 +590,12 @@ export const DASHBOARD_ERROR_CODES = [
   "E_ROLE_SETTINGS_INVALID",
   "E_ROLE_SETTINGS_CONFLICT",
   "E_ROLE_SETTINGS_WRITE_FAILED",
+  // Delta 20260921 §4.4.6: the fallback card's actions.
+  "E_FALLBACK_NOT_FOUND",
+  "E_FALLBACK_NOT_PENDING",
+  "E_FALLBACK_NO_CANDIDATE",
+  "E_FALLBACK_NO_RESET",
+  "E_FALLBACK_CREATE_FAILED",
 ] as const;
 
 export type DashboardErrorCode = (typeof DASHBOARD_ERROR_CODES)[number];
@@ -907,10 +919,45 @@ export const roleSettingSchema = z.object({
 });
 
 /**
+ * One entry of a role's fallback chain as the user saves it (delta 20260921
+ * §4.4.2–§4.4.3): a BASE provider (never a `bm-*` alias), one of its models,
+ * and optional thinking and mode (`null` = not set).
+ */
+export const fallbackEntryInputSchema = z.object({
+  baseProvider: z.string().min(1).max(200),
+  model: z.string().min(1).max(200),
+  thinkingOptionId: z.string().min(1).max(200).nullable(),
+  modeId: z.string().min(1).max(200).nullable(),
+});
+
+/**
+ * A role's fallback chain as Roles & models shows it: the policy (`ask`
+ * shows a card when the role hits a plan limit, `off` does nothing; `auto`
+ * only from phase 2a-18), the entries in order with the alias each runs on
+ * (`bm-<role>-fallback-<position>`), the capability and listed price of each
+ * entry's provider and model, and whether detection patterns come from the
+ * user's `role-fallback.json`.
+ */
+export const fallbackSettingsSchema = z.object({
+  role: bmRoleSchema,
+  policy: z.enum(["ask", "off", "auto"]),
+  entries: z.array(
+    fallbackEntryInputSchema.extend({
+      position: z.number().int().min(1).max(3),
+      alias: z.string(),
+      capability: providerCapabilitySchema,
+      cost: modelPriceSchema.nullable(),
+    }),
+  ),
+  patternsFromFile: z.boolean(),
+});
+
+/**
  * `roles.settings` — the three roles, always in the order manager, worker,
  * reviewer. `revision` is what `roles.save-settings` must send back: sha256 of
  * the canonical JSON of every `bm-*` provider and the whole profile array
- * (§4.3.2). `fallback` is always `null` until phase 2a-16 (§4.4.3).
+ * (§4.3.2). `fallback` holds the chain of each role whose chain is offered
+ * (`FALLBACK_ROLES`, §4.4.3); `null` when none is.
  * `warnings` are English sentences for the user, e.g. the shared-plan warning
  * when the Manager and the Worker extend the same base provider.
  */
@@ -920,7 +967,13 @@ export const rolesSettingsRpc = defineRpc({
   output: z.object({
     revision: z.string(),
     roles: z.array(roleSettingSchema),
-    fallback: z.null(),
+    fallback: z
+      .object({
+        manager: fallbackSettingsSchema.optional(),
+        worker: fallbackSettingsSchema.optional(),
+        reviewer: fallbackSettingsSchema.optional(),
+      })
+      .nullable(),
     warnings: z.array(z.string()),
     /** The base providers Paseo reports as available (never a `bm-*` alias), for the Edit form's Provider picker. */
     providers: z.array(z.string()),
@@ -985,7 +1038,98 @@ export const rolesSaveSettingsRpc = defineRpc({
   }),
 });
 
+/**
+ * `roles.save-fallback` — saves one role's policy and 0–3 fallback entries
+ * (delta 20260921 §4.4.3): the aliases through the config writer (so `revision`
+ * guards them like `roles.save-settings`), then `role-fallback.json`.
+ */
+export const rolesSaveFallbackRpc = defineRpc({
+  name: "roles.save-fallback",
+  input: z.object({
+    revision: z.string().min(1),
+    role: bmRoleSchema,
+    policy: z.enum(["ask", "off"]),
+    entries: z.array(fallbackEntryInputSchema).max(3),
+  }),
+  output: z.object({
+    revision: z.string(),
+    fallback: fallbackSettingsSchema,
+    warnings: z.array(z.string()),
+  }),
+});
+
+/**
+ * One recorded fallback incident (delta 20260921 §4.4.2, §4.4.5, REQ-065 j):
+ * an agent whose turn ended on a provider-plan failure, what was learnt about
+ * it (class, verbatim message cut to 500 characters, reset time), the next
+ * candidate of its role's chain, and what became of it. Stored in
+ * `<install home>/role-fallback-state.json`.
+ */
+export const fallbackIncidentSchema = z.object({
+  id: z.string().regex(/^fb-[0-9a-f]{12}$/),
+  role: bmRoleSchema,
+  workspaceId: z.string(),
+  /** `null` for a Manager, which serves a workspace, not a request. */
+  requestId: z.string().nullable(),
+  agentId: z.string(),
+  agentProvider: z.string(),
+  agentModel: z.string().nullable(),
+  /** The Worker of a Reviewer; the Manager of a Worker; `null` for a Manager. */
+  parentId: z.string().nullable(),
+  /** The chat whose card shows the incident. */
+  managerId: z.string().nullable(),
+  class: z.enum(["L1", "L2", "L4", "L5"]),
+  /** N1 (`failed`) or N2 (`completed`). */
+  signal: z.enum(["failed", "completed"]),
+  message: z.string().max(500),
+  perModelWindow: z.boolean(),
+  resetsAt: z.string().nullable(),
+  candidate: fallbackEntryInputSchema
+    .extend({ position: z.number().int().min(1).max(3), alias: z.string() })
+    .nullable(),
+  status: z.enum(["pending", "switched", "waiting", "resumed", "dismissed", "exhausted", "expired", "failed"]),
+  detectedAt: z.string(),
+  decidedAt: z.string().nullable(),
+  waitUntil: z.string().nullable(),
+  replacementId: z.string().nullable(),
+  error: z.string().nullable(),
+});
+
+/**
+ * `fallback.incidents` — the recorded incidents (§4.4.6), oldest first,
+ * filtered by workspace and/or ids when given. The fallback card and the
+ * waiting pill read their state here, never from the notice text, so an old
+ * notice never shows a button that no longer applies.
+ */
+export const fallbackIncidentsRpc = defineRpc({
+  name: "fallback.incidents",
+  input: z.object({ workspaceId: z.string().min(1).optional(), ids: z.array(z.string().min(1)).max(200).optional() }),
+  output: z.object({ incidents: z.array(fallbackIncidentSchema) }),
+});
+
+/**
+ * `fallback.act` — the user's choice on the card for a `pending` incident:
+ * switch to the candidate (§4.4.7), wait for the reset (§4.4.9), or handle it
+ * themselves (`dismiss`, §4.4.10). Returns the incident as it is afterwards.
+ */
+export const fallbackActRpc = defineRpc({
+  name: "fallback.act",
+  input: z.object({ incidentId: z.string().min(1), action: z.enum(["switch", "wait", "dismiss"]) }),
+  output: z.object({ incident: fallbackIncidentSchema }),
+});
+
+/**
+ * Furthest ahead a `resetsAt` may lie for the card to offer "Wait until …"
+ * and for `fallback.act` `wait` to accept it: 7 days (§4.4.6, §4.4.9).
+ */
+export const FALLBACK_MAX_WAIT_MS = 7 * 24 * 60 * 60 * 1000;
+
 export type ProviderCapabilityClass = z.infer<typeof providerCapabilitySchema>;
+export type FallbackActInput = z.infer<typeof fallbackActRpc.input>;
+export type FallbackIncident = z.infer<typeof fallbackIncidentSchema>;
+export type FallbackEntryInput = z.infer<typeof fallbackEntryInputSchema>;
+export type FallbackSettings = z.infer<typeof fallbackSettingsSchema>;
+export type RolesSaveFallbackInput = z.infer<typeof rolesSaveFallbackRpc.input>;
 export type RolesSaveSettingsInput = z.infer<typeof rolesSaveSettingsRpc.input>;
 export type RoleSetting = z.infer<typeof roleSettingSchema>;
 export type RolesSettings = z.infer<typeof rolesSettingsRpc.output>;
@@ -1010,6 +1154,12 @@ export const chatPeerSchema = z.object({
   labelled: z.boolean().default(true),
   /** Archived in Paseo: never a recipient, since a message would bring it back (delta 20260918f F12). */
   archived: z.boolean(),
+  /**
+   * A fallback agent took over from this one (`bm.replacedBy`, or the agent of
+   * a `switched` incident, delta 20260921 §4.4.8): never the request's Worker
+   * again. Defaults to false for older servers.
+   */
+  replaced: z.boolean().default(false),
 });
 
 /** One Worker waiting for the user's answer in a Manager's chat (delta 20260918d §4.8). */
@@ -1027,14 +1177,30 @@ export const waitingWorkerSchema = z.object({
 export type WaitingWorker = z.infer<typeof waitingWorkerSchema>;
 
 /**
+ * One `pending` fallback incident waiting for the user's decision in a live
+ * Manager's chat (delta 20260921 §4.4.6): `managerId` is the incident's, and
+ * `workspaceId` that Manager's, where its pill goes.
+ */
+export const waitingFallbackSchema = z.object({
+  managerId: agentIdSchema,
+  workspaceId: workspaceIdSchema,
+  incident: fallbackIncidentSchema,
+});
+
+export type WaitingFallback = z.infer<typeof waitingFallbackSchema>;
+
+/**
  * `chat.waiting` — for every paseo-bm Manager, the idle Workers whose latest
  * report to it is `blocked` with a `BM-QUESTIONS` block (delta 20260918d §4.8,
- * REQ-059 j). Read-only.
+ * REQ-059 j), and the `pending` fallback incidents whose card is in its chat
+ * (delta 20260921 §4.4.6), read from the incidents file, not the timeline, so
+ * they show even when the Manager's own turn failed. `fallback` defaults to
+ * empty for a server built before it. Read-only.
  */
 export const chatWaitingRpc = defineRpc({
   name: "chat.waiting",
   input: z.object({}),
-  output: z.object({ waiting: z.array(waitingWorkerSchema) }),
+  output: z.object({ waiting: z.array(waitingWorkerSchema), fallback: z.array(waitingFallbackSchema).default([]) }),
 });
 
 /**

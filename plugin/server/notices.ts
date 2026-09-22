@@ -56,6 +56,14 @@ export const TOOLS_NOTICE_MARKER = "BM-TOOLS";
  */
 export const SETTINGS_NOTICE_MARKER = "BM-SETTINGS";
 
+/**
+ * First words of the plugin's fallback notices (delta 20260921 §4.4.6,
+ * §4.4.9): `BM-FALLBACK` tells a Manager about an incident and its decision;
+ * `BM-RESUME` asks an agent to carry on after its usage reset.
+ */
+export const FALLBACK_NOTICE_MARKER = "BM-FALLBACK";
+export const RESUME_NOTICE_MARKER = "BM-RESUME";
+
 const PREFIXES: readonly string[] = [
   BUDGET_NOTICE_MARKER,
   REVIEWER_STOP_NOTICE_PREFIX,
@@ -63,6 +71,8 @@ const PREFIXES: readonly string[] = [
   FORMAT_NOTICE_MARKER,
   TOOLS_NOTICE_MARKER,
   SETTINGS_NOTICE_MARKER,
+  FALLBACK_NOTICE_MARKER,
+  RESUME_NOTICE_MARKER,
 ];
 
 /** True when this text is one of the plugin's own notices, not a person's words. */

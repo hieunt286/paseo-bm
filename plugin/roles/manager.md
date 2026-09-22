@@ -119,6 +119,8 @@ plugin's: your last `BM-ANSWERS` broke the template. Send the corrected block
 again to that Worker once it is not running; say nothing to the user about it.
 `BM-TOOLS` (plugin): tell the user in one line; no new Worker unless asked.
 `BM-SETTINGS` (plugin): its line replaces the matching `## Runtime facts` line.
+`BM-FALLBACK` (plugin): tell the user in one line and create no agent yourself;
+on `status: switched`, follow the agent on its `replacement` line.
 
 What to tell the user at each point:
 

@@ -329,6 +329,8 @@ Change the location with `--home <dir>` or `PASEO_BM_HOME`. paseo-bm refuses an 
 | `~/.paseo-bm/backups/<timestamp>/` | A copy of `config.json` taken before paseo-bm edits it (`paseo-config.json`), and copies of files paseo-bm deliberately overwrote. Kept until you prune them or remove them at uninstall. |
 | `~/.paseo-bm/traces/` | The Metric screen's records: `meta.json`, plus one directory per workspace with `meta.json` and `events-<YYYYMM>.jsonl`. This is **your data**, not part of the payload: it has no hash in `install.json`, it is never backed up, and installing or updating never touches it. Delete it from the Metric screen. |
 | `~/.paseo-bm/role-extras.json` | Your additional role instructions from the Setup screen. Like `traces/`, this is **your data**: no hash in `install.json`, never touched by an update or `--prune`. |
+| `~/.paseo-bm/role-fallback.json` | Your fallback chains from Roles & models: each role's policy and fallback entries (provider, model, thinking, mode), plus optional detection `patterns` you edit by hand. Your data, like `role-extras.json`. |
+| `~/.paseo-bm/role-fallback-state.json` | The fallback incidents: each agent that stopped on its provider plan, what was chosen on its card, and the replacement. At most 200 are kept. Your data, like `role-extras.json`. |
 | `~/.paseo-bm/.lock` | Process lock held while `install` or `uninstall` runs. `doctor` never takes it. |
 
 ### Paseo config: `~/.paseo/config.json`
@@ -341,6 +343,7 @@ The location follows `--paseo-home <dir>`, `PASEO_HOME`, or the directory the Pa
 | `daemon.mcp.injectIntoAgents` | `true`; the previous state is recorded so uninstall can restore it | Only with the trust consent (the same single consent) |
 | `agents.providers.bm-manager`, `agents.providers.bm-worker`, `agents.providers.bm-reviewer` | A derived provider `{ extends, label, paseoTools }` that reuses your existing provider login, with no command and no environment | Role registration |
 | `daemon.agentProfiles[]` entries whose `id` starts with `bm-` | The role's provider, model and name. Other profiles and their order are left untouched. | Role registration |
+| `agents.providers.bm-worker-fallback-<n>` (n = 1…3) | A derived provider `{ extends, label, paseoTools }` for each entry of the Worker's fallback chain, written by the plugin through Paseo's API. Removed with every other `bm-*` entry at uninstall. | When you save a fallback chain in Beads Manager → Setup → Roles & models |
 
 The `plugins` key is written **by Paseo** when paseo-bm runs `paseo plugin install`. After uninstall, Paseo leaves an empty `plugins: {}` behind; that key belongs to Paseo.
 
@@ -437,7 +440,7 @@ What stays, on purpose:
 - **Files you edited by hand** are kept and listed. `--force` deletes them too, after backing them up.
 - **Backups**, unless you chose to remove them.
 - **`install.json`, when the Paseo daemon is not running.** Run `uninstall --apply` again once Paseo is running.
-- **Your additional role instructions** (`~/.paseo-bm/role-extras.json`).
+- **Your additional role instructions** (`~/.paseo-bm/role-extras.json`), **your fallback chains** (`~/.paseo-bm/role-fallback.json`) and **the fallback incidents** (`~/.paseo-bm/role-fallback-state.json`).
 - **Agent skills**, the **beads tools** `br` and `bv`, and **Beads Manager, Worker and Reviewer agents** already in Paseo. Archive or delete the agents yourself.
 - The empty `plugins: {}` key Paseo leaves in `config.json`.
 

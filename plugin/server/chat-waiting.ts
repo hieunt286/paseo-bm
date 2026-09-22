@@ -1,18 +1,24 @@
 /**
  * `chat.waiting`: which Workers wait for the user's answer, per Manager
- * (delta 20260918d-card-replies §4.8, REQ-059 j). Read-only.
+ * (delta 20260918d-card-replies §4.8, REQ-059 j), and which fallback
+ * incidents wait for the user's decision (delta 20260921 §4.4.6). Read-only.
  *
- * The source is each Manager's live timeline, not the trace store: a report
- * reaches the store only when the Manager's turn ends, and the pill should
- * appear as soon as the question does.
+ * The Workers come from each Manager's live timeline, not the trace store: a
+ * report reaches the store only when the Manager's turn ends, and the pill
+ * should appear as soon as the question does. The incidents come from the
+ * incidents file, not the timeline, so their pill is right even when the
+ * Manager's own turn failed on the same plan.
  */
 import { parseQuestions } from "../shared/bm-questions";
 import { parseReports } from "../shared/bm-report";
-import type { WaitingWorker } from "../shared/contracts";
+import type { FallbackIncident, WaitingFallback, WaitingWorker } from "../shared/contracts";
 import { soleWorkerOf } from "../shared/sole-worker";
 import { peersOfWorkspace, workspaceRecordsReader } from "./chat-peers";
 import { bmAgentsOf, type DashboardPaseo } from "./dashboard-rpc";
+import { readIncidents, replacementsOf } from "./fallback-state";
 import { readTimelinePages } from "./live-timeline";
+import { installHomeOf } from "./role-extras";
+import { TIMED_OUT, withTimeout } from "./role-mode";
 
 /** How much of a Manager's timeline is read per call: one page, newest first. */
 export const WAITING_TIMELINE_PAGES = 1;
@@ -35,6 +41,8 @@ export interface WaitingCandidate {
   status: string;
   requestId: string | null;
   archived: boolean;
+  /** A fallback Worker replaced this one (delta 20260921 §4.4.8). */
+  replaced?: boolean;
 }
 
 /**
@@ -90,25 +98,65 @@ export function waitingOf(
   return out;
 }
 
-/** `chat.waiting` handler: every live Manager's waiting Workers. Never throws for one Manager. */
+/**
+ * The fallback incidents the pills count: `pending`, with a `managerId` that is
+ * one of `managers` (live ones: only a live chat shows a pill). Each carries
+ * its Manager's workspace, where the pill goes. In the order given (the
+ * incidents file keeps them oldest first).
+ */
+export function pendingFallbackOf(
+  managers: ReadonlyArray<{ id: string; workspaceId: string }>,
+  incidents: readonly FallbackIncident[],
+): WaitingFallback[] {
+  const workspaceOf = new Map(managers.map((manager) => [manager.id, manager.workspaceId]));
+  return incidents.flatMap((incident) => {
+    const workspaceId = incident.status === "pending" && incident.managerId !== null ? workspaceOf.get(incident.managerId) : undefined;
+    return workspaceId === undefined ? [] : [{ managerId: incident.managerId!, workspaceId, incident }];
+  });
+}
+
+export interface ChatWaitingDeps {
+  homedir?: () => string;
+  /** The install home; the handler looks it up (within the lookup budget), tests pass one. */
+  home?: string | null;
+  log?: (message: string) => void;
+}
+
+/** Every recorded incident; none when the install home or the file cannot be read. Never throws. */
+async function incidentsOf(paseo: DashboardPaseo, deps: ChatWaitingDeps): Promise<FallbackIncident[]> {
+  try {
+    const found = deps.home !== undefined ? deps.home : await withTimeout(installHomeOf(paseo, { homedir: deps.homedir }));
+    if (found === null || found === TIMED_OUT) return [];
+    return readIncidents(found, deps.log).incidents;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * `chat.waiting` handler: every live Manager's waiting Workers and pending
+ * fallback incidents. Never throws for one Manager.
+ */
 export async function handleChatWaiting(
   paseo: DashboardPaseo,
-  deps: { homedir?: () => string } = {},
-): Promise<{ waiting: WaitingWorker[] }> {
+  deps: ChatWaitingDeps = {},
+): Promise<{ waiting: WaitingWorker[]; fallback: WaitingFallback[] }> {
   const all = await bmAgentsOf(paseo);
   const managers = all.filter(
     (entry) => entry.facts.role === "manager" && !entry.facts.archived && entry.facts.status !== "closed" && entry.workspaceId !== null,
   );
-  if (managers.length === 0) return { waiting: [] };
+  if (managers.length === 0) return { waiting: [], fallback: [] };
 
   // Only a live Manager's chat shows pills, so agents elsewhere are never
   // looked at and their workspace's trace store never read (delta 20260918f
   // F11). The peers come from the helper `chat.peers` uses, so a pill and its
   // card see the same Workers (F12).
   const managerWorkspaces = new Set(managers.map((manager) => manager.workspaceId!));
+  const incidents = await incidentsOf(paseo, deps);
+  const replacements = replacementsOf(incidents);
   const workers: WaitingCandidate[] = [];
   for (const workspaceId of managerWorkspaces) {
-    for (const peer of await peersOfWorkspace(all, workspaceId, workspaceRecordsReader(paseo, workspaceId, deps))) {
+    for (const peer of await peersOfWorkspace(all, workspaceId, workspaceRecordsReader(paseo, workspaceId, deps), replacements)) {
       if (peer.role === "worker") workers.push({ ...peer, workspaceId });
     }
   }
@@ -126,5 +174,9 @@ export async function handleChatWaiting(
     }
     waiting.push(...waitingOf({ id: manager.facts.id, workspaceId: manager.workspaceId! }, entries, workers));
   }
-  return { waiting };
+  const fallback = pendingFallbackOf(
+    managers.map((manager) => ({ id: manager.facts.id, workspaceId: manager.workspaceId! })),
+    incidents,
+  );
+  return { waiting, fallback };
 }

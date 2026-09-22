@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { listAllAgents, roleOfAgent } from "../plugin/server/agent-role";
+import { listAllAgents, roleOfAgent, roleOfProvider } from "../plugin/server/agent-role";
 import { handleChatPeers } from "../plugin/server/chat-rpc";
 import { handleChatWaiting } from "../plugin/server/chat-waiting";
 import { bmAgentsOf, type DashboardPaseo } from "../plugin/server/dashboard-rpc";
+import { FALLBACK_ROLES, fallbackAlias, fallbackAliasOf, positionOfAlias } from "../plugin/shared/fallback";
 
 /**
  * Which paseo-bm role an agent has (delta 20260918g §4.1–§4.2, REQ-061 a).
@@ -90,6 +91,41 @@ describe("roleOfAgent", () => {
     for (const bad of [null, undefined, 42, "bm-worker", { labels: "x", provider: 7 }]) {
       expect(roleOfAgent(bad)).toBeNull();
     }
+  });
+});
+
+describe("fallback aliases (delta 20260921 §4.4.1, REQ-065 f)", () => {
+  it("run the role in their name, with or without a model, positions 1 to 3 only", () => {
+    expect(roleOfProvider("bm-worker-fallback-2/x")).toBe("worker");
+    expect(roleOfProvider("bm-reviewer-fallback-3")).toBe("reviewer");
+    expect(roleOfProvider("bm-manager-fallback-1/anthropic/claude-sonnet-4-6")).toBe("manager");
+    for (const other of ["bm-worker-fallback-4", "bm-worker-fallback-0", "bm-worker-fallback-", "bm-boss-fallback-1", "bm-worker-fallback-1x", "xbm-worker-fallback-1"]) {
+      expect(roleOfProvider(other)).toBeNull();
+    }
+  });
+
+  it("leave the three main aliases as they were", () => {
+    expect(roleOfProvider("bm-manager")).toBe("manager");
+    expect(roleOfProvider("bm-worker/claude-opus-5")).toBe("worker");
+    expect(roleOfProvider("bm-reviewer/gpt-5.6-sol")).toBe("reviewer");
+    expect(roleOfProvider("claude")).toBeNull();
+    expect(roleOfProvider(undefined)).toBeNull();
+  });
+
+  it("give an unlabelled agent on a fallback alias its role", () => {
+    expect(roleOfAgent({ labels: {}, provider: "bm-worker-fallback-1/qwen" })).toEqual({ role: "worker", labelled: false });
+  });
+
+  it("are named and read back by the shared helpers; the main alias is position 0", () => {
+    expect(fallbackAlias("worker", 2)).toBe("bm-worker-fallback-2");
+    expect(() => fallbackAlias("worker", 4)).toThrow(RangeError);
+    expect(fallbackAliasOf("bm-reviewer-fallback-3")).toEqual({ role: "reviewer", position: 3 });
+    expect(fallbackAliasOf("bm-reviewer-fallback-3/gpt")).toBeNull();
+    expect(positionOfAlias("bm-worker")).toBe(0);
+    expect(positionOfAlias("bm-worker-fallback-1")).toBe(1);
+    expect(positionOfAlias("claude")).toBeNull();
+    // Phase 2a-16 offers the Worker's chain only; 2a-17 adds the other two roles.
+    expect(FALLBACK_ROLES).toEqual(["worker"]);
   });
 });
 

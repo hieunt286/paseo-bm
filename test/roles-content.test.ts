@@ -162,10 +162,27 @@ describe("all three files", () => {
   // refuses (design F5). The "Talking to the user" paragraph has no wrap slack
   // left (+1 line). worker.md took the same line within its ceiling: the "Per
   // bead" paragraph under "Proving a change" was re-wrapped (7 -> 6 lines).
+  //
+  // manager.md 177 -> 179 for delta 20260921 phase 2a-16 (bead 332y.6, owner
+  // decision Q14 a, raised just enough): the Manager gains two lines for the
+  // plugin's BM-FALLBACK notice — tell the user in one line, create no agent,
+  // and follow the replacement Worker once switched. No paragraph of manager.md
+  // has wrap slack left.
+  //
+  // worker.md 397 -> 402 for delta 20260921 phase 2a-16 (bead 332y.8, owner
+  // decision Q14 a, raised just enough): a replacement Worker starts from the
+  // plugin's BM-HANDOVER, and the five-line paragraph that tells it to continue
+  // the request — read git status and git diff first, revert nothing, keep the
+  // review budget — sits with the other plugin messages under "Reporting". No
+  // paragraph of worker.md has wrap slack left.
+  //
+  // worker.md 402 -> 403 for bead 332y.11 (same decision): one line for the
+  // plugin's BM-RESUME notice after a usage reset; re-wrapping it into the
+  // handover paragraph saves no line.
   it.each([
-    ["worker.md", worker, 397],
+    ["worker.md", worker, 403],
     ["reviewer.md", reviewer, 164],
-    ["manager.md", manager, 177],
+    ["manager.md", manager, 179],
   ])("%s leads with the hard limits and stays under %i lines", (_name, text, limit) => {
     const headings = text.split("\n").filter((line) => line.startsWith("## "));
     expect(headings[0]).toBe("## RULES");
@@ -1084,6 +1101,29 @@ describe("the plugin's BM-FORMAT notice (delta 20260918g §4.10, REQ-061 j)", ()
   ])("%s takes a BM-SETTINGS line in place of its Runtime-facts line", (_name, text, from, to) => {
     const rule = "`BM-SETTINGS` (plugin): its line replaces the matching `## Runtime facts` line.";
     expect(between(text, from, to).replace(/\s+/g, " ")).toContain(rule);
+  });
+
+  // Delta 20260921 §4.4.8 (REQ-065 d): a replacement Worker continues the
+  // request from the plugin's handover, reverting nothing.
+  it("worker.md continues a request from a BM-HANDOVER", () => {
+    const rule =
+      "A first message that starts with `BM-HANDOVER` (plugin) hands you a request whose Worker stopped: continue it. Read `git status` and `git diff` first; every change there is the request's, never revert it. Reopen a closed bead only if a review blocks it. Continue the review budget from `reviewCalls` and open no new batch for one in review. Send `received` to `managerAgentId`.";
+    expect(between(worker, "## Reporting", "## Stop").replace(/\s+/g, " ")).toContain(rule);
+  });
+
+  // Delta 20260921 §4.4.9 (REQ-065 e): after the reset the plugin resumes the Worker.
+  it("worker.md carries on after a BM-RESUME", () => {
+    expect(between(worker, "## Reporting", "## Stop").replace(/\s+/g, " ")).toContain(
+      "`BM-RESUME` (plugin): your usage limit reset; continue where you stopped.",
+    );
+  });
+
+  // Delta 20260921 §4.4.6 (REQ-065 c): the Manager hears about a stopped
+  // Worker from the plugin and never creates the replacement itself.
+  it("manager.md tells the user about a BM-FALLBACK and creates no agent itself", () => {
+    const rule =
+      "`BM-FALLBACK` (plugin): tell the user in one line and create no agent yourself; on `status: switched`, follow the agent on its `replacement` line.";
+    expect(between(manager, "## Talking to the user").replace(/\s+/g, " ")).toContain(rule);
   });
 
   it("sits where each role already hears about the plugin's messages", () => {

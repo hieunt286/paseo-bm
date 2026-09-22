@@ -8,7 +8,7 @@ import { soleWorkerOf } from "../plugin/shared/sole-worker";
  */
 
 const REQ = "req-20260918T063746Z";
-const peer = (id: string, overrides: Partial<{ role: string; requestId: string | null; archived: boolean }> = {}) => ({
+const peer = (id: string, overrides: Partial<{ role: string; requestId: string | null; archived: boolean; replaced: boolean }> = {}) => ({
   id,
   role: "worker",
   requestId: REQ,
@@ -30,5 +30,12 @@ describe("soleWorkerOf", () => {
   it("ignores an archived Worker of the same request", () => {
     expect(soleWorkerOf([peer("w-old", { archived: true }), peer("w-new")], REQ)?.id).toBe("w-new");
     expect(soleWorkerOf([peer("w-old", { archived: true })], REQ)).toBeNull();
+  });
+
+  it("ignores a Worker a fallback Worker replaced, which keeps the request id (delta 20260921 §4.4.8)", () => {
+    expect(soleWorkerOf([peer("w-old", { replaced: true }), peer("w-new")], REQ)?.id).toBe("w-new");
+    expect(soleWorkerOf([peer("w-old", { replaced: true })], REQ)).toBeNull();
+    // Older servers send no flag: the peer counts as before.
+    expect(soleWorkerOf([peer("w1")], REQ)?.id).toBe("w1");
   });
 });

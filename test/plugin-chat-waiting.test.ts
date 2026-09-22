@@ -1,6 +1,11 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { handleChatWaiting, waitingOf, type WaitingCandidate, type WaitingEntry } from "../plugin/server/chat-waiting";
+import { handleChatWaiting, pendingFallbackOf, waitingOf, type WaitingCandidate, type WaitingEntry } from "../plugin/server/chat-waiting";
 import type { DashboardPaseo } from "../plugin/server/dashboard-rpc";
+import { ROLE_FALLBACK_STATE_FILE } from "../plugin/server/fallback-state";
+import { chatWaitingRpc, type FallbackIncident } from "../plugin/shared/contracts";
 
 /**
  * `chat.waiting` (delta 20260918d-card-replies §4.8, REQ-059 j): the Workers
@@ -159,7 +164,10 @@ describe("chat.waiting", () => {
       { homedir: () => "/nonexistent-bm-home" },
     );
     expect(result.waiting).toEqual([]);
-    expect(configGet).toHaveBeenCalledTimes(1);
+    expect(result.fallback).toEqual([]);
+    // One for the trace store, one for the fallback incidents file (delta
+    // 20260921 §4.4.6): a second trace-store read would make it three.
+    expect(configGet).toHaveBeenCalledTimes(2);
   });
 
   it("gives one pill, for the live Worker, when an archived Worker has the same request (delta 20260918f F12)", async () => {
@@ -187,5 +195,108 @@ describe("chat.waiting", () => {
   it("keeps the other Managers when one timeline cannot be read", async () => {
     const result = await handleChatWaiting(paseo({ m1: new Error("gone"), m2: [agentMessage(asking2)] }), { homedir: () => "/nonexistent-bm-home" });
     expect(result.waiting.map((w) => w.workerId)).toEqual(["w2"]);
+  });
+});
+
+describe("pending fallback incidents in chat.waiting (delta 20260921 §4.4.6)", () => {
+  const incident = (overrides: Partial<FallbackIncident> = {}): FallbackIncident => ({
+    id: "fb-3f9a2c1d7e4b",
+    role: "worker",
+    workspaceId: "wks_a",
+    requestId: REQ,
+    agentId: "w1",
+    agentProvider: "bm-worker/claude-opus-5",
+    agentModel: "claude-opus-5",
+    parentId: "m1",
+    managerId: "m1",
+    class: "L1",
+    signal: "failed",
+    message: "You've hit your usage limit.",
+    perModelWindow: false,
+    resetsAt: "2026-09-21T15:40:00Z",
+    candidate: { position: 1, alias: "bm-worker-fallback-1", baseProvider: "codex", model: "gpt-5.6-sol", thinkingOptionId: "high", modeId: null },
+    status: "pending",
+    detectedAt: "2026-09-21T14:00:00.000Z",
+    decidedAt: null,
+    waitUntil: null,
+    replacementId: null,
+    error: null,
+    ...overrides,
+  });
+  const managers = [
+    { id: "m1", workspaceId: "wks_a" },
+    { id: "m2", workspaceId: "wks_b" },
+  ];
+
+  it("counts only pending incidents, each for the live Manager it names, in that Manager's workspace", () => {
+    const mine = incident();
+    const other = incident({ id: "fb-000000000002", managerId: "m2", workspaceId: "wks_other" });
+    const incidents = [
+      mine,
+      other,
+      incident({ id: "fb-000000000003", status: "dismissed" }),
+      incident({ id: "fb-000000000004", status: "switched" }),
+      incident({ id: "fb-000000000005", status: "waiting" }),
+      incident({ id: "fb-000000000006", managerId: null }),
+      incident({ id: "fb-000000000007", managerId: "m9" }),
+    ];
+    expect(pendingFallbackOf(managers, incidents)).toEqual([
+      { managerId: "m1", workspaceId: "wks_a", incident: mine },
+      { managerId: "m2", workspaceId: "wks_b", incident: other },
+    ]);
+    expect(pendingFallbackOf([], incidents)).toEqual([]);
+  });
+
+  const entry = (id: string, role: string, workspaceId: string, extra: Record<string, unknown> = {}) => ({
+    agent: { id, workspaceId, status: "idle", title: `${role} ${id}`, labels: { "bm.role": role, ...(role === "worker" ? { "bm.requestId": REQ } : {}) }, ...extra },
+  });
+
+  function paseo(list: Array<ReturnType<typeof entry>>): DashboardPaseo {
+    return {
+      agents: {
+        list: vi.fn(async ({ filter }: { filter: { labels?: Record<string, string> } }) => ({
+          entries: list.filter((e) => filter.labels === undefined || e.agent.labels["bm.role"] === filter.labels["bm.role"]),
+        })),
+        // The Manager's own turn failed: its timeline cannot be read. The incidents still count.
+        ref: () => ({ timeline: { refetch: vi.fn(async () => Promise.reject(new Error("turn failed"))) } }),
+      },
+      workspaces: { list: vi.fn(async () => ({ entries: [] })) },
+      config: { get: vi.fn(async () => ({ config: {} })) },
+    };
+  }
+
+  function withIncidents<T>(incidents: FallbackIncident[], run: (home: string) => Promise<T>): Promise<T> {
+    const home = mkdtempSync(join(tmpdir(), "bm-chat-waiting-"));
+    writeFileSync(join(home, ROLE_FALLBACK_STATE_FILE), JSON.stringify({ version: 1, incidents }), { mode: 0o600 });
+    return run(home).finally(() => rmSync(home, { recursive: true, force: true }));
+  }
+
+  it("reads the incidents file, not the timeline, and leaves out a Manager that is archived", async () => {
+    const agents = [entry("m1", "manager", "wks_a"), entry("m3", "manager", "wks_c", { archivedAt: "2026-09-21T00:00:00.000Z" }), entry("w1", "worker", "wks_a")];
+    const pending = incident();
+    const result = await withIncidents([pending, incident({ id: "fb-000000000008", managerId: "m3" }), incident({ id: "fb-000000000009", status: "failed" })], (home) =>
+      handleChatWaiting(paseo(agents), { homedir: () => "/nonexistent-bm-home", home }),
+    );
+    expect(result).toEqual({ waiting: [], fallback: [{ managerId: "m1", workspaceId: "wks_a", incident: pending }] });
+  });
+
+  it("is empty with no live Manager, no install home, or an unreadable file", async () => {
+    const log = vi.fn();
+    expect(await withIncidents([incident()], (home) => handleChatWaiting(paseo([entry("w1", "worker", "wks_a")]), { home }))).toEqual({ waiting: [], fallback: [] });
+    expect((await handleChatWaiting(paseo([entry("m1", "manager", "wks_a")]), { homedir: () => "/nonexistent-bm-home" })).fallback).toEqual([]);
+    expect((await handleChatWaiting(paseo([entry("m1", "manager", "wks_a")]), { home: null })).fallback).toEqual([]);
+    const broken = mkdtempSync(join(tmpdir(), "bm-chat-waiting-"));
+    try {
+      writeFileSync(join(broken, ROLE_FALLBACK_STATE_FILE), "{ not json", { mode: 0o600 });
+      expect((await handleChatWaiting(paseo([entry("m1", "manager", "wks_a")]), { home: broken, log })).fallback).toEqual([]);
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(log.mock.calls[0]![0]).toMatch(/^\[paseo-bm\] /);
+    } finally {
+      rmSync(broken, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the contract additive: an answer without `fallback` still reads, as empty", () => {
+    expect(chatWaitingRpc.output.parse({ waiting: [] })).toEqual({ waiting: [], fallback: [] });
   });
 });

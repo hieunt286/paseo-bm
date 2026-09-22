@@ -171,10 +171,10 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     const { server, hooks } = setup();
     // One here (bm-wq6) plus the WP-205 collector's turn_started and turn_ended,
     // plus delta 20260918g's agent.created labelling, its turn_started scan and
-    // its turn_ended BM-FORMAT check.
-    expect(server.on).toHaveBeenCalledTimes(6);
+    // its turn_ended BM-FORMAT check, plus delta 20260921's fallback detection.
+    expect(server.on).toHaveBeenCalledTimes(7);
     expect([...hooks.keys()].sort()).toEqual(["agent.created", "agent.turn_ended", "agent.turn_started"]);
-    expect(hooks.get("agent.turn_ended")).toHaveLength(3);
+    expect(hooks.get("agent.turn_ended")).toHaveLength(4);
   });
 
   it("sends the notice only to the stopped Worker's running Reviewers (idle Worker on refresh)", async () => {
@@ -223,6 +223,13 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     const { run } = setup();
     const { paseo, sends } = fakePaseo({ agents: [reviewer("rev-a")], statuses: { [WORKER]: ["idle"] } });
     await run(event("bm-worker/gpt-5.6-sol"), paseo);
+    expect(sends).toEqual([{ id: "rev-a", text: REVIEWER_STOP_NOTICE }]);
+  });
+
+  it("recognises a fallback Worker bm-worker-fallback-1/<model> (delta 20260921 §4.4.1)", async () => {
+    const { run } = setup();
+    const { paseo, sends } = fakePaseo({ agents: [reviewer("rev-a")], statuses: { [WORKER]: ["idle"] } });
+    await run(event("bm-worker-fallback-1/qwen3-coder"), paseo);
     expect(sends).toEqual([{ id: "rev-a", text: REVIEWER_STOP_NOTICE }]);
   });
 
@@ -360,11 +367,13 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
   it("removes the hook on cleanup", () => {
     const { cleanup, hooks, removers } = setup();
     cleanup();
-    // Six removals: this hook, the WP-205 collector's turn_started and
-    // turn_ended, and delta 20260918g's agent.created, turn_started scan and
-    // turn_ended BM-FORMAT check. The map must end up empty.
+    // Seven removals: this hook, the WP-205 collector's turn_started and
+    // turn_ended, delta 20260918g's agent.created, turn_started scan and
+    // turn_ended BM-FORMAT check, and delta 20260921's fallback detection
+    // (turn_ended). The map must end up empty.
     expect([...removers].sort()).toEqual([
       "agent.created",
+      "agent.turn_ended",
       "agent.turn_ended",
       "agent.turn_ended",
       "agent.turn_ended",

@@ -424,6 +424,8 @@ Phân loại chữ, theo thứ tự, loại đầu tiên khớp thắng:
 
 - Mẫu mặc định nằm trong `plugin/shared/fallback-patterns.ts`. Đây là **điểm khởi đầu chưa kiểm trên sự cố thật** (đề xuất §1.5): nghiệm thu phase 2a-16 và điều kiện vào phase 2a-18 kiểm lại chúng.
 - L1 đứng trước L3 vì thông báo hết hạn mức của gói có thể chứa chữ "rate limit".
+- *(Errata 2026-09-22, Q16 a)* Mẫu `patterns` của người dùng có lượng từ lồng nhau bị bỏ khi biên dịch, log một dòng (§6).
+- *(Errata khi implement, bead `bm-phase-2a-16-fallback-worker-332y.4`)* Điều 2 của N2 chỉ xét tin **của chính agent**: một Worker được đánh thức bằng `BM-REVIEW` của Reviewer vẫn có thể hết hạn mức ngay trong lượt đó (REQ-065 a nói lượt "không có `BM-REPORT`" của agent).
 - Phân loại xong mà thuộc L3 hoặc L6 → không làm gì, như hôm nay.
 
 #### 4.4.5 Dựng sự cố
@@ -588,6 +590,15 @@ Luồng:
 
 Ghi `dismissed`, gửi `BM-FALLBACK` với `status: dismissed`. Không động tới agent nào.
 
+#### 4.4.11 Errata khi implement phase 2a-16 (không đổi quyết định nào)
+
+- **File hỏng không bao giờ bị ghi đè.** `role-fallback.json` không đọc được thì `roles.save-fallback` từ chối (`E_ROLE_SETTINGS_INVALID`, "fix or delete it") thay vì ghi mặc định đè lên, để khối `patterns` người dùng tự sửa không bị mất; khi lưu, mọi khoá plugin không quản lý được giữ nguyên. `role-fallback-state.json` không đọc được thì không ghi sự cố nào (một dòng log mỗi lần) cho tới khi người dùng sửa hoặc xoá file.
+- **Phát hiện có hook riêng.** `registerFallbackDetection` thêm một handler `agent.turn_ended`, không bám `onRecorded` của bộ thu thập, để việc phát hiện không phụ thuộc kho vết (kho khoá hay không ghi được thì vẫn nhận ra sự cố). Handler chỉ đọc thư mục cài đặt với lượt đã hỏng, hoặc lượt `completed` có câu trả lời ngắn và không làm gì khác.
+- **Tin của sự cố được che bí mật.** `message` qua `redactText` của bộ thu thập (REQ-048b) rồi mới cắt 500 ký tự.
+- **Đặt lại hẹn giờ "Wait".** Paseo không đưa plugin handle SDK nào lúc nạp (không có sự kiện khởi động, `PluginServerContext` không có `paseo`), nên hẹn giờ của các sự cố `waiting` được đặt lại ở hook hay RPC dự phòng đầu tiên có handle — cùng kiểu "một lần mỗi lần chạy" với lượt quét nhãn của delta 20260918g. Hẹn giờ đã quá hạn chạy ngay.
+- **Switch: lỗi trước khi tạo giữ `pending`.** Không đọc được Worker cũ hay thư mục của nó thì không tạo gì, sự cố vẫn `pending`; chỉ khi `agents.create` thất bại mới ghi `failed` (bước 8). Với provider có mode phân tầng, Worker thay thế được truyền mode tường minh theo đúng luật Worker của hook.
+- **Hợp đồng cộng thêm.** `agents.list` trả thêm `replacedBy` (nhãn `bm.replacedBy`, không có thì `replacementId` của sự cố `switched`) để cây agent ghi `· replaced by <id>`; `chat.waiting` trả thêm `fallback` (sự cố `pending` của các Manager đang sống) cho pill.
+
 ### 4.5 Phase 2a-17 — Dự phòng cho Reviewer và Manager (REQ-066)
 
 `FALLBACK_ROLES` thành `["worker", "reviewer", "manager"]`. Màn Roles & models hiện chuỗi cho cả ba vai trò (§4.3.1). Phát hiện, sự cố, thẻ, pill, "Chờ" và "Để tôi" dùng lại nguyên §4.4. Hai vai trò mới chỉ khác nhau ở **ai tạo agent thay thế** và **bàn giao gì**:
@@ -728,7 +739,7 @@ Mã lỗi mới vào sổ mã chung của sản phẩm (`DASHBOARD_ERROR_CODES` 
   - plugin tạo Worker và Manager; Reviewer do Worker tạo theo chỉ dẫn;
   - mỗi agent bị thay tối đa một lần;
   - chuỗi tối đa 3 mục, nên mỗi vai trò trong một phạm vi (request, hay workspace với Manager) có nhiều nhất 3 agent thay thế.
-- **Chèn lệnh:** `setAgentLabels` giữ các kiểm hiện có của `paseo-cli.ts`, gồm mẫu id agent và `execFile` không shell. Mẫu regex của người dùng được biên dịch trong `try`; mẫu hỏng bị bỏ và log. Chuỗi so bị cắt ở 2.000 ký tự trước khi chạy regex, để một mẫu tồi không treo được hook lâu.
+- **Chèn lệnh:** `setAgentLabels` giữ các kiểm hiện có của `paseo-cli.ts`, gồm mẫu id agent và `execFile` không shell. Mẫu regex của người dùng được biên dịch trong `try`; mẫu hỏng bị bỏ và log. Chuỗi so bị cắt ở 2.000 ký tự trước khi chạy regex, để một mẫu tồi không treo được hook lâu. *(Errata 2026-09-22, owner chốt Q16 a: việc cắt chỉ chặn được mẫu có chi phí tăng theo bình phương độ dài chuỗi. Mẫu backtracking theo hàm mũ như `(a+)+$` vẫn treo được tiến trình plugin — đo được ~200 ms ở 25 ký tự. Vì vậy mẫu của người dùng có **lượng từ lồng nhau** (nhóm được lặp mà bên trong có lượng từ, ví dụ `(a+)+`, `(\w*)*`) bị bỏ và log như mẫu hỏng. Dạng hiếm hơn như `(a\|aa)*$` vẫn lọt: rủi ro owner chấp nhận, vì file chỉ sửa tay.)*
 - **Yêu cầu rà soát:** owner review mã của `config-writer.ts`, `fallback.act` (Worker) và `createManager` dùng cho dự phòng trước bản phát hành của phase tương ứng. Đây là cùng loại với ba chỗ thiết kế gốc §7 đã nêu.
 
 ## 7. Reliability
@@ -829,3 +840,5 @@ Nghiệm thu trên daemon thật, do owner làm hoặc owner cho phép làm, ở
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Phase 2a-14 xong (beads `bm-phase-2a-14-any-provider-u2g9.1` → `.11`): dòng 3–6 của PRD delta §4 đã áp vào PRD gốc; errata §2.6 và §7 vào thiết kế gốc; checklist nghiệm thu phần 2a-14 và ghi chú phát hành `docs/operations/paseo-bm-release-notes-0.3.0-alpha.0.md`. Khi implement: hook tra mode của Worker cả khi bên tạo đã chọn mode (để bật `auto_accept` trên OpenCode); `costOf` nhận thêm `paseo` làm tham số đầu |
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Owner chốt Q14 a (nâng trần dòng file vai trò vừa đủ theo đo thật khi bead thêm câu) và Q15 a: errata §4.3.4, §6, §8, §10 — bước đọc lại kiểm chính mục `bm-*` vừa ghi; ghi đè song song trong cửa sổ đọc–ghi chỉ thu hẹp được, không báo được |
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Phase 2a-15 xong (beads `bm-phase-2a-15-roles-and-models-kj1p.1` → `.6`): errata §3.4 và §5 vào thiết kế gốc; ADR-008 Accepted; checklist nghiệm thu phần 2a-15 và ghi chú phát hành `docs/operations/paseo-bm-release-notes-0.3.0-alpha.1.md`. Khi implement: `roles.settings` trả thêm `providers` (errata §4.3.2); `BM-SETTINGS` đếm `notified` là số đích đã gửi hay xếp hàng |
+| 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Owner chốt Q16 a: errata §6 và §4.4.4 — cắt chuỗi 2.000 ký tự không chặn được mẫu backtracking theo hàm mũ; mẫu của người dùng có lượng từ lồng nhau bị bỏ và log. Errata khi implement §4.4.4 điều 2 của N2: chỉ xét khối trong tin của chính agent |
+| 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | Phase 2a-16 xong (beads `bm-phase-2a-16-fallback-worker-332y.1` → `.12`): errata §2.6, §3.1, §8 vào thiết kế gốc; GUIDE thêm hai file và alias dự phòng; checklist nghiệm thu phần 2a-16 và ghi chú phát hành `docs/operations/paseo-bm-release-notes-0.3.0-alpha.2.md`. Errata khi implement gom ở §4.4.11 |

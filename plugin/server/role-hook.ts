@@ -1,5 +1,5 @@
 import type { PluginBeforeRequests, PluginServerContext } from "@getpaseo/plugin/server";
-import { ROLE_BY_PROVIDER } from "./agent-role";
+import { roleOfProvider } from "./agent-role";
 import { providerId } from "./provider-id";
 import {
   LOOKUP_TIMEOUT_MS,
@@ -40,8 +40,10 @@ import {
  * §4.6): what the role files used to teach in a paragraph each is one lookup
  * here, and it cannot be got wrong by an agent.
  *
- * Provider ids map to roles through `ROLE_BY_PROVIDER` (agent-role.ts), the
- * same map every lookup uses to tell paseo-bm agents apart (delta 20260918g).
+ * Provider ids map to roles through `roleOfProvider` (agent-role.ts), the
+ * same rule every lookup uses to tell paseo-bm agents apart (delta 20260918g):
+ * the three main aliases and the fallback aliases `bm-<role>-fallback-<n>`
+ * (delta 20260921 §4.4.1). Lookups use the agent's real alias.
  */
 
 export { chooseModeId, type ProviderMode } from "./role-mode";
@@ -69,9 +71,8 @@ export function applyRoleInstructions(
     // Typed as required, but never trusted: a malformed request must not throw.
     const config = (request as Partial<AgentCreateRequest> | null | undefined)?.config;
     if (config === null || typeof config !== "object") return undefined;
-    const id = providerId(config.provider);
-    if (id === null || !Object.prototype.hasOwnProperty.call(ROLE_BY_PROVIDER, id)) return undefined;
-    const role = ROLE_BY_PROVIDER[id]!;
+    const role = roleOfProvider(config.provider);
+    if (role === null) return undefined;
     const base = BASE_INSTRUCTIONS[role];
     // The user's additions from the Setup screen come after the base, never instead of it.
     // Runtime facts sit between the two, so manager.ensure and this hook write the same text.
@@ -107,9 +108,10 @@ export function applyRoleMode(
     const config = (request as Partial<AgentCreateRequest> | null | undefined)?.config;
     if (config === null || typeof config !== "object") return undefined;
     const id = providerId(config.provider);
-    if (id === null || !Object.prototype.hasOwnProperty.call(ROLE_BY_PROVIDER, id)) return undefined;
+    const role = roleOfProvider(id);
+    if (id === null || role === null) return undefined;
     const current = typeof config.modeId === "string" && config.modeId.trim() !== "" ? config.modeId : undefined;
-    const modeId = chooseModeId(ROLE_BY_PROVIDER[id]!, modes, current, profileModeId);
+    const modeId = chooseModeId(role, modes, current, profileModeId);
     if (modeId === undefined || modeId === current) return undefined;
     if (current !== undefined) {
       console.warn(`[paseo-bm] ${id} was created in mode "${current}", which that role must not use; starting it in "${modeId}" instead.`);
@@ -150,9 +152,8 @@ export function applyRoleProfile(request: AgentCreateRequest, profile: RoleProfi
     if (profile === null) return undefined;
     const config = (request as Partial<AgentCreateRequest> | null | undefined)?.config;
     if (config === null || typeof config !== "object") return undefined;
-    const id = providerId(config.provider);
-    if (id === null || !Object.prototype.hasOwnProperty.call(ROLE_BY_PROVIDER, id)) return undefined;
-    const role = ROLE_BY_PROVIDER[id]!;
+    const role = roleOfProvider(config.provider);
+    if (role === null) return undefined;
     if (role !== "worker" && role !== "reviewer") return undefined;
 
     const next: Record<string, unknown> = { ...config };
@@ -194,9 +195,8 @@ export function applyRunPosture(
   try {
     const config = (request as Partial<AgentCreateRequest> | null | undefined)?.config;
     if (config === null || typeof config !== "object") return undefined;
-    const id = providerId(config.provider);
-    if (id === null || !Object.prototype.hasOwnProperty.call(ROLE_BY_PROVIDER, id)) return undefined;
-    const role = ROLE_BY_PROVIDER[id]!;
+    const role = roleOfProvider(config.provider);
+    if (role === null) return undefined;
     if (!ROLE_GETS_MODE[role]) return undefined;
     const own = config.featureValues;
     const current = {
@@ -248,8 +248,9 @@ function modeLookupFor(request: AgentCreateRequest): string | null {
   try {
     const config = (request as Partial<AgentCreateRequest> | null | undefined)?.config;
     const id = providerId(config?.provider);
-    if (id === null || !Object.prototype.hasOwnProperty.call(ROLE_BY_PROVIDER, id)) return null;
-    return ROLE_GETS_MODE[ROLE_BY_PROVIDER[id]!] ? id : null;
+    const role = roleOfProvider(id);
+    if (id === null || role === null) return null;
+    return ROLE_GETS_MODE[role] ? id : null;
   } catch {
     return null;
   }
@@ -276,7 +277,7 @@ async function prepare(
   }
   const cwd = typeof request?.config?.cwd === "string" ? request.config.cwd : undefined;
   const id = providerId(request?.config?.provider);
-  const role = id !== null && Object.prototype.hasOwnProperty.call(ROLE_BY_PROVIDER, id) ? ROLE_BY_PROVIDER[id] : undefined;
+  const role = roleOfProvider(id) ?? undefined;
   // The Worker's or Reviewer's own profile: its mode (bm-msy), and its
   // thinking and features (delta 20260921 §4.1.1). One read, whether or not
   // the mode needs a lookup: a Worker created WITH a mode still gets the
@@ -295,8 +296,7 @@ async function prepare(
 
 function isBmRequest(request: AgentCreateRequest): boolean {
   try {
-    const id = providerId((request as Partial<AgentCreateRequest> | null | undefined)?.config?.provider);
-    return id !== null && Object.prototype.hasOwnProperty.call(ROLE_BY_PROVIDER, id);
+    return roleOfProvider((request as Partial<AgentCreateRequest> | null | undefined)?.config?.provider) !== null;
   } catch {
     return false;
   }

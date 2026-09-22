@@ -153,11 +153,13 @@ function agentLabel(agent: AgentNode): string {
  * The role text of a row: `Manager`, or `Manager · no label` for a paseo-bm
  * agent with no valid `bm.role` label — started outside Beads Manager and
  * recognised by its provider (delta 20260918g §4.4). An `Unknown role` row
- * already says as much, so it gets no mark.
+ * already says as much, so it gets no mark. An agent a fallback agent took
+ * over from reads `· replaced by <id>`, whatever its role (delta 20260921 §4.4.8).
  */
-export function rowRoleLabel(agent: Pick<AgentNode, "role" | "labelled">): string {
+export function rowRoleLabel(agent: Pick<AgentNode, "role" | "labelled"> & { replacedBy?: string | null }): string {
   const role = roleLabel(agent.role);
-  return agent.labelled === false && agent.role !== "unknown" ? `${role} · no label` : role;
+  const label = agent.labelled === false && agent.role !== "unknown" ? `${role} · no label` : role;
+  return agent.replacedBy ? `${label} · replaced by ${agent.replacedBy}` : label;
 }
 
 function flatten(nodes: readonly AgentTreeNode[], depth: number, out: AgentRow[]): AgentRow[] {

@@ -1,6 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WAITING_POLL_MS, fnv1a32Hex, pillIdOf, pillOf, planPills, questionCountOf } from "../plugin/client/waiting-pills-model";
-import type { WaitingWorker } from "../plugin/shared/contracts";
+import {
+  FALLBACK_PILL_ICON,
+  WAITING_PILL_ICON,
+  WAITING_POLL_MS,
+  fallbackPillIdOf,
+  fallbackPillsOf,
+  fnv1a32Hex,
+  pillChatOf,
+  pillIdOf,
+  pillOf,
+  planPills,
+  questionCountOf,
+} from "../plugin/client/waiting-pills-model";
+import type { FallbackIncident, WaitingFallback, WaitingWorker } from "../plugin/shared/contracts";
 
 /**
  * The "questions waiting" pills (delta 20260918d-card-replies §4.8, REQ-059 j):
@@ -101,6 +113,88 @@ describe("planning the pills", () => {
   });
 });
 
+const incident = (overrides: Partial<FallbackIncident> = {}): FallbackIncident => ({
+  id: "fb-3f9a2c1d7e4b",
+  role: "worker",
+  workspaceId: "wks_a",
+  requestId: REQ,
+  agentId: "w1",
+  agentProvider: "bm-worker/claude-opus-5",
+  agentModel: "claude-opus-5",
+  parentId: "m1",
+  managerId: "m1",
+  class: "L1",
+  signal: "failed",
+  message: "You've hit your usage limit.",
+  perModelWindow: false,
+  resetsAt: "2026-09-21T15:40:00Z",
+  candidate: { position: 1, alias: "bm-worker-fallback-1", baseProvider: "codex", model: "gpt-5.6-sol", thinkingOptionId: "high", modeId: null },
+  status: "pending",
+  detectedAt: "2026-09-21T14:00:00.000Z",
+  decidedAt: null,
+  waitUntil: null,
+  replacementId: null,
+  error: null,
+  ...overrides,
+});
+
+/** A `chat.waiting` fallback entry: the incident in its Manager's chat. */
+const waitingOn = (managerId: string, workspaceId: string, overrides: Partial<FallbackIncident> = {}): WaitingFallback => ({
+  managerId,
+  workspaceId,
+  incident: incident({ managerId, ...overrides }),
+});
+
+describe("a Manager's fallback pill (delta 20260921 §4.4.6)", () => {
+  it("counts the pending incidents of that Manager only, one pill per Manager", () => {
+    const pills = fallbackPillsOf([
+      waitingOn("m1", "wks_a"),
+      waitingOn("m1", "wks_a", { id: "fb-000000000002" }),
+      waitingOn("m2", "wks_b", { id: "fb-000000000003" }),
+      // Not pending, or not this Manager's: never counted, even if sent.
+      waitingOn("m1", "wks_a", { id: "fb-000000000004", status: "dismissed" }),
+      waitingOn("m1", "wks_a", { id: "fb-000000000005", status: "switched" }),
+      { managerId: "m1", workspaceId: "wks_a", incident: incident({ id: "fb-000000000006", managerId: "m9" }) },
+      // Listed twice: counted once.
+      waitingOn("m1", "wks_a"),
+    ]);
+    expect(pills.map((pill) => [pill.id, pill.label, pill.incidents.map((i) => i.id)])).toEqual([
+      ["bm-fallback-m1", "Fallback · 2 decisions", ["fb-3f9a2c1d7e4b", "fb-000000000002"]],
+      ["bm-fallback-m2", "Fallback · 1 decision", ["fb-000000000003"]],
+    ]);
+    expect(pills[0]).toMatchObject({ kind: "fallback", managerId: "m1", workspaceId: "wks_a" });
+    expect(pills[1]!.title).toBe("An agent stopped by its provider plan waits for your decision");
+    expect(pills[0]!.title).toBe("2 agents stopped by their provider plan wait for your decision");
+    expect(fallbackPillIdOf("m7")).toBe("bm-fallback-m7");
+    expect(pillChatOf(pills[1]!)).toEqual({ managerId: "m2", workspaceId: "wks_b" });
+  });
+
+  it("is not made when nothing is pending", () => {
+    expect(fallbackPillsOf([])).toEqual([]);
+    expect(fallbackPillsOf([waitingOn("m1", "wks_a", { status: "waiting" }), waitingOn("m1", "wks_a", { status: "failed" })])).toEqual([]);
+  });
+
+  it("sits next to the question pills, redrawn when its incidents change and removed when none is pending", () => {
+    const asked = entry();
+    expect(pillChatOf(pillOf(asked)!)).toEqual({ managerId: "m1", workspaceId: "wks_a" });
+    const first = planPills(new Map(), [asked], [waitingOn("m1", "wks_a")]);
+    expect(first.add.map((pill) => [pill.id, pill.label])).toEqual([
+      ["bm-waiting-w1", "Worker · Card replies · 2 questions"],
+      ["bm-fallback-m1", "Fallback · 1 decision"],
+    ]);
+    const shown = new Map(first.add.map((pill) => [pill.id, pill.key]));
+    expect(planPills(shown, [asked], [waitingOn("m1", "wks_a")])).toEqual({ add: [], update: [], remove: [] });
+    // One more incident redraws the pill; so does a different one at the same count.
+    const more = planPills(shown, [asked], [waitingOn("m1", "wks_a"), waitingOn("m1", "wks_a", { id: "fb-000000000002" })]);
+    expect(more.update.map((pill) => [pill.id, pill.label])).toEqual([["bm-fallback-m1", "Fallback · 2 decisions"]]);
+    const swapped = planPills(shown, [asked], [waitingOn("m1", "wks_a", { id: "fb-000000000002" })]);
+    expect(swapped.update.map((pill) => pill.id)).toEqual(["bm-fallback-m1"]);
+    // Decided: the pill goes, the question pill stays.
+    expect(planPills(shown, [asked], [waitingOn("m1", "wks_a", { status: "dismissed" })])).toEqual({ add: [], update: [], remove: ["bm-fallback-m1"] });
+    expect(planPills(shown, [asked])).toEqual({ add: [], update: [], remove: ["bm-fallback-m1"] });
+  });
+});
+
 // `waiting-pills.tsx` draws a chat card, so `react-native` is replaced by inert
 // stand-ins, as in test/plugin-launcher.test.ts.
 vi.mock("react-native", () => ({
@@ -151,5 +245,55 @@ describe("a pill keeps its popover when it is redrawn (delta 20260918f F13)", ()
 
     stop();
     expect(waitingEntryOf(pillIdOf("w1"))).toBeUndefined();
+  });
+});
+
+describe("the fallback pill's popover (delta 20260921 §4.4.6)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("goes on the Manager's chat and shows that Manager's pending incidents, newest set after each read", async () => {
+    vi.useFakeTimers();
+    const pillsPath = "../plugin/client/waiting-pills.tsx";
+    const { registerWaitingPills, fallbackEntriesOf, waitingEntryOf } = (await import(pillsPath)) as {
+      registerWaitingPills: (client: unknown) => () => void;
+      fallbackEntriesOf: (pillId: string) => FallbackIncident[] | undefined;
+      waitingEntryOf: (pillId: string) => WaitingWorker | undefined;
+    };
+    const answers = [
+      { waiting: [], fallback: [waitingOn("m1", "wks_a")] },
+      { waiting: [], fallback: [waitingOn("m1", "wks_a"), waitingOn("m1", "wks_a", { id: "fb-000000000002" })] },
+      { waiting: [], fallback: [] },
+    ];
+    const added: Array<{ id: string; workspaceId: string; agentId: string; button: { icon: string; label: string; behavior: { Content: unknown } } }> = [];
+    const updates: Array<{ label: string; behavior: { Content: unknown } }> = [];
+    const removed = vi.fn();
+    const client = {
+      rpc: vi.fn(async () => answers.shift() ?? { waiting: [], fallback: [] }),
+      addComposerPill: vi.fn((registration: (typeof added)[number]) => {
+        added.push(registration);
+        return { update: vi.fn((button: (typeof updates)[number]) => updates.push(button)), remove: removed };
+      }),
+    };
+
+    const stop = registerWaitingPills(client);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(added).toHaveLength(1);
+    expect(added[0]).toMatchObject({ id: "bm-fallback-m1", workspaceId: "wks_a", agentId: "m1" });
+    expect(added[0]!.button).toMatchObject({ icon: FALLBACK_PILL_ICON, label: "Fallback · 1 decision" });
+    expect(FALLBACK_PILL_ICON).not.toBe(WAITING_PILL_ICON);
+    expect(fallbackEntriesOf(fallbackPillIdOf("m1"))?.map((i) => i.id)).toEqual(["fb-3f9a2c1d7e4b"]);
+    expect(waitingEntryOf(fallbackPillIdOf("m1"))).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(WAITING_POLL_MS);
+    expect(updates.map((button) => button.label)).toEqual(["Fallback · 2 decisions"]);
+    expect(updates[0]!.behavior.Content).toBe(added[0]!.button.behavior.Content);
+    expect(fallbackEntriesOf(fallbackPillIdOf("m1"))?.map((i) => i.id)).toEqual(["fb-3f9a2c1d7e4b", "fb-000000000002"]);
+
+    await vi.advanceTimersByTimeAsync(WAITING_POLL_MS);
+    expect(removed).toHaveBeenCalledTimes(1);
+    expect(fallbackEntriesOf(fallbackPillIdOf("m1"))).toBeUndefined();
+    stop();
   });
 });

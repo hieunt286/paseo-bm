@@ -123,7 +123,17 @@ describe("provider filtering", () => {
     },
   );
 
-  it.each(["claude", "codex/gpt-5.6-sol", "opencode", ""])("ignores %o", async (provider) => {
+  it.each([
+    ["bm-worker-fallback-1/claude-opus-5", "worker"],
+    ["bm-reviewer-fallback-2", "reviewer"],
+  ])("collects a turn of a fallback agent %s with its role (delta 20260921 §4.4.1)", async (provider, role) => {
+    const built = await buildRecord(asEvent(turnEnded({ agent: { ...turnEnded().agent, provider } })), {
+      location,
+    });
+    expect(built?.record.role).toBe(role);
+  });
+
+  it.each(["claude", "codex/gpt-5.6-sol", "opencode", "", "bm-worker-fallback-4"])("ignores %o", async (provider) => {
     const built = await buildRecord(asEvent(turnEnded({ agent: { ...turnEnded().agent, provider } })), {
       location,
     });

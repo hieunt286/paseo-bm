@@ -311,6 +311,7 @@ describe("checkReviewBudget", () => {
     const pending = new Map<string, BudgetOverrun>();
     expect(await checkReviewBudget(ended("x", "claude"), { location, paseo, told, pending })).toBe("ignored");
     expect(await checkReviewBudget(ended("y", "bm-workers"), { location, paseo, told, pending })).toBe("ignored");
+    expect(await checkReviewBudget(ended("z", "bm-worker-fallback-4"), { location, paseo, told, pending })).toBe("ignored");
     expect(
       await checkReviewBudget(
         { agent: { id: WORKER, workspaceId: null, provider: "bm-worker" } } as never,

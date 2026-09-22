@@ -488,7 +488,11 @@ function oldestFirst(a: ListedAgentSnapshot, b: ListedAgentSnapshot): number {
  */
 export async function listWorkspaceAgents(
   input: { workspaceId: string },
-  deps: { paseo: AgentDirectoryPaseo },
+  deps: {
+    paseo: AgentDirectoryPaseo;
+    /** Agent id → its replacement, from `switched` fallback incidents (delta 20260921 §4.4.8). */
+    replacements?: ReadonlyMap<string, string>;
+  },
 ): Promise<{ agents: AgentNode[] }> {
   const all = await listAllAgents((options) => deps.paseo.agents.list(options), {
     includeArchived: false,
@@ -529,6 +533,7 @@ export async function listWorkspaceAgents(
         parentId: parent !== undefined && members.has(parent) ? parent : null,
         updatedAt: agent.updatedAt,
         labelled: roleOfAgent(agent)?.labelled ?? false,
+        replacedBy: agent.labels["bm.replacedBy"] ?? deps.replacements?.get(agent.id) ?? null,
       };
     });
   return { agents };

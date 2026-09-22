@@ -1,19 +1,23 @@
 /**
  * What the Setup screen says (delta 20260916-setup-screen), and what its
- * Roles & models section shows and saves (delta 20260921 §4.3.1), without a
- * renderer.
+ * Roles & models section shows and saves (delta 20260921 §4.3.1), fallback
+ * chains included (§4.4.3), without a renderer.
  *
  * Pure: no React, no React Native, no `server/` import.
  */
 import type {
   BmRole,
+  FallbackEntryInput,
+  FallbackSettings,
   RoleModelOption,
   RoleSetting,
   RolesOptions,
+  RolesSaveFallbackInput,
   RolesSaveSettingsInput,
   RolesSettings,
   SetupStatus,
 } from "../shared/contracts";
+import { MAX_FALLBACK_ENTRIES } from "../shared/fallback";
 import type { Badge, GraphNode } from "./dashboard-model";
 import { errorMessageOf } from "./launch-manager";
 
@@ -181,13 +185,17 @@ export function roleSettingText(setting: RoleSetting, options?: RolesOptions): s
   return parts.join(" · ");
 }
 
-/** The distinct base providers of the roles, whose `roles.options` label the rows; never a `bm-*` alias. */
+/**
+ * The distinct base providers of the roles, then of their fallback entries,
+ * whose `roles.options` label the rows; never a `bm-*` alias.
+ */
 export function rowOptionProviders(settings: RolesSettings): string[] {
   const out: string[] = [];
-  for (const setting of settings.roles) {
-    const provider = setting.baseProvider;
+  const add = (provider: string | null) => {
     if (provider !== null && !isRoleAlias(provider) && !out.includes(provider)) out.push(provider);
-  }
+  };
+  for (const setting of settings.roles) add(setting.baseProvider);
+  for (const chain of fallbackBlocks(settings)) for (const entry of chain.entries) add(entry.baseProvider);
   return out;
 }
 
@@ -405,4 +413,122 @@ export function applySavedRole(settings: RolesSettings, result: { revision: stri
     revision: result.revision,
     roles: settings.roles.map((setting) => (setting.role === result.role.role ? result.role : setting)),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Fallback chains (delta 20260921 §4.3.1, §4.4.3, REQ-065 f).
+// ---------------------------------------------------------------------------
+
+/** The policy row under a role: `On a usage limit: (•) Ask me ( ) Off`. "Auto switch" arrives in phase 2a-18. */
+export const FALLBACK_POLICY_CHOICES: ReadonlyArray<{ id: "ask" | "off"; label: string }> = [
+  { id: "ask", label: "Ask me" },
+  { id: "off", label: "Off" },
+];
+
+/**
+ * The chains to show, in role order: one block per role present in
+ * `roles.settings.fallback`. The server decides which roles are offered
+ * (`FALLBACK_ROLES`), so a later phase enables more blocks without a client change.
+ */
+export function fallbackBlocks(settings: RolesSettings): FallbackSettings[] {
+  const chains = settings.fallback;
+  if (chains === null || chains === undefined) return [];
+  return SETUP_ROLES.map((entry) => chains[entry.role]).filter((chain): chain is FallbackSettings => chain !== undefined);
+}
+
+/** What a chain's block holds while the user edits it. */
+export interface FallbackDraft {
+  policy: "ask" | "off";
+  entries: FallbackEntryInput[];
+}
+
+/** The draft a block starts from: the chain as saved. (A hand-written `auto` reads as Ask me until phase 2a-18.) */
+export function fallbackDraftOf(chain: FallbackSettings): FallbackDraft {
+  return {
+    policy: chain.policy === "off" ? "off" : "ask",
+    entries: chain.entries.map(({ baseProvider, model, thinkingOptionId, modeId }) => ({ baseProvider, model, thinkingOptionId, modeId })),
+  };
+}
+
+/** One entry row: `<Provider> · <model> · thinking <id | provider default>`, plus the mode when one is set. */
+export function fallbackEntryText(entry: FallbackEntryInput, options?: RolesOptions): string {
+  const listed = optionsFor(entry.baseProvider, options);
+  const parts = [
+    providerLabel(entry.baseProvider),
+    listed?.models.find((model) => model.id === entry.model)?.label ?? entry.model,
+    `thinking ${entry.thinkingOptionId ?? "provider default"}`,
+  ];
+  if (entry.modeId !== null) parts.push(`mode ${listed?.modes.find((mode) => mode.id === entry.modeId)?.label ?? entry.modeId}`);
+  return parts.join(" · ");
+}
+
+/** The listed price of a saved entry, as the Edit form shows it; `null` when unknown. */
+export function fallbackPriceText(entry: FallbackSettings["entries"][number]): string | null {
+  return entry.cost === null ? null : `~$${entry.cost.inputUsdPerMTok} / $${entry.cost.outputUsdPerMTok} per 1M tokens`;
+}
+
+/** True while another entry fits (at most three per role). */
+export function canAddFallback(draft: FallbackDraft): boolean {
+  return draft.entries.length < MAX_FALLBACK_ENTRIES;
+}
+
+/** The draft with `entry` appended; unchanged when the chain is full. */
+export function addFallback(draft: FallbackDraft, entry: FallbackEntryInput): FallbackDraft {
+  return canAddFallback(draft) ? { ...draft, entries: [...draft.entries, { ...entry }] } : draft;
+}
+
+/** The draft with entry `index` replaced (an entry edited in place). */
+export function replaceFallback(draft: FallbackDraft, index: number, entry: FallbackEntryInput): FallbackDraft {
+  if (index < 0 || index >= draft.entries.length) return draft;
+  return { ...draft, entries: draft.entries.map((current, at) => (at === index ? { ...entry } : current)) };
+}
+
+/** The draft without entry `index`; the entries after it move up, so positions stay 1…n. */
+export function removeFallback(draft: FallbackDraft, index: number): FallbackDraft {
+  if (index < 0 || index >= draft.entries.length) return draft;
+  return { ...draft, entries: draft.entries.filter((_entry, at) => at !== index) };
+}
+
+/** The draft with entry `index` moved one place up (`-1`) or down (`1`); unchanged at either end. */
+export function moveFallback(draft: FallbackDraft, index: number, delta: -1 | 1): FallbackDraft {
+  const target = index + delta;
+  if (index < 0 || index >= draft.entries.length || target < 0 || target >= draft.entries.length) return draft;
+  const entries = [...draft.entries];
+  [entries[index], entries[target]] = [entries[target]!, entries[index]!];
+  return { ...draft, entries };
+}
+
+/** True when the draft would change the saved chain. */
+export function fallbackDraftChanged(chain: FallbackSettings, draft: FallbackDraft): boolean {
+  const saved = fallbackDraftOf(chain);
+  return saved.policy !== draft.policy || JSON.stringify(saved.entries) !== JSON.stringify(draft.entries);
+}
+
+/** The `roles.save-fallback` input; `revision` is the one the block had when the user started editing it. */
+export function saveFallbackInput(revision: string, role: BmRole, draft: FallbackDraft): RolesSaveFallbackInput {
+  return { revision, role, policy: draft.policy, entries: draft.entries.map((entry) => ({ ...entry })) };
+}
+
+/**
+ * An entry as the Edit form's `setting`, so the same form (`roleFormView`)
+ * edits a fallback entry: `null` opens an empty form for "Add fallback".
+ */
+export function entryAsSetting(role: BmRole, entry: FallbackEntryInput | null): RoleSetting {
+  return {
+    role,
+    providerId: role === "manager" ? "bm-manager" : role === "worker" ? "bm-worker" : "bm-reviewer",
+    baseProvider: entry?.baseProvider ?? null,
+    label: null,
+    model: entry?.model ?? null,
+    thinkingOptionId: entry?.thinkingOptionId ?? null,
+    modeId: entry?.modeId ?? null,
+    featureValues: {},
+    capability: "unknown",
+  };
+}
+
+/** The entry a completed Edit form describes, or `null` while it has no provider or model. */
+export function entryOfDraft(draft: RoleDraft): FallbackEntryInput | null {
+  if (draft.baseProvider === "" || draft.model === null) return null;
+  return { baseProvider: draft.baseProvider, model: draft.model, thinkingOptionId: draft.thinkingOptionId, modeId: draft.modeId };
 }

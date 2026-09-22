@@ -37,15 +37,28 @@ import {
   beadChipsView,
   visibleBeads,
   withAnswersBlock,
+  candidateCost,
+  fallbackActError,
+  fallbackCardOfIncident,
+  fallbackCardView,
+  fallbackNoticeCardSchema,
+  listedCostProvider,
+  localTimeText,
+  lookupOf,
+  runFallbackAction,
+  waitDeadline,
   type ChatCard,
+  type FallbackLookup,
 } from "../plugin/client/chat-cards";
 import { parseMarkdown } from "../plugin/client/markdown";
 import { answeredRecord, answersVersion, repliedAt, setAnswered, setReplied, subscribeAnswers } from "../plugin/client/answer-state";
 import type { Question } from "../plugin/shared/bm-questions";
 import type { BeadRow } from "../plugin/shared/contracts";
 import { handleChatPeers } from "../plugin/server/chat-rpc";
+import { fallbackNotice } from "../plugin/server/fallback-rpc";
 import type { DashboardPaseo } from "../plugin/server/dashboard-rpc";
-import { TRACE_STORE_SCHEMA_VERSION, type ChatPeer } from "../plugin/shared/contracts";
+import { DashboardError, FALLBACK_MAX_WAIT_MS, TRACE_STORE_SCHEMA_VERSION, type ChatPeer, type FallbackIncident } from "../plugin/shared/contracts";
+import { soleWorkerOf } from "../plugin/shared/sole-worker";
 
 /**
  * Chat cards (delta 20260916-chat-cards). Message texts are the shapes
@@ -304,6 +317,39 @@ describe("chat.peers", () => {
       const result = await handleChatPeers({ agentId: "m1" }, withUnlabelled, { homedir: () => home });
       expect(result.peers.find((p) => p.id === "w0")?.requestId).toBe("req-20260916T062244Z");
       expect(result.peers.find((p) => p.id === "w1")?.requestId).toBe("req-1");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("marks a Worker replaced by a fallback Worker: by its bm.replacedBy label, or by a switched incident (delta 20260921 §4.4.8)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bm-chat-peers-replaced-"));
+    try {
+      mkdirSync(join(home, ".paseo-bm"), { recursive: true });
+      writeFileSync(join(home, ".paseo-bm", "install.json"), JSON.stringify({ schemaVersion: 1 }));
+      const switched = {
+        id: "fb-0000000000dd", role: "worker", workspaceId: "wks_a", requestId: "req-1", agentId: "w0", agentProvider: "bm-worker",
+        agentModel: null, parentId: "m1", managerId: "m1", class: "L1", signal: "failed", message: "", perModelWindow: false,
+        resetsAt: null, candidate: null, status: "switched", detectedAt: "2026-09-22T00:00:00.000Z", decidedAt: "2026-09-22T00:01:00.000Z",
+        waitUntil: null, replacementId: "w1", error: null,
+      };
+      writeFileSync(join(home, ".paseo-bm", "role-fallback-state.json"), JSON.stringify({ version: 1, incidents: [switched] }));
+      const sdk = paseo();
+      const list = sdk.agents.list;
+      sdk.agents.list = vi.fn(async (options: { filter: { labels?: Record<string, string> } }) => {
+        const result = await list(options as never);
+        const extra = [
+          // Label missing (labelling failed), but the incident says it was switched.
+          entry("w0", "worker", "wks_a", { "bm.requestId": "req-1", "paseo.parent-agent-id": "m1" }),
+          entry("w8", "worker", "wks_a", { "bm.requestId": "req-8", "bm.replacedBy": "w1" }),
+        ];
+        return options.filter.labels === undefined ? { entries: [...result.entries, ...extra] } : result;
+      }) as never;
+      const result = await handleChatPeers({ agentId: "m1" }, sdk, { homedir: () => home });
+      const replaced = Object.fromEntries(result.peers.map((p) => [p.id, p.replaced]));
+      expect(replaced).toEqual({ w1: false, r1: false, w0: true, w8: true });
+      // So the request's Worker is the replacement, not the one it replaced.
+      expect(soleWorkerOf(result.peers, "req-1")?.id).toBe("w1");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
@@ -971,5 +1017,195 @@ describe("fallbackMarkdown (delta 20260918g §4.8, Q3 a)", () => {
     expect(markdown).toContain("  - **a**: the table. (recommended)");
     // The raw text, rendered as Markdown, ran the fields into one paragraph.
     expect(markdown).not.toBe(text);
+  });
+});
+
+describe("the fallback card (delta 20260921 §4.4.6, REQ-065 c)", () => {
+  // Local times, so the labels read the same in every time zone.
+  const NOW = new Date(2026, 8, 21, 14, 0);
+  const at = (hours: number, minutes = 0, days = 0) => new Date(2026, 8, 21 + days, hours, minutes).toISOString();
+
+  const incident = (overrides: Partial<FallbackIncident> = {}): FallbackIncident => ({
+    id: "fb-3f9a2c1d7e4b",
+    role: "worker",
+    workspaceId: "wks_1",
+    requestId: "req-20260921T111242Z",
+    agentId: "wrk-1",
+    agentProvider: "bm-worker/claude-opus-5",
+    agentModel: "claude-opus-5",
+    parentId: "mgr-1",
+    managerId: "mgr-1",
+    class: "L1",
+    signal: "failed",
+    message: "You've hit your usage limit.",
+    perModelWindow: false,
+    resetsAt: at(15, 40),
+    candidate: { position: 1, alias: "bm-worker-fallback-1", baseProvider: "codex", model: "gpt-5.6-sol", thinkingOptionId: "high", modeId: null },
+    status: "pending",
+    detectedAt: "2026-09-21T14:00:00.000Z",
+    decidedAt: null,
+    waitUntil: null,
+    replacementId: null,
+    error: null,
+    ...overrides,
+  });
+  /** The notice exactly as the plugin sends it. */
+  const noticeOf = (overrides: Partial<FallbackIncident> = {}) => fallbackNotice(incident(overrides), () => "claude");
+  const found = (overrides: Partial<FallbackIncident> = {}): FallbackLookup => ({ state: "found", incident: incident(overrides) });
+  const cardOf = (text = noticeOf()) => toChatCard({ type: "user_message", text, clientMessageId: "sdk-message-id" }, "complete")!;
+  const view = (lookup: FallbackLookup, cost: Parameters<typeof fallbackCardView>[3] = null) => fallbackCardView(cardOf(), lookup, NOW, cost);
+
+  it("turns the plugin's notice into a fallback card, although Paseo stores a clientMessageId on it", () => {
+    const card = cardOf();
+    expect(chatCardSchema.parse(card)).toMatchObject({
+      type: "fallback",
+      direction: "received",
+      requestId: "req-20260921T111242Z",
+      questions: [],
+      formatIssues: [],
+      fallback: { incident: "fb-3f9a2c1d7e4b", role: "worker", agent: "wrk-1", class: "L1", provider: "bm-worker (claude) · claude-opus-5", message: "You've hit your usage limit." },
+    });
+    expect(toChatCard({ type: "user_message", text: noticeOf() }, "complete")?.type).toBe("fallback");
+  });
+
+  it("keeps no state of the notice: status, candidate and reset time come only from fallback.incidents", () => {
+    expect(Object.keys(fallbackNoticeCardSchema.shape).sort()).toEqual(["agent", "class", "incident", "message", "provider", "role"]);
+    expect(cardOf().fallback).not.toHaveProperty("status");
+    // The notice says pending; the incident has been decided since: no button.
+    const stale = fallbackCardView(cardOf(noticeOf({ status: "pending" })), found({ status: "dismissed" }), NOW, null);
+    expect(stale.buttons).toEqual([]);
+    expect(stale.statusLine).toEqual({ text: "Dismissed: you handle it.", tone: "muted" });
+  });
+
+  it("is made only for the notice itself, never for a quote of it", () => {
+    expect(toChatCard({ type: "assistant_message", text: noticeOf() }, "complete")).toBeUndefined();
+    expect(toChatCard({ type: "user_message", text: `The plugin said:\n\n${noticeOf()}`, clientMessageId: "c1" }, "complete")).toBeUndefined();
+    expect(toChatCard({ type: "user_message", text: noticeOf().replace("fb-3f9a2c1d7e4b", "fb-nope"), clientMessageId: "c1" }, "complete")).toBeUndefined();
+    // Every other card says it is not one.
+    expect(toChatCard({ type: "user_message", text: REPORT }, "complete")?.fallback).toBeNull();
+  });
+
+  it("offers all three buttons for a pending incident with a candidate and a reset within 7 days", () => {
+    const shown = view(found());
+    expect(shown.buttons).toEqual([
+      { action: "switch", label: "Switch to bm-worker-fallback-1 · Codex · gpt-5.6-sol" },
+      { action: "wait", label: "Wait until 15:40" },
+      { action: "dismiss", label: "I'll handle it" },
+    ]);
+    expect(shown.statusLine).toBeNull();
+    expect(shown).toMatchObject({
+      title: "Worker stopped by its provider plan",
+      requestId: "req-20260921T111242Z",
+      summary: "Usage limit (L1) · bm-worker · claude-opus-5",
+      message: "You've hit your usage limit.",
+      chip: { text: "pending", tone: "warning" },
+    });
+  });
+
+  it("drops Switch without a candidate and Wait without a usable reset; I'll handle it stays", () => {
+    const actions = (overrides: Partial<FallbackIncident>) => view(found(overrides)).buttons.map((button) => button.action);
+    expect(actions({ candidate: null })).toEqual(["wait", "dismiss"]);
+    expect(actions({ resetsAt: null })).toEqual(["switch", "dismiss"]);
+    expect(actions({ resetsAt: "not a time" })).toEqual(["switch", "dismiss"]);
+    expect(actions({ resetsAt: new Date(NOW.getTime() + FALLBACK_MAX_WAIT_MS + 60_000).toISOString() })).toEqual(["switch", "dismiss"]);
+    expect(actions({ candidate: null, resetsAt: null })).toEqual(["dismiss"]);
+  });
+
+  it("waits up to exactly 7 days ahead, and resumes at once for a reset already past", () => {
+    expect(waitDeadline(new Date(NOW.getTime() + FALLBACK_MAX_WAIT_MS).toISOString(), NOW)).not.toBeNull();
+    expect(view(found({ resetsAt: at(10, 5, 1) })).buttons[1]).toEqual({ action: "wait", label: "Wait until tomorrow 10:05" });
+    expect(view(found({ resetsAt: at(9, 0, 3) })).buttons[1]).toEqual({ action: "wait", label: "Wait until Thu 24 Sep 09:00" });
+    expect(view(found({ resetsAt: at(13, 30) })).buttons[1]).toEqual({ action: "wait", label: "Resume now (the limit reset at 13:30)" });
+  });
+
+  it("names the candidate's price when one is known: the bundled table, then what Paseo lists", () => {
+    const sonnet = { position: 1, alias: "bm-worker-fallback-1", baseProvider: "claude", model: "claude-sonnet-5", thinkingOptionId: null, modeId: null };
+    expect(candidateCost(sonnet, null)).toEqual({ inputUsdPerMTok: 2, cacheReadUsdPerMTok: 0.2, outputUsdPerMTok: 10 });
+    const listed = [{ id: "gpt-5.6-sol", label: "GPT-5.6-Sol", thinkingOptions: [], defaultThinkingOptionId: null, cost: { inputUsdPerMTok: 1.25, cacheReadUsdPerMTok: 0.125, outputUsdPerMTok: 10 } }];
+    const cost = candidateCost(incident().candidate, listed);
+    expect(view(found(), cost).buttons[0]!.label).toBe("Switch to bm-worker-fallback-1 · Codex · gpt-5.6-sol · ~$1.25 / $10 per 1M tokens");
+    expect(candidateCost(incident().candidate, [])).toBeNull();
+    expect(candidateCost(null, listed)).toBeNull();
+    // Paseo is asked only for a pending candidate the table has no price for.
+    expect(listedCostProvider(found())).toBe("codex");
+    expect(listedCostProvider(found({ candidate: sonnet }))).toBeNull();
+    expect(listedCostProvider(found({ status: "switched" }))).toBeNull();
+    expect(listedCostProvider(found({ candidate: null }))).toBeNull();
+    expect(listedCostProvider({ state: "loading" })).toBeNull();
+  });
+
+  it("shows no button, only one status line, once the incident is not pending", () => {
+    const lines = Object.fromEntries(
+      (
+        [
+          ["switched", { replacementId: "3d2c1b0a-9f8e-4d7c-b6a5-0123456789ab" }],
+          ["waiting", { waitUntil: at(15, 41) }],
+          ["resumed", {}],
+          ["dismissed", {}],
+          ["exhausted", {}],
+          ["expired", {}],
+          ["failed", { error: "E_FALLBACK_CREATE_FAILED: Paseo refused the new agent" }],
+        ] as const
+      ).map(([status, extra]) => {
+        const shown = view(found({ status, ...extra }));
+        expect(shown.buttons, status).toEqual([]);
+        expect(shown.chip?.text, status).toBe(status);
+        return [status, shown.statusLine?.text];
+      }),
+    );
+    expect(lines).toEqual({
+      switched: "Switched to bm-worker-fallback-1 · Codex · gpt-5.6-sol (agent 3d2c1b0a).",
+      waiting: "Waiting until 15:41; then the Worker carries on.",
+      resumed: "Resumed: the limit reset and the Worker was asked to carry on.",
+      dismissed: "Dismissed: you handle it.",
+      exhausted: "No fallback left to switch to.",
+      expired: "Expired: by the reset the Worker was archived, running or already replaced.",
+      failed: "Failed: E_FALLBACK_CREATE_FAILED: Paseo refused the new agent",
+    });
+  });
+
+  it("offers nothing while the incident is unknown, unreadable or no longer recorded", () => {
+    const loading = view({ state: "loading" });
+    expect(loading).toMatchObject({ buttons: [], chip: null, statusLine: { text: "Checking the incident…", tone: "muted" } });
+    // Until the incident is read, the notice's own words describe it.
+    expect(loading.summary).toBe("Usage limit (L1) · bm-worker (claude) · claude-opus-5");
+    const failed = view({ state: "failed", error: new DashboardError("E_FALLBACK_NOT_FOUND", "paseo-bm cannot find its install home") });
+    expect(failed).toMatchObject({ buttons: [], statusLine: { text: "Could not read the incident (E_FALLBACK_NOT_FOUND): paseo-bm cannot find its install home", tone: "danger" } });
+    expect(view({ state: "failed", error: new Error("daemon unreachable") }).statusLine?.text).toBe("Could not read the incident: daemon unreachable");
+    expect(view(lookupOf("fb-3f9a2c1d7e4b", [incident({ id: "fb-000000000002" })]))).toMatchObject({ buttons: [], chip: null });
+    expect(lookupOf("fb-3f9a2c1d7e4b", [incident()])).toEqual(found());
+  });
+
+  it("builds the same card for a waiting pill, from the incident alone", () => {
+    const card = fallbackCardOfIncident(incident());
+    expect(chatCardSchema.parse(card)).toMatchObject({ type: "fallback", requestId: "req-20260921T111242Z", fallback: { incident: "fb-3f9a2c1d7e4b", role: "worker" } });
+    expect(fallbackCardView(card, found(), NOW, null).buttons.map((button) => button.action)).toEqual(["switch", "wait", "dismiss"]);
+    expect(fallbackCardView(card, { state: "loading" }, NOW, null).summary).toBe("Usage limit (L1) · bm-worker · claude-opus-5");
+  });
+
+  it("presses a button with ONE fallback.act call, and shows a failure with its code", async () => {
+    const decided = incident({ status: "dismissed", decidedAt: "2026-09-21T14:05:00.000Z" });
+    const act = vi.fn(async () => ({ incident: decided }));
+    expect(await runFallbackAction({ incidentId: "fb-3f9a2c1d7e4b", action: "dismiss", act })).toEqual({ ok: true, incident: decided });
+    expect(act).toHaveBeenCalledTimes(1);
+    expect(act).toHaveBeenCalledWith({ incidentId: "fb-3f9a2c1d7e4b", action: "dismiss" });
+
+    const refused = vi.fn(async () => {
+      throw new DashboardError("E_FALLBACK_NO_CANDIDATE", "bm-worker-fallback-1 is not available");
+    });
+    expect(await runFallbackAction({ incidentId: "fb-3f9a2c1d7e4b", action: "switch", act: refused })).toEqual({
+      ok: false,
+      reason: "Could not switch to the fallback (E_FALLBACK_NO_CANDIDATE): bm-worker-fallback-1 is not available",
+    });
+    expect(refused).toHaveBeenCalledTimes(1);
+    expect(fallbackActError("wait", new DashboardError("E_FALLBACK_NO_RESET", "no reset time"))).toBe("Could not wait for the reset (E_FALLBACK_NO_RESET): no reset time");
+    expect(fallbackActError("dismiss", new Error("socket closed"))).toBe("Could not record that you handle it: socket closed");
+  });
+
+  it("reads a time in the device's zone: today, tomorrow, yesterday, or the date", () => {
+    expect(localTimeText(new Date(2026, 8, 21, 9, 5), NOW)).toBe("09:05");
+    expect(localTimeText(new Date(2026, 8, 22, 0, 0), NOW)).toBe("tomorrow 00:00");
+    expect(localTimeText(new Date(2026, 8, 20, 23, 59), NOW)).toBe("yesterday 23:59");
+    expect(localTimeText(new Date(2026, 9, 1, 18, 30), NOW)).toBe("Thu 1 Oct 18:30");
   });
 });

@@ -122,6 +122,8 @@ Bốn hợp đồng dưới đây phải cụ thể tới mức hai lần chạy
 
 *(Errata 2026-09-22, [delta 20260921-worker-fallback-and-role-settings](./paseo-bm-delta-20260921-worker-fallback-and-role-settings.md) §4.2, REQ-063: mode và tự duyệt của agent con được chọn theo **khả năng** của provider, không theo tên. Provider có mode phân tầng (Claude, Codex): như trên. Provider có mode không phân tầng (OpenCode — mode là agent OpenCode của người dùng): luôn truyền một mode có trong danh sách, và bật `auto_accept` cho Manager và Worker; Reviewer **không bao giờ** tự duyệt. Provider không có mode (Pi): không truyền mode, và `## Runtime facts` nói "none". Mode dự phòng `auto` của Reviewer chỉ dặn khi `bm-reviewer` chạy trên Claude hay Codex. Worker hay Manager mới không có công cụ Paseo → `BM-TOOLS` cho Manager, `toolsNotice` trên màn Manager.)*
 
+*(Errata 2026-09-22, [delta 20260921-worker-fallback-and-role-settings](./paseo-bm-delta-20260921-worker-fallback-and-role-settings.md) §4.4, REQ-065: một Worker dừng vì gói của provider (hết hạn mức, billing, đăng nhập, provider không chạy) không còn chỉ dừng. Plugin nhận ra lượt đó (`fallback-detect.ts`), ghi một sự cố và hỏi người dùng bằng thẻ trong chat Manager (`BM-FALLBACK`). Người dùng chọn **Switch**: plugin tạo Worker thay thế trên alias `bm-worker-fallback-<n>`, với lời bàn giao `BM-HANDOVER` dựng bằng mã; Worker cũ mang nhãn `bm.replacedBy` và không còn là Worker của request. Chọn **Wait**: plugin gửi `BM-RESUME` cho chính Worker cũ khi hạn mức reset. Chọn **I'll handle it**: không động tới agent nào. Manager không tự tạo Worker dự phòng.)*
+
 **A. Hợp đồng nhãn (REQ-033).** Không đủ nếu chỉ nói "gán nhãn phù hợp".
 
 | Mục | Quy định |
@@ -233,6 +235,8 @@ Cả hai vai trò: không bao giờ chọn mode `planning`. Lý do: các lượt
       events-<YYYYMM>.jsonl         (0600) nối thêm, một bản ghi lượt một dòng
   .lock
 ```
+
+*(Errata 2026-09-22, delta 20260921 §4.4.2: thư mục cài đặt có thêm hai file dữ liệu người dùng, cùng cách với `role-extras.json` — `role-fallback.json` (0600, chuỗi dự phòng và policy của từng vai trò, `patterns` sửa tay) và `role-fallback-state.json` (0600, các sự cố dự phòng, tối đa 200). Không hash trong `install.json`; cập nhật, `--prune` và gỡ cài đặt không chạm.)*
 
 `traces/` là **dữ liệu do paseo-bm tạo nhưng thuộc người dùng**: không có hash trong `install.json`, không được backup, cài và cập nhật không bao giờ chạm. Xem §3.3 loại `user-data`, [ADR-007](../adr/ADR-007-dashboard-trace-store.md), và [Technical Design Dashboard](paseo-bm-dashboard.md) §3.
 
@@ -432,7 +436,7 @@ Không telemetry. CLI `skills` có kênh thu thập riêng của nó; README ph�
 - **Agent mồ côi:** Worker vẫn chạy khi Manager đã bị xoá thì không bị ảnh hưởng; panel hiển thị nó ở nhánh "không có Manager" thay vì giấu đi.
 - **Worker chết giữa chừng:** tài liệu và beads đã ghi vẫn hợp lệ; người dùng thấy trạng thái lỗi và đọc được agent đó để biết dừng ở đâu. paseo-bm không tự dọn.
 - **Dọn rác:** chỉ thư mục payload dở dang (không có trong `versions[]`) mới bị dọn.
-- **Không tác vụ nền, không cron, không watcher.** Bộ thu thập lưu vết của Dashboard bám hook `agent.turn_ended` của Paseo nên vẫn nằm trong quy tắc này: nó chạy theo sự kiện, không có đồng hồ, không quét đĩa, và lỗi ghi bị nuốt để không ảnh hưởng agent *(delta `design-delta-20260916-trace-store`)*.
+- **Không tác vụ nền, không cron, không watcher.** Bộ thu thập lưu vết của Dashboard bám hook `agent.turn_ended` của Paseo nên vẫn nằm trong quy tắc này: nó chạy theo sự kiện, không có đồng hồ, không quét đĩa, và lỗi ghi bị nuốt để không ảnh hưởng agent *(delta `design-delta-20260916-trace-store`)*. *(Errata 2026-09-22, delta 20260921 §4.4.9, owner chốt Q6 a: một ngoại lệ hẹp — "Wait until the reset" của thẻ dự phòng đặt đúng một hẹn giờ cho mỗi lần người dùng bấm, ghi ra `role-fallback-state.json`, đặt lại sau khi plugin nạp lại, và kết thúc khi sự cố đổi trạng thái. Không quét đĩa, không lặp.)*
 
 ## 9. Interaction Flow
 
@@ -596,6 +600,7 @@ CI **không** chạy agent thật: không xác định, tốn tiền, và cần 
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | **Theo [delta 20260921-worker-fallback-and-role-settings](./paseo-bm-delta-20260921-worker-fallback-and-role-settings.md), phase 2a-16** (REQ-065): errata §2.6 — Worker dừng vì gói của provider được hỏi bằng thẻ, Switch / Wait / I'll handle it; errata §3.1 — `role-fallback.json` và `role-fallback-state.json`; errata §8 — ngoại lệ hẹn giờ của Q6 a |
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | **Theo [delta 20260921-worker-fallback-and-role-settings](./paseo-bm-delta-20260921-worker-fallback-and-role-settings.md), phase 2a-15** (REQ-064, ADR-008 Accepted): errata §3.4 — plugin cũng ghi mục `bm-*` qua `config.patch` khi người dùng lưu trên màn "Roles & models"; errata §5 — ba RPC `roles.settings`, `roles.options`, `roles.save-settings` và ba mã lỗi `E_ROLE_SETTINGS_*` |
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | **Theo [delta 20260921-worker-fallback-and-role-settings](./paseo-bm-delta-20260921-worker-fallback-and-role-settings.md), phase 2a-14** (REQ-063): errata §2.6 — cách chạy theo khả năng provider, Runtime facts "none", `BM-TOOLS`; errata §7 — Reviewer trên Pi / OpenCode |
 | 2026-09-22 | hieu.nt10 (soạn bởi Beads Worker) | **Theo [delta 20260921-worker-fallback-and-role-settings](./paseo-bm-delta-20260921-worker-fallback-and-role-settings.md), phase 2a-13** (REQ-062): errata §3.2 — `roles[]` là lần ghi cuối của trình cài, cài lại gộp mục `bm-*`; hook áp thinking và feature của profile cho Worker và Reviewer (delta §4.1.1) |

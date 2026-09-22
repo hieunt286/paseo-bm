@@ -21,6 +21,8 @@ export async function peersOfWorkspace(
   all: ReadonlyArray<{ facts: AgentFacts; workspaceId: string | null }>,
   workspaceId: string,
   readWorkspaceRecords: () => Promise<TraceRecord[]>,
+  /** Agent id → its replacement, from `switched` fallback incidents (delta 20260921 §4.4.8). */
+  replacements: ReadonlyMap<string, string> = new Map(),
 ): Promise<ChatPeer[]> {
   let records: TraceRecord[] | null = null;
   const peers: ChatPeer[] = [];
@@ -40,6 +42,7 @@ export async function peersOfWorkspace(
       batchId: facts.batchIdLabel,
       labelled: facts.labelled ?? true,
       archived: facts.archived,
+      replaced: (facts.replacedBy ?? null) !== null || replacements.has(facts.id),
     });
   }
   return peers;

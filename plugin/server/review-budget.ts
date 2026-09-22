@@ -38,7 +38,7 @@ import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
 import type { Tier } from "../shared/contracts";
 import { agentFactsOf, type DashboardPaseo } from "./dashboard-rpc";
 import { BUDGET_NOTICE_MARKER } from "./notices";
-import { providerId } from "./provider-id";
+import { roleOfProvider } from "./agent-role";
 import { readRecords, type TraceStoreLocation } from "./trace-store";
 import { reconstructTraces, type ReconstructedTrace } from "./traces";
 
@@ -119,8 +119,6 @@ export interface BudgetDeps {
 
 export type BudgetOutcome = "ignored" | "within" | "already-told" | "deferred" | "sent";
 
-const MANAGER_ROLE = "bm-manager";
-const COUNTED_ROLES = new Set(["bm-worker", "bm-reviewer", MANAGER_ROLE]);
 const NO_PENDING = new Map<string, BudgetOverrun>();
 
 /**
@@ -136,13 +134,14 @@ export async function checkReviewBudget(event: TurnEndedEvent, deps: BudgetDeps)
   let claimed: string | null = null;
   try {
     const agent = event?.agent;
-    const role = providerId(agent?.provider);
+    // Every paseo-bm role counts, on its main alias or a fallback one (delta 20260921 §4.4.1).
+    const role = roleOfProvider(agent?.provider);
     const workspaceId = agent?.workspaceId ?? null;
-    if (role === null || !COUNTED_ROLES.has(role) || workspaceId === null) return "ignored";
+    if (role === null || workspaceId === null) return "ignored";
     const keyOf = (found: BudgetOverrun): string => `${workspaceId}::${found.requestId}`;
 
     let over: BudgetOverrun | undefined;
-    if (role === MANAGER_ROLE) {
+    if (role === "manager") {
       // A Manager turn end only FLUSHES what a Worker or Reviewer turn end
       // already found — usually the notice deferred moments ago because this
       // Manager was still answering the Worker's last report.

@@ -491,6 +491,12 @@ describe("rowRoleLabel (delta 20260918g §4.4)", () => {
     expect(rowRoleLabel({ role: "unknown", labelled: false })).toBe("Unknown role");
   });
 
+  it("names the agent that replaced one, whatever its role (delta 20260921 §4.4.8)", () => {
+    expect(rowRoleLabel({ role: "worker", labelled: true, replacedBy: "wrk-2" })).toBe("Worker · replaced by wrk-2");
+    expect(rowRoleLabel({ role: "manager", labelled: false, replacedBy: "mgr-2" })).toBe("Manager · no label · replaced by mgr-2");
+    expect(rowRoleLabel({ role: "reviewer", labelled: true, replacedBy: null })).toBe("Reviewer");
+  });
+
   it("shows the mark in the rows built from the tree", () => {
     const node = (id: string, role: AgentNode["role"], labelled: boolean, parentId: string | null = null): AgentNode => ({
       id,

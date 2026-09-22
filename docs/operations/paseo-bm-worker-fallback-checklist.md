@@ -62,3 +62,20 @@ Trước khi kiểm, chụp mảng `daemon.agentProfiles` và các mục `agents
 | 15.7 | Cảnh báo không chặn | Edit Worker → Pi (nếu có) → Save | Lưu được, dưới dòng Worker hiện `Pi needs pi-mcp-adapter to give this role Paseo tools.` | Chưa đo |
 
 Rủi ro đã biết (owner chấp nhận, Q3 a, Q15 a): một thay đổi trong Settings của Paseo rơi đúng vào lúc plugin đang ghi (giữa lần đọc và lần ghi của một lần Save) có thể bị đè mà không báo. Không có bước kiểm cho rủi ro này.
+
+## Phase 2a-16 — `0.3.0-alpha.2` (REQ-065)
+
+Cần một chuỗi dự phòng cho Worker: Beads Manager → Setup → Roles & models → dưới dòng Worker → **+ Add fallback** (ví dụ Codex) → **Save fallbacks**. Một sự cố thật là tốt nhất; không có thì dựng lượt hỏng bằng một provider giả (ví dụ một Worker trên provider Pi chưa đăng nhập, cho L4).
+
+| # | Kiểm | Cách làm | Kết quả mong đợi | Kết quả |
+|---|---|---|---|---|
+| 16.1 | Lưu chuỗi ghi alias và file | Sau khi lưu, đọc `~/.paseo/config.json` và `~/.paseo-bm/role-fallback.json` | Có `agents.providers.bm-worker-fallback-1` với `extends` của mục đó; file có `roles.worker.entries` đúng thứ tự; 0 profile khác đổi | Chưa đo |
+| 16.2 | Thẻ hiện ngay khi lượt Worker hỏng | Một Worker dừng vì hạn mức / billing / đăng nhập | Chat Manager có thẻ "Worker stopped by its provider plan" với nguyên văn lỗi; pill "Fallback · 1 decision" ở Manager đó; `~/.paseo-bm/role-fallback-state.json` có sự cố `pending` | Chưa đo |
+| 16.3 | Thẻ vẫn hiện khi Manager cùng provider gốc | Manager và Worker cùng provider gốc; Worker hết hạn mức gói | Lượt của Manager hỏng theo (vô hại), nhưng thẻ và pill vẫn hiện (đọc từ file, không từ lượt Manager) | Chưa đo |
+| 16.4 | Switch tạo Worker thay thế | Bấm **Switch to …** trên thẻ | Trong **≤ 60 giây** có Worker "Beads Worker (fallback)" trên `bm-worker-fallback-1/<model>`, nhãn `bm.replaces` = Worker cũ; Worker cũ mang `bm.replacedBy`; Worker mới gửi `received` và **không mở lại** bead đã đóng | Chưa đo |
+| 16.5 | Một Worker cho request | Sau 16.4, trả lời một câu hỏi của request đó trên thẻ | Câu trả lời tới Worker mới, không tới Worker cũ; cây agent ghi `· replaced by <id>` cạnh Worker cũ | Chưa đo |
+| 16.6 | `listUsage` trả cửa sổ | Ở một sự cố L1 của Claude hay Codex | Sự cố có `resetsAt` (giờ reset muộn nhất trong các cửa sổ đã hết); thẻ có nút **Wait until <giờ>** | Chưa đo |
+| 16.7 | Wait | Bấm **Wait until …** | Sự cố `waiting`; tới giờ reset + 60 giây, Worker cũ nhận `BM-RESUME …` và làm tiếp; thẻ ghi đã resume | Chưa đo |
+| 16.8 | I'll handle it | Bấm **I'll handle it** trên một sự cố khác | Sự cố `dismissed`; không agent nào bị tạo hay dừng | Chưa đo |
+
+Rủi ro đã biết: mẫu nhận dạng mặc định chưa kiểm trên sự cố thật (đề xuất §1.5). Nếu 16.2 không có thẻ, ghi nguyên văn lỗi của lượt hỏng vào cột Kết quả: đó là dữ liệu để sửa mẫu, và là điều kiện vào phase 2a-18.

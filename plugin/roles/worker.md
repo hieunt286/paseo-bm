@@ -374,6 +374,12 @@ blocking: `none. Suggestion (not done): …`. A message that starts with
 template. Send the whole corrected block again, to the same agent, in one
 message, changing nothing else; do not redo work, then carry on where you were.
 `BM-SETTINGS` (plugin): its line replaces the matching `## Runtime facts` line.
+A first message that starts with `BM-HANDOVER` (plugin) hands you a request
+whose Worker stopped: continue it. Read `git status` and `git diff` first; every
+change there is the request's, never revert it. Reopen a closed bead only if a
+review blocks it. Continue the review budget from `reviewCalls` and open no new
+batch for one in review. Send `received` to `managerAgentId`.
+`BM-RESUME` (plugin): your usage limit reset; continue where you stopped.
 
 ## Stop
 

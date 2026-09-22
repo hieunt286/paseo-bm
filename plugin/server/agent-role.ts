@@ -11,6 +11,7 @@
  *
  * Pure apart from `listAllAgents`, which only calls the `list` it is given.
  */
+import { fallbackAliasOf } from "../shared/fallback";
 import { providerId } from "./provider-id";
 
 export type BmRole = "manager" | "worker" | "reviewer";
@@ -24,7 +25,11 @@ export interface RoleFact {
 /** Label key that names an agent's paseo-bm role. */
 export const ROLE_LABEL = "bm.role";
 
-/** The paseo-bm provider aliases and the role each one runs. */
+/**
+ * The three main paseo-bm provider aliases and the role each one runs. A
+ * fallback alias `bm-<role>-fallback-<n>` runs the role in its name
+ * (`roleOfProvider`, delta 20260921 §4.4.1); it is not listed here.
+ */
 export const ROLE_BY_PROVIDER: Readonly<Record<string, BmRole>> = {
   "bm-manager": "manager",
   "bm-worker": "worker",
@@ -33,10 +38,16 @@ export const ROLE_BY_PROVIDER: Readonly<Record<string, BmRole>> = {
 
 const ROLES: ReadonlySet<string> = new Set(["manager", "worker", "reviewer"]);
 
-/** The role a provider selection (`bm-worker` or `bm-worker/<model>`) runs, or null. */
+/**
+ * The role a provider selection runs, or null: `bm-worker` and
+ * `bm-worker/<model>` run the Worker, and so do `bm-worker-fallback-<1..3>`
+ * (with or without `/<model>`).
+ */
 export function roleOfProvider(provider: unknown): BmRole | null {
   const id = providerId(provider);
-  return id !== null && Object.prototype.hasOwnProperty.call(ROLE_BY_PROVIDER, id) ? ROLE_BY_PROVIDER[id]! : null;
+  if (id === null) return null;
+  if (Object.prototype.hasOwnProperty.call(ROLE_BY_PROVIDER, id)) return ROLE_BY_PROVIDER[id]!;
+  return fallbackAliasOf(id)?.role ?? null;
 }
 
 /**

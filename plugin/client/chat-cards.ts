@@ -5,8 +5,9 @@
  * Paseo runs a timeline transformer on every chat item of every agent, and the
  * transformer cannot tell whose chat it is. So a card is made only for what is
  * unmistakably paseo-bm's: a message another agent sent that carries a
- * `BM-REPORT`, a `BM-REVIEW` or a request id, and an agent's own finished
- * message that carries a report or review block. Everything else is left to
+ * `BM-REPORT`, a `BM-REVIEW` or a request id, an agent's own finished
+ * message that carries a report or review block, and the plugin's own
+ * `BM-FALLBACK` notice (delta 20260921 §4.4.6). Everything else is left to
  * Paseo. Who sent what is decided later, by the renderer, from `chat.peers`.
  *
  * Pure: no React, no React Native, no `server/` import.
@@ -15,10 +16,21 @@ import { z } from "zod";
 import { looksLikeReport, parseReports, parseReviews, requestIdFromText } from "../shared/bm-report";
 import { answersText, parseQuestions, type Pick, type Question } from "../shared/bm-questions";
 import { checkBlocks, issueText } from "../shared/bm-format";
-import type { BeadRow, ChatPeer, WaitingWorker } from "../shared/contracts";
+import { BM_FALLBACK_MARKER, parseFallbackNotice } from "../shared/bm-fallback";
+import {
+  FALLBACK_MAX_WAIT_MS,
+  type BeadRow,
+  type ChatPeer,
+  type FallbackActInput,
+  type FallbackIncident,
+  type RoleModelOption,
+  type WaitingWorker,
+} from "../shared/contracts";
+import { MODEL_PRICES, type ModelPrice } from "../shared/prices";
 import { soleWorkerOf } from "../shared/sole-worker";
-import type { Badge, GraphNode } from "./dashboard-model";
-import { errorMessageOf } from "./launch-manager";
+import type { Badge, GraphNode, Tone } from "./dashboard-model";
+import { errorCodeOf, errorMessageOf } from "./launch-manager";
+import { providerLabel } from "./setup-model";
 
 export const CHAT_CARD_KIND = "bm-message";
 export const CHAT_CARD_VERSION = 1;
@@ -30,8 +42,25 @@ export const questionSchema = z.object({
   options: z.array(z.object({ key: z.string(), text: z.string(), recommended: z.boolean() })),
 });
 
+/**
+ * What a `BM-FALLBACK` card keeps of its notice (delta 20260921 §4.4.6): the
+ * incident it is about, and what to show until `fallback.incidents` answers.
+ * Never the incident's state — no status, candidate or reset time — so an old
+ * notice cannot show a button that no longer applies.
+ */
+export const fallbackNoticeCardSchema = z.object({
+  incident: z.string(),
+  role: z.enum(["manager", "worker", "reviewer"]).nullable(),
+  agent: z.string().nullable(),
+  class: z.enum(["L1", "L2", "L4", "L5"]).nullable(),
+  provider: z.string().nullable(),
+  message: z.string().nullable(),
+});
+
+export type FallbackNoticeCard = z.infer<typeof fallbackNoticeCardSchema>;
+
 export const chatCardSchema = z.object({
-  type: z.enum(["report", "review", "message"]),
+  type: z.enum(["report", "review", "message", "fallback"]),
   /** `received`: another agent sent it into this chat; `sent`: this chat's agent wrote it. */
   direction: z.enum(["received", "sent"]),
   requestId: z.string().nullable(),
@@ -52,6 +81,8 @@ export const chatCardSchema = z.object({
    * §4.8), one `<kind> <field>: <issue>` line each; empty when they follow it.
    */
   formatIssues: z.array(z.string()).default([]),
+  /** The notice of a `fallback` card; null for every other card. */
+  fallback: fallbackNoticeCardSchema.nullable().default(null),
 });
 
 export type ChatCard = z.infer<typeof chatCardSchema>;
@@ -85,6 +116,13 @@ function gistOf(text: string): string {
 export function toChatCard(item: ChatItem, phase: "streaming" | "complete"): ChatCard | undefined {
   if (typeof item.text !== "string" || item.text.trim() === "") return undefined;
   const text = item.text;
+  // The plugin's own notice. Paseo stores a `clientMessageId` on it like on
+  // the user's words (`server/notices.ts`), so it is told apart by its first
+  // line, as the plugin writes it, before that test.
+  if (item.type === "user_message") {
+    const card = fallbackCardOf(text);
+    if (card !== undefined) return card;
+  }
   let direction: ChatCard["direction"];
   if (item.type === "user_message") {
     // Typed by the user in Paseo's app: that is the user's own message.
@@ -150,6 +188,7 @@ export function toChatCard(item: ChatItem, phase: "streaming" | "complete"): Cha
     text,
     questions,
     formatIssues,
+    fallback: null,
   };
 }
 
@@ -659,4 +698,330 @@ function hashOf(text: string): string {
 /** Key of the "already answered" memory: this chat, this request, these questions, this message. */
 export function answeredKey(agentId: string, card: ChatCard): string {
   return [agentId, card.requestId ?? "", card.questions.map((question) => question.id).join(","), hashOf(card.text)].join("|");
+}
+
+// ---------------------------------------------------------------------------
+// The fallback card (delta 20260921 §4.4.6, REQ-065 c).
+//
+// Built from the plugin's `BM-FALLBACK` notice, but everything that decides
+// what the user may do — status, candidate, reset time — comes from
+// `fallback.incidents`. The notice is only the incident's id and what to show
+// until that answers.
+// ---------------------------------------------------------------------------
+
+/** First line of a text, trimmed. */
+function firstLineOf(text: string): string {
+  return (text.trimStart().split(/\r?\n/, 1)[0] ?? "").trim();
+}
+
+/** What a fallback card leaves empty: it carries no report or review block. */
+const NO_BLOCK = { batchId: null, phase: null, tier: null, verdict: null, blocking: null, blockers: null } as const;
+
+function stoppedTitle(role: ChatRole | null): string {
+  return `${role === null ? "Agent" : ROLE_NAME[role]} stopped by its provider plan`;
+}
+
+/**
+ * The card of a `BM-FALLBACK` notice, or undefined: the text must start with
+ * the marker line, as the plugin writes it, and name a usable incident id.
+ */
+export function fallbackCardOf(text: string): ChatCard | undefined {
+  if (firstLineOf(text) !== BM_FALLBACK_MARKER) return undefined;
+  const notice = parseFallbackNotice(text);
+  if (notice === null) return undefined;
+  return {
+    ...NO_BLOCK,
+    type: "fallback",
+    direction: "received",
+    requestId: notice.requestId,
+    beads: { created: 0, updated: 0, closed: 0 },
+    questions: [],
+    formatIssues: [],
+    gist: stoppedTitle(notice.role),
+    text,
+    fallback: {
+      incident: notice.incident,
+      role: notice.role,
+      agent: notice.agent,
+      class: notice.class,
+      provider: notice.provider,
+      message: notice.message,
+    },
+  };
+}
+
+/** The failed agent's provider alias and model, as the card shows them. */
+function failedProviderOf(incident: FallbackIncident): string {
+  const alias = incident.agentProvider.split("/", 1)[0] ?? incident.agentProvider;
+  return incident.agentModel === null ? alias : `${alias} · ${incident.agentModel}`;
+}
+
+/**
+ * The card a waiting pill shows for an incident it counts: the pill reads
+ * `chat.waiting`, not the timeline, so there is no notice text to build from.
+ */
+export function fallbackCardOfIncident(incident: FallbackIncident): ChatCard {
+  return {
+    ...NO_BLOCK,
+    type: "fallback",
+    direction: "received",
+    requestId: incident.requestId,
+    beads: { created: 0, updated: 0, closed: 0 },
+    questions: [],
+    formatIssues: [],
+    gist: stoppedTitle(incident.role),
+    text: "",
+    fallback: {
+      incident: incident.id,
+      role: incident.role,
+      agent: incident.agentId,
+      class: incident.class,
+      provider: failedProviderOf(incident),
+      message: incident.message,
+    },
+  };
+}
+
+/** What `fallback.incidents` said about a card's incident. */
+export type FallbackLookup =
+  | { state: "loading" }
+  | { state: "failed"; error: unknown }
+  | { state: "missing" }
+  | { state: "found"; incident: FallbackIncident };
+
+export type FallbackAction = FallbackActInput["action"];
+
+export interface FallbackButton {
+  action: FallbackAction;
+  label: string;
+}
+
+export interface FallbackCardView {
+  role: ChatRole | null;
+  title: string;
+  requestId: string | null;
+  /** The failure class, and the failed agent's provider and model. */
+  summary: string;
+  /** The provider's own words, verbatim. */
+  message: string | null;
+  /** The incident's status, once known. */
+  chip: Badge | null;
+  /** Only while the incident is `pending`. */
+  buttons: FallbackButton[];
+  /** Where there are no buttons: what became of the incident, or why nothing can be decided here. */
+  statusLine: { text: string; tone: Tone } | null;
+}
+
+const CLASS_LABELS: Readonly<Record<FallbackIncident["class"], string>> = {
+  L1: "Usage limit (L1)",
+  L2: "Billing (L2)",
+  L4: "Login (L4)",
+  L5: "Provider unavailable (L5)",
+};
+
+const STATUS_TONES: Readonly<Record<FallbackIncident["status"], Tone>> = {
+  pending: "warning",
+  switched: "success",
+  waiting: "info",
+  resumed: "success",
+  dismissed: "muted",
+  exhausted: "danger",
+  expired: "muted",
+  failed: "danger",
+};
+
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
+
+/** `15:40`, `tomorrow 15:40`, `yesterday 15:40` or `Thu 24 Sep 15:40`, in the device's time zone. */
+export function localTimeText(at: Date, now: Date): string {
+  const two = (value: number) => String(value).padStart(2, "0");
+  const time = `${two(at.getHours())}:${two(at.getMinutes())}`;
+  const dayOf = (date: Date) => new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  // Rounded: a day with a clock change is 23 or 25 hours long.
+  const days = Math.round((dayOf(at) - dayOf(now)) / 86_400_000);
+  if (days === 0) return time;
+  if (days === 1) return `tomorrow ${time}`;
+  if (days === -1) return `yesterday ${time}`;
+  return `${WEEKDAYS[at.getDay()]} ${at.getDate()} ${MONTHS[at.getMonth()]} ${time}`;
+}
+
+/**
+ * The reset time "Wait" may wait for: a readable `resetsAt` at most
+ * `FALLBACK_MAX_WAIT_MS` ahead — the rule `fallback.act` `wait` applies (§4.4.9).
+ * A reset already past still counts: waiting then resumes the agent at once.
+ */
+export function waitDeadline(resetsAt: string | null, now: Date): Date | null {
+  if (resetsAt === null) return null;
+  const at = new Date(resetsAt);
+  if (Number.isNaN(at.getTime())) return null;
+  return at.getTime() - now.getTime() <= FALLBACK_MAX_WAIT_MS ? at : null;
+}
+
+/** `bm-worker-fallback-1 · Codex · gpt-5.6-sol`. */
+export function candidateText(candidate: NonNullable<FallbackIncident["candidate"]>): string {
+  return `${candidate.alias} · ${providerLabel(candidate.baseProvider)} · ${candidate.model}`;
+}
+
+/** `~$5 / $25 per 1M tokens`, as Roles & models words a listed price. */
+export function priceText(cost: ModelPrice): string {
+  return `~$${cost.inputUsdPerMTok} / $${cost.outputUsdPerMTok} per 1M tokens`;
+}
+
+/**
+ * The candidate's price, in the order the Dashboard uses (§4.2.7): the bundled
+ * table, then the rate Paseo lists for the model (`roles.options` of its base
+ * provider, `listed`), else none.
+ */
+export function candidateCost(
+  candidate: FallbackIncident["candidate"],
+  listed: readonly RoleModelOption[] | null | undefined,
+): ModelPrice | null {
+  if (candidate === null) return null;
+  return MODEL_PRICES[candidate.model] ?? listed?.find((model) => model.id === candidate.model)?.cost ?? null;
+}
+
+/**
+ * The base provider whose `roles.options` the card reads for the Switch
+ * button's price, or null: only for a pending incident with a candidate the
+ * bundled table has no price for.
+ */
+export function listedCostProvider(lookup: FallbackLookup): string | null {
+  if (lookup.state !== "found" || lookup.incident.status !== "pending") return null;
+  const candidate = lookup.incident.candidate;
+  if (candidate === null || MODEL_PRICES[candidate.model] !== undefined) return null;
+  return candidate.baseProvider;
+}
+
+/** The buttons of an incident: none unless it is `pending`, and "I'll handle it" always then. */
+export function fallbackButtons(incident: FallbackIncident, now: Date, cost: ModelPrice | null): FallbackButton[] {
+  if (incident.status !== "pending") return [];
+  const buttons: FallbackButton[] = [];
+  if (incident.candidate !== null) {
+    buttons.push({
+      action: "switch",
+      label: `Switch to ${candidateText(incident.candidate)}${cost === null ? "" : ` · ${priceText(cost)}`}`,
+    });
+  }
+  const deadline = waitDeadline(incident.resetsAt, now);
+  if (deadline !== null) {
+    const at = localTimeText(deadline, now);
+    buttons.push({ action: "wait", label: deadline.getTime() > now.getTime() ? `Wait until ${at}` : `Resume now (the limit reset at ${at})` });
+  }
+  buttons.push({ action: "dismiss", label: "I'll handle it" });
+  return buttons;
+}
+
+function timeOf(iso: string | null, now: Date): string | null {
+  if (iso === null) return null;
+  const at = new Date(iso);
+  return Number.isNaN(at.getTime()) ? null : localTimeText(at, now);
+}
+
+/** One line for an incident that is no longer `pending`; null while it is. */
+export function fallbackStatusLine(incident: FallbackIncident, now: Date): { text: string; tone: Tone } | null {
+  const tone = STATUS_TONES[incident.status];
+  const role = roleName(incident.role);
+  switch (incident.status) {
+    case "pending":
+      return null;
+    case "switched": {
+      const to = incident.candidate === null ? "a fallback agent" : candidateText(incident.candidate);
+      const agent = incident.replacementId === null ? "" : ` (agent ${incident.replacementId.slice(0, 8)})`;
+      return { text: `Switched to ${to}${agent}.`, tone };
+    }
+    case "waiting": {
+      const until = timeOf(incident.waitUntil ?? incident.resetsAt, now);
+      return { text: until === null ? `Waiting for the usage reset; then the ${role} carries on.` : `Waiting until ${until}; then the ${role} carries on.`, tone };
+    }
+    case "resumed":
+      return { text: `Resumed: the limit reset and the ${role} was asked to carry on.`, tone };
+    case "dismissed":
+      return { text: "Dismissed: you handle it.", tone };
+    case "exhausted":
+      return { text: "No fallback left to switch to.", tone };
+    case "expired":
+      return { text: `Expired: by the reset the ${role} was archived, running or already replaced.`, tone };
+    case "failed":
+      return { text: `Failed: ${incident.error ?? "unknown error"}`, tone };
+  }
+}
+
+/** An RPC error with its registry code once, in front: `(<code>): <message>`. */
+function codedReason(error: unknown): string {
+  const code = errorCodeOf(error);
+  const message = errorMessageOf(error);
+  if (code === null) return `: ${message}`;
+  const rest = message.replace(/^\s*E_[A-Z0-9_]+\s*:?\s*/, "");
+  return rest === "" ? ` (${code})` : ` (${code}): ${rest}`;
+}
+
+/**
+ * Everything a fallback card draws, from its notice and the incident as
+ * `fallback.incidents` has it now. `cost` is the candidate's price, if known.
+ */
+export function fallbackCardView(card: ChatCard, lookup: FallbackLookup, now: Date, cost: ModelPrice | null): FallbackCardView {
+  const notice = card.fallback;
+  const incident = lookup.state === "found" ? lookup.incident : null;
+  const role = incident?.role ?? notice?.role ?? null;
+  const cls = incident?.class ?? notice?.class ?? null;
+  const provider = incident === null ? (notice?.provider ?? null) : failedProviderOf(incident);
+  const base = {
+    role,
+    title: stoppedTitle(role),
+    requestId: incident === null ? card.requestId : incident.requestId,
+    summary: [cls === null ? null : CLASS_LABELS[cls], provider].filter((part) => part !== null).join(" · "),
+    message: incident === null ? (notice?.message ?? null) : incident.message.trim() || null,
+  };
+  switch (lookup.state) {
+    case "loading":
+      return { ...base, chip: null, buttons: [], statusLine: { text: "Checking the incident…", tone: "muted" } };
+    case "failed":
+      return { ...base, chip: null, buttons: [], statusLine: { text: `Could not read the incident${codedReason(lookup.error)}`, tone: "danger" } };
+    case "missing":
+      return { ...base, chip: null, buttons: [], statusLine: { text: "This incident is no longer recorded; there is nothing to decide here.", tone: "muted" } };
+    case "found":
+      return {
+        ...base,
+        chip: { text: lookup.incident.status, tone: STATUS_TONES[lookup.incident.status] },
+        buttons: fallbackButtons(lookup.incident, now, cost),
+        statusLine: fallbackStatusLine(lookup.incident, now),
+      };
+  }
+}
+
+/** The incident a `fallback.incidents` answer has for this card: `missing` when it has none. */
+export function lookupOf(incidentId: string, incidents: readonly FallbackIncident[]): FallbackLookup {
+  const incident = incidents.find((candidate) => candidate.id === incidentId);
+  return incident === undefined ? { state: "missing" } : { state: "found", incident };
+}
+
+const ACTION_WORDS: Readonly<Record<FallbackAction, string>> = {
+  switch: "switch to the fallback",
+  wait: "wait for the reset",
+  dismiss: "record that you handle it",
+};
+
+/** The error line of a failed button, with the registry code the server sent. */
+export function fallbackActError(action: FallbackAction, error: unknown): string {
+  return `Could not ${ACTION_WORDS[action]}${codedReason(error)}`;
+}
+
+export type FallbackActResult = { ok: true; incident: FallbackIncident } | { ok: false; reason: string };
+
+/**
+ * One button press: ONE `fallback.act` call. The incident it answers with is
+ * the card's new state; a failure becomes the card's error line.
+ */
+export async function runFallbackAction(input: {
+  incidentId: string;
+  action: FallbackAction;
+  act: (input: FallbackActInput) => Promise<{ incident: FallbackIncident }>;
+}): Promise<FallbackActResult> {
+  try {
+    const { incident } = await input.act({ incidentId: input.incidentId, action: input.action });
+    return { ok: true, incident };
+  } catch (failure) {
+    return { ok: false, reason: fallbackActError(input.action, failure) };
+  }
 }

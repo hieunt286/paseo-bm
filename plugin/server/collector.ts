@@ -41,6 +41,7 @@ import { parseReports, parseReviews, requestIdFromText } from "./bm-report";
 import { isPluginNotice } from "./notices";
 import { stripNewRequestMarker } from "../shared/new-request";
 import { resolveInstallHome } from "./install-home";
+import { roleOfProvider } from "./agent-role";
 import { providerId } from "./provider-id";
 import {
   TraceStoreLockTimeout,
@@ -58,13 +59,6 @@ import {
   type TraceRuntime,
   type Usage,
 } from "../shared/contracts";
-
-/** Provider ids paseo-bm owns; anything else is not collected. */
-export const COLLECTED_PROVIDERS: Readonly<Record<string, "manager" | "worker" | "reviewer">> = {
-  "bm-manager": "manager",
-  "bm-worker": "worker",
-  "bm-reviewer": "reviewer",
-};
 
 /** Timeline entries read back per turn when timestamps have to be recovered. */
 export const REFETCH_LIMIT = 200;
@@ -333,8 +327,8 @@ function markKey(agentId: string, turnId: string | null): string {
 
 /** Records a turn's start time. */
 export function noteTurnStart(event: TurnStartedEvent, now: () => Date = () => new Date()): void {
-  const id = providerId(event.agent.provider);
-  if (id === null || !(id in COLLECTED_PROVIDERS)) return;
+  // Only paseo-bm's agents are collected, fallback aliases included (delta 20260921 §4.4.1).
+  if (roleOfProvider(event.agent.provider) === null) return;
   startMarks.set(markKey(event.agent.id, event.turnId), now().toISOString());
 }
 
@@ -374,9 +368,8 @@ export async function buildRecord(
   event: TurnEndedEvent,
   deps: CollectorDeps,
 ): Promise<{ record: TraceRecord; workspaceName: string | null } | null> {
-  const id = providerId(event.agent.provider);
-  const role = id === null ? undefined : COLLECTED_PROVIDERS[id];
-  if (role === undefined) return null;
+  const role = roleOfProvider(event.agent.provider);
+  if (role === null) return null;
   if (event.agent.workspaceId === null) return null;
 
   const now = deps.now ?? (() => new Date());

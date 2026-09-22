@@ -1,8 +1,7 @@
 import type { PluginLifecycleEvents, PluginServerContext } from "@getpaseo/plugin/server";
 import { PARENT_AGENT_LABEL } from "./manager";
 import { REVIEWER_STOP_NOTICE_PREFIX, WORKER_STOP_NOTICE } from "./notices";
-import { listAllAgents, roleOfAgent } from "./agent-role";
-import { providerId } from "./provider-id";
+import { listAllAgents, roleOfAgent, roleOfProvider } from "./agent-role";
 
 /**
  * Stop propagation from a Beads Worker to its running Reviewers (bm-wq6, REQ-026f).
@@ -27,9 +26,6 @@ import { providerId } from "./provider-id";
  *
  * Lifecycle belongs to the user (ADR-005): nothing here archives or deletes.
  */
-
-/** Provider id of a Beads Worker; `bm-worker/<model>` names it too. */
-export const WORKER_PROVIDER_ID = "bm-worker";
 
 /** `bm.role` value that identifies a Reviewer (design §5). */
 export const REVIEWER_ROLE_VALUE = "reviewer";
@@ -117,13 +113,13 @@ function wait(ms: number, signal: AbortSignal | undefined): Promise<void> {
   });
 }
 
-/** The event is the end of a canceled turn of a `bm-worker` agent. */
+/** The event is the end of a canceled turn of a Worker (`bm-worker`, or a fallback Worker alias). */
 export function isCanceledWorkerTurn(event: TurnEndedEvent): boolean {
   const candidate = event as Partial<TurnEndedEvent> | null | undefined;
   return (
     candidate?.outcome?.kind === "canceled" &&
     typeof candidate.agent?.id === "string" &&
-    providerId(candidate.agent.provider) === WORKER_PROVIDER_ID
+    roleOfProvider(candidate.agent.provider) === "worker"
   );
 }
 
@@ -166,6 +162,46 @@ async function listRunningReviewers(
 }
 
 /**
+ * Sends `REVIEWER_STOP_NOTICE` to every running Reviewer of `workerId` (in
+ * `workspaceId` when known), re-reading each one just before the send and
+ * skipping it unless it is still running. Returns the ids it sent to. Never
+ * throws: a failure costs one log line; an aborted `signal` ends it quietly.
+ * Also used when a fallback Worker replaces a stopped one (delta 20260921 §4.4.7).
+ */
+export async function stopRunningReviewers(
+  paseo: StopPaseo,
+  workerId: string,
+  workspaceId: string | null,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const stopped: string[] = [];
+  let reviewers: StopAgentSnapshot[];
+  try {
+    reviewers = await listRunningReviewers(paseo, workerId, workspaceId);
+  } catch (error) {
+    if (!isAborted(signal)) {
+      console.warn(`${LOG_PREFIX} could not list the Reviewers of Worker ${workerId}: ${describeError(error)}`);
+    }
+    return stopped;
+  }
+  for (const reviewer of reviewers) {
+    if (isAborted(signal)) return stopped;
+    try {
+      const handle = paseo.agents.ref(reviewer.id);
+      const fresh = await handle.refresh();
+      if (isAborted(signal)) return stopped;
+      if (!isRunningReviewerOf(fresh?.agent, workerId, workspaceId)) continue;
+      await handle.send(REVIEWER_STOP_NOTICE);
+      stopped.push(reviewer.id);
+    } catch (error) {
+      if (isAborted(signal)) return stopped;
+      console.warn(`${LOG_PREFIX} could not stop Reviewer ${reviewer.id} of Worker ${workerId}: ${describeError(error)}`);
+    }
+  }
+  return stopped;
+}
+
+/**
  * Handler body of `on("agent.turn_ended")`. Resolves in every case: failures are
  * logged with `console.warn`, an aborted `signal` ends it quietly.
  *
@@ -205,31 +241,7 @@ export async function propagateWorkerStop(
     }
 
     const workspaceId = event.agent.workspaceId ?? worker?.workspaceId ?? null;
-    let reviewers: StopAgentSnapshot[];
-    try {
-      reviewers = await listRunningReviewers(paseo, workerId, workspaceId);
-    } catch (error) {
-      if (!isAborted(signal)) {
-        console.warn(`${LOG_PREFIX} could not list the Reviewers of Worker ${workerId}: ${describeError(error)}`);
-      }
-      return;
-    }
-
-    for (const reviewer of reviewers) {
-      if (isAborted(signal)) return;
-      try {
-        const handle = paseo.agents.ref(reviewer.id);
-        const fresh = await handle.refresh();
-        if (isAborted(signal)) return;
-        if (!isRunningReviewerOf(fresh?.agent, workerId, workspaceId)) continue;
-        await handle.send(REVIEWER_STOP_NOTICE);
-      } catch (error) {
-        if (isAborted(signal)) return;
-        console.warn(
-          `${LOG_PREFIX} could not stop Reviewer ${reviewer.id} of Worker ${workerId}: ${describeError(error)}`,
-        );
-      }
-    }
+    await stopRunningReviewers(paseo, workerId, workspaceId, signal);
   } catch (error) {
     if (!isAborted(signal)) {
       console.warn(`${LOG_PREFIX} unexpected failure: ${describeError(error)}`);

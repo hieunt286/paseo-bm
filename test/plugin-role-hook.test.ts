@@ -99,6 +99,12 @@ describe("before(\"agent.create\") role hook", () => {
     expect((await run({ config: { provider: "bm-worker/gpt-5.6-sol", cwd: "/repo" } }))?.config?.systemPrompt).toBe(workerWithFallback);
   });
 
+  it("gives a fallback Worker bm-worker-fallback-1/<model> the Worker's instructions (delta 20260921 §4.4.1)", async () => {
+    const { run } = setup();
+    expect((await run({ config: { provider: "bm-worker-fallback-1/qwen3-coder", cwd: "/repo" } }))?.config?.systemPrompt).toBe(workerWithFallback);
+    expect(await run({ config: { provider: "bm-worker-fallback-4/qwen3-coder", cwd: "/repo" } })).toBeUndefined();
+  });
+
   it("gives bm-reviewer the text of roles/reviewer.md", async () => {
     const { run } = setup();
     expect((await run({ config: { provider: "bm-reviewer", cwd: "/repo" } }))?.config?.systemPrompt).toBe(reviewerMd);
@@ -259,6 +265,15 @@ describe("before(\"agent.create\") start mode", () => {
       config: { provider: "bm-worker/claude-opus-5", cwd: "/repo", systemPrompt: workerWithReviewerMode("auto"), modeId: "bypassPermissions" },
       env: { A: "1" },
     });
+  });
+
+  it("looks up a fallback Worker's modes by its own alias, not the main one (delta 20260921 §4.4.1)", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { spy, paseo } = paseoWith(async (provider: string) => ({ provider, modes: CLAUDE_MODES, error: null }));
+    const { run } = setup(paseo);
+    const result = await run({ config: { provider: "bm-worker-fallback-1/claude-opus-5", cwd: "/repo" } });
+    expect(spy.mock.calls[0]).toEqual(["bm-worker-fallback-1", { cwd: "/repo" }]);
+    expect(result?.config).toMatchObject({ systemPrompt: workerWithReviewerMode("auto"), modeId: "bypassPermissions" });
   });
 
   it("gives a Worker the Reviewer mode it must pass, as Runtime facts after its role text (errata K10, Q1a)", async () => {

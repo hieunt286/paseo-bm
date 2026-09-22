@@ -325,6 +325,7 @@ export async function bmAgentsOf(paseo: DashboardPaseo): Promise<Array<{ workspa
       batchIdLabel: labels["bm.batchId"] ?? null,
       archived: typeof agent["archivedAt"] === "string" && agent["archivedAt"] !== "",
       title: typeof agent["title"] === "string" ? (agent["title"] as string) : null,
+      replacedBy: labels["bm.replacedBy"] ?? null,
     };
     out.push({ workspaceId: typeof agent["workspaceId"] === "string" ? agent["workspaceId"] : null, facts });
   }

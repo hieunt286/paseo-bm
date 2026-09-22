@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { forgetModelCosts } from "../plugin/server/model-costs";
 import { noticeQueue } from "../plugin/server/notice-queue";
 import { LOOKUP_TIMEOUT_MS, forgetModes } from "../plugin/server/role-mode";
@@ -21,6 +24,22 @@ import { DashboardError, rolesOptionsRpc, rolesSettingsRpc } from "../plugin/sha
  * Claude (`tiered`), OpenCode (`untiered`), Pi (`none`) and a provider whose
  * modes answer an error (`unknown`). Nothing here touches a real daemon.
  */
+
+// roles.settings now reads the fallback chains from the install home (delta
+// 20260921 §4.4.3): point $HOME at an empty directory so this machine's real
+// ~/.paseo-bm is never read. No install home there, so the chains are the defaults.
+const realHome = process.env.HOME;
+const isolatedHome = mkdtempSync(join(tmpdir(), "bm-role-settings-home-"));
+beforeAll(() => {
+  process.env.HOME = isolatedHome;
+});
+afterAll(() => {
+  process.env.HOME = realHome;
+  rmSync(isolatedHome, { recursive: true, force: true });
+});
+
+/** The Worker's chain when nothing is saved: ask, no entry (phase 2a-16 offers the Worker's chain only). */
+const DEFAULT_FALLBACK = { worker: { role: "worker", policy: "ask", entries: [], patternsFromFile: false } };
 
 const FETCHED_AT = "2026-09-22T08:00:00.000Z";
 
@@ -268,7 +287,7 @@ describe("roles.settings", () => {
           capability: "none",
         },
       ],
-      fallback: null,
+      fallback: DEFAULT_FALLBACK,
       warnings: [],
       // No listAvailable on this fake: Paseo cannot say, so nothing to pick.
       providers: [],
@@ -311,7 +330,7 @@ describe("roles.settings", () => {
     });
     expect(listModes.mock.calls.map((call) => call[0])).toEqual(["claude"]);
     expect(result.revision).toBe(roleSettingsRevision(config));
-    expect(result.fallback).toBeNull();
+    expect(result.fallback).toEqual(DEFAULT_FALLBACK);
   });
 
   it("describes every role as missing on a daemon without paseo-bm roles", async () => {
@@ -368,7 +387,7 @@ describe("roles.settings", () => {
       ["worker", null, null, "unknown"],
       ["reviewer", null, null, "unknown"],
     ]);
-    expect(result.fallback).toBeNull();
+    expect(result.fallback).toEqual(DEFAULT_FALLBACK);
     expect(result.warnings).toEqual([
       "paseo-bm could not read the Paseo configuration (daemon went away); reopen Roles & models to try again.",
     ]);
@@ -562,8 +581,8 @@ describe("registration", () => {
       },
     } as unknown as PluginServerContext;
     registerRoleSettingsRpcs(server);
-    // roles.save-settings joined them with bead kj1p.3.
-    expect([...handlers.keys()].sort()).toEqual(["roles.options", "roles.save-settings", "roles.settings"]);
+    // roles.save-settings joined them with bead kj1p.3, roles.save-fallback with 332y.2.
+    expect([...handlers.keys()].sort()).toEqual(["roles.options", "roles.save-fallback", "roles.save-settings", "roles.settings"]);
 
     const { paseo } = fakePaseo();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -750,10 +769,15 @@ describe("roles.save-settings (delta 20260921 §4.3.3–§4.3.4, REQ-064 b/c/e/f
     ).rejects.toMatchObject({ code: "E_ROLE_SETTINGS_INVALID" });
   });
 
-  it("registers roles.save-settings next to the two read RPCs", () => {
+  it("registers roles.save-settings next to the two read RPCs, then roles.save-fallback", () => {
     const handle = vi.fn();
     registerRoleSettingsRpcs({ handle } as unknown as PluginServerContext);
-    expect(handle.mock.calls.map((call) => (call[0] as { name: string }).name)).toEqual(["roles.settings", "roles.options", "roles.save-settings"]);
+    expect(handle.mock.calls.map((call) => (call[0] as { name: string }).name)).toEqual([
+      "roles.settings",
+      "roles.options",
+      "roles.save-settings",
+      "roles.save-fallback",
+    ]);
   });
 });
 

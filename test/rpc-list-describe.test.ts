@@ -64,13 +64,29 @@ describe("agents.list — tree", () => {
 
     expect(agentsListRpc.output.parse(output)).toEqual({
       agents: [
-        { id: "mgr", role: "manager", title: "Beads Manager", status: "running", parentId: null, updatedAt: "2026-09-15T09:00:00.000Z", labelled: true },
-        { id: "wrk", role: "worker", title: "wrk", status: "idle", parentId: "mgr", updatedAt: "2026-09-15T09:00:00.000Z", labelled: true },
-        { id: "rev", role: "reviewer", title: "rev", status: "idle", parentId: "wrk", updatedAt: "2026-09-15T09:00:00.000Z", labelled: true },
+        { id: "mgr", role: "manager", title: "Beads Manager", status: "running", parentId: null, updatedAt: "2026-09-15T09:00:00.000Z", labelled: true, replacedBy: null },
+        { id: "wrk", role: "worker", title: "wrk", status: "idle", parentId: "mgr", updatedAt: "2026-09-15T09:00:00.000Z", labelled: true, replacedBy: null },
+        { id: "rev", role: "reviewer", title: "rev", status: "idle", parentId: "wrk", updatedAt: "2026-09-15T09:00:00.000Z", labelled: true, replacedBy: null },
       ],
     });
     // No label filter (unlabeled children must be reachable), archived excluded.
     expect(filters).toEqual([{ includeArchived: false }]);
+  });
+
+  it("names the agent that replaced one, by its bm.replacedBy label or by a switched incident (delta 20260921 §4.4.8)", async () => {
+    const { paseo } = fakeDirectory([
+      agent({ id: "mgr", createdAt: t(1), labels: { "bm.role": "manager" } }),
+      agent({ id: "wrk", createdAt: t(2), labels: { "bm.role": "worker", "paseo.parent-agent-id": "mgr", "bm.replacedBy": "wrk-2" } }),
+      agent({ id: "wrk-2", createdAt: t(3), labels: { "bm.role": "worker", "paseo.parent-agent-id": "mgr" } }),
+      agent({ id: "rev", createdAt: t(4), labels: { "bm.role": "reviewer", "paseo.parent-agent-id": "wrk" } }),
+    ]);
+    const { agents } = await listWorkspaceAgents({ workspaceId: WS }, { paseo, replacements: new Map([["rev", "rev-2"]]) });
+    expect(agents.map((a) => [a.id, a.replacedBy])).toEqual([
+      ["mgr", null],
+      ["wrk", "wrk-2"],
+      ["wrk-2", null],
+      ["rev", "rev-2"],
+    ]);
   });
 
   it("agent with missing or foreign bm.role label: role unknown, no error", async () => {
@@ -266,11 +282,14 @@ describe("plugin server entry — agents.list and roles.describe", () => {
       "chat.beads",
       "chat.peers",
       "chat.waiting",
+      "fallback.act",
+      "fallback.incidents",
       "manager.ensure",
       "roles.describe",
       "roles.instructions",
       "roles.options",
       "roles.save-extra",
+      "roles.save-fallback",
       "roles.save-settings",
       "roles.settings",
       "setup.install-tool",

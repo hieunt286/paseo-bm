@@ -9,6 +9,7 @@ import { bmAgentsOf, workspaceDirectory, type DashboardPaseo } from "./dashboard
 import { readTimelinePages } from "./live-timeline";
 import { handleChatWaiting } from "./chat-waiting";
 import { peersOfWorkspace, workspaceRecordsReader } from "./chat-peers";
+import { replacementsFor } from "./fallback-state";
 import { beadIdCandidates } from "../shared/bead-ids";
 import {
   beadsLookupRpc,
@@ -33,7 +34,12 @@ export async function handleChatPeers(
   const all = await bmAgentsOf(paseo);
   const found = all.find((entry) => entry.facts.id === input.agentId);
   if (found === undefined || found.workspaceId === null) return { owner: null, peers: [], workspaceId: null };
-  const peers = await peersOfWorkspace(all, found.workspaceId, workspaceRecordsReader(paseo, found.workspaceId, deps));
+  const peers = await peersOfWorkspace(
+    all,
+    found.workspaceId,
+    workspaceRecordsReader(paseo, found.workspaceId, deps),
+    await replacementsFor(paseo, deps),
+  );
   return {
     owner: peers.find((peer) => peer.id === input.agentId) ?? null,
     peers: peers.filter((peer) => peer.id !== input.agentId),

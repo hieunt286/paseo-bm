@@ -4,7 +4,8 @@
  * a Test button, and the beads tools `br` / `bv` with a confirmed Install.
  * Above the instructions, "Roles & models" (delta 20260921 §4.3.1) shows each
  * role's provider, model, thinking and mode, with an Edit form that saves
- * through `roles.save-settings`.
+ * through `roles.save-settings`, and under a role whose fallback chain is
+ * offered, its policy and entries, saved through `roles.save-fallback` (§4.4.3).
  *
  * It is the surface's MAIN screen (owner decision Q1, delta 20260918e §4.2):
  * no back button, and a "Workspaces" button to the workspace list. The surface
@@ -22,12 +23,16 @@ import {
   rolesInstructionsRpc,
   rolesOptionsRpc,
   rolesSaveExtraRpc,
+  rolesSaveFallbackRpc,
   rolesSaveSettingsRpc,
   rolesSettingsRpc,
   setupInstallToolRpc,
   setupStatusRpc,
   type BmRole,
+  type FallbackEntryInput,
+  type FallbackSettings,
   type RoleSetting,
+  type RolesOptions,
   type RolesSettings,
   type SetupStatus,
 } from "../shared/contracts";
@@ -35,9 +40,23 @@ import { dashboardStyles, toneColor, type Badge } from "./dashboard-model";
 import { errorMessageOf } from "./launch-manager";
 import { MarkdownView } from "./markdown-view";
 import {
+  FALLBACK_POLICY_CHOICES,
   ROLES_APPLY_NOTICE,
   SETUP_ROLES,
+  addFallback,
   applySavedRole,
+  canAddFallback,
+  entryAsSetting,
+  entryOfDraft,
+  fallbackBlocks,
+  fallbackDraftChanged,
+  fallbackDraftOf,
+  fallbackEntryText,
+  fallbackPriceText,
+  moveFallback,
+  removeFallback,
+  replaceFallback,
+  saveFallbackInput,
   extraCounter,
   installWarning,
   isSettingsConflict,
@@ -54,6 +73,7 @@ import {
   skillChips,
   skillDirsText,
   toolBadge,
+  type FallbackDraft,
   type RoleChoice,
   type RoleDraft,
   type SetupRole,
@@ -347,6 +367,278 @@ function RoleEditForm({ role, label, setting, available, revision, styles, theme
   );
 }
 
+/**
+ * The Edit form of one fallback entry: the same fields and rules as a role's
+ * form (`roleFormView`), but it hands the entry back to its chain instead of
+ * saving; the chain is saved as a whole.
+ */
+function FallbackEntryForm({ role, entry, available, styles, theme, onDone, onCancel }: {
+  role: BmRole;
+  entry: FallbackEntryInput | null;
+  available: readonly string[];
+  styles: Styles;
+  theme: Theme;
+  onDone: (entry: FallbackEntryInput) => void;
+  onCancel: () => void;
+}) {
+  const getOptions = useRpc(rolesOptionsRpc);
+  const setting = useMemo(() => entryAsSetting(role, entry), [role, entry]);
+  const [draft, setDraft] = useState<RoleDraft>(() => roleDraftOf(setting));
+  const options = useQuery({
+    queryKey: roleOptionsKey(draft.baseProvider),
+    queryFn: () => getOptions({ provider: draft.baseProvider }),
+    enabled: draft.baseProvider !== "",
+  });
+  const view = roleFormView({ role, setting, available, draft, options: options.data });
+  const done = view.blocker === null ? entryOfDraft(view.draft) : null;
+
+  return (
+    <View style={[styles.card, { backgroundColor: theme.colors.surface0, gap: 8 }]}>
+      <Text style={styles.sectionTitle}>{entry === null ? "Add fallback" : "Edit fallback"}</Text>
+      {view.providers.length === 0 ? (
+        <Text style={styles.body}>Paseo reports no available provider right now.</Text>
+      ) : (
+        <ChoiceField
+          title="Provider"
+          choices={view.providers.map((provider) => ({ id: provider, label: providerLabel(provider) }))}
+          selected={draft.baseProvider === "" ? null : draft.baseProvider}
+          onSelect={(id) => setDraft((current) => ({ ...current, baseProvider: id ?? "" }))}
+          styles={styles}
+          theme={theme}
+        />
+      )}
+      {options.isLoading ? <ActivityIndicator color={styles.spinner.color} /> : null}
+      {options.isError ? (
+        <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{errorMessageOf(options.error)}</Text>
+      ) : null}
+      {view.models.length === 0 ? null : (
+        <ChoiceField
+          title="Model"
+          choices={view.models.map((model) => ({ id: model.id, label: model.label }))}
+          selected={view.draft.model}
+          onSelect={(id) => setDraft((current) => ({ ...current, model: id }))}
+          styles={styles}
+          theme={theme}
+        />
+      )}
+      {view.price === null ? null : <Text style={styles.body}>{view.price}</Text>}
+      {view.thinking.length === 0 ? null : (
+        <ChoiceField
+          title="Thinking"
+          choices={view.thinking}
+          selected={view.draft.thinkingOptionId}
+          onSelect={(id) => setDraft((current) => ({ ...current, thinkingOptionId: id }))}
+          styles={styles}
+          theme={theme}
+        />
+      )}
+      {view.modes.length === 0 ? null : (
+        <ChoiceField
+          title="Mode"
+          choices={view.modes}
+          selected={view.draft.modeId}
+          onSelect={(id) => setDraft((current) => ({ ...current, modeId: id }))}
+          styles={styles}
+          theme={theme}
+        />
+      )}
+      {view.modeNote === null ? null : <Text style={[styles.body, { color: toneColor(theme, "warning") }]}>{view.modeNote}</Text>}
+      {view.blocker === null || options.isError ? null : <Text style={styles.body}>{view.blocker}</Text>}
+      <View style={styles.chipRow}>
+        <Pressable
+          accessibilityRole="button"
+          disabled={done === null}
+          onPress={() => done !== null && onDone(done)}
+          style={[styles.button, done === null ? { opacity: 0.5 } : null]}
+        >
+          <Text style={styles.buttonText}>{entry === null ? "Add" : "Done"}</Text>
+        </Pressable>
+        <Pressable accessibilityRole="button" onPress={onCancel} style={styles.secondaryButton}>
+          <Text style={styles.secondaryButtonText}>Cancel</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+/** A small text button of an entry row: ↑, ↓, Edit, Remove. */
+function RowButton({ label, accessibilityLabel, disabled, onPress, styles }: {
+  label: string;
+  accessibilityLabel: string;
+  disabled?: boolean;
+  onPress: () => void;
+  styles: Styles;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel}
+      disabled={disabled}
+      onPress={onPress}
+      style={[styles.secondaryButton, disabled ? { opacity: 0.4 } : null]}
+    >
+      <Text style={styles.secondaryButtonText}>{label}</Text>
+    </Pressable>
+  );
+}
+
+/**
+ * The fallback chain of one role (§4.3.1): the policy, the entries with
+ * reorder, edit and remove, and "Add fallback". Edits stay local until Save;
+ * the block keeps the `revision` it had when the user started editing, so a
+ * save over a configuration changed since then is refused.
+ */
+function FallbackBlock({ chain, label, revision, available, optionsOf, styles, theme }: {
+  chain: FallbackSettings;
+  label: string;
+  revision: string;
+  available: readonly string[];
+  optionsOf: (provider: string) => RolesOptions | undefined;
+  styles: Styles;
+  theme: Theme;
+}) {
+  const saveFallback = useRpc(rolesSaveFallbackRpc);
+  const queryClient = useQueryClient();
+  const [editing, setEditing] = useState<{ draft: FallbackDraft; revision: string } | null>(null);
+  const [form, setForm] = useState<{ index: number | null } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [notes, setNotes] = useState<Badge[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const draft = editing?.draft ?? fallbackDraftOf(chain);
+  const changed = editing !== null && fallbackDraftChanged(chain, editing.draft);
+
+  const edit = (next: (current: FallbackDraft) => FallbackDraft) => {
+    setNotes([]);
+    setError(null);
+    setEditing((current) => ({ draft: next(current?.draft ?? fallbackDraftOf(chain)), revision: current?.revision ?? revision }));
+  };
+
+  const save = async () => {
+    if (editing === null) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const result = await saveFallback(saveFallbackInput(editing.revision, chain.role, editing.draft));
+      setEditing(null);
+      setNotes(savedNotes(result));
+      void queryClient.invalidateQueries({ queryKey: ROLES_SETTINGS_KEY });
+    } catch (failure) {
+      setError(saveErrorText(failure));
+      if (isSettingsConflict(failure)) void queryClient.invalidateQueries({ queryKey: ROLES_SETTINGS_KEY });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <View style={{ gap: 6, paddingLeft: 12 }}>
+      <View style={[styles.chipRow, { alignItems: "center" }]}>
+        <Text style={styles.body}>On a usage limit:</Text>
+        {FALLBACK_POLICY_CHOICES.map((choice) => {
+          const on = draft.policy === choice.id;
+          return (
+            <Chip
+              key={choice.id}
+              badge={{ text: choice.label, tone: on ? "info" : "muted" }}
+              selected={on}
+              onPress={() => edit((current) => ({ ...current, policy: choice.id }))}
+              styles={styles}
+              theme={theme}
+            />
+          );
+        })}
+      </View>
+      {draft.entries.map((entry, index) => {
+        const saved = editing === null ? chain.entries[index] : undefined;
+        const price = saved === undefined ? null : fallbackPriceText(saved);
+        return (
+          <View key={`${index}:${entry.baseProvider}:${entry.model}`} style={{ gap: 4 }}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+              <Text style={styles.body}>{`Fallback ${index + 1}`}</Text>
+              <Text style={[styles.body, { flex: 1, minWidth: 160 }]} selectable>
+                {fallbackEntryText(entry, optionsOf(entry.baseProvider))}
+              </Text>
+              <RowButton label="↑" accessibilityLabel={`Move ${label} fallback ${index + 1} up`} disabled={index === 0} onPress={() => edit((current) => moveFallback(current, index, -1))} styles={styles} />
+              <RowButton
+                label="↓"
+                accessibilityLabel={`Move ${label} fallback ${index + 1} down`}
+                disabled={index === draft.entries.length - 1}
+                onPress={() => edit((current) => moveFallback(current, index, 1))}
+                styles={styles}
+              />
+              <RowButton label="Edit" accessibilityLabel={`Edit ${label} fallback ${index + 1}`} onPress={() => setForm({ index })} styles={styles} />
+              <RowButton label="Remove" accessibilityLabel={`Remove ${label} fallback ${index + 1}`} onPress={() => edit((current) => removeFallback(current, index))} styles={styles} />
+            </View>
+            {price === null ? null : <Text style={styles.body}>{price}</Text>}
+            {form?.index === index ? (
+              <FallbackEntryForm
+                role={chain.role}
+                entry={entry}
+                available={available}
+                styles={styles}
+                theme={theme}
+                onDone={(next) => {
+                  edit((current) => replaceFallback(current, index, next));
+                  setForm(null);
+                }}
+                onCancel={() => setForm(null)}
+              />
+            ) : null}
+          </View>
+        );
+      })}
+      {form !== null && form.index === null ? (
+        <FallbackEntryForm
+          role={chain.role}
+          entry={null}
+          available={available}
+          styles={styles}
+          theme={theme}
+          onDone={(next) => {
+            edit((current) => addFallback(current, next));
+            setForm(null);
+          }}
+          onCancel={() => setForm(null)}
+        />
+      ) : canAddFallback(draft) ? (
+        <View style={styles.chipRow}>
+          <RowButton label="+ Add fallback" accessibilityLabel={`Add a fallback for the ${label}`} onPress={() => setForm({ index: null })} styles={styles} />
+        </View>
+      ) : null}
+      {editing === null ? null : (
+        <View style={styles.chipRow}>
+          <Pressable
+            accessibilityRole="button"
+            disabled={!changed || saving}
+            onPress={() => void save()}
+            style={[styles.button, changed && !saving ? null : { opacity: 0.5 }]}
+          >
+            <Text style={styles.buttonText}>{saving ? "Saving…" : "Save fallbacks"}</Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            disabled={saving}
+            onPress={() => {
+              setEditing(null);
+              setForm(null);
+              setError(null);
+            }}
+            style={styles.secondaryButton}
+          >
+            <Text style={styles.secondaryButtonText}>Discard</Text>
+          </Pressable>
+        </View>
+      )}
+      {notes.map((line, index) => (
+        <Text key={`${index}:${line.text}`} style={[styles.body, { color: toneColor(theme, line.tone) }]}>
+          {line.text}
+        </Text>
+      ))}
+      {error === null ? null : <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{error}</Text>}
+    </View>
+  );
+}
+
 /** "Roles & models": one row per role in the order `roles.settings` returns, each with an Edit form. */
 function RolesSection({ styles, theme }: { styles: Styles; theme: Theme }) {
   const getSettings = useRpc(rolesSettingsRpc);
@@ -357,7 +649,9 @@ function RolesSection({ styles, theme }: { styles: Styles; theme: Theme }) {
   const optionQueries = useQueries({
     queries: providers.map((provider) => ({ queryKey: roleOptionsKey(provider), queryFn: () => getOptions({ provider }) })),
   });
-  const rows = data === undefined ? [] : roleRows(data, (provider) => optionQueries[providers.indexOf(provider)]?.data);
+  const optionsOf = (provider: string) => optionQueries[providers.indexOf(provider)]?.data;
+  const rows = data === undefined ? [] : roleRows(data, optionsOf);
+  const chains = new Map((data === undefined ? [] : fallbackBlocks(data)).map((chain) => [chain.role, chain] as const));
   const [editing, setEditing] = useState<{ role: BmRole; revision: string } | null>(null);
   const [notes, setNotes] = useState<{ role: BmRole; lines: Badge[] } | null>(null);
 
@@ -400,6 +694,17 @@ function RolesSection({ styles, theme }: { styles: Styles; theme: Theme }) {
                       </Text>
                     ))
                   : null}
+                {chains.get(row.role) === undefined ? null : (
+                  <FallbackBlock
+                    chain={chains.get(row.role)!}
+                    label={row.label}
+                    revision={data.revision}
+                    available={data.providers}
+                    optionsOf={optionsOf}
+                    styles={styles}
+                    theme={theme}
+                  />
+                )}
                 {open ? (
                   <RoleEditForm
                     role={row.role}

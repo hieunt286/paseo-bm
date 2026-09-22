@@ -1,10 +1,24 @@
 import { describe, expect, it } from "vitest";
 import {
+  FALLBACK_POLICY_CHOICES,
   ROLES_APPLY_NOTICE,
   ROLES_CONFLICT_MESSAGE,
   SETUP_ROLES,
+  addFallback,
   applySavedRole,
+  canAddFallback,
   compareVersions,
+  entryAsSetting,
+  entryOfDraft,
+  fallbackBlocks,
+  fallbackDraftChanged,
+  fallbackDraftOf,
+  fallbackEntryText,
+  fallbackPriceText,
+  moveFallback,
+  removeFallback,
+  replaceFallback,
+  saveFallbackInput,
   extraCounter,
   installWarning,
   isSettingsConflict,
@@ -27,7 +41,7 @@ import {
   thinkingChoices,
   toolBadge,
 } from "../plugin/client/setup-model";
-import type { RoleModelOption, RoleSetting, RolesOptions, RolesSettings, SetupStatus } from "../plugin/shared/contracts";
+import type { FallbackSettings, RoleModelOption, RoleSetting, RolesOptions, RolesSettings, SetupStatus } from "../plugin/shared/contracts";
 
 type Tool = SetupStatus["tools"][number];
 const tool = (overrides: Partial<Tool>): Tool => ({
@@ -384,6 +398,110 @@ describe("Roles & models", () => {
       expect(next.roles[1]).toBe(saved);
       expect(next.roles[0]).toBe(settings.roles[0]);
       expect(next.providers).toBe(settings.providers);
+    });
+  });
+
+  describe("fallback chains (delta 20260921 §4.3.1, §4.4.3)", () => {
+    const CODEX = { baseProvider: "codex", model: "gpt-5.6-sol", thinkingOptionId: "high", modeId: "full-access" };
+    const PI = { baseProvider: "pi", model: "claude-haiku", thinkingOptionId: null, modeId: null };
+    const OPENCODE = { baseProvider: "opencode", model: "big-pickle", thinkingOptionId: null, modeId: "build" };
+    const chain = (entries: Array<typeof CODEX | typeof PI>, policy: FallbackSettings["policy"] = "ask"): FallbackSettings => ({
+      role: "worker",
+      policy,
+      entries: entries.map((entry, index) => ({
+        ...entry,
+        position: index + 1,
+        alias: `bm-worker-fallback-${index + 1}`,
+        capability: "tiered",
+        cost: index === 0 ? { inputUsdPerMTok: 1.25, cacheReadUsdPerMTok: 0.125, outputUsdPerMTok: 10 } : null,
+      })),
+      patternsFromFile: false,
+    });
+
+    it("shows a block only for the roles roles.settings carries a chain for, in role order", () => {
+      expect(fallbackBlocks(settings)).toEqual([]);
+      const worker = chain([CODEX]);
+      const reviewer = { ...chain([]), role: "reviewer" as const };
+      expect(fallbackBlocks({ ...settings, fallback: { reviewer, worker } }).map((block) => block.role)).toEqual(["worker", "reviewer"]);
+      expect(fallbackBlocks({ ...settings, fallback: { worker } })).toEqual([worker]);
+      // The entries' providers are looked up too, so their rows get labels.
+      expect(rowOptionProviders({ ...settings, fallback: { worker: chain([CODEX, PI]) } })).toEqual(["claude", "codex", "pi"]);
+    });
+
+    it("offers Ask me and Off, and reads a saved chain into a draft", () => {
+      expect(FALLBACK_POLICY_CHOICES.map((choice) => choice.label)).toEqual(["Ask me", "Off"]);
+      expect(fallbackDraftOf(chain([CODEX, PI], "off"))).toEqual({ policy: "off", entries: [CODEX, PI] });
+      // A hand-written auto reads as Ask me until Auto switch exists (phase 2a-18).
+      expect(fallbackDraftOf(chain([], "auto")).policy).toBe("ask");
+    });
+
+    it("labels an entry row from roles.options and prices a saved entry", () => {
+      expect(fallbackEntryText(CODEX, codex)).toBe("Codex · GPT-5.6-Sol · thinking high · mode Full access");
+      expect(fallbackEntryText(PI)).toBe("Pi · claude-haiku · thinking provider default");
+      const saved = chain([CODEX, PI]);
+      expect(fallbackPriceText(saved.entries[0]!)).toBe("~$1.25 / $10 per 1M tokens");
+      expect(fallbackPriceText(saved.entries[1]!)).toBeNull();
+    });
+
+    it("add, remove and reorder produce the right roles.save-fallback payload", () => {
+      let draft = fallbackDraftOf(chain([]));
+      draft = addFallback(draft, CODEX);
+      draft = addFallback(draft, PI);
+      expect(saveFallbackInput("rev-1", "worker", draft)).toEqual({ revision: "rev-1", role: "worker", policy: "ask", entries: [CODEX, PI] });
+      draft = moveFallback(draft, 1, -1);
+      expect(draft.entries).toEqual([PI, CODEX]);
+      // Moving past either end changes nothing.
+      expect(moveFallback(draft, 0, -1)).toBe(draft);
+      expect(moveFallback(draft, 1, 1)).toBe(draft);
+      draft = removeFallback(draft, 0);
+      expect(saveFallbackInput("rev-2", "worker", { ...draft, policy: "off" })).toEqual({
+        revision: "rev-2",
+        role: "worker",
+        policy: "off",
+        entries: [CODEX],
+      });
+      draft = replaceFallback(draft, 0, OPENCODE);
+      expect(draft.entries).toEqual([OPENCODE]);
+    });
+
+    it("stops at three entries", () => {
+      let draft = fallbackDraftOf(chain([CODEX, PI]));
+      expect(canAddFallback(draft)).toBe(true);
+      draft = addFallback(draft, OPENCODE);
+      expect(canAddFallback(draft)).toBe(false);
+      expect(addFallback(draft, CODEX)).toBe(draft);
+    });
+
+    it("knows when the draft differs from what is saved", () => {
+      const saved = chain([CODEX, PI]);
+      expect(fallbackDraftChanged(saved, fallbackDraftOf(saved))).toBe(false);
+      expect(fallbackDraftChanged(saved, moveFallback(fallbackDraftOf(saved), 0, 1))).toBe(true);
+      expect(fallbackDraftChanged(saved, { ...fallbackDraftOf(saved), policy: "off" })).toBe(true);
+    });
+
+    it("edits an entry with the role's own form, Reviewer rules included", () => {
+      const view = roleFormView({
+        role: "reviewer",
+        setting: entryAsSetting("reviewer", null),
+        available: settings.providers,
+        draft: { baseProvider: "codex", model: "gpt-5.6-sol", thinkingOptionId: null, modeId: null },
+        options: codex,
+      });
+      expect(view.modes.map((mode) => mode.id)).toEqual([null, "auto"]);
+      expect(entryOfDraft(view.draft)).toEqual({ baseProvider: "codex", model: "gpt-5.6-sol", thinkingOptionId: null, modeId: null });
+      expect(entryOfDraft({ baseProvider: "", model: null, thinkingOptionId: null, modeId: null })).toBeNull();
+      expect(entryAsSetting("worker", CODEX)).toMatchObject({ role: "worker", providerId: "bm-worker", baseProvider: "codex", model: "gpt-5.6-sol", modeId: "full-access" });
+    });
+
+    it("shows the server's warnings after a save, and the conflict sentence on a stale revision", () => {
+      const warnings = ["Fallback 1 runs on claude like the Worker itself: it only helps when the limit is per model."];
+      expect(savedNotes({ warnings })).toEqual([
+        { text: "Saved.", tone: "success" },
+        { text: warnings[0], tone: "warning" },
+      ]);
+      expect(saveErrorText(new Error("E_ROLE_SETTINGS_CONFLICT: the configuration changed elsewhere; reopen Roles & models"))).toBe(
+        "The configuration changed elsewhere; reopen Roles & models.",
+      );
     });
   });
 });

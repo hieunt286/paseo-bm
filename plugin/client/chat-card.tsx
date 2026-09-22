@@ -11,6 +11,10 @@
  * Worker; every Reply re-reads its recipient's status first (delta
  * 20260918d-card-replies §4.1–§4.3).
  *
+ * The plugin's `BM-FALLBACK` notice is a card of its own (delta 20260921
+ * §4.4.6): its status and buttons come from `fallback.incidents`, never from
+ * the notice's text, and each button is one `fallback.act` call.
+ *
  * All wording and decisions live in `chat-cards.ts`, tested without a
  * renderer. Client rules: React Native primitives only, colours from the theme.
  */
@@ -18,7 +22,16 @@ import { type PluginTimelineItemProps, usePaseo, useRpc } from "@getpaseo/plugin
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState, useSyncExternalStore } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
-import { answersMarkRpc, answersMarksRpc, chatPeersRpc, chatWaitingRpc } from "../shared/contracts";
+import {
+  answersMarkRpc,
+  answersMarksRpc,
+  chatPeersRpc,
+  chatWaitingRpc,
+  fallbackActRpc,
+  fallbackIncidentsRpc,
+  rolesOptionsRpc,
+  type FallbackIncident,
+} from "../shared/contracts";
 import { errorMessageOf } from "./launch-manager";
 import { answeredRecord, answersVersion, repliedAt, setAnswered, setReplied, subscribeAnswers } from "./answer-state";
 import { WAITING_POLL_MS } from "./waiting-pills-model";
@@ -27,9 +40,13 @@ import {
   answeredHow,
   answeredKey,
   answersDraft,
+  candidateCost,
   choosable,
   drawAsCard,
+  fallbackCardView,
   fallbackMarkdown,
+  listedCostProvider,
+  lookupOf,
   markOf,
   markdownOf,
   ownerWarning,
@@ -41,6 +58,7 @@ import {
   replyControls,
   replyTarget,
   roleName,
+  runFallbackAction,
   sendReply,
   sentSummary,
   showsQuestions,
@@ -51,6 +69,8 @@ import {
   questionHeading,
   withAnswersBlock,
   type ChatCard,
+  type FallbackAction,
+  type FallbackLookup,
   type Picks,
 } from "./chat-cards";
 import { dashboardStyles, toneColor } from "./dashboard-model";
@@ -70,7 +90,17 @@ function clock(date: Date): string {
   return Number.isNaN(date.getTime()) ? "" : `${two(date.getHours())}:${two(date.getMinutes())}`;
 }
 
-export function ChatCardView({ theme, layout, agentId, item, timestamp }: PluginTimelineItemProps<ChatCard>) {
+/** A listed price changes rarely; the Switch button reads it once in a while. */
+const COST_STALE_MS = 5 * 60_000;
+
+/** One incident's state, shared by every copy of its card (the chat's, a pill's popover). */
+const fallbackIncidentKey = (incidentId: string) => ["paseo-bm", "fallback-incident", incidentId] as const;
+
+export function ChatCardView(props: PluginTimelineItemProps<ChatCard>) {
+  return props.item.data.type === "fallback" ? <FallbackCardView {...props} /> : <MessageCardView {...props} />;
+}
+
+function MessageCardView({ theme, layout, agentId, item, timestamp }: PluginTimelineItemProps<ChatCard>) {
   const card = item.data;
   const styles = useMemo(() => dashboardStyles(theme, layout.compact), [theme, layout.compact]);
   const paseo = usePaseo();
@@ -342,6 +372,120 @@ export function ChatCardView({ theme, layout, agentId, item, timestamp }: Plugin
 
 type Styles = ReturnType<typeof dashboardStyles>;
 type Theme = PluginTimelineItemProps<ChatCard>["theme"];
+
+/**
+ * The card of a `BM-FALLBACK` notice (delta 20260921 §4.4.6). The notice only
+ * names the incident: whether there is anything to decide, and what, is read
+ * from `fallback.incidents` — while the incident is still open, again every
+ * `WAITING_POLL_MS` — so an old notice never shows a button that no longer
+ * applies. A button press is one `fallback.act`; the incident it returns is the
+ * card's new state, and a failure is shown with its code.
+ */
+function FallbackCardView({ theme, layout, item, timestamp }: PluginTimelineItemProps<ChatCard>) {
+  const card = item.data;
+  const incidentId = card.fallback?.incident ?? "";
+  const styles = useMemo(() => dashboardStyles(theme, layout.compact), [theme, layout.compact]);
+  const queryClient = useQueryClient();
+  const listIncidents = useRpc(fallbackIncidentsRpc);
+  const act = useRpc(fallbackActRpc);
+  const getOptions = useRpc(rolesOptionsRpc);
+  const incidents = useQuery({
+    queryKey: fallbackIncidentKey(incidentId),
+    queryFn: async (): Promise<FallbackIncident[]> => (await listIncidents({ ids: [incidentId] })).incidents,
+    enabled: incidentId !== "",
+    // Only an open incident can still change without a press here (the reset
+    // timer, a copy of this card in a pill's popover).
+    refetchInterval: (query) => {
+      const status = query.state.data?.find((candidate) => candidate.id === incidentId)?.status;
+      return status === "pending" || status === "waiting" ? WAITING_POLL_MS : false;
+    },
+  });
+  const lookup: FallbackLookup = incidents.isSuccess
+    ? lookupOf(incidentId, incidents.data)
+    : incidents.isError
+      ? { state: "failed", error: incidents.error }
+      : { state: "loading" };
+  // The Switch button's price: the bundled table, else what Paseo lists.
+  const costProvider = listedCostProvider(lookup);
+  const listed = useQuery({
+    queryKey: ["paseo-bm", "fallback-candidate-options", costProvider ?? ""],
+    queryFn: () => getOptions({ provider: costProvider! }),
+    enabled: costProvider !== null,
+    staleTime: COST_STALE_MS,
+    retry: false,
+  });
+  const [acting, setActing] = useState<FallbackAction | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+  const cost = lookup.state === "found" ? candidateCost(lookup.incident.candidate, listed.data?.models) : null;
+  const view = fallbackCardView(card, lookup, new Date(), cost);
+  const mark = markOf(view.role);
+
+  const press = async (action: FallbackAction) => {
+    setActing(action);
+    setFailure(null);
+    const result = await runFallbackAction({ incidentId, action, act });
+    setActing(null);
+    if (result.ok) {
+      queryClient.setQueryData<FallbackIncident[]>(fallbackIncidentKey(incidentId), [result.incident]);
+      return;
+    }
+    setFailure(result.reason);
+    // Refused because the incident moved on (another copy, the timer): show where it is now.
+    void queryClient.invalidateQueries({ queryKey: fallbackIncidentKey(incidentId) });
+  };
+
+  return (
+    <View style={[styles.card, { gap: 6, marginVertical: 4 }]}>
+      <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
+        <View style={{ flex: 1, gap: 2 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            {mark === null ? null : <RoleMark kind={mark} theme={theme} />}
+            <Text style={[styles.sectionTitle, { color: theme.colors.foreground }]} numberOfLines={1}>
+              {view.title}
+            </Text>
+          </View>
+          <Text style={styles.body}>{clock(timestamp)}</Text>
+        </View>
+        {view.chip === null ? null : <Chip badge={view.chip} styles={styles} theme={theme} />}
+      </View>
+
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        {view.requestId === null ? null : <Chip badge={{ text: view.requestId, tone: "muted" }} styles={styles} theme={theme} />}
+        {view.summary === "" ? null : (
+          <Text style={[styles.body, { flex: 1 }]} numberOfLines={2}>
+            {view.summary}
+          </Text>
+        )}
+      </View>
+      {view.message === null ? null : (
+        <Text style={[styles.mono, { color: theme.colors.foregroundMuted }]} numberOfLines={3}>
+          {view.message}
+        </Text>
+      )}
+
+      {view.buttons.length === 0 ? null : (
+        <View style={styles.chipRow}>
+          {view.buttons.map((button) => (
+            <Pressable
+              key={button.action}
+              accessibilityRole="button"
+              accessibilityState={{ disabled: acting !== null }}
+              disabled={acting !== null}
+              onPress={() => void press(button.action)}
+              style={[button.action === "dismiss" ? styles.secondaryButton : styles.button, { opacity: acting !== null && acting !== button.action ? 0.5 : 1 }]}
+            >
+              <Text style={button.action === "dismiss" ? styles.secondaryButtonText : styles.buttonText}>
+                {acting === button.action ? "Working…" : button.label}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
+      {view.statusLine === null ? null : <Text style={[styles.body, { color: toneColor(theme, view.statusLine.tone) }]}>{view.statusLine.text}</Text>}
+      {failure === null ? null : <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{failure}</Text>}
+    </View>
+  );
+}
 
 /** One option of a question: a full-width row, outlined, filled when chosen (delta 20260918d §4.4). */
 function optionRow(theme: Theme, selected: boolean) {

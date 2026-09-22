@@ -396,6 +396,11 @@ describe("Dashboard error codes", () => {
       "E_ROLE_SETTINGS_INVALID",
       "E_ROLE_SETTINGS_CONFLICT",
       "E_ROLE_SETTINGS_WRITE_FAILED",
+      "E_FALLBACK_NOT_FOUND",
+      "E_FALLBACK_NOT_PENDING",
+      "E_FALLBACK_NO_CANDIDATE",
+      "E_FALLBACK_NO_RESET",
+      "E_FALLBACK_CREATE_FAILED",
     ]);
   });
 

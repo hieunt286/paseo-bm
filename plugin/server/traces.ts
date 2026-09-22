@@ -59,6 +59,8 @@ export interface AgentFacts {
    * `bm.role` label (delta 20260918g §4.1). Absent means labelled.
    */
   labelled?: boolean;
+  /** `bm.replacedBy` label: the agent that took over after a fallback switch (delta 20260921 §4.4.7). */
+  replacedBy?: string | null;
 }
 
 /** One reconstructed request, before timing and bead enrichment (WP-206.1.2). */
