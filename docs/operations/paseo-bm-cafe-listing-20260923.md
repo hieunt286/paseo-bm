@@ -113,3 +113,36 @@ Owner đã cân nhắc và chọn phương án này thay cho `path: "plugin"`: �
 4. Lần này `SCAN_OUTCOME` sẽ thực sự chạy (quét an ninh gói npm) thay vì `skipped`. Chưa rõ nó soi gì; nếu đỏ thì đọc log rồi tính tiếp.
 
 Sau bước đó, lệnh `paseo plugin add npm:paseo-bm@<version>` mà trang tự sinh vẫn lỗi nạp vì gốc gói không phải payload — rủi ro §7 không đổi, hai caveat đầu vẫn nói đúng chuyện đó.
+
+## 10. Cổng thứ tư: quét an ninh đòi plugin root **nạp được thật**
+
+Sau khi khai `package`, lần chạy thứ hai của `Registry admission` (run [35838506116](https://github.com/paseo-cafe/paseo-cafe/actions/runs/35838506116)) cho kết quả: `VALIDATE_OUTCOME: success`, `TARGETS_OUTCOME: success` — hai cổng cũ đã qua — nhưng `SCAN_OUTCOME: failure`. Bước "Scan changed plugins" đặt `continue-on-error`, nên nhìn danh sách bước thì tưởng xanh; giá trị thật nằm ở bước "Enforce admission result".
+
+Báo cáo bot dán vào PR:
+
+```
+## paseo-bm
+Status: failed          Blocking findings: 1
+- [entrypoint] missing . plugin has no Paseo 0.8 runtime entry
+npm package: paseo-bm   npm status: failed   npm version: 0.3.0-alpha.5
+- [npm/entrypoint] missing . plugin has no Paseo 0.8 runtime entry
+```
+
+Luật `entrypoint/missing` trong `scripts/plugin-security/static-scan.ts` đòi **một trong bốn file** `index.client.ts(x)` hoặc `index.server.ts(x)` nằm ngay thư mục gốc của plugin, và nó **blocking**.
+
+Hai lần quét, hai thư mục khác nhau (`scripts/plugin-security/scan.ts`):
+
+| Quét | Thư mục | Dòng |
+|---|---|---|
+| Kho Git | `target.path ?? "."` — **có** áp `path` | 229 |
+| Gói npm | `pluginPath: "."` — **luôn là gốc tarball**, không áp `path` | 322 |
+
+Hệ quả, và đây là điểm chặn thật sự của cả yêu cầu này:
+
+- Khai `path: "plugin"` thì lần quét Git qua được, vì `plugin/` có đủ `index.client.tsx`, `index.server.ts` và manifest.
+- Nhưng lần quét npm **không bao giờ** qua được với gói `paseo-bm`, vì gốc gói là trình cài đặt chứ không phải payload. Thêm manifest vào gốc tarball (0.3.0-alpha.5) không cứu được: nó đòi **runtime entry**, không phải manifest.
+- Mà bỏ `package` cũng không được, vì §4: hồ sơ mới bắt buộc khai.
+
+Nói cách khác, registry chỉ nhận plugin mà **gốc gói npm chính là payload nạp được**. Đó là hình dạng của `@omercnet/paseo-beads` (repo có `path`, gói npm riêng cho payload). paseo-bm hiện không có hình dạng đó, và đây là quyết định đóng gói của sản phẩm chứ không phải một chỗ sửa nhỏ — xem ADR-001.
+
+Bot review của họ (CodeRabbit) cũng độc lập nêu đúng mối lo trong hai caveat của ta: "The registry's generated install command cannot load Paseo BM, so users must use its separate `npx paseo-bm` installer."
