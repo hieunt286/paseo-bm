@@ -76,11 +76,11 @@ Sau khi khai `package`, một cổng nữa mới bắt đầu chạy — `SCAN_O
 
 | File | Việc |
 |---|---|
-| `paseo-plugin.json` (gốc repo) | **File mới**, nội dung y hệt `plugin/paseo-plugin.json`. Đây là thứ CI của paseo.cafe đọc. **Đừng xoá vì tưởng trùng lặp.** Nó không nằm trong `files` nên không đi vào gói npm. |
+| ~~`paseo-plugin.json` (gốc repo)~~ | **Đã gỡ 2026-09-23** cùng phép kiểm của nó. Nó sinh ra cho phương án entry trỏ gốc repo; từ khi entry khai `path: "plugin"` thì cổng 1 đọc `plugin/paseo-plugin.json`, cổng 3 đọc gốc tarball gói payload, và một manifest ở gốc chỉ khiến `paseo plugin add` tìm thấy một plugin rồi chết vì thiếu runtime entry. Test nay khẳng định repo chỉ còn **một** manifest. |
 | `test/plugin-structure.test.ts` | Thêm test giữ hai manifest không lệch nhau |
 | `README.md` | Đổi tiêu đề mục `Quick start` thành `Install` và `Before you install` thành `Limitations and warnings`, để bộ đọc của paseo.cafe nhận ra mục cài đặt và mục giới hạn. Nội dung không đổi, nên REQ-015 không đổi. |
-| `AGENTS.md` | Ba dòng trong khối "Repository layout" nói rõ manifest ở gốc là gì, để không ai xoá nhầm. Đi cùng file ở dòng trên: commit chung, revert chung. |
-| `images/` | Ba ảnh chụp màn hình thật, owner cung cấp (Q4a): `01-beads-screen.jpg` (màn Beads), `02-metric-request.jpg` (màn Metric), `03-installer-roles.png` (trình cài hỏi vai trò). Chép nguyên bản từ `paseo-bm-site/src/assets/media`, không nằm trong `files` nên không vào gói npm. |
+| `AGENTS.md` | **Trạng thái cuối:** mục "Two packages, one release" ghi quy tắc hai gói và năm thứ làm gãy hồ sơ; khối "Repository layout" khớp cây thư mục thật. Ba dòng mô tả manifest ở gốc đã bỏ cùng chính file đó (§10, WP-321a). |
+| `plugin/images/` | Ba ảnh chụp màn hình thật, owner cung cấp (Q4a): `01-beads-screen.jpg` (màn Beads), `02-metric-request.jpg` (màn Metric), `03-installer-roles.png` (trình cài hỏi vai trò). Chép nguyên bản từ `paseo-bm-site/src/assets/media`. **Chuyển từ `images/` ở gốc repo vào `plugin/` ngày 2026-09-23** khi entry đổi sang `path: "plugin"`; không nằm trong `files` của gói payload và bị mẫu phủ định loại khỏi gói trình cài, nên không vào tarball nào. |
 
 ## 6. Trang listing sẽ hiện gì (`scripts/scan.ts`)
 
@@ -88,7 +88,7 @@ Mọi đường dẫn đều tính theo `path`; không khai `path` nên tất c�
 
 - **Mô tả**: `package.json.description` — "Beads Management for Paseo: installs the paseo-bm plugin and its agent roles".
 - **Version**: `package.json.version` — 0.3.0-alpha.4.
-- **Ảnh**: thư mục `images/` trước, rồi ảnh tham chiếu trong README (đường dẫn cục bộ được đổi sang URL raw của GitHub). `images/` đánh số 01-03 để cố định thứ tự, nên ảnh dẫn đầu là màn Beads; sau đó tới `assets/paseo-bm-flow.svg` mà README đang trỏ. Ba ảnh này là ảnh thật của sản phẩm, đã soi từng tấm: không có credential, token hay đường dẫn riêng tư, và không có khối Exif.
+- **Ảnh**: bộ quét đọc thư mục `images` **ngay dưới `path`**, tức `plugin/images/` — ảnh đã chuyển vào đó, đánh số 01-03 để cố định thứ tự nên ảnh dẫn đầu là màn Beads. Không dùng URL tuyệt đối trong README: URL tuyệt đối chỉ được giữ nếu host nằm trong danh sách tin cậy mà ta chưa đọc được. Ảnh không nằm trong tarball nào và `smoke:packed` canh điều đó. Ba ảnh là ảnh thật của sản phẩm, đã soi từng tấm: không credential, không token, không đường dẫn riêng tư, không khối Exif.
 - **Health 6 mục**: `manifestValid` (đạt nhờ §5), `hasReadme`, `hasLicense`, `hasTests` (script `test`), `hasTypecheckScript` (script `typecheck`), `updatedRecently` (180 ngày) — đủ cả sáu.
 - Lịch quét: gói npm 15 phút một lần, nguồn Git 6 giờ một lần.
 
@@ -103,7 +103,7 @@ Owner đã cân nhắc và chọn phương án này thay cho `path: "plugin"`: �
 1. ~~Commit các thay đổi ở §5 và đưa lên nhánh mặc định `main`~~ — **xong 2026-09-23**, `main` ở `5c7daa5`, CI của repo xanh (run 35832961123).
 2. ~~Fork `paseo-cafe/paseo-cafe`, thêm `registry/paseo-bm.json`, mở PR~~ — **xong**: [PR #215](https://github.com/paseo-cafe/paseo-cafe/pull/215) từ nhánh `hieunt286:add-paseo-bm`. Đang **đỏ** vì §4: hồ sơ mới bắt buộc khai `package`.
 3. **Việc kế tiếp, cần owner quyết**: làm §9 (thêm `paseo-plugin.json` vào `files`, phát hành bản mới, rồi thêm `"package": "paseo-bm"` vào chính PR #215). Không làm thì PR không bao giờ xanh.
-4. Sau khi PR được merge và tới lần quét kế tiếp, mở trang listing xem ba ảnh trong `images/` có hiện đúng không — đây là phép kiểm duy nhất phải chờ bên ngoài, nên nó nằm ở đây chứ không nằm trong tiêu chí của bead. Thêm hay đổi ảnh về sau chỉ cần push, không cần PR mới.
+4. Sau khi PR được merge và tới lần quét kế tiếp, mở trang listing xem ba ảnh trong `plugin/images/` có hiện đúng không — đây là phép kiểm duy nhất phải chờ bên ngoài, nên nó nằm ở đây chứ không nằm trong tiêu chí của bead. Thêm hay đổi ảnh về sau chỉ cần push, không cần PR mới.
 
 ## 9. Phát hành một bản mới — điều kiện bắt buộc, không còn là tuỳ chọn
 
@@ -185,3 +185,19 @@ permissions: publish, stage publish
 Đúng thứ cần: nguồn tin cậy là GitHub Actions, đúng file `release.yml`, đúng repo, có quyền publish. Nên nửa rủi ro "publish xong gói trình cài rồi chết ở gói payload" không còn là ẩn số trước khi phát hành.
 
 **Ghi lại cho lần sau:** `npm trust list` và `npm trust github` đều cần OTP, nên chúng luôn là việc của owner, giống như bản giữ chỗ. Chỉ lần phát hành thật là chạy được không cần OTP, vì `release.yml` dùng OIDC.
+
+
+## 13. Trạng thái cuối — cả bốn cổng đã xanh
+
+Run [35854151581](https://github.com/paseo-cafe/paseo-cafe/actions/runs/35854151581) trên PR #215, đọc ở bước "Enforce admission result" chứ không nhìn danh sách bước:
+
+```
+FETCH_OUTCOME: success     VALIDATE_OUTCOME: success
+TARGETS_OUTCOME: success   SCAN_OUTCOME: success      PUBLISH_OUTCOME: success
+```
+
+Hồ sơ đang nộp: `path: "plugin"`, `package: "paseo-bm-plugin"`, sáu caveat. PR `MERGEABLE`, đang chờ maintainer duyệt và merge — phần còn lại nằm ngoài tầm repo này.
+
+Hai lỗi của Worker trên nhánh PR, ghi lại để lần sau tránh: một commit ghi đè file thành 0 byte, vì một bước trong lệnh hỏng mà chuỗi lệnh vẫn chạy tiếp (từ nay: kiểm file có nội dung **trước** khi gọi API ghi); và một commit sai định dạng, vì `json.dumps` bung mảng ngắn ra nhiều dòng trong khi Biome của họ giữ mảng ngắn trên một dòng.
+
+Việc còn lại sau khi merge, không thuộc phase này: mở trang listing xem mô tả, version và ba ảnh có lên đúng không; lịch quét là 15 phút cho nguồn npm và 6 giờ cho nguồn Git.

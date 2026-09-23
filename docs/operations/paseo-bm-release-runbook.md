@@ -13,6 +13,8 @@
 
 Người chạy (Claude) **không** đăng nhập npm và **không** chạm tới thông tin đăng nhập của owner; các lệnh ở mục 1 do owner tự chạy.
 
+> **Đo được 2026-09-23, phase 2a-20.** Không phải "nên" mà là "không thể": tài khoản npm của owner đặt `two-factor auth: auth-and-writes`, nên **mọi** thao tác ghi đòi yếu tố thứ hai. `npm whoami` và `npm token list` chạy được, nhưng `npm publish`, `npm trust` và `npm dist-tag add` đều mở luồng xác thực trình duyệt mà agent không hoàn tất được — thử ba lần, không lần nào publish được gì. Owner chốt Q13 b (cho agent dùng phiên npm) nhưng thực tế bác bỏ nó, nên luật ở trên **giữ nguyên** và được mở rộng: bước giữ chỗ, `npm trust github`, và mọi lần dời dist-tag là việc của owner. Chỉ lần phát hành thật chạy được không cần OTP, vì `release.yml` publish bằng OIDC. Lưu ý thêm: npm đang siết token bỏ qua 2FA, nên đừng coi Granular Access Token là đường vòng lâu dài.
+
 ## 1. Owner chạy trên máy mình
 
 ```bash

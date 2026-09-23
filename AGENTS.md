@@ -31,22 +31,59 @@ Read this before touching anything in this repository.
 
 **Hard packaging rule:** no `preinstall` / `postinstall` scripts — downloading the package must never modify the user's machine. `prepack` is fine because it runs on the publisher's machine.
 
+### Two packages, one release
+
+Every release publishes **two npm packages at the same version**, from the same commit and the
+same `release.yml` run:
+
+| Package | What it is | Root of its tarball |
+|---|---|---|
+| `paseo-bm` | the installer CLI you run with `npx` | `dist/`, `plugin/`, no manifest |
+| `paseo-bm-plugin` | the payload in `plugin/` | **a loadable plugin**: `paseo-plugin.json` + `index.client.tsx` + `index.server.ts` |
+
+This exists because [paseo.cafe](https://paseo.cafe) lists paseo-bm, and its security scan
+demands a Paseo 0.8 runtime entry at the plugin root — reading the npm tarball root whatever the
+entry's `path` says. An installer tarball can never satisfy that. See
+[ADR-009](docs/adr/ADR-009-payload-as-npm-package.md) and
+[the listing record](docs/operations/paseo-bm-cafe-listing-20260923.md).
+
+What breaks the listing, so do not do it:
+
+- **Letting the versions drift.** `package.json`, `plugin/package.json` and `PLUGIN_VERSION` must
+  match; the build writes the last two and a test fails when they disagree. Their validator
+  compares the version in git against the one it resolves on npm.
+- **Renaming `release.yml`.** npm's trusted-publisher entries for *both* packages point at this
+  workflow by file name.
+- **Forgetting the dist-tag.** Their `resolveNpmPackage` reads `paseo-bm-plugin@latest`, and
+  `release.yml` only sets `next`. Moving `latest` needs a one-time password, so it is the owner's
+  step, not an agent's.
+- **Adding a `test` script to `plugin/package.json` to win the listing's health badge.** There is
+  no test in `plugin/`; a script that exists to turn a check green is a fake check.
+- **Putting anything at the installer tarball's root that looks like a plugin.**
+
+The registry entry lives in the other repository, at `registry/paseo-bm.json` in
+`paseo-cafe/paseo-cafe`, and declares `path: "plugin"` with `package: "paseo-bm-plugin"`. Their
+CI runs Biome over it: **short arrays stay on one line**.
+
 ## Repository layout
 
 ```
 AGENTS.md              this file (CLAUDE.md is a symlink to it)
-paseo-plugin.json      copy of plugin/paseo-plugin.json, kept identical by a test; this is the file the
-                       paseo.cafe registry reads (docs/operations/paseo-bm-cafe-listing-20260923.md). Do not
-                       delete it as a duplicate, and do not point Paseo at the repo root: the payload is plugin/
 docs/product/          PRD (Accepted)
 docs/design/           Technical Design (Active)
-docs/adr/              ADR-001..006 (Accepted)
+docs/adr/              ADR-001..009 (Accepted)
 docs/plans/            implementation plan v2 (Active, Plan-ready PASS); v1 is Superseded
-docs/operations/       acceptance checklists and run records (created by WP-117 / WP-120)
+docs/operations/       acceptance checklists, run records, release notes, the paseo.cafe listing record
 .beads/                bead graph; issues.jsonl is tracked, *.db is gitignored
-src/                   CLI source (not created yet)
-plugin/                Paseo plugin payload (not created yet)
+src/                   CLI source: the installer published as the npm package `paseo-bm`
+plugin/                Paseo plugin payload, published as its own npm package `paseo-bm-plugin`;
+                       has its own package.json, README.md, LICENSE, and images/ for the listing
 ```
+
+There is deliberately **no `paseo-plugin.json` at the repo root**. One existed for a day while
+the paseo.cafe entry pointed at the repository root; the entry now declares `path: "plugin"`, so
+nothing reads a root manifest and a stray one would make `paseo plugin add` find a plugin that
+cannot load. A test asserts the repository has exactly one manifest.
 
 ## Process: feature-workflow is mandatory
 
