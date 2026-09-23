@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -92,9 +92,13 @@ describe("plugin manifest", () => {
     expect(read("LICENSE")).toBe(readFileSync(join(repoRoot, "LICENSE"), "utf8"));
   });
 
-  it("is mirrored byte for byte by the copy at the repo root", () => {
-    const root = readFileSync(join(repoRoot, "paseo-plugin.json"), "utf8");
-    expect(root).toBe(read("paseo-plugin.json"));
+  // There is deliberately no copy at the repo root. One existed while the
+  // paseo.cafe entry pointed at the repository root; now that the entry
+  // declares `path: "plugin"` and the payload package, nothing reads a root
+  // manifest, and leaving one would make a direct `paseo plugin add` find a
+  // plugin with no runtime entry beside it. ADR-009, listing record §10.
+  it("is the repository's only manifest", () => {
+    expect(existsSync(join(repoRoot, "paseo-plugin.json"))).toBe(false);
   });
 });
 

@@ -188,12 +188,13 @@ try {
     "payload tarball carries no images/ directory",
   );
 
-  const rootManifestPath = join(packed, "paseo-plugin.json");
-  check(existsSync(rootManifestPath), "tarball contains paseo-plugin.json at its root");
-  if (existsSync(rootManifestPath)) {
-    const rootManifest = JSON.parse(readFileSync(rootManifestPath, "utf8"));
-    check(rootManifest.id === "paseo-bm", 'tarball root paseo-plugin.json declares id "paseo-bm"');
-  }
+  // The installer tarball root must NOT look like a plugin: the payload package
+  // is the one whose root is loadable. A manifest here would make
+  // `paseo plugin add npm:paseo-bm@<v>` find a plugin with no runtime entry.
+  check(
+    !existsSync(join(packed, "paseo-plugin.json")),
+    "installer tarball root carries no paseo-plugin.json",
+  );
   for (const entry of ["index.server.ts", "index.client.tsx", "roles/manager.md", "roles/worker.md", "roles/reviewer.md"]) {
     check(existsSync(join(packed, "plugin", entry)), `tarball contains plugin/${entry}`);
   }
