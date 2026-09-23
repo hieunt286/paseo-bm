@@ -15,7 +15,7 @@
 - Directory cộng đồng, **không chính thức**; trang chủ tự ghi các mục "not reviewed, audited, or vouched for".
 - Một plugin là **một file** `registry/<plugin-id>.json` trong repo `github.com/paseo-cafe/paseo-cafe`. Tên file phải trùng plugin id dạng kebab-case: với chúng ta là `registry/paseo-bm.json`.
 - Hai đường nộp: form https://paseo.cafe/submit điền sẵn rồi mở issue (bot chuyển thành PR), hoặc tự mở PR thêm file.
-  **Hồ sơ này đi đường PR thủ công**, vì form bắt buộc điền npm package còn lần nộp này cố ý không khai (§4).
+  **Hồ sơ này đi đường PR thủ công.** Form bắt buộc điền npm package, và hoá ra CI của họ cũng vậy với hồ sơ mới — xem §4.
 
 ## 2. Nội dung file sẽ nộp
 
@@ -42,19 +42,35 @@
 
 Hai caveat đầu nói thẳng chuyện ở §7: chỉ `npx paseo-bm` mới cài được, còn lệnh trang tự sinh sẽ lỗi nạp và phải gỡ bằng `paseo plugin remove paseo-bm`. Bản nháp đầu (owner duyệt ở Q5a) chỉ nói lệnh đó "sets up the payload only", nhẹ hơn sự thật; review lô b1 bắt lỗi này nên hai câu được viết lại và hai câu yêu cầu hệ thống gộp làm một để không vượt mức 6 câu.
 
-## 3. CI của họ kiểm gì (`scripts/validate-registry.ts`)
+## 3. CI của họ kiểm gì
 
 | Kiểm | Hồ sơ này |
 |---|---|
 | Tên file là plugin id kebab-case hợp lệ | `paseo-bm` — đạt |
 | `<path>/paseo-plugin.json` tồn tại trên GitHub và `id` khớp tên file | không khai `path` nên nó đọc **gốc repo** — đạt nhờ file mới ở §5 |
-| Khai `package` thì tải tarball npm, đòi `paseo-plugin.json` **ngay gốc tarball**, `name` khớp, `version` khớp npm và khớp `package.json` trên Git | bỏ qua vì không khai `package` |
+| Khai `package` thì tải tarball npm, đòi `paseo-plugin.json` **ngay gốc tarball**, `name` khớp, `version` khớp npm và khớp `package.json` trên Git | chưa chạy tới, vì bị chặn ở dòng dưới |
+| `scripts/plugin-security/targets.ts` dòng 99: hồ sơ **mới** mà không khai `package` thì **ném lỗi ngay** | **ĐỎ** — xem §4 |
+
+Hai cổng này khác nhau: `validate-registry.ts` coi `package` là tuỳ chọn, `plugin-security/targets.ts` thì không, và job `Registry admission` đòi cả hai xanh.
 
 CI đọc nhánh mặc định (`HEAD`) của repo, nên `paseo-plugin.json` ở gốc **phải có trên `main` trước khi mở PR**.
 
-## 4. Vì sao lần này không khai `package`
+## 4. Hồ sơ mới **bắt buộc** khai `package`
 
-Kiểm tra npm đọc `paseo-plugin.json` ở **gốc tarball** và không áp `path`. Gói `paseo-bm` là trình cài đặt: gốc tarball có `package.json` và `dist/`, còn payload nằm trong `plugin/`. Muốn khai `package` thì phải thêm `paseo-plugin.json` vào `files` rồi phát hành một bản mới, vì CI đọc gói **đã publish**. Owner chọn nộp ngay theo nguồn Git và để việc đó cho lần phát hành tới (§9). Cái mất: listing hiện số sao GitHub thay vì số lượt tải npm 30 ngày.
+**Đính chính 2026-09-23, sau khi PR thật bị CI chặn.** Bản đầu của tài liệu này nói `package` là tuỳ chọn, dựa trên `registryEntrySchema` (`package` không bắt buộc) và trên `validate-registry.ts` (cả khối npm nằm trong `if (entry.package)`). Đúng với hai chỗ đó, nhưng **thiếu một cổng thứ ba**: `scripts/plugin-security/targets.ts` dòng 99 ném lỗi với mọi hồ sơ mới không khai `package`, và job `Registry admission` đòi bước đó xanh.
+
+Bằng chứng: PR [paseo-cafe/paseo-cafe#215](https://github.com/paseo-cafe/paseo-cafe/pull/215), run [35834044223](https://github.com/paseo-cafe/paseo-cafe/actions/runs/35834044223) — `VALIDATE_OUTCOME: success` (phần §3 của tài liệu này đúng: manifest ở gốc repo được chấp nhận), nhưng `TARGETS_OUTCOME: failure` với
+
+```
+error: new registry entry "paseo-bm" must declare a public npm package
+    at selectPullRequestTargets (scripts/plugin-security/targets.ts:100:17)
+```
+
+Hồ sơ cũ không khai `package` (ví dụ mục nào đó đã nằm sẵn trong registry) không bị đụng tới: điều kiện là `!previous && !baseIds.has(entry.id)`, tức chỉ áp cho mục mới.
+
+Hệ quả: muốn có listing thì **phải** khai `package: "paseo-bm"`, và muốn khai được thì tarball npm phải có `paseo-plugin.json` ngay ở gốc — tức thêm nó vào `files` rồi **phát hành một bản mới** (§9). Không có đường vòng: bỏ `package` là bị chặn, khai `package` mà tarball đã publish chưa có manifest thì `validate-registry.ts` chặn.
+
+Sau khi khai `package`, một cổng nữa mới bắt đầu chạy — `SCAN_OUTCOME` (quét an ninh gói npm) lần này bị `skipped`. Chưa biết nó soi gì, nên đừng coi việc phát hành là xong chuyện.
 
 ## 5. Thay đổi trong repo này
 
@@ -84,17 +100,16 @@ Owner đã cân nhắc và chọn phương án này thay cho `path: "plugin"`: �
 
 ## 8. Các bước owner làm
 
-1. Xem `git diff`, commit các thay đổi ở §5 và **đưa lên nhánh mặc định `main`** (CI của họ đọc `HEAD`).
-2. Fork `github.com/paseo-cafe/paseo-cafe`, thêm file `registry/paseo-bm.json` với đúng nội dung §2, mở PR.
-3. Chờ CI xanh rồi chờ họ merge. Listing xuất hiện sau lần quét kế tiếp.
+1. ~~Commit các thay đổi ở §5 và đưa lên nhánh mặc định `main`~~ — **xong 2026-09-23**, `main` ở `5c7daa5`, CI của repo xanh (run 35832961123).
+2. ~~Fork `paseo-cafe/paseo-cafe`, thêm `registry/paseo-bm.json`, mở PR~~ — **xong**: [PR #215](https://github.com/paseo-cafe/paseo-cafe/pull/215) từ nhánh `hieunt286:add-paseo-bm`. Đang **đỏ** vì §4: hồ sơ mới bắt buộc khai `package`.
+3. **Việc kế tiếp, cần owner quyết**: làm §9 (thêm `paseo-plugin.json` vào `files`, phát hành bản mới, rồi thêm `"package": "paseo-bm"` vào chính PR #215). Không làm thì PR không bao giờ xanh.
 4. Sau khi PR được merge và tới lần quét kế tiếp, mở trang listing xem ba ảnh trong `images/` có hiện đúng không — đây là phép kiểm duy nhất phải chờ bên ngoài, nên nó nằm ở đây chứ không nằm trong tiêu chí của bead. Thêm hay đổi ảnh về sau chỉ cần push, không cần PR mới.
 
-## 9. Lần phát hành tới
+## 9. Phát hành một bản mới — điều kiện bắt buộc, không còn là tuỳ chọn
 
-Muốn listing hiện số lượt tải npm:
+1. Thêm `"paseo-plugin.json"` vào `files` trong `package.json`, để tarball có manifest **ngay ở gốc** (chỗ `validate-registry.ts` đọc, không áp `path`).
+2. Phát hành bản mới theo `paseo-bm-release-runbook.md`. Hai điều kiện của `validate-registry.ts`: `package.json.version` trên `main` phải **bằng** phiên bản npm mà nó phân giải, và dist-tag phải trỏ đúng bản đó — `latest` do owner dời tay, `release.yml` chỉ dời `next`.
+3. Thêm `"package": "paseo-bm"` vào `registry/paseo-bm.json` và push lên nhánh `add-paseo-bm` của fork; PR #215 tự chạy lại, không cần PR mới.
+4. Lần này `SCAN_OUTCOME` sẽ thực sự chạy (quét an ninh gói npm) thay vì `skipped`. Chưa rõ nó soi gì; nếu đỏ thì đọc log rồi tính tiếp.
 
-1. Thêm `"paseo-plugin.json"` vào `files` trong `package.json`.
-2. Phát hành bản mới theo `paseo-bm-release-runbook.md`, và bảo đảm dist-tag `latest` trỏ đúng bản đó (CI của paseo.cafe đọc bản npm đang phát hành).
-3. Mở PR thứ hai vào registry, thêm `"package": "paseo-bm"` vào `registry/paseo-bm.json`.
-
-Sau bước đó, lệnh `paseo plugin add npm:paseo-bm@<version>` mà trang tự sinh vẫn lỗi nạp vì gốc gói không phải payload — rủi ro §7 không đổi.
+Sau bước đó, lệnh `paseo plugin add npm:paseo-bm@<version>` mà trang tự sinh vẫn lỗi nạp vì gốc gói không phải payload — rủi ro §7 không đổi, hai caveat đầu vẫn nói đúng chuyện đó.
