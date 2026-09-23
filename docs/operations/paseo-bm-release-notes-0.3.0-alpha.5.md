@@ -26,7 +26,7 @@ Vì gốc tarball nay có manifest, lệnh `paseo plugin add npm:paseo-bm@0.3.0-
 ## Không đổi
 
 - Không sửa mã trình cài, mã plugin, chỉ dẫn vai trò hay hợp đồng `--json`.
-- dist-tag `latest` do owner dời tay; `release.yml` chỉ đặt `next`.
+- dist-tag `latest` do owner dời tay; `release.yml` chỉ đặt `next`. Kiểm ngày 2026-09-23 bằng `npm view paseo-bm dist-tags`: `latest` và `next` cùng ở `0.3.0-alpha.4`, nên khi owner dời `latest` sang bản này, người dùng `npx paseo-bm` trần đi từ `0.3.0-alpha.4` lên `0.3.0-alpha.5` — một bước đóng gói, không có thay đổi hành vi. (Bảng dist-tag trong [hồ sơ chạy 20260923](./paseo-bm-release-run-20260923.md) chụp thời điểm ngay sau workflow, khi `latest` còn ở `0.2.0-alpha.1`; owner đã dời sau đó.)
 
 ## Nguồn
 

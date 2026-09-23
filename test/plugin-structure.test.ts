@@ -53,8 +53,9 @@ describe("plugin manifest", () => {
 
   // The repo root carries a copy of this manifest because the paseo.cafe
   // registry reads `paseo-plugin.json` at the root of the repository, while the
-  // payload Paseo installs lives in `plugin/`. The copy stays out of the npm
-  // package (`files` is dist/ and plugin/ only).
+  // payload Paseo installs lives in `plugin/`. Since 0.3.0-alpha.5 the copy
+  // also ships at the root of the npm tarball, because the registry's npm check
+  // reads it there; scripts/smoke-packed.mjs guards that.
   // See docs/operations/paseo-bm-cafe-listing-20260923.md.
   it("is mirrored byte for byte by the copy at the repo root", () => {
     const root = readFileSync(join(repoRoot, "paseo-plugin.json"), "utf8");

@@ -142,6 +142,16 @@ try {
   check(packedManifest.version === expectedVersion, `packed package.json version is ${expectedVersion}`);
   check(existsSync(join(packed, "dist", "index.js")), "tarball contains dist/index.js");
   check(existsSync(join(packed, "plugin", "paseo-plugin.json")), "tarball contains plugin/paseo-plugin.json");
+  // The copy at the tarball root is what the paseo.cafe registry reads: its npm
+  // check opens paseo-plugin.json at the root and ignores the entry's `path`.
+  // Dropping it from `files` would break the listing with every other check
+  // still green. See docs/operations/paseo-bm-cafe-listing-20260923.md §4.
+  const rootManifestPath = join(packed, "paseo-plugin.json");
+  check(existsSync(rootManifestPath), "tarball contains paseo-plugin.json at its root");
+  if (existsSync(rootManifestPath)) {
+    const rootManifest = JSON.parse(readFileSync(rootManifestPath, "utf8"));
+    check(rootManifest.id === "paseo-bm", 'tarball root paseo-plugin.json declares id "paseo-bm"');
+  }
   for (const entry of ["index.server.ts", "index.client.tsx", "roles/manager.md", "roles/worker.md", "roles/reviewer.md"]) {
     check(existsSync(join(packed, "plugin", entry)), `tarball contains plugin/${entry}`);
   }
