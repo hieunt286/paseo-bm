@@ -57,6 +57,16 @@ export function registerBeadsHeaderButtons(client: PluginClientContext): () => v
   let stopped = false;
   let unsubscribe: (() => void) | undefined;
 
+  // The workspace is a parameter, not a loop variable: the phone runs this
+  // bundle on Hermes, where every closure made in a loop sees the loop's last
+  // value, so each button would open the last workspace listed.
+  const addButton = (workspaceId: string) =>
+    client.addHeaderButton({
+      id: BEADS_HEADER_BUTTON_ID,
+      workspaceId,
+      button: beadsHeaderButton(() => client.openPanel(BEADS_TAB_PANEL_ID, { workspaceId })),
+    });
+
   const refresh = async () => {
     if (pending || stopped) return;
     pending = true;
@@ -68,14 +78,7 @@ export function registerBeadsHeaderButtons(client: PluginClientContext): () => v
         shown.get(workspaceId)?.remove();
         shown.delete(workspaceId);
       }
-      for (const workspaceId of plan.add) {
-        const registration = client.addHeaderButton({
-          id: BEADS_HEADER_BUTTON_ID,
-          workspaceId,
-          button: beadsHeaderButton(() => client.openPanel(BEADS_TAB_PANEL_ID, { workspaceId })),
-        });
-        shown.set(workspaceId, registration);
-      }
+      for (const workspaceId of plan.add) shown.set(workspaceId, addButton(workspaceId));
     } catch {
       // A failed read keeps the buttons as they are: better a button one
       // period late than buttons that flicker whenever the daemon is slow.

@@ -1,3 +1,5 @@
+import { build } from "esbuild";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BEADS_HEADER_BUTTON_ID,
@@ -11,6 +13,33 @@ import {
  * REQ-060 o): Paseo 0.8's mobile app has no "+" menu, so this is how a phone
  * opens the Beads tab.
  */
+
+/**
+ * The module as the phone runs it. Paseo 0.8 compiles a client bundle with
+ * esbuild (`compileTarget`: cjs, neutral, es2020, async lowered) and evaluates
+ * it on Hermes, where a closure made inside a loop sees the loop's LAST
+ * binding (Paseo's `makeHermesInteropEager` works around the same thing in
+ * esbuild's interop getters). Turning every `let` / `const` into `var` gives
+ * Node the same semantics.
+ */
+async function moduleOnHermes(): Promise<{ registerBeadsHeaderButtons: typeof registerBeadsHeaderButtons }> {
+  const result = await build({
+    entryPoints: [fileURLToPath(new URL("../plugin/client/beads-header-button.ts", import.meta.url))],
+    bundle: true,
+    format: "cjs",
+    platform: "neutral",
+    target: "es2020",
+    supported: { "async-await": false },
+    write: false,
+    logLevel: "silent",
+  });
+  const eager = result.outputFiles[0]!.text.replaceAll("get: () => from[key]", "value: from[key]");
+  const functionScoped = eager.replace(/\b(?:const|let)\b/g, "var");
+  expect(functionScoped).not.toBe(eager);
+  const module = { exports: {} };
+  new Function("module", "exports", functionScoped)(module, module.exports);
+  return module.exports as { registerBeadsHeaderButtons: typeof registerBeadsHeaderButtons };
+}
 
 describe("planning the header buttons", () => {
   const listed = [{ id: "a" }, { id: "b" }, { id: "c", archivingAt: "2026-09-19T00:00:00.000Z" }];
@@ -81,6 +110,23 @@ describe("following the open workspaces", () => {
     const second = fake.added[1]!.button.behavior;
     if (second.kind === "action") void second.onPress();
     expect(fake.client.openPanel).toHaveBeenCalledWith("bm-beads", { workspaceId: "wks_b" });
+  });
+
+  it("gives each button its own workspace on the phone too, where a loop's closures share its last binding", async () => {
+    const onHermes = await moduleOnHermes();
+    const fake = fakeClient([[{ id: "wks_a" }, { id: "wks_b" }, { id: "wks_c" }]]);
+    stop = onHermes.registerBeadsHeaderButtons(fake.client as never);
+    await settle();
+
+    expect(fake.added.map((entry) => entry.workspaceId)).toEqual(["wks_a", "wks_b", "wks_c"]);
+    for (const entry of fake.added) {
+      if (entry.button.behavior.kind === "action") void entry.button.behavior.onPress();
+    }
+    expect(fake.client.openPanel.mock.calls).toEqual([
+      ["bm-beads", { workspaceId: "wks_a" }],
+      ["bm-beads", { workspaceId: "wks_b" }],
+      ["bm-beads", { workspaceId: "wks_c" }],
+    ]);
   });
 
   it("removes the button of a workspace that went, keeps the buttons when a read fails, and removes all on cleanup", async () => {
