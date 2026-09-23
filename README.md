@@ -11,7 +11,7 @@
 
 > **Status:** prerelease (`0.3.0-alpha.*`). Command names, flags, exit codes and the `--json` shape are a public contract, but expect rough edges.
 
-## Quick start
+## Install
 
 1. Open the Paseo app so its daemon is running. You need Paseo 0.8.0 or newer with the `paseo` CLI on your PATH, Node 22 or newer, and macOS or Linux.
 2. In a terminal, run the installer and answer its questions:
@@ -24,7 +24,7 @@
 
 > **Run it, don't add it as a dependency.** `paseo-bm` is a command-line tool you run with `npx`. `npm i paseo-bm` only adds a useless dependency to your project.
 
-## Before you install
+## Limitations and warnings
 
 - **Paseo plugins run without a sandbox.** The plugin has the same access to your machine as the Paseo daemon: files, processes, credentials and network.
 - **One consent grants Paseo's agent tools to every agent on this machine**, not only to paseo-bm's roles. Any agent can then create, prompt and stop other agents, and spend money on your model providers.
