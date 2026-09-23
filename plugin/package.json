@@ -1,0 +1,35 @@
+{
+  "name": "paseo-bm-plugin",
+  "version": "0.3.0-alpha.5",
+  "description": "Beads Management for Paseo — the plugin payload: the Metric, Beads and Setup screens plus the agent role instructions. Install with npx paseo-bm, which also registers the three agent roles.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hieunt286/paseo-bm.git",
+    "directory": "plugin"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "paseo-plugin.json",
+    "index.client.tsx",
+    "index.server.ts",
+    "client/",
+    "server/",
+    "shared/",
+    "roles/",
+    "tsconfig.json",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "keywords": [
+    "paseo",
+    "paseo-plugin",
+    "beads"
+  ]
+}

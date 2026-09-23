@@ -13,7 +13,8 @@
   "files": [
     "dist/",
     "plugin/",
-    "paseo-plugin.json"
+    "paseo-plugin.json",
+    "!plugin/images/**"
   ],
   "repository": {
     "type": "git",

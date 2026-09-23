@@ -57,6 +57,41 @@ describe("plugin manifest", () => {
   // also ships at the root of the npm tarball, because the registry's npm check
   // reads it there; scripts/smoke-packed.mjs guards that.
   // See docs/operations/paseo-bm-cafe-listing-20260923.md.
+  // The payload ships as its own npm package, paseo-bm-plugin, and the
+  // paseo.cafe registry compares the version in git against the one it resolves
+  // on npm. Three files carry that version and none of them may drift:
+  // package.json at the repo root is the source, and the build regenerates the
+  // other two. ADR-009, design delta 20260923 §4.
+  it("carries the same version in package.json, the payload package and PLUGIN_VERSION", () => {
+    const root = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as { version: string };
+    const payload = JSON.parse(read("package.json")) as { name: string; version: string };
+    const baked = /PLUGIN_VERSION = "([^"]+)"/.exec(read("shared/version.ts"))?.[1];
+
+    expect(payload.name).toBe("paseo-bm-plugin");
+    expect(payload.version).toBe(root.version);
+    expect(baked).toBe(root.version);
+  });
+
+  it("declares no dependencies and no test script it cannot honour", () => {
+    const payload = JSON.parse(read("package.json")) as Record<string, unknown> & {
+      scripts?: Record<string, string>;
+    };
+    // Paseo provides the runtime modules to a plugin, so the payload package
+    // must not pull any of its own (ADR-001 Context).
+    expect(payload.dependencies).toBeUndefined();
+    expect(payload.devDependencies).toBeUndefined();
+    // There is no test under plugin/. A `test` script here would exist only to
+    // turn the registry's health badge green, which is a fake check.
+    expect(payload.scripts?.test).toBeUndefined();
+  });
+
+  // The payload is published as a standalone package, and MIT requires the
+  // notice in every copy, so plugin/LICENSE ships with it and must stay the
+  // repository's own licence rather than drifting into a second one.
+  it("ships the repository's licence, byte for byte", () => {
+    expect(read("LICENSE")).toBe(readFileSync(join(repoRoot, "LICENSE"), "utf8"));
+  });
+
   it("is mirrored byte for byte by the copy at the repo root", () => {
     const root = readFileSync(join(repoRoot, "paseo-plugin.json"), "utf8");
     expect(root).toBe(read("paseo-plugin.json"));
@@ -66,6 +101,9 @@ describe("plugin manifest", () => {
 describe("payload layout", () => {
   it.each([
     "paseo-plugin.json",
+    "package.json",
+    "README.md",
+    "LICENSE",
     "tsconfig.json",
     "index.client.tsx",
     "index.server.ts",

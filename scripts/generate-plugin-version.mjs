@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Generates plugin/shared/version.ts from the package version.
+// Generates plugin/shared/version.ts and plugin/package.json's version from
+// the package version.
 //
 // The payload needs its version as a build-time constant because the client
 // entry cannot read the file system (docs/design/paseo-bm.md §2.4). The file is
@@ -14,6 +15,11 @@ import { fileURLToPath } from "node:url";
 
 const packageUrl = new URL("../package.json", import.meta.url);
 const targetUrl = new URL("../plugin/shared/version.ts", import.meta.url);
+// The payload is published as its own npm package, `paseo-bm-plugin`, and the
+// paseo.cafe registry compares the version in git against the one on npm, so
+// the two package.json files must never drift. See ADR-009 and
+// docs/design/paseo-bm-delta-20260923-payload-npm-package.md §4.
+const payloadPackageUrl = new URL("../plugin/package.json", import.meta.url);
 
 const { version } = JSON.parse(readFileSync(packageUrl, "utf8"));
 if (typeof version !== "string" || version.length === 0) {
@@ -38,4 +44,14 @@ try {
 if (current !== contents) {
   writeFileSync(targetUrl, contents);
   console.log(`generated ${fileURLToPath(targetUrl)} (${version})`);
+}
+
+// Rewrite only the `version` field: JSON.parse keeps insertion order for string
+// keys, so every other field and the field order survive untouched.
+const payloadRaw = readFileSync(payloadPackageUrl, "utf8");
+const payload = JSON.parse(payloadRaw);
+if (payload.version !== version) {
+  payload.version = version;
+  writeFileSync(payloadPackageUrl, `${JSON.stringify(payload, null, 2)}\n`);
+  console.log(`generated ${fileURLToPath(payloadPackageUrl)} (${version})`);
 }

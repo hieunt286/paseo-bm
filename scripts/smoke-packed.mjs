@@ -146,6 +146,48 @@ try {
   // check opens paseo-plugin.json at the root and ignores the entry's `path`.
   // Dropping it from `files` would break the listing with every other check
   // still green. See docs/operations/paseo-bm-cafe-listing-20260923.md §4.
+  // The screenshots exist for the paseo.cafe listing, which reads them from the
+  // plugin path in git. Nobody running `npx paseo-bm` should download them, so
+  // `files` excludes them with a negative pattern — and npm honouring that
+  // pattern is exactly the kind of thing to verify on a real tarball rather
+  // than trust. See docs/design/paseo-bm-delta-20260923-payload-npm-package.md §6.
+  const packedImages = readdirSync(join(packed, "plugin"), { withFileTypes: true }).filter(
+    (entry) => entry.name === "images",
+  );
+  check(packedImages.length === 0, "tarball carries no plugin/images/ directory");
+
+  // 2b. The payload is published as its own package, paseo-bm-plugin, whose
+  // tarball root must BE a loadable plugin: that is what the paseo.cafe
+  // security scan checks, and it always reads the tarball root (ADR-009).
+  console.log("\n# payload package (paseo-bm-plugin)");
+  const payloadPackDir = join(work, "payload-pack");
+  const payloadExtractDir = join(work, "payload-extract");
+  mkdirSync(payloadPackDir, { recursive: true });
+  mkdirSync(payloadExtractDir, { recursive: true });
+  const payloadPack = run("npm", ["pack", "--pack-destination", payloadPackDir], {
+    cwd: join(repoRoot, "plugin"),
+    env: npmEnv,
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+  process.stdout.write(payloadPack.stdout);
+  if (payloadPack.status !== 0) throw new Error(`npm pack (payload) failed with exit code ${payloadPack.status}`);
+  const payloadTarballs = readdirSync(payloadPackDir).filter((name) => name.endsWith(".tgz"));
+  if (payloadTarballs.length !== 1) {
+    throw new Error(`expected exactly one payload tarball, found: ${payloadTarballs.join(", ") || "none"}`);
+  }
+  mustRun("tar extract (payload)", "tar", ["-xzf", join(payloadPackDir, payloadTarballs[0]), "-C", payloadExtractDir]);
+  const payloadPacked = join(payloadExtractDir, "package");
+  const payloadManifest = JSON.parse(readFileSync(join(payloadPacked, "package.json"), "utf8"));
+  check(payloadManifest.name === "paseo-bm-plugin", "payload package is named paseo-bm-plugin");
+  check(payloadManifest.version === expectedVersion, `payload package version is ${expectedVersion}`);
+  for (const entry of ["paseo-plugin.json", "index.client.tsx", "index.server.ts", "LICENSE", "README.md"]) {
+    check(existsSync(join(payloadPacked, entry)), `payload tarball root has ${entry}`);
+  }
+  check(
+    !existsSync(join(payloadPacked, "images")),
+    "payload tarball carries no images/ directory",
+  );
+
   const rootManifestPath = join(packed, "paseo-plugin.json");
   check(existsSync(rootManifestPath), "tarball contains paseo-plugin.json at its root");
   if (existsSync(rootManifestPath)) {
@@ -165,11 +207,16 @@ try {
     repoDist.size > 0 && missingDist.length === 0,
     `every built file under dist/ is in the tarball${missingDist.length ? ` (missing: ${missingDist.join(", ")})` : ""}`,
   );
-  // Every payload file in the repo must ship: the payload has no include list of its own.
+  // Every payload file in the repo must ship, with exactly one deliberate
+  // exception: plugin/images/ exists for the paseo.cafe listing and is excluded
+  // from this tarball by a negative `files` pattern, asserted above. The
+  // exception is spelled out here rather than by relaxing the check, so a file
+  // that goes missing for any other reason still fails.
+  const payloadExcluded = (path) => path === "images" || path.startsWith("images/");
   const repoPayload = snapshot(join(repoRoot, "plugin"));
   const packedPayload = snapshot(join(packed, "plugin"));
-  const missing = [...repoPayload.keys()].filter((path) => !packedPayload.has(path));
-  check(missing.length === 0, `every file under plugin/ is in the tarball${missing.length ? ` (missing: ${missing.join(", ")})` : ""}`);
+  const missing = [...repoPayload.keys()].filter((path) => !packedPayload.has(path) && !payloadExcluded(path));
+  check(missing.length === 0, `every file under plugin/ except images/ is in the tarball${missing.length ? ` (missing: ${missing.join(", ")})` : ""}`);
   const lifecycle = ["preinstall", "install", "postinstall", "prepare"].filter(
     (name) => name in (packedManifest.scripts ?? {}),
   );
