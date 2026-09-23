@@ -169,3 +169,19 @@ Bot review của họ (CodeRabbit) cũng độc lập nêu đúng mối lo trong
 | `scanner/incomplete` | không có gì chặn đọc: không symlink, không file khổng lồ, không `node_modules` trong payload | đạt |
 
 **Không luật nào đỏ**, nên theo quyết định Q15 a của owner thì đi tiếp sang bước phát hành. Đây vẫn là đọc luật cộng đo tại chỗ, không phải chạy chính bộ quét của họ — bằng chứng cuối cùng vẫn là lần chạy `Registry admission` sau khi publish.
+
+## 12. Trusted publisher của gói payload — đã xác nhận
+
+Bead `bm-phase-2a-20-x3g0.6` đóng lại khi phần này mới chỉ là lời owner: `npm trust list` đòi OTP, endpoint `/-/package/<gói>/trust` trả 401, và packument công khai không mang thông tin trust — đã thử cả ba đường. Owner chạy lệnh và dán kết quả ngay sau đó:
+
+```
+type: github
+id: c392d9f4-e672-441c-a684-01331bc8cd81
+file: release.yml
+repository: hieunt286/paseo-bm
+permissions: publish, stage publish
+```
+
+Đúng thứ cần: nguồn tin cậy là GitHub Actions, đúng file `release.yml`, đúng repo, có quyền publish. Nên nửa rủi ro "publish xong gói trình cài rồi chết ở gói payload" không còn là ẩn số trước khi phát hành.
+
+**Ghi lại cho lần sau:** `npm trust list` và `npm trust github` đều cần OTP, nên chúng luôn là việc của owner, giống như bản giữ chỗ. Chỉ lần phát hành thật là chạy được không cần OTP, vì `release.yml` dùng OIDC.
