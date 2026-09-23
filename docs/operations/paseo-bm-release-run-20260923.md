@@ -8,7 +8,7 @@
 | Quy trình | [release runbook](./paseo-bm-release-runbook.md) §2 |
 | Kết quả | **Đã phát hành.** `paseo-bm@0.3.0-alpha.4` trên dist-tag `next`, có provenance SLSA v1 |
 | Commit được tag | `e309e452dcb5c4c9df11b68820d53d62e993c790` (`e309e45`) |
-| Các commit của lần phát hành | `55403a0` bản vá nút Beads + tài liệu phát hành · `e309e45` `chore(release): 0.3.0-alpha.4` (được tag) · `7d62a16` bản ghi này + bốn dòng revision · `721f446` và `9f75bfb` đồ thị bead · cộng một commit sửa theo review `b3` |
+| Các commit của lần phát hành | `55403a0` bản vá nút Beads + tài liệu phát hành · `e309e45` `chore(release): 0.3.0-alpha.4` (được tag) · `7d62a16` bản ghi này + bốn dòng revision · `721f446` và `9f75bfb` đồ thị bead · `c0787b0` sửa hai câu sai mà review `b3` tìm ra (ghi chú phát hành và `GUIDE.md`) · và một commit `chore(beads)` cuối cùng mang việc đóng lại `.2` và `.8` |
 | Beads | `bm-release-030-alpha4-shof` (epic) và `.1` → `.8` |
 
 ## Bản này mang gì

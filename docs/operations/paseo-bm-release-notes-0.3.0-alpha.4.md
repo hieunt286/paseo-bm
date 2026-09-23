@@ -40,7 +40,7 @@ Bản prerelease **gộp** của cả delta 20260921 ([PRD delta](../product/pas
 - Mọi trường RPC mới là cộng thêm. Policy mặc định vẫn là "Ask me"; `install.json` không đổi hình dạng.
 - `roles[]` trong `install.json` giờ nghĩa là "trình cài đã ghi gì lần cuối"; cấu hình có hiệu lực là cấu hình Paseo.
 - **Cài lại không còn đưa các mục `bm-*` về mặc định.** Ai từng dùng cài lại để "reset" vai trò thì nay dùng `--role` hay `--reconfigure`.
-- **`policy: "auto"` an toàn với mọi bản `0.3.0-alpha.*`.** Schema của `role-fallback.json` đã nhận `"auto"` từ phase 2a-16, và mã trước 2a-18 đọc mọi policy khác `"off"` thành "Ask me" (chú thích có sẵn trong `plugin/client/setup-model.ts`). Chuỗi dự phòng giữ nguyên, không mất gì. Ghi chú của các phase trước nói bản cũ "coi cả file là không dùng được" — điều đó **không đúng**. Dù sao cũng không có bản `0.3.0-alpha.*` nào khác trên npm để hạ xuống.
+- **`policy: "auto"` an toàn với mọi bản `0.3.0-alpha.*`.** Schema của `role-fallback.json` đã nhận `"auto"` từ phase 2a-16, và mã trước 2a-18 đọc mọi policy khác `"off"` thành "Ask me" (chú thích ghi rõ điều đó nằm trong `plugin/client/setup-model.ts` **ở bản 2a-17**; bản 2a-18 thay dòng ấy bằng hỗ trợ `auto` thật, nên tìm trong mã hiện tại sẽ không thấy). Chuỗi dự phòng giữ nguyên, không mất gì. Ghi chú của các phase trước nói bản cũ "coi cả file là không dùng được" — điều đó **không đúng**. Dù sao cũng không có bản `0.3.0-alpha.*` nào khác trên npm để hạ xuống.
 
 ## Hoàn tác
 
