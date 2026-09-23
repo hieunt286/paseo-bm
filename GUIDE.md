@@ -75,7 +75,7 @@ No `sudo` is needed. The npm package has no install scripts, so downloading it c
 npx paseo-bm
 ```
 
-`npx` downloads the package, runs it once and leaves nothing in your project. Every build is also published under the dist-tag `next`. While there is no stable version, `npx paseo-bm` and `npx paseo-bm@next` fetch the same prerelease. Once a stable release exists, use `npx paseo-bm@next` to keep getting prereleases.
+`npx` downloads the package, runs it once and leaves nothing in your project. Every build is published under the dist-tag `next`, so **`npx paseo-bm@next` always fetches the newest prerelease**. Plain `npx paseo-bm` follows the `latest` tag, which can lag behind `next` — it is moved by hand, and while a prerelease is the newest build it may still point at an older one. `npm view paseo-bm dist-tags` shows where each tag is today.
 
 ### What the interactive install asks
 
@@ -407,7 +407,7 @@ Exit codes: `0` healthy, `1` drift in what paseo-bm owns, `2` misuse. Warnings n
 
 ## Updating
 
-Run the installer again: `npx paseo-bm` takes the newest release, and `npx paseo-bm@next` the newest prerelease.
+Run the installer again: `npx paseo-bm@next` takes the newest prerelease, and `npx paseo-bm` whatever the `latest` tag points at — which may be older than `next`. Check with `npm view paseo-bm dist-tags`.
 
 - **New version.** The payload is copied into a new `~/.paseo-bm/plugin/<new version>/`. Paseo 0.8 cannot re-point a directory plugin, so paseo-bm runs `paseo plugin remove paseo-bm` and then `paseo plugin install <new dir>`; the plugin is absent for a few seconds. If the new version fails to register or load, paseo-bm reinstalls the previous directory, keeps the record on the old version, and exits `7` with Paseo's error message.
 - **Same version.** Nothing to change: nothing is asked and the exit code is `0`. Files repaired or changed in the active plugin directory: paseo-bm **reloads the plugin** and waits for `running`.

@@ -4,6 +4,8 @@ Bản prerelease **gộp** của cả delta 20260921 ([PRD delta](../product/pas
 
 > **Bản đầu tiên kể từ `0.2.0-alpha.1`.** Sáu phase 2a-13 → 2a-18 mỗi phase đã soạn sẵn một ghi chú riêng, nhưng **không bản nào trong số đó lên npm**: `0.2.0-alpha.2` và `0.3.0-alpha.0` → `0.3.0-alpha.3` chưa từng tồn tại trên registry. Tất cả nằm trong bản này. Ghi chú của từng phase vẫn giữ nguyên làm lịch sử, liên kết ở dưới.
 
+**Cài bản này:** `npx paseo-bm@next`, hoặc ghim cứng `npx paseo-bm@0.3.0-alpha.4`. Lệnh `npx paseo-bm` trần đi theo dist-tag `latest`, **chưa** trỏ vào bản này; `npm view paseo-bm dist-tags` cho biết hiện `latest` ở đâu.
+
 ## Thay đổi
 
 ### Vai trò và model
@@ -38,7 +40,7 @@ Bản prerelease **gộp** của cả delta 20260921 ([PRD delta](../product/pas
 - Mọi trường RPC mới là cộng thêm. Policy mặc định vẫn là "Ask me"; `install.json` không đổi hình dạng.
 - `roles[]` trong `install.json` giờ nghĩa là "trình cài đã ghi gì lần cuối"; cấu hình có hiệu lực là cấu hình Paseo.
 - **Cài lại không còn đưa các mục `bm-*` về mặc định.** Ai từng dùng cài lại để "reset" vai trò thì nay dùng `--role` hay `--reconfigure`.
-- **Giữa các bản `0.3.0-alpha.*` với nhau:** cài lại một bản `0.3.0-alpha.*` cũ hơn trong khi `role-fallback.json` còn `policy: "auto"` thì bản cũ coi **cả file** là không dùng được (một dòng log) và mọi vai trò về mặc định. Vì vậy đổi policy về "Ask me" trước. Cảnh báo này **không** áp dụng cho `0.2.0-alpha.1` — xem mục dưới.
+- **`policy: "auto"` an toàn với mọi bản `0.3.0-alpha.*`.** Schema của `role-fallback.json` đã nhận `"auto"` từ phase 2a-16, và mã trước 2a-18 đọc mọi policy khác `"off"` thành "Ask me" (chú thích có sẵn trong `plugin/client/setup-model.ts`). Chuỗi dự phòng giữ nguyên, không mất gì. Ghi chú của các phase trước nói bản cũ "coi cả file là không dùng được" — điều đó **không đúng**. Dù sao cũng không có bản `0.3.0-alpha.*` nào khác trên npm để hạ xuống.
 
 ## Hoàn tác
 
