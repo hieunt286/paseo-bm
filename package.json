@@ -12,7 +12,8 @@
   },
   "files": [
     "dist/",
-    "plugin/"
+    "plugin/",
+    "paseo-plugin.json"
   ],
   "repository": {
     "type": "git",
