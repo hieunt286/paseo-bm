@@ -177,12 +177,44 @@ jobs:
       - name: Smoke test packed package
         run: npm run smoke:packed
 
+      # Everything that can be checked is checked before anything is published:
+      # once paseo-bm is on npm it cannot be taken back, so a payload package
+      # that would fail must fail here, not between the two publishes (ADR-009,
+      # design delta 20260923 §5).
+      - name: Assert both packages agree
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const payload = JSON.parse(fs.readFileSync("plugin/package.json", "utf8"));
+            const expected = process.argv[1];
+            if (payload.name !== "paseo-bm-plugin") {
+              console.error(`plugin/package.json name is ${payload.name}, expected paseo-bm-plugin`);
+              process.exit(1);
+            }
+            if (payload.version !== expected) {
+              console.error(`plugin/package.json version is ${payload.version}, expected ${expected}`);
+              process.exit(1);
+            }
+            console.log(`payload package ${payload.name}@${payload.version}`);
+          ' "${VERSION}"
+
       - name: Publish (dry-run)
         env:
           VERSION: ${{ steps.meta.outputs.version }}
           DIST_TAG: ${{ steps.meta.outputs.dist_tag }}
         run: |
           echo "Dry-run publish of paseo-bm@${VERSION} with dist-tag ${DIST_TAG}"
+          npm publish --dry-run --provenance --access public --tag "${DIST_TAG}"
+
+      - name: Publish payload (dry-run)
+        working-directory: plugin
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          DIST_TAG: ${{ steps.meta.outputs.dist_tag }}
+        run: |
+          echo "Dry-run publish of paseo-bm-plugin@${VERSION} with dist-tag ${DIST_TAG}"
           npm publish --dry-run --provenance --access public --tag "${DIST_TAG}"
 
       # The real publish (bead bm-wp-118-4s4.2) runs only when a human publishes a
@@ -196,6 +228,20 @@ jobs:
           DIST_TAG: ${{ steps.meta.outputs.dist_tag }}
         run: |
           echo "Publishing paseo-bm@${VERSION} with dist-tag ${DIST_TAG}"
+          npm publish --provenance --access public --tag "${DIST_TAG}"
+
+      # Second, and only after the installer package is safely out: the payload,
+      # whose tarball root is the loadable plugin that paseo.cafe scans. Its
+      # trusted-publisher entry points at this same workflow file, so renaming
+      # this file breaks publishing for both packages.
+      - name: Publish payload to npm
+        if: github.event_name == 'release'
+        working-directory: plugin
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          DIST_TAG: ${{ steps.meta.outputs.dist_tag }}
+        run: |
+          echo "Publishing paseo-bm-plugin@${VERSION} with dist-tag ${DIST_TAG}"
           npm publish --provenance --access public --tag "${DIST_TAG}"
 
       - name: Verify published version
@@ -217,4 +263,25 @@ jobs:
             sleep 15
           done
           echo "paseo-bm@${DIST_TAG} still resolves to '${last}' after 5 minutes, expected ${VERSION}" >&2
+          exit 1
+
+      - name: Verify published payload
+        if: github.event_name == 'release'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          DIST_TAG: ${{ steps.meta.outputs.dist_tag }}
+        # Same wait as above: npm answers "being processed" for a while after a
+        # healthy publish.
+        run: |
+          last=""
+          for attempt in $(seq 1 20); do
+            published=$(npm view "paseo-bm-plugin@${DIST_TAG}" version 2>/dev/null || true)
+            if [ "$published" = "$VERSION" ]; then
+              echo "npm dist-tag ${DIST_TAG} -> paseo-bm-plugin@${published} (after $((attempt * 15))s)"
+              exit 0
+            fi
+            last="$published"
+            sleep 15
+          done
+          echo "paseo-bm-plugin@${DIST_TAG} still resolves to '${last}' after 5 minutes, expected ${VERSION}" >&2
           exit 1
