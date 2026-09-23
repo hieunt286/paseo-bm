@@ -51,12 +51,6 @@ describe("plugin manifest", () => {
     expect(manifest.requirements.paseo).toBe(">=0.8.0");
   });
 
-  // The repo root carries a copy of this manifest because the paseo.cafe
-  // registry reads `paseo-plugin.json` at the root of the repository, while the
-  // payload Paseo installs lives in `plugin/`. Since 0.3.0-alpha.5 the copy
-  // also ships at the root of the npm tarball, because the registry's npm check
-  // reads it there; scripts/smoke-packed.mjs guards that.
-  // See docs/operations/paseo-bm-cafe-listing-20260923.md.
   // The payload ships as its own npm package, paseo-bm-plugin, and the
   // paseo.cafe registry compares the version in git against the one it resolves
   // on npm. Three files carry that version and none of them may drift:

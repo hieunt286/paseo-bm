@@ -101,7 +101,7 @@ Trang listing tự sinh lệnh cài thẳng: `paseo plugin add npm:paseo-bm-plug
 ## 8. Các bước owner làm
 
 1. ~~Commit các thay đổi ở §5 và đưa lên nhánh mặc định `main`~~ — **xong 2026-09-23**, `main` ở `5c7daa5`, CI của repo xanh (run 35832961123).
-2. ~~Fork `paseo-cafe/paseo-cafe`, thêm `registry/paseo-bm.json`, mở PR~~ — **xong**: [PR #215](https://github.com/paseo-cafe/paseo-cafe/pull/215) từ nhánh `hieunt286:add-paseo-bm`. Đang **đỏ** vì §4: hồ sơ mới bắt buộc khai `package`.
+2. ~~Fork `paseo-cafe/paseo-cafe`, thêm `registry/paseo-bm.json`, mở PR~~ — **xong**: [PR #215](https://github.com/paseo-cafe/paseo-cafe/pull/215) từ nhánh `hieunt286:add-paseo-bm`. Lúc đó **đỏ** vì §4 rồi §10; nay đã xanh, xem bước 3 và §13.
 3. ~~Phát hành bản mới rồi cập nhật hồ sơ~~ — **xong 2026-09-23**: `0.3.0-alpha.6` publish hai gói, hồ sơ chuyển sang `path: "plugin"` + `package: "paseo-bm-plugin"`, và `Registry admission` xanh cả bốn cổng (§13). Ba lệnh cần OTP do owner chạy: bản giữ chỗ, `npm trust github`, và hai lần `npm dist-tag add`.
 4. Sau khi PR được merge và tới lần quét kế tiếp, mở trang listing xem ba ảnh trong `plugin/images/` có hiện đúng không — đây là phép kiểm duy nhất phải chờ bên ngoài, nên nó nằm ở đây chứ không nằm trong tiêu chí của bead. Thêm hay đổi ảnh về sau chỉ cần push, không cần PR mới.
 
@@ -201,5 +201,7 @@ TARGETS_OUTCOME: success   SCAN_OUTCOME: success      PUBLISH_OUTCOME: success
 Hồ sơ đang nộp: `path: "plugin"`, `package: "paseo-bm-plugin"`, sáu caveat. PR `MERGEABLE`, đang chờ maintainer duyệt và merge — phần còn lại nằm ngoài tầm repo này.
 
 Hai lỗi của Worker trên nhánh PR, ghi lại để lần sau tránh: một commit ghi đè file thành 0 byte, vì một bước trong lệnh hỏng mà chuỗi lệnh vẫn chạy tiếp (từ nay: kiểm file có nội dung **trước** khi gọi API ghi); và một commit sai định dạng, vì `json.dumps` bung mảng ngắn ra nhiều dòng trong khi Biome của họ giữ mảng ngắn trên một dòng.
+
+**Một cái bẫy còn sống tới lần phát hành sau.** `paseo-bm@0.3.0-alpha.6` — tức bản `latest` hiện tại — **vẫn có `paseo-plugin.json` ở gốc tarball**, vì nó publish từ `e7424cb`, trước commit `4b444b5` gỡ file ấy. Nên trên Paseo 0.9+, lệnh `paseo plugin add npm:paseo-bm@0.3.0-alpha.6` sẽ tìm thấy một plugin rồi **lỗi nạp** vì gốc gói không có runtime entry; gỡ bằng `paseo plugin remove paseo-bm`. Từ bản phát hành kế tiếp trở đi thì hết, và `smoke:packed` canh sẵn. Bản đã publish thì không sửa được — đó là cái giá của việc publish trước rồi mới dọn.
 
 Việc còn lại sau khi merge, không thuộc phase này: mở trang listing xem mô tả, version và ba ảnh có lên đúng không; lịch quét là 15 phút cho nguồn npm và 6 giờ cho nguồn Git.

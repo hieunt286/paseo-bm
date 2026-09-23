@@ -62,8 +62,16 @@ What breaks the listing, so do not do it:
 - **Putting anything at the installer tarball's root that looks like a plugin.**
 
 The registry entry lives in the other repository, at `registry/paseo-bm.json` in
-`paseo-cafe/paseo-cafe`, and declares `path: "plugin"` with `package: "paseo-bm-plugin"`. Their
-CI runs Biome over it: **short arrays stay on one line**.
+`paseo-cafe/paseo-cafe`, and declares `path: "plugin"` with `package: "paseo-bm-plugin"`. Two
+things cost a red run to learn there:
+
+- Their CI runs Biome over the entry: **short arrays stay on one line**. `JSON.stringify(x, null, 2)`
+  expands them and fails the job before it reaches validation.
+- **Never write a file, local or remote, from a value you have not checked is non-empty, and never
+  let a shell chain continue past a failed step.** A `python3 … <<'PY'` block that exits non-zero
+  does not stop the `cmd && cmd` line after it: on 2026-09-23 that truncated the entry on the PR
+  branch to zero bytes, in someone else's repository. Guard the value (`test -s`, `test -n`) or put
+  the whole sequence inside one script that stops on error.
 
 ## Repository layout
 

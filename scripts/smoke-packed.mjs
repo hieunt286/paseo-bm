@@ -187,6 +187,24 @@ try {
     !existsSync(join(payloadPacked, "images")),
     "payload tarball carries no images/ directory",
   );
+  // The payload's `files` is a hand-written allowlist, so a new directory under
+  // plugin/ would silently not ship — and an npm version cannot be republished.
+  // Hold it to the same standard as the installer: everything in plugin/ ships,
+  // except the screenshots and the files npm never packs.
+  const payloadExcludedFromTarball = (path) =>
+    path === "images" ||
+    path.startsWith("images/") ||
+    path === "package.json" ||
+    path === ".DS_Store";
+  const repoPayloadFiles = snapshot(join(repoRoot, "plugin"));
+  const packedPayloadFiles = snapshot(payloadPacked);
+  const missingFromPayload = [...repoPayloadFiles.keys()].filter(
+    (path) => !packedPayloadFiles.has(path) && !payloadExcludedFromTarball(path),
+  );
+  check(
+    missingFromPayload.length === 0,
+    `every file under plugin/ except images/ is in the payload tarball${missingFromPayload.length ? ` (missing: ${missingFromPayload.join(", ")})` : ""}`,
+  );
 
   // The installer tarball root must NOT look like a plugin: the payload package
   // is the one whose root is loadable. A manifest here would make
