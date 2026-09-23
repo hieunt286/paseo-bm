@@ -146,3 +146,26 @@ Hệ quả, và đây là điểm chặn thật sự của cả yêu cầu này:
 Nói cách khác, registry chỉ nhận plugin mà **gốc gói npm chính là payload nạp được**. Đó là hình dạng của `@omercnet/paseo-beads` (repo có `path`, gói npm riêng cho payload). paseo-bm hiện không có hình dạng đó, và đây là quyết định đóng gói của sản phẩm chứ không phải một chỗ sửa nhỏ — xem ADR-001.
 
 Bot review của họ (CodeRabbit) cũng độc lập nêu đúng mối lo trong hai caveat của ta: "The registry's generated install command cannot load Paseo BM, so users must use its separate `npx paseo-bm` installer."
+
+## 11. Đối chiếu payload với toàn bộ luật quét (WP-317, trước khi publish)
+
+Đo ngày 2026-09-23 trên `plugin/` ở trạng thái cuối (đã có `package.json`, `README.md`, `LICENSE`, `images/`). Nguồn luật: `scripts/plugin-security/static-scan.ts` — **mọi** luật đều blocking, không có mức khuyến nghị.
+
+| Luật | Bằng chứng | Kết quả |
+|---|---|---|
+| `manifest/missing`, `manifest/json` | `plugin/paseo-plugin.json` parse được | đạt |
+| `manifest/id` | `id` là `paseo-bm`, khớp `PLUGIN_ID = /^[a-z][a-z0-9-]*$/` và khớp tên file hồ sơ `registry/paseo-bm.json` | đạt |
+| `manifest/requirements`, `.paseo`, `.unknown` | khoá cấp cao chỉ có `id` và `requirements`; `requirements` chỉ có `paseo` là `>=0.8.0` | đạt |
+| `manifest/build` | không khai `build` | đạt |
+| `manifest/unknown:<key>` | không có khoá lạ | đạt |
+| `entrypoint/missing` | `index.client.tsx` và `index.server.ts` ngay gốc `plugin/` | đạt |
+| `entrypoint/legacy-index` | không có `index.ts` hay `index.tsx` ở gốc payload (đếm: 0) | đạt |
+| `boundary/unsupported-sdk-import` | subpath dùng: `@getpaseo/plugin`, `/client`, `/client/react-native`, `/server` — cả bốn nằm trong `SUPPORTED_SDK` của họ; số subpath ngoài danh sách: 0 | đạt |
+| `boundary/runtime-module-import` | `node:` builtin ngoài `server/`: 0 file; SDK server-only ngoài `server/`: 0; module client-only (`react`, `react-dom`, `react-native`, `use-sync-external-store`, `@tanstack/react-query`) ngoài `client/`: 0 | đạt |
+| `boundary/cross-runtime-import` | `test/plugin-structure.test.ts` canh sẵn: client không với vào `server/`, server không với vào `client/`, `shared/` không import Node lẫn react-native — chạy trong `npm run verify` | đạt |
+| `boundary/invalid-module-location` | mọi import tương đối phân giải trong `client/`, `server/`, `shared/` hoặc cùng thư mục | đạt |
+| `scanner/symlink` | `find plugin -type l`: 0 | đạt |
+| `scanner/size-limit` (2 MB) | file lớn nhất là `plugin/images/02-metric-request.jpg` 154,8 KB; số file vượt 2 MB: 0 | đạt |
+| `scanner/incomplete` | không có gì chặn đọc: không symlink, không file khổng lồ, không `node_modules` trong payload | đạt |
+
+**Không luật nào đỏ**, nên theo quyết định Q15 a của owner thì đi tiếp sang bước phát hành. Đây vẫn là đọc luật cộng đo tại chỗ, không phải chạy chính bộ quét của họ — bằng chứng cuối cùng vẫn là lần chạy `Registry admission` sau khi publish.
