@@ -35,6 +35,9 @@ Read this before touching anything in this repository.
 
 ```
 AGENTS.md              this file (CLAUDE.md is a symlink to it)
+paseo-plugin.json      copy of plugin/paseo-plugin.json, kept identical by a test; this is the file the
+                       paseo.cafe registry reads (docs/operations/paseo-bm-cafe-listing-20260923.md). Do not
+                       delete it as a duplicate, and do not point Paseo at the repo root: the payload is plugin/
 docs/product/          PRD (Accepted)
 docs/design/           Technical Design (Active)
 docs/adr/              ADR-001..006 (Accepted)
