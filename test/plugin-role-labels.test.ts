@@ -73,8 +73,9 @@ describe("embedded copies", () => {
   it("carries the bumped payload version", () => {
     const manifest = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as { version: string };
     expect(PLUGIN_VERSION).toBe(manifest.version);
-    // Phase 2a is a feature addition, so the minor version moved.
-    expect(PLUGIN_VERSION.startsWith("0.2.")).toBe(true);
+    // The minor moves with each feature wave: phase 2a was 0.2.x, and delta
+    // 20260921 (phases 2a-14..2a-18, REQ-062..REQ-067) moved it to 0.3.x.
+    expect(PLUGIN_VERSION.startsWith("0.3.")).toBe(true);
   });
 });
 
