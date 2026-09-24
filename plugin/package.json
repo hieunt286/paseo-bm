@@ -1,6 +1,6 @@
 {
   "name": "paseo-bm-plugin",
-  "version": "0.3.0-alpha.6",
+  "version": "0.3.0-alpha.7",
   "description": "Beads Management for Paseo — the plugin payload: the Metric, Beads and Setup screens plus the agent role instructions. Install with npx paseo-bm, which also registers the three agent roles.",
   "license": "MIT",
   "type": "module",
