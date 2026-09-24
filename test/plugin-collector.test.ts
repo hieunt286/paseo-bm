@@ -9,6 +9,7 @@ import {
   clearStartMarks,
   collectTurnEnded,
   evidenceFromItem,
+  joinStreamedText,
   skillsFromItem,
   noteTurnStart,
   sliceLastTurn,
@@ -889,6 +890,44 @@ describe("who wrote a message", () => {
     const built = await buildRecord(asEvent(turnEnded({ timeline: [flagged] })), { location: null });
     expect(built?.record.sent[0]?.text).toBe("Sửa giúp tôi cái CI đang đỏ");
     expect(built?.record.sent[0]?.origin).toBe("user");
+  });
+});
+
+describe("plugin notices and streamed chunks", () => {
+  // As the Reviewer e5fc4c82 received it on 2026-09-24.
+  const notice = [
+    "BM-FORMAT requestId: req-20260924T065116Z",
+    "Your last BM-REVIEW broke the template:",
+    "- BM-REVIEW checked: is missing",
+    "- BM-REVIEW verdict: must be pass or changes-required",
+    "Answer with the whole corrected BM-REVIEW block as your final message; do not review again.",
+  ].join("\n");
+
+  it("records a notice as a message, never as the review or report it names", async () => {
+    const built = await buildRecord(asEvent(turnEnded({ timeline: [{ type: "user_message" as const, text: notice, messageId: "m1", clientMessageId: "c1" }] })), { location: null });
+    expect(built?.record.sent[0]?.origin).toBe("agent");
+    expect(built?.record.reviews).toEqual([]);
+    expect(built?.record.reports).toEqual([]);
+  });
+
+  it("joins consecutive assistant chunks into one message, and nothing else", () => {
+    const tool = { type: "tool_call", name: "Shell" };
+    const joined = joinStreamedText([
+      { type: "assistant_message", text: "Checking." },
+      tool,
+      { type: "assistant_message", text: "BM-REVIEW\nrequ", messageId: "a" },
+      { type: "assistant_message", text: "estId: req-1", messageId: "a" },
+      { type: "assistant_message", text: "Another message.", messageId: "b" },
+      { type: "user_message", text: "hi" },
+      { type: "user_message", text: "again" },
+    ]);
+    expect(joined.map((item) => (item as { text?: string }).text ?? "tool")).toEqual([
+      "Checking.",
+      "tool",
+      "BM-REVIEW\nrequestId: req-1\n\nAnother message.",
+      "hi",
+      "again",
+    ]);
   });
 });
 

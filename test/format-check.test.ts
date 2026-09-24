@@ -333,6 +333,23 @@ describe("reviews and answers", () => {
     expect(sends).toEqual([]);
   });
 
+  it("reads a streamed review whole: its chunks are one message, not many (traces 2026-09-22..24)", async () => {
+    const goodReview = badReview.replace("verdict: approved", "verdict: pass");
+    // The shapes that drew a false BM-FORMAT: a chunk ending in "requ", one in "verdict: p".
+    for (const cut of [goodReview.indexOf("requestId") + 4, goodReview.indexOf("verdict: pass") + 10]) {
+      const { sends, deps } = world([worker(), reviewer()]);
+      const chunks = [said(goodReview.slice(0, cut)), said(goodReview.slice(cut))].map((item) => ({ ...item, messageId: "m1" }));
+      await checkTurnFormat(turn(reviewer(), [received("please review"), said("Checking."), { type: "tool_call", name: "Shell" }, ...chunks]), deps);
+      expect(sends).toEqual([]);
+    }
+    // A bad review split the same way is still caught, once.
+    const { sends, deps } = world([worker(), reviewer()]);
+    await checkTurnFormat(turn(reviewer(), [received("please review"), said(badReview.slice(0, 20)), said(badReview.slice(20))]), deps);
+    expect(sends.map((send) => send.id)).toEqual(["rev"]);
+    expect(sends[0]!.text).toContain("verdict: must be pass or changes-required");
+    expect(sends[0]!.text).not.toContain("is missing");
+  });
+
   it("tells the Manager when a relayed BM-ANSWERS breaks the template", async () => {
     const { sends, deps } = world([manager(), worker()]);
     await checkTurnFormat(turn(worker(), [received(`Continue ${REQ}.\nBM-ANSWERS\nrequestId: ${REQ}\nQ1 a`)]), deps);

@@ -7,8 +7,10 @@
  * unmistakably paseo-bm's: a message another agent sent that carries a
  * `BM-REPORT`, a `BM-REVIEW` or a request id, an agent's own finished
  * message that carries a report or review block, the plugin's own
- * `BM-FALLBACK` notice (delta 20260921 §4.4.6), and the user's reply sent from
- * a card's Reply box, which `replyText` heads. Everything else is left to
+ * `BM-FALLBACK` notice (delta 20260921 §4.4.6), its other notices (`BM-FORMAT`,
+ * `BM-ANSWERED`, …) as a small card that says they are the plugin's, and the
+ * user's reply sent from a card's Reply box, which `replyText` heads.
+ * Everything else is left to
  * Paseo. Who sent what is decided later, by the renderer, from `chat.peers`.
  *
  * Pure: no React, no React Native, no `server/` import.
@@ -18,6 +20,7 @@ import { looksLikeReport, parseReports, parseReviews, requestIdFromText } from "
 import { answersText, parseAnswers, parseQuestions, type Answer, type Pick, type Question } from "../shared/bm-questions";
 import { checkBlocks, issueText } from "../shared/bm-format";
 import { BM_FALLBACK_MARKER, parseFallbackNotice } from "../shared/bm-fallback";
+import { noticeMarkerOf } from "../shared/notices";
 import {
   FALLBACK_MAX_WAIT_MS,
   type BeadRow,
@@ -61,8 +64,11 @@ export const fallbackNoticeCardSchema = z.object({
 export type FallbackNoticeCard = z.infer<typeof fallbackNoticeCardSchema>;
 
 export const chatCardSchema = z.object({
-  /** `reply`: the user's words sent from a card's Reply box (`replyText`). */
-  type: z.enum(["report", "review", "message", "fallback", "reply"]),
+  /**
+   * `reply`: the user's words sent from a card's Reply box (`replyText`);
+   * `notice`: one of the plugin's own notices other than `BM-FALLBACK`.
+   */
+  type: z.enum(["report", "review", "message", "fallback", "reply", "notice"]),
   /** `received`: another agent sent it into this chat; `sent`: this chat's agent wrote it. */
   direction: z.enum(["received", "sent"]),
   requestId: z.string().nullable(),
@@ -87,6 +93,8 @@ export const chatCardSchema = z.object({
   fallback: fallbackNoticeCardSchema.nullable().default(null),
   /** The message's `BM-ANSWERS` rows, for this card's request; empty when it has none. */
   answers: z.array(z.object({ id: z.string(), text: z.string() })).default([]),
+  /** The marker of a `notice` card (`BM-FORMAT`, `BM-ANSWERED`, …); null for every other card. */
+  notice: z.string().nullable().default(null),
 });
 
 export type ChatCard = z.infer<typeof chatCardSchema>;
@@ -124,7 +132,7 @@ export function toChatCard(item: ChatItem, phase: "streaming" | "complete"): Cha
   // the user's words (`server/notices.ts`), so it is told apart by its first
   // line, as the plugin writes it, before that test.
   if (item.type === "user_message") {
-    const card = fallbackCardOf(text);
+    const card = fallbackCardOf(text) ?? noticeCardOf(text);
     if (card !== undefined) return card;
   }
   let direction: ChatCard["direction"];
@@ -195,6 +203,39 @@ export function toChatCard(item: ChatItem, phase: "streaming" | "complete"): Cha
     formatIssues,
     fallback: null,
     answers: direction === "received" ? answersFor(text, requestId) : [],
+    notice: null,
+  };
+}
+
+/**
+ * The card of one of the plugin's notices, or undefined. It says what the
+ * plugin told this agent, one line, with the whole notice one tap away; it is
+ * never checked against a template, and there is no one to reply to.
+ */
+function noticeCardOf(text: string): ChatCard | undefined {
+  const marker = noticeMarkerOf(text);
+  // `BM-FALLBACK` has a card of its own; one it cannot read stays text (`fallbackCardOf`).
+  if (marker === null || marker === BM_FALLBACK_MARKER) return undefined;
+  const [head = "", ...rest] = text.split("\n");
+  return {
+    type: "notice",
+    direction: "received",
+    requestId: BARE_REQUEST_ID.exec(head)?.[0] ?? null,
+    batchId: null,
+    phase: null,
+    tier: null,
+    verdict: null,
+    blocking: null,
+    blockers: null,
+    beads: { created: 0, updated: 0, closed: 0 },
+    // The first line is the marker and the request; the gist is what follows.
+    gist: gistOf(marker === "STOP" ? text : [head.slice(marker.length).replace(/\brequestId:\s*\S+/, ""), ...rest].join("\n")),
+    text,
+    questions: [],
+    formatIssues: [],
+    fallback: null,
+    answers: [],
+    notice: marker,
   };
 }
 
@@ -235,6 +276,7 @@ function replyCardOf(text: string): ChatCard | undefined {
     formatIssues: [],
     fallback: null,
     answers: answersFor(text, requestId),
+    notice: null,
   };
 }
 
@@ -303,7 +345,7 @@ export function partiesOf(card: ChatCard, owner: ChatPeer | null, peers: readonl
   }
 
   if (card.type === "report") return { from: party(workerOf(card.requestId), "worker"), to: self };
-  if (card.type === "reply") return { from: party(undefined, null), to: self };
+  if (card.type === "reply" || card.type === "notice") return { from: party(undefined, null), to: self };
   if (card.type === "review") {
     const reviewers = ofRole("reviewer").filter(
       (peer) => (card.requestId === null || peer.requestId === card.requestId) && (card.batchId === null || peer.batchId === card.batchId),
@@ -322,9 +364,9 @@ export function partiesOf(card: ChatCard, owner: ChatPeer | null, peers: readonl
   }
 }
 
-/** The sender as the card's header names it: the user's reply is "You". */
+/** The sender as the card's header names it: the user's reply is "You", a notice the plugin's. */
 export function senderName(card: ChatCard, from: Party): string {
-  return card.type === "reply" ? "You" : partyName(from);
+  return card.type === "reply" ? "You" : card.type === "notice" ? "paseo-bm plugin" : partyName(from);
 }
 
 /** One `BM-ANSWERS` row as a card shows it: `Q3 · a — the option`. */
@@ -377,6 +419,7 @@ export function statusChip(card: ChatCard): Badge | null {
     return { text: card.phase, tone };
   }
   if (card.type === "reply") return { text: "Your reply", tone: "info" };
+  if (card.type === "notice") return { text: card.notice ?? "notice", tone: "muted" };
   if (card.type === "review" && card.verdict !== null) {
     const verdict = card.verdict.toLowerCase();
     const tone: Badge["tone"] = /pass|approved/.test(verdict) ? "success" : /stopped/.test(verdict) ? "muted" : "warning";
@@ -838,6 +881,7 @@ export function fallbackCardOf(text: string): ChatCard | undefined {
     beads: { created: 0, updated: 0, closed: 0 },
     questions: [],
     answers: [],
+    notice: null,
     formatIssues: [],
     gist: stoppedTitle(notice.role),
     text,
@@ -871,6 +915,7 @@ export function fallbackCardOfIncident(incident: FallbackIncident): ChatCard {
     beads: { created: 0, updated: 0, closed: 0 },
     questions: [],
     answers: [],
+    notice: null,
     formatIssues: [],
     gist: stoppedTitle(incident.role),
     text: "",

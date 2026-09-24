@@ -1329,3 +1329,43 @@ describe("the user's reply from a card, in the recipient's chat", () => {
     expect(replyCard(REPLY.replace("requestId: req-20260924T064739Z", "requestId: req-20260101T000000Z"))!.answers).toEqual([]);
   });
 });
+
+describe("the plugin's own notices, as a card", () => {
+  // The three the owner saw raw on 2026-09-24.
+  const FORMAT = [
+    "BM-FORMAT requestId: req-20260924T065116Z",
+    "Your last BM-REPORT broke the template:",
+    '- BM-REPORT tier: must be "Small|Medium|Large (changed: no)"',
+    "Send the whole corrected block again, to the same agent as before, in one message.",
+  ].join("\n");
+  const ANSWERED = [
+    "BM-ANSWERED requestId: req-20260924T064739Z",
+    "The user answered Q1, Q2, Q3, Q4 directly to the Worker (in its card or chat); the Worker has them.",
+    "Still open: Q5.",
+  ].join("\n");
+  const noticeCard = (text: string) => toChatCard({ type: "user_message", text, clientMessageId: "sdk-message-id" }, "complete");
+
+  it("names the notice, its request and what it says, and nothing else", () => {
+    const card = noticeCard(FORMAT)!;
+    expect(card).toMatchObject({ type: "notice", notice: "BM-FORMAT", requestId: "req-20260924T065116Z", formatIssues: [], questions: [], answers: [] });
+    expect(card.gist).toBe("Your last BM-REPORT broke the template:");
+    expect(statusChip(card)).toEqual({ text: "BM-FORMAT", tone: "muted" });
+    expect(summaryOf(card)).toBe("Your last BM-REPORT broke the template:");
+    expect(chatCardSchema.parse(card)).toEqual(card);
+    expect(noticeCard(ANSWERED)).toMatchObject({ type: "notice", notice: "BM-ANSWERED", requestId: "req-20260924T064739Z" });
+  });
+
+  it("comes from the plugin, and has no one to reply to", () => {
+    const card = noticeCard(ANSWERED)!;
+    const { from, to } = partiesOf(card, manager, [worker]);
+    expect(senderName(card, from)).toBe("paseo-bm plugin");
+    expect(from.id).toBeNull();
+    expect(to.id).toBe(manager.id);
+    expect(drawAsCard(card, manager)).toBe(true);
+  });
+
+  it("covers the reviewer stop notice, and leaves a message that only mentions a notice alone", () => {
+    expect(noticeCard("STOP: The Beads Worker that created you was stopped by the user.")).toMatchObject({ type: "notice", notice: "STOP" });
+    expect(noticeCard(`The plugin said:\n\n${FORMAT}`)).toBeUndefined();
+  });
+});

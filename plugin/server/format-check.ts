@@ -45,7 +45,7 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { checkBlocks, issueText, type BlockKind, type CheckedBlock } from "../shared/bm-format";
 import { roleOfProvider, type BmRole } from "./agent-role";
-import { sliceLastTurn } from "./collector";
+import { joinStreamedText, sliceLastTurn } from "./collector";
 import { bmAgentsOf, requireLocation, type DashboardPaseo } from "./dashboard-rpc";
 import { FORMAT_NOTICE_MARKER, isPluginNotice } from "./notices";
 import { readRecords } from "./trace-store";
@@ -239,7 +239,7 @@ async function factsOfAgent(deps: FormatDeps, agentId: string | null): Promise<A
 
 /** Records the latest block of each sender/request/kind seen in this turn. */
 async function detect(event: FormatTurnEvent, role: BmRole, deps: FormatDeps, log: (message: string) => void): Promise<void> {
-  const items = sliceLastTurn(Array.isArray(event.timeline) ? event.timeline : [])
+  const items = joinStreamedText(sliceLastTurn(Array.isArray(event.timeline) ? event.timeline : []))
     .map(textItem)
     .filter((item): item is TimelineText => item !== null);
   const wanted: BlockKind = role === "manager" ? "BM-REPORT" : role === "worker" ? "BM-ANSWERS" : "BM-REVIEW";

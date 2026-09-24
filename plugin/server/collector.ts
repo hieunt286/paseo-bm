@@ -132,6 +132,42 @@ function textOf(item: TimelineItem): string | null {
   return null;
 }
 
+interface StreamedText {
+  type: "assistant_message";
+  text: string;
+  messageId?: unknown;
+}
+
+function isAssistantText(item: unknown): item is StreamedText {
+  if (item === null || typeof item !== "object") return false;
+  const { type, text } = item as { type?: unknown; text?: unknown };
+  return type === "assistant_message" && typeof text === "string";
+}
+
+/**
+ * `items` with each run of consecutive `assistant_message` items joined into one.
+ *
+ * A provider streams its reply in chunks, and the hook's timeline keeps every
+ * chunk as an `assistant_message` of its own (`agent_message_chunk` in Paseo's
+ * ACP connection), so a block read item by item arrives cut — `BM-REVIEW` then
+ * `requ` — and the format check told 13 Reviewers their valid review broke the
+ * template (traces 2026-09-22..24). Chunks join as they are; two messages with
+ * different `messageId`s are kept apart by a blank line.
+ */
+export function joinStreamedText<T>(items: readonly T[]): T[] {
+  const out: T[] = [];
+  for (const item of items) {
+    const previous = out.at(-1);
+    if (isAssistantText(previous) && isAssistantText(item)) {
+      const apart = typeof previous.messageId === "string" && typeof item.messageId === "string" && previous.messageId !== item.messageId;
+      out[out.length - 1] = { ...previous, text: `${previous.text}${apart ? "\n\n" : ""}${item.text}` } as T;
+      continue;
+    }
+    out.push(item);
+  }
+  return out;
+}
+
 /**
  * The tail of a whole-conversation timeline that plausibly belongs to the turn
  * that just ended: from the last `user_message` to the end.
@@ -392,7 +428,7 @@ export async function buildRecord(
             item: entry.item as TimelineItem,
             at: typeof entry.timestamp === "string" ? entry.timestamp : endedAt,
           }))
-      : sliceLastTurn(items).map((item) => ({ item, at: endedAt }));
+      : joinStreamedText(sliceLastTurn(items)).map((item) => ({ item, at: endedAt }));
 
   const sent: TraceMessage[] = [];
   const received: TraceMessage[] = [];
@@ -425,6 +461,9 @@ export async function buildRecord(
     } else {
       received.push(message);
     }
+    // A plugin notice quotes block names ("- BM-REVIEW checked: is missing"),
+    // which parsed as a review with the verdict "checked: is missing".
+    if (isPluginNotice(safe)) continue;
     reports.push(...parseReports(safe, { agentId: event.agent.id, at }));
     reviews.push(...parseReviews(safe, { agentId: event.agent.id, at }));
   }
