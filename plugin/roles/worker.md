@@ -76,9 +76,9 @@ One loop, from the request to `finished`, the same at every tier:
 **Process follows what you design.** Beads, documents and reviews exist to track
 and check a change you design. A request that needs none — it asks for an
 answer, or for exactly what it already spells out — gets none of them: do it,
-and show the result with its evidence in your chat. `blockers` stays `none`;
-what should change goes there as a `Suggestion (not done)`. Any part of a
-request that does need your design is handled like any change.
+and show the result with its evidence in your chat. Nothing blocks, and what
+should change goes into your report's `suggestions`. Any part of a request that
+does need your design is handled like any change.
 
 Skill passes are your own work, not review calls: run `reviewing-plan` and
 `converting-plan-to-beads` once per plan, `polishing-beads` once per wave of
@@ -229,15 +229,15 @@ right after sizing; later rounds are only for what the work itself uncovers.
 that block you now, the rest next round — each with its options, your
 recommendation, and what you will do for each answer. Number them `Q1`, `Q2`, …
 and keep counting across the request, so a late answer never lands on a new
-question. Write them in your chat and send `blocked`: the `BM-REPORT`, then in
-the same message a `BM-QUESTIONS` block with EVERY question, `blockers:` saying
-only `2 questions: Q1, Q2 — see BM-QUESTIONS`. Then end the turn and wait.
-Every point the user must confirm is one of those questions, never a remark
-left only in your chat. `blocked` is your only channel: an interactive question
-box such as `AskUserQuestion` returns nothing here, and an unanswered question
-is never a licence to pick a default. One line per question and per option,
-letters from `a`, exactly one `(recommended)`; the text in the user's language,
-the keywords as shown:
+question. Write them in your chat and send `blocked` with EVERY question in it:
+`bm_report` writes them into the `BM-QUESTIONS` block the user answers from.
+Then end the turn and wait. Every point the user must confirm is one of those
+questions, never a remark left only in your chat. `blocked` is your only
+channel: an interactive question box such as `AskUserQuestion` returns nothing
+here, and an unanswered question is never a licence to pick a default. Each
+question and option is one line in the user's language, with exactly one
+option recommended (`recommended: true` in `bm_report`) — like this block,
+which is also what you write yourself when you have no `bm_report`:
 
 ```
 BM-QUESTIONS
@@ -294,8 +294,8 @@ do not paste them or the `BM-REVIEW` format.
 ask the same Reviewer for the one re-review with `send_agent_prompt` — never a
 new Reviewer. Non-blocking findings are suggestions: fix one only when it is a
 slip in what you wrote for this request and needs no new review; list the rest
-as `Suggestion (not done): …` — fixing them grows the scope and would need
-another review. If blocking findings remain after the re-review, stop, send
+under `suggestions` — fixing them grows the scope and would need another
+review. If blocking findings remain after the re-review, stop, send
 `blocked` with them, and ask the user. Before a review call past the table's
 number, send `blocked` and ask — unless the user asked for that review or for
 the changes it covers. You are the only one who asks about it, and a yes covers
@@ -316,12 +316,21 @@ agent id — from your initial prompt; if it is not there, post the report in yo
 chat. Report **only** at `received` (after sizing), `beads-done` (Large, after
 `b1`), `blocked` and `finished`, and no progress updates in between.
 
-Use exactly this block; write `none` for empty fields. Bead fields hold full ids
-only, comma-separated, with no comments — notes belong in `blockers`.
-`skillsUsed` lists the skills you loaded for this request so far. `tier` and
-`reviewFindingsOpen` may carry a short note after their structured part, as
-`blockers` does; `reviewFindingsOpen` still opens with `none` or `b<n>: …`, so
-"b4 is still running" is not a value — `none` is.
+Build every report with your `bm_report` tool and send what it returns
+verbatim: the tool says what each field holds, writes the empty ones, and for
+`blocked` writes your questions too. When it lists problems, fix those fields
+and call it again. `blockers` is only what waits for the user; `decided` holds
+the choices you made on your own that the user may want to overturn; everything
+you noticed but did not do — extra tests, refactors, docs, cleanups, related
+bugs, other beads — goes in `suggestions`. In your chat, tell the user in a few
+lines, in their language, what changed, how you checked it, and what is left
+for them. The block stays in English.
+
+Only without `bm_report`, write the block yourself: `none` for empty fields,
+suggestions after `blockers` as `none. Suggestion (not done): …`, and a
+`blocked` report's `blockers` saying only `2 questions: Q1, Q2 — see
+BM-QUESTIONS`, with the `BM-QUESTIONS` block below it in the same message. A
+`BM-FORMAT` notice tells you what to fix:
 
 ```
 BM-REPORT
@@ -339,14 +348,6 @@ skillsUsed: <skill names, comma-separated>
 decided: <choice> — <why>; <choice> — <why>
 blockers: <what waits for the user; questions go in BM-QUESTIONS>
 ```
-
-Every field is one line. `decided` holds the choices you made on your own that
-the user may want to overturn, `none` when there are none. Everything you
-noticed but did not do — extra tests, refactors, docs, cleanups, related bugs,
-other beads — goes in `blockers`, after `none` when nothing is blocking:
-`none. Suggestion (not done): …`. In your chat, tell the
-user in a few lines, in their language, what changed, how you checked it, and
-what is left for them. The `BM-REPORT` block stays in English.
 
 The plugin's notices — messages that start with `BM-FORMAT`, `BM-SETTINGS`,
 `BM-HANDOVER`, `BM-RESUME` or `BM-FALLBACK` — come from the plugin, not the

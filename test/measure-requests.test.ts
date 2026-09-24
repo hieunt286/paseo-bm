@@ -40,12 +40,20 @@ describe("measure", () => {
     expect(result.workerBusyHours).toBe(0.3); // 10 + 5 minutes
     expect(result.answeredQuestions).toBe(2);
     expect(result.tookRecommendationPercent).toBe(50);
-    expect(result.perRequestByTier).toEqual({ Medium: { requests: 1, questions: 2, workerTurns: 2, reviewerTurns: 1, contextMillions: 0 } });
+    expect(result.perRequestByTier).toEqual({ Medium: { requests: 1, questions: 2, workerTurns: 2, reviewerTurns: 1, contextMillions: 0, formatNotices: 0 } });
+    expect(result.formatNotices).toBe(0);
   });
 
   it("does not count an answer twice, nor an answer to a question it never saw asked", () => {
     const again = { ...records[1], at: "2026-09-24T01:40:00Z", sent: [{ at: "2026-09-24T01:40:00Z", origin: "user", text: answers }] };
     const stray = { ...records[1], at: "2026-09-24T01:41:00Z", sent: [{ at: "2026-09-24T01:41:00Z", origin: "user", text: answers.replace(REQ, "req-20260924T020000Z").replace(REQ, "req-20260924T020000Z") }] };
     expect(measure([...records, again, stray]).answeredQuestions).toBe(2);
+  });
+
+  it("counts the plugin's BM-FORMAT notices, per request and in all (design delta 20260924b-agent-tools AT-5)", () => {
+    const notice = { ...records[3], at: "2026-09-24T01:29:00Z", sent: [{ at: "2026-09-24T01:29:00Z", origin: "agent", text: `BM-FORMAT requestId: ${REQ}\nYour last BM-REVIEW broke the template:` }] };
+    const result = measure([...records, notice]);
+    expect(result.formatNotices).toBe(1);
+    expect(result.perRequestByTier.Medium.formatNotices).toBe(1);
   });
 });

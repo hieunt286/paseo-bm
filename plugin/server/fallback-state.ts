@@ -34,6 +34,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { roleOfProvider } from "./agent-role";
+import { aliasBases } from "./alias-bases";
 import { redactText, sliceLastTurn, type CollectorPaseo } from "./collector";
 import { classifyTurn, quietReply } from "./fallback-detect";
 import { chainOf, readRoleFallback, type FallbackChain } from "./fallback-settings";
@@ -331,24 +332,6 @@ function modelOf(snapshot: Record<string, unknown> | null): string | null {
   return nonEmpty(asRecord(snapshot?.["runtimeInfo"])?.["model"]) ?? nonEmpty(snapshot?.["model"]);
 }
 
-/** The `extends` of every alias, from one `config.get()` under the lookup budget; `{}` when unreadable. */
-async function aliasBases(paseo: unknown): Promise<Record<string, string>> {
-  const config = (paseo as { config?: { get?: unknown } } | null | undefined)?.config;
-  if (typeof config?.get !== "function") return {};
-  try {
-    const result = await withTimeout(config.get.call(config) as Promise<{ config?: unknown } | null | undefined>);
-    if (result === TIMED_OUT) return {};
-    const providers = asRecord(asRecord(result?.config)?.["providers"]) ?? {};
-    const out: Record<string, string> = {};
-    for (const [id, entry] of Object.entries(providers)) {
-      const base = nonEmpty(asRecord(entry)?.["extends"]);
-      if (base !== null) out[id] = base;
-    }
-    return out;
-  } catch {
-    return {};
-  }
-}
 
 /**
  * Builds and writes the incident of one classified turn (§4.4.5 steps 1–5).

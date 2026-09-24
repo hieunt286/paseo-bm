@@ -113,16 +113,20 @@ const MR = flat(rulesBlock(manager).join("\n"));
 
 describe("reviewer.md says a prose field may run over several lines (fault L8, 2026-09-23)", () => {
   it("names the two fields and the indent that keeps the continuation inside the block", () => {
-    expect(reviewer).toMatch(/`checked` and `notChecked` are prose: a long value may run over several/);
-    expect(reviewer).toMatch(/lines, as long as every line after the first is indented\./);
+    // Since ADR-010 bm_review writes the indent itself; the rule stays for the hand-written fallback.
+    expect(R).toMatch(/`checked` and `notChecked` may run over several lines, as long as every line after the first is indented/);
   });
 });
 
-describe("worker.md teaches what the BM-REPORT check accepts (fault L2, 2026-09-23)", () => {
-  it("says a short note may follow tier and reviewFindingsOpen, and where the line still is", () => {
-    expect(worker).toMatch(/`tier` and\n`reviewFindingsOpen` may carry a short note after their structured part/);
-    expect(worker).toMatch(/`reviewFindingsOpen` still opens with `none` or `b<n>: …`/);
-    expect(worker).toMatch(/"b4 is still running" is not a value/);
+describe("the BM-REPORT field rules live in bm_report, not in worker.md (ADR-010)", () => {
+  // Fault L2 (2026-09-23) was worker.md and the check describing the fields
+  // differently. The field rules now live in one place, the tool's schema and
+  // the check its output passes (test/bm-tools.test.ts); worker.md no longer
+  // restates them, so they cannot drift apart again.
+  it("does not restate field syntax the tool owns", () => {
+    expect(worker).not.toMatch(/may carry a short note after their structured part/);
+    expect(worker).not.toMatch(/full ids only, comma-separated/);
+    expect(worker).not.toMatch(/Every field is one line\./);
   });
 });
 
@@ -273,8 +277,13 @@ describe("all three files", () => {
     // the criteria table now lives only there (it drifted while worker.md held
     // a copy); manager.md 177 -> 149 (no size guess, no skill-directory rules,
     // no per-message rules). Each is the measured length + 1.
-    ["worker.md", worker, 375],
-    ["reviewer.md", reviewer, 170],
+    // Design delta 20260924b-agent-tools: the tools own the field rules, so the
+    // role files send each agent to its tool and keep only the template as the
+    // fallback (ADR-010, Q3 a). worker.md 375 -> 376, reviewer.md 170 -> 169:
+    // measured + 1 after the field rules left. manager.md took its sentence
+    // within its ceiling.
+    ["worker.md", worker, 376],
+    ["reviewer.md", reviewer, 169],
     // manager.md 185 -> 177 for bead bm-worker-autonomy-895l.2 (design delta
     // 20260924-worker-autonomy §4): no ordered size rule, no Large
     // confirmation, no skills-per-tier check. Measured 176 + 1.
@@ -543,10 +552,11 @@ describe("worker.md — the workflow", () => {
     rule(W, "the example says what makes a question answerable", /every option is named/);
     rule(W, "at most five numbered questions", /at most 5 numbered questions/i);
     rule(W, "each question carries options and a recommendation", /options, your recommendation/);
-    rule(W, "every question goes into the BM-QUESTIONS block of the report's message", /in the same message a `BM-QUESTIONS` block with EVERY question/);
-    rule(W, "blockers only points at the block", /`blockers:` saying only `2 questions: Q1, Q2 — see BM-QUESTIONS`/);
+    rule(W, "every question goes into the blocked report, which writes the BM-QUESTIONS block", /send `blocked` with EVERY question in it:\s+`bm_report` writes them into the `BM-QUESTIONS` block the user answers from/);
+    // bm_report writes this line itself; the rule stays for the hand-written fallback (ADR-010).
+    rule(W, "blockers only points at the block", /`blockers` saying only `2 questions: Q1, Q2 — see\s+BM-QUESTIONS`/);
     rule(W, "question ids keep counting across the request", /keep counting across the request/i);
-    rule(W, "exactly one recommendation per question", /exactly one `\(recommended\)`/);
+    rule(W, "exactly one recommendation per question", /with exactly one\s+option recommended/);
     rule(W, "answers arrive as a BM-ANSWERS block", /`BM-ANSWERS` block/);
     rule(W, "an answer is an option pick or the user's own words", /`Q1: a — …` picks that option, `Q2: other — …` is the user's own words/);
     rule(W, "an answer to a question that is not open is not acted on", /not open[^.]{0,80}do not act on it/i);
@@ -641,8 +651,7 @@ describe("worker.md — the workflow", () => {
     rule(W, "beads-done is Large's, after b1", /`beads-done` \(Large, after\s+`b1`\)/);
     expect(W).not.toMatch(/Small sends only `received` and `finished`/);
     rule(W, "no progress updates in between", /no progress updates (in )?between/i);
-    rule(W, "bead fields hold full ids only", /full ids only, comma-separated/);
-    rule(W, "skillsUsed lists the skills loaded so far", /`skillsUsed` lists the skills you loaded/);
+    // Bead ids and skillsUsed are described by bm_report's schema now (ADR-010).
 
     const block = worker.slice(worker.indexOf("BM-REPORT\nrequestId"));
     verbatim(
@@ -821,14 +830,14 @@ describe("reviewer.md — what it checks and how it decides", () => {
       "checked: <what you read and ran: document paths, bead ids, diff paths, test results, abuse cases tried>",
       "findings:",
       "- severity: blocking | non-blocking",
-      "  location: <file:line, or bead id>",
+      "  location: <file:line, a bead id, or a document heading>",
       "  reason: <why this is a problem>",
       "  suggestedFix: <what the Worker should change>",
       "notChecked: <anything in the scope you could not check, and why>",
     );
-    rule(R, "the verdict follows the blocking findings", /Non-blocking findings alone never change the verdict/);
-    rule(R, "an empty list is written findings: none", /With no findings write exactly `findings: none`/);
-    rule(R, "the plugin owns the counters (owner decision Q17)", /the plugin counts review calls/);
+    rule(R, "the verdict follows the blocking findings", /`changes-required` when one is blocking, `pass` otherwise/);
+    rule(R, "an empty list is written findings: none", /`findings: none` when there are none/);
+    // "No counters" left with the counters' last trace: the tool writes no such field (ADR-010).
     expect(R).not.toMatch(/the Worker counts/);
   });
 
@@ -1045,7 +1054,7 @@ describe("manager.md — how it runs a request", () => {
     rule(M, "never to a running Worker", /once it is not `running`/);
     verbatim(
       manager,
-      "`Continue <requestId>.`, then:\n  ```\n  BM-ANSWERS\n  requestId: <requestId>\n  Q6: a — <the option as the Worker wrote it>\n  Q7: other — <the user's own words>\n  ```",
+      "`Continue <requestId>.`, then the block your `bm_answers` tool returns, or\n  without that tool this one:\n  ```\n  BM-ANSWERS\n  requestId: <requestId>\n  Q6: a — <the option as the Worker wrote it>\n  Q7: other — <the user's own words>\n  ```",
     );
     rule(M, "an answer that fits no single question is asked back, not guessed", /fits no single open question: ask the user, send nothing for it/);
     rule(M, "the Manager never picks for the user", /never pick an option for them/);
@@ -1062,10 +1071,12 @@ describe("manager.md — how it runs a request", () => {
     // The Manager can only relay them because the Worker puts them in `blockers`.
     // Design delta 20260924-instruction-quality P0-1: one `blockers` line, or the format check rejects the report.
     // Owner decision P2-2: decisions have their own `decided` field; suggestions stay in `blockers`.
-    rule(W, "the Worker puts its suggestions in blockers", /goes in `blockers`, after `none` when nothing is blocking:\s+`none\. Suggestion \(not done\): …`/i);
-    rule(W, "and its own decisions on the decided line", /`decided` holds the choices you made on your own that\s+the user may want to overturn, `none` when there are none/);
+    // ADR-010: the Worker lists them in bm_report's `suggestions`, which the tool
+    // writes into `blockers` as `Suggestion (not done): …` (test/bm-tools.test.ts).
+    rule(W, "the Worker puts its suggestions in suggestions", /everything\s+you noticed but did not do — extra tests, refactors, docs, cleanups, related\s+bugs, other beads — goes in `suggestions`/i);
+    rule(W, "by hand, they follow none in blockers", /suggestions after `blockers` as `none\. Suggestion \(not done\): …`/);
+    rule(W, "and its own decisions on the decided line", /`decided` holds\s+the choices you made on your own that the user may want to overturn/);
     verbatim(worker, "decided: <choice> — <why>; <choice> — <why>\nblockers:");
-    rule(W, "every field is one line", /Every field is one line\./);
     rule(M, "a turn that ended without a report is not news", /A Paseo notice that the Worker ended a turn WITHOUT a new `BM-REPORT`/);
     rule(M, "an error or a permission wait is told", /if the Worker errored or waits for a permission, tell the user/);
     rule(M, "otherwise one status line", /otherwise reply with ONE status line/);
@@ -1238,9 +1249,29 @@ describe("worker.md: process follows what the Worker designs", () => {
     rule(W, "the loop skips the change steps", /A request that needs no change of your\s+design gets no bead, no Reviewer and no review call: do it \(below\), send\s+`finished`, and skip steps 3–6\./);
     rule(W, "the principle, with why", /\*\*Process follows what you design\.\*\* Beads, documents and reviews exist to track\s+and check a change you design\./);
     rule(W, "an answer or what the request spells out needs none", /A request that needs none — it asks for an\s+answer, or for exactly what it already spells out — gets none of them/);
-    rule(W, "the result comes with its evidence and blockers stays none", /show the result with its evidence in your chat\. `blockers` stays `none`/);
+    rule(W, "the result comes with its evidence and nothing blocks", /show the result with its evidence in your chat\. Nothing blocks, and what\s+should change goes into your report's `suggestions`/);
     rule(W, "a part that does need design is a change", /Any part of a\s+request that does need your design is handled like any change\./);
     rule(W, "the request that names the action is the yes", /A request that itself\s+asks for one of these is that yes, for exactly what it names\./);
     expect(W).not.toMatch(/A request that only asks for (information|an operation)/);
+  });
+});
+
+describe("each role builds its block with its tool, and keeps the template as the fallback (ADR-010)", () => {
+  it("worker.md: bm_report first, the hand-written block only without it", () => {
+    rule(W, "the report is built by bm_report and sent verbatim", /Build every report with your `bm_report` tool and send what it returns\s+verbatim/);
+    rule(W, "bm_report writes the questions when blocked", /for\s+`blocked` writes your questions too/);
+    rule(W, "a tool error is fixed and the tool called again", /When it lists problems, fix those fields\s+and call it again\./);
+    rule(W, "the template is the fallback", /Only without `bm_report`, write the block yourself/);
+    expect(worker).toMatch(/```\nBM-REPORT\nrequestId: <requestId>/);
+  });
+
+  it("reviewer.md: bm_review first; the tool writes the verdict", () => {
+    rule(R, "the answer is built by bm_review", /Build your answer with your `bm_review` tool: it writes the verdict from your\s+findings/);
+    rule(R, "the template is the fallback", /Only without that tool, your final answer is exactly this block/);
+    expect(reviewer).toMatch(/```\nBM-REVIEW\nrequestId: <requestId>/);
+  });
+
+  it("manager.md: bm_answers first", () => {
+    rule(M, "answers are built by bm_answers", /then the block your `bm_answers` tool returns, or\s+without that tool this one:/);
   });
 });

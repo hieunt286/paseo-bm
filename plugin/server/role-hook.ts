@@ -1,5 +1,7 @@
 import type { PluginBeforeRequests, PluginServerContext } from "@getpaseo/plugin/server";
 import { roleOfProvider } from "./agent-role";
+import { TOOL_PROVIDERS, withAgentTools, type AgentToolsEndpoint } from "./agent-tools";
+import { aliasBases } from "./alias-bases";
 import { providerId } from "./provider-id";
 import {
   LOOKUP_TIMEOUT_MS,
@@ -267,6 +269,8 @@ async function prepare(
   profileModeId: string | null;
   profile: RoleProfile | null;
   features: ProviderFeature[] | null;
+  /** The provider the alias extends (`claude`, `codex`, …), or null when unreadable. */
+  base: string | null;
 }> {
   let extras: Partial<RoleExtras> = {};
   try {
@@ -291,7 +295,8 @@ async function prepare(
   const selection = typeof request?.config?.provider === "string" ? request.config.provider : (id ?? "");
   const features = capabilityOf(modes) === "untiered" ? await featuresFor(paseo, selection, cwd) : null;
   const facts = role === undefined ? {} : await runtimeFactsOf(role, paseo, cwd);
-  return { extras, modes, facts, profileModeId, profile, features };
+  const base = id === null ? null : ((await aliasBases(paseo))[id] ?? null);
+  return { extras, modes, facts, profileModeId, profile, features, base };
 }
 
 function isBmRequest(request: AgentCreateRequest): boolean {
@@ -306,10 +311,32 @@ function isBmRequest(request: AgentCreateRequest): boolean {
 export type RoleHookHost = Partial<Pick<PluginServerContext, "before">>;
 
 /**
+ * The request with the role's tool server added (design delta
+ * 20260924b-agent-tools, ADR-010), or `undefined` when there is nothing to
+ * add: not a paseo-bm agent, no endpoint listening, or a base provider that
+ * is unknown or cannot take pre-approved tools (`TOOL_PROVIDERS`) — Paseo
+ * would refuse to create that agent at all. Never throws.
+ */
+export function applyAgentTools(
+  request: AgentCreateRequest,
+  tools: Pick<AgentToolsEndpoint, "urlFor"> | null,
+  base: string | null,
+): AgentCreateRequest | undefined {
+  try {
+    if (tools === null || base === null || !TOOL_PROVIDERS.includes(base)) return undefined;
+    const role = roleOfProvider(request.config.provider);
+    const config = role === null ? undefined : withAgentTools(request.config, role, tools.urlFor(role));
+    return config === undefined ? undefined : { ...request, config };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Registers the `before("agent.create")` hook and returns its remover. On a
  * host without `before` it logs one line and returns a no-op.
  */
-export function registerRoleHook(host: RoleHookHost): () => void {
+export function registerRoleHook(host: RoleHookHost, tools: Pick<AgentToolsEndpoint, "urlFor"> | null = null): () => void {
   if (typeof host.before !== "function") {
     console.warn(
       "[paseo-bm] this Paseo host has no before(\"agent.create\") hook; Worker and Reviewer agents will start without role instructions.",
@@ -330,9 +357,10 @@ export function registerRoleHook(host: RoleHookHost): () => void {
         console.warn(
           `[paseo-bm] preparing the role config took longer than ${LOOKUP_TIMEOUT_MS} ms; the agent starts with its role instructions only.`,
         );
+        // The base provider is unknown here, so no tools: an agent Paseo refuses would cost more than a hand-written block.
         return applyRoleInstructions(request);
       }
-      return applyRoleConfig(
+      const configured = applyRoleConfig(
         request,
         prepared.extras,
         prepared.modes,
@@ -341,6 +369,7 @@ export function registerRoleHook(host: RoleHookHost): () => void {
         prepared.profile,
         prepared.features,
       );
+      return applyAgentTools(configured ?? request, tools, prepared.base) ?? configured;
     })();
   });
   return typeof remove === "function" ? remove : () => {};

@@ -36,6 +36,7 @@ export function measure(records) {
   let userWaitMinutes = 0;
   let answered = 0;
   let tookRecommendation = 0;
+  let formatNotices = 0;
 
   const sorted = [...records].sort((a, b) => (a.at < b.at ? -1 : 1));
   for (const record of sorted) {
@@ -52,7 +53,7 @@ export function measure(records) {
       if (busy < 600) workerBusyMinutes += busy;
     }
     if (record.requestId) {
-      const request = requests.get(record.requestId) ?? { tier: null, workerTurns: 0, reviewerTurns: 0, questions: new Set(), context: 0 };
+      const request = requests.get(record.requestId) ?? { tier: null, workerTurns: 0, reviewerTurns: 0, questions: new Set(), context: 0, formatNotices: 0 };
       request.context += ctx;
       if (role === "worker") request.workerTurns += 1;
       if (role === "reviewer") request.reviewerTurns += 1;
@@ -60,6 +61,12 @@ export function measure(records) {
       requests.set(record.requestId, request);
     }
     for (const message of record.sent ?? []) {
+      // The plugin's template notice (ADR-010 aims to make it rare): counted once per agent that received it.
+      if (/^BM-FORMAT\b/.test(message.text)) {
+        formatNotices += 1;
+        const notified = /^BM-FORMAT requestId: (req-\d{8}T\d{6}Z)/.exec(message.text)?.[1];
+        if (notified !== undefined && requests.has(notified)) requests.get(notified).formatNotices += 1;
+      }
       const requestId = REQUEST_ID.exec(message.text)?.[1];
       if (requestId === undefined) continue;
       const lines = message.text.split("\n");
@@ -100,12 +107,13 @@ export function measure(records) {
   for (const request of requests.values()) {
     if (request.workerTurns === 0) continue;
     const tier = request.tier ?? "unknown";
-    const entry = (tiers[tier] ??= { requests: 0, questions: 0, workerTurns: 0, reviewerTurns: 0, context: 0 });
+    const entry = (tiers[tier] ??= { requests: 0, questions: 0, workerTurns: 0, reviewerTurns: 0, context: 0, formatNotices: 0 });
     entry.requests += 1;
     entry.questions += request.questions.size;
     entry.workerTurns += request.workerTurns;
     entry.reviewerTurns += request.reviewerTurns;
     entry.context += request.context;
+    entry.formatNotices += request.formatNotices;
   }
   const perRequest = Object.fromEntries(
     Object.entries(tiers).map(([tier, entry]) => [
@@ -116,6 +124,7 @@ export function measure(records) {
         workerTurns: round(entry.workerTurns / entry.requests),
         reviewerTurns: round(entry.reviewerTurns / entry.requests),
         contextMillions: round(entry.context / entry.requests / 1e6),
+        formatNotices: round(entry.formatNotices / entry.requests),
       },
     ]),
   );
@@ -128,6 +137,7 @@ export function measure(records) {
     workerBusyHours: round(workerBusyMinutes / 60),
     answeredQuestions: answered,
     tookRecommendationPercent: answered === 0 ? 0 : round((100 * tookRecommendation) / answered, 0),
+    formatNotices,
     perRequestByTier: perRequest,
   };
 }
@@ -165,8 +175,9 @@ function main(argv) {
   console.log(`worker turns woken without a message: ${result.workerWakeShareOfWorker}% of the worker's context`);
   console.log(`question rounds: ${result.questionRounds}; user wait ${result.userWaitHours} h vs worker busy ${result.workerBusyHours} h`);
   console.log(`answered questions: ${result.answeredQuestions}; took the recommendation: ${result.tookRecommendationPercent}%`);
+  console.log(`BM-FORMAT notices: ${result.formatNotices}`);
   for (const [tier, entry] of Object.entries(result.perRequestByTier)) {
-    console.log(`${tier.padEnd(8)} requests=${entry.requests} questions=${entry.questions} workerTurns=${entry.workerTurns} reviewerTurns=${entry.reviewerTurns} context=${entry.contextMillions}M`);
+    console.log(`${tier.padEnd(8)} requests=${entry.requests} questions=${entry.questions} workerTurns=${entry.workerTurns} reviewerTurns=${entry.reviewerTurns} context=${entry.contextMillions}M formatNotices=${entry.formatNotices}`);
   }
 }
 

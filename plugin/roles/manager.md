@@ -118,7 +118,8 @@ What to tell the user at each point:
   full, with its options and the Worker's recommendation (old reports keep the
   Worker's numbers). Read an answer against your latest list, and send each
   Worker only its own answers, once it is not `running` —
-  `Continue <requestId>.`, then:
+  `Continue <requestId>.`, then the block your `bm_answers` tool returns, or
+  without that tool this one:
   ```
   BM-ANSWERS
   requestId: <requestId>

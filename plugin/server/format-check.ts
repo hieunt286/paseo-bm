@@ -145,9 +145,14 @@ export function formatNotice(kind: BlockKind, requestId: string | null, issues: 
     `${FORMAT_NOTICE_MARKER} requestId: ${requestId ?? "unknown"}`,
     `Your last ${kind} broke the template:`,
     ...issues.map((issue) => `- ${issue}`),
+    // An agent created since ADR-010 has a tool that cannot write this wrong.
+    carriesQuestions ? `If you have the ${TOOL_OF[kind]} tool, build your next report with it.` : `If you have the ${TOOL_OF[kind]} tool, build the block with it.`,
     last,
   ].join("\n");
 }
+
+/** The tool that builds each kind of block (ADR-010). */
+const TOOL_OF: Record<BlockKind, string> = { "BM-REPORT": "bm_report", "BM-QUESTIONS": "bm_report", "BM-REVIEW": "bm_review", "BM-ANSWERS": "bm_answers" };
 
 /** djb2, enough to tell two blocks apart. */
 function hashOf(text: string): string {

@@ -414,6 +414,27 @@ describe("review parsing", () => {
     );
     expect(review).toMatchObject({ batchId: "b2", verdict: "changes-required", blockingCount: 2 });
   });
+
+  it("counts finding items only, and only those after this block's marker (independent review, 2026-09-24)", () => {
+    const pass = [
+      "BM-REVIEW",
+      "requestId: req-1",
+      "batchId: b1",
+      "reviewKind: re-review",
+      "verdict: pass",
+      "checked: the old severity: blocking finding on a.ts:3 is fixed",
+      "findings:",
+      "- severity: non-blocking",
+      "  location: a.ts:9",
+      "  reason: mentions severity: blocking in prose",
+      "  suggestedFix: none",
+      "notChecked: none",
+    ].join("\n");
+    expect(parseReviews(pass, ctx)[0]).toMatchObject({ verdict: "pass", blockingCount: 0 });
+    // Two reviews in one message: each counts its own findings.
+    const second = pass.replace("batchId: b1", "batchId: b2").replace("verdict: pass", "verdict: changes-required").replace("- severity: non-blocking", "- severity: blocking");
+    expect(parseReviews(`${second}\n\n${pass}`, ctx).map((review) => review.blockingCount)).toEqual([1, 0]);
+  });
 });
 
 describe("telling a report apart from a user request", () => {

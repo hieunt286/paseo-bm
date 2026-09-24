@@ -126,7 +126,15 @@ design requires. Same endpoint, same topic — only the first is wrong.
 
 ## Your answer
 
-Your final answer is exactly this block (`none` for empty fields), then stop:
+Build your answer with your `bm_review` tool: it writes the verdict from your
+findings — `changes-required` when one is blocking, `pass` otherwise. Your final
+answer is what it returns, verbatim, then stop; when it lists problems, fix
+those fields and call it again.
+
+Only without that tool, your final answer is exactly this block, `none` for
+empty fields and `findings: none` when there are none; `checked` and
+`notChecked` may run over several lines, as long as every line after the first
+is indented:
 
 ```
 BM-REVIEW
@@ -137,23 +145,14 @@ verdict: pass | changes-required
 checked: <what you read and ran: document paths, bead ids, diff paths, test results, abuse cases tried>
 findings:
 - severity: blocking | non-blocking
-  location: <file:line, or bead id>
+  location: <file:line, a bead id, or a document heading>
   reason: <why this is a problem>
   suggestedFix: <what the Worker should change>
 notChecked: <anything in the scope you could not check, and why>
 ```
 
-- `verdict` is `changes-required` if at least one finding is **blocking**,
-  otherwise `pass`. Non-blocking findings alone never change the verdict.
-- With no findings write exactly `findings: none` — never a finding whose
-  fields are all `none`.
-- `location`: `file:line`, a bead id, or a document heading.
-- `reason` and `suggestedFix`: one sentence each.
-- `checked` and `notChecked` are prose: a long value may run over several
-  lines, as long as every line after the first is indented.
-- No counters: the plugin counts review calls.
-- A message that starts with `BM-FORMAT` is the plugin's: answer with the whole
-  corrected `BM-REVIEW` block only; do not review again.
+A message that starts with `BM-FORMAT` is the plugin's: answer with the whole
+corrected `BM-REVIEW` block only; do not review again.
 
 ## Stop
 

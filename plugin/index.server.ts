@@ -5,6 +5,7 @@ import { registerCollector } from "./server/collector";
 import { checkReviewBudget, type BudgetOverrun, type BudgetPaseo } from "./server/review-budget";
 import { registerDashboardRpcs } from "./server/dashboard-rpc";
 import { registerRoleHook } from "./server/role-hook";
+import { startAgentTools } from "./server/agent-tools";
 import { describeRoles } from "./server/roles";
 import { registerStopPropagation } from "./server/stop-propagation";
 import { registerAgentLabels } from "./server/agent-labels";
@@ -109,7 +110,9 @@ export default function contribute(server: PluginServerContext): () => void {
   // delta 20260921 §4.3.2: the read-only data of Roles & models (`roles.settings`, `roles.options`).
   registerRoleSettingsRpcs(server);
   registerChatRpcs(server);
-  const removeRoleHook = registerRoleHook(server);
+  // The agents' block-building tools (ADR-010): one endpoint, given to every bm-* agent created from now on.
+  const agentTools = startAgentTools();
+  const removeRoleHook = registerRoleHook(server, agentTools);
   const removeStopPropagation = registerStopPropagation(server);
   // delta 20260918g §4.5: a bm-* agent created without its bm.role label gets it.
   const removeAgentLabels = registerAgentLabels(server);
@@ -173,5 +176,6 @@ export default function contribute(server: PluginServerContext): () => void {
     removeFallbackNotices();
     fallbackWaiter.clear();
     removeCollector();
+    void agentTools.close();
   };
 }

@@ -283,6 +283,8 @@ interface RawBlock {
   unknown: string[];
   /** Text after `BM-REVIEW` on the marker line, e.g. `BM-REVIEW STOPPED`. */
   markerSuffix: string;
+  /** Every line from the marker to the next marker, block or not: a review's findings follow its fields. */
+  tail: string[];
 }
 
 /**
@@ -293,15 +295,18 @@ function extractBlocks(text: string, marker: RegExp): RawBlock[] {
   const lines = text.split(/\r?\n/);
   const blocks: RawBlock[] = [];
   let current: RawBlock | null = null;
+  let latest: RawBlock | null = null;
 
   for (const rawLine of lines) {
     const line = unquote(rawLine);
     const markerMatch = marker.exec(rawLine);
     if (markerMatch !== null) {
       if (current !== null) blocks.push(current);
-      current = { fields: new Map(), unknown: [], markerSuffix: (markerMatch[1] ?? "").trim() };
+      current = { fields: new Map(), unknown: [], markerSuffix: (markerMatch[1] ?? "").trim(), tail: [] };
+      latest = current;
       continue;
     }
+    latest?.tail.push(rawLine);
     if (current === null) continue;
     if (FENCE.test(rawLine)) {
       // A fence right after the marker opens the block; a later one closes it.
@@ -397,6 +402,9 @@ export function parseReports(text: string, context: ParseContext): ParsedReport[
  * `BM-REVIEW STOPPED` (the stop answer from bm-wq6) carries its verdict on the
  * marker line rather than in a field, so the suffix is read too.
  */
+/** A finding item of a review: `- severity: blocking`, quoted or bold or not. */
+const FINDING_BLOCKING = /^\s*(?:>\s*)*[-*]\s+\**severity\**\s*:\s*\**blocking\b/i;
+
 export function parseReviews(text: string, context: ParseContext): ParsedReview[] {
   if (typeof text !== "string" || text === "") return [];
   const out: ParsedReview[] = [];
@@ -405,15 +413,17 @@ export function parseReviews(text: string, context: ParseContext): ParsedReview[
     const verdict = valueOrNull(block.fields.get("verdict")) ?? suffix;
     if (verdict === null && block.fields.size === 0) continue;
     // reviewer.md lists findings as "- severity: blocking | non-blocking" lines,
-    // which end the key/value block, so they are counted in the message text.
-    // A `blocking: <n>` field, if a Reviewer writes one, still wins. Before this
-    // the count was always null for real reviews.
+    // which end the key/value block, so they are counted in the lines that
+    // follow this block's marker — finding items only: a `checked` or `reason`
+    // that merely mentions "severity: blocking" is not a finding (independent
+    // review, 2026-09-24). A `blocking: <n>` field, if a Reviewer writes one,
+    // still wins.
     const blockingRaw = valueOrNull(block.fields.get("blocking"));
     const blockingCount =
       blockingRaw !== null
         ? firstNumber(blockingRaw, /(\d+)/)
         : block.fields.has("verdict")
-          ? (text.match(/severity\s*:\s*blocking\b/gi) ?? []).length
+          ? block.tail.filter((line) => FINDING_BLOCKING.test(line)).length
           : null;
     out.push({
       agentId: context.agentId,

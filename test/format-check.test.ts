@@ -111,9 +111,15 @@ describe("formatNotice", () => {
         `BM-FORMAT requestId: ${REQ}`,
         "Your last BM-REPORT broke the template:",
         "- BM-QUESTIONS Q1: needs exactly one option ending in (recommended) (found 0)",
+        "If you have the bm_report tool, build the block with it.",
         "Send the whole corrected block again, to the same agent as before, in one message. Change nothing else and do not redo any work; then carry on exactly where you were. Do not mention this notice to the user.",
       ].join("\n"),
     );
+    // Each kind names its own tool (ADR-010).
+    expect(formatNotice("BM-REVIEW", REQ, ["x"])).toContain("If you have the bm_review tool, build the block with it.");
+    expect(formatNotice("BM-ANSWERS", REQ, ["x"])).toContain("If you have the bm_answers tool, build the block with it.");
+    // A blocked report is not re-sent: the tool is for the next one.
+    expect(formatNotice("BM-REPORT", REQ, ["x"], true)).toContain("If you have the bm_report tool, build your next report with it.");
     expect(formatNotice("BM-REVIEW", REQ, ["x"]).split("\n").at(-1)).toBe(
       "Answer with the whole corrected BM-REVIEW block as your final message; do not review again.",
     );
