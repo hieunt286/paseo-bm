@@ -273,7 +273,7 @@ describe("all three files", () => {
     // the criteria table now lives only there (it drifted while worker.md held
     // a copy); manager.md 177 -> 149 (no size guess, no skill-directory rules,
     // no per-message rules). Each is the measured length + 1.
-    ["worker.md", worker, 374],
+    ["worker.md", worker, 384],
     ["reviewer.md", reviewer, 170],
     // manager.md 185 -> 177 for bead bm-worker-autonomy-895l.2 (design delta
     // 20260924-worker-autonomy §4): no ordered size rule, no Large
@@ -397,9 +397,13 @@ describe("worker.md — the workflow", () => {
   // Large confirmation are gone on purpose: Workers cited "rule 1" to call
   // internal changes Large (209 Large reports against 74 Medium).
   it("sizes by consequence, in the model's own judgement", () => {
-    rule(W, "consequences, not the size of the diff", /Judge the consequences, not the size of the diff/);
+    rule(W, "consequences of its own change, not the size of the diff", /Judge the consequences of the change you make, not the size of the diff/);
+    // Owner, 2026-09-24: "tôi chỉ bảo sửa lại comment url và commit rồi push vào
+    // Dev … mà hệ thống vẫn ngồi tạo beads và thậm chí đánh giá việc đó là large".
+    // A push the user ordered is their decision, not the size of the work.
+    rule(W, "an action the user named never raises the tier", /An action the user asked for by name —\s+commit, push, publish, deploy — is their decision, covered by their yes \(rule\s+1\): it never raises the tier\./);
     rule(W, "bead count is never evidence", /number of beads is never\s+evidence/i);
-    rule(W, "Large is what is hard to undo or reaches outside the repository", /\*\*Large\*\* — hard to undo, or it reaches people outside this repository/);
+    rule(W, "Large is a change that is hard to undo or changes what outsiders get", /\*\*Large\*\* — your change is hard to undo, or it changes what people outside\s+this repository get/);
     rule(W, "Small needs no document", /\*\*Small\*\* — one clear change that needs no document/);
     rule(
       W,
@@ -1227,8 +1231,20 @@ describe("worker.md: an answered number is closed (design delta 20260924-qa-ledg
 // và reviewer" — forbidden, not merely optional.
 describe("worker.md: a request that only asks for information", () => {
   it("never gets a bead, a Reviewer or a review call, and skips straight to finished", () => {
-    rule(W, "skips the change steps", /A request that only asks for information\s+never gets a bead, a Reviewer or a review call: answer it \(below\), send\s+`finished`, and skip steps 3–6\./);
+    rule(W, "skips the change steps", /A request that only asks for information, or\s+only for an operation, never gets a bead, a Reviewer or a review call: do it\s+\(below\), send `finished`, and skip steps 3–6\./);
     rule(W, "never a bead or a Reviewer, no document unless asked", /changes nothing, so it never gets a bead or a\s+Reviewer, and no document unless the user asks for one/);
     rule(W, "the answer goes in the chat and blockers stays none", /give it with its sources in your chat\. In the `finished` report `blockers`\s+stays `none`/);
+  });
+});
+
+// Owner decision 2026-09-24 ("Chỉ thao tác thuần bỏ cả hai"): a pure operation
+// gets no bead and no Reviewer; an edit it asks for is still a change.
+describe("worker.md: a request that only asks for an operation", () => {
+  it("never gets a bead or a Reviewer, is proved by its own result, and an edit in it is still a change", () => {
+    rule(W, "a pure operation gets no bead or Reviewer", /\*\*A request that only asks for an operation\*\* — commit, push, sync or rebase a\s+branch, run a command or a script — with no change of your own to the content\s+never gets a bead or a Reviewer either/);
+    rule(W, "proved by its own result", /prove it with its own result\s+\(the commit hash, the push output, the command's exit status\)/);
+    rule(W, "an edit it asks for is handled like any change", /When it also\s+asks for an edit, the edit is sized and handled like any change, and the\s+operation follows it\./);
+    // Rule 1: the request that names the action is the yes, so the Worker does not ask again.
+    rule(W, "the request that names the action is the yes", /A request that itself\s+asks for one of these is that yes, for exactly what it names\./);
   });
 });

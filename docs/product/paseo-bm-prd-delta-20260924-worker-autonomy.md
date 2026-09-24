@@ -70,6 +70,14 @@ Nguyên văn: "1. Việc tra cứu thì không được phép có bead và revie
 - **REQ-034 — trường `decided`.** `BM-REPORT` có thêm trường `decided` (đặt trước `blockers`), liệt kê các lựa chọn Worker tự đưa ra, dạng `<lựa chọn> — <lý do>`, ngăn cách bằng `; `, hoặc `none`. Trường này là tuỳ chọn với bộ kiểm định dạng, để báo cáo của Worker tạo trước thay đổi vẫn hợp lệ. Nó thay quy ước `Decided: …` nằm trong `blockers`.
 - **REQ-025 — Manager nắm tình trạng công việc.** Manager được đọc trạng thái và hoạt động gần đây của Worker và các Reviewer của nó (`get_agent_status`, `get_agent_activity`) bất cứ khi nào cần để biết công việc đang ở đâu. Manager vẫn không nhắn Worker để hỏi tiến độ, và vẫn không bịa điều nó không thấy.
 
+### Quyết định sau lần chạy thật đầu tiên (2026-09-24, 05:45Z)
+
+Chủ repo: "tôi chỉ bảo sửa lại comment url và commit rồi push vào Dev trên paseo, mà hệ thống vẫn ngồi tạo beads và thậm chí đánh giá việc đó là large". Worker `a9018a07` (project-b, `req-20260924T054525Z`) chạy chỉ dẫn mới và xếp Large, lý do *"the request ends in a push to the shared branch dev"*. Nó làm đúng chữ của REQ-036(a) bản đầu. Chỗ sai nằm ở định nghĩa.
+
+- **REQ-036(a), sửa lại.** Mức đo hệ quả của **thay đổi Worker tự làm**. Một hành động người dùng gọi đích danh (commit, push, publish, deploy) là quyết định của họ, đã được chính yêu cầu cho phép, và **không bao giờ làm tăng mức**. Lớn = thay đổi của Worker khó hoàn tác, hoặc thay đổi thứ người ngoài repo nhận được.
+- **REQ-026(a).** Một yêu cầu gọi đích danh một việc cần hỏi trước (commit, push…) chính là lời đồng ý cho đúng việc đó.
+- **REQ-022 và REQ-024 — thao tác thuần.** Chủ repo chọn "Chỉ thao tác thuần bỏ cả hai". Yêu cầu chỉ gồm thao tác (commit, push, đồng bộ hay rebase nhánh, chạy lệnh hay script), không có thay đổi nội dung của Worker, thì **không** tạo bead và **không** gọi Reviewer; bằng chứng là kết quả của chính thao tác. Một chỉnh sửa nằm trong cùng yêu cầu vẫn xử lý như mọi thay đổi: Small thì một bead ngắn và một lượt review.
+
 ## 3. Ngoài phạm vi
 
 - Năm giới hạn cứng của Worker (REQ-026a, b; luật không làm cho check "xanh giả"; không đọc bí mật; phạm vi là yêu cầu) giữ nguyên.

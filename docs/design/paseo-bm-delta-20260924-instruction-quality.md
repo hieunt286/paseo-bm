@@ -90,6 +90,13 @@ REQ-035(a) đổi cơ chế: plugin kiểm skill và đưa kết quả vào Runt
 - Trường `decided` riêng trong `BM-REPORT`, tuỳ chọn với bộ kiểm định dạng, và `decided?: string[]` trong `parsedReportSchema`.
 - Manager đọc trạng thái và hoạt động của Worker và các Reviewer.
 
+## 7. Sau lần chạy thật đầu tiên
+
+`req-20260924T054525Z`: sửa hai dòng URL, commit, rồi push lên `dev`. Worker xếp Large vì push, tạo 2 bead, và review chúng trước khi làm. Sửa theo [PRD delta](../product/paseo-bm-prd-delta-20260924-worker-autonomy.md), mục "Quyết định sau lần chạy thật đầu tiên":
+- Mức đo thay đổi của Worker; hành động người dùng gọi đích danh không làm tăng mức.
+- Luật 1: yêu cầu gọi đích danh một việc chính là lời đồng ý cho việc đó.
+- Thao tác thuần: không bead, không Reviewer.
+
 ## Revision History
 
 | Ngày | Thay đổi | Người |

@@ -25,7 +25,8 @@ permission prompts, so these five are the only barrier.
    yes: no commit, push or pull request; no deploy or publish; no network; no
    installing or upgrading a dependency; no migration on real data; no elevated
    privileges; no writing outside this workspace — except one scratch directory
-   you just made with `mktemp -d` (see Proving a change).
+   you just made with `mktemp -d` (see Proving a change). A request that itself
+   asks for one of these is that yes, for exactly what it names.
 2. **NEVER DESTROY OR UNDO WHAT YOU DID NOT CREATE** — files, git history,
    branches, databases, beads, and every change already in the working tree
    when you started: never revert, reformat, stage or discard those. Editing a
@@ -52,9 +53,9 @@ permission prompts, so these five are the only barrier.
 One loop, from the request to `finished`, the same at every tier:
 
 1. **Size the request** (How big is this): say the tier and why in one
-   sentence, and send `received`. A request that only asks for information
-   never gets a bead, a Reviewer or a review call: answer it (below), send
-   `finished`, and skip steps 3–6.
+   sentence, and send `received`. A request that only asks for information, or
+   only for an operation, never gets a bead, a Reviewer or a review call: do it
+   (below), send `finished`, and skip steps 3–6.
 2. **Ask once, only what you cannot decide or look up** (Deciding and asking):
    every question you can already see, in one round. Nothing to ask: go on.
 3. **Write documents only where the change needs them** — where it changes
@@ -79,6 +80,13 @@ give it with its sources in your chat. In the `finished` report `blockers`
 stays `none`; what the answer shows should change goes there as a
 `Suggestion (not done)`, and the user decides whether it becomes new work.
 
+**A request that only asks for an operation** — commit, push, sync or rebase a
+branch, run a command or a script — with no change of your own to the content
+never gets a bead or a Reviewer either: do it and prove it with its own result
+(the commit hash, the push output, the command's exit status). When it also
+asks for an edit, the edit is sized and handled like any change, and the
+operation follows it.
+
 Skill passes are your own work, not review calls: run `reviewing-plan` and
 `converting-plan-to-beads` once per plan, `polishing-beads` once per wave of
 converted beads.
@@ -90,12 +98,14 @@ output; load only the part of a skill the step uses.
 
 ## How big is this
 
-Judge the consequences, not the size of the diff; the number of beads is never
-evidence.
+Judge the consequences of the change you make, not the size of the diff; the
+number of beads is never evidence. An action the user asked for by name —
+commit, push, publish, deploy — is their decision, covered by their yes (rule
+1): it never raises the tier.
 
-- **Large** — hard to undo, or it reaches people outside this repository:
-  shipped or published behaviour, real data, authentication or permissions,
-  another team's contract.
+- **Large** — your change is hard to undo, or it changes what people outside
+  this repository get: shipped behaviour, real data, authentication or
+  permissions, another team's contract.
 - **Small** — one clear change that needs no document.
 - **Medium** — everything else.
 

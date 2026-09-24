@@ -135,9 +135,9 @@ Describe the change in normal chat. The Manager:
 
 ### 2. The Worker sizes the request
 
-The Worker judges the consequences, not the size of the change:
+The Worker judges the consequences of the change it makes, not the size of the diff. An action you ask for by name — commit, push, publish — is your decision and never makes a request larger:
 
-- **Large:** hard to undo, or it reaches people outside the repository — shipped or published behaviour, real data, authentication or permissions, another team's contract.
+- **Large:** its change is hard to undo, or it changes what people outside the repository get — shipped behaviour, real data, authentication or permissions, another team's contract.
 - **Small:** one clear change that needs no document.
 - **Medium:** everything else.
 
@@ -155,6 +155,7 @@ Nothing waits for a confirmation before implementing; what cannot be undone stil
 ### 3. The Worker does only what you asked
 
 - **A request that only asks for information** — a question, research, an investigation — creates no bead and no Reviewer: the answer comes with its sources, in the Worker's chat and its `finished` report.
+- **A request that only asks for an operation** — commit, push, sync a branch, run a command — creates no bead and no Reviewer either; the Worker does it and shows its result. Asking for it is your yes, so the Worker does not ask again. An edit in the same request is handled like any change.
 - **Anything beyond the request is a suggestion, not work.** Extra tests, refactors, docs, clean-ups and related bugs are listed as `Suggestion (not done): …`. The Manager asks you whether any of them should become new work.
 - Before creating a bead, the Worker looks for open beads with the same `feature:<slug>` label. It updates a single match instead of creating a duplicate, and **asks you** when several match.
 - Every bead it creates carries a `feature:<slug>` label and a short `## Provenance` naming the request. The beads of a plan follow the `converting-plan-to-beads` contract (objective, scope in and out, components, validation, primary proof, reversibility, …); every bead holds **one outcome** that can be reviewed and reverted on its own; beads are never sized by file, line or bead counts.
