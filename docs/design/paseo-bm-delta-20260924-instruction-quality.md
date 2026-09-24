@@ -97,6 +97,10 @@ REQ-035(a) đổi cơ chế: plugin kiểm skill và đưa kết quả vào Runt
 - Luật 1: yêu cầu gọi đích danh một việc chính là lời đồng ý cho việc đó.
 - Thao tác thuần: không bead, không Reviewer.
 
+## 8. Nguyên tắc chung thay cho liệt kê tình huống
+
+Theo yêu cầu của chủ repo ("hướng dẫn phổ quát ngắn gọn"), các đoạn về yêu cầu tra cứu và thao tác thuần trong worker.md được thay bằng **một nguyên tắc**: *Process follows what you design*. Phần "How big is this" không còn nêu tên tình huống nào (commit, push, xác thực…): mức đo rủi ro của thứ Worker thiết kế, và điều người dùng đã nói rõ không làm tăng mức. Có test canh để phần đó không nêu lại tình huống cụ thể.
+
 ## Revision History
 
 | Ngày | Thay đổi | Người |

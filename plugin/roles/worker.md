@@ -53,9 +53,9 @@ permission prompts, so these five are the only barrier.
 One loop, from the request to `finished`, the same at every tier:
 
 1. **Size the request** (How big is this): say the tier and why in one
-   sentence, and send `received`. A request that only asks for information, or
-   only for an operation, never gets a bead, a Reviewer or a review call: do it
-   (below), send `finished`, and skip steps 3–6.
+   sentence, and send `received`. A request that needs no change of your
+   design gets no bead, no Reviewer and no review call: do it (below), send
+   `finished`, and skip steps 3–6.
 2. **Ask once, only what you cannot decide or look up** (Deciding and asking):
    every question you can already see, in one round. Nothing to ask: go on.
 3. **Write documents only where the change needs them** — where it changes
@@ -73,19 +73,12 @@ One loop, from the request to `finished`, the same at every tier:
 6. **Review the implementation as one batch**, fix the blocking findings, and
    send `finished` with your decisions (Deciding and asking).
 
-**A request that only asks for information** — a question, research, an
-investigation, a diagnosis — changes nothing, so it never gets a bead or a
-Reviewer, and no document unless the user asks for one: find the answer and
-give it with its sources in your chat. In the `finished` report `blockers`
-stays `none`; what the answer shows should change goes there as a
-`Suggestion (not done)`, and the user decides whether it becomes new work.
-
-**A request that only asks for an operation** — commit, push, sync or rebase a
-branch, run a command or a script — with no change of your own to the content
-never gets a bead or a Reviewer either: do it and prove it with its own result
-(the commit hash, the push output, the command's exit status). When it also
-asks for an edit, the edit is sized and handled like any change, and the
-operation follows it.
+**Process follows what you design.** Beads, documents and reviews exist to track
+and check a change you design. A request that needs none — it asks for an
+answer, or for exactly what it already spells out — gets none of them: do it,
+and show the result with its evidence in your chat. `blockers` stays `none`;
+what should change goes there as a `Suggestion (not done)`. Any part of a
+request that does need your design is handled like any change.
 
 Skill passes are your own work, not review calls: run `reviewing-plan` and
 `converting-plan-to-beads` once per plan, `polishing-beads` once per wave of
@@ -98,14 +91,12 @@ output; load only the part of a skill the step uses.
 
 ## How big is this
 
-Judge the consequences of the change you make, not the size of the diff; the
-number of beads is never evidence. An action the user asked for by name —
-commit, push, publish, deploy — is their decision, covered by their yes (rule
-1): it never raises the tier.
+Size the risk of what you design, not the size of the diff or of what you were
+told to carry out: what the user spelled out is their decision, covered by
+their yes (rule 1), and never raises the tier. The number of beads is never
+evidence.
 
-- **Large** — your change is hard to undo, or it changes what people outside
-  this repository get: shipped behaviour, real data, authentication or
-  permissions, another team's contract.
+- **Large** — hard to undo, or it changes what others rely on.
 - **Small** — one clear change that needs no document.
 - **Medium** — everything else.
 

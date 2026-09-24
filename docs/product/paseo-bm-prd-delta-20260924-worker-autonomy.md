@@ -78,6 +78,13 @@ Chủ repo: "tôi chỉ bảo sửa lại comment url và commit rồi push vào
 - **REQ-026(a).** Một yêu cầu gọi đích danh một việc cần hỏi trước (commit, push…) chính là lời đồng ý cho đúng việc đó.
 - **REQ-022 và REQ-024 — thao tác thuần.** Chủ repo chọn "Chỉ thao tác thuần bỏ cả hai". Yêu cầu chỉ gồm thao tác (commit, push, đồng bộ hay rebase nhánh, chạy lệnh hay script), không có thay đổi nội dung của Worker, thì **không** tạo bead và **không** gọi Reviewer; bằng chứng là kết quả của chính thao tác. Một chỉnh sửa nằm trong cùng yêu cầu vẫn xử lý như mọi thay đổi: Small thì một bead ngắn và một lượt review.
 
+### Nguyên tắc chung thay cho liệt kê tình huống (2026-09-24)
+
+Chủ repo: "Tôi không muốn làm theo kiểu cứ phải chỉ định case tình huống là git, commit hay các tình huống khác … vì đây là Agent dùng cho rất nhiều loại việc, cần có hướng dẫn phổ quát ngắn gọn". Hai quy tắc "yêu cầu chỉ hỏi thông tin" và "thao tác thuần" ở trên được gộp thành **một nguyên tắc**, không nêu tên tình huống nào:
+
+- **Quy trình đi theo thứ Worker thiết kế.** Bead, tài liệu và review dùng để theo dõi và kiểm một thay đổi do Worker thiết kế. Yêu cầu không cần Worker thiết kế gì (chỉ cần một câu trả lời, hoặc đúng điều chính nó đã nói rõ) thì không có bead, tài liệu hay review; Worker làm và cho thấy kết quả kèm bằng chứng. Phần nào cần Worker thiết kế thì xử lý như mọi thay đổi.
+- **Mức đo rủi ro của thứ Worker thiết kế.** Không đo độ lớn của diff, cũng không đo điều người dùng đã nói rõ, vì đó là quyết định của họ (và là lời đồng ý theo REQ-026a). Lớn = khó hoàn tác, hoặc thay đổi thứ người khác đang dựa vào.
+
 ## 3. Ngoài phạm vi
 
 - Năm giới hạn cứng của Worker (REQ-026a, b; luật không làm cho check "xanh giả"; không đọc bí mật; phạm vi là yêu cầu) giữ nguyên.
