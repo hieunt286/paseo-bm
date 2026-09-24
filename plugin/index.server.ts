@@ -15,7 +15,9 @@ import { createReviewerResend, createReviewerSwitch } from "./server/fallback-re
 import type { FallbackAction } from "./server/fallback-rpc";
 import { createWorkerSwitch } from "./server/fallback-switch";
 import { createFallbackWaiter } from "./server/fallback-wait";
+import { createBudgetTold } from "./server/budget-told";
 import { registerFormatCheck } from "./server/format-check";
+import { registerQaLedger } from "./server/qa-ledger";
 import { registerNoticeQueue } from "./server/notice-queue";
 import { currentInstructions } from "./server/role-extras";
 import { registerSetupRpcs } from "./server/setup-rpc";
@@ -119,9 +121,15 @@ export default function contribute(server: PluginServerContext): () => void {
   const noticeQueue = registerNoticeQueue(server);
   // delta 20260918g §4.7: the sender of a BM-* block that breaks its template is told (BM-FORMAT).
   const removeFormatCheck = registerFormatCheck(noticeQueue.host);
+  // design delta 20260924-qa-ledger §3: every question a Manager receives and
+  // every answer a Worker receives is written down, so "answered" is a fact the
+  // pill, the card, the Manager and a fallback handover can read.
+  const removeQaLedger = registerQaLedger(server);
   // delta 20260917c §4.7: the plugin counts the review budget and tells the
   // Manager once per request; it never stops an agent.
-  const budgetTold = new Set<string>();
+  // Kept on disk (delta: diagnosis 2026-09-23 fault L5): a reload used to wipe
+  // this and the same overrun was announced to the user a second time.
+  const budgetTold = createBudgetTold();
   // Only an overrun found at a Worker's or Reviewer's turn end goes in here, and
   // only what is in here may be sent at a Manager's turn end (review b2).
   const budgetPending = new Map<string, BudgetOverrun>();
@@ -159,6 +167,7 @@ export default function contribute(server: PluginServerContext): () => void {
     removeStopPropagation();
     removeAgentLabels();
     removeFormatCheck();
+    removeQaLedger();
     noticeQueue.remove();
     removeFallbackDetection();
     removeFallbackNotices();

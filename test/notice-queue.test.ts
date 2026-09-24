@@ -483,9 +483,10 @@ describe("the server entry", () => {
     });
     const server = { handle: vi.fn(), registerSettings: vi.fn(), before: vi.fn(() => () => {}), on };
     const cleanup = contribute(server as unknown as Parameters<typeof contribute>[0]);
-    // Unchanged by the queue: stop propagation, BM-FORMAT, the collector and
-    // (delta 20260921 §4.4.4) the fallback detection.
-    expect(hooks.get("agent.turn_ended")).toHaveLength(4);
+    // Unchanged by the queue: stop propagation, BM-FORMAT, the collector,
+    // (delta 20260921 §4.4.4) the fallback detection and (delta 20260924
+    // qa-ledger §3.2) the question–answer ledger.
+    expect(hooks.get("agent.turn_ended")).toHaveLength(5);
 
     // A non-bm agent, so every other hook ignores the turn end without touching Paseo.
     const { paseo, sends, set } = world({ "agent-1": { status: "running" } });

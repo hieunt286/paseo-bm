@@ -10,6 +10,7 @@
  * | `requestId` | the replaced Worker's `bm.requestId` label, recorded on the incident |
  * | report fields | the LATEST `BM-REPORT` of that request in the workspace trace store |
  * | `reviewCalls` | the request's reconstructed trace, against its tier's budget; a replacement Reviewer's first message is not counted (§4.5.1) |
+ * | `questions` | the question–answer ledger: every question of the request with its latest answer or `open` (design delta 20260924-qa-ledger §8) |
  * | original request | the first `user_message` of the replaced Worker's timeline |
  *
  * Manager (`managerHandover`):
@@ -17,7 +18,7 @@
  * | Field | Source |
  * |---|---|
  * | `workers` | live, non-replaced Workers of the workspace (`bmAgentsOf`, `liveWorkersOf`); provider and model from each one's snapshot; last report as for the Worker |
- * | `openQuestions` | `waitingOf` (the pill's rule) on the old Manager's timeline |
+ * | `openQuestions` | `waitingOf` (the pill's rule, with the question–answer ledger) on the old Manager's timeline |
  * | `openIncidents` | the workspace's other `pending` or `waiting` incidents |
  * | user's messages | the three newest `user_message` items WITH `clientMessageId` (the user's own words) in the old Manager's timeline |
  *
@@ -34,6 +35,7 @@ import { replacementsOf } from "./fallback-state";
 import { LIVE_MAX_PAGES, LIVE_PAGE_LIMIT, readTimelinePages, type LiveTimelinePaseo } from "./live-timeline";
 import { isPluginNotice } from "./notices";
 import { providerId } from "./provider-id";
+import { answeredIds, handoverQuestionLines, readQaLedger, type QaLedger } from "./qa-ledger";
 import { REVIEW_BUDGET } from "./review-budget";
 import { asRecord, nonEmpty } from "./role-choices";
 import { TRUNCATION_MARKER, readRecords, type TraceStoreLocation } from "./trace-store";
@@ -63,7 +65,15 @@ const OPEN_INCIDENT_STATUSES: ReadonlySet<FallbackIncident["status"]> = new Set(
 
 /** Last paragraph of the Manager handover (§4.5.2). */
 const MANAGER_CLOSING =
-  "You are the Beads Manager of this workspace from now on. Every Worker listed was told your id. Tell the user in one line that you took over, then carry on.";
+  "You are the Beads Manager of this workspace from now on. Every Worker listed was told your id: take them as yours and create no Worker that already exists. Tell the user in one line that you took over, then carry on.";
+
+/**
+ * Last paragraph of the Worker handover: what the replacement does with it
+ * (design delta 20260924-instruction-quality §2.1 — the notice says it, so
+ * worker.md does not have to).
+ */
+export const WORKER_CLOSING =
+  "You continue this request in place of the Worker that stopped. Read `git status` and `git diff` first: every change there belongs to the request, so never revert it. Reopen a closed bead only if a review blocks it. Continue the review budget from `reviewCalls` and open no new batch for one in review. The `questions` above are settled: never ask an answered one again; ask an `open` one at your next `blocked` under its own number, and number new ones after the highest listed (from Q100 when it reads `unknown`). Then send `received` to `managerAgentId`.";
 
 export interface HandoverDeps {
   /** Agent listing and timelines; `PaseoApi` is structurally assignable. */
@@ -96,6 +106,20 @@ async function within<T>(budget: number, work: () => Promise<T> | T): Promise<T 
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
+}
+
+/** The ledger when it reads cleanly; null (so "unknown") when it is missing its home, unreadable, corrupt or too new. */
+function ledgerOf(location: TraceStoreLocation | null): QaLedger | null {
+  if (location === null) return null;
+  const ledger = readQaLedger(location);
+  return ledger.notices.length > 0 ? null : ledger;
+}
+
+/** The `questions` block of a Worker handover: `unknown`, `none`, or one line per question. */
+function questionsBlock(ledger: QaLedger | null, requestId: string | null): string[] {
+  if (ledger === null || requestId === null) return ["questions: unknown"];
+  const lines = handoverQuestionLines(ledger, requestId);
+  return lines.length === 0 ? ["questions: none"] : ["questions:", ...lines];
 }
 
 /** The request's latest `BM-REPORT` in the trace store, or null. */
@@ -141,7 +165,7 @@ export async function workerHandover(incident: FallbackIncident, deps: HandoverD
   const requestId = incident.requestId;
   const records =
     deps.location === null ? null : await within(budget, () => readRecords(deps.location!, incident.workspaceId).records);
-  const [report, review, original] = await Promise.all([
+  const [report, review, original, ledger] = await Promise.all([
     within(budget, () => (records === null || requestId === null ? null : latestReport(records, requestId))),
     within(budget, async () => {
       if (records === null || requestId === null) return null;
@@ -153,6 +177,7 @@ export async function workerHandover(incident: FallbackIncident, deps: HandoverD
       return reconstructTraces({ records, agents: [...facts.values()], replacementIds }).find((trace) => trace.requestId === requestId) ?? null;
     }),
     within(budget, () => firstUserMessage(deps.paseo, incident.agentId)),
+    within(budget, () => ledgerOf(deps.location)),
   ]);
 
   const tier = report?.tier ?? review?.tier ?? null;
@@ -176,6 +201,11 @@ export async function workerHandover(incident: FallbackIncident, deps: HandoverD
     `reviewFindingsOpen: ${report === null ? "unknown" : (report.reviewFindingsOpen ?? "none")}`,
     `reviewCalls: ${reviewCalls}`,
     `skillsUsed: ${list(report?.skillsUsed)}`,
+    // What the stopped Worker chose on its own, so its final report can still list it.
+    `decided: ${report === null ? "none" : list(report.decided ?? [])}`,
+    ...questionsBlock(ledger, requestId),
+    "",
+    WORKER_CLOSING,
     "",
     "Original request (verbatim, the first message the replaced Worker received):",
     original ?? "unavailable",
@@ -279,7 +309,11 @@ function workerLine(worker: ChatPeer, records: readonly TraceRecord[] | null, sn
 
 /** `workerId: Q1, Q2; …` for the Workers waiting on the user, or `none`. */
 function questionsOf(waiting: readonly WaitingWorker[]): string {
-  const parts = waiting.map((entry) => `${entry.workerId}: ${(parseQuestions(entry.text)?.questions ?? []).map((question) => question.id).join(", ")}`);
+  const parts = waiting.map((entry) => {
+    const answered = new Set(entry.answered ?? []);
+    const open = (parseQuestions(entry.text)?.questions ?? []).map((question) => question.id).filter((id) => !answered.has(id));
+    return `${entry.workerId}: ${open.join(", ")}`;
+  });
   return parts.length === 0 ? "none" : parts.join("; ");
 }
 
@@ -320,6 +354,8 @@ export async function managerHandover(incident: FallbackIncident, deps: ManagerH
   const workers = peers === null ? null : liveWorkersOf(peers);
   const snapshots = workers === null ? [] : await Promise.all(workers.map((worker) => within(left(), () => snapshotOf(deps.paseo, worker.id))));
   const walked = await walking;
+  // Answered questions are not open, as the pill reads them (design delta 20260924-qa-ledger §8).
+  const ledger = await within(left(), () => ledgerOf(deps.location));
 
   // The pill's rule, on the pill's window of the old Manager's timeline.
   const windowRead = timeline.pages > 0 && (walked !== null || timeline.pages >= WAITING_TIMELINE_PAGES);
@@ -331,6 +367,7 @@ export async function managerHandover(incident: FallbackIncident, deps: ManagerH
             { id: managerId, workspaceId },
             timeline.recent,
             peers.filter((peer) => peer.role === "worker").map((peer) => ({ ...peer, workspaceId })),
+            (requestId) => (ledger === null ? new Set<string>() : answeredIds(ledger, requestId)),
           ),
         );
   const typed = [...timeline.typed].reverse();

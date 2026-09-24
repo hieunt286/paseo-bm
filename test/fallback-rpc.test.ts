@@ -53,7 +53,7 @@ const EXPECTED = [
   "candidate: bm-worker-fallback-1 · codex · gpt-5.6-sol · thinking high",
   "replacement: none",
   "",
-  "The worker stopped because of its provider plan. The user decides on the card in this chat. Tell the user in one line; do not create an agent yourself.",
+  "The worker stopped because of its provider plan. The user decides on the card in this chat. Tell the user in one line; do not create an agent yourself. Once the status is switched, follow the agent on the replacement line instead.",
 ].join("\n");
 
 function fakePaseo(statuses: Record<string, string> = {}) {

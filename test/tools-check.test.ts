@@ -133,8 +133,11 @@ describe("setup.status paseoTools and the Setup screen warning", () => {
     expect(paseoToolsWarnings(base as SetupStatus)).toEqual([]);
   });
 
-  it("tells the Manager, in its role file, what BM-TOOLS means", () => {
+  // Design delta 20260924-instruction-quality §2.1: the notice itself tells the
+  // Manager what to do; manager.md hands every BM- message to the message.
+  it("tells the Manager, in the notice itself, what BM-TOOLS means", () => {
+    expect(toolsNotice("w-1", "pi")).toContain("Tell the user in one line; do not create another Worker for this request unless the user asks.");
     const manager = readFileSync(new URL("../plugin/roles/manager.md", import.meta.url), "utf8").replace(/\s+/g, " ");
-    expect(manager).toContain("`BM-TOOLS` (plugin): tell the user in one line; no new Worker unless asked.");
+    expect(manager).toContain("The plugin's notices — messages that start with `BM-FORMAT`, `BM-BUDGET`, `BM-TOOLS`");
   });
 });

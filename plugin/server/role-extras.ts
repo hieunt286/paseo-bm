@@ -21,6 +21,7 @@ import { WORKER_INSTRUCTIONS } from "./worker-instructions";
 import { writeStoreFileAtomically } from "./trace-store";
 import { TIMED_OUT, capabilityOf, chooseModeId, lastModesOf, modesFor, profileModeOf, runPostureOf, withTimeout, type ProviderMode } from "./role-mode";
 import { DashboardError } from "../shared/contracts";
+import { skillsStatus, type SkillsStatus } from "./setup-skills";
 
 export type Role = "manager" | "worker" | "reviewer";
 
@@ -68,6 +69,19 @@ export interface RuntimeFacts {
   workerModeNone?: boolean;
   /** The Reviewer's provider has no modes at all (Pi): the Worker must pass none. */
   reviewerModeNone?: boolean;
+  /**
+   * Required skills the Worker's own agent cannot load, checked by the plugin
+   * (PRD delta 20260924-worker-autonomy REQ-035a): `[]` all present,
+   * absent when it could not be checked (no line at all).
+   */
+  workerSkillsMissing?: string[];
+}
+
+/** The Manager's `Worker skills` line (design delta 20260924-instruction-quality §3). */
+export function workerSkillsLine(missing: readonly string[]): string {
+  return missing.length === 0
+    ? "Worker skills: all present."
+    : `Worker skills: missing ${missing.map((name) => `\`${name}\``).join(", ")} — tell the user once, when you confirm the Worker, that it works with lower quality, and point to \`npx paseo-bm doctor\`.`;
 }
 
 /**
@@ -90,13 +104,13 @@ export function runtimeFactsText(role: Role, facts: RuntimeFacts = {}): string {
   const trimmed = (value: string | null | undefined) => (typeof value === "string" ? value.trim() : "");
   const child = role === "manager" ? "Worker" : role === "worker" ? "Reviewer" : null;
   if (child === null) return "";
+  const lines: string[] = [];
   const none = role === "manager" ? facts.workerModeNone === true : facts.reviewerModeNone === true;
-  if (none) {
-    return `${RUNTIME_FACTS_HEADING}\n\n${child} mode: none — do not pass \`settings.modeId\` when you create a ${child}; Paseo sets it.`;
-  }
   const mode = role === "manager" ? trimmed(facts.workerModeId) : trimmed(facts.reviewerModeId);
-  if (mode === "") return "";
-  return `${RUNTIME_FACTS_HEADING}\n\n${child} mode: \`${mode}\` — pass it as \`settings.modeId\` when you create a ${child}.`;
+  if (none) lines.push(`${child} mode: none — do not pass \`settings.modeId\` when you create a ${child}; Paseo sets it.`);
+  else if (mode !== "") lines.push(`${child} mode: \`${mode}\` — pass it as \`settings.modeId\` when you create a ${child}.`);
+  if (role === "manager" && facts.workerSkillsMissing !== undefined) lines.push(workerSkillsLine(facts.workerSkillsMissing));
+  return lines.length === 0 ? "" : `${RUNTIME_FACTS_HEADING}\n\n${lines.join("\n")}`;
 }
 
 /**
@@ -127,7 +141,36 @@ export async function runtimeFactsOf(
   paseo: unknown,
   cwd?: string,
   log: (message: string) => void = (message) => console.warn(message),
+  skills: () => SkillsStatus = () => skillsStatus(),
 ): Promise<RuntimeFacts> {
+  // In parallel: each lookup has its own timeout, and a slow one must not add to the other.
+  const [modes, skillFacts] = await Promise.all([
+    modeFactsOf(role, paseo, cwd, log),
+    role === "manager" ? workerSkillFacts(paseo, skills, log) : Promise.resolve({}),
+  ]);
+  return { ...modes, ...skillFacts };
+}
+
+/**
+ * Which required skills the Worker's own agent lacks, from the provider the
+ * `bm-worker` alias extends (PRD delta 20260924-worker-autonomy REQ-035a: the
+ * plugin checks, the Manager only tells the user). `{}` — no line — when the
+ * provider or the skill directories cannot be read. Never throws.
+ */
+async function workerSkillFacts(paseo: unknown, skills: () => SkillsStatus, log: (message: string) => void): Promise<RuntimeFacts> {
+  try {
+    const base = await baseProviderOf(paseo, "bm-worker");
+    if (base !== "claude" && base !== "codex" && base !== "pi" && base !== "opencode") return {};
+    const missing = skills().skills.filter((row) => row.required && row[base] !== "ok").map((row) => row.name);
+    return { workerSkillsMissing: missing };
+  } catch (error) {
+    log(`[paseo-bm] checking the Worker's skills failed: ${error instanceof Error ? error.message : String(error)}`);
+    return {};
+  }
+}
+
+/** The mode facts of `runtimeFactsOf`. */
+async function modeFactsOf(role: Role, paseo: unknown, cwd: string | undefined, log: (message: string) => void): Promise<RuntimeFacts> {
   if (role === "reviewer") return {};
   try {
     if (role === "worker") {

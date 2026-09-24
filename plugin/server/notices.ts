@@ -64,6 +64,12 @@ export const SETTINGS_NOTICE_MARKER = "BM-SETTINGS";
 export const FALLBACK_NOTICE_MARKER = "BM-FALLBACK";
 export const RESUME_NOTICE_MARKER = "BM-RESUME";
 
+/**
+ * First word of the notice that tells a Manager the user answered its Worker
+ * directly, in the card or the Worker's chat (design delta 20260924-qa-ledger §5).
+ */
+export const ANSWERED_NOTICE_MARKER = "BM-ANSWERED";
+
 const PREFIXES: readonly string[] = [
   BUDGET_NOTICE_MARKER,
   REVIEWER_STOP_NOTICE_PREFIX,
@@ -73,6 +79,7 @@ const PREFIXES: readonly string[] = [
   SETTINGS_NOTICE_MARKER,
   FALLBACK_NOTICE_MARKER,
   RESUME_NOTICE_MARKER,
+  ANSWERED_NOTICE_MARKER,
 ];
 
 /** True when this text is one of the plugin's own notices, not a person's words. */

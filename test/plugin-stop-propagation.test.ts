@@ -171,10 +171,11 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     const { server, hooks } = setup();
     // One here (bm-wq6) plus the WP-205 collector's turn_started and turn_ended,
     // plus delta 20260918g's agent.created labelling, its turn_started scan and
-    // its turn_ended BM-FORMAT check, plus delta 20260921's fallback detection.
-    expect(server.on).toHaveBeenCalledTimes(7);
+    // its turn_ended BM-FORMAT check, plus delta 20260921's fallback detection,
+    // plus delta 20260924's question–answer ledger (turn_ended).
+    expect(server.on).toHaveBeenCalledTimes(8);
     expect([...hooks.keys()].sort()).toEqual(["agent.created", "agent.turn_ended", "agent.turn_started"]);
-    expect(hooks.get("agent.turn_ended")).toHaveLength(4);
+    expect(hooks.get("agent.turn_ended")).toHaveLength(5);
   });
 
   it("sends the notice only to the stopped Worker's running Reviewers (idle Worker on refresh)", async () => {
@@ -367,12 +368,14 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
   it("removes the hook on cleanup", () => {
     const { cleanup, hooks, removers } = setup();
     cleanup();
-    // Seven removals: this hook, the WP-205 collector's turn_started and
+    // Eight removals: this hook, the WP-205 collector's turn_started and
     // turn_ended, delta 20260918g's agent.created, turn_started scan and
-    // turn_ended BM-FORMAT check, and delta 20260921's fallback detection
-    // (turn_ended). The map must end up empty.
+    // turn_ended BM-FORMAT check, delta 20260921's fallback detection
+    // (turn_ended) and delta 20260924's question–answer ledger (turn_ended).
+    // The map must end up empty.
     expect([...removers].sort()).toEqual([
       "agent.created",
+      "agent.turn_ended",
       "agent.turn_ended",
       "agent.turn_ended",
       "agent.turn_ended",

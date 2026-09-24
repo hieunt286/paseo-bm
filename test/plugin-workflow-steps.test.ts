@@ -274,8 +274,11 @@ describe("review_plan (delta 20260917-workflow-skills §5.5)", () => {
         sent: [{ agentId: MANAGER, at: "2026-09-16T10:00:00.000Z", text: "a request", truncated: false }],
         evidence: [skill("reviewing-plan", MANAGER)],
       }),
-      record({ agentId: "w1", role: "worker", turnId: "w-turn", at: "2026-09-16T10:10:00.000Z", reports: [report({ tier: "Large" })] }),
+      record({ agentId: "w1", role: "worker", turnId: "w-turn", at: "2026-09-16T10:10:00.000Z", reports: [report({ tier: null })] }),
     ];
+    // No tier: since PRD delta 20260924-worker-autonomy every tier may omit
+    // this step, so only a trace without a tier still shows what this test is
+    // about (the evidence rule, not the tier rule).
     const steps = inferWorkflowSteps(reconstructTraces({ records, agents: [agent({ id: "w1" })] })[0]!);
     expect(rowFor(steps, "review_plan").status).toBe("unknown");
   });
@@ -310,7 +313,7 @@ describe("review_plan (delta 20260917-workflow-skills §5.5)", () => {
     const steps = inferWorkflowSteps(
       traceWith({
         reports: [
-          report({ phase: "finished", tier: "Large", skillsUsed: ["feature-workflow"], incompleteFields: ["skillsUsed"] }),
+          report({ phase: "finished", tier: null, skillsUsed: ["feature-workflow"], incompleteFields: ["skillsUsed"] }),
         ],
       }),
     );
@@ -322,8 +325,8 @@ describe("review_plan (delta 20260917-workflow-skills §5.5)", () => {
     const steps = inferWorkflowSteps(
       traceWith({
         reports: [
-          report({ phase: "finished", tier: "Large", at: "2026-09-16T10:10:00.000Z", skillsUsed: ["feature-workflow"] }),
-          report({ phase: "finished", tier: "Large", at: "2026-09-16T10:40:00.000Z", skillsUsed: [], incompleteFields: ["skillsUsed"] }),
+          report({ phase: "finished", tier: null, at: "2026-09-16T10:10:00.000Z", skillsUsed: ["feature-workflow"] }),
+          report({ phase: "finished", tier: null, at: "2026-09-16T10:40:00.000Z", skillsUsed: [], incompleteFields: ["skillsUsed"] }),
         ],
       }),
     );
@@ -331,13 +334,13 @@ describe("review_plan (delta 20260917-workflow-skills §5.5)", () => {
     expect(rowFor(steps, "polish_beads").status).toBe("unknown");
   });
 
-  it("may be skipped by Small and Medium, but stays unknown for Large without evidence", () => {
-    for (const tier of ["Small", "Medium"] as const) {
+  it("may be skipped by every tier (PRD delta 20260924-worker-autonomy), and stays unknown without a tier", () => {
+    for (const tier of ["Small", "Medium", "Large"] as const) {
       const steps = inferWorkflowSteps(traceWith({ reports: [report({ tier })] }));
       expect(rowFor(steps, "review_plan").status, tier).toBe("skipped");
     }
-    const large = inferWorkflowSteps(traceWith({ reports: [report({ tier: "Large" })] }));
-    expect(rowFor(large, "review_plan").status).toBe("unknown");
+    const untiered = inferWorkflowSteps(traceWith({ reports: [report({ tier: null })] }));
+    expect(rowFor(untiered, "review_plan").status).toBe("unknown");
   });
 });
 
@@ -356,7 +359,7 @@ describe("skill evidence for convert, polish and implement (delta 20260917-workf
   };
 
   it("does not read a guardrail without a polish segment as polish skipped", () => {
-    const steps = inferWorkflowSteps(traceWith({ reports: [report({ tier: "Medium", guardrail: newGuardrail })] }));
+    const steps = inferWorkflowSteps(traceWith({ reports: [report({ tier: null, guardrail: newGuardrail })] }));
     expect(rowFor(steps, "polish_beads").status).toBe("unknown");
   });
 
@@ -400,11 +403,11 @@ describe("skill evidence for convert, polish and implement (delta 20260917-workf
     expect(rowFor(without, "implement").status).toBe("unknown");
   });
 
-  it("lets a Small request skip polish without any signal, but not a Medium one", () => {
-    const small = inferWorkflowSteps(traceWith({ reports: [report({ tier: "Small" })] }));
-    expect(rowFor(small, "polish_beads").status).toBe("skipped");
-    const medium = inferWorkflowSteps(traceWith({ reports: [report({ tier: "Medium" })] }));
-    expect(rowFor(medium, "polish_beads").status).toBe("unknown");
+  it("lets any tier skip polish without any signal (PRD delta 20260924-worker-autonomy), but not an untiered request", () => {
+    for (const tier of ["Small", "Medium", "Large"] as const) {
+      expect(rowFor(inferWorkflowSteps(traceWith({ reports: [report({ tier })] })), "polish_beads").status, tier).toBe("skipped");
+    }
+    expect(rowFor(inferWorkflowSteps(traceWith({ reports: [report({ tier: null })] })), "polish_beads").status).toBe("unknown");
   });
 });
 
@@ -420,19 +423,20 @@ describe("the skipped rule (REQ-045d)", () => {
     expect(rowFor(steps, "implement").status).toBe("unknown");
   });
 
-  it("lets a Medium request skip only review_plan; polish is required again (delta 20260917-workflow-skills)", () => {
-    const steps = inferWorkflowSteps(traceWith({ reports: [report({ tier: "Medium" })] }));
-    expect(SKIPPABLE_BY_TIER.Medium).toEqual(["review_plan"]);
-    expect(rowFor(steps, "review_plan").status).toBe("skipped");
-    for (const step of ["prd", "design", "adr", "plan", "polish_beads"]) {
-      expect(rowFor(steps, step).status, step).toBe("unknown");
+  // PRD delta 20260924-worker-autonomy (REQ-045d): documents follow the change,
+  // not the tier, so Medium and Large may omit exactly what Small may.
+  it("lets Medium and Large skip the same steps as Small, and nothing else", () => {
+    expect(SKIPPABLE_BY_TIER.Medium).toEqual(SKIPPABLE_BY_TIER.Small);
+    expect(SKIPPABLE_BY_TIER.Large).toEqual(SKIPPABLE_BY_TIER.Small);
+    for (const tier of ["Medium", "Large"] as const) {
+      const steps = inferWorkflowSteps(traceWith({ reports: [report({ tier })] }));
+      for (const step of ["prd", "design", "adr", "plan", "review_plan", "polish_beads"]) {
+        expect(rowFor(steps, step), `${tier} ${step}`).toMatchObject({ status: "skipped", confidence: "exact" });
+      }
+      for (const step of ["convert_to_beads", "implement", "review_batches", "build_and_tests", "close_with_evidence"]) {
+        expect(rowFor(steps, step).status, `${tier} ${step}`).not.toBe("skipped");
+      }
     }
-  });
-
-  it("lets a Large request skip nothing (delta 20260917-workflow-skills)", () => {
-    const steps = inferWorkflowSteps(traceWith({ reports: [report({ tier: "Large" })] }));
-    expect(SKIPPABLE_BY_TIER.Large).toEqual([]);
-    expect(steps.filter((row) => row.status === "skipped")).toEqual([]);
   });
 
   it("never says skipped without a reported tier", () => {

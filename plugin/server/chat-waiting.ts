@@ -9,6 +9,7 @@
  * incidents file, not the timeline, so their pill is right even when the
  * Manager's own turn failed on the same plan.
  */
+import { join } from "node:path";
 import { parseQuestions } from "../shared/bm-questions";
 import { parseReports } from "../shared/bm-report";
 import type { FallbackIncident, WaitingFallback, WaitingWorker } from "../shared/contracts";
@@ -17,6 +18,8 @@ import { peersOfWorkspace, workspaceRecordsReader } from "./chat-peers";
 import { bmAgentsOf, type DashboardPaseo } from "./dashboard-rpc";
 import { readIncidents, replacementsOf } from "./fallback-state";
 import { readTimelinePages } from "./live-timeline";
+import { answeredIds, readQaLedgerSafely } from "./qa-ledger";
+import { TRACES_DIR_NAME } from "./install-home";
 import { installHomeOf } from "./role-extras";
 import { TIMED_OUT, withTimeout } from "./role-mode";
 
@@ -25,6 +28,7 @@ export const WAITING_TIMELINE_PAGES = 1;
 export const WAITING_TIMELINE_LIMIT = 200;
 
 const REQUEST_ID = /^req-\d{8}T\d{6}Z$/;
+const NONE_ANSWERED: ReadonlySet<string> = new Set();
 
 /** A timeline entry as Paseo returns it. */
 export interface WaitingEntry {
@@ -53,11 +57,19 @@ export interface WaitingCandidate {
  * when that newest report is `blocked` with at least one question for its own
  * request, and the single Worker of that request is idle (or errored): a
  * running Worker already has its answer.
+ *
+ * `answered` is the question–answer ledger's view (design delta
+ * 20260924-qa-ledger §4.1): a Worker is idle while it waits for its Reviewer
+ * too, so "blocked and idle" alone showed answered questions as open again.
+ * A report whose questions are ALL answered is not waiting; one with some
+ * answered is still waiting, and says which in `answered`. Without it (the
+ * ledger could not be read) the result is what it was before the ledger.
  */
 export function waitingOf(
   manager: { id: string; workspaceId: string },
   entries: readonly WaitingEntry[],
   workers: readonly WaitingCandidate[],
+  answered: (requestId: string) => ReadonlySet<string> = () => NONE_ANSWERED,
 ): WaitingWorker[] {
   const newest = new Map<string, { phase: string | null; text: string; at: string | null }>();
   for (const entry of entries) {
@@ -85,6 +97,9 @@ export function waitingOf(
     );
     if (worker === null) continue;
     if (worker.status !== "idle" && worker.status !== "error") continue;
+    const done = answered(requestId);
+    const answeredHere = asked.questions.map((question) => question.id).filter((id) => done.has(id));
+    if (answeredHere.length === asked.questions.length) continue;
     out.push({
       managerId: manager.id,
       workspaceId: manager.workspaceId,
@@ -93,6 +108,7 @@ export function waitingOf(
       requestId,
       text: report.text,
       at: report.at,
+      answered: answeredHere,
     });
   }
   return out;
@@ -122,15 +138,41 @@ export interface ChatWaitingDeps {
   log?: (message: string) => void;
 }
 
-/** Every recorded incident; none when the install home or the file cannot be read. Never throws. */
-async function incidentsOf(paseo: DashboardPaseo, deps: ChatWaitingDeps): Promise<FallbackIncident[]> {
+/** The install home within the lookup budget, or null. Never throws. */
+async function homeOf(paseo: DashboardPaseo, deps: ChatWaitingDeps): Promise<string | null> {
   try {
     const found = deps.home !== undefined ? deps.home : await withTimeout(installHomeOf(paseo, { homedir: deps.homedir }));
-    if (found === null || found === TIMED_OUT) return [];
-    return readIncidents(found, deps.log).incidents;
+    return found === null || found === TIMED_OUT ? null : found;
+  } catch {
+    return null;
+  }
+}
+
+/** Every recorded incident; none when the install home or the file cannot be read. Never throws. */
+function incidentsOf(home: string | null, deps: ChatWaitingDeps): FallbackIncident[] {
+  if (home === null) return [];
+  try {
+    return readIncidents(home, deps.log).incidents;
   } catch {
     return [];
   }
+}
+
+/**
+ * The ledger's answered questions per request, read once per call; answers
+ * nothing when the install home or the ledger cannot be read, so the pills
+ * fall back to what they did before the ledger. Never throws.
+ */
+function answeredOf(home: string | null, deps: ChatWaitingDeps): (requestId: string) => ReadonlySet<string> {
+  if (home === null) return () => NONE_ANSWERED;
+  const ledger = readQaLedgerSafely({ tracesDir: join(home, TRACES_DIR_NAME) });
+  for (const notice of ledger.notices) (deps.log ?? ((message: string) => console.warn(message)))(`[paseo-bm] ${notice}`);
+  const cache = new Map<string, ReadonlySet<string>>();
+  return (requestId) => {
+    let found = cache.get(requestId);
+    if (found === undefined) cache.set(requestId, (found = answeredIds(ledger, requestId)));
+    return found;
+  };
 }
 
 /**
@@ -152,7 +194,9 @@ export async function handleChatWaiting(
   // F11). The peers come from the helper `chat.peers` uses, so a pill and its
   // card see the same Workers (F12).
   const managerWorkspaces = new Set(managers.map((manager) => manager.workspaceId!));
-  const incidents = await incidentsOf(paseo, deps);
+  const home = await homeOf(paseo, deps);
+  const incidents = incidentsOf(home, deps);
+  const answered = answeredOf(home, deps);
   const replacements = replacementsOf(incidents);
   const workers: WaitingCandidate[] = [];
   for (const workspaceId of managerWorkspaces) {
@@ -172,7 +216,7 @@ export async function handleChatWaiting(
     } catch {
       continue;
     }
-    waiting.push(...waitingOf({ id: manager.facts.id, workspaceId: manager.workspaceId! }, entries, workers));
+    waiting.push(...waitingOf({ id: manager.facts.id, workspaceId: manager.workspaceId! }, entries, workers, answered));
   }
   const fallback = pendingFallbackOf(
     managers.map((manager) => ({ id: manager.facts.id, workspaceId: manager.workspaceId! })),

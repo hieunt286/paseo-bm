@@ -69,6 +69,16 @@ describe("childFactLine", () => {
     expect(await childFactLine("reviewer", paseo)).toBe(REVIEWER_LINE);
   });
 
+  // Design delta 20260924-instruction-quality §3: the Manager's facts also carry a
+  // `Worker skills` line, which is not a role setting and never rides a BM-SETTINGS.
+  it("is only the mode line when the Manager's facts also name the Worker's skills", async () => {
+    const paseo = {
+      ...modes({ "bm-worker": [{ id: "build", label: "Build" }] }),
+      config: { get: async () => ({ config: { agentProfiles: [], providers: { "bm-worker": { extends: "claude" } } } }) },
+    };
+    expect(await childFactLine("worker", paseo)).toBe(WORKER_LINE);
+  });
+
   it("is null for a Manager save (nobody creates Managers), and '' when there is no line", async () => {
     expect(await childFactLine("manager", modes({}))).toBeNull();
     expect(await childFactLine("worker", {})).toBe("");

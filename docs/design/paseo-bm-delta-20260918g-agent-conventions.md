@@ -38,7 +38,7 @@
 
 | # | Sự thật | Nguồn |
 |---|---|---|
-| K1 | Manager `f13a4e4e` (workspace `wks_ef81bbe0663d91ca`) có provider `bm-manager`, đủ chỉ dẫn Manager, `labels: {}`, tên = câu đầu người dùng gõ; Manager do `manager.ensure` tạo luôn tên "Beads Manager" và có `bm.role`, `bm.version`, `bm.modeSet` | `get_agent_status`, `list_agents` 2026-09-18; `manager.ts:295-307`; bead `bm-llmg` |
+| K1 | Manager `f13a4e4e` (workspace `wks_project_b`) có provider `bm-manager`, đủ chỉ dẫn Manager, `labels: {}`, tên = câu đầu người dùng gõ; Manager do `manager.ensure` tạo luôn tên "Beads Manager" và có `bm.role`, `bm.version`, `bm.modeSet` | `get_agent_status`, `list_agents` 2026-09-18; `manager.ts:295-307`; bead `bm-llmg` |
 | K2 | `bmAgentsOf` chỉ liệt kê theo nhãn `bm.role`, mỗi vai **một trang 200**, không đọc trang sau | `dashboard-rpc.ts:293-326` |
 | K3 | `manager.ensure`, cây agent, `/bm-worker-stop-all`, dừng Reviewer đều lọc theo nhãn `bm.role` | `manager.ts:213-226, 418, 455`; `stop-propagation.ts:140, 163, 302-307` |
 | K4 | Kho vết và ngân sách review đã nhận vai theo provider, không theo nhãn | `collector.ts:371-373`; `review-budget.ts:141` |

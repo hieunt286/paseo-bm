@@ -2,7 +2,12 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { RUNTIME_FACTS_HEADING } from "../plugin/server/role-extras";
-import { BUDGET_NOTICE_MARKER, budgetNotice } from "../plugin/server/review-budget";
+import { budgetNotice } from "../plugin/server/review-budget";
+import { formatNotice } from "../plugin/server/format-check";
+import { WORKER_CLOSING } from "../plugin/server/fallback-handover";
+import { managerIdNotice, settingsNotice } from "../plugin/server/settings-notices";
+import { RESUME_NOTICE } from "../plugin/server/fallback-wait";
+import { toolsNotice } from "../plugin/server/tools-check";
 
 /**
  * What the three role files must carry.
@@ -106,6 +111,21 @@ const WR = flat(rulesBlock(worker).join("\n"));
 const RR = flat(rulesBlock(reviewer).join("\n"));
 const MR = flat(rulesBlock(manager).join("\n"));
 
+describe("reviewer.md says a prose field may run over several lines (fault L8, 2026-09-23)", () => {
+  it("names the two fields and the indent that keeps the continuation inside the block", () => {
+    expect(reviewer).toMatch(/`checked` and `notChecked` are prose: a long value may run over several/);
+    expect(reviewer).toMatch(/lines, as long as every line after the first is indented\./);
+  });
+});
+
+describe("worker.md teaches what the BM-REPORT check accepts (fault L2, 2026-09-23)", () => {
+  it("says a short note may follow tier and reviewFindingsOpen, and where the line still is", () => {
+    expect(worker).toMatch(/`tier` and\n`reviewFindingsOpen` may carry a short note after their structured part/);
+    expect(worker).toMatch(/`reviewFindingsOpen` still opens with `none` or `b<n>: …`/);
+    expect(worker).toMatch(/"b4 is still running" is not a value/);
+  });
+});
+
 describe("all three files", () => {
   // The long versions were 190–520 lines; the owner asked for short ones. On
   // 2026-09-17 worker.md was raised to 270 then 280 for the workflow-skills
@@ -193,10 +213,72 @@ describe("all three files", () => {
   // replacement Manager starting from BM-HANDOVER role manager. Re-wrapping
   // the plugin-message lines would split the BM-TOOLS sentence that
   // test/tools-check.test.ts pins on one line.
+  // worker.md 409 -> 412 for bead bm-tier-reviewfindings-mau-q5oy (diagnosis
+  // 2026-09-23, fault L2): three lines saying that `tier` and
+  // `reviewFindingsOpen` accept a short note, and that `reviewFindingsOpen`
+  // still has to open with `none` or `b<n>:`. The template two lines below
+  // teaches the shape but not the allowance, and 9 of 87 real reports tripped
+  // on exactly that gap. Raised rather than trimmed: the alternative was
+  // dropping the "b4 is still running is not a value" half, which is the one
+  // shape the checker still rejects and therefore the one worth saying.
+  // worker.md 412 -> 415 for bead bm-format-khong-keo-questions-aqxs (diagnosis
+  // 2026-09-23, fault L1): BM-FORMAT now has two endings, and a Worker that
+  // always re-sends would put its BM-QUESTIONS in front of the user a second
+  // time — the cause of all four repeated question cards that day. The
+  // paragraph has to name the fork and say why, or the notice's own "do NOT
+  // send this block again" line argues with the role file.
+  // manager.md 182 -> 185 for bead bm-so-hoi-dap-tb4m.3 (design delta
+  // 20260924-qa-ledger §5): three lines for the plugin's BM-ANSWERED notice.
+  // A card answer goes straight to the Worker, so without them the Manager
+  // kept telling the user an answered question was open and relayed it again
+  // (2026-09-22T17:11Z, 2026-09-23T05:58Z). The "reported again" rule of the
+  // `blocked` bullet took its new clause within its own lines.
+  // worker.md 415 -> 418 for bead bm-so-hoi-dap-tb4m.4 (design delta
+  // 20260924-qa-ledger §6): the Worker is now the only side that asks about
+  // reviews beyond the budget, and a yes covers what the user said it covers.
+  // Without the second half each extra review re-asked the same decision
+  // (project-b req-20260923T122743Z Q6 then Q8). Two lines appended to
+  // the paragraph that already says "ask the user".
+  // worker.md 418 -> 422 for bead bm-so-hoi-dap-tb4m.5 (design delta
+  // 20260924-qa-ledger §7): an option that hands the user an action outside
+  // the chat must mean "done" when chosen. "I will run it, then tell you"
+  // delivered the answer before the action, and the Worker asked the same
+  // thing again under a new number (paseo-bm req-20260923T063441Z Q8 -> Q9,
+  // Q16 -> Q17 -> Q18). Five lines appended to the paragraph on what makes a
+  // question answerable, where the rule belongs.
+  // worker.md 422 -> 424 for bead bm-so-hoi-dap-tb4m.6 (design delta
+  // 20260924-qa-ledger §8): BM-HANDOVER now carries the request's questions
+  // and answers, and a replacement Worker must treat the answered ones as
+  // settled or it asks the user everything again. Two lines in the handover
+  // paragraph.
+  // worker.md 424 -> 425 for the same bead (design delta 20260924-qa-ledger
+  // §3.4): the plugin counts a number with any answer as answered, so a
+  // question the answer did not settle must come back under a NEW number.
+  // Replaying the real traces found one Worker that re-asked Q3 under Q3
+  // (wks_project_c, 2026-09-21T06:59:56Z); the pill would have hidden it.
+  // worker.md 425 -> 406 for bead bm-worker-autonomy-895l.1 (design delta
+  // 20260924-worker-autonomy §3): one loop instead of three tier branches, a
+  // consequence definition instead of the ordered list and its examples, and
+  // "decide what you can undo, ask four things" instead of eight triggers and
+  // three fixed moments. Lowered to the measured 405 + 1 so the savings stay.
   it.each([
-    ["worker.md", worker, 409],
-    ["reviewer.md", reviewer, 164],
-    ["manager.md", manager, 182],
+    // Owner decisions P2 (2026-09-24): worker.md 356 -> 371 for the rule that a
+    // request asking only for information gets no bead and no Reviewer, the
+    // `decided` field, and the review fixes (named notices, read-only helpers,
+    // the review-budget question); manager.md 149 -> 152 for reading the
+    // Worker's activity and the named notices. Measured + 1.
+    // Design delta 20260924-instruction-quality: worker.md 406 -> 356 (the
+    // plugin messages speak for themselves, the worked bead and the criteria
+    // table left, rules gained their reasons); reviewer.md 164 -> 170 because
+    // the criteria table now lives only there (it drifted while worker.md held
+    // a copy); manager.md 177 -> 149 (no size guess, no skill-directory rules,
+    // no per-message rules). Each is the measured length + 1.
+    ["worker.md", worker, 374],
+    ["reviewer.md", reviewer, 170],
+    // manager.md 185 -> 177 for bead bm-worker-autonomy-895l.2 (design delta
+    // 20260924-worker-autonomy §4): no ordered size rule, no Large
+    // confirmation, no skills-per-tier check. Measured 176 + 1.
+    ["manager.md", manager, 152],
   ])("%s leads with the hard limits and stays under %i lines", (_name, text, limit) => {
     const headings = text.split("\n").filter((line) => line.startsWith("## "));
     expect(headings[0]).toBe("## RULES");
@@ -300,129 +382,103 @@ describe("worker.md — what the job is", () => {
     rule(W, "a tidy graph around unasked work is a failure", /failed request/i);
   });
 
-  it("states the precedence between this file and the skills, positively", () => {
-    rule(W, "skills say how", /[Ss]kills say HOW/);
-    rule(W, "this file decides the limits, the budget, reporting, asking and scope", /this file\n?\s*decides|\*\*this file[\s\S]{0,20}decides\*\*/);
-    rule(W, "and why", /a skill cannot know what you are allowed to do/i);
+  it("states the precedence between this file, the skills and the repository's own instructions", () => {
+    rule(W, "skills say how", /[Ss]kills say how/);
+    rule(W, "the repository's AGENTS.md says how code is written there", /repository's own `AGENTS\.md` or `CLAUDE\.md` says how code is written there/);
+    rule(W, "this file decides the limits, the budget, reporting, asking and scope", /\*\*this file\s+decides\*\*/);
+    rule(W, "and why", /neither of those knows what you are allowed to do here/);
   });
 });
 
 describe("worker.md — the workflow", () => {
-  it("sizes by an ordered rule where risk beats apparent size", () => {
-    order(W, "tier rule order", "→ **Large**", "→ **Small**", "→ **Medium**");
-    rule(W, "first match wins", /FIRST match wins/);
-    rule(W, "bead count is never evidence", /number of beads is never evidence/i);
+  // Design delta 20260924-worker-autonomy §3 (owner, 2026-09-24): the tier is
+  // the model's own judgement of consequences. The ordered "first match wins"
+  // list, its examples, the skills-per-tier row, the three branches and the
+  // Large confirmation are gone on purpose: Workers cited "rule 1" to call
+  // internal changes Large (209 Large reports against 74 Medium).
+  it("sizes by consequence, in the model's own judgement", () => {
+    rule(W, "consequences, not the size of the diff", /Judge the consequences, not the size of the diff/);
+    rule(W, "bead count is never evidence", /number of beads is never\s+evidence/i);
+    rule(W, "Large is what is hard to undo or reaches outside the repository", /\*\*Large\*\* — hard to undo, or it reaches people outside this repository/);
+    rule(W, "Small needs no document", /\*\*Small\*\* — one clear change that needs no document/);
     rule(
       W,
       "a tier or size the user sets wins",
       /(override|sets?)[^.]{0,50}(tier|size)|(tier|size)[^.]{0,50}(the user|Manager)[^.]{0,30}(set|override)/i,
     );
-    
+    expect(W).not.toMatch(/FIRST match wins/);
+    expect(W).not.toMatch(/Examples: API response wording/);
   });
 
-  it("pins the tier table: documents, plan, skills, batches and the budget", () => {
-    // Pinned by content, not by the step number it used to carry: which skills
-    // a tier runs is the decision; where the chain lives is layout.
-    expect(W).toMatch(
-      /\| Skills[^|]*\| none[^|]*\| `feature-workflow`, `polishing-beads`, `implementing-beads`; with a plan also `reviewing-plan`, `converting-plan-to-beads` \| all five \|/,
-    );
-    expect(W).toMatch(/\| Plan \| none \| only when the work needs one/);
-    expect(W).toMatch(/\*\*Total review calls per request\*\* \| \*\*1\*\* \| \*\*4\*\* \| \*\*6\*\*/);
-    verbatim(W, "plus 1 re-review only if blocking findings remain");
+  it("ties reviews, not documents or skills, to the tier, and never waits for a confirmation", () => {
+    expect(W).toMatch(/\*\*Review calls per request\*\* \| \*\*2\*\* \| \*\*2\*\* \| \*\*4\*\*/);
     rule(W, "Small writes no new document file", /no new document file/);
-    rule(W, "Large waits for the user before implementing", /\*\*ask the user to confirm and wait\*\*/);
+    rule(W, "documents only where the change needs them", /\*\*Write documents only where the change needs them\*\*/);
+    expect(W).not.toMatch(/\| Skills/);
+    expect(W).not.toMatch(/ask the user to confirm and wait/);
+    rule(W, "Large does not wait after b1", /there is no confirmation to wait for/);
   });
 
-  it("holds the whole job in one loop, with the tier branches inside it", () => {
+  it("holds the whole job in one loop, the same at every tier", () => {
     const loop = between(W, "One loop, from the request", "## How big is this");
     order(
       loop,
       "the loop",
       "**Size the request**",
       "`received`",
-      "Ask what you cannot answer",
-      "**Small** —",
-      "**Medium** —",
-      "**Large** —",
+      "**Ask once, only what you cannot decide or look up**",
+      "**Write documents only where the change needs them**",
+      "**Large only:**",
       "Implement the request's beads one at a time",
       "Review the implementation as one batch",
-      "`finished`",
+      "`finished` with your decisions",
     );
-    const small = between(loop, "**Small** —", "**Medium** —");
-    order(small, "Small path", "one short bead", "make the change", "cheapest check", "close with evidence", "one review", "`finished`");
-    const medium = between(loop, "**Medium** —", "**Large** —");
-    for (const step of ["with a plan: `reviewing-plan`", "write the beads by hand", "`polishing-beads`", "batch `b1`, stage `plan`", "`beads-done`", "batch `b2`"]) {
-      expect(medium, step).toContain(step);
+    for (const step of ["`reviewing-plan`", "`plan-ready-for-beads`", "`converting-plan-to-beads`", "`polishing-beads`", "write the beads by hand", "one short bead"]) {
+      expect(loop, step).toContain(step);
     }
-    const large = between(loop, "**Large** —", "Implement the request's beads");
-    order(
-      large,
-      "Large chain",
-      "document chain",
-      "plan",
-      "`reviewing-plan`",
-      "batch `b1`",
-      "`plan-ready-for-beads`",
-      "`converting-plan-to-beads`",
-      "`polishing-beads`",
-      "batch `b2`",
-      "`beads-done`",
-      "**ask the user to confirm and wait**",
-      "batch `b3`",
-    );
-    verbatim(large, "`Plan-ready: PASS — <date>`");
+    verbatim(loop, "`Plan-ready: PASS — <date>`");
+    expect(loop).not.toMatch(/\*\*Medium\*\* —/);
   });
 
   it("treats skill passes as its own work, with a cadence per skill", () => {
-    rule(W, "skill passes are not review calls", /[Ss]kill passes are yours, not review calls/);
-    rule(W, "reviewing-plan runs once per plan", /`reviewing-plan`:? once per plan/);
-    rule(W, "converting-plan-to-beads runs once per plan", /`converting-plan-to-beads`:? once per plan/);
-    rule(W, "polishing-beads runs once per wave", /`polishing-beads`:? once per wave/);
+    rule(W, "skill passes are not review calls", /Skill passes are your own work, not review calls/);
+    rule(W, "reviewing-plan and converting-plan-to-beads run once per plan", /`reviewing-plan` and\s+`converting-plan-to-beads` once per plan/);
+    rule(W, "polishing-beads runs once per wave", /`polishing-beads` once per wave/);
   });
 
-  it("teaches the leaf contract with a worked bead, and sizes beads by outcome", () => {
-    verbatim(W, "`reference/leaf-bead-checklist.md`");
-    // The ten-part contract is now shown, not listed: one real bead of this
-    // repository's graph, annotated with what each part buys (delta §4.8).
-    // Review b3: the example must be ordinary user work, not paseo-bm's own
-    // machinery, and it must show every part of the leaf contract.
-    const example = between(W, "Here is a real one from a real request", "Primary Proof and Reversibility are the two");
-    expect(example).not.toMatch(/bm-wp-|role-hook|paseo-bm/);
-    for (const part of [
-      "## Objective",
-      "## Context",
-      "## Scope",
-      "## Components Touched",
-      "## Dependencies",
-      "## Assumptions",
-      "## Acceptance Criteria",
-      "## Validation / Definition of Done",
-      "## Primary Proof",
-      "## Reversibility",
-      "## Provenance",
-    ]) {
-      expect(example, part).toContain(part);
-    }
-    rule(W, "the example says what Primary Proof and Reversibility buy", /prove itself and undo itself/);
-    // The Provenance of a real bead names the request, not just the plan.
-    expect(example).toMatch(/Request: req-\d{8}T\d{6}Z — "/);
-    rule(W, "one leaf is one outcome", /ONE LEAF = ONE OUTCOME/);
-    rule(W, "size is never judged by counts", /never judge size by file, line or bead counts/);
+  // Design delta 20260924-instruction-quality §2.4: every read stays in the
+  // context and is read again at each later step (the Worker's biggest cost).
+  it("keeps its context small", () => {
+    rule(W, "keeps its context small, and says why", /\*\*Keep your context small\.\*\* Everything you read stays in your context and is\s+read again at every later step/);
+    rule(W, "never prints a whole large file or log", /never print a whole large file, log or command\s+output/);
+  });
+  // Design delta 20260924-instruction-quality §2: the 35-line worked bead left
+  // the always-loaded file; the checklist lives in `converting-plan-to-beads`.
+  // What a hand-written bead must carry stays here, with why.
+  it("states the leaf contract and sizes beads by outcome", () => {
+    rule(W, "a hand-written bead carries the core of the leaf contract", /needs its Objective,\s+Scope \(in and out\), Acceptance Criteria, a \*\*Primary Proof\*\* named before you\s+start and its \*\*Reversibility\*\*/);
+    rule(W, "a Large request's hand-written beads follow the converter's checklist", /and so do a Large request's beads written by\s+hand, because its `b1` review applies that checklist/);
+    rule(W, "the plan's leaves follow the converter's checklist", /`converting-plan-to-beads`\s+`reference\/leaf-bead-checklist\.md`/);
+    rule(W, "Primary Proof and Reversibility say what they buy", /prove\s+itself and undo itself/);
+    rule(W, "one leaf is one outcome", /One leaf is one outcome/);
+    rule(W, "size is never judged by counts", /never judge size by file, line or bead\s+counts/);
     verbatim(W, "`## Acceptance Criteria`", "`## Success Criteria`", "`br lint -s all`");
     rule(W, "an existing heading is never dropped", /(never drop|never goes away|never removes?)[^.]{0,40}heading|heading[^.]{0,40}(never goes away|is never dropped)/i);
     rule(W, "every new bead has a Provenance section", /`## Provenance`/);
     rule(W, "and it names the request id and the request itself", /the `requestId` and the\s+user's request in one quoted line/i);
   });
-
-  it("labels every bead with feature:<slug> and stops when several beads match", () => {
+  it("labels every bead with feature:<slug> and picks the closest of several matches itself", () => {
     verbatim(W, "`feature:<slug>`", "`br list --label feature:<slug> --json`", "`feature:hoa-don`");
-    rule(W, "several matches means stop and ask", /more than one → stop and ask/i);
+    // Design delta 20260924-instruction-quality §2.5: which duplicate to update can be undone.
+    rule(W, "several matches: update the closest and record it", /one or more that overlap → update the closest and say why in the bead\s+\(picking one of several goes on your `decided` line\)/);
+    expect(W).not.toMatch(/more than one → stop and ask/i);
   });
-
   it("implements one bead at a time and closes each one on its own evidence", () => {
     rule(W, "only one bead in progress", /only \*\*one\*\* bead `in_progress`/i);
     rule(W, "only this request's beads", /Never pick up other ready beads|only (on )?this request's beads/i);
-    rule(W, "implementing-beads without parallel sub-agents", /never with parallel sub-agents/);
+    // Design delta 20260924-instruction-quality §2.3: the rule keeps its reason, and read-only helpers are allowed.
+    rule(W, "never two agents editing at once, and why", /never let two agents edit at once, because the working\s+tree and the bead states would race/);
+    rule(W, "read-only helper agents are fine, inside the limits", /helper agents that only read files in\s+this workspace — no network, never through `create_agent` — are fine/);
     order(
       W,
       "per-bead cycle",
@@ -432,7 +488,7 @@ describe("worker.md — the workflow", () => {
     );
     rule(W, "no build command is not a reason to stop", /no build or test command is not a reason to stop/i);
     rule(W, "git status is read once before the first write", /`git status` once before your first write/);
-    rule(W, "the cheapest check that proves it", /cheapest check/);
+    rule(W, "the cheapest check that proves it", /cheapest (direct )?check/);
     rule(W, "a blocking finding reopens the bead", /`br reopen <id>`/);
     rule(W, "changes after finished form a new batch", /(form|are) a new batch `b<n>`/);
     rule(W, "a split makes siblings, never deletes", /SIBLING beads under the same parent/);
@@ -451,13 +507,20 @@ describe("worker.md — the workflow", () => {
     rule(W, "no build command is not a reason to stop", /no build or test command is not a reason to stop/i);
   });
 
-  it("asks at fixed moments, in one numbered set, and waits", () => {
-    rule(W, "intake questions before any document", /on intake before any document/i);
-    rule(W, "questions after reviewing-plan", /after `reviewing-plan`/);
-    rule(W, "risk questions before implementing a Large request", /for Large, before implementing/i);
-    // The twelve triggers became one principle with two halves (delta §4.3).
-    rule(W, "ask when the answer changes what you build", /would change what you build/);
-    rule(W, "ask when you are stuck", /when you are stuck/i);
+  // Design delta 20260924-worker-autonomy §3: 78% of 285 answered questions
+  // took the Worker's own recommendation and 31% were about the process
+  // itself, so the Worker decides what it can undo and asks for four things.
+  it("decides what it can undo, records it, and asks only four things, once and early", () => {
+    rule(W, "decides what it can undo", /\*\*Decide what you can undo\.\*\*/);
+    rule(W, "records each decision for the user to overturn", /record the ones the\s+user may care about on your report's `decided` line \(Reporting\), so they can\s+overturn them/);
+    rule(W, "looks before it asks", /\*\*Look before you ask\.\*\*/);
+    rule(W, "asks about the environment only what it cannot read", /a\s+fact about the environment you cannot read yourself/);
+    rule(W, "an existing bead's acceptance criteria are an approved decision", /changing an\s+existing bead's acceptance criteria/);
+    rule(W, "asks only for four things", /\*\*Ask only for these four\*\*/);
+    rule(W, "asks in one round right after sizing", /\*\*Ask once, early\.\*\* Every question you can already see goes into one round/);
+    rule(W, "asks when stuck", /\*\*Being stuck\*\* — the same error a third time after three different fixes/);
+    expect(W).not.toMatch(/fixed moments/);
+    expect(W).not.toMatch(/on intake before any document/i);
     // Delta 20260918c-question-cards: the worked example is the `BM-QUESTIONS`
     // block the Manager's chat card reads, so its shape is pinned.
     rule(W, "a worked question set is shown", /Q1: Storage — [\s\S]{0,200}\(recommended\)/);
@@ -472,7 +535,6 @@ describe("worker.md — the workflow", () => {
     // First live run (F7): five points in the chat, four in `blockers`, so the user saw four.
     rule(W, "a point for the user is never left only in the chat", /never a\s+remark left only in your chat/i);
     rule(W, "the example says what makes a question answerable", /every option is named/);
-    rule(W, "a moment with nothing to ask is skipped", /skip a moment with nothing to ask/i);
     rule(W, "at most five numbered questions", /at most 5 numbered questions/i);
     rule(W, "each question carries options and a recommendation", /options, your recommendation/);
     rule(W, "every question goes into the BM-QUESTIONS block of the report's message", /in the same message a `BM-QUESTIONS` block with EVERY question/);
@@ -490,7 +552,6 @@ describe("worker.md — the workflow", () => {
       ["make a security trade-off", /mak\w* a security trade-off/i],
       ["edit a frozen document", /edit\w* a frozen document/i],
       ["delete or merge existing beads", /delet\w* or merg\w* existing beads/i],
-      ["several beads match the labels", /more than one → stop and ask/i],
     ] as const) {
       rule(W, `stop-and-ask trigger: ${name}`, pattern);
     }
@@ -501,12 +562,17 @@ describe("worker.md — the workflow", () => {
   it("gets one review and one re-review per batch, and never fixes non-blocking findings", () => {
     rule(W, "a review is a message to a Reviewer agent", /review happens only when you send a message to a Reviewer|review happens only when you send a Reviewer agent a message/i);
     rule(W, "one review, then at most one re-review", /one review and, only if blocking findings remain, one re-review/i);
-    // REQ-037(e): Small gets exactly one review, so a blocking finding there is
-    // fixed and reported, never re-reviewed (review b3, B2).
-    rule(W, "a Small request has exactly one review in all", /Small request is the exception: it has exactly one review/i);
-    rule(W, "and a blocking finding there goes to the user, not to a second Reviewer", /never a second Reviewer message/i);
+    // Design delta 20260924-worker-autonomy: Small no longer has the one-review
+    // exception that ended in a question to the user; documents are reviewed
+    // before implementing only for Large or on request.
+    rule(W, "the same at every tier", /one re-review\s+— at every tier/);
+    rule(W, "what was written is reviewed before implementing only for Large or on request", /Review what you\s+wrote before implementing only for a Large request or when the user asks/);
+    rule(W, "a review the user asks for is its own yes", /a\s+review the user asks for is its own yes to the calls it takes/);
+    expect(W).not.toMatch(/Small request is the exception/);
     rule(W, "a batch keeps its id", /keeps its `batchId`/);
-    rule(W, "non-blocking findings are not fixed", /[Dd]o not fix non-blocking findings/);
+    // Design delta 20260924-instruction-quality §2.3: the rule now says why, and lets a slip in the Worker's own work be fixed.
+    rule(W, "non-blocking findings are suggestions, with the reason", /Non-blocking findings are suggestions: fix one only when it is a\s+slip in what you wrote for this request and needs no new review/);
+    rule(W, "and why the rest are not fixed", /fixing them grows the scope and would need\s+another review/);
     rule(W, "blocking findings after the re-review stop the work", /stop, send `blocked` with them, and ask the user/i);
     rule(W, "a re-review goes to the same Reviewer", /same Reviewer/);
     // Owner decisions Q17 and Q21: the plugin counts, the Worker does not.
@@ -535,21 +601,12 @@ describe("worker.md — the workflow", () => {
     expect(W).not.toMatch(/plugin sets the Reviewer's\s+mode/i);
     // Review b3: "cannot write or reach the network" was false of Codex auto.
     expect(W).not.toMatch(/cannot write or reach the network/);
-    // The stage criteria moved here from reviewer.md: one Reviewer, one stage.
-    // A Large b1 carries the plan, so that brief needs the plan criteria too.
-    rule(W, "a documents batch that carries a plan names the plan criteria", /Large `b1` carries the plan too/);
-    for (const criteria of [
-      "`checklists/prd-ready.md`",
-      "`reviewing-plan` in its review-only mode",
-      "`converting-plan-to-beads/reference/leaf-bead-checklist.md`",
-      "`implementing-beads`: the preflight",
-    ]) {
-      verbatim(W, criteria);
-    }
-    rule(W, "the brief carries the stage criteria", /the criteria for that stage/i);
-    rule(W, "the review format is not pasted into the prompt", /Do not paste the `BM-REVIEW` format/);
+    // Design delta 20260924-instruction-quality §2.2: the criteria live in
+    // reviewer.md only; the Worker names the stage, chosen by what it wrote.
+    rule(W, "the stage follows what was written", /the stage — `implementation`\s+after implementing; before it, `plan` when you wrote a plan, otherwise `beads`,\s+plus `documents` when you wrote any/);
+    rule(W, "the Reviewer owns the criteria", /The Reviewer knows each stage's criteria;\s+do not paste them or the `BM-REVIEW` format/);
+    expect(W).not.toMatch(/checklists\/prd-ready\.md/);
   });
-
   it("treats only a stop message or an empty resume as a stop", () => {
     const stop = between(W, "A turn is a STOP only if it brings");
     rule(stop, "an empty turn after a cut-off is a stop", /\*\*nothing at all\*\*/);
@@ -575,7 +632,8 @@ describe("worker.md — the workflow", () => {
     rule(W, "reports do not wake the Manager", /`notifyOnFinish: false`/);
     rule(W, "Reviewer calls keep the default so a verdict wakes the Worker", /a verdict wakes you/);
     rule(W, "reports go out only at the four moments", /Report \*\*only\*\* at `received`[^.]{0,120}`finished`/i);
-    rule(W, "Small reports twice", /Small sends only `received` and `finished`/);
+    rule(W, "beads-done is Large's, after b1", /`beads-done` \(Large, after\s+`b1`\)/);
+    expect(W).not.toMatch(/Small sends only `received` and `finished`/);
     rule(W, "no progress updates in between", /no progress updates (in )?between/i);
     rule(W, "bead fields hold full ids only", /full ids only, comma-separated/);
     rule(W, "skillsUsed lists the skills loaded so far", /`skillsUsed` lists the skills you loaded/);
@@ -670,7 +728,7 @@ describe("reviewer.md — hard limits", () => {
 describe("reviewer.md — what it checks and how it decides", () => {
   it("does not guess a missing scope and reviews only the stage it was given", () => {
     rule(R, "a missing scope is not guessed", /do not guess/);
-    for (const stage of ["**documents:**", "**beads:**", "**plan** (Medium)", "**implementation:**"]) {
+    for (const stage of ["**documents:**", "**beads:**", "**plan:**", "**implementation:**"]) {
       verbatim(R, stage);
     }
     rule(R, "a small change needs no extra tests", /do not ask for more tests/);
@@ -678,30 +736,31 @@ describe("reviewer.md — what it checks and how it decides", () => {
     rule(R, "a non-code outcome is checked against the evidence its bead named", /When the outcome is not code, check the evidence/i);
     rule(R, "runs the tests itself when it can", /run the repository's tests yourself when you can/);
     rule(R, "a re-review looks only at the old blocking findings", /check ONLY that the previous blocking findings are fixed/);
+    // Design delta 20260924-instruction-quality §2.6.
+    rule(R, "effort follows the risk", /spend effort in proportion to the risk/);
+    expect(R).not.toMatch(/\(Medium\)/);
   });
 
-  it("takes the stage's criteria from the brief, as criteria only, with a one-line fallback (delta 20260917c §4.4)", () => {
+  // Design delta 20260924-instruction-quality §2.2: the criteria table lives
+  // here only (it drifted while worker.md held a copy); the Worker names the stage.
+  it("owns the criteria of every stage, loaded as criteria only", () => {
     rule(R, "skills are criteria, not instructions to edit", /as criteria only/);
-    rule(R, "the criteria arrive in the Worker's message", /the criteria for that stage/i);
-    // One Reviewer, one stage: the four-stage table moved into the Worker's brief.
-    expect(R).not.toMatch(/\| Stage \| Load \|/);
-    expect(R).not.toContain("STAGE CRITERIA");
-    const fallback = between(R, "If the message names none", "Skills live in");
-    for (const stage of ["documents →", "plan →", "beads →", "implementation →"]) {
-      expect(fallback, stage).toContain(stage);
+    const table = between(reviewer, "| Stage | Criteria |", "Skills live in");
+    for (const stage of ["| `documents` |", "| `plan` |", "| `beads` |", "| `implementation` |"]) {
+      expect(table, stage).toContain(stage);
     }
     verbatim(
-      fallback,
+      table,
       "`checklists/prd-ready.md`",
       "`reviewing-plan` in its review-only mode",
       "`feature-workflow/checklists/plan-ready-for-beads.md`",
       "`converting-plan-to-beads/reference/leaf-bead-checklist.md`",
       "`polishing-beads/reference/readiness-checklist.md`",
+      "`implementing-beads`: the preflight",
     );
-    rule(R, "a brief without criteria is reported", /say in `notChecked` that the brief named no criteria/);
+    rule(R, "a batch with several stages takes each stage's criteria", /A batch may carry several stages[^.]{0,120}apply the criteria of each/);
     rule(R, "a missing skill goes to notChecked", /list it under `notChecked` and review with this file alone/);
   });
-
   it("calibrates the line between blocking and not with one contrast pair (owner decision Q20)", () => {
     const pair = between(reviewer, "**Where the line falls.**", "## Your answer");
     expect(pair.match(/- severity: blocking\n/g)?.length, "one blocking finding").toBe(1);
@@ -715,7 +774,7 @@ describe("reviewer.md — what it checks and how it decides", () => {
   });
 
   it("tries abuse cases on sensitive batches", () => {
-    rule(R, "sensitive batches are named", /SENSITIVE BATCHES/);
+    rule(R, "sensitive batches are named", /\*\*Sensitive batches\*\*/);
     for (const abuse of [
       "authorization bypass",
       "session revocation",
@@ -734,12 +793,15 @@ describe("reviewer.md — what it checks and how it decides", () => {
     rule(R, "a bug or a failing check is blocking", /a bug, a failing check/);
     rule(R, "a weakened test is blocking", /(test|assertion|acceptance criterion)[^;]{0,90}(weakened|deleted)[^;]{0,60}pass/i);
     rule(R, "a bundled or proof-less Medium/Large leaf is blocking", /bundles several outcomes|lacks Primary Proof or Reversibility/);
-    rule(R, "beads batch and Medium plan batch both count", /in a `beads` batch, or among the beads of a Medium `plan` batch/);
+    rule(R, "beads and plan batches both count", /in a `beads` or `plan` batch, a leaf that bundles several outcomes/);
+    // Design delta 20260924-instruction-quality P0-3: the tier no longer allows or forbids a change.
+    rule(R, "an unasked contract change is judged against the request and design, not the tier", /change that neither the request nor an approved design asked for/);
+    expect(R).not.toMatch(/the tier did not allow/);
     rule(R, "a guessed decided value is blocking", /forces an implementer to guess a decided value/);
-    rule(R, "unasked work is never blocking", /ANY WORK THE REQUEST DID NOT ASK FOR/);
-    rule(R, "hardening beyond the request is never blocking", /HARDENING BEYOND THE REQUEST/);
+    rule(R, "unasked work is never blocking", /any work the request did not ask for/);
+    rule(R, "hardening beyond the request is never blocking", /hardening\s+beyond the request and the approved design/);
     rule(R, "unless it is an exploitable defect", /unless it is an exploitable defect in what was built/);
-    rule(R, "at most three non-blocking findings", /At most three non-blocking findings/);
+    rule(R, "only the three non-blocking findings that matter most", /Give only the three non-blocking findings that matter most/);
   });
 
   it("returns the exact BM-REVIEW block", () => {
@@ -798,11 +860,13 @@ describe("manager.md — hard limits", () => {
   });
 
   it("M3 — never says more than it can see", () => {
-    rule(MR, "never reads another agent's conversation", /another agent's conversation/i);
-    rule(MR, "reports and the status tools are the only sources", /`BM-REPORT`[^.]{0,80}(status|activity)/i);
-    // The plugin speaks to the Manager too (`BM-BUDGET`); without this the
-    // limit would forbid acting on its own notices (review b3).
-    rule(MR, "the plugin's own notices count as a source", /the plugin's own notices \(they start with `BM-`\)/);
+    // Owner decision P2-3 (2026-09-24): "Manager hoàn toàn được phép, như vậy
+    // mới là giá trị quan trọng của Manager - nắm được tình trạng công việc".
+    // The old "never read another agent's conversation" is reversed on purpose.
+    rule(MR, "knowing where the work stands is its job", /Knowing where the work stands is your\s+job/);
+    rule(MR, "reads the Worker's and Reviewers' status and activity", /read a Worker's or its\s+Reviewers' status and activity \(`get_agent_status`, `get_agent_activity`\)/);
+    rule(MR, "the plugin's own notices count as a source", /the reports and the plugin's notices/);
+    rule(MR, "says what it saw and how old it is", /Say what you saw and how old it is/);
     rule(MR, "says so when it does not know", /(say|admit|tell)[^.]{0,80}(do not|don't) know/i);
   });
 
@@ -834,6 +898,8 @@ describe("manager.md — hard limits", () => {
   it("M5 — never reads or prints secrets, including the environment", () => {
     rule(MR, "no environment scanning", /(never|not|no)[^.]{0,60}environment/i);
     verbatim(MR, '`$PASEO_AGENT_ID`');
+    // Owner decision P2-3 lets it read other agents' activity: a secret seen there is still never printed.
+    rule(MR, "a secret seen in another agent's activity is never printed", /NEVER READ OR PRINT SECRETS\*\* — the environment, or one seen in an agent's\s+activity/);
   });
 
   it("does not carry the Worker's own limits (owner decision, 2026-09-16)", () => {
@@ -842,16 +908,17 @@ describe("manager.md — hard limits", () => {
 });
 
 describe("manager.md — how it runs a request", () => {
-  it("delegates before it checks anything else", () => {
-    order(M, "delegate first", "2. **Delegate now", "4. **Then check skills**");
-    rule(M, "no lookups before delegating", /Do not check skills, search tools or list agents first/);
+  it("delegates before it looks anything up", () => {
+    order(M, "delegate first", "2. **Delegate now", "4. **Confirm to the user");
+    rule(M, "no lookups before delegating", /Do not search tools or list\s+agents first/);
   });
-
-  it("guesses the size with the same ordered rule as the Worker", () => {
-    order(M, "tier rule order", "→ **Large**", "→ **Small**", "→ **Medium**");
-    rule(M, "bead count is never evidence", /number of beads is never evidence/i);
+  // Design delta 20260924-instruction-quality §3: the Worker sizes; a Manager
+  // guess only anchored it. A size the user states is still passed on.
+  it("leaves the size to the Worker and passes on only a size the user stated", () => {
+    rule(M, "the Worker sizes", /The Worker sizes it/);
+    rule(M, "a stated size is passed on", /a size\s+only if the user stated one/);
+    expect(M).not.toMatch(/guess the size|size guess/i);
   });
-
   it("spells out a create_agent call that succeeds first time", () => {
     verbatim(
       M,
@@ -878,51 +945,44 @@ describe("manager.md — how it runs a request", () => {
       "a missing mode fails loudly and is reported",
       /Paseo refuses to create a Worker\s+without one/,
       /If that section is missing, the creation fails with\s+Paseo's own list of modes, which you report/,
+      /If it names no Worker mode, the creation fails with\s+Paseo's own list of modes, which you report/,
     );
     expect(M).not.toMatch(/inspect_provider/);
     expect(M).not.toMatch(/bypassPermissions|full-access|colorTier/);
     rule(M, "the Worker's own instructions are not repeated", /The Worker already has its own instructions/);
   });
 
-  it("checks the five skills in the three directories and never blocks on them", () => {
-    for (const skill of [
-      "`feature-workflow`",
-      "`reviewing-plan`",
-      "`converting-plan-to-beads`",
-      "`polishing-beads`",
-      "`implementing-beads`",
-    ]) {
-      verbatim(M, skill);
-    }
-    verbatim(M, "`~/.agents/skills`", "`~/.claude/skills`", "`~/.codex/skills`", "`npx paseo-bm doctor`");
-    rule(M, "an absent codex directory is normal", /an absent `~\/.codex\/skills` is normal/);
-    rule(M, "a missing skill never blocks", /Keep going/);
+  // Design delta 20260924-instruction-quality §3, PRD delta REQ-035a: the
+  // plugin checks the skills and writes the result into the Runtime facts.
+  it("tells the user about missing skills from its Runtime facts, once, and never blocks", () => {
+    rule(M, "missing skills come from the Runtime facts", /If your `## Runtime facts` name missing\s+Worker skills, add that the first time you confirm a Worker in this chat/);
+    expect(M).not.toMatch(/~\/\.codex\/skills|Then check skills/);
   });
-
   it("answers a `received` report with one line", () => {
     rule(M, "received is acknowledged in one line", /\*\*`received`:\*\* one line/);
     rule(M, "and nothing more is due until the Worker speaks again", /Nothing else is due until it asks or\s+finishes/i);
   });
 
-  it("asks the user on a budget notice, and still checks the skills a tier requires", () => {
-    // Owner decisions Q17 and Q21: the plugin counts; on an overrun the Manager
-    // asks the user, because the user may have allowed the calls in the
-    // Worker's chat. The Manager no longer carries its own budget table.
+  it("only reports a budget notice", () => {
+    // Owner decision Q17: the plugin counts. Design delta 20260924-qa-ledger §6
+    // replaces Q21's "the Manager asks": the Worker asks before any review
+    // beyond its budget, so the Manager tells the user in one line and does
+    // not ask the same thing again. The Manager carries no budget table.
     expect(M).not.toMatch(/\*\*Total review calls per `requestId`\*\*/);
-    verbatim(M, "`BM-BUDGET`");
-    rule(M, "asks the user whether to continue or cancel", /ask the user whether to\s+continue or to cancel/i);
-    rule(M, "never cancels on the notice alone", /Never cancel on the notice\s+alone/);
-    // "Continue" means sending nothing: a message replaces the turn the Worker
-    // is in, so an encouraging reply would destroy the work (review b3).
-    rule(M, "a continue answer sends the Worker nothing", /send the Worker nothing/);
-    rule(M, "and a cancel answer says what is unfinished", /cancel the run and say what is unfinished/i);
+    // Design delta 20260924-instruction-quality §2.1: the notice says it all; manager.md only hands BM- messages to themselves.
+    expect(M).not.toMatch(/ask the user whether to\s+continue or to cancel/i);
+    const notice = budgetNotice({ requestId: "req-X", tier: "Large", calls: 5, budget: 4, managerAgentId: "m" });
+    expect(notice).toContain("do not ask the user about it");
+    expect(notice).toContain("Do not cancel on this notice alone");
+    rule(M, "a budget notice still allows a cancel the user asks for", /including after a budget notice/);
+    // The Worker is the one that asks, and a yes covers what the user said.
+    rule(W, "the Worker asks before a review past its budget", /Before a review call past the table's\s+number, send `blocked` and ask — unless the user asked for that review or for\s+the changes it covers/);
+    rule(W, "the Worker alone asks about it", /You are the only one who asks about it/);
+    rule(W, "a yes covers what the user said it covers", /a yes covers what the user said it covers \("one more", "until it is clean"\): do not ask again for a call inside it/);
     expect(M).not.toMatch(/If a limit is exceeded without permission: cancel/);
-    verbatim(
-      M,
-      "Large: `feature-workflow`, `reviewing-plan`, `converting-plan-to-beads`, `polishing-beads`, `implementing-beads`",
-      "Medium: `feature-workflow`, `polishing-beads`, `implementing-beads`",
-    );
-    rule(M, "a missing skill is reported, not punished", /Do not cancel the\s+Worker for it/);
+    // Design delta 20260924-worker-autonomy §4: skills are no longer required per tier.
+    expect(M).not.toMatch(/a skill its tier requires/);
+    expect(M).not.toMatch(/Small 1,\s+Medium 4, Large 6/);
   });
 
   it("keeps the user informed from what it can actually see (delta 20260917c §4.5)", () => {
@@ -939,7 +999,8 @@ describe("manager.md — how it runs a request", () => {
     rule(M, "because a message destroys the turn", /replaces the\s+turn it is in and throws that work away/i);
     rule(M, "the words are held, not dropped", /Hold the user's words/);
     rule(M, "and sent when that Worker's turn ends", /send when Paseo wakes you at that Worker's turn end/i);
-    rule(M, "progress questions are answered from the last report, with its age", /answer from the last report and the\s+agent status, and say how old/i);
+    rule(M, "progress is read from the Worker's activity, never asked of it", /never message the Worker to ask for\s+progress — read its activity instead/i);
+    rule(M, "progress questions are answered from what it saw, with its age", /answer from what you saw, with how old it is/i);
     rule(M, "two sources that disagree are both named", /which source said what/i);
     rule(M, "progress is never invented", /never invent progress/i);
   });
@@ -949,8 +1010,10 @@ describe("manager.md — how it runs a request", () => {
   });
 
   it("reports each Worker phase the way the user needs it", () => {
-    rule(M, "a Large beads-done waits for the user", /For a \*\*Large\*\* request say the Worker is waiting for the user's confirmation/);
-    rule(M, "never announces implementation early", /never say it started implementing before the user answered/);
+    // Design delta 20260924-worker-autonomy §4: Large no longer waits for a confirmation.
+    rule(M, "beads-done is one line and waits for nothing", /\*\*`beads-done`:\*\* one line[^.]{0,120}it waits for no confirmation/);
+    rule(M, "finished counts the Worker's own decisions, which the user can overturn", /how many choices the report's `decided` line lists —\s+made by the Worker on its own, any of which the user can overturn/);
+    expect(M).not.toMatch(/waiting for the\s+user's confirmation/);
     // Delta 20260918d-card-replies (owner decision Q1): every report reaches
     // the user as a card, so the Manager says only what the card does not. The
     // questions of a `BM-QUESTIONS` block are on the card's buttons and are
@@ -980,12 +1043,23 @@ describe("manager.md — how it runs a request", () => {
     );
     rule(M, "an answer that fits no single question is asked back, not guessed", /fits no single open question: ask the user, send nothing for it/);
     rule(M, "the Manager never picks for the user", /never pick an option for them/);
-    rule(M, "a Worker that reported again is not answered again", /reported again has had its answers[^.]{0,40}relay nothing more/);
+    rule(
+      M,
+      "a Worker that reported again is not answered again",
+      /reported again has had its answers[^.]{0,40}relay nothing more/,
+      // Design delta 20260924-qa-ledger §5.4 adds the BM-ANSWERED case to the same rule.
+      /reported again, or whose questions a `BM-ANSWERED` closed, has had its answers: relay nothing more/,
+    );
     // Delta 20260918d: the card lists the suggestions; the Manager counts them
     // and still asks the user which, if any, becomes new work.
-    rule(M, "suggestions are counted and put to the user", /how many `Suggestion \(not done\)` items[^.]{0,60}ask which, if any, becomes new work — the user decides/);
+    rule(M, "suggestions are counted and put to the user", /how many `Suggestion \(not done\)` items, and ask which\s+suggestion, if any, becomes new work — the user decides/);
     // The Manager can only relay them because the Worker puts them in `blockers`.
-    rule(W, "the Worker puts its suggestions in blockers", /goes in `blockers`[^.]{0,80}`none\. Suggestion \(not done\): …`/i);
+    // Design delta 20260924-instruction-quality P0-1: one `blockers` line, or the format check rejects the report.
+    // Owner decision P2-2: decisions have their own `decided` field; suggestions stay in `blockers`.
+    rule(W, "the Worker puts its suggestions in blockers", /goes in `blockers`, after `none` when nothing is blocking:\s+`none\. Suggestion \(not done\): …`/i);
+    rule(W, "and its own decisions on the decided line", /`decided` holds the choices you made on your own that\s+the user may want to overturn, `none` when there are none/);
+    verbatim(worker, "decided: <choice> — <why>; <choice> — <why>\nblockers:");
+    rule(W, "every field is one line", /Every field is one line\./);
     rule(M, "a turn that ended without a report is not news", /A Paseo notice that the Worker ended a turn WITHOUT a new `BM-REPORT`/);
     rule(M, "an error or a permission wait is told", /if the Worker errored or waits for a permission, tell the user/);
     rule(M, "otherwise one status line", /otherwise reply with ONE status line/);
@@ -1034,18 +1108,8 @@ describe("across the three files (delta 20260917c)", () => {
     }
   });
 
-  it("tells the Manager what the plugin's budget notice asks, in the same words (Q21)", () => {
-    const notice = flat(budgetNotice({ requestId: "req-X", tier: "Large", calls: 7, budget: 6, managerAgentId: "m" }));
-    const asked = "ask the user whether to continue or to cancel";
-    expect(notice.toLowerCase()).toContain(asked);
-    expect(M.replace(/\*\*/g, "").toLowerCase()).toContain(asked);
-    expect(notice.startsWith(BUDGET_NOTICE_MARKER)).toBe(true);
-    verbatim(M, `\`${BUDGET_NOTICE_MARKER}\``);
-  });
-
   it("shows worked examples as examples, not as lists of rules (§4.8)", () => {
     const workerBlocks = fenced(worker);
-    expect(workerBlocks.some((block) => block.includes("## Primary Proof") && block.includes("## Reversibility")), "a bead").toBe(true);
     // Delta 20260918c-question-cards: the question set is the `BM-QUESTIONS` block.
     expect(
       workerBlocks.some((block) => /^BM-QUESTIONS\nrequestId: .+\nQ1: .+\n- a: .+\(recommended\)\n- b: /m.test(block)),
@@ -1084,82 +1148,87 @@ describe("the RULES budget", () => {
   });
 });
 
-describe("the plugin's BM-FORMAT notice (delta 20260918g §4.10, REQ-061 j)", () => {
-  // Verbatim from the design: each role learns what the notice is and what to
-  // send back, and that it is not the user's words.
-  it.each([
-    [
-      "worker.md",
-      worker,
-      "A message that starts with `BM-FORMAT` comes from the plugin, not the user: your last block broke the template. Send the whole corrected block again, to the same agent, in one message, changing nothing else; do not redo work, then carry on where you were.",
-    ],
-    [
-      "manager.md",
-      manager,
-      "A message that starts with `BM-FORMAT` is the plugin's: your last `BM-ANSWERS` broke the template. Send the corrected block again to that Worker once it is not running; say nothing to the user about it.",
-    ],
-    [
-      "reviewer.md",
-      reviewer,
-      "A message that starts with `BM-FORMAT` is the plugin's: answer with the whole corrected `BM-REVIEW` block only; do not review again.",
-    ],
-  ])("%s carries its rule word for word", (_name, text, rule) => {
-    expect(text.replace(/\s+/g, " ")).toContain(rule);
+// Design delta 20260924-instruction-quality §2.1: every BM- message says what
+// the receiver does, so worker.md and manager.md carry one line for all of them
+// and the per-message rules are pinned on the messages themselves.
+describe("plugin messages carry their own instructions", () => {
+  it("worker.md and manager.md hand every BM- message to the message itself", () => {
+    // Review of this delta (blocking): a catch-all "BM-" also caught BM-REPORT,
+    // BM-NEW-REQUEST and the user's BM-ANSWERS; each file names its notices.
+    rule(W, "the plugin's notices are named and say what to do", /The plugin's notices — messages that start with `BM-FORMAT`, `BM-SETTINGS`,\s+`BM-HANDOVER`, `BM-RESUME` or `BM-FALLBACK` — come from the plugin, not the\s+user: each says what to do, so do exactly that/);
+    rule(W, "the user's BM-ANSWERS is not a notice", /A `BM-ANSWERS` block is the user's answer, not a notice\./);
+    rule(M, "the plugin's notices are named and say what to do", /The plugin's notices — messages that start with `BM-FORMAT`, `BM-BUDGET`,\s+`BM-TOOLS`, `BM-SETTINGS`, `BM-FALLBACK`, `BM-RESUME`, `BM-ANSWERED` or\s+`BM-HANDOVER` — come from the plugin, not the user or the Worker: each says what to do/);
+    rule(M, "a Worker report and the user's new-request flag are not notices", /A Worker's\s+`BM-REPORT` and the user's `BM-NEW-REQUEST` are not notices\./);
+    for (const [name, text] of [["worker.md", W], ["manager.md", M]] as const) {
+      expect(text, name).not.toMatch(/`BM-(SETTINGS|RESUME|FALLBACK|TOOLS|ANSWERED)` \(plugin\)/);
+    }
   });
 
-  // Delta 20260921 §4.3.5 (REQ-064 d): BM-SETTINGS carries a new child mode to
-  // the agents that create that child, so both creators take its line.
-  // Since phase 2a-17 (§4.5.2) a Worker's BM-SETTINGS may also carry the id
-  // of a replacement Manager, so its rule names any matching fact.
-  it.each([
-    ["worker.md", worker, "## Reporting", "## Stop", "`BM-SETTINGS` (plugin): its line replaces the matching fact, including the Manager's agent id you report to."],
-    ["manager.md", manager, "## Talking to the user", undefined, "`BM-SETTINGS` (plugin): its line replaces the matching `## Runtime facts` line."],
-  ])("%s takes a BM-SETTINGS line in place of the fact it names", (_name, text, from, to, rule) => {
-    expect(between(text, from, to).replace(/\s+/g, " ")).toContain(rule);
-  });
-
-  // Delta 20260921 §4.4.8 (REQ-065 d): a replacement Worker continues the
-  // request from the plugin's handover, reverting nothing.
-  it("worker.md continues a request from a BM-HANDOVER", () => {
-    const rule =
-      "A first message that starts with `BM-HANDOVER` (plugin) hands you a request whose Worker stopped: continue it. Read `git status` and `git diff` first; every change there is the request's, never revert it. Reopen a closed bead only if a review blocks it. Continue the review budget from `reviewCalls` and open no new batch for one in review. Send `received` to `managerAgentId`.";
-    expect(between(worker, "## Reporting", "## Stop").replace(/\s+/g, " ")).toContain(rule);
+  it("each notice says what its receiver does", () => {
+    expect(formatNotice("BM-REPORT", "req-X", ["x"])).toMatch(/Send the whole corrected block again[^\n]*Do not mention this notice to the user\.$/);
+    expect(formatNotice("BM-REPORT", "req-X", ["x"], true)).toMatch(/Do NOT send this block again[^\n]*Do not mention this notice to the user\.$/);
+    expect(formatNotice("BM-ANSWERS", "req-X", ["x"])).toMatch(/Send the whole corrected block again/);
+    for (const part of [
+      "never revert it",
+      "Reopen a closed bead only if a review blocks it",
+      "Continue the review budget from `reviewCalls`",
+      "never ask an answered one again",
+      "number new ones after the highest listed (from Q100 when it reads `unknown`)",
+      "send `received` to `managerAgentId`",
+    ]) {
+      expect(WORKER_CLOSING, part).toContain(part);
+    }
+    expect(settingsNotice("Worker mode: `x`")).toMatch(/replaces the matching line[\s\S]*Do not reply to this message; carry on/);
+    expect(managerIdNotice("m-2")).toContain("send every BM-REPORT to this agent from now on");
+    expect(RESUME_NOTICE).toContain("Continue from where you stopped; do not redo finished work.");
+    expect(toolsNotice("w", "pi")).toContain("Tell the user in one line; do not create another Worker");
   });
 
   // Delta 20260921 §4.5.1 (REQ-066 b): a Reviewer stopped by its provider plan
-  // is replaced through its Worker, on the plugin's instructions.
+  // is replaced through its Worker, on the plugin's instructions — before any
+  // notice arrives, so this one stays in worker.md.
   it("worker.md waits for BM-FALLBACK when a Reviewer ends on a provider error", () => {
     expect(between(worker, "## Reviewing", "## Reporting").replace(/\s+/g, " ")).toContain(
       "A Reviewer of yours that ends on a provider error (usage limit, credit or billing, login, provider unavailable) is not a review: create no other Reviewer, end your turn without a report, and wait — the plugin asks the user with a card, then sends you `BM-FALLBACK`.",
     );
   });
 
-  // Delta 20260921 §4.4.9 (REQ-065 e): after the reset the plugin resumes the Worker.
-  it("worker.md carries on after a BM-RESUME", () => {
-    expect(between(worker, "## Reporting", "## Stop").replace(/\s+/g, " ")).toContain(
-      "`BM-RESUME` (plugin): your usage limit reset; continue where you stopped.",
+  it("reviewer.md keeps its BM-FORMAT rule, next to its answer", () => {
+    expect(between(reviewer, "## Your answer", "## Stop").replace(/\s+/g, " ")).toContain(
+      "A message that starts with `BM-FORMAT` is the plugin's: answer with the whole corrected `BM-REVIEW` block only; do not review again.",
     );
   });
+});
 
-  // Delta 20260921 §4.4.6 (REQ-065 c): the Manager hears about a stopped
-  // Worker from the plugin and never creates the replacement itself.
-  // Delta 20260921 §4.5.2 (REQ-066 c): a replacement Manager takes over the
-  // Workers listed in its handover and recreates none.
-  it("manager.md takes over from a BM-HANDOVER role manager", () => {
-    expect(between(manager, "## Talking to the user").replace(/\s+/g, " ")).toContain(
-      "A first message that starts with `BM-HANDOVER` and `role: manager` makes you this workspace's Manager: take the listed Workers as yours, tell the user in one line, and recreate no Worker that exists.",
-    );
+describe("manager.md closes what BM-ANSWERED reports (design delta 20260924-qa-ledger §5.4)", () => {
+  it("drops the questions, relays nothing, and tells the user in one line", () => {
+    expect(manager).toMatch(/or whose\n {2}questions a `BM-ANSWERED` closed, has had its answers: relay nothing more\./);
   });
+});
 
-  it("manager.md tells the user about a BM-FALLBACK and creates no agent itself", () => {
-    const rule =
-      "`BM-FALLBACK` (plugin): tell the user in one line and create no agent yourself; on `status: switched`, follow the agent on its `replacement` line.";
-    expect(between(manager, "## Talking to the user").replace(/\s+/g, " ")).toContain(rule);
+describe("worker.md: an action handed to the user is answered once it is done (design delta 20260924-qa-ledger §7)", () => {
+  it("writes such an option as done, never as a promise, and does not re-ask it under a new number", () => {
+    rule(W, "choosing the option means the action is done", /An option that needs the user to act outside the chat \([^)]*\) is written so that choosing it means it is done/);
+    rule(W, "never a promise to report back", /never "I will do X, then tell you"/);
+    // Review finding 4: "wait" named no channel and pulled against "an answer
+    // closes its number"; `blocked` must carry questions (bm-format.ts), so a
+    // failed check is a new question under a new number, said as such.
+    rule(W, "a failed check after it is asked under a new number, saying what was seen", /If your check still fails after such an answer, it did not settle the question: say in one line what you saw and ask under a new number\./);
   });
+});
 
-  it("sits where each role already hears about the plugin's messages", () => {
-    expect(between(worker, "## Reporting", "## Stop").replace(/\s+/g, " ")).toContain("starts with `BM-FORMAT`");
-    expect(between(manager, "## Talking to the user").replace(/\s+/g, " ")).toContain("starts with `BM-FORMAT`");
-    expect(between(reviewer, "## Your answer", "## Stop").replace(/\s+/g, " ")).toContain("starts with `BM-FORMAT`");
+describe("worker.md: an answered number is closed (design delta 20260924-qa-ledger §3.4)", () => {
+  it("asks what an answer left open under a new number", () => {
+    rule(W, "an answer closes its number even when it does not settle it", /An answer that does not settle its question still closes that number: ask what is left under a new number, saying why\./);
+  });
+});
+
+// Owner decision P2-1 (2026-09-24): "Việc tra cứu thì không được phép có bead
+// và reviewer" — forbidden, not merely optional.
+describe("worker.md: a request that only asks for information", () => {
+  it("never gets a bead, a Reviewer or a review call, and skips straight to finished", () => {
+    rule(W, "skips the change steps", /A request that only asks for information\s+never gets a bead, a Reviewer or a review call: answer it \(below\), send\s+`finished`, and skip steps 3–6\./);
+    rule(W, "never a bead or a Reviewer, no document unless asked", /changes nothing, so it never gets a bead or a\s+Reviewer, and no document unless the user asks for one/);
+    rule(W, "the answer goes in the chat and blockers stays none", /give it with its sources in your chat\. In the `finished` report `blockers`\s+stays `none`/);
   });
 });

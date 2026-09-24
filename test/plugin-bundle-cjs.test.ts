@@ -268,9 +268,10 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
     // 20260918g labels a bm-* agent created without bm.role on agent.created,
     // and starts its once-per-run label scan on agent.turn_started too; its
     // BM-FORMAT check runs on agent.turn_ended; delta 20260921 adds the
-    // fallback detection on agent.turn_ended.
+    // fallback detection on agent.turn_ended; delta 20260924 adds the
+    // question–answer ledger on agent.turn_ended.
     expect([...onHooks.keys()].sort()).toEqual(["agent.created", "agent.turn_ended", "agent.turn_started"]);
-    expect(onHooks.get("agent.turn_ended")).toHaveLength(4);
+    expect(onHooks.get("agent.turn_ended")).toHaveLength(5);
     expect(onHooks.get("agent.turn_started")).toHaveLength(2);
     expect(onHooks.get("agent.created")).toHaveLength(1);
 
@@ -278,7 +279,12 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
     const ensured = await handlers.get("manager.ensure")!({ workspaceId: "ws-1" }, { paseo });
     expect(ensured).toEqual({ agentId: "created-1", created: true, otherManagerIds: [], modeNotice: null, toolsNotice: null });
     expect(created).toHaveLength(1);
-    expect(created[0]!.options.config.systemPrompt).toBe(managerMd);
+    // The base, then the Runtime facts: `bm-worker` extends codex here, so the
+    // plugin states the Worker's skills (design delta 20260924-instruction-quality
+    // §3). Which skills this machine has is not the test's business.
+    const prompt = created[0]!.options.config.systemPrompt as string;
+    expect(prompt.startsWith(managerMd.trimEnd())).toBe(true);
+    expect(prompt).toMatch(/\n## Runtime facts\n\n(?:Worker mode: [^\n]*\n)?Worker skills: (all present\.|missing `)/);
 
     const described = await handlers.get("roles.describe")!({}, { paseo });
     expect(described).toEqual({
@@ -299,7 +305,8 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
       `${workerMd.trimEnd()}\n\n## Runtime facts\n\nReviewer mode: \`auto\` — pass it as \`settings.modeId\` when you create a Reviewer.\n`,
     );
     expect((await run({ provider: "bm-reviewer", cwd: "/repo" }))?.config.systemPrompt).toBe(reviewerMd);
-    expect(await run({ provider: "bm-manager", cwd: "/repo", systemPrompt: managerMd })).toBeUndefined();
+    // A Manager that already carries its full instructions (base + Runtime facts) is left alone.
+    expect(await run({ provider: "bm-manager", cwd: "/repo", systemPrompt: prompt })).toBeUndefined();
     // Another provider's agent is answered at once, without a lookup.
     expect(hook({ request: { config: { provider: "claude", cwd: "/repo" } } }, { paseo })).toBeUndefined();
 

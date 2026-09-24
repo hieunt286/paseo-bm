@@ -24,6 +24,7 @@ function report(over: Partial<Record<(typeof REPORT_FIELDS)[number], string | nu
     reviewFindingsOpen: "none",
     buildAndTests: "live Paseo snapshots read; scratch vitest probe 1/1 pass",
     skillsUsed: "none",
+    decided: "none",
     blockers: "none. Suggestion (not done): label the Manager.",
     ...over,
   };
@@ -177,7 +178,7 @@ describe("BM-REPORT rules", () => {
     expect(issuesOf(report({ requestId: "req-2026-09-18" }))).toEqual(['requestId: must look like req-YYYYMMDDTHHMMSSZ (got "req-2026-09-18")']);
     expect(issuesOf(report({ phase: "done" }))).toEqual(['phase: must be one of received, beads-done, blocked, finished (got "done")']);
     expect(issuesOf(report({ tier: "Large" }))).toEqual([
-      'tier: must be "Small|Medium|Large (changed: no)" or "… (changed: from <tier>, <reason>)"',
+      'tier: must be "Small|Medium|Large (changed: no)" or "… (changed: from <tier>, <reason>)"; a short note may follow either',
     ]);
     expect(issuesOf(report({ tier: "Large (changed: from Small)" }))).toHaveLength(1);
   });
@@ -196,7 +197,7 @@ describe("BM-REPORT rules", () => {
   it("skillsUsed, reviewFindingsOpen and the free-text fields", () => {
     expect(issuesOf(report({ skillsUsed: "feature workflow" }))).toEqual(["skillsUsed: must be none or skill names separated by commas"]);
     expect(issuesOf(report({ reviewFindingsOpen: "b2: flush trigger; the other one" }))).toEqual([
-      'reviewFindingsOpen: must be none or "b<n>: <finding>" items separated by ";"',
+      'reviewFindingsOpen: must be none or "b<n>: <finding>" items separated by ";" — write none when no finding is open',
     ]);
     expect(issuesOf(report({ reviewFindingsOpen: "b2: flush trigger; b3: rollback" }))).toEqual([]);
     expect(issuesOf(report({ blockers: "" }))).toEqual(["blockers: is empty; write none"]);
@@ -289,6 +290,124 @@ describe("BM-REVIEW rules", () => {
   });
 });
 
+/**
+ * The 2026-09-23 diagnosis of the project-b run
+ * (docs/operations/paseo-bm-chan-doan-hoi-lap-20260923.md, fault L2): 9 of 87
+ * real BM-REPORT blocks tripped the check, and every one of them tripped on
+ * `tier` or `reviewFindingsOpen` alone. The 10 distinct values fell into six
+ * shapes, five of which the template in worker.md reads as allowed.
+ *
+ * The SHAPES below are those ten, verbatim; the free text inside them is
+ * neutralised, because they come from another repository's reports and this one
+ * is published. What each case pins is the shape, which is what the checker
+ * reads.
+ */
+describe("field values a real run produced (diagnosis 2026-09-23, fault L2)", () => {
+  const accepts = (over: { tier?: string; reviewFindingsOpen?: string }) => issuesOf(report(over));
+
+  it("A — a note after `none` on reviewFindingsOpen", () => {
+    expect(accepts({ reviewFindingsOpen: "none (b1: 4 blocking in round 1 + 1 in round 2 — all fixed; 3 non-blocking left on purpose)" })).toEqual([]);
+    expect(accepts({ reviewFindingsOpen: "none (b1 verdict pass; 2 non-blocking findings, not fixed by the rule)" })).toEqual([]);
+    expect(accepts({ reviewFindingsOpen: "none (b1 verdict pass; 1 non-blocking finding left as a suggestion)" })).toEqual([]);
+    expect(accepts({ reviewFindingsOpen: "none — b1 had 5 blocking, the re-review found 1 survivor, all 6 fixed; the b1 budget is spent" })).toEqual([]);
+  });
+
+  it("B — a note after `(changed: no)` on tier", () => {
+    expect(accepts({ tier: "Large (changed: no — stays Large; wave 3 item 3 widens it to ~26 screens so rule 1 still holds)" })).toEqual([]);
+  });
+
+  it("C — a parenthetical inside `from <tier>`, and a `reason:` label", () => {
+    expect(accepts({ tier: "Small (changed: from Large (preliminary guess), reason: the deliverable is one new standalone file)" })).toEqual([]);
+    expect(accepts({ tier: "Small (changed: from Large (preliminary guess), reason: a reference file; no running code touched)" })).toEqual([]);
+  });
+
+  it("D — a short label between `b<n>` and the colon", () => {
+    expect(accepts({ reviewFindingsOpen: "b1 re-review: the final acceptance swaps row 1 for a checksum with no dated exception" })).toEqual([]);
+  });
+
+  it("E — a `;` inside a parenthesis does not split an item", () => {
+    // The real value split into four parts, two of which named no batch at all.
+    const value = "b1: a token reaches unprotected pipelines (a trade-off; needs Q6); b1: 3 other blocking findings fixed (baseline aligned; row 1 not run)";
+    expect(value.split(";")).toHaveLength(4);
+    expect(accepts({ reviewFindingsOpen: value })).toEqual([]);
+  });
+
+  it("F — prose that names no finding is STILL rejected, and the message teaches the fix", () => {
+    expect(accepts({ reviewFindingsOpen: "b4 is still running, no result yet" })).toEqual([
+      'reviewFindingsOpen: must be none or "b<n>: <finding>" items separated by ";" — write none when no finding is open',
+    ]);
+  });
+
+  it("what was wrong before stays wrong", () => {
+    expect(accepts({ tier: "Huge (changed: no)" })).toHaveLength(1);
+    expect(accepts({ tier: "Large" })).toHaveLength(1);
+    expect(accepts({ tier: "Large (changed: from Huge, widened)" })).toHaveLength(1);
+    expect(accepts({ tier: "Large (changed: maybe)" })).toHaveLength(1);
+    // `from <tier>` still needs a reason: the comma is not one.
+    expect(accepts({ tier: "Large (changed: from Small, )" })).toHaveLength(1);
+    // …and the tier name itself is still a tier name, not a prefix of one.
+    expect(accepts({ tier: "Large (changed: from Smallish, the scope grew)" })).toHaveLength(1);
+    expect(accepts({ tier: "Large (changed: from Largeee)" })).toHaveLength(1);
+    expect(accepts({ tier: "Large (changed: from Small,)" })).toHaveLength(1);
+    expect(accepts({ reviewFindingsOpen: "b: no number" })).toHaveLength(1);
+    expect(accepts({ reviewFindingsOpen: "b1: one; prose with no batch" })).toHaveLength(1);
+  });
+});
+
+/**
+ * Fault L8 of the 2026-09-23 diagnosis: `checkReview` only accepted an indented
+ * `key: value` inside `findings:`, so a `checked:` value written as a list was
+ * rejected line by line. On 2026-09-22 a 2956-character review that listed its
+ * seven fixes drew seven "not a field" issues, and the re-send was 478
+ * characters shorter because the list had to be flattened into prose.
+ */
+describe("BM-REVIEW prose fields may run over several lines (fault L8)", () => {
+  const review = (...body: string[]) =>
+    ["BM-REVIEW", `requestId: ${REQ}`, "batchId: b1", "reviewKind: re-review", ...body].join("\n");
+
+  it("indented lines continue checked: and notChecked:", () => {
+    expect(
+      issuesOf(
+        review(
+          "verdict: changes-required",
+          "checked: I re-read the fixed sections against my first-pass reads.",
+          "  Fix 1: the rule now checks its conditions in code order. Resolved.",
+          "  Fix 2: the second uses the expanded index. Resolved.",
+          "findings:",
+          "- severity: blocking",
+          "  location: docs/design/a.md:58",
+          "  reason: The plan makes it the Phase 1 source for every tab.",
+          "  suggestedFix: Let it accept any tab and check VIEW on that tab.",
+          "notChecked: I did not re-extract all 10 tables.",
+          "  I spot-checked only two of them.",
+        ),
+      ),
+    ).toEqual([]);
+  });
+
+  it("a structured field still has to fit one line", () => {
+    expect(
+      issuesOf(review("  and more on the next line", "verdict: pass", "checked: x", "findings: none", "notChecked: x")),
+    ).toEqual(['-: line "and more on the next line" is not a field of the template']);
+  });
+
+  it("an unindented line that is not a field is still an issue", () => {
+    expect(
+      issuesOf(review("verdict: pass", "checked: x", "this line is neither", "findings: none", "notChecked: x")),
+    ).toEqual(['-: line "this line is neither" is not a field of the template']);
+  });
+
+  it("the findings list reads exactly as before", () => {
+    expect(
+      issuesOf(review("verdict: pass", "checked: x", "findings:", "- severity: blocking", "  location: a.ts:1", "notChecked: x")),
+    ).toEqual([
+      'finding 1: is missing "reason"',
+      'finding 1: is missing "suggestedFix"',
+      "verdict: must be changes-required: a finding is blocking",
+    ]);
+  });
+});
+
 describe("checkBlocks", () => {
   it("returns every block in order, with its requestId and own text", () => {
     const blocks = checkBlocks(BLOCKED);
@@ -315,5 +434,29 @@ describe("checkBlocks", () => {
     const issue: FormatIssue = { kind: "BM-REPORT", field: "phase", message: "must be one of …" };
     expect(issueText(issue)).toBe("BM-REPORT phase: must be one of …");
     expect(issueText({ ...issue, field: null })).toBe("BM-REPORT: must be one of …");
+  });
+});
+
+/**
+ * Design delta 20260924-instruction-quality P0-1: a Worker's decisions travel
+ * on the one `blockers` line. The review of delta worker-autonomy ran
+ * `checkBlocks` on both shapes; this pins what it found.
+ */
+describe("the decided field (owner decision P2-2)", () => {
+  it("is accepted between skillsUsed and blockers, and may be left out by an older Worker", () => {
+    expect(checkBlocks(report({ decided: "used zod — already a dependency; one bead — a single outcome" }))[0]!.issues).toEqual([]);
+    expect(checkBlocks(report({ decided: null }))[0]!.issues).toEqual([]);
+  });
+});
+
+describe("Decided: entries in a finished report", () => {
+  it("pass on one blockers line", () => {
+    const text = report({ blockers: "none. Decided: used zod — already a dependency; Decided: one bead — a single outcome; Suggestion (not done): more tests" });
+    expect(checkBlocks(text)[0]!.issues).toEqual([]);
+  });
+
+  it("break the template on lines of their own", () => {
+    const text = report({ blockers: "none." }) + "\nDecided: used zod — already a dependency";
+    expect(checkBlocks(text)[0]!.issues.map((issue) => issue.message).join(" ")).toMatch(/not a field of the template/);
   });
 });

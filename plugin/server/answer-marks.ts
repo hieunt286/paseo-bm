@@ -48,7 +48,7 @@ function hasControlCharacter(text: string): boolean {
   return false;
 }
 
-/** A key this store accepts: a card key is `agentId|requestId|questionIds|hash`. */
+/** A key this store accepts: a card key is `agentId|requestId|questionIds`. */
 export function isAnswerMarkKey(key: unknown): key is string {
   return typeof key === "string" && key.length > 0 && key.length <= ANSWER_MARK_KEY_MAX && !hasControlCharacter(key);
 }

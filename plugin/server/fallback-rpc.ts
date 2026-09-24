@@ -57,7 +57,7 @@ export function fallbackNotice(incident: FallbackIncident, baseOf: (alias: strin
     `replacement: ${incident.replacementId ?? "none"}`,
     "",
     closing ??
-      `The ${incident.role} stopped because of its provider plan. The user decides on the card in this chat. Tell the user in one line; do not create an agent yourself.`,
+      `The ${incident.role} stopped because of its provider plan. The user decides on the card in this chat. Tell the user in one line; do not create an agent yourself. Once the status is switched, follow the agent on the replacement line instead.`,
   ].join("\n");
 }
 

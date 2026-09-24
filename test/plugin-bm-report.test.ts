@@ -273,6 +273,7 @@ describe("report parsing", () => {
       reviewFindingsOpen: "none",
       buildAndTests: "npm test - pass",
       skillsUsed: "feature-workflow, polishing-beads",
+      decided: "used zod — already a dependency; Decided: one bead — a single outcome",
       blockers: "none",
       guardrail: "batch b3 reviews 1/2; total 5/6; userAllowedExtra 0",
     };
@@ -287,6 +288,8 @@ describe("report parsing", () => {
     expect(report?.incompleteFields).toEqual([]);
     expect(report?.skillsUsed).toEqual(["feature-workflow", "polishing-beads"]);
     expect(report?.beadsCreated).toEqual(["x-gcj", "x-gcj.1"]);
+    // Owner decision P2-2: the `decided` field, `; `-separated, a repeated label dropped.
+    expect(report?.decided).toEqual(["used zod — already a dependency", "one bead — a single outcome"]);
     // Owner decision Q17: the plugin counts review calls; the Worker's block no
     // longer carries a self-reported guardrail line.
     expect(template.some((line) => line.startsWith("guardrail"))).toBe(false);
@@ -458,5 +461,17 @@ describe("a BM-QUESTIONS block after the report (delta 20260918c-question-cards)
     expect(parseReports(`${report}\n\n${questions}`, ctx)).toEqual(alone);
     expect(parseReports(`${report}\n${questions}`, ctx)).toEqual(alone);
     expect(parseReports(`\`\`\`\n${report}\n${questions}\n\`\`\``, ctx)).toEqual(alone);
+  });
+});
+
+describe("the decided field (owner decision P2-2, 2026-09-24)", () => {
+  it("reads none as empty and is empty in a report written before the field existed", () => {
+    const withNone = parseReports(["BM-REPORT", "requestId: req-20260924T010000Z", "phase: finished", "decided: none", "blockers: none"].join("\n"), ctx)[0];
+    expect(withNone?.decided).toEqual([]);
+    expect(parseReports(PRIOR_FORMAT, ctx)[0]?.decided).toEqual([]);
+    // "none." and "none — …" are none too, as in blockers (review of P2).
+    for (const value of ["none.", "none — nothing to choose"]) {
+      expect(parseReports(["BM-REPORT", "requestId: req-20260924T010000Z", `decided: ${value}`].join("\n"), ctx)[0]?.decided, value).toEqual([]);
+    }
   });
 });

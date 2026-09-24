@@ -5,8 +5,11 @@
  * the count. The 2026-09-17 acceptance run showed the trace store counting 4
  * calls correctly while the Worker reported 5, so the number now comes from the
  * one place that gets it right: `reviewCallsOf`, the same figure the Dashboard
- * shows. The guardrail stays behavioural — this module only TELLS the Manager;
- * the Manager decides and the user permits. Nothing here stops an agent.
+ * shows. The guardrail stays behavioural — this module only TELLS the Manager,
+ * and since design delta 20260924-qa-ledger §6 the notice is for information
+ * only: the Worker is the one that asks the user before a review beyond its
+ * budget, and a second question from the Manager about the same calls asked
+ * the user twice (2026-09-23T05:59Z). Nothing here stops an agent.
  *
  * Two properties this module must never lose (review b2):
  * - It only ever tells the Manager about an overrun a Worker's or Reviewer's
@@ -40,26 +43,35 @@ import { agentFactsOf, reviewerReplacementsFor, type DashboardPaseo } from "./da
 import { BUDGET_NOTICE_MARKER } from "./notices";
 import { roleOfProvider } from "./agent-role";
 import { readRecords, type TraceStoreLocation } from "./trace-store";
+import type { BudgetTold } from "./budget-told";
 import { reconstructTraces, type ReconstructedTrace } from "./traces";
 
-/** Total review calls per request, by tier (REQ-037; unchanged by this delta). */
-export const REVIEW_BUDGET: Readonly<Record<Tier, number>> = { Small: 1, Medium: 4, Large: 6 };
+/**
+ * Total review calls per request, by tier (PRD delta 20260924-worker-autonomy,
+ * REQ-037d): one implementation batch — a review and one re-review — at every
+ * tier, plus the documents-and-beads batch a Large request reviews before it
+ * implements. Replaces 1 / 4 / 6, which paid for three batches of a Large
+ * request and a Small request with no re-review.
+ */
+export const REVIEW_BUDGET: Readonly<Record<Tier, number>> = { Small: 2, Medium: 2, Large: 4 };
 
 /** First word of the notice; `roles/manager.md` tells the Manager what to do with it. */
 export { BUDGET_NOTICE_MARKER } from "./notices";
 
 /**
- * The fixed notice the Manager receives, word for word from design delta §4.7.
- * The Manager ASKS the user; it never cancels on the notice alone, because the
- * user may have allowed the extra calls in the Worker's own chat (REQ-026e,
- * owner decision Q21). `roles/manager.md` pins the same text.
+ * The fixed notice the Manager receives, word for word from design delta
+ * 20260924-qa-ledger §6, which replaces the "ask the user whether to continue
+ * or cancel" of delta 20260917c §4.7: one side asks, and it is the Worker, which
+ * sends `blocked` before any review beyond its budget (worker.md "Reviewing").
+ * The Manager still never cancels on the notice alone. `roles/manager.md` pins
+ * the same instruction.
  */
 export function budgetNotice(over: BudgetOverrun): string {
   return (
     `${BUDGET_NOTICE_MARKER} requestId: ${over.requestId}\n` +
     `The Worker has used ${over.calls} review calls; the ${over.tier} budget is ${over.budget}. ` +
-    "Ask the user whether to continue or to cancel the Worker's run, and wait for the answer. " +
-    "Do not cancel on your own: the user may already have allowed the extra calls in the Worker's chat."
+    "For your information only: the Worker asks the user itself before any review beyond its budget, so do not ask the user about it. " +
+    "Tell the user in one line. Do not cancel on this notice alone; if the user asks you to stop the Worker, cancel its run."
   );
 }
 
@@ -106,8 +118,8 @@ export interface BudgetPaseo extends Omit<DashboardPaseo, "agents"> {
 export interface BudgetDeps {
   location: TraceStoreLocation;
   paseo: BudgetPaseo;
-  /** `workspaceId::requestId` of every request already told, or being told now. */
-  told: Set<string>;
+  /** Which overruns the Manager has already been told about; survives a reload. */
+  told: BudgetTold;
   /**
    * Overruns found at a Worker's or Reviewer's turn end that could not be sent
    * yet (the Manager was running). Only these may go out at a Manager turn end,
@@ -165,14 +177,24 @@ export async function checkReviewBudget(event: TurnEndedEvent, deps: BudgetDeps)
       );
       over = trace === undefined ? undefined : (overrunOf(trace) ?? undefined);
       if (over === undefined) return "within";
-      if (deps.told.has(keyOf(over))) return "already-told";
       pending.set(keyOf(over), over);
     }
 
     const key = keyOf(over);
-    if (deps.told.has(key)) return "already-told";
-    // Claimed BEFORE any await: two turn ends handled at once must not both send.
-    deps.told.add(key);
+    // Claimed BEFORE any await: two turn ends handled at once must not both
+    // send. The claim also carries the call count, so the SAME overrun is
+    // announced once while a LATER one still gets through (fault L5).
+    const claim = deps.told.claim(deps.location, key, over.calls);
+    if (claim !== "claimed") {
+      // Only a request told FOR GOOD may drop its pending entry: the Manager
+      // branch takes the first pending entry of its own, and a stale one would
+      // block the flush of every later over-budget request. `sending` is the
+      // other refusal and must leave the entry alone — it is the deferral
+      // another turn end left for the Manager to flush, and deleting it loses
+      // the warning entirely (review b3 re-review).
+      if (claim === "told") pending.delete(key);
+      return "already-told";
+    }
     claimed = key;
 
     const handle = deps.paseo.agents.ref?.(over.managerAgentId);
@@ -194,6 +216,7 @@ export async function checkReviewBudget(event: TurnEndedEvent, deps: BudgetDeps)
     }
 
     await handle.send(budgetNotice(over));
+    deps.told.commit(deps.location, key, over.calls);
     pending.delete(key);
     claimed = null;
     return "sent";
@@ -203,6 +226,6 @@ export async function checkReviewBudget(event: TurnEndedEvent, deps: BudgetDeps)
     return "deferred";
   } finally {
     // Not sent after all: let a later turn end try again.
-    if (claimed !== null) deps.told.delete(claimed);
+    if (claimed !== null) deps.told.release(claimed);
   }
 }

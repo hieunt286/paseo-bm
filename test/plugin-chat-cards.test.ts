@@ -3,9 +3,12 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ANSWER_MARK_KEY_MAX, isAnswerMarkKey } from "../plugin/server/answer-marks";
 import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store";
 import {
   answeredHow,
+  answeredInLedger,
+  movedOnLine,
   answerSummary,
   answeredKey,
   answersDraft,
@@ -438,6 +441,17 @@ describe("a report's questions", () => {
 describe("choosing answers", () => {
   const questions = card(ASKING).questions;
 
+  it("A8: never fills or sends a question the ledger already holds an answer to (design delta 20260924-qa-ledger §4.3)", () => {
+    const asking = card(ASKING);
+    const inLedger = new Set(["Q6"]);
+    expect(recommendedPicks(questions, {}, inLedger)).toEqual({ Q7: { key: "a" } });
+    // A pick left over from before the ledger answered it does not go out again.
+    expect(answersDraft(asking, { Q6: { key: "a" }, Q7: { other: "rename next release" } }, inLedger)).toBe(
+      ["BM-ANSWERS", "requestId: req-20260916T062244Z", "Q7: other — rename next release"].join("\n"),
+    );
+    expect(answersDraft(asking, { Q6: { key: "a" } }, inLedger)).toBe("");
+  });
+
   it("fills recommendations only into empty questions, and never pre-selects", () => {
     expect(recommendedPicks(questions, {})).toEqual({ Q6: { key: "a" }, Q7: { key: "a" } });
     expect(recommendedPicks(questions, { Q6: { key: "b" } })).toEqual({ Q6: { key: "b" }, Q7: { key: "a" } });
@@ -540,10 +554,45 @@ describe("the answers block in the Reply box", () => {
 describe("the answered memory", () => {
   const asking = card(ASKING);
 
-  it("keys the answered memory on the chat, the request, the questions and the message", () => {
+  it("keys on the chat, the request and the questions", () => {
     expect(answeredKey("m1", asking)).toBe(answeredKey("m1", card(ASKING)));
     expect(answeredKey("m1", asking)).not.toBe(answeredKey("m2", asking));
-    expect(answeredKey("m1", asking)).not.toBe(answeredKey("m1", card(`${ASKING}\nThat is all.`)));
+  });
+
+  /**
+   * Fault L3 of the 2026-09-23 diagnosis. A BM-FORMAT notice made the Worker
+   * re-send its report with one field corrected; the card text changed, the key
+   * changed with it, and the second card offered Q10-Q12 as if nobody had
+   * answered. The user answered twice and the second answer cut into the
+   * Worker's running turn.
+   */
+  it("a re-sent report with a corrected field shares the key with the first", () => {
+    const corrected = card(ASKING.replace("tier: Large (changed: no)", "tier: Large (changed: from Medium, the scope grew)"));
+    expect(corrected.text).not.toBe(asking.text);
+    expect(corrected.questions.map((question) => question.id)).toEqual(asking.questions.map((question) => question.id));
+    expect(answeredKey("m1", corrected)).toBe(answeredKey("m1", asking));
+  });
+
+  it("the key is still one the mark store accepts", () => {
+    const key = answeredKey("m1", asking);
+    expect(isAnswerMarkKey(key)).toBe(true);
+    expect(key.length).toBeLessThanOrEqual(ANSWER_MARK_KEY_MAX);
+  });
+
+  it("a trailing line in the message no longer makes a second key", () => {
+    expect(answeredKey("m1", card(`${ASKING}\nThat is all.`))).toBe(answeredKey("m1", asking));
+  });
+
+  /**
+   * The trade-off this key accepts, pinned so it stays a decision: two
+   * different question sets that reuse the same ids under one request share a
+   * key. What keeps that from happening is worker.md's rule that a Worker keeps
+   * counting its question numbers across the request.
+   */
+  it("the same ids under one request mean one question set, by the numbering rule", () => {
+    const relabelled = card(ASKING.replace("Q6: Storage", "Q6: Something else entirely"));
+    expect(relabelled.questions[0]!.text).not.toBe(asking.questions[0]!.text);
+    expect(answeredKey("m1", relabelled)).toBe(answeredKey("m1", asking));
   });
 });
 
@@ -839,6 +888,7 @@ describe("a question card that is no longer waiting", () => {
     requestId: "req-20260916T062244Z",
     text: ASKING,
     at: null,
+    answered: [] as string[],
   };
 
   it("is still waiting only while chat.waiting lists this very report for this chat", () => {
@@ -847,6 +897,14 @@ describe("a question card that is no longer waiting", () => {
     expect(stillWaiting(asking, "m1", [{ ...waitingEntry, requestId: "req-20260916T081749Z" }])).toBe(false);
     expect(stillWaiting(asking, "m1", [{ ...waitingEntry, text: `${ASKING}\nmore` }])).toBe(false);
     expect(stillWaiting(asking, "m1", [])).toBe(false);
+  });
+
+  it("reads which of its questions the ledger answered from its own chat.waiting entry only", () => {
+    const partly = { ...waitingEntry, answered: ["Q6"] };
+    expect([...answeredInLedger(asking, "m1", [partly])]).toEqual(["Q6"]);
+    expect([...answeredInLedger(asking, "m2", [partly])]).toEqual([]);
+    expect([...answeredInLedger(asking, "m1", null)]).toEqual([]);
+    expect(movedOnLine("Worker · Contact redesign")).toBe("Answered, or Worker · Contact redesign is working or has reported since.");
   });
 
   it("counts as answered when sent, marked, or no longer listed — and not while unknown", () => {

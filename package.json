@@ -29,7 +29,8 @@
     "generate:plugin-version": "node scripts/generate-plugin-version.mjs",
     "generate:role-instructions": "node scripts/generate-role-instructions.mjs",
     "typecheck:plugin": "tsc -p plugin/tsconfig.json",
-    "smoke:packed": "node scripts/smoke-packed.mjs"
+    "smoke:packed": "node scripts/smoke-packed.mjs",
+    "measure": "node scripts/measure-requests.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.12.0",

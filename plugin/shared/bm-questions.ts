@@ -183,6 +183,102 @@ export function parseQuestions(text: string): QuestionSet | null {
   return { requestId, questions: drafts.map(finish) };
 }
 
+/** One answer as it reached the Worker: `Q16`, and what follows `Q16:`. */
+export interface Answer {
+  id: string;
+  text: string;
+}
+
+export interface AnswerSet {
+  requestId: string | null;
+  answers: Answer[];
+}
+
+const ANSWERS_MARKER = /^\s*(?:>\s*)*(?:[-*]\s+)?(?:\*\*)?bm-answers(?:\*\*)?\s*$/i;
+/** Answers read from one block; more is not a real answer block. */
+export const MAX_ANSWERS = 50;
+
+/**
+ * The last `BM-ANSWERS` block of a message, or null when it has none
+ * (design delta 20260924-qa-ledger §3.3).
+ *
+ * The block arrives inside a longer message — "Reply from the user about …"
+ * from a card, "Continue <requestId>." plus the user's words from the Manager —
+ * so the marker is looked for across the whole message. The block ends at the
+ * first blank line after an answer, at another `BM-*` block, or at a closing
+ * fence: the user's own words after it are not answers. An answer that wraps
+ * onto indented lines keeps them. A repeated id keeps its first line.
+ *
+ * A QUOTED marker (`> BM-ANSWERS`) is a quotation — the user pasting an old
+ * block under their new answers — and is never read: taking the last block
+ * of any kind would record the old answers and drop the new ones (review of
+ * design delta 20260924-qa-ledger, finding 1).
+ */
+export function parseAnswers(text: string): AnswerSet | null {
+  if (typeof text !== "string" || text === "") return null;
+  const lines = text.split(/\r?\n/);
+  let start = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (ANSWERS_MARKER.test(lines[index]!) && !QUOTE.test(lines[index]!)) {
+      start = index;
+      break;
+    }
+  }
+  if (start === -1) return null;
+
+  let requestId: string | null = null;
+  const answers: Answer[] = [];
+  let current: Answer | null = null;
+  let budget = MAX_BLOCK_CHARS - lines[start]!.length - 1;
+  let started = false;
+
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const raw = lines[index]!;
+    budget -= raw.length + 1;
+    if (budget < 0) break;
+    const line = raw.replace(QUOTE, "");
+    if (line.trim() === "") {
+      if (answers.length > 0) break;
+      continue;
+    }
+    if (FENCE.test(raw)) {
+      if (!started) continue;
+      break;
+    }
+    if (ANY_MARKER.test(raw)) break;
+
+    const request = REQUEST_ID.exec(line);
+    if (request !== null) {
+      started = true;
+      if (requestId === null) requestId = cleanRequestId(request[1] ?? "");
+      continue;
+    }
+
+    const answer = QUESTION.exec(line);
+    if (answer !== null) {
+      started = true;
+      const id = `Q${Number.parseInt(answer[1]!, 10)}`;
+      if (answers.some((known) => known.id === id)) {
+        current = null;
+        continue;
+      }
+      if (answers.length >= MAX_ANSWERS) break;
+      current = { id, text: cut((answer[2] ?? "").replace(/\*\*/g, "").trim()) };
+      answers.push(current);
+      continue;
+    }
+
+    if (INDENTED.test(line) && current !== null) {
+      current.text = appended(current.text, line.trim());
+      continue;
+    }
+    if (answers.length === 0) continue;
+    break;
+  }
+
+  return answers.length === 0 && requestId === null ? null : { requestId, answers: answers.filter((entry) => entry.text !== "") };
+}
+
 function oneLine(text: string): string {
   return text.replace(/\s*\r?\n\s*/g, " ").trim();
 }

@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { handleChatWaiting, pendingFallbackOf, waitingOf, type WaitingCandidate, type WaitingEntry } from "../plugin/server/chat-waiting";
 import type { DashboardPaseo } from "../plugin/server/dashboard-rpc";
 import { ROLE_FALLBACK_STATE_FILE } from "../plugin/server/fallback-state";
+import { recordEntries } from "../plugin/server/qa-ledger";
 import { chatWaitingRpc, type FallbackIncident } from "../plugin/shared/contracts";
 
 /**
@@ -55,7 +56,7 @@ const worker = (overrides: Partial<WaitingCandidate> = {}): WaitingCandidate => 
 describe("waitingOf", () => {
   it("lists an idle Worker whose newest report asks questions", () => {
     expect(waitingOf(manager, [agentMessage(ASKING)], [worker()])).toEqual([
-      { managerId: "m1", workspaceId: "wks_a", workerId: "w1", workerTitle: "Card replies", requestId: REQ, text: ASKING, at: "2026-09-18T05:00:00.000Z" },
+      { managerId: "m1", workspaceId: "wks_a", workerId: "w1", workerTitle: "Card replies", requestId: REQ, text: ASKING, at: "2026-09-18T05:00:00.000Z", answered: [] },
     ]);
     expect(waitingOf(manager, [agentMessage(ASKING)], [worker({ status: "error" })])).toHaveLength(1);
   });
@@ -298,5 +299,75 @@ describe("pending fallback incidents in chat.waiting (delta 20260921 §4.4.6)", 
 
   it("keeps the contract additive: an answer without `fallback` still reads, as empty", () => {
     expect(chatWaitingRpc.output.parse({ waiting: [] })).toEqual({ waiting: [], fallback: [] });
+  });
+});
+
+/**
+ * The question–answer ledger decides "answered" (design delta 20260924-qa-ledger
+ * §4.1, A1). The case: a `blocked` report with four questions, three answered
+ * in the card, then the Worker ends its turn to wait for its Reviewer — idle,
+ * no new report. Before the ledger this listed all four questions as open, and
+ * on 2026-09-22 the user answered Q16, Q17 and Q19 a second time 32 minutes
+ * later.
+ */
+describe("waitingOf with the question–answer ledger", () => {
+  const FOUR = [
+    "BM-QUESTIONS",
+    `requestId: ${REQ}`,
+    "Q16: Phase order — which first?",
+    "- a: foundations. (recommended)",
+    "- b: customers.",
+    "Q17: Routes — where?",
+    "- a: old menu. (recommended)",
+    "- b: new prefix.",
+    "Q18: Uploads — keep?",
+    "- a: keep. (recommended)",
+    "- b: drop.",
+    "Q19: Status after review?",
+    "- a: Accepted. (recommended)",
+    "- b: Draft.",
+  ].join("\n");
+  const ASKING_FOUR = report(REQ, "blocked", FOUR).replace("1 question: Q1", "4 questions: Q16, Q17, Q18, Q19");
+  const answered = (ids: string[]) => (requestId: string) => new Set(requestId === REQ ? ids : []);
+
+  it("A1: an idle Worker with three of four answered still waits, for one question", () => {
+    const [entry] = waitingOf(manager, [agentMessage(ASKING_FOUR)], [worker()], answered(["Q16", "Q17", "Q19"]));
+    expect(entry?.answered).toEqual(["Q16", "Q17", "Q19"]);
+  });
+
+  it("A1: an idle Worker whose every question is answered is not waiting — it is waiting for its Reviewer", () => {
+    expect(waitingOf(manager, [agentMessage(ASKING_FOUR)], [worker()], answered(["Q16", "Q17", "Q18", "Q19"]))).toEqual([]);
+    // Answers to another request never close this one.
+    expect(waitingOf(manager, [agentMessage(ASKING_FOUR)], [worker()], () => new Set(["Q16", "Q17", "Q18", "Q19"].map((id) => `${id}x`)))).toHaveLength(1);
+  });
+
+  it("reads the ledger from the install home once per call, and falls back to the old rule without one", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bm-chat-waiting-ledger-"));
+    try {
+      const location = { tracesDir: join(home, "traces") };
+      recordEntries(location, {
+        workspaceId: "wks_a",
+        workerId: "w1",
+        questions: [],
+        answers: ["Q16", "Q17", "Q18", "Q19"].map((id) => ({ requestId: REQ, id, text: "a", via: "user" as const })),
+      });
+      const agents = [
+        { agent: { id: "m1", provider: "bm-manager", labels: { "bm.role": "manager" }, status: "idle", archivedAt: null, workspaceId: "wks_a", cwd: "/r", title: null }, project: { workspace: { id: "wks_a" } } },
+        { agent: { id: "w1", provider: "bm-worker", labels: { "bm.role": "worker", "bm.requestId": REQ }, status: "idle", archivedAt: null, workspaceId: "wks_a", cwd: "/r", title: "Card replies" }, project: { workspace: { id: "wks_a" } } },
+      ];
+      const sdk: DashboardPaseo = {
+        agents: {
+          list: vi.fn(async () => ({ entries: agents })),
+          ref: () => ({ timeline: { refetch: vi.fn(async () => ({ entries: [agentMessage(ASKING_FOUR)], hasOlder: false })) } }),
+        },
+        workspaces: { list: vi.fn(async () => ({ entries: [] })) },
+        config: { get: vi.fn(async () => ({ config: {} })) },
+      } as unknown as DashboardPaseo;
+      expect((await handleChatWaiting(sdk, { home })).waiting).toEqual([]);
+      // Without a readable home the ledger answers nothing: the pre-ledger rule.
+      expect((await handleChatWaiting(sdk, { home: null })).waiting).toHaveLength(1);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

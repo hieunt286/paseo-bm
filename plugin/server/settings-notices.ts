@@ -34,7 +34,9 @@ export async function childFactLine(savedRole: BmRole, paseo: unknown, cwd?: str
   try {
     const text = runtimeFactsText(creator, await runtimeFactsOf(creator, paseo, cwd, () => {}));
     const prefix = `${RUNTIME_FACTS_HEADING}\n\n`;
-    return text.startsWith(prefix) ? text.slice(prefix.length) : "";
+    if (!text.startsWith(prefix)) return "";
+    // Only the child's mode line: other facts (the Manager's `Worker skills`) are not role settings.
+    return text.slice(prefix.length).split("\n").find((line) => / mode: /.test(line)) ?? "";
   } catch {
     return "";
   }

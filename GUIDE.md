@@ -127,55 +127,53 @@ Open the Manager with **Go to** on the [Beads Manager screen](#the-beads-manager
 
 Describe the change in normal chat. The Manager:
 
-- restates the request in one sentence and guesses its size;
+- restates the request in one sentence (the Worker decides its size);
 - **immediately creates one Beads Worker** in the same workspace. A follow-up to a request already in progress goes to that request's Worker instead;
 - passes your request on **verbatim** and adds no requirements of its own;
-- tells you the Worker, the request id (`req-<UTC time>`), the size guess, and any missing skills;
+- tells you the Worker and the request id (`req-<UTC time>`), and — once — any skills the Worker's tool is missing (the plugin checks them);
 - replies in your language, in a few lines.
 
 ### 2. The Worker sizes the request
 
-The first rule that matches wins, and risk beats how small a request sounds:
+The Worker judges the consequences, not the size of the change:
 
-- **Large:** touches a public contract, a data schema, authentication, permissions, weak rollback, or several independent components.
-- **Small:** stays in one component, changes no contract, needs no new document, and the approach is clear.
+- **Large:** hard to undo, or it reaches people outside the repository — shipped or published behaviour, real data, authentication or permissions, another team's contract.
+- **Small:** one clear change that needs no document.
 - **Medium:** everything else.
 
-The Worker tells you the size and the reason. You can override it; the Worker follows your choice.
+The Worker tells you the size and the reason. You can override it; the Worker follows your choice. Documents do not follow the size: at any size the Worker writes or updates a document only where the change touches something others rely on (a recorded decision, a contract, a schema, shipped behaviour), and a Small request writes none.
 
 | | Small | Medium | Large |
 |---|---|---|---|
-| Documents | none, not even a brief | only the affected sections | the full document chain |
-| Workflow skills | none: the fast path | `feature-workflow`, `polishing-beads`, `implementing-beads`; with a plan also `reviewing-plan` and `converting-plan-to-beads` | all five |
-| Before implementing | goes straight on | goes straight on | **asks you to confirm** |
-| Review stages | the implementation | the plan (documents + beads), the implementation | the documents, the beads, the implementation |
-| Reviews per stage | one | one, plus one re-review only if blocking findings remain | same as Medium |
-| Review budget per request | 1 | 4 | 6 |
-| Reports to the Manager | `received`, `finished` | `received`, `beads-done`, `finished` | `received`, `beads-done`, `finished` |
+| Review stages | the implementation | the implementation | the documents and beads, then the implementation |
+| Reviews per stage | one, plus one re-review only if blocking findings remain | same | same |
+| Review budget per request | 2 | 2 | 4 |
+| Reports to the Manager | `received`, `finished` | `received`, `finished` | `received`, `beads-done`, `finished` |
 
-A **Small** request takes the fast path: one short bead, the change, the cheapest check that proves it, one review, close, done.
+Nothing waits for a confirmation before implementing; what cannot be undone still waits for your yes (below).
 
 ### 3. The Worker does only what you asked
 
+- **A request that only asks for information** — a question, research, an investigation — creates no bead and no Reviewer: the answer comes with its sources, in the Worker's chat and its `finished` report.
 - **Anything beyond the request is a suggestion, not work.** Extra tests, refactors, docs, clean-ups and related bugs are listed as `Suggestion (not done): …`. The Manager asks you whether any of them should become new work.
 - Before creating a bead, the Worker looks for open beads with the same `feature:<slug>` label. It updates a single match instead of creating a duplicate, and **asks you** when several match.
-- Every bead it creates carries a `feature:<slug>` label and a short `## Provenance` naming the request. For Medium and Large requests each bead follows the `converting-plan-to-beads` contract (objective, scope in and out, components, validation, primary proof, reversibility, …) and holds **one outcome** that can be reviewed and reverted on its own; beads are never sized by file, line or bead counts.
-- For Medium and Large requests it runs `reviewing-plan` on its plan and `polishing-beads` on its beads. These are its own quality passes: they never replace a Reviewer and do not count against the review budget.
-- It works on one bead at a time (with `implementing-beads` for Medium and Large), runs the check that proves the bead, and **closes the bead with that evidence right away**. When all beads are closed, the implementation is reviewed once; a bead with a blocking finding is reopened, fixed and closed again with new evidence.
-- For Medium and Large requests it **asks you** at fixed moments — before writing documents, after reviewing its plan, and, for Large requests, before implementing (with the list of risks: behaviour or configuration changes, migrations, compatibility, security trade-offs, requirements added beyond your words). It also stops and asks whenever it would deviate from approved documents, change behaviour or configuration you rely on, add a requirement you did not ask for, or make a security trade-off. Questions come as one numbered list (at most five) with options and a recommendation. It waits for your answer and never assumes one.
+- Every bead it creates carries a `feature:<slug>` label and a short `## Provenance` naming the request. The beads of a plan follow the `converting-plan-to-beads` contract (objective, scope in and out, components, validation, primary proof, reversibility, …); every bead holds **one outcome** that can be reviewed and reverted on its own; beads are never sized by file, line or bead counts.
+- When it writes a plan it runs `reviewing-plan` on it and `polishing-beads` on the beads converted from it. These are its own quality passes: they never replace a Reviewer and do not count against the review budget.
+- It works on one bead at a time (with `implementing-beads` when there is more than one), runs the check that proves the bead, and **closes the bead with that evidence right away**. When all beads are closed, the implementation is reviewed once; a bead with a blocking finding is reopened, fixed and closed again with new evidence.
+- **It decides what can be undone, and asks only four things.** Inside your request, choices it could reverse later — the approach, names, layout, test shape, the order of beads, whether a document needs updating — are its own; it lists them on its report's `decided` line so you can overturn any of them. It asks you only about the scope (widening, narrowing, adding a requirement), about what cannot be undone or an approved decision (editing a frozen document, deviating from an approved one, changing an existing bead's acceptance criteria, deleting or merging beads, changing an approved design because a Reviewer asked), about what only you have (something you must type or do, the environment, a security trade-off, behaviour existing users rely on), and when it is stuck. Questions it can already see come in one round right after sizing, as one numbered list (at most five) with options and a recommendation. For those it waits for your answer and never assumes one.
 - It **asks you first** before installing or upgrading dependencies, using the network, running migrations on real data, deploying or publishing, editing frozen documents, widening the scope, or deleting or merging beads.
 - Outside the repository it writes only into a temporary directory it has just created and deletes before reporting.
 - **Five limits hold whatever the request:** nothing leaves the workspace without your explicit yes (commit, push, pull request, deploy, publish, network, dependency install, real-data migration, elevated privileges); nothing the Worker did not create is destroyed or touched, including the changes that were already in the tree and your agents; secrets are never read or copied; **no check is ever made to look green** — a test, an assertion or an acceptance criterion is never weakened so something passes, and a bead is never closed on a check the Worker did not watch pass; and nothing only you can decide is decided for you. You review `git diff` and decide.
 
 ### 4. A Reviewer checks each batch
 
-Reviews are grouped by stage (see the table). For each stage the Worker creates one Reviewer, fixes **blocking** findings, and sends that same Reviewer one re-review. It does not fix non-blocking findings; they become suggestions. If blocking findings remain after the re-review, the Worker **stops and asks you**. The plugin, not the Worker, counts the review calls of each request (see the next section).
+Reviews are grouped by stage (see the table); documents are reviewed before implementing only for a Large request or when you ask. For each stage the Worker creates one Reviewer, fixes **blocking** findings, and sends that same Reviewer one re-review. It does not fix non-blocking findings; they become suggestions. If blocking findings remain after the re-review, the Worker **stops and asks you**. The plugin, not the Worker, counts the review calls of each request (see the next section).
 
 The Reviewer checks each stage against criteria from the workflow skills: the PRD and design gates for documents, `reviewing-plan` (review-only) and the plan-ready gate for a plan, the leaf and readiness checklists for beads, and the split triggers and risk table of `implementing-beads` for the implementation. It may run the repository's tests and throwaway probe scripts, but it changes nothing, uses no network and installs nothing. For authentication, permissions, data or a public contract it lists the abuse and edge cases it tried. Hardening beyond your request is a suggestion, not a blocker, unless it is a real defect in what was built.
 
 ### 5. Reports, and when things finish
 
-The Worker sends a structured `BM-REPORT` to the Manager only at the moments listed in the table, plus `blocked` when it needs you. Each report lists the skills the Worker used (`skillsUsed`). The Manager relays: it passes your answers to the Worker word for word, shows you every question of a `blocked` report, and never approves or changes the Worker's plan itself. The plugin counts every request's review calls from the conversation — the same number the Metric screen shows. When a request goes over its budget, the plugin tells the Manager once, and the Manager **asks you** whether to continue or cancel; it never cancels on that notice alone, because you may already have allowed the extra reviews in the Worker's chat. The Manager still cancels a Worker that is stuck or off course, and tells you why. If a Medium or Large request finishes without a skill its size requires, the Manager tells you which one.
+The Worker sends a structured `BM-REPORT` to the Manager only at the moments listed in the table, plus `blocked` when it needs you. Each report lists the skills the Worker used (`skillsUsed`). The Manager relays: it passes your answers to the Worker word for word, shows you every question of a `blocked` report, and never approves or changes the Worker's plan itself. The plugin counts every request's review calls from the conversation — the same number the Metric screen shows. Before any review beyond its budget, the Worker asks you in its `blocked` card, and a yes covers what you said it covers ("one more", "until it is clean"). When a request goes over its budget, the plugin tells the Manager once, and the Manager tells you the numbers in one line without asking again; it never cancels on that notice alone. The Manager still cancels a Worker that is stuck or off course, and tells you why. When a Worker finishes, the Manager tells you how many decisions it made on its own (its `decided` line), any of which you can overturn. When you ask how the work is going, the Manager reads the Worker's and its Reviewers' status and recent activity instead of asking the Worker.
 
 When a Worker finishes, it stays idle for you to inspect. **Only you archive or delete agents.** The Manager may cancel a Worker's run, but no agent archives or deletes another.
 
@@ -208,7 +206,7 @@ Only paseo-bm's own messages become cards: messages you type, ordinary replies, 
 
 - **You can chat with a Worker directly** to clarify or redirect. Those messages appear on the Metric screen as `💬 You → <agent>`.
 - **Stopping a Worker also stops its Reviewers.** When you press Stop on a Worker, it cancels the Reviewers it created, and the plugin also sends each running Reviewer a fixed stop notice. This is **not a hard cancel**: Paseo 0.8 gives plugins no way to cancel an agent. A stopped Reviewer takes one short turn to acknowledge. The Worker then reports where it stopped and waits for you.
-- **The review budget is a behavioural guardrail.** The plugin counts the reviews and the Manager asks you when a request goes over. Nothing in code blocks a Worker that ignores its instructions, and one extra review can happen before you are asked.
+- **The review budget is a behavioural guardrail.** The plugin counts the reviews, the Worker asks you before going over, and the Manager tells you when a request did. Nothing in code blocks a Worker that ignores its instructions, and one extra review can happen before you are asked.
 
 ## The Beads Manager screen
 

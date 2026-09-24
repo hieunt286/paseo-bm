@@ -14,7 +14,7 @@ import { FALLBACK_ROLES, fallbackAlias, fallbackAliasOf, positionOfAlias } from 
 
 const MANAGER_ID = "f13a4e4e-18b6-4369-91c8-70c61460ef2d";
 const WORKER_ID = "9467dc77-8afb-4e9e-9177-a17dcf8e10b3";
-const WORKSPACE = "wks_ef81bbe0663d91ca";
+const WORKSPACE = "wks_project_b";
 const REQ = "req-20260918T070348Z";
 
 type Agent = Record<string, unknown> & { id: string; labels: Record<string, string> };

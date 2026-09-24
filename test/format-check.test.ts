@@ -19,7 +19,7 @@ import type { TraceRecord } from "../plugin/shared/contracts";
  */
 
 const REQ = "req-20260918T070348Z";
-const WS = "wks_ef81bbe0663d91ca";
+const WS = "wks_project_b";
 
 type Agent = { id: string; provider: string; labels: Record<string, string>; status: string; lastUserMessageAt: string | null; archivedAt?: string | null };
 
@@ -111,7 +111,7 @@ describe("formatNotice", () => {
         `BM-FORMAT requestId: ${REQ}`,
         "Your last BM-REPORT broke the template:",
         "- BM-QUESTIONS Q1: needs exactly one option ending in (recommended) (found 0)",
-        "Send the whole corrected block again, to the same agent as before, in one message. Change nothing else and do not redo any work; then carry on exactly where you were.",
+        "Send the whole corrected block again, to the same agent as before, in one message. Change nothing else and do not redo any work; then carry on exactly where you were. Do not mention this notice to the user.",
       ].join("\n"),
     );
     expect(formatNotice("BM-REVIEW", REQ, ["x"]).split("\n").at(-1)).toBe(
@@ -124,6 +124,76 @@ describe("formatNotice", () => {
     expect(isPluginNotice(notice)).toBe(true);
     const record = { agentId: "rev", sent: [{ agentId: null, at: "", text: notice, truncated: false }] } as unknown as TraceRecord;
     expect(reviewCallsOf(["rev"], [record])).toBe(0);
+  });
+});
+
+/**
+ * Fault L1 of the 2026-09-23 diagnosis. `unitsOf` merges a BM-QUESTIONS block
+ * into the BM-REPORT above it, so "send the whole corrected block again" put
+ * the same question set in front of the user a second time — four times that
+ * day, 19 to 48 seconds apart. The notice for a block that carried questions
+ * therefore asks for nothing.
+ */
+describe("a notice never re-asks the user (fault L1)", () => {
+  /** The 2026-09-23T10:55:43.947Z report of req-20260923T070427Z, in shape. */
+  const blockedWithQuestions = (findings: string) =>
+    [
+      "BM-REPORT",
+      `requestId: ${REQ}`,
+      "phase: blocked",
+      "tier: Large (changed: no)",
+      "filesChanged: none",
+      "beadsCreated: none",
+      "beadsUpdated: none",
+      "beadsClosed: none",
+      "beadsReady: none",
+      `reviewFindingsOpen: ${findings}`,
+      "buildAndTests: not run",
+      "skillsUsed: feature-workflow",
+      "blockers: 3 questions: Q10, Q11, Q12 — see BM-QUESTIONS",
+      "",
+      "BM-QUESTIONS",
+      `requestId: ${REQ}`,
+      "Q10: Which tables does the request mean?",
+      "- a: every paginated list table. (recommended)",
+      "- b: those plus the short ones.",
+      "Q11: How tall should the main table be?",
+      "- a: it follows the viewport. (recommended)",
+      "- b: it keeps its fixed height.",
+      "Q12: What should the paginator show?",
+      "- a: one compact row. (recommended)",
+      "- b: the full control.",
+    ].join("\n");
+
+  it("reports the broken field but forbids the re-send that would show Q10-Q12 twice", async () => {
+    const { sends, deps } = world([manager(), worker()]);
+    // The real value: prose that names no finding, still rejected after fault L2's fix.
+    await checkTurnFormat(turn(manager(), [received(blockedWithQuestions("b4 is still running, no result yet"))]), deps);
+    expect(sends).toHaveLength(1);
+    const notice = sends[0]!.text;
+    expect(notice).toContain("- BM-REPORT reviewFindingsOpen:");
+    expect(notice).not.toContain("Send the whole corrected block again");
+    expect(notice.split("\n").at(-1)).toBe(
+      "Do NOT send this block again: its BM-QUESTIONS would reach the user a second time. Leave the report as it stands, apply the correction to your next one, and carry on exactly where you were. Do not mention this notice to the user.",
+    );
+  });
+
+  it("a report with no questions is still asked to re-send", async () => {
+    const { sends, deps } = world([manager(), worker()]);
+    await checkTurnFormat(turn(manager(), [received(report("finished", false).replace("skillsUsed: feature-workflow", "skillsUsed: not a skill!"))]), deps);
+    expect(sends).toHaveLength(1);
+    expect(sends[0]!.text.split("\n").at(-1)).toBe(
+      "Send the whole corrected block again, to the same agent as before, in one message. Change nothing else and do not redo any work; then carry on exactly where you were. Do not mention this notice to the user.",
+    );
+  });
+
+  it("formatNotice carries both endings", () => {
+    expect(formatNotice("BM-REPORT", REQ, ["x"], true)).toContain("Do NOT send this block again");
+    expect(formatNotice("BM-REPORT", REQ, ["x"], false)).toContain("Send the whole corrected block again");
+    // A Reviewer's own block never reached the user, so its ending does not change.
+    expect(formatNotice("BM-REVIEW", REQ, ["x"], true).split("\n").at(-1)).toBe(
+      "Answer with the whole corrected BM-REVIEW block as your final message; do not review again.",
+    );
   });
 });
 

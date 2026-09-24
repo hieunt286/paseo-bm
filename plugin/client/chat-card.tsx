@@ -20,7 +20,7 @@
  */
 import { type PluginTimelineItemProps, usePaseo, useRpc } from "@getpaseo/plugin/client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
 import {
   answersMarkRpc,
@@ -64,6 +64,8 @@ import {
   showsQuestions,
   startsOpen,
   stillWaiting,
+  answeredInLedger,
+  movedOnLine,
   statusChip,
   summaryOf,
   questionHeading,
@@ -142,6 +144,18 @@ function MessageCardView({ theme, layout, agentId, item, timestamp }: PluginTime
   const queryClient = useQueryClient();
   const marks = useQuery({ queryKey: ANSWER_MARKS_QUERY, queryFn: () => listMarks({}), enabled: asksHere });
   const marked = marks.data?.keys.includes(key) ?? false;
+  // Questions the ledger already holds an answer to: shown answered, never sent again.
+  const inLedger = useMemo(() => (asksHere ? answeredInLedger(card, agentId, waitingNow) : new Set<string>()), [asksHere, card, agentId, waitingNow]);
+  // A question the ledger closed after the user picked it (the Manager relayed
+  // it meanwhile) must leave the Reply box too, or Send would answer it again.
+  const inLedgerKey = [...inLedger].sort().join(",");
+  useEffect(() => {
+    if (!Object.keys(picks).some((id) => inLedger.has(id))) return;
+    const kept = Object.fromEntries(Object.entries(picks).filter(([id]) => !inLedger.has(id)));
+    setPicks(kept);
+    setAnswer((text) => withAnswersBlock(text, answersDraft(card, kept, inLedger)));
+    // `inLedgerKey` stands for `inLedger`, which is a new Set on every poll.
+  }, [inLedgerKey, card, picks]);
   const how = asksHere
     ? answeredHow({
         sent: done !== null,
@@ -180,7 +194,7 @@ function MessageCardView({ theme, layout, agentId, item, timestamp }: PluginTime
   // the user's own words stay (delta 20260918d §4.1).
   const changePicks = (next: Picks) => {
     setPicks(next);
-    setAnswer((current) => withAnswersBlock(current, answersDraft(card, next)));
+    setAnswer((current) => withAnswersBlock(current, answersDraft(card, next, inLedger)));
     setReplying(true);
     setOutcome(null);
   };
@@ -286,6 +300,7 @@ function MessageCardView({ theme, layout, agentId, item, timestamp }: PluginTime
           theme={theme}
           recipient={partyName(from)}
           picks={picks}
+          answered={inLedger}
           onChange={changePicks}
           answeredLine={
             how === "sent" && done !== null
@@ -293,7 +308,7 @@ function MessageCardView({ theme, layout, agentId, item, timestamp }: PluginTime
               : how === "marked"
                 ? "Marked as answered."
                 : how === "moved-on"
-                  ? `No longer waiting: ${partyName(from)} is working or has reported since.`
+                  ? movedOnLine(partyName(from))
                   : null
           }
           unreachable={unreachable}
@@ -515,6 +530,7 @@ function QuestionForm({
   theme,
   recipient,
   picks,
+  answered,
   onChange,
   answeredLine,
   unreachable,
@@ -526,6 +542,8 @@ function QuestionForm({
   theme: Theme;
   recipient: string;
   picks: Picks;
+  /** Questions the question–answer ledger already holds an answer to: shown as answered, not choosable. */
+  answered: ReadonlySet<string>;
   onChange: (next: Picks) => void;
   /** What replaces the options once the card counts as answered, or null. */
   answeredLine: string | null;
@@ -559,49 +577,53 @@ function QuestionForm({
           >
             <Text style={[styles.body, { color: theme.colors.foreground, fontWeight: "600" }]}>{heading}</Text>
             <Text style={[styles.body, { color: theme.colors.foreground }]}>{body}</Text>
-            <View style={{ gap: 8 }}>
-              {choosable(question)
-                ? question.options.map((option) => {
-                    const selected = current !== undefined && "key" in current && current.key === option.key;
-                    return (
-                      <Pressable
-                        key={option.key}
-                        accessibilityRole="button"
-                        accessibilityState={{ selected, disabled: off }}
-                        disabled={off}
-                        onPress={() => pick(question, { key: option.key })}
-                        style={optionRow(theme, selected)}
-                      >
-                        <Text style={[styles.body, { width: 14, color: theme.colors.foreground }]}>{selected ? "●" : "○"}</Text>
-                        <Text style={[styles.body, { width: 16, color: theme.colors.foreground, fontWeight: "600" }]}>{option.key}</Text>
-                        <Text style={[styles.body, { flex: 1, color: theme.colors.foreground }]}>{option.text}</Text>
-                        {option.recommended ? <Chip badge={{ text: "recommended", tone: "success" }} styles={styles} theme={theme} /> : null}
-                      </Pressable>
-                    );
-                  })
-                : null}
-              <Pressable
-                accessibilityRole="button"
-                accessibilityState={{ selected: other !== null, disabled: off }}
-                disabled={off}
-                onPress={() => pick(question, { other: other?.other ?? "" })}
-                style={optionRow(theme, other !== null)}
-              >
-                <Text style={[styles.body, { width: 14, color: theme.colors.foreground }]}>{other !== null ? "●" : "○"}</Text>
-                <Text style={[styles.body, { flex: 1, color: theme.colors.foreground }]}>Other…</Text>
-              </Pressable>
-              {other === null ? null : (
-                <TextInput
-                  value={other.other}
-                  onChangeText={(text) => pick(question, { other: text })}
-                  editable={!off}
-                  multiline
-                  placeholder={`Your answer to ${question.id}`}
-                  placeholderTextColor={theme.colors.foregroundMuted}
-                  style={[styles.mono, { minHeight: 48, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 8, padding: 8 }]}
-                />
-              )}
-            </View>
+            {answered.has(question.id) ? (
+              <Text style={[styles.body, { color: toneColor(theme, "success") }]}>Answered.</Text>
+            ) : (
+              <View style={{ gap: 8 }}>
+                {choosable(question)
+                  ? question.options.map((option) => {
+                      const selected = current !== undefined && "key" in current && current.key === option.key;
+                      return (
+                        <Pressable
+                          key={option.key}
+                          accessibilityRole="button"
+                          accessibilityState={{ selected, disabled: off }}
+                          disabled={off}
+                          onPress={() => pick(question, { key: option.key })}
+                          style={optionRow(theme, selected)}
+                        >
+                          <Text style={[styles.body, { width: 14, color: theme.colors.foreground }]}>{selected ? "●" : "○"}</Text>
+                          <Text style={[styles.body, { width: 16, color: theme.colors.foreground, fontWeight: "600" }]}>{option.key}</Text>
+                          <Text style={[styles.body, { flex: 1, color: theme.colors.foreground }]}>{option.text}</Text>
+                          {option.recommended ? <Chip badge={{ text: "recommended", tone: "success" }} styles={styles} theme={theme} /> : null}
+                        </Pressable>
+                      );
+                    })
+                  : null}
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: other !== null, disabled: off }}
+                  disabled={off}
+                  onPress={() => pick(question, { other: other?.other ?? "" })}
+                  style={optionRow(theme, other !== null)}
+                >
+                  <Text style={[styles.body, { width: 14, color: theme.colors.foreground }]}>{other !== null ? "●" : "○"}</Text>
+                  <Text style={[styles.body, { flex: 1, color: theme.colors.foreground }]}>Other…</Text>
+                </Pressable>
+                {other === null ? null : (
+                  <TextInput
+                    value={other.other}
+                    onChangeText={(text) => pick(question, { other: text })}
+                    editable={!off}
+                    multiline
+                    placeholder={`Your answer to ${question.id}`}
+                    placeholderTextColor={theme.colors.foregroundMuted}
+                    style={[styles.mono, { minHeight: 48, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 8, padding: 8 }]}
+                  />
+                )}
+              </View>
+            )}
           </View>
         );
       })}
@@ -612,7 +634,7 @@ function QuestionForm({
           accessibilityRole="button"
           accessibilityState={{ disabled: off }}
           disabled={off}
-          onPress={() => onChange(recommendedPicks(card.questions, picks))}
+          onPress={() => onChange(recommendedPicks(card.questions, picks, answered))}
           style={styles.secondaryButton}
         >
           <Text style={styles.secondaryButtonText}>Use recommendations</Text>

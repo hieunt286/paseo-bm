@@ -3,6 +3,7 @@ import {
   MAX_OPTIONS,
   MAX_QUESTIONS,
   answersText,
+  parseAnswers,
   parseQuestions,
   type Question,
 } from "../plugin/shared/bm-questions";
@@ -243,5 +244,47 @@ describe("writing the answers", () => {
     expect(() => answersText("req-1", questions, { Q1: { key: "a" } })).toThrow(/Q2/);
     expect(() => answersText("req-1", questions, { Q1: { key: "a" }, Q2: { other: "  \n " } })).toThrow(/Q2/);
     expect(() => answersText("req-1", questions, { Q1: { key: "z" }, Q2: { key: "a" } })).toThrow(/Q1/);
+  });
+});
+
+describe("parseAnswers (design delta 20260924-qa-ledger §3.3)", () => {
+  it("reads the block a card sends, after its reply line", () => {
+    const text = ["Reply from the user about `req-20260923T063441Z`, batch b5:", "", "BM-ANSWERS", "requestId: req-20260923T063441Z", "Q14: a — go on to beads."].join("\n");
+    expect(parseAnswers(text)).toEqual({ requestId: "req-20260923T063441Z", answers: [{ id: "Q14", text: "a — go on to beads." }] });
+  });
+
+  it("tolerates bold ids, bullets and wrapped answers, and keeps a repeated id's first line", () => {
+    const text = ["BM-ANSWERS", "requestId: `req-20260922T135101Z`", "- **Q16**: a — foundations", "   first, then customers", "Q16: b — ignored", "Q17: other — my own words"].join("\n");
+    expect(parseAnswers(text)?.answers).toEqual([
+      { id: "Q16", text: "a — foundations first, then customers" },
+      { id: "Q17", text: "other — my own words" },
+    ]);
+  });
+
+  it("ends at the blank line before the user's own words and at another block", () => {
+    expect(parseAnswers("BM-ANSWERS\nrequestId: req-20260922T135101Z\nQ1: a\n\nQ2: this is prose")?.answers.map((a) => a.id)).toEqual(["Q1"]);
+    expect(parseAnswers("BM-ANSWERS\nrequestId: req-20260922T135101Z\nQ1: a\nBM-REPORT\nQ2: x")?.answers.map((a) => a.id)).toEqual(["Q1"]);
+  });
+
+  it("never reads a quoted block: the user pasting old answers under new ones (review finding 1)", () => {
+    const text = [
+      "Reply from the user about `req-20260922T135101Z`:",
+      "",
+      "BM-ANSWERS",
+      "requestId: req-20260922T135101Z",
+      "Q18: a — keep.",
+      "",
+      "I already answered these earlier:",
+      "> BM-ANSWERS",
+      "> requestId: req-20260922T135101Z",
+      "> Q16: a — foundations.",
+    ].join("\n");
+    expect(parseAnswers(text)?.answers).toEqual([{ id: "Q18", text: "a — keep." }]);
+    expect(parseAnswers("> BM-ANSWERS\n> requestId: req-20260922T135101Z\n> Q16: a")).toBeNull();
+  });
+
+  it("returns null without a block", () => {
+    expect(parseAnswers("Q1: a — no marker here")).toBeNull();
+    expect(parseAnswers("")).toBeNull();
   });
 });

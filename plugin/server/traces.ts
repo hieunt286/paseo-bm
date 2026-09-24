@@ -487,8 +487,13 @@ export function blocksCompletion(blockers: string | null): boolean {
   if (blockers === null) return false;
   const text = blockers.trim();
   if (text === "" || /^none\b/i.test(text)) return false;
-  const withoutSuggestions = text.replace(/Suggestion \(not done\):[^]*?(?=Suggestion \(not done\):|$)/gi, "").trim();
-  return withoutSuggestions !== "";
+  // `Decided: …` entries are the Worker's own choices, recorded for the user to
+  // overturn — not something waiting (design delta 20260924-instruction-quality).
+  const withoutNotes = text
+    .replace(/(Suggestion \(not done\)|\bDecided):[^]*?(?=Suggestion \(not done\):|\bDecided:|$)/gi, "")
+    .replace(/^[\s.;,]+|[\s.;,]+$/g, "")
+    .trim();
+  return withoutNotes !== "";
 }
 
 /**

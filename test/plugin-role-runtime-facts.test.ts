@@ -253,3 +253,59 @@ describe("Runtime facts by provider capability (delta 20260921 §4.2.3, REQ-063 
     expect(read("worker")).toContain("Runtime facts` (`none`: pass no mode;");
   });
 });
+
+/**
+ * The Manager's `Worker skills` line (design delta 20260924-instruction-quality
+ * §3, PRD delta 20260924-worker-autonomy REQ-035a): the plugin checks the
+ * required skills for the provider `bm-worker` extends, instead of the Manager
+ * reading skill directories itself.
+ */
+describe("Worker skills in the Manager's Runtime facts", () => {
+  const status = (missingForCodex: string[]) => () => ({
+    checkedAt: "",
+    dirs: { shared: "", claude: "", codex: "", pi: "", opencode: "" },
+    skills: ["feature-workflow", "polishing-beads", "architecture-premise-audit"].map((name) => ({
+      name,
+      required: name !== "architecture-premise-audit",
+      claude: "ok" as const,
+      codex: missingForCodex.includes(name) ? ("missing" as const) : ("ok" as const),
+      pi: "missing" as const,
+      opencode: "missing" as const,
+      problem: null,
+    })),
+    missingRequired: { claude: 0, codex: 0, pi: 0, opencode: 0 },
+    installCommand: "",
+  });
+  const paseoExtending = (base: string | null) => ({
+    providers: { listModes: vi.fn(async () => { throw new Error("no modes here"); }) },
+    config: { get: async () => ({ config: { providers: base === null ? {} : { "bm-worker": { extends: base } } } }) },
+  });
+
+  it("names the required skills the Worker's provider lacks, and only required ones", async () => {
+    const facts = await runtimeFactsOf("manager", paseoExtending("codex"), "/repo", () => {}, status(["polishing-beads", "architecture-premise-audit"]));
+    expect(facts.workerSkillsMissing).toEqual(["polishing-beads"]);
+    expect(runtimeFactsText("manager", facts)).toBe(
+      `${RUNTIME_FACTS_HEADING}\n\nWorker skills: missing \`polishing-beads\` — tell the user once, when you confirm the Worker, that it works with lower quality, and point to \`npx paseo-bm doctor\`.`,
+    );
+  });
+
+  it("says all present, and sits after the mode line", async () => {
+    const facts = await runtimeFactsOf("manager", paseoExtending("claude"), "/repo", () => {}, status(["polishing-beads"]));
+    expect(facts.workerSkillsMissing).toEqual([]);
+    expect(runtimeFactsText("manager", { workerModeId: "bypassPermissions", workerSkillsMissing: [] })).toBe(
+      `${RUNTIME_FACTS_HEADING}\n\n${LINE}\nWorker skills: all present.`,
+    );
+  });
+
+  it("writes no line when the provider or the skills cannot be read, and never throws", async () => {
+    expect((await runtimeFactsOf("manager", paseoExtending(null), "/repo", () => {}, status([]))).workerSkillsMissing).toBeUndefined();
+    const log: string[] = [];
+    const broken = () => {
+      throw new Error("EACCES");
+    };
+    expect((await runtimeFactsOf("manager", paseoExtending("codex"), "/repo", (m) => log.push(m), broken)).workerSkillsMissing).toBeUndefined();
+    expect(log.join("\n")).toContain("checking the Worker's skills failed");
+    // The Worker and the Reviewer never get the line.
+    expect(runtimeFactsText("worker", { workerSkillsMissing: ["x"] })).toBe("");
+  });
+});

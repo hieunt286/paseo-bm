@@ -48,19 +48,17 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
 ];
 
 /**
- * Steps each tier is allowed to omit, from REQ-036 as amended by delta
- * 20260917-workflow-skills §4.1: Medium and Large polish their beads again,
- * and only Small skips the polish pass.
- *
- * `Medium` may skip only `review_plan`, because it writes a plan only when the
- * work needs one. It may not skip a document step: REQ-036(c) lets it leave
- * out the documents that are "not affected", and which those are is not
- * observable from outside, so claiming one was skipped would be a guess.
+ * Steps each tier is allowed to omit (REQ-045d as amended by PRD delta
+ * 20260924-worker-autonomy): documents no longer follow the tier — a Worker
+ * writes them only where the change needs them (REQ-036c) — so every tier may
+ * omit the document steps, the plan, its review and the polish of converted
+ * beads. The other steps are never "skipped" by tier.
  */
+const OPTIONAL_STEPS: readonly WorkflowStep[] = ["prd", "design", "adr", "plan", "review_plan", "polish_beads"];
 export const SKIPPABLE_BY_TIER: Readonly<Record<Tier, readonly WorkflowStep[]>> = {
-  Small: ["prd", "design", "adr", "plan", "review_plan", "polish_beads"],
-  Medium: ["review_plan"],
-  Large: [],
+  Small: OPTIONAL_STEPS,
+  Medium: OPTIONAL_STEPS,
+  Large: OPTIONAL_STEPS,
 };
 
 const DOC_PREFIX: Partial<Record<WorkflowStep, string>> = {
@@ -408,7 +406,7 @@ export function inferWorkflowSteps(
         status: "skipped" as const,
         confidence: "exact" as const,
         evidence: [],
-        note: `tier ${tier} may omit this step (REQ-036)`,
+        note: `optional at every tier, tier ${tier} included: documents follow the change, not the tier (REQ-036c, REQ-045d)`,
       };
     }
     return {

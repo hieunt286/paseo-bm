@@ -67,9 +67,14 @@ export function fallbackPillIdOf(managerId: string): string {
   return `bm-fallback-${managerId}`;
 }
 
-/** The report's questions, as the card reads them; 0 when the text has none. */
+/**
+ * The report's questions still OPEN, as the card reads them: the ones the
+ * question–answer ledger holds an answer to are not counted (design delta
+ * 20260924-qa-ledger §4.2). 0 when the text has none.
+ */
 export function questionCountOf(entry: WaitingWorker): number {
-  return toChatCard({ type: "user_message", text: entry.text }, "complete")?.questions.length ?? 0;
+  const answered = new Set(entry.answered ?? []);
+  return toChatCard({ type: "user_message", text: entry.text }, "complete")?.questions.filter((question) => !answered.has(question.id)).length ?? 0;
 }
 
 export function pillOf(entry: WaitingWorker): WaitingPill | null {
@@ -83,7 +88,8 @@ export function pillOf(entry: WaitingWorker): WaitingPill | null {
     // The text's hash too: without a timestamp, a new report with the same
     // number of questions would otherwise never reach the popover (delta
     // 20260918f F14).
-    key: [entry.managerId, entry.workspaceId, entry.requestId, label, entry.at ?? "", fnv1a32Hex(entry.text)].join("|"),
+    // `answered` too: a partly answered report must redraw its popover's card.
+    key: [entry.managerId, entry.workspaceId, entry.requestId, label, entry.at ?? "", fnv1a32Hex(entry.text), (entry.answered ?? []).join(",")].join("|"),
     label,
     title: `Questions from ${name} about ${entry.requestId}`,
     entry,

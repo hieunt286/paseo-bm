@@ -43,6 +43,7 @@ const entry = (overrides: Partial<WaitingWorker> = {}): WaitingWorker => ({
   requestId: REQ,
   text: asking(2),
   at: "2026-09-18T05:00:00.000Z",
+  answered: [],
   ...overrides,
 });
 
@@ -56,6 +57,16 @@ describe("a waiting Worker's pill", () => {
     });
     expect(pillOf(entry({ text: asking(1) }))?.label).toBe("Worker · Card replies · 1 question");
     expect(pillIdOf("w9")).toBe("bm-waiting-w9");
+  });
+
+  it("counts only the questions the ledger has no answer to, and redraws when that changes (design delta 20260924-qa-ledger §4.2)", () => {
+    expect(questionCountOf(entry({ answered: ["Q1"] }))).toBe(1);
+    expect(pillOf(entry({ answered: ["Q1"] }))?.label).toBe("Worker · Card replies · 1 question");
+    expect(pillOf(entry({ answered: ["Q1"] }))?.key).not.toBe(pillOf(entry())?.key);
+    // A server older than the ledger sends no `answered`: every question counts.
+    const old: Partial<WaitingWorker> = entry();
+    delete old.answered;
+    expect(questionCountOf(old as WaitingWorker)).toBe(2);
   });
 
   it("is not made for a report without questions", () => {

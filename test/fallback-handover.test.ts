@@ -1,8 +1,9 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { managerHandover, workerHandover } from "../plugin/server/fallback-handover";
+import { WORKER_CLOSING, managerHandover, workerHandover } from "../plugin/server/fallback-handover";
+import { qaLedgerPath, recordEntries } from "../plugin/server/qa-ledger";
 import { appendRecord, clearTraceStoreCache, type TraceStoreLocation } from "../plugin/server/trace-store";
 import { TRACE_STORE_SCHEMA_VERSION, type FallbackIncident, type ParsedReport, type TraceRecord } from "../plugin/shared/contracts";
 
@@ -183,8 +184,14 @@ describe("workerHandover", () => {
         "beadsClosed: none",
         "beadsReady: bm-a.1",
         "reviewFindingsOpen: b1: none",
-        "reviewCalls: 2 of 4",
+        "reviewCalls: 2 of 2",
         "skillsUsed: feature-workflow, polishing-beads",
+        // Written before the decided field existed: nothing recorded.
+        "decided: none",
+        // A ledger file that does not exist yet: nothing was asked.
+        "questions: none",
+        "",
+        WORKER_CLOSING,
         "",
         "Original request (verbatim, the first message the replaced Worker received):",
         // Masked like every trace record (REQ-048b).
@@ -199,7 +206,55 @@ describe("workerHandover", () => {
     expect(text).toContain("\nmanagerAgentId: none\n");
     expect(text).toContain("\nlastReport: none\ntier: unknown\nfilesChanged: unknown\n");
     expect(text).toContain("\nreviewCalls: unknown\n");
+    expect(text).toContain("\nquestions: unknown\n");
     expect(text.endsWith("\nunavailable")).toBe(true);
+  });
+
+  /**
+   * Design delta 20260924-qa-ledger §8 (A6): without the questions, a
+   * replacement Worker starts from the original request alone and asks the
+   * user everything its predecessor already asked and had answered.
+   */
+  it("A6: hands over every question with its latest answer, or open", async () => {
+    recordEntries(location, {
+      workspaceId: WS,
+      workerId: null,
+      questions: [
+        { requestId: REQ, id: "Q10", text: "Where does the list live?" },
+        { requestId: REQ, id: "Q2", text: "Rename the session cookie?" },
+        { requestId: REQ, id: "Q1", text: "Which storage?" },
+      ],
+      answers: [],
+    });
+    recordEntries(location, {
+      workspaceId: WS,
+      workerId: WORKER,
+      questions: [],
+      answers: [
+        { requestId: REQ, id: "Q1", text: "a — the existing table", via: "user" },
+        { requestId: REQ, id: "Q1", text: "other — a new table after all", via: "agent" },
+        { requestId: REQ, id: "Q3", text: "b — later", via: "user" },
+      ],
+    });
+    const { paseo } = fakePaseo([]);
+    const text = await workerHandover(incident(), { paseo, location });
+    expect(text).toContain(
+      [
+        "\nquestions:",
+        "- Q1: Which storage? → other — a new table after all",
+        "- Q2: Rename the session cookie? → open",
+        "- Q3: (question not recorded) → b — later",
+        "- Q10: Where does the list live? → open",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("A6: reads questions unknown for a corrupt ledger", async () => {
+    mkdirSync(join(home, "ui"), { recursive: true });
+    writeFileSync(qaLedgerPath(location), "{ nope");
+    const { paseo } = fakePaseo([]);
+    expect(await workerHandover(incident(), { paseo, location })).toContain("\nquestions: unknown\n");
   });
 
   it("keeps to its budget: a timeline that never answers costs only the request text", async () => {
@@ -227,10 +282,10 @@ describe("workerHandover", () => {
     const { paseo } = fakePaseo([], ["agent-rev-1", "agent-rev-2"]);
     const switched = incident({ id: "fb-00000000000b", role: "reviewer", agentId: "agent-rev-1", parentId: WORKER, status: "switched", replacementId: "agent-rev-2" });
 
-    expect(await workerHandover(incident(), { paseo, location, incidents: [switched] })).toContain("\nreviewCalls: 1 of 4\n");
+    expect(await workerHandover(incident(), { paseo, location, incidents: [switched] })).toContain("\nreviewCalls: 1 of 2\n");
     // Without them — none given and no install home the fake can name, or `null` — counted as before.
-    expect(await workerHandover(incident(), { paseo, location })).toContain("\nreviewCalls: 2 of 4\n");
-    expect(await workerHandover(incident(), { paseo, location, incidents: null })).toContain("\nreviewCalls: 2 of 4\n");
+    expect(await workerHandover(incident(), { paseo, location })).toContain("\nreviewCalls: 2 of 2\n");
+    expect(await workerHandover(incident(), { paseo, location, incidents: null })).toContain("\nreviewCalls: 2 of 2\n");
   });
 });
 
@@ -379,12 +434,29 @@ describe("managerHandover", () => {
         `2. ${"x".repeat(980)}[redac...[truncated]`,
         "3. Ship it when the review passes.",
         "",
-        "You are the Beads Manager of this workspace from now on. Every Worker listed was told your id. Tell the user in one line that you took over, then carry on.",
+        "You are the Beads Manager of this workspace from now on. Every Worker listed was told your id: take them as yours and create no Worker that already exists. Tell the user in one line that you took over, then carry on.",
       ].join("\n"),
     );
     // The third message sat on the older page; nothing was late.
     expect(refetch).toHaveBeenCalledTimes(2);
     expect(log).not.toHaveBeenCalled();
+  });
+
+  it("A6: leaves answered questions out of openQuestions, as the pill does (design delta 20260924-qa-ledger §8)", async () => {
+    await storeReports();
+    const answer = (ids: string[]) =>
+      recordEntries(location, {
+        workspaceId: WS,
+        workerId: WORKER_A,
+        questions: [],
+        answers: ids.map((id) => ({ requestId: REQ_A, id, text: "a", via: "user" as const })),
+      });
+    answer(["Q1"]);
+    const partly = await managerHandover(managerIncident(), { paseo: managerPaseo(TIMELINE, 5).paseo, location, incidents: INCIDENTS, env: ENV, log: vi.fn() });
+    expect(partly).toContain(`\nopenQuestions: ${WORKER_A}: Q2\n`);
+    answer(["Q2"]);
+    const all = await managerHandover(managerIncident(), { paseo: managerPaseo(TIMELINE, 5).paseo, location, incidents: INCIDENTS, env: ENV, log: vi.fn() });
+    expect(all).toContain("\nopenQuestions: none\n");
   });
 
   it("does not list a replaced, archived, closed or other workspace's Worker", async () => {

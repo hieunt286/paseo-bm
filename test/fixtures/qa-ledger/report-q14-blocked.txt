@@ -1,0 +1,19 @@
+BM-REPORT
+requestId: req-20260923T063441Z
+phase: blocked
+tier: Large (changed: from Medium, a second published npm package is a new public artifact, it needs a branch in release.yml, it supersedes ADR-001 decision 1, and it touches the registry entry and AGENTS.md)
+filesChanged: docs/adr/ADR-009-payload-as-npm-package.md (new, uncommitted), docs/design/paseo-bm-delta-20260923-payload-npm-package.md (new, uncommitted), docs/plans/paseo-bm-implementation-plan-delta-20260923-payload-npm-package.md (new, uncommitted)
+beadsCreated: none
+beadsUpdated: none
+beadsClosed: none
+beadsReady: none
+reviewFindingsOpen: none
+buildAndTests: not run this turn; documents only, no code changed
+skillsUsed: polishing-beads, reviewing-plan
+blockers: 1 question: Q14 — see BM-QUESTIONS. Batch b5 used its review and its one re-review. The first pass returned four blocking findings, all correct, and all four are fixed: gate 4 is not one rule but the whole static-scan rule set, every finding of which is blocking, so the design now records the rule list and the plan gains WP-317 which runs those rules against the payload before anything is published; Paseo 0.8 has no npm source at all, so the ADR, the design and the plan now state the Git command for 0.8 and label the npm: form as 0.9+; plugin/LICENSE is added because MIT requires the notice in every copy, not for the health badge, and the review's 4/6 claim was wrong because hasLicense accepts the repository licence; and images move into plugin/images rather than being referenced by absolute URL, because scan.ts only keeps remote image URLs from a trusted host list I could not read. I also fixed two non-blocking items because both were statements that would have been false once frozen: scripts.typecheck cannot run from the published tarball, and the release runbook still told a future reader that the person running it never logs into npm, which the owner's Q13b decision reversed. The re-review then found one more blocking item, and it was mine: fixing the images decision left the out-of-scope section still saying images stay out of plugin/, so an implementer reading the scope would have refused the work the fix added. I fixed that and an off-by-one cross-reference from the renumbering. Per the review rules a batch gets one review and one re-review, so those last two fixes have not been seen by a Reviewer.
+
+BM-QUESTIONS
+requestId: req-20260923T063441Z
+Q14: Hai chỗ sửa cuối của lô `b5` chưa qua mắt Reviewer nào — một là mâu thuẫn trong mục "ngoài phạm vi" (Reviewer đã chỉ đúng chỗ và đúng cách sửa), hai là một tham chiếu chéo lệch một số sau khi đánh số lại WP. Ngân sách review của lô này đã dùng hết.
+- a: đi tiếp sang beads. Hai chỗ ấy là văn bản của chính tôi, Reviewer đã nêu rõ cách sửa, và cả cụm tài liệu sẽ còn được soi lại gián tiếp khi review lô beads đối chiếu từng bead với plan. (recommended)
+- b: chi thêm một lượt Reviewer mới cho riêng hai chỗ sửa ấy trước khi sang beads: chắc chắn hơn, chậm thêm một nhịp.

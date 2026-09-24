@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { BUDGET_TOLD_SCHEMA_VERSION, budgetToldPath, createBudgetTold, type BudgetTold } from "../plugin/server/budget-told";
 import { looksLikeReport, parseReports, requestIdFromText } from "../plugin/server/bm-report";
 import {
   BUDGET_NOTICE_MARKER,
@@ -69,21 +70,23 @@ function trace(overrides: Partial<ReconstructedTrace> = {}): ReconstructedTrace 
 }
 
 describe("overrunOf", () => {
-  it("uses the budgets of REQ-037, unchanged", () => {
-    expect(REVIEW_BUDGET).toEqual({ Small: 1, Medium: 4, Large: 6 });
+  it("uses the budgets of PRD delta 20260924-worker-autonomy (REQ-037d)", () => {
+    // One implementation batch (a review and one re-review) at every tier,
+    // plus the documents-and-beads batch of a Large request.
+    expect(REVIEW_BUDGET).toEqual({ Small: 2, Medium: 2, Large: 4 });
   });
 
   it("is null inside the budget and at it", () => {
-    expect(overrunOf(trace({ tier: "Small", reviewCalls: 1 }))).toBeNull();
-    expect(overrunOf(trace({ tier: "Large", reviewCalls: 6 }))).toBeNull();
+    expect(overrunOf(trace({ tier: "Small", reviewCalls: 2 }))).toBeNull();
+    expect(overrunOf(trace({ tier: "Large", reviewCalls: 4 }))).toBeNull();
   });
 
   it("names the request, the count and the budget once it is passed", () => {
-    expect(overrunOf(trace({ tier: "Medium", reviewCalls: 5 }))).toEqual({
+    expect(overrunOf(trace({ tier: "Medium", reviewCalls: 3 }))).toEqual({
       requestId: REQ,
       tier: "Medium",
-      calls: 5,
-      budget: 4,
+      calls: 3,
+      budget: 2,
       managerAgentId: MANAGER,
     });
   });
@@ -97,7 +100,7 @@ describe("overrunOf", () => {
 });
 
 describe("budgetNotice", () => {
-  const text = budgetNotice({ requestId: REQ, tier: "Small", calls: 2, budget: 1, managerAgentId: MANAGER });
+  const text = budgetNotice({ requestId: REQ, tier: "Small", calls: 3, budget: 2, managerAgentId: MANAGER });
 
   it("carries the request id in the form that attributes the Manager's turn to that request", () => {
     expect(text.startsWith(BUDGET_NOTICE_MARKER)).toBe(true);
@@ -108,13 +111,18 @@ describe("budgetNotice", () => {
     expect(looksLikeReport(text)).toBe(false);
   });
 
-  it("is exactly the text design delta §4.7 decided (owner decision Q21: ask, never cancel on the notice alone)", () => {
+  // Design delta 20260924-qa-ledger §6 replaces delta 20260917c §4.7 here: the
+  // Worker asks the user before any review beyond its budget, so the Manager
+  // asking again about the same calls put one question to the user twice
+  // (2026-09-23T05:59Z). The notice now informs; it still never cancels.
+  it("is exactly the text design delta 20260924-qa-ledger §6 decided: inform, do not ask, never cancel on it alone", () => {
     expect(text).toBe(
       `BM-BUDGET requestId: ${REQ}\n` +
-        "The Worker has used 2 review calls; the Small budget is 1. " +
-        "Ask the user whether to continue or to cancel the Worker's run, and wait for the answer. " +
-        "Do not cancel on your own: the user may already have allowed the extra calls in the Worker's chat.",
+        "The Worker has used 3 review calls; the Small budget is 2. " +
+        "For your information only: the Worker asks the user itself before any review beyond its budget, so do not ask the user about it. " +
+        "Tell the user in one line. Do not cancel on this notice alone; if the user asks you to stop the Worker, cancel its run.",
     );
+    expect(text).not.toMatch(/ask the user whether/i);
   });
 });
 
@@ -170,7 +178,12 @@ function report(requestId: string, at: string) {
   };
 }
 
-/** A Small request: the Manager's turn carries the Worker's report, so the trace knows its tier. */
+/**
+ * A Small request: the Manager's turn carries the Worker's report, so the trace
+ * knows its tier. It has already used ONE review call, so each scenario's next
+ * call reaches the budget of 2 and the one after passes it — the same steps
+ * these tests took when the Small budget was 1 (PRD delta 20260924-worker-autonomy).
+ */
 async function seedRequest(): Promise<void> {
   await appendRecord(
     location,
@@ -184,6 +197,7 @@ async function seedRequest(): Promise<void> {
     location,
     turn({ agentId: WORKER, role: "worker", requestId: REQ, parentAgentId: MANAGER, at: "2026-09-17T01:02:00.000Z" }),
   );
+  await reviewCall("agent-rev-1", 3);
 }
 
 /** One recorded Reviewer turn per review request it received. */
@@ -263,7 +277,7 @@ describe("checkReviewBudget", () => {
     await seedRequest();
     await reviewCall("agent-rev-1", 5);
     const { paseo, send } = fakePaseo();
-    const told = new Set<string>();
+    const told = createBudgetTold(() => {});
     const pending = new Map<string, BudgetOverrun>();
     expect(await checkReviewBudget(ended("agent-rev-1", "bm-reviewer/gpt"), { location, paseo, told, pending })).toBe("within");
     expect(send).not.toHaveBeenCalled();
@@ -273,16 +287,16 @@ describe("checkReviewBudget", () => {
     expect(await checkReviewBudget(ended("agent-rev-1", "bm-reviewer/gpt"), { location, paseo, told, pending })).toBe("sent");
   });
 
-  it("tells the Manager once when a Small request makes a second review call", async () => {
+  it("tells the Manager once when a Small request passes its budget of two review calls", async () => {
     await seedRequest();
     await reviewCall("agent-rev-1", 5);
     await reviewCall("agent-rev-1", 7);
     const { paseo, send, sent } = fakePaseo();
-    const told = new Set<string>();
+    const told = createBudgetTold(() => {});
     const pending = new Map<string, BudgetOverrun>();
     expect(await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told, pending })).toBe("sent");
     expect(send).toHaveBeenCalledTimes(1);
-    expect(sent[0]).toBe(budgetNotice({ requestId: REQ, tier: "Small", calls: 2, budget: 1, managerAgentId: MANAGER }));
+    expect(sent[0]).toBe(budgetNotice({ requestId: REQ, tier: "Small", calls: 3, budget: 2, managerAgentId: MANAGER }));
 
     // A later turn of the Worker or of a new Reviewer does not repeat it.
     await reviewCall("agent-rev-2", 9);
@@ -296,7 +310,7 @@ describe("checkReviewBudget", () => {
     await reviewCall("agent-rev-1", 7);
     let status = "running";
     const { paseo, send } = fakePaseo({ managerStatus: () => status });
-    const told = new Set<string>();
+    const told = createBudgetTold(() => {});
     const pending = new Map<string, BudgetOverrun>();
     expect(await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told, pending })).toBe("deferred");
     expect(send).not.toHaveBeenCalled();
@@ -307,7 +321,7 @@ describe("checkReviewBudget", () => {
 
   it("ignores agents that are not paseo-bm's, and agents with no workspace", async () => {
     const { paseo, send } = fakePaseo();
-    const told = new Set<string>();
+    const told = createBudgetTold(() => {});
     const pending = new Map<string, BudgetOverrun>();
     expect(await checkReviewBudget(ended("x", "claude"), { location, paseo, told, pending })).toBe("ignored");
     expect(await checkReviewBudget(ended("y", "bm-workers"), { location, paseo, told, pending })).toBe("ignored");
@@ -328,7 +342,7 @@ describe("checkReviewBudget", () => {
     // The Worker's `finished` report woke the Manager, then the Worker's turn ended.
     let status = "running";
     const { paseo, send } = fakePaseo({ managerStatus: () => status });
-    const told = new Set<string>();
+    const told = createBudgetTold(() => {});
     const pending = new Map<string, BudgetOverrun>();
     expect(await checkReviewBudget(ended(WORKER, "bm-worker"), { location, paseo, told, pending })).toBe("deferred");
     // No Worker or Reviewer turn follows; only the Manager finishes answering.
@@ -359,7 +373,7 @@ describe("checkReviewBudget", () => {
 
     const { paseo, send } = fakePaseo();
     // A fresh process: nothing was found here yet, so a Manager turn end is silent.
-    const told = new Set<string>();
+    const told = createBudgetTold(() => {});
     const pending = new Map<string, BudgetOverrun>();
     expect(await checkReviewBudget(ended(MANAGER, "bm-manager"), { location, paseo, told, pending })).toBe("within");
     expect(send).not.toHaveBeenCalled();
@@ -383,7 +397,7 @@ describe("checkReviewBudget", () => {
     await reviewCall("agent-rev-1", 5);
     await reviewCall("agent-rev-1", 7);
     const { paseo, send } = fakePaseo();
-    const told = new Set<string>();
+    const told = createBudgetTold(() => {});
     const pending = new Map<string, BudgetOverrun>();
     const results = await Promise.all([
       checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told, pending }),
@@ -399,7 +413,7 @@ describe("checkReviewBudget", () => {
     await reviewCall("agent-rev-1", 7);
     const log = vi.fn();
     const { paseo, send } = fakePaseo({ managerArchivedAt: "2026-09-17T02:00:00.000Z" });
-    const told = new Set<string>();
+    const told = createBudgetTold(() => {});
     const pending = new Map<string, BudgetOverrun>();
     // Recognised at the Reviewer's own turn end: nothing is deferred, so no
     // later turn end tries to wake an agent the user archived.
@@ -416,11 +430,11 @@ describe("checkReviewBudget", () => {
     await reviewCall("agent-rev-1", 7);
     const log = vi.fn();
     const failing = fakePaseo({ send: async () => { throw new Error("socket closed"); } });
-    const told = new Set<string>();
+    const told = createBudgetTold(() => {});
     const pending = new Map<string, BudgetOverrun>();
     await expect(checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo: failing.paseo, told, pending, log })).resolves.toBe("deferred");
     expect(String(log.mock.calls[0]?.[0])).toContain("socket closed");
-    expect(told.size).toBe(0);
+    // The claim was released, so a later turn end may try the same overrun again.
 
     const unreachable = fakePaseo({ reachable: false });
     await expect(checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo: unreachable.paseo, told, pending, log })).resolves.toBe("deferred");
@@ -429,7 +443,7 @@ describe("checkReviewBudget", () => {
 
   it("survives a malformed event", async () => {
     const { paseo } = fakePaseo();
-    await expect(checkReviewBudget(undefined as never, { location, paseo, told: new Set(), pending: new Map() })).resolves.toBe("ignored");
+    await expect(checkReviewBudget(undefined as never, { location, paseo, told: createBudgetTold(() => {}), pending: new Map() })).resolves.toBe("ignored");
   });
 });
 
@@ -464,6 +478,144 @@ const reviewerIncident = (overrides: Partial<FallbackIncident> = {}): FallbackIn
 const writeIncidents = (dir: string, incidents: FallbackIncident[]): void =>
   writeFileSync(join(dir, "role-fallback-state.json"), `${JSON.stringify({ version: 1, incidents }, null, 2)}\n`);
 
+/**
+ * Fault L5 of the 2026-09-23 diagnosis: the told-state lived in a Set inside
+ * `contribute()`'s closure, so a plugin reload or a daemon restart wiped it and
+ * the same overrun was announced again. req-20260923T021315Z was told at
+ * "5 review calls" twice, 47 minutes and one daemon restart (pid 95805 -> 6971)
+ * apart, with the count unchanged.
+ */
+describe("the review-budget notice survives a reload", () => {
+  const overBudget = async () => {
+    await seedRequest();
+    await reviewCall("agent-rev-1", 5);
+    await reviewCall("agent-rev-1", 7);
+  };
+
+  it("a store built afresh from the same home does not repeat the notice", async () => {
+    await overBudget();
+    const { paseo, send } = fakePaseo();
+    expect(
+      await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told: createBudgetTold(() => {}), pending: new Map() }),
+    ).toBe("sent");
+    expect(send).toHaveBeenCalledTimes(1);
+
+    // The reload: everything in memory is gone, only the file is left.
+    expect(
+      await checkReviewBudget(ended(WORKER, "bm-worker"), { location, paseo, told: createBudgetTold(() => {}), pending: new Map() }),
+    ).toBe("already-told");
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(readFileSync(budgetToldPath(location), "utf8")).told).toEqual([
+      { key: `${WS}::${REQ}`, calls: 3, at: expect.any(String) },
+    ]);
+  });
+
+  /**
+   * Review b3 caught this: dropping the old `told.has(...)` early return left an
+   * already-told overrun sitting in `pending`, and the Manager branch takes the
+   * FIRST pending entry of its own — so one stale entry blocked the flush of
+   * every later over-budget request for as long as the process lived.
+   */
+  it("an already-told overrun leaves nothing behind in pending", async () => {
+    await overBudget();
+    const { paseo, send } = fakePaseo();
+    const pending = new Map<string, BudgetOverrun>();
+    expect(await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told: createBudgetTold(() => {}), pending })).toBe("sent");
+    expect(pending.size).toBe(0);
+
+    expect(await checkReviewBudget(ended(WORKER, "bm-worker"), { location, paseo, told: createBudgetTold(() => {}), pending })).toBe("already-told");
+    expect(pending.size).toBe(0);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("a notice that did not go out is not remembered", async () => {
+    await overBudget();
+    const failing = fakePaseo({ send: async () => { throw new Error("socket closed"); } });
+    const told = createBudgetTold(() => {});
+    expect(
+      await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo: failing.paseo, told, pending: new Map(), log: () => {} }),
+    ).toBe("deferred");
+    const { paseo, send } = fakePaseo();
+    expect(await checkReviewBudget(ended(WORKER, "bm-worker"), { location, paseo, told, pending: new Map() })).toBe("sent");
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a symlinked ui directory without throwing into the turn", async () => {
+    await overBudget();
+    const elsewhere = mkdtempSync(join(tmpdir(), "bm-budget-elsewhere-"));
+    try {
+      symlinkSync(elsewhere, join(home, "ui"));
+      const notices: string[] = [];
+      const { paseo, send } = fakePaseo();
+      // The notice still goes out — a warning lost is worse than one repeated —
+      // and nothing is written through the link.
+      expect(
+        await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told: createBudgetTold((m) => notices.push(m)), pending: new Map() }),
+      ).toBe("sent");
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(notices.join(" ")).toContain("review-budget");
+      expect(readdirSync(elsewhere)).toEqual([]);
+    } finally {
+      rmSync(join(home, "ui"), { force: true });
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * The b3 re-review caught this: `claim` refuses for two different reasons,
+   * and treating them alike erased the deferral another turn end had left for
+   * the Manager to flush — so the warning was never delivered at all.
+   */
+  it("a turn end that overlaps a deferral does not erase it", async () => {
+    await overBudget();
+    let status = "running";
+    const busy = fakePaseo({ managerStatus: () => status });
+    const told = createBudgetTold(() => {});
+    const pending = new Map<string, BudgetOverrun>();
+    // Both turn ends are in flight while the Manager is running: the first
+    // claims, sees `running` and defers; the second finds it `sending`.
+    const outcomes = await Promise.all([
+      checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo: busy.paseo, told, pending }),
+      checkReviewBudget(ended(WORKER, "bm-worker"), { location, paseo: busy.paseo, told, pending }),
+    ]);
+    expect(outcomes.sort()).toEqual(["already-told", "deferred"]);
+    expect(pending.size).toBe(1);
+
+    // No Worker or Reviewer turn follows; the Manager's own turn end must still deliver it.
+    status = "idle";
+    expect(await checkReviewBudget(ended(MANAGER, "bm-manager"), { location, paseo: busy.paseo, told, pending })).toBe("sent");
+    expect(busy.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("a corrupt or unreadable file means untold, never a lost warning", async () => {
+    await overBudget();
+    mkdirSync(dirname(budgetToldPath(location)), { recursive: true });
+    writeFileSync(budgetToldPath(location), "{ this is not json");
+    const notices: string[] = [];
+    const { paseo, send } = fakePaseo();
+    expect(
+      await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told: createBudgetTold((m) => notices.push(m)), pending: new Map() }),
+    ).toBe("sent");
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(notices.join(" ")).toContain("not valid JSON");
+  });
+
+  it("a file from a newer version is never overwritten", async () => {
+    await overBudget();
+    mkdirSync(dirname(budgetToldPath(location)), { recursive: true });
+    const future = `${JSON.stringify({ schemaVersion: BUDGET_TOLD_SCHEMA_VERSION + 1, told: [] }, null, 2)}\n`;
+    writeFileSync(budgetToldPath(location), future);
+    const notices: string[] = [];
+    const { paseo, send } = fakePaseo();
+    expect(
+      await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told: createBudgetTold((m) => notices.push(m)), pending: new Map() }),
+    ).toBe("sent");
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(readFileSync(budgetToldPath(location), "utf8")).toBe(future);
+    expect(notices.join(" ")).toContain("newer than this plugin understands");
+  });
+});
+
 describe("checkReviewBudget with a replacement Reviewer", () => {
   /** The Small request's one review call, then the same message resent to the replacement. */
   async function resent(): Promise<void> {
@@ -471,8 +623,23 @@ describe("checkReviewBudget with a replacement Reviewer", () => {
     await reviewCall("agent-rev-1", 5);
     await reviewCall("agent-rev-2", 7);
   }
+  /**
+   * Each call below is its own scenario over the SAME request, so each needs a
+   * clean told-state. A real `createBudgetTold` would not give one: it now
+   * remembers on disk, under this shared `location`, which is the point of
+   * bead bm-ngan-sach-song-qua-nap-lai-qyag. What these cases check is the
+   * review-call COUNT with a replacement Reviewer, so they isolate the memory.
+   */
+  const isolatedTold = (): BudgetTold => {
+    const seen = new Set<string>();
+    return {
+      claim: (_location, key) => (seen.has(key) ? "told" : (seen.add(key), "claimed")),
+      commit: () => {},
+      release: (key) => void seen.delete(key),
+    };
+  };
   const check = (paseo: BudgetPaseo, home?: string | null) =>
-    checkReviewBudget(ended("agent-rev-2", "bm-reviewer"), { location, paseo, told: new Set(), pending: new Map(), ...(home === undefined ? {} : { home }) });
+    checkReviewBudget(ended("agent-rev-2", "bm-reviewer"), { location, paseo, told: isolatedTold(), pending: new Map(), ...(home === undefined ? {} : { home }) });
 
   it("stays within budget: the resend is the same review call; the next message counts", async () => {
     await resent();
@@ -484,7 +651,7 @@ describe("checkReviewBudget with a replacement Reviewer", () => {
     // A second message to the replacement is a new call, and over a Small budget.
     await reviewCall("agent-rev-2", 9);
     expect(await check(paseo, home)).toBe("sent");
-    expect(sent[0]).toBe(budgetNotice({ requestId: REQ, tier: "Small", calls: 2, budget: 1, managerAgentId: MANAGER }));
+    expect(sent[0]).toBe(budgetNotice({ requestId: REQ, tier: "Small", calls: 3, budget: 2, managerAgentId: MANAGER }));
   });
 
   it("counts the resend as today when the replacement is not recorded, or the file cannot be used", async () => {
@@ -576,13 +743,13 @@ describe("plugin notices in the timeline", () => {
           { location, paseo: undefined, log: () => {} } as never,
         )
       )?.record.sent[0]?.origin;
-    const notice = budgetNotice({ requestId: REQ, tier: "Small", calls: 2, budget: 1, managerAgentId: MANAGER });
+    const notice = budgetNotice({ requestId: REQ, tier: "Small", calls: 3, budget: 2, managerAgentId: MANAGER });
     expect(await build(notice)).toBe("agent");
     expect(await build("Please add a login screen.")).toBe("user");
   });
 
   it("never takes a notice for the request text of a row", () => {
-    const notice = budgetNotice({ requestId: REQ, tier: "Small", calls: 2, budget: 1, managerAgentId: MANAGER });
+    const notice = budgetNotice({ requestId: REQ, tier: "Small", calls: 3, budget: 2, managerAgentId: MANAGER });
     const [trace] = reconstructTraces({
       records: [
         turn({ requestId: REQ, sent: [{ agentId: MANAGER, at: "2026-09-17T01:00:00.000Z", text: notice, truncated: false }] }),

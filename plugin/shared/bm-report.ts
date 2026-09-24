@@ -238,6 +238,21 @@ function parsePhase(raw: string | undefined): ReportPhase | null {
   return PHASES.find((phase) => normalized.startsWith(phase)) ?? null;
 }
 
+/**
+ * The `decided` field (design delta 20260924-instruction-quality, owner decision
+ * P2-2): the choices the Worker made on its own, `; `-separated, `none` empty.
+ * A repeated `Decided:` label inside an entry is dropped.
+ */
+function parseDecided(raw: string | undefined): string[] {
+  const value = valueOrNull(raw);
+  // "none." or "none — nothing to choose" is still none, as in `blockers`.
+  if (value === null || /^none\b/i.test(value)) return [];
+  return value
+    .split(/;\s*/)
+    .map((entry) => entry.replace(/^decided:\s*/i, "").trim())
+    .filter((entry) => entry !== "");
+}
+
 function parseTier(raw: string | undefined): Tier | null {
   const value = valueOrNull(raw);
   if (value === null) return null;
@@ -258,6 +273,7 @@ const REPORT_KEYS = new Map<string, keyof ParsedReport | "phase" | "tier" | "gua
   ["reviewfindingsopen", "reviewFindingsOpen"],
   ["buildandtests", "buildAndTests"],
   ["skillsused", "skillsUsed"],
+  ["decided", "decided"],
   ["blockers", "blockers"],
   ["guardrail", "guardrail"],
 ]);
@@ -356,6 +372,7 @@ export function parseReports(text: string, context: ParseContext): ParsedReport[
       reviewFindingsOpen: valueOrNull(field("reviewfindingsopen")),
       buildAndTests: valueOrNull(field("buildandtests")),
       skillsUsed: skills.names,
+      decided: parseDecided(field("decided")),
       blockers: valueOrNull(field("blockers")),
       guardrail: parseGuardrail(field("guardrail")),
       unparsedFields: [...new Set(block.unknown)],

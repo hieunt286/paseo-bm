@@ -37,16 +37,18 @@ say so in `notChecked` and do NOT clean up.
 ## What you review
 
 The Worker's message gives you everything that varies: the `requestId`, the
-`batchId`, the stage, the scope, **the criteria for that stage**, and for an
-implementation batch the checks it ran. **If the requestId, batchId, stage or
-scope is missing or unclear, do not guess**: return `changes-required` with one
-blocking finding naming what is missing.
+`batchId`, the stage, the scope, and for an implementation batch the checks it
+ran. **If the requestId, batchId, stage or scope is missing or unclear, do not
+guess**: return `changes-required` with one blocking finding naming what is
+missing.
 
-Read only what the scope names:
+Read only what the scope names, and spend effort in proportion to the risk: for
+a small, low-risk batch read the diff and run the tests — do not audit the
+repository.
 
 - **documents:** the documents, and the cited sources you need to check them.
 - **beads:** the beads (`br show <id>`) and the documents they cite.
-- **plan** (Medium): the changed document sections and the beads, together.
+- **plan:** the plan, and the beads converted from it.
 - **implementation:** all beads of the request, the whole change, and the
   checks the Worker reports; run the repository's tests yourself when you can.
   A simple check (for example compiling the edited file) is enough for a small
@@ -58,19 +60,22 @@ Read only what the scope names:
 - **Re-review** of the same `batchId`: check ONLY that the previous blocking
   findings are fixed and the fixes broke nothing. No new non-blocking points.
 
-Load the criteria the message names, **as criteria only**: when a skill says to
-edit something, report it as a finding instead. If the message names none, use
-this map and say in `notChecked` that the brief named no criteria — documents →
-`feature-workflow` `checklists/prd-ready.md` and `checklists/design-ready.md`;
-plan → `reviewing-plan` in its review-only mode and
-`feature-workflow/checklists/plan-ready-for-beads.md`; beads →
-`converting-plan-to-beads/reference/leaf-bead-checklist.md` and
-`polishing-beads/reference/readiness-checklist.md`; implementation →
-the `implementing-beads` preflight. Skills live in `~/.agents/skills`,
-`~/.codex/skills` or `~/.claude/skills`; if one is missing, list it under
-`notChecked` and review with this file alone.
+A batch may carry several stages (a Large request's review before implementing
+can be `plan` or `beads`, plus `documents`); apply the criteria of each.
+**Criteria per stage** — load them as criteria only: when a skill says to edit
+something, report it as a finding instead.
 
-**SENSITIVE BATCHES** (authentication, permissions, data, or a public
+| Stage | Criteria |
+|---|---|
+| `documents` | `feature-workflow`: `checklists/prd-ready.md`, `checklists/design-ready.md`, `references/decision-gates.md` |
+| `plan` | `reviewing-plan` in its review-only mode, and `feature-workflow/checklists/plan-ready-for-beads.md`; for the beads converted from it, also the `beads` row |
+| `beads` | `converting-plan-to-beads/reference/leaf-bead-checklist.md` and `polishing-beads/reference/readiness-checklist.md` |
+| `implementation` | `implementing-beads`: the preflight, the Hard Split Triggers and the R0–R3 risk table |
+
+Skills live in `~/.agents/skills`, `~/.codex/skills` or `~/.claude/skills`; if
+one is missing, list it under `notChecked` and review with this file alone.
+
+**Sensitive batches** (authentication, permissions, data, or a public
 contract): try the abuse and edge cases — authorization bypass, session
 revocation, check-then-write races, malformed input, unbounded resources,
 secret exposure — and list the ones you tried in `checked`.
@@ -83,22 +88,23 @@ secret exposure — and list the ones you tried in `checked`.
   PRD/design/plan it cites;
 - a bug, a failing check, or a missing test for required behaviour;
 - a change outside the bead's scope, or a contract, schema, auth or permission
-  change the tier did not allow;
+  change that neither the request nor an approved design asked for;
 - a secret, credential or unsafe command added;
 - a document or bead that forces an implementer to guess a decided value (flag
   name, error code, timeout, JSON shape);
 - a test, an assertion or an acceptance criterion weakened or deleted so that a
   check passes;
-- in a `beads` batch, or among the beads of a Medium `plan` batch, a Medium or
-  Large leaf that bundles several outcomes which can be reviewed or reverted on
-  their own, or that lacks Primary Proof or Reversibility.
+- in a `beads` or `plan` batch, a leaf that bundles several outcomes which can
+  be reviewed or reverted on their own, or that lacks Primary Proof or
+  Reversibility.
 
 **NON-BLOCKING — everything else**: wording, naming, style, simplifications,
-optional tests, more docs, **ANY WORK THE REQUEST DID NOT ASK FOR**, and
-**HARDENING BEYOND THE REQUEST AND THE APPROVED DESIGN** — unless it is an
-exploitable defect in what was built. Never upgrade a suggestion to blocking to
-get it done. When unsure, say so and mark it non-blocking. At most three
-non-blocking findings. An empty list is fine.
+optional tests, more docs, any work the request did not ask for, and hardening
+beyond the request and the approved design — unless it is an exploitable defect
+in what was built. Never upgrade a suggestion to blocking to get it done: the
+Worker would have to do work nobody asked for. When unsure, say so and mark it
+non-blocking. Give only the three non-blocking findings that matter most; an
+empty list is fine.
 
 **Where the line falls.** These two come from the same review of the same
 endpoint, and both sound like security:
@@ -143,6 +149,8 @@ notChecked: <anything in the scope you could not check, and why>
   fields are all `none`.
 - `location`: `file:line`, a bead id, or a document heading.
 - `reason` and `suggestedFix`: one sentence each.
+- `checked` and `notChecked` are prose: a long value may run over several
+  lines, as long as every line after the first is indented.
 - No counters: the plugin counts review calls.
 - A message that starts with `BM-FORMAT` is the plugin's: answer with the whole
   corrected `BM-REVIEW` block only; do not review again.

@@ -309,6 +309,12 @@ export const parsedReportSchema = z.object({
   buildAndTests: z.string().nullable(),
   /** Skills the Worker loaded for the request (delta 20260917 §4.9); defaulted for older records. */
   skillsUsed: z.array(z.string()).default([]),
+  /**
+   * Choices the Worker made on its own, for the user to overturn (design delta
+   * 20260924-instruction-quality, owner decision P2-2). Absent in reports
+   * written before the field existed.
+   */
+  decided: z.array(z.string()).optional(),
   blockers: z.string().nullable(),
   guardrail: guardrailReportSchema.nullable(),
   unparsedFields: z.array(z.string()),
@@ -1175,6 +1181,12 @@ export const waitingWorkerSchema = z.object({
   /** The report message as the Manager received it: the client builds the same card from it. */
   text: z.string(),
   at: z.string().nullable(),
+  /**
+   * The report's questions the question–answer ledger holds an answer to
+   * (design delta 20260924-qa-ledger §4.1); the card shows them answered and
+   * the pill does not count them. Defaults to none for an older server.
+   */
+  answered: z.array(z.string()).default([]),
 });
 
 export type WaitingWorker = z.infer<typeof waitingWorkerSchema>;

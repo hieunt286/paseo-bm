@@ -1,7 +1,9 @@
 /**
  * `BM-FORMAT`: the sender of a block that breaks its template is told, and
  * asked to send the whole corrected block again (delta 20260918g §4.7,
- * REQ-061 f, owner decisions Q2 a and Q8 a).
+ * REQ-061 f, owner decisions Q2 a and Q8 a) — unless the block carried
+ * `BM-QUESTIONS`, where re-sending would ask the user the same thing twice, so
+ * the notice reports and asks for nothing (`formatNotice`).
  *
  * Only timeline shapes verified on a real daemon are read: a `user_message`
  * with no `clientMessageId` is another agent's message, and an
@@ -91,6 +93,8 @@ interface Pending {
   receiverId: string | null;
   issues: string[];
   hash: string;
+  /** The block put questions in front of the user; the notice must not ask for a re-send. */
+  carriesQuestions: boolean;
 }
 
 export interface FormatState {
@@ -118,12 +122,25 @@ export interface FormatDeps {
 
 export type FormatOutcome = "ignored" | "checked";
 
-/** The notice, word for word from design §4.7. */
-export function formatNotice(kind: BlockKind, requestId: string | null, issues: readonly string[]): string {
+/**
+ * The notice, word for word from design §4.7 — except for a block that carried
+ * QUESTIONS to the user, where it must not ask for a re-send.
+ *
+ * `unitsOf` merges a `BM-QUESTIONS` block into the `BM-REPORT` above it, because
+ * that is how the sender wrote them and how `bm-format.ts` checks them: a
+ * `blocked` report is only valid WITH its questions. So "send the whole block
+ * again" puts the same question set in front of the user a second time — the
+ * cause of all four repeated question cards measured on 2026-09-23. Deferring
+ * the notice does not help: it only moves the second card to after the user has
+ * answered. The notice therefore says what is wrong and asks for nothing.
+ */
+export function formatNotice(kind: BlockKind, requestId: string | null, issues: readonly string[], carriesQuestions = false): string {
   const last =
     kind === "BM-REVIEW"
       ? "Answer with the whole corrected BM-REVIEW block as your final message; do not review again."
-      : "Send the whole corrected block again, to the same agent as before, in one message. Change nothing else and do not redo any work; then carry on exactly where you were.";
+      : carriesQuestions
+        ? "Do NOT send this block again: its BM-QUESTIONS would reach the user a second time. Leave the report as it stands, apply the correction to your next one, and carry on exactly where you were. Do not mention this notice to the user."
+        : "Send the whole corrected block again, to the same agent as before, in one message. Change nothing else and do not redo any work; then carry on exactly where you were. Do not mention this notice to the user.";
   return [
     `${FORMAT_NOTICE_MARKER} requestId: ${requestId ?? "unknown"}`,
     `Your last ${kind} broke the template:`,
@@ -156,17 +173,36 @@ function textItem(item: unknown): TimelineText | null {
   return item as TimelineText;
 }
 
+interface Unit {
+  kind: BlockKind;
+  requestId: string | null;
+  issues: string[];
+  text: string;
+  /** The unit put at least one question in front of the user, so it must never be re-sent. */
+  carriesQuestions: boolean;
+}
+
+/** A `Q<n>:` line, i.e. a question the user was actually shown. */
+const QUESTION_LINE = /^Q\d+:/m;
+
 /** The blocks of one message grouped as the sender sent them: a report with its questions is one unit. */
-function unitsOf(blocks: readonly CheckedBlock[]): Array<{ kind: BlockKind; requestId: string | null; issues: string[]; text: string }> {
-  const units: Array<{ kind: BlockKind; requestId: string | null; issues: string[]; text: string }> = [];
+function unitsOf(blocks: readonly CheckedBlock[]): Unit[] {
+  const units: Unit[] = [];
   for (const block of blocks) {
     const previous = units.at(-1);
     if (block.kind === "BM-QUESTIONS" && previous?.kind === "BM-REPORT") {
       previous.issues.push(...block.issues.map(issueText));
       previous.text += `\n\n${block.text}`;
+      previous.carriesQuestions ||= QUESTION_LINE.test(block.text);
       continue;
     }
-    units.push({ kind: block.kind, requestId: block.requestId, issues: block.issues.map(issueText), text: block.text });
+    units.push({
+      kind: block.kind,
+      requestId: block.requestId,
+      issues: block.issues.map(issueText),
+      text: block.text,
+      carriesQuestions: block.kind === "BM-QUESTIONS" && QUESTION_LINE.test(block.text),
+    });
   }
   return units;
 }
@@ -213,7 +249,7 @@ async function detect(event: FormatTurnEvent, role: BmRole, deps: FormatDeps, lo
       ? item.type === "assistant_message"
       : item.type === "user_message" && typeof item.clientMessageId !== "string" && !isPluginNotice(item.text),
   );
-  const latest = new Map<string, { kind: BlockKind; requestId: string | null; issues: string[]; text: string }>();
+  const latest = new Map<string, Unit>();
   for (const item of sources) {
     for (const unit of unitsOf(checkBlocks(item.text))) {
       if (unit.kind !== wanted) continue;
@@ -265,6 +301,7 @@ async function detect(event: FormatTurnEvent, role: BmRole, deps: FormatDeps, lo
       receiverId,
       issues: unit.issues,
       hash,
+      carriesQuestions: unit.carriesQuestions,
     });
   }
 }
@@ -305,7 +342,7 @@ async function flush(endedId: string, deps: FormatDeps, log: (message: string) =
         continue;
       }
       if (isBusy(sender)) continue;
-      await deps.paseo.agents.ref(entry.senderId).send(formatNotice(entry.kind, entry.requestId, entry.issues));
+      await deps.paseo.agents.ref(entry.senderId).send(formatNotice(entry.kind, entry.requestId, entry.issues, entry.carriesQuestions));
       deps.state.pending.delete(entry.key);
       deps.state.sent.set(counted, (deps.state.sent.get(counted) ?? 0) + 1);
       deps.state.notifiedBlocks.add(entry.hash);

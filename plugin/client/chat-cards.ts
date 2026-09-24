@@ -481,11 +481,15 @@ export function questionHeading(question: Question): { heading: string; body: st
   return topic === null ? { heading: question.id, body: rest } : { heading: `${question.id} · ${topic}`, body: rest };
 }
 
-/** Fills the recommended option into every question still unanswered; never overwrites a pick. */
-export function recommendedPicks(questions: readonly Question[], picks: Readonly<Picks>): Picks {
+/**
+ * Fills the recommended option into every question still unanswered; never
+ * overwrites a pick, and never touches a question the ledger already holds an
+ * answer to (`answered`, design delta 20260924-qa-ledger §4.3).
+ */
+export function recommendedPicks(questions: readonly Question[], picks: Readonly<Picks>, answered: ReadonlySet<string> = new Set()): Picks {
   const next: Picks = { ...picks };
   for (const question of questions) {
-    if (next[question.id] !== undefined || !choosable(question)) continue;
+    if (next[question.id] !== undefined || !choosable(question) || answered.has(question.id)) continue;
     const recommended = question.options.find((option) => option.recommended);
     if (recommended !== undefined) next[question.id] = { key: recommended.key };
   }
@@ -507,9 +511,10 @@ export function isAnswered(question: Question, pick: Pick | undefined): boolean 
  * "" when none is answered or the card names no request (delta 20260918d §4.1).
  * An unanswered question gets no line and stays open: the Worker asks again.
  */
-export function answersDraft(card: ChatCard, picks: Readonly<Picks>): string {
+export function answersDraft(card: ChatCard, picks: Readonly<Picks>, inLedger: ReadonlySet<string> = new Set()): string {
   if (card.requestId === null) return "";
-  const answered = card.questions.filter((question) => isAnswered(question, picks[question.id]));
+  // A question the ledger already holds an answer to is never answered again (design delta 20260924-qa-ledger §4.3).
+  const answered = card.questions.filter((question) => !inLedger.has(question.id) && isAnswered(question, picks[question.id]));
   return answered.length === 0 ? "" : answersText(card.requestId, answered, picks);
 }
 
@@ -565,9 +570,30 @@ export function sentSummary(card: ChatCard, picks: Readonly<Picks>, text: string
 // Is a question card answered? (delta 20260918d §4.9, batch b6)
 // ---------------------------------------------------------------------------
 
+/** The `chat.waiting` entry of `card` in this Manager's chat, if it still lists one. */
+function waitingEntryOf(card: ChatCard, chatAgentId: string, waiting: readonly WaitingWorker[]): WaitingWorker | undefined {
+  return waiting.find((entry) => entry.managerId === chatAgentId && entry.requestId === card.requestId && entry.text === card.text);
+}
+
 /** The report of `card` is one `chat.waiting` still lists for this Manager's chat. */
 export function stillWaiting(card: ChatCard, chatAgentId: string, waiting: readonly WaitingWorker[]): boolean {
-  return waiting.some((entry) => entry.managerId === chatAgentId && entry.requestId === card.requestId && entry.text === card.text);
+  return waitingEntryOf(card, chatAgentId, waiting) !== undefined;
+}
+
+/**
+ * The card's questions the question–answer ledger holds an answer to, as
+ * `chat.waiting` lists them for this chat (design delta 20260924-qa-ledger
+ * §4.3). Empty while `chat.waiting` is unknown or no longer lists the card:
+ * then the card as a whole counts as answered or moved on (`answeredHow`).
+ */
+export function answeredInLedger(card: ChatCard, chatAgentId: string, waiting: readonly WaitingWorker[] | null): Set<string> {
+  if (waiting === null) return new Set();
+  return new Set(waitingEntryOf(card, chatAgentId, waiting)?.answered ?? []);
+}
+
+/** The line a card shows once it no longer waits (`answeredHow` gave "moved-on"). */
+export function movedOnLine(workerName: string): string {
+  return `Answered, or ${workerName} is working or has reported since.`;
 }
 
 export type AnsweredHow = "sent" | "marked" | "moved-on";
@@ -688,16 +714,24 @@ export async function sendReply(input: SendReplyInput): Promise<SendReplyResult>
   }
 }
 
-/** djb2: short and stable, enough to tell two reports of one request apart. */
-function hashOf(text: string): string {
-  let hash = 5381;
-  for (let index = 0; index < text.length; index += 1) hash = ((hash << 5) + hash + text.charCodeAt(index)) | 0;
-  return (hash >>> 0).toString(36);
-}
-
-/** Key of the "already answered" memory: this chat, this request, these questions, this message. */
+/**
+ * Key of the "already answered" memory: this chat, this request, THESE
+ * QUESTIONS — deliberately not the message they arrived in.
+ *
+ * It used to carry a hash of the whole card text, so a report re-sent with one
+ * corrected field produced a second, blank card for questions already answered.
+ * On 2026-09-23 the user answered Q10–Q12 twice for that reason, and the second
+ * answer cut into the Worker's running turn.
+ *
+ * What this leans on: a Worker numbers its questions once per request and keeps
+ * counting (worker.md, "keep counting across the request, so a late answer
+ * never lands on a new question"), so one id set means one question set. Two
+ * genuinely different sets that reused Q1–Q4 under one request would share this
+ * key and the second would look answered — the test below pins that trade-off
+ * so it is a decision, not a surprise.
+ */
 export function answeredKey(agentId: string, card: ChatCard): string {
-  return [agentId, card.requestId ?? "", card.questions.map((question) => question.id).join(","), hashOf(card.text)].join("|");
+  return [agentId, card.requestId ?? "", card.questions.map((question) => question.id).join(",")].join("|");
 }
 
 // ---------------------------------------------------------------------------

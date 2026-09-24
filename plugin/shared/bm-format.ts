@@ -57,16 +57,26 @@ export const REPORT_FIELDS = [
   "reviewFindingsOpen",
   "buildAndTests",
   "skillsUsed",
+  "decided",
   "blockers",
 ] as const;
+/** Fields a report may leave out: `decided` came later, and older Workers never write it. */
+const OPTIONAL_REPORT_FIELDS: ReadonlySet<string> = new Set(["decided"]);
 const PHASES = ["received", "beads-done", "blocked", "finished"];
-const TIER = /^(Small|Medium|Large) \(changed: (no|from (Small|Medium|Large), .+)\)$/;
+const TIER_SHELL = /^(?:Small|Medium|Large) \(changed: ([\s\S]+)\)$/;
+/** `no`, optionally followed by a note. */
+const TIER_NO = /^no(?:[\s—–\-,;(][\s\S]*)?$/;
+/** `from <tier>`, an optional parenthetical, an optional `reason:` label, then a non-empty reason. */
+const TIER_FROM = /^from (?:Small|Medium|Large)(?![A-Za-z])(?:\s*\([^()]*\))?\s*[,—–-]?\s*(?:reason:\s*)?[^\s,—–-][\s\S]*$/;
 const BEAD_FIELDS = new Set(["beadsCreated", "beadsUpdated", "beadsClosed", "beadsReady"]);
 const SKILL = /^[a-z0-9][a-z0-9-]*$/i;
-const FINDING_OPEN = /^b\d+: \S.*$/;
+/** `b<n>: <finding>`; up to two short label words may sit before the colon (`b1 re-review: …`). */
+const FINDING_OPEN = /^b\d+(?: [A-Za-z][\w-]*){0,2}: \S[\s\S]*$/;
 const BLOCKERS_QUESTIONS = new RegExp(`^(\\d+) questions?: (Q\\d+(?:, Q\\d+)*) ${DASH} see BM-QUESTIONS\\b`);
 
 const REVIEW_FIELDS = ["requestId", "batchId", "reviewKind", "verdict", "checked", "findings", "notChecked"] as const;
+/** The free-text fields of BM-REVIEW: their value may run over several indented lines. */
+const PROSE_REVIEW_FIELDS = new Set(["checked", "notChecked"]);
 const FINDING_FIELDS = ["severity", "location", "reason", "suggestedFix"] as const;
 
 const QUESTION = /^Q(\d+): \S.*$/;
@@ -75,6 +85,46 @@ const RECOMMENDED = /\(recommended\)\s*$/;
 const ANSWER = new RegExp(`^Q(\\d+): (?:[a-z]|other) ${DASH} \\S.*$`);
 
 const isNone = (value: string) => value.trim().toLowerCase() === "none";
+/** `none`, on its own or followed by a note — what `blockers:` already allows in worker.md. */
+const isNoneWithNote = (value: string) => /^none(?:[\s—–\-,;(:][\s\S]*)?$/i.test(value.trim());
+
+/**
+ * `text` split on `separator`, ignoring separators inside `(...)`.
+ *
+ * A finding's own text carries parentheses that carry semicolons ("(security
+ * trade-off, needs Q6); b1: …" was one real value), and a blind split turned
+ * the tail of one item into two items that named no batch.
+ */
+function splitTopLevel(text: string, separator: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index]!;
+    if (character === "(") depth += 1;
+    else if (character === ")") depth = Math.max(0, depth - 1);
+    else if (character === separator && depth === 0) {
+      parts.push(text.slice(start, index));
+      start = index + 1;
+    }
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
+
+/**
+ * Does `tier` follow the template? `Small|Medium|Large (changed: …)`, where the
+ * inside is `no` or `from <tier>` plus a reason, either of which may carry a
+ * short note — worker.md allows exactly that on `blockers:` one line below, and
+ * 3 of the 9 malformed reports of the 2026-09-23 diagnosis were notes agents
+ * read the template as inviting.
+ */
+function tierIsWellFormed(tier: string): boolean {
+  const shell = TIER_SHELL.exec(tier);
+  if (shell === null) return false;
+  const inside = shell[1]!;
+  return TIER_NO.test(inside) || TIER_FROM.test(inside);
+}
 
 /** The block marker of a line (quote stripped), or null. */
 function markerOf(line: string): { kind: BlockKind; bare: boolean; stopped: boolean } | null {
@@ -190,7 +240,7 @@ function checkReport(block: RawBlock, questions: RawBlock | undefined, issue: (f
     seen.set(key, value);
     order.push(key);
   }
-  for (const key of REPORT_FIELDS) if (!seen.has(key)) issue(key, "is missing");
+  for (const key of REPORT_FIELDS) if (!seen.has(key) && !OPTIONAL_REPORT_FIELDS.has(key)) issue(key, "is missing");
   const expected = REPORT_FIELDS.filter((key) => seen.has(key));
   const outOfPlace = order.findIndex((key, position) => key !== expected[position]);
   if (outOfPlace !== -1) {
@@ -202,8 +252,8 @@ function checkReport(block: RawBlock, questions: RawBlock | undefined, issue: (f
   const phase = seen.get("phase");
   if (phase !== undefined && !PHASES.includes(phase)) issue("phase", `must be one of ${PHASES.join(", ")} (got "${shorten(phase)}")`);
   const tier = seen.get("tier");
-  if (tier !== undefined && !TIER.test(tier)) {
-    issue("tier", 'must be "Small|Medium|Large (changed: no)" or "… (changed: from <tier>, <reason>)"');
+  if (tier !== undefined && !tierIsWellFormed(tier)) {
+    issue("tier", 'must be "Small|Medium|Large (changed: no)" or "… (changed: from <tier>, <reason>)"; a short note may follow either');
   }
   for (const key of BEAD_FIELDS) {
     const value = seen.get(key);
@@ -220,10 +270,10 @@ function checkReport(block: RawBlock, questions: RawBlock | undefined, issue: (f
     issue("skillsUsed", "must be none or skill names separated by commas");
   }
   const findings = seen.get("reviewFindingsOpen");
-  if (findings !== undefined && !isNone(findings) && findings.split(";").some((part) => !FINDING_OPEN.test(part.trim()))) {
-    issue("reviewFindingsOpen", 'must be none or "b<n>: <finding>" items separated by ";"');
+  if (findings !== undefined && !isNoneWithNote(findings) && splitTopLevel(findings, ";").some((part) => !FINDING_OPEN.test(part.trim()))) {
+    issue("reviewFindingsOpen", 'must be none or "b<n>: <finding>" items separated by ";" — write none when no finding is open');
   }
-  for (const key of ["filesChanged", "buildAndTests", "blockers"]) {
+  for (const key of ["filesChanged", "buildAndTests", "decided", "blockers"]) {
     if (seen.get(key) === "") issue(key, "is empty; write none");
   }
 
@@ -321,6 +371,7 @@ function checkReview(block: RawBlock, issue: (field: string | null, message: str
   const seen = new Map<string, string>();
   const findings: Array<Map<string, string>> = [];
   let inFindings = false;
+  let lastField: string | null = null;
   for (const line of block.lines) {
     const item = /^- ([A-Za-z]+):(?:\s(.*))?$/.exec(line);
     const nested = /^\s+([A-Za-z]+):(?:\s(.*))?$/.exec(line);
@@ -332,12 +383,18 @@ function checkReview(block: RawBlock, issue: (field: string | null, message: str
       findings.at(-1)!.set(nested[1]!, (nested[2] ?? "").trim());
       continue;
     }
+    // An indented line continues the prose field above it. reviewer.md shows
+    // `checked:` and `notChecked:` as free text and never says they must fit one
+    // line; on 2026-09-22 a review that listed its seven fixes one per indented
+    // line was told each was "not a field", and the re-send lost the list.
+    if (!inFindings && PROSE_REVIEW_FIELDS.has(lastField ?? "") && /^\s+\S/.test(line)) continue;
     const field = FIELD.exec(line);
     if (field === null) {
       issue(null, `line "${shorten(line)}" is not a field of the template`);
       continue;
     }
     const key = field[1]!;
+    lastField = key;
     inFindings = key === "findings";
     if (!(REVIEW_FIELDS as readonly string[]).includes(key)) issue(key, "is not a field of the template");
     else if (seen.has(key)) issue(key, "appears twice");
