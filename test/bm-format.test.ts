@@ -316,6 +316,18 @@ describe("field values a real run produced (diagnosis 2026-09-23, fault L2)", ()
     expect(accepts({ tier: "Large (changed: no — stays Large; wave 3 item 3 widens it to ~26 screens so rule 1 still holds)" })).toEqual([]);
   });
 
+  // 2026-09-24, req-20260924T065116Z: the owner saw "template error" on a card
+  // whose only issue was a note AFTER the parenthesis — exactly what worker.md
+  // says ("a short note after their structured part") and what the notice
+  // itself promises ("a short note may follow either").
+  it("B2 — a note after the closing parenthesis, on either form", () => {
+    expect(accepts({ tier: "Medium (changed: no) — wiring an already-designed backend dependency (X-11) into one shared table component; revertible, no public contract change" })).toEqual([]);
+    expect(accepts({ tier: "Small (changed: from Large (preliminary guess), reason: one file) — nothing else moved" })).toEqual([]);
+    // A note is not a licence for a malformed inside, nor for text glued to the parenthesis.
+    expect(accepts({ tier: "Large (changed: maybe) — really" })).toHaveLength(1);
+    expect(accepts({ tier: "Large (changed: no)stays" })).toHaveLength(1);
+  });
+
   it("C — a parenthetical inside `from <tier>`, and a `reason:` label", () => {
     expect(accepts({ tier: "Small (changed: from Large (preliminary guess), reason: the deliverable is one new standalone file)" })).toEqual([]);
     expect(accepts({ tier: "Small (changed: from Large (preliminary guess), reason: a reference file; no running code touched)" })).toEqual([]);

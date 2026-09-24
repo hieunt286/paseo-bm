@@ -11,6 +11,7 @@ import {
   movedOnLine,
   answerSummary,
   answeredKey,
+  answerRowText,
   answersDraft,
   chatCardSchema,
   drawAsCard,
@@ -32,7 +33,9 @@ import {
   questionHeading,
   quickReplies,
   replyTarget,
+  replyNote,
   replyText,
+  senderName,
   sendReply,
   statusChip,
   summaryOf,
@@ -1265,5 +1268,64 @@ describe("the fallback card (delta 20260921 §4.4.6, REQ-065 c)", () => {
     expect(localTimeText(new Date(2026, 8, 22, 0, 0), NOW)).toBe("tomorrow 00:00");
     expect(localTimeText(new Date(2026, 8, 20, 23, 59), NOW)).toBe("yesterday 23:59");
     expect(localTimeText(new Date(2026, 9, 1, 18, 30), NOW)).toBe("Thu 1 Oct 18:30");
+  });
+});
+
+describe("the user's reply from a card, in the recipient's chat", () => {
+  // As the Worker received it on 2026-09-24: `replyText` of a card in the Manager's chat.
+  const REPLY = [
+    "Reply from the user about `req-20260924T064739Z`:",
+    "",
+    "BM-ANSWERS",
+    "requestId: req-20260924T064739Z",
+    "Q1: a — Keep the old URL comment",
+    "Q2: other — push to dev only",
+    "",
+    "Thanks, go ahead.",
+  ].join("\n");
+  const replyCard = (text = REPLY) => toChatCard({ type: "user_message", text, clientMessageId: "c1" }, "complete");
+
+  it("is a card of its own, with its request and one row per answer", () => {
+    const card = replyCard()!;
+    expect(card).toMatchObject({ type: "reply", direction: "received", requestId: "req-20260924T064739Z", batchId: null, formatIssues: [], questions: [] });
+    expect(card.answers).toEqual([
+      { id: "Q1", text: "a — Keep the old URL comment" },
+      { id: "Q2", text: "other — push to dev only" },
+    ]);
+    expect(card.answers.map(answerRowText)).toEqual(["Q1 · a — Keep the old URL comment", "Q2 · other — push to dev only"]);
+    expect(chatCardSchema.parse(card)).toEqual(card);
+  });
+
+  it("says it is the user's, what it answers, and the user's own words", () => {
+    const card = replyCard()!;
+    expect(senderName(card, partiesOf(card, worker, [manager]).from)).toBe("You");
+    expect(partiesOf(card, worker, [manager]).to.id).toBe(worker.id);
+    expect(statusChip(card)).toEqual({ text: "Your reply", tone: "info" });
+    expect(summaryOf(card)).toBe("answers to Q1, Q2 · Thanks, go ahead.");
+    expect(replyNote(REPLY)).toBe("Thanks, go ahead.");
+    expect(drawAsCard(card, worker)).toBe(true);
+  });
+
+  it("round-trips what the card's Reply box sends, with a batch and free words only", () => {
+    const review = card(REVIEW);
+    const text = replyText(review, "Looks fine to me.");
+    const sent = replyCard(text)!;
+    expect(sent).toMatchObject({ type: "reply", requestId: "req-20260916T081749Z", batchId: "b1", answers: [], gist: "Looks fine to me." });
+    expect(summaryOf(sent)).toBe("Looks fine to me.");
+  });
+
+  it("leaves everything else the user typed to Paseo", () => {
+    expect(replyCard("Please reply from the user about this")).toBeUndefined();
+    expect(replyCard(INSTRUCTION)).toBeUndefined();
+  });
+
+  it("shows the answers the Manager relays as rows too, but not a block of another request", () => {
+    const relay = ["Continue req-20260924T064739Z.", "", "BM-ANSWERS", "requestId: req-20260924T064739Z", "Q3: b — Medium"].join("\n");
+    const relayed = toChatCard({ type: "user_message", text: relay }, "complete")!;
+    expect(relayed.type).toBe("message");
+    expect(relayed.answers).toEqual([{ id: "Q3", text: "b — Medium" }]);
+    expect(summaryOf(relayed)).toBe("answer to Q3");
+    // A reply about one request carrying another request's block shows no rows.
+    expect(replyCard(REPLY.replace("requestId: req-20260924T064739Z", "requestId: req-20260101T000000Z"))!.answers).toEqual([]);
   });
 });

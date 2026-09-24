@@ -39,6 +39,7 @@ import type { Question } from "../shared/bm-questions";
 import {
   answeredHow,
   answeredKey,
+  answerRowText,
   answersDraft,
   candidateCost,
   choosable,
@@ -58,6 +59,7 @@ import {
   replyControls,
   replyTarget,
   roleName,
+  senderName,
   runFallbackAction,
   sendReply,
   sentSummary,
@@ -256,7 +258,7 @@ function MessageCardView({ theme, layout, agentId, item, timestamp }: PluginTime
           <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             {fromMark === null ? null : <RoleMark kind={fromMark} theme={theme} />}
             <Text style={[styles.sectionTitle, { color: theme.colors.foreground }]} numberOfLines={1}>
-              {partyName(from)}
+              {senderName(card, from)}
             </Text>
             <Text style={styles.body} numberOfLines={1}>
               {`→ ${partyName(to)}`}
@@ -281,6 +283,17 @@ function MessageCardView({ theme, layout, agentId, item, timestamp }: PluginTime
           {summaryOf(card)}
         </Text>
       </View>
+
+      {/* The answers a message carries, one row each, instead of the raw block. */}
+      {card.answers.length === 0 ? null : (
+        <View style={[styles.card, { gap: 2, backgroundColor: theme.colors.surface0 }]}>
+          {card.answers.map((row) => (
+            <Text key={row.id} style={styles.body}>
+              {answerRowText(row)}
+            </Text>
+          ))}
+        </View>
+      )}
 
       {workspaceId === null || beadIds.length === 0 ? null : (
         <BeadChips

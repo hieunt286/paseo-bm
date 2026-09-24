@@ -64,6 +64,13 @@ export const REPORT_FIELDS = [
 const OPTIONAL_REPORT_FIELDS: ReadonlySet<string> = new Set(["decided"]);
 const PHASES = ["received", "beads-done", "blocked", "finished"];
 const TIER_SHELL = /^(?:Small|Medium|Large) \(changed: ([\s\S]+)\)$/;
+/**
+ * The same shell with a note AFTER the closing parenthesis, which is what
+ * worker.md literally says ("a short note after their structured part").
+ * The inside may hold one level of parentheses, as `from Large (preliminary
+ * guess), reason` does.
+ */
+const TIER_SHELL_THEN_NOTE = /^(?:Small|Medium|Large) \(changed: ((?:[^()]|\([^()]*\))+)\)\s*[—–\-,;:.]\s*\S[\s\S]*$/;
 /** `no`, optionally followed by a note. */
 const TIER_NO = /^no(?:[\s—–\-,;(][\s\S]*)?$/;
 /** `from <tier>`, an optional parenthetical, an optional `reason:` label, then a non-empty reason. */
@@ -120,10 +127,13 @@ function splitTopLevel(text: string, separator: string): string[] {
  * read the template as inviting.
  */
 function tierIsWellFormed(tier: string): boolean {
-  const shell = TIER_SHELL.exec(tier);
-  if (shell === null) return false;
-  const inside = shell[1]!;
-  return TIER_NO.test(inside) || TIER_FROM.test(inside);
+  // A note inside the parentheses, or after them: both read as the template does.
+  for (const shell of [TIER_SHELL.exec(tier), TIER_SHELL_THEN_NOTE.exec(tier)]) {
+    if (shell === null) continue;
+    const inside = shell[1]!;
+    if (TIER_NO.test(inside) || TIER_FROM.test(inside)) return true;
+  }
+  return false;
 }
 
 /** The block marker of a line (quote stripped), or null. */
