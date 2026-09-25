@@ -7,9 +7,9 @@ Read this before touching anything in this repository.
 `paseo-bm` (BM = Beads Management) is published to npm and installed with `npx paseo-bm`. It does two things:
 
 1. **Installs a Paseo plugin.** Copies a plugin payload into a stable install home, registers it with the Paseo daemon, registers three agent roles, and can delegate agent-skill installation to the third-party `skills` CLI.
-2. **Provides an agent orchestration loop.** After install, the user chats with **Beads Manager** (an agent). Manager immediately delegates to a **Beads Worker** (a peer agent in the same workspace). Worker follows the feature-workflow process: update docs when needed, create or update beads, then keep going until the beads are implemented. After every batch of changes Worker spawns a **Reviewer** sub-agent. The user can chat directly with Worker, and only the user may archive or delete an agent.
+2. **Provides an agent orchestration loop.** After install, the user chats with **Beads Manager** (an agent). Manager answers what it can read itself and hands every change to a **Beads Worker** (a peer agent in the same workspace). Worker sizes the request and uses only the process that size needs: a small change is done and proved directly; larger work gets beads, documents where they are needed, and a **Reviewer** sub-agent. The user can chat directly with Worker, and only the user may archive or delete an agent. The behaviour itself lives in `plugin/roles/*.md`.
 
-**Current state: documentation and a bead graph only. There is no product code yet.** The first implementable bead is the project scaffold.
+**Current state:** shipped on npm (0.3.x); the paseo.cafe listing PR is open, so there is no listing page yet. The work now is maintenance and new features on a running product.
 
 ## Language rule
 
@@ -77,10 +77,11 @@ things cost a red run to learn there:
 
 ```
 AGENTS.md              this file (CLAUDE.md is a symlink to it)
-docs/product/          PRD (Accepted)
-docs/design/           Technical Design (Active)
-docs/adr/              ADR-001..009 (Accepted)
-docs/plans/            implementation plan v2 (Active, Plan-ready PASS); v1 is Superseded
+docs/product/          PRDs (Accepted, living): paseo-bm-prd.md, paseo-bm-dashboard-prd.md
+docs/design/           Technical Designs (Active, living): paseo-bm.md, paseo-bm-dashboard.md;
+                       *-delta-* files are merged history, cited by code comments
+docs/adr/              ADR-001..010 (Accepted)
+docs/plans/            one plan per piece of Designed work; Completed ones are history
 docs/operations/       acceptance checklists, run records, release notes, the paseo.cafe listing record
 .beads/                bead graph; issues.jsonl is tracked, *.db is gitignored
 src/                   CLI source: the installer published as the npm package `paseo-bm`
@@ -93,15 +94,38 @@ the paseo.cafe entry pointed at the repository root; the entry now declares `pat
 nothing reads a root manifest and a stray one would make `paseo plugin add` find a plugin that
 cannot load. A test asserts the repository has exactly one manifest.
 
-## Process: feature-workflow is mandatory
+## Process: risk picks the lane
 
-Every change goes through the `feature-workflow` skill. Do not improvise a different process.
+Rigor follows the risk of the change, never its size or the habit of the last change. Pick
+the lightest lane that fits, say which one in a line, and move up when you learn more.
+The product is shipped (0.3.x); this repository is in maintenance, not in a build-out phase.
 
-- **Read the artifacts before proposing anything.** The PRD, Technical Design and plan already resolve most questions. Re-deriving them wastes tokens and invents contradictions.
-- **Risk decides rigor, not effort estimates.** A one-line change that touches a public contract, a data schema, auth, or rollback safety is high-risk work and needs the matching artifacts.
-- **The plan is frozen.** `docs/plans/paseo-bm-implementation-plan-v2.md` is `Active` with `Plan-ready: PASS`. Do not edit it in place to fit new scope — write a delta-change document instead. The same applies to the Accepted PRD and Active design; correcting stale text that contradicts an already-recorded decision is errata and is allowed, adding scope is not.
-- **Gates are real.** `prd-ready` → `design-ready` → `plan-ready-for-beads` → `feature-done`. Report gate results honestly; a skipped gate is recorded as an exception, never as a pass.
-- **Ask instead of guessing.** If a bead would force you to invent a flag name, an error code, a timeout value, a JSON shape, or a label convention, stop and ask. Those are already decided in the Technical Design; if one is genuinely missing, that is a design gap to surface, not to fill silently.
+| Lane | When | What it takes |
+|---|---|---|
+| **Direct** | Local and easy to undo: a bug fix, a screen, wording or style change, a refactor, a test, tooling, a doc correction — anything that changes none of the contracts below | Just do it. Update the docs that describe what you changed, in place. Proof = the verification commands below, green. No bead, no plan, no gate, no Reviewer |
+| **Tracked** | Still low-risk, but several outcomes with an order between them, or work that will span sessions or be handed over | Beads written by hand (`br create`), closed on evidence. No plan and no gate unless a trigger below appears |
+| **Designed** | Any of the **triggers** below | `feature-workflow`: the design (and PRD when the user-facing outcome changes) edited in place, an ADR for a durable decision, a plan and beads when there is a real dependency graph, and the gates that apply |
+
+**Triggers for Designed** — a change that:
+
+- changes a contract others consume: `npx paseo-bm` flags, exit and error codes, `--json` output, `install.json` / trace-store / any on-disk schema, the `BM-*` block formats and notices, plugin RPC contracts in `plugin/shared/contracts.ts` read across versions;
+- writes to the user's Paseo configuration, agent skill directories or anything outside the install home;
+- touches credentials, permissions, agent modes or anything the safety boundaries below guard;
+- touches release, publishing or the two-package rule;
+- adds a dependency or changes the architecture (overturns or adds an ADR);
+- cannot be undone.
+
+The **role files** (`plugin/roles/*.md`) are product behaviour for every user: changing what an
+agent may do is Designed; rewording without changing behaviour is Direct.
+
+How the lanes are held:
+
+- **Look before you ask.** The design, ADRs and code already answer most questions; read the part you need instead of re-deriving it. A flag name, error code, timeout, JSON shape or label convention is decided in the design — if one is genuinely missing, surface the gap instead of inventing it.
+- **Docs are living.** The PRD, the Technical Design and the ADR index describe the product **as it is now**. Change them in place in the same commit as the code, with one Revision History line when the change is not a correction. No delta files for new work: the deltas under `docs/` are merged history, kept only because code comments cite them. An ADR is never rewritten — a new ADR supersedes it.
+- **PRD states outcomes, design states detail.** Theme tokens, labels, pixel values and limits belong in the design, code and tests, so a screen tweak never becomes a requirement change.
+- **A plan belongs to one piece of Designed work** and is closed (`Status: Completed`) when its beads are; it is not a standing contract for later work.
+- **Gates apply only where their artifact exists.** Report them honestly; a skipped gate is an exception, never a pass.
+- **No bookkeeping after the fact.** Never create a bead to record work already done, and do not make a commit that only moves beads — bead state goes in the same commit as the work.
 
 ## Working with beads (`br`)
 
@@ -109,9 +133,9 @@ Every change goes through the `feature-workflow` skill. Do not improvise a diffe
 
 ### Conventions in this repo
 
-- IDs look like `bm-wp-115-51j.2` — prefix `bm`, the work package, a hash, and a child suffix.
-- Every bead carries three labels: `feature:paseo-bm`, `phase:1a` or `phase:1b`, and `wp:wp-1NN`.
-- Epics mirror the plan's work packages; leaves are the executable units.
+- IDs start with `bm-`; beads converted from a plan also carry the work package (`bm-wp-115-51j.2`).
+- Every bead carries `feature:<slug>`; beads converted from a plan also carry `phase:*` and `wp:wp-NNN`.
+- Epics mirror a plan's work packages; leaves are the executable units.
 - Leaf descriptions are self-contained on purpose: an implementer must be able to work from the bead alone, without opening the plan.
 
 ### Daily commands
@@ -130,11 +154,14 @@ br dep cycles             # must always report no cycles
 
 ### Rules
 
-- **Take work from `br ready`.** Do not start a blocked bead, and do not invent work that has no bead.
+Beads are for the Tracked and Designed lanes; Direct work has none.
+
+- **When you use beads, take them from `br ready`.** Do not start a blocked bead.
 - **Close with evidence.** The reason must point at the bead's Acceptance Criteria — a command that ran, a test that passed, an observation made. "Done" is not a reason.
 - **Never delete beads.** Split or merge instead, and record `Split-from: <id>` in the Provenance section.
 - **Never hand-edit `.beads/issues.jsonl`.** Go through `br` so the database and the JSONL stay consistent.
-- **Scope lives in the plan.** A bead may be re-worded for clarity; it may not grow new scope.
+- **A bead does not grow new scope.** It may be re-worded for clarity; new scope is new work in its own lane.
+- **Keep a hand-written bead short:** objective, acceptance criteria, how it is proved. The long leaf template is for beads converted from a plan.
 
 ### `br` gotchas that will bite you
 
@@ -185,6 +212,7 @@ Checked against a live daemon, Paseo CLI/daemon 0.8.0:
 - Paseo delivers `config.systemPrompt` differently per provider: Claude gets it as `append` to the `claude_code` preset (after the whole preset, which brings its own memory, `AskUserQuestion` and commit instructions), with `CLAUDE.md` injected into the conversation, not the system prompt; Codex gets it as `developerInstructions` (after a collaboration mode's own `developer_instructions`), with each `AGENTS.md` as a separate user-role message; OpenCode gets it as `system`. A daemon-level `appendSystemPrompt` (empty unless configured) follows it in all three. Details and sources: `docs/design/paseo-bm-research-20260918-instructions-by-model.md`.
 - A plugin's server process **can serve its own MCP endpoint** and give it to agents (verified 2026-09-24, Claude): `node:http` listening on `127.0.0.1` inside the plugin process works, and `before("agent.create")` returning `config.mcpServers["<name>"] = { type: "http", url, alwaysLoad: true }` plus `config.toolPolicy.preapproved = [{ kind: "mcp", server, tool }]` gives the new agent the tool as `mcp__<name>__<tool>`, with **no permission prompt**. Without `alwaysLoad` Claude hides the tool behind a ToolSearch step. Agents that already exist never get it (`agent.session_open` changes only `env`). paseo-bm's endpoint: ADR-010, `plugin/server/agent-tools.ts`.
 - **`toolPolicy` is refused outright on a provider that cannot pre-approve MCP tools.** Paseo 0.8 `applyProviderConfiguration` throws `Provider '<id>' cannot preapprove exact MCP tools for unattended execution` — the agent is never created — unless the provider's contract has `applyToolPolicy`: only **claude, codex, opencode** (`PROVIDER_CONTRACTS.supportsExactMcpPreapproval`); Pi, Oh My Pi, Copilot and other ACP providers do not. It also throws when a grant names a server missing from `mcpServers`. For Codex, `applyCodexToolPolicy` turns the grants into `mcp_servers.<server>.enabled_tools` plus `tools.<tool>.approval_mode = "approve"`. Verified 2026-09-24 through fallback aliases: a Codex agent created through Paseo calls the tool (shown as `paseo-bm.bm_review`) with no approval prompt; an OpenCode creation carrying `toolPolicy` is accepted; a Pi creation without it succeeds. The creation hook reads the alias's base provider with `config.get()` → `config.providers[<alias>].extends` (the SDK's shape; the file keeps them under `agents.providers`).
+- Paseo **0.9.2** `daemon status --json` has **no `cliVersion`** (it still has `home`, `daemonVersion`, `listen`); `paseo --version` prints the bare CLI version. The adapter falls back to it (bm-qh4c). `plugin ls` / `plugin logs --json` kept their 0.8 shape.
 
 ## Safety boundaries when working in this repo
 
@@ -196,6 +224,6 @@ Checked against a live daemon, Paseo CLI/daemon 0.8.0:
 ## Verification before declaring work done
 
 ```bash
-npm run typecheck && npm run lint && npm test && npm run build   # once src/ exists
-br lint -s all && br dep cycles                                   # graph stays clean
+npm run typecheck && npm run lint && npm test && npm run build
+br lint -s all && br dep cycles                                   # only when you changed beads
 ```
