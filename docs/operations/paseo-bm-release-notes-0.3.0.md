@@ -45,6 +45,10 @@ Nếu bạn đang chạy Paseo 0.9.x thì đây là lý do để nâng lên bả
 
 Lùi tại máy bằng `npx paseo-bm@0.3.0-alpha.7` chỉ dùng được **nếu bạn đang ở Paseo 0.8**: trên Paseo 0.9.2 bản đó không cài được, nó dừng ở `E_PASEO_OUTPUT_UNEXPECTED` (exit 3) như mục đầu đã nói. Ngoài bản vá trình cài đặt ấy, `0.3.0-alpha.7` chỉ thiếu đợt giao diện ở trên và không thiếu tính năng cốt lõi nào (tool dựng khối `BM-*`, sổ hỏi–đáp, dự phòng nhà cung cấp đều đã có).
 
+## Kiểm chứng
+
+`npm run verify` mã 0 trên đúng cây được tag, chạy trong một git worktree sạch của commit ấy: **124 file test, 3052 test pass**, build thành công. Trên GitHub, bản này còn đi qua ma trận macOS + Linux × Node 24 kèm `smoke:packed` hai lần — một lần diễn tập và một lần của chính sự kiện phát hành — rồi publish bằng OIDC kèm provenance.
+
 ## Nguồn
 
 [PRD delta REQ-069](https://github.com/hieunt286/paseo-bm/blob/v0.3.0/docs/product/paseo-bm-prd-delta-20260925-kanban-quiet-colours.md) · [design delta kanban-quiet-colours](https://github.com/hieunt286/paseo-bm/blob/v0.3.0/docs/design/paseo-bm-delta-20260925-kanban-quiet-colours.md) · [design delta stable-release](https://github.com/hieunt286/paseo-bm/blob/v0.3.0/docs/design/paseo-bm-delta-20260925b-stable-release.md) · [delta plan phát hành 0.3.0](https://github.com/hieunt286/paseo-bm/blob/v0.3.0/docs/plans/paseo-bm-implementation-plan-delta-20260925b-stable-release-030.md) · [ADR-009](https://github.com/hieunt286/paseo-bm/blob/v0.3.0/docs/adr/ADR-009-payload-as-npm-package.md)
