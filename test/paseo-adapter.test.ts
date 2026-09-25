@@ -54,6 +54,8 @@ interface FakeScript {
   argvLog?: string;
   /** PATH for the child; defaults to the fake's own directory only. */
   path?: string;
+  /** Per-subcommand answers, keyed like BM_FAKE_SCRIPT ("daemon status", "--version"). */
+  script?: Record<string, { stdout?: string; stderr?: string; exit?: number }>;
 }
 
 function fakeEnv(script: FakeScript): NodeJS.ProcessEnv {
@@ -68,6 +70,11 @@ function fakeEnv(script: FakeScript): NodeJS.ProcessEnv {
   if (script.touch !== undefined) env["BM_FAKE_TOUCH"] = script.touch;
   if (script.pidFile !== undefined) env["BM_FAKE_PID_FILE"] = script.pidFile;
   if (script.argvLog !== undefined) env["BM_FAKE_ARGV_LOG"] = script.argvLog;
+  if (script.script !== undefined) {
+    const file = join(workDir(), "script.json");
+    writeFileSync(file, JSON.stringify(script.script));
+    env["BM_FAKE_SCRIPT"] = file;
+  }
   return env;
 }
 
@@ -215,6 +222,43 @@ describe("well-formed JSON", () => {
     expect(status.daemonVersion).toBe("0.8.0");
     expect(status.listen).toBe("127.0.0.1:7777");
     expect(status.raw).toMatchObject({ localDaemon: true });
+  });
+
+  it("does not ask `paseo --version` when daemon status names the CLI version (Paseo 0.8)", async () => {
+    const argvLog = join(workDir(), "argv.log");
+    const adapter = adapterFor({ stdout: STATUS_JSON, argvLog });
+    expect((await adapter.daemonStatus()).cliVersion).toBe("0.8.0");
+    expect(readArgvLog(argvLog).map((call) => call.argv)).toEqual([["daemon", "status", "--json"]]);
+  });
+
+  it("reads the CLI version from `paseo --version` when daemon status has no cliVersion (Paseo 0.9)", async () => {
+    const argvLog = join(workDir(), "argv.log");
+    const adapter = adapterFor({
+      argvLog,
+      script: {
+        "daemon status": {
+          stdout: JSON.stringify({ home: "/Users/someone/.paseo", daemonVersion: "0.9.2", listen: "127.0.0.1:6767" }),
+        },
+        "--version": { stdout: "0.9.2\n" },
+      },
+    });
+    const status = await adapter.daemonStatus();
+    expect(status.cliVersion).toBe("0.9.2");
+    expect(status.daemonVersion).toBe("0.9.2");
+    expect(readArgvLog(argvLog).map((call) => call.argv)).toEqual([["daemon", "status", "--json"], ["--version"]]);
+  });
+
+  it("still rejects a status without cliVersion when `paseo --version` prints nothing", async () => {
+    const adapter = adapterFor({
+      script: {
+        "daemon status": { stdout: JSON.stringify({ home: "/Users/someone/.paseo", daemonVersion: "0.9.2" }) },
+        "--version": { stdout: "  \n" },
+      },
+    });
+    const error = await expectPaseoError(() => adapter.daemonStatus());
+    expect(error.code).toBe("E_PASEO_OUTPUT_UNEXPECTED");
+    expect(error.reason).toBe("unexpected-shape");
+    expect(error.message).toContain("cliVersion");
   });
 
   it("keeps enabled and status apart: enabled true with status disabled is not running", async () => {

@@ -245,7 +245,11 @@ export function createPaseoAdapter(options: PaseoAdapterOptions = {}): PaseoAdap
 
     async daemonStatus(): Promise<DaemonStatus> {
       const { value, argv } = await runJson(["daemon", "status", "--json"]);
-      return parseDaemonStatus(value, argv);
+      // Paseo 0.9 dropped `cliVersion` from `daemon status`; the CLI still
+      // prints its own version, so ADR-004's CLI-vs-daemon check keeps its input.
+      if (asNonEmptyString(asRecord(value)?.["cliVersion"]) !== undefined) return parseDaemonStatus(value, argv);
+      const version = await run(["--version"]);
+      return parseDaemonStatus(value, argv, version.stdout.trim().split("\n")[0]?.trim());
     },
 
     async daemonReload(): Promise<DaemonReload> {
@@ -530,13 +534,17 @@ function asNonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
 
-/** `daemon status`: home, cliVersion and daemonVersion are required; the rest is not read. */
-export function parseDaemonStatus(value: unknown, argv: readonly string[]): DaemonStatus {
+/**
+ * `daemon status`: home, cliVersion and daemonVersion are required; the rest is not read.
+ * `cliVersion` falls back to what `paseo --version` printed, for a Paseo whose
+ * status no longer reports it.
+ */
+export function parseDaemonStatus(value: unknown, argv: readonly string[], printedCliVersion?: string): DaemonStatus {
   const record = asRecord(value);
   if (record === undefined) throw unexpected(argv, "the payload is not a JSON object");
 
   const home = asNonEmptyString(record["home"]);
-  const cliVersion = asNonEmptyString(record["cliVersion"]);
+  const cliVersion = asNonEmptyString(record["cliVersion"]) ?? asNonEmptyString(printedCliVersion);
   const daemonVersion = asNonEmptyString(record["daemonVersion"]);
   const missing = [
     home === undefined ? "home" : undefined,

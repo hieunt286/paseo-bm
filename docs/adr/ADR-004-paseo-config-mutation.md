@@ -15,6 +15,7 @@ paseo-bm cần ba việc ở phía Paseo: đọc trạng thái daemon, đăng k�
 Khảo sát trên máy (Paseo 0.8.0, 2026-09-14):
 
 - `paseo daemon status --json` trả về `home`, `cliVersion`, `daemonVersion`, `listen`, `localDaemon`, `connectedDaemon` — đủ cho toàn bộ bước kiểm tra môi trường.
+  - *Errata 2026-09-25 (bm-qh4c):* Paseo 0.9.2 bỏ `cliVersion` khỏi `daemon status --json`. Lớp thích ứng khi đó lấy phiên bản CLI từ `paseo --version`; quyết định ở mục 2 không đổi.
 - `paseo plugin install|ls|logs|enable|disable|remove` đều có `--json` và `--host`.
 - **Không có lệnh CLI nào để đặt một trường cấu hình tuỳ ý.** `paseo daemon` chỉ có `start`, `pair`, `reload`, `status`, `stop`, `restart`, `set-password`.
 - `paseo daemon reload --json` (bí danh `paseo reload`) nạp lại `config.json` mà không cần khởi động lại daemon.
