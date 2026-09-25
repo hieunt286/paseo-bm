@@ -63,3 +63,30 @@ Xong thì nhắn cho Claude: **"đã cấu hình trusted publisher"**.
 - `npm publish` báo tên gói đã có chủ khác → đổi tên gói là quyết định của owner (ảnh hưởng README, `package.json`, trusted publisher); dừng và hỏi.
 - `npm trust github` báo thiếu quyền hoặc thiếu 2FA → owner bật 2FA ở mức tài khoản rồi chạy lại; không dùng token bypass 2FA.
 - Không muốn có bản giữ chỗ trên registry → phương án còn lại là owner tự publish `0.1.0-alpha.0` (mất provenance cho bản đó) hoặc dùng token một lần trong CI (trái quyết định thiết kế "không NPM_TOKEN", cần errata). Cả hai đều cần owner chọn lại.
+
+## 4. Bản ổn định (từ `0.3.0` trở đi)
+
+`release.yml` nhận cả bản không phải prerelease và **tự** đặt dist-tag theo loại phiên bản: prerelease → `next`, ổn định → `latest`. Nghĩa là một bản ổn định **không** còn cần bước `npm dist-tag add` cần OTP của owner. Quyết định và lý do: [design delta 20260925b](../design/paseo-bm-delta-20260925b-stable-release.md) §2.
+
+Khác §2 đúng ba chỗ:
+
+1. **GitHub Release không đánh dấu prerelease.** Workflow đòi cờ `prerelease` của Release khớp hình dạng phiên bản (`version.includes("-")`), nên bỏ `--prerelease`:
+   ```bash
+   git tag v0.3.0 && git push origin v0.3.0
+   gh release create v0.3.0 --title "v0.3.0" --notes-file docs/operations/paseo-bm-release-notes-0.3.0.md
+   ```
+   Đánh dấu sai thì workflow đỏ ở bước `Resolve version, tag and dist-tag`, **trước** khi publish.
+2. **Xác minh ở `latest`, không phải `next`:**
+   ```bash
+   npm view paseo-bm version && npm view paseo-bm-plugin version
+   npm view paseo-bm dist-tags && npm view paseo-bm-plugin dist-tags
+   npm view paseo-bm dist.attestations && npm view paseo-bm-plugin dist.attestations
+   cd "$(mktemp -d)" && npx --yes paseo-bm@0.3.0 --version
+   ```
+3. **`next` không tự dời theo.** Sau một bản ổn định, `next` vẫn trỏ bản prerelease cuối. Muốn `next` trỏ bản ổn định thì owner chạy tay (cần OTP):
+   ```bash
+   npm dist-tag add paseo-bm@0.3.0 next
+   npm dist-tag add paseo-bm-plugin@0.3.0 next
+   ```
+
+Cái diễn tập (`workflow_dispatch`) chứng minh được và không chứng minh được: nó cho thấy ma trận kiểm tra xanh, `smoke:packed` xanh, hai gói đóng gói được, và workflow tính ra `dist-tag=latest`. Nó **không** cho thấy registry nhận tag đó, vì `npm publish --dry-run` không hỏi registry publish. Nếu publish xong mà `latest` không dời, đường chặn là hai lệnh `npm dist-tag add` ở trên.

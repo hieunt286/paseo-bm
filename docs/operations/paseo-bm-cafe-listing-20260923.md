@@ -111,7 +111,7 @@ Không còn là danh sách việc phải làm — phase 2a-20 đã làm xong. Đ
 
 1. **Hai gói, một phiên bản.** `release.yml` publish `paseo-bm` rồi `paseo-bm-plugin` trong cùng một lần chạy; bước "Assert both packages agree" chặn trước khi có gì lên npm.
 2. **Ba nguồn phiên bản không được lệch**: `package.json`, `plugin/package.json`, `PLUGIN_VERSION`. Cổng 3 so phiên bản trên Git với phiên bản npm nó phân giải.
-3. **`paseo-bm-plugin@latest` phải trỏ bản mới.** `resolveNpmPackage` đọc đúng tag đó, còn `release.yml` chỉ đặt `next`. Lệnh này đòi OTP nên là việc của owner.
+3. **`paseo-bm-plugin@latest` phải trỏ bản mới.** `resolveNpmPackage` đọc đúng tag đó. Từ `0.3.0`, `release.yml` tự đặt dist-tag theo loại phiên bản — prerelease vào `next`, bản ổn định vào `latest` — nên một bản ổn định không cần bước tay nào. Còn muốn `next` trỏ một bản ổn định, hay dời tag bằng tay, thì vẫn đòi OTP và vẫn là việc của owner.
 4. **Đừng đổi tên `release.yml`**: cấu hình trusted publisher của **cả hai** gói trỏ theo tên file.
 5. **Gốc tarball gói trình cài không được giống một plugin**, và gốc gói payload phải luôn là plugin nạp được — `smoke:packed` canh cả hai chiều.
 6. Sửa hồ sơ registry thì nhớ **Biome giữ mảng ngắn trên một dòng**, nếu không job đỏ ngay trước cả bước validate.

@@ -9,7 +9,7 @@
 - **Reviewer** — checks each stage and returns a verdict. It never edits anything.
 - **Screens in Paseo** — **Metric** (what each request did and cost), **Beads** (the workspace's beads) and **Setup** (tools, skills and your own role instructions).
 
-> **Status:** prerelease (`0.3.0-alpha.*`). Command names, flags, exit codes and the `--json` shape are a public contract, but expect rough edges.
+> **Status:** stable release `0.3.0` on the `latest` dist-tag; prereleases continue on `next`. Command names, flags, exit codes and the `--json` shape are a public contract.
 
 ## Install
 

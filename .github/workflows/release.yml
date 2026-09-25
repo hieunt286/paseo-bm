@@ -148,11 +148,16 @@ jobs:
               console.error(`GitHub release prerelease=${env.RELEASE_PRERELEASE} but version ${version} prerelease=${prerelease}.`);
               process.exit(1);
             }
-            if (!prerelease) {
-              console.error(`Phase 1 publishes prereleases only, under dist-tag next; ${version} is not a prerelease.`);
-              process.exit(1);
-            }
-            const distTag = "next";
+            // The dist-tag follows the kind of version: a prerelease goes to
+            // `next`, a stable one to `latest` — the tag `npx paseo-bm` and the
+            // paseo.cafe scanner both read. Publishing to `latest` here runs over
+            // OIDC in this same job, which is what removes the owner's manual
+            // `npm dist-tag add` (it needs a one-time password). A stable version
+            // is NOT also pushed to `next`: that would need `npm dist-tag add`,
+            // a different write from `publish`, and the trusted-publisher grant
+            // is not proven to cover it. See
+            // docs/design/paseo-bm-delta-20260925b-stable-release.md §2.2-§2.3.
+            const distTag = prerelease ? "next" : "latest";
             console.log(`version=${version}`);
             console.log(`tag=${tag}`);
             console.log(`dist-tag=${distTag}`);
@@ -219,8 +224,9 @@ jobs:
 
       # The real publish (bead bm-wp-118-4s4.2) runs only when a human publishes a
       # GitHub Release; a manual workflow run stays a dry-run. It cannot be undone
-      # after 72 hours, so the Release itself is the approval point. The version
-      # must be a prerelease (checked above) and always goes to dist-tag `next`.
+      # after 72 hours, so the Release itself is the approval point. The dist-tag
+      # is resolved above from the kind of version (prerelease -> `next`, stable ->
+      # `latest`), and the GitHub Release's own prerelease flag must agree with it.
       - name: Publish to npm
         if: github.event_name == 'release'
         env:

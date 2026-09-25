@@ -27,7 +27,7 @@ Read this before touching anything in this repository.
 | Lint / types | ESLint, `tsc --noEmit` |
 | Plugin payload | Paseo plugin API v0.8: split `index.client.tsx` + `index.server.ts`, Zod contracts in `shared/`, React Native primitives only in `client/` |
 | Issue tracking | Beads via `br`; `.beads/issues.jsonl` is the source of truth |
-| Release | GitHub Release → npm trusted publishing (OIDC) with provenance; prereleases go to dist-tag `next` |
+| Release | GitHub Release → npm trusted publishing (OIDC) with provenance; the workflow sets the dist-tag from the version: prereleases to `next`, stable releases to `latest` |
 
 **Hard packaging rule:** no `preinstall` / `postinstall` scripts — downloading the package must never modify the user's machine. `prepack` is fine because it runs on the publisher's machine.
 
@@ -54,9 +54,10 @@ What breaks the listing, so do not do it:
   compares the version in git against the one it resolves on npm.
 - **Renaming `release.yml`.** npm's trusted-publisher entries for *both* packages point at this
   workflow by file name.
-- **Forgetting the dist-tag.** Their `resolveNpmPackage` reads `paseo-bm-plugin@latest`, and
-  `release.yml` only sets `next`. Moving `latest` needs a one-time password, so it is the owner's
-  step, not an agent's.
+- **Forgetting the dist-tag.** Their `resolveNpmPackage` reads `paseo-bm-plugin@latest`. Since
+  0.3.0 `release.yml` sets the tag from the version — prerelease to `next`, stable to `latest` —
+  so a stable release needs no manual step. Pointing `next` at a stable version, or moving either
+  tag by hand, still needs a one-time password and is the owner's step, not an agent's.
 - **Adding a `test` script to `plugin/package.json` to win the listing's health badge.** There is
   no test in `plugin/`; a script that exists to turn a check green is a fake check.
 - **Putting anything at the installer tarball's root that looks like a plugin.**
