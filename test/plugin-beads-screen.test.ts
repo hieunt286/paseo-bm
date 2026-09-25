@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { actionMessage, getBeadDetail, listBeadRows, runBeadAction } from "../plugin/server/bead-actions";
 import { clearBeadsCache } from "../plugin/server/beads-store";
 import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store";
@@ -20,11 +19,16 @@ import {
   previewValues,
   sortBeads,
   actionsFor,
-  beadTitleTone,
+  beadActionResults,
+  beadEmphasis,
+  beadResultKey,
+  emphasisTone,
   closedBeadsVisibility,
+  defaultKanbanBucket,
   doneText,
-  beadListItems,
-  groupBeads,
+  kanbanColumns,
+  kanbanLayout,
+  visibleKanbanBucket,
   beadsOverview,
   facetsOf,
   filterBeads,
@@ -395,7 +399,7 @@ describe("an in-progress bead says who is on it", () => {
     const summary = workSummary({ status: "in_progress", work: { started: mark(), last: mark({ at: "2026-09-16T10:14:11.000Z" }) } }, now)!;
     expect(summary.headline).toMatch(/^Contact dialog · since \d\d\/09 \d\d:\d\d \(2h 34m\) · running$/);
     expect(summary.agentId).toBe("d91ccf32-aaaa");
-    expect(summary.tone).toBe("info");
+    expect(summary.tone).toBe("plain");
     expect(summary.lines.join("\n")).toContain("Last activity");
   });
 
@@ -412,7 +416,8 @@ describe("an in-progress bead says who is on it", () => {
     )!;
     expect(summary.agentId).toBe("w2");
     expect(summary.headline).toMatch(/^Second worker · last active \d\d\/09 \d\d:00 · no longer in Paseo$/);
-    expect(summary.tone).toBe("warning");
+    // Gone is told by the words, not by an amber line (delta 20260925 §3.2).
+    expect(summary.tone).toBe("muted");
   });
 
   it("says when nobody was recorded, and says nothing for other statuses", () => {
@@ -421,7 +426,7 @@ describe("an in-progress bead says who is on it", () => {
   });
 });
 
-describe("a bead title and its chip say the status in one colour (delta 20260918e, Q8)", () => {
+describe("a bead says its status in words and contrast, never in a hue (delta 20260925 §3.2)", () => {
   // One bead per bucket, including an open bead that is not ready: it is
   // "blocked" although its status is "open".
   const samples = [
@@ -432,34 +437,36 @@ describe("a bead title and its chip say the status in one colour (delta 20260918
     { name: "closed", bead: { status: "closed", ready: false } },
   ] as const;
 
-  it("gives the four statuses four different title colours", () => {
-    const tones = Object.fromEntries(samples.map(({ name, bead }) => [name, beadTitleTone(bead)]));
-    expect(tones).toEqual({
-      ready: "info",
-      in_progress: "warning",
-      "blocked (status)": "danger",
-      "blocked (open, not ready)": "danger",
-      closed: "success",
+  it("reads an open bead at full contrast and a closed one dim, with no hue anywhere", () => {
+    const emphasis = Object.fromEntries(samples.map(({ name, bead }) => [name, beadEmphasis(bead)]));
+    expect(emphasis).toEqual({
+      ready: "strong",
+      in_progress: "strong",
+      "blocked (status)": "strong",
+      "blocked (open, not ready)": "strong",
+      closed: "dim",
     });
-    expect(new Set(Object.values(tones)).size).toBe(4);
+    // The only two tones a bead may use: no accent, no amber, no red, no green.
+    expect(new Set(samples.map(({ bead }) => emphasisTone(beadEmphasis(bead))))).toEqual(new Set(["plain", "muted"]));
   });
 
-  it.each(samples)("colours the chip of a $name bead like its title, with the same words as before", ({ bead }) => {
-    expect(statusBadge(bead).tone).toBe(beadTitleTone(bead));
+  it.each(samples)("gives the chip of a $name bead the emphasis of its title, with the same words as before", ({ bead }) => {
+    expect(statusBadge(bead).tone).toBe(emphasisTone(beadEmphasis(bead)));
+    expect(["plain", "muted"]).toContain(statusBadge(bead).tone);
     const words = { ready: "Ready", in_progress: "In progress", blocked: "Blocked", closed: "Closed" } as const;
     expect(statusBadge(bead).text).toBe(words[statusBucket(bead)]);
   });
 });
 
-describe("the Beads list in four groups, closed beads behind the eye (delta 20260918e, Q9, Q10)", () => {
+describe("the Beads board: one column per status, closed beads behind the eye (delta 20260925 §3.1)", () => {
   // `closedBeadsVisibility` lives for the whole test run, like an app session:
-  // put it back after each case, so a failing assertion cannot leak `true` into
-  // the next one (delta 20260918f S11).
+  // put it back after each case, so a failing assertion cannot leak into the
+  // next one (delta 20260918f S11). Its default is now `true` (owner Q4).
   afterEach(() => {
-    closedBeadsVisibility.set(false);
+    closedBeadsVisibility.set(true);
   });
 
-  // Only status and readiness decide a group; the rest of a row is not read.
+  // Only status and readiness decide a column; the rest of a row is not read.
   const row = (id: string, status: string, ready = false) => ({ id, status, ready }) as unknown as BeadRow;
   const sorted = [
     row("r1", "open", true),
@@ -472,73 +479,122 @@ describe("the Beads list in four groups, closed beads behind the eye (delta 2026
     row("c2", "closed"),
   ];
 
-  it("puts work in progress first, then blocked, ready and closed, keeping the sort inside each group", () => {
-    const { groups, visible, closed, truncated } = groupBeads(sorted, { showClosed: true, limit: 200 });
-    expect(groups.map((group) => [group.bucket, group.label, group.tone, group.total, group.beads.map((bead) => bead.id)])).toEqual([
-      ["in_progress", "In progress", "warning", 2, ["p1", "p2"]],
-      ["blocked", "Blocked", "danger", 2, ["b1", "b2"]],
-      ["ready", "Ready", "info", 2, ["r1", "r2"]],
-      ["closed", "Closed", "success", 2, ["c1", "c2"]],
+  it("puts work in progress first, then blocked, ready and closed, keeping the sort inside each column", () => {
+    const { columns, visible, closed } = kanbanColumns(sorted, { showClosed: true });
+    expect(columns.map((column) => [column.bucket, column.label, column.total, column.beads.map((bead) => bead.id)])).toEqual([
+      ["in_progress", "In progress", 2, ["p1", "p2"]],
+      ["blocked", "Blocked", 2, ["b1", "b2"]],
+      ["ready", "Ready", 2, ["r1", "r2"]],
+      ["closed", "Closed", 2, ["c1", "c2"]],
     ]);
-    expect({ visible, closed, truncated }).toEqual({ visible: 8, closed: 2, truncated: 0 });
+    expect({ visible, closed }).toEqual({ visible: 8, closed: 2 });
   });
 
-  it("drops empty groups, and the Closed group while closed beads are hidden, still counting them", () => {
-    const hidden = groupBeads(sorted.filter((bead) => bead.id !== "b1" && bead.id !== "b2"), { showClosed: false, limit: 200 });
-    expect(hidden.groups.map((group) => group.bucket)).toEqual(["in_progress", "ready"]);
-    expect({ visible: hidden.visible, closed: hidden.closed }).toEqual({ visible: 4, closed: 2 });
-    expect(groupBeads([row("c1", "closed")], { showClosed: false, limit: 200 })).toEqual({ groups: [], visible: 0, closed: 1, truncated: 0 });
-  });
-
-  it("spends the list limit in group order and says how many it cut", () => {
-    const three = groupBeads([row("p1", "in_progress"), row("p2", "in_progress"), row("b1", "blocked"), row("b2", "blocked"), row("r1", "open", true)], {
-      showClosed: true,
-      limit: 3,
-    });
-    expect(three.groups.map((group) => [group.bucket, group.total, group.beads.length])).toEqual([
-      ["in_progress", 2, 2],
-      ["blocked", 2, 1],
+  it("keeps an empty column, with its own words, so the board does not jump when a filter changes", () => {
+    const { columns } = kanbanColumns([row("p1", "in_progress")], { showClosed: true });
+    expect(columns.map((column) => [column.bucket, column.total, column.empty !== ""])).toEqual([
+      ["in_progress", 1, true],
+      ["blocked", 0, true],
+      ["ready", 0, true],
+      ["closed", 0, true],
     ]);
-    expect(three.truncated).toBe(2);
   });
 
-  it("lays the groups out as one flat list keyed by bead id, so a bead that changes group keeps its row (delta 20260918f F9)", () => {
-    const items = beadListItems(groupBeads(sorted, { showClosed: true, limit: 200 }));
-    expect(items.map((item) => item.key)).toEqual([
-      "group:in_progress", "p1", "p2",
-      "group:blocked", "b1", "b2",
-      "group:ready", "r1", "r2",
-      "group:closed", "c1", "c2",
+  it("drops only the Closed column while closed beads are hidden, still counting them", () => {
+    const hidden = kanbanColumns(sorted, { showClosed: false });
+    expect(hidden.columns.map((column) => column.bucket)).toEqual(["in_progress", "blocked", "ready"]);
+    expect({ visible: hidden.visible, closed: hidden.closed }).toEqual({ visible: 6, closed: 2 });
+    expect(kanbanColumns([row("c1", "closed")], { showClosed: false }).visible).toBe(0);
+  });
+
+  it("spends the row limit per column, so a long Closed column cannot eat the room of In progress", () => {
+    const one = kanbanColumns(sorted, { showClosed: true, limit: 1 });
+    expect(one.columns.map((column) => [column.bucket, column.total, column.beads.map((bead) => bead.id), column.hidden])).toEqual([
+      ["in_progress", 2, ["p1"], 1],
+      ["blocked", 2, ["b1"], 1],
+      ["ready", 2, ["r1"], 1],
+      ["closed", 2, ["c1"], 1],
     ]);
-    expect(items[0]).toEqual({ kind: "group", key: "group:in_progress", label: "In progress", total: 2, tone: "warning" });
-    expect(items[1]).toMatchObject({ kind: "bead", key: "p1" });
-
-    // p1 finishes: same key, now under Closed.
-    const after = beadListItems(groupBeads(sorted.map((bead) => (bead.id === "p1" ? row("p1", "closed") : bead)), { showClosed: true, limit: 200 }));
-    expect(after.filter((item) => item.key === "p1")).toHaveLength(1);
-    expect(after.findIndex((item) => item.key === "p1")).toBeGreaterThan(after.findIndex((item) => item.key === "group:closed"));
-
-    // The limit and the empty groups are exactly those of groupBeads.
-    const limited = beadListItems(groupBeads(sorted, { showClosed: false, limit: 3 }));
-    expect(limited.map((item) => item.key)).toEqual(["group:in_progress", "p1", "p2", "group:blocked", "b1"]);
+    // No whole-board number: each column says its own "+N more".
+    expect(one.columns.reduce((sum, column) => sum + column.hidden, 0)).toBe(4);
   });
 
-  it("draws those items as siblings under one parent, with no View per group", () => {
-    const screen = readFileSync(fileURLToPath(new URL("../plugin/client/beads-screen.tsx", import.meta.url)), "utf8");
-    expect(screen).toMatch(/beadListItems\(grouped\)\.map\(/);
-    expect(screen).not.toMatch(/grouped\.groups\.map\(/);
+  it("picks the shape from the measured width, and follows the host when nothing was measured", () => {
+    expect(kanbanLayout(null, true, 4)).toEqual({ mode: "tabs", perRow: 1 });
+    expect(kanbanLayout(null, false, 4)).toEqual({ mode: "columns", perRow: 4 });
+    expect(kanbanLayout(360, false, 4)).toEqual({ mode: "tabs", perRow: 1 });
+    expect(kanbanLayout(519, false, 4)).toEqual({ mode: "tabs", perRow: 1 });
+    expect(kanbanLayout(520, false, 4)).toEqual({ mode: "columns", perRow: 2 });
+    expect(kanbanLayout(800, false, 4)).toEqual({ mode: "columns", perRow: 3 });
+    expect(kanbanLayout(1200, false, 4)).toEqual({ mode: "columns", perRow: 4 });
+    // Never more columns than there are, and never zero of them.
+    expect(kanbanLayout(1200, false, 3)).toEqual({ mode: "columns", perRow: 3 });
+    expect(kanbanLayout(1200, false, 0)).toEqual({ mode: "columns", perRow: 1 });
   });
 
-  it("hides closed beads by default and remembers the choice for the session", () => {
-    expect(closedBeadsVisibility.get()).toBe(false);
+  it("opens a narrow screen on the first column that has a bead, and goes back there when that column is gone", () => {
+    const { columns } = kanbanColumns([row("r1", "open", true), row("c1", "closed")], { showClosed: true });
+    expect(defaultKanbanBucket(columns)).toBe("ready");
+    expect(visibleKanbanBucket(columns, "closed")).toBe("closed");
+    // The user was on Closed and pressed the eye: that column no longer exists.
+    const { columns: withoutClosed } = kanbanColumns([row("r1", "open", true), row("c1", "closed")], { showClosed: false });
+    expect(visibleKanbanBucket(withoutClosed, "closed")).toBe("ready");
+    expect(visibleKanbanBucket(withoutClosed, null)).toBe("ready");
+    // Nothing anywhere: the first column of the board, not a crash.
+    expect(defaultKanbanBucket(kanbanColumns([], { showClosed: true }).columns)).toBe("in_progress");
+  });
+
+  it("shows closed beads by default and remembers the choice for the session", () => {
+    expect(closedBeadsVisibility.get()).toBe(true);
     const heard = vi.fn();
     const stop = closedBeadsVisibility.subscribe(heard);
-    closedBeadsVisibility.set(true);
-    expect(heard).toHaveBeenCalledTimes(1);
-    expect(closedBeadsVisibility.get()).toBe(true);
-    stop();
     closedBeadsVisibility.set(false);
     expect(heard).toHaveBeenCalledTimes(1);
+    expect(closedBeadsVisibility.get()).toBe(false);
+    stop();
+    closedBeadsVisibility.set(true);
+    expect(heard).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("what an action on a bead reported survives the bead changing column (delta 20260925 §3.1, F9 of 20260918f)", () => {
+  const key = (beadId: string, workspaceId = "wks_1") => beadResultKey(workspaceId, beadId);
+
+  afterEach(() => {
+    for (const workspaceId of ["wks_1", "wks_2"]) {
+      for (const bead of ["p1", "p2"]) beadActionResults.clear(key(bead, workspaceId));
+    }
+  });
+
+  it("keeps the result per bead, so a row built again reads the same line", () => {
+    const sent = { text: "Sent to the Beads Manager.", managerId: "m1", tone: "success" as const };
+    beadActionResults.set(key("p1"), sent);
+    // A new reader stands for the panel React builds after the bead moved to
+    // another column: same bead id, same line, and nothing for its neighbour.
+    expect(beadActionResults.get(key("p1"))).toBe(sent);
+    expect(beadActionResults.get(key("p2"))).toBeUndefined();
+  });
+
+  it("does not leak between two workspaces holding the same bead id", () => {
+    // One client bundle serves every workspace, and two repos can share a `br`
+    // prefix — so the key carries the workspace (review b2).
+    beadActionResults.set(key("p1", "wks_1"), { text: "Sent in the first repo.", managerId: null, tone: "success" });
+    expect(beadActionResults.get(key("p1", "wks_2"))).toBeUndefined();
+    expect(key("p1", "wks_1")).not.toBe(key("p1", "wks_2"));
+  });
+
+  it("tells its readers, and forgets a bead when the user opens a new action", () => {
+    const heard = vi.fn();
+    const stop = beadActionResults.subscribe(heard);
+    beadActionResults.set(key("p1"), { text: "Sent.", managerId: null, tone: "success" });
+    expect(heard).toHaveBeenCalledTimes(1);
+    beadActionResults.clear(key("p1"));
+    expect(heard).toHaveBeenCalledTimes(2);
+    expect(beadActionResults.get(key("p1"))).toBeUndefined();
+    // Clearing what is not there says nothing.
+    beadActionResults.clear(key("p1"));
+    expect(heard).toHaveBeenCalledTimes(2);
+    stop();
   });
 });
 

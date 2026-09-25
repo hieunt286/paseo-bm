@@ -12,7 +12,6 @@
  */
 
 import type { WorkspaceOverview } from "../shared/contracts";
-import { STATUS_TONE } from "./beads-model";
 import type { Tone } from "./dashboard-model";
 import { createSlot, type Slot } from "./slot";
 
@@ -152,8 +151,8 @@ export interface WorkspaceStat {
  * The four figures of a workspace row: beads in total, in progress, blocked,
  * and Workers running now. A figure that is zero stays grey so the ones that
  * need attention stand out; a workspace without a bead store says so once.
- * In progress and blocked take the bead status colours (`STATUS_TONE`), so a
- * row reads like the Beads screen it opens (delta 20260918e, REQ-060 n).
+ * A figure above zero reads at full contrast and none of them carries a hue,
+ * like everywhere else a bead shows (delta 20260925 §3.2; errata of REQ-060 n).
  */
 export function workspaceStats(overview: WorkspaceOverview | undefined): WorkspaceStat[] {
   if (overview === undefined) return [];
@@ -162,7 +161,7 @@ export function workspaceStats(overview: WorkspaceOverview | undefined): Workspa
     icon: "Hammer",
     value: String(overview.runningWorkers),
     label: `${overview.runningWorkers} Worker(s) running`,
-    tone: overview.runningWorkers > 0 ? "success" : "muted",
+    tone: overview.runningWorkers > 0 ? "plain" : "muted",
   };
   const beads = overview.beads;
   if (beads === null) {
@@ -175,14 +174,14 @@ export function workspaceStats(overview: WorkspaceOverview | undefined): Workspa
       icon: "CircleDot",
       value: String(beads.inProgress),
       label: `${beads.inProgress} in progress`,
-      tone: beads.inProgress > 0 ? STATUS_TONE.in_progress : "muted",
+      tone: beads.inProgress > 0 ? "plain" : "muted",
     },
     {
       key: "blocked",
       icon: "Ban",
       value: String(beads.blocked),
       label: `${beads.blocked} blocked`,
-      tone: beads.blocked > 0 ? STATUS_TONE.blocked : "muted",
+      tone: beads.blocked > 0 ? "plain" : "muted",
     },
     running,
   ];

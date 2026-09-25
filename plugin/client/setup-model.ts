@@ -38,6 +38,22 @@ export const SKILL_COLUMNS: ReadonlyArray<{ key: "claude" | "codex" | "pi" | "op
   { key: "opencode", agent: "OpenCode" },
 ];
 
+/**
+ * The three sections of the Setup screen, one per configuration the owner named
+ * (delta 20260925 §3.3): the beads tools, the agent skills, and everything about
+ * the agents themselves. One long scroll was hard to read, so each is a tab.
+ */
+export type SetupTab = "tools" | "skills" | "agents";
+
+export const SETUP_TABS: ReadonlyArray<{ key: SetupTab; label: string; hint: string }> = [
+  { key: "tools", label: "Beads tools", hint: "br and bv on the daemon's PATH" },
+  { key: "skills", label: "Agent skills", hint: "the skills each role needs" },
+  { key: "agents", label: "Agents", hint: "models, modes and extra instructions" },
+];
+
+/** Where the screen opens; a reopened surface starts here again. */
+export const DEFAULT_SETUP_TAB: SetupTab = "tools";
+
 export const SETUP_ROLES: ReadonlyArray<{ role: SetupRole; label: string; mark: GraphNode["kind"] }> = [
   { role: "manager", label: "Manager", mark: "request" },
   { role: "worker", label: "Worker", mark: "worker" },

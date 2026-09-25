@@ -18,6 +18,8 @@ import {
   groupTraces,
   guardrailMismatch,
   linkingBadge,
+  errorCard,
+  errorTally,
   overviewCards,
   ROLE_MARK,
   requestGraph,
@@ -420,6 +422,64 @@ describe("the confirmation gate defaults to No", () => {
       }),
     ).rejects.toThrow("rpc failed");
     expect(gate.getPending()).toBeNull();
+  });
+});
+
+describe("how many times a request went wrong (delta 20260925 §3.5, REQ-069 g)", () => {
+  const errs = (failedTurns: number, agentErrors = 0, fallbacks = 0) => ({ failedTurns, agentErrors, fallbacks });
+
+  it("adds the three kinds up and counts the requests they belong to", () => {
+    const tally = errorTally([
+      trace({ errors: errs(2, 1, 1) }),
+      trace({ traceId: "req:req-B", errors: errs(0, 0, 3) }),
+      trace({ traceId: "req:req-C", errors: errs(0) }),
+    ]);
+    expect(tally).toEqual({ total: 7, requests: 2, failedTurns: 2, agentErrors: 1, fallbacks: 4 });
+  });
+
+  it("counts a request once however many questions it took", () => {
+    // The rows of one request share a traceId (delta 20260917e §4.3): the server
+    // keeps the request's own errors on the opening row, and this must not read
+    // two rows of one request as two failing requests.
+    const tally = errorTally([
+      trace({ turn: { index: 1, total: 2 }, errors: errs(1, 0, 2) }),
+      trace({ turn: { index: 2, total: 2 }, errors: errs(1) }),
+    ]);
+    expect(tally).toEqual({ total: 4, requests: 1, failedTurns: 2, agentErrors: 0, fallbacks: 2 });
+  });
+
+  it("reads a row from an older server as nothing to count", () => {
+    const older = trace();
+    delete (older as { errors?: unknown }).errors;
+    expect(errorTally([older])).toEqual({ total: 0, requests: 0, failedTurns: 0, agentErrors: 0, fallbacks: 0 });
+    expect(errorTally([])).toEqual({ total: 0, requests: 0, failedTurns: 0, agentErrors: 0, fallbacks: 0 });
+  });
+
+  it("says plainly when nothing failed, and names the unit when something did", () => {
+    expect(errorCard(errorTally([trace({ errors: errs(0) })]))).toEqual({
+      label: "Errors",
+      value: "0",
+      hint: "no error recorded",
+    });
+    expect(errorCard(errorTally([trace({ errors: errs(1) })]))).toEqual({
+      label: "Errors",
+      value: "1",
+      hint: "1 request with an error · 1 failed turn",
+    });
+    // Parts that are zero are left out, and the plural follows the count.
+    expect(errorCard(errorTally([trace({ errors: errs(2, 0, 3) }), trace({ traceId: "req:req-B", errors: errs(0, 1) })])).hint).toBe(
+      "2 requests with an error · 2 failed turns · 1 agent error · 3 provider fallbacks",
+    );
+  });
+
+  it("sits right after the Requests card, so the two are read together", () => {
+    const cards = overviewCards([trace({ errors: errs(1, 0, 1) })], null);
+    expect(cards.map((card) => card.label).slice(0, 3)).toEqual(["Requests", "Errors", "Beads"]);
+    expect(cards.find((card) => card.label === "Errors")).toEqual({
+      label: "Errors",
+      value: "2",
+      hint: "1 request with an error · 1 failed turn · 1 provider fallback",
+    });
   });
 });
 

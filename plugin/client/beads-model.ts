@@ -23,16 +23,32 @@ export function statusBucket(bead: Pick<BeadRow, "status" | "ready">): StatusBuc
   return bead.ready ? "ready" : "blocked";
 }
 
+/** How loudly a bead reads: full contrast while there is work in it, dim once it is closed. */
+export type BeadEmphasis = "strong" | "dim";
+
 /**
- * The one colour of each status (owner decisions Q3 and Q8, delta 20260918e):
- * the title and the chip of a bead both read it, so they cannot disagree.
+ * What tells a bead's status apart since delta 20260925 §3.2 (owner: four hues
+ * on one list were tiring): the words say which status it is, and the contrast
+ * says whether it is still open. Which column it sits in says the rest.
+ *
+ * This replaces `STATUS_TONE` of delta 20260918e (Q3, Q8) — see the errata of
+ * REQ-060 (g), (h) and (n) in prd-delta-20260925-kanban-quiet-colours.
  */
-export const STATUS_TONE: Readonly<Record<StatusBucket, Tone>> = {
-  ready: "info", // accent: not started
-  in_progress: "warning",
-  blocked: "danger",
-  closed: "success",
+export const STATUS_EMPHASIS: Readonly<Record<StatusBucket, BeadEmphasis>> = {
+  ready: "strong",
+  in_progress: "strong",
+  blocked: "strong",
+  closed: "dim",
 };
+
+export function beadEmphasis(bead: Pick<BeadRow, "status" | "ready">): BeadEmphasis {
+  return STATUS_EMPHASIS[statusBucket(bead)];
+}
+
+/** The two tones a bead is allowed to use: nothing on a bead carries a hue. */
+export function emphasisTone(emphasis: BeadEmphasis): Tone {
+  return emphasis === "strong" ? "plain" : "muted";
+}
 
 const STATUS_TEXT: Readonly<Record<StatusBucket, string>> = {
   ready: "Ready",
@@ -41,14 +57,13 @@ const STATUS_TEXT: Readonly<Record<StatusBucket, string>> = {
   closed: "Closed",
 };
 
+/**
+ * The status chip: the same words as before, and the same emphasis as the bead's
+ * title, so a chip and the title it sits under can never disagree (the invariant
+ * REQ-060 (h) asked for, now about contrast instead of hue).
+ */
 export function statusBadge(bead: Pick<BeadRow, "status" | "ready">): Badge {
-  const bucket = statusBucket(bead);
-  return { text: STATUS_TEXT[bucket], tone: STATUS_TONE[bucket] };
-}
-
-/** The colour of a bead's title in a list: only the title is coloured, never the row (Q8). */
-export function beadTitleTone(bead: Pick<BeadRow, "status" | "ready">): Tone {
-  return STATUS_TONE[statusBucket(bead)];
+  return { text: STATUS_TEXT[statusBucket(bead)], tone: emphasisTone(beadEmphasis(bead)) };
 }
 
 function median(values: readonly number[]): number | null {
@@ -353,65 +368,100 @@ export function filterBeads(beads: readonly BeadRow[], filter: BeadFilter): Bead
 // Groups and the closed-beads toggle (delta 20260918e §4.4, owner Q9 and Q10).
 // ---------------------------------------------------------------------------
 
-/** The order of the list's groups: work in progress first, then what is stuck. */
+/** The order of the board's columns: work in progress first, then what is stuck. */
 export const STATUS_GROUP_ORDER: readonly StatusBucket[] = ["in_progress", "blocked", "ready", "closed"];
 
-export interface BeadGroup {
-  bucket: StatusBucket;
-  /** The chip's words, so a group header and its rows' chips read the same. */
-  label: string;
-  tone: Tone;
-  /** Every bead of the group, even when the list limit shows fewer. */
-  total: number;
-  beads: BeadRow[];
+/** How many px a column needs before its rows stop being unreadable. */
+export const KANBAN_MIN_COLUMN = 260;
+
+/** How many rows one column draws before it says how many it cut. */
+export const KANBAN_COLUMN_LIMIT = 100;
+
+export interface KanbanLayout {
+  /** `tabs`: one column at a time, picked from a row of status tabs. `columns`: side by side. */
+  mode: "tabs" | "columns";
+  /** How many columns fit on one row; 1 in `tabs` mode. */
+  perRow: number;
 }
 
 /**
- * Splits an already filtered and sorted list into its status groups, keeping
- * the order inside each group. Empty groups are dropped, and so is Closed while
- * closed beads are hidden. The list limit is spent in display order: a group
- * the limit leaves empty is dropped too, and its beads count as truncated.
+ * How the board is laid out at a given width (delta 20260925 §3.1).
+ *
+ * `width` is the measured width of the list area (`onLayout`), `null` until the
+ * first measurement — and on a host that never measures, which is why that case
+ * follows the host's own `compact` flag instead of reading a missing width as 0.
  */
-export function groupBeads(
+export function kanbanLayout(width: number | null, compact: boolean, buckets: number): KanbanLayout {
+  const columns = Math.max(1, buckets);
+  if (width === null) return compact ? { mode: "tabs", perRow: 1 } : { mode: "columns", perRow: columns };
+  if (width < 2 * KANBAN_MIN_COLUMN) return { mode: "tabs", perRow: 1 };
+  return { mode: "columns", perRow: Math.min(columns, Math.floor(width / KANBAN_MIN_COLUMN)) };
+}
+
+export interface KanbanColumn {
+  bucket: StatusBucket;
+  /** The words of the status chip, so a column and the beads in it read the same. */
+  label: string;
+  /** Every bead of the column after the filters, including the rows the limit cut. */
+  total: number;
+  beads: BeadRow[];
+  /** How many beads the row limit cut from this column. */
+  hidden: number;
+  /** What an empty column says. An empty column is still drawn, so the board does not jump when a filter changes. */
+  empty: string;
+}
+
+/**
+ * Splits an already filtered and sorted list into the board's columns, keeping
+ * the order inside each column. Every bucket of `STATUS_GROUP_ORDER` comes back
+ * even when it is empty; Closed only while closed beads are shown. The row limit
+ * is spent per column, so a long Closed column cannot eat the room of In
+ * progress (delta 20260925 §3.1).
+ *
+ * There is no whole-board "truncated" number: each column carries its own
+ * `hidden`, which is where a reader is already looking (errata of the design's
+ * §3.1, after review b2 — the old flat list needed one because the limit was
+ * spent across all four groups).
+ */
+export function kanbanColumns(
   beads: readonly BeadRow[],
-  options: { showClosed: boolean; limit: number },
-): { groups: BeadGroup[]; visible: number; closed: number; truncated: number } {
+  options: { showClosed: boolean; limit?: number },
+): { columns: KanbanColumn[]; visible: number; closed: number } {
+  const limit = options.limit ?? KANBAN_COLUMN_LIMIT;
   const byBucket = new Map<StatusBucket, BeadRow[]>(STATUS_GROUP_ORDER.map((bucket) => [bucket, []]));
   for (const bead of beads) byBucket.get(statusBucket(bead))!.push(bead);
   const closed = byBucket.get("closed")!.length;
-  const groups: BeadGroup[] = [];
+  const columns: KanbanColumn[] = [];
   let visible = 0;
-  let budget = options.limit;
   for (const bucket of STATUS_GROUP_ORDER) {
     if (bucket === "closed" && !options.showClosed) continue;
     const all = byBucket.get(bucket)!;
     visible += all.length;
-    const taken = all.slice(0, Math.max(0, budget));
-    budget -= taken.length;
-    if (taken.length === 0) continue;
-    groups.push({ bucket, label: STATUS_TEXT[bucket], tone: STATUS_TONE[bucket], total: all.length, beads: taken });
+    const taken = all.slice(0, Math.max(0, limit));
+    columns.push({
+      bucket,
+      label: STATUS_TEXT[bucket],
+      total: all.length,
+      beads: taken,
+      hidden: all.length - taken.length,
+      empty: "Nothing here.",
+    });
   }
-  const drawn = groups.reduce((sum, group) => sum + group.beads.length, 0);
-  return { groups, visible, closed, truncated: visible - drawn };
+  return { columns, visible, closed };
 }
 
-/** One entry of the Beads list: a group's title line, or a bead row. */
-export type BeadListItem =
-  | { kind: "group"; key: string; label: string; total: number; tone: Tone }
-  | { kind: "bead"; key: string; bead: BeadRow };
+/** The column a narrow screen opens on: the first one with a bead, else the first. */
+export function defaultKanbanBucket(columns: readonly KanbanColumn[]): StatusBucket {
+  return (columns.find((column) => column.beads.length > 0) ?? columns[0])?.bucket ?? "in_progress";
+}
 
 /**
- * The grouped list as one flat run of items: each group's title, then its
- * beads (delta 20260918f F9). Drawn as siblings under one parent and keyed by
- * bead id, a bead that moves to another group after a refresh keeps its row,
- * so an open detail and the result of an action stay put. Order, empty groups
- * and the row limit are exactly those of `groupBeads`.
+ * The column a narrow screen shows: the chosen one, or the default again once
+ * that column is gone (the filters changed, or closed beads were hidden).
  */
-export function beadListItems(grouped: { groups: readonly BeadGroup[] }): BeadListItem[] {
-  return grouped.groups.flatMap((group): BeadListItem[] => [
-    { kind: "group", key: `group:${group.bucket}`, label: group.label, total: group.total, tone: group.tone },
-    ...group.beads.map((bead): BeadListItem => ({ kind: "bead", key: bead.id, bead })),
-  ]);
+export function visibleKanbanBucket(columns: readonly KanbanColumn[], selected: StatusBucket | null): StatusBucket {
+  if (selected !== null && columns.some((column) => column.bucket === selected)) return selected;
+  return defaultKanbanBucket(columns);
 }
 
 /** A boolean that outlives the screen but not the app session: one per loaded client bundle. */
@@ -420,6 +470,63 @@ export interface SessionToggle {
   set(value: boolean): void;
   subscribe(listener: () => void): () => void;
 }
+
+/**
+ * Values that outlive a component but not the app session, keyed by bead id.
+ *
+ * `get` returns the stored object itself, so it is stable between renders and
+ * can be read straight from `useSyncExternalStore` without a snapshot cache.
+ */
+export interface SessionMap<T> {
+  get(key: string): T | undefined;
+  set(key: string, value: T): void;
+  clear(key: string): void;
+  subscribe(listener: () => void): () => void;
+}
+
+export function createSessionMap<T>(): SessionMap<T> {
+  const values = new Map<string, T>();
+  const listeners = new Set<() => void>();
+  const emit = () => {
+    for (const listener of listeners) listener();
+  };
+  return {
+    get: (key) => values.get(key),
+    set(key, value) {
+      values.set(key, value);
+      emit();
+    },
+    clear(key) {
+      if (values.delete(key)) emit();
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+}
+
+/** The key of a bead in `beadActionResults`: two workspaces may hold the same bead id. */
+export function beadResultKey(workspaceId: string, beadId: string): string {
+  return `${workspaceId}:${beadId}`;
+}
+
+/**
+ * What the last action on a bead reported, kept for the app session
+ * (delta 20260925 §3.1). Keyed per workspace and bead, because one client
+ * bundle serves every workspace and two repos can use the same `br` prefix.
+ *
+ * The board draws each status as its own column, so a bead that changes status
+ * moves to another parent and React builds its row again — which would drop the
+ * "Sent to the Beads Manager" line the user is reading right after pressing
+ * Assign, Close or Delete. That line is the evidence of an action, so it lives
+ * here instead of inside the row. It is what keeps fix F9 of delta 20260918f
+ * standing now that rows are no longer siblings under one parent.
+ */
+export const beadActionResults: SessionMap<{ text: string; managerId: string | null; tone: Tone }> =
+  createSessionMap();
 
 export function createSessionToggle(initial: boolean): SessionToggle {
   let value = initial;
@@ -440,11 +547,12 @@ export function createSessionToggle(initial: boolean): SessionToggle {
 }
 
 /**
- * Whether the Beads screen shows closed beads. Hidden by default, remembered
- * while the app runs, back to hidden after a reload (owner decision Q9). The
- * screen on the surface and the one in the "Beads" tab share it.
+ * Whether the Beads screen shows the Closed column. Shown by default since
+ * delta 20260925 (owner decision Q4: Closed is a column like the others), still
+ * remembered while the app runs and back to shown after a reload. The screen on
+ * the surface and the one in the "Beads" tab share it.
  */
-export const closedBeadsVisibility = createSessionToggle(false);
+export const closedBeadsVisibility = createSessionToggle(true);
 
 export function toggle(set: ReadonlySet<string>, value: string): Set<string> {
   const next = new Set(set);
@@ -568,7 +676,9 @@ export function workSummary(bead: Pick<BeadRow, "status" | "work">, now: Date): 
     headline: `${workerName(current)} · ${since} · ${agentState(current)}`,
     lines,
     agentId: current.agentId,
-    tone: current.status === "running" ? "info" : current.status === null ? "warning" : "muted",
+    // A Worker that is running reads at full contrast; anything else is quiet.
+    // The words already say idle, gone, or not recorded (delta 20260925 §3.2).
+    tone: current.status === "running" ? "plain" : "muted",
   };
 }
 

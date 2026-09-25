@@ -142,14 +142,41 @@ export function reviewerReplacementIds(incidents: readonly FallbackIncident[]): 
 }
 
 /**
- * `reviewerReplacementIds` of `<home>/role-fallback-state.json`. Empty without
- * a home, or when the file is missing or unusable, so the count stays what it
- * was before fallback existed. Silent: fallback detection already logs an
- * unusable file, and a Dashboard refresh or a turn end must not repeat it.
- * Never throws.
+ * The recorded fallback incidents of `<home>/role-fallback-state.json`, read
+ * once per Dashboard call. Empty without a home, or when the file is missing or
+ * unusable, so every count stays what it was before fallback existed. Silent:
+ * fallback detection already logs an unusable file, and a Dashboard refresh or a
+ * turn end must not repeat it. Never throws.
  */
+export function incidentsIn(home: string | null): FallbackIncident[] {
+  return home === null ? [] : readIncidents(home, () => {}).incidents;
+}
+
+/**
+ * How many provider-plan incidents each request of a workspace had that did not
+ * already fail a turn (delta 20260925 §3.4).
+ *
+ * Only `signal: "completed"` counts here: an incident with `signal: "failed"`
+ * came from a turn whose record says `failed`, which `errorsOf` counts as a
+ * failed turn, and one failure must read as one error. An incident without a
+ * `requestId` is a Manager's and belongs to no request.
+ */
+export function fallbackCountsOf(
+  incidents: readonly FallbackIncident[],
+  workspaceId: string,
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const incident of incidents) {
+    if (incident.workspaceId !== workspaceId || incident.requestId === null) continue;
+    if (incident.signal !== "completed") continue;
+    counts.set(incident.requestId, (counts.get(incident.requestId) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/** `reviewerReplacementIds` of that file. Kept for callers that need only those ids. */
 export function reviewerReplacementsIn(home: string | null): Set<string> {
-  return home === null ? new Set() : reviewerReplacementIds(readIncidents(home, () => {}).incidents);
+  return reviewerReplacementIds(incidentsIn(home));
 }
 
 /**
@@ -302,6 +329,8 @@ export async function readTraceContext(
   workspaceState: WorkspaceState;
   notices: string[];
   store: StoreSize;
+  /** Provider-plan incidents per request that did not fail a turn (delta 20260925 §3.4). */
+  fallbackCounts: Map<string, number>;
 }> {
   const { home, location } = await requireInstallHome(paseo, deps);
   const read = readRecords(location, input.workspaceId);
@@ -310,12 +339,15 @@ export async function readTraceContext(
   const classified = classifyWorkspaces(location, listed).find(
     (entry) => entry.workspaceId === input.workspaceId,
   );
+  // One read of the incidents file for both things that need it: the review
+  // count and the error count (delta 20260925 §3.4).
+  const incidents = incidentsIn(home);
   // The same review count as the BM-BUDGET check: a replacement Reviewer's
   // first message is not a new call (delta 20260921 §4.5.1).
   const traces = reconstructTraces({
     records: read.records,
     agents: [...agents.values()],
-    replacementIds: reviewerReplacementsIn(home),
+    replacementIds: reviewerReplacementIds(incidents),
   });
   return {
     location,
@@ -327,6 +359,7 @@ export async function readTraceContext(
     workspaceState: classified?.state ?? (listed === null ? "unknown" : "live"),
     notices: read.notices,
     store: measureStore(location, input.workspaceId),
+    fallbackCounts: fallbackCountsOf(incidents, input.workspaceId),
   };
 }
 
@@ -417,6 +450,7 @@ export async function handleTracesList(
         workspaceState: context.workspaceState,
         reassignedFrom: reassignedFromOf(trace, input.workspaceId),
         priceUsage: (usage) => priceUsage(usage, listed),
+        fallbacksOf: (requestId) => (requestId === null ? 0 : (context.fallbackCounts.get(requestId) ?? 0)),
       }),
     ),
     nextCursor,
@@ -447,6 +481,7 @@ export async function handleTracesGet(
     workspaceState: context.workspaceState,
     reassignedFrom: reassignedFromOf(trace, input.workspaceId),
     priceUsage: (usage) => priceUsage(usage, listed),
+    fallbacksOf: (requestId) => (requestId === null ? 0 : (context.fallbackCounts.get(requestId) ?? 0)),
     lookupBeads: (ids) => (directory === null ? { found: [], missing: [...ids] } : lookupBeads(directory, ids)),
     workflowSteps: (reconstructed, beadStatus) =>
       inferWorkflowSteps(reconstructed, { beadStatus, workspaceDir: context.evidenceDirectory }),

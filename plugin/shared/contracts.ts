@@ -228,6 +228,35 @@ export const guardrailReportSchema = z.object({
   raw: z.string(),
 });
 
+/**
+ * How many times a request went wrong, whatever the reason (REQ-069 g,
+ * delta 20260925 §3.4).
+ *
+ * The three numbers are **disjoint**, so adding them up is a count of failures
+ * and not three views of the same death: one usage-limit failure writes a failed
+ * turn, leaves its agent in `error` and files a fallback incident, and it must
+ * read as one error.
+ */
+export const traceErrorsSchema = z.object({
+  /** Turns of **this row** that ended `failed`. */
+  failedTurns: z.number().int().nonnegative(),
+  /**
+   * Agents of the request left in Paseo's `error` status that have **no** failed
+   * turn record in this trace — killed before the collector wrote one. Set on the
+   * row that opens the request only, because it belongs to the request.
+   */
+  agentErrors: z.number().int().nonnegative(),
+  /**
+   * Provider-plan incidents of this request whose turn still ended `completed`
+   * (`signal: "completed"`: the turn ran and did nothing). An incident with
+   * `signal: "failed"` came from a turn already counted in `failedTurns`. Set on
+   * the row that opens the request only.
+   */
+  fallbacks: z.number().int().nonnegative(),
+});
+
+export type TraceErrors = z.infer<typeof traceErrorsSchema>;
+
 /** One row of the trace list (design §4.2). */
 export const traceSummarySchema = z.object({
   traceId: z.string().min(1),
@@ -265,6 +294,11 @@ export const traceSummarySchema = z.object({
   usageByModelRole: z
     .array(z.object({ role: agentRoleSchema, model: z.string().nullable(), usage: usageSchema }))
     .optional(),
+  /**
+   * Errors of this row (delta 20260925 §3.4). Optional so a payload written
+   * before it still parses; a reader without it counts no errors.
+   */
+  errors: traceErrorsSchema.optional(),
   beadCounts: z.object({
     created: beadCountSchema,
     updated: beadCountSchema,

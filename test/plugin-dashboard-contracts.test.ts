@@ -68,6 +68,7 @@ const summary: TraceSummary = {
   },
   durationMs: 742_000,
   usage,
+  errors: { failedTurns: 1, agentErrors: 0, fallbacks: 1 },
   beadCounts: {
     created: { count: 2, confidence: "exact" },
     updated: { count: 1, confidence: "inferred" },
@@ -227,6 +228,20 @@ describe("Dashboard data contracts", () => {
       present: false,
     };
     expect(beadStatsSchema.parse(stats).present).toBe(false);
+  });
+
+  it("reads a row written before the error count as no errors, and keeps a real one (delta 20260925 §3.4)", () => {
+    const older: Record<string, unknown> = { ...summary };
+    delete older.errors;
+    const parsed = traceSummarySchema.parse(older);
+    expect(parsed.errors).toBeUndefined();
+    const withErrors = traceSummarySchema.parse({ ...summary, errors: { failedTurns: 2, agentErrors: 1, fallbacks: 0 } });
+    expect(withErrors.errors).toEqual({ failedTurns: 2, agentErrors: 1, fallbacks: 0 });
+    // A count is a count: no negative, no fraction.
+    expect(() => traceSummarySchema.parse({ ...summary, errors: { failedTurns: -1, agentErrors: 0, fallbacks: 0 } })).toThrow();
+    expect(() => traceSummarySchema.parse({ ...summary, errors: { failedTurns: 0.5, agentErrors: 0, fallbacks: 0 } })).toThrow();
+    // Every part must be there when the field is: a half-filled count would read as zero.
+    expect(() => traceSummarySchema.parse({ ...summary, errors: { failedTurns: 1 } })).toThrow();
   });
 
   it("rejects a summary that is missing a required field", () => {

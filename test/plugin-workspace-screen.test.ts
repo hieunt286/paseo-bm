@@ -23,8 +23,10 @@ vi.mock("react-native", () => {
 // The root tsconfig has no `jsx`, so the .tsx module is loaded through a
 // non-literal specifier that `tsc --noEmit` does not resolve.
 const uiPath = "../plugin/client/ui.tsx";
-const { BeadRowCard, WorkspaceScreenHeader } = (await import(uiPath)) as {
+const { BeadRowCard, KanbanBoard, StatusTabs, WorkspaceScreenHeader } = (await import(uiPath)) as {
   BeadRowCard: (props: Record<string, unknown>) => unknown;
+  KanbanBoard: (props: Record<string, unknown>) => unknown;
+  StatusTabs: (props: Record<string, unknown>) => unknown;
   WorkspaceScreenHeader: (props: Record<string, unknown>) => unknown;
 };
 
@@ -34,6 +36,10 @@ const styles = {
   title: { name: "title" },
   card: { name: "card" },
   sectionTitle: { name: "sectionTitle" },
+  body: { name: "body" },
+  chipRow: { name: "chipRow" },
+  button: { name: "button" },
+  buttonText: { name: "buttonText" },
 };
 const theme = {
   colors: new Proxy({}, { get: (_target, key) => `#${String(key)}` }),
@@ -122,14 +128,14 @@ describe("one bead row for the Beads screen and the Beads in this chat panel (S4
   const row = (open: boolean) =>
     renderTree(BeadRowCard({ bead, open, onToggle: vi.fn(), meta: "META", detail: "DETAIL", styles, theme }));
 
-  it("draws the title with its status colour, not bold, and ▸ while closed; the meta; no detail", () => {
+  it("draws the title at full contrast, not bold, and ▸ while closed; the meta; no detail", () => {
     const tree = row(false);
     const [press] = pressables(tree);
     expect(press!.props.accessibilityState).toEqual({ expanded: false });
     const title = allNodes(tree).find((node) => node.type === "Text")!;
     expect(texts(tree)[0]).toBe("▸ Lock an account");
     expect(title.props.numberOfLines).toBe(2);
-    expect(title.props.style).toEqual([styles.sectionTitle, { fontWeight: "400", color: "#statusWarning" }]);
+    expect(title.props.style).toEqual([styles.sectionTitle, { fontWeight: "400", color: "#foreground" }]);
     expect(press!.children).toContain("META");
     expect(JSON.stringify(tree)).not.toContain("DETAIL");
   });
@@ -144,5 +150,100 @@ describe("one bead row for the Beads screen and the Beads in this chat panel (S4
   it("is the row both lists draw", () => {
     expect(source("../plugin/client/beads-screen.tsx")).toMatch(/<BeadRowCard/);
     expect(source("../plugin/client/bead-chips.tsx")).toMatch(/<BeadRowCard/);
+  });
+});
+
+describe("the Beads board and its status tabs (delta 20260925 §3.1)", () => {
+  const bead = (id: string) => ({ id, title: id, status: "in_progress", ready: false }) as unknown as Record<string, unknown>;
+  const column = (bucket: string, label: string, beads: string[], extra: Record<string, unknown> = {}) => ({
+    bucket,
+    label,
+    total: beads.length,
+    beads: beads.map(bead),
+    hidden: 0,
+    empty: "Nothing here.",
+    ...extra,
+  });
+
+  it("draws every column in order with its name and size, and says so when one is empty", () => {
+    const tree = renderTree(
+      KanbanBoard({
+        columns: [
+          column("in_progress", "In progress", ["p1", "p2"]),
+          column("blocked", "Blocked", []),
+          column("ready", "Ready", ["r1"], { total: 9, hidden: 8 }),
+        ],
+        perRow: 3,
+        gap: 8,
+        renderBead: (row: { id: string }) => `ROW:${row.id}`,
+        styles,
+      }),
+    );
+    expect(texts(tree)).toEqual([
+      "In progress · 2",
+      "Blocked · 0",
+      "Nothing here.",
+      "Ready · 9",
+      "+8 more · narrow the filters to see them",
+    ]);
+    expect(JSON.stringify(tree)).toContain("ROW:p1");
+    expect(JSON.stringify(tree)).toContain("ROW:p2");
+    // A column header is not coloured: the status is in the words (delta 20260925 §3.2).
+    const header = allNodes(tree).find((node) => node.type === "Text")!;
+    expect(header.props.style).toBe(styles.sectionTitle);
+  });
+
+  it("gives each column a cell of exactly 100 / perRow percent, so a row never wraps early", () => {
+    const cells = (perRow: number) =>
+      allNodes(
+        renderTree(
+          KanbanBoard({
+            columns: [column("in_progress", "In progress", ["p1"]), column("blocked", "Blocked", ["b1"])],
+            perRow,
+            gap: 8,
+            renderBead: () => null,
+            styles,
+          }),
+        ),
+      )
+        .map((node) => node.props.style as { flexBasis?: string } | undefined)
+        .filter((style) => style?.flexBasis !== undefined)
+        .map((style) => style!.flexBasis);
+    expect(cells(2)).toEqual(["50%", "50%"]);
+    expect(cells(4)).toEqual(["25%", "25%"]);
+    expect(cells(1)).toEqual(["100%", "100%"]);
+  });
+
+  it("names the tabs for a screen reader, marks the chosen one, and reports a press", () => {
+    const onSelect = vi.fn();
+    const tree = renderTree(
+      StatusTabs({
+        tabs: [
+          { key: "in_progress", label: "In progress", count: 2 },
+          { key: "blocked", label: "Blocked", count: 0 },
+        ],
+        selected: "blocked",
+        onSelect,
+        styles,
+      }),
+    );
+    const list = allNodes(tree).find((node) => node.props.accessibilityRole === "tablist")!;
+    expect(list).toBeDefined();
+    const tabs = allNodes(tree).filter((node) => node.props.accessibilityRole === "tab");
+    expect(tabs.map((tab) => tab.props.accessibilityState)).toEqual([{ selected: false }, { selected: true }]);
+    expect(texts(tree)).toEqual(["In progress 2", "Blocked 0"]);
+    expect(tabs[1]!.props.style).toBe(styles.button);
+    expect(tabs[0]!.props.style).toBe(styles.secondaryButton);
+    (tabs[0]!.props.onPress as () => void)();
+    expect(onSelect).toHaveBeenCalledWith("in_progress");
+  });
+
+  it("is what the Beads screen draws, measuring its own width", () => {
+    const screen = source("../plugin/client/beads-screen.tsx");
+    expect(screen).toMatch(/<KanbanBoard/);
+    expect(screen).toMatch(/<StatusTabs/);
+    expect(screen).toMatch(/onLayout=\{\(event\) => setBoardWidth\(event\.nativeEvent\.layout\.width\)\}/);
+    // No column is drawn by hand, and the old flat list is gone.
+    expect(screen).not.toMatch(/beadListItems/);
   });
 });

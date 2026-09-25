@@ -128,7 +128,8 @@ Open the Manager with **Go to** on the [Beads Manager screen](#the-beads-manager
 Describe the change in normal chat. The Manager:
 
 - restates the request in one sentence (the Worker decides its size);
-- **immediately creates one Beads Worker** in the same workspace. A follow-up to a request already in progress goes to that request's Worker instead;
+- **answers a question itself when it can read the answer** — where a request or a Worker stands, what the beads say, what a file or function does, what git shows — naming what it read and starting no Worker. It changes nothing itself: no file, bead, build or test;
+- for a change, **immediately creates one Beads Worker** in the same workspace. A follow-up to a request already in progress goes to that request's Worker instead;
 - passes your request on **verbatim** and adds no requirements of its own;
 - tells you the Worker and the request id (`req-<UTC time>`), and — once — any skills the Worker's tool is missing (the plugin checks them);
 - replies in your language, in a few lines.
@@ -137,17 +138,18 @@ Describe the change in normal chat. The Manager:
 
 The Worker sizes the risk of what it designs itself — not the size of the diff, and not what you told it to carry out, which is your decision:
 
-- **Large:** hard to undo, or it changes what others rely on.
-- **Small:** one clear change that needs no document.
-- **Medium:** everything else.
+- **Large:** hard to undo, or it changes what others rely on — an interface, a format or stored data that other code or people consume, or a recorded decision. How something looks, reads or works inside is not one of these.
+- **Small:** one clear, local change that is easy to undo and that a check can prove.
+- **Medium:** everything else — several outcomes, an order between them, or work someone else may have to pick up.
 
-The Worker tells you the size and the reason. You can override it; the Worker follows your choice. Documents do not follow the size: at any size the Worker writes or updates a document only where the change touches something others rely on (a recorded decision, a contract, a schema, shipped behaviour), and a Small request writes none.
+The Worker tells you the size and the reason. You can override it; the Worker follows your choice. Documents do not follow the size: at any size the Worker writes a document only where the change overturns something recorded (a decision, a contract, a schema). A document that only describes what it changes is corrected in place as part of the change, without a question, and a Small request writes no new document.
 
 | | Small | Medium | Large |
 |---|---|---|---|
-| Review stages | the implementation | the implementation | the documents and beads, then the implementation |
+| Beads | none | written by hand | from a plan, or by hand |
+| Review stages | none, unless you ask | the implementation | the documents and beads, then the implementation |
 | Reviews per stage | one, plus one re-review only if blocking findings remain | same | same |
-| Review budget per request | 2 | 2 | 4 |
+| Review budget per request (a ceiling) | 2, only for a review you ask for | 2 | 4 |
 | Reports to the Manager | `received`, `finished` | `received`, `finished` | `received`, `beads-done`, `finished` |
 
 Nothing waits for a confirmation before implementing; what cannot be undone still waits for your yes (below).
@@ -156,18 +158,19 @@ Nothing waits for a confirmation before implementing; what cannot be undone stil
 
 - **Process follows what the Worker designs.** Beads, documents and reviews track and check a change the Worker designs. A request that needs none — an answer, or exactly what you already spelled out — gets none of them: the Worker does it and shows the result with its evidence. What you spelled out is also your yes, so it does not ask again. Any part that does need its design is handled like any change.
 - **Anything beyond the request is a suggestion, not work.** Extra tests, refactors, docs, clean-ups and related bugs are listed as `Suggestion (not done): …`. The Manager asks you whether any of them should become new work.
-- Before creating a bead, the Worker looks for open beads with the same `feature:<slug>` label. It updates a single match instead of creating a duplicate, and **asks you** when several match.
+- A Small change has no bead: the Worker makes it, runs the check that proves it, and puts the command and its result in its report.
+- Before creating a bead, the Worker looks for open beads with the same `feature:<slug>` label. It updates the closest match instead of creating a duplicate, and says which one it picked on its `decided` line.
 - Every bead it creates carries a `feature:<slug>` label and a short `## Provenance` naming the request. The beads of a plan follow the `converting-plan-to-beads` contract (objective, scope in and out, components, validation, primary proof, reversibility, …); every bead holds **one outcome** that can be reviewed and reverted on its own; beads are never sized by file, line or bead counts.
 - When it writes a plan it runs `reviewing-plan` on it and `polishing-beads` on the beads converted from it. These are its own quality passes: they never replace a Reviewer and do not count against the review budget.
 - It works on one bead at a time (with `implementing-beads` when there is more than one), runs the check that proves the bead, and **closes the bead with that evidence right away**. When all beads are closed, the implementation is reviewed once; a bead with a blocking finding is reopened, fixed and closed again with new evidence.
-- **It decides what can be undone, and asks only four things.** Inside your request, choices it could reverse later — the approach, names, layout, test shape, the order of beads, whether a document needs updating — are its own; it lists them on its report's `decided` line so you can overturn any of them. It asks you only about the scope (widening, narrowing, adding a requirement), about what cannot be undone or an approved decision (editing a frozen document, deviating from an approved one, changing an existing bead's acceptance criteria, deleting or merging beads, changing an approved design because a Reviewer asked), about what only you have (something you must type or do, the environment, a security trade-off, behaviour existing users rely on), and when it is stuck. Questions it can already see come in one round right after sizing, as one numbered list (at most five) with options and a recommendation. For those it waits for your answer and never assumes one.
+- **It decides what can be undone, and asks only four things.** Inside your request, choices it could reverse later — the approach, names, layout, test shape, the order of beads, whether a document needs updating — are its own; it lists them on its report's `decided` line so you can overturn any of them. It asks you only about the scope (widening, narrowing, adding a requirement), about what cannot be undone or an approved decision (editing a document the repository freezes, deviating from an approved decision, contract, requirement or plan scope — correcting what a document says about the thing it changes is not one of these, changing an existing bead's acceptance criteria, deleting or merging beads, changing an approved design because a Reviewer asked), about what only you have (something you must type or do, the environment, a security trade-off, behaviour existing users rely on), and when it is stuck. Questions it can already see come in one round right after sizing, as one numbered list (at most five) with options and a recommendation. For those it waits for your answer and never assumes one.
 - It **asks you first** before installing or upgrading dependencies, using the network, running migrations on real data, deploying or publishing, editing frozen documents, widening the scope, or deleting or merging beads.
 - Outside the repository it writes only into a temporary directory it has just created and deletes before reporting.
 - **Five limits hold whatever the request:** nothing leaves the workspace without your explicit yes (commit, push, pull request, deploy, publish, network, dependency install, real-data migration, elevated privileges); nothing the Worker did not create is destroyed or touched, including the changes that were already in the tree and your agents; secrets are never read or copied; **no check is ever made to look green** — a test, an assertion or an acceptance criterion is never weakened so something passes, and a bead is never closed on a check the Worker did not watch pass; and nothing only you can decide is decided for you. You review `git diff` and decide.
 
 ### 4. A Reviewer checks each batch
 
-Reviews are grouped by stage (see the table); documents are reviewed before implementing only for a Large request or when you ask. For each stage the Worker creates one Reviewer, fixes **blocking** findings, and sends that same Reviewer one re-review. It does not fix non-blocking findings; they become suggestions. If blocking findings remain after the re-review, the Worker **stops and asks you**. The plugin, not the Worker, counts the review calls of each request (see the next section).
+Reviews are grouped by stage (see the table); documents are reviewed before implementing only for a Large request or when you ask, and a Small change is reviewed only when you ask. For each stage the Worker creates one Reviewer, fixes **blocking** findings, and sends that same Reviewer one re-review. It does not fix non-blocking findings; they become suggestions. If blocking findings remain after the re-review, the Worker **stops and asks you**. The plugin, not the Worker, counts the review calls of each request (see the next section).
 
 The Reviewer checks each stage against criteria from the workflow skills: the PRD and design gates for documents, `reviewing-plan` (review-only) and the plan-ready gate for a plan, the leaf and readiness checklists for beads, and the split triggers and risk table of `implementing-beads` for the implementation. It may run the repository's tests and throwaway probe scripts, but it changes nothing, uses no network and installs nothing. For authentication, permissions, data or a public contract it lists the abuse and edge cases it tried. Hardening beyond your request is a suggestion, not a blocker, unless it is a real defect in what was built.
 
@@ -220,13 +223,13 @@ Open **Beads Manager** in Paseo's sidebar. It opens on **Setup** (below); the **
 | **Metric** | [What each request did](#metric-what-each-request-did). |
 | **Beads** | [The workspace's beads](#beads-the-workspaces-beads). |
 
-Under each workspace name, four small figures show the beads in total, in progress (yellow) and blocked (red), and how many Workers are running right now (they refresh every few seconds while the list is open). A dot next to the name pulses while one of its paseo-bm agents is working. The three buttons stay on one line, on a phone too. From Metric or Beads, ← goes back to the list.
+Under each workspace name, four small figures show the beads in total, in progress and blocked, and how many Workers are running right now — in progress, blocked and running Workers read in plain text above zero and grey at zero, the total stays grey, and no colour has to be learnt (they refresh every few seconds while the list is open). A dot next to the name pulses while one of its paseo-bm agents is working. The three buttons stay on one line, on a phone too. From Metric or Beads, ← goes back to the list.
 
-**Setup** is where the screen opens:
+**Setup** is where the screen opens. It has three tabs — **Beads tools**, **Agent skills** and **Agents** — and shows one of them at a time; what the screen has to tell you (a missing tool, a failed check) stays above the tabs, so no tab can hide it.
 
 - **Beads tools.** Whether `br` and `bv` are on the PATH the Paseo daemon uses, their versions, and whether a newer one is known. A missing tool has an **Install** button that runs the same command as [install](#what-the-interactive-install-asks) after you confirm it. Updating is never run for you: the screen shows the command to copy.
 - **Agent skills.** Each required and optional skill, for Claude Code and for Codex: installed, missing, or broken (unreadable `SKILL.md` or a wrong `name:`). **Test** checks again. The equivalent `skills add` command is shown to copy; the plugin never installs skills.
-- **Additional instructions.** A text box per role (Manager, Worker, Reviewer). What you save is added **after** the built-in instructions, under a heading that says it cannot override the rules. **Preview** shows the full instructions an agent will get. It applies to agents created after you save; running agents keep what they started with. The text is stored in `~/.paseo-bm/role-extras.json`.
+- **Agents.** Each role's provider, model, thinking and mode, with an Edit form, and its fallback chain where one is offered. Below them, **additional instructions**: a text box per role (Manager, Worker, Reviewer). What you save is added **after** the built-in instructions, under a heading that says it cannot override the rules. **Preview** shows the full instructions an agent will get. It applies to agents created after you save; running agents keep what they started with. The text is stored in `~/.paseo-bm/role-extras.json`.
 
 **Closed workspaces with history** (at the end of the Workspaces list) lists workspaces that were archived or removed from Paseo but still have recorded traces, with their last name, path, last activity and history size. Press **Metric** to read that history.
 
@@ -240,7 +243,8 @@ The Metric screen answers what chat cannot: what a request turned into, how long
 
 **Top of the screen**
 
-- **Overview cards:** requests (running, waiting, done), beads, agents (Workers and Reviewers), messages sent and received, tokens (input, cached, output), and estimated cost.
+- **Overview cards:** requests (running, waiting, done), **errors**, beads, agents (Workers and Reviewers), messages sent and received, tokens (input, cached, output), and estimated cost.
+- **Errors** counts how many times a request went wrong, for any reason: a turn that ended failed, an agent left in Paseo's error state, and every provider-plan incident (usage limit, login, provider down). It says how many requests are affected and breaks the number down. Each failure counts once — a request you asked three follow-ups on is still one request, and a usage limit that killed a turn is one error, not three. With nothing to report it says "no error recorded".
 - **Requests, last 7 days** as a bar chart.
 - **Top 5 heaviest Workers** by tokens. Press one to open that Worker.
 
@@ -275,19 +279,20 @@ The Beads screen reads `.beads/issues.jsonl` in the workspace directly. It **nev
 4. **By priority.**
 5. **Time:** median time to close, the bead longest in progress, and stale beads (open with no update for 7 days or more).
 
-**List**
+**The board**
 
 - Search by id or title.
 - Filter by status, type, priority and labels. Labels are grouped by category (the part before `:`, such as `feature:` or `area:`). Each group shows its most common values first, and the rest are one tap away. Active filters appear as chips you can remove.
 - Sort by updated, created or closed time, or by priority.
-- The list is split into four groups, in this order: **In progress**, **Blocked**, **Ready**, **Closed**, each with its size. Filters apply first, and the sort you chose applies inside each group.
-- **Closed beads are hidden** until you press the eye button (it shows how many there are). The choice lasts until you reload the app.
-- Each row shows the bead's **title first**, coloured by status (accent = ready, yellow = in progress, red = blocked, green = closed), with its id, type, priority and status on the line below.
+- Beads are laid out as a **board**, one column per status, in this order: **In progress**, **Blocked**, **Ready**, **Closed**, each with its size. Filters apply first, and the sort you chose applies inside each column. A column with nothing in it stays where it is and says so, so the board does not jump about while you filter. Each column shows its first 100 beads and says how many it left out.
+- **The board follows the width.** Wide enough for two columns or more (a desktop window) and they sit side by side, as many per row as fit. Narrower than that — a phone, or a slim window — and you get one column at a time, picked from a row of status tabs that carry the counts.
+- **Closed beads are shown**, as a column like the others. The eye button hides them again (it shows how many there are), and that choice lasts until you reload the app.
+- Each row shows the bead's **title first**, in plain text while there is still work in it and dimmed once it is closed — the words on the status chip say which status it is, so nothing depends on colour. The id, type, priority and status are on the line below.
 - **Beads in progress say who is on them:** the Worker, since when, how long it has been, and whether that Worker is running, idle or gone. This comes from the recorded Worker commands (`br update <id> --status in_progress` or `--claim`) and reports. When no such command was recorded, the screen says the start is not recorded and shows the Worker's last activity instead of guessing.
 
 **Detail**
 
-Press a bead to see who is working on it (with a button to open that Worker), its description rendered as Markdown, its labels, its dependencies and children, and its close reason. Three actions are available, each confirmed first:
+Press a bead to see who is working on it (with a button to open that Worker), its description rendered as Markdown, its labels, its dependencies and children, and its close reason. Three actions are available, each confirmed first. What an action reported stays on the bead even when the next refresh moves it to another column; a confirmation you had open but not answered closes when the bead moves.
 
 | Action | What happens |
 |---|---|

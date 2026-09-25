@@ -9,10 +9,10 @@
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import type { ReactNode } from "react";
 import type { BeadRow } from "../shared/contracts";
-import { beadTitleTone } from "./beads-model";
+import { beadEmphasis, emphasisTone, type BeadEmphasis, type KanbanColumn } from "./beads-model";
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import { Pressable, Text, View } from "react-native";
-import { ROLE_MARK, barShare, toneColor, type Badge, type Bar, type GraphNode, type Tone, type dashboardStyles } from "./dashboard-model";
+import { ROLE_MARK, barShare, toneColor, type Badge, type Bar, type GraphNode, type dashboardStyles } from "./dashboard-model";
 
 export type Styles = ReturnType<typeof dashboardStyles>;
 export type Theme = PluginSurfaceProps["theme"];
@@ -176,12 +176,16 @@ export function Chip({
 }
 
 /**
- * A bead title in a list: the section size, not bold, in its status colour
- * (owner decisions Q3 and Q8, delta 20260918e). `null` keeps the plain text
+ * A bead title in a list: the section size, never bold (REQ-060 (i): bold titles
+ * were tiring), and only as loud as its status — full contrast while the bead is
+ * open, dim once it is closed (delta 20260925 §3.2). `null` keeps the plain text
  * colour, for a bead shown outside a list.
  */
-export function beadTitleStyle(styles: Styles, theme: Theme, tone: Tone | null) {
-  return [styles.sectionTitle, { fontWeight: "400" as const, color: tone === null ? theme.colors.foreground : toneColor(theme, tone) }];
+export function beadTitleStyle(styles: Styles, theme: Theme, emphasis: BeadEmphasis | null) {
+  return [
+    styles.sectionTitle,
+    { fontWeight: "400" as const, color: emphasis === null ? theme.colors.foreground : toneColor(theme, emphasisTone(emphasis)) },
+  ];
 }
 
 /**
@@ -211,12 +215,92 @@ export function BeadRowCard({
     <View style={styles.card}>
       <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} onPress={onToggle}>
         {/* The title is what a reader scans for; the id comes second. */}
-        <Text style={beadTitleStyle(styles, theme, beadTitleTone(bead))} numberOfLines={open ? undefined : 2}>
+        <Text style={beadTitleStyle(styles, theme, beadEmphasis(bead))} numberOfLines={open ? undefined : 2}>
           {`${open ? "▾" : "▸"} ${bead.title ?? "(untitled)"}`}
         </Text>
         {meta}
       </Pressable>
       {open ? detail : null}
+    </View>
+  );
+}
+
+/**
+ * A row of tabs: one label per view, the chosen one filled in
+ * (delta 20260925 §3.1, §3.3). Used for the Beads board's status columns on a
+ * narrow screen and for the three sections of the Setup screen, so both read
+ * the same. Hook-free.
+ */
+export function StatusTabs({
+  tabs,
+  selected,
+  onSelect,
+  styles,
+}: {
+  tabs: ReadonlyArray<{ key: string; label: string; count?: number; hint?: string }>;
+  selected: string;
+  onSelect: (key: string) => void;
+  styles: Styles;
+}) {
+  return (
+    <View accessibilityRole="tablist" style={styles.chipRow}>
+      {tabs.map((tab) => {
+        const on = tab.key === selected;
+        return (
+          <Pressable
+            key={tab.key}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: on }}
+            accessibilityLabel={tab.hint === undefined ? tab.label : `${tab.label}: ${tab.hint}`}
+            onPress={() => onSelect(tab.key)}
+            style={on ? styles.button : styles.secondaryButton}
+          >
+            <Text style={on ? styles.buttonText : styles.secondaryButtonText}>
+              {tab.count === undefined ? tab.label : `${tab.label} ${tab.count}`}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
+/**
+ * The Beads board: one column per status, `perRow` of them on a row
+ * (delta 20260925 §3.1). Each column sits in a cell of exactly `100 / perRow`
+ * percent with its own padding, so the cells of a row add up to 100% and none
+ * of them wraps early — `gap` on the row would push the last cell out.
+ *
+ * An empty column is still drawn and says so, so the board does not jump when a
+ * filter changes. Hook-free: the rows come in through `renderBead`.
+ */
+export function KanbanBoard({
+  columns,
+  perRow,
+  gap,
+  renderBead,
+  styles,
+}: {
+  columns: readonly KanbanColumn[];
+  perRow: number;
+  gap: number;
+  renderBead: (bead: BeadRow) => ReactNode;
+  styles: Styles;
+}) {
+  return (
+    <View style={{ flexDirection: "row", flexWrap: "wrap", marginHorizontal: -gap / 2 }}>
+      {columns.map((column) => (
+        <View key={column.bucket} style={{ flexBasis: `${100 / Math.max(1, perRow)}%`, padding: gap / 2 }}>
+          <View style={{ gap }}>
+            <Text style={styles.sectionTitle}>{`${column.label} · ${column.total}`}</Text>
+            {column.beads.length === 0 ? <Text style={styles.body}>{column.empty}</Text> : null}
+            {column.beads.map((bead) => renderBead(bead))}
+            {column.hidden > 0 ? (
+              <Text style={styles.body}>{`+${column.hidden} more · narrow the filters to see them`}</Text>
+            ) : null}
+          </View>
+        </View>
+      ))}
     </View>
   );
 }

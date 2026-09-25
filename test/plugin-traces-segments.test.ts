@@ -172,3 +172,126 @@ describe("summariseSegments", () => {
     expect(rows[0]).toEqual(summarise(traceOf(once), deps));
   });
 });
+
+/**
+ * How many times a request went wrong, whatever the reason
+ * (delta 20260925 §3.4, REQ-069 g).
+ *
+ * The rule the counting exists for: adding a request's rows up must count each
+ * failure exactly once — not once per turn row, and not once per source that saw
+ * the same death.
+ */
+describe("errors of a request", () => {
+  const WORKER = "agent-worker";
+  const workerFacts = (status: string): AgentFacts & { id: string } => ({
+    id: WORKER,
+    role: "worker",
+    status,
+    parentAgentId: MANAGER,
+    createdAt: "2026-09-17T09:01:00.000Z",
+    requestIdLabel: REQ,
+    batchIdLabel: null,
+    archived: false,
+  });
+  const workerTurn = (at: string, outcome: TraceRecord["outcome"]) =>
+    record({ agentId: WORKER, role: "worker", at, endedAt: at, turnId: `worker-${at.slice(14, 16)}`, outcome });
+  const withWorker = (agents: Array<AgentFacts & { id: string }>, records: TraceRecord[]) =>
+    reconstructTraces({ records, agents: [reviewerFacts, ...agents] }).find((t) => t.requestId === REQ)!;
+
+  it("counts a failed turn on the row it happened in, and nothing when nothing failed", () => {
+    const clean = summarise(traceOf(conversation()), deps);
+    expect(clean.errors).toEqual({ failedTurns: 0, agentErrors: 0, fallbacks: 0 });
+
+    const records = [...conversation(), workerTurn("2026-09-17T09:06:00.000Z", "failed")];
+    const rows = summariseSegments(withWorker([], records), deps);
+    expect(rows.map((row) => row.errors!.failedTurns)).toEqual([1, 0]);
+  });
+
+  it("keeps the request's own errors on the opening row, so a sum over the rows counts each once", () => {
+    const records = [...conversation(), workerTurn("2026-09-17T09:06:00.000Z", "failed")];
+    const withFallbacks = { ...deps, agents: new Map([[WORKER, workerFacts("idle")]]), fallbacksOf: () => 2 };
+    const rows = summariseSegments(withWorker([workerFacts("idle")], records), withFallbacks);
+    expect(rows.map((row) => row.errors)).toEqual([
+      { failedTurns: 1, agentErrors: 0, fallbacks: 2 },
+      { failedTurns: 0, agentErrors: 0, fallbacks: 0 },
+    ]);
+    const total = rows.reduce(
+      (sum, row) => sum + row.errors!.failedTurns + row.errors!.agentErrors + row.errors!.fallbacks,
+      0,
+    );
+    expect(total).toBe(3);
+  });
+
+  it("counts an agent left in error only when no failed turn of its own was recorded", () => {
+    // Killed before the collector wrote anything: nothing else counts it.
+    const noRecord = withWorker([workerFacts("error")], conversation());
+    expect(summarise(noRecord, { ...deps, agents: new Map([[WORKER, workerFacts("error")]]) }).errors).toEqual({
+      failedTurns: 0,
+      agentErrors: 1,
+      fallbacks: 0,
+    });
+
+    // The usual case: the agent's own turn failed, so the failure is already counted.
+    const records = [...conversation(), workerTurn("2026-09-17T09:06:00.000Z", "failed")];
+    const withRecord = withWorker([workerFacts("error")], records);
+    expect(summarise(withRecord, { ...deps, agents: new Map([[WORKER, workerFacts("error")]]) }).errors).toEqual({
+      failedTurns: 1,
+      agentErrors: 0,
+      fallbacks: 0,
+    });
+  });
+
+  it("reports no fallback incident when nobody tells it about them", () => {
+    expect(summarise(traceOf(conversation()), deps).errors!.fallbacks).toBe(0);
+  });
+});
+
+/**
+ * The case review b2 found: a Worker that died on the FOLLOW-UP turn and was
+ * left in Paseo's `error` status. Row 1 must not count it as an agent error
+ * while row 2 counts its failed turn — that is one death, and the Errors card
+ * adds the rows up.
+ */
+describe("a request whose last turn died", () => {
+  const WORKER = "agent-worker";
+  const worker: AgentFacts & { id: string } = {
+    id: WORKER,
+    role: "worker",
+    status: "error",
+    parentAgentId: MANAGER,
+    createdAt: "2026-09-17T09:01:00.000Z",
+    requestIdLabel: REQ,
+    batchIdLabel: null,
+    archived: false,
+  };
+
+  it("counts the death once across the rows, not once per row", () => {
+    const records = [
+      turn("2026-09-17T09:00:00.000Z", "Sửa giúp tôi cái CI đang đỏ", "user", 100),
+      turn("2026-09-17T09:10:00.000Z", "Tiện thể thêm cả test cho case rỗng", "user", 7),
+      // The failed turn belongs to the SECOND question.
+      record({
+        agentId: WORKER,
+        role: "worker",
+        at: "2026-09-17T09:12:00.000Z",
+        endedAt: "2026-09-17T09:12:00.000Z",
+        turnId: "worker-12",
+        outcome: "failed",
+      }),
+    ];
+    const trace = reconstructTraces({ records, agents: [worker] }).find((t) => t.requestId === REQ)!;
+    const withAgents = { ...deps, agents: new Map([[WORKER, worker]]) };
+    const rows = summariseSegments(trace, withAgents);
+    expect(rows.map((row) => row.errors)).toEqual([
+      { failedTurns: 0, agentErrors: 0, fallbacks: 0 },
+      { failedTurns: 1, agentErrors: 0, fallbacks: 0 },
+    ]);
+    const total = rows.reduce(
+      (sum, row) => sum + row.errors!.failedTurns + row.errors!.agentErrors + row.errors!.fallbacks,
+      0,
+    );
+    expect(total).toBe(1);
+    // And the whole request says the same number.
+    expect(summarise(trace, withAgents).errors).toEqual({ failedTurns: 1, agentErrors: 0, fallbacks: 0 });
+  });
+});

@@ -30,6 +30,7 @@ import type {
   Tier,
   TraceBead,
   TraceDetail,
+  TraceErrors,
   TraceMessage,
   TraceRecord,
   TraceState,
@@ -1117,6 +1118,33 @@ export interface SummariseDeps {
    * never has to know about money; without it the row reports tokens only.
    */
   priceUsage?: (usage: Usage) => Usage;
+  /**
+   * How many provider-plan incidents of this request did not fail a turn
+   * (delta 20260925 §3.4). Injected, because the incidents live in a file this
+   * module does not read; without it the row reports none.
+   */
+  fallbacksOf?: (requestId: string | null) => number;
+}
+
+/**
+ * The errors of a whole trace, whatever their reason (delta 20260925 §3.4).
+ *
+ * `failedTurns` is of the records it is given, so a per-turn row gets its own
+ * count. The other two belong to the request, and `summariseSegments` keeps them
+ * on the opening row so adding a request's rows up counts each failure once.
+ */
+export function errorsOf(trace: ReconstructedTrace, deps: SummariseDeps): TraceErrors {
+  const failedTurns = trace.records.filter((record) => record.outcome === "failed").length;
+  // An agent in `error` almost always wrote a failed turn first; only one killed
+  // before that is a failure nothing else counted.
+  const failedAgents = new Set(
+    trace.records.filter((record) => record.outcome === "failed").map((record) => record.agentId),
+  );
+  const agentErrors = [...trace.workerIds, ...trace.reviewerIds].filter((id) => {
+    const agent = deps.agents.get(id);
+    return agent?.status === "error" && !failedAgents.has(id);
+  }).length;
+  return { failedTurns, agentErrors, fallbacks: deps.fallbacksOf?.(trace.requestId) ?? 0 };
 }
 
 /**
@@ -1162,6 +1190,7 @@ export function summarise(trace: ReconstructedTrace, deps: SummariseDeps): Trace
     guardrailReported: trace.guardrailReported,
     durationMs: totalMsOf(trace),
     usage: total.usage,
+    errors: errorsOf(trace, deps),
     messageCount: trace.records.reduce((count, record) => count + record.sent.length + record.received.length, 0),
     userMessageCount: userMessagesOf(trace).length,
     workerUsage: trace.workerIds.map((agentId) => ({
@@ -1222,6 +1251,20 @@ export function summariseSegments(trace: ReconstructedTrace, deps: SummariseDeps
     return {
       ...part,
       turn: { index: segment.index, total },
+      // `failedTurns` is this turn's; the other two are the request's, so they
+      // stay on the opening row — the same rule `requestsPerDay` follows, and
+      // what keeps a sum over the rows from counting one failure twice
+      // (delta 20260925 §3.4).
+      //
+      // They come from `whole`, never from `part`: `errorsOf` suppresses an
+      // agent error that already has a failed turn record, and a segment only
+      // sees its own records. A Worker that died on the follow-up turn would
+      // otherwise count as an agent error on row 1 AND a failed turn on row 2.
+      errors: {
+        failedTurns: part.errors?.failedTurns ?? 0,
+        agentErrors: segment.index === 1 ? (whole.errors?.agentErrors ?? 0) : 0,
+        fallbacks: segment.index === 1 ? (whole.errors?.fallbacks ?? 0) : 0,
+      },
       // Notices are the request's, and `summarise` derives one of them from the
       // records it was given — which here are a single turn's. Everything else
       // request-level (review calls, state, tier, linking, the agents) is

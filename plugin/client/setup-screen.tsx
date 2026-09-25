@@ -40,9 +40,11 @@ import { dashboardStyles, toneColor, type Badge } from "./dashboard-model";
 import { errorMessageOf } from "./launch-manager";
 import { MarkdownView } from "./markdown-view";
 import {
+  DEFAULT_SETUP_TAB,
   FALLBACK_POLICY_CHOICES,
   ROLES_APPLY_NOTICE,
   SETUP_ROLES,
+  SETUP_TABS,
   addFallback,
   applySavedRole,
   canAddFallback,
@@ -78,8 +80,9 @@ import {
   type RoleChoice,
   type RoleDraft,
   type SetupRole,
+  type SetupTab,
 } from "./setup-model";
-import { Chip, RoleMark, type Styles, type Theme } from "./ui";
+import { Chip, RoleMark, StatusTabs, type Styles, type Theme } from "./ui";
 import { PLUGIN_VERSION } from "../shared/version";
 
 export interface SetupScreenProps extends PluginSurfaceProps {
@@ -827,6 +830,9 @@ export function SetupScreen({ theme, layout, onOpenWorkspaces, status: statusStr
   const getStatus = useRpc(setupStatusRpc);
   const status = useQuery({ queryKey: ["paseo-bm", "setup", "status"], queryFn: () => getStatus({}) });
   const data = status.data;
+  // Lives as long as this screen: reopening the surface starts on the first tab,
+  // the same way the "Beads" tab's sub-tabs behave (delta 20260925 §3.3).
+  const [tab, setTab] = useState<SetupTab>(DEFAULT_SETUP_TAB);
   const headline = data === undefined ? null : setupHeadline(data);
 
   return (
@@ -859,53 +865,68 @@ export function SetupScreen({ theme, layout, onOpenWorkspaces, status: statusStr
             </Text>
           ))}
 
+      {/* The three configurations, one at a time. Everything above this row —
+          the headline and the tool warnings — stays out of the tabs, so a tab can
+          never hide a problem (delta 20260925 §3.3). */}
+      <StatusTabs tabs={SETUP_TABS} selected={tab} onSelect={(key) => setTab(key as SetupTab)} styles={styles} />
+
       {/* 1. Beads tools */}
-      <Text style={styles.sectionTitle}>Beads tools</Text>
-      {data?.tools.map((tool) => (
-        <ToolCard key={tool.id} tool={tool} styles={styles} theme={theme} onInstalled={() => void status.refetch()} />
-      ))}
-      {data === undefined ? null : (
-        <Text style={[styles.body, { fontSize: 11 }]}>{`Newest versions as of ${data.latestCheckedOn}; paseo-bm does not look them up online.`}</Text>
+      {tab !== "tools" ? null : (
+        <>
+          {data?.tools.map((tool) => (
+            <ToolCard key={tool.id} tool={tool} styles={styles} theme={theme} onInstalled={() => void status.refetch()} />
+          ))}
+          {data === undefined ? null : (
+            <Text style={[styles.body, { fontSize: 11 }]}>{`Newest versions as of ${data.latestCheckedOn}; paseo-bm does not look them up online.`}</Text>
+          )}
+        </>
       )}
 
       {/* 2. Agent skills */}
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-        <Text style={[styles.sectionTitle, { flex: 1 }]}>Agent skills</Text>
-        <Pressable accessibilityRole="button" disabled={status.isFetching} onPress={() => void status.refetch()} style={styles.secondaryButton}>
-          <Text style={styles.secondaryButtonText}>{status.isFetching ? "Testing…" : "Test"}</Text>
-        </Pressable>
-      </View>
-      {data === undefined ? null : (
-        <View style={[styles.card, { gap: 6 }]}>
-          <Text style={styles.body}>{`Checked ${new Date(data.skills.checkedAt).toLocaleTimeString()} · ${skillDirsText(data.skills.dirs)}`}</Text>
-          {data.skills.skills.map((skill) => (
-            <View key={skill.name} style={{ gap: 2 }}>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                <Text style={[styles.mono, { flex: 1 }]}>{`${skill.name}${skill.required ? "" : " (optional)"}`}</Text>
-                {skillChips(skill).map((badge) => (
-                  <Chip key={badge.text} badge={badge} styles={styles} theme={theme} />
-                ))}
-              </View>
-              {skill.problem === null ? null : (
-                <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{skill.problem}</Text>
-              )}
+      {tab !== "skills" ? null : (
+        <>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <Text style={[styles.sectionTitle, { flex: 1 }]}>Agent skills</Text>
+            <Pressable accessibilityRole="button" disabled={status.isFetching} onPress={() => void status.refetch()} style={styles.secondaryButton}>
+              <Text style={styles.secondaryButtonText}>{status.isFetching ? "Testing…" : "Test"}</Text>
+            </Pressable>
+          </View>
+          {data === undefined ? null : (
+            <View style={[styles.card, { gap: 6 }]}>
+              <Text style={styles.body}>{`Checked ${new Date(data.skills.checkedAt).toLocaleTimeString()} · ${skillDirsText(data.skills.dirs)}`}</Text>
+              {data.skills.skills.map((skill) => (
+                <View key={skill.name} style={{ gap: 2 }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                    <Text style={[styles.mono, { flex: 1 }]}>{`${skill.name}${skill.required ? "" : " (optional)"}`}</Text>
+                    {skillChips(skill).map((badge) => (
+                      <Chip key={badge.text} badge={badge} styles={styles} theme={theme} />
+                    ))}
+                  </View>
+                  {skill.problem === null ? null : (
+                    <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{skill.problem}</Text>
+                  )}
+                </View>
+              ))}
+              <CommandLine label="Install the required skills for Claude Code and Codex (run it yourself, or use `npx paseo-bm install --apply --install-skills`)" command={data.skills.installCommand} styles={styles} theme={theme} />
             </View>
-          ))}
-          <CommandLine label="Install the required skills for Claude Code and Codex (run it yourself, or use `npx paseo-bm install --apply --install-skills`)" command={data.skills.installCommand} styles={styles} theme={theme} />
-        </View>
+          )}
+        </>
       )}
 
-      {/* 3. Roles & models (delta 20260921 §4.3.1) */}
-      <RolesSection styles={styles} theme={theme} />
-
-      {/* 4. Additional instructions per role */}
-      <Text style={styles.sectionTitle}>Additional instructions</Text>
-      <Text style={styles.body}>
-        Added after each role&apos;s built-in instructions, for agents created from now on. Running agents keep what they started with.
-      </Text>
-      {SETUP_ROLES.map((entry) => (
-        <RoleCard key={entry.role} {...entry} styles={styles} theme={theme} compact={layout.compact} />
-      ))}
+      {/* 3. Roles & models (delta 20260921 §4.3.1) and 4. additional
+          instructions: both are about the agents, so they share one tab. */}
+      {tab !== "agents" ? null : (
+        <>
+          <RolesSection styles={styles} theme={theme} />
+          <Text style={styles.sectionTitle}>Additional instructions</Text>
+          <Text style={styles.body}>
+            Added after each role&apos;s built-in instructions, for agents created from now on. Running agents keep what they started with.
+          </Text>
+          {SETUP_ROLES.map((entry) => (
+            <RoleCard key={entry.role} {...entry} styles={styles} theme={theme} compact={layout.compact} />
+          ))}
+        </>
+      )}
 
       <Text style={[styles.body, { fontSize: 11 }]}>{`paseo-bm ${PLUGIN_VERSION}`}</Text>
     </ScrollView>

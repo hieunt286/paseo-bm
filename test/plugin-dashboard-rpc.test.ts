@@ -6,6 +6,8 @@ import {
   emptyBeadStats,
   handleBeadsStats,
   handleTracesDelete,
+  fallbackCountsOf,
+  incidentsIn,
   readTraceContext,
   requireLocation,
   workspaceDirectory,
@@ -284,5 +286,76 @@ describe("review calls of a Reviewer that replaced a stopped one (delta 20260921
     expect(await reviewCalls()).toBe(1);
     writeFileSync(join(home, "role-fallback-state.json"), "{ not json");
     expect(await reviewCalls()).toBe(2);
+  });
+});
+
+/**
+ * Provider-plan incidents as errors of a request (delta 20260925 §3.4).
+ *
+ * An incident is a turn that died on the provider's plan, so it belongs in the
+ * error count — but only when the turn itself still reported `completed`. An
+ * incident with `signal: "failed"` came from a turn whose record says `failed`,
+ * and `errorsOf` already counts that one.
+ */
+describe("fallback incidents that count as errors", () => {
+  const base: FallbackIncident = {
+    id: "fb-00000000000c",
+    role: "worker",
+    workspaceId: WS,
+    requestId: "req-A",
+    agentId: "agent-worker",
+    agentProvider: "bm-worker/claude-opus-5",
+    agentModel: "claude-opus-5",
+    parentId: "agent-manager",
+    managerId: "agent-manager",
+    class: "L1",
+    signal: "completed",
+    message: "You've hit your usage limit.",
+    perModelWindow: false,
+    resetsAt: null,
+    candidate: null,
+    status: "pending",
+    detectedAt: "2026-09-25T10:15:00.000Z",
+    decidedAt: null,
+    waitUntil: null,
+    replacementId: null,
+    error: null,
+  };
+  const of = (...overrides: Array<Partial<FallbackIncident>>) =>
+    fallbackCountsOf(
+      overrides.map((override, index) => ({ ...base, id: `fb-00000000${String(index).padStart(4, "0")}`, ...override })),
+      WS,
+    );
+
+  it("counts one per request, whatever became of the incident", () => {
+    expect([...of({}, { requestId: "req-B" }, { requestId: "req-B", status: "switched" }, { status: "dismissed" })]).toEqual([
+      ["req-A", 2],
+      ["req-B", 2],
+    ]);
+  });
+
+  it("leaves out a turn that already failed, another workspace, and a Manager's own incident", () => {
+    expect([...of({ signal: "failed" })]).toEqual([]);
+    expect([...of({ workspaceId: "wks_other" })]).toEqual([]);
+    expect([...of({ requestId: null, role: "manager" })]).toEqual([]);
+  });
+
+  it("reads the incidents file once and survives it being missing or broken", async () => {
+    expect(incidentsIn(null)).toEqual([]);
+    expect(incidentsIn(home)).toEqual([]);
+    writeFileSync(join(home, "role-fallback-state.json"), JSON.stringify({ version: 1, incidents: [base] }));
+    expect(incidentsIn(home).map((entry) => entry.id)).toEqual([base.id]);
+    writeFileSync(join(home, "role-fallback-state.json"), "{ not json");
+    expect(incidentsIn(home)).toEqual([]);
+  });
+
+  it("hands the count to the rows of the request it belongs to", async () => {
+    const location = { tracesDir: join(home, "traces") };
+    await appendRecord(location, record({ requestId: "req-A", agentId: "agent-manager", role: "manager" }));
+    clearTraceStoreCache();
+    writeFileSync(join(home, "role-fallback-state.json"), JSON.stringify({ version: 1, incidents: [base] }));
+    const context = await readTraceContext({ workspaceId: WS }, fakePaseo());
+    expect(context.fallbackCounts.get("req-A")).toBe(1);
+    expect(context.fallbackCounts.get("req-B")).toBeUndefined();
   });
 });

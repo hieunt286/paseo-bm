@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   FALLBACK_POLICY_CHOICES,
   ROLES_APPLY_NOTICE,
   ROLES_CONFLICT_MESSAGE,
+  DEFAULT_SETUP_TAB,
   SETUP_ROLES,
+  SETUP_TABS,
   addFallback,
   applySavedRole,
   canAddFallback,
@@ -514,5 +518,45 @@ describe("Roles & models", () => {
         "The configuration changed elsewhere; reopen Roles & models.",
       );
     });
+  });
+});
+
+describe("the three tabs of the Setup screen (delta 20260925 §3.3)", () => {
+  const source = readFileSync(fileURLToPath(new URL("../plugin/client/setup-screen.tsx", import.meta.url)), "utf8");
+
+  it("names the three configurations the owner asked for, in that order, and opens on the first", () => {
+    expect(SETUP_TABS.map((tab) => [tab.key, tab.label])).toEqual([
+      ["tools", "Beads tools"],
+      ["skills", "Agent skills"],
+      ["agents", "Agents"],
+    ]);
+    // Every tab says what it holds, for the screen reader label.
+    expect(SETUP_TABS.every((tab) => tab.hint.length > 0)).toBe(true);
+    expect(DEFAULT_SETUP_TAB).toBe("tools");
+    expect(SETUP_TABS.some((tab) => tab.key === DEFAULT_SETUP_TAB)).toBe(true);
+  });
+
+  it("draws one section at a time, through the same tab row the Beads board uses", () => {
+    expect(source).toMatch(/<StatusTabs tabs=\{SETUP_TABS\} selected=\{tab\}/);
+    for (const key of ["tools", "skills", "agents"]) {
+      expect(source).toContain(`{tab !== "${key}" ? null : (`);
+    }
+    // The two role sections share the Agents tab: Roles & models and the
+    // additional instructions are one configuration.
+    const agents = source.slice(source.indexOf('{tab !== "agents" ? null : ('));
+    expect(agents).toMatch(/<RolesSection/);
+    expect(agents).toMatch(/Additional instructions/);
+    expect(agents).toMatch(/<RoleCard/);
+  });
+
+  it("keeps the headline and the tool warnings above the tabs, so no tab can hide a problem", () => {
+    const tabs = source.indexOf("<StatusTabs tabs={SETUP_TABS}");
+    expect(tabs).toBeGreaterThan(0);
+    const above = source.slice(0, tabs);
+    expect(above).toMatch(/setupHeadline\(data\)/);
+    expect(above).toMatch(/paseoToolsWarnings\(data\)/);
+    expect(above).toMatch(/\{statusStrip\}/);
+    // The version line stays at the end of the screen, outside the tabs.
+    expect(source.slice(source.lastIndexOf("</ScrollView>") - 300)).toMatch(/paseo-bm \$\{PLUGIN_VERSION\}/);
   });
 });

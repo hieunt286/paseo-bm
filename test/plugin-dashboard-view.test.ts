@@ -14,7 +14,6 @@ import {
   workspaceStats,
   selectDashboardFromCommandCenter,
 } from "../plugin/client/dashboard-view";
-import { STATUS_TONE } from "../plugin/client/beads-model";
 import { createSlot } from "../plugin/client/slot";
 
 /**
@@ -129,14 +128,14 @@ describe("workspace row figures", () => {
     });
     expect(stats.map((stat) => [stat.key, stat.icon, stat.value, stat.tone])).toEqual([
       ["total", "Layers", "141", "muted"],
-      ["inProgress", "CircleDot", "2", "warning"],
+      ["inProgress", "CircleDot", "2", "plain"],
       ["blocked", "Ban", "0", "muted"],
-      ["running", "Hammer", "1", "success"],
+      ["running", "Hammer", "1", "plain"],
     ]);
     expect(stats.map((stat) => stat.label).join(", ")).toBe("141 beads in total, 2 in progress, 0 blocked, 1 Worker(s) running");
   });
 
-  it("colours in progress and blocked like the bead statuses (delta 20260918e, REQ-060 n)", () => {
+  it("reads a figure above zero at full contrast and never in a hue (delta 20260925 §3.2, errata REQ-060 n)", () => {
     const tones = Object.fromEntries(
       workspaceStats({
         workspaceId: "wks_1",
@@ -145,8 +144,9 @@ describe("workspace row figures", () => {
         runningAgents: { manager: 0, worker: 0, reviewer: 0 },
       }).map((stat) => [stat.key, stat.tone]),
     );
-    expect(tones).toEqual({ total: "muted", inProgress: "warning", blocked: "danger", running: "muted" });
-    expect([tones.inProgress, tones.blocked]).toEqual([STATUS_TONE.in_progress, STATUS_TONE.blocked]);
+    expect(tones).toEqual({ total: "muted", inProgress: "plain", blocked: "plain", running: "muted" });
+    // No orange, red or green on the row a user scans (owner, 2026-09-25).
+    expect(Object.values(tones).every((tone) => tone === "plain" || tone === "muted")).toBe(true);
   });
 
   it("says once that a workspace has no beads, and shows nothing before the figures load", () => {

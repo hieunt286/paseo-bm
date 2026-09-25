@@ -25,25 +25,38 @@ import {
   type SortKey,
   actionSpec,
   actionsFor,
+  beadActionResults,
+  beadResultKey,
   beadsOverview,
   closedBeadsVisibility,
   doneText,
-  beadListItems,
-  groupBeads,
+  kanbanColumns,
+  kanbanLayout,
   facetsOf,
   filterBeads,
   priorityLabel,
   statusBadge,
   toggle,
+  visibleKanbanBucket,
   workSummary,
   type BeadFilter,
+  type StatusBucket,
 } from "./beads-model";
 import { dashboardStyles, toneColor, type Badge } from "./dashboard-model";
 import { errorMessageOf } from "./launch-manager";
-import { BarChart, BeadRowCard, Chip, RoleMark, StatCards, WorkspaceScreenHeader, type Styles, type Theme, type WorkspaceScreenProps } from "./ui";
-
-
-const LIST_LIMIT = 200;
+import {
+  BarChart,
+  BeadRowCard,
+  Chip,
+  KanbanBoard,
+  RoleMark,
+  StatCards,
+  StatusTabs,
+  WorkspaceScreenHeader,
+  type Styles,
+  type Theme,
+  type WorkspaceScreenProps,
+} from "./ui";
 
 const facetText = (value: string) => value.replace("in_progress", "in progress");
 
@@ -114,7 +127,16 @@ export function BeadDetailPanel({
   const runAction = useRpc(beadsActionRpc);
   const [pending, setPending] = useState<BeadAction | null>(null);
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ text: string; managerId: string | null; tone: Badge["tone"] } | null>(null);
+  // What the last action reported lives outside this panel: the board draws each
+  // status as its own column, so a bead that changes status gets a new row and
+  // this panel is built again — and the line telling the user the request was
+  // sent must not vanish with it (delta 20260925 §3.1, keeping F9 of 20260918f).
+  const resultKey = beadResultKey(workspaceId, bead.id);
+  const result = useSyncExternalStore(beadActionResults.subscribe, () => beadActionResults.get(resultKey) ?? null);
+  const setResult = (next: { text: string; managerId: string | null; tone: Badge["tone"] } | null) => {
+    if (next === null) beadActionResults.clear(resultKey);
+    else beadActionResults.set(resultKey, next);
+  };
   const detail = useQuery({
     queryKey: ["paseo-bm", "bead", workspaceId, bead.id],
     queryFn: () => getBead({ workspaceId, id: bead.id }),
@@ -270,6 +292,10 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
   const [descending, setDescending] = useState(true);
   const [showLabels, setShowLabels] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(new Set());
+  // The board's own two pieces of state: how wide the list area measured, and
+  // which column a narrow screen is showing.
+  const [boardWidth, setBoardWidth] = useState<number | null>(null);
+  const [openBucket, setOpenBucket] = useState<StatusBucket | null>(null);
   const beads = useQuery({
     queryKey: ["paseo-bm", "beads-list", workspaceId],
     queryFn: () => listBeads({ workspaceId }),
@@ -280,9 +306,12 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
   const shown = useMemo(() => sortBeads(filterBeads(rows, filter), sortKey, descending), [rows, filter, sortKey, descending]);
   // Closed beads are hidden until asked for, for the rest of the app session (Q9).
   const showClosed = useSyncExternalStore(closedBeadsVisibility.subscribe, closedBeadsVisibility.get, closedBeadsVisibility.get);
-  const grouped = useMemo(() => groupBeads(shown, { showClosed, limit: LIST_LIMIT }), [shown, showClosed]);
+  const board = useMemo(() => kanbanColumns(shown, { showClosed }), [shown, showClosed]);
   const active = activeFilters(filter);
   const overview = beads.data === undefined ? null : beadsOverview(rows, beads.data.stats, new Date());
+  const shape = kanbanLayout(boardWidth, layout.compact, board.columns.length);
+  const bucket = visibleKanbanBucket(board.columns, openBucket);
+  const shownColumns = shape.mode === "tabs" ? board.columns.filter((column) => column.bucket === bucket) : board.columns;
   // Done / total at a glance, counted like the Progress card (Q11).
   const done = overview === null ? null : doneText(overview.progress);
   const now = new Date();
@@ -363,7 +392,8 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
               />
             ))}
             <Pressable accessibilityRole="button" onPress={() => setFilter(EMPTY_FILTER)}>
-              <Text style={[styles.badge, { color: toneColor(theme, "danger"), paddingVertical: 2 }]}>Clear all</Text>
+              {/* Removing filters loses nothing, so it is not painted like a danger. */}
+              <Text style={[styles.badge, { color: toneColor(theme, "plain"), paddingVertical: 2 }]}>Clear all</Text>
             </Pressable>
           </View>
         ) : null}
@@ -439,42 +469,46 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
         })}
       </View>
 
-      {/* List: status groups, closed beads behind the eye (delta 20260918e §4.4) */}
+      {/* Board: one column per status, closed beads behind the eye
+          (delta 20260925 §3.1; delta 20260918e §4.4 for the eye) */}
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-        <Text style={[styles.sectionTitle, { flex: 1 }]}>{`${grouped.visible} of ${rows.length} beads`}</Text>
+        <Text style={[styles.sectionTitle, { flex: 1 }]}>{`${board.visible} of ${rows.length} beads`}</Text>
         <Pressable
           accessibilityRole="button"
           accessibilityState={{ selected: showClosed }}
-          accessibilityLabel={`${showClosed ? "Hide" : "Show"} closed beads (${grouped.closed})`}
+          accessibilityLabel={`${showClosed ? "Hide" : "Show"} closed beads (${board.closed})`}
           onPress={() => closedBeadsVisibility.set(!showClosed)}
           style={[styles.secondaryButton, { flexDirection: "row", alignItems: "center", gap: 6 }]}
         >
           <Icon name={showClosed ? "Eye" : "EyeOff"} size={16} color={theme.colors.foreground} />
-          <Text style={styles.secondaryButtonText}>{`Closed ${grouped.closed}`}</Text>
+          <Text style={styles.secondaryButtonText}>{`Closed ${board.closed}`}</Text>
         </Pressable>
       </View>
       {beads.data !== undefined && rows.length === 0 ? (
         <Text style={styles.body}>This workspace has no beads yet.</Text>
       ) : null}
-      {grouped.visible === 0 && grouped.closed > 0 ? (
-        <Text style={styles.body}>{`All ${grouped.closed} matching beads are closed. Show them with the eye button.`}</Text>
+      {board.visible === 0 && board.closed > 0 ? (
+        <Text style={styles.body}>{`All ${board.closed} matching beads are closed. Show them with the eye button.`}</Text>
       ) : null}
-      {/* One flat run of siblings keyed by bead id: a bead that changes group
-          keeps its row and its open detail (delta 20260918f F9). */}
-      {beadListItems(grouped).map((item) =>
-        item.kind === "group" ? (
-          <View key={item.key} style={{ gap: layout.compact ? 6 : 8 }}>
-            {/* A line of its own between groups, then the group's name and size. */}
-            <View style={{ height: 1, backgroundColor: theme.colors.border, marginTop: 4 }} />
-            <Text style={[styles.sectionTitle, { color: toneColor(theme, item.tone) }]}>{`${item.label} · ${item.total}`}</Text>
-          </View>
-        ) : (
-          renderRow(item.bead)
-        ),
-      )}
-      {grouped.truncated > 0 ? (
-        <Text style={styles.body}>{`Showing the first ${LIST_LIMIT}. Narrow the filters to see the rest.`}</Text>
-      ) : null}
+      {/* The width decides the shape: columns side by side when there is room,
+          one column behind a row of status tabs when there is not. */}
+      <View onLayout={(event) => setBoardWidth(event.nativeEvent.layout.width)} style={{ gap: layout.compact ? 6 : 8 }}>
+        {shape.mode === "tabs" ? (
+          <StatusTabs
+            tabs={board.columns.map((column) => ({ key: column.bucket, label: column.label, count: column.total }))}
+            selected={bucket}
+            onSelect={(key) => setOpenBucket(key as StatusBucket)}
+            styles={styles}
+          />
+        ) : null}
+        <KanbanBoard
+          columns={shownColumns}
+          perRow={shape.perRow}
+          gap={layout.compact ? 6 : 8}
+          renderBead={renderRow}
+          styles={styles}
+        />
+      </View>
     </ScrollView>
   );
 

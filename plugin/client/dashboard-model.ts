@@ -105,7 +105,12 @@ export function formatUsage(usage: Usage): string {
 // Labels.
 // ---------------------------------------------------------------------------
 
-export type Tone = "muted" | "info" | "warning" | "danger" | "success";
+/**
+ * `plain` is the text colour itself: it says "read me" without a hue, and it is
+ * what everywhere a bead shows uses since delta 20260925 §3.2 — four hues on a
+ * list of beads were tiring to read.
+ */
+export type Tone = "muted" | "plain" | "info" | "warning" | "danger" | "success";
 
 export interface Badge {
   text: string;
@@ -434,7 +439,64 @@ export interface OverviewCard {
   hint: string;
 }
 
-/** Six numbers that answer "what is going on here" at a glance. */
+/**
+ * How many times the requests on screen went wrong, whatever the reason
+ * (REQ-069 g, delta 20260925 §3.5).
+ *
+ * `requests` counts requests by `traceId`, not rows: since delta 20260917e a
+ * request that was followed up has one row per question, and "3 requests failed"
+ * must not mean "3 questions of the same request". The three kinds are disjoint
+ * by construction on the server (§3.4), so `total` is a count of failures.
+ */
+export interface ErrorTally {
+  total: number;
+  requests: number;
+  failedTurns: number;
+  agentErrors: number;
+  fallbacks: number;
+}
+
+export function errorTally(traces: readonly TraceSummary[]): ErrorTally {
+  const failing = new Set<string>();
+  const tally: ErrorTally = { total: 0, requests: 0, failedTurns: 0, agentErrors: 0, fallbacks: 0 };
+  for (const trace of traces) {
+    // A row from a server built before the field says nothing, which is not the
+    // same as saying zero — but there is nothing else to count, so it adds none.
+    const errors = trace.errors;
+    if (errors === undefined) continue;
+    const sum = errors.failedTurns + errors.agentErrors + errors.fallbacks;
+    if (sum === 0) continue;
+    tally.failedTurns += errors.failedTurns;
+    tally.agentErrors += errors.agentErrors;
+    tally.fallbacks += errors.fallbacks;
+    tally.total += sum;
+    failing.add(trace.traceId);
+  }
+  return { ...tally, requests: failing.size };
+}
+
+/** English plural without a library: `1 request`, `2 requests`. */
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+/**
+ * The "Errors" card. The hint says "request(s) with an error" on purpose: the
+ * "Requests" card beside it counts rows, and two numbers in one row of cards
+ * must not mean two different things by the same word.
+ */
+export function errorCard(tally: ErrorTally): OverviewCard {
+  if (tally.total === 0) return { label: "Errors", value: "0", hint: "no error recorded" };
+  const parts = [
+    `${plural(tally.requests, "request")} with an error`,
+    ...(tally.failedTurns === 0 ? [] : [plural(tally.failedTurns, "failed turn")]),
+    ...(tally.agentErrors === 0 ? [] : [plural(tally.agentErrors, "agent error")]),
+    ...(tally.fallbacks === 0 ? [] : [plural(tally.fallbacks, "provider fallback")]),
+  ];
+  return { label: "Errors", value: String(tally.total), hint: parts.join(" · ") };
+}
+
+/** Seven numbers that answer "what is going on here" at a glance. */
 export function overviewCards(traces: readonly TraceSummary[], stats: BeadStats | null): OverviewCard[] {
   const count = (state: TraceSummary["state"]) => traces.filter((trace) => trace.state === state).length;
   const workers = new Set(traces.flatMap((trace) => trace.workerIds)).size;
@@ -463,6 +525,8 @@ export function overviewCards(traces: readonly TraceSummary[], stats: BeadStats 
       value: String(traces.length),
       hint: `${count("running")} running · ${count("waiting_user")} waiting · ${count("completed")} done`,
     },
+    // Right after the request count, because it is read together with it.
+    errorCard(errorTally(traces)),
     beads,
     { label: "Agents", value: String(workers + reviewers), hint: `${workers} workers · ${reviewers} reviewers` },
     {
@@ -858,6 +922,8 @@ export function toneColor(theme: PluginTheme, tone: Tone): string {
   switch (tone) {
     case "muted":
       return theme.colors.foregroundMuted;
+    case "plain":
+      return theme.colors.foreground;
     case "info":
       return theme.colors.accent;
     case "warning":
