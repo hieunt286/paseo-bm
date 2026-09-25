@@ -2,17 +2,17 @@
 
 **Bản ổn định đầu tiên**, và bản đầu tiên chạy được với **Paseo 0.9.2**.
 
-Từ bản này, dist-tag `latest` do chính `release.yml` đặt bằng OIDC. Trước đây mọi bản đều là prerelease vào `next`, còn `latest` do owner dời tay bằng `npm dist-tag add` — một bước cần OTP, và nó vừa biến mất. `latest` trước bản này trỏ `0.3.0-alpha.7`.
+Từ bản này, dist-tag `latest` do chính `release.yml` đặt bằng OIDC. Trước đây mọi bản đều là prerelease vào `next`, còn `latest` do owner dời tay bằng `npm dist-tag add` — một bước cần OTP, và nó vừa biến mất. `latest` trước bản này trỏ `0.3.0-alpha.7` (đo bằng `npm view paseo-bm dist-tags` ngay trước khi phát hành).
 
 **Cài bản này:** `npx paseo-bm`, hoặc ghim cứng `npx paseo-bm@0.3.0`. Cách cài không đổi. Như mọi bản, hai gói `paseo-bm` và `paseo-bm-plugin` cùng phiên bản.
 
 ## Trình cài đặt chạy được với Paseo 0.9.2
 
-Paseo 0.9.2 bỏ trường `cliVersion` khỏi `paseo daemon status --json`. Với `0.3.0-alpha.7` và mọi bản trước, điều đó làm **mọi** lệnh của trình cài đặt — `install`, `doctor`, `uninstall` — dừng ở `E_PASEO_OUTPUT_UNEXPECTED` (exit 3) ngay bước kiểm tra phiên bản, trước khi ghi bất cứ thứ gì.
+Paseo 0.9.2 bỏ trường `cliVersion` khỏi `paseo daemon status --json`, và với `0.3.0-alpha.7` cùng mọi bản trước, bước kiểm tra phiên bản vì thế thất bại. Mỗi lệnh chịu hậu quả khác nhau: **`install` dừng ngay ở exit 3** (`E_PASEO_OUTPUT_UNEXPECTED`) và **không ghi gì**; **`doctor` báo phép kiểm daemon là lỗi rồi chạy tiếp, kết thúc ở exit 1**; **`uninstall` chạy tiếp mà không có câu trả lời nào của Paseo**, nên nó vẫn gỡ những gì sổ cài đặt ghi và chỉ để lại phần đăng ký plugin cùng sổ ấy. Nói ngắn: trên Paseo 0.9.2 bạn không cài được, và hai lệnh kia chạy trong mù.
 
 - Thiếu `cliVersion` thì trình cài đặt đọc `paseo --version` và lấy dòng đầu làm phiên bản CLI; luật của [ADR-004](https://github.com/hieunt286/paseo-bm/blob/v0.3.0/docs/adr/ADR-004-paseo-config-mutation.md) không đổi (CLI phải khớp daemon, `>= 0.8.0`).
 - Có `cliVersion` — tức Paseo 0.8 — thì hành vi **không đổi** và `paseo --version` không được gọi.
-- `paseo --version` rỗng hoặc lỗi thì vẫn dừng bằng `E_PASEO_OUTPUT_UNEXPECTED` và không ghi gì.
+- `paseo --version` **rỗng** thì vẫn dừng bằng `E_PASEO_OUTPUT_UNEXPECTED` (nêu tên `cliVersion`); `paseo --version` **lỗi** (mã thoát khác 0) thì lỗi của chính CLI nổi lên dưới mã `E_DAEMON_UNREACHABLE`. Cả hai đường đều là exit 3 và **không ghi gì**.
 
 Nếu bạn đang chạy Paseo 0.9.x thì đây là lý do để nâng lên bản này.
 
@@ -43,7 +43,7 @@ Nếu bạn đang chạy Paseo 0.9.x thì đây là lý do để nâng lên bả
 
 Đường lùi của dự án là **phát hành bản vá `0.3.1`**, không `npm unpublish`.
 
-Lùi tại máy bằng `npx paseo-bm@0.3.0-alpha.7` chỉ dùng được **nếu bạn đang ở Paseo 0.8**: trên Paseo 0.9.2 bản đó không cài được, nó dừng ở `E_PASEO_OUTPUT_UNEXPECTED` (exit 3) như mục đầu đã nói. Ngoài bản vá trình cài đặt ấy, `0.3.0-alpha.7` chỉ thiếu đợt giao diện ở trên và không thiếu tính năng cốt lõi nào (tool dựng khối `BM-*`, sổ hỏi–đáp, dự phòng nhà cung cấp đều đã có).
+Lùi tại máy bằng `npx paseo-bm@0.3.0-alpha.7` chỉ dùng được **nếu bạn đang ở Paseo 0.8**: trên Paseo 0.9.2 bản đó không cài được — `install` dừng ở exit 3, như mục đầu đã nói. Ngoài bản vá trình cài đặt ấy, `0.3.0-alpha.7` chỉ thiếu đợt giao diện ở trên và không thiếu tính năng cốt lõi nào (tool dựng khối `BM-*`, sổ hỏi–đáp, dự phòng nhà cung cấp đều đã có).
 
 ## Kiểm chứng
 

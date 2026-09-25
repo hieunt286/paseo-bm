@@ -17,7 +17,7 @@
 
 Hai thứ, cộng một thay đổi đường phát hành:
 
-1. **Trình cài đặt chạy được với Paseo 0.9.2** (bead `bm-qh4c`). 0.9.2 bỏ `cliVersion` khỏi `daemon status --json`, nên mọi lệnh của trình cài đặt dừng ở `E_PASEO_OUTPUT_UNEXPECTED` (exit 3). Đây là phần quan trọng nhất của bản này và **đã bị bỏ sót** ở bản nháp ghi chú phát hành đầu tiên — review lô `b1` tìm ra.
+1. **Trình cài đặt chạy được với Paseo 0.9.2** (bead `bm-qh4c`). 0.9.2 bỏ `cliVersion` khỏi `daemon status --json`, nên bước kiểm tra phiên bản thất bại: `install` dừng ở exit 3 (`E_PASEO_OUTPUT_UNEXPECTED`, không ghi gì), `doctor` báo phép kiểm daemon là lỗi rồi kết thúc ở exit 1, `uninstall` chạy tiếp mà không có câu trả lời nào của Paseo. Đây là phần quan trọng nhất của bản này và **đã bị bỏ sót** ở bản nháp ghi chú phát hành đầu tiên — review lô `b1` tìm ra; câu "mọi lệnh dừng ở exit 3" là bản sửa quá tay của chính lần đó và review lô `b2` bắt lại.
 2. **REQ-069 giao diện**: kanban bốn cột có responsive, trạng thái nói bằng chữ và độ tương phản thay cho màu hue, Setup chia ba tab, thẻ "Errors" ở màn Metric.
 3. **`release.yml` nhận bản ổn định** và đặt dist-tag theo loại phiên bản (`prerelease ? "next" : "latest"`), nên bản ổn định không còn cần `npm dist-tag add` cần OTP.
 
@@ -37,6 +37,8 @@ Hai thứ, cộng một thay đổi đường phát hành:
 | Thời điểm | `placeholder` | `latest` | `next` |
 |---|---|---|---|
 | Trước lần phát hành | `0.0.0-placeholder.0` | `0.3.0-alpha.7` | `0.3.0-alpha.7` |
+
+Hàng "trước" đo bằng `npm view paseo-bm dist-tags --json` và `npm view paseo-bm-plugin dist-tags --json` ngay đầu phase, trước khi có gì được commit. Lưu ý cho người đọc sau: [hồ sơ listing 2026-09-23](./paseo-bm-cafe-listing-20260923.md) còn ghi `latest` ở `0.3.0-alpha.6` — owner đã dời tay sang `0.3.0-alpha.7` sau đó, và tài liệu ấy không được cập nhật.
 | Sau lần phát hành | `0.0.0-placeholder.0` | **`0.3.0`** (do `release.yml` đặt, không cần OTP) | `0.3.0-alpha.7` |
 
 Đúng cho **cả hai** gói. `next` giữ nguyên có chủ ý: đẩy một bản ổn định vào `next` cần `npm dist-tag add`, một lệnh ghi khác `publish` mà cấu hình trusted publisher (`publish, stage publish`) chưa chứng minh là bao được — không đưa một lệnh ghi chưa kiểm chứng vào giữa một lượt phát hành không đảo ngược được. Muốn `next` trỏ `0.3.0` thì owner chạy tay, cần OTP.
@@ -52,6 +54,9 @@ Phát hành bản vá `0.3.1`; không `npm unpublish`. Hạ bản về `0.3.0-al
 3. **`git commit <path>` commit cả file, nên một file mang nhiều đợt việc thì không tách được.** `AGENTS.md` mang cả dòng Verified facts của `bm-qh4c`, cả bản viết lại quy trình chưa có bead. Hệ quả: phải **commit việc đang treo trước**, rồi mới viết errata vào những file đó — review lô `b1` bắt đúng chỗ này và thứ tự bead đã đảo lại (`.7` trước `.1`).
 4. **Cây làm việc có ba đợt việc, không phải hai.** Hai đợt có bead đã đóng (`bm-qh4c`, `bm-ui-kanban-yen-tinh-4vm6`), một đợt **không có bead nào**. Đếm bead trong `.beads/issues.jsonl` chưa commit là cách nhanh nhất để biết đợt nào thuộc về ai.
 5. **`.beads/issues.jsonl` không tách được theo đường dẫn.** Nó mang trạng thái đóng của hai đợt kia **và** bead của phase này, nên nó đi cùng commit đường phát hành và commit ấy nói rõ vì sao.
+
+6. **Bộ errata bỏ sót tài liệu có thẩm quyền nhất.** Bead `.1` sửa bảy chỗ trong năm file và đóng với câu "không còn chỗ nào nói workflow chỉ đặt `next`" — nhưng `docs/design/paseo-bm.md` §3.2, tức Technical Design đang sống, vẫn tả đường phát hành cũ. Review lô `b2` tìm ra bằng cách `grep` cả repo thay vì tin danh sách. Chỗ này **không** sửa trong phase: phiên `paseo-bm-2b` đang viết lại đúng file đó và bản trong cây làm việc của họ đã gộp delta 20260925b vào §3.2 (dist-tag theo loại phiên bản, luật không có nháy đơn, bản ổn định không đẩy vào `next`) kèm dòng Revision History — sửa chồng lên sẽ commit phần việc chưa xong của họ. Câu AC5 của bead `.1` vì vậy là **nói quá**, và đây là bản ghi của việc đó.
+7. **Ba câu sai trong ghi chú phát hành đã publish.** Review lô `b2` bắt: "mọi lệnh dừng ở exit 3" (thật ra chỉ `install`; `doctor` exit 1, `uninstall` chạy tiếp), và "`paseo --version` rỗng hoặc lỗi đều là `E_PASEO_OUTPUT_UNEXPECTED`" (lỗi thì là `E_DAEMON_UNREACHABLE`, theo `FAILURE_CODES` trong `src/paseo/adapter.ts`). Đã sửa trong file **và** trong body của GitHub Release. Bài học: mỗi câu về hành vi trong ghi chú phát hành phải truy được về một dòng mã, không suy từ bead.
 
 ## Còn lại
 
