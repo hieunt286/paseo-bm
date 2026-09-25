@@ -1,7 +1,7 @@
 /**
  * Role configuration — ask for the three roles, validate what the user typed,
  * and turn the result into `roles[]` entries for the install record
- * (REQ-027(a)(d)(e), Design §4.2 · §7 · §9.1, ADR-006 decisions 1 and 2).
+ * (REQ-027(a)(d)(e), Design §4.2 · §4.5, ADR-006 decisions 1 and 2).
  *
  * Nothing here writes anything, and nothing here touches `config.json`:
  * registering the derived providers and the agent profiles is WP-107's job.
@@ -9,7 +9,7 @@
  *
  * ## The two validation tiers, and why there are two
  *
- * Design §7 asks for one thing that cannot be done in one place: `--role` must
+ * Design §4.2 asks for one thing that cannot be done in one place: `--role` must
  * be checked "at argument-parsing time, before preflight and before any write",
  * *and* the provider/model pair must be one that "really exists in the list
  * Paseo returns". The first half needs no daemon; the second half is a daemon
@@ -456,7 +456,7 @@ export interface RoleSelection {
   /**
    * The name shown for the agent — the `label` of the derived provider and the
    * `name` of the agent profile (WP-107). It is *not* part of `roles[]`:
-   * Design §3.2 gives that array no name field.
+   * Design §5.2 gives that array no name field.
    */
   readonly displayName: string;
   /** The user's own provider the derived provider will `extend`. Never a credential. */
@@ -483,7 +483,7 @@ export interface ConfigureRolesOptions {
   /**
    * The names the roles already carry in Paseo's `config.json` — the `name` of
    * each `bm-<role>` agent profile, or the derived provider's `label`. `roles[]`
-   * has no name field (Design §3.2), so this is the only place a name the user
+   * has no name field (Design §5.2), so this is the only place a name the user
    * chose survives between runs. Used when a recorded entry is reused and when
    * `--role` replaces a role's provider/model; without it either path would
    * reset the name to its default (bugs bm-lev, bm-6uy). Questions asked under

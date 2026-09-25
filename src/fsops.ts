@@ -1,5 +1,5 @@
 /**
- * The one way paseo-bm is allowed to write to disk (ADR-002, Design §8).
+ * The one way paseo-bm is allowed to write to disk (ADR-002, Design §9).
  *
  * Three properties carry the whole interruption-safety story, because ADR-002
  * deliberately has no transaction journal and no global rollback:
@@ -89,7 +89,7 @@ export interface BackupOptions {
   /**
    * Explicit relative destination inside `backupDir`, for sources that do not
    * live under `relativeTo` — Paseo's `config.json` is backed up as
-   * `paseo-config.json` (Design §3.1).
+   * `paseo-config.json` (Design §5.1).
    */
   as?: string;
 }
@@ -100,7 +100,7 @@ export interface FsOpsOptions {
   /**
    * The filesystem seam (`src/fs-guard.ts`). Defaults to the real filesystem;
    * tests inject a guarded one so an out-of-scope write fails the test instead
-   * of reaching the disk (Design §10, M-4).
+   * of reaching the disk (Design §11, M-4).
    */
   fs?: NodeFsApi;
 }
@@ -129,7 +129,7 @@ export function sha256(data: string | Uint8Array): string {
 
 /**
  * The `<timestamp>` segment of a backup directory, e.g. `20260915T101500Z`
- * (Design §3.1). Second resolution, UTC, safe as a directory name.
+ * (Design §5.1). Second resolution, UTC, safe as a directory name.
  */
 export function backupStamp(at: Date = new Date()): string {
   return `${at.toISOString().split(".")[0]!.replace(/[-:]/g, "")}Z`;

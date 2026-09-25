@@ -7,8 +7,8 @@
  *
  * Rules:
  *
- * - **Every regular file is payload**, `roles/*.md` included (Design §2.4,
- *   §3.2 `files[]`). There is no include/exclude list: the package's `files`
+ * - **Every regular file is payload**, `roles/*.md` included (Design §3.1,
+ *   §5.2 `files[]`). There is no include/exclude list: the package's `files`
  *   field already decides what ships, and a second filter here would be a
  *   second, silently diverging definition of "the payload".
  * - **Symlinks and special files are refused**, not followed. A link inside the

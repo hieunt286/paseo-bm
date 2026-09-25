@@ -1,5 +1,5 @@
 /**
- * The single adapter over the `paseo` CLI (ADR-004, Technical Design §6, §8).
+ * The single adapter over the `paseo` CLI (ADR-004, Technical Design §4.7).
  *
  * Everything paseo-bm's installer needs from Paseo goes through this module:
  * `daemon status`, `daemon reload`, `plugin install`, `plugin ls`,
@@ -15,7 +15,7 @@
  *    interpreter, so a plugin directory containing spaces, quotes or `;` is one
  *    argument and can never become a second command.
  * 2. Every call is bounded by {@link PASEO_CALL_TIMEOUT_MS} (15 seconds,
- *    Technical Design §8). When the deadline passes the child is terminated,
+ *    Technical Design §4.7). When the deadline passes the child is terminated,
  *    escalated to SIGKILL, and the call fails with a diagnostic code.
  * 3. `enabled` is NOT `status`. `enabled` is the plugin's own switch and is
  *    always true after a successful install; only `status` says whether the
@@ -28,7 +28,7 @@
 import { spawn } from "node:child_process";
 import type { ErrorCode } from "../errors.js";
 
-/** Per-call deadline for every `paseo` invocation, Technical Design §8. */
+/** Per-call deadline for every `paseo` invocation, Technical Design §4.7. */
 export const PASEO_CALL_TIMEOUT_MS = 15_000;
 
 /**

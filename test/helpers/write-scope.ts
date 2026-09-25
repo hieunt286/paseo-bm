@@ -1,5 +1,5 @@
 /**
- * Test harness for the write-scope invariant (Design §10, milestone M-4).
+ * Test harness for the write-scope invariant (Design §11, milestone M-4).
  *
  * `src/fs-guard.ts` owns the policy — what paseo-bm may write. This file is the
  * test side of it and adds the thing a policy alone cannot give: it catches

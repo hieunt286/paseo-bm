@@ -1,6 +1,6 @@
 /**
  * Secret masking — the last thing that touches text on its way out
- * (Technical Design §7, "Bí mật").
+ * (Technical Design §9, "Bí mật").
  *
  * The rule this module exists to enforce is *where* masking happens, not how
  * clever it is: a filter is applied once, at the final exit of each of the
@@ -11,11 +11,11 @@
  * renderers apply one *by default*, so forgetting to pass a redactor makes the
  * output safe rather than unsafe.
  *
- * What counts as a secret is a constant, from Design §7:
+ * What counts as a secret is a constant, from Design §9:
  *
  * - the *values* of {@link SECRET_ENV_VARS}, masked wherever they appear, and
  * - password-shaped argv tokens ({@link SECRET_ARGV_FLAGS}) together with the
- *   value that follows them, so an echoed command line (Design §7, trust
+ *   value that follows them, so an echoed command line (Design §9, trust
  *   boundary 2 prints the command verbatim before running it) cannot carry a
  *   credential that never passed through our environment.
  *
@@ -37,10 +37,10 @@
 /** What every masked value is replaced with. JSON-safe on purpose: no quotes, no backslashes. */
 export const REDACTED = "[redacted]";
 
-/** Environment variables whose *value* is masked wherever it appears (Design §7). */
+/** Environment variables whose *value* is masked wherever it appears (Design §9). */
 export const SECRET_ENV_VARS: readonly string[] = ["PASEO_PASSWORD", "PASEO_DAEMON_PASSWORD"];
 
-/** Argv flags whose following value is a credential (Design §7). */
+/** Argv flags whose following value is a credential (Design §9). */
 export const SECRET_ARGV_FLAGS: readonly string[] = ["--password", "--token", "--secret"];
 
 /** A final-pass filter over outgoing text. */
@@ -243,7 +243,7 @@ function detectIndent(text: string): number {
 /**
  * Mask an argv before it is printed or logged, keeping its shape.
  *
- * Design §7 requires the command paseo-bm is about to run to be shown verbatim.
+ * Design §9 requires the command paseo-bm is about to run to be shown verbatim.
  * "Verbatim" has to stop at the credential: the flag stays visible so the user
  * can see what is being passed, the value does not.
  */

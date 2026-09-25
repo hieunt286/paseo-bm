@@ -1,5 +1,5 @@
 /**
- * `roles.describe` on the daemon side (design §5, REQ-032d; errata bm-dnc).
+ * `roles.describe` on the daemon side (Technical Design §7.3, REQ-032d; errata bm-dnc).
  *
  * The answer comes from the configuration Paseo has in effect right now, read
  * through the plugin SDK's `paseo.config.get()` — not from `install.json`. The

@@ -1,6 +1,6 @@
 /**
- * The write scope guard (Design §7 "Phạm vi ghi của trình cài đặt", §10 layer
- * "Bất biến an toàn", ADR-003 decision 1).
+ * The write scope guard (Design §9 "Phạm vi ghi của trình cài", §11 layer
+ * "bất biến an toàn", ADR-003 decision 1).
  *
  * paseo-bm may create, change or delete exactly two things on the machine:
  *
@@ -397,7 +397,7 @@ export function isWriteFlags(flags: string | number | undefined): boolean {
 }
 
 /**
- * The temporary file an atomic write of `target` goes through (Design §8:
+ * The temporary file an atomic write of `target` goes through (Design §9:
  * temp → fsync → rename, in the destination directory). `src/fsops.ts` names
  * its temp files with this, so the guard below can recognise them.
  */

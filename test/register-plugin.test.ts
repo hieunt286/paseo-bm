@@ -1,5 +1,5 @@
 /**
- * Plugin registration (bm-wp-105-6ec.3, REQ-005(a)(c), Design §9.1, §9.3).
+ * Plugin registration (bm-wp-105-6ec.3, REQ-005(a)(c), Design §4.5).
  *
  * Runs against the fake CLI in `test/fakes/paseo` inside a `mkdtemp` install
  * home: no daemon is contacted and `~/.paseo` is never read or written.

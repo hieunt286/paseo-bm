@@ -1,6 +1,6 @@
 /**
- * `install --prune` — Technical Design §3.1, §3.2 (`versions[]`, `backups[]`),
- * §4.2, §8; ADR-002 decision 7; Design Q-016.
+ * `install --prune` — Technical Design §5.1, §5.2 (`versions[]`, `backups[]`),
+ * §4.2, §9; ADR-002 decision 7; Design Q-016.
  *
  * The owner decided to keep every payload version and every backup. Removing
  * any of them is therefore only ever an explicit user request, and this module

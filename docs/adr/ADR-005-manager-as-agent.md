@@ -6,6 +6,7 @@
 | Date | 2026-09-15 |
 | Owner | hieu.nt10 |
 | Liên quan | [PRD REQ-020, REQ-021, REQ-026](../product/paseo-bm-prd.md#6-functional-requirements) · [ADR-006](ADR-006-role-registration.md) · [Technical Design](../design/paseo-bm.md) |
+| Mở rộng bởi | [ADR-011](ADR-011-manager-coordinates-workers.md) — Manager tự điều phối Worker (Accepted 2026-09-25); quyết định 3 và 5 ở đây vẫn nguyên |
 
 ## Context
 

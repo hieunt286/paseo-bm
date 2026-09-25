@@ -27,7 +27,7 @@ import { z } from "zod";
  * Models deliberately NOT in this table, so they resolve to "unavailable":
  * - Codex / OpenAI models (for example `gpt-5.6-sol`, which the `bm-reviewer`
  *   profile uses on this machine). No sourced figure was available when this
- *   table was written, and Design §9 says other providers' rates come from
+ *   table was written, and Dashboard Design §9 says other providers' rates come from
  *   that provider's own published page. Adding a guessed number is forbidden.
  * - Claude Fable / Mythos tiers. Their cache-read rate differs by version, and
  *   an unverified rate belongs nowhere near a cost display.

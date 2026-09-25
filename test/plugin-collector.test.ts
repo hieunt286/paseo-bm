@@ -668,7 +668,7 @@ describe("collection end to end", () => {
     // only on Linux, and under it `mkdirSync(..., { recursive: true })` never
     // returns; being synchronous, no test timeout can interrupt it. Do not
     // reach for a system path to get an unwritable directory — see
-    // docs/design/paseo-bm-delta-20260921-ci-linux-hang.md for the diagnosis.
+    // docs/archive/design/paseo-bm-delta-20260921-ci-linux-hang.md for the diagnosis.
     const blocker = join(home, "not-a-directory");
     writeFileSync(blocker, "");
     const broken = { tracesDir: join(blocker, "traces") };

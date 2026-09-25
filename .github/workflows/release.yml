@@ -156,7 +156,7 @@ jobs:
             // A stable version is NOT also pushed to `next`: that would need
             // `npm dist-tag add` too, a different write from `publish`, and the
             // trusted-publisher grant is not proven to cover it. See
-            // docs/design/paseo-bm-delta-20260925b-stable-release.md §2.2-§2.3.
+            // docs/archive/design/paseo-bm-delta-20260925b-stable-release.md §2.2-§2.3.
             // Keep every line here free of apostrophes and single quotes: this
             // script is passed to node inside a single-quoted shell string, so
             // one apostrophe ends the string and the rest becomes shell code.

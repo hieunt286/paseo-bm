@@ -1,7 +1,7 @@
 /**
  * Running the third-party `skills` CLI on the user's behalf, after consent
  * (bead bm-wp-110-rkw.3; REQ-007(d)–(j), REQ-010(e), REQ-013(c), M-1, M-9;
- * Technical Design §6 · §7 · §8 · §9.3; ADR-003).
+ * Technical Design §4.7 · §9; ADR-003).
  *
  * The split of responsibility is ADR-003's: paseo-bm **never writes inside a
  * skills directory**. The only thing it does is start the `skills` CLI — the
@@ -44,10 +44,10 @@ import { REQUIRED_SKILLS, detectSkills, hasMissingRequiredSkills, isCheckedAgent
  */
 export const SKILLS_SOURCE = "cuongntr/agent-skills";
 
-/** Deadline for one `skills add` run (Design §8). */
+/** Deadline for one `skills add` run (Design §4.7). */
 export const SKILLS_TIMEOUT_MS = 300_000;
 
-/** Silence after which the user is told the CLI is still running (Design §8). */
+/** Silence after which the user is told the CLI is still running (Design §4.7). */
 export const SKILLS_SILENCE_WARNING_MS = 60_000;
 
 /**
@@ -76,7 +76,7 @@ export interface SkillsCommand {
  *   `skills` 1.5.26 parses them (`parseAddOptions` consumes arguments until the
  *   next one starting with `-`); a comma-joined value would be read as one
  *   agent name. The agent names were validated at parse time and can never
- *   start with `-` (Design §7), so none of them can end the list early or be
+ *   start with `-` (Design §4.2), so none of them can end the list early or be
  *   read as a flag.
  */
 /**

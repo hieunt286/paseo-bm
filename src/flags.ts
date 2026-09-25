@@ -16,7 +16,7 @@ import type { ErrorCode } from "./errors.js";
 export { EXIT_CODES, EXIT_CODE_SPECS, exitCodeMeaning, isExitCode, previewExitCode } from "./exit-codes.js";
 export type { ExitCode, ExitCodeName, ExitCodeSpec, PreviewSituation } from "./exit-codes.js";
 
-/** Executable commands. Design §4.1 also lists `configure`, which is Phase 2. */
+/** Executable commands. Design §4.1 (there is no `configure` command). */
 export const COMMANDS = ["install", "doctor", "uninstall"] as const;
 export type CommandName = (typeof COMMANDS)[number];
 

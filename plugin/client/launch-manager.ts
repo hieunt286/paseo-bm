@@ -1,6 +1,6 @@
 /**
- * Launch logic behind the "Open Beads Manager" entry points (WP-113, design
- * §2.2, §5, §9.3). Pure and injectable: no React, no React Native, no JSX, so
+ * Launch logic behind the "Open Beads Manager" entry points (WP-113, Technical
+ * Design §2, §7.3). Pure and injectable: no React, no React Native, no JSX, so
  * it is testable without a renderer. `launcher.tsx` renders from it.
  *
  * The client never finds or creates a Manager itself: it calls `manager.ensure`

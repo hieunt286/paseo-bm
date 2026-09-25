@@ -11,8 +11,8 @@
  * `src/report/human.ts` and `src/report/json.ts` are the only two renderers.
  * Both take a `Report` and a sink; neither writes to `process.stdout` itself.
  *
- * Shapes here follow Technical Design §4.4 (JSON), §3.3 (ownership statuses)
- * and §3.4 (the config keys paseo-bm owns).
+ * Shapes here follow Technical Design §4.4 (JSON), §5.3 (ownership statuses)
+ * and §6.1 (the config keys paseo-bm owns).
  */
 
 import type { ErrorCode, WarningCode } from "./errors.js";
@@ -30,7 +30,7 @@ export type JsonObject = { readonly [key: string]: JsonValue };
  *
  * `create` / `update` / `skip` / `conflict` come from an install plan;
  * `delete` / `keep` / `config` are what an uninstall plan uses (`config` is
- * shared: both commands edit the keys of §3.4).
+ * shared: both commands edit the keys of §6.1).
  */
 export const ACTION_KINDS = ["create", "update", "skip", "conflict", "delete", "keep", "config"] as const;
 
@@ -43,7 +43,7 @@ export const WRITING_ACTION_KINDS: readonly ActionKind[] = ["create", "update", 
  * Where an action lands. The human renderer groups by this, so the user reads
  * one block per place on their machine that is about to change, and the set is
  * closed: paseo-bm only writes inside its install home and the config keys of
- * Design §3.4 (§7, "write scope of the installer").
+ * Design §6.1 (§9, "write scope of the installer").
  */
 export const ACTION_LOCATIONS = ["install-home", "paseo-config", "paseo-daemon", "agent-skills"] as const;
 
@@ -58,7 +58,7 @@ export const ACTION_LOCATION_LABELS: Readonly<Record<ActionLocation, string>> = 
 };
 
 /**
- * The ownership statuses of Design §3.3, which are the reasons a file action
+ * The ownership statuses of Design §5.3, which are the reasons a file action
  * carries. `reason` is a free string because uninstall and config actions need
  * reasons this table does not cover; these are the values a file plan uses.
  */
@@ -86,7 +86,7 @@ export interface FileAction extends ActionFields {
   readonly kind: Exclude<ActionKind, "config">;
 }
 
-/** An edit to a single configuration key, Design §3.4. */
+/** An edit to a single configuration key, Design §6.1. */
 export interface ConfigAction extends ActionFields {
   readonly kind: "config";
   /** Value before the edit; `null` when the key was absent. */
@@ -119,7 +119,7 @@ export interface ActionSummary {
   readonly byKind: Readonly<Record<ActionKind, number>>;
   /** True when at least one action would write. */
   readonly writes: boolean;
-  /** True when at least one action needs a human decision (Design §3.3, exit code 5). */
+  /** True when at least one action needs a human decision (Design §5.3, exit code 5). */
   readonly conflicts: boolean;
 }
 
@@ -218,7 +218,7 @@ export interface RoleReport {
   readonly role: string;
   readonly provider: string;
   readonly model: string;
-  /** Whether this role is granted Paseo tool access (trust boundary 3, §7). */
+  /** Whether this role is granted Paseo tool access (trust boundary 3, Design §9). */
   readonly paseoTools: boolean;
   /** Whether the provider has a login session; `null` when it could not be told. */
   readonly loggedIn: boolean | null;
@@ -230,7 +230,7 @@ export interface SkillsByAgent {
   readonly missing: readonly string[];
 }
 
-/** Outcome of a `skills` run paseo-bm made on the user's behalf (Design §3.2). */
+/** Outcome of a `skills` run paseo-bm made on the user's behalf (Design §5.2). */
 export type SkillsAssistOutcome = "ok" | "failed" | "interrupted" | null;
 
 /**

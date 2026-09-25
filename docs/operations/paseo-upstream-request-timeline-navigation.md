@@ -7,7 +7,7 @@
 | Status | **Draft — not sent** |
 | Target | Paseo maintainers (`@getpaseo/plugin`) |
 | Checked against | `@getpaseo/plugin` 0.8.0, `@getpaseo/client` 0.8.0 (type declarations only) |
-| Origin | paseo-bm request `req-20260918T041426Z`, batch `b4`, owner decision Q12 (a); bead `bm-wp-257-card-b4-zwx7.4`; PRD delta `docs/product/paseo-bm-prd-delta-20260918d-card-replies.md` §1.3 |
+| Origin | paseo-bm request `req-20260918T041426Z`, batch `b4`, owner decision Q12 (a); bead `bm-wp-257-card-b4-zwx7.4`; PRD delta `docs/archive/product/paseo-bm-prd-delta-20260918d-card-replies.md` §1.3 |
 | Date | 2026-09-18 |
 
 ## Summary
@@ -55,7 +55,7 @@ plugin's own RPC, never from the message text).
 `run`, `waitForFinish`, `commands`, `archive`, `detach`, `subscribe` — all of
 them act on the agent, none of them on the app's view.
 
-paseo-bm already uses `navigation.openAgent` from its Dashboard and Beads
+paseo-bm already uses `navigation.openAgent` from its Metric and Beads
 surfaces, so the host capability exists; only the timeline renderer props lack it.
 
 ## Request
@@ -93,7 +93,11 @@ is the rule the SDK comment already states.
 ## What paseo-bm does meanwhile
 
 The Worker's name on a card is plain text. The user opens the Worker from Paseo's
-agent list or from paseo-bm's Dashboard, which does have `navigation`. When a
+agent list or from paseo-bm's Metric screen, which does have `navigation`. When a
 Paseo release passes `navigation` to timeline renderers, the card's name becomes
 a button that calls `navigation.openAgent({ agentId })`, shown only when the
 field is present.
+
+---
+
+*Revision 2026-09-25: still open and not sent. Re-read against paseo-bm 0.3.0 (the card's Worker name is still plain text; the Metric and Beads screens use `navigation.openAgent`). Not re-checked against the Paseo 0.9.x plugin SDK.*

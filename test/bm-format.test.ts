@@ -105,7 +105,7 @@ const REVIEW_BLOCKING = [
   "checked: three delta documents; K1–K17 sources",
   "findings:",
   "- severity: blocking",
-  "  location: docs/design/paseo-bm-delta-20260918g-agent-conventions.md:208",
+  "  location: docs/archive/design/paseo-bm-delta-20260918g-agent-conventions.md:208",
   "  reason: A deferred BM-REVIEW notice can stay pending forever.",
   "  suggestedFix: Define a flush trigger after the Reviewer becomes idle.",
   "- severity: non-blocking",
@@ -292,7 +292,7 @@ describe("BM-REVIEW rules", () => {
 
 /**
  * The 2026-09-23 diagnosis of the project-b run
- * (docs/operations/paseo-bm-chan-doan-hoi-lap-20260923.md, fault L2): 9 of 87
+ * (docs/archive/operations/paseo-bm-chan-doan-hoi-lap-20260923.md, fault L2): 9 of 87
  * real BM-REPORT blocks tripped the check, and every one of them tripped on
  * `tier` or `reviewFindingsOpen` alone. The 10 distinct values fell into six
  * shapes, five of which the template in worker.md reads as allowed.

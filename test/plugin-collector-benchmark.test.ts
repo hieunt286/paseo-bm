@@ -11,7 +11,7 @@ import {
 
 /**
  * WP-205 benchmark: the collector runs inside a real agent turn, so the NFR is
- * under 50 ms for the largest record the caps allow (PRD §7, design §11).
+ * under 50 ms for the largest record the caps allow (PRD §7, Dashboard Design §16).
  *
  * The measurement includes the whole hook path: build, redact, cap, take the
  * workspace lock, `write` and `fsync`. `fsync` is the part that could blow the

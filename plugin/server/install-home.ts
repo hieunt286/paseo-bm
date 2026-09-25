@@ -22,7 +22,7 @@
  */
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
-/** Plugin id the installer registers with Paseo (design §3.2 `paseo.pluginId`). */
+/** Plugin id the installer registers with Paseo (Technical Design §5.2 `paseo.pluginId`). */
 export const PLUGIN_ID = "paseo-bm";
 
 /** Directory of the trace store inside the install home (design §3.2). */
@@ -35,7 +35,7 @@ export const TRACES_DIR_NAME = "traces";
  */
 export const UI_DIR_NAME = "ui";
 
-/** Highest `install.json` schema version this code understands (design §3.2). */
+/** Highest `install.json` schema version this code understands (Technical Design §5.2). */
 export const SUPPORTED_RECORD_SCHEMA_VERSION = 1;
 
 /** Minimal SDK view this module needs. `PaseoApi` is structurally assignable to it. */

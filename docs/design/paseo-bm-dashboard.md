@@ -2,81 +2,113 @@
 
 | Trường | Giá trị |
 |---|---|
-| Status | **Active** (bản 4, duyệt 2026-09-16) — cổng `design-ready` PASS |
+| Status | **Active** — cổng `design-ready` PASS 2026-09-16 |
+| Tài liệu sống | Từ 2026-09-25 tài liệu này được **sửa tại chỗ** và luôn tả hiện trạng; mỗi lần sửa thêm một dòng Revision History, git là vết kiểm tra. Các delta cũ đã gộp vào đây chỉ còn là hồ sơ lịch sử (bảng [Lịch sử](#lịch-sử)) |
 | Owner | hieu.nt10 (GitHub: hieunt286) |
 | Created | 2026-09-16 |
-| Requirements source | [PRD Dashboard điều phối](../product/paseo-bm-dashboard-prd.md) (REQ-040 → REQ-057) |
-| Design gốc | [paseo-bm — Technical Design](./paseo-bm.md) (Active) — tài liệu này **mở rộng**, không thay thế |
-| Related ADRs | [ADR-007](../adr/ADR-007-dashboard-trace-store.md) (Proposed — kho lưu vết) · [ADR-002](../adr/ADR-002-install-ownership-model.md) (quyền sở hữu trong thư mục cài đặt) · [ADR-005](../adr/ADR-005-manager-as-agent.md) (vòng đời agent thuộc người dùng) · [ADR-006](../adr/ADR-006-role-registration.md) |
+| Requirements source | [PRD Dashboard điều phối](../product/paseo-bm-dashboard-prd.md) (REQ-040 → REQ-069); REQ-059 (thẻ câu hỏi) nằm ở [PRD gốc](../product/paseo-bm-prd.md) |
+| Design gốc | [paseo-bm — Technical Design](./paseo-bm.md) — tài liệu này **mở rộng** nó: thư mục cài đặt, vai trò, chỉ dẫn, fallback, slash command ở đó |
+| Related ADRs | [ADR-007](../adr/ADR-007-dashboard-trace-store.md) (kho lưu vết) · [ADR-002](../adr/ADR-002-install-ownership-model.md) · [ADR-005](../adr/ADR-005-manager-as-agent.md) (vòng đời agent thuộc người dùng) · [ADR-006](../adr/ADR-006-role-registration.md) |
 | Môi trường tham chiếu | `@getpaseo/plugin` 0.8.0, `@getpaseo/client` 0.8.0, `@getpaseo/protocol` 0.8.0; Paseo CLI/daemon 0.8.0; Node ≥ 22 |
 
-## 1. Boundaries
+## 1. Phạm vi
 
-- **Design này sở hữu:** năm RPC mới và hợp đồng Zod của chúng; **kho lưu vết** (vị trí, bố cục, lược đồ, ghi, đọc, xoá, đo dung lượng); bộ thu thập bám hook vòng đời; thuật toán nhóm trace theo yêu cầu; bộ đọc `BM-REPORT` và `BM-REVIEW`; cách đo thời gian; cách suy ra bước feature-workflow kèm độ chắc chắn; bộ đọc `.beads/issues.jsonl`; cách tính token và chi phí; các module client của Dashboard; mã lỗi mới; chiến lược kiểm thử của tính năng.
-- **Design này KHÔNG sở hữu:** nội dung `roles/*.md` (thuộc design gốc §2.5, §2.6 — tài liệu này chỉ **yêu cầu thêm hai nhãn** theo REQ-051 và **đọc** khối `BM-REPORT`); trình cài đặt và lệnh gỡ (chỉ nêu yêu cầu, xem §14); cách tạo agent; định dạng `install.json`; nội bộ Paseo; định dạng dữ liệu của `br`; bảng giá của provider.
-- **Không đổi gì đang chạy:** ba RPC hiện có (`manager.ensure`, `agents.list`, `roles.describe`), surface và panel hiện có giữ nguyên hành vi.
+**Tài liệu này sở hữu:**
 
-## 2. Architecture
+- kho lưu vết (vị trí, bố cục, lược đồ, ghi, đọc, xoá, gán lại, đo dung lượng) và bộ thu thập bám hook vòng đời;
+- cách dựng trace theo request, bộ đọc `BM-REPORT` / `BM-REVIEW` / `BM-QUESTIONS` / `BM-ANSWERS`, cách đo thời gian, suy ra trạng thái, đếm lỗi, suy ra bước feature-workflow, tính token và chi phí;
+- bộ đọc `.beads/issues.jsonl` và các hành động giao việc từ màn Beads;
+- mọi màn hình client của plugin: surface "Beads Manager" (Setup kể cả màn "Roles & models", Workspaces, Metric, Beads), tab "Beads" và nút header, thẻ chat, thẻ câu hỏi, thẻ sự cố dự phòng, pill câu đang chờ và pill dự phòng, panel "Beads in this chat" và "Beads agents";
+- các RPC nuôi những thứ trên (§5) và mã lỗi của chúng.
+
+**Không sở hữu** (ở [design gốc](./paseo-bm.md) hoặc delta còn sống của nó): nội dung `plugin/roles/*.md` (kể cả luật Worker viết `BM-QUESTIONS`, cách Manager chuyển câu trả lời, nhãn `bm.requestId`/`bm.batchId`); trình cài đặt và CLI (kể cả `--install-beads-tools`); bố cục thư mục cài đặt; cách tạo agent và hook `agent.create`; `manager.ensure`, `agents.list`, `roles.describe`, `agents.stop-all`; hợp đồng server của cài đặt vai trò, model và fallback (`roles.settings`, `roles.options`, `roles.save-settings`, `roles.save-fallback`, `fallback.*`, luật phát hiện và xử lý sự cố); sổ câu hỏi–trả lời (qa-ledger); công cụ agent của plugin (ADR-010); hai slash command `/bm-worker-new` và `/bm-worker-stop-all`. Tài liệu này chỉ tả chỗ các phần đó hiện lên màn hình.
+
+## 2. Kiến trúc
 
 ### 2.1 Module
 
 ```
 plugin/
-  index.client.tsx
-    client/launcher.tsx        màn hình Beads Manager: thêm nút "Dashboard"
-    client/dashboard.tsx       (mới) màn hình Dashboard, chỉ render
-    client/dashboard-model.ts  (mới) logic + text + style, không JSX, test được
-    client/settings.tsx        (mới) màn hình cài đặt plugin: ngưỡng cảnh báo dung lượng
-  index.server.ts              + 4 RPC mới + 1 bộ thu thập
-    server/collector.ts        (mới) hook turn_started/turn_ended → ghi lưu vết
-    server/trace-store.ts      (mới) đọc/ghi/xoá/đo kho lưu vết
-    server/install-home.ts     (mới) tìm thư mục cài đặt từ cấu hình Paseo
-    server/traces.ts           (mới) dựng trace từ kho lưu vết + agent + timeline
-    server/bm-report.ts        (mới) đọc khối BM-REPORT / BM-REVIEW
-    server/workflow-steps.ts   (mới) suy ra bước quy trình + bằng chứng
-    server/beads-store.ts      (mới) đọc .beads/issues.jsonl, tính thống kê
-    server/cost.ts             (mới) token → chi phí, theo bảng giá có ngày
-    shared/contracts.ts        + hợp đồng Zod của 4 RPC mới
-    shared/prices.ts           (mới) bảng giá đi kèm bản phát hành + pricesUpdatedAt
-    shared/settings.ts         (mới) defineSettings: ngưỡng cảnh báo, version 1
+  index.client.tsx            đăng ký surface, sidebar, Command Center, settings screen,
+                              2 timeline transformer + 1 renderer, 3 workspace panel,
+                              nút header, composer pill
+    client/launcher.tsx         surface "Beads Manager": chọn view, dải trạng thái, danh sách Workspaces
+    client/setup-screen.tsx     màn Setup (màn chính của surface), ba tab, "Roles & models"
+    client/dashboard.tsx        màn Metric       client/dashboard-actions.tsx  xoá / gán lại trace
+    client/beads-screen.tsx     màn Beads (kanban, bộ lọc, chi tiết, hành động)
+    client/beads-tab.tsx        panel workspace "Beads" với hai tab con
+    client/beads-header-button.ts  nút "Beads" trên header workspace
+    client/tree.tsx             panel "Beads agents"     client/agent-tree.ts   logic của nó
+    client/chat-card.tsx        thẻ chat, thẻ câu hỏi, thẻ sự cố dự phòng (vẽ)   client/chat-cards.ts   logic thuần
+    client/bead-chips.tsx       chip bead trên thẻ, khung chi tiết, panel "Beads in this chat"
+    client/waiting-pills.tsx    composer pill           client/waiting-pills-model.ts
+    client/answer-state.ts      trạng thái "đã trả lời" trong phiên app
+    client/ui.tsx               view dùng chung, không hook
+    client/*-model.ts, dashboard-view.ts, launch-manager.ts, slot.ts   logic thuần
+    client/settings.tsx         màn cài đặt ngưỡng dung lượng
+  index.server.ts
+    server/collector.ts         hook turn_started / turn_ended → ghi lưu vết
+    server/trace-store.ts       đọc/ghi/xoá/gán lại/đo kho; bộ kiểm đường dẫn; mutex
+    server/install-home.ts      tìm thư mục cài đặt; hằng số UI_DIR_NAME = "ui"
+    server/traces.ts            dựng trace, tách đoạn, trạng thái, đếm lỗi
+    server/workflow-steps.ts    bước feature-workflow     server/cost.ts   token → chi phí
+    server/beads-store.ts       đọc .beads/issues.jsonl   server/bead-work.ts   ai đang làm bead
+    server/bead-actions.ts      beads.list/get/action     server/shell.ts   đọc lệnh br
+    server/dashboard-rpc.ts     RPC của Metric, Beads, Workspaces
+    server/chat-rpc.ts          chat.peers, chat.beads, beads.lookup
+    server/chat-peers.ts        peersOfWorkspace, workspaceRecordsReader
+    server/chat-waiting.ts      chat.waiting              server/answer-marks.ts  answers.mark(s)
+    server/live-timeline.ts     readTimelinePages (dùng chung)
+    server/setup-rpc.ts, setup-tools.ts, setup-skills.ts, role-extras.ts   màn Setup
+  shared/contracts.ts           hợp đồng Zod của mọi RPC
+  shared/bm-report.ts           bộ đọc BM-REPORT/BM-REVIEW (server/bm-report.ts chỉ re-export)
+  shared/bm-questions.ts        bộ đọc/soạn BM-QUESTIONS/BM-ANSWERS
+  shared/bead-ids.ts, sole-worker.ts, order.ts, prices.ts, settings.ts
 ```
 
-Cách chia bám đúng khuôn đang có: phần thuần (`dashboard-model.ts`) test được không cần renderer như `client/launch-manager.ts`; mỗi module server nhận một **cửa sổ hẹp, tiêm được** của `PaseoApi` và của hệ thống file, như `ManagerPaseo` trong `server/manager.ts`.
+Khuôn chung: mọi quyết định nằm trong module thuần (không React, không React Native), test được không cần renderer; `.tsx` chỉ nối và vẽ. Module server nhận một cửa sổ hẹp, tiêm được, của `PaseoApi` và của hệ thống file.
 
 ### 2.2 Ba quyết định nền
 
-1. **Thu thập theo sự kiện, đọc bù khi mở.** Bộ thu thập bám `on("agent.turn_ended")` (và `turn_started` để lấy mốc bắt đầu) của các agent `bm-*`, ghi ngay vào kho lưu vết. Đây là **hook sự kiện**, không phải cron, watcher hay vòng lặp nền — plugin đã dùng đúng hook này cho việc lan truyền lệnh dừng (bm-wq6), nên ràng buộc "không tác vụ nền" của design gốc §8 vẫn giữ. Khi người dùng mở Dashboard, phần lượt **đang chạy** được đọc bù trực tiếp từ timeline; phần đã xong lấy từ kho.
-2. **Lưu vết bền, người dùng xoá được** (ADR-007, REQ-053 → REQ-056). Lý do: vòng đời agent thuộc người dùng (ADR-005), nên nếu chỉ dẫn xuất lúc đọc thì việc người dùng xoá một Worker sẽ xoá luôn lịch sử công việc. Cái giá là paseo-bm bắt đầu **ghi dữ liệu hội thoại lên đĩa**, và cái giá đó được trả bằng ba thứ bắt buộc: che bí mật trước khi ghi, quyền `0600`, và một đường xoá tường minh.
-3. **Không chắc thì nói không rõ.** Mỗi con số suy luận đi kèm một trường độ chắc chắn được render ra giao diện.
+1. **Thu thập theo sự kiện, đọc bù khi mở.** Bộ thu thập bám `on("agent.turn_ended")` (và `turn_started` để lấy mốc bắt đầu) của agent `bm-*`, ghi ngay vào kho. Đây là hook sự kiện, không phải cron, watcher hay vòng lặp nền. Lượt **đang chạy** được đọc bù từ timeline khi người dùng mở màn hình.
+2. **Lưu vết bền, người dùng xoá được** (ADR-007). Vòng đời agent thuộc người dùng (ADR-005): nếu chỉ dẫn xuất lúc đọc thì xoá một Worker là mất lịch sử. Cái giá (ghi hội thoại lên đĩa) được trả bằng: che bí mật trước khi ghi, quyền `0600`, và một đường xoá tường minh.
+3. **Không chắc thì nói không rõ.** Mỗi con số suy luận kèm một độ chắc chắn (`exact` / `inferred` / `unknown`) hiện ra giao diện.
 
 ### 2.3 Luồng dữ liệu
 
 ```
-AGENT CHẠY (không có người dùng nào đang xem)
-  hook turn_started(agent bm-*)  → ghi mốc bắt đầu lượt
-  hook turn_ended(agent bm-*)    → che bí mật → nối bản ghi vào
-                                    <install home>/traces/<workspaceId>/events-<YYYYMM>.jsonl
+AGENT CHẠY
+  hook turn_started(bm-*)  → ghi mốc bắt đầu lượt (trong bộ nhớ)
+  hook turn_ended(bm-*)    → timeline.refetch lấy timestamp → che bí mật → nối một dòng vào
+                             <install home>/traces/<workspaceId>/events-<YYYYMM>.jsonl
 
-NGƯỜI DÙNG MỞ DASHBOARD
-  rpc beads.stats  { workspaceId }        → đọc <workspace>/.beads/issues.jsonl (cache mtime+size)
-  rpc traces.list  { workspaceId, … }     → đọc kho lưu vết + agents.list (trạng thái hiện tại)
-  rpc traces.get   { workspaceId, traceId }→ kho lưu vết + đọc bù timeline cho lượt đang chạy
-  rpc traces.delete{ workspaceId, … }     → xoá trong kho lưu vết, không chạm gì khác
+NGƯỜI DÙNG MỞ MÀN HÌNH
+  traces.list / traces.get      kho lưu vết + agents.list (+ đọc bù timeline cho lượt đang chạy)
+  beads.list / beads.stats      <workspace>/.beads/issues.jsonl (cache mtime+size)
+  chat.peers / chat.waiting     agents.list + timeline Manager + kho lưu vết khi thiếu nhãn
 ```
 
-`traces.list` không đọc timeline khi mọi trace của trang đó đã hoàn tất trong kho — đây là điều giữ D-1 (≤ 3 giây) khả thi kể cả khi kho đã lớn.
+`traces.list` không đọc timeline khi mọi trace của trang đã xong trong kho — điều giữ D-1 (≤ 3 giây) khi kho lớn.
+
+### 2.4 Luật chung cho client
+
+- Chỉ primitive React Native; mọi màu lấy từ theme qua `toneColor(theme, tone)`, `Tone = "muted" | "plain" | "info" | "warning" | "danger" | "success"` (`plain` = `foreground`, `muted` = `foregroundMuted`, `info` = `accent`, ba tone còn lại là `status*`). Không mã màu viết cứng, không ghép kênh alpha vào chuỗi màu: tô nhạt làm bằng một `View` phủ tuyệt đối với `opacity`.
+- Chữ giao diện bằng tiếng Anh; mọi thứ bấm được có nhãn trợ năng; dùng được ở `layout.compact` (padding 12 thay 24).
+- Phần vẽ dùng chung là **view không hook** trong `ui.tsx` (`WorkspaceScreenHeader`, `BeadRowCard`, `StatusTabs`, `KanbanBoard`, `StatCards`, `BarChart`, `Chip`, `RoleMark`, `RoleLegend`), để `test/helpers/element-tree.ts` dựng được cây mà không cần renderer.
+- Trạng thái sống qua việc gỡ component nhưng không qua lần tải lại app thì nằm ở module, đọc bằng `useSyncExternalStore`: `createSlot<T>()` (`slot.ts`), `createSessionToggle`, `createSessionMap` (`beads-model.ts`), `answer-state.ts`. Trạng thái phải qua được lần tải lại thì nằm ở server, trong `<install home>`.
+- Không polling ngầm, trừ các nhịp có chủ ý: danh sách Workspaces 10 s (chỉ khi đang hiện), `chat.waiting` 15 s, nút header 15 s, panel "Beads in this chat" 15 s, panel "Beads agents" 5 s, thẻ sự cố dự phòng 15 s (chỉ khi sự cố `pending`/`waiting`).
 
 ## 3. Kho lưu vết
 
 ### 3.1 Tìm thư mục cài đặt
 
-Bundle server **không có cwd** và không đọc được `import.meta.url` (errata bm-dnc), lại phải chịu được việc người dùng đổi thư mục cài đặt bằng `--home` hoặc `PASEO_BM_HOME`. Thứ tự giải quyết, dừng ở bước đầu tiên thành công:
+Bundle server không có cwd và không đọc được `import.meta.url`, lại phải chịu được `--home` / `PASEO_BM_HOME`. Thứ tự, dừng ở bước đầu thành công:
 
-1. `paseo.config.get()` → `config.plugins["paseo-bm"]` là `{ source: "directory", path }`. Đường dẫn đó là `<install home>/plugin/<version>`, nên `<install home>` = `dirname(dirname(path))`.
-2. Xác nhận bằng sự tồn tại của `<install home>/install.json` và `schemaVersion` đọc được. Không khớp → sang bước 3.
-3. Dự phòng `~/.paseo-bm`. Vẫn không có `install.json` → tính năng lưu vết **tắt** kèm một thông báo trên Dashboard; phần đọc thống kê beads vẫn chạy.
+1. `paseo.config.get()` → `config.plugins["paseo-bm"]` là `{ source: "directory", path }` với `path` = `<install home>/plugin/<version>`, nên `<install home>` = `dirname(dirname(path))`.
+2. Xác nhận bằng `<install home>/install.json` đọc được `schemaVersion`. Không khớp → bước 3.
+3. Dự phòng `~/.paseo-bm`. Vẫn không có `install.json` → lưu vết **tắt** kèm thông báo; phần đọc beads vẫn chạy.
 
-`install.json` chỉ được **đọc** (nó không chứa bí mật, theo design gốc §3.2); plugin không bao giờ ghi vào nó.
+`install.json` chỉ được đọc, không bao giờ ghi.
 
 ### 3.2 Bố cục
 
@@ -86,394 +118,680 @@ Bundle server **không có cwd** và không đọc được `import.meta.url` (e
   <workspaceId>/                           0700
     meta.json                              0600   { lastKnownName, lastKnownDirectory, lastSeenAt }
     events-202609.jsonl                    0600   nối thêm, một bản ghi một dòng
-    events-202610.jsonl
+<install home>/ui/                         0700   trạng thái giao diện phải qua được lần tải lại
+  answer-marks.json                        0600   (§15.6)
+<install home>/role-extras.json            0600   (§11.3)
 ```
 
-- **Tách theo `workspaceId`** để xoá theo workspace là xoá một thư mục, để gán lại là di chuyển một thư mục, và để không phải đọc dữ liệu của workspace khác.
-- **`meta.json` của mỗi workspace** ghi tên và đường dẫn lần cuối paseo-bm thấy workspace đó, cùng `lastSeenAt`. Đây là thứ duy nhất giúp người dùng nhận ra một `workspaceId` không còn trong Paseo là repo nào (REQ-057a). Bộ thu thập cập nhật nó mỗi khi ghi một lượt, và chỉ khi giá trị đổi.
-- **Tách theo tháng** để xoá theo mốc thời gian phần lớn là xoá cả file, và để một file không lớn vô hạn.
-- **`schemaVersion`** bắt đầu từ `1`. Bản cao hơn mức hiểu được → đọc ở chế độ hạn chế (chỉ những trường đã biết), hiện thông báo, và **không ghi thêm** vào kho đó (`E_TRACE_STORE_SCHEMA_TOO_NEW`). Không bao giờ ghi đè dữ liệu của bản mới hơn.
+- Tách theo `workspaceId`: xoá theo workspace là xoá một thư mục, gán lại là di chuyển một thư mục. Tách theo tháng: xoá theo mốc phần lớn là xoá cả file.
+- `meta.json` của workspace là thứ duy nhất giúp nhận ra một workspace không còn trong Paseo (REQ-057a); bộ thu thập cập nhật nó khi giá trị đổi.
+- `schemaVersion` = `TRACE_STORE_SCHEMA_VERSION` = 1. Kho có bản cao hơn → đọc hạn chế, thông báo, **không ghi** (`E_TRACE_STORE_SCHEMA_TOO_NEW`). Bản ghi mới chỉ được **thêm** trường tuỳ chọn; không di trú.
+- `ui/launcher-order.json` có thể còn trên máy từ tính năng ghim đã bỏ: không đọc, không ghi, không xoá.
 
-### 3.3 Bản ghi
-
-Một dòng JSON, đã che bí mật, mỗi dòng độc lập (file hỏng một dòng vẫn dùng được phần còn lại):
+### 3.3 Bản ghi (`traceRecordSchema`)
 
 ```
-{ v: 1, at: ISO, workspaceId, agentId, role, turnId | null,
-  kind: "turn",
-  requestId | null, parentAgentId | null, agentCreatedAt,
-  startedAt, endedAt, outcome: "completed"|"failed"|"canceled",
-  sent:    [{ at, text }],            // user_message của lượt, đã cắt và che
-  received:[{ at, text }],            // assistant_message của lượt, đã cắt và che
-  reports: [ <BM-REPORT đã đọc> ],    // gồm cả unparsedFields
-  reviews: [ <BM-REVIEW đã đọc> ],
-  evidence:[ <evidence>… ],           // lệnh br, file đã ghi, dấu vết sub_agent
-  usage:   { inputTokens, cachedInputTokens, outputTokens, totalCostUsd | null, model | null } | null }
+{ v: 1, kind: "turn", at, workspaceId, agentId, role, turnId | null,
+  requestId | null, parentAgentId | null, agentCreatedAt | null,
+  startedAt | null, endedAt, outcome: "completed" | "failed" | "canceled",
+  sent:     [traceMessage],   // tin đến của lượt, đã cắt và che
+  received: [traceMessage],   // assistant_message của lượt, đã cắt và che
+  reports:  [parsedReport],   reviews: [parsedReview],
+  evidence: [evidence],       // lệnh shell, file đã ghi, sub_agent, skill đã load
+  usage:    usage | null,
+  runtime?: { model, thinkingOptionId, modeId, provider? } | null }
+
+traceMessage = { agentId | null, at, text, truncated, origin?: "user" | "agent" }
 ```
 
-*Errata 2026-09-18 ([delta 20260918](paseo-bm-delta-20260918-manager-mode-model-metrics.md) §4.2):* bản ghi có thêm trường **tuỳ chọn** `runtime: { model, thinkingOptionId, modeId } | null` — thứ agent **thật sự chạy** ở lượt đó, lấy từ snapshot của `timeline.refetch`: `runtimeInfo` trước, trường cấu hình (`model`, `effectiveThinkingOptionId` → `thinkingOptionId`, `currentModeId`) chỉ để dự phòng; `null` khi không đọc được snapshot. Là trường cộng thêm: `v` và `schemaVersion` vẫn là 1, không di trú; bản cũ đọc bản ghi mới thì bỏ qua nó. `usage.model` giữ nguồn cũ.
+- **`origin`**: `user` khi tin mang `clientMessageId` (người dùng gõ trong app), `agent` khi một agent gửi bằng `send_agent_prompt`. Bản ghi cũ không có trường này **không bao giờ** được coi là lời người dùng.
+- **`runtime`**: thứ agent thật sự chạy ở lượt đó, lấy từ snapshot của `timeline.refetch` — `runtimeInfo` trước, trường cấu hình (`model`, `effectiveThinkingOptionId` → `thinkingOptionId`, `currentModeId`) chỉ để dự phòng; `null` khi không đọc được snapshot. `provider` (thêm bởi delta fallback 20260921) để định giá model không có trong bảng giá. `usage.model` giữ nguồn cũ.
+- **Bằng chứng `skill`**: Claude Code load skill là `tool_call` tên `Skill` với `detail.label` = tên skill; provider khác thì đọc `<skill>/SKILL.md` (suy luận); `ls`/`test -f` không tính.
+- **Thời điểm tin nhắn có thể là giờ lúc ghi.** Tin chỉ mang giờ của timeline khi `timeline.refetch` thành công; khi lỗi (agent đã lưu trữ là ca hiển nhiên) cả bản ghi đóng dấu `now()`. Không mã nào được coi thời điểm tin trong bản ghi là giờ thật, hay dùng nó làm khoá.
 
 Quy tắc ghi:
 
-- **Nối thêm, không sửa.** Một lượt ghi đúng một dòng; không bao giờ sửa dòng đã ghi. Sửa duy nhất là **xoá** (§3.5).
-- **Chống trùng** theo `(agentId, turnId, vân tay nội dung lượt)`: hook có thể chạy lại sau reload, nên bộ đọc bỏ dòng trùng và giữ dòng có `at` muộn nhất. *Errata 2026-09-17:* khoá ban đầu chỉ là `(agentId, turnId)` vì thiết kế giả định turn id không lặp trong một agent; Paseo đánh số lại, nên khoá đó **vứt mất** các lượt thật — xem [delta 20260917d](paseo-bm-dashboard-delta-20260917d-request-attribution.md) §3 B và §4 B.
-- **Ghi an toàn:** mọi đường dẫn đi qua bộ kiểm ở §3.8 trước khi mở; mở `O_APPEND` **cộng `O_NOFOLLOW`**, một lần `write` cho một dòng đã kết thúc bằng `\n`, rồi `fsync`. Mọi thao tác sửa kho lấy khoá tuần tự ở §3.8. Ghi lỗi (hết đĩa, không đủ quyền, kho lược đồ mới hơn) thì **bỏ qua, log một dòng**, và không bao giờ ném ra ngoài hook — một lỗi lưu vết không được làm chết lượt của agent (REQ-053c).
-- **Trần độ dài** mỗi trường văn bản trước khi ghi (mặc định 8 KB cho một `sent`/`received`, 32 KB cho một bản ghi); phần cắt được ghi rõ bằng hậu tố `…[truncated]`.
+- **Nối thêm, không sửa.** Một lượt một dòng. Sửa duy nhất là xoá (§3.5).
+- **Chống trùng** (`dedupeRecords`) theo `(agentId, turnId, vân tay nội dung lượt)`, giữ dòng có `at` muộn nhất. Vân tay = 16 ký tự hex đầu của sha1 trên chữ của `sent` rồi `received`, theo thứ tự; bản ghi không có tin nào dùng khoá `(agentId, turnId)`. Lý do: hook có thể chạy lại sau reload (cùng nội dung → cùng khoá), còn Paseo **dùng lại turn id trong cùng một agent** cho lượt khác (khác nội dung → giữ cả hai). Rủi ro chấp nhận: lần ghi lại rơi vào đường dự phòng và cắt ra tập tin hơi khác thì thừa một dòng, không mất dữ liệu. `messageId` của timeline đúng bản chất hơn nhưng `traceMessage` không lưu nó (thêm vào là đổi lược đồ kho), nên dùng vân tay chữ; các chữ ghép có tiền tố độ dài (`<len>:<text>`) để hai tin không tách lại thành cặp khác. Bản ghi `turnId: null` không có khoá nên luôn được giữ hết.
+- **Ghi an toàn:** đường dẫn qua bộ kiểm §3.8; mở `O_APPEND | O_NOFOLLOW`, một `write` cho một dòng kết thúc bằng `\n`, rồi `fsync`; mọi thao tác sửa kho lấy mutex §3.8. Ghi lỗi (hết đĩa, quyền, lược đồ mới hơn) → bỏ qua, log một dòng, **không bao giờ** ném ra ngoài hook.
+- **Trần độ dài:** 8 KB cho một tin, 32 KB cho một bản ghi; phần cắt có hậu tố `…[truncated]`.
 
 ### 3.4 Đọc
 
-`traces.list` đọc file của workspace từ mới tới cũ (theo tên tháng), dựng trace theo §5, dừng khi đủ `limit`. `traces.get` đọc mọi dòng thuộc `traceId` rồi bổ sung:
+`traces.list` đọc file của workspace từ mới tới cũ (theo tên tháng), dựng trace theo §6, dừng khi đủ `limit`. `traces.get` đọc mọi dòng thuộc trace rồi bổ sung trạng thái hiện tại của từng agent (`agents.list`) và lượt đang chạy (đọc bù timeline trong cửa sổ `activeTurn.startedAt → nay`). Cache theo `(workspaceId, file, mtimeMs, size)`.
 
-- trạng thái **hiện tại** của từng agent (`agents.list`), để biết cái nào còn sống, cái nào đã lưu trữ hay bị xoá;
-- lượt **đang chạy** (nếu có): đọc bù timeline trong cửa sổ `activeTurn.startedAt → nay`.
-
-Cache trong bộ nhớ theo `(workspaceId, file, mtimeMs, size)`; file tháng cũ hầu như không đổi nên cache gần như luôn đúng.
-
-### 3.5 Xoá (REQ-054)
-
-`traces.delete` nhận đúng một trong ba dạng phạm vi:
+### 3.5 Xoá (`traces.delete`)
 
 | Phạm vi | Cách làm |
 |---|---|
-| `{ traceId }` | Viết lại các file tháng liên quan, bỏ mọi dòng thuộc trace đó (ghi tạm → `fsync` → `rename`, đúng nguyên tắc atomic của design gốc §8) |
-| `{ before: ISO }` | Xoá hẳn các file tháng nằm hoàn toàn trước mốc; viết lại đúng một file chứa mốc |
+| `{ traceId }` | Viết lại các file tháng liên quan, bỏ mọi dòng của trace (file tạm → `fsync` → `rename`) |
+| `{ before: ISO }` | Xoá file tháng nằm hoàn toàn trước mốc; viết lại đúng một file chứa mốc |
 | `{ allOfWorkspace: true }` | Xoá thư mục `<traces>/<workspaceId>` |
 
-- **Xem trước là bắt buộc:** `traces.delete` với `dryRun: true` trả về `{ traces, bytes }` sẽ mất; giao diện luôn gọi `dryRun` trước và hỏi xác nhận, mặc định "Không".
-- **Chống thoát thư mục:** đi qua bộ kiểm ở §3.8 — kiểm mẫu `workspaceId`, kiểm tiền tố sau `resolve`, **và `lstat` từng thành phần để từ chối symlink ở mọi cấp**. Không đạt → `E_TRACE_STORE_UNWRITABLE`, không xoá gì.
-- Xoá **không** chạm beads, tài liệu, agent, hội thoại Paseo, `install.json`, `config.json` hay bất cứ file nào ngoài `<install home>/traces` (test phủ định, D-9).
-- Xoá trace của một yêu cầu **đang chạy**: cho phép, nhưng giao diện cảnh báo trước rằng các lượt sau sẽ được ghi thành một trace mới.
+- Giao diện luôn gọi `dryRun: true` trước (trả `{ traces, bytes, running }`) rồi hỏi xác nhận, mặc định "Không". `running` là số request trong phạm vi còn agent `running`; > 0 thì cảnh báo rằng các lượt sau sẽ thành một trace mới.
+- Đi qua bộ kiểm §3.8; không đạt → `E_TRACE_STORE_UNWRITABLE`, không xoá gì. Không chạm beads, tài liệu, agent, hội thoại Paseo, `install.json`, `config.json` hay bất cứ gì ngoài `<install home>/traces`.
+- Dòng không đọc được được **giữ nguyên** khi viết lại: không xoá dữ liệu mình không hiểu.
 
-### 3.6 Dung lượng (REQ-055)
+### 3.6 Dung lượng
 
-`traces.list` trả kèm `store: { traces, bytes, workspaceBytes }`, tính bằng `stat` trên các file — không đọc nội dung.
+`store = { bytes, workspaceBytes }` trả kèm `traces.list`, `traces.delete`, `traces.reassign`, tính bằng `stat` — không đọc nội dung, nên không có số trace.
 
-**Ngưỡng nằm ở phía client, không ở server** (REQ-055d): server trả số byte thô, client đọc ngưỡng bằng `useSettings(...)` rồi tự quyết định có cảnh báo hay không. Lý do: `registerSettings` cho server **khai báo** lược đồ cài đặt, còn ba RPC read/write/reset do Paseo quản lý là để **client** gọi; đặt việc so ngưỡng ở client tránh phải bịa thêm một đường đọc cài đặt phía server.
+Ngưỡng cảnh báo ở **client**: server trả byte thô, client đọc ngưỡng bằng `useSettings(...)`. Lý do: `registerSettings` ở server chỉ khai báo lược đồ; ba RPC read/write/reset do Paseo quản lý dành cho client. Cài đặt (`shared/settings.ts`): `defineSettings({ id: "paseo-bm", scope: "host", version: 1, schema: z.object({ warnAboveBytes: z.number().int().positive().default(200 * 1024 * 1024) }) })`. Paseo chỉ có `scope: "host"`, nên ngưỡng là một giá trị cho cả máy và màn cài đặt nói rõ (`HOST_SCOPE_NOTICE`). Giá trị sai bị Zod chặn, Paseo trả `invalid`, ngưỡng cũ giữ nguyên. **Không tự xoá, không tự nén, không xoay vòng.**
 
-Cài đặt (`shared/settings.ts`): `defineSettings({ id: "paseo-bm", scope: "host", version: 1, schema: z.object({ warnAboveBytes: z.number().int().positive().default(200 * 1024 * 1024) }) })`. Phạm vi duy nhất Paseo cấp là `"host"`, nên ngưỡng là **một giá trị cho cả máy**, không theo workspace — giao diện phải nói rõ (REQ-055e). Giá trị không hợp lệ bị Zod chặn ở bước ghi và Paseo trả `invalid`; màn hình hiện lỗi và giữ ngưỡng cũ (REQ-055f). `migrate` được khai báo sẵn để `version` sau này đổi được mà không mất giá trị cũ.
+### 3.7 Workspace không còn, và gán lại
 
-**Không tự xoá, không tự nén, không xoay vòng.**
+| Tình trạng | Điều kiện |
+|---|---|
+| `live` | có trong `paseo.workspaces.list()`, `archivingAt` rỗng |
+| `archived` | có trong danh sách, `archivingAt` khác rỗng |
+| `orphaned` | không có trong danh sách |
+| `unknown` | `workspaces.list()` lỗi — một lần gọi lỗi không bao giờ thành kết luận "không còn" |
 
-### 3.7 Workspace không còn, và gán lại (REQ-057)
+**Gán lại** (`traces.reassign`), chỉ do người dùng khởi động:
 
-**Phân loại.** Với mỗi `workspaceId` có trong kho, đối chiếu `paseo.workspaces.list()`:
+1. `to` phải đang có trong `workspaces.list()` và khác `from`; sai → `E_TRACE_REASSIGN_INVALID`, không chạm gì.
+2. `dryRun: true` trả `{ traces, bytes }` để hỏi xác nhận.
+3. Đích chưa có thư mục → `rename` cả thư mục.
+4. Đích đã có → gộp từng file tháng bằng cùng `dedupeRecords`, file tạm → `fsync` → `rename`, rồi xoá file nguồn; dòng không đọc được được giữ. Toàn bộ nằm trong mutex §3.8; bị ngắt thì tệ nhất còn cả hai bản, và bộ đọc loại trùng nên không nhân đôi.
+5. `meta.json` của đích giữ giá trị của đích.
 
-| Tình trạng | Điều kiện | Hiển thị |
-|---|---|---|
-| `live` | có trong danh sách, `archivingAt` rỗng | như bình thường |
-| `archived` | có trong danh sách, `archivingAt` khác rỗng | đứng ở chỗ của nó, nhãn "đã lưu trữ" (REQ-057b) |
-| `orphaned` | **không** có trong danh sách | nhóm "workspace không còn", kèm `lastKnownName` và `lastKnownDirectory` từ `meta.json` |
+Gán lại không sửa `workspaceId` trong bản ghi (sự thật lịch sử); thư mục quyết định trace thuộc đâu, và `TraceSummary.reassignedFrom` báo khi hai giá trị khác nhau.
 
-Không bao giờ suy ra `orphaned` từ một lần gọi lỗi: `workspaces.list()` thất bại thì mọi workspace giữ trạng thái `unknown` và không nhóm lại.
+### 3.8 Bộ kiểm đường dẫn và tuần tự hoá
 
-**Gán lại** (`traces.reassign`), chỉ do người dùng khởi động, không có cơ chế tự đoán (REQ-057f):
-
-1. Kiểm tra `to` là một workspace **đang có** trong `workspaces.list()`, và `from` khác `to`. Sai → `E_TRACE_REASSIGN_INVALID`, không chạm gì.
-2. `dryRun: true` trả `{ traces, bytes }` để giao diện hỏi xác nhận trước.
-3. Đích chưa có thư mục → `rename` cả thư mục (một thao tác, không mất dữ liệu nếu bị ngắt).
-4. Đích đã có thư mục → gộp theo từng file tháng: đọc cả hai, loại trùng bằng cùng `dedupeRecords` của §3.3, ghi tạm → `fsync` → `rename`, rồi xoá file nguồn. Toàn bộ bước này nằm trong khoá tuần tự ở §3.8, nên **không có bản ghi nào được nối vào nguồn trong lúc gộp**. Bị ngắt vì tiến trình chết thì tệ nhất là còn cả hai bản; bộ đọc loại trùng nên **không nhân đôi** (REQ-057e).
-5. `meta.json` của đích giữ giá trị của đích; `meta.json` nguồn bị xoá cùng thư mục nguồn.
-6. Không chạm file nào ngoài `<install home>/traces` (REQ-057g), với đúng bộ kiểm đường dẫn ở §3.5.
-
-Gán lại **không** sửa `workspaceId` bên trong từng bản ghi: trường đó ghi lại sự thật lịch sử. Vị trí thư mục là thứ quyết định trace thuộc workspace nào, và `TraceSummary` báo `reassignedFrom` khi hai giá trị khác nhau.
-
-### 3.8 Bộ kiểm đường dẫn dùng chung và tuần tự hoá ghi
-
-Hai cơ chế dưới đây là **bắt buộc và dùng chung** cho mọi thao tác ghi, xoá và gán lại. Chúng nằm trong đúng một module (`server/trace-store.ts`); không module nào được tự dựng đường dẫn vào kho.
-
-**Bộ kiểm đường dẫn (no-follow).** Kiểm tiền tố chuỗi sau `resolve` **không đủ**: một thành phần là symlink vẫn trỏ ra ngoài kho dù đường dẫn trông hợp lệ. Thứ tự kiểm, thất bại ở bất kỳ bước nào → `E_TRACE_STORE_UNWRITABLE` và **không chạm đĩa**:
+Dùng chung cho mọi thao tác ghi, xoá, gán lại, và nằm trong đúng `server/trace-store.ts`; không module nào tự dựng đường dẫn vào kho. Thất bại ở bất kỳ bước nào → `E_TRACE_STORE_UNWRITABLE`, không chạm đĩa:
 
 1. `workspaceId` khớp `^[A-Za-z0-9._-]{1,128}$` và không phải `.` hay `..`.
 2. Đường dẫn sau `resolve` nằm trong `<install home>/traces`.
-3. `lstat` **từng thành phần** từ `<install home>` xuống tới file đích: thành phần nào là symlink thì từ chối, không đi theo.
-4. Mở file đích với `O_NOFOLLOW` (macOS và Linux đều có); file tạm dùng `O_CREAT | O_EXCL | O_NOFOLLOW` và được tạo **trong cùng thư mục** với file nó sẽ thay, để `rename` là thao tác trong một hệ thống file.
+3. `lstat` **từng thành phần** từ `<install home>` xuống file đích; symlink ở bất kỳ cấp nào bị từ chối (kiểm tiền tố chuỗi không đủ).
+4. File đích mở với `O_NOFOLLOW`; file tạm `O_CREAT | O_EXCL | O_NOFOLLOW`, trong cùng thư mục với file nó thay.
 
-Đây là cùng nguyên tắc mà §10 áp cho đường đọc `.beads/issues.jsonl` và `src/paths-guard.ts` áp cho trình cài đặt; điểm khác là ở đây nó áp cho cả đường **ghi** và **xoá**.
+File trong `<install home>/ui/` dùng cùng khuôn (`assertNoSymlinkOnPath`, `writeStoreFileAtomically`).
 
-**Tuần tự hoá.** Bộ thu thập và mọi handler RPC chạy trong **cùng một tiến trình** plugin server (Paseo fork một worker cho mỗi plugin), nên không cần khoá file:
+**Tuần tự hoá:** bộ thu thập và mọi handler chạy trong cùng tiến trình plugin, nên dùng một **mutex bất đồng bộ trong tiến trình, khoá theo `workspaceId`** cho mọi thao tác sửa kho. Đọc không lấy khoá; dòng cuối ghi dở bị bỏ qua và tính vào `skippedLines`. Bộ thu thập gặp khoá thì chờ, quá 5 giây thì bỏ lượt và log một dòng. Tiến trình khác duy nhất có thể ghi kho là CLI lúc gỡ; lệnh gỡ chạy `paseo plugin remove` **trước** khi chạm `traces/`.
 
-- Một **mutex bất đồng bộ trong tiến trình, khoá theo `workspaceId`**, bao mọi thao tác **sửa** kho: nối bản ghi, viết lại khi xoá, và `rename`/gộp khi gán lại. Không có hai thao tác sửa nào của cùng một workspace chạy xen nhau.
-- **Đọc không lấy khoá.** Kho là dòng-một-bản-ghi nên đọc trong lúc có người nối là an toàn; một dòng cuối bị ghi dở (tiến trình chết giữa `write`) bị bộ đọc bỏ qua và tính vào `skippedLines`.
-- Bộ thu thập gặp khoá thì **chờ**, không bỏ bản ghi; chờ quá hạn (mặc định 5 giây) thì bỏ qua lượt đó và log một dòng, đúng nguyên tắc "lỗi lưu vết không bao giờ chặn agent" ở §3.3.
+## 4. Data model
 
-**Tiến trình khác duy nhất có thể ghi vào kho là CLI `paseo-bm` lúc gỡ.** Không dùng khoá cho việc này; dùng **thứ tự**: lệnh gỡ chạy `paseo plugin remove` (plugin dừng) **trước** khi chạm `traces/`, nên không có lời nối nào còn chạy. Điều kiện ra của WP-213 phải chứng minh đúng thứ tự đó.
-
-## 4. Data Model của API
-
-Đặt trong `shared/contracts.ts` bằng Zod, cùng chỗ với ba hợp đồng hiện có; `shared/` vẫn không import Node hay React Native.
+Mọi hợp đồng ở `plugin/shared/contracts.ts` bằng Zod; `shared/` không import Node hay React Native. Trường thêm sau luôn là tuỳ chọn để payload cũ vẫn parse (client và server ship cùng bundle, nhưng hai chiều vẫn phải đọc được).
 
 ### 4.1 Kiểu dùng chung
 
 ```ts
 confidence = "exact" | "inferred" | "unknown"
-
-evidence = { kind: "report" | "shell" | "file" | "agent" | "timeline",
-             detail: string, agentId: string | null, at: string | null }
-
-usage = { inputTokens, cachedInputTokens, outputTokens,
-          costUsd: number | null,
-          costBasis: "provider" | "estimated" | "unavailable",
-          model: string | null, pricesUpdatedAt: string | null }
+evidence   = { kind: "report" | "shell" | "file" | "agent" | "timeline" | "skill",
+               detail: string, agentId: string | null, at: string | null }
+usage      = { inputTokens, cachedInputTokens, outputTokens, costUsd: number | null,
+               costBasis: "provider" | "estimated" | "unavailable",
+               model: string | null, pricesUpdatedAt: string | null }
+traceState = "running" | "waiting_user" | "completed" | "stopped" | "failed" | "unknown"
+tier       = "Small" | "Medium" | "Large"
 ```
 
-### 4.2 `TraceSummary`
+`costBasis: "provider"` còn trong lược đồ nhưng server không bao giờ đặt nó (§9).
 
-| Trường | Kiểu | Ngữ nghĩa |
-|---|---|---|
-| `traceId` | string | `<managerAgentId>:<seq của entry yêu cầu>` khi dựng từ timeline Manager; `req:<requestId>` khi requestId đã biết. Bền trong kho lưu vết |
-| `requestId` | string hoặc null | `req-<YYYYMMDDTHHMMSSZ>` do Manager sinh |
-| `requestedAt` | string | Thời điểm yêu cầu mở đầu |
-| `excerpt` | string | Một dòng đầu của yêu cầu, đã cắt và đã che bí mật |
-| `state` | enum | `running` , `waiting_user` , `completed` , `stopped` , `failed` , `unknown` (§7.3) |
-| `workerIds` / `reviewerIds` | string[] | Agent gán vào trace |
-| `reviewCalls` | number hoặc null | **Số lượt gọi review** quan sát được |
-| `guardrailReported` | object hoặc null | Bộ đếm Worker tự báo, nguyên văn |
-| `durationMs` | number hoặc null | null khi đang chạy hoặc không đo được |
-| `usage` | usage | Tổng của mọi agent trong trace |
-| `beadCounts` | object | `{ created, updated, closed, ready }`, mỗi số kèm `confidence` |
-| `tier` | enum hoặc null | `Small` , `Medium` , `Large` |
-| `linking` | confidence | Việc nhóm trace chắc tới đâu |
-| `agentsMissing` | string[] | Agent có trong lưu vết nhưng không còn trên máy |
-| `workspaceState` | enum | `live` , `archived` , `orphaned` , `unknown` (§3.7) |
-| `reassignedFrom` | string hoặc null | `workspaceId` gốc, khi trace đã được gán lại |
-| `notices` | string[] | "dữ liệu có thể thiếu", "kho lưu vết tắt", … |
-| `usageByModelRole` | `[{ role, model \| null, usage }]` | *Thêm 2026-09-18 ([delta 20260918](paseo-bm-delta-20260918-manager-mode-model-metrics.md) §4.3, REQ-058e).* Token và chi phí theo vai trò × model hiệu lực, cho biểu đồ "Tokens by model × role" ở tổng quan. Tuỳ chọn trong lược đồ, server luôn gửi |
+### 4.2 `TraceSummary` (một dòng của danh sách)
 
-### 4.3 `TraceDetail`
+| Trường | Ngữ nghĩa |
+|---|---|
+| `traceId` | `req:<requestId>` khi biết request; ngược lại `<managerAgentId>:<seq>`. Bền trong kho |
+| `requestId` | `req-<YYYYMMDDTHHMMSSZ>` do Manager sinh, hoặc `null` |
+| `requestedAt`, `excerpt` | Thời điểm và một dòng đầu của lời hỏi (đã cắt, đã che); `excerpt: null` khi chưa ghi được lời hỏi |
+| `turn` | `{ index, total }` khi request có nhiều lượt người dùng hỏi (§6.2); `null` khi chỉ một |
+| `state` | §7.3 |
+| `workerIds`, `reviewerIds` | Agent gán vào trace |
+| `reviewCalls` | Số **lượt** gọi review quan sát được (khác số agent Reviewer) |
+| `guardrailReported` | Bộ đếm Worker tự báo, nguyên văn |
+| `durationMs` | `null` khi đang chạy hoặc không đo được |
+| `usage` | Tổng của mọi agent |
+| `messageCount`, `userMessageCount` | Tin gửi và nhận; tin người dùng gõ thẳng cho một agent của request |
+| `workerUsage` | `[{ agentId, title, usage }]` — cho biểu đồ Worker tốn token nhất |
+| `usageByModelRole?` | `[{ role, model, usage }]` theo model hiệu lực — cho biểu đồ model × vai trò |
+| `errors?` | §7.4 |
+| `beadCounts` | `{ created, updated, closed, ready }`, mỗi số `{ count, confidence }` |
+| `tier`, `linking` | Mức Worker tự phân loại; độ chắc của việc nhóm |
+| `agentsMissing` | Agent có trong lưu vết nhưng không còn trên máy |
+| `workspaceState`, `reassignedFrom` | §3.7 |
+| `notices` | "dữ liệu có thể thiếu", "kho lưu vết tắt", … |
 
-```
-TraceDetail = TraceSummary + {
-  sent:     { userRequest, workerInitialPrompts[], reviewRequests[] },
-  received: { reports[], reviews[], managerReplies[] },
-  timing:   { totalMs|null, managerTurns[], workers[], reviewers[], basis: string },
-  usageByAgent: [{ agentId, role, usage, runtime?: [{ model, thinkingOptionId, modeId, recorded, turns }] }],
-  usageByModel?: [{ model|null, usage }],   // errata 2026-09-18, xem dưới
-  beads:    [{ id, title|null, statusNow|null, action, confidence, evidence[] }],
-  workflowSteps: [{ step, status: "done"|"skipped"|"unknown", confidence, evidence[], note|null }],
-  subAgentTraces:[{ agentId, subAgentType|null, description|null, count }],
-}
-```
-
-*Errata 2026-09-18 ([delta 20260918](paseo-bm-delta-20260918-manager-mode-model-metrics.md) §4.3, REQ-058a–d):* `usageByAgent[].runtime` gộp các lượt của một agent thành một dòng cho mỗi tổ hợp `(model, thinkingOptionId, modeId, recorded)` kèm số lượt, theo thứ tự gặp đầu tiên. Lượt có `runtime` → `recorded: true`; lượt cũ không có `runtime` nhưng có `usage.model` → giữ model đó, thinking/mode `null`, `recorded: false`; không có cả hai → `model: null`. `usageByModel` là token và chi phí theo model hiệu lực, cộng lại đúng bằng `usage` của trace. Hai trường tuỳ chọn trong lược đồ, server luôn gửi.
-
-`workflowSteps` luôn trả đủ danh sách bước cố định, đúng thứ tự: `classify_tier`, `prd`, `design`, `adr`, `plan`, `convert_to_beads`, `polish_beads`, `implement`, `review_batches`, `build_and_tests`, `close_with_evidence`.
-
-### 4.4 `BeadStats`
+### 4.3 `TraceDetail` = `TraceSummary` + …
 
 ```
-{ total, open, inProgress, blocked, closed, ready,
-  readAt, source, skippedLines, present }
+sent:     { userRequest, workerInitialPrompts[], reviewRequests[] (+ batchId) }
+received: { reports[], reviews[], managerReplies[] }
+timing:   { totalMs | null, managerTurns[], workers[], reviewers[], basis }
+usageByAgent: [{ agentId, role, usage, runtime?: [{ model, thinkingOptionId, modeId, recorded, turns }] }]
+usageByModel?: [{ model | null, usage }]
+beads:    [{ id, title | null, statusNow | null, action: created|updated|closed|ready, confidence, evidence[] }]
+workflowSteps: [{ step, status: done|skipped|unknown, confidence, evidence[], note | null }]  // luôn đủ 12 bước
+subAgentTraces: [{ agentId, subAgentType | null, description | null, count }]
+userMessages: [traceMessage]              // tin người dùng gõ thẳng cho agent của request
+skills: [{ agentId, skill, at | null }]   // skill mỗi agent đã load
 ```
+
+- `sent.userRequest` là đúng tin mà bước dựng lại đã chọn làm lời hỏi, không phải tin đầu của lượt Manager đầu (có thể là một `BM-REPORT`).
+- `runtime` gộp các lượt của một agent thành một dòng cho mỗi tổ hợp `(model, thinkingOptionId, modeId, recorded)`, theo thứ tự gặp đầu. Lượt có `runtime` → `recorded: true`; lượt cũ chỉ có `usage.model` → thinking/mode `null`, `recorded: false` (giao diện: `not recorded`); `recorded: true` với `thinkingOptionId: null` là `provider default`.
+- `usageByModel` cộng lại đúng bằng `usage` của trace.
+
+### 4.4 Beads
+
+```
+BeadStats = { total, open, inProgress, blocked, closed, ready, readAt, source, skippedLines, present }
+BeadRow   = { id, title | null, status, issueType, priority: 0..4 | null, labels[], createdAt, updatedAt,
+              closedAt, ready, parentId | null, work: { started, last } | null }
+BeadDetail = BeadRow + { description, closeReason, blockedBy[], children[] }
+work mark = { agentId, at, title | null, status | null }   // status null: Paseo không còn liệt kê agent
+```
+
+`present: false` = workspace không có `.beads/issues.jsonl`: trạng thái rỗng, không phải lỗi.
 
 ## 5. Hợp đồng RPC
 
-| RPC | Input | Output | Ngữ nghĩa |
-|---|---|---|---|
-| `traces.list` | `{ workspaceId, limit?, cursor? }` | `{ traces: TraceSummary[], nextCursor, truncated, store, notices }` | Danh sách trace của workspace, mới nhất trước. `limit` trần 50 |
-| `traces.get` | `{ workspaceId, traceId }` | `{ trace: TraceDetail }` | Đọc sâu một trace; không dựng lại được → `E_TRACE_NOT_FOUND` |
-| `traces.delete` | `{ workspaceId, scope: { traceId } \| { before } \| { allOfWorkspace: true }, dryRun? }` | `{ deleted: { traces, bytes }, store }` | `dryRun: true` chỉ đếm, không xoá. Ghi vào đúng kho lưu vết, không nơi nào khác |
-| `traces.reassign` | `{ fromWorkspaceId, toWorkspaceId, dryRun? }` | `{ moved: { traces, bytes }, store }` | Gán lại toàn bộ trace của một workspace không còn sang một workspace đang có (§3.7). `dryRun: true` chỉ đếm |
-| `beads.stats` | `{ workspaceId }` | `{ stats: BeadStats }` | Đọc `.beads/issues.jsonl` của workspace. Không có file → `present: false`, không lỗi |
+Tên RPC phải khớp `^[a-z][a-z0-9._-]*$` (SDK). Mọi RPC dưới đây chỉ đọc, trừ những dòng ghi rõ.
 
-**Mã lỗi mới.** Design gốc §4.4 là **bộ mã duy nhất** của sản phẩm ("không được đặt mã tại chỗ"), nên năm mã dưới đây phải được ghi vào đó bằng delta-change ở §14:
+| RPC | Input → Output | Ghi chú |
+|---|---|---|
+| `traces.list` | `{ workspaceId, limit?, cursor? }` → `{ traces, nextCursor, truncated, store, notices }` | Mới nhất trước; `limit` trần `TRACE_LIST_LIMIT` = 50 |
+| `traces.get` | `{ workspaceId, traceId }` → `{ trace: TraceDetail }` | Không dựng lại được → `E_TRACE_NOT_FOUND` |
+| `traces.delete` | `{ workspaceId, scope, dryRun? }` → `{ deleted: { traces, bytes, running }, store }` | **Ghi** kho (§3.5); `scope` là đúng một trong ba dạng |
+| `traces.reassign` | `{ fromWorkspaceId, toWorkspaceId, dryRun? }` → `{ moved: { traces, bytes }, store }` | **Ghi** kho (§3.7) |
+| `traces.workspaces` | `{}` → `{ workspaces: [{ workspaceId, state, lastKnownName, lastKnownDirectory, lastSeenAt, bytes }] }` | Mọi workspace có lịch sử; lối vào lịch sử của workspace đã đóng |
+| `beads.stats` | `{ workspaceId }` → `{ stats }` | §10 |
+| `beads.list` | `{ workspaceId }` → `{ beads: BeadRow[], stats }` | §10 |
+| `beads.get` | `{ workspaceId, id }` → `{ bead: BeadDetail }` | Id không có → `E_BEAD_NOT_FOUND` |
+| `beads.action` | `{ workspaceId, id, action: implement\|delete\|close }` → `{ managerId, created }` | **Gửi** một yêu cầu cho Manager (§13.4) |
+| `beads.lookup` | `{ workspaceId, ids (≤ 100) }` → `{ beads }` | Chỉ giữ id có thật trong kho |
+| `workspaces.overview` | `{}` → `{ workspaces: [{ workspaceId, beads: { total, inProgress, blocked, ready } \| null, runningWorkers, runningAgents: { manager, worker, reviewer } }] }` | Mọi workspace chưa lưu trữ; `runningWorkers` = `runningAgents.worker`, giữ cho bản đọc cũ |
+| `chat.peers` | `{ agentId }` → `{ owner, peers, workspaceId }` | §15.2 |
+| `chat.beads` | `{ workspaceId, agentId }` → `{ beads: [{ bead, mentions, lastMentionedAt }], scannedItems }` | §15.7 |
+| `chat.waiting` | `{}` → `{ waiting: WaitingWorker[], fallback: [{ managerId, workspaceId, incident }] }` | §15.5, §15.8; `fallback` = sự cố `pending` của Manager sống (luật server: design gốc §7.10) |
+| `answers.marks` | `{}` → `{ keys, notices }` | §15.6 |
+| `answers.mark` | `{ key (1–400 ký tự), marked }` → `{ keys, notices }` | **Ghi** `ui/answer-marks.json` |
+| `setup.status` | `{}` → tools, skills, extras, … | §11.3; chỉ chạy `--version` |
+| `setup.install-tool` | `{ tool: br\|bv, confirmed: true }` → `{ command, code, tail }` | **Chạy** trình cài; `confirmed` bắt buộc là `true` |
+| `roles.instructions` | `{ role }` → `{ base, extra, full, path \| null, maxChars }` | §11.3 |
+| `roles.save-extra` | `{ role, text }` → `{ extra, full }` | **Ghi** `role-extras.json` |
+
+**Mã lỗi** (`DASHBOARD_ERROR_CODES`, ghi vào bộ mã chung của design gốc; lỗi ném dạng `Error` có `message` bắt đầu bằng mã, client đọc bằng `errorCodeOf`):
 
 | Mã | Khi nào |
 |---|---|
 | `E_TIMELINE_UNAVAILABLE` | Paseo không trả được timeline của một agent |
-| `E_BEADS_STORE_UNREADABLE` | `.beads/issues.jsonl` có nhưng không đọc được: quyền, vượt trần 32 MB, hoặc symlink ra ngoài workspace |
-| `E_TRACE_NOT_FOUND` | `traceId` không còn trong kho lưu vết |
-| `E_TRACE_STORE_UNWRITABLE` | Không ghi hoặc không xoá được kho: quyền, hết đĩa, `workspaceId` không hợp lệ, đường dẫn thoát ra ngoài |
-| `E_TRACE_STORE_SCHEMA_TOO_NEW` | `meta.json` có `schemaVersion` cao hơn mức bản đang chạy hiểu |
-| `E_TRACE_REASSIGN_INVALID` | Gán lại vào một workspace không tồn tại, hoặc `from` trùng `to` |
+| `E_BEADS_STORE_UNREADABLE` | `.beads/issues.jsonl` có nhưng không đọc được: quyền, vượt 32 MB, symlink ra ngoài workspace |
+| `E_TRACE_NOT_FOUND` | `traceId` không còn trong kho |
+| `E_TRACE_STORE_UNWRITABLE` | Không ghi/xoá được kho: quyền, hết đĩa, `workspaceId` sai, đường dẫn thoát ra ngoài |
+| `E_TRACE_STORE_SCHEMA_TOO_NEW` | `meta.json` có `schemaVersion` cao hơn mức hiểu |
+| `E_TRACE_REASSIGN_INVALID` | Gán lại vào workspace không tồn tại, hoặc `from` trùng `to` |
+| `E_BEAD_NOT_FOUND` | Id bead không có trong kho |
+| `E_ROLE_EXTRA_INVALID` | Chỉ dẫn thêm sai (vượt 8 000 ký tự) |
+| `E_TOOL_PRESENT` | `setup.install-tool` cho công cụ đã có |
+| `E_TOOL_INSTALL_FAILED` | Lệnh cài chạy lỗi |
 
-Lỗi được ném dưới dạng `Error` có `message` bắt đầu bằng mã, để client đọc bằng `errorCodeOf` sẵn có.
+Các mã `E_ROLE_SETTINGS_*` và `E_FALLBACK_*` trong cùng danh sách thuộc các RPC ở design gốc (§7.3.6, §7.10); màn hình hiện chúng theo §11.3 và §15.8.
 
-## 6. Nhóm trace theo yêu cầu
+## 6. Dựng trace theo request
 
-1. **Lấy agent.** `agents.list` theo nhãn (`bm.role=manager|worker|reviewer`), `includeArchived: true`, phân trang 200; lọc theo `agent.workspaceId`. Dựng cây bằng `parentAgentId`; parent không có trong tập thì node là gốc.
-2. **Đọc kho lưu vết** của workspace. Bucket **khoá theo `requestId`**, nên N lượt Manager của cùng một request luôn là **một** dòng. Một trace mở ra từ lượt Manager có `sent` không phải `BM-REPORT`, **hoặc** từ lượt Manager đọc được `requestId` — trường hợp sau `requestText` để `null` và dòng đó nói rõ là chưa ghi được lời yêu cầu (plugin chỉ thu từ lúc nó được nạp). Lượt Manager **không** nêu `requestId` thuộc về **request mà chính Manager đó nêu ở lượt kế tiếp của nó**; không có lượt nào sau đó của cùng Manager nêu request thì mới mở một dòng tạm. *Errata 2026-09-17 (b):* một request được **tách thành các đoạn** trên màn hình — mỗi lượt Manager mà tin nhắn đầu là lời người dùng thật (`origin === "user"`) mở một đoạn, và danh sách hiện một dòng cho mỗi đoạn; `requestId`, cách Worker báo cáo và ngân sách review **không đổi** (owner chốt Q23). Biểu đồ vẫn đếm request (Q27). Xem [delta 20260917e](paseo-bm-delta-20260917e-manager-screen-and-commands.md) §4.3. *Errata 2026-09-17 (a):* mã cũ tìm lượt kế tiếp trong **cả workspace**, nên một lượt của Manager đã lưu trữ chui vào request của Manager sau đó, cách 18 giờ — xem [delta 20260917d](paseo-bm-dashboard-delta-20260917d-request-attribution.md) §3 A và §4 A. Xem [delta 20260916-acceptance-fixes](paseo-bm-delta-20260916-acceptance-fixes.md) vị trí 1, 2, 6.
-3. **Lấy `requestId`**, dừng ở nguồn đầu tiên có giá trị:
-   a. nhãn `bm.requestId` của agent (REQ-051) → `linking: "exact"`;
-   b. trường `requestId:` trong một `BM-REPORT` của trace → `"exact"`;
-   c. dòng `requestId: req-…` trong prompt khởi tạo Worker (`manager.md` bắt buộc có) → `"exact"`;
-   d. không có → nhóm theo thời gian: Worker có `agentCreatedAt` nằm trong lượt Manager của trace và chưa thuộc trace nào → `"inferred"`;
-   e. không xếp được → nhóm "không rõ yêu cầu", `"unknown"`; **không** gán bừa vào trace gần nhất.
-4. **Gán Reviewer** theo `parentAgentId` = một Worker của trace (hoặc nhãn `bm.batchId` khi có).
-4b. **Bản ghi của agent không còn trên máy.** Một bản ghi tự nêu `requestId` của nó, nên nó được gắn vào trace kể cả khi `agents.list` không còn agent đó — người dùng có thể **xoá** Worker, và lưu trữ thì `includeArchived: true` vẫn thấy nhưng xoá thì không. Agent đó vào `agentsMissing` và dòng trace nói rõ "không còn trên máy này". Nếu chỉ gắn qua danh sách agent thì byte vẫn nằm trong kho mà phần việc biến khỏi màn hình ([delta](paseo-bm-delta-20260916-acceptance-fixes.md) vị trí 8, chân thứ ba của D-8).
-5. **Đếm hai loại số** (REQ-042b): `reviewerIds.length` là số agent; `reviewCalls` là số lượt, đếm bằng số bản ghi `sent` của Reviewer không phải `BM-REVIEW`. Lệch với `guardrail` Worker tự báo thì hiện cả hai và đánh dấu.
+### 6.1 Nhóm
 
-**Bộ đọc `BM-REPORT`** (`server/bm-report.ts`) khoan dung theo REQ-050: tìm mọi khối bắt đầu bằng dòng `BM-REPORT` (có hay không có rào ```), đọc từng dòng `khoá: giá trị`, khoá không phân biệt chữ hoa, khoá lạ vào `unparsedFields`, khoá thiếu để `null`; `none` và chuỗi rỗng là "không có"; id bead tách theo dấu phẩy hoặc khoảng trắng và lọc theo dạng id kho beads. Loại trùng theo `(agentId, phase, requestId, at)` để một báo cáo được trích dẫn lại không bị đếm hai lần.
+1. **Lấy agent.** `agents.list` mọi agent (`includeArchived: true`, trang 200); vai trò lấy từ nhãn `bm.role`, thiếu nhãn thì theo provider `bm-*` (`roleOfAgent`, `labelled: false`); lọc theo `agent.workspaceId`. Cây theo `parentAgentId`; parent không có trong tập thì node là gốc.
+2. **Đọc kho** của workspace. Bucket **khoá theo `requestId`**, nên mọi lượt Manager của một request là một trace. Trace mở ra từ lượt Manager có tin đến không phải `BM-REPORT`, **hoặc** lượt Manager đọc được `requestId` (khi đó lời hỏi `null` và dòng nói rõ là chưa ghi được — plugin chỉ thu từ lúc được nạp).
+3. **Lượt Manager không nêu `requestId`** thuộc request mà **chính Manager đó** nêu ở lượt kế tiếp của nó; không có thì mở một dòng tạm. Phạm vi là một Manager, không phải cả workspace: báo cáo tiến độ của Worker tới Manager y như lời người dùng, nên lời của chính Manager ở lượt sau là bằng chứng; tìm trong cả workspace từng kéo lượt của một Manager đã lưu trữ vào request của Manager khác 18 giờ sau. Không thêm ngưỡng thời gian.
+4. **Lấy `requestId`**, dừng ở nguồn đầu tiên có giá trị: nhãn `bm.requestId` của agent → `exact`; `requestId:` trong một `BM-REPORT` của trace → `exact`; dòng `requestId: req-…` trong prompt khởi tạo Worker → `exact`; id `req-…` viết trần mà tin gửi tới agent nhắc nhiều hơn mọi id khác cộng lại → `inferred` (Manager 0.1.0 viết id trần và không gắn nhãn; tin Worker cũng dẫn request khác); Worker có `agentCreatedAt` nằm trong lượt Manager của trace và chưa thuộc trace nào → `inferred`; không xếp được → nhóm "không rõ yêu cầu", `unknown`, **không** gán bừa vào trace gần nhất.
+5. **Reviewer** theo `parentAgentId` = một Worker của trace (hoặc nhãn `bm.batchId`). Một báo cáo nêu request **khác** không bao giờ là bằng chứng của request này, dù nằm trong bản ghi nào (`reportsBelongingTo`); lời hỏi của request là tin người dùng **sớm nhất** trong các lượt đã gộp.
+6. **Bản ghi của agent không còn trên máy** vẫn gắn vào trace theo `requestId` của chính nó; agent đó vào `agentsMissing` và dòng nói "không còn trên máy này" (xoá Worker thì `includeArchived` cũng không thấy nó).
+7. **Hai loại số:** `reviewerIds.length` là số agent; `reviewCalls` đếm tin `sent` của Reviewer không phải `BM-REVIEW` và không phải thông báo STOP plugin gửi. Lệch với `guardrail` Worker tự báo thì hiện cả hai và đánh dấu.
+8. **Tin người dùng** (`origin: "user"`) gửi cho Worker/Reviewer vào `userMessages` theo vai trò của agent nhận, kể cả khi agent đã bị xoá.
 
-**Id bead đọc từ lệnh `br`** chỉ lấy ở **tham số vị trí**, tức phần trước cờ đầu tiên và sau khi làm trắng phần trong dấu nháy; `br create` không nêu id nào vì `br` tự sinh id, và `--help`/`--dry-run` không phải hành động. Quét cả dòng lệnh sẽ đọc `-l "feature:format-date"` và văn bản trong `-r "…"` thành id bead (delta vị trí 4).
+### 6.2 Tách đoạn theo lượt người dùng hỏi
 
-**"Báo cáo mới nhất"** trong mục này và §7.3 nghĩa là mới nhất **theo thời gian**: báo cáo tới một trace từ nhiều lượt duyệt nên thứ tự mảng là thứ tự tới, không phải thứ tự thời gian.
+Một request được tách thành **các đoạn** trên màn hình: mỗi lượt Manager mà tin đầu là lời người dùng thật (`origin === "user"`, không dựa câu chữ) mở một đoạn, và danh sách hiện một dòng cho mỗi đoạn với `turn: { index, total }` (`summariseSegments`). Các dòng của một request dùng chung `traceId`, nên khoá danh sách là `traceId#index`. `requestId`, cách Worker báo cáo và ngân sách review không đổi. Biểu đồ và số "request có lỗi" đếm **request** (dòng `index === 1` hoặc `turn: null`), không đếm dòng.
 
-## 7. Đo thời gian
+### 6.3 Bộ đọc `BM-REPORT` / `BM-REVIEW` (`shared/bm-report.ts`)
 
-### 7.1 Mốc đo (cố định, và in ra giao diện)
+- Khoan dung: mọi khối bắt đầu bằng dòng `BM-REPORT` (có hay không có rào ```), đọc từng dòng `khoá: giá trị`, khoá không phân biệt hoa thường, khoá lạ vào `unparsedFields`, khoá thiếu `null`; `none` và chuỗi rỗng là "không có". Khối kết thúc ở dòng đầu tiên không có dạng `key: value` — nên một khối `BM-QUESTIONS` ngay sau không làm báo cáo đọc sai.
+- `requestId` trong văn xuôi đọc dễ dãi với markdown (`REQUEST_ID_PATTERN`: "- `requestId`: `req-…`" vẫn khớp). Lượt Manager không mang `requestId` lấy nó từ tin trả lời của chính Manager (`managerRequestId`: Manager sinh id trong lượt mở request, nên tin đến chưa có), **không** từ lệnh `date -u +req-%Y%m%dT%H%M%SZ` (đó là chuỗi định dạng).
+- Id bead tách theo dấu phẩy, chấm phẩy hoặc khoảng trắng, lọc theo dạng id; nhóm `( … )` chỉ chứa id thì mở ra, nhóm khác là chú thích và bị bỏ cả nhóm (`(b2 fix: no-logging AC)` không sinh bead `no-logging`). Dạng rút gọn `.N` (`.2`, `.2.1`) mở theo gốc của id đầy đủ gần nhất đứng trước (`x-gcj, x-gcj.1, .2` → `x-gcj.2`); rút gọn không có id đứng trước bị bỏ và làm danh sách không trọn. Cắt ở trần thì bỏ luôn mảnh bị cắt ngang (`…60a.435` cắt thành `…60a.4` là bead khác); trường danh sách chặn ở `MAX_LIST_CHARS` = 8 000 ký tự; danh sách đọc không trọn vào `incompleteFields` (số đếm là cận dưới, suy luận).
+- Loại trùng theo `(agentId, phase, requestId, at)`. Khối có giá trị dạng mẫu (`a | b`, như `verdict: approved | changes-required`) là tin thường, không phải báo cáo.
+- `BM-REVIEW`: `batchId`, `verdict`, `blockingCount` đếm từ dòng `- severity: blocking`.
+- "Báo cáo mới nhất" luôn là mới nhất **theo thời gian**, không phải phần tử cuối mảng.
+
+### 6.4 Id bead trong lệnh `br` (`server/shell.ts`)
+
+Chỉ lấy ở **tham số vị trí**: phần trước cờ đầu tiên, sau khi làm trắng phần trong dấu nháy. `br create` không nêu id nào (`br` tự sinh), `--help`/`--dry-run` không phải hành động, `br close` trong chuỗi trích dẫn không phải đóng bead. Đếm bead và bảng bước quy trình dùng chung module này. Quét cả dòng lệnh từng đọc `-l "feature:format-date"` và chữ trong `-r "…"` thành id bead. **Đếm bead** (`beadCounts`): `created`/`updated`/`closed` là hợp của mọi báo cáo (theo thời gian) và lệnh `br create`/`update`/`close`; `ready` là **trạng thái**, không phải hành động, nên chỉ lấy từ báo cáo **mới nhất** (báo cáo `beads-done` cũ nói 3 bead sẵn sàng không được thắng `finished` nói `beadsReady: none`). Có báo cáo → `exact`, danh sách đọc không trọn → `inferred`; chỉ có lệnh `br` → `inferred`; không có gì → `unknown`. Không lọc bằng cách tra kho `.beads`: bead vừa tạo có thể chưa vào kho, nên "không có trong kho" không đủ để loại; luật vị trí phân biệt ngay tại nguồn.
+
+## 7. Thời gian, trạng thái và lỗi
+
+### 7.1 Mốc đo (cố định, in ra giao diện)
 
 | Số | Bắt đầu | Kết thúc |
 |---|---|---|
-| Tổng thời gian của yêu cầu | `startedAt` của lượt Manager mở đầu | Muộn hơn giữa: `endedAt` của lượt Manager cuối, và `at` của `BM-REPORT` `finished` |
+| Tổng của request | `startedAt` của lượt Manager mở đầu | Muộn hơn giữa `endedAt` lượt Manager cuối và `at` của `BM-REPORT` `finished` |
 | Một lượt | `startedAt` (hook `turn_started`) | `endedAt` (hook `turn_ended`) |
-| Một Worker | `agentCreatedAt` | `at` của `BM-REPORT` `finished`; thiếu thì `endedAt` của lượt cuối |
-| Một Reviewer | `agentCreatedAt` | `at` của `BM-REVIEW` cuối; thiếu thì `endedAt` của lượt cuối |
+| Một Worker | `agentCreatedAt` | `at` của `BM-REPORT` `finished`; thiếu thì `endedAt` lượt cuối |
+| Một Reviewer | `agentCreatedAt` | `at` của `BM-REVIEW` cuối; thiếu thì `endedAt` lượt cuối |
 
-### 7.2 Quy tắc bắt buộc
+Lượt còn `activeTurn` → `ms = null`, hiện thời gian đã trôi, không hiện tổng. Đây là thời gian treo, gồm cả lúc chờ người dùng, và giao diện nói câu đó. Thiếu mốc → `null` kèm notice, không bao giờ 0.
 
-- Lượt còn `activeTurn` → `ms = null`, state `running`, giao diện hiện thời gian đã trôi từ `activeTurn.startedAt`, **không** hiện tổng.
-- Đây là **thời gian treo**, gồm cả thời gian chờ người dùng trả lời; giao diện phải nói câu này (REQ-043c).
-- Thiếu mốc → `null` và một notice, không bao giờ suy ra 0.
+### 7.2 Plugin reload giữa lượt
 
-### 7.3 Suy ra `state`
+Mốc `turn_started` mất; bản ghi vẫn ghi với `startedAt` suy từ entry đầu của lượt kèm notice.
 
-Thứ tự, dừng ở điều kiện khớp đầu tiên: có agent `status = "running"` → `running`; `BM-REPORT` cuối là `blocked` → `waiting_user`; có agent `status = "error"` hoặc lượt cuối `outcome = failed` → `failed`; `BM-REPORT` cuối là `finished` → **`stopped` nếu `blockers` khác rỗng, còn lại `completed`** (`worker.md` gửi `finished` cả khi xong việc lẫn khi bị dừng); Worker tồn tại nhưng không còn `running` và không có `finished` → `stopped`; còn lại → `unknown`.
+### 7.3 `state`
 
-**Chỉ báo cáo cuối cùng quyết định.** Một lượt `canceled` trước đó là quá khứ, không phải kết luận: F-1 của đợt nghiệm thu bị ngắt bốn lần rồi làm xong, và luật cũ ("có lượt `canceled` bất kỳ → `stopped`") báo một request **đã giao xong** là "Stopped" (delta vị trí 5).
+Dừng ở điều kiện khớp đầu tiên: có agent `running` → `running`; `BM-REPORT` mới nhất là `blocked` → `waiting_user`; có agent `error` hoặc lượt cuối `failed` → `failed`; `BM-REPORT` mới nhất là `finished` → `stopped` nếu `blockers` khác rỗng, còn lại `completed`; Worker tồn tại, không `running`, không có `finished` → `stopped`; còn lại `unknown`. Chỉ báo cáo cuối quyết định: một lượt `canceled` trước đó là quá khứ (một request bị ngắt bốn lần rồi làm xong vẫn là `completed`).
 
-## 8. Suy ra bước feature-workflow (REQ-045)
+### 7.4 Đếm lỗi (`TraceSummary.errors`)
 
-> Errata 2026-09-17: bảng thành **12 bước** (thêm `review_plan` sau `plan`); `review_plan`, `convert_to_beads`, `polish_beads`, `implement` lấy thêm tín hiệu từ trường `skillsUsed` và bằng chứng `skill`; `guardrail` không có đoạn `polish` không còn là phủ định; Vừa chỉ được bỏ `review_plan`, Lớn không được bỏ bước nào; bằng chứng `file` tuyệt đối được đọc theo thư mục của workspace. Xem [delta workflow-skills](./paseo-bm-delta-20260917-workflow-skills.md) §5.5 (`design-delta-20260917-workflow-skills`).
+`state` là trạng thái **hiện tại**, nên một request lỗi rồi chạy lại xong đọc là Completed và số lần lỗi mất. `errors` giữ con số đó, cộng từ bản ghi đã có, không đổi bộ thu thập hay file trace:
 
-| Bước | Tín hiệu `exact` | Tín hiệu `inferred` |
+```ts
+traceErrorsSchema = z.object({
+  failedTurns: nonneg,  // lượt của DÒNG NÀY kết thúc `failed`
+  agentErrors: nonneg,  // Worker/Reviewer của request (không tính Manager) ở `error` mà KHÔNG có bản ghi lượt failed nào trong trace
+  fallbacks:   nonneg,  // sự cố fallback của request có `signal: "completed"`
+})
+```
+
+- Ba số **không chồng nhau**, nên cộng lại là số lần lỗi thật: một lần hết hạn mức ghi một lượt failed, để agent ở `error` và mở một sự cố fallback, và phải đọc là **một** lỗi. Sự cố `signal: "failed"` sinh từ đúng một lượt đã failed nên không tính lại; sự cố của Manager (`requestId` null) không thuộc request nào.
+- `failedTurns` đếm theo từng đoạn (§6.2). `agentErrors` và `fallbacks` thuộc cả request: chỉ đặt ở dòng `index === 1`, lấy từ bản tóm tắt **cả trace** (đọc theo đoạn thì một Worker chết ở lượt sau bị đếm hai lần), các dòng sau để 0.
+- Nguồn `fallbacks`: `SummariseDeps.fallbacksOf(requestId)`; `dashboard-rpc.ts` đọc `role-fallback-state.json` **một lần** (`incidentsIn`) cho cả `fallbackCountsOf(incidents, workspaceId)` lẫn việc nhận ra Reviewer thay thế. Mọi trạng thái sự cố đều tính.
+
+## 8. Bước feature-workflow
+
+Bảng luôn đủ 12 bước, đúng thứ tự: `classify_tier`, `prd`, `design`, `adr`, `plan`, `review_plan`, `convert_to_beads`, `polish_beads`, `implement`, `review_batches`, `build_and_tests`, `close_with_evidence`.
+
+| Bước | `exact` | `inferred` |
 |---|---|---|
-| `classify_tier` | `tier:` trong `BM-REPORT` | câu phân loại trong lời Worker |
-| `prd` | `filesChanged` dưới `docs/product/` | `tool_call` `write`/`edit` dưới `docs/product/` |
-| `design` | `filesChanged` dưới `docs/design/` | `write`/`edit` dưới `docs/design/` |
-| `adr` | `filesChanged` dưới `docs/adr/` | `write`/`edit` dưới `docs/adr/` |
-| `plan` | `filesChanged` dưới `docs/plans/` | `write`/`edit` dưới `docs/plans/` |
-| `convert_to_beads` | `beadsCreated` không rỗng, hoặc `phase: beads-done` | `shell` có `br create` |
-| `polish_beads` | `guardrail` ghi `polish n/max` với `n ≥ 1`; **và phủ định chính xác:** mọi `guardrail` đọc được đều ghi `polish 0` → bước này **không xảy ra**, thắng mọi suy luận từ timeline | `shell` có `br update` chạm **≥2 bead khác nhau** trong một lượt sau `br create`. Sửa nhiều lần **cùng một** bead là việc thường, không phải polish ([delta](paseo-bm-delta-20260916-acceptance-fixes.md) vị trí 7) |
-| `implement` | `phase: bead-implemented` | `write`/`edit` ngoài `docs/` trong workspace |
+| `classify_tier` | `tier:` trong `BM-REPORT` | — |
+| `prd` / `design` / `adr` / `plan` | `filesChanged` dưới `docs/product/` / `docs/design/` / `docs/adr/` / `docs/plans/` | `write`/`edit` dưới thư mục đó (đường dẫn tuyệt đối đọc theo thư mục workspace) |
+| `review_plan` | `skillsUsed` có `reviewing-plan` | Worker/Reviewer load skill `reviewing-plan` |
+| `convert_to_beads` | `beadsCreated` không rỗng, `phase: beads-done`, hoặc `skillsUsed` có `converting-plan-to-beads` | load skill đó; hoặc `br create` |
+| `polish_beads` | `skillsUsed` có `polishing-beads`; hoặc `guardrail` ghi `polish n/max` với `n ≥ 1` | load skill đó; hoặc `br update` chạm **≥ 2 bead khác nhau** trong một lượt (sửa nhiều lần cùng một bead là việc thường) |
+| `implement` | `phase: bead-implemented`, hoặc `skillsUsed` có `implementing-beads` | `write`/`edit` ngoài `docs/` và `.beads/` trong workspace |
 | `review_batches` | có Reviewer và có `BM-REVIEW` | có agent con `bm.role=reviewer` |
-| `build_and_tests` | `buildAndTests` khác `not run` | `shell` chạy lệnh test hoặc build của repo |
-| `close_with_evidence` | `beadsClosed` không rỗng và bead đó `closed` trong kho | `shell` có `br close` |
+| `build_and_tests` | `buildAndTests` khác "not run" | `shell` chạy lệnh test/build của repo |
+| `close_with_evidence` | `beadsClosed` không rỗng (ghi chú thêm "confirmed closed in the store" khi kho nói bead đã `closed`) | `shell` có `br close` |
 
-**Quy tắc `skipped`.** Chỉ đặt `skipped` khi cả hai điều đúng: `tier` đọc được, và REQ-036 cho phép mức đó bỏ bước đó (`Small` bỏ `prd`/`design`/`adr`/`plan`/`polish_beads`; `Medium` chỉ được `skipped` cho `polish_beads`, vì "tài liệu không bị ảnh hưởng" không quan sát được). Mọi trường hợp khác là `unknown`. Đây là điều giữ D-5: **không có bằng chứng phủ định thì không kết luận phủ định.** Ngược lại, khi **có** bằng chứng phủ định chính xác — ví dụ `guardrail` ghi `polish 0` — bước đó là `skipped` kèm đúng câu báo cáo làm ghi chú, kể cả ở `Large` (nơi không mức nào được bỏ bước), vì lúc đó ta **biết** chứ không phải suy đoán.
+**Phủ định chính xác** thắng mọi suy luận và cho `skipped` (`confidence: exact`) kèm câu làm ghi chú: mọi `guardrail` có đoạn polish đều ghi `polish 0` (guardrail không có đoạn polish không nói gì); báo cáo `finished` mới nhất liệt kê `skillsUsed` mà thiếu skill của bước (`review_plan`, `polish_beads`; `skillsUsed` đọc không trọn thì không chứng minh gì). Thiếu `converting-plan-to-beads` hay `implementing-beads` **không** bao giờ là phủ định. Mọi báo cáo `finished` ghi `beadsCreated` (hay `beadsClosed`) rỗng thì `br create` (hay `br close`) trong timeline không được tính là bằng chứng của `convert_to_beads` (hay `close_with_evidence`). `build_and_tests` suy luận chỉ khi lệnh test/build đứng **đầu** một đoạn lệnh (một `grep 'pytest'` không phải chạy test); `buildAndTests` dạng "not run / none / n/a / skipped / no" không phải bằng chứng.
 
-## 9. Token và chi phí (REQ-052)
+**`skipped` theo mức:** khi `tier` đọc được, mọi mức (Small, Medium, Large) đều được bỏ `prd`, `design`, `adr`, `plan`, `review_plan`, `polish_beads` (`SKIPPABLE_BY_TIER`) — tài liệu đi theo thay đổi, không theo mức (REQ-022d). Mức Small còn được bỏ `convert_to_beads`, `review_batches`, `close_with_evidence`: thay đổi Small không có bead và không review trừ khi người dùng yêu cầu (REQ-022c, REQ-024c); có bằng chứng thì vẫn là `done`. `implement` và `build_and_tests` không bao giờ `skipped` theo mức. `skipped` theo mức mang `confidence: exact` và ghi chú nêu lý do (`skippedNote`). Không có bằng chứng và không được bỏ → `unknown` (không có `tier` thì ghi chú "no tier was reported, so nothing can be called skipped"): không có bằng chứng phủ định thì không kết luận phủ định.
 
-1. **`lastUsage.totalCostUsd` không dùng được cho một request.** Đo trên 12 lượt Manager thật, nó **chỉ tăng** (0,3956 → 0,4492 → … → 2,2712) trong khi token bên cạnh lên xuống theo từng lượt: đó là **tổng luỹ kế của phiên agent**, không phải chi phí một lượt. Bản ghi lượt vì vậy **không** ghi nó, và chi phí một request **luôn** là số tạm tính ở bước 2 (delta vị trí 3, đổi một phần Q-035).
-2. **Tạm tính:** tính từ `shared/prices.ts`, khớp theo model id của agent:
-   `cost = inputTokens×in + cachedInputTokens×cacheRead + outputTokens×out`. Tính token cache **riêng** theo đơn giá cache: coi token cache như token vào bình thường sẽ báo đắt hơn thực tế nhiều lần. → `costBasis: "estimated"`.
-3. **Model không có trong bảng:** `costUsd: null`, `costBasis: "unavailable"` — giao diện chỉ hiện token.
-4. `shared/prices.ts` có `pricesUpdatedAt` và giao diện **luôn** hiện ngày đó cạnh số tiền, kèm nhãn "estimated". **Không gọi mạng để lấy giá.**
-5. Bảng giá là dữ liệu sẽ cũ: nguồn sự thật là trang giá công bố của từng provider, và giá trên Amazon Bedrock hoặc Google Vertex **khác** giá API gốc. Vì vậy số tiền luôn là *tạm tính*, không phải hoá đơn (REQ-052f).
-6. *Errata 2026-09-18 ([delta 20260918](paseo-bm-delta-20260918-manager-mode-model-metrics.md) §4.3, owner chốt Q38):* mọi phép gộp theo model — tổng tiền của trace, dòng token theo model, biểu đồ model × vai trò — dùng **model hiệu lực** của bản ghi: `runtime.model`, không có thì `usage.model`. Con số chỉ khác trước ở ca profile để trống model: token trước đây "không có giá" nay được định giá theo model đã chạy.
+## 9. Token và chi phí
 
-> Khảo sát để điền bảng lần đầu (giá API gốc của Anthropic, kiểm 2026-06-24, USD trên 1 triệu token, in/out): `claude-opus-5` 5/25 · `claude-sonnet-5` 2/10 · `claude-haiku-4-5` 1/5. Phải kiểm lại tại thời điểm implement và ghi đúng `pricesUpdatedAt`; model của provider khác (ví dụ Codex) lấy từ trang giá của chính provider đó.
+1. **`lastUsage.totalCostUsd` không dùng được**: đó là tổng luỹ kế của phiên agent (đo trên 12 lượt Manager: chỉ tăng 0,3956 → … → 2,2712 trong khi token lên xuống). Bản ghi lượt không ghi nó; chi phí một request **luôn** là số tạm tính.
+2. **Tạm tính** từ `shared/prices.ts` theo model: `inputTokens×in + cachedInputTokens×cacheRead + outputTokens×out` — token cache tính riêng theo đơn giá cache. → `costBasis: "estimated"`. Model không có trong bảng thì thử danh sách model của provider (`runtime.provider`; `metadata.cost` của `listModels`).
+3. Không định giá được → `costUsd: null`, `costBasis: "unavailable"`, giao diện chỉ hiện token.
+4. Giao diện luôn hiện `pricesUpdatedAt` cạnh số tiền kèm nhãn "estimated"; số tiền là tạm tính, không phải hoá đơn (giá Bedrock/Vertex khác giá API gốc). **Không gọi mạng lấy giá.**
+5. Mọi phép gộp theo model (tổng tiền, dòng theo model, biểu đồ model × vai trò) dùng **model hiệu lực**: `runtime.model`, không có thì `usage.model`.
 
-## 10. Đọc kho beads (REQ-046)
+## 10. Đọc kho beads
 
-- **Đường dẫn:** `<workspace.directory>/.beads/issues.jsonl`, `directory` lấy từ snapshot workspace của SDK. Không dùng cwd của tiến trình plugin.
-- **Chống thoát thư mục:** `resolve` rồi kiểm tra vẫn nằm trong `directory`; `lstat` từng thành phần, symlink trỏ ra ngoài → `E_BEADS_STORE_UNREADABLE`. Bản riêng nhỏ trong `server/`: plugin payload không import `src/`.
-- **Đọc:** stream theo dòng; dòng hỏng thì bỏ qua và tăng `skippedLines`; trần 32 MB.
-- **Loại trùng:** nhiều dòng cùng `id` thì giữ dòng có `updated_at` muộn nhất.
-- **Tính số:** `total` là số id phân biệt; `open`/`inProgress`/`blocked`/`closed` theo `status`; `ready` là `status = "open"` và **mọi** phụ thuộc loại `blocks` trỏ tới bead đã `closed` — `parent-child` không chặn; phụ thuộc trỏ tới id không tồn tại thì coi là chưa đóng.
-- **Cache:** theo `(path, mtimeMs, size)`.
-- **Chỉ đọc.** Không gọi `br`, không tiến trình con, không ghi, không chạm `beads.db`.
+- **Thư mục workspace** lấy từ snapshot SDK theo thứ tự `directory`, `workspaceDirectory`, `cwd`, và chỉ với workspace không phải worktree mới thêm `projectRootPath`. Worktree **không bao giờ** dùng `projectRootPath` làm dự phòng: đó là bản checkout chính, và các worktree sẽ thấy chung beads của nó. Không dùng cwd của plugin.
+- **Đường dẫn** `<dir>/.beads/issues.jsonl`: `resolve` rồi kiểm vẫn trong `dir`; `lstat` từng thành phần, symlink ra ngoài → `E_BEADS_STORE_UNREADABLE`. Bản riêng trong `server/` (payload không import `src/`).
+- **Đọc** theo dòng, trần 32 MB; dòng hỏng bỏ qua và tăng `skippedLines`; nhiều dòng cùng `id` giữ `updated_at` muộn nhất. Cache theo `(path, mtimeMs, size)`.
+- **Số:** `total` = số id phân biệt; `open`/`inProgress`/`blocked`/`closed` theo `status`; `ready` = `open`, không phải epic, và **mọi** phụ thuộc `blocks` trỏ tới bead `closed` (`parent-child` không chặn; id không tồn tại coi là chưa đóng).
+- **Chỉ đọc**: không gọi `br`, không tiến trình con, không ghi, không chạm `beads.db`.
+- **Ai đang làm bead** (`BeadRow.work`, chỉ cho bead `in_progress`, `server/bead-work.ts`): `br` không ghi thời điểm bắt đầu và Worker không đặt `assignee`, nên suy từ kho lưu vết, chỉ lượt của Worker. `started` = lệnh gần nhất đưa bead sang `in_progress` (`--status in_progress`, `--status=in_progress`, `-s in_progress`, `--claim`); `last` = lệnh hoặc `BM-REPORT` gần nhất nhắc id (khớp nguyên id: `x.1` không khớp `x.12`). Không có lệnh đặt trạng thái → "start not recorded"; Worker khác nhận bead sau thì hiện Worker mới với giờ hoạt động của nó, không mượn giờ bắt đầu cũ. Không có kho lưu vết thì chỉ thiếu tên Worker.
 
-## 11. Hiệu năng
+## 11. Surface "Beads Manager"
+
+### 11.1 View và đường quay lại
+
+`DashboardViewName = "setup" | "workspaces" | "dashboard" | "beads"`; surface mở ở `SURFACE_HOME_VIEW = "setup"`.
+
+| View | `backOf` | `backLabelOf` (nhãn trợ năng của ←) |
+|---|---|---|
+| `setup` | `null` (không có ←) | `null` |
+| `workspaces` | `setup` | "Back to Beads Manager setup" |
+| `dashboard`, `beads` | `workspaces` | "Back to workspaces" |
+
+```
+sidebar / Command Center "Open Beads Manager"
+  → setup ──(Workspaces)──> workspaces ──(Metric | Beads)──> dashboard | beads
+Command Center "Open Beads Metric" → dashboard ──(←)──> workspaces ──(←)──> setup
+```
+
+Command Center và slash command không truyền được gì vào surface, nên dùng **ô chờ một chỗ** `createSlot<string>()`: `launchRequests` (mở Manager), `dashboardRequests` (mở Metric của workspace), `launcherNotices` (thông báo của slash command). `take()` báo cho người nghe **chỉ khi thật sự xoá một giá trị**, nên bấm để ẩn thông báo ẩn ngay và không có vòng lặp. `runPendingRequest` trả `null` **trước** `take()` khi launcher đang `pending`, và effect của surface chạy lại khi trạng thái launcher đổi, nên yêu cầu mở Manager đến giữa chừng không bị rơi (ô một chỗ: yêu cầu mới nhất thắng).
+
+### 11.2 Dải trạng thái
+
+`launcherStatusLines({ commandNotice, canOpenAgents, state })` trả theo thứ tự: thông báo slash command (tone `muted`, `dismissable`, nhãn trợ năng `"<text>. Dismiss."`); `OLD_HOST_WARNING` khi host thiếu `navigation.openAgent` (tone `warning`); các dòng `describeLauncherState(state)`: `pending` → "Opening Beads Manager…"; `opened` → "Started a new…" / "Reopened the existing Beads Manager…" (`muted`), rồi tone `warning` cho Manager sống khác (`otherManagerIds`, "…nothing was archived or deleted."), `modeNotice`, `toolsNotice` (nguyên văn server, design gốc §7.3); `error` → `danger` "Could not open Beads Manager (<code>). <message>". Dòng không ẩn được là `Text` có `accessibilityLiveRegion="polite"`. `LauncherStatus` được dựng **một lần** trong `ManagerLauncherSurface` và đặt ở mọi view của surface (Setup, Workspaces, Metric, Beads) — slash command có thể mở surface ở bất kỳ view nào. Tab "Beads" (§14) không có dải này.
+
+### 11.3 Màn Setup (màn chính)
+
+```
+[Beads Manager ............................ (Workspaces)]
+Setup for this machine: beads tools, agent skills, and each role's model and extra instructions.
+<dải trạng thái> · spinner · lỗi · setupHeadline · paseoToolsWarnings
+[Beads tools] [Agent skills] [Agents]          ← StatusTabs, một tab mỗi lần
+<nội dung tab>
+paseo-bm <version>
+```
+
+- Tab: `SETUP_TABS` = `tools` "Beads tools" · `skills` "Agent skills" · `agents` "Agents"; `DEFAULT_SETUP_TAB = "tools"`, là `useState` nên mở lại surface thì về tab đầu. Mỗi tab có `hint` (vd. "br and bv on the daemon's PATH"), làm nhãn trợ năng `"<label>: <hint>"`. Mọi thứ báo vấn đề (`setupHeadline`, `paseoToolsWarnings`) nằm **trên** dãy tab, để không tab nào che được một công cụ thiếu. Tab `agents` gồm "Roles & models" rồi "Additional instructions".
+- Nút "Workspaces" (`secondaryButton`, nhãn trợ năng "Open the workspace list: Beads Manager, metrics and beads of each workspace").
+
+**Beads tools** (`setup.status`, `setup-tools.ts`):
+
+- Tìm `br`, `bv` (và `bd`, chỉ thông tin) trên `PATH` của daemon cộng `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `~/.cargo/bin`, `~/go/bin`; chạy `--version` song song (timeout 5 s). Không bao giờ chạy `bv` trần (TUI). `br` chỉ tính là có khi đúng tên `br`.
+- Mỗi công cụ hiện trạng thái, đường dẫn (PATH của daemon có thể khác terminal), phiên bản, bản mới nhất đã biết (`LATEST_KNOWN`, hằng số có ngày kiểm, không tra mạng), lệnh cài và lệnh cập nhật với nút Copy (về chữ "Copy" sau 2 s).
+- Lệnh cài: có `brew` → `brew install dicklesworthstone/tap/<tool>`; không có, `br` → script `beads_rust/main/install.sh | bash -s -- --skip-skills` (để paseo-bm không ghi vào thư mục skill); không có, `bv` → script `beads_viewer` ghim commit `a43b8e85a39664381566abdfd85dc8fcbfdcb773`. Lệnh này phải trùng lệnh của CLI (test khoá; `src/` và `plugin/` không dùng chung code).
+- Nút Install chỉ hiện khi thiếu. Hộp xác nhận nêu nguyên văn lệnh và cảnh báo lệnh tải mã từ mạng. `setup.install-tool` chạy lệnh trong shell đăng nhập (`/bin/zsh -lc` nếu `SHELL` là zsh, còn lại `/bin/bash -lc`), timeout 300 s, trả mã thoát và 40 dòng cuối. Công cụ đã có → `E_TOOL_PRESENT`; lỗi → `E_TOOL_INSTALL_FAILED`. Cập nhật không chạy từ màn hình. Plugin không bao giờ tự cài.
+
+**Agent skills:** `setup.status` đọc (chỉ đọc) thư mục skill của tiến trình daemon (`~/.agents/skills`, `~/.claude/skills` theo `CLAUDE_CONFIG_DIR`, `~/.codex/skills` theo `CODEX_HOME`, và thư mục của Pi/OpenCode khi có). Claude Code chỉ tính thư mục của nó; Codex tính `~/.agents/skills` hoặc thư mục của nó. Nút **Test** đọc lại từng `SKILL.md`: đọc được, có frontmatter `name:` trùng tên thư mục → `ok` / `missing` / `broken` kèm giờ kiểm. Màn hiện lệnh `skills add` tương đương; plugin không cài skill.
+
+**Roles & models** (`setup-screen.tsx`, logic ở `setup-model.ts`; hợp đồng server và luật kiểm ở design gốc §7.3.6):
+
+- `RolesSection` đọc `roles.settings` (khoá `ROLES_SETTINGS_KEY`) và `roles.options` của mọi provider gốc trong vai và chuỗi dự phòng (`rowOptionProviders`). Mỗi vai một hàng: `RoleMark`, tên vai, `roleSettingText` = `<Provider> · <model label> · thinking <id | provider default>[ · mode <label>]`, nút Edit/Close. Dưới thẻ: `warnings` của `roles.settings` (tone `warning`, một lần cho cả thẻ) và `ROLES_APPLY_NOTICE` "Changes apply to agents created after you save. Running agents keep their model and thinking."
+- **Form Edit** (`RoleEditForm`, `roleFormView`): chip Provider từ `roles.settings.providers` (không alias `bm-*`; provider đang lưu luôn có mặt); Model từ `roles.options`, dưới đó giá `~$<in> / $<out> per 1M tokens` khi có; Thinking ẩn khi model không có mức, lựa chọn đầu "Provider default (<mức>)"; Mode ẩn khi `capability: none`, lựa chọn đầu "Not set", Reviewer trên `tiered` không thấy mode `dangerous`/`planning`; `capability: unknown` mà đang có mode → cảnh báo lưu sẽ xoá mode. Save bật khi nháp đủ provider + model và khác bản lưu. Form giữ `revision` lúc mở: `E_ROLE_SETTINGS_CONFLICT` → "The configuration changed elsewhere; reopen Roles & models." và đọc lại `roles.settings`. Lưu xong: "Saved." kèm từng `warnings` dưới hàng (`notified` không hiện).
+- **Chuỗi dự phòng** (`FallbackBlock`) dưới mỗi vai có trong `roles.settings.fallback`: `On a usage limit:` chip Ask me / Auto switch / Off; Auto switch → cảnh báo chi phí (Manager thêm "The chat you use may be replaced."). Mỗi mục `Fallback <n>  <Provider> · <model> · thinking …[ · mode …]`, nút ↑ ↓ Edit Remove, dòng giá; "+ Add fallback" khi dưới `MAX_FALLBACK_ENTRIES` (3). Form mục dùng đúng luật form vai. Sửa chỉ nằm ở máy khách tới khi bấm "Save fallbacks" (`roles.save-fallback` cả chuỗi, `revision` lúc bắt đầu sửa) hoặc "Discard".
+
+**Additional instructions** (`role-extras.ts`):
+
+- Lưu ở `<install home>/role-extras.json` (`0600`, file tạm rồi rename, chặn symlink): `{ "version": 1, "roles": { "manager", "worker", "reviewer" } }`, mỗi vai tối đa `MAX_EXTRA_CHARS` = 8 000 ký tự. Là dữ liệu người dùng: không hash trong `install.json`, cập nhật và `--prune` không đụng.
+- **Chỉ nối thêm**: đầy đủ = gốc + `---` + `## Additional instructions from the user` + `These add to the rules above and never override a RULES item.` + nội dung. Áp cho agent tạo sau khi lưu (hook `agent.create` cho Worker/Reviewer, `manager.ensure` cho Manager); file không đọc được thì dùng bản gốc, không chặn việc tạo agent. Plugin settings của Paseo không dùng được cho việc này vì server không đọc được chúng.
+- Preview hiện toàn văn bản đầy đủ dạng Markdown.
+
+### 11.4 Danh sách Workspaces
+
+- Dòng đầu `[←] Workspaces`, câu giới thiệu một dòng, dải trạng thái, rồi một dòng cho mỗi workspace theo **đúng thứ tự `workspaces.list` trả về** (`activity_at desc`); không ghim, không kéo-thả.
+- Mỗi dòng: tên (1 dòng) và project; `workspaceStats` — bốn con số kèm icon `Layers` tổng, `CircleDot` đang làm, `Ban` bị chặn, `Hammer` Worker đang chạy (tone `plain` khi > 0, `muted` khi 0; tổng luôn `muted`; không kho bead thì một dòng "–"); chấm 8 px cạnh tên (`RunningDot`, `runningDotState`); ba nút nhỏ có icon trên một hàng, cả trên điện thoại: `WORKSPACE_ACTIONS` = Go to (`Bot`), Metric (`ChartColumn`), Beads (`ListChecks`). Go to là nút chính và ẩn khi host thiếu `navigation.openAgent`; Metric và Beads chỉ đọc nên luôn còn (REQ-040d).
+- **Chấm đang chạy:** tổng `runningAgents` > 0 → tone `success`, nhấp nháy `Animated.loop` opacity 1 ↔ `DIM_OPACITY` 0,3, mỗi nhịp `PULSE_MS` = 900 ms (`useNativeDriver: false`), kèm chữ `1 Worker, 1 Reviewer`; = 0 → chấm mờ 0,3, tone `muted`, không chữ, nhãn trợ năng "No Beads agent running"; chưa có số liệu → không vẽ. `AccessibilityInfo.isReduceMotionEnabled()` đúng → chấm đặc, không hoạt ảnh (hỏi lỗi coi là sai). Poll chỉ đổi số thì không khởi động lại vòng lặp.
+- Danh sách bỏ workspace đang lưu trữ (`archivingAt`). `workspaces.list` và `traces.workspaces` là query một lần, chạy ở mọi view: yêu cầu "Open Beads Metric" cần nhãn từ `workspaces.list` (thiếu thì dùng `workspaceId`).
+- `workspaces.overview` chỉ được đọc khi view là `workspaces` (`overviewPolling`: `OVERVIEW_POLL_MS` = 10 000 ms), vì mỗi lần đọc chạm kho bead của mọi workspace.
+- Cuối danh sách: "Closed workspaces with history" (`closedWorkspaces`: có trong `traces.workspaces` nhưng không còn được liệt kê, trạng thái khác `unknown`, mới nhất trước), mỗi mục mở màn Metric của lịch sử đó; màn Metric của workspace mới mở lại đề nghị gán lịch sử sang nó.
+- Tiêu đề màn Metric/Beads là `screenTitleOf(label, project)`: thêm tên project khi tên workspace khác tên project, để không nhầm hai kho bead.
+
+## 12. Màn Metric
+
+`DashboardPanel(props: WorkspaceScreenProps)`; `WorkspaceScreenProps` = `PluginSurfaceProps` + `workspaceId`, `workspaceLabel?`, `onBack?`, `backLabel?`, `status?`. Đầu màn là `WorkspaceScreenHeader`: ← (khi có `onBack`), tiêu đề `Metric · <tên>` (khi có `workspaceLabel`), nút Refresh; dải trạng thái ngay dưới.
+
+1. **Tổng quan** — `overviewCards`, bảy thẻ: Requests (số **dòng**; hint running · waiting · done), **Errors**, Beads, Agents, Messages, Tokens (in · cached · out), Cost (estimated; số request chưa định giá).
+   - `errorTally` cộng `errors` của các dòng đang hiện (dòng không có trường đọc là 0), `requests` đếm theo `traceId`. `errorCard`: tổng 0 → giá trị `0`, hint "no error recorded"; ngược lại hint `"<n> request(s) with an error · <a> failed turn(s) · <b> agent error(s) · <c> provider fallback(s)"`, bỏ phần bằng 0. "request(s) with an error" nói rõ đơn vị vì thẻ Requests bên cạnh đếm dòng. Thẻ không tô màu.
+   - Cảnh báo dung lượng (§3.6) ngay dưới hàng thẻ.
+2. **Biểu đồ** (khi có dòng): "Requests, last 7 days — each request counted once" (`requestsPerDay`, chỉ dòng mở request); "Top 5 heaviest Workers (tokens)" (`heaviestWorkers`, bấm mở Worker khi host có `navigation.openAgent`); "Tokens by model × role" (`tokensByModelRole`, model không có giá chỉ hiện token).
+3. **Các request** — `RoleLegend`, rồi `groupTraces` (nhóm theo `workspaceState` theo thứ tự live → archived → orphaned → unknown, bỏ nhóm rỗng; nhóm orphaned có câu gợi ý gán lại hoặc xoá — đó là cách duy nhất người dùng tìm thấy tính năng gán lại; tên và đường dẫn cuối biết được hiện ở mục "Closed workspaces with history" của danh sách Workspaces). Mỗi dòng một `RequestCard` gọn (`RoleMark` của Manager, lời hỏi 1 dòng, badge trạng thái, dòng phụ `[turn i of n · ]<tier | size ?> · <thời gian> · <n> tokens · <chi phí>[ · 💬 <n> from you]` — phần cuối khi người dùng nhắn thẳng cho agent của request); bấm để mở **graph** Request → Worker → Reviewer (`requestGraph`), chi tiết chỉ tải khi mở. Bấm từng node để xem: đã hỏi gì, trả lời gì, thời gian, token, model/thinking/mode (`runtimeLines`), bead, skill đã load, tin người dùng gửi thẳng (`💬 You → <agent>`), và bước quy trình trên một dòng chip (`stepChip`: xanh lá ✓ exact, xanh ✓~ inferred, xám – không cần, vàng ? không rõ). Các quy tắc trung thực (độ chắc của việc nhóm, số đếm lệch, workspace không còn) nằm ở node Request. Nút "Open agent" chỉ hiện khi host có `navigation.openAgent`.
+   - **Dòng model** (`runtimeLines`): mỗi phần tử `runtime` một dòng `Model: <m> · thinking: <id | provider default> · mode: <id | unknown> · <n> turn(s)`; `recorded: false` → `Model: <m> · thinking/mode: not recorded · …`, hay `Model: not recorded · …` khi model `null`. Manager không có node riêng: dòng của nó nằm ở node Request, dạng `Manager <id ngắn> — Model: …`, cùng dòng `Tokens by model: <model> <n> tokens · $… · …` (`tokensByModelLine`; model không có giá chỉ hiện token, model `null` là `unknown model`). Phụ đề node Worker/Reviewer thêm tên model khi agent chạy đúng một model biết tên (`singleModelOf`).
+4. **Storage** gập ở cuối: dung lượng, xoá theo trace / cũ hơn `OLDER_THAN_DAYS` = 30 ngày / cả workspace, gán lại (`dashboard-actions.tsx`, `createConfirmationGate`: không có "Yes" mặc định).
+5. `PRIVACY_NOTICE` ở cuối: màn hình hiện và lưu hội thoại agent.
+
+Màn gọi `traces.list` một lần, không truyền `cursor` (trang đầu, tối đa 50); `truncated: true` thì màn ghi "Older requests are not shown." **Chưa có nút tải thêm** (REQ-041 (c), REQ-049 (a)) dù server đã trả `nextCursor`.
+
+**Icon vai trò** (`ROLE_MARK`, icon Lucide của `Icon` trong `@getpaseo/plugin/client/react-native` trên nền tròn cùng màu `opacity: 0.16`): request/Manager `BotMessageSquare` tone `info`; Worker `Hammer` tone `success`; Reviewer `ScanEye` tone `warning`. Màu `danger` để dành cho lỗi; hình icon khác nhau nên vẫn phân biệt được khi hai màu gần nhau. Tên icon sai thì Paseo không vẽ gì, không lỗi.
+
+## 13. Màn Beads
+
+`BeadsScreen(props: WorkspaceScreenProps)`, dùng chung cho surface và tab "Beads". Đầu màn: ← · `Beads · <tên>` · `doneText` (`✓ <closed> / <total> done`, nhãn trợ năng "`<closed> of <total> beads done, epics not counted`", chỉ hiện khi có dữ liệu) · Refresh. Rồi dải trạng thái và dòng `Read from <đường dẫn file>` (để hai workspace cùng một bản sao beads không trông như bị lẫn).
+
+### 13.1 Tổng quan (`beadsOverview`)
+
+Năm mục: Status (Total, Ready, In progress, Blocked, Closed); Progress (phần trăm đã đóng, **không tính epic**, không theo bộ lọc — `doneText` đọc cùng số); By type; By priority (P0 → P4, P?); Time (trung vị tạo → đóng, "Longest in progress" tính từ `work.started` nếu biết, Stale = mở và không cập nhật quá 7 ngày). Không có biểu đồ tạo/đóng theo ngày.
+
+### 13.2 Bộ lọc và sắp
+
+Ô tìm theo id và tiêu đề; chip lọc Status / Type / Priority / Labels (`facetsOf`: số của một giá trị là số bead nó sẽ hiện khi kết hợp các bộ lọc khác; nhãn gom theo tiền tố `feature`, `area`, `component`, …, mỗi nhóm hiện `LABEL_PREVIEW` = 5 giá trị trước "+N more"); chip bộ lọc đang bật có ✕ và "Clear all" (tone `plain` — nó chỉ bỏ bộ lọc); Sort theo Updated / Created / Closed / Priority, mới nhất trước, bead thiếu giá trị luôn cuối. Trong một facet chọn nhiều là "hoặc", giữa các facet là "và". Chip Status xếp theo `STATUS_ORDER` (Ready trước), khác thứ tự cột `STATUS_GROUP_ORDER` (§13.3); gộp hai thứ tự là đổi thứ người dùng thấy, phải hỏi owner.
+
+### 13.3 Kanban
+
+Mọi quyết định ở `beads-model.ts`; `KanbanBoard` và `StatusTabs` là view không hook trong `ui.tsx`.
+
+- **Cột** theo `STATUS_GROUP_ORDER` = `in_progress` → `blocked` → `ready` → `closed`. `statusBucket`: `closed`, `in_progress`, `blocked` theo `status`; bead mở mà chưa sẵn sàng hay mang trạng thái lạ (`deferred`) là `blocked`. `kanbanColumns(beads, { showClosed, limit? })` nhận danh sách **đã lọc và đã sắp**, giữ thứ tự trong cột, trả `{ columns, visible, closed }`; mỗi cột `{ bucket, label, total, beads, hidden, empty: "Nothing here." }`. Cột rỗng vẫn trả về và vẽ (bố cục không nhảy khi lọc); Closed chỉ có khi `showClosed`.
+- **Giới hạn** `KANBAN_COLUMN_LIMIT` = 100 dòng **mỗi cột**, để cột Closed dài không ăn chỗ của In progress; cột bị cắt nói `+<hidden> more · narrow the filters to see them`.
+- **Bố cục** `kanbanLayout(width, compact, buckets)`, `width` đo bằng `onLayout` của vùng danh sách: chưa đo (`null`) → theo `compact` của host (`tabs` / `columns` đủ cột); `width < 2 × KANBAN_MIN_COLUMN` (260) → `tabs`; còn lại `columns` với `perRow = min(buckets, floor(width / 260))`. Mỗi cột trong một ô `flexBasis: (100 / perRow)%` với padding làm khoảng cách (phần trăm cộng đúng 100%, `gap` trên hàng sẽ đẩy ô cuối xuống). Chế độ `tabs`: `StatusTabs` (`accessibilityRole="tablist"`, mỗi tab `"tab"` + `accessibilityState.selected`, chữ `<tên> <số>`), cột mở sẵn là `defaultKanbanBucket` (cột đầu có bead), và `visibleKanbanBucket` quay về mặc định khi cột đang chọn biến mất.
+- **Nút mắt** ở dòng `<visible> of <total> beads`: `Eye`/`EyeOff` + `Closed <n>`, `accessibilityState.selected`, nhãn "Show/Hide closed beads (<n>)". `closedBeadsVisibility = createSessionToggle(true)`: **mặc định hiện**, nhớ trong phiên app, dùng chung giữa surface và tab. Mọi bead khớp đều đã đóng mà đang ẩn → "All <n> matching beads are closed. Show them with the eye button." Workspace không có bead → "This workspace has no beads yet."
+
+### 13.4 Dòng bead, chi tiết và hành động
+
+- **Dòng** (`BeadRowCard`, dùng chung với panel "Beads in this chat"): tên trước (tối đa 2 dòng khi gập, ▸/▾), rồi id, chip `P<n> · <type>`, chip trạng thái; bead `in_progress` có thêm dòng `RoleMark` Worker + `workSummary.headline` (`<Worker> · since <giờ> (<bao lâu>) · <trạng thái>`, hoặc "start not recorded"). Bấm để mở chi tiết ngay trong thẻ.
+- **Chi tiết** (`BeadDetailPanel`, `beads.get`): mô tả dạng Markdown, lý do đóng, phụ thuộc; khung "Being worked on" với nút "Open the Worker"; các hành động (`actionsFor`: bead đã đóng chỉ có Delete).
+- **Hành động** qua Manager của workspace, không tự tạo Worker: `beads.action` gọi `ensureManager` rồi `paseo.agents.ref(managerId).send(actionMessage(...))`; Manager tạo Worker theo `manager.md`. Như vậy `requestId`, nhãn, báo cáo, ngân sách review và trace giữ nguyên, và Metric thấy request như mọi request khác. Tin gửi (tiếng Anh, cho agent):
+
+  ```
+  [Beads screen] The user asks: <implement|delete|close> bead <id> ("<title>").
+  <chỉ dẫn của hành động>
+  The user confirmed this action on the Beads screen. Treat it as a new request from the user. Do not commit or push.
+  ```
+
+  Delete và Close là **yêu cầu đánh giá**: Worker xem bead còn cần không / đã đạt tiêu chí chưa, làm nếu được, không thì báo lý do. Plugin không bao giờ ghi kho bead. Mọi hành động qua cổng xác nhận (`actionSpec`: Assign a Worker / Close / Delete; nút huỷ "No, cancel"), vì mỗi hành động tốn quota thật.
+- **Dòng kết quả sống qua việc đổi cột.** Mỗi trạng thái là một cột (một cha riêng), nên bead đổi trạng thái sau lần refresh thì React dựng lại dòng. Kết quả hành động (`"Sent to the Beads Manager… It will hand the bead to a Worker."` kèm nút "Open the Beads Manager", hoặc lỗi) vì vậy nằm ở `beadActionResults: SessionMap<{ text, managerId, tone }>`, khoá `beadResultKey(workspaceId, beadId)` = `<workspaceId>:<beadId>` (hai repo có thể cùng tiền tố `br`), đọc bằng `useSyncExternalStore`, `clear` khi người dùng mở hành động mới. `SessionMap.get` trả đúng object đã lưu nên ổn định giữa các lần render, không cần snapshot. `pending`/`busy` vẫn là state của panel: chỉ sống vài giây xác nhận, mất khi bead đổi cột không xoá bằng chứng nào (hộp xác nhận đang mở thì đóng lại).
+
+### 13.5 Cách bead nói trạng thái
+
+Nhiều màu trên một danh sách gây mỏi mắt, nên ở **mọi chỗ hiện bead** (màn Beads, tab "Beads", panel "Beads in this chat", chip bead trên thẻ chat, số trên dòng workspace) trạng thái chỉ nói bằng **chữ và độ tương phản**, không bằng hue:
+
+- `STATUS_EMPHASIS`: `ready`, `in_progress`, `blocked` → `strong`; `closed` → `dim`. `beadEmphasis(bead)`; `emphasisTone`: `strong` → `plain`, `dim` → `muted`.
+- `statusBadge(bead)` = `{ text: Ready | In progress | Blocked | Closed, tone: emphasisTone(beadEmphasis(bead)) }`: chip và tên luôn cùng độ tương phản, và trạng thái luôn có chữ.
+- `beadTitleStyle(styles, theme, emphasis | null)` = `sectionTitle` với `fontWeight: "400"` (không in đậm) và màu `foreground`/`foregroundMuted`; `null` (khung chi tiết mở từ chip) giữ `foreground`. Dòng không tô nền, không vạch trái.
+- Tiêu đề cột dùng `sectionTitle` không màu. Dãy `StatusTabs` là nút: tab đang chọn kiểu `button` (nền accent), tab kia `secondaryButton`, như tab con của tab "Beads"; màu đó nói tab nào đang mở, không nói trạng thái bead. `workSummary.tone`: `running` → `plain`, còn lại `muted`.
+- Ngoài chỗ hiện bead, màu giữ nguyên: dòng lỗi RPC (đỏ), cảnh báo (vàng), chip lọc đang bật và "+N more" (accent), màn Metric, thẻ chat, nút Delete.
+
+## 14. Tab "Beads" và nút header
+
+- **Panel** `client.addWorkspacePanel({ id: BEADS_TAB_PANEL_ID ("bm-beads"), title: "Beads", icon: "ListChecks", context: "workspace", Component: BeadsTabPanel })`, đăng ký trước panel "Beads agents"; không khai `locations` (mặc định `["workspace"]`). Paseo đưa mọi panel `context: "workspace"` vào menu "+" của thanh tab và màn "New tab".
+- `BeadsTabPanel`: hàng tab con `BEADS_TAB_VIEWS` = Beads, Metric (`accessibilityRole="tab"`, tab chọn kiểu `button`, tab kia `secondaryButton`, cao ~40 px), mở ở `DEFAULT_BEADS_TAB_VIEW = "beads"` (`useState`, sống trong tab). Nội dung là `BeadsScreen` / `DashboardPanel` **không** truyền `onBack`, `workspaceLabel`, `status`: không ←, không tiêu đề, không dải trạng thái; dòng đầu chỉ còn phần bên phải. Đổi tab con thì unmount màn kia; dữ liệu nằm trong cache React Query theo khoá `["paseo-bm", "beads-list", id]`, `["paseo-bm", "traces", id]`. Hai tab "Beads" của cùng workspace dùng chung cache, mỗi tab giữ tab con riêng; mở lại tab cũ hay mở tab mới là việc của Paseo.
+- **App mobile của Paseo 0.8 không có "+"** (thanh tab mobile chỉ liệt kê tab đã mở; `onCreateNewTab` chỉ trao cho `WorkspaceDesktopTabsRow` và `SplitContainer`). Lối vào mobile là **nút header**: `registerBeadsHeaderButtons(client)` (`beads-header-button.ts`) đọc `client.paseo.workspaces.list({})` lúc bắt đầu, mỗi `BEADS_HEADER_POLL_MS` = 15 000 ms và mỗi khi `workspaces.subscribe` báo cập nhật (một lần đọc tại một thời điểm; lỗi thì giữ nút; client không có `paseo` không làm hỏng việc nạp). `planHeaderButtons(shown, listed)` → `{ add, remove }` theo workspace đang mở (không `archivingAt`). Mỗi workspace một `client.addHeaderButton({ id: BEADS_HEADER_BUTTON_ID ("bm-beads-open"), workspaceId, button })`, nút chỉ biểu tượng `ListChecks`, title "Open the Beads tab: beads and metrics of this workspace", bấm → `client.openPanel("bm-beads", { workspaceId })`. Ở dạng hẹp (`useIsCompactFormFactor` hoặc rộng < 1100 px) Paseo hiện nút plugin **đầu tiên** thẳng trên header, nút sau vào menu "more"; desktop hiện ở header phải. Paseo khoá nút header theo `id` + `workspaceId` (trùng `id` trong một workspace thì lỗi), nên mọi workspace dùng chung một `id`. `addButton(workspaceId)` nhận workspace làm tham số, không bắt biến vòng lặp: trên Hermes (mobile) mọi closure tạo trong vòng lặp thấy giá trị cuối. Timer `unref`; cleanup gỡ mọi nút.
+- **Panel "Beads agents"** (`tree.tsx`, logic ở `agent-tree.ts`, đăng ký sau panel "Beads"): cây Manager → Worker → Reviewer từ `agents.list` (design gốc §7.3), làm mới mỗi `AGENT_TREE_POLL_MS` = 5 000 ms khi panel hiện; agent đã bị thay ghi `<vai> · replaced by <id>`.
+
+## 15. Chat
+
+### 15.1 Paseo cho gì
+
+- `addTimelineTransformer({ query: { itemType }, transform({ item, phase }) })` chạy cho **mỗi** mục chat của **mọi** agent; trả `undefined` giữ mục gốc, trả `{ items }` thay bằng mục `plugin`. Transformer không biết chat thuộc agent nào.
+- `addTimelineRenderer({ kind, version, schema, Component })` nhận `agentId` của khung chat, `timestamp`, `theme`, `layout`, **không** có `workspaceId` hay `navigation`.
+- Chỉ đổi phần hiển thị; lịch sử ở daemon và thứ model đọc giữ nguyên. Hoàn tác = gỡ hai transformer và renderer trong `index.client.tsx`.
+
+### 15.2 Thẻ chat
+
+Hai transformer `bm-chat-received` (`user_message`) và `bm-chat-sent` (`assistant_message`) gọi `toChatCard(item, phase)`; renderer `CHAT_CARD_KIND` = `"bm-message"`, `CHAT_CARD_VERSION` = 1, `ChatCardView`. `toChatCard` không bao giờ ném.
+
+**Khi nào có thẻ:**
+
+- `user_message` **không** có `clientMessageId` (do agent gửi) và chứa `BM-REPORT`, `BM-REVIEW` hoặc một request id `req-YYYYMMDDTHHMMSSZ`;
+- `assistant_message` **đã hoàn tất** (`phase: complete`, để khỏi nhấp nháy khi stream) và chứa `BM-REPORT` hoặc `BM-REVIEW`;
+- `user_message` có `clientMessageId` chỉ thành thẻ `reply` khi đó là tin ô Reply của thẻ viết ra (dòng đầu `Reply from the user about …`); lời người dùng tự gõ để nguyên cho Paseo;
+- thông báo của chính plugin (tiền tố ở design gốc §7.5) nhận ra theo dòng đầu: `BM-FALLBACK` đọc được `incident` → thẻ `fallback` (§15.8), không đọc được → văn bản; các tiền tố khác → thẻ `notice` (`noticeCardOf`): một dòng tóm tắt thông báo (bỏ tiền tố và `requestId:`), chip `requestId` khi có, toàn văn một chạm; không kiểm mẫu, không có ô Reply.
+
+Khối liệt kê giá trị cho phép (`phase: … | …`) là mẫu định dạng, không phải báo cáo. Mọi mục khác giữ nguyên.
+
+**Dữ liệu** (`chatCardSchema`): `type` (`report` / `review` / `message` / `fallback` / `reply` / `notice`), `direction` (`received` / `sent`), `requestId`, `batchId`, `phase`, `tier`, `verdict`, `blocking`, `blockers`, `beads { created, updated, closed }`, `gist`, `text`, `questions` (§15.3), `formatIssues`, `fallback`, `answers`, `notice`. Thẻ dựng lại từ tin mỗi lần hiện, không lưu ở đâu.
+
+**Ai gửi, ai nhận** (`partiesOf(card, owner, peers)`), dữ liệu từ `chat.peers({ agentId })` → `{ owner, peers, workspaceId }` với `ChatPeer = { id, role, title, status, parentId, requestId, batchId, labelled, archived, replaced }`. `requestId` của Worker lấy từ nhãn, thiếu nhãn thì từ kho lưu vết bằng đúng luật của Metric; kho chỉ được đọc tối đa một lần và chỉ khi thiếu nhãn (`peersOfWorkspace`, `server/chat-peers.ts`).
+
+- Báo cáo nhận được → Worker của request; review nhận được → Reviewer khớp `requestId` và `batchId`; tin khác trong chat Worker → Manager (cha nếu là Manager); trong chat Reviewer → Worker cha; trong chat Manager → Worker của request.
+- Tin tự viết: người gửi là chủ khung chat; người nhận là Worker cha (review) hoặc Manager.
+- **Worker của request** = `soleWorkerOf(peers, requestId)` (`shared/sole-worker.ts`, dùng chung server và client): agent `worker` **chưa lưu trữ**, không bị thay (`replaced`), mang đúng `requestId`, và là **duy nhất**; không có hoặc nhiều hơn một → không có. `partiesOf` chỉ dùng để gọi tên nên lùi về Worker duy nhất kể cả đã lưu trữ; đường gửi thì không bao giờ.
+- Không xác định được thì ghi vai trò kèm "unknown", không đoán id.
+- `drawAsCard(card, owner)`: chủ khung chat không phải agent paseo-bm (`owner` null hoặc `unknown`) → sai; thẻ nhận luôn vẽ; thẻ gửi chỉ vẽ khi vai trò chủ khung khớp (review → Reviewer, còn lại → Worker), nên Manager trích một khối thì hiện nguyên văn. Sai → nguyên văn dạng Markdown, không khung thẻ.
+
+**Bố cục:**
+
+- Khung `styles.card`, không viền trái. Hàng tiêu đề: cột trái có `RoleMark` (chỉ biểu tượng mang màu vai trò), tên người gửi (`sectionTitle`, màu `foreground`) `→ <người nhận>`, dòng dưới là giờ gửi `HH:MM`; cột phải căn phải có chip trạng thái (`statusChip`: phase/verdict) và ngay dưới là chip "Answered" khi có.
+- **Chip `template error`** (tone `danger`) khi `formatIssues` không rỗng: `checkBlocks(text)` (bộ kiểm mẫu, design gốc §7.6) trên khối của agent khác (thẻ nhận), hoặc trên `BM-REVIEW` của chính Reviewer trong chat nó (Worker trích báo cáo của mình trong chat mình thì chưa gửi gì). Mở toàn văn thì trên cùng là "This message breaks the template:" và từng lỗi một dòng.
+- `statusChip`: báo cáo `blocked` → `warning`, `finished` → `success`, phase khác → `info`; review `pass`/`approved` → `success`, `stopped` → `muted`, còn lại `warning`, kèm `· <n> blocking` khi có; thẻ `reply` ghi "Your reply" (`info`); thẻ `notice` ghi thông báo (`muted`).
+- Chip `requestId` (tone `muted`) khi thẻ nêu request, rồi một dòng tóm tắt (`summaryOf`), tối đa 2 dòng (`numberOfLines={2}` kể cả khi mở); phần `waiting on: <blockers>` cắt ở `SUMMARY_BLOCKERS_CHARS` = 160 ký tự. Báo cáo có câu hỏi tóm tắt là `<tier> · <n> questions waiting`.
+- Bead liên quan: chip bead (§15.7).
+- "▸ Show message" / "▾ Hide message" mở toàn văn dạng Markdown (`markdownOf`: khối `key: value` thành danh sách tên trường in đậm; `BM-QUESTIONS`/`BM-ANSWERS` là khối như `BM-REPORT`, dòng `Q<n>:` in đậm, lựa chọn thụt dưới câu).
+- **Thẻ `finished`**: `startsOpen(card)` đúng và `outlineTone(card)` = `"success"` chỉ khi `type === "report" && phase === "finished"`, không xét chiều: thẻ mở sẵn toàn văn và khung có `borderColor` success (vẫn `borderWidth: 1`). `open` là state của component, nên thẻ bị gỡ rồi vẽ lại thì mở sẵn lại.
+
+### 15.3 Câu hỏi: `BM-QUESTIONS` và `BM-ANSWERS`
+
+Worker đặt câu hỏi trong khối `BM-QUESTIONS` ngay sau `BM-REPORT`, trong cùng tin `blocked`; `blockers:` chỉ còn trỏ tới khối (luật viết nằm ở `worker.md`):
+
+```
+BM-QUESTIONS
+requestId: req-20260917T010956Z
+Q1: Storage — the request says "save the user list" but not where.
+- a: the existing Postgres `users` table: no migration, ready today. (recommended)
+- b: a new table: needs a migration, which makes this request Large.
+```
+
+Mã `Q<n>` đếm tiếp trong cả request, nên câu trả lời muộn cho lượt cũ không trùng mã câu mới. Câu trả lời:
+
+```
+BM-ANSWERS
+requestId: req-20260917T010956Z
+Q1: a — the existing Postgres `users` table: no migration, ready today.
+Q2: other — <lời người dùng, xuống dòng đổi thành dấu cách>
+```
+
+**`plugin/shared/bm-questions.ts`** (thuần, client dùng được; tách khỏi `bm-report.ts` để hợp đồng báo cáo không đổi):
+
+```ts
+interface QuestionOption { key: string; text: string; recommended: boolean }
+interface Question { id: string; text: string; options: QuestionOption[] }
+interface QuestionSet { requestId: string | null; questions: Question[] }
+function parseQuestions(text: string): QuestionSet | null;          // khối BM-QUESTIONS CUỐI trong tin
+type Pick = { key: string } | { other: string };
+function answersText(requestId, questions, picks): string;          // ném lỗi khi một câu được truyền thiếu đáp án
+```
+
+`parseQuestions` dễ dãi vì đầu vào do model viết: dòng mở `BM-QUESTIONS` chấp nhận `>`, `-`, `**`, rào ```; dòng câu `Q<n>` rồi `:` `.` hay `)` (cả `**Q1:**`, `- Q1:`); lựa chọn phải có gạch đầu dòng hoặc ngoặc (`- a: …`, `- (a) …`, `a) …`, `(a) …`) — văn xuôi `a: …` không phải lựa chọn; `(recommended)`/`[recommended]` bỏ khỏi chữ, hơn một đề xuất trong một câu → coi như không có; dòng thụt ≥ 2 dấu cách nối vào dòng trên; mọi dòng được bỏ tiền tố trích dẫn `>`; khối kết thúc ở dòng mở khối khác, rào đóng (``` hoặc `~~~`), hoặc văn xuôi không thụt **sau** câu đầu tiên (văn xuôi trước câu đầu là lời dẫn, bỏ qua); mã/khoá trùng giữ cái đầu. **Giới hạn:** quét toàn tin từng dòng (một regex neo đầu dòng, không lượng từ lồng nhau, tuyến tính) để tìm dòng mở cuối, rồi chỉ đọc 20 000 ký tự từ đó; tối đa 10 câu × 8 lựa chọn; mỗi đoạn chữ cắt ở 1 000 ký tự. Câu có ít hơn 2 lựa chọn vẫn trả về và chỉ trả lời được bằng "Other".
+
+### 15.4 Thẻ câu hỏi và ô Reply
+
+**Khi nào:** `toChatCard` điền `questions` khi thẻ là `report` và khối có `requestId` trống hoặc bằng `requestId` của báo cáo (khối của request khác bị bỏ). `showsQuestions(card, owner)` đúng khi thẻ `report`, `received`, chủ khung chat là Manager, và có câu hỏi. Chat Worker và Reviewer không có phần này; báo cáo kiểu cũ không có khối thì thẻ như thường.
+
+**Bố cục phần câu hỏi:** mỗi câu một khối (`gap: 6`, `paddingVertical: 8`, từ câu thứ hai có vạch `borderTopWidth: 1` màu `border`); tiêu đề `questionHeading` (`Q6 · Storage`, chủ đề là phần trước ` — ` đầu tiên; không có chủ đề thì `Q6`) in `600`, câu hỏi `styles.body` màu `foreground`; mỗi lựa chọn là một `Pressable` rộng hết thẻ (hàng: `○`/`●` rộng 14, khoá in đậm rộng 16, chữ `flex: 1`, chip `recommended` tone `success` ở cuối; `paddingVertical: 8`, `paddingHorizontal: 10`, `borderRadius: 8`, `borderWidth: 1`; đã chọn: viền `info`, nền `surface2`; `accessibilityRole="button"`, `accessibilityState.selected`); hàng cuối "Other…" (không có khoá) mở ô nhập cho câu đó. Không lựa chọn nào được chọn sẵn: `picks` bắt đầu rỗng. Dưới mọi câu: dòng `Answers go to <Worker> · <requestId>`, dòng lý do (khi có), rồi hàng nút `Use recommendations` (`recommendedPicks`: điền đề xuất cho câu còn trống, không đè, không gửi), `Clear`, `Mark as answered`. Không xác định được người nhận → câu hỏi vẫn hiện; lựa chọn, ô Other, `Use recommendations` và `Clear` tắt (`Mark as answered` vẫn bấm được), kèm lý do. Worker đang chạy **không** làm tắt lựa chọn: người dùng soạn trước được, `sendReply` từ chối lúc bấm Send.
+
+**Lựa chọn viết vào ô Reply** — một đường gửi duy nhất cho mọi thẻ:
+
+- `isAnswered(question, pick)`: khoá có thật của câu có ≥ 2 lựa chọn, hoặc "Other" có chữ sau `trim`.
+- `answersDraft(card, picks)` = `answersText` chỉ trên các câu đã trả lời; `""` khi không có câu nào hoặc thẻ không nêu request.
+- `withAnswersBlock(text, block)`: vùng khối là dòng `BM-ANSWERS` đầu tiên cộng các dòng liền sau khớp `^\s*(requestId|Q\d+)\s*:`. Chữ người dùng ngoài vùng (trên và dưới) giữ nguyên thứ tự; **khối luôn đứng đầu ô**, một dòng trống, rồi chữ người dùng. Sửa tay bên trong khối bị viết đè ở lần chọn sau.
+- Mỗi lần `picks` đổi: `setAnswer(withAnswersBlock(answer, answersDraft(card, next)))` và mở ô Reply.
+- Nút **Send** bật khi ô có chữ và không đang gửi, gọi `sendReply({ card, text, refreshPeers, send })` với `refreshPeers` = `peers.refetch({ throwOnError: true })`, `send` = `paseo.agents.ref(id).send(text)` (đường composer của app, tin mang `clientMessageId` như lời người dùng):
+  1. ô rỗng → "Write a reply first.", không gọi gì;
+  2. đọc lại `chat.peers`; `replyTarget(card, owner, peers)` trả lý do → không gửi;
+  3. `send(peer.id, replyText(card, text))` **đúng một lần**, id không bao giờ lấy từ nội dung tin; `replyText` = `Reply from the user about \`<requestId>\`[, batch <id>]:` + dòng trống + chữ;
+  4. lỗi của `refreshPeers` hay `send` → lý do; ô và lựa chọn giữ nguyên.
+- `replyTarget`: người nhận là `from` (thẻ nhận) hoặc `to` (thẻ gửi) của `partiesOf` và phải có trong `peers`. Lý do chặn: không tìm được ("Cannot tell which Worker asked this: no single Worker has `<requestId>`." cho báo cáo nhận; "Cannot tell which <Role> to send this to." cho thẻ khác); chính mình ("This is your own message."); đã lưu trữ ("<tên> is archived." — tin tới agent lưu trữ sẽ bỏ lưu trữ nó); `running`/`initializing` ("<tên> is working; a message now would replace its turn. Send when it stops."); trạng thái khác ("<tên> is <status>."). Chỉ `idle` và `error` được gửi.
+- Gửi xong: "Sent to <tên>.", xoá và đóng ô; nếu `sentSummary(card, picks, text)` khác `null` (khối nằm nguyên trong chữ đã gửi) thì phần câu hỏi thay bằng `Answered at HH:MM → <Worker>: Q6 a, Q7 other` (`answerSummary` chỉ liệt kê câu đã trả lời). Câu chưa trả lời vẫn mở và Worker hỏi lại.
+- Báo cáo `blocked` **không** có câu hỏi có hai câu gợi ý điền sẵn (`quickReplies`, không tự gửi); báo cáo có câu hỏi thì không.
+- Sau khi đã Reply, nút "Reply to <vai trò>" nhường chỗ cho chip "Answered" (`replyControls(canReply, replied)`: `canReply` sai → không có cả hai); bấm chip mở lại ô Reply.
+
+### 15.5 Câu đang chờ: `chat.waiting` và composer pill
+
+- **Server** (`server/chat-waiting.ts`): với mỗi Manager chưa lưu trữ, chưa đóng, `readTimelinePages(paseo, managerId, { pages: 1, limit: 200 })` rồi `waitingOf(manager, entries, workers, answered)`: lấy `user_message` **không** có `clientMessageId`; báo cáo cuối có `requestId` dạng `req-…` là báo cáo của tin; giữ báo cáo mới nhất mỗi request; chỉ giữ `phase: blocked` có ít nhất một câu hỏi và `requestId` của khối khớp; Worker = `soleWorkerOf` trong cùng workspace, trạng thái `idle` hoặc `error`; câu nào sổ câu hỏi–trả lời đã có đáp án thì vào `answered`, báo cáo đã được trả lời hết thì bỏ. Lỗi đọc một Manager chỉ làm mất Manager đó (`try/catch` quanh `readTimelinePages` được giữ có chủ ý: hàm vẫn có thể ném khi `refetch` không trả gì). Đọc timeline sống, không đọc kho lưu vết: báo cáo chỉ vào kho khi lượt Manager kết thúc, còn pill phải hiện ngay khi câu hỏi tới. Kho lưu vết chỉ được đọc cho workspace **có Manager đang sống** và chỉ khi Worker thiếu nhãn.
+- `WaitingWorker = { managerId, workspaceId, workerId, workerTitle, requestId, text, at, answered }`; `text` là nguyên tin báo cáo, để client dựng lại đúng thẻ.
+- **Client** (`waiting-pills.tsx`, `waiting-pills-model.ts`): `registerWaitingPills(client)` đọc `chat.waiting` ngay rồi mỗi `WAITING_POLL_MS` = 15 000 ms, không chồng lượt; RPC lỗi thì giữ pill, không báo. `planPills(current, waiting)` → `{ add, update, remove }`; pill id `bm-waiting-<workerId>`, gắn vào composer của chat Manager (`addComposerPill({ id, workspaceId, agentId: managerId, button: { …, behavior: { kind: "popover", Content } } })`; một registration không chuyển chat được, nên đổi Manager thì gỡ rồi thêm lại); không còn câu mở → không có pill; khoá `[managerId, workspaceId, requestId, label, at ?? "", fnv1a32Hex(text), answered]` — có băm nội dung để báo cáo mới cùng số câu (và `at` null) vẫn tới popover. Nhãn `<Worker> · <n> question(s)` (chỉ câu còn mở), title `Questions from <Worker> about <requestId>`, icon `MessageCircleQuestion`. Popover: mỗi pill có **một** `Content` tạo lúc thêm, đọc mục mới nhất từ một `Map` ở module, nên `update` không dựng lại popover đang mở và chữ đang gõ không mất; `Content` vẽ `ChatCardView` với thẻ dựng từ `toChatCard({ type: "user_message", text }, "complete")`, nên có đủ câu hỏi, ô Reply, kiểm trạng thái, chip "Answered". Không có API cuộn chat tới một mục.
+- Giới hạn: chỉ 200 mục mới nhất của timeline Manager; báo cáo `blocked` cũ hơn thế trông như "không còn chờ" và không có pill, nhưng vẫn trả lời được bằng ô Reply của thẻ.
+
+### 15.6 Trạng thái "đã trả lời"
+
+- **Trong phiên app** (`answer-state.ts`, không React): bảng `answered` (khoá → `{ at, summary, to }`) và `replied` (khoá → `Date`), `setAnswered`/`setReplied` báo mọi người nghe (`subscribeAnswers`), `answersVersion()` là snapshot; `chat-card.tsx` đọc bằng `useSyncExternalStore`, nên bản trong chat và bản trong popover vẽ lại cùng lúc. Tải lại app thì mất.
+- **Khoá** `answeredKey(agentId, card)` = `<chat agentId>|<requestId>|<các mã câu>` — không băm nội dung tin: báo cáo gửi lại với một trường sửa không được sinh thẻ trống thứ hai cho câu đã trả lời. Đổi lại, hai bộ câu khác nhau dùng lại cùng mã trong một request sẽ trùng khoá (Worker đếm tiếp mã nên việc này không nên xảy ra).
+- **Dấu "Mark as answered"** lưu bền (`server/answer-marks.ts`): `<install home>/ui/answer-marks.json` = `{ schemaVersion: 1, marks: [{ key, at }] }`; khoá 1–`ANSWER_MARK_KEY_MAX` (400) ký tự, không ký tự điều khiển; giữ tối đa `ANSWER_MARKS_LIMIT` = 500 dấu mới nhất. Đọc/ghi qua bộ kiểm no-follow và ghi nguyên tử như kho lưu vết (§3.8). File hỏng hay đời mới hơn đọc như rỗng kèm `notices`; khoá hỏng trong file bị bỏ kèm `notices`; khoá sai hay file đời mới hơn khi ghi → `E_TRACE_STORE_UNWRITABLE`. Nút gọi `answers.mark` rồi ghi kết quả vào cache `answer-marks`; lỗi hiện trên thẻ.
+- **Thẻ tự biết đã trả lời** (chỉ thẻ `showsQuestions`): `useQuery(["paseo-bm", "chat-waiting"], refetchInterval 15 000)` và `answers.marks`, dùng chung cache nên một lần đọc cho mọi thẻ. `stillWaiting` = có mục cùng `managerId`, `requestId` và nguyên văn tin. `answeredHow({ sent, marked, waiting, stillWaitingNow })`: `sent` → "sent" (`Answered at … → …`); `marked` → "marked" ("Marked as answered."); `waiting` đã biết mà thẻ không còn chờ → "moved-on" (`Answered, or <Worker> is working or has reported since.`); `waiting` chưa biết → không suy ra gì. Đã trả lời thì chip "Answered" hiện và nút Reply ẩn.
+- **Câu sổ câu hỏi–trả lời đã có đáp án** (`answered` của mục `chat.waiting`): hiện "Answered." (tone `success`) thay cho các lựa chọn, không chọn được; `Use recommendations` bỏ qua nó; lựa chọn đã chọn trước cho câu đó bị gỡ khỏi khối `BM-ANSWERS` trong ô Reply.
+
+### 15.7 Bead trong chat
+
+- **Chip bead trên thẻ:** `shared/bead-ids.ts` tìm chuỗi có dạng id bead (bỏ request id, đường dẫn, cờ lệnh, URL). `BeadChips` nhận **mọi** ứng viên (≤ 100), tra `beads.lookup` (chỉ giữ id có thật, nên `feature-workflow` hay `BM-REPORT` không bao giờ thành chip), **rồi** mới cắt: `beadChipsView(found, expanded)` dùng `visibleBeads` với `BEAD_CHIPS_SHOWN` = 2; phần còn lại sau chip "…" (tone `muted`, nhãn "Show all N beads"), bấm để mở rộng, không có nút thu. Không bead nào có thật → không vẽ gì. Chip ghi `beadChipText` (`<tên, ≤ 48 ký tự> · <id>`), tone theo `statusBadge`; bấm mở chi tiết ngay trong thẻ (`BeadInline`, dùng lại `BeadDetailPanel` với ba hành động). `chat.peers` trả `workspaceId` để biết tra kho nào.
+- **Panel "Beads in this chat"** (`addWorkspacePanel`, `id: "bm-chat-beads"`, `context: "agent"`): câu hỏi thường của Worker là văn bản chat, và đổi chúng thành thẻ sẽ đổi cả chat của agent khác, nên bead được gom ở panel. `chat.beads` đọc `CHAT_BEADS_PAGES` = 2 trang × `CHAT_BEADS_PAGE_SIZE` = 200, tức 400 mục mới nhất, lấy id từ tin nhắn và lệnh shell, chỉ giữ id có thật, đếm số lần nhắc, sắp theo lần nhắc gần nhất, tối đa `CHAT_BEADS_LIMIT` = 30. Panel làm mới mỗi 15 s; dòng là `BeadRowCard`, không nhóm, không nút mắt.
+- Mọi RPC chat ở `server/chat-rpc.ts` (`registerChatRpcs`), tách khỏi `dashboard-rpc.ts`; vòng đọc timeline dùng chung là `readTimelinePages` (`live-timeline.ts`).
+
+### 15.8 Sự cố dự phòng: thẻ và pill
+
+Luật phát hiện sự cố, ứng viên, `BM-FALLBACK` và `fallback.incidents` / `fallback.act` ở design gốc §7.10; đây chỉ là phần hiện ra.
+
+- **Thẻ** (`fallbackCardOf`: dòng đầu đúng `BM-FALLBACK` và đọc được `incident`). Thẻ chỉ giữ id sự cố; trạng thái, ứng viên, giờ reset lấy từ `fallback.incidents({ ids })`, khoá `["paseo-bm", "fallback-incident", id]` dùng chung với popover của pill, đọc lại mỗi `WAITING_POLL_MS` khi `pending`/`waiting` — chữ của tin không bao giờ là trạng thái.
+- **Bố cục:** `RoleMark` + "<Vai> stopped by its provider plan", giờ, chip trạng thái (`pending` → `warning`; `switched`/`resumed` → `success`; `waiting` → `info`; `dismissed`/`expired` → `muted`; `exhausted`/`failed` → `danger`); chip `requestId`; dòng `Usage limit (L1) | Billing (L2) | Login (L4) | Provider unavailable (L5) · <alias> · <model>`; lời provider (mono, 3 dòng).
+- **Nút, chỉ khi `pending`:** "Switch to <alias> · <Provider> · <model>[ · ~$in / $out per 1M tokens]" khi có ứng viên (giá: `MODEL_PRICES` rồi `roles.options`); "Wait until <giờ máy>" khi `resetsAt` cách không quá `FALLBACK_MAX_WAIT_MS` (7 ngày), đã qua thì "Resume now (the limit reset at …)"; "I'll handle it" luôn có. Reviewer `switched` chưa có `replacementId` → chỉ "Resend to Worker". Mỗi nút một `fallback.act`; kết quả là trạng thái mới; lỗi → "Could not <việc> (<mã>): …" rồi đọc lại.
+- Hết `pending` → một dòng trạng thái (`fallbackStatusLine`); Manager `switched`: "A new Beads Manager is running on … Open Beads Manager from the sidebar or Command Center to continue with it."
+- **Pill:** mỗi Manager có sự cố `pending` (từ `chat.waiting.fallback`) một pill `bm-fallback-<managerId>`, icon `FALLBACK_PILL_ICON` = `TriangleAlert`, nhãn `Fallback · <n> decision(s)`, title "An agent stopped by its provider plan waits for your decision" (nhiều: "<n> agents stopped by their provider plan wait for your decision"). Popover vẽ một thẻ cho mỗi sự cố (`fallbackCardOfIncident`), cũ nhất trước, đủ nút. Chung vòng đọc `chat.waiting` và `planPills` với pill câu hỏi; khoá gồm Manager và id các sự cố.
+
+## 16. Hiệu năng
 
 | Chỗ | Cách |
 |---|---|
-| Ghi lưu vết | Một `write` + `fsync` cho một dòng mỗi lượt; mục tiêu dưới 50 ms, và lỗi không bao giờ chặn agent |
-| Đọc lưu vết | Theo file tháng, mới tới cũ, dừng khi đủ `limit` (50); cache theo `mtime`+`size` |
-| Timeline | Chỉ đọc bù cho lượt đang chạy, hoặc khi kho lưu vết tắt; trần 2.000 entry mỗi agent mỗi lần |
-| Client | `useQuery` như code hiện có, `staleTime` ngắn, refetch khi người dùng bấm; không polling ngầm |
-| Không có | Cron, watcher, vòng lặp nền, tính toán nặng ở client |
+| Ghi lưu vết | Một `write` + `fsync` mỗi lượt; mục tiêu dưới 50 ms; lỗi không bao giờ chặn agent |
+| Đọc lưu vết | Theo file tháng, mới tới cũ, dừng khi đủ `limit` (50); cache `mtime`+`size` |
+| Timeline | Chỉ đọc bù lượt đang chạy, hoặc khi kho tắt; trần 2 000 entry mỗi agent mỗi lần |
+| Kho beads | Trần 32 MB; cache `(path, mtimeMs, size)` |
+| Client | `useQuery` với khoá có `workspaceId`; chi tiết trace chỉ tải khi mở; các nhịp polling ở §2.4, không cái nào chạy khi màn của nó không hiện (trừ pill và nút header, vốn gắn với app) |
 
-## 12. Security & Privacy
+## 17. Security & Privacy
 
-- **Ranh giới ghi mới, và chỉ một:** `<install home>/traces/**`. Test phủ định chứng minh không ghi vào workspace, `~/.paseo`, thư mục skills, `install.json` hay bất cứ nơi nào khác (REQ-047, D-7).
-- **Che bí mật trước khi ghi** (REQ-048b), không phải chỉ trước khi render: dữ liệu đã lên đĩa thì không sửa lại được. Quy tắc lấy từ bộ che của CLI (`src/redact.ts` là nguồn quy tắc; plugin có bản sao hằng số vì không import `src/`).
-- **Không ghi `env`.** Hook `agent.create` có thấy `env` nhưng bộ thu thập không dùng hook đó và không có đường nào để `env` vào bản ghi.
-- **Quyền:** thư mục `0700`, file `0600`, như `install.json`.
-- **Đọc đĩa ngoài kho của mình đúng hai chỗ:** `<workspace>/.beads/issues.jsonl` và `<install home>/install.json` (chỉ đọc, để xác nhận thư mục cài đặt).
-- **Xoá là quyền của người dùng** (REQ-054f): không có đường nào trong sản phẩm tự xoá trace, và lệnh gỡ phải hỏi (REQ-056a).
-- **Nói rõ với người dùng** rằng màn hình đang hiện lại và đang lưu hội thoại agent (REQ-048d).
-- **Không mạng** ở mọi luồng, kể cả việc lấy giá model.
+- **Ranh giới ghi:** `<install home>/traces/**`, `<install home>/ui/**`, `<install home>/role-extras.json`. Không ghi vào workspace, `~/.paseo`, thư mục skills, `install.json`.
+- **Đọc đĩa ngoài phần của mình:** `<workspace>/.beads/issues.jsonl`, `<install home>/install.json` (chỉ để xác nhận thư mục cài đặt), `role-fallback-state.json` của plugin, và thư mục skill (chỉ `SKILL.md`, cho màn Setup).
+- **Che bí mật trước khi ghi**, không chỉ trước khi render: quy tắc lấy từ `src/redact.ts`, plugin có bản sao hằng số vì không import `src/`.
+- Không ghi `env`: bộ thu thập không dùng hook `agent.create`.
+- Quyền: thư mục `0700`, file `0600`.
+- Xoá là quyền của người dùng: không đường nào tự xoá trace; lệnh gỡ phải hỏi.
+- Màn Metric nói rõ nó hiện và lưu hội thoại agent.
+- **Không mạng** ở mọi luồng dashboard. Ngoại lệ duy nhất có chủ ý: `setup.install-tool` chạy trình cài tải từ mạng, chỉ khi người dùng bấm và xác nhận nguyên văn lệnh (`confirmed: true` bắt buộc ở schema); script `bv` ghim commit, script `br` tự kiểm SHA256.
+- Màn Beads và thẻ chat **gửi tin cho agent** (hành động bead, Reply): luôn qua xác nhận hoặc nút gửi tường minh, luôn đọc lại trạng thái người nhận, không bao giờ gửi tới agent đang chạy hay đã lưu trữ. Màn Metric không tạo, dừng hay gửi gì cho agent.
 
-## 13. Reliability
+## 18. Reliability
 
-- Agent bị lưu trữ hoặc xoá → trace vẫn đầy đủ phần đã lưu vết; `agentsMissing` liệt kê agent không còn, kèm notice.
-- Ghi lưu vết lỗi → bỏ qua, log một dòng, Dashboard hiện "có thể thiếu trace"; agent không bị ảnh hưởng.
-- Kho có `schemaVersion` mới hơn → đọc hạn chế, không ghi, không xoá tự động.
+- Agent bị lưu trữ hoặc xoá → trace giữ đủ phần đã lưu; `agentsMissing` kèm notice.
+- Ghi lưu vết lỗi → bỏ qua, log một dòng, Dashboard hiện "có thể thiếu trace".
+- Kho có `schemaVersion` mới hơn → đọc hạn chế, không ghi.
 - File lưu vết hỏng một dòng → bỏ đúng dòng đó, đếm vào `skippedLines`.
-- Plugin reload giữa một lượt → mốc `turn_started` mất; bản ghi vẫn được ghi với `startedAt` suy từ entry đầu của lượt và một notice.
 - `reset`, `gap`, `staleCursor` từ timeline → đọc lại một lần và gắn notice.
-- Host Paseo thiếu API timeline hoặc thiếu `before`/`on` hook → tắt đúng phần đó kèm thông báo, phần còn lại vẫn chạy (cùng khuôn với cách `role-hook.ts` xử lý host thiếu `before`).
+- Host thiếu API timeline hay hook `before`/`on` → tắt đúng phần đó kèm thông báo. Host thiếu `navigation.openAgent` → các nút "Open …" tự ẩn.
+- RPC lỗi → mỗi màn hiện dòng đỏ kèm mã và nút Refresh; phần còn lại (kể cả hàng tab con) vẫn dùng được.
 
-## 14. Ảnh hưởng tới tài liệu đã đóng băng
+## 19. Chiến lược kiểm thử
 
-Kho lưu vết nằm trong thư mục cài đặt, nên tính năng này **phải** đi kèm một delta-change; không sửa tại chỗ (AGENTS.md).
-
-| Tài liệu | Cần sửa gì |
+| Tầng | Nguyên tắc |
 |---|---|
-| PRD gốc — REQ-012 (gỡ cài đặt) | Danh sách gỡ có thêm kho lưu vết, được hỏi riêng, và có cờ riêng cho chế độ không tương tác (REQ-056a). Tên cờ còn chờ owner chốt — xem Q-039 |
-| PRD gốc — REQ-010 (cập nhật và an toàn khi bị ngắt) | Ghi rõ **cập nhật không bao giờ xoá kho lưu vết**, kể cả `--prune` (REQ-056b) |
-| Design gốc §3.1 (bố cục thư mục cài đặt) | Thêm `traces/` |
-| Design gốc §3.3 (phân loại quyền sở hữu) | Thêm loại "dữ liệu do paseo-bm tạo, thuộc người dùng, không có hash, không backup, xoá phải hỏi" |
-| Design gốc §4.4 (bộ mã lỗi) | Thêm năm mã ở §5 |
-| Design gốc §5 (hợp đồng RPC) | Thêm bốn RPC, hoặc một dòng trỏ sang tài liệu này |
-| Design gốc §8 (reliability) | Ghi rõ rằng "không tác vụ nền" vẫn giữ: thu thập bằng hook sự kiện, không cron/watcher |
-| `roles/manager.md`, `roles/worker.md` | Thêm nhãn `bm.requestId` và `bm.batchId` (REQ-051), kèm bump phiên bản chỉ dẫn |
+| Logic | Mọi quyết định ở module thuần (`*-model.ts`, `chat-cards.ts`, `dashboard-view.ts`, `slot.ts`, `shared/*`, `server/*`), test bằng Vitest không cần renderer. Mỗi tiêu chí hành vi có một đối chứng âm đã chạy đỏ |
+| View | View không hook dựng bằng `test/helpers/element-tree.ts`; chỗ đặt (ví dụ dải trạng thái ở mọi view) kiểm bằng assert trên mã nguồn. File trong `test/` không import `react-native` như một giá trị |
+| Kho | Ghi rồi đọc lại; trùng khoá kể cả turn id dùng lại và bản ghi lại đóng dấu giờ ghi; dòng hỏng, dòng cuối ghi dở; symlink ở mọi cấp bị từ chối và đích không đổi một byte; barrier cho ghi đồng thời với xoá/gán lại |
+| Hợp đồng | Danh sách RPC chính xác trong `test/plugin-bundle-cjs.test.ts` và `test/rpc-list-describe.test.ts`; client entry không import `server/`, `shared/` không import Node |
+| Phủ định | Không ghi ngoài ranh giới §17, không mạng, Metric không gọi hàm ghi nào của SDK |
+| Dữ liệu thật | Bộ đọc được thử trên chuỗi agent thật viết; nghiệm thu trên daemon thật ghi run record ở `docs/operations/`. Phần nhìn (màu, bố cục, cử chỉ) do owner kiểm trên daemon thật, desktop và điện thoại |
 
-## 15. Testing Strategy
+## 20. Tương thích
 
-| Tầng | Nội dung |
-|---|---|
-| Unit — `bm-report.ts` | Khối `BM-REVIEW`; khối đủ field; thiếu field; field lạ; nhiều khối một tin nhắn; khối bị trích dẫn lại; chữ hoa khác; `none`; id nhiều dấu phân cách; khối của bản chỉ dẫn trước (REQ-050c) |
-| Unit — `trace-store.ts` | Ghi rồi đọc lại; dòng trùng `(agentId, turnId, vân tay)`, kể cả turn id bị dùng lại và bản ghi lại đóng dấu giờ ghi; dòng hỏng; **dòng cuối bị ghi dở**; file nhiều tháng; `schemaVersion` mới hơn; hết đĩa và không đủ quyền (lỗi bị nuốt, không ném); cắt trường dài; quyền `0700` cho thư mục và `0600` cho file |
-| Unit — bộ kiểm đường dẫn (§3.8) | Symlink tại `traces/`, tại thư mục workspace, tại file tháng, tại file tạm — mọi trường hợp bị từ chối, **đích của symlink không đổi một byte**; `workspaceId` sai mẫu; `.` và `..`; đường dẫn thoát ra ngoài |
-| Unit — tuần tự hoá (§3.8) | Dùng barrier: nối bản ghi đồng thời với xoá và với gán lại — không mất bản ghi, không nhân đôi sau khi đọc lại, không ghi vào thư mục nguồn sau khi gán lại xong; collector chờ quá hạn thì bỏ lượt và log |
-| Unit — xoá | Ba phạm vi; `dryRun` đếm đúng; `workspaceId` sai định dạng; đường dẫn thoát ra ngoài; xoá trace đang chạy; chứng minh không file nào ngoài `traces/` bị chạm |
-| Unit — gán lại | Đích chưa có thư mục (`rename`); đích đã có (gộp + loại trùng); `from` trùng `to`; đích không tồn tại; `dryRun` đếm đúng; bị ngắt giữa lúc gộp thì đọc lại không nhân đôi; `reassignedFrom` đúng |
-| Unit — phân loại workspace | `live` / `archived` / `orphaned` / `unknown` khi `workspaces.list()` lỗi; `meta.json` thiếu thì vẫn hiện được nhóm orphan |
-| Unit — cài đặt | Lược đồ Zod chặn giá trị âm và không phải số; `migrate` giữ giá trị cũ; thiếu cài đặt thì dùng mặc định 200 MB |
-| Unit — `install-home.ts` | Lấy từ `config.plugins`; `--home` khác mặc định; `install.json` thiếu; cấu hình không có mục plugin → tắt tính năng chứ không ném |
-| Unit — `collector.ts` | Chỉ ghi cho agent `bm-*`; `outcome` failed/canceled; hook thiếu trên host cũ; lượt không có `turn_started`; giả định **A-2** (timeline của hook có `timestamp` hay không) được test bằng cả hai dạng dữ liệu |
-| Unit — `traces.ts` | Nhóm theo nhãn, theo `BM-REPORT`, theo prompt, theo thời gian, và nhóm "không rõ"; Worker mồ côi; Reviewer dùng lại; hai yêu cầu chồng thời gian; agent đã bị xoá |
-| Unit — thời gian, `workflow-steps.ts`, `cost.ts`, `beads-store.ts` | Như §7, §8, §9, §10; riêng `cost.ts`: có `totalCostUsd`, không có, model lạ, token cache tính theo đơn giá cache |
-| Unit — `dashboard-model.ts` | Text cho từng `state`, `confidence`, `costBasis`; cảnh báo dung lượng; xác nhận xoá mặc định "Không"; `compact` |
-| Integration | `PaseoApi` giả + `$HOME` giả: một workspace, một Manager, hai Worker, ba Reviewer, có agent đã lưu trữ; kiểm tra bốn RPC đầu-cuối, gồm cả vòng ghi → đọc → xoá |
-| Phủ định | REQ-047: không gọi hàm ghi của SDK, không mạng, không ghi ngoài `traces/`, không đọc file nào khác ngoài hai chỗ ở §12 |
-| Bundle | Bổ sung `test/plugin-bundle-cjs.test.ts`: client entry mới không import `server/`; `shared/` không import Node |
-| Nghiệm thu trên daemon thật | D-2 → D-11 trên bộ kit nghiệm thu điều phối, ghi run record trong `docs/operations/`; gồm bước kiểm **A-1** và **A-2**, bước xoá trace và bước gán lại đều có ảnh chụp hệ thống file trước–sau, và một lần cập nhật phiên bản để chứng minh kho còn nguyên |
+- Bản mới đọc kho của bản cũ; bản cũ gặp kho mới hơn thì đọc hạn chế, không ghi. Cập nhật phiên bản **không** xoá kho, kể cả `--prune`.
+- Trường thêm vào payload (`errors`, `usageByModelRole`, `usageByModel`, `runtime`, `labelled`, `replaced`, `answered`, …) luôn tuỳ chọn hoặc có mặc định.
+- Agent tạo bởi bản trước (không nhãn `bm.requestId`) vẫn hiện, ở mức `inferred`.
+- Bộ đọc `BM-REPORT` đọc được định dạng hiện tại và trước đó; báo cáo không có `BM-QUESTIONS` cho thẻ như thường. Chỉ dẫn gắn lúc tạo agent, nên Manager/Worker cũ và plugin mới vẫn hiểu nhau: thẻ vẫn có nút vì thẻ là mã plugin.
 
-## 16. Backward Compatibility
+## 21. Câu hỏi mở
 
-- Ba RPC hiện có không đổi input, output hay ngữ nghĩa; surface "Beads Manager" giữ nút *Open Beads Manager*.
-- Không đổi `install.json`, không đổi khoá nào trong `config.json`; không cần cài lại plugin (cập nhật payload theo REQ-010 là đủ).
-- Kho lưu vết có `schemaVersion`: bản mới đọc được kho của bản cũ; bản cũ gặp kho mới hơn thì đọc hạn chế và không ghi.
-- Agent tạo bởi bản trước (không có nhãn `bm.requestId`) vẫn hiện, ở mức `inferred`.
-- Cập nhật phiên bản **không** xoá kho lưu vết, kể cả `--prune` và kể cả khi lược đồ cần di trú: di trú ghi bản mới rồi mới bỏ bản cũ, không bao giờ xoá trước (REQ-056b).
-- Bộ đọc `BM-REPORT` đọc được cả định dạng hiện tại và định dạng sau này (REQ-050b).
-
-## 17. Open Questions
-
-| ID | Question | Ảnh hưởng thiết kế |
+| ID | Câu hỏi | Ảnh hưởng |
 |---|---|---|
-| Q-039 | Lệnh **gỡ**: giữ hành vi "hỏi rồi xoá" hay luôn giữ kho, và tên cờ cho chế độ không tương tác (đề xuất `--purge-traces`) | Quyết định nội dung delta-change cho PRD gốc REQ-012 (§14). Phần **cập nhật** đã chốt: không bao giờ xoá |
-| Q-042 | **Mới:** ngưỡng chỉ có phạm vi toàn máy vì Paseo chỉ cấp `scope: "host"`. Nếu về sau cần ngưỡng theo workspace thì phải tự lưu trong `meta.json` của kho — có cần không? | §3.6 |
-| A-1 | Báo cáo gửi bằng `send_agent_prompt` có phải entry `user_message` trong timeline Manager không | §6 bước 2; sai thì đọc `BM-REPORT` từ timeline Worker |
-| A-2 | `timeline` của hook `agent.turn_ended` có `timestamp` cho từng item không | §3.3 và §7; thiếu thì bộ thu thập gọi thêm một `timeline.refetch` cho cửa sổ lượt vừa xong |
+| Q-039 | Lệnh **gỡ**: "hỏi rồi xoá" hay luôn giữ kho, và tên cờ cho chế độ không tương tác. Phần cập nhật đã chốt: không bao giờ xoá | Thuộc design gốc (CLI) |
+| Q-042 | Ngưỡng dung lượng chỉ có phạm vi toàn máy vì Paseo chỉ có `scope: "host"`; có cần ngưỡng theo workspace (tự lưu trong `meta.json`) không? | §3.6 |
 
-## 18. Revision History
+## 22. Revision History
 
 | Date | Author | Change |
 |---|---|---|
-| 2026-09-19 | hieu.nt10 (soạn bởi Beads Worker) | **Theo [delta 20260918e](paseo-bm-delta-20260918e-beads-tab.md) §4.6, batch `b6`** (REQ-060 o): `registerBeadsHeaderButtons` gắn nút header `bm-beads-open` cho mỗi workspace đang mở, bấm gọi `client.openPanel("bm-beads", { workspaceId })`; errata F2 — app mobile của Paseo 0.8 không có "+" |
-| 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | **Theo [delta 20260918f](paseo-bm-delta-20260918f-ui-review.md)** (request `req-20260918T063746Z`): rà soát phần UI ngày 18 — bỏ thông báo thì ẩn ngay, lần mở Manager đang chờ không rơi, dải trạng thái và nút ← đúng trên Metric/Beads, số liệu workspace chỉ đọc khi danh sách hiện, bead đang mở giữ nguyên khi đổi nhóm, chip bead tra trước khi gập, `chat.peers` có `archived`, pill giữ popover; gỡ tính năng ghim (`launcher.order.*`); dọn code thừa |
-| 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | **Theo [delta 20260918e](paseo-bm-delta-20260918e-beads-tab.md) §4.5, batch `b5`** (REQ-060 m, n): `beadsOverview` bỏ trường `activity` và tham số `days`; `workspaceStats` lấy tone của số đang làm và số block từ `STATUS_TONE` (warning, danger) |
-| 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | **Theo [delta 20260918e](paseo-bm-delta-20260918e-beads-tab.md) §4.4, batch `b4`** (REQ-060 g, h, j–m): màu trạng thái chuyển từ cả dòng sang tên bead (`beadTitleTone`, bỏ `TintedCard`); danh sách màn Beads chia nhóm bằng `groupBeads`; nút mắt `closedBeadsVisibility` ẩn bead đã đóng theo phiên app; `doneText` ở dòng đầu màn; bỏ biểu đồ tạo/đóng 14 ngày |
-| 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | **Theo [delta 20260918e](paseo-bm-delta-20260918e-beads-tab.md)** (REQ-060): panel workspace `bm-beads` ("Beads" trong menu "+") vẽ màn Beads và màn Metric làm hai tab con, không nút ← và không tiêu đề; surface Beads Manager mở ở Setup (`SURFACE_HOME_VIEW`, `backOf`), danh sách workspace thành màn phụ, dải trạng thái (`launcherStatusLines`) ở cả hai màn; màu trạng thái dùng chung `STATUS_TONE` cho dòng (`TintedCard`) và chip |
-| 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | **Errata theo [delta 20260918](paseo-bm-delta-20260918-manager-mode-model-metrics.md)** (REQ-058, owner chốt Q32, Q38): §3.3 bản ghi thêm trường tuỳ chọn `runtime`; §4.2 `TraceSummary.usageByModelRole`; §4.3 `usageByAgent[].runtime` (một dòng mỗi tổ hợp model/thinking/mode, kèm `recorded` và số lượt; lượt cũ giữ `usage.model`) và `usageByModel`; §9 gộp theo model hiệu lực. Không di trú, `schemaVersion` vẫn 1 |
-| 2026-09-17 | hieu.nt10 (soạn bởi Claude) | **Theo [delta 20260917e](paseo-bm-delta-20260917e-manager-screen-and-commands.md).** §4 bước 2: một request tách thành các đoạn theo lượt người dùng hỏi, dựa vào `origin` chứ không dựa câu chữ; biểu đồ vẫn đếm **request** (Q27). Hai RPC mới `launcher.order.get` / `launcher.order.set` cho thứ tự ghim, lưu trong install home chứ không dùng plugin settings (đường đó đang lỗi). `workspaces.overview` thêm `runningAgents` — errata nằm ở delta 20260916-owner-feedback, nơi RPC đó được định nghĩa |
-| 2026-09-17 | hieu.nt10 (soạn bởi Claude) | **Errata theo [delta 20260917d](paseo-bm-dashboard-delta-20260917d-request-attribution.md)** — lỗi owner báo: câu hỏi vừa gửi không thấy trong Metric. §3.3 và §3.5 bước 4: khoá chống trùng thêm **vân tay nội dung lượt** (Paseo dùng lại turn id trong cùng một agent, nên khoá cũ vứt mất lượt thật). §6 bước 2: lượt Manager vô danh chỉ gộp vào request của **chính Manager đó** (mã cũ tìm trong cả workspace, kéo lượt của Manager đã lưu trữ vào request 18 giờ sau). Sự thật mới: thời điểm tin nhắn trong bản ghi có thể là **giờ lúc ghi**, nên không dùng làm khoá được |
-| 2026-09-16 | hieu.nt10 (soạn bởi Claude) | **Bản 5 — sau nghiệm thu trên daemon thật (WP-214).** Áp dụng [delta 20260916-acceptance-fixes](paseo-bm-delta-20260916-acceptance-fixes.md): §6 (bucket khoá theo `requestId`; trace mở được từ `requestId` không cần lời yêu cầu; lượt Manager vô danh thuộc request được nêu ở lượt sau; id bead chỉ ở tham số vị trí; "mới nhất" là theo thời gian), §7.3 (chỉ báo cáo cuối quyết định; `finished` + `blockers` mới là `stopped`), §6 bước 4b (bản ghi của agent đã bị xoá vẫn thuộc request của nó), §8 (phủ định chính xác của `polish`; polish phải chạm ≥2 bead), §9 (bỏ nguồn `provider` vì `totalCostUsd` là tổng luỹ kế của phiên — đổi một phần Q-035) |
-| 2026-09-16 | hieu.nt10 (soạn bởi Claude) | **Owner duyệt; cổng `design-ready` PASS.** Status Draft → Active. Ngoại lệ "soạn design trước `prd-ready`" đã kết thúc: PRD được duyệt cùng lượt, nên ngoại lệ chỉ còn giá trị lịch sử |
-| 2026-09-16 | hieu.nt10 (soạn bởi Claude) | **Bản 4 — theo lượt review độc lập bằng Codex trên plan Phase 2a.** Review chỉ ra hai lỗ hổng thật ở tầng design: (1) đường **ghi** và **xoá** chỉ kiểm tiền tố chuỗi nên vẫn bị symlink ở một thành phần dẫn ra ngoài kho, dù đường **đọc** ở §10 đã kiểm `lstat`; (2) chưa có hợp đồng tuần tự hoá giữa bộ thu thập và hai thao tác xoá/gán lại. Thêm §3.8 (bộ kiểm no-follow dùng chung + mutex trong tiến trình khoá theo `workspaceId` + thứ tự dừng plugin trước khi lệnh gỡ chạm kho), sửa §3.3, §3.5, §3.7 trỏ vào đó, thêm ba nhóm test ở §15, và sửa header vốn còn ghi REQ-040 → REQ-056 và "bốn RPC" |
-| 2026-09-16 | hieu.nt10 (soạn bởi Claude) | **Bản 3 sau khi owner chốt Q-040, Q-041 và một phần Q-039.** §3.2 thêm `meta.json` cho mỗi workspace (tên và đường dẫn cuối biết được); §3.6 chuyển việc so ngưỡng sang client qua `useSettings` và khai báo `defineSettings` phạm vi `host`; thêm §3.7 (phân loại `live`/`archived`/`orphaned` và thuật toán **gán lại**), RPC `traces.reassign`, mã lỗi `E_TRACE_REASSIGN_INVALID`, hai trường `workspaceState` và `reassignedFrom`; §14 thêm dòng delta cho REQ-010 (cập nhật không xoá kho); thêm test cho gán lại, phân loại workspace và cài đặt |
-| 2026-09-16 | hieu.nt10 (soạn bởi Claude) | **Bản 2 sau khi owner chốt Q-030 → Q-037.** Viết lại quyết định nền: thu thập theo hook sự kiện và **lưu vết bền trên đĩa** thay cho dẫn xuất-khi-đọc; thêm §3 (kho lưu vết: tìm thư mục cài đặt qua `config.plugins`, bố cục theo workspace và theo tháng, bản ghi, ghi atomic, xoá ba phạm vi, đo dung lượng), `traces.delete`, hai mã lỗi mới, §9 (token và chi phí, tính riêng token cache), §14 (danh sách phải delta-change cho tài liệu đã đóng băng). Ghi nhận giả định mới **A-2** về `timestamp` trong timeline của hook |
-| 2026-09-16 | hieu.nt10 (soạn bởi Claude) | Bản Draft đầu tiên, soạn cùng lượt với PRD tính năng theo ngoại lệ đã ghi. Dữ kiện Paseo 0.8 đọc từ khai báo kiểu của `@getpaseo/plugin` 0.8.0, `@getpaseo/client` 0.8.0, `@getpaseo/protocol` 0.8.0 |
+| 2026-09-25 | hieu.nt10 (soạn bởi Claude) | Rà soát sau khi gộp: đối chiếu từng delta ở bảng Lịch sử, phần giao diện của bốn delta gốc (17e, 18, 21, qa-ledger) và REQ-059 với code. Thêm: màn "Roles & models" và chuỗi dự phòng (§11.3), chấm đang chạy và dòng trạng thái mở Manager (§11.2, §11.4), dòng model trên graph (§12), thẻ và pill sự cố dự phòng (§15.8), thẻ `notice`, chip `template error`, `statusChip`, `drawAsCard` (§15.2), panel "Beads agents" (§14), luật đếm bead và đọc id rút gọn `.N` (§6.3, §6.4), `managerRequestId` và id `req-…` viết trần (§6.1, §6.3), ảnh hưởng của sổ hỏi–đáp lên thẻ (§15.6), lý do chọn vân tay chữ (§3.3). Sửa theo code: `chat.beads` đọc 400 mục, `agents.list` lấy mọi agent rồi `roleOfAgent`, `close_with_evidence` exact không cần kho xác nhận, thứ tự và phần bị tắt dưới câu hỏi, `StatusTabs` có màu nút, `chat.waiting.fallback`, phạm vi §1 (giao diện Roles & models và dự phòng thuộc tài liệu này). Ghi rõ chưa có nút tải thêm (§12) |
+| 2026-09-25 | hieu.nt10 (soạn bởi Claude) | **Gộp thành tài liệu sống.** Gộp 11 delta ở bảng Lịch sử vào đây, viết lại theo màn hình/thành phần và theo mã hiện tại (§2.4, §11–§15 mới; §3.3, §3.6, §4, §5, §6, §8 cập nhật theo code); bỏ §14 cũ "Ảnh hưởng tới tài liệu đã đóng băng" và các giả định A-1, A-2 (đã kiểm: báo cáo tới Manager là `user_message`; bộ thu thập gọi `timeline.refetch` để lấy timestamp). Từ nay sửa tại chỗ |
+| 2026-09-25 | hieu.nt10 (soạn bởi Beads Worker) | Theo delta kanban-quiet-colours: kanban bốn cột, trạng thái bead nói bằng chữ và độ tương phản, ba tab cho Setup, `TraceSummary.errors` và thẻ Errors |
+| 2026-09-19 | hieu.nt10 (soạn bởi Beads Worker) | Theo delta 20260918e batch `b6`: nút header `bm-beads-open`; app mobile của Paseo 0.8 không có "+" |
+| 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Theo delta 20260918f: rà soát UI — ô chờ `createSlot`, yêu cầu mở Manager không rơi, dải trạng thái trên Metric/Beads, số liệu workspace chỉ đọc khi danh sách hiện, chip bead tra trước khi cắt, `chat.peers.archived`, `soleWorkerOf`; gỡ tính năng ghim (`launcher.order.*`) |
+| 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Theo delta 20260918e: panel `bm-beads` với hai tab con; Setup là màn chính; bốn nhóm, nút mắt, `doneText`; bỏ biểu đồ 14 ngày |
+| 2026-09-18 | hieu.nt10 (soạn bởi Beads Worker) | Errata theo delta 20260918 (manager-mode-model-metrics): `runtime` trong bản ghi, `usageByModelRole`, `usageByAgent[].runtime`, `usageByModel`; gộp theo model hiệu lực |
+| 2026-09-17 | hieu.nt10 (soạn bởi Claude) | Theo delta 20260917e: tách request thành đoạn theo lượt người dùng hỏi; `workspaces.overview.runningAgents` |
+| 2026-09-17 | hieu.nt10 (soạn bởi Claude) | Errata theo delta 20260917d: khoá chống trùng thêm vân tay nội dung lượt; lượt Manager vô danh chỉ gộp trong cùng Manager |
+| 2026-09-16 | hieu.nt10 (soạn bởi Claude) | Bản 5 sau nghiệm thu trên daemon thật (delta acceptance-fixes): tám luật đọc lại trace |
+| 2026-09-16 | hieu.nt10 (soạn bởi Claude) | Owner duyệt; `design-ready` PASS; Draft → Active |
+| 2026-09-16 | hieu.nt10 (soạn bởi Claude) | Bản 2–4: lưu vết bền trên đĩa, xoá, gán lại, bộ kiểm đường dẫn no-follow và mutex theo workspace (sau review độc lập bằng Codex) |
+| 2026-09-16 | hieu.nt10 (soạn bởi Claude) | Bản Draft đầu tiên |
+
+## Lịch sử
+
+Các delta đã gộp vào tài liệu này. File nằm ở `docs/archive/` (mã nguồn trích chúng theo tên và mục) nhưng chỉ là hồ sơ lịch sử; hiện trạng là tài liệu này.
+
+| Delta | Ngày | Đưa vào |
+|---|---|---|
+| [delta-20260916-acceptance-fixes](../archive/design/paseo-bm-delta-20260916-acceptance-fixes.md) | 2026-09-16 | Tám luật đọc lại trace sau nghiệm thu thật: bucket theo `requestId`, chi phí luôn tạm tính, id bead chỉ ở tham số vị trí, chỉ báo cáo cuối quyết định trạng thái, phủ định chính xác của polish, bản ghi của agent đã xoá vẫn thuộc request |
+| [delta-20260916-beads-screen](../archive/design/paseo-bm-delta-20260916-beads-screen.md) | 2026-09-16 | Màn Beads, `beads.list/get/action`, ba hành động giao việc qua Manager, `E_BEAD_NOT_FOUND` |
+| [delta-20260916-chat-cards](../archive/design/paseo-bm-delta-20260916-chat-cards.md) | 2026-09-16 | Thẻ chat cho tin giữa Manager, Worker, Reviewer; `chat.peers`; chip bead, `beads.lookup`, panel "Beads in this chat" |
+| [delta-20260916-owner-feedback](../archive/design/paseo-bm-delta-20260916-owner-feedback.md) | 2026-09-16 | Metric dạng thẻ + biểu đồ + graph; `origin` và bằng chứng `skill`; icon vai trò; thư mục worktree; ai đang làm bead; `workspaces.overview`; `store` chỉ còn byte (phần chỉ dẫn vai trò không gộp ở đây) |
+| [delta-20260916-setup-screen](../archive/design/paseo-bm-delta-20260916-setup-screen.md) | 2026-09-16 | Màn Setup: chỉ dẫn thêm từng vai, kiểm skill, `br`/`bv` và nút Install (phần CLI `--install-beads-tools` không gộp ở đây) |
+| [dashboard-delta-20260917d-request-attribution](../archive/design/paseo-bm-dashboard-delta-20260917d-request-attribution.md) | 2026-09-17 | Chống trùng thêm vân tay nội dung lượt; lượt Manager vô danh chỉ gộp trong cùng Manager |
+| [delta-20260917e-manager-screen-and-commands](../archive/design/paseo-bm-delta-20260917e-manager-screen-and-commands.md) (phần giao diện; phần còn lại ở design gốc) | 2026-09-17 | Tách request thành đoạn, `runningAgents` và chấm đang chạy, thông báo slash command trên dải trạng thái; bỏ ghim |
+| [delta-20260918-manager-mode-model-metrics](../archive/design/paseo-bm-delta-20260918-manager-mode-model-metrics.md) (phần số liệu model) | 2026-09-18 | `runtime`, `usageByAgent[].runtime`, `usageByModel`, `usageByModelRole`, dòng model trên graph, `modeNotice` trên dải trạng thái |
+| [delta-20260918c-question-cards](../archive/design/paseo-bm-delta-20260918c-question-cards.md) | 2026-09-18 | Khối `BM-QUESTIONS` / `BM-ANSWERS`, bộ đọc `bm-questions.ts`, thẻ câu hỏi trong chat Manager (luật viết của `worker.md`/`manager.md` không gộp ở đây) |
+| [delta-20260918d-card-replies](../archive/design/paseo-bm-delta-20260918d-card-replies.md) | 2026-09-18 | Một đường gửi `sendReply` cho mọi thẻ, lựa chọn viết vào ô Reply, bố cục câu hỏi, chip "Answered", `chat.waiting` và pill, "Mark as answered", thẻ `finished` mở sẵn (phần `manager.md` không gộp ở đây) |
+| [delta-20260918e-beads-tab](../archive/design/paseo-bm-delta-20260918e-beads-tab.md) | 2026-09-18 | Tab "Beads" với hai tab con, Setup là màn chính, dải trạng thái, nút mắt, `doneText`, nút header |
+| [delta-20260918f-ui-review](../archive/design/paseo-bm-delta-20260918f-ui-review.md) | 2026-09-18 | Rà soát UI: `createSlot`, yêu cầu mở Manager không rơi, `WorkspaceScreenHeader`, `overviewPolling`, gỡ tính năng ghim, chip bead tra trước khi cắt, `soleWorkerOf` và `archived`, pill không dựng lại popover |
+| [delta-20260921-worker-fallback-and-role-settings](../archive/design/paseo-bm-delta-20260921-worker-fallback-and-role-settings.md) (phần giao diện) | 2026-09-21 | Màn "Roles & models" và chuỗi dự phòng, thẻ và pill sự cố dự phòng, `replaced by` ở panel "Beads agents", cột skill Pi/OpenCode |
+| [delta-20260924-qa-ledger](../archive/design/paseo-bm-delta-20260924-qa-ledger.md) (phần giao diện) | 2026-09-24 | `answered` trên pill và thẻ câu hỏi |
+| [delta-20260925-kanban-quiet-colours](../archive/design/paseo-bm-delta-20260925-kanban-quiet-colours.md) | 2026-09-25 | Kanban bốn cột co giãn, trạng thái bead bằng chữ và độ tương phản, ba tab cho Setup, `errors` và thẻ Errors ở Metric, `beadActionResults` |

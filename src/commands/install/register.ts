@@ -1,7 +1,7 @@
 /**
  * Plugin registration — turn the payload the applier placed on disk into a
- * plugin the Paseo daemon knows about (REQ-005(a)(c), REQ-010, Design §9.1,
- * §9.3, ADR-001 decision 3, ADR-004 decision 3).
+ * plugin the Paseo daemon knows about (REQ-005(a)(c), REQ-010, Design §4.5,
+ * ADR-001 decision 3, ADR-004 decision 3).
  *
  * The only mechanisms used are Paseo's own:
  *
@@ -37,7 +37,7 @@
  * before, so when {@link RegisterPluginInput.payloadChanged} is true and the
  * registration stays on the same directory, the step runs
  * `paseo plugin reload paseo-bm` and polls `plugin ls` until `status` is
- * `running` — 30 seconds at 500 ms, like the consent step (§8). A plugin
+ * `running` — 30 seconds at 500 ms, like the consent step (§4.7). A plugin
  * reported `disabled` is not reloaded: nothing is loaded while the global
  * switch is off, and it starts from the new files once it is turned on. A
  * reload that fails, or a plugin that does not get to `running`, is
@@ -104,10 +104,10 @@ export type PluginRegistrationFailure = "version-not-recorded" | "install-failed
  */
 export type PluginFallbackOutcome = "not-attempted" | "restored" | "failed" | "unavailable";
 
-/** Design §8: total wait for the plugin to report `running`. */
+/** Design §4.7: total wait for the plugin to report `running`. */
 export const PLUGIN_RUNNING_TIMEOUT_MS = 30_000;
 
-/** Design §8: interval between two `plugin ls` polls. */
+/** Design §4.7: interval between two `plugin ls` polls. */
 export const PLUGIN_POLL_INTERVAL_MS = 500;
 
 const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));

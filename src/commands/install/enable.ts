@@ -1,7 +1,7 @@
 /**
  * The trust-boundary step of `paseo-bm install` (bead bm-wp-107-2r5.2;
- * REQ-006(a)(b)(d)(e), REQ-031(c), REQ-005(b), M-7; Technical Design §3.2,
- * §3.4, §4.2, §7, §8, §9.1, §9.3; ADR-006 decisions 3, 4 and 8).
+ * REQ-006(a)(b)(d)(e), REQ-031(c), REQ-005(b), M-7; Technical Design §5.2,
+ * §6.1, §4.2, §4.5, §4.7, §9; ADR-006 decisions 3, 4 and 8).
  *
  * One consent covers two switches in Paseo's `config.json`:
  *
@@ -25,9 +25,9 @@
  * - The write goes through `applyConfigEdit` (backup, minimal edit, reload,
  *   `appliedPaths` check, rollback on a failed reload). There is no restart.
  * - After the reload, `plugin ls` is polled until the plugin's `status` is
- *   `running` — never `enabled` — for 30 seconds at 500 ms intervals (§8).
+ *   `running` — never `enabled` — for 30 seconds at 500 ms intervals (§4.7).
  *   A plugin that does not get there is `E_PLUGIN_LOAD_FAILED` (exit 7); the
- *   switches are left on (§9.3).
+ *   switches are left on (§4.5).
  */
 
 import type { ErrorCode } from "../../errors.js";
@@ -52,7 +52,7 @@ import type { InstallStepInput, TrustBoundaryOutcome, TrustBoundaryStep } from "
 import { DEFAULT_PLUGIN_ID } from "./planner.js";
 import { PLUGIN_RUNNING_TIMEOUT_MS, pluginLogsCommand, waitForPluginRunning } from "./register.js";
 
-// Design §8 wait values; they live with the shared poll in ./register.js (bm-i52).
+// Design §4.7 wait values; they live with the shared poll in ./register.js (bm-i52).
 export { PLUGIN_POLL_INTERVAL_MS, PLUGIN_RUNNING_TIMEOUT_MS } from "./register.js";
 
 /** The single question for both switches. */

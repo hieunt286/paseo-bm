@@ -1,6 +1,6 @@
 /**
  * The role step of `paseo-bm install` (bead bm-wp-107-2r5.4; REQ-027(a)–(e),
- * REQ-031; Technical Design §3.2, §3.4, §4.2, §9.1; ADR-006 decisions 1, 2, 5).
+ * REQ-031; Technical Design §5.2, §6.1, §4.2, §4.5; ADR-006 decisions 1, 2, 5).
  *
  * This file composes three modules that already decide everything and adds
  * only the wiring:
@@ -23,7 +23,7 @@
  *    asking on a terminal — and turns the decision into `config` actions for
  *    the preview. The preview is therefore the plan here too.
  * 2. {@link RolesStep.apply}, under the lock, after plugin registration and the
- *    trust-boundary step (Design §9.1): the login check, the `bm-*` write, and
+ *    trust-boundary step (Design §4.5): the login check, the `bm-*` write, and
  *    `roles[]` in `install.json`. The config backup is added to `backups[]`
  *    and handed back so `--prune` keeps it.
  *
@@ -179,7 +179,7 @@ async function planRoles(
   }
 
   // Read before deciding: a reused roles[] entry takes its name from here,
-  // because roles[] itself has no name field (Design §3.2, bug bm-lev).
+  // because roles[] itself has no name field (Design §5.2, bug bm-lev).
   const config = await readConfigOrEmpty(input.paseoHome, input.fs);
 
   let configuration;
@@ -220,7 +220,7 @@ async function applyRoles(input: RolesApplyInput, spawnLogin: LoginSpawner | und
   const { context, plan } = input;
   const prompter = input.interactive ? context.prompter : nonInteractive(context.prompter);
 
-  /* -- 1. login: warn, never block (Design §9.3) ---------------------------- */
+  /* -- 1. login: warn, never block (Design §4.5) ---------------------------- */
   const logins = await ensureProviderLogins({
     selections: plan.selections,
     runner: input.adapter,

@@ -75,7 +75,7 @@ describe("sha256", () => {
 });
 
 describe("backupStamp", () => {
-  it("formats a UTC instant the way Design §3.1 shows", () => {
+  it("formats a UTC instant the way Design §5.1 shows", () => {
     expect(backupStamp(new Date("2026-09-15T10:15:00.123Z"))).toBe("20260915T101500Z");
   });
 

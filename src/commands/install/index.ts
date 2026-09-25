@@ -1,7 +1,6 @@
 /**
  * `paseo-bm install` — the end-to-end command flow (bead bm-wp-105-6ec.4;
- * REQ-001(a)(b), REQ-003, REQ-010(b); Technical Design §2.1, §4.1–§4.4, §8,
- * §9.1, §9.3).
+ * REQ-001(a)(b), REQ-003, REQ-010(b); Technical Design §2, §4.1–§4.5, §9).
  *
  * This file composes modules that already exist and decides nothing they
  * already decide:
@@ -91,7 +90,7 @@ export const APPLY_QUESTION = "Apply these changes?";
 /** Asked on top of the apply confirmation when the plan needs it; `--yes` never answers it. */
 export const DOWNGRADE_QUESTION = "Install an older paseo-bm over the newer one that is installed?";
 
-/** Design §3.3: a user-modified file is kept unless the user decides otherwise. */
+/** Design §5.3: a user-modified file is kept unless the user decides otherwise. */
 export const OVERWRITE_QUESTION = "Overwrite the files you changed? A backup of each is taken first.";
 
 /* ---------------------------------------------------------------- steps */

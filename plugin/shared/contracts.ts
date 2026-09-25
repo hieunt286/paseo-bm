@@ -5,7 +5,7 @@ import { modelPriceSchema } from "./prices";
 /**
  * RPC contracts for the paseo-bm plugin.
  *
- * Source of truth: docs/design/paseo-bm.md §5 ("Hợp đồng RPC của plugin").
+ * Source of truth: docs/design/paseo-bm.md §7.12 ("Bảng RPC của plugin").
  * This module is `shared/`, so it must stay free of Node and React Native
  * runtime imports: Zod schemas and plain values only.
  *
@@ -29,9 +29,8 @@ export const agentIdSchema = z.string().min(1);
  *
  * `otherManagerIds` lists the other live Managers of the same workspace (newest
  * first) when more than one exists; `agentId` is then the newest. They are
- * reported, never deleted or archived (design §9.3). NOTE: this field is not in
- * the design §5 table yet — see the WP-112 report; it is the only channel for
- * the "báo trong panel" requirement.
+ * reported, never deleted or archived (Technical Design §7.3). It is the only
+ * channel for the "báo trong panel" requirement (see the WP-112 report).
  *
  * Failures are thrown as errors whose message starts with a registry code
  * (`E_PROVIDER_UNAVAILABLE`).
@@ -61,7 +60,7 @@ export const managerEnsureRpc = defineRpc({
 
 /**
  * Role shown for a listed agent: one of the three roles, or `unknown` when the
- * `bm.role` label is missing or holds another value (design §5, "không rõ vai trò").
+ * `bm.role` label is missing or holds another value (Technical Design §7.3).
  */
 export const agentRoleSchema = z.enum(["manager", "worker", "reviewer", "unknown"]);
 
@@ -69,11 +68,11 @@ export const agentRoleSchema = z.enum(["manager", "worker", "reviewer", "unknown
  * One node of the agent tree the workspace panel draws.
  *
  * `role` is `unknown` when the agent carries no readable `bm.role` label; the
- * panel renders that instead of dropping the agent (design §5).
+ * panel renders that instead of dropping the agent (Technical Design §7.3).
  * `title` mirrors the SDK snapshot, which may be `null` (untitled agent).
  * `parentId` is the `paseo.parent-agent-id` label when that parent is itself in
  * the list, otherwise `null` — so an orphaned Worker (its Manager deleted or
- * archived) is a root of the tree (design §8).
+ * archived) is a root of the tree (Technical Design §7.3).
  */
 export const agentNodeSchema = z.object({
   id: agentIdSchema,

@@ -138,9 +138,9 @@ export interface PaseoConfigFacts {
   readonly present: boolean;
   /** False when the file exists but could not be read or parsed as JSON. */
   readonly readable: boolean;
-  /** `pluginsEnabled` — the global plugin switch (Design §3.4). */
+  /** `pluginsEnabled` — the global plugin switch (Design §6.1). */
   readonly pluginsEnabled: boolean;
-  /** `daemon.mcp.injectIntoAgents` — the agent tool switch (Design §3.4). */
+  /** `daemon.mcp.injectIntoAgents` — the agent tool switch (Design §6.1). */
   readonly mcpInjectIntoAgents: boolean;
   /** Ids under `agents.providers`. */
   readonly agentProviderIds: readonly string[];
@@ -156,7 +156,7 @@ export interface PaseoConfigFacts {
 
 export type PaseoConfigReader = (configFile: string) => Promise<PaseoConfigFacts>;
 
-/** One owned payload file, judged against the hash recorded for it (§3.3). */
+/** One owned payload file, judged against the hash recorded for it (Design §5.3). */
 export interface OwnedFileStatus {
   /** Path relative to the install home, exactly as `install.json` records it. */
   readonly path: string;
@@ -275,7 +275,7 @@ function nonEmptyString(value: unknown): string | undefined {
  *
  * Interim: `src/paseo/config.ts` is the module that will own this file. Until
  * it lands, this reader is deliberately the narrowest thing that answers the
- * questions in Design §3.4 — it opens the file read-only, never repairs it, and
+ * questions in Design §6.1 — it opens the file read-only, never repairs it, and
  * treats every shape it does not recognise as "absent" rather than guessing.
  */
 export const readPaseoConfigFacts: PaseoConfigReader = async (configFile) => {
@@ -342,7 +342,7 @@ export const readPaseoConfigFacts: PaseoConfigReader = async (configFile) => {
 /**
  * Compares every file `install.json` claims against what is on disk.
  *
- * Interim: `src/ownership.ts` is the module that will own the §3.3 status
+ * Interim: `src/ownership.ts` is the module that will own the Design §5.3 status
  * table for install and uninstall as well. Doctor needs only the read half —
  * hash what is there, compare it to what was written — so it carries this
  * narrow version behind {@link OwnedFileProbe} and will hand the job over.
@@ -745,7 +745,7 @@ async function canonical(path: string): Promise<string> {
   }
 }
 
-/** The two switches of one trust boundary, Design §3.4 and REQ-006 / REQ-031c. */
+/** The two switches of one trust boundary, Design §6.1 and REQ-006 / REQ-031c. */
 function switchChecks(config: PaseoConfigFacts): readonly Check[] {
   if (!config.readable) {
     const message = config.present
@@ -888,7 +888,7 @@ function changedInAppChecks(record: InstallRecord, config: PaseoConfigFacts): re
  *
  * A count, never a byte total: measuring size means walking every tree, which
  * buys nothing a user acts on. Both are informational — keeping old versions is
- * the designed behaviour (§3.1), and only `--prune` on `install` removes any.
+ * the designed behaviour (Design §5.1), and only `--prune` on `install` removes any.
  */
 function inventoryChecks(record: InstallRecord): readonly Check[] {
   const versions = record.versions.length;

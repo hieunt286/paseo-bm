@@ -36,13 +36,13 @@ export interface CommandContext {
   readonly explicitCommand: boolean;
   readonly flags: Flags;
   /**
-   * `--role` after its syntax has been checked (Design §7). Empty when the
+   * `--role` after its syntax has been checked (Design §4.2). Empty when the
    * flag was not used. Whether each provider and model actually exists is a
    * separate, later check against Paseo — see `src/roles/config.ts`.
    */
   readonly roleSpecs: readonly RoleSpec[];
   /**
-   * `--skills-agents` after validation (Design §7), or the default
+   * `--skills-agents` after validation (Design §4.2), or the default
    * `claude,codex` when the flag was not used.
    */
   readonly skillsAgents: readonly string[];
@@ -102,7 +102,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies): Pr
     return EXIT_CODES.ok;
   }
 
-  // Value-format checks belong here, not inside `parseCommandLine`: Design §7
+  // Value-format checks belong here, not inside `parseCommandLine`: Design §4.2
   // requires them at parse time, before preflight and before anything is
   // written, and doing them after the parser keeps the parser free of any
   // knowledge about roles and providers. Only the syntax is judged now; the

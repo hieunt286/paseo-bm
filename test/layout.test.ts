@@ -267,7 +267,7 @@ describe("installPaths", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  it("describes the install home layout from Design §3.1", () => {
+  it("describes the install home layout from Design §5.1", () => {
     mkdirSync(join(home, ".paseo-bm"), { recursive: true });
     const layout = resolveLayout({ homeDir: home, cwd: CWD, env: {} });
     const paths = installPaths(layout.installHome.path);

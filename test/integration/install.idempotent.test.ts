@@ -1,5 +1,5 @@
 /**
- * Install evidence — idempotence (bead bm-wp-105-6ec.5; REQ-009, M-3, Design §8).
+ * Install evidence — idempotence (bead bm-wp-105-6ec.5; REQ-009, M-3, Design §9).
  * Primary Proof: `npm test -- integration/install`.
  *
  * A first `install --apply` on a fake `$HOME`, then the same install again.

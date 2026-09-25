@@ -161,3 +161,7 @@ remove it.
 
 Both paths depend on agents following their instructions, which is why we
 would like a real cancel.
+
+---
+
+*Revision 2026-09-25: still open and not sent. The workaround described above is what paseo-bm 0.3.0 ships (`plugin/server/stop-propagation.ts`; the Worker's Stop section in `plugin/roles/worker.md`). Not re-checked against the Paseo 0.9.x plugin SDK.*

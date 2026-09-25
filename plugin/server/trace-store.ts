@@ -56,7 +56,7 @@ import {
   type WorkspaceState,
 } from "../shared/contracts";
 
-/** Workspace ids are used as directory names, so they are restricted (design §3.5). */
+/** Workspace ids are used as directory names, so they are restricted (design §3.8). */
 export const WORKSPACE_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 
 /** How long a mutation waits for the workspace lock before giving up (design §3.8). */
@@ -943,7 +943,7 @@ function safeJson(line: string): unknown {
 }
 
 // ---------------------------------------------------------------------------
-// Workspace classification and reassignment (WP-210, Design §3.7).
+// Workspace classification and reassignment (WP-210, Dashboard Design §3.7).
 //
 // A workspace the user removed from Paseo must not take its history with it,
 // and it must not be guessed back onto a new workspace either: matching by

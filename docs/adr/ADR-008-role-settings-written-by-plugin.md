@@ -2,11 +2,11 @@
 
 | Trường | Giá trị |
 |---|---|
-| Status | **Accepted** (2026-09-22). Owner chọn hướng R1 ngày 2026-09-21 (Q3 a của `req-20260921T111242Z`) và duyệt [PRD delta 20260921](../product/paseo-bm-prd-delta-20260921-worker-fallback-and-role-settings.md) §9 ngày 2026-09-22 (Q10 a) — điều kiện chuyển Accepted mà ADR này đặt ra. Có hiệu lực từ phase 2a-15, khi plugin bắt đầu ghi cấu hình vai trò (`plugin/server/config-writer.ts`) |
+| Status | **Accepted** (2026-09-22). Owner chọn hướng R1 ngày 2026-09-21 (Q3 a của `req-20260921T111242Z`) và duyệt [PRD delta 20260921](../archive/product/paseo-bm-prd-delta-20260921-worker-fallback-and-role-settings.md) §9 ngày 2026-09-22 (Q10 a) — điều kiện chuyển Accepted mà ADR này đặt ra. Có hiệu lực từ phase 2a-15, khi plugin bắt đầu ghi cấu hình vai trò (`plugin/server/config-writer.ts`) |
 | Date | 2026-09-21 |
 | Owner | hieu.nt10 |
 | Sửa đổi | [ADR-004](ADR-004-paseo-config-mutation.md) quyết định 1; [ADR-006](ADR-006-role-registration.md) quyết định 1 và 5 |
-| Liên quan | [PRD delta 20260921](../product/paseo-bm-prd-delta-20260921-worker-fallback-and-role-settings.md) REQ-064, REQ-065, REQ-066 · [Design delta 20260921](../design/paseo-bm-delta-20260921-worker-fallback-and-role-settings.md) §4.3, §4.4 · [Đề xuất 20260921](../design/paseo-bm-proposal-20260921-worker-fallback-and-role-settings.md) §4.2, §4.7 |
+| Liên quan | [PRD delta 20260921](../archive/product/paseo-bm-prd-delta-20260921-worker-fallback-and-role-settings.md) REQ-064, REQ-065, REQ-066 · [Design delta 20260921](../archive/design/paseo-bm-delta-20260921-worker-fallback-and-role-settings.md) §4.3, §4.4 · [Đề xuất 20260921](../archive/design/paseo-bm-proposal-20260921-worker-fallback-and-role-settings.md) §4.2, §4.7 |
 
 ## Context
 

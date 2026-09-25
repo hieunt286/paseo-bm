@@ -374,7 +374,7 @@ function openBuckets(records: readonly TraceRecord[]): { buckets: Bucket[]; byRe
 const BARE_REQUEST_ID = /\breq-\d{8}T\d{6}Z\b/g;
 
 /**
- * Request id of an agent, in the order design §6 step 3 fixes: label → its own
+ * Request id of an agent, in the order design §6.1 step 4 fixes: label → its own
  * records and reports → its prompts → the bare id its messages name most.
  * Returns the confidence with it so the caller can tell a fact from an
  * inference.
@@ -757,7 +757,7 @@ export function reconstructTraces(options: ReconstructOptions): ReconstructedTra
 }
 
 // ---------------------------------------------------------------------------
-// Timing, bead detail, summaries and pages (WP-206.1.2; Design §4.2, §4.3, §7).
+// Timing, bead detail, summaries and pages (WP-206.1.2; Dashboard Design §4.2, §4.3, §7).
 // ---------------------------------------------------------------------------
 
 /** Sentence printed next to every duration, so no number is read as machine time. */

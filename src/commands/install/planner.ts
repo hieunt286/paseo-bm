@@ -1,5 +1,5 @@
 /**
- * The install planner — Technical Design §2.1, §3.3, §8, §9.1.
+ * The install planner — Technical Design §2, §4.5, §5.3, §9.
  *
  * The architectural rule is "the planner does not write, the applier does not
  * decide". This module turns the current state of the machine — the install
@@ -20,7 +20,7 @@
  *   destination lands in the new `plugin/<version>/` directory and is therefore
  *   `missing`; the three conflicting states only show up on a reinstall/repair,
  *   or for `install.json` itself.
- * - **The two switches of one trust boundary** (§3.4): `pluginsEnabled` and
+ * - **The two switches of one trust boundary** (§6.1): `pluginsEnabled` and
  *   `daemon.mcp.injectIntoAgents`. They are planned as `config` actions only;
  *   consent and the write belong to the command flow and the applier.
  * - **Plugin registration** with the daemon, when the caller says what Paseo
@@ -239,7 +239,7 @@ export async function planInstall(input: PlanInstallInput): Promise<InstallPlan>
   }
 
   // The record is rewritten only when there is something to record, which is
-  // what keeps "the same version again produces zero writes" (Design §8) true.
+  // what keeps "the same version again produces zero writes" (Design §9) true.
   const recordNeedsUpdate =
     input.record === undefined ||
     input.record.version !== input.version ||

@@ -87,7 +87,7 @@ function statusOf(entries: readonly Ownership[], path: string): string {
   return found.status;
 }
 
-describe("the five states of Design §3.3", () => {
+describe("the five states of Design §5.3", () => {
   const path = "plugin/0.1.0/roles/worker.md";
 
   it("unchanged: recorded, on disk, hash matches the record and the payload", async () => {
@@ -246,7 +246,7 @@ describe("the real reach of the three conflicting states (ADR-002 decision 4)", 
     expect(new Set(entries.map((entry) => entry.detail))).toEqual(new Set(["not installed yet"]));
   });
 
-  it("installing the same version again produces no writing action at all (§8)", async () => {
+  it("installing the same version again produces no writing action at all (Design §9)", async () => {
     for (const path of payload("0.1.0")) {
       install(path, OLD);
     }

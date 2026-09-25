@@ -1,6 +1,6 @@
 /**
  * Reader for the `BM-REPORT` and `BM-REVIEW` blocks the roles emit
- * (WP-204, Dashboard Design §6 "Bộ đọc BM-REPORT").
+ * (WP-204, Dashboard Design §6.3 "Bộ đọc BM-REPORT / BM-REVIEW").
  *
  * The format is defined in `plugin/roles/worker.md` (Reporting) and
  * `plugin/roles/reviewer.md`. It is produced by a language model, so this
@@ -346,7 +346,7 @@ export interface ParseContext {
  * Reads every `BM-REPORT` block in one message.
  *
  * Duplicates are dropped on `(agentId, phase, requestId, at)`: a Worker that
- * quotes its own earlier report back must not be counted twice (design §6).
+ * quotes its own earlier report back must not be counted twice (Dashboard Design §6.3).
  */
 export function parseReports(text: string, context: ParseContext): ParsedReport[] {
   if (typeof text !== "string" || text === "") return [];
@@ -454,7 +454,7 @@ export function requestIdFromText(text: string): string | null {
   return found === null ? null : found.replace(/[`*]+$/, "");
 }
 
-/** True when a message is a role report rather than a user request (design §6 step 2). */
+/** True when a message is a role report rather than a user request (Dashboard Design §6.1 step 2). */
 export function looksLikeReport(text: string): boolean {
   return typeof text === "string" && text.split(/\r?\n/).some((line) => REPORT_MARKER.test(line));
 }

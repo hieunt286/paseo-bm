@@ -206,7 +206,7 @@ describe("runCli — routing", () => {
 
 describe("runCli — a simulated interactive install runs end to end on the scripted prompter", () => {
   /**
-   * Stand-in for the WP-105 install flow: the happy path of Design §9.1 asks
+   * Stand-in for the WP-105 install flow: the happy path of Design §4.5 asks
    * exactly three confirmations — apply, the single trust boundary covering
    * plugins plus agent tool access, and the skills CLI — plus role questions
    * that are not confirmations. The confirm counter is the evidence for M-1.

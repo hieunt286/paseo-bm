@@ -1,92 +1,99 @@
-# Runbook phát hành prerelease đầu tiên — paseo-bm
+# Release runbook — paseo-bm
 
-| Trường | Giá trị |
+| Field | Value |
 |---|---|
-| Bead | `bm-wp-118-4s4.2` |
-| Phiên bản đích | `0.1.0-alpha.0`, dist-tag `next`, có provenance |
-| Workflow | [`.github/workflows/release.yml`](../../.github/workflows/release.yml) — bước publish thật chỉ chạy khi có **GitHub Release** (`github.event_name == 'release'`); chạy tay là dry-run |
-| Trạng thái | Đã chuẩn bị xong (dry-run `34996962249` xanh). **Chưa publish.** |
+| Status | Active — the release process in force |
+| Workflow | [`.github/workflows/release.yml`](../../.github/workflows/release.yml) — the real publish runs only on a **GitHub Release** event (`release: published`); a manual run (`workflow_dispatch`) is a rehearsal and stops at `npm publish --dry-run` |
+| Packages | `paseo-bm` (the installer) and `paseo-bm-plugin` (the payload in `plugin/`), at **the same version**, from the same run |
+| Dist-tag | The workflow picks it from the version: with a `-` (a prerelease, `0.4.0-alpha.0` for instance) → `next`; without one (stable, `0.4.0` for instance) → `latest` |
+| Release notes | `docs/releases/paseo-bm-release-notes-<version>.md`, used as the body of the GitHub Release |
+| Underlying decisions | [ADR-009](../adr/ADR-009-payload-as-npm-package.md) (two packages); [design delta 20260925b](../archive/design/paseo-bm-delta-20260925b-stable-release.md) §2 (the dist-tag follows the kind of version) |
 
-## Vì sao cần bước giữ chỗ
+## 0. Rules that do not change
 
-`npm trust` (cấu hình trusted publishing bằng OIDC) **chỉ làm được khi gói đã tồn tại** trên registry (`npm help trust`: *Package must exist*), cần 2FA ở mức tài khoản và quyền ghi trên gói. `paseo-bm` chưa từng được publish, nên bản **đầu tiên** không thể đi qua OIDC. Owner chọn cách: tự publish một bản **giữ chỗ**, cấu hình trust, rồi để workflow publish bản thật kèm provenance.
+- **Authentication is OIDC** (trusted publishing): there is no `NPM_TOKEN` and no other secret. The trusted publisher of **both** packages points at the file name `release.yml` — do not rename it and do not move it.
+- **The GitHub Release is the approval point.** After 72 hours there is no `unpublish`; the way back is always to release a patch.
+- **An agent never logs in to npm and never touches the owner's credentials.** The npm account has 2FA at `auth-and-writes`, so every write outside `release.yml` (`npm publish` by hand, `npm trust …`, `npm dist-tag add …`) asks for a one-time password and is the owner's job. Letting an agent try failed three times (2026-09-23).
+- **Three version sources must agree**: `package.json`, `plugin/package.json`, `plugin/shared/version.ts` (`PLUGIN_VERSION`). The last two are generated from the first by `npm run build`; the workflow's `Assert both packages agree` step stops the run before anything reaches npm. Why: [the paseo.cafe record](./paseo-bm-cafe-listing-20260923.md) §9.
+- No `preinstall` / `install` / `postinstall` in `package.json`; the workflow checks it.
 
-Người chạy (Claude) **không** đăng nhập npm và **không** chạm tới thông tin đăng nhập của owner; các lệnh ở mục 1 do owner tự chạy.
+## 1. Preparation (an agent can do this)
 
-> **Đo được 2026-09-23, phase 2a-20.** Không phải "nên" mà là "không thể": tài khoản npm của owner đặt `two-factor auth: auth-and-writes`, nên **mọi** thao tác ghi đòi yếu tố thứ hai. `npm whoami` và `npm token list` chạy được, nhưng `npm publish`, `npm trust` và `npm dist-tag add` đều mở luồng xác thực trình duyệt mà agent không hoàn tất được — thử ba lần, không lần nào publish được gì. Owner chốt Q13 b (cho agent dùng phiên npm) nhưng thực tế bác bỏ nó, nên luật ở trên **giữ nguyên** và được mở rộng: bước giữ chỗ, `npm trust github`, và mọi lần dời dist-tag là việc của owner. Chỉ lần phát hành thật chạy được không cần OTP, vì `release.yml` publish bằng OIDC. Lưu ý thêm: npm đang siết token bỏ qua 2FA, nên đừng coi Granular Access Token là đường vòng lâu dài.
+1. **Pick the number.** A prerelease → `next`, a stable version → `latest`. `test/plugin-role-labels.test.ts` pins the payload's minor version (`0.3.`); changing the minor means fixing that check in the same commit.
+2. **Change the version, then build, before verifying**:
+   ```bash
+   npm version <version> --no-git-tag-version
+   npm run build          # writes plugin/package.json and PLUGIN_VERSION
+   npm run verify         # typecheck, typecheck:plugin, lint, test, build
+   ```
+   Verifying before building, after a version change, goes red because the two generated sources do not agree yet.
+3. **Write the release notes** at `docs/releases/paseo-bm-release-notes-<version>.md`, **in English**, following the shape of the most recent one: what this version brings, what to know when upgrading, rollback, evidence, sources. Name every change in the behaviour of the agents (`plugin/roles/*.md`) and of the installer.
+4. **Verify on exactly the tree that will be tagged.** If the working tree holds another session's unfinished work, measure in a clean worktree:
+   ```bash
+   WT=$(mktemp -d) && git worktree add --detach "$WT" <commit>
+   ln -s "$PWD/node_modules" "$WT/node_modules" && (cd "$WT" && npm run verify)
+   git worktree remove "$WT"
+   ```
+5. **Commit** `chore(release): <version>`, push `main`, wait for `ci.yml` to go green (Node 22, ubuntu).
+6. **Rehearse** `release.yml` on `main`:
+   ```bash
+   gh workflow run release.yml -f tag=v<version>
+   ```
+   It passes when: both jobs `verify (ubuntu-latest, node 24)` and `verify (macos-latest, node 24)` are green, including `Smoke test packed package`; the log holds `Dry-run publish of paseo-bm@<version> with dist-tag <next|latest>` and the same line for `paseo-bm-plugin`; and the four real publish/verify steps are `skipped`. A rehearsal does not prove the registry accepts the dist-tag — `--dry-run` never asks the registry.
+7. **When you change `release.yml`, check the shell layer too**, not only the JavaScript: `bash -n` over every `run:` block; no `node -e '…'` may contain a single quote, not even inside a comment (an `owner's` turned the first `0.3.0` rehearsal red).
 
-## 1. Owner chạy trên máy mình
+## 2. Releasing (after the owner approves)
+
+The GitHub Release's `prerelease` flag must agree with the shape of the version; where they differ, the workflow goes red at `Resolve version, tag and dist-tag`, before anything is published.
 
 ```bash
-cd /Users/Shared/work/self/paseo-plugins/paseo-bm
-git pull                      # lấy bản mới nhất của main
-
-npm login                     # mở trình duyệt, cần 2FA
-npm whoami                    # kiểm tra đã đăng nhập đúng tài khoản
-
-# Bản giữ chỗ: KHÔNG dùng dist-tag next hay latest
-npm version 0.0.0-placeholder.0 --no-git-tag-version
-npm publish --tag placeholder --access public
-git checkout package.json     # trả version về 0.1.0-alpha.0, không commit bản giữ chỗ
-
-# Cấu hình trusted publisher cho GitHub Actions
-npm trust github paseo-bm --file release.yml --repo hieunt286/paseo-bm --allow-publish
-npm trust list paseo-bm       # xác nhận đã có cấu hình
+git tag v<version> && git push origin v<version>
+# prerelease:
+gh release create v<version> --prerelease --title "v<version>" --notes-file docs/releases/paseo-bm-release-notes-<version>.md
+# stable:
+gh release create v<version> --title "v<version>" --notes-file docs/releases/paseo-bm-release-notes-<version>.md
 ```
 
-Ghi chú:
-- Bản giữ chỗ nằm ở dist-tag `placeholder`, nên `npx paseo-bm` và `npx paseo-bm@next` **không** lấy phải nó.
-- Không cần `npm unpublish`: npm chỉ cho gỡ trong 72 giờ và đường lùi của dự án là phát hành bản vá, không phải unpublish.
-- Nếu `npm trust github` báo đã có cấu hình: `npm trust list paseo-bm` lấy id rồi `npm trust revoke paseo-bm --id <id>` trước khi tạo lại.
+Follow the run of the `release` event: the checks, `smoke:packed`, `Assert both packages agree`, the two dry-run steps, then `Publish to npm` (`paseo-bm`) → `Publish payload to npm` (`paseo-bm-plugin`) → `Verify published version` → `Verify published payload` (each waits up to 5 minutes, because npm answers "being processed").
 
-Xong thì nhắn cho Claude: **"đã cấu hình trusted publisher"**.
+## 3. Verification
 
-## 2. Claude làm tiếp, sau khi owner duyệt publish
+```bash
+npm view paseo-bm version && npm view paseo-bm-plugin version
+npm view paseo-bm dist-tags && npm view paseo-bm-plugin dist-tags
+npm view paseo-bm dist.attestations && npm view paseo-bm-plugin dist.attestations   # SLSA provenance v1
+cd "$(mktemp -d)" && npx --yes paseo-bm@<version> --version
+```
 
-1. Kiểm tra lại: `main` xanh, `npm view paseo-bm dist-tags` có `placeholder`, `npm trust list` do owner xác nhận.
-2. Tạo tag và GitHub Release (đây là **điểm phê duyệt**, publish không đảo ngược được sau 72 giờ):
-   ```bash
-   git tag v0.1.0-alpha.0 && git push origin v0.1.0-alpha.0
-   gh release create v0.1.0-alpha.0 --prerelease --title "v0.1.0-alpha.0" --notes-file <ghi chú>
-   ```
-3. Theo dõi workflow `release.yml` (sự kiện `release`): các bước kiểm tra, `smoke:packed`, `publish --dry-run`, rồi **Publish to npm** và **Verify published version**.
-4. Xác minh:
-   ```bash
-   npm view paseo-bm@next version
-   npm view paseo-bm@next dist.attestations    # provenance
-   cd "$(mktemp -d)" && npx --yes paseo-bm@next --version
-   ```
-5. Ghi bằng chứng vào bead `bm-wp-118-4s4.2` rồi đóng bead và epic WP-118.
+It passes when both packages are at `<version>`, the dist-tag matches the kind of version (`next` or `latest`) on **both** packages, and the attestations are there. Record the evidence (the run number, the output) in the close reason of the release bead.
 
-## 3. Nếu bước giữ chỗ thất bại
+## 4. After the release
 
-- `npm publish` báo tên gói đã có chủ khác → đổi tên gói là quyết định của owner (ảnh hưởng README, `package.json`, trusted publisher); dừng và hỏi.
-- `npm trust github` báo thiếu quyền hoặc thiếu 2FA → owner bật 2FA ở mức tài khoản rồi chạy lại; không dùng token bypass 2FA.
-- Không muốn có bản giữ chỗ trên registry → phương án còn lại là owner tự publish `0.1.0-alpha.0` (mất provenance cho bản đó) hoặc dùng token một lần trong CI (trái quyết định thiết kế "không NPM_TOKEN", cần errata). Cả hai đều cần owner chọn lại.
+- **A stable release does not move `next`.** `next` still points at the last prerelease. To make `npx paseo-bm@next` give the stable version, the owner runs (a one-time password is needed): `npm dist-tag add paseo-bm@<version> next` and `npm dist-tag add paseo-bm-plugin@<version> next`. Those two commands are also the fallback if `latest` does not move after a publish.
+- **paseo.cafe**: if a caveat of the `registry/paseo-bm.json` entry names the number or the kind of version, fix it as [the listing record](./paseo-bm-cafe-listing-20260923.md) §9 says (Biome keeps a short array on one line; check the content is non-empty before writing it).
+- The real dist-tag state is always read with `npm view <package> dist-tags`, never copied into a document.
 
-## 4. Bản ổn định (từ `0.3.0` trở đi)
+## 5. The way back
 
-`release.yml` nhận cả bản không phải prerelease và **tự** đặt dist-tag theo loại phiên bản: prerelease → `next`, ổn định → `latest`. Nghĩa là một bản ổn định **không** còn cần bước `npm dist-tag add` cần OTP của owner. Quyết định và lý do: [design delta 20260925b](../design/paseo-bm-delta-20260925b-stable-release.md) §2.
+Release a patch (`<major>.<minor>.<patch+1>` or `-alpha.<n+1>`); never `npm unpublish`. A user who needs to go back right away uses `npx paseo-bm@<previous version>`; the release notes say which Paseo versions the previous release still runs on (`0.3.0-alpha.7` cannot install on Paseo 0.9.2, for instance).
 
-Khác §2 đúng ba chỗ:
+## 6. Only when adding a new npm package
 
-1. **GitHub Release không đánh dấu prerelease.** Workflow đòi cờ `prerelease` của Release khớp hình dạng phiên bản (`version.includes("-")`), nên bỏ `--prerelease`:
-   ```bash
-   git tag v0.3.0 && git push origin v0.3.0
-   gh release create v0.3.0 --title "v0.3.0" --notes-file docs/operations/paseo-bm-release-notes-0.3.0.md
-   ```
-   Đánh dấu sai thì workflow đỏ ở bước `Resolve version, tag and dist-tag`, **trước** khi publish.
-2. **Xác minh ở `latest`, không phải `next`:**
-   ```bash
-   npm view paseo-bm version && npm view paseo-bm-plugin version
-   npm view paseo-bm dist-tags && npm view paseo-bm-plugin dist-tags
-   npm view paseo-bm dist.attestations && npm view paseo-bm-plugin dist.attestations
-   cd "$(mktemp -d)" && npx --yes paseo-bm@0.3.0 --version
-   ```
-3. **`next` không tự dời theo.** Sau một bản ổn định, `next` vẫn trỏ bản prerelease cuối. Muốn `next` trỏ bản ổn định thì owner chạy tay (cần OTP):
-   ```bash
-   npm dist-tag add paseo-bm@0.3.0 next
-   npm dist-tag add paseo-bm-plugin@0.3.0 next
-   ```
+`npm trust` can only be configured for a package that **already exists** on the registry, so the first version of a new package name does not go through OIDC. The owner does this on their own machine (a one-time password is needed):
 
-Cái diễn tập (`workflow_dispatch`) chứng minh được và không chứng minh được: nó cho thấy ma trận kiểm tra xanh, `smoke:packed` xanh, hai gói đóng gói được, và workflow tính ra `dist-tag=latest`. Nó **không** cho thấy registry nhận tag đó, vì `npm publish --dry-run` không hỏi registry publish. Nếu publish xong mà `latest` không dời, đường chặn là hai lệnh `npm dist-tag add` ở trên.
+```bash
+npm login && npm whoami
+npm version 0.0.0-placeholder.0 --no-git-tag-version      # in the package's own directory
+npm publish --tag placeholder --access public             # never next or latest
+git checkout package.json
+npm trust github <package> --file release.yml --repo hieunt286/paseo-bm --allow-publish
+npm trust list <package>
+```
+
+Both current packages already have a trusted publisher (`paseo-bm` since `0.1.0-alpha.0`, `paseo-bm-plugin` confirmed in [the listing record](./paseo-bm-cafe-listing-20260923.md) §12); the placeholder version `0.0.0-placeholder.0` sits on the `placeholder` dist-tag, so `npx` never picks it up. If the package name already belongs to someone else, or `npm trust` reports missing permissions: stop and ask the owner; never use a token that bypasses 2FA.
+
+---
+
+*Revision 2026-09-25: rewritten as the runbook in force, following `release.yml` at HEAD (two packages, the dist-tag from the kind of version, release notes under `docs/releases/`). The first release, `0.1.0-alpha.0`, is condensed into §6; what happened in each release lives in the run records in the archive.*
+
+*Revision 2026-09-25 (later the same day): translated to English, and step 1.3 now asks for English release notes — the language rule in `AGENTS.md` puts commit messages, the release notes and this runbook in English (request `req-20260925T045037Z`).*

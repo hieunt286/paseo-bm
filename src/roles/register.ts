@@ -1,7 +1,7 @@
 /**
  * Role registration — turn three decided roles into three derived providers and
  * three agent profiles inside Paseo's `config.json`
- * (REQ-031(a)(b)(d), Design §3.4, ADR-006 decisions 1, 2, 3, 5, 9).
+ * (REQ-031(a)(b)(d), Design §6.1, ADR-006 decisions 1, 2, 3, 5, 9).
  *
  * This is the module that makes the three roles visible to the user: the
  * derived providers are what `paseoTools` can be narrowed on, and the agent

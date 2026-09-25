@@ -1,13 +1,13 @@
 /**
  * The one module allowed to change `<paseo home>/config.json` (ADR-004,
- * ADR-006, Design §3.4, §9.3).
+ * ADR-006, Design §6.1, §4.7).
  *
  * This is the only place paseo-bm writes into a file that belongs to another
  * product, so it carries its own evidence and its own undo. Five rules hold the
  * whole story together:
  *
  * 1. **Read–modify–write, never replace.** The file is parsed, only the keys
- *    listed in Design §3.4 are touched, and everything else — including key
+ *    listed in Design §6.1 are touched, and everything else — including key
  *    order — comes back out exactly as it went in. `daemon.agentProfiles` is an
  *    array, so it is merged entry by entry: entries whose `id` starts with
  *    `bm-` are added or merged into in place, every other entry keeps its
@@ -57,13 +57,13 @@ import type { DaemonReload, PaseoAdapter } from "./adapter.js";
 /** Prefix every key paseo-bm owns inside Paseo's config carries (ADR-006). */
 export const BM_PREFIX = "bm-";
 
-/** Name the Paseo config takes inside a backup directory (Design §3.1). */
+/** Name the Paseo config takes inside a backup directory (Design §5.1). */
 export const CONFIG_BACKUP_NAME = "paseo-config.json";
 
-/** Root-level plugin switch (Design §3.4, REQ-006). */
+/** Root-level plugin switch (Design §6.1, REQ-006). */
 export const PLUGINS_ENABLED_PATH = "pluginsEnabled";
 
-/** The global agent-tool switch (Design §3.4, ADR-006 decision 3). */
+/** The global agent-tool switch (Design §6.1, ADR-006 decision 3). */
 export const MCP_INJECT_PATH = "daemon.mcp.injectIntoAgents";
 
 /** The array of agent profiles; merged entry by entry, never replaced. */
@@ -290,7 +290,7 @@ export interface ApplyConfigEditOptions {
   readonly edit: ConfigEdit;
   /** Only `daemonReload` is used — there is no restart anywhere in paseo-bm. */
   readonly adapter: Pick<PaseoAdapter, "daemonReload">;
-  /** Filesystem seam; tests inject the guarded one (Design §10, M-4). */
+  /** Filesystem seam; tests inject the guarded one (Design §11, M-4). */
   readonly fs?: NodeFsApi;
   /** Backup directory. Defaults to `<install home>/backups/<stamp>/`. */
   readonly backupDir?: string;
@@ -493,7 +493,7 @@ export function serialiseConfig(config: PaseoConfig, snapshot: Pick<ConfigSnapsh
 /**
  * The whole write path: backup, read–modify–write with concurrent-write
  * detection, `paseo daemon reload`, verification, and rollback to the backup
- * when the daemon does not take the change (Design §9.3).
+ * when the daemon does not take the change (Design §4.7).
  *
  * Nothing is written when the edit would not change a value, so running an
  * install twice leaves the file untouched.
@@ -912,7 +912,7 @@ async function reloadOrRollback(
     return await adapter.daemonReload();
   } catch (error) {
     // The daemon refused the new config: put the file back and reload again so
-    // the daemon is left running the configuration it accepted (Design §9.3).
+    // the daemon is left running the configuration it accepted (Design §4.7).
     const restored = await rollback(context);
     await reloadQuietly(adapter);
     throw new ConfigMutationError({

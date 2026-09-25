@@ -304,7 +304,7 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
   const rows = beads.data?.beads ?? [];
   const facets = useMemo(() => facetsOf(rows, filter), [rows, filter]);
   const shown = useMemo(() => sortBeads(filterBeads(rows, filter), sortKey, descending), [rows, filter, sortKey, descending]);
-  // Closed beads are hidden until asked for, for the rest of the app session (Q9).
+  // Closed beads are shown by default; the eye button hides them for the rest of the app session (REQ-069c).
   const showClosed = useSyncExternalStore(closedBeadsVisibility.subscribe, closedBeadsVisibility.get, closedBeadsVisibility.get);
   const board = useMemo(() => kanbanColumns(shown, { showClosed }), [shown, showClosed]);
   const active = activeFilters(filter);

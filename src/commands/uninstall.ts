@@ -1,9 +1,9 @@
 /**
  * `paseo-bm uninstall` — remove exactly what paseo-bm owns (REQ-012, M-5,
- * Technical Design §3.2, §3.4, §4.2–§4.4, §9.4; ADR-002, ADR-004, ADR-006
+ * Technical Design §5.2, §6.1, §4.2–§4.4, §4.6; ADR-002, ADR-004, ADR-006
  * decisions 7 and 8).
  *
- * The flow of §9.4, and who does what:
+ * The flow of §4.6, and who does what:
  *
  *   light preflight → read install.json → {@link planUninstall} (reads only)
  *   → preview → confirm → {@link applyUninstall} (decides nothing):

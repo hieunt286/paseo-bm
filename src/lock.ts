@@ -1,5 +1,5 @@
 /**
- * Process lock for the install home (Design §3.1, §8).
+ * Process lock for the install home (Design §5.1, §9).
  *
  * Two `paseo-bm` runs writing the same install home at the same time could
  * interleave the ownership record and the payload directories. The lock removes
@@ -121,7 +121,7 @@ export interface LockHandle {
   release(): void;
 }
 
-/** Name of the lock file inside the install home (Design §3.1). */
+/** Name of the lock file inside the install home (Design §5.1). */
 const LOCK_FILE_NAME = ".lock";
 
 /** Signals that must not leave a lock file behind. */
@@ -130,7 +130,7 @@ const CLEANUP_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
 /** Lock file permissions: only the owner may read or write it. */
 const LOCK_FILE_MODE = 0o600;
 
-/** Install home permissions, per Design §3.1. */
+/** Install home permissions, per Design §5.1. */
 const LOCK_DIR_MODE = 0o700;
 
 /**

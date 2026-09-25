@@ -1,5 +1,5 @@
 /**
- * The install record — `<install home>/install.json`, Technical Design §3.2,
+ * The install record — `<install home>/install.json`, Technical Design §5.2,
  * ADR-002 decisions 1, 8 and 9.
  *
  * This file is the **single source of truth about ownership**: what is not in
@@ -8,7 +8,7 @@
  *
  * 1. **It never holds a secret.** No password, no token, no API key, no content
  *    of a user's file. {@link serializeRecord} is a whitelist projection: only
- *    the fields listed in Design §3.2 are written, so a stray key attached to
+ *    the fields listed in Design §5.2 are written, so a stray key attached to
  *    an object in memory physically cannot reach the file.
  * 2. **A record we do not understand stops the run.** A `schemaVersion` above
  *    {@link RECORD_SCHEMA_VERSION} raises `E_RECORD_SCHEMA_TOO_NEW` (ADR-002
@@ -74,7 +74,7 @@ export type PreviousKeyState = McpInjectPrevious;
 
 /**
  * The closed set of `config.json` containers paseo-bm can bring into existence
- * on its way to a key it writes (Design §3.2, §3.4; bead bm-tm2). Only these may
+ * on its way to a key it writes (Design §5.2, §6.1; bead bm-tm2). Only these may
  * appear in `paseo.createdConfigContainers`, so a record can never point the
  * uninstaller at an arbitrary key of Paseo's file.
  */
@@ -149,7 +149,7 @@ export interface RoleRecord {
   readonly paseoTools: boolean;
 }
 
-/** One payload file paseo-bm owns, hashed so a user edit is visible (§3.3). */
+/** One payload file paseo-bm owns, hashed so a user edit is visible (Design §5.3). */
 export interface FileRecord {
   /** Relative to `installHome`, e.g. `plugin/0.1.0/roles/worker.md`. */
   readonly path: string;
@@ -205,7 +205,7 @@ export interface SkillsRecord {
   readonly assistOutcome: SkillsAssistOutcome;
 }
 
-/** `install.json`, schema v1 (Design §3.2). */
+/** `install.json`, schema v1 (Design §5.2). */
 export interface InstallRecord {
   readonly schemaVersion: typeof RECORD_SCHEMA_VERSION;
   /** The npm package version that wrote this record. */
@@ -299,7 +299,7 @@ export function isIsoUtc(value: string): boolean {
   return ISO_UTC.test(value) && !Number.isNaN(Date.parse(value));
 }
 
-/** The `install.json` inside an install home (Design §3.1). */
+/** The `install.json` inside an install home (Design §5.1). */
 export function recordPath(installHome: string): string {
   return installPaths(installHome).record;
 }
@@ -397,7 +397,7 @@ export function touchRecord(record: InstallRecord, at: Date | string = new Date(
 
 /**
  * Renders a record as the exact text that goes on disk: the field order of
- * Design §3.2, two-space indent, one trailing newline.
+ * Design §5.2, two-space indent, one trailing newline.
  *
  * Every value is copied field by field. That is what makes "the record holds no
  * secret" a structural property rather than a promise — an object carrying an

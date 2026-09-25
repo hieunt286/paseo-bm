@@ -147,7 +147,7 @@ export function resolveLayout(input: ResolveLayoutInput = {}): Layout {
 
 /**
  * Refuses an install home that is `$HOME`, an ancestor of `$HOME`, or that
- * overlaps a directory belonging to Paseo or to an agent (Design §7). Runs
+ * overlaps a directory belonging to Paseo or to an agent (Design §9). Runs
  * before anything is written, because everything under the install home is
  * ours to create, overwrite and later delete.
  */
@@ -191,7 +191,7 @@ export function assertSafeInstallHome(layout: Layout): string {
 
 export interface InstallPaths {
   readonly root: string;
-  /** `install.json`, the ownership record (Design §3.2). */
+  /** `install.json`, the ownership record (Design §5.2). */
   readonly record: string;
   /** `plugin/`, holding one directory per installed payload version. */
   readonly pluginRoot: string;
@@ -203,7 +203,7 @@ export interface InstallPaths {
   backupDir(stamp: string): string;
 }
 
-/** The fixed layout inside the install home (Design §3.1). */
+/** The fixed layout inside the install home (Design §5.1). */
 export function installPaths(installHome: string): InstallPaths {
   const root = resolve(installHome);
   const pluginRoot = resolve(root, "plugin");

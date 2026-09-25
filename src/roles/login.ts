@@ -1,5 +1,5 @@
 /**
- * Provider login check and login delegation (REQ-027(b)(c), Design §6 · §7,
+ * Provider login check and login delegation (REQ-027(b)(c), Design §4.7 · §9,
  * ADR-006 decision 2).
  *
  * The promise this file keeps: **paseo-bm never reads, types in, or stores a
@@ -157,7 +157,7 @@ export function formatLoginCommand(command: LoginCommand): string {
 
 /**
  * Deadline for one interactive login. The Design fixes no value for it; this
- * mirrors the 300 seconds it gives the `skills` CLI (§8), the other external
+ * mirrors the 300 seconds it gives the `skills` CLI (§4.7), the other external
  * tool behind trust boundary 2. A browser sign-in needs minutes, not seconds.
  */
 export const LOGIN_TIMEOUT_MS = 300_000;
@@ -292,7 +292,7 @@ export interface ProviderLoginResult {
 export interface ProviderLoginReport {
   readonly providers: readonly ProviderLoginResult[];
   readonly warnings: readonly ProviderLoginWarning[];
-  /** Always false: a missing login never stops an install (Design §6, §10). */
+  /** Always false: a missing login never stops an install (Design §4.5, §4.7). */
   readonly blocksInstall: false;
 }
 

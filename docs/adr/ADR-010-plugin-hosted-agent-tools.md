@@ -5,7 +5,7 @@
 | Status | Accepted |
 | Date | 2026-09-24 |
 | Owner | hieu.nt10 |
-| Liên quan | [design-delta-20260924b-agent-tools](../design/paseo-bm-delta-20260924b-agent-tools.md); [ADR-004](ADR-004-paseo-config-mutation.md) (plugin không sửa config Paseo); [ADR-006](ADR-006-role-registration.md) (vai trò đăng ký qua provider alias) |
+| Liên quan | [design-delta-20260924b-agent-tools](../archive/design/paseo-bm-delta-20260924b-agent-tools.md); [ADR-004](ADR-004-paseo-config-mutation.md) (plugin không sửa config Paseo); [ADR-006](ADR-006-role-registration.md) (vai trò đăng ký qua provider alias) |
 | Quyết định của chủ repo | 2026-09-24: Q1 (a), Q2 (a), Q3 (a) của delta trên |
 
 ## Context

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Smoke test for the packed npm package (bead bm-wp-101-b51.3, Design §10
+// Smoke test for the packed npm package (bead bm-wp-101-b51.3, Technical Design §11
 // "Gói đã đóng").
 //
 // Everything here runs against the real tarball produced by `npm pack`, never
@@ -150,7 +150,7 @@ try {
   // plugin path in git. Nobody running `npx paseo-bm` should download them, so
   // `files` excludes them with a negative pattern — and npm honouring that
   // pattern is exactly the kind of thing to verify on a real tarball rather
-  // than trust. See docs/design/paseo-bm-delta-20260923-payload-npm-package.md §6.
+  // than trust. See docs/archive/design/paseo-bm-delta-20260923-payload-npm-package.md §6.
   const packedImages = readdirSync(join(packed, "plugin"), { withFileTypes: true }).filter(
     (entry) => entry.name === "images",
   );

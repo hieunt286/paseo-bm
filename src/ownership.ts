@@ -1,5 +1,5 @@
 /**
- * Ownership classification — Technical Design §3.3, ADR-002 decisions 1 and 4.
+ * Ownership classification — Technical Design §5.3, ADR-002 decisions 1 and 4.
  *
  * Every destination paseo-bm may write to is put into exactly one of five
  * states by comparing three things: the install record (`files[]`, the single
@@ -22,7 +22,7 @@
  *    content. A sha256 comparison is the only evidence used here.
  * 2. **Nothing is written.** This module reads. It is what lets `install` and
  *    `install --apply` share one code path: the preview is the classification,
- *    and the applier acts on it (Design §8, REQ-009).
+ *    and the applier acts on it (Design §9, REQ-009).
  * 3. **The real reach of the three conflicting states is small.** An upgrade
  *    always copies into `plugin/<new version>/`, so on the upgrade path every
  *    destination is `missing` and nothing can be in the way. `outdated`,
@@ -31,7 +31,7 @@
  *    repaired, or for `install.json` itself (ADR-002 decision 4). There is
  *    deliberately no keep/overwrite flow for upgrades — it would be dead code.
  *
- * A note on `missing`: the §3.3 table words it as "recorded but gone from
+ * A note on `missing`: the §5.3 table words it as "recorded but gone from
  * disk", yet the same section's scope note says every destination on the
  * upgrade path — which is recorded nowhere yet — is `missing` too, and the
  * §4.4 example carries `{"kind": "create", "reason": "missing"}` for exactly
@@ -49,17 +49,17 @@ import type { FileRecord, InstallRecord } from "./record.js";
 import { resolveRecordedPath } from "./record.js";
 
 /**
- * The five states of Design §3.3. Identical to the file reasons an `Action`
+ * The five states of Design §5.3. Identical to the file reasons an `Action`
  * carries, on purpose: a classification turns into a report line without a
  * second vocabulary in between.
  */
 export type OwnershipStatus = FileStatusReason;
 
-/** The five states, in the order of the §3.3 table. */
+/** The five states, in the order of the §5.3 table. */
 export const OWNERSHIP_STATUSES: readonly OwnershipStatus[] = FILE_STATUS_REASONS;
 
 /**
- * Reason string for the one case that is not a §3.3 state: content is already
+ * Reason string for the one case that is not a §5.3 state: content is already
  * correct but the permission bits are not. `src/fsops.ts` already calls that
  * outcome `mode-changed`; the same word is reused rather than invented again.
  */
@@ -95,7 +95,7 @@ export interface OwnershipTarget {
   /**
    * Baseline to compare against, overriding the `files[]` lookup. This exists
    * for `install.json`, which is a destination paseo-bm owns but which the
-   * record cannot list inside itself (Design §3.3, "or `install.json` itself").
+   * record cannot list inside itself (Design §5.3, "or `install.json` itself").
    */
   readonly recorded?: FileRecord | undefined;
   /** Report location; defaults to `install-home`. */
@@ -148,7 +148,7 @@ export function findRecordedFile(record: InstallRecord | undefined, path: string
 }
 
 /**
- * The whole of Design §3.3, as one pure function.
+ * The whole of Design §5.3, as one pure function.
  *
  * The order of the tests is the meaning of the table. "Nothing on disk" comes
  * first because there is then nothing to be in the way and nothing to lose;
@@ -294,7 +294,7 @@ export async function inspectOwnership(input: InspectOwnershipInput): Promise<re
   return result;
 }
 
-/** Options of the default-action mapping — the third column of §3.3. */
+/** Options of the default-action mapping — the third column of Design §5.3. */
 export interface DefaultActionOptions {
   /**
    * `--force`: overwrite a `user-modified` file. A backup is always taken
@@ -304,13 +304,13 @@ export interface DefaultActionOptions {
 }
 
 /**
- * The default action for a classification, straight from the §3.3 table.
+ * The default action for a classification, straight from the Design §5.3 table.
  *
  * The one row the table does not have is a file whose content is already right
  * but whose permission bits are not. That is an `update` with the reason
  * `mode-changed`, not a `skip`: a `chmod` changes the user's machine and so it
  * has to appear in the preview instead of happening quietly. It does not cost
- * the "same version again produces zero actions" promise of §8, because a run
+ * the "same version again produces zero actions" promise of Design §9, because a run
  * that wrote those files wrote them `0600` in the first place, so there is no
  * drift to fix.
  *

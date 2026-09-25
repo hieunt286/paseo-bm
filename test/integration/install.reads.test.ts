@@ -1,6 +1,6 @@
 /**
  * Install evidence — what the whole install reads (bead bm-wp-105-6ec.5;
- * REQ-008(d), Design §7 "Trong ~/.paseo chỉ đọc config.json").
+ * REQ-008(d), Design §9 "trong ~/.paseo chỉ đọc config.json").
  * Primary Proof: `npm test -- integration/install`.
  *
  * test/credentials-guard.test.ts proves this on a representative sequence of

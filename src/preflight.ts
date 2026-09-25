@@ -1,6 +1,6 @@
 /**
  * Preflight — the gate every write in paseo-bm stands behind (REQ-002,
- * Technical Design §4.3, §6, §9.3).
+ * Technical Design §4.3, §4.5, §4.7).
  *
  * The rule this module exists to enforce: when the environment is not fit, the
  * run stops **before the first write**, exits with code 3, and prints a
@@ -46,7 +46,7 @@ export const SUPPORTED_PLATFORMS: readonly NodeJS.Platform[] = ["darwin", "linux
 /** Node floor, kept equal to the `engines.node` field of package.json. */
 export const MINIMUM_NODE_MAJOR = 22;
 
-/** Oldest Paseo paseo-bm can drive (Technical Design §6; plugin API v0.8). */
+/** Oldest Paseo paseo-bm can drive (Technical Design §4.7; plugin API v0.8). */
 export const MINIMUM_PASEO_VERSION = "0.8.0";
 
 /** Executable names of the beads CLI, in the order they are looked for. */

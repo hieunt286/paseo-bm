@@ -1,6 +1,6 @@
 /**
  * Install evidence — interruption matrix (bead bm-wp-105-6ec.5; REQ-010(c),
- * M-3, Design §8, §9.3 "Ctrl+C giữa chừng", §10 "Gián đoạn & idempotent").
+ * M-3, Design §9 "Ctrl+C", §11 "gián đoạn và idempotent").
  * Primary Proof: `npm test -- integration/install`.
  *
  * The run is killed at **every** filesystem write it makes, one kill point per
@@ -23,8 +23,8 @@
  *
  * Abandoned atomic temp files are compared out and listed in the printed
  * summary instead. A kill between a temp file's `open` and its `rename` leaves
- * `.<name>.<pid>.<hex>.tmp` beside the target, and Design §8 limits cleanup to
- * partial payload directories (§9.3: "File dở ở dạng tạm nên bị bỏ"), so nothing
+ * `.<name>.<pid>.<hex>.tmp` beside the target, and Design §9 limits cleanup to
+ * partial payload directories ("file dở ở dạng tạm nên bị bỏ"), so nothing
  * sweeps them. They never hold a target's name, and on an upgrade the partial
  * version directory — temp files included — is removed whole, which is asserted.
  *

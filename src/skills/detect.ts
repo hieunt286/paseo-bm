@@ -1,6 +1,6 @@
 /**
  * Read-only detection of the agent skills the paseo-bm roles rely on
- * (REQ-007(a)(b)(c), ADR-003, Design §6).
+ * (REQ-007(a)(b)(c), ADR-003, Design §4.7).
  *
  * The rule this module exists to honour is ADR-003 decision 1: **paseo-bm never
  * creates, edits, deletes or backs up anything inside a skills directory.** That

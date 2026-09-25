@@ -1,5 +1,5 @@
 /**
- * `--skills-agents` validation (REQ-007(d), Design §4.2 · §4.3 · §7).
+ * `--skills-agents` validation (REQ-007(d), Design §4.2 · §4.3).
  *
  * The list the user types here ends up as arguments of an external command —
  * the third-party `skills` CLI. That is why it is judged at argument-parsing
@@ -19,10 +19,10 @@ import type { UsageError } from "../flags.js";
 /** What `--skills-agents` means when it is not given (Design §4.2). */
 export const DEFAULT_SKILLS_AGENTS: readonly string[] = ["claude", "codex"];
 
-/** The longest list accepted (Design §7). */
+/** The longest list accepted (Design §4.2). */
 export const MAX_SKILLS_AGENTS = 8;
 
-/** One agent name (Design §7). The first character can never be `-`. */
+/** One agent name (Design §4.2). The first character can never be `-`. */
 export const SKILLS_AGENT_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
 export type SkillsAgentsResult =

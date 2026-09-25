@@ -55,7 +55,7 @@ Khác biệt quan trọng về phạm vi: paseo-bm chỉ ghi **một cây thư m
 
 ## Bổ sung 2026-09-16 — loại `user-data` đứng ngoài mô hình hash
 
-Theo delta [`design-delta-20260916-trace-store`](../design/paseo-bm-delta-20260916-trace-store.md) do owner duyệt, thư mục `<install home>/traces/` (kho lưu vết của Dashboard) là **dữ liệu do paseo-bm tạo nhưng thuộc người dùng**, và **không** áp mô hình hồ sơ–hash của ADR này:
+Theo delta [`design-delta-20260916-trace-store`](../archive/design/paseo-bm-delta-20260916-trace-store.md) do owner duyệt, thư mục `<install home>/traces/` (kho lưu vết của Dashboard) là **dữ liệu do paseo-bm tạo nhưng thuộc người dùng**, và **không** áp mô hình hồ sơ–hash của ADR này:
 
 - không nằm trong `files[]`, không có `sha256`, không sinh `backups[]`;
 - không có bốn trạng thái `unchanged` / `outdated` / `user-modified` / `conflict` — nó không phải tài sản phiên bản nên không có "bản đúng" để so;

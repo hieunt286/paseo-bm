@@ -1,6 +1,6 @@
 /**
  * Install evidence — the write guard (bead bm-wp-105-6ec.5; REQ-008(e), M-4,
- * Design §7 "Phạm vi ghi của trình cài đặt", §10 "Bất biến an toàn").
+ * Design §9 "Phạm vi ghi của trình cài", §11 "bất biến an toàn").
  * Primary Proof: `npm test -- integration/install`.
  *
  * The guard runs in `block` mode for the whole process — `node:fs` itself is

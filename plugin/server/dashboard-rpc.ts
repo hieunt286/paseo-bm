@@ -363,7 +363,7 @@ export async function readTraceContext(
   };
 }
 
-/** Agent facts of one workspace, keyed by id (design §6 step 1). */
+/** Agent facts of one workspace, keyed by id (design §6.1 step 1). */
 export async function agentFactsOf(
   paseo: DashboardPaseo,
   workspaceId: string,

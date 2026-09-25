@@ -1,5 +1,5 @@
 /**
- * The install applier — Technical Design §2.1, §3.1–§3.3, §8, §9.1; ADR-001,
+ * The install applier — Technical Design §2, §4.5, §5.1–§5.3, §9; ADR-001,
  * ADR-002.
  *
  * "The planner does not write, the applier does not decide." This module takes
@@ -22,7 +22,7 @@
  * bytes read back from disk — so the record can only ever describe what is
  * really there.
  *
- * Side-by-side install (§8, ADR-002 decision 7): a new version lands in a new
+ * Side-by-side install (Design §5.1, ADR-002 decision 7): a new version lands in a new
  * directory, old version directories are never touched, and `files[]` /
  * `versions[]` keep the entries of every installed version. Nothing installed
  * is ever removed here; only `--prune` may do that. The single exception is
@@ -320,7 +320,7 @@ export interface PartialPayloadInput {
 
 /**
  * Directories directly under `plugin/` that are not in `versions[]` — what an
- * interrupted run leaves behind (ADR-002 consequences, Design §8). Reads only.
+ * interrupted run leaves behind (ADR-002 consequences, Design §9). Reads only.
  * Returned relative to the install home, e.g. `plugin/0.2.0`.
  */
 export async function findPartialPayloadDirs(input: PartialPayloadInput): Promise<string[]> {

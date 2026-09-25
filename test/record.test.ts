@@ -42,7 +42,7 @@ afterEach(() => {
 });
 
 /**
- * A record with every field of Design §3.2 populated with a distinguishable
+ * A record with every field of Design §5.2 populated with a distinguishable
  * value, so a round trip that drops or confuses one is visible.
  */
 function fullRecord(overrides: Partial<InstallRecord> = {}): InstallRecord {
@@ -196,7 +196,7 @@ describe("write then read", () => {
     expect(await readRecord(fsops)).toBeUndefined();
   });
 
-  it("serializes deterministically in the field order of Design §3.2", () => {
+  it("serializes deterministically in the field order of Design §5.2", () => {
     const text = serializeRecord(fullRecord());
     expect(text).toBe(serializeRecord(parseRecord(text)));
     expect(Object.keys(JSON.parse(text) as object)).toEqual([
@@ -216,7 +216,7 @@ describe("write then read", () => {
 });
 
 describe("the record carries no secret", () => {
-  /** Exactly the field paths Design §3.2 defines. Nothing else may be written. */
+  /** Exactly the field paths Design §5.2 defines. Nothing else may be written. */
   const ALLOWED_PATHS = new Set([
     "schemaVersion",
     "version",

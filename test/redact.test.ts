@@ -77,7 +77,7 @@ function reportCarrying(secret: string): Report {
 }
 
 describe("what counts as a secret", () => {
-  it("is the constant list from Design §7", () => {
+  it("is the constant list from Design §9", () => {
     expect(SECRET_ENV_VARS).toEqual(["PASEO_PASSWORD", "PASEO_DAEMON_PASSWORD"]);
     expect(SECRET_ARGV_FLAGS).toEqual(["--password", "--token", "--secret"]);
   });

@@ -3,11 +3,11 @@
 | Trường | Giá trị |
 |---|---|
 | Mã | `cafe-listing-20260923` |
-| Status | **Active** — repo đã sẵn sàng, chờ owner push và mở PR |
+| Status | **Active** — hồ sơ qua đủ bốn cổng CI (§13); [PR #215](https://github.com/paseo-cafe/paseo-cafe/pull/215) vẫn **OPEN**, chờ maintainer merge (kiểm 2026-09-25) |
 | Owner | hieu.nt10 |
 | Created | 2026-09-23 |
 | Yêu cầu | `req-20260923T063441Z`: "Bây giờ tôi muốn đăng ký plugin của mình lên trang này : https://paseo.cafe/submit , tôi cần làm gì và bạn có thể hỗ trợ tôi làm được những gì" |
-| Quyết định của owner | Q1a (manifest ở gốc repo, entry không khai `path`), Q2a (chưa khai `package`), Q3a (sửa trong working tree, owner tự commit), Q4a (owner gửi ảnh chụp màn hình), Q5a (dùng bản nháp metadata) |
+| Quyết định của owner | Q3a (sửa trong working tree, owner tự commit), Q4a (owner gửi ảnh chụp màn hình), Q5a (dùng bản nháp metadata). Q1a (manifest ở gốc repo, không khai `path`) và Q2a (không khai `package`) **đã bị thay**: CI của registry bác cả hai (§4, §10), entry nay khai `path: "plugin"` và `package: "paseo-bm-plugin"` ([ADR-009](../adr/ADR-009-payload-as-npm-package.md)) |
 | Nguồn đã đọc (2026-09-23) | `paseo-cafe/paseo-cafe`: `README.md`, `scripts/validate-registry.ts`, `scripts/scan.ts`, `src/lib/registry-schema.ts`, `registry/paseo-beads.json`; trang `paseo.cafe/submit` và `paseo.cafe/plugins/paseo-beads` |
 
 ## 1. paseo.cafe nhận hồ sơ thế nào
@@ -17,17 +17,21 @@
 - Hai đường nộp: form https://paseo.cafe/submit điền sẵn rồi mở issue (bot chuyển thành PR), hoặc tự mở PR thêm file.
   **Hồ sơ này đi đường PR thủ công.** Form bắt buộc điền npm package, và hoá ra CI của họ cũng vậy với hồ sơ mới — xem §4.
 
-## 2. Nội dung file sẽ nộp
+## 2. Nội dung file đang nộp
+
+Đọc lại từ nhánh `hieunt286:add-paseo-bm` ngày 2026-09-25 (sau commit `d2213653` của lần phát hành `0.3.0`):
 
 ```json
 {
   "repo": "hieunt286/paseo-bm",
+  "path": "plugin",
+  "package": "paseo-bm-plugin",
   "categories": ["orchestration", "productivity"],
   "platforms": ["macos", "linux"],
   "caveats": [
     "Install with `npx paseo-bm`: it also registers the three bm-* agent roles the plugin needs. There is no other supported install.",
-    "The install command this page generates fails to load paseo-bm; undo it with `paseo plugin remove paseo-bm`.",
-    "Prerelease 0.3.0-alpha: commands, flags, exit codes and the --json shape can still change.",
+    "Installed straight from this page the screens load, but the three bm-* agent roles are missing, so the Manager cannot create a Worker.",
+    "Stable 0.3.0 on npm: commands, flags, exit codes and the --json shape are a public contract and change only with a new version.",
     "Requires Paseo 0.8.0+, Node 22+, the paseo CLI on PATH, macOS or Linux (no Windows), plus the br and bv Beads CLIs.",
     "Enabling Paseo's agent tools grants them to every agent on the machine, not only paseo-bm's roles.",
     "The Worker runs without permission prompts; its limits are role instructions only, so review git diff before you commit."
@@ -36,11 +40,11 @@
 }
 ```
 
-`registryEntrySchema` khai `.strict()`: chỉ nhận đúng các trường `repo`, `path`, `package`, `categories`, `platforms`, `caveats`, `submittedBy`; thêm trường lạ là hỏng. `caveats` tối đa 6 câu, mỗi câu tối đa 140 ký tự — bản trên dài lần lượt 128, 108, 90, 115, 98, 120.
+`registryEntrySchema` khai `.strict()`: chỉ nhận đúng các trường `repo`, `path`, `package`, `categories`, `platforms`, `caveats`, `submittedBy`; thêm trường lạ là hỏng. `caveats` tối đa 6 câu, mỗi câu tối đa 140 ký tự — bản trên dài lần lượt 128, 134, 127, 115, 98, 120.
 
 `categories` là chuỗi tự do (`z.array(z.string().min(1))`), nhưng `platforms` là **enum** (`z.array(z.enum(PLATFORMS))`): giá trị `macos` đã được xác nhận bằng một hồ sơ thật đang nằm trong registry (`registry/launchd-jobs.json`), nên viết thường như trên.
 
-Hai caveat đầu nói thẳng chuyện ở §7: chỉ `npx paseo-bm` mới cài được, còn lệnh trang tự sinh sẽ lỗi nạp và phải gỡ bằng `paseo plugin remove paseo-bm`. Bản nháp đầu (owner duyệt ở Q5a) chỉ nói lệnh đó "sets up the payload only", nhẹ hơn sự thật; review lô b1 bắt lỗi này nên hai câu được viết lại và hai câu yêu cầu hệ thống gộp làm một để không vượt mức 6 câu.
+Hai caveat đầu nói thẳng rủi ro ở §7: chỉ `npx paseo-bm` mới cài đủ, còn lệnh trang tự sinh nạp được màn hình nhưng thiếu ba vai trò. Caveat số 3 nhắc số hiệu phiên bản, nên phải sửa khi loại phiên bản đổi (lần gần nhất: prerelease → `0.3.0` ổn định).
 
 ## 3. CI của họ kiểm gì
 
@@ -85,9 +89,9 @@ Hệ quả lúc đó: muốn có listing thì **phải** khai `package`. Kết l
 Mọi đường dẫn đều tính theo `path`, mà hồ sơ khai `path: "plugin"`, nên tất cả đọc trong `plugin/`:
 
 - **Mô tả**: `plugin/package.json.description` — "Beads Management for Paseo — the plugin payload: the Metric, Beads and Setup screens plus the agent role instructions. Install with npx paseo-bm, which also registers the three agent roles."
-- **Version**: `plugin/package.json.version` — 0.3.0-alpha.6, luôn bằng gói trình cài.
+- **Version**: `plugin/package.json.version`, luôn bằng gói trình cài (`0.3.0` lúc kiểm).
 - **Ảnh**: bộ quét đọc thư mục `images` **ngay dưới `path`**, tức `plugin/images/` — ảnh đã chuyển vào đó, đánh số 01-03 để cố định thứ tự nên ảnh dẫn đầu là màn Beads. Không dùng URL tuyệt đối trong README: URL tuyệt đối chỉ được giữ nếu host nằm trong danh sách tin cậy mà ta chưa đọc được. Ảnh không nằm trong tarball nào và `smoke:packed` canh điều đó. Ba ảnh là ảnh thật của sản phẩm, đã soi từng tấm: không credential, không token, không đường dẫn riêng tư, không khối Exif.
-- **Health, đạt 5/6 và cố ý**: `manifestValid`, `hasReadme` (`plugin/README.md`), `hasLicense` (`plugin/LICENSE`, và dù không có file thì license của repo cũng đủ), `hasTypecheckScript`, `updatedRecently` — đạt. `hasTests` **không đạt**: trong `plugin/` không có test nào, và bịa một script `test` để mục này xanh là làm cho kiểm tra trông xanh. Payload vẫn được kiểm thật bằng 71 file dưới `test/` ở gốc repo, chúng chỉ không nằm dưới `path`.
+- **Health, đạt 5/6 và cố ý**: `manifestValid`, `hasReadme` (`plugin/README.md`), `hasLicense` (`plugin/LICENSE`, và dù không có file thì license của repo cũng đủ), `hasTypecheckScript`, `updatedRecently` — đạt. `hasTests` **không đạt**: trong `plugin/` không có test nào, và bịa một script `test` để mục này xanh là làm cho kiểm tra trông xanh. Payload vẫn được kiểm thật bằng các test dưới `test/` ở gốc repo, chúng chỉ không nằm dưới `path`.
 - Lịch quét: gói npm 15 phút một lần, nguồn Git 6 giờ một lần.
 
 ## 7. Rủi ro đã chấp nhận
@@ -103,7 +107,8 @@ Trang listing tự sinh lệnh cài thẳng: `paseo plugin add npm:paseo-bm-plug
 1. ~~Commit các thay đổi ở §5 và đưa lên nhánh mặc định `main`~~ — **xong 2026-09-23**, `main` ở `5c7daa5`, CI của repo xanh (run 35832961123).
 2. ~~Fork `paseo-cafe/paseo-cafe`, thêm `registry/paseo-bm.json`, mở PR~~ — **xong**: [PR #215](https://github.com/paseo-cafe/paseo-cafe/pull/215) từ nhánh `hieunt286:add-paseo-bm`. Lúc đó **đỏ** vì §4 rồi §10; nay đã xanh, xem bước 3 và §13.
 3. ~~Phát hành bản mới rồi cập nhật hồ sơ~~ — **xong 2026-09-23**: `0.3.0-alpha.6` publish hai gói, hồ sơ chuyển sang `path: "plugin"` + `package: "paseo-bm-plugin"`, và `Registry admission` xanh cả bốn cổng (§13). Ba lệnh cần OTP do owner chạy: bản giữ chỗ, `npm trust github`, và hai lần `npm dist-tag add`.
-4. Sau khi PR được merge và tới lần quét kế tiếp, mở trang listing xem ba ảnh trong `plugin/images/` có hiện đúng không — đây là phép kiểm duy nhất phải chờ bên ngoài, nên nó nằm ở đây chứ không nằm trong tiêu chí của bead. Thêm hay đổi ảnh về sau chỉ cần push, không cần PR mới.
+4. ~~Sửa caveat khi lên bản ổn định~~ — **xong 2026-09-25**: commit `d2213653` trên nhánh PR (+1/−1, caveat số 3), comment ở PR #215.
+5. Sau khi PR được merge và tới lần quét kế tiếp, mở trang listing xem ba ảnh trong `plugin/images/` có hiện đúng không — đây là phép kiểm duy nhất phải chờ bên ngoài, nên nó nằm ở đây chứ không nằm trong tiêu chí của bead. Thêm hay đổi ảnh về sau chỉ cần push, không cần PR mới.
 
 ## 9. Mỗi lần phát hành sau phải giữ đúng những điều này
 
@@ -202,6 +207,10 @@ Hồ sơ đang nộp: `path: "plugin"`, `package: "paseo-bm-plugin"`, sáu cavea
 
 Hai lỗi của Worker trên nhánh PR, ghi lại để lần sau tránh: một commit ghi đè file thành 0 byte, vì một bước trong lệnh hỏng mà chuỗi lệnh vẫn chạy tiếp (từ nay: kiểm file có nội dung **trước** khi gọi API ghi); và một commit sai định dạng, vì `json.dumps` bung mảng ngắn ra nhiều dòng trong khi Biome của họ giữ mảng ngắn trên một dòng.
 
-**Một cái bẫy còn sống tới lần phát hành sau.** `paseo-bm@0.3.0-alpha.6` — tức bản `latest` hiện tại — **vẫn có `paseo-plugin.json` ở gốc tarball**, vì nó publish từ `e7424cb`, trước commit `4b444b5` gỡ file ấy. Nên trên Paseo 0.9+, lệnh `paseo plugin add npm:paseo-bm@0.3.0-alpha.6` sẽ tìm thấy một plugin rồi **lỗi nạp** vì gốc gói không có runtime entry; gỡ bằng `paseo plugin remove paseo-bm`. Từ bản phát hành kế tiếp trở đi thì hết, và `smoke:packed` canh sẵn. Bản đã publish thì không sửa được — đó là cái giá của việc publish trước rồi mới dọn.
+**Bẫy còn lại ở một bản cũ.** `paseo-bm@0.3.0-alpha.6` publish từ `e7424cb`, trước commit `4b444b5` gỡ manifest ở gốc, nên tarball của nó **vẫn có `paseo-plugin.json` ở gốc**: trên Paseo 0.9+, `paseo plugin add npm:paseo-bm@0.3.0-alpha.6` tìm thấy một plugin rồi **lỗi nạp**; gỡ bằng `paseo plugin remove paseo-bm`. Từ `0.3.0-alpha.7` trở đi (gồm `latest` = `0.3.0`) thì hết, và `smoke:packed` canh sẵn. Bản đã publish thì không sửa được.
 
 Việc còn lại sau khi merge, không thuộc phase này: mở trang listing xem mô tả, version và ba ảnh có lên đúng không; lịch quét là 15 phút cho nguồn npm và 6 giờ cho nguồn Git.
+
+---
+
+*Revision 2026-09-25: Status, quyết định còn hiệu lực, §2 (entry thật trên nhánh PR sau khi sửa caveat cho `0.3.0`), §6, §8 và bẫy ở §13 cập nhật theo trạng thái hiện tại. Các mục §4, §10 giữ lại vì ghi lý do của cấu hình đang dùng.*

@@ -5,7 +5,7 @@
 | Mã | `research-20260918-instructions-by-model` |
 | Request | `req-20260918T011706Z` (phần 3 của yêu cầu) |
 | Bead | `bm-wp-248-uxpe` |
-| Thiết kế | [design-delta-20260918](./paseo-bm-delta-20260918-manager-mode-model-metrics.md) §4.5 (câu hỏi R1–R6, luật nguồn) |
+| Thiết kế | [design-delta-20260918](../archive/design/paseo-bm-delta-20260918-manager-mode-model-metrics.md) §4.5 (câu hỏi R1–R6, luật nguồn) |
 | Phạm vi | Claude Code / `claude-opus-5` (Manager, Worker); Codex / `gpt-5.6-sol` (Reviewer); một đoạn về OpenCode (Q35) |
 | Tính chất | **Chỉ điều tra.** Không sửa `plugin/roles/*.md` (Q33). Mọi đề xuất ở §7 là việc owner quyết, thành request mới |
 | Ngày | 2026-09-18 — người viết: Beads Worker (`claude-opus-5`) |
@@ -145,4 +145,4 @@ Nguồn cục bộ:
 - Snapshot: Worker `29e658b5` (`claude-opus-5`, cửa sổ 1.000.000); Reviewer `2998dc82` (`gpt-5.6-sol`, thinking hiệu lực `xhigh`, mode `auto`, collaboration mode `Default`, cửa sổ 258.400, 110.940 token ở lượt đầu)
 - Kho vết `~/.paseo-bm/traces/*/events-202609.jsonl` (504 lượt, 7 workspace)
 - `plugin/roles/{manager,worker,reviewer}.md` bản hiện tại; `git show 1f7f034:plugin/roles/worker.md` (bản 09-15, cho phép thêm phase `documents-done` và `bead-implemented`); `plugin/server/bm-report.ts` 390–399
-- `docs/operations/paseo-bm-context-engineering-run-20260917c.md` §2, §4, §5
+- `docs/archive/operations/paseo-bm-context-engineering-run-20260917c.md` §2, §4, §5

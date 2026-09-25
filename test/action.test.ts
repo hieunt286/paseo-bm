@@ -51,7 +51,7 @@ describe("action vocabulary", () => {
     expect([...ACTION_KINDS]).toEqual(["create", "update", "skip", "conflict", "delete", "keep", "config"]);
   });
 
-  it("lists the ownership statuses of Design §3.3 as file reasons", () => {
+  it("lists the ownership statuses of Design §5.3 as file reasons", () => {
     expect([...FILE_STATUS_REASONS]).toEqual(["unchanged", "outdated", "user-modified", "conflict", "missing"]);
   });
 
@@ -107,7 +107,7 @@ describe("summarizeActions", () => {
     expect(EXIT_CODES.conflict).toBe(5);
   });
 
-  it("handles an empty plan, the idempotent re-run case of Design §8", () => {
+  it("handles an empty plan, the idempotent re-run case of Design §9", () => {
     const summary = summarizeActions([]);
     expect(summary.total).toBe(0);
     expect(summary.writes).toBe(false);

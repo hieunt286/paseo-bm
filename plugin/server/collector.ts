@@ -1,10 +1,10 @@
 /**
  * Turn collector: the only writer of the trace store (WP-205, Dashboard Design
- * §2.2 decision 1, §3.3, §12).
+ * §2.2 decision 1, §3.3, §17).
  *
  * It hangs off Paseo's own lifecycle hooks — `agent.turn_started` for the start
  * mark and `agent.turn_ended` for the record — so there is no timer, no watcher
- * and no polling loop; the "no background work" rule of the base design §8
+ * and no polling loop; the "no background work" rule of the base design §9
  * still holds. The plugin already uses `agent.turn_ended` for stop propagation
  * (bm-wq6), so this is a known-good seam.
  *
@@ -66,7 +66,7 @@ export const REFETCH_LIMIT = 200;
 /**
  * Secret masking, applied **before** anything reaches the disk (REQ-048b).
  *
- * Same rule set as the CLI's `src/redact.ts` (Design §7): the *values* of these
+ * Same rule set as the CLI's `src/redact.ts` (Technical Design §9): the *values* of these
  * environment variables, and the value following a password-shaped flag. The
  * plugin payload cannot import `src/`, so the constants are duplicated; they
  * are a short closed list by design.

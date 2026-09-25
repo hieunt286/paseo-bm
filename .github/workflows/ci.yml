@@ -1,7 +1,7 @@
 name: CI
 
-# Kept minimal on purpose (Design §10, errata 2026-09-18): one job on the lowest
-# supported Node. The full matrix (macOS and Linux, Node 22 and 24), the build,
+# Kept minimal on purpose (Technical Design §3.2): one job on the lowest
+# supported Node. The release matrix (macOS and Linux, Node 24), the build,
 # the packed-package smoke test and the lifecycle-script guard run in
 # release.yml, before anything is published.
 

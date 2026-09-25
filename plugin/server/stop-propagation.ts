@@ -27,12 +27,12 @@ import { listAllAgents, roleOfAgent, roleOfProvider } from "./agent-role";
  * Lifecycle belongs to the user (ADR-005): nothing here archives or deletes.
  */
 
-/** `bm.role` value that identifies a Reviewer (design §5). */
+/** `bm.role` value that identifies a Reviewer (Technical Design §7.1). */
 export const REVIEWER_ROLE_VALUE = "reviewer";
 
 /**
  * Wait before the single re-check of a Worker that still reads `running` right
- * after its turn was canceled. Mirrors the plugin poll interval of design §8
+ * after its turn was canceled. Mirrors the plugin poll interval of Technical Design §4.7
  * (`PLUGIN_POLL_INTERVAL_MS` in the CLI, which the plugin bundle cannot import);
  * it is not a new product timeout.
  */

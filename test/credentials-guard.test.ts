@@ -24,7 +24,7 @@ import { readVersion } from "../src/version.js";
  * Two assertions carry the whole bead:
  *
  * 1. inside the Paseo home, the set of files *read* is exactly `{config.json}`
- *    (Design §7), and
+ *    (Design §9), and
  * 2. no file whose name marks it as a credential is touched anywhere — not in
  *    `~/.paseo`, not in an agent's configuration directory.
  *

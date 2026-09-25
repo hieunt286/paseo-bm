@@ -1,5 +1,5 @@
 /**
- * Install evidence — time (bead bm-wp-105-6ec.5; part of M-2, Design §8).
+ * Install evidence — time (bead bm-wp-105-6ec.5; part of M-2, Design §4.7).
  * Primary Proof: `npm test -- integration/install`.
  *
  * `install --apply` of the repository's real plugin payload, against the fake

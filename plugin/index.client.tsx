@@ -108,7 +108,7 @@ async function runWorkerStopAll(context: WorkspaceCommand): Promise<void> {
 }
 
 /**
- * Client entry of the paseo-bm plugin (design §2.4).
+ * Client entry of the paseo-bm plugin (Technical Design §8).
  *
  * WP-211 adds the Dashboard to that same surface (Q-036): a "Dashboard" button
  * per workspace, a workspace Command Center item that queues a workspace and

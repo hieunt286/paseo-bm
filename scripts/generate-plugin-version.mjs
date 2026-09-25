@@ -3,7 +3,7 @@
 // the package version.
 //
 // The payload needs its version as a build-time constant because the client
-// entry cannot read the file system (docs/design/paseo-bm.md §2.4). The file is
+// entry cannot read the file system (docs/design/paseo-bm.md §8). The file is
 // committed with a dev placeholder so a fresh checkout typechecks; the build
 // rewrites it, and `prepack` runs the build, so every published tarball carries
 // the real version.
@@ -18,7 +18,7 @@ const targetUrl = new URL("../plugin/shared/version.ts", import.meta.url);
 // The payload is published as its own npm package, `paseo-bm-plugin`, and the
 // paseo.cafe registry compares the version in git against the one on npm, so
 // the two package.json files must never drift. See ADR-009 and
-// docs/design/paseo-bm-delta-20260923-payload-npm-package.md §4.
+// docs/archive/design/paseo-bm-delta-20260923-payload-npm-package.md §4.
 const payloadPackageUrl = new URL("../plugin/package.json", import.meta.url);
 
 const { version } = JSON.parse(readFileSync(packageUrl, "utf8"));
@@ -28,7 +28,7 @@ if (typeof version !== "string" || version.length === 0) {
 
 const contents = `// GENERATED FILE — do not edit by hand.
 // Regenerated from the package version by scripts/generate-plugin-version.mjs,
-// which the build runs before packing. Design ref: docs/design/paseo-bm.md §2.4.
+// which the build runs before packing. Design ref: docs/design/paseo-bm.md §3.1.
 
 /** Version of the paseo-bm payload, baked in at build time. */
 export const PLUGIN_VERSION = ${JSON.stringify(version)};

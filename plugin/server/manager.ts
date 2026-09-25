@@ -1,5 +1,5 @@
 /**
- * `manager.ensure` on the daemon side (WP-112, design §5, §8, §9.3).
+ * `manager.ensure` on the daemon side (WP-112, Technical Design §7.3).
  *
  * One Manager per workspace: look the live Manager up by its `bm.role=manager`
  * label BEFORE creating anything; when there is none, create one from the
@@ -36,7 +36,7 @@ import { readIncidents } from "./fallback-state";
 import { installHomeOf } from "./role-extras";
 import { recordTools } from "./tools-check";
 
-/** Label key and value that identify a paseo-bm Manager (design §5). */
+/** Label key and value that identify a paseo-bm Manager (Technical Design §7.1). */
 export const MANAGER_ROLE_LABEL = "bm.role";
 export const MANAGER_ROLE_VALUE = "manager";
 export const VERSION_LABEL = "bm.version";
@@ -59,7 +59,7 @@ export const MANAGER_TITLE = "Beads Manager";
 
 /**
  * Error codes this RPC can report. Taken from the single Phase 1 registry in
- * design §4.4 ("Không được đặt mã tại chỗ"); §5 itself lists no RPC codes.
+ * Technical Design §4.4 (no code is minted in place); §7.3 names `E_PROVIDER_UNAVAILABLE`.
  */
 export type ManagerEnsureErrorCode = "E_PROVIDER_UNAVAILABLE";
 
@@ -183,7 +183,7 @@ export interface EnsureManagerResult {
   created: boolean;
   /**
    * Other live Managers found in the same workspace, newest first, never a
-   * replaced one. Reported so the panel can tell the user (design §9.3); never
+   * replaced one. Reported so the panel can tell the user (Technical Design §7.3); never
    * deleted or archived here.
    */
   otherManagerIds: string[];
@@ -530,7 +530,7 @@ async function switchOnce(manager: ManagerAgentSnapshot, deps: EnsureManagerDeps
 }
 
 // ---------------------------------------------------------------------------
-// `agents.list` (WP-112, design §5, REQ-025a)
+// `agents.list` (WP-112, Technical Design §7.3, REQ-025a)
 // ---------------------------------------------------------------------------
 
 /** Label Paseo sets on an agent created by another agent (AGENTS.md, verified). */

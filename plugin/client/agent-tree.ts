@@ -1,5 +1,6 @@
 /**
- * Logic behind the "Beads agents" workspace panel (WP-113, design §2.2, §5, §8,
+ * Logic behind the "Beads agents" workspace panel (WP-113, Technical Design §2,
+ * §7.3, §9,
  * REQ-025a, REQ-032d). Pure: no React, no React Native, no JSX, so it is
  * testable without a renderer. `tree.tsx` renders from it.
  *
@@ -23,9 +24,9 @@ export const AGENT_TREE_PANEL_ID = "beads-agents";
 export const AGENT_TREE_ICON = "ListTree";
 
 /**
- * How often the panel re-reads `agents.list`. The design says the tree is
- * polled (§2.4) but fixes no interval; this value is a placeholder pending an
- * owner decision (see the WP-113 panel report).
+ * How often the panel re-reads `agents.list` (Dashboard Design §2.4, §14). The
+ * first design said only that the tree is polled, so this value began as a
+ * placeholder pending an owner decision (see the WP-113 panel report).
  */
 export const AGENT_TREE_POLL_MS = 5000;
 

@@ -14,7 +14,8 @@ Read this before touching anything in this repository.
 ## Language rule
 
 - Everything **for agents** — this file, `plugin/roles/*.md`, and any system prompt — is written in **English**.
-- Everything in `docs/` is written in **Vietnamese** for human readers. Keep it that way.
+- **Everything that goes into git or out with a release is written in English**: commit messages, the release notes under `docs/releases/`, and the [release runbook](docs/operations/paseo-bm-release-runbook.md). The notes are published verbatim as the GitHub Release body, so they are read by everyone, not only by this project.
+- Everything else in `docs/` is written in **Vietnamese** for human readers. Keep it that way.
 - Docs that the product's Worker generates in a *target* repo follow that repo's existing language, defaulting to English.
 
 ## Tech stack
@@ -78,12 +79,19 @@ things cost a red run to learn there:
 
 ```
 AGENTS.md              this file (CLAUDE.md is a symlink to it)
+docs/README.md         index of the docs, in Vietnamese: start here
 docs/product/          PRDs (Accepted, living): paseo-bm-prd.md, paseo-bm-dashboard-prd.md
-docs/design/           Technical Designs (Active, living): paseo-bm.md, paseo-bm-dashboard.md;
-                       *-delta-* files are merged history, cited by code comments
+docs/design/           Technical Designs (Active, living): paseo-bm.md, paseo-bm-dashboard.md,
+                       plus the research note on instructions by provider
 docs/adr/              ADR-001..010 (Accepted)
-docs/plans/            one plan per piece of Designed work; Completed ones are history
-docs/operations/       acceptance checklists, run records, release notes, the paseo.cafe listing record
+docs/operations/       living only: release runbook, acceptance checklists (install,
+                       orchestration, worker fallback), the paseo.cafe listing record,
+                       open requests to upstream Paseo
+docs/releases/         release notes, one file per version (the GitHub Release body)
+docs/archive/          history, never edited: merged deltas (design/, product/), completed
+                       plans (plans/), run records and diagnoses (operations/). Code comments
+                       cite deltas by name and section; find them here
+docs/plans/            created only for a piece of Designed work; archived when it completes
 .beads/                bead graph; issues.jsonl is tracked, *.db is gitignored
 src/                   CLI source: the installer published as the npm package `paseo-bm`
 plugin/                Paseo plugin payload, published as its own npm package `paseo-bm-plugin`;
@@ -122,7 +130,7 @@ agent may do is Designed; rewording without changing behaviour is Direct.
 How the lanes are held:
 
 - **Look before you ask.** The design, ADRs and code already answer most questions; read the part you need instead of re-deriving it. A flag name, error code, timeout, JSON shape or label convention is decided in the design — if one is genuinely missing, surface the gap instead of inventing it.
-- **Docs are living.** The PRD, the Technical Design and the ADR index describe the product **as it is now**. Change them in place in the same commit as the code, with one Revision History line when the change is not a correction. No delta files for new work: the deltas under `docs/` are merged history, kept only because code comments cite them. An ADR is never rewritten — a new ADR supersedes it.
+- **Docs are living.** The PRD, the Technical Design and the ADR index describe the product **as it is now**. Change them in place in the same commit as the code, with one Revision History line when the change is not a correction. No delta files for new work: the old deltas live in `docs/archive/`, kept only because code comments cite them. An ADR is never rewritten — a new ADR supersedes it. A run record, a diagnosis or a completed plan goes to `docs/archive/` when its work is done.
 - **PRD states outcomes, design states detail.** Theme tokens, labels, pixel values and limits belong in the design, code and tests, so a screen tweak never becomes a requirement change.
 - **A plan belongs to one piece of Designed work** and is closed (`Status: Completed`) when its beads are; it is not a standing contract for later work.
 - **Gates apply only where their artifact exists.** Report them honestly; a skipped gate is an exception, never a pass.
