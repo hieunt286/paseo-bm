@@ -281,13 +281,26 @@ describe("all three files", () => {
     // role files send each agent to its tool and keep only the template as the
     // fallback (ADR-010, Q3 a). worker.md 375 -> 376, reviewer.md 170 -> 169:
     // measured + 1 after the field rules left. manager.md took its sentence
-    // within its ceiling.
-    ["worker.md", worker, 376],
+    // within its ceiling. worker.md 376 -> 394 and manager.md 152 -> 160 for the
+    // 2026-09-25 lanes (owner: "nhiều việc nhỏ không xứng đáng tạo beads"): Small
+    // without bead or review, documents corrected in place, Manager answers what
+    // it can read. Measured + 1.
+    // ADR-011 (owner decision Q1 (c) of req-20260925T051841Z): manager.md 160 -> 197
+    // (191 after the first pass, then review b2 finding 1: holding a Worker had to
+    // name its mechanism, which is one more item in the creation recipe)
+    // for `## Coordinating the Workers` — waking a waiting Worker on a verified
+    // fact, the fact/decision split, holding one Worker when two would collide, and
+    // saying so before and after; the `## RULES` budget did NOT move, the carve-out
+    // is one sentence inside rule 2. worker.md 394 -> 398 for the lines that let
+    // a `BM-ANSWERS` entry carry a fact the Manager verified (review b1 finding 2), and
+    // the sentence that re-asks a decision sent as a fact.
+    // Each is the measured length + 1.
+    ["worker.md", worker, 398],
     ["reviewer.md", reviewer, 169],
     // manager.md 185 -> 177 for bead bm-worker-autonomy-895l.2 (design delta
     // 20260924-worker-autonomy §4): no ordered size rule, no Large
     // confirmation, no skills-per-tier check. Measured 176 + 1.
-    ["manager.md", manager, 152],
+    ["manager.md", manager, 197],
   ])("%s leads with the hard limits and stays under %i lines", (_name, text, limit) => {
     const headings = text.split("\n").filter((line) => line.startsWith("## "));
     expect(headings[0]).toBe("## RULES");
@@ -412,10 +425,13 @@ describe("worker.md — the workflow", () => {
     // A push the user ordered is their decision, not the size of the work.
     rule(W, "what the user spelled out never raises the tier", /what the user spelled out is their decision, covered by\s+their yes \(rule 1\), and never raises the tier/);
     rule(W, "bead count is never evidence", /number of beads is never\s+evidence/i);
-    rule(W, "Large is hard to undo or changes what others rely on", /\*\*Large\*\* — hard to undo, or it changes what others rely on\./);
+    rule(W, "Large is hard to undo or changes what others rely on", /\*\*Large\*\* — hard to undo, or it changes what others rely on:/);
+    // Owner, 2026-09-25: a screen tweak became a Large request with three delta
+    // documents. What others rely on is what they consume, not how a thing looks.
+    rule(W, "how something looks or works inside is not what others rely on", /How something looks, reads or works inside is not one of these\./);
     // Owner, 2026-09-24: "cần có hướng dẫn phổ quát ngắn gọn chứ đừng gò ép vào use-case".
     expect(between(W, "## How big is this", "## Splitting the work")).not.toMatch(/commit|push|research|authentication/i);
-    rule(W, "Small needs no document", /\*\*Small\*\* — one clear change that needs no document/);
+    rule(W, "Small is local, undoable and provable, and needs no new document", /\*\*Small\*\* — one clear, local change that is easy to undo and that a check\s+can prove\. It may correct the documents that describe it; it needs no new one\./);
     rule(
       W,
       "a tier or size the user sets wins",
@@ -448,7 +464,7 @@ describe("worker.md — the workflow", () => {
       "Review the implementation as one batch",
       "`finished` with your decisions",
     );
-    for (const step of ["`reviewing-plan`", "`plan-ready-for-beads`", "`converting-plan-to-beads`", "`polishing-beads`", "write the beads by hand", "one short bead"]) {
+    for (const step of ["`reviewing-plan`", "`plan-ready-for-beads`", "`converting-plan-to-beads`", "`polishing-beads`", "write the beads by hand"]) {
       expect(loop, step).toContain(step);
     }
     verbatim(loop, "`Plan-ready: PASS — <date>`");
@@ -872,6 +888,13 @@ describe("manager.md — hard limits", () => {
     // b2 review: "and nothing else" also swallowed the six mandated
     // initialPrompt items, including the Manager's own id the Worker needs.
     rule(MR, "the first prompt follows its own recipe", /FIRST prompt[^.]{0,60}(recipe|step 2)|first prompt is the exception/i);
+    // ADR-011 (owner decision Q1 (c) of req-20260925T051841Z): the limit is about
+    // the WORK. What the Manager has READ of the STATE of the work it may send a
+    // Worker itself — on 2026-09-25 a Manager held Worker A's `finished` report and
+    // still asked the user to retype it before it would wake Worker B. The carve-out
+    // is one sentence inside rule 2 on purpose: the RULES budget did not move.
+    rule(MR, "what it has read of the state of the work it may send itself", /READ[^.]{0,80}state of the work[^.]{0,60}send/i);
+    rule(MR, "and never without its source", /with its source/i);
   });
 
   it("M3 — never says more than it can see", () => {
@@ -924,7 +947,7 @@ describe("manager.md — hard limits", () => {
 
 describe("manager.md — how it runs a request", () => {
   it("delegates before it looks anything up", () => {
-    order(M, "delegate first", "2. **Delegate now", "4. **Confirm to the user");
+    order(M, "reading, then delegating", "2. **A question you can answer by reading", "3. **A change: delegate now", "5. **Confirm to the user");
     rule(M, "no lookups before delegating", /Do not search tools or list\s+agents first/);
   });
   // Design delta 20260924-instruction-quality §3: the Worker sizes; a Manager
@@ -1093,6 +1116,98 @@ describe("manager.md — how it runs a request", () => {
   });
 });
 
+describe("manager.md — coordinating the Workers (ADR-011)", () => {
+  // Owner decision Q1 (c) of req-20260925T051841Z. The incident: the user had
+  // answered "pause until Worker A has committed"; Worker A reported `finished`;
+  // the Manager READ that report, said so, and still made the user type one word
+  // before it would wake Worker B. Rule 2 was read as "send a Worker nothing the
+  // user did not type", so the state of the work had nowhere to go.
+  const C = flat(between(manager, "## Coordinating the Workers", "## Talking to the user"));
+
+  it("makes the order of the Workers the Manager's own job", () => {
+    rule(C, "it is the only one that sees every Worker", /only one who sees every Worker/i);
+    rule(C, "they share one tree, one bead store, one history", /one working tree, one bead store and one history/i);
+    rule(C, "coordinating is not deciding", /Coordinating is not deciding/i);
+  });
+
+  it("wakes a waiting Worker itself, on something it has seen", () => {
+    rule(C, "a waiting Worker is woken", /Wake a waiting Worker yourself/i);
+    about(C, "seen", 260, /another Worker's report/, /`get_agent_status`/, /`git`/, /`br`/);
+    verbatim(C, "`Continue <requestId>.`");
+    rule(C, "with the source it read the fact in", /with the source you read it in/i);
+    rule(C, "and only once that Worker is not running", /once it is not `running`/);
+    // Review b2 finding 2: a fact sent loose leaves the question open and
+    // worker.md then re-asks it, so a Worker waiting on its OWN question is
+    // routed to the `BM-ANSWERS` bullet instead of a bare `Continue`.
+    rule(C, "a Worker waiting on a question of its own goes to the answers bullet", /one waiting on a question of its own gets the next bullet instead/i);
+    rule(C, "it never asks the user to relay what it can see", /Never ask the user to tell you what you can see/i);
+  });
+
+  it("answers a fact itself and leaves every decision to the user", () => {
+    rule(C, "a fact is answered, a decision is relayed", /A fact you answer, a decision you relay/i);
+    rule(C, "in the BM-ANSWERS block", /`BM-ANSWERS` block/);
+    rule(C, "as an other entry carrying the fact and where it was read", /other — <the fact, and where you read it>/);
+    about(C, "stays theirs", 220, /Scope, approach, a trade-off/, /even while it blocks the Worker/);
+    // Review b1 finding 3: a fact sent on its own could wake a Worker while one of
+    // the user's answers to the same report was still outstanding, and manager.md's
+    // "a Worker that reported again … relay nothing more" would then strand it.
+    rule(C, "a fact travels with the user's answers to the same report", /Send a fact with the user's answers to that same report/i);
+    rule(C, "alone only when it is the only open question", /alone only when it is its only open question/i);
+  });
+
+  it("holds one Worker when two would collide, without delaying delegation", () => {
+    rule(C, "two Workers writing the same things are ordered", /Hold one Worker when two would collide/i);
+    // Review b2 finding 1: "hold the other" with no named mechanism reads, in
+    // this file, as "keep the request back" (step 3 uses "hold" for exactly
+    // that), which would break REQ-021 (e)/M-10 and ADR-011 decision 4. The
+    // mechanism is now named: the Worker is created at once and told it waits.
+    rule(C, "holding never delays creating the Worker", /Never by delaying its creation/i);
+    rule(C, "the request still gets its own Worker at once", /the request gets its own Worker at once \(step 3\)/i);
+    rule(C, "the wait travels in the first prompt", /the wait rides in the first prompt/i);
+    rule(C, "and carries nothing about how to do the work", /never how to do the work/i);
+    rule(C, "the case is two Workers writing the same things", /Two Workers writing the same files, beads or history is that case/i);
+    rule(C, "the user is told who waits on whom", /Say who waits on whom/i);
+    rule(C, "the held one is woken when the first is done", /wake the held one when the first is idle and its work is committed or reported/i);
+    // The other half of the mechanism, in the creation recipe itself.
+    rule(M, "the first prompt carries the wait", /when another Worker is already writing the same files, beads or history, one line naming it/i);
+    rule(M, "and leaves the meanwhile to the Worker", /what to do meanwhile is the Worker's own call/i);
+  });
+
+  it("says what it will do before, and what it did after", () => {
+    rule(C, "it announces that it will wake the Worker", /say that YOU will wake it and on what/i);
+    rule(C, "never asking the user to be its messenger", /never "tell me and I will"/i);
+    rule(C, "and afterwards says what it saw and sent", /what you saw and what you sent/i);
+    rule(C, "so the user can overturn it", /so the user can overturn it/i);
+  });
+
+  it("asks instead of guessing when what it saw may not be the point", () => {
+    rule(C, "an uncertain reading is a question", /Unsure is a question/i);
+    rule(C, "two sources that disagree go to the user", /two sources disagree, ask the user instead of guessing/i);
+    rule(C, "because a wrongly woken Worker does wrong work", /woken on a wrong fact does wrong work/i);
+  });
+
+  it("stops leaving a Worker that finished waiting for something idle", () => {
+    rule(M, "the finished bullet carries the exception", /Leave the Worker idle — unless it finished waiting for something/i);
+    rule(M, "a fact-only question in a blocked report is the Manager's to answer", /A question that asks only for a fact you can read, you answer yourself \(Coordinating the Workers\)/i);
+  });
+});
+
+describe("worker.md — an answer may be a fact the Manager verified (ADR-011)", () => {
+  // The other half of the same decision (review b1 finding 2): the Worker acts on
+  // the block, and every answered number closes for good, so it must be able to
+  // tell a verified fact from the user's binding word.
+  it("names the two kinds of `other` entry", () => {
+    rule(W, "the user's words, or a fact the Manager verified", /is the user's own words, or a fact your Manager verified, with its source/i);
+    rule(W, "a BM-ANSWERS block is still an answer, not a plugin notice", /A `BM-ANSWERS` block is the user's answer, not a notice\./);
+    rule(W, "and one entry may be the Manager's verified fact", /One `other` entry in it may be a fact your Manager verified, with its source/i);
+  });
+
+  it("re-asks under a new number when an answer reads as a decision", () => {
+    rule(W, "scope, approach or a trade-off is not settled by a fact", /One that reads as scope, approach or a trade-off rather than a fact is not the user's decision, whoever sent it/i);
+    rule(W, "what is left comes back under a new number", /ask what is left under a new number, saying why/i);
+  });
+});
+
 describe("across the three files (delta 20260917c)", () => {
   const fenced = (text: string) => [...text.matchAll(/```\n([\s\S]*?)```/g)].map((m) => m[1] ?? "");
 
@@ -1155,7 +1270,8 @@ describe("the RULES budget", () => {
   it.each([
     ["worker.md", worker, 5, 34],
     ["reviewer.md", reviewer, 4, 18],
-    ["manager.md", manager, 5, 29],
+    // manager.md 29 -> 30: rule 1 now names what it may do instead (read), 2026-09-25.
+    ["manager.md", manager, 5, 30],
   ])("%s states exactly %i hard limits, in at most %i lines", (name, text, limits, lines) => {
     const block = rulesBlock(text);
     expect(block.filter((line) => /^\d+\. \*\*/.test(line)).length, `${name}: numbered limits`).toBe(limits);
@@ -1246,13 +1362,38 @@ describe("worker.md: an answered number is closed (design delta 20260924-qa-ledg
 // one principle covers both, naming no case.
 describe("worker.md: process follows what the Worker designs", () => {
   it("gives no bead, Reviewer or review to a request that needs no design of the Worker's", () => {
-    rule(W, "the loop skips the change steps", /A request that needs no change of your\s+design gets no bead, no Reviewer and no review call: do it \(below\), send\s+`finished`, and skip steps 3–6\./);
+    rule(W, "the loop skips the change steps", /A Small request, and one that needs no\s+change of your design, gets no bead, no Reviewer and no review call: do it,\s+prove it \(Proving a change\), send `finished`, and skip steps 3–6\./);
     rule(W, "the principle, with why", /\*\*Process follows what you design\.\*\* Beads, documents and reviews exist to track\s+and check a change you design\./);
     rule(W, "an answer or what the request spells out needs none", /A request that needs none — it asks for an\s+answer, or for exactly what it already spells out — gets none of them/);
     rule(W, "the result comes with its evidence and nothing blocks", /show the result with its evidence in your chat\. Nothing blocks, and what\s+should change goes into your report's `suggestions`/);
     rule(W, "a part that does need design is a change", /Any part of a\s+request that does need your design is handled like any change\./);
     rule(W, "the request that names the action is the yes", /A request that itself\s+asks for one of these is that yes, for exactly what it names\./);
     expect(W).not.toMatch(/A request that only asks for (information|an operation)/);
+  });
+});
+
+// Owner, 2026-09-25: "nhiều việc tôi thấy khá nhỏ nhặt không xứng đáng tạo beads".
+// The process follows risk: a Small change is proved by its check, a document
+// that only describes it is corrected in place, and the Manager answers what
+// it can read without starting a Worker.
+describe("the 2026-09-25 lanes", () => {
+  it("worker.md: a Small change gets no bead and no review unless the user asks", () => {
+    rule(W, "the table says Small has no beads", /\| Beads \| none \| written by hand \| from a plan, or by hand \|/);
+    rule(W, "Small reviews only on request", /\| Review batches \| none, unless the user asks \|/);
+    rule(W, "the calls are a ceiling", /The calls are a ceiling, not a target/);
+    rule(W, "a Small change is proved by its check", /A Small change has no bead: make it, run its check, read the result/);
+  });
+
+  it("worker.md: a description is corrected in place, a decision is asked about", () => {
+    rule(W, "documents only where a recorded thing is overturned", /where it overturns\s+something recorded: a decision, a contract, a schema/);
+    rule(W, "a descriptive document is corrected in place without a question", /corrected in place as part of the change: no new document, no\s+question/);
+    rule(W, "correcting a description is not an approved-decision question", /Correcting what a\s+document says about the thing you change is part of the change, not one\s+of these\./);
+  });
+
+  it("manager.md: answers what it can read, changes nothing", () => {
+    rule(MR, "changes nothing, reading is its own", /\*\*YOU CHANGE NOTHING\.\*\*[\s\S]{0,260}Reading is yours/);
+    rule(M, "answers a question it can read without a Worker", /\*\*A question you can answer by reading, answer yourself\*\*[\s\S]{0,300}create no Worker/);
+    rule(M, "a build, a test or a change goes to a Worker", /An answer that needs a build, a\s+test or a long investigation, or a question that turns into a change, is a\s+change\./);
   });
 });
 

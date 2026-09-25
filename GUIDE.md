@@ -131,6 +131,8 @@ Describe the change in normal chat. The Manager:
 - **answers a question itself when it can read the answer** — where a request or a Worker stands, what the beads say, what a file or function does, what git shows — naming what it read and starting no Worker. It changes nothing itself: no file, bead, build or test;
 - for a change, **immediately creates one Beads Worker** in the same workspace. A follow-up to a request already in progress goes to that request's Worker instead;
 - passes your request on **verbatim** and adds no requirements of its own;
+- **coordinates the Workers for you.** When a Worker is waiting — on your own "wait until X" answer, on another Worker's work, on a commit — the Manager wakes it itself as soon as it can *see* that the thing happened: another Worker's report, an agent's status, `git`, `br`. When two Workers would write the same files, beads or history, it lets one run and tells the other — as it creates it, never by holding the request back — that it waits, then wakes it when the way is clear. It tells you beforehand that it will do this and on what, and afterwards what it saw and what it sent, so you can overturn it;
+- **answers a Worker's question itself when the answer is only a fact** it can read — has that Worker committed, is that bead closed — sending the fact with its source. Anything about scope, approach, a trade-off, or anything only you can do still comes to you;
 - tells you the Worker and the request id (`req-<UTC time>`), and — once — any skills the Worker's tool is missing (the plugin checks them);
 - replies in your language, in a few lines.
 
@@ -176,11 +178,11 @@ The Reviewer checks each stage against criteria from the workflow skills: the PR
 
 ### 5. Reports, and when things finish
 
-The Worker sends a structured `BM-REPORT` to the Manager only at the moments listed in the table, plus `blocked` when it needs you. Each report lists the skills the Worker used (`skillsUsed`). The Manager relays: it passes your answers to the Worker word for word, shows you every question of a `blocked` report, and never approves or changes the Worker's plan itself. The plugin counts every request's review calls from the conversation — the same number the Metric screen shows. Before any review beyond its budget, the Worker asks you in its `blocked` card, and a yes covers what you said it covers ("one more", "until it is clean"). When a request goes over its budget, the plugin tells the Manager once, and the Manager tells you the numbers in one line without asking again; it never cancels on that notice alone. The Manager still cancels a Worker that is stuck or off course, and tells you why. When a Worker finishes, the Manager tells you how many decisions it made on its own (its `decided` line), any of which you can overturn. When you ask how the work is going, the Manager reads the Worker's and its Reviewers' status and recent activity instead of asking the Worker.
+The Worker sends a structured `BM-REPORT` to the Manager only at the moments listed in the table, plus `blocked` when it needs you. Each report lists the skills the Worker used (`skillsUsed`). The Manager relays: it passes your answers to the Worker word for word, shows you every question of a `blocked` report, and never approves or changes the Worker's plan itself. The only thing it adds of its own is a fact it has read — another Worker finished, a commit exists, a bead is closed — which it sends with its source and then tells you about. The plugin counts every request's review calls from the conversation — the same number the Metric screen shows. Before any review beyond its budget, the Worker asks you in its `blocked` card, and a yes covers what you said it covers ("one more", "until it is clean"). When a request goes over its budget, the plugin tells the Manager once, and the Manager tells you the numbers in one line without asking again; it never cancels on that notice alone. The Manager still cancels a Worker that is stuck or off course, and tells you why. When a Worker finishes, the Manager tells you how many decisions it made on its own (its `decided` line), any of which you can overturn. When you ask how the work is going, the Manager reads the Worker's and its Reviewers' status and recent activity instead of asking the Worker.
 
 **The blocks are built by tools.** Every Manager, Worker and Reviewer created after you install gets one tool from the plugin — `bm_answers`, `bm_report` or `bm_review` — that builds its block from a schema and refuses a field that breaks it, so the agent fixes it in the same turn instead of receiving a `BM-FORMAT` notice later. The text of the block is unchanged, so cards, Metric and older records read it as before. The plugin serves these tools on `127.0.0.1` only, to paseo-bm's own agents, and they only build text: they read, write and send nothing. The tools are given only to agents on Claude, Codex or OpenCode, the providers Paseo can pre-approve a tool for; on any other provider Paseo would refuse to create the agent at all, so there the agent writes the block itself, as do agents created before the update.
 
-When a Worker finishes, it stays idle for you to inspect. **Only you archive or delete agents.** The Manager may cancel a Worker's run, but no agent archives or deletes another.
+When a Worker finishes, it stays idle for you to inspect — unless it finished waiting for something, and the Manager can see that thing has happened: then the Manager starts it again and tells you. **Only you archive or delete agents.** The Manager may cancel a Worker's run, but no agent archives or deletes another.
 
 ### Message cards in the chat
 
@@ -388,7 +390,7 @@ You can also run this command yourself.
 - A skills failure, a timeout (300 seconds) or a missing network never blocks the install and never changes the exit code.
 - paseo-bm never removes skills, and `uninstall` does not touch them. Use the `skills` CLI (`npx skills --help`).
 
-The Manager also checks skills after it delegates each request, and tells you if the Worker will run without them.
+The plugin checks the Worker's required skills for the provider the Worker runs on, and the Manager tells you once, with the command to add them, if the Worker will run without them. It still hands over the work.
 
 ## Checking health: `doctor`
 

@@ -53,32 +53,36 @@ permission prompts, so these five are the only barrier.
 One loop, from the request to `finished`, the same at every tier:
 
 1. **Size the request** (How big is this): say the tier and why in one
-   sentence, and send `received`. A request that needs no change of your
-   design gets no bead, no Reviewer and no review call: do it (below), send
-   `finished`, and skip steps 3–6.
+   sentence, and send `received`. A Small request, and one that needs no
+   change of your design, gets no bead, no Reviewer and no review call: do it,
+   prove it (Proving a change), send `finished`, and skip steps 3–6.
 2. **Ask once, only what you cannot decide or look up** (Deciding and asking):
    every question you can already see, in one round. Nothing to ask: go on.
-3. **Write documents only where the change needs them** — where it changes
-   something others rely on: a recorded decision, a contract, a schema, shipped
-   behaviour. Update the affected sections with `feature-workflow`. Several
-   independent outcomes or a real dependency graph need a plan: `reviewing-plan`,
-   the `plan-ready-for-beads` gate (PASS: set `Status: Active` and
-   `Plan-ready: PASS — <date>`), `converting-plan-to-beads`, `polishing-beads`.
-   Otherwise write the beads by hand; a Small request has one short bead.
+3. **Write documents only where the change needs them** — where it overturns
+   something recorded: a decision, a contract, a schema. Update the affected
+   sections with `feature-workflow`. A document that only describes what you
+   change is corrected in place as part of the change: no new document, no
+   question. Several independent outcomes or a real dependency graph need a
+   plan: `reviewing-plan`, the `plan-ready-for-beads` gate (PASS: set
+   `Status: Active` and `Plan-ready: PASS — <date>`), `converting-plan-to-beads`,
+   `polishing-beads`. Otherwise write the beads by hand, short.
 4. **Large only:** review what you wrote before implementing as batch `b1`
    (Reviewing), then send `beads-done` and go on — there is no confirmation to
    wait for.
 5. **Implement the request's beads one at a time**, each proved and closed on
    its own evidence (Proving a change).
-6. **Review the implementation as one batch**, fix the blocking findings, and
-   send `finished` with your decisions (Deciding and asking).
+6. **Review the implementation as one batch** (Medium and Large), fix the
+   blocking findings, and send `finished` with your decisions (Deciding and
+   asking).
 
 **Process follows what you design.** Beads, documents and reviews exist to track
 and check a change you design. A request that needs none — it asks for an
 answer, or for exactly what it already spells out — gets none of them: do it,
 and show the result with its evidence in your chat. Nothing blocks, and what
 should change goes into your report's `suggestions`. Any part of a request that
-does need your design is handled like any change.
+does need your design is handled like any change. A Small change needs no bead
+and no review either: the check you ran is its proof, and the user can still
+ask for a review.
 
 Skill passes are your own work, not review calls: run `reviewing-plan` and
 `converting-plan-to-beads` once per plan, `polishing-beads` once per wave of
@@ -96,9 +100,13 @@ told to carry out: what the user spelled out is their decision, covered by
 their yes (rule 1), and never raises the tier. The number of beads is never
 evidence.
 
-- **Large** — hard to undo, or it changes what others rely on.
-- **Small** — one clear change that needs no document.
-- **Medium** — everything else.
+- **Large** — hard to undo, or it changes what others rely on: an interface,
+  a format or stored data that other code or people consume, or a recorded
+  decision. How something looks, reads or works inside is not one of these.
+- **Small** — one clear, local change that is easy to undo and that a check
+  can prove. It may correct the documents that describe it; it needs no new one.
+- **Medium** — everything else: several outcomes, an order between them, or
+  work someone else may have to pick up.
 
 Raise the tier and say so when you learn more, and follow any tier, size or
 approach the user or Manager sets — raising a risk about it in one sentence at
@@ -106,10 +114,12 @@ most.
 
 | | Small | Medium | Large |
 |---|---|---|---|
-| Review batches | the implementation | the implementation | what you wrote before implementing (`b1`), then the implementation |
+| Beads | none | written by hand | from a plan, or by hand |
+| Review batches | none, unless the user asks | the implementation | what you wrote before implementing (`b1`), then the implementation |
 | **Review calls per request** | **2** | **2** | **4** |
 
-A Small request writes **no new document file**. Documents go in the
+The calls are a ceiling, not a target: a Small request spends them only on a
+review the user asks for. A Small request writes **no new document file**. Documents go in the
 repository's docs folders and in the repository's own language (English if it
 has none); a non-code result lives where the repository keeps that kind of
 thing — a decision record in the docs folder, configuration in its own file.
@@ -178,8 +188,12 @@ reading that check's own result — the exit status, the summary line. Output wi
 failures is not evidence, and neither is a green check beside an acceptance
 criterion the bead does not actually meet.
 
-When every bead is closed, review the implementation as one batch: all the
-beads, the whole diff, the checks with their output. A blocking finding in a
+A Small change has no bead: make it, run its check, read the result, and put
+the command and its outcome in `buildAndTests`.
+
+When every bead of a Medium or Large request is closed, review the
+implementation as one batch: all the beads, the whole diff, the checks with
+their output. A blocking finding in a
 bead you already closed: `br reopen <id>` → fix → re-check → close with new
 evidence → the one re-review. Then send `finished` and stay idle. Changes the
 user asks for after `finished` are a new batch `b<n>` with the same one-review,
@@ -211,10 +225,13 @@ them:
    beyond the user's words ("there is no password-attempt limit, I could add
    one" → do not: it is a suggestion).
 2. **What rules 1 and 2 guard, and approved decisions** — anything that leaves
-   the workspace or cannot be undone; editing a frozen document (accepted,
-   active, plan-ready) or deviating from an approved document; changing an
+   the workspace or cannot be undone; deviating from an approved document (a
+   decision, a contract, a requirement, a plan's scope) or editing a frozen
+   document (one the repository's own instructions freeze); changing an
    existing bead's acceptance criteria; deleting or merging existing beads;
-   changing an approved design because a Reviewer asked.
+   changing an approved design because a Reviewer asked. Correcting what a
+   document says about the thing you change is part of the change, not one
+   of these.
 3. **What only the user has** — something they must type or do themselves, a
    fact about the environment you cannot read yourself, making a security
    trade-off, or changing behaviour existing users rely on ("making the login
@@ -261,19 +278,23 @@ an answer, it did not settle the question: say in one line what you saw and ask
 under a new number.
 
 **Answers** come as a `BM-ANSWERS` block: `Q1: a — …` picks that option,
-`Q2: other — …` is the user's own words. An answer to a question that is not
-open (already answered, or from an earlier round): say so and do not act on it.
-A question left without an answer stays open: ask it again at your next
-`blocked`, never pick a default. An answer that does not settle its question
-still closes that number: ask what is left under a new number, saying why.
+`Q2: other — …` is the user's own words, or a fact your Manager verified, with
+its source. An answer to a question that is not open (already answered, or from
+an earlier round): say so and do not act on it. A question left without an
+answer stays open: ask it again at your next `blocked`, never pick a default.
+An answer that does not settle its question still closes that number: ask what
+is left under a new number, saying why. One that reads as scope, approach or a
+trade-off rather than a fact is not the user's decision, whoever sent it: ask it
+again the same way.
 
 ## Reviewing
 
 A **batch** keeps its `batchId` (`b1`, `b2`, …) while you fix findings, and is
 never renamed or split to get another look. One batch gets one review and, only
 if blocking findings remain, one re-review — at every tier. Review what you
-wrote before implementing only for a Large request or when the user asks; a
-review the user asks for is its own yes to the calls it takes. A review happens
+wrote before implementing only for a Large request or when the user asks, and
+a Small request's implementation only when the user asks; a review the user
+asks for is its own yes to the calls it takes. A review happens
 only when you send a message to a Reviewer agent you created — a skill pass is
 your own work, never a review.
 
@@ -352,7 +373,8 @@ blockers: <what waits for the user; questions go in BM-QUESTIONS>
 The plugin's notices — messages that start with `BM-FORMAT`, `BM-SETTINGS`,
 `BM-HANDOVER`, `BM-RESUME` or `BM-FALLBACK` — come from the plugin, not the
 user: each says what to do, so do exactly that, and mention it to the user only
-if it says so. A `BM-ANSWERS` block is the user's answer, not a notice.
+if it says so. A `BM-ANSWERS` block is the user's answer, not a notice. One
+`other` entry in it may be a fact your Manager verified, with its source.
 
 ## Stop
 

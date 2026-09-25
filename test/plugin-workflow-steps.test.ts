@@ -412,22 +412,35 @@ describe("skill evidence for convert, polish and implement (delta 20260917-workf
 });
 
 describe("the skipped rule (REQ-045d)", () => {
-  it("lets a Small request skip the document steps and polish", () => {
+  // Owner, 2026-09-25: a Small change has no bead and no review unless the user
+  // asks (REQ-022c, REQ-024c), so its bead and review steps are skipped too.
+  it("lets a Small request skip the document steps, polish, beads and review", () => {
     const steps = inferWorkflowSteps(traceWith({ reports: [report({ tier: "Small" })] }));
-    for (const step of SKIPPABLE_BY_TIER.Small) {
+    for (const step of ["prd", "design", "adr", "plan", "review_plan", "polish_beads"]) {
       expect(rowFor(steps, step)).toMatchObject({ status: "skipped", confidence: "exact" });
       expect(rowFor(steps, step).note).toContain("tier Small");
     }
-    // Steps a Small request may not skip stay unknown, not skipped.
-    expect(rowFor(steps, "convert_to_beads").status).toBe("unknown");
+    for (const step of ["convert_to_beads", "review_batches", "close_with_evidence"]) {
+      expect(rowFor(steps, step)).toMatchObject({ status: "skipped", confidence: "exact" });
+      expect(rowFor(steps, step).note).toContain("a Small change has no bead and no review");
+    }
+    // Implementing and checking are never skipped.
     expect(rowFor(steps, "implement").status).toBe("unknown");
+    expect(rowFor(steps, "build_and_tests").status).toBe("unknown");
   });
 
-  // PRD delta 20260924-worker-autonomy (REQ-045d): documents follow the change,
-  // not the tier, so Medium and Large may omit exactly what Small may.
-  it("lets Medium and Large skip the same steps as Small, and nothing else", () => {
-    expect(SKIPPABLE_BY_TIER.Medium).toEqual(SKIPPABLE_BY_TIER.Small);
-    expect(SKIPPABLE_BY_TIER.Large).toEqual(SKIPPABLE_BY_TIER.Small);
+  it("still shows a Small request's bead and review as done when it had them", () => {
+    const steps = inferWorkflowSteps(
+      traceWith({ reports: [report({ tier: "Small" })], evidence: [shell("br create --title=x")] }),
+    );
+    expect(rowFor(steps, "convert_to_beads").status).toBe("done");
+  });
+
+  // Documents follow the change, not the tier (REQ-045d), so Medium and Large
+  // omit the document steps; they always have beads and a review.
+  it("lets Medium and Large skip only the document steps, the plan review and polish", () => {
+    expect(SKIPPABLE_BY_TIER.Medium).toEqual(["prd", "design", "adr", "plan", "review_plan", "polish_beads"]);
+    expect(SKIPPABLE_BY_TIER.Large).toEqual(SKIPPABLE_BY_TIER.Medium);
     for (const tier of ["Medium", "Large"] as const) {
       const steps = inferWorkflowSteps(traceWith({ reports: [report({ tier })] }));
       for (const step of ["prd", "design", "adr", "plan", "review_plan", "polish_beads"]) {

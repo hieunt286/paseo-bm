@@ -489,7 +489,7 @@ const ANSWERS_SCHEMA: JsonSchema = {
         type: "object",
         additionalProperties: false,
         required: ["id"],
-        description: "Either option with optionText (the option as the Worker wrote it), or other with the user's own words.",
+        description: "Either option with optionText (the option as the Worker wrote it), or other with the user's own words, or a fact you verified, named with its source.",
         properties: { id: QUESTION_ID, option: { type: "string", pattern: "^[a-z]$" }, optionText: TEXT, other: TEXT },
       },
     },
@@ -540,7 +540,7 @@ export const AGENT_TOOLS: readonly AgentTool[] = [
   tool<AnswersInput>({
     name: "bm_answers",
     role: "manager",
-    description: "Build the BM-ANSWERS block that relays the user's answers to a Worker.",
+    description: "Build the BM-ANSWERS block that answers a Worker: the user's answers, or a fact you verified yourself.",
     inputSchema: ANSWERS_SCHEMA,
     rules: answersRules,
     build: buildAnswers,

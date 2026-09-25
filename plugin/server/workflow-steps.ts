@@ -48,18 +48,26 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
 ];
 
 /**
- * Steps each tier is allowed to omit (REQ-045d as amended by PRD delta
- * 20260924-worker-autonomy): documents no longer follow the tier — a Worker
- * writes them only where the change needs them (REQ-036c) — so every tier may
- * omit the document steps, the plan, its review and the polish of converted
- * beads. The other steps are never "skipped" by tier.
+ * Steps each tier is allowed to omit (REQ-045d). Documents do not follow the
+ * tier — a Worker writes them only where the change needs them (REQ-022d) — so
+ * every tier may omit the document steps, the plan, its review and the polish
+ * of converted beads. A Small change also has no bead and no review unless the
+ * user asks for one (REQ-022c, REQ-024c, owner 2026-09-25), so it may omit the
+ * bead and review steps too. Implementing and checking are never skipped.
  */
 const OPTIONAL_STEPS: readonly WorkflowStep[] = ["prd", "design", "adr", "plan", "review_plan", "polish_beads"];
+const SMALL_ONLY_STEPS: readonly WorkflowStep[] = ["convert_to_beads", "review_batches", "close_with_evidence"];
 export const SKIPPABLE_BY_TIER: Readonly<Record<Tier, readonly WorkflowStep[]>> = {
-  Small: OPTIONAL_STEPS,
+  Small: [...OPTIONAL_STEPS, ...SMALL_ONLY_STEPS],
   Medium: OPTIONAL_STEPS,
   Large: OPTIONAL_STEPS,
 };
+
+function skippedNote(step: WorkflowStep, tier: Tier): string {
+  return SMALL_ONLY_STEPS.includes(step)
+    ? "a Small change has no bead and no review unless the user asks (REQ-022c, REQ-024c)"
+    : `optional at every tier, tier ${tier} included: documents follow the change, not the tier (REQ-022d, REQ-045d)`;
+}
 
 const DOC_PREFIX: Partial<Record<WorkflowStep, string>> = {
   prd: "docs/product/",
@@ -406,7 +414,7 @@ export function inferWorkflowSteps(
         status: "skipped" as const,
         confidence: "exact" as const,
         evidence: [],
-        note: `optional at every tier, tier ${tier} included: documents follow the change, not the tier (REQ-036c, REQ-045d)`,
+        note: skippedNote(step, tier),
       };
     }
     return {

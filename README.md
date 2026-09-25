@@ -1,12 +1,12 @@
 # paseo-bm — Beads Management for Paseo
 
-`paseo-bm` adds a small agent team to [Paseo](https://paseo.sh). You describe a change in chat, and the team turns it into documents (only when the change needs them), beads (small, dependency-aware work items tracked with `br`) and working code. A separate agent reviews each stage.
+`paseo-bm` adds a small agent team to [Paseo](https://paseo.sh). You describe a change in chat, and the team turns it into documents (only when the change needs them), beads (small, dependency-aware work items tracked with `br`) and working code. The process follows the risk: a small change is made and proved directly, larger work gets beads and a separate agent's review.
 
-![How paseo-bm carries a request: you ask the Beads Manager, which hands the request to a Beads Worker. The Worker sizes it, writes documents only when needed, creates beads, implements them one at a time with evidence, and has a Reviewer check each stage.](assets/paseo-bm-flow.svg)
+![How paseo-bm carries a request: the Beads Manager answers what it can read and hands every change to a Beads Worker. The Worker sizes the change: a Small change is made and proved by a check, with no bead and no review; a Medium change gets beads and one review of the implementation; a Large change gets documents where a decision or contract changes, a review before building, beads and a review of the implementation.](assets/paseo-bm-flow.svg)
 
-- **Beads Manager** — your single point of contact in a workspace. It hands each request to a Worker right away and tells you the result.
+- **Beads Manager** — your single point of contact in a workspace. It answers what it can read itself (status, beads, code, git history), hands every change to a Worker right away, and tells you the result.
 - **Beads Worker** — carries one request from start to finish with the feature-workflow skills from [cuongntr/agent-skills](https://github.com/cuongntr/agent-skills) (another author's repository). Anything beyond your request becomes a suggestion, not work.
-- **Reviewer** — checks each stage and returns a verdict. It never edits anything.
+- **Reviewer** — checks medium and large work (and small work when you ask) and returns a verdict. It never edits anything.
 - **Screens in Paseo** — **Metric** (what each request did and cost), **Beads** (the workspace's beads) and **Setup** (tools, skills and your own role instructions).
 
 > **Status:** stable release `0.3.0` on the `latest` dist-tag; prereleases continue on `next`. Command names, flags, exit codes and the `--json` shape are a public contract.
@@ -28,7 +28,7 @@
 
 - **Paseo plugins run without a sandbox.** The plugin has the same access to your machine as the Paseo daemon: files, processes, credentials and network.
 - **One consent grants Paseo's agent tools to every agent on this machine**, not only to paseo-bm's roles. Any agent can then create, prompt and stop other agents, and spend money on your model providers.
-- **The Worker runs without permission prompts.** Its limits (no commit or push, no destructive commands, no secret files) are role instructions only, so review `git diff` before you commit.
+- **The Worker runs without permission prompts.** Its limits (no commit, push or publish without your yes, no destructive commands, no secret files) are role instructions only, so review `git diff` before you commit.
 
 The full warnings, including what paseo-bm records on your machine, are in [GUIDE.md](GUIDE.md#before-you-install-read-these-warnings).
 
