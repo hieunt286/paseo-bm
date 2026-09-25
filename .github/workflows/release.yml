@@ -149,14 +149,17 @@ jobs:
               process.exit(1);
             }
             // The dist-tag follows the kind of version: a prerelease goes to
-            // `next`, a stable one to `latest` — the tag `npx paseo-bm` and the
-            // paseo.cafe scanner both read. Publishing to `latest` here runs over
-            // OIDC in this same job, which is what removes the owner's manual
-            // `npm dist-tag add` (it needs a one-time password). A stable version
-            // is NOT also pushed to `next`: that would need `npm dist-tag add`,
-            // a different write from `publish`, and the trusted-publisher grant
-            // is not proven to cover it. See
+            // `next`, a stable one to `latest` — the tag that `npx paseo-bm` and
+            // the paseo.cafe scanner both read. Publishing to `latest` happens
+            // over OIDC in this same job, which removes the manual
+            // `npm dist-tag add` step (that one needs a one-time password).
+            // A stable version is NOT also pushed to `next`: that would need
+            // `npm dist-tag add` too, a different write from `publish`, and the
+            // trusted-publisher grant is not proven to cover it. See
             // docs/design/paseo-bm-delta-20260925b-stable-release.md §2.2-§2.3.
+            // Keep every line here free of apostrophes and single quotes: this
+            // script is passed to node inside a single-quoted shell string, so
+            // one apostrophe ends the string and the rest becomes shell code.
             const distTag = prerelease ? "next" : "latest";
             console.log(`version=${version}`);
             console.log(`tag=${tag}`);
