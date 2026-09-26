@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -123,12 +123,15 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "bm-detail-"));
   workspace = join(home, "repo");
   mkdirSync(join(workspace, ".beads"), { recursive: true });
-  writeFileSync(join(home, "install.json"), JSON.stringify({ schemaVersion: 1 }));
+  // From 0.4.0 the store is found with `resolveDataHome`, so the folder is
+  // named here rather than through the plugin path in the fake configuration.
+  process.env["PASEO_BM_HOME"] = home;
   clearTraceStoreCache();
   clearBeadsCache();
 });
 
 afterEach(() => {
+  delete process.env["PASEO_BM_HOME"];
   rmSync(home, { recursive: true, force: true });
 });
 

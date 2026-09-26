@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AGENT_TOOLS_SERVER, MAX_BODY_BYTES, answer, savedPort, startAgentTools, withAgentTools, type AgentToolsEndpoint } from "../plugin/server/agent-tools";
+import { AGENT_TOOLS_SERVER, MAX_BODY_BYTES, answer, savedPort, startAgentTools, statePath, withAgentTools, type AgentToolsEndpoint } from "../plugin/server/agent-tools";
 import { applyAgentTools, registerRoleHook, type AgentCreateRequest } from "../plugin/server/role-hook";
 
 /**
@@ -159,21 +159,90 @@ describe("the port kept across restarts", () => {
     }
   });
 
-  it("never creates an install home, and ignores a state file it does not understand", async () => {
+  it("creates the data folder 0700 and the file 0600 on a machine that has neither", async () => {
     const bare = mkdtempSync(join(tmpdir(), "bm-agent-tools-bare-"));
     homes.push(bare);
-    const path = join(bare, ".paseo-bm", "ui", "agent-tools.json");
+    const dataHome = join(bare, ".paseo-bm");
+    const path = join(dataHome, "ui", "agent-tools.json");
     const endpoint = startAgentTools({ statePath: path, log: () => {} });
     endpoints.push(endpoint);
     await endpoint.ready;
-    expect(endpoint.urlFor("worker")).not.toBeNull();
-    expect(() => readFileSync(path)).toThrow();
 
+    expect(endpoint.urlFor("worker")).not.toBeNull();
+    // Before 0.4.0 nothing here was allowed to create the install home, so the
+    // port was simply lost. The plugin owns the folder now (ADR-012 decision 3).
+    expect(savedPort(path)).toBe(Number(new URL(endpoint.urlFor("worker")!).port));
+    expect(statSync(dataHome).mode & 0o777).toBe(0o700);
+    expect(statSync(join(dataHome, "ui")).mode & 0o777).toBe(0o700);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  it("ignores a state file it does not understand", () => {
     const dir = home();
     const statePath = join(dir, ".paseo-bm", "ui", "agent-tools.json");
     mkdirSync(join(dir, ".paseo-bm", "ui"));
     writeFileSync(statePath, JSON.stringify({ schemaVersion: 99, port: 1234 }));
     expect(savedPort(statePath)).toBeNull();
+  });
+
+  it("writes through no symlink, and keeps serving when it cannot save", async () => {
+    const dir = home();
+    const outside = join(dir, "outside");
+    mkdirSync(outside);
+    symlinkSync(outside, join(dir, ".paseo-bm", "ui"));
+    const logs: string[] = [];
+    const endpoint = startAgentTools({ statePath: join(dir, ".paseo-bm", "ui", "agent-tools.json"), log: (line) => logs.push(line) });
+    endpoints.push(endpoint);
+    await endpoint.ready;
+
+    expect(endpoint.urlFor("worker")).not.toBeNull();
+    expect(() => readFileSync(join(outside, "agent-tools.json"))).toThrow();
+    expect(logs.join("\n")).toContain("could not save the agent tools port");
+  });
+});
+
+describe("where the port file goes", () => {
+  it("follows PASEO_BM_HOME rather than ~/.paseo-bm", () => {
+    const dir = home();
+    const custom = join(dir, "custom-bm");
+    process.env["PASEO_BM_HOME"] = custom;
+    try {
+      expect(statePath()).toEqual({ path: join(custom, "ui", "agent-tools.json"), home: custom });
+    } finally {
+      delete process.env["PASEO_BM_HOME"];
+    }
+  });
+
+  it("follows the home.json pointer", () => {
+    const dir = home();
+    const custom = join(dir, "pointed-bm");
+    writeFileSync(
+      join(dir, ".paseo-bm", "home.json"),
+      JSON.stringify({ schemaVersion: 1, home: custom, writtenBy: "paseo-bm@0.4.0", at: "2026-09-25T00:00:00.000Z" }),
+    );
+    const previous = process.env["HOME"];
+    process.env["HOME"] = dir;
+    try {
+      expect(statePath()).toEqual({ path: join(custom, "ui", "agent-tools.json"), home: custom });
+    } finally {
+      if (previous === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previous;
+    }
+  });
+
+  it("reports an unusable data folder and starts no endpoint", async () => {
+    process.env["PASEO_BM_HOME"] = "relative/bm";
+    const logs: string[] = [];
+    try {
+      const endpoint = startAgentTools({ log: (line) => logs.push(line) });
+      await endpoint.ready;
+      expect(endpoint.urlFor("worker")).toBeNull();
+    } finally {
+      delete process.env["PASEO_BM_HOME"];
+    }
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain("cannot use the paseo-bm data folder");
+    expect(logs[0]).toContain("agents write their BM-* blocks by hand.");
   });
 
   it("closes: no URL after close, also when closed before it listened", async () => {

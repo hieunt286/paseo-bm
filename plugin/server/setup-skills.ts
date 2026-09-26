@@ -17,6 +17,11 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { DashboardError } from "../shared/contracts";
+import { redactText } from "./collector";
+import { run, type ToolDeps } from "./setup-tools";
+import { updateSetupState, type SetupStateDeps } from "./setup-state";
+
 export const REQUIRED_SKILLS = [
   "feature-workflow",
   "reviewing-plan",
@@ -118,4 +123,76 @@ export function skillsStatus(deps: SkillDeps = {}): SkillsStatus {
     },
     installCommand: `npx -y skills add cuongntr/agent-skills -g -a claude-code codex -s ${REQUIRED_SKILLS.join(" ")} -y`,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Installing them (0.4.0, design §7.13.4; ADR-012 decision 5 amends ADR-003).
+// ---------------------------------------------------------------------------
+
+/**
+ * How long the third-party `skills` CLI may take. It downloads from the
+ * network, so the limit is generous; past it the run is reported as a timeout,
+ * not as a failure, because the two mean different things to the user.
+ */
+export const SKILLS_INSTALL_TIMEOUT_MS = 300_000;
+
+export type InstallSkillsDeps = SkillDeps & ToolDeps & SetupStateDeps & { log?: (line: string) => void };
+
+export interface InstallSkillsResult {
+  command: string;
+  code: number;
+  tail: string[];
+  missingBefore: SkillsStatus["missingRequired"];
+  missingAfter: SkillsStatus["missingRequired"];
+}
+
+/**
+ * Runs the `skills` CLI once, with the command the Setup screen showed.
+ *
+ * The plugin still never writes a skill folder itself (ADR-003): the only
+ * thing that changes anything there is the CLI process the user chose to run,
+ * and the command is a constant built from `REQUIRED_SKILLS` — nothing from the
+ * request reaches the shell. What ADR-012 changed is only WHO starts it: a
+ * button here instead of the retired installer.
+ */
+export async function installSkills(deps: InstallSkillsDeps = {}): Promise<InstallSkillsResult> {
+  const before = skillsStatus(deps);
+  if (before.missingRequired.claude === 0 && before.missingRequired.codex === 0) {
+    throw new DashboardError(
+      "E_SKILLS_PRESENT",
+      "Claude Code and Codex already have every skill the roles need; nothing was run",
+    );
+  }
+
+  const command = before.installCommand;
+  const exec = deps.run ?? run;
+  const env = deps.env ?? process.env;
+  // A login shell, so the CLI sees the user's usual PATH (node, npx).
+  const result = await exec(env.SHELL?.endsWith("zsh") ? "/bin/zsh" : "/bin/bash", ["-lc", command], SKILLS_INSTALL_TIMEOUT_MS);
+  const timedOut = result.timedOut === true;
+  const tail = redactText(result.output, env)
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .slice(-40);
+  const outcome = timedOut ? "timeout" : result.code === 0 ? "ok" : "failed";
+
+  try {
+    updateSetupState({ skillsRun: { at: new Date().toISOString(), command, code: result.code, outcome } }, deps);
+  } catch (error) {
+    // Only shown on Setup; the skills are installed or not either way.
+    (deps.log ?? ((line: string) => console.warn(line)))(
+      `[paseo-bm] could not record the skills run: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  if (outcome !== "ok") {
+    throw new DashboardError(
+      "E_SKILLS_INSTALL_FAILED",
+      timedOut
+        ? `\`${command}\` did not finish within ${SKILLS_INSTALL_TIMEOUT_MS / 1000} seconds: ${tail.slice(-3).join(" | ")}`
+        : `\`${command}\` exited with ${result.code}: ${tail.slice(-3).join(" | ")}`,
+    );
+  }
+
+  return { command, code: result.code, tail, missingBefore: before.missingRequired, missingAfter: skillsStatus(deps).missingRequired };
 }

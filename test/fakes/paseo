@@ -37,7 +37,17 @@
  *                        fails with that reason, and the entry stays
  *                        configured with status "failed" (Paseo 0.8 writes the
  *                        entry before starting the plugin and keeps it);
- *                      - remove deletes the entry, and fails when there is none.
+ *                      - add (0.4.0) installs `npm:<package>@<version>` and
+ *                        records installation.identity = { kind: "npm",
+ *                        packageName, pluginPath: "." }; "addFailures":
+ *                        { "<source>": "<reason>" } makes one fail, leaving the
+ *                        entry configured with status "failed"; "addStatus"
+ *                        sets the status of a successful one.
+ *                      - a plugin entry may carry "identity", which `ls`
+ *                        reports as installation.identity.
+ *                      - remove deletes the entry, and fails when there is
+ *                        none, or with the reason in "removeFailures":
+ *                        { "<id>": "<reason>" }, changing nothing.
  *                      - reload <id> (bm-i52) fails when the id is not
  *                        configured, or with the reason in
  *                        "reloadFailures": { "<id>": "<reason>" } (status
@@ -67,18 +77,30 @@ if (process.env.BM_FAKE_TOUCH) {
   fs.writeFileSync(process.env.BM_FAKE_TOUCH, "the fake CLI ran\n");
 }
 
-if (process.env.BM_FAKE_STATE && argv[0] === "plugin" && ["ls", "install", "remove", "reload"].includes(argv[1])) {
+if (process.env.BM_FAKE_STATE && argv[0] === "plugin" && ["ls", "install", "add", "remove", "reload"].includes(argv[1])) {
   const statePath = process.env.BM_FAKE_STATE;
   const state = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, "utf8")) : {};
   state.plugins = state.plugins || {};
   const save = () => fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
+  /** `npm:paseo-bm-plugin@0.4.0` -> `paseo-bm-plugin`. */
+  const packageOf = (source) => {
+    const bare = source.startsWith("npm:") ? source.slice(4) : source;
+    const at = bare.lastIndexOf("@");
+    return at > 0 ? bare.slice(0, at) : bare;
+  };
   const fail = (message) => {
     process.stdout.write(
       JSON.stringify({ error: { name: "DaemonRpcError", code: "handler_error", message: `Request failed: ${message}` } }) + "\n",
     );
     process.exit(1);
   };
-  const summary = (id) => ({ id, path: state.plugins[id].path, enabled: true, status: state.plugins[id].status });
+  const summary = (id) => {
+    const entry = state.plugins[id];
+    const base = { id, path: entry.path, enabled: true, status: entry.status };
+    // Paseo 0.9 describes where a plugin came from; 0.8 does not, and a
+    // directory install of any version may leave it out (design §4.3).
+    return entry.identity === undefined ? base : { ...base, installation: { identity: entry.identity } };
+  };
 
   if (argv[1] === "ls") {
     const pending = state.pendingStatuses || {};
@@ -107,6 +129,29 @@ if (process.env.BM_FAKE_STATE && argv[0] === "plugin" && ["ls", "install", "remo
     process.stdout.write(JSON.stringify(summary(id)));
     process.exit(0);
   }
+  if (argv[1] === "add") {
+    // `paseo plugin add npm:<package>@<version> --id <id> --json`.
+    const source = argv[2] ?? "";
+    const idAt = argv.indexOf("--id");
+    const id = idAt >= 0 ? argv[idAt + 1] : "paseo-bm";
+    if (state.plugins[id]) {
+      fail(`Plugin ID "${id}" is already configured; choose another ID with --id`);
+    }
+    const failure = (state.addFailures || {})[source];
+    if (failure !== undefined) {
+      state.plugins[id] = { path: source, status: "failed", identity: { kind: "npm", packageName: packageOf(source), pluginPath: "." } };
+      save();
+      fail(failure);
+    }
+    state.plugins[id] = {
+      path: source,
+      status: state.addStatus || state.status || "running",
+      identity: { kind: "npm", packageName: packageOf(source), pluginPath: "." },
+    };
+    save();
+    process.stdout.write(JSON.stringify(summary(id)));
+    process.exit(0);
+  }
   if (argv[1] === "reload") {
     const id = argv[2];
     if (!state.plugins[id]) {
@@ -127,6 +172,10 @@ if (process.env.BM_FAKE_STATE && argv[0] === "plugin" && ["ls", "install", "remo
   const id = argv[2];
   if (!state.plugins[id]) {
     fail(`Plugin "${id}" is not configured`);
+  }
+  const removeFailure = (state.removeFailures || {})[id];
+  if (removeFailure !== undefined) {
+    fail(removeFailure);
   }
   delete state.plugins[id];
   save();

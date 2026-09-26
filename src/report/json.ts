@@ -15,8 +15,8 @@
 import { DIAGNOSTICS } from "../errors.js";
 import { createJsonRedactor } from "../redact.js";
 import type { Redactor } from "../redact.js";
-import { REPORT_SCHEMA_VERSION, isConfigAction, isDoctorReport } from "../action.js";
-import type { Action, Check, JsonObject, JsonValue, Report, ReportWarning, SkillsReport } from "../action.js";
+import { REPORT_SCHEMA_VERSION, isMigrateReport, isPluginAction } from "../action.js";
+import type { Action, JsonObject, JsonValue, Report, ReportWarning, SkillsReport } from "../action.js";
 
 /** Anything that accepts text: `process.stdout.write`, a test buffer, a pipe. */
 export type OutputWriter = (chunk: string) => void;
@@ -52,13 +52,21 @@ export function toJsonDocument(report: Report): JsonObject {
     },
   };
 
-  // doctor reports findings; install and uninstall report a plan. Exactly one
-  // of the two keys is present, so a consumer cannot read an empty plan as "no
-  // work" when it is really looking at a health check.
-  if (isDoctorReport(report)) {
-    document.checks = report.checks.map(checkToJson);
-  } else {
-    document.actions = report.actions.map(actionToJson);
+  document.actions = report.actions.map(actionToJson);
+
+  // The migration is the one command whose outcome is not readable from the
+  // actions alone: "the plugin was switched" and "the switch failed and the old
+  // one is back" look the same from a list of files.
+  if (isMigrateReport(report)) {
+    document.migration = {
+      outcome: report.migration.outcome,
+      from: report.migration.from,
+      to: report.migration.to,
+      fallback:
+        report.migration.fallback === null
+          ? null
+          : { outcome: report.migration.fallback.outcome, detail: report.migration.fallback.detail },
+    };
   }
 
   document.roles = report.roles.map((role) => ({
@@ -90,26 +98,14 @@ function actionToJson(action: Action): JsonObject {
     target: action.target,
     reason: action.reason,
   };
-  if (isConfigAction(action)) {
+  if (isPluginAction(action)) {
     base.from = action.from;
     base.to = action.to;
-    if (action.consent !== undefined) {
-      base.consent = action.consent;
-    }
   }
   if (action.detail !== undefined) {
     base.detail = action.detail;
   }
   return base;
-}
-
-function checkToJson(check: Check): JsonObject {
-  return {
-    id: check.id,
-    severity: check.severity,
-    message: check.message,
-    remediation: check.remediation,
-  };
 }
 
 function skillsToJson(skills: SkillsReport): JsonObject {
@@ -133,7 +129,8 @@ function skillsToJson(skills: SkillsReport): JsonObject {
  * Warnings carry only a code; the wording comes from the registry, so two runs
  * can never describe the same code differently. The rendered shape is exactly
  * the `{ code, message }` of Design §4.4 — the remediation text stays in the
- * registry, where `doctor`'s `checks[]` and the human report read it from.
+ * registry, which is where `src/preflight.ts` reads it from when a warning
+ * becomes a line a human has to act on.
  */
 function warningToJson(warning: ReportWarning): JsonObject {
   const entry = DIAGNOSTICS[warning.code];

@@ -21,6 +21,7 @@
  * 7. A creation that fails records `failed` and returns
  *    `E_FALLBACK_CREATE_FAILED`, never back to `pending`.
  */
+import { unusableDataHomeMessage } from "./data-home";
 import { peersOfWorkspace } from "./chat-peers";
 import { createLocationResolver, resolveLocationFromPaseo } from "./collector";
 import { bmAgentsOf, type DashboardPaseo } from "./dashboard-rpc";
@@ -92,7 +93,7 @@ export function createManagerSwitch(deps: ManagerSwitchDeps = {}): FallbackActio
   return async (incident, paseo, rpcDeps: FallbackRpcDeps) => {
     const now = rpcDeps.now ?? deps.now ?? (() => new Date());
     const home = rpcDeps.home ?? null;
-    if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", "paseo-bm cannot find its install home");
+    if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", `${unusableDataHomeMessage()}; see Setup`);
     if (incident.role !== "manager") throw new DashboardError("E_FALLBACK_NO_CANDIDATE", `not a Manager incident (${incident.role})`);
 
     // 1. Still pending, with a candidate, and the old Manager not replaced yet.

@@ -10,9 +10,8 @@ import {
   redactArgv,
   redactText,
 } from "../src/redact.js";
-import { renderHumanReport } from "../src/report/human.js";
 import { renderJsonReport } from "../src/report/json.js";
-import type { PlanReport, Report } from "../src/action.js";
+import type { MigrateReport, Report } from "../src/action.js";
 
 /**
  * The value used as a stand-in for a real credential. Long and distinctive so a
@@ -25,15 +24,15 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-function planReport(overrides: Partial<PlanReport> = {}): Report {
-  const base: PlanReport = {
+function planReport(overrides: Partial<MigrateReport> = {}): Report {
+  const base: MigrateReport = {
     schemaVersion: 1,
-    command: "install",
+    command: "migrate",
     mode: "preview",
     paseoBmVersion: "0.1.0",
     paseo: {
-      cliVersion: "0.8.0",
-      daemonVersion: "0.8.0",
+      cliVersion: "0.9.2",
+      daemonVersion: "0.9.2",
       home: "/fake/home/.paseo",
       pluginsEnabled: false,
     },
@@ -41,10 +40,10 @@ function planReport(overrides: Partial<PlanReport> = {}): Report {
       {
         kind: "create",
         target: "installHome/plugin/0.1.0/roles/worker.md",
-        location: "install-home",
         reason: "missing",
       },
     ],
+    migration: { outcome: "migrated", from: "/fake/home/.paseo-bm/plugin/0.3.1", to: "npm:paseo-bm-plugin@0.4.0", fallback: null },
     roles: [],
     skills: null,
     warnings: [],
@@ -60,7 +59,6 @@ function reportCarrying(secret: string): Report {
       {
         kind: "create",
         target: `installHome/plugin/0.1.0/${secret}.md`,
-        location: "install-home",
         reason: "missing",
         detail: `ran: npx -y skills add repo --token ${secret}`,
       },
@@ -268,18 +266,17 @@ describe("all three channels, from one environment", () => {
    * redactor here — masking has to be what happens by default, because an
    * opt-in seam is one forgotten argument away from a leak.
    */
-  it.each(SECRET_ENV_VARS)("masks %s in the human table, the JSON document and the verbose stream", (variable) => {
+  it.each(SECRET_ENV_VARS)("masks %s in the JSON document and the verbose stream", (variable) => {
     vi.stubEnv(variable, SECRET);
     const report = reportCarrying(SECRET);
 
-    const human = renderHumanReport(report);
     const json = renderJsonReport(report);
     const verboseChunks: string[] = [];
     const verbose = createRedactingWriter((chunk) => verboseChunks.push(chunk));
     verbose(`+ paseo plugin install /tmp/x --token ${SECRET}\n`);
     verbose.flush();
 
-    for (const channel of [human, json, verboseChunks.join("")]) {
+    for (const channel of [json, verboseChunks.join("")]) {
       expect(channel).not.toContain(SECRET);
       expect(channel).toContain(REDACTED);
     }
@@ -290,7 +287,6 @@ describe("all three channels, from one environment", () => {
     vi.stubEnv("PASEO_PASSWORD", "");
     vi.stubEnv("PASEO_DAEMON_PASSWORD", "");
     const report = planReport();
-    expect(renderHumanReport(report)).toBe(renderHumanReport(report, { redact: (text) => text }));
     expect(renderJsonReport(report)).toBe(renderJsonReport(report, { redact: (text) => text }));
   });
 });

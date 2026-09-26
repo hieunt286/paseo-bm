@@ -17,6 +17,14 @@ import {
  * Codes the Technical Design §4.4 pins down. The registry may grow, but none of
  * these may disappear or change meaning inside a major version.
  */
+/**
+ * The codes 0.4.0 still has.
+ *
+ * WP-406 dropped the ones only the retired install / doctor / uninstall flow
+ * could raise (`E_BAD_SKILLS_AGENTS`, `E_BAD_ROLE_SPEC`,
+ * `E_CONFIG_CONCURRENT_WRITE`, `E_PROVIDER_UNAVAILABLE` and four of the
+ * warnings). What is left is what the migration and its preflight can report.
+ */
 const REQUIRED_CODES = [
   "E_DAEMON_UNREACHABLE",
   "E_VERSION_MISMATCH",
@@ -25,24 +33,18 @@ const REQUIRED_CODES = [
   "E_PASEO_CLI_MISSING",
   "E_PASEO_OUTPUT_UNEXPECTED",
   "E_CONFLICT",
-  "E_BAD_SKILLS_AGENTS",
-  "E_BAD_ROLE_SPEC",
-  "E_CONFIG_CONCURRENT_WRITE",
   "E_RECORD_SCHEMA_TOO_NEW",
   "E_LOCKED",
-  "E_PROVIDER_UNAVAILABLE",
   // Added by the 2026-09-15 errata to Design §4.3/§4.4.
   "E_UNSAFE_INSTALL_HOME",
   "E_PATH_ESCAPE",
   "E_SYMLINK_IN_PATH",
   "E_TARGET_NOT_WRITABLE",
   "E_PLUGIN_LOAD_FAILED",
-  "W_SKILLS_MISSING",
+  // 0.4.0: the CLI only migrates (ADR-012 decision 7).
+  "E_COMMAND_RETIRED",
+  "W_PLUGINS_DISABLED",
   "W_BEADS_CLI_MISSING",
-  "W_SKILLS_ASSIST_FAILED",
-  "W_PROVIDER_NOT_LOGGED_IN",
-  // Setup screen delta, 2026-09-16.
-  "W_BEADS_TOOLS_INSTALL_FAILED",
   "W_BEADS_VIEWER_MISSING",
 ] as const;
 
@@ -127,6 +129,21 @@ describe("diagnostic registry", () => {
       expect(key.startsWith("E_") || key.startsWith("W_"), `${key} has no E_/W_ prefix`).toBe(true);
     }
     expect(new Set(DIAGNOSTIC_CODES).size).toBe(DIAGNOSTIC_CODES.length);
+  });
+
+  it("no longer registers a code only the retired installer could raise", () => {
+    for (const gone of [
+      "E_BAD_SKILLS_AGENTS",
+      "E_BAD_ROLE_SPEC",
+      "E_CONFIG_CONCURRENT_WRITE",
+      "E_PROVIDER_UNAVAILABLE",
+      "W_SKILLS_MISSING",
+      "W_SKILLS_ASSIST_FAILED",
+      "W_PROVIDER_NOT_LOGGED_IN",
+      "W_BEADS_TOOLS_INSTALL_FAILED",
+    ]) {
+      expect(isDiagnosticCode(gone), `${gone} is still registered`).toBe(false);
+    }
   });
 
   it("classifies codes by prefix and rejects unknown ones", () => {

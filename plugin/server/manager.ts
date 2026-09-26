@@ -30,10 +30,11 @@ import { PLUGIN_VERSION } from "../shared/version";
 import { setAgentLabel, setAgentMode, type PaseoCliDeps } from "./paseo-cli";
 import { listAllAgents, roleOfAgent } from "./agent-role";
 import { providerId } from "./provider-id";
-import { AUTO_APPROVE_FEATURE, TIMED_OUT, capabilityOf, featuresFor, managerModeFor, modesFor, runPostureOf, withTimeout } from "./role-mode";
+import { AUTO_APPROVE_FEATURE, capabilityOf, featuresFor, managerModeFor, modesFor, runPostureOf } from "./role-mode";
 import { workspaceDirectory, type DashboardPaseo } from "./dashboard-rpc";
 import { readIncidents } from "./fallback-state";
-import { installHomeOf } from "./role-extras";
+import { dataHomeOf } from "./role-extras";
+import { ensureRoles, type EnsureRolesResult } from "./setup-roles";
 import { recordTools } from "./tools-check";
 
 /** Label key and value that identify a paseo-bm Manager (Technical Design §7.1). */
@@ -147,11 +148,27 @@ export interface ManagerPaseo {
     };
   };
   config: {
-    get(): Promise<{ config: { agentProfiles?: ManagerAgentProfile[] } }>;
+    get(): Promise<{
+      config: {
+        agentProfiles?: ManagerAgentProfile[];
+        /** Read by `ensureRoles` (0.4.0) to see which roles are missing. */
+        providers?: Record<string, unknown> | null;
+        /** Paseo's agent-tools switch; `false` is what the setup notice reports. */
+        mcp?: { injectIntoAgents?: unknown };
+      };
+    }>;
+    /** Used only by `ensureRoles` to create a missing role (design §7.13.2). */
+    patch?(patch: Record<string, unknown>): Promise<unknown>;
   };
-  /** Absent on a host that cannot list modes; the Manager then gets no mode of ours. */
+  /**
+   * Absent on a host that cannot list modes; the Manager then gets no mode of
+   * ours. `listAvailable` and `listModels` are what `ensureRoles` picks a new
+   * role's provider and model from.
+   */
   providers?: {
-    listModes(provider: string, options?: { cwd?: string }): Promise<unknown>;
+    listModes?(provider: string, options?: { cwd?: string }): Promise<unknown>;
+    listAvailable?(): Promise<unknown>;
+    listModels?(provider: string): Promise<unknown>;
   };
 }
 
@@ -171,9 +188,9 @@ export interface EnsureManagerDeps {
    */
   workspaceDirectory?: (workspaceId: string) => Promise<string | null>;
   /**
-   * The install home, whose `role-fallback-state.json` names the replaced
-   * Managers (delta 20260921 §4.5.2); `null` means none. Looked up within the
-   * lookup budget when absent; tests pass one.
+   * The data folder, whose `role-fallback-state.json` names the replaced
+   * Managers (delta 20260921 §4.5.2); `null` means none. Looked up when absent;
+   * tests pass one.
    */
   home?: string | null;
 }
@@ -198,6 +215,12 @@ export interface EnsureManagerResult {
    * §4.2.4); `null` otherwise, and always for an existing Manager.
    */
   toolsNotice: string | null;
+  /**
+   * What this machine still needs, in one line: the roles this call created
+   * with defaults, and Paseo's agent-tools switch being off (design §7.3).
+   * `null` when there is nothing to say, which is the usual case.
+   */
+  setupNotice: string | null;
 }
 
 /** A Manager is live when it is neither archived nor closed. */
@@ -243,25 +266,22 @@ export async function findLiveManagers(
       isLive(agent) &&
       agent.labels?.[REPLACED_BY_LABEL] === undefined,
   );
-  const replaced = live.length === 0 ? new Set<string>() : await replacedManagerIds(paseo, lookup);
+  const replaced = live.length === 0 ? new Set<string>() : replacedManagerIds(lookup);
   return live
     .filter((agent) => !replaced.has(agent.id))
     .sort((a, b) => Number(labelledManager(b)) - Number(labelledManager(a)) || newestFirst(a, b));
 }
 
 /**
- * The `agentId` of every `switched` Manager incident in the install home's
- * `role-fallback-state.json` (delta 20260921 §4.5.2). Empty when the home is
- * not found within the lookup budget or the file cannot be used; the
- * `bm.replacedBy` label still applies then. Never throws.
+ * The `agentId` of every `switched` Manager incident in the data folder's
+ * `role-fallback-state.json` (delta 20260921 §4.5.2). Empty when there is no
+ * data folder or the file cannot be used; the `bm.replacedBy` label still
+ * applies then. Never throws.
  */
-async function replacedManagerIds(
-  paseo: ManagerPaseo,
-  lookup: { home?: string | null; log?: (message: string) => void },
-): Promise<Set<string>> {
+function replacedManagerIds(lookup: { home?: string | null; log?: (message: string) => void }): Set<string> {
   try {
-    const home = lookup.home !== undefined ? lookup.home : await withTimeout(installHomeOf(paseo));
-    if (home === null || home === TIMED_OUT) return new Set();
+    const home = lookup.home !== undefined ? lookup.home : dataHomeOf();
+    if (home === null) return new Set();
     return new Set(
       readIncidents(home, lookup.log)
         .incidents.filter((incident) => incident.role === "manager" && incident.status === "switched")
@@ -293,6 +313,65 @@ function startedBroken(snapshot: ManagerAgentSnapshot | null): boolean {
 }
 
 /**
+ * Creates whatever of the three roles is missing, and turns every failure into
+ * the one error this RPC speaks.
+ *
+ * A failure here stops the Manager being created on purpose: without its
+ * profile there is nothing to create, and a half-set-up machine that silently
+ * produced an agent on some other provider would be worse than a sentence
+ * telling the user where to look.
+ */
+async function ensureRolesFor(paseo: ManagerPaseo, log?: (message: string) => void): Promise<EnsureRolesResult> {
+  let ensured: EnsureRolesResult;
+  try {
+    ensured = await ensureRoles(paseo, log === undefined ? {} : { log });
+  } catch (error) {
+    throw new ManagerEnsureError(
+      "E_PROVIDER_UNAVAILABLE",
+      `paseo-bm could not create its roles (${error instanceof Error ? error.message : String(error)}). Open Beads Manager → Setup to see what is missing.`,
+    );
+  }
+  if (ensured.skipped === "cleaned-up") {
+    throw new ManagerEnsureError(
+      "E_PROVIDER_UNAVAILABLE",
+      'paseo-bm\'s settings were removed. Open Beads Manager → Setup and choose "Set up again", or remove the plugin with: paseo plugin remove paseo-bm',
+    );
+  }
+  return ensured;
+}
+
+/**
+ * The one line the launcher shows under the Manager, or `null`.
+ *
+ * Two sentences, in this order, each only when it is true. The roles sentence
+ * is about what THIS call just did; the agent-tools one is checked on every
+ * call, because the switch is Paseo's and the user can turn it off at any time
+ * — and with it off the Manager cannot create a Worker at all.
+ */
+async function setupNoticeFor(paseo: ManagerPaseo, ensured: EnsureRolesResult): Promise<string | null> {
+  const sentences: string[] = [];
+  if (ensured.created.length > 0 && ensured.baseProvider !== null && ensured.model !== null) {
+    sentences.push(
+      `paseo-bm created its roles with defaults (${ensured.baseProvider} · ${ensured.model}). Change them in Setup → Agents.`,
+    );
+  }
+  if (await agentToolsOff(paseo)) {
+    sentences.push("Paseo's agent tools are off, so the Manager may not be able to create a Worker. Allow them in Setup.");
+  }
+  return sentences.length === 0 ? null : sentences.join(" ");
+}
+
+/** True only when Paseo says the switch is off; a config it cannot read says nothing. */
+async function agentToolsOff(paseo: ManagerPaseo): Promise<boolean> {
+  try {
+    const { config } = await paseo.config.get();
+    return (config as { mcp?: { injectIntoAgents?: unknown } }).mcp?.injectIntoAgents === false;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Handler body of `manager.ensure`.
  *
  * Throws `ManagerEnsureError` (`E_PROVIDER_UNAVAILABLE`) when the Manager cannot
@@ -307,6 +386,11 @@ export async function ensureManager(
   const { paseo } = deps;
   const { workspaceId } = input;
 
+  // Opening the Manager is one of the two moments a machine gets set up (the
+  // other is the Setup screen). The plugin has no install hook — `contribute()`
+  // has no Paseo handle — so this is where a paseo.cafe install gets its roles.
+  const ensured = await ensureRolesFor(paseo, deps.log);
+
   const [chosen, ...others] = await findLiveManagers(paseo, workspaceId, { home: deps.home, log: deps.log });
   if (chosen) {
     return {
@@ -317,6 +401,7 @@ export async function ensureManager(
       // mode they chose: paseo-bm never switches it (delta 20260918g §4.3).
       modeNotice: labelledManager(chosen) ? await switchOnce(chosen, deps) : null,
       toolsNotice: null,
+      setupNotice: await setupNoticeFor(paseo, ensured),
     };
   }
 
@@ -325,7 +410,7 @@ export async function ensureManager(
   if (!profile) {
     throw new ManagerEnsureError(
       "E_PROVIDER_UNAVAILABLE",
-      `agent profile "${MANAGER_PROFILE_ID}" is not registered on this daemon; re-run \`npx paseo-bm\` to register the roles.`,
+      `agent profile "${MANAGER_PROFILE_ID}" is not registered on this daemon; open Beads Manager → Setup to see what is missing.`,
     );
   }
 
@@ -379,7 +464,14 @@ export async function ensureManager(
     readInstructions: deps.readInstructions,
     version: deps.version,
   });
-  return { agentId: created.agentId, created: true, otherManagerIds: [], modeNotice: null, toolsNotice: created.toolsNotice };
+  return {
+    agentId: created.agentId,
+    created: true,
+    otherManagerIds: [],
+    modeNotice: null,
+    toolsNotice: created.toolsNotice,
+    setupNotice: await setupNoticeFor(paseo, ensured),
+  };
 }
 
 /** What `createManager` creates; the caller has already decided the provider, mode and thinking. */

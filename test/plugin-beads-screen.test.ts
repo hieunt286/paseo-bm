@@ -185,7 +185,6 @@ describe("list and get handlers", () => {
   it("list names the Worker of an in-progress bead from the trace store", async () => {
     const home = join(workspace, "bm-home");
     mkdirSync(home, { recursive: true });
-    writeFileSync(join(home, "install.json"), JSON.stringify({ schemaVersion: 1 }));
     await appendRecord({ tracesDir: join(home, "traces") }, {
       v: TRACE_STORE_SCHEMA_VERSION, kind: "turn", at: "2026-09-16T10:00:00.000Z", workspaceId: WS, agentId: "w1",
       role: "worker", turnId: "t1", requestId: "req-A", parentAgentId: null, agentCreatedAt: null, startedAt: null,
@@ -194,7 +193,16 @@ describe("list and get handlers", () => {
     });
     clearTraceStoreCache();
     const paseo = fakePaseo();
-    paseo.config.get = vi.fn(async () => ({ config: { plugins: { "paseo-bm": { source: "directory", path: join(home, "plugin", "0.2.0") } } } }));
+    // From 0.4.0 the store is found with `resolveDataHome` (design §5.1), not
+    // through the plugin path Paseo registered.
+    const listWithStore = async () => {
+      process.env["PASEO_BM_HOME"] = home;
+      try {
+        return await handleBeadsList({ workspaceId: WS }, paseo);
+      } finally {
+        delete process.env["PASEO_BM_HOME"];
+      }
+    };
     // A daemon answers a bm.role=worker query with agents that carry that label.
     paseo.agents.list = vi.fn(async ({ filter }: { filter: { labels?: Record<string, string> } }) => ({
       entries:
@@ -202,7 +210,7 @@ describe("list and get handlers", () => {
           ? [{ id: "w1", workspaceId: WS, status: "idle", title: "Worker for C", labels: { "bm.role": "worker" } }]
           : [],
     })) as never;
-    const list = await handleBeadsList({ workspaceId: WS }, paseo, { homedir: () => join(workspace, "no-home") });
+    const list = await listWithStore();
     expect(list.beads.find((row) => row.id === "demo-c")?.work?.started).toEqual({
       agentId: "w1", at: "2026-09-16T09:30:00.000Z", title: "Worker for C", status: "idle",
     });

@@ -655,7 +655,7 @@ function QuestionForm({
         <Pressable accessibilityRole="button" accessibilityState={{ disabled: off }} disabled={off} onPress={() => onChange({})} style={styles.secondaryButton}>
           <Text style={styles.secondaryButtonText}>Clear</Text>
         </Pressable>
-        {/* Saved in the install home: the card stays answered after a reload (Q16 a). */}
+        {/* Saved in the data folder: the card stays answered after a reload (Q16 a). */}
         <Pressable
           accessibilityRole="button"
           accessibilityState={{ disabled: marking }}

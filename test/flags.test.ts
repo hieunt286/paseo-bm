@@ -13,26 +13,12 @@ import type { CommandName, FlagSpec, ParsedCommandLine } from "../src/flags.js";
  * here and a row in FLAG_SPECS disagree, the published command line changed.
  */
 const DESIGN_FLAG_TABLE: readonly (readonly [string, readonly CommandName[]])[] = [
-  ["--apply", ["install", "uninstall"]],
-  ["--yes", ["install", "uninstall"]],
-  ["--enable-plugins", ["install"]],
-  ["--install-skills", ["install"]],
-  // Setup screen delta, 2026-09-16 (owner decision: installs missing br / bv).
-  ["--install-beads-tools", ["install"]],
-  ["--skills-agents", ["install", "doctor"]],
-  ["--role", ["install"]],
-  ["--reconfigure", ["install"]],
-  ["--skip-skills-check", ["install", "doctor"]],
-  ["--force", ["install", "uninstall"]],
-  ["--ask-skills-again", ["install"]],
-  ["--restore-backups", ["uninstall"]],
-  ["--prune", ["install"]],
-  ["--home", ["install", "doctor", "uninstall"]],
-  ["--paseo-home", ["install", "doctor", "uninstall"]],
-  ["--claude-home", ["install", "doctor", "uninstall"]],
-  ["--codex-home", ["install", "doctor", "uninstall"]],
-  ["--json", ["install", "doctor", "uninstall"]],
-  ["--verbose", ["install", "doctor", "uninstall"]],
+  ["--apply", ["migrate", "install"]],
+  ["--yes", ["migrate", "install"]],
+  ["--home", ["migrate", "install"]],
+  ["--paseo-home", ["migrate", "install"]],
+  ["--json", ["migrate", "install"]],
+  ["--verbose", ["migrate", "install"]],
 ];
 
 function expectOk(argv: readonly string[]): ParsedCommandLine {
@@ -121,25 +107,12 @@ describe("parseCommandLine — every registered flag", () => {
   }
 
   it("defaults every unset flag to a falsy, empty value", () => {
-    const parsed = expectOk(["doctor"]);
+    const parsed = expectOk(["migrate"]);
     expect(parsed.flags).toEqual({
       apply: false,
       yes: false,
-      enablePlugins: false,
-      installSkills: false,
-      installBeadsTools: false,
-      skillsAgents: undefined,
-      role: [],
-      reconfigure: false,
-      skipSkillsCheck: false,
-      force: false,
-      askSkillsAgain: false,
-      restoreBackups: false,
-      prune: false,
       home: undefined,
       paseoHome: undefined,
-      claudeHome: undefined,
-      codexHome: undefined,
       json: false,
       verbose: false,
     });
@@ -148,14 +121,15 @@ describe("parseCommandLine — every registered flag", () => {
 
 describe("parseCommandLine — commands", () => {
   it("routes an explicit command", () => {
-    const parsed = expectOk(["uninstall", "--apply"]);
-    expect(parsed.command).toBe("uninstall");
+    const parsed = expectOk(["install", "--apply"]);
+    expect(parsed.command).toBe("install");
     expect(parsed.explicitCommand).toBe(true);
   });
 
-  it("treats a bare invocation as the install wizard", () => {
+  // 0.4.0 does one thing, so a bare `paseo-bm` is the migration.
+  it("treats a bare invocation as migrate", () => {
     const parsed = expectOk([]);
-    expect(parsed.command).toBe("install");
+    expect(parsed.command).toBe("migrate");
     expect(parsed.explicitCommand).toBe(false);
   });
 
@@ -167,15 +141,15 @@ describe("parseCommandLine — commands", () => {
     expect(expectUsageError(["install", "doctor"])).toContain("Unexpected argument");
   });
 
-  it("rejects an uninstall-only flag on the bare wizard", () => {
+  it("rejects a flag that no longer exists", () => {
     expect(expectUsageError(["--restore-backups"])).toContain("--restore-backups");
   });
 });
 
 describe("parseCommandLine — flag syntax", () => {
   it("accepts both --flag value and --flag=value", () => {
-    expect(expectOk(["install", "--skills-agents", "claude,codex"]).flags.skillsAgents).toBe("claude,codex");
-    expect(expectOk(["install", "--skills-agents=claude"]).flags.skillsAgents).toBe("claude");
+    expect(expectOk(["migrate", "--home", "/opt/bm"]).flags.home).toBe("/opt/bm");
+    expect(expectOk(["migrate", "--home=/opt/bm"]).flags.home).toBe("/opt/bm");
   });
 
   it("rejects an unknown flag", () => {
@@ -195,11 +169,6 @@ describe("parseCommandLine — flag syntax", () => {
     expect(expectOk(["install", "--home=-weird"]).flags.home).toBe("-weird");
   });
 
-  it("collects --role repeatedly and does not validate its format here", () => {
-    const parsed = expectOk(["install", "--role", "worker=codex/gpt-5.6-sol", "--role=reviewer=nonsense"]);
-    expect(parsed.flags.role).toEqual(["worker=codex/gpt-5.6-sol", "reviewer=nonsense"]);
-  });
-
   it("lets the last occurrence of a single-value flag win", () => {
     expect(expectOk(["install", "--home", "/a", "--home", "/b"]).flags.home).toBe("/b");
   });
@@ -214,8 +183,8 @@ describe("parseCommandLine — help and version", () => {
   });
 
   it("carries the command as the help topic", () => {
-    expect(expectOk(["uninstall", "--help"]).helpTopic).toBe("uninstall");
-    expect(expectOk(["-h", "doctor"]).helpTopic).toBe("doctor");
+    expect(expectOk(["install", "--help"]).helpTopic).toBe("install");
+    expect(expectOk(["-h", "migrate"]).helpTopic).toBe("migrate");
   });
 
   it("reports --version, and prefers --help when both appear", () => {

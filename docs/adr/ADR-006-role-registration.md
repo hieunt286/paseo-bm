@@ -6,7 +6,7 @@
 | Date | 2026-09-15 |
 | Owner | hieu.nt10 |
 | Liên quan | [PRD REQ-027, REQ-031, REQ-032](../product/paseo-bm-prd.md#6-functional-requirements) · [ADR-004](ADR-004-paseo-config-mutation.md) (mở rộng phạm vi) · [ADR-005](ADR-005-manager-as-agent.md) · [Technical Design](../design/paseo-bm.md) |
-| Sửa đổi bởi | [ADR-008](ADR-008-role-settings-written-by-plugin.md), quyết định 1 và 5 (Accepted 2026-09-22) |
+| Sửa đổi bởi | [ADR-008](ADR-008-role-settings-written-by-plugin.md), quyết định 1 và 5 (Accepted 2026-09-22) · [ADR-012](ADR-012-plugin-is-the-product.md) (2026-09-25), quyết định 1, 4, 6, 7, 8: plugin (không phải trình cài) tạo alias và profile còn thiếu với mặc định, không hỏi; cấp tool Paseo cho agent là một nút riêng có cảnh báo trên Setup, không gộp với bật plugin; chỉ dẫn vai nhúng trong gói, không hash; gỡ bằng nút "Remove paseo-bm's settings"; trạng thái trước của `injectIntoAgents` ghi ở `ui/setup-state.json` dạng boolean |
 
 ## Context
 

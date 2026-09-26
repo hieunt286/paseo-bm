@@ -23,8 +23,10 @@
  * Steps 1 and 3 only narrow that window to one handler's round trip.
  *
  * Scope (ADR-008 D2): provider ids must start with `bm-`; profiles only
- * `bm-manager`, `bm-worker`, `bm-reviewer`, and only when they already exist —
- * creating a role is the installer's job. The SDK view is flat (design F12):
+ * `bm-manager`, `bm-worker`, `bm-reviewer`, and only when they already exist.
+ * Creating one is `createRoleEntries` below — a separate path on purpose, so a
+ * settings save can never bring a role into being as a side effect. The SDK
+ * view is flat (design F12):
  * `config.providers` is `agents.providers`, `config.agentProfiles` is
  * `daemon.agentProfiles`. Never calls `paseo daemon reload`, never touches the
  * file itself.
@@ -36,6 +38,8 @@ import { DashboardError } from "../shared/contracts";
 export interface RoleConfigView {
   providers?: Record<string, unknown> | null;
   agentProfiles?: ReadonlyArray<Record<string, unknown>> | null;
+  /** Paseo's machine-wide agent-tools switch; see `setAgentTools`. */
+  mcp?: { injectIntoAgents?: boolean } | null;
 }
 
 /** The SDK slice this module uses; `PaseoApi` is structurally assignable. */
@@ -124,16 +128,16 @@ function checkScope(write: RoleConfigWrite, config: RoleConfigView): void {
   }
   for (const id of Object.keys(write.providers ?? {})) {
     if (ROLE_PROFILE_IDS.includes(id) && !Object.prototype.hasOwnProperty.call(providers, id)) {
-      throw invalid(`provider "${id}" is not registered; run npx paseo-bm install first`);
+      throw invalid(`provider "${id}" is not registered; open Beads Manager → Setup, which creates it`);
     }
   }
   for (const id of write.removeProviders ?? []) {
-    if (ROLE_PROFILE_IDS.includes(id)) throw invalid(`provider "${id}" belongs to the installer and is never removed by the plugin`);
+    if (ROLE_PROFILE_IDS.includes(id)) throw invalid(`provider "${id}" is a main role; only "Remove paseo-bm's settings" on Setup removes it`);
   }
   const profiles = Array.isArray(config.agentProfiles) ? config.agentProfiles : [];
   for (const id of Object.keys(write.profiles ?? {})) {
     if (!ROLE_PROFILE_IDS.includes(id)) throw invalid(`the plugin only edits the bm-manager, bm-worker and bm-reviewer profiles, not "${id}"`);
-    if (!profiles.some((entry) => entry?.id === id)) throw invalid(`profile "${id}" is not registered; run npx paseo-bm install first`);
+    if (!profiles.some((entry) => entry?.id === id)) throw invalid(`profile "${id}" is not registered; open Beads Manager → Setup, which creates it`);
   }
 }
 
@@ -218,5 +222,184 @@ export function writeRoleConfig(paseo: ConfigPaseo, write: RoleConfigWrite): Pro
       throw new DashboardError("E_ROLE_SETTINGS_WRITE_FAILED", `Paseo did not keep the saved values (${missing.join(", ")})`);
     }
     return { revision: after.revision, config: after.config };
+  });
+}
+
+/**
+ * Creates the missing main-role entries, and only those (ADR-012 decision 4,
+ * design §7.13.2).
+ *
+ * This is the one path that may bring a `bm-manager`, `bm-worker` or
+ * `bm-reviewer` entry into being, and it is deliberately not part of
+ * `writeRoleConfig`: a settings save must never create a role as a side effect,
+ * and creation carries no `expectedRevision` because nobody showed the user
+ * anything to be stale about — it runs when a role is absent, which is a fact
+ * about the config, not about a screen.
+ *
+ * An entry that already exists is never touched, whatever it holds. Paseo's
+ * configuration is the source of truth (ADR-008 decision 5): a user who changed
+ * the Worker's model or its provider keeps that change.
+ */
+export interface CreateRoleEntriesResult extends RoleConfigWriteResult {
+  /** The role ids created, in the order of `ROLE_PROFILE_IDS`; empty when nothing was missing. */
+  created: string[];
+}
+
+export function createRoleEntries(
+  paseo: ConfigPaseo,
+  roles: Readonly<Record<string, { alias: Record<string, unknown>; profile: Record<string, unknown> }>>,
+): Promise<CreateRoleEntriesResult> {
+  return serialised(async () => {
+    const failed = (detail: string, cause?: unknown): DashboardError =>
+      new DashboardError("E_SETUP_ROLES_FAILED", detail, cause === undefined ? undefined : { cause });
+
+    for (const id of Object.keys(roles)) {
+      if (!ROLE_PROFILE_IDS.includes(id)) throw failed(`"${id}" is not one of the three main roles`);
+    }
+
+    // Read inside the lock: what is missing is decided from the config this
+    // write is built on, never from a snapshot a caller took earlier.
+    const { revision, config } = await readRoleConfig(paseo);
+    const providers = (config.providers ?? {}) as Record<string, unknown>;
+    const read = Array.isArray(config.agentProfiles) ? config.agentProfiles : [];
+
+    const newProviders: Record<string, Record<string, unknown>> = {};
+    const newProfiles: Record<string, unknown>[] = [];
+    const created: string[] = [];
+    for (const id of ROLE_PROFILE_IDS) {
+      const wanted = roles[id];
+      if (wanted === undefined) continue;
+      const hasAlias = Object.prototype.hasOwnProperty.call(providers, id);
+      const hasProfile = read.some((entry) => entry?.id === id);
+      if (hasAlias && hasProfile) continue;
+      if (!hasAlias) newProviders[id] = wanted.alias;
+      // Appended at the end, because `agentProfiles` is replaced whole and the
+      // order of everything already there must survive the write.
+      if (!hasProfile) newProfiles.push(wanted.profile);
+      created.push(id);
+    }
+    if (created.length === 0) return { revision, config, created };
+
+    const patch: Record<string, unknown> = {};
+    if (Object.keys(newProviders).length > 0) patch.providers = newProviders;
+    if (newProfiles.length > 0) patch.agentProfiles = [...read, ...newProfiles];
+
+    try {
+      await paseo.config.patch(patch);
+    } catch (error) {
+      throw failed(error instanceof Error ? error.message : String(error), error);
+    }
+
+    // Read back: the entries written are there as written, and nothing else in
+    // the array moved. A mismatch is reported, never patched over — a second
+    // write would replace the array again on top of whatever went wrong.
+    const after = await readRoleConfig(paseo);
+    const missing = missingFromReadBack({ expectedRevision: revision, providers: newProviders }, after.config);
+    const afterProfiles = Array.isArray(after.config.agentProfiles) ? after.config.agentProfiles : [];
+    for (const profile of newProfiles) {
+      const id = profile.id as string;
+      if (!afterProfiles.some((entry) => contains(entry, profile))) missing.push(`profile ${id}`);
+    }
+    for (const [index, entry] of read.entries()) {
+      if (!contains(afterProfiles[index], entry)) missing.push(`profile ${index + 1} of the ones already there`);
+    }
+    if (missing.length > 0) {
+      throw failed(`Paseo did not keep the created roles (${missing.join(", ")})`);
+    }
+    return { revision: after.revision, config: after.config, created };
+  });
+}
+
+/**
+ * Turns Paseo's machine-wide agent-tools switch on or off
+ * (`daemon.mcp.injectIntoAgents`, design §6.1).
+ *
+ * The only key outside `bm-*` the plugin ever writes, and the reason it takes
+ * its own function: the switch gives EVERY agent on the machine the power to
+ * create, message and stop other agents, not just paseo-bm's three, so it is
+ * only ever reached from a button the user pressed after a warning (§7.13.3)
+ * or from the cleanup that puts it back.
+ *
+ * Same mutex as every other write, so it cannot interleave with a role patch,
+ * and the same read-back: Paseo saying yes is not the same as Paseo keeping it.
+ */
+export function setAgentTools(paseo: ConfigPaseo, value: boolean): Promise<RoleConfigWriteResult> {
+  return serialised(async () => {
+    const failed = (detail: string, cause?: unknown): DashboardError =>
+      new DashboardError("E_SETUP_WRITE_FAILED", detail, cause === undefined ? undefined : { cause });
+
+    try {
+      await paseo.config.patch({ mcp: { injectIntoAgents: value } });
+    } catch (error) {
+      throw failed(error instanceof Error ? error.message : String(error), error);
+    }
+
+    const after = await readRoleConfig(paseo);
+    if (agentToolsIn(after.config) !== value) {
+      throw failed(`Paseo did not keep the agent tools switch (asked for ${value})`);
+    }
+    return after;
+  });
+}
+
+/** `daemon.mcp.injectIntoAgents` as the SDK view reports it; a missing key is off. */
+export function agentToolsIn(config: RoleConfigView): boolean {
+  return (config as { mcp?: { injectIntoAgents?: unknown } }).mcp?.injectIntoAgents === true;
+}
+
+export interface RemoveAllResult extends RoleConfigWriteResult {
+  removedProviders: string[];
+  removedProfiles: string[];
+}
+
+/**
+ * Removes every `bm-*` entry from Paseo's configuration in one patch
+ * (design §7.13.7, ADR-012 decision 6).
+ *
+ * Paseo has no hook that runs when a plugin is removed, so "uninstall" is a
+ * button; this is the write half of it. It takes the whole `bm-*` prefix — the
+ * three roles and every fallback alias — because a leftover alias points at a
+ * provider the user may later delete, and because a partial removal is the one
+ * outcome a person cannot easily finish by hand.
+ *
+ * `restoreAgentTools` is `null` when Paseo's switch must be left alone: it is
+ * only ever set when the setup state says paseo-bm turned it on.
+ */
+export function removeAllBmEntries(paseo: ConfigPaseo, restoreAgentTools: boolean | null): Promise<RemoveAllResult> {
+  return serialised(async () => {
+    const failed = (detail: string, cause?: unknown): DashboardError =>
+      new DashboardError("E_SETUP_WRITE_FAILED", detail, cause === undefined ? undefined : { cause });
+
+    const { revision, config } = await readRoleConfig(paseo);
+    const providers = (config.providers ?? {}) as Record<string, unknown>;
+    const read = Array.isArray(config.agentProfiles) ? config.agentProfiles : [];
+    const removedProviders = Object.keys(providers).filter(isBmId);
+    const removedProfiles = read.map((entry) => (typeof entry?.id === "string" ? entry.id : "")).filter(isBmId);
+
+    const patch: Record<string, unknown> = {};
+    if (removedProviders.length > 0) patch.removeProviders = removedProviders;
+    // Sent only when there is one to take out: the array is replaced whole, so
+    // an unnecessary send is an unnecessary chance to lose someone else's edit.
+    if (removedProfiles.length > 0) patch.agentProfiles = read.filter((entry) => !isBmId(String(entry?.id ?? "")));
+    if (restoreAgentTools !== null) patch.mcp = { injectIntoAgents: restoreAgentTools };
+    if (Object.keys(patch).length === 0) return { revision, config, removedProviders, removedProfiles };
+
+    try {
+      await paseo.config.patch(patch);
+    } catch (error) {
+      throw failed(error instanceof Error ? error.message : String(error), error);
+    }
+
+    const after = await readRoleConfig(paseo);
+    const left = Object.keys((after.config.providers ?? {}) as Record<string, unknown>).filter(isBmId);
+    const leftProfiles = (Array.isArray(after.config.agentProfiles) ? after.config.agentProfiles : [])
+      .map((entry) => String(entry?.id ?? ""))
+      .filter(isBmId);
+    const problems = [...left.map((id) => `provider ${id}`), ...leftProfiles.map((id) => `profile ${id}`)];
+    if (restoreAgentTools !== null && agentToolsIn(after.config) !== restoreAgentTools) {
+      problems.push(`the agent tools switch (asked for ${restoreAgentTools})`);
+    }
+    if (problems.length > 0) throw failed(`Paseo kept ${problems.join(", ")}`);
+    return { revision: after.revision, config: after.config, removedProviders, removedProfiles };
   });
 }

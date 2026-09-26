@@ -204,7 +204,7 @@ async function runRepresentativeInstall(): Promise<void> {
         env: {
           PATH: process.env.PATH,
           PASEO_HOME: paseoHome,
-          BM_FAKE_STDOUT: JSON.stringify({ home: paseoHome, cliVersion: "0.8.0", daemonVersion: "0.8.0" }),
+          BM_FAKE_STDOUT: JSON.stringify({ home: paseoHome, cliVersion: "0.9.2", daemonVersion: "0.9.2" }),
         },
       });
       await adapter.daemonStatus();

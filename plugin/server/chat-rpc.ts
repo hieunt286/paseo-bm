@@ -38,7 +38,7 @@ export async function handleChatPeers(
     all,
     found.workspaceId,
     workspaceRecordsReader(paseo, found.workspaceId, deps),
-    await replacementsFor(paseo, deps),
+    replacementsFor(deps),
   );
   return {
     owner: peers.find((peer) => peer.id === input.agentId) ?? null,

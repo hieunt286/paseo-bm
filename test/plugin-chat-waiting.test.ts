@@ -166,9 +166,11 @@ describe("chat.waiting", () => {
     );
     expect(result.waiting).toEqual([]);
     expect(result.fallback).toEqual([]);
-    // One for the trace store, one for the fallback incidents file (delta
-    // 20260921 §4.4.6): a second trace-store read would make it three.
-    expect(configGet).toHaveBeenCalledTimes(2);
+    // None at all from 0.4.0: the trace store and the fallback incidents file
+    // are both found with `resolveDataHome`, which reads no Paseo
+    // configuration (design §5.1). Before, this was two `config.get()` calls
+    // and a second trace-store read would have made it three.
+    expect(configGet).toHaveBeenCalledTimes(0);
   });
 
   it("gives one pill, for the live Worker, when an archived Worker has the same request (delta 20260918f F12)", async () => {

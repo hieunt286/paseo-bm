@@ -6,40 +6,45 @@
 | Cách sửa | **Tài liệu sống từ 2026-09-25.** Sửa tại chỗ để luôn mô tả trạng thái hiện tại, mỗi lần sửa thêm một dòng Revision History; git là hồ sơ kiểm toán. Không mở delta mới cho tài liệu này. |
 | Owner | hieu.nt10 (GitHub: hieunt286) |
 | Requirements source | [PRD paseo-bm](../product/paseo-bm-prd.md) |
+| Routing decision | [PRD §0](../product/paseo-bm-prd.md#0-routing-decision) (amended 2026-09-25 theo ADR-012, lane Designed); bản 0.4.0: [plan 0.4.0 §0](../plans/paseo-bm-plan-040-single-source.md#0-routing-decision) |
 | Tài liệu anh em | [Technical Design Dashboard](./paseo-bm-dashboard.md) — màn Metric, Beads, Setup, thẻ chat, pill, kho lưu vết và các RPC của chúng |
-| Related ADRs | [ADR-001](../adr/ADR-001-plugin-distribution.md) · [ADR-002](../adr/ADR-002-install-ownership-model.md) · [ADR-003](../adr/ADR-003-skills-delegation.md) · [ADR-004](../adr/ADR-004-paseo-config-mutation.md) · [ADR-005](../adr/ADR-005-manager-as-agent.md) · [ADR-006](../adr/ADR-006-role-registration.md) · [ADR-007](../adr/ADR-007-dashboard-trace-store.md) · [ADR-008](../adr/ADR-008-role-settings-written-by-plugin.md) · [ADR-009](../adr/ADR-009-payload-as-npm-package.md) · [ADR-010](../adr/ADR-010-plugin-hosted-agent-tools.md) · [ADR-011](../adr/ADR-011-manager-coordinates-workers.md) |
+| Related ADRs | [ADR-001](../adr/ADR-001-plugin-distribution.md) · [ADR-002](../adr/ADR-002-install-ownership-model.md) · [ADR-003](../adr/ADR-003-skills-delegation.md) · [ADR-004](../adr/ADR-004-paseo-config-mutation.md) · [ADR-005](../adr/ADR-005-manager-as-agent.md) · [ADR-006](../adr/ADR-006-role-registration.md) · [ADR-007](../adr/ADR-007-dashboard-trace-store.md) · [ADR-008](../adr/ADR-008-role-settings-written-by-plugin.md) · [ADR-009](../adr/ADR-009-payload-as-npm-package.md) · [ADR-010](../adr/ADR-010-plugin-hosted-agent-tools.md) · [ADR-011](../adr/ADR-011-manager-coordinates-workers.md) · [ADR-012](../adr/ADR-012-plugin-is-the-product.md) |
 | Hành vi của agent | [`plugin/roles/manager.md`](../../plugin/roles/manager.md), [`worker.md`](../../plugin/roles/worker.md), [`reviewer.md`](../../plugin/roles/reviewer.md) là nguồn sự thật duy nhất. Tài liệu này chỉ mô tả cơ chế plugin làm quanh chúng. |
-| Môi trường tham chiếu | Paseo CLI/daemon 0.8.0 (kiểm thêm 0.9.2 cho trình cài), Node ≥ 22, macOS và Linux |
+| Môi trường tham chiếu | Mã hiện có: Paseo CLI/daemon 0.8.0 (kiểm thêm 0.9.2), Node ≥ 22, macOS và Linux. **(0.4.0)** Paseo ≥ 0.9.0; plugin vẫn biên dịch với `@getpaseo/plugin`/`client`/`protocol` 0.8.0 |
 
 ## 1. Phạm vi
 
-- **Tài liệu này sở hữu:** CLI `paseo-bm` (lệnh, cờ, JSON, mã thoát, mã lỗi); thư mục cài đặt và hồ sơ; cách gọi Paseo CLI; phần paseo-bm ghi vào `config.json` (của trình cài và của plugin); đóng gói hai gói npm và quy trình phát hành; plugin server: nhận vai agent, hook tạo agent, Manager, endpoint công cụ cho agent, các thông điệp `BM-*` của plugin, kiểm mẫu khối, đếm ngân sách review, sổ hỏi–đáp, dừng agent, dự phòng khi hết hạn mức; các slash command.
-- **Không sở hữu:** câu chữ và hành vi của ba vai (thuộc `plugin/roles/*.md`); giao diện Metric/Beads/Setup, thẻ chat, pill, kho lưu vết (thuộc [Design Dashboard](./paseo-bm-dashboard.md)); chất lượng suy luận của model; nội dung skills bên thứ ba; nội bộ Paseo; thao tác git.
+- **Tài liệu này sở hữu:** đóng gói gói `paseo-bm-plugin` và quy trình phát hành; CLI chuyển đổi `paseo-bm` 0.4.0 (lệnh, cờ, JSON, mã thoát, mã lỗi); thư mục dữ liệu của plugin và các file trong đó; phần paseo-bm ghi vào `config.json`; plugin server: thiết lập máy (vai trò, tool Paseo cho agent, skills, gỡ cấu hình), nhận vai agent, hook tạo agent, Manager, endpoint công cụ cho agent, các thông điệp `BM-*` của plugin, kiểm mẫu khối, đếm ngân sách review, sổ hỏi–đáp, dừng agent, dự phòng khi hết hạn mức; các slash command.
+- **Không sở hữu:** câu chữ và hành vi của ba vai (thuộc `plugin/roles/*.md`); giao diện Metric/Beads/Setup (kể cả luồng thiết lập máy trên Setup), thẻ chat, pill, kho lưu vết (thuộc [Design Dashboard](./paseo-bm-dashboard.md)); chất lượng suy luận của model; nội dung skills bên thứ ba; nội bộ Paseo (kể cả cách Paseo tải, cập nhật và gỡ gói npm); thao tác git.
+- **Trạng thái của tài liệu.** Tới 0.3.1 sản phẩm gồm trình cài `npx paseo-bm` cộng plugin. [ADR-012](../adr/ADR-012-plugin-is-the-product.md) (2026-09-25) chốt bản đích **0.4.0**: plugin `paseo-bm-plugin` là toàn bộ sản phẩm. Các mục §2–§6 và §7.13 tả bản 0.4.0; chỗ nào tả mã hiện có mà 0.4.0 đổi thì ghi **(0.4.0)** ngay tại chỗ. Trình cài 0.3.1 (wizard, `doctor`, `uninstall`, hồ sơ sở hữu payload, sửa file `config.json` có backup) chỉ còn trong lịch sử git của file này (bản trước dòng Revision History "ADR-012").
 
 ## 2. Kiến trúc
 
 ```
-┌─ TRÌNH CÀI (npx paseo-bm) ─────────────────────────────────────────────────┐
-│ cli · preflight · planner · applier · record · paseo adapter · skills       │
-│ · roles (provider dẫn xuất + agent profile + công tắc công cụ)              │
-└───────────┬────────────────────────────────────────────────────────────────┘
-            │ ghi
+  paseo.cafe  hoặc  paseo plugin add npm:paseo-bm-plugin          (Paseo ≥ 0.9.0)
+  cập nhật:   paseo plugin update paseo-bm
+            │ Paseo tải gói vào ~/.paseo/plugins/paseo-bm/<uuid>/node_modules/paseo-bm-plugin
             ▼
-  ~/.paseo-bm/          install.json · plugin/<ver>/ · backups/ · .lock
-                        + dữ liệu người dùng: traces/ · ui/ · role-*.json
-  ~/.paseo/config.json  pluginsEnabled · agents.providers.bm-* · daemon.agentProfiles[bm-*]
-                        · daemon.mcp.injectIntoAgents
-
 ┌─ PLUGIN (chạy trong daemon) ────────────────────────────────────────────────┐
 │ client: sidebar + Command Center "Beads Manager", slash command, màn        │
-│         Metric/Beads/Setup, thẻ chat (Design Dashboard)                     │
-│ server: before("agent.create") → chỉ dẫn vai, Runtime facts, mode, công cụ  │
+│         Metric/Beads/Setup (kể cả thiết lập máy), thẻ chat (Design Dashboard)│
+│ server: thiết lập máy (§7.13) → tạo vai trò còn thiếu, cấp tool Paseo cho    │
+│                                 agent, chạy CLI skills, gỡ cấu hình          │
+│         before("agent.create") → chỉ dẫn vai, Runtime facts, mode, công cụ  │
 │         on("agent.created")    → gắn nhãn, kiểm công cụ Paseo (BM-TOOLS)    │
 │         on("agent.turn_ended") → lưu vết, BM-FORMAT, ngân sách review,      │
 │                                   sổ hỏi–đáp, dừng Reviewer, dự phòng,      │
 │                                   hàng chờ thông báo                        │
 │         RPC · endpoint MCP 127.0.0.1 (bm_report / bm_review / bm_answers)   │
 └───────────┬────────────────────────────────────────────────────────────────┘
+            │ ghi (plugin là bên ghi duy nhất)
+            ▼
+  <thư mục dữ liệu>     mặc định ~/.paseo-bm, plugin tự tạo (§5):
+                        traces/ · ui/ (gồm setup-state.json) · role-*.json
+  ~/.paseo/config.json  chỉ qua config.patch (§6): agents.providers.bm-* ·
+                        daemon.agentProfiles[bm-*] · daemon.mcp.injectIntoAgents (khi người dùng bấm)
+
+  npx paseo-bm@0.4.0    bản cuối của trình cài, chỉ chuyển bản cài thư mục sang npm (§4)
             │ tạo / nhắn / đọc trạng thái
             ▼
   người dùng ⇄ MANAGER (bm-manager) ──tạo──▶ WORKER (bm-worker) ──tạo──▶ REVIEWER (bm-reviewer)
@@ -48,24 +53,30 @@
 
 Người dùng chat được với cả Manager lẫn Worker. Agent do agent khác tạo vẫn là agent hạng nhất trong workspace (chỉ mang thêm nhãn `paseo.parent-agent-id`); người dùng mở, nhắn, dừng, lưu trữ, xoá được. Vòng đời agent thuộc người dùng (ADR-005): plugin không bao giờ lưu trữ hay xoá agent, và không có RPC nào làm việc đó. Ngoại lệ duy nhất: một Manager chính `createManager` vừa tạo mà khởi động hỏng thì đúng agent đó bị lưu trữ trước khi báo lỗi (§7.3).
 
-Plugin tồn tại vì ba việc một agent không làm được: lối vào ổn định mở đúng Manager của workspace; bảo đảm một Manager mỗi workspace; và các cơ chế cần mã (hook, đếm, kiểm mẫu, dự phòng).
+Plugin tồn tại vì ba việc một agent không làm được: lối vào ổn định mở đúng Manager của workspace; bảo đảm một Manager mỗi workspace; và các cơ chế cần mã (hook, đếm, kiểm mẫu, dự phòng). Từ 0.4.0 nó thêm việc thứ tư: tự thiết lập máy, vì không còn trình cài nào làm thay.
+
+Ba việc plugin **không** làm được (ADR-012): bật `pluginsEnabled` (plugin chưa chạy khi công tắc còn tắt — công tắc thuộc Paseo và người dùng); tự dọn khi bị gỡ (Paseo không có hook gỡ plugin); sao lưu nguyên file `config.json` (SDK chỉ trả một view, và file có thể chứa khoá của provider).
 
 ## 3. Đóng gói và phát hành
 
-### 3.1 Hai gói, một phiên bản
+### 3.1 Gói
 
-| Gói | Nội dung | Gốc tarball |
+Tới 0.3.1 mỗi lần phát hành publish hai gói cùng phiên bản (ADR-009). **(0.4.0)** Sản phẩm là một gói; `paseo-bm` 0.4.0 là lần publish cuối của trình cài:
+
+| Gói | Vai trò | Gốc tarball |
 |---|---|---|
-| `paseo-bm` | trình cài; `bin: { "paseo-bm": "dist/index.js" }`; `files: ["dist/", "plugin/", "!plugin/images/**"]` | `dist/`, `plugin/`, không có manifest plugin |
-| `paseo-bm-plugin` | payload trong `plugin/` (`plugin/package.json`) | plugin nạp được: `paseo-plugin.json`, `index.client.tsx`, `index.server.ts`, `client/`, `server/`, `shared/`, `roles/`, `tsconfig.json`, `LICENSE`, `README.md` |
+| `paseo-bm-plugin` | **Sản phẩm.** Cài bằng paseo.cafe hoặc `paseo plugin add npm:paseo-bm-plugin`, cập nhật bằng `paseo plugin update paseo-bm`, gỡ bằng `paseo plugin remove paseo-bm` sau nút gỡ cấu hình (§7.13.7). Đường cài duy nhất được hỗ trợ | plugin nạp được: `paseo-plugin.json`, `index.client.tsx`, `index.server.ts`, `client/`, `server/`, `shared/`, `roles/`, `tsconfig.json`, `LICENSE`, `README.md` |
+| `paseo-bm` | **(0.4.0)** Bản cuối, chỉ để chuyển đổi (§4); `bin: { "paseo-bm": "dist/index.js" }`; `files: ["dist/"]` (không còn `plugin/`: bản 0.4.0 không chép payload). Sau 0.4.0 không publish nữa; owner chạy `npm deprecate paseo-bm "<thông điệp>"` (cần OTP) | chỉ `dist/`, không có gì trông như plugin |
 
-- Gói payload tồn tại vì paseo.cafe quét gốc tarball npm và đòi runtime entry Paseo 0.8 ngay ở đó (ADR-009). Hồ sơ registry nằm ở repo `paseo-cafe/paseo-cafe` (`registry/paseo-bm.json`, `path: "plugin"`, `package: "paseo-bm-plugin"`).
-- `package.json`, `plugin/package.json` và `PLUGIN_VERSION` (`plugin/shared/version.ts`) luôn cùng phiên bản: `scripts/generate-plugin-version.mjs` (chạy trong `build`, nên cả trong `prepack`) ghi hai nguồn sau; một test đỏ khi ba nguồn lệch.
-- `plugin/package.json` không có `dependencies` (Paseo cấp module runtime) và **không có script `test`**: không có test nào trong `plugin/`, và một script chỉ để mục health `hasTests` xanh là kiểm tra giả. Script `typecheck` chỉ chạy được từ checkout của repo.
-- `plugin/LICENSE` là bản sao đúng từng byte của `LICENSE` gốc (gói payload là một bản phân phối riêng, MIT đòi kèm giấy phép); một test giữ hai file khớp.
-- `plugin/images/` chỉ phục vụ trang listing, không vào tarball nào; `smoke:packed` khẳng định điều đó và khẳng định gốc tarball payload có manifest cùng hai entry.
-- Gói trình cài không có phụ thuộc runtime: mọi thứ được `tsup` gói vào `dist/index.js`. Không có `preinstall` / `install` / `postinstall` (tải gói không được đổi máy người dùng); `prepack` được phép vì chạy trên máy người phát hành.
-- Chỉ có **một** `paseo-plugin.json` trong repo (`plugin/paseo-plugin.json`: `{ "id": "paseo-bm", "requirements": { "paseo": ">=0.8.0" } }`); một test khẳng định điều đó.
+Thông điệp deprecate (owner dán nguyên văn): `paseo-bm is now installed from paseo.cafe or with "paseo plugin add npm:paseo-bm-plugin" (Paseo 0.9+). If you installed it with npx before, run "npx paseo-bm@0.4.0" once to switch.`
+
+- **(0.4.0)** `plugin/paseo-plugin.json` = `{ "id": "paseo-bm", "requirements": { "paseo": ">=0.9.0" } }`: Paseo 0.8 không có nguồn npm (ADR-009 QĐ5), nên 0.8 không được hỗ trợ; người dùng 0.8 giữ `paseo-bm@0.3.1`. Chỉ có **một** `paseo-plugin.json` trong repo; một test khẳng định điều đó.
+- **Phiên bản.** `package.json` gốc vẫn là nguồn phiên bản duy nhất người sửa tay; `scripts/generate-plugin-version.mjs` (chạy trong `build`, nên cả trong `prepack`) ghi `plugin/package.json` và `PLUGIN_VERSION` (`plugin/shared/version.ts`); một test đỏ khi ba nguồn lệch. Ở 0.4.0 luật này giữ nguyên vì hai gói còn publish cùng lần. **Sau 0.4.0:** `package.json` gốc mang `"private": true` (không publish được nữa, vẫn giữ phiên bản, script build/test và devDependencies); `src/` (CLI chuyển đổi) và test của nó bị xoá ở bản kế tiếp; test đồng bộ phiên bản giữ nguyên.
+- `plugin/package.json` không có `dependencies` (Paseo cấp module runtime — với nguồn npm điều này chưa kiểm, §13 Q-045) và **không có script `test`**: không có test nào trong `plugin/`, và một script chỉ để mục health `hasTests` xanh là kiểm tra giả. Script `typecheck` chỉ chạy được từ checkout của repo. **(0.4.0)** `description`: `Beads Management for Paseo: a Beads Manager agent that hands each request to a Beads Worker, with Metric, Beads and Setup screens. Install from paseo.cafe or with "paseo plugin add npm:paseo-bm-plugin" (Paseo 0.9+).`
+- `plugin/LICENSE` là bản sao đúng từng byte của `LICENSE` gốc; một test giữ hai file khớp.
+- `plugin/images/` chỉ phục vụ trang listing, không vào tarball nào; `smoke:packed` khẳng định điều đó và khẳng định gốc tarball payload có manifest cùng hai entry. **(0.4.0)** `smoke:packed` thêm: tarball `paseo-bm` 0.4.0 chỉ có `dist/` và `package.json`, `README.md`, `LICENSE`; manifest của tarball plugin khai `>=0.9.0`.
+- Không có `preinstall` / `install` / `postinstall` ở gói nào (tải gói không được đổi máy người dùng; Paseo tự chạy `npm install` cho plugin npm); `prepack` được phép vì chạy trên máy người phát hành.
+- **Registry paseo.cafe** (`registry/paseo-bm.json` ở repo `paseo-cafe/paseo-cafe`): giữ `package: "paseo-bm-plugin"`, `path: "plugin"`. **(0.4.0)** Caveat 1–3 (đang nói `npx paseo-bm` là đường cài duy nhất và hứa hợp đồng CLI) được owner viết lại bằng một PR ở repo đó: cài từ paseo.cafe là đủ trên Paseo 0.9+; ba bước cần bấm trên Setup; gỡ plugin mà không bấm "Remove paseo-bm's settings" thì cấu hình `bm-*` và `injectIntoAgents` còn lại. Hai bẫy của CI bên đó vẫn áp dụng (mảng ngắn một dòng; không ghi file từ giá trị chưa kiểm là khác rỗng — AGENTS.md).
 
 ### 3.2 CI và phát hành
 
@@ -74,237 +85,224 @@ Plugin tồn tại vì ba việc một agent không làm được: lối vào �
   1. Job `verify`: ma trận `{ubuntu-latest, macos-latest} × Node 24`, `fail-fast: false`: typecheck gốc và plugin, lint, test, build, `smoke:packed`, kiểm không có script vòng đời cài đặt. Node 22 đã được `ci.yml` kiểm ở mọi commit; chiều hệ điều hành được giữ vì chính nó bắt được lỗi treo chỉ có trên Linux.
   2. Job `release` (`needs: verify`, `id-token: write`, npm ≥ 11.5.1): tag phải bằng `v<version>` của `package.json`; với sự kiện `release`, cờ prerelease của Release phải khớp hình dạng phiên bản (`version.includes("-")`), nên bản ổn định phải được tạo Release **không** đánh dấu prerelease. **Dist-tag theo loại phiên bản:** prerelease → `next`, bản ổn định → `latest`. Sau đó `npm ci` → kiểm → build → `smoke:packed` → "Assert both packages agree" (`plugin/package.json` có `name` `paseo-bm-plugin` và cùng phiên bản) → `npm publish --dry-run` cho cả hai gói. Chỉ khi sự kiện là `release`: publish `paseo-bm` rồi mới publish `paseo-bm-plugin` (cả hai `--provenance --access public --tag <dist-tag>`), rồi chờ `npm view <gói>@<dist-tag> version` bằng phiên bản mới (tối đa 20 lần × 15 giây, vì npm báo "being processed" một lúc sau khi publish).
   3. Script node của bước "Resolve version, tag and dist-tag" nằm trong chuỗi shell nháy đơn: không được có dấu nháy đơn hay apostrophe nào trong script.
-- Bản ổn định **không** được đẩy thêm vào `next`: việc đó cần `npm dist-tag add`, một lệnh ghi khác `publish` mà quyền trusted publisher chưa được chứng minh là cho phép. `next` vì vậy ở lại bản prerelease cuối; dời nó (hay dời `latest` khi publish không tự dời) là việc tay của owner, cần OTP. Registry paseo.cafe đọc `paseo-bm-plugin@latest`.
+  4. **(0.4.0)** Bản 0.4.0 chạy đúng luồng trên lần cuối (cả hai gói). **Từ bản sau 0.4.0:** bỏ dry-run và publish của `paseo-bm` cùng bước chờ của nó; "Assert both packages agree" thành "Assert the plugin version": `plugin/package.json` có `name` `paseo-bm-plugin` và `version` bằng tag. Tên file và trusted publisher của `paseo-bm-plugin` giữ nguyên.
+- Bản ổn định **không** được đẩy thêm vào `next`: việc đó cần `npm dist-tag add`, một lệnh ghi khác `publish` mà quyền trusted publisher chưa được chứng minh là cho phép. `next` vì vậy ở lại bản prerelease cuối; dời nó (hay dời `latest` khi publish không tự dời) là việc tay của owner, cần OTP. Registry paseo.cafe đọc `paseo-bm-plugin@latest`, và `paseo plugin add npm:paseo-bm-plugin` không nêu phiên bản cũng lấy `latest`.
 - Bản đã publish không lùi được (npm chặn `unpublish` sau 72 giờ): đường lùi là phát hành bản vá, và chính GitHub Release là điểm phê duyệt của người.
 
-## 4. CLI `paseo-bm`
+## 4. CLI `paseo-bm` 0.4.0 — chỉ chuyển đổi
 
-### 4.1 Lệnh
+**(0.4.0)** Toàn bộ mục này là bản đích. CLI 0.3.1 (wizard, `install`, `doctor`, `uninstall`, `--prune`) thay bằng đúng một việc: đưa một bản cài dạng thư mục của trình cài cũ sang nguồn npm, giữ nguyên dữ liệu, vai trò và công tắc (ADR-012 QĐ7). Nó dùng lại các module sẵn có của `src/`: `paseo/adapter.ts`, `preflight.ts`, `layout.ts` + `paths-guard.ts`, `lock.ts`, `record.ts`, `fsops.ts`, `redact.ts`, `report/*`, `exit-codes.ts`, `errors.ts`, và mẫu đường lùi `restorePrevious` của `commands/install/register.ts` (bm-vey).
+
+### 4.1 Lệnh và cờ
 
 | Lệnh | Ý nghĩa |
 |---|---|
-| `paseo-bm` | Có TTY: wizard. Không TTY: in bản xem trước rồi thoát mã 6 |
-| `paseo-bm install` | Cài hoặc cập nhật (cùng một đường mã). Mặc định chỉ xem trước; cần `--apply` mới ghi |
-| `paseo-bm doctor` | Kiểm tra sức khoẻ. **Không ghi gì**, chỉ gọi lệnh Paseo chỉ-đọc (`daemon status`, `plugin ls`), không gọi CLI `skills`, không chạm mạng, không lấy khoá |
-| `paseo-bm uninstall` | Gỡ đúng những gì hồ sơ ghi. Mặc định chỉ xem trước |
+| `paseo-bm`, `paseo-bm install`, `paseo-bm migrate` | Chuyển đổi (§4.3–§4.5). Có TTY: xem trước rồi hỏi một câu, mặc định "Không". Không TTY: cần `--apply`; thiếu thì in bản xem trước và thoát 6 |
+| `paseo-bm doctor`, `paseo-bm uninstall` | Không chạy gì. In việc đó đã chuyển về đâu (sức khoẻ: màn Setup, hoặc `paseo plugin ls` / `paseo plugin logs paseo-bm` khi plugin không nạp được; gỡ: nút "Remove paseo-bm's settings" trên Setup rồi `paseo plugin remove paseo-bm`), thoát 2, `E_COMMAND_RETIRED` |
 | `--version`, `--help` | (`-v`, `-h`) |
 
-Không có lệnh `configure`: người dùng app đổi vai trò trên màn "Roles & models" (§7.3.6); người dùng terminal dùng `install --role … --reconfigure`.
-
-### 4.2 Cờ
-
-| Cờ | Lệnh | Ghi chú |
-|---|---|---|
-| `--apply` | install, uninstall | Không có thì chỉ xem trước |
-| `--yes` | install, uninstall | Bỏ qua xác nhận áp dụng; **không** ngầm đồng ý ranh giới tin cậy nào |
-| `--enable-plugins` | install | Đồng ý cả hai việc trong **một** ranh giới tin cậy: bật `pluginsEnabled` và `daemon.mcp.injectIntoAgents`. Gộp vì bật plugin mà không mở công cụ thì Manager không tạo được Worker |
-| `--install-skills` | install | Đồng ý chạy CLI `skills` |
-| `--install-beads-tools` | install | Đồng ý cài `br` và `bv` còn thiếu khi không có terminal (có terminal thì luồng tương tác làm việc này) |
-| `--skills-agents <list>` | install, doctor | Agent đích cho CLI `skills`, mặc định `claude,codex`; khi dựng lệnh, `claude` được đổi thành `claude-code` (tên CLI `skills` 1.5.26 dùng) |
-| `--role <role>=<provider>/<model>` | install | Lặp lại được, ví dụ `--role worker=codex/gpt-5.6-sol` |
-| `--reconfigure` | install | Hỏi lại toàn bộ cấu hình vai trò |
-| `--skip-skills-check` | install, doctor | Bỏ hẳn phần skills |
-| `--force` | install, uninstall | Cài: ghi đè `user-modified` (luôn backup). Gỡ: xoá cả file `user-modified` (sau khi chép vào backup) |
-| `--ask-skills-again` | install | Xoá ghi nhớ "đừng hỏi lại" của bước skills |
-| `--restore-backups` | uninstall | Khôi phục file payload từ backup trước khi xoá |
-| `--prune` | install | Dọn payload cũ và backup, **chỉ** khi người dùng yêu cầu; luôn giữ backup cấu hình Paseo mới nhất |
-| `--home`, `--paseo-home`, `--claude-home`, `--codex-home` | tất cả | Hoặc biến môi trường tương ứng (`PASEO_BM_HOME`, `PASEO_HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`) |
-| `--json`, `--verbose` | tất cả | |
-
-Thứ tự ưu tiên: cờ > biến môi trường > mặc định. `--skills-agents` và `--role` được kiểm **lúc phân tích tham số**, trước preflight và trước mọi thao tác ghi: `--skills-agents` mỗi phần tử khớp `^[a-z0-9][a-z0-9_-]{0,31}$`, tối đa 8, loại trùng, từ chối phần tử bắt đầu bằng `-`; `--role` phải là `<vai>=<provider>/<model>` với vai là một trong ba. Sai → mã 2 (`E_BAD_SKILLS_AGENTS`, `E_BAD_ROLE_SPEC`). Cặp provider/model không có trong Paseo được kiểm sau, khi đã có adapter: `E_PROVIDER_UNAVAILABLE`, mã 3, vẫn trước mọi thao tác ghi.
-
-### 4.3 Mã thoát
-
-| Mã | Ý nghĩa |
+| Cờ | Ghi chú |
 |---|---|
-| 0 | Thành công, xem trước theo chủ đích, hoặc `doctor` báo khoẻ |
-| 1 | `doctor` phát hiện sai lệch thuộc phạm vi sở hữu |
-| 2 | Dùng sai lệnh/cờ (gồm `--skills-agents`, `--role` sai định dạng) |
-| 3 | Tiền đề môi trường không đạt — chưa ghi gì (gồm provider/model của `--role` không có trong Paseo) |
-| 4 | Đã cài nhưng ranh giới tin cậy chưa được đồng ý (plugin chưa bật, hoặc công cụ chưa mở) |
-| 5 | Dừng vì xung đột cần người quyết định |
+| `--apply` | Không TTY thì bắt buộc để ghi |
+| `--yes` | Bỏ câu hỏi xác nhận khi có TTY |
+| `--home <dir>` / `PASEO_BM_HOME` | Thư mục cài đặt của trình cài cũ (mặc định `~/.paseo-bm`); cùng luật an toàn như cũ (`E_UNSAFE_INSTALL_HOME`, `E_PATH_ESCAPE`, `E_SYMLINK_IN_PATH`, `E_TARGET_NOT_WRITABLE`, thoát 3) |
+| `--paseo-home <dir>` / `PASEO_HOME` | Chỉ để dò; `home` của `paseo daemon status --json` vẫn là nguồn sự thật |
+| `--json`, `--verbose` | |
+
+Mọi cờ khác của 0.3.x (`--enable-plugins`, `--install-skills`, `--install-beads-tools`, `--skills-agents`, `--role`, `--reconfigure`, `--skip-skills-check`, `--force`, `--ask-skills-again`, `--restore-backups`, `--prune`, `--claude-home`, `--codex-home`) → thoát 2, `E_COMMAND_RETIRED`, thông điệp nêu chỗ thay thế trên Setup. Thứ tự ưu tiên: cờ > biến môi trường > mặc định.
+
+### 4.2 Tiền đề
+
+Dừng trước mọi thao tác ghi, thoát 3, khi: hệ điều hành không phải macOS/Linux (`E_UNSUPPORTED_OS`); Node < 22 (`E_NODE_TOO_OLD`); không có `paseo` (`E_PASEO_CLI_MISSING`); daemon không trả lời `paseo daemon status --json` (`E_DAEMON_UNREACHABLE`); phiên bản CLI (`cliVersion`, không có thì `paseo --version`) khác `daemonVersion`, hoặc thấp hơn **0.9.0** (`E_VERSION_MISMATCH`, thông điệp đổi thành "requires Paseo 0.9.0 or newer"); thư mục cài đặt không an toàn; khoá `<install home>/.lock` đang bị giữ (`E_LOCKED`); `install.json` không đọc được hay hỏng (thoát 3 như cũ) hoặc có `schemaVersion` > 2 (`E_RECORD_SCHEMA_TOO_NEW`). Mỗi lời gọi Paseo là tiến trình con, argv mảng, không shell, 15 giây — trừ `plugin add` (§4.4).
+
+### 4.3 Nhận ra bản cài
+
+Đọc `paseo plugin ls --json`, mục `id === "paseo-bm"`. Paseo 0.9 báo thêm `installation.identity = { kind, packageName?, pluginPath? }`; thiếu trường này thì chỉ dùng luật đường dẫn. "Nằm trong" là so sau `path.resolve` (không `realpath`), như bản cũ.
+
+| Tình huống | Nhận ra bằng | CLI làm | `migration.outcome`, mã |
+|---|---|---|---|
+| **A** — bản cài thư mục của trình cài | có mục; `identity.kind` là `"directory"` hoặc vắng; `path` nằm trong `<install home>/plugin/`; `install.json` có `schemaVersion: 1` | chuyển đổi (§4.4), rồi đánh dấu (§4.5) | `migrated` 0 · `fell-back` 7 · `fallback-failed` 7 · `remove-failed` 7 |
+| **B** — đã là npm | `identity.kind === "npm"` và `identity.packageName === "paseo-bm-plugin"` | không gọi Paseo. `install.json` còn `schemaVersion: 1` → chỉ làm bước 0 của §4.4 rồi §4.5 (lần chuyển trước dừng giữa chừng, hoặc người dùng tự `plugin add`) | `already-npm` 0 |
+| **C** — thư mục khác | `identity.kind` là `"directory"` (hoặc vắng) mà `path` ngoài `<install home>/plugin/` (checkout của người phát triển, hoặc thư mục cài ở home khác) | không ghi gì; thông điệp gợi ý `--home <dir>` | `not-ours` 5, `E_CONFLICT` |
+| **D** — không có mục `paseo-bm` | | không ghi gì; in hướng dẫn cài từ paseo.cafe và lệnh `paseo plugin add npm:paseo-bm-plugin` (có `install.json` thì thêm: dữ liệu cũ ở `<install home>` được bản npm dùng tiếp) | `no-directory-install` 0 |
+| **E** — nguồn khác | `identity.kind` là giá trị khác, hoặc `npm` với `packageName` khác | không ghi gì | `not-ours` 5, `E_CONFLICT` |
+
+Mục thư mục có `path` nằm trong `<install home>/plugin/` mà **không có** `install.json` → coi như C: không ghi gì, `not-ours` 5, `E_CONFLICT` (hồ sơ là bằng chứng sở hữu duy nhất — ADR-002; không có nó thì không có gì để mang `agentTools` sang hay để đánh dấu). `plugin ls --json` lỗi hay không đọc được → dừng như tiền đề, thoát 3, mã của `PaseoCliError` (như `listPluginOrStop` của 0.3.x). Luật nhận B dựa vào `installation.identity` có mặt trong `plugin ls --json` với bản npm (schema `{ kind: "npm", packageName, pluginPath }` có trong bundle Paseo 0.9.2; việc CLI in nó ra được đo ở §13 Q-047): nếu vắng, bản npm rơi vào C và lần chạy lại trả 5 thay vì 0 — sửa bằng dữ liệu đo trước khi phát hành.
+
+**Cài từ paseo.cafe khi còn bản cài thư mục cũ.** Paseo từ chối id đã cấu hình (`Plugin ID "paseo-bm" is already configured; choose another ID with --id`), nên người dùng 0.3.x bấm cài từ paseo.cafe sẽ gặp lỗi đó. Lối ra duy nhất được hỗ trợ là chạy `npx paseo-bm@0.4.0` một lần (tình huống A); không bao giờ khuyên `--id` khác (hai bản paseo-bm cùng chạy sẽ cùng tạo vai trò và cùng tiêm chỉ dẫn). README, `plugin/README.md` và caveat của listing nêu đúng câu lỗi này cùng lệnh đó.
+
+`install.json` đã có `schemaVersion: 2` (đã chuyển) mà Paseo lại báo bản cài thư mục của tình huống A → **không** tự chuyển lại (có thể người dùng cố ý quay về): không ghi gì, thông điệp "already switched once; Paseo shows a directory install again", thoát 5, `E_CONFLICT`, `not-ours`.
+
+### 4.4 Chuyển đổi (tình huống A)
+
+Bản xem trước liệt kê đúng các bước dưới, kèm thư mục cũ, gói và phiên bản đích (`npm:paseo-bm-plugin@<phiên bản của chính CLI>`), và một câu: "agents keep running; paseo-bm's hooks are off for the seconds the switch takes". Xác nhận xong:
+
+0. **Ghi trước khi đụng Paseo** (plugin 0.3.x không đọc hai file này nên chúng vô hại nếu phải lùi): (i) thư mục cài đặt khác `~/.paseo-bm` → con trỏ `~/.paseo-bm/home.json` (§5.2; tạo `~/.paseo-bm` với quyền `0700` nếu chưa có); (ii) `install.json` có `paseo.mcpInject.setByUs: true` và `<install home>/ui/setup-state.json` chưa có `agentTools` → ghi `agentTools = { setBy: "installer", previous: <previous.present && previous.value === true>, at }` (§5.3). Ghi qua `fsops` (một bộ cho mỗi gốc: thư mục cài đặt và `~/.paseo-bm`; atomic, `0600`, chặn symlink và thoát thư mục).
+1. `paseo plugin remove paseo-bm --json`. Lỗi → dừng; không bước nào sau chạy; thoát 7, `E_PLUGIN_LOAD_FAILED`, `remove-failed`, kèm nguyên văn lý do của Paseo.
+2. `paseo plugin add npm:paseo-bm-plugin@<phiên bản> --id paseo-bm --json`, hạn **120 giây** (`PLUGIN_ADD_TIMEOUT_MS = 120_000`: Paseo chạy `npm install` thật).
+3. Chờ mục `paseo-bm` có `status` ∈ {`running`, `disabled`}: poll `plugin ls --json` mỗi 500 ms, tổng 30 giây (như bản cũ). `disabled` nghĩa là `pluginsEnabled` đang tắt — việc của Paseo và người dùng — nên vẫn là thành công, kèm một dòng nhắc.
+4. Bước 2 hay 3 lỗi → **đường lùi** (bm-vey): `paseo plugin remove paseo-bm` (lỗi bỏ qua: Paseo có thể giữ mục của plugin không khởi động được) → `paseo plugin install <thư mục cũ> --id paseo-bm --json` → chờ như bước 3. Thoát 7, `E_PLUGIN_LOAD_FAILED`, kèm nguyên văn lý do của Paseo (`error.message` của JSON lỗi, không có thì stderr) và kết quả đường lùi: `fell-back` (bản cũ chạy lại) hoặc `fallback-failed` (in hai lệnh tay: `paseo plugin install <thư mục cũ> --id paseo-bm`, `paseo plugin logs paseo-bm`). `install.json` không đổi; hai file của bước 0 ở lại.
+5. Thành công → §4.5.
+
+Không bao giờ: `paseo daemon restart`/`stop`; sửa tay khoá `plugins`; đụng mục `bm-*`, `daemon.mcp.injectIntoAgents`, `pluginsEnabled`; xoá hay sửa `plugin/<ver>/`, `backups/`, `traces/`, `ui/` (trừ bước 0), `role-*.json`. Chạy lại sau khi thành công → tình huống B, 0 thay đổi.
+
+### 4.5 Đánh dấu `install.json`
+
+Ghi lại `install.json` (atomic, `0600`) với `schemaVersion: 2`, `updatedAt` mới và trường mới:
+
+```jsonc
+"migratedTo": { "source": "npm", "package": "paseo-bm-plugin", "version": "0.4.0", "at": "<ISO 8601 UTC>" }
+```
+
+Mọi trường khác giữ nguyên giá trị. Lý do tăng `schemaVersion`: trình cài ≤ 0.3.1 đọc hồ sơ **trước mọi thao tác ghi** (`install` — `src/commands/install/index.ts` `loadRecordOrStop`; `uninstall` — `src/commands/uninstall.ts` `readRecord`; `doctor`) và dừng ở `E_RECORD_SCHEMA_TOO_NEW`, thoát 3, khi gặp `schemaVersion` > 1. Một `npx paseo-bm@0.3.x` còn trong cache vì vậy không cài ngược bản thư mục và không gỡ plugin npm của người đã chuyển; lời khắc phục nó in (`npx paseo-bm@latest`) dẫn tới 0.4.0 sau khi owner dời `latest`. CLI 0.4.0 đọc được cả `1` và `2`.
+
+### 4.6 Mã thoát, JSON, mã lỗi
+
+| Mã | Ý nghĩa ở 0.4.0 |
+|---|---|
+| 0 | Đã chuyển; đã là npm; không có bản cài thư mục (đã in hướng dẫn); hoặc xem trước theo chủ đích |
+| 2 | Dùng sai lệnh/cờ, kể cả lệnh và cờ đã bỏ (`E_COMMAND_RETIRED`) |
+| 3 | Tiền đề không đạt — chưa ghi gì |
+| 5 | Plugin `paseo-bm` đang cài không phải của trình cài ở thư mục này (`E_CONFLICT`) — chưa ghi gì |
 | 6 | Không TTY và không `--apply`: đã in bản xem trước, chưa ghi gì |
-| 7 | Đã chép file và ghi hồ sơ, nhưng Paseo không cài/không nạp được plugin (`paseo plugin logs paseo-bm`) |
+| 7 | `plugin remove`/`plugin add` hỏng hoặc plugin mới không lên (`E_PLUGIN_LOAD_FAILED`); `migration.outcome` nói đường lùi ra sao |
 
-Cảnh báo về skills và beads tools không bao giờ đổi mã thoát.
-
-### 4.4 JSON
-
-Khi bật `--json`, stdout chỉ có đúng một tài liệu JSON; output của tiến trình con đi ra stderr.
+Mã 1 và 4 không còn phát ra (không còn `doctor`, không còn ranh giới tin cậy nào do CLI hỏi) và không được dùng lại cho nghĩa khác. `--json`: stdout đúng một tài liệu, output tiến trình con ra stderr; cùng khung `schemaVersion: 1` của báo cáo cũ:
 
 ```jsonc
 {
   "schemaVersion": 1,
-  "command": "install",              // install | doctor | uninstall
-  "mode": "preview",                 // preview | applied
-  "paseoBmVersion": "…",
-  "paseo": { "cliVersion": "…", "daemonVersion": "…", "home": "…", "pluginsEnabled": false },
+  "command": "migrate",                     // cả khi gọi bằng `paseo-bm` hay `install`
+  "mode": "preview",                        // preview | applied
+  "paseoBmVersion": "0.4.0",
+  "paseo": { "cliVersion": "…", "daemonVersion": "…", "home": "…", "pluginsEnabled": true },
   "actions": [
-    { "kind": "create", "target": "installHome/plugin/<ver>/roles/worker.md", "reason": "missing" },
-    { "kind": "config", "target": "paseoHome/config.json#daemon.agentProfiles[bm-worker]", "from": null, "to": "…", "consent": "interactive" }
+    { "kind": "create", "target": "~/.paseo-bm/home.json", "reason": "custom-install-home" },
+    { "kind": "create", "target": "installHome/ui/setup-state.json#agentTools", "reason": "carry-over" },
+    { "kind": "plugin", "target": "paseo-bm", "from": "<thư mục cũ>", "to": "npm:paseo-bm-plugin@0.4.0" },
+    { "kind": "update", "target": "installHome/install.json", "reason": "migrated" }
   ],
-  "roles": [{ "role": "worker", "provider": "codex", "model": "gpt-5.6-sol", "paseoTools": true, "loggedIn": true }],
-  "skills": { "source": "cuongntr/agent-skills", "required": ["…"], "byAgent": { "claude": { "present": [], "missing": [] } },
-              "suggestedCommand": "npx -y skills add …", "assisted": false, "outcome": null },
-  "warnings": [{ "code": "W_BEADS_CLI_MISSING", "message": "…" }],
+  "migration": { "outcome": "migrated", "from": "<thư mục cũ> | null", "to": "npm:paseo-bm-plugin@0.4.0 | null", "fallback": null },
+  "warnings": [],
   "result": { "exitCode": 0, "pluginState": "running" }
-  // thất bại có mã: "result": { "exitCode": 3, "pluginState": null, "error": { "code": "E_TARGET_NOT_WRITABLE", "message": "…" } }
+  // thất bại: "result": { "exitCode": 7, "pluginState": "running", "error": { "code": "E_PLUGIN_LOAD_FAILED", "message": "…" } },
+  //           "migration.fallback": { "outcome": "fell-back" | "fallback-failed", "detail": "…" }
 }
 ```
 
-- `result.error` **chỉ có mặt khi thất bại** với một mã trong sổ đăng ký.
-- `doctor` thay `actions[]` bằng `checks[]` gồm `{ id, severity: "ok" | "warn" | "error", message, remediation }`. Id là hợp đồng, đổi tên là thay đổi phá vỡ: `paseo-daemon`, `paseo-version`, `install-record`, `install-version`, `files-missing`, `files-modified`, `plugin-registered`, `plugin-status`, `plugin-path`, `plugins-enabled`, `agent-tools`, `role-bm-manager`, `role-bm-worker`, `role-bm-reviewer`, `roles.changed-in-app`, `payload-versions`, `backups`, `beads-cli`, `beads-viewer`.
-  - `plugin-path` so thư mục Paseo đang nạp với thư mục phiên bản active trong `install.json` (lệch → `error`, Paseo không báo đường dẫn → `warn`); `install-version` báo `error` cả khi `version` của hồ sơ khác phiên bản active.
-  - `agent-tools` là công tắc `daemon.mcp.injectIntoAgents`.
-  - `roles.changed-in-app` mang severity `ok` (hợp đồng không có `info`), xuất hiện một lần cho mỗi vai có `extends` của alias hay `model` của profile khác `roles[]`, và không bao giờ nâng mã thoát.
-- `uninstall` dùng `actions[]` với `kind: "delete" | "keep" | "config"`.
+`kind: "plugin"` là giá trị mới; `migration.outcome` ∈ `migrated`, `already-npm`, `no-directory-install`, `not-ours`, `fell-back`, `fallback-failed`, `remove-failed`. `result.error` chỉ có mặt khi thất bại.
 
-**Sổ mã lỗi của CLI** (`src/errors.ts`, một hằng số, có test chặn mã đặt tại chỗ; mỗi mục có thông điệp và cách khắc phục): `E_DAEMON_UNREACHABLE`, `E_VERSION_MISMATCH`, `E_UNSUPPORTED_OS`, `E_NODE_TOO_OLD`, `E_PASEO_CLI_MISSING`, `E_PASEO_OUTPUT_UNEXPECTED`, `E_CONFLICT`, `E_BAD_SKILLS_AGENTS`, `E_BAD_ROLE_SPEC`, `E_CONFIG_CONCURRENT_WRITE`, `E_RECORD_SCHEMA_TOO_NEW`, `E_LOCKED`, `E_PROVIDER_UNAVAILABLE`, `E_UNSAFE_INSTALL_HOME`, `E_PATH_ESCAPE`, `E_SYMLINK_IN_PATH`, `E_TARGET_NOT_WRITABLE` (ba mã chốt đường dẫn và mã này: thoát 3, chưa ghi gì), `E_PLUGIN_LOAD_FAILED` (thoát 7); cảnh báo `W_SKILLS_MISSING`, `W_SKILLS_ASSIST_FAILED`, `W_BEADS_CLI_MISSING`, `W_BEADS_VIEWER_MISSING`, `W_BEADS_TOOLS_INSTALL_FAILED`, `W_PROVIDER_NOT_LOGGED_IN`.
-
-**Sổ mã lỗi của RPC plugin** (`DASHBOARD_ERROR_CODES` trong `plugin/shared/contracts.ts`; đi qua kênh RPC, không có mã thoát; thông điệp bắt đầu bằng mã): `E_TIMELINE_UNAVAILABLE`, `E_BEADS_STORE_UNREADABLE`, `E_TRACE_NOT_FOUND`, `E_TRACE_STORE_UNWRITABLE`, `E_TRACE_STORE_SCHEMA_TOO_NEW`, `E_TRACE_REASSIGN_INVALID`, `E_BEAD_NOT_FOUND`, `E_ROLE_EXTRA_INVALID`, `E_TOOL_PRESENT`, `E_TOOL_INSTALL_FAILED`, `E_ROLE_SETTINGS_INVALID`, `E_ROLE_SETTINGS_CONFLICT`, `E_ROLE_SETTINGS_WRITE_FAILED`, `E_FALLBACK_NOT_FOUND`, `E_FALLBACK_NOT_PENDING`, `E_FALLBACK_NO_CANDIDATE`, `E_FALLBACK_NO_RESET`, `E_FALLBACK_CREATE_FAILED`. `manager.ensure` ném `E_PROVIDER_UNAVAILABLE`.
-
-### 4.5 Luồng cài và cập nhật
-
-```
-cli → preflight → record.load → hỏi vai trò + kiểm provider/model → planner → xem trước (gồm vai trò sẽ đăng ký)
-  → xác nhận (mặc định "Không")
-  → applier: plugin/<ver> (atomic, gồm roles/*.md) → hồ sơ tạm → đăng ký plugin (dưới)
-  → pluginsEnabled / injectIntoAgents tắt? → cảnh báo tin cậy (một lần hỏi, hai hệ quả) → đồng ý? không → bỏ qua (mã 4)
-       có → backup → sửa khoá → reload → xác minh
-  → provider chưa đăng nhập? → mời chạy lệnh login của chính công cụ đó (Pi: in hướng dẫn, không có lệnh)
-  → backup → ghi agents.providers.bm-* và daemon.agentProfiles[bm-*] (gộp, §6.1) → reload → xác minh
-  → chốt install.json → skills: dò → thiếu → hiện đúng lệnh → đồng ý → chạy CLI skills → dò lại
-  → beads tools (br, bv) thiếu → đề nghị cài → tóm tắt
-```
-
-- Câu hỏi vai trò và kiểm provider/model chạy **trước** bản xem trước, nên `E_PROVIDER_UNAVAILABLE` ra trước mọi thao tác ghi.
-- "Đăng ký plugin trước, bật công tắc sau" là thứ tự hợp lệ: `paseo plugin install` thành công cả khi `pluginsEnabled` tắt, trả `status: "disabled"`. Luôn đọc `status`, không đọc `enabled`.
-- **Đăng ký plugin theo phiên bản.** Paseo từ chối `plugin install` khi id đã cấu hình và không có lệnh đổi đường dẫn plugin thư mục (`update` chỉ cho Git). Vì vậy, đọc `paseo plugin ls --json` (thiếu thì lấy `paseo.pluginDir` của hồ sơ), so sau `path.resolve` (không `realpath`):
-  - chưa cấu hình → `install <dir mới> --id paseo-bm`;
-  - đã trỏ đúng thư mục mới → không gọi Paseo; nhưng nếu lượt này đã ghi ít nhất một file trong `plugin/<ver>` và plugin không `disabled` thì `paseo plugin reload paseo-bm --json` rồi chờ `running` (Paseo không nạp lại bundle khi file đổi tại chỗ);
-  - trỏ thư mục khác → `remove paseo-bm` → `install <dir mới>`; lỗi → `remove` lần nữa (Paseo giữ mục của plugin không khởi động được, lỗi ở bước này bỏ qua) → `install <dir cũ>` → `E_PLUGIN_LOAD_FAILED` (mã 7) kèm nguyên văn lý do của Paseo (`error.message` của JSON lỗi, không có thì stderr) và kết quả đường lùi.
-  - Thành công: `versions[].active` và `paseo.pluginDir` sang bản mới. Thất bại: hồ sơ giữ `pluginDir`/`active` cũ và ghi trả `version` cũ; payload mới vẫn nằm trên đĩa.
-  - Không bao giờ restart/stop daemon, không sửa tay khoá `plugins`.
-- **Luồng lỗi:** daemon không chạy / lệch phiên bản / thiếu CLI → dừng ở preflight, mã 3, chưa ghi gì. `plugin install` lỗi → giữ payload, không sửa `config.json`, in lệnh xem log. Plugin không `running` sau 30 giây → báo lỗi kèm lệnh log, hồ sơ ghi trạng thái thật, không tự tắt công tắc. Người dùng từ chối ranh giới tin cậy → vẫn cài xong, vai trò vẫn đăng ký, mã 4, `doctor` báo tiếp. Provider chưa đăng nhập → vai trò vẫn đăng ký, `W_PROVIDER_NOT_LOGGED_IN`. Thiếu `br` (beads CLI) hay `bv` → cảnh báo, không chặn; Worker gọi `br` trực tiếp trong workspace.
-
-### 4.6 Gỡ cài đặt
-
-`preflight nhẹ → đọc install.json → planner (chỉ đọc) → xem trước → xác nhận → paseo plugin remove → xoá mục bm-* trong agents.providers và daemon.agentProfiles (kể cả alias dự phòng) → trả daemon.mcp.injectIntoAgents về trạng thái trước nếu chính paseo-bm bật → xoá container config paseo-bm đã tạo mà nay rỗng → khôi phục backup nếu được yêu cầu → xoá payload theo versions[] → giữ file user-modified → hỏi tắt lại pluginsEnabled (chỉ khi chính paseo-bm bật và không còn plugin khác) → backup theo lựa chọn → install.json → báo cáo`.
-
-- Chỉ duyệt thư mục `plugin/<version>` có trong `versions[]`. File không có trong hồ sơ được giữ và liệt kê.
-- **Dữ liệu người dùng (§5.3) không bị chạm và không được liệt kê**: `traces/`, `ui/`, `role-extras.json`, `role-fallback.json`, `role-fallback-state.json` nằm lại.
-- Daemon không chạy → vẫn xoá file, giữ `install.json` để lần sau hoàn tất phần Paseo.
-- `paseo plugin remove` không xoá thư mục nguồn và để lại `plugins: {}`; khoá đó là của Paseo, paseo-bm không xoá.
-- Không đụng agent đang tồn tại, skills, CLI `skills`, và mọi mục config không có tiền tố `bm-`. Không khôi phục nguyên file `config.json` từ backup (sẽ xoá mọi thay đổi sau lúc cài — ADR-006 QĐ8).
-
-### 4.7 Tích hợp bên ngoài của trình cài
-
-| Bên ngoài | Cách gọi | Lỗi |
-|---|---|---|
-| Paseo CLI | `daemon status\|reload --json`, `plugin install\|ls\|logs\|remove\|reload --json`, `provider ls\|models <p>\|diagnostic <p> --json` (chỉ lúc cài: kiểm vai trò và trạng thái đăng nhập), `--version`; tiến trình con, argv mảng, không shell, 15 giây mỗi lời gọi | Không tới được → dừng ở preflight, mã 3. JSON lạ → `E_PASEO_OUTPUT_UNEXPECTED` |
-| Phiên bản Paseo | CLI và daemon phải cùng phiên bản và ≥ 0.8.0. Paseo 0.9.2 bỏ `cliVersion` khỏi `daemon status --json`: adapter lấy từ `paseo --version` | |
-| `~/.paseo/config.json` | Đọc–sửa–ghi tối thiểu (§6.1); backup trước; reload sau; phát hiện ghi song song thì đọc lại và thử **một** lần | Lệch tiếp → `E_CONFIG_CONCURRENT_WRITE`, giữ bản của bên kia. Reload lỗi → khôi phục backup, reload lại, báo lỗi |
-| CLI `skills` | Chỉ sau khi đồng ý; nguồn skills là hằng số trong gói (`cuongntr/agent-skills`); năm skill bắt buộc (`REQUIRED_SKILLS`, `src/skills/detect.ts`): `feature-workflow`, `reviewing-plan`, `converting-plan-to-beads`, `polishing-beads`, `implementing-beads` — thiếu thì `W_SKILLS_MISSING`; `architecture-premise-audit`, `authoring-workspace-protocol` chỉ là gợi ý, không bao giờ cảnh báo; chế độ symlink; in nguyên văn lệnh trước khi chạy; 300 giây, cảnh báo sau 60 giây không output; Ctrl+C chuyển tín hiệu cho tiến trình con, ghi `assistOutcome: "interrupted"` | Không chặn, không đổi mã thoát |
-| Lệnh login của provider | Chỉ khi đồng ý; 300 giây | Thất bại → hướng dẫn thủ công; vai trò vẫn đăng ký; `W_PROVIDER_NOT_LOGGED_IN` |
-| `br` / `bv` còn thiếu | Có terminal: nằm trong các thay đổi được áp (bản xem trước nêu đúng lệnh); không terminal: chỉ với `--install-beads-tools`. Có Homebrew → `brew install dicklesworthstone/tap/<tool>`; không thì script cài của dự án (`br` với `--skip-skills` để không ghi thư mục skills, `bv` ghim commit); 300 giây | Cảnh báo `W_BEADS_TOOLS_INSTALL_FAILED` kèm lệnh tay; không đổi mã thoát |
-
-Chờ plugin `running`: tổng 30 giây, poll 500 ms. Không telemetry.
+**Sổ mã lỗi của CLI** (`src/errors.ts`) ở 0.4.0: giữ `E_DAEMON_UNREACHABLE`, `E_VERSION_MISMATCH` (thông điệp 0.9.0), `E_UNSUPPORTED_OS`, `E_NODE_TOO_OLD`, `E_PASEO_CLI_MISSING`, `E_PASEO_OUTPUT_UNEXPECTED`, `E_CONFLICT`, `E_RECORD_SCHEMA_TOO_NEW`, `E_LOCKED`, `E_UNSAFE_INSTALL_HOME`, `E_PATH_ESCAPE`, `E_SYMLINK_IN_PATH`, `E_TARGET_NOT_WRITABLE`, `E_PLUGIN_LOAD_FAILED`; thêm **`E_COMMAND_RETIRED`** (thoát 2); bỏ mọi mã chỉ luồng cài cũ dùng (`E_BAD_SKILLS_AGENTS`, `E_BAD_ROLE_SPEC`, `E_CONFIG_CONCURRENT_WRITE`, `E_PROVIDER_UNAVAILABLE` của CLI, mọi `W_*`). Sổ mã lỗi RPC của plugin ở §7.12.
 
 ## 5. Dữ liệu trên đĩa
 
-### 5.1 Thư mục cài đặt
+### 5.1 Thư mục dữ liệu
 
 ```
-~/.paseo-bm/                       (0700; --home hoặc PASEO_BM_HOME)
-  install.json                     (0600) hồ sơ, nguồn sự thật về quyền sở hữu payload
-  plugin/<ver>/                    payload từng phiên bản; bản cũ GIỮ LẠI, chỉ --prune xoá
-  backups/<UTC>/                   paseo-config.json + file bị ghi đè có chủ đích
-  .lock                            khoá của install/uninstall
-  ── dữ liệu người dùng (§5.3) ──
+<thư mục dữ liệu>/                 (0700; mặc định ~/.paseo-bm)
+  home.json                        (0600) con trỏ, chỉ nằm ở ~/.paseo-bm, chỉ khi dữ liệu ở chỗ khác (§5.2)
   traces/                          (0700) kho lưu vết Dashboard: meta.json, <workspaceId>/{meta.json, events-<YYYYMM>.jsonl}
-  ui/                              trạng thái bền của plugin: answer-marks.json, budget-told.json, qa-ledger.json, agent-tools.json
+  ui/                              trạng thái bền của plugin: answer-marks.json, budget-told.json, qa-ledger.json,
+                                   agent-tools.json, setup-state.json (0.4.0, §5.3)
   role-extras.json                 (0600) chỉ dẫn bổ sung của người dùng cho từng vai
   role-fallback.json               (0600) chuỗi dự phòng và policy từng vai (§7.10)
   role-fallback-state.json         (0600) các sự cố dự phòng, tối đa 200
+  ── chỉ ở người dùng cũ, do trình cài để lại (§5.4); plugin không đọc, không ghi, không xoá ──
+  install.json · plugin/<ver>/ · backups/<UTC>/ · .lock
 ```
 
-Plugin tìm thư mục cài đặt từ đường dẫn Paseo ghi khi đăng ký (`config.plugins["paseo-bm"].path` = `<home>/plugin/<ver>`, lùi hai cấp) và xác nhận bằng `install.json`; không chắc thì trả lý do thay vì ném, và các phần cần thư mục này tắt đi. Bundle server không dùng được `import.meta.url` (Paseo biên dịch thành CJS và fork không đặt cwd).
+Thư mục gói do Paseo quản lý (`~/.paseo/plugins/paseo-bm/<uuid>/node_modules/paseo-bm-plugin`) có thể đổi mỗi lần cập nhật, nên **không bao giờ** chứa dữ liệu. Bundle server không dùng được `import.meta.url` (Paseo biên dịch thành CJS và fork không đặt cwd).
 
-### 5.2 `install.json`
+**Tìm thư mục dữ liệu.** `resolveDataHome()` ở `plugin/server/data-home.ts`, **đồng bộ và không cần handle Paseo** — nên endpoint công cụ (§7.4) biết ghi cổng ở đâu ngay lúc plugin còn đang nạp. Dừng ở bước đầu có giá trị:
 
-| Trường | Kiểu | Ghi chú |
-|---|---|---|
-| `schemaVersion` | number | `1`; lớn hơn mức CLI hiểu → `E_RECORD_SCHEMA_TOO_NEW` |
-| `version` | string | Phiên bản gói đã cài |
-| `installedAt` / `updatedAt` | ISO 8601 UTC | |
-| `installHome` | string | Đường dẫn tuyệt đối |
-| `paseo.home` | string | Từ `paseo daemon status --json` |
-| `paseo.pluginId` / `paseo.pluginDir` | string | |
-| `paseo.pluginsEnabledSetByUs` | boolean | Căn cứ để lệnh gỡ đề nghị tắt lại |
-| `paseo.pluginsEnabledPrevious` | `{ present, value }`, tuỳ chọn | Trạng thái trước lần bật đầu; ghi trước khi chạm `config.json`. Gỡ và người dùng chọn tắt lại: vắng → xoá khoá, `false` → `false`, chỉ khi giá trị hiện tại vẫn là `true`. Hồ sơ cũ không có trường này thì đặt `false` |
-| `paseo.mcpInject` | `{ setByUs, previous: { present, value } }` | Phân biệt "vắng" với "`false`" để hoàn tác đúng (ADR-006 QĐ8) |
-| `paseo.createdConfigContainers` | string[], tuỳ chọn | Container paseo-bm tự tạo, trong tập đóng `agents`, `agents.providers`, `daemon`, `daemon.agentProfiles`, `daemon.mcp`; chỉ ghi khi container chưa có, không bao giờ bớt. Gỡ: container trong danh sách mà nay rỗng thì xoá, từ trong ra ngoài |
-| `roles[]` | `{ role, providerId, profileId, baseProvider, model, modeId, thinkingOptionId, paseoTools }` | **Lần ghi cuối của trình cài**, không phải cấu hình đang có hiệu lực (nguồn sự thật là cấu hình Paseo — ADR-008). Trình cài luôn ghi `modeId: null`, `thinkingOptionId: null` |
-| `files[]` | `{ path, sha256, mode }` | Mọi file payload, gồm `roles/*.md` và `package.json` của payload |
-| `versions[]` | `{ version, dir, installedAt, active }` | Giữ tất cả; chỉ `--prune` xoá |
-| `backups[]` | `{ at, dir, reason }` | |
-| `skills.agents[]` | string[] | |
-| `skills.lastStatus` | `{ agent, skill, present }[]` | |
-| `skills.assistDeclinedAt` | ISO \| null | "Đừng hỏi lại" |
-| `skills.lastCommand` | string \| null | |
-| `skills.assistOutcome` | `"ok" \| "failed" \| "interrupted" \| null` | |
+1. `PASEO_BM_HOME` trong môi trường của tiến trình plugin (tức của daemon), phải là đường dẫn tuyệt đối;
+2. con trỏ `~/.paseo-bm/home.json` (§5.2), khi file tồn tại;
+3. `~/.paseo-bm`.
 
-Ghi atomic, `0600`, không chứa bí mật.
+Ứng viên của bước 1 hoặc 2 phải qua cùng luật an toàn của trình cài (`src/layout.ts` `assertSafeInstallHome`, chép sang plugin vì plugin không import `src/`): không phải `$HOME` hay thư mục chứa nó; không trùng, không chứa, không nằm trong `~/.paseo` / `PASEO_HOME`, `~/.claude` / `CLAUDE_CONFIG_DIR`, `~/.codex` / `CODEX_HOME`, `~/.agents`. Hỏng luật, hay con trỏ hỏng → `{ home: null, reason }`, **không** lùi âm thầm về `~/.paseo-bm` (lùi sẽ tách dữ liệu làm hai nơi); các phần cần thư mục tắt đi và Setup hiện `reason`. Kết quả: `{ home, tracesDir, source: "env" | "pointer" | "default" } | { home: null, tracesDir: null, reason }`.
 
-### 5.3 Phân loại quyền sở hữu
+**Tạo.** `ensureDataHome(home)` chỉ chạy ở lần ghi đầu tiên cần nó: `mkdir -p` quyền `0700`, kiểm symlink trên đường xuống thư mục trước và sau khi tạo (cùng cách `trace-store.ts` `ensureStoreDir` / `assertNoSymlinkOnPath`). Đường kiểm bắt đầu ở `$HOME` khi thư mục nằm trong `$HOME` — mặc định và gần như mọi máy thật — còn lại bắt đầu ở thư mục cha của nó: `$HOME` là symlink trên không ít máy nên gốc chỉ được kiểm tồn tại, không bị xét; và `/var`, `/tmp` trên macOS là symlink nên đi từ gốc hệ thống sẽ từ chối một `PASEO_BM_HOME=/var/data/bm` hoàn toàn bình thường. Đọc không bao giờ tạo; thư mục chưa có thì đọc như rỗng. `install.json` **không** là điều kiện để tin một thư mục: trình cài 0.3.x ghi nó, bản cài từ paseo.cafe không có, và đó đúng là ca từng làm Dashboard trống.
 
-| Tình trạng | Điều kiện | Hành động mặc định |
-|---|---|---|
-| `unchanged` | có trong `files[]`, hash khớp | bỏ qua |
-| `outdated` | hash khớp bản ghi cũ, khác bản mới | cập nhật |
-| `user-modified` | hash không khớp bản ghi | giữ; hỏi khi tương tác; `--force` mới ghi đè, luôn backup |
-| `conflict` | trên đĩa, không có trong `files[]` | bỏ qua, báo |
-| `missing` | có trong `files[]`, không còn trên đĩa | tạo lại |
-| `user-data` | `traces/`, `ui/`, `role-extras.json`, `role-fallback.json`, `role-fallback-state.json` | không hash, không backup, không so; cài, cập nhật, `--prune` và gỡ **đều không chạm** |
+**Ai đọc thư mục dữ liệu.** Phần lớn đi qua một hàm duy nhất: `role-extras.ts` `dataHomeOf(deps)` — đồng bộ, không tham số `paseo`, trả `string | null`, không bao giờ ném; nó gói `resolveDataHome` và chỉ lấy `home`. Dùng ở `manager.ts`, `role-hook.ts`, `chat-waiting.ts`, `setup-rpc.ts`, `dashboard-rpc.ts`, `fallback-settings.ts`, `fallback-state.ts`, `fallback-rpc.ts`, `fallback-switch.ts`, `fallback-wait.ts`, `fallback-reviewer.ts`; các kho nhận thư mục từ chỗ gọi (`qa-ledger.ts`, `answer-marks.ts`, `budget-told.ts`). Sáu module gọi `resolveDataHome` trực tiếp vì còn cần `tracesDir` hoặc `reason`: `agent-tools.ts`, `collector.ts`, `dashboard-rpc.ts`, `setup-machine.ts`, `setup-rpc.ts`, `setup-state.ts` — `dashboard-rpc.ts` và `setup-rpc.ts` đi cả hai đường, tuỳ chỗ cần gì. `trace-store.ts` không tự tìm thư mục: nó nhận `tracesDir` từ chỗ gọi. `install-home.ts` chỉ còn `installHomeFromPluginPath` và `confirmInstallHome`, để nhận ra bản cài thư mục 0.3.x cho banner chuyển đổi (§7.13.6). Cổng endpoint công cụ nằm ở `<thư mục dữ liệu>/ui/agent-tools.json`, ghi atomic có chặn symlink, quyền `0600`.
 
-Nâng cấp luôn chép sang `plugin/<version mới>/` nên mọi đích là `missing`; ba trạng thái xung đột chỉ xảy ra khi cài lại cùng phiên bản, sửa chữa thư mục đang dùng, hoặc với chính `install.json`. `user-data` là dữ liệu tích luỹ do plugin tạo, không phải tài sản phiên bản; trình cài không tạo và không ghi vào đó. Dữ liệu trong `ui/` và `role-*.json` ghi atomic (file tạm → rename), `0600`, chặn symlink — trừ `ui/agent-tools.json` (chỉ chứa số cổng, §7.4: tạm → rename, quyền mặc định, không chặn symlink); file mang `schemaVersion` mới hơn plugin hiểu thì đọc như rỗng và **không ghi đè**; đọc không bao giờ sửa file.
+### 5.2 Con trỏ `~/.paseo-bm/home.json` (0.4.0)
+
+Chỉ CLI 0.4.0 ghi (§4.4 bước 0), khi thư mục cài đặt cũ không phải `~/.paseo-bm`; plugin chỉ đọc.
+
+```jsonc
+{ "schemaVersion": 1, "home": "/abs/path", "writtenBy": "paseo-bm@0.4.0", "at": "<ISO 8601 UTC>" }
+```
+
+Không phải JSON, `schemaVersion` khác `1`, `home` không tuyệt đối hay không qua luật an toàn → `{ home: null, reason }`. `home` bằng `~/.paseo-bm` → như không có con trỏ. Thư mục đích chưa có → `ensureDataHome` tạo ở lần ghi đầu. Muốn bỏ con trỏ thì xoá file (README nói điều này).
+
+### 5.3 `ui/setup-state.json` (0.4.0)
+
+Trạng thái của thiết lập máy, thay phần `install.json` mà plugin còn cần (trạng thái trước của `injectIntoAgents` để hoàn tác đúng). Module `plugin/server/setup-state.ts`.
+
+```ts
+{ schemaVersion: 1,
+  agentTools: { setBy: "plugin" | "installer", previous: boolean, at: string /* ISO */ } | null,
+  rolesCreated: { at: string, roles: Array<"manager" | "worker" | "reviewer">, baseProvider: string, model: string } | null,
+  skillsRun: { at: string, command: string, code: number, outcome: "ok" | "failed" | "timeout" } | null,
+  cleanedUpAt: string | null }
+```
+
+- `agentTools`: có mặt khi và chỉ khi chính paseo-bm (plugin, hoặc trình cài cũ qua bước chuyển) đã bật `daemon.mcp.injectIntoAgents`. Plugin ghi nó **trước** lần patch bật công tắc; patch hỏng thì trả trường về giá trị trước. View của SDK luôn có `mcp.injectIntoAgents` kiểu boolean (khoá vắng đọc là `false`), nên hoàn tác ghi `false`, không bao giờ xoá khoá — khác bản `{ present, value }` của trình cài, và chấp nhận được vì vắng và `false` cùng nghĩa với daemon.
+- `rolesCreated`: lần cuối plugin tạo vai trò (§7.13.2); Setup dùng nó để nói vai trò được tạo với mặc định.
+- `skillsRun`: lần cuối chạy CLI `skills` (§7.13.4), chỉ để hiện.
+- `cleanedUpAt`: thời điểm "Remove paseo-bm's settings" chạy (§7.13.7); khác `null` thì plugin không tự tạo vai trò nữa.
+- Không chứa bí mật, không chứa đường dẫn tới credential.
+
+### 5.4 Luật chung, và phần của người dùng cũ
+
+- Mọi file trong thư mục dữ liệu là dữ liệu người dùng: cập nhật plugin không chạm; chỉ nút gỡ cấu hình xoá được, sau xác nhận thứ hai (§7.13.7).
+- Ghi atomic (file tạm → `fsync` → `rename`), `0600`, chặn symlink. File mang `schemaVersion` (hay `version`) mới hơn plugin hiểu thì đọc như rỗng và **không ghi đè**; đọc không bao giờ sửa file.
+- **Người dùng cũ** giữ nguyên `~/.paseo-bm` (hoặc thư mục `--home` của họ, tìm qua con trỏ): traces, `ui/`, `role-*.json` được bản npm dùng tiếp, không di trú. `install.json` được đánh dấu (§4.5) rồi để yên; `plugin/<ver>/` và `backups/` không còn gì trỏ tới sau khi chuyển. **Không** bản 0.4.0 nào xoá chúng: plugin không đọc `install.json` và không được xoá thứ nó không tạo; một cách xoá an toàn có tồn tại (CLI có `files[]` + `sha256` và `versions[]` trong `install.json`, và mã dọn của `src/commands/prune.ts`) nhưng nằm ngoài phạm vi 0.4.0. README chỉ cho người dùng tự xoá hai thư mục đó sau khi chuyển.
 
 ## 6. Cấu hình Paseo
 
 ### 6.1 Phần paseo-bm ghi vào `config.json`
 
-| Khoá | Ghi gì | Ai, khi nào |
+**(0.4.0)** Plugin là bên ghi duy nhất, và chỉ qua `config.patch` của SDK (khoá phẳng: `providers` = `agents.providers`, gộp sâu; `removeProviders: string[]`; `agentProfiles` = `daemon.agentProfiles`, **thay nguyên mảng**; `mcp.injectIntoAgents`). Không bao giờ sửa file, không bao giờ `daemon reload`, không bao giờ đọc `~/.paseo/config.json` bằng `node:fs` (file có thể chứa khoá và `env` của provider). CLI 0.4.0 không ghi `config.json`; nó chỉ gọi `paseo plugin remove|add|install`.
+
+| Khoá | Ghi gì | Khi nào |
 |---|---|---|
-| `pluginsEnabled` | `true` | Trình cài, có đồng ý (REQ-006) |
-| `plugins` | Do **Paseo** ghi khi `paseo plugin install` | paseo-bm không tự ghi |
-| `daemon.mcp.injectIntoAgents` | `true` | Trình cài, gộp chung một lần đồng ý với `pluginsEnabled`. Cảnh báo nêu đủ: plugin là mã không sandbox, và **mọi** agent trên máy được tạo, nhắc, dừng agent khác |
-| `agents.providers.bm-manager` / `bm-worker` / `bm-reviewer` | `{ extends, label, paseoTools }`, không `command`, không `env`. Reviewer không bao giờ có `paseoTools` | Trình cài; plugin chỉ đổi `extends` (§7.3.6) |
-| `agents.providers.bm-<vai>-fallback-<n>` (n = 1…3) | Manager/Worker: `{ extends, label: "<Role> (fallback <n>)", paseoTools: { enabled: true } }`; Reviewer: không `paseoTools`. Không có profile | Plugin, khi người dùng lưu chuỗi dự phòng |
-| `daemon.agentProfiles[]` | Chỉ các mục `id` bắt đầu bằng `bm-`; mục khác và thứ tự giữ nguyên | Trình cài; plugin chỉ đổi `model` / `thinkingOptionId` / `modeId` của mục `bm-<vai>` đã có |
+| `pluginsEnabled` | Không bao giờ | Công tắc của Paseo và người dùng; plugin tắt thì không chạy được mã nào |
+| `plugins` | Do **Paseo** ghi khi `plugin add/remove` | paseo-bm không tự ghi |
+| `daemon.mcp.injectIntoAgents` | `true`; khi gỡ cấu hình: `agentTools.previous` | Khi người dùng bấm "Allow agent tools…" (§7.13.3); trả về khi gỡ, chỉ nếu `setup-state.agentTools` có và giá trị hiện tại là `true` |
+| `agents.providers.bm-manager` / `bm-worker` / `bm-reviewer` | Tạo khi thiếu: `{ extends, label, paseoTools: { enabled: true } }` cho Manager và Worker, `{ extends, label }` cho Reviewer; không `command`, không `env`. Sau đó chỉ đổi `extends` (§7.3.6) | Tạo: §7.13.2. Xoá: chỉ khi gỡ cấu hình |
+| `agents.providers.bm-<vai>-fallback-<n>` (n = 1…3) | Manager/Worker: `{ extends, label: "<Role> (fallback <n>)", paseoTools: { enabled: true } }`; Reviewer: không `paseoTools`. Không có profile | Khi người dùng lưu chuỗi dự phòng; xoá khi gỡ cấu hình |
+| `daemon.agentProfiles[]` | Chỉ các mục `id` bắt đầu bằng `bm-`. Tạo khi thiếu: `{ id: "bm-<vai>", name, provider: "bm-<vai>", model, notes }`, thêm vào **cuối** mảng; không bao giờ ghi `modeId`/`thinkingOptionId` lúc tạo. Sau đó chỉ đổi `model` / `thinkingOptionId` / `modeId` của mục `bm-<vai>` đã có | Tạo: §7.13.2. Xoá: chỉ khi gỡ cấu hình |
 
-**Trình cài gộp, không thay nguyên.** Mục vai trò là `bm-manager`, `bm-worker`, `bm-reviewer`:
+**Giá trị khi tạo** (cùng quy tắc mặc định của trình cài cũ, `src/roles/config.ts` `defaultProvider`/`defaultModel` và `src/roles/register.ts`):
 
-| Mục đã có | Cài/cập nhật không nêu vai đó | Cài có nêu vai đó (`--role`, `--reconfigure`, hoặc `roles[]` không có mục dùng được: lần cài đầu, provider đã ghi không còn trong Paseo) |
-|---|---|---|
-| alias `bm-<vai>` | giữ mọi khoá; chỉ bảo đảm `paseoTools.enabled === true` cho Manager và Worker (gộp vào `paseoTools` đang có, `disabledTools` còn nguyên); thiếu `extends` thì lấy từ `roles[]` | đặt `extends` và `label` mới; khoá khác giữ |
-| profile `bm-<vai>` | giữ mọi khoá; chỉ bảo đảm `provider === "bm-<vai>"`; thiếu `model`/`name` thì lấy từ `roles[]` | đặt `name`, `model`; **xoá** `thinkingOptionId` khi model đổi (thinking thuộc về model); khoá khác giữ |
-| alias `bm-<vai>-fallback-<n>` | không đụng | không đụng (không có cờ CLI cho chuỗi dự phòng) |
-| chưa có | tạo từ `roles[]` | tạo từ lựa chọn mới |
+- `label` = `name`: `Beads Manager`, `Beads Worker`, `Beads Reviewer`.
+- `notes`: đúng văn bản `ROLE_PROFILE_NOTES` của `src/roles/register.ts`, chép sang plugin thành hằng số (module `plugin/server/setup-roles.ts`), một test giữ văn bản khớp tới khi `src/` bị xoá.
+- Provider gốc mặc định: mục **đầu tiên** của `paseo.providers.listAvailable()` có `available === true` và không phải alias `bm-*`, theo **thứ tự Paseo trả** (không sắp xếp; `pickableProviders` sắp theo tên chỉ cho form). Khác trình cài: không có provider nào `available` thì plugin **không** trỏ vai trò vào provider không dùng được (trình cài lấy `providers[0]`), mà báo `E_SETUP_ROLES_FAILED`.
+- Model mặc định: model **đầu tiên** của `paseo.providers.listModels(<provider gốc>)`; không có → `E_SETUP_ROLES_FAILED`.
+- Thiếu một nửa: alias `bm-<vai>` có mà profile thiếu → profile dùng model đầu tiên của `extends` của alias; profile có mà alias thiếu → alias dùng provider gốc mặc định (profile giữ nguyên; màn Roles & models cảnh báo nếu model không thuộc provider đó).
+- Mục đã có **không bao giờ bị sửa** khi tạo (ADR-008 QĐ5: config của Paseo là nguồn sự thật). Gỡ cấu hình xoá mọi mục có tiền tố `bm-`.
 
-Mục tạo mới: alias `{ extends, label, paseoTools?: { enabled: true } }`; profile `{ id, name, provider: "bm-<vai>", model, notes }` (`notes` là ghi chú "khi nào dùng" của vai), không bao giờ ghi `modeId`/`thinkingOptionId`. Chạy lại trên mục đã đủ khoá → không có thay đổi (idempotent). Gỡ xoá mọi mục có tiền tố `bm-`.
+### 6.2 Plugin ghi cấu hình (`plugin/server/config-writer.ts`, ADR-008, ADR-012)
 
-### 6.2 Plugin ghi cấu hình (`plugin/server/config-writer.ts`, ADR-008)
+Mọi lần ghi đi qua **một** mutex trong tiến trình (`serialised`) và qua `config.patch`, rồi đọc lại và kiểm **chính mục vừa ghi**; không khớp → lỗi, không ghi lại (ghi lại cũng là thay cả mảng). Hôm nay chỉ có đường của màn "Roles & models" (`writeRoleConfig`). **(0.4.0)** Thêm ba đường, cùng mutex, cùng bước đọc lại:
 
-Chỉ khi người dùng bấm Lưu trên "Roles & models". Mọi lần ghi đi qua một mutex trong tiến trình và qua `config.patch` của SDK (khoá phẳng: `providers` là `agents.providers`, được gộp sâu; `agentProfiles` là `daemon.agentProfiles`, thay nguyên mảng; `removeProviders: string[]` xoá alias). Không bao giờ sửa file trực tiếp, không bao giờ gọi `daemon reload`.
+| Hàm (0.4.0) | Patch | Kiểm trước khi ghi | Đọc lại |
+|---|---|---|---|
+| `createRoleEntries(roles, defaults)` | `providers: { <alias thiếu>: {…} }`; `agentProfiles` = mảng vừa đọc + profile thiếu ở cuối (chỉ gửi khi có profile phải tạo) | Đọc ngay trong khoá; chỉ id thuộc ba vai chính và đang thiếu; hình dạng cố định của §6.1 | Alias và profile vừa tạo có đúng khoá đã gửi; mọi mục khác của mảng giữ nguyên |
+| `setAgentTools(value)` | `mcp: { injectIntoAgents: value }` | — | `config.mcp.injectIntoAgents === value` |
+| `removeAllBmEntries(restoreAgentTools)` | `removeProviders` = mọi id provider bắt đầu bằng `bm-` (ba vai chính và mọi alias dự phòng); `agentProfiles` = mảng vừa đọc bỏ mọi mục `id` bắt đầu bằng `bm-` (chỉ gửi khi có mục như vậy); `mcp.injectIntoAgents` khi phải trả về — **một** patch | Đọc ngay trong khoá | Không còn provider hay profile `bm-*`; công tắc đúng giá trị trả về |
 
-Phạm vi: chỉ id bắt đầu bằng `bm-`; alias chính phải có sẵn và không bao giờ bị plugin xoá (`removeProviders` chỉ dành cho alias dự phòng); chỉ ba profile vai trò, và chỉ khi đã có. `agentProfiles` chỉ được gửi khi có sửa profile, nên lần lưu chuỗi dự phòng (chỉ alias) không đè được profile nào. Settings → Agent profiles của Paseo sửa cùng dữ liệu: sửa ở đó khi màn đang mở thì lần Lưu sau bị `E_ROLE_SETTINGS_CONFLICT`.
+Luật cho đường "Roles & models" (`writeRoleConfig`), không đổi trừ câu chữ:
 
 1. `config.get()` → tính `revision` = sha256 của JSON chuẩn hoá (khoá sắp xếp) gồm `{ providers: mọi mục bm-*, profiles: toàn bộ mảng agentProfiles }`. Khác `input.revision` → `E_ROLE_SETTINGS_CONFLICT`, không ghi.
-2. Patch: `providers["bm-<vai>"] = { extends }`; `agentProfiles` = đúng mảng vừa đọc, chỉ thay mục `bm-<vai>` tại chỗ (`null` = xoá khoá). Profile `bm-<vai>` không có → `E_ROLE_SETTINGS_INVALID` ("run npx paseo-bm install first"): plugin không tạo mục vai trò.
+2. Patch: `providers["bm-<vai>"] = { extends }`; `agentProfiles` = đúng mảng vừa đọc, chỉ thay mục `bm-<vai>` tại chỗ (`null` = xoá khoá). `agentProfiles` chỉ được gửi khi có sửa profile, nên lần lưu chuỗi dự phòng (chỉ alias) không đè được profile nào.
 3. `config.patch`. Lỗi → `E_ROLE_SETTINGS_WRITE_FAILED` kèm lời daemon.
-4. Đọc lại, kiểm **chính mục `bm-*` vừa ghi**. Không khớp → `E_ROLE_SETTINGS_WRITE_FAILED`, không ghi lại.
+4. Đọc lại, kiểm chính mục `bm-*` vừa ghi. Không khớp → `E_ROLE_SETTINGS_WRITE_FAILED`.
 
-Giới hạn đã chấp nhận: một thay đổi trong app rơi đúng giữa bước 1 và bước 3 bị lần ghi (thay nguyên mảng) trả về bản đã đọc, và **không phát hiện được**; plugin chỉ thu hẹp cửa sổ đó.
+**Luật phạm vi** (`checkScope`). Hôm nay: chỉ id `bm-`; alias chính phải có sẵn ("run npx paseo-bm install first") và không bao giờ bị xoá; chỉ ba profile vai trò và chỉ khi đã có. **(0.4.0)** ADR-008 QĐ2 hết hiệu lực cho việc **tạo**: alias và profile của ba vai chính được tạo, nhưng **chỉ** qua `createRoleEntries` và chỉ khi đang thiếu; chúng chỉ bị xoá qua `removeAllBmEntries`. Đường `writeRoleConfig` vẫn từ chối tạo hay xoá mục vai chính (lưu một form không bao giờ tạo vai trò), với câu chữ mới ở §7.13.10. Phạm vi ghi vẫn chỉ là các id bắt đầu bằng `bm-`, cộng đúng một khoá ngoài phạm vi đó: `mcp.injectIntoAgents`, chỉ qua `setAgentTools`/`removeAllBmEntries`.
+
+Giới hạn đã chấp nhận (ADR-008 QĐ3, ADR-012 Consequences): một thay đổi trong app rơi đúng giữa lần đọc và lần patch của một lần ghi có gửi `agentProfiles` (lưu profile, tạo profile, gỡ cấu hình) bị trả về bản đã đọc và **không phát hiện được**; plugin chỉ thu hẹp cửa sổ đó. Không còn bản sao lưu nguyên file `config.json`: daemon tự kiểm patch và tự khôi phục file của nó khi lỗi. Settings → Agent profiles của Paseo sửa cùng dữ liệu: sửa ở đó khi màn "Roles & models" đang mở thì lần Lưu sau bị `E_ROLE_SETTINGS_CONFLICT`.
 
 ## 7. Plugin server
 
@@ -355,16 +353,16 @@ Worker skills: all present.
 
 - Manager nhận dòng `Worker mode` (tra `listModes("bm-worker")`) và dòng `Worker skills`; Worker nhận dòng `Reviewer mode` (tra `listModes("bm-reviewer")`); Reviewer không có mục này.
 - Provider không có mode: ``<Child> mode: none — do not pass `settings.modeId` when you create a <Child>; Paseo sets it.`` Không tra được: không có dòng (lần tạo hỏng to, kèm danh sách mode của Paseo). Ngoại lệ cho Reviewer: dùng danh sách mode đọc được lần gần nhất trong tiến trình (qua đúng luật của hook); không có thì `REVIEWER_FALLBACK_MODE = "auto"` nếu provider gốc của `bm-reviewer` là `claude`/`codex` hoặc không đọc được, còn lại không có dòng; mọi lần dùng dự phòng có log. Với Manager, tra hỏng mà profile có mode thì truyền mode đó.
-- `Worker skills`: plugin kiểm năm skill bắt buộc (§4.7) với thư mục skill của provider gốc của `bm-worker` (`claude` `$CLAUDE_CONFIG_DIR/skills`, mặc định `~/.claude/skills`; `codex` `~/.agents/skills` hoặc `$CODEX_HOME/skills`; `pi` `~/.pi/agent/skills`; `opencode` `~/.config/opencode/skill`): `all present.` hoặc ``missing `<tên>`, … — tell the user once, when you confirm the Worker, that it works with lower quality, and point to `npx paseo-bm doctor`.``. Provider gốc khác bốn provider này, hoặc không đọc được → không có dòng.
+- `Worker skills`: plugin kiểm năm skill bắt buộc (§7.13.4) với thư mục skill của provider gốc của `bm-worker` (`claude` `$CLAUDE_CONFIG_DIR/skills`, mặc định `~/.claude/skills`; `codex` `~/.agents/skills` hoặc `$CODEX_HOME/skills`; `pi` `~/.pi/agent/skills`; `opencode` `~/.config/opencode/skill`): `all present.` hoặc ``missing `<tên>`, … — tell the user once, when you confirm the Worker, that it works with lower quality, and point to `npx paseo-bm doctor`.`` — **(0.4.0)** đuôi câu thành ``…and point to Beads Manager → Setup → Agent skills.``. Provider gốc khác bốn provider này, hoặc không đọc được → không có dòng.
 - Hai tra cứu mode và skill chạy song song. Runtime facts nằm ngoài bản nhúng, nên file `roles/*.md` và bản nhúng vẫn khớp từng byte.
 - Agent đang sống mà dòng Runtime facts của nó đổi (người dùng đổi mode/provider của vai con) được báo bằng `BM-SETTINGS` (§7.5).
 
 ### 7.3 Manager (`manager.ts`)
 
-**`manager.ensure { workspaceId }` → `{ agentId, created, otherManagerIds, modeNotice: string | null, toolsNotice?: string | null }`.**
+**`manager.ensure { workspaceId }` → `{ agentId, created, otherManagerIds, modeNotice: string | null, toolsNotice?: string | null, setupNotice?: string | null }`** (`setupNotice` là **(0.4.0)**, §7.13.2: câu về vai trò chỉ khi lần gọi này vừa tạo vai trò; câu về công tắc tool ở mọi lần gọi khi công tắc tắt).
 
 - `findLiveManagers`: agent `roleOfAgent().role === "manager"` còn sống trong workspace, **bỏ** Manager có `bm.replacedBy` hoặc là agent của một sự cố Manager `switched`; xếp có nhãn trước, rồi mới nhất trước. Có → trả nó, `created: false`, các Manager còn lại trong `otherManagerIds` (báo, không bao giờ xoá). Manager bị người dùng xoá → lần sau tạo mới, không báo lỗi.
-- Chưa có → đọc profile `bm-manager` (không có → `E_PROVIDER_UNAVAILABLE`, "re-run `npx paseo-bm`"), chọn mode rồi `createManager`.
+- Chưa có → đọc profile `bm-manager` (không có → `E_PROVIDER_UNAVAILABLE`, "re-run `npx paseo-bm`"), chọn mode rồi `createManager`. **(0.4.0)** Trước khi đọc profile, gọi `ensureRoles` (§7.13.2): vai trò thiếu được tạo, lỗi thành `E_PROVIDER_UNAVAILABLE` với câu chữ của §7.13.2.
 - **Mode của Manager:** `tiered` → `managerModeFor`: mode profile nếu provider liệt kê (kể cả `planning`), không thì mode `dangerous` đầu tiên (Claude `bypassPermissions`, Codex `full-access`); không có → mode mặc định của provider và một dòng log. Plugin không bao giờ tự chọn `planning`, và không lùi về `moderate` (yêu cầu là "không hỏi quyền"). Không đọc được danh sách → truyền mode profile như cũ. `untiered`/`none` → `runPostureOf("manager")` như Worker. Khi plugin tự chọn mode, Manager mang nhãn `bm.modeSet=<mode>`.
 - **Manager đã có, chưa có `bm.modeSet`, và có nhãn `bm.role`** được chuyển **một lần** (`switchOnce`): không có mode đích → thôi; đang `running` → bỏ qua lần này và trả `modeNotice` (đổi mode giữa lượt có thể dựng lại query của Claude); `currentModeId` khác đích → `paseo agent mode <id> <mode> --json`; rồi `paseo agent update <id> --label bm.modeSet=<mode> --json`. Mọi lỗi thành `modeNotice`, Manager vẫn được mở; `modeNotice` cũng được ghi ra log, vì đường mở Manager từ màn Beads không hiện thông báo. Có `bm.modeSet` → không bao giờ đổi nữa (người dùng đổi tay được tôn trọng). Manager chỉ nhận theo provider thì không bao giờ bị đổi mode. Trên `untiered`, plugin không đổi được feature của agent đã có, nên `modeNotice` nói Manager có thể hỏi quyền.
 - **`createManager`** (dùng chung cho `manager.ensure` và Manager thay thế): `workspaces.ref(id).agents.create({ config: { provider, modeId?, thinkingOptionId?, featureValues?, systemPrompt }, title: "Beads Manager", labels: { bm.role: "manager", bm.version, …extra }, prompt? })`. Agent vừa tạo đã hỏng → lưu trữ đúng agent đó rồi ném `E_PROVIDER_UNAVAILABLE`. `capabilities.supportsMcpServers === false` → `toolsNotice` ("…without Paseo tools (on Pi this means pi-mcp-adapter is missing): it cannot create or message a Worker.").
@@ -388,7 +386,7 @@ Giao diện thuộc Design Dashboard; server:
 ### 7.4 Endpoint công cụ cho agent (`agent-tools.ts`, `shared/bm-tools.ts`, ADR-010)
 
 - Tiến trình server của plugin nghe HTTP trên `127.0.0.1`, trả JSON-RPC của MCP, một JSON cho mỗi request: `initialize` (giao thức `2025-06-18`, `2025-03-26`, `2024-11-05`; phiên bản lạ nhận bản mới nhất), `ping`, `tools/list`, `tools/call`; notification → 202. Mỗi vai một đường `/mcp/<worker|reviewer|manager>`, nên agent chỉ thấy công cụ của mình. Đường khác → 404. Chỉ `POST` (khác → 405). Từ chối header `Origin` (403), `Host` khác `127.0.0.1`/`localhost` (403), body > `MAX_BODY_BYTES = 1_000_000` (413, đóng kết nối), batch rỗng (400).
-- Cổng được lưu ở `~/.paseo-bm/ui/agent-tools.json` (`{ schemaVersion: 1, port }`) — luôn dưới install home **mặc định**, vì endpoint khởi động trước khi có handle Paseo; install home ở chỗ khác thì cổng không được lưu — và lấy lại ở lần chạy sau, nên agent đang sống giữ công cụ qua một lần nạp lại plugin. Cổng bị chiếm → cổng mới, agent cũ quay về viết tay. Endpoint không bao giờ tạo thư mục cài đặt. Lỗi → một dòng log, không có công cụ.
+- Cổng được lưu ở `<thư mục dữ liệu>/ui/agent-tools.json` (`{ schemaVersion: 1, port }`), tìm bằng `resolveDataHome` (đồng bộ, không cần handle Paseo — endpoint khởi động trước khi có handle) và tạo bằng `ensureDataHome` khi cần (§5.1). Cổng được lấy lại ở lần chạy sau, nên agent đang sống giữ công cụ qua một lần nạp lại plugin. Cổng bị chiếm → cổng mới, agent cũ quay về viết tay. Lỗi → một dòng log, không có công cụ.
 - Hook gắn vào config: `mcpServers["paseo-bm"] = { type: "http", url, alwaysLoad: true }` và thêm `toolPolicy.preapproved` `{ kind: "mcp", server: "paseo-bm", tool }` cho công cụ của vai (không có `alwaysLoad` thì Claude giấu công cụ sau một bước tìm công cụ). Agent thấy `mcp__paseo-bm__<tool>` (Claude) hay `paseo-bm.<tool>` (Codex), không bị hỏi quyền. Agent đã tồn tại không nhận được công cụ (`agent.session_open` chỉ đổi `env`).
 - **Công cụ chỉ dựng văn bản**, không có tác dụng phụ, nên endpoint không cần biết ai gọi; agent tự gửi văn bản trả về bằng `send_agent_prompt` như cũ. Mọi bên đọc văn bản (thẻ, Dashboard, trace, sổ hỏi–đáp, bộ kiểm mẫu) không đổi. Đường viết tay được giữ vĩnh viễn làm dự phòng.
 
@@ -501,7 +499,7 @@ Still open: <Q… | none | unknown>.
   patterns?: Partial<Record<"L1"|"L2"|"L3"|"L4"|"L5", string[]>> }   // regex, cờ "i", chỉ sửa tay, chung cho mọi vai
 ```
 
-- Thiếu file hay thiếu vai → `{ policy: "ask", entries: [] }` (vẫn có thẻ với "Wait" và "I'll handle it"). File hỏng → dùng mặc định, log, màn cấu hình báo lỗi, và `roles.save-fallback` **từ chối ghi** bằng `E_ROLE_SETTINGS_INVALID` (không đè `patterns` người dùng sửa); không tìm được thư mục cài đặt → `E_ROLE_SETTINGS_WRITE_FAILED` ("run npx paseo-bm install"); khi lưu, khoá plugin không quản lý được giữ nguyên.
+- Thiếu file hay thiếu vai → `{ policy: "ask", entries: [] }` (vẫn có thẻ với "Wait" và "I'll handle it"). File hỏng → dùng mặc định, log, màn cấu hình báo lỗi, và `roles.save-fallback` **từ chối ghi** bằng `E_ROLE_SETTINGS_INVALID` (không đè `patterns` người dùng sửa); không tìm được thư mục cài đặt → `E_ROLE_SETTINGS_WRITE_FAILED` ("run npx paseo-bm install"; **(0.4.0)** thư mục dữ liệu không dùng được, câu chữ §7.13.10); khi lưu, khoá plugin không quản lý được giữ nguyên.
 - `roles.save-fallback`: vai phải thuộc `FALLBACK_ROLES`; mỗi mục qua kiểm của §7.3.6 với luật mode của vai; chặn hai mục trùng `baseProvider` + `model` và mục trùng provider gốc + model của vai chính; mục cùng provider gốc với vai chính được cảnh báo `only helps when the limit is per model`. Ghi alias `bm-<vai>-fallback-<n>` qua `config-writer` trước (xoá bằng `removeProviders`, đánh số lại cho liền), rồi mới ghi file.
 
 **Phát hiện** (`fallback-detect.ts`, hook `agent.turn_ended` riêng, không phụ thuộc kho lưu vết). Chỉ xét agent có vai trong `FALLBACK_ROLES`, không có `bm.replacedBy`, có `workspaceId`; lượt `canceled` bị bỏ qua, và install home chỉ được đọc khi lượt có dạng N1 hay N2.
@@ -644,34 +642,147 @@ Bộ thu thập (`collector.ts`) ghi một bản ghi mỗi lượt của agent `
 | Dự phòng | `fallback.incidents`, `fallback.act` | §7.10 |
 | Chat | `chat.waiting`, `chat.peers`, `chat.beads` | §7.8, Design Dashboard |
 | Dashboard, Beads, Setup | `traces.list`, `traces.get`, `traces.delete`, `traces.reassign`, `traces.workspaces`, `beads.stats`, `beads.list`, `beads.get`, `beads.action`, `beads.lookup`, `workspaces.overview`, `answers.marks`, `answers.mark`, `setup.status`, `setup.install-tool` | Design Dashboard |
+| Thiết lập máy **(0.4.0)** | `setup.ensure-roles` (`setupEnsureRolesRpc`), `setup.grant-agent-tools` (`setupGrantAgentToolsRpc`), `setup.install-skills` (`setupInstallSkillsRpc`), `setup.cleanup` (`setupCleanupRpc`); `setup.status` thêm trường `setup` | §7.13 |
+
+Tên RPC theo đúng lối sẵn có: `<nhóm>.<việc-viết-gạch-nối>`, khớp `^[a-z][a-z0-9._-]*$` của SDK. Mọi RPC có tác dụng ra ngoài máy của người dùng (chạy lệnh, bật công tắc, xoá) nhận `confirmed: z.literal(true)` như `setup.install-tool`, để schema chặn lời gọi chưa qua hộp xác nhận.
+
+**Sổ mã lỗi của RPC plugin** (`DASHBOARD_ERROR_CODES` trong `plugin/shared/contracts.ts`; đi qua kênh RPC, không có mã thoát; thông điệp bắt đầu bằng mã): `E_TIMELINE_UNAVAILABLE`, `E_BEADS_STORE_UNREADABLE`, `E_TRACE_NOT_FOUND`, `E_TRACE_STORE_UNWRITABLE`, `E_TRACE_STORE_SCHEMA_TOO_NEW`, `E_TRACE_REASSIGN_INVALID`, `E_BEAD_NOT_FOUND`, `E_ROLE_EXTRA_INVALID`, `E_TOOL_PRESENT`, `E_TOOL_INSTALL_FAILED`, `E_ROLE_SETTINGS_INVALID`, `E_ROLE_SETTINGS_CONFLICT`, `E_ROLE_SETTINGS_WRITE_FAILED`, `E_FALLBACK_NOT_FOUND`, `E_FALLBACK_NOT_PENDING`, `E_FALLBACK_NO_CANDIDATE`, `E_FALLBACK_NO_RESET`, `E_FALLBACK_CREATE_FAILED`; **(0.4.0)** thêm `E_SETUP_ROLES_FAILED`, `E_SETUP_WRITE_FAILED`, `E_SKILLS_PRESENT`, `E_SKILLS_INSTALL_FAILED`, `E_DATA_HOME_UNAVAILABLE` (§7.13.9). `manager.ensure` ném `E_PROVIDER_UNAVAILABLE` (`ManagerEnsureErrorCode`, ngoài danh sách trên).
+
+### 7.13 Thiết lập máy (0.4.0)
+
+Toàn mục là bản đích 0.4.0 (ADR-012 QĐ4–QĐ6, QĐ8). Plugin không có hook cài hay gỡ, và `contribute()` không có handle Paseo, nên mọi việc thiết lập chạy **lười**: ở RPC đầu tiên cần nó. Giao diện của luồng này thuộc [Design Dashboard](./paseo-bm-dashboard.md) §11.3; mục này là hợp đồng server. Module: `server/setup-roles.ts` (tạo vai trò, hằng số mặc định), `server/setup-machine.ts` (tool agent, đăng nhập, loại bản cài, gỡ cấu hình), `server/setup-skills.ts` (thêm `installSkills`), `server/setup-state.ts`, `server/data-home.ts`; mọi ghi cấu hình qua `config-writer.ts` (§6.2).
+
+#### 7.13.1 Khi nào chạy
+
+| Việc | Tự chạy? | Điểm kích hoạt |
+|---|---|---|
+| Tạo vai trò còn thiếu (`ensureRoles`) | **Có** — không cấp quyền gì mới, chỉ tạo mục `bm-*` của chính paseo-bm | `manager.ensure` (trước khi đọc profile `bm-manager`); `setup.ensure-roles` (màn Setup gọi mỗi lần mở, trước `setup.status`) |
+| Cấp tool Paseo cho agent (`injectIntoAgents`) | Không — nút có cảnh báo | `setup.grant-agent-tools` |
+| Cài skills bằng CLI `skills` | Không — nút có lưu ý bên thứ ba | `setup.install-skills` |
+| Cài `br` / `bv` | Không — nút như hôm nay | `setup.install-tool` (không đổi) |
+| Đăng nhập provider | Không bao giờ chạy | `setup.status` chỉ báo trạng thái và lệnh của chính công cụ đó |
+| Gỡ cấu hình | Không — nút, xác nhận hai lớp | `setup.cleanup` |
+
+`ensureRoles` không chạy khi `setup-state.cleanedUpAt` khác `null`, hoặc khi cờ trong bộ nhớ `cleanedUpThisRun` bật (đặt bởi `setup.cleanup`, để việc xoá thư mục dữ liệu cũng không làm vai trò tự sinh lại trước khi người dùng gỡ plugin); khi đó nó trả `skipped: "cleaned-up"` và chỉ `setup.ensure-roles { resume: true }` ("Set up again") mới xoá mốc đó và chạy tiếp.
+
+#### 7.13.2 `setup.ensure-roles` và `ensureRoles`
+
+1. Trong mutex của `config-writer`: `config.get()`; vai `r` thiếu khi thiếu alias `bm-r` **hoặc** profile `bm-r`. Không thiếu gì → trả ngay, không patch (chạy lại cho 0 thay đổi).
+2. Chọn giá trị theo §6.1 (`listAvailable`, `listModels`, mỗi lời gọi trong `withTimeout` 5 giây như `role-choices.ts`). Không chọn được → `E_SETUP_ROLES_FAILED` ("Paseo reports no available provider" / "Paseo lists no model for <provider>"), không ghi gì.
+3. `createRoleEntries` (§6.2): **một** patch, rồi đọc lại. Patch bị từ chối hay đọc lại lệch → `E_SETUP_ROLES_FAILED` kèm lời daemon.
+4. Thành công → ghi `setup-state.rolesCreated` (lỗi ghi file chỉ log: cấu hình đã đúng), log một dòng `[paseo-bm] created roles …`.
+
+| RPC | Input | Output |
+|---|---|---|
+| `setup.ensure-roles` | `{ resume?: boolean }` | `{ created: BmRole[], baseProvider: string \| null, model: string \| null, skipped: "cleaned-up" \| null }` |
+
+`manager.ensure` gọi cùng `ensureRoles`: lỗi → `E_PROVIDER_UNAVAILABLE` với thông điệp `paseo-bm could not create its roles (<lý do>). Open Beads Manager → Setup to see what is missing.`; `skipped: "cleaned-up"` → `E_PROVIDER_UNAVAILABLE`, `paseo-bm's settings were removed. Open Beads Manager → Setup and choose "Set up again", or remove the plugin with: paseo plugin remove paseo-bm`. Output của `manager.ensure` thêm trường tuỳ chọn **`setupNotice?: string | null`**, ghép từ hai câu (thứ tự này, mỗi câu khi đúng):
+- vừa tạo vai trò: `paseo-bm created its roles with defaults (<provider> · <model>). Change them in Setup → Agents.`
+- `config.mcp.injectIntoAgents === false`: `Paseo's agent tools are off, so the Manager may not be able to create a Worker. Allow them in Setup.`
+
+#### 7.13.3 `setup.grant-agent-tools`
+
+| RPC | Input | Output |
+|---|---|---|
+| `setup.grant-agent-tools` | `{ confirmed: true }` (`z.literal(true)`) | `{ injectIntoAgents: true, changed: boolean }` |
+
+Đã `true` → `changed: false`, không ghi gì và **không** ghi `agentTools` (không phải paseo-bm bật). Ngược lại: ghi `setup-state.agentTools = { setBy: "plugin", previous: false, at }` → `setAgentTools(true)` → đọc lại; patch hỏng → trả `agentTools` về giá trị trước rồi ném `E_SETUP_WRITE_FAILED`; không ghi được `setup-state.json` (trước patch) → `E_DATA_HOME_UNAVAILABLE`, không patch (không có bản ghi thì không hoàn tác được). Văn bản cảnh báo trên màn hình (Design Dashboard §11.3) phải nêu: công tắc áp dụng cho **mọi** agent trên máy, không chỉ ba vai của paseo-bm; agent nào cũng được tạo, nhắn và dừng agent khác. Nút này bắt buộc: §13 Q-044 đã đo, `paseoTools.enabled` của provider không tự cấp tool khi công tắc tắt.
+
+#### 7.13.4 `setup.install-skills`
+
+| RPC | Input | Output |
+|---|---|---|
+| `setup.install-skills` | `{ confirmed: true }` | `{ command: string, code: number, tail: string[], missingBefore: MissingRequired, missingAfter: MissingRequired }` (`MissingRequired` = `setupStatusSchema.skills.missingRequired`) |
+
+- Năm skill bắt buộc (`REQUIRED_SKILLS`: `feature-workflow`, `reviewing-plan`, `converting-plan-to-beads`, `polishing-beads`, `implementing-beads`); `architecture-premise-audit`, `authoring-workspace-protocol` chỉ là gợi ý, không bao giờ cảnh báo. Nguồn là hằng số `cuongntr/agent-skills`.
+- Lệnh cố định, **không** ghép từ input nào: đúng chuỗi `installCommand` của `skillsStatus` hôm nay, `npx -y skills add cuongntr/agent-skills -g -a claude-code codex -s feature-workflow reviewing-plan converting-plan-to-beads polishing-beads implementing-beads -y` (chế độ symlink mặc định của CLI `skills`, không `--copy`). Chạy như `installTool` của `setup-tools.ts`: `/bin/zsh -lc <lệnh>` khi `SHELL` kết thúc bằng `zsh`, còn lại `/bin/bash -lc <lệnh>` (shell đăng nhập, để `npx` có trên PATH của người dùng), hạn **300 giây** (`SKILLS_INSTALL_TIMEOUT_MS = 300_000`), giữ 40 dòng cuối, output qua bộ che bí mật. Hàm `run` của `setup-tools.ts` hôm nay gộp hết giờ vào mã 1; đường này cần nó trả thêm `timedOut: boolean` (lỗi `execFile` có `killed === true`) để `skillsRun.outcome` là `"timeout"` thay vì `"failed"`.
+- Trước khi chạy: đọc `skillsStatus`; Claude và Codex đều đủ năm skill → `E_SKILLS_PRESENT`, không chạy. Sau khi chạy: đọc lại (`missingAfter`), ghi `setup-state.skillsRun` (lỗi ghi chỉ log). Mã khác 0 hay hết giờ → `E_SKILLS_INSTALL_FAILED` kèm lệnh và ba dòng cuối (vẫn ghi `skillsRun` với `outcome` tương ứng).
+- Plugin **không bao giờ** tự ghi, sửa, xoá file trong thư mục skills (ADR-003 QĐ1); thay đổi duy nhất ở đó đến từ tiến trình CLI `skills` người dùng vừa bấm chạy. Cột Pi/OpenCode vẫn chỉ đọc: lệnh không nhắm chúng.
+
+#### 7.13.5 Trạng thái đăng nhập provider
+
+Trong `setup.status` (chỉ đọc): với mỗi provider gốc (`extends`) của `bm-manager`, `bm-worker`, `bm-reviewer` (gộp trùng), gọi `paseo.providers.diagnostic(<provider>)` song song, mỗi lời gọi 5 giây. Từ `payload.diagnostic` (văn bản) chỉ giữ đúng một boolean bằng `/"loggedIn"\s*:\s*(true|false)/` (cùng luật `src/roles/login.ts` `parseProviderDiagnostic`); phần còn lại của văn bản không bao giờ được lưu, trả hay log. Không có boolean, lỗi, hết giờ → `unknown`, không bao giờ đoán là chưa đăng nhập. Lệnh hiển thị (hằng số, chép từ `PROVIDER_LOGIN_COMMANDS`): `claude` → `claude auth login`; `codex` → `codex login`; `opencode` → `opencode providers login`; `pi` → không có lệnh, `guidance` = `Pi has no login command paseo-bm knows; sign in the way Pi's own documentation describes, then open Setup again.`; provider khác → `loginCommand: null`, `guidance: null`. Plugin **không bao giờ** chạy lệnh đăng nhập và không mở terminal cho nó.
+
+#### 7.13.6 Loại bản cài và banner chuyển đổi
+
+`setup.status` báo `install.kind`: `"installer-directory"` khi `config.plugins["paseo-bm"].path` có dạng `<X>/plugin/<ver>` (`installHomeFromPluginPath`) **và** `<X>/install.json` tồn tại; còn lại `"other"` (bản npm, hay checkout của người phát triển). Không gọi `paseo plugin ls` (không cần CLI cho việc chỉ đọc này). `installer-directory` → banner trên Setup với lệnh `npx paseo-bm@0.4.0` (Design Dashboard §11.3). Giới hạn đã biết: người dùng cũ đang chạy mã 0.3.x từ bản cài thư mục, nên banner chỉ hiện khi một bản cài thư mục chạy mã ≥ 0.4.0 (ví dụ sau đường lùi của lần chuyển mà ai đó cài lại tay thư mục mới); đường chính tới người dùng cũ là cảnh báo deprecate của npm, README và caveat của listing.
+
+#### 7.13.7 `setup.cleanup` — "Remove paseo-bm's settings"
+
+| RPC | Input | Output |
+|---|---|---|
+| `setup.cleanup` | `{ confirmed: true, deleteData: boolean }` | `{ removedProviders: string[], removedProfiles: string[], agentTools: "restored" \| "left-on" \| "off", data: { deleted: string[], kept: string[] } \| null, nextCommand: "paseo plugin remove paseo-bm" }` |
+
+1. `removeAllBmEntries` (§6.2) trong **một** patch: mọi provider `bm-*` (ba vai và mọi alias dự phòng), mọi profile `bm-*`, và `mcp.injectIntoAgents = agentTools.previous` khi `setup-state.agentTools` có **và** giá trị hiện tại là `true` (`agentTools: "restored"`); công tắc bật mà không do paseo-bm → giữ, `"left-on"` (màn hình nói ai muốn tắt thì tắt trong Paseo); công tắc tắt → `"off"`. Patch hỏng hay đọc lại lệch → `E_SETUP_WRITE_FAILED`, không bước nào sau chạy.
+2. Đặt `cleanedUpThisRun`; ghi `setup-state.cleanedUpAt` và `agentTools: null` — luôn luôn, kể cả khi `deleteData` là `true`, vì `ui/setup-state.json` không bao giờ bị xoá (bước 3).
+3. `deleteData: true` (màn hình chỉ gửi sau xác nhận thứ hai; mặc định giữ): xoá **đúng các mục do plugin tạo** trong thư mục dữ liệu: `traces/`, mọi thứ trong `ui/` **trừ `ui/setup-state.json`**, `role-extras.json`, `role-fallback.json`, `role-fallback-state.json`; từng mục `lstat` trước, symlink thì bỏ qua và liệt kê vào `kept`. `ui/setup-state.json` luôn được giữ (và liệt kê trong `kept`) vì nó mang `cleanedUpAt`: không có nó, một lần plugin nạp lại trước khi người dùng gỡ plugin sẽ tự tạo lại vai trò (REQ-012 e). Thư mục dữ liệu vì thế không bao giờ bị xoá hẳn bởi nút này. `home.json`, `install.json`, `plugin/`, `backups/`, `.lock` và mọi thứ lạ **được giữ** và liệt kê trong `kept` (chúng không phải của plugin; nếu plugin đang chạy từ một bản cài thư mục thì chính mã của nó nằm trong `plugin/`). Lỗi xoá một mục → liệt kê trong `kept` kèm lý do, không ném.
+4. Không đụng: agent đang tồn tại (màn xác nhận nói agent đang chạy trên vai `bm-*` sẽ hỏng khi tạo lượt mới, nên lưu trữ chúng trước), skills, `br`/`bv`, `pluginsEnabled`, `plugins`, mọi mục không có tiền tố `bm-`.
+5. Plugin không tự gỡ mình (`paseo plugin remove` từ trong plugin dừng chính tiến trình đang chạy lệnh): `nextCommand` là lệnh người dùng chạy tiếp. Gỡ plugin mà không bấm nút → mục `bm-*` và `injectIntoAgents` còn lại; README và caveat của listing nói rõ.
+
+#### 7.13.8 `setup.status` thêm gì
+
+Trường mới `setup` (tuỳ chọn trong schema, để payload của server cũ vẫn parse), vẫn chỉ đọc:
+
+```ts
+setup?: {
+  roles: { present: BmRole[], missing: BmRole[], created: { at, roles, baseProvider, model } | null, cleanedUpAt: string | null },
+  agentTools: { injectIntoAgents: boolean | null /* null: không đọc được config */, setBy: "plugin" | "installer" | null },
+  logins: Array<{ provider: string, roles: BmRole[], state: "logged-in" | "logged-out" | "unknown",
+                  loginCommand: string | null, guidance: string | null }>,
+  skillsRun: { at, command, code, outcome } | null,
+  dataHome: { path: string | null, source: "env" | "pointer" | "default" | null, reason: string | null },
+  install: { kind: "installer-directory" | "other", pluginPath: string | null },
+}
+```
+
+#### 7.13.9 Mã lỗi mới
+
+Thêm vào `DASHBOARD_ERROR_CODES` (§7.12): `E_SETUP_ROLES_FAILED` (không chọn được provider/model, patch bị từ chối, đọc lại lệch khi tạo vai trò), `E_SETUP_WRITE_FAILED` (patch của `setup.grant-agent-tools` / `setup.cleanup` bị từ chối hay đọc lại lệch), `E_SKILLS_PRESENT` (`setup.install-skills` khi không thiếu skill nào), `E_SKILLS_INSTALL_FAILED` (CLI `skills` thoát khác 0 hay quá 300 giây), `E_DATA_HOME_UNAVAILABLE` (thư mục dữ liệu không dùng được: `resolveDataHome` trả `home: null`, hoặc không ghi được `setup-state.json`). Các RPC sẵn có giữ mã hiện tại; chỉ câu chữ đổi (§7.13.10).
+
+#### 7.13.10 Câu chữ còn trỏ tới trình cài
+
+| Chỗ | Hôm nay | (0.4.0) |
+|---|---|---|
+| `server/manager.ts` (profile thiếu) | `…re-run \`npx paseo-bm\` to register the roles.` | Hai câu ở §7.13.2 |
+| `server/config-writer.ts` `checkScope` (alias/profile chính chưa có) | `provider "<id>" is not registered; run npx paseo-bm install first` · `profile "<id>" is not registered; run npx paseo-bm install first` | `provider "<id>" is not registered; open Beads Manager → Setup, which creates it` · `profile "<id>" is not registered; open Beads Manager → Setup, which creates it` |
+| `server/config-writer.ts` (xoá alias chính) | `provider "<id>" belongs to the installer and is never removed by the plugin` | `provider "<id>" is a main role; only "Remove paseo-bm's settings" on Setup removes it` |
+| `server/fallback-settings.ts` (lưu chuỗi dự phòng) | `paseo-bm cannot find its install home; run npx paseo-bm install, then save again` | `paseo-bm cannot use its data folder (<reason>); see Setup` (mã giữ `E_ROLE_SETTINGS_WRITE_FAILED`) |
+| `server/fallback-rpc.ts`, `fallback-switch.ts`, `fallback-wait.ts`, `fallback-manager.ts`, `fallback-reviewer.ts` (`E_FALLBACK_NOT_FOUND`) | `paseo-bm cannot find its install home` | `paseo-bm cannot use its data folder (<reason>); see Setup` (mã giữ `E_FALLBACK_NOT_FOUND`) |
+| `server/setup-rpc.ts` (lưu chỉ dẫn thêm) | `cannot save: the paseo-bm install home cannot be found` | `cannot save: paseo-bm cannot use its data folder (<reason>)` (mã giữ `E_ROLE_EXTRA_INVALID`) |
+| `server/role-extras.ts` (Runtime facts, dòng `Worker skills`) | ``…and point to `npx paseo-bm doctor`.`` | ``…and point to Beads Manager → Setup → Agent skills.`` |
+| `client/agent-tree.ts` (không có vai trò) | `…paseo-bm is not installed on this host, or its roles are not registered with Paseo. Run \`npx paseo-bm doctor\`.` | `No role configuration found: paseo-bm's roles are not registered with Paseo. Open Beads Manager → Setup to create them.` |
+| `client/setup-screen.tsx` (nhãn lệnh skills) | `…(run it yourself, or use \`npx paseo-bm install --apply --install-skills\`)` | `Install the required skills for Claude Code and Codex: press Install skills, or run it yourself` |
+| `plugin/package.json` `description` | `…Install with npx paseo-bm, which also registers the three agent roles.` | §3.1 |
+| `plugin/README.md`, caveat 1–3 của listing | `npx paseo-bm` là đường cài duy nhất; hứa hợp đồng CLI | Cài từ paseo.cafe / `paseo plugin add npm:paseo-bm-plugin` (Paseo 0.9+); ba bước bấm trên Setup; bấm "Remove paseo-bm's settings" trước `paseo plugin remove paseo-bm`, không thì cấu hình còn lại; plugin không nạp được thì `paseo plugin ls` và `paseo plugin logs paseo-bm`; người dùng cũ chạy `npx paseo-bm@0.4.0` một lần |
 
 ## 8. Plugin client (lối vào)
 
 - Sidebar "Beads Manager" và Command Center (mở Manager của workspace hiện tại qua `manager.ensure`; mở Metric), hai slash command (§7.9), màn Settings "Beads Dashboard", bộ biến đổi và vẽ timeline cho thẻ chat, các workspace panel. Client không đọc được hệ thống file: mọi thứ cần đĩa đi qua RPC.
 - Renderer của Paseo là Expo + `react-native-web`; mã client dùng primitive React Native, `useNativeDriver` phải là `false`. File trong `test/` không import `react-native` như một giá trị.
 - Bố cục và hành vi màn hình: [Design Dashboard](./paseo-bm-dashboard.md).
+- **(0.4.0)** Thiết lập máy nằm trên màn Setup (Design Dashboard §11.3): mỗi lần mở, màn gọi `setup.ensure-roles` rồi `setup.status`; thẻ "Set up paseo-bm" phía trên dãy tab liệt kê việc còn thiếu (vai trò, tool Paseo cho agent, skills, `br`/`bv`, đăng nhập), mỗi việc cần đồng ý có nút và hộp xác nhận riêng; nút "Remove paseo-bm's settings" có xác nhận thứ hai cho dữ liệu; banner chuyển đổi khi `install.kind` là `installer-directory`. Dải trạng thái hiện `setupNotice` của `manager.ensure` như `modeNotice`.
 
 ## 9. Security và reliability
 
-- **Ranh giới tin cậy 1 — bật plugin:** mã không sandbox. Đồng ý rõ ràng hoặc `--enable-plugins`; `--yes` không tính.
-- **Ranh giới tin cậy 2 — chạy tiến trình ngoài:** CLI `skills`, lệnh login, cài `br`/`bv`. Argv mảng, không shell, in nguyên văn lệnh trước khi chạy, nguồn skills là hằng số.
-- **Ranh giới tin cậy 3 — mở công cụ Paseo:** `daemon.mcp.injectIntoAgents` cho **mọi** agent trên máy quyền tạo, nhắc, dừng agent khác; gộp một lần hỏi với ranh giới 1; `doctor` hiển thị.
-- **Phạm vi ghi của trình cài:** chỉ `<install home>/**` và các khoá ở §6.1; có test chứng minh không ghi ra ngoài, kể cả thư mục skills. Plugin ghi `ui/`, `traces/`, `role-*.json` trong install home, và `config.json` chỉ qua §6.2.
-- **Chống thoát thư mục:** mọi đường dẫn `resolve` rồi kiểm nằm trong gốc cho phép; từ chối install home trùng/chứa `$HOME`, `~/.paseo`, thư mục cấu hình agent; `lstat` trước khi ghi, không đi xuyên symlink.
-- **Bí mật:** không đọc, ghi, in credential; trong `~/.paseo` chỉ đọc `config.json`; che `PASEO_PASSWORD`, `PASEO_DAEMON_PASSWORD` và token dạng mật khẩu ở mọi kênh. Tin người dùng đi vào bàn giao, sổ hỏi–đáp, sự cố dự phòng và lưu vết đều qua bộ che bí mật. `listUsage` là daemon gọi bằng phiên của nó, chỉ sau một sự cố L1 của Claude/Codex khi policy khác `off`, một lần mỗi sự cố — ngoại lệ mạng duy nhất.
+- **Ranh giới tin cậy 1 — bật plugin:** mã không sandbox. **(0.4.0)** Công tắc `pluginsEnabled` thuộc Paseo và người dùng; plugin không đọc hay ghi nó. README và caveat của listing nói plugin là mã không sandbox, truy cập được file, tiến trình và mạng của máy. (Tới 0.3.1: trình cài hỏi, `--enable-plugins`; `--yes` không tính.)
+- **Ranh giới tin cậy 2 — chạy tiến trình ngoài:** CLI `skills` (**(0.4.0)** nút trên Setup, lệnh hằng số hiện nguyên văn trong hộp xác nhận, shell đăng nhập, 300 giây, §7.13.4), cài `br`/`bv` (nút sẵn có), Paseo CLI từ trong daemon (`paseo-cli.ts`, `execFile` không shell). Lệnh đăng nhập provider **không bao giờ** được chạy: chỉ hiện (§7.13.5). CLI 0.4.0 chỉ gọi `paseo` (argv mảng, không shell).
+- **Ranh giới tin cậy 3 — mở công cụ Paseo:** `daemon.mcp.injectIntoAgents` cho **mọi** agent trên máy quyền tạo, nhắc, dừng agent khác. **(0.4.0)** Một nút riêng có cảnh báo đó (§7.13.3), không còn gộp với việc bật plugin; plugin ghi trạng thái trước vào `setup-state.json` để gỡ cấu hình trả về đúng; Setup hiện công tắc đang bật hay tắt và ai bật.
+- **Phạm vi ghi.** **(0.4.0)** Plugin: `<thư mục dữ liệu>/**` (§5.1) và `config.json` chỉ qua `config.patch` trong phạm vi §6.2 (id `bm-*` và `mcp.injectIntoAgents`); không bao giờ ghi thư mục skills, `~/.paseo` bằng `node:fs`, workspace (ngoài hành động bead đã có), hay `install.json`/`plugin/`/`backups/` của trình cài cũ. CLI 0.4.0: `<install home>/install.json`, `<install home>/ui/setup-state.json`, `~/.paseo-bm/home.json`, và các lệnh `paseo plugin remove|add|install`. Có test chứng minh cả hai phạm vi.
+- **Chống thoát thư mục:** mọi đường dẫn `resolve` rồi kiểm nằm trong gốc cho phép; từ chối thư mục cài đặt hay (0.4.0) thư mục dữ liệu trùng/chứa `$HOME`, `~/.paseo`, thư mục cấu hình agent; `lstat` trước khi ghi, không đi xuyên symlink; gỡ cấu hình chỉ xoá danh sách mục cố định của §7.13.7.
+- **Bí mật:** không đọc, ghi, in credential; trong `~/.paseo` chỉ đọc `config.json` (**(0.4.0)** plugin chỉ đọc qua `config.get()`; văn bản `providers.diagnostic` chỉ để lấy một boolean `loggedIn`, không lưu, không trả, không log); che `PASEO_PASSWORD`, `PASEO_DAEMON_PASSWORD` và token dạng mật khẩu ở mọi kênh. Tin người dùng đi vào bàn giao, sổ hỏi–đáp, sự cố dự phòng và lưu vết đều qua bộ che bí mật. `listUsage` là daemon gọi bằng phiên của nó, chỉ sau một sự cố L1 của Claude/Codex khi policy khác `off`, một lần mỗi sự cố — ngoại lệ mạng duy nhất.
 - **Quyền của agent:** Manager và Worker chạy ở mode không hỏi quyền của provider, nên ranh giới hành vi của chúng (không git, không phá, không ra ngoài workspace, không đọc bí mật, hỏi trước khi cài/mạng/migration/deploy) **chỉ còn trong chỉ dẫn vai**. Reviewer không bao giờ chạy mode `dangerous`/`planning` và không bao giờ tự duyệt (`auto_accept: false`); trên Pi không có lớp duyệt nào và trên OpenCode chạy với quyền agent OpenCode được chọn — ở hai trường hợp đó luật chỉ-đọc cũng chỉ còn trong chỉ dẫn. Alias Reviewer không bao giờ có `paseoTools`; ràng buộc "Reviewer không tạo agent" nằm trong chỉ dẫn (câu hỏi mở ở §13).
 - **Endpoint công cụ:** chỉ `127.0.0.1`, từ chối `Origin` và `Host` lạ, giới hạn body; công cụ không có tác dụng phụ.
-- **Tạo agent của plugin:** chỉ ở `manager.ensure`, `fallback.act` và chế độ Auto người dùng bật.
-- **Atomic:** mọi file ghi qua tạm → `fsync` → `rename` (ngoại lệ `ui/agent-tools.json`, §5.3). **Idempotent:** chạy lại cùng phiên bản cho 0 Action. **Khoá:** `.lock` cho install/uninstall. **Ctrl+C:** file dở ở dạng tạm nên bị bỏ; payload chưa vào hồ sơ thì lần sau dọn.
+- **Tạo agent của plugin:** chỉ ở `manager.ensure`, `fallback.act` và chế độ Auto người dùng bật. **(0.4.0)** Tạo mục cấu hình không cần hỏi chỉ có một: vai trò `bm-*` còn thiếu (§7.13.2); nó không cấp quyền nào mới.
+- **Atomic:** mọi file ghi qua tạm → `fsync` → `rename` (hôm nay trừ `ui/agent-tools.json`; **(0.4.0)** không còn ngoại lệ, §5.1). **Idempotent (0.4.0):** `ensureRoles` trên cấu hình đủ không patch; CLI chạy lại sau khi chuyển là tình huống B, 0 thay đổi. **Khoá:** mọi lần ghi cấu hình của plugin qua một mutex; CLI giữ `<install home>/.lock`. **Ctrl+C** giữa lần chuyển của CLI: file dở ở dạng tạm nên bị bỏ; ngắt giữa `remove` và `add` để lại máy không có plugin `paseo-bm` — chạy lại CLI gặp tình huống D và in đúng lệnh `paseo plugin add`, dữ liệu và `install.json` (chưa đánh dấu) còn nguyên.
 - **Không tác vụ nền, không cron, không watcher.** Mọi thứ của plugin chạy theo sự kiện hay RPC. Ngoại lệ hẹp duy nhất: hẹn giờ "Wait" (§7.10).
 - **Agent mồ côi / chết giữa chừng:** Worker còn chạy khi Manager đã bị xoá không bị ảnh hưởng và hiện ở nhánh gốc của cây; tài liệu và bead đã ghi vẫn hợp lệ; paseo-bm không tự dọn và không tự tạo lại Worker.
 - Mọi thứ nhớ trong bộ nhớ tiến trình (hàng chờ, đếm `BM-FORMAT`, danh sách mode gần nhất, kết quả kiểm công cụ, nhãn đã gắn) mất khi plugin nạp lại; mỗi thành phần đã nêu đường lùi của nó.
-- Yêu cầu rà soát trước bản phát hành: sửa `config.json` (trình cài và `config-writer.ts`), chạy tiến trình ngoài, phần plugin tạo agent (`manager.ts`, `fallback.act`).
+- Yêu cầu rà soát trước bản phát hành: sửa `config.json` (`config-writer.ts`, kể cả ba đường mới của §6.2), chạy tiến trình ngoài (`setup-tools.ts`, `setup-skills.ts`), xoá trong thư mục dữ liệu (`setup.cleanup`), phần plugin tạo agent (`manager.ts`, `fallback.act`), và CLI chuyển đổi 0.4.0.
 
 ## 10. Chỉ dẫn vai trò — cơ chế
 
 - `plugin/roles/{manager,worker,reviewer}.md` là nguồn sự thật cho hành vi của ba vai: phân mức, khi nào dùng bead, khi nào review, cách hỏi, báo cáo, dừng. Tài liệu này không chép lại chúng.
-- Chúng được đóng trong payload, có hash trong `install.json` như mọi file payload, và được nhúng vào bundle server lúc build (`npm run generate:role-instructions`). Nạp vào agent qua hook §7.2, không phụ thuộc việc người dùng đã cài skills.
+- Chúng được đóng trong payload (tới 0.3.1 có hash trong `install.json` như mọi file payload; **(0.4.0)** chỉ nằm trong gói `paseo-bm-plugin`, không hồ sơ nào hash chúng), và được nhúng vào bundle server lúc build (`npm run generate:role-instructions`). Nạp vào agent qua hook §7.2, không phụ thuộc việc người dùng đã cài skills.
 - Paseo đưa `config.systemPrompt` tới từng provider một kiểu (Claude: `append` sau preset `claude_code`; Codex: `developerInstructions`; OpenCode: `system`); phân tích ở [research-20260918-instructions-by-model](./paseo-bm-research-20260918-instructions-by-model.md).
 - Mọi nội dung dành cho agent viết bằng **tiếng Anh**. Tài liệu Worker tạo cho repo đích theo ngôn ngữ repo đó, mặc định tiếng Anh.
 - `test/roles-content.test.ts` ghim nguyên văn chỉ những gì mã hay vai khác phụ thuộc (mẫu khối, tên nhãn, tên phase, thông điệp plugin mà vai phải nhận ra, câu trỏ tới Runtime facts) và kiểm các giới hạn cứng theo ý, trên khối `## RULES`.
@@ -680,19 +791,36 @@ Bộ thu thập (`collector.ts`) ghi một bản ghi mỗi lượt của agent `
 
 ## 11. Testing
 
-- Vitest. Tích hợp chạy trên `$HOME` giả với `paseo`, `skills` giả trên `PATH` ghi lại argv; plugin test với Paseo SDK giả; không test nào chạm daemon thật. CI không chạy agent thật (không xác định, tốn tiền, cần đăng nhập).
-- Tầng chính: unit (phân loại quyền sở hữu, hash, cờ/env, argv, JSON Paseo, che bí mật, hợp nhất `agentProfiles`); luồng install/doctor/uninstall; bất biến an toàn (không ghi ngoài install home và `config.json`, không ghi thư mục skills, không đọc credential); hợp nhất cấu hình trên fixture thật đã ẩn danh (mọi mục không `bm-` giữ từng byte); gián đoạn và idempotent; ma trận skills; hợp đồng RPC và các module server; nội dung chỉ dẫn; gói đã đóng (`smoke:packed`).
+- Vitest. Plugin test với Paseo SDK giả; không test nào chạm daemon thật. CI không chạy agent thật (không xác định, tốn tiền, cần đăng nhập).
 - Test không được treo cả tiến trình: một lời gọi đồng bộ bị chặn thì `testTimeout` của Vitest không cắt được (đã xảy ra với `mkdirSync(…, { recursive: true })` dưới `/proc` trên Linux). Đường dẫn "không ghi được" trong test được dựng bằng một **file thường đứng ở vị trí thư mục** trong thư mục tạm của test (`ENOTDIR` ngay trên mọi hệ điều hành, không phụ thuộc quyền root).
-- Nghiệm thu điều phối trên daemon thật là thủ công, bắt buộc trước bản phát hành lớn; checklist và biên bản ở `docs/operations/`.
+- Hôm nay (0.3.1) còn tầng tích hợp của trình cài: `$HOME` giả với `paseo`, `skills` giả trên `PATH` ghi lại argv; luồng install/doctor/uninstall, phân loại quyền sở hữu, hợp nhất `agentProfiles` trên fixture thật đã ẩn danh. **(0.4.0)** Các test đó (install/doctor/uninstall, planner, applier, ownership, prune, preflight 0.8, skills assist, login, roles register) bị bỏ cùng mã của chúng; thay bằng:
+
+| Tầng (0.4.0) | Kiểm gì |
+|---|---|
+| Thư mục dữ liệu | `resolveDataHome`: env / con trỏ / mặc định; con trỏ hỏng, schema lạ, đích không an toàn → `home: null` không lùi; `ensureDataHome` tạo `0700`, từ chối symlink ở mọi cấp; đọc không tạo gì; không còn đọc `install.json` |
+| `setup-state.json` | ghi atomic `0600`; schema mới hơn → đọc rỗng, không ghi đè |
+| `ensureRoles` | thiếu cả ba / một / nửa (alias không profile và ngược lại) / không thiếu gì (0 patch); không provider `available`; không model; patch bị từ chối; đọc lại lệch; mảng `agentProfiles` gửi đi = mảng đọc được + mục mới ở cuối, mọi mục không `bm-` giữ từng byte; không bao giờ có `command`/`env`/`modeId`/`thinkingOptionId`; Reviewer không `paseoTools`; `cleanedUpAt` chặn, `resume` mở lại; `manager.ensure` trả `setupNotice` |
+| Tool agent và gỡ cấu hình | ghi `agentTools` trước patch, hoàn tác khi patch hỏng; đã bật sẵn → không ghi; gỡ trả công tắc chỉ khi `setBy` có và đang `true`; một patch duy nhất; `deleteData` chỉ xoá các mục của plugin, giữ `ui/setup-state.json` (còn `cleanedUpAt`), `install.json`/`plugin/`/`backups/`/`home.json` và symlink; sau `deleteData` rồi nạp lại plugin, `ensureRoles` vẫn trả `skipped: "cleaned-up"` |
+| Skills | lệnh cố định (so nguyên văn), shell giả, hết 300 giây, mã khác 0, `E_SKILLS_PRESENT`, đọc lại sau khi chạy; không ghi vào thư mục skills |
+| Đăng nhập | chỉ boolean ra khỏi `diagnostic`; lỗi / hết giờ / không có boolean → `unknown`; bảng lệnh |
+| Hợp đồng | danh sách RPC chính xác (`test/plugin-bundle-cjs.test.ts`, `test/rpc-list-describe.test.ts`) gồm bốn RPC mới; `confirmed: true` bắt buộc ở schema; `DASHBOARD_ERROR_CODES` |
+| Câu chữ | không chuỗi nào trong mã của `plugin/` (`server/`, `client/`, `shared/`, `roles/`, hai entry) còn chứa `npx paseo-bm` ngoài banner chuyển đổi, và không còn chứa `install home` trong thông điệp cho người dùng; `plugin/README.md` chỉ nhắc `npx paseo-bm@0.4.0` ở đoạn chuyển đổi |
+| CLI 0.4.0 (tích hợp, `$HOME` giả, `paseo` giả) | tình huống A–E của §4.3; `remove`/`add` hỏng → đường lùi `fell-back` / `fallback-failed`, `install.json` không đổi; thành công → `schemaVersion: 2` + `migratedTo`, con trỏ khi `--home` khác mặc định, mang `agentTools` sang; chạy lại → B; lệnh/cờ đã bỏ → 2; không TTY không `--apply` → 6; JSON đúng khung; không ghi ngoài ba file của §9 |
+| Gói | `smoke:packed`: tarball plugin nạp được, manifest `>=0.9.0`; tarball `paseo-bm` 0.4.0 chỉ có `dist/` |
+
+- Nghiệm thu thủ công trên daemon thật (bắt buộc trước 0.4.0, bản prerelease trên dist-tag `next`, Paseo 0.9.x): cài mới bằng `paseo plugin add npm:paseo-bm-plugin@next` trên máy chưa có gì (đo cả §13 Q-044, Q-045, Q-047); chuyển một bản cài 0.3.1 dạng thư mục (mặc định và `--home`); sau khi chuyển, `npx paseo-bm@0.3.1 install` phải dừng ở mã 3 mà không đổi gì; `paseo plugin update paseo-bm` (§13 Q-046); gỡ cấu hình rồi `paseo plugin remove paseo-bm`. Nghiệm thu điều phối như cũ; checklist ở `docs/operations/`, biên bản mỗi lần chạy ở `docs/archive/operations/` (quy ước của `docs/README.md`).
 
 ## 12. Tương thích
 
-- `install.json` `schemaVersion` 1; mọi trường thêm sau là tuỳ chọn, hồ sơ cũ vẫn đọc được.
-- Hợp đồng JSON và mã thoát của CLI là công khai: trong cùng major chỉ thêm, không đổi nghĩa.
+- **(0.4.0) Paseo 0.8 không còn được hỗ trợ.** `requirements.paseo: ">=0.9.0"`, nên Paseo 0.8 không nạp gói 0.4.0; người dùng 0.8 giữ `paseo-bm@0.3.1` (trình cài và payload thư mục) hoặc nâng Paseo. Mã plugin vẫn biên dịch với SDK 0.8.0 và đã chạy trên 0.9.2.
+- **(0.4.0) Hợp đồng CLI.** Tới 0.3.1 lệnh, cờ, JSON và mã thoát của CLI là hợp đồng công khai, trong cùng major chỉ thêm. 0.4.0 bỏ gần hết chúng; đó là thay đổi phá vỡ có chủ ý, đánh dấu bằng bước minor trước 1.0 (ADR-012 QĐ9). Phần còn lại (khung JSON `schemaVersion: 1`, các mã 0/2/3/5/6/7) giữ nghĩa cũ; mã 1 và 4 không bao giờ được dùng lại cho nghĩa khác.
+- `install.json`: `schemaVersion` 1 tới 0.3.1; **(0.4.0)** `2` sau khi chuyển (§4.5), để trình cài cũ dừng thay vì ghi.
+- **(0.4.0) Hạ phiên bản xuống dưới 0.4.0 không phải đường lùi.** Plugin 0.3.x chỉ tin một thư mục có `install.json` `schemaVersion: 1`, tìm ở `<đường dẫn đăng ký>/../..` rồi `~/.paseo-bm` (`install-home.ts` `confirmInstallHome`). Sau `paseo plugin update paseo-bm --version 0.3.1` trên bản npm, đường dẫn đăng ký không có dạng `<home>/plugin/<ver>`, và `install.json` hoặc đã là `2` (người đã chuyển) hoặc không có (người cài mới): plugin 0.3.1 chạy nhưng mọi phần cần thư mục (lưu vết, chỉ dẫn thêm, dự phòng, sổ hỏi–đáp) tắt; cấu hình `bm-*` vẫn dùng được. Đường lùi được hỗ trợ là một bản vá ≥ 0.4.0 (§3.2); hạ trong phạm vi ≥ 0.4.0 bằng `paseo plugin update paseo-bm --version <v>` thì an toàn.
+- **(0.4.0) Quyết định R3.** Người chịu rủi ro: hieu.nt10. Điểm không lùi: mỗi lần publish npm (npm chặn `unpublish` sau 72 giờ) và `npm deprecate paseo-bm`. Diễn tập **có chọn**: bản prerelease trên dist-tag `next` của cả hai gói cộng nghiệm thu trên daemon Paseo 0.9 thật (§11) trước khi có gì lên `latest`; §13 Q-045 không đạt thì dừng. Khoanh vùng sau phát hành: bản vá; người dùng thư mục mà lần chuyển lùi (`fell-back`) vẫn chạy 0.3.1 như trước.
 - Văn bản khối `BM-REPORT` là hợp đồng đang được Dashboard, thẻ, trace và sổ hỏi–đáp tiêu thụ; đổi nó cần cập nhật mọi bên đọc và bộ đọc khoan dung.
-- Kho lưu vết và các file `ui/` có lược đồ riêng đánh số độc lập; bản ghi mới chỉ thêm trường tuỳ chọn.
-- Bản plugin cũ gặp alias `bm-*-fallback-*` không nhận ra vai của nó; lệnh gỡ của bản cũ vẫn xoá alias đó (luật tiền tố `bm-`).
-- Khi Paseo đổi phiên bản: xem lại `requirements.paseo`, mức kiểm ở preflight, khoá cấu hình ở §6, hình dạng `daemon status --json` (0.9.2 đã bỏ `cliVersion`), và danh sách `TOOL_PROVIDERS`.
+- Kho lưu vết và các file `ui/` (kể cả `setup-state.json`) có lược đồ riêng đánh số độc lập; bản ghi mới chỉ thêm trường tuỳ chọn. Bản npm đọc nguyên kho của bản cài thư mục, không di trú.
+- Bản plugin cũ gặp alias `bm-*-fallback-*` không nhận ra vai của nó; mọi đường gỡ vẫn xoá alias đó (luật tiền tố `bm-`).
+- Khi Paseo đổi phiên bản: xem lại `requirements.paseo`, khoá cấu hình ở §6 và hình dạng `MutableDaemonConfigPatch`, hình dạng `plugin ls --json` (`installation.identity`) mà CLI 0.4.0 đọc, và danh sách `TOOL_PROVIDERS`.
 
 ## 13. Câu hỏi mở
 
@@ -700,13 +828,16 @@ Bộ thu thập (`collector.ts`) ghi một bản ghi mỗi lượt của agent `
 |---|---|---|---|
 | Q-028 | Khi công tắc MCP toàn cục bật, `paseoTools` ở mức provider có thật sự tước công cụ của `bm-reviewer` không? Nếu không, "Reviewer không tạo agent" chỉ nằm ở chỉ dẫn (ADR-006 QĐ9) | hieu.nt10 | open |
 | Q-025 | Một workspace đúng một Manager; người dùng cố tình tạo cái thứ hai thì xử lý gì ngoài "chọn cái có nhãn, mới nhất, và báo"? | hieu.nt10 | open |
-| Q-039b | Lệnh gỡ xử lý kho lưu vết thế nào (hỏi riêng rồi xoá, hay luôn giữ), và tên cờ không tương tác (đề xuất `--purge-traces`). Hiện mã luôn giữ `traces/` | hieu.nt10 | open |
-| Q-043 | `doctor` có báo kho lưu vết (số trace, dung lượng, lược đồ) không? | hieu.nt10 | open |
+| Q-044 | Trên daemon thật với `daemon.mcp.injectIntoAgents` **tắt**, `paseoTools.enabled` của `bm-manager`/`bm-worker` có tự cấp tool Paseo cho agent của hai vai đó không? | hieu.nt10 | **closed 2026-09-25 — không.** Đo trên Paseo 0.9.2: công tắc tắt → agent trên `bm-worker` (có `paseoTools.enabled: true`) và agent `claude` thường đều không có `create_agent`/`send_agent_prompt`/`list_agents`; đối chứng dương với công tắc bật → agent `bm-worker` có đủ `mcp__paseo__create_agent`, `mcp__paseo__send_agent_prompt`, `mcp__paseo__list_agents`. Công tắc toàn máy là bắt buộc; nút §7.13.3 giữ nguyên; vai trò tự tạo kèm `paseoTools` không tự cấp quyền gì |
+| Q-045 | Gói cài bằng `paseo plugin add npm:paseo-bm-plugin` có nạp được `zod` và `@getpaseo/plugin` không (`plugin/package.json` không khai `dependencies`; bản cài thư mục cũng không có `node_modules` mà vẫn chạy, nên host có lẽ cấp chúng, nhưng chưa thấy với nguồn npm)? Không → thêm `dependencies` trước 0.4.0. Đo trên bản prerelease `next` | hieu.nt10 | open — rủi ro thấp: plugin `paseo-cafe` cài từ npm trên cùng máy (Paseo 0.9.2) chỉ khai `semver` mà vẫn import `zod`, `react`, `react-native`, `@getpaseo/plugin` và đang `running`, nên host cấp các module đó cho nguồn npm; vẫn xác nhận trên bản `next` |
+| Q-046 | `paseo plugin update paseo-bm` có đổi đường dẫn đăng ký (thư mục `<uuid>` mới) không? Không ảnh hưởng dữ liệu (§5.1 không dùng thư mục gói), nhưng ảnh hưởng `install.kind` và chẩn đoán | hieu.nt10 | open |
+| Q-047 | Paseo 0.9 `plugin add npm:…` với `--json` và không TTY: có hỏi tin cậy tương tác, có tự bật `pluginsEnabled`, và in JSON cùng hình dạng `{ id, path, enabled, status }` như `plugin install` không? Và `plugin ls --json` của một bản npm có mang `installation.identity = { kind: "npm", packageName, pluginPath }` không? CLI 0.4.0 (§4.3 tình huống B, §4.4 bước 2) dựa vào hai hình dạng đó | hieu.nt10 | open — một phần đã trả lời 2026-09-25: `plugin ls --json` của bản npm `paseo-cafe` có `installation.identity = { kind: "npm", packageName: "paseo-cafe", pluginPath: "." }`, nên luật nhận tình huống B đứng; phần `plugin add --json` không TTY vẫn đo trên bản `next` |
 
 ## 14. Revision History
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-09-25 | hieu.nt10 (soạn bởi Claude) | **ADR-012: một nguồn duy nhất — plugin `paseo-bm-plugin` là toàn bộ sản phẩm (bản đích 0.4.0).** §1–§6 viết lại theo bản đích: một gói sản phẩm, `requirements.paseo >=0.9.0`, `paseo-bm` 0.4.0 là lần publish cuối và `release.yml` sau đó chỉ publish plugin (§3); CLI 0.4.0 chỉ chuyển bản cài thư mục sang npm, với tình huống A–E, đường lùi bm-vey, `install.json` `schemaVersion: 2` + `migratedTo`, `E_COMMAND_RETIRED`, mã thoát 0/2/3/5/6/7 và khung JSON (§4); thư mục dữ liệu do plugin tự tạo, `resolveDataHome` env → con trỏ `~/.paseo-bm/home.json` → mặc định, `ui/setup-state.json` (§5); plugin là bên ghi config duy nhất, giá trị mặc định khi tạo vai trò, ba đường ghi mới và luật phạm vi đổi (§6). Thêm §7.13 (thiết lập máy: `setup.ensure-roles`, `setup.grant-agent-tools`, `setup.install-skills`, `setup.cleanup`, trường `setup` của `setup.status`, `setupNotice` của `manager.ensure`, năm mã lỗi mới, bảng câu chữ còn trỏ tới `npx paseo-bm`); sổ mã lỗi RPC chuyển về §7.12. Cập nhật §7.2, §7.3, §7.4, §7.10, §8–§12. §13: bỏ Q-039b (đã trả lời: nút gỡ cấu hình, xoá dữ liệu chỉ sau xác nhận thứ hai, mặc định giữ — ADR-012 QĐ6) và Q-043 (không còn `doctor`); thêm Q-044 → Q-047. Trình cài 0.3.1 chỉ còn trong lịch sử git. **Rà soát `design-ready` độc lập cùng ngày**, đối chiếu mã: thêm dòng Routing decision ở đầu; §4.3 thêm bản cài trong `<install home>/plugin/` không có `install.json` (→ C) và lỗi `plugin ls` (→ 3), ghi rõ luật B dựa vào `installation.identity`; §5.1 liệt kê đủ chỗ gọi `installHomeOf`; §7.13.4 `run` phải báo hết giờ; §7.13.10 thêm câu `E_FALLBACK_NOT_FOUND` của năm module dự phòng; §11 phạm vi test câu chữ và chỗ để biên bản; §12 thêm hạ phiên bản dưới 0.4.0 (không phải đường lùi, plugin 0.3.x không tin thư mục dữ liệu) và quyết định R3; Q-047 thêm hình dạng `plugin ls --json` của bản npm Sau review plan: Q-044 đóng (đo: không), bằng chứng cho Q-045 và một phần Q-047, thêm trường hợp cài từ paseo.cafe khi còn bản cài thư mục (§4.3). |
 | 2026-09-25 | hieu.nt10 (soạn bởi Beads Worker) | **Q-026 đã trả lời và rời bảng câu hỏi mở:** Manager được tự điều phối Worker trong phạm vi người dùng đã quyết ([ADR-011](../adr/ADR-011-manager-coordinates-workers.md), PRD REQ-025 (d)–(g), quyết định chủ repo Q1 (c) của `req-20260925T051841Z`); §10 trỏ tới quyết định đó, luật nằm trong `plugin/roles/manager.md` |
 | 2026-09-25 | hieu.nt10 (soạn bởi Claude) | Rà soát sau khi gộp, đối chiếu từng delta với mã: **bổ sung** dist-tag theo loại phiên bản của `release.yml` (gộp delta 20260925b-stable-release), `plugin/LICENSE`, năm skill bắt buộc, lệnh `provider ls/models/diagnostic`, cài `br`/`bv` và thời hạn login, hình dạng mục vai trò tạo mới (có `notes`), phạm vi `config-writer`, `FallbackSettings` và lỗi của `roles.*`, luật nhận Reviewer thay thế, khoá tuần tự và mã lỗi của `fallback.act`, nhãn `class`, Auto chỉ báo một lần, 404 và chỗ lưu cổng của endpoint công cụ, luật đầu vào của công cụ, phase cũ bộ đọc khoan dung nhận, chip `template error`, thử lại `BM-FORMAT`, đọc lại đích của `agents.stop-all`, cờ `NEW_REQUEST_MARKER`, trỏ tới báo cáo nghiên cứu system prompt theo provider; **sửa** mã thoát của `--role` (cặp không có trong Paseo là mã 3), dự phòng mode Reviewer trong Runtime facts, thứ tự trường `BM-HANDOVER`, hẹn giờ Wait (không huỷ, `expired` không báo), ngoại lệ ghi atomic của `ui/agent-tools.json`, phạm vi loại trừ Worker bị thay khỏi `BM-SETTINGS` |
 | 2026-09-25 | hieu.nt10 (soạn bởi Claude) | **Gộp 16 delta thiết kế lõi vào tài liệu này; từ nay là tài liệu sống, sửa tại chỗ.** Viết lại theo thành phần, chỉ mô tả trạng thái hiện tại theo mã; bỏ errata, bảng câu hỏi đã trả lời và lịch sử cũ (git giữ bản trước). Hành vi của vai trỏ về `plugin/roles/*.md`. Các delta đã gộp liệt kê ở §15 và mang Status "Merged". Chỗ lệch giữa delta và mã được viết theo mã |

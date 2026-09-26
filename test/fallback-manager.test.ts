@@ -86,7 +86,20 @@ function fakeDaemon(options: { create?: () => Promise<unknown>; oldLabels?: Reco
         error: null,
       }),
     },
-    config: { get: async () => ({ config: { providers: { "bm-manager": { extends: "claude" } } } }) },
+    config: {
+      // A machine that is already set up, so `ensureRoles` (0.4.0) finds
+      // nothing missing when `manager.ensure` runs below.
+      get: async () => ({
+        config: {
+          providers: { "bm-manager": { extends: "claude" }, "bm-worker": { extends: "claude" }, "bm-reviewer": { extends: "claude" } },
+          agentProfiles: [
+            { id: "bm-manager", provider: "bm-manager", model: "claude-sonnet-5" },
+            { id: "bm-worker", provider: "bm-worker", model: "claude-sonnet-5" },
+            { id: "bm-reviewer", provider: "bm-reviewer", model: "claude-sonnet-5" },
+          ],
+        },
+      }),
+    },
   };
   return { paseo, create, agents };
 }

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { priceFor, priceUsage, type ListedPrices } from "../plugin/server/cost";
@@ -395,12 +395,14 @@ describe("the Dashboard read RPCs price from the listed rates", () => {
     home = mkdtempSync(join(tmpdir(), "bm-cost-"));
     workspace = join(home, "repo");
     mkdirSync(join(workspace, ".beads"), { recursive: true });
-    writeFileSync(join(home, "install.json"), JSON.stringify({ schemaVersion: 1 }));
+  // From 0.4.0 the store is found with `resolveDataHome` (design §5.1).
+    process.env["PASEO_BM_HOME"] = home;
     clearTraceStoreCache();
     clearBeadsCache();
   });
 
   afterEach(() => {
+    delete process.env["PASEO_BM_HOME"];
     rmSync(home, { recursive: true, force: true });
   });
 

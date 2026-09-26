@@ -1,7 +1,7 @@
 {
   "name": "paseo-bm",
-  "version": "0.3.1",
-  "description": "Beads Management for Paseo: installs the paseo-bm plugin and its agent roles",
+  "version": "0.4.0-alpha.0",
+  "description": "Beads Management for Paseo: the last version of the paseo-bm command, which moves an install made by an earlier npx paseo-bm to the plugin on npm. The product itself is the paseo-bm-plugin package.",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -11,9 +11,7 @@
     "paseo-bm": "dist/index.js"
   },
   "files": [
-    "dist/",
-    "plugin/",
-    "!plugin/images/**"
+    "dist/"
   ],
   "repository": {
     "type": "git",

@@ -8,8 +8,8 @@
 | Created | 2026-09-16 |
 | Requirements source | [PRD Dashboard điều phối](../product/paseo-bm-dashboard-prd.md) (REQ-040 → REQ-069); REQ-059 (thẻ câu hỏi) nằm ở [PRD gốc](../product/paseo-bm-prd.md) |
 | Design gốc | [paseo-bm — Technical Design](./paseo-bm.md) — tài liệu này **mở rộng** nó: thư mục cài đặt, vai trò, chỉ dẫn, fallback, slash command ở đó |
-| Related ADRs | [ADR-007](../adr/ADR-007-dashboard-trace-store.md) (kho lưu vết) · [ADR-002](../adr/ADR-002-install-ownership-model.md) · [ADR-005](../adr/ADR-005-manager-as-agent.md) (vòng đời agent thuộc người dùng) · [ADR-006](../adr/ADR-006-role-registration.md) |
-| Môi trường tham chiếu | `@getpaseo/plugin` 0.8.0, `@getpaseo/client` 0.8.0, `@getpaseo/protocol` 0.8.0; Paseo CLI/daemon 0.8.0; Node ≥ 22 |
+| Related ADRs | [ADR-007](../adr/ADR-007-dashboard-trace-store.md) (kho lưu vết) · [ADR-002](../adr/ADR-002-install-ownership-model.md) · [ADR-005](../adr/ADR-005-manager-as-agent.md) (vòng đời agent thuộc người dùng) · [ADR-006](../adr/ADR-006-role-registration.md) · [ADR-012](../adr/ADR-012-plugin-is-the-product.md) (plugin là toàn bộ sản phẩm; thiết lập máy trên Setup) |
+| Môi trường tham chiếu | `@getpaseo/plugin` 0.8.0, `@getpaseo/client` 0.8.0, `@getpaseo/protocol` 0.8.0; Paseo CLI/daemon 0.8.0; Node ≥ 22. **(0.4.0)** Paseo ≥ 0.9.0 |
 
 ## 1. Phạm vi
 
@@ -21,7 +21,7 @@
 - mọi màn hình client của plugin: surface "Beads Manager" (Setup kể cả màn "Roles & models", Workspaces, Metric, Beads), tab "Beads" và nút header, thẻ chat, thẻ câu hỏi, thẻ sự cố dự phòng, pill câu đang chờ và pill dự phòng, panel "Beads in this chat" và "Beads agents";
 - các RPC nuôi những thứ trên (§5) và mã lỗi của chúng.
 
-**Không sở hữu** (ở [design gốc](./paseo-bm.md) hoặc delta còn sống của nó): nội dung `plugin/roles/*.md` (kể cả luật Worker viết `BM-QUESTIONS`, cách Manager chuyển câu trả lời, nhãn `bm.requestId`/`bm.batchId`); trình cài đặt và CLI (kể cả `--install-beads-tools`); bố cục thư mục cài đặt; cách tạo agent và hook `agent.create`; `manager.ensure`, `agents.list`, `roles.describe`, `agents.stop-all`; hợp đồng server của cài đặt vai trò, model và fallback (`roles.settings`, `roles.options`, `roles.save-settings`, `roles.save-fallback`, `fallback.*`, luật phát hiện và xử lý sự cố); sổ câu hỏi–trả lời (qa-ledger); công cụ agent của plugin (ADR-010); hai slash command `/bm-worker-new` và `/bm-worker-stop-all`. Tài liệu này chỉ tả chỗ các phần đó hiện lên màn hình.
+**Không sở hữu** (ở [design gốc](./paseo-bm.md) hoặc delta còn sống của nó): nội dung `plugin/roles/*.md` (kể cả luật Worker viết `BM-QUESTIONS`, cách Manager chuyển câu trả lời, nhãn `bm.requestId`/`bm.batchId`); trình cài đặt và CLI (kể cả `--install-beads-tools`; **(0.4.0)** CLI chuyển đổi); bố cục thư mục cài đặt (**(0.4.0)** thư mục dữ liệu, `setup-state.json`); hợp đồng server, luật ghi và mã lỗi của thiết lập máy (`setup.ensure-roles`, `setup.grant-agent-tools`, `setup.install-skills`, `setup.cleanup`, trường `setup` của `setup.status` — design gốc §7.13); cách tạo agent và hook `agent.create`; `manager.ensure`, `agents.list`, `roles.describe`, `agents.stop-all`; hợp đồng server của cài đặt vai trò, model và fallback (`roles.settings`, `roles.options`, `roles.save-settings`, `roles.save-fallback`, `fallback.*`, luật phát hiện và xử lý sự cố); sổ câu hỏi–trả lời (qa-ledger); công cụ agent của plugin (ADR-010); hai slash command `/bm-worker-new` và `/bm-worker-stop-all`. Tài liệu này chỉ tả chỗ các phần đó hiện lên màn hình.
 
 ## 2. Kiến trúc
 
@@ -60,6 +60,7 @@ plugin/
     server/chat-waiting.ts      chat.waiting              server/answer-marks.ts  answers.mark(s)
     server/live-timeline.ts     readTimelinePages (dùng chung)
     server/setup-rpc.ts, setup-tools.ts, setup-skills.ts, role-extras.ts   màn Setup
+    server/setup-roles.ts, setup-machine.ts, setup-state.ts, data-home.ts   (0.4.0) thiết lập máy, design gốc §5, §7.13
   shared/contracts.ts           hợp đồng Zod của mọi RPC
   shared/bm-report.ts           bộ đọc BM-REPORT/BM-REVIEW (server/bm-report.ts chỉ re-export)
   shared/bm-questions.ts        bộ đọc/soạn BM-QUESTIONS/BM-ANSWERS
@@ -95,20 +96,22 @@ NGƯỜI DÙNG MỞ MÀN HÌNH
 - Chỉ primitive React Native; mọi màu lấy từ theme qua `toneColor(theme, tone)`, `Tone = "muted" | "plain" | "info" | "warning" | "danger" | "success"` (`plain` = `foreground`, `muted` = `foregroundMuted`, `info` = `accent`, ba tone còn lại là `status*`). Không mã màu viết cứng, không ghép kênh alpha vào chuỗi màu: tô nhạt làm bằng một `View` phủ tuyệt đối với `opacity`.
 - Chữ giao diện bằng tiếng Anh; mọi thứ bấm được có nhãn trợ năng; dùng được ở `layout.compact` (padding 12 thay 24).
 - Phần vẽ dùng chung là **view không hook** trong `ui.tsx` (`WorkspaceScreenHeader`, `BeadRowCard`, `StatusTabs`, `KanbanBoard`, `StatCards`, `BarChart`, `Chip`, `RoleMark`, `RoleLegend`), để `test/helpers/element-tree.ts` dựng được cây mà không cần renderer.
-- Trạng thái sống qua việc gỡ component nhưng không qua lần tải lại app thì nằm ở module, đọc bằng `useSyncExternalStore`: `createSlot<T>()` (`slot.ts`), `createSessionToggle`, `createSessionMap` (`beads-model.ts`), `answer-state.ts`. Trạng thái phải qua được lần tải lại thì nằm ở server, trong `<install home>`.
+- Trạng thái sống qua việc gỡ component nhưng không qua lần tải lại app thì nằm ở module, đọc bằng `useSyncExternalStore`: `createSlot<T>()` (`slot.ts`), `createSessionToggle`, `createSessionMap` (`beads-model.ts`), `answer-state.ts`. Trạng thái phải qua được lần tải lại thì nằm ở server, trong `<install home>` (**(0.4.0)** thư mục dữ liệu, design gốc §5.1).
 - Không polling ngầm, trừ các nhịp có chủ ý: danh sách Workspaces 10 s (chỉ khi đang hiện), `chat.waiting` 15 s, nút header 15 s, panel "Beads in this chat" 15 s, panel "Beads agents" 5 s, thẻ sự cố dự phòng 15 s (chỉ khi sự cố `pending`/`waiting`).
 
 ## 3. Kho lưu vết
 
 ### 3.1 Tìm thư mục cài đặt
 
-Bundle server không có cwd và không đọc được `import.meta.url`, lại phải chịu được `--home` / `PASEO_BM_HOME`. Thứ tự, dừng ở bước đầu thành công:
+Bundle server không có cwd và không đọc được `import.meta.url`, lại phải chịu được `--home` / `PASEO_BM_HOME`. Thứ tự hôm nay, dừng ở bước đầu thành công:
 
 1. `paseo.config.get()` → `config.plugins["paseo-bm"]` là `{ source: "directory", path }` với `path` = `<install home>/plugin/<version>`, nên `<install home>` = `dirname(dirname(path))`.
 2. Xác nhận bằng `<install home>/install.json` đọc được `schemaVersion`. Không khớp → bước 3.
 3. Dự phòng `~/.paseo-bm`. Vẫn không có `install.json` → lưu vết **tắt** kèm thông báo; phần đọc beads vẫn chạy.
 
 `install.json` chỉ được đọc, không bao giờ ghi.
+
+**(0.4.0)** Thay bằng `resolveDataHome()` của design gốc §5.1: `PASEO_BM_HOME` → con trỏ `~/.paseo-bm/home.json` → `~/.paseo-bm`; plugin **tự tạo** thư mục (`0700`) ở lần ghi đầu và không còn đọc `install.json`. Lưu vết chỉ tắt khi `resolveDataHome` trả `home: null` (thư mục không an toàn, con trỏ hỏng); lý do hiện ở thông báo của Metric như hôm nay và ở khối "This install" của Setup (§11.3). Mọi đường dẫn `<install home>` trong tài liệu này từ 0.4.0 đọc là `<thư mục dữ liệu>`.
 
 ### 3.2 Bố cục
 
@@ -308,6 +311,10 @@ Tên RPC phải khớp `^[a-z][a-z0-9._-]*$` (SDK). Mọi RPC dưới đây ch�
 | `answers.mark` | `{ key (1–400 ký tự), marked }` → `{ keys, notices }` | **Ghi** `ui/answer-marks.json` |
 | `setup.status` | `{}` → tools, skills, extras, … | §11.3; chỉ chạy `--version` |
 | `setup.install-tool` | `{ tool: br\|bv, confirmed: true }` → `{ command, code, tail }` | **Chạy** trình cài; `confirmed` bắt buộc là `true` |
+| `setup.ensure-roles` **(0.4.0)** | `{ resume? }` → `{ created, baseProvider, model, skipped }` | **Ghi** cấu hình Paseo khi thiếu vai trò; Setup gọi mỗi lần mở, trước `setup.status`. Hợp đồng: design gốc §7.13.2 |
+| `setup.grant-agent-tools` **(0.4.0)** | `{ confirmed: true }` → `{ injectIntoAgents: true, changed }` | **Ghi** `daemon.mcp.injectIntoAgents`; design gốc §7.13.3 |
+| `setup.install-skills` **(0.4.0)** | `{ confirmed: true }` → `{ command, code, tail, missingBefore, missingAfter }` | **Chạy** CLI `skills`; design gốc §7.13.4 |
+| `setup.cleanup` **(0.4.0)** | `{ confirmed: true, deleteData }` → `{ removedProviders, removedProfiles, agentTools, data, nextCommand }` | **Xoá** mục `bm-*`, trả công tắc tool, tuỳ chọn xoá dữ liệu; design gốc §7.13.7 |
 | `roles.instructions` | `{ role }` → `{ base, extra, full, path \| null, maxChars }` | §11.3 |
 | `roles.save-extra` | `{ role, text }` → `{ extra, full }` | **Ghi** `role-extras.json` |
 
@@ -325,6 +332,11 @@ Tên RPC phải khớp `^[a-z][a-z0-9._-]*$` (SDK). Mọi RPC dưới đây ch�
 | `E_ROLE_EXTRA_INVALID` | Chỉ dẫn thêm sai (vượt 8 000 ký tự) |
 | `E_TOOL_PRESENT` | `setup.install-tool` cho công cụ đã có |
 | `E_TOOL_INSTALL_FAILED` | Lệnh cài chạy lỗi |
+| `E_SETUP_ROLES_FAILED` **(0.4.0)** | Không tạo được vai trò còn thiếu (không có provider/model dùng được, Paseo từ chối) |
+| `E_SETUP_WRITE_FAILED` **(0.4.0)** | Paseo từ chối lần bật tool agent hay lần gỡ cấu hình |
+| `E_SKILLS_PRESENT` **(0.4.0)** | `setup.install-skills` khi không thiếu skill nào |
+| `E_SKILLS_INSTALL_FAILED` **(0.4.0)** | CLI `skills` lỗi hay quá 300 giây |
+| `E_DATA_HOME_UNAVAILABLE` **(0.4.0)** | Thư mục dữ liệu không dùng được, hay không ghi được `setup-state.json` |
 
 Các mã `E_ROLE_SETTINGS_*` và `E_FALLBACK_*` trong cùng danh sách thuộc các RPC ở design gốc (§7.3.6, §7.10); màn hình hiện chúng theo §11.3 và §15.8.
 
@@ -454,7 +466,7 @@ Command Center và slash command không truyền được gì vào surface, nên
 
 ### 11.2 Dải trạng thái
 
-`launcherStatusLines({ commandNotice, canOpenAgents, state })` trả theo thứ tự: thông báo slash command (tone `muted`, `dismissable`, nhãn trợ năng `"<text>. Dismiss."`); `OLD_HOST_WARNING` khi host thiếu `navigation.openAgent` (tone `warning`); các dòng `describeLauncherState(state)`: `pending` → "Opening Beads Manager…"; `opened` → "Started a new…" / "Reopened the existing Beads Manager…" (`muted`), rồi tone `warning` cho Manager sống khác (`otherManagerIds`, "…nothing was archived or deleted."), `modeNotice`, `toolsNotice` (nguyên văn server, design gốc §7.3); `error` → `danger` "Could not open Beads Manager (<code>). <message>". Dòng không ẩn được là `Text` có `accessibilityLiveRegion="polite"`. `LauncherStatus` được dựng **một lần** trong `ManagerLauncherSurface` và đặt ở mọi view của surface (Setup, Workspaces, Metric, Beads) — slash command có thể mở surface ở bất kỳ view nào. Tab "Beads" (§14) không có dải này.
+`launcherStatusLines({ commandNotice, canOpenAgents, state })` trả theo thứ tự: thông báo slash command (tone `muted`, `dismissable`, nhãn trợ năng `"<text>. Dismiss."`); `OLD_HOST_WARNING` khi host thiếu `navigation.openAgent` (tone `warning`); các dòng `describeLauncherState(state)`: `pending` → "Opening Beads Manager…"; `opened` → "Started a new…" / "Reopened the existing Beads Manager…" (`muted`), rồi tone `warning` cho Manager sống khác (`otherManagerIds`, "…nothing was archived or deleted."), `modeNotice`, `toolsNotice`, **(0.4.0)** `setupNotice` (nguyên văn server, design gốc §7.3, §7.13.2); `error` → `danger` "Could not open Beads Manager (<code>). <message>". Dòng không ẩn được là `Text` có `accessibilityLiveRegion="polite"`. `LauncherStatus` được dựng **một lần** trong `ManagerLauncherSurface` và đặt ở mọi view của surface (Setup, Workspaces, Metric, Beads) — slash command có thể mở surface ở bất kỳ view nào. Tab "Beads" (§14) không có dải này.
 
 ### 11.3 Màn Setup (màn chính)
 
@@ -462,9 +474,12 @@ Command Center và slash command không truyền được gì vào surface, nên
 [Beads Manager ............................ (Workspaces)]
 Setup for this machine: beads tools, agent skills, and each role's model and extra instructions.
 <dải trạng thái> · spinner · lỗi · setupHeadline · paseoToolsWarnings
+<banner chuyển đổi>                            ← (0.4.0) chỉ khi install.kind = installer-directory
+<thẻ "Set up paseo-bm">                         ← (0.4.0) chỉ khi còn việc thiếu
 [Beads tools] [Agent skills] [Agents]          ← StatusTabs, một tab mỗi lần
 <nội dung tab>
 paseo-bm <version>
+<khối "This install">                           ← (0.4.0) thư mục dữ liệu, nút gỡ cấu hình
 ```
 
 - Tab: `SETUP_TABS` = `tools` "Beads tools" · `skills` "Agent skills" · `agents` "Agents"; `DEFAULT_SETUP_TAB = "tools"`, là `useState` nên mở lại surface thì về tab đầu. Mỗi tab có `hint` (vd. "br and bv on the daemon's PATH"), làm nhãn trợ năng `"<label>: <hint>"`. Mọi thứ báo vấn đề (`setupHeadline`, `paseoToolsWarnings`) nằm **trên** dãy tab, để không tab nào che được một công cụ thiếu. Tab `agents` gồm "Roles & models" rồi "Additional instructions".
@@ -477,12 +492,31 @@ paseo-bm <version>
 - Lệnh cài: có `brew` → `brew install dicklesworthstone/tap/<tool>`; không có, `br` → script `beads_rust/main/install.sh | bash -s -- --skip-skills` (để paseo-bm không ghi vào thư mục skill); không có, `bv` → script `beads_viewer` ghim commit `a43b8e85a39664381566abdfd85dc8fcbfdcb773`. Lệnh này phải trùng lệnh của CLI (test khoá; `src/` và `plugin/` không dùng chung code).
 - Nút Install chỉ hiện khi thiếu. Hộp xác nhận nêu nguyên văn lệnh và cảnh báo lệnh tải mã từ mạng. `setup.install-tool` chạy lệnh trong shell đăng nhập (`/bin/zsh -lc` nếu `SHELL` là zsh, còn lại `/bin/bash -lc`), timeout 300 s, trả mã thoát và 40 dòng cuối. Công cụ đã có → `E_TOOL_PRESENT`; lỗi → `E_TOOL_INSTALL_FAILED`. Cập nhật không chạy từ màn hình. Plugin không bao giờ tự cài.
 
-**Agent skills:** `setup.status` đọc (chỉ đọc) thư mục skill của tiến trình daemon (`~/.agents/skills`, `~/.claude/skills` theo `CLAUDE_CONFIG_DIR`, `~/.codex/skills` theo `CODEX_HOME`, và thư mục của Pi/OpenCode khi có). Claude Code chỉ tính thư mục của nó; Codex tính `~/.agents/skills` hoặc thư mục của nó. Nút **Test** đọc lại từng `SKILL.md`: đọc được, có frontmatter `name:` trùng tên thư mục → `ok` / `missing` / `broken` kèm giờ kiểm. Màn hiện lệnh `skills add` tương đương; plugin không cài skill.
+**Thiết lập máy (0.4.0)** (`setup-screen.tsx`, logic thuần ở `setup-model.ts`; hợp đồng server ở design gốc §7.13). Không còn dòng chữ nào của màn trỏ tới `npx paseo-bm`, trừ banner.
+
+- **Khi mở màn:** gọi `setup.ensure-roles {}` rồi mới `setup.status` (một chuỗi, spinner chung). `created` khác rỗng → dải trạng thái có dòng `success` "paseo-bm created its roles with defaults (<provider> · <model>). Change them in Agents." (ẩn được). `E_SETUP_ROLES_FAILED` → dòng `danger` kèm mã và lời server, nút "Try again" gọi lại `setup.ensure-roles`. `skipped: "cleaned-up"` → không có thẻ thiết lập; thay bằng dòng `warning` "paseo-bm's settings were removed. Remove the plugin with `paseo plugin remove paseo-bm`, or set it up again." kèm nút "Set up again" (`setup.ensure-roles { resume: true }`).
+- **Banner chuyển đổi** (`status.setup.install.kind === "installer-directory"`, tone `warning`): "This copy of paseo-bm was installed by the old npx installer. Switch it to the paseo.cafe install once: `npx paseo-bm@0.4.0`. Your roles, settings and history stay." Lệnh có nút Copy. Không ẩn được.
+- **Thẻ "Set up paseo-bm"** (`setupChecklist(status)`, trả các dòng còn thiếu theo thứ tự dưới; không còn dòng nào thì thẻ không hiện). Mỗi dòng: tên, một câu trạng thái, nút hành động (nếu có). Đặt **trên** dãy tab như `setupHeadline`, để không tab nào che được việc còn thiếu.
+
+  Câu trạng thái của từng dòng (nguyên văn): Roles — "Not created: <Manager, Worker, Reviewer>. <lời server của `E_SETUP_ROLES_FAILED`, không có thì bỏ>"; Agent tools — "Off — the Manager may not be able to create a Worker." (cùng câu của khối trên "Roles & models"); Agent skills — "Required skills for the Worker (<Claude Code | Codex | …>): <k>/5. The Worker works with lower quality without them."; Beads tools — "Missing <br | bv | br and bv> — the Worker cannot manage beads without it" (cùng câu của `setupHeadline`); Sign-in — câu ở cột cuối.
+
+  | Dòng | Thiếu khi | Nút | Hộp xác nhận (nguyên văn, tiếng Anh) |
+  |---|---|---|---|
+  | Roles | `setup.roles.missing` khác rỗng (ensure vừa hỏng) | "Try again" | — (không cần: chỉ tạo mục `bm-*` của paseo-bm) |
+  | Agent tools | `setup.agentTools.injectIntoAgents === false` | "Allow agent tools…" | Tiêu đề "Allow Paseo's agent tools for every agent?". Thân: "The Manager and the Worker need Paseo's agent tools to create and message other agents. Paseo has one switch for this (daemon.mcp.injectIntoAgents), and it applies to **every agent on this machine**, not only paseo-bm's: any agent can then create, message and stop other agents. paseo-bm records the current value so "Remove paseo-bm's settings" can turn it back off." Nút "Allow for every agent" / "Cancel" (mặc định). Gọi `setup.grant-agent-tools { confirmed: true }` |
+  | Agent skills | agent của provider mà vai `bm-worker` đang dùng (Claude Code cho `claude`, Codex cho `codex`) thiếu skill bắt buộc; provider khác (Pi, OpenCode) thì theo cột của nó nếu có, không có thì không hiện dòng này | "Install skills…" | Tiêu đề "Run the third-party skills CLI?". Thân: lệnh nguyên văn (`status.skills.installCommand`), rồi "This downloads the skills from github.com/cuongntr/agent-skills (another author) with the `skills` CLI, a third-party tool with its own data collection. paseo-bm never writes to your skills folders itself. It can take up to 5 minutes." Nút "Run it" / "Cancel" (mặc định). Gọi `setup.install-skills { confirmed: true }`; kết quả hiện mã thoát và 40 dòng cuối như Install của `br`/`bv`, rồi đọc lại `setup.status` |
+  | Beads tools | `br` hoặc `bv` thiếu | "Open Beads tools" (chuyển tab) | Hộp xác nhận Install sẵn có của tab |
+  | Sign-in | một dòng `logins` có `state: "logged-out"` | không có nút chạy | Chỉ chữ: "`<provider>` (used by <roles>) is not signed in. Sign in with: `<loginCommand>`" + Copy; Pi: `guidance`. `unknown` không làm hiện dòng |
+
+- Mọi hộp xác nhận: nút huỷ là mặc định và nhận phím Escape; nút đồng ý không bao giờ được focus sẵn; bấm đồng ý mới gửi RPC (schema buộc `confirmed: true`). Lỗi của RPC hiện ngay dưới dòng, kèm mã.
+
+**Agent skills:** `setup.status` đọc (chỉ đọc) thư mục skill của tiến trình daemon (`~/.agents/skills`, `~/.claude/skills` theo `CLAUDE_CONFIG_DIR`, `~/.codex/skills` theo `CODEX_HOME`, và thư mục của Pi/OpenCode khi có). Claude Code chỉ tính thư mục của nó; Codex tính `~/.agents/skills` hoặc thư mục của nó. Nút **Test** đọc lại từng `SKILL.md`: đọc được, có frontmatter `name:` trùng tên thư mục → `ok` / `missing` / `broken` kèm giờ kiểm. Màn hiện lệnh `skills add` tương đương; plugin không cài skill. **(0.4.0)** Tab có thêm nút "Install skills…" (cùng hộp xác nhận và RPC với thẻ thiết lập) khi có agent thiếu skill bắt buộc, và dòng "Last run: <thời điểm> · exit <code>" từ `setup.skillsRun`; nhãn dòng lệnh đổi theo design gốc §7.13.10. Cột Pi/OpenCode vẫn chỉ đọc.
 
 **Roles & models** (`setup-screen.tsx`, logic ở `setup-model.ts`; hợp đồng server và luật kiểm ở design gốc §7.3.6):
 
 - `RolesSection` đọc `roles.settings` (khoá `ROLES_SETTINGS_KEY`) và `roles.options` của mọi provider gốc trong vai và chuỗi dự phòng (`rowOptionProviders`). Mỗi vai một hàng: `RoleMark`, tên vai, `roleSettingText` = `<Provider> · <model label> · thinking <id | provider default>[ · mode <label>]`, nút Edit/Close. Dưới thẻ: `warnings` của `roles.settings` (tone `warning`, một lần cho cả thẻ) và `ROLES_APPLY_NOTICE` "Changes apply to agents created after you save. Running agents keep their model and thinking."
 - **Form Edit** (`RoleEditForm`, `roleFormView`): chip Provider từ `roles.settings.providers` (không alias `bm-*`; provider đang lưu luôn có mặt); Model từ `roles.options`, dưới đó giá `~$<in> / $<out> per 1M tokens` khi có; Thinking ẩn khi model không có mức, lựa chọn đầu "Provider default (<mức>)"; Mode ẩn khi `capability: none`, lựa chọn đầu "Not set", Reviewer trên `tiered` không thấy mode `dangerous`/`planning`; `capability: unknown` mà đang có mode → cảnh báo lưu sẽ xoá mode. Save bật khi nháp đủ provider + model và khác bản lưu. Form giữ `revision` lúc mở: `E_ROLE_SETTINGS_CONFLICT` → "The configuration changed elsewhere; reopen Roles & models." và đọc lại `roles.settings`. Lưu xong: "Saved." kèm từng `warnings` dưới hàng (`notified` không hiện).
+- **(0.4.0) Trên "Roles & models":** `setup.roles.created` khác `null` → dòng `muted` "Created by paseo-bm on <ngày> with defaults (<provider> · <model>). Change them here." Dưới thẻ vai: khối **Paseo agent tools** — "On for every agent" (kèm "turned on by paseo-bm" khi `setBy` có) hoặc "Off — the Manager may not be able to create a Worker" với nút "Allow agent tools…" (cùng hộp xác nhận ở trên); và khối **Sign-in**, một dòng mỗi provider gốc của ba vai: `<provider>` · "used by Manager, Worker" · "Signed in" / "Not signed in — sign in with `<lệnh>`" (Copy) / "Unknown"; Pi hiện `guidance`. Không có nút nào chạy lệnh đăng nhập.
 - **Chuỗi dự phòng** (`FallbackBlock`) dưới mỗi vai có trong `roles.settings.fallback`: `On a usage limit:` chip Ask me / Auto switch / Off; Auto switch → cảnh báo chi phí (Manager thêm "The chat you use may be replaced."). Mỗi mục `Fallback <n>  <Provider> · <model> · thinking …[ · mode …]`, nút ↑ ↓ Edit Remove, dòng giá; "+ Add fallback" khi dưới `MAX_FALLBACK_ENTRIES` (3). Form mục dùng đúng luật form vai. Sửa chỉ nằm ở máy khách tới khi bấm "Save fallbacks" (`roles.save-fallback` cả chuỗi, `revision` lúc bắt đầu sửa) hoặc "Discard".
 
 **Additional instructions** (`role-extras.ts`):
@@ -490,6 +524,12 @@ paseo-bm <version>
 - Lưu ở `<install home>/role-extras.json` (`0600`, file tạm rồi rename, chặn symlink): `{ "version": 1, "roles": { "manager", "worker", "reviewer" } }`, mỗi vai tối đa `MAX_EXTRA_CHARS` = 8 000 ký tự. Là dữ liệu người dùng: không hash trong `install.json`, cập nhật và `--prune` không đụng.
 - **Chỉ nối thêm**: đầy đủ = gốc + `---` + `## Additional instructions from the user` + `These add to the rules above and never override a RULES item.` + nội dung. Áp cho agent tạo sau khi lưu (hook `agent.create` cho Worker/Reviewer, `manager.ensure` cho Manager); file không đọc được thì dùng bản gốc, không chặn việc tạo agent. Plugin settings của Paseo không dùng được cho việc này vì server không đọc được chúng.
 - Preview hiện toàn văn bản đầy đủ dạng Markdown.
+
+**Khối "This install" (0.4.0)**, dưới dòng `paseo-bm <version>`, ngoài các tab:
+
+- "Data folder: `<path>`" và nguồn (`default` / "set by PASEO_BM_HOME" / "from ~/.paseo-bm/home.json"); `path: null` → dòng `danger` với `reason`, và các nút cần thư mục (lưu chỉ dẫn thêm, lưu chuỗi dự phòng, bật tool agent) báo `E_DATA_HOME_UNAVAILABLE` / mã sẵn có khi bấm.
+- "If paseo-bm does not load at all, check `paseo plugin ls` and `paseo plugin logs paseo-bm`." (thay cho `doctor`, vì khi plugin không nạp thì không có màn nào hiện).
+- Nút **"Remove paseo-bm's settings…"** (tone `danger`, nhãn trợ năng "Remove paseo-bm's roles and settings from Paseo"). Xác nhận **lớp một**: "This removes every bm-* provider and agent profile from Paseo (the three roles and their fallbacks)<, and turns Paseo's agent tools back off (paseo-bm turned them on)>. Agents already running on these roles will fail on their next turn: archive them first. Skills, br and bv stay." Nút "Remove settings" / "Cancel" (mặc định). Xác nhận **lớp hai** (luôn hỏi, mặc định giữ): "Also delete paseo-bm's data in `<path>`: history (traces), extra instructions, fallback settings and incidents? One small file stays so the roles are not re-created before you remove the plugin, and files left by the old installer stay." Nút "Keep my data" (mặc định) / "Delete data". Gửi `setup.cleanup { confirmed: true, deleteData }`. Kết quả: danh sách đã xoá, đã giữ (`data.kept`), trạng thái công tắc ("left on — it was not turned on by paseo-bm" khi `left-on`), rồi dòng cố định "Now remove the plugin: `paseo plugin remove paseo-bm`" + Copy. Sau đó màn chuyển sang trạng thái `skipped: "cleaned-up"` ở trên.
 
 ### 11.4 Danh sách Workspaces
 
@@ -711,14 +751,14 @@ Luật phát hiện sự cố, ứng viên, `BM-FALLBACK` và `fallback.incident
 
 ## 17. Security & Privacy
 
-- **Ranh giới ghi:** `<install home>/traces/**`, `<install home>/ui/**`, `<install home>/role-extras.json`. Không ghi vào workspace, `~/.paseo`, thư mục skills, `install.json`.
-- **Đọc đĩa ngoài phần của mình:** `<workspace>/.beads/issues.jsonl`, `<install home>/install.json` (chỉ để xác nhận thư mục cài đặt), `role-fallback-state.json` của plugin, và thư mục skill (chỉ `SKILL.md`, cho màn Setup).
+- **Ranh giới ghi:** `<install home>/traces/**`, `<install home>/ui/**`, `<install home>/role-extras.json`. Không ghi vào workspace, `~/.paseo`, thư mục skills, `install.json`. **(0.4.0)** Thư mục dữ liệu (design gốc §5.1) thay `<install home>`; thêm `ui/setup-state.json`; cấu hình Paseo chỉ qua `config.patch` của design gốc §6.2; xoá chỉ qua `setup.cleanup` và chỉ các mục design gốc §7.13.7 liệt kê.
+- **Đọc đĩa ngoài phần của mình:** `<workspace>/.beads/issues.jsonl`, `<install home>/install.json` (chỉ để xác nhận thư mục cài đặt; **(0.4.0)** chỉ để biết nó tồn tại, cho banner chuyển đổi), `role-fallback-state.json` của plugin, và thư mục skill (chỉ `SKILL.md`, cho màn Setup). **(0.4.0)** Thêm `~/.paseo-bm/home.json` (con trỏ).
 - **Che bí mật trước khi ghi**, không chỉ trước khi render: quy tắc lấy từ `src/redact.ts`, plugin có bản sao hằng số vì không import `src/`.
 - Không ghi `env`: bộ thu thập không dùng hook `agent.create`.
 - Quyền: thư mục `0700`, file `0600`.
 - Xoá là quyền của người dùng: không đường nào tự xoá trace; lệnh gỡ phải hỏi.
 - Màn Metric nói rõ nó hiện và lưu hội thoại agent.
-- **Không mạng** ở mọi luồng dashboard. Ngoại lệ duy nhất có chủ ý: `setup.install-tool` chạy trình cài tải từ mạng, chỉ khi người dùng bấm và xác nhận nguyên văn lệnh (`confirmed: true` bắt buộc ở schema); script `bv` ghim commit, script `br` tự kiểm SHA256.
+- **Không mạng** ở mọi luồng dashboard. Ngoại lệ có chủ ý: `setup.install-tool` chạy trình cài tải từ mạng, chỉ khi người dùng bấm và xác nhận nguyên văn lệnh (`confirmed: true` bắt buộc ở schema); script `bv` ghim commit, script `br` tự kiểm SHA256. **(0.4.0)** Ngoại lệ thứ hai cùng luật: `setup.install-skills` chạy CLI `skills` (tải từ npm và GitHub); `providers.diagnostic` là daemon hỏi provider của nó, không phải plugin ra mạng.
 - Màn Beads và thẻ chat **gửi tin cho agent** (hành động bead, Reply): luôn qua xác nhận hoặc nút gửi tường minh, luôn đọc lại trạng thái người nhận, không bao giờ gửi tới agent đang chạy hay đã lưu trữ. Màn Metric không tạo, dừng hay gửi gì cho agent.
 
 ## 18. Reliability
@@ -753,13 +793,13 @@ Luật phát hiện sự cố, ứng viên, `BM-FALLBACK` và `fallback.incident
 
 | ID | Câu hỏi | Ảnh hưởng |
 |---|---|---|
-| Q-039 | Lệnh **gỡ**: "hỏi rồi xoá" hay luôn giữ kho, và tên cờ cho chế độ không tương tác. Phần cập nhật đã chốt: không bao giờ xoá | Thuộc design gốc (CLI) |
 | Q-042 | Ngưỡng dung lượng chỉ có phạm vi toàn máy vì Paseo chỉ có `scope: "host"`; có cần ngưỡng theo workspace (tự lưu trong `meta.json`) không? | §3.6 |
 
 ## 22. Revision History
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-09-25 | hieu.nt10 (soạn bởi Claude) | **ADR-012: một nguồn duy nhất — thiết lập máy chuyển lên Setup (bản đích 0.4.0).** §11.3: gọi `setup.ensure-roles` khi mở màn, dòng "created its roles with defaults", banner chuyển đổi, thẻ "Set up paseo-bm" với năm dòng (vai trò, tool agent kèm cảnh báo toàn máy, skills kèm lưu ý bên thứ ba, `br`/`bv`, đăng nhập chỉ hiện lệnh), nút "Install skills…" trên tab skills, khối tool agent và đăng nhập trên "Roles & models", khối "This install" với thư mục dữ liệu và nút "Remove paseo-bm's settings…" có xác nhận thứ hai cho dữ liệu (mặc định giữ). §3.1 trỏ tới thư mục dữ liệu mới; §5 thêm bốn RPC và năm mã lỗi (hợp đồng ở design gốc §7.13); §11.2 `setupNotice`; §1, §2.1, §2.4, §17 cập nhật. §21: bỏ Q-039 (đã trả lời ở ADR-012 QĐ6). Vẫn ba tab, đúng REQ-069 (f). Rà soát `design-ready` độc lập cùng ngày: §11.3 thêm câu trạng thái nguyên văn cho từng dòng của thẻ "Set up paseo-bm" (dùng lại câu sẵn có của `setupHeadline` và khối tool agent) |
 | 2026-09-25 | hieu.nt10 (soạn bởi Claude) | Rà soát sau khi gộp: đối chiếu từng delta ở bảng Lịch sử, phần giao diện của bốn delta gốc (17e, 18, 21, qa-ledger) và REQ-059 với code. Thêm: màn "Roles & models" và chuỗi dự phòng (§11.3), chấm đang chạy và dòng trạng thái mở Manager (§11.2, §11.4), dòng model trên graph (§12), thẻ và pill sự cố dự phòng (§15.8), thẻ `notice`, chip `template error`, `statusChip`, `drawAsCard` (§15.2), panel "Beads agents" (§14), luật đếm bead và đọc id rút gọn `.N` (§6.3, §6.4), `managerRequestId` và id `req-…` viết trần (§6.1, §6.3), ảnh hưởng của sổ hỏi–đáp lên thẻ (§15.6), lý do chọn vân tay chữ (§3.3). Sửa theo code: `chat.beads` đọc 400 mục, `agents.list` lấy mọi agent rồi `roleOfAgent`, `close_with_evidence` exact không cần kho xác nhận, thứ tự và phần bị tắt dưới câu hỏi, `StatusTabs` có màu nút, `chat.waiting.fallback`, phạm vi §1 (giao diện Roles & models và dự phòng thuộc tài liệu này). Ghi rõ chưa có nút tải thêm (§12) |
 | 2026-09-25 | hieu.nt10 (soạn bởi Claude) | **Gộp thành tài liệu sống.** Gộp 11 delta ở bảng Lịch sử vào đây, viết lại theo màn hình/thành phần và theo mã hiện tại (§2.4, §11–§15 mới; §3.3, §3.6, §4, §5, §6, §8 cập nhật theo code); bỏ §14 cũ "Ảnh hưởng tới tài liệu đã đóng băng" và các giả định A-1, A-2 (đã kiểm: báo cáo tới Manager là `user_message`; bộ thu thập gọi `timeline.refetch` để lấy timestamp). Từ nay sửa tại chỗ |
 | 2026-09-25 | hieu.nt10 (soạn bởi Beads Worker) | Theo delta kanban-quiet-colours: kanban bốn cột, trạng thái bead nói bằng chữ và độ tương phản, ba tab cho Setup, `TraceSummary.errors` và thẻ Errors |

@@ -351,7 +351,7 @@ export function capRecord(record: TraceRecord): TraceRecord {
 }
 
 export interface TraceStoreLocation {
-  /** `<install home>/traces`, from WP-202's resolver. */
+  /** `<data folder>/traces`, from `resolveDataHome` (design §5.1). */
   tracesDir: string;
 }
 

@@ -5,6 +5,7 @@
 | Status | Accepted |
 | Date | 2026-09-14 |
 | Owner | hieu.nt10 |
+| Sửa đổi bởi | [ADR-012](ADR-012-plugin-is-the-product.md) (2026-09-25): **plugin**, không phải trình cài, chạy CLI `skills` sau khi người dùng bấm và xác nhận trên Setup. Quyết định 3: không còn cờ không tương tác; quyết định 4: agent đích cố định Claude Code và Codex, bỏ `--skills-agents`; quyết định 5: chuỗi lệnh hằng số chạy qua shell đăng nhập (như cài `br`/`bv`) để `npx` có trên PATH, thay cho "argv mảng, không qua shell" — không phần nào của chuỗi đến từ input; quyết định 1, 2, 6–9 giữ nguyên |
 | Liên quan | [PRD REQ-007, REQ-015, Phụ lục A](../product/paseo-bm-prd.md#12-phụ-lục-a--khảo-sát-nguồn-skills-khuyến-nghị), [ADR-002](ADR-002-install-ownership-model.md), [Technical Design](../design/paseo-bm.md) |
 
 ## Context

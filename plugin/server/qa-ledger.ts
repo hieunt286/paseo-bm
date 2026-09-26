@@ -52,7 +52,7 @@ import { parseAnswers, parseQuestions } from "../shared/bm-questions";
 import { roleOfProvider } from "./agent-role";
 import { createLocationResolver, redactText, resolveLocationFromPaseo, sliceLastTurn, type LocationResolver } from "./collector";
 import { bmAgentsOf, type DashboardPaseo } from "./dashboard-rpc";
-import { UI_DIR_NAME } from "./install-home";
+import { UI_DIR_NAME } from "./data-home";
 import { enqueue, type NoticeOutcome, type NoticePaseo } from "./notice-queue";
 import { ANSWERED_NOTICE_MARKER, isPluginNotice } from "./notices";
 import { assertNoSymlinkOnPath, ensureStoreDir, writeStoreFileAtomically, type TraceStoreLocation } from "./trace-store";

@@ -101,7 +101,6 @@ import {
   parseVersion,
   realFsProbe,
   runPreflight,
-  toCheck,
 } from "../src/preflight.js";
 import type { PreflightCheckId, PreflightResult } from "../src/preflight.js";
 import { DIAGNOSTICS, diagnostic } from "../src/errors.js";
@@ -335,7 +334,7 @@ describe("runPreflight — every failing branch stops before the first write", (
       code: "E_VERSION_MISMATCH",
       build: (sandbox) => ({
         options: {
-          adapter: healthyAdapter(sandbox, { cli: "0.8.0", daemon: "0.9.1" }),
+          adapter: healthyAdapter(sandbox, { cli: "0.9.1", daemon: "0.9.2" }),
           installHome: sandbox.installHome,
           platform: "linux",
           nodeVersion: "24.0.0",
@@ -344,12 +343,12 @@ describe("runPreflight — every failing branch stops before the first write", (
       }),
     },
     {
-      name: "Paseo is older than 0.8.0",
+      name: "Paseo is older than 0.9.0",
       checkId: "paseo-version",
       code: "E_VERSION_MISMATCH",
       build: (sandbox) => ({
         options: {
-          adapter: healthyAdapter(sandbox, { cli: "0.7.9", daemon: "0.7.9" }),
+          adapter: healthyAdapter(sandbox, { cli: "0.8.0", daemon: "0.8.0" }),
           installHome: sandbox.installHome,
           platform: "linux",
           nodeVersion: "24.0.0",
@@ -370,7 +369,7 @@ describe("runPreflight — every failing branch stops before the first write", (
         temporaryDirs.push(locked);
         return {
           options: {
-            adapter: healthyAdapter(sandbox, { cli: "0.8.0", daemon: "0.8.0" }),
+            adapter: healthyAdapter(sandbox, { cli: "0.9.2", daemon: "0.9.2" }),
             installHome: join(locked, "paseo-bm"),
             platform: "linux",
             nodeVersion: "24.0.0",
@@ -429,7 +428,7 @@ describe("runPreflight — every failing branch stops before the first write", (
 describe("runPreflight — a healthy environment", () => {
   it("passes, takes the Paseo home from the daemon, and writes nothing", async () => {
     const sandbox = makeSandbox();
-    const adapter = healthyAdapter(sandbox, { cli: "0.8.0", daemon: "0.8.0" });
+    const adapter = healthyAdapter(sandbox, { cli: "0.9.2", daemon: "0.9.2" });
     const before = snapshot(sandbox.root);
 
     const { value: result, writes } = await withWriteLog(async () =>
@@ -450,8 +449,8 @@ describe("runPreflight — a healthy environment", () => {
 
     // The daemon's own answer is the source of truth for Paseo's home.
     expect(result.facts.paseoHome).toBe(sandbox.paseoHome);
-    expect(result.facts.cliVersion).toBe("0.8.0");
-    expect(result.facts.daemonVersion).toBe("0.8.0");
+    expect(result.facts.cliVersion).toBe("0.9.2");
+    expect(result.facts.daemonVersion).toBe("0.9.2");
     expect((result.facts.daemonStatus as DaemonStatus).listen).toBe("127.0.0.1:7777");
 
     expect(result.findings.map((finding) => finding.id)).toEqual([
@@ -463,13 +462,12 @@ describe("runPreflight — a healthy environment", () => {
       "beads-cli",
       "beads-viewer",
     ]);
-    expect(result.checks).toEqual(result.findings.map(toCheck));
   });
 
   it("warns but does not block when the beads CLI is missing", async () => {
     const sandbox = makeSandbox();
     const result = await runPreflight({
-      adapter: healthyAdapter(sandbox, { cli: "0.8.0", daemon: "0.8.0" }),
+      adapter: healthyAdapter(sandbox, { cli: "0.9.2", daemon: "0.9.2" }),
       installHome: sandbox.installHome,
       platform: "linux",
       nodeVersion: "24.0.0",
@@ -496,7 +494,7 @@ describe("runPreflight — a healthy environment", () => {
     }
 
     const result = await runPreflight({
-      adapter: healthyAdapter(sandbox, { cli: "0.8.0", daemon: "0.8.0" }),
+      adapter: healthyAdapter(sandbox, { cli: "0.9.2", daemon: "0.9.2" }),
       installHome: sandbox.installHome,
       platform: "linux",
       nodeVersion: "24.0.0",
@@ -514,7 +512,7 @@ describe("runPreflight — a healthy environment", () => {
 
     const { value: result, writes } = await withWriteLog(async () =>
       runPreflight({
-        adapter: healthyAdapter(sandbox, { cli: "0.8.0", daemon: "0.8.0" }),
+        adapter: healthyAdapter(sandbox, { cli: "0.9.2", daemon: "0.9.2" }),
         installHome: sandbox.installHome,
         platform: "linux",
         nodeVersion: "24.0.0",
@@ -565,7 +563,7 @@ describe("the repo's write-scope harness agrees", () => {
   ] as const)("records zero writes for %s", async (_label, expected) => {
     const sandbox = makeSandbox();
     const adapter =
-      expected === "ok" ? healthyAdapter(sandbox, { cli: "0.8.0", daemon: "0.8.0" }) : daemonDownAdapter();
+      expected === "ok" ? healthyAdapter(sandbox, { cli: "0.9.2", daemon: "0.9.2" }) : daemonDownAdapter();
 
     const result = await withWriteScope(
       {
@@ -629,20 +627,30 @@ describe("checkNodeVersion", () => {
 
 describe("checkPaseoVersion", () => {
   it("accepts equal versions at or above the minimum", () => {
-    expect(checkPaseoVersion({ cliVersion: "0.8.0", daemonVersion: "0.8.0" }).severity).toBe("ok");
+    expect(checkPaseoVersion({ cliVersion: "0.9.0", daemonVersion: "0.9.0" }).severity).toBe("ok");
+    expect(checkPaseoVersion({ cliVersion: "0.9.2", daemonVersion: "0.9.2" }).severity).toBe("ok");
     expect(checkPaseoVersion({ cliVersion: "1.2.3", daemonVersion: "1.2.3" }).severity).toBe("ok");
   });
 
   it.each([
-    ["mismatch", "0.8.0", "0.8.1"],
+    ["mismatch", "0.9.0", "0.9.1"],
+    // 0.4.0 needs `paseo plugin add npm:<package>`, which arrived in 0.9.
+    ["Paseo 0.8, which has no npm plugin source", "0.8.0", "0.8.0"],
     ["too old", "0.7.9", "0.7.9"],
-    ["prerelease of the minimum", "0.8.0-rc.1", "0.8.0-rc.1"],
+    ["prerelease of the minimum", "0.9.0-rc.1", "0.9.0-rc.1"],
     ["unreadable", "next", "next"],
   ])("refuses %s", (_label, cliVersion, daemonVersion) => {
     const finding = checkPaseoVersion({ cliVersion, daemonVersion });
     expect(finding.severity).toBe("error");
     expect(finding.code).toBe("E_VERSION_MISMATCH");
     expect(finding.remediation).toBe(diagnostic("E_VERSION_MISMATCH").remediation);
+  });
+
+  it("says which version it needs, and where a Paseo 0.8 user should stay", () => {
+    const finding = checkPaseoVersion({ cliVersion: "0.8.0", daemonVersion: "0.8.0" });
+
+    expect(finding.detail).toContain("requires Paseo 0.9.0 or newer");
+    expect(finding.detail).toContain("paseo-bm@0.3.1");
   });
 });
 
@@ -689,14 +697,15 @@ describe("version parsing", () => {
     expect(compareVersions(parseVersion("1.0.0-rc.1+build.1")!, parseVersion("1.0.0-rc.1+build.2")!)).toBe(0);
   });
 
-  it("answers the only question that matters: at least 0.8.0?", () => {
-    expect(MINIMUM_PASEO_VERSION).toBe("0.8.0");
-    expect(meetsMinimumPaseoVersion("0.8.0")).toBe(true);
-    expect(meetsMinimumPaseoVersion("0.8.1")).toBe(true);
-    expect(meetsMinimumPaseoVersion("0.9.0-rc.1")).toBe(true);
+  it("answers the only question that matters: at least 0.9.0?", () => {
+    expect(MINIMUM_PASEO_VERSION).toBe("0.9.0");
+    expect(meetsMinimumPaseoVersion("0.9.0")).toBe(true);
+    expect(meetsMinimumPaseoVersion("0.9.2")).toBe(true);
+    expect(meetsMinimumPaseoVersion("0.10.0-rc.1")).toBe(true);
     expect(meetsMinimumPaseoVersion("1.0.0")).toBe(true);
+    expect(meetsMinimumPaseoVersion("0.8.0")).toBe(false);
     expect(meetsMinimumPaseoVersion("0.7.12")).toBe(false);
-    expect(meetsMinimumPaseoVersion("0.8.0-rc.1")).toBe(false);
+    expect(meetsMinimumPaseoVersion("0.9.0-rc.1")).toBe(false);
     expect(meetsMinimumPaseoVersion("garbage")).toBe(false);
   });
 });
@@ -785,18 +794,19 @@ describe("beads CLI detection", () => {
 });
 
 describe("findings and the report model", () => {
-  it("produces checks that carry exactly the four report fields", async () => {
+  it("produces findings that carry exactly the six fields a caller reads", async () => {
     const sandbox = makeSandbox();
     const result: PreflightResult = await runPreflight({
-      adapter: healthyAdapter(sandbox, { cli: "0.8.0", daemon: "0.8.0" }),
+      adapter: healthyAdapter(sandbox, { cli: "0.9.2", daemon: "0.9.2" }),
       installHome: sandbox.installHome,
       platform: "linux",
       nodeVersion: "24.0.0",
       env: { PATH: sandbox.emptyBin },
     });
 
-    for (const check of result.checks) {
-      expect(Object.keys(check).sort()).toEqual(["id", "message", "remediation", "severity"]);
+    expect(result.findings.length).toBeGreaterThan(0);
+    for (const finding of result.findings) {
+      expect(Object.keys(finding).sort()).toEqual(["code", "detail", "id", "message", "remediation", "severity"]);
     }
   });
 

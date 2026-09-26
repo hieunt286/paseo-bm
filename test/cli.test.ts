@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { renderHelp, runCli } from "../src/cli.js";
 import type { CommandContext, CommandHandlers, Writer } from "../src/cli.js";
-import { COMMAND_SPECS, EXIT_CODES, FLAG_SPECS } from "../src/flags.js";
+import { EXIT_CODES, FLAG_SPECS } from "../src/flags.js";
+import { RETIRED_FLAGS } from "../src/retired.js";
 import { NonInteractivePrompter, ScriptedPrompter } from "../src/prompter.js";
 import type { Prompter, TtyInfo } from "../src/prompter.js";
 import { readVersion } from "../src/version.js";
@@ -36,7 +37,7 @@ function harness(overrides: Partial<Record<keyof CommandHandlers, number>> = {})
     stderr: (text) => {
       err += text;
     },
-    handlers: { install: make("install"), doctor: make("doctor"), uninstall: make("uninstall") },
+    handlers: { migrate: make("migrate"), install: make("install") },
   };
 }
 
@@ -56,18 +57,25 @@ function run(
 }
 
 describe("runCli — help", () => {
-  it("lists every subcommand and every flag", async () => {
+  it("lists only the 0.4.0 surface, and says where everything else went", async () => {
     const h = harness();
     expect(await run(["--help"], h)).toBe(EXIT_CODES.ok);
     const text = h.out();
-    for (const command of COMMAND_SPECS) {
-      expect(text, `missing command ${command.name}`).toContain(`  ${command.name}`);
-    }
+
     for (const spec of FLAG_SPECS) {
+      if (RETIRED_FLAGS[spec.flag] !== undefined) {
+        expect(text, `retired flag still offered: ${spec.flag}`).not.toContain(spec.flag);
+        continue;
+      }
       expect(text, `missing flag ${spec.flag}`).toContain(spec.flag);
     }
     expect(text).toContain("-h, --help");
     expect(text).toContain("-v, --version");
+    // The jobs that moved into the plugin are named, so `--help` still answers
+    // "how do I install / check / remove it?".
+    expect(text).toContain("paseo plugin add npm:paseo-bm-plugin");
+    expect(text).toContain("Beads Manager → Setup");
+    expect(text).toContain("paseo plugin remove paseo-bm");
     expect(h.seen).toHaveLength(0);
   });
 
@@ -77,23 +85,28 @@ describe("runCli — help", () => {
     expect(h.out()).toMatch(/--yes only skips the apply confirmation/);
   });
 
-  it("documents the exit code table", async () => {
+  it("documents the exit codes 0.4.0 can still return, and no others", async () => {
     const h = harness();
     await run(["--help"], h);
-    for (const code of [0, 1, 2, 3, 4, 5, 6]) {
+    for (const code of [0, 2, 3, 5, 6, 7]) {
       expect(h.out()).toMatch(new RegExp(`\\n  ${code} `));
+    }
+    // 1 was `doctor` drift and 4 was a missing consent: neither exists now,
+    // and neither number is ever reused.
+    for (const gone of [1, 4]) {
+      expect(h.out()).not.toMatch(new RegExp(`\\n  ${gone} `));
     }
   });
 
-  it("narrows the option list for a command topic", async () => {
+  it("narrows the option list for a command topic, and offers no retired flag", () => {
     const optionLine = (flag: string): RegExp => new RegExp(`\\n {2}\\${flag}( |$)`, "m");
-    const uninstall = renderHelp("uninstall");
-    expect(uninstall).toMatch(optionLine("--restore-backups"));
-    expect(uninstall).not.toMatch(optionLine("--enable-plugins"));
-    const doctor = renderHelp("doctor");
-    expect(doctor).toMatch(optionLine("--skills-agents"));
-    expect(doctor).not.toMatch(optionLine("--apply"));
-    expect(doctor).not.toMatch(optionLine("--prune"));
+    const install = renderHelp("install");
+
+    expect(install).toMatch(optionLine("--apply"));
+    expect(install).toMatch(optionLine("--home"));
+    for (const retired of Object.keys(RETIRED_FLAGS)) {
+      expect(install, `retired flag still offered: ${retired}`).not.toMatch(optionLine(retired));
+    }
   });
 
   it("prints the package version for --version", async () => {
@@ -119,54 +132,55 @@ describe("runCli — misuse returns exit code 2", () => {
     expect(h.err()).toContain('Unknown command "instal"');
   });
 
-  it.each([
-    ["doctor", "--apply"],
-    ["doctor", "--yes"],
-    ["doctor", "--force"],
-    ["doctor", "--prune"],
-    ["install", "--restore-backups"],
-    ["uninstall", "--enable-plugins"],
-    ["uninstall", "--install-skills"],
-    ["uninstall", "--reconfigure"],
-  ])("rejects %s %s", async (command, flag) => {
+  // A flag on a command that does not take it. `doctor` and `uninstall` are
+  // gone in 0.4.0, and so is every flag that used to be wrong on them: those
+  // now answer with their retirement (test/retired.test.ts).
+  it("rejects a flag that does not exist at all", async () => {
     const h = harness();
-    expect(await run([command, flag], h)).toBe(EXIT_CODES.usage);
-    expect(h.err()).toContain(flag);
+    expect(await run(["install", "--nope"], h)).toBe(EXIT_CODES.usage);
+    expect(h.err()).toContain("--nope");
     expect(h.seen).toHaveLength(0);
   });
 });
 
 describe("runCli — routing", () => {
-  it.each(["install", "doctor", "uninstall"] as const)("routes %s to its handler", async (command) => {
+  it("routes install to its handler", async () => {
     const h = harness();
-    await run([command], h);
+    await run(["install"], h);
     expect(h.seen).toHaveLength(1);
-    expect(h.seen[0]?.command).toBe(command);
+    expect(h.seen[0]?.command).toBe("install");
     expect(h.seen[0]?.explicitCommand).toBe(true);
   });
 
-  it("routes a bare invocation to install, flagged as implicit", async () => {
+  // 0.4.0 only migrates (ADR-012 decision 7): `doctor` and `uninstall` are
+  // answered with the sentence that says where the job went, not routed.
+  it.each(["doctor", "uninstall"] as const)("answers %s with its retirement instead of running it", async (command) => {
+    const h = harness();
+    expect(await run([command], h)).toBe(EXIT_CODES.usage);
+    expect(h.seen).toHaveLength(0);
+    expect(h.err()).toContain("E_COMMAND_RETIRED");
+  });
+
+  it("routes a bare invocation to migrate, flagged as implicit", async () => {
     const h = harness();
     await run([], h);
-    expect(h.seen[0]?.command).toBe("install");
+    expect(h.seen[0]?.command).toBe("migrate");
     expect(h.seen[0]?.explicitCommand).toBe(false);
   });
 
   it("returns the handler's exit code unchanged", async () => {
-    const h = harness({ doctor: EXIT_CODES.doctorDrift });
-    expect(await run(["doctor"], h)).toBe(EXIT_CODES.doctorDrift);
+    const h = harness({ install: EXIT_CODES.conflict });
+    expect(await run(["install"], h)).toBe(EXIT_CODES.conflict);
   });
 
   it("hands the handler its flags, flag-level home overrides and TTY state", async () => {
     const h = harness();
-    await run(
-      ["install", "--apply", "--role", "worker=codex/gpt-5.6-sol", "--paseo-home=/flag/paseo"],
-      h,
-      { tty: NO_TTY, env: { PASEO_HOME: "/env/paseo" } },
-    );
+    await run(["install", "--apply", "--paseo-home=/flag/paseo"], h, {
+      tty: NO_TTY,
+      env: { PASEO_HOME: "/env/paseo" },
+    });
     const context = h.seen[0];
     expect(context?.flags.apply).toBe(true);
-    expect(context?.flags.role).toEqual(["worker=codex/gpt-5.6-sol"]);
     expect(context?.homes.paseoHome).toBe("/flag/paseo");
     expect(context?.tty.interactive).toBe(false);
   });
@@ -193,141 +207,14 @@ describe("runCli — routing", () => {
     const h = harness();
     const handlers: CommandHandlers = {
       ...h.handlers,
-      doctor: () => {
+      install: () => {
         throw new Error("boom");
       },
     };
     await expect(
-      runCli(["doctor"], { handlers, stdout: h.stdout, stderr: h.stderr, env: {}, tty: TTY, createPrompter: () => prompter }),
+      runCli(["install"], { handlers, stdout: h.stdout, stderr: h.stderr, env: {}, tty: TTY, createPrompter: () => prompter }),
     ).rejects.toThrow("boom");
     expect(prompter.isClosed).toBe(true);
   });
 });
 
-describe("runCli — a simulated interactive install runs end to end on the scripted prompter", () => {
-  /**
-   * Stand-in for the WP-105 install flow: the happy path of Design §4.5 asks
-   * exactly three confirmations — apply, the single trust boundary covering
-   * plugins plus agent tool access, and the skills CLI — plus role questions
-   * that are not confirmations. The confirm counter is the evidence for M-1.
-   */
-  const installFlow = async (context: CommandContext): Promise<number> => {
-    const { prompter, stdout } = context;
-    stdout("preview: 3 actions\n");
-
-    if (!context.flags.yes && !(await prompter.confirm({ message: "Apply these changes?" }))) {
-      return EXIT_CODES.ok;
-    }
-
-    const name = await prompter.input({ message: "Worker agent name", defaultValue: "Beads Worker" });
-    const provider = await prompter.select({
-      message: "Provider for Worker",
-      choices: [
-        { value: "claude", label: "Claude Code" },
-        { value: "codex", label: "Codex" },
-      ],
-    });
-    stdout(`worker: ${name} on ${provider}\n`);
-
-    const trusted =
-      context.flags.enablePlugins ||
-      (await prompter.confirm({
-        message: "Enable plugins and grant Paseo tool access to agents?",
-        details: ["Plugin code is not sandboxed.", "Every agent on this machine gains agent-control tools."],
-      }));
-    stdout(`trust boundary: ${trusted ? "granted" : "declined"}\n`);
-
-    const skills =
-      context.flags.installSkills ||
-      (await prompter.confirm({ message: "Run `npx -y skills add ...` for claude,codex?" }));
-    stdout(`skills: ${skills ? "assisted" : "manual"}\n`);
-
-    return trusted ? EXIT_CODES.ok : EXIT_CODES.consentMissing;
-  };
-
-  it("asks exactly three confirmations on the happy path (M-1)", async () => {
-    const prompter = new ScriptedPrompter({
-      confirm: [true, true, true],
-      input: ["Beads Worker"],
-      select: ["codex"],
-    });
-    const h = harness();
-    const code = await runCli(["install", "--apply"], {
-      handlers: { ...h.handlers, install: installFlow },
-      stdout: h.stdout,
-      stderr: h.stderr,
-      env: {},
-      tty: TTY,
-      createPrompter: () => prompter,
-    });
-
-    expect(code).toBe(EXIT_CODES.ok);
-    expect(prompter.counts.confirm).toBe(3);
-    expect(prompter.counts).toEqual({ confirm: 3, input: 1, select: 1, total: 5 });
-    expect(prompter.confirmMessages).toEqual([
-      "Apply these changes?",
-      "Enable plugins and grant Paseo tool access to agents?",
-      "Run `npx -y skills add ...` for claude,codex?",
-    ]);
-    expect(h.out()).toContain("worker: Beads Worker on codex");
-    expect(h.out()).toContain("trust boundary: granted");
-    expect(h.out()).toContain("skills: assisted");
-    expect(prompter.isClosed).toBe(true);
-  });
-
-  it("--yes drops only the apply confirmation, never a trust boundary", async () => {
-    const prompter = new ScriptedPrompter({ confirm: [true, true], input: ["Beads Worker"], select: ["codex"] });
-    const h = harness();
-    await runCli(["install", "--apply", "--yes"], {
-      handlers: { ...h.handlers, install: installFlow },
-      stdout: h.stdout,
-      stderr: h.stderr,
-      env: {},
-      tty: TTY,
-      createPrompter: () => prompter,
-    });
-
-    expect(prompter.counts.confirm).toBe(2);
-    expect(prompter.confirmMessages).toEqual([
-      "Enable plugins and grant Paseo tool access to agents?",
-      "Run `npx -y skills add ...` for claude,codex?",
-    ]);
-  });
-
-  it("--enable-plugins covers both halves of the trust boundary with one answer", async () => {
-    const prompter = new ScriptedPrompter({ confirm: [true, true], input: ["Beads Worker"], select: ["codex"] });
-    const h = harness();
-    const code = await runCli(["install", "--apply", "--enable-plugins"], {
-      handlers: { ...h.handlers, install: installFlow },
-      stdout: h.stdout,
-      stderr: h.stderr,
-      env: {},
-      tty: TTY,
-      createPrompter: () => prompter,
-    });
-
-    expect(code).toBe(EXIT_CODES.ok);
-    expect(h.out()).toContain("trust boundary: granted");
-    expect(prompter.confirmMessages).toEqual([
-      "Apply these changes?",
-      "Run `npx -y skills add ...` for claude,codex?",
-    ]);
-  });
-
-  it("declining the trust boundary still finishes, and reports exit code 4", async () => {
-    const prompter = new ScriptedPrompter({ confirm: [true, false, false], input: [], select: ["claude"] });
-    const h = harness();
-    const code = await runCli(["install", "--apply"], {
-      handlers: { ...h.handlers, install: installFlow },
-      stdout: h.stdout,
-      stderr: h.stderr,
-      env: {},
-      tty: TTY,
-      createPrompter: () => prompter,
-    });
-
-    expect(code).toBe(EXIT_CODES.consentMissing);
-    expect(h.out()).toContain("trust boundary: declined");
-    expect(prompter.counts.confirm).toBe(3);
-  });
-});

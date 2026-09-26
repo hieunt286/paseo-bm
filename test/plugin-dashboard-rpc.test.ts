@@ -19,7 +19,12 @@ import { TRACE_STORE_SCHEMA_VERSION, type FallbackIncident, type TraceRecord } f
 
 /**
  * WP-208 / WP-210: the Dashboard RPC handlers, against a fake Paseo SDK and a
- * fake install home. No daemon, no real HOME.
+ * temporary data folder. No daemon, no real HOME.
+ *
+ * From 0.4.0 the trace store is found with `resolveDataHome` (design §5.1), so
+ * the folder is named by `PASEO_BM_HOME` rather than by the plugin path in the
+ * fake Paseo configuration — which is also why no `install.json` is written
+ * any more: nothing reads one.
  */
 
 const WS = "wks_1";
@@ -73,27 +78,30 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "bm-rpc-"));
   workspace = join(home, "repo");
   mkdirSync(join(workspace, ".beads"), { recursive: true });
-  writeFileSync(join(home, "install.json"), JSON.stringify({ schemaVersion: 1 }));
+  process.env["PASEO_BM_HOME"] = home;
   clearTraceStoreCache();
   clearBeadsCache();
 });
 
 afterEach(() => {
+  delete process.env["PASEO_BM_HOME"];
   rmSync(home, { recursive: true, force: true });
 });
 
 describe("requireLocation", () => {
-  it("resolves the trace store from the registered plugin path", async () => {
+  it("resolves the trace store inside the data folder, with no install.json", async () => {
     const location = await requireLocation(fakePaseo());
     expect(location.tracesDir).toBe(join(home, "traces"));
   });
 
-  it("fails with a coded error when the store cannot be resolved", async () => {
-    // `homedir` is injected at an empty directory so this test cannot pass or
-    // fail because of a real paseo-bm installation on the machine running it.
-    await expect(
-      requireLocation(fakePaseo({ plugins: {} }), { homedir: () => join(home, "empty-home") }),
-    ).rejects.toThrow(/E_TRACE_STORE_UNWRITABLE/);
+  it("resolves it even when Paseo has no plugin registered at all", async () => {
+    const location = await requireLocation(fakePaseo({ plugins: {} }));
+    expect(location.tracesDir).toBe(join(home, "traces"));
+  });
+
+  it("fails with a coded error when the data folder cannot be used", async () => {
+    process.env["PASEO_BM_HOME"] = "relative/bm";
+    await expect(requireLocation(fakePaseo())).rejects.toThrow(/E_TRACE_STORE_UNWRITABLE/);
   });
 });
 

@@ -141,20 +141,16 @@ try {
   const packedManifest = JSON.parse(readFileSync(join(packed, "package.json"), "utf8"));
   check(packedManifest.version === expectedVersion, `packed package.json version is ${expectedVersion}`);
   check(existsSync(join(packed, "dist", "index.js")), "tarball contains dist/index.js");
-  check(existsSync(join(packed, "plugin", "paseo-plugin.json")), "tarball contains plugin/paseo-plugin.json");
-  // The copy at the tarball root is what the paseo.cafe registry reads: its npm
-  // check opens paseo-plugin.json at the root and ignores the entry's `path`.
-  // Dropping it from `files` would break the listing with every other check
-  // still green. See docs/operations/paseo-bm-cafe-listing-20260923.md §4.
-  // The screenshots exist for the paseo.cafe listing, which reads them from the
-  // plugin path in git. Nobody running `npx paseo-bm` should download them, so
-  // `files` excludes them with a negative pattern — and npm honouring that
-  // pattern is exactly the kind of thing to verify on a real tarball rather
-  // than trust. See docs/archive/design/paseo-bm-delta-20260923-payload-npm-package.md §6.
-  const packedImages = readdirSync(join(packed, "plugin"), { withFileTypes: true }).filter(
-    (entry) => entry.name === "images",
+  // From 0.4.0 this tarball is the migration command and nothing else: the
+  // payload ships as `paseo-bm-plugin`, checked below, and carrying a second
+  // copy here would mean two sources of the same plugin on one machine
+  // (ADR-012 decision 1).
+  check(!existsSync(join(packed, "plugin")), "installer tarball carries no plugin/ directory");
+  const packedTop = readdirSync(packed, { withFileTypes: true }).map((entry) => entry.name).sort();
+  check(
+    packedTop.every((name) => ["dist", "package.json", "README.md", "LICENSE"].includes(name)),
+    `installer tarball root has only dist/, package.json, README.md and LICENSE (found: ${packedTop.join(", ")})`,
   );
-  check(packedImages.length === 0, "tarball carries no plugin/images/ directory");
 
   // 2b. The payload is published as its own package, paseo-bm-plugin, whose
   // tarball root must BE a loadable plugin: that is what the paseo.cafe
@@ -183,6 +179,13 @@ try {
   for (const entry of ["paseo-plugin.json", "index.client.tsx", "index.server.ts", "LICENSE", "README.md"]) {
     check(existsSync(join(payloadPacked, entry)), `payload tarball root has ${entry}`);
   }
+  // The manifest a daemon reads out of the tarball is what decides whether it
+  // loads at all; 0.8 has no npm plugin source, so it must refuse (ADR-012 D2).
+  const payloadPluginManifest = JSON.parse(readFileSync(join(payloadPacked, "paseo-plugin.json"), "utf8"));
+  check(
+    payloadPluginManifest.requirements?.paseo === ">=0.9.0",
+    'payload manifest requires Paseo ">=0.9.0"',
+  );
   check(
     !existsSync(join(payloadPacked, "images")),
     "payload tarball carries no images/ directory",
@@ -213,9 +216,6 @@ try {
     !existsSync(join(packed, "paseo-plugin.json")),
     "installer tarball root carries no paseo-plugin.json",
   );
-  for (const entry of ["index.server.ts", "index.client.tsx", "roles/manager.md", "roles/worker.md", "roles/reviewer.md"]) {
-    check(existsSync(join(packed, "plugin", entry)), `tarball contains plugin/${entry}`);
-  }
   // Every built file must ship. Checking only the bin is not enough: npm always
   // packs the `bin` target even when dist/ is missing from `files`, so a
   // bin-only check stays green while chunks and sourcemaps are silently dropped.
@@ -226,16 +226,6 @@ try {
     repoDist.size > 0 && missingDist.length === 0,
     `every built file under dist/ is in the tarball${missingDist.length ? ` (missing: ${missingDist.join(", ")})` : ""}`,
   );
-  // Every payload file in the repo must ship, with exactly one deliberate
-  // exception: plugin/images/ exists for the paseo.cafe listing and is excluded
-  // from this tarball by a negative `files` pattern, asserted above. The
-  // exception is spelled out here rather than by relaxing the check, so a file
-  // that goes missing for any other reason still fails.
-  const payloadExcluded = (path) => path === "images" || path.startsWith("images/");
-  const repoPayload = snapshot(join(repoRoot, "plugin"));
-  const packedPayload = snapshot(join(packed, "plugin"));
-  const missing = [...repoPayload.keys()].filter((path) => !packedPayload.has(path) && !payloadExcluded(path));
-  check(missing.length === 0, `every file under plugin/ except images/ is in the tarball${missing.length ? ` (missing: ${missing.join(", ")})` : ""}`);
   const lifecycle = ["preinstall", "install", "postinstall", "prepare"].filter(
     (name) => name in (packedManifest.scripts ?? {}),
   );
@@ -256,8 +246,8 @@ try {
   const bin = join(projectDir, "node_modules", ".bin", "paseo-bm");
   check(existsSync(bin), "installed package exposes node_modules/.bin/paseo-bm");
   check(
-    existsSync(join(installed, "package.json")) && existsSync(join(installed, "plugin", "paseo-plugin.json")),
-    "installed layout satisfies findPayloadRoot (package.json + plugin/paseo-plugin.json above dist/)",
+    existsSync(join(installed, "package.json")) && existsSync(join(installed, "dist", "index.js")),
+    "installed layout is the command and nothing else (package.json + dist/)",
   );
 
   // 4. Run the installed bin with a fake HOME and a PATH holding only a fake paseo and node.
@@ -298,11 +288,8 @@ try {
     writeFileSync(
       scriptFile,
       JSON.stringify({
-        "daemon status": { stdout: JSON.stringify({ home: join(fakeHome, ".paseo"), cliVersion: "0.8.0", daemonVersion: "0.8.0" }) },
+        "daemon status": { stdout: JSON.stringify({ home: join(fakeHome, ".paseo"), cliVersion: "0.9.2", daemonVersion: "0.9.2" }) },
         "plugin ls": { stdout: "[]" },
-        "provider ls": { stdout: JSON.stringify([{ provider: "claude", label: "Claude", status: "available" }]) },
-        "provider models": { stdout: JSON.stringify([{ id: "claude-opus-5", model: "Opus 5" }]) },
-        "provider diagnostic": { stdout: JSON.stringify({ provider: "claude", diagnostic: 'Auth: {"loggedIn": true}' }) },
       }),
     );
     const flowEnv = { ...cliEnv, BM_FAKE_SCRIPT: scriptFile };
@@ -310,44 +297,42 @@ try {
     const workSnapshot = () => new Map([...snapshot(work)].filter(([path]) => !ignoredInWork.has(path)));
     const workBefore = workSnapshot();
 
-    const preview = run(bin, ["install"], { cwd: neutralCwd, env: flowEnv });
-    console.log(`$ paseo-bm install -> exit ${preview.status}`);
-    if (preview.status !== 6) console.log(`  stdout: ${preview.stdout}\n  stderr: ${preview.stderr}`);
-    check(preview.status === 6, "paseo-bm install without a TTY and without --apply exits 6");
-    check(preview.stdout.includes("Planned changes"), "paseo-bm install prints the preview");
-
-    const previewJson = run(bin, ["install", "--json"], { cwd: neutralCwd, env: flowEnv });
-    let previewReport;
-    try {
-      previewReport = JSON.parse(previewJson.stdout);
-    } catch {
-      previewReport = undefined;
-    }
-    console.log(`$ paseo-bm install --json -> exit ${previewJson.status}`);
+    // Nothing of paseo-bm on this machine: the one supported answer is the
+    // paseo.cafe instructions, exit 0, and no write anywhere (case D, §4.3).
+    const bare = run(bin, [], { cwd: neutralCwd, env: flowEnv });
+    console.log(`$ paseo-bm -> exit ${bare.status}`);
+    if (bare.status !== 0) console.log(`  stdout: ${bare.stdout}\n  stderr: ${bare.stderr}`);
+    check(bare.status === 0, "paseo-bm on a machine with no paseo-bm plugin exits 0");
     check(
-      previewJson.status === 6 && previewReport?.mode === "preview" && previewReport?.result?.exitCode === 6,
-      "paseo-bm install --json prints one preview document with result.exitCode 6",
+      bare.stdout.includes("paseo plugin add npm:paseo-bm-plugin"),
+      "paseo-bm prints how to install the plugin instead",
     );
 
-    const doctor = run(bin, ["doctor", "--json"], { cwd: neutralCwd, env: flowEnv });
-    let doctorReport;
+    const bareJson = run(bin, ["--json"], { cwd: neutralCwd, env: flowEnv });
+    let bareReport;
     try {
-      doctorReport = JSON.parse(doctor.stdout);
+      bareReport = JSON.parse(bareJson.stdout);
     } catch {
-      doctorReport = undefined;
+      bareReport = undefined;
     }
-    console.log(`$ paseo-bm doctor --json -> exit ${doctor.status}`);
-    if (doctor.status !== 0) console.log(`  stdout: ${doctor.stdout}\n  stderr: ${doctor.stderr}`);
-    check(doctor.status === 0 && doctorReport?.result?.exitCode === 0, "paseo-bm doctor on a machine without paseo-bm exits 0");
+    console.log(`$ paseo-bm --json -> exit ${bareJson.status}`);
     check(
-      doctorReport?.checks?.some((entry) => entry.id === "install-record" && entry.severity === "warn") === true,
-      "paseo-bm doctor reports that paseo-bm is not installed",
+      bareJson.status === 0 && bareReport?.command === "migrate" && bareReport?.migration?.outcome === "no-directory-install",
+      "paseo-bm --json prints one migrate document naming the outcome",
     );
+
+    // The retired commands still explain themselves, and run nothing.
+    for (const retired of ["doctor", "uninstall"]) {
+      const answer = run(bin, [retired], { cwd: neutralCwd, env: flowEnv });
+      console.log(`$ paseo-bm ${retired} -> exit ${answer.status}`);
+      check(answer.status === 2, `paseo-bm ${retired} exits 2`);
+      check(answer.stderr.includes("E_COMMAND_RETIRED"), `paseo-bm ${retired} says it was retired`);
+    }
 
     const argvLog = existsSync(fakeLog) ? readFileSync(fakeLog, "utf8") : "";
-    check(argvLog.includes('"daemon","status"'), "install and doctor talked to the fake paseo, not a real one");
-    check(!existsSync(join(fakeHome, ".paseo-bm")), "the install preview created no install home");
-    check(sameSnapshot(workBefore, workSnapshot()), "install preview and doctor wrote nothing, inside the fake HOME or anywhere else in the work dir");
+    check(argvLog.includes('"daemon","status"'), "the run talked to the fake paseo, not a real one");
+    check(!existsSync(join(fakeHome, ".paseo-bm")), "the run created no data folder");
+    check(sameSnapshot(workBefore, workSnapshot()), "the run wrote nothing, inside the fake HOME or anywhere else in the work dir");
   }
 
   // 5. No stray writes.

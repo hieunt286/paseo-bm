@@ -73,9 +73,10 @@ describe("embedded copies", () => {
   it("carries the bumped payload version", () => {
     const manifest = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as { version: string };
     expect(PLUGIN_VERSION).toBe(manifest.version);
-    // The minor moves with each feature wave: phase 2a was 0.2.x, and delta
-    // 20260921 (phases 2a-14..2a-18, REQ-063..REQ-067) moved it to 0.3.x.
-    expect(PLUGIN_VERSION.startsWith("0.3.")).toBe(true);
+    // The minor moves with each feature wave: phase 2a was 0.2.x, delta
+    // 20260921 moved it to 0.3.x, and ADR-012 — the plugin becoming the whole
+    // product, with the npx installer retired — moved it to 0.4.x.
+    expect(PLUGIN_VERSION.startsWith("0.4.")).toBe(true);
   });
 });
 

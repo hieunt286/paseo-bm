@@ -285,7 +285,7 @@ describe("Worker skills in the Manager's Runtime facts", () => {
     const facts = await runtimeFactsOf("manager", paseoExtending("codex"), "/repo", () => {}, status(["polishing-beads", "architecture-premise-audit"]));
     expect(facts.workerSkillsMissing).toEqual(["polishing-beads"]);
     expect(runtimeFactsText("manager", facts)).toBe(
-      `${RUNTIME_FACTS_HEADING}\n\nWorker skills: missing \`polishing-beads\` — tell the user once, when you confirm the Worker, that it works with lower quality, and point to \`npx paseo-bm doctor\`.`,
+      `${RUNTIME_FACTS_HEADING}\n\nWorker skills: missing \`polishing-beads\` — tell the user once, when you confirm the Worker, that it works with lower quality, and point to Beads Manager → Setup → Agent skills.`,
     );
   });
 

@@ -42,13 +42,16 @@ function sourceFilesUnder(relativeDir: string): string[] {
 }
 
 describe("plugin manifest", () => {
-  it("declares the paseo-bm id and requires Paseo 0.8 or newer", () => {
+  // 0.4.0 (ADR-012 decision 2): the product is the npm package, and Paseo only
+  // learned to install one in 0.9. A 0.8 daemon must refuse this plugin rather
+  // than load a build that cannot reach its own install path.
+  it("declares the paseo-bm id and requires Paseo 0.9 or newer", () => {
     const manifest = JSON.parse(read("paseo-plugin.json")) as {
       id: string;
       requirements: { paseo: string };
     };
     expect(manifest.id).toBe("paseo-bm");
-    expect(manifest.requirements.paseo).toBe(">=0.8.0");
+    expect(manifest.requirements.paseo).toBe(">=0.9.0");
   });
 
   // The payload ships as its own npm package, paseo-bm-plugin, and the

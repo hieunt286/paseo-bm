@@ -22,7 +22,7 @@ import {
 import {
   BASE_INSTRUCTIONS,
   fullInstructions,
-  installHomeOf,
+  dataHomeOf,
   readRoleExtras,
   runtimeFactsOf,
   type RoleExtras,
@@ -274,7 +274,7 @@ async function prepare(
 }> {
   let extras: Partial<RoleExtras> = {};
   try {
-    const home = await installHomeOf(paseo);
+    const home = dataHomeOf();
     if (home !== null) extras = readRoleExtras(home);
   } catch {
     // Without the additions the agent still gets its base instructions.

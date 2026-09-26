@@ -667,18 +667,20 @@ describe("checkReviewBudget with a replacement Reviewer", () => {
     expect(await check(paseo, home)).toBe("sent");
   });
 
-  it("finds the install home itself when none is given, as the plugin runs", async () => {
+  it("finds the data folder itself when none is given, as the plugin runs", async () => {
     await resent();
-    writeFileSync(join(home, "install.json"), JSON.stringify({ schemaVersion: 1 }));
-    const { paseo } = fakePaseo();
-    const installed = {
-      ...paseo,
-      config: { get: async () => ({ config: { plugins: { "paseo-bm": { source: "directory", path: join(home, "plugin", "0.2.0") } } } }) },
-    } as BudgetPaseo;
-    // The request is found and counted: over budget until the incident names the replacement.
-    expect(await check(installed)).toBe("sent");
-    writeIncidents(home, [reviewerIncident()]);
-    expect(await check(installed)).toBe("within");
+    // No `install.json` and no plugin entry in the configuration: from 0.4.0
+    // the folder is found with `resolveDataHome` alone (design §5.1).
+    process.env["PASEO_BM_HOME"] = home;
+    try {
+      const { paseo } = fakePaseo();
+      // The request is found and counted: over budget until the incident names the replacement.
+      expect(await check(paseo)).toBe("sent");
+      writeIncidents(home, [reviewerIncident()]);
+      expect(await check(paseo)).toBe("within");
+    } finally {
+      delete process.env["PASEO_BM_HOME"];
+    }
   });
 });
 

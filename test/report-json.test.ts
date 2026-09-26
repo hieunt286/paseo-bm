@@ -1,189 +1,94 @@
 import { describe, expect, it } from "vitest";
 import { renderJsonReport, toJsonDocument, writeJsonReport } from "../src/report/json.js";
 import { EXIT_CODES } from "../src/exit-codes.js";
-import type { Action, Check, DoctorReport, PlanReport, Report } from "../src/action.js";
+import type { Action, MigrateReport } from "../src/action.js";
 
 /**
- * Fixtures use symbolic roots (`installHome/…`, `paseoHome/…`) exactly as
- * Design §4.4 writes them, so snapshots never contain a real `$HOME`.
+ * The machine channel — Technical Design §4.4.
+ *
+ * 0.4.0 has one command, so one report shape. The install and uninstall plans
+ * and the doctor findings this file also covered went with the commands that
+ * produced them (WP-406); what is still worth pinning is the frame: the key
+ * order, which actions carry `from`/`to`, where a warning's wording comes from,
+ * that `result.error` is present exactly on a failure, and that stdout receives
+ * one parseable document and nothing else.
+ *
+ * Fixtures use symbolic roots (`installHome/…`) exactly as Design §4.4 writes
+ * them, so nothing here contains a real `$HOME`.
  */
 const PASEO = {
-  cliVersion: "0.8.0",
-  daemonVersion: "0.8.0",
+  cliVersion: "0.9.2",
+  daemonVersion: "0.9.2",
   home: "/fake/home/.paseo",
   pluginsEnabled: false,
 } as const;
 
-const ROLES = [
-  { role: "manager", provider: "claude", model: "opus-5", paseoTools: true, loggedIn: true },
-  { role: "worker", provider: "codex", model: "gpt-5.6-sol", paseoTools: true, loggedIn: false },
-  { role: "reviewer", provider: "codex", model: "gpt-5.6-sol", paseoTools: false, loggedIn: null },
-] as const;
+const OLD_DIR = "/fake/home/.paseo-bm/plugin/0.3.1";
+const NPM_SOURCE = "npm:paseo-bm-plugin@0.4.0";
 
-const SKILLS = {
-  source: "cuongntr/agent-skills",
-  required: ["feature-workflow", "implementing-beads"],
-  byAgent: {
-    codex: { present: ["feature-workflow"], missing: ["implementing-beads"] },
-    claude: { present: ["feature-workflow", "implementing-beads"], missing: [] },
-  },
-  suggestedCommand: "npx -y skills add cuongntr/agent-skills --agent codex implementing-beads",
-  assisted: false,
-  outcome: null,
-} as const;
-
-const INSTALL_ACTIONS: readonly Action[] = [
+const ACTIONS: readonly Action[] = [
   {
     kind: "create",
-    target: "installHome/plugin/0.1.0/roles/worker.md",
-    location: "install-home",
-    reason: "missing",
+    target: "installHome/home.json",
+    reason: "custom-install-home",
+  },
+  {
+    kind: "create",
+    target: "installHome/ui/setup-state.json#agentTools",
+    reason: "carry-over",
+  },
+  {
+    kind: "plugin",
+    target: "paseo-bm",
+    reason: "switch-to-npm",
+    from: OLD_DIR,
+    to: NPM_SOURCE,
   },
   {
     kind: "update",
     target: "installHome/install.json",
-    location: "install-home",
-    reason: "outdated",
-  },
-  {
-    kind: "skip",
-    target: "installHome/plugin/0.1.0/roles/manager.md",
-    location: "install-home",
-    reason: "unchanged",
-  },
-  {
-    kind: "conflict",
-    target: "installHome/plugin/0.1.0/roles/reviewer.md",
-    location: "install-home",
-    reason: "user-modified",
-    detail: "re-run with --force to overwrite; a backup is taken first",
-  },
-  {
-    kind: "create",
-    target: "paseoDaemon/plugins[paseo-bm]",
-    location: "paseo-daemon",
-    reason: "missing",
-  },
-  {
-    kind: "config",
-    target: "paseoHome/config.json#pluginsEnabled",
-    location: "paseo-config",
-    reason: "not enabled yet",
-    from: false,
-    to: true,
-    consent: "interactive",
-  },
-  {
-    kind: "config",
-    target: "paseoHome/config.json#daemon.agentProfiles[bm-worker]",
-    location: "paseo-config",
-    reason: "missing",
-    from: null,
-    to: { id: "bm-worker", label: "Beads Worker" },
-    consent: "interactive",
+    reason: "migrated",
+    detail: "schemaVersion 2, so a 0.3.x build refuses to re-install over the npm plugin",
   },
 ];
 
-function installReport(overrides: Partial<PlanReport> = {}): PlanReport {
+function migrateReport(overrides: Partial<MigrateReport> = {}): MigrateReport {
   return {
     schemaVersion: 1,
-    command: "install",
-    mode: "preview",
-    paseoBmVersion: "0.1.0",
+    command: "migrate",
+    mode: "applied",
+    paseoBmVersion: "0.4.0",
     paseo: PASEO,
-    actions: INSTALL_ACTIONS,
-    roles: [...ROLES],
-    skills: SKILLS,
-    warnings: [{ code: "W_BEADS_CLI_MISSING", detail: "looked for br and bd on PATH" }],
-    result: { exitCode: EXIT_CODES.ok, pluginState: "disabled" },
-    ...overrides,
-  };
-}
-
-const UNINSTALL_ACTIONS: readonly Action[] = [
-  { kind: "delete", target: "installHome/plugin/0.1.0", location: "install-home", reason: "owned payload" },
-  {
-    kind: "keep",
-    target: "installHome/plugin/0.1.0/roles/reviewer.md",
-    location: "install-home",
-    reason: "user-modified",
-  },
-  {
-    kind: "config",
-    target: "paseoHome/config.json#daemon.mcp.injectIntoAgents",
-    location: "paseo-config",
-    reason: "restoring the value paseo-bm found",
-    from: true,
-    to: null,
-    consent: "interactive",
-  },
-];
-
-function uninstallReport(): PlanReport {
-  return {
-    schemaVersion: 1,
-    command: "uninstall",
-    mode: "preview",
-    paseoBmVersion: "0.1.0",
-    paseo: { ...PASEO, pluginsEnabled: true },
-    actions: UNINSTALL_ACTIONS,
+    actions: ACTIONS,
+    migration: { outcome: "migrated", from: OLD_DIR, to: NPM_SOURCE, fallback: null },
     roles: [],
     skills: null,
-    warnings: [],
-    result: { exitCode: EXIT_CODES.ok, pluginState: "running" },
-  };
-}
-
-const CHECKS: readonly Check[] = [
-  { id: "paseo-cli", severity: "ok", message: "Paseo CLI 0.8.0 and daemon 0.8.0 agree.", remediation: "" },
-  {
-    id: "plugin-status",
-    severity: "error",
-    message: "The paseo-bm plugin is registered but its status is disabled.",
-    remediation: "Run `npx paseo-bm install --apply` and consent to enabling plugins.",
-  },
-  {
-    id: "skills",
-    severity: "warn",
-    message: "codex is missing 1 of 2 required skills.",
-    remediation: "Run the printed `skills add` command.",
-  },
-];
-
-function doctorReport(): DoctorReport {
-  return {
-    schemaVersion: 1,
-    command: "doctor",
-    mode: "preview",
-    paseoBmVersion: "0.1.0",
-    paseo: { ...PASEO, pluginsEnabled: true },
-    checks: CHECKS,
-    roles: [...ROLES],
-    skills: SKILLS,
-    warnings: [{ code: "W_PROVIDER_NOT_LOGGED_IN", detail: "worker uses codex" }],
-    result: { exitCode: EXIT_CODES.doctorDrift, pluginState: "disabled" },
+    warnings: [{ code: "W_PLUGINS_DISABLED", detail: "Paseo reports the plugin as disabled" }],
+    result: { exitCode: EXIT_CODES.ok, pluginState: "disabled" },
+    ...overrides,
   };
 }
 
 /** A stdout sink that records every chunk, the way the CLI passes one in. */
 function sink(): { chunks: string[]; write: (chunk: string) => void } {
   const chunks: string[] = [];
-  return { chunks, write: (chunk) => chunks.push(chunk) };
+  return { chunks, write: (chunk: string) => void chunks.push(chunk) };
 }
 
-describe("renderJsonReport — install", () => {
+describe("renderJsonReport — migrate", () => {
   it("renders the shape of Design §4.4", () => {
-    expect(renderJsonReport(installReport())).toMatchSnapshot();
+    expect(toJsonDocument(migrateReport())).toMatchSnapshot();
   });
 
   it("orders the top-level keys the way Design §4.4 lists them", () => {
-    expect(Object.keys(toJsonDocument(installReport()))).toEqual([
+    expect(Object.keys(toJsonDocument(migrateReport()))).toEqual([
       "schemaVersion",
       "command",
       "mode",
       "paseoBmVersion",
       "paseo",
       "actions",
+      "migration",
       "roles",
       "skills",
       "warnings",
@@ -191,125 +96,132 @@ describe("renderJsonReport — install", () => {
     ]);
   });
 
-  it("renders from/to only for config actions", () => {
-    const document = toJsonDocument(installReport()) as { actions: Record<string, unknown>[] };
-    expect(Object.keys(document.actions[0] ?? {})).toEqual(["kind", "target", "reason"]);
-    const config = document.actions.find((action) => action.kind === "config");
-    expect(Object.keys(config ?? {})).toEqual(["kind", "target", "reason", "from", "to", "consent"]);
-    expect(config?.from).toBe(false);
+  it("renders from/to only for the plugin action", () => {
+    const document = toJsonDocument(migrateReport()) as { actions: Record<string, unknown>[] };
+
+    for (const action of document.actions) {
+      const hasEndpoints = "from" in action && "to" in action;
+      expect(hasEndpoints, String(action.kind)).toBe(action.kind === "plugin");
+    }
+    expect(document.actions.find((action) => action.kind === "plugin")).toMatchObject({ from: OLD_DIR, to: NPM_SOURCE });
+  });
+
+  it("gives every action the three fields that are always there", () => {
+    const document = toJsonDocument(migrateReport()) as { actions: Record<string, unknown>[] };
+
+    for (const action of document.actions) {
+      expect(Object.keys(action)).toContain("kind");
+      expect(Object.keys(action)).toContain("target");
+      expect(Object.keys(action)).toContain("reason");
+    }
   });
 
   it("takes warning wording from the registry, not from the caller", () => {
-    const document = toJsonDocument(installReport()) as { warnings: Record<string, unknown>[] };
-    expect(document.warnings[0]).toEqual({
-      code: "W_BEADS_CLI_MISSING",
-      message: expect.stringContaining("beads CLI"),
-      detail: "looked for br and bd on PATH",
-    });
+    const document = toJsonDocument(migrateReport()) as { warnings: Record<string, unknown>[] };
+
+    expect(document.warnings[0]).toMatchObject({ code: "W_PLUGINS_DISABLED" });
+    expect(String(document.warnings[0]?.message)).toContain("plugins switch is off");
   });
 
-  it("renders an applied run through the very same code path", () => {
-    const preview = toJsonDocument(installReport());
-    const applied = toJsonDocument(installReport({ mode: "applied" }));
-    expect(applied.actions).toEqual(preview.actions);
-    expect(applied.mode).toBe("applied");
+  it("renders a preview through the very same code path", () => {
+    const preview = toJsonDocument(migrateReport({ mode: "preview" })) as { mode: string; actions: unknown[] };
+
+    expect(preview.mode).toBe("preview");
+    expect(preview.actions).toHaveLength(ACTIONS.length);
   });
 
-  it("renders skills as null when the step was skipped", () => {
-    expect(toJsonDocument(installReport({ skills: null })).skills).toBeNull();
+  it("renders skills as null when there is nothing to say about them", () => {
+    expect((toJsonDocument(migrateReport()) as { skills: unknown }).skills).toBeNull();
+  });
+});
+
+describe("the migration block", () => {
+  it("names the outcome and both ends of the move", () => {
+    const document = toJsonDocument(migrateReport()) as { migration: Record<string, unknown> };
+
+    expect(document.migration).toEqual({ outcome: "migrated", from: OLD_DIR, to: NPM_SOURCE, fallback: null });
+  });
+
+  it("describes a fallback when the switch failed", () => {
+    const document = toJsonDocument(
+      migrateReport({
+        migration: { outcome: "fell-back", from: OLD_DIR, to: NPM_SOURCE, fallback: { outcome: "fell-back", detail: `restored ${OLD_DIR}` } },
+      }),
+    ) as { migration: Record<string, unknown> };
+
+    expect(document.migration).toMatchObject({ outcome: "fell-back", fallback: { outcome: "fell-back" } });
+  });
+
+  it("carries an outcome that wrote nothing at all", () => {
+    const document = toJsonDocument(
+      migrateReport({ actions: [], migration: { outcome: "no-directory-install", from: null, to: NPM_SOURCE, fallback: null } }),
+    ) as { migration: Record<string, unknown>; actions: unknown[] };
+
+    expect(document.migration).toMatchObject({ outcome: "no-directory-install", from: null });
+    expect(document.actions).toEqual([]);
   });
 });
 
 describe("writeJsonReport — stdout holds exactly one document", () => {
   it("writes one chunk that parses as a single JSON document", () => {
-    const stdout = sink();
-    writeJsonReport(installReport(), stdout.write);
-    const text = stdout.chunks.join("");
+    const out = sink();
 
-    expect(stdout.chunks).toHaveLength(1);
-    expect(text.endsWith("\n")).toBe(true);
-    expect(text.trimStart().startsWith("{")).toBe(true);
+    writeJsonReport(migrateReport(), out.write);
 
-    // Two concatenated documents, or any log line mixed in, would make this throw.
-    const parsed: unknown = JSON.parse(text);
-    expect(parsed).toEqual(toJsonDocument(installReport()));
-
-    // And nothing outside the document: the text is exactly what JSON.stringify produced.
-    expect(text).toBe(`${JSON.stringify(parsed, null, 2)}\n`);
-  });
-
-  it("stays a single document for every command", () => {
-    for (const report of [installReport(), uninstallReport(), doctorReport()] satisfies Report[]) {
-      const stdout = sink();
-      writeJsonReport(report, stdout.write);
-      expect(() => JSON.parse(stdout.chunks.join("")) as unknown).not.toThrow();
-      expect(stdout.chunks).toHaveLength(1);
-    }
+    expect(out.chunks).toHaveLength(1);
+    expect(out.chunks[0]?.endsWith("\n")).toBe(true);
+    const parsed = JSON.parse(out.chunks[0]!) as { command: string };
+    expect(parsed.command).toBe("migrate");
+    // One document: nothing before the first `{` and nothing after the last `}`.
+    expect(out.chunks[0]?.trimStart().startsWith("{")).toBe(true);
+    expect(out.chunks[0]?.trimEnd().endsWith("}")).toBe(true);
   });
 
   it("can render compactly on one line", () => {
-    const text = renderJsonReport(uninstallReport(), { indent: 0 });
-    expect(text.trimEnd().split("\n")).toHaveLength(1);
-    expect(() => JSON.parse(text) as unknown).not.toThrow();
+    const compact = renderJsonReport(migrateReport(), { indent: 0 });
+
+    expect(compact.trimEnd().includes("\n")).toBe(false);
+    expect(JSON.parse(compact)).toMatchObject({ schemaVersion: 1 });
   });
 
   it("passes the finished text through the redaction seam", () => {
-    const text = renderJsonReport(installReport(), { redact: (value) => value.replace(/0\.8\.0/g, "x.y.z") });
-    expect(text).not.toContain("0.8.0");
-    expect(() => JSON.parse(text) as unknown).not.toThrow();
-  });
-});
+    const seen: string[] = [];
 
-describe("renderJsonReport — doctor", () => {
-  it("renders checks[] instead of actions[]", () => {
-    expect(renderJsonReport(doctorReport())).toMatchSnapshot();
-  });
+    renderJsonReport(migrateReport(), {
+      redact: (text) => {
+        seen.push(text);
+        return text;
+      },
+    });
 
-  it("never carries an actions key", () => {
-    const document = toJsonDocument(doctorReport());
-    expect(document).not.toHaveProperty("actions");
-    expect(Object.keys(document)).toContain("checks");
-  });
-
-  it("gives every check the four fields of Design §4.4", () => {
-    const document = toJsonDocument(doctorReport()) as { checks: Record<string, unknown>[] };
-    for (const check of document.checks) {
-      expect(Object.keys(check)).toEqual(["id", "severity", "message", "remediation"]);
-    }
-  });
-});
-
-describe("renderJsonReport — uninstall", () => {
-  it("renders delete, keep and config actions", () => {
-    expect(renderJsonReport(uninstallReport())).toMatchSnapshot();
-  });
-
-  it("uses only the uninstall kinds of Design §4.4", () => {
-    const document = toJsonDocument(uninstallReport()) as { actions: Record<string, unknown>[] };
-    expect(document.actions.map((action) => action.kind)).toEqual(["delete", "keep", "config"]);
+    expect(seen).toHaveLength(1);
+    expect(JSON.parse(seen[0]!)).toMatchObject({ command: "migrate" });
   });
 });
 
 describe("result.error (Design §4.4 errata 2026-09-15)", () => {
   it("carries the registry code and message on a failed run", () => {
-    const failed = {
-      ...installReport(),
-      result: {
-        exitCode: EXIT_CODES.preflight,
-        pluginState: null,
-        error: { code: "E_TARGET_NOT_WRITABLE" as const, message: "The install home is not writable." },
-      },
-    };
-    const document = JSON.parse(renderJsonReport(failed)) as { result: Record<string, unknown> };
+    const document = toJsonDocument(
+      migrateReport({
+        migration: { outcome: "remove-failed", from: OLD_DIR, to: NPM_SOURCE, fallback: null },
+        result: {
+          exitCode: EXIT_CODES.pluginLoadFailed,
+          pluginState: null,
+          error: { code: "E_PLUGIN_LOAD_FAILED", message: "Paseo could not remove the plugin: the daemon is busy." },
+        },
+      }),
+    ) as { result: Record<string, unknown> };
+
     expect(document.result).toEqual({
-      exitCode: EXIT_CODES.preflight,
+      exitCode: EXIT_CODES.pluginLoadFailed,
       pluginState: null,
-      error: { code: "E_TARGET_NOT_WRITABLE", message: "The install home is not writable." },
+      error: { code: "E_PLUGIN_LOAD_FAILED", message: "Paseo could not remove the plugin: the daemon is busy." },
     });
   });
 
   it("omits the key entirely on success", () => {
-    const document = JSON.parse(renderJsonReport(installReport())) as { result: Record<string, unknown> };
-    expect(Object.keys(document.result)).toEqual(["exitCode", "pluginState"]);
+    const document = toJsonDocument(migrateReport()) as { result: Record<string, unknown> };
+
+    expect("error" in document.result).toBe(false);
   });
 });

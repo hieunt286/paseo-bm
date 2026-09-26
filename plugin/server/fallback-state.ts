@@ -38,11 +38,11 @@ import { aliasBases } from "./alias-bases";
 import { redactText, sliceLastTurn, type CollectorPaseo } from "./collector";
 import { classifyTurn, quietReply } from "./fallback-detect";
 import { chainOf, readRoleFallback, type FallbackChain } from "./fallback-settings";
-import { TRACES_DIR_NAME } from "./install-home";
+import { TRACES_DIR_NAME } from "./data-home";
 import { PARENT_AGENT_LABEL } from "./manager";
 import { providerId } from "./provider-id";
 import { asRecord, availableProviders, nonEmpty, reasonOf } from "./role-choices";
-import { installHomeOf } from "./role-extras";
+import { dataHomeOf } from "./role-extras";
 import { TIMED_OUT, withTimeout } from "./role-mode";
 import { writeStoreFileAtomically } from "./trace-store";
 import { fallbackAlias, positionOfAlias } from "../shared/fallback";
@@ -120,13 +120,13 @@ export function replacementsOf(incidents: readonly FallbackIncident[]): Map<stri
 }
 
 /**
- * `replacementsOf` the incidents in the install home of `paseo`, within the
- * lookup budget; empty when either cannot be read. Never throws.
+ * `replacementsOf` the incidents in the plugin's own data folder; empty when
+ * there is no folder or they cannot be read. Never throws.
  */
-export async function replacementsFor(paseo: unknown, deps: { homedir?: () => string; home?: string | null } = {}): Promise<Map<string, string>> {
+export function replacementsFor(deps: { homedir?: () => string; home?: string | null } = {}): Map<string, string> {
   try {
-    const found = deps.home !== undefined ? deps.home : await withTimeout(installHomeOf(paseo, deps.homedir === undefined ? {} : { homedir: deps.homedir }));
-    if (found === null || found === TIMED_OUT) return new Map();
+    const found = deps.home !== undefined ? deps.home : dataHomeOf(deps.homedir === undefined ? {} : { homedir: deps.homedir });
+    if (found === null) return new Map();
     return replacementsOf(readIncidents(found, () => {}).incidents);
   } catch {
     return new Map();
@@ -289,7 +289,7 @@ interface SnapshotPaseo {
   agents: { ref(agentId: string): { refresh(): Promise<{ agent?: unknown } | null> } };
 }
 
-/** Gets each written incident, the Paseo handle of the hook that wrote it, the role's policy then, and the install home. */
+/** Gets each written incident, the Paseo handle of the hook that wrote it, the role's policy then, and the data folder. */
 export type IncidentListener = (
   incident: FallbackIncident,
   paseo: unknown,
@@ -446,8 +446,8 @@ export type FallbackHost = Partial<Pick<PluginServerContext, "on">>;
 export interface RegisterFallbackOptions {
   log?: (message: string) => void;
   now?: () => Date;
-  /** The install home; tests pass one, the plugin looks it up (and keeps it once found). */
-  home?: () => Promise<string | null>;
+  /** The data folder; tests pass one, the plugin looks it up (and keeps it once found). */
+  home?: () => string | null;
   /** Hears the SDK handle of every paseo-bm turn end (the wait timers are set again from it, §4.4.9). */
   onPaseo?: (paseo: unknown) => void;
 }
@@ -464,11 +464,11 @@ export function registerFallbackDetection(host: FallbackHost, options: RegisterF
   if (typeof host.on !== "function") return () => {};
   const log = options.log ?? defaultLog;
   let knownHome: string | null = null;
-  const homeOf = async (paseo: unknown): Promise<string | null> => {
+  // Kept once found: the folder does not move while the daemon runs.
+  const homeOf = (): string | null => {
     if (options.home !== undefined) return options.home();
     if (knownHome !== null) return knownHome;
-    const found = await withTimeout(installHomeOf(paseo));
-    knownHome = found === TIMED_OUT ? null : found;
+    knownHome = dataHomeOf();
     return knownHome;
   };
   const remove = host.on("agent.turn_ended", async (event, context) => {
@@ -485,7 +485,7 @@ export function registerFallbackDetection(host: FallbackHost, options: RegisterF
       if (text === null) return;
       const paseo = (context as { paseo?: unknown } | undefined)?.paseo;
       if (paseo === undefined) return;
-      const home = await homeOf(paseo);
+      const home = homeOf();
       if (home === null) return;
       const patterns = readRoleFallback(home, log).file.patterns ?? null;
       const signal = await classifyTurn(event, { paseo: paseo as CollectorPaseo, patterns, log });

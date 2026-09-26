@@ -58,11 +58,13 @@ function record(overrides: Partial<TraceRecord> = {}): TraceRecord {
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "bm-reassign-"));
   location = { tracesDir: join(home, "traces") };
-  writeFileSync(join(home, "install.json"), JSON.stringify({ schemaVersion: 1 }));
+  // From 0.4.0 the store is found with `resolveDataHome` (design §5.1).
+  process.env["PASEO_BM_HOME"] = home;
   clearTraceStoreCache();
 });
 
 afterEach(() => {
+  delete process.env["PASEO_BM_HOME"];
   rmSync(home, { recursive: true, force: true });
 });
 

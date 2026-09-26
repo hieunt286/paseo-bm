@@ -14,14 +14,14 @@
  * Handlers throw only coded `DashboardError`s; the notice never throws.
  */
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { unusableDataHomeMessage } from "./data-home";
 import { onFallbackIncident, readIncidents, updateIncidents } from "./fallback-state";
 import { FALLBACK_NOTICE_MARKER } from "./notices";
 import { enqueue as defaultEnqueue, type NoticeOutcome, type NoticePaseo } from "./notice-queue";
 import { aliasBases } from "./alias-bases";
 import { providerId } from "./provider-id";
 import { reasonOf } from "./role-choices";
-import { installHomeOf } from "./role-extras";
-import { TIMED_OUT, withTimeout } from "./role-mode";
+import { dataHomeOf } from "./role-extras";
 import { FALLBACK_CLASS_LABELS } from "../shared/bm-fallback";
 import { DashboardError, fallbackActRpc, fallbackIncidentsRpc, type FallbackActInput, type FallbackIncident } from "../shared/contracts";
 
@@ -87,16 +87,14 @@ export async function notifyFallback(incident: FallbackIncident, paseo: unknown,
 }
 
 export interface FallbackRpcDeps extends FallbackNoticeDeps {
-  /** The install home; the plugin looks it up, tests pass one. */
+  /** The data folder; the plugin looks it up, tests pass one. */
   home?: string | null;
   now?: () => Date;
 }
 
-/** The install home, raced against the lookup budget. */
-async function homeOf(paseo: unknown, deps: FallbackRpcDeps): Promise<string | null> {
-  if (deps.home !== undefined) return deps.home;
-  const found = await withTimeout(installHomeOf(paseo));
-  return found === TIMED_OUT ? null : found;
+/** The data folder, or `null` when there is none; `deps.home` stands in for it in tests. */
+function homeOf(deps: FallbackRpcDeps): string | null {
+  return deps.home !== undefined ? deps.home : dataHomeOf();
 }
 
 /** Handler body of `fallback.incidents`: oldest first; an unreadable file or unknown home reads as none. */
@@ -105,7 +103,7 @@ export async function handleFallbackIncidents(
   paseo: unknown,
   deps: FallbackRpcDeps = {},
 ): Promise<{ incidents: FallbackIncident[] }> {
-  const home = await homeOf(paseo, deps);
+  const home = homeOf(deps);
   if (home === null) return { incidents: [] };
   const ids = input?.ids === undefined ? null : new Set(input.ids);
   const incidents = readIncidents(home, deps.log ?? defaultLog).incidents.filter(
@@ -149,8 +147,8 @@ export async function decidePending(
 
 /** `dismiss` ("I'll handle it", §4.4.10): `dismissed`, no agent touched. */
 export const dismissIncident: FallbackAction = async (incident, _paseo, deps) => {
-  const home = await homeOf(_paseo, deps);
-  if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", "paseo-bm cannot find its install home");
+  const home = homeOf(deps);
+  if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", `${unusableDataHomeMessage()}; see Setup`);
   const now = (deps.now ?? (() => new Date()))().toISOString();
   return decidePending(home, incident.id, (current) => ({ ...current, status: "dismissed", decidedAt: now }), deps.log ?? defaultLog);
 };
@@ -186,8 +184,8 @@ export function handleFallbackAct(
   deps: FallbackRpcDeps & { actions?: FallbackActions } = {},
 ): Promise<{ incident: FallbackIncident }> {
   return oneActionAtATime(async () => {
-    const home = await homeOf(paseo, deps);
-    if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", "paseo-bm cannot find its install home");
+    const home = homeOf(deps);
+    if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", `${unusableDataHomeMessage()}; see Setup`);
     const found = readIncidents(home, deps.log ?? defaultLog).incidents.find((incident) => incident.id === input.incidentId);
     if (found === undefined) throw new DashboardError("E_FALLBACK_NOT_FOUND", `no fallback incident ${input.incidentId}`);
     const scoped = { ...deps, home };
@@ -249,7 +247,7 @@ export async function decideAutomatically(
   } catch (error) {
     log(`[paseo-bm] the Auto switch policy could not ${action} for incident ${incident.id}: ${reasonOf(error)}`);
     // The card shows what became of it; the chat is told the state it is in now.
-    const home = await homeOf(paseo, deps);
+    const home = homeOf(deps);
     const now = home === null ? undefined : readIncidents(home, log).incidents.find((entry) => entry.id === incident.id);
     await notifyFallback(now ?? incident, paseo, deps);
   }

@@ -16,6 +16,7 @@
  * before the Worker got the instructions, the card offers **Resend to Worker**,
  * which sends the same message again.
  */
+import { unusableDataHomeMessage } from "./data-home";
 import { aliasBases, decidePending, fallbackNotice, type FallbackAction, type FallbackRpcDeps } from "./fallback-rpc";
 import { readIncidents, updateIncidents } from "./fallback-state";
 import { FALLBACK_NOTICE_MARKER } from "./notices";
@@ -23,8 +24,8 @@ import { enqueue as defaultEnqueue, type NoticeOutcome, type NoticePaseo } from 
 import { setAgentLabels, type CliResult } from "./paseo-cli";
 import { roleOfProvider } from "./agent-role";
 import { asRecord, availableProviders, nonEmpty, reasonOf } from "./role-choices";
-import { REVIEWER_FALLBACK_MODE, REVIEWER_FALLBACK_PROVIDERS, installHomeOf } from "./role-extras";
-import { TIMED_OUT, capabilityOf, chooseModeId, featuresFor, modesFor, runPostureOf, withTimeout } from "./role-mode";
+import { REVIEWER_FALLBACK_MODE, REVIEWER_FALLBACK_PROVIDERS, dataHomeOf } from "./role-extras";
+import { capabilityOf, chooseModeId, featuresFor, modesFor, runPostureOf } from "./role-mode";
 import { DashboardError, type FallbackIncident } from "../shared/contracts";
 
 /** Label a replacement agent carries: the id of the agent it replaces. */
@@ -78,7 +79,7 @@ export interface ReviewerFallbackDeps {
   enqueue?: (targetId: string, kind: string, text: string, paseo?: NoticePaseo) => Promise<NoticeOutcome>;
   /** `setAgentLabels` of `paseo-cli.ts` by default. */
   setLabels?: (agentId: string, labels: Record<string, string>) => Promise<CliResult>;
-  /** The install home (tests); looked up otherwise. */
+  /** The data folder (tests); looked up otherwise. */
   home?: string | null;
 }
 
@@ -105,7 +106,7 @@ export function createReviewerSwitch(deps: ReviewerFallbackDeps = {}): FallbackA
   return async (incident, paseo, rpcDeps: FallbackRpcDeps) => {
     const now = rpcDeps.now ?? deps.now ?? (() => new Date());
     const home = rpcDeps.home ?? null;
-    if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", "paseo-bm cannot find its install home");
+    if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", `${unusableDataHomeMessage()}; see Setup`);
     if (incident.role !== "reviewer") throw new DashboardError("E_FALLBACK_NO_CANDIDATE", `not a Reviewer incident (${incident.role})`);
     const candidate = incident.candidate;
     if (candidate === null) throw new DashboardError("E_FALLBACK_NO_CANDIDATE", "the fallback chain has no entry left for this Reviewer");
@@ -159,11 +160,7 @@ export async function linkReplacementReviewer(
     const workspaceId = nonEmpty(snapshot?.["workspaceId"]);
     const parentId = nonEmpty(labels[PARENT_AGENT_LABEL]) ?? nonEmpty(snapshot?.["parentAgentId"]);
     const requestId = nonEmpty(labels[REQUEST_ID_LABEL]);
-    let home = deps.home;
-    if (home === undefined) {
-      const found = await withTimeout(installHomeOf(paseo));
-      home = found === TIMED_OUT ? null : found;
-    }
+    const home = deps.home === undefined ? dataHomeOf() : deps.home;
     if (home === null) return null;
     const match = (incident: FallbackIncident) =>
       incident.role === "reviewer" &&

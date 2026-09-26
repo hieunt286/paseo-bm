@@ -416,6 +416,12 @@ describe("Dashboard error codes", () => {
       "E_FALLBACK_NO_CANDIDATE",
       "E_FALLBACK_NO_RESET",
       "E_FALLBACK_CREATE_FAILED",
+      // 0.4.0 single source (ADR-012 decision 3, design §7.13.9).
+      "E_DATA_HOME_UNAVAILABLE",
+      "E_SETUP_ROLES_FAILED",
+      "E_SETUP_WRITE_FAILED",
+      "E_SKILLS_PRESENT",
+      "E_SKILLS_INSTALL_FAILED",
     ]);
   });
 

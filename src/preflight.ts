@@ -32,7 +32,7 @@
 
 import { accessSync, constants, statSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
-import type { Check, CheckSeverity, ReportWarning } from "./action.js";
+import type { ReportWarning } from "./action.js";
 import type { DiagnosticCode, ErrorCode } from "./errors.js";
 import { diagnostic } from "./errors.js";
 import { EXIT_CODES } from "./exit-codes.js";
@@ -46,8 +46,14 @@ export const SUPPORTED_PLATFORMS: readonly NodeJS.Platform[] = ["darwin", "linux
 /** Node floor, kept equal to the `engines.node` field of package.json. */
 export const MINIMUM_NODE_MAJOR = 22;
 
-/** Oldest Paseo paseo-bm can drive (Technical Design §4.7; plugin API v0.8). */
-export const MINIMUM_PASEO_VERSION = "0.8.0";
+/**
+ * Oldest Paseo 0.4.0 can drive (ADR-012 decision 2).
+ *
+ * 0.9 is where Paseo learned `paseo plugin add npm:<package>`, which is the
+ * only install path 0.4.0 has: migrating an older daemon would take away the
+ * directory install and have nothing to put in its place.
+ */
+export const MINIMUM_PASEO_VERSION = "0.9.0";
 
 /** Executable names of the beads CLI, in the order they are looked for. */
 export const BEADS_CLI_NAMES: readonly string[] = ["br", "bd"];
@@ -66,13 +72,21 @@ export type PreflightCheckId =
   | "beads-cli"
   | "beads-viewer";
 
+/** How much a finding matters: it passed, it is worth saying, or it blocks. */
+export type CheckSeverity = "ok" | "warn" | "error";
+
 /**
- * One check's outcome. It is a report `Check` plus the registry code, so the
- * same value can be rendered by `doctor` and turned into a failure by
- * `install` without either side re-wording it.
+ * One check's outcome — the message a human reads, what to do about it, and the
+ * registry code, so the caller turns a finding into a warning or into the
+ * failure it exits on without re-wording either.
  */
-export interface PreflightFinding extends Check {
+export interface PreflightFinding {
   readonly id: PreflightCheckId;
+  readonly severity: CheckSeverity;
+  /** Registry message, plus run-specific detail when there is any. */
+  readonly message: string;
+  /** Registry remediation; empty for a check that passed. */
+  readonly remediation: string;
   /** Registry code; `null` for a check that passed. */
   readonly code: DiagnosticCode | null;
   /** Run-specific context already folded into `message`; `null` when there is none. */
@@ -114,8 +128,6 @@ export interface PreflightResult {
   readonly failure: PreflightFailure | null;
   /** Checks that actually ran, in order. A run stops at the first failure. */
   readonly findings: readonly PreflightFinding[];
-  /** The same findings as the report model sees them. */
-  readonly checks: readonly Check[];
   /** Warnings collected on the way; they never change the exit code. */
   readonly warnings: readonly ReportWarning[];
   readonly facts: PreflightFacts;
@@ -222,16 +234,6 @@ export function toFailure(finding: PreflightFinding): PreflightFailure {
  */
 export function formatPreflightFailure(failure: PreflightFailure): string {
   return `${failure.message}\n${failure.remediation}`;
-}
-
-/** Drop the preflight-only fields, leaving exactly what the report model takes. */
-export function toCheck(finding: PreflightFinding): Check {
-  return {
-    id: finding.id,
-    severity: finding.severity,
-    message: finding.message,
-    remediation: finding.remediation,
-  };
 }
 
 /* ------------------------------------------------------------------ versions */
@@ -408,7 +410,7 @@ export function checkPaseoVersion(status: Pick<DaemonStatus, "cliVersion" | "dae
     return fail(
       "paseo-version",
       "E_VERSION_MISMATCH",
-      `This Paseo is ${cliVersion}; paseo-bm needs ${MINIMUM_PASEO_VERSION} or newer.`,
+      `This Paseo is ${cliVersion}; paseo-bm requires Paseo ${MINIMUM_PASEO_VERSION} or newer. On Paseo 0.8, keep paseo-bm@0.3.1.`,
     );
   }
   return ok("paseo-version", `Paseo ${cliVersion} is supported, and the CLI and daemon agree.`);
@@ -580,7 +582,6 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
     ok: failure === null,
     failure,
     findings,
-    checks: findings.map(toCheck),
     warnings,
     facts: {
       platform,

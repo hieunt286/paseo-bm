@@ -55,6 +55,8 @@ export type LauncherState =
       modeNotice: string | null;
       /** Added by delta 20260921 §4.2.4; absent in a state built before it. */
       toolsNotice?: string | null;
+      /** What this machine still needs (0.4.0, design §7.3); absent in an older state. */
+      setupNotice?: string | null;
     }
   | { status: "error"; workspaceId: string; code: string | null; message: string };
 
@@ -117,6 +119,7 @@ export function createManagerLauncher(): ManagerLauncher {
           otherManagerIds: [...result.otherManagerIds],
           modeNotice: result.modeNotice ?? null,
           toolsNotice: result.toolsNotice ?? null,
+          setupNotice: result.setupNotice ?? null,
         });
         return "opened";
       } catch (error) {
@@ -208,6 +211,11 @@ export function describeLauncherState(state: LauncherState): LauncherNotice[] {
       // Delta 20260921 §4.2.4: without Paseo tools this Manager cannot run a request.
       const toolsNotice = state.toolsNotice ?? null;
       if (toolsNotice !== null) notices.push({ tone: "warning", text: toolsNotice });
+      // 0.4.0: what the machine still needs — roles just created with defaults,
+      // and Paseo's agent-tools switch being off. Last, because the two above
+      // are about this Manager and this one is about the machine.
+      const setupNotice = state.setupNotice ?? null;
+      if (setupNotice !== null) notices.push({ tone: "warning", text: setupNotice });
       return notices;
     }
     case "error":

@@ -1,186 +1,232 @@
-# Checklist nghiệm thu trình cài đặt trên daemon thật — paseo-bm
+# Checklist nghiệm thu bản cài 0.4.0 trên daemon thật — paseo-bm
 
 | Trường | Giá trị |
 |---|---|
-| Status | Active — nghiệm thu vòng đời cài / chạy lại / cập nhật / gỡ của trình cài |
-| Áp dụng cho | `paseo-bm` `0.3.0`; Paseo CLI/daemon 0.8.0 trở lên (gồm 0.9.2, bản không còn `cliVersion` trong `daemon status --json`) |
-| Liên quan | [PRD M-1 → M-9](../product/paseo-bm-prd.md#2-mục-tiêu--chỉ-số-thành-công) · [Design §9.1, §10](../design/paseo-bm.md) · [ADR-006](../adr/ADR-006-role-registration.md) |
-| Nguồn gốc | Soạn cho nghiệm thu Phase 1a (`bm-wp-120-b2e.1.1`, lượt đạt 2026-09-15); giữ làm checklist hiện hành cho trình cài |
+| Status | Active — nghiệm thu đường cài duy nhất của 0.4.0: plugin npm, Setup, chuyển đổi, gỡ |
+| Áp dụng cho | `paseo-bm-plugin` và `paseo-bm` `0.4.0`; Paseo CLI/daemon **0.9.2** (0.9.2 không còn `cliVersion` trong `daemon status --json`; adapter tự lùi về `paseo --version`) |
+| Liên quan | [PRD](../product/paseo-bm-prd.md) · [Design §7.13, §11, §13](../design/paseo-bm.md) · [Design §4.3–§4.6](../design/paseo-bm.md) · [ADR-012](../adr/ADR-012-plugin-is-the-product.md) · [Plan 0.4.0](../plans/paseo-bm-plan-040-single-source.md) |
+| Nguồn gốc | Viết lại từ checklist trình cài 0.3.x (`bm-wp-407-prerelease-8t7x.2`); trình cài cũ không còn tồn tại trong 0.4.0 |
 
-Tài liệu này mô tả **cách chạy và cách chấm**; nó không chứa số đo. Mỗi lượt chạy chép mục 9 và mục 10 sang một biên bản riêng. Ngưỡng M-1 → M-9 lấy nguyên văn từ PRD; checklist không đặt ngưỡng mới. Nên chạy khi một bản phát hành đổi trình cài (`src/`) hoặc khi lên một phiên bản Paseo mới.
+Tài liệu này mô tả **cách chạy và cách chấm**; nó không chứa số đo. Mỗi lượt chạy chép mục 10 sang một biên bản riêng ở `docs/archive/operations/paseo-bm-install-run-<YYYYMMDD>.md`. Ngưỡng lấy nguyên văn từ PRD và design; checklist không đặt ngưỡng mới. Chạy khi một bản phát hành đổi đường cài, đổi Setup, đổi lệnh chuyển đổi, hoặc khi lên một phiên bản Paseo mới.
 
 ## 1. Phạm vi và nguyên tắc
 
-- Chuỗi chạy: **cài lần đầu → chạy lại cùng phiên bản → `doctor` → cập nhật lên phiên bản mới hơn → `doctor` → gỡ → trả máy về trạng thái ban đầu**, trên **daemon Paseo thật** với **HOME sạch** cho paseo-bm.
-- "HOME sạch" nghĩa là paseo-bm, thư mục skills và cache npm của lượt chạy nằm trong một `HOME` tạm, còn `PASEO_HOME` vẫn trỏ vào `~/.paseo` thật để dùng daemon thật. Nhờ vậy skills do CLI `skills` cài không đổ vào thư mục skills thật của bạn.
-- Lượt chạy **sửa `~/.paseo/config.json` thật**, đăng ký plugin `paseo-bm` và bật hai công tắc khi bạn đồng ý. Bước 3 backup trước; bước 8 trả về trạng thái ban đầu.
-- Không chạy `paseo daemon restart` hay `stop`.
+- Chuỗi chạy: **cài mới từ npm → Setup đủ các bước cần bấm → chuyển một bản cài thư mục 0.3.1 sang npm → cập nhật → gỡ → trả máy về trạng thái ban đầu**, trên **daemon Paseo thật**.
+- Đặt paseo-bm và thư mục skills của lượt chạy trong một `HOME` tạm ở những bước làm được, còn `PASEO_HOME` vẫn trỏ `~/.paseo` thật để dùng daemon thật. Nhờ vậy skills do CLI `skills` cài không đổ vào thư mục skills thật của bạn.
+- **Lượt chạy sửa `~/.paseo/config.json` thật**: Paseo ghi mục `plugins`, và plugin tạo ba vai trò `bm-*` cùng công tắc `daemon.mcp.injectIntoAgents` khi bạn bấm. Mục 3 backup trước; mục 9 trả về trạng thái ban đầu.
+- **Không chạy `paseo daemon restart` hay `stop`** ở bất kỳ bước nào: nó có thể giết agent đang chạy.
+- Không bao giờ dùng `--id` khác cho `paseo-bm` (design §4.3): hai bản paseo-bm cùng máy sẽ cùng tạo vai trò và cùng chèn hướng dẫn.
 - Gặp tình huống checklist không lường trước: **dừng và ghi lại**, không tự ứng biến.
 
 ## 2. Biến dùng trong checklist
 
 ```bash
-export RUN=~/bm-acceptance/$(date -u +%Y%m%d)/install
+export RUN=~/bm-acceptance/$(date -u +%Y%m%d)/install-040
 export EVID=$RUN/evidence
 export REAL_PASEO_HOME="$HOME/.paseo"
-export CLEAN_HOME=$RUN/home                 # HOME sạch cho paseo-bm
+export CLEAN_HOME=$RUN/home                 # HOME tạm cho dữ liệu paseo-bm và skills
 export REPO=/Users/Shared/work/self/paseo-plugins/paseo-bm
-# Chạy paseo-bm trong HOME sạch nhưng với daemon thật:
-bm() { HOME="$CLEAN_HOME" PASEO_HOME="$REAL_PASEO_HOME" npx --yes --package "$TARBALL" paseo-bm "$@"; }
-# Lệnh TƯƠNG TÁC có ghi log: dùng `script`, KHÔNG dùng `| tee`.
-bmlog() { local log="$1"; shift; script -q "$log" env HOME="$CLEAN_HOME" PASEO_HOME="$REAL_PASEO_HOME" npx --yes --package "$TARBALL" paseo-bm "$@"; }
+export TAG=next                             # 0.4.0-alpha.0 nằm ở dist-tag `next`
 mkdir -p "$EVID" "$CLEAN_HOME"
-# Mô phỏng máy đã có Claude Code và Codex: không có hai thư mục này thì paseo-bm
-# (và CLI skills) coi hai agent là CHƯA CÀI và bỏ qua bước skills — M-9 không đo được.
+# Mô phỏng máy đã có Claude Code và Codex: không có hai thư mục này thì Setup coi
+# hai agent là CHƯA CÀI và cột skills của chúng không đo được.
 mkdir -p "$CLEAN_HOME/.claude" "$CLEAN_HOME/.codex"
 ```
 
-> **Bẫy đã gặp:** HOME sạch không có `.claude`/`.codex` thì lần cài đầu bỏ qua bước skills; lần chạy lại, các CLI provider mà Paseo gọi để liệt kê model tự tạo `~/.codex`, `~/.cache/opencode`… trong HOME tạm và install hỏi lại skills. Đó là hiện tượng của HOME tạm, không phải paseo-bm ghi ngoài phạm vi. Tạo sẵn hai thư mục trên trước bước 4.
+> **Bẫy đã gặp (0.3.x, vẫn đúng):** một lệnh tương tác chạy qua `| tee` thì stdout không còn là terminal, nên CLI coi là **không có TTY** và không hỏi gì. Lệnh cần trả lời câu hỏi phải chạy qua `script -q <log> …`, giữ TTY mà vẫn ghi log.
 
-> **Bẫy đã gặp:** `bm install 2>&1 | tee file` làm stdout không còn là terminal, nên paseo-bm coi là **không có TTY**: không hỏi gì, dùng vai trò mặc định và thoát mã 6; một lệnh `--apply` sau đó cài thật mà không có đồng ý. Mọi lệnh cần trả lời câu hỏi phải chạy qua `bmlog` (dùng `script -q`, giữ nguyên TTY mà vẫn ghi log).
+> Plugin đọc thư mục dữ liệu theo `PASEO_BM_HOME` → con trỏ `~/.paseo-bm/home.json` → `~/.paseo-bm`, và **plugin chạy trong tiến trình daemon**, nên `HOME` của terminal không đổi được nó. Muốn plugin ghi vào `HOME` tạm thì phải đặt `PASEO_BM_HOME` trong môi trường của **daemon** trước khi mở app; nếu không làm được, chấp nhận plugin dùng `~/.paseo-bm` thật và ghi rõ trong biên bản.
 
 ## 3. Chuẩn bị và backup
 
-- [ ] Ghi commit đang nghiệm thu: `git -C "$REPO" rev-parse --short HEAD > "$EVID/commit.txt"`.
-- [ ] Ghi các run CI của commit đó (dùng cho M-6): `gh run list --commit "$(git -C "$REPO" rev-parse HEAD)" > "$EVID/ci-run.txt"` — cần một run `ci.yml` và một run diễn tập `release.yml` (`gh workflow run release.yml -f tag=v<version>` nếu chưa có).
-- [ ] Ghi phiên bản Paseo: `paseo --version > "$EVID/paseo-version.txt"; paseo daemon status --json >> "$EVID/paseo-version.txt"`.
-- [ ] Đóng gói bản v1: `cd "$REPO" && npm ci && npm pack --pack-destination "$RUN"`, rồi `export TARBALL=$RUN/paseo-bm-<version>.tgz` (`<version>` của `package.json`).
-- [ ] **Backup cấu hình Paseo:** `cp "$REAL_PASEO_HOME/config.json" "$EVID/config.before.json"`.
-- [ ] Ghi hai công tắc trước khi chạy:
-  `jq '{pluginsEnabled: (if has("pluginsEnabled") then .pluginsEnabled else "ABSENT" end), injectIntoAgents: (if ((.daemon.mcp // {}) | has("injectIntoAgents")) then .daemon.mcp.injectIntoAgents else "ABSENT" end)}' "$EVID/config.before.json" > "$EVID/switches.before.json"`
-  (không dùng `//` cho giá trị boolean: `false // "ABSENT"` ra `"ABSENT"`, sai nghĩa).
-- [ ] Ghi các mục `room-*` hiện có:
-  `jq -S '{providers: ((.agents.providers // {}) | with_entries(select(.key|startswith("room-")))), profiles: [(.daemon.agentProfiles // [])[] | select(.id|startswith("room-"))]}' "$EVID/config.before.json" > "$EVID/room.before.json"`.
-  Nếu cả hai rỗng, ghi "không có mục room-* trên máy này" vào biên bản; phép kiểm room-* khi đó dựa vào test tự động `npm test -- role-registration` (fixture 6 provider + 6 profile `room-*`).
-- [ ] Ghi danh sách plugin: `paseo plugin ls --json > "$EVID/plugins.before.json"`.
-- [ ] **Kiểm tiền đề HOME sạch:** `HOME="$CLEAN_HOME" PASEO_HOME="$REAL_PASEO_HOME" paseo daemon status --json | jq '{home, localDaemon, pid}'` phải cho `home` đúng bằng `$REAL_PASEO_HOME`, `localDaemon: "running"` và `pid` giống lần chạy bình thường. Nếu không, **dừng** — HOME sạch không dùng được với daemon này, cần quyết định lại cách chạy.
-  - **Bẫy đã gặp khi soạn checklist (2026-09-15):** **không** viết `HOME="$CLEAN_HOME" PASEO_HOME="$HOME/.paseo" …` trên cùng một dòng — bash mở `$HOME` *sau* khi đã gán `HOME` mới, nên `PASEO_HOME` trỏ vào HOME tạm; Paseo CLI khi đó tạo một `.paseo` mới trong HOME tạm và báo `localDaemon: "stopped"`. Luôn dùng biến `REAL_PASEO_HOME` đã tính sẵn ở mục 2.
-  - Kiểm chứng đọc-chỉ lúc soạn: với `REAL_PASEO_HOME` tính sẵn, `daemon status` báo `home` thật, `localDaemon: "running"`, không tạo file nào trong HOME tạm và không đổi mtime file trong `~/.paseo`.
-- [ ] Không còn agent `bm-*` nào đang chạy khi cài, cập nhật hay gỡ (`paseo ls`): cài lại hay nạp lại plugin ngắt lượt của agent.
-- [ ] Tạo mốc thời gian: `touch "$EVID/start.marker"`.
+1. Ghi lại phiên bản: `paseo --version`, `paseo daemon status --json | tee "$EVID/daemon-status-before.json"`. Yêu cầu **0.9.0 trở lên**; nhỏ hơn thì dừng (0.4.0 không hỗ trợ).
+2. Backup config thật và danh sách plugin:
+   ```bash
+   cp "$REAL_PASEO_HOME/config.json" "$EVID/config.before.json"
+   paseo plugin ls --json | tee "$EVID/plugin-ls-before.json"
+   ```
+3. Ghi lại trạng thái công tắc trước khi chạy, để mục 9 so lại:
+   ```bash
+   python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print("injectIntoAgents:",d.get("daemon",{}).get("mcp",{}).get("injectIntoAgents"))' "$EVID/config.before.json" | tee "$EVID/switch-before.txt"
+   ```
+4. Ghi lại có sẵn `bm-*` nào trong config chưa (phải không có, nếu máy chưa từng dùng paseo-bm):
+   ```bash
+   grep -o '"bm-[a-z0-9-]*"' "$EVID/config.before.json" | sort -u | tee "$EVID/bm-entries-before.txt"
+   ```
 
-## 4. Cài lần đầu (M-1, M-7, M-9)
+## 4. Mục (1) — cài mới trên máy chưa từng có paseo-bm
 
-- [ ] Chạy **tương tác** và đo tổng thời gian cho biên bản (không dùng cho M-2 vì có thời gian người trả lời):
-  `time bmlog "$EVID/install-1.log" install`
-- [ ] **Đếm số lần xác nhận** (M-1): áp dụng; bật plugin kèm quyền công cụ agent (một câu hỏi cho cả hai); cài skills. Câu hỏi cấu hình vai trò (tên, provider, model) **không** tính là xác nhận. Thiếu `br`/`bv` thì lần chạy tương tác cài chúng theo xác nhận áp dụng, không thêm câu hỏi. Ghi từng câu theo thứ tự vào `$EVID/m1-prompts.txt`.
-- [ ] Trả lời: đồng ý áp dụng; đồng ý câu cảnh báo tin cậy; chọn provider/model cho ba vai trò (ghi lại); đăng nhập provider nếu được mời; **đồng ý cài skills**.
-- [ ] Mã thoát 0: `echo $?` ngay sau lệnh (hoặc đọc dòng "Exit code" trong log).
-- [ ] **M-7:** `paseo plugin ls --json | tee "$EVID/plugins.after-install.json" | jq '.[] | select(.id=="paseo-bm") | .status'` → `"running"`. Kiểm `status`, **không** kiểm `enabled`.
-- [ ] **M-9:** trước khi cài, `HOME` sạch không có skill nào. Sau bước cài skills:
-  `bm doctor --json > "$EVID/doctor-after-install.json"; jq '.checks[] | select(.id|startswith("skills-"))' "$EVID/doctor-after-install.json"` → năm skill bắt buộc có mặt cho các agent đã chọn.
-  Nếu CLI `skills` thất bại (mạng, lỗi CLI): log phải có hướng dẫn cài thủ công kèm đúng lệnh — ghi lại dòng đó; đây là nhánh đạt thứ hai của M-9.
+Điều kiện: `plugin-ls-before.json` không có mục `paseo-bm`, `bm-entries-before.txt` rỗng.
 
-## 5. Chạy lại cùng phiên bản (M-3) và `doctor`
+```bash
+paseo plugin add "npm:paseo-bm-plugin@$TAG" --json | tee "$EVID/01-plugin-add.json"
+paseo plugin ls --json | tee "$EVID/01-plugin-ls.json"
+```
 
-- [ ] Ghi hash trước: `shasum -a 256 "$REAL_PASEO_HOME/config.json" > "$EVID/config.rerun-before.sha256"; find "$CLEAN_HOME/.paseo-bm" -type f -print0 | sort -z | xargs -0 shasum -a 256 > "$EVID/installhome.rerun-before.sha256"`.
-- [ ] Chạy lại **tương tác**: `bmlog "$EVID/install-rerun.log" install` → **không có câu hỏi nào**, báo cáo toàn `skip`, mã 0.
-- [ ] Chạy lại không tương tác: `bm install --apply --json > "$EVID/install-rerun.json"; jq '[.actions[] | select(.kind != "skip")] | length' "$EVID/install-rerun.json"` → `0`.
-- [ ] Hash sau khớp hash trước cho `config.json` và mọi file trong install home ngoài `.lock`.
-- [ ] **`doctor`** (độ trễ và trạng thái): `time bm doctor --json > "$EVID/doctor-1.json"` → mã 0, thời gian ≤ 5 giây; `jq -r '.checks[] | "\(.id) \(.severity)"' "$EVID/doctor-1.json"` cho `paseo-daemon ok`, `paseo-version ok`, `plugin-status ok`, `plugins-enabled ok`, `agent-tools ok`, `role-bm-manager ok`, `role-bm-worker ok`, `role-bm-reviewer ok`, `beads-cli ok`, `beads-viewer ok`.
+Chấm đạt khi:
 
-## 6. Cập nhật lên phiên bản mới hơn (M-2)
+- `plugin add` thoát 0 và `plugin ls` báo `paseo-bm` với `status` là `running` (hoặc `disabled` nếu công tắc plugin của Paseo đang tắt — bật rồi kiểm lại).
+- Trong `plugin ls --json`, mục `paseo-bm` có `installation.identity.kind = "npm"` và `packageName = "paseo-bm-plugin"`. **Đây là phần còn lại của Q-047**: ghi nguyên văn `installation` vào biên bản.
 
-- [ ] Dựng bản v2 **ngoài repo**, không đổi repo. `<version v2>` phải lớn hơn v1 và giữ minor (một test ghim minor của payload), ví dụ v1 `0.3.0` → v2 `0.3.1-acc.0`; `npm pack` chạy `prepack` → build nên payload trong tarball mang đúng `<version v2>`:
-  ```bash
-  rm -rf "$RUN/v2src" && git clone -q "$REPO" "$RUN/v2src" && cd "$RUN/v2src"
-  npm ci && npm version <version v2> --no-git-tag-version && npm pack --pack-destination "$RUN"
-  export TARBALL=$RUN/paseo-bm-<version v2>.tgz
-  ```
-- [ ] **M-2 — thời gian cài phần plugin**, không tính bước skills, không có thời gian người trả lời:
-  `/usr/bin/time -p bash -c 'HOME="$CLEAN_HOME" PASEO_HOME="$REAL_PASEO_HOME" npx --yes --package "$TARBALL" paseo-bm install --apply --yes --skip-skills-check --json' > "$EVID/update.json" 2> "$EVID/update.time"`
-  Chạy `npx` một lần trước với `--version` để gói đã được tải; số đo chỉ tính từ lúc `npx` đã có gói. Ngưỡng: `real` ≤ 60 giây.
-- [ ] Mã thoát 0; `jq '.result' "$EVID/update.json"` có `pluginState: "running"`.
-- [ ] Cài bên cạnh: `ls "$CLEAN_HOME/.paseo-bm/plugin"` có cả thư mục v1 và v2; `jq '.versions' "$CLEAN_HOME/.paseo-bm/install.json"` có hai mục, bản mới `active: true`.
-- [ ] Vai trò không bị hỏi lại và không bị ghi lại (`roles[]` giữ nguyên).
-- [ ] `bm doctor --json > "$EVID/doctor-2.json"` → mã 0, `install-version ok`, ba `role-bm-*` ok, `agent-tools ok`.
+Rồi mở app và làm **đúng các bước Setup của design §7.13**, ghi ảnh hoặc log từng bước:
 
-## 7. Gỡ (M-5)
-
-- [ ] Chạy **tương tác** (M-5 chỉ đạt được khi tương tác, vì bỏ backup và tắt lại `pluginsEnabled` chỉ được hỏi qua prompt): `bmlog "$EVID/uninstall.log" uninstall --apply`.
-- [ ] Trả lời: **bỏ backup**; **tắt lại** `pluginsEnabled` nếu được đề nghị (chỉ được đề nghị khi chính paseo-bm đã bật và không còn plugin nào khác).
-- [ ] Mã thoát 0.
-- [ ] **M-5 — không còn thứ do paseo-bm tạo:**
-  - [ ] `test ! -e "$CLEAN_HOME/.paseo-bm"`.
-  - [ ] `jq '[(.agents.providers // {}) | keys[] | select(startswith("bm-"))] + [(.daemon.agentProfiles // [])[] | .id | select(startswith("bm-"))]' "$REAL_PASEO_HOME/config.json"` → `[]`.
-  - [ ] `paseo plugin ls --json | jq '[.[] | select(.id=="paseo-bm")] | length'` → `0`.
-  - [ ] Không còn file tạm atomic do paseo-bm để lại: `ls -a "$REAL_PASEO_HOME" | grep -E '^\.config\.json\..*\.tmp$'` → rỗng.
-  - [ ] Cấu hình khớp bản trước khi cài, bỏ qua khoá `plugins` mà Paseo để lại:
-    `test -s "$EVID/config.before.json" && test -s "$REAL_PASEO_HOME/config.json" && diff <(jq -S 'del(.plugins)' "$EVID/config.before.json") <(jq -S 'del(.plugins)' "$REAL_PASEO_HOME/config.json")` → rỗng, mã 0. (Luôn kèm `test -s`: nếu biến chưa đặt, cả hai `jq` đều lỗi, hai đầu vào đều rỗng và `diff` báo "giống nhau" — kết luận sai.)
-  - [ ] Hai công tắc trở về đúng giá trị ở `switches.before.json` (chạy lại đúng lệnh `jq` ở bước 3 lên `config.json` hiện tại rồi `diff`).
-  - [ ] `bm doctor --json > "$EVID/doctor-after-uninstall.json"` → `install-record` báo chưa cài, mã 0.
-  - Skills do CLI `skills` cài **không** tính là thứ paseo-bm tạo (ADR-003); chúng nằm trong `HOME` sạch và bị xoá ở bước 8.
-- [ ] **room-\* giữ nguyên từng byte:** chạy lại lệnh `jq` của bước 3 ra `room.after.json`, rồi `cmp "$EVID/room.before.json" "$EVID/room.after.json"`.
-
-## 8. Trả máy về trạng thái ban đầu
-
-- [ ] Nếu phép `diff` cấu hình ở bước 7 rỗng: **không** chép đè gì cả.
-- [ ] Nếu không rỗng: **dừng**, lưu `cp "$REAL_PASEO_HOME/config.json" "$EVID/config.after.json"`, đối chiếu từng khác biệt với biên bản. Chỉ chép `config.before.json` đè lên khi chắc chắn khác biệt đều do lượt chạy gây ra và không có thay đổi hợp lệ nào khác phát sinh trong lúc chạy; ghi quyết định vào biên bản.
-- [ ] Nếu plugin `paseo-bm` còn trong `paseo plugin ls`: `paseo plugin remove paseo-bm`.
-- [ ] Xoá HOME sạch và bản dựng tạm: `rm -rf "$CLEAN_HOME" "$RUN/v2src" "$RUN"/paseo-bm-*.tgz` (giữ lại `$EVID` cho tới khi biên bản được commit).
-- [ ] So lại `plugins.before.json` với `paseo plugin ls --json`.
-
-## 9. Đối chiếu M-1 → M-9: một phép đo, một quy tắc đạt
-
-| Chỉ số | Định nghĩa (PRD) | Phép đo duy nhất | Đạt khi | Ô bằng chứng |
-|---|---|---|---|---|
-| M-1 | Số thao tác để cài lần đầu | Đếm lệnh và lần xác nhận ở bước 4 | 1 lệnh và **đúng 3** xác nhận: áp dụng; bật plugin kèm quyền công cụ; cài skills | `install-1.log`, `m1-prompts.txt` |
-| M-2 | Thời gian cài phần plugin, từ lúc `npx` đã có gói, chưa tính skills | `real` của lệnh cập nhật không tương tác ở bước 6 | `real` ≤ 60 giây | `update.time` |
-| M-3 | Thay đổi khi chạy lại cùng phiên bản | Bước 5: số Action khác `skip` và so hash | `0` Action khác `skip`, không câu hỏi, hash `config.json` và install home không đổi | `install-rerun.log`, `install-rerun.json`, `*.rerun-before.sha256` |
-| M-4 | Số lần ghi ngoài phạm vi sở hữu | Test tự động `npm test -- integration/install ownership` trên commit đang nghiệm thu (guard chặn ghi toàn tiến trình, không tự ghi thư mục skills, không ghi đè file người dùng đã sửa khi chưa đồng ý) | Tất cả xanh; trong lượt chạy thật không có lỗi ghi và room-* giữ nguyên | output test, `room.*.json` |
-| M-5 | Thứ do paseo-bm tạo còn sót sau khi gỡ | Toàn bộ các mục kiểm ở bước 7 | Mọi mục kiểm đạt | `uninstall.log`, `doctor-after-uninstall.json`, output các lệnh bước 7 |
-| M-6 | Tỉ lệ cài thành công trên ma trận hỗ trợ | Run CI của commit đang nghiệm thu: `ci.yml` (ubuntu, Node 22) và diễn tập `release.yml` (ubuntu, macOS × Node 24, gồm `smoke:packed` trên gói đã đóng gói). Ma trận chia hai workflow theo delta 20260921 | 3/3 job `success` | `ci-run.txt` + link run |
-| M-7 | Plugin `running` sau khi cài khi đã đồng ý | `paseo plugin ls --json` sau bước 4 | `status` của `paseo-bm` là `running` | `plugins.after-install.json` |
-| M-8 | Độ chính xác báo cáo skills | Test tự động `npm test -- skills-detect` (đủ, thiếu một phần, thiếu hết, symlink, đổi vị trí bằng biến môi trường) | Tất cả xanh | output test |
-| M-9 | Máy thiếu skills, đồng ý hỗ trợ → đủ skills | Bước 4: `doctor` sau khi cài skills, hoặc log hướng dẫn thủ công khi CLI `skills` thất bại | Năm skill bắt buộc có mặt; **hoặc** CLI thất bại và log có hướng dẫn thủ công kèm lệnh | `doctor-after-install.json` hoặc `install-1.log` |
-
-Kiểm bổ sung theo điều kiện ra của WP-120 (không phải chỉ số riêng):
-
-| Kiểm | Phép đo | Đạt khi |
+| Bước | Làm gì | Đạt khi |
 |---|---|---|
-| `doctor` báo đủ ba vai trò và quyền công cụ | Bước 5 và 6 | `role-bm-manager`, `role-bm-worker`, `role-bm-reviewer`, `agent-tools` đều `ok` |
-| Độ trễ `doctor` (REQ-011) | `time` ở bước 5 | ≤ 5 giây |
-| room-* không đổi | `cmp` ở bước 7 | Giống hệt, hoặc ghi "không có trên máy" kèm test tự động xanh |
-| Công tắc MCP về trạng thái trước | So `switches.before.json` ở bước 7 | Khớp |
+| a. Vai trò | Mở **Beads Manager** ở sidebar | Plugin tự tạo `bm-manager`, `bm-worker`, `bm-reviewer`; Setup hiện dòng "paseo-bm created its roles with defaults (<provider> · <model>). Change them in Agents." |
+| b. Tool agent | **Setup → Set up paseo-bm → Allow agent tools…**, đọc cảnh báo rồi bấm **Allow for every agent** | `daemon.mcp.injectIntoAgents` thành `true`; `ui/setup-state.json` có `agentTools.setBy = "plugin"` và `previous` bằng giá trị ở `switch-before.txt` |
+| c. Skills | **Install skills…**, đọc lệnh rồi bấm **Run it** | Lệnh chạy xong, cột skills của Claude Code và Codex đủ 5/5; Setup hiện dòng `Last run: … · exit 0` |
+| d. `br` / `bv` | **Setup → Beads tools**, cài cái nào thiếu | `br` và `bv` có đường dẫn trên PATH của daemon |
+| e. Đăng nhập | **Setup → Agents → Sign-in** | Provider của Worker báo **Signed in**; nếu không, chạy lệnh Setup hiện rồi mở lại |
+
+Sau đó chạy một yêu cầu thật, đây là **điều kiện ra 1 của MVP-Lock**:
+
+- Manager tạo được Worker.
+- Worker tạo được Reviewer.
+- Màn **Metric** có trace của yêu cầu đó.
+
+Ghi `paseo plugin logs paseo-bm --json | tail -50 > "$EVID/01-plugin-logs.json"` cho biên bản.
+
+**Đo Q-045 ở đây** (bắt buộc đạt): plugin npm nạp được `zod` và `@getpaseo/plugin` dù `plugin/package.json` không khai `dependencies`. Bằng chứng là chính bước a chạy được — Setup và Manager đều dùng cả hai. Nếu `plugin logs` có lỗi module thì **dừng**: cần thêm `dependencies` trước khi phát hành.
+
+**Đo Q-047 (phần còn lại)**: chạy lại `paseo plugin add` trong một shell **không có TTY** (ví dụ `paseo plugin add … --json < /dev/null > out.json 2>err.txt`) trên một `--id` tạm rồi gỡ ngay, và ghi lại: nó có hỏi tin cậy không, có tự bật `pluginsEnabled` không, và in JSON dạng gì.
+
+## 5. Mục (2) — chuyển một bản cài thư mục 0.3.1 sang npm
+
+Làm hai lần: một lần với thư mục cài mặc định, một lần với `--home`.
+
+```bash
+# Dựng lại một bản cài 0.3.x: gỡ bản npm trước, rồi cài 0.3.1 như cũ.
+paseo plugin remove paseo-bm --json
+HOME="$CLEAN_HOME" PASEO_HOME="$REAL_PASEO_HOME" npx --yes paseo-bm@0.3.1 install --apply --enable-plugins
+paseo plugin ls --json | tee "$EVID/02-before.json"
+# Chuyển:
+HOME="$CLEAN_HOME" PASEO_HOME="$REAL_PASEO_HOME" script -q "$EVID/02-migrate.log" npx --yes "paseo-bm@$TAG"
+```
+
+Chấm đạt khi:
+
+- Lệnh in bản xem trước rồi hỏi một câu, mặc định **No**; trả lời Yes thì thoát **0**.
+- `paseo plugin ls --json` báo `paseo-bm` với `identity.kind = "npm"`, `packageName = "paseo-bm-plugin"`, `status` `running` (hoặc `disabled`).
+- `$CLEAN_HOME/.paseo-bm/install.json` có `schemaVersion: 2` và `migratedTo: { source: "npm", package: "paseo-bm-plugin", version: "0.4.0-…", at: … }`.
+- **Giữ nguyên dữ liệu**: `traces/`, `role-extras.json`, `role-fallback*.json`, `ui/` còn đủ; `plugin/0.3.1/` và `backups/` vẫn còn (0.4.0 không xoá).
+- Vai trò `bm-*` trong config **không đổi**, công tắc `injectIntoAgents` **không đổi**.
+- Mở lại Beads Manager: Metric vẫn thấy trace cũ. Đây là **điều kiện ra 2 của MVP-Lock**.
+
+Lần thứ hai, với thư mục cài khác mặc định:
+
+```bash
+HOME="$CLEAN_HOME" npx --yes paseo-bm@0.3.1 install --apply --enable-plugins --home "$RUN/custom-bm"
+HOME="$CLEAN_HOME" script -q "$EVID/02b-migrate.log" npx --yes "paseo-bm@$TAG" --home "$RUN/custom-bm"
+```
+
+Thêm điều kiện: `$CLEAN_HOME/.paseo-bm/home.json` được tạo, nội dung `{ "schemaVersion": 1, "home": "<RUN>/custom-bm", "writtenBy": "paseo-bm@0.4.0-…", "at": … }`, quyền `0600`, và `$RUN/custom-bm/install.json` mới là cái có `schemaVersion: 2`.
+
+Chạy lại lệnh chuyển lần nữa (**tình huống B**): thoát **0**, không gọi Paseo lần nào, `install.json` không đổi.
+
+## 6. Mục (3) — bản 0.3.1 cũ không cài lại được lên bản npm
+
+Ngay sau mục 5, còn nguyên `install.json` `schemaVersion: 2`:
+
+```bash
+HOME="$CLEAN_HOME" npx --yes paseo-bm@0.3.1 install --apply 2>&1 | tee "$EVID/03-old-install.log"; echo "exit=$?"
+```
+
+Chấm đạt khi: thoát **3** với `E_RECORD_SCHEMA_TOO_NEW`, và **không đổi gì** — `plugin ls` vẫn là bản npm, config không đổi. Đây là cơ chế duy nhất ngăn một máy đã chuyển bị cài lại thành bản thư mục.
+
+## 7. Mục (4) — cập nhật
+
+```bash
+paseo plugin update paseo-bm --json | tee "$EVID/04-update.json"
+paseo plugin ls --json | tee "$EVID/04-plugin-ls.json"
+```
+
+Chấm đạt khi: thoát 0, `status` trở lại `running`, và dữ liệu trong thư mục dữ liệu **không đổi** (so `ls -la` trước/sau).
+
+**Đo Q-046**: so `path` của mục `paseo-bm` trong `04-plugin-ls.json` với `02-before.json`. Ghi lại `plugin update` có đổi đường dẫn đăng ký hay không — nếu có, thư mục gói do Paseo quản lý đổi mỗi lần cập nhật, đúng như design §5.1 giả định.
+
+## 8. Mục (5) và (6) — gỡ cấu hình, và xung đột id
+
+**(5) Gỡ.** Làm hai lần, mỗi lần dựng lại bản cài ở mục 4 trước:
+
+1. Lần một, **giữ dữ liệu**: Setup → **Remove paseo-bm's settings…** → **Remove settings** → **Keep my data**.
+2. Lần hai, **xoá dữ liệu**: cùng đường, nhưng chọn **Delete data**.
+
+Rồi mỗi lần:
+
+```bash
+paseo plugin remove paseo-bm --json | tee "$EVID/05-remove.json"
+cp "$REAL_PASEO_HOME/config.json" "$EVID/05-config-after.json"
+grep -o '"bm-[a-z0-9-]*"' "$EVID/05-config-after.json" | sort -u | tee "$EVID/05-bm-entries-after.txt"
+```
+
+Chấm đạt khi (**điều kiện ra 3 của MVP-Lock**):
+
+- `05-bm-entries-after.txt` rỗng: không còn provider hay profile `bm-*` nào, kể cả alias dự phòng.
+- `injectIntoAgents` trở lại đúng giá trị trong `switch-before.txt` — chỉ khi chính paseo-bm bật nó; nếu bạn đã bật sẵn thì màn hình phải báo **left on** và giá trị **không đổi**.
+- Lần một: thư mục dữ liệu còn nguyên. Lần hai: `traces/`, `role-extras.json`, `role-fallback*.json` và mọi thứ trong `ui/` **trừ** `ui/setup-state.json` đã mất; `install.json`, `plugin/`, `backups/`, `home.json` còn.
+- Cả hai lần: skills, `br`, `bv` **không bị chạm**.
+- Cài lại plugin mà **chưa** bấm "Set up again": Setup báo settings đã bị gỡ và **không tự tạo lại vai trò** (REQ-012 e). Bấm **Set up again** thì tạo lại.
+
+**(6) Xung đột id.** Dựng một bản cài thư mục 0.3.1 (như mục 5), rồi:
+
+```bash
+paseo plugin add "npm:paseo-bm-plugin@$TAG" --json 2>&1 | tee "$EVID/06-conflict.log"
+```
+
+Chấm đạt khi: bị từ chối với **đúng nguyên văn**
+
+```
+Plugin ID "paseo-bm" is already configured; choose another ID with --id
+```
+
+và làm theo mục "coming from `npx paseo-bm`" của README — tức chạy `npx paseo-bm@$TAG` một lần — thì giải quyết được. **Không** thử `--id` khác ở bất kỳ bước nào.
+
+## 9. Trả máy về trạng thái ban đầu
+
+1. Setup → **Remove paseo-bm's settings…** (nếu còn), rồi `paseo plugin remove paseo-bm`.
+2. So `~/.paseo/config.json` với `$EVID/config.before.json`; khác chỗ nào thì sửa tay về đúng bản backup, trừ khoá `plugins` rỗng mà Paseo để lại (khoá đó là của Paseo).
+3. Xoá `$RUN` nếu không cần giữ, và xoá `~/.paseo-bm` **chỉ khi** nó do lượt chạy này tạo.
+4. Không chạy `paseo daemon restart`/`stop`.
 
 ## 10. Phiếu ghi biên bản
 
-```markdown
-### Lượt chạy Phase 1a — <ngày>
+Chép mục này sang `docs/archive/operations/paseo-bm-install-run-<YYYYMMDD>.md`.
 
-- Commit / run CI:
-- Máy (OS, Paseo CLI/daemon, Node, npm):
-- Phiên bản v1 / v2:
-- Provider / model — Manager / Worker / Reviewer:
-- Công tắc trước: pluginsEnabled = …, injectIntoAgents = …
-- room-* trên máy: có (n provider, n profile) / không
+### Lượt chạy 0.4.0 — <ngày>
 
-| Chỉ số | Số đo | Đạt? | Ghi chú |
+| Trường | Giá trị |
+|---|---|
+| Ngày, người chạy | |
+| `paseo --version` / `daemonVersion` | |
+| Phiên bản thử | `paseo-bm-plugin@…`, `paseo-bm@…` |
+| Máy | |
+
+| Mục | Kết quả | Bằng chứng | Ghi chú |
 |---|---|---|---|
-| M-1 | … xác nhận | | |
-| M-2 | … giây | | |
-| M-3 | … Action khác skip | | |
-| M-4 | test … | | |
-| M-5 | … mục sót | | |
-| M-6 | …/3 job | | |
-| M-7 | status … | | |
-| M-8 | test … | | |
-| M-9 | có đủ / hướng dẫn thủ công | | |
+| (1) Cài mới từ npm + đủ bước Setup | đạt / không | | |
+| (1) Manager → Worker → Reviewer, Metric có trace | đạt / không | | Điều kiện ra 1 |
+| (2) Chuyển bản thư mục, thư mục mặc định | đạt / không | | Điều kiện ra 2 |
+| (2) Chuyển bản thư mục, `--home` + con trỏ `home.json` | đạt / không | | |
+| (2) Chạy lại lệnh chuyển (tình huống B) | đạt / không | | |
+| (3) `paseo-bm@0.3.1 install` bị chặn, thoát 3 | đạt / không | | |
+| (4) `paseo plugin update paseo-bm` | đạt / không | | |
+| (5) Gỡ, giữ dữ liệu | đạt / không | | Điều kiện ra 3 |
+| (5) Gỡ, xoá dữ liệu | đạt / không | | |
+| (5) Chưa "Set up again" thì không tạo lại vai trò | đạt / không | | REQ-012 e |
+| (6) Xung đột id, đúng nguyên văn thông báo | đạt / không | | |
 
-- doctor: ba vai trò …, quyền công cụ …, độ trễ … giây
-- Công tắc sau khi gỡ: pluginsEnabled = …, injectIntoAgents = …
-- Trả máy về trạng thái ban đầu: không cần chép đè / đã chép đè (lý do)
-- Lệch so với checklist:
-```
+| Câu hỏi | Đo được gì | Kết luận |
+|---|---|---|
+| Q-045 — plugin npm nạp được `zod` và `@getpaseo/plugin`? | | **bắt buộc đạt** |
+| Q-046 — `plugin update` có đổi `path` đăng ký? | | |
+| Q-047 (còn lại) — `plugin add npm:… --json` không TTY: hỏi tin cậy? tự bật `pluginsEnabled`? JSON dạng gì? | | |
+
+Q-044 **đã đóng** (design §13, đo 2026-09-25): `paseoTools.enabled` của provider một mình **không** cấp tool Paseo cho agent, nên nút tool agent ở mục 4b là bắt buộc — không đo lại. Phần `plugin ls --json` của Q-047 đã trả lời trên `paseo-cafe`; mục 4 xác nhận lại cho `paseo-bm-plugin`.
+
+REQ-070 (e): ghi lại lượt chuyển đổi có giữ nguyên dữ liệu, vai trò và công tắc hay không, kèm bằng chứng.
 
 ## 11. Hạn chế đã biết
 
-- M-5 chỉ đạt khi gỡ **tương tác**: không có cờ để bỏ backup hay tắt lại `pluginsEnabled` khi không có TTY.
-- File tạm atomic (`.config.json.*.tmp`, `.install.json.*.tmp`) có thể bị bỏ lại nếu tiến trình bị giết đúng lúc đổi tên; không cơ chế nào dọn chúng. Bước 7 kiểm để phát hiện, không để che.
-- Trong HOME tạm, các CLI provider do Paseo gọi (Codex, OpenCode, bun) tự tạo thư mục của chúng (`.codex/tmp`, `.cache/opencode`, `Library/Caches/bun`…). Các thư mục này không do paseo-bm tạo và không tính vào M-4/M-5.
-- M-2 đo trên lượt **cập nhật** không tương tác, vì lượt cài đầu tiên phải tương tác để đếm M-1; bản ghi thời gian CI (`install.timing`) là số đo bổ sung.
-- Tiền đề HOME sạch (Paseo CLI tôn trọng `PASEO_HOME`, `paseo plugin install` chạy được dưới HOME tạm) đã đứng vững ở lượt nghiệm thu 2026-09-15 trên Paseo 0.8.0; với một phiên bản Paseo mới, bước kiểm tiền đề ở mục 3 là nơi phát hiện nếu nó đổi.
-
----
-
-*Revision 2026-09-25: giữ làm checklist hiện hành cho trình cài (`0.3.0`, Paseo 0.8.0+): bỏ số hiệu cố định `0.1.0-alpha.*`, thêm các check `doctor` hiện có (`paseo-*`, `beads-*`), M-6 theo hai workflow hiện tại, ghi phiên bản Paseo. Tên file còn mang chữ `phase1a` vì lịch sử; đề xuất đổi tên ở bước sắp xếp lại `docs/`.*
+- Checklist chạy trên **một máy, một daemon**; không đo nhiều daemon hay máy nhiều người dùng.
+- `PASEO_BM_HOME` chỉ đổi được thư mục dữ liệu của plugin nếu đặt được trong môi trường của daemon; nếu không, lượt chạy dùng `~/.paseo-bm` thật và biên bản phải nói rõ.
+- Chuỗi "gỡ rồi cài lại" đi qua `paseo plugin remove`/`add` thật, nên con trỏ `plugins` trong config thật thay đổi nhiều lần trong một lượt; mục 9 là bước duy nhất đưa nó về.

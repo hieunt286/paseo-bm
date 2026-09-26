@@ -197,8 +197,15 @@ export interface PaseoAdapter {
   readonly executable: string;
   /** Resolved per-call deadline, after defaults. 15000 unless overridden. */
   readonly timeoutMs: number;
-  /** Run an arbitrary argv and return the raw result; non-zero exit throws. */
-  run(args: readonly string[]): Promise<PaseoInvocation>;
+  /**
+   * Run an arbitrary argv and return the raw result; non-zero exit throws.
+   *
+   * `timeoutMs` overrides the adapter's deadline for this one call. Almost
+   * nothing needs it — 15 seconds is generous for a local daemon — but
+   * `paseo plugin add npm:<package>` makes Paseo fetch and install from the
+   * network, so it gets its own, much longer budget (design §4.4 step 2).
+   */
+  run(args: readonly string[], options?: { timeoutMs?: number }): Promise<PaseoInvocation>;
   daemonStatus(): Promise<DaemonStatus>;
   daemonReload(): Promise<DaemonReload>;
   pluginInstall(directory: string): Promise<PluginSummary>;
@@ -224,9 +231,9 @@ export function createPaseoAdapter(options: PaseoAdapterOptions = {}): PaseoAdap
   const timeoutMs = options.timeoutMs ?? PASEO_CALL_TIMEOUT_MS;
   const killGraceMs = options.killGraceMs ?? PASEO_KILL_GRACE_MS;
 
-  async function run(args: readonly string[]): Promise<PaseoInvocation> {
+  async function run(args: readonly string[], callOptions: { timeoutMs?: number } = {}): Promise<PaseoInvocation> {
     return await runPaseo(executable, args, {
-      timeoutMs,
+      timeoutMs: callOptions.timeoutMs ?? timeoutMs,
       killGraceMs,
       env: options.env,
       cwd: options.cwd,

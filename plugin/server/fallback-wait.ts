@@ -19,12 +19,12 @@
  * incident becomes `resumed`, and its Manager chat gets a `BM-FALLBACK` with
  * `status: resumed`. Never throws into a timer: failures cost one log line.
  */
+import { unusableDataHomeMessage } from "./data-home";
 import { decidePending, notifyFallback, type FallbackAction, type FallbackRpcDeps } from "./fallback-rpc";
 import { readIncidents, updateIncidents } from "./fallback-state";
 import { REPLACED_BY_LABEL } from "./fallback-detect";
 import { asRecord, reasonOf } from "./role-choices";
-import { installHomeOf } from "./role-extras";
-import { TIMED_OUT, withTimeout } from "./role-mode";
+import { dataHomeOf } from "./role-extras";
 import { DashboardError, FALLBACK_MAX_WAIT_MS, type FallbackIncident } from "../shared/contracts";
 
 /** What the stopped agent is sent when its usage reset (agent-facing, so English). */
@@ -45,7 +45,7 @@ export interface WaiterDeps {
   clearTimer?: (timer: Timer) => void;
   /** The Manager chat notice; `notifyFallback` by default. */
   notify?: (incident: FallbackIncident, paseo: unknown) => Promise<unknown>;
-  /** The install home when the caller knows it (tests); looked up otherwise. */
+  /** The data folder when the caller knows it (tests); looked up otherwise. */
   home?: string | null;
 }
 
@@ -80,11 +80,10 @@ export function createFallbackWaiter(deps: WaiterDeps = {}): FallbackWaiter {
   const timers = new Map<string, Timer>();
   let armed = false;
 
-  const homeOf = async (paseo: unknown, known?: string | null): Promise<string | null> => {
+  const homeOf = (known?: string | null): string | null => {
     if (known !== undefined) return known;
     if (deps.home !== undefined) return deps.home;
-    const found = await withTimeout(installHomeOf(paseo));
-    return found === TIMED_OUT ? null : found;
+    return dataHomeOf();
   };
 
   const cancel = (incidentId: string): void => {
@@ -144,8 +143,8 @@ export function createFallbackWaiter(deps: WaiterDeps = {}): FallbackWaiter {
   };
 
   const wait: FallbackAction = async (incident, paseo, rpcDeps: FallbackRpcDeps) => {
-    const home = await homeOf(paseo, rpcDeps.home);
-    if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", "paseo-bm cannot find its install home");
+    const home = homeOf(rpcDeps.home);
+    if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", `${unusableDataHomeMessage()}; see Setup`);
     const resetsAt = incident.resetsAt === null ? Number.NaN : Date.parse(incident.resetsAt);
     const at = (rpcDeps.now ?? now)();
     if (Number.isNaN(resetsAt)) throw new DashboardError("E_FALLBACK_NO_RESET", "the reset time of this limit is not known");
@@ -167,7 +166,7 @@ export function createFallbackWaiter(deps: WaiterDeps = {}): FallbackWaiter {
       if (armed) return;
       armed = true;
       try {
-        const home = await homeOf(paseo);
+        const home = homeOf();
         if (home === null) {
           armed = false;
           return;

@@ -95,7 +95,7 @@ export default function contribute(server: PluginServerContext): () => void {
   // settings.paseo-bm.read` errors because this one line was missing
   // (bm-settings-rpc-stgv).
   server.registerSettings(dashboardSettings);
-  server.handle(agentsListRpc, async (input, { paseo }) => listWorkspaceAgents(input, { paseo, replacements: await replacementsFor(paseo) }));
+  server.handle(agentsListRpc, async (input, { paseo }) => listWorkspaceAgents(input, { paseo, replacements: replacementsFor() }));
   server.handle(rolesDescribeRpc, (_input, { paseo }) => describeRoles({ paseo }));
   registerDashboardRpcs(server, {
     ensureManager: async (workspaceId, paseo) => {

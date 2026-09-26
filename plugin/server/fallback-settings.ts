@@ -10,7 +10,7 @@
  *   so the `agent.create` hook recognises the role (`roleOfProvider`). Written
  *   through `config-writer.ts`, so the same `revision` guards it as a role save;
  * - the entry's model, thinking and mode, and the policy, live in the user's
- *   own file `<install home>/role-fallback.json`: user data like
+ *   own file `<data folder>/role-fallback.json`: user data like
  *   `role-extras.json` (F9) — mode 0600, temp file then rename, symlink
  *   refused, no hash in `install.json`, never touched by an update, `--prune`
  *   or uninstall.
@@ -24,12 +24,13 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
+import { unusableDataHomeMessage } from "./data-home";
 import { canonicalJson, readRoleConfig, writeRoleConfig, type ConfigPaseo } from "./config-writer";
-import { TRACES_DIR_NAME } from "./install-home";
+import { TRACES_DIR_NAME } from "./data-home";
 import { costOf } from "./model-costs";
 import { asRecord, availableProviders, checkRoleChoice, nonEmpty, reasonOf } from "./role-choices";
-import { installHomeOf } from "./role-extras";
-import { TIMED_OUT, capabilityOf, modesFor, withTimeout, type ProviderCapability } from "./role-mode";
+import { dataHomeOf } from "./role-extras";
+import { capabilityOf, modesFor, type ProviderCapability } from "./role-mode";
 import { writeStoreFileAtomically } from "./trace-store";
 import { FALLBACK_ROLES, MAX_FALLBACK_ENTRIES, fallbackAlias, fallbackAliasOf, type FallbackRole } from "../shared/fallback";
 import {
@@ -172,24 +173,23 @@ export async function fallbackSettingsOf(
 
 export interface FallbackDeps {
   log?: (message: string) => void;
-  /** Home directory for locating the install home (tests pass a temporary one). */
+  /** Home directory for locating the data folder (tests pass a temporary one). */
   homedir?: () => string;
-  /** The install home itself, when the caller already knows it (`null`: none); otherwise it is looked up. */
+  /** The data folder itself, when the caller already knows it (`null`: none); otherwise it is looked up. */
   home?: string | null;
 }
 
-/** The install home, raced against the lookup budget like every other read; `null` when unknown. Never throws. */
-async function homeOf(paseo: unknown, deps: FallbackDeps): Promise<string | null> {
+/** The data folder, or `null` when it is unknown. Never throws. */
+function homeOf(deps: FallbackDeps): string | null {
   if (deps.home !== undefined) return deps.home;
-  const found = await withTimeout(installHomeOf(paseo, deps.homedir === undefined ? {} : { homedir: deps.homedir }));
-  return found === TIMED_OUT ? null : found;
+  return dataHomeOf(deps.homedir === undefined ? {} : { homedir: deps.homedir });
 }
 
 /**
  * The `fallback` of `roles.settings`: the chain of every role in
- * `FALLBACK_ROLES`, or `null` when none is offered. An install home that
- * cannot be confirmed reads as the defaults (a save then reports it); an
- * invalid file adds one warning.
+ * `FALLBACK_ROLES`, or `null` when none is offered. A data folder that cannot
+ * be used reads as the defaults (a save then reports it); an invalid file adds
+ * one warning.
  */
 export async function fallbackForSettings(
   paseo: unknown,
@@ -197,7 +197,7 @@ export async function fallbackForSettings(
 ): Promise<{ fallback: Partial<Record<FallbackRole, FallbackSettings>> | null; warnings: string[] }> {
   if (FALLBACK_ROLES.length === 0) return { fallback: null, warnings: [] };
   const log = deps.log ?? defaultLog;
-  const home = await homeOf(paseo, deps);
+  const home = homeOf(deps);
   const read = home === null ? { file: emptyFile(), raw: null, error: null } : readRoleFallback(home, log);
   const warnings =
     read.error === null ? [] : [`${ROLE_FALLBACK_FILE} is not valid (${read.error}); fallback uses the defaults until you fix or delete it.`];
@@ -279,9 +279,9 @@ export function handleRolesSaveFallback(
       warnings.push(`Fallback ${index + 1} runs on ${entry.baseProvider} like the ${ROLE_LABELS[role]} itself: it only helps when the limit is per model.`);
     }
 
-    const home = await homeOf(paseo, deps);
+    const home = homeOf(deps);
     if (home === null) {
-      throw new DashboardError("E_ROLE_SETTINGS_WRITE_FAILED", "paseo-bm cannot find its install home; run npx paseo-bm install, then save again");
+      throw new DashboardError("E_ROLE_SETTINGS_WRITE_FAILED", `${unusableDataHomeMessage()}; see Setup`);
     }
     const read = readRoleFallback(home, log);
     if (read.error !== null) throw invalid(`${ROLE_FALLBACK_FILE} is not valid (${read.error}); fix or delete it, then save again`);

@@ -19,10 +19,8 @@ import { bmAgentsOf, type DashboardPaseo } from "./dashboard-rpc";
 import { readIncidents, replacementsOf } from "./fallback-state";
 import { readTimelinePages } from "./live-timeline";
 import { answeredIds, readQaLedgerSafely } from "./qa-ledger";
-import { TRACES_DIR_NAME } from "./install-home";
-import { installHomeOf } from "./role-extras";
-import { TIMED_OUT, withTimeout } from "./role-mode";
-
+import { TRACES_DIR_NAME } from "./data-home";
+import { dataHomeOf } from "./role-extras";
 /** How much of a Manager's timeline is read per call: one page, newest first. */
 export const WAITING_TIMELINE_PAGES = 1;
 export const WAITING_TIMELINE_LIMIT = 200;
@@ -133,22 +131,17 @@ export function pendingFallbackOf(
 
 export interface ChatWaitingDeps {
   homedir?: () => string;
-  /** The install home; the handler looks it up (within the lookup budget), tests pass one. */
+  /** The data folder; the handler looks it up itself, tests pass one. */
   home?: string | null;
   log?: (message: string) => void;
 }
 
-/** The install home within the lookup budget, or null. Never throws. */
-async function homeOf(paseo: DashboardPaseo, deps: ChatWaitingDeps): Promise<string | null> {
-  try {
-    const found = deps.home !== undefined ? deps.home : await withTimeout(installHomeOf(paseo, { homedir: deps.homedir }));
-    return found === null || found === TIMED_OUT ? null : found;
-  } catch {
-    return null;
-  }
+/** The data folder, or `null` when there is none. Never throws. */
+function homeOf(deps: ChatWaitingDeps): string | null {
+  return deps.home !== undefined ? deps.home : dataHomeOf({ homedir: deps.homedir });
 }
 
-/** Every recorded incident; none when the install home or the file cannot be read. Never throws. */
+/** Every recorded incident; none when the data folder or the file cannot be read. Never throws. */
 function incidentsOf(home: string | null, deps: ChatWaitingDeps): FallbackIncident[] {
   if (home === null) return [];
   try {
@@ -194,7 +187,7 @@ export async function handleChatWaiting(
   // F11). The peers come from the helper `chat.peers` uses, so a pill and its
   // card see the same Workers (F12).
   const managerWorkspaces = new Set(managers.map((manager) => manager.workspaceId!));
-  const home = await homeOf(paseo, deps);
+  const home = homeOf(deps);
   const incidents = incidentsOf(home, deps);
   const answered = answeredOf(home, deps);
   const replacements = replacementsOf(incidents);

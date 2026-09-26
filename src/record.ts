@@ -29,16 +29,40 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute } from "node:path";
 import type { ErrorCode } from "./errors.js";
 import { diagnostic } from "./errors.js";
 import { FILE_MODE } from "./fsops.js";
 import type { FsOps, WriteResult } from "./fsops.js";
 import { installPaths } from "./layout.js";
-import { assertWithinRoot } from "./paths-guard.js";
 
 /** Schema version this build writes and is willing to read. */
 export const RECORD_SCHEMA_VERSION = 1 as const;
+
+/**
+ * The version `paseo-bm migrate` stamps once it has moved an install to the
+ * npm plugin (design §4.5).
+ *
+ * Raising the number is deliberate and is the whole mechanism: a 0.3.x build
+ * reading a schema-2 record stops with `E_RECORD_SCHEMA_TOO_NEW` instead of
+ * "re-installing" a directory plugin over the npm one. This build therefore
+ * reads both 1 and 2, and only the migration writes 2.
+ */
+export const MIGRATED_RECORD_SCHEMA_VERSION = 2 as const;
+
+/** Every schemaVersion this build understands. */
+export const SUPPORTED_RECORD_SCHEMA_VERSIONS: readonly number[] = [
+  RECORD_SCHEMA_VERSION,
+  MIGRATED_RECORD_SCHEMA_VERSION,
+];
+
+/** Where an install was moved to, written only by the migration. */
+export interface MigratedToRecord {
+  readonly source: "npm";
+  readonly package: string;
+  readonly version: string;
+  readonly at: string;
+}
 
 /** The three roles paseo-bm registers, in the order they are used. */
 export const ROLE_NAMES = ["manager", "worker", "reviewer"] as const;
@@ -207,7 +231,7 @@ export interface SkillsRecord {
 
 /** `install.json`, schema v1 (Design §5.2). */
 export interface InstallRecord {
-  readonly schemaVersion: typeof RECORD_SCHEMA_VERSION;
+  readonly schemaVersion: typeof RECORD_SCHEMA_VERSION | typeof MIGRATED_RECORD_SCHEMA_VERSION;
   /** The npm package version that wrote this record. */
   readonly version: string;
   readonly installedAt: string;
@@ -220,6 +244,11 @@ export interface InstallRecord {
   readonly versions: readonly VersionRecord[];
   readonly backups: readonly BackupRecord[];
   readonly skills: SkillsRecord;
+  /**
+   * Set once `paseo-bm migrate` has switched this install to the npm plugin.
+   * Absent on every record a 0.3.x install wrote.
+   */
+  readonly migratedTo?: MigratedToRecord | undefined;
 }
 
 /** Why a record could not be used. Only `schema-too-new` has a registry code. */
@@ -305,97 +334,6 @@ export function recordPath(installHome: string): string {
 }
 
 /**
- * Absolute path of a recorded file. Recorded paths are relative to the install
- * home on purpose: `--home` may point somewhere else than it did last time, and
- * a relative path keeps the record describing the same payload either way.
- */
-export function resolveRecordedPath(installHome: string, relativePath: string): string {
-  const root = resolve(installHome);
-  return assertWithinRoot(root, resolve(root, relativePath));
-}
-
-export interface CreateRecordInput {
-  /** The npm package version doing the install. */
-  readonly version: string;
-  readonly installHome: string;
-  readonly paseo: {
-    readonly home: string;
-    readonly pluginId?: string | null;
-    readonly pluginDir?: string | null;
-    readonly pluginsEnabledSetByUs?: boolean;
-    readonly mcpInject?: McpInjectRecord;
-  };
-  /** Defaults to now; tests pass a fixed instant. */
-  readonly at?: Date | string;
-}
-
-/**
- * A fresh, valid, empty record. Nothing is owned yet — every list starts empty,
- * which is the honest starting state: ownership is only claimed as files are
- * actually written.
- *
- * `mcpInject` defaults to "we did not set it and we observed nothing", so a
- * caller that forgets to record the previous state cannot make the uninstaller
- * believe it may turn the switch off.
- */
-export function createRecord(input: CreateRecordInput): InstallRecord {
-  const stamp = toIsoUtc(input.at);
-  return validateRecord({
-    schemaVersion: RECORD_SCHEMA_VERSION,
-    version: input.version,
-    installedAt: stamp,
-    updatedAt: stamp,
-    installHome: resolve(input.installHome),
-    paseo: {
-      home: input.paseo.home,
-      pluginId: input.paseo.pluginId ?? null,
-      pluginDir: input.paseo.pluginDir ?? null,
-      pluginsEnabledSetByUs: input.paseo.pluginsEnabledSetByUs ?? false,
-      mcpInject: input.paseo.mcpInject ?? { setByUs: false, previous: { present: false, value: null } },
-    },
-    roles: [],
-    files: [],
-    versions: [],
-    backups: [],
-    skills: {
-      agents: [],
-      lastStatus: [],
-      assistDeclinedAt: null,
-      lastCommand: null,
-      assistOutcome: null,
-    },
-  });
-}
-
-/**
- * The record with `created` merged into `paseo.createdConfigContainers`. Merging
- * never drops an entry: a container paseo-bm created on the first install stays
- * paseo-bm's across every later install and update. Returns the same object
- * when nothing new is added, so callers can skip the write.
- */
-export function withCreatedConfigContainers(
-  record: InstallRecord,
-  created: readonly ConfigContainerPath[],
-  at: Date | string = new Date(),
-): InstallRecord {
-  const known = new Set<ConfigContainerPath>(record.paseo.createdConfigContainers ?? []);
-  if (created.every((path) => known.has(path))) {
-    return record;
-  }
-  for (const path of created) known.add(path);
-  return {
-    ...record,
-    updatedAt: toIsoUtc(at),
-    paseo: { ...record.paseo, createdConfigContainers: CONFIG_CONTAINER_PATHS.filter((path) => known.has(path)) },
-  };
-}
-
-/** The same record with a new `updatedAt`. `installedAt` never moves. */
-export function touchRecord(record: InstallRecord, at: Date | string = new Date()): InstallRecord {
-  return { ...record, updatedAt: toIsoUtc(at) };
-}
-
-/**
  * Renders a record as the exact text that goes on disk: the field order of
  * Design §5.2, two-space indent, one trailing newline.
  *
@@ -455,6 +393,16 @@ export function serializeRecord(record: InstallRecord): string {
       active: version.active,
     })),
     backups: valid.backups.map((backup) => ({ at: backup.at, dir: backup.dir, reason: backup.reason })),
+    ...(valid.migratedTo === undefined
+      ? {}
+      : {
+          migratedTo: {
+            source: valid.migratedTo.source,
+            package: valid.migratedTo.package,
+            version: valid.migratedTo.version,
+            at: valid.migratedTo.at,
+          },
+        }),
     skills: {
       agents: [...valid.skills.agents],
       lastStatus: valid.skills.lastStatus.map((status) => ({
@@ -501,7 +449,7 @@ export function validateRecord(value: unknown, context: RecordContext = {}): Ins
   const root = asObject(value, "", context, "the install record");
   const schemaVersion = asInteger(root["schemaVersion"], "schemaVersion", context);
 
-  if (schemaVersion > RECORD_SCHEMA_VERSION) {
+  if (schemaVersion > MIGRATED_RECORD_SCHEMA_VERSION) {
     const entry = diagnostic("E_RECORD_SCHEMA_TOO_NEW");
     throw new RecordError({
       reason: "schema-too-new",
@@ -510,7 +458,7 @@ export function validateRecord(value: unknown, context: RecordContext = {}): Ins
       foundSchemaVersion: schemaVersion,
       message:
         `${entry.message} ${describeFile(context)} declares schemaVersion ${schemaVersion}, ` +
-        `but this build understands ${RECORD_SCHEMA_VERSION}. ${entry.remediation}`,
+        `but this build understands ${SUPPORTED_RECORD_SCHEMA_VERSIONS.join(" and ")}. ${entry.remediation}`,
       path: context.path,
       field: "schemaVersion",
     });
@@ -543,8 +491,12 @@ export function validateRecord(value: unknown, context: RecordContext = {}): Ins
   );
   assertAtMostOneActive(versions, context);
 
+  const migratedTo = root["migratedTo"] === undefined || root["migratedTo"] === null
+    ? undefined
+    : readMigratedTo(root["migratedTo"], "migratedTo", context);
+
   return {
-    schemaVersion: RECORD_SCHEMA_VERSION,
+    schemaVersion: schemaVersion === MIGRATED_RECORD_SCHEMA_VERSION ? MIGRATED_RECORD_SCHEMA_VERSION : RECORD_SCHEMA_VERSION,
     version: asNonEmptyString(root["version"], "version", context),
     installedAt: asTimestamp(root["installedAt"], "installedAt", context),
     updatedAt: asTimestamp(root["updatedAt"], "updatedAt", context),
@@ -588,17 +540,23 @@ export function validateRecord(value: unknown, context: RecordContext = {}): Ins
       lastCommand: asNullableNonEmptyString(skills["lastCommand"], "skills.lastCommand", context),
       assistOutcome: readAssistOutcome(skills["assistOutcome"], "skills.assistOutcome", context),
     },
+    ...(migratedTo === undefined ? {} : { migratedTo }),
   };
 }
 
-/** True when `value` is a valid schema-1 record. Never raises. */
-export function isInstallRecord(value: unknown): value is InstallRecord {
-  try {
-    validateRecord(value);
-    return true;
-  } catch {
-    return false;
+/** `migratedTo`, the one field only the migration writes. */
+function readMigratedTo(value: unknown, field: string, context: RecordContext): MigratedToRecord {
+  const entry = asObject(value, field, context);
+  const source = asNonEmptyString(entry["source"], `${field}.source`, context);
+  if (source !== "npm") {
+    throw invalid(`${field}.source must be "npm", found ${JSON.stringify(source)}`, `${field}.source`, context);
   }
+  return {
+    source: "npm",
+    package: asNonEmptyString(entry["package"], `${field}.package`, context),
+    version: asNonEmptyString(entry["version"], `${field}.version`, context),
+    at: asTimestamp(entry["at"], `${field}.at`, context),
+  };
 }
 
 export interface RecordIoOptions {

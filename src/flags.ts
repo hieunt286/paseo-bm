@@ -16,8 +16,16 @@ import type { ErrorCode } from "./errors.js";
 export { EXIT_CODES, EXIT_CODE_SPECS, exitCodeMeaning, isExitCode, previewExitCode } from "./exit-codes.js";
 export type { ExitCode, ExitCodeName, ExitCodeSpec, PreviewSituation } from "./exit-codes.js";
 
-/** Executable commands. Design §4.1 (there is no `configure` command). */
-export const COMMANDS = ["install", "doctor", "uninstall"] as const;
+/**
+ * Executable commands.
+ *
+ * 0.4.0 has one: `migrate`, with `install` as its alias, because that is what a
+ * 0.3.x user's muscle memory and every old script types. `doctor` and
+ * `uninstall` are gone from the parser entirely: `runCli` answers them from
+ * `src/retired.ts` before it parses anything, so they never need a spec, a
+ * handler or a flag scope again.
+ */
+export const COMMANDS = ["migrate", "install"] as const;
 export type CommandName = (typeof COMMANDS)[number];
 
 export interface CommandSpec {
@@ -26,37 +34,27 @@ export interface CommandSpec {
 }
 
 export const COMMAND_SPECS: readonly CommandSpec[] = [
-  { name: "install", summary: "Install or update paseo-bm (without --apply: asks before writing on a terminal, preview only otherwise)" },
-  { name: "doctor", summary: "Read-only health check; never writes anything" },
-  { name: "uninstall", summary: "Remove what paseo-bm owns (preview only without --apply)" },
+  {
+    name: "migrate",
+    summary:
+      "Move an install made by an earlier `npx paseo-bm` to the plugin on npm (without --apply: asks before writing on a terminal, preview only otherwise)",
+  },
+  { name: "install", summary: "The same as `migrate`, under the name 0.3.x used" },
 ];
 
 const ALL_COMMANDS: readonly CommandName[] = COMMANDS;
 
-/** Parsed, typed flag values. One field per row of Design §4.2. */
+/**
+ * Parsed, typed flag values — the whole 0.4.0 surface.
+ *
+ * The thirteen flags 0.3.x had are gone; `src/retired.ts` answers each one by
+ * name, so they need no field here and no place in the parser.
+ */
 export interface Flags {
   readonly apply: boolean;
   readonly yes: boolean;
-  readonly enablePlugins: boolean;
-  readonly installSkills: boolean;
-  readonly installBeadsTools: boolean;
-  readonly skillsAgents: string | undefined;
-  /**
-   * Raw `<role>=<provider>/<model>` strings, in the order they were typed. The
-   * syntax is checked by `parseRoleSpecs()` in `src/roles/config.ts`, which
-   * `runCli()` runs immediately after parsing.
-   */
-  readonly role: readonly string[];
-  readonly reconfigure: boolean;
-  readonly skipSkillsCheck: boolean;
-  readonly force: boolean;
-  readonly askSkillsAgain: boolean;
-  readonly restoreBackups: boolean;
-  readonly prune: boolean;
   readonly home: string | undefined;
   readonly paseoHome: string | undefined;
-  readonly claudeHome: string | undefined;
-  readonly codexHome: string | undefined;
   readonly json: boolean;
   readonly verbose: boolean;
 }
@@ -83,94 +81,15 @@ export const FLAG_SPECS: readonly FlagSpec[] = [
     flag: "--apply",
     key: "apply",
     kind: "boolean",
-    commands: ["install", "uninstall"],
+    commands: ["migrate", "install"],
     summary: "Actually write; without it the command only previews",
   },
   {
     flag: "--yes",
     key: "yes",
     kind: "boolean",
-    commands: ["install", "uninstall"],
+    commands: ["migrate", "install"],
     summary: "Skip the apply confirmation; never implies consent to any trust boundary",
-  },
-  {
-    flag: "--enable-plugins",
-    key: "enablePlugins",
-    kind: "boolean",
-    commands: ["install"],
-    summary: "Consent to both halves of one trust boundary: enable pluginsEnabled and grant Paseo tools to agents",
-  },
-  {
-    flag: "--install-skills",
-    key: "installSkills",
-    kind: "boolean",
-    commands: ["install"],
-    summary: "Consent to running the third-party skills CLI",
-  },
-  {
-    flag: "--install-beads-tools",
-    key: "installBeadsTools",
-    kind: "boolean",
-    commands: ["install"],
-    summary: "Consent to installing missing br and bv without a terminal (a terminal install does it anyway)",
-  },
-  {
-    flag: "--skills-agents",
-    key: "skillsAgents",
-    kind: "value",
-    commands: ["install", "doctor"],
-    valueLabel: "<list>",
-    summary: "Target agents for the skills CLI (default claude,codex)",
-  },
-  {
-    flag: "--role",
-    key: "role",
-    kind: "repeatable",
-    commands: ["install"],
-    valueLabel: "<role>=<provider>/<model>",
-    summary: "Pick the tool for a role; repeatable",
-  },
-  {
-    flag: "--reconfigure",
-    key: "reconfigure",
-    kind: "boolean",
-    commands: ["install"],
-    summary: "Ask the full role configuration again even when it already exists",
-  },
-  {
-    flag: "--skip-skills-check",
-    key: "skipSkillsCheck",
-    kind: "boolean",
-    commands: ["install", "doctor"],
-    summary: "Skip the skills step entirely",
-  },
-  {
-    flag: "--force",
-    key: "force",
-    kind: "boolean",
-    commands: ["install", "uninstall"],
-    summary: "Install: overwrite user-modified files. Uninstall: delete them too",
-  },
-  {
-    flag: "--ask-skills-again",
-    key: "askSkillsAgain",
-    kind: "boolean",
-    commands: ["install"],
-    summary: "Clear the remembered \"do not ask again\" answer for the skills step",
-  },
-  {
-    flag: "--restore-backups",
-    key: "restoreBackups",
-    kind: "boolean",
-    commands: ["uninstall"],
-    summary: "Restore backups before removing",
-  },
-  {
-    flag: "--prune",
-    key: "prune",
-    kind: "boolean",
-    commands: ["install"],
-    summary: "Clean up old payloads and backups; only on request",
   },
   {
     flag: "--home",
@@ -189,24 +108,6 @@ export const FLAG_SPECS: readonly FlagSpec[] = [
     valueLabel: "<dir>",
     env: "PASEO_HOME",
     summary: "Paseo home directory",
-  },
-  {
-    flag: "--claude-home",
-    key: "claudeHome",
-    kind: "value",
-    commands: ALL_COMMANDS,
-    valueLabel: "<dir>",
-    env: "CLAUDE_CONFIG_DIR",
-    summary: "Claude Code config directory used when detecting skills",
-  },
-  {
-    flag: "--codex-home",
-    key: "codexHome",
-    kind: "value",
-    commands: ALL_COMMANDS,
-    valueLabel: "<dir>",
-    env: "CODEX_HOME",
-    summary: "Codex config directory used when detecting skills",
   },
   {
     flag: "--json",
@@ -234,7 +135,7 @@ export interface UsageError {
   readonly message: string;
   readonly hint?: string;
   /**
-   * Registry code, when the misuse has one — `E_BAD_ROLE_SPEC` for a malformed
+   * Registry code, when the misuse has one — `E_COMMAND_RETIRED` for a retired
    * `--role`. Plain argv mistakes (an unknown flag, a missing value) have no
    * code and leave this undefined.
    */
@@ -351,7 +252,7 @@ export function parseCommandLine(argv: readonly string[]): ParseResult {
   }
 
   // A bare `paseo-bm` is the install wizard, so install owns flag applicability.
-  const effective: CommandName = command ?? "install";
+  const effective: CommandName = command ?? "migrate";
 
   for (const spec of FLAG_SPECS) {
     if (!raw.has(spec.key)) {
@@ -402,7 +303,7 @@ function scanForHelp(argv: readonly string[]): ParsedCommandLine | undefined {
     return undefined;
   }
   return {
-    command: topic ?? "install",
+    command: topic ?? "migrate",
     explicitCommand: topic !== undefined,
     help,
     // `--help` wins when both are present: it is the more informative answer.
@@ -424,21 +325,8 @@ function assemble(raw: ReadonlyMap<FlagKey, RawValue>): Flags {
   return {
     apply: readBoolean(raw, "apply"),
     yes: readBoolean(raw, "yes"),
-    enablePlugins: readBoolean(raw, "enablePlugins"),
-    installSkills: readBoolean(raw, "installSkills"),
-    installBeadsTools: readBoolean(raw, "installBeadsTools"),
-    skillsAgents: readValue(raw, "skillsAgents"),
-    role: readList(raw, "role"),
-    reconfigure: readBoolean(raw, "reconfigure"),
-    skipSkillsCheck: readBoolean(raw, "skipSkillsCheck"),
-    force: readBoolean(raw, "force"),
-    askSkillsAgain: readBoolean(raw, "askSkillsAgain"),
-    restoreBackups: readBoolean(raw, "restoreBackups"),
-    prune: readBoolean(raw, "prune"),
     home: readValue(raw, "home"),
     paseoHome: readValue(raw, "paseoHome"),
-    claudeHome: readValue(raw, "claudeHome"),
-    codexHome: readValue(raw, "codexHome"),
     json: readBoolean(raw, "json"),
     verbose: readBoolean(raw, "verbose"),
   };
@@ -453,17 +341,11 @@ function readValue(raw: ReadonlyMap<FlagKey, RawValue>, key: FlagKey): string | 
   return typeof value === "string" ? value : undefined;
 }
 
-function readList(raw: ReadonlyMap<FlagKey, RawValue>, key: FlagKey): readonly string[] {
-  const value = raw.get(key);
-  return Array.isArray(value) ? value : [];
-}
 
 /** Directory overrides that any command may need. */
 export interface HomeOverrides {
   readonly home: string | undefined;
   readonly paseoHome: string | undefined;
-  readonly claudeHome: string | undefined;
-  readonly codexHome: string | undefined;
 }
 
 export type Environment = Readonly<Record<string, string | undefined>>;
@@ -477,10 +359,5 @@ export type Environment = Readonly<Record<string, string | undefined>>;
 // resolveLayout() in src/layout.ts, which is the single owner of the
 // flag > env > daemon > default precedence contract (REQ-014c).
 export function homeFlagOverrides(flags: Flags): HomeOverrides {
-  return {
-    home: flags.home,
-    paseoHome: flags.paseoHome,
-    claudeHome: flags.claudeHome,
-    codexHome: flags.codexHome,
-  };
+  return { home: flags.home, paseoHome: flags.paseoHome };
 }

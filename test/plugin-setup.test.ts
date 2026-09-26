@@ -14,8 +14,8 @@ import { applyRoleInstructions } from "../plugin/server/role-hook";
 import { OPTIONAL_SKILLS, REQUIRED_SKILLS, checkSkillAt, skillsStatus } from "../plugin/server/setup-skills";
 import { commandsFor, findTool, installTool, toolsStatus, versionOf } from "../plugin/server/setup-tools";
 import { handleRolesInstructions, handleRolesSaveExtra, handleSetupStatus } from "../plugin/server/setup-rpc";
-import { OPTIONAL_SKILLS as CLI_OPTIONAL, REQUIRED_SKILLS as CLI_REQUIRED } from "../src/skills/detect";
 import { setupStatusSchema } from "../plugin/shared/contracts";
+import { updateSetupState } from "../plugin/server/setup-state";
 
 /** Setup screen (delta 20260916-setup-screen). */
 
@@ -25,7 +25,6 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "bm-setup-"));
   home = join(root, ".paseo-bm");
   mkdirSync(home, { recursive: true });
-  writeFileSync(join(home, "install.json"), JSON.stringify({ schemaVersion: 1 }));
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
@@ -53,7 +52,7 @@ describe("additional role instructions", () => {
 
   it("refuse text over the limit and a symlinked file", () => {
     expect(() => saveRoleExtra(home, "worker", "x".repeat(MAX_EXTRA_CHARS + 1))).toThrow(/E_ROLE_EXTRA_INVALID/);
-    // An install home that is a symlink to somewhere else is refused.
+    // A data folder that is a symlink to somewhere else is refused.
     const target = join(root, "outside");
     mkdirSync(target);
     rmSync(home, { recursive: true });
@@ -81,9 +80,22 @@ describe("additional role instructions", () => {
     const got = await handleRolesInstructions({ role: "manager" }, paseo, deps());
     expect(got).toMatchObject({ extra: "Keep it short.", base: BASE_INSTRUCTIONS.manager, path: join(home, "role-extras.json"), maxChars: MAX_EXTRA_CHARS });
     expect(got.full).toBe(fullInstructions("manager", "Keep it short."));
-    await expect(handleRolesSaveExtra({ role: "manager", text: "x" }, paseo, { homedir: () => join(root, "none") })).rejects.toThrow(
-      /E_ROLE_EXTRA_INVALID/,
-    );
+    // A home the plugin has never seen is no longer a failure: from 0.4.0 the
+    // first save creates the data folder (design §5.1).
+    const fresh = join(root, "fresh");
+    await handleRolesSaveExtra({ role: "manager", text: "x" }, paseo, { homedir: () => fresh });
+    expect(readRoleExtras(join(fresh, ".paseo-bm")).manager).toBe("x");
+    expect(statSync(join(fresh, ".paseo-bm")).mode & 0o777).toBe(0o700);
+
+    // A data folder that cannot be used is still refused, with its reason.
+    process.env["PASEO_BM_HOME"] = "relative/bm";
+    try {
+      await expect(handleRolesSaveExtra({ role: "manager", text: "x" }, paseo, deps())).rejects.toThrow(
+        /E_ROLE_EXTRA_INVALID: cannot save: paseo-bm cannot use its data folder \(/,
+      );
+    } finally {
+      delete process.env["PASEO_BM_HOME"];
+    }
   });
 });
 
@@ -93,9 +105,17 @@ describe("skills", () => {
     writeFileSync(join(dir, name, "SKILL.md"), `---\nname: ${declared}\ndescription: x\n---\nbody`);
   };
 
-  it("uses the same lists as the CLI", () => {
-    expect([...REQUIRED_SKILLS]).toEqual([...CLI_REQUIRED]);
-    expect([...OPTIONAL_SKILLS]).toEqual([...CLI_OPTIONAL]);
+  // These were checked against a second copy in `src/skills/detect.ts` until
+  // WP-406 deleted the installer; the plugin's lists are now the only ones.
+  it("names the five skills the Worker needs, and the two that are optional", () => {
+    expect([...REQUIRED_SKILLS]).toEqual([
+      "feature-workflow",
+      "reviewing-plan",
+      "converting-plan-to-beads",
+      "polishing-beads",
+      "implementing-beads",
+    ]);
+    expect([...OPTIONAL_SKILLS]).toEqual(["architecture-premise-audit", "authoring-workspace-protocol"]);
   });
 
   it("counts Claude's own directory, and the shared or own directory for Codex", () => {
@@ -288,5 +308,108 @@ describe("setup.status", () => {
     const bad = structuredClone(old);
     Object.assign(bad.skills.skills[0]!, { pi: "installed" });
     expect(setupStatusSchema.safeParse(bad).success).toBe(false);
+  });
+});
+
+describe("setup.status: what the machine's setup looks like (0.4.0, design §7.13.5)", () => {
+  const setUpDaemon = (overrides: Record<string, unknown> = {}) => ({
+    providers: {
+      diagnostic: async (provider: string) => ({ diagnostic: `{"loggedIn": ${provider === "claude"}, "home": "/secret/path"}` }),
+    },
+    config: {
+      get: async () => ({
+        config: {
+          providers: { "bm-manager": { extends: "claude" }, "bm-worker": { extends: "claude" }, "bm-reviewer": { extends: "codex" } },
+          agentProfiles: [{ id: "bm-manager" }, { id: "bm-worker" }, { id: "bm-reviewer" }],
+          mcp: { injectIntoAgents: true },
+          ...overrides,
+        },
+      }),
+    },
+  });
+
+  const statusDeps = () => ({ ...deps(), env: { PATH: "" }, isExecutable: () => false, run: async () => ({ code: 0, output: "" }) });
+
+  it("reports the roles, the switch, the sign-ins, the data folder and the install kind", async () => {
+    const status = await handleSetupStatus(setUpDaemon(), statusDeps());
+
+    expect(status.setup).toMatchObject({
+      roles: { present: ["manager", "worker", "reviewer"], missing: [], created: null, cleanedUpAt: null },
+      agentTools: { injectIntoAgents: true, setBy: null },
+      logins: [
+        { provider: "claude", roles: ["manager", "worker"], state: "logged-in", loginCommand: "claude auth login" },
+        { provider: "codex", roles: ["reviewer"], state: "logged-out", loginCommand: "codex login" },
+      ],
+      skillsRun: null,
+      dataHome: { path: home, source: "default", reason: null },
+      install: { kind: "other", pluginPath: null },
+    });
+    expect(setupStatusSchema.parse(status)).toEqual(status);
+  });
+
+  it("keeps nothing of a provider diagnostic but the sign-in boolean", async () => {
+    const status = await handleSetupStatus(setUpDaemon(), statusDeps());
+
+    expect(JSON.stringify(status)).not.toContain("/secret/path");
+  });
+
+  it("lists what is missing on a machine that has never been set up", async () => {
+    const bare = { config: { get: async () => ({ config: {} }) } };
+
+    const status = await handleSetupStatus(bare, statusDeps());
+
+    expect(status.setup?.roles).toMatchObject({ present: [], missing: ["manager", "worker", "reviewer"] });
+    expect(status.setup?.agentTools).toEqual({ injectIntoAgents: false, setBy: null });
+    expect(status.setup?.logins).toEqual([]);
+  });
+
+  it("says the switch is unknown when the configuration cannot be read", async () => {
+    const broken = { config: { get: async () => { throw new Error("daemon is busy"); } } };
+
+    const status = await handleSetupStatus(broken, statusDeps());
+
+    expect(status.setup?.agentTools.injectIntoAgents).toBeNull();
+  });
+
+  it("carries the marks the other setup steps left", async () => {
+    updateSetupState(
+      {
+        agentTools: { setBy: "plugin", previous: false, at: "2026-09-25T10:00:00.000Z" },
+        rolesCreated: { at: "2026-09-25T09:00:00.000Z", roles: ["manager"], baseProvider: "claude", model: "claude-opus-5" },
+        skillsRun: { at: "2026-09-25T09:30:00.000Z", command: "npx -y skills add x", code: 0, outcome: "ok" },
+        cleanedUpAt: "2026-09-25T11:00:00.000Z",
+      },
+      { env: {}, homedir: () => root },
+    );
+
+    const status = await handleSetupStatus(setUpDaemon(), statusDeps());
+
+    expect(status.setup?.agentTools.setBy).toBe("plugin");
+    expect(status.setup?.roles.created).toMatchObject({ roles: ["manager"], baseProvider: "claude" });
+    expect(status.setup?.roles.cleanedUpAt).toBe("2026-09-25T11:00:00.000Z");
+    expect(status.setup?.skillsRun).toMatchObject({ outcome: "ok" });
+  });
+
+  it("recognises a 0.3.x directory install from the registered plugin path", async () => {
+    writeFileSync(join(home, "install.json"), JSON.stringify({ schemaVersion: 1 }));
+
+    const status = await handleSetupStatus(setUpDaemon({ plugins: { "paseo-bm": { path: join(home, "plugin", "0.3.1") } } }), statusDeps());
+
+    expect(status.setup?.install).toEqual({ kind: "installer-directory", pluginPath: join(home, "plugin", "0.3.1") });
+  });
+
+  it("reports an unusable data folder with its reason instead of failing", async () => {
+    const status = await handleSetupStatus(setUpDaemon(), { ...statusDeps(), env: { PATH: "", PASEO_BM_HOME: "relative/bm" } });
+
+    expect(status.setup?.dataHome).toMatchObject({ path: null, source: null });
+    expect(status.setup?.dataHome.reason).toContain("absolute path");
+  });
+
+  it("writes nothing", async () => {
+    rmSync(home, { recursive: true, force: true });
+
+    await handleSetupStatus(setUpDaemon(), statusDeps());
+
+    expect(existsSync(home)).toBe(false);
   });
 });

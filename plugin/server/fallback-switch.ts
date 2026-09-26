@@ -23,6 +23,7 @@
  *    creation (the old Worker cannot be read) creates nothing and leaves the
  *    incident pending.
  */
+import { unusableDataHomeMessage } from "./data-home";
 import { createLocationResolver, resolveLocationFromPaseo } from "./collector";
 import { decidePending, type FallbackAction, type FallbackRpcDeps } from "./fallback-rpc";
 import { REPLACED_BY_LABEL } from "./fallback-detect";
@@ -30,8 +31,8 @@ import { workerHandover } from "./fallback-handover";
 import { readIncidents } from "./fallback-state";
 import { setAgentLabels, type CliResult } from "./paseo-cli";
 import { asRecord, availableProviders, nonEmpty, reasonOf } from "./role-choices";
-import { installHomeOf } from "./role-extras";
-import { TIMED_OUT, capabilityOf, chooseModeId, featuresFor, modesFor, runPostureOf, withTimeout } from "./role-mode";
+import { dataHomeOf } from "./role-extras";
+import { capabilityOf, chooseModeId, featuresFor, modesFor, runPostureOf } from "./role-mode";
 import { stopRunningReviewers, type StopPaseo } from "./stop-propagation";
 import type { TraceStoreLocation } from "./trace-store";
 import { DashboardError, type FallbackIncident } from "../shared/contracts";
@@ -92,9 +93,8 @@ export function createWorkerSwitch(deps: SwitchDeps = {}): FallbackAction {
   return (incident, paseo, rpcDeps: FallbackRpcDeps) =>
     serialised(async () => {
       const now = rpcDeps.now ?? deps.now ?? (() => new Date());
-      const found = await withTimeout(rpcDeps.home !== undefined ? Promise.resolve(rpcDeps.home) : installHomeOf(paseo));
-      const home = found === TIMED_OUT ? null : found;
-      if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", "paseo-bm cannot find its install home");
+      const home = rpcDeps.home !== undefined ? rpcDeps.home : dataHomeOf();
+      if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", `${unusableDataHomeMessage()}; see Setup`);
       if (incident.role !== "worker") throw new DashboardError("E_FALLBACK_NO_CANDIDATE", `switching a ${incident.role} arrives in a later release`);
 
       // 1. Still pending (a second click finds it decided) and not replaced yet.

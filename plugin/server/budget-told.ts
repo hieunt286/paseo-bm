@@ -24,7 +24,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { z } from "zod";
-import { UI_DIR_NAME } from "./install-home";
+import { UI_DIR_NAME } from "./data-home";
 import { assertNoSymlinkOnPath, ensureStoreDir, writeStoreFileAtomically, type TraceStoreLocation } from "./trace-store";
 
 /** Bumped only when the shape below changes incompatibly. */

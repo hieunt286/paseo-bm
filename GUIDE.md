@@ -14,36 +14,31 @@ The complete reference for `paseo-bm`. For a short overview and the quick start,
 - [Trace storage](#trace-storage)
 - [Everything paseo-bm writes](#everything-paseo-bm-writes)
 - [Agent skills](#agent-skills)
-- [Checking health: `doctor`](#checking-health-doctor)
+- [Checking health](#checking-health)
 - [Updating](#updating)
-- [Uninstalling](#uninstalling)
-- [Command reference](#command-reference)
-- [Exit codes and JSON output](#exit-codes-and-json-output)
+- [Removing paseo-bm](#removing-paseo-bm)
+- [Coming from the `npx` install](#coming-from-the-npx-install)
 - [Troubleshooting](#troubleshooting)
 - [Known limits](#known-limits)
 
 ## Before you install: read these warnings
 
-Installing paseo-bm asks for **one consent** that turns on **two switches** in `~/.paseo/config.json`. Both reach beyond paseo-bm.
-
 > [!WARNING]
-> **1. Plugin trust: `pluginsEnabled`.**
-> Paseo plugins run **without a sandbox**. The paseo-bm plugin runs inside the Paseo daemon with the same access to your machine as the daemon itself: files, processes, credentials and network. Only enable it if you trust this package.
+> **1. Plugin trust.**
+> Paseo plugins run **without a sandbox**. The paseo-bm plugin runs inside the Paseo daemon with the same access to your machine as the daemon itself: files, processes, credentials and network. Install it only if you trust this package. Paseo's own plugins switch is what allows any plugin to run at all; paseo-bm never writes it.
 
 > [!WARNING]
 > **2. Agent-creation permission: `daemon.mcp.injectIntoAgents`.**
 > The Manager and the Worker need Paseo's tools to create, message and stop other agents. Paseo grants those tools to **every agent on this machine**, not only to paseo-bm's roles. Once the switch is on, any agent can create, prompt and stop other agents, which means it can start work and spend money on your model providers.
+>
+> Nothing turns it on for you. **Setup → Allow agent tools…** asks first, with that warning, and records what the switch was before so **Remove paseo-bm's settings** can put it back. Until you press it, the Manager cannot create a Worker.
 
-In a terminal, both switches are covered by one question, `Enable Paseo plugins and grant Paseo tools to agents?`. It defaults to **No** and is shown with the warning text above. Without a terminal, the only way to give this consent is `--enable-plugins`. **`--yes` is never consent**: it only skips the "apply" confirmation.
-
-If you decline, the rest of the install still completes, but the plugin does not run and the Manager cannot create a Worker. The command exits with code `4`. To enable later:
-
-```bash
-npx paseo-bm install --apply --enable-plugins
-```
+> [!WARNING]
+> **3. Installing skills runs someone else's tool.**
+> **Setup → Install skills…** runs the third-party `skills` CLI, which downloads from [cuongntr/agent-skills](https://github.com/cuongntr/agent-skills) (another author's repository) and has its own data collection. The exact command is shown before it runs, and paseo-bm never writes to your skills folders itself.
 
 > [!CAUTION]
-> **3. Agent permission modes, and rules that only instructions enforce.**
+> **4. Agent permission modes, and rules that only instructions enforce.**
 > - **The Worker** is created in its provider's **no-prompt mode**: Claude `bypassPermissions`, Codex `full-access`, or the equivalent for other providers. Paseo does not ask you to approve its commands.
 > - **The Reviewer** is created in **auto mode** (Claude `auto`, Codex `auto`), which does not grant full or network access. The plugin sets this itself when the Reviewer is created, and moves a Reviewer out of a full-access or planning mode even if the Worker asked for one.
 > - **The Manager** runs in the mode of its `bm-manager` profile. Its instructions forbid doing the work itself, archiving or deleting agents, reading other agents' conversations and approving permission requests. They do **not** forbid git operations, publishing, destructive commands or reading credential files, so choose the `bm-manager` profile's mode with that in mind.
@@ -51,7 +46,7 @@ npx paseo-bm install --apply --enable-plugins
 > The Worker's boundaries (no git commit or push, no destructive commands, no secret files, ask before dependencies, network or migrations) are enforced **only by its role instructions**. No Paseo permission prompt backs them up. Use paseo-bm in repositories where you are comfortable with that, and review `git diff` before you commit.
 
 > [!NOTE]
-> **4. Agent conversation is recorded on this machine.** From the first turn after you install, the plugin writes one record per agent turn into `~/.paseo-bm/traces/`, so the Metric screen can still show a request after its agents are deleted. Records contain the text your agents sent and received, including anything quoted from your repository. Nothing is uploaded. See [Trace storage](#trace-storage).
+> **5. Agent conversation is recorded on this machine.** From the first turn after the plugin loads, it writes one record per agent turn into `~/.paseo-bm/traces/`, so the Metric screen can still show a request after its agents are deleted. Records contain the text your agents sent and received, including anything quoted from your repository. Nothing is uploaded. See [Trace storage](#trace-storage).
 
 Your requests and source code go to the model providers you choose for each role. paseo-bm has no telemetry.
 
@@ -60,64 +55,47 @@ Your requests and source code go to the model providers you choose for each role
 | Requirement | Detail |
 |---|---|
 | Operating system | macOS or Linux. Native Windows is refused. WSL reports itself as Linux but is not covered by testing. |
-| Node.js | 22 or newer |
-| Paseo | Paseo desktop with its CLI and daemon at **0.8.0 or newer**, both reporting the **same** version. The daemon must be running, which usually means the Paseo app is open. |
-| `paseo` CLI | On your `PATH`: `paseo --version` must work in the shell you install from. |
-| Beads tools `br` ([beads_rust](https://github.com/Dicklesworthstone/beads_rust)) and `bv` ([beads_viewer](https://github.com/Dicklesworthstone/beads_viewer)) | **Required for the agents**: the Worker manages beads with `br`, and agents use `bv`'s `--robot-*` views. You do not need them beforehand: [install](#what-the-interactive-install-asks) installs a missing one, and so can the Setup screen. |
-| A logged-in agent provider | At least one provider Paseo offers (for example Claude or Codex), logged in with that tool's own login. paseo-bm never handles credentials. |
-| Network | Needed for `npx` to download the package, and to install missing skills or beads tools. The plugin install itself runs locally. |
+| Paseo | Paseo desktop at **0.9.0 or newer**, with its daemon running (which usually means the Paseo app is open). 0.9 is where Paseo learned to install a plugin from npm, which is the only supported install path. `plugin/paseo-plugin.json` declares `requirements.paseo: ">=0.9.0"`, so an older daemon refuses the plugin rather than loading a build that cannot reach its own install path. |
+| Paseo 0.8 | Not supported by 0.4.0. Keep `paseo-bm@0.3.1` — the last version with the `npx` installer — or upgrade Paseo. |
+| Beads tools `br` ([beads_rust](https://github.com/Dicklesworthstone/beads_rust)) and `bv` ([beads_viewer](https://github.com/Dicklesworthstone/beads_viewer)) | **Required for the agents**: the Worker manages beads with `br`, and agents use `bv`'s `--robot-*` views. You do not need them beforehand — **Setup → Beads tools** installs a missing one after you confirm the command. |
+| A logged-in agent provider | At least one provider Paseo offers (for example Claude or Codex), logged in with that tool's own login. paseo-bm never handles credentials and never runs a login command; **Setup → Agents** shows the command for you to run. |
+| Network | Needed for Paseo to fetch the package, and for the **Install skills** and **Install `br` / `bv`** buttons. Nothing else reaches the network. |
 
-No `sudo` is needed. The npm package has no install scripts, so downloading it changes nothing on your machine until you run a command and confirm.
+No `sudo` is needed, and nothing is written to your machine until you open the plugin.
 
 ## Install
 
-```bash
-npx paseo-bm
-```
-
-`npx` downloads the package, runs it once and leaves nothing in your project. Plain `npx paseo-bm` follows the `latest` tag, which is where **stable releases** go — the release workflow sets it, so it is never behind by a manual step. Prereleases go to `next`, so **`npx paseo-bm@next` fetches the newest prerelease**, which can be older or newer than `latest` depending on which came last. `npm view paseo-bm dist-tags` shows where each tag is today.
-
-### What the interactive install asks
-
-Run the command in a real terminal. If you pipe its output (for example `| tee`) or pass `--json`, paseo-bm sees no terminal and asks nothing: see [non-interactive install](#non-interactive-install).
-
-1. **Environment check.** paseo-bm checks the operating system, Node, the `paseo` CLI, the daemon, the Paseo version and whether the install home can be created. If a check fails, it stops **before writing anything**, prints a fix and exits `3`. A missing `br` or `bv` is only a warning (see step 9).
-2. **Role configuration** (first install, or with `--reconfigure`). For the Manager, the Worker and the Reviewer it asks for:
-   - a name (defaults: `Beads Manager`, `Beads Worker`, `Beads Reviewer`);
-   - a provider, from the providers Paseo offers;
-   - a model for that provider.
-
-   Giving the Reviewer a different provider from the Worker gives the review an independent point of view. The Reviewer is the only role without Paseo tools.
-3. **Preview.** Every file, Paseo registration and config key that would change is listed.
-4. **`Apply these changes?`** (default No). No writes nothing. If nothing needs to change, this question is skipped and every action is reported as skipped.
-5. **Plugin registration.** The payload is copied to `~/.paseo-bm/plugin/<version>/` and registered with Paseo as plugin `paseo-bm`.
-6. **`Enable Paseo plugins and grant Paseo tools to agents?`** (default No). The single trust consent [above](#before-you-install-read-these-warnings). Not asked when both switches are already on.
-7. **Provider login.** For a chosen provider that is not logged in, paseo-bm prints that provider's own login command and asks `Run <command> now?`. If you decline, it prints manual steps. The role stays registered either way.
-8. **Agent skills.** If recommended skills are missing, paseo-bm shows the exact `skills` command and asks before running it. See [Agent skills](#agent-skills). A No is remembered; `--ask-skills-again` asks again.
-9. **Beads tools.** If `br` or `bv` is missing, the preview lists the exact install commands before `Apply these changes?`, and applying installs them — no extra question. The commands:
-   - with Homebrew on your PATH: `brew install dicklesworthstone/tap/br` and `brew install dicklesworthstone/tap/bv`;
-   - otherwise the projects' own install scripts: `br`'s with `--skip-skills` (so nothing is written into your skills directories), and `bv`'s pinned to the commit its README names.
-
-   A failure is only a warning (`W_BEADS_TOOLS_INSTALL_FAILED`) with the command to run yourself.
-10. **Summary.** Plugin state, roles, login state, skills state, and where everything was written.
-
-Two more questions appear only when they apply: overwriting files you edited by hand (a backup is taken first), and installing an **older** paseo-bm over a newer one.
-
-### Non-interactive install
-
-Without a terminal, `install` needs `--apply` to write anything. Without `--apply` it prints the preview and exits `6`. Each trust boundary needs its own flag:
+Needs Paseo 0.9.0 or newer. Either install from **[paseo.cafe](https://paseo.cafe)**, the plugin
+listing inside the Paseo app, or run:
 
 ```bash
-npx paseo-bm install --apply --yes --enable-plugins --install-skills --install-beads-tools \
-  --role manager=claude/<model> --role worker=claude/<model> --role reviewer=codex/<model> \
-  --json
+paseo plugin add npm:paseo-bm-plugin
 ```
 
-- `--enable-plugins` consents to both `pluginsEnabled` and `daemon.mcp.injectIntoAgents`. Without it the install completes and exits `4`.
-- `--install-skills` allows paseo-bm to run the third-party `skills` CLI. Without it, missing skills are only a warning.
-- `--install-beads-tools` allows paseo-bm to install a missing `br` or `bv` (see step 9 above). Without it, a run without a terminal only prints the commands.
-- `--role <role>=<provider>/<model>` picks the tool for `manager`, `worker` or `reviewer`. A role with no `--role` and no earlier configuration gets Paseo's default provider and model, with a warning. The pair must exist in Paseo, otherwise the run stops with `E_PROVIDER_UNAVAILABLE` before writing anything.
-- Installing an older version over a newer one is refused without a terminal (exit `5`).
+Nothing on your machine changes until you open the plugin: Paseo has no hook that runs at install
+time, so paseo-bm does its setup lazily, the first time you open **Beads Manager** or **Setup**.
+
+### What happens the first time you open it
+
+1. **The three roles are created**, if they are missing: the provider aliases `bm-manager`,
+   `bm-worker`, `bm-reviewer` and their agent profiles. The defaults are the first provider Paseo
+   reports as available and that provider's first model — the same rule the retired installer used.
+   Existing entries are never changed, so anything you set yourself is kept. Setup and the launcher
+   both say so, and **Setup → Agents** is where you change them.
+2. **Setup shows "Set up paseo-bm"** with whatever is still missing. Three rows are buttons, because
+   each grants something and nothing runs before you press it:
+
+   | Step | What pressing it does | Why it needs a press |
+   |---|---|---|
+   | **Allow agent tools…** | Turns on Paseo's `daemon.mcp.injectIntoAgents` | The switch applies to **every agent on this machine**, not only paseo-bm's roles: any agent can then create, message and stop other agents. paseo-bm records what the switch was before, so removal can put it back. Without it the Manager cannot create a Worker at all. |
+   | **Install skills…** | Runs the third-party `skills` CLI once, with the exact command shown | It downloads from [cuongntr/agent-skills](https://github.com/cuongntr/agent-skills) (another author's repository) and that tool has its own data collection. paseo-bm never writes to your skills folders itself. It can take up to 5 minutes. |
+   | **Install `br` / `bv`** | Runs the beads tools' own documented install command | It downloads and runs someone else's install script. The exact command is shown first. |
+
+   The card disappears when nothing is left. Rows that are merely *unknown* — a provider whose
+   sign-in Paseo could not report — never appear.
+3. **Sign-in.** **Setup → Agents** lists each provider your roles run on and whether it is signed in.
+   paseo-bm never runs a login command and never sees a credential: it shows the command that
+   provider's own tool documents, and you run it.
 
 ## Working with the agents
 
@@ -313,7 +291,7 @@ Records live in `~/.paseo-bm/traces/`: one directory per workspace, one file per
 - **Every deletion shows first** how many traces and how many bytes will go, and how many of those requests are still running. It then asks you to confirm, and the safe answer is the default.
 - **Deletion is irreversible.** There is no undo and no bin.
 - Deleting traces removes only paseo-bm's own recording. Your beads, documents, agents and Paseo conversations are untouched.
-- Updating paseo-bm never deletes the store, including `install --prune`.
+- Updating paseo-bm never deletes the store.
 
 **Closed or removed workspaces keep their history.** It appears under **Closed workspaces with history** on the Beads Manager screen. If you remove a workspace from Paseo and later open the same project again, Paseo gives it a new workspace id. The old history's Metric screen offers to **reassign** it onto a workspace that exists, or you can delete it. paseo-bm never makes that link on its own, because two workspaces on the same path are not necessarily the same line of work.
 
@@ -325,48 +303,57 @@ Set it in Paseo settings → **Beads Dashboard**. The default is 200 MB. Paseo s
 
 This is the complete list. paseo-bm writes nowhere else.
 
-### Install home: `~/.paseo-bm/**`
+### The data folder: `~/.paseo-bm/**`
 
-Change the location with `--home <dir>` or `PASEO_BM_HOME`. paseo-bm refuses an install home that is, or contains, your home directory, Paseo's directory or an agent configuration directory.
+The plugin owns this folder and creates it when it first needs it, with mode `0700`. It is found in
+three steps, stopping at the first that yields a path: the environment variable `PASEO_BM_HOME` (must
+be absolute), the pointer `~/.paseo-bm/home.json` (written only by the migration command, when your
+old install home was somewhere else), then `~/.paseo-bm`. A candidate that is, or contains, your home
+directory, Paseo's directory or an agent configuration directory is refused — and paseo-bm then
+stops rather than quietly using the default, which would split your data across two places. **Setup →
+This install** shows the folder it is using and how it was found.
 
 | Path | What it is |
 |---|---|
-| `~/.paseo-bm/plugin/<version>/` | The plugin payload for each installed version, including `roles/manager.md`, `roles/worker.md` and `roles/reviewer.md`. Older versions are kept until you run `install --prune`. |
-| `~/.paseo-bm/install.json` | The install record and the source of truth for what paseo-bm owns: version, a hash of every file, Paseo config changes and their previous values, roles, and skills-step state. Do not edit or delete it by hand. |
-| `~/.paseo-bm/backups/<timestamp>/` | A copy of `config.json` taken before paseo-bm edits it (`paseo-config.json`), and copies of files paseo-bm deliberately overwrote. Kept until you prune them or remove them at uninstall. |
-| `~/.paseo-bm/traces/` | The Metric screen's records: `meta.json`, plus one directory per workspace with `meta.json` and `events-<YYYYMM>.jsonl`. This is **your data**, not part of the payload: it has no hash in `install.json`, it is never backed up, and installing or updating never touches it. Delete it from the Metric screen. |
-| `~/.paseo-bm/role-extras.json` | Your additional role instructions from the Setup screen. Like `traces/`, this is **your data**: no hash in `install.json`, never touched by an update or `--prune`. |
-| `~/.paseo-bm/role-fallback.json` | Your fallback chains from Roles & models: each role's policy and fallback entries (provider, model, thinking, mode), plus optional detection `patterns` you edit by hand. Your data, like `role-extras.json`. |
-| `~/.paseo-bm/role-fallback-state.json` | The fallback incidents: each agent that stopped on its provider plan, what was chosen on its card, and the replacement. At most 200 are kept. Your data, like `role-extras.json`. |
-| `~/.paseo-bm/ui/` | Small files of the plugin's own: the "Mark as answered" marks, the questions-and-answers ledger, and `agent-tools.json`, the port of the agents' tool endpoint (see [Reports](#5-reports-and-when-things-finish)). |
-| `~/.paseo-bm/.lock` | Process lock held while `install` or `uninstall` runs. `doctor` never takes it. |
+| `~/.paseo-bm/traces/` | The Metric screen's records: `meta.json`, plus one directory per workspace with `meta.json` and `events-<YYYYMM>.jsonl`. **Your data**: an update never touches it. Delete it from the Metric screen. |
+| `~/.paseo-bm/role-extras.json` | Your additional role instructions from the Setup screen. Your data. |
+| `~/.paseo-bm/role-fallback.json` | Your fallback chains from Roles & models: each role's policy and fallback entries (provider, model, thinking, mode), plus optional detection `patterns` you edit by hand. Your data. |
+| `~/.paseo-bm/role-fallback-state.json` | The fallback incidents: each agent that stopped on its provider plan, what was chosen on its card, and the replacement. At most 200 are kept. Your data. |
+| `~/.paseo-bm/ui/` | Small files of the plugin's own: `answer-marks.json` ("Mark as answered"), `qa-ledger.json` (the questions-and-answers ledger), `budget-told.json` (which review-budget overruns were announced), `agent-tools.json` (the port of the agents' tool endpoint), and `setup-state.json` (what Setup has done: which roles were created, whether paseo-bm turned Paseo's agent tools on and what they were before, the last skills run, and whether you removed paseo-bm's settings). |
+| `~/.paseo-bm/home.json` | A pointer to a data folder somewhere else, written **only** by `npx paseo-bm@0.4.0` when it migrates an install that used `--home`. Delete the file to drop the pointer. |
+
+Files a 0.3.x install left behind — `install.json`, `plugin/<version>/` and `backups/` — are read by
+nothing in 0.4.0 and are never deleted by it. After migrating you can delete `plugin/` and `backups/`
+by hand.
+
+Every write goes to a temporary file first, is `fsync`ed and then renamed into place, with mode
+`0600` and a check that no component of the path is a symlink. A run killed mid-write can leave a
+`*.tmp-*` file beside its target; it is safe to delete.
 
 ### Paseo config: `~/.paseo/config.json`
 
-The location follows `--paseo-home <dir>`, `PASEO_HOME`, or the directory the Paseo daemon reports. A backup is taken first, and only these keys are touched:
+paseo-bm **never** edits this file itself. Everything below goes through Paseo's own API
+(`config.patch`), and every write is read back afterwards.
 
 | Key | What paseo-bm writes | When |
 |---|---|---|
-| `pluginsEnabled` | `true` | Only with the trust consent |
-| `daemon.mcp.injectIntoAgents` | `true`; the previous state is recorded so uninstall can restore it | Only with the trust consent (the same single consent) |
-| `agents.providers.bm-manager`, `agents.providers.bm-worker`, `agents.providers.bm-reviewer` | A derived provider `{ extends, label, paseoTools }` that reuses your existing provider login, with no command and no environment | Role registration |
-| `daemon.agentProfiles[]` entries whose `id` starts with `bm-` | The role's provider, model and name. Other profiles and their order are left untouched. | Role registration |
-| `agents.providers.bm-worker-fallback-<n>` (n = 1…3) | A derived provider `{ extends, label, paseoTools }` for each entry of the Worker's fallback chain, written by the plugin through Paseo's API. Removed with every other `bm-*` entry at uninstall. | When you save a fallback chain in Beads Manager → Setup → Roles & models |
+| `agents.providers.bm-manager`, `agents.providers.bm-worker`, `agents.providers.bm-reviewer` | A derived provider `{ extends, label, paseoTools }` (the Reviewer gets no `paseoTools`) that reuses your existing provider login, with no command and no environment | Created when missing, the first time you open Beads Manager or Setup. An entry that already exists is never changed. |
+| `daemon.agentProfiles[]` entries whose `id` starts with `bm-` | The role's provider, model and name, appended at the end. Other profiles and their order are left untouched. | Same as above; afterwards, only when you save in Roles & models. |
+| `agents.providers.bm-<role>-fallback-<n>` (n = 1…3) | A derived provider for each entry of a role's fallback chain | When you save a fallback chain in Setup → Roles & models |
+| `daemon.mcp.injectIntoAgents` | `true`; the previous value is recorded in `ui/setup-state.json` first | **Only** when you press **Allow agent tools…** and confirm. Set back to the recorded value by **Remove paseo-bm's settings**. |
 
-The `plugins` key is written **by Paseo** when paseo-bm runs `paseo plugin install`. After uninstall, Paseo leaves an empty `plugins: {}` behind; that key belongs to Paseo.
-
-### Temporary files
-
-Every write goes to a temporary file first and is then renamed into place. If a run is killed mid-write, a leftover file such as `~/.paseo/.config.json.<pid>.<hex>.tmp` (or the same pattern beside a file in the install home) may remain. It is safe to delete once no paseo-bm command is running.
+`pluginsEnabled` and `plugins` belong to Paseo: paseo-bm never writes either. The migration command
+`npx paseo-bm@0.4.0` writes only `<install home>/install.json`, `<install home>/ui/setup-state.json`
+and `~/.paseo-bm/home.json`, and calls `paseo plugin remove|add` — it does not touch `config.json`.
 
 ### What paseo-bm never writes
 
-- **Beads tools.** paseo-bm does not write `br` or `bv` itself: it runs Homebrew or the projects' own install scripts, as described in [Install](#install).
-- **Agent skills.** paseo-bm only reads skills directories. Skills are installed and removed only by the third-party `skills` CLI, and only when you consent.
-- Credentials and provider logins: the installer and the plugin never read, store or print them.
+- **Agent skills.** paseo-bm only reads skills directories. Skills are put there by the third-party `skills` CLI, and only when you press **Install skills** and confirm.
+- **Beads tools.** paseo-bm does not write `br` or `bv` itself: it runs Homebrew or the projects' own install scripts, after showing you the command.
+- Credentials and provider logins: never read, stored or printed. paseo-bm does not run login commands.
 - Plugins, providers or profiles created by you or by other tools. Only `bm-*` entries belong to paseo-bm.
 - Your repository, from the plugin: the Beads screen and the Metric screen only **read** `.beads/issues.jsonl`. Changes to your repository come from the agents you ask for work.
-- Existing agents in Paseo. They are yours, and uninstall leaves them in place.
+- Existing agents in Paseo. They are yours, and removal leaves them in place.
 
 ## Agent skills
 
@@ -377,206 +364,193 @@ The Worker follows the **feature-workflow** process, which comes from a set of a
 - **Optional skills** (suggested only): `architecture-premise-audit`, `authoring-workspace-protocol`.
 - **Where paseo-bm looks** (read-only): `~/.agents/skills`; Claude Code's `~/.claude/skills` (follows `--claude-home` or `CLAUDE_CONFIG_DIR`); Codex's `~/.codex/skills` (follows `--codex-home` or `CODEX_HOME`). Symlinked skills count as present. Only names are compared, not versions.
 
-When required skills are missing, paseo-bm shows the exact command and asks before running it. Without a terminal, it runs the command only with `--install-skills`. Target agents come from `--skills-agents` (default `claude,codex`; `claude` is passed as `claude-code`). With the defaults, the command is:
+When required skills are missing, **Setup → Agent skills** shows the exact command and an **Install
+skills…** button. Pressing it asks once more, then runs that command — and only that command, which
+is a constant: nothing you type reaches the shell. The run has a 300-second limit, its output is
+shown with secrets masked, and Setup records when it last ran and with what exit code. The command:
 
 ```bash
 npx -y skills add cuongntr/agent-skills -g -a claude-code codex -s feature-workflow reviewing-plan converting-plan-to-beads polishing-beads implementing-beads -y
 ```
 
-You can also run this command yourself.
+You can also run this command yourself; Setup has a Copy button for it.
 
 - **Skills are installed as symlinks**, so all your agents share **one copy** of each skill.
 - **The `skills` CLI is a third-party tool with its own data collection.** paseo-bm's no-telemetry promise does not cover it.
-- A skills failure, a timeout (300 seconds) or a missing network never blocks the install and never changes the exit code.
-- paseo-bm never removes skills, and `uninstall` does not touch them. Use the `skills` CLI (`npx skills --help`).
+- A failure, a timeout (300 seconds) or a missing network is reported on Setup and changes nothing else. The agents keep working, with lower quality.
+- paseo-bm never removes skills, and removing paseo-bm does not touch them. Remove them with the `skills` CLI (`npx skills --help`).
 
 The plugin checks the Worker's required skills for the provider the Worker runs on, and the Manager tells you once, with the command to add them, if the Worker will run without them. It still hands over the work.
 
-## Checking health: `doctor`
+## Checking health
+
+Everything the retired `doctor` command reported is on the **Setup** screen while the plugin is
+running: the three roles and their models, Paseo's agent-tools switch and who turned it on, each
+provider's sign-in, the required skills per agent, `br` and `bv`, the data folder and how it was
+found, and which kind of install this is.
+
+If the plugin does **not** load at all, Setup cannot tell you anything. Ask Paseo instead:
 
 ```bash
-npx paseo-bm doctor
+paseo plugin ls
+paseo plugin logs paseo-bm
 ```
-
-`doctor` is **read-only**. It writes nothing, takes no lock, uses no network, never runs the `skills` CLI, and calls only `paseo daemon status` and `paseo plugin ls`. It reports each check with a fix:
-
-| Area | Check ids |
-|---|---|
-| Paseo | `paseo-daemon`, `paseo-version` |
-| Install record | `install-record`, `install-version` |
-| Payload files | `files-missing`, `files-modified` |
-| Plugin | `plugin-registered`, `plugin-status`, `plugin-path` |
-| Consent switches | `plugins-enabled`, `agent-tools` |
-| Roles | `role-bm-manager`, `role-bm-worker`, `role-bm-reviewer` |
-| Housekeeping | `payload-versions`, `backups` |
-| Warnings only | `beads-cli`, `beads-viewer`, the per-agent skills checks, provider login state |
-
-Exit codes: `0` healthy, `1` drift in what paseo-bm owns, `2` misuse. Warnings never change the exit code. After an uninstall, `doctor` reports that paseo-bm is not installed.
 
 ## Updating
 
-Run the installer again: `npx paseo-bm` takes the newest stable release (the `latest` tag), and `npx paseo-bm@next` the newest prerelease. Check with `npm view paseo-bm dist-tags`.
+```bash
+paseo plugin update paseo-bm
+```
 
-- **New version.** The payload is copied into a new `~/.paseo-bm/plugin/<new version>/`. Paseo 0.8 cannot re-point a directory plugin, so paseo-bm runs `paseo plugin remove paseo-bm` and then `paseo plugin install <new dir>`; the plugin is absent for a few seconds. If the new version fails to register or load, paseo-bm reinstalls the previous directory, keeps the record on the old version, and exits `7` with Paseo's error message.
-- **Same version.** Nothing to change: nothing is asked and the exit code is `0`. Files repaired or changed in the active plugin directory: paseo-bm **reloads the plugin** and waits for `running`.
-- **Files you edited by hand** are never overwritten silently. On a terminal you are asked, and a backup is taken first. Without a terminal they are kept unless you pass `--force`.
-- **Downgrade** (older over newer) needs an explicit answer on a terminal.
-- **Role changes:** `npx paseo-bm install --reconfigure` asks the role questions again.
-- **Clean up:** `npx paseo-bm install --apply --prune` removes old payload versions and backups. It never removes the version in use or files you edited, and it always keeps the newest Paseo config backup.
+Your data folder is never touched by an update: traces, role instructions, fallback settings and the
+setup state all stay. Your `bm-*` entries in Paseo's configuration are left as they are, including
+any model or mode you changed yourself.
 
-paseo-bm never restarts or stops the Paseo daemon. Updating replaces or reloads the plugin, and turns that end during those seconds are not recorded, so update while no Beads agent is working.
+Downgrading is supported only **within 0.4.0 and later**. Going back to 0.3.x is not a rollback: a
+0.3.x plugin does not trust a data folder whose `install.json` is missing or marked as migrated, so
+it would find no history. If a 0.4.x release breaks something for you, the way back is a later
+0.4.x.
 
-## Uninstalling
+## Removing paseo-bm
+
+Two steps, in this order.
+
+1. **Setup → Remove paseo-bm's settings…**, then confirm. This removes every `bm-*` provider and
+   agent profile from Paseo (the three roles and their fallback aliases) and, if paseo-bm turned
+   Paseo's agent tools on, puts that switch back to what it was. A second, separate question asks
+   whether to delete the plugin's data as well; the default keeps it.
+2. **Remove the plugin:**
+
+   ```bash
+   paseo plugin remove paseo-bm
+   ```
+
+Why two steps: Paseo has no hook that runs when a plugin is removed, so nothing of paseo-bm's can
+run at that moment. If you skip step 1, the `bm-*` providers and profiles stay in your configuration
+and the agent-tools switch stays as it is; you can put the plugin back and press the button, or
+delete those entries in Paseo's own settings.
+
+What the button never touches: agents you already created (archive them yourself — they will fail on
+their next turn without their role), your skills, `br` and `bv`, and anything in the data folder that
+paseo-bm did not create (`install.json`, `plugin/`, `backups/`, `home.json`, and anything you put
+there). One file always survives, even when you ask for the data to be deleted:
+`ui/setup-state.json`, because it records that you removed the settings — without it, one plugin
+reload before step 2 would create the three roles again.
+
+Skills are removed with the `skills` CLI, not by paseo-bm.
+
+## Coming from the `npx` install
+
+If you installed paseo-bm before 0.4.0, the plugin on your machine is a **directory install**: Paseo
+points at `~/.paseo-bm/plugin/<version>/`. It has two problems. It never updates by itself, and
+installing the npm package on top of it is refused by Paseo with exactly:
+
+```
+Plugin ID "paseo-bm" is already configured; choose another ID with --id
+```
+
+**Do not choose another id.** Two copies of paseo-bm would both create roles and both inject
+instructions into your agents. The one supported fix is to run this once:
 
 ```bash
-npx paseo-bm uninstall          # preview only
-npx paseo-bm uninstall --apply  # remove, after confirmation
+npx paseo-bm@0.4.0
 ```
 
-Uninstall removes **only what `install.json` says paseo-bm owns**. It unregisters the `paseo-bm` plugin, deletes the `bm-*` providers and profiles (and any config container it created that is now empty), puts `daemon.mcp.injectIntoAgents` back to its recorded previous state, and deletes the payload.
+That is all the `paseo-bm` command does in 0.4.0, and 0.4.0 is its last release. It removes the
+directory plugin, installs `npm:paseo-bm-plugin` at the same version, and — if that fails — puts the
+directory install back exactly as it was. Your data folder, your roles and Paseo's switches are left
+alone; it marks `install.json` as migrated and, when your data folder is not `~/.paseo-bm`, writes
+the pointer `~/.paseo-bm/home.json` so the plugin can still find it.
 
-It asks, each defaulting to No:
+Afterwards, `~/.paseo-bm/plugin/` and `~/.paseo-bm/backups/` are read by nothing and you can delete
+them by hand. Deleting `~/.paseo-bm/home.json` drops the pointer.
 
-1. `Uninstall paseo-bm as shown above?` (skipped with `--yes`)
-2. `paseo-bm turned Paseo plugins on and no other plugin is installed. Turn plugins off again?` (only when that is true)
-3. `Also remove paseo-bm's backups? This cannot be undone.`
-
-**Questions 2 and 3 are interactive-only.** Without a terminal, plugins stay enabled and backups are kept.
-
-What stays, on purpose:
-
-- **Files you edited by hand** are kept and listed. `--force` deletes them too, after backing them up.
-- **Backups**, unless you chose to remove them.
-- **`install.json`, when the Paseo daemon is not running.** Run `uninstall --apply` again once Paseo is running.
-- **Your additional role instructions** (`~/.paseo-bm/role-extras.json`), **your fallback chains** (`~/.paseo-bm/role-fallback.json`) and **the fallback incidents** (`~/.paseo-bm/role-fallback-state.json`).
-- **Agent skills**, the **beads tools** `br` and `bv`, and **Beads Manager, Worker and Reviewer agents** already in Paseo. Archive or delete the agents yourself.
-- The empty `plugins: {}` key Paseo leaves in `config.json`.
-
-`--restore-backups` copies backed-up **payload files** back before removing. It **never restores the whole `config.json`**, because that would discard every change made since the install. Only the keys paseo-bm owns are undone. Older copies of the config stay under `~/.paseo-bm/backups/` for manual recovery.
-
-## Command reference
-
-```text
-npx paseo-bm [command] [options]
-```
-
-| Command | Meaning |
-|---|---|
-| *(none)* | The install wizard on a terminal. Without a terminal, prints a preview and writes nothing. |
-| `install` | Install or update. Without a terminal and without `--apply`, only previews. |
-| `doctor` | Read-only health check |
-| `uninstall` | Remove what paseo-bm owns. Only previews without `--apply`. |
-
-| Option | Applies to | Meaning |
-|---|---|---|
-| `--apply` | install, uninstall | Actually write; without it the command only previews |
-| `--yes` | install, uninstall | Skip the apply confirmation; never implies consent to any trust boundary |
-| `--enable-plugins` | install | Consent to both halves of one trust boundary: enable `pluginsEnabled` and grant Paseo tools to agents |
-| `--install-skills` | install | Consent to running the third-party skills CLI |
-| `--install-beads-tools` | install | Consent to installing a missing `br` / `bv` without a terminal (a terminal install does it anyway) |
-| `--skills-agents <list>` | install, doctor | Target agents for the skills CLI (default `claude,codex`) |
-| `--role <role>=<provider>/<model>` | install | Pick the tool for a role; repeatable |
-| `--reconfigure` | install | Ask the full role configuration again even when it already exists |
-| `--skip-skills-check` | install, doctor | Skip the skills step entirely |
-| `--force` | install, uninstall | Install: overwrite user-modified files. Uninstall: delete them too |
-| `--ask-skills-again` | install | Clear the remembered "do not ask again" answer for the skills step |
-| `--restore-backups` | uninstall | Restore backups before removing (payload files only) |
-| `--prune` | install | Clean up old payloads and backups; only on request |
-| `--home <dir>` | all | paseo-bm install home (env `PASEO_BM_HOME`) |
-| `--paseo-home <dir>` | all | Paseo home directory (env `PASEO_HOME`) |
-| `--claude-home <dir>` | all | Claude Code config directory used when detecting skills (env `CLAUDE_CONFIG_DIR`) |
-| `--codex-home <dir>` | all | Codex config directory used when detecting skills (env `CODEX_HOME`) |
-| `--json` | all | Emit exactly one JSON document on stdout |
-| `--verbose` | all | Print more detail about each step |
-| `-h`, `--help` | | Show help |
-| `-v`, `--version` | | Print the version and exit |
-
-Precedence: flag, then environment variable, then default. `npx paseo-bm <command> --help` shows the options for one command.
-
-## Exit codes and JSON output
+### Exit codes
 
 | Code | Meaning |
 |---|---|
-| `0` | success, an intentional preview, or a healthy doctor |
-| `1` | doctor found drift in what paseo-bm owns |
-| `2` | misuse of a command or flag |
-| `3` | environment precondition failed; nothing was written |
-| `4` | installed, but a trust boundary was not consented to |
-| `5` | stopped on a conflict that needs a human decision |
-| `6` | no terminal and no `--apply`; preview printed, nothing written |
-| `7` | files installed, but Paseo could not install or load the plugin |
-
-`0` and `6` differ on purpose: `6` means a script forgot `--apply`, so nothing happened. Warnings (missing skills, a missing or failed `br` / `bv`, a provider that is not logged in) never change the exit code.
-
-With `--json`, stdout carries exactly one JSON document and child-process output goes to stderr. The document has `schemaVersion`, `command`, `mode` (`preview` or `applied`), the versions, the `actions` (`checks` for `doctor`), `roles`, `skills`, `warnings` and a `result`. A failed run with a registered error code adds `result.error`:
-
-```json
-{
-  "result": {
-    "exitCode": 3,
-    "pluginState": null,
-    "error": { "code": "E_TARGET_NOT_WRITABLE", "message": "…" }
-  }
-}
-```
-
-`result.error` is present **only** when the command failed. Error codes (`E_…`) and warning codes (`W_…`) are stable: within a major version codes are only added, never renamed or given a new meaning.
+| `0` | Migrated, or there was nothing to migrate (already on npm, or no directory install — it then prints the paseo.cafe instructions), or a preview without `--apply` in a terminal |
+| `2` | The command, subcommand or flag does not exist in 0.4.0 (`E_COMMAND_RETIRED`) — `install`, `doctor`, `uninstall` and the 0.3.x flags are gone |
+| `3` | A precondition failed: Paseo older than 0.9.0, no daemon, no `paseo` CLI |
+| `5` | `E_CONFLICT`: the registered `paseo-bm` plugin is not one paseo-bm installed |
+| `6` | No terminal and no `--apply` |
+| `7` | `E_PLUGIN_LOAD_FAILED`: the npm plugin would not start, and the directory install was put back |
 
 ## Troubleshooting
 
-Start with `npx paseo-bm doctor` (add `--verbose` for detail). Every error prints a fix.
+Start at **Setup**: it shows the state of every setup item and the reason for whatever is wrong. If
+the plugin does not load at all, Setup cannot help — ask Paseo with `paseo plugin ls` and
+`paseo plugin logs paseo-bm`.
 
-**The plugin is not running, or Beads Manager does not appear in Paseo**
+**Beads Manager does not appear in Paseo**
 
+- `paseo plugin ls` — check a plugin's `status` (`running` or `disabled`), not its `enabled` field.
 - `paseo plugin logs paseo-bm` shows Paseo's reason.
-- In `doctor`: `plugins-enabled` or `agent-tools` not ok means the trust consent was not given; run `npx paseo-bm install --apply --enable-plugins`. `plugin-path` or `install-version` in error means Paseo loads a different version than the recorded one; run `npx paseo-bm install --apply`.
-- Check a plugin's `status` (`running` or `disabled`) in `paseo plugin ls`, not its `enabled` field.
+- Paseo's own **plugins** switch is Paseo's, not paseo-bm's: with plugins off, no plugin code runs at
+  all. Turn it on in Paseo's settings.
+- On Paseo 0.8 the plugin is refused on purpose (it declares `>=0.9.0`). Upgrade Paseo, or keep
+  `paseo-bm@0.3.1`.
 
-**`E_PLUGIN_LOAD_FAILED` (exit 7)**
+**The Manager cannot create a Worker**
 
-The files were copied, but Paseo could not install or load the plugin. The files are kept. Read `paseo plugin logs paseo-bm`, fix the cause, and run `npx paseo-bm install --apply` again. During an update, the message also says whether the previous version was restored.
+Almost always Paseo's agent-tools switch. Setup says `Off — the Manager may not be able to create a
+Worker` and offers **Allow agent tools…**. A provider's own `paseoTools` setting is not enough: the
+machine-wide switch is what grants the tools.
 
-**The daemon is not reachable: `E_DAEMON_UNREACHABLE`, `E_PASEO_CLI_MISSING` or `E_VERSION_MISMATCH` (exit 3)**
+Otherwise, check the Worker's provider is signed in (**Setup → Agents → Sign-in** shows the command)
+and that its model still exists in Paseo. The Manager reports the exact cause when creation fails.
 
-Open the Paseo app, make sure `paseo --version` works in the same shell, and make sure the CLI and the daemon are both 0.8.0 or newer with the same version. Nothing has been written at this point. Do not restart or stop the daemon while agents are running: that can kill them.
+**`E_SETUP_ROLES_FAILED`**
 
-**Missing skills: `W_SKILLS_MISSING` or `W_SKILLS_ASSIST_FAILED`**
+paseo-bm could not create its three roles. The message says why: `Paseo reports no available
+provider` means no provider is usable yet — sign in to one, then press **Try again**. `Paseo lists no
+model for <provider>` means that provider is available but has no models. A refused patch is Paseo
+declining the write; `paseo plugin logs paseo-bm` has the detail.
 
-Run the printed `skills add` command yourself, or `npx paseo-bm install --apply --install-skills` (add `--ask-skills-again` if you declined before). Then run `doctor`.
+**`E_DATA_HOME_UNAVAILABLE`**
 
-**Conflicts: `E_CONFLICT` (exit 5)**
+paseo-bm cannot use its data folder, so history and settings are off. **Setup → This install** shows
+the reason. Usually `PASEO_BM_HOME` is relative or points somewhere paseo-bm refuses (your home
+directory, or inside Paseo's or an agent's directory), or `~/.paseo-bm/home.json` is not valid JSON.
+paseo-bm deliberately does not fall back to the default here: that would split your data in two.
 
-Something paseo-bm does not own is in the way, or a file you edited would be overwritten. Move a foreign file aside yourself, or re-run with `--force` to overwrite files recorded as user-modified (a backup is taken first). Exit `5` also covers a downgrade without a terminal.
+**`E_SETUP_WRITE_FAILED`**
 
-**Other errors that exit 3 before writing**
+Paseo refused a configuration write, or did not keep it. Nothing is left half-written: the previous
+value is restored first. Retry; if it persists, check `paseo plugin logs paseo-bm`.
 
-| Code | What to do |
-|---|---|
-| `E_LOCKED` | Another install or uninstall holds `~/.paseo-bm/.lock`. Wait; delete `.lock` only if you are sure no run is active. |
-| `E_CONFIG_CONCURRENT_WRITE` | Something else changed `config.json` during the write (Paseo's settings screen, another run). Close it and retry. |
-| `E_TARGET_NOT_WRITABLE`, `E_UNSAFE_INSTALL_HOME`, `E_SYMLINK_IN_PATH`, `E_PATH_ESCAPE` | Point `--home` at a dedicated directory you own, such as `~/.paseo-bm`, with no symlinks in the path. |
-| `E_PROVIDER_UNAVAILABLE` | The provider or model for a role does not exist in Paseo. Pick an existing pair with `--role`. |
-| `E_RECORD_SCHEMA_TOO_NEW` | `install.json` was written by a newer paseo-bm. Run `npx paseo-bm` again. Do not edit the record. |
+**`E_SKILLS_INSTALL_FAILED` or `E_SKILLS_PRESENT`**
 
-**The Manager cannot create a Worker, or a provider is not logged in (`W_PROVIDER_NOT_LOGGED_IN`)**
+`E_SKILLS_PRESENT` means Claude Code and Codex already have every required skill. `…_FAILED` shows
+the command's exit code and its last lines — run the command yourself to see the whole output. A run
+that passes 300 seconds is reported as a timeout.
 
-Check that `agent-tools` is ok in `doctor` and that the Worker's provider is logged in with its own login command. Change a role's provider or model with `npx paseo-bm install --reconfigure`. The Manager tells you the exact cause when creation fails.
+**`E_TRACE_STORE_UNWRITABLE`**
 
-**The Worker cannot create or update beads: `W_BEADS_CLI_MISSING`, `W_BEADS_VIEWER_MISSING`, `W_BEADS_TOOLS_INSTALL_FAILED`**
+The trace store could not be written. Most often a symlink somewhere on the path of the data folder,
+which paseo-bm refuses to write through, or a regular file where a directory should be.
 
-Open Beads Manager (it opens on Setup): it shows whether `br` and `bv` are on the `PATH` the Paseo daemon uses (which can differ from your terminal's), and can install a missing one after you confirm. Or run the command the warning printed. A script install puts the tool in `~/.local/bin`; add that directory to your PATH if the warning says so.
+**The Worker cannot create or update beads**
+
+**Setup → Beads tools** shows whether `br` and `bv` are on the `PATH` the Paseo daemon uses (which can
+differ from your terminal's) and installs a missing one after you confirm. A script install puts the
+tool in `~/.local/bin`; add that directory to the daemon's PATH if the warning says so.
 
 **Metric shows *(unknown)* for a request, or a request has no request text**
 
-Recording starts at the first turn after install, so a request that began earlier is only partly recorded. A request whose agents were deleted still shows what was recorded, with a note.
+Recording starts at the first turn after the plugin loads, so a request that began earlier is only
+partly recorded. A request whose agents were deleted still shows what was recorded, with a note.
 
 **The Beads screen is empty**
 
-The workspace has no `.beads/issues.jsonl`, or the workspace is no longer listed by Paseo (see [Known limits](#known-limits)).
+The workspace has no `.beads/issues.jsonl`, or the workspace is no longer listed by Paseo (see
+[Known limits](#known-limits)).
 
-**A script installed without asking**
+**Migration problems**
 
-Piping output (`| tee`) or passing `--json` removes the terminal, so nothing is asked. Without a terminal, consent only comes from `--enable-plugins`, `--install-skills` and `--install-beads-tools`.
+See [Coming from the `npx` install](#coming-from-the-npx-install) for the exit codes. Exit `7` means
+the npm plugin would not load and your directory install was put back — nothing was lost; read
+`paseo plugin logs paseo-bm` before trying again.
 
 ## Known limits
 
@@ -586,4 +560,5 @@ Piping output (`| tee`) or passing `--json` removes the terminal, so nothing is 
 - **Costs are estimates** from a bundled price table.
 - **Only paseo-bm's own messages become chat cards**; a Worker's ordinary chat text stays plain (use the **Beads in this chat** panel for its beads).
 - **Additional role instructions apply to agents created after you save them**, and they are machine-wide: they apply to every workspace.
-- Not available yet: a separate `configure` command (use `install --reconfigure`), installing skills from inside Paseo, suggested extra agent profiles, a limit on parallel Workers, report export, views across several workspaces, remote daemons, Windows support, and a code-enforced review budget.
+- **Paseo has no uninstall hook**, so removing paseo-bm's configuration is a button you press before removing the plugin.
+- Not available yet: suggested extra agent profiles, a limit on parallel Workers, report export, views across several workspaces, remote daemons, Windows support, and a code-enforced review budget.

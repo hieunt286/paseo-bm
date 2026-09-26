@@ -1,33 +1,44 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { vi } from "vitest";
-import type * as BeadsTools from "../../src/beads-tools.js";
 import type * as AgentTools from "../../plugin/server/agent-tools";
 
 /**
- * No test may download and run a real installer. `install` installs missing
- * `br` / `bv` on a terminal (delta 20260916-setup-screen); the default step is
- * replaced here by one that does nothing. Tests of the step build their own
- * with `createBeadsToolsStep` and a fake runner.
+ * Every test worker gets a HOME of its own.
+ *
+ * From 0.4.0 the plugin's data folder is `~/.paseo-bm` with nothing gating it
+ * — no `install.json` to confirm, no Paseo handle to ask (design §5.1) — so a
+ * module that resolves it with the real `os.homedir()` would read, and a
+ * handler like `traces.delete` would write, the data of whoever is running the
+ * suite. `os.homedir()` reads `$HOME` on POSIX and `%USERPROFILE%` on Windows,
+ * so redirecting both covers every default. A test that wants a particular
+ * folder still injects `homedir` or sets `PASEO_BM_HOME`, and both still win.
+ *
+ * `PASEO_BM_HOME` is cleared for the same reason, and it matters more: it is
+ * checked BEFORE `homedir()`, so a developer who exports the documented
+ * override would send every test that injects nothing into their real data
+ * folder — and `ensureRoles` swallows the write failure, so it would be silent.
  */
-vi.mock("../../src/beads-tools.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof BeadsTools>();
-  return {
-    ...actual,
-    installBeadsTools: async () => ({ warnings: [], notes: [], resolvedWarnings: [] }),
-  };
+const testHome = mkdtempSync(join(tmpdir(), `bm-test-home-${process.pid}-`));
+process.env["HOME"] = testHome;
+process.env["USERPROFILE"] = testHome;
+delete process.env["PASEO_BM_HOME"];
+process.on("exit", () => {
+  rmSync(testHome, { recursive: true, force: true });
 });
 
 /**
- * No test may touch the real install home either: the plugin entry starts the
- * agent tools endpoint (ADR-010), whose port file lives in `~/.paseo-bm`.
- * Every start without an explicit path gets a per-process temporary one.
+ * The plugin entry starts the agent tools endpoint (ADR-010), which writes its
+ * port into the data folder. The temporary HOME above is what keeps that off
+ * the real `~/.paseo-bm` — this mock only keeps its log line out of the test
+ * output, so a suite that never asked about the endpoint stays readable.
  */
 vi.mock("../../plugin/server/agent-tools", async (importOriginal) => {
   const actual = await importOriginal<typeof AgentTools>();
-  const { tmpdir } = await import("node:os");
-  const { join } = await import("node:path");
   return {
     ...actual,
     startAgentTools: (options: Parameters<typeof actual.startAgentTools>[0] = {}) =>
-      actual.startAgentTools({ statePath: join(tmpdir(), `bm-agent-tools-test-${process.pid}`, ".paseo-bm", "ui", "agent-tools.json"), log: () => {}, ...options }),
+      actual.startAgentTools({ log: () => {}, ...options }),
   };
 });

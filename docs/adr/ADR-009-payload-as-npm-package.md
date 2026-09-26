@@ -2,7 +2,7 @@
 
 | Trường | Giá trị |
 |---|---|
-| Status | Accepted |
+| Status | Accepted; quyết định 4 và 5 **Superseded by [ADR-012](ADR-012-plugin-is-the-product.md) (2026-09-25)**: `paseo-bm-plugin` là đường cài duy nhất được hỗ trợ, trên Paseo 0.9+ |
 | Date | 2026-09-23 |
 | Owner | hieu.nt10 |
 | Liên quan | Sửa đổi [ADR-001](ADR-001-plugin-distribution.md) quyết định 1 và mục "Alternatives considered"; [hồ sơ liệt kê paseo.cafe](../operations/paseo-bm-cafe-listing-20260923.md) §4 và §10 |

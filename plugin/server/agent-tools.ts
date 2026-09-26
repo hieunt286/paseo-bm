@@ -18,11 +18,12 @@
  * Nothing here throws into the plugin: a failure is one log line and no tools.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { toolNamed, toolsFor, type AgentTool, type ToolRole } from "../shared/bm-tools";
-import { UI_DIR_NAME } from "./install-home";
+import { ensureDataHome, resolveDataHome, type DataHomeDeps } from "./data-home";
+import { UI_DIR_NAME } from "./data-home";
+import { ensureStoreDir, writeStoreFileAtomically } from "./trace-store";
 
 /** Name of the MCP server in an agent's config; Claude shows the tools as `mcp__paseo-bm__<tool>`. */
 export const AGENT_TOOLS_SERVER = "paseo-bm";
@@ -168,8 +169,20 @@ async function handle(request: IncomingMessage, response: ServerResponse, log: (
 // The port kept across restarts.
 // ---------------------------------------------------------------------------
 
-export function statePath(home: string = homedir()): string {
-  return join(home, ".paseo-bm", UI_DIR_NAME, STATE_FILE);
+/**
+ * Where the port is remembered, or `null` with the reason the data folder is
+ * unusable.
+ *
+ * Resolution goes through `resolveDataHome` (design §5.1), which is why that
+ * function is synchronous: the endpoint starts while the plugin is still
+ * loading, long before there is a Paseo handle to ask. The path was fixed at
+ * `~/.paseo-bm` before 0.4.0, so a user with a data folder anywhere else lost
+ * the port on every reload.
+ */
+export function statePath(deps: DataHomeDeps = {}): { path: string; home: string } | { path: null; reason: string } {
+  const resolution = resolveDataHome(deps);
+  if (resolution.home === null) return { path: null, reason: resolution.reason };
+  return { path: join(resolution.home, UI_DIR_NAME, STATE_FILE), home: resolution.home };
 }
 
 /** The port saved by an earlier start, or null. Never throws. */
@@ -183,15 +196,20 @@ export function savedPort(path: string): number | null {
   }
 }
 
-/** Saves the port, but only inside an install home that exists: this never creates one. */
+/**
+ * Saves the port with the same writer every other store uses: the folder
+ * created 0700 when missing, a temporary file fsynced and renamed, 0600, and
+ * no symlink anywhere on the path. Before 0.4.0 this file was the one
+ * exception to all three rules, because nothing was allowed to create the
+ * install home; the plugin owns the folder now, so the exception is gone.
+ */
 function savePort(path: string, port: number, log: (line: string) => void): void {
   try {
     const home = dirname(dirname(path));
-    if (!existsSync(home)) return;
-    mkdirSync(dirname(path), { recursive: true });
-    const temp = `${path}.tmp-${process.pid}`;
-    writeFileSync(temp, `${JSON.stringify({ schemaVersion: STATE_VERSION, port })}\n`);
-    renameSync(temp, path);
+    const tracesDir = join(home, "traces");
+    ensureDataHome(home);
+    ensureStoreDir(tracesDir, dirname(path));
+    writeStoreFileAtomically({ tracesDir }, path, `${JSON.stringify({ schemaVersion: STATE_VERSION, port })}\n`);
   } catch (error) {
     log(`[paseo-bm] could not save the agent tools port: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -230,7 +248,14 @@ export interface StartOptions {
 /** Starts the endpoint: the saved port first, any free port after. Never throws. */
 export function startAgentTools(options: StartOptions = {}): AgentToolsEndpoint {
   const log = options.log ?? ((line: string) => console.warn(line));
-  const path = options.statePath ?? statePath();
+  const resolved = options.statePath === undefined ? statePath() : { path: options.statePath };
+  if (resolved.path === null) {
+    log(
+      `[paseo-bm] the agent tools endpoint cannot use the paseo-bm data folder (${resolved.reason}); agents write their BM-* blocks by hand.`,
+    );
+    return { urlFor: () => null, ready: Promise.resolve(), close: async () => {} };
+  }
+  const path = resolved.path;
   let port: number | null = null;
   const server = createServer((request, response) => {
     handle(request, response, log).catch(() => send(response, 500));

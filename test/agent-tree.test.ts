@@ -395,11 +395,13 @@ describe("role configuration (roles.describe)", () => {
     }
   });
 
-  it("roles: [] shows an explicit not-installed / roles-not-registered state", () => {
+  it("roles: [] says the roles are not registered, and where they are created", () => {
     const shown = texts(view({ roles: { status: "success", data: [] } }));
     expect(shown).toContain(NO_ROLES_TEXT);
-    expect(NO_ROLES_TEXT).toMatch(/not installed/);
     expect(NO_ROLES_TEXT).toMatch(/not registered with Paseo/);
+    // 0.4.0: the plugin creates them itself, so there is nothing to install.
+    expect(NO_ROLES_TEXT).toContain("Open Beads Manager → Setup to create them.");
+    expect(NO_ROLES_TEXT).not.toMatch(/npx paseo-bm/);
   });
 });
 

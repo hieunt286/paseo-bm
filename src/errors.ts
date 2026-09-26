@@ -37,9 +37,15 @@ export const DIAGNOSTICS = {
   E_VERSION_MISMATCH: {
     code: "E_VERSION_MISMATCH",
     message:
-      "The installed Paseo is not a version paseo-bm supports: it requires Paseo 0.8.0 or newer, with the CLI and the daemon reporting the same version.",
+      "The installed Paseo is not a version paseo-bm supports: it requires Paseo 0.9.0 or newer, with the CLI and the daemon reporting the same version.",
     remediation:
-      "Upgrade Paseo so the CLI and the daemon are both 0.8.0 or newer and agree on the version, then run the command again.",
+      "Upgrade Paseo so the CLI and the daemon are both 0.9.0 or newer and agree on the version, then run the command again. On Paseo 0.8, keep paseo-bm@0.3.1.",
+  },
+  E_COMMAND_RETIRED: {
+    code: "E_COMMAND_RETIRED",
+    message: "That command or flag was retired in paseo-bm 0.4.0, which only migrates an old install to the npm plugin.",
+    remediation:
+      "Everything the CLI used to do is now in the plugin: open Beads Manager → Setup. See https://github.com/hieunt286/paseo-bm#readme",
   },
   E_UNSUPPORTED_OS: {
     code: "E_UNSUPPORTED_OS",
@@ -70,25 +76,6 @@ export const DIAGNOSTICS = {
     remediation:
       "Inspect the reported target and move it aside yourself, or re-run with `--force` to overwrite files recorded as user-modified. A backup is always taken before overwriting.",
   },
-  E_BAD_SKILLS_AGENTS: {
-    code: "E_BAD_SKILLS_AGENTS",
-    message: "The value of `--skills-agents` is not a valid agent list.",
-    remediation:
-      "Pass at most 8 comma-separated names, each matching ^[a-z0-9][a-z0-9_-]{0,31}$, for example `--skills-agents claude,codex`. Nothing was written.",
-  },
-  E_BAD_ROLE_SPEC: {
-    code: "E_BAD_ROLE_SPEC",
-    message: "The value of `--role` is not a valid role specification.",
-    remediation:
-      "Use `--role <role>=<provider>/<model>` where the role is manager, worker or reviewer, for example `--role worker=codex/gpt-5.6-sol`. Nothing was written.",
-  },
-  E_CONFIG_CONCURRENT_WRITE: {
-    code: "E_CONFIG_CONCURRENT_WRITE",
-    message:
-      "Another process changed the Paseo config file while paseo-bm was updating it, and the single retry hit the same conflict.",
-    remediation:
-      "Close anything else editing Paseo configuration — the Paseo settings screen or another paseo-bm run — then run the command again. The other process's version of the file was kept.",
-  },
   E_RECORD_SCHEMA_TOO_NEW: {
     code: "E_RECORD_SCHEMA_TOO_NEW",
     message: "The install record was written by a newer paseo-bm and uses a schema version this build does not understand.",
@@ -100,12 +87,6 @@ export const DIAGNOSTICS = {
     message: "Another paseo-bm install or uninstall already holds the lock on this install home.",
     remediation:
       "Wait for the other run to finish and try again. If you are certain no other run is active, delete the `.lock` file in the install home first. `paseo-bm doctor` never needs the lock.",
-  },
-  E_PROVIDER_UNAVAILABLE: {
-    code: "E_PROVIDER_UNAVAILABLE",
-    message: "The provider or model requested for an agent role does not exist in this Paseo installation.",
-    remediation:
-      "Check which providers and models Paseo offers, then pick an existing pair for the role, for example `--role worker=<provider>/<model>`. Nothing was written.",
   },
   E_UNSAFE_INSTALL_HOME: {
     code: "E_UNSAFE_INSTALL_HOME",
@@ -137,35 +118,16 @@ export const DIAGNOSTICS = {
     remediation:
       "Run `paseo plugin logs paseo-bm` to see why, fix the cause, then run `npx paseo-bm install --apply` again. The installed files were kept.",
   },
-  W_SKILLS_MISSING: {
-    code: "W_SKILLS_MISSING",
-    message: "Some agent skills that the paseo-bm roles rely on are not installed for the selected agents.",
-    remediation:
-      "Run the printed `skills add` command yourself, or re-run install with `--install-skills` to let paseo-bm run it after you consent. This never blocks the install or changes the exit code.",
+  W_PLUGINS_DISABLED: {
+    code: "W_PLUGINS_DISABLED",
+    message: "Paseo reports the plugin as disabled: Paseo's own plugins switch is off.",
+    remediation: "Turn plugins on in Paseo's settings; the switch is Paseo's and paseo-bm never writes it.",
   },
   W_BEADS_CLI_MISSING: {
     code: "W_BEADS_CLI_MISSING",
     message: "The beads CLI (`br` or `bd`) was not found, so Worker will not be able to manage beads.",
     remediation:
       "Install br (beads_rust) and make sure it is on PATH: `brew install dicklesworthstone/tap/br`, or `curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh | bash -s -- --skip-skills`. The Beads Manager Setup screen can also install it. paseo-bm installs fine without it; only the beads part of the workflow is unavailable.",
-  },
-  W_SKILLS_ASSIST_FAILED: {
-    code: "W_SKILLS_ASSIST_FAILED",
-    message: "The `skills` command that paseo-bm ran on your behalf did not finish successfully.",
-    remediation:
-      "Run the printed command manually to see the failure, then re-run `paseo-bm doctor`. Skills problems never block the install or change the exit code.",
-  },
-  W_PROVIDER_NOT_LOGGED_IN: {
-    code: "W_PROVIDER_NOT_LOGGED_IN",
-    message: "The provider chosen for an agent role has no active login session, so that role cannot start a session yet.",
-    remediation:
-      "Run that tool's own login command — paseo-bm never handles credentials — then run `paseo-bm doctor` to confirm. The role stays registered either way.",
-  },
-  W_BEADS_TOOLS_INSTALL_FAILED: {
-    code: "W_BEADS_TOOLS_INSTALL_FAILED",
-    message: "paseo-bm tried to install a missing beads tool (`br` or `bv`) and it is still not available.",
-    remediation:
-      "Run the printed install command yourself to see the failure, make sure the tool is on PATH, then run `paseo-bm doctor`. This never blocks the install or changes the exit code.",
   },
   W_BEADS_VIEWER_MISSING: {
     code: "W_BEADS_VIEWER_MISSING",

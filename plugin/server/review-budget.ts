@@ -170,7 +170,7 @@ export async function checkReviewBudget(event: TurnEndedEvent, deps: BudgetDeps)
       // review call sent again, not a new one (delta 20260921 §4.5.1).
       const [facts, replacementIds] = await Promise.all([
         agentFactsOf(deps.paseo, workspaceId),
-        reviewerReplacementsFor(deps.paseo, { home: deps.home }),
+        reviewerReplacementsFor({ home: deps.home }),
       ]);
       const trace = reconstructTraces({ records, agents: [...facts.values()], replacementIds }).find(
         (candidate) => candidate.workerIds.includes(agent.id) || candidate.reviewerIds.includes(agent.id),

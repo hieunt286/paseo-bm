@@ -1,5 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
-import { canonicalJson, roleConfigRevision, writeRoleConfig, type ConfigPaseo, type RoleConfigView, type RoleConfigWrite } from "../plugin/server/config-writer";
+import {
+  canonicalJson,
+  createRoleEntries,
+  roleConfigRevision,
+  writeRoleConfig,
+  type ConfigPaseo,
+  type RoleConfigView,
+  type RoleConfigWrite,
+} from "../plugin/server/config-writer";
+import { ROLE_NAMES, ROLE_PROFILE_NOTES, roleAliasEntry, roleId, roleProfileEntry } from "../plugin/server/setup-roles";
 import { DashboardError } from "../plugin/shared/contracts";
 
 /**
@@ -197,5 +206,149 @@ describe("writeRoleConfig", () => {
     // read-back equals the first read, so there is nothing left to report.
     expect(daemon.state().agentProfiles[0]).toEqual(ROOM);
     expect(daemon.getCalls()).toBe(2);
+  });
+});
+
+// ── createRoleEntries (0.4.0, ADR-012 decision 4) ──────────────────────────
+
+const rolesToCreate = () =>
+  Object.fromEntries(
+    ROLE_NAMES.map((role) => [
+      roleId(role),
+      { alias: roleAliasEntry(role, "claude"), profile: roleProfileEntry(role, "claude-opus-5") },
+    ]),
+  );
+
+/** A machine with no paseo-bm entries at all: a fresh paseo.cafe install. */
+const bare = () => ({ providers: { "room-lead": { extends: "codex" } }, agentProfiles: [ROOM] });
+
+describe("createRoleEntries", () => {
+
+  it("creates all three in one patch, the Reviewer without Paseo tools", async () => {
+    const daemon = fakeDaemon(bare());
+
+    const result = await createRoleEntries(daemon.paseo, rolesToCreate());
+
+    expect(result.created).toEqual(["bm-manager", "bm-worker", "bm-reviewer"]);
+    expect(daemon.patches).toHaveLength(1);
+    expect(daemon.patches[0]!.providers).toEqual({
+      "bm-manager": { extends: "claude", label: "Beads Manager", paseoTools: { enabled: true } },
+      "bm-worker": { extends: "claude", label: "Beads Worker", paseoTools: { enabled: true } },
+      "bm-reviewer": { extends: "claude", label: "Beads Reviewer" },
+    });
+    expect(daemon.state().providers["bm-reviewer"]).not.toHaveProperty("paseoTools");
+  });
+
+  it("appends the profiles at the end and leaves every other entry byte-identical", async () => {
+    const daemon = fakeDaemon(bare());
+
+    await createRoleEntries(daemon.paseo, rolesToCreate());
+
+    const profiles = daemon.state().agentProfiles;
+    expect(profiles[0]).toEqual(ROOM);
+    expect(profiles.map((entry) => entry.id)).toEqual(["room-lead", "bm-manager", "bm-worker", "bm-reviewer"]);
+    expect(profiles[1]).toEqual({
+      id: "bm-manager",
+      name: "Beads Manager",
+      provider: "bm-manager",
+      model: "claude-opus-5",
+      notes: ROLE_PROFILE_NOTES.manager,
+    });
+  });
+
+  it("writes no command, env, modeId or thinkingOptionId", async () => {
+    const daemon = fakeDaemon(bare());
+
+    await createRoleEntries(daemon.paseo, rolesToCreate());
+
+    const written = JSON.stringify(daemon.patches[0]);
+    for (const key of ["command", "env", "modeId", "thinkingOptionId"]) expect(written).not.toContain(key);
+  });
+
+  it("creates only what is missing and never touches what is there", async () => {
+    const daemon = fakeDaemon(initial());
+    const worker = structuredClone(daemon.state().providers["bm-worker"]);
+    const workerProfile = structuredClone(daemon.state().agentProfiles[1]);
+
+    const result = await createRoleEntries(daemon.paseo, rolesToCreate());
+
+    expect(result.created).toEqual(["bm-manager"]);
+    expect(Object.keys(daemon.patches[0]!.providers as object)).toEqual(["bm-manager"]);
+    expect(daemon.state().providers["bm-worker"]).toEqual(worker);
+    expect(daemon.state().agentProfiles[1]).toEqual(workerProfile);
+  });
+
+  it("creates the missing half of a half-created role", async () => {
+    const daemon = fakeDaemon({
+      providers: { "bm-manager": { extends: "codex", label: "Mine" } },
+      agentProfiles: [{ id: "bm-worker", name: "W", provider: "bm-worker", model: "m" }],
+    });
+
+    await createRoleEntries(daemon.paseo, rolesToCreate());
+
+    // The alias it already had is kept as it was; only the missing halves are written.
+    expect(daemon.state().providers["bm-manager"]).toEqual({ extends: "codex", label: "Mine" });
+    expect(daemon.state().agentProfiles.map((entry) => entry.id)).toEqual(["bm-worker", "bm-manager", "bm-reviewer"]);
+    expect(Object.keys(daemon.patches[0]!.providers as object)).toEqual(["bm-worker", "bm-reviewer"]);
+  });
+
+  it("patches nothing when all three are there", async () => {
+    const daemon = fakeDaemon({
+      providers: { "bm-manager": {}, "bm-worker": {}, "bm-reviewer": {} },
+      agentProfiles: ROLE_NAMES.map((role) => ({ id: roleId(role) })),
+    });
+
+    const result = await createRoleEntries(daemon.paseo, rolesToCreate());
+
+    expect(result.created).toEqual([]);
+    expect(daemon.patches).toHaveLength(0);
+  });
+
+  it("reports a refused patch as E_SETUP_ROLES_FAILED with the daemon's message", async () => {
+    const daemon = fakeDaemon(bare());
+    vi.spyOn(daemon.paseo.config, "patch").mockRejectedValueOnce(new Error("Request failed: providers is read-only"));
+
+    await expect(createRoleEntries(daemon.paseo, rolesToCreate())).rejects.toMatchObject({
+      code: "E_SETUP_ROLES_FAILED",
+      message: "E_SETUP_ROLES_FAILED: Request failed: providers is read-only",
+    });
+  });
+
+  it("reports a read-back that lost an entry, and does not patch again", async () => {
+    const daemon = fakeDaemon(bare());
+    // The daemon answers the patch, then shows a config without what was sent.
+    vi.spyOn(daemon.paseo.config, "patch").mockImplementationOnce(async () => ({}));
+
+    await expect(createRoleEntries(daemon.paseo, rolesToCreate())).rejects.toMatchObject({ code: "E_SETUP_ROLES_FAILED" });
+    expect(daemon.patches).toHaveLength(0);
+  });
+
+  it("refuses an id that is not one of the three main roles", async () => {
+    const daemon = fakeDaemon(bare());
+
+    await expect(
+      createRoleEntries(daemon.paseo, { "bm-worker-fallback-1": { alias: {}, profile: {} } }),
+    ).rejects.toMatchObject({ code: "E_SETUP_ROLES_FAILED" });
+    expect(daemon.patches).toHaveLength(0);
+  });
+});
+
+describe("the texts that send a user to Setup", () => {
+  it("names Setup, not the retired installer, when a main role is missing or would be removed", async () => {
+    const daemon = fakeDaemon(bare());
+    const revision = roleConfigRevision(daemon.state());
+    const write = (patch: Partial<RoleConfigWrite>) =>
+      writeRoleConfig(daemon.paseo, { expectedRevision: revision, ...patch } as RoleConfigWrite);
+
+    await expect(write({ providers: { "bm-worker": { extends: "claude" } } })).rejects.toThrow(
+      'provider "bm-worker" is not registered; open Beads Manager → Setup, which creates it',
+    );
+    await expect(write({ profiles: { "bm-worker": { model: "m" } } })).rejects.toThrow(
+      'profile "bm-worker" is not registered; open Beads Manager → Setup, which creates it',
+    );
+    await expect(write({ removeProviders: ["bm-worker"] })).rejects.toThrow(
+      'provider "bm-worker" is a main role; only "Remove paseo-bm\'s settings" on Setup removes it',
+    );
+    expect(daemon.patches).toHaveLength(0);
   });
 });

@@ -172,7 +172,7 @@ export async function workerHandover(incident: FallbackIncident, deps: HandoverD
       // The same count as the BM-BUDGET check (delta 20260921 §4.5.1).
       const [facts, replacementIds] = await Promise.all([
         agentFactsOf(deps.paseo as DashboardPaseo, incident.workspaceId),
-        deps.incidents === undefined ? reviewerReplacementsFor(deps.paseo) : reviewerReplacementIds(deps.incidents ?? []),
+        deps.incidents === undefined ? reviewerReplacementsFor() : reviewerReplacementIds(deps.incidents ?? []),
       ]);
       return reconstructTraces({ records, agents: [...facts.values()], replacementIds }).find((trace) => trace.requestId === requestId) ?? null;
     }),

@@ -1,14 +1,16 @@
 import { runCli } from "./cli.js";
 import type { CommandHandlers } from "./cli.js";
-import { doctorCommand } from "./commands/doctor.js";
-import { installCommand } from "./commands/install/index.js";
-import { uninstallCommand } from "./commands/uninstall.js";
+import { createMigrateCommand } from "./commands/migrate.js";
 
-/** The handler table: one entry per command of Design §4.1. */
-export const handlers: CommandHandlers = {
-  install: installCommand,
-  doctor: doctorCommand,
-  uninstall: uninstallCommand,
-};
+/**
+ * The handler table.
+ *
+ * 0.4.0 does one thing, so `migrate` and the alias 0.3.x users type share a
+ * handler. `doctor` and `uninstall` have none: `runCli` answers them with their
+ * retirement before it parses anything (`src/retired.ts`).
+ */
+const migrate = createMigrateCommand();
+
+export const handlers: CommandHandlers = { migrate, install: migrate };
 
 process.exitCode = await runCli(process.argv.slice(2), { handlers });

@@ -2,7 +2,7 @@
 
 | Trường | Giá trị |
 |---|---|
-| Status | Accepted |
+| Status | **Superseded by [ADR-012](ADR-012-plugin-is-the-product.md) (2026-09-25)** — sản phẩm là gói plugin `paseo-bm-plugin` cài từ paseo.cafe / npm; trình cài không còn chép payload và đăng ký thư mục |
 | Date | 2026-09-14 |
 | Owner | hieu.nt10 |
 | Liên quan | [PRD §Q-004](../product/paseo-bm-prd.md#10-open-questions), [Technical Design](../design/paseo-bm.md) |

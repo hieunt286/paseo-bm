@@ -331,7 +331,7 @@ describe("registerFallbackDetection", () => {
     saveChain("ask", [CODEX]);
     const { paseo, listUsage } = fakeDaemon({ windows: [{ id: "five_hour", usedPct: 100, resetsAt: "2026-09-22T15:00:00.000Z" }] });
     const fake = host();
-    registerFallbackDetection(fake.value as never, { log, now: NOW, home: async () => home });
+    registerFallbackDetection(fake.value as never, { log, now: NOW, home: () => home });
     await fake.handlers[0]!(
       { agent: { id: WORKER, provider: "bm-worker/claude-opus-5", workspaceId: WORKSPACE }, turnId: "t1", outcome: { kind: "failed", error: { message: L1.message } }, timeline: [] },
       { paseo },
@@ -341,7 +341,7 @@ describe("registerFallbackDetection", () => {
   });
 
   it("does not even look up the install home for an ordinary turn", async () => {
-    const homeLookup = vi.fn(async () => home);
+    const homeLookup = vi.fn(() => home);
     const fake = host();
     registerFallbackDetection(fake.value as never, { log, now: NOW, home: homeLookup });
     const { paseo } = fakeDaemon();

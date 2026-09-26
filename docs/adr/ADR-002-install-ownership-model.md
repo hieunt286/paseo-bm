@@ -5,6 +5,7 @@
 | Status | Accepted (bổ sung 2026-09-16 — xem mục cuối) |
 | Date | 2026-09-14 |
 | Owner | hieu.nt10 |
+| Sửa đổi bởi | [ADR-012](ADR-012-plugin-is-the-product.md) (2026-09-25): hồ sơ cài đặt chỉ còn cho người dùng cũ. Quyết định 1–7 chỉ áp cho trình cài tới 0.3.1 (từ 0.4.0 Paseo giữ gói, không còn payload để hash, backup hay giữ song song); quyết định 9 được dùng để chặn trình cài cũ: CLI 0.4.0 đánh dấu `install.json` là đã chuyển bằng `schemaVersion: 2` |
 | Liên quan | [PRD REQ-004, REQ-008, REQ-009, REQ-010, REQ-012](../product/paseo-bm-prd.md#6-functional-requirements), [ADR-001](ADR-001-plugin-distribution.md), [Technical Design](../design/paseo-bm.md) |
 
 ## Context

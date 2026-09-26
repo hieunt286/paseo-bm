@@ -22,9 +22,7 @@ import type {
 } from "./flags.js";
 import { createPrompter, detectTty } from "./prompter.js";
 import type { Prompter, TtyInfo } from "./prompter.js";
-import { parseRoleSpecs } from "./roles/config.js";
-import { parseSkillsAgents } from "./skills/agents.js";
-import type { RoleSpec } from "./roles/config.js";
+import { RETIRED_CODE, RETIRED_FLAGS, retirementIn, retirementMessage } from "./retired.js";
 import { readVersion } from "./version.js";
 
 export type Writer = (text: string) => void;
@@ -35,17 +33,6 @@ export interface CommandContext {
   /** False for a bare `paseo-bm`: run the wizard on a TTY, preview otherwise. */
   readonly explicitCommand: boolean;
   readonly flags: Flags;
-  /**
-   * `--role` after its syntax has been checked (Design §4.2). Empty when the
-   * flag was not used. Whether each provider and model actually exists is a
-   * separate, later check against Paseo — see `src/roles/config.ts`.
-   */
-  readonly roleSpecs: readonly RoleSpec[];
-  /**
-   * `--skills-agents` after validation (Design §4.2), or the default
-   * `claude,codex` when the flag was not used.
-   */
-  readonly skillsAgents: readonly string[];
   readonly homes: HomeOverrides;
   readonly tty: TtyInfo;
   readonly prompter: Prompter;
@@ -86,6 +73,15 @@ export async function runCli(argv: readonly string[], deps: CliDependencies): Pr
   const tty = deps.tty ?? detectTty();
   const version = deps.version ?? readVersion();
 
+  // Before parsing: 0.4.0 only migrates (ADR-012 decision 7), and someone who
+  // typed `doctor` or `--role` deserves the sentence that says where the job
+  // went — not a complaint about the value of a flag that no longer exists.
+  const retired = retirementIn(argv);
+  if (retired !== undefined) {
+    reportUsageError(stderr, { code: RETIRED_CODE, message: retirementMessage(retired) });
+    return EXIT_CODES.usage;
+  }
+
   const result = parseCommandLine(argv);
   if (!result.ok) {
     reportUsageError(stderr, result.error);
@@ -102,30 +98,11 @@ export async function runCli(argv: readonly string[], deps: CliDependencies): Pr
     return EXIT_CODES.ok;
   }
 
-  // Value-format checks belong here, not inside `parseCommandLine`: Design §4.2
-  // requires them at parse time, before preflight and before anything is
-  // written, and doing them after the parser keeps the parser free of any
-  // knowledge about roles and providers. Only the syntax is judged now; the
-  // existence of a provider/model pair needs a daemon and is checked later
-  // with `E_PROVIDER_UNAVAILABLE`.
-  const roles = parseRoleSpecs(parsed.flags.role);
-  if (!roles.ok) {
-    reportUsageError(stderr, roles.error);
-    return EXIT_CODES.usage;
-  }
-  const skillsAgents = parseSkillsAgents(parsed.flags.skillsAgents);
-  if (!skillsAgents.ok) {
-    reportUsageError(stderr, skillsAgents.error);
-    return EXIT_CODES.usage;
-  }
-
   const prompter = (deps.createPrompter ?? ((info: TtyInfo) => createPrompter(info)))(tty);
   const context: CommandContext = {
     command: parsed.command,
     explicitCommand: parsed.explicitCommand,
     flags: parsed.flags,
-    roleSpecs: roles.specs,
-    skillsAgents: skillsAgents.agents,
     homes: homeFlagOverrides(parsed.flags),
     tty,
     prompter,
@@ -144,8 +121,8 @@ export async function runCli(argv: readonly string[], deps: CliDependencies): Pr
 
 /**
  * Write a misuse message the same way for every cause of exit code 2. A misuse
- * that carries a registry code prints it, so `E_BAD_ROLE_SPEC` is visible to a
- * reader and greppable in a transcript.
+ * that carries a registry code prints it, so `E_COMMAND_RETIRED` is visible to
+ * a reader and greppable in a transcript.
  */
 export function reportUsageError(stderr: Writer, error: UsageError): void {
   const prefix = error.code === undefined ? "error:" : `error: ${error.code}:`;
@@ -166,21 +143,24 @@ export function renderHelp(topic?: CommandName): string {
 
   if (topic === undefined) {
     lines.push("Usage:");
-    lines.push("  npx paseo-bm [command] [options]");
+    lines.push("  npx paseo-bm [options]");
     lines.push("");
-    lines.push("Running paseo-bm with no command starts the install wizard on a terminal,");
-    lines.push("and prints a preview without writing anything when there is no terminal.");
+    lines.push("paseo-bm 0.4.0 does one thing: it moves an install made by an earlier");
+    lines.push("`npx paseo-bm` to the plugin on npm, keeping your roles, settings and");
+    lines.push("history. It is the last version of this command.");
     lines.push("");
-    lines.push("Commands:");
-    for (const command of COMMAND_SPECS) {
-      lines.push(`  ${command.name.padEnd(COMMAND_COLUMN)}${command.summary}`);
-    }
+    lines.push("Everything else paseo-bm used to do is in the plugin itself:");
+    lines.push("  Install      from paseo.cafe, or `paseo plugin add npm:paseo-bm-plugin`");
+    lines.push("  Set up       Beads Manager → Setup");
+    lines.push("  Health       Beads Manager → Setup, or `paseo plugin logs paseo-bm`");
+    lines.push("  Remove       Setup → \"Remove paseo-bm's settings\", then");
+    lines.push("               `paseo plugin remove paseo-bm`");
     lines.push("");
-    lines.push("install and uninstall only preview their work; pass --apply to write.");
+    lines.push("Without --apply it only previews; on a terminal it asks first.");
     lines.push("");
     lines.push("Options:");
     for (const spec of FLAG_SPECS) {
-      lines.push(...renderFlag(spec, true));
+      if (RETIRED_FLAGS[spec.flag] === undefined) lines.push(...renderFlag(spec, true));
     }
   } else {
     lines.push("Usage:");
@@ -193,7 +173,7 @@ export function renderHelp(topic?: CommandName): string {
     }
     lines.push("Options:");
     for (const spec of FLAG_SPECS) {
-      if (spec.commands.includes(topic)) {
+      if (spec.commands.includes(topic) && RETIRED_FLAGS[spec.flag] === undefined) {
         lines.push(...renderFlag(spec, false));
       }
     }
@@ -202,18 +182,18 @@ export function renderHelp(topic?: CommandName): string {
   lines.push(`  ${"-h, --help".padEnd(FLAG_COLUMN)}Show this message`);
   lines.push(`  ${"-v, --version".padEnd(FLAG_COLUMN)}Print the version and exit`);
   lines.push("");
-  lines.push("--yes only skips the apply confirmation. It never grants consent to enable");
-  lines.push("plugins, to open Paseo tool access for agents, or to run the skills CLI.");
+  lines.push("--yes only skips the apply confirmation. Nothing here grants any consent:");
+  lines.push("the switches paseo-bm used to ask about are buttons on Setup now.");
   lines.push("");
   lines.push("Exit codes:");
   for (const spec of EXIT_CODE_SPECS) {
+    if (spec.code === EXIT_CODES.doctorDrift || spec.code === EXIT_CODES.consentMissing) continue;
     lines.push(`  ${String(spec.code).padEnd(4)}${spec.meaning}`);
   }
   lines.push("");
   return lines.join("\n");
 }
 
-const COMMAND_COLUMN = 12;
 const FLAG_COLUMN = 34;
 
 function renderFlag(spec: FlagSpec, showCommands: boolean): string[] {

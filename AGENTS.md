@@ -39,14 +39,19 @@ same `release.yml` run:
 
 | Package | What it is | Root of its tarball |
 |---|---|---|
-| `paseo-bm` | the installer CLI you run with `npx` | `dist/`, `plugin/`, no manifest |
-| `paseo-bm-plugin` | the payload in `plugin/` | **a loadable plugin**: `paseo-plugin.json` + `index.client.tsx` + `index.server.ts` |
+| `paseo-bm` | the migration command you run with `npx`, once | `dist/` only — no `plugin/`, no manifest |
+| `paseo-bm-plugin` | the product: the payload in `plugin/` | **a loadable plugin**: `paseo-plugin.json` + `index.client.tsx` + `index.server.ts` |
 
 This exists because [paseo.cafe](https://paseo.cafe) lists paseo-bm, and its security scan
-demands a Paseo 0.8 runtime entry at the plugin root — reading the npm tarball root whatever the
+demands a Paseo runtime entry at the plugin root — reading the npm tarball root whatever the
 entry's `path` says. An installer tarball can never satisfy that. See
 [ADR-009](docs/adr/ADR-009-payload-as-npm-package.md) and
 [the listing record](docs/operations/paseo-bm-cafe-listing-20260923.md).
+
+**From 0.4.0 the plugin is the whole product** ([ADR-012](docs/adr/ADR-012-plugin-is-the-product.md)):
+`paseo-bm` carries no copy of the payload, does one thing — move a 0.3.x directory install to
+`npm:paseo-bm-plugin` — and 0.4.0 is its last release. Two copies of the payload on one machine is
+exactly what its only job exists to end, so nothing may put `plugin/` back into that tarball.
 
 What breaks the listing, so do not do it:
 

@@ -11,6 +11,7 @@ import { accessSync, constants, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { DashboardError } from "../shared/contracts";
+import { redactText } from "./collector";
 
 export type ToolId = "br" | "bv" | "bd";
 
@@ -61,7 +62,7 @@ export interface ToolDeps {
   env?: NodeJS.ProcessEnv;
   homedir?: () => string;
   isExecutable?: (path: string) => boolean;
-  run?: (file: string, args: string[], timeoutMs: number) => Promise<{ code: number; output: string }>;
+  run?: (file: string, args: string[], timeoutMs: number) => Promise<{ code: number; output: string; timedOut?: boolean }>;
 }
 
 function isExecutable(path: string): boolean {
@@ -74,11 +75,23 @@ function isExecutable(path: string): boolean {
   }
 }
 
-function run(file: string, args: string[], timeoutMs: number): Promise<{ code: number; output: string }> {
+/**
+ * Runs a command and never rejects.
+ *
+ * `timedOut` is separate from the exit code because a command Node killed at
+ * the timeout looks exactly like one that failed: `execFile` sets `killed` and
+ * reports no code of its own. The two deserve different words on screen, so
+ * the difference is kept rather than flattened.
+ */
+export function run(
+  file: string,
+  args: string[],
+  timeoutMs: number,
+): Promise<{ code: number; output: string; timedOut: boolean }> {
   return new Promise((resolve) => {
     execFile(file, args, { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
       const code = error === null ? 0 : typeof (error as { code?: unknown }).code === "number" ? (error as { code: number }).code : 1;
-      resolve({ code, output: `${stdout}${stderr}` });
+      resolve({ code, output: `${stdout}${stderr}`, timedOut: (error as { killed?: unknown } | null)?.killed === true });
     });
   });
 }
@@ -154,7 +167,19 @@ export async function installTool(id: "br" | "bv", deps: ToolDeps = {}): Promise
   const env = deps.env ?? process.env;
   // A login shell, so the installer sees the user's usual PATH (brew, curl).
   const result = await exec(env.SHELL?.endsWith("zsh") ? "/bin/zsh" : "/bin/bash", ["-lc", command], INSTALL_TIMEOUT_MS);
-  const tail = result.output.split("\n").filter((line) => line.trim() !== "").slice(-40);
+  // Redacted before anything of it reaches a screen, and a run Node killed at
+  // the deadline is called a timeout rather than flattened into "exited with 1"
+  // — the same two rules `installSkills` follows.
+  const tail = redactText(result.output, env)
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .slice(-40);
+  if (result.timedOut === true) {
+    throw new DashboardError(
+      "E_TOOL_INSTALL_FAILED",
+      `\`${command}\` did not finish within ${INSTALL_TIMEOUT_MS / 1000} seconds: ${tail.slice(-3).join(" | ")}`,
+    );
+  }
   if (result.code !== 0) {
     throw new DashboardError("E_TOOL_INSTALL_FAILED", `\`${command}\` exited with ${result.code}: ${tail.slice(-3).join(" | ")}`);
   }

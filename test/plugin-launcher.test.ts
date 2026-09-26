@@ -117,7 +117,16 @@ function fakePaseo(initial: ManagerAgentSnapshot[] = []) {
     config: {
       async get() {
         return {
-          config: { agentProfiles: [{ id: "bm-manager", provider: "bm-manager", model: "m" }] },
+          config: {
+            // A machine that is already set up, so `ensureRoles` (0.4.0) finds
+            // nothing missing and this test is about the launcher alone.
+            providers: { "bm-manager": {}, "bm-worker": {}, "bm-reviewer": {} },
+            agentProfiles: [
+              { id: "bm-manager", provider: "bm-manager", model: "m" },
+              { id: "bm-worker", provider: "bm-worker", model: "m" },
+              { id: "bm-reviewer", provider: "bm-reviewer", model: "m" },
+            ],
+          },
         };
       },
     },
@@ -407,7 +416,9 @@ describe("pending and error states", () => {
 
   it("shows the server's error code and opens nothing when manager.ensure fails", async () => {
     const sdk = fakePaseo();
-    sdk.paseo.config.get = async () => ({ config: { agentProfiles: [] } });
+    // No roles at all and no provider Paseo can offer: `ensureRoles` fails, so
+    // the launcher shows the coded error instead of a Manager.
+    sdk.paseo.config.get = async () => ({ config: { providers: {}, agentProfiles: [] } });
     const ensure = wiredEnsure(sdk.paseo);
     const openAgent = vi.fn();
     const launcher = createManagerLauncher();
@@ -423,7 +434,14 @@ describe("pending and error states", () => {
 
     // Pressing again after an error is allowed.
     sdk.paseo.config.get = async () => ({
-      config: { agentProfiles: [{ id: "bm-manager", provider: "bm-manager" }] },
+      config: {
+        providers: { "bm-manager": {}, "bm-worker": {}, "bm-reviewer": {} },
+        agentProfiles: [
+          { id: "bm-manager", provider: "bm-manager" },
+          { id: "bm-worker", provider: "bm-worker" },
+          { id: "bm-reviewer", provider: "bm-reviewer" },
+        ],
+      },
     });
     expect(await launcher.launch(WS, { ensure, openAgent })).toBe("opened");
   });
@@ -627,5 +645,36 @@ describe("launcher: a Manager without Paseo tools (delta 20260921 §4.2.4)", () 
     expect(notices.map((notice) => notice.text)).toContain(text);
     const before = describeLauncherState({ status: "opened", workspaceId: "ws", agentId: "m", created: true, otherManagerIds: [], modeNotice: null });
     expect(before.map((notice) => notice.text)).not.toContain(text);
+  });
+});
+
+describe("launcher: what the machine still needs (0.4.0, design §7.3)", () => {
+  it("shows setupNotice as a warning, after the mode and tools notices", async () => {
+    const { describeLauncherState } = await import("../plugin/client/launch-manager");
+    const modeNotice = "This Manager stays in the mode you chose.";
+    const toolsNotice = "This Manager has no Paseo tools.";
+    const setupNotice = "paseo-bm created its roles with defaults (codex · gpt-5.6-sol). Change them in Setup → Agents.";
+
+    const notices = describeLauncherState({
+      status: "opened",
+      workspaceId: "ws",
+      agentId: "m",
+      created: true,
+      otherManagerIds: [],
+      modeNotice,
+      toolsNotice,
+      setupNotice,
+    });
+
+    expect(notices.map((notice) => notice.text).slice(-3)).toEqual([modeNotice, toolsNotice, setupNotice]);
+    expect(notices.at(-1)?.tone).toBe("warning");
+  });
+
+  it("shows nothing for a state built before the field existed", async () => {
+    const { describeLauncherState } = await import("../plugin/client/launch-manager");
+
+    const before = describeLauncherState({ status: "opened", workspaceId: "ws", agentId: "m", created: true, otherManagerIds: [], modeNotice: null });
+
+    expect(before).toHaveLength(1);
   });
 });

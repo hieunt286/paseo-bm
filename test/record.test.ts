@@ -4,24 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FsOps } from "../src/fsops.js";
 import { createFsOps } from "../src/fsops.js";
-import { PathGuardError } from "../src/paths-guard.js";
 import type { InstallRecord } from "../src/record.js";
 import {
   RECORD_SCHEMA_VERSION,
   ROLE_NAMES,
   RecordError,
-  createRecord,
-  isInstallRecord,
   isRecordError,
   parseRecord,
   readRecord,
   recordPath,
-  resolveRecordedPath,
   roleId,
   serializeRecord,
-  touchRecord,
   validateRecord,
-  withCreatedConfigContainers,
   writeRecord,
 } from "../src/record.js";
 
@@ -297,8 +291,10 @@ describe("the record carries no secret", () => {
 });
 
 describe("a schema newer than this build", () => {
-  it("refuses schemaVersion 2 with the upgrade diagnostic", async () => {
-    const future = { ...fullRecord(), schemaVersion: 2, newField: "who knows" };
+  // 2 is the version the migration stamps (design §4.5), so this build reads
+  // it. 3 is the first one it cannot.
+  it("refuses schemaVersion 3 with the upgrade diagnostic", async () => {
+    const future = { ...fullRecord(), schemaVersion: 3, newField: "who knows" };
     mkdirSync(root, { recursive: true, mode: 0o700 });
     writeFileSync(recordPath(fsops.root), `${JSON.stringify(future, null, 2)}\n`, { mode: 0o600 });
 
@@ -311,10 +307,10 @@ describe("a schema newer than this build", () => {
     const recordError = error as RecordError;
     expect(recordError.reason).toBe("schema-too-new");
     expect(recordError.code).toBe("E_RECORD_SCHEMA_TOO_NEW");
-    expect(recordError.foundSchemaVersion).toBe(2);
+    expect(recordError.foundSchemaVersion).toBe(3);
     expect(recordError.field).toBe("schemaVersion");
     expect(recordError.path).toBe(recordPath(fsops.root));
-    expect(recordError.message).toContain("schemaVersion 2");
+    expect(recordError.message).toContain("schemaVersion 3");
     expect(recordError.message).toContain("npx paseo-bm@latest");
     expect(recordError.remediation).toContain("Upgrade paseo-bm");
   });
@@ -452,12 +448,6 @@ describe("a damaged record", () => {
   ])("refuses %s", (_label, override, expected) => {
     expect(() => validateRecord({ ...fullRecord(), ...(override as object) })).toThrow(expected);
   });
-
-  it("answers isInstallRecord without raising", () => {
-    expect(isInstallRecord(fullRecord())).toBe(true);
-    expect(isInstallRecord({ schemaVersion: 1 })).toBe(false);
-    expect(isInstallRecord("install.json")).toBe(false);
-  });
 });
 
 describe("tolerated shapes", () => {
@@ -480,48 +470,6 @@ describe("tolerated shapes", () => {
     expect(parsed.paseo.pluginId).toBeNull();
     expect(parsed.roles[0]?.modeId).toBeNull();
     expect(parsed.skills.assistOutcome).toBeNull();
-  });
-});
-
-describe("createRecord and touchRecord", () => {
-  it("starts out owning nothing and never claiming it set the MCP switch", () => {
-    const record = createRecord({
-      version: "0.1.0",
-      installHome: root,
-      paseo: { home: "/home/user/.paseo" },
-      at: "2026-09-15T12:00:00.000Z",
-    });
-
-    expect(record.schemaVersion).toBe(RECORD_SCHEMA_VERSION);
-    expect(record.installedAt).toBe("2026-09-15T12:00:00.000Z");
-    expect(record.updatedAt).toBe(record.installedAt);
-    expect(record.files).toEqual([]);
-    expect(record.versions).toEqual([]);
-    expect(record.backups).toEqual([]);
-    expect(record.roles).toEqual([]);
-    expect(record.paseo.pluginsEnabledSetByUs).toBe(false);
-    expect(record.paseo.mcpInject).toEqual({ setByUs: false, previous: { present: false, value: null } });
-    expect(record.skills).toEqual({
-      agents: [],
-      lastStatus: [],
-      assistDeclinedAt: null,
-      lastCommand: null,
-      assistOutcome: null,
-    });
-  });
-
-  it("survives a round trip through the file", async () => {
-    const record = createRecord({ version: "0.1.0", installHome: root, paseo: { home: "/home/user/.paseo" } });
-    await writeRecord(fsops, record);
-    expect(await readRecord(fsops)).toEqual(record);
-  });
-
-  it("moves updatedAt only", () => {
-    const record = fullRecord();
-    const touched = touchRecord(record, "2026-09-16T00:00:00.000Z");
-    expect(touched.updatedAt).toBe("2026-09-16T00:00:00.000Z");
-    expect(touched.installedAt).toBe(record.installedAt);
-    expect(touched.files).toEqual(record.files);
   });
 });
 
@@ -593,31 +541,5 @@ describe("pluginsEnabledPrevious and createdConfigContainers (bm-tm2)", () => {
     const value = JSON.parse(serializeRecord(withNewFields())) as { paseo: Record<string, unknown> };
     value.paseo["pluginsEnabledPrevious"] = { present: false, value: false };
     expect(() => validateRecord(value)).toThrow(/paseo\.pluginsEnabledPrevious says the key was absent/);
-  });
-
-  it("merges created containers without ever dropping one, in canonical order", () => {
-    const base = fullRecord();
-    const first = withCreatedConfigContainers(base, ["daemon.mcp", "daemon"], "2026-09-16T00:00:00.000Z");
-    expect(first.paseo.createdConfigContainers).toEqual(["daemon", "daemon.mcp"]);
-    expect(first.updatedAt).toBe("2026-09-16T00:00:00.000Z");
-
-    const second = withCreatedConfigContainers(first, ["agents"], "2026-09-17T00:00:00.000Z");
-    expect(second.paseo.createdConfigContainers).toEqual(["agents", "daemon", "daemon.mcp"]);
-
-    // Nothing new (including an empty list): the very same object comes back.
-    expect(withCreatedConfigContainers(second, ["daemon"])).toBe(second);
-    expect(withCreatedConfigContainers(base, [])).toBe(base);
-  });
-});
-
-describe("resolveRecordedPath", () => {
-  it("rebuilds an absolute path under the install home", () => {
-    expect(resolveRecordedPath("/home/user/.paseo-bm", "plugin/0.1.0/roles/worker.md")).toBe(
-      "/home/user/.paseo-bm/plugin/0.1.0/roles/worker.md",
-    );
-  });
-
-  it("refuses to leave the install home", () => {
-    expect(() => resolveRecordedPath("/home/user/.paseo-bm", "../.ssh/id_rsa")).toThrow(PathGuardError);
   });
 });

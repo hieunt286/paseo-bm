@@ -6,6 +6,7 @@
 | Date | 2026-09-21 |
 | Owner | hieu.nt10 |
 | Sửa đổi | [ADR-004](ADR-004-paseo-config-mutation.md) quyết định 1; [ADR-006](ADR-006-role-registration.md) quyết định 1 và 5 |
+| Sửa đổi bởi | [ADR-012](ADR-012-plugin-is-the-product.md) (2026-09-25), quyết định 2: plugin được **tạo** alias và profile của ba vai trò chính khi chúng thiếu, và xoá chúng khi người dùng gỡ cấu hình; mục đã có vẫn không bị sửa khi tạo (quyết định 5); phạm vi ghi vẫn chỉ id `bm-`, cộng `mcp.injectIntoAgents` khi người dùng bấm |
 | Liên quan | [PRD delta 20260921](../archive/product/paseo-bm-prd-delta-20260921-worker-fallback-and-role-settings.md) REQ-064, REQ-065, REQ-066 · [Design delta 20260921](../archive/design/paseo-bm-delta-20260921-worker-fallback-and-role-settings.md) §4.3, §4.4 · [Đề xuất 20260921](../archive/design/paseo-bm-proposal-20260921-worker-fallback-and-role-settings.md) §4.2, §4.7 |
 
 ## Context

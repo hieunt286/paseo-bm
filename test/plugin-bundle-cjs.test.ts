@@ -253,6 +253,10 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
       "roles.save-fallback",
       "roles.save-settings",
       "roles.settings",
+      "setup.cleanup",
+      "setup.ensure-roles",
+      "setup.grant-agent-tools",
+      "setup.install-skills",
       "setup.install-tool",
       "setup.status",
       "traces.delete",
@@ -277,7 +281,7 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
 
     const { paseo, created } = fakePaseo();
     const ensured = await handlers.get("manager.ensure")!({ workspaceId: "ws-1" }, { paseo });
-    expect(ensured).toEqual({ agentId: "created-1", created: true, otherManagerIds: [], modeNotice: null, toolsNotice: null });
+    expect(ensured).toEqual({ agentId: "created-1", created: true, otherManagerIds: [], modeNotice: null, toolsNotice: null, setupNotice: null });
     expect(created).toHaveLength(1);
     // The base, then the Runtime facts: `bm-worker` extends codex here, so the
     // plugin states the Worker's skills (design delta 20260924-instruction-quality

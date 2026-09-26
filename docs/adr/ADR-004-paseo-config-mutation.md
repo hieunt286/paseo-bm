@@ -6,7 +6,7 @@
 | Date | 2026-09-14 |
 | Owner | hieu.nt10 |
 | Liên quan | [PRD REQ-005, REQ-006, REQ-010d](../product/paseo-bm-prd.md#6-functional-requirements), [ADR-001](ADR-001-plugin-distribution.md), [ADR-002](ADR-002-install-ownership-model.md), [Technical Design](../design/paseo-bm.md) |
-| Sửa đổi bởi | [ADR-008](ADR-008-role-settings-written-by-plugin.md), quyết định 1 (Accepted 2026-09-22) |
+| Sửa đổi bởi | [ADR-008](ADR-008-role-settings-written-by-plugin.md), quyết định 1 (Accepted 2026-09-22) · [ADR-012](ADR-012-plugin-is-the-product.md) (2026-09-25): plugin sửa config qua `config.patch`, không qua file. Quyết định 4, 6, 7, 8 (bật `pluginsEnabled`, ghi ai bật, sửa file tối thiểu, phát hiện ghi song song) hết hiệu lực từ 0.4.0; quyết định 2 đổi mức tối thiểu thành Paseo 0.9.0; quyết định 1, 3, 5 chỉ còn áp cho CLI chuyển đổi 0.4.0 |
 
 ## Context
 

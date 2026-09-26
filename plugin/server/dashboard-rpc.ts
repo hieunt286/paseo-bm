@@ -11,12 +11,11 @@
  * matched by id. A workspace that is not in the list is reported as an empty
  * bead store rather than an error — it may simply have been archived.
  */
-import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { listAllAgents, roleOfAgent } from "./agent-role";
 import { beadStats, lookupBeads } from "./beads-store";
-import { resolveInstallHome } from "./install-home";
+import { resolveDataHome } from "./data-home";
 import { priceUsage } from "./cost";
 import { listedPricesFor } from "./model-costs";
 import { inferWorkflowSteps } from "./workflow-steps";
@@ -26,8 +25,7 @@ import { beadWorkOf } from "./bead-work";
 import { readAnswerMarks, writeAnswerMark } from "./answer-marks";
 import { stopAllInWorkspace, type StopPaseo } from "./stop-propagation";
 import { readIncidents } from "./fallback-state";
-import { installHomeOf } from "./role-extras";
-import { TIMED_OUT, withTimeout } from "./role-mode";
+import { dataHomeOf } from "./role-extras";
 import {
   detail,
   paginate,
@@ -108,16 +106,12 @@ export async function requireLocation(
   return (await requireInstallHome(paseo, deps)).location;
 }
 
-/** `requireLocation`, with the install home it was found in. */
+/** `requireLocation`, with the data folder it was found in. */
 async function requireInstallHome(
   paseo: DashboardPaseo,
   deps: { homedir?: () => string },
 ): Promise<{ home: string; location: TraceStoreLocation }> {
-  const resolution = await resolveInstallHome({
-    paseo,
-    fs: { readFileSync: (path, encoding) => readFileSync(path, encoding) },
-    homedir: deps.homedir ?? homedir,
-  });
+  const resolution = resolveDataHome({ homedir: deps.homedir ?? homedir });
   if (resolution.home === null) {
     throw new DashboardError(
       "E_TRACE_STORE_UNWRITABLE",
@@ -180,13 +174,12 @@ export function reviewerReplacementsIn(home: string | null): Set<string> {
 }
 
 /**
- * `reviewerReplacementsIn` the install home of `paseo`, looked up within the
- * lookup budget unless `deps.home` names it (tests). Never throws.
+ * `reviewerReplacementsIn` the plugin's own data folder, unless `deps.home`
+ * names it (tests). Never throws.
  */
-export async function reviewerReplacementsFor(paseo: unknown, deps: { home?: string | null } = {}): Promise<Set<string>> {
+export function reviewerReplacementsFor(deps: { home?: string | null } = {}): Set<string> {
   try {
-    const found = deps.home !== undefined ? deps.home : await withTimeout(installHomeOf(paseo));
-    return reviewerReplacementsIn(found === TIMED_OUT ? null : found);
+    return reviewerReplacementsIn(deps.home !== undefined ? deps.home : dataHomeOf());
   } catch {
     return new Set();
   }

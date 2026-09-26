@@ -26,6 +26,10 @@ import {
   rolesSaveFallbackRpc,
   rolesSaveSettingsRpc,
   rolesSettingsRpc,
+  setupCleanupRpc,
+  setupEnsureRolesRpc,
+  setupGrantAgentToolsRpc,
+  setupInstallSkillsRpc,
   setupInstallToolRpc,
   setupStatusRpc,
   type BmRole,
@@ -40,7 +44,20 @@ import { dashboardStyles, toneColor, type Badge } from "./dashboard-model";
 import { errorMessageOf } from "./launch-manager";
 import { MarkdownView } from "./markdown-view";
 import {
+  AGENT_TOOLS_DIALOG,
+  CLEANUP_BUTTON_ACCESSIBILITY_LABEL,
+  CLEANUP_BUTTON_LABEL,
+  CLEANUP_DATA_DIALOG,
+  CLEANUP_WARNING_DIALOG,
   DEFAULT_SETUP_TAB,
+  PLUGIN_DIAGNOSTICS_LINE,
+  SKILLS_COMMAND_LABEL,
+  agentToolsBlock,
+  anySkillMissing,
+  dataHomeLine,
+  rolesCreatedLine,
+  signInRows,
+  skillsRunLine,
   FALLBACK_POLICY_CHOICES,
   ROLES_APPLY_NOTICE,
   SETUP_ROLES,
@@ -48,6 +65,11 @@ import {
   addFallback,
   applySavedRole,
   canAddFallback,
+  cleanupDataQuestion,
+  cleanupInput,
+  cleanupReport,
+  cleanupWarning,
+  ensureRolesLine,
   entryAsSetting,
   entryOfDraft,
   fallbackBlocks,
@@ -56,8 +78,11 @@ import {
   fallbackEntryText,
   fallbackPolicyWarning,
   fallbackPriceText,
+  migrationBanner,
   moveFallback,
   removeFallback,
+  setupChecklist,
+  skillsDialog,
   replaceFallback,
   saveFallbackInput,
   extraCounter,
@@ -79,6 +104,9 @@ import {
   type FallbackDraft,
   type RoleChoice,
   type RoleDraft,
+  type ChecklistRow,
+  type CleanupReport,
+  type SetupDialog,
   type SetupRole,
   type SetupTab,
 } from "./setup-model";
@@ -825,11 +853,391 @@ function ToolCard({ tool, styles, theme, onInstalled }: {
   );
 }
 
+/**
+ * A confirmation shown in place, with Cancel as the default.
+ *
+ * The confirm button is deliberately not the first control and never
+ * pre-focused: both dialogs that use this grant something machine-wide, so an
+ * accidental Return must do nothing (design §7.13.3, §7.13.4).
+ */
+function ConfirmBlock({ dialog, busy, busyLabel, onConfirm, onCancel, styles, theme }: {
+  dialog: SetupDialog;
+  busy: boolean;
+  busyLabel: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+  styles: Styles;
+  theme: Theme;
+}) {
+  return (
+    <View style={{ gap: 6 }}>
+      <Text style={[styles.sectionTitle, { color: toneColor(theme, "warning") }]}>{dialog.title}</Text>
+      <Text style={styles.body} selectable>
+        {dialog.body}
+      </Text>
+      <View style={styles.chipRow}>
+        {busy ? null : (
+          <Pressable accessibilityRole="button" onPress={onCancel} style={styles.secondaryButton}>
+            <Text style={styles.secondaryButtonText}>{dialog.cancelLabel}</Text>
+          </Pressable>
+        )}
+        <Pressable accessibilityRole="button" disabled={busy} onPress={onConfirm} style={styles.button}>
+          <Text style={styles.buttonText}>{busy ? busyLabel : dialog.confirmLabel}</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+/**
+ * "Set up paseo-bm": what this machine still needs, and the buttons that do it.
+ *
+ * Above the tab row on purpose — a tab could hide it — and not rendered at all
+ * when `setupChecklist` is empty, which is where almost every user is.
+ */
+function SetupChecklistCard({ status, rolesError, onDone, onOpenTab, styles, theme }: {
+  status: SetupStatus;
+  rolesError: string | null;
+  onDone: () => void;
+  onOpenTab: (tab: SetupTab) => void;
+  styles: Styles;
+  theme: Theme;
+}) {
+  const ensure = useRpc(setupEnsureRolesRpc);
+  const grant = useRpc(setupGrantAgentToolsRpc);
+  const installSkills = useRpc(setupInstallSkillsRpc);
+  const [asking, setAsking] = useState<"agent-tools" | "install-skills" | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<{ key: string; text: string } | null>(null);
+  const [tail, setTail] = useState<string[]>([]);
+
+  const rows = setupChecklist(status, rolesError);
+  if (rows.length === 0) return null;
+
+  const call = async (key: string, work: () => Promise<unknown>) => {
+    setBusy(true);
+    setFailure(null);
+    try {
+      await work();
+      setAsking(null);
+      onDone();
+    } catch (error) {
+      setFailure({ key, text: errorMessageOf(error) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const press = (row: ChecklistRow) => {
+    switch (row.action.kind) {
+      case "ensure-roles":
+        return void call("roles", () => ensure({}));
+      case "grant-agent-tools":
+        return setAsking("agent-tools");
+      case "install-skills":
+        return setAsking("install-skills");
+      case "open-tab":
+        return onOpenTab(row.action.tab);
+      default:
+        return undefined;
+    }
+  };
+
+  return (
+    <View style={[styles.card, { gap: 10 }]}>
+      <Text style={styles.sectionTitle}>Set up paseo-bm</Text>
+      {rows.map((row) => (
+        <View key={`${row.key}-${row.status}`} style={{ gap: 4 }}>
+          <Text style={[styles.body, { fontWeight: "600" }]}>{row.title}</Text>
+          <Text style={styles.body} selectable>
+            {row.status}
+          </Text>
+          {row.command === null ? null : <CommandLine label="Run it yourself" command={row.command} styles={styles} theme={theme} />}
+          {row.button === null ? null : (
+            <Pressable
+              accessibilityRole="button"
+              disabled={busy}
+              onPress={() => press(row)}
+              style={[styles.button, { alignSelf: "flex-start" }]}
+            >
+              <Text style={styles.buttonText}>{row.button}</Text>
+            </Pressable>
+          )}
+          {failure !== null && failure.key === row.key ? (
+            <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{failure.text}</Text>
+          ) : null}
+        </View>
+      ))}
+      {asking === "agent-tools" ? (
+        <ConfirmBlock
+          dialog={AGENT_TOOLS_DIALOG}
+          busy={busy}
+          busyLabel="Allowing…"
+          onCancel={() => setAsking(null)}
+          onConfirm={() => void call("agent-tools", () => grant({ confirmed: true }))}
+          styles={styles}
+          theme={theme}
+        />
+      ) : null}
+      {asking === "install-skills" ? (
+        <ConfirmBlock
+          dialog={skillsDialog(status.skills.installCommand)}
+          busy={busy}
+          busyLabel="Running… (up to 5 minutes)"
+          onCancel={() => setAsking(null)}
+          onConfirm={() =>
+            void call("skills", async () => {
+              setTail((await installSkills({ confirmed: true })).tail);
+            })
+          }
+          styles={styles}
+          theme={theme}
+        />
+      ) : null}
+      {tail.length === 0 ? null : (
+        <Text style={[styles.mono, { backgroundColor: theme.colors.surface0, padding: 6, borderRadius: 6 }]} selectable>
+          {tail.join("\n")}
+        </Text>
+      )}
+    </View>
+  );
+}
+
+/** The Agents tab's view of Paseo's machine-wide switch, with the same dialog. */
+function AgentToolsBlockView({ status, onDone, styles, theme }: {
+  status: SetupStatus;
+  onDone: () => void;
+  styles: Styles;
+  theme: Theme;
+}) {
+  const grant = useRpc(setupGrantAgentToolsRpc);
+  const [asking, setAsking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  const block = agentToolsBlock(status);
+  if (block === null) return null;
+
+  return (
+    <View style={[styles.card, { gap: 6 }]}>
+      <Text style={styles.sectionTitle}>Paseo agent tools</Text>
+      <Text style={[styles.body, { color: toneColor(theme, block.tone) }]}>{block.text}</Text>
+      {asking ? (
+        <ConfirmBlock
+          dialog={AGENT_TOOLS_DIALOG}
+          busy={busy}
+          busyLabel="Allowing…"
+          onCancel={() => setAsking(false)}
+          onConfirm={() =>
+            void (async () => {
+              setBusy(true);
+              setFailure(null);
+              try {
+                await grant({ confirmed: true });
+                setAsking(false);
+                onDone();
+              } catch (error) {
+                setFailure(errorMessageOf(error));
+              } finally {
+                setBusy(false);
+              }
+            })()
+          }
+          styles={styles}
+          theme={theme}
+        />
+      ) : block.button === null ? null : (
+        <Pressable accessibilityRole="button" onPress={() => setAsking(true)} style={[styles.button, { alignSelf: "flex-start" }]}>
+          <Text style={styles.buttonText}>{block.button}</Text>
+        </Pressable>
+      )}
+      {failure === null ? null : <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{failure}</Text>}
+    </View>
+  );
+}
+
+/** The Agent skills tab's own Install button, with the same dialog as the card. */
+function SkillsInstallBlock({ command, onDone, styles, theme }: {
+  command: string;
+  onDone: () => void;
+  styles: Styles;
+  theme: Theme;
+}) {
+  const installSkills = useRpc(setupInstallSkillsRpc);
+  const [asking, setAsking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ text: string; tone: "success" | "danger"; tail: string[] } | null>(null);
+
+  return (
+    <View style={{ gap: 6 }}>
+      {asking ? (
+        <ConfirmBlock
+          dialog={skillsDialog(command)}
+          busy={busy}
+          busyLabel="Running… (up to 5 minutes)"
+          onCancel={() => setAsking(false)}
+          onConfirm={() =>
+            void (async () => {
+              setBusy(true);
+              setResult(null);
+              try {
+                const done = await installSkills({ confirmed: true });
+                setResult({ text: `Ran \`${done.command}\`, exit ${done.code}.`, tone: "success", tail: done.tail });
+                setAsking(false);
+                onDone();
+              } catch (error) {
+                setResult({ text: errorMessageOf(error), tone: "danger", tail: [] });
+              } finally {
+                setBusy(false);
+              }
+            })()
+          }
+          styles={styles}
+          theme={theme}
+        />
+      ) : (
+        <Pressable accessibilityRole="button" onPress={() => setAsking(true)} style={[styles.button, { alignSelf: "flex-start" }]}>
+          <Text style={styles.buttonText}>Install skills…</Text>
+        </Pressable>
+      )}
+      {result === null ? null : (
+        <View style={{ gap: 2 }}>
+          <Text style={[styles.body, { color: toneColor(theme, result.tone) }]}>{result.text}</Text>
+          {result.tail.length === 0 ? null : (
+            <Text style={[styles.mono, { backgroundColor: theme.colors.surface0, padding: 6, borderRadius: 6 }]} selectable>
+              {result.tail.join("\n")}
+            </Text>
+          )}
+        </View>
+      )}
+    </View>
+  );
+}
+
+/**
+ * "Remove paseo-bm's settings": two questions, then one RPC.
+ *
+ * Two on purpose. The first takes away the configuration, which one press can
+ * put back; the second offers to delete the user's history, which nothing can.
+ * Each defaults to the safe answer and neither sends anything until it is
+ * pressed (design §7.13.7).
+ */
+function CleanupBlock({ status, onCleaned, styles, theme }: {
+  status: SetupStatus;
+  onCleaned: () => void;
+  styles: Styles;
+  theme: Theme;
+}) {
+  const cleanup = useRpc(setupCleanupRpc);
+  const [step, setStep] = useState<"idle" | "warning" | "data">("idle");
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  const [report, setReport] = useState<CleanupReport | null>(null);
+
+  const run = (deleteData: boolean) =>
+    void (async () => {
+      setBusy(true);
+      setFailure(null);
+      try {
+        setReport(cleanupReport(await cleanup(cleanupInput(deleteData))));
+        setStep("idle");
+        onCleaned();
+      } catch (error) {
+        setFailure(errorMessageOf(error));
+      } finally {
+        setBusy(false);
+      }
+    })();
+
+  if (report !== null) {
+    return (
+      <View style={[styles.card, { gap: 6 }]}>
+        <Text style={styles.sectionTitle}>paseo-bm&apos;s settings were removed</Text>
+        {report.lines.map((line) => (
+          <Text key={line} style={styles.body} selectable>
+            {line}
+          </Text>
+        ))}
+        <CommandLine label="Now remove the plugin" command={report.nextCommand} styles={styles} theme={theme} />
+      </View>
+    );
+  }
+
+  return (
+    <View style={{ gap: 6 }}>
+      {step === "idle" ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={CLEANUP_BUTTON_ACCESSIBILITY_LABEL}
+          onPress={() => setStep("warning")}
+          style={[styles.secondaryButton, { alignSelf: "flex-start", borderColor: toneColor(theme, "danger") }]}
+        >
+          <Text style={[styles.secondaryButtonText, { color: toneColor(theme, "danger") }]}>{CLEANUP_BUTTON_LABEL}</Text>
+        </Pressable>
+      ) : null}
+      {step === "warning" ? (
+        <View style={{ gap: 6 }}>
+          <Text style={[styles.body, { color: toneColor(theme, "danger") }]} selectable>
+            {cleanupWarning(status)}
+          </Text>
+          <View style={styles.chipRow}>
+            <Pressable accessibilityRole="button" onPress={() => setStep("idle")} style={styles.secondaryButton}>
+              <Text style={styles.secondaryButtonText}>{CLEANUP_WARNING_DIALOG.cancelLabel}</Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" onPress={() => setStep("data")} style={styles.button}>
+              <Text style={styles.buttonText}>{CLEANUP_WARNING_DIALOG.confirmLabel}</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
+      {step === "data" ? (
+        <View style={{ gap: 6 }}>
+          <Text style={[styles.body, { color: toneColor(theme, "warning") }]} selectable>
+            {cleanupDataQuestion(status)}
+          </Text>
+          <View style={styles.chipRow}>
+            <Pressable accessibilityRole="button" disabled={busy} onPress={() => run(false)} style={styles.button}>
+              <Text style={styles.buttonText}>{busy ? "Removing…" : CLEANUP_DATA_DIALOG.keepLabel}</Text>
+            </Pressable>
+            {busy ? null : (
+              <Pressable accessibilityRole="button" onPress={() => run(true)} style={styles.secondaryButton}>
+                <Text style={[styles.secondaryButtonText, { color: toneColor(theme, "danger") }]}>
+                  {CLEANUP_DATA_DIALOG.deleteLabel}
+                </Text>
+              </Pressable>
+            )}
+          </View>
+        </View>
+      ) : null}
+      {failure === null ? null : <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{failure}</Text>}
+    </View>
+  );
+}
+
 export function SetupScreen({ theme, layout, onOpenWorkspaces, status: statusStrip }: SetupScreenProps) {
   const styles = useMemo(() => dashboardStyles(theme, layout.compact), [theme, layout.compact]);
   const getStatus = useRpc(setupStatusRpc);
-  const status = useQuery({ queryKey: ["paseo-bm", "setup", "status"], queryFn: () => getStatus({}) });
+  const ensure = useRpc(setupEnsureRolesRpc);
+  // One chain, one spinner: the roles are created (or found) BEFORE the status
+  // is read, so the screen never shows a machine as half set up while it is
+  // being set up. This is the other first-use trigger besides opening the
+  // Manager (design §7.13.2).
+  const status = useQuery({
+    queryKey: ["paseo-bm", "setup", "status"],
+    queryFn: async () => {
+      let ensured: Awaited<ReturnType<typeof ensure>> | null = null;
+      let rolesError: unknown = null;
+      try {
+        ensured = await ensure({});
+      } catch (error) {
+        rolesError = error;
+      }
+      return { ...(await getStatus({})), ensured, rolesError };
+    },
+  });
   const data = status.data;
+  const [dismissedRoles, setDismissedRoles] = useState(false);
+  const rolesLine = data === undefined ? null : ensureRolesLine(data.ensured, data.rolesError);
+  const banner = data === undefined ? null : migrationBanner(data);
   // Lives as long as this screen: reopening the surface starts on the first tab,
   // the same way the "Beads" tab's sub-tabs behave (delta 20260925 §3.3).
   const [tab, setTab] = useState<SetupTab>(DEFAULT_SETUP_TAB);
@@ -857,6 +1265,57 @@ export function SetupScreen({ theme, layout, onOpenWorkspaces, status: statusStr
         <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{errorMessageOf(status.error)}</Text>
       ) : null}
       {headline === null ? null : <Text style={[styles.sectionTitle, { color: toneColor(theme, headline.tone) }]}>{headline.text}</Text>}
+
+      {/* This install came from the retired `npx` installer (design §7.13.6). */}
+      {banner === null ? null : (
+        <View style={[styles.card, { gap: 6 }]}>
+          <Text style={[styles.body, { color: toneColor(theme, "warning") }]} selectable>
+            {banner.text}
+          </Text>
+          <CommandLine label="Run it once" command={banner.command} styles={styles} theme={theme} />
+        </View>
+      )}
+
+      {rolesLine === null || (rolesLine.dismissable && dismissedRoles) ? null : (
+        <View style={{ gap: 6 }}>
+          <Text style={[styles.body, { color: toneColor(theme, rolesLine.tone) }]} selectable>
+            {rolesLine.text}
+          </Text>
+          <View style={styles.chipRow}>
+            {rolesLine.button === null ? null : (
+              <Pressable
+                accessibilityRole="button"
+                onPress={() =>
+                  void (async () => {
+                    // "Set up again" is the only call that clears the cleanup mark.
+                    if (rolesLine.button === "Set up again") await ensure({ resume: true });
+                    await status.refetch();
+                  })()
+                }
+                style={[styles.button, { alignSelf: "flex-start" }]}
+              >
+                <Text style={styles.buttonText}>{rolesLine.button}</Text>
+              </Pressable>
+            )}
+            {rolesLine.dismissable ? (
+              <Pressable accessibilityRole="button" onPress={() => setDismissedRoles(true)} style={styles.secondaryButton}>
+                <Text style={styles.secondaryButtonText}>Dismiss</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        </View>
+      )}
+
+      {data === undefined || data.ensured?.skipped === "cleaned-up" ? null : (
+        <SetupChecklistCard
+          status={data}
+          rolesError={data.rolesError === null ? null : errorMessageOf(data.rolesError)}
+          onDone={() => void status.refetch()}
+          onOpenTab={setTab}
+          styles={styles}
+          theme={theme}
+        />
+      )}
       {data === undefined
         ? null
         : paseoToolsWarnings(data).map((warning) => (
@@ -891,6 +1350,12 @@ export function SetupScreen({ theme, layout, onOpenWorkspaces, status: statusStr
               <Text style={styles.secondaryButtonText}>{status.isFetching ? "Testing…" : "Test"}</Text>
             </Pressable>
           </View>
+          {data === undefined || !anySkillMissing(data) ? null : (
+            <SkillsInstallBlock command={data.skills.installCommand} onDone={() => void status.refetch()} styles={styles} theme={theme} />
+          )}
+          {data === undefined || skillsRunLine(data) === null ? null : (
+            <Text style={[styles.body, { fontSize: 11 }]}>{skillsRunLine(data)}</Text>
+          )}
           {data === undefined ? null : (
             <View style={[styles.card, { gap: 6 }]}>
               <Text style={styles.body}>{`Checked ${new Date(data.skills.checkedAt).toLocaleTimeString()} · ${skillDirsText(data.skills.dirs)}`}</Text>
@@ -907,7 +1372,7 @@ export function SetupScreen({ theme, layout, onOpenWorkspaces, status: statusStr
                   )}
                 </View>
               ))}
-              <CommandLine label="Install the required skills for Claude Code and Codex (run it yourself, or use `npx paseo-bm install --apply --install-skills`)" command={data.skills.installCommand} styles={styles} theme={theme} />
+              <CommandLine label={SKILLS_COMMAND_LABEL} command={data.skills.installCommand} styles={styles} theme={theme} />
             </View>
           )}
         </>
@@ -917,7 +1382,32 @@ export function SetupScreen({ theme, layout, onOpenWorkspaces, status: statusStr
           instructions: both are about the agents, so they share one tab. */}
       {tab !== "agents" ? null : (
         <>
+          {data === undefined || rolesCreatedLine(data) === null ? null : (
+            <Text style={[styles.body, { fontSize: 11 }]}>{rolesCreatedLine(data)}</Text>
+          )}
           <RolesSection styles={styles} theme={theme} />
+          {data === undefined ? null : (
+            <AgentToolsBlockView status={data} onDone={() => void status.refetch()} styles={styles} theme={theme} />
+          )}
+          {data === undefined || signInRows(data).length === 0 ? null : (
+            <View style={[styles.card, { gap: 6 }]}>
+              <Text style={styles.sectionTitle}>Sign-in</Text>
+              <Text style={[styles.body, { fontSize: 11 }]}>
+                paseo-bm never runs a login command and never sees your credentials.
+              </Text>
+              {signInRows(data).map((row) => (
+                <View key={row.provider} style={{ gap: 2 }}>
+                  <Text style={styles.body}>{`${row.provider} · ${row.usedBy}`}</Text>
+                  <Text style={[styles.body, { color: toneColor(theme, row.tone) }]} selectable>
+                    {row.text}
+                  </Text>
+                  {row.command === null ? null : (
+                    <CommandLine label="Run it yourself" command={row.command} styles={styles} theme={theme} />
+                  )}
+                </View>
+              ))}
+            </View>
+          )}
           <Text style={styles.sectionTitle}>Additional instructions</Text>
           <Text style={styles.body}>
             Added after each role&apos;s built-in instructions, for agents created from now on. Running agents keep what they started with.
@@ -929,6 +1419,19 @@ export function SetupScreen({ theme, layout, onOpenWorkspaces, status: statusStr
       )}
 
       <Text style={[styles.body, { fontSize: 11 }]}>{`paseo-bm ${PLUGIN_VERSION}`}</Text>
+      {/* Outside the tabs: where this install keeps its data, and what to look
+          at when the plugin does not load at all (design §7.13.8). */}
+      {data === undefined || dataHomeLine(data) === null ? null : (
+        <Text style={[styles.body, { fontSize: 11, color: toneColor(theme, dataHomeLine(data)!.tone) }]} selectable>
+          {dataHomeLine(data)!.text}
+        </Text>
+      )}
+      <Text style={[styles.body, { fontSize: 11 }]} selectable>
+        {PLUGIN_DIAGNOSTICS_LINE}
+      </Text>
+      {data === undefined ? null : (
+        <CleanupBlock status={data} onCleaned={() => void status.refetch()} styles={styles} theme={theme} />
+      )}
     </ScrollView>
   );
 }

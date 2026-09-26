@@ -33,14 +33,13 @@
  *   gives tokens and (sometimes) cost, which is where a record's `usage` comes
  *   from.
  */
-import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename } from "node:path";
 import type { PluginLifecycleEvents, PluginServerContext } from "@getpaseo/plugin/server";
 import { parseReports, parseReviews, requestIdFromText } from "./bm-report";
 import { isPluginNotice } from "./notices";
 import { stripNewRequestMarker } from "../shared/new-request";
-import { resolveInstallHome } from "./install-home";
+import { resolveDataHome } from "./data-home";
 import { roleOfProvider } from "./agent-role";
 import { providerId } from "./provider-id";
 import {
@@ -568,18 +567,20 @@ export function createLocationResolver(
   };
 }
 
-/** Default resolver: WP-202's install-home lookup, with real `fs` and `os`. */
-export async function resolveLocationFromPaseo(paseo: unknown): Promise<TraceStoreLocation | null> {
-  const resolution = await resolveInstallHome({
-    paseo: paseo as Parameters<typeof resolveInstallHome>[0]["paseo"],
-    fs: { readFileSync: (path, encoding) => readFileSync(path, encoding) },
-    homedir,
-  });
+/**
+ * Default resolver: the data folder of design §5.1, with the real `os`.
+ *
+ * It takes no `paseo` any more — resolution is synchronous and handle-free from
+ * 0.4.0 — and stays async and assignable to `LocationResolver`, which is how
+ * every caller passes it.
+ */
+export async function resolveLocationFromPaseo(): Promise<TraceStoreLocation | null> {
+  const resolution = resolveDataHome({ homedir });
   return resolution.home === null ? null : { tracesDir: resolution.tracesDir };
 }
 
 export interface RegisterCollectorOptions {
-  /** Overridden in tests; production uses the install-home resolver. */
+  /** Overridden in tests; production uses the data-folder resolver. */
   resolveLocation?: LocationResolver;
   now?: () => Date;
   env?: NodeJS.ProcessEnv;
