@@ -1,6 +1,6 @@
 {
   "name": "paseo-bm-plugin",
-  "version": "0.4.0-alpha.0",
+  "version": "0.4.0",
   "description": "Beads Management for Paseo: a Beads Manager agent that hands each request to a Beads Worker, with Metric, Beads and Setup screens. Install from paseo.cafe or with \"paseo plugin add npm:paseo-bm-plugin\" (Paseo 0.9+).",
   "license": "MIT",
   "type": "module",

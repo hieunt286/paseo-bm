@@ -1,6 +1,6 @@
 {
   "name": "paseo-bm",
-  "version": "0.4.0-alpha.0",
+  "version": "0.4.0",
   "description": "Beads Management for Paseo: the last version of the paseo-bm command, which moves an install made by an earlier npx paseo-bm to the plugin on npm. The product itself is the paseo-bm-plugin package.",
   "type": "module",
   "license": "MIT",

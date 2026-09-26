@@ -58,6 +58,34 @@ Không đụng máy thật: `~/.paseo/config.json`, `~/.paseo-bm` và thư mục
 - Thông điệp `E_RECORD_SCHEMA_TOO_NEW` của 0.3.1 khuyên `npx paseo-bm@latest`; trong thời gian prerelease `latest` vẫn là `0.3.1`, nên người dùng cần `@next`. Hết khi `0.4.0` lên `latest`.
 - Log daemon có `Agent MCP transport error … Unsupported protocol version: 2026-07-28` từ endpoint MCP của **Paseo** (không phải của paseo-bm); agent vẫn dùng được công cụ Paseo.
 
-## 5. Vòng trên gói npm thật
+## 5. Vòng trên gói npm thật (`0.4.0-alpha.0` trên `next`)
 
-Chạy lại sau khi publish, ghi bổ sung vào mục này.
+Publish: commit `3e64f5e`, CI run 36219007086, diễn tập 36219071445, release run 36219193860; cả hai gói `0.4.0-alpha.0` trên `next` có SLSA provenance v1, `latest` giữ `0.3.1`. Daemon cô lập **không** có registry thử: npm đọc thẳng registry.npmjs.org.
+
+| # | Mục | Kết quả | Bằng chứng |
+|---|---|---|---|
+| R1.1 | `paseo plugin add npm:paseo-bm-plugin@next` | đạt | `resolved` = `https://registry.npmjs.org/paseo-bm-plugin/-/paseo-bm-plugin-0.4.0-alpha.0.tgz`, `integrity` khớp `npm view … dist.integrity`; `running` |
+| R1.2 | Mở Manager khi công cụ agent tắt → bấm cho phép → mở lại | đạt | lần đầu `E_PROVIDER_UNAVAILABLE` với câu chỉ tới nút; lần sau Manager được tạo |
+| R1.3 | Việc Medium có Reviewer (Claude) | đạt | 2 bead tạo và đóng, Reviewer `auto` pass, 5/5 test, báo cáo `finished` |
+| R1.4 | Đổi Worker/Reviewer sang Codex, Manager cũ, việc mới không nêu model | đạt | Manager gọi `create_agent` với `bm-worker/claude-opus-5-5`; plugin log `… starting it on "gpt-5.6-sol"`; Worker Codex `full-access`, Reviewer Codex `auto`, 7/7 test. Hook cũng đưa một Reviewer xin model `default` về model của profile |
+| R2.1 | `paseo plugin add npm:paseo-bm-plugin@next` đè lên bản cài thư mục `0.3.1` | đạt | Paseo từ chối: `Plugin ID "paseo-bm" is already configured; choose another ID with --id` |
+| R2.2 | `npx paseo-bm@next --apply` | đạt | thoát 0, `migrated`, plugin npm `running` |
+| R2.3 | `npx paseo-bm@0.3.1 install --apply` sau đó | đạt | thoát 3 |
+| R2.4 | `npx paseo-bm` không phiên bản | ghi nhận | vẫn ra `0.3.1` cho tới khi bản ổn định lên `latest` |
+| R3 | Quét bảo mật paseo.cafe trên tarball tải từ npm | đạt | 0 blocking, 0 advisory |
+
+**Ghi nhận về hành vi Manager (có từ 0.3.x, không mới ở 0.4.0):**
+
+- Sau khi nhận `BM-REPORT` (tiếng Anh, đến như một tin `user_message`), Manager chuyển sang trả lời tiếng Anh dù người dùng viết tiếng Việt. Sửa ở `0.4.0`: `roles/manager.md` nói rõ ngôn ngữ của người dùng là ngôn ngữ người dùng gõ, báo cáo hay thông báo không đổi nó.
+- Một lần Manager nhắc với người dùng về connector Canva của claude.ai (thông báo connector nạp vào phiên Claude Code), dù chỉ dẫn đã cấm; để nguyên, theo dõi ở lần nghiệm thu sau.
+
+## 6. Tiền kiểm bản ổn định `0.4.0` (registry thử, `latest` = `0.4.0`)
+
+| # | Mục | Kết quả | Bằng chứng |
+|---|---|---|---|
+| P1 | Cài `@next` (bản thật `0.4.0-alpha.0`) rồi `paseo plugin update paseo-bm` không cờ | đạt | `--check` nhắm `0.4.0`; `updated`, `running`, `currentRevision: 0.4.0` |
+| P2 | `npx paseo-bm --version` không phiên bản | đạt | `0.4.0` |
+| P3 | Quét bảo mật paseo.cafe trên tarball `0.4.0` | đạt | 0 blocking, 0 advisory |
+| P4 | Việc Medium có Reviewer, Manager mới (`bm.version` `0.4.0`) | đạt, kèm ghi nhận | chạy đủ, 3 bead, Reviewer pass; **Manager trả lời tiếng Anh ngay câu đầu** dù người dùng viết tiếng Việt |
+| P5 | Thí nghiệm ngôn ngữ: cùng yêu cầu tiếng Việt, system prompt thật chỉ khác đoạn "How you talk" (A = lời 0.3.x, B = lời 0.4.0), 3 lượt mỗi bên, Worker bị dừng ngay | ghi nhận | 6/6 câu trả lời đầu bằng tiếng Việt. P4 là một lần trượt ngẫu nhiên của model, không do lời mới; lời mới giữ lại vì nhắm đúng tình huống đã thấy (chuyển ngôn ngữ sau `BM-REPORT`), và được theo dõi ở lần nghiệm thu sau |
+
