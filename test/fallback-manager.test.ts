@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createManagerSwitch } from "../plugin/server/fallback-manager";
 import { handleFallbackAct } from "../plugin/server/fallback-rpc";
 import { ROLE_FALLBACK_STATE_FILE } from "../plugin/server/fallback-state";
-import { ensureManager } from "../plugin/server/manager";
+import { AGENT_TOOLS_OFF_SWITCH_MESSAGE, ensureManager } from "../plugin/server/manager";
 import { forgetModes } from "../plugin/server/role-mode";
 import { managerIdNotice } from "../plugin/server/settings-notices";
 import { fallbackStatusLine } from "../plugin/client/chat-cards";
@@ -54,7 +54,7 @@ const incident = (overrides: Partial<FallbackIncident> = {}): FallbackIncident =
 
 type Agent = { id: string; workspaceId: string; status: string; provider: string; labels: Record<string, string>; createdAt?: string; archivedAt?: string | null };
 
-function fakeDaemon(options: { create?: () => Promise<unknown>; oldLabels?: Record<string, string> } = {}) {
+function fakeDaemon(options: { create?: () => Promise<unknown>; oldLabels?: Record<string, string>; injectIntoAgents?: boolean } = {}) {
   const agents: Agent[] = [
     { id: OLD, workspaceId: WS, status: "idle", provider: "bm-manager", labels: { "bm.role": "manager", "bm.modeSet": "bypassPermissions", ...options.oldLabels }, createdAt: "2026-09-22T01:00:00.000Z" },
     { id: "wrk-idle", workspaceId: WS, status: "idle", provider: "bm-worker", labels: { "bm.role": "worker", "bm.requestId": "req-1", "paseo.parent-agent-id": OLD } },
@@ -97,6 +97,7 @@ function fakeDaemon(options: { create?: () => Promise<unknown>; oldLabels?: Reco
             { id: "bm-worker", provider: "bm-worker", model: "claude-sonnet-5" },
             { id: "bm-reviewer", provider: "bm-reviewer", model: "claude-sonnet-5" },
           ],
+          ...(options.injectIntoAgents === undefined ? {} : { mcp: { injectIntoAgents: options.injectIntoAgents } }),
         },
       }),
     },
@@ -193,6 +194,23 @@ describe("switch (Manager)", () => {
     expect(read()[0]).toMatchObject({ status: "failed", error: expect.stringContaining("provider not logged in") });
     expect(setLabels).not.toHaveBeenCalled();
     expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it("creates no replacement while Paseo's agent tools are off, and leaves the incident pending for a later press", async () => {
+    // A Manager gets the tools only when it is created: a replacement made now
+    // would become the Manager Beads Manager opens, unable to create a Worker.
+    write([incident()]);
+    const off = fakeDaemon({ injectIntoAgents: false });
+    const { action, setLabels, enqueue } = switcher();
+    await expect(action(incident(), off.paseo, { home })).rejects.toMatchObject({ code: "E_FALLBACK_CREATE_FAILED", message: expect.stringContaining(AGENT_TOOLS_OFF_SWITCH_MESSAGE) });
+    expect(off.create).not.toHaveBeenCalled();
+    expect(setLabels).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(read()[0]).toMatchObject({ status: "pending" });
+
+    const on = fakeDaemon({ injectIntoAgents: true });
+    await expect(action(incident(), on.paseo, { home })).resolves.toMatchObject({ status: "switched", replacementId: NEW });
+    expect(on.create).toHaveBeenCalledTimes(1);
   });
 
   it("refuses a Manager already replaced, creating nothing", async () => {

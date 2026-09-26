@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleFallbackAct, type FallbackActions } from "../plugin/server/fallback-rpc";
 import { ROLE_FALLBACK_STATE_FILE } from "../plugin/server/fallback-state";
 import { FALLBACK_WORKER_TITLE, createWorkerSwitch } from "../plugin/server/fallback-switch";
+import { AGENT_TOOLS_OFF_SWITCH_MESSAGE } from "../plugin/server/manager";
 import { forgetModes } from "../plugin/server/role-mode";
 import { REVIEWER_STOP_NOTICE } from "../plugin/server/stop-propagation";
 import type { FallbackIncident } from "../plugin/shared/contracts";
@@ -61,7 +62,7 @@ const MODES: Record<string, unknown[]> = {
   "bm-worker-fallback-3": [],
 };
 
-function fakeDaemon(options: { oldLabels?: Record<string, string>; reviewers?: Array<{ id: string; status: string }>; create?: () => Promise<{ id: string }>; available?: string[] } = {}) {
+function fakeDaemon(options: { oldLabels?: Record<string, string>; reviewers?: Array<{ id: string; status: string }>; create?: () => Promise<{ id: string }>; available?: string[]; injectIntoAgents?: boolean } = {}) {
   const sent: Array<{ id: string; text: string }> = [];
   const reviewers = (options.reviewers ?? []).map((reviewer) => ({
     ...reviewer,
@@ -89,6 +90,7 @@ function fakeDaemon(options: { oldLabels?: Record<string, string>; reviewers?: A
       listModes: async (provider: string) => ({ provider, modes: MODES[provider] ?? [], error: null }),
       listFeatures: async () => ({ features: [{ type: "toggle", id: "auto_accept", label: "Auto-accept", value: false }] }),
     },
+    ...(options.injectIntoAgents === undefined ? {} : { config: { get: async () => ({ config: { mcp: { injectIntoAgents: options.injectIntoAgents } } }) } }),
   };
   return { paseo, create, sent };
 }
@@ -140,6 +142,21 @@ describe("switch (Worker)", () => {
     expect(stopReviewers).toHaveBeenCalledWith(paseo, OLD, "wks_1");
     expect(after).toMatchObject({ status: "switched", replacementId: NEW, decidedAt: "2026-09-22T04:05:00.000Z" });
     expect(read()[0]).toMatchObject({ status: "switched", replacementId: NEW });
+  });
+
+  it("creates no replacement Worker while Paseo's agent tools are off, and leaves the incident pending", async () => {
+    // Without the tools a Worker could neither send a BM-REPORT nor create a Reviewer.
+    write([incident()]);
+    const off = fakeDaemon({ injectIntoAgents: false });
+    const { action, setLabels, stopReviewers } = switcher();
+    await expect(action(incident(), off.paseo, { home })).rejects.toMatchObject({ code: "E_FALLBACK_CREATE_FAILED", message: expect.stringContaining(AGENT_TOOLS_OFF_SWITCH_MESSAGE) });
+    expect(off.create).not.toHaveBeenCalled();
+    expect(setLabels).not.toHaveBeenCalled();
+    expect(stopReviewers).not.toHaveBeenCalled();
+    expect(read()[0]).toMatchObject({ status: "pending" });
+
+    const on = fakeDaemon({ injectIntoAgents: true });
+    await expect(action(incident(), on.paseo, { home })).resolves.toMatchObject({ status: "switched", replacementId: NEW });
   });
 
   it("creates one Worker for two clicks at once: the second finds the incident decided", async () => {

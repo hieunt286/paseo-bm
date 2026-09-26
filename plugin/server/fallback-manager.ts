@@ -29,7 +29,7 @@ import { REPLACED_BY_LABEL } from "./fallback-detect";
 import { liveWorkersOf, managerHandover } from "./fallback-handover";
 import { decidePending, type FallbackAction, type FallbackRpcDeps } from "./fallback-rpc";
 import { readIncidents, replacementsOf } from "./fallback-state";
-import { createManager, type ManagerPaseo } from "./manager";
+import { AGENT_TOOLS_OFF_SWITCH_MESSAGE, agentToolsOff, createManager, type ManagerPaseo } from "./manager";
 import { enqueue as defaultEnqueue, type NoticeOutcome, type NoticePaseo } from "./notice-queue";
 import { SETTINGS_NOTICE_MARKER } from "./notices";
 import { setAgentLabels, type CliResult } from "./paseo-cli";
@@ -117,6 +117,10 @@ export function createManagerSwitch(deps: ManagerSwitchDeps = {}): FallbackActio
     if (available !== null && !available.has(candidate.baseProvider)) {
       throw new DashboardError("E_FALLBACK_NO_CANDIDATE", `${candidate.baseProvider} is not available in Paseo right now`);
     }
+    // A Manager gets Paseo's tools only when it is created: one made now would
+    // never create a Worker, and it would become the Manager Beads Manager opens.
+    // Nothing was created: the incident stays pending.
+    if (await agentToolsOff(paseo)) throw new DashboardError("E_FALLBACK_CREATE_FAILED", AGENT_TOOLS_OFF_SWITCH_MESSAGE);
 
     // 2. The handover, within its own budget.
     const prompt = await handover(current, { paseo, location: await location(paseo).catch(() => null), incidents });

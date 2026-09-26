@@ -639,7 +639,7 @@ export function setupChecklist(status: SetupStatus, rolesError?: string | null):
     rows.push({
       key: "agent-tools",
       title: "Agent tools",
-      status: "Off — the Manager may not be able to create a Worker.",
+      status: "Off — no new Beads Manager starts until you allow them.",
       button: "Allow agent tools…",
       action: { kind: "grant-agent-tools" },
       command: null,
@@ -813,7 +813,7 @@ export function agentToolsBlock(status: SetupStatus): AgentToolsBlock | null {
       button: null,
     };
   }
-  return { text: "Off — the Manager may not be able to create a Worker", tone: "warning", button: "Allow agent tools…" };
+  return { text: "Off — no new Beads Manager starts until you allow them", tone: "warning", button: "Allow agent tools…" };
 }
 
 export interface SignInRow {

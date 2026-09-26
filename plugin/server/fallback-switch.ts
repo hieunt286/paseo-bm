@@ -29,6 +29,7 @@ import { decidePending, type FallbackAction, type FallbackRpcDeps } from "./fall
 import { REPLACED_BY_LABEL } from "./fallback-detect";
 import { workerHandover } from "./fallback-handover";
 import { readIncidents } from "./fallback-state";
+import { AGENT_TOOLS_OFF_SWITCH_MESSAGE, agentToolsOff } from "./manager";
 import { setAgentLabels, type CliResult } from "./paseo-cli";
 import { asRecord, availableProviders, nonEmpty, reasonOf } from "./role-choices";
 import { dataHomeOf } from "./role-extras";
@@ -120,6 +121,9 @@ export function createWorkerSwitch(deps: SwitchDeps = {}): FallbackAction {
       if (available !== null && !available.has(candidate.baseProvider)) {
         throw new DashboardError("E_FALLBACK_NO_CANDIDATE", `${candidate.baseProvider} is not available in Paseo right now`);
       }
+      // A Worker gets Paseo's tools only when it is created: one made now could
+      // neither report nor create a Reviewer. Nothing was created: still pending.
+      if (await agentToolsOff(paseo)) throw new DashboardError("E_FALLBACK_CREATE_FAILED", AGENT_TOOLS_OFF_SWITCH_MESSAGE);
 
       const fail = async (detail: string): Promise<never> => {
         await decidePending(home, current.id, (entry) => ({ ...entry, status: "failed", decidedAt: now().toISOString(), error: detail }), log);

@@ -81,7 +81,9 @@ time, so paseo-bm does its setup lazily, the first time you open **Beads Manager
    `bm-worker`, `bm-reviewer` and their agent profiles. The defaults are the first provider Paseo
    reports as available and that provider's first model — the same rule the retired installer used.
    Existing entries are never changed, so anything you set yourself is kept. Setup and the launcher
-   both say so, and **Setup → Agents** is where you change them.
+   both say so, and **Setup → Agents** is where you change them. What you set there is what a new
+   Worker or Reviewer runs on, even when a Manager or Worker created earlier asks for the old model
+   (and even for one you start by hand on `bm-worker` or `bm-reviewer` with another model).
 2. **Setup shows "Set up paseo-bm"** with whatever is still missing. Three rows are buttons, because
    each grants something and nothing runs before you press it:
 
@@ -493,8 +495,7 @@ the plugin does not load at all, Setup cannot help — ask Paseo with `paseo plu
 
 **Beads Manager will not open, or the Manager cannot create a Worker**
 
-Almost always Paseo's agent-tools switch. While it is off, opening Beads Manager stops with `Paseo's agent tools are off…` instead of starting a Manager that could never create a Worker. Setup says `Off — the Manager may not be able to create a
-Worker` and offers **Allow agent tools…**. A provider's own `paseoTools` setting is not enough: the
+Almost always Paseo's agent-tools switch. While it is off, opening Beads Manager stops with `Paseo's agent tools are off…` instead of starting a Manager that could never create a Worker. Setup says `Off — no new Beads Manager starts until you allow them` and offers **Allow agent tools…**. A provider's own `paseoTools` setting is not enough: the
 machine-wide switch is what grants the tools.
 
 Otherwise, check the Worker's provider is signed in (**Setup → Agents → Sign-in** shows the command)

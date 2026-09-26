@@ -475,6 +475,21 @@ describe("before(\"agent.create\") profile thinking and features (delta 20260921
     expect(warn.mock.calls.some((call) => /asked for model "claude-sonnet-5", but its profile names "claude-opus-5"/.test(String(call[0])))).toBe(true);
   });
 
+  it("drops a thinking level chosen for the model it replaces, and uses the profile's instead", async () => {
+    const withThinking = paseoWithProfiles([workerProfile({ thinkingOptionId: "max" })]);
+    const first = setup(withThinking.paseo);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const replaced = await first.run({ config: { provider: "bm-worker/claude-sonnet-5", cwd: "/repo", modeId: "bypassPermissions", thinkingOptionId: "low" } });
+    expect(replaced?.config?.provider).toBe("bm-worker/claude-opus-5");
+    expect(replaced?.config?.thinkingOptionId).toBe("max");
+
+    const without = paseoWithProfiles([workerProfile()]);
+    const second = setup(without.paseo);
+    const cleared = await second.run({ config: { provider: "bm-worker/claude-sonnet-5", cwd: "/repo", modeId: "bypassPermissions", thinkingOptionId: "low" } });
+    expect(cleared?.config?.provider).toBe("bm-worker/claude-opus-5");
+    expect(cleared?.config).not.toHaveProperty("thinkingOptionId");
+  });
+
   it("starts a Reviewer on its profile's model after the user moved it to another provider", async () => {
     const { paseo } = paseoWithProfiles([{ id: "bm-reviewer", name: "Reviewer", provider: "bm-reviewer", model: "gpt-5.6-sol" }], async () => ({ modes: CODEX_MODES }));
     const { run } = setup(paseo);
@@ -608,6 +623,15 @@ describe("run posture by provider capability (delta 20260921 §4.2.1–§4.2.2, 
     const result = await run({ config: { provider: "bm-worker/anthropic/claude-sonnet-4-6", cwd: "/repo" } });
     expect(result?.config).toMatchObject({ modeId: "bytes", featureValues: { auto_accept: true } });
     expect(listFeatures).toHaveBeenCalledWith({ provider: "bm-worker/anthropic/claude-sonnet-4-6", cwd: "/repo" });
+  });
+
+  it("reads the features of the profile's model when the Worker was asked for another one", async () => {
+    const { listFeatures, paseo } = openCodePaseo([{ id: "bm-worker", name: "Worker", provider: "bm-worker", model: "anthropic/claude-sonnet-4-6" }]);
+    const { run } = setup(paseo);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = await run({ config: { provider: "bm-worker/openai/gpt-5.5", cwd: "/repo" } });
+    expect(listFeatures).toHaveBeenCalledWith({ provider: "bm-worker/anthropic/claude-sonnet-4-6", cwd: "/repo" });
+    expect(result?.config).toMatchObject({ provider: "bm-worker/anthropic/claude-sonnet-4-6", modeId: "bytes", featureValues: { auto_accept: true } });
   });
 
   it("keeps the mode the Manager passed to an OpenCode Worker and still turns auto-approve on", async () => {

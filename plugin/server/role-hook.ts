@@ -163,6 +163,9 @@ export function applyRoleModel(request: AgentCreateRequest, profile: RoleProfile
     const next: Record<string, unknown> = { ...config };
     if (typeof config.provider === "string" && config.provider.includes("/")) next.provider = `${id}/${profile.model}`;
     if (typeof config.model === "string" && config.model.trim() !== "") next.model = profile.model;
+    // A thinking level belongs to the model it was chosen for and may not exist
+    // on the profile's; `applyRoleProfile` then sets the profile's own, if any.
+    delete next.thinkingOptionId;
     console.warn(`[paseo-bm] ${id} was asked for model "${requested}", but its profile names "${profile.model}"; starting it on "${profile.model}".`);
     return { ...request, config: next as unknown as AgentCreateRequest["config"] };
   } catch {
@@ -327,7 +330,12 @@ async function prepare(
   const modes = lookup === null ? null : await modesFor(paseo, lookup, undefined, cwd);
   // Only an untiered provider (OpenCode) costs the features round trip: its
   // auto-approve toggle is the one feature the posture rule sets (§4.2.2).
-  const selection = typeof request?.config?.provider === "string" ? request.config.provider : (id ?? "");
+  // The model the agent will run on: the profile's when `applyRoleModel` will
+  // switch to it, so the features are those of that model.
+  const requested = typeof request?.config?.provider === "string" ? request.config.provider : (id ?? "");
+  const wanted = profile?.model ?? null;
+  const asked = request?.config ? requestModelOf(request.config) : null;
+  const selection = id !== null && wanted !== null && asked !== null && asked !== wanted ? `${id}/${wanted}` : requested;
   const features = capabilityOf(modes) === "untiered" ? await featuresFor(paseo, selection, cwd) : null;
   const facts = role === undefined ? {} : await runtimeFactsOf(role, paseo, cwd);
   const base = id === null ? null : ((await aliasBases(paseo))[id] ?? null);

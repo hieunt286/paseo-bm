@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ROLE_FALLBACK_FILE } from "../plugin/server/fallback-settings";
 import { AUTO_WAIT_WINDOW_MS, autoActionOf, decidePending, decideAutomatically, registerFallbackRpcs, type FallbackAction } from "../plugin/server/fallback-rpc";
 import { ROLE_FALLBACK_STATE_FILE, recordIncident } from "../plugin/server/fallback-state";
+import { createWorkerSwitch } from "../plugin/server/fallback-switch";
 import { noticeQueue } from "../plugin/server/notice-queue";
 import type { FallbackIncident } from "../plugin/shared/contracts";
 
@@ -116,6 +117,24 @@ describe("decideAutomatically", () => {
     expect(await decideAutomatically(incident({ candidate: null }), {}, { home, log, now: () => NOW, enqueue: async () => "sent", actions: acts })).toBe(false);
     expect(acts.roles).toEqual([]);
     expect(read()[0]!.status).toBe("pending");
+  });
+
+  it("leaves the incident pending and tells the chat once when Paseo's agent tools are off (real Worker switch)", async () => {
+    write([incident()]);
+    const create = vi.fn();
+    const paseo = {
+      agents: { create, ref: (id: string) => ({ refresh: async () => ({ agent: { id, cwd: "/repo", status: "idle", labels: { "bm.role": "worker" } } }) }) },
+      providers: { listAvailable: async () => ({ providers: [{ provider: "codex", available: true }] }) },
+      config: { get: async () => ({ config: { mcp: { injectIntoAgents: false } } }) },
+    };
+    const enqueue = vi.fn<(target: string, kind: string, text: string) => Promise<"sent">>(async () => "sent");
+    const worker = createWorkerSwitch({ log, now: () => NOW, setLabels: vi.fn(), stopReviewers: vi.fn(), handover: vi.fn(), location: async () => null });
+    expect(await decideAutomatically(incident(), paseo, { home, log, now: () => NOW, enqueue, actions: { switch: worker } })).toBe(true);
+    expect(create).not.toHaveBeenCalled();
+    expect(read()[0]!.status).toBe("pending");
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(enqueue.mock.calls[0]![2]).toContain("\nstatus: pending\n");
+    expect(log).toHaveBeenCalledWith(expect.stringMatching(/could not switch .*agent tools are off/));
   });
 
   it("tells the chat the state a failed switch left, instead of throwing", async () => {

@@ -703,9 +703,23 @@ describe("manager.ensure sets the machine up (0.4.0, ADR-012 decision 4)", () =>
     const error = await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), log: () => {} }).catch((e: unknown) => e);
 
     expect((error as ManagerEnsureError).code).toBe("E_PROVIDER_UNAVAILABLE");
-    expect((error as Error).message).toBe(`E_PROVIDER_UNAVAILABLE: ${AGENT_TOOLS_OFF_MESSAGE}`);
+    // The call that created the roles still says so: a later open no longer would.
+    expect((error as Error).message).toBe(
+      "E_PROVIDER_UNAVAILABLE: paseo-bm created its roles with defaults (codex · gpt-5.6-sol). Change them in Setup → Agents. " +
+        AGENT_TOOLS_OFF_MESSAGE,
+    );
     expect(fake.createCalls).toHaveLength(0);
     expect(Object.keys(fake.config().providers)).toEqual(["bm-manager", "bm-worker", "bm-reviewer"]);
+  });
+
+  it("refuses with the agent-tools sentence alone when the roles already existed", async () => {
+    const fake = fakePaseo({ injectIntoAgents: false });
+
+    const error = await ensureManager({ workspaceId: WS }, deps(fake.paseo)).catch((e: unknown) => e);
+
+    expect((error as Error).message).toBe(`E_PROVIDER_UNAVAILABLE: ${AGENT_TOOLS_OFF_MESSAGE}`);
+    expect(fake.createCalls).toHaveLength(0);
+    expect(fake.patches).toEqual([]);
   });
 
   it("creates the Manager once the switch is on", async () => {

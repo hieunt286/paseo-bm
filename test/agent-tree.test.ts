@@ -347,7 +347,7 @@ describe("loading and error states", () => {
     const shown = texts(out);
     expect(shown).toContain("Could not load agents. connection lost");
     expect(shown).toContain(
-      "Could not load role configuration (E_RECORD_SCHEMA_TOO_NEW). E_RECORD_SCHEMA_TOO_NEW: install.json uses schema 2",
+      "Could not load role configuration (E_RECORD_SCHEMA_TOO_NEW). install.json uses schema 2",
     );
     const retry = pressables(out);
     expect(retry.map((p) => p.props.accessibilityLabel)).toEqual(["Retry loading agents", "Retry loading role configuration"]);

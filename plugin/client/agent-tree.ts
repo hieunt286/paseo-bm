@@ -15,7 +15,7 @@
  */
 import type { PluginTheme } from "@getpaseo/plugin";
 import type { AgentNode, RoleDescriptor } from "../shared/contracts";
-import { errorCodeOf, errorMessageOf, type NoticeTone } from "./launch-manager";
+import { codedTail, errorCodeOf, errorMessageOf, type NoticeTone } from "./launch-manager";
 
 /** Workspace panel id. */
 export const AGENT_TREE_PANEL_ID = "beads-agents";
@@ -229,7 +229,7 @@ export const NO_ROLES_TEXT =
 export function loadErrorText(what: string, error: unknown): string {
   const code = errorCodeOf(error);
   const message = errorMessageOf(error);
-  return code ? `Could not load ${what} (${code}). ${message}` : `Could not load ${what}. ${message}`;
+  return code ? `Could not load ${what} ${codedTail(code, message)}` : `Could not load ${what}. ${message}`;
 }
 
 // ---------------------------------------------------------------------------

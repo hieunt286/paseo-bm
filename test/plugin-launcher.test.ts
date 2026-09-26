@@ -14,6 +14,7 @@ import {
   OLD_HOST_WARNING,
   describeLauncherState,
   errorCodeOf,
+  errorMessageOf,
   launcherStatusLines,
   launchRequests,
   launcherStyles,
@@ -459,6 +460,29 @@ describe("pending and error states", () => {
     ]);
     expect(errorCodeOf("E_X_Y: z")).toBe("E_X_Y");
     expect(errorCodeOf(new Error("W_PROVIDER_NOT_LOGGED_IN: z"))).toBeNull();
+  });
+
+  it("shows the server's message of an RPC error as the app receives it: without the daemon's wrapping, the code once", async () => {
+    // @getpaseo/client's DaemonRpcError, as a failed plugin RPC reaches the app.
+    const wrapped = new Error(
+      "Request failed: E_PROVIDER_UNAVAILABLE: Paseo's agent tools are off. requestType=plugin.rpc.invoke.request code=handler_error",
+    );
+    expect(errorCodeOf(wrapped)).toBe("E_PROVIDER_UNAVAILABLE");
+    expect(errorMessageOf(wrapped)).toBe("E_PROVIDER_UNAVAILABLE: Paseo's agent tools are off.");
+    const launcher = createManagerLauncher();
+    await launcher.launch(WS, { ensure: vi.fn(async () => Promise.reject(wrapped)), openAgent: vi.fn() });
+    expect(describeLauncherState(launcher.getState())).toEqual([
+      { tone: "danger", text: "Could not open Beads Manager (E_PROVIDER_UNAVAILABLE). Paseo's agent tools are off." },
+    ]);
+    // A wrapped message without a code keeps its text, minus the wrapping only.
+    expect(errorMessageOf(new Error("Request failed: connection lost requestType=plugin.rpc.invoke.request code=handler_error"))).toBe("connection lost");
+    expect(errorCodeOf(new Error("Request failed: connection lost"))).toBeNull();
+    // A server that sent its code alone: the code once, nothing repeated after it.
+    const bare = createManagerLauncher();
+    await bare.launch(WS, { ensure: vi.fn(async () => Promise.reject(new Error("Request failed: E_X_Y requestType=plugin.rpc.invoke.request code=handler_error"))), openAgent: vi.fn() });
+    expect(describeLauncherState(bare.getState())).toEqual([{ tone: "danger", text: "Could not open Beads Manager (E_X_Y)." }]);
+    // Only the daemon's wrapping goes: a message that merely mentions the words keeps them.
+    expect(errorMessageOf(new Error("the request failed: requestType unknown"))).toBe("the request failed: requestType unknown");
   });
 
   it("reports other live Managers as a warning and archives or deletes nothing", async () => {

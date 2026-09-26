@@ -664,7 +664,7 @@ describe("setupChecklist", () => {
       {
         key: "agent-tools",
         title: "Agent tools",
-        status: "Off — the Manager may not be able to create a Worker.",
+        status: "Off — no new Beads Manager starts until you allow them.",
         button: "Allow agent tools…",
         action: { kind: "grant-agent-tools" },
         command: null,
@@ -896,7 +896,7 @@ describe("the Agents tab's own blocks", () => {
       button: null,
     });
     expect(agentToolsBlock(withSetup({ agentTools: { injectIntoAgents: false, setBy: null } }))).toEqual({
-      text: "Off — the Manager may not be able to create a Worker",
+      text: "Off — no new Beads Manager starts until you allow them",
       tone: "warning",
       button: "Allow agent tools…",
     });

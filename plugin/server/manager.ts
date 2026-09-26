@@ -350,15 +350,18 @@ async function ensureRolesFor(paseo: ManagerPaseo, log?: (message: string) => vo
  */
 async function setupNoticeFor(paseo: ManagerPaseo, ensured: EnsureRolesResult): Promise<string | null> {
   const sentences: string[] = [];
-  if (ensured.created.length > 0 && ensured.baseProvider !== null && ensured.model !== null) {
-    sentences.push(
-      `paseo-bm created its roles with defaults (${ensured.baseProvider} · ${ensured.model}). Change them in Setup → Agents.`,
-    );
-  }
+  const roles = rolesSentence(ensured);
+  if (roles !== null) sentences.push(roles);
   if (await agentToolsOff(paseo)) {
     sentences.push("Paseo's agent tools are off, so the Manager may not be able to create a Worker. Allow them in Setup.");
   }
   return sentences.length === 0 ? null : sentences.join(" ");
+}
+
+/** The roles sentence, only when THIS call created roles; `null` otherwise. */
+function rolesSentence(ensured: EnsureRolesResult): string | null {
+  if (ensured.created.length === 0 || ensured.baseProvider === null || ensured.model === null) return null;
+  return `paseo-bm created its roles with defaults (${ensured.baseProvider} · ${ensured.model}). Change them in Setup → Agents.`;
 }
 
 /**
@@ -369,10 +372,24 @@ export const AGENT_TOOLS_OFF_MESSAGE =
   "Paseo's agent tools are off, and a Beads Manager created now would never get them, so it could not create a Worker. " +
   'Press "Allow agent tools…" in Setup, then open Beads Manager again.';
 
-/** True only when Paseo says the switch is off; a config it cannot read says nothing. */
-async function agentToolsOff(paseo: ManagerPaseo): Promise<boolean> {
+/**
+ * Why a fallback switch created no replacement: the same reason as
+ * `AGENT_TOOLS_OFF_MESSAGE`, and the incident stays pending so the user can
+ * press Switch again once the tools are allowed.
+ */
+export const AGENT_TOOLS_OFF_SWITCH_MESSAGE =
+  "Paseo's agent tools are off, and a replacement created now would never get them. " +
+  'Press "Allow agent tools…" in Setup, then choose Switch again.';
+
+/**
+ * True only when Paseo says the switch is off; a config it cannot read says
+ * nothing. `=== false` on purpose: the SDK view always holds a boolean (a
+ * missing key reads `false`, design §5.3), so an absent value means the view
+ * itself could not be read, not that the switch is off.
+ */
+export async function agentToolsOff(paseo: unknown): Promise<boolean> {
   try {
-    const { config } = await paseo.config.get();
+    const { config } = await (paseo as ManagerPaseo).config.get();
     return (config as { mcp?: { injectIntoAgents?: unknown } }).mcp?.injectIntoAgents === false;
   } catch {
     return false;
@@ -417,8 +434,11 @@ export async function ensureManager(
   // while the switch is off keeps working without `create_agent` even after the
   // user allows them, and only the user may archive it. So none is created
   // until the switch is on; an existing Manager is still opened above.
+  // The roles sentence rides along: on a fresh install this is the call that
+  // created them, and a later open would no longer say so.
   if (await agentToolsOff(paseo)) {
-    throw new ManagerEnsureError("E_PROVIDER_UNAVAILABLE", AGENT_TOOLS_OFF_MESSAGE);
+    const roles = rolesSentence(ensured);
+    throw new ManagerEnsureError("E_PROVIDER_UNAVAILABLE", roles === null ? AGENT_TOOLS_OFF_MESSAGE : `${roles} ${AGENT_TOOLS_OFF_MESSAGE}`);
   }
 
   const { config } = await paseo.config.get();
