@@ -31,7 +31,7 @@ The complete reference for `paseo-bm`. For a short overview and the quick start,
 > **2. Agent-creation permission: `daemon.mcp.injectIntoAgents`.**
 > The Manager and the Worker need Paseo's tools to create, message and stop other agents. Paseo grants those tools to **every agent on this machine**, not only to paseo-bm's roles. Once the switch is on, any agent can create, prompt and stop other agents, which means it can start work and spend money on your model providers.
 >
-> Nothing turns it on for you. **Setup → Allow agent tools…** asks first, with that warning, and records what the switch was before so **Remove paseo-bm's settings** can put it back. Until you press it, the Manager cannot create a Worker.
+> Nothing turns it on for you. **Setup → Allow agent tools…** asks first, with that warning, and records what the switch was before so **Remove paseo-bm's settings** can put it back. Until you press it, Beads Manager does not start: an agent only gets Paseo's tools when it is created, so a Manager started before the switch was on could never create a Worker.
 
 > [!WARNING]
 > **3. Installing skills runs someone else's tool.**
@@ -491,9 +491,9 @@ the plugin does not load at all, Setup cannot help — ask Paseo with `paseo plu
 - On Paseo 0.8 the plugin is refused on purpose (it declares `>=0.9.0`). Upgrade Paseo, or keep
   `paseo-bm@0.3.1`.
 
-**The Manager cannot create a Worker**
+**Beads Manager will not open, or the Manager cannot create a Worker**
 
-Almost always Paseo's agent-tools switch. Setup says `Off — the Manager may not be able to create a
+Almost always Paseo's agent-tools switch. While it is off, opening Beads Manager stops with `Paseo's agent tools are off…` instead of starting a Manager that could never create a Worker. Setup says `Off — the Manager may not be able to create a
 Worker` and offers **Allow agent tools…**. A provider's own `paseoTools` setting is not enough: the
 machine-wide switch is what grants the tools.
 

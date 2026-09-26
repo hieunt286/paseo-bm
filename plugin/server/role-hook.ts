@@ -138,6 +138,39 @@ function requestModelOf(config: { provider?: unknown; model?: unknown }): string
 }
 
 /**
+ * Returns the request with the model of the Worker's or Reviewer's own profile
+ * when the creator named another one, or `undefined` when nothing changes.
+ * Never throws.
+ *
+ * The role files tell the creator to pass `bm-<role>/<model of the profile>`,
+ * but a Manager reads the profile once and keeps it: after the user moved the
+ * Worker from Claude to Codex in Setup, a Manager created earlier still asked
+ * for `bm-worker/claude-opus-5-5`, and Codex refused the model at the Worker's
+ * first turn (clean-install run 2026-09-26). The profile is what the user set,
+ * so it wins, the way `applyRoleMode` makes the role's mode win. Only the main
+ * aliases have a profile; a fallback alias keeps the model it was given.
+ */
+export function applyRoleModel(request: AgentCreateRequest, profile: RoleProfile | null): AgentCreateRequest | undefined {
+  try {
+    if (profile === null || profile.model === null) return undefined;
+    const config = (request as Partial<AgentCreateRequest> | null | undefined)?.config;
+    if (config === null || typeof config !== "object") return undefined;
+    const id = providerId(config.provider);
+    const role = roleOfProvider(id);
+    if (id === null || (role !== "worker" && role !== "reviewer")) return undefined;
+    const requested = requestModelOf(config);
+    if (requested === null || requested === profile.model) return undefined;
+    const next: Record<string, unknown> = { ...config };
+    if (typeof config.provider === "string" && config.provider.includes("/")) next.provider = `${id}/${profile.model}`;
+    if (typeof config.model === "string" && config.model.trim() !== "") next.model = profile.model;
+    console.warn(`[paseo-bm] ${id} was asked for model "${requested}", but its profile names "${profile.model}"; starting it on "${profile.model}".`);
+    return { ...request, config: next as unknown as AgentCreateRequest["config"] };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Returns the request with the thinking level and feature values of the
  * Worker's or Reviewer's own profile (delta 20260921 §4.1.1, REQ-062 a), or
  * `undefined` when nothing changes. Never throws.
@@ -230,7 +263,9 @@ export function applyRoleConfig(
   features: readonly ProviderFeature[] | null = null,
 ): AgentCreateRequest | undefined {
   const withInstructions = applyRoleInstructions(request, extras, facts);
-  const withProfile = applyRoleProfile(withInstructions ?? request, profile) ?? withInstructions;
+  // The model first: the profile's thinking level only applies on the profile's model.
+  const withModel = applyRoleModel(withInstructions ?? request, profile) ?? withInstructions;
+  const withProfile = applyRoleProfile(withModel ?? request, profile) ?? withModel;
   const capability = capabilityOf(modes);
   const posture =
     capability === "untiered" || capability === "none"

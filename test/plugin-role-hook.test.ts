@@ -450,8 +450,10 @@ describe("before(\"agent.create\") profile thinking and features (delta 20260921
     const { run } = setup(paseo);
     const same = await run({ config: { provider: "bm-worker", model: "claude-opus-5", cwd: "/repo", modeId: "bypassPermissions" } });
     expect(same?.config?.thinkingOptionId).toBe("max");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
     const other = await run({ config: { provider: "bm-worker", model: "claude-sonnet-5", cwd: "/repo", modeId: "bypassPermissions" } });
-    expect(other?.config).not.toHaveProperty("thinkingOptionId");
+    expect(other?.config?.model).toBe("claude-opus-5");
+    expect(other?.config?.thinkingOptionId).toBe("max");
   });
 
   it("keeps a thinking level the creator passed", async () => {
@@ -461,11 +463,38 @@ describe("before(\"agent.create\") profile thinking and features (delta 20260921
     expect(result?.config?.thinkingOptionId).toBe("low");
   });
 
-  it("does not set the profile's thinking on a different model", async () => {
+  it("starts a Worker asked for another model on the profile's model, with the profile's thinking", async () => {
+    // Clean-install run 2026-09-26: a Manager created before the user moved the
+    // Worker to Codex still asked for bm-worker/claude-opus-5-5.
     const { paseo } = paseoWithProfiles([workerProfile({ thinkingOptionId: "max" })]);
     const { run } = setup(paseo);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const result = await run({ config: { provider: "bm-worker/claude-sonnet-5", cwd: "/repo", modeId: "bypassPermissions" } });
-    expect(result?.config).not.toHaveProperty("thinkingOptionId");
+    expect(result?.config?.provider).toBe("bm-worker/claude-opus-5");
+    expect(result?.config?.thinkingOptionId).toBe("max");
+    expect(warn.mock.calls.some((call) => /asked for model "claude-sonnet-5", but its profile names "claude-opus-5"/.test(String(call[0])))).toBe(true);
+  });
+
+  it("starts a Reviewer on its profile's model after the user moved it to another provider", async () => {
+    const { paseo } = paseoWithProfiles([{ id: "bm-reviewer", name: "Reviewer", provider: "bm-reviewer", model: "gpt-5.6-sol" }], async () => ({ modes: CODEX_MODES }));
+    const { run } = setup(paseo);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = await run({ config: { provider: "bm-reviewer/claude-opus-5-5", cwd: "/repo", modeId: "auto" } });
+    expect(result?.config?.provider).toBe("bm-reviewer/gpt-5.6-sol");
+  });
+
+  it("leaves the model alone when it is the profile's, when the request names none, and on a fallback alias", async () => {
+    const { paseo } = paseoWithProfiles([workerProfile()]);
+    const { run } = setup(paseo);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const same = await run({ config: { provider: "bm-worker/claude-opus-5", cwd: "/repo", modeId: "bypassPermissions" } });
+    expect(same?.config?.provider).toBe("bm-worker/claude-opus-5");
+    const none = await run({ config: { provider: "bm-worker", cwd: "/repo", modeId: "bypassPermissions" } });
+    expect(none?.config?.provider).toBe("bm-worker");
+    expect(none?.config).not.toHaveProperty("model");
+    const fallback = await run({ config: { provider: "bm-worker-fallback-1/gpt-5.5", cwd: "/repo", modeId: "bypassPermissions" } });
+    expect(fallback?.config?.provider).toBe("bm-worker-fallback-1/gpt-5.5");
+    expect(warn.mock.calls.some((call) => /asked for model/.test(String(call[0])))).toBe(false);
   });
 
   it("sets the profile's thinking when the request names no model", async () => {

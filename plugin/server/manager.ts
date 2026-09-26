@@ -361,6 +361,14 @@ async function setupNoticeFor(paseo: ManagerPaseo, ensured: EnsureRolesResult): 
   return sentences.length === 0 ? null : sentences.join(" ");
 }
 
+/**
+ * Why no new Manager was created. It names the button because the error line
+ * is drawn above the Setup screen that holds it.
+ */
+export const AGENT_TOOLS_OFF_MESSAGE =
+  "Paseo's agent tools are off, and a Beads Manager created now would never get them, so it could not create a Worker. " +
+  'Press "Allow agent tools…" in Setup, then open Beads Manager again.';
+
 /** True only when Paseo says the switch is off; a config it cannot read says nothing. */
 async function agentToolsOff(paseo: ManagerPaseo): Promise<boolean> {
   try {
@@ -403,6 +411,14 @@ export async function ensureManager(
       toolsNotice: null,
       setupNotice: await setupNoticeFor(paseo, ensured),
     };
+  }
+
+  // A Manager gets Paseo's tools when it is created, never later: one created
+  // while the switch is off keeps working without `create_agent` even after the
+  // user allows them, and only the user may archive it. So none is created
+  // until the switch is on; an existing Manager is still opened above.
+  if (await agentToolsOff(paseo)) {
+    throw new ManagerEnsureError("E_PROVIDER_UNAVAILABLE", AGENT_TOOLS_OFF_MESSAGE);
   }
 
   const { config } = await paseo.config.get();

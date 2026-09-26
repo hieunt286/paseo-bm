@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
   createManager,
   ensureManager,
+  AGENT_TOOLS_OFF_MESSAGE,
   ManagerEnsureError,
   type ManagerAgentHandle,
   type ManagerAgentProfile,
@@ -670,8 +671,8 @@ describe("manager.ensure sets the machine up (0.4.0, ADR-012 decision 4)", () =>
     expect(fake.patches).toEqual([]);
   });
 
-  it("warns about Paseo's agent-tools switch on every call, not only the first", async () => {
-    const fake = fakePaseo({ injectIntoAgents: false });
+  it("warns about Paseo's agent-tools switch on every call that opens a Manager", async () => {
+    const fake = fakePaseo({ agents: [agent({ id: "mgr-1" })], injectIntoAgents: false });
 
     const first = await ensureManager({ workspaceId: WS }, deps(fake.paseo));
     const second = await ensureManager({ workspaceId: WS }, deps(fake.paseo));
@@ -683,7 +684,7 @@ describe("manager.ensure sets the machine up (0.4.0, ADR-012 decision 4)", () =>
   });
 
   it("puts the roles sentence before the agent-tools one when both are true", async () => {
-    const fake = fresh({ injectIntoAgents: false });
+    const fake = fresh({ agents: [agent({ id: "mgr-1" })], injectIntoAgents: false });
 
     const result = await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), log: () => {} });
 
@@ -691,6 +692,29 @@ describe("manager.ensure sets the machine up (0.4.0, ADR-012 decision 4)", () =>
       "paseo-bm created its roles with defaults (codex · gpt-5.6-sol). Change them in Setup → Agents. " +
         "Paseo's agent tools are off, so the Manager may not be able to create a Worker. Allow them in Setup.",
     );
+  });
+
+  it("creates no Manager while Paseo's agent tools are off, but still creates the roles", async () => {
+    // A Manager gets Paseo's tools only when it is created: one made now would
+    // stay without create_agent after the user allows them (clean-install run
+    // 2026-09-26), and only the user may archive it.
+    const fake = fresh({ injectIntoAgents: false });
+
+    const error = await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), log: () => {} }).catch((e: unknown) => e);
+
+    expect((error as ManagerEnsureError).code).toBe("E_PROVIDER_UNAVAILABLE");
+    expect((error as Error).message).toBe(`E_PROVIDER_UNAVAILABLE: ${AGENT_TOOLS_OFF_MESSAGE}`);
+    expect(fake.createCalls).toHaveLength(0);
+    expect(Object.keys(fake.config().providers)).toEqual(["bm-manager", "bm-worker", "bm-reviewer"]);
+  });
+
+  it("creates the Manager once the switch is on", async () => {
+    const fake = fresh({ injectIntoAgents: true });
+
+    const result = await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), log: () => {} });
+
+    expect(result.created).toBe(true);
+    expect(fake.createCalls).toHaveLength(1);
   });
 
   it("creates no Manager when the roles cannot be created, and points at Setup", async () => {

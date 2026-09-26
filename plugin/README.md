@@ -22,7 +22,7 @@ model Paseo reports as available; change them in **Setup → Agents**.
 
 Open **Setup** and work through **Set up paseo-bm**. Three steps need a press, because each grants
 something: **Allow agent tools** (Paseo's machine-wide `daemon.mcp.injectIntoAgents` switch, without
-which the Manager cannot create a Worker), **Install skills** (runs the third-party `skills` CLI
+which Beads Manager does not start, because a Manager started earlier could never create a Worker), **Install skills** (runs the third-party `skills` CLI
 once) and **Install `br` / `bv`** (the beads tools).
 
 Update it with `paseo plugin update paseo-bm`.

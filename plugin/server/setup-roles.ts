@@ -41,8 +41,9 @@ export const ROLE_PROFILE_NOTES: Readonly<Record<RoleName, string>> = {
     "paseo-bm Manager — the agent you talk to. It delegates every request to a Beads Worker " +
     "and reports progress back; it does not do the work itself and never archives or deletes an agent.",
   worker:
-    "paseo-bm Worker — does the work in the repository: documents, beads, then implementation, " +
-    "spawning a Beads Reviewer after each batch of changes. It never commits and never pushes.",
+    "paseo-bm Worker — does the work in the repository, sized to the request: a small change is made and " +
+    "checked directly; larger work gets beads, documents where needed and a Beads Reviewer. " +
+    "It commits or pushes only when the user asks.",
   reviewer:
     "paseo-bm Reviewer — read-only review of the batch of changes just made. It reports findings " +
     "by severity, does not edit anything, and must never create or stop an agent.",
