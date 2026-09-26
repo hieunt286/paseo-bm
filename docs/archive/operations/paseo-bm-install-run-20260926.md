@@ -89,3 +89,18 @@ Publish: commit `3e64f5e`, CI run 36219007086, diễn tập 36219071445, release
 | P4 | Việc Medium có Reviewer, Manager mới (`bm.version` `0.4.0`) | đạt, kèm ghi nhận | chạy đủ, 3 bead, Reviewer pass; **Manager trả lời tiếng Anh ngay câu đầu** dù người dùng viết tiếng Việt |
 | P5 | Thí nghiệm ngôn ngữ: cùng yêu cầu tiếng Việt, system prompt thật chỉ khác đoạn "How you talk" (A = lời 0.3.x, B = lời 0.4.0), 3 lượt mỗi bên, Worker bị dừng ngay | ghi nhận | 6/6 câu trả lời đầu bằng tiếng Việt. P4 là một lần trượt ngẫu nhiên của model, không do lời mới; lời mới giữ lại vì nhắm đúng tình huống đã thấy (chuyển ngôn ngữ sau `BM-REPORT`), và được theo dõi ở lần nghiệm thu sau |
 
+## 7. Nghiệm thu bản ổn định `0.4.0` trên registry thật
+
+Publish: commit `d910795` trên `main`, CI run 36220348210, diễn tập 36220407516 (dry-run nêu dist-tag `latest` cho cả hai gói), release run 36220562608. `npm view`: cả hai gói `latest` = `0.4.0`, `next` = `0.4.0-alpha.0`, SLSA provenance v1.
+
+| # | Mục | Kết quả | Bằng chứng |
+|---|---|---|---|
+| F1 | `paseo plugin add npm:paseo-bm-plugin` (không tag) trên daemon mới | đạt | `currentRevision: 0.4.0`, `resolved` từ registry.npmjs.org, `integrity` khớp `npm view` |
+| F2 | Mở Manager khi công cụ agent tắt → cho phép → việc Medium có Reviewer | đạt | từ chối có hướng dẫn, rồi Worker, 3 bead, Reviewer pass, 4/4 test; Manager trả lời tiếng Việt suốt, kể cả sau `BM-REPORT` |
+| F3 | Bản cài thư mục `0.3.1` → `npx paseo-bm --apply` (không phiên bản) | đạt | `paseoBmVersion: 0.4.0`, `migrated` sang `npm:paseo-bm-plugin@0.4.0`, plugin `running` |
+| F4 | Cài `@next` (`0.4.0-alpha.0`) → `paseo plugin update paseo-bm` không cờ | đạt | `updated`, `running`, `0.4.0` |
+| F5 | `scripts/validate-registry.ts` của paseo.cafe (bản `main`) trên mục `registry/paseo-bm.json` hiện có | đạt | `✓ 1 registry entry validated OK.` |
+| F6 | `scanNpmTarget` của paseo.cafe trên `paseo-bm-plugin@latest` | đạt | `status: passed`, 0 blocking, 0 advisory, 104 file, 1 341 316 byte |
+
+Máy thật không đổi suốt buổi: `~/.paseo/config.json` giữ mtime 09:57, `~/.paseo-bm` không có file mới, daemon thật ở 6767 chạy liên tục.
+
