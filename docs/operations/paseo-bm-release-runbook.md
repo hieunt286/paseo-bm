@@ -40,7 +40,7 @@
    ```bash
    gh workflow run release.yml -f tag=v<version>
    ```
-   It passes when: both jobs `verify (ubuntu-latest, node 24)` and `verify (macos-latest, node 24)` are green, including `Smoke test packed package`; the log holds `Dry-run publish of paseo-bm-plugin@<version> with dist-tag <next|latest>`; and the two real steps, `Publish payload to npm` and `Verify published payload`, are `skipped`. A rehearsal does not prove the registry accepts the dist-tag — `--dry-run` never asks the registry.
+   It passes when: both jobs `verify (ubuntu-latest, node 24)` and `verify (macos-latest, node 24)` are green, including `Smoke test packed package`; the log holds `Dry-run publish of paseo-bm-plugin@<version> with dist-tag <next|latest>`; and the two real steps, `Publish payload to npm` and `Verify published payload`, are `skipped`. A rehearsal does not prove the registry accepts the dist-tag. It does ask whether the version exists: rehearsing a version already on npm fails at the dry-run with `You cannot publish over the previously published versions` (seen on 2026-09-28 with `0.4.0`), so rehearse only after step 2 has moved the version.
 7. **When you change `release.yml`, check the shell layer too**, not only the JavaScript: `bash -n` over every `run:` block; no `node -e '…'` may contain a single quote, not even inside a comment (an `owner's` turned the first `0.3.0` rehearsal red).
 
 ## 2. Releasing (after the owner approves)
