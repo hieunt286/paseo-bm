@@ -50,7 +50,7 @@ An ADR is never rewritten; a new decision gets a new ADR that supersedes it.
 | Plan | Status |
 |---|---|
 | [paseo-bm-plan-040-single-source.md](plans/paseo-bm-plan-040-single-source.md) | Active — 0.4.0 and 0.4.1 are released; the last exit condition waits for the paseo.cafe caveats PR to be merged |
-| [paseo-bm-plan-050-orchestrator.md](plans/paseo-bm-plan-050-orchestrator.md) | Draft — 0.5.0, the Orchestrator: eight work packages, `plan-ready-for-beads` self-evaluated, awaiting the owner |
+| [paseo-bm-plan-orchestrator.md](plans/paseo-bm-plan-orchestrator.md) | Draft — the Orchestrator: eight work packages, `plan-ready-for-beads` self-evaluated, awaiting the owner; no release in scope (the owner picks the version after testing) |
 
 A plan exists only for a piece of Designed work and moves to `archive/plans/` when its work is done.
 

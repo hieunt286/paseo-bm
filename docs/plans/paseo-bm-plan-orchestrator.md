@@ -1,4 +1,4 @@
-# Implementation Plan — 0.5.0: the Orchestrator
+# Implementation Plan — the Orchestrator
 
 | Field | Value |
 |---|---|
@@ -9,7 +9,7 @@
 | Decision | [ADR-013](../adr/ADR-013-orchestrator-assess-and-nudge.md) (Accepted 2026-09-28) |
 | Requirements | [Orchestrator PRD](../product/paseo-bm-orchestrator-prd.md) REQ-071 → REQ-080 (Accepted 2026-09-28) |
 | Technical Design | [paseo-bm-orchestrator.md](../design/paseo-bm-orchestrator.md) §1 → §12 (Active 2026-09-28) · [paseo-bm.md](../design/paseo-bm.md) §6.2, §7.2, §7.12, §7.13 · [paseo-bm-dashboard.md](../design/paseo-bm-dashboard.md) §6, §11.3, §12 |
-| Target release | `paseo-bm-plugin@0.5.0` (a new minor: a fourth role and new Paseo configuration entries) |
+| Target release | **None in this plan.** The owner tests the finished work and only then decides the version and the release (owner, 2026-09-28) |
 
 ## 0. Routing Decision
 
@@ -27,16 +27,16 @@ Canonical owner: [Orchestrator PRD §0](../product/paseo-bm-orchestrator-prd.md#
 - Observing agents that are not paseo-bm's (PRD §3).
 - Any action on agents beyond ADR-013: stopping, archiving, answering for the user, applying suggestions without a click.
 - Translating `docs/archive/` or the bead history.
+- Releasing: the version number, release notes, the minor-version pin of `test/plugin-role-labels.test.ts`, any publish to npm. The owner decides them after testing the finished work, and the [release runbook](../operations/paseo-bm-release-runbook.md) covers them then.
 
 **Phase exit conditions:**
 1. Every P2 acceptance criterion of REQ-071 → REQ-080 is met, with the test evidence of design §11.
 2. O-1 → O-5 met: the rule fixtures of the 2026-09-26 run raise their flags and a clean trace raises none; the negative tests of O-3 and O-5 are green.
 3. REQ-047 of the Dashboard PRD amended; the role and notice tables of the base design updated.
 4. `npm run verify` green; `smoke:packed` green.
-5. An acceptance run on an isolated daemon (`scripts/manual-test/`, registry mirror for the unpublished tarball) with a run record in `docs/archive/operations/`: update from 0.4.1 gains the fourth role; a Small request that creates a bead raises `process.small-heavy`; with the nudge switch on the running Worker receives exactly one `BM-NUDGE`; Assess returns a `done` assessment and one suggestion is applied; removing paseo-bm's settings leaves no `bm-*` entry.
-6. `paseo-bm-plugin@0.5.0` on `latest` with provenance, after `0.5.0-alpha.0` on `next` passed the same run.
+5. An acceptance run on an isolated daemon (`scripts/manual-test/`, the plugin installed from this branch's `plugin/` folder) with a run record in `docs/archive/operations/`: a machine set up by 0.4.1 (installed from npm, then replaced by the branch's plugin) gains the fourth role; a Small request that creates a bead raises `process.small-heavy`; with the nudge switch on the running Worker receives exactly one `BM-NUDGE`; Assess returns a `done` assessment and one suggestion is applied; removing paseo-bm's settings leaves no `bm-*` entry.
 
-**Default checkpoint posture:** WP-501 → WP-507 change only code and documents in this repository and are undone with git; nothing they add runs on a user's machine until a release, and the nudge switch is off by default. The points of no return are the npm publishes in WP-508 (the GitHub Release is the approval point, per the [release runbook](../operations/paseo-bm-release-runbook.md)). **R3 decision** (design §10): risk owner hieu.nt10; rehearsal selected — `0.5.0-alpha.0` on `next` plus the acceptance run before anything reaches `latest`. The way back for a user is `paseo plugin update paseo-bm --version 0.4.1` (design §10 lists what it leaves behind: the `bm-orchestrator` entries and the `orchestrator/` folder).
+**Default checkpoint posture:** every work package changes only code and documents in this repository and is undone with git; nothing reaches a user's machine until the owner releases it, and the nudge switch is off by default. The plan has no point of no return: publishing is outside it (MVP-Lock). When the owner releases, design §10 says what a downgrade to 0.4.1 leaves behind (the `bm-orchestrator` entries and the `orchestrator/` folder) and what the release notes must say.
 
 ## 2. Work packages
 
@@ -55,7 +55,7 @@ Canonical owner: [Orchestrator PRD §0](../product/paseo-bm-orchestrator-prd.md#
 - **Requirements:** REQ-077, REQ-079 (a) (the role exists only to be created on confirmation).
 - **Design:** orchestrator design §3.1, §3.2 (every place listed, with its decision, **except** the `CLEANUP_DELETES` row, which is WP-501's), §10 (compatibility table); base design §6.2 (`ROLE_PROFILE_IDS`), §7.2 (hook), §7.13 (roles on Setup); `roles/orchestrator.md` content per design §6.4 and §5.3 (read-only, one `bm_assessment` call, rubric meaning, English).
 - **Prerequisites:** none.
-- **Exit:** tests: `ensureRoles` on a config with the three roles creates only `bm-orchestrator` and leaves the others byte-identical; `setup-state.json` keeps `rolesCreated.roles` to the three roles and records `orchestratorCreatedAt`, and the 0.4.1 schema (from tag `v0.4.1`) still parses it; the 0.4.1 `roles.save-settings` code still saves another role on a config that contains `bm-orchestrator`; `bmRoleSchema` still has three values and `role-fallback-state.json` written by 0.4.1 still parses; the hook injects `orchestrator-instructions`, a non-dangerous mode, the profile model, and no `paseoTools` (its tool endpoint is WP-504's); `roles-content` checks that `orchestrator.md` has the read-only rules, the one-call rule and the 1–5 scale, and the generated `orchestrator-instructions.ts` matches the Markdown byte for byte; the collector records no turn of the new role; cleanup removes `bm-orchestrator`; the tests that pinned three roles are updated. The base design's role table lists four roles.
+- **Exit:** tests: `ensureRoles` on a config with the three roles creates only `bm-orchestrator` and leaves the others byte-identical; `setup-state.json` keeps `rolesCreated.roles` to the three roles and records `orchestratorCreatedAt`, and the 0.4.1 schema (from tag `v0.4.1`) still parses it; the 0.4.1 `roles.save-settings` code still saves another role on a config that contains `bm-orchestrator`; `bmRoleSchema` still has three values and `role-fallback-state.json` written by 0.4.1 still parses; the hook injects `orchestrator-instructions`, a mode under the Reviewer rule (a `dangerous` or `planning` mode is replaced, `auto_accept` stays off), the profile model, and no `paseoTools` (its tool endpoint is WP-504's); `roles-content` checks that `orchestrator.md` has the read-only rules, the one-call rule and the 1–5 scale, and the generated `orchestrator-instructions.ts` matches the Markdown byte for byte; the collector records no turn of the new role; cleanup removes `bm-orchestrator`; the tests that pinned three roles are updated. The base design's role table lists four roles.
 - **Boundary:** writes to the user's Paseo configuration (new entries only, through the existing `config.patch` path) and a compatibility seam with 0.4.1 stored data — the exit tests above are that seam's proof.
 
 ### WP-503 — Rules and flags
@@ -91,7 +91,7 @@ Canonical owner: [Orchestrator PRD §0](../product/paseo-bm-orchestrator-prd.md#
 - **Requirements:** REQ-071, REQ-078 (a), (b) (screen), REQ-078 (f) (the count on the tab).
 - **Design:** orchestrator design §7 (`orchestrator.overview`: caps of 50 requests per workspace and 300 in total, `truncated`, one `agents.list` for all workspaces, nudge counts from `nudges.json`), §8.1 (tab, `SETUP_TABS`, `ConfirmBlock` text, `onOpenTrace` callback and `initialTraceId` on `DashboardPanel`); dashboard design §11.3 (Setup tabs).
 - **Prerequisites:** WP-503 (flags), WP-501 (settings RPC), WP-505 (the nudge record it counts, and the switch's behaviour the dialog describes).
-- **Exit:** tests (pure models, no `react-native` value import in `test/`): overview aggregation, caps and `truncated`, nudge counts per request and for the period, empty state; the tab's text and the switch's confirmation; `onOpenTrace` sets the workspace and view and the card of that trace opens. The dashboard design §11.3 lists four tabs; base design §7.12 lists `orchestrator.overview`.
+- **Exit:** tests (pure models, no `react-native` value import in `test/`): overview aggregation, caps and `truncated`, nudge counts per request and for the period, empty state; `orchestrator.overview` makes no `agents.create`, no `send` and no timeline read (REQ-071 e); the tab's text and the switch's confirmation; `onOpenTrace` sets the workspace and view and the card of that trace opens. The dashboard design §11.3 lists four tabs; base design §7.12 lists `orchestrator.overview`.
 
 ### WP-507 — Flags, nudges and assessments on the Metric screen
 
@@ -101,14 +101,14 @@ Canonical owner: [Orchestrator PRD §0](../product/paseo-bm-orchestrator-prd.md#
 - **Prerequisites:** WP-503 (flags), WP-504 (assessment RPCs), WP-505 (nudges in `orchestrator.flags`).
 - **Exit:** tests (pure models): the `⚑ N` subtitle from one `flag-counts` call per page, the Flags chip group and evidence lines, the "based on the agents that still exist" note when `linking` is not `exact`, the "linked by turn" label, the Open agent and Refresh buttons of a `pending` assessment, the "Orchestrator nudge" lines, the preview dialog text from `assess-preview`, assessment rendering for `pending`/`done`/`failed`, the suggestion dialog showing the text after appending and `chars / 8,000`. The dashboard design §12 describes these elements.
 
-### WP-508 — User documents, release and acceptance
+### WP-508 — User documents and acceptance
 
-- **Outcome:** users can read about the Orchestrator; `0.5.0-alpha.0` is on `next` and passes the acceptance run on an isolated daemon; `0.5.0` is on `latest`.
+- **Outcome:** users can read about the Orchestrator; the finished work passes the acceptance run on an isolated daemon, so the owner can test it and decide on a release.
 - **Requirements:** every REQ of the MVP-Lock (observed evidence); PRD Phase O1 exit criteria.
-- **Design:** orchestrator design §10 (rollback and what a downgrade leaves), §11 (acceptance row); [release runbook](../operations/paseo-bm-release-runbook.md); `scripts/manual-test/README.md` (the acceptance kit, extended with the Orchestrator scenarios).
+- **Design:** orchestrator design §11 (acceptance row); `scripts/manual-test/README.md` (the acceptance kit, extended with the Orchestrator scenarios).
 - **Prerequisites:** WP-501 → WP-507.
-- **Exit:** GUIDE.md, README.md and `plugin/README.md` describe the tab, flags, Assess (what is sent and that it costs tokens) and the nudge switch (including that it interrupts a running Worker); release notes for `0.5.0-alpha.0` and `0.5.0`, including the downgrade note; the minor-version pin in `test/plugin-role-labels.test.ts` moved to `0.5.` with the owner's agreement; the acceptance run record (phase exit 5) in `docs/archive/operations/`; `npm view paseo-bm-plugin dist-tags` shows `next` → `0.5.0-alpha.0` then `latest` → `0.5.0`, with provenance; the plan closed (`Status: Completed`).
-- **Boundary:** R3 — the publishes cannot be undone; the owner approves each GitHub Release. Acceptance never touches the owner's real daemon or `~/.paseo-bm`.
+- **Exit:** GUIDE.md, README.md and `plugin/README.md` describe the tab, flags, Assess (what is sent and that it costs tokens) and the nudge switch (including that it interrupts a running Worker), without naming a version; `scripts/manual-test/README.md` gains the Orchestrator scenarios of phase exit 5 (update from 0.4.1, the Small request with a bead, the nudge switch, Assess and apply); the acceptance run record (phase exit 5) in `docs/archive/operations/`; the plan closed (`Status: Completed`).
+- **Boundary:** no version bump and no publish (MVP-Lock). Acceptance never touches the owner's real daemon or `~/.paseo-bm`.
 
 ## 3. Dependencies
 
@@ -136,14 +136,14 @@ WP-501 and WP-502 have no prerequisite and can run in parallel. No cycles.
 | Agents created by an older release do not know `BM-NUDGE` | Switch off by default; the notice explains itself |
 | Paseo changes how `send` behaves on a running agent | The existing stop propagation relies on the same behaviour; the acceptance run checks it on Paseo 0.9.2 |
 | Role files exceed their line caps | Write compactly; at most one documented raise per file (design §6.4) |
-| Downgrading to 0.4.1 leaves `bm-orchestrator` and `orchestrator/` behind | Accepted by the owner; release notes say how to remove them by hand |
+| Downgrading to 0.4.1 leaves `bm-orchestrator` and `orchestrator/` behind | Accepted by the owner; design §10 records what the release notes must say when the owner releases |
 
 ## 5. Open questions
 
 | ID | Question | Owner | Status | Blocks |
 |---|---|---|---|---|
 | Q-075 | Snapshot flags at request end so that they do not change when an agent is deleted | hieu.nt10 | deferred (design §12) | nothing in this phase |
-| Q-076 | Release number `0.5.0`, and moving the minor-version pin of `test/plugin-role-labels.test.ts` from `0.4.` to `0.5.` | hieu.nt10 | open — proposed here | WP-508 only |
+| Q-076 | Release number, and moving the minor-version pin of `test/plugin-role-labels.test.ts` | hieu.nt10 | **answered (2026-09-28)** — not in this plan: the owner decides after testing the finished work | nothing in this phase |
 
 ## 6. Test strategy
 
@@ -153,25 +153,27 @@ WP-501 and WP-502 have no prerequisite and can run in parallel. No cycles.
 - **Negative (trust boundary):** no `agents.create` without confirmation; no send with the switch off; never a send to a Worker whose latest report is `blocked`/`finished`; no `archive`/`cancel`; no read of a non-paseo-bm agent; no write outside the data folder and the `config.patch` scope.
 - **Role files:** `roles-content.test.ts` for `BM-NUDGE` and `orchestrator.md`; generated instructions match.
 - **Packaging:** `smoke:packed` for the plugin tarball.
-- **Acceptance:** isolated daemon with `scripts/manual-test/`, on the `next` tarball through a registry mirror, then on the real registry after publishing (WP-508).
+- **Acceptance:** isolated daemon with `scripts/manual-test/`, the plugin installed from the branch's folder over a 0.4.1 setup (WP-508).
 - **No new coverage threshold.** Existing tests stay green, apart from the ones that pinned three roles, updated in WP-502.
 
 ## 7. Revision History
 
 | Date | Who | Change |
 |---|---|---|
+| 2026-09-28 | hieu.nt10 (drafted by Claude) | Owner: no version bump or release in this plan — the owner tests the finished work first. Release, version and minor-version pin moved out of phase (Q-076 answered); WP-508 is user documents and acceptance; acceptance installs the branch's plugin over a 0.4.1 setup; file renamed from `paseo-bm-plan-050-orchestrator.md` |
+| 2026-09-28 | hieu.nt10 (drafted by Claude) | Second review (3 findings): WP-502's mode test follows REQ-077 (c) (no `planning` mode either, `auto_accept` off); WP-506 proves REQ-071 (e); WP-508 extends the manual-test kit that phase exit 5 relies on |
 | 2026-09-28 | hieu.nt10 (drafted by Claude) | After an independent review (7 findings): design gained the `nudges.json` record, `orchestrator.flag-counts` and nudge counts; WP-501 owns the stores and `CLEANUP_DELETES`, WP-503 the `BM-NUDGE` marker and the hook's call to the correction log, WP-504 the tool endpoint injection, WP-505 the nudges in `orchestrator.flags` and the full REQ-079 negative set, WP-506 the nudge count (new edge WP-506 → WP-505); every RPC and error code has a WP that adds it to base design §7.12; WP-502 and WP-507 exits completed |
 | 2026-09-28 | hieu.nt10 (drafted by Claude) | First version, Draft: eight work packages from the Active Orchestrator design and the Accepted PRD and ADR-013; self-evaluated against `plan-ready-for-beads` (§8) |
 
 ## 8. Gate `plan-ready-for-beads` — self-evaluation (2026-09-28)
 
 - **Header:** Status Draft, Plan-ready Pending, owner, Routing Decision linked, PRD + design + ADR linked, phase named "Phase O1 MVP" — ✓
-- **MVP-Lock:** REQ-071 → REQ-080 + the REQ-047 amendment; out of phase listed; six exit conditions; checkpoint posture with the R3 decision — ✓
+- **MVP-Lock:** REQ-071 → REQ-080 + the REQ-047 amendment; out of phase listed, releasing included; five exit conditions; checkpoint posture: no point of no return in the plan — ✓
 - **Work packages:** 8 (WP-501 → WP-508), each with outcome, requirements, design references, prerequisites, exit — ✓
 - **Dependencies:** 20 edges, acyclic, each naming the product the dependent WP needs — ✓
-- **Risks and open questions:** 10 risks with mitigations; Q-075 deferred, Q-076 blocks only WP-508 — ✓
+- **Risks and open questions:** 10 risks with mitigations; Q-075 deferred, Q-076 answered (out of plan) — ✓
 - **Test strategy:** per layer, fixtures, compatibility, negative, acceptance — ✓
-- **Applicable modules:** persistent state (WP-501, WP-502 boundaries), consumed contracts (RPCs additive, `BM-NUDGE` new, `bmRoleSchema` kept), trust boundary (WP-504, WP-505 negative tests), R3 (WP-508) — ✓
+- **Applicable modules:** persistent state (WP-501, WP-502 boundaries), consumed contracts (RPCs additive, `BM-NUDGE` new, `bmRoleSchema` kept), trust boundary (WP-504, WP-505 negative tests); R3 not applicable (no publish in the plan) — ✓
 - **Decomposition-readiness:** every blocking design choice (file shapes, RPC shapes, error codes, rule thresholds, watcher caps, tool name matching, storage keys) is in the design; boundaries are named on the WPs that cross seams; sequencing is explicit — ✓
 - **Warnings:** 8 WPs in one phase is at the limit but each is a coherent slice; plan length about 5 pages.
 
