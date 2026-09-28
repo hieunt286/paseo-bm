@@ -1,69 +1,69 @@
-# ADR-006 — Đăng ký vai trò bằng provider dẫn xuất cộng agent profile, mở quyền công cụ có cảnh báo
+# ADR-006 — Register roles with derived providers plus agent profiles; open tool permissions with a warning
 
-| Trường | Giá trị |
+| Field | Value |
 |---|---|
 | Status | Accepted |
 | Date | 2026-09-15 |
 | Owner | hieu.nt10 |
-| Liên quan | [PRD REQ-027, REQ-031, REQ-032](../product/paseo-bm-prd.md#6-functional-requirements) · [ADR-004](ADR-004-paseo-config-mutation.md) (mở rộng phạm vi) · [ADR-005](ADR-005-manager-as-agent.md) · [Technical Design](../design/paseo-bm.md) |
-| Sửa đổi bởi | [ADR-008](ADR-008-role-settings-written-by-plugin.md), quyết định 1 và 5 (Accepted 2026-09-22) · [ADR-012](ADR-012-plugin-is-the-product.md) (2026-09-25), quyết định 1, 4, 6, 7, 8: plugin (không phải trình cài) tạo alias và profile còn thiếu với mặc định, không hỏi; cấp tool Paseo cho agent là một nút riêng có cảnh báo trên Setup, không gộp với bật plugin; chỉ dẫn vai nhúng trong gói, không hash; gỡ bằng nút "Remove paseo-bm's settings"; trạng thái trước của `injectIntoAgents` ghi ở `ui/setup-state.json` dạng boolean |
+| Related | [PRD REQ-027, REQ-031, REQ-032](../product/paseo-bm-prd.md#6-functional-requirements) · [ADR-004](ADR-004-paseo-config-mutation.md) (scope expanded) · [ADR-005](ADR-005-manager-as-agent.md) · [Technical Design](../design/paseo-bm.md) |
+| Amended by | [ADR-008](ADR-008-role-settings-written-by-plugin.md), decisions 1 and 5 (Accepted 2026-09-22) · [ADR-012](ADR-012-plugin-is-the-product.md) (2026-09-25), decisions 1, 4, 6, 7, 8: the plugin (not the installer) creates missing aliases and profiles with defaults, without asking; granting Paseo tools to agents is a separate button with a warning on Setup, not combined with enabling the plugin; the role instructions are embedded in the package, without hashes; removal is through the "Remove paseo-bm's settings" button; the previous state of `injectIntoAgents` is recorded in `ui/setup-state.json` as a boolean |
 
 ## Context
 
-ADR-005 chốt Manager và Worker là agent. Muốn chúng tạo và theo dõi agent khác thì phải có hai thứ:
+ADR-005 settled that Manager and Worker are agents. For them to create and follow other agents, two things are needed:
 
-1. **Một chỗ để người dùng chọn công cụ và model cho từng vai trò** — Paseo gọi là agent profile.
-2. **Quyền dùng bộ công cụ Paseo** — mặc định agent **không** có.
+1. **A place for the user to choose the tool and model for each role** — Paseo calls it an agent profile.
+2. **Permission to use Paseo's tool set** — by default an agent does **not** have it.
 
-Dữ kiện đã khảo sát trên máy (Paseo 0.8.0, 2026-09-15):
+Facts surveyed on the machine (Paseo 0.8.0, 2026-09-15):
 
-- `daemon.mcp.enabled` mặc định bật; `daemon.mcp.injectIntoAgents` **mặc định tắt**, và khi bật thì **mọi** agent đều có công cụ Paseo. Trên máy owner nó đang bật sẵn, nhưng không được coi đó là mặc định của người dùng khác.
-- Có thể giới hạn theo provider bằng khoá `paseoTools` (`enabled`, `disabledTools`) trong `agents.providers.<id>`.
-- Provider **dẫn xuất** khai báo bằng `extends`, và **không bắt buộc** khai báo lại `command`. Ví dụ tối thiểu chỉ cần `extends` cộng `label`.
-- `daemon.agentProfiles` là một mảng, mỗi mục gồm `id`, `name`, `icon`, `color`, `provider`, `modeId`, `thinkingOptionId`, `notes`.
-- Máy owner **đã có** 6 provider dẫn xuất và 6 profile do paseo-room tạo (tiền tố `room-`). paseo-bm phải sống chung, không được ghi đè.
-- ADR-004 trước đây tuyên bố paseo-bm **không** chạm `agents.providers` và `daemon.agentProfiles`. Quyết định này **mở rộng phạm vi đó** vì sản phẩm đã đổi.
+- `daemon.mcp.enabled` is on by default; `daemon.mcp.injectIntoAgents` is **off by default**, and when on, **every** agent gets Paseo's tools. On the owner's machine it is already on, but that must not be taken as other users' default.
+- It can be limited per provider with the `paseoTools` key (`enabled`, `disabledTools`) in `agents.providers.<id>`.
+- A **derived** provider is declared with `extends`, and does **not have to** declare `command` again. The minimal example needs only `extends` plus `label`.
+- `daemon.agentProfiles` is an array, each entry having `id`, `name`, `icon`, `color`, `provider`, `modeId`, `thinkingOptionId`, `notes`.
+- The owner's machine **already has** 6 derived providers and 6 profiles created by paseo-room (prefix `room-`). paseo-bm must coexist with them and must not overwrite them.
+- ADR-004 previously stated that paseo-bm does **not** touch `agents.providers` and `daemon.agentProfiles`. This decision **expands that scope** because the product has changed.
 
 ## Decision
 
-1. **Đăng ký ba vai trò** dưới tiền tố `bm-`, để không đụng bất cứ thứ gì của người dùng hay của paseo-room:
-   - Provider dẫn xuất: `bm-manager`, `bm-worker`, `bm-reviewer`, mỗi cái chỉ gồm `extends` (trỏ tới provider gốc người dùng chọn), `label`, và `paseoTools`.
-   - Agent profile tương ứng, có `notes` mô tả rõ khi nào dùng vai trò nào.
-2. **Không khai báo `command`, không khai báo `env`.** Vai trò dùng lại đúng nhị phân và đúng phiên đăng nhập sẵn có của provider gốc. Đây là cách giữ lời hứa "không chạm credential": paseo-bm không tạo thư mục nhà riêng cho từng vai trò, không đụng token, không cách ly phiên đăng nhập — khác hẳn paseo-room.
-3. **Mở quyền công cụ — báo trước rồi bật, kèm thu hẹp theo vai trò** *(sửa 2026-09-15 theo quyết định của owner)*:
-   - Trình cài đặt **thông báo rõ rồi bật `daemon.mcp.injectIntoAgents`**. Cảnh báo phải nói thẳng: bật công tắc này nghĩa là **mọi agent trên máy** đều được quyền tạo, nhắc và dừng agent khác, chứ không riêng ba vai trò của paseo-bm. Bước này **gộp chung một lần hỏi với việc bật plugin**: tương tác thì một câu hỏi nêu đủ hai hệ quả; không tương tác thì cờ `--enable-plugins` phủ cả hai. *(Sửa 2026-09-15 — bản đầu tách thành hai lần đồng ý; owner chốt gộp vì bật plugin mà không mở quyền thì Manager không tạo được Worker.)*
-   - Vẫn đặt `paseoTools.enabled = true` cho `bm-manager` và `bm-worker`, và **không** đặt cho `bm-reviewer`. Đây là lớp thu hẹp bổ sung, có tác dụng thì tốt, không có tác dụng thì cũng không hại.
-   - Ghi vào hồ sơ nếu chính paseo-bm là bên bật công tắc, để lệnh gỡ trả lại đúng trạng thái cũ.
-   - *Bản đầu của ADR này chọn đường ngược lại — chỉ mở theo provider và tránh công tắc toàn cục. Owner chốt đổi vì đường hẹp chưa chắc có tác dụng, và một sản phẩm không tạo được agent thì vô dụng. Cái giá là phạm vi quyền rộng hơn, nên nó được đánh đổi bằng một cảnh báo tường minh thay vì làm lặng lẽ.*
-4. **Đồng ý phải tường minh, nhưng gộp với đồng ý bật plugin.** Cho một agent quyền tạo và dừng agent khác là một ranh giới an ninh, nên `--yes` **không bao giờ** được tính là đồng ý. Nhưng nó đi chung một lần hỏi với việc bật plugin, vì hai việc này chỉ có nghĩa khi đi cùng nhau.
-5. **Chỉ ghi phần của mình.** Với `daemon.agentProfiles` là một mảng, paseo-bm đọc, chỉ thêm hoặc sửa các mục có tiền tố `bm-`, giữ nguyên thứ tự và nội dung mọi mục khác, rồi ghi lại. **Không bao giờ thay cả mảng** — đây chính là chỗ paseo-room có thể nuốt mất thay đổi song song.
-6. **Chỉ dẫn vai trò là tài sản đi kèm phiên bản**, nằm trong payload plugin và được ghi vào thư mục cài đặt như mọi file khác: có hash, có phân loại quyền sở hữu, có backup khi ghi đè (ADR-002).
-7. **Gỡ cài đặt** thì xoá đúng các mục `bm-*` trong `agents.providers` và `daemon.agentProfiles`, trả `daemon.mcp.injectIntoAgents` về trạng thái cũ nếu chính paseo-bm đã bật, và giữ nguyên mọi thứ khác.
-8. **Ghi trạng thái trước theo từng khoá, không phải một cờ boolean.** Hồ sơ lưu `{ present, value }` của `daemon.mcp.injectIntoAgents` tại thời điểm trước khi paseo-bm chạm vào, vì "trước đó khoá không tồn tại" khác với "trước đó là `false`". Lúc gỡ thì sửa đúng khoá đó theo trạng thái đã ghi, có kiểm tra ghi song song — **không** khôi phục nguyên cả file backup, vì làm vậy sẽ xoá mất mọi thay đổi cấu hình phát sinh sau khi cài. Nếu giá trị hiện tại khác với giá trị paseo-bm đã đặt thì coi như người khác đã đổi và **không** đụng vào. *(Errata 2026-09-15, bm-tm2: cùng quy tắc áp cho `pluginsEnabled` qua trường `paseo.pluginsEnabledPrevious`, và hồ sơ ghi thêm `paseo.createdConfigContainers` — các container `config.json` do chính paseo-bm tạo — để lệnh gỡ xoá chúng khi đã rỗng trở lại; container có sẵn hoặc còn nội dung khác thì giữ. Xem Design §3.2.)*
-9. **Reviewer: ràng buộc ở hai lớp.** Không đặt `paseoTools` cho `bm-reviewer` là lớp cấu hình, nhưng khi công tắc toàn cục đã bật thì **chưa chắc** lớp này vô hiệu hoá được quyền. Vì vậy ràng buộc "Reviewer không tạo agent" phải được viết thẳng trong chỉ dẫn vai trò, và phần nghiệm thu phải kiểm tra thực tế Reviewer có nhận được công cụ quản lý agent hay không. Nếu hoá ra nó vẫn nhận, thì lớp chỉ dẫn là thứ duy nhất chặn review đệ quy và điều đó phải được ghi nhận như một rủi ro đã biết.
+1. **Register three roles** under the `bm-` prefix, so as not to touch anything of the user's or of paseo-room's:
+   - Derived providers: `bm-manager`, `bm-worker`, `bm-reviewer`, each consisting only of `extends` (pointing at the base provider the user chose), `label`, and `paseoTools`.
+   - The corresponding agent profiles, with `notes` that clearly describe when to use which role.
+2. **No `command`, no `env`.** The roles reuse exactly the binary and the existing login session of the base provider. This is how the promise "never touch credentials" is kept: paseo-bm creates no separate home directory per role, touches no token, and isolates no login session — quite unlike paseo-room.
+3. **Open tool permissions — announce first, then turn on, with per-role narrowing** *(revised 2026-09-15 per the owner's decision)*:
+   - The installer **announces clearly and then turns on `daemon.mcp.injectIntoAgents`**. The warning must say plainly: turning this switch on means **every agent on the machine** gets permission to create, nudge and stop other agents, not only paseo-bm's three roles. This step is **combined into one question with enabling the plugin**: interactively, one question states both consequences; non-interactively, the `--enable-plugins` flag covers both. *(Revised 2026-09-15 — the first draft split it into two consents; the owner decided to combine them because enabling the plugin without opening the permission leaves Manager unable to create a Worker.)*
+   - `paseoTools.enabled = true` is still set for `bm-manager` and `bm-worker`, and **not** set for `bm-reviewer`. This is an additional narrowing layer: good if it works, harmless if it does not.
+   - Record in the install record whether paseo-bm itself turned the switch on, so that the uninstall command returns exactly the previous state.
+   - *The first draft of this ADR chose the opposite path — open only per provider and avoid the global switch. The owner decided to change it because the narrow path might not work, and a product that cannot create agents is useless. The price is a wider permission scope, so it is traded for an explicit warning instead of being done silently.*
+4. **Consent must be explicit, but it is combined with the consent to enable the plugin.** Giving an agent the permission to create and stop other agents is a security boundary, so `--yes` **never** counts as consent. But it goes into the same question as enabling the plugin, because the two only make sense together.
+5. **Write only our own part.** With `daemon.agentProfiles` being an array, paseo-bm reads it, only adds or edits entries prefixed `bm-`, keeps the order and content of every other entry intact, and writes it back. **Never replace the whole array** — this is exactly where paseo-room can swallow a concurrent change.
+6. **The role instructions are a versioned asset**, living in the plugin payload and written into the install home like every other file: with a hash, ownership classification, and a backup on overwrite (ADR-002).
+7. **Uninstall** deletes exactly the `bm-*` entries in `agents.providers` and `daemon.agentProfiles`, returns `daemon.mcp.injectIntoAgents` to its previous state if paseo-bm itself turned it on, and keeps everything else intact.
+8. **Record the previous state per key, not as a boolean flag.** The record stores `{ present, value }` of `daemon.mcp.injectIntoAgents` as it was before paseo-bm touched it, because "the key did not exist before" is different from "it was `false` before". On uninstall, edit exactly that key according to the recorded state, with a concurrent-write check — **do not** restore the whole backup file, because that would erase every configuration change made after the install. If the current value differs from the value paseo-bm set, treat it as changed by someone else and do **not** touch it. *(Errata 2026-09-15, bm-tm2: the same rule applies to `pluginsEnabled` through the `paseo.pluginsEnabledPrevious` field, and the record also stores `paseo.createdConfigContainers` — the `config.json` containers created by paseo-bm itself — so that the uninstall command deletes them once they are empty again; a container that already existed or still has other content is kept. See Design §3.2.)*
+9. **Reviewer: constrained at two layers.** Not setting `paseoTools` for `bm-reviewer` is the configuration layer, but when the global switch is on, this layer **may not** be able to disable the permission. So the constraint "Reviewer does not create agents" must be written directly in the role instructions, and the acceptance run must check whether Reviewer actually receives the agent-management tools. If it turns out that it still does, then the instruction layer is the only thing preventing recursive review, and that must be recorded as a known risk.
 
 ## Consequences
 
-**Tích cực**
-- Người dùng chọn công cụ cho từng vai trò ngay trong Paseo, và thấy vai trò trong bộ chọn model như mọi profile khác.
-- Không đụng credential: không thư mục nhà riêng, không token, không cách ly phiên đăng nhập. Bằng chứng phủ định của PRD giữ nguyên giá trị.
-- Tiền tố `bm-` làm cho việc gỡ sạch trở nên xác định, và sống chung được với paseo-room.
-- Ghi trạng thái trước theo từng khoá cho phép hoàn tác đúng chỗ mà không đè lên thay đổi của người khác.
+**Positive**
+- The user chooses the tool for each role right inside Paseo, and sees the roles in the model picker like any other profile.
+- No credentials touched: no separate home directory, no token, no isolated login session. The PRD's negative evidence keeps its value.
+- The `bm-` prefix makes clean removal deterministic, and allows coexisting with paseo-room.
+- Recording the previous state per key allows undoing exactly the right thing without overriding someone else's change.
 
-**Tiêu cực / phải chấp nhận**
-- Phạm vi ghi vào `config.json` **rộng hơn hẳn** so với ADR-004: từ đúng một trường boolean lên ba provider, ba profile, và có thể cả công tắc MCP. Bù lại bằng quy tắc chỉ-ghi-phần-của-mình và bằng backup trước mỗi lần ghi.
-- Sửa một phần tử trong mảng `agentProfiles` khó hơn sửa một trường gốc; cần đọc–sửa–ghi cẩn thận và kiểm tra lại sau khi reload.
-- **Quyền rộng hơn mong muốn:** bật công tắc toàn cục nghĩa là mọi agent trên máy — kể cả những agent không liên quan tới paseo-bm — đều được quyền tạo, nhắc và dừng agent khác. Owner chấp nhận có ý thức, đổi lại phải cảnh báo tường minh lúc cài và `doctor` phải hiển thị trạng thái này.
-- **Lớp thu hẹp theo vai trò có thể vô tác dụng** khi công tắc toàn cục đã bật; khi đó "Reviewer không có công cụ" chỉ còn được bảo đảm bằng chỉ dẫn vai trò chứ không phải bằng cấu hình (quyết định 9).
-- Provider dẫn xuất kế thừa hạn mức và trạng thái đăng nhập của provider gốc; provider gốc hỏng thì cả ba vai trò hỏng theo.
+**Negative / to be accepted**
+- The scope of writes into `config.json` is **much wider** than in ADR-004: from exactly one boolean field up to three providers, three profiles, and possibly the MCP switch. Compensated by the write-only-our-own-part rule and by a backup before every write.
+- Editing one element of the `agentProfiles` array is harder than editing a root field; it needs a careful read–modify–write and a check after the reload.
+- **Wider permission than desired:** turning on the global switch means every agent on the machine — including agents that have nothing to do with paseo-bm — gets permission to create, nudge and stop other agents. The owner accepts this knowingly, in exchange for an explicit warning at install time and `doctor` showing this state.
+- **The per-role narrowing layer may have no effect** when the global switch is on; then "Reviewer has no tools" is guaranteed only by the role instructions, not by configuration (decision 9).
+- A derived provider inherits the base provider's usage limits and login state; if the base provider breaks, all three roles break with it.
 
 ## Alternatives considered
 
-| Phương án | Lý do loại |
+| Option | Reason rejected |
 |---|---|
-| Chỉ mở quyền theo provider, tránh công tắc toàn cục | **Đây là lựa chọn ban đầu của ADR này và đã bị owner đảo ngược ngày 2026-09-15.** Lý do loại: chưa có bằng chứng quyền theo provider có tác dụng khi công tắc toàn cục tắt, và một sản phẩm không tạo được agent thì vô dụng. Đường hẹp vẫn được giữ như lớp bổ sung |
-| Bật công tắc toàn cục **lặng lẽ**, không báo người dùng | Đây mới là phương án thật sự đáng loại: thay đổi ranh giới an ninh của cả máy mà người dùng không biết |
-| Bật `paseoTools` thẳng trên provider gốc (`codex`, `claude`) | Vẫn ảnh hưởng mọi agent dùng provider đó, trong khi chi phí tạo provider dẫn xuất gần như bằng không |
-| Sao chép mô hình paseo-room: provider riêng kèm thư mục nhà và phiên đăng nhập riêng cho từng vai trò | Kéo theo trách nhiệm quản lý credential mà PRD đã tuyên bố không nhận; cũng buộc người dùng đăng nhập lại nhiều lần cho cùng một công cụ |
-| Không đăng ký profile, để Manager truyền thẳng provider và model khi tạo agent | Người dùng mất chỗ để xem và sửa cấu hình vai trò; và cấu hình sẽ nằm rải trong chỉ dẫn thay vì ở nơi Paseo dành cho nó |
-| Ghi đè cả mảng `agentProfiles` cho gọn | Chính là lỗi đã thấy ở paseo-room: mất thay đổi song song từ ứng dụng |
+| Open the permission only per provider, avoiding the global switch | **This was the original choice of this ADR and was reversed by the owner on 2026-09-15.** Reason rejected: there is no evidence yet that the per-provider permission works when the global switch is off, and a product that cannot create agents is useless. The narrow path is still kept as an additional layer |
+| Turn on the global switch **silently**, without telling the user | This is the option that truly deserves rejection: changing the security boundary of the whole machine without the user knowing |
+| Turn on `paseoTools` directly on the base provider (`codex`, `claude`) | Still affects every agent using that provider, while the cost of creating a derived provider is almost zero |
+| Copy the paseo-room model: separate providers with a separate home directory and login session for each role | Brings the responsibility of managing credentials that the PRD has declared it does not take on; also forces the user to log in again several times for the same tool |
+| Register no profiles, and let Manager pass the provider and model directly when creating an agent | The user loses a place to view and edit the role configuration; and the configuration would be scattered through the instructions instead of in the place Paseo reserves for it |
+| Overwrite the whole `agentProfiles` array for simplicity | This is exactly the bug seen in paseo-room: losing a concurrent change from the app |

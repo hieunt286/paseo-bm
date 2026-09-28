@@ -1,63 +1,63 @@
-# ADR-012 — Một nguồn duy nhất: plugin `paseo-bm-plugin` cài từ npm / paseo.cafe là toàn bộ sản phẩm
+# ADR-012 — One source: the `paseo-bm-plugin` plugin installed from npm / paseo.cafe is the whole product
 
-| Trường | Giá trị |
+| Field | Value |
 |---|---|
 | Status | **Accepted** (2026-09-25) |
 | Date | 2026-09-25 |
 | Owner | hieu.nt10 |
-| Thay thế | [ADR-001](ADR-001-plugin-distribution.md) (phân phối bằng payload đi kèm trình cài); [ADR-009](ADR-009-payload-as-npm-package.md) quyết định 4 và 5 (trình cài là đường cài được hỗ trợ; gói thứ hai không nằm trên đường cài) |
-| Sửa đổi | [ADR-002](ADR-002-install-ownership-model.md) (hồ sơ cài đặt chỉ còn cho người dùng cũ); [ADR-003](ADR-003-skills-delegation.md) (plugin, không phải trình cài, chạy CLI `skills` sau khi người dùng bấm); [ADR-004](ADR-004-paseo-config-mutation.md) (plugin sửa config qua `config.patch`, không qua file); [ADR-006](ADR-006-role-registration.md) quyết định 1, 4, 6, 7, 8 (ai tạo và gỡ vai trò, ai hỏi đồng ý); [ADR-008](ADR-008-role-settings-written-by-plugin.md) quyết định 2 (plugin được **tạo** ba vai trò chính) |
-| Liên quan | [Technical Design](../design/paseo-bm.md) §3, §4, §5, §6, §7 · [PRD](../product/paseo-bm-prd.md) · [hồ sơ paseo.cafe](../operations/paseo-bm-cafe-listing-20260923.md) |
-| Quyết định của chủ repo | 2026-09-25: một nguồn duy nhất là `paseo-bm-plugin`; bản cuối của `npx paseo-bm` tự chuyển người dùng cũ; chỉ hỗ trợ Paseo 0.9+; plugin tự tạo ba vai trò, các bước còn lại cần đồng ý qua nút trên Setup |
+| Supersedes | [ADR-001](ADR-001-plugin-distribution.md) (distribution through a payload shipped with the installer); [ADR-009](ADR-009-payload-as-npm-package.md) decisions 4 and 5 (the installer is the supported install path; the second package is not on the install path) |
+| Amends | [ADR-002](ADR-002-install-ownership-model.md) (the install record now exists only for existing users); [ADR-003](ADR-003-skills-delegation.md) (the plugin, not the installer, runs the `skills` CLI after the user clicks); [ADR-004](ADR-004-paseo-config-mutation.md) (the plugin edits the config through `config.patch`, not through the file); [ADR-006](ADR-006-role-registration.md) decisions 1, 4, 6, 7, 8 (who creates and removes roles, who asks for consent); [ADR-008](ADR-008-role-settings-written-by-plugin.md) decision 2 (the plugin may **create** the three main roles) |
+| Related | [Technical Design](../design/paseo-bm.md) §3, §4, §5, §6, §7 · [PRD](../product/paseo-bm-prd.md) · [paseo.cafe listing record](../operations/paseo-bm-cafe-listing-20260923.md) |
+| The owner's decisions | 2026-09-25: the single source is `paseo-bm-plugin`; the last release of `npx paseo-bm` migrates existing users itself; only Paseo 0.9+ is supported; the plugin creates the three roles itself, the remaining steps need consent through a button on Setup |
 
 ## Context
 
-Tới 0.3.1, paseo-bm có hai gói npm cùng phiên bản:
+Up to 0.3.1, paseo-bm had two npm packages at the same version:
 
-- `paseo-bm` — trình cài chạy bằng `npx`: chép payload vào `~/.paseo-bm/plugin/<version>/`, đăng ký plugin dạng thư mục, tạo ba vai trò `bm-*`, hỏi đồng ý bật plugin và cấp tool Paseo cho agent, chạy CLI `skills`, cài `br`/`bv`, có `doctor` và `uninstall`.
-- `paseo-bm-plugin` — chính thư mục `plugin/`, tồn tại chỉ vì paseo.cafe đòi gốc gói npm phải là plugin nạp được (ADR-009).
+- `paseo-bm` — the installer run with `npx`: copies the payload into `~/.paseo-bm/plugin/<version>/`, registers the plugin as a directory, creates the three `bm-*` roles, asks for consent to enable the plugin and grant Paseo tools to agents, runs the `skills` CLI, installs `br`/`bv`, and has `doctor` and `uninstall`.
+- `paseo-bm-plugin` — the `plugin/` directory itself, existing only because paseo.cafe demands that the npm package root be a loadable plugin (ADR-009).
 
-Người dùng cài thẳng từ paseo.cafe nhận giao diện nhưng **thiếu ba vai trò**, nên Manager không tạo được Worker; caveat của listing phải cảnh báo điều đó. Hai đường cài, một đường hỏng, hai gói phải giữ khớp phiên bản.
+A user installing directly from paseo.cafe gets the interface but **lacks the three roles**, so Manager cannot create a Worker; the listing's caveat has to warn about that. Two install paths, one of them broken, two packages whose versions must be kept in step.
 
-Paseo 0.9 đã có nguồn npm (`paseo plugin add npm:<gói>`) và tự cập nhật (`paseo plugin update`). Một phân tích đối chiếu từng việc của trình cài (27 việc, 2026-09-25) cho thấy: 5 việc plugin đã làm, 12 việc plugin làm được bằng API sẵn có (chủ yếu `config.patch`), 10 việc không còn cần vì Paseo tự lo. Plugin **không** làm được ba điều: bật `pluginsEnabled` (plugin chưa chạy khi công tắc còn tắt), tự dọn khi bị gỡ (Paseo không có hook gỡ plugin), và sao lưu nguyên file config (SDK chỉ trả một view). Những chỗ còn thiếu là **quy tắc của chính plugin**, không phải API thiếu.
+Paseo 0.9 has an npm source (`paseo plugin add npm:<package>`) and updates by itself (`paseo plugin update`). An analysis comparing each of the installer's jobs (27 jobs, 2026-09-25) showed: 5 jobs the plugin already does, 12 jobs the plugin can do with existing APIs (mostly `config.patch`), 10 jobs no longer needed because Paseo handles them. The plugin **cannot** do three things: turn on `pluginsEnabled` (the plugin is not running while the switch is still off), clean up after itself when removed (Paseo has no plugin-removal hook), and back up the whole config file (the SDK returns only a view). What is still missing is **the plugin's own rules**, not missing APIs.
 
 ## Decision
 
-1. **Sản phẩm là một gói: `paseo-bm-plugin`.** Người dùng cài bằng paseo.cafe hoặc `paseo plugin add npm:paseo-bm-plugin`, cập nhật bằng `paseo plugin update paseo-bm`. Đó là đường cài duy nhất được hỗ trợ. Entry registry giữ `package: "paseo-bm-plugin"`, `path: "plugin"`.
-2. **Chỉ hỗ trợ Paseo 0.9 trở lên.** `paseo-plugin.json` khai `requirements.paseo: ">=0.9.0"`. Người dùng Paseo 0.8 giữ `paseo-bm@0.3.1` hoặc nâng Paseo.
-3. **Plugin tự sở hữu thư mục dữ liệu.** Mặc định `~/.paseo-bm` (giữ nguyên dữ liệu của người dùng cũ), plugin **tự tạo** nó khi cần, quyền `0700`. Thư mục Paseo quản lý gói npm có thể đổi mỗi lần cập nhật nên không bao giờ chứa dữ liệu. `install.json` không còn là điều kiện để plugin tin một thư mục dữ liệu.
-4. **Plugin tự tạo ba vai trò lần đầu.** Khi plugin thấy thiếu `bm-manager`, `bm-worker` hoặc `bm-reviewer` (lúc mở lối vào, Setup, hay `manager.ensure`), nó tạo provider dẫn xuất và agent profile của vai trò đó qua `config.patch`, theo đúng quy tắc mặc định của trình cài cũ: provider đầu tiên Paseo báo là dùng được, model đầu tiên của provider đó; `paseoTools.enabled` cho Manager và Worker, không cho Reviewer; không bao giờ ghi `command` hay `env`. Nó chỉ tạo **mục còn thiếu**, không sửa mục đã có (ADR-008 quyết định 5: config của Paseo là nguồn sự thật), và báo trên Setup rằng vai trò được tạo với mặc định, đổi được ở tab Agents. ADR-008 quyết định 2 ("plugin không bao giờ tạo ba vai trò chính") hết hiệu lực; phạm vi ghi vẫn chỉ là các mục id bắt đầu bằng `bm-`.
-5. **Ba bước còn lại cần một cú bấm có cảnh báo trên Setup**, không gì tự chạy:
-   - **Cấp tool Paseo cho agent** (`daemon.mcp.injectIntoAgents`), kèm cảnh báo "áp dụng cho mọi agent trên máy". Plugin ghi lại giá trị trước đó vào thư mục dữ liệu để hoàn tác đúng.
-   - **Cài skills** bằng CLI `skills` của bên thứ ba (argv cố định, hạn 300 giây, kiểm lại sau khi chạy), kèm lưu ý đó là công cụ bên thứ ba.
-   - **Cài `br`/`bv`**: đã có trên Setup, giữ nguyên.
-   Đăng nhập provider: Setup hiện trạng thái và lệnh đăng nhập của chính công cụ đó; plugin không chạy lệnh đăng nhập và không bao giờ thấy thông tin đăng nhập.
-6. **Gỡ cài đặt là một nút trên Setup**: "Gỡ cấu hình của paseo-bm" xoá mọi provider và profile `bm-*` (kể cả alias dự phòng), trả `injectIntoAgents` về giá trị đã ghi nếu chính plugin đã bật nó, và chỉ xoá thư mục dữ liệu sau một xác nhận thứ hai (mặc định giữ). Sau đó người dùng chạy `paseo plugin remove paseo-bm`. Gỡ plugin mà không bấm nút thì cấu hình còn lại; README và caveat của listing nói rõ điều này.
-7. **`npx paseo-bm` 0.4.0 là bản cuối, chỉ để chuyển đổi.** Nó thay mọi lệnh cũ bằng một việc: nếu máy có bản cài dạng thư mục của paseo-bm, chạy `paseo plugin remove paseo-bm` rồi `paseo plugin add npm:paseo-bm-plugin@<phiên bản của nó>`, và nếu bước sau hỏng thì cài lại thư mục cũ; giữ nguyên dữ liệu, vai trò và công tắc; đánh dấu `install.json` là đã chuyển. Không có bản cài cũ thì nó chỉ in hướng dẫn cài từ paseo.cafe. Sau 0.4.0, `release.yml` chỉ publish `paseo-bm-plugin`, và owner đánh dấu `paseo-bm` deprecated trên npm (cần OTP). Plugin chạy từ bản cài thư mục thì hiện banner trên Setup nhắc chạy `npx paseo-bm` một lần.
-8. **Sức khoẻ**: tab và dòng tình trạng của Setup thay `doctor` khi plugin đang chạy. Khi plugin không nạp được, README chỉ tới `paseo plugin ls` và `paseo plugin logs paseo-bm`.
-9. **Phiên bản 0.4.0.** Bỏ CLI là đổi hợp đồng công khai mà caveat của listing đã hứa, nên tăng minor.
+1. **The product is one package: `paseo-bm-plugin`.** The user installs it through paseo.cafe or `paseo plugin add npm:paseo-bm-plugin`, and updates it with `paseo plugin update paseo-bm`. That is the only supported install path. The registry entry keeps `package: "paseo-bm-plugin"`, `path: "plugin"`.
+2. **Only Paseo 0.9 and later is supported.** `paseo-plugin.json` declares `requirements.paseo: ">=0.9.0"`. Paseo 0.8 users keep `paseo-bm@0.3.1` or upgrade Paseo.
+3. **The plugin owns its data folder itself.** By default `~/.paseo-bm` (existing users' data is kept), the plugin **creates** it itself when needed, with permissions `0700`. The directory where Paseo manages npm packages may change on every update, so it never holds data. `install.json` is no longer a condition for the plugin to trust a data folder.
+4. **The plugin creates the three roles itself the first time.** When the plugin finds `bm-manager`, `bm-worker` or `bm-reviewer` missing (when the entry point opens, on Setup, or in `manager.ensure`), it creates that role's derived provider and agent profile through `config.patch`, following exactly the old installer's default rules: the first provider Paseo reports as usable, that provider's first model; `paseoTools.enabled` for Manager and Worker, not for Reviewer; never writing `command` or `env`. It creates only **missing entries**, does not edit existing ones (ADR-008 decision 5: the Paseo config is the source of truth), and says on Setup that the roles were created with defaults and can be changed in the Agents tab. ADR-008 decision 2 ("the plugin never creates the three main roles") no longer applies; the write scope is still only entries whose id starts with `bm-`.
+5. **The three remaining steps need a click with a warning on Setup**; nothing runs by itself:
+   - **Grant Paseo tools to agents** (`daemon.mcp.injectIntoAgents`), with the warning "applies to every agent on the machine". The plugin records the previous value in the data folder so it can be undone correctly.
+   - **Install skills** with the third-party `skills` CLI (fixed argv, a 300-second limit, a check after running), with a note that it is a third-party tool.
+   - **Install `br`/`bv`**: already on Setup, unchanged.
+   Provider login: Setup shows the state and the login command of the tool itself; the plugin does not run the login command and never sees the credentials.
+6. **Uninstalling is a button on Setup**: "Remove paseo-bm's settings" deletes every `bm-*` provider and profile (including the fallback aliases), returns `injectIntoAgents` to the recorded value if the plugin itself turned it on, and deletes the data folder only after a second confirmation (kept by default). The user then runs `paseo plugin remove paseo-bm`. If the plugin is removed without clicking the button, the settings remain; the README and the listing's caveat say so plainly.
+7. **`npx paseo-bm` 0.4.0 is the last release, for migration only.** It replaces every old command with one job: if the machine has a directory install of paseo-bm, run `paseo plugin remove paseo-bm` and then `paseo plugin add npm:paseo-bm-plugin@<its version>`, and if the latter fails, reinstall the old directory; keep the data, the roles and the switches intact; mark `install.json` as migrated. With no old install, it only prints instructions for installing from paseo.cafe. After 0.4.0, `release.yml` publishes only `paseo-bm-plugin`, and the owner marks `paseo-bm` deprecated on npm (needs an OTP). A plugin running from a directory install shows a banner on Setup reminding the user to run `npx paseo-bm` once.
+8. **Health**: Setup's tab and status line replace `doctor` while the plugin is running. When the plugin cannot load, the README points to `paseo plugin ls` and `paseo plugin logs paseo-bm`.
+9. **Version 0.4.0.** Dropping the CLI changes a public contract that the listing's caveat promised, so the minor version goes up.
 
 ## Consequences
 
-**Tích cực**
-- Một đường cài, một gói, một nơi cập nhật: người dùng từ paseo.cafe nhận đủ sản phẩm.
-- Bớt phần lớn mã trong `src/` (sao chép payload, hồ sơ sở hữu, đăng ký, nâng cấp, prune, khoá, preflight, báo cáo CLI) và các test của nó; việc bảo trì còn một gói.
-- Cập nhật do Paseo lo (`paseo plugin update`), không còn thư mục phiên bản song song trong `~/.paseo-bm/plugin/`.
+**Positive**
+- One install path, one package, one place to update: users from paseo.cafe get the complete product.
+- Most of the code in `src/` (copying the payload, the ownership record, registration, upgrade, prune, lock, preflight, CLI reports) and its tests go away; maintenance is down to one package.
+- Updates are handled by Paseo (`paseo plugin update`); no more parallel version directories in `~/.paseo-bm/plugin/`.
 
-**Tiêu cực / phải chấp nhận**
-- Người dùng Paseo 0.8 không còn đường lên phiên bản mới.
-- Không còn bản sao lưu nguyên file `~/.paseo/config.json` trước khi sửa; thay bằng `config.patch` (daemon kiểm và tự khôi phục file của nó khi lỗi) cộng kiểm revision của plugin — đúng mức ADR-008 đã chấp nhận cho việc sửa vai trò.
-- Tạo profile nghĩa là ghi lại cả mảng `agentProfiles`: cùng rủi ro ghi đè đồng thời đã chấp nhận ở ADR-008 quyết định 3.
-- Gỡ plugin không qua nút để lại cấu hình `bm-*` và `injectIntoAgents`; chỉ nhắc được bằng tài liệu.
-- Một `npx paseo-bm@0.3.x` đã cache vẫn có thể cài ngược lại bản thư mục; chỉ cảnh báo deprecate của npm và bản 0.4.0 giảm được rủi ro này.
-- Việc cấp tool Paseo cho agent vẫn là công tắc toàn máy; nếu kiểm trên daemon thật cho thấy `paseoTools.enabled` của từng provider đủ để cấp tool mà không cần công tắc, nút này sẽ được bỏ bằng một quyết định sau.
+**Negative / to be accepted**
+- Paseo 0.8 users no longer have a path to new versions.
+- There is no longer a backup of the whole `~/.paseo/config.json` file before editing; replaced by `config.patch` (the daemon validates and restores its own file on error) plus the plugin's revision check — exactly the level ADR-008 accepted for editing roles.
+- Creating a profile means rewriting the whole `agentProfiles` array: the same concurrent-overwrite risk already accepted in ADR-008 decision 3.
+- Removing the plugin without the button leaves the `bm-*` settings and `injectIntoAgents` behind; this can only be pointed out in documentation.
+- A cached `npx paseo-bm@0.3.x` can still install the directory version back; only npm's deprecation warning and the 0.4.0 release reduce this risk.
+- Granting Paseo tools to agents is still a machine-wide switch; if a check on a real daemon shows that each provider's `paseoTools.enabled` is enough to grant the tools without the switch, this button will be dropped by a later decision.
 
 ## Alternatives considered
 
-| Phương án | Lý do loại |
+| Option | Reason rejected |
 |---|---|
-| Giữ hai gói, chỉ để plugin tự tạo vai trò | Vẫn hai đường cài, hai thứ phải phát hành và giữ khớp; chủ repo muốn một nguồn |
-| Đổi tên gói duy nhất thành `paseo-bm` | `paseo-bm` 0.1–0.3.1 là trình cài: một phạm vi phiên bản cũ sẽ cho Paseo một gói không nạp được; `npx paseo-bm` hỏng hẳn không kèm lời giải thích; phải đổi entry registry và trusted publisher |
-| Plugin tự chuyển bản cài thư mục sang npm | `paseo plugin remove` chạy từ trong plugin dừng chính tiến trình đó giữa chừng; hỏng nửa chừng thì người dùng không còn giao diện nào để gỡ rối |
-| Tiếp tục hỗ trợ Paseo 0.8 qua nguồn Git | Thêm một đường cài phải kiểm và viết tài liệu, trái mục tiêu một nguồn |
-| Hỏi đồng ý cả việc tạo vai trò | Chủ repo chọn tự tạo: vai trò chỉ là mục `bm-*` của chính paseo-bm, không cấp quyền gì mới; quyền thật (tool Paseo cho mọi agent, chạy công cụ bên thứ ba) vẫn qua nút |
+| Keep two packages, only let the plugin create the roles itself | Still two install paths, two things to release and keep in step; the owner wants one source |
+| Rename the single package to `paseo-bm` | `paseo-bm` 0.1–0.3.1 is the installer: an old version range would give Paseo a package that cannot load; `npx paseo-bm` would break outright with no explanation; the registry entry and trusted publisher would have to change |
+| The plugin migrates the directory install to npm itself | `paseo plugin remove` run from inside the plugin stops that very process midway; if it fails halfway, the user is left with no interface to troubleshoot from |
+| Keep supporting Paseo 0.8 through a Git source | Adds another install path to test and document, against the one-source goal |
+| Ask for consent to create the roles as well | The owner chose to create them automatically: the roles are only paseo-bm's own `bm-*` entries and grant no new permission; the real permissions (Paseo tools for every agent, running a third-party tool) still go through a button |

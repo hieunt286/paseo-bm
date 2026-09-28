@@ -5,7 +5,7 @@ import { modelPriceSchema } from "./prices";
 /**
  * RPC contracts for the paseo-bm plugin.
  *
- * Source of truth: docs/design/paseo-bm.md §7.12 ("Bảng RPC của plugin").
+ * Source of truth: docs/design/paseo-bm.md §7.12 ("The plugin's RPC table").
  * This module is `shared/`, so it must stay free of Node and React Native
  * runtime imports: Zod schemas and plain values only.
  *

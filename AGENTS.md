@@ -13,9 +13,11 @@ Read this before touching anything in this repository.
 
 ## Language rule
 
-- Everything **for agents** — this file, `plugin/roles/*.md`, and any system prompt — is written in **English**.
-- **Everything that goes into git or out with a release is written in English**: commit messages, the release notes under `docs/releases/`, and the [release runbook](docs/operations/paseo-bm-release-runbook.md). The notes are published verbatim as the GitHub Release body, so they are read by everyone, not only by this project.
-- Everything else in `docs/` is written in **Vietnamese** for human readers. Keep it that way.
+**Everything in this repository is written in English** (owner decision, 2026-09-28: the product is global). That covers this file, `plugin/roles/*.md` and every system prompt; commit messages, release notes and the release runbook; and every living document in `docs/` — PRDs, designs, ADRs, plans, operations, the docs index. New documents are written in English from the start.
+
+- **One exception: `docs/archive/`** is the historical record and stays in Vietnamese, as it was written. It is never edited, and code comments cite its files by name and section.
+- A quote of a user or of an agent keeps its meaning in English; do not paste Vietnamese into a living document.
+- The release notes are published verbatim as the GitHub Release body, so they are read by everyone, not only by this project.
 - Docs that the product's Worker generates in a *target* repo follow that repo's existing language, defaulting to English.
 
 ## Tech stack
@@ -88,7 +90,7 @@ things cost a red run to learn there:
 
 ```
 AGENTS.md              this file (CLAUDE.md is a symlink to it)
-docs/README.md         index of the docs, in Vietnamese: start here
+docs/README.md         index of the docs: start here
 docs/product/          PRDs (Accepted, living): paseo-bm-prd.md, paseo-bm-dashboard-prd.md
 docs/design/           Technical Designs (Active, living): paseo-bm.md, paseo-bm-dashboard.md,
                        plus the research note on instructions by provider

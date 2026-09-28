@@ -1,6 +1,6 @@
 /**
  * Secret masking — the last thing that touches text on its way out
- * (Technical Design §9, "Bí mật").
+ * (Technical Design §9, "Secrets").
  *
  * The rule this module exists to enforce is *where* masking happens, not how
  * clever it is: a filter is applied once, at the final exit of each of the

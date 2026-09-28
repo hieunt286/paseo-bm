@@ -1,25 +1,25 @@
-# paseo.cafe — hồ sơ liệt kê paseo-bm
+# paseo.cafe — the paseo-bm listing record
 
-| Trường | Giá trị |
+| Field | Value |
 |---|---|
-| Mã | `cafe-listing-20260923` |
-| Status | **Active** — paseo-bm đã được liệt kê: [PR #215](https://github.com/paseo-cafe/paseo-cafe/pull/215) merged 2026-09-25. Caveat viết lại cho 0.4 trong [PR #284](https://github.com/paseo-cafe/paseo-cafe/pull/284) (mở 2026-09-28, mọi check xanh, chờ maintainer merge) |
+| ID | `cafe-listing-20260923` |
+| Status | **Active** — paseo-bm is listed: [PR #215](https://github.com/paseo-cafe/paseo-cafe/pull/215) merged 2026-09-25. Caveats rewritten for 0.4 in [PR #284](https://github.com/paseo-cafe/paseo-cafe/pull/284) (opened 2026-09-28, every check green, waiting for a maintainer to merge) |
 | Owner | hieu.nt10 |
 | Created | 2026-09-23 |
-| Yêu cầu | `req-20260923T063441Z`: "Bây giờ tôi muốn đăng ký plugin của mình lên trang này : https://paseo.cafe/submit , tôi cần làm gì và bạn có thể hỗ trợ tôi làm được những gì" |
-| Quyết định của owner | Q3a (sửa trong working tree, owner tự commit), Q4a (owner gửi ảnh chụp màn hình), Q5a (dùng bản nháp metadata). Q1a (manifest ở gốc repo, không khai `path`) và Q2a (không khai `package`) **đã bị thay**: CI của registry bác cả hai (§4, §10), entry nay khai `path: "plugin"` và `package: "paseo-bm-plugin"` ([ADR-009](../adr/ADR-009-payload-as-npm-package.md)) |
-| Nguồn đã đọc (2026-09-23) | `paseo-cafe/paseo-cafe`: `README.md`, `scripts/validate-registry.ts`, `scripts/scan.ts`, `src/lib/registry-schema.ts`, `registry/paseo-beads.json`; trang `paseo.cafe/submit` và `paseo.cafe/plugins/paseo-beads` |
+| Request | `req-20260923T063441Z`: "Now I want to register my plugin on this site : https://paseo.cafe/submit , what do I need to do and what can you help me do" |
+| Owner's decisions | Q3a (edit in the working tree, the owner commits), Q4a (the owner sends the screenshots), Q5a (use the draft metadata). Q1a (manifest at the repo root, no `path` declared) and Q2a (no `package` declared) **have been superseded**: the registry's CI rejected both (§4, §10), the entry now declares `path: "plugin"` and `package: "paseo-bm-plugin"` ([ADR-009](../adr/ADR-009-payload-as-npm-package.md)) |
+| Sources read (2026-09-23) | `paseo-cafe/paseo-cafe`: `README.md`, `scripts/validate-registry.ts`, `scripts/scan.ts`, `src/lib/registry-schema.ts`, `registry/paseo-beads.json`; the pages `paseo.cafe/submit` and `paseo.cafe/plugins/paseo-beads` |
 
-## 1. paseo.cafe nhận hồ sơ thế nào
+## 1. How paseo.cafe takes a listing
 
-- Directory cộng đồng, **không chính thức**; trang chủ tự ghi các mục "not reviewed, audited, or vouched for".
-- Một plugin là **một file** `registry/<plugin-id>.json` trong repo `github.com/paseo-cafe/paseo-cafe`. Tên file phải trùng plugin id dạng kebab-case: với chúng ta là `registry/paseo-bm.json`.
-- Hai đường nộp: form https://paseo.cafe/submit điền sẵn rồi mở issue (bot chuyển thành PR), hoặc tự mở PR thêm file.
-  **Hồ sơ này đi đường PR thủ công.** Form bắt buộc điền npm package, và hoá ra CI của họ cũng vậy với hồ sơ mới — xem §4.
+- A community directory, **not official**; the home page itself says its entries are "not reviewed, audited, or vouched for".
+- A plugin is **one file** `registry/<plugin-id>.json` in the repo `github.com/paseo-cafe/paseo-cafe`. The file name must match the plugin id in kebab-case: for us that is `registry/paseo-bm.json`.
+- Two ways to submit: the form at https://paseo.cafe/submit pre-fills and then opens an issue (a bot turns it into a PR), or open a PR adding the file yourself.
+  **This listing goes the manual PR way.** The form requires an npm package, and it turns out their CI does too for a new listing — see §4.
 
-## 2. Nội dung file đang nộp
+## 2. The content of the file being submitted
 
-Nhánh `hieunt286:paseo-bm-caveats-040` ([PR #284](https://github.com/paseo-cafe/paseo-cafe/pull/284), 2026-09-28), chỉ đổi `caveats` so với bản đã merge ở PR #215:
+Branch `hieunt286:paseo-bm-caveats-040` ([PR #284](https://github.com/paseo-cafe/paseo-cafe/pull/284), 2026-09-28), which changes only `caveats` compared with the version merged in PR #215:
 
 ```json
 {
@@ -40,95 +40,95 @@ Nhánh `hieunt286:paseo-bm-caveats-040` ([PR #284](https://github.com/paseo-cafe
 }
 ```
 
-Owner duyệt nội dung ngày 2026-09-28. Không còn câu nào nêu số phiên bản của sản phẩm (chỉ Paseo 0.9.0+ và lệnh chuyển đổi `npx paseo-bm@0.4.0`, cả hai cố định). CI của PR #284: `Registry admission` với `FETCH/VALIDATE/TARGETS/SCAN/PUBLISH_OUTCOME` đều `success`; báo cáo quét của họ: `paseo-bm-plugin` 0.4.1 `passed`, 0 blocking, 0 advisory. Trước khi đẩy: `bunx biome check --error-on-warnings` sạch và `validate-registry.ts` đạt trên máy; file được ghi bằng một script dừng khi lỗi và kiểm nội dung không rỗng (§13).
+The owner approved the content on 2026-09-28. No sentence states a version number of the product any more (only Paseo 0.9.0+ and the migration command `npx paseo-bm@0.4.0`, both fixed). CI of PR #284: `Registry admission` with `FETCH/VALIDATE/TARGETS/SCAN/PUBLISH_OUTCOME` all `success`; their scan report: `paseo-bm-plugin` 0.4.1 `passed`, 0 blocking, 0 advisory. Before pushing: `bunx biome check --error-on-warnings` clean and `validate-registry.ts` passing locally; the file was written by a script that stops on error and checks that the content is not empty (§13).
 
-Bản 0.3.x (PR #215) nói `npx paseo-bm` là đường cài duy nhất và cài từ trang này thiếu vai trò; từ 0.4.0 cả hai không còn đúng (ADR-012).
+The 0.3.x version (PR #215) said `npx paseo-bm` was the only install path and that installing from this page lacked the roles; from 0.4.0 neither is true any more (ADR-012).
 
-`registryEntrySchema` khai `.strict()`: chỉ nhận đúng các trường `repo`, `path`, `package`, `categories`, `platforms`, `caveats`, `submittedBy`; thêm trường lạ là hỏng. `caveats` tối đa 6 câu, mỗi câu tối đa 140 ký tự — bản trên dài lần lượt 137, 115, 119, 120, 121, 120.
+`registryEntrySchema` declares `.strict()`: it accepts only the fields `repo`, `path`, `package`, `categories`, `platforms`, `caveats`, `submittedBy`; adding an unknown field breaks it. `caveats` is at most 6 sentences, each at most 140 characters — the ones above are 137, 115, 119, 120, 121, 120 long, in order.
 
-`categories` là chuỗi tự do (`z.array(z.string().min(1))`), nhưng `platforms` là **enum** (`z.array(z.enum(PLATFORMS))`): giá trị `macos` đã được xác nhận bằng một hồ sơ thật đang nằm trong registry (`registry/launchd-jobs.json`), nên viết thường như trên.
+`categories` are free strings (`z.array(z.string().min(1))`), but `platforms` is an **enum** (`z.array(z.enum(PLATFORMS))`): the value `macos` was confirmed by a real listing already in the registry (`registry/launchd-jobs.json`), so it is lower case as above.
 
 
-## 3. CI của họ kiểm gì
+## 3. What their CI checks
 
-Bốn cổng, và hồ sơ cuối cùng qua cả bốn (§13). Cấu hình đang nộp: `path: "plugin"`, `package: "paseo-bm-plugin"`.
+Four gates, and the final listing passes all four (§13). The configuration being submitted: `path: "plugin"`, `package: "paseo-bm-plugin"`.
 
-| Cổng | Kiểm gì | Hồ sơ này |
+| Gate | What it checks | This listing |
 |---|---|---|
-| 1 | Tên file là plugin id kebab-case, và `<path>/paseo-plugin.json` trên nhánh mặc định có `id` khớp tên file | đọc `plugin/paseo-plugin.json`, `id` là `paseo-bm` — đạt |
-| 2 | `plugin-security/targets.ts` dòng 99: hồ sơ **mới** không khai `package` thì ném lỗi ngay | khai `paseo-bm-plugin` — đạt (§4 kể vì sao ta từng trượt) |
-| 3 | `validate-registry.ts` tải tarball npm, đòi `paseo-plugin.json` **ngay gốc tarball**, `name` khớp, `version` khớp npm và khớp `<path>/package.json` trên Git | gốc gói payload có manifest; ba phiên bản đồng bộ bằng generator và một test — đạt |
-| 4 | `plugin-security/static-scan.ts`: plugin root phải có runtime entry thật, quét cả nguồn Git (áp `path`) lẫn gốc tarball npm (**không** áp `path`) | `plugin/` và gốc gói payload đều có `index.client.tsx` và `index.server.ts` — đạt (§10 kể vì sao ta từng trượt, §11 là bảng đối chiếu trước khi publish) |
+| 1 | The file name is the plugin id in kebab-case, and `<path>/paseo-plugin.json` on the default branch has an `id` matching the file name | reads `plugin/paseo-plugin.json`, `id` is `paseo-bm` — pass |
+| 2 | `plugin-security/targets.ts` line 99: a **new** listing that declares no `package` throws right away | declares `paseo-bm-plugin` — pass (§4 tells why we once failed) |
+| 3 | `validate-registry.ts` downloads the npm tarball, requires `paseo-plugin.json` **at the tarball root**, a matching `name`, a `version` matching npm and matching `<path>/package.json` on Git | the payload package root has the manifest; the three versions are kept in sync by a generator and a test — pass |
+| 4 | `plugin-security/static-scan.ts`: the plugin root must have a real runtime entry, scanning both the Git source (applying `path`) and the npm tarball root (**not** applying `path`) | `plugin/` and the payload package root both have `index.client.tsx` and `index.server.ts` — pass (§10 tells why we once failed, §11 is the comparison table before publishing) |
 
-Bốn cổng nằm trong cùng một job `Registry admission`, và bước tổng kết `Enforce admission result` đòi **tất cả** xanh. CI đọc **nhánh mặc định** của repo, nên mọi thứ cổng 1 và cổng 4 cần phải có trên `main` trước khi mở hoặc cập nhật PR.
+The four gates are in the same `Registry admission` job, and the summary step `Enforce admission result` requires **all** of them green. CI reads the repo's **default branch**, so everything gates 1 and 4 need must be on `main` before opening or updating the PR.
 
-## 4. Hồ sơ mới **bắt buộc** khai `package`
+## 4. A new listing **must** declare `package`
 
-**Đính chính 2026-09-23, sau khi PR thật bị CI chặn.** Bản đầu của tài liệu này nói `package` là tuỳ chọn, dựa trên `registryEntrySchema` (`package` không bắt buộc) và trên `validate-registry.ts` (cả khối npm nằm trong `if (entry.package)`). Đúng với hai chỗ đó, nhưng **thiếu một cổng thứ ba**: `scripts/plugin-security/targets.ts` dòng 99 ném lỗi với mọi hồ sơ mới không khai `package`, và job `Registry admission` đòi bước đó xanh.
+**Correction 2026-09-23, after the real PR was blocked by CI.** The first version of this document said `package` was optional, based on `registryEntrySchema` (`package` not required) and on `validate-registry.ts` (the whole npm block is inside `if (entry.package)`). That is right for those two places, but **a third gate was missed**: `scripts/plugin-security/targets.ts` line 99 throws for every new listing that declares no `package`, and the `Registry admission` job requires that step to be green.
 
-Bằng chứng: PR [paseo-cafe/paseo-cafe#215](https://github.com/paseo-cafe/paseo-cafe/pull/215), run [35834044223](https://github.com/paseo-cafe/paseo-cafe/actions/runs/35834044223) — `VALIDATE_OUTCOME: success` (phần §3 của tài liệu này đúng: manifest ở gốc repo được chấp nhận), nhưng `TARGETS_OUTCOME: failure` với
+Evidence: PR [paseo-cafe/paseo-cafe#215](https://github.com/paseo-cafe/paseo-cafe/pull/215), run [35834044223](https://github.com/paseo-cafe/paseo-cafe/actions/runs/35834044223) — `VALIDATE_OUTCOME: success` (§3 of this document was right: a manifest at the repo root is accepted), but `TARGETS_OUTCOME: failure` with
 
 ```
 error: new registry entry "paseo-bm" must declare a public npm package
     at selectPullRequestTargets (scripts/plugin-security/targets.ts:100:17)
 ```
 
-Hồ sơ cũ không khai `package` (ví dụ mục nào đó đã nằm sẵn trong registry) không bị đụng tới: điều kiện là `!previous && !baseIds.has(entry.id)`, tức chỉ áp cho mục mới.
+An old listing that declares no `package` (for example some entry already in the registry) is not touched: the condition is `!previous && !baseIds.has(entry.id)`, that is, it only applies to new entries.
 
-Hệ quả lúc đó: muốn có listing thì **phải** khai `package`. Kết luận kế tiếp của bản này — "khai `paseo-bm` rồi thêm manifest vào `files` của gói trình cài" — **đã bị chính cổng 4 bác bỏ một giờ sau**: xem §10. Đường đi cuối cùng là publish payload thành gói riêng `paseo-bm-plugin` và khai gói ấy ([ADR-009](../adr/ADR-009-payload-as-npm-package.md)). Giữ lại mục này vì nó ghi một bài học còn đúng: đọc schema và một file validator là chưa đủ, một job CI có thể có nhiều cổng.
+The consequence at that time: to get a listing, `package` **had to** be declared. The next conclusion of this version — "declare `paseo-bm` then add the manifest to the `files` of the installer package" — **was rejected by gate 4 itself an hour later**: see §10. The final path was to publish the payload as its own package `paseo-bm-plugin` and declare that package ([ADR-009](../adr/ADR-009-payload-as-npm-package.md)). This section is kept because it records a lesson that still holds: reading the schema and one validator file is not enough, one CI job can have several gates.
 
-## 5. Thay đổi trong repo này
+## 5. Changes in this repo
 
-| File | Việc |
+| File | Change |
 |---|---|
-| ~~`paseo-plugin.json` (gốc repo)~~ | **Đã gỡ 2026-09-23** cùng phép kiểm của nó. Nó sinh ra cho phương án entry trỏ gốc repo; từ khi entry khai `path: "plugin"` thì cổng 1 đọc `plugin/paseo-plugin.json`, cổng 3 đọc gốc tarball gói payload, và một manifest ở gốc chỉ khiến `paseo plugin add` tìm thấy một plugin rồi chết vì thiếu runtime entry. Test nay khẳng định repo chỉ còn **một** manifest. |
-| `test/plugin-structure.test.ts` | Thêm test giữ hai manifest không lệch nhau |
-| `README.md` | Đổi tiêu đề mục `Quick start` thành `Install` và `Before you install` thành `Limitations and warnings`, để bộ đọc của paseo.cafe nhận ra mục cài đặt và mục giới hạn. Nội dung không đổi, nên REQ-015 không đổi. |
-| `AGENTS.md` | **Trạng thái cuối:** mục "Two packages, one release" ghi quy tắc hai gói và năm thứ làm gãy hồ sơ; khối "Repository layout" khớp cây thư mục thật. Ba dòng mô tả manifest ở gốc đã bỏ cùng chính file đó (§10, WP-321a). |
-| `plugin/images/` | Ba ảnh chụp màn hình thật, owner cung cấp (Q4a): `01-beads-screen.jpg` (màn Beads), `02-metric-request.jpg` (màn Metric), `03-installer-roles.png` (trình cài hỏi vai trò). Chép nguyên bản từ `paseo-bm-site/src/assets/media`. **Chuyển từ `images/` ở gốc repo vào `plugin/` ngày 2026-09-23** khi entry đổi sang `path: "plugin"`; không nằm trong `files` của gói payload và bị mẫu phủ định loại khỏi gói trình cài, nên không vào tarball nào. |
+| ~~`paseo-plugin.json` (repo root)~~ | **Removed 2026-09-23** together with its check. It was created for the option where the entry points at the repo root; since the entry declares `path: "plugin"`, gate 1 reads `plugin/paseo-plugin.json`, gate 3 reads the payload package's tarball root, and a manifest at the root only makes `paseo plugin add` find a plugin that then dies for lack of a runtime entry. A test now asserts the repo has only **one** manifest. |
+| `test/plugin-structure.test.ts` | Added a test that keeps the two manifests from drifting apart |
+| `README.md` | Renamed the section `Quick start` to `Install` and `Before you install` to `Limitations and warnings`, so that paseo.cafe's reader recognises the install section and the limitations section. The content did not change, so REQ-015 did not change. |
+| `AGENTS.md` | **Final state:** the section "Two packages, one release" records the two-package rule and the five things that break the listing; the "Repository layout" block matches the real directory tree. The three lines describing the root manifest were removed together with the file itself (§10, WP-321a). |
+| `plugin/images/` | Three real screenshots, provided by the owner (Q4a): `01-beads-screen.jpg` (the Beads screen), `02-metric-request.jpg` (the Metric screen), `03-installer-roles.png` (the installer asking for roles). Copied unchanged from `paseo-bm-site/src/assets/media`. **Moved from `images/` at the repo root into `plugin/` on 2026-09-23** when the entry changed to `path: "plugin"`; not in the `files` of the payload package and excluded from the installer package by a negative pattern, so it goes into no tarball. |
 
-## 6. Trang listing sẽ hiện gì (`scripts/scan.ts`)
+## 6. What the listing page will show (`scripts/scan.ts`)
 
-Mọi đường dẫn đều tính theo `path`, mà hồ sơ khai `path: "plugin"`, nên tất cả đọc trong `plugin/`:
+Every path is resolved against `path`, and the listing declares `path: "plugin"`, so everything is read inside `plugin/`:
 
-- **Mô tả**: `plugin/package.json.description` — "Beads Management for Paseo — the plugin payload: the Metric, Beads and Setup screens plus the agent role instructions. Install with npx paseo-bm, which also registers the three agent roles."
-- **Version**: `plugin/package.json.version`, luôn bằng gói trình cài (`0.3.0` lúc kiểm).
-- **Ảnh**: bộ quét đọc thư mục `images` **ngay dưới `path`**, tức `plugin/images/` — ảnh đã chuyển vào đó, đánh số 01-03 để cố định thứ tự nên ảnh dẫn đầu là màn Beads. Không dùng URL tuyệt đối trong README: URL tuyệt đối chỉ được giữ nếu host nằm trong danh sách tin cậy mà ta chưa đọc được. Ảnh không nằm trong tarball nào và `smoke:packed` canh điều đó. Ba ảnh là ảnh thật của sản phẩm, đã soi từng tấm: không credential, không token, không đường dẫn riêng tư, không khối Exif.
-- **Health, đạt 5/6 và cố ý**: `manifestValid`, `hasReadme` (`plugin/README.md`), `hasLicense` (`plugin/LICENSE`, và dù không có file thì license của repo cũng đủ), `hasTypecheckScript`, `updatedRecently` — đạt. `hasTests` **không đạt**: trong `plugin/` không có test nào, và bịa một script `test` để mục này xanh là làm cho kiểm tra trông xanh. Payload vẫn được kiểm thật bằng các test dưới `test/` ở gốc repo, chúng chỉ không nằm dưới `path`.
-- Lịch quét: gói npm 15 phút một lần, nguồn Git 6 giờ một lần.
+- **Description**: `plugin/package.json.description` — "Beads Management for Paseo — the plugin payload: the Metric, Beads and Setup screens plus the agent role instructions. Install with npx paseo-bm, which also registers the three agent roles."
+- **Version**: `plugin/package.json.version`, always equal to the installer package (`0.3.0` when checked).
+- **Images**: the scanner reads the `images` folder **right under `path`**, that is `plugin/images/` — the images were moved there, numbered 01-03 to fix the order so that the leading image is the Beads screen. No absolute URL in the README: an absolute URL is only kept if its host is on a trust list we have not been able to read. The images are in no tarball and `smoke:packed` guards that. The three images are real screenshots of the product, each inspected: no credential, no token, no private path, no Exif block.
+- **Health, 5/6 passing, on purpose**: `manifestValid`, `hasReadme` (`plugin/README.md`), `hasLicense` (`plugin/LICENSE`, and even without the file the repo's license would be enough), `hasTypecheckScript`, `updatedRecently` — pass. `hasTests` **does not pass**: there is no test in `plugin/`, and inventing a `test` script to make this item green would be making a check look green. The payload is still really tested by the tests under `test/` at the repo root; they just are not under `path`.
+- Scan schedule: the npm package every 15 minutes, the Git source every 6 hours.
 
-## 7. Rủi ro đã chấp nhận
+## 7. Accepted risk
 
-Trang listing tự sinh lệnh cài thẳng: `paseo plugin add npm:paseo-bm-plugin@<version>` cho Paseo 0.9+, và `paseo plugin add hieunt286/paseo-bm --ref <sha> --path plugin` cho 0.8. Từ khi có gói payload, **cả hai lệnh đều nạp được** — nhưng nạp ra một sản phẩm **thiếu ba vai trò** `bm-manager`, `bm-worker`, `bm-reviewer`, vì trình cài mới là bên đăng ký chúng (ADR-006). Beads Manager khi đó không tạo nổi Worker.
+The listing page generates direct install commands on its own: `paseo plugin add npm:paseo-bm-plugin@<version>` for Paseo 0.9+, and `paseo plugin add hieunt286/paseo-bm --ref <sha> --path plugin` for 0.8. Since the payload package exists, **both commands load** — but they load a product **missing the three roles** `bm-manager`, `bm-worker`, `bm-reviewer`, because the installer is the one that registers them (ADR-006). Beads Manager then cannot create a Worker.
 
-Đây là rủi ro đã chấp nhận có ý thức, và caveat số 1 cùng số 2 nói thẳng cả hai vế: `npx paseo-bm` là cách cài duy nhất được hỗ trợ, còn cài thẳng thì màn hình lên nhưng thiếu vai trò.
+This is a consciously accepted risk, and caveats number 1 and number 2 say both halves plainly: `npx paseo-bm` is the only supported install method, and a direct install brings up the screens but lacks the roles.
 
-*(Bản trước của mục này mô tả một rủi ro khác — lệnh tự sinh **lỗi nạp**, vì hồ sơ khi ấy trỏ gốc repo nơi có manifest mà không có runtime entry. Owner từng chọn phương án đó ở Q1a, chính xác vì "một lỗi to và rõ" dễ hiểu hơn "một sản phẩm nửa vời". Cổng 4 của registry bác bỏ phương án ấy, nên nay ta đang ở đúng cái nửa vời đó — và trả giá bằng hai caveat nói rõ. Lối thoát thật sự vẫn thế: cho payload tự đăng ký vai trò lần đầu, một yêu cầu riêng owner đã chốt ở Q12 b.)*
+*(The previous version of this section described a different risk — the generated command **failing to load**, because the listing at that time pointed at the repo root, where there was a manifest but no runtime entry. The owner had chosen that option in Q1a, precisely because "one big, clear error" is easier to understand than "a half-working product". Gate 4 of the registry rejected that option, so we are now in exactly that half-working state — and pay for it with two caveats that say so clearly. The real way out is still the same: let the payload register the roles itself the first time, a separate request the owner decided in Q12 b.)*
 
-## 8. Các bước owner làm
+## 8. The owner's steps
 
-1. ~~Commit các thay đổi ở §5 và đưa lên nhánh mặc định `main`~~ — **xong 2026-09-23**, `main` ở `5c7daa5`, CI của repo xanh (run 35832961123).
-2. ~~Fork `paseo-cafe/paseo-cafe`, thêm `registry/paseo-bm.json`, mở PR~~ — **xong**: [PR #215](https://github.com/paseo-cafe/paseo-cafe/pull/215) từ nhánh `hieunt286:add-paseo-bm`. Lúc đó **đỏ** vì §4 rồi §10; nay đã xanh, xem bước 3 và §13.
-3. ~~Phát hành bản mới rồi cập nhật hồ sơ~~ — **xong 2026-09-23**: `0.3.0-alpha.6` publish hai gói, hồ sơ chuyển sang `path: "plugin"` + `package: "paseo-bm-plugin"`, và `Registry admission` xanh cả bốn cổng (§13). Ba lệnh cần OTP do owner chạy: bản giữ chỗ, `npm trust github`, và hai lần `npm dist-tag add`.
-4. ~~Sửa caveat khi lên bản ổn định~~ — **xong 2026-09-25**: commit `d2213653` trên nhánh PR (+1/−1, caveat số 3), comment ở PR #215.
-5. Sau khi PR được merge và tới lần quét kế tiếp, mở trang listing xem ba ảnh trong `plugin/images/` có hiện đúng không — đây là phép kiểm duy nhất phải chờ bên ngoài, nên nó nằm ở đây chứ không nằm trong tiêu chí của bead. Thêm hay đổi ảnh về sau chỉ cần push, không cần PR mới.
+1. ~~Commit the changes of §5 and push them to the default branch `main`~~ — **done 2026-09-23**, `main` at `5c7daa5`, the repo's CI green (run 35832961123).
+2. ~~Fork `paseo-cafe/paseo-cafe`, add `registry/paseo-bm.json`, open a PR~~ — **done**: [PR #215](https://github.com/paseo-cafe/paseo-cafe/pull/215) from the branch `hieunt286:add-paseo-bm`. At that time **red** because of §4 and then §10; now green, see step 3 and §13.
+3. ~~Release a new version then update the listing~~ — **done 2026-09-23**: `0.3.0-alpha.6` published both packages, the listing moved to `path: "plugin"` + `package: "paseo-bm-plugin"`, and `Registry admission` is green on all four gates (§13). Three commands needing an OTP were run by the owner: the placeholder release, `npm trust github`, and two runs of `npm dist-tag add`.
+4. ~~Fix the caveat when moving to the stable release~~ — **done 2026-09-25**: commit `d2213653` on the PR branch (+1/−1, caveat number 3), comment on PR #215.
+5. After the PR is merged and the next scan has run, open the listing page and check that the three images in `plugin/images/` show correctly — this is the only check that has to wait on an outside party, so it lives here and not in the bead's criteria. Adding or changing images later only needs a push, not a new PR.
 
-## 9. Mỗi lần phát hành sau phải giữ đúng những điều này
+## 9. What every later release must keep right
 
-Không còn là danh sách việc phải làm — phase 2a-20 đã làm xong. Đây là những điều một bản phát hành **không được** làm sai, nếu không listing sẽ hỏng lặng lẽ. Bản rút gọn cho agent nằm ở mục "Two packages, one release" trong `AGENTS.md`.
+No longer a to-do list — phase 2a-20 has finished it. These are the things a release **must not** get wrong, or the listing breaks silently. The short version for agents is in the section "Two packages, one release" of `AGENTS.md`.
 
-1. **Hai gói, một phiên bản.** `release.yml` publish `paseo-bm` rồi `paseo-bm-plugin` trong cùng một lần chạy; bước "Assert both packages agree" chặn trước khi có gì lên npm.
-2. **Ba nguồn phiên bản không được lệch**: `package.json`, `plugin/package.json`, `PLUGIN_VERSION`. Cổng 3 so phiên bản trên Git với phiên bản npm nó phân giải.
-3. **`paseo-bm-plugin@latest` phải trỏ bản mới.** `resolveNpmPackage` đọc đúng tag đó. Từ `0.3.0`, `release.yml` tự đặt dist-tag theo loại phiên bản — prerelease vào `next`, bản ổn định vào `latest` — nên một bản ổn định không cần bước tay nào. Còn muốn `next` trỏ một bản ổn định, hay dời tag bằng tay, thì vẫn đòi OTP và vẫn là việc của owner.
-4. **Đừng đổi tên `release.yml`**: cấu hình trusted publisher của **cả hai** gói trỏ theo tên file.
-5. **Gốc tarball gói trình cài không được giống một plugin**, và gốc gói payload phải luôn là plugin nạp được — `smoke:packed` canh cả hai chiều.
-6. Sửa hồ sơ registry thì nhớ **Biome giữ mảng ngắn trên một dòng**, nếu không job đỏ ngay trước cả bước validate.
+1. **Two packages, one version.** `release.yml` publishes `paseo-bm` then `paseo-bm-plugin` in the same run; the step "Assert both packages agree" blocks before anything reaches npm.
+2. **The three version sources must not drift**: `package.json`, `plugin/package.json`, `PLUGIN_VERSION`. Gate 3 compares the version on Git with the npm version it resolves.
+3. **`paseo-bm-plugin@latest` must point at the new version.** `resolveNpmPackage` reads exactly that tag. Since `0.3.0`, `release.yml` sets the dist-tag from the kind of version on its own — prerelease to `next`, stable to `latest` — so a stable release needs no manual step. Pointing `next` at a stable version, or moving a tag by hand, still requires an OTP and is still the owner's job.
+4. **Do not rename `release.yml`**: the trusted publisher configuration of **both** packages points at it by file name.
+5. **The installer package's tarball root must not look like a plugin**, and the payload package's root must always be a loadable plugin — `smoke:packed` guards both directions.
+6. When editing the registry listing, remember that **Biome keeps short arrays on one line**, otherwise the job goes red right away, before even the validate step.
 
-## 10. Cổng thứ tư: quét an ninh đòi plugin root **nạp được thật**
+## 10. The fourth gate: the security scan requires the plugin root to **really load**
 
-Sau khi khai `package`, lần chạy thứ hai của `Registry admission` (run [35838506116](https://github.com/paseo-cafe/paseo-cafe/actions/runs/35838506116)) cho kết quả: `VALIDATE_OUTCOME: success`, `TARGETS_OUTCOME: success` — hai cổng cũ đã qua — nhưng `SCAN_OUTCOME: failure`. Bước "Scan changed plugins" đặt `continue-on-error`, nên nhìn danh sách bước thì tưởng xanh; giá trị thật nằm ở bước "Enforce admission result".
+After declaring `package`, the second run of `Registry admission` (run [35838506116](https://github.com/paseo-cafe/paseo-cafe/actions/runs/35838506116)) gave: `VALIDATE_OUTCOME: success`, `TARGETS_OUTCOME: success` — the two old gates passed — but `SCAN_OUTCOME: failure`. The step "Scan changed plugins" sets `continue-on-error`, so looking at the step list it seems green; the real value is in the step "Enforce admission result".
 
-Báo cáo bot dán vào PR:
+The report the bot pasted into the PR:
 
 ```
 ## paseo-bm
@@ -138,51 +138,51 @@ npm package: paseo-bm   npm status: failed   npm version: 0.3.0-alpha.5
 - [npm/entrypoint] missing . plugin has no Paseo 0.8 runtime entry
 ```
 
-Luật `entrypoint/missing` trong `scripts/plugin-security/static-scan.ts` đòi **một trong bốn file** `index.client.ts(x)` hoặc `index.server.ts(x)` nằm ngay thư mục gốc của plugin, và nó **blocking**.
+The `entrypoint/missing` rule in `scripts/plugin-security/static-scan.ts` requires **one of four files** `index.client.ts(x)` or `index.server.ts(x)` right in the plugin's root folder, and it is **blocking**.
 
-Hai lần quét, hai thư mục khác nhau (`scripts/plugin-security/scan.ts`):
+Two scans, two different folders (`scripts/plugin-security/scan.ts`):
 
-| Quét | Thư mục | Dòng |
+| Scan | Folder | Line |
 |---|---|---|
-| Kho Git | `target.path ?? "."` — **có** áp `path` | 229 |
-| Gói npm | `pluginPath: "."` — **luôn là gốc tarball**, không áp `path` | 322 |
+| Git repository | `target.path ?? "."` — **does** apply `path` | 229 |
+| npm package | `pluginPath: "."` — **always the tarball root**, does not apply `path` | 322 |
 
-Hệ quả, và đây là điểm chặn thật sự của cả yêu cầu này:
+The consequence, and this is the real blocker of this whole request:
 
-- Khai `path: "plugin"` thì lần quét Git qua được, vì `plugin/` có đủ `index.client.tsx`, `index.server.ts` và manifest.
-- Nhưng lần quét npm **không bao giờ** qua được với gói `paseo-bm`, vì gốc gói là trình cài đặt chứ không phải payload. Thêm manifest vào gốc tarball (0.3.0-alpha.5) không cứu được: nó đòi **runtime entry**, không phải manifest.
-- Mà bỏ `package` cũng không được, vì §4: hồ sơ mới bắt buộc khai.
+- Declaring `path: "plugin"` makes the Git scan pass, because `plugin/` has `index.client.tsx`, `index.server.ts` and the manifest.
+- But the npm scan can **never** pass with the `paseo-bm` package, because the package root is the installer, not the payload. Adding the manifest to the tarball root (0.3.0-alpha.5) does not save it: it requires a **runtime entry**, not a manifest.
+- And dropping `package` is not possible either, because of §4: a new listing must declare it.
 
-Nói cách khác, registry chỉ nhận plugin mà **gốc gói npm chính là payload nạp được**. Đó là hình dạng của `@omercnet/paseo-beads` (repo có `path`, gói npm riêng cho payload). paseo-bm hiện không có hình dạng đó, và đây là quyết định đóng gói của sản phẩm chứ không phải một chỗ sửa nhỏ — xem ADR-001.
+In other words, the registry only accepts a plugin whose **npm package root is itself the loadable payload**. That is the shape of `@omercnet/paseo-beads` (the repo has a `path`, a separate npm package for the payload). paseo-bm does not currently have that shape, and this is a packaging decision of the product, not a small fix — see ADR-001.
 
-Bot review của họ (CodeRabbit) cũng độc lập nêu đúng mối lo trong hai caveat của ta: "The registry's generated install command cannot load Paseo BM, so users must use its separate `npx paseo-bm` installer."
+Their review bot (CodeRabbit) also independently raised exactly the concern in our two caveats: "The registry's generated install command cannot load Paseo BM, so users must use its separate `npx paseo-bm` installer."
 
-## 11. Đối chiếu payload với toàn bộ luật quét (WP-317, trước khi publish)
+## 11. Comparing the payload with every scan rule (WP-317, before publishing)
 
-Đo ngày 2026-09-23 trên `plugin/` ở trạng thái cuối (đã có `package.json`, `README.md`, `LICENSE`, `images/`). Nguồn luật: `scripts/plugin-security/static-scan.ts` — **mọi** luật đều blocking, không có mức khuyến nghị.
+Measured on 2026-09-23 on `plugin/` in its final state (with `package.json`, `README.md`, `LICENSE`, `images/`). Source of the rules: `scripts/plugin-security/static-scan.ts` — **every** rule is blocking, there is no advisory level.
 
-| Luật | Bằng chứng | Kết quả |
+| Rule | Evidence | Result |
 |---|---|---|
-| `manifest/missing`, `manifest/json` | `plugin/paseo-plugin.json` parse được | đạt |
-| `manifest/id` | `id` là `paseo-bm`, khớp `PLUGIN_ID = /^[a-z][a-z0-9-]*$/` và khớp tên file hồ sơ `registry/paseo-bm.json` | đạt |
-| `manifest/requirements`, `.paseo`, `.unknown` | khoá cấp cao chỉ có `id` và `requirements`; `requirements` chỉ có `paseo` là `>=0.8.0` | đạt |
-| `manifest/build` | không khai `build` | đạt |
-| `manifest/unknown:<key>` | không có khoá lạ | đạt |
-| `entrypoint/missing` | `index.client.tsx` và `index.server.ts` ngay gốc `plugin/` | đạt |
-| `entrypoint/legacy-index` | không có `index.ts` hay `index.tsx` ở gốc payload (đếm: 0) | đạt |
-| `boundary/unsupported-sdk-import` | subpath dùng: `@getpaseo/plugin`, `/client`, `/client/react-native`, `/server` — cả bốn nằm trong `SUPPORTED_SDK` của họ; số subpath ngoài danh sách: 0 | đạt |
-| `boundary/runtime-module-import` | `node:` builtin ngoài `server/`: 0 file; SDK server-only ngoài `server/`: 0; module client-only (`react`, `react-dom`, `react-native`, `use-sync-external-store`, `@tanstack/react-query`) ngoài `client/`: 0 | đạt |
-| `boundary/cross-runtime-import` | `test/plugin-structure.test.ts` canh sẵn: client không với vào `server/`, server không với vào `client/`, `shared/` không import Node lẫn react-native — chạy trong `npm run verify` | đạt |
-| `boundary/invalid-module-location` | mọi import tương đối phân giải trong `client/`, `server/`, `shared/` hoặc cùng thư mục | đạt |
-| `scanner/symlink` | `find plugin -type l`: 0 | đạt |
-| `scanner/size-limit` (2 MB) | file lớn nhất là `plugin/images/02-metric-request.jpg` 154,8 KB; số file vượt 2 MB: 0 | đạt |
-| `scanner/incomplete` | không có gì chặn đọc: không symlink, không file khổng lồ, không `node_modules` trong payload | đạt |
+| `manifest/missing`, `manifest/json` | `plugin/paseo-plugin.json` parses | pass |
+| `manifest/id` | `id` is `paseo-bm`, matching `PLUGIN_ID = /^[a-z][a-z0-9-]*$/` and matching the listing file name `registry/paseo-bm.json` | pass |
+| `manifest/requirements`, `.paseo`, `.unknown` | the top-level keys are only `id` and `requirements`; `requirements` has only `paseo` at `>=0.8.0` | pass |
+| `manifest/build` | no `build` declared | pass |
+| `manifest/unknown:<key>` | no unknown key | pass |
+| `entrypoint/missing` | `index.client.tsx` and `index.server.ts` right at the root of `plugin/` | pass |
+| `entrypoint/legacy-index` | no `index.ts` or `index.tsx` at the payload root (count: 0) | pass |
+| `boundary/unsupported-sdk-import` | subpaths used: `@getpaseo/plugin`, `/client`, `/client/react-native`, `/server` — all four are in their `SUPPORTED_SDK`; number of subpaths outside the list: 0 | pass |
+| `boundary/runtime-module-import` | `node:` builtins outside `server/`: 0 files; server-only SDK outside `server/`: 0; client-only modules (`react`, `react-dom`, `react-native`, `use-sync-external-store`, `@tanstack/react-query`) outside `client/`: 0 | pass |
+| `boundary/cross-runtime-import` | `test/plugin-structure.test.ts` already guards it: the client does not reach into `server/`, the server does not reach into `client/`, `shared/` imports neither Node nor react-native — run in `npm run verify` | pass |
+| `boundary/invalid-module-location` | every relative import resolves inside `client/`, `server/`, `shared/` or the same folder | pass |
+| `scanner/symlink` | `find plugin -type l`: 0 | pass |
+| `scanner/size-limit` (2 MB) | the largest file is `plugin/images/02-metric-request.jpg` at 154.8 KB; number of files over 2 MB: 0 | pass |
+| `scanner/incomplete` | nothing blocks reading: no symlink, no huge file, no `node_modules` in the payload | pass |
 
-**Không luật nào đỏ**, nên theo quyết định Q15 a của owner thì đi tiếp sang bước phát hành. Đây vẫn là đọc luật cộng đo tại chỗ, không phải chạy chính bộ quét của họ — bằng chứng cuối cùng vẫn là lần chạy `Registry admission` sau khi publish.
+**No rule is red**, so under the owner's decision Q15 a the work moves on to the release step. This is still reading the rules plus measuring in place, not running their scanner itself — the final evidence is still the `Registry admission` run after publishing.
 
-## 12. Trusted publisher của gói payload — đã xác nhận
+## 12. The payload package's trusted publisher — confirmed
 
-Bead `bm-phase-2a-20-x3g0.6` đóng lại khi phần này mới chỉ là lời owner: `npm trust list` đòi OTP, endpoint `/-/package/<gói>/trust` trả 401, và packument công khai không mang thông tin trust — đã thử cả ba đường. Owner chạy lệnh và dán kết quả ngay sau đó:
+The bead `bm-phase-2a-20-x3g0.6` was closed while this part was still only the owner's word: `npm trust list` requires an OTP, the endpoint `/-/package/<package>/trust` returns 401, and the public packument carries no trust information — all three ways were tried. The owner ran the command and pasted the result right afterwards:
 
 ```
 type: github
@@ -192,30 +192,30 @@ repository: hieunt286/paseo-bm
 permissions: publish, stage publish
 ```
 
-Đúng thứ cần: nguồn tin cậy là GitHub Actions, đúng file `release.yml`, đúng repo, có quyền publish. Nên nửa rủi ro "publish xong gói trình cài rồi chết ở gói payload" không còn là ẩn số trước khi phát hành.
+Exactly what is needed: the trusted source is GitHub Actions, the right file `release.yml`, the right repo, with publish permission. So the half of the risk "the installer package publishes and then the payload package fails" is no longer an unknown before the release.
 
-**Ghi lại cho lần sau:** `npm trust list` và `npm trust github` đều cần OTP, nên chúng luôn là việc của owner, giống như bản giữ chỗ. Chỉ lần phát hành thật là chạy được không cần OTP, vì `release.yml` dùng OIDC.
+**Noted for next time:** `npm trust list` and `npm trust github` both require an OTP, so they are always the owner's job, like the placeholder release. Only the real release runs without an OTP, because `release.yml` uses OIDC.
 
 
-## 13. Trạng thái cuối — cả bốn cổng đã xanh
+## 13. Final state — all four gates green
 
-Run [35854151581](https://github.com/paseo-cafe/paseo-cafe/actions/runs/35854151581) trên PR #215, đọc ở bước "Enforce admission result" chứ không nhìn danh sách bước:
+Run [35854151581](https://github.com/paseo-cafe/paseo-cafe/actions/runs/35854151581) on PR #215, read at the step "Enforce admission result" rather than from the step list:
 
 ```
 FETCH_OUTCOME: success     VALIDATE_OUTCOME: success
 TARGETS_OUTCOME: success   SCAN_OUTCOME: success      PUBLISH_OUTCOME: success
 ```
 
-Hồ sơ đang nộp: `path: "plugin"`, `package: "paseo-bm-plugin"`, sáu caveat. PR `MERGEABLE`, đang chờ maintainer duyệt và merge — phần còn lại nằm ngoài tầm repo này.
+The listing being submitted: `path: "plugin"`, `package: "paseo-bm-plugin"`, six caveats. The PR is `MERGEABLE`, waiting for a maintainer to review and merge — the rest is outside this repo's reach.
 
-Hai lỗi của Worker trên nhánh PR, ghi lại để lần sau tránh: một commit ghi đè file thành 0 byte, vì một bước trong lệnh hỏng mà chuỗi lệnh vẫn chạy tiếp (từ nay: kiểm file có nội dung **trước** khi gọi API ghi); và một commit sai định dạng, vì `json.dumps` bung mảng ngắn ra nhiều dòng trong khi Biome của họ giữ mảng ngắn trên một dòng.
+Two mistakes of the Worker on the PR branch, recorded to avoid them next time: one commit overwrote the file with 0 bytes, because a step in the command failed and the command chain kept going (from now on: check the file has content **before** calling the write API); and one commit had the wrong formatting, because `json.dumps` expanded short arrays onto several lines while their Biome keeps short arrays on one line.
 
-**Bẫy còn lại ở một bản cũ.** `paseo-bm@0.3.0-alpha.6` publish từ `e7424cb`, trước commit `4b444b5` gỡ manifest ở gốc, nên tarball của nó **vẫn có `paseo-plugin.json` ở gốc**: trên Paseo 0.9+, `paseo plugin add npm:paseo-bm@0.3.0-alpha.6` tìm thấy một plugin rồi **lỗi nạp**; gỡ bằng `paseo plugin remove paseo-bm`. Từ `0.3.0-alpha.7` trở đi (gồm `latest` = `0.3.0`) thì hết, và `smoke:packed` canh sẵn. Bản đã publish thì không sửa được.
+**A remaining trap in an old version.** `paseo-bm@0.3.0-alpha.6` was published from `e7424cb`, before the commit `4b444b5` that removed the root manifest, so its tarball **still has `paseo-plugin.json` at its root**: on Paseo 0.9+, `paseo plugin add npm:paseo-bm@0.3.0-alpha.6` finds a plugin and then **fails to load**; remove it with `paseo plugin remove paseo-bm`. From `0.3.0-alpha.7` on (including `latest` = `0.3.0`) this is gone, and `smoke:packed` already guards it. A published version cannot be fixed.
 
-Việc còn lại sau khi merge, không thuộc phase này: mở trang listing xem mô tả, version và ba ảnh có lên đúng không; lịch quét là 15 phút cho nguồn npm và 6 giờ cho nguồn Git.
+What remains after the merge, not part of this phase: open the listing page and check that the description, the version and the three images show correctly; the scan schedule is 15 minutes for the npm source and 6 hours for the Git source.
 
 ---
 
-*Revision 2026-09-25: Status, quyết định còn hiệu lực, §2 (entry thật trên nhánh PR sau khi sửa caveat cho `0.3.0`), §6, §8 và bẫy ở §13 cập nhật theo trạng thái hiện tại. Các mục §4, §10 giữ lại vì ghi lý do của cấu hình đang dùng.*
+*Revision 2026-09-25: Status, the decisions still in force, §2 (the real entry on the PR branch after fixing the caveat for `0.3.0`), §6, §8 and the trap in §13 updated to the current state. §4 and §10 are kept because they record the reasons for the configuration in use.*
 
-*Revision 2026-09-28: Status (PR #215 đã merge; PR #284 viết lại caveat cho 0.4) và §2 (nội dung mới, độ dài, kết quả CI). Đoạn giải thích hai caveat cũ về `npx paseo-bm` được bỏ vì không còn đúng.*
+*Revision 2026-09-28: Status (PR #215 merged; PR #284 rewrites the caveats for 0.4) and §2 (new content, lengths, CI result). The paragraph explaining the two old caveats about `npx paseo-bm` was removed because it is no longer true.*

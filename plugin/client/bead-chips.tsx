@@ -1,6 +1,6 @@
 /**
  * Beads named in a chat, as chips that open the bead in place
- * (owner request 2026-09-16: "click vào mã beads ... xem đc nội dung").
+ * (owner request 2026-09-16: "click a bead id ... and see its content").
  *
  * `BeadChips` sits inside a chat card; `ChatBeadsPanel` is the agent panel
  * that lists every bead the chat named recently, for messages Paseo shows as

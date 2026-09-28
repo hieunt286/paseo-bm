@@ -1,6 +1,6 @@
 /**
  * Reader for the `BM-REPORT` and `BM-REVIEW` blocks the roles emit
- * (WP-204, Dashboard Design §6.3 "Bộ đọc BM-REPORT / BM-REVIEW").
+ * (WP-204, Dashboard Design §6.3 "The BM-REPORT / BM-REVIEW reader").
  *
  * The format is defined in `plugin/roles/worker.md` (Reporting) and
  * `plugin/roles/reviewer.md`. It is produced by a language model, so this

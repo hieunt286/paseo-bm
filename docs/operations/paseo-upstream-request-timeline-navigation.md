@@ -1,5 +1,3 @@
-> Ghi chú: tài liệu này viết bằng tiếng Anh (ngoại lệ của quy tắc `docs/` tiếng Việt) vì người đọc là maintainer của Paseo.
-
 # Upstream request: let a plugin's timeline renderer open an agent
 
 | Field | Value |

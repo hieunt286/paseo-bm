@@ -58,7 +58,7 @@ async function runWorkerNew(context: WorkspaceCommand): Promise<void> {
   // The flag line tells the Manager this is NEW work, not a follow-up. Without
   // it the Manager applies its own rule -- a message while a request is live is
   // a follow-up -- and hands the words to the Worker already busy, which is the
-  // opposite of what this command is for (delta 20260917f §2 lỗi A).
+  // opposite of what this command is for (delta 20260917f §2, bug A).
   if (request !== "") {
     await context.paseo.agents.ref(agentId).send(`${NEW_REQUEST_MARKER}\n${request}`);
   }

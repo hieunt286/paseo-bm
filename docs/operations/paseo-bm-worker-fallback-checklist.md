@@ -1,115 +1,115 @@
-# Checklist nghiệm thu — cài đặt vai trò và dự phòng provider
+# Acceptance checklist — role settings and provider fallback
 
-| Trường | Giá trị |
+| Field | Value |
 |---|---|
-| Status | Active — kiểm trên daemon thật các tính năng cài đặt vai trò và dự phòng có trong `0.3.0` |
-| Nguồn | [PRD delta §5](../archive/product/paseo-bm-prd-delta-20260921-worker-fallback-and-role-settings.md#5-bằng-chứng-thành-công), [design delta §8](../archive/design/paseo-bm-delta-20260921-worker-fallback-and-role-settings.md#8-testing-strategy), [plan delta §1.3](../archive/plans/paseo-bm-implementation-plan-delta-20260921-worker-fallback-and-role-settings.md#13-điều-kiện-ra) |
-| Người chạy | owner (hieu.nt10), trên daemon thật |
-| Nguyên tắc ghi điểm | Mục nào chưa đo thì ghi **Chưa đo**, không bao giờ ghi Đạt. Mục không đạt thì ghi **Không** kèm số đo |
+| Status | Active — checks on a real daemon the role-settings and fallback features present in `0.3.0` |
+| Source | [PRD delta §5](../archive/product/paseo-bm-prd-delta-20260921-worker-fallback-and-role-settings.md#5-bằng-chứng-thành-công), [design delta §8](../archive/design/paseo-bm-delta-20260921-worker-fallback-and-role-settings.md#8-testing-strategy), [plan delta §1.3](../archive/plans/paseo-bm-implementation-plan-delta-20260921-worker-fallback-and-role-settings.md#13-điều-kiện-ra) |
+| Run by | the owner (hieu.nt10), on a real daemon |
+| Scoring rule | An item not measured yet is recorded as **Not measured**, never as Pass. An item that fails is recorded as **Fail** with the measurement |
 
-Mỗi phần là một tính năng, ghi phiên bản đầu tiên có nó. Tính năng mới về vai trò hay dự phòng thêm phần mới vào đây.
+Each part is one feature, and records the first version that has it. A new feature about roles or fallback adds a new part here.
 
-## Chuẩn bị chung, và đường lùi
+## Common preparation, and the way back
 
-> **Cảnh báo:** **không** cài bản mới hay `paseo plugin reload` khi còn một agent `bm-*` đang chạy — việc đó ngắt lượt của agent (bài học lượt 2026-09-16).
+> **Warning:** **do not** install a new version or run `paseo plugin reload` while a `bm-*` agent is still running — doing so cuts the agent's turn (lesson from the 2026-09-16 run).
 
-| # | Bước | Ghi lại |
+| # | Step | Record |
 |---|---|---|
-| 1 | Đọc `~/.paseo-bm/install.json` (`version`, `roles[]`) | phiên bản cũ, để khôi phục |
-| 2 | Chụp `~/.paseo/config.json` (mục `agents.providers.bm-*` và `daemon.agentProfiles`) | ảnh trước |
-| 3 | `npm run build` trong repo, trên commit cần kiểm | bản dựng dùng để kiểm |
-| 4 | `node dist/index.js install --home ~/.paseo-bm` | output, mã thoát |
+| 1 | Read `~/.paseo-bm/install.json` (`version`, `roles[]`) | the old version, to restore |
+| 2 | Snapshot `~/.paseo/config.json` (the `agents.providers.bm-*` entries and `daemon.agentProfiles`) | the before snapshot |
+| 3 | `npm run build` in the repo, on the commit to check | the build used for the check |
+| 4 | `node dist/index.js install --home ~/.paseo-bm` | output, exit code |
 
-**Đường lùi:** `npx paseo-bm@<phiên bản cũ>` cài lại bản trước. Các giá trị bạn đặt trên mục `bm-*` không bị bản mới xoá; bản cũ sẽ thay nguyên mục đó ở lần ghi kế tiếp của nó.
+**Way back:** `npx paseo-bm@<old version>` reinstalls the previous version. The values you set on the `bm-*` entries are not deleted by the new version; the old version will replace the whole entry on its next write.
 
-## Thinking và model theo profile (REQ-062, từ `0.2.0-alpha.2`)
+## Thinking and model per profile (REQ-062, since `0.2.0-alpha.2`)
 
-| # | Kiểm | Cách làm | Kết quả mong đợi | Kết quả |
+| # | Check | How | Expected result | Result |
 |---|---|---|---|---|
-| 13.1 | Thinking của profile tới Worker | Settings → Agent profiles → profile **Worker** (`bm-worker`) → Thinking = `max` → lưu. Giao Manager một yêu cầu Nhỏ | Worker mới chạy thinking `max`: màn **Metric** → request → nút Worker ghi `thinking: max` (`runtimeInfo.thinkingOptionId`) cho **100%** Worker tạo sau đó | Chưa đo |
-| 13.2 | Thinking của profile tới Reviewer | Như 13.1 với profile **Reviewer** (`bm-reviewer`), ví dụ `high`, và một yêu cầu Vừa (yêu cầu Nhỏ không tạo Reviewer) | Reviewer mới chạy `high` | Chưa đo |
-| 13.3 | Cài lại không xoá | Sau 13.1, chạy lại `node dist/index.js install --home ~/.paseo-bm` | Bản xem trước báo 0 thay đổi cấu hình; `thinkingOptionId: "max"` vẫn nằm trên profile `bm-worker` trong `~/.paseo/config.json` | Chưa đo |
-| 13.4 | `--role` chỉ đổi đúng vai trò | `node dist/index.js install --home ~/.paseo-bm --role worker=<provider>/<model khác>` | Profile `bm-worker` đổi `model`, **mất** `thinkingOptionId`, giữ `modeId` nếu có; profile `bm-manager` và `bm-reviewer` không đổi byte nào | Chưa đo |
-| 13.5 | `doctor` báo đổi trong app | Trong Settings, đổi model của Worker; chạy `node dist/index.js doctor` | Có dòng `bm-worker: base provider or model differs from what the installer wrote (changed in the app).`; mã thoát không đổi so với trước khi đổi | Chưa đo |
+| 13.1 | The profile's thinking reaches the Worker | Settings → Agent profiles → profile **Worker** (`bm-worker`) → Thinking = `max` → save. Give Manager a Small request | A new Worker runs with thinking `max`: **Metric** screen → request → the Worker node shows `thinking: max` (`runtimeInfo.thinkingOptionId`) for **100%** of Workers created afterwards | Not measured |
+| 13.2 | The profile's thinking reaches the Reviewer | As 13.1 with profile **Reviewer** (`bm-reviewer`), for example `high`, and a Medium request (a Small request creates no Reviewer) | A new Reviewer runs at `high` | Not measured |
+| 13.3 | Reinstalling does not delete | After 13.1, run `node dist/index.js install --home ~/.paseo-bm` again | The preview reports 0 configuration changes; `thinkingOptionId: "max"` is still on the `bm-worker` profile in `~/.paseo/config.json` | Not measured |
+| 13.4 | `--role` changes only that role | `node dist/index.js install --home ~/.paseo-bm --role worker=<provider>/<another model>` | The `bm-worker` profile changes `model`, **loses** `thinkingOptionId`, keeps `modeId` if any; the `bm-manager` and `bm-reviewer` profiles do not change by a single byte | Not measured |
+| 13.5 | `doctor` reports a change made in the app | In Settings, change the Worker's model; run `node dist/index.js doctor` | There is the line `bm-worker: base provider or model differs from what the installer wrote (changed in the app).`; the exit code is the same as before the change | Not measured |
 
-## Worker và Reviewer trên OpenCode, Pi (REQ-063, từ `0.3.0-alpha.0`)
+## Worker and Reviewer on OpenCode, Pi (REQ-063, since `0.3.0-alpha.0`)
 
-Cần một provider OpenCode và một provider Pi `available` trên daemon. Đổi provider gốc của vai trò bằng `node dist/index.js install --home ~/.paseo-bm --role <vai trò>=<provider>/<model>`, và trả lại như cũ sau mỗi kiểm.
+Needs an OpenCode provider and a Pi provider `available` on the daemon. Change a role's base provider with `node dist/index.js install --home ~/.paseo-bm --role <role>=<provider>/<model>`, and put it back as it was after each check.
 
-| # | Kiểm | Cách làm | Kết quả mong đợi | Kết quả |
+| # | Check | How | Expected result | Result |
 |---|---|---|---|---|
-| 14.1 | Worker trên OpenCode làm xong một yêu cầu Nhỏ | `--role worker=opencode/<model>`; mở Beads Manager, giao một yêu cầu Nhỏ trên fixture nghiệm thu | Worker được tạo với một agent OpenCode (mode) và `auto_accept` bật; Manager nhận cả `received` và `finished` | Chưa đo |
-| 14.2 | Reviewer trên OpenCode được tạo | `--role reviewer=opencode/<model>`; một yêu cầu Vừa (yêu cầu Nhỏ không có Reviewer, trừ khi người dùng xin review) | Reviewer được tạo **không lỗi**, `auto_accept` **tắt**; nếu agent OpenCode hỏi quyền, yêu cầu duyệt hiện trong Paseo | Chưa đo |
-| 14.3 | Reviewer trên Pi được tạo | `--role reviewer=pi/<model>`; một yêu cầu Vừa | Reviewer được tạo không lỗi, không có mode; `## Runtime facts` của Worker ghi `Reviewer mode: none` | Chưa đo |
-| 14.4 | Worker Pi thiếu `pi-mcp-adapter` sinh `BM-TOOLS` | Trên máy chưa có adapter: `--role worker=pi/<model>`; giao một yêu cầu | Chat Manager nhận `BM-TOOLS …` trước khi lượt đầu của Worker kết thúc; màn Setup có dòng cảnh báo Worker | Chưa đo |
-| 14.5 | Tín hiệu `supportsMcpServers` | Như 14.4, rồi `get_agent_status` của Worker Pi | `capabilities.supportsMcpServers` là `false`. **Nếu là `true` hay không có**, ghi lại nguyên văn và báo: tín hiệu của thiết kế §4.2.4 sai | Chưa đo |
-| 14.6 | Tín hiệu nạp skill trên OpenCode và Pi | Sau 14.1 và 14.3, mở màn **Metric** → request | Cột skill của Worker OpenCode / Reviewer Pi: ghi lại có hay "không ghi nhận" (giới hạn đã biết, thiết kế §4.2.8) | Chưa đo |
-| 14.7 | Cột skill Pi và OpenCode | Mở Beads Manager → Setup | Có cột Pi (`~/.pi/agent/skills`) và OpenCode (`~/.config/opencode/skill`) | Chưa đo |
-| 14.8 | Giá theo `metadata.cost` | Sau 14.1, màn **Metric** → request | Lượt của Worker OpenCode có tiền (không chỉ token) | Chưa đo |
+| 14.1 | A Worker on OpenCode finishes a Small request | `--role worker=opencode/<model>`; open Beads Manager, give a Small request on the acceptance fixture | The Worker is created with an OpenCode agent (mode) and `auto_accept` on; Manager receives both `received` and `finished` | Not measured |
+| 14.2 | A Reviewer on OpenCode is created | `--role reviewer=opencode/<model>`; a Medium request (a Small request has no Reviewer, unless the user asks for a review) | The Reviewer is created **without error**, `auto_accept` **off**; if the OpenCode agent asks for permission, the approval request shows in Paseo | Not measured |
+| 14.3 | A Reviewer on Pi is created | `--role reviewer=pi/<model>`; a Medium request | The Reviewer is created without error, with no mode; the Worker's `## Runtime facts` says `Reviewer mode: none` | Not measured |
+| 14.4 | A Pi Worker without `pi-mcp-adapter` produces `BM-TOOLS` | On a machine without the adapter: `--role worker=pi/<model>`; give a request | The Manager chat receives `BM-TOOLS …` before the Worker's first turn ends; the Setup screen has a Worker warning line | Not measured |
+| 14.5 | The `supportsMcpServers` signal | As 14.4, then `get_agent_status` of the Pi Worker | `capabilities.supportsMcpServers` is `false`. **If it is `true` or missing**, record it verbatim and report: the signal of design §4.2.4 is wrong | Not measured |
+| 14.6 | The skill-load signal on OpenCode and Pi | After 14.1 and 14.3, open the **Metric** screen → request | The skill column of the OpenCode Worker / Pi Reviewer: record whether it shows or says "not recorded" (known limitation, design §4.2.8) | Not measured |
+| 14.7 | Pi and OpenCode skill columns | Open Beads Manager → Setup | There is a Pi column (`~/.pi/agent/skills`) and an OpenCode column (`~/.config/opencode/skill`) | Not measured |
+| 14.8 | Cost from `metadata.cost` | After 14.1, **Metric** screen → request | The OpenCode Worker's turn has a cost (not only tokens) | Not measured |
 
 
-## Sửa vai trò trên màn Setup (REQ-064, ADR-008, từ `0.3.0-alpha.1`)
+## Editing roles on the Setup screen (REQ-064, ADR-008, since `0.3.0-alpha.1`)
 
-Trước khi kiểm, chụp mảng `daemon.agentProfiles` và các mục `agents.providers.bm-*` của `~/.paseo/config.json` (bước 2 của phần chuẩn bị); 15.2 so với ảnh đó. Đây là chỗ plugin tự ghi `config.json` (ADR-008, `plugin/server/config-writer.ts`).
+Before checking, snapshot the `daemon.agentProfiles` array and the `agents.providers.bm-*` entries of `~/.paseo/config.json` (step 2 of the preparation); 15.2 compares against that snapshot. This is where the plugin writes `config.json` itself (ADR-008, `plugin/server/config-writer.ts`).
 
-| # | Kiểm | Cách làm | Kết quả mong đợi | Kết quả |
+| # | Check | How | Expected result | Result |
 |---|---|---|---|---|
-| 15.1 | Lưu trên màn → Settings hiện cùng giá trị | Beads Manager → Setup → Roles & models → **Edit** ở Worker → đổi model (và thinking nếu model có) → **Save** | Dòng Worker hiện model mới và chữ "Saved."; Settings → Agent profiles → profile **Worker** (`bm-worker`) hiện đúng model và thinking đó | Chưa đo |
-| 15.2 | 0 profile khác đổi | Sau 15.1, so `~/.paseo/config.json` với ảnh trước | Chỉ `model` / `thinkingOptionId` / `modeId` của `bm-worker` và `extends` của `agents.providers.bm-worker` khác; **mọi** profile không phải `bm-*` giống từng byte, thứ tự mảng giữ nguyên | Chưa đo |
-| 15.3 | Worker kế tiếp chạy model mới | Sau 15.1, giao Manager một yêu cầu Nhỏ | màn **Metric** → request → nút Worker ghi đúng model đã lưu (`runtimeInfo.model`) | Chưa đo |
-| 15.4 | Đổi provider → Manager đang sống được báo | Có một Manager đang mở. Edit Worker → đổi sang provider khác (ví dụ Codex) → Save; rồi giao Manager một yêu cầu | Chat Manager nhận `BM-SETTINGS …` với dòng `Worker mode` mới (ngay nếu Manager nghỉ, ở cuối lượt nếu đang chạy); Worker kế tiếp được tạo **không lỗi** mode | Chưa đo |
-| 15.5 | Lệch revision → không ghi | Mở Edit ở Worker; trong Settings của Paseo sửa một profile bất kỳ và lưu; quay lại và bấm Save | Form báo đúng câu `The configuration changed elsewhere; reopen Roles & models.`; `config.json` không đổi thêm | Chưa đo |
-| 15.6 | Reviewer không có mode nguy hiểm | Edit Reviewer trên Claude hay Codex | Danh sách Mode **không** có `bypassPermissions` / `full-access` / `plan` | Chưa đo |
-| 15.7 | Cảnh báo không chặn | Edit Worker → Pi (nếu có) → Save | Lưu được, dưới dòng Worker hiện `Pi needs pi-mcp-adapter to give this role Paseo tools.` | Chưa đo |
+| 15.1 | Save on the screen → Settings shows the same values | Beads Manager → Setup → Roles & models → **Edit** on Worker → change the model (and thinking if the model has it) → **Save** | The Worker row shows the new model and the text "Saved."; Settings → Agent profiles → profile **Worker** (`bm-worker`) shows exactly that model and thinking | Not measured |
+| 15.2 | 0 other profiles changed | After 15.1, compare `~/.paseo/config.json` with the before snapshot | Only `model` / `thinkingOptionId` / `modeId` of `bm-worker` and `extends` of `agents.providers.bm-worker` differ; **every** profile that is not `bm-*` is byte-identical, the array order is kept | Not measured |
+| 15.3 | The next Worker runs the new model | After 15.1, give Manager a Small request | **Metric** screen → request → the Worker node shows exactly the saved model (`runtimeInfo.model`) | Not measured |
+| 15.4 | Provider change → the live Manager is told | A Manager is open. Edit Worker → change to another provider (for example Codex) → Save; then give Manager a request | The Manager chat receives `BM-SETTINGS …` with the new `Worker mode` line (right away if Manager is idle, at the end of the turn if it is running); the next Worker is created **without** a mode error | Not measured |
+| 15.5 | Revision mismatch → no write | Open Edit on Worker; in Paseo's Settings edit any profile and save; come back and click Save | The form reports exactly `The configuration changed elsewhere; reopen Roles & models.`; `config.json` does not change further | Not measured |
+| 15.6 | Reviewer has no dangerous mode | Edit Reviewer on Claude or Codex | The Mode list does **not** have `bypassPermissions` / `full-access` / `plan` | Not measured |
+| 15.7 | The warning does not block | Edit Worker → Pi (if available) → Save | It saves, and under the Worker row shows `Pi needs pi-mcp-adapter to give this role Paseo tools.` | Not measured |
 
-Rủi ro đã biết (owner chấp nhận, Q3 a, Q15 a): một thay đổi trong Settings của Paseo rơi đúng vào lúc plugin đang ghi (giữa lần đọc và lần ghi của một lần Save) có thể bị đè mà không báo. Không có bước kiểm cho rủi ro này.
+Known risk (accepted by the owner, Q3 a, Q15 a): a change in Paseo's Settings that lands exactly while the plugin is writing (between the read and the write of one Save) can be overwritten without notice. There is no check step for this risk.
 
-## Dự phòng cho Worker (REQ-065, từ `0.3.0-alpha.2`)
+## Worker fallback (REQ-065, since `0.3.0-alpha.2`)
 
-Cần một chuỗi dự phòng cho Worker: Beads Manager → Setup → Roles & models → dưới dòng Worker → **+ Add fallback** (ví dụ Codex) → **Save fallbacks**. Một sự cố thật là tốt nhất; không có thì dựng lượt hỏng bằng một provider giả (ví dụ một Worker trên provider Pi chưa đăng nhập, cho L4).
+Needs a fallback chain for the Worker: Beads Manager → Setup → Roles & models → under the Worker row → **+ Add fallback** (for example Codex) → **Save fallbacks**. A real incident is best; without one, stage a failed turn with a fake provider (for example a Worker on a Pi provider that is not signed in, for L4).
 
-| # | Kiểm | Cách làm | Kết quả mong đợi | Kết quả |
+| # | Check | How | Expected result | Result |
 |---|---|---|---|---|
-| 16.1 | Lưu chuỗi ghi alias và file | Sau khi lưu, đọc `~/.paseo/config.json` và `~/.paseo-bm/role-fallback.json` | Có `agents.providers.bm-worker-fallback-1` với `extends` của mục đó; file có `roles.worker.entries` đúng thứ tự; 0 profile khác đổi | Chưa đo |
-| 16.2 | Thẻ hiện ngay khi lượt Worker hỏng | Một Worker dừng vì hạn mức / billing / đăng nhập | Chat Manager có thẻ "Worker stopped by its provider plan" với nguyên văn lỗi; pill "Fallback · 1 decision" ở Manager đó; `~/.paseo-bm/role-fallback-state.json` có sự cố `pending` | Chưa đo |
-| 16.3 | Thẻ vẫn hiện khi Manager cùng provider gốc | Manager và Worker cùng provider gốc; Worker hết hạn mức gói | Lượt của Manager hỏng theo (vô hại), nhưng thẻ và pill vẫn hiện (đọc từ file, không từ lượt Manager) | Chưa đo |
-| 16.4 | Switch tạo Worker thay thế | Bấm **Switch to …** trên thẻ | Trong **≤ 60 giây** có Worker "Beads Worker (fallback)" trên `bm-worker-fallback-1/<model>`, nhãn `bm.replaces` = Worker cũ; Worker cũ mang `bm.replacedBy`; Worker mới gửi `received` và **không mở lại** bead đã đóng | Chưa đo |
-| 16.5 | Một Worker cho request | Sau 16.4, trả lời một câu hỏi của request đó trên thẻ | Câu trả lời tới Worker mới, không tới Worker cũ; cây agent ghi `· replaced by <id>` cạnh Worker cũ | Chưa đo |
-| 16.6 | `listUsage` trả cửa sổ | Ở một sự cố L1 của Claude hay Codex | Sự cố có `resetsAt` (giờ reset muộn nhất trong các cửa sổ đã hết); thẻ có nút **Wait until <giờ>** | Chưa đo |
-| 16.7 | Wait | Bấm **Wait until …** | Sự cố `waiting`; tới giờ reset + 60 giây, Worker cũ nhận `BM-RESUME …` và làm tiếp; thẻ ghi đã resume | Chưa đo |
-| 16.8 | I'll handle it | Bấm **I'll handle it** trên một sự cố khác | Sự cố `dismissed`; không agent nào bị tạo hay dừng | Chưa đo |
+| 16.1 | Saving the chain writes the alias and the file | After saving, read `~/.paseo/config.json` and `~/.paseo-bm/role-fallback.json` | There is `agents.providers.bm-worker-fallback-1` with that entry's `extends`; the file has `roles.worker.entries` in the right order; 0 other profiles changed | Not measured |
+| 16.2 | The card shows as soon as a Worker turn fails | A Worker stops because of a usage limit / billing / sign-in | The Manager chat has the card "Worker stopped by its provider plan" with the error verbatim; the pill "Fallback · 1 decision" on that Manager; `~/.paseo-bm/role-fallback-state.json` has a `pending` incident | Not measured |
+| 16.3 | The card still shows when Manager is on the same base provider | Manager and Worker on the same base provider; the Worker runs out of its plan limit | Manager's turn fails too (harmless), but the card and the pill still show (read from the file, not from Manager's turn) | Not measured |
+| 16.4 | Switch creates a replacement Worker | Click **Switch to …** on the card | Within **≤ 60 seconds** there is a Worker "Beads Worker (fallback)" on `bm-worker-fallback-1/<model>`, label `bm.replaces` = the old Worker; the old Worker carries `bm.replacedBy`; the new Worker sends `received` and **does not reopen** closed beads | Not measured |
+| 16.5 | One Worker per request | After 16.4, answer a question of that request on the card | The answer reaches the new Worker, not the old one; the agent tree shows `· replaced by <id>` next to the old Worker | Not measured |
+| 16.6 | `listUsage` returns windows | On an L1 incident of Claude or Codex | The incident has `resetsAt` (the latest reset time among the exhausted windows); the card has a **Wait until <time>** button | Not measured |
+| 16.7 | Wait | Click **Wait until …** | The incident is `waiting`; at the reset time + 60 seconds, the old Worker receives `BM-RESUME …` and continues; the card records that it resumed | Not measured |
+| 16.8 | I'll handle it | Click **I'll handle it** on another incident | The incident is `dismissed`; no agent is created or stopped | Not measured |
 
-Rủi ro đã biết: mẫu nhận dạng mặc định chưa kiểm trên sự cố thật (đề xuất §1.5). Nếu 16.2 không có thẻ, ghi nguyên văn lỗi của lượt hỏng vào cột Kết quả: đó là dữ liệu để sửa mẫu.
+Known risk: the default recognition patterns have not been checked on a real incident (proposal §1.5). If 16.2 has no card, record the failed turn's error verbatim in the Result column: that is the data to fix the patterns.
 
-## Dự phòng cho Reviewer và Manager (REQ-066, từ `0.3.0-alpha.3`)
+## Reviewer and Manager fallback (REQ-066, since `0.3.0-alpha.3`)
 
-Cần một chuỗi dự phòng cho Reviewer và cho Manager (Beads Manager → Setup → Roles & models, khối dưới dòng Reviewer và dòng Manager). Như phần dự phòng cho Worker: sự cố thật là tốt nhất, không thì dựng lượt hỏng bằng một provider giả; không bao giờ cố đẩy một provider tới hạn mức.
+Needs a fallback chain for the Reviewer and for the Manager (Beads Manager → Setup → Roles & models, the block under the Reviewer row and the Manager row). As in the Worker fallback part: a real incident is best, otherwise stage a failed turn with a fake provider; never try to push a provider to its usage limit.
 
-| # | Kiểm | Cách làm | Kết quả mong đợi | Kết quả |
+| # | Check | How | Expected result | Result |
 |---|---|---|---|---|
-| 17.1 | Switch một Reviewer | Một Reviewer dừng vì hạn mức / billing / đăng nhập; bấm **Switch to …** trên thẻ trong chat Manager | Worker cha nhận `BM-FALLBACK` với chỉ dẫn `create_agent`; Worker tạo Reviewer trên `bm-reviewer-fallback-1/<model>` có nhãn `bm.replaces` = Reviewer cũ, và gửi nó nguyên văn tin review cũ; Reviewer cũ mang `bm.replacedBy` | Chưa đo |
-| 17.2 | Số lượt review không tăng | Sau 17.1, màn **Metric** → request | Số lượt review của request **không tăng** vì tin gửi lại; không có `BM-BUDGET` vì tin đó | Chưa đo |
-| 17.3 | Resend to Worker | **Không dựng lại trên daemon thật**: tin chỉ nằm trong hàng chờ khi Worker đang chạy, nên phải nạp lại plugin giữa lượt của Worker — trái cảnh báo ở phần chuẩn bị. Chỉ kiểm bằng test tự động (`test/fallback-reviewer.test.ts`) | Thẻ hiện nút **Resend to Worker** khi sự cố Reviewer `switched` mà chưa có Reviewer thay thế; bấm thì Worker nhận lại đúng chỉ dẫn | Chưa đo (chỉ test tự động) |
-| 17.4 | Switch một Manager | Manager dừng vì gói của provider; bấm **Switch to …** trên thẻ trong chính chat Manager đó | Có Manager mới trên `bm-manager-fallback-1/<model>` với lời bàn giao `BM-HANDOVER` role manager (Worker, câu hỏi đang chờ, ba tin gần nhất của bạn đã che bí mật); thẻ ghi "A new Beads Manager is running on …" | Chưa đo |
-| 17.5 | Beads Manager mở Manager thay thế | Sau 17.4, mở Beads Manager từ sidebar hay Command Center | Mở Manager mới, không phải Manager cũ; Manager cũ vẫn còn cho tới khi bạn lưu trữ nó | Chưa đo |
-| 17.6 | Worker báo cáo tới Manager mới | Sau 17.4, một Worker đang chạy gửi báo cáo kế tiếp | Worker đã nhận `BM-SETTINGS` với dòng `Manager agent id: …`; báo cáo kế tiếp tới Manager mới | Chưa đo |
+| 17.1 | Switch a Reviewer | A Reviewer stops because of a usage limit / billing / sign-in; click **Switch to …** on the card in the Manager chat | The parent Worker receives `BM-FALLBACK` with a `create_agent` instruction; the Worker creates a Reviewer on `bm-reviewer-fallback-1/<model>` labelled `bm.replaces` = the old Reviewer, and sends it the old review message verbatim; the old Reviewer carries `bm.replacedBy` | Not measured |
+| 17.2 | The review count does not grow | After 17.1, **Metric** screen → request | The request's review count **does not grow** because of the resent message; there is no `BM-BUDGET` because of it | Not measured |
+| 17.3 | Resend to Worker | **Not reproduced on a real daemon**: the message is only queued while the Worker is running, so the plugin would have to be reloaded mid Worker turn — against the warning in the preparation. Checked only by automated test (`test/fallback-reviewer.test.ts`) | The card shows the **Resend to Worker** button when a Reviewer incident is `switched` but there is no replacement Reviewer yet; clicking it makes the Worker receive the same instruction again | Not measured (automated test only) |
+| 17.4 | Switch a Manager | A Manager stops because of its provider plan; click **Switch to …** on the card in that same Manager chat | There is a new Manager on `bm-manager-fallback-1/<model>` with a `BM-HANDOVER` role manager handover (Worker, pending questions, your three most recent messages with secrets masked); the card says "A new Beads Manager is running on …" | Not measured |
+| 17.5 | Beads Manager opens the replacement Manager | After 17.4, open Beads Manager from the sidebar or the Command Center | It opens the new Manager, not the old one; the old Manager stays until you archive it | Not measured |
+| 17.6 | The Worker reports to the new Manager | After 17.4, a running Worker sends its next report | The Worker has received `BM-SETTINGS` with the line `Manager agent id: …`; the next report reaches the new Manager | Not measured |
 
 
-## Tự chuyển và tự chờ (REQ-067, từ `0.3.0-alpha.4`)
+## Auto switch and auto wait (REQ-067, since `0.3.0-alpha.4`)
 
-Mục 18.1 là tiền đề trước khi bật **Auto switch**: bộ mẫu phải nhận đúng loại ít nhất một sự cố thật (từng là điều kiện phát hành của `0.3.0-alpha.4`, owner chốt Q17 b; đã Đạt trên máy owner). Các mục khác cần một chuỗi dự phòng, và policy **Auto switch** đặt riêng cho vai trò cần kiểm (Beads Manager → Setup → Roles & models). Như phần dự phòng cho Worker: sự cố thật là tốt nhất, không thì dựng lượt hỏng bằng một provider giả; không bao giờ cố đẩy một provider tới hạn mức.
+Item 18.1 is the prerequisite before turning on **Auto switch**: the patterns must classify at least one real incident correctly (it was a release condition of `0.3.0-alpha.4`, decided by the owner in Q17 b; already Passed on the owner's machine). The other items need a fallback chain, and the **Auto switch** policy set separately for the role being checked (Beads Manager → Setup → Roles & models). As in the Worker fallback part: a real incident is best, otherwise stage a failed turn with a fake provider; never try to push a provider to its usage limit.
 
-| # | Kiểm | Cách làm | Kết quả mong đợi | Kết quả |
+| # | Check | How | Expected result | Result |
 |---|---|---|---|---|
-| 18.1 | Bộ mẫu nhận đúng sự cố thật (REQ-067 c) | Đọc `~/.paseo-bm/role-fallback-state.json` (chỉ đọc) | Ít nhất một sự cố có `signal` và `message` do một provider thật sinh ra, và `class` đúng với lỗi đó theo bộ mẫu (mặc định hoặc của file) | **Đạt** — đọc 2026-09-23 (`req-20260923T040415Z`). File có 1 sự cố: `fb-d3c9430912b2`, `role` `worker`, `signal` `completed`, `message` `"Failed to authenticate. API Error: 401 API key is invalid."` — do Anthropic thật từ chối lượt Claude Code sinh ra, `class` `L4`, `status` `switched`. Không có `~/.paseo-bm/role-fallback.json` nên bộ mẫu áp dụng là `DEFAULT_PATTERNS`. Chạy chính `classifyText` của `plugin/shared/fallback-patterns.ts` trên `message` đó: trả `L4`, mẫu khớp `/\b401\b/i`, `isFallbackClass` true — **trùng** với `class` đã ghi trong file. |
-| 18.2 | Lựa chọn và cảnh báo | Chọn **Auto switch** cho Worker, rồi cho Manager; **Save fallbacks** | Dưới dòng policy có cảnh báo chi phí; của Manager có thêm "The chat you use may be replaced."; `role-fallback.json` có `policy: "auto"` cho đúng vai trò đó, vai trò khác không đổi | Chưa đo |
-| 18.3 | Tự chuyển | Worker có Auto switch dừng vì gói của provider, không biết giờ reset (hay giờ reset còn hơn 30 phút) | Không cần bấm: có Worker thay thế như 16.4; chat Manager nhận **một** thẻ, trạng thái đã chuyển — không có thẻ "pending" trước đó | Chưa đo |
-| 18.4 | Tự chờ | Sự cố L1 của Claude hay Codex có giờ reset còn ≤ 30 phút | Sự cố `waiting` ngay, không agent nào được tạo; tới giờ reset agent cũ nhận `BM-RESUME` như 16.7 | Chưa đo |
-| 18.5 | Không ứng viên | Vai trò có Auto switch nhưng chuỗi rỗng (hay mọi ứng viên đã dùng) | Sự cố ở lại `pending`, thẻ như Ask me | Chưa đo |
-| 18.6 | Ask me không đổi | Vai trò để "Ask me" | Như 16.2: thẻ `pending`, không gì tự chạy | Chưa đo |
+| 18.1 | The patterns classify a real incident correctly (REQ-067 c) | Read `~/.paseo-bm/role-fallback-state.json` (read only) | At least one incident has a `signal` and `message` produced by a real provider, and a `class` that is correct for that error according to the patterns (default or from the file) | **Pass** — read 2026-09-23 (`req-20260923T040415Z`). The file has 1 incident: `fb-d3c9430912b2`, `role` `worker`, `signal` `completed`, `message` `"Failed to authenticate. API Error: 401 API key is invalid."` — produced by the real Anthropic refusing a Claude Code turn, `class` `L4`, `status` `switched`. There is no `~/.paseo-bm/role-fallback.json`, so the patterns in force are `DEFAULT_PATTERNS`. Running the actual `classifyText` of `plugin/shared/fallback-patterns.ts` on that `message`: returns `L4`, matching pattern `/\b401\b/i`, `isFallbackClass` true — **the same** as the `class` recorded in the file. |
+| 18.2 | Choice and warning | Choose **Auto switch** for Worker, then for Manager; **Save fallbacks** | Under the policy row there is a cost warning; Manager's also has "The chat you use may be replaced."; `role-fallback.json` has `policy: "auto"` for exactly that role, other roles unchanged | Not measured |
+| 18.3 | Auto switch | A Worker with Auto switch stops because of its provider plan, with no known reset time (or a reset time more than 30 minutes away) | No click needed: there is a replacement Worker as in 16.4; the Manager chat receives **one** card, in the switched state — no "pending" card before it | Not measured |
+| 18.4 | Auto wait | An L1 incident of Claude or Codex with a reset time ≤ 30 minutes away | The incident is `waiting` right away, no agent is created; at the reset time the old agent receives `BM-RESUME` as in 16.7 | Not measured |
+| 18.5 | No candidate | A role with Auto switch but an empty chain (or every candidate already used) | The incident stays `pending`, the card as with Ask me | Not measured |
+| 18.6 | Ask me unchanged | A role left on "Ask me" | As 16.2: a `pending` card, nothing runs by itself | Not measured |
 
-Rủi ro đã biết: bật Auto switch khi 18.1 chưa đạt thì một lần nhận nhầm tạo ra một agent thừa. Nếu 18.3 tạo agent cho một lượt không phải lỗi gói, ghi nguyên văn lượt đó vào cột Kết quả và đặt lại "Ask me".
+Known risk: turning on Auto switch while 18.1 has not passed means one misclassification creates a surplus agent. If 18.3 creates an agent for a turn that is not a plan error, record that turn verbatim in the Result column and set "Ask me" back.
 
 ---
 
-*Revision 2026-09-25: giữ làm checklist hiện hành cho cài đặt vai trò và dự phòng; tiêu đề phần đổi từ số phase sang tính năng, "Dashboard" đổi thành màn Metric, bỏ các câu về điều kiện vào/ra phase đã đóng; kiểm cần Reviewer dùng yêu cầu Vừa vì yêu cầu Nhỏ không còn tạo Reviewer. Kết quả đã đo (18.1) giữ nguyên.*
+*Revision 2026-09-25: kept as the current checklist for role settings and fallback; part titles changed from phase numbers to features, "Dashboard" renamed to the Metric screen, sentences about the entry/exit conditions of closed phases removed; checks that need a Reviewer use a Medium request because a Small request no longer creates a Reviewer. The measured result (18.1) is kept as is.*

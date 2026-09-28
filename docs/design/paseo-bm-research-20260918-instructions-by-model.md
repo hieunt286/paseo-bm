@@ -1,148 +1,148 @@
-# Báo cáo — Chỉ dẫn vai trò tới từng model thế nào, và có cần tối ưu theo model không
+# Report — How role instructions reach each model, and whether they need optimising per model
 
-| Trường | Giá trị |
+| Field | Value |
 |---|---|
-| Mã | `research-20260918-instructions-by-model` |
-| Request | `req-20260918T011706Z` (phần 3 của yêu cầu) |
+| ID | `research-20260918-instructions-by-model` |
+| Request | `req-20260918T011706Z` (part 3 of the request) |
 | Bead | `bm-wp-248-uxpe` |
-| Thiết kế | [design-delta-20260918](../archive/design/paseo-bm-delta-20260918-manager-mode-model-metrics.md) §4.5 (câu hỏi R1–R6, luật nguồn) |
-| Phạm vi | Claude Code / `claude-opus-5` (Manager, Worker); Codex / `gpt-5.6-sol` (Reviewer); một đoạn về OpenCode (Q35) |
-| Tính chất | **Chỉ điều tra.** Không sửa `plugin/roles/*.md` (Q33). Mọi đề xuất ở §7 là việc owner quyết, thành request mới |
-| Ngày | 2026-09-18 — người viết: Beads Worker (`claude-opus-5`) |
+| Design | [design-delta-20260918](../archive/design/paseo-bm-delta-20260918-manager-mode-model-metrics.md) §4.5 (questions R1–R6, source rule) |
+| Scope | Claude Code / `claude-opus-5` (Manager, Worker); Codex / `gpt-5.6-sol` (Reviewer); one paragraph on OpenCode (Q35) |
+| Nature | **Investigation only.** No change to `plugin/roles/*.md` (Q33). Every suggestion in §7 is for the owner to decide, as a new request |
+| Date | 2026-09-18 — author: Beads Worker (`claude-opus-5`) |
 
-Ký hiệu nguồn: **[B]** bundle Paseo 0.8 đã cài (`/Applications/Paseo.app/Contents/Resources/app.asar`, gói `@getpaseo/server/dist/server/server/agent/…`), kèm số dòng; **[T]** kho vết `~/.paseo-bm/traces`; **[S]** snapshot agent đọc bằng `get_agent_status`; **[D]** tài liệu công khai của nhà cung cấp, đọc ngày 2026-09-18 (danh sách ở §8); **[Q]** quan sát trực tiếp ngữ cảnh của chính Worker viết báo cáo này. Điều gì là **suy luận** thì ghi rõ.
+Source notation: **[B]** the installed Paseo 0.8 bundle (`/Applications/Paseo.app/Contents/Resources/app.asar`, package `@getpaseo/server/dist/server/server/agent/…`), with line numbers; **[T]** the trace store `~/.paseo-bm/traces`; **[S]** agent snapshots read with `get_agent_status`; **[D]** the vendors' public documentation, read on 2026-09-18 (list in §8); **[Q]** direct observation of the context of the very Worker writing this report. Whatever is **inferred** is marked as such.
 
-## 0. Kết luận ngắn
+## 0. Short conclusion
 
-1. **Ba provider nạp chỉ dẫn vai trò theo ba đường khác nhau** (§2): Claude nối nó vào **cuối** system prompt dựng sẵn của Claude Code; Codex đưa nó thành **developer instructions**; OpenCode đưa vào trường `system`. Ở cả Claude lẫn Codex, chỉ dẫn vai trò đứng ở vị trí **có thẩm quyền cao hơn** file chỉ dẫn của repo (`CLAUDE.md`/`AGENTS.md` đi vào hội thoại như lời người dùng).
-2. **Không cần tách văn bản chỉ dẫn theo model lúc này.** Trên 504 lượt đã ghi, cả hai model làm đúng hợp đồng định dạng gần như tuyệt đối: 61/61 lượt Reviewer (`gpt-5.6-sol`) kết thúc bằng khối `BM-REVIEW` đủ 7 trường; 131 `BM-REPORT` của Worker (`claude-opus-5`) không thiếu trường nào (§5). Mọi bất thường tìm được đều do **tầng chỉ dẫn xung đột nhau** hoặc do phiên bản prompt cũ, không do model.
-3. **Cái cần tối ưu là chỗ các tầng chỉ dẫn đè lên nhau, và chỗ đó khác nhau theo provider** (§6). Hai xung đột có bằng chứng thật: (a) preset của Claude Code dạy agent **ghi bộ nhớ ra `~/.claude/projects/…/memory`**, trái giới hạn "không ghi ra ngoài workspace" — 3 lần ghi thật; (b) tin nhắn giao việc của Worker cho phép Reviewer chạy `npm run build`, còn `reviewer.md` chỉ cho chạy test và lint/typecheck không ghi file — Reviewer làm theo tin nhắn, 8 lệnh build trong 7 lượt.
-4. **Sáu đề xuất có thứ tự ở §7**: hai sửa chữ dùng chung cho mọi model, một chỉnh cấu hình riêng cho Reviewer (mức thinking), và ba việc chỉ nên làm sau khi đo.
+1. **The three providers load role instructions by three different paths** (§2): Claude appends them to the **end** of Claude Code's built-in system prompt; Codex passes them as **developer instructions**; OpenCode puts them in the `system` field. On both Claude and Codex, the role instructions sit in a position of **higher authority** than the repository's instruction file (`CLAUDE.md`/`AGENTS.md` enters the conversation as the user's words).
+2. **There is no need to split the instruction text per model at this point.** Across 504 recorded turns, both models honour the format contract almost perfectly: 61/61 Reviewer turns (`gpt-5.6-sol`) end with a `BM-REVIEW` block with all 7 fields; 131 `BM-REPORT`s from the Worker (`claude-opus-5`) miss no field (§5). Every anomaly found comes from **instruction layers conflicting with each other** or from an old prompt version, not from the model.
+3. **What needs optimising is where the instruction layers overlap, and that differs per provider** (§6). Two conflicts have real evidence: (a) Claude Code's preset teaches the agent to **write memory to `~/.claude/projects/…/memory`**, against the limit "do not write outside the workspace" — 3 real writes; (b) the Worker's assignment message allows the Reviewer to run `npm run build`, while `reviewer.md` only allows running tests and lint/typecheck that write no files — the Reviewer followed the message, 8 build commands in 7 turns.
+4. **Six ordered suggestions in §7**: two wording fixes shared by every model, one configuration tweak specific to the Reviewer (thinking level), and three jobs that should only be done after measuring.
 
-**Giới hạn của dữ liệu:** mỗi vai trò chỉ chạy **một** model (Manager và Worker luôn `claude-opus-5`, Reviewer luôn `gpt-5.6-sol`), nên số liệu **không tách được** hiệu ứng của model khỏi hiệu ứng của vai trò. Muốn tách phải chạy đổi model trên cùng fixture — ngoài phạm vi request này (Q33 không chọn (c)).
+**Limits of the data:** each role ran only **one** model (Manager and Worker always `claude-opus-5`, Reviewer always `gpt-5.6-sol`), so the numbers **cannot separate** the effect of the model from the effect of the role. Separating them would need a run with swapped models on the same fixture — out of scope for this request (Q33 did not choose (c)).
 
-## 1. Câu hỏi và cách làm
+## 1. Questions and method
 
-| # | Câu hỏi (thiết kế §4.5) | Nguồn chính |
+| # | Question (design §4.5) | Main source |
 |---|---|---|
-| R1 | Chỉ dẫn vai trò nằm ở đâu trong ngữ cảnh | [B], [S], [D], [Q] |
-| R2 | Nó chiếm bao nhiêu, cái gì đứng sau nó | đếm ký tự trên file; [S] |
-| R3 | Hướng dẫn chính thức của từng họ model nói gì | [D] |
-| R4 | Trên trace đã có, từng model thật sự làm theo tới đâu | [T], biên bản trong `docs/operations/` |
-| R5 | Nét nào của ba file vai trò tác động khác nhau theo model | đối chiếu R1–R4 |
-| R6 | Có cần tối ưu theo model không; đề xuất | tổng hợp |
+| R1 | Where the role instructions sit in the context | [B], [S], [D], [Q] |
+| R2 | How much they take up, what comes after them | character count on the files; [S] |
+| R3 | What each model family's official guidance says | [D] |
+| R4 | On the existing traces, how far each model actually follows them | [T], run records in `docs/operations/` |
+| R5 | Which traits of the three role files act differently per model | cross-check of R1–R4 |
+| R6 | Is per-model optimisation needed; suggestions | synthesis |
 
-Phép đo trên trace: đọc mọi `events-*.jsonl`, khử trùng lặp theo `(agentId, turnId, nội dung lượt)`, phân loại lệnh shell bằng đúng luật của plugin (`shell.ts`: tách theo `&& || ; |`, xoá phần trong dấu nháy trước khi so tên lệnh). Script nằm trong thư mục `mktemp -d` và đã xoá khi xong.
+Measurement on the traces: read every `events-*.jsonl`, deduplicate by `(agentId, turnId, turn content)`, classify shell commands with exactly the plugin's rule (`shell.ts`: split on `&& || ; |`, strip the quoted parts before comparing command names). The script lived in a `mktemp -d` folder and was deleted when done.
 
-## 2. R1 — Chỉ dẫn vai trò tới từng provider bằng đường nào
+## 2. R1 — By which path the role instructions reach each provider
 
 | | Claude Code (`claude-opus-5`) | Codex (`gpt-5.6-sol`) | OpenCode |
 |---|---|---|---|
-| Paseo gửi chỉ dẫn vai trò vào | `systemPrompt: { type: "preset", preset: "claude_code", append: <vai trò + phần daemon nối> }` — [B] `providers/claude/agent.js` 2588–2590, 2633–2638 | `developerInstructions` khi mở thread, khi nối lại thread và mỗi lượt — [B] `codex-app-server-agent.js` 2879–2881, 3013–3015, 3947–3958; khi có collaboration mode thì `developer_instructions = <chỉ dẫn của mode> + <vai trò> + <phần daemon>` — 2716–2718 | trường `system` — [B] `opencode-agent.js` 2511–2522, 2788–2803 |
-| Vai trò tin nhắn | **system**, nằm **sau** toàn bộ preset của Claude Code | **developer**, sau chỉ dẫn gốc của model (Codex tự giữ, plugin không thấy) và sau chỉ dẫn của collaboration mode (Reviewer của lô b1 chạy mode `Default` — [S]) | system |
-| Cái gì đứng sau | `appendSystemPrompt` của daemon — rỗng trừ khi người dùng đặt trong cấu hình daemon ([B] `bootstrap.js`, `agent-manager.js` 377, 3606–3615) | như cột trái, cùng một chuỗi | như cột trái |
-| File chỉ dẫn của repo | `CLAUDE.md` (ở repo này là symlink tới `AGENTS.md`) được **tiêm vào hội thoại như ngữ cảnh dự án, không vào system prompt**; Paseo bật đủ ba nguồn `user`, `project`, `local` ([B] 38–42; [D] Anthropic "Modifying system prompts") | mỗi `AGENTS.md` tìm thấy thành **một tin nhắn vai trò user** mở đầu bằng `# AGENTS.md instructions for <thư mục>` ([D] OpenAI "Codex Prompting Guide") | không kiểm |
-| Preset mang thêm gì | công cụ, an toàn, môi trường, **và các chỉ dẫn riêng của Claude Code**: mục "# Memory" bảo agent tự ghi bộ nhớ ra `~/.claude/projects/<repo>/memory/`, công cụ hỏi `AskUserQuestion`, luật commit và PR — [Q]: tất cả nằm trong system prompt của chính Worker này, **trước** chỉ dẫn vai trò | chỉ dẫn gốc của Codex và của collaboration mode (không đọc được từ plugin) | không kiểm |
-| Đổi chỉ dẫn giữa phiên | Claude Code **ghi lại system prompt ở request đầu tiên** và dùng lại cho tới khi phiên bị nén ([D] Anthropic) — sửa file vai trò chỉ tới agent **mới** | Paseo gửi lại `developerInstructions` mỗi lượt, nhưng giá trị là `config.systemPrompt` đã chốt lúc tạo agent — thực tế cũng chỉ tới agent mới | — |
+| Paseo sends the role instructions into | `systemPrompt: { type: "preset", preset: "claude_code", append: <role + the daemon's appended part> }` — [B] `providers/claude/agent.js` 2588–2590, 2633–2638 | `developerInstructions` when opening a thread, when resuming a thread and on every turn — [B] `codex-app-server-agent.js` 2879–2881, 3013–3015, 3947–3958; with a collaboration mode, `developer_instructions = <the mode's instructions> + <role> + <daemon part>` — 2716–2718 | the `system` field — [B] `opencode-agent.js` 2511–2522, 2788–2803 |
+| Message role | **system**, placed **after** the whole Claude Code preset | **developer**, after the model's base instructions (Codex keeps them itself, the plugin cannot see them) and after the collaboration mode's instructions (the Reviewer of batch b1 ran mode `Default` — [S]) | system |
+| What comes after | the daemon's `appendSystemPrompt` — empty unless the user sets it in the daemon config ([B] `bootstrap.js`, `agent-manager.js` 377, 3606–3615) | as the left column, the same string | as the left column |
+| The repository's instruction file | `CLAUDE.md` (a symlink to `AGENTS.md` in this repository) is **injected into the conversation as project context, not into the system prompt**; Paseo enables all three sources `user`, `project`, `local` ([B] 38–42; [D] Anthropic "Modifying system prompts") | each `AGENTS.md` found becomes **one user-role message** starting with `# AGENTS.md instructions for <folder>` ([D] OpenAI "Codex Prompting Guide") | not checked |
+| What the preset brings along | tools, safety, environment, **and Claude Code's own instructions**: the "# Memory" section telling the agent to write memory itself to `~/.claude/projects/<repo>/memory/`, the `AskUserQuestion` question tool, commit and PR rules — [Q]: all of it is in this very Worker's system prompt, **before** the role instructions | Codex's base instructions and the collaboration mode's (not readable from the plugin) | not checked |
+| Changing instructions mid-session | Claude Code **records the system prompt at the first request** and reuses it until the session is compacted ([D] Anthropic) — editing a role file only reaches **new** agents | Paseo resends `developerInstructions` every turn, but the value is the `config.systemPrompt` fixed when the agent was created — in practice it also only reaches new agents | — |
 
-**Hệ quả về thẩm quyền.** Anthropic viết rõ: "Instructions in the user message carry marginally less weight than the same text in the system prompt" [D]. Codex đặt `AGENTS.md` ở vai trò user, dưới developer. Vì vậy, khi file vai trò và file của repo mâu thuẫn, **ở cả hai provider file vai trò thắng về vị trí**. Nhưng thắng về vị trí không có nghĩa là model không phải tốn công hoà giải: với GPT-5, "poorly-constructed prompts containing contradictory or vague instructions can be more damaging to GPT-5 than to other models, as it expends reasoning tokens searching for a way to reconcile the contradictions" [D].
+**Consequence for authority.** Anthropic states it plainly: "Instructions in the user message carry marginally less weight than the same text in the system prompt" [D]. Codex places `AGENTS.md` in the user role, below developer. So when the role file and the repository's file contradict each other, **on both providers the role file wins by position**. But winning by position does not mean the model is spared the effort of reconciling them: with GPT-5, "poorly-constructed prompts containing contradictory or vague instructions can be more damaging to GPT-5 than to other models, as it expends reasoning tokens searching for a way to reconcile the contradictions" [D].
 
-**Khác biệt thật duy nhất về đường nạp:** ở Claude, chỉ dẫn vai trò phải **sống chung với một preset lớn viết cho một kịch bản khác** — một người ngồi xem và duyệt từng bước. Chính Anthropic nói preset giả định "a human is in the loop with access to a full toolset", và với "an agent [that] runs autonomously without a human approving each step" thì nên cân nhắc prompt riêng [D]. paseo-bm **không chọn được** điều đó: Paseo cố định preset + `append` [B 2633–2638]. Codex không có tầng tương đương mà plugin nhìn thấy được.
+**The only real difference in the loading path:** on Claude, the role instructions must **live alongside a large preset written for a different scenario** — a person sitting and watching, approving each step. Anthropic itself says the preset assumes "a human is in the loop with access to a full toolset", and that for "an agent [that] runs autonomously without a human approving each step" a custom prompt should be considered [D]. paseo-bm **cannot choose** that: Paseo fixes preset + `append` [B 2633–2638]. Codex has no equivalent layer that the plugin can see.
 
-## 3. R2 — Kích thước và chỗ đứng
+## 3. R2 — Size and position
 
-| | Ký tự | Token ước tính (ký tự ÷ 4) | Cụm CHỮ HOA | `NEVER` | Bảng (dòng) | Khối ví dụ |
+| | Characters | Estimated tokens (characters ÷ 4) | UPPER-CASE phrases | `NEVER` | Tables (rows) | Example blocks |
 |---|---|---|---|---|---|---|
-| `manager.md` | 9.104 | ~2.300 | 7 | 3 | 0 | 0 |
-| `worker.md` | 21.220 | ~5.300 | 8 | 4 | 15 | 3 |
-| `reviewer.md` | 7.494 | ~1.900 | 11 | 1 | 0 | 3 |
-| `AGENTS.md` của repo này (ví dụ file repo) | 15.427 | ~3.900 | 0 | 0 | 9 | 3 |
+| `manager.md` | 9,104 | ~2,300 | 7 | 3 | 0 | 0 |
+| `worker.md` | 21,220 | ~5,300 | 8 | 4 | 15 | 3 |
+| `reviewer.md` | 7,494 | ~1,900 | 11 | 1 | 0 | 3 |
+| This repository's `AGENTS.md` (as an example repository file) | 15,427 | ~3,900 | 0 | 0 | 9 | 3 |
 
-Ước tính ÷ 4 là thô và thấp hơn thực tế với chữ tiếng Việt; chỉ dùng để so tương đối.
+The ÷ 4 estimate is rough and lower than reality for Vietnamese text; use it only for relative comparison.
 
-- **Cửa sổ ngữ cảnh khác nhau gấp bốn:** Worker trên Claude có 1.000.000 token ([S] `contextWindowMaxTokens`); Reviewer trên Codex có 258.400. Reviewer lô b1 của request này dùng **110.940 token ngay lượt đầu (43%)** [S] — suy luận: phần lớn là file dự án và skill nó đọc, vì `reviewer.md` chỉ ~1.900 token.
-- **Kích thước preset của Claude Code không đo được từ plugin** (suy luận: lớn hơn cả ba file vai trò cộng lại, vì nó mang toàn bộ hướng dẫn công cụ và môi trường). Chỉ dẫn vai trò vì vậy là **phần đuôi** của một system prompt dài — vị trí mà Anthropic nói với Opus 5 vẫn giữ tốt: "its instruction following, tool calling, and reasoning stay consistent throughout the window" [D].
+- **The context windows differ fourfold:** the Worker on Claude has 1,000,000 tokens ([S] `contextWindowMaxTokens`); the Reviewer on Codex has 258,400. The batch b1 Reviewer of this request used **110,940 tokens on its very first turn (43%)** [S] — inferred: mostly the project files and skills it read, since `reviewer.md` is only ~1,900 tokens.
+- **The size of Claude Code's preset cannot be measured from the plugin** (inferred: larger than all three role files combined, since it carries all the tool and environment guidance). The role instructions are therefore the **tail** of a long system prompt — a position Anthropic says Opus 5 still handles well: "its instruction following, tool calling, and reasoning stay consistent throughout the window" [D].
 
-## 4. R3 — Hướng dẫn chính thức nói gì
+## 4. R3 — What the official guidance says
 
-| Chủ đề | Anthropic — Claude Opus 5 | OpenAI — GPT-5.x / Codex |
+| Topic | Anthropic — Claude Opus 5 | OpenAI — GPT-5.x / Codex |
 |---|---|---|
-| Nhấn mạnh, lời lẽ tuyệt đối | Model mới "more responsive to the system prompt… may now overtrigger. The fix is to dial back any aggressive language. Where you might have said 'CRITICAL: You MUST use this tool when…', you can use more normal prompting" | GPT-5: "Be THOROUGH" từng cần cho model cũ nhưng "counterproductive with GPT-5, which is already naturally introspective and proactive" (ví dụ Cursor) |
-| Giải thích lý do | "Providing context or motivation behind your instructions… 'NEVER use ellipses' [kém hơn câu có lý do]… Claude is smart enough to generalize from the explanation" | (không có câu tương đương trong các trang đã đọc cho GPT-5.x) |
-| Mâu thuẫn giữa các chỉ dẫn | không có mục riêng | "contradictory or vague instructions can be more damaging to GPT-5… expends reasoning tokens searching for a way to reconcile" |
-| Nói cái cần làm thay vì cái cấm | "Tell Claude what to do instead of what not to do"; "Positive examples… more effective than instructions about what not to do" | GPT-5.2 dùng cả hai dạng; ưu tiên ràng buộc cụ thể ("Implement EXACTLY and ONLY what the user requests") |
-| Ví dụ mẫu | "one of the most reliable ways to steer… Include 3–5 examples", bọc trong `<example>` | định dạng cố định: "Always follow this schema exactly (no extra fields)" |
-| Phạm vi | Opus 5 "can also expand the scope of a task… constrain scope explicitly" | GPT-5.2: "No extra features… If any instruction is ambiguous, choose the simplest valid interpretation" |
-| Tự kiểm | Opus 5 tự kiểm; "If your prompt contains explicit verification instructions… remove them: instructions like these cause over-verification" | (bài cho GPT-6 Astra — model **không** dùng ở đây — nói model mới tự chạy test; không áp cho 5.6) |
-| Agent con | Opus 5 "delegates to subagents more readily"; preset `claude_code` tự thêm một chỉ dẫn uỷ quyền trên Opus 5 | GPT-5.6 "multi-agent behavior is very steerable" (tóm tắt kết quả tìm kiếm; trang gốc trả 403, độ tin thấp hơn) |
-| Mức thinking/effort | mặc định `high`; hạ `low`/`medium` khi chất lượng giữ được | Codex: "'medium'… good all-around… `high` or `xhigh` for your hardest tasks"; GPT-5.6 Sol ở `low` "outperforming GPT-5.5 at high" (tóm tắt tìm kiếm, như trên) |
-| Cấu trúc | XML tag giúp tách chỉ dẫn / ngữ cảnh / ví dụ | Markdown trong chỉ dẫn không có cảnh báo gì |
+| Emphasis, absolute wording | New models are "more responsive to the system prompt… may now overtrigger. The fix is to dial back any aggressive language. Where you might have said 'CRITICAL: You MUST use this tool when…', you can use more normal prompting" | GPT-5: "Be THOROUGH" was once needed for older models but is "counterproductive with GPT-5, which is already naturally introspective and proactive" (the Cursor example) |
+| Explaining the reason | "Providing context or motivation behind your instructions… 'NEVER use ellipses' [worse than a sentence with a reason]… Claude is smart enough to generalize from the explanation" | (no equivalent sentence in the pages read for GPT-5.x) |
+| Contradictions between instructions | no dedicated section | "contradictory or vague instructions can be more damaging to GPT-5… expends reasoning tokens searching for a way to reconcile" |
+| Say what to do rather than what is forbidden | "Tell Claude what to do instead of what not to do"; "Positive examples… more effective than instructions about what not to do" | GPT-5.2 uses both forms; prefers concrete constraints ("Implement EXACTLY and ONLY what the user requests") |
+| Examples | "one of the most reliable ways to steer… Include 3–5 examples", wrapped in `<example>` | fixed format: "Always follow this schema exactly (no extra fields)" |
+| Scope | Opus 5 "can also expand the scope of a task… constrain scope explicitly" | GPT-5.2: "No extra features… If any instruction is ambiguous, choose the simplest valid interpretation" |
+| Self-checking | Opus 5 checks itself; "If your prompt contains explicit verification instructions… remove them: instructions like these cause over-verification" | (the article for GPT-6 Astra — a model **not** used here — says the new model runs tests by itself; does not apply to 5.6) |
+| Sub-agents | Opus 5 "delegates to subagents more readily"; the `claude_code` preset adds a delegation instruction by itself on Opus 5 | GPT-5.6 "multi-agent behavior is very steerable" (search result summary; the original page returns 403, lower confidence) |
+| Thinking/effort level | default `high`; lower to `low`/`medium` when quality holds | Codex: "'medium'… good all-around… `high` or `xhigh` for your hardest tasks"; GPT-5.6 Sol at `low` "outperforming GPT-5.5 at high" (search summary, as above) |
+| Structure | XML tags help separate instructions / context / examples | no warning at all about Markdown in instructions |
 
-Không trang nào của OpenAI đã đọc là "hướng dẫn prompt cho GPT-5.6" riêng; trang "Model guidance" hiện viết cho GPT-6 Astra và chỉ nhắc 5.6 Sol để so sánh. Kết luận về GPT ở báo cáo này vì vậy dựa trên hướng dẫn GPT-5 / 5.2 / Codex — **suy luận** rằng chúng vẫn đúng với 5.6.
+None of the OpenAI pages read is a dedicated "prompting guide for GPT-5.6"; the "Model guidance" page is currently written for GPT-6 Astra and mentions 5.6 Sol only for comparison. The conclusions about GPT in this report therefore rest on the GPT-5 / 5.2 / Codex guidance — **inferred** to still hold for 5.6.
 
-## 5. R4 — Trên trace, từng model thật sự làm theo tới đâu
+## 5. R4 — On the traces, how far each model actually follows them
 
-Dữ liệu [T]: **504** lượt sau khử trùng lặp, 7 workspace, 2026-09-16 → 2026-09-18. Manager `claude-opus-5` 244 lượt / 9 agent; Worker `claude-opus-5` 199 lượt / 24 agent; Reviewer `gpt-5.6-sol` 61 lượt / 37 agent. Bộ file vai trò đổi một lần trong khoảng này (viết lại ngày 2026-09-17, delta 20260917c).
+Data [T]: **504** turns after deduplication, 7 workspaces, 2026-09-16 → 2026-09-18. Manager `claude-opus-5` 244 turns / 9 agents; Worker `claude-opus-5` 199 turns / 24 agents; Reviewer `gpt-5.6-sol` 61 turns / 37 agents. The set of role files changed once in this period (rewritten on 2026-09-17, delta 20260917c).
 
-| Thước đo | Reviewer — `gpt-5.6-sol` | Worker / Manager — `claude-opus-5` |
+| Measure | Reviewer — `gpt-5.6-sol` | Worker / Manager — `claude-opus-5` |
 |---|---|---|
-| Khối kết quả cố định | **61/61** lượt hoàn tất kết thúc bằng `BM-REVIEW` của chính nó, **0** khối thiếu một trong 7 trường; verdict đúng `pass`/`changes-required` ở 59/61 — 2 khối ghép hai lô vào một câu trả lời, cả hai ngày 09-16 | **131** `BM-REPORT`, **0** thiếu trường; 3 báo cáo tự thêm trường lạ (`beadsDeferred`, `beadsBlocked`) |
-| Giới hạn "chỉ đọc" (Reviewer) / "không ghi ra ngoài workspace" | **0** file được ghi; nhưng **8** lệnh `npm run build`/`verify` trong 7 lượt (3 workspace, 09-17 → 09-18) — build ghi file ra thư mục build. Ở 6/7 lượt, **tin nhắn giao việc của Worker cho phép thẳng** ("You may run `npm run build`…"); hai repo demo không có `AGENTS.md` nào | **3** file ghi vào `~/.claude/projects/<repo>/memory/` (Manager 2, Worker 1, cùng một workspace, 09-16); 35 lần ghi còn lại ngoài workspace đều nằm trong thư mục `mktemp` được phép |
-| Lệnh cần hỏi trước (git ghi, cài phụ thuộc, mạng) | 0 | Worker: 14 lệnh git ghi, 23 lệnh cài phụ thuộc, 34 lệnh mạng. **Trace không cho biết lệnh nào đã được người dùng cho phép** (ví dụ các bead phát hành README do owner yêu cầu commit), nên đây là con số cần kiểm tay, **không** phải số vi phạm. Lượt nghiệm thu có kiểm tay gần nhất (biên bản 20260917c §4) chỉ tìm thấy một lệch: ghi `/tmp` ngoài thư mục `mktemp` |
-| Token ra mỗi lượt | 655 | Worker 14.174; Manager 996 |
+| Fixed result block | **61/61** completed turns end with its own `BM-REVIEW`, **0** blocks missing one of the 7 fields; verdict exactly `pass`/`changes-required` in 59/61 — 2 blocks merged two batches into one answer, both on 09-16 | **131** `BM-REPORT`s, **0** missing fields; 3 reports added unknown fields on their own (`beadsDeferred`, `beadsBlocked`) |
+| Limit "read-only" (Reviewer) / "do not write outside the workspace" | **0** files written; but **8** `npm run build`/`verify` commands in 7 turns (3 workspaces, 09-17 → 09-18) — a build writes files to the build folder. In 6/7 turns, **the Worker's assignment message allowed it outright** ("You may run `npm run build`…"); the two demo repositories have no `AGENTS.md` at all | **3** files written to `~/.claude/projects/<repo>/memory/` (Manager 2, Worker 1, same workspace, 09-16); the other 35 writes outside the workspace are all inside permitted `mktemp` folders |
+| Commands that need asking first (git writes, installing dependencies, network) | 0 | Worker: 14 git write commands, 23 dependency install commands, 34 network commands. **The trace does not say which commands the user had allowed** (for example the README release beads where the owner asked for a commit), so this is a number to check by hand, **not** a count of violations. The most recent acceptance run checked by hand (run record 20260917c §4) found only one deviation: a write to `/tmp` outside the `mktemp` folder |
+| Output tokens per turn | 655 | Worker 14,174; Manager 996 |
 
-**Hai con số trông như lỗi model nhưng thật ra không phải:**
+**Two numbers that look like model errors but actually are not:**
 
-- **8 verdict lạ** kiểu `approved | changes-required` mà bộ đọc ghi nhận cho Reviewer ngày 09-16 **không do Reviewer viết**: bộ đọc nhặt chúng từ **tin nhắn yêu cầu review của Worker**, khi đó Worker còn tự dán một mẫu `BM-REVIEW` của riêng nó (có `verdict: approved | changes-required`). Khối của chính Reviewer trong cùng lượt ghi `verdict: pass`. Bản viết lại 09-17 thêm câu "Do not paste the `BM-REVIEW` format" vào `worker.md`; từ đó không còn trường hợp nào. → Lỗi của **Worker với prompt cũ**, cộng một điểm yếu của bộ đọc (đọc cả tin nhắn gửi đi).
-- **27/67 review không có `blockingCount`**: bản ghi viết trước khi bộ đọc biết đếm các dòng `severity: blocking` (chú thích trong `plugin/server/bm-report.ts` 390–399). Là giới hạn của bộ thu thập, không phải của model.
+- **8 odd verdicts** such as `approved | changes-required` that the reader recorded for the Reviewer on 09-16 **were not written by the Reviewer**: the reader picked them up from **the Worker's review request message**, back when the Worker still pasted its own `BM-REVIEW` template (with `verdict: approved | changes-required`). The Reviewer's own block in the same turn says `verdict: pass`. The 09-17 rewrite added the sentence "Do not paste the `BM-REVIEW` format" to `worker.md`; since then there has been no such case. → An error of **the Worker with the old prompt**, plus a weakness of the reader (it reads outgoing messages too).
+- **27/67 reviews have no `blockingCount`**: records written before the reader knew how to count `severity: blocking` lines (comment in `plugin/server/bm-report.ts` 390–399). A limit of the collector, not of the model.
 
-## 6. R5 — Nét nào của ba file vai trò tác động khác nhau theo model
+## 6. R5 — Which traits of the three role files act differently per model
 
-| # | Nét | Claude (preset + append) | Codex (developer) | Bằng chứng |
+| # | Trait | Claude (preset + append) | Codex (developer) | Evidence |
 |---|---|---|---|---|
-| 1 | **Giới hạn "không ghi ra ngoài workspace" gặp chỉ dẫn bộ nhớ của preset** | Preset bảo agent ghi bộ nhớ ra `~/.claude/projects/…`; `worker.md` rule 1 và `manager.md` không nhắc tới thư mục đó. Hai chỉ dẫn cùng nằm trong system prompt, preset đứng trước | Không có tính năng tương ứng | 3 lần ghi thật ở §5; [Q] mục "# Memory" có trong system prompt của chính Worker này |
-| 2 | **"Được chạy gì" của Reviewer gặp tin nhắn giao việc của Worker** | Người viết tin nhắn là Worker trên Claude: nó tự cấp thêm quyền mà `worker.md` không nói nó được cấp | `reviewer.md` (developer) chỉ cho chạy test và lint/typecheck không ghi file; tin nhắn của Worker (user) cho chạy `npm run build`. Hai tầng nói khác nhau — đúng loại mâu thuẫn OpenAI cảnh báo — và Reviewer theo tầng cụ thể hơn | 6/7 lượt build ở §5 có câu cho phép trong tin nhắn. `reviewer.md` đã xử lý xung đột với **skill** ("when a skill says to edit something, report it as a finding"), nhưng chưa nói tin nhắn giao việc có được **nới** danh sách lệnh hay không |
-| 3 | **Cụm CHỮ HOA ở mục RULES** (7 / 8 / 11 cụm) | Anthropic khuyên hạ giọng vì model mới "overtrigger" | GPT-5 làm theo "surgical precision"; chữ hoa không có tác dụng được ghi nhận riêng | Không đo được overtrigger: 48/131 báo cáo là `blocked`, nhưng mức Large **bắt buộc** hai vòng hỏi — không kết luận được là hỏi thừa |
-| 4 | **Hướng dẫn tự kiểm chứng dày** (bằng chứng cho từng bead, đối chứng âm) | Opus 5: chỉ dẫn "hãy kiểm lại" gây kiểm thừa. Nhưng yêu cầu ở đây là **bằng chứng** cho người khác đọc, không phải "hãy tự kiểm lại" | — | Biên bản 20260917c: Worker tự dựng bản sao và chạy end-to-end, được đánh giá là "kiểm chứng thật", không phải lãng phí |
-| 5 | **Agent con** | `worker.md` chỉ cấm agent con song song khi implement; preset tự thêm chỉ dẫn uỷ quyền trên Opus 5 | Reviewer không được tạo agent | Worker gọi agent con của provider 24 lần [T]; không có số chi phí riêng để kết luận |
-| 6 | **Mẫu khối cố định có lựa chọn `a \| b`** | Worker giữ đúng mẫu `BM-REPORT` | Reviewer giữ đúng mẫu, không chép nguyên văn `pass \| changes-required` | §5 |
-| 7 | **Ví dụ mẫu** (một bead mẫu, một mẫu câu hỏi, một cặp hiệu chuẩn chặn/không chặn) | Đúng hướng Anthropic | Đúng hướng OpenAI | — |
+| 1 | **The limit "do not write outside the workspace" meets the preset's memory instruction** | The preset tells the agent to write memory to `~/.claude/projects/…`; `worker.md` rule 1 and `manager.md` do not mention that folder. Both instructions are in the system prompt, the preset comes first | No corresponding feature | 3 real writes in §5; [Q] the "# Memory" section is in this very Worker's system prompt |
+| 2 | **The Reviewer's "what it may run" meets the Worker's assignment message** | The author of the message is the Worker on Claude: it grants extra permissions itself that `worker.md` does not say it may grant | `reviewer.md` (developer) only allows running tests and lint/typecheck that write no files; the Worker's message (user) allows running `npm run build`. The two layers say different things — exactly the kind of contradiction OpenAI warns about — and the Reviewer follows the more specific layer | 6/7 build turns in §5 have an allowing sentence in the message. `reviewer.md` already handles conflicts with a **skill** ("when a skill says to edit something, report it as a finding"), but does not yet say whether an assignment message may **loosen** the command list |
+| 3 | **UPPER-CASE phrases in the RULES section** (7 / 8 / 11 phrases) | Anthropic advises toning down because new models "overtrigger" | GPT-5 follows with "surgical precision"; upper case has no separately recorded effect | Overtriggering could not be measured: 48/131 reports are `blocked`, but the Large tier **requires** two rounds of questions — no conclusion that the questions were unnecessary |
+| 4 | **Dense self-verification guidance** (evidence for each bead, negative controls) | Opus 5: "check again" instructions cause over-verification. But the requirement here is **evidence** for others to read, not "check yourself again" | — | Run record 20260917c: the Worker built its own copy and ran end-to-end, judged "real verification", not waste |
+| 5 | **Sub-agents** | `worker.md` only forbids parallel sub-agents during implementation; the preset adds a delegation instruction by itself on Opus 5 | The Reviewer may not create agents | The Worker called the provider's sub-agents 24 times [T]; no separate cost figure to conclude from |
+| 6 | **Fixed block templates with an `a \| b` choice** | The Worker keeps exactly to the `BM-REPORT` template | The Reviewer keeps exactly to the template, does not copy `pass \| changes-required` verbatim | §5 |
+| 7 | **Examples** (a sample bead, a sample question, a blocking/non-blocking calibration pair) | In line with Anthropic's direction | In line with OpenAI's direction | — |
 
-## 7. R6 — Kết luận và đề xuất có thứ tự
+## 7. R6 — Conclusion and ordered suggestions
 
-**Trả lời câu hỏi của owner:** thuật toán nạp chỉ dẫn **có** khác nhau theo provider (§2), nhưng khác biệt đó **chưa** làm model nào làm sai hợp đồng (§5). Thứ cần tối ưu **không phải văn phong riêng cho từng model**, mà là **những chỗ một tầng chỉ dẫn khác — preset của công cụ, hay tin nhắn giao việc của một agent khác — cãi nhau với file vai trò**. Những chỗ đó khác nhau theo provider, nhưng sửa được bằng **một văn bản chung** cho mọi model.
+**Answer to the owner's question:** the algorithm that loads the instructions **does** differ per provider (§2), but that difference has **not yet** made any model break the contract (§5). What needs optimising is **not a separate writing style for each model**, but **the places where another instruction layer — the tool's preset, or another agent's assignment message — argues with the role file**. Those places differ per provider, but they can be fixed with **one shared text** for every model.
 
-| # | Đề xuất | Loại | Tác động | Chi phí | Rủi ro | Đo bằng |
+| # | Suggestion | Kind | Impact | Cost | Risk | Measured by |
 |---|---|---|---|---|---|---|
-| 1 | Trong giới hạn "không ghi ra ngoài workspace" của `worker.md` và mục giới hạn của `manager.md`, gọi tên **thư mục bộ nhớ của công cụ**: công cụ mời ghi bộ nhớ thì đó vẫn là ghi ra ngoài workspace. Một câu, gộp vào giới hạn đã có — không thêm giới hạn mới (đúng phong cách owner chọn ở delta 20260917c) | Một văn bản cho mọi model | Vừa: chặn lệch có thật ở Claude; vô hại với Codex | Rất thấp | Thấp | Số lần ghi file ngoài workspace, không phải `mktemp`, theo vai trò → 0 ở lượt chạy sau |
-| 2 | Cho `worker.md` và `reviewer.md` **nói cùng một câu** về lệnh build/verify của repo: hoặc `reviewer.md` cho phép rõ ("the repository's own build or verify command"), hoặc cả hai nói tin nhắn giao việc không nới được danh sách lệnh của Reviewer. **Owner quyết** cho phép hay không: build chỉ ghi ra thư mục build bị git bỏ qua, nhưng vẫn là ghi | Một văn bản cho mọi model | Vừa: bỏ một mâu thuẫn giữa hai tầng làm GPT tốn token lý luận, và một chỗ lệch với luật chỉ đọc | Rất thấp | Thấp | Số lần Reviewer chạy build; token mỗi lượt review |
-| 3 | Đặt **mức thinking** cho profile `bm-reviewer` thay vì để Codex tự chọn — hiện là `xhigh` dù paseo-bm không đặt [S]. Thử `high` rồi `medium` trên cùng một fixture | Cấu hình riêng cho provider | Có thể lớn về thời gian và tiền của Reviewer | Thấp (màn Setup đã có ô thinking) | Vừa: có thể bắt ít lỗi hơn | Số mục chặn tìm được, token, thời gian trên cùng fixture |
-| 4 | **Hạ giọng** các cụm CHỮ HOA ở mục RULES thành câu thường kèm lý do. **Chỉ làm dưới dạng thử có đo**, không làm mù: lượt đo 20260917c với bản hiện tại là lượt duy nhất không có lỗi chặn | Một văn bản cho mọi model | Chưa biết | Thấp | Vừa: có thể nới một lan can đang chạy tốt | So một lượt chạy trên fixture 20260917c |
-| 5 | Thêm một câu vào `worker.md` về **khi nào dùng agent con** (việc lớn, độc lập, song song), như Anthropic gợi ý cho Opus 5 | Một văn bản; tác dụng chủ yếu ở Claude | Chưa biết | Rất thấp | Thấp | Số agent con của provider và chi phí Worker mỗi request |
-| 6 | Ghi vào tài liệu vận hành: **sửa file vai trò chỉ có tác dụng với agent tạo sau đó** (Claude ghi lại system prompt ở request đầu; Codex dùng giá trị chốt lúc tạo) | Không đổi chữ | Tránh đo nhầm sau khi sửa | Không | Không | — |
+| 1 | In the limit "do not write outside the workspace" of `worker.md` and the limits section of `manager.md`, name **the tool's memory folder**: when a tool invites writing memory, that is still writing outside the workspace. One sentence, merged into the existing limit — no new limit (in the style the owner chose in delta 20260917c) | One text for every model | Medium: blocks a real deviation on Claude; harmless on Codex | Very low | Low | Number of file writes outside the workspace, not `mktemp`, per role → 0 in the next run |
+| 2 | Make `worker.md` and `reviewer.md` **say the same sentence** about the repository's build/verify command: either `reviewer.md` allows it explicitly ("the repository's own build or verify command"), or both say an assignment message cannot loosen the Reviewer's command list. **The owner decides** whether to allow it: a build only writes to a build folder that git ignores, but it is still a write | One text for every model | Medium: removes a contradiction between two layers that makes GPT spend reasoning tokens, and a deviation from the read-only rule | Very low | Low | Number of times the Reviewer runs a build; tokens per review turn |
+| 3 | Set the **thinking level** for the `bm-reviewer` profile instead of letting Codex choose — currently `xhigh` although paseo-bm does not set it [S]. Try `high` then `medium` on the same fixture | Provider-specific configuration | Possibly large for the Reviewer's time and money | Low (the Setup screen already has a thinking field) | Medium: may catch fewer errors | Number of blocking items found, tokens, time on the same fixture |
+| 4 | **Tone down** the UPPER-CASE phrases in the RULES section into normal sentences with a reason. **Only as a measured trial**, not blindly: the 20260917c measurement run with the current version is the only run without a blocking error | One text for every model | Unknown | Low | Medium: may loosen a guardrail that is working well | Compare one run on the 20260917c fixture |
+| 5 | Add one sentence to `worker.md` about **when to use sub-agents** (large, independent, parallel work), as Anthropic suggests for Opus 5 | One text; the effect is mainly on Claude | Unknown | Very low | Low | Number of the provider's sub-agents and Worker cost per request |
+| 6 | Record in the operations documentation: **editing a role file only takes effect for agents created after that** (Claude records the system prompt at the first request; Codex uses the value fixed at creation) | No wording change | Avoids measuring the wrong thing after an edit | None | None | — |
 
-**Không đề xuất:** tách `plugin/roles/*.md` thành biến thể theo provider. Lý do: (1) không có bằng chứng model nào hỏng vì văn phong; (2) mỗi vai trò chỉ chạy một model nên chưa có dữ liệu để tối ưu riêng; (3) hai bản nghĩa là gấp đôi file phải giữ đồng bộ, gấp đôi test nội dung, và hook `before("agent.create")` phải chọn bản theo provider nền. Nếu owner vẫn muốn đi hướng này, bước đúng đầu tiên là **một lượt chạy đổi model** — Reviewer bằng Claude và Worker bằng GPT trên cùng fixture — để có số liệu tách được model khỏi vai trò.
+**Not suggested:** splitting `plugin/roles/*.md` into per-provider variants. Reasons: (1) there is no evidence that any model fails because of writing style; (2) each role runs only one model, so there is no data yet to optimise separately; (3) two versions means twice the files to keep in sync, twice the content tests, and the `before("agent.create")` hook would have to pick the version by base provider. If the owner still wants to go this way, the right first step is **a run with swapped models** — the Reviewer on Claude and the Worker on GPT on the same fixture — to get numbers that separate the model from the role.
 
-**OpenCode.** Paseo đưa chỉ dẫn vai trò vào trường `system` của OpenCode [B 2511–2522]. Dự án chưa chạy vai trò nào trên OpenCode, nên không có trace và không có kết luận. Đề xuất 1 và 2 viết cho mọi model, nên vẫn áp dụng được nếu sau này dùng OpenCode.
+**OpenCode.** Paseo puts the role instructions in OpenCode's `system` field [B 2511–2522]. The project has not run any role on OpenCode yet, so there are no traces and no conclusions. Suggestions 1 and 2 are written for every model, so they still apply if OpenCode is used later.
 
-## 8. Nguồn
+## 8. Sources
 
-Tài liệu công khai, đọc ngày 2026-09-18:
+Public documentation, read on 2026-09-18:
 
 - Anthropic — [Prompting Claude Opus 5](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5)
-- Anthropic — [Prompting best practices](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices) (mục *Add context to improve performance*, *Control the format of responses*, *Tool usage*, *Subagent orchestration*, *Migration considerations*)
+- Anthropic — [Prompting best practices](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices) (sections *Add context to improve performance*, *Control the format of responses*, *Tool usage*, *Subagent orchestration*, *Migration considerations*)
 - Anthropic — [Modifying system prompts (Agent SDK)](https://code.claude.com/docs/en/agent-sdk/modifying-system-prompts)
 - OpenAI — [GPT-5 prompting guide](https://developers.openai.com/cookbook/examples/gpt-5/gpt-5_prompting_guide)
 - OpenAI — [GPT-5.2 Prompting Guide](https://developers.openai.com/cookbook/examples/gpt-5/gpt-5-2_prompting_guide)
 - OpenAI — [Codex Prompting Guide](https://developers.openai.com/cookbook/examples/gpt-5/codex_prompting_guide)
-- OpenAI — [Model guidance](https://developers.openai.com/api/docs/guides/latest-model) (viết cho GPT-6 Astra; nhắc GPT-5.6 Sol)
-- OpenAI — [Rethinking skills and prompts for GPT-6 Astra](https://developers.openai.com/blog/rethinking-skills-and-prompts-for-gpt-6-astra) (model không dùng ở đây; chỉ để đối chiếu)
-- OpenAI — [The builder's guide to GPT-5.6](https://openai.com/index/builders-guide-to-gpt-5-6/): trang trả **403**; hai ý trích ở §4 lấy từ đoạn tóm tắt của kết quả tìm kiếm, độ tin thấp hơn
+- OpenAI — [Model guidance](https://developers.openai.com/api/docs/guides/latest-model) (written for GPT-6 Astra; mentions GPT-5.6 Sol)
+- OpenAI — [Rethinking skills and prompts for GPT-6 Astra](https://developers.openai.com/blog/rethinking-skills-and-prompts-for-gpt-6-astra) (a model not used here; for comparison only)
+- OpenAI — [The builder's guide to GPT-5.6](https://openai.com/index/builders-guide-to-gpt-5-6/): the page returns **403**; the two points quoted in §4 come from the search result summary, lower confidence
 
-Nguồn cục bộ:
+Local sources:
 
-- Bundle Paseo 0.8 — `server/agent/providers/claude/agent.js` 38–42, 2588–2590, 2633–2638; `server/agent/providers/codex-app-server-agent.js` 2716–2718, 2879–2881, 3013–3015, 3947–3958; `server/agent/providers/opencode-agent.js` 2511–2522, 2788–2803; `server/agent/agent-manager.js` 377, 3606–3615; `server/bootstrap.js` (`appendSystemPrompt`)
-- Snapshot: Worker `29e658b5` (`claude-opus-5`, cửa sổ 1.000.000); Reviewer `2998dc82` (`gpt-5.6-sol`, thinking hiệu lực `xhigh`, mode `auto`, collaboration mode `Default`, cửa sổ 258.400, 110.940 token ở lượt đầu)
-- Kho vết `~/.paseo-bm/traces/*/events-202609.jsonl` (504 lượt, 7 workspace)
-- `plugin/roles/{manager,worker,reviewer}.md` bản hiện tại; `git show 1f7f034:plugin/roles/worker.md` (bản 09-15, cho phép thêm phase `documents-done` và `bead-implemented`); `plugin/server/bm-report.ts` 390–399
+- Paseo 0.8 bundle — `server/agent/providers/claude/agent.js` 38–42, 2588–2590, 2633–2638; `server/agent/providers/codex-app-server-agent.js` 2716–2718, 2879–2881, 3013–3015, 3947–3958; `server/agent/providers/opencode-agent.js` 2511–2522, 2788–2803; `server/agent/agent-manager.js` 377, 3606–3615; `server/bootstrap.js` (`appendSystemPrompt`)
+- Snapshots: Worker `29e658b5` (`claude-opus-5`, window 1,000,000); Reviewer `2998dc82` (`gpt-5.6-sol`, effective thinking `xhigh`, mode `auto`, collaboration mode `Default`, window 258,400, 110,940 tokens on the first turn)
+- Trace store `~/.paseo-bm/traces/*/events-202609.jsonl` (504 turns, 7 workspaces)
+- `plugin/roles/{manager,worker,reviewer}.md` current version; `git show 1f7f034:plugin/roles/worker.md` (the 09-15 version, which allowed adding the phases `documents-done` and `bead-implemented`); `plugin/server/bm-report.ts` 390–399
 - `docs/archive/operations/paseo-bm-context-engineering-run-20260917c.md` §2, §4, §5

@@ -1,54 +1,54 @@
-# ADR-001 — Phân phối plugin bằng payload đi kèm gói npm, đăng ký từ thư mục cục bộ
+# ADR-001 — Distribute the plugin as a payload shipped in the npm package, registered from a local directory
 
-| Trường | Giá trị |
+| Field | Value |
 |---|---|
-| Status | **Superseded by [ADR-012](ADR-012-plugin-is-the-product.md) (2026-09-25)** — sản phẩm là gói plugin `paseo-bm-plugin` cài từ paseo.cafe / npm; trình cài không còn chép payload và đăng ký thư mục |
+| Status | **Superseded by [ADR-012](ADR-012-plugin-is-the-product.md) (2026-09-25)** — the product is the plugin package `paseo-bm-plugin`, installed from paseo.cafe / npm; the installer no longer copies the payload or registers a directory |
 | Date | 2026-09-14 |
 | Owner | hieu.nt10 |
-| Liên quan | [PRD §Q-004](../product/paseo-bm-prd.md#10-open-questions), [Technical Design](../design/paseo-bm.md) |
+| Related | [PRD §Q-004](../product/paseo-bm-prd.md#10-open-questions), [Technical Design](../design/paseo-bm.md) |
 
 ## Context
 
-Paseo 0.8 nhận plugin từ hai nguồn: một thư mục trên máy daemon (`paseo plugin install <dir>`) hoặc một repo Git (`paseo plugin add owner/repo[:path] --ref <ref>`). Cấu hình daemon lưu nguồn plugin dưới dạng `plugins: record<id, PluginSource>`, và loại nguồn duy nhất được ghi cho bản cài cục bộ là `"directory"` — nghĩa là **đường dẫn thư mục phải tồn tại lâu dài**, không chỉ trong lúc chạy lệnh.
+Paseo 0.8 accepts a plugin from two sources: a directory on the daemon's machine (`paseo plugin install <dir>`) or a Git repository (`paseo plugin add owner/repo[:path] --ref <ref>`). The daemon configuration stores plugin sources as `plugins: record<id, PluginSource>`, and the only source type written for a local install is `"directory"` — meaning **the directory path must exist for the long term**, not only while the command runs.
 
-Ràng buộc đã kiểm chứng trên máy (Paseo CLI/daemon 0.8.0, 2026-09-14):
+Constraints verified on the machine (Paseo CLI/daemon 0.8.0, 2026-09-14):
 
-- `paseo plugin install --help` có `--id`, `--ref`, `--path`, `--json`, `--host`; `install` và `add` là cùng một lệnh.
-- `paseo plugin update` chỉ áp dụng cho plugin nguồn Git.
-- `paseo plugin remove` xoá checkout do Paseo quản lý với nguồn Git, nhưng **không bao giờ xoá thư mục nguồn cục bộ**.
-- `paseo plugin init` tạo scaffold chỉ có `devDependencies` (`@getpaseo/plugin`, react, react-native, zod, typescript) phục vụ typecheck; Paseo cấp module runtime cho plugin, nên payload không cần `node_modules` khi chạy.
-- PRD yêu cầu: người dùng biết chính xác mã plugin mình đang tin cậy, và sau khi `npx` tải gói thì phần cài plugin không cần mạng.
+- `paseo plugin install --help` has `--id`, `--ref`, `--path`, `--json`, `--host`; `install` and `add` are the same command.
+- `paseo plugin update` applies only to Git-source plugins.
+- `paseo plugin remove` deletes the Paseo-managed checkout for a Git source, but **never deletes a local source directory**.
+- `paseo plugin init` creates a scaffold with only `devDependencies` (`@getpaseo/plugin`, react, react-native, zod, typescript) for typechecking; Paseo provides the runtime modules to the plugin, so the payload needs no `node_modules` at run time.
+- The PRD requires: the user knows exactly which plugin code they are trusting, and once `npx` has downloaded the package, installing the plugin needs no network.
 
-Vấn đề: `npx` chạy gói từ thư mục cache tạm. Nếu trỏ Paseo vào đó, cache bị dọn là plugin gãy.
+The problem: `npx` runs the package from a temporary cache directory. If Paseo is pointed there, the plugin breaks when the cache is cleaned.
 
 ## Decision
 
-1. Mã plugin nằm trong chính repo `paseo-bm`, thư mục `plugin/`, và được đóng vào gói npm qua trường `files`.
-2. Khi cài, CLI **copy** payload từ gói npm sang `<install home>/plugin/<version>/` (mặc định `~/.paseo-bm/plugin/<version>/`), là một đường dẫn ổn định do paseo-bm sở hữu.
-3. Đăng ký với Paseo bằng `paseo plugin install <install home>/plugin/<version> --id paseo-bm --json`.
-4. **Phiên bản plugin luôn bằng phiên bản gói npm.** Không dùng `paseo plugin update` (chỉ dành cho nguồn Git); đường cập nhật duy nhất là chạy lại `npx paseo-bm@<version>`.
-5. Payload không kèm `node_modules`. `paseo-plugin.json` khai báo `requirements.paseo` là `>=0.8.0`.
-6. Khi gỡ: `paseo plugin remove paseo-bm`, rồi paseo-bm tự xoá thư mục payload của mình (vì Paseo không xoá nguồn cục bộ).
+1. The plugin code lives in the `paseo-bm` repository itself, in the `plugin/` directory, and is packed into the npm package through the `files` field.
+2. On install, the CLI **copies** the payload from the npm package to `<install home>/plugin/<version>/` (by default `~/.paseo-bm/plugin/<version>/`), a stable path owned by paseo-bm.
+3. It registers with Paseo using `paseo plugin install <install home>/plugin/<version> --id paseo-bm --json`.
+4. **The plugin version always equals the npm package version.** `paseo plugin update` is not used (it is only for Git sources); the only update path is running `npx paseo-bm@<version>` again.
+5. The payload ships without `node_modules`. `paseo-plugin.json` declares `requirements.paseo` as `>=0.8.0`.
+6. On uninstall: `paseo plugin remove paseo-bm`, then paseo-bm deletes its own payload directory (because Paseo does not delete a local source).
 
 ## Consequences
 
-**Tích cực**
-- Cài plugin không cần mạng và không phụ thuộc GitHub lúc cài.
-- Mã chạy đúng bằng mã trong phiên bản npm mà người dùng chọn; provenance của npm phủ luôn payload.
-- Không cần bước `build` trong `paseo-plugin.json` (build là của quy trình phát hành), nên không có lệnh lạ chạy trên máy người dùng lúc cài.
-- Giữ được nhiều phiên bản cạnh nhau dưới `plugin/<version>/`, nên hạ cấp hay khắc phục sự cố đơn giản.
+**Positive**
+- Installing the plugin needs no network and does not depend on GitHub at install time.
+- The code that runs is exactly the code in the npm version the user chose; npm provenance covers the payload too.
+- No `build` step is needed in `paseo-plugin.json` (building belongs to the release process), so no unfamiliar command runs on the user's machine at install time.
+- Several versions can be kept side by side under `plugin/<version>/`, so downgrading or recovering from an incident is simple.
 
-**Tiêu cực / phải chấp nhận**
-- Trùng lặp dữ liệu: payload nằm cả trong gói npm lẫn thư mục cài đặt. Chấp nhận được vì kích thước nhỏ.
-- Mất tiện ích `paseo plugin update` và luồng cập nhật trong Settings của Paseo. Bù lại bằng thông điệp rõ ràng trong `doctor` và README.
-- paseo-bm phải tự dọn thư mục payload khi gỡ; nếu bỏ sót sẽ còn rác. Ràng buộc bằng hồ sơ cài đặt (ADR-002) và tiêu chí M-5 của PRD.
-- Mỗi phiên bản chiếm thêm dung lượng. *(Sửa 2026-09-15: bản đầu đề xuất "giữ tối đa N phiên bản". Owner đã chốt **giữ tất cả**, chỉ dọn khi người dùng chạy `--prune` — xem Technical Design Q-016.)*
+**Negative / to be accepted**
+- Duplicated data: the payload lives both in the npm package and in the install home. Acceptable because it is small.
+- The convenience of `paseo plugin update` and the update flow in Paseo's Settings is lost. Compensated by clear messages in `doctor` and the README.
+- paseo-bm must clean up its own payload directory on uninstall; if it misses it, garbage is left behind. Bounded by the install record (ADR-002) and PRD criterion M-5.
+- Each version takes additional disk space. *(Corrected 2026-09-15: the first draft proposed "keep at most N versions". The owner decided to **keep all of them**, cleaning up only when the user runs `--prune` — see Technical Design Q-016.)*
 
 ## Alternatives considered
 
-| Phương án | Lý do loại |
+| Option | Reason rejected |
 |---|---|
-| `paseo plugin add hieunt286/paseo-bm:plugin --ref v<version>` (nguồn Git) | Cần mạng và quyền truy cập GitHub lúc cài; phiên bản plugin tách rời phiên bản npm nên dễ lệch; thêm một đường tin cậy thứ hai ngoài npm provenance. Vẫn giữ như phương án dự phòng nếu sau này cần luồng update của Paseo |
-| Trỏ Paseo thẳng vào thư mục cache của `npx` | Cache là tạm; dọn cache là plugin gãy. Loại dứt khoát |
-| Tách plugin sang repo riêng và publish độc lập | Phình chi phí phát hành cho một sản phẩm một người; đồng bộ phiên bản giữa hai repo là gánh nặng không cần thiết ở Phase 1 |
-| Cài plugin dưới dạng gói npm toàn cục rồi trỏ vào `node_modules` | Paseo không có kiểu nguồn npm; đường dẫn `node_modules` toàn cục khác nhau giữa các trình quản lý phiên bản Node |
+| `paseo plugin add hieunt286/paseo-bm:plugin --ref v<version>` (Git source) | Needs network and GitHub access at install time; the plugin version is decoupled from the npm version and drifts easily; adds a second trust path besides npm provenance. Still kept as a fallback option if Paseo's update flow is needed later |
+| Point Paseo straight at the `npx` cache directory | The cache is temporary; cleaning the cache breaks the plugin. Rejected outright |
+| Split the plugin into its own repository and publish it independently | Inflates the release cost for a one-person product; keeping versions in sync across two repositories is an unnecessary burden in Phase 1 |
+| Install the plugin as a global npm package and point at `node_modules` | Paseo has no npm source type; the global `node_modules` path differs between Node version managers |

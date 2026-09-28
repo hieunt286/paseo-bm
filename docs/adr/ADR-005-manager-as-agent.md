@@ -1,62 +1,62 @@
-# ADR-005 — Beads Manager là một agent, plugin chỉ là lối vào và bảng quan sát
+# ADR-005 — Beads Manager is an agent; the plugin is only the entry point and the observation board
 
-| Trường | Giá trị |
+| Field | Value |
 |---|---|
 | Status | Accepted |
 | Date | 2026-09-15 |
 | Owner | hieu.nt10 |
-| Liên quan | [PRD REQ-020, REQ-021, REQ-026](../product/paseo-bm-prd.md#6-functional-requirements) · [ADR-006](ADR-006-role-registration.md) · [Technical Design](../design/paseo-bm.md) |
-| Mở rộng bởi | [ADR-011](ADR-011-manager-coordinates-workers.md) — Manager tự điều phối Worker (Accepted 2026-09-25); quyết định 3 và 5 ở đây vẫn nguyên |
+| Related | [PRD REQ-020, REQ-021, REQ-026](../product/paseo-bm-prd.md#6-functional-requirements) · [ADR-006](ADR-006-role-registration.md) · [Technical Design](../design/paseo-bm.md) |
+| Extended by | [ADR-011](ADR-011-manager-coordinates-workers.md) — Manager coordinates Workers itself (Accepted 2026-09-25); decisions 3 and 5 here are unchanged |
 
 ## Context
 
-Yêu cầu của owner: người dùng **chat** với Beads Manager; Manager **giao ngay** việc xuống một Beads Worker; Manager chịu trách nhiệm quản lý, kiểm soát và trả lời về tiến độ các agent; người dùng **chat thẳng được với Worker**; và **chỉ người dùng** mới đóng hoặc xoá Worker.
+The owner's requirement: the user **chats** with Beads Manager; Manager **immediately hands** the work down to a Beads Worker; Manager is responsible for managing and controlling the agents and answering about their progress; the user **can chat directly with Worker**; and **only the user** closes or deletes a Worker.
 
-Có hai cách hiện thực hoá, và chúng dẫn tới hai sản phẩm khác hẳn nhau:
+There are two ways to realise this, and they lead to two quite different products:
 
-1. **Manager là giao diện của plugin** — một panel có ô nhập, mã phía daemon nhận yêu cầu rồi gọi SDK tạo Worker.
-2. **Manager là một agent** — người dùng chat với nó như mọi agent khác; nó tự quyết định và tự gọi công cụ để tạo, theo dõi, nhắc việc.
+1. **Manager is the plugin's interface** — a panel with an input box, and daemon-side code that receives the request and calls the SDK to create a Worker.
+2. **Manager is an agent** — the user chats with it like any other agent; it decides for itself and calls tools itself to create, follow and nudge.
 
-Dữ kiện đã kiểm chứng trên daemon thật (Paseo 0.8.0, 2026-09-15):
+Facts verified on a real daemon (Paseo 0.8.0, 2026-09-15):
 
-- Agent do một agent khác tạo ra vẫn là **agent hạng nhất trong workspace**: nó xuất hiện trong danh sách agent, chỉ mang thêm nhãn `paseo.parent-agent-id`. Có sẵn `paseo agent open|send|stop|archive|delete`.
-- Nghĩa là người dùng mở, chat, dừng, lưu trữ hay xoá một agent con **trực tiếp** được — quan hệ cha con chỉ là dữ liệu mô tả, không phải bức tường.
-- Paseo cấp cho agent một bộ công cụ để tạo và theo dõi agent khác khi quyền được mở (xem ADR-006).
+- An agent created by another agent is still **a first-class agent in the workspace**: it appears in the agent list, carrying only an extra `paseo.parent-agent-id` label. `paseo agent open|send|stop|archive|delete` are available.
+- That means the user can open, chat with, stop, archive or delete a child agent **directly** — the parent–child relation is only descriptive data, not a wall.
+- Paseo gives an agent a set of tools to create and follow other agents when the permission is open (see ADR-006).
 
-Plugin Paseo **không đọc được khung chat** của agent khác; nó chỉ nhận cái người dùng chủ động gửi cho nó. Vì vậy phương án 1 buộc người dùng phải nhập yêu cầu vào một ô riêng thay vì chat bình thường, và mọi trao đổi làm rõ qua lại sẽ phải tự dựng lại từ đầu trong giao diện plugin.
+A Paseo plugin **cannot read the chat** of another agent; it receives only what the user actively sends to it. So option 1 would force the user to type requests into a separate box instead of chatting normally, and every back-and-forth clarification would have to be rebuilt from scratch in the plugin's interface.
 
 ## Decision
 
-1. **Beads Manager là một agent**, chạy trong workspace của người dùng, dùng công cụ và model do người dùng cấu hình lúc cài.
-2. **Plugin không thay Manager làm việc.** Vai trò của plugin thu về ba việc:
-   - **Lối vào:** một mục sidebar và một mục Command Center để mở Manager cho workspace hiện tại; chưa có thì tạo, có rồi thì mở lại.
-   - **Bảng quan sát:** hiển thị cây agent của paseo-bm trong workspace (Manager → Worker → Reviewer) kèm trạng thái, để người dùng thấy toàn cảnh mà không phải tự lần trong danh sách agent.
-   - **Cài đặt:** đăng ký vai trò và chỉ dẫn (ADR-006).
-3. **Manager giao ngay, không tự làm.** Nhận yêu cầu là tạo Worker; bản thân Manager không viết tài liệu, không tạo bead.
-4. **Worker và Reviewer là agent hạng nhất.** Người dùng chat thẳng, dừng, lưu trữ, xoá được.
-5. **Vòng đời do người dùng quyết.** Không agent nào được **lưu trữ hay xoá** agent. Manager **được phép dừng** một Worker đang đi lạc hoặc treo, vì dừng là thao tác khôi phục được còn xoá thì mất lịch sử; dừng một Worker phải kéo theo dừng Reviewer mà nó đang chạy. Xong việc thì Worker báo cáo rồi nghỉ, chờ người dùng xử lý. *(Làm rõ 2026-09-15 sau khi lượt review chỉ ra REQ-020d và REQ-026f mâu thuẫn nhau.)*
-6. **Worker dừng lại hỏi** trước những việc có tính quyết định: sửa tài liệu đã đóng băng, mở rộng phạm vi, xoá hay gộp bead đang có.
+1. **Beads Manager is an agent**, running in the user's workspace, using the tools and model the user configured at install time.
+2. **The plugin does not do Manager's work.** The plugin's role comes down to three things:
+   - **Entry point:** a sidebar item and a Command Center item to open Manager for the current workspace; create it if there is none, reopen it if there is one.
+   - **Observation board:** show paseo-bm's agent tree in the workspace (Manager → Worker → Reviewer) with states, so the user sees the whole picture without searching through the agent list.
+   - **Setup:** register the roles and instructions (ADR-006).
+3. **Manager hands off immediately and does not do the work itself.** Receiving a request means creating a Worker; Manager itself writes no documents and creates no beads.
+4. **Worker and Reviewer are first-class agents.** The user can chat with them directly, stop, archive and delete them.
+5. **The lifecycle is the user's decision.** No agent may **archive or delete** an agent. Manager **may stop** a Worker that has gone astray or hangs, because stopping can be recovered from whereas deleting loses the history; stopping a Worker must also stop the Reviewer it is running. When done, the Worker reports and then rests, waiting for the user to deal with it. *(Clarified 2026-09-15 after the review pass pointed out that REQ-020d and REQ-026f contradicted each other.)*
+6. **Worker stops and asks** before decisive actions: editing a frozen document, expanding scope, deleting or merging existing beads.
 
 ## Consequences
 
-**Tích cực**
-- Trao đổi làm rõ diễn ra tự nhiên trong khung chat, đúng chỗ người dùng đã quen, thay vì trong một ô nhập tự chế.
-- Manager thừa hưởng miễn phí mọi thứ Paseo đã làm tốt: lịch sử hội thoại, phê duyệt quyền, thông báo, giao diện di động.
-- Ranh giới trách nhiệm rõ: plugin lo cài đặt và quan sát, agent lo suy luận. Mã phía plugin không phải đoán ý người dùng.
-- Người dùng can thiệp được ở mọi tầng, kể cả nói thẳng với Worker khi Manager hiểu sai.
+**Positive**
+- Clarifying exchanges happen naturally in the chat, where the user is already used to them, instead of in a home-made input box.
+- Manager inherits for free everything Paseo already does well: conversation history, permission approvals, notifications, the mobile interface.
+- A clear boundary of responsibility: the plugin handles setup and observation, the agent handles reasoning. Plugin-side code does not have to guess what the user means.
+- The user can intervene at every level, including talking directly to Worker when Manager has misunderstood.
 
-**Tiêu cực / phải chấp nhận**
-- **Tốn thêm một phiên model** cho Manager, dù phần lớn việc nó làm chỉ là chuyển tiếp và tóm tắt. Đây là cái giá của việc chat được và tự quyết được.
-- Hành vi kém xác định hơn một đoạn mã: Manager có thể diễn giải sai yêu cầu. Giảm thiểu bằng bộ chỉ dẫn vai trò đóng gói sẵn (REQ-032) thay vì để người dùng tự viết mỗi lần.
-- Plugin phải mở đúng quyền công cụ cho Manager và Worker, mà đó là quyền tạo và dừng agent khác — một ranh giới an ninh thật (ADR-006).
-- Manager không đọc hội thoại của agent khác. Vì vậy "nắm tiến độ" đứng trên hai chân: **báo cáo có cấu trúc do Worker chủ động gửi về** ở từng mốc (REQ-034), cộng với trạng thái và dòng hoạt động mà công cụ Paseo trả về. Thiếu chân thứ nhất thì Manager chỉ biết agent còn sống hay không, chứ không biết nó đã làm gì — đây là khoảng trống mà lượt review ngày 2026-09-15 chỉ ra và REQ-034 lấp vào.
-- Chi phí tăng theo số yêu cầu: mỗi yêu cầu ít nhất ba phiên (Manager đã có, cộng Worker, cộng Reviewer).
+**Negative / to be accepted**
+- **One more model session** for Manager, even though most of what it does is relaying and summarising. That is the price of being able to chat and decide.
+- Behaviour is less deterministic than a piece of code: Manager may misinterpret a request. Mitigated by a prepackaged set of role instructions (REQ-032) instead of letting the user write them each time.
+- The plugin must open the right tool permissions for Manager and Worker, and those are permissions to create and stop other agents — a real security boundary (ADR-006).
+- Manager does not read other agents' conversations. So "knowing the progress" stands on two legs: **structured reports that Worker actively sends back** at each milestone (REQ-034), plus the state and activity lines that Paseo's tools return. Without the first leg, Manager only knows whether an agent is alive, not what it has done — this is the gap that the review pass of 2026-09-15 pointed out and REQ-034 fills.
+- Cost grows with the number of requests: each request is at least three sessions (the existing Manager, plus Worker, plus Reviewer).
 
 ## Alternatives considered
 
-| Phương án | Lý do loại |
+| Option | Reason rejected |
 |---|---|
-| Manager là giao diện plugin cộng mã phía daemon | Rẻ hơn và dễ đoán hơn, nhưng người dùng phải nhập yêu cầu vào một ô riêng và không chat qua lại được; mọi việc làm rõ yêu cầu phải tự dựng lại. Trái thẳng với yêu cầu của owner |
-| Manager là agent nhưng Worker là agent con bị che, chỉ nói chuyện qua Manager | Mất khả năng chat thẳng với Worker mà owner yêu cầu; và thực tế Paseo vẫn phơi agent con ra như agent hạng nhất nên che là tự làm khó |
-| Không có Manager: người dùng tự tạo Worker từ profile | Mất hẳn phần quản lý và trả lời tiến độ; người dùng lại phải tự nhớ quy trình — đúng vấn đề sản phẩm này muốn xoá |
-| Manager tự dọn Worker khi xong | Trái yêu cầu của owner, và xoá mất lịch sử làm việc mà người dùng có thể còn cần đọc lại |
+| Manager is the plugin's interface plus daemon-side code | Cheaper and more predictable, but the user must type requests into a separate box and cannot chat back and forth; every clarification of a request has to be rebuilt. Directly contrary to the owner's requirement |
+| Manager is an agent but Worker is a hidden child agent that talks only through Manager | Loses the ability to chat directly with Worker that the owner requires; and in practice Paseo still exposes child agents as first-class agents, so hiding them only makes things harder |
+| No Manager: the user creates Workers from a profile themselves | Loses the managing and progress-answering part entirely; the user again has to remember the process — exactly the problem this product wants to remove |
+| Manager cleans up the Worker itself when done | Contrary to the owner's requirement, and deletes a work history the user may still need to read again |

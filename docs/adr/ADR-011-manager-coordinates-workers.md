@@ -1,47 +1,47 @@
-# ADR-011 — Manager tự điều phối Worker trong phạm vi người dùng đã quyết
+# ADR-011 — Manager coordinates Workers itself within what the user has decided
 
-| Trường | Giá trị |
+| Field | Value |
 |---|---|
 | Status | Accepted |
 | Date | 2026-09-25 |
 | Owner | hieu.nt10 |
-| Liên quan | [PRD REQ-021, REQ-025, REQ-026](../product/paseo-bm-prd.md#6-functional-requirements) · [ADR-005](ADR-005-manager-as-agent.md) (mở rộng quyết định 3 và 5) · [Technical Design §10](../design/paseo-bm.md) · `plugin/roles/manager.md` |
-| Quyết định của chủ repo | 2026-09-25: Q1 (c), Q2 (a) của `req-20260925T051841Z` |
+| Related | [PRD REQ-021, REQ-025, REQ-026](../product/paseo-bm-prd.md#6-functional-requirements) · [ADR-005](ADR-005-manager-as-agent.md) (extends decisions 3 and 5) · [Technical Design §10](../design/paseo-bm.md) · `plugin/roles/manager.md` |
+| The owner's decisions | 2026-09-25: Q1 (c), Q2 (a) of `req-20260925T051841Z` |
 
 ## Context
 
-Manager là agent duy nhất nhìn thấy toàn bộ Worker của một workspace, và nó đã được phép đọc trạng thái lẫn dòng hoạt động của chúng (quyết định chủ repo P2-3, 2026-09-24). Nhưng nó không được phép **làm gì** với những thứ nó thấy ngoài việc kể lại cho người dùng.
+Manager is the only agent that sees all the Workers of a workspace, and it is already allowed to read both their state and their activity lines (the owner's decision P2-3, 2026-09-24). But it is not allowed to **do anything** with what it sees besides telling the user.
 
-Ngày 2026-09-25 chuyện đó thành lỗi thật. Người dùng chốt `B7 a` cho Worker B (`req-20260925T045037Z`): tạm hoãn tới khi Worker A xong và đã commit. Worker B gửi báo cáo `finished` ở trạng thái tạm hoãn rồi nghỉ. Worker A (`req-20260925T033834Z`) làm xong bản phát hành 0.3.0 và gửi báo cáo `finished`. Manager **đọc được** báo cáo đó, nói đúng rằng điều kiện đã đủ — rồi vẫn nhắn "bạn nhắn một câu là tôi đánh thức nó" và đứng chờ người dùng gõ "Chạy tiếp đi". Người dùng trở thành đường truyền cho một sự thật Manager đã nắm trong tay.
+On 2026-09-25 that became a real bug. The user decided `B7 a` for Worker B (`req-20260925T045037Z`): postpone until Worker A is done and has committed. Worker B sent a `finished` report in the postponed state and then rested. Worker A (`req-20260925T033834Z`) finished the 0.3.0 release and sent a `finished` report. Manager **could read** that report, said correctly that the condition was met — and then still wrote "send me a line and I will wake it up" and stood waiting for the user to type "Go on". The user became the relay for a fact Manager already held in its hands.
 
-Nguyên nhân nằm trong chính chỉ dẫn vai trò, không phải ở dữ kiện: luật 2 (`YOU ARE A RELAY, NOT A DECIDER`) được đọc thành "không bao giờ gửi cho Worker thứ người dùng chưa gõ", và phần "Talking to the user" bảo để một Worker đã `finished` ở trạng thái nghỉ. Manager thiếu quyền, không thiếu thông tin.
+The cause lay in the role instructions themselves, not in the facts: rule 2 (`YOU ARE A RELAY, NOT A DECIDER`) was read as "never send a Worker anything the user has not typed", and the "Talking to the user" section said to leave a `finished` Worker resting. Manager lacked the permission, not the information.
 
 ## Decision
 
-1. **Manager là người điều phối, không chỉ là đường truyền.** Nó được tự nhắn cho Worker để tiếp tục công việc: đánh thức một Worker đang chờ, và sắp thứ tự các Worker chạm cùng file, bead hay lịch sử git — kể cả khi người dùng chưa nêu điều kiện nào.
-2. **Chỉ hành động trên thứ đã kiểm chứng.** Điều kiện phải được thấy bằng một nguồn đọc được: báo cáo của Worker khác, `get_agent_status`, `git`, hay `br`. Suy đoán, hay "chắc là xong rồi", không phải căn cứ.
-3. **Sự thật thì tự trả lời, quyết định thì hỏi.** Một câu hỏi của Worker chỉ hỏi một sự thật Manager đọc được thì Manager tự trả lời (khối `BM-ANSWERS`, kèm nguồn). Phạm vi, cách làm, đánh đổi, việc người dùng phải tự làm, và mọi thứ ở REQ-026 (d) vẫn chuyển cho người dùng — Manager không bao giờ chọn thay.
-4. **Giao việc vẫn ngay lập tức.** Điều phối chỉ áp cho việc đánh thức và tiếp tục; nó không hoãn việc tạo Worker (REQ-021, chỉ số M-10 ≤ 60 giây giữ nguyên). Giữ một Worker lại nghĩa là **nói cho nó biết ngay lúc tạo** rằng nó chờ ai và chờ điều gì — không phải giữ yêu cầu lại; trong lúc chờ nó tự quyết làm được gì.
-5. **Nói trước và nói sau.** Thấy một Worker sẽ phải chờ thì Manager báo ngay rằng chính nó sẽ đánh thức và theo điều kiện nào — không bao giờ "bạn nhắn một câu rồi tôi làm". Gửi xong thì một dòng: đã thấy gì, đã gửi gì. Người dùng lật lại được mọi lần đánh thức.
-6. **Không đổi phần còn lại.** Manager vẫn không tự làm việc (ADR-005 quyết định 3), không lưu trữ hay xoá agent, không duyệt quyền thay người dùng, không thêm yêu cầu của riêng nó vào lời người dùng, và không gửi vào lượt một Worker đang chạy.
+1. **Manager is a coordinator, not only a relay.** It may message a Worker itself to continue the work: wake a waiting Worker, and order the Workers that touch the same files, beads or git history — even when the user has not stated any condition.
+2. **Act only on what has been verified.** The condition must be seen through a readable source: another Worker's report, `get_agent_status`, `git`, or `br`. A guess, or "it must be done by now", is not a basis.
+3. **Answer facts yourself, ask about decisions.** A Worker's question that only asks for a fact Manager can read is answered by Manager itself (a `BM-ANSWERS` block, with the source). Scope, approach, trade-offs, work the user must do themselves, and everything in REQ-026 (d) still go to the user — Manager never chooses in their place.
+4. **Handing off is still immediate.** Coordination applies only to waking and continuing; it does not delay creating a Worker (REQ-021, metric M-10 ≤ 60 seconds unchanged). Holding a Worker back means **telling it at creation time** whom it is waiting for and what for — not holding the request back; while waiting it decides for itself what it can do.
+5. **Say it before and after.** When it sees that a Worker will have to wait, Manager says at once that it will wake it itself, and on which condition — never "send me a line and I will do it". Once it has sent, one line: what it saw, what it sent. The user can look back over every wake-up.
+6. **The rest is unchanged.** Manager still does not do the work itself (ADR-005 decision 3), does not archive or delete agents, does not approve permissions on the user's behalf, does not add requests of its own to the user's words, and does not send into a turn a Worker is running.
 
-**Chỗ ghi luật, và ngân sách của nó.** Quyền mới nằm trong `plugin/roles/manager.md` và chỉ ở đó. Khối `## RULES` của tệp đó giữ nguyên ngân sách đang có — đúng 5 giới hạn đánh số, tối đa 30 dòng: phần thuộc về luật là **một câu** trong luật 2 (thứ Manager đã đọc được về tình trạng công việc thì nó gửi được, kèm nguồn), mua bằng cách siết chính lời luật 2; cách làm nằm ở một mục riêng bên dưới. Ngân sách ấy là thứ giữ cho phần đầu tệp còn đọc được ở lượt thứ mười; thêm một quyền không phải lý do để nới nó. Chỉ dẫn của Worker cũng phải nhận được khối `BM-ANSWERS` do Manager viết: một mục `other` nay có thể là lời người dùng **hoặc** một sự thật Manager đã kiểm chứng kèm nguồn, và thứ đọc ra như phạm vi hay cách làm thì Worker hỏi lại dưới số mới thay vì coi là quyết định của người dùng.
+**Where the rule is written, and its budget.** The new permission lives in `plugin/roles/manager.md` and only there. That file's `## RULES` block keeps its existing budget — exactly 5 numbered limits, at most 30 lines: the part that belongs to the rules is **one sentence** in rule 2 (what Manager has read about the state of the work it may send, with the source), paid for by tightening the wording of rule 2 itself; the how-to lives in a separate section below. That budget is what keeps the top of the file readable at the tenth turn; adding a permission is no reason to loosen it. Worker's instructions must also accept a `BM-ANSWERS` block written by Manager: an `other` entry may now be the user's words **or** a fact Manager has verified with a source, and anything that reads like scope or approach the Worker asks again under a new number instead of treating it as the user's decision.
 
 ## Consequences
 
-**Tích cực**
-- Người dùng thôi làm đường truyền cho những sự thật Manager đã nắm; đúng tình huống 2026-09-25 nay chạy hết mà không cần họ gõ gì.
-- Nhiều Worker trong một workspace có người giữ thứ tự. Chúng dùng chung một working tree và một kho bead, nên thứ tự là việc có thật, và Manager là chỗ duy nhất nhìn thấy đủ để giữ.
-- Quyền quyết định nội dung công việc không dịch chuyển: ranh giới mới nằm giữa **sự thật** và **quyết định**, không phải giữa Manager và Worker.
+**Positive**
+- The user stops being the relay for facts Manager already holds; the exact 2026-09-25 case now runs to the end without them typing anything.
+- Several Workers in one workspace have someone keeping their order. They share one working tree and one bead store, so ordering is a real job, and Manager is the only place that sees enough to keep it.
+- The right to decide the content of the work does not move: the new boundary lies between **fact** and **decision**, not between Manager and Worker.
 
-**Tiêu cực / phải chấp nhận**
-- Manager có thể đánh thức nhầm vì đọc sai một báo cáo hay một dòng `git log`. Giảm thiểu bằng ba ràng buộc: phải có bằng chứng đọc được, phải nói cho người dùng ngay sau khi gửi, và không chắc thì hỏi.
-- Manager tốn thêm lượt đọc trạng thái, nên tốn thêm token cho mỗi yêu cầu có nhiều Worker.
-- Đây là lan can hành vi trong chỉ dẫn, không phải mã: không có lớp chặn nào của Paseo ngăn Manager gửi một câu nó không nên gửi (REQ-026 c).
-- Một Worker được đánh thức bằng lời của Manager chứ không phải lời người dùng, nên dòng lịch sử chat của Worker không còn chỉ toàn lời người dùng. Manager phải ghi rõ nguồn trong chính câu nó gửi.
+**Negative / to be accepted**
+- Manager may wake a Worker by mistake because it misread a report or a `git log` line. Mitigated by three constraints: there must be readable evidence, the user must be told right after sending, and when unsure, ask.
+- Manager spends extra turns reading state, so extra tokens for every request with several Workers.
+- This is a behavioural guardrail in the instructions, not code: no Paseo layer prevents Manager from sending a sentence it should not send (REQ-026 c).
+- A Worker woken by Manager's words rather than the user's, so the Worker's chat history is no longer made up only of the user's words. Manager must state the source in the very sentence it sends.
 
 ## Alternatives considered
 
-- **Giữ nguyên đường truyền tuyệt đối.** Đơn giản và dễ kiểm, nhưng đó chính là lỗi người dùng báo: sản phẩm bắt họ gõ lại điều máy đã biết.
-- **Chỉ thi hành điều kiện người dùng đã nêu** (Q1 a của yêu cầu này). Đủ cho tình huống 2026-09-25 và ít rủi ro hơn, nhưng vẫn để Manager đứng yên khi hai Worker va nhau mà người dùng chưa kịp nghĩ tới. Chủ repo chọn (c).
-- **Plugin tự đánh thức bằng mã** (một hook đếm điều kiện rồi gửi hộ). Xác định hơn, nhưng trái ADR-005 quyết định 2: plugin không đoán ý người dùng, phần suy luận thuộc về agent.
+- **Keep the absolute relay.** Simple and easy to check, but that is exactly the bug the user reported: the product makes them type again what the machine already knows.
+- **Only enforce conditions the user has stated** (Q1 a of this request). Enough for the 2026-09-25 case and less risky, but still leaves Manager standing still when two Workers collide in a way the user has not thought of yet. The owner chose (c).
+- **The plugin wakes Workers itself in code** (a hook that counts conditions and sends on their behalf). More deterministic, but contrary to ADR-005 decision 2: the plugin does not guess what the user means; the reasoning belongs to the agent.

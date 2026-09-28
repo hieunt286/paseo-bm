@@ -1,5 +1,5 @@
 /**
- * The write scope guard (Design §9 "Phạm vi ghi của trình cài", §11 layer
+ * The write scope guard (Design §9 "Write scope", the installer's part, §11 layer
  * "bất biến an toàn", ADR-003 decision 1).
  *
  * paseo-bm may create, change or delete exactly two things on the machine:

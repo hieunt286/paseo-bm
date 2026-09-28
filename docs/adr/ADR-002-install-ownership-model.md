@@ -1,66 +1,66 @@
-# ADR-002 — Hồ sơ cài đặt có checksum, ghi atomic, backup; không dùng journal giao dịch đầy đủ
+# ADR-002 — An install record with checksums, atomic writes and backups; no full transaction journal
 
-| Trường | Giá trị |
+| Field | Value |
 |---|---|
-| Status | Accepted (bổ sung 2026-09-16 — xem mục cuối) |
+| Status | Accepted (amended 2026-09-16 — see the last section) |
 | Date | 2026-09-14 |
 | Owner | hieu.nt10 |
-| Sửa đổi bởi | [ADR-012](ADR-012-plugin-is-the-product.md) (2026-09-25): hồ sơ cài đặt chỉ còn cho người dùng cũ. Quyết định 1–7 chỉ áp cho trình cài tới 0.3.1 (từ 0.4.0 Paseo giữ gói, không còn payload để hash, backup hay giữ song song); quyết định 9 được dùng để chặn trình cài cũ: CLI 0.4.0 đánh dấu `install.json` là đã chuyển bằng `schemaVersion: 2` |
-| Liên quan | [PRD REQ-004, REQ-008, REQ-009, REQ-010, REQ-012](../product/paseo-bm-prd.md#6-functional-requirements), [ADR-001](ADR-001-plugin-distribution.md), [Technical Design](../design/paseo-bm.md) |
+| Amended by | [ADR-012](ADR-012-plugin-is-the-product.md) (2026-09-25): the install record now exists only for existing users. Decisions 1–7 apply only to installers up to 0.3.1 (from 0.4.0 Paseo holds the package, and there is no payload left to hash, back up or keep side by side); decision 9 is used to stop old installers: CLI 0.4.0 marks `install.json` as migrated with `schemaVersion: 2` |
+| Related | [PRD REQ-004, REQ-008, REQ-009, REQ-010, REQ-012](../product/paseo-bm-prd.md#6-functional-requirements), [ADR-001](ADR-001-plugin-distribution.md), [Technical Design](../design/paseo-bm.md) |
 
 ## Context
 
-paseo-bm ghi vào máy người dùng và phải đáp ứng bốn yêu cầu của PRD cùng lúc: chạy lại không đổi gì (REQ-009), không ghi đè file người dùng đã sửa (REQ-008), gỡ sạch đúng phần mình sở hữu (REQ-012), và không để lại file ghi dở khi bị ngắt (REQ-010c).
+paseo-bm writes to the user's machine and must meet four PRD requirements at once: running again changes nothing (REQ-009), a file the user has edited is not overwritten (REQ-008), uninstalling removes exactly what it owns (REQ-012), and an interruption leaves no half-written file (REQ-010c).
 
-Hai hình mẫu đã khảo sát:
+Two models were surveyed:
 
-- **paseo-room**: mỗi mục là `dir` / `file` / `link`, so sánh với đĩa rồi `rm` + ghi lại khi khác. Không backup, không atomic, không có danh sách file trong marker `room.json`. Hệ quả: sửa tay bị ghi đè im lặng; gỡ là `rm -rf` cả thư mục. Nhóm này đã **chủ động bỏ** installer v1 có journal, rollback và lock (~10k dòng) vì quá nặng.
-- **Trình cài skills của chính Paseo**: ghi theo giao dịch với thư mục `.paseo-skills-transaction-*`, `transaction.json`, `backup/`, vùng cách ly `.paseo-skills-recovered-*`, cộng với `.paseo-managed-files.json` chứa sha256 từng file.
+- **paseo-room**: each entry is a `dir` / `file` / `link`, compared with the disk, then `rm` + rewritten when it differs. No backup, no atomicity, no file list in the `room.json` marker. Consequence: hand edits are silently overwritten; uninstalling is an `rm -rf` of the whole directory. That team **deliberately dropped** a v1 installer with a journal, rollback and a lock (~10k lines) because it was too heavy.
+- **Paseo's own skills installer**: writes transactionally with a `.paseo-skills-transaction-*` directory, `transaction.json`, `backup/`, a `.paseo-skills-recovered-*` quarantine area, plus `.paseo-managed-files.json` holding the sha256 of every file.
 
-Khác biệt quan trọng về phạm vi: paseo-bm chỉ ghi **một cây thư mục payload do mình sở hữu hoàn toàn** cộng **một thay đổi nhỏ trong `config.json` của Paseo** (ADR-004). Nó không rải file vào thư mục của người khác — đó là lý do không cần tới bộ máy giao dịch đầy đủ.
+An important difference in scope: paseo-bm writes only **one payload directory tree that it owns entirely** plus **one small change in Paseo's `config.json`** (ADR-004). It does not scatter files into anyone else's directory — which is why the full transaction machinery is not needed.
 
 ## Decision
 
-1. **Hồ sơ cài đặt** `<install home>/install.json`, có `schemaVersion`, ghi: phiên bản, thời điểm, đường dẫn Paseo home đã dùng, danh sách từng file payload kèm `sha256` và quyền, các thay đổi đã thực hiện lên Paseo, và trạng thái tương tác về skills. Đây là **nguồn sự thật về quyền sở hữu**: không có trong hồ sơ nghĩa là không phải của paseo-bm.
-2. **Ghi atomic từng file**: ghi ra file tạm cùng thư mục, `fsync`, rồi `rename`. Không bao giờ `rm` rồi ghi lại.
-3. **Chỉ ghi khi khác**: so `sha256` trước; giống thì không chạm vào file (bảo đảm REQ-009).
-4. **Phân loại đích trước khi ghi**: *của ta và khớp hash* → cập nhật được; *của ta nhưng hash khác* → người dùng đã sửa, mặc định giữ; *không có trong hồ sơ mà đã tồn tại* → xung đột, bỏ qua.
-5. **Backup trước mọi ghi đè có chủ đích**, vào `<install home>/backups/<timestamp>/`, giữ nguyên đường dẫn tương đối, và in đường dẫn ra cho người dùng.
-6. **Không có journal, không rollback toàn cục.** Khôi phục dựa trên ba tính chất: ghi atomic từng file, tính idempotent, và hồ sơ cài đặt. Bị ngắt giữa chừng thì chạy lại lệnh cài là về trạng thái nhất quán.
-7. **Cài phiên bản mới không ghi đè phiên bản cũ**: payload mới vào `plugin/<version mới>/`. Đây là cách đạt REQ-010c mà không cần rollback. *(Sửa 2026-09-15: bản đầu viết "dọn bản cũ, giữ tối đa N bản". Owner đã chốt **giữ tất cả**, chỉ dọn khi người dùng chạy `--prune` — xem Technical Design Q-016. Không có cơ chế dọn tự động nào.)*
-   **Hệ quả về phạm vi của các trạng thái ở quyết định 4:** vì bản nâng cấp luôn vào thư mục mới, mọi đích đều là `missing` → tạo mới, nên `user-modified`, `outdated` và `conflict` **chỉ xảy ra trong thư mục phiên bản đang hoạt động** (cài lại cùng phiên bản, hoặc sửa chữa file bị xoá/bị sửa) và với chính `install.json`. File người dùng đã sửa trong thư mục phiên bản **cũ** được để nguyên, liệt kê trong bản tóm tắt, và `--prune` không bao giờ xoá.
-8. **Quyền**: thư mục `0700`, file `0600`.
-9. `schemaVersion` lớn hơn mức CLI hiểu → dừng và yêu cầu người dùng nâng cấp, không đoán.
+1. **The install record** `<install home>/install.json`, with a `schemaVersion`, records: the version, the time, the Paseo home path used, the list of every payload file with its `sha256` and permissions, the changes made to Paseo, and the interaction state for skills. It is **the source of truth for ownership**: not in the record means not paseo-bm's.
+2. **Atomic writes, file by file**: write to a temporary file in the same directory, `fsync`, then `rename`. Never `rm` and then rewrite.
+3. **Write only when different**: compare the `sha256` first; if it is the same, the file is not touched (guarantees REQ-009).
+4. **Classify the target before writing**: *ours and matching the hash* → may be updated; *ours but with a different hash* → the user has edited it, kept by default; *not in the record but already existing* → conflict, skipped.
+5. **Back up before every intended overwrite**, into `<install home>/backups/<timestamp>/`, keeping the relative path, and print the path for the user.
+6. **No journal, no global rollback.** Recovery rests on three properties: atomic per-file writes, idempotence, and the install record. If interrupted midway, running the install command again returns to a consistent state.
+7. **Installing a new version does not overwrite the old version**: the new payload goes into `plugin/<new version>/`. This is how REQ-010c is met without a rollback. *(Corrected 2026-09-15: the first draft said "clean up old versions, keep at most N". The owner decided to **keep all of them**, cleaning up only when the user runs `--prune` — see Technical Design Q-016. There is no automatic cleanup mechanism.)*
+   **Consequence for the scope of the states in decision 4:** because an upgrade always goes into a new directory, every target is `missing` → created, so `user-modified`, `outdated` and `conflict` **occur only in the active version's directory** (reinstalling the same version, or repairing a deleted/edited file) and on `install.json` itself. A file the user has edited in an **old** version's directory is left alone, listed in the summary, and `--prune` never deletes it.
+8. **Permissions**: directories `0700`, files `0600`.
+9. A `schemaVersion` higher than the CLI understands → stop and ask the user to upgrade, without guessing.
 
 ## Consequences
 
-**Tích cực**
-- Ba yêu cầu khó (idempotent, không ghi đè im lặng, gỡ sạch) đều suy ra trực tiếp từ hồ sơ cài đặt.
-- Không có trạng thái nửa vời khó hiểu: file hoặc là bản cũ nguyên vẹn, hoặc là bản mới nguyên vẹn.
-- Đơn giản hơn hẳn journal, nên ít mã và ít cách hỏng.
+**Positive**
+- The three hard requirements (idempotence, no silent overwrite, clean uninstall) all follow directly from the install record.
+- No confusing half-way state: a file is either the old version intact or the new version intact.
+- Much simpler than a journal, so less code and fewer ways to break.
 
-**Tiêu cực / phải chấp nhận**
-- Bị ngắt giữa chừng có thể để lại **thư mục payload phiên bản mới chưa hoàn tất**. Xử lý: bản chưa được ghi vào hồ sơ thì coi là rác, lần chạy sau dọn.
-- Hồ sơ bị xoá tay là mất dấu vết sở hữu; khi đó paseo-bm coi như chưa cài và báo mọi đích hiện có là xung đột, thay vì đoán.
-- `sha256` chỉ phát hiện nội dung khác, không biết ai sửa. Đủ cho mục tiêu "không ghi đè im lặng".
-- Backup tích tụ theo thời gian; cần chính sách dọn và một lệnh liệt kê.
+**Negative / to be accepted**
+- An interruption midway can leave **an unfinished payload directory for the new version**. Handling: a version not yet written into the record is treated as garbage and cleaned up by the next run.
+- If the record is deleted by hand, the ownership trail is lost; paseo-bm then treats itself as not installed and reports every existing target as a conflict, instead of guessing.
+- `sha256` only detects that content differs, not who changed it. Enough for the goal of "no silent overwrite".
+- Backups accumulate over time; a cleanup policy and a listing command are needed.
 
 ## Alternatives considered
 
-| Phương án | Lý do loại |
+| Option | Reason rejected |
 |---|---|
-| Kiểu paseo-room: `rm` + ghi lại, marker không có danh sách file | Vi phạm thẳng REQ-008 và REQ-012; chính tác giả cũng ghi nhận đây là điểm yếu |
-| Journal giao dịch đầy đủ như trình cài skills của Paseo | Phù hợp khi ghi vào thư mục dùng chung với công cụ khác. paseo-bm chỉ ghi trong thư mục của chính mình nên chi phí không tương xứng |
-| Dựa vào `mtime`/kích thước thay cho hash | Không tin cậy khi copy hay checkout; dễ vừa bỏ sót vừa báo nhầm |
-| Ghi đè trực tiếp rồi sửa nếu lỗi | Không có điểm khôi phục; đúng thứ mà REQ-010c cấm |
+| paseo-room style: `rm` + rewrite, a marker with no file list | Directly violates REQ-008 and REQ-012; its own author acknowledges this as a weakness |
+| A full transaction journal like Paseo's skills installer | Fits when writing into a directory shared with other tools. paseo-bm writes only inside its own directory, so the cost is out of proportion |
+| Rely on `mtime`/size instead of a hash | Unreliable across copies and checkouts; easy both to miss changes and to report false ones |
+| Overwrite directly, then fix on error | No recovery point; exactly what REQ-010c forbids |
 
-## Bổ sung 2026-09-16 — loại `user-data` đứng ngoài mô hình hash
+## Addendum 2026-09-16 — the `user-data` kind stands outside the hash model
 
-Theo delta [`design-delta-20260916-trace-store`](../archive/design/paseo-bm-delta-20260916-trace-store.md) do owner duyệt, thư mục `<install home>/traces/` (kho lưu vết của Dashboard) là **dữ liệu do paseo-bm tạo nhưng thuộc người dùng**, và **không** áp mô hình hồ sơ–hash của ADR này:
+Under the delta [`design-delta-20260916-trace-store`](../archive/design/paseo-bm-delta-20260916-trace-store.md) approved by the owner, the `<install home>/traces/` directory (the Dashboard's trace store) is **data created by paseo-bm but belonging to the user**, and the record–hash model of this ADR does **not** apply to it:
 
-- không nằm trong `files[]`, không có `sha256`, không sinh `backups[]`;
-- không có bốn trạng thái `unchanged` / `outdated` / `user-modified` / `conflict` — nó không phải tài sản phiên bản nên không có "bản đúng" để so;
-- cài và cập nhật (gồm cả `--prune`) **không bao giờ** chạm tới nó (PRD REQ-010f);
-- chỉ lệnh gỡ được xoá, và phải hỏi riêng (PRD REQ-012i).
+- it is not in `files[]`, has no `sha256`, produces no `backups[]`;
+- it has none of the four states `unchanged` / `outdated` / `user-modified` / `conflict` — it is not a versioned asset, so there is no "correct version" to compare against;
+- install and update (including `--prune`) **never** touch it (PRD REQ-010f);
+- only the uninstall command may delete it, and it must ask separately (PRD REQ-012i).
 
-Lý do quyết định này không làm yếu ADR-002: mô hình hash tồn tại để trả lời "file này của ai và có bị sửa tay không". Với dữ liệu tích luỹ thì câu hỏi đó vô nghĩa — mọi thay đổi đều là dữ liệu mới hợp lệ. Áp hash lên nó sẽ luôn báo `user-modified` và biến một tính năng đúng thành một cảnh báo sai. Chi tiết ở [ADR-007](ADR-007-dashboard-trace-store.md) và [Technical Design](../design/paseo-bm.md) §3.3.
+Why this decision does not weaken ADR-002: the hash model exists to answer "whose file is this and has it been edited by hand". For accumulating data that question is meaningless — every change is new, valid data. Applying a hash to it would always report `user-modified` and turn a correct feature into a false warning. Details in [ADR-007](ADR-007-dashboard-trace-store.md) and [Technical Design](../design/paseo-bm.md) §3.3.

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Smoke test for the packed npm package (bead bm-wp-101-b51.3, Technical Design §11
-// "Gói đã đóng").
+// Smoke test for the packed npm package (bead bm-wp-101-b51.3, Technical Design §11,
+// the packed-package layer).
 //
 // Everything here runs against the real tarball produced by `npm pack`, never
 // against the source tree: the failure this guards against is a file that works

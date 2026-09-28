@@ -1,69 +1,72 @@
-# Tài liệu paseo-bm — đọc từ đây
+# paseo-bm documentation — start here
 
-Tài liệu trong `docs/` là **tài liệu sống**: mỗi file tả sản phẩm **như nó đang chạy**, được sửa tại chỗ cùng commit với code và thêm một dòng Revision History. Muốn biết vì sao một điều từng được quyết thì xem mục "Lịch sử" cuối mỗi design, rồi tới `archive/`. Cách chọn quy trình cho một thay đổi (Direct / Tracked / Designed) nằm ở [`AGENTS.md`](../AGENTS.md), mục *Process*.
+The documentation in `docs/` is written in English and is **living documentation**: each file describes the product **as it runs now**, is edited in place in the same commit as the code, and gains one Revision History line. To learn why something was once decided, see the "History" section at the end of each design, then `archive/`. How to pick the process for a change (Direct / Tracked / Designed) is in [`AGENTS.md`](../AGENTS.md), section *Process*.
 
-**Sản phẩm là một gói.** Từ bản 0.4.0 ([ADR-012](adr/ADR-012-plugin-is-the-product.md)) paseo-bm là plugin `paseo-bm-plugin`, cài từ paseo.cafe hoặc bằng `paseo plugin add npm:paseo-bm-plugin` trên Paseo 0.9+; trình cài `npx paseo-bm` chỉ còn một bản cuối để chuyển người dùng cũ. PRD và design tả bản đích đó và ghi rõ chỗ nào chưa có trong mã.
+**The product is one package.** From 0.4.0 ([ADR-012](adr/ADR-012-plugin-is-the-product.md)) paseo-bm is the plugin `paseo-bm-plugin`, installed from paseo.cafe or with `paseo plugin add npm:paseo-bm-plugin` on Paseo 0.9+; the `npx paseo-bm` installer has only one last release left, to move existing users over. The PRDs and designs describe that target release and state clearly what is not in the code yet.
 
-## Sản phẩm làm gì — PRD
+## What the product does — PRD
 
-| Tài liệu | Nội dung |
+| Document | Contents |
 |---|---|
-| [paseo-bm-prd.md](product/paseo-bm-prd.md) | Cài đặt và thiết lập máy (bản đích 0.4.0: từ paseo.cafe, Setup, chuyển người dùng cũ), vai trò Manager / Worker / Reviewer, ranh giới an toàn, review, báo cáo, dự phòng provider |
-| [paseo-bm-dashboard-prd.md](product/paseo-bm-dashboard-prd.md) | Màn Metric, Beads, Setup, thẻ trong chat, kho lưu vết |
+| [paseo-bm-prd.md](product/paseo-bm-prd.md) | Installation and machine setup (target release 0.4.0: from paseo.cafe, Setup, moving existing users over), the Manager / Worker / Reviewer roles, safety boundaries, review, reporting, provider fallback |
+| [paseo-bm-dashboard-prd.md](product/paseo-bm-dashboard-prd.md) | The Metric, Beads and Setup screens, cards in chat, the trace store |
+| [paseo-bm-orchestrator-prd.md](product/paseo-bm-orchestrator-prd.md) | **Accepted** — the Orchestrator tab: rule-based flags assessing coordination, an LLM assessment on click (role `bm-orchestrator`), nudging a running agent after a flag |
 
-PRD nói **kết quả người dùng nhận được**. Chi tiết như màu, nhãn, giới hạn và con số nằm ở design, code và test. Yêu cầu nào chưa có trong code được ghi *"Chưa làm"* ngay trong dòng của nó.
+A PRD states **the outcome the user gets**. Details such as colours, labels, limits and numbers live in the design, code and tests. A requirement not yet in the code is marked *"Not implemented yet"* in its own row.
 
-## Sản phẩm làm thế nào — Technical Design
+## How the product does it — Technical Design
 
-| Tài liệu | Nội dung |
+| Document | Contents |
 |---|---|
-| [paseo-bm.md](design/paseo-bm.md) | Đóng gói và phát hành, CLI chuyển đổi 0.4.0, thư mục dữ liệu, thiết lập máy, cấu hình Paseo, phía server của plugin: hook tạo agent, Manager, tool của agent, thông báo `BM-*`, ngân sách review, sổ hỏi–đáp, dự phòng, trace |
-| [paseo-bm-dashboard.md](design/paseo-bm-dashboard.md) | Kho lưu vết, dựng trace theo request, bước quy trình, màn Metric / Beads / Setup (kể cả Roles & models), thẻ chat, pill, thẻ dự phòng |
-| [paseo-bm-research-20260918-instructions-by-model.md](design/paseo-bm-research-20260918-instructions-by-model.md) | Chỉ dẫn vai trò tới Claude, Codex, OpenCode thế nào |
+| [paseo-bm.md](design/paseo-bm.md) | Packaging and release, the 0.4.0 migration CLI, the data folder, machine setup, Paseo configuration, the plugin's server side: the agent-creation hook, Manager, agent tools, `BM-*` notices, the review budget, the question–answer log, fallback, trace |
+| [paseo-bm-dashboard.md](design/paseo-bm-dashboard.md) | The trace store, building a trace per request, process steps, the Metric / Beads / Setup screens (including Roles & models), chat cards, pills, the fallback card |
+| [paseo-bm-orchestrator.md](design/paseo-bm-orchestrator.md) | **Active** — the Orchestrator tab: the catalogue of rules and flags, the `bm-orchestrator` role and the `bm_assessment` tool, the `BM-NUDGE` agent nudge, the `orchestrator.*` RPCs |
+| [paseo-bm-research-20260918-instructions-by-model.md](design/paseo-bm-research-20260918-instructions-by-model.md) | How role instructions reach Claude, Codex and OpenCode |
 
-Hành vi của từng vai trò nằm trong chính chỉ dẫn của nó: [`plugin/roles/manager.md`](../plugin/roles/manager.md), [`worker.md`](../plugin/roles/worker.md), [`reviewer.md`](../plugin/roles/reviewer.md). Design không chép lại.
+Each role's behaviour lives in its own instructions: [`plugin/roles/manager.md`](../plugin/roles/manager.md), [`worker.md`](../plugin/roles/worker.md), [`reviewer.md`](../plugin/roles/reviewer.md). The design does not copy it.
 
-## Quyết định kiến trúc — ADR
+## Architecture decisions — ADR
 
-| ADR | Quyết định |
+| ADR | Decision |
 |---|---|
-| [ADR-001](adr/ADR-001-plugin-distribution.md) | Payload đi kèm gói npm, đăng ký từ thư mục cục bộ (**Superseded** bởi ADR-012) |
-| [ADR-002](adr/ADR-002-install-ownership-model.md) | Hồ sơ cài đặt có checksum, ghi atomic, backup |
-| [ADR-003](adr/ADR-003-skills-delegation.md) | Uỷ quyền việc cài skills cho CLI `skills` |
-| [ADR-004](adr/ADR-004-paseo-config-mutation.md) | Tích hợp Paseo qua CLI; sửa tối thiểu `config.json` |
-| [ADR-005](adr/ADR-005-manager-as-agent.md) | Beads Manager là một agent; plugin là lối vào và bảng quan sát |
-| [ADR-006](adr/ADR-006-role-registration.md) | Đăng ký vai trò bằng provider dẫn xuất và agent profile |
-| [ADR-007](adr/ADR-007-dashboard-trace-store.md) | Kho lưu vết trong thư mục cài đặt, người dùng xoá được |
-| [ADR-008](adr/ADR-008-role-settings-written-by-plugin.md) | Plugin ghi cấu hình vai trò qua `config.patch`; alias dự phòng |
-| [ADR-009](adr/ADR-009-payload-as-npm-package.md) | Payload là gói npm riêng `paseo-bm-plugin`, cùng lần phát hành (QĐ4–5 thay bởi ADR-012) |
-| [ADR-010](adr/ADR-010-plugin-hosted-agent-tools.md) | Plugin phục vụ tool có schema cho agent qua MCP HTTP |
-| [ADR-011](adr/ADR-011-manager-coordinates-workers.md) | Manager tự điều phối Worker trong phạm vi người dùng đã quyết |
-| [ADR-012](adr/ADR-012-plugin-is-the-product.md) | Một nguồn: plugin `paseo-bm-plugin` cài từ npm / paseo.cafe là toàn bộ sản phẩm; `npx paseo-bm` 0.4.0 chỉ chuyển đổi; Paseo 0.9+. Thay ADR-001, thay ADR-009 QĐ4–5, sửa ADR-002, 003, 004, 006, 008 |
+| [ADR-001](adr/ADR-001-plugin-distribution.md) | The payload ships inside the npm package and is registered from a local directory (**Superseded** by ADR-012) |
+| [ADR-002](adr/ADR-002-install-ownership-model.md) | Install record with checksums, atomic writes, backups |
+| [ADR-003](adr/ADR-003-skills-delegation.md) | Delegate skill installation to the `skills` CLI |
+| [ADR-004](adr/ADR-004-paseo-config-mutation.md) | Integrate with Paseo through its CLI; change `config.json` minimally |
+| [ADR-005](adr/ADR-005-manager-as-agent.md) | Beads Manager is an agent; the plugin is the entry point and the observation panel |
+| [ADR-006](adr/ADR-006-role-registration.md) | Register roles with derived providers and agent profiles |
+| [ADR-007](adr/ADR-007-dashboard-trace-store.md) | Trace store in the install home, deletable by the user |
+| [ADR-008](adr/ADR-008-role-settings-written-by-plugin.md) | The plugin writes role settings through `config.patch`; fallback aliases |
+| [ADR-009](adr/ADR-009-payload-as-npm-package.md) | The payload is its own npm package `paseo-bm-plugin`, in the same release (decisions 4–5 replaced by ADR-012) |
+| [ADR-010](adr/ADR-010-plugin-hosted-agent-tools.md) | The plugin serves schema-typed tools to agents over MCP HTTP |
+| [ADR-011](adr/ADR-011-manager-coordinates-workers.md) | Manager coordinates Workers itself within the scope the user has decided |
+| [ADR-012](adr/ADR-012-plugin-is-the-product.md) | One source: the plugin `paseo-bm-plugin` installed from npm / paseo.cafe is the whole product; `npx paseo-bm` 0.4.0 only migrates; Paseo 0.9+. Replaces ADR-001, replaces ADR-009 decisions 4–5, amends ADR-002, 003, 004, 006, 008 |
+| [ADR-013](adr/ADR-013-orchestrator-assess-and-nudge.md) | **Accepted** — Orchestrator: the plugin creates the `bm-orchestrator` assessment agent when the user clicks, and nudges a running Manager/Worker with `BM-NUDGE` when the user turns the nudge switch on; no other action. Amends REQ-047 of the Dashboard PRD |
 
-ADR không bao giờ được viết lại; quyết định mới thì viết ADR mới thay thế nó.
+An ADR is never rewritten; a new decision gets a new ADR that supersedes it.
 
-## Vận hành — `operations/`
+## Operations — `operations/`
 
-| Tài liệu | Dùng khi |
+| Document | Use it when |
 |---|---|
-| [Runbook phát hành](operations/paseo-bm-release-runbook.md) | Phát hành một phiên bản (hai gói, cùng một lần chạy `release.yml`) |
-| [Checklist bản cài 0.4.0](operations/paseo-bm-install-checklist.md) | Nghiệm thu cài từ npm, Setup, chuyển đổi và gỡ trên daemon thật |
-| [Checklist điều phối](operations/paseo-bm-orchestration-checklist.md) | Nghiệm thu Manager → Worker → Reviewer với bộ yêu cầu mẫu |
-| [Checklist vai trò và dự phòng](operations/paseo-bm-worker-fallback-checklist.md) | Nghiệm thu cài đặt vai trò và dự phòng provider |
-| [Hồ sơ paseo.cafe](operations/paseo-bm-cafe-listing-20260923.md) | Liệt kê paseo-bm trên paseo.cafe; các bẫy của registry |
-| [Đề nghị gửi Paseo: huỷ agent](operations/paseo-upstream-request-agent-cancel.md), [điều hướng timeline](operations/paseo-upstream-request-timeline-navigation.md) | Hai đề nghị còn mở gửi maintainer của Paseo (tiếng Anh) |
+| [Release runbook](operations/paseo-bm-release-runbook.md) | Releasing a version (from 0.4.1 only the `paseo-bm-plugin` package) |
+| [0.4.0 install checklist](operations/paseo-bm-install-checklist.md) | Acceptance of installing from npm, Setup, migration and removal on a real daemon |
+| [Orchestration checklist](operations/paseo-bm-orchestration-checklist.md) | Acceptance of Manager → Worker → Reviewer with the sample request set |
+| [Roles and fallback checklist](operations/paseo-bm-worker-fallback-checklist.md) | Acceptance of role settings and provider fallback |
+| [paseo.cafe record](operations/paseo-bm-cafe-listing-20260923.md) | Listing paseo-bm on paseo.cafe; the registry's traps |
+| [Request to Paseo: cancel an agent](operations/paseo-upstream-request-agent-cancel.md), [timeline navigation](operations/paseo-upstream-request-timeline-navigation.md) | Two open requests to the Paseo maintainers (in English) |
 
-## Ghi chú phát hành — `releases/`
+## Release notes — `releases/`
 
-Mỗi phiên bản một file `paseo-bm-release-notes-<version>.md`; file đó là body của GitHub Release. Bản mới nhất: [0.3.0](releases/paseo-bm-release-notes-0.3.0.md).
+One file per version, `paseo-bm-release-notes-<version>.md`; that file is the GitHub Release body. Latest: [0.3.0](releases/paseo-bm-release-notes-0.3.0.md).
 
-## Lưu trữ — `archive/`
+## Archive — `archive/`
 
-Chỉ đọc, không sửa. Code và các tài liệu cũ trích delta theo tên và số mục (ví dụ "delta 20260917c §4.7"); tìm chúng ở đây.
+Read-only, never edited. This is the historical record and is still in Vietnamese. Code and older documents cite deltas by name and section number (for example "delta 20260917c §4.7"); find them here.
 
-| Thư mục | Chứa |
+| Folder | Contains |
 |---|---|
-| `archive/design/` | Các design delta và proposal đã gộp vào hai Technical Design |
-| `archive/product/` | Các PRD delta đã gộp vào hai PRD |
-| `archive/plans/` | Mọi implementation plan đã hoàn tất |
-| `archive/operations/` | Biên bản các lần chạy nghiệm thu và phát hành, chẩn đoán, checklist của các phase đã đóng |
+| `archive/design/` | The design deltas and proposals merged into the two Technical Designs |
+| `archive/product/` | The PRD deltas merged into the two PRDs |
+| `archive/plans/` | Every completed implementation plan |
+| `archive/operations/` | Run records of acceptance runs and releases, diagnoses, checklists of closed phases |

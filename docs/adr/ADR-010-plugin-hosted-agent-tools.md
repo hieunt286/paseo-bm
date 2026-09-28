@@ -1,36 +1,36 @@
-# ADR-010 — Plugin phục vụ tool có schema cho agent của mình qua MCP HTTP
+# ADR-010 — The plugin serves schema-backed tools to its own agents over MCP HTTP
 
-| Trường | Giá trị |
+| Field | Value |
 |---|---|
 | Status | Accepted |
 | Date | 2026-09-24 |
 | Owner | hieu.nt10 |
-| Liên quan | [design-delta-20260924b-agent-tools](../archive/design/paseo-bm-delta-20260924b-agent-tools.md); [ADR-004](ADR-004-paseo-config-mutation.md) (plugin không sửa config Paseo); [ADR-006](ADR-006-role-registration.md) (vai trò đăng ký qua provider alias) |
-| Quyết định của chủ repo | 2026-09-24: Q1 (a), Q2 (a), Q3 (a) của delta trên |
+| Related | [design-delta-20260924b-agent-tools](../archive/design/paseo-bm-delta-20260924b-agent-tools.md); [ADR-004](ADR-004-paseo-config-mutation.md) (the plugin does not edit the Paseo config); [ADR-006](ADR-006-role-registration.md) (roles registered through provider aliases) |
+| The owner's decisions | 2026-09-24: Q1 (a), Q2 (a), Q3 (a) of the delta above |
 
 ## Context
 
-Agent viết khối `BM-*` bằng tay, plugin đọc lại bằng regex. Chỉ dẫn và bộ kiểm là hai bản mô tả một mẫu, lệch nhau, và mỗi lần lệch tốn một lượt `BM-FORMAT`. Chủ repo muốn sửa tận gốc, và muốn cách sửa **có sẵn khi người dùng cài plugin**, không cần bước cài thêm.
+Agents write `BM-*` blocks by hand, and the plugin reads them back with a regex. The instructions and the checker are two descriptions of one format, they drift apart, and every drift costs a `BM-FORMAT` turn. The owner wants to fix this at the root, and wants the fix to be **available as soon as the user installs the plugin**, with no additional install step.
 
-Paseo 0.8 cho plugin gắn MCP server vào agent sắp tạo (`before("agent.create")` → `config.mcpServers`) và duyệt sẵn tool (`config.toolPolicy.preapproved`). Paseo tự đưa tool của nó tới agent bằng MCP `http`.
+Paseo 0.8 lets a plugin attach an MCP server to an agent about to be created (`before("agent.create")` → `config.mcpServers`) and pre-approve tools (`config.toolPolicy.preapproved`). Paseo delivers its own tools to agents over MCP `http`.
 
 ## Decision
 
-1. **Tiến trình server của paseo-bm phục vụ một MCP endpoint HTTP** trên `127.0.0.1`. Port được chọn một lần và lưu trong install home, để agent đang sống giữ được tool qua các lần plugin nạp lại.
-2. `before("agent.create")` gắn endpoint ấy **chỉ cho agent `bm-*`** và duyệt sẵn đúng các tool của vai trò đó. Không đụng config Paseo (ADR-004 giữ nguyên), không đụng agent khác trên máy.
-3. **Tool không có tác dụng phụ:** kiểm đầu vào bằng schema Zod trong `shared/`, trả về khối `BM-*` dựng từ schema, hoặc lỗi từng trường. Agent tự gửi khối như trước. Vì vậy endpoint không cần biết ai gọi và không cần xác thực.
-4. **Schema là nguồn duy nhất của mẫu.** Văn bản khối không đổi, nên mọi bên đang đọc văn bản (thẻ chat, Dashboard, trace, qa-ledger) không đổi.
-5. **Đường viết tay giữ vĩnh viễn** làm dự phòng; bộ kiểm và `BM-FORMAT` giữ nguyên cho nó.
+1. **paseo-bm's server process serves an HTTP MCP endpoint** on `127.0.0.1`. The port is chosen once and stored in the install home, so that a live agent keeps its tools across plugin reloads.
+2. `before("agent.create")` attaches that endpoint **only to `bm-*` agents** and pre-approves exactly the tools of that role. It does not touch the Paseo config (ADR-004 stays unchanged), and does not touch other agents on the machine.
+3. **The tools have no side effects:** they validate input with a Zod schema in `shared/` and return a `BM-*` block built from the schema, or per-field errors. The agent sends the block itself, as before. So the endpoint needs to know neither who is calling nor any authentication.
+4. **The schema is the single source of the format.** The block text does not change, so every party that reads the text (the chat card, the Dashboard, traces, the qa-ledger) does not change.
+5. **The hand-written path is kept permanently** as a fallback; the checker and `BM-FORMAT` stay unchanged for it.
 
 ## Consequences
 
-- Agent tạo trước bản này không có tool (hook `agent.session_open` chỉ đổi được `env`); chúng tiếp tục viết tay.
-- Plugin mở một cổng lắng nghe trên loopback. Tool không đọc, ghi hay gửi gì, nên một tiến trình khác trên máy gọi vào cũng không lấy được gì ngoài văn bản nó tự đưa vào.
-- Không giữ được port cũ (bị chiếm) thì plugin chọn port mới; agent cũ mất tool và quay về viết tay.
-- Paseo **từ chối tạo agent** khi request có `toolPolicy` mà provider không duyệt sẵn được tool MCP (chỉ claude, codex, opencode làm được). Vì vậy tool chỉ được gắn khi provider gốc của alias nằm trong danh sách đó; Pi, Copilot hay provider không đọc được thì không gắn gì, và agent viết khối bằng tay như hôm nay.
+- Agents created before this version have no tools (the `agent.session_open` hook can only change `env`); they keep writing by hand.
+- The plugin opens a listening port on loopback. The tools read, write and send nothing, so another process on the machine calling in gets nothing but the text it put in itself.
+- If the old port cannot be kept (it is taken), the plugin picks a new port; old agents lose the tools and go back to writing by hand.
+- Paseo **refuses to create an agent** when the request has a `toolPolicy` and the provider cannot pre-approve MCP tools (only claude, codex, opencode can). So the tools are attached only when the alias's base provider is in that list; for Pi, Copilot or a provider that cannot be read, nothing is attached, and the agent writes blocks by hand as today.
 
 ## Alternatives considered
 
-- **Tool tự gửi khối** (Q1 b): bớt một bước nhưng phải nhận diện agent gọi, giữ luật "không gửi vào lượt đang chạy", và đổi cách thẻ chat nhận biết người gửi. Có thể làm sau, trên nền quyết định này.
-- **Script `stdio` trong payload** (Q2 b): không phụ thuộc port, nhưng cần đường dẫn `node` chạy được; Paseo Desktop không bảo đảm có `node` trên `PATH`.
-- **Bỏ đường viết tay sau chuyển đổi** (Q3 b): một provider không hỗ trợ MCP sẽ không báo cáo được.
+- **The tool sends the block itself** (Q1 b): saves one step but has to identify the calling agent, keep the rule "do not send into a running turn", and change how the chat card recognises the sender. Can be done later, on top of this decision.
+- **A `stdio` script in the payload** (Q2 b): does not depend on a port, but needs a runnable `node` path; Paseo Desktop does not guarantee `node` on the `PATH`.
+- **Drop the hand-written path after the migration** (Q3 b): a provider that does not support MCP would be unable to report.
