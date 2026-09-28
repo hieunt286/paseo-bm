@@ -45,6 +45,15 @@ Each role's behaviour lives in its own instructions: [`plugin/roles/manager.md`]
 
 An ADR is never rewritten; a new decision gets a new ADR that supersedes it.
 
+## Plans in progress — `plans/`
+
+| Plan | Status |
+|---|---|
+| [paseo-bm-plan-040-single-source.md](plans/paseo-bm-plan-040-single-source.md) | Active — 0.4.0 and 0.4.1 are released; the last exit condition waits for the paseo.cafe caveats PR to be merged |
+| [paseo-bm-plan-050-orchestrator.md](plans/paseo-bm-plan-050-orchestrator.md) | Draft — 0.5.0, the Orchestrator: eight work packages, `plan-ready-for-beads` self-evaluated, awaiting the owner |
+
+A plan exists only for a piece of Designed work and moves to `archive/plans/` when its work is done.
+
 ## Operations — `operations/`
 
 | Document | Use it when |
