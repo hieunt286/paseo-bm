@@ -3,7 +3,7 @@
 | Trường | Giá trị |
 |---|---|
 | Mã | `cafe-listing-20260923` |
-| Status | **Active** — hồ sơ qua đủ bốn cổng CI (§13); [PR #215](https://github.com/paseo-cafe/paseo-cafe/pull/215) vẫn **OPEN**, chờ maintainer merge (kiểm 2026-09-25) |
+| Status | **Active** — paseo-bm đã được liệt kê: [PR #215](https://github.com/paseo-cafe/paseo-cafe/pull/215) merged 2026-09-25. Caveat viết lại cho 0.4 trong [PR #284](https://github.com/paseo-cafe/paseo-cafe/pull/284) (mở 2026-09-28, mọi check xanh, chờ maintainer merge) |
 | Owner | hieu.nt10 |
 | Created | 2026-09-23 |
 | Yêu cầu | `req-20260923T063441Z`: "Bây giờ tôi muốn đăng ký plugin của mình lên trang này : https://paseo.cafe/submit , tôi cần làm gì và bạn có thể hỗ trợ tôi làm được những gì" |
@@ -19,7 +19,7 @@
 
 ## 2. Nội dung file đang nộp
 
-Đọc lại từ nhánh `hieunt286:add-paseo-bm` ngày 2026-09-25 (sau commit `d2213653` của lần phát hành `0.3.0`):
+Nhánh `hieunt286:paseo-bm-caveats-040` ([PR #284](https://github.com/paseo-cafe/paseo-cafe/pull/284), 2026-09-28), chỉ đổi `caveats` so với bản đã merge ở PR #215:
 
 ```json
 {
@@ -29,22 +29,25 @@
   "categories": ["orchestration", "productivity"],
   "platforms": ["macos", "linux"],
   "caveats": [
-    "Install with `npx paseo-bm`: it also registers the three bm-* agent roles the plugin needs. There is no other supported install.",
-    "Installed straight from this page the screens load, but the three bm-* agent roles are missing, so the Manager cannot create a Worker.",
-    "Stable 0.3.0 on npm: commands, flags, exit codes and the --json shape are a public contract and change only with a new version.",
-    "Requires Paseo 0.8.0+, Node 22+, the paseo CLI on PATH, macOS or Linux (no Windows), plus the br and bv Beads CLIs.",
-    "Enabling Paseo's agent tools grants them to every agent on the machine, not only paseo-bm's roles.",
+    "Install from this page or with `paseo plugin add npm:paseo-bm-plugin`; the three bm-* agent roles are created the first time you open it.",
+    "Requires Paseo 0.9.0+ and the br and bv Beads CLIs (Setup offers to install them). macOS or Linux only, no Windows.",
+    "Setup asks before each grant: Paseo agent tools (given to every agent on the machine) and skills via a third-party CLI.",
+    "Removing the plugin without Setup → Remove paseo-bm's settings leaves the bm-* config and the agent-tools switch behind.",
+    "Installed with npx paseo-bm before? Installing here fails (\"already configured\") until you run `npx paseo-bm@0.4.0` once.",
     "The Worker runs without permission prompts; its limits are role instructions only, so review git diff before you commit."
   ],
   "submittedBy": "hieunt286"
 }
 ```
 
-`registryEntrySchema` khai `.strict()`: chỉ nhận đúng các trường `repo`, `path`, `package`, `categories`, `platforms`, `caveats`, `submittedBy`; thêm trường lạ là hỏng. `caveats` tối đa 6 câu, mỗi câu tối đa 140 ký tự — bản trên dài lần lượt 128, 134, 127, 115, 98, 120.
+Owner duyệt nội dung ngày 2026-09-28. Không còn câu nào nêu số phiên bản của sản phẩm (chỉ Paseo 0.9.0+ và lệnh chuyển đổi `npx paseo-bm@0.4.0`, cả hai cố định). CI của PR #284: `Registry admission` với `FETCH/VALIDATE/TARGETS/SCAN/PUBLISH_OUTCOME` đều `success`; báo cáo quét của họ: `paseo-bm-plugin` 0.4.1 `passed`, 0 blocking, 0 advisory. Trước khi đẩy: `bunx biome check --error-on-warnings` sạch và `validate-registry.ts` đạt trên máy; file được ghi bằng một script dừng khi lỗi và kiểm nội dung không rỗng (§13).
+
+Bản 0.3.x (PR #215) nói `npx paseo-bm` là đường cài duy nhất và cài từ trang này thiếu vai trò; từ 0.4.0 cả hai không còn đúng (ADR-012).
+
+`registryEntrySchema` khai `.strict()`: chỉ nhận đúng các trường `repo`, `path`, `package`, `categories`, `platforms`, `caveats`, `submittedBy`; thêm trường lạ là hỏng. `caveats` tối đa 6 câu, mỗi câu tối đa 140 ký tự — bản trên dài lần lượt 137, 115, 119, 120, 121, 120.
 
 `categories` là chuỗi tự do (`z.array(z.string().min(1))`), nhưng `platforms` là **enum** (`z.array(z.enum(PLATFORMS))`): giá trị `macos` đã được xác nhận bằng một hồ sơ thật đang nằm trong registry (`registry/launchd-jobs.json`), nên viết thường như trên.
 
-Hai caveat đầu nói thẳng rủi ro ở §7: chỉ `npx paseo-bm` mới cài đủ, còn lệnh trang tự sinh nạp được màn hình nhưng thiếu ba vai trò. Caveat số 3 nhắc số hiệu phiên bản, nên phải sửa khi loại phiên bản đổi (lần gần nhất: prerelease → `0.3.0` ổn định).
 
 ## 3. CI của họ kiểm gì
 
@@ -214,3 +217,5 @@ Việc còn lại sau khi merge, không thuộc phase này: mở trang listing x
 ---
 
 *Revision 2026-09-25: Status, quyết định còn hiệu lực, §2 (entry thật trên nhánh PR sau khi sửa caveat cho `0.3.0`), §6, §8 và bẫy ở §13 cập nhật theo trạng thái hiện tại. Các mục §4, §10 giữ lại vì ghi lý do của cấu hình đang dùng.*
+
+*Revision 2026-09-28: Status (PR #215 đã merge; PR #284 viết lại caveat cho 0.4) và §2 (nội dung mới, độ dài, kết quả CI). Đoạn giải thích hai caveat cũ về `npx paseo-bm` được bỏ vì không còn đúng.*
