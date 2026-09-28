@@ -4,12 +4,12 @@ Read this before touching anything in this repository.
 
 ## What this project is
 
-`paseo-bm` (BM = Beads Management) is published to npm and installed with `npx paseo-bm`. It does two things:
+`paseo-bm` (BM = Beads Management) is a Paseo plugin, published to npm as `paseo-bm-plugin` and listed on [paseo.cafe](https://paseo.cafe); users install it from the listing or with `paseo plugin add npm:paseo-bm-plugin` (Paseo 0.9+). It does two things:
 
-1. **Installs a Paseo plugin.** Copies a plugin payload into a stable install home, registers it with the Paseo daemon, registers three agent roles, and can delegate agent-skill installation to the third-party `skills` CLI.
+1. **Sets itself up.** On first use it creates its three agent roles; its Setup screen asks before each step that grants something (Paseo's agent tools for every agent, skills through the third-party `skills` CLI, `br`/`bv`) and removes its own settings on request. The old `npx paseo-bm` installer is retired: its last version, 0.4.0, only moves a 0.3.x directory install to the npm plugin.
 2. **Provides an agent orchestration loop.** After install, the user chats with **Beads Manager** (an agent). Manager answers what it can read itself and hands every change to a **Beads Worker** (a peer agent in the same workspace). Worker sizes the request and uses only the process that size needs: a small change is done and proved directly; larger work gets beads, documents where they are needed, and a **Reviewer** sub-agent. The user can chat directly with Worker, and only the user may archive or delete an agent. The behaviour itself lives in `plugin/roles/*.md`.
 
-**Current state:** shipped on npm (0.3.x); the paseo.cafe listing PR is open, so there is no listing page yet. The work now is maintenance and new features on a running product.
+**Current state:** shipped on npm (0.4.x) and listed on paseo.cafe. The work now is maintenance and new features on a running product.
 
 ## Language rule
 
@@ -32,15 +32,19 @@ Read this before touching anything in this repository.
 
 **Hard packaging rule:** no `preinstall` / `postinstall` scripts — downloading the package must never modify the user's machine. `prepack` is fine because it runs on the publisher's machine.
 
-### Two packages, one release
+### One published package (two until 0.4.0)
 
-Every release publishes **two npm packages at the same version**, from the same commit and the
-same `release.yml` run:
+Since 0.4.1 a release publishes **one npm package, `paseo-bm-plugin`**, from `release.yml`:
 
-| Package | What it is | Root of its tarball |
-|---|---|---|
-| `paseo-bm` | the migration command you run with `npx`, once | `dist/` only — no `plugin/`, no manifest |
-| `paseo-bm-plugin` | the product: the payload in `plugin/` | **a loadable plugin**: `paseo-plugin.json` + `index.client.tsx` + `index.server.ts` |
+| Package | What it is | Root of its tarball | Published |
+|---|---|---|---|
+| `paseo-bm-plugin` | the product: the payload in `plugin/` | **a loadable plugin**: `paseo-plugin.json` + `index.client.tsx` + `index.server.ts` | every release |
+| `paseo-bm` | the migration command you run with `npx`, once | `dist/` only — no `plugin/`, no manifest | last at **0.4.0**; deprecated on npm; the root `package.json` is `"private": true` |
+
+Up to 0.4.0 both packages were published at the same version from the same run. The root
+`package.json` is still the one hand-edited version source and the build still runs from it; it
+is simply never published. If the migration command ever needs a fix, the
+[release runbook](docs/operations/paseo-bm-release-runbook.md) §7 says how to publish it once more.
 
 This exists because [paseo.cafe](https://paseo.cafe) lists paseo-bm, and its security scan
 demands a Paseo runtime entry at the plugin root — reading the npm tarball root whatever the
@@ -59,7 +63,7 @@ What breaks the listing, so do not do it:
   match; the build writes the last two and a test fails when they disagree. Their validator
   compares the version in git against the one it resolves on npm.
 - **Renaming `release.yml`.** npm's trusted-publisher entries for *both* packages point at this
-  workflow by file name.
+  workflow by file name (`paseo-bm`'s is kept for a possible fix of the migration command).
 - **Forgetting the dist-tag.** Their `resolveNpmPackage` reads `paseo-bm-plugin@latest`. Since
   0.3.0 `release.yml` sets the tag from the version — prerelease to `next`, stable to `latest` —
   so a stable release needs no manual step. Pointing `next` at a stable version, or moving either
@@ -112,7 +116,7 @@ cannot load. A test asserts the repository has exactly one manifest.
 
 Rigor follows the risk of the change, never its size or the habit of the last change. Pick
 the lightest lane that fits, say which one in a line, and move up when you learn more.
-The product is shipped (0.3.x); this repository is in maintenance, not in a build-out phase.
+The product is shipped (0.4.x); this repository is in maintenance, not in a build-out phase.
 
 | Lane | When | What it takes |
 |---|---|---|
@@ -125,7 +129,7 @@ The product is shipped (0.3.x); this repository is in maintenance, not in a buil
 - changes a contract others consume: `npx paseo-bm` flags, exit and error codes, `--json` output, `install.json` / trace-store / any on-disk schema, the `BM-*` block formats and notices, plugin RPC contracts in `plugin/shared/contracts.ts` read across versions;
 - writes to the user's Paseo configuration, agent skill directories or anything outside the install home;
 - touches credentials, permissions, agent modes or anything the safety boundaries below guard;
-- touches release, publishing or the two-package rule;
+- touches release, publishing or the one-published-package rule;
 - adds a dependency or changes the architecture (overturns or adds an ADR);
 - cannot be undone.
 

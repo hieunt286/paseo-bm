@@ -1,14 +1,19 @@
 name: Release
 
-# IMPORTANT: npm's trusted publisher configuration for `paseo-bm` refers to this
-# workflow by its file name (`release.yml`). Renaming or moving this file breaks
-# publishing until the trusted publisher entry on npmjs.com is updated too.
+# IMPORTANT: npm's trusted publisher configuration for `paseo-bm-plugin` refers
+# to this workflow by its file name (`release.yml`), and so does the one for
+# `paseo-bm`, kept in case the migration command ever needs a fix. Renaming or
+# moving this file breaks publishing until the entries on npmjs.com are updated.
+#
+# Since 0.4.1 this workflow publishes only `paseo-bm-plugin`, the product. The
+# `paseo-bm` command stopped at 0.4.0 (ADR-012) and is deprecated on npm; the
+# release runbook says how to publish it again for one release if ever needed.
 #
 # Authentication is OpenID Connect (trusted publishing): there is no NPM_TOKEN
 # and no other secret in this workflow, by design.
 #
-# Scope today (bead bm-wp-101-b51.4): verify the tag, re-run every check, and
-# stop at `npm publish --dry-run`. The real publish step is added by WP-118,
+# A manual run (workflow_dispatch) is a rehearsal: it re-runs every check and
+# stops at `npm publish --dry-run`. Only a published GitHub Release publishes,
 # because a publish cannot be undone after 72 hours and needs a human approval.
 
 on:
@@ -84,15 +89,18 @@ jobs:
         run: npm run smoke:packed
 
       # Cheap guard for the packaging rule in AGENTS.md: downloading the package
-      # must never run code on the installing machine.
+      # must never run code on the installing machine. plugin/package.json is the
+      # published one; the root one is checked too, as it always was.
       - name: Assert no npm install lifecycle scripts
         run: |
           node -e '
-            const s = require("./package.json").scripts ?? {};
-            const forbidden = ["preinstall", "install", "postinstall"].filter((k) => k in s);
-            if (forbidden.length > 0) {
-              console.error("Forbidden lifecycle scripts present: " + forbidden.join(", "));
-              process.exit(1);
+            for (const file of ["./package.json", "./plugin/package.json"]) {
+              const s = require(file).scripts ?? {};
+              const forbidden = ["preinstall", "install", "postinstall"].filter((k) => k in s);
+              if (forbidden.length > 0) {
+                console.error(file + ": forbidden lifecycle scripts present: " + forbidden.join(", "));
+                process.exit(1);
+              }
             }
             console.log("ok: no install lifecycle scripts");
           '
@@ -149,8 +157,8 @@ jobs:
               process.exit(1);
             }
             // The dist-tag follows the kind of version: a prerelease goes to
-            // `next`, a stable one to `latest` — the tag that `npx paseo-bm` and
-            // the paseo.cafe scanner both read. Publishing to `latest` happens
+            // `next`, a stable one to `latest` — the tag that a plain
+            // `paseo plugin update` and the paseo.cafe scanner both read. Publishing to `latest` happens
             // over OIDC in this same job, which removes the manual
             // `npm dist-tag add` step (that one needs a one-time password).
             // A stable version is NOT also pushed to `next`: that would need
@@ -186,10 +194,9 @@ jobs:
         run: npm run smoke:packed
 
       # Everything that can be checked is checked before anything is published:
-      # once paseo-bm is on npm it cannot be taken back, so a payload package
-      # that would fail must fail here, not between the two publishes (ADR-009,
-      # design delta 20260923 §5).
-      - name: Assert both packages agree
+      # a version on npm cannot be taken back. The plugin package must carry the
+      # name paseo.cafe lists and the version of the tag (ADR-009, ADR-012).
+      - name: Assert the plugin version
         env:
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
@@ -208,14 +215,6 @@ jobs:
             console.log(`payload package ${payload.name}@${payload.version}`);
           ' "${VERSION}"
 
-      - name: Publish (dry-run)
-        env:
-          VERSION: ${{ steps.meta.outputs.version }}
-          DIST_TAG: ${{ steps.meta.outputs.dist_tag }}
-        run: |
-          echo "Dry-run publish of paseo-bm@${VERSION} with dist-tag ${DIST_TAG}"
-          npm publish --dry-run --provenance --access public --tag "${DIST_TAG}"
-
       - name: Publish payload (dry-run)
         working-directory: plugin
         env:
@@ -225,24 +224,12 @@ jobs:
           echo "Dry-run publish of paseo-bm-plugin@${VERSION} with dist-tag ${DIST_TAG}"
           npm publish --dry-run --provenance --access public --tag "${DIST_TAG}"
 
-      # The real publish (bead bm-wp-118-4s4.2) runs only when a human publishes a
-      # GitHub Release; a manual workflow run stays a dry-run. It cannot be undone
-      # after 72 hours, so the Release itself is the approval point. The dist-tag
-      # is resolved above from the kind of version (prerelease -> `next`, stable ->
-      # `latest`), and the GitHub Release's own prerelease flag must agree with it.
-      - name: Publish to npm
-        if: github.event_name == 'release'
-        env:
-          VERSION: ${{ steps.meta.outputs.version }}
-          DIST_TAG: ${{ steps.meta.outputs.dist_tag }}
-        run: |
-          echo "Publishing paseo-bm@${VERSION} with dist-tag ${DIST_TAG}"
-          npm publish --provenance --access public --tag "${DIST_TAG}"
-
-      # Second, and only after the installer package is safely out: the payload,
-      # whose tarball root is the loadable plugin that paseo.cafe scans. Its
-      # trusted-publisher entry points at this same workflow file, so renaming
-      # this file breaks publishing for both packages.
+      # The real publish runs only when a human publishes a GitHub Release; a
+      # manual workflow run stays a dry-run. It cannot be undone after 72 hours,
+      # so the Release itself is the approval point. The dist-tag is resolved
+      # above from the kind of version (prerelease -> `next`, stable -> `latest`),
+      # and the GitHub Release's own prerelease flag must agree with it. The
+      # tarball root is the loadable plugin that paseo.cafe scans.
       - name: Publish payload to npm
         if: github.event_name == 'release'
         working-directory: plugin
@@ -253,34 +240,13 @@ jobs:
           echo "Publishing paseo-bm-plugin@${VERSION} with dist-tag ${DIST_TAG}"
           npm publish --provenance --access public --tag "${DIST_TAG}"
 
-      - name: Verify published version
+      - name: Verify published payload
         if: github.event_name == 'release'
         env:
           VERSION: ${{ steps.meta.outputs.version }}
           DIST_TAG: ${{ steps.meta.outputs.dist_tag }}
         # npm answers "Your package is being processed and may take a few minutes
         # to become available", so a short wait fails a healthy publish (bm-90a).
-        run: |
-          last=""
-          for attempt in $(seq 1 20); do
-            published=$(npm view "paseo-bm@${DIST_TAG}" version 2>/dev/null || true)
-            if [ "$published" = "$VERSION" ]; then
-              echo "npm dist-tag ${DIST_TAG} -> ${published} (after $((attempt * 15))s)"
-              exit 0
-            fi
-            last="$published"
-            sleep 15
-          done
-          echo "paseo-bm@${DIST_TAG} still resolves to '${last}' after 5 minutes, expected ${VERSION}" >&2
-          exit 1
-
-      - name: Verify published payload
-        if: github.event_name == 'release'
-        env:
-          VERSION: ${{ steps.meta.outputs.version }}
-          DIST_TAG: ${{ steps.meta.outputs.dist_tag }}
-        # Same wait as above: npm answers "being processed" for a while after a
-        # healthy publish.
         run: |
           last=""
           for attempt in $(seq 1 20); do
