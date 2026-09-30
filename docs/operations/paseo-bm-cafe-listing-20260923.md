@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | ID | `cafe-listing-20260923` |
-| Status | **Active** — paseo-bm is listed: [PR #215](https://github.com/paseo-cafe/paseo-cafe/pull/215) merged 2026-09-25. Caveats rewritten for 0.4 in [PR #284](https://github.com/paseo-cafe/paseo-cafe/pull/284) (opened 2026-09-28, every check green, waiting for a maintainer to merge) |
+| Status | **Active** — paseo-bm is listed: [PR #215](https://github.com/paseo-cafe/paseo-cafe/pull/215) merged 2026-09-25. Caveats rewritten for 0.4 in [PR #284](https://github.com/paseo-cafe/paseo-cafe/pull/284), merged 2026-09-28 |
 | Owner | hieu.nt10 |
 | Created | 2026-09-23 |
 | Request | `req-20260923T063441Z`: "Now I want to register my plugin on this site : https://paseo.cafe/submit , what do I need to do and what can you help me do" |
@@ -219,3 +219,5 @@ What remains after the merge, not part of this phase: open the listing page and 
 *Revision 2026-09-25: Status, the decisions still in force, §2 (the real entry on the PR branch after fixing the caveat for `0.3.0`), §6, §8 and the trap in §13 updated to the current state. §4 and §10 are kept because they record the reasons for the configuration in use.*
 
 *Revision 2026-09-28: Status (PR #215 merged; PR #284 rewrites the caveats for 0.4) and §2 (new content, lengths, CI result). The paragraph explaining the two old caveats about `npx paseo-bm` was removed because it is no longer true.*
+
+*Revision 2026-09-30: Status — PR #284 merged 2026-09-28.*

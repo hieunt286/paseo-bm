@@ -2,13 +2,13 @@
 
 | Field | Value |
 |---|---|
-| Status | Active |
+| Status | **Completed** 2026-09-30 — every exit condition met; the last, the paseo.cafe caveats (PR #284), merged 2026-09-28 |
 | Plan-ready | PASS — 2026-09-25 — hieu.nt10 (independent review; D1 settled: keep `ui/setup-state.json` when deleting data) |
 | Owner | hieu.nt10 |
 | Phase | **Phase 0.4.0 — Single source** |
-| Decision | [ADR-012](../adr/ADR-012-plugin-is-the-product.md) (Accepted 2026-09-25) |
-| Requirements | [PRD](../product/paseo-bm-prd.md) REQ-001 → REQ-015, REQ-027, REQ-031, REQ-070 (0.4.0 version, currently marked *Not implemented yet*) |
-| Technical Design | [paseo-bm.md](../design/paseo-bm.md) §3, §4, §5, §6, §7.3, §7.12, §7.13, §9, §11, §12, §13 · [paseo-bm-dashboard.md](../design/paseo-bm-dashboard.md) §11.3 |
+| Decision | [ADR-012](../../adr/ADR-012-plugin-is-the-product.md) (Accepted 2026-09-25) |
+| Requirements | [PRD](../../product/paseo-bm-prd.md) REQ-001 → REQ-015, REQ-027, REQ-031, REQ-070 (0.4.0 version, currently marked *Not implemented yet*) |
+| Technical Design | [paseo-bm.md](../../design/paseo-bm.md) §3, §4, §5, §6, §7.3, §7.12, §7.13, §9, §11, §12, §13 · [paseo-bm-dashboard.md](../../design/paseo-bm-dashboard.md) §11.3 |
 | Background analysis | Comparison table of the installer's 27 jobs (2026-09-25), summarised in the Context section of ADR-012 |
 
 ## 0. Routing Decision
@@ -39,7 +39,7 @@
 4. `paseo-bm-plugin@0.4.0` and `paseo-bm@0.4.0` on `latest`, with provenance; `paseo-bm` deprecated; the paseo.cafe entry has the new caveat; from then on `release.yml` publishes only `paseo-bm-plugin`.
 5. `npm run verify` green; Q-044 → Q-047 have answers recorded in design §13.
 
-**Default checkpoint posture:** every work package before WP-407 only changes code and documentation in the repository, undone with git. The points of no return are the npm publishes (WP-407 prerelease to `next`, WP-408 stable release to `latest`); the approval point is the GitHub Release the owner agrees to, per the [release runbook](../operations/paseo-bm-release-runbook.md). The way back for users is a patch release ≥ 0.4.0; downgrading to 0.3.x is **not** a way back, because the 0.3.x plugin does not trust the data folder when `install.json` is `schemaVersion: 2` or absent (design §12). Directory-install users whose migration fell back (`fell-back`) still run 0.3.1 as before. **R3 decision** (design §12): risk owner hieu.nt10; selective rehearsal — a prerelease on `next` plus an acceptance run on a real daemon (WP-407) before anything goes to `latest`.
+**Default checkpoint posture:** every work package before WP-407 only changes code and documentation in the repository, undone with git. The points of no return are the npm publishes (WP-407 prerelease to `next`, WP-408 stable release to `latest`); the approval point is the GitHub Release the owner agrees to, per the [release runbook](../../operations/paseo-bm-release-runbook.md). The way back for users is a patch release ≥ 0.4.0; downgrading to 0.3.x is **not** a way back, because the 0.3.x plugin does not trust the data folder when `install.json` is `schemaVersion: 2` or absent (design §12). Directory-install users whose migration fell back (`fell-back`) still run 0.3.1 as before. **R3 decision** (design §12): risk owner hieu.nt10; selective rehearsal — a prerelease on `next` plus an acceptance run on a real daemon (WP-407) before anything goes to `latest`.
 
 ## 2. Work packages
 
@@ -162,6 +162,7 @@ No cycles.
 
 | Date | Who | Change |
 |---|---|---|
+| 2026-09-30 | Claude | **Completed**: epic `bm-single-source-040-otjw` closed on evidence (install run 2026-09-26, release run 2026-09-28, PR #284 merged 2026-09-28); moved to the archive |
 | 2026-09-25 | hieu.nt10 | First version |
 | 2026-09-25 | hieu.nt10 (reviewed by Claude) | `reviewing-plan`: corrected the way back (downgrading to 0.3.x cannot read the data — design §12) and recorded the R3 decision; MVP-Lock adds REQ-035 (b), REQ-062 (c)(e), REQ-063 (a)(f), out of phase adds deleting `src/`; WP-402 adds dashboard §11.2; WP-403 adds REQ-008 (e), REQ-031 (c), REQ-063 (f), REQ-070 (g) and negative tests; WP-405 takes on the manifest check of `smoke:packed`; WP-406 adds the case of a missing `install.json`; WP-407 adds the mandatory security review before the prerelease, the acceptance items of design §11 and the fix loop when Q-047 differs from the design; WP-408 adds `private: true`; Q-047 adds the shape of `plugin ls`; the test strategy adds the negative layer |
 | 2026-09-25 | hieu.nt10 | Settled D1 (keep `ui/setup-state.json` when deleting data, WP-404) and the Worker's per-provider skills line (dashboard §11.3); WP-406 updates the two-package table of `AGENTS.md`; gate `plan-ready-for-beads` PASS, plan Active |

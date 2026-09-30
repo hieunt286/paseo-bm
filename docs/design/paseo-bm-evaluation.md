@@ -59,6 +59,7 @@ Every metric states its source and whether the field replay can compute it or on
 | A-9 | Suite outcome: per scenario, correct and boundary-clean (§6.4) | scorecard | suite only |
 | A-10 | Traceability: complete chains / 30 sampled outputs (about 10 beads, 10 changed files, 10 decisions from finished requests of the phase's field window); a link that does not apply counts as complete when the chain states why, a missing link that should exist does not (autonomy design §E.4; built in Phase 5) | links (derived) | field |
 | A-11 | Median time from the first turn of a request to its `finished` report, minus the owner-wait intervals of its questions | records | both |
+| A-12 | Coordination interventions that reached their expected outcome, per kind (`answer`, `unblock`, `correct`, `stop`, `compact`, `handoff`, `advice`): `met` / (`met` + `missed`) over the intervention log's checked entries; `unknown` entries are counted apart (autonomy design §G.3; built in Phase 2) | `orchestrator/interventions.json` | field |
 
 Also reported (context for the targets): recommended-option agreement (answers equal to the `(recommended)` option / answered), owner wait (median, p90), rounds blocked per request, tier mix, review calls and blocking findings per batch, reports with format problems, cancelled turns, failed turns, turns by role, requests by the UTC day of their first activity.
 
@@ -162,6 +163,7 @@ Provider logins come from the real HOME (as in the 0.4.0 kit); nothing is writte
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-09-30 | hieu.nt10 (drafted by Claude) | §4: A-12 added (ADR-021, autonomy design §G.3); A-8's Phase 3 target on the heaviest 20 % of requests is read from the per-request Worker tokens the replay already reports, with the context figures of §G.2 |
 | 2026-09-30 | Claude (owner approved) | §4: a Worker's question the Orchestrator answered with `bm_decide` (change-004) is answered by agents for A-1, is its wake's action for A-7, and its grant is not the owner's for A-6 |
 | 2026-09-30 | Claude (owner's delegation) | §4: A-4 and A-10 defined (autonomy design §B.9, §E.4; change-003) |
 | 2026-09-29 | Claude (owner's delegation) | Phase 1 sources (bead `bm-autonomy-phase1b-dbdv.8`, from the live check's findings 1–2): A-1, A-2 (c) and A-6 read the decision store `decisions/`; A-7 reads the new wake record `orchestrator/wakes.json` (the trace store records no Orchestrator turn and the notice queue is in memory, so a wake cannot be derived from what was stored) — acted on within the wake's own turn; the replay, the suite's `loadRunData` and Insights read both. 0.4.1 inputs give the same figures |

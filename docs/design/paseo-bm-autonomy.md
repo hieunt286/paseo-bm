@@ -7,7 +7,7 @@
 | Owner | hieu.nt10 (GitHub: hieunt286) |
 | Requirements source | [Calibrated autonomy PRD](../product/paseo-bm-autonomy-prd.md) (Accepted 2026-09-29): REQ-110 → REQ-172 |
 | Routing decision | [PRD §0](../product/paseo-bm-autonomy-prd.md#0-routing-decision) |
-| ADRs | [ADR-017](../adr/ADR-017-decisions-are-stored-objects.md) (Part A) · [ADR-018](../adr/ADR-018-calibrated-autonomy-per-class.md) (Part B) · [ADR-019](../adr/ADR-019-action-boundary-permission-events.md) (Part D, decided by its spike) — ADR-017 and ADR-018 Accepted, ADR-019 Proposed until its spike |
+| ADRs | [ADR-017](../adr/ADR-017-decisions-are-stored-objects.md) (Part A) · [ADR-018](../adr/ADR-018-calibrated-autonomy-per-class.md) (Part B) · [ADR-019](../adr/ADR-019-action-boundary-permission-events.md) (Part D, decided by its spike) · [ADR-021](../adr/ADR-021-orchestrator-measured-coordination-controller.md) (Part G) — ADR-017 and ADR-018 Accepted, ADR-019 Proposed until its spike |
 | Related designs | [Evaluation](./paseo-bm-evaluation.md) (Phase 0, Active; metrics every phase exit uses) · [Experience concept](./paseo-bm-experience-concept.md) (Draft; its decisions move into Part A §A.12) · [Base design](./paseo-bm.md), [Dashboard design](./paseo-bm-dashboard.md), [Orchestrator design](./paseo-bm-orchestrator.md) — each section this design replaces is named in §A.14 and edited when its phase lands |
 | Reference environment | Paseo 0.9.2, `@getpaseo/plugin` 0.8.0 typings, Node ≥ 22 |
 
@@ -313,7 +313,7 @@ Settled by Claude under the owner's delegation while polishing the Phase 2 beads
 - **Precedents.** RPCs `precedents.list { workspaceId? }`, `precedents.save { decisionId?, scope, subject?, text?, expiresInDays? }` and `precedents.end { id }`. A decision without a `subject` cannot be saved. The resolving answer is the precedent's text as the owner's words, or the option whose label equals it. "Owner-fixed" means the four hard-owner classes: a precedent is the owner's own standing answer, so it also resolves a decision in an `owner` cell. Injection resolves the workspace from `config.cwd`; when it cannot, only global precedents are injected.
 - **Digest and override.** The Inbox's last-opened time is kept in `<data>/inbox/seen.json`, with the alerts store's file rules. An override is a new owner decision `r:<uuid>` with `supersedes: <delegated id>`, open until the owner answers it. The delegated answer already delivered is not recalled; the corrected answer follows it.
 - **A-4 and A-5.** Computed per delegated class in `eval-metrics.ts` from the overrides and the ledger's reversals of decisions answered `by: policy | precedent`. The owner's own reversal rate is the reference for A-5.
-- **Retirement.** `bm_assessment` goes with the additional instructions, together with `assessment.ts`, `shared/bm-assessment.ts`, the assessments kept by the Orchestrator's store and its "Assessing a workflow" section. PRD Appendix B replaces it by precedents and replay findings. Every runtime rule flag goes except `review.over-budget`, which feeds the stall pass.
+- **Retirement.** `bm_assessment` goes with the additional instructions, together with `assessment.ts`, `shared/bm-assessment.ts`, the assessments kept by the Orchestrator's store and its "Assessing a workflow" section. PRD Appendix B replaces it by precedents and replay findings. Every runtime rule flag goes except `review.over-budget`, which feeds the stall pass. Proactive advice (§G.4) replaces the assessment.
 
 ---
 
@@ -367,6 +367,189 @@ Settled by Claude under the owner's delegation while polishing the Phase 2 beads
 
 ---
 
+## Part G — Coordination control: measurement and advice (Phase 2), compaction and handoff (Phase 3) (ADR-021)
+
+The owner's decisions of 2026-09-30 (ADR-021) and the field replay of the same day behind them: the Worker spends 93 % of the tokens; the heaviest 10 % of requests use 50 % of the Worker's; requests stop 3.2 times each to ask the owner; reviews find 1.35 blocking findings per batch. G.1–G.4 are Phase 2 (REQ-126–128), G.5–G.8 Phase 3 (REQ-134–136).
+
+### G.1 The loop and the ladder
+
+**The loop.**
+- Code observes (trace records, reports, decisions, alerts, tokens) and detects (a threshold or an event). Only then is the Orchestrator woken (§A.8's rule: only a judgement wakes it).
+- The Orchestrator diagnoses with its bounded read tools and picks the lightest intervention that will do.
+- Code records the intervention with its expected outcome (G.3) and checks it after a window.
+
+**The ladder**, lightest first:
+
+| # | Intervention | How |
+|---|---|---|
+| 1 | Advise the Manager | a note, no command |
+| 2 | Correct the Worker | a command, the Manager copied |
+| 3 | Change the structure: compaction, handoff, a re-plan | a handoff always goes through the Manager |
+| 4 | Stop | `interrupt` on a danger line |
+| 5 | The owner | a decision |
+
+**Who deals with the owner.** The Manager stays the owner's contact and the keeper of the request's context (PRD Q-100). The Orchestrator reaches the owner only through decisions and its own chat.
+
+**What the Orchestrator never does:**
+- skip or shorten a review or a check;
+- waive a blocking finding;
+- change what the owner asked;
+- create, archive or delete an agent;
+- read whole transcripts routinely.
+
+### G.2 Measurement (Phase 2, REQ-126)
+
+**Recorded.**
+- The trace record's `usage` keeps, additively, `contextUsed` and `contextMax` when the provider reports `contextWindowUsedTokens` / `contextWindowMaxTokens`. **(verify)** which providers report them, on the isolated daemon; the Claude Manager observed on 2026-09-30 reported only tokens and cost.
+- A timeline `compaction` item becomes evidence `{ kind: "compaction", trigger, preTokens }` (additive, trace `v` unchanged).
+
+**Derived** (in `eval-metrics.ts`, read by the replay, Insights and Work):
+- tokens read per turn (input + cached);
+- tokens per request by role, and per agent over its life;
+- a **context estimate** per turn: `contextUsed` when reported, else the turn's tokens read ÷ (the turn's tool calls + 1), labelled an estimate.
+
+**Shown.**
+- Work → request Details: tokens by role, each agent's context trend.
+- Work → Agents: the same, per agent.
+- Insights → Cost: the distribution per request, and the heaviest requests (numbers only).
+
+**Replay candidates.** For each request and agent, the first turn where the default thresholds of G.7 would have triggered a compaction or a handoff, and an estimated saving: the tokens read after that turn, minus the same number of model calls re-reading a brief-sized context. Always labelled an estimate. The Phase 3 defaults are set from these figures.
+
+### G.3 The intervention log and outcomes (Phase 2, REQ-127)
+
+**The store.** `<data>/orchestrator/interventions.json`, with the store rules of §A.8 (0600, atomic, symlinks refused, the newest 2,000 kept). Ids, times and enums only. Each entry: `{ id, kind, workspaceId, requestId, targetAgentId, trigger, expected, windowMs, at, outcome: pending | met | missed | unknown, checkedAt }`.
+
+**Kinds**, each with its expected outcome and window:
+
+| Kind | Recorded from | Met when | Window |
+|---|---|---|---|
+| `answer` | `bm_decide` | the Worker resumes | 10 min |
+| `unblock` | a command on a `request.stalled` event | the stall alert clears | 15 min |
+| `correct` | a command on a `worker.signal` | the signal clears, or the next report's checks pass | the next report |
+| `stop` | an interrupt | the turn ends | 2 min |
+| `compact` | Phase 3 | tokens per turn over the next three turns ≤ 60 % of the three before | three turns |
+| `handoff` | Phase 3 | the successor's tokens per turn ≤ 50 % of the predecessor's last three, and the successor reports progress | 60 min |
+| `advice` | G.4 | the owner answered the advice decision | 7 days |
+
+**The check.** A pass on `agent.turn_ended`, throttled like the outdated-agents pass, checks pending entries against the stores.
+
+**Where it shows.**
+- A-12 per kind appears in Insights.
+- The Inbox's Decided for you digest (bead `t9lm.15`) also lists the interventions since the owner last looked.
+- A compaction or handoff kind below A-12's target is switched off until it recovers, with an Inbox alert. Another kind below it becomes an advice finding (G.4).
+
+### G.4 Proactive advice (Phase 2, REQ-128; replaces the workflow assessment, §B.9)
+
+**The trigger.**
+- Each `finished` report the collector records counts toward its project.
+- When the count since the last advice reaches `advice.everyFinished` (Settings, G.7; default 5; 0 = off), the event bus publishes `advice.due` for that project. It is a judgement wake.
+- The owner can also ask in the Orchestrator's chat at any time.
+
+**The tool.** `bm_findings { workspaceId }` is bounded (about 4,000 characters) and returns the project's findings, each with its figures:
+- repeated question subjects without a precedent;
+- blocked rounds per request;
+- review rounds and blocking findings per tier;
+- stall reasons;
+- the heaviest requests and the compaction or handoff candidates of G.2;
+- intervention kinds below target.
+
+**The action.** For each finding worth acting on, the Orchestrator asks with `bm_ask_owner`, and one option carries a **prepared change** the plugin applies on the owner's answer:
+- `precedent.save`
+- `autonomy.set` (a delegable cell)
+- `coordination.set` (a threshold or cadence of G.7)
+- `review.budget` (Phase 3)
+
+With no finding worth acting on, it writes a note; the wake still counts as acted on.
+
+**Never** text appended to an agent's instructions (the retired assessment).
+
+### G.5 Compaction (Phase 3, REQ-134)
+
+**Verify first** (the phase's first work, isolated daemon, for Claude and Codex, and OpenCode when available):
+- whether a `/compact <focus>` user message sent through the SDK starts a manual compaction (a timeline `compaction` item with `trigger: manual`);
+- whether the focus is honoured, and what `preTokens`, cost and time it takes;
+- how the collector sees the message: an SDK send carries `clientMessageId`, so it must be classified as the plugin's through the plugin's send log, never as the owner's.
+
+A provider that cannot compact is recorded here as falling back to a handoff (Worker) or to nothing (Manager).
+
+**The tool.** `bm_compact { agentId, reason }` (Orchestrator). The target is a Manager or a Worker of a project, never a Reviewer (short-lived) or the Orchestrator (it replaces itself). It is refused, writing nothing, when:
+- compaction is off;
+- the target is not a Manager or a Worker;
+- the target is below its threshold (G.7);
+- `compact.maxPerAgent` is reached. For a Worker, a handoff is suggested instead.
+
+**The sequence.**
+1. Wait for the target's next idle moment after a safe point: a Worker after a report; a Manager with no notice pending. Never inside a running turn (the notice queue).
+2. The plugin sends `/compact` with a focus from a fixed template: keep the request and the owner's words, the decisions taken, the plan and bead state, open review findings and files changed; drop tool output.
+3. It waits for the `compaction` item to complete.
+4. It sends a **state brief** (`BM-STATE`, a plugin notice) built from the stores, so what matters is restored from artifacts rather than from the model's summary alone.
+
+### G.6 Handoff (Phase 3, REQ-135)
+
+**The tool.** `bm_handoff { workerId, reason }` (Orchestrator). It is refused, writing nothing, when:
+- handoff is off;
+- the target is not the Worker of an unfinished request;
+- `handoff.maxPerRequest` is reached;
+- the request is below its threshold.
+
+When the Worker is not at a safe point, the request waits for the next one. Safe points are a bead closed with evidence (`bead-implemented`), `beads-done`, or a review verdict received.
+
+**The sequence.**
+1. **The outgoing Worker's note.** At the Worker's idle moment the plugin asks it for a short note: `bm_report` with `handoffNote`, at most 1,500 characters, saying what was tried and what is next. It waits for it within a bound (10 min) and goes on without it after.
+2. **The brief.** The plugin builds it, bounded to about 6,000 characters, and keeps it at `<data>/handoffs/<id>.json`. It holds:
+   - the request and the owner's words;
+   - the decisions taken;
+   - the plan and doc paths;
+   - the bead state (done, ready, blocked);
+   - the last report (files, checks);
+   - open review findings;
+   - the branch and diff stat;
+   - the note.
+3. **The command to the Manager.** `BM-COMMAND intent: handoff`, carrying the brief's id. The Manager:
+   - creates the successor with `create_agent` (provider `bm-worker…`), the rendered brief as its first message; the creation hook adds instructions and runtime facts as for every Worker, and labels it `bm.handoffFrom=<old>`;
+   - tells the outgoing Worker it is replaced. The plugin labels that Worker `bm.replacedBy=<new>`; it stays idle and is never archived.
+4. **The request continues.** It keeps its request id: Work's timeline shows the handoff, and the Worker's reports continue.
+5. **The successor proves again.** Its brief says to run the checks again before reporting anything done. Phase 3's detected evidence (C.2) holds it to that.
+
+**Role text.**
+- The Manager gets one bullet: executing a handoff.
+- The Worker gets one bullet: the handoff note and working from a brief.
+- Both within their budgets (Manager 120/120, Worker 249/250): reword, do not add.
+
+### G.7 Settings → Coordination
+
+Stored in `<data>/coordination/settings.json` (`version: 1`, the store rules) and read and set by the RPCs `coordination.settings` and `coordination.set`. These are the owner's surface: the Orchestrator can only propose a change (G.4). The cleanup button deletes the folder.
+
+| Setting | Phase | Default |
+|---|---|---|
+| `advice.everyFinished` | 2 | 5 (0 = off) |
+| `compact.enabled` | 3 | on once the G.5 verification passes for the provider |
+| `compact.tokensPerTurn` | 3 | from G.2, the agent's p75 |
+| `compact.contextShare` | 3 | 0.5, where the provider reports it |
+| `compact.maxPerAgent` | 3 | 2 |
+| `handoff.enabled` | 3 | on |
+| `handoff.requestTokens` | 3 | from G.2, the request p80 |
+| `handoff.maxPerRequest` | 3 | 2 |
+
+Phase 2 builds the store with `advice.everyFinished`; Phase 3 adds the rest.
+
+### G.8 Guardrails and measures
+
+**Quality comes first.** No review, check or blocking finding is traded for tokens or time. A-8's Phase 3 target on the heaviest requests holds only with no rise in:
+- blocking findings per review batch;
+- A-5;
+- the finished-unverified share.
+
+**Bounded.**
+- Each intervention is logged (G.3), shown in the digest and measured (A-12).
+- Settings switches compaction and handoff off at once.
+- Hard-owner effects keep their grants (§A.3).
+- Agents belong to the owner.
+
+**A-7 still holds** (< 20 % of wakes with no action): `advice.due` and the threshold events are judgement wakes, and the Orchestrator's own tokens are part of A-8.
+
+---
+
 ## 7. Open decisions
 
 | ID | Decision | Owner | Status |
@@ -380,6 +563,7 @@ Settled by Claude under the owner's delegation while polishing the Phase 2 beads
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-09-30 | hieu.nt10 (drafted by Claude) | Part G added (ADR-021, the owner's decisions of 2026-09-30): the coordination loop and ladder; measurement, the intervention log and proactive advice in Phase 2; compaction on the Orchestrator's request and handoff through the Manager in Phase 3; Settings → Coordination; §B.9: advice replaces the assessment |
 | 2026-09-30 | Claude (owner approved) | §A.3, §A.6, §A.9, §B.9: `bm_decide` as built in Phase 1 (change-004, bead `bm-autonomy-phase1b-dbdv.9`) — the Orchestrator answers a Worker's open question through the store (`by: orchestrator`, `via: autopilot`, a reason), on Autopilot and never with a release, data, security, cost, network or outside-workspace option; delivered as an owner answer; the first answer wins and a refusal names who answered; a command's `BM-ANSWERS` for a stored question is refused |
 | 2026-09-30 | Claude (owner approved) | §A.12 cards: decision options wrap (field fix, change-004) |
 | 2026-09-30 | Claude (owner's delegation) | B.9, C.6, D.4, E.4, F.3: the design choices the Phase 2–6 beads had recorded as assumptions, settled when the beads were polished (change-003) — among them the policy authority of an Orchestrator command that answers no decision (replacing Autopilot), `owner`/`shadow` semantics, the override and held-request ids, REQ-130's file and bead claims, the model family, the A-10 sample |
