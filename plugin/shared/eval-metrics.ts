@@ -110,9 +110,13 @@ export interface QuestionSplit {
    * or the Orchestrator asked the owner (a decision).
    */
   reachedOwner: number;
-  /** Answered with no owner message in between. */
+  /** Answered with no owner message in between; a decision the Orchestrator answered (`bm_decide`) is one. */
   answeredByAgents: number;
-  /** Of `answeredByAgents`: the answer came in, or after, an Orchestrator `BM-COMMAND`. The rest are the Manager's facts. */
+  /**
+   * Of `answeredByAgents`: the Orchestrator answered — its stored answer
+   * (`bm_decide`, change-004), or an answer that came in, or after, its
+   * `BM-COMMAND`. The rest are the Manager's facts.
+   */
   answeredByAgentsViaCommand: number;
   /** Never answered and never put to the owner. */
   unanswered: number;
@@ -817,6 +821,8 @@ export function computeEvalMetrics(input: EvalInput): EvalMetrics {
   }
   // Stored Worker questions (Phase 1): a question the records do not show is taken from its decision;
   // the owner's answer is one more answer to its key, unless the owner's own answer already reached the Worker.
+  // The Orchestrator's stored answer (`bm_decide`, change-004) never reached the owner: an answer by agents,
+  // which the Worker gets only as the plugin's BM-DELIVERY (never read from the records as an answer).
   const ownerAnswerOf = new Map<string, { at: number | null }>();
   for (const decision of storedDecisions) {
     const id = questionIdOf(decision);
@@ -834,9 +840,12 @@ export function computeEvalMetrics(input: EvalInput): EvalMetrics {
     }
     if (decision.status !== "answered" || decision.answer === null) continue;
     const answeredAt = timeOf(decision.answer.at);
-    ownerAnswerOf.set(key, { at: answeredAt });
-    if ((answers.get(key) ?? []).some((answer) => answer.owner)) continue;
-    push(answers, key, { requestId: decision.requestId, id, text: answerTextOf(decision.answer), at: answeredAt, owner: true, fromOrchestrator: false });
+    const byOwner = decision.answer.by === "owner";
+    if (byOwner) {
+      ownerAnswerOf.set(key, { at: answeredAt });
+      if ((answers.get(key) ?? []).some((answer) => answer.owner)) continue;
+    }
+    push(answers, key, { requestId: decision.requestId, id, text: answerTextOf(decision.answer), at: answeredAt, owner: byOwner, fromOrchestrator: !byOwner });
     if (answeredAt !== null) push(answeredAtByRequest, decision.requestId, answeredAt);
   }
   // A-6: an answered decision's grant and words hold for its request.
@@ -845,9 +854,10 @@ export function computeEvalMetrics(input: EvalInput): EvalMetrics {
     const answeredAt = timeOf(decision.answer.at);
     if (answeredAt === null) continue;
     if (decision.answer.words !== null) push(decisionWords, decision.requestId, { at: answeredAt, text: decision.answer.words });
-    // A Worker's question: the option the owner chose is the Worker's yes for its effects (autonomy design §A.11).
-    // An Orchestrator's decision authorises through the command sent on it (above).
-    if (decisionKindOf(decision.id) === "question" && decision.grant !== null) {
+    // A Worker's question: the option the owner chose is the Worker's yes for its effects (autonomy design §A.11);
+    // the Orchestrator's choice (`bm_decide`) is not the owner's. An Orchestrator's decision authorises through
+    // the command sent on it (above).
+    if (decisionKindOf(decision.id) === "question" && decision.grant !== null && decision.answer.by === "owner") {
       push(grantsByRequest, decision.requestId, { at: answeredAt, effects: new Set(decision.grant.effects) });
     }
   }
@@ -1058,8 +1068,8 @@ export function computeEvalMetrics(input: EvalInput): EvalMetrics {
   const a6Authorised = EFFECTFUL_ACTIONS.reduce((sum, action) => sum + byAction[action].authorised, 0);
   const a6NotShown = EFFECTFUL_ACTIONS.reduce((sum, action) => sum + byAction[action].notShownAuthorised, 0);
 
-  // A-7: wakes, and whether an Orchestrator command, decision or note followed: within the wake's own
-  // turn for a recorded wake, within 10 minutes for a stall key (or a recorded wake without its end).
+  // A-7: wakes, and whether an Orchestrator command, decision, answer (`bm_decide`) or note followed: within
+  // the wake's own turn for a recorded wake, within 10 minutes for a stall key (or a recorded wake without its end).
   const actions: Array<{ workspaceId: string; at: number }> = [];
   for (const proposal of proposals) {
     const at = timeOf(proposal.at);
@@ -1068,6 +1078,9 @@ export function computeEvalMetrics(input: EvalInput): EvalMetrics {
   for (const decision of storedDecisions) {
     const at = timeOf(decision.askedAt);
     if (at !== null && decisionKindOf(decision.id) === "orchestrator") actions.push({ workspaceId: decision.workspaceId, at });
+    // A Worker's question the Orchestrator answered (change-004): its action at the answer's time.
+    const answeredAt = decisionKindOf(decision.id) === "question" && decision.answer?.by === "orchestrator" ? timeOf(decision.answer.at) : null;
+    if (answeredAt !== null) actions.push({ workspaceId: decision.workspaceId, at: answeredAt });
   }
   for (const note of input.notes ?? []) {
     const at = timeOf(note.at);

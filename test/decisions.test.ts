@@ -4,6 +4,7 @@ import {
   DECISION_STATUSES,
   EFFECTS,
   GRANT_TTL_MS,
+  MAX_ANSWER_REASON_CHARS,
   MAX_ANSWER_WORDS_CHARS,
   answerDecision,
   confirmDecision,
@@ -203,6 +204,55 @@ describe("answering", () => {
     const result = answerDecision(settled, { via: "inbox", optionKey: "a", at: plus(1000) });
     expect(refusalOf(result)).toBe("settled");
     if (status === "superseded") expect(result.ok ? "" : result.message).toContain(`q:${DECISION_REQUEST}:Q2`);
+  });
+});
+
+describe("the Orchestrator's answer (bm_decide, change-004)", () => {
+  const decided = () =>
+    ok(answerDecision(makeDecision(), { by: "orchestrator", via: "autopilot", optionKey: "c", reason: "  Hold: the review is not in yet.  ", at: AT }));
+
+  it("round-trips by: orchestrator with its reason, and grants what the owner's choice of that option would", () => {
+    const decision = decided();
+    expect(decision.answer).toEqual({ by: "orchestrator", via: "autopilot", optionKey: "c", words: null, at: AT, reason: "Hold: the review is not in yet." });
+    expect(decisionSchema.parse(JSON.parse(JSON.stringify(decision)))).toEqual(decision);
+    expect(ok(answerDecision(makeDecision(), { by: "orchestrator", via: "autopilot", optionKey: "a", reason: "Only the contract.", at: AT })).grant).toEqual({
+      effects: ["push"],
+      expiresAt: plus(GRANT_TTL_MS),
+      usedAt: null,
+    });
+  });
+
+  it("still reads an answer stored before it: the owner's, without by-orchestrator or a reason", () => {
+    const older = makeDecision({ status: "answered", settledAt: AT, answer: { by: "owner", via: "inbox", optionKey: "a", words: null, at: AT } });
+    const parsed = decisionSchema.parse(JSON.parse(JSON.stringify(older)));
+    expect(parsed.answer).toEqual({ by: "owner", via: "inbox", optionKey: "a", words: null, at: AT });
+    expect(parsed.answer).not.toHaveProperty("reason");
+  });
+
+  it("answers only with an option and a reason of 1-300 characters", () => {
+    const open = makeDecision();
+    expect(refusalOf(answerDecision(open, { by: "orchestrator", via: "autopilot", words: "Hold it.", at: AT }))).toBe("invalid-answer");
+    expect(refusalOf(answerDecision(open, { by: "orchestrator", via: "autopilot", optionKey: "c", reason: "   ", at: AT }))).toBe("invalid-answer");
+    expect(refusalOf(answerDecision(open, { by: "orchestrator", via: "autopilot", optionKey: "c", reason: "x".repeat(MAX_ANSWER_REASON_CHARS + 1), at: AT }))).toBe("invalid-answer");
+    expect(refusalOf(answerDecision(open, { by: "orchestrator", via: "autopilot", optionKey: "z", reason: "Why not.", at: AT }))).toBe("unknown-option");
+  });
+
+  it("the schema holds it: never own words or no option for the Orchestrator, Autopilot only for the Orchestrator, a reason ≤ 300", () => {
+    const answered = (answer: Record<string, unknown>) => makeDecision({ status: "answered", settledAt: AT, answer: { by: "orchestrator", via: "autopilot", optionKey: "c", words: null, at: AT, ...answer } as never });
+    expect(decisionSchema.safeParse(answered({})).success).toBe(true);
+    expect(decisionSchema.safeParse(answered({ optionKey: null, words: "Hold it." })).success).toBe(false);
+    expect(decisionSchema.safeParse(answered({ optionKey: null })).success).toBe(false);
+    expect(decisionSchema.safeParse(answered({ by: "owner" })).success).toBe(false);
+    expect(decisionSchema.safeParse(answered({ by: "policy" })).success).toBe(false);
+    expect(decisionSchema.safeParse(answered({ reason: "x".repeat(MAX_ANSWER_REASON_CHARS + 1) })).success).toBe(false);
+  });
+
+  it("the first answer wins: the owner's later answer is refused, naming who answered", () => {
+    const result = answerDecision(decided(), { via: "inbox", optionKey: "a", at: plus(60_000) });
+    expect(refusalOf(result)).toBe("settled");
+    expect(result.ok ? "" : result.message).toBe(`decision q:${DECISION_REQUEST}:Q1 is answered by the Orchestrator; it can no longer be answered`);
+    const byOwner = answerDecision(inStatus("answered"), { by: "orchestrator", via: "autopilot", optionKey: "c", at: plus(60_000) });
+    expect(byOwner.ok ? "" : byOwner.message).toContain("is answered by the owner");
   });
 });
 

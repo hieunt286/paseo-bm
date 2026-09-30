@@ -31,6 +31,10 @@
  *   end), or at once with `interrupt: true` only while that Worker's danger
  *   allowance is open; its Manager always gets the same block with `copy:
  *   yes` through the queue. Never a Reviewer.
+ * - Neither carries the answer to a question the decision store holds
+ *   (change-004, ADR-017): a `BM-ANSWERS` block naming a stored `Qn` of that
+ *   request is refused — an open one is answered with `bm_decide`, a settled
+ *   one already was (`refuseStoredAnswers`).
  * - Both pass the backstop (`undeclaredCategoriesOf` over `re:` and the body:
  *   a category of the big-decision gate that the declared effects do not
  *   cover refuses with "declare the effect or ask the owner" — less the
@@ -50,7 +54,14 @@
  *   replaces the Orchestrator's open decision of the same request unless
  *   `separate`, and says which one it replaced; it sends nothing.
  *   `bm_decisions` (autonomy design §A.9) lists stored decisions, read-only
- *   (`decision-tools.ts`). `bm_set_autopilot` (§6A) turns a project's Autopilot on or off
+ *   (`decision-tools.ts`). `bm_decide` (change-004; autonomy design §B.5,
+ *   brought forward with Phase 1's authority) answers a Worker's open
+ *   question with one of its options as the Orchestrator — only on the
+ *   project's Autopilot, never an option with a release, data, security,
+ *   cost, network or outside-workspace effect, a dependency install only
+ *   where the owner allowed it (`decideRefusalOf`) — and hands it to the
+ *   delivery the owner's answers take (`onSettled`).
+ *   `bm_set_autopilot` (§6A) turns a project's Autopilot on or off
  *   under the same chat check; it sends nothing (autonomy design §A.8: the
  *   Orchestrator runs already, and the project's events follow).
  * - `bm_assessment` (§5.5) checks the assessment with the pure tool of
@@ -58,7 +69,8 @@
  *   `assessments/<workspaceId>.jsonl`.
  *
  * Only `bm_send_command` and `bm_direct_worker` reach a working agent — a
- * Manager, or a Worker and its Manager. Nothing here sends
+ * Manager, or a Worker and its Manager — and `bm_decide` through the
+ * plugin's own delivery of an answer. Nothing here sends
  * to a Reviewer, creates, stops or archives, or writes to a repository.
  *
  * The endpoint is plain HTTP, so there is no hook or RPC context to take a
@@ -85,6 +97,8 @@ import { isPluginNotice } from "./notices";
 import { commandKindOf, commandRequestIdOf, commandSubjectOf } from "./orchestrator-actions";
 import { findOrchestratorAgent, isOwnerWord, type OrchestratorAgentPaseo } from "./orchestrator-agent";
 import { createAlertStore } from "./alert-store";
+import { answerBlockOf } from "./decision-materialiser";
+import type { OnDecisionsSettled } from "./decision-rpc";
 import { createDecisionStore } from "./decision-store";
 import { decisionsText, type DecisionsQuery } from "./decision-tools";
 import { createOrchestratorStore, type OrchestratorStore } from "./orchestrator-store";
@@ -110,8 +124,11 @@ import {
   CONFIRM_EFFECTS,
   MAX_DECISION_TEXT_CHARS,
   UNSETTLED_STATUSES,
+  answerDecision,
+  answeredByText,
   decisionKindOf,
   grantRefusal,
+  questionDecisionId,
   realEffects,
   useGrant,
   type Decision,
@@ -242,6 +259,13 @@ export interface OrchestratorToolsDeps extends DataHomeDeps {
   queue?: Pick<NoticeQueue, "enqueue">;
   /** How `bm_repo` runs git; `runGit` by default. */
   git?: GitRunner;
+  /**
+   * Where a question `bm_decide` answered goes: the same delivery hook the
+   * owner's answers go to (`settledByKind` in `index.server.ts`, autonomy
+   * design §A.6). None by default: the answer is only stored, and a later
+   * delivery of that request, or the next plugin run, sends it.
+   */
+  onSettled?: OnDecisionsSettled;
   log?: (message: string) => void;
 }
 
@@ -529,9 +553,16 @@ export async function workingAgents(paseo: Pick<OrchestratorToolsPaseo, "agents"
         archived: typeof agent["archivedAt"] === "string" && agent["archivedAt"] !== "",
         // The agent that created it: a Worker's Manager (`paseo.parent-agent-id`, AGENTS.md).
         parentAgentId: parentOf(agent),
+        // A Worker's request (`bm.requestId`), or null.
+        requestIdLabel: requestLabelOf(agent),
       },
     ];
   });
+}
+
+function requestLabelOf(agent: Record<string, unknown>): string | null {
+  const label = ((agent["labels"] ?? {}) as Record<string, unknown>)["bm.requestId"];
+  return typeof label === "string" && label !== "" ? label : null;
 }
 
 function parentOf(agent: Record<string, unknown>): string | null {
@@ -784,6 +815,46 @@ function checkedCommand(input: CommandInput, workspaceId: string, context: Conte
   return commandBlockOf(input);
 }
 
+/** Why a command's `BM-ANSWERS` line for this stored Worker question is refused (change-004). */
+export function storedAnswerRefusalOf(questionId: string, decision: Decision): string {
+  const what = `${questionId} of ${decision.requestId ?? "its request"} is the stored decision ${decision.id}`;
+  switch (decision.status) {
+    case "open":
+      return `${what}: answer it with bm_decide, not in a BM-ANSWERS block`;
+    case "needs-confirmation":
+      return `${what}, waiting for the owner to confirm an answer typed in a chat: it is the owner's`;
+    case "answered":
+      return `${what}, already answered by ${answeredByText(decision.answer?.by ?? "owner")}: the plugin delivers that answer itself, so send nothing for it`;
+    default:
+      return `${what}, ${decision.status}${decision.supersededBy === null ? "" : ` by ${decision.supersededBy}`}: it can no longer be answered`;
+  }
+}
+
+/**
+ * Refuses a command whose `BM-ANSWERS` block names a question the decision
+ * store holds for that request (change-004; ADR-017: one source of truth,
+ * nobody relays): an open one is answered with `bm_decide`, which the plugin
+ * delivers once; a settled one was answered or replaced already, and a second
+ * answer would reach the Worker twice. The request is the block's own
+ * `requestId:`, else one the body names, else `requestId`. A block that names
+ * no stored question passes; a store that cannot be read refuses. Reads only.
+ */
+function refuseStoredAnswers(body: string, workspaceId: string, requestId: string | null, home: string): void {
+  const block = answerBlockOf(body, requestId);
+  if (block === null || block.answers.length === 0) return;
+  let stored: Array<{ questionId: string; decision: Decision }> = [];
+  try {
+    const store = createDecisionStore(home);
+    stored = block.answers.flatMap((answer) => {
+      const decision = store.get(questionDecisionId(block.requestId, answer.id), workspaceId);
+      return decision === null ? [] : [{ questionId: answer.id, decision }];
+    });
+  } catch (error) {
+    refuse(`the decisions of project ${workspaceId} cannot be read to check the BM-ANSWERS block (${describeError(error)}); nothing was sent`);
+  }
+  if (stored.length > 0) refuse(stored.map(({ questionId, decision }) => storedAnswerRefusalOf(questionId, decision)).join("; "));
+}
+
 /** What a command of the Orchestrator declares (autonomy design §A.7). */
 interface Declared {
   intent: CommandIntent;
@@ -819,6 +890,7 @@ function authorityFields(granted: CommandAuthorityOf) {
 async function bmSendCommand(input: SendInput, context: Context, deps: OrchestratorToolsDeps): Promise<ServerToolResult> {
   const manager = await requireManager(input, context);
   const requestId = input.requestId ?? null;
+  refuseStoredAnswers(input.command, input.workspaceId, requestId, context.home);
   const granted = await authorityOf({ ...input, requestId }, context, SEND_REFUSED_MESSAGE);
   const source = granted.via;
   const command: CommandInput = {
@@ -913,6 +985,8 @@ async function bmDirectWorker(input: DirectInput, context: Context, deps: Orches
   if (worker.workspaceId !== input.workspaceId) refuse(`Worker ${input.workerId} does not belong to project ${input.workspaceId}`);
   if (worker.archived) refuse(`Worker ${input.workerId} is archived; nothing can be sent to it`);
   const requestId = input.requestId ?? null;
+  // A block without a request of its own is about the Worker's request.
+  refuseStoredAnswers(input.command, input.workspaceId, requestId ?? worker.requestIdLabel, context.home);
   const granted = await authorityOf({ ...input, requestId }, context, DIRECT_REFUSED_MESSAGE);
   const source = granted.via;
   const manager =
@@ -1185,6 +1259,141 @@ async function bmAskOwner(input: AskOwnerInput, context: Context, deps: Orchestr
 /** `bm_decisions` (autonomy design §A.9): the stored decisions, newest asked first, with their grants; read-only. */
 function bmDecisions(input: DecisionsQuery, context: Context): ServerToolResult {
   return { ok: true, text: decisionsText(context.home, input, context.env, { grant: true }) };
+}
+
+/**
+ * The effects of a Worker's question only the owner grants in Phase 1
+ * (change-004): release, data, security and cost (`CONFIRM_EFFECTS`), a
+ * network call and a change outside the workspace. A `dependency-install`
+ * also needs `dependency` among the project's allowed categories.
+ */
+export const OWNER_ONLY_ANSWER_EFFECTS: readonly Effect[] = [...CONFIRM_EFFECTS, "network", "outside-workspace"];
+
+interface DecideInput {
+  decisionId: string;
+  optionKey: string;
+  reason: string;
+}
+
+function notAQuestionMessage(decisionId: string): string {
+  return `${decisionId} is not a Worker's question; bm_decide answers only a Worker's question (q:…), and your own decisions and the fallback incidents are the owner's`;
+}
+
+/**
+ * Why the Orchestrator may not answer `decision` with `optionKey` on Phase
+ * 1's authority (change-004; Phase 2 swaps Autopilot for the policy), or null
+ * when it may: a Worker's question (`q:`) that is still `open` — not waiting
+ * for the owner's confirmation, not answered (the first answer wins), not
+ * superseded, withdrawn or expired —, of a project whose Autopilot is on,
+ * with that option, whose effects hold none of `OWNER_ONLY_ANSWER_EFFECTS`
+ * and a `dependency-install` only where the owner allowed `dependency`. Pure.
+ */
+export function decideRefusalOf(
+  decision: Decision,
+  optionKey: string,
+  project: { autopilot: boolean; allowed: readonly GateCategory[] },
+): string | null {
+  if (decisionKindOf(decision.id) !== "question") return notAQuestionMessage(decision.id);
+  switch (decision.status) {
+    case "open":
+      break;
+    case "answered":
+      return `decision ${decision.id} was already answered by ${answeredByText(decision.answer?.by ?? "owner")} at ${decision.answer?.at ?? decision.settledAt}; the first answer stands`;
+    case "needs-confirmation":
+      return `decision ${decision.id} waits for the owner to confirm an answer typed in a chat; it is the owner's`;
+    case "superseded":
+      return `decision ${decision.id} is superseded by ${decision.supersededBy}; answer that one if it is still open`;
+    default:
+      return `decision ${decision.id} is ${decision.status}; it can no longer be answered`;
+  }
+  if (!project.autopilot) return `Autopilot is off for project ${decision.workspaceId}; its Workers' questions are the owner's to answer`;
+  const option = decision.options.find((entry) => entry.key === optionKey);
+  if (option === undefined) {
+    return `decision ${decision.id} has no option ${JSON.stringify(optionKey)}; its options are ${decision.options.map((entry) => entry.key).join(", ") || "none"}`;
+  }
+  const effects = realEffects(option.effects);
+  const ownerOnly = effects.filter((effect) => OWNER_ONLY_ANSWER_EFFECTS.includes(effect));
+  if (ownerOnly.length > 0) return `option ${optionKey} of ${decision.id} allows ${ownerOnly.join(", ")}, which only the owner grants; leave the question to the owner`;
+  if (effects.includes("dependency-install") && !project.allowed.includes("dependency")) {
+    return `option ${optionKey} of ${decision.id} allows dependency-install, and the owner has not allowed dependency for project ${decision.workspaceId}; leave the question to the owner`;
+  }
+  return null;
+}
+
+/** What the Orchestrator's answer did, in one sentence, from the delivery the plugin recorded. */
+function decidedDeliveryText(decision: Decision): string {
+  switch (decision.delivery?.outcome) {
+    case "sent":
+      return "The Worker has it now, as the plugin's BM-DELIVERY.";
+    case "queued":
+      return "The Worker gets it, as the plugin's BM-DELIVERY, when its current turn ends.";
+    case "failed":
+      return "The plugin could not deliver it: the request has no single live Worker. The owner sees that on the decision.";
+    default:
+      return "The plugin delivers it to the Worker at its next idle moment, as it delivers the owner's answers.";
+  }
+}
+
+/**
+ * `bm_decide` (change-004; autonomy design §A.6, §B.5, ADR-017): answers a
+ * Worker's open question with one of its options, as the Orchestrator
+ * (`by: orchestrator`, `via: autopilot`, the reason kept, redacted), with the
+ * grant an owner's choice of that option gives — only as far as
+ * `decideRefusalOf` allows. From the read to the write nothing awaits, so no
+ * other answer can come between (the store takes no lock; the first answer
+ * wins). The answered decision then goes to `onSettled`, the delivery the
+ * owner's answers take, so the Worker gets it as `BM-DELIVERY` at its next
+ * idle moment, and every card and the Inbox show it answered. A refusal
+ * writes nothing and sends nothing.
+ */
+async function bmDecide(input: DecideInput, context: Context, deps: OrchestratorToolsDeps): Promise<ServerToolResult> {
+  if (decisionKindOf(input.decisionId) !== "question") refuse(notAQuestionMessage(input.decisionId));
+  const store = createDecisionStore(context.home);
+  const at = context.now.toISOString();
+  let mutation: ReturnType<typeof store.transition>;
+  try {
+    const decision = store.get(input.decisionId);
+    if (decision === null) refuse(`no decision ${input.decisionId}; use a decisionId a decision.opened line or bm_decisions gave`);
+    const workspaceId = decision.workspaceId;
+    const problem = decideRefusalOf(decision, input.optionKey, {
+      autopilot: context.store.isAutopilot(workspaceId),
+      allowed: context.store.allowedCategories(workspaceId),
+    });
+    if (problem !== null) refuse(problem);
+    mutation = store.transition(
+      decision.id,
+      (current) => answerDecision(current, { by: "orchestrator", via: "autopilot", optionKey: input.optionKey, reason: redactText(input.reason, context.env), at }),
+      workspaceId,
+    );
+  } catch (error) {
+    if (error instanceof Refusal) throw error;
+    refuse(`the answer to ${input.decisionId} could not be stored (${describeError(error)}); nothing was changed`);
+  }
+  if (mutation.status === "not-found") refuse(`no decision ${input.decisionId}`);
+  if (mutation.status === "refused") refuse(`${mutation.message}; nothing was changed`);
+  const answered = mutation.decision;
+  if (deps.onSettled !== undefined) {
+    try {
+      await deps.onSettled([answered], { paseo: context.paseo });
+    } catch (error) {
+      (deps.log ?? ((message: string) => console.warn(message)))(
+        `[paseo-bm] decision ${answered.id} is answered by the Orchestrator, but its delivery failed: ${describeError(error)}`,
+      );
+    }
+  }
+  let now = answered;
+  try {
+    now = store.get(answered.id, answered.workspaceId) ?? answered;
+  } catch {
+    // The answer stands; only what the delivery recorded is not known.
+  }
+  const questionId = answered.id.slice(answered.id.lastIndexOf(":") + 1);
+  const said = [
+    `Answered ${questionId} of ${answered.requestId} with option ${input.optionKey}, as yours; the owner sees your answer and your reason on the decision.`,
+    decidedDeliveryText(now),
+    "Send nothing more for it. Tell the owner in one line what you chose and why.",
+  ].join(" ");
+  return { ok: true, text: `${said}\n${json({ decisionId: answered.id, optionKey: input.optionKey, grant: now.grant, delivery: now.delivery })}` };
 }
 
 // ---------------------------------------------------------------------------
@@ -1460,6 +1669,8 @@ export function createOrchestratorTools(deps: OrchestratorToolsDeps = {}): Orche
         return bmDecisions(input as DecisionsQuery, context);
       case "bm_ask_owner":
         return bmAskOwner(input as AskOwnerInput, context, deps);
+      case "bm_decide":
+        return bmDecide(input as DecideInput, context, deps);
       case "bm_set_autopilot":
         return bmSetAutopilot(input as { workspaceId: string; enabled: boolean }, context);
       case "bm_direct_worker":

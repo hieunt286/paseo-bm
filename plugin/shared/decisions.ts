@@ -56,8 +56,20 @@ export type DecisionStatus = z.infer<typeof decisionStatusSchema>;
 export const UNSETTLED_STATUSES: readonly DecisionStatus[] = ["open", "needs-confirmation"];
 export const SETTLED_STATUSES: readonly DecisionStatus[] = ["answered", "superseded", "withdrawn", "expired"];
 
-/** Where the owner's answer came from (§A.3). */
-export const ANSWER_VIA = ["inbox", "chat-card", "chat-manager", "chat-worker", "chat-orchestrator"] as const;
+/**
+ * Who answered (§A.3): the owner, or the Orchestrator (`bm_decide`, a Worker's
+ * question on the project's Autopilot, change-004). Additive: every answer
+ * stored before it is the owner's.
+ */
+export const ANSWER_BY = ["owner", "orchestrator"] as const;
+export const answerBySchema = z.enum(ANSWER_BY);
+export type AnswerBy = z.infer<typeof answerBySchema>;
+
+/**
+ * Where the answer came from (§A.3): the owner's surface or chat, or
+ * `autopilot` — the Orchestrator's answer under the project's Autopilot.
+ */
+export const ANSWER_VIA = ["inbox", "chat-card", "chat-manager", "chat-worker", "chat-orchestrator", "autopilot"] as const;
 export const answerViaSchema = z.enum(ANSWER_VIA);
 export type AnswerVia = z.infer<typeof answerViaSchema>;
 
@@ -79,6 +91,8 @@ export const MAX_DECISION_LABEL_CHARS = 1000;
 export const MAX_DECISION_OPTIONS_COUNT = 8;
 /** Longest answer in the owner's own words. */
 export const MAX_ANSWER_WORDS_CHARS = 4000;
+/** Longest reason an answer carries (the Orchestrator's, `bm_decide`). */
+export const MAX_ANSWER_REASON_CHARS = 300;
 /** Longest body of a prepared command; the same cap as a proposal's command. */
 export const MAX_PREPARED_BODY_CHARS = 4000;
 /** A subject slug (§A.5: ≤ 60 characters of `[a-z0-9-]`). */
@@ -132,17 +146,22 @@ export type DecisionOption = z.infer<typeof decisionOptionSchema>;
 
 export const decisionAnswerSchema = z
   .object({
-    by: z.literal("owner"),
+    by: answerBySchema,
     via: answerViaSchema,
     /** The option chosen, or null. */
     optionKey: z.string().regex(OPTION_KEY_PATTERN).nullable(),
     /** The owner's own words, or null. */
     words: z.string().min(1).max(MAX_ANSWER_WORDS_CHARS).nullable(),
     at: isoTimeSchema,
+    /** Why this answer, in one line: the Orchestrator's (`bm_decide`); absent on the owner's answers. */
+    reason: z.string().min(1).max(MAX_ANSWER_REASON_CHARS).optional(),
   })
   // Both null: the owner confirmed an answer typed in a chat (`decisions.confirm`),
   // whose text the plugin did not parse.
-  .refine((answer) => answer.optionKey === null || answer.words === null, { message: "an answer is an option or words, not both" });
+  .refine((answer) => answer.optionKey === null || answer.words === null, { message: "an answer is an option or words, not both" })
+  // Only options, never own words, for the Orchestrator (change-004).
+  .refine((answer) => answer.by === "owner" || (answer.optionKey !== null && answer.words === null), { message: "the Orchestrator answers with an option" })
+  .refine((answer) => answer.via !== "autopilot" || answer.by === "orchestrator", { message: "only the Orchestrator answers on Autopilot" });
 export type DecisionAnswer = z.infer<typeof decisionAnswerSchema>;
 
 export const decisionGrantSchema = z.object({
@@ -291,8 +310,18 @@ function refuse(refusal: TransitionRefusal, message: string): TransitionResult {
   return { ok: false, refusal, message };
 }
 
+/** Who answered, for a refusal: "the owner" or "the Orchestrator". */
+export function answeredByText(by: AnswerBy): string {
+  return by === "orchestrator" ? "the Orchestrator" : "the owner";
+}
+
 function refuseSettled(decision: Decision): TransitionResult {
-  const by = decision.status === "superseded" && decision.supersededBy !== null ? ` by ${decision.supersededBy}` : "";
+  const by =
+    decision.status === "superseded" && decision.supersededBy !== null
+      ? ` by ${decision.supersededBy}`
+      : decision.status === "answered" && decision.answer !== null
+        ? ` by ${answeredByText(decision.answer.by)}`
+        : "";
   return refuse("settled", `decision ${decision.id} is ${decision.status}${by}; it can no longer be answered`);
 }
 
@@ -302,23 +331,35 @@ export interface AnswerInput {
   words?: string | null;
   /** The time of the answer, ISO. */
   at: string;
+  /** Who answers; the owner by default. The Orchestrator answers only with an option. */
+  by?: AnswerBy;
+  /** Why, in one line (trimmed, at most `MAX_ANSWER_REASON_CHARS`); none by default. */
+  reason?: string | null;
 }
 
 /**
  * Answers an unsettled decision with one option or the owner's own words
  * (trimmed). The answer grants the chosen option's declared effects — or, for
  * own words, every effect the decision declares — for one use until
- * `at + GRANT_TTL_MS`; an answer that grants nothing carries no grant.
+ * `at + GRANT_TTL_MS`; an answer that grants nothing carries no grant. The
+ * Orchestrator's answer (`by: orchestrator`) is always an option, grants what
+ * the owner's choice of it would, and keeps its reason.
  */
 export function answerDecision(decision: Decision, input: AnswerInput): TransitionResult {
   if (!isAnswerable(decision)) return refuseSettled(decision);
+  const by = input.by ?? "owner";
   const optionKey = input.optionKey ?? null;
   const words = input.words == null ? null : input.words.trim();
+  const reason = input.reason == null ? null : input.reason.trim();
   if ((optionKey === null) === (words === null)) {
     return refuse("invalid-answer", "an answer names exactly one option or gives the owner's own words");
   }
+  if (by === "orchestrator" && optionKey === null) return refuse("invalid-answer", "the Orchestrator answers with one of the options, never in its own words");
   if (words !== null && (words.length === 0 || words.length > MAX_ANSWER_WORDS_CHARS)) {
     return refuse("invalid-answer", `the owner's words must be 1–${MAX_ANSWER_WORDS_CHARS} characters`);
+  }
+  if (reason !== null && (reason.length === 0 || reason.length > MAX_ANSWER_REASON_CHARS)) {
+    return refuse("invalid-answer", `a reason must be 1–${MAX_ANSWER_REASON_CHARS} characters`);
   }
   if (optionKey !== null && !decision.options.some((option) => option.key === optionKey)) {
     return refuse("unknown-option", `decision ${decision.id} has no option ${JSON.stringify(optionKey)}`);
@@ -332,7 +373,7 @@ export function answerDecision(decision: Decision, input: AnswerInput): Transiti
       status: "answered",
       settledAt: input.at,
       needsConfirmation: null,
-      answer: { by: "owner", via: input.via, optionKey, words, at: input.at },
+      answer: { by, via: input.via, optionKey, words, at: input.at, ...(reason === null ? {} : { reason }) },
       grant: effects.length === 0 ? null : { effects, expiresAt, usedAt: null },
     },
   };

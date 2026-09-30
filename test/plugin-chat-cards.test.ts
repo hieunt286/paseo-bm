@@ -518,6 +518,26 @@ describe("the decision card's view (experience concept §5.2)", () => {
     expect(view(found(ok(answerDecision(questionDecision(), { via: "chat-card", optionKey: "a", at: "2026-09-16T10:03:00.000Z" })))).frame.tag).toBeNull();
   });
 
+  it("shows the Orchestrator's answer (bm_decide, change-004) as the Orchestrator's, its reason in Details, and no answer buttons", () => {
+    const decided = ok(
+      answerDecision(questionDecision(), { by: "orchestrator", via: "autopilot", optionKey: "a", reason: "No migration: the table already holds the list.", at: "2026-09-16T10:02:00.000Z" }),
+    );
+    const delivered = { ...decided, delivery: { to: "w1", kind: `answers:${REQ}`, at: "2026-09-16T10:02:01.000Z", outcome: "queued" as const } };
+    const shown = view(found(delivered));
+    expect(shown.frame).toMatchObject({
+      chip: { text: "Decided", tone: "success" },
+      authority: `answered by the Orchestrator · ${localTimeText(new Date("2026-09-16T10:02:00.000Z"), NOW)}`,
+      body: ["✓ the existing table: no migration.", "Queued for Worker · Contact redesign: it goes when the agent is idle."],
+    });
+    // Settled: nothing to press but Details, and nothing read again.
+    expect(shown).toMatchObject({ options: [], ownWords: false, confirmChat: false, confirm: null });
+    expect(decisionPollMs(found(delivered), AT, NOW)).toBe(false);
+    // The reason is in Details, never on the card's face; the owner is not named as the one who answered.
+    expect(shown.details).toEqual(expect.arrayContaining(["Answered by: the Orchestrator", "Answer via: autopilot", "Reason: No migration: the table already holds the list."]));
+    expect(JSON.stringify(shown.frame)).not.toContain("No migration: the table");
+    expect(JSON.stringify(shown.frame)).not.toContain("answered by you");
+  });
+
   it("asks whether a chat message answered it, and closes it without a grant", () => {
     const marked = ok(markNeedsConfirmation(questionDecision(), { via: "chat-worker", at: "2026-09-16T10:04:00.000Z" }));
     const shown = view(found(marked));
@@ -600,7 +620,7 @@ describe("answering from the card", () => {
 
     // A second answer from a stale copy is refused and says why.
     const again = await runDecisionAnswer({ id: Q_ID, choice: { optionKey: "b" }, confirmed: true, via: "chat-card", answer });
-    expect(again).toEqual({ ok: false, reason: `Could not answer (E_DECISION_SETTLED): decision ${Q_ID} is answered; it can no longer be answered` });
+    expect(again).toEqual({ ok: false, reason: `Could not answer (E_DECISION_SETTLED): decision ${Q_ID} is answered by the owner; it can no longer be answered` });
   });
 
   it("passes confirmed only after the owner confirmed, and own words as words", async () => {
@@ -675,8 +695,9 @@ describe("the drawn decision card", () => {
     );
     expect(labels(nodes)).toEqual(["Answer: the existing table: no migration. (recommended)", "Answer: a file on disk: simplest.; allows push", "Answer in your own words", "Show details"]);
     const [primary, secondary] = pressables(nodes);
-    expect(primary!.props["style"]).toEqual([{ name: "button" }, { opacity: 1 }]);
-    expect(secondary!.props["style"]).toEqual([{ name: "secondaryButton" }, { opacity: 1 }]);
+    // The middle style is the options' layout (row or stacked), pinned by test/plugin-decision-options-layout.test.ts.
+    expect(primary!.props["style"]).toEqual([{ name: "button" }, expect.any(Object), { opacity: 1 }]);
+    expect(secondary!.props["style"]).toEqual([{ name: "secondaryButton" }, expect.any(Object), { opacity: 1 }]);
     (primary!.props["onPress"] as () => void)();
     expect(onChoose).toHaveBeenCalledWith("a");
     // No id on the face; Details is closed.

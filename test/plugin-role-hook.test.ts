@@ -731,7 +731,7 @@ describe("before(\"agent.create\") for bm-orchestrator (orchestrator design §3.
   /** The endpoint's URLs: the Orchestrator's carries the secret (§5.1). */
   const urlFor = (role: string) => `http://127.0.0.1:4567/mcp/${role}${role === "orchestrator" ? `/${SECRET}` : ""}`;
   const ORCHESTRATOR_URL = `http://127.0.0.1:4567/mcp/orchestrator/${SECRET}`;
-  const ORCHESTRATOR_GRANTS = ["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_set_autopilot", "bm_direct_worker", "bm_repo", "bm_note", "bm_assessment"].map((tool) => ({ kind: "mcp", server: "paseo-bm", tool }));
+  const ORCHESTRATOR_GRANTS = ["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_set_autopilot", "bm_direct_worker", "bm_repo", "bm_note", "bm_assessment"].map((tool) => ({ kind: "mcp", server: "paseo-bm", tool }));
   /** The hook as index.server registers it, with a tool endpoint serving every role. */
   function hookWithTools(paseo: unknown, usePaseo?: (paseo: unknown) => void) {
     let hook: ((input: { request: AgentCreateRequest }, context: unknown) => unknown) | undefined;

@@ -27,8 +27,12 @@ import { ASSESSMENT_CRITERIA } from "../plugin/shared/bm-assessment";
 import { effectsWithheldBy, commandBlockOf, limitsOf, parseCommandBlock, type CommandInput } from "../plugin/shared/orchestrator-command";
 import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
 import { handleDecisionsAnswer, settledByKind } from "../plugin/server/decision-rpc";
+import { createQuestionDecisionDelivery } from "../plugin/server/decision-delivery";
 import { createOrchestratorDecisionDelivery } from "../plugin/server/orchestrator-decisions";
 import { answerDecision, type Decision } from "../plugin/shared/decisions";
+import { parseAnswers } from "../plugin/shared/bm-questions";
+import { DELIVERY_NOTICE_MARKER } from "../plugin/shared/notices";
+import { makeDecision } from "./helpers/decisions";
 import type { TraceRecord } from "../plugin/shared/contracts";
 import { MANAGER, REVIEWER, WORKER, WORKSPACE_ID, agent, at, msg, report, shell, turn } from "./fixtures/orchestrator-traces";
 
@@ -67,6 +71,7 @@ import { MANAGER, REVIEWER, WORKER, WORKSPACE_ID, agent, at, msg, report, shell,
  * | REQ-083 a: the Worker watch refreshes and reads only running `bm-*` Workers of Autopilot projects — none with no Autopilot, none of a project whose Autopilot is off | "the live watch of running Workers" |
  * | REQ-079 b, REQ-115 b: the Orchestrator gets only `BM-EVENTS` (Autopilot project: a decision opened, a request finished or stalled, a Worker signal — batched) and `BM-ANSWER`; stalls and Worker signals are Inbox alerts, never messages | `PATHS` (`sendsTo`), "the event bus", "the stall pass" |
  * | Loop guard (design §6A): a 13th command for one request in 24 hours is refused and sends nothing | the `bm_send_command` loop-guard path |
+ * | change-004 (ADR-017, the field case of 2026-09-30): a Worker's question has one answer — the Orchestrator's `bm_decide` settles it and only the plugin's `BM-DELIVERY` reaches the Worker, each `Qn` once; the owner's later tap is refused as answered; a command carrying the answer to a stored `Qn` is refused and sends nothing | the `bm_decide` paths; `expectBoundary` (`deliveries`) |
  * | REQ-079 c: no stop, archive, delete, config write; instructions only through apply-suggestion | the spy + `expectBoundary` after every path |
  * | O-3: no Autopilot → no event and no message to the Orchestrator; a stall is only an Inbox alert | "the stall pass", "the event bus" |
  * | O-4: no Orchestrator agent and no send before the owner starts it | "O-4 — before the user opens the Orchestrator" |
@@ -556,8 +561,14 @@ beforeEach(async () => {
     workspaceDir,
   );
   host = hostOf(fake.paseo);
-  // The endpoint's tools, wired as agent-tools.ts wires them: the handle comes from a hook or RPC context.
-  tools = createOrchestratorTools({ env: { PASEO_BM_HOME: home }, homedir: () => root, now: () => NOW });
+  // The endpoint's tools, wired as agent-tools.ts and index.server.ts wire them: the handle comes from a hook or
+  // RPC context; a question bm_decide answered takes the owner answers' delivery, through the shared queue.
+  tools = createOrchestratorTools({
+    env: { PASEO_BM_HOME: home },
+    homedir: () => root,
+    now: () => NOW,
+    onSettled: settledByKind({ question: questionDelivery().onSettled, orchestrator: orchestratorDelivery() }),
+  });
   tools.usePaseo(fake.paseo);
   enqueueSpy = vi.spyOn(noticeQueue, "enqueue");
   batchSpy = vi.spyOn(noticeQueue, "enqueueBatch");
@@ -580,21 +591,38 @@ afterEach(() => {
   expect(violations).toEqual([]);
 });
 
+/** The plugin's delivery of stored answers to a Worker (autonomy design §A.6), not a command. */
+const isAnswersDelivery = (text: string): boolean => text.startsWith(`${DELIVERY_NOTICE_MARKER} answers\n`);
+
 /**
  * What must hold after any path: no forbidden call; no agent created; nothing
  * sent or queued, except — with `sendsTo` — one delivery or more, all to
  * those agents; every timeline read of a `bm-*` agent; the workspace (beads,
  * documents) untouched; the role instructions untouched unless `instructions`.
+ * The Worker gets the plugin's `BM-DELIVERY answers` only with `deliveries`,
+ * and then every `Qn` in them is a stored decision that is answered, and none
+ * reaches it twice (change-004).
  */
-function expectBoundary(options: { instructions?: boolean; creates?: number; sendsTo?: readonly string[]; limits?: boolean } = {}): void {
+function expectBoundary(
+  options: { instructions?: boolean; creates?: number; sendsTo?: readonly string[]; limits?: boolean; deliveries?: boolean } = {},
+): void {
   expect(boundary.violations).toEqual([]);
+  const deliveries = [...fake.sends.filter((sent) => sent.id === WORKER).map((sent) => sent.text), ...noticeQueue.pending(WORKER).map((queued) => queued.text)].filter(
+    isAnswersDelivery,
+  );
+  if (options.deliveries !== true) expect(deliveries).toEqual([]);
+  const deliveredKeys = deliveries.flatMap((text) => {
+    const set = parseAnswers(text)!;
+    return set.answers.map((answer) => `q:${set.requestId}:${answer.id}`);
+  });
+  expect(new Set(deliveredKeys).size, "a Qn delivered twice").toBe(deliveredKeys.length);
+  for (const id of deliveredKeys) expect(createDecisionStore(home).get(id, WORKSPACE_ID), id).toMatchObject({ status: "answered" });
   // REQ-082 c, design §6B.1, autonomy design §A.7: what reaches the Manager or the Worker, sent or still
   // queued, is a BM-COMMAND v2 block with its authority; it carries the limits its approval leaves when the
   // Orchestrator decided it — never one that withholds an approved effect — and none when the owner typed it.
-  const toWorking = [MANAGER, WORKER].flatMap((id) => [
-    ...fake.sends.filter((sent) => sent.id === id).map((sent) => sent.text),
-    ...noticeQueue.pending(id).map((queued) => queued.text),
-  ]);
+  const toWorking = [MANAGER, WORKER]
+    .flatMap((id) => [...fake.sends.filter((sent) => sent.id === id).map((sent) => sent.text), ...noticeQueue.pending(id).map((queued) => queued.text)])
+    .filter((text) => !isAnswersDelivery(text));
   for (const text of toWorking) {
     const block = parseCommandBlock(text);
     expect(block, text).not.toBeNull();
@@ -608,9 +636,9 @@ function expectBoundary(options: { instructions?: boolean; creates?: number; sen
   // ADR-016 decision 2, design §6B.4: what reaches the Worker is a `to: worker` block from the Orchestrator,
   // and its Manager has the same block as a copy; a Manager gets `to: manager` blocks, or copies of what its Worker got.
   const blocksTo = (id: string) =>
-    [...fake.sends.filter((sent) => sent.id === id).map((sent) => sent.text), ...noticeQueue.pending(id).map((queued) => queued.text)].map(
-      (text) => parseCommandBlock(text)!,
-    );
+    [...fake.sends.filter((sent) => sent.id === id).map((sent) => sent.text), ...noticeQueue.pending(id).map((queued) => queued.text)]
+      .filter((text) => !isAnswersDelivery(text))
+      .map((text) => parseCommandBlock(text)!);
   const toWorker = blocksTo(WORKER);
   const toManager = blocksTo(MANAGER);
   for (const block of toWorker) {
@@ -944,6 +972,8 @@ interface BoundaryPath {
   sendsTo?: readonly string[];
   /** What the path sends the Manager or the Worker is the Orchestrator's (its tools, or a command it prepared): each block carries the limits. Otherwise none does. */
   limits?: boolean;
+  /** The plugin delivers stored answers to the Worker (`BM-DELIVERY answers`): the path settles Worker questions. */
+  deliveries?: boolean;
   run(): Promise<void>;
 }
 
@@ -962,6 +992,8 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<{ 
 
 /** The delivery of an Orchestrator decision the owner answered (autonomy design §A.6), through the plugin's shared notice queue. */
 const orchestratorDelivery = () => createOrchestratorDecisionDelivery({ home: () => home, now: () => NOW });
+/** The delivery of a Worker's answered questions (autonomy design §A.6), through the plugin's shared notice queue. */
+const questionDelivery = () => createQuestionDecisionDelivery({ home: () => home, now: () => NOW });
 
 /** `decisions.answer` as the Inbox calls it, with the plugin's delivery of Orchestrator decisions. */
 function answerDecisionRpc(input: Parameters<typeof handleDecisionsAnswer>[0]) {
@@ -1589,6 +1621,92 @@ const PATHS: BoundaryPath[] = [
     },
   },
   {
+    name: "tool bm_decide, the field case of 2026-09-30: the Orchestrator answers Q1–Q3, the owner's later tap on Q2 is refused as answered, a command re-sending an answer is refused, and the Worker gets each Qn once",
+    rpc: null,
+    tool: "bm_decide",
+    sendsTo: [WORKER],
+    deliveries: true,
+    run: async () => {
+      clearDecisionStoreCache();
+      createOrchestratorStore(home).setAutopilot(WORKSPACE_ID, true, "tab");
+      const qid = (n: number) => `q:${REQUEST_ID}:Q${n}`;
+      for (const n of [1, 2, 3]) {
+        createDecisionStore(home).open(
+          makeDecision({
+            id: qid(n),
+            workspaceId: WORKSPACE_ID,
+            requestId: REQUEST_ID,
+            askedBy: { role: "worker", agentId: WORKER },
+            askedAt: at(2),
+            round: 1,
+            question: `Date format question ${n}?`,
+            subject: null,
+            options: [
+              { key: "a", label: "dd/mm/yyyy", recommended: true, effects: ["none"] },
+              { key: "b", label: "yyyy-mm-dd", recommended: false, effects: ["commit"] },
+            ],
+          }),
+        );
+      }
+      // The Worker is running: every answer waits for its turn end, one block for the request.
+      for (const n of [1, 2, 3]) {
+        const decided = await callTool("bm_decide", { decisionId: qid(n), optionKey: "a", reason: "The owner asked for dd/mm/yyyy." });
+        expect(decided, `Q${n}`).toMatchObject({ isError: false, text: expect.stringContaining("when its current turn ends") });
+      }
+      expect(fake.sends).toEqual([]);
+      for (const n of [1, 2, 3]) expect(createDecisionStore(home).get(qid(n), WORKSPACE_ID)).toMatchObject({ status: "answered", answer: { by: "orchestrator", via: "autopilot" } });
+
+      // The owner taps Q2 on a stale card: the first answer stands, and nothing more is delivered.
+      const onSettled = settledByKind({ question: questionDelivery().onSettled });
+      await expect(
+        handleDecisionsAnswer({ id: qid(2), optionKey: "b", via: "chat-card" }, fake.paseo, { env: { PASEO_BM_HOME: home }, homedir: () => root, now: () => NOW, onSettled }),
+      ).rejects.toMatchObject({ code: "E_DECISION_SETTLED", message: expect.stringContaining(`decision ${qid(2)} is answered by the Orchestrator; it can no longer be answered`) });
+      expect(createDecisionStore(home).get(qid(2), WORKSPACE_ID)!.answer).toMatchObject({ by: "orchestrator", optionKey: "a" });
+      // The Orchestrator re-sending an answer by hand, as it did in the field: refused, nothing sent or recorded.
+      expect(await callTool("bm_direct_worker", { ...DIRECT, command: `BM-ANSWERS\nrequestId: ${REQUEST_ID}\nQ2: a — dd/mm/yyyy` })).toMatchObject({
+        isError: true,
+        text: expect.stringContaining(`Q2 of ${REQUEST_ID} is the stored decision ${qid(2)}, already answered by the Orchestrator`),
+      });
+      expect(allCommands()).toEqual([]);
+      // A second bm_decide is refused too: the first answer wins.
+      expect(await callTool("bm_decide", { decisionId: qid(3), optionKey: "b", reason: "Changed my mind." })).toMatchObject({
+        isError: true,
+        text: expect.stringContaining("already answered by the Orchestrator"),
+      });
+
+      // The Worker's turn ends: ONE BM-DELIVERY with Q1, Q2 and Q3, each once.
+      fake.table.get(WORKER)!.status = "idle";
+      fake.policy.sendTo.add(WORKER);
+      await turnEnded(workerEnded());
+      expect(fake.sends.map((sent) => sent.id)).toEqual([WORKER]);
+      expect(fake.sends[0]!.text).toBe(
+        `BM-DELIVERY answers\nContinue ${REQUEST_ID}.\n\nBM-ANSWERS\nrequestId: ${REQUEST_ID}\nQ1: a — dd/mm/yyyy\nQ2: a — dd/mm/yyyy\nQ3: a — dd/mm/yyyy`,
+      );
+      expect(noticeQueue.pending(WORKER)).toEqual([]);
+    },
+  },
+  {
+    name: "tool bm_direct_worker with a BM-ANSWERS naming an open stored question: refused, pointing at bm_decide; the question stays open",
+    rpc: null,
+    tool: "bm_direct_worker",
+    run: async () => {
+      clearDecisionStoreCache();
+      createOrchestratorStore(home).setAutopilot(WORKSPACE_ID, true, "tab");
+      const id = `q:${REQUEST_ID}:Q1`;
+      createDecisionStore(home).open(makeDecision({ id, workspaceId: WORKSPACE_ID, requestId: REQUEST_ID, askedBy: { role: "worker", agentId: WORKER }, subject: null }));
+      expect(await callTool("bm_direct_worker", DIRECT)).toEqual({
+        isError: true,
+        text: `Refused: Q1 of ${REQUEST_ID} is the stored decision ${id}: answer it with bm_decide, not in a BM-ANSWERS block.`,
+      });
+      expect(await callTool("bm_send_command", { ...SEND, intent: "answer", command: `BM-ANSWERS\nrequestId: ${REQUEST_ID}\nQ1: a` })).toMatchObject({
+        isError: true,
+        text: expect.stringContaining("answer it with bm_decide"),
+      });
+      expect(createDecisionStore(home).get(id, WORKSPACE_ID)!.status).toBe("open");
+      expect(allCommands()).toEqual([]);
+    },
+  },
+  {
     name: "the owner picks an Orchestrator option with a prepared command: one command to that Manager, approved = the option's effects, the grant spent once",
     rpc: null,
     sendsTo: [MANAGER],
@@ -1739,6 +1857,7 @@ describe("REQ-079 (a-c), O-2 — across every Orchestrator path, no forbidden ac
         creates: path.creates ?? 0,
         ...(path.sendsTo === undefined ? {} : { sendsTo: path.sendsTo }),
         limits: path.limits === true,
+        deliveries: path.deliveries === true,
       });
     });
   }
@@ -1776,6 +1895,7 @@ describe("O-4 — before the user opens the Orchestrator: no Orchestrator agent,
     expect((await callTool("bm_set_autopilot", { workspaceId: WORKSPACE_ID, enabled: true })).isError).toBe(true);
     await callTool("bm_ask_owner", { workspaceId: WORKSPACE_ID, question: "Delete the old invoices?", recommendation: "No." });
     expect((await callTool("bm_direct_worker", DIRECT)).isError).toBe(true);
+    expect((await callTool("bm_decide", { decisionId: `q:${REQUEST_ID}:Q1`, optionKey: "a", reason: "Nothing is asked yet." })).isError).toBe(true);
     await callTool("bm_note", { workspaceId: WORKSPACE_ID, text: "Nothing is open yet." });
     await callTool("bm_repo", { workspaceId: WORKSPACE_ID, action: "status" });
     await turnEnded(managerEnded());

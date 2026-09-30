@@ -690,6 +690,29 @@ describe("A-1 from the decision store (Phase 1)", () => {
     expect(m.a5.reanswered).toBe(1);
   });
 
+  it("a question the Orchestrator answered with bm_decide (change-004) was answered by agents, once, and never reached the owner", () => {
+    const decided = answerDecision(storedQuestion(), { by: "orchestrator", via: "autopilot", optionKey: "a", reason: "PDF is what the owner asked for.", at: at(6) });
+    if (!decided.ok) throw new Error(decided.message);
+    // The Worker gets it only as the plugin's BM-DELIVERY notice, which the records never read as an answer.
+    const records = [askedAt(at(5), Q1), workerGot(at(6, 5), `BM-DELIVERY answers\n${relay(R, "Q1: a — PDF")}`, "agent"), finishedAt(at(20))];
+    const m = metrics(records, { decisions: [decided.decision] });
+    expect(m.a1.finished).toEqual({ asked: 1, reachedOwner: 0, answeredByAgents: 1, answeredByAgentsViaCommand: 1, unanswered: 0 });
+    expect(m.a1.perFinishedRequest).toEqual({ asked: 1, reachedOwner: 0, answeredByAgents: 1 });
+    expect(m.a2.answeredTwice).toBe(0);
+    // No owner wait: nobody waited on the owner.
+    expect(m.supplementary.ownerWait).toMatchObject({ questions: 0 });
+    // Its grant is not the owner's: a push after it is not shown authorised by it (A-6).
+    const pushed = answerDecision(storedQuestion(), { by: "orchestrator", via: "autopilot", optionKey: "b", reason: "x", at: at(6) });
+    if (!pushed.ok) throw new Error(pushed.message);
+    const push = workerGot(at(7), "Go on.", "agent", { evidence: [shell("git push origin main", at(7))] });
+    expect(metrics([askedAt(at(5), Q1), push], { decisions: [pushed.decision] }).a6).toMatchObject({ authorised: 0, notShownAuthorised: 1 });
+    // An owner message in the request between the question and the answer still makes it reach the owner.
+    expect(metrics([askedAt(at(5), Q1), ownerTyped(at(5, 30), "PDF, please."), finishedAt(at(20))], { decisions: [decided.decision] }).a1.finished).toMatchObject({
+      reachedOwner: 1,
+      answeredByAgents: 0,
+    });
+  });
+
   it("an Orchestrator decision of the request open between the question and its answer put it to the owner", () => {
     const m = metrics([askedAt(at(5), Q1), workerGot(at(9), orchestratorAnswer(R, "Q1: a — PDF"), "agent")], {
       decisions: [storedQuestion(), orchestratorDecision("o:d1", at(6))],
@@ -780,6 +803,14 @@ describe("A-7 from the wake records (Phase 1)", () => {
       notes: [{ workspaceId: WORKSPACE_ID, at: at(21) }],
     });
     expect(m.a7).toEqual({ approximate: false, notesIncluded: true, wakeRecordsIncluded: true, wakes: 5, actedOn: 3, noAction: 2, noActionShare: 0.4 });
+  });
+
+  it("a Worker's question the Orchestrator answered (bm_decide, change-004) in the wake's turn is its action; the owner's answer is not", () => {
+    const decided = answerDecision(storedQuestion(), { by: "orchestrator", via: "autopilot", optionKey: "a", reason: "PDF.", at: at(11) });
+    if (!decided.ok) throw new Error(decided.message);
+    const byOwner = answered(storedQuestion({ id: `q:${R}:Q2` }), at(21), { optionKey: "a" });
+    const m = metrics([], { wakes: [wake(at(10), at(12)), wake(at(20), at(22))], decisions: [decided.decision, byOwner] });
+    expect(m.a7).toMatchObject({ approximate: false, wakes: 2, actedOn: 1, noAction: 1 });
   });
 
   it("a wake without its end is judged over 10 minutes, cut at the next wake, and counted unknown", () => {

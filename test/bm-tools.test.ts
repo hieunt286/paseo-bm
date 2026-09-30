@@ -16,7 +16,7 @@ import {
 } from "../plugin/shared/bm-tools";
 import { WORKSPACE_ID_PATTERN } from "../plugin/server/trace-store";
 import { parseReports, parseReviews } from "../plugin/shared/bm-report";
-import { EFFECTS } from "../plugin/shared/decisions";
+import { CONFIRM_EFFECTS, EFFECTS } from "../plugin/shared/decisions";
 
 /**
  * The agents' block-building tools (design delta 20260924b-agent-tools, AT-1).
@@ -259,7 +259,7 @@ describe("the tool list", () => {
   });
 
   it("lists the Orchestrator's server-run tools before bm_assessment, the Manager's bm_decisions after bm_answers, and nothing new for the Worker and the Reviewer (orchestrator design §5, autonomy design §A.9)", () => {
-    expect(toolFacesFor("orchestrator").map((tool) => tool.name)).toEqual(["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_set_autopilot", "bm_direct_worker", "bm_repo", "bm_note", "bm_assessment"]);
+    expect(toolFacesFor("orchestrator").map((tool) => tool.name)).toEqual(["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_set_autopilot", "bm_direct_worker", "bm_repo", "bm_note", "bm_assessment"]);
     for (const role of ["worker", "reviewer"] as const) expect(toolFacesFor(role)).toEqual(toolsFor(role));
     expect(toolFacesFor("manager").map((tool) => tool.name)).toEqual(["bm_answers", "bm_decisions"]);
     expect(serverToolsFor("manager")).toEqual(MANAGER_SERVER_TOOLS);
@@ -323,6 +323,24 @@ describe("the tool list", () => {
     ]);
     expect(face("bm_send_command").description).not.toMatch(/limit line/);
     expect(face("bm_send_command").inputSchema.properties?.["re"]).toMatchObject({ maxLength: 120 });
+  });
+
+  it("bm_decide (change-004): a decision, one option and a one-line reason, nothing else — never own words", () => {
+    const face = ORCHESTRATOR_SERVER_TOOLS.find((tool) => tool.name === "bm_decide")!;
+    expect(face.inputSchema.required).toEqual(["decisionId", "optionKey", "reason"]);
+    expect(Object.keys(face.inputSchema.properties ?? {})).toEqual(["decisionId", "optionKey", "reason"]);
+    expect(schemaIssues(face.inputSchema, { decisionId: "q:req-20260930T031055Z:Q1", optionKey: "a", reason: "Because." })).toEqual([]);
+    expect(schemaIssues(face.inputSchema, { decisionId: "q:req-20260930T031055Z:Q1", optionKey: "Use PDF", reason: "x".repeat(301), words: "PDF" })).toEqual([
+      "input.optionKey: must match ^[a-z0-9][a-z0-9-]{0,31}$",
+      "input.reason: must be at most 300 characters",
+      "input.words: is not a field of this tool",
+    ]);
+    // Its limits are in its description, where the model reads them.
+    for (const effect of [...CONFIRM_EFFECTS, "network", "outside-workspace", "dependency-install"]) expect(face.description, effect).toContain(effect);
+    // The command tools point at it for a stored question.
+    for (const name of ["bm_send_command", "bm_direct_worker"]) {
+      expect(ORCHESTRATOR_SERVER_TOOLS.find((tool) => tool.name === name)!.inputSchema.properties?.["command"]?.description).toContain("bm_decide");
+    }
   });
 
   it("the workspace id rule is the trace store's", () => {

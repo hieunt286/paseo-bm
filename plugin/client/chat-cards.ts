@@ -972,6 +972,7 @@ const VIA_WHERE: Readonly<Record<AnswerVia, string>> = {
   "chat-manager": " in the Manager's chat",
   "chat-worker": " in the Worker's chat",
   "chat-orchestrator": " in the Orchestrator's chat",
+  autopilot: " on Autopilot",
 };
 
 const CHAT_WORDS: Readonly<Record<ChatVia, string>> = {
@@ -1060,7 +1061,12 @@ function decisionDetails(card: ChatCard, seed: DecisionSeed, decision: Decision 
     lines.push(`${option.key}: ${option.label}${option.recommended ? " (recommended)" : ""} — effects: ${effects.length === 0 ? "none" : effectWords(effects)}`);
   }
   lines.push(`Status: ${decision.status}${decision.settledAt === null ? "" : ` at ${decision.settledAt}`}`);
-  if (decision.answer !== null) lines.push(`Answer via: ${decision.answer.via}`);
+  if (decision.answer !== null) {
+    if (decision.answer.by === "orchestrator") lines.push("Answered by: the Orchestrator");
+    lines.push(`Answer via: ${decision.answer.via}`);
+    // The Orchestrator's reason (bm_decide, change-004): in Details, never on the card's face.
+    if (decision.answer.reason !== undefined) lines.push(`Reason: ${decision.answer.reason}`);
+  }
   if (decision.grant !== null) {
     lines.push(`Grant: ${effectWords(decision.grant.effects)} until ${decision.grant.expiresAt}${decision.grant.usedAt === null ? "" : `, used at ${decision.grant.usedAt}`}`);
   }
@@ -1168,12 +1174,14 @@ export function decisionCardView(input: DecisionViewInput): DecisionCardView {
     }
     case "answered": {
       const answer = decision.answer!;
+      // Settled either way, so no answer buttons: the Orchestrator's answer (bm_decide) is as final as the owner's.
+      const by = answer.by === "orchestrator" ? "answered by the Orchestrator" : `answered by you${VIA_WHERE[answer.via]}`;
       return {
         ...view,
         frame: {
           ...frame,
           chip,
-          authority: `answered by you${VIA_WHERE[answer.via]} · ${localTimeText(new Date(answer.at), now)}`,
+          authority: `${by} · ${localTimeText(new Date(answer.at), now)}`,
           tag: grantTag(decision),
           body: answerLines(decision, agents).slice(0, MAX_BODY_LINES),
         },

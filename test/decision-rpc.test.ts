@@ -18,7 +18,7 @@ import {
   decisionsGetRpc,
   decisionsListRpc,
 } from "../plugin/shared/contracts";
-import { GRANT_TTL_MS, markNeedsConfirmation, supersedeDecision, withdrawDecision, type Decision } from "../plugin/shared/decisions";
+import { GRANT_TTL_MS, answerDecision, markNeedsConfirmation, supersedeDecision, withdrawDecision, type Decision } from "../plugin/shared/decisions";
 import { DECISION_REQUEST, DECISION_WS, makeDecision } from "./helpers/decisions";
 
 /**
@@ -123,6 +123,18 @@ describe("decisions.answer", () => {
 
     // Only the first answer reached the delivery hook.
     expect(settled).toHaveLength(1);
+  });
+
+  it("refuses the owner's answer to a question the Orchestrator already answered (bm_decide, change-004), naming who answered", async () => {
+    const s = store();
+    s.open(q(1));
+    s.transition(q(1).id, (d) => answerDecision(d, { by: "orchestrator", via: "autopilot", optionKey: "c", reason: "Hold until the review.", at: NOW }));
+    const before = fileBytes();
+    await expect(handleDecisionsAnswer({ id: q(1).id, optionKey: "a", confirmed: true, via: "chat-card" }, PASEO, deps)).rejects.toThrow(
+      `E_DECISION_SETTLED: decision ${q(1).id} is answered by the Orchestrator; it can no longer be answered`,
+    );
+    expect(fileBytes()).toBe(before);
+    expect(settled).toEqual([]);
   });
 
   it("needs the owner's confirmation for a release, data, security or cost effect (X-4)", async () => {

@@ -136,7 +136,11 @@ export default function contribute(server: PluginServerContext): () => void {
   // recorded turn brought.
   const stallWatcher = createStallWatcher({ bus: eventBus });
   // The agents' block-building tools (ADR-010): one endpoint, given to every bm-* agent created from now on.
-  const agentTools = startAgentTools({ orchestrator: createOrchestratorTools() });
+  // A Worker's question the Orchestrator answers (bm_decide, change-004) takes the delivery the owner's
+  // answers take: the settlement hook below, read when a call comes, long after this line.
+  const agentTools = startAgentTools({
+    orchestrator: createOrchestratorTools({ onSettled: (decisions, context) => onDecisionsSettled(decisions, context) }),
+  });
   // Orchestrator design §8: the `orchestrator.*` RPCs. An Orchestrator created
   // before the endpoint's stored secret was made has an old URL (§5.1).
   const isToolsStale = toolsStaleSince(agentTools.secretSince);
@@ -209,8 +213,9 @@ export default function contribute(server: PluginServerContext): () => void {
   // Autonomy design §A.6 (ADR-017): decisions.list / get / answer / confirm. An
   // answered decision is delivered by its asker kind: a fallback decision runs
   // its prepared action through fallback.act's own handler.
-  // One settlement hook for every way a decision is answered: the RPCs and the
-  // materialiser below; each kind has its own delivery (§A.6).
+  // One settlement hook for every way a decision is answered: the RPCs, the
+  // materialiser below and the Orchestrator's bm_decide (above); each kind has
+  // its own delivery (§A.6).
   // A Worker's answered questions go to it at its next idle moment, one
   // BM-ANSWERS block per request (DQ-2); undelivered ones are resent after a reload.
   const questionDelivery = createQuestionDecisionDelivery();

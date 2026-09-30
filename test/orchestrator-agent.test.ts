@@ -179,7 +179,7 @@ describe("orchestrator.open", () => {
     expect(request.title).toBe("Beads Orchestrator");
     expect(request.config.provider).toBe("bm-orchestrator/claude-opus-5-5");
     expect(request.prompt).toBe(ORCHESTRATOR_FIRST_PROMPT);
-    for (const tool of ["bm_projects", "bm_request", "bm_agent_messages", "bm_decisions", "bm_send_command", "bm_ask_owner", "bm_set_autopilot", "bm_direct_worker", "bm_repo", "bm_note", "bm_assessment"]) {
+    for (const tool of ["bm_projects", "bm_request", "bm_agent_messages", "bm_decisions", "bm_send_command", "bm_ask_owner", "bm_decide", "bm_set_autopilot", "bm_direct_worker", "bm_repo", "bm_note", "bm_assessment"]) {
       expect(request.prompt).toContain(tool);
     }
     // Proposals are retired (autonomy design §A.11, §A.14): the first prompt no longer offers one.

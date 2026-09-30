@@ -170,6 +170,20 @@ describe("Needs you: grouping and order", () => {
     expect(UNKNOWN_PROJECT).not.toContain("wks");
   });
 
+  it("drops a question the Orchestrator answered (bm_decide, change-004): it is settled, so it no longer needs you", () => {
+    const open = question("req-A", 1, 10);
+    const other = question("req-A", 2, 5);
+    const decided = answerDecision(open, { by: "orchestrator", via: "autopilot", optionKey: "c", reason: "Hold until the review is in.", at: minutesAgo(1) });
+    if (!decided.ok) throw new Error("fixture");
+    // Whether the list still carries a stale copy or already left it out, only the open question needs the owner.
+    for (const decisions of [[decided.decision, other], [other]]) {
+      const shown = inboxView(input({ decisions }));
+      expect(shown.needsYou.groups.flatMap((group) => group.items.map((item) => item.decision.id))).toEqual(["q:req-A:Q2"]);
+      expect(shown.needsYou.count).toBe(1);
+      expect(shown.count).toBe(1);
+    }
+  });
+
   it("keeps a decision settled here in its place, drawn settled and not counted; the list's stale copy loses", () => {
     const open = question("req-A", 1, 10);
     const other = question("req-A", 2, 5);

@@ -280,6 +280,25 @@ export function DecisionCard({
   );
 }
 
+/** The longest option label that still sits in a row of chips; a longer one stacks the options. */
+export const OPTION_ROW_MAX_CHARS = 32;
+
+/**
+ * Whether a decision's options stack: short answers ("Yes", "Hold") sit side
+ * by side; once one is a sentence, each option takes the card's width and its
+ * text wraps, so nothing runs past the card.
+ */
+export function optionsStacked(labels: readonly string[]): boolean {
+  return labels.some((label) => label.length > OPTION_ROW_MAX_CHARS);
+}
+
+// A row item in React Native does not shrink by default: without these a long
+// label widens its button past the card instead of wrapping.
+const OPTION_STACK = { gap: 6 };
+const STACKED_OPTION = { alignSelf: "stretch" as const, alignItems: "flex-start" as const };
+const ROW_OPTION = { maxWidth: "100%" as const, flexShrink: 1 };
+const OPTION_TEXT = { flexShrink: 1, textAlign: "left" as const };
+
 /**
  * What a decision card draws, from its view: the frame, then the options (the
  * recommended one the primary action), "Own words…", the in-place
@@ -336,8 +355,9 @@ export function DecisionCardBody({
     );
   }
   if (view.options.length > 0) {
+    const stacked = optionsStacked(view.options.map((option) => option.label));
     actions.push(
-      <View key="options" style={styles.chipRow}>
+      <View key="options" style={stacked ? OPTION_STACK : styles.chipRow}>
         {view.options.map((option) => (
           <Pressable
             key={option.key}
@@ -346,9 +366,9 @@ export function DecisionCardBody({
             accessibilityState={{ disabled: off }}
             disabled={off}
             onPress={() => onChoose(option.key)}
-            style={[option.primary ? styles.button : styles.secondaryButton, { opacity: off ? 0.5 : 1 }]}
+            style={[option.primary ? styles.button : styles.secondaryButton, stacked ? STACKED_OPTION : ROW_OPTION, { opacity: off ? 0.5 : 1 }]}
           >
-            <Text style={option.primary ? styles.buttonText : styles.secondaryButtonText}>{option.label}</Text>
+            <Text style={[option.primary ? styles.buttonText : styles.secondaryButtonText, OPTION_TEXT]}>{option.label}</Text>
           </Pressable>
         ))}
       </View>,

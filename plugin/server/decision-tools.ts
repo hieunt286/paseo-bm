@@ -77,10 +77,13 @@ export function decisionSummaryOf(decision: Decision, env: NodeJS.ProcessEnv, op
       decision.answer === null
         ? null
         : {
+            // The owner, or the Orchestrator (`bm_decide`, with its reason).
+            by: decision.answer.by,
             via: decision.answer.via,
             optionKey: decision.answer.optionKey,
             words: words === null ? null : cutText(redactText(words, env), DECISION_WORDS_MAX_CHARS),
             at: decision.answer.at,
+            ...(decision.answer.reason === undefined ? {} : { reason: redactText(decision.answer.reason, env) }),
           },
     ...(options.grant ? { grant: decision.grant } : {}),
     delivery: decision.delivery,

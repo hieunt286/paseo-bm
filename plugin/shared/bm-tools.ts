@@ -6,9 +6,10 @@
  *
  * The Orchestrator's other tools (design §5.2–§5.3, §6A, §6B.4: `bm_projects`,
  * `bm_request`, `bm_agent_messages`, `bm_send_command`, `bm_decisions`,
- * `bm_ask_owner`, `bm_set_autopilot`, `bm_direct_worker`, `bm_repo`,
- * `bm_note`) read plugin data and repositories, record decisions, commands
- * and notes, and send commands, so they cannot be pure: only their
+ * `bm_ask_owner`, `bm_decide`, `bm_set_autopilot`, `bm_direct_worker`,
+ * `bm_repo`, `bm_note`) read plugin data and repositories, record and answer
+ * decisions, record commands and notes, and send commands, so they cannot be
+ * pure: only their
  * faces — name, description, input schema — live here
  * (`ORCHESTRATOR_SERVER_TOOLS`), and `server/orchestrator-tools.ts` runs them.
  * The Manager's `bm_decisions` (autonomy design §A.9) reads the decision store,
@@ -35,7 +36,7 @@
 import { checkBlocks, issueText, type BlockKind } from "./bm-format";
 import { ASSESSMENT_BLOCK, ASSESSMENT_INPUT_SCHEMA, rubricIssues } from "./bm-assessment";
 import { MAX_OPTIONS, MAX_SUBJECT_CHARS } from "./bm-questions";
-import { DECISION_STATUSES, EFFECTS, SUBJECT_PATTERN } from "./decisions";
+import { DECISION_STATUSES, EFFECTS, MAX_ANSWER_REASON_CHARS, OPTION_KEY_PATTERN, SUBJECT_PATTERN } from "./decisions";
 import {
   MAX_DECISION_OPTIONS,
   MAX_DECISION_OPTION_CHARS,
@@ -764,7 +765,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
           maxLength: MAX_COMMAND_DECISION_ID_CHARS,
           description: "The id (o:…) of your decision the owner answered, when this command carries out that answer: its grant covers the effects the owner approved, once.",
         },
-        command: { type: "string", minLength: 1, maxLength: MAX_COMMAND_BODY_CHARS, description: "The instructions the Manager receives: the body of the BM-COMMAND block. Answers to questions go in a BM-ANSWERS block." },
+        command: { type: "string", minLength: 1, maxLength: MAX_COMMAND_BODY_CHARS, description: "The instructions the Manager receives: the body of the BM-COMMAND block. A stored question (q:…) is answered with bm_decide, never in a BM-ANSWERS block here." },
         reason: { type: "string", minLength: 1, maxLength: MAX_COMMAND_WHY_CHARS, description: "Why this command, in one line, for the Manager and the owner (the block's why)." },
       },
     },
@@ -773,7 +774,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
     name: "bm_decisions",
     role: "orchestrator",
     description:
-      "The owner's decisions as the plugin stores them: your own questions (o:…), the Workers' questions (q:…) and the fallback incidents (f:…), newest asked first, redacted. Each with its status (open, needs-confirmation, answered, superseded, withdrawn, expired), its options and their effects, the owner's answer, the grant it gave (effects, until when, used or not) and what the plugin delivered. Filter by project, request or status (unsettled: open or needs-confirmation). Read-only. Returns JSON.",
+      "The owner's decisions as the plugin stores them: your own questions (o:…), the Workers' questions (q:…) and the fallback incidents (f:…), newest asked first, redacted. Each with its status (open, needs-confirmation, answered, superseded, withdrawn, expired), its options and their effects, the answer (the owner's, or yours with bm_decide and your reason), the grant it gave (effects, until when, used or not) and what the plugin delivered. Filter by project, request or status (unsettled: open or needs-confirmation). Read-only. Returns JSON.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -853,6 +854,32 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
     },
   },
   {
+    name: "bm_decide",
+    role: "orchestrator",
+    description:
+      "Answer a Worker's open question (a q:… decision) yourself, with one of its options, on a project whose Autopilot is on. The option may allow none of push, publish, deploy, real-data, migration, security, cost, network or outside-workspace, and dependency-install only where the owner allowed dependency; anything else is the owner's. The plugin records the answer as yours, with your reason, and delivers it to the Worker at its next idle moment, exactly as it delivers the owner's. The first answer wins: a question already answered, waiting for the owner's confirmation or no longer open is refused, and a refusal changes nothing. Never answer a stored question in a command's BM-ANSWERS block.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["decisionId", "optionKey", "reason"],
+      properties: {
+        decisionId: {
+          type: "string",
+          minLength: 1,
+          maxLength: MAX_COMMAND_DECISION_ID_CHARS,
+          description: "The Worker's question, q:<requestId>:<Qn>, as a decision.opened line or bm_decisions gave it.",
+        },
+        optionKey: { type: "string", pattern: OPTION_KEY_PATTERN.source, description: "The key of the option you choose (a, b, …)." },
+        reason: {
+          type: "string",
+          minLength: 1,
+          maxLength: MAX_ANSWER_REASON_CHARS,
+          description: `Why this option, in one line, for the owner: it is shown with your answer. 1-${MAX_ANSWER_REASON_CHARS} characters.`,
+        },
+      },
+    },
+  },
+  {
     name: "bm_set_autopilot",
     role: "orchestrator",
     description:
@@ -871,7 +898,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
     name: "bm_direct_worker",
     role: "orchestrator",
     description:
-      "Command a running project's Worker directly: a correction, or the answer to its question. Same authority as bm_send_command (Autopilot on, the owner's own latest message in your chat, or decisionId), the same declared intent and effects, and the same check of the text against them. Delivered as a BM-COMMAND block when the Worker's turn ends, and its Manager always gets a copy. interrupt: true delivers at once, replacing the Worker's turn, and is allowed only while a danger signal of that Worker is open. Never a Reviewer.",
+      "Command a running project's Worker directly: a correction, or the answer to a question of its that has no stored decision (a stored one, q:…, is answered with bm_decide). Same authority as bm_send_command (Autopilot on, the owner's own latest message in your chat, or decisionId), the same declared intent and effects, and the same check of the text against them. Delivered as a BM-COMMAND block when the Worker's turn ends, and its Manager always gets a copy. interrupt: true delivers at once, replacing the Worker's turn, and is allowed only while a danger signal of that Worker is open. Never a Reviewer.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -895,7 +922,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
           maxLength: MAX_COMMAND_DECISION_ID_CHARS,
           description: "The id (o:…) of your decision the owner answered, when this command carries out that answer: its grant covers the effects the owner approved, once.",
         },
-        command: { type: "string", minLength: 1, maxLength: MAX_COMMAND_BODY_CHARS, description: "The instructions the Worker receives: the body of the BM-COMMAND block. Answers to its questions go in a BM-ANSWERS block." },
+        command: { type: "string", minLength: 1, maxLength: MAX_COMMAND_BODY_CHARS, description: "The instructions the Worker receives: the body of the BM-COMMAND block. An answer to a question with no stored decision goes in a BM-ANSWERS block; a stored one (q:…) is refused here: answer it with bm_decide." },
         why: { type: "string", minLength: 1, maxLength: MAX_COMMAND_WHY_CHARS, description: "Why, in one line." },
         interrupt: { type: "boolean", description: "true stops the Worker's running turn with this command; only while its danger signal is open." },
       },

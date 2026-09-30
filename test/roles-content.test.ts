@@ -472,6 +472,13 @@ describe("orchestrator.md — decides what reaches it, verifies, declares effect
     }
     for (const signal of ["stuck", "permission", "danger", "failing", "heavy", "outside"]) expect(O, signal).toContain(`\`${signal}\``);
     rule(O, "danger is interrupted only when allowed", /`interrupt: true` — allowed only when the line says so/);
+    // change-004: a decision.opened is answered with bm_decide when Autopilot covers the option, else it stays the owner's.
+    rule(
+      O,
+      "a decision.opened is answered with bm_decide, or left to the owner",
+      /`decision\.opened` — a Worker asks the owner\. Read it with `bm_decisions`\. If Autopilot covers the option you choose, answer with `bm_decide`; otherwise leave it to the owner\./,
+    );
+    expect(O, "no answer to a stored question in a command").not.toMatch(/answer with `bm_direct_worker`|intent `answer`, a `BM-ANSWERS` block/);
     rule(O, "BM-ANSWER carries a grant used with decisionId", /\*\*`BM-ANSWER`\*\* is the owner's answer to one of your decisions, with its grant/);
     rule(O, "carries the answer out with decisionId", /passing `decisionId`, so the grant covers the effects the owner approved/);
   });
@@ -481,7 +488,9 @@ describe("orchestrator.md — decides what reaches it, verifies, declares effect
     rule(O, "never a Reviewer", /never to a Reviewer/);
     rule(O, "a refusal sent nothing", /A refusal means nothing was sent/);
     rule(O, "never reword", /never reword to get through/);
-    rule(O, "direct commands only correct or answer", /`bm_direct_worker` \(to a Worker: only a correction or the answer to its own questions; its Manager gets a copy\)/);
+    // A Worker's question is answered through the decision store, never in a command (change-004).
+    rule(O, "direct commands only correct", /`bm_direct_worker` \(to a Worker: only a correction; its Manager gets a copy\)/);
+    rule(O, "a Worker's question is bm_decide's", /`bm_decide` \(a Worker's question\)/);
   });
 
   it("asks the owner with prepared actions, one open decision per request, and claims no replacement the tool did not report", () => {

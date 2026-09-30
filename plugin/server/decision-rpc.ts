@@ -11,7 +11,9 @@
  * or `BM-ANSWER` (`orchestrator-decisions.ts`), and the fallback incidents'
  * `fallback.act` (`fallback-decisions.ts`). The answer
  * stands whatever the hook does: a failing hook is logged, never turned into a
- * failed answer.
+ * failed answer. The same hook delivers a Worker's question the Orchestrator
+ * answered with `bm_decide` (`orchestrator-tools.ts`, change-004), so its
+ * answer reaches the Worker exactly as the owner's does.
  */
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import {

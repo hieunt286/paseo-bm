@@ -173,7 +173,7 @@ describe("the Orchestrator's endpoint (orchestrator design §5.1)", () => {
     findings: [{ severity: "warning", text: "Beads for a Small request.", evidence: "br create after tier: Small" }],
     suggestions: [{ role: "worker", text: "A Small request gets no bead.", why: "The beads finding." }],
   };
-  const ORCHESTRATOR_TOOLS = ["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_set_autopilot", "bm_direct_worker", "bm_repo", "bm_note", "bm_assessment"];
+  const ORCHESTRATOR_TOOLS = ["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_set_autopilot", "bm_direct_worker", "bm_repo", "bm_note", "bm_assessment"];
   /** The Orchestrator's tools no other role has: the Manager has a bm_decisions of its own. */
   const ORCHESTRATOR_ONLY = ORCHESTRATOR_TOOLS.filter((name) => name !== "bm_decisions");
 
@@ -577,7 +577,7 @@ describe("the creation hook's part", () => {
     const orchestrator = applyAgentTools(request("bm-orchestrator/claude-opus-5"), tools, "claude");
     expect(orchestrator?.config.mcpServers?.[AGENT_TOOLS_SERVER]).toEqual({ type: "http", url: "http://127.0.0.1:4567/mcp/orchestrator", alwaysLoad: true });
     expect(orchestrator?.config.toolPolicy?.preapproved).toEqual(
-      ["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_set_autopilot", "bm_direct_worker", "bm_repo", "bm_note", "bm_assessment"].map((tool) => ({ kind: "mcp", server: AGENT_TOOLS_SERVER, tool })),
+      ["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_set_autopilot", "bm_direct_worker", "bm_repo", "bm_note", "bm_assessment"].map((tool) => ({ kind: "mcp", server: AGENT_TOOLS_SERVER, tool })),
     );
     expect(applyAgentTools(request("bm-orchestrator"), tools, "copilot")).toBeUndefined();
     // Paseo refuses a toolPolicy on Pi, Oh My Pi or Copilot: the agent must still be created.

@@ -575,9 +575,11 @@ function decisionEvents(decision: Decision, nameOf: (agentId: string | null) => 
   if (answer !== null) {
     const option = answer.optionKey === null ? undefined : decision.options.find((entry) => entry.key === answer.optionKey);
     const to = decision.delivery === null ? "" : ` → ${nameOf(decision.delivery.to)}`;
+    // The Orchestrator answers only with an option (bm_decide, change-004).
+    const who = answer.by === "orchestrator" ? "The Orchestrator" : "You";
     const text =
       option !== undefined
-        ? `You chose "${shorten(option.label, 80)}"${to}`
+        ? `${who} chose "${shorten(option.label, 80)}"${to}`
         : answer.words !== null
           ? `You answered in your own words${to}`
           : "You confirmed it was answered in the chat";

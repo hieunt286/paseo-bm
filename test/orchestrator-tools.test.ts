@@ -20,7 +20,10 @@ import {
   REPO_OUTPUT_MAX_CHARS,
   PROJECTS_BOUNDED_NOTE,
   REQUEST_BOUNDED_NOTE,
+  OWNER_ONLY_ANSWER_EFFECTS,
   agentMessagesBoundedNote,
+  decideRefusalOf,
+  storedAnswerRefusalOf,
   type GitRunner,
   type OrchestratorToolsDeps,
   type ServerToolResult,
@@ -31,8 +34,19 @@ import { createAlertStore } from "../plugin/server/alert-store";
 import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
 import { handleDecisionsAnswer, settledByKind } from "../plugin/server/decision-rpc";
 import { createOrchestratorDecisionDelivery } from "../plugin/server/orchestrator-decisions";
+import { createQuestionDecisionDelivery } from "../plugin/server/decision-delivery";
 import { isPluginNotice } from "../plugin/shared/notices";
-import { GRANT_TTL_MS, answerDecision, type Decision } from "../plugin/shared/decisions";
+import {
+  CONFIRM_EFFECTS,
+  GRANT_TTL_MS,
+  answerDecision,
+  expireDecision,
+  markNeedsConfirmation,
+  supersedeDecision,
+  withdrawDecision,
+  type Decision,
+} from "../plugin/shared/decisions";
+import { makeDecision } from "./helpers/decisions";
 import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store";
 import type { AgentFacts } from "../plugin/server/traces";
 import type { TraceRecord } from "../plugin/shared/contracts";
@@ -595,7 +609,7 @@ describe("bm_assessment (design §5.5)", () => {
 });
 
 describe("the tool set", () => {
-  it("lists the eleven tools in order, and answers an unknown name without running anything", async () => {
+  it("lists the twelve tools in order, and answers an unknown name without running anything", async () => {
     const { paseo } = fakePaseo([]);
     const tools = toolsWith(paseo);
     expect(tools.faces.map((face) => face.name)).toEqual([
@@ -605,6 +619,7 @@ describe("the tool set", () => {
       "bm_send_command",
       "bm_decisions",
       "bm_ask_owner",
+      "bm_decide",
       "bm_set_autopilot",
       "bm_direct_worker",
       "bm_repo",
@@ -1572,6 +1587,258 @@ describe("the owner's answer to an Orchestrator decision (autonomy design §A.6)
     await answer({ id, optionKey: "a", confirmed: true });
     expect(stored(id)).toMatchObject({ grant: { usedAt: null }, delivery: { to: MANAGER, outcome: "failed" } });
     expect(enqueue.mock.calls.map(([target]) => target)).toEqual([MANAGER, ORCHESTRATOR]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// change-004: the Orchestrator answers a Worker's question through the store.
+// ---------------------------------------------------------------------------
+
+describe("bm_decide (change-004; autonomy design §A.6, §B.5)", () => {
+  const REQUEST = "req-20260930T031055Z";
+  const QID = (n: number) => `q:${REQUEST}:Q${n}`;
+  const worker = () => snapshotOf(clean().agents[1]!, { status: "idle", labels: { "bm.role": "worker", "paseo.parent-agent-id": MANAGER, "bm.requestId": REQUEST } });
+  /** A Worker's open question: `a` recommended, no effect; `b` the effects under test. */
+  const question = (n: number, effects: Decision["options"][number]["effects"] = ["commit"], overrides: Partial<Decision> = {}) =>
+    makeDecision({
+      id: QID(n),
+      workspaceId: WORKSPACE_ID,
+      requestId: REQUEST,
+      askedBy: { role: "worker", agentId: WORKER },
+      askedAt: at(0),
+      question: `Question ${n}?`,
+      subject: null,
+      options: [
+        { key: "a", label: "Keep it as it is", recommended: true, effects: ["none"] },
+        { key: "b", label: "Change it", recommended: false, effects },
+      ],
+      ...overrides,
+    });
+  const stored = (id: string) => createDecisionStore(home).get(id, WORKSPACE_ID)!;
+  const bytes = () => readFileSync(join(home, "decisions", `${WORKSPACE_ID}.json`), "utf8");
+  let onSettled: ReturnType<typeof vi.fn<(decisions: Decision[], context: { paseo: unknown }) => Promise<void>>>;
+  beforeEach(() => {
+    onSettled = vi.fn(async () => undefined);
+    deps.onSettled = onSettled;
+    createOrchestratorStore(home).setAutopilot(WORKSPACE_ID, true, "tab");
+  });
+  afterEach(() => clearDecisionStoreCache());
+
+  function decideTools() {
+    const fake = fakePaseo([snapshotOf(clean().agents[0]!), worker(), orchestratorAgent]);
+    return { ...fake, tools: toolsWith(fake.paseo) };
+  }
+
+  it("answers an open q: decision on an Autopilot project as the Orchestrator, with the option's grant, and hands it to the owner answers' delivery", async () => {
+    createDecisionStore(home).open(question(1));
+    const { tools, paseo, send } = decideTools();
+
+    const result = await tools.call("bm_decide", { decisionId: QID(1), optionKey: "b", reason: "A one-line fix the review already covers." });
+
+    expect(result.ok).toBe(true);
+    expect(result.text.split("\n")[0]).toBe(
+      `Answered Q1 of ${REQUEST} with option b, as yours; the owner sees your answer and your reason on the decision. The plugin delivers it to the Worker at its next idle moment, as it delivers the owner's answers. Send nothing more for it. Tell the owner in one line what you chose and why.`,
+    );
+    expect(stored(QID(1))).toMatchObject({
+      status: "answered",
+      settledAt: NOW.toISOString(),
+      answer: { by: "orchestrator", via: "autopilot", optionKey: "b", words: null, at: NOW.toISOString(), reason: "A one-line fix the review already covers." },
+      grant: { effects: ["commit"], usedAt: null },
+      delivery: null,
+    });
+    expect(jsonOf(result)).toMatchObject({ decisionId: QID(1), optionKey: "b", grant: { effects: ["commit"] }, delivery: null });
+    // The same hook the owner's answers take, once, with the Paseo handle; nothing sent by the tool itself.
+    expect(onSettled).toHaveBeenCalledTimes(1);
+    expect(onSettled.mock.calls[0]![0]).toMatchObject([{ id: QID(1), answer: { by: "orchestrator" } }]);
+    expect(onSettled.mock.calls[0]![1]).toEqual({ paseo });
+    expect(send).not.toHaveBeenCalled();
+    expect(createOrchestratorStore(home).listCommands()).toEqual([]);
+  });
+
+  it("through the real question delivery: the Worker gets BM-DELIVERY answers once, and the decision records it", async () => {
+    createDecisionStore(home).open(question(1));
+    const enqueue = vi.fn(async () => "sent" as const);
+    const delivery = createQuestionDecisionDelivery({ home: () => home, now: () => NOW, queue: { enqueue, pending: () => [] }, workerOf: async () => WORKER });
+    deps.onSettled = settledByKind({ question: delivery.onSettled });
+    const { tools } = decideTools();
+
+    const result = await tools.call("bm_decide", { decisionId: QID(1), optionKey: "a", reason: "Keep it: the owner asked for no change." });
+
+    expect(result.text.split("\n")[0]).toContain("The Worker has it now, as the plugin's BM-DELIVERY.");
+    expect(enqueue.mock.calls).toEqual([[WORKER, `answers:${REQUEST}`, `BM-DELIVERY answers\nContinue ${REQUEST}.\n\nBM-ANSWERS\nrequestId: ${REQUEST}\nQ1: a — Keep it as it is`, expect.anything()]]);
+    expect(stored(QID(1)).delivery).toEqual({ to: WORKER, kind: `answers:${REQUEST}`, at: NOW.toISOString(), outcome: "sent" });
+    expect(jsonOf(result)).toMatchObject({ delivery: { outcome: "sent" } });
+  });
+
+  it("a delivery that throws costs a log line; the answer stands", async () => {
+    createDecisionStore(home).open(question(1));
+    const logs: string[] = [];
+    deps.onSettled = vi.fn(async () => {
+      throw new Error("queue gone");
+    });
+    deps.log = (line) => logs.push(line);
+    const { tools } = decideTools();
+    expect((await tools.call("bm_decide", { decisionId: QID(1), optionKey: "a", reason: "Keep it." })).ok).toBe(true);
+    expect(stored(QID(1)).status).toBe("answered");
+    expect(logs).toEqual([`[paseo-bm] decision ${QID(1)} is answered by the Orchestrator, but its delivery failed: queue gone`]);
+  });
+
+  it("refuses, writing and delivering nothing, what Phase 1's authority does not cover — and names why", async () => {
+    const store = createDecisionStore(home);
+    store.open(question(1, ["push"]));
+    store.open(question(2, ["network"]));
+    store.open(question(3, ["outside-workspace"]));
+    store.open(question(4, ["dependency-install"]));
+    store.open(question(5, ["security"]));
+    store.open(question(6, ["cost", "commit"]));
+    store.open(makeDecision({ id: "o:asked-by-you", workspaceId: WORKSPACE_ID, requestId: REQUEST, askedBy: { role: "orchestrator", agentId: ORCHESTRATOR }, round: null, subject: null }));
+    store.open(makeDecision({ id: "f:fb-0123456789ab", workspaceId: WORKSPACE_ID, requestId: null, askedBy: { role: "plugin", agentId: null }, round: null, subject: null }));
+    const { tools, send } = decideTools();
+    const before = bytes();
+    const refused = async (decisionId: string, optionKey = "b") => (await tools.call("bm_decide", { decisionId, optionKey, reason: "Because." })).text;
+
+    expect(await refused(QID(1))).toBe(`Refused: option b of ${QID(1)} allows push, which only the owner grants; leave the question to the owner.`);
+    expect(await refused(QID(2))).toBe(`Refused: option b of ${QID(2)} allows network, which only the owner grants; leave the question to the owner.`);
+    expect(await refused(QID(3))).toBe(`Refused: option b of ${QID(3)} allows outside-workspace, which only the owner grants; leave the question to the owner.`);
+    expect(await refused(QID(4))).toBe(
+      `Refused: option b of ${QID(4)} allows dependency-install, and the owner has not allowed dependency for project ${WORKSPACE_ID}; leave the question to the owner.`,
+    );
+    expect(await refused(QID(5))).toContain("allows security, which only the owner grants");
+    expect(await refused(QID(6))).toContain("allows cost, which only the owner grants");
+    expect(await refused(QID(1), "z")).toBe(`Refused: decision ${QID(1)} has no option "z"; its options are a, b.`);
+    expect(await refused(QID(9))).toBe(`Refused: no decision ${QID(9)}; use a decisionId a decision.opened line or bm_decisions gave.`);
+    for (const id of ["o:asked-by-you", "f:fb-0123456789ab"]) {
+      expect(await refused(id, "a")).toBe(
+        `Refused: ${id} is not a Worker's question; bm_decide answers only a Worker's question (q:…), and your own decisions and the fallback incidents are the owner's.`,
+      );
+    }
+    // Every CONFIRM_EFFECTS effect, network and outside-workspace stay the owner's.
+    expect(OWNER_ONLY_ANSWER_EFFECTS).toEqual([...CONFIRM_EFFECTS, "network", "outside-workspace"]);
+    expect(bytes()).toBe(before);
+    expect(onSettled).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+
+    // The owner's allowed dependency covers dependency-install, and nothing more.
+    createOrchestratorStore(home).setAutopilotAllow(WORKSPACE_ID, ["dependency"]);
+    expect((await tools.call("bm_decide", { decisionId: QID(4), optionKey: "b", reason: "The lockfile already names it." })).ok).toBe(true);
+    expect(await refused(QID(2))).toContain("allows network, which only the owner grants");
+  });
+
+  it("refuses without Autopilot, and a question that is not open: answered (first answer wins), waiting for confirmation, superseded, withdrawn or expired", async () => {
+    const store = createDecisionStore(home);
+    store.open(question(1));
+    store.open(question(2));
+    store.open(question(3));
+    store.open(question(4));
+    store.open(question(5));
+    store.open(question(6));
+    store.transition(QID(2), (decision) => answerDecision(decision, { via: "inbox", optionKey: "a", at: at(1) }), WORKSPACE_ID);
+    store.transition(QID(3), (decision) => markNeedsConfirmation(decision, { via: "chat-worker", at: at(1) }), WORKSPACE_ID);
+    store.transition(QID(4), (decision) => supersedeDecision(decision, { by: QID(7), at: at(1) }), WORKSPACE_ID);
+    store.transition(QID(5), (decision) => withdrawDecision(decision, { at: at(1) }), WORKSPACE_ID);
+    store.transition(QID(6), (decision) => expireDecision(decision, { at: at(1) }), WORKSPACE_ID);
+    const { tools } = decideTools();
+    const before = bytes();
+    const refused = async (decisionId: string) => (await tools.call("bm_decide", { decisionId, optionKey: "a", reason: "Because." })).text;
+
+    expect(await refused(QID(2))).toBe(`Refused: decision ${QID(2)} was already answered by the owner at ${at(1)}; the first answer stands.`);
+    expect(await refused(QID(3))).toBe(`Refused: decision ${QID(3)} waits for the owner to confirm an answer typed in a chat; it is the owner's.`);
+    expect(await refused(QID(4))).toBe(`Refused: decision ${QID(4)} is superseded by ${QID(7)}; answer that one if it is still open.`);
+    expect(await refused(QID(5))).toBe(`Refused: decision ${QID(5)} is withdrawn; it can no longer be answered.`);
+    expect(await refused(QID(6))).toBe(`Refused: decision ${QID(6)} is expired; it can no longer be answered.`);
+    createOrchestratorStore(home).setAutopilot(WORKSPACE_ID, false, "tab");
+    expect(await refused(QID(1))).toBe(`Refused: Autopilot is off for project ${WORKSPACE_ID}; its Workers' questions are the owner's to answer.`);
+    expect(bytes()).toBe(before);
+    expect(onSettled).not.toHaveBeenCalled();
+
+    // Answered by the Orchestrator itself: a second call is refused the same way, naming it.
+    createOrchestratorStore(home).setAutopilot(WORKSPACE_ID, true, "tab");
+    expect((await tools.call("bm_decide", { decisionId: QID(1), optionKey: "a", reason: "Keep it." })).ok).toBe(true);
+    expect(await refused(QID(1))).toBe(`Refused: decision ${QID(1)} was already answered by the Orchestrator at ${NOW.toISOString()}; the first answer stands.`);
+    expect(onSettled).toHaveBeenCalledTimes(1);
+  });
+
+  it("decideRefusalOf is the rule, pure: only an open q: decision on Autopilot, an option it has, and an effect the Orchestrator may grant", () => {
+    const project = { autopilot: true, allowed: [] as const };
+    expect(decideRefusalOf(question(1, ["commit"]), "b", project)).toBeNull();
+    expect(decideRefusalOf(question(1, ["none"]), "a", project)).toBeNull();
+    expect(decideRefusalOf(question(1, ["dependency-install", "commit"]), "b", { autopilot: true, allowed: ["dependency"] })).toBeNull();
+    expect(decideRefusalOf(question(1, ["dependency-install"]), "b", project)).toContain("has not allowed dependency");
+    expect(decideRefusalOf(question(1), "b", { autopilot: false, allowed: [] })).toContain("Autopilot is off");
+    for (const effect of OWNER_ONLY_ANSWER_EFFECTS) expect(decideRefusalOf(question(1, [effect]), "b", { autopilot: true, allowed: ["security", "release", "data", "cost", "dependency"] }), effect).toContain(`allows ${effect}`);
+  });
+});
+
+describe("a command never carries the answer to a stored question (change-004)", () => {
+  const REQUEST = "req-20260926T100020Z";
+  const agents = () => [snapshotOf(clean().agents[0]!), snapshotOf(clean().agents[1]!, { status: "running" }), orchestratorAgent];
+  const direct = {
+    workspaceId: WORKSPACE_ID,
+    workerId: WORKER,
+    requestId: REQUEST,
+    re: "answer to Q2",
+    intent: "answer",
+    effects: ["none"],
+    command: `BM-ANSWERS\nrequestId: ${REQUEST}\nQ2: a — PDF, A4.`,
+    why: "The owner said PDF.",
+  };
+  const send = { workspaceId: WORKSPACE_ID, managerId: MANAGER, requestId: REQUEST, intent: "answer", effects: ["none"], command: direct.command, reason: "The owner said PDF." };
+  const question = (n: number) =>
+    makeDecision({ id: `q:${REQUEST}:Q${n}`, workspaceId: WORKSPACE_ID, requestId: REQUEST, askedBy: { role: "worker", agentId: WORKER }, askedAt: at(0), subject: null });
+  afterEach(() => clearDecisionStoreCache());
+
+  function commandTools() {
+    createOrchestratorStore(home).setAutopilot(WORKSPACE_ID, true, "tab");
+    const fake = fakePaseo(agents());
+    const enqueue = vi.fn(async () => "queued" as const);
+    deps.queue = { enqueue };
+    return { ...fake, enqueue, tools: toolsWith(fake.paseo) };
+  }
+
+  it("refuses a BM-ANSWERS naming an open stored question — answer it with bm_decide — on both tools, sending and recording nothing", async () => {
+    createDecisionStore(home).open(question(2));
+    const { tools, enqueue } = commandTools();
+    const open = `Refused: Q2 of ${REQUEST} is the stored decision q:${REQUEST}:Q2: answer it with bm_decide, not in a BM-ANSWERS block.`;
+    expect(await tools.call("bm_direct_worker", direct)).toEqual({ ok: false, text: open });
+    expect(await tools.call("bm_send_command", send)).toEqual({ ok: false, text: open });
+    // Without its own requestId line, the block is the command's request, or the Worker's.
+    const bare = { ...direct, command: "BM-ANSWERS\nQ2: a — PDF, A4." };
+    expect((await tools.call("bm_direct_worker", bare)).text).toBe(open);
+    const unscoped = { workspaceId: bare.workspaceId, workerId: bare.workerId, re: bare.re, intent: bare.intent, effects: bare.effects, command: bare.command, why: bare.why };
+    expect((await tools.call("bm_direct_worker", unscoped)).text).toBe(open);
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(createOrchestratorStore(home).listCommands()).toEqual([]);
+  });
+
+  it("refuses one for a settled question as already answered, naming who; one for a question with no stored decision is sent as before", async () => {
+    const store = createDecisionStore(home);
+    store.open(question(2));
+    store.open(question(3));
+    store.transition(`q:${REQUEST}:Q2`, (decision) => answerDecision(decision, { by: "orchestrator", via: "autopilot", optionKey: "a", reason: "PDF.", at: at(1) }), WORKSPACE_ID);
+    store.transition(`q:${REQUEST}:Q3`, (decision) => answerDecision(decision, { via: "inbox", optionKey: "c", at: at(1) }), WORKSPACE_ID);
+    const { tools, enqueue } = commandTools();
+
+    expect((await tools.call("bm_direct_worker", direct)).text).toBe(
+      `Refused: Q2 of ${REQUEST} is the stored decision q:${REQUEST}:Q2, already answered by the Orchestrator: the plugin delivers that answer itself, so send nothing for it.`,
+    );
+    // Every stored question the block names is listed.
+    expect((await tools.call("bm_send_command", { ...send, command: `${direct.command}\nQ3: c — Hold.` })).text).toBe(
+      `Refused: Q2 of ${REQUEST} is the stored decision q:${REQUEST}:Q2, already answered by the Orchestrator: the plugin delivers that answer itself, so send nothing for it; Q3 of ${REQUEST} is the stored decision q:${REQUEST}:Q3, already answered by the owner: the plugin delivers that answer itself, so send nothing for it.`,
+    );
+    expect(enqueue).not.toHaveBeenCalled();
+
+    // Q5 has no stored decision: unchanged.
+    expect((await tools.call("bm_direct_worker", { ...direct, re: "answer to Q5", command: `BM-ANSWERS\nrequestId: ${REQUEST}\nQ5: PDF, A4.` })).ok).toBe(true);
+    expect(enqueue).toHaveBeenCalled();
+  });
+
+  it("storedAnswerRefusalOf says what became of a question the owner or the plugin closed", () => {
+    expect(storedAnswerRefusalOf("Q2", { ...question(2), status: "needs-confirmation", needsConfirmation: { via: "chat-worker", at: at(1) } })).toBe(
+      `Q2 of ${REQUEST} is the stored decision q:${REQUEST}:Q2, waiting for the owner to confirm an answer typed in a chat: it is the owner's`,
+    );
+    expect(storedAnswerRefusalOf("Q2", { ...question(2), status: "superseded", settledAt: at(1), supersededBy: `q:${REQUEST}:Q4` })).toBe(
+      `Q2 of ${REQUEST} is the stored decision q:${REQUEST}:Q2, superseded by q:${REQUEST}:Q4: it can no longer be answered`,
+    );
   });
 });
 
