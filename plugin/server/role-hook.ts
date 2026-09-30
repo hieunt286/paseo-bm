@@ -2,6 +2,7 @@ import type { PluginBeforeRequests, PluginServerContext } from "@getpaseo/plugin
 import { roleOfProvider } from "./agent-role";
 import { TOOL_PROVIDERS, withAgentTools, type AgentToolsEndpoint } from "./agent-tools";
 import { aliasBases } from "./alias-bases";
+import { createOrchestratorStore } from "./orchestrator-store";
 import { providerId } from "./provider-id";
 import {
   LOOKUP_TIMEOUT_MS,
@@ -27,6 +28,7 @@ import {
   runtimeFactsOf,
   type RoleExtras,
   type RuntimeFacts,
+  type Role,
 } from "./role-extras";
 
 /**
@@ -40,12 +42,20 @@ import {
  *
  * The same hook sets the start mode of Workers and Reviewers (delta 20260917c
  * §4.6): what the role files used to teach in a paragraph each is one lookup
- * here, and it cannot be got wrong by an agent.
+ * here, and it cannot be got wrong by an agent. The Orchestrator's assessment
+ * agent gets its instructions, its profile and a mode under the Reviewer's
+ * rule the same way, and no Paseo tools (orchestrator design §3.1).
  *
  * Provider ids map to roles through `roleOfProvider` (agent-role.ts), the
  * same rule every lookup uses to tell paseo-bm agents apart (delta 20260918g):
  * the three main aliases and the fallback aliases `bm-<role>-fallback-<n>`
  * (delta 20260921 §4.4.1). Lookups use the agent's real alias.
+ *
+ * The hook does NOT enforce the role pairing (only a Manager creates Workers,
+ * only a Worker creates Reviewers; autonomy design §A.10): Paseo hands it
+ * `{ config, env }` only, with no creator id, although a throw here would reach
+ * the `create_agent` caller cleanly (both verified 2026-09-29, AGENTS.md). The
+ * pairing is checked on `agent.created` instead (`role-pairing.ts`).
  */
 
 export { chooseModeId, type ProviderMode } from "./role-mode";
@@ -76,7 +86,7 @@ export function applyRoleInstructions(
     const role = roleOfProvider(config.provider);
     if (role === null) return undefined;
     const base = BASE_INSTRUCTIONS[role];
-    // The user's additions from the Setup screen come after the base, never instead of it.
+    // The role's additional instructions (from Phase 1 no screen edits them) come after the base, never instead of it.
     // Runtime facts sit between the two, so manager.ensure and this hook write the same text.
     const instructions = fullInstructions(role, extras[role] ?? "", facts);
 
@@ -138,13 +148,39 @@ function requestModelOf(config: { provider?: unknown; model?: unknown }): string
 }
 
 /**
- * Returns the request with the model of the Worker's or Reviewer's own profile
- * when the creator named another one, or `undefined` when nothing changes.
+ * The roles whose own profile the hook applies: the model, the thinking level
+ * and the features. The Manager is left alone: `manager.ensure` already passes
+ * its profile. The Orchestrator's assessment agent is created by the plugin
+ * with its profile's model, but the user may have changed the profile since
+ * (orchestrator design §3.1).
+ */
+const PROFILE_ROLES: ReadonlySet<Role | null> = new Set<Role>(["worker", "reviewer", "orchestrator"]);
+
+/**
+ * Appends a model the hook replaced to `orchestrator/model-corrections.json`,
+ * for the `agent.model-corrected` rule (orchestrator design §4.3). The agent
+ * has no id yet, so the rule later matches by alias, `cwd` and time. Without a
+ * data folder nothing is recorded; a failed write is only logged by the store,
+ * and nothing here can fail the creation.
+ */
+function recordCorrection(alias: string, requested: string, profileModel: string, cwd: string): void {
+  try {
+    const home = dataHomeOf();
+    if (home === null) return;
+    createOrchestratorStore(home).appendCorrection({ at: new Date().toISOString(), alias, requested, profileModel, cwd });
+  } catch {
+    // The correction itself matters more than its record.
+  }
+}
+
+/**
+ * Returns the request with the model of a Worker's, Reviewer's or
+ * Orchestrator's own profile when the creator named another one, or `undefined` when nothing changes.
  * Never throws.
  *
  * The role files tell the creator to pass `bm-<role>/<model of the profile>`,
  * but a Manager reads the profile once and keeps it: after the user moved the
- * Worker from Claude to Codex in Setup, a Manager created earlier still asked
+ * Worker from Claude to Codex in Settings, a Manager created earlier still asked
  * for `bm-worker/claude-opus-5-5`, and Codex refused the model at the Worker's
  * first turn (clean-install run 2026-09-26). The profile is what the user set,
  * so it wins, the way `applyRoleMode` makes the role's mode win. Only the main
@@ -157,7 +193,7 @@ export function applyRoleModel(request: AgentCreateRequest, profile: RoleProfile
     if (config === null || typeof config !== "object") return undefined;
     const id = providerId(config.provider);
     const role = roleOfProvider(id);
-    if (id === null || (role !== "worker" && role !== "reviewer")) return undefined;
+    if (id === null || !PROFILE_ROLES.has(role)) return undefined;
     const requested = requestModelOf(config);
     if (requested === null || requested === profile.model) return undefined;
     const next: Record<string, unknown> = { ...config };
@@ -167,6 +203,7 @@ export function applyRoleModel(request: AgentCreateRequest, profile: RoleProfile
     // on the profile's; `applyRoleProfile` then sets the profile's own, if any.
     delete next.thinkingOptionId;
     console.warn(`[paseo-bm] ${id} was asked for model "${requested}", but its profile names "${profile.model}"; starting it on "${profile.model}".`);
+    recordCorrection(id, requested, profile.model, typeof config.cwd === "string" ? config.cwd : "");
     return { ...request, config: next as unknown as AgentCreateRequest["config"] };
   } catch {
     return undefined;
@@ -175,7 +212,8 @@ export function applyRoleModel(request: AgentCreateRequest, profile: RoleProfile
 
 /**
  * Returns the request with the thinking level and feature values of the
- * Worker's or Reviewer's own profile (delta 20260921 §4.1.1, REQ-062 a), or
+ * Worker's, Reviewer's or Orchestrator's own profile (delta 20260921 §4.1.1,
+ * REQ-062 a; orchestrator design §3.1), or
  * `undefined` when nothing changes. Never throws.
  *
  * - `thinkingOptionId`: the profile's, only when the creator passed none and
@@ -191,8 +229,7 @@ export function applyRoleProfile(request: AgentCreateRequest, profile: RoleProfi
     const config = (request as Partial<AgentCreateRequest> | null | undefined)?.config;
     if (config === null || typeof config !== "object") return undefined;
     const role = roleOfProvider(config.provider);
-    if (role === null) return undefined;
-    if (role !== "worker" && role !== "reviewer") return undefined;
+    if (role === null || !PROFILE_ROLES.has(role)) return undefined;
 
     const next: Record<string, unknown> = { ...config };
     let changed = false;
@@ -218,8 +255,8 @@ export function applyRoleProfile(request: AgentCreateRequest, profile: RoleProfi
 }
 
 /**
- * Returns the request with the start mode and auto-approve of a Worker or
- * Reviewer on an `untiered` or `none` provider (delta 20260921 §4.2.2), or
+ * Returns the request with the start mode and auto-approve of a Worker,
+ * Reviewer or Orchestrator on an `untiered` or `none` provider (delta 20260921 §4.2.2), or
  * `undefined` when nothing changes. `tiered` and `unknown` providers keep
  * `applyRoleMode`. Never throws.
  */
@@ -320,11 +357,11 @@ async function prepare(
   const cwd = typeof request?.config?.cwd === "string" ? request.config.cwd : undefined;
   const id = providerId(request?.config?.provider);
   const role = roleOfProvider(id) ?? undefined;
-  // The Worker's or Reviewer's own profile: its mode (bm-msy), and its
+  // The Worker's, Reviewer's or Orchestrator's own profile: its mode (bm-msy), and its
   // thinking and features (delta 20260921 §4.1.1). One read, whether or not
   // the mode needs a lookup: a Worker created WITH a mode still gets the
   // thinking set on its profile.
-  const profile = role === "worker" || role === "reviewer" ? await profileOf(paseo, id!) : null;
+  const profile = role !== undefined && PROFILE_ROLES.has(role) ? await profileOf(paseo, id!) : null;
   const lookup = modeLookupFor(request);
   const profileModeId = lookup === null ? null : (profile?.modeId ?? null);
   const modes = lookup === null ? null : await modesFor(paseo, lookup, undefined, cwd);
@@ -368,6 +405,8 @@ export function applyAgentTools(
   try {
     if (tools === null || base === null || !TOOL_PROVIDERS.includes(base)) return undefined;
     const role = roleOfProvider(request.config.provider);
+    // Every role has its own path. The Orchestrator's carries the endpoint's secret and serves its
+    // read tools, its decision and command tools and bm_assessment — and it never gets Paseo's tools (orchestrator design §3.1, §5.1).
     const config = role === null ? undefined : withAgentTools(request.config, role, tools.urlFor(role));
     return config === undefined ? undefined : { ...request, config };
   } catch {
@@ -375,11 +414,18 @@ export function applyAgentTools(
   }
 }
 
+/** The part of the endpoint the hook uses; `usePaseo` hands the Orchestrator's tools the hook's Paseo handle. */
+export type RoleHookTools = Pick<AgentToolsEndpoint, "urlFor"> & Partial<Pick<AgentToolsEndpoint, "usePaseo">>;
+
 /**
  * Registers the `before("agent.create")` hook and returns its remover. On a
  * host without `before` it logs one line and returns a no-op.
+ *
+ * Each paseo-bm creation also hands the endpoint the context's Paseo handle:
+ * the Orchestrator's tools have no context of their own, and an Orchestrator
+ * only gets their URL from this hook (orchestrator design §5.1).
  */
-export function registerRoleHook(host: RoleHookHost, tools: Pick<AgentToolsEndpoint, "urlFor"> | null = null): () => void {
+export function registerRoleHook(host: RoleHookHost, tools: RoleHookTools | null = null): () => void {
   if (typeof host.before !== "function") {
     console.warn(
       "[paseo-bm] this Paseo host has no before(\"agent.create\") hook; Worker and Reviewer agents will start without role instructions.",
@@ -390,8 +436,13 @@ export function registerRoleHook(host: RoleHookHost, tools: Pick<AgentToolsEndpo
     const request = (input as { request?: AgentCreateRequest } | undefined)?.request as AgentCreateRequest;
     // Every agent creation passes here: only paseo-bm's own pay for a lookup.
     if (!isBmRequest(request)) return undefined;
+    const paseo = (context as { paseo?: unknown } | undefined)?.paseo;
+    try {
+      tools?.usePaseo?.(paseo);
+    } catch {
+      // The tools' handle never costs an agent its creation.
+    }
     return (async () => {
-      const paseo = (context as { paseo?: unknown } | undefined)?.paseo;
       // The host fails the whole creation if this hook takes longer than 30 s,
       // so everything it looks up is raced as ONE budget: a slow daemon costs
       // the extras, the mode and the facts, never the agent.

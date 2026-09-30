@@ -44,7 +44,12 @@ import type {
 /** Agent facts reconstruction needs, from `agents.list` or the store. */
 export interface AgentFacts {
   id: string;
-  role: "manager" | "worker" | "reviewer" | "unknown";
+  /**
+   * `orchestrator` only from `bmAgentsOf(…, { includeOrchestrator: true })`,
+   * which no reconstruction reads: the assessment agent is never part of a
+   * request's trace (orchestrator design §3.2).
+   */
+  role: "manager" | "worker" | "reviewer" | "orchestrator" | "unknown";
   status: string;
   parentAgentId: string | null;
   createdAt: string | null;
@@ -329,6 +334,10 @@ function openBuckets(records: readonly TraceRecord[]): { buckets: Bucket[]; byRe
     for (let position = own.length - 2; position >= 0; position -= 1) {
       nextNamed[position] = idOf[own[position + 1]!] ?? nextNamed[position + 1] ?? null;
     }
+    const previousNamed: (string | null)[] = new Array(own.length).fill(null);
+    for (let position = 1; position < own.length; position += 1) {
+      previousNamed[position] = idOf[own[position - 1]!] ?? previousNamed[position - 1] ?? null;
+    }
     const firstPosition = new Map<string, number>();
     own.forEach((index, position) => {
       const id = idOf[index]!;
@@ -355,7 +364,15 @@ function openBuckets(records: readonly TraceRecord[]): { buckets: Bucket[]; byRe
       if (idOf[index] !== null) return;
       const record = managerRecords[index]!;
       const text = textOf[index]!;
-      const nextRequestId = (text === null ? null : openedAfter(position)) ?? nextNamed[position] ?? null;
+      // A turn with no inbound message is the Manager woken by its Worker's end
+      // of turn: it closes the request already open (its summary to the
+      // user), not the next one. Folded forward, it made a row that predated
+      // the next request by 41 s and charged it the summary's tokens
+      // (Orchestrator acceptance 2026-09-28, finding P1).
+      const nextRequestId =
+        text === null
+          ? (previousNamed[position] ?? nextNamed[position] ?? null)
+          : (openedAfter(position) ?? nextNamed[position] ?? null);
       const bucket = nextRequestId === null ? undefined : byRequestId.get(nextRequestId);
       if (bucket !== undefined) fold(bucket, record, text);
       // Nothing follows from this Manager: a request still in flight gets a
@@ -1340,9 +1357,13 @@ export function detail(trace: ReconstructedTrace, deps: DetailDeps): TraceDetail
     );
   }
 
+  // A Worker record's first message is its prompt only when a person or the
+  // Manager wrote it: a plugin notice that opens a Worker turn (a `BM-STOP`,
+  // a `BM-RESUME`) is not.
   const workerPrompts = trace.records
     .filter((record) => record.role === "worker")
-    .flatMap((record) => record.sent.slice(0, 1));
+    .flatMap((record) => record.sent.slice(0, 1))
+    .filter((message) => !isPluginNotice(message.text));
   const reviewRequests = trace.records
     .filter((record) => record.role === "reviewer")
     .flatMap((record) =>

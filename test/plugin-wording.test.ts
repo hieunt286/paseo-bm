@@ -68,10 +68,10 @@ describe("the payload's own wording", () => {
 
   it("points at Setup, not at a retired command, when something is missing", () => {
     const facts = readFileSync(join(payload, "server", "role-extras.ts"), "utf8");
-    expect(facts).toContain("point to Beads Manager → Setup → Agent skills.");
+    expect(facts).toContain("point to Beads Manager → Settings → Tools & skills.");
 
     const tree = readFileSync(join(payload, "client", "agent-tree.ts"), "utf8");
-    expect(tree).toContain("Open Beads Manager → Setup to create them.");
+    expect(tree).toContain("Open Beads Manager → Settings to create them.");
   });
 });
 
@@ -117,7 +117,7 @@ describe("the plugin package", () => {
   it("describes the paseo.cafe install, not the retired one", () => {
     expect(pkg.description).toBe(
       "Beads Management for Paseo: a Beads Manager agent that hands each request to a Beads Worker, " +
-        'with Metric, Beads and Setup screens. Install from paseo.cafe or with "paseo plugin add npm:paseo-bm-plugin" (Paseo 0.9+).',
+        'with an Inbox, Work, Insights and Settings. Install from paseo.cafe or with "paseo plugin add npm:paseo-bm-plugin" (Paseo 0.9+).',
     );
   });
 

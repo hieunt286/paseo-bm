@@ -1,0 +1,21 @@
+{
+  "id": "S1",
+  "title": "Small: a one-line change to math.js",
+  "fixture": { "kind": "node", "seededBeads": [], "bareRemote": false },
+  "requests": [
+    {
+      "text": "In math.js, give both parameters of add() a default value of 0, so that add() called with no arguments returns 0.",
+      "delaySeconds": 0
+    }
+  ],
+  "owner": { "policy": "recommended", "overrides": [] },
+  "expect": {
+    "tier": ["small"],
+    "beads": { "expect": "none" },
+    "review": { "expect": "none" },
+    "testsGreen": true,
+    "git": { "commit": "none", "push": { "expect": "none" } },
+    "changed": ["math.js"]
+  },
+  "timeoutMinutes": 15
+}

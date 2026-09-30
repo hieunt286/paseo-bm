@@ -16,8 +16,8 @@
  * 4. `bm.replacedBy` on the old Manager; a failure only logs.
  * 5. Every live, non-replaced Worker of the workspace gets a `BM-SETTINGS`
  *    with the new Manager's id, through the notice queue.
- * 6. `switched` with `replacementId`; the caller sends BM-FALLBACK into the
- *    old Manager's chat.
+ * 6. `switched` with `replacementId`; `fallback.act` then withdraws the
+ *    incident's open decision, if the card decided it.
  * 7. A creation that fails records `failed` and returns
  *    `E_FALLBACK_CREATE_FAILED`, never back to `pending`.
  */
@@ -93,7 +93,7 @@ export function createManagerSwitch(deps: ManagerSwitchDeps = {}): FallbackActio
   return async (incident, paseo, rpcDeps: FallbackRpcDeps) => {
     const now = rpcDeps.now ?? deps.now ?? (() => new Date());
     const home = rpcDeps.home ?? null;
-    if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", `${unusableDataHomeMessage()}; see Setup`);
+    if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", `${unusableDataHomeMessage()}; see Settings → Data`);
     if (incident.role !== "manager") throw new DashboardError("E_FALLBACK_NO_CANDIDATE", `not a Manager incident (${incident.role})`);
 
     // 1. Still pending, with a candidate, and the old Manager not replaced yet.

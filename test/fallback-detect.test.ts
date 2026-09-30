@@ -183,6 +183,19 @@ describe("which agents are looked at", () => {
     }
   });
 
+  it("the Orchestrator has no fallback chain: its usage-limit turn is never classified (orchestrator design §3.1)", async () => {
+    for (const provider of ["bm-orchestrator", "bm-orchestrator/claude-opus-5"]) {
+      const { value, refetch } = deps({ labels: { "bm.role": "orchestrator" }, lastUsage: { outputTokens: 0 } });
+      const agent = { ...turn().agent, provider };
+      expect(await classifyTurn(asEvent(failed(LIMIT, { agent })), value)).toBeNull();
+      expect(await classifyTurn(asEvent(turn({ agent })), value)).toBeNull();
+      expect(refetch).not.toHaveBeenCalled();
+    }
+    // The bm.role label decides over the provider, as everywhere else.
+    const labelled = deps({ labels: { "bm.role": "orchestrator" }, lastUsage: { outputTokens: 0 } });
+    expect(await classifyTurn(asEvent(failed(LIMIT)), labelled.value)).toBeNull();
+  });
+
   it("an agent with a bm.replacedBy label -> null", async () => {
     expect(REPLACED_BY_LABEL).toBe("bm.replacedBy");
     const snapshot = { labels: { "bm.role": "worker", "bm.replacedBy": "w-2" }, lastUsage: { outputTokens: 0 } };

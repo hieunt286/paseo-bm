@@ -258,13 +258,13 @@ describe("workspaces.overview", () => {
         workspaceId: WS,
         beads: { total: 4, inProgress: 1, blocked: 2, ready: 0 },
         runningWorkers: 1,
-        runningAgents: { manager: 0, worker: 1, reviewer: 1 },
+        runningAgents: { manager: 0, worker: 1, reviewer: 1, orchestrator: 0 },
       },
       {
         workspaceId: "wks_nobeads",
         beads: null,
         runningWorkers: 1,
-        runningAgents: { manager: 1, worker: 1, reviewer: 0 },
+        runningAgents: { manager: 1, worker: 1, reviewer: 0, orchestrator: 0 },
       },
     ]);
   });
@@ -285,12 +285,27 @@ describe("workspaces.overview", () => {
     })) as never;
     const { workspaces } = await handleWorkspacesOverview(paseo);
     const row = workspaces[0]!;
-    expect(row.runningAgents).toEqual({ manager: 0, worker: 0, reviewer: 1 });
+    expect(row.runningAgents).toEqual({ manager: 0, worker: 0, reviewer: 1, orchestrator: 0 });
     const total = row.runningAgents.manager + row.runningAgents.worker + row.runningAgents.reviewer;
     expect(total).toBeGreaterThan(0);
     // `runningWorkers` keeps its old meaning, which is exactly why it cannot
     // carry the new signal on its own.
     expect(row.runningWorkers).toBe(0);
+  });
+
+  it("counts a running Orchestrator assessment as a paseo-bm agent, by its label or its provider (orchestrator design §3.2)", async () => {
+    const paseo = fakePaseo();
+    paseo.workspaces.list = vi.fn(async () => ({ entries: [{ id: WS, directory: workspace }] }));
+    paseo.agents.list = vi.fn(async () => ({
+      entries: [
+        { id: "o1", workspaceId: WS, status: "running", labels: { "bm.role": "orchestrator" } },
+        { id: "o2", workspaceId: WS, status: "running", provider: "bm-orchestrator/claude-opus-5", labels: {} },
+        { id: "o3", workspaceId: WS, status: "idle", labels: { "bm.role": "orchestrator" } },
+      ],
+    })) as never;
+    const { workspaces } = await handleWorkspacesOverview(paseo);
+    expect(workspaces[0]!.runningAgents).toEqual({ manager: 0, worker: 0, reviewer: 0, orchestrator: 2 });
+    expect(workspaces[0]!.runningWorkers).toBe(0);
   });
 });
 
@@ -469,9 +484,10 @@ describe("a bead says its status in words and contrast, never in a hue (delta 20
 describe("the Beads board: one column per status, closed beads behind the eye (delta 20260925 §3.1)", () => {
   // `closedBeadsVisibility` lives for the whole test run, like an app session:
   // put it back after each case, so a failing assertion cannot leak into the
-  // next one (delta 20260918f S11). Its default is now `true` (owner Q4).
+  // next one (delta 20260918f S11). Its default is `false` since Work
+  // (experience concept §4.2: Closed hidden by default).
   afterEach(() => {
-    closedBeadsVisibility.set(true);
+    closedBeadsVisibility.set(false);
   });
 
   // Only status and readiness decide a column; the rest of a row is not read.
@@ -487,12 +503,12 @@ describe("the Beads board: one column per status, closed beads behind the eye (d
     row("c2", "closed"),
   ];
 
-  it("puts work in progress first, then blocked, ready and closed, keeping the sort inside each column", () => {
+  it("puts work in progress first, then ready, blocked and closed, keeping the sort inside each column", () => {
     const { columns, visible, closed } = kanbanColumns(sorted, { showClosed: true });
     expect(columns.map((column) => [column.bucket, column.label, column.total, column.beads.map((bead) => bead.id)])).toEqual([
       ["in_progress", "In progress", 2, ["p1", "p2"]],
-      ["blocked", "Blocked", 2, ["b1", "b2"]],
       ["ready", "Ready", 2, ["r1", "r2"]],
+      ["blocked", "Blocked", 2, ["b1", "b2"]],
       ["closed", "Closed", 2, ["c1", "c2"]],
     ]);
     expect({ visible, closed }).toEqual({ visible: 8, closed: 2 });
@@ -502,15 +518,15 @@ describe("the Beads board: one column per status, closed beads behind the eye (d
     const { columns } = kanbanColumns([row("p1", "in_progress")], { showClosed: true });
     expect(columns.map((column) => [column.bucket, column.total, column.empty !== ""])).toEqual([
       ["in_progress", 1, true],
-      ["blocked", 0, true],
       ["ready", 0, true],
+      ["blocked", 0, true],
       ["closed", 0, true],
     ]);
   });
 
   it("drops only the Closed column while closed beads are hidden, still counting them", () => {
     const hidden = kanbanColumns(sorted, { showClosed: false });
-    expect(hidden.columns.map((column) => column.bucket)).toEqual(["in_progress", "blocked", "ready"]);
+    expect(hidden.columns.map((column) => column.bucket)).toEqual(["in_progress", "ready", "blocked"]);
     expect({ visible: hidden.visible, closed: hidden.closed }).toEqual({ visible: 6, closed: 2 });
     expect(kanbanColumns([row("c1", "closed")], { showClosed: false }).visible).toBe(0);
   });
@@ -519,8 +535,8 @@ describe("the Beads board: one column per status, closed beads behind the eye (d
     const one = kanbanColumns(sorted, { showClosed: true, limit: 1 });
     expect(one.columns.map((column) => [column.bucket, column.total, column.beads.map((bead) => bead.id), column.hidden])).toEqual([
       ["in_progress", 2, ["p1"], 1],
-      ["blocked", 2, ["b1"], 1],
       ["ready", 2, ["r1"], 1],
+      ["blocked", 2, ["b1"], 1],
       ["closed", 2, ["c1"], 1],
     ]);
     // No whole-board number: each column says its own "+N more".
@@ -552,15 +568,15 @@ describe("the Beads board: one column per status, closed beads behind the eye (d
     expect(defaultKanbanBucket(kanbanColumns([], { showClosed: true }).columns)).toBe("in_progress");
   });
 
-  it("shows closed beads by default and remembers the choice for the session", () => {
-    expect(closedBeadsVisibility.get()).toBe(true);
+  it("hides closed beads by default and remembers the choice for the session", () => {
+    expect(closedBeadsVisibility.get()).toBe(false);
     const heard = vi.fn();
     const stop = closedBeadsVisibility.subscribe(heard);
-    closedBeadsVisibility.set(false);
-    expect(heard).toHaveBeenCalledTimes(1);
-    expect(closedBeadsVisibility.get()).toBe(false);
-    stop();
     closedBeadsVisibility.set(true);
+    expect(heard).toHaveBeenCalledTimes(1);
+    expect(closedBeadsVisibility.get()).toBe(true);
+    stop();
+    closedBeadsVisibility.set(false);
     expect(heard).toHaveBeenCalledTimes(1);
   });
 });

@@ -30,6 +30,7 @@ import { TRACES_DIR_NAME } from "./data-home";
 import { costOf } from "./model-costs";
 import { asRecord, availableProviders, checkRoleChoice, nonEmpty, reasonOf } from "./role-choices";
 import { dataHomeOf } from "./role-extras";
+import { rolePaseoToolsPolicy } from "./setup-roles";
 import { capabilityOf, modesFor, type ProviderCapability } from "./role-mode";
 import { writeStoreFileAtomically } from "./trace-store";
 import { FALLBACK_ROLES, MAX_FALLBACK_ENTRIES, fallbackAlias, fallbackAliasOf, type FallbackRole } from "../shared/fallback";
@@ -216,13 +217,13 @@ function serialised<T>(work: () => Promise<T>): Promise<T> {
   return run;
 }
 
-/** The alias entry of fallback `n` of `role` (§4.4.1): a Reviewer alias never gets Paseo tools (ADR-006 D3). */
+/**
+ * The alias entry of fallback `n` of `role` (§4.4.1): the same Paseo-tools
+ * policy as the role's main alias (autonomy design §A.10), so a fallback never
+ * runs with more tools than the role — a Reviewer's with none at all.
+ */
 export function fallbackAliasEntry(role: BmRole, n: number, baseProvider: string): Record<string, unknown> {
-  return {
-    extends: baseProvider,
-    label: `${ROLE_LABELS[role]} (fallback ${n})`,
-    ...(role === "reviewer" ? {} : { paseoTools: { enabled: true } }),
-  };
+  return { extends: baseProvider, label: `${ROLE_LABELS[role]} (fallback ${n})`, paseoTools: rolePaseoToolsPolicy(role) };
 }
 
 /** True when `existing` already holds every key of `wanted` with the same value. */
@@ -281,7 +282,7 @@ export function handleRolesSaveFallback(
 
     const home = homeOf(deps);
     if (home === null) {
-      throw new DashboardError("E_ROLE_SETTINGS_WRITE_FAILED", `${unusableDataHomeMessage()}; see Setup`);
+      throw new DashboardError("E_ROLE_SETTINGS_WRITE_FAILED", `${unusableDataHomeMessage()}; see Settings → Data`);
     }
     const read = readRoleFallback(home, log);
     if (read.error !== null) throw invalid(`${ROLE_FALLBACK_FILE} is not valid (${read.error}); fix or delete it, then save again`);

@@ -8,9 +8,10 @@ The documentation in `docs/` is written in English and is **living documentation
 
 | Document | Contents |
 |---|---|
-| [paseo-bm-prd.md](product/paseo-bm-prd.md) | Installation and machine setup (target release 0.4.0: from paseo.cafe, Setup, moving existing users over), the Manager / Worker / Reviewer roles, safety boundaries, review, reporting, provider fallback |
-| [paseo-bm-dashboard-prd.md](product/paseo-bm-dashboard-prd.md) | The Metric, Beads and Setup screens, cards in chat, the trace store |
-| [paseo-bm-orchestrator-prd.md](product/paseo-bm-orchestrator-prd.md) | **Accepted** — the Orchestrator tab: rule-based flags assessing coordination, an LLM assessment on click (role `bm-orchestrator`), nudging a running agent after a flag |
+| [paseo-bm-prd.md](product/paseo-bm-prd.md) | Installation and machine setup (target release 0.4.0: from paseo.cafe, set-up, moving existing users over), the Manager / Worker / Reviewer roles, safety boundaries, review, reporting, provider fallback |
+| [paseo-bm-dashboard-prd.md](product/paseo-bm-dashboard-prd.md) | The trace store and the history it keeps; its screen and card requirements are replaced by the autonomy PRD (REQ-118) since Phase 1 |
+| [paseo-bm-orchestrator-prd.md](product/paseo-bm-orchestrator-prd.md) | **Accepted** — the Orchestrator: one agent for the machine, rule-based signals, Autopilot per project, live coordination of Workers, the big-decision gate; the requirements Phase 1 replaced are named in its header |
+| [paseo-bm-autonomy-prd.md](product/paseo-bm-autonomy-prd.md) | **Accepted** — the programme PRD for calibrated autonomy: seven phases from a measured baseline to decision objects, autonomy earned per class, evidence, the action boundary, traceability and specialisation on evidence; supersedes the Orchestrator PRD on acceptance |
 
 A PRD states **the outcome the user gets**. Details such as colours, labels, limits and numbers live in the design, code and tests. A requirement not yet in the code is marked *"Not implemented yet"* in its own row.
 
@@ -18,12 +19,15 @@ A PRD states **the outcome the user gets**. Details such as colours, labels, lim
 
 | Document | Contents |
 |---|---|
-| [paseo-bm.md](design/paseo-bm.md) | Packaging and release, the 0.4.0 migration CLI, the data folder, machine setup, Paseo configuration, the plugin's server side: the agent-creation hook, Manager, agent tools, `BM-*` notices, the review budget, the question–answer log, fallback, trace |
-| [paseo-bm-dashboard.md](design/paseo-bm-dashboard.md) | The trace store, building a trace per request, process steps, the Metric / Beads / Setup screens (including Roles & models), chat cards, pills, the fallback card |
-| [paseo-bm-orchestrator.md](design/paseo-bm-orchestrator.md) | **Active** — the Orchestrator tab: the catalogue of rules and flags, the `bm-orchestrator` role and the `bm_assessment` tool, the `BM-NUDGE` agent nudge, the `orchestrator.*` RPCs |
+| [paseo-bm.md](design/paseo-bm.md) | Packaging and release, the 0.4.0 migration CLI, the data folder, machine setup, Paseo configuration, the plugin's server side: the agent-creation hook, Manager, agent tools, `BM-*` notices, the review budget, questions and answers as stored decisions, fallback, trace |
+| [paseo-bm-dashboard.md](design/paseo-bm-dashboard.md) | The trace store, building a trace per request, process steps, the Beads Manager surface (Inbox, Work, Insights, Settings with Roles & models), the Beads board, chat cards v2 |
+| [paseo-bm-orchestrator.md](design/paseo-bm-orchestrator.md) | **Active** — the Orchestrator agent: its role and tools, the rules and signals, the stall pass, Autopilot, `BM-COMMAND`, the live watch, the gate, the Inbox's Orchestrator line, the `orchestrator.*` RPCs |
+| [paseo-bm-autonomy.md](design/paseo-bm-autonomy.md) | **Active** — Phases 1–6 of the autonomy programme: decision objects and typed handoffs, calibrated autonomy per class, evidence, the action boundary, traceability, specialisation on evidence |
+| [paseo-bm-evaluation.md](design/paseo-bm-evaluation.md) | **Active** — Phase 0 of the autonomy programme: metric definitions, the replay over the trace store, the evaluation suite on an isolated daemon, the baseline report |
+| [paseo-bm-experience-concept.md](design/paseo-bm-experience-concept.md) | **Draft** — fresh-eye concept for the management screens (Inbox, Work, Insights, Settings) and the cards of the four roles, for the autonomy PRD |
 | [paseo-bm-research-20260918-instructions-by-model.md](design/paseo-bm-research-20260918-instructions-by-model.md) | How role instructions reach Claude, Codex and OpenCode |
 
-Each role's behaviour lives in its own instructions: [`plugin/roles/manager.md`](../plugin/roles/manager.md), [`worker.md`](../plugin/roles/worker.md), [`reviewer.md`](../plugin/roles/reviewer.md). The design does not copy it.
+Each role's behaviour lives in its own instructions: [`plugin/roles/manager.md`](../plugin/roles/manager.md), [`worker.md`](../plugin/roles/worker.md), [`reviewer.md`](../plugin/roles/reviewer.md), [`orchestrator.md`](../plugin/roles/orchestrator.md). The design does not copy it.
 
 ## Architecture decisions — ADR
 
@@ -41,7 +45,14 @@ Each role's behaviour lives in its own instructions: [`plugin/roles/manager.md`]
 | [ADR-010](adr/ADR-010-plugin-hosted-agent-tools.md) | The plugin serves schema-typed tools to agents over MCP HTTP |
 | [ADR-011](adr/ADR-011-manager-coordinates-workers.md) | Manager coordinates Workers itself within the scope the user has decided |
 | [ADR-012](adr/ADR-012-plugin-is-the-product.md) | One source: the plugin `paseo-bm-plugin` installed from npm / paseo.cafe is the whole product; `npx paseo-bm` 0.4.0 only migrates; Paseo 0.9+. Replaces ADR-001, replaces ADR-009 decisions 4–5, amends ADR-002, 003, 004, 006, 008 |
-| [ADR-013](adr/ADR-013-orchestrator-assess-and-nudge.md) | **Accepted** — Orchestrator: the plugin creates the `bm-orchestrator` assessment agent when the user clicks, and nudges a running Manager/Worker with `BM-NUDGE` when the user turns the nudge switch on; no other action. Amends REQ-047 of the Dashboard PRD |
+| [ADR-013](adr/ADR-013-orchestrator-assess-and-nudge.md) | **Superseded by ADR-014** — the first Orchestrator (an assessment agent per click, `BM-NUDGE` sent by the plugin); built and tested, rejected by the owner before any release |
+| [ADR-014](adr/ADR-014-orchestrator-agent-proposes-owner-approves.md) | **Accepted** — Orchestrator: one machine-wide agent reads every paseo-bm project through plugin tools and proposes commands to Managers; only the owner's click sends them; a stall watcher behind a switch wakes it. Amends REQ-047 of the Dashboard PRD |
+| [ADR-015](adr/ADR-015-orchestrator-autopilot-per-project.md) | **Accepted** — Orchestrator Autopilot per project (answers questions and commands the Manager itself, woken on each question and finished step), the owner's word in chat counts as approval; limits: no commit/push/deploy, no real data, big decisions to the owner. Amends ADR-014 decisions 4-5 |
+| [ADR-016](adr/ADR-016-orchestrator-coordinates-workers-live.md) | **Accepted** — Orchestrator: live watch of running Workers, direct Worker commands with a Manager copy (interrupt only on danger), rule gate on big decisions, read-only repo tool and notes, `BM-COMMAND` cards, coordinator's dashboard. Amends ADR-015 decision 4 and ADR-011 |
+| [ADR-017](adr/ADR-017-decisions-are-stored-objects.md) | **Accepted** — decisions are stored objects rendered everywhere; typed handoffs; nobody relays; authority from declared effects and one-use grants |
+| [ADR-018](adr/ADR-018-calibrated-autonomy-per-class.md) | **Accepted** — autonomy per project × decision class (owner / shadow / delegate), earned from measured agreement; precedents |
+| [ADR-019](adr/ADR-019-action-boundary-permission-events.md) | **Proposed** — effectful actions held before they run through Paseo's permission events; decided by the Phase 4 spike |
+| [ADR-020](adr/ADR-020-paseo-tools-policy-per-role.md) | **Accepted** — every role's Paseo-tools policy written explicitly (Reviewer and Orchestrator none; Manager and Worker a disabled list); supersedes ADR-006 decision 9 |
 
 An ADR is never rewritten; a new decision gets a new ADR that supersedes it.
 
@@ -49,17 +60,21 @@ An ADR is never rewritten; a new decision gets a new ADR that supersedes it.
 
 | Plan | Status |
 |---|---|
+| [phase1b](plans/paseo-bm-plan-autonomy-phase1b.md) (Active; WP-108 → WP-110 and WP-112 built, the Phase 1 exit WP-111 waits for the owner's use of the new build), [phase2](plans/paseo-bm-plan-autonomy-phase2.md), [phase3](plans/paseo-bm-plan-autonomy-phase3.md), [phase4](plans/paseo-bm-plan-autonomy-phase4.md), [phase5](plans/paseo-bm-plan-autonomy-phase5.md), [phase6](plans/paseo-bm-plan-autonomy-phase6.md) | Active — converted to beads 2026-09-30 (epics `bm-autonomy-phase2-t9lm` … `bm-autonomy-phase6-i8fc`); each phase opens with a re-check bead against the previous phase's figures |
+| [autonomy change-001](plans/paseo-bm-plan-autonomy-change-001-suite-at-end.md) | Applied — the suite at the programme's end, and the plan review's fixes to the Active plans (Phase 0, 1a, 1b) |
+| [autonomy change-002](plans/paseo-bm-plan-autonomy-change-002-phase1-as-built.md) | Applied — Phase 1 as built (WP-112, the wake rule, A-3), how the owner installs the unreleased build for the exit, and what Phases 2–6 inherit |
+| [autonomy change-003](plans/paseo-bm-plan-autonomy-change-003-decisions-at-conversion.md) | Applied — the design choices the Phase 2–6 beads had left open, settled when the beads were polished; two new Phase 2 beads |
 | [paseo-bm-plan-040-single-source.md](plans/paseo-bm-plan-040-single-source.md) | Active — 0.4.0 and 0.4.1 are released; the last exit condition waits for the paseo.cafe caveats PR to be merged |
-| [paseo-bm-plan-orchestrator.md](plans/paseo-bm-plan-orchestrator.md) | Draft — the Orchestrator: eight work packages, `plan-ready-for-beads` self-evaluated, awaiting the owner; no release in scope (the owner picks the version after testing) |
 
-A plan exists only for a piece of Designed work and moves to `archive/plans/` when its work is done.
+A plan exists only for a piece of Designed work and moves to `archive/plans/` when its work is done. Phase 0 of the autonomy programme completed on 2026-09-29: [archive/plans/paseo-bm-plan-autonomy-phase0.md](archive/plans/paseo-bm-plan-autonomy-phase0.md). Phase 1 part a completed the same day: [archive/plans/paseo-bm-plan-autonomy-phase1a.md](archive/plans/paseo-bm-plan-autonomy-phase1a.md). The Orchestrator plan was completed on 2026-09-28: [archive/plans/paseo-bm-plan-orchestrator.md](archive/plans/paseo-bm-plan-orchestrator.md), acceptance in [archive/operations/paseo-bm-orchestrator-run-20260928.md](archive/operations/paseo-bm-orchestrator-run-20260928.md). It was then replaced, before any release, by the Orchestrator agent of ADR-014: [archive/plans/paseo-bm-plan-orchestrator-v2.md](archive/plans/paseo-bm-plan-orchestrator-v2.md), acceptance in [archive/operations/paseo-bm-orchestrator-agent-run-20260928.md](archive/operations/paseo-bm-orchestrator-agent-run-20260928.md). Autopilot per project (ADR-015) followed on 2026-09-29: [archive/plans/paseo-bm-plan-orchestrator-autopilot.md](archive/plans/paseo-bm-plan-orchestrator-autopilot.md), acceptance in [archive/operations/paseo-bm-orchestrator-autopilot-run-20260929.md](archive/operations/paseo-bm-orchestrator-autopilot-run-20260929.md). Live coordination (ADR-016) followed the same day: [archive/plans/paseo-bm-plan-orchestrator-coordination.md](archive/plans/paseo-bm-plan-orchestrator-coordination.md), acceptance in [archive/operations/paseo-bm-orchestrator-coordination-run-20260929.md](archive/operations/paseo-bm-orchestrator-coordination-run-20260929.md).
 
 ## Operations — `operations/`
 
 | Document | Use it when |
 |---|---|
+| [Evaluation baseline](operations/paseo-bm-eval-baseline.md) | The numbers every phase of the autonomy programme is compared with: field replay and suite runs |
 | [Release runbook](operations/paseo-bm-release-runbook.md) | Releasing a version (from 0.4.1 only the `paseo-bm-plugin` package) |
-| [0.4.0 install checklist](operations/paseo-bm-install-checklist.md) | Acceptance of installing from npm, Setup, migration and removal on a real daemon |
+| [0.4.0 install checklist](operations/paseo-bm-install-checklist.md) | Acceptance of installing from npm, set-up, migration and removal on a real daemon |
 | [Orchestration checklist](operations/paseo-bm-orchestration-checklist.md) | Acceptance of Manager → Worker → Reviewer with the sample request set |
 | [Roles and fallback checklist](operations/paseo-bm-worker-fallback-checklist.md) | Acceptance of role settings and provider fallback |
 | [paseo.cafe record](operations/paseo-bm-cafe-listing-20260923.md) | Listing paseo-bm on paseo.cafe; the registry's traps |

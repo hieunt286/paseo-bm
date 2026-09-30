@@ -15,17 +15,18 @@ import { homedir } from "node:os";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { listAllAgents, roleOfAgent } from "./agent-role";
 import { beadStats, lookupBeads } from "./beads-store";
-import { resolveDataHome } from "./data-home";
+import { resolveDataHome, type DataHomeDeps } from "./data-home";
 import { priceUsage } from "./cost";
 import { listedPricesFor } from "./model-costs";
 import { inferWorkflowSteps } from "./workflow-steps";
 import { mergeExtras, readLiveExtras } from "./live-timeline";
 import { getBeadDetail, listBeadRows, runBeadAction, type BeadActionPaseo } from "./bead-actions";
 import { beadWorkOf } from "./bead-work";
-import { readAnswerMarks, writeAnswerMark } from "./answer-marks";
 import { stopAllInWorkspace, type StopPaseo } from "./stop-propagation";
 import { readIncidents } from "./fallback-state";
 import { dataHomeOf } from "./role-extras";
+import { createOrchestratorStore } from "./orchestrator-store";
+import { createDecisionStore } from "./decision-store";
 import {
   detail,
   paginate,
@@ -35,6 +36,7 @@ import {
   type ReconstructedTrace,
 } from "./traces";
 import {
+  assertWritableSchema,
   classifyWorkspaces,
   readRecords,
   deleteTraces,
@@ -55,8 +57,6 @@ import {
   beadsGetRpc,
   beadsActionRpc,
   workspacesOverviewRpc,
-  answersMarkRpc,
-  answersMarksRpc,
   agentsStopAllRpc,
   tracesGetRpc,
   tracesListRpc,
@@ -109,9 +109,9 @@ export async function requireLocation(
 /** `requireLocation`, with the data folder it was found in. */
 async function requireInstallHome(
   paseo: DashboardPaseo,
-  deps: { homedir?: () => string },
+  deps: DataHomeDeps,
 ): Promise<{ home: string; location: TraceStoreLocation }> {
-  const resolution = resolveDataHome({ homedir: deps.homedir ?? homedir });
+  const resolution = resolveDataHome({ ...deps, homedir: deps.homedir ?? homedir });
   if (resolution.home === null) {
     throw new DashboardError(
       "E_TRACE_STORE_UNWRITABLE",
@@ -286,6 +286,24 @@ export async function handleTracesDelete(
     }
     recordKeys = new Set(trace.records.map((record) => recordKeyOf(record)));
   }
+  if (input.dryRun !== true && inScope.length > 0) {
+    // The assessments of the deleted traces go with them (orchestrator design
+    // §5.3, REQ-075 e). An assessment is keyed by the request when the trace has
+    // one, else by the trace, so both ids are named. Before the traces, not
+    // after: a failure here then leaves everything in place for a retry, where
+    // the other order would leave excerpts of traces that are already gone. The
+    // store's own refusal comes first for the same reason.
+    assertWritableSchema(location);
+    const { home } = await requireInstallHome(paseo, deps);
+    const requestIds = inScope.flatMap((trace) => (trace.requestId === null ? [] : [trace.requestId]));
+    createOrchestratorStore(home).deleteAssessmentsFor(input.workspaceId, {
+      traceIds: inScope.map((trace) => trace.traceId),
+      requestIds,
+    });
+    // Autonomy design §A.4: a deleted request's settled decisions go with it;
+    // an open one stays, because the owner still has to answer it.
+    createDecisionStore(home).deleteSettled(input.workspaceId, requestIds);
+  }
   const outcome = await deleteTraces(location, input.workspaceId, scope, {
     dryRun: input.dryRun === true,
     recordKeys,
@@ -306,7 +324,7 @@ export async function handleTracesDelete(
 export async function readTraceContext(
   input: { workspaceId: string },
   paseo: DashboardPaseo,
-  deps: { homedir?: () => string } = {},
+  deps: DataHomeDeps = {},
 ): Promise<{
   location: TraceStoreLocation;
   traces: ReconstructedTrace[];
@@ -371,8 +389,16 @@ export async function agentFactsOf(
  * an agent started from Paseo's own new-agent flow with a paseo-bm profile
  * (no `bm.role` label) is found too, marked `labelled: false` (delta 20260918g
  * §4.2). The daemon's directory filter has no workspace key.
+ *
+ * The Orchestrator's assessment agent is left out unless `includeOrchestrator`
+ * asks for it: it is a paseo-bm agent the user sees and archives, but no part
+ * of a request, so nothing that rebuilds a trace or picks a chat peer may meet
+ * it (orchestrator design §3.2).
  */
-export async function bmAgentsOf(paseo: DashboardPaseo): Promise<Array<{ workspaceId: string | null; facts: AgentFacts }>> {
+export async function bmAgentsOf(
+  paseo: DashboardPaseo,
+  options: { includeOrchestrator?: boolean } = {},
+): Promise<Array<{ workspaceId: string | null; facts: AgentFacts }>> {
   let listed: Array<Record<string, unknown>>;
   try {
     listed = await listAllAgents(
@@ -394,6 +420,7 @@ export async function bmAgentsOf(paseo: DashboardPaseo): Promise<Array<{ workspa
     const fact = roleOfAgent(agent);
     const id = String(agent["id"] ?? "");
     if (fact === null || id === "") continue;
+    if (fact.role === "orchestrator" && options.includeOrchestrator !== true) continue;
     const labels = (agent["labels"] ?? {}) as Record<string, string>;
     const facts: AgentFacts = {
       id,
@@ -457,7 +484,7 @@ export async function handleTracesList(
 export async function handleTracesGet(
   input: { workspaceId: string; traceId: string },
   paseo: DashboardPaseo,
-  deps: { homedir?: () => string } = {},
+  deps: DataHomeDeps = {},
 ): Promise<{ trace: TraceDetail }> {
   const context = await readTraceContext(input, paseo, deps);
   const trace = context.traces.find((candidate) => candidate.traceId === input.traceId);
@@ -545,25 +572,6 @@ export async function handleAgentsStopAll(
   return stopAllInWorkspace(paseo, input.workspaceId);
 }
 
-/** `answers.marks` handler: the cards marked as answered (delta 20260918d §4.9). */
-export async function handleAnswerMarksGet(
-  paseo: DashboardPaseo,
-  deps: { homedir?: () => string } = {},
-): Promise<{ keys: string[]; notices: string[] }> {
-  const { keys, notices } = readAnswerMarks(await requireLocation(paseo, deps));
-  return { keys, notices };
-}
-
-/** `answers.mark` handler: marks one card as answered, or removes the mark. */
-export async function handleAnswerMarkSet(
-  input: { key: string; marked: boolean },
-  paseo: DashboardPaseo,
-  deps: { homedir?: () => string } = {},
-): Promise<{ keys: string[]; notices: string[] }> {
-  const { keys, notices } = writeAnswerMark(await requireLocation(paseo, deps), input.key, input.marked);
-  return { keys, notices };
-}
-
 /**
  * `workspaces.overview` handler: bead counts and running agents per listed
  * workspace. Read-only.
@@ -572,11 +580,13 @@ export async function handleAnswerMarkSet(
  * `runningAgents` is added beside it. Owner decision Q25 (delta 20260917e):
  * the Manager thinking and a Reviewer running both count as "this project is
  * busy". Counting Workers alone left the screen still during the parts of a
- * request where the user most wants to see something happening.
+ * request where the user most wants to see something happening. A running
+ * Orchestrator assessment counts too, under its own key (orchestrator design
+ * §3.2).
  */
 export async function handleWorkspacesOverview(paseo: DashboardPaseo): Promise<{ workspaces: WorkspaceOverview[] }> {
   const listed = (await listedWorkspaces(paseo)) ?? [];
-  const agents = await bmAgentsOf(paseo);
+  const agents = await bmAgentsOf(paseo, { includeOrchestrator: true });
   return {
     workspaces: listed
       .filter((entry) => !entry.archived && entry.id !== "")
@@ -601,6 +611,7 @@ export async function handleWorkspacesOverview(paseo: DashboardPaseo): Promise<{
           manager: runningOf("manager"),
           worker: runningOf("worker"),
           reviewer: runningOf("reviewer"),
+          orchestrator: runningOf("orchestrator"),
         };
         return { workspaceId: entry.id, beads, runningWorkers: runningAgents.worker, runningAgents };
       }),
@@ -678,8 +689,6 @@ export function registerDashboardRpcs(
   server.handle(beadsListRpc, (input, context) => handleBeadsList(input, sdk(context)));
   server.handle(beadsGetRpc, (input, context) => handleBeadsGet(input, sdk(context)));
   server.handle(workspacesOverviewRpc, (_input, context) => handleWorkspacesOverview(sdk(context)));
-  server.handle(answersMarksRpc, (_input, context) => handleAnswerMarksGet(sdk(context)));
-  server.handle(answersMarkRpc, (input, context) => handleAnswerMarkSet(input, sdk(context)));
   server.handle(agentsStopAllRpc, (input, context) => handleAgentsStopAll(input, context.paseo as StopPaseo));
   const ensureManager = deps.ensureManager;
   if (ensureManager !== undefined) {

@@ -8,7 +8,7 @@
 | Created | 2026-09-16 |
 | Requirements source | [Orchestration Dashboard PRD](../product/paseo-bm-dashboard-prd.md) (REQ-040 → REQ-069); REQ-059 (question card) lives in the [base PRD](../product/paseo-bm-prd.md) |
 | Base design | [paseo-bm — Technical Design](./paseo-bm.md) — this document **extends** it: the install home, roles, instructions, fallback and slash commands are there |
-| Related ADRs | [ADR-007](../adr/ADR-007-dashboard-trace-store.md) (trace store) · [ADR-002](../adr/ADR-002-install-ownership-model.md) · [ADR-005](../adr/ADR-005-manager-as-agent.md) (the agent lifecycle belongs to the user) · [ADR-006](../adr/ADR-006-role-registration.md) · [ADR-012](../adr/ADR-012-plugin-is-the-product.md) (the plugin is the whole product; machine setup on Setup) |
+| Related ADRs | [ADR-007](../adr/ADR-007-dashboard-trace-store.md) (trace store) · [ADR-002](../adr/ADR-002-install-ownership-model.md) · [ADR-005](../adr/ADR-005-manager-as-agent.md) (the agent lifecycle belongs to the user) · [ADR-006](../adr/ADR-006-role-registration.md) · [ADR-012](../adr/ADR-012-plugin-is-the-product.md) (the plugin is the whole product; machine setup in Settings) |
 | Reference environment | `@getpaseo/plugin` 0.8.0, `@getpaseo/client` 0.8.0, `@getpaseo/protocol` 0.8.0; Paseo CLI/daemon 0.8.0; Node ≥ 22. **(0.4.0)** Paseo ≥ 0.9.0 |
 
 ## 1. Scope
@@ -17,11 +17,11 @@
 
 - the trace store (location, layout, schema, writing, reading, deleting, reassigning, measuring size) and the collector hooked on lifecycle hooks;
 - how a trace is built per request, the `BM-REPORT` / `BM-REVIEW` / `BM-QUESTIONS` / `BM-ANSWERS` readers, how time is measured, how state is inferred, how errors are counted, how the feature-workflow step is inferred, how tokens and cost are computed;
-- the `.beads/issues.jsonl` reader and the actions that hand out work from the Beads screen;
-- every client screen of the plugin: the "Beads Manager" surface (Setup including the "Roles & models" screen, Workspaces, Metric, Beads), the "Beads" tab and the header button, chat cards, the question card, the fallback incident card, the waiting-question pill and the fallback pill, the "Beads in this chat" and "Beads agents" panels;
+- the `.beads/issues.jsonl` reader and the actions that hand out work from the Beads board;
+- the client pieces the "Beads Manager" surface is built from — the surface's views and hand-offs, the status strip, the Settings blocks (including "Roles & models"), a project's page (Requests, the Beads board, Agents), the history actions — the "Beads" tab and the header button, chat cards v2, the "Beads in this chat" and "Beads agents" panels. What the Inbox, Work, Insights and Settings show, and the decision card, are specified in the [autonomy design](./paseo-bm-autonomy.md) §A.12; this document says how those pieces work;
 - the RPCs that feed the above (§5) and their error codes.
 
-**Does not own** (they are in the [base design](./paseo-bm.md) or its still-living deltas): the content of `plugin/roles/*.md` (including the rule for the Worker writing `BM-QUESTIONS`, how the Manager relays answers, the `bm.requestId`/`bm.batchId` labels); the installer and the CLI (including `--install-beads-tools`; **(0.4.0)** the migration CLI); the install home layout (**(0.4.0)** the data folder, `setup-state.json`); the server contract, write rules and error codes of machine setup (`setup.ensure-roles`, `setup.grant-agent-tools`, `setup.install-skills`, `setup.cleanup`, the `setup` field of `setup.status` — base design §7.13); how agents are created and the `agent.create` hook; `manager.ensure`, `agents.list`, `roles.describe`, `agents.stop-all`; the server contract for role, model and fallback settings (`roles.settings`, `roles.options`, `roles.save-settings`, `roles.save-fallback`, `fallback.*`, the incident detection and handling rules); the question–answer ledger (qa-ledger); the plugin's agent tools (ADR-010); the two slash commands `/bm-worker-new` and `/bm-worker-stop-all`. This document only describes where those parts show up on screen.
+**Does not own** (they are in the [base design](./paseo-bm.md) or its still-living deltas): the content of `plugin/roles/*.md` (including the rule for the Worker writing `BM-QUESTIONS`, how the Manager relays answers, the `bm.requestId`/`bm.batchId` labels); the installer and the CLI (including `--install-beads-tools`; **(0.4.0)** the migration CLI); the install home layout (**(0.4.0)** the data folder, `setup-state.json`); the server contract, write rules and error codes of machine setup (`setup.ensure-roles`, `setup.grant-agent-tools`, `setup.install-skills`, `setup.cleanup`, the `setup` field of `setup.status` — base design §7.13); how agents are created and the `agent.create` hook; `manager.ensure`, `agents.list`, `roles.describe`, `agents.stop-all`; the server contract for role, model and fallback settings (`roles.settings`, `roles.options`, `roles.save-settings`, `roles.save-fallback`, `fallback.*`, the incident detection and handling rules); the decision store and its RPCs (autonomy design §A.3–§A.6); the plugin's agent tools (ADR-010); the two slash commands `/bm-worker-new` and `/bm-worker-stop-all`. This document only describes where those parts show up on screen.
 
 ## 2. Architecture
 
@@ -29,22 +29,28 @@
 
 ```
 plugin/
-  index.client.tsx            registers surface, sidebar, Command Center, settings screen,
-                              2 timeline transformer + 1 renderer, 3 workspace panel,
-                              header button, composer pill
-    client/launcher.tsx         surface "Beads Manager": view picker, status strip, Workspaces list
-    client/setup-screen.tsx     Setup screen (the surface's main screen), three tabs, "Roles & models"
-    client/dashboard.tsx        Metric screen    client/dashboard-actions.tsx  delete / reassign trace
-    client/beads-screen.tsx     Beads screen (kanban, filters, detail, actions)
-    client/beads-tab.tsx        workspace panel "Beads" with two sub-tabs
+  index.client.tsx            registers surface, sidebar, 3 Command Center items, settings screen,
+                              2 timeline transformer + 1 renderer, 3 workspace panel, header button
+    client/launcher.tsx         surface "Beads Manager": section router (Inbox · Work · Insights · Settings),
+                                status strip, running dot
+    client/surface-view.ts      the surface's views, back links and Command Center hand-offs (pure)
+    client/inbox.tsx            Inbox        client/inbox-model.ts
+    client/orchestrator-line.tsx the Inbox's Orchestrator line   client/orchestrator-model.ts  its wording,
+                                and the stage bar and M W R letters of Work's rows
+    client/work.tsx             Work: project rows, a project's page (Requests · Beads · Agents)   client/work-model.ts
+    client/insights.tsx         Insights     client/insights-model.ts
+    client/settings-section.tsx Settings     client/settings-model.ts
+    client/settings-blocks.tsx  the Settings blocks: Roles & models, fallback chains, tools, skills,
+                                agent tools, cleanup    client/setup-model.ts  their wording
+    client/dashboard-actions.tsx delete / reassign request history
+    client/beads-screen.tsx     the Beads board (kanban, filters, detail, actions), BeadsOverviewSection
+    client/beads-tab.tsx        workspace panel "Beads": the workspace's project page
     client/beads-header-button.ts  "Beads" button on the workspace header
-    client/tree.tsx             panel "Beads agents"     client/agent-tree.ts   its logic
-    client/chat-card.tsx        chat card, question card, fallback incident card (rendering)   client/chat-cards.ts   pure logic
+    client/tree.tsx             panel "Beads agents", Work's Agents tab     client/agent-tree.ts   its logic
+    client/chat-card.tsx        chat cards v2 and the live DecisionCard (rendering)   client/chat-cards.ts   pure logic
     client/bead-chips.tsx       bead chips on cards, detail pane, panel "Beads in this chat"
-    client/waiting-pills.tsx    composer pill           client/waiting-pills-model.ts
-    client/answer-state.ts      "answered" state within the app session
     client/ui.tsx               shared views, no hooks
-    client/*-model.ts, dashboard-view.ts, launch-manager.ts, slot.ts   pure logic
+    client/*-model.ts, launch-manager.ts, slot.ts   pure logic
     client/settings.tsx         storage threshold settings screen
   index.server.ts
     server/collector.ts         turn_started / turn_ended hooks → write the trace
@@ -54,12 +60,11 @@ plugin/
     server/workflow-steps.ts    feature-workflow steps    server/cost.ts   token → cost
     server/beads-store.ts       read .beads/issues.jsonl  server/bead-work.ts   who is working on a bead
     server/bead-actions.ts      beads.list/get/action     server/shell.ts   br read commands
-    server/dashboard-rpc.ts     RPCs for Metric, Beads, Workspaces
+    server/dashboard-rpc.ts     RPCs for requests, beads and the workspace figures
     server/chat-rpc.ts          chat.peers, chat.beads, beads.lookup
     server/chat-peers.ts        peersOfWorkspace, workspaceRecordsReader
-    server/chat-waiting.ts      chat.waiting              server/answer-marks.ts  answers.mark(s)
     server/live-timeline.ts     readTimelinePages (shared)
-    server/setup-rpc.ts, setup-tools.ts, setup-skills.ts, role-extras.ts   Setup screen
+    server/setup-rpc.ts, setup-tools.ts, setup-skills.ts, role-extras.ts   Settings: tools, skills, roles
     server/setup-roles.ts, setup-machine.ts, setup-state.ts, data-home.ts   (0.4.0) machine setup, base design §5, §7.13
   shared/contracts.ts           Zod contracts for every RPC
   shared/bm-report.ts           BM-REPORT/BM-REVIEW parser (server/bm-report.ts only re-exports)
@@ -86,7 +91,7 @@ AGENT RUNS
 USER OPENS A SCREEN
   traces.list / traces.get      trace store + agents.list (+ timeline backfill for running turns)
   beads.list / beads.stats      <workspace>/.beads/issues.jsonl (cache mtime+size)
-  chat.peers / chat.waiting     agents.list + Manager timeline + trace store when labels are missing
+  chat.peers                    agents.list + trace store when labels are missing
 ```
 
 `traces.list` does not read the timeline when every trace of the page is already finished in the store — which is what keeps D-1 (≤ 3 seconds) when the store is large.
@@ -95,9 +100,9 @@ USER OPENS A SCREEN
 
 - React Native primitives only; every color comes from the theme via `toneColor(theme, tone)`, `Tone = "muted" | "plain" | "info" | "warning" | "danger" | "success"` (`plain` = `foreground`, `muted` = `foregroundMuted`, `info` = `accent`, the other three tones are `status*`). No hard-coded color codes, no alpha channel spliced into a color string: tinting is done with an absolutely positioned overlay `View` with `opacity`.
 - Interface text is in English; everything pressable has an accessibility label; usable at `layout.compact` (padding 12 instead of 24).
-- Shared drawing code is **hook-free views** in `ui.tsx` (`WorkspaceScreenHeader`, `BeadRowCard`, `StatusTabs`, `KanbanBoard`, `StatCards`, `BarChart`, `Chip`, `RoleMark`, `RoleLegend`), so that `test/helpers/element-tree.ts` can build the tree without a renderer.
-- State that survives a component unmount but not an app reload lives in a module, read with `useSyncExternalStore`: `createSlot<T>()` (`slot.ts`), `createSessionToggle`, `createSessionMap` (`beads-model.ts`), `answer-state.ts`. State that must survive a reload lives on the server, in `<install home>` (**(0.4.0)** the data folder, base design §5.1).
-- No background polling, except the deliberate intervals: the Workspaces list 10 s (only while shown), `chat.waiting` 15 s, the header button 15 s, the "Beads in this chat" panel 15 s, the "Beads agents" panel 5 s, the fallback incident card 15 s (only while the incident is `pending`/`waiting`).
+- Shared drawing code is **hook-free views** in `ui.tsx` (`WorkspaceScreenHeader`, `BeadRowCard`, `StatusTabs`, `KanbanBoard`, `StatCards`, `BarChart`, `Chip`, `RoleMark`, `ConfirmBlock`, `CardFrame`, `CompactLine`), so that `test/helpers/element-tree.ts` can build the tree without a renderer.
+- State that survives a component unmount but not an app reload lives in a module, read with `useSyncExternalStore`: `createSlot<T>()` (`slot.ts`), `createSessionToggle`, `createSessionMap` (`beads-model.ts`). State that must survive a reload lives on the server, in `<install home>` (**(0.4.0)** the data folder, base design §5.1).
+- No background polling, except the deliberate intervals: the Inbox 5 s (only while shown), Work's rows and figures 10 s (only while shown), a project's requests and decisions and an open live request's detail 10 s (only while shown), a decision card 5 s (only while the decision can be answered), the header button 15 s, the "Beads in this chat" panel 15 s, the "Beads agents" panel and Work's Agents tab 5 s.
 
 ## 3. Trace store
 
@@ -111,7 +116,7 @@ The server bundle has no cwd and cannot read `import.meta.url`, yet must honour 
 
 `install.json` is only read, never written.
 
-**(0.4.0)** Replaced by `resolveDataHome()` of base design §5.1: `PASEO_BM_HOME` → the pointer `~/.paseo-bm/home.json` → `~/.paseo-bm`; the plugin **creates** the folder itself (`0700`) on the first write and no longer reads `install.json`. Tracing is off only when `resolveDataHome` returns `home: null` (an unsafe folder, a broken pointer); the reason shows in the Metric notice as today and in the "This install" block of Setup (§11.3). Every `<install home>` path in this document reads, from 0.4.0, as `<data folder>`.
+**(0.4.0)** Replaced by `resolveDataHome()` of base design §5.1: `PASEO_BM_HOME` → the pointer `~/.paseo-bm/home.json` → `~/.paseo-bm`; the plugin **creates** the folder itself (`0700`) on the first write and no longer reads `install.json`. Tracing is off only when `resolveDataHome` returns `home: null` (an unsafe folder, a broken pointer); the reason shows in the notices of `traces.list` and in the Data group of Settings (§11.4). Every `<install home>` path in this document reads, from 0.4.0, as `<data folder>`.
 
 ### 3.2 Layout
 
@@ -121,9 +126,8 @@ The server bundle has no cwd and cannot read `import.meta.url`, yet must honour 
   <workspaceId>/                           0700
     meta.json                              0600   { lastKnownName, lastKnownDirectory, lastSeenAt }
     events-202609.jsonl                    0600   append-only, one record per line
-<install home>/ui/                         0700   UI state that must survive a reload
-  answer-marks.json                        0600   (§15.6)
-<install home>/role-extras.json            0600   (§11.3)
+<install home>/ui/                         0700   plugin state that must survive a reload (setup state, …)
+<install home>/role-extras.json            0600   (§11.4)
 ```
 
 - Split by `workspaceId`: deleting by workspace is deleting one folder, reassigning is moving one folder. Split by month: deleting by cutoff is mostly deleting whole files.
@@ -142,13 +146,15 @@ The server bundle has no cwd and cannot read `import.meta.url`, yet must honour 
   reports:  [parsedReport],   reviews: [parsedReview],
   evidence: [evidence],       // shell commands, files written, sub_agent, skills loaded
   usage:    usage | null,
-  runtime?: { model, thinkingOptionId, modeId, provider? } | null }
+  runtime?: { model, thinkingOptionId, modeId, provider? } | null,
+  pluginVersion?: string | null }
 
 traceMessage = { agentId | null, at, text, truncated, origin?: "user" | "agent" }
 ```
 
 - **`origin`**: `user` when the message carries `clientMessageId` (the user typed it in the app), `agent` when an agent sent it with `send_agent_prompt`. An old record without this field is **never** treated as the user's words.
 - **`runtime`**: what the agent actually ran in that turn, taken from the `timeline.refetch` snapshot — `runtimeInfo` first, the configured fields (`model`, `effectiveThinkingOptionId` → `thinkingOptionId`, `currentModeId`) only as a fallback; `null` when the snapshot cannot be read. `provider` (added by the fallback delta 20260921) is used to price a model that is not in the price table. `usage.model` keeps the old source.
+- **`pluginVersion`**: the paseo-bm version that wrote the record (`PLUGIN_VERSION`), for the evaluation replay ([evaluation design](./paseo-bm-evaluation.md) §3). Optional: records written before it have none and `v` stays 1.
 - **`skill` evidence**: Claude Code loading a skill is a `tool_call` named `Skill` with `detail.label` = the skill name; for other providers it is reading `<skill>/SKILL.md` (inferred); `ls`/`test -f` do not count.
 - **A message's time may be the write time.** A message carries the timeline's time only when `timeline.refetch` succeeds; when it fails (an archived agent is the obvious case) the whole record is stamped with `now()`. No code may treat a message time in a record as the real time, or use it as a key.
 
@@ -172,7 +178,7 @@ Write rules:
 | `{ allOfWorkspace: true }` | Delete the folder `<traces>/<workspaceId>` |
 
 - The interface always calls `dryRun: true` first (returning `{ traces, bytes, running }`), then asks for confirmation, defaulting to "No". `running` is the number of requests in scope that still have a `running` agent; > 0 shows a warning that later turns will become a new trace.
-- Goes through the checker of §3.8; failing it → `E_TRACE_STORE_UNWRITABLE`, nothing deleted. Does not touch beads, documents, agents, Paseo conversations, `install.json`, `config.json` or anything outside `<install home>/traces`.
+- Goes through the checker of §3.8; failing it → `E_TRACE_STORE_UNWRITABLE`, nothing deleted. Does not touch beads, documents, agents, Paseo conversations, `install.json`, `config.json` or anything outside `<install home>/traces`, except the Orchestrator's assessments of the traces in scope ([Design Orchestrator](./paseo-bm-orchestrator.md) §5.3): every line of `orchestrator/assessments/<workspaceId>.jsonl` whose `requestId` or `traceId` names one of them is removed, before the traces, so a failure there leaves both in place. A `before` cutoff counts a trace as in scope when any of its records lies before the cutoff. A preview (`dryRun`) touches neither.
 - Lines that cannot be read are **kept as they are** on a rewrite: do not delete data you do not understand.
 
 ### 3.6 Size
@@ -247,8 +253,8 @@ tier       = "Small" | "Medium" | "Large"
 | `durationMs` | `null` while running or when it cannot be measured |
 | `usage` | Total of all agents |
 | `messageCount`, `userMessageCount` | Messages sent and received; messages the user typed directly to an agent of the request |
-| `workerUsage` | `[{ agentId, title, usage }]` — for the chart of the Workers that spent the most tokens |
-| `usageByModelRole?` | `[{ role, model, usage }]` by effective model — for the model × role chart |
+| `workerUsage` | `[{ agentId, title, usage }]` — tokens per Worker |
+| `usageByModelRole?` | `[{ role, model, usage }]` by effective model |
 | `errors?` | §7.4 |
 | `beadCounts` | `{ created, updated, closed, ready }`, each number `{ count, confidence }` |
 | `tier`, `linking` | The tier the Worker classified itself; the certainty of the grouping |
@@ -259,7 +265,7 @@ tier       = "Small" | "Medium" | "Large"
 ### 4.3 `TraceDetail` = `TraceSummary` + …
 
 ```
-sent:     { userRequest, workerInitialPrompts[], reviewRequests[] (+ batchId) }
+sent:     { userRequest, workerInitialPrompts[], reviewRequests[] (+ batchId) }  // a Worker record's first message, unless it is a plugin notice
 received: { reports[], reviews[], managerReplies[] }
 timing:   { totalMs | null, managerTurns[], workers[], reviewers[], basis }
 usageByAgent: [{ agentId, role, usage, runtime?: [{ model, thinkingOptionId, modeId, recorded, turns }] }]
@@ -297,26 +303,23 @@ RPC names must match `^[a-z][a-z0-9._-]*$` (SDK). Every RPC below is read-only, 
 | `traces.get` | `{ workspaceId, traceId }` → `{ trace: TraceDetail }` | Cannot be rebuilt → `E_TRACE_NOT_FOUND` |
 | `traces.delete` | `{ workspaceId, scope, dryRun? }` → `{ deleted: { traces, bytes, running }, store }` | **Writes** the store (§3.5); `scope` is exactly one of the three forms |
 | `traces.reassign` | `{ fromWorkspaceId, toWorkspaceId, dryRun? }` → `{ moved: { traces, bytes }, store }` | **Writes** the store (§3.7) |
-| `traces.workspaces` | `{}` → `{ workspaces: [{ workspaceId, state, lastKnownName, lastKnownDirectory, lastSeenAt, bytes }] }` | Every workspace that has history; the way into the history of a closed workspace |
+| `traces.workspaces` | `{}` → `{ workspaces: [{ workspaceId, state, lastKnownName, lastKnownDirectory, lastSeenAt, bytes }] }` | Every workspace that has history; the way into the history of a closed workspace (Work's "Closed workspaces with history", Settings → Data) |
 | `beads.stats` | `{ workspaceId }` → `{ stats }` | §10 |
 | `beads.list` | `{ workspaceId }` → `{ beads: BeadRow[], stats }` | §10 |
 | `beads.get` | `{ workspaceId, id }` → `{ bead: BeadDetail }` | Id not present → `E_BEAD_NOT_FOUND` |
 | `beads.action` | `{ workspaceId, id, action: implement\|delete\|close }` → `{ managerId, created }` | **Sends** a request to the Manager (§13.4) |
 | `beads.lookup` | `{ workspaceId, ids (≤ 100) }` → `{ beads }` | Keeps only ids that really exist in the store |
-| `workspaces.overview` | `{}` → `{ workspaces: [{ workspaceId, beads: { total, inProgress, blocked, ready } \| null, runningWorkers, runningAgents: { manager, worker, reviewer } }] }` | Every workspace not archived; `runningWorkers` = `runningAgents.worker`, kept for old readers |
+| `workspaces.overview` | `{}` → `{ workspaces: [{ workspaceId, beads: { total, inProgress, blocked, ready } \| null, runningWorkers, runningAgents: { manager, worker, reviewer, orchestrator? } }] }` | Every workspace not archived; `runningWorkers` = `runningAgents.worker`, kept for old readers; `orchestrator` counts running Orchestrator assessment agents ([Design Orchestrator](./paseo-bm-orchestrator.md) §3.2) and is absent from a 0.4.x server |
 | `chat.peers` | `{ agentId }` → `{ owner, peers, workspaceId }` | §15.2 |
 | `chat.beads` | `{ workspaceId, agentId }` → `{ beads: [{ bead, mentions, lastMentionedAt }], scannedItems }` | §15.7 |
-| `chat.waiting` | `{}` → `{ waiting: WaitingWorker[], fallback: [{ managerId, workspaceId, incident }] }` | §15.5, §15.8; `fallback` = `pending` incidents of live Managers (server rules: base design §7.10) |
-| `answers.marks` | `{}` → `{ keys, notices }` | §15.6 |
-| `answers.mark` | `{ key (1–400 characters), marked }` → `{ keys, notices }` | **Writes** `ui/answer-marks.json` |
-| `setup.status` | `{}` → tools, skills, extras, … | §11.3; only runs `--version` |
+| `setup.status` | `{}` → tools, skills, extras, … | §11.4; only runs `--version` |
 | `setup.install-tool` | `{ tool: br\|bv, confirmed: true }` → `{ command, code, tail }` | **Runs** the installer; `confirmed` must be `true` |
-| `setup.ensure-roles` **(0.4.0)** | `{ resume? }` → `{ created, baseProvider, model, skipped }` | **Writes** the Paseo configuration when a role is missing; Setup calls it on every open, before `setup.status`. Contract: base design §7.13.2 |
+| `setup.ensure-roles` **(0.4.0)** | `{ resume? }` → `{ created, baseProvider, model, skipped }` | **Writes** the Paseo configuration when a role is missing; Settings calls it on every open, before `setup.status`. Contract: base design §7.13.2 |
 | `setup.grant-agent-tools` **(0.4.0)** | `{ confirmed: true }` → `{ injectIntoAgents: true, changed }` | **Writes** `daemon.mcp.injectIntoAgents`; base design §7.13.3 |
 | `setup.install-skills` **(0.4.0)** | `{ confirmed: true }` → `{ command, code, tail, missingBefore, missingAfter }` | **Runs** the `skills` CLI; base design §7.13.4 |
 | `setup.cleanup` **(0.4.0)** | `{ confirmed: true, deleteData }` → `{ removedProviders, removedProfiles, agentTools, data, nextCommand }` | **Deletes** the `bm-*` entries, restores the tool switch, optionally deletes the data; base design §7.13.7 |
-| `roles.instructions` | `{ role }` → `{ base, extra, full, path \| null, maxChars }` | §11.3 |
-| `roles.save-extra` | `{ role, text }` → `{ extra, full }` | **Writes** `role-extras.json` |
+| `roles.instructions` | `{ role }` → `{ base, extra, full, path \| null, maxChars }` | No screen reads it in Phase 1; the Orchestrator's `apply-suggestion` flow uses its `hash` |
+| `roles.save-extra` | `{ role, text }` → `{ extra, full }` | **Writes** `role-extras.json`; no screen calls it in Phase 1 (autonomy design Part B retires additional instructions) |
 
 **Error codes** (`DASHBOARD_ERROR_CODES`, recorded in the base design's shared code registry; errors are thrown as an `Error` whose `message` starts with the code, and the client reads it with `errorCodeOf`):
 
@@ -338,7 +341,7 @@ RPC names must match `^[a-z][a-z0-9._-]*$` (SDK). Every RPC below is read-only, 
 | `E_SKILLS_INSTALL_FAILED` **(0.4.0)** | The `skills` CLI failed or took over 300 seconds |
 | `E_DATA_HOME_UNAVAILABLE` **(0.4.0)** | The data folder is unusable, or `setup-state.json` cannot be written |
 
-The `E_ROLE_SETTINGS_*` and `E_FALLBACK_*` codes in the same list belong to the RPCs in the base design (§7.3.6, §7.10); the screens show them per §11.3 and §15.8.
+The `E_ROLE_SETTINGS_*` and `E_FALLBACK_*` codes in the same list belong to the RPCs in the base design (§7.3.6, §7.10); Settings shows them per §11.4, the Inbox per autonomy design §A.12.
 
 ## 6. Building a trace per request
 
@@ -346,16 +349,16 @@ The `E_ROLE_SETTINGS_*` and `E_FALLBACK_*` codes in the same list belong to the 
 
 1. **Get the agents.** `agents.list` of every agent (`includeArchived: true`, page of 200); the role comes from the `bm.role` label, and without the label from the `bm-*` provider (`roleOfAgent`, `labelled: false`); filtered by `agent.workspaceId`. A tree by `parentAgentId`; a node whose parent is not in the set is a root.
 2. **Read the store** of the workspace. Buckets are **keyed by `requestId`**, so all the Manager turns of one request are one trace. A trace is opened by a Manager turn whose incoming message is not a `BM-REPORT`, **or** by a Manager turn from which a `requestId` can be read (then the request is `null` and the row says plainly that it could not be recorded — the plugin only collects from the moment it is loaded).
-3. **A Manager turn that names no `requestId`** belongs to the request that **that same Manager** names in its next turn; if there is none, a temporary row is opened. The scope is one Manager, not the whole workspace: a Worker's progress report to the Manager looks exactly like the user's words, so the Manager's own words in its next turn are the evidence; searching across the whole workspace once pulled the turns of an archived Manager into the request of another Manager 18 hours later. No time threshold is added.
+3. **A Manager turn that names no `requestId`** belongs to the request that **that same Manager** names in its next turn; if there is none, a temporary row is opened. **Exception:** a turn with **no inbound message** (the Manager woken because its Worker ended a turn) belongs to the request that Manager named **before** it — it is the summary that closes that request — and only falls forward when there is none (Orchestrator acceptance 2026-09-28, P1: it made a phantom row 41 s before the next request). The scope is one Manager, not the whole workspace: a Worker's progress report to the Manager looks exactly like the user's words, so the Manager's own words in its next turn are the evidence; searching across the whole workspace once pulled the turns of an archived Manager into the request of another Manager 18 hours later. No time threshold is added.
 4. **Get the `requestId`**, stopping at the first source that has a value: the agent's `bm.requestId` label → `exact`; `requestId:` in a `BM-REPORT` of the trace → `exact`; the line `requestId: req-…` in the Worker's initial prompt → `exact`; a bare `req-…` id that the messages sent to the agent mention more often than all other ids combined → `inferred` (Manager 0.1.0 writes a bare id and sets no label; Worker messages also cite other requests); a Worker whose `agentCreatedAt` falls within a Manager turn of the trace and that does not yet belong to any trace → `inferred`; cannot be placed → the "unknown request" group, `unknown`, **not** assigned arbitrarily to the nearest trace.
 5. **Reviewers** by `parentAgentId` = a Worker of the trace (or the `bm.batchId` label). A report that names a **different** request is never evidence for this request, whichever record it sits in (`reportsBelongingTo`); the request's words are the **earliest** user message in the merged turns.
 6. **Records of an agent no longer on the machine** are still attached to the trace by their own `requestId`; that agent goes into `agentsMissing` and the row says "no longer on this machine" (once a Worker is deleted, `includeArchived` does not see it either).
-7. **Two kinds of number:** `reviewerIds.length` is the number of agents; `reviewCalls` counts the Reviewer's `sent` messages that are not `BM-REVIEW` and not the STOP notice the plugin sends. When it differs from the `guardrail` the Worker reports itself, both are shown and flagged.
+7. **Two kinds of number:** `reviewerIds.length` is the number of agents; `reviewCalls` counts the Reviewer's `sent` messages that are not `BM-REVIEW` and not the STOP notice the plugin sends. The `guardrail` the Worker reports itself is kept beside it (`guardrailReported`), never merged into it.
 8. **User messages** (`origin: "user"`) sent to a Worker/Reviewer go into `userMessages` by the role of the receiving agent, even when the agent has been deleted.
 
 ### 6.2 Splitting into segments by the turns in which the user asks
 
-A request is split into **segments** on screen: each Manager turn whose first message is a real user message (`origin === "user"`, not based on wording) opens a segment, and the list shows one row per segment with `turn: { index, total }` (`summariseSegments`). The rows of one request share the `traceId`, so the list key is `traceId#index`. The `requestId`, how the Worker reports and the review budget do not change. Charts and the "requests with errors" number count **requests** (rows with `index === 1` or `turn: null`), not rows.
+A request is split into **segments**: each Manager turn whose first message is a real user message (`origin === "user"`, not based on wording) opens a segment, and `traces.list` returns one row per segment with `turn: { index, total }` (`summariseSegments`). The rows of one request share the `traceId`, so a row's key is `traceId#index`. The `requestId`, how the Worker reports and the review budget do not change. Work merges the rows of one trace back into one request (`requestSummaries`), and every count of requests counts **requests** (rows with `index === 1` or `turn: null`), not rows.
 
 ### 6.3 The `BM-REPORT` / `BM-REVIEW` reader (`shared/bm-report.ts`)
 
@@ -372,7 +375,7 @@ Taken only from **positional arguments**: the part before the first flag, after 
 
 ## 7. Time, state and errors
 
-### 7.1 Measurement points (fixed, printed in the interface)
+### 7.1 Measurement points (fixed)
 
 | Number | Start | End |
 |---|---|---|
@@ -409,6 +412,8 @@ traceErrorsSchema = z.object({
 
 ## 8. Feature-workflow steps
 
+`traces.get` returns these steps, and the Orchestrator's tools read them (`assessment.ts` `buildAssessmentContent`); no screen draws them since the autonomy programme's Phase 1 (§12).
+
 The table always has all 12 steps, in order: `classify_tier`, `prd`, `design`, `adr`, `plan`, `review_plan`, `convert_to_beads`, `polish_beads`, `implement`, `review_batches`, `build_and_tests`, `close_with_evidence`.
 
 | Step | `exact` | `inferred` |
@@ -433,7 +438,7 @@ The table always has all 12 steps, in order: `classify_tier`, `prd`, `design`, `
 2. **Estimated** from `shared/prices.ts` by model: `inputTokens×in + cachedInputTokens×cacheRead + outputTokens×out` — cached tokens are priced separately at the cache rate. → `costBasis: "estimated"`. A model not in the table is looked up in the provider's model list (`runtime.provider`; `metadata.cost` of `listModels`).
 3. Cannot be priced → `costUsd: null`, `costBasis: "unavailable"`, the interface shows only tokens.
 4. The interface always shows `pricesUpdatedAt` next to the amount, with the label "estimated"; the amount is an estimate, not an invoice (Bedrock/Vertex prices differ from the original API prices). **No network call to fetch prices.**
-5. Every aggregation by model (total cost, rows by model, the model × role chart) uses the **effective model**: `runtime.model`, falling back to `usage.model`.
+5. Every aggregation by model (total cost, rows by model, tokens by model and role) uses the **effective model**: `runtime.model`, falling back to `usage.model`.
 
 ## 10. Reading the beads store
 
@@ -446,44 +451,53 @@ The table always has all 12 steps, in order: `classify_tier`, `prd`, `design`, `
 
 ## 11. Surface "Beads Manager"
 
-### 11.1 Views and the way back
+What each section shows is specified in the [autonomy design](./paseo-bm-autonomy.md) §A.12 (experience concept §4); this section says how the surface is put together.
 
-`DashboardViewName = "setup" | "workspaces" | "dashboard" | "beads"`; the surface opens at `SURFACE_HOME_VIEW = "setup"`.
+### 11.1 Sections, views and the way back
 
-| View | `backOf` | `backLabelOf` (accessibility label of ←) |
-|---|---|---|
-| `setup` | `null` (no ←) | `null` |
-| `workspaces` | `setup` | "Back to Beads Manager setup" |
-| `dashboard`, `beads` | `workspaces` | "Back to workspaces" |
+The surface opens on the Inbox and a row of section tabs (`StatusTabs`) above every view switches **Inbox · Work · Insights · Settings** (`SURFACE_SECTIONS`); the Inbox tab carries the count of what needs the owner. `SurfaceView = "inbox" | "work" | "project-requests" | "project-beads" | "insights" | "settings"` (`client/surface-view.ts`, pure); `SURFACE_HOME_VIEW = "inbox"`.
+
+| View | Section | `backOf` | `backLabelOf` (accessibility label of ←) |
+|---|---|---|---|
+| `inbox`, `work`, `insights`, `settings` | its own | `null` (no ←: the tabs reach it) | `null` |
+| `project-requests`, `project-beads` (`projectTabOf` → `requests` / `beads`) | Work | `work` | "Back to Work" |
 
 ```
-sidebar / Command Center "Open Beads Manager"
-  → setup ──(Workspaces)──> workspaces ──(Metric | Beads)──> dashboard | beads
-Command Center "Open Beads Metric" → dashboard ──(←)──> workspaces ──(←)──> setup
+sidebar / Command Center "Open Beads Inbox"  → inbox
+Work's project row or closed-history row     → project-requests ──(←)──> work
+Command Center "Open Beads project"          → project-requests (this workspace)
+Command Center "Open Beads Manager"          → the workspace's Manager chat (launch-manager.ts)
 ```
 
-The Command Center and slash commands cannot pass anything into the surface, so a **one-place slot** `createSlot<string>()` is used: `launchRequests` (open the Manager), `dashboardRequests` (open a workspace's Metric), `launcherNotices` (slash command notices). `take()` notifies listeners **only when it actually removes a value**, so pressing to dismiss a notice dismisses it at once and there is no loop. `runPendingRequest` returns `null` **before** `take()` while the launcher is `pending`, and the surface's effect runs again when the launcher state changes, so a request to open the Manager that arrives midway is not dropped (one-place slot: the newest request wins).
+The Command Center and slash commands cannot pass anything into a surface, so each hand-off is a **one-place slot** `createSlot<T>()` (`slot.ts`): `launchRequests` (open the Manager), `sectionRequests` (open a section; "Open Beads Inbox", global), `projectRequests` (open a workspace's project page on Requests; "Open Beads project", `open-beads-project`, workspace), `launcherNotices` (slash command notices). `take()` notifies listeners **only when it actually removes a value**, so pressing to dismiss a notice dismisses it at once and there is no loop. `runPendingRequest` returns `null` **before** `take()` while the launcher is `pending`, and the surface's effect runs again when the launcher state changes, so a request to open the Manager that arrives midway is not dropped (one-place slot: the newest request wins).
+
+The surface keeps the open project as a `SurfaceWorkspace` `{ id, label, closed? }`: `label` is `screenTitleOf(label, project)` (the project name is added when the workspace name differs from it, so that two bead stores are not confused), falling back to the workspace id; `closed` is the `traces.workspaces` state of a workspace Paseo no longer lists (`archived` or `orphaned`).
 
 ### 11.2 Status strip
 
-`launcherStatusLines({ commandNotice, canOpenAgents, state })` returns, in order: the slash command notice (tone `muted`, `dismissable`, accessibility label `"<text>. Dismiss."`); `OLD_HOST_WARNING` when the host lacks `navigation.openAgent` (tone `warning`); the lines of `describeLauncherState(state)`: `pending` → "Opening Beads Manager…"; `opened` → "Started a new…" / "Reopened the existing Beads Manager…" (`muted`), then tone `warning` for other live Managers (`otherManagerIds`, "…nothing was archived or deleted."), `modeNotice`, `toolsNotice`, **(0.4.0)** `setupNotice` (the server's text verbatim, base design §7.3, §7.13.2); `error` → `danger` "Could not open Beads Manager (<code>). <message>", where `<message>` is the server's message with the daemon's wrapper stripped (`Request failed: … requestType=… code=…` of `DaemonRpcError`) and the leading code removed when the code is already in the parentheses (`withoutCode`); with no code, "Could not open Beads Manager. <message>". A line that cannot be dismissed is a `Text` with `accessibilityLiveRegion="polite"`. `LauncherStatus` is built **once** in `ManagerLauncherSurface` and placed on every view of the surface (Setup, Workspaces, Metric, Beads) — a slash command can open the surface at any view. The "Beads" tab (§14) has no such strip.
+`launcherStatusLines({ commandNotice, canOpenAgents, state })` returns, in order: the slash command notice (tone `muted`, `dismissable`, accessibility label `"<text>. Dismiss."`); `OLD_HOST_WARNING` when the host lacks `navigation.openAgent` (tone `warning`); the lines of `describeLauncherState(state)`: `pending` → "Opening Beads Manager…"; `opened` → "Started a new…" / "Reopened the existing Beads Manager…" (`muted`), then tone `warning` for other live Managers (`otherManagerIds`, "…nothing was archived or deleted."), `modeNotice`, `toolsNotice`, **(0.4.0)** `setupNotice` (the server's text verbatim, base design §7.3, §7.13.2); `error` → `danger` "Could not open Beads Manager (<code>). <message>", where `<message>` is the server's message with the daemon's wrapper stripped (`Request failed: … requestType=… code=…` of `DaemonRpcError`) and the leading code removed when the code is already in the parentheses (`withoutCode`); with no code, "Could not open Beads Manager. <message>". A line that cannot be dismissed is a `Text` with `accessibilityLiveRegion="polite"`. `LauncherStatus` is built **once** in `ManagerLauncherSurface` and placed on every view of the surface (the Inbox, Work's list, a project's page, Insights, Settings) — a slash command can open the surface at any view. The "Beads" tab (§14) has no such strip.
 
-### 11.3 Setup screen (the main screen)
+### 11.3 Work: projects and a project's page
 
-```
-[Beads Manager ............................ (Workspaces)]
-Setup for this machine: beads tools, agent skills, and each role's model and extra instructions.
-<status strip> · spinner · error · setupHeadline · paseoToolsWarnings
-<migration banner>                             ← (0.4.0) only when install.kind = installer-directory
-<"Set up paseo-bm" card>                        ← (0.4.0) only while something is missing
-[Beads tools] [Agent skills] [Agents]          ← StatusTabs, one tab at a time
-<tab content>
-paseo-bm <version>
-<"This install" block>                          ← (0.4.0) data folder, cleanup button
-```
+`client/work.tsx` draws, `client/work-model.ts` decides (autonomy design §A.12 as built for the rows, the stage bar, the evidence lines and the timeline).
 
-- Tabs: `SETUP_TABS` = `tools` "Beads tools" · `skills` "Agent skills" · `agents` "Agents"; `DEFAULT_SETUP_TAB = "tools"`, a `useState`, so reopening the surface goes back to the first tab. Each tab has a `hint` (e.g. "br and bv on the daemon's PATH"), used for the accessibility label `"<label>: <hint>"`. Everything that reports a problem (`setupHeadline`, `paseoToolsWarnings`) sits **above** the tab row, so that no tab can hide a missing tool. The `agents` tab contains "Roles & models" then "Additional instructions".
-- The "Workspaces" button (`secondaryButton`, accessibility label "Open the workspace list: Beads Manager, metrics and beads of each workspace").
+- **Project rows** — `workspaces.list` in exactly the order it returns (`activity_at desc`; no pinning), leaving out workspaces being archived (`archivingAt`); each row the name, the running dot, the current request, its stage, the M W R letters and when it last moved, from `orchestrator.state` (read every `WORK_POLL_MS` = 10,000 ms while the rows show) and `workspaces.overview` (read only while the view is `work`: `overviewPolling`, `OVERVIEW_POLL_MS` = 10,000 ms, because each read touches the bead store of every workspace). A row opens the project's page.
+- **Running dot** (`RunningDot`, `runningDotState`, drawn bare on a row, the words in its accessibility label): total `runningAgents` > 0 → tone `success`, pulsing with `Animated.loop` opacity 1 ↔ `DIM_OPACITY` 0.3, each beat `PULSE_MS` = 900 ms (`useNativeDriver: false`), label `1 Worker, 1 Reviewer` (a running Orchestrator counts as `1 Orchestrator`; a server that does not send `orchestrator` counts none); = 0 → a dimmed dot at 0.3, tone `muted`, label "No Beads agent running"; no data yet → nothing drawn. `AccessibilityInfo.isReduceMotionEnabled()` true → a solid dot, no animation (a failed query counts as false). A poll that only changes the numbers does not restart the loop.
+- **Closed workspaces with history**, after the rows: `closedWorkspaces(stored, listedIds)` — in `traces.workspaces` but no longer listed, state other than `unknown`, newest first, each with its state ("archived" / "no longer in Paseo"), last known folder, last activity and size. An entry opens that workspace's project page with `closed` set (§11.1): its Requests tab shows the history, and there is no **Chat** (no Manager to talk to).
+- **A project's page** (`ProjectPage`): `ProjectHeader` — ← (on the surface), the project's title (`null` in the workspace's own "Beads" tab, §14), **Chat ▸** (the project's Manager through `managerLauncher`, only on a host with `navigation.openAgent`, "Opening…" while pending) — and the tabs **Requests · Beads · Agents** (`PROJECT_TABS`). Requests: `traces.list` merged per trace, a stage bar, evidence lines and a typed timeline per request (`traces.get` when opened, `decisions.list { scope: workspace }`), newest first, the newest open; ids only under **Details**, with what each agent ran on — model, thinking, mode and turns per combination, and the tokens per model (`runtimeDetailLines`, REQ-058; the detail is read when the timeline or Details opens). Beads: the Beads board (§13). Agents: the agent tree of the "Beads agents" panel, without the role configuration.
+- **History actions** (`dashboard-actions.tsx` `TraceActions`, the only irreversible thing on these screens): every path is a press, then the preview (`traces.delete` / `traces.reassign` with `dryRun: true`), then a confirmation that states what would be lost (`describeAction`, `createConfirmationGate`: nothing pending until the preview answered, Cancel "No, keep them" first, no default "Yes"), then the real call; nothing runs on mount, on a timer or on a refresh (REQ-054f).
+  - **Per request**, under its **Details**: "Delete this request's history" (`scope: { traceId }`).
+  - **A closed workspace**, above its requests: the card "History of a closed workspace" ("archived in Paseo" or "Paseo no longer has this workspace", and that the requests stay until deleted) with "Delete traces older than 30 days" (`OLDER_THAN_DAYS`), "Delete all traces here" and — only when `orphaned` (REQ-057d) — "Reassign to <workspace>" for each workspace Paseo lists.
+  - **Every workspace with history**, in Settings → Data → Trace storage (§11.4).
+  - After an action the page's request list and details are read again.
+
+The page reads the first page of `traces.list` (at most 50) and says "Showing the <n> newest requests." when there are more; there is no load-more button yet (REQ-041 (c), REQ-049 (a)) although the server returns `nextCursor`. The server still infers the workflow steps of §8 for `traces.get` (the Orchestrator's workflow assessment reads them), but no screen draws them.
+
+**Role icons** (`ROLE_MARK`, Lucide icons of `Icon` in `@getpaseo/plugin/client/react-native` on a round background of the same colour at `opacity: 0.16`): request/Manager `BotMessageSquare` tone `info`; Worker `Hammer` tone `success`; Reviewer `ScanEye` tone `warning`; Orchestrator `Compass` tone `muted`. They mark the roles in Settings → Roles & models, on chat cards and on an in-progress bead. The `danger` colour is reserved for errors; the icon shapes differ, so they can still be told apart when two colours are close. A wrong icon name makes Paseo draw nothing, with no error.
+
+### 11.4 Settings
+
+`client/settings-section.tsx` (one-line group states in `settings-model.ts`) arranges four groups, each folded to one line with its state: **Agents**, **Autonomy** (one line until Part B of the autonomy design), **Tools & skills**, **Data**. The blocks come from `client/settings-blocks.tsx` (`RolesSection`, `ToolCard`, `AgentToolsBlockView`, `SkillsInstallBlock`, `CleanupBlock`, `CommandLine`), with their wording in `setup-model.ts`. Every confirmation puts Cancel first; an RPC error shows under the block it came from, with its code. No screen edits a role's additional instructions in Phase 1.
 
 **Beads tools** (`setup.status`, `setup-tools.ts`):
 
@@ -492,79 +506,44 @@ paseo-bm <version>
 - Install command: with `brew` → `brew install dicklesworthstone/tap/<tool>`; without it, `br` → the script `beads_rust/main/install.sh | bash -s -- --skip-skills` (so paseo-bm does not write into the skill folders); without it, `bv` → the `beads_viewer` script pinned at commit `a43b8e85a39664381566abdfd85dc8fcbfdcb773`. This command must match the CLI's command (a test locks it; `src/` and `plugin/` share no code).
 - The Install button shows only when the tool is missing. The confirmation dialog states the command verbatim and warns that the command downloads code from the network. `setup.install-tool` runs the command in a login shell (`/bin/zsh -lc` if `SHELL` is zsh, otherwise `/bin/bash -lc`), timeout 300 s, and returns the exit code and the last 40 lines. Tool already present → `E_TOOL_PRESENT`; failure → `E_TOOL_INSTALL_FAILED`. Updates are not run from the screen. The plugin never installs anything on its own.
 
-**Machine setup (0.4.0)** (`setup-screen.tsx`, pure logic in `setup-model.ts`; the server contract is in base design §7.13). No text on the screen points to `npx paseo-bm` any more, except the banner.
+**Machine setup (0.4.0)** (the server contract is in base design §7.13). No text on the screen points to `npx paseo-bm` any more, except the banner.
 
-- **When the screen opens:** call `setup.ensure-roles {}` and only then `setup.status` (one sequence, a shared spinner). A non-empty `created` → the status strip has a `success` line "paseo-bm created its roles with defaults (<provider> · <model>). Change them in Agents." (dismissable). `E_SETUP_ROLES_FAILED` → a `danger` line with the code and the server's words, and a "Try again" button that calls `setup.ensure-roles` again. `skipped: "cleaned-up"` → no setup card; instead a `warning` line "paseo-bm's settings were removed. Remove the plugin with `paseo plugin remove paseo-bm`, or set it up again." with a "Set up again" button (`setup.ensure-roles { resume: true }`).
-- **Migration banner** (`status.setup.install.kind === "installer-directory"`, tone `warning`): "This copy of paseo-bm was installed by the old npx installer. Switch it to the paseo.cafe install once: `npx paseo-bm@0.4.0`. Your roles, settings and history stay." The command has a Copy button. Cannot be dismissed.
-- **The "Set up paseo-bm" card** (`setupChecklist(status)`, returns the missing rows in the order below; with no row left the card does not show). Each row: a name, a status sentence, an action button (if any). Placed **above** the tab row like `setupHeadline`, so that no tab can hide what is still missing.
+- **When Settings opens:** call `setup.ensure-roles {}` and only then `setup.status` (one sequence, a shared spinner). A non-empty `created` → a `success` line "paseo-bm created its roles with defaults (<provider> · <model>). Change them in Agents." (dismissable) when all four roles were created; otherwise the line names the roles created, from the same function as `manager.ensure` (base design §7.13.2). `E_SETUP_ROLES_FAILED` → a `danger` line with the code and the server's words, and a "Try again" button that calls `setup.ensure-roles` again. `skipped: "cleaned-up"` → a `warning` line "paseo-bm's settings were removed. Remove the plugin with `paseo plugin remove paseo-bm`, or set it up again." with a "Set up again" button (`setup.ensure-roles { resume: true }`).
+- **Migration banner** (`status.setup.install.kind === "installer-directory"`, tone `warning`, in the Data group): "This copy of paseo-bm was installed by the old npx installer. Switch it to the paseo.cafe install once: `npx paseo-bm@0.4.0`. Your roles, settings and history stay." The command has a Copy button. Cannot be dismissed.
+- **Agent tools** (`AgentToolsBlockView`, in Agents): "On for every agent" (with "turned on by paseo-bm" when `setBy` is present) or "Off — no new Beads Manager starts until you allow them" with an "Allow agent tools…" button. Dialog: title "Allow Paseo's agent tools for every agent?". Body: "The Manager and the Worker need Paseo's agent tools to create and message other agents. Paseo has one switch for this (daemon.mcp.injectIntoAgents), and it applies to **every agent on this machine**, not only paseo-bm's: any agent can then create, message and stop other agents. paseo-bm records the current value so "Remove paseo-bm's settings" can turn it back off." Buttons "Cancel" (default) / "Allow for every agent". Calls `setup.grant-agent-tools { confirmed: true }`. Last new agents without Paseo tools (`paseoToolsWarnings`) are warned about above the roles.
+- **Sign-in** (in Agents): one row per base provider of the roles: `<provider>` · "used by Manager, Worker" · "Signed in" / "Not signed in — sign in with `<command>`" (Copy) / "Unknown"; Pi shows `guidance`. No button runs a sign-in command.
+- Every confirmation dialog: the cancel button is the default and takes the Escape key; the consent button is never focused in advance; only pressing consent sends the RPC (the schema requires `confirmed: true`).
 
-  The status sentence of each row (verbatim): Roles — "Not created: <Manager, Worker, Reviewer>. <the server's words of `E_SETUP_ROLES_FAILED`, omitted when absent>"; Agent tools — "Off — no new Beads Manager starts until you allow them." (the same sentence as the block on "Roles & models"); Agent skills — "Required skills for the Worker (<Claude Code | Codex | …>): <k>/5. The Worker works with lower quality without them."; Beads tools — "Missing <br | bv | br and bv> — the Worker cannot manage beads without it" (the same sentence as `setupHeadline`); Sign-in — the sentence in the last column.
+**Agent skills** (in Tools & skills): `setup.status` reads (read only) the skill folders of the daemon process (`~/.agents/skills`, `~/.claude/skills` per `CLAUDE_CONFIG_DIR`, `~/.codex/skills` per `CODEX_HOME`, and the Pi/OpenCode folders when present). Claude Code counts only its own folder; Codex counts `~/.agents/skills` or its own folder. The **Test** button re-reads each `SKILL.md`: readable, with a frontmatter `name:` equal to the folder name → `ok` / `missing` / `broken`, with the check time. The block shows the equivalent `skills add` command and, when an agent is missing a required skill, an "Install skills…" button — title "Run the third-party skills CLI?", body the command verbatim (`status.skills.installCommand`) then "This downloads the skills from github.com/cuongntr/agent-skills (another author) with the `skills` CLI, a third-party tool with its own data collection. paseo-bm never writes to your skills folders itself. It can take up to 5 minutes.", buttons "Cancel" (default) / "Run it" → `setup.install-skills { confirmed: true }`; the result shows the exit code and the last 40 lines, then `setup.status` is read again; a line "Last run: <time> · exit <code>" from `setup.skillsRun`. The Pi/OpenCode columns stay read only.
 
-  | Row | Missing when | Button | Confirmation dialog (verbatim, English) |
-  |---|---|---|---|
-  | Roles | `setup.roles.missing` not empty (ensure just failed) | "Try again" | — (not needed: it only creates paseo-bm's `bm-*` entries) |
-  | Agent tools | `setup.agentTools.injectIntoAgents === false` | "Allow agent tools…" | Title "Allow Paseo's agent tools for every agent?". Body: "The Manager and the Worker need Paseo's agent tools to create and message other agents. Paseo has one switch for this (daemon.mcp.injectIntoAgents), and it applies to **every agent on this machine**, not only paseo-bm's: any agent can then create, message and stop other agents. paseo-bm records the current value so "Remove paseo-bm's settings" can turn it back off." Buttons "Allow for every agent" / "Cancel" (default). Calls `setup.grant-agent-tools { confirmed: true }` |
-  | Agent skills | the agent of the provider that the `bm-worker` role uses (Claude Code for `claude`, Codex for `codex`) is missing a required skill; for other providers (Pi, OpenCode) it follows that provider's column if there is one, otherwise this row does not show | "Install skills…" | Title "Run the third-party skills CLI?". Body: the command verbatim (`status.skills.installCommand`), then "This downloads the skills from github.com/cuongntr/agent-skills (another author) with the `skills` CLI, a third-party tool with its own data collection. paseo-bm never writes to your skills folders itself. It can take up to 5 minutes." Buttons "Run it" / "Cancel" (default). Calls `setup.install-skills { confirmed: true }`; the result shows the exit code and the last 40 lines like the Install of `br`/`bv`, then `setup.status` is read again |
-  | Beads tools | `br` or `bv` missing | "Open Beads tools" (switches tab) | The tab's existing Install confirmation dialog |
-  | Sign-in | a `logins` row has `state: "logged-out"` | no button that runs anything | Text only: "`<provider>` (used by <roles>) is not signed in. Sign in with: `<loginCommand>`" + Copy; Pi: `guidance`. `unknown` does not make the row show |
+**Roles & models** (in Agents; `RolesSection`, the server contract and validation rules are in base design §7.3.6):
 
-- Every confirmation dialog: the cancel button is the default and takes the Escape key; the consent button is never focused in advance; only pressing consent sends the RPC (the schema requires `confirmed: true`). An RPC error shows right under the row, with its code.
-
-**Agent skills:** `setup.status` reads (read only) the skill folders of the daemon process (`~/.agents/skills`, `~/.claude/skills` per `CLAUDE_CONFIG_DIR`, `~/.codex/skills` per `CODEX_HOME`, and the Pi/OpenCode folders when present). Claude Code counts only its own folder; Codex counts `~/.agents/skills` or its own folder. The **Test** button re-reads each `SKILL.md`: readable, with a frontmatter `name:` equal to the folder name → `ok` / `missing` / `broken`, with the check time. The screen shows the equivalent `skills add` command; the plugin does not install skills. **(0.4.0)** The tab also has an "Install skills…" button (the same confirmation dialog and RPC as the setup card) when an agent is missing a required skill, and a line "Last run: <time> · exit <code>" from `setup.skillsRun`; the command line's label changes per base design §7.13.10. The Pi/OpenCode columns stay read only.
-
-**Roles & models** (`setup-screen.tsx`, logic in `setup-model.ts`; the server contract and validation rules are in base design §7.3.6):
-
-- `RolesSection` reads `roles.settings` (key `ROLES_SETTINGS_KEY`) and `roles.options` of every base provider in the roles and the fallback chains (`rowOptionProviders`). One row per role: `RoleMark`, the role name, `roleSettingText` = `<Provider> · <model label> · thinking <id | provider default>[ · mode <label>]`, an Edit/Close button. Under the card: the `warnings` of `roles.settings` (tone `warning`, once for the whole card) and `ROLES_APPLY_NOTICE` "Changes apply to agents created after you save. Running agents keep their model and thinking."
+- `RolesSection` reads `roles.settings` (key `ROLES_SETTINGS_KEY`) and `roles.options` of every base provider in the roles and the fallback chains (`rowOptionProviders`). One row per role: `RoleMark`, the role name, `roleSettingText` = `<Provider> · <model label> · thinking <id | provider default>[ · mode <label>]`, an Edit/Close button. Under the card: the `warnings` of `roles.settings` (tone `warning`, once for the whole card) and `ROLES_APPLY_NOTICE` "Changes apply to agents created after you save. Running agents keep their model and thinking."; `setup.roles.created` not `null` → a `muted` line "Created by paseo-bm on <date> with defaults (<provider> · <model>). Change them here."
 - **Edit form** (`RoleEditForm`, `roleFormView`): Provider chips from `roles.settings.providers` (no `bm-*` alias; the saved provider is always present); Model from `roles.options`, with the price `~$<in> / $<out> per 1M tokens` below it when known; Thinking hidden when the model has no levels, the first choice "Provider default (<level>)"; Mode hidden when `capability: none`, the first choice "Not set", a Reviewer on `tiered` does not see `dangerous`/`planning` modes; `capability: unknown` with a mode currently set → a warning that saving will clear the mode. Save is enabled when the draft has both provider + model and differs from the saved version. The form keeps the `revision` from when it was opened: `E_ROLE_SETTINGS_CONFLICT` → "The configuration changed elsewhere; reopen Roles & models." and `roles.settings` is read again. After saving: "Saved." with each of the `warnings` under the row (`notified` is not shown).
-- **(0.4.0) On "Roles & models":** `setup.roles.created` not `null` → a `muted` line "Created by paseo-bm on <date> with defaults (<provider> · <model>). Change them here." Under the role card: the **Paseo agent tools** block — "On for every agent" (with "turned on by paseo-bm" when `setBy` is present) or "Off — no new Beads Manager starts until you allow them" with an "Allow agent tools…" button (the same confirmation dialog as above); and the **Sign-in** block, one row per base provider of the three roles: `<provider>` · "used by Manager, Worker" · "Signed in" / "Not signed in — sign in with `<command>`" (Copy) / "Unknown"; Pi shows `guidance`. No button runs a sign-in command.
 - **Fallback chain** (`FallbackBlock`) under each role present in `roles.settings.fallback`: `On a usage limit:` chips Ask me / Auto switch / Off; Auto switch → a cost warning (the Manager adds "The chat you use may be replaced."). Each entry `Fallback <n>  <Provider> · <model> · thinking …[ · mode …]`, buttons ↑ ↓ Edit Remove, a price line; "+ Add fallback" while under `MAX_FALLBACK_ENTRIES` (3). The entry form uses exactly the role form's rules. Edits stay on the client until "Save fallbacks" is pressed (`roles.save-fallback` for the whole chain, with the `revision` from when editing started) or "Discard".
 
-**Additional instructions** (`role-extras.ts`):
+**Additional instructions** (`role-extras.ts`, server side only in Phase 1): stored in `<install home>/role-extras.json` (`0600`, temporary file then rename, symlinks refused): `{ "version": 1, "roles": { "manager", "worker", "reviewer" } }`, each role at most `MAX_EXTRA_CHARS` = 8,000 characters; **append only** — the full text = base + `---` + `## Additional instructions from the user` + `These add to the rules above and never override a RULES item.` + the content; applies to agents created after saving; when the file cannot be read, the base version is used and agent creation is not blocked. Text written by an earlier build still applies; no screen writes it (the Orchestrator's `apply-suggestion` RPC still can), and Part B of the autonomy design retires it.
 
-- Stored in `<install home>/role-extras.json` (`0600`, temporary file then rename, symlinks refused): `{ "version": 1, "roles": { "manager", "worker", "reviewer" } }`, each role at most `MAX_EXTRA_CHARS` = 8,000 characters. It is user data: not hashed in `install.json`, untouched by update and `--prune`.
-- **Append only**: the full text = base + `---` + `## Additional instructions from the user` + `These add to the rules above and never override a RULES item.` + the content. Applies to agents created after saving (the `agent.create` hook for the Worker/Reviewer, `manager.ensure` for the Manager); when the file cannot be read, the base version is used and agent creation is not blocked. Paseo's plugin settings cannot be used for this because the server cannot read them.
-- The preview shows the whole full text as Markdown.
+**Data:**
 
-**The "This install" block (0.4.0)**, under the `paseo-bm <version>` line, outside the tabs:
+- "Data folder: `<path>`" and its source (`default` / "set by PASEO_BM_HOME" / "from ~/.paseo-bm/home.json"); `path: null` → a `danger` line with the `reason`, and the buttons that need the folder (saving the fallback chain, enabling the agent tools) report `E_DATA_HOME_UNAVAILABLE` / their existing code when pressed.
+- **Trace storage:** the total size and the threshold warning (§3.6), `HOST_SCOPE_NOTICE`, the privacy notice `PRIVACY_NOTICE` ("paseo-bm stores the agents' conversation of each request on this machine, and Work shows it. You can delete it at any time: here, or from a request's Details."), then one row per workspace with history (`traces.workspaces`), each folding out `TraceActions` for the whole workspace (older than 30 days, all, and reassign when `orphaned`, §11.3).
+- **This install:** the `paseo-bm <version>` line and "If paseo-bm does not load at all, check `paseo plugin ls` and `paseo plugin logs paseo-bm`." (when the plugin does not load no screen shows).
+- The **"Remove paseo-bm's settings…"** button (`CleanupBlock`, tone `danger`, accessibility label "Remove paseo-bm's roles and settings from Paseo"). **First-level** confirmation: "This removes every bm-* provider and agent profile from Paseo (the four roles and their fallbacks)<, and turns Paseo's agent tools back off (paseo-bm turned them on)>. Agents already running on these roles will fail on their next turn: archive them first. Skills, br and bv stay." Buttons "Cancel" (default) / "Remove settings". **Second-level** confirmation (always asked, default keep): "Also delete paseo-bm's data in `<path>`: history (traces), extra instructions, fallback settings and incidents? One small file stays so the roles are not re-created before you remove the plugin, and files left by the old installer stay." Buttons "Keep my data" (default) / "Delete data". Sends `setup.cleanup { confirmed: true, deleteData }`. Result: the list of what was removed, what was kept (`data.kept`), the switch state ("left on — it was not turned on by paseo-bm" when `left-on`), then `paseo plugin remove paseo-bm` with a Copy button. The data deleted includes the files of retired features that earlier builds left (autonomy design §A.14): everything in `ui/` but the setup state, and the `orchestrator/` folder whole.
 
-- "Data folder: `<path>`" and its source (`default` / "set by PASEO_BM_HOME" / "from ~/.paseo-bm/home.json"); `path: null` → a `danger` line with the `reason`, and the buttons that need the folder (saving additional instructions, saving the fallback chain, enabling the agent tools) report `E_DATA_HOME_UNAVAILABLE` / their existing code when pressed.
-- "If paseo-bm does not load at all, check `paseo plugin ls` and `paseo plugin logs paseo-bm`." (instead of `doctor`, because when the plugin does not load no screen shows).
-- The **"Remove paseo-bm's settings…"** button (tone `danger`, accessibility label "Remove paseo-bm's roles and settings from Paseo"). **First-level** confirmation: "This removes every bm-* provider and agent profile from Paseo (the three roles and their fallbacks)<, and turns Paseo's agent tools back off (paseo-bm turned them on)>. Agents already running on these roles will fail on their next turn: archive them first. Skills, br and bv stay." Buttons "Remove settings" / "Cancel" (default). **Second-level** confirmation (always asked, default keep): "Also delete paseo-bm's data in `<path>`: history (traces), extra instructions, fallback settings and incidents? One small file stays so the roles are not re-created before you remove the plugin, and files left by the old installer stay." Buttons "Keep my data" (default) / "Delete data". Sends `setup.cleanup { confirmed: true, deleteData }`. Result: the list of what was removed, what was kept (`data.kept`), the switch state ("left on — it was not turned on by paseo-bm" when `left-on`), then the fixed line "Now remove the plugin: `paseo plugin remove paseo-bm`" + Copy. After that the screen moves to the `skipped: "cleaned-up"` state above.
+### 11.5 Inbox and Insights
 
-**The Orchestrator tab (fourth, after Agents)** — designed in [Orchestrator Design](./paseo-bm-orchestrator.md) §8.1 (Active 2026-09-28): an overview of the flags of every workspace and the agent nudge switch. The flags, the Assess button and the assessment result on the Metric screen are in the same document, §8.2.
+The Inbox (`inbox.tsx`, `inbox-model.ts`) and Insights (`insights.tsx`, `insights-model.ts`, `insights.summary`) are specified in autonomy design §A.12. The Inbox's first line is the **Orchestrator line** (`orchestrator-line.tsx`, wording in `orchestrator-model.ts` `orchestratorLineView`): the agent's state ("Beads Orchestrator — running | idle | not open", from `orchestrator.state`, read once when the Inbox shows) and one button — **Orchestrator chat ▸** (opens `state.agent.id`, the newest Orchestrator), **Start the Orchestrator…** when there is none, or **Start a new Orchestrator…** when it lost its tools or runs on older instructions (the reason in `warning`). Starting reads `orchestrator.open-preview` and shows its dialog in place ("<provider> · <model or provider default>", "Reads the work of every paseo-bm project on this machine; uses tokens.", Cancel first; the recreate dialog adds "The old one stays in your agent list; …"); only the confirm calls `orchestrator.open { confirmed: true[, recreate: true] }`, then opens its chat (without `navigation.openAgent`: "The Orchestrator is ready. Open Beads Orchestrator from your agent list."). While a new Orchestrator is younger than 24 hours and an older one is still listed: "New Orchestrator since <span> ago — the old chat is no longer used." Insights shows the Beads board's overview figures (`BeadsOverviewSection`, §13.1) for the chosen project.
 
-### 11.4 Workspaces list
+## 12. Screens retired by the autonomy programme
 
-- The first line `[←] Workspaces`, a one-line introduction, the status strip, then one row per workspace in **exactly the order `workspaces.list` returns** (`activity_at desc`); no pinning, no drag-and-drop.
-- Each row: the name (1 line) and the project; `workspaceStats` — four numbers with the icons `Layers` total, `CircleDot` in progress, `Ban` blocked, `Hammer` Workers running (tone `plain` when > 0, `muted` when 0; the total always `muted`; with no bead store, a single "–" line); an 8 px dot next to the name (`RunningDot`, `runningDotState`); three small buttons with icons on one row, on phones too: `WORKSPACE_ACTIONS` = Go to (`Bot`), Metric (`ChartColumn`), Beads (`ListChecks`). Go to is the primary button and is hidden when the host lacks `navigation.openAgent`; Metric and Beads are read only, so they always stay (REQ-040d).
-- **Running dot:** total `runningAgents` > 0 → tone `success`, pulsing with `Animated.loop` opacity 1 ↔ `DIM_OPACITY` 0.3, each beat `PULSE_MS` = 900 ms (`useNativeDriver: false`), with the text `1 Worker, 1 Reviewer`; = 0 → a dimmed dot at 0.3, tone `muted`, no text, accessibility label "No Beads agent running"; no data yet → nothing drawn. `AccessibilityInfo.isReduceMotionEnabled()` true → a solid dot, no animation (a failed query counts as false). A poll that only changes the numbers does not restart the loop.
-- The list leaves out workspaces being archived (`archivingAt`). `workspaces.list` and `traces.workspaces` are one-off queries that run on every view: the "Open Beads Metric" request needs the label from `workspaces.list` (falling back to `workspaceId`).
-- `workspaces.overview` is read only while the view is `workspaces` (`overviewPolling`: `OVERVIEW_POLL_MS` = 10,000 ms), because each read touches the bead store of every workspace.
-- At the end of the list: "Closed workspaces with history" (`closedWorkspaces`: in `traces.workspaces` but no longer listed, state other than `unknown`, newest first), each entry opening the Metric screen of that history; the Metric screen of a newly reopened workspace offers to reassign the history to it.
-- The Metric/Beads screen title is `screenTitleOf(label, project)`: adds the project name when the workspace name differs from the project name, so that two bead stores are not confused.
-
-## 12. Metric screen
-
-`DashboardPanel(props: WorkspaceScreenProps)`; `WorkspaceScreenProps` = `PluginSurfaceProps` + `workspaceId`, `workspaceLabel?`, `onBack?`, `backLabel?`, `status?`. The top of the screen is `WorkspaceScreenHeader`: ← (when there is `onBack`), the title `Metric · <name>` (when there is `workspaceLabel`), a Refresh button; the status strip right below.
-
-1. **Overview** — `overviewCards`, seven cards: Requests (the number of **rows**; hint running · waiting · done), **Errors**, Beads, Agents, Messages, Tokens (in · cached · out), Cost (estimated; the number of requests not priced).
-   - `errorTally` adds up the `errors` of the rows shown (a row without the field reads as 0), and `requests` counts by `traceId`. `errorCard`: total 0 → value `0`, hint "no error recorded"; otherwise the hint `"<n> request(s) with an error · <a> failed turn(s) · <b> agent error(s) · <c> provider fallback(s)"`, leaving out the parts equal to 0. "request(s) with an error" states its unit because the Requests card next to it counts rows. The card is not coloured.
-   - The size warning (§3.6) right below the row of cards.
-2. **Charts** (when there are rows): "Requests, last 7 days — each request counted once" (`requestsPerDay`, only rows that open a request); "Top 5 heaviest Workers (tokens)" (`heaviestWorkers`, pressing opens the Worker when the host has `navigation.openAgent`); "Tokens by model × role" (`tokensByModelRole`, a model with no price shows only tokens).
-3. **The requests** — `RoleLegend`, then `groupTraces` (grouped by `workspaceState` in the order live → archived → orphaned → unknown, leaving out empty groups; the orphaned group has a sentence suggesting reassigning or deleting — that is the only way the user finds the reassign feature; the last known name and path show in the "Closed workspaces with history" entry of the Workspaces list). Each row is a compact `RequestCard` (the Manager's `RoleMark`, the request in 1 line, a status badge, a secondary line `[turn i of n · ]<tier | size ?> · <time> · <n> tokens · <cost>[ · 💬 <n> from you]` — the last part when the user messaged an agent of the request directly); press to open the **graph** Request → Worker → Reviewer (`requestGraph`), with the detail loaded only on open. Press each node to see: what was asked, what was answered, time, tokens, model/thinking/mode (`runtimeLines`), beads, skills loaded, messages the user sent directly (`💬 You → <agent>`), and the workflow steps on one line of chips (`stepChip`: green ✓ exact, blue ✓~ inferred, grey – not needed, yellow ? unknown). The honesty rules (certainty of the grouping, mismatched counts, workspace no longer present) sit on the Request node. The "Open agent" button shows only when the host has `navigation.openAgent`.
-   - **Model lines** (`runtimeLines`): each `runtime` element is one line `Model: <m> · thinking: <id | provider default> · mode: <id | unknown> · <n> turn(s)`; `recorded: false` → `Model: <m> · thinking/mode: not recorded · …`, or `Model: not recorded · …` when the model is `null`. The Manager has no node of its own: its line sits on the Request node, in the form `Manager <short id> — Model: …`, together with the line `Tokens by model: <model> <n> tokens · $… · …` (`tokensByModelLine`; a model with no price shows only tokens, a `null` model is `unknown model`). The subtitle of a Worker/Reviewer node adds the model name when the agent ran exactly one model with a known name (`singleModelOf`).
-4. **Storage**, collapsed at the end: size, deleting by trace / older than `OLDER_THAN_DAYS` = 30 days / the whole workspace, reassigning (`dashboard-actions.tsx`, `createConfirmationGate`: no default "Yes").
-5. `PRIVACY_NOTICE` at the end: the screen shows and stores agent conversations.
-
-The screen calls `traces.list` once, without passing `cursor` (the first page, at most 50); with `truncated: true` the screen says "Older requests are not shown." **There is no load-more button yet** (REQ-041 (c), REQ-049 (a)) although the server already returns `nextCursor`.
-
-**Role icons** (`ROLE_MARK`, Lucide icons of `Icon` in `@getpaseo/plugin/client/react-native` on a round background of the same colour at `opacity: 0.16`): request/Manager `BotMessageSquare` tone `info`; Worker `Hammer` tone `success`; Reviewer `ScanEye` tone `warning`. The `danger` colour is reserved for errors; the icon shapes differ, so they can still be told apart when two colours are close. A wrong icon name makes Paseo draw nothing, with no error.
+Phase 1 of the autonomy programme (autonomy design §A.14) replaced the screens this section used to describe: the Setup landing with its tabs and checklist became Settings (§11.4); the workspace list and the per-workspace Metric screen — overview cards, charts, request graphs and workflow-step chips — became Work (§11.3) and Insights (§11.5); the Orchestrator's own screen became the Inbox, Work and the Orchestrator's chat. Their history actions moved to Work and Settings (§11.3).
 
 ## 13. Beads screen
 
-`BeadsScreen(props: WorkspaceScreenProps)`, shared by the surface and the "Beads" tab. The top of the screen: ← · `Beads · <name>` · `doneText` (`✓ <closed> / <total> done`, accessibility label "`<closed> of <total> beads done, epics not counted`", shown only when there is data) · Refresh. Then the status strip and the line `Read from <file path>` (so that two workspaces on the same copy of beads do not look mixed up).
+`BeadsScreen(props: WorkspaceScreenProps)`, the Beads tab of a project's page (§11.3), on the surface and in the workspace's "Beads" tab. The board comes first; its overview figures are drawn by `BeadsOverviewSection` in Insights. The top of the screen: ← (when there is one) · `Beads · <name>` (when there is a name) · `doneText` (`✓ <closed> / <total> done`, accessibility label "`<closed> of <total> beads done, epics not counted`", shown only when there is data) · Refresh. Then the status strip and the line `Read from <file path>` (so that two workspaces on the same copy of beads do not look mixed up).
 
-### 13.1 Overview (`beadsOverview`)
+### 13.1 Overview (`beadsOverview`, shown in Insights)
 
 Five sections: Status (Total, Ready, In progress, Blocked, Closed); Progress (the percentage closed, **epics not counted**, not affected by the filters — `doneText` reads the same number); By type; By priority (P0 → P4, P?); Time (median created → closed, "Longest in progress" counted from `work.started` if known, Stale = open and not updated for over 7 days). There is no chart of created/closed per day.
 
@@ -585,7 +564,7 @@ Every decision is in `beads-model.ts`; `KanbanBoard` and `StatusTabs` are hook-f
 
 - **Row** (`BeadRowCard`, shared with the "Beads in this chat" panel): the title first (at most 2 lines when collapsed, ▸/▾), then the id, the chip `P<n> · <type>`, the status chip; an `in_progress` bead also has a line with the Worker's `RoleMark` + `workSummary.headline` (`<Worker> · since <time> (<how long>) · <state>`, or "start not recorded"). Press to open the detail right inside the card.
 - **Detail** (`BeadDetailPanel`, `beads.get`): the description as Markdown, the close reason, dependencies; a "Being worked on" box with an "Open the Worker" button; the actions (`actionsFor`: a closed bead has only Delete).
-- **Actions** go through the workspace's Manager, without creating a Worker directly: `beads.action` calls `ensureManager` then `paseo.agents.ref(managerId).send(actionMessage(...))`; the Manager creates a Worker per `manager.md`. That way the `requestId`, labels, reports, review budget and trace stay the same, and Metric sees the request like any other request. The message sent (English, for the agent):
+- **Actions** go through the workspace's Manager, without creating a Worker directly: `beads.action` calls `ensureManager` then `paseo.agents.ref(managerId).send(actionMessage(...))`; the Manager creates a Worker per `manager.md`. That way the `requestId`, labels, reports, review budget and trace stay the same, and Work shows the request like any other request. The message sent (English, for the agent):
 
   ```
   [Beads screen] The user asks: <implement|delete|close> bead <id> ("<title>").
@@ -598,19 +577,19 @@ Every decision is in `beads-model.ts`; `KanbanBoard` and `StatusTabs` are hook-f
 
 ### 13.5 How a bead shows its status
 
-Many colours on one list tire the eyes, so **everywhere a bead is shown** (the Beads screen, the "Beads" tab, the "Beads in this chat" panel, bead chips on chat cards, the numbers on a workspace row) the status is expressed only by **text and contrast**, not by hue:
+Many colours on one list tire the eyes, so **everywhere a bead is shown** (the Beads board, the "Beads in this chat" panel, bead chips on chat cards, the bead figures of a project row) the status is expressed only by **text and contrast**, not by hue:
 
 - `STATUS_EMPHASIS`: `ready`, `in_progress`, `blocked` → `strong`; `closed` → `dim`. `beadEmphasis(bead)`; `emphasisTone`: `strong` → `plain`, `dim` → `muted`.
 - `statusBadge(bead)` = `{ text: Ready | In progress | Blocked | Closed, tone: emphasisTone(beadEmphasis(bead)) }`: the chip and the title always have the same contrast, and the status always has text.
 - `beadTitleStyle(styles, theme, emphasis | null)` = `sectionTitle` with `fontWeight: "400"` (not bold) and the colour `foreground`/`foregroundMuted`; `null` (a detail box opened from a chip) keeps `foreground`. Rows have no background fill and no left bar.
-- Column titles use `sectionTitle` without colour. The `StatusTabs` row is buttons: the selected tab in the `button` style (accent background), the others `secondaryButton`, like the sub-tabs of the "Beads" tab; that colour says which tab is open, not a bead's status. `workSummary.tone`: `running` → `plain`, otherwise `muted`.
-- Outside the places where beads are shown, colours stay as they are: RPC error lines (red), warnings (yellow), active filter chips and "+N more" (accent), the Metric screen, chat cards, the Delete button.
+- Column titles use `sectionTitle` without colour. The `StatusTabs` row is buttons: the selected tab in the `button` style (accent background), the others `secondaryButton`, like the section tabs and a project's tabs; that colour says which tab is open, not a bead's status. `workSummary.tone`: `running` → `plain`, otherwise `muted`.
+- Outside the places where beads are shown, colours stay as they are: RPC error lines (red), warnings (yellow), active filter chips and "+N more" (accent), Insights, chat cards, the Delete button.
 
 ## 14. The "Beads" tab and the header button
 
 - **Panel** `client.addWorkspacePanel({ id: BEADS_TAB_PANEL_ID ("bm-beads"), title: "Beads", icon: "ListChecks", context: "workspace", Component: BeadsTabPanel })`, registered before the "Beads agents" panel; no `locations` declared (default `["workspace"]`). Paseo puts every `context: "workspace"` panel into the "+" menu of the tab bar and the "New tab" screen.
-- `BeadsTabPanel`: a row of sub-tabs `BEADS_TAB_VIEWS` = Beads, Metric (`accessibilityRole="tab"`, the selected tab in the `button` style, the other `secondaryButton`, ~40 px high), opening at `DEFAULT_BEADS_TAB_VIEW = "beads"` (`useState`, living within the tab). The content is `BeadsScreen` / `DashboardPanel` **without** passing `onBack`, `workspaceLabel`, `status`: no ←, no title, no status strip; the first line keeps only its right-hand part. Switching sub-tab unmounts the other screen; the data sits in the React Query cache under the keys `["paseo-bm", "beads-list", id]`, `["paseo-bm", "traces", id]`. Two "Beads" tabs of the same workspace share the cache, each keeping its own sub-tab; reopening an old tab or opening a new tab is Paseo's business.
-- **Paseo 0.8's mobile app has no "+"** (the mobile tab bar only lists open tabs; `onCreateNewTab` is only handed to `WorkspaceDesktopTabsRow` and `SplitContainer`). The mobile entry point is the **header button**: `registerBeadsHeaderButtons(client)` (`beads-header-button.ts`) reads `client.paseo.workspaces.list({})` at start, every `BEADS_HEADER_POLL_MS` = 15,000 ms and whenever `workspaces.subscribe` reports an update (one read at a time; on error the buttons are kept; a client without `paseo` does not break loading). `planHeaderButtons(shown, listed)` → `{ add, remove }` by the open workspaces (no `archivingAt`). One `client.addHeaderButton({ id: BEADS_HEADER_BUTTON_ID ("bm-beads-open"), workspaceId, button })` per workspace, an icon-only button `ListChecks`, title "Open the Beads tab: beads and metrics of this workspace", pressing → `client.openPanel("bm-beads", { workspaceId })`. In the narrow form (`useIsCompactFormFactor` or width < 1100 px) Paseo shows the **first** plugin button directly on the header and later buttons in the "more" menu; desktop shows them on the right of the header. Paseo keys header buttons by `id` + `workspaceId` (a duplicate `id` within one workspace is an error), so every workspace uses the same `id`. `addButton(workspaceId)` takes the workspace as a parameter and does not capture the loop variable: on Hermes (mobile) every closure created in a loop sees the last value. The timer is `unref`ed; cleanup removes every button.
+- `BeadsTabPanel`: the workspace's **project page** of Work (`ProjectPage`, §11.3) — Requests · Beads · Agents — opened on Beads (`BEADS_TAB_INITIAL`, owner decision Q2), with `label: null`: no ←, no title, no status strip, no Chat. A workspace panel cannot open the surface, so the page is drawn in the tab (experience concept §3: the Beads tab opens Work on its project). Its data sits in the React Query cache under Work's keys, so the tab and the surface share one read; two "Beads" tabs of the same workspace share the cache, each keeping its own tab; reopening an old tab or opening a new tab is Paseo's business.
+- **Paseo 0.8's mobile app has no "+"** (the mobile tab bar only lists open tabs; `onCreateNewTab` is only handed to `WorkspaceDesktopTabsRow` and `SplitContainer`). The mobile entry point is the **header button**: `registerBeadsHeaderButtons(client)` (`beads-header-button.ts`) reads `client.paseo.workspaces.list({})` at start, every `BEADS_HEADER_POLL_MS` = 15,000 ms and whenever `workspaces.subscribe` reports an update (one read at a time; on error the buttons are kept; a client without `paseo` does not break loading). `planHeaderButtons(shown, listed)` → `{ add, remove }` by the open workspaces (no `archivingAt`). One `client.addHeaderButton({ id: BEADS_HEADER_BUTTON_ID ("bm-beads-open"), workspaceId, button })` per workspace, an icon-only button `ListChecks`, title "Open the Beads tab: this workspace's requests, beads and agents", pressing → `client.openPanel("bm-beads", { workspaceId })`. In the narrow form (`useIsCompactFormFactor` or width < 1100 px) Paseo shows the **first** plugin button directly on the header and later buttons in the "more" menu; desktop shows them on the right of the header. Paseo keys header buttons by `id` + `workspaceId` (a duplicate `id` within one workspace is an error), so every workspace uses the same `id`. `addButton(workspaceId)` takes the workspace as a parameter and does not capture the loop variable: on Hermes (mobile) every closure created in a loop sees the last value. The timer is `unref`ed; cleanup removes every button.
 - **The "Beads agents" panel** (`tree.tsx`, logic in `agent-tree.ts`, registered after the "Beads" panel): the Manager → Worker → Reviewer tree from `agents.list` (base design §7.3), refreshed every `AGENT_TREE_POLL_MS` = 5,000 ms while the panel is shown; an agent that has been replaced reads `<role> · replaced by <id>`.
 
 ## 15. Chat
@@ -621,38 +600,33 @@ Many colours on one list tire the eyes, so **everywhere a bead is shown** (the B
 - `addTimelineRenderer({ kind, version, schema, Component })` receives the chat pane's `agentId`, `timestamp`, `theme`, `layout`, and **no** `workspaceId` or `navigation`.
 - Only the display changes; the history in the daemon and what the model reads stay the same. Undo = remove the two transformers and the renderer in `index.client.tsx`.
 
-### 15.2 Chat card
+### 15.2 Chat cards v2
 
-Two transformers, `bm-chat-received` (`user_message`) and `bm-chat-sent` (`assistant_message`), call `toChatCard(item, phase)`; the renderer `CHAT_CARD_KIND` = `"bm-message"`, `CHAT_CARD_VERSION` = 1, `ChatCardView`. `toChatCard` never throws.
+Two transformers, `bm-chat-received` (`user_message`) and `bm-chat-sent` (`assistant_message`), call `toChatCards(item, phase)`, which returns the cards of one item or `undefined` (the item stays Paseo's); the renderer `CHAT_CARD_KIND` = `"bm-message"`, `CHAT_CARD_VERSION` = 2, `ChatCardView`. `toChatCards` never throws. What each card shows is specified in autonomy design §A.12 (cards v2, as built); in short:
 
-**When there is a card:**
+| Card | Made from |
+|---|---|
+| `decision` | one question of a `BM-QUESTIONS` block (`q:<requestId>:<Qn>`; a report that asks is one card per question, a `finished` report that asks is its `finished` card plus those), a `BM-FALLBACK` notice (`f:<incidentId>`), a `BM-ANSWER` notice (its `decisionId:`) |
+| `progress` | a `BM-REPORT` that is not `finished` and asks nothing |
+| `finished` | a `finished` `BM-REPORT` |
+| `verdict` | a `BM-REVIEW` |
+| `brief` | another agent's message that names a request (a request brief, a review request) |
+| `action` | a delivered `BM-COMMAND` (v2; v1 still read) |
+| `notice` | every other plugin notice, a Manager's copy of a Worker command and a `BM-EVENTS` batch: one compact line |
 
-- a `user_message` **without** `clientMessageId` (sent by an agent) that contains `BM-REPORT`, `BM-REVIEW` or a request id `req-YYYYMMDDTHHMMSSZ`;
-- an **already complete** `assistant_message` (`phase: complete`, to avoid flicker while streaming) that contains `BM-REPORT` or `BM-REVIEW`;
-- a `user_message` with `clientMessageId` becomes a `reply` card only when it is the message written by a card's Reply box (first line `Reply from the user about …`); what the user typed themselves is left to Paseo;
-- the plugin's own notices (prefixes in base design §7.5) are recognised by their first line: a `BM-FALLBACK` from which an `incident` can be read → a `fallback` card (§15.8), otherwise → plain text; the other prefixes → a `notice` card (`noticeCardOf`): a one-line summary of the notice (without the prefix and `requestId:`), a `requestId` chip when present, the full text one tap away; no template check, no Reply box.
+**When there is a card:** a `user_message` **without** `clientMessageId` (sent by an agent) that contains `BM-REPORT`, `BM-REVIEW` or a request id `req-YYYYMMDDTHHMMSSZ`; an **already complete** `assistant_message` (`phase: complete`, to avoid flicker while streaming) that contains `BM-REPORT` or `BM-REVIEW`; the plugin's own notices (prefixes in base design §7.5, `shared/notices.ts`), recognised by their first line whatever their `clientMessageId`. What the owner typed is left to Paseo. A block that lists the allowed values (`phase: … | …`) is a format template, not a report. A notice an earlier build sent and no build sends any more (the 0.4.x notice that told a Manager its Worker had been answered directly) is still recognised in stored history and shown as a compact line with its marker.
 
-A block that lists the allowed values (`phase: … | …`) is a format template, not a report. Every other item stays as it is.
+**One frame** (`CardFrame`, `ui.tsx`): actor → recipient · authority · time, one status chip, a title, at most `MAX_BODY_LINES` = 3 body lines, one primary action, **Details** (ids only there); a `notice` is `CompactLine`. The **`template error`** state (`formatIssues`, from `checkBlocks(text)`, the template checker of base design §7.6, on another agent's block or on the Reviewer's own `BM-REVIEW` in its own chat) lists each error under Details. The card is rebuilt from the message each time it is shown, and stored nowhere; a decision card's state comes only from the store (below).
 
-**Data** (`chatCardSchema`): `type` (`report` / `review` / `message` / `fallback` / `reply` / `notice`), `direction` (`received` / `sent`), `requestId`, `batchId`, `phase`, `tier`, `verdict`, `blocking`, `blockers`, `beads { created, updated, closed }`, `gist`, `text`, `questions` (§15.3), `formatIssues`, `fallback`, `answers`, `notice`. The card is rebuilt from the message each time it is shown, and stored nowhere.
-
-**Who sends, who receives** (`partiesOf(card, owner, peers)`), with data from `chat.peers({ agentId })` → `{ owner, peers, workspaceId }` where `ChatPeer = { id, role, title, status, parentId, requestId, batchId, labelled, archived, replaced }`. A Worker's `requestId` comes from its label, and without the label from the trace store using exactly the Metric rules; the store is read at most once and only when a label is missing (`peersOfWorkspace`, `server/chat-peers.ts`).
+**Who sends, who receives** (`partiesOf(card, owner, peers)`), with data from `chat.peers({ agentId })` → `{ owner, peers, workspaceId }` where `ChatPeer = { id, role, title, status, parentId, requestId, batchId, labelled, archived, replaced }`. A Worker's `requestId` comes from its label, and without the label from the trace store by the same rules as the request history (§6.1); the store is read at most once and only when a label is missing (`peersOfWorkspace`, `server/chat-peers.ts`).
 
 - A received report → the Worker of the request; a received review → the Reviewer matching `requestId` and `batchId`; any other message in a Worker's chat → the Manager (the parent if it is a Manager); in a Reviewer's chat → the parent Worker; in a Manager's chat → the Worker of the request.
 - A message it wrote itself: the sender is the owner of the chat pane; the receiver is the parent Worker (review) or the Manager.
-- **The Worker of the request** = `soleWorkerOf(peers, requestId)` (`shared/sole-worker.ts`, shared by server and client): a `worker` agent that is **not archived**, not replaced (`replaced`), carries exactly the `requestId`, and is **the only one**; none or more than one → none. `partiesOf` is only used for naming, so it falls back to the only Worker even when archived; the send path never does.
-- When it cannot be determined, the role is written with "unknown", and no id is guessed.
+- **The Worker of the request** = `soleWorkerOf(peers, requestId)` (`shared/sole-worker.ts`, shared by the cards and the delivery of answers, `decision-delivery.ts`): a `worker` agent that is **not archived**, not replaced (`replaced`), carries exactly the `requestId`, and is **the only one**; none or more than one → none. `partiesOf` is only used for naming, so it falls back to the only Worker even when archived.
+- When it cannot be determined, the actor line names the role only (`actorName`), never an id.
 - `drawAsCard(card, owner)`: the chat pane's owner is not a paseo-bm agent (`owner` null or `unknown`) → false; a received card is always drawn; a sent card is drawn only when the pane owner's role matches (review → Reviewer, otherwise → Worker), so a block quoted by the Manager shows verbatim. False → verbatim as Markdown, without the card frame.
 
-**Layout:**
-
-- Frame `styles.card`, no left border. Header row: the left column has `RoleMark` (only the icon carries the role colour), the sender's name (`sectionTitle`, colour `foreground`) `→ <receiver>`, and below it the send time `HH:MM`; the right-aligned right column has the status chip (`statusChip`: phase/verdict) and right below it the "Answered" chip when present.
-- **The `template error` chip** (tone `danger`) when `formatIssues` is not empty: `checkBlocks(text)` (the template checker, base design §7.6) on another agent's block (received card), or on the Reviewer's own `BM-REVIEW` in its own chat (a Worker quoting its own report in its own chat has not sent anything yet). Opening the full text shows "This message breaks the template:" at the top and each error on its own line.
-- `statusChip`: report `blocked` → `warning`, `finished` → `success`, other phases → `info`; review `pass`/`approved` → `success`, `stopped` → `muted`, otherwise `warning`, with `· <n> blocking` when present; a `reply` card reads "Your reply" (`info`); a `notice` card reads the notice (`muted`).
-- A `requestId` chip (tone `muted`) when the card names a request, then a summary line (`summaryOf`), at most 2 lines (`numberOfLines={2}` even when open); the `waiting on: <blockers>` part is cut at `SUMMARY_BLOCKERS_CHARS` = 160 characters. A report with questions is summarised as `<tier> · <n> questions waiting`.
-- Related beads: bead chips (§15.7).
-- "▸ Show message" / "▾ Hide message" opens the full text as Markdown (`markdownOf`: a `key: value` block becomes a list with bold field names; `BM-QUESTIONS`/`BM-ANSWERS` are blocks like `BM-REPORT`, `Q<n>:` lines in bold, options indented under the question).
-- **A `finished` card**: `startsOpen(card)` true and `outlineTone(card)` = `"success"` only when `type === "report" && phase === "finished"`, regardless of direction: the card opens with the full text shown and the frame has a success `borderColor` (still `borderWidth: 1`). `open` is component state, so a card that is unmounted and drawn again opens again.
+**A decision card** (`DecisionCard`, `chat-card.tsx`) keeps only a seed of its decision (id, asker, the question and its options as the message wrote them); status, answer and delivery come only from the store: it reads `decisions.get` every `DECISION_POLL_MS` = 5,000 ms while the decision is `open` or `needs-confirmation` and stops once it is settled; one not recorded yet is looked for only `DECISION_LOOKUP_WINDOW_MS` = 10 minutes after its message. Every copy of one decision (the Worker's chat, the Manager's, the Orchestrator's, the Inbox) shares one query (`decisionQueryKey`), so an answer shows everywhere at the next read. Options are buttons (the recommended one primary) plus **Own words…**, answered through `decisions.answer` with `via: chat-card` (`via: inbox` in the Inbox); an answer whose effects are in `CONFIRM_EFFECTS` first shows the in-place confirmation, Cancel first; `needs-confirmation` shows **Keep open** / **Close as answered** (`decisions.confirm`). A fallback decision (`f:`) offers the incident's prepared actions (switch, wait, resend, dismiss; base design §7.10). There is no other question UI: no reply box, no answered chip, no "Mark as answered", no "Use recommendations".
 
 ### 15.3 Questions: `BM-QUESTIONS` and `BM-ANSWERS`
 
@@ -686,60 +660,19 @@ type Pick = { key: string } | { other: string };
 function answersText(requestId, questions, picks): string;          // throws when a question is passed without an answer
 ```
 
-`parseQuestions` is lenient because the input is written by a model: the opening `BM-QUESTIONS` line accepts `>`, `-`, `**`, a ``` fence; a question line is `Q<n>` followed by `:` `.` or `)` (also `**Q1:**`, `- Q1:`); an option must have a bullet or parentheses (`- a: …`, `- (a) …`, `a) …`, `(a) …`) — prose `a: …` is not an option; `(recommended)`/`[recommended]` is removed from the text, and more than one recommendation in one question → treated as none; a line indented by ≥ 2 spaces is joined to the line above; every line has its `>` quote prefix removed; a block ends at a line that opens another block, a closing fence (``` or `~~~`), or unindented prose **after** the first question (prose before the first question is a lead-in, ignored); a duplicate id/key keeps the first one. **Limits:** the whole message is scanned line by line (one regex anchored at the line start, no nested quantifiers, linear) to find the last opening line, then only 20,000 characters from there are read; at most 10 questions × 8 options; each piece of text is cut at 1,000 characters. A question with fewer than 2 options is still returned and can only be answered with "Other".
+`parseQuestions` is lenient because the input is written by a model: the opening `BM-QUESTIONS` line accepts `>`, `-`, `**`, a ``` fence; a question line is `Q<n>` followed by `:` `.` or `)` (also `**Q1:**`, `- Q1:`); an option must have a bullet or parentheses (`- a: …`, `- (a) …`, `a) …`, `(a) …`) — prose `a: …` is not an option; `(recommended)`/`[recommended]` is removed from the text, and more than one recommendation in one question → treated as none; a line indented by ≥ 2 spaces is joined to the line above; every line has its `>` quote prefix removed; a block ends at a line that opens another block, a closing fence (``` or `~~~`), or unindented prose **after** the first question (prose before the first question is a lead-in, ignored); a duplicate id/key keeps the first one. **Limits:** the whole message is scanned line by line (one regex anchored at the line start, no nested quantifiers, linear) to find the last opening line, then only 20,000 characters from there are read; at most 10 questions × 8 options; each piece of text is cut at 1,000 characters. A question with fewer than 2 options is still returned and can only be answered with "Other". A question may end with `[subject: <slug>]` and an option with `[effects: <list>]` (`worker.md`), which the decision keeps (autonomy design §A.3).
 
-### 15.4 Question card and the Reply box
+The Worker owns the numbering and the options; the plugin turns each question of the block into a stored decision (`q:<requestId>:<Qn>`, autonomy design §A.5), and delivers the owner's answers to the Worker as a `BM-ANSWERS` block (§A.6). The Manager writes a `BM-ANSWERS` block only when the owner answers in its chat.
 
-**When:** `toChatCard` fills `questions` when the card is a `report` and the block's `requestId` is empty or equal to the report's `requestId` (a block of another request is dropped). `showsQuestions(card, owner)` is true when the card is a `report`, `received`, the chat pane's owner is a Manager, and there are questions. Worker and Reviewer chats do not have this part; an old-style report without the block is an ordinary card.
-
-**Layout of the question part:** one block per question (`gap: 6`, `paddingVertical: 8`, from the second question on a `borderTopWidth: 1` line in the `border` colour); the heading `questionHeading` (`Q6 · Storage`, the topic being the part before the first ` — `; with no topic, `Q6`) in `600`, the question in `styles.body` with colour `foreground`; each option is a `Pressable` as wide as the card (row: `○`/`●` 14 wide, the key in bold 16 wide, text `flex: 1`, a `recommended` chip in tone `success` at the end; `paddingVertical: 8`, `paddingHorizontal: 10`, `borderRadius: 8`, `borderWidth: 1`; selected: `info` border, `surface2` background; `accessibilityRole="button"`, `accessibilityState.selected`); a last row "Other…" (no key) opens an input box for that question. No option is preselected: `picks` starts empty. Under all the questions: the line `Answers go to <Worker> · <requestId>`, the reason line (when there is one), then the button row `Use recommendations` (`recommendedPicks`: fills the recommendation into questions still empty, does not overwrite, does not send), `Clear`, `Mark as answered`. When the receiver cannot be determined → the questions still show; the options, the Other box, `Use recommendations` and `Clear` are disabled (`Mark as answered` can still be pressed), with the reason. A running Worker does **not** disable the options: the user can compose in advance, and `sendReply` refuses when Send is pressed.
-
-**Choices are written into the Reply box** — a single send path for every card:
-
-- `isAnswered(question, pick)`: a real key of a question with ≥ 2 options, or "Other" with text after `trim`.
-- `answersDraft(card, picks)` = `answersText` over only the answered questions; `""` when there are none or the card names no request.
-- `withAnswersBlock(text, block)`: the block region is the first `BM-ANSWERS` line plus the lines right after it that match `^\s*(requestId|Q\d+)\s*:`. The user's text outside the region (above and below) keeps its order; **the block always comes first in the box**, then a blank line, then the user's text. Manual edits inside the block are overwritten on the next choice.
-- Each time `picks` changes: `setAnswer(withAnswersBlock(answer, answersDraft(card, next)))` and the Reply box opens.
-- The **Send** button is enabled when the box has text and nothing is being sent, and calls `sendReply({ card, text, refreshPeers, send })` with `refreshPeers` = `peers.refetch({ throwOnError: true })`, `send` = `paseo.agents.ref(id).send(text)` (the app's composer path; the message carries `clientMessageId` like the user's words):
-  1. empty box → "Write a reply first.", nothing is called;
-  2. read `chat.peers` again; `replyTarget(card, owner, peers)` returns a reason → nothing is sent;
-  3. `send(peer.id, replyText(card, text))` **exactly once**, the id never taken from the message content; `replyText` = `Reply from the user about \`<requestId>\`[, batch <id>]:` + a blank line + the text;
-  4. an error from `refreshPeers` or `send` → the reason; the box and the choices stay as they are.
-- `replyTarget`: the receiver is `from` (received card) or `to` (sent card) of `partiesOf` and must be in `peers`. Blocking reasons: not found ("Cannot tell which Worker asked this: no single Worker has `<requestId>`." for a received report; "Cannot tell which <Role> to send this to." for other cards); oneself ("This is your own message."); archived ("<name> is archived." — a message to an archived agent would unarchive it); `running`/`initializing` ("<name> is working; a message now would replace its turn. Send when it stops."); any other state ("<name> is <status>."). Only `idle` and `error` may be sent to.
-- After sending: "Sent to <name>.", the box is cleared and closed; if `sentSummary(card, picks, text)` is not `null` (the block is intact in the sent text) the question part is replaced by `Answered at HH:MM → <Worker>: Q6 a, Q7 other` (`answerSummary` lists only answered questions). Unanswered questions stay open and the Worker asks again.
-- A `blocked` report **without** questions has two prefilled suggested sentences (`quickReplies`, not sent automatically); a report with questions does not.
-- After a Reply, the "Reply to <role>" button gives way to the "Answered" chip (`replyControls(canReply, replied)`: `canReply` false → neither); pressing the chip reopens the Reply box.
-
-### 15.5 Waiting questions: `chat.waiting` and the composer pill
-
-- **Server** (`server/chat-waiting.ts`): for each Manager not archived and not closed, `readTimelinePages(paseo, managerId, { pages: 1, limit: 200 })` then `waitingOf(manager, entries, workers, answered)`: takes the `user_message`s **without** `clientMessageId`; the last report with a `requestId` of the form `req-…` is the message's report; keeps the latest report per request; keeps only `phase: blocked` with at least one question and a matching block `requestId`; Worker = `soleWorkerOf` in the same workspace, in state `idle` or `error`; questions that the question–answer ledger already has an answer for go into `answered`, and a report whose questions are all answered is dropped. A read error for one Manager only loses that Manager (the `try/catch` around `readTimelinePages` is kept on purpose: the function can still throw when `refetch` returns nothing). It reads the live timeline, not the trace store: a report only reaches the store when the Manager's turn ends, while the pill must show as soon as the question arrives. The trace store is read only for a workspace **that has a live Manager** and only when a Worker lacks its label.
-- `WaitingWorker = { managerId, workspaceId, workerId, workerTitle, requestId, text, at, answered }`; `text` is the whole report message, so that the client rebuilds exactly the card.
-- **Client** (`waiting-pills.tsx`, `waiting-pills-model.ts`): `registerWaitingPills(client)` reads `chat.waiting` at once and then every `WAITING_POLL_MS` = 15,000 ms, without overlapping runs; on an RPC error it keeps the pills and reports nothing. `planPills(current, waiting)` → `{ add, update, remove }`; pill id `bm-waiting-<workerId>`, attached to the composer of the Manager's chat (`addComposerPill({ id, workspaceId, agentId: managerId, button: { …, behavior: { kind: "popover", Content } } })`; a registration cannot move to another chat, so a Manager change removes and re-adds it); no open question left → no pill; the key `[managerId, workspaceId, requestId, label, at ?? "", fnv1a32Hex(text), answered]` — it includes a content hash so that a new report with the same number of questions (and a null `at`) still reaches the popover. Label `<Worker> · <n> question(s)` (only questions still open), title `Questions from <Worker> about <requestId>`, icon `MessageCircleQuestion`. Popover: each pill has **one** `Content` created when it is added, which reads the latest entry from a module-level `Map`, so an `update` does not rebuild an open popover and text being typed is not lost; `Content` draws `ChatCardView` with the card built from `toChatCard({ type: "user_message", text }, "complete")`, so it has all the questions, the Reply box, the state checks, the "Answered" chip. There is no API to scroll the chat to an item.
-- Limit: only the 200 newest items of the Manager's timeline; a `blocked` report older than that looks like "no longer waiting" and has no pill, but can still be answered with the card's Reply box.
-
-### 15.6 The "answered" state
-
-- **Within the app session** (`answer-state.ts`, no React): the tables `answered` (key → `{ at, summary, to }`) and `replied` (key → `Date`), `setAnswered`/`setReplied` notify all listeners (`subscribeAnswers`), `answersVersion()` is the snapshot; `chat-card.tsx` reads them with `useSyncExternalStore`, so the copy in the chat and the copy in the popover redraw at the same time. Lost on an app reload.
-- **Key** `answeredKey(agentId, card)` = `<chat agentId>|<requestId>|<the question ids>` — the message content is not hashed: a report resent with one field edited must not produce a second empty card for questions already answered. In exchange, two different sets of questions reusing the same ids in one request would share a key (the Worker keeps counting ids, so this should not happen).
-- **The "Mark as answered" mark** is stored durably (`server/answer-marks.ts`): `<install home>/ui/answer-marks.json` = `{ schemaVersion: 1, marks: [{ key, at }] }`; key 1–`ANSWER_MARK_KEY_MAX` (400) characters, no control characters; keeps at most the `ANSWER_MARKS_LIMIT` = 500 newest marks. Read/written through the no-follow checker and written atomically like the trace store (§3.8). A broken or newer-generation file reads as empty, with `notices`; a broken key in the file is dropped, with `notices`; an invalid key or a newer-generation file on write → `E_TRACE_STORE_UNWRITABLE`. The button calls `answers.mark` then writes the result into the `answer-marks` cache; an error shows on the card.
-- **A card knows by itself that it has been answered** (only `showsQuestions` cards): `useQuery(["paseo-bm", "chat-waiting"], refetchInterval 15 000)` and `answers.marks`, sharing the cache, so one read serves every card. `stillWaiting` = there is an entry with the same `managerId`, `requestId` and verbatim message. `answeredHow({ sent, marked, waiting, stillWaitingNow })`: `sent` → "sent" (`Answered at … → …`); `marked` → "marked" ("Marked as answered."); `waiting` known and the card no longer waiting → "moved-on" (`Answered, or <Worker> is working or has reported since.`); `waiting` not known yet → nothing is inferred. Once answered, the "Answered" chip shows and the Reply button is hidden.
-- **A question that the question–answer ledger already has an answer for** (`answered` of a `chat.waiting` entry): shows "Answered." (tone `success`) instead of the options, and cannot be chosen; `Use recommendations` skips it; a choice made earlier for that question is removed from the `BM-ANSWERS` block in the Reply box.
-
-### 15.7 Beads in the chat
+### 15.4 Beads in the chat
 
 - **Bead chips on a card:** `shared/bead-ids.ts` finds strings shaped like bead ids (leaving out request ids, paths, command flags, URLs). `BeadChips` takes **every** candidate (≤ 100), looks them up with `beads.lookup` (which keeps only ids that really exist, so `feature-workflow` or `BM-REPORT` never becomes a chip), and **only then** cuts: `beadChipsView(found, expanded)` uses `visibleBeads` with `BEAD_CHIPS_SHOWN` = 2; the rest go behind a "…" chip (tone `muted`, label "Show all N beads"), pressed to expand, with no collapse button. No bead really exists → nothing is drawn. A chip reads `beadChipText` (`<title, ≤ 48 characters> · <id>`), toned by `statusBadge`; pressing opens the detail right inside the card (`BeadInline`, reusing `BeadDetailPanel` with the three actions). `chat.peers` returns `workspaceId` to know which store to look up.
 - **The "Beads in this chat" panel** (`addWorkspacePanel`, `id: "bm-chat-beads"`, `context: "agent"`): a Worker's ordinary questions are chat text, and turning them into cards would change the chats of other agents too, so beads are gathered in a panel. `chat.beads` reads `CHAT_BEADS_PAGES` = 2 pages × `CHAT_BEADS_PAGE_SIZE` = 200, i.e. the 400 newest items, takes ids from messages and shell commands, keeps only ids that really exist, counts the mentions, sorts by most recent mention, at most `CHAT_BEADS_LIMIT` = 30. The panel refreshes every 15 s; a row is a `BeadRowCard`, no grouping, no eye button.
 - Every chat RPC is in `server/chat-rpc.ts` (`registerChatRpcs`), separate from `dashboard-rpc.ts`; the shared timeline read loop is `readTimelinePages` (`live-timeline.ts`).
 
-### 15.8 Fallback incident: card and pill
+### 15.5 Fallback incident
 
-The incident detection rules, the candidates, `BM-FALLBACK` and `fallback.incidents` / `fallback.act` are in base design §7.10; this is only the part that shows up.
-
-- **Card** (`fallbackCardOf`: first line exactly `BM-FALLBACK` and an `incident` can be read). The card keeps only the incident id; state, candidates and reset time come from `fallback.incidents({ ids })`, key `["paseo-bm", "fallback-incident", id]` shared with the pill's popover, re-read every `WAITING_POLL_MS` while `pending`/`waiting` — the text of the message is never the state.
-- **Layout:** `RoleMark` + "<Role> stopped by its provider plan", the time, a state chip (`pending` → `warning`; `switched`/`resumed` → `success`; `waiting` → `info`; `dismissed`/`expired` → `muted`; `exhausted`/`failed` → `danger`); a `requestId` chip; the line `Usage limit (L1) | Billing (L2) | Login (L4) | Provider unavailable (L5) · <alias> · <model>`; the provider's words (mono, 3 lines).
-- **Buttons, only when `pending`:** "Switch to <alias> · <Provider> · <model>[ · ~$in / $out per 1M tokens]" when there is a candidate (price: `MODEL_PRICES` then `roles.options`); "Wait until <machine time>" when `resetsAt` is no more than `FALLBACK_MAX_WAIT_MS` (7 days) away, and once it has passed "Resume now (the limit reset at …)"; "I'll handle it" is always there. A `switched` Reviewer that has no `replacementId` yet → only "Resend to Worker". Each button is one `fallback.act`; the result is the new state; an error → "Could not <action> (<code>): …" and then a re-read.
-- No longer `pending` → one state line (`fallbackStatusLine`); a `switched` Manager: "A new Beads Manager is running on … Open Beads Manager from the sidebar or Command Center to continue with it."
-- **Pill:** each Manager with a `pending` incident (from `chat.waiting.fallback`) gets one pill `bm-fallback-<managerId>`, icon `FALLBACK_PILL_ICON` = `TriangleAlert`, label `Fallback · <n> decision(s)`, title "An agent stopped by its provider plan waits for your decision" (several: "<n> agents stopped by their provider plan wait for your decision"). The popover draws one card per incident (`fallbackCardOfIncident`), oldest first, with all the buttons. It shares the `chat.waiting` read loop and `planPills` with the question pill; the key consists of the Manager and the incident ids.
+The incident detection rules, the candidates, `BM-FALLBACK` and `fallback.incidents` / `fallback.act` are in base design §7.10. A pending incident is the owner's decision `f:<incidentId>` (autonomy design §A.5 d): it shows in the Inbox, and a `BM-FALLBACK` notice in a chat is that decision's card (§15.2), its options the incident's prepared actions — switch to the candidate, wait for the reset, resend a switched Reviewer's instructions, or handle it yourself. What became of a settled incident (a new agent running with **Open**, waiting, dismissed, failed) and **Resend to Worker** show in the Inbox (autonomy design §A.12).
 
 ## 16. Performance
 
@@ -749,19 +682,19 @@ The incident detection rules, the candidates, `BM-FALLBACK` and `fallback.incide
 | Reading the trace | By month file, newest to oldest, stopping at `limit` (50); `mtime`+`size` cache |
 | Timeline | Only catches up the running turn, or when the store is off; capped at 2,000 entries per agent per read |
 | Beads store | Capped at 32 MB; `(path, mtimeMs, size)` cache |
-| Client | `useQuery` with keys that include `workspaceId`; trace detail loaded only on open; the polling intervals in §2.4, none of which runs while its screen is not shown (except the pills and the header button, which are tied to the app) |
+| Client | `useQuery` with keys that include `workspaceId`; trace detail loaded only on open; the polling intervals in §2.4, none of which runs while its screen is not shown (except the header button, which is tied to the app) |
 
 ## 17. Security & Privacy
 
 - **Write boundary:** `<install home>/traces/**`, `<install home>/ui/**`, `<install home>/role-extras.json`. No writing into the workspace, `~/.paseo`, skill folders, `install.json`. **(0.4.0)** The data folder (base design §5.1) replaces `<install home>`; `ui/setup-state.json` is added; the Paseo configuration only through `config.patch` of base design §6.2; deletion only through `setup.cleanup` and only the entries listed in base design §7.13.7.
-- **Reading disk outside its own part:** `<workspace>/.beads/issues.jsonl`, `<install home>/install.json` (only to confirm the install home; **(0.4.0)** only to know whether it exists, for the migration banner), the plugin's `role-fallback-state.json`, and the skill folders (only `SKILL.md`, for the Setup screen). **(0.4.0)** Plus `~/.paseo-bm/home.json` (the pointer).
+- **Reading disk outside its own part:** `<workspace>/.beads/issues.jsonl`, `<install home>/install.json` (only to confirm the install home; **(0.4.0)** only to know whether it exists, for the migration banner), the plugin's `role-fallback-state.json`, and the skill folders (only `SKILL.md`, for Settings). **(0.4.0)** Plus `~/.paseo-bm/home.json` (the pointer).
 - **Secrets are masked before writing**, not only before rendering: the rules come from `src/redact.ts`, and the plugin has a copy of the constants because it does not import `src/`.
 - `env` is not recorded: the collector does not use the `agent.create` hook.
 - Permissions: folders `0700`, files `0600`.
 - Deletion is the user's right: no path deletes traces on its own; the uninstall command must ask.
-- The Metric screen states plainly that it shows and stores agent conversations.
+- Settings → Data states plainly that paseo-bm stores agent conversations and that Work shows them (`PRIVACY_NOTICE`).
 - **No network** in any dashboard flow. Deliberate exception: `setup.install-tool` runs an installer downloaded from the network, only when the user presses and confirms the verbatim command (`confirmed: true` required by the schema); the `bv` script is pinned to a commit, the `br` script checks its own SHA256. **(0.4.0)** A second exception under the same rule: `setup.install-skills` runs the `skills` CLI (downloading from npm and GitHub); `providers.diagnostic` is the daemon asking its provider, not the plugin going out to the network.
-- The Beads screen and chat cards **send messages to agents** (bead actions, Reply): always through a confirmation or an explicit send button, always re-reading the receiver's state, never sending to an agent that is running or archived. The Metric screen creates, stops or sends nothing to any agent.
+- The Beads board **sends messages to agents** (bead actions): always through a confirmation, always to the workspace's Manager. A decision card sends nothing itself: it answers the stored decision (`decisions.answer`), and the plugin delivers the answer (autonomy design §A.6) — never into a running turn, never to a Reviewer. Work's Requests and Insights create, stop or send nothing to any agent.
 
 ## 18. Reliability
 
@@ -771,25 +704,26 @@ The incident detection rules, the candidates, `BM-FALLBACK` and `fallback.incide
 - A trace file with one broken line → exactly that line is skipped and counted in `skippedLines`.
 - `reset`, `gap`, `staleCursor` from the timeline → read again once and attach a notice.
 - A host lacking the timeline API or the `before`/`on` hooks → exactly that part is turned off, with a notice. A host lacking `navigation.openAgent` → the "Open …" buttons hide themselves.
-- An RPC error → each screen shows a red line with the code and a Refresh button; the rest (including the sub-tab row) stays usable.
+- An RPC error → each screen shows a red line with the code; the rest (including the section and project tabs) stays usable.
 
 ## 19. Test strategy
 
 | Layer | Principle |
 |---|---|
-| Logic | Every decision is in a pure module (`*-model.ts`, `chat-cards.ts`, `dashboard-view.ts`, `slot.ts`, `shared/*`, `server/*`), tested with Vitest without a renderer. Each behavioural criterion has a negative control that has been seen to fail |
+| Logic | Every decision is in a pure module (`*-model.ts`, `chat-cards.ts`, `surface-view.ts`, `slot.ts`, `shared/*`, `server/*`), tested with Vitest without a renderer. Each behavioural criterion has a negative control that has been seen to fail |
 | View | Hook-free views are built with `test/helpers/element-tree.ts`; placement (e.g. the status strip on every view) is checked with assertions on the source code. Files in `test/` do not import `react-native` as a value |
 | Store | Write then read back; duplicate keys including reused turn ids and a rewrite stamped with the write time; broken lines, a half-written last line; symlinks at every level refused and the target unchanged by a single byte; a barrier for writes concurrent with delete/reassign |
 | Contract | The exact RPC list in `test/plugin-bundle-cjs.test.ts` and `test/rpc-list-describe.test.ts`; the client entry does not import `server/`, `shared/` does not import Node |
-| Negative | No writing outside the boundary of §17, no network, Metric calls no write function of the SDK |
+| Negative | No writing outside the boundary of §17, no network, Work's Requests and Insights call no write function of the SDK |
 | Real data | The readers are tried on strings written by real agents; acceptance runs on a real daemon write a run record in `docs/operations/`. The visual part (colours, layout, gestures) is checked by the owner on a real daemon, on desktop and phone |
 
 ## 20. Compatibility
 
 - A new version reads an old version's store; an old version meeting a newer store reads it in limited mode and does not write. A version update does **not** delete the store, including `--prune`.
-- Fields added to a payload (`errors`, `usageByModelRole`, `usageByModel`, `runtime`, `labelled`, `replaced`, `answered`, …) are always optional or have a default.
+- Fields added to a payload (`errors`, `usageByModelRole`, `usageByModel`, `runtime`, `labelled`, `replaced`, …) are always optional or have a default.
+- Data files and notices of features the autonomy programme retired (§12, autonomy design §A.14) are ignored when an earlier build left them, and the cleanup button deletes them; there is no compatibility path to the retired screens (PRD REQ-171).
 - Agents created by an earlier version (without the `bm.requestId` label) still show, at the `inferred` level.
-- The `BM-REPORT` reader reads the current format and the previous one; a report without `BM-QUESTIONS` gives an ordinary card. Instructions are attached when the agent is created, so an old Manager/Worker and a new plugin still understand each other: the card still has its buttons because the card is plugin code.
+- The `BM-REPORT` reader reads the current format and the previous one; a report without `BM-QUESTIONS` gives an ordinary card; a `BM-COMMAND` v1 block still reads. Instructions are attached when the agent is created, so an agent on older instructions is flagged in the Inbox (autonomy design §A.11), and its cards are still drawn because the card is plugin code.
 
 ## 21. Open questions
 
@@ -801,6 +735,22 @@ The incident detection rules, the candidates, `BM-FALLBACK` and `fallback.incide
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-09-29 | Claude (owner's delegation) | Retirement sweep (autonomy design §A.14, bead bm-autonomy-phase1b-dbdv.6): §11 rewritten for the surface as built — sections Inbox · Work · Insights · Settings and their views (`surface-view.ts`), the "Open Beads project" and "Open Beads Inbox" hand-offs, Work's rows, closed-workspace history and a project's page, the history actions moved to a request's Details, a closed workspace's Requests and Settings → Data, Settings from `settings-blocks.tsx`, the Inbox's Orchestrator line; §12 now only names the retired screens; §13/§14: the board first, the overview in Insights, the "Beads" tab is the workspace's project page; §15 rewritten for cards v2 and live decision cards (the reply box, the question card, the waiting list and its pills, the answer marks and their file removed); §1, §2, §3.2, §5, §16–§20 brought in line; a request's Details keep what each agent ran on and the tokens per model (REQ-058), shown before on the retired request graph |
+| 2026-09-29 | hieu.nt10 (written by Claude) | Trace records carry an optional `pluginVersion` (§ record fields), for the evaluation replay of the autonomy programme (bead bm-autonomy-phase0-m1ih.1) |
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | §15.2: the `command` card and the `event` compact line ([Design Orchestrator](./paseo-bm-orchestrator.md) §6B.2, ADR-016), with the fields `command` and `event`; an unparsable block falls back to the `notice` card |
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | §11.3: the Orchestrator tab becomes a coordinator's dashboard ([Design Orchestrator](./paseo-bm-orchestrator.md) §9, §6B.7, ADR-016) — the summary line; Needs you oldest first, a decision's options as buttons behind a confirmation, Other…; one health card per project (colour, Allow… for the gate categories, stage bar, M W R dots, current request, progress, Worker signal chips, Details with interventions, notes, assessment bars and the actions); What the Orchestrator did as one list across projects, last, with → Manager / → Worker, who decided, the `re:` line and body of a `BM-COMMAND`, Override… and Pause Autopilot |
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | §11.3, after real use ([Design Orchestrator](./paseo-bm-orchestrator.md) §9): **What the Orchestrator did** replaces the collapsed Activity — sent commands without the limit line and asked decisions with their status, by project, 4 lines with Show all, the last 24 hours with Show older; the header's Latest line and the new-Orchestrator notice; `orchestrator.state` read every 10 seconds while the tab is shown; the project rows drop the latest action |
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | §11.3: the Orchestrator tab simplified ([Design Orchestrator](./paseo-bm-orchestrator.md) §9, ADR-015; REQ-071, REQ-082) — header with Open chat; Needs you only when not empty, with command cards (Send / Edit / Skip) and decision cards (Answer… through `orchestrator.ask` with `decisionId`, Skip); project rows with the state and its minutes, the Autopilot switch and its dialog, the latest action by source, Assess workflow, Ask… and Command… behind "…"; Activity collapsed; the Stalled and Interventions sections removed; the new empty sentence |
+| 2026-09-28 | hieu.nt10 (drafted by Claude) | §11.3: the one-screen Orchestrator tab of [Design Orchestrator](./paseo-bm-orchestrator.md) §9 replaces the placeholder (REQ-071, REQ-076 c/e, REQ-078 a/c/d) — header with Open Orchestrator and the Watch for stalled work switch, Needs your approval, Stalled, Projects with the latest workflow assessment, Interventions, the empty state; read on open, on focus, after every action and on Refresh, no timer; every dialog defaults to Cancel |
+| 2026-09-28 | hieu.nt10 (drafted by Claude) | The first Orchestrator design's parts removed ([Design Orchestrator](./paseo-bm-orchestrator.md) §11, ADR-014, REQ-071 f): §12 drops the `· ⚑ N` of a row, the Flags chips, the nudge lines and the Assess/Assessments block — Metric gets nothing from the Orchestrator but opening one request (`initialTraceId`); §11.3 the Orchestrator tab is a placeholder until the one-screen tab of Orchestrator §9, keeping `onOpenTrace`, `RULE_LABELS` and the Add to <Role>'s instructions dialog |
+| 2026-09-28 | hieu.nt10 (drafted by Claude) | §6.1 step 3: a Manager turn with no inbound message belongs to the request named before it (Orchestrator acceptance finding P1) |
+| 2026-09-28 | hieu.nt10 (drafted by Claude) | §12: Assess and the Assessments block on an opened request ([Design Orchestrator](./paseo-bm-orchestrator.md) §5, §7, §8.2; REQ-075 a, b, e, f; REQ-076 a, b) — the Assess preview dialog from `orchestrator.assess-preview` (default Cancel), assessments newest first with state, model, the six scores, findings, suggestions, the "linked by turn" label, Assessing… with Open agent and Refresh (no polling), the error and raw reply of a failed one, and the "Add to <Role>'s instructions" dialog with the text after appending, `chars / 8,000` and `expectedHash` |
+| 2026-09-28 | hieu.nt10 (drafted by Claude) | §12: opening one request from the Orchestrator tab ([Design Orchestrator](./paseo-bm-orchestrator.md) §8.1, REQ-071 c) — `onOpenTrace` switches the surface to that workspace's Metric, `DashboardPanel.initialTraceId` opens that trace's card; a trace beyond the first page is looked for on at most 10 more pages and drawn on its own under "Opened from the Orchestrator", else one "Could not find …" line |
+| 2026-09-28 | hieu.nt10 (drafted by Claude) | §11.3: four Setup tabs — the Orchestrator tab ([Design Orchestrator](./paseo-bm-orchestrator.md) §8.1, REQ-071, REQ-078 a-b, f): the Nudge running agents switch behind `ConfirmBlock` (moved to `ui.tsx`), its two rule checkboxes, the 7/14/30-day overview with rows, most frequent flags, "Nudges sent: N", the table by size, truncation and the empty state, and one readable label per rule |
+| 2026-09-28 | hieu.nt10 (drafted by Claude) | §12: the Orchestrator's flags and nudges on Metric ([Design Orchestrator](./paseo-bm-orchestrator.md) §8.2, REQ-073 a–c) — `· ⚑ N` on a row from one `orchestrator.flag-counts` call per page, and on an opened request the Flags chip group with its evidence, the "based on the agents that still exist" note and one "Orchestrator nudge: …" line per nudge |
+| 2026-09-28 | hieu.nt10 (drafted by Claude) | The fourth role on the client ([Design Orchestrator](./paseo-bm-orchestrator.md) §3.1): its role icon (`Compass`, `muted`, kept out of the graph legend), `1 Orchestrator` in the running dot, the "created its roles" line naming only the roles created (§11.3), and "the four roles" in the cleanup warning |
+| 2026-09-28 | hieu.nt10 (drafted by Claude) | §5 `workspaces.overview`: `runningAgents.orchestrator` (optional) counts running Orchestrator assessment agents; the assessment agent is otherwise kept out of trace reconstruction ([Design Orchestrator](./paseo-bm-orchestrator.md) §3.2) |
+| 2026-09-28 | hieu.nt10 (drafted by Claude) | §3.5: `traces.delete` also removes the Orchestrator's assessments of the traces in scope, keyed by `requestId` or `traceId` ([Design Orchestrator](./paseo-bm-orchestrator.md) §5.3, REQ-075 e), before the traces; a preview removes none |
 | 2026-09-26 | hieu.nt10 (drafted by Claude) | §11.2: the launcher's error line (and the agent tree's "Could not load …") shows the server's message without the `Request failed: … requestType=… code=…` wrapper the app receives from `DaemonRpcError`, and without repeating the code; before this, `errorCodeOf` could never extract the code in the app |
 | 2026-09-26 | hieu.nt10 (drafted by Claude) | §11.3: the agent tools status sentence when off becomes "Off — no new Beads Manager starts until you allow them", because from 0.4.0 `manager.ensure` does not create a Manager while the switch is off (base design §7.3); the old sentence saying the Manager "may not be able to create a Worker" is no longer true |
 | 2026-09-25 | hieu.nt10 (drafted by Claude) | **ADR-012: a single source — machine setup moves to Setup (target release 0.4.0).** §11.3: call `setup.ensure-roles` when the screen opens, the "created its roles with defaults" line, the migration banner, the "Set up paseo-bm" card with five rows (roles, agent tools with the machine-wide warning, skills with the third-party note, `br`/`bv`, sign-in showing only the command), the "Install skills…" button on the skills tab, the agent tools and sign-in blocks on "Roles & models", the "This install" block with the data folder and the "Remove paseo-bm's settings…" button with a second confirmation for the data (default keep). §3.1 points to the new data folder; §5 adds four RPCs and five error codes (contract in base design §7.13); §11.2 `setupNotice`; §1, §2.1, §2.4, §17 updated. §21: Q-039 removed (answered in ADR-012 decision 6). Still three tabs, per REQ-069 (f). Independent `design-ready` review the same day: §11.3 adds the verbatim status sentence for each row of the "Set up paseo-bm" card (reusing the existing sentences of `setupHeadline` and the agent tools block) |

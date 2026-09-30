@@ -2,16 +2,19 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fallbackNotice, handleFallbackAct, handleFallbackIncidents, notifyFallback } from "../plugin/server/fallback-rpc";
+import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
+import { fallbackDecisionId, syncFallbackDecisions } from "../plugin/server/fallback-decisions";
+import { fallbackNotice, handleFallbackAct, handleFallbackIncidents } from "../plugin/server/fallback-rpc";
 import { ROLE_FALLBACK_STATE_FILE } from "../plugin/server/fallback-state";
-import { createNoticeQueue } from "../plugin/server/notice-queue";
 import { isPluginNotice } from "../plugin/server/notices";
 import { parseFallbackNotice } from "../plugin/shared/bm-fallback";
 import type { FallbackIncident } from "../plugin/shared/contracts";
 
 /**
- * Delta 20260921 §4.4.6, §4.4.10 (REQ-065 c): BM-FALLBACK to the Manager chat,
- * the `fallback.incidents` RPC and the card's "I'll handle it" action.
+ * Delta 20260921 §4.4.6, §4.4.10 (REQ-065 c): the BM-FALLBACK block (still
+ * the Worker's instructions for a switched Reviewer), the `fallback.incidents`
+ * RPC and the card's "I'll handle it" action. Autonomy design §A.5 d: nothing
+ * is sent to the Manager; an incident decided on the card withdraws its decision.
  */
 
 const incident = (overrides: Partial<FallbackIncident> = {}): FallbackIncident => ({
@@ -53,7 +56,7 @@ const EXPECTED = [
   "candidate: bm-worker-fallback-1 · codex · gpt-5.6-sol · thinking high",
   "replacement: none",
   "",
-  "The worker stopped because of its provider plan. The user decides on the card in this chat. Tell the user in one line; do not create an agent yourself. Once the status is switched, follow the agent on the replacement line instead.",
+  "CLOSING",
 ].join("\n");
 
 function fakePaseo(statuses: Record<string, string> = {}) {
@@ -79,6 +82,7 @@ beforeEach(() => {
   home = join(root, ".paseo-bm");
   mkdirSync(home);
   log.mockReset();
+  clearDecisionStoreCache();
 });
 
 afterEach(() => {
@@ -90,35 +94,20 @@ const writeIncidents = (incidents: FallbackIncident[]) =>
 
 describe("BM-FALLBACK", () => {
   it("is the block of the design, word for word, with the message on one line", () => {
-    expect(fallbackNotice(incident(), (alias) => (alias === "bm-worker" ? "claude" : null))).toBe(EXPECTED);
+    expect(fallbackNotice(incident(), (alias) => (alias === "bm-worker" ? "claude" : null), "CLOSING")).toBe(EXPECTED);
   });
 
   it("writes none / unknown for what is not known, and cuts the message to 300 characters", () => {
     const text = fallbackNotice(
       incident({ requestId: null, resetsAt: null, candidate: null, agentModel: null, message: "x".repeat(400) }),
       () => null,
+      "CLOSING",
     );
     expect(text).toContain("\nrequestId: none\n");
     expect(text).toContain("\nprovider: bm-worker (unknown) · unknown\n");
     expect(text).toContain("\nresetsAt: unknown\n");
     expect(text).toContain("\ncandidate: none\n");
     expect(text).toContain(`\nmessage: ${"x".repeat(300)}\n`);
-  });
-
-  it("reaches a running Manager at its next turn end, exactly", async () => {
-    const queue = createNoticeQueue({ log: () => {} });
-    const fake = fakePaseo({ "mgr-1": "running" });
-    expect(await notifyFallback(incident(), fake.paseo, { enqueue: queue.enqueue, log })).toBe("queued");
-    expect(fake.sent).toEqual([]);
-    fake.statuses["mgr-1"] = "idle";
-    await queue.turnEnded({ agent: { id: "mgr-1" } }, fake.paseo);
-    expect(fake.sent).toEqual([{ id: "mgr-1", text: EXPECTED }]);
-  });
-
-  it("tells nobody when the incident has no Manager chat", async () => {
-    const enqueue = vi.fn();
-    expect(await notifyFallback(incident({ managerId: null }), fakePaseo().paseo, { enqueue, log })).toBeNull();
-    expect(enqueue).not.toHaveBeenCalled();
   });
 
   it("is a plugin notice, as BM-RESUME is: never the user's words, never a review call", () => {
@@ -182,17 +171,15 @@ describe("fallback.incidents", () => {
 describe("fallback.act", () => {
   const NOW = () => new Date("2026-09-21T14:05:00.000Z");
 
-  it("dismiss marks a pending incident dismissed, touches no agent, and tells the Manager chat", async () => {
+  it("dismiss marks a pending incident dismissed, touches no agent, tells no Manager, and withdraws its decision", async () => {
     writeIncidents([incident()]);
-    const enqueue = vi.fn<(target: string, kind: string, text: string) => Promise<"sent">>(async () => "sent");
+    expect(syncFallbackDecisions(home, { now: NOW, log }).opened).toEqual([fallbackDecisionId("fb-3f9a2c1d7e4b")]);
     const fake = fakePaseo();
-    const { incident: after } = await handleFallbackAct({ incidentId: "fb-3f9a2c1d7e4b", action: "dismiss" }, fake.paseo, { home, now: NOW, enqueue, log });
+    const { incident: after } = await handleFallbackAct({ incidentId: "fb-3f9a2c1d7e4b", action: "dismiss" }, fake.paseo, { home, now: NOW, log });
     expect(after).toMatchObject({ status: "dismissed", decidedAt: "2026-09-21T14:05:00.000Z", replacementId: null });
     expect(JSON.parse(readFileSync(join(home, ROLE_FALLBACK_STATE_FILE), "utf8")).incidents[0].status).toBe("dismissed");
-    expect(enqueue).toHaveBeenCalledTimes(1);
-    expect(enqueue.mock.calls[0]![0]).toBe("mgr-1");
-    expect(enqueue.mock.calls[0]![2]).toContain("\nstatus: dismissed\n");
     expect(fake.sent).toEqual([]);
+    expect(createDecisionStore(home).get(fallbackDecisionId("fb-3f9a2c1d7e4b"))).toMatchObject({ status: "withdrawn", settledAt: "2026-09-21T14:05:00.000Z" });
   });
 
   it("refuses an incident that is no longer pending, and an unknown one", async () => {
@@ -216,11 +203,9 @@ describe("fallback.act", () => {
       code: "E_FALLBACK_NO_RESET",
     });
     const wait = vi.fn(async (current: FallbackIncident) => ({ ...current, status: "waiting" as const }));
-    const enqueue = vi.fn<(target: string, kind: string, text: string) => Promise<"sent">>(async () => "sent");
     await expect(
-      handleFallbackAct({ incidentId: "fb-3f9a2c1d7e4b", action: "wait" }, paseo, { home, log, enqueue, actions: { wait } }),
+      handleFallbackAct({ incidentId: "fb-3f9a2c1d7e4b", action: "wait" }, paseo, { home, log, actions: { wait } }),
     ).resolves.toMatchObject({ incident: { status: "waiting" } });
     expect(wait).toHaveBeenCalledTimes(1);
-    expect(enqueue.mock.calls[0]![2]).toContain("\nstatus: waiting\n");
   });
 });

@@ -140,6 +140,23 @@ describe("notifyChildFactChange", () => {
     expect(fake.list).not.toHaveBeenCalled();
   });
 
+  it("does nothing for an Orchestrator save, and never tells an Orchestrator agent about another role's line (orchestrator design §3.2)", async () => {
+    const orchestrators: Agent[] = [
+      { id: "o-labelled", provider: "bm-orchestrator", labels: { "bm.role": "orchestrator" }, status: "idle" },
+      { id: "o-plain", provider: "bm-orchestrator/claude-opus-5", status: "idle" },
+    ];
+    const enqueue = vi.fn(async () => "sent" as const);
+    const fake = fakePaseo([...MANAGERS, ...WORKERS, ...orchestrators]);
+    expect(await childFactLine("orchestrator", fake.paseo)).toBeNull();
+    expect(await notifyChildFactChange("orchestrator", "", "Orchestrator mode: `auto`", fake.paseo, { enqueue })).toBe(0);
+    expect(fake.list).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
+    // A Worker or Reviewer line reaches its creators only.
+    await notifyChildFactChange("worker", WORKER_LINE, NEW_WORKER_LINE, fake.paseo, { enqueue });
+    await notifyChildFactChange("reviewer", "", REVIEWER_LINE, fake.paseo, { enqueue });
+    expect(enqueue.mock.calls.map((call) => (call as unknown[])[0])).toEqual(["m-idle", "m-busy", "w-1", "w-fallback"]);
+  });
+
   it("never throws: a failed agent list costs one log line and notifies nobody", async () => {
     const log = vi.fn();
     const fake = fakePaseo([]);

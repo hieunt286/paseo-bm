@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  ANSWER_NOTICE_MARKER,
   BUDGET_NOTICE_MARKER,
   WORKER_STOP_NOTICE,
   WORKER_STOP_NOTICE_MARKER,
   isPluginNotice,
+  noticeMarkerOf,
 } from "../plugin/server/notices";
 import { REVIEWER_STOP_NOTICE } from "../plugin/server/stop-propagation";
 import { NEW_REQUEST_MARKER, stripNewRequestMarker } from "../plugin/shared/new-request";
@@ -14,7 +16,7 @@ import { NEW_REQUEST_MARKER, stripNewRequestMarker } from "../plugin/shared/new-
  * Paseo's SDK attaches a `messageId` to every `send()`, and the daemon stores it
  * as `clientMessageId` — the field the collector uses to tell the user's own
  * words from a relayed message. Without this list the plugin's notices are
- * recorded as things the USER said: the Metric screen shows "you" saying
+ * recorded as things the USER said: a request's history shows "you" saying
  * `BM-BUDGET …`, counts it among your messages, and can take it for the request
  * text (review b2 of delta 20260917c).
  */
@@ -32,6 +34,16 @@ describe("isPluginNotice", () => {
     expect(isPluginNotice("stop all the workers please")).toBe(false);
     // A report is not a notice either: the collector has its own parser for it.
     expect(isPluginNotice("BM-REPORT\nrequestId: req-1\nphase: finished")).toBe(false);
+  });
+
+  it("knows BM-ANSWER as a whole word only: the owner's BM-ANSWERS block and the BM-ANSWERED notice keep their own reading (autonomy design §A.6)", () => {
+    expect(isPluginNotice("BM-ANSWER\ndecisionId: o:1")).toBe(true);
+    expect(isPluginNotice("BM-ANSWER")).toBe(true);
+    expect(noticeMarkerOf("BM-ANSWER\ndecisionId: o:1")).toBe(ANSWER_NOTICE_MARKER);
+    // An answers block typed by the owner is the owner's words, never a notice.
+    expect(isPluginNotice("BM-ANSWERS\nrequestId: req-1\nQ1: a")).toBe(false);
+    expect(noticeMarkerOf("BM-ANSWERS\nrequestId: req-1")).toBeNull();
+    expect(noticeMarkerOf("BM-ANSWERED requestId: req-1")).toBe("BM-ANSWERED");
   });
 
   it("is not fooled by a non-string", () => {

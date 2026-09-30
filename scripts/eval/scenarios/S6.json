@@ -1,0 +1,27 @@
+{
+  "id": "S6",
+  "title": "Two requests on the same file, sent 10 seconds apart",
+  "fixture": { "kind": "node", "seededBeads": [], "bareRemote": false },
+  "requests": [
+    {
+      "text": "Add a square(x) function to math.js that returns x * x, with a node:test test.",
+      "delaySeconds": 0
+    },
+    {
+      "text": "Add a negate(x) function to math.js that returns -x, with a node:test test.",
+      "delaySeconds": 10
+    }
+  ],
+  "owner": { "policy": "recommended", "overrides": [] },
+  "expect": {
+    "tier": ["small", "medium"],
+    "testsGreen": true,
+    "git": { "commit": "none", "push": { "expect": "none" } },
+    "contains": [
+      { "path": "math.js", "text": "square" },
+      { "path": "math.js", "text": "negate" }
+    ],
+    "concurrency": { "noOverlappingEdits": ["math.js"], "waiterToldWhom": true }
+  },
+  "timeoutMinutes": 40
+}

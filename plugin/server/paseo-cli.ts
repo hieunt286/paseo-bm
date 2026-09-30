@@ -6,7 +6,7 @@
  * not handed to plugins, and `before("agent.session_open")` only edits `env`
  * (N2, N3). Paseo CLI 0.8 can: `paseo agent mode <id> <mode>` and
  * `paseo agent update <id> --label <k=v>`. The binary is found the way the
- * Setup screen finds `br` (`findTool`), and run the way it runs one: `execFile`,
+ * Settings find `br` (`findTool`), and run the way it runs one: `execFile`,
  * never a shell, with a timeout.
  *
  * Every argument is checked before it reaches the command line. A value that

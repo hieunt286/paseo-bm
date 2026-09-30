@@ -99,6 +99,7 @@ describe("writeSetupState / updateSetupState", () => {
       rolesCreated,
       skillsRun,
       cleanedUpAt: "2026-09-25T11:00:00.000Z",
+      orchestratorCreatedAt: "2026-09-28T09:00:00.000Z",
     };
 
     writeSetupState(state, deps());
@@ -110,13 +111,30 @@ describe("writeSetupState / updateSetupState", () => {
     updateSetupState({ agentTools }, deps());
     updateSetupState({ rolesCreated }, deps());
     updateSetupState({ cleanedUpAt: "2026-09-25T11:00:00.000Z" }, deps());
+    updateSetupState({ orchestratorCreatedAt: "2026-09-28T09:00:00.000Z" }, deps());
 
     expect(readSetupState(deps())).toEqual({
       agentTools,
       rolesCreated,
       skillsRun: null,
       cleanedUpAt: "2026-09-25T11:00:00.000Z",
+      orchestratorCreatedAt: "2026-09-28T09:00:00.000Z",
     });
+  });
+
+  it("reads a file written before orchestratorCreatedAt existed, with the field null", () => {
+    writeRaw(JSON.stringify({ schemaVersion: 1, agentTools, rolesCreated, cleanedUpAt: null }));
+
+    expect(readSetupState(deps())).toEqual({ ...emptySetupState(), agentTools, rolesCreated });
+  });
+
+  it("keeps rolesCreated.roles to the three roles: a fourth value makes the whole file unreadable", () => {
+    // Why `bm-orchestrator` has its own field (orchestrator design §3.2): the
+    // enum refuses the value, and the file then reads as empty — agentTools
+    // and cleanedUpAt included. 0.4.1 parses it the same way.
+    writeRaw(JSON.stringify({ schemaVersion: 1, agentTools, rolesCreated: { ...rolesCreated, roles: ["manager", "orchestrator"] } }));
+
+    expect(readSetupState(deps())).toEqual(emptySetupState());
   });
 
   it("can clear a field back to null", () => {

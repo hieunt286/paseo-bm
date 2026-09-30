@@ -1,0 +1,26 @@
+{
+  "id": "S2",
+  "title": "Medium: subtract, multiply and divide with node:test tests",
+  "fixture": { "kind": "node", "seededBeads": [], "bareRemote": false },
+  "requests": [
+    {
+      "text": "Add subtract(a, b), multiply(a, b) and divide(a, b) to math.js. divide must throw an Error when b is 0. Cover every new function, including the division by zero, with node:test tests in test/math.test.js.",
+      "delaySeconds": 0
+    }
+  ],
+  "owner": { "policy": "recommended", "overrides": [] },
+  "expect": {
+    "tier": ["medium"],
+    "beads": { "expect": "created", "min": 1, "closedWithEvidence": true, "covering": [] },
+    "review": { "expect": "reviewed", "min": 1, "beforeImplementation": false },
+    "testsGreen": true,
+    "git": { "commit": "none", "push": { "expect": "none" } },
+    "changed": ["math.js", "test/math.test.js"],
+    "contains": [
+      { "path": "math.js", "text": "subtract" },
+      { "path": "math.js", "text": "multiply" },
+      { "path": "math.js", "text": "divide" }
+    ]
+  },
+  "timeoutMinutes": 40
+}

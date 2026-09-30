@@ -15,10 +15,14 @@ import {
 } from "../plugin/server/manager";
 import type { CliOutcome, PaseoCliDeps } from "../plugin/server/paseo-cli";
 import type { ProviderMode } from "../plugin/server/role-mode";
-import { markCleanedUpThisRun } from "../plugin/server/setup-roles";
+import { markCleanedUpThisRun, rolePaseoToolsPolicy } from "../plugin/server/setup-roles";
 import contribute, { readManagerInstructions } from "../plugin/index.server";
 import { managerEnsureRpc, type FallbackIncident } from "../plugin/shared/contracts";
+import { createAlertStore } from "../plugin/server/alert-store";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
+import { currentInstructionsHash } from "../plugin/server/instructions-label";
+
+const MANAGER_HASH = currentInstructionsHash("manager");
 
 // The entry resolves the install home from $HOME when Paseo's config names no
 // plugin path; point it at an empty directory so this machine's real
@@ -83,17 +87,19 @@ interface FakeOptions {
   models?: Record<string, Array<{ id: string }>>;
 }
 
-/** The three aliases of a machine that has been set up (0.4.0, design §6.1). */
+/** The four aliases of a machine that has been set up (0.4.0, design §6.1; orchestrator design §3.1). */
 const roleAliases = (): Record<string, unknown> => ({
-  "bm-manager": { extends: "codex", label: "Beads Manager" },
-  "bm-worker": { extends: "codex", label: "Beads Worker" },
-  "bm-reviewer": { extends: "codex", label: "Beads Reviewer" },
+  "bm-manager": { extends: "codex", label: "Beads Manager", paseoTools: rolePaseoToolsPolicy("manager") },
+  "bm-worker": { extends: "codex", label: "Beads Worker", paseoTools: rolePaseoToolsPolicy("worker") },
+  "bm-reviewer": { extends: "codex", label: "Beads Reviewer", paseoTools: rolePaseoToolsPolicy("reviewer") },
+  "bm-orchestrator": { extends: "codex", label: "Beads Orchestrator", paseoTools: rolePaseoToolsPolicy("orchestrator") },
 });
 
-/** The two profiles besides the Manager's; every test's config carries them. */
+/** The three profiles besides the Manager's; every test's config carries them. */
 const otherRoleProfiles = (): ManagerAgentProfile[] => [
   { id: "bm-worker", provider: "bm-worker", model: "gpt-5.6-sol" },
   { id: "bm-reviewer", provider: "bm-reviewer", model: "gpt-5.6-sol" },
+  { id: "bm-orchestrator", provider: "bm-orchestrator", model: "gpt-5.6-sol" },
 ];
 
 function agent(overrides: Partial<ManagerAgentSnapshot> & { id: string }): ManagerAgentSnapshot {
@@ -238,7 +244,7 @@ describe("manager.ensure — no Manager yet", () => {
 
     const result = await ensureManager({ workspaceId: WS }, deps(fake.paseo));
 
-    expect(result).toEqual({ agentId: "created-1", created: true, otherManagerIds: [], modeNotice: null, toolsNotice: null, setupNotice: null });
+    expect(result).toEqual({ agentId: "created-1", created: true, otherManagerIds: [], modeNotice: null, toolsNotice: null, setupNotice: null, replacedManagerId: null });
     expect(fake.calls.indexOf("list")).toBeLessThan(fake.calls.indexOf("create"));
     // No label filter since delta 20260918g §4.2–§4.3: a Manager started from
     // Paseo's own new-agent flow carries no bm.role label and is recognised by
@@ -254,7 +260,7 @@ describe("manager.ensure — no Manager yet", () => {
       thinkingOptionId: "high",
       systemPrompt: managerMd,
     });
-    expect(options.labels).toEqual({ "bm.role": "manager", "bm.version": PLUGIN_VERSION });
+    expect(options.labels).toEqual({ "bm.role": "manager", "bm.version": PLUGIN_VERSION, "bm.instructions": MANAGER_HASH });
     expect(fake.archived).toEqual([]);
   });
 
@@ -299,7 +305,7 @@ describe("manager.ensure — a new Manager's mode (delta 20260918 §4.1)", () =>
     expect(options.config.modeId).toBe("bypassPermissions");
     expect(options.labels).toEqual({
       "bm.role": "manager",
-      "bm.version": PLUGIN_VERSION,
+      "bm.version": PLUGIN_VERSION, "bm.instructions": MANAGER_HASH,
       "bm.modeSet": "bypassPermissions",
     });
     expect(logs).toEqual([]);
@@ -360,7 +366,7 @@ describe("manager.ensure — a new Manager's mode (delta 20260918 §4.1)", () =>
     const { options, logs } = await create({ profiles: [{ ...installedProfile, modeId: "acceptEdits" }], modes: "reject" });
 
     expect(options.config.modeId).toBe("acceptEdits");
-    expect(options.labels).toEqual({ "bm.role": "manager", "bm.version": PLUGIN_VERSION });
+    expect(options.labels).toEqual({ "bm.role": "manager", "bm.version": PLUGIN_VERSION, "bm.instructions": MANAGER_HASH });
     expect(logs).toHaveLength(1);
     expect(logs[0]).toMatch(/could not read the modes of bm-manager/);
   });
@@ -398,7 +404,7 @@ describe("manager.ensure — Manager already exists", () => {
     const first = await ensureManager({ workspaceId: WS }, deps(fake.paseo));
     const second = await ensureManager({ workspaceId: WS }, deps(fake.paseo));
 
-    expect(first).toEqual({ agentId: "mgr-existing", created: false, otherManagerIds: [], modeNotice: null, toolsNotice: null, setupNotice: null });
+    expect(first).toEqual({ agentId: "mgr-existing", created: false, otherManagerIds: [], modeNotice: null, toolsNotice: null, setupNotice: null, replacedManagerId: null });
     expect(second).toEqual(first);
     expect(fake.createCalls).toHaveLength(0);
     // The profile is never read for an existing Manager. From 0.4.0 the config
@@ -460,7 +466,7 @@ describe("manager.ensure — an existing Manager is switched once (delta 2026091
       ["/opt/fake/paseo", "agent", "mode", "mgr-1", "bypassPermissions", "--json"],
       ["/opt/fake/paseo", "agent", "update", "mgr-1", "--label", "bm.modeSet=bypassPermissions", "--json"],
     ]);
-    expect(result).toEqual({ agentId: "mgr-1", created: false, otherManagerIds: [], modeNotice: null, toolsNotice: null, setupNotice: null });
+    expect(result).toEqual({ agentId: "mgr-1", created: false, otherManagerIds: [], modeNotice: null, toolsNotice: null, setupNotice: null, replacedManagerId: null });
     expect(fake.createCalls).toEqual([]);
   });
 
@@ -530,7 +536,7 @@ describe("manager.ensure — two live Managers", () => {
 
     const result = await ensureManager({ workspaceId: WS }, deps(fake.paseo));
 
-    expect(result).toEqual({ agentId: "mgr-new", created: false, otherManagerIds: ["mgr-old"], modeNotice: null, toolsNotice: null, setupNotice: null });
+    expect(result).toEqual({ agentId: "mgr-new", created: false, otherManagerIds: ["mgr-old"], modeNotice: null, toolsNotice: null, setupNotice: null, replacedManagerId: null });
     expect(fake.createCalls).toHaveLength(0);
     expect(fake.archived).toEqual([]);
     expect(fake.liveManagers().map((a) => a.id).sort()).toEqual(["mgr-new", "mgr-old"]);
@@ -562,7 +568,7 @@ describe("manager.ensure — a Manager without the bm.role label (delta 20260918
 
     const result = await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), cli, log: () => {} });
 
-    expect(result).toEqual({ agentId: "user-mgr", created: false, otherManagerIds: [], modeNotice: null, toolsNotice: null, setupNotice: null });
+    expect(result).toEqual({ agentId: "user-mgr", created: false, otherManagerIds: [], modeNotice: null, toolsNotice: null, setupNotice: null, replacedManagerId: null });
     expect(fake.createCalls).toEqual([]);
     expect(runs).toEqual([]);
   });
@@ -577,7 +583,7 @@ describe("manager.ensure — a Manager without the bm.role label (delta 20260918
 
     const result = await ensureManager({ workspaceId: WS }, deps(fake.paseo));
 
-    expect(result).toEqual({ agentId: "bm-mgr", created: false, otherManagerIds: ["user-mgr"], modeNotice: null, toolsNotice: null, setupNotice: null });
+    expect(result).toEqual({ agentId: "bm-mgr", created: false, otherManagerIds: ["user-mgr"], modeNotice: null, toolsNotice: null, setupNotice: null, replacedManagerId: null });
     expect(fake.createCalls).toEqual([]);
   });
 
@@ -649,16 +655,29 @@ describe("manager.ensure sets the machine up (0.4.0, ADR-012 decision 4)", () =>
       ...extra,
     });
 
-  it("creates the three roles on the way in, then the Manager, and says so", async () => {
+  it("creates the four roles on the way in, then the Manager, and says so", async () => {
     const fake = fresh();
 
     const result = await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), log: () => {} });
 
     expect(fake.patches).toHaveLength(1);
-    expect(Object.keys(fake.config().providers)).toEqual(["bm-manager", "bm-worker", "bm-reviewer"]);
+    expect(Object.keys(fake.config().providers)).toEqual(["bm-manager", "bm-worker", "bm-reviewer", "bm-orchestrator"]);
     expect(result.created).toBe(true);
     expect(result.setupNotice).toBe(
-      "paseo-bm created its roles with defaults (codex · gpt-5.6-sol). Change them in Setup → Agents.",
+      "paseo-bm created its roles with defaults (codex · gpt-5.6-sol). Change them in Settings → Agents.",
+    );
+  });
+
+  it("names only the Orchestrator on a machine updated from 0.4.x, which had the other three roles", async () => {
+    const threeRoles = roleAliases();
+    delete threeRoles["bm-orchestrator"];
+    const fake = fresh({ providers: threeRoles, profiles: [bmManagerProfile], injectIntoAgents: true });
+
+    const result = await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), log: () => {} });
+
+    expect(Object.keys(fake.config().providers)).toEqual(["bm-manager", "bm-worker", "bm-reviewer", "bm-orchestrator"]);
+    expect(result.setupNotice).toBe(
+      "paseo-bm created its Beads Orchestrator role with defaults (codex · gpt-5.6-sol). Change it in Settings → Agents.",
     );
   });
 
@@ -678,7 +697,7 @@ describe("manager.ensure sets the machine up (0.4.0, ADR-012 decision 4)", () =>
     const second = await ensureManager({ workspaceId: WS }, deps(fake.paseo));
 
     expect(first.setupNotice).toBe(
-      "Paseo's agent tools are off, so the Manager may not be able to create a Worker. Allow them in Setup.",
+      "Paseo's agent tools are off, so the Manager may not be able to create a Worker. Allow them in Settings → Agents.",
     );
     expect(second.setupNotice).toBe(first.setupNotice);
   });
@@ -689,8 +708,8 @@ describe("manager.ensure sets the machine up (0.4.0, ADR-012 decision 4)", () =>
     const result = await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), log: () => {} });
 
     expect(result.setupNotice).toBe(
-      "paseo-bm created its roles with defaults (codex · gpt-5.6-sol). Change them in Setup → Agents. " +
-        "Paseo's agent tools are off, so the Manager may not be able to create a Worker. Allow them in Setup.",
+      "paseo-bm created its roles with defaults (codex · gpt-5.6-sol). Change them in Settings → Agents. " +
+        "Paseo's agent tools are off, so the Manager may not be able to create a Worker. Allow them in Settings → Agents.",
     );
   });
 
@@ -705,11 +724,11 @@ describe("manager.ensure sets the machine up (0.4.0, ADR-012 decision 4)", () =>
     expect((error as ManagerEnsureError).code).toBe("E_PROVIDER_UNAVAILABLE");
     // The call that created the roles still says so: a later open no longer would.
     expect((error as Error).message).toBe(
-      "E_PROVIDER_UNAVAILABLE: paseo-bm created its roles with defaults (codex · gpt-5.6-sol). Change them in Setup → Agents. " +
+      "E_PROVIDER_UNAVAILABLE: paseo-bm created its roles with defaults (codex · gpt-5.6-sol). Change them in Settings → Agents. " +
         AGENT_TOOLS_OFF_MESSAGE,
     );
     expect(fake.createCalls).toHaveLength(0);
-    expect(Object.keys(fake.config().providers)).toEqual(["bm-manager", "bm-worker", "bm-reviewer"]);
+    expect(Object.keys(fake.config().providers)).toEqual(["bm-manager", "bm-worker", "bm-reviewer", "bm-orchestrator"]);
   });
 
   it("refuses with the agent-tools sentence alone when the roles already existed", async () => {
@@ -738,7 +757,7 @@ describe("manager.ensure sets the machine up (0.4.0, ADR-012 decision 4)", () =>
 
     expect((error as ManagerEnsureError).code).toBe("E_PROVIDER_UNAVAILABLE");
     expect((error as Error).message).toBe(
-      "E_PROVIDER_UNAVAILABLE: paseo-bm could not create its roles (E_SETUP_ROLES_FAILED: Paseo reports no available provider). Open Beads Manager → Setup to see what is missing.",
+      "E_PROVIDER_UNAVAILABLE: paseo-bm could not create its roles (E_SETUP_ROLES_FAILED: Paseo reports no available provider). Open Beads Manager → Settings to see what is missing.",
     );
     expect(fake.createCalls).toHaveLength(0);
   });
@@ -751,7 +770,7 @@ describe("manager.ensure sets the machine up (0.4.0, ADR-012 decision 4)", () =>
 
       expect((error as ManagerEnsureError).code).toBe("E_PROVIDER_UNAVAILABLE");
       expect((error as Error).message).toBe(
-        'E_PROVIDER_UNAVAILABLE: paseo-bm\'s settings were removed. Open Beads Manager → Setup and choose "Set up again", or remove the plugin with: paseo plugin remove paseo-bm',
+        'E_PROVIDER_UNAVAILABLE: paseo-bm\'s settings were removed. Open Beads Manager → Settings and choose "Set up again", or remove the plugin with: paseo plugin remove paseo-bm',
       );
       expect(fake.patches).toEqual([]);
       expect(fake.createCalls).toHaveLength(0);
@@ -793,6 +812,7 @@ describe("plugin server entry", () => {
       modeNotice: null,
       toolsNotice: null,
       setupNotice: null,
+      replacedManagerId: null,
     });
   });
 
@@ -865,7 +885,7 @@ describe("manager.ensure — posture by provider capability (delta 20260921 §4.
 });
 
 describe("manager.ensure — a new Manager without Paseo tools (delta 20260921 §4.2.4, REQ-063 d)", () => {
-  it("returns toolsNotice when the created Manager reports supportsMcpServers false, and records it for the Setup screen", async () => {
+  it("returns toolsNotice when the created Manager reports supportsMcpServers false, and records it for Settings", async () => {
     const { toolsSeen, forgetTools } = await import("../plugin/server/tools-check");
     forgetTools();
     const fake = fakePaseo({ profiles: [{ id: "bm-manager", provider: "bm-manager", model: "qwen" }], modes: [], createdSnapshot: { capabilities: { supportsMcpServers: false } } });
@@ -908,7 +928,7 @@ describe("manager.ensure — a replaced Manager is skipped (delta 20260921 §4.5
     agent({ id: "mgr-other", createdAt: "2026-09-15T09:00:00.000Z", labels: marked }),
     agent({ id: "mgr-replaced", createdAt: "2026-09-15T10:00:00.000Z", labels: { ...marked, ...replacedLabels } }),
   ];
-  const expected = { agentId: "mgr-other", created: false, otherManagerIds: ["mgr-third"], modeNotice: null, toolsNotice: null, setupNotice: null };
+  const expected = { agentId: "mgr-other", created: false, otherManagerIds: ["mgr-third"], modeNotice: null, toolsNotice: null, setupNotice: null, replacedManagerId: null };
 
   const managerIncident = (
     overrides: Partial<FallbackIncident> & Pick<FallbackIncident, "id" | "agentId" | "status">,
@@ -974,6 +994,106 @@ describe("manager.ensure — a replaced Manager is skipped (delta 20260921 §4.5
   });
 });
 
+describe("manager.ensure { replaceOutdated } — a Manager on older instructions (autonomy PRD §11 rule 3)", () => {
+  function fakeCli(answer: CliOutcome = { code: 0, output: "{}", timedOut: false }) {
+    const runs: string[][] = [];
+    const cli: PaseoCliDeps = {
+      find: () => "/opt/fake/paseo",
+      run: async (file, args) => {
+        runs.push([file, ...args]);
+        return answer;
+      },
+    };
+    return { cli, runs };
+  }
+
+  const outdated = () => agent({ id: "mgr-old", labels: { "bm.role": "manager", "bm.modeSet": "full-access", "bm.instructions": "0123456789ab" } });
+  const alertKey = `outdated-agent:${WS}:mgr-old`;
+
+  async function withHome<T>(body: (home: string) => Promise<T>): Promise<T> {
+    const home = mkdtempSync(join(tmpdir(), "bm-replace-outdated-"));
+    try {
+      return await body(home);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+
+  it("creates one new Manager, marks the old one replaced, clears its alert, and archives nothing", async () => {
+    await withHome(async (home) => {
+      createAlertStore(home).raise({ workspaceId: WS, kind: "outdated-agent", subject: "mgr-old" });
+      const fake = fakePaseo({ agents: [outdated()] });
+      const cliFake = fakeCli();
+      const replace = () => ensureManager({ workspaceId: WS, replaceOutdated: true }, { ...deps(fake.paseo), home, cli: cliFake.cli, log: () => {} });
+
+      const result = await replace();
+
+      expect(result).toEqual({
+        agentId: "created-1",
+        created: true,
+        otherManagerIds: [],
+        modeNotice: null,
+        toolsNotice: null,
+        setupNotice: null,
+        replacedManagerId: "mgr-old",
+      });
+      expect(managerEnsureRpc.output.parse(result)).toEqual(result);
+      expect(fake.createCalls).toHaveLength(1);
+      expect(fake.createCalls[0]!.options.labels).toMatchObject({ "bm.role": "manager", "bm.instructions": MANAGER_HASH });
+      expect(cliFake.runs).toEqual([["/opt/fake/paseo", "agent", "update", "mgr-old", "--label", "bm.replacedBy=created-1", "--json"]]);
+      expect(fake.archived).toEqual([]);
+      expect(fake.store.find((entry) => entry.id === "mgr-old")?.archivedAt).toBeNull();
+      expect(createAlertStore(home).isOpen(alertKey)).toBe(false);
+
+      // A second tap finds the new, current Manager and creates nothing.
+      const again = await replace();
+      expect(again).toMatchObject({ agentId: "created-1", created: false, replacedManagerId: null });
+      expect(fake.createCalls).toHaveLength(1);
+      expect(cliFake.runs).toHaveLength(1);
+    });
+  });
+
+  it("returns a current Manager as it is", async () => {
+    const fake = fakePaseo({ agents: [agent({ id: "mgr-1", labels: { "bm.role": "manager", "bm.modeSet": "x", "bm.instructions": MANAGER_HASH } })] });
+    const cliFake = fakeCli();
+    const result = await ensureManager({ workspaceId: WS, replaceOutdated: true }, { ...deps(fake.paseo), cli: cliFake.cli });
+    expect(result).toMatchObject({ agentId: "mgr-1", created: false, replacedManagerId: null });
+    expect(fake.createCalls).toEqual([]);
+    expect(cliFake.runs).toEqual([]);
+  });
+
+  it("without replaceOutdated, an outdated Manager is still opened, not replaced", async () => {
+    const fake = fakePaseo({ agents: [outdated()] });
+    const result = await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), cli: fakeCli().cli });
+    expect(result).toMatchObject({ agentId: "mgr-old", created: false, replacedManagerId: null });
+    expect(fake.createCalls).toEqual([]);
+  });
+
+  it("a failed replacedBy label costs one log line; the new Manager is still returned", async () => {
+    const fake = fakePaseo({ agents: [outdated()] });
+    const log = vi.fn();
+    const result = await ensureManager(
+      { workspaceId: WS, replaceOutdated: true },
+      { ...deps(fake.paseo), cli: fakeCli({ code: 1, output: "Error: busy\n", timedOut: false }).cli, log },
+    );
+    expect(result).toMatchObject({ agentId: "created-1", created: true, replacedManagerId: "mgr-old" });
+    expect(log.mock.calls.map((call) => call[0]).filter((line) => line.includes("replaces"))).toEqual([
+      "[paseo-bm] Manager created-1 replaces mgr-old, but mgr-old could not be marked as replaced: `paseo agent update` exited with 1: Error: busy",
+    ]);
+    expect(fake.archived).toEqual([]);
+  });
+
+  it("with Paseo's agent tools off, creates nothing and leaves the old Manager as it is", async () => {
+    const fake = fakePaseo({ agents: [outdated()], injectIntoAgents: false });
+    const cliFake = fakeCli();
+    await expect(
+      ensureManager({ workspaceId: WS, replaceOutdated: true }, { ...deps(fake.paseo), cli: cliFake.cli }),
+    ).rejects.toThrow(AGENT_TOOLS_OFF_MESSAGE);
+    expect(fake.createCalls).toEqual([]);
+    expect(cliFake.runs).toEqual([]);
+  });
+});
+
 describe("createManager — the one path that creates a Manager (delta 20260921 §4.5.2)", () => {
   it("creates a replacement like manager.ensure creates a Manager, plus its own labels and first message", async () => {
     const fake = fakePaseo();
@@ -993,7 +1113,7 @@ describe("createManager — the one path that creates a Manager (delta 20260921 
         options: {
           config: { provider: "bm-manager-fallback-1/gpt-5.6-sol", modeId: "full-access", systemPrompt: managerMd },
           title: "Beads Manager",
-          labels: { "bm.role": "manager", "bm.version": PLUGIN_VERSION, "bm.modeSet": "full-access", "bm.replaces": "mgr-old" },
+          labels: { "bm.role": "manager", "bm.version": PLUGIN_VERSION, "bm.instructions": MANAGER_HASH, "bm.modeSet": "full-access", "bm.replaces": "mgr-old" },
           prompt: "BM-HANDOVER\nrole: manager",
         },
       },

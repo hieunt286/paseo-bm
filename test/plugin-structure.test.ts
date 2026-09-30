@@ -113,6 +113,7 @@ describe("payload layout", () => {
     "server/manager-instructions.ts",
     "server/worker-instructions.ts",
     "server/reviewer-instructions.ts",
+    "server/orchestrator-instructions.ts",
     "server/role-hook.ts",
     "client",
     "server",
@@ -199,9 +200,10 @@ describe("role instruction files", () => {
   const roleFiles = ["manager.md", "worker.md", "reviewer.md"];
   // Short files with the hard rules first (owner feedback, 2026-09-16).
   const requiredHeadings = ["## RULES", "## Stop"];
-  // manager.md carries its stop handling inside the section that tells the user
-  // what happens at each Worker phase (delta 20260917c §4.5).
-  const STOP_ALIASES = ["## When to stop and report", "## Talking to the user"];
+  // manager.md carries its stop handling inside the section that follows each
+  // Worker phase (delta 20260917c §4.5; "## Following a request" since the
+  // rewrite of autonomy design §A.11).
+  const STOP_ALIASES = ["## When to stop and report", "## Talking to the user", "## Following a request"];
 
   it.each(roleFiles)("roles/%s exists", (file) => {
     expect(exists(join("roles", file))).toBe(true);

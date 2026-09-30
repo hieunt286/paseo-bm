@@ -8,6 +8,10 @@ import {
   type ScanPaseo,
 } from "../plugin/server/agent-labels";
 import type { CliOutcome, PaseoCliDeps } from "../plugin/server/paseo-cli";
+import { currentInstructionsHash, instructionsHashOf } from "../plugin/server/instructions-label";
+import { MANAGER_INSTRUCTIONS } from "../plugin/server/manager-instructions";
+import { REVIEWER_INSTRUCTIONS } from "../plugin/server/reviewer-instructions";
+import { ORCHESTRATOR_INSTRUCTIONS_HASH } from "../plugin/server/orchestrator-agent";
 
 /**
  * Labelling a bm-* agent created without its `bm.role` label (delta 20260918g
@@ -82,6 +86,12 @@ describe("createAgentLabeller().labelAgent", () => {
     expect(runs).toEqual([["/opt/fake/paseo", "agent", "update", "w1", "--label", "bm.role=worker", "--json"]]);
   });
 
+  it("gives an Orchestrator only its role", async () => {
+    const { labeller, paseo, runs } = setup({ o1: { labels: {}, currentModeId: "default" } });
+    expect(await labeller.labelAgent("o1", "bm-orchestrator/claude-opus-5", paseo)).toBe("labelled");
+    expect(runs).toEqual([["/opt/fake/paseo", "agent", "update", "o1", "--label", "bm.role=orchestrator", "--json"]]);
+  });
+
   it("runs nothing for an agent that already has a valid bm.role", async () => {
     const { labeller, paseo, runs } = setup({ w1: { labels: { "bm.role": "worker", "bm.requestId": "req-20260918T070348Z" } } });
     expect(await labeller.labelAgent("w1", "bm-worker/claude-opus-5", paseo)).toBe("already-labelled");
@@ -118,6 +128,80 @@ describe("createAgentLabeller().labelAgent", () => {
     const outcomes = await Promise.all([labeller.labelAgent(ID, "bm-manager", paseo), labeller.labelAgent(ID, "bm-manager", paseo)]);
     expect(outcomes.sort()).toEqual(["already-handled", "labelled"]);
     expect(runs).toHaveLength(1);
+  });
+});
+
+describe("bm.instructions on a new agent (autonomy design §A.11, PRD §11 rule 3)", () => {
+  it("is the first 12 hex digits of the SHA-256 of the role text, one per role, the Orchestrator's included", () => {
+    expect(currentInstructionsHash("manager")).toBe(instructionsHashOf(MANAGER_INSTRUCTIONS));
+    expect(currentInstructionsHash("manager")).toMatch(/^[0-9a-f]{12}$/);
+    expect(currentInstructionsHash("orchestrator")).toBe(ORCHESTRATOR_INSTRUCTIONS_HASH);
+    const all = (["manager", "worker", "reviewer", "orchestrator"] as const).map((role) => currentInstructionsHash(role));
+    expect(new Set(all).size).toBe(4);
+  });
+
+  it("an unlabelled new Manager gets its role, its mode and its instructions hash in one command", async () => {
+    const { labeller, paseo, runs, log } = setup({ [ID]: { labels: {}, runtimeInfo: { modeId: "bypassPermissions" } } });
+    expect(await labeller.labelAgent(ID, "bm-manager/claude-opus-5", paseo, { created: true })).toBe("labelled");
+    expect(runs).toEqual([
+      [
+        "/opt/fake/paseo", "agent", "update", ID,
+        "--label", "bm.role=manager",
+        "--label", "bm.modeSet=bypassPermissions",
+        "--label", `bm.instructions=${currentInstructionsHash("manager")}`,
+        "--json",
+      ],
+    ]);
+    expect(log).toHaveBeenCalledTimes(1);
+  });
+
+  it("a labelled new Worker gets only the hash, and says nothing", async () => {
+    const { labeller, paseo, runs, log } = setup({ w1: { labels: { "bm.role": "worker", "paseo.parent-agent-id": "m1" } } });
+    expect(await labeller.labelAgent("w1", "bm-worker", paseo, { created: true })).toBe("labelled");
+    expect(runs).toEqual([["/opt/fake/paseo", "agent", "update", "w1", "--label", `bm.instructions=${currentInstructionsHash("worker")}`, "--json"]]);
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it("a fallback Reviewer is stamped with the Reviewer's hash", async () => {
+    const { labeller, paseo, runs } = setup({ r1: { labels: { "bm.role": "reviewer" } } });
+    await labeller.labelAgent("r1", "bm-reviewer-fallback-1/gpt-5.6-sol", paseo, { created: true });
+    expect(runs[0]).toContain(`bm.instructions=${currentInstructionsHash("reviewer")}`);
+  });
+
+  it("runs nothing when the agent already carries this build's hash", async () => {
+    const { labeller, paseo, runs } = setup({
+      m1: { labels: { "bm.role": "manager", "bm.instructions": currentInstructionsHash("manager") } },
+    });
+    expect(await labeller.labelAgent("m1", "bm-manager", paseo, { created: true })).toBe("already-labelled");
+    expect(runs).toEqual([]);
+  });
+
+  it("does not stamp an agent whose system prompt lacks this build's role text", async () => {
+    const { labeller, paseo, runs, log } = setup({
+      r1: { labels: { "bm.role": "reviewer" }, persistence: { metadata: { systemPrompt: "some other prompt" } } },
+      r2: { labels: { "bm.role": "reviewer" }, persistence: { metadata: { systemPrompt: `${REVIEWER_INSTRUCTIONS}\n\n## Runtime facts\n- x` } } },
+    });
+    expect(await labeller.labelAgent("r1", "bm-reviewer", paseo, { created: true })).toBe("already-labelled");
+    expect(log.mock.calls[0]![0]).toBe("[paseo-bm] r1 was created without this build's reviewer instructions, so it is not marked as current.");
+    expect(await labeller.labelAgent("r2", "bm-reviewer", paseo, { created: true })).toBe("labelled");
+    expect(runs).toEqual([["/opt/fake/paseo", "agent", "update", "r2", "--label", `bm.instructions=${currentInstructionsHash("reviewer")}`, "--json"]]);
+  });
+
+  it("without created (the scan), an older agent is never stamped", async () => {
+    const { labeller, paseo, runs } = setup({ w1: { labels: {} } });
+    await labeller.labelAgent("w1", "bm-worker", paseo);
+    expect(runs).toEqual([["/opt/fake/paseo", "agent", "update", "w1", "--label", "bm.role=worker", "--json"]]);
+  });
+
+  it("a new agent the scan reached first is still stamped once by agent.created", async () => {
+    const { labeller, paseo, runs } = setup({ w1: { labels: {} } });
+    expect(await labeller.labelAgent("w1", "bm-worker", paseo)).toBe("labelled");
+    expect(await labeller.labelAgent("w1", "bm-worker", paseo, { created: true })).toBe("labelled");
+    expect(await labeller.labelAgent("w1", "bm-worker", paseo, { created: true })).toBe("already-handled");
+    expect(runs).toEqual([
+      ["/opt/fake/paseo", "agent", "update", "w1", "--label", "bm.role=worker", "--json"],
+      ["/opt/fake/paseo", "agent", "update", "w1", "--label", `bm.instructions=${currentInstructionsHash("worker")}`, "--json"],
+    ]);
   });
 });
 
@@ -199,9 +283,11 @@ describe("the once-per-run label scan (owner decision Q6 a, design §4.5 errata)
     await labeller.scanOnce(paseo);
 
     expect(lists).toHaveLength(1);
+    // The scan never stamps bm.instructions; agent.created (w1 here) does, once.
     expect(cliFake.runs).toEqual([
       ["/opt/fake/paseo", "agent", "update", "m-plain", "--label", "bm.role=manager", "--label", "bm.modeSet=bypassPermissions", "--json"],
       ["/opt/fake/paseo", "agent", "update", "r-plain", "--label", "bm.role=reviewer", "--json"],
+      ["/opt/fake/paseo", "agent", "update", "w1", "--label", `bm.instructions=${currentInstructionsHash("worker")}`, "--json"],
     ]);
   });
 

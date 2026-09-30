@@ -6,7 +6,7 @@
 | Date | 2026-09-15 |
 | Owner | hieu.nt10 |
 | Related | [PRD REQ-027, REQ-031, REQ-032](../product/paseo-bm-prd.md#6-functional-requirements) · [ADR-004](ADR-004-paseo-config-mutation.md) (scope expanded) · [ADR-005](ADR-005-manager-as-agent.md) · [Technical Design](../design/paseo-bm.md) |
-| Amended by | [ADR-008](ADR-008-role-settings-written-by-plugin.md), decisions 1 and 5 (Accepted 2026-09-22) · [ADR-012](ADR-012-plugin-is-the-product.md) (2026-09-25), decisions 1, 4, 6, 7, 8: the plugin (not the installer) creates missing aliases and profiles with defaults, without asking; granting Paseo tools to agents is a separate button with a warning on Setup, not combined with enabling the plugin; the role instructions are embedded in the package, without hashes; removal is through the "Remove paseo-bm's settings" button; the previous state of `injectIntoAgents` is recorded in `ui/setup-state.json` as a boolean |
+| Amended by | [ADR-008](ADR-008-role-settings-written-by-plugin.md), decisions 1 and 5 (Accepted 2026-09-22) · [ADR-012](ADR-012-plugin-is-the-product.md) (2026-09-25), decisions 1, 4, 6, 7, 8: the plugin (not the installer) creates missing aliases and profiles with defaults, without asking; granting Paseo tools to agents is a separate button with a warning on Setup, not combined with enabling the plugin; the role instructions are embedded in the package, without hashes; removal is through the "Remove paseo-bm's settings" button; the previous state of `injectIntoAgents` is recorded in `ui/setup-state.json` as a boolean · [ADR-020](ADR-020-paseo-tools-policy-per-role.md) supersedes decision 9 (2026-09-29) |
 
 ## Context
 

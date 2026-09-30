@@ -1,8 +1,13 @@
 /**
- * The Beads screen (design delta 20260916-beads-screen): five overview
- * sections, a filterable bead list, and a bead detail with three hand-off
- * actions. Every action is confirmed first and goes to the workspace's Beads
- * Manager; this screen never writes the bead store.
+ * The Beads screen (design delta 20260916-beads-screen; Work → Beads since the
+ * experience concept §4.2): the board first — In progress · Ready · Blocked,
+ * Closed behind the eye and hidden by default, the counts in the column
+ * headers — with the filters and the sort folded behind one button, and a bead
+ * detail with three hand-off actions. Every action is confirmed first and goes
+ * to the workspace's Beads Manager; this screen never writes the bead store.
+ *
+ * The overview figures (status, progress, by type, by priority, time) moved to
+ * Insights: `BeadsOverviewSection` draws them from `beadsOverview`.
  *
  * Client rules: React Native primitives only, colours from `theme.colors`, no
  * Node import, no `server/` import.
@@ -29,6 +34,7 @@ import {
   beadResultKey,
   beadsOverview,
   closedBeadsVisibility,
+  type BeadsOverview,
   doneText,
   kanbanColumns,
   kanbanLayout,
@@ -283,6 +289,31 @@ export function BeadDetailPanel({
   );
 }
 
+/**
+ * The overview figures of a workspace's beads — status, progress (epics left
+ * out), by type, by priority, time — for Insights (experience concept §4.3).
+ * Hook-free: the caller reads `beads.list` and builds `beadsOverview`.
+ */
+export function BeadsOverviewSection({ overview, styles }: { overview: BeadsOverview; styles: Styles }) {
+  return (
+    <>
+      <StatCards cards={overview.status} styles={styles} />
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Progress</Text>
+        <View style={styles.barTrack}>
+          <View style={[styles.barFill, { width: `${Math.round(overview.progress.share * 100)}%` }]} />
+        </View>
+        <Text style={styles.body}>{overview.progress.label}</Text>
+      </View>
+      <View style={styles.cards}>
+        <BarChart title="By type" bars={overview.byType} styles={styles} labelWidth={70} />
+        <BarChart title="By priority" bars={overview.byPriority} styles={styles} labelWidth={70} />
+      </View>
+      <StatCards cards={overview.timing} styles={styles} />
+    </>
+  );
+}
+
 export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceLabel, onBack, backLabel, status }: WorkspaceScreenProps) {
   const styles = useMemo(() => dashboardStyles(theme, layout.compact), [theme, layout.compact]);
   const listBeads = useRpc(beadsListRpc);
@@ -291,6 +322,8 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
   const [sortKey, setSortKey] = useState<SortKey>("updated");
   const [descending, setDescending] = useState(true);
   const [showLabels, setShowLabels] = useState(false);
+  // The filters and the sort sit behind one button, so the board comes first.
+  const [showFilters, setShowFilters] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(new Set());
   // The board's own two pieces of state: how wide the list area measured, and
   // which column a narrow screen is showing.
@@ -304,10 +337,12 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
   const rows = beads.data?.beads ?? [];
   const facets = useMemo(() => facetsOf(rows, filter), [rows, filter]);
   const shown = useMemo(() => sortBeads(filterBeads(rows, filter), sortKey, descending), [rows, filter, sortKey, descending]);
-  // Closed beads are shown by default; the eye button hides them for the rest of the app session (REQ-069c).
+  // Closed beads are hidden by default; the eye button shows them for the rest of the app session (REQ-069c).
   const showClosed = useSyncExternalStore(closedBeadsVisibility.subscribe, closedBeadsVisibility.get, closedBeadsVisibility.get);
   const board = useMemo(() => kanbanColumns(shown, { showClosed }), [shown, showClosed]);
   const active = activeFilters(filter);
+  // How many filters are on, the search included: said on the folded Filter button.
+  const filtersOn = active.length + (filter.text.trim() === "" ? 0 : 1);
   const overview = beads.data === undefined ? null : beadsOverview(rows, beads.data.stats, new Date());
   const shape = kanbanLayout(boardWidth, layout.compact, board.columns.length);
   const bucket = visibleKanbanBucket(board.columns, openBucket);
@@ -331,148 +366,31 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
                 {done.text}
               </Text>
             )}
-            <Pressable accessibilityRole="button" onPress={() => void beads.refetch()} style={styles.secondaryButton}>
+            <Pressable accessibilityRole="button" accessibilityLabel="Read the beads again" onPress={() => void beads.refetch()} style={styles.secondaryButton}>
               <Text style={styles.secondaryButtonText}>Refresh</Text>
             </Pressable>
           </>
         }
       />
 
-      {beads.data === undefined ? null : (
-        <Text style={styles.body} selectable>{`Read from ${beads.data.stats.source}`}</Text>
-      )}
       {beads.isPending ? <ActivityIndicator color={styles.spinner.color} /> : null}
       {beads.isError ? (
         <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{errorMessageOf(beads.error)}</Text>
       ) : null}
 
-      {overview === null ? null : (
-        <>
-          {/* 1. Status */}
-          <StatCards cards={overview.status} styles={styles} />
-
-          {/* 2. Progress */}
-          <View style={styles.card}>
-            <Text style={styles.sectionTitle}>Progress</Text>
-            <View style={styles.barTrack}>
-              <View style={[styles.barFill, { width: `${Math.round(overview.progress.share * 100)}%` }]} />
-            </View>
-            <Text style={styles.body}>{overview.progress.label}</Text>
-          </View>
-
-          <View style={styles.cards}>
-            <BarChart title="By type" bars={overview.byType} styles={styles} labelWidth={70} />
-            <BarChart title="By priority" bars={overview.byPriority} styles={styles} labelWidth={70} />
-          </View>
-
-          {/* 5. Time */}
-          <StatCards cards={overview.timing} styles={styles} />
-        </>
-      )}
-
-      {/* Filters */}
-      <View style={[styles.card, { gap: 8 }]}>
-        <TextInput
-          value={filter.text}
-          onChangeText={(text) => setFilter({ ...filter, text })}
-          placeholder="Search id or title"
-          placeholderTextColor={theme.colors.foregroundMuted}
-          style={[styles.body, { borderWidth: 1, borderColor: theme.colors.border, borderRadius: 8, padding: 8 }]}
-        />
-        {active.length > 0 ? (
-          <View style={styles.chipRow}>
-            {active.map((entry) => (
-              <Chip
-                key={`${entry.facet}:${entry.value}`}
-                badge={{ text: `${facetText(entry.value)} ✕`, tone: "info" }}
-                selected
-                onPress={() => setFilter({ ...filter, [entry.facet]: toggle(filter[entry.facet], entry.value) })}
-                styles={styles}
-                theme={theme}
-              />
-            ))}
-            <Pressable accessibilityRole="button" onPress={() => setFilter(EMPTY_FILTER)}>
-              {/* Removing filters loses nothing, so it is not painted like a danger. */}
-              <Text style={[styles.badge, { color: toneColor(theme, "plain"), paddingVertical: 2 }]}>Clear all</Text>
-            </Pressable>
-          </View>
-        ) : null}
-        <FacetRow
-          title="Status"
-          values={facets.statuses}
-          selected={filter.statuses}
-          onToggle={(value) => setFilter({ ...filter, statuses: toggle(filter.statuses, value) })}
-          styles={styles}
-          theme={theme}
-        />
-        <FacetRow
-          title="Type"
-          values={facets.types}
-          selected={filter.types}
-          onToggle={(value) => setFilter({ ...filter, types: toggle(filter.types, value) })}
-          styles={styles}
-          theme={theme}
-        />
-        <FacetRow
-          title="Priority"
-          values={facets.priorities}
-          selected={filter.priorities}
-          onToggle={(value) => setFilter({ ...filter, priorities: toggle(filter.priorities, value) })}
-          styles={styles}
-          theme={theme}
-        />
-        {facets.labelGroups.length === 0 ? null : (
-          <Pressable accessibilityRole="button" accessibilityState={{ expanded: showLabels }} onPress={() => setShowLabels(!showLabels)}>
-            <Text style={styles.body}>
-              {`${showLabels ? "▾" : "▸"} Labels · ${facets.labelGroups.map((group) => `${group.category}${group.selected > 0 ? ` (${group.selected})` : ""}`).join(", ")}`}
-            </Text>
-          </Pressable>
-        )}
-        {showLabels
-          ? facets.labelGroups.map((group) => (
-              <FacetRow
-                key={group.category}
-                title={group.category}
-                values={group.values}
-                selected={filter.labels}
-                onToggle={(value) => setFilter({ ...filter, labels: toggle(filter.labels, value) })}
-                styles={styles}
-                theme={theme}
-                expanded={expandedGroups.has(group.category)}
-                onExpand={() => setExpandedGroups(toggle(expandedGroups, group.category))}
-              />
-            ))
-          : null}
-      </View>
-
-      {/* Sort */}
-      <View style={[styles.chipRow, { alignItems: "center" }]}>
-        <Text style={styles.body}>Sort</Text>
-        {SORT_OPTIONS.map((option) => {
-          const on = option.key === sortKey;
-          return (
-            <Chip
-              key={option.key}
-              badge={{ text: on ? `${option.label} ${descending ? "↓" : "↑"}` : option.label, tone: on ? "info" : "muted" }}
-              selected={on}
-              onPress={() => {
-                if (on) setDescending(!descending);
-                else {
-                  setSortKey(option.key);
-                  setDescending(true);
-                }
-              }}
-              styles={styles}
-              theme={theme}
-            />
-          );
-        })}
-      </View>
-
-      {/* Board: one column per status, closed beads behind the eye
+      {/* Board header: the count, the filters, and closed beads behind the eye
           (delta 20260925 §3.1; delta 20260918e §4.4 for the eye) */}
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+      <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
         <Text style={[styles.sectionTitle, { flex: 1 }]}>{`${board.visible} of ${rows.length} beads`}</Text>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`${showFilters ? "Hide" : "Show"} the filters and the sort${filtersOn > 0 ? `, ${filtersOn} on` : ""}`}
+          accessibilityState={{ expanded: showFilters }}
+          onPress={() => setShowFilters(!showFilters)}
+          style={styles.secondaryButton}
+        >
+          <Text style={styles.secondaryButtonText}>{`Filter${filtersOn > 0 ? ` (${filtersOn})` : ""} ${showFilters ? "▾" : "▸"}`}</Text>
+        </Pressable>
         <Pressable
           accessibilityRole="button"
           accessibilityState={{ selected: showClosed }}
@@ -484,6 +402,112 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
           <Text style={styles.secondaryButtonText}>{`Closed ${board.closed}`}</Text>
         </Pressable>
       </View>
+
+      {/* The filters in use stay in sight while the panel is folded. */}
+      {active.length > 0 ? (
+        <View style={styles.chipRow}>
+          {active.map((entry) => (
+            <Chip
+              key={`${entry.facet}:${entry.value}`}
+              badge={{ text: `${facetText(entry.value)} ✕`, tone: "info" }}
+              selected
+              onPress={() => setFilter({ ...filter, [entry.facet]: toggle(filter[entry.facet], entry.value) })}
+              styles={styles}
+              theme={theme}
+            />
+          ))}
+          <Pressable accessibilityRole="button" accessibilityLabel="Clear all filters" onPress={() => setFilter(EMPTY_FILTER)}>
+            {/* Removing filters loses nothing, so it is not painted like a danger. */}
+            <Text style={[styles.badge, { color: toneColor(theme, "plain"), paddingVertical: 2 }]}>Clear all</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
+      {/* Filters and sort, folded behind the Filter button */}
+      {!showFilters ? null : (
+        <View style={{ gap: 8 }}>
+          <View style={[styles.card, { gap: 8 }]}>
+            <TextInput
+              value={filter.text}
+              onChangeText={(text) => setFilter({ ...filter, text })}
+              placeholder="Search id or title"
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={[styles.body, { borderWidth: 1, borderColor: theme.colors.border, borderRadius: 8, padding: 8 }]}
+            />
+            <FacetRow
+              title="Status"
+              values={facets.statuses}
+              selected={filter.statuses}
+              onToggle={(value) => setFilter({ ...filter, statuses: toggle(filter.statuses, value) })}
+              styles={styles}
+              theme={theme}
+            />
+            <FacetRow
+              title="Type"
+              values={facets.types}
+              selected={filter.types}
+              onToggle={(value) => setFilter({ ...filter, types: toggle(filter.types, value) })}
+              styles={styles}
+              theme={theme}
+            />
+            <FacetRow
+              title="Priority"
+              values={facets.priorities}
+              selected={filter.priorities}
+              onToggle={(value) => setFilter({ ...filter, priorities: toggle(filter.priorities, value) })}
+              styles={styles}
+              theme={theme}
+            />
+            {facets.labelGroups.length === 0 ? null : (
+              <Pressable accessibilityRole="button" accessibilityState={{ expanded: showLabels }} onPress={() => setShowLabels(!showLabels)}>
+                <Text style={styles.body}>
+                  {`${showLabels ? "▾" : "▸"} Labels · ${facets.labelGroups.map((group) => `${group.category}${group.selected > 0 ? ` (${group.selected})` : ""}`).join(", ")}`}
+                </Text>
+              </Pressable>
+            )}
+            {showLabels
+              ? facets.labelGroups.map((group) => (
+                  <FacetRow
+                    key={group.category}
+                    title={group.category}
+                    values={group.values}
+                    selected={filter.labels}
+                    onToggle={(value) => setFilter({ ...filter, labels: toggle(filter.labels, value) })}
+                    styles={styles}
+                    theme={theme}
+                    expanded={expandedGroups.has(group.category)}
+                    onExpand={() => setExpandedGroups(toggle(expandedGroups, group.category))}
+                  />
+                ))
+              : null}
+          </View>
+
+          {/* Sort */}
+          <View style={[styles.chipRow, { alignItems: "center" }]}>
+            <Text style={styles.body}>Sort</Text>
+            {SORT_OPTIONS.map((option) => {
+              const on = option.key === sortKey;
+              return (
+                <Chip
+                  key={option.key}
+                  badge={{ text: on ? `${option.label} ${descending ? "↓" : "↑"}` : option.label, tone: on ? "info" : "muted" }}
+                  selected={on}
+                  onPress={() => {
+                    if (on) setDescending(!descending);
+                    else {
+                      setSortKey(option.key);
+                      setDescending(true);
+                    }
+                  }}
+                  styles={styles}
+                  theme={theme}
+                />
+              );
+            })}
+          </View>
+        </View>
+      )}
+
       {beads.data !== undefined && rows.length === 0 ? (
         <Text style={styles.body}>This workspace has no beads yet.</Text>
       ) : null}
@@ -509,6 +533,9 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
           styles={styles}
         />
       </View>
+      {beads.data === undefined ? null : (
+        <Text style={[styles.body, { fontSize: 11 }]} selectable>{`Read from ${beads.data.stats.source}`}</Text>
+      )}
     </ScrollView>
   );
 

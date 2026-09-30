@@ -14,7 +14,7 @@
 import { fallbackAliasOf } from "../shared/fallback";
 import { providerId } from "./provider-id";
 
-export type BmRole = "manager" | "worker" | "reviewer";
+export type BmRole = "manager" | "worker" | "reviewer" | "orchestrator";
 
 /** The role, and whether it came from the `bm.role` label (true) or only from the provider (false). */
 export interface RoleFact {
@@ -26,17 +26,19 @@ export interface RoleFact {
 export const ROLE_LABEL = "bm.role";
 
 /**
- * The three main paseo-bm provider aliases and the role each one runs. A
+ * The four main paseo-bm provider aliases and the role each one runs. A
  * fallback alias `bm-<role>-fallback-<n>` runs the role in its name
- * (`roleOfProvider`, delta 20260921 §4.4.1); it is not listed here.
+ * (`roleOfProvider`, delta 20260921 §4.4.1); it is not listed here, and the
+ * Orchestrator has none (orchestrator design §3.1).
  */
 export const ROLE_BY_PROVIDER: Readonly<Record<string, BmRole>> = {
   "bm-manager": "manager",
   "bm-worker": "worker",
   "bm-reviewer": "reviewer",
+  "bm-orchestrator": "orchestrator",
 };
 
-const ROLES: ReadonlySet<string> = new Set(["manager", "worker", "reviewer"]);
+const ROLES: ReadonlySet<string> = new Set(["manager", "worker", "reviewer", "orchestrator"]);
 
 /**
  * The role a provider selection runs, or null: `bm-worker` and

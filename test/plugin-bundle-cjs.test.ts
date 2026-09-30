@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { rolePaseoToolsPolicy } from "../plugin/server/setup-roles";
 
 // The entry resolves the install home from $HOME when Paseo's config names no
 // plugin path; point it at an empty directory so this machine's real
@@ -155,14 +156,16 @@ function fakePaseo() {
           config: {
             providers: {
               claude: {},
-              "bm-manager": { extends: "claude", label: "Beads Manager", paseoTools: { enabled: true } },
-              "bm-worker": { extends: "codex", label: "Beads Worker", paseoTools: { enabled: true } },
-              "bm-reviewer": { extends: "claude", label: "Beads Reviewer" },
+              "bm-manager": { extends: "claude", label: "Beads Manager", paseoTools: rolePaseoToolsPolicy("manager") },
+              "bm-worker": { extends: "codex", label: "Beads Worker", paseoTools: rolePaseoToolsPolicy("worker") },
+              "bm-reviewer": { extends: "claude", label: "Beads Reviewer", paseoTools: rolePaseoToolsPolicy("reviewer") },
+              "bm-orchestrator": { extends: "claude", label: "Beads Orchestrator", paseoTools: rolePaseoToolsPolicy("orchestrator") },
             },
             agentProfiles: [
               { id: "bm-manager", name: "Beads Manager", provider: "bm-manager", model: "opus" },
               { id: "bm-worker", name: "Beads Worker", provider: "bm-worker", model: "gpt-5.6-sol" },
               { id: "bm-reviewer", name: "Beads Reviewer", provider: "bm-reviewer", model: "sonnet" },
+              { id: "bm-orchestrator", name: "Beads Orchestrator", provider: "bm-orchestrator", model: "sonnet" },
             ],
           },
         };
@@ -233,8 +236,6 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
     expect([...handlers.keys()].sort()).toEqual([
       "agents.list",
       "agents.stop-all",
-      "answers.mark",
-      "answers.marks",
       "beads.action",
       "beads.get",
       "beads.list",
@@ -242,10 +243,20 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
       "beads.stats",
       "chat.beads",
       "chat.peers",
-      "chat.waiting",
+      "decisions.answer",
+      "decisions.confirm",
+      "decisions.get",
+      "decisions.list",
       "fallback.act",
       "fallback.incidents",
+      "inbox.alerts",
+      "insights.summary",
       "manager.ensure",
+      "orchestrator.apply-suggestion",
+      "orchestrator.open",
+      "orchestrator.open-preview",
+      "orchestrator.set-autopilot",
+      "orchestrator.state",
       "roles.describe",
       "roles.instructions",
       "roles.options",
@@ -272,16 +283,18 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
     // 20260918g labels a bm-* agent created without bm.role on agent.created,
     // and starts its once-per-run label scan on agent.turn_started too; its
     // BM-FORMAT check runs on agent.turn_ended; delta 20260921 adds the
-    // fallback detection on agent.turn_ended; delta 20260924 adds the
-    // question–answer ledger on agent.turn_ended.
-    expect([...onHooks.keys()].sort()).toEqual(["agent.created", "agent.turn_ended", "agent.turn_started"]);
-    expect(onHooks.get("agent.turn_ended")).toHaveLength(5);
-    expect(onHooks.get("agent.turn_started")).toHaveLength(2);
+    // fallback detection on agent.turn_ended; the outdated-agents pass
+    // (autonomy design §A.11) starts on agent.turn_started and clears on
+    // agent.archived.
+    expect([...onHooks.keys()].sort()).toEqual(["agent.archived", "agent.created", "agent.turn_ended", "agent.turn_started"]);
+    expect(onHooks.get("agent.turn_ended")).toHaveLength(4);
+    expect(onHooks.get("agent.turn_started")).toHaveLength(3);
+    expect(onHooks.get("agent.archived")).toHaveLength(1);
     expect(onHooks.get("agent.created")).toHaveLength(1);
 
     const { paseo, created } = fakePaseo();
     const ensured = await handlers.get("manager.ensure")!({ workspaceId: "ws-1" }, { paseo });
-    expect(ensured).toEqual({ agentId: "created-1", created: true, otherManagerIds: [], modeNotice: null, toolsNotice: null, setupNotice: null });
+    expect(ensured).toEqual({ agentId: "created-1", created: true, otherManagerIds: [], modeNotice: null, toolsNotice: null, setupNotice: null, replacedManagerId: null });
     expect(created).toHaveLength(1);
     // The base, then the Runtime facts: `bm-worker` extends codex here, so the
     // plugin states the Worker's skills (design delta 20260924-instruction-quality
@@ -296,6 +309,7 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
         { role: "manager", provider: "claude", model: "opus", paseoTools: true, instructionsPath: "roles/manager.md" },
         { role: "worker", provider: "codex", model: "gpt-5.6-sol", paseoTools: true, instructionsPath: "roles/worker.md" },
         { role: "reviewer", provider: "claude", model: "sonnet", paseoTools: false, instructionsPath: "roles/reviewer.md" },
+        { role: "orchestrator", provider: "claude", model: "sonnet", paseoTools: false, instructionsPath: "roles/orchestrator.md" },
       ],
     });
 

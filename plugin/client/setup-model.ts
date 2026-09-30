@@ -1,7 +1,8 @@
 /**
- * What the Setup screen says (delta 20260916-setup-screen), and what its
- * Roles & models section shows and saves (delta 20260921 §4.3.1), fallback
- * chains included (§4.4.3), without a renderer.
+ * What Settings says about the machine's set-up — tools, skills, agent tools,
+ * sign-in, data folder, cleanup (from the Setup screen, delta
+ * 20260916-setup-screen) — and what its Roles & models section shows and saves
+ * (delta 20260921 §4.3.1), fallback chains included (§4.4.3), without a renderer.
  *
  * Pure: no React, no React Native, no `server/` import.
  */
@@ -15,13 +16,16 @@ import type {
   RolesSaveFallbackInput,
   RolesSaveSettingsInput,
   RolesSettings,
+  SetupRoleWithOrchestrator,
   SetupStatus,
 } from "../shared/contracts";
 import { MAX_FALLBACK_ENTRIES } from "../shared/fallback";
-import type { Badge, GraphNode } from "./dashboard-model";
+import { rolesCreatedSentence } from "../shared/roles-created";
+import type { Badge, RoleMarkKind } from "./dashboard-model";
 import { errorMessageOf } from "./launch-manager";
 
-export type SetupRole = "manager" | "worker" | "reviewer";
+/** Every role Settings → Agents shows a card for, the Orchestrator included (orchestrator design §3.1). */
+export type SetupRole = SetupRoleWithOrchestrator;
 type Tool = SetupStatus["tools"][number];
 type SkillRow = SetupStatus["skills"]["skills"][number];
 type SkillState = SkillRow["claude"];
@@ -38,26 +42,11 @@ export const SKILL_COLUMNS: ReadonlyArray<{ key: "claude" | "codex" | "pi" | "op
   { key: "opencode", agent: "OpenCode" },
 ];
 
-/**
- * The three sections of the Setup screen, one per configuration the owner named
- * (delta 20260925 §3.3): the beads tools, the agent skills, and everything about
- * the agents themselves. One long scroll was hard to read, so each is a tab.
- */
-export type SetupTab = "tools" | "skills" | "agents";
-
-export const SETUP_TABS: ReadonlyArray<{ key: SetupTab; label: string; hint: string }> = [
-  { key: "tools", label: "Beads tools", hint: "br and bv on the daemon's PATH" },
-  { key: "skills", label: "Agent skills", hint: "the skills each role needs" },
-  { key: "agents", label: "Agents", hint: "models, modes and extra instructions" },
-];
-
-/** Where the screen opens; a reopened surface starts here again. */
-export const DEFAULT_SETUP_TAB: SetupTab = "tools";
-
-export const SETUP_ROLES: ReadonlyArray<{ role: SetupRole; label: string; mark: GraphNode["kind"] }> = [
+export const SETUP_ROLES: ReadonlyArray<{ role: SetupRole; label: string; mark: RoleMarkKind }> = [
   { role: "manager", label: "Manager", mark: "request" },
   { role: "worker", label: "Worker", mark: "worker" },
   { role: "reviewer", label: "Reviewer", mark: "reviewer" },
+  { role: "orchestrator", label: "Orchestrator", mark: "orchestrator" },
 ];
 
 /** Numeric comparison of `0.2.10` / `v0.25.0`; null when either is not a version. */
@@ -110,22 +99,6 @@ export function skillDirsText(dirs: SetupStatus["skills"]["dirs"]): string {
   ].join(" · ");
 }
 
-/** One line at the top: is this machine ready for the Beads agents? */
-export function setupHeadline(status: SetupStatus): Badge {
-  const missingTools = status.tools.filter((tool) => tool.required && tool.path === null).map((tool) => tool.id);
-  const required = status.skills.skills.filter((skill) => skill.required).length;
-  const counts = SKILL_COLUMNS.flatMap(({ key, agent }) => {
-    const missing = status.skills.missingRequired[key];
-    return missing === undefined ? [] : [{ agent, missing }];
-  });
-  const skills = `skills: ${counts.map((count) => `${count.agent} ${required - count.missing}/${required}`).join(", ")}`;
-  if (missingTools.length > 0) {
-    return { text: `Missing ${missingTools.join(" and ")} — the Worker cannot manage beads without it · ${skills}`, tone: "danger" };
-  }
-  const readyForOne = counts.some((count) => count.missing === 0);
-  return { text: `br and bv ready · ${skills}`, tone: readyForOne ? "success" : "warning" };
-}
-
 /**
  * One warning per role whose last new agent had no Paseo tools (delta 20260921
  * §4.2.4, REQ-063 d); nothing for `ok`, `unknown` or an older server.
@@ -141,10 +114,6 @@ export function paseoToolsWarnings(status: SetupStatus): string[] {
       `The last ${name} (${entry.agentId}) runs on ${entry.provider} without Paseo tools, so it cannot create or message other agents. On Pi, install the pi-mcp-adapter extension.`,
     ];
   });
-}
-
-export function extraCounter(length: number, max: number): string {
-  return `${length.toLocaleString("en-US")} / ${max.toLocaleString("en-US")} characters`;
 }
 
 export function installWarning(tool: Tool): string {
@@ -216,15 +185,22 @@ export function rowOptionProviders(settings: RolesSettings): string[] {
 }
 
 export interface RoleRow {
-  role: BmRole;
+  role: SetupRole;
   label: string;
-  mark: GraphNode["kind"];
+  mark: RoleMarkKind;
   setting: RoleSetting;
   text: string;
+  /** The role's fallback chain, drawn under the row; `null`: no fallback block and no "Add fallback" button. */
+  fallback: FallbackSettings | null;
 }
 
-/** The rows of the section, in the order `roles.settings` returned them. */
+/**
+ * The rows of the section, one per role, in the order `roles.settings`
+ * returned them. The Orchestrator's row has no fallback chain (orchestrator
+ * design §3.1), whatever the server sends.
+ */
 export function roleRows(settings: RolesSettings, optionsOf: (provider: string) => RolesOptions | undefined): RoleRow[] {
+  const chains = fallbackBlocks(settings);
   return settings.roles.map((setting) => {
     const known = SETUP_ROLES.find((entry) => entry.role === setting.role);
     const options = setting.baseProvider === null ? undefined : optionsOf(setting.baseProvider);
@@ -234,6 +210,7 @@ export function roleRows(settings: RolesSettings, optionsOf: (provider: string) 
       mark: known?.mark ?? "worker",
       setting,
       text: roleSettingText(setting, options),
+      fallback: chains.find((chain) => chain.role === setting.role) ?? null,
     };
   });
 }
@@ -287,13 +264,14 @@ export function thinkingChoices(model: RoleModelOption | null | undefined): Role
 /**
  * Mode choices of a provider for a role: "Not set" first. None (the field is
  * hidden) for capability `none` or when the provider lists no mode. The
- * Reviewer on a `tiered` provider is never offered a `dangerous` or
- * `planning` mode (§4.3.3).
+ * Reviewer and the Orchestrator on a `tiered` provider are never offered a
+ * `dangerous` or `planning` mode (§4.3.3; orchestrator design §3.1).
  */
-export function modeChoices(role: BmRole, options: RolesOptions | undefined): RoleChoice[] {
+export function modeChoices(role: SetupRole, options: RolesOptions | undefined): RoleChoice[] {
   if (options === undefined || options.capability === "none") return [];
+  const guarded = role === "reviewer" || role === "orchestrator";
   const modes = options.modes.filter((mode) => {
-    if (role !== "reviewer" || options.capability !== "tiered") return true;
+    if (!guarded || options.capability !== "tiered") return true;
     const tier = (mode.colorTier ?? "").toLowerCase();
     return tier !== "dangerous" && tier !== "planning";
   });
@@ -332,7 +310,7 @@ export interface RoleFormView {
  * (`undefined` while it loads or when it failed).
  */
 export function roleFormView(input: {
-  role: BmRole;
+  role: SetupRole;
   setting: RoleSetting;
   available: readonly string[];
   draft: RoleDraft;
@@ -396,7 +374,7 @@ export function draftChanged(setting: RoleSetting, draft: RoleDraft): boolean {
 }
 
 /** The `roles.save-settings` input, or `null` while the draft has no provider or model. */
-export function saveSettingsInput(revision: string, role: BmRole, draft: RoleDraft): RolesSaveSettingsInput | null {
+export function saveSettingsInput(revision: string, role: SetupRole, draft: RoleDraft): RolesSaveSettingsInput | null {
   if (draft.baseProvider === "" || draft.model === null) return null;
   return {
     revision,
@@ -462,12 +440,16 @@ const ROLE_NAMES: Readonly<Record<BmRole, string>> = { manager: "Manager", worke
 /**
  * The chains to show, in role order: one block per role present in
  * `roles.settings.fallback`. The server decides which roles are offered
- * (`FALLBACK_ROLES`), so a later phase enables more blocks without a client change.
+ * (`FALLBACK_ROLES`), so a later phase enables more blocks without a client
+ * change. The Orchestrator never has one (orchestrator design §3.1).
  */
 export function fallbackBlocks(settings: RolesSettings): FallbackSettings[] {
   const chains = settings.fallback;
   if (chains === null || chains === undefined) return [];
-  return SETUP_ROLES.map((entry) => chains[entry.role]).filter((chain): chain is FallbackSettings => chain !== undefined);
+  return SETUP_ROLES.flatMap((entry) => {
+    const chain = entry.role === "orchestrator" ? undefined : chains[entry.role];
+    return chain === undefined ? [] : [chain];
+  });
 }
 
 /** What a chain's block holds while the user edits it. */
@@ -568,29 +550,8 @@ export function entryOfDraft(draft: RoleDraft): FallbackEntryInput | null {
 }
 
 // ---------------------------------------------------------------------------
-// "Set up paseo-bm": the checklist a paseo.cafe install works through
-// (0.4.0, design §7.13; Dashboard design §11.3).
+// Which agent's skills a role's provider needs (Settings → Tools & skills).
 // ---------------------------------------------------------------------------
-
-/** Which of the plugin's own screens a row sends the user to, when it is not a button. */
-export type ChecklistAction =
-  | { kind: "ensure-roles" }
-  | { kind: "grant-agent-tools" }
-  | { kind: "install-skills" }
-  | { kind: "open-tab"; tab: SetupTab }
-  | { kind: "none" };
-
-export interface ChecklistRow {
-  key: "roles" | "agent-tools" | "skills" | "tools" | "sign-in";
-  title: string;
-  /** The one sentence that says what is wrong. */
-  status: string;
-  /** Label of the row's button, or `null` when the row is text only. */
-  button: string | null;
-  action: ChecklistAction;
-  /** A command the user runs themselves, shown with a Copy button. */
-  command: string | null;
-}
 
 /** The label Setup uses for the agent whose skills a provider needs. */
 export function skillAgentOfProvider(provider: string): { key: "claude" | "codex" | "pi" | "opencode"; agent: SkillAgent } | null {
@@ -602,97 +563,6 @@ export function skillAgentOfProvider(provider: string): { key: "claude" | "codex
   };
   const key = byProvider[provider];
   return key === undefined ? null : (SKILL_COLUMNS.find((column) => column.key === key) ?? null);
-}
-
-/** `"manager"` → `"Manager"`, from the one list that names the roles. */
-const roleLabel = (role: string): string => SETUP_ROLES.find((entry) => entry.role === role)?.label ?? role;
-
-/**
- * The rows of the "Set up paseo-bm" card: what is still missing, in the order
- * a user has to do it, and nothing else.
- *
- * An empty list means the card is not shown at all — which is the state almost
- * every user is in, almost all the time. Anything that is merely unknown (a
- * provider whose sign-in could not be read, a skills column the server did not
- * report) produces no row: a checklist that lists things that may well be fine
- * teaches people to ignore it.
- */
-export function setupChecklist(status: SetupStatus, rolesError?: string | null): ChecklistRow[] {
-  const setup = status.setup;
-  if (setup === undefined) return [];
-  const rows: ChecklistRow[] = [];
-
-  if (setup.roles.missing.length > 0) {
-    const names = setup.roles.missing.map(roleLabel).join(", ");
-    const detail = rolesError === undefined || rolesError === null || rolesError === "" ? "" : ` ${rolesError}`;
-    rows.push({
-      key: "roles",
-      title: "Roles",
-      status: `Not created: ${names}.${detail}`,
-      button: "Try again",
-      action: { kind: "ensure-roles" },
-      command: null,
-    });
-  }
-
-  if (setup.agentTools.injectIntoAgents === false) {
-    rows.push({
-      key: "agent-tools",
-      title: "Agent tools",
-      status: "Off — no new Beads Manager starts until you allow them.",
-      button: "Allow agent tools…",
-      action: { kind: "grant-agent-tools" },
-      command: null,
-    });
-  }
-
-  // The skills row follows the WORKER's provider and no other: the Worker is
-  // what runs the skills, so a Reviewer on a provider with none of them
-  // installed is not a reason to interrupt anybody.
-  const workerProvider = setup.logins.find((entry) => entry.roles.includes("worker"))?.provider ?? null;
-  const column = workerProvider === null ? null : skillAgentOfProvider(workerProvider);
-  const missingForWorker = column === null ? undefined : status.skills.missingRequired[column.key];
-  if (column !== null && missingForWorker !== undefined && missingForWorker > 0) {
-    const required = status.skills.skills.filter((skill) => skill.required).length;
-    rows.push({
-      key: "skills",
-      title: "Agent skills",
-      status: `Required skills for the Worker (${column.agent === "Claude" ? "Claude Code" : column.agent}): ${required - missingForWorker}/${required}. The Worker works with lower quality without them.`,
-      button: "Install skills…",
-      action: { kind: "install-skills" },
-      command: null,
-    });
-  }
-
-  const missingTools = status.tools.filter((tool) => (tool.id === "br" || tool.id === "bv") && tool.path === null).map((tool) => tool.id);
-  if (missingTools.length > 0) {
-    rows.push({
-      key: "tools",
-      title: "Beads tools",
-      status: `Missing ${missingTools.join(" and ")} — the Worker cannot manage beads without it`,
-      button: "Open Beads tools",
-      action: { kind: "open-tab", tab: "tools" },
-      command: null,
-    });
-  }
-
-  for (const login of setup.logins) {
-    if (login.state !== "logged-out") continue;
-    const roles = login.roles.map(roleLabel).join(", ");
-    rows.push({
-      key: "sign-in",
-      title: "Sign-in",
-      status:
-        login.loginCommand === null
-          ? `\`${login.provider}\` (used by ${roles}) is not signed in. ${login.guidance ?? ""}`.trimEnd()
-          : `\`${login.provider}\` (used by ${roles}) is not signed in. Sign in with: \`${login.loginCommand}\``,
-      button: null,
-      action: { kind: "none" },
-      command: login.loginCommand,
-    });
-  }
-
-  return rows;
 }
 
 /** The one line that tells a 0.3.x user to move to the npm install, or `null`. */
@@ -728,13 +598,10 @@ export function ensureRolesLine(
       button: "Set up again",
     };
   }
-  if (result.created.length === 0 || result.baseProvider === null || result.model === null) return null;
-  return {
-    tone: "success",
-    text: `paseo-bm created its roles with defaults (${result.baseProvider} · ${result.model}). Change them in Agents.`,
-    dismissable: true,
-    button: null,
-  };
+  // Names only the roles created: a machine updated from 0.4.x gets just the Orchestrator.
+  const text = rolesCreatedSentence(result, "Agents");
+  if (text === null) return null;
+  return { tone: "success", text, dismissable: true, button: null };
 }
 
 /**
@@ -826,8 +693,11 @@ export interface SignInRow {
   command: string | null;
 }
 
+/** `"manager"` → `"Manager"`, from the one list that names the roles. */
+const roleLabel = (role: string): string => SETUP_ROLES.find((entry) => entry.role === role)?.label ?? role;
+
 /**
- * One row per provider the three roles run on.
+ * One row per provider the roles run on.
  *
  * paseo-bm never runs a login command: the row shows what the provider's own
  * tool documents and the user runs it themselves (design §9).
@@ -897,7 +767,6 @@ export function dataHomeLine(status: SetupStatus): DataHomeLines | null {
 
 export const CLEANUP_BUTTON_LABEL = "Remove paseo-bm's settings…";
 export const CLEANUP_BUTTON_ACCESSIBILITY_LABEL = "Remove paseo-bm's roles and settings from Paseo";
-export const CLEANUP_NEXT_LINE = "Now remove the plugin: `paseo plugin remove paseo-bm`";
 export const CLEANUP_NEXT_COMMAND = "paseo plugin remove paseo-bm";
 
 /**
@@ -914,7 +783,7 @@ export function cleanupWarning(status: SetupStatus): string {
       ? ", and turns Paseo's agent tools back off (paseo-bm turned them on)"
       : "";
   return (
-    `This removes every bm-* provider and agent profile from Paseo (the three roles and their fallbacks)${alsoSwitch}. ` +
+    `This removes every bm-* provider and agent profile from Paseo (the four roles and their fallbacks)${alsoSwitch}. ` +
     "Agents already running on these roles will fail on their next turn: archive them first. Skills, br and bv stay."
   );
 }

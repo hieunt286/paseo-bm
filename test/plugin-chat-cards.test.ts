@@ -3,78 +3,81 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ANSWER_MARK_KEY_MAX, isAnswerMarkKey } from "../plugin/server/answer-marks";
+import { allNodes, pressables, renderTree, texts, type RNode } from "./helpers/element-tree";
 import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store";
 import {
-  answeredHow,
-  answeredInLedger,
-  movedOnLine,
-  answerSummary,
-  answeredKey,
-  answerRowText,
-  answersDraft,
+  CHAT_CARD_VERSION,
+  DECISION_LOOKUP_WINDOW_MS,
+  DECISION_POLL_MS,
+  DECISION_UI_IDLE,
+  MAX_BODY_LINES,
+  OWN_WORDS,
+  cardFrameOf,
   chatCardSchema,
+  choiceNeedsConfirmation,
+  decisionCardOf,
+  decisionCardView,
+  decisionLookupOf,
+  decisionPollMs,
+  detailLinesOf,
   drawAsCard,
+  fallbackDecisionSeed,
   fallbackMarkdown,
-  ownerWarning,
-  isAnswered,
-  recommendedPicks,
-  replyControls,
-  sentSummary,
-  showsQuestions,
-  startsOpen,
-  stillWaiting,
-  topicOf,
-  markdownOf,
-  markOf,
-  outlineTone,
-  partiesOf,
-  partyName,
-  questionHeading,
-  quickReplies,
-  replyTarget,
-  replyNote,
-  replyText,
-  senderName,
-  sendReply,
-  statusChip,
-  summaryOf,
-  toChatCard,
-  beadChipsView,
-  visibleBeads,
-  withAnswersBlock,
-  candidateCost,
-  fallbackActError,
-  fallbackCardOfIncident,
-  fallbackCardView,
-  fallbackNoticeCardSchema,
-  listedCostProvider,
   localTimeText,
-  lookupOf,
-  runFallbackAction,
-  waitDeadline,
+  markOf,
+  markdownOf,
+  noticeLine,
+  ownerWarning,
+  partiesOf,
+  actorName,
+  runDecisionAnswer,
+  runDecisionConfirm,
+  toChatCards,
+  type CardFrameView,
   type ChatCard,
-  type FallbackLookup,
+  type DecisionLookup,
+  type DecisionUi,
 } from "../plugin/client/chat-cards";
 import { parseMarkdown } from "../plugin/client/markdown";
-import { answeredRecord, answersVersion, repliedAt, setAnswered, setReplied, subscribeAnswers } from "../plugin/client/answer-state";
-import type { Question } from "../plugin/shared/bm-questions";
-import type { BeadRow } from "../plugin/shared/contracts";
 import { handleChatPeers } from "../plugin/server/chat-rpc";
 import { fallbackNotice } from "../plugin/server/fallback-rpc";
+import { answerNoticeOf } from "../plugin/server/orchestrator-decisions";
 import type { DashboardPaseo } from "../plugin/server/dashboard-rpc";
-import { DashboardError, FALLBACK_MAX_WAIT_MS, TRACE_STORE_SCHEMA_VERSION, type ChatPeer, type FallbackIncident } from "../plugin/shared/contracts";
+import { DashboardError, TRACE_STORE_SCHEMA_VERSION, type ChatPeer, type FallbackIncident } from "../plugin/shared/contracts";
+import { answerDecision, confirmDecision, markNeedsConfirmation, supersedeDecision, withdrawDecision, type Decision } from "../plugin/shared/decisions";
 import { soleWorkerOf } from "../plugin/shared/sole-worker";
 
 /**
- * Chat cards (delta 20260916-chat-cards). Message texts are the shapes
- * measured on the owner's workspace.
+ * Chat cards v2 (autonomy design §A.12, experience concept §5): one frame
+ * for every card, decisions live from the store, and no reply box or other
+ * question UI anywhere. The hook-free pieces (`CardFrame`, `CompactLine`,
+ * `DecisionCardBody`) are expanded with the element-tree helper;
+ * `react-native` and the SDK's icon are named stand-ins.
  */
 
+vi.mock("react-native", () => {
+  const make = (name: string) => Object.assign(() => null, { displayName: name, primitive: true });
+  return { Pressable: make("Pressable"), ScrollView: make("ScrollView"), Text: make("Text"), TextInput: make("TextInput"), View: make("View") };
+});
+vi.mock("@getpaseo/plugin/client/react-native", () => ({ Icon: Object.assign(() => null, { displayName: "Icon", primitive: true }) }));
+
+// The root tsconfig has no `jsx`, so the .tsx modules load through non-literal specifiers.
+const uiPath = "../plugin/client/ui.tsx";
+const cardPath = "../plugin/client/chat-card.tsx";
+const { CardFrame, CompactLine } = (await import(uiPath)) as {
+  CardFrame: (props: Record<string, unknown>) => unknown;
+  CompactLine: (props: Record<string, unknown>) => unknown;
+};
+const { DecisionCardBody } = (await import(cardPath)) as { DecisionCardBody: (props: Record<string, unknown>) => unknown };
+
+const styles = new Proxy({}, { get: (_target, key) => ({ name: String(key) }) });
+const theme = { colors: new Proxy({}, { get: (_target, key) => `#${String(key)}` }) };
+
+const REQ = "req-20260916T062244Z";
 const REPORT = [
   "BM-REPORT",
-  "requestId: req-20260916T062244Z",
-  "phase: blocked",
+  `requestId: ${REQ}`,
+  "phase: beads-done",
   "tier: Large (changed: no)",
   "filesChanged: docs/design/a.md",
   "beadsCreated: cus-a, cus-b",
@@ -83,76 +86,30 @@ const REPORT = [
   "beadsReady: none",
   "reviewFindingsOpen: none",
   "buildAndTests: not run",
-  "blockers: Q1 — keep the old label?",
-  "guardrail: total 3/10",
+  "skillsUsed: feature-workflow",
+  "blockers: waiting for the staging database to come back",
 ].join("\n");
+const QUESTIONS = [
+  "BM-QUESTIONS",
+  `requestId: ${REQ}`,
+  "Q6: Storage — where does the list live?",
+  "- a: the existing table: no migration. (recommended)",
+  "- b: a file on disk: simplest. [effects: push]",
+  "Q7: Sessions — rename the cookie?",
+  "- a: keep it. (recommended)",
+  "- b: rename it.",
+].join("\n");
+const ASKING = `${REPORT.replace("phase: beads-done", "phase: blocked").replace("blockers: waiting for the staging database to come back", "blockers: 2 questions: Q6, Q7 — see BM-QUESTIONS")}\n\n${QUESTIONS}`;
+const FINISHED = `Contact form redesigned and tested.\n\n${REPORT.replace("phase: beads-done", "phase: finished")
+  .replace("blockers: waiting for the staging database to come back", "blockers: none")
+  .replace("buildAndTests: not run", "buildAndTests: npm test — 212 passed")}`;
+const REVIEW = ["Checked the batch.", "", "---", "", "BM-REVIEW", "requestId: req-20260916T081749Z", "batchId: b1", "reviewKind: first", "verdict: pass", "checked: docs/x.md", "findings: none", "notChecked: none"].join("\n");
+const INSTRUCTION = `CONTINUE — \`${REQ}\`\n\n## Decision: apply the 5-line fix to R3\n\nGo ahead.\nThen report.\nAnd stop.`;
+const REVIEW_REQUEST = "You are the Reviewer (read only). requestId: req-20260916T081749Z. batchId: b1 (documents).\n\nRepo: /repo";
 
-const REVIEW = ["Checked the batch.", "", "---", "", "BM-REVIEW", "requestId: req-20260916T081749Z", "batchId: b1", "reviewKind: first", "verdict: pass", "checked: docs/x.md"].join("\n");
-
-const INSTRUCTION = "TIẾP TỤC LÀM VIỆC — `req-20260916T062244Z`\n\n## Quyết định: ÁP BẢN SỬA 5 DÒNG CHO R3\n\nLàm đi.";
-
-const REVIEW_REQUEST = "Bạn là Reviewer (chỉ đọc). requestId: req-20260916T081749Z. batchId: b1 (tài liệu).\n\nRepo: /repo";
-
-describe("which chat items become cards", () => {
-  it("turns a Worker report into a report card", () => {
-    const card = toChatCard({ type: "user_message", text: REPORT }, "complete")!;
-    expect(chatCardSchema.parse(card)).toMatchObject({
-      type: "report",
-      direction: "received",
-      requestId: "req-20260916T062244Z",
-      phase: "blocked",
-      tier: "Large",
-      beads: { created: 2, updated: 0, closed: 1 },
-      blockers: "Q1 — keep the old label?",
-    });
-  });
-
-  it("turns a Manager instruction and a review request into message cards", () => {
-    expect(toChatCard({ type: "user_message", text: INSTRUCTION }, "complete")).toMatchObject({
-      type: "message",
-      requestId: "req-20260916T062244Z",
-      gist: "TIẾP TỤC LÀM VIỆC — req-20260916T062244Z",
-    });
-    expect(toChatCard({ type: "user_message", text: REVIEW_REQUEST }, "complete")).toMatchObject({
-      type: "message",
-      requestId: "req-20260916T081749Z",
-      batchId: "b1",
-    });
-  });
-
-  it("turns a Reviewer's own finished verdict into a sent review card", () => {
-    expect(toChatCard({ type: "assistant_message", text: REVIEW }, "complete")).toMatchObject({
-      type: "review",
-      direction: "sent",
-      verdict: "pass",
-      batchId: "b1",
-    });
-  });
-
-  it("reads a review request that explains the verdict format as a message, not a verdict", () => {
-    // Real Worker prompts paste the block format into every review request.
-    const request = `${REVIEW_REQUEST}\n\nAnswer with:\n\nBM-REVIEW\nrequestId: req-20260916T081749Z\nbatchId: b1\nverdict: approved | changes-required\n`;
-    expect(toChatCard({ type: "user_message", text: request }, "complete")).toMatchObject({ type: "message", verdict: null, batchId: "b1" });
-    const reportFormat = "Report with:\n\nBM-REPORT\nrequestId: <requestId>\nphase: received | documents-done | finished\n\nfor `req-20260916T062244Z`";
-    expect(toChatCard({ type: "user_message", text: reportFormat }, "complete")).toMatchObject({ type: "message", phase: null });
-    expect(toChatCard({ type: "assistant_message", text: reportFormat }, "complete")).toBeUndefined();
-  });
-
-  it("leaves everything else to Paseo", () => {
-    // Typed by the user, even when it names a request.
-    expect(toChatCard({ type: "user_message", text: INSTRUCTION, clientMessageId: "c1" }, "complete")).toBeUndefined();
-    // Another agent's message with nothing of paseo-bm's.
-    expect(toChatCard({ type: "user_message", text: "please summarise the file" }, "complete")).toBeUndefined();
-    // An ordinary answer, even one that names a request.
-    expect(toChatCard({ type: "assistant_message", text: "Worker started on req-20260916T062244Z." }, "complete")).toBeUndefined();
-    // A verdict still streaming.
-    expect(toChatCard({ type: "assistant_message", text: REVIEW }, "streaming")).toBeUndefined();
-    // Other item kinds and empty text.
-    expect(toChatCard({ type: "tool_call", text: REPORT }, "complete")).toBeUndefined();
-    expect(toChatCard({ type: "user_message", text: "  " }, "complete")).toBeUndefined();
-    expect(toChatCard({ type: "user_message" }, "complete")).toBeUndefined();
-  });
-});
+const cards = (text: string, type: "user_message" | "assistant_message" = "user_message", clientMessageId?: string) =>
+  toChatCards({ type, text, ...(clientMessageId === undefined ? {} : { clientMessageId }) }, "complete");
+const card = (text: string, type: "user_message" | "assistant_message" = "user_message") => cards(text, type)![0]!;
 
 const peer = (overrides: Partial<ChatPeer>): ChatPeer => ({
   id: "x",
@@ -162,101 +119,688 @@ const peer = (overrides: Partial<ChatPeer>): ChatPeer => ({
   parentId: null,
   requestId: null,
   batchId: null,
+  labelled: true,
   archived: false,
+  replaced: false,
   ...overrides,
 });
 const manager = peer({ id: "m1", role: "manager", title: "Beads Manager" });
-const worker = peer({ id: "w1", title: "Contact redesign", parentId: "m1", requestId: "req-20260916T062244Z" });
+const worker = peer({ id: "w1", title: "Contact redesign", parentId: "m1", requestId: REQ });
 const otherWorker = peer({ id: "w2", title: "PAKD fix", parentId: "m1", requestId: "req-20260916T081749Z" });
 const reviewer = peer({ id: "r1", role: "reviewer", parentId: "w2", requestId: "req-20260916T081749Z", batchId: "b1" });
-const card = (text: string, type: "user_message" | "assistant_message" = "user_message") => toChatCard({ type, text }, "complete")!;
+
+const AT = new Date("2026-09-16T10:00:00Z");
+const NOW = new Date("2026-09-16T10:12:00Z");
+const frameOf = (c: ChatCard, owner: ChatPeer | null = manager, peers: ChatPeer[] = [worker, otherWorker, reviewer]) => cardFrameOf(c, { owner, peers, at: AT, now: NOW });
+
+describe("which chat items become which cards", () => {
+  it("turns a report that asks questions into one decision card per question", () => {
+    const asked = cards(ASKING)!;
+    expect(asked.map((c) => [c.type, c.decision?.id])).toEqual([
+      ["decision", `q:${REQ}:Q6`],
+      ["decision", `q:${REQ}:Q7`],
+    ]);
+    expect(asked[0]).toMatchObject({
+      direction: "received",
+      requestId: REQ,
+      decision: {
+        asker: "worker",
+        questionId: "Q6",
+        question: "Storage — where does the list live?",
+        options: [
+          { key: "a", label: "the existing table: no migration.", recommended: true },
+          { key: "b", label: "a file on disk: simplest.", recommended: false },
+        ],
+      },
+    });
+    // The whole message stays with each card, for Details.
+    expect(asked[1]!.text).toBe(ASKING);
+  });
+
+  it("turns a report into a progress or finished card, and a finished one that asks into both", () => {
+    expect(card(REPORT)).toMatchObject({ type: "progress", formatIssues: [], report: { phase: "beads-done", tier: "Large", beads: { created: 2, updated: 0, closed: 1 }, filesChanged: 1 } });
+    expect(card(REPORT.replace("phase: beads-done", "phase: received")).type).toBe("progress");
+    // A blocked report that asks nothing is progress too.
+    expect(card(REPORT.replace("phase: beads-done", "phase: blocked")).type).toBe("progress");
+    expect(card(FINISHED)).toMatchObject({ type: "finished", gist: "Contact form redesigned and tested.", report: { checks: "npm test — 212 passed" } });
+    expect(cards(`${FINISHED}\n\n${QUESTIONS}`)!.map((c) => c.type)).toEqual(["finished", "decision", "decision"]);
+    // A questions block about another request asks nothing here.
+    expect(cards(`${REPORT}\n\n${QUESTIONS.replace(`requestId: ${REQ}`, "requestId: req-20260101T000000Z")}`)!.map((c) => c.type)).toEqual(["progress"]);
+  });
+
+  it("turns a review into a verdict card, and a request brief or review request into a brief", () => {
+    expect(card(REVIEW, "assistant_message")).toMatchObject({ type: "verdict", direction: "sent", review: { verdict: "pass", batchId: "b1", blocking: 0 }, formatIssues: [] });
+    expect(card(INSTRUCTION)).toMatchObject({ type: "brief", requestId: REQ, gist: `CONTINUE — ${REQ}` });
+    expect(card(REVIEW_REQUEST)).toMatchObject({ type: "brief", requestId: "req-20260916T081749Z" });
+  });
+
+  it("reads a message that explains the block formats as a brief, not a report or a verdict", () => {
+    const request = `${REVIEW_REQUEST}\n\nAnswer with:\n\nBM-REVIEW\nrequestId: req-20260916T081749Z\nbatchId: b1\nverdict: approved | changes-required\n`;
+    expect(card(request)).toMatchObject({ type: "brief", review: null });
+    const reportFormat = `Report with:\n\nBM-REPORT\nrequestId: <requestId>\nphase: received | documents-done | finished\n\nfor \`${REQ}\``;
+    expect(card(reportFormat)).toMatchObject({ type: "brief", report: null });
+    expect(cards(reportFormat, "assistant_message")).toBeUndefined();
+  });
+
+  it("leaves everything else to Paseo — the owner's typed words above all", () => {
+    expect(cards(INSTRUCTION, "user_message", "c1")).toBeUndefined();
+    expect(cards(ASKING, "user_message", "c1")).toBeUndefined();
+    // What an old card's Reply box sent is the owner's own message now.
+    expect(cards(`Reply from the user about \`${REQ}\`:\n\nBM-ANSWERS\nrequestId: ${REQ}\nQ1: a — keep`, "user_message", "c1")).toBeUndefined();
+    expect(cards("please summarise the file")).toBeUndefined();
+    expect(cards(`Worker started on ${REQ}.`, "assistant_message")).toBeUndefined();
+    expect(toChatCards({ type: "assistant_message", text: REVIEW }, "streaming")).toBeUndefined();
+    expect(toChatCards({ type: "tool_call", text: REPORT }, "complete")).toBeUndefined();
+    expect(cards("  ")).toBeUndefined();
+    expect(toChatCards({ type: "user_message" }, "complete")).toBeUndefined();
+  });
+
+  it("keeps every card JSON and valid for the version 2 renderer", () => {
+    expect(CHAT_CARD_VERSION).toBe(2);
+    for (const c of [...cards(ASKING)!, card(REPORT), card(FINISHED), card(REVIEW, "assistant_message"), card(INSTRUCTION)]) {
+      expect(chatCardSchema.parse(c)).toEqual(c);
+      expect(JSON.parse(JSON.stringify(c))).toEqual(c);
+    }
+  });
+});
+
+describe("the plugin's own notices", () => {
+  const notice = (text: string) => cards(text, "user_message", "sdk-message-id")!;
+  const FORMAT = [
+    `BM-FORMAT requestId: ${REQ}`,
+    "Your last BM-REPORT broke the template:",
+    '- BM-REPORT tier: must be "Small|Medium|Large (changed: no)"',
+  ].join("\n");
+
+  it("are one compact line each, though Paseo stores a clientMessageId on them", () => {
+    const [format] = notice(FORMAT);
+    expect(format).toMatchObject({ type: "notice", requestId: REQ, notice: { marker: "BM-FORMAT", what: "A block broke its template", tone: "warning" } });
+    expect(chatCardSchema.parse(format)).toEqual(format);
+    expect(noticeLine(format!, AT, NOW)).toBe("A block broke its template — Your last BM-REPORT broke the template: · 12 min ago");
+    expect(notice("STOP: The Beads Worker that created you was stopped by the user.")[0]).toMatchObject({ type: "notice", notice: { marker: "STOP", what: "Asked to stop" } });
+    // A message that only quotes a notice is not one.
+    expect(cards(`The plugin said:\n\n${FORMAT}`, "user_message", "c1")).toBeUndefined();
+  });
+
+  it("make the owner's answer to a decision (BM-ANSWER) that decision's card", () => {
+    const answered = ok(answerDecision(orchestratorDecision(), { via: "inbox", optionKey: "go", at: "2026-09-16T10:05:00.000Z" }));
+    const [c] = notice(answerNoticeOf(answered));
+    expect(c).toMatchObject({ type: "decision", requestId: REQ, decision: { id: O_ID, asker: "orchestrator", question: "Push the checkout fix now?" } });
+    expect(chatCardSchema.parse(c)).toEqual(c);
+    // Without a readable decision id it is only a notice line.
+    expect(notice("BM-ANSWER\ndecisionId: nonsense")[0]).toMatchObject({ type: "notice", notice: { marker: "BM-ANSWER" } });
+  });
+
+  it("make a fallback incident (BM-FALLBACK) its decision f:<incidentId>, never the old fallback card", () => {
+    const [c] = notice(fallbackNotice(incident(), () => "claude", "Create the replacement Reviewer."));
+    expect(c).toMatchObject({
+      type: "decision",
+      requestId: "req-20260921T111242Z",
+      decision: { id: "f:fb-3f9a2c1d7e4b", asker: "plugin", question: "The Worker was stopped by its provider plan", options: [] },
+    });
+    expect(chatCardSchema.parse(c)).toEqual(c);
+    expect(fallbackDecisionSeed("fb 1", "worker")).toBeNull();
+    // One that names no usable incident still is the plugin's: a notice line.
+    expect(notice(fallbackNotice(incident(), () => "claude", "Create the replacement Reviewer.").replace("fb-3f9a2c1d7e4b", "fb-nope"))[0]).toMatchObject({ type: "notice", notice: { marker: "BM-FALLBACK" } });
+  });
+});
 
 describe("who sent it and who gets it", () => {
-  it("in the Manager's chat, a report comes from the Worker of that request", () => {
+  it("in the Manager's chat, a report and its questions come from the Worker of that request", () => {
     const { from, to } = partiesOf(card(REPORT), manager, [worker, otherWorker, reviewer]);
     expect(from).toEqual({ role: "worker", id: "w1", title: "Contact redesign" });
     expect(to.id).toBe("m1");
-    expect(partyName(from)).toBe("Worker · Contact redesign");
+    expect(actorName(from)).toBe("Worker · Contact redesign");
+    expect(partiesOf(cards(ASKING)![0]!, manager, [worker]).from.id).toBe("w1");
   });
 
-  it("in a Worker's chat, an instruction comes from its Manager", () => {
+  it("in a Worker's chat, a brief comes from its Manager; in a Reviewer's, from its parent Worker", () => {
     expect(partiesOf(card(INSTRUCTION), worker, [manager, otherWorker]).from.id).toBe("m1");
-  });
-
-  it("in a Reviewer's chat, a request comes from its parent Worker; its verdict goes back there", () => {
     expect(partiesOf(card(REVIEW_REQUEST), reviewer, [manager, worker, otherWorker]).from.id).toBe("w2");
     const sent = partiesOf(card(REVIEW, "assistant_message"), reviewer, [manager, worker, otherWorker]);
     expect(sent.from).toMatchObject({ role: "reviewer", id: "r1" });
     expect(sent.to.id).toBe("w2");
   });
 
-  it("names a role without an id when no single agent fits", () => {
-    const twins = [worker, peer({ id: "w3", requestId: "req-20260916T062244Z" })];
+  it("names a role, never an id, when no single agent fits", () => {
+    const twins = [worker, peer({ id: "w3", requestId: REQ })];
     const { from } = partiesOf(card(REPORT), manager, twins);
     expect(from).toEqual({ role: "worker", id: null, title: null });
-    expect(partyName(from)).toBe("Worker (unknown)");
-    // Not a paseo-bm chat at all.
-    expect(partiesOf(card(INSTRUCTION), null, []).from).toEqual({ role: null, id: null, title: null });
+    expect(actorName(from)).toBe("Worker");
+    expect(actorName({ role: "worker", id: "w3aaaaaaaaaa", title: null })).toBe("Worker");
   });
 
   it("draws a card only in a paseo-bm chat, and a sent block only for the role that writes it", () => {
     expect(drawAsCard(card(REPORT), manager)).toBe(true);
     expect(drawAsCard(card(REPORT), null)).toBe(false);
     expect(drawAsCard(card(REVIEW, "assistant_message"), reviewer)).toBe(true);
-    // A Manager quoting a review is not a Reviewer's verdict.
     expect(drawAsCard(card(REVIEW, "assistant_message"), manager)).toBe(false);
     expect(drawAsCard(card(REPORT, "assistant_message"), worker)).toBe(true);
+    expect(drawAsCard(cards(ASKING, "assistant_message")![0]!, worker)).toBe(true);
+    expect(drawAsCard(cards(ASKING, "assistant_message")![0]!, manager)).toBe(false);
   });
 
   it("maps roles to the graph icons", () => {
-    expect([markOf("manager"), markOf("worker"), markOf("reviewer"), markOf(null)]).toEqual(["request", "worker", "reviewer", null]);
+    expect([markOf("manager"), markOf("worker"), markOf("reviewer"), markOf("orchestrator"), markOf(null)]).toEqual(["request", "worker", "reviewer", "orchestrator", null]);
   });
 });
 
-describe("what the card says", () => {
-  it("colours the status and summarises a report", () => {
-    const report = card(REPORT);
-    expect(statusChip(report)).toEqual({ text: "blocked", tone: "warning" });
-    expect(summaryOf(report)).toBe("Large · beads 2 created, 1 closed · waiting on: Q1 — keep the old label?");
-    expect(statusChip(card(REVIEW, "assistant_message"))).toEqual({ text: "pass", tone: "success" });
-    expect(statusChip(card(INSTRUCTION))).toBeNull();
+describe("the one frame: actor → recipient · authority · time, one chip, ≤ 3 body lines, ids only in Details", () => {
+  const faceOf = (view: CardFrameView) => [view.actor.name, view.recipient, view.authority, view.time, view.chip?.text, view.title, view.tag, ...view.body].join("\n");
+
+  it("progress: the stage as the chip and title, beads and what it waits on", () => {
+    const view = frameOf(card(REPORT));
+    expect(view).toMatchObject({
+      actor: { mark: "worker", name: "Worker · Contact redesign" },
+      recipient: "Manager · Beads Manager",
+      authority: null,
+      chip: { text: "Working", tone: "info" },
+      title: "Beads planned",
+      tag: "Large",
+      body: ["Beads: 2 created, 1 closed", "Waiting on: waiting for the staging database to come back"],
+      outline: null,
+    });
+    expect(frameOf(card(REPORT.replace("phase: beads-done", "phase: received")))).toMatchObject({ chip: { text: "Received", tone: "info" }, title: "Request received" });
+    expect(frameOf(card(REPORT.replace("phase: beads-done", "phase: blocked")))).toMatchObject({ chip: { text: "Blocked", tone: "warning" }, title: "Blocked" });
   });
 
-  it("cuts a long waiting-on text on the summary line (delta 20260918c, Q50)", () => {
-    const long = "\"Continue\" does not tell me the result of the real-daemon check, and everything left waits on it. ".repeat(12);
-    const summary = summaryOf(card(REPORT.replace("blockers: Q1 — keep the old label?", `blockers: ${long}`)));
-    const waiting = summary.slice(summary.indexOf("waiting on: ") + "waiting on: ".length);
-    expect(summary.startsWith("Large · beads 2 created, 1 closed · waiting on: ")).toBe(true);
-    expect(waiting.length).toBeLessThanOrEqual(160);
+  it("cuts a long waiting-on text: the whole text is in Details", () => {
+    const long = "the result of the real-daemon check, which everything left waits on. ".repeat(12);
+    const waiting = frameOf(card(REPORT.replace("blockers: waiting for the staging database to come back", `blockers: ${long}`))).body.at(-1)!;
+    expect(waiting.length).toBeLessThanOrEqual("Waiting on: ".length + 160);
     expect(waiting.endsWith("…")).toBe(true);
-    expect(long.startsWith(waiting.slice(0, -1))).toBe(true);
   });
 
+  it("finished: what changed, the checks and what it decided alone, in a success outline", () => {
+    const view = frameOf(card(FINISHED));
+    expect(view).toMatchObject({
+      chip: { text: "Finished", tone: "success" },
+      title: "Contact form redesigned and tested.",
+      outline: "success",
+      body: ["1 file changed · 1 bead closed", "Checks: npm test — 212 passed"],
+    });
+    const decided = card(FINISHED.replace("skillsUsed: feature-workflow", "skillsUsed: feature-workflow\ndecided: kept the old label; used the table"));
+    expect(frameOf(decided).body.at(-1)).toMatch(/^Decided on its own: \d+ \(see Details\)$/);
+  });
+
+  it("verdict: Passed or Changes required, and the blocking count", () => {
+    const view = frameOf(card(REVIEW, "assistant_message"), reviewer, [manager, worker, otherWorker]);
+    expect(view).toMatchObject({ actor: { mark: "reviewer" }, recipient: "Worker · PAKD fix", chip: { text: "Passed", tone: "success" }, title: "Checked the batch.", body: ["No blocking findings"] });
+    expect(frameOf(card(REVIEW.replace("verdict: pass", "verdict: changes-required"), "assistant_message"), reviewer).chip).toEqual({ text: "Changes required", tone: "warning" });
+  });
+
+  it("brief: the request quoted, a few lines of it", () => {
+    const view = frameOf(card(INSTRUCTION), worker, [manager]);
+    expect(view).toMatchObject({ actor: { mark: "request", name: "Manager · Beads Manager" }, chip: null, title: `CONTINUE — ${REQ}` });
+    expect(view.body).toEqual(["Decision: apply the 5-line fix to R3", "Go ahead.", "Then report."]);
+  });
+
+  it("never shows more than three body lines, and no id of its own on the card's face", () => {
+    for (const c of [card(REPORT), card(FINISHED), card(REVIEW, "assistant_message")]) {
+      const view = frameOf(c, c.direction === "sent" ? reviewer : manager);
+      expect(view.body.length).toBeLessThanOrEqual(MAX_BODY_LINES);
+      expect(faceOf(view)).not.toMatch(/req-\d{8}T\d{6}Z/);
+    }
+    expect(faceOf(frameOf(card(REVIEW, "assistant_message"), reviewer))).not.toContain("b1");
+    // A brief quotes the request as written, ids and all; it too keeps to three lines.
+    expect(frameOf(card(INSTRUCTION), worker).body).toHaveLength(MAX_BODY_LINES);
+    expect(detailLinesOf(card(REVIEW, "assistant_message"), reviewer)).toEqual(["Request: req-20260916T081749Z", "Batch: b1", "Verdict: pass"]);
+    expect(detailLinesOf(card(REPORT), manager)).toEqual([`Request: ${REQ}`, "Phase: beads-done"]);
+  });
+
+  it("says a template problem on the card and lists it in Details", () => {
+    const broken = cards(ASKING.replace("- a: the existing table: no migration. (recommended)", "- a: the existing table: no migration."))!;
+    expect(broken[0]!.formatIssues).toEqual(["BM-QUESTIONS Q6: needs exactly one option ending in (recommended) (found 0)"]);
+    const approved = card(REVIEW.replace("verdict: pass", "verdict: approved"), "assistant_message");
+    expect(approved.formatIssues).toEqual(["BM-REVIEW verdict: must be pass or changes-required"]);
+    expect(frameOf(approved, reviewer).body.at(-1)).toBe("This message breaks its template: see Details.");
+    expect(detailLinesOf(approved, reviewer)).toEqual(expect.arrayContaining(["This message breaks the template:", "• BM-REVIEW verdict: must be pass or changes-required"]));
+    // Only another agent's block is checked, or a Reviewer's own review: not a Worker quoting its report.
+    expect(cards(ASKING.replace("(recommended)", ""), "assistant_message")![0]!.formatIssues).toEqual([]);
+  });
+
+  it("names an agent started outside Beads Manager in Details only", () => {
+    const unlabelled = { ...manager, labelled: false };
+    expect(ownerWarning(unlabelled)).toBe("This agent has no bm.role label: it was started outside Beads Manager, and paseo-bm recognised it by its provider.");
+    expect(ownerWarning(manager)).toBeNull();
+    expect(ownerWarning(null)).toBeNull();
+    expect(detailLinesOf(card(REPORT), unlabelled)[0]).toBe(ownerWarning(unlabelled));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The decision card.
+// ---------------------------------------------------------------------------
+
+const Q_ID = `q:${REQ}:Q6`;
+const O_ID = "o:3f1c2b9a-0d4e-4c55-9f00-1234567890ab";
+
+function questionDecision(overrides: Partial<Decision> = {}): Decision {
+  return {
+    id: Q_ID,
+    workspaceId: "wks_a",
+    requestId: REQ,
+    askedBy: { role: "worker", agentId: "w1" },
+    askedAt: "2026-09-16T10:00:00.000Z",
+    round: 1,
+    question: "Storage — where does the list live?",
+    subject: "storage",
+    options: [
+      { key: "a", label: "the existing table: no migration.", recommended: true, effects: ["none"] },
+      { key: "b", label: "a file on disk: simplest.", recommended: false, effects: ["push"] },
+    ],
+    status: "open",
+    settledAt: null,
+    needsConfirmation: null,
+    answer: null,
+    grant: null,
+    delivery: null,
+    supersedes: null,
+    supersededBy: null,
+    ...overrides,
+  };
+}
+
+function orchestratorDecision(): Decision {
+  return questionDecision({
+    id: O_ID,
+    askedBy: { role: "orchestrator", agentId: null },
+    round: null,
+    question: "Push the checkout fix now?",
+    subject: null,
+    options: [
+      { key: "go", label: "Push it", recommended: true, effects: ["push"] },
+      { key: "hold", label: "Hold", recommended: false, effects: [] },
+    ],
+  });
+}
+
+function ok(result: ReturnType<typeof answerDecision>): Decision {
+  if (!result.ok) throw new Error(result.message);
+  return result.decision;
+}
+
+function incident(overrides: Partial<FallbackIncident> = {}): FallbackIncident {
+  return {
+    id: "fb-3f9a2c1d7e4b",
+    role: "worker",
+    workspaceId: "wks_1",
+    requestId: "req-20260921T111242Z",
+    agentId: "wrk-1",
+    agentProvider: "bm-worker/claude-opus-5",
+    agentModel: "claude-opus-5",
+    parentId: "mgr-1",
+    managerId: "mgr-1",
+    class: "L1",
+    signal: "failed",
+    message: "You've hit your usage limit.",
+    perModelWindow: false,
+    resetsAt: null,
+    candidate: null,
+    status: "pending",
+    detectedAt: "2026-09-21T14:00:00.000Z",
+    decidedAt: null,
+    waitUntil: null,
+    replacementId: null,
+    error: null,
+    ...overrides,
+  };
+}
+
+const QCARD = cards(ASKING)![0]!;
+const agents = [manager, worker];
+const view = (lookup: DecisionLookup, ui: DecisionUi = DECISION_UI_IDLE, c: ChatCard = QCARD) => decisionCardView({ card: c, lookup, agents, ui, cardAt: AT, now: NOW });
+const found = (decision: Decision): DecisionLookup => ({ state: "found", decision });
+
+describe("the decision card's view (experience concept §5.2)", () => {
+  it("offers the options while open: the recommended one is the primary action, a release asks for confirmation", () => {
+    const shown = view(found(questionDecision()));
+    expect(shown.frame).toMatchObject({
+      actor: { mark: "worker", name: "Worker · Contact redesign" },
+      recipient: "you",
+      authority: null,
+      time: "asked 12 min ago",
+      chip: { text: "Needs decision", tone: "warning" },
+      title: "Storage — where does the list live?",
+      tag: "effects: push",
+      body: [],
+    });
+    expect(shown.options).toEqual([
+      { key: "a", label: "the existing table: no migration. ★", primary: true, confirm: false, accessibilityLabel: "Answer: the existing table: no migration. (recommended)" },
+      { key: "b", label: "a file on disk: simplest.", primary: false, confirm: true, accessibilityLabel: "Answer: a file on disk: simplest.; allows push" },
+    ]);
+    expect(shown).toMatchObject({ ownWords: true, confirmChat: false, confirm: null });
+    // Ids, effects per option and the subject are in Details.
+    expect(shown.details).toEqual(expect.arrayContaining([`Decision: ${Q_ID}`, `Request: ${REQ}`, "Subject: storage", "b: a file on disk: simplest. — effects: push"]));
+    expect(JSON.stringify(shown.frame)).not.toContain(Q_ID);
+  });
+
+  it("asks for the confirmation in place, Cancel first and the default, before a release, data, security or cost answer", () => {
+    const decision = questionDecision();
+    expect(choiceNeedsConfirmation(decision, { optionKey: "a" })).toBe(false);
+    expect(choiceNeedsConfirmation(decision, { optionKey: "b" })).toBe(true);
+    // Own words grant everything the decision declares.
+    expect(choiceNeedsConfirmation(decision, { words: "use a file" })).toBe(true);
+    expect(choiceNeedsConfirmation(questionDecision({ options: [{ key: "a", label: "x", recommended: true, effects: ["commit"] }] }), { words: "x" })).toBe(false);
+    const confirming = view(found(decision), { ...DECISION_UI_IDLE, confirming: "b" });
+    expect(confirming.confirm).toEqual({
+      title: "Answer: a file on disk: simplest.?",
+      body: "This answer allows push once, within the hour. Nothing is sent until you confirm.",
+      confirmLabel: "Confirm and send",
+      cancelLabel: "Cancel",
+      defaultAction: "cancel",
+    });
+    expect(confirming.options).toEqual([]);
+    expect(view(found(decision), { ...DECISION_UI_IDLE, words: "file", confirming: OWN_WORDS }).confirm?.title).toBe("Send your own words?");
+    // The own-words box replaces the option buttons while it is open.
+    expect(view(found(decision), { ...DECISION_UI_IDLE, words: "" }).options).toEqual([]);
+  });
+
+  it("shows an answer everywhere: who answered where and when, what, where it went, the grant", () => {
+    const answered = ok(answerDecision(questionDecision(), { via: "inbox", optionKey: "b", at: "2026-09-16T10:02:00.000Z" }));
+    const delivered = { ...answered, delivery: { to: "w1", kind: `answers:${REQ}`, at: "2026-09-16T10:02:01.000Z", outcome: "sent" as const } };
+    const shown = view(found(delivered));
+    expect(shown.frame).toMatchObject({
+      chip: { text: "Decided", tone: "success" },
+      authority: `answered by you in the Inbox · ${localTimeText(new Date("2026-09-16T10:02:00.000Z"), NOW)}`,
+      tag: "grant: push 1×",
+      body: ["✓ a file on disk: simplest.", "Sent to Worker · Contact redesign."],
+    });
+    expect(shown).toMatchObject({ options: [], ownWords: false, confirmChat: false, confirm: null });
+    // Own words, a queued or failed delivery, a used grant.
+    const words = ok(answerDecision(questionDecision(), { via: "chat-card", words: "Use a file, but not yet.", at: "2026-09-16T10:03:00.000Z" }));
+    expect(view(found({ ...words, delivery: { to: "zz", kind: "k", at: "t", outcome: "queued" } })).frame.body).toEqual([
+      "Your words: Use a file, but not yet.",
+      "Queued for the agent: it goes when the agent is idle.",
+    ]);
+    expect(view(found({ ...words, delivery: { to: "w1", kind: "k", at: "t", outcome: "failed" } })).frame.body.at(-1)).toBe("Could not deliver to Worker · Contact redesign.");
+    expect(view(found({ ...words, grant: { ...words.grant!, usedAt: "2026-09-16T10:05:00.000Z" } })).frame.tag).toBe("grant used");
+    expect(view(found(ok(answerDecision(questionDecision(), { via: "chat-card", optionKey: "a", at: "2026-09-16T10:03:00.000Z" })))).frame.tag).toBeNull();
+  });
+
+  it("asks whether a chat message answered it, and closes it without a grant", () => {
+    const marked = ok(markNeedsConfirmation(questionDecision(), { via: "chat-worker", at: "2026-09-16T10:04:00.000Z" }));
+    const shown = view(found(marked));
+    expect(shown.frame.chip).toEqual({ text: "Needs confirmation", tone: "warning" });
+    expect(shown.frame.body).toEqual([`You wrote in the Worker's chat at ${localTimeText(new Date("2026-09-16T10:04:00.000Z"), NOW)}. Did that answer it?`]);
+    expect(shown).toMatchObject({ confirmChat: true, options: [], ownWords: false });
+    const closed = ok(confirmDecision(marked, { answered: true, at: "2026-09-16T10:05:00.000Z" }));
+    expect(view(found(closed)).frame.body).toEqual(["Answered in the Worker's chat (confirmed by you)."]);
+  });
+
+  it("offers nothing once superseded, withdrawn or expired", () => {
+    const superseded = ok(supersedeDecision(questionDecision(), { by: `q:${REQ}:Q9`, at: "2026-09-16T10:06:00.000Z" }));
+    expect(view(found(superseded)).frame).toMatchObject({ chip: { text: "Superseded", tone: "muted" }, body: ["Replaced by a newer question."] });
+    expect(view(found(superseded)).details).toContain(`Superseded by: q:${REQ}:Q9`);
+    const fallbackCard = decisionCardOf(fallbackDecisionSeed("fb-3f9a2c1d7e4b", "worker")!, null);
+    const withdrawn = ok(withdrawDecision(questionDecision({ id: "f:fb-3f9a2c1d7e4b", requestId: null, askedBy: { role: "plugin", agentId: null }, round: null }), { at: "2026-09-16T10:06:00.000Z" }));
+    expect(view(found(withdrawn), DECISION_UI_IDLE, fallbackCard).frame).toMatchObject({
+      actor: { mark: null, name: "paseo-bm plugin" },
+      chip: { text: "Withdrawn" },
+      body: ["The incident was handled another way."],
+    });
+    for (const settled of [superseded, withdrawn]) expect(view(found(settled))).toMatchObject({ options: [], ownWords: false, confirmChat: false });
+  });
+
+  it("shows the seed until the store answers, and says why nothing can be answered", () => {
+    expect(view({ state: "loading" })).toMatchObject({ options: [], ownWords: false, frame: { title: "Storage — where does the list live?", chip: null, body: ["Reading the decision…"] } });
+    expect(view({ state: "missing" }).frame.body).toEqual(["Not recorded yet: it opens once the Manager has read the report."]);
+    const orchestratorCard = cards(answerNoticeOf(ok(answerDecision(orchestratorDecision(), { via: "inbox", optionKey: "hold", at: "2026-09-16T10:05:00.000Z" }))), "user_message", "s")![0]!;
+    expect(view({ state: "missing" }, DECISION_UI_IDLE, orchestratorCard).frame).toMatchObject({ actor: { mark: "orchestrator", name: "Orchestrator" }, body: ["This decision is not recorded."] });
+    const failed = view({ state: "failed", error: new DashboardError("E_DECISION_WRITE_FAILED", "cannot read the store") });
+    expect(failed.frame.body).toEqual(["Could not read the decision (E_DECISION_WRITE_FAILED): cannot read the store"]);
+    expect(view({ state: "failed", error: new Error("daemon unreachable") }).frame.body).toEqual(["Could not read the decision: daemon unreachable"]);
+  });
+
+  it("reads E_DECISION_NOT_FOUND as not recorded, anything else as a failure", () => {
+    const decision = questionDecision();
+    expect(decisionLookupOf({ data: { decision } })).toEqual({ state: "found", decision });
+    expect(decisionLookupOf({ error: new DashboardError("E_DECISION_NOT_FOUND", "no such decision") })).toEqual({ state: "missing" });
+    expect(decisionLookupOf({ error: new Error("socket closed") }).state).toBe("failed");
+    expect(decisionLookupOf({ error: null })).toEqual({ state: "loading" });
+  });
+
+  it("reads again every 5 s while it can be answered, never once settled, and looks for a missing one only for a while", () => {
+    expect(DECISION_POLL_MS).toBe(5_000);
+    expect(decisionPollMs(found(questionDecision()), AT, NOW)).toBe(5_000);
+    expect(decisionPollMs(found(ok(markNeedsConfirmation(questionDecision(), { via: "chat-worker", at: "t" }))), AT, NOW)).toBe(5_000);
+    expect(decisionPollMs(found(ok(answerDecision(questionDecision(), { via: "inbox", optionKey: "a", at: "2026-09-16T10:02:00.000Z" }))), AT, NOW)).toBe(false);
+    expect(decisionPollMs({ state: "missing" }, AT, new Date(AT.getTime() + 60_000))).toBe(5_000);
+    expect(decisionPollMs({ state: "missing" }, AT, new Date(AT.getTime() + DECISION_LOOKUP_WINDOW_MS + 1))).toBe(false);
+    expect(decisionPollMs({ state: "failed", error: new Error("x") }, AT, new Date(AT.getTime() + DECISION_LOOKUP_WINDOW_MS + 1))).toBe(false);
+  });
+});
+
+describe("answering from the card", () => {
+  it("renders answered on the next poll once decisions.answer took it — in every card that shows it", async () => {
+    // A fake store behind the two RPCs, as the server applies them.
+    let stored = questionDecision();
+    const answer = vi.fn(async (input: { id: string; optionKey?: string; words?: string; confirmed?: true; via: "inbox" | "chat-card" }) => {
+      const result = answerDecision(stored, { via: input.via, optionKey: input.optionKey ?? null, words: input.words ?? null, at: "2026-09-16T10:02:00.000Z" });
+      if (!result.ok) throw new DashboardError("E_DECISION_SETTLED", result.message);
+      stored = result.decision;
+      return { decision: stored };
+    });
+    const get = async () => ({ decision: stored });
+
+    const before = decisionLookupOf({ data: await get() });
+    expect(view(before).options.map((option) => option.key)).toEqual(["a", "b"]);
+    const result = await runDecisionAnswer({ id: Q_ID, choice: { optionKey: "a" }, confirmed: false, via: "chat-card", answer });
+    expect(result.ok).toBe(true);
+    expect(answer).toHaveBeenCalledTimes(1);
+    expect(answer).toHaveBeenCalledWith({ id: Q_ID, optionKey: "a", via: "chat-card" });
+
+    // Another copy of the card (the Worker's chat, the Inbox) reads it on its next poll.
+    const after = decisionLookupOf({ data: await get() });
+    const shown = view(after);
+    expect(shown.frame.chip).toEqual({ text: "Decided", tone: "success" });
+    expect(shown.frame.body[0]).toBe("✓ the existing table: no migration.");
+    expect(shown.options).toEqual([]);
+    expect(decisionPollMs(after, AT, NOW)).toBe(false);
+
+    // A second answer from a stale copy is refused and says why.
+    const again = await runDecisionAnswer({ id: Q_ID, choice: { optionKey: "b" }, confirmed: true, via: "chat-card", answer });
+    expect(again).toEqual({ ok: false, reason: `Could not answer (E_DECISION_SETTLED): decision ${Q_ID} is answered; it can no longer be answered` });
+  });
+
+  it("passes confirmed only after the owner confirmed, and own words as words", async () => {
+    const answer = vi.fn(async () => ({ decision: questionDecision() }));
+    await runDecisionAnswer({ id: Q_ID, choice: { optionKey: "b" }, confirmed: true, via: "inbox", answer });
+    await runDecisionAnswer({ id: Q_ID, choice: { words: "Use a file." }, confirmed: false, via: "chat-card", answer });
+    expect(answer.mock.calls).toEqual([
+      [{ id: Q_ID, optionKey: "b", confirmed: true, via: "inbox" }],
+      [{ id: Q_ID, words: "Use a file.", via: "chat-card" }],
+    ]);
+    expect(await runDecisionAnswer({ id: Q_ID, choice: { words: "  " }, confirmed: false, via: "chat-card", answer })).toEqual({ ok: false, reason: "Write your answer first." });
+    expect(answer).toHaveBeenCalledTimes(2);
+    const refused = vi.fn(async () => {
+      throw new DashboardError("E_DECISION_NOT_CONFIRMED", "confirm the push first");
+    });
+    expect(await runDecisionAnswer({ id: Q_ID, choice: { optionKey: "b" }, confirmed: false, via: "chat-card", answer: refused })).toEqual({
+      ok: false,
+      reason: "Could not answer (E_DECISION_NOT_CONFIRMED): confirm the push first",
+    });
+  });
+
+  it("closes or keeps open a decision that needs confirmation with ONE decisions.confirm call", async () => {
+    const confirm = vi.fn(async () => ({ decision: questionDecision() }));
+    expect(await runDecisionConfirm({ id: Q_ID, answered: true, confirm })).toEqual({ ok: true, decision: questionDecision() });
+    expect(confirm).toHaveBeenCalledWith({ id: Q_ID, answered: true });
+    const refused = vi.fn(async () => {
+      throw new DashboardError("E_DECISION_NOT_NEEDS_CONFIRMATION", "it is open");
+    });
+    expect(await runDecisionConfirm({ id: Q_ID, answered: false, confirm: refused })).toEqual({
+      ok: false,
+      reason: "Could not reopen the decision (E_DECISION_NOT_NEEDS_CONFIRMATION): it is open",
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The drawn cards (element tree).
+// ---------------------------------------------------------------------------
+
+const noop = () => undefined;
+function drawDecision(shown: ReturnType<typeof view>, ui: DecisionUi = DECISION_UI_IDLE, detailsOpen = false, handlers: Record<string, unknown> = {}) {
+  return renderTree(
+    DecisionCardBody({
+      view: shown,
+      ui,
+      detailsOpen,
+      onToggleDetails: noop,
+      onChoose: noop,
+      onOpenWords: noop,
+      onWords: noop,
+      onSendWords: noop,
+      onCancel: noop,
+      onConfirm: noop,
+      onCloseInChat: noop,
+      text: ASKING,
+      styles,
+      theme,
+      compact: false,
+      ...handlers,
+    }),
+  );
+}
+const labels = (nodes: Array<RNode | string>) => pressables(nodes).map((node) => node.props["accessibilityLabel"]);
+
+describe("the drawn decision card", () => {
+  it("draws the frame, the options with the recommended one primary, Own words… and Details — and labels every button", () => {
+    const onChoose = vi.fn();
+    const nodes = drawDecision(view(found(questionDecision())), DECISION_UI_IDLE, false, { onChoose });
+    const shown = texts(nodes);
+    expect(shown).toEqual(
+      expect.arrayContaining(["Worker · Contact redesign", "→ you", "asked 12 min ago", "Needs decision", "Storage — where does the list live?", "effects: push", "the existing table: no migration. ★", "Own words…", "Details ▸"]),
+    );
+    expect(labels(nodes)).toEqual(["Answer: the existing table: no migration. (recommended)", "Answer: a file on disk: simplest.; allows push", "Answer in your own words", "Show details"]);
+    const [primary, secondary] = pressables(nodes);
+    expect(primary!.props["style"]).toEqual([{ name: "button" }, { opacity: 1 }]);
+    expect(secondary!.props["style"]).toEqual([{ name: "secondaryButton" }, { opacity: 1 }]);
+    (primary!.props["onPress"] as () => void)();
+    expect(onChoose).toHaveBeenCalledWith("a");
+    // No id on the face; Details is closed.
+    expect(shown.join("\n")).not.toContain(Q_ID);
+  });
+
+  it("has no reply box, no Answered chip, no Mark as answered, no Use recommendations — in any state", () => {
+    const decision = questionDecision();
+    const states = [
+      drawDecision(view(found(decision))),
+      drawDecision(view(found(ok(answerDecision(decision, { via: "inbox", optionKey: "a", at: "2026-09-16T10:02:00.000Z" }))))),
+      drawDecision(view(found(ok(markNeedsConfirmation(decision, { via: "chat-worker", at: "2026-09-16T10:04:00.000Z" }))))),
+      drawDecision(view({ state: "missing" })),
+    ];
+    for (const nodes of states) {
+      expect(allNodes(nodes).filter((node) => node.type === "TextInput")).toEqual([]);
+      const words = texts(nodes).join("\n");
+      for (const retired of ["Mark as answered", "Use recommendations", "Reply", "Answered\n", "Clear"]) expect(words).not.toContain(retired);
+    }
+  });
+
+  it("opens the own-words box only on request, with Cancel and Send", () => {
+    const nodes = drawDecision(view(found(questionDecision()), { ...DECISION_UI_IDLE, words: "" }), { ...DECISION_UI_IDLE, words: "" });
+    const input = allNodes(nodes).find((node) => node.type === "TextInput");
+    expect(input?.props["accessibilityLabel"]).toBe("Your answer in your own words");
+    expect(labels(nodes)).toEqual(["Cancel", "Send your answer", "Show details"]);
+    expect(pressables(nodes)[1]!.props["disabled"]).toBe(true);
+  });
+
+  it("draws the confirmation with Cancel first, and nothing else to press but Details", () => {
+    const nodes = drawDecision(view(found(questionDecision()), { ...DECISION_UI_IDLE, confirming: "b" }), { ...DECISION_UI_IDLE, confirming: "b" });
+    expect(texts(nodes)).toEqual(expect.arrayContaining(["Answer: a file on disk: simplest.?", "This answer allows push once, within the hour. Nothing is sent until you confirm."]));
+    expect(labels(nodes)).toEqual(["Cancel", "Confirm and send", "Show details"]);
+  });
+
+  it("draws Keep open / Close as answered for a decision that needs confirmation", () => {
+    const onCloseInChat = vi.fn();
+    const nodes = drawDecision(view(found(ok(markNeedsConfirmation(questionDecision(), { via: "chat-manager", at: "2026-09-16T10:04:00.000Z" })))), DECISION_UI_IDLE, false, { onCloseInChat });
+    expect(labels(nodes)).toEqual(["Keep the decision open", "Close the decision as answered", "Show details"]);
+    (pressables(nodes)[1]!.props["onPress"] as () => void)();
+    expect(onCloseInChat).toHaveBeenCalledWith(true);
+  });
+
+  it("shows the ids and the whole message only when Details is open", () => {
+    const nodes = drawDecision(view(found(questionDecision())), DECISION_UI_IDLE, true);
+    const shown = texts(nodes);
+    expect(shown).toEqual(expect.arrayContaining([`Decision: ${Q_ID}`, `Request: ${REQ}`, "Details ▾"]));
+    expect(labels(nodes).at(-1)).toBe("Hide details");
+  });
+
+  it("disables every answer while one is being sent, and shows a refusal", () => {
+    const busy = { ...DECISION_UI_IDLE, busy: true };
+    const nodes = drawDecision(view(found(questionDecision()), busy), busy);
+    expect(pressables(nodes).slice(0, 3).map((node) => node.props["disabled"])).toEqual([true, true, true]);
+    expect(texts(nodes)).toContain("Sending your answer…");
+    const refused = { ...DECISION_UI_IDLE, error: "Could not answer (E_DECISION_SETTLED): decision is answered" };
+    expect(texts(drawDecision(view(found(questionDecision()), refused), refused))).toContain("Could not answer (E_DECISION_SETTLED): decision is answered");
+  });
+});
+
+describe("the frame and the compact line, drawn", () => {
+  it("draws at most three body lines and colours only the outline of a finished card", () => {
+    const shown: CardFrameView = { ...frameOf(card(FINISHED)), body: ["one", "two", "three", "four"] };
+    const nodes = renderTree(CardFrame({ view: shown, details: null, detailsOpen: false, onToggleDetails: noop, styles, theme }));
+    expect(texts(nodes)).toEqual(expect.arrayContaining(["one", "two", "three"]));
+    expect(texts(nodes)).not.toContain("four");
+    const outer = nodes[0] as RNode;
+    expect(outer.props["style"]).toEqual([{ name: "card" }, { gap: 6, marginVertical: 4 }, { borderColor: "#statusSuccess" }]);
+    const plain = renderTree(CardFrame({ view: frameOf(card(REPORT)), details: null, detailsOpen: false, onToggleDetails: noop, styles, theme }))[0] as RNode;
+    expect((plain.props["style"] as unknown[])[2]).toBeNull();
+    const source = readFileSync(fileURLToPath(new URL("../plugin/client/ui.tsx", import.meta.url)), "utf8");
+    expect(source).not.toMatch(/borderLeft(Width|Color)/);
+  });
+
+  it("draws a notice as one line that opens to the whole notice", () => {
+    const notice = cards(`BM-FORMAT requestId: ${REQ}\nYour last BM-REPORT broke the template:`, "user_message", "s")![0]!;
+    const onToggle = vi.fn();
+    const closed = renderTree(CompactLine({ tone: "warning", text: noticeLine(notice, AT, NOW), expanded: false, onToggle, details: "whole", styles, theme }));
+    expect(texts(closed)).toEqual(["●", "A block broke its template — Your last BM-REPORT broke the template: · 12 min ago", "▸"]);
+    expect(labels(closed)[0]).toBe("A block broke its template — Your last BM-REPORT broke the template: · 12 min ago. Show the whole notice");
+    (pressables(closed)[0]!.props["onPress"] as () => void)();
+    expect(onToggle).toHaveBeenCalled();
+  });
+});
+
+describe("the retired question UI is gone from the chat code", () => {
+  const source = (file: string) => readFileSync(fileURLToPath(new URL(`../plugin/client/${file}`, import.meta.url)), "utf8");
+
+  it("uses neither the answer marks, chat.waiting, the session answer state, nor fallback.act", () => {
+    for (const file of ["chat-card.tsx", "chat-cards.ts"]) {
+      const text = source(file);
+      for (const retired of ["answersMark", "chatWaiting", "answer-state", "fallbackAct", "fallbackIncidents", "sendReply", "QuestionForm", "replyText"]) {
+        expect(text, `${file}: ${retired}`).not.toContain(retired);
+      }
+    }
+    // The drawing code has none of the retired controls' words.
+    for (const words of ["Mark as answered", "Use recommendations", "Reply to", "Answered\""]) expect(source("chat-card.tsx")).not.toContain(words);
+  });
+
+  it("answers only through decisions.answer and decisions.confirm, as the chat card", () => {
+    const text = source("chat-card.tsx");
+    expect(text).toContain("useRpc(decisionsAnswerRpc)");
+    expect(text).toContain("useRpc(decisionsConfirmRpc)");
+    expect(text).toContain('via="chat-card"');
+    expect(text).not.toMatch(/agents\.ref\([^)]*\)\.send/);
+  });
+});
+
+describe("the message in Details", () => {
   it("renders report fields as a bold-key list, not one paragraph", () => {
     const blocks = parseMarkdown(markdownOf(["```", REPORT, "```", "", "Anything else?"].join("\n")));
     expect(blocks[0]).toMatchObject({ kind: "paragraph", spans: [{ text: "BM-REPORT", bold: true }] });
     const bullets = blocks.filter((block) => block.kind === "bullet");
     expect(bullets).toHaveLength(12);
-    expect(bullets[0]).toMatchObject({ spans: [{ text: "requestId", bold: true }, { text: ": req-20260916T062244Z" }] });
+    expect(bullets[0]).toMatchObject({ spans: [{ text: "requestId", bold: true }, { text: `: ${REQ}` }] });
     expect(blocks.some((block) => block.kind === "code")).toBe(false);
-    expect(blocks.at(-1)).toMatchObject({ kind: "paragraph" });
   });
 
-  it("leaves free text as it is", () => {
+  it("leaves free text as it is, and lays a plain-text card out the same way", () => {
     expect(markdownOf(INSTRUCTION)).toBe(INSTRUCTION);
-  });
-
-  it("names the request in a reply, and offers quick answers only when the Worker waits", () => {
-    expect(replyText(card(REVIEW_REQUEST), "  Looks right.  ")).toBe(
-      "Reply from the user about `req-20260916T081749Z`, batch b1:\n\nLooks right.",
-    );
-    expect(quickReplies(card(REPORT))).toHaveLength(2);
-    expect(quickReplies(card(REVIEW, "assistant_message"))).toEqual([]);
-  });
-
-  it("keeps card data JSON, as Paseo requires", () => {
-    const data: ChatCard = card(REPORT);
-    expect(JSON.parse(JSON.stringify(data))).toEqual(data);
+    const markdown = fallbackMarkdown({ text: ASKING });
+    expect(markdown).toBe(markdownOf(ASKING));
+    expect(markdown).toContain("- **phase**: blocked");
+    expect(markdown).toContain("  - **a**: the existing table: no migration. (recommended)");
   });
 });
 
@@ -310,7 +854,7 @@ describe("chat.peers", () => {
         v: TRACE_STORE_SCHEMA_VERSION, kind: "turn", at: "2026-09-16T10:00:00.000Z", workspaceId: "wks_a", agentId: "w0",
         role: "worker", turnId: "t1", requestId: null, parentAgentId: null, agentCreatedAt: null, startedAt: null,
         endedAt: "2026-09-16T10:00:00.000Z", outcome: "completed", received: [], reports: [], reviews: [], evidence: [], usage: null,
-        sent: [{ agentId: null, at: "2026-09-16T09:59:00.000Z", text: "TIẾP TỤC LÀM VIỆC — `req-20260916T062244Z`", truncated: false }],
+        sent: [{ agentId: null, at: "2026-09-16T09:59:00.000Z", text: `CONTINUE — \`${REQ}\``, truncated: false }],
       });
       clearTraceStoreCache();
       const withUnlabelled = paseo();
@@ -321,7 +865,7 @@ describe("chat.peers", () => {
         return wantsWorkers ? { entries: [...result.entries, entry("w0", "worker", "wks_a")] } : result;
       }) as never;
       const result = await handleChatPeers({ agentId: "m1" }, withUnlabelled, { homedir: () => home });
-      expect(result.peers.find((p) => p.id === "w0")?.requestId).toBe("req-20260916T062244Z");
+      expect(result.peers.find((p) => p.id === "w0")?.requestId).toBe(REQ);
       expect(result.peers.find((p) => p.id === "w1")?.requestId).toBe("req-1");
     } finally {
       rmSync(home, { recursive: true, force: true });
@@ -333,12 +877,7 @@ describe("chat.peers", () => {
     try {
       mkdirSync(join(home, ".paseo-bm"), { recursive: true });
       writeFileSync(join(home, ".paseo-bm", "install.json"), JSON.stringify({ schemaVersion: 1 }));
-      const switched = {
-        id: "fb-0000000000dd", role: "worker", workspaceId: "wks_a", requestId: "req-1", agentId: "w0", agentProvider: "bm-worker",
-        agentModel: null, parentId: "m1", managerId: "m1", class: "L1", signal: "failed", message: "", perModelWindow: false,
-        resetsAt: null, candidate: null, status: "switched", detectedAt: "2026-09-22T00:00:00.000Z", decidedAt: "2026-09-22T00:01:00.000Z",
-        waitUntil: null, replacementId: "w1", error: null,
-      };
+      const switched = { ...incident({ id: "fb-0000000000dd", workspaceId: "wks_a", requestId: "req-1", agentId: "w0", parentId: "m1", managerId: "m1", message: "" }), status: "switched", decidedAt: "2026-09-22T00:01:00.000Z", replacementId: "w1" };
       writeFileSync(join(home, ".paseo-bm", "role-fallback-state.json"), JSON.stringify({ version: 1, incidents: [switched] }));
       const sdk = paseo();
       const list = sdk.agents.list;
@@ -363,1009 +902,5 @@ describe("chat.peers", () => {
 
   it("has nothing for an agent that is not paseo-bm's", async () => {
     expect(await handleChatPeers({ agentId: "someone-else" }, paseo(), { homedir: () => "/nonexistent-bm-home" })).toEqual({ owner: null, peers: [], workspaceId: null });
-  });
-});
-
-/**
- * The question card (delta 20260918c-question-cards §4.4): a Worker's
- * `blocked` report with a `BM-QUESTIONS` block, seen in the Manager's chat.
- */
-const QUESTIONS = [
-  "BM-QUESTIONS",
-  "requestId: req-20260916T062244Z",
-  "Q6: Storage — where does the list live?",
-  "- a: the existing table: no migration. (recommended)",
-  "- b: a file on disk: simplest.",
-  "Q7: Sessions — rename the cookie?",
-  "- a: keep it. (recommended)",
-  "- b: rename it.",
-].join("\n");
-const ASKING = `${REPORT.replace("blockers: Q1 — keep the old label?", "blockers: 2 questions: Q6, Q7 — see BM-QUESTIONS")}\n\n${QUESTIONS}`;
-
-describe("a report's questions", () => {
-  it("are read into the card, and change the summary and the quick replies", () => {
-    const asking = card(ASKING);
-    expect(asking.questions.map((question) => question.id)).toEqual(["Q6", "Q7"]);
-    expect(asking.questions[0]!.options).toEqual([
-      { key: "a", text: "the existing table: no migration.", recommended: true },
-      { key: "b", text: "a file on disk: simplest.", recommended: false },
-    ]);
-    expect(summaryOf(asking)).toBe("Large · beads 2 created, 1 closed · 2 questions waiting");
-    expect(quickReplies(asking)).toEqual([]);
-    expect(JSON.parse(JSON.stringify(asking))).toEqual(asking);
-    expect(chatCardSchema.parse(asking).questions).toHaveLength(2);
-  });
-
-  it("are not taken from a block about another request", () => {
-    expect(card(ASKING.replace("requestId: req-20260916T062244Z\nQ6", "requestId: req-20260916T081749Z\nQ6")).questions).toEqual([]);
-  });
-
-  it("leave an old-style report as it was", () => {
-    const old = card(REPORT);
-    expect(old.questions).toEqual([]);
-    expect(summaryOf(old)).toBe("Large · beads 2 created, 1 closed · waiting on: Q1 — keep the old label?");
-    expect(quickReplies(old)).toHaveLength(2);
-    // A card built before the field existed still validates.
-    const before: Partial<ChatCard> = { ...old };
-    delete before.questions;
-    expect(chatCardSchema.parse(before).questions).toEqual([]);
-  });
-
-  it("show buttons only in the Manager's chat, on the report it received", () => {
-    const asking = card(ASKING);
-    expect(showsQuestions(asking, manager)).toBe(true);
-    expect(showsQuestions(asking, worker)).toBe(false);
-    expect(showsQuestions(asking, reviewer)).toBe(false);
-    expect(showsQuestions(asking, null)).toBe(false);
-    expect(showsQuestions(card(ASKING, "assistant_message"), manager)).toBe(false);
-    expect(showsQuestions(card(REPORT), manager)).toBe(false);
-  });
-
-  it("split a question into its topic and the rest", () => {
-    expect(topicOf(card(ASKING).questions[0]!)).toEqual({ topic: "Storage", rest: "where does the list live?" });
-    expect(topicOf({ id: "Q1", text: "No topic here", options: [] })).toEqual({ topic: null, rest: "No topic here" });
-  });
-
-  it("draw a bold heading of id and topic, and the question on its own line (delta 20260918d, Q5)", () => {
-    expect(questionHeading(card(ASKING).questions[0]!)).toEqual({ heading: "Q6 · Storage", body: "where does the list live?" });
-    expect(questionHeading({ id: "Q1", text: "No topic here", options: [] })).toEqual({ heading: "Q1", body: "No topic here" });
-  });
-
-  it("render as nested Markdown when the message is opened", () => {
-    const blocks = parseMarkdown(markdownOf(QUESTIONS));
-    expect(blocks[0]).toMatchObject({ kind: "paragraph", spans: [{ text: "BM-QUESTIONS", bold: true }] });
-    const bullets = blocks.filter((block) => block.kind === "bullet");
-    expect(bullets.map((block) => (block.kind === "bullet" ? block.depth : -1))).toEqual([0, 0, 1, 1, 0, 1, 1]);
-    expect(bullets[1]).toMatchObject({ spans: [{ text: "Q6", bold: true }, { text: ": Storage — where does the list live?" }] });
-    expect(bullets[2]).toMatchObject({ spans: [{ text: "a", bold: true }, { text: ": the existing table: no migration. (recommended)" }] });
-  });
-});
-
-describe("choosing answers", () => {
-  const questions = card(ASKING).questions;
-
-  it("A8: never fills or sends a question the ledger already holds an answer to (design delta 20260924-qa-ledger §4.3)", () => {
-    const asking = card(ASKING);
-    const inLedger = new Set(["Q6"]);
-    expect(recommendedPicks(questions, {}, inLedger)).toEqual({ Q7: { key: "a" } });
-    // A pick left over from before the ledger answered it does not go out again.
-    expect(answersDraft(asking, { Q6: { key: "a" }, Q7: { other: "rename next release" } }, inLedger)).toBe(
-      ["BM-ANSWERS", "requestId: req-20260916T062244Z", "Q7: other — rename next release"].join("\n"),
-    );
-    expect(answersDraft(asking, { Q6: { key: "a" } }, inLedger)).toBe("");
-  });
-
-  it("fills recommendations only into empty questions, and never pre-selects", () => {
-    expect(recommendedPicks(questions, {})).toEqual({ Q6: { key: "a" }, Q7: { key: "a" } });
-    expect(recommendedPicks(questions, { Q6: { key: "b" } })).toEqual({ Q6: { key: "b" }, Q7: { key: "a" } });
-    expect(recommendedPicks(questions, { Q7: { other: "later" } })).toEqual({ Q6: { key: "a" }, Q7: { other: "later" } });
-  });
-
-  // Delta 20260918d (owner decision Q4): Send no longer waits for every
-  // question. These cases replace `formComplete`'s: the same picks, now
-  // checked one question at a time and in the block they produce.
-  it("counts a pick as an answer only for an existing option or the user's own words", () => {
-    const [q6, q7] = questions as [Question, Question];
-    expect(isAnswered(q6, undefined)).toBe(false);
-    expect(isAnswered(q6, { key: "a" })).toBe(true);
-    expect(isAnswered(q6, { key: "z" })).toBe(false);
-    expect(isAnswered(q7, { other: "   " })).toBe(false);
-    expect(isAnswered(q7, { other: "rename next release" })).toBe(true);
-  });
-
-  it("writes a line only for each answered question", () => {
-    const asking = card(ASKING);
-    expect(answersDraft(asking, {})).toBe("");
-    expect(answersDraft(asking, { Q6: { key: "z" }, Q7: { other: "   " } })).toBe("");
-    expect(answersDraft(asking, { Q6: { key: "a" } })).toBe(
-      ["BM-ANSWERS", "requestId: req-20260916T062244Z", "Q6: a — the existing table: no migration."].join("\n"),
-    );
-    expect(answersDraft(asking, { Q6: { key: "a" }, Q7: { other: "rename next release" } })).toBe(
-      ["BM-ANSWERS", "requestId: req-20260916T062244Z", "Q6: a — the existing table: no migration.", "Q7: other — rename next release"].join("\n"),
-    );
-    // "Use recommendations", then Send: two actions still answer every question.
-    expect(answersDraft(asking, recommendedPicks(questions, {}))).toBe(
-      ["BM-ANSWERS", "requestId: req-20260916T062244Z", "Q6: a — the existing table: no migration.", "Q7: a — keep it."].join("\n"),
-    );
-    // No request, nothing to address the answers to.
-    expect(answersDraft({ ...asking, requestId: null }, { Q6: { key: "a" } })).toBe("");
-  });
-
-  it("answers a question without options only in the user's own words", () => {
-    const lone = [{ id: "Q9", text: "Anything else?", options: [{ key: "a", text: "no", recommended: true }] }];
-    expect(recommendedPicks(lone, {})).toEqual({});
-    expect(isAnswered(lone[0]!, { key: "a" })).toBe(false);
-    expect(isAnswered(lone[0]!, { other: "no" })).toBe(true);
-  });
-
-  it("summarises only what was answered", () => {
-    expect(answerSummary(questions, { Q6: { key: "a" }, Q7: { other: "rename it" } })).toBe("Q6 a, Q7 other");
-    expect(answerSummary(questions, { Q6: { key: "b" }, Q7: { other: "  " } })).toBe("Q6 b");
-  });
-});
-
-describe("the answers block in the Reply box", () => {
-  const block = ["BM-ANSWERS", "requestId: req-20260916T062244Z", "Q6: a — the existing table: no migration."].join("\n");
-  const older = ["BM-ANSWERS", "requestId: req-20260916T062244Z", "Q6: b — a file on disk: simplest.", "Q7: a — keep it."].join("\n");
-
-  it("goes into an empty box", () => {
-    expect(withAnswersBlock("", block)).toBe(block);
-    expect(withAnswersBlock("", "")).toBe("");
-  });
-
-  it("replaces the old block and keeps the words below it", () => {
-    const result = withAnswersBlock(`${older}\n\nShip it after lunch.`, block);
-    expect(result.startsWith(block)).toBe(true);
-    expect(result).toBe(`${block}\n\nShip it after lunch.`);
-  });
-
-  it("moves words typed above the old block below the new one", () => {
-    const result = withAnswersBlock(`note\n\n${older}`, block);
-    expect(result.startsWith(block)).toBe(true);
-    expect(result).toBe(`${block}\n\nnote`);
-  });
-
-  it("keeps words from both sides, in order, without a double blank line", () => {
-    const result = withAnswersBlock(`first\n\n${older}\n\nsecond`, block);
-    expect(result.startsWith(block)).toBe(true);
-    expect(result).toBe(`${block}\n\nfirst\n\nsecond`);
-    expect(result).not.toContain("\n\n\n");
-  });
-
-  it("puts a block above words that had none", () => {
-    const result = withAnswersBlock("OK", block);
-    expect(result.startsWith(block)).toBe(true);
-    expect(result).toBe(`${block}\n\nOK`);
-  });
-
-  it("leaves the words alone when there is no block to write", () => {
-    expect(withAnswersBlock(`${older}\n\nShip it.`, "")).toBe("Ship it.");
-    expect(withAnswersBlock(`\n${older}\n`, "")).toBe("");
-    expect(withAnswersBlock("Just words.\nTwo lines.", "")).toBe("Just words.\nTwo lines.");
-  });
-
-  it("knows whether a sent reply still carried the answers", () => {
-    const asking = card(ASKING);
-    const picks = { Q6: { key: "a" }, Q7: { other: "rename it" } };
-    const box = withAnswersBlock("Thanks.", answersDraft(asking, picks));
-    expect(sentSummary(asking, picks, box)).toBe("Q6 a, Q7 other");
-    expect(sentSummary(asking, picks, "Thanks.")).toBeNull();
-    expect(sentSummary(asking, {}, "Thanks.")).toBeNull();
-  });
-});
-
-describe("the answered memory", () => {
-  const asking = card(ASKING);
-
-  it("keys on the chat, the request and the questions", () => {
-    expect(answeredKey("m1", asking)).toBe(answeredKey("m1", card(ASKING)));
-    expect(answeredKey("m1", asking)).not.toBe(answeredKey("m2", asking));
-  });
-
-  /**
-   * Fault L3 of the 2026-09-23 diagnosis. A BM-FORMAT notice made the Worker
-   * re-send its report with one field corrected; the card text changed, the key
-   * changed with it, and the second card offered Q10-Q12 as if nobody had
-   * answered. The user answered twice and the second answer cut into the
-   * Worker's running turn.
-   */
-  it("a re-sent report with a corrected field shares the key with the first", () => {
-    const corrected = card(ASKING.replace("tier: Large (changed: no)", "tier: Large (changed: from Medium, the scope grew)"));
-    expect(corrected.text).not.toBe(asking.text);
-    expect(corrected.questions.map((question) => question.id)).toEqual(asking.questions.map((question) => question.id));
-    expect(answeredKey("m1", corrected)).toBe(answeredKey("m1", asking));
-  });
-
-  it("the key is still one the mark store accepts", () => {
-    const key = answeredKey("m1", asking);
-    expect(isAnswerMarkKey(key)).toBe(true);
-    expect(key.length).toBeLessThanOrEqual(ANSWER_MARK_KEY_MAX);
-  });
-
-  it("a trailing line in the message no longer makes a second key", () => {
-    expect(answeredKey("m1", card(`${ASKING}\nThat is all.`))).toBe(answeredKey("m1", asking));
-  });
-
-  /**
-   * The trade-off this key accepts, pinned so it stays a decision: two
-   * different question sets that reuse the same ids under one request share a
-   * key. What keeps that from happening is worker.md's rule that a Worker keeps
-   * counting its question numbers across the request.
-   */
-  it("the same ids under one request mean one question set, by the numbering rule", () => {
-    const relabelled = card(ASKING.replace("Q6: Storage", "Q6: Something else entirely"));
-    expect(relabelled.questions[0]!.text).not.toBe(asking.questions[0]!.text);
-    expect(answeredKey("m1", relabelled)).toBe(answeredKey("m1", asking));
-  });
-});
-
-/**
- * Answers sent from a question card go through the Reply box (delta 20260918d
- * §4.1–§4.3). These replace the `sendAnswers` cases: the same peers and the
- * same failures, now on `sendReply` with the box the picks wrote.
- */
-describe("sending the answers", () => {
-  const asking = card(ASKING);
-  const picks = { Q6: { key: "a" }, Q7: { other: "rename it next release" } };
-  const box = withAnswersBlock("", answersDraft(asking, picks));
-  const expected = replyText(asking, box);
-
-  it("goes as one message to the asking Worker, block first", async () => {
-    const refreshPeers = vi.fn(async () => ({ owner: manager, peers: [worker, otherWorker, reviewer] }));
-    const send = vi.fn(async () => undefined);
-    expect(await sendReply({ card: asking, text: box, refreshPeers, send })).toEqual({ ok: true, to: worker, text: expected });
-    expect(refreshPeers).toHaveBeenCalledTimes(1);
-    expect(send).toHaveBeenCalledTimes(1);
-    expect(send).toHaveBeenCalledWith("w1", expected);
-    expect(expected).toBe(
-      [
-        "Reply from the user about `req-20260916T062244Z`:",
-        "",
-        "BM-ANSWERS",
-        "requestId: req-20260916T062244Z",
-        "Q6: a — the existing table: no migration.",
-        "Q7: other — rename it next release",
-      ].join("\n"),
-    );
-  });
-
-  it("carries the picks together with the user's own words (the owner's bug)", async () => {
-    // The owner ticked an option, typed "OK" and pressed Send: only "OK" arrived.
-    const withWords = withAnswersBlock("OK", answersDraft(asking, { Q6: { key: "a" } }));
-    const send = vi.fn(async () => undefined);
-    const result = await sendReply({ card: asking, text: withWords, refreshPeers: async () => ({ owner: manager, peers: [worker] }), send });
-    expect(result.ok).toBe(true);
-    expect(send).toHaveBeenCalledTimes(1);
-    expect(send).toHaveBeenCalledWith("w1", replyText(asking, withWords));
-    const sent = (send.mock.calls[0] as unknown as [string, string])[1];
-    expect(sent).toContain("Q6: a — the existing table: no migration.");
-    expect(sent).toContain("OK");
-  });
-
-  it("does not send when the Worker started running since the card was drawn", async () => {
-    const send = vi.fn(async () => undefined);
-    const result = await sendReply({
-      card: asking,
-      text: box,
-      refreshPeers: async () => ({ owner: manager, peers: [{ ...worker, status: "running" }] }),
-      send,
-    });
-    expect(result).toEqual({ ok: false, reason: expect.stringContaining("is working") });
-    expect(send).not.toHaveBeenCalled();
-  });
-
-  it("reports a failed send and a failed refresh", async () => {
-    expect(
-      await sendReply({
-        card: asking,
-        text: box,
-        refreshPeers: async () => ({ owner: manager, peers: [worker] }),
-        send: async () => {
-          throw new Error("Agent not found");
-        },
-      }),
-    ).toEqual({ ok: false, reason: "Agent not found" });
-    const send = vi.fn(async () => undefined);
-    expect(
-      await sendReply({
-        card: asking,
-        text: box,
-        refreshPeers: async () => {
-          throw new Error("daemon unreachable");
-        },
-        send,
-      }),
-    ).toEqual({ ok: false, reason: "daemon unreachable" });
-    expect(send).not.toHaveBeenCalled();
-  });
-
-  it("sends nothing when nothing was picked or written", async () => {
-    const refreshPeers = vi.fn(async () => ({ owner: manager, peers: [worker] }));
-    const send = vi.fn(async () => undefined);
-    const empty = withAnswersBlock("", answersDraft(asking, {}));
-    expect(await sendReply({ card: asking, text: empty, refreshPeers, send })).toEqual({ ok: false, reason: "Write a reply first." });
-    expect(refreshPeers).not.toHaveBeenCalled();
-    expect(send).not.toHaveBeenCalled();
-  });
-});
-
-
-/**
- * Every card's Reply box (delta 20260918d-card-replies §4.2, owner decision
- * Q4): the recipient comes from `chat.peers`, its status is read again just
- * before sending, and a running recipient is never sent to.
- */
-describe("where a reply goes", () => {
-  const asking = card(ASKING);
-  const reviewCard = card(REVIEW);
-  const instruction = card(INSTRUCTION);
-  const lead = peer({ id: "w2", title: "PAKD fix", parentId: "m1", requestId: "req-20260916T081749Z" });
-  const contact = peer({ id: "w1", title: "Contact redesign", parentId: "m1", requestId: "req-20260916T062244Z" });
-
-  it("to the one Worker of a report's request, when it is idle or errored", () => {
-    expect(replyTarget(asking, manager, [worker, otherWorker, reviewer])).toEqual({ peer: worker });
-    expect(replyTarget(asking, manager, [{ ...worker, status: "error" }])).toEqual({ peer: { ...worker, status: "error" } });
-  });
-
-  it("to the live Worker when an archived one has the same request, and never to an archived agent (delta 20260918f F12)", () => {
-    // A broken Worker the Manager replaced keeps the request label; the user archived it.
-    const broken = peer({ id: "w0", title: "Broken", parentId: "m1", requestId: "req-20260916T062244Z", archived: true });
-    expect(replyTarget(asking, manager, [broken, worker, reviewer])).toEqual({ peer: worker });
-    expect(partiesOf(asking, manager, [broken, worker]).from.id).toBe("w1");
-    // Only the archived one: still named on the card, but nothing is sent to it.
-    expect(partiesOf(asking, manager, [broken]).from.id).toBe("w0");
-    expect(replyTarget(asking, manager, [broken])).toEqual({ reason: "Worker · Broken is archived." });
-  });
-
-  it("nowhere when no single Worker has the report's request", () => {
-    expect(replyTarget(asking, manager, [otherWorker])).toEqual({
-      reason: "Cannot tell which Worker asked this: no single Worker has `req-20260916T062244Z`.",
-    });
-    const twin = peer({ id: "w3", requestId: "req-20260916T062244Z" });
-    expect(replyTarget(asking, manager, [worker, twin])).toEqual({
-      reason: "Cannot tell which Worker asked this: no single Worker has `req-20260916T062244Z`.",
-    });
-  });
-
-  it("not now when the Worker is running, starting or closed", () => {
-    for (const status of ["running", "initializing"]) {
-      expect(replyTarget(asking, manager, [{ ...worker, status }])).toEqual({
-        reason: "Worker · Contact redesign is working; a message now would replace its turn. Send when it stops.",
-      });
-    }
-    expect(replyTarget(asking, manager, [{ ...worker, status: "closed" }])).toEqual({ reason: "Worker · Contact redesign is closed." });
-  });
-
-  it("guards a Reviewer's and a Manager's turn the same way", () => {
-    // A review in its Worker's chat answers the Reviewer of that batch.
-    expect(replyTarget(reviewCard, lead, [manager, reviewer])).toEqual({ peer: reviewer });
-    expect(replyTarget(reviewCard, lead, [manager, { ...reviewer, status: "running" }])).toEqual({
-      reason: "Reviewer r1 is working; a message now would replace its turn. Send when it stops.",
-    });
-    // A Manager's instruction in a Worker's chat answers that Manager.
-    expect(replyTarget(instruction, contact, [manager, reviewer])).toEqual({ peer: manager });
-    expect(replyTarget(instruction, contact, [{ ...manager, status: "running" }])).toEqual({
-      reason: "Manager · Beads Manager is working; a message now would replace its turn. Send when it stops.",
-    });
-    expect(replyTarget(instruction, contact, [])).toEqual({ reason: "Cannot tell which Manager to send this to." });
-  });
-});
-
-describe("sending a reply", () => {
-  const asking = card(ASKING);
-  const text = "Keep the old label.";
-  const expected = replyText(asking, text);
-
-  it("re-reads the peers, then sends one message to the recipient", async () => {
-    const refreshPeers = vi.fn(async () => ({ owner: manager, peers: [worker, otherWorker, reviewer] }));
-    const send = vi.fn(async () => undefined);
-    expect(await sendReply({ card: asking, text, refreshPeers, send })).toEqual({ ok: true, to: worker, text: expected });
-    expect(refreshPeers).toHaveBeenCalledTimes(1);
-    expect(send).toHaveBeenCalledTimes(1);
-    expect(send).toHaveBeenCalledWith("w1", expected);
-  });
-
-  it("does not send when the recipient started running since the card was drawn", async () => {
-    const send = vi.fn(async () => undefined);
-    const result = await sendReply({
-      card: asking,
-      text,
-      refreshPeers: async () => ({ owner: manager, peers: [{ ...worker, status: "running" }] }),
-      send,
-    });
-    expect(result).toEqual({ ok: false, reason: expect.stringContaining("is working") });
-    expect(send).not.toHaveBeenCalled();
-  });
-
-  it("reports a failed send and a failed refresh", async () => {
-    expect(
-      await sendReply({
-        card: asking,
-        text,
-        refreshPeers: async () => ({ owner: manager, peers: [worker] }),
-        send: async () => {
-          throw new Error("Agent not found");
-        },
-      }),
-    ).toEqual({ ok: false, reason: "Agent not found" });
-    const send = vi.fn(async () => undefined);
-    expect(
-      await sendReply({
-        card: asking,
-        text,
-        refreshPeers: async () => {
-          throw new Error("daemon unreachable");
-        },
-        send,
-      }),
-    ).toEqual({ ok: false, reason: "daemon unreachable" });
-    expect(send).not.toHaveBeenCalled();
-  });
-
-  it("touches nothing while the box is blank", async () => {
-    const refreshPeers = vi.fn(async () => ({ owner: manager, peers: [worker] }));
-    const send = vi.fn(async () => undefined);
-    expect(await sendReply({ card: asking, text: "  \n ", refreshPeers, send })).toEqual({ ok: false, reason: "Write a reply first." });
-    expect(refreshPeers).not.toHaveBeenCalled();
-    expect(send).not.toHaveBeenCalled();
-  });
-});
-
-describe("related beads on a card (delta 20260918d, batch b4)", () => {
-  const ids = ["bm-a", "bm-b", "bm-c", "bm-d", "bm-e", "bm-f", "bm-g"];
-
-  it("shows two and folds the rest behind the … chip", () => {
-    expect(visibleBeads([], false)).toEqual({ shown: [], hidden: 0 });
-    expect(visibleBeads(ids.slice(0, 2), false)).toEqual({ shown: ["bm-a", "bm-b"], hidden: 0 });
-    expect(visibleBeads(ids.slice(0, 3), false)).toEqual({ shown: ["bm-a", "bm-b"], hidden: 1 });
-    expect(visibleBeads(ids, false)).toEqual({ shown: ["bm-a", "bm-b"], hidden: 5 });
-  });
-
-  it("shows every bead once the … chip was pressed", () => {
-    expect(visibleBeads(ids, true)).toEqual({ shown: ids, hidden: 0 });
-    expect(visibleBeads(ids, true).shown).not.toBe(ids);
-  });
-
-  it("counts only beads the store really has: two chips, then … for the rest found (delta 20260918f F10)", () => {
-    // `beadIdCandidates` is a shape test: a report's text yields BM-REPORT,
-    // BM-QUESTIONS and hyphenated words before the real ids. The lookup keeps
-    // the ids the store has, in the order asked; only then are two shown.
-    const found = ["bm-a", "bm-b", "bm-c"].map((id) => ({ id }) as unknown as BeadRow);
-    expect(beadChipsView(found, false)).toEqual({ shown: found.slice(0, 2), hidden: 1 });
-    expect(beadChipsView(found, true)).toEqual({ shown: found, hidden: 0 });
-    expect(beadChipsView([], false)).toEqual({ shown: [], hidden: 0 });
-  });
-
-  it("hands the lookup every candidate, and lets BeadChips fold what it found", () => {
-    const card = readFileSync(fileURLToPath(new URL("../plugin/client/chat-card.tsx", import.meta.url)), "utf8");
-    const chips = readFileSync(fileURLToPath(new URL("../plugin/client/bead-chips.tsx", import.meta.url)), "utf8");
-    expect(card).toMatch(/<BeadChips\b[^>]*\bids=\{beadIds\}/);
-    expect(card).not.toMatch(/visibleBeads\(/);
-    expect(chips).toMatch(/beadChipsView\(/);
-    expect(chips).toMatch(/accessibilityLabel=\{`Show all \$\{/);
-  });
-});
-
-describe("the Reply button and the Answered chip (delta 20260918d, batch b4, Q14)", () => {
-  it("offers the Reply button until a reply went out, then the Answered chip", () => {
-    expect(replyControls(true, false)).toEqual({ replyButton: true, answeredChip: false });
-    expect(replyControls(true, true)).toEqual({ replyButton: false, answeredChip: true });
-  });
-
-  it("offers neither when the card cannot reply", () => {
-    expect(replyControls(false, false)).toEqual({ replyButton: false, answeredChip: false });
-    expect(replyControls(false, true)).toEqual({ replyButton: false, answeredChip: false });
-  });
-});
-
-/**
- * One answered state for every copy of a card (delta 20260918d §4.9, batch b6,
- * owner decisions Q16 a, Q17 a): the session store every copy subscribes to,
- * and what `chat.waiting` says about a question card.
- */
-describe("the session's answered state", () => {
-  it("tells every subscriber about a write, and stops after unsubscribing", () => {
-    const heard: number[] = [];
-    const stop = subscribeAnswers(() => heard.push(answersVersion()));
-    const before = answersVersion();
-    setAnswered("m1|req-x|Q1|a", { at: new Date(0), summary: "Q1 a", to: "Worker · X" });
-    setReplied("m1|req-x|Q1|a", new Date(1));
-    expect(heard).toEqual([before + 1, before + 2]);
-    expect(answeredRecord("m1|req-x|Q1|a")).toMatchObject({ summary: "Q1 a", to: "Worker · X" });
-    expect(repliedAt("m1|req-x|Q1|a")).toEqual(new Date(1));
-    stop();
-    setReplied("m1|req-x|Q1|a", new Date(2));
-    expect(heard).toHaveLength(2);
-    expect(answeredRecord("unknown")).toBeNull();
-    expect(repliedAt("unknown")).toBeNull();
-  });
-});
-
-describe("a question card that is no longer waiting", () => {
-  const asking = card(ASKING);
-  const waitingEntry = {
-    managerId: "m1",
-    workspaceId: "wks_a",
-    workerId: "w1",
-    workerTitle: "Contact redesign",
-    requestId: "req-20260916T062244Z",
-    text: ASKING,
-    at: null,
-    answered: [] as string[],
-  };
-
-  it("is still waiting only while chat.waiting lists this very report for this chat", () => {
-    expect(stillWaiting(asking, "m1", [waitingEntry])).toBe(true);
-    expect(stillWaiting(asking, "m2", [waitingEntry])).toBe(false);
-    expect(stillWaiting(asking, "m1", [{ ...waitingEntry, requestId: "req-20260916T081749Z" }])).toBe(false);
-    expect(stillWaiting(asking, "m1", [{ ...waitingEntry, text: `${ASKING}\nmore` }])).toBe(false);
-    expect(stillWaiting(asking, "m1", [])).toBe(false);
-  });
-
-  it("reads which of its questions the ledger answered from its own chat.waiting entry only", () => {
-    const partly = { ...waitingEntry, answered: ["Q6"] };
-    expect([...answeredInLedger(asking, "m1", [partly])]).toEqual(["Q6"]);
-    expect([...answeredInLedger(asking, "m2", [partly])]).toEqual([]);
-    expect([...answeredInLedger(asking, "m1", null)]).toEqual([]);
-    expect(movedOnLine("Worker · Contact redesign")).toBe("Answered, or Worker · Contact redesign is working or has reported since.");
-  });
-
-  it("counts as answered when sent, marked, or no longer listed — and not while unknown", () => {
-    expect(answeredHow({ sent: true, marked: true, waiting: [], stillWaitingNow: false })).toBe("sent");
-    expect(answeredHow({ sent: false, marked: true, waiting: null, stillWaitingNow: false })).toBe("marked");
-    expect(answeredHow({ sent: false, marked: false, waiting: null, stillWaitingNow: false })).toBeNull();
-    expect(answeredHow({ sent: false, marked: false, waiting: [waitingEntry], stillWaitingNow: true })).toBeNull();
-    expect(answeredHow({ sent: false, marked: false, waiting: [], stillWaitingNow: false })).toBe("moved-on");
-  });
-});
-
-describe("a finished report's card (delta 20260918d §4.10, req-20260918T074311Z)", () => {
-  const FINISHED = REPORT.replace("phase: blocked", "phase: finished");
-  const others = {
-    received: card(REPORT.replace("phase: blocked", "phase: received")),
-    "beads-done": card(REPORT.replace("phase: blocked", "phase: beads-done")),
-    blocked: card(REPORT),
-    "unreadable phase": card(REPORT.replace("phase: blocked", "phase: somewhere")),
-    review: card(REVIEW, "assistant_message"),
-    message: card(INSTRUCTION),
-  };
-  const source = readFileSync(fileURLToPath(new URL("../plugin/client/chat-card.tsx", import.meta.url)), "utf8");
-
-  it("reads the cards it is tested with as intended", () => {
-    expect(card(FINISHED)).toMatchObject({ type: "report", direction: "received", phase: "finished" });
-    expect(card(FINISHED, "assistant_message")).toMatchObject({ type: "report", direction: "sent", phase: "finished" });
-    expect(others["unreadable phase"]).toMatchObject({ type: "report", phase: null });
-    expect(others.review.type).toBe("review");
-    expect(others.message.type).toBe("message");
-  });
-
-  it("opens with the whole message showing, in the Manager's chat and in the Worker's own", () => {
-    expect(startsOpen(card(FINISHED))).toBe(true);
-    expect(startsOpen(card(FINISHED, "assistant_message"))).toBe(true);
-  });
-
-  /** One value per card of `others`, so a failure shows every card at once. */
-  const each = <T>(of: (card: ChatCard) => T) => Object.fromEntries(Object.entries(others).map(([name, other]) => [name, of(other)]));
-  const all = <T>(value: T) => Object.fromEntries(Object.keys(others).map((name) => [name, value]));
-
-  it("leaves every other card folded", () => {
-    expect(each(startsOpen)).toEqual(all(false));
-  });
-
-  it("wears a success outline, in the Manager's chat and in the Worker's own", () => {
-    expect(outlineTone(card(FINISHED))).toBe("success");
-    expect(outlineTone(card(FINISHED, "assistant_message"))).toBe("success");
-  });
-
-  it("leaves every other card with the usual border", () => {
-    expect(each(outlineTone)).toEqual(all(null));
-  });
-
-  it("colours only the outer frame's border, at the usual width, never a left border", () => {
-    expect(source).toContain("const outline = outlineTone(card);");
-    expect(source).toContain(
-      "<View style={[styles.card, { gap: 6, marginVertical: 4 }, outline === null ? null : { borderColor: toneColor(theme, outline) }]}>",
-    );
-    expect(source).not.toMatch(/borderLeft(Width|Color)/);
-  });
-
-  it("is the card's first open state, still toggled by its button", () => {
-    expect(source).toContain("const [open, setOpen] = useState(() => startsOpen(card));");
-    expect(source).not.toMatch(/\[open, setOpen\] = useState\(false\)/);
-    expect(source).toContain("onPress={() => setOpen(!open)}");
-  });
-});
-
-describe("ownerWarning (delta 20260918g §4.4)", () => {
-  const peer = (labelled: boolean | undefined) => ({
-    id: "f13a4e4e-18b6-4369-91c8-70c61460ef2d",
-    role: "manager" as const,
-    title: "Hãy pull code mới nhất từ branch dev về",
-    status: "idle",
-    parentId: null,
-    requestId: null,
-    batchId: null,
-    archived: false,
-    ...(labelled === undefined ? {} : { labelled }),
-  });
-
-  it("warns in the chat of an agent recognised only by its provider", () => {
-    expect(ownerWarning(peer(false))).toEqual({
-      chip: { text: "Not started by paseo-bm", tone: "warning" },
-      line: "This agent has no bm.role label: it was started outside Beads Manager, and paseo-bm recognised it by its provider.",
-    });
-  });
-
-  it("says nothing for a labelled agent, an older server's peer, or no owner", () => {
-    expect(ownerWarning(peer(true))).toBeNull();
-    expect(ownerWarning(peer(undefined))).toBeNull();
-    expect(ownerWarning(null)).toBeNull();
-  });
-});
-
-describe("formatIssues on cards (delta 20260918g §4.8)", () => {
-  const REQ_G = "req-20260918T071130Z";
-  const blockedReport = (options: string[]) =>
-    [
-      "BM-REPORT",
-      `requestId: ${REQ_G}`,
-      "phase: blocked",
-      "tier: Large (changed: no)",
-      "filesChanged: none",
-      "beadsCreated: none",
-      "beadsUpdated: none",
-      "beadsClosed: none",
-      "beadsReady: none",
-      "reviewFindingsOpen: none",
-      "buildAndTests: not run",
-      "skillsUsed: feature-workflow",
-      "blockers: 1 question: Q1 — see BM-QUESTIONS",
-      "",
-      "BM-QUESTIONS",
-      `requestId: ${REQ_G}`,
-      "Q1: Storage — where?",
-      ...options,
-    ].join("\n");
-  const review = (verdict: string) =>
-    ["BM-REVIEW", `requestId: ${REQ_G}`, "batchId: b4", "reviewKind: first", `verdict: ${verdict}`, "checked: the diff", "findings: none", "notChecked: none"].join("\n");
-
-  it("lists the issues of a received block that breaks its template", () => {
-    const card = toChatCard({ type: "user_message", text: blockedReport(["- a: the table.", "- b: a file."]) }, "complete")!;
-    expect(card.formatIssues).toEqual(["BM-QUESTIONS Q1: needs exactly one option ending in (recommended) (found 0)"]);
-  });
-
-  it("is empty for a received block that follows its template", () => {
-    const card = toChatCard({ type: "user_message", text: blockedReport(["- a: the table. (recommended)", "- b: a file."]) }, "complete")!;
-    expect(card.formatIssues).toEqual([]);
-  });
-
-  it("checks a Reviewer's own review, but not a Worker quoting its report in its own chat", () => {
-    const quoted = toChatCard({ type: "assistant_message", text: blockedReport(["- a: the table.", "- b: a file."]) }, "complete")!;
-    expect(quoted.formatIssues).toEqual([]);
-    const own = toChatCard({ type: "assistant_message", text: review("approved") }, "complete")!;
-    expect(own.formatIssues).toEqual(["BM-REVIEW verdict: must be pass or changes-required"]);
-  });
-
-  it("never makes a card of what the user typed", () => {
-    expect(toChatCard({ type: "user_message", text: review("approved"), clientMessageId: "c1" }, "complete")).toBeUndefined();
-  });
-
-  it("defaults to no issues for card data written before the field existed", () => {
-    const older: Record<string, unknown> = { ...toChatCard({ type: "user_message", text: review("pass") }, "complete")! };
-    delete older["formatIssues"];
-    expect(chatCardSchema.parse(older).formatIssues).toEqual([]);
-  });
-});
-
-describe("fallbackMarkdown (delta 20260918g §4.8, Q3 a)", () => {
-  it("lays a report out like the card: one field per line, questions apart from their options", () => {
-    const text = [
-      "BM-REPORT",
-      "requestId: req-20260918T070348Z",
-      "phase: blocked",
-      "blockers: 1 question: Q1 — see BM-QUESTIONS",
-      "",
-      "BM-QUESTIONS",
-      "requestId: req-20260918T070348Z",
-      "Q1: Storage — where?",
-      "- a: the table. (recommended)",
-      "- b: a file.",
-    ].join("\n");
-    const markdown = fallbackMarkdown({ text });
-    expect(markdown).toBe(markdownOf(text));
-    expect(markdown).toContain("- **phase**: blocked");
-    expect(markdown).toContain("- **blockers**: 1 question: Q1 — see BM-QUESTIONS");
-    expect(markdown).toContain("  - **a**: the table. (recommended)");
-    // The raw text, rendered as Markdown, ran the fields into one paragraph.
-    expect(markdown).not.toBe(text);
-  });
-});
-
-describe("the fallback card (delta 20260921 §4.4.6, REQ-065 c)", () => {
-  // Local times, so the labels read the same in every time zone.
-  const NOW = new Date(2026, 8, 21, 14, 0);
-  const at = (hours: number, minutes = 0, days = 0) => new Date(2026, 8, 21 + days, hours, minutes).toISOString();
-
-  const incident = (overrides: Partial<FallbackIncident> = {}): FallbackIncident => ({
-    id: "fb-3f9a2c1d7e4b",
-    role: "worker",
-    workspaceId: "wks_1",
-    requestId: "req-20260921T111242Z",
-    agentId: "wrk-1",
-    agentProvider: "bm-worker/claude-opus-5",
-    agentModel: "claude-opus-5",
-    parentId: "mgr-1",
-    managerId: "mgr-1",
-    class: "L1",
-    signal: "failed",
-    message: "You've hit your usage limit.",
-    perModelWindow: false,
-    resetsAt: at(15, 40),
-    candidate: { position: 1, alias: "bm-worker-fallback-1", baseProvider: "codex", model: "gpt-5.6-sol", thinkingOptionId: "high", modeId: null },
-    status: "pending",
-    detectedAt: "2026-09-21T14:00:00.000Z",
-    decidedAt: null,
-    waitUntil: null,
-    replacementId: null,
-    error: null,
-    ...overrides,
-  });
-  /** The notice exactly as the plugin sends it. */
-  const noticeOf = (overrides: Partial<FallbackIncident> = {}) => fallbackNotice(incident(overrides), () => "claude");
-  const found = (overrides: Partial<FallbackIncident> = {}): FallbackLookup => ({ state: "found", incident: incident(overrides) });
-  const cardOf = (text = noticeOf()) => toChatCard({ type: "user_message", text, clientMessageId: "sdk-message-id" }, "complete")!;
-  const view = (lookup: FallbackLookup, cost: Parameters<typeof fallbackCardView>[3] = null) => fallbackCardView(cardOf(), lookup, NOW, cost);
-
-  it("turns the plugin's notice into a fallback card, although Paseo stores a clientMessageId on it", () => {
-    const card = cardOf();
-    expect(chatCardSchema.parse(card)).toMatchObject({
-      type: "fallback",
-      direction: "received",
-      requestId: "req-20260921T111242Z",
-      questions: [],
-      formatIssues: [],
-      fallback: { incident: "fb-3f9a2c1d7e4b", role: "worker", agent: "wrk-1", class: "L1", provider: "bm-worker (claude) · claude-opus-5", message: "You've hit your usage limit." },
-    });
-    expect(toChatCard({ type: "user_message", text: noticeOf() }, "complete")?.type).toBe("fallback");
-  });
-
-  it("keeps no state of the notice: status, candidate and reset time come only from fallback.incidents", () => {
-    expect(Object.keys(fallbackNoticeCardSchema.shape).sort()).toEqual(["agent", "class", "incident", "message", "provider", "role"]);
-    expect(cardOf().fallback).not.toHaveProperty("status");
-    // The notice says pending; the incident has been decided since: no button.
-    const stale = fallbackCardView(cardOf(noticeOf({ status: "pending" })), found({ status: "dismissed" }), NOW, null);
-    expect(stale.buttons).toEqual([]);
-    expect(stale.statusLine).toEqual({ text: "Dismissed: you handle it.", tone: "muted" });
-  });
-
-  it("is made only for the notice itself, never for a quote of it", () => {
-    expect(toChatCard({ type: "assistant_message", text: noticeOf() }, "complete")).toBeUndefined();
-    expect(toChatCard({ type: "user_message", text: `The plugin said:\n\n${noticeOf()}`, clientMessageId: "c1" }, "complete")).toBeUndefined();
-    expect(toChatCard({ type: "user_message", text: noticeOf().replace("fb-3f9a2c1d7e4b", "fb-nope"), clientMessageId: "c1" }, "complete")).toBeUndefined();
-    // Every other card says it is not one.
-    expect(toChatCard({ type: "user_message", text: REPORT }, "complete")?.fallback).toBeNull();
-  });
-
-  it("offers all three buttons for a pending incident with a candidate and a reset within 7 days", () => {
-    const shown = view(found());
-    expect(shown.buttons).toEqual([
-      { action: "switch", label: "Switch to bm-worker-fallback-1 · Codex · gpt-5.6-sol" },
-      { action: "wait", label: "Wait until 15:40" },
-      { action: "dismiss", label: "I'll handle it" },
-    ]);
-    expect(shown.statusLine).toBeNull();
-    expect(shown).toMatchObject({
-      title: "Worker stopped by its provider plan",
-      requestId: "req-20260921T111242Z",
-      summary: "Usage limit (L1) · bm-worker · claude-opus-5",
-      message: "You've hit your usage limit.",
-      chip: { text: "pending", tone: "warning" },
-    });
-  });
-
-  it("drops Switch without a candidate and Wait without a usable reset; I'll handle it stays", () => {
-    const actions = (overrides: Partial<FallbackIncident>) => view(found(overrides)).buttons.map((button) => button.action);
-    expect(actions({ candidate: null })).toEqual(["wait", "dismiss"]);
-    expect(actions({ resetsAt: null })).toEqual(["switch", "dismiss"]);
-    expect(actions({ resetsAt: "not a time" })).toEqual(["switch", "dismiss"]);
-    expect(actions({ resetsAt: new Date(NOW.getTime() + FALLBACK_MAX_WAIT_MS + 60_000).toISOString() })).toEqual(["switch", "dismiss"]);
-    expect(actions({ candidate: null, resetsAt: null })).toEqual(["dismiss"]);
-  });
-
-  it("waits up to exactly 7 days ahead, and resumes at once for a reset already past", () => {
-    expect(waitDeadline(new Date(NOW.getTime() + FALLBACK_MAX_WAIT_MS).toISOString(), NOW)).not.toBeNull();
-    expect(view(found({ resetsAt: at(10, 5, 1) })).buttons[1]).toEqual({ action: "wait", label: "Wait until tomorrow 10:05" });
-    expect(view(found({ resetsAt: at(9, 0, 3) })).buttons[1]).toEqual({ action: "wait", label: "Wait until Thu 24 Sep 09:00" });
-    expect(view(found({ resetsAt: at(13, 30) })).buttons[1]).toEqual({ action: "wait", label: "Resume now (the limit reset at 13:30)" });
-  });
-
-  it("names the candidate's price when one is known: the bundled table, then what Paseo lists", () => {
-    const sonnet = { position: 1, alias: "bm-worker-fallback-1", baseProvider: "claude", model: "claude-sonnet-5", thinkingOptionId: null, modeId: null };
-    expect(candidateCost(sonnet, null)).toEqual({ inputUsdPerMTok: 2, cacheReadUsdPerMTok: 0.2, outputUsdPerMTok: 10 });
-    const listed = [{ id: "gpt-5.6-sol", label: "GPT-5.6-Sol", thinkingOptions: [], defaultThinkingOptionId: null, cost: { inputUsdPerMTok: 1.25, cacheReadUsdPerMTok: 0.125, outputUsdPerMTok: 10 } }];
-    const cost = candidateCost(incident().candidate, listed);
-    expect(view(found(), cost).buttons[0]!.label).toBe("Switch to bm-worker-fallback-1 · Codex · gpt-5.6-sol · ~$1.25 / $10 per 1M tokens");
-    expect(candidateCost(incident().candidate, [])).toBeNull();
-    expect(candidateCost(null, listed)).toBeNull();
-    // Paseo is asked only for a pending candidate the table has no price for.
-    expect(listedCostProvider(found())).toBe("codex");
-    expect(listedCostProvider(found({ candidate: sonnet }))).toBeNull();
-    expect(listedCostProvider(found({ status: "switched" }))).toBeNull();
-    expect(listedCostProvider(found({ candidate: null }))).toBeNull();
-    expect(listedCostProvider({ state: "loading" })).toBeNull();
-  });
-
-  it("shows no button, only one status line, once the incident is not pending", () => {
-    const lines = Object.fromEntries(
-      (
-        [
-          ["switched", { replacementId: "3d2c1b0a-9f8e-4d7c-b6a5-0123456789ab" }],
-          ["waiting", { waitUntil: at(15, 41) }],
-          ["resumed", {}],
-          ["dismissed", {}],
-          ["exhausted", {}],
-          ["expired", {}],
-          ["failed", { error: "E_FALLBACK_CREATE_FAILED: Paseo refused the new agent" }],
-        ] as const
-      ).map(([status, extra]) => {
-        const shown = view(found({ status, ...extra }));
-        expect(shown.buttons, status).toEqual([]);
-        expect(shown.chip?.text, status).toBe(status);
-        return [status, shown.statusLine?.text];
-      }),
-    );
-    expect(lines).toEqual({
-      switched: "Switched to bm-worker-fallback-1 · Codex · gpt-5.6-sol (agent 3d2c1b0a).",
-      waiting: "Waiting until 15:41; then the Worker carries on.",
-      resumed: "Resumed: the limit reset and the Worker was asked to carry on.",
-      dismissed: "Dismissed: you handle it.",
-      exhausted: "No fallback left to switch to.",
-      expired: "Expired: by the reset the Worker was archived, running or already replaced.",
-      failed: "Failed: E_FALLBACK_CREATE_FAILED: Paseo refused the new agent",
-    });
-  });
-
-  it("offers nothing while the incident is unknown, unreadable or no longer recorded", () => {
-    const loading = view({ state: "loading" });
-    expect(loading).toMatchObject({ buttons: [], chip: null, statusLine: { text: "Checking the incident…", tone: "muted" } });
-    // Until the incident is read, the notice's own words describe it.
-    expect(loading.summary).toBe("Usage limit (L1) · bm-worker (claude) · claude-opus-5");
-    const failed = view({ state: "failed", error: new DashboardError("E_FALLBACK_NOT_FOUND", "paseo-bm cannot find its install home") });
-    expect(failed).toMatchObject({ buttons: [], statusLine: { text: "Could not read the incident (E_FALLBACK_NOT_FOUND): paseo-bm cannot find its install home", tone: "danger" } });
-    expect(view({ state: "failed", error: new Error("daemon unreachable") }).statusLine?.text).toBe("Could not read the incident: daemon unreachable");
-    expect(view(lookupOf("fb-3f9a2c1d7e4b", [incident({ id: "fb-000000000002" })]))).toMatchObject({ buttons: [], chip: null });
-    expect(lookupOf("fb-3f9a2c1d7e4b", [incident()])).toEqual(found());
-  });
-
-  it("builds the same card for a waiting pill, from the incident alone", () => {
-    const card = fallbackCardOfIncident(incident());
-    expect(chatCardSchema.parse(card)).toMatchObject({ type: "fallback", requestId: "req-20260921T111242Z", fallback: { incident: "fb-3f9a2c1d7e4b", role: "worker" } });
-    expect(fallbackCardView(card, found(), NOW, null).buttons.map((button) => button.action)).toEqual(["switch", "wait", "dismiss"]);
-    expect(fallbackCardView(card, { state: "loading" }, NOW, null).summary).toBe("Usage limit (L1) · bm-worker · claude-opus-5");
-  });
-
-  it("presses a button with ONE fallback.act call, and shows a failure with its code", async () => {
-    const decided = incident({ status: "dismissed", decidedAt: "2026-09-21T14:05:00.000Z" });
-    const act = vi.fn(async () => ({ incident: decided }));
-    expect(await runFallbackAction({ incidentId: "fb-3f9a2c1d7e4b", action: "dismiss", act })).toEqual({ ok: true, incident: decided });
-    expect(act).toHaveBeenCalledTimes(1);
-    expect(act).toHaveBeenCalledWith({ incidentId: "fb-3f9a2c1d7e4b", action: "dismiss" });
-
-    const refused = vi.fn(async () => {
-      throw new DashboardError("E_FALLBACK_NO_CANDIDATE", "bm-worker-fallback-1 is not available");
-    });
-    expect(await runFallbackAction({ incidentId: "fb-3f9a2c1d7e4b", action: "switch", act: refused })).toEqual({
-      ok: false,
-      reason: "Could not switch to the fallback (E_FALLBACK_NO_CANDIDATE): bm-worker-fallback-1 is not available",
-    });
-    expect(refused).toHaveBeenCalledTimes(1);
-    expect(fallbackActError("wait", new DashboardError("E_FALLBACK_NO_RESET", "no reset time"))).toBe("Could not wait for the reset (E_FALLBACK_NO_RESET): no reset time");
-    expect(fallbackActError("dismiss", new Error("socket closed"))).toBe("Could not record that you handle it: socket closed");
-  });
-
-  it("reads a time in the device's zone: today, tomorrow, yesterday, or the date", () => {
-    expect(localTimeText(new Date(2026, 8, 21, 9, 5), NOW)).toBe("09:05");
-    expect(localTimeText(new Date(2026, 8, 22, 0, 0), NOW)).toBe("tomorrow 00:00");
-    expect(localTimeText(new Date(2026, 8, 20, 23, 59), NOW)).toBe("yesterday 23:59");
-    expect(localTimeText(new Date(2026, 9, 1, 18, 30), NOW)).toBe("Thu 1 Oct 18:30");
-  });
-});
-
-describe("the user's reply from a card, in the recipient's chat", () => {
-  // As the Worker received it on 2026-09-24: `replyText` of a card in the Manager's chat.
-  const REPLY = [
-    "Reply from the user about `req-20260924T064739Z`:",
-    "",
-    "BM-ANSWERS",
-    "requestId: req-20260924T064739Z",
-    "Q1: a — Keep the old URL comment",
-    "Q2: other — push to dev only",
-    "",
-    "Thanks, go ahead.",
-  ].join("\n");
-  const replyCard = (text = REPLY) => toChatCard({ type: "user_message", text, clientMessageId: "c1" }, "complete");
-
-  it("is a card of its own, with its request and one row per answer", () => {
-    const card = replyCard()!;
-    expect(card).toMatchObject({ type: "reply", direction: "received", requestId: "req-20260924T064739Z", batchId: null, formatIssues: [], questions: [] });
-    expect(card.answers).toEqual([
-      { id: "Q1", text: "a — Keep the old URL comment" },
-      { id: "Q2", text: "other — push to dev only" },
-    ]);
-    expect(card.answers.map(answerRowText)).toEqual(["Q1 · a — Keep the old URL comment", "Q2 · other — push to dev only"]);
-    expect(chatCardSchema.parse(card)).toEqual(card);
-  });
-
-  it("says it is the user's, what it answers, and the user's own words", () => {
-    const card = replyCard()!;
-    expect(senderName(card, partiesOf(card, worker, [manager]).from)).toBe("You");
-    expect(partiesOf(card, worker, [manager]).to.id).toBe(worker.id);
-    expect(statusChip(card)).toEqual({ text: "Your reply", tone: "info" });
-    expect(summaryOf(card)).toBe("answers to Q1, Q2 · Thanks, go ahead.");
-    expect(replyNote(REPLY)).toBe("Thanks, go ahead.");
-    expect(drawAsCard(card, worker)).toBe(true);
-  });
-
-  it("round-trips what the card's Reply box sends, with a batch and free words only", () => {
-    const review = card(REVIEW);
-    const text = replyText(review, "Looks fine to me.");
-    const sent = replyCard(text)!;
-    expect(sent).toMatchObject({ type: "reply", requestId: "req-20260916T081749Z", batchId: "b1", answers: [], gist: "Looks fine to me." });
-    expect(summaryOf(sent)).toBe("Looks fine to me.");
-  });
-
-  it("leaves everything else the user typed to Paseo", () => {
-    expect(replyCard("Please reply from the user about this")).toBeUndefined();
-    expect(replyCard(INSTRUCTION)).toBeUndefined();
-  });
-
-  it("shows the answers the Manager relays as rows too, but not a block of another request", () => {
-    const relay = ["Continue req-20260924T064739Z.", "", "BM-ANSWERS", "requestId: req-20260924T064739Z", "Q3: b — Medium"].join("\n");
-    const relayed = toChatCard({ type: "user_message", text: relay }, "complete")!;
-    expect(relayed.type).toBe("message");
-    expect(relayed.answers).toEqual([{ id: "Q3", text: "b — Medium" }]);
-    expect(summaryOf(relayed)).toBe("answer to Q3");
-    // A reply about one request carrying another request's block shows no rows.
-    expect(replyCard(REPLY.replace("requestId: req-20260924T064739Z", "requestId: req-20260101T000000Z"))!.answers).toEqual([]);
-  });
-});
-
-describe("the plugin's own notices, as a card", () => {
-  // The three the owner saw raw on 2026-09-24.
-  const FORMAT = [
-    "BM-FORMAT requestId: req-20260924T065116Z",
-    "Your last BM-REPORT broke the template:",
-    '- BM-REPORT tier: must be "Small|Medium|Large (changed: no)"',
-    "Send the whole corrected block again, to the same agent as before, in one message.",
-  ].join("\n");
-  const ANSWERED = [
-    "BM-ANSWERED requestId: req-20260924T064739Z",
-    "The user answered Q1, Q2, Q3, Q4 directly to the Worker (in its card or chat); the Worker has them.",
-    "Still open: Q5.",
-  ].join("\n");
-  const noticeCard = (text: string) => toChatCard({ type: "user_message", text, clientMessageId: "sdk-message-id" }, "complete");
-
-  it("names the notice, its request and what it says, and nothing else", () => {
-    const card = noticeCard(FORMAT)!;
-    expect(card).toMatchObject({ type: "notice", notice: "BM-FORMAT", requestId: "req-20260924T065116Z", formatIssues: [], questions: [], answers: [] });
-    expect(card.gist).toBe("Your last BM-REPORT broke the template:");
-    expect(statusChip(card)).toEqual({ text: "BM-FORMAT", tone: "muted" });
-    expect(summaryOf(card)).toBe("Your last BM-REPORT broke the template:");
-    expect(chatCardSchema.parse(card)).toEqual(card);
-    expect(noticeCard(ANSWERED)).toMatchObject({ type: "notice", notice: "BM-ANSWERED", requestId: "req-20260924T064739Z" });
-  });
-
-  it("comes from the plugin, and has no one to reply to", () => {
-    const card = noticeCard(ANSWERED)!;
-    const { from, to } = partiesOf(card, manager, [worker]);
-    expect(senderName(card, from)).toBe("paseo-bm plugin");
-    expect(from.id).toBeNull();
-    expect(to.id).toBe(manager.id);
-    expect(drawAsCard(card, manager)).toBe(true);
-  });
-
-  it("covers the reviewer stop notice, and leaves a message that only mentions a notice alone", () => {
-    expect(noticeCard("STOP: The Beads Worker that created you was stopped by the user.")).toMatchObject({ type: "notice", notice: "STOP" });
-    expect(noticeCard(`The plugin said:\n\n${FORMAT}`)).toBeUndefined();
   });
 });

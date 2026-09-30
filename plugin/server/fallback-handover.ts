@@ -10,7 +10,7 @@
  * | `requestId` | the replaced Worker's `bm.requestId` label, recorded on the incident |
  * | report fields | the LATEST `BM-REPORT` of that request in the workspace trace store |
  * | `reviewCalls` | the request's reconstructed trace, against its tier's budget; a replacement Reviewer's first message is not counted (§4.5.1) |
- * | `questions` | the question–answer ledger: every question of the request with its latest answer or `open` (design delta 20260924-qa-ledger §8) |
+ * | `questions` | the decision store: every question the request asked the owner (`q:<requestId>:<Qn>`) with its answer, `open`, or how it ended (autonomy design §A.4) |
  * | original request | the first `user_message` of the replaced Worker's timeline |
  *
  * Manager (`managerHandover`):
@@ -18,7 +18,7 @@
  * | Field | Source |
  * |---|---|
  * | `workers` | live, non-replaced Workers of the workspace (`bmAgentsOf`, `liveWorkersOf`); provider and model from each one's snapshot; last report as for the Worker |
- * | `openQuestions` | `waitingOf` (the pill's rule, with the question–answer ledger) on the old Manager's timeline |
+ * | `openQuestions` | the decision store: each listed Worker's unsettled questions, by its request |
  * | `openIncidents` | the workspace's other `pending` or `waiting` incidents |
  * | user's messages | the three newest `user_message` items WITH `clientMessageId` (the user's own words) in the old Manager's timeline |
  *
@@ -27,22 +27,22 @@
  * blocks the switch. Every quoted user text is masked like every trace record
  * (REQ-048b).
  */
+import { dirname } from "node:path";
 import { peersOfWorkspace } from "./chat-peers";
-import { WAITING_TIMELINE_LIMIT, WAITING_TIMELINE_PAGES, waitingOf, type WaitingEntry } from "./chat-waiting";
 import { redactText } from "./collector";
 import { agentFactsOf, bmAgentsOf, reviewerReplacementIds, reviewerReplacementsFor, type DashboardPaseo } from "./dashboard-rpc";
+import { createDecisionStore } from "./decision-store";
 import { replacementsOf } from "./fallback-state";
 import { LIVE_MAX_PAGES, LIVE_PAGE_LIMIT, readTimelinePages, type LiveTimelinePaseo } from "./live-timeline";
 import { isPluginNotice } from "./notices";
 import { providerId } from "./provider-id";
-import { answeredIds, handoverQuestionLines, readQaLedger, type QaLedger } from "./qa-ledger";
 import { REVIEW_BUDGET } from "./review-budget";
 import { asRecord, nonEmpty } from "./role-choices";
 import { TRUNCATION_MARKER, readRecords, type TraceStoreLocation } from "./trace-store";
 import { reconstructTraces } from "./traces";
 import { FALLBACK_CLASS_LABELS } from "../shared/bm-fallback";
-import { parseQuestions } from "../shared/bm-questions";
-import type { ChatPeer, FallbackIncident, ParsedReport, TraceRecord, WaitingWorker } from "../shared/contracts";
+import type { ChatPeer, FallbackIncident, ParsedReport, TraceRecord } from "../shared/contracts";
+import { decisionKindOf, isAnswerable, type Decision } from "../shared/decisions";
 
 /** First line of the handover. */
 export const HANDOVER_MARKER = "BM-HANDOVER";
@@ -59,6 +59,12 @@ const BLOCKERS_CHARS = 300;
 /** The user's newest messages a Manager handover quotes, and the longest one. */
 const QUOTED_MESSAGES = 3;
 const QUOTED_MESSAGE_CHARS = 1000;
+
+/** Longest question or answer text in one `questions` line. */
+export const HANDOVER_TEXT_CHARS = 300;
+
+/** Timeline items per page when the old Manager's timeline is read for the owner's messages. */
+const MANAGER_TIMELINE_LIMIT = 200;
 
 /** Incidents a new Manager inherits: still to be decided, or waiting for a reset. */
 const OPEN_INCIDENT_STATUSES: ReadonlySet<FallbackIncident["status"]> = new Set(["pending", "waiting"]);
@@ -108,18 +114,43 @@ async function within<T>(budget: number, work: () => Promise<T> | T): Promise<T 
   }
 }
 
-/** The ledger when it reads cleanly; null (so "unknown") when it is missing its home, unreadable, corrupt or too new. */
-function ledgerOf(location: TraceStoreLocation | null): QaLedger | null {
+/**
+ * The workspace's Worker questions in the decision store (autonomy design
+ * §A.4), which lives beside the trace store in the data folder; null (so
+ * "unknown") without a trace store or when the store cannot be read.
+ */
+function questionDecisionsOf(location: TraceStoreLocation | null, workspaceId: string): Decision[] | null {
   if (location === null) return null;
-  const ledger = readQaLedger(location);
-  return ledger.notices.length > 0 ? null : ledger;
+  return createDecisionStore(dirname(location.tracesDir), { log: () => undefined })
+    .list({ workspaceId })
+    .filter((decision) => decisionKindOf(decision.id) === "question");
 }
 
-/** The `questions` block of a Worker handover: `unknown`, `none`, or one line per question. */
-function questionsBlock(ledger: QaLedger | null, requestId: string | null): string[] {
-  if (ledger === null || requestId === null) return ["questions: unknown"];
-  const lines = handoverQuestionLines(ledger, requestId);
-  return lines.length === 0 ? ["questions: none"] : ["questions:", ...lines];
+/** `Q3` of `q:<requestId>:Q3`. */
+const questionIdOf = (decision: Pick<Decision, "id">): string => decision.id.slice(decision.id.lastIndexOf(":") + 1);
+const questionNumber = (decision: Pick<Decision, "id">): number => Number.parseInt(questionIdOf(decision).slice(1), 10);
+
+const handoverText = (text: string): string => oneLine(text, HANDOVER_TEXT_CHARS);
+
+/** What became of a question: its answer, `open`, or how it ended without one. */
+function outcomeOf(decision: Decision): string {
+  if (isAnswerable(decision)) return "open";
+  if (decision.status === "superseded") return decision.supersededBy === null ? "superseded" : `superseded by ${questionIdOf({ id: decision.supersededBy })}`;
+  if (decision.status !== "answered" || decision.answer === null) return decision.status;
+  const { optionKey, words } = decision.answer;
+  if (optionKey !== null) {
+    const label = decision.options.find((option) => option.key === optionKey)?.label;
+    return handoverText(label === undefined ? optionKey : `${optionKey} — ${label}`);
+  }
+  return words === null ? "answered in chat" : handoverText(`other — ${words}`);
+}
+
+/** The `questions` block of a Worker handover: `unknown`, `none`, or one line per question in number order. */
+function questionsBlock(decisions: readonly Decision[] | null, requestId: string | null): string[] {
+  if (decisions === null || requestId === null) return ["questions: unknown"];
+  const asked = decisions.filter((decision) => decision.requestId === requestId).sort((a, b) => questionNumber(a) - questionNumber(b));
+  if (asked.length === 0) return ["questions: none"];
+  return ["questions:", ...asked.map((decision) => `- ${questionIdOf(decision)}: ${handoverText(decision.question)} → ${outcomeOf(decision)}`)];
 }
 
 /** The request's latest `BM-REPORT` in the trace store, or null. */
@@ -165,7 +196,7 @@ export async function workerHandover(incident: FallbackIncident, deps: HandoverD
   const requestId = incident.requestId;
   const records =
     deps.location === null ? null : await within(budget, () => readRecords(deps.location!, incident.workspaceId).records);
-  const [report, review, original, ledger] = await Promise.all([
+  const [report, review, original, questions] = await Promise.all([
     within(budget, () => (records === null || requestId === null ? null : latestReport(records, requestId))),
     within(budget, async () => {
       if (records === null || requestId === null) return null;
@@ -177,7 +208,7 @@ export async function workerHandover(incident: FallbackIncident, deps: HandoverD
       return reconstructTraces({ records, agents: [...facts.values()], replacementIds }).find((trace) => trace.requestId === requestId) ?? null;
     }),
     within(budget, () => firstUserMessage(deps.paseo, incident.agentId)),
-    within(budget, () => ledgerOf(deps.location)),
+    within(budget, () => questionDecisionsOf(deps.location, incident.workspaceId)),
   ]);
 
   const tier = report?.tier ?? review?.tier ?? null;
@@ -203,7 +234,7 @@ export async function workerHandover(incident: FallbackIncident, deps: HandoverD
     `skillsUsed: ${list(report?.skillsUsed)}`,
     // What the stopped Worker chose on its own, so its final report can still list it.
     `decided: ${report === null ? "none" : list(report.decided ?? [])}`,
-    ...questionsBlock(ledger, requestId),
+    ...questionsBlock(questions, requestId),
     "",
     WORKER_CLOSING,
     "",
@@ -236,8 +267,6 @@ interface SnapshotPaseo {
 interface ManagerTimeline {
   /** Pages read so far. */
   pages: number;
-  /** The pill's window (`WAITING_TIMELINE_PAGES`), newest first, as `waitingOf` wants it. */
-  recent: WaitingEntry[];
   /** The user's own messages, newest first, masked and cut; at most `QUOTED_MESSAGES`. */
   typed: string[];
 }
@@ -271,14 +300,13 @@ function quoted(text: string, env: NodeJS.ProcessEnv): string {
 
 /**
  * Reads the old Manager's timeline back to its start (bounded) into `into`:
- * the pill's window and the user's newest messages. Filled as pages arrive,
- * so what was read before the budget ran out still counts.
+ * the user's newest messages. Filled as pages arrive, so what was read before
+ * the budget ran out still counts.
  */
 async function readManagerTimeline(paseo: unknown, managerId: string, into: ManagerTimeline, env: NodeJS.ProcessEnv): Promise<true> {
-  await readTimelinePages(paseo as LiveTimelinePaseo, managerId, { pages: LIVE_MAX_PAGES, limit: WAITING_TIMELINE_LIMIT }, (entries) => {
+  await readTimelinePages(paseo as LiveTimelinePaseo, managerId, { pages: LIVE_MAX_PAGES, limit: MANAGER_TIMELINE_LIMIT }, (entries) => {
     // Pages come newest first, each oldest first.
     const newestFirst = [...entries].reverse();
-    if (into.pages < WAITING_TIMELINE_PAGES) into.recent.push(...newestFirst);
     into.pages += 1;
     for (const entry of newestFirst) {
       if (into.typed.length >= QUOTED_MESSAGES) break;
@@ -307,12 +335,14 @@ function workerLine(worker: ChatPeer, records: readonly TraceRecord[] | null, sn
   return `- ${worker.id} · requestId ${worker.requestId ?? "unknown"} · ${runsOn} · ${worker.status} · last report: ${last} · blockers: ${blockers}`;
 }
 
-/** `workerId: Q1, Q2; …` for the Workers waiting on the user, or `none`. */
-function questionsOf(waiting: readonly WaitingWorker[]): string {
-  const parts = waiting.map((entry) => {
-    const answered = new Set(entry.answered ?? []);
-    const open = (parseQuestions(entry.text)?.questions ?? []).map((question) => question.id).filter((id) => !answered.has(id));
-    return `${entry.workerId}: ${open.join(", ")}`;
+/** `workerId: Q1, Q2; …` — each listed Worker's unsettled questions, by its request — or `none`. */
+function openQuestionsOf(workers: readonly ChatPeer[], decisions: readonly Decision[]): string {
+  const parts = workers.flatMap((worker) => {
+    const open = decisions
+      .filter((decision) => worker.requestId !== null && decision.requestId === worker.requestId && isAnswerable(decision))
+      .sort((a, b) => questionNumber(a) - questionNumber(b))
+      .map(questionIdOf);
+    return open.length === 0 ? [] : [`${worker.id}: ${open.join(", ")}`];
   });
   return parts.length === 0 ? "none" : parts.join("; ");
 }
@@ -340,7 +370,7 @@ export async function managerHandover(incident: FallbackIncident, deps: ManagerH
   const left = (): number => Math.max(0, deadline - Date.now());
   const log = deps.log ?? ((message: string) => console.warn(message));
   const { workspaceId, agentId: managerId } = incident;
-  const timeline: ManagerTimeline = { pages: 0, recent: [], typed: [] };
+  const timeline: ManagerTimeline = { pages: 0, typed: [] };
 
   const walking = within(budget, () => readManagerTimeline(deps.paseo, managerId, timeline, deps.env ?? process.env));
   const [records, all] = await Promise.all([
@@ -354,22 +384,8 @@ export async function managerHandover(incident: FallbackIncident, deps: ManagerH
   const workers = peers === null ? null : liveWorkersOf(peers);
   const snapshots = workers === null ? [] : await Promise.all(workers.map((worker) => within(left(), () => snapshotOf(deps.paseo, worker.id))));
   const walked = await walking;
-  // Answered questions are not open, as the pill reads them (design delta 20260924-qa-ledger §8).
-  const ledger = await within(left(), () => ledgerOf(deps.location));
-
-  // The pill's rule, on the pill's window of the old Manager's timeline.
-  const windowRead = timeline.pages > 0 && (walked !== null || timeline.pages >= WAITING_TIMELINE_PAGES);
-  const waiting =
-    peers === null || !windowRead
-      ? null
-      : await within(left(), () =>
-          waitingOf(
-            { id: managerId, workspaceId },
-            timeline.recent,
-            peers.filter((peer) => peer.role === "worker").map((peer) => ({ ...peer, workspaceId })),
-            (requestId) => (ledger === null ? new Set<string>() : answeredIds(ledger, requestId)),
-          ),
-        );
+  // What is still open is what the decision store holds unsettled (autonomy design §A.4).
+  const questions = await within(left(), () => questionDecisionsOf(deps.location, workspaceId));
   const typed = [...timeline.typed].reverse();
   const messages = typed.length > 0 ? typed.map((text, index) => `${index + 1}. ${text}`) : [timeline.pages > 0 && walked !== null ? "none" : "unknown"];
 
@@ -391,7 +407,7 @@ export async function managerHandover(incident: FallbackIncident, deps: ManagerH
       : workers.length === 0
         ? ["workers: none"]
         : ["workers:", ...workers.map((worker, index) => workerLine(worker, records, snapshots[index] ?? null))]),
-    `openQuestions: ${waiting === null ? "unknown" : questionsOf(waiting)}`,
+    `openQuestions: ${workers === null || questions === null ? "unknown" : openQuestionsOf(workers, questions)}`,
     `openIncidents: ${openIncidentsOf(incident, deps.incidents)}`,
     "",
     "The user's last messages to the Manager you replace (oldest first, verbatim):",

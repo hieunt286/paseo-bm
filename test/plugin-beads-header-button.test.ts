@@ -52,7 +52,7 @@ describe("planning the header buttons", () => {
   it("is an icon-only action button", () => {
     const openTab = vi.fn();
     const button = beadsHeaderButton(openTab);
-    expect(button).toMatchObject({ icon: "ListChecks", title: "Open the Beads tab: beads and metrics of this workspace" });
+    expect(button).toMatchObject({ icon: "ListChecks", title: "Open the Beads tab: this workspace's requests, beads and agents" });
     expect("label" in button).toBe(false);
     expect(button.behavior.kind).toBe("action");
     if (button.behavior.kind === "action") void button.behavior.onPress();

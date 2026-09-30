@@ -4,7 +4,7 @@
  *
  * Finding and version-checking is read-only. Installing runs only the
  * documented command for a tool that is missing, only when the user pressed
- * Install and confirmed it on the Setup screen.
+ * Install and confirmed it in Settings.
  */
 import { execFile } from "node:child_process";
 import { accessSync, constants, statSync } from "node:fs";
@@ -160,7 +160,7 @@ export const INSTALL_TIMEOUT_MS = 300_000;
  */
 export async function installTool(id: "br" | "bv", deps: ToolDeps = {}): Promise<{ command: string; code: number; tail: string[] }> {
   if (findTool(id, deps) !== null) {
-    throw new DashboardError("E_TOOL_PRESENT", `${id} is already installed; update it with the command shown on the Setup screen`);
+    throw new DashboardError("E_TOOL_PRESENT", `${id} is already installed; update it with the command shown in Settings`);
   }
   const command = commandsFor(id, findTool("brew", deps)).install!;
   const exec = deps.run ?? run;

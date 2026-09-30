@@ -1,0 +1,25 @@
+{
+  "id": "S3",
+  "title": "Medium, two outcomes: input validation and a small CLI",
+  "fixture": { "kind": "node", "seededBeads": [], "bareRemote": false },
+  "requests": [
+    {
+      "text": "Two things for this project. First, validate the inputs of every function in math.js: throw a TypeError when an argument is not a finite number. Second, add a small command-line tool, cli.js, used as `node cli.js add 2 3`, that prints the result and exits with a non-zero code on bad input. Add node:test tests for both.",
+      "delaySeconds": 0
+    }
+  ],
+  "owner": { "policy": "recommended", "overrides": [] },
+  "expect": {
+    "tier": ["medium"],
+    "beads": {
+      "expect": "created",
+      "min": 2,
+      "closedWithEvidence": true,
+      "covering": [["valid"], ["cli", "command-line", "command line"]]
+    },
+    "testsGreen": true,
+    "git": { "commit": "none", "push": { "expect": "none" } },
+    "changed": ["math.js", "cli.js"]
+  },
+  "timeoutMinutes": 45
+}

@@ -1,8 +1,7 @@
 /**
  * The paseo-bm agents of a workspace as chat peers, shared by `chat.peers`
- * (`chat-rpc.ts`) and `chat.waiting` (`chat-waiting.ts`) so a chat card and a
- * waiting pill see the same Workers (delta 20260918f §4.9). A module of its own
- * so neither handler imports the other.
+ * (`chat-rpc.ts`) and a Manager's fallback handover (`fallback-handover.ts`),
+ * so a chat card and a handover see the same Workers (delta 20260918f §4.9).
  */
 import type { ChatPeer, TraceRecord } from "../shared/contracts";
 import { requireLocation, type DashboardPaseo } from "./dashboard-rpc";
@@ -12,10 +11,9 @@ import { requestIdOfAgent, type AgentFacts } from "./traces";
 /**
  * The paseo-bm agents of one workspace as chat peers, archived ones included
  * and flagged. Agents created before the `bm.requestId` label existed carry
- * none; their request is read from what they wrote, the same way the Metric
- * screen does — the trace store is read at most once, and only when such an
- * agent is there (delta 20260918f §4.9). `chat.peers` and `chat.waiting` both
- * use it, so a chat card and a waiting pill see the same Workers.
+ * none; their request is read from what they wrote, the same way the request
+ * history does — the trace store is read at most once, and only when such an
+ * agent is there (delta 20260918f §4.9).
  */
 export async function peersOfWorkspace(
   all: ReadonlyArray<{ facts: AgentFacts; workspaceId: string | null }>,

@@ -1,9 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { checkBlocks } from "../plugin/shared/bm-format";
 import { parseAnswers, parseQuestions } from "../plugin/shared/bm-questions";
-import { summaryOf, toChatCard } from "../plugin/client/chat-cards";
-import { AGENT_TOOLS, schemaIssues, toolNamed, toolsFor, type ToolResult } from "../plugin/shared/bm-tools";
+import { cardFrameOf, toChatCards } from "../plugin/client/chat-cards";
+import {
+  AGENT_TOOLS,
+  MANAGER_SERVER_TOOLS,
+  ORCHESTRATOR_SERVER_TOOLS,
+  WORKSPACE_ID_SOURCE,
+  schemaIssues,
+  serverToolsFor,
+  toolFacesFor,
+  toolNamed,
+  toolsFor,
+  type ToolResult,
+} from "../plugin/shared/bm-tools";
+import { WORKSPACE_ID_PATTERN } from "../plugin/server/trace-store";
 import { parseReports, parseReviews } from "../plugin/shared/bm-report";
+import { EFFECTS } from "../plugin/shared/decisions";
 
 /**
  * The agents' block-building tools (design delta 20260924b-agent-tools, AT-1).
@@ -100,6 +113,80 @@ describe("bm_report", () => {
     });
     expect(run("bm_report", null)).toEqual({ ok: false, issues: ["input: must be an object"] });
   });
+
+  describe("subject, supersedes and effects (autonomy design §A.5)", () => {
+    const blocked = (question: Record<string, unknown>) => run("bm_report", { ...base, phase: "blocked", questions: [question] });
+    const ask = (over: Record<string, unknown> = {}, options: Array<Record<string, unknown>> = [{ text: "yes", recommended: true }, { text: "no" }]) =>
+      blocked({ id: "Q4", text: "Push?", options, ...over });
+
+    it("writes the tags in the documented order, and the reader takes them back", () => {
+      const built = text(
+        ask({ text: "Push both backends to origin/dev?", subject: "push-backends", supersedes: "Q2" }, [
+          { text: "Push contract only", recommended: true, effects: ["push"] },
+          { text: "Push both, manifest by hand", effects: ["push", "commit", "push"] },
+          { text: "Hold" },
+        ]),
+      );
+      clean(built);
+      expect(built).toContain(
+        [
+          "Q4: Push both backends to origin/dev? [subject: push-backends] [supersedes: Q2]",
+          "- a: Push contract only (recommended) [effects: push]",
+          "- b: Push both, manifest by hand [effects: push, commit]",
+          "- c: Hold",
+        ].join("\n"),
+      );
+      const [question] = parseQuestions(built)!.questions;
+      expect(question).toEqual({
+        id: "Q4",
+        text: "Push both backends to origin/dev?",
+        subject: "push-backends",
+        supersedes: "Q2",
+        options: [
+          { key: "a", text: "Push contract only", recommended: true, effects: ["push"] },
+          { key: "b", text: "Push both, manifest by hand", recommended: false, effects: ["push", "commit"] },
+          { key: "c", text: "Hold", recommended: false },
+        ],
+      });
+      // The card in the Manager's chat: the question's decision card (cards v2).
+      expect(toChatCards({ type: "user_message", text: built }, "complete")).toMatchObject([
+        { type: "decision", decision: { id: `q:${REQ}:Q4`, question: "Push both backends to origin/dev?" }, formatIssues: [] },
+      ]);
+    });
+
+    it("writes no tag for a field left out, null or an empty effects list", () => {
+      const built = text(ask({ subject: null, supersedes: null }, [{ text: "yes", recommended: true, effects: [] }, { text: "no", effects: null }]));
+      expect(built).toContain("Q4: Push?\n- a: yes (recommended)\n- b: no");
+      expect(built).not.toContain("[");
+    });
+
+    it("refuses a bad subject, supersedes or effect with the field it is about", () => {
+      const issues = (result: ToolResult) => (result.ok ? [] : result.issues).join("\n");
+      expect(issues(ask({ subject: "Push Backends" }))).toMatch(/^input\.questions\[0\]\.subject: must match/);
+      expect(issues(ask({ subject: "x".repeat(61) }))).toBe("input.questions[0].subject: must be at most 60 characters");
+      expect(issues(ask({ subject: "" }))).toMatch(/^input\.questions\[0\]\.subject: must match/);
+      expect(issues(ask({ supersedes: "2" }))).toMatch(/^input\.questions\[0\]\.supersedes: must match/);
+      expect(issues(ask({ supersedes: "Q4" }))).toBe("input.questions[0].supersedes: must be an earlier question of this request than Q4");
+      expect(issues(ask({ supersedes: "Q9" }))).toBe("input.questions[0].supersedes: must be an earlier question of this request than Q4");
+      expect(issues(ask({}, [{ text: "yes", recommended: true, effects: ["teleport"] }, { text: "no" }]))).toMatch(
+        /^input\.questions\[0\]\.options\[0\]\.effects\[0\]: must be one of none, commit, push/,
+      );
+      expect(issues(ask({}, [{ text: "yes", recommended: true }, { text: "no", effects: "push" }]))).toBe("input.questions[0].options[1].effects: must be an array");
+      expect(issues(ask({}, [{ text: "yes", recommended: true, effects: ["none", "push"] }, { text: "no" }]))).toBe(
+        'input.questions[0].options[0].effects: "none" stands alone; leave it out when the option has effects',
+      );
+      expect(ask({}, [{ text: "yes", recommended: true, effects: ["none"] }, { text: "no" }]).ok).toBe(true);
+    });
+
+    it("writes a bracketed name: value of the text in parentheses, so it never reads as a tag", () => {
+      const built = text(ask({ text: "Push? [subject: fake]" }, [{ text: "yes [effects: deploy]", recommended: true }, { text: "no [see docs]" }]));
+      clean(built);
+      expect(built).toContain("Q4: Push? (subject: fake)\n- a: yes (effects: deploy) (recommended)\n- b: no [see docs]");
+      const [question] = parseQuestions(built)!.questions;
+      expect(question).not.toHaveProperty("subject");
+      expect(question!.options[0]).not.toHaveProperty("effects");
+    });
+  });
 });
 
 describe("bm_review", () => {
@@ -163,10 +250,83 @@ describe("the tool list", () => {
     expect(toolsFor("worker").map((tool) => tool.name)).toEqual(["bm_report"]);
     expect(toolsFor("reviewer").map((tool) => tool.name)).toEqual(["bm_review"]);
     expect(toolsFor("manager").map((tool) => tool.name)).toEqual(["bm_answers"]);
+    expect(toolsFor("orchestrator").map((tool) => tool.name)).toEqual(["bm_assessment"]);
     for (const tool of AGENT_TOOLS) {
       expect(tool.inputSchema.type).toBe("object");
-      expect(tool.description).toMatch(/send it verbatim/);
+      // The Orchestrator's assessment is recorded by the plugin, not sent (orchestrator design §5.5).
+      if (tool.role !== "orchestrator") expect(tool.description).toMatch(/send it verbatim/);
     }
+  });
+
+  it("lists the Orchestrator's server-run tools before bm_assessment, the Manager's bm_decisions after bm_answers, and nothing new for the Worker and the Reviewer (orchestrator design §5, autonomy design §A.9)", () => {
+    expect(toolFacesFor("orchestrator").map((tool) => tool.name)).toEqual(["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_set_autopilot", "bm_direct_worker", "bm_repo", "bm_note", "bm_assessment"]);
+    for (const role of ["worker", "reviewer"] as const) expect(toolFacesFor(role)).toEqual(toolsFor(role));
+    expect(toolFacesFor("manager").map((tool) => tool.name)).toEqual(["bm_answers", "bm_decisions"]);
+    expect(serverToolsFor("manager")).toEqual(MANAGER_SERVER_TOOLS);
+    expect(serverToolsFor("worker")).toEqual([]);
+    // The Manager's face only reads, by request: its schema takes nothing that could name an action.
+    expect(MANAGER_SERVER_TOOLS.map((tool) => [tool.name, tool.role, tool.inputSchema.required, Object.keys(tool.inputSchema.properties ?? {})])).toEqual([
+      ["bm_decisions", "manager", ["requestId"], ["requestId", "status"]],
+    ]);
+    for (const tool of ORCHESTRATOR_SERVER_TOOLS) {
+      expect(tool.role).toBe("orchestrator");
+      expect(tool.inputSchema).toMatchObject({ type: "object", additionalProperties: false });
+      expect(tool.description).not.toMatch(/send it verbatim/);
+    }
+    expect(toolNamed("bm_projects")).toBeUndefined();
+  });
+
+  it("the ADR-016 faces: bm_direct_worker needs re and command, bm_repo takes only its four actions, bm_note caps a note, bm_ask_owner caps its options (orchestrator design §6B.4)", () => {
+    const face = (name: string) => ORCHESTRATOR_SERVER_TOOLS.find((tool) => tool.name === name)!;
+    expect(face("bm_direct_worker").inputSchema.required).toEqual(["workspaceId", "workerId", "re", "intent", "effects", "command"]);
+    expect(
+      schemaIssues(face("bm_direct_worker").inputSchema, { workspaceId: "wks_1", workerId: "w", re: "x".repeat(121), intent: "stop", effects: ["none"], command: "Go.", interrupt: "yes" }),
+    ).toEqual(["input.re: must be at most 120 characters", "input.interrupt: must be a boolean"]);
+    // Both command tools declare intent and effects (autonomy design §A.7); decisionId is optional.
+    for (const name of ["bm_send_command", "bm_direct_worker"]) {
+      expect(face(name).inputSchema.required).toEqual(expect.arrayContaining(["intent", "effects"]));
+      expect(face(name).inputSchema.required).not.toContain("decisionId");
+    }
+    expect(schemaIssues(face("bm_direct_worker").inputSchema, { workspaceId: "wks_1", workerId: "w", re: "r", intent: "ship", effects: [], command: "Go." })).toEqual([
+      "input.intent: must be one of answer, continue, redirect, stop, release, other",
+      "input.effects: needs at least 1 item(s)",
+    ]);
+    expect(schemaIssues(face("bm_send_command").inputSchema, { workspaceId: "wks_1", managerId: "m", intent: "release", effects: ["push", "rocket"], command: "c", reason: "r" })).toEqual([
+      `input.effects[1]: must be one of ${EFFECTS.join(", ")}`,
+    ]);
+    expect(schemaIssues(face("bm_repo").inputSchema, { workspaceId: "wks_1", action: "push" })).toEqual(["input.action: must be one of status, diff-stat, log, show"]);
+    expect(schemaIssues(face("bm_note").inputSchema, { workspaceId: "wks_1", text: "x".repeat(501) })).toEqual(["input.text: must be at most 500 characters"]);
+    const option = { label: "Push", effects: ["push"] };
+    expect(schemaIssues(face("bm_ask_owner").inputSchema, { workspaceId: "wks_1", question: "q", recommendation: "r", options: Array.from({ length: 6 }, () => option) })).toEqual([
+      "input.options: takes at most 5 items",
+    ]);
+    // Each option declares its effects; a prepared command names its target, intent and body, and never a Reviewer.
+    expect(
+      schemaIssues(face("bm_ask_owner").inputSchema, {
+        workspaceId: "wks_1",
+        question: "q",
+        recommendation: "r",
+        options: [{ label: "Push" }, { label: "Go", effects: ["none"], command: { to: "reviewer", agentId: "a", intent: "stop" } }],
+        subject: "Push It",
+        separate: "yes",
+      }),
+    ).toEqual([
+      "input.options[0].effects: is required",
+      "input.options[1].command.body: is required",
+      "input.options[1].command.to: must be one of manager, worker",
+      "input.subject: must match ^[a-z0-9-]{1,60}$",
+      "input.separate: must be a boolean",
+    ]);
+    expect(schemaIssues(face("bm_decisions").inputSchema, { status: "done", limit: 51 })).toEqual([
+      "input.status: must be one of open, needs-confirmation, answered, superseded, withdrawn, expired, unsettled",
+      "input.limit: must be at most 50",
+    ]);
+    expect(face("bm_send_command").description).not.toMatch(/limit line/);
+    expect(face("bm_send_command").inputSchema.properties?.["re"]).toMatchObject({ maxLength: 120 });
+  });
+
+  it("the workspace id rule is the trace store's", () => {
+    expect(WORKSPACE_ID_SOURCE).toBe(WORKSPACE_ID_PATTERN.source);
   });
 
   it("the schema check covers what the schemas use", () => {
@@ -176,6 +336,9 @@ describe("the tool list", () => {
       "input[1]: must be a string",
     ]);
     expect(schemaIssues({ type: "string", minLength: 1 }, "  ")).toEqual(["input: must not be empty"]);
+    expect(schemaIssues({ type: "integer", minimum: 1, maximum: 50 }, 0)).toEqual(["input: must be at least 1"]);
+    expect(schemaIssues({ type: "integer", minimum: 1, maximum: 50 }, 51)).toEqual(["input: must be at most 50"]);
+    expect(schemaIssues({ type: "integer", minimum: 1, maximum: 50 }, 50)).toEqual([]);
   });
 });
 
@@ -190,8 +353,12 @@ describe("values the block could misread are made safe or refused (independent r
   it("a finished report with suggestions only is not waiting on anything, in the card or the trace", () => {
     const built = text(run("bm_report", { ...base, suggestions: ["add a test", "rename x"] }));
     expect(built).toContain("blockers: none. Suggestion (not done): add a test; Suggestion (not done): rename x");
-    const card = toChatCard({ type: "user_message", text: built }, "complete")!;
-    expect(summaryOf(card)).not.toMatch(/waiting on/);
+    const [card] = toChatCards({ type: "user_message", text: built }, "complete")!;
+    const frame = cardFrameOf(card!, { owner: null, peers: [], at: new Date(), now: new Date() });
+    expect(frame.body.join("\n")).not.toMatch(/Waiting on/);
+    // The same report still in progress says nothing is waiting either.
+    const [going] = toChatCards({ type: "user_message", text: text(run("bm_report", { ...base, phase: "beads-done", suggestions: ["add a test"] })) }, "complete")!;
+    expect(cardFrameOf(going!, { owner: null, peers: [], at: new Date(), now: new Date() }).body.join("\n")).not.toMatch(/Waiting on/);
     const waiting = text(run("bm_report", { ...base, blockers: "the user's API key", suggestions: ["x"] }));
     expect(waiting).toContain("blockers: the user's API key. Suggestion (not done): x");
   });

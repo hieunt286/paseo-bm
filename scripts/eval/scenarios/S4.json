@@ -1,0 +1,22 @@
+{
+  "id": "S4",
+  "title": "Public contract: change the JSON output of the CLI that a script consumes",
+  "fixture": { "kind": "node", "cli": true, "seededBeads": [], "bareRemote": false },
+  "requests": [
+    {
+      "text": "Change the JSON that cli.js prints. Instead of {\"op\": ..., \"result\": ...} it should print {\"operation\": ..., \"operands\": [a, b], \"value\": ...}.",
+      "delaySeconds": 0
+    }
+  ],
+  "owner": { "policy": "recommended", "overrides": [] },
+  "expect": {
+    "tier": ["large"],
+    "review": { "expect": "reviewed", "min": 1, "beforeImplementation": true },
+    "testsGreen": true,
+    "git": { "commit": "none", "push": { "expect": "none" } },
+    "changed": ["cli.js"],
+    "contractDoc": { "paths": ["docs/cli-contract.md"], "orAsked": [] },
+    "consumerWorks": { "argv": ["node", "scripts/report.js"], "orAsked": ["report.js", "consumer"] }
+  },
+  "timeoutMinutes": 60
+}

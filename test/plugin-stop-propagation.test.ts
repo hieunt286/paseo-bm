@@ -172,10 +172,11 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     // One here (bm-wq6) plus the WP-205 collector's turn_started and turn_ended,
     // plus delta 20260918g's agent.created labelling, its turn_started scan and
     // its turn_ended BM-FORMAT check, plus delta 20260921's fallback detection,
-    // plus delta 20260924's question–answer ledger (turn_ended).
-    expect(server.on).toHaveBeenCalledTimes(8);
-    expect([...hooks.keys()].sort()).toEqual(["agent.created", "agent.turn_ended", "agent.turn_started"]);
-    expect(hooks.get("agent.turn_ended")).toHaveLength(5);
+    // plus the outdated-agents pass (turn_started, agent.archived; autonomy
+    // design §A.11). The question–answer ledger's turn_ended is retired (§A.14).
+    expect(server.on).toHaveBeenCalledTimes(9);
+    expect([...hooks.keys()].sort()).toEqual(["agent.archived", "agent.created", "agent.turn_ended", "agent.turn_started"]);
+    expect(hooks.get("agent.turn_ended")).toHaveLength(4);
   });
 
   it("sends the notice only to the stopped Worker's running Reviewers (idle Worker on refresh)", async () => {
@@ -218,6 +219,18 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     });
     await propagateWorkerStop(event() as never, { paseo: paseo as never });
     expect(sends).toEqual([{ id: "rev-plain", text: REVIEWER_STOP_NOTICE }]);
+  });
+
+  it("does nothing when an Orchestrator's turn is canceled, and never stops an Orchestrator child of the Worker (orchestrator design §3.2)", async () => {
+    const orchestratorChild = reviewer("orc-child", { provider: "bm-orchestrator" }, { "bm.role": "orchestrator" });
+    const { paseo, sends, listCalls } = fakePaseo({ agents: [orchestratorChild, reviewer("rev-a")], statuses: { [WORKER]: ["idle"] } });
+    for (const provider of ["bm-orchestrator", "bm-orchestrator/claude-opus-5"]) {
+      await propagateWorkerStop(event(provider) as never, { paseo: paseo as never });
+    }
+    expect(listCalls).toEqual([]);
+    expect(sends).toEqual([]);
+    await propagateWorkerStop(event() as never, { paseo: paseo as never });
+    expect(sends).toEqual([{ id: "rev-a", text: REVIEWER_STOP_NOTICE }]);
   });
 
   it("recognises a bm-worker/<model> provider", async () => {
@@ -368,18 +381,19 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
   it("removes the hook on cleanup", () => {
     const { cleanup, hooks, removers } = setup();
     cleanup();
-    // Eight removals: this hook, the WP-205 collector's turn_started and
+    // Nine removals: this hook, the WP-205 collector's turn_started and
     // turn_ended, delta 20260918g's agent.created, turn_started scan and
     // turn_ended BM-FORMAT check, delta 20260921's fallback detection
-    // (turn_ended) and delta 20260924's question–answer ledger (turn_ended).
+    // (turn_ended) and the outdated-agents pass (turn_started, agent.archived).
     // The map must end up empty.
     expect([...removers].sort()).toEqual([
+      "agent.archived",
       "agent.created",
       "agent.turn_ended",
       "agent.turn_ended",
       "agent.turn_ended",
       "agent.turn_ended",
-      "agent.turn_ended",
+      "agent.turn_started",
       "agent.turn_started",
       "agent.turn_started",
     ]);
@@ -529,6 +543,21 @@ describe("stopAllInWorkspace", () => {
     const result = await stopAllInWorkspace(paseo as never, WS);
     expect(sends.map((s) => s.id)).toEqual(["w1"]);
     expect(result).toEqual({ workers: 1, reviewers: 0, skipped: 0 });
+  });
+
+  it("never asks the Orchestrator's assessment agent, labelled or recognised only by its provider (orchestrator design §3.2)", async () => {
+    const { paseo, sends, refreshes } = fakePaseo({
+      agents: [
+        { id: "orc-labelled", workspaceId: WS, status: "running", labels: { "bm.role": "orchestrator" } },
+        { id: "orc-plain", workspaceId: WS, status: "running", labels: {}, provider: "bm-orchestrator/claude-opus-5" },
+        worker("w1"),
+      ],
+    });
+    const result = await stopAllInWorkspace(paseo as never, WS);
+    expect(sends.map((s) => s.id)).toEqual(["w1"]);
+    expect(result).toEqual({ workers: 1, reviewers: 0, skipped: 0 });
+    expect(refreshes).not.toContain("orc-labelled");
+    expect(refreshes).not.toContain("orc-plain");
   });
 
   it("walks every page", async () => {

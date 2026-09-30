@@ -42,11 +42,12 @@ function fakeDaemon(options: { injectIntoAgents?: boolean; patchFails?: boolean 
       "bm-manager": { extends: "claude" },
       "bm-worker": { extends: "claude" },
       "bm-reviewer": { extends: "codex" },
+      "bm-orchestrator": { extends: "claude" },
       "bm-worker-fallback-1": { extends: "codex" },
       "bm-worker-fallback-2": { extends: "pi" },
       "bm-reviewer-fallback-1": { extends: "pi" },
     },
-    agentProfiles: [ROOM, { id: "bm-manager" }, { id: "bm-worker" }, { id: "bm-reviewer" }],
+    agentProfiles: [ROOM, { id: "bm-manager" }, { id: "bm-worker" }, { id: "bm-reviewer" }, { id: "bm-orchestrator" }],
     mcp: { injectIntoAgents: options.injectIntoAgents ?? true },
   };
   const patches: Array<Record<string, unknown>> = [];
@@ -81,6 +82,13 @@ function fillDataHome(): void {
   for (const name of ["role-extras.json", "role-fallback.json", "role-fallback-state.json"]) {
     writeFileSync(join(dataHome, name), "{}");
   }
+  // The Orchestrator's folder (orchestrator design §5): settings, a first-design
+  // nudges.json nothing reads any more, and an assessment. It goes whole.
+  mkdirSync(join(dataHome, "orchestrator", "assessments"), { recursive: true });
+  for (const name of ["settings.json", "nudges.json", "model-corrections.json"]) {
+    writeFileSync(join(dataHome, "orchestrator", name), "{}");
+  }
+  writeFileSync(join(dataHome, "orchestrator", "assessments", "wks_1.jsonl"), "{}\n");
   // Not ours: the CLI's pointer, the old installer's record and folders.
   // A valid pointer naming this same folder: it reads as "no pointer", which is
   // what a 0.4.0 CLI leaves on a machine whose data folder is the default one.
@@ -106,11 +114,12 @@ describe("setup.cleanup", () => {
       "bm-manager",
       "bm-worker",
       "bm-reviewer",
+      "bm-orchestrator",
       "bm-worker-fallback-1",
       "bm-worker-fallback-2",
       "bm-reviewer-fallback-1",
     ]);
-    expect(result.removedProfiles).toEqual(["bm-manager", "bm-worker", "bm-reviewer"]);
+    expect(result.removedProfiles).toEqual(["bm-manager", "bm-worker", "bm-reviewer", "bm-orchestrator"]);
     expect(Object.keys(daemon.state().providers)).toEqual(["claude", "room-lead"]);
     expect(daemon.state().agentProfiles).toEqual([ROOM]);
     expect(result.nextCommand).toBe("paseo plugin remove paseo-bm");
@@ -183,6 +192,7 @@ describe("setup.cleanup", () => {
     expect(result.data).toBeNull();
     expect(existsSync(join(dataHome, "traces"))).toBe(true);
     expect(existsSync(join(dataHome, "role-extras.json"))).toBe(true);
+    expect(existsSync(join(dataHome, "orchestrator", "assessments", "wks_1.jsonl"))).toBe(true);
   });
 });
 
@@ -199,19 +209,22 @@ describe("deleting the data too", () => {
         "role-extras.json",
         "role-fallback.json",
         "role-fallback-state.json",
+        "orchestrator",
         join("ui", "answer-marks.json"),
         join("ui", "budget-told.json"),
         join("ui", "qa-ledger.json"),
         join("ui", "agent-tools.json"),
       ].sort(),
     );
-    for (const gone of ["traces", "role-extras.json", "role-fallback.json", "role-fallback-state.json"]) {
+    for (const gone of ["traces", "role-extras.json", "role-fallback.json", "role-fallback-state.json", "orchestrator"]) {
       expect(existsSync(join(dataHome, gone))).toBe(false);
     }
     for (const kept of ["home.json", "install.json", ".lock", "plugin", "backups"]) {
       expect(existsSync(join(dataHome, kept))).toBe(true);
       expect(result.data?.kept.join("\n")).toContain(kept);
     }
+    // Before `orchestrator` was listed, the cleanup kept it as somebody else's.
+    expect(result.data?.kept.join("\n")).not.toContain("orchestrator");
     // Nothing outside the data folder is ever looked at.
     expect(existsSync(join(home, "notes.txt"))).toBe(true);
   });
@@ -241,6 +254,22 @@ describe("deleting the data too", () => {
     expect(result.data?.deleted).not.toContain("role-extras.json");
     expect(result.data?.kept.join("\n")).toContain("role-extras.json (role-extras.json is a symlink; paseo-bm did not create it)");
     expect(readFileSync(join(outside, "keep-me.txt"), "utf8")).toBe("still here");
+  });
+
+  it("keeps a symlinked orchestrator/ and what it points at", async () => {
+    const daemon = fakeDaemon();
+    fillDataHome();
+    const outside = join(home, "outside-orchestrator");
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, "settings.json"), "keep me");
+    rmSync(join(dataHome, "orchestrator"), { recursive: true });
+    symlinkSync(outside, join(dataHome, "orchestrator"));
+
+    const result = await cleanupPaseoBm(daemon.paseo, { deleteData: true }, deps());
+
+    expect(result.data?.deleted).not.toContain("orchestrator");
+    expect(result.data?.kept.join("\n")).toContain("orchestrator (orchestrator is a symlink; paseo-bm did not create it)");
+    expect(readFileSync(join(outside, "settings.json"), "utf8")).toBe("keep me");
   });
 
   // Review b1: checking only the last component is not enough. `readdir`
@@ -312,7 +341,7 @@ describe("after the button, before `paseo plugin remove`", () => {
       { ...deps(), log: () => {}, resume: true },
     );
 
-    expect(again.created).toEqual(["manager", "worker", "reviewer"]);
+    expect(again.created).toEqual(["manager", "worker", "reviewer", "orchestrator"]);
   });
 });
 

@@ -16,8 +16,7 @@ import {
 import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store";
 import { buildRecord } from "../plugin/server/collector";
 import { reconstructTraces, type ReconstructedTrace } from "../plugin/server/traces";
-import { guardrailMismatch, reviewerLine } from "../plugin/client/dashboard-model";
-import { TRACE_STORE_SCHEMA_VERSION, type FallbackIncident, type TraceRecord, type TraceSummary } from "../plugin/shared/contracts";
+import { TRACE_STORE_SCHEMA_VERSION, type FallbackIncident, type TraceRecord } from "../plugin/shared/contracts";
 
 /**
  * delta 20260917c §4.7 (REQ-037 errata): the plugin counts review calls and
@@ -333,6 +332,24 @@ describe("checkReviewBudget", () => {
       ),
     ).toBe("ignored");
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it("ignores the Orchestrator's assessment agent: no trace rebuilt, nothing counted or sent (orchestrator design §3.2)", async () => {
+    await seedRequest();
+    await reviewCall("agent-rev-1", 5);
+    await reviewCall("agent-rev-1", 7);
+    const { paseo, send } = fakePaseo();
+    const list = vi.spyOn(paseo.agents, "list");
+    const told = createBudgetTold(() => {});
+    const pending = new Map<string, BudgetOverrun>();
+    for (const provider of ["bm-orchestrator", "bm-orchestrator/claude-opus-5"]) {
+      expect(await checkReviewBudget(ended("agent-orc", provider), { location, paseo, told, pending })).toBe("ignored");
+    }
+    expect(list).not.toHaveBeenCalled();
+    expect(pending.size).toBe(0);
+    expect(send).not.toHaveBeenCalled();
+    // The same over-budget request is still announced at the Reviewer's turn end.
+    expect(await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told, pending })).toBe("sent");
   });
 
   it("sends at the Manager's own turn end when the Worker's last report woke it (review b1, B2)", async () => {
@@ -720,12 +737,6 @@ describe("BM-REPORT without a guardrail line", () => {
     expect(report!.guardrail).toMatchObject({ batchId: "b1", batchReviews: 2, batchMax: 2, total: 3, budget: 4 });
   });
 
-  it("shows the derived count with no mismatch note when nothing was self-reported", () => {
-    const summary = { reviewerIds: ["agent-rev-1"], reviewCalls: 2, guardrailReported: null } as unknown as TraceSummary;
-    expect(guardrailMismatch(summary)).toBe(false);
-    expect(reviewerLine(summary)).toContain("2 review calls");
-    expect(reviewerLine(summary)).not.toMatch(/reported/i);
-  });
 });
 
 // ── The plugin's own notices are not the user's words (review b2) ──────────

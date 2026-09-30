@@ -26,6 +26,7 @@
  * - The only removal a handle offers is `archive()`; the SDK has no delete.
  */
 import type { AgentNode } from "../shared/contracts";
+import { rolesCreatedSentence } from "../shared/roles-created";
 import { PLUGIN_VERSION } from "../shared/version";
 import { setAgentLabel, setAgentMode, type PaseoCliDeps } from "./paseo-cli";
 import { listAllAgents, roleOfAgent } from "./agent-role";
@@ -36,6 +37,9 @@ import { readIncidents } from "./fallback-state";
 import { dataHomeOf } from "./role-extras";
 import { ensureRoles, type EnsureRolesResult } from "./setup-roles";
 import { recordTools } from "./tools-check";
+import { INSTRUCTIONS_LABEL, currentInstructionsHash, hasOutdatedInstructions } from "./instructions-label";
+import { createAlertStore } from "./alert-store";
+import { alertKeyOf } from "../shared/alerts";
 
 /** Label key and value that identify a paseo-bm Manager (Technical Design §7.1). */
 export const MANAGER_ROLE_LABEL = "bm.role";
@@ -221,6 +225,12 @@ export interface EnsureManagerResult {
    * `null` when there is nothing to say, which is the usual case.
    */
   setupNotice: string | null;
+  /**
+   * The outdated Manager this call replaced (`replaceOutdated`, autonomy PRD
+   * §11 rule 3): it is marked `bm.replacedBy` and stays alive until the owner
+   * archives it. `null` when nothing was replaced.
+   */
+  replacedManagerId: string | null;
 }
 
 /** A Manager is live when it is neither archived nor closed. */
@@ -313,7 +323,7 @@ function startedBroken(snapshot: ManagerAgentSnapshot | null): boolean {
 }
 
 /**
- * Creates whatever of the three roles is missing, and turns every failure into
+ * Creates whatever of the four roles is missing, and turns every failure into
  * the one error this RPC speaks.
  *
  * A failure here stops the Manager being created on purpose: without its
@@ -328,13 +338,13 @@ async function ensureRolesFor(paseo: ManagerPaseo, log?: (message: string) => vo
   } catch (error) {
     throw new ManagerEnsureError(
       "E_PROVIDER_UNAVAILABLE",
-      `paseo-bm could not create its roles (${error instanceof Error ? error.message : String(error)}). Open Beads Manager → Setup to see what is missing.`,
+      `paseo-bm could not create its roles (${error instanceof Error ? error.message : String(error)}). Open Beads Manager → Settings to see what is missing.`,
     );
   }
   if (ensured.skipped === "cleaned-up") {
     throw new ManagerEnsureError(
       "E_PROVIDER_UNAVAILABLE",
-      'paseo-bm\'s settings were removed. Open Beads Manager → Setup and choose "Set up again", or remove the plugin with: paseo plugin remove paseo-bm',
+      'paseo-bm\'s settings were removed. Open Beads Manager → Settings and choose "Set up again", or remove the plugin with: paseo plugin remove paseo-bm',
     );
   }
   return ensured;
@@ -353,24 +363,27 @@ async function setupNoticeFor(paseo: ManagerPaseo, ensured: EnsureRolesResult): 
   const roles = rolesSentence(ensured);
   if (roles !== null) sentences.push(roles);
   if (await agentToolsOff(paseo)) {
-    sentences.push("Paseo's agent tools are off, so the Manager may not be able to create a Worker. Allow them in Setup.");
+    sentences.push("Paseo's agent tools are off, so the Manager may not be able to create a Worker. Allow them in Settings → Agents.");
   }
   return sentences.length === 0 ? null : sentences.join(" ");
 }
 
-/** The roles sentence, only when THIS call created roles; `null` otherwise. */
+/**
+ * The roles sentence, only when THIS call created roles; `null` otherwise. It
+ * names only the roles created: a machine updated from 0.4.x gets just the
+ * Orchestrator (orchestrator design §3.1).
+ */
 function rolesSentence(ensured: EnsureRolesResult): string | null {
-  if (ensured.created.length === 0 || ensured.baseProvider === null || ensured.model === null) return null;
-  return `paseo-bm created its roles with defaults (${ensured.baseProvider} · ${ensured.model}). Change them in Setup → Agents.`;
+  return rolesCreatedSentence(ensured, "Settings → Agents");
 }
 
 /**
- * Why no new Manager was created. It names the button because the error line
- * is drawn above the Setup screen that holds it.
+ * Why no new Manager was created. It names the button, and where it is: the
+ * error line is drawn on the surface whose Settings hold it.
  */
 export const AGENT_TOOLS_OFF_MESSAGE =
   "Paseo's agent tools are off, and a Beads Manager created now would never get them, so it could not create a Worker. " +
-  'Press "Allow agent tools…" in Setup, then open Beads Manager again.';
+  'Press "Allow agent tools…" in Settings → Agents, then open Beads Manager again.';
 
 /**
  * Why a fallback switch created no replacement: the same reason as
@@ -379,7 +392,7 @@ export const AGENT_TOOLS_OFF_MESSAGE =
  */
 export const AGENT_TOOLS_OFF_SWITCH_MESSAGE =
   "Paseo's agent tools are off, and a replacement created now would never get them. " +
-  'Press "Allow agent tools…" in Setup, then choose Switch again.';
+  'Press "Allow agent tools…" in Settings → Agents, then choose Switch again.';
 
 /**
  * True only when Paseo says the switch is off; a config it cannot read says
@@ -399,25 +412,33 @@ export async function agentToolsOff(paseo: unknown): Promise<boolean> {
 /**
  * Handler body of `manager.ensure`.
  *
+ * With `replaceOutdated`, a live Manager on older instructions (its
+ * `bm.instructions` label is not this build's, autonomy PRD §11 rule 3) is
+ * replaced: a new Manager is created exactly as when there is none, the old
+ * one is marked `bm.replacedBy=<new id>` and its `outdated-agent` alert is
+ * cleared. The old one is never archived, stopped or messaged (ADR-005); the
+ * owner archives it. A current Manager is returned as it is, so a second tap
+ * creates nothing.
+ *
  * Throws `ManagerEnsureError` (`E_PROVIDER_UNAVAILABLE`) when the Manager cannot
  * be created: the `bm-manager` profile is missing, the SDK rejects the create,
  * or the created agent comes back already failed (then that exact agent is
  * archived before throwing).
  */
 export async function ensureManager(
-  input: { workspaceId: string },
+  input: { workspaceId: string; replaceOutdated?: boolean },
   deps: EnsureManagerDeps,
 ): Promise<EnsureManagerResult> {
   const { paseo } = deps;
   const { workspaceId } = input;
 
   // Opening the Manager is one of the two moments a machine gets set up (the
-  // other is the Setup screen). The plugin has no install hook — `contribute()`
+  // other is opening Settings). The plugin has no install hook — `contribute()`
   // has no Paseo handle — so this is where a paseo.cafe install gets its roles.
   const ensured = await ensureRolesFor(paseo, deps.log);
 
   const [chosen, ...others] = await findLiveManagers(paseo, workspaceId, { home: deps.home, log: deps.log });
-  if (chosen) {
+  if (chosen && !(input.replaceOutdated === true && hasOutdatedInstructions(chosen.labels, "manager"))) {
     return {
       agentId: chosen.id,
       created: false,
@@ -427,8 +448,52 @@ export async function ensureManager(
       modeNotice: labelledManager(chosen) ? await switchOnce(chosen, deps) : null,
       toolsNotice: null,
       setupNotice: await setupNoticeFor(paseo, ensured),
+      replacedManagerId: null,
     };
   }
+
+  const created = await createFromProfile(deps, workspaceId, ensured);
+  if (chosen) await markReplaced(chosen, created.agentId, workspaceId, deps);
+  return {
+    agentId: created.agentId,
+    created: true,
+    otherManagerIds: chosen ? others.map((agent) => agent.id) : [],
+    modeNotice: null,
+    toolsNotice: created.toolsNotice,
+    setupNotice: await setupNoticeFor(paseo, ensured),
+    replacedManagerId: chosen ? chosen.id : null,
+  };
+}
+
+/**
+ * After `replaceOutdated`: marks the old Manager `bm.replacedBy=<new id>` (so
+ * `findLiveManagers` and the outdated-agents pass leave it out) and clears its
+ * `outdated-agent` alert. Best effort — a failure costs one log line; the new
+ * Manager is the newest labelled one and is chosen anyway. Never throws.
+ */
+async function markReplaced(old: ManagerAgentSnapshot, newId: string, workspaceId: string, deps: EnsureManagerDeps): Promise<void> {
+  const log = deps.log ?? ((message: string) => console.warn(message));
+  try {
+    const labelled = await setAgentLabel(old.id, REPLACED_BY_LABEL, newId, deps.cli);
+    if (!labelled.ok) log(`[paseo-bm] Manager ${newId} replaces ${old.id}, but ${old.id} could not be marked as replaced: ${labelled.reason}`);
+  } catch (error) {
+    log(`[paseo-bm] Manager ${newId} replaces ${old.id}, but ${old.id} could not be marked as replaced: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  try {
+    const home = deps.home !== undefined ? deps.home : dataHomeOf();
+    if (home !== null) createAlertStore(home).clear(alertKeyOf("outdated-agent", old.workspaceId ?? workspaceId, old.id));
+  } catch (error) {
+    log(`[paseo-bm] could not clear the older-instructions alert of Manager ${old.id}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/**
+ * Creates the workspace's Manager from the `bm-manager` profile: the path of
+ * `manager.ensure` when there is no live Manager, or when an outdated one is
+ * replaced.
+ */
+async function createFromProfile(deps: EnsureManagerDeps, workspaceId: string, ensured: EnsureRolesResult): Promise<CreateManagerResult> {
+  const { paseo } = deps;
 
   // A Manager gets Paseo's tools when it is created, never later: one created
   // while the switch is off keeps working without `create_agent` even after the
@@ -446,7 +511,7 @@ export async function ensureManager(
   if (!profile) {
     throw new ManagerEnsureError(
       "E_PROVIDER_UNAVAILABLE",
-      `agent profile "${MANAGER_PROFILE_ID}" is not registered on this daemon; open Beads Manager → Setup to see what is missing.`,
+      `agent profile "${MANAGER_PROFILE_ID}" is not registered on this daemon; open Beads Manager → Settings to see what is missing.`,
     );
   }
 
@@ -491,7 +556,7 @@ export async function ensureManager(
     );
   }
 
-  const created = await createManager(paseo, workspaceId, {
+  return createManager(paseo, workspaceId, {
     providerSelection: providerSelection(profile),
     modeId,
     thinkingOptionId: profile.thinkingOptionId,
@@ -500,14 +565,6 @@ export async function ensureManager(
     readInstructions: deps.readInstructions,
     version: deps.version,
   });
-  return {
-    agentId: created.agentId,
-    created: true,
-    otherManagerIds: [],
-    modeNotice: null,
-    toolsNotice: created.toolsNotice,
-    setupNotice: await setupNoticeFor(paseo, ensured),
-  };
 }
 
 /** What `createManager` creates; the caller has already decided the provider, mode and thinking. */
@@ -518,7 +575,7 @@ export interface CreateManagerOptions extends Pick<EnsureManagerDeps, "readInstr
   thinkingOptionId?: string;
   featureValues?: Record<string, unknown>;
   /**
-   * Added to `bm.role=manager` and `bm.version`: `bm.modeSet` when paseo-bm
+   * Added to `bm.role=manager`, `bm.version` and `bm.instructions`: `bm.modeSet` when paseo-bm
    * chose the mode (not for a profile mode passed on unchecked), `bm.replaces`
    * for a replacement (delta 20260921 §4.5.2).
    */
@@ -568,6 +625,8 @@ export async function createManager(
       labels: {
         [MANAGER_ROLE_LABEL]: MANAGER_ROLE_VALUE,
         [VERSION_LABEL]: options.version ?? PLUGIN_VERSION,
+        // The hash of the role text the creation hook gives it (autonomy design §A.11).
+        [INSTRUCTIONS_LABEL]: currentInstructionsHash("manager"),
         ...options.labels,
       },
       ...(prompt !== undefined ? { prompt } : {}),

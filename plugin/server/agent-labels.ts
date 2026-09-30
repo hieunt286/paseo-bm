@@ -10,22 +10,31 @@
  * set to the mode it already runs in, so `manager.ensure` never switches a mode
  * the user chose.
  *
+ * Every agent `agent.created` reports also gets `bm.instructions`, the hash of
+ * the role text this build's creation hook gave it (autonomy design §A.11,
+ * PRD §11 rule 3; `instructions-label.ts`), in the same command. The load-time
+ * scan never adds it: an agent without it is one `outdated-agents.ts` flags.
+ *
  * Best effort: running the CLI from inside the daemon is not proven on a real
  * daemon yet (bead bm-wp-249-5qqp.1). Recognising the role by provider
  * (`agent-role.ts`) is what guarantees the cards; a failure here costs one log
  * line. Nothing here throws, and each agent is handled at most once per run.
  */
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { listAllAgents, roleOfAgent, roleOfProvider } from "./agent-role";
+import { listAllAgents, roleOfAgent, roleOfProvider, type BmRole } from "./agent-role";
+import { INSTRUCTIONS_LABEL, currentInstructionsHash, roleTextOf } from "./instructions-label";
 import { setAgentLabels, type PaseoCliDeps } from "./paseo-cli";
 import { checkWorkerTools, type ToolsPaseo } from "./tools-check";
 import { linkReplacementReviewer } from "./fallback-reviewer";
+import { checkRolePairing, type PairingPaseo, type RolePairingDeps } from "./role-pairing";
 
 /** The snapshot fields this module reads; `PaseoAgent` is structurally assignable. */
 export interface LabelAgentSnapshot {
   labels?: Record<string, string> | null;
   currentModeId?: string | null;
   runtimeInfo?: { modeId?: string | null } | null;
+  /** The system prompt Paseo gave the agent, when the snapshot carries it (`persistence.metadata.systemPrompt`). */
+  persistence?: { metadata?: unknown } | null;
 }
 
 /** Minimal SDK view: re-read one agent. */
@@ -65,6 +74,17 @@ export interface AgentLabelsDeps {
 
 export type LabelOutcome = "not-bm" | "already-handled" | "already-labelled" | "labelled" | "failed";
 
+export interface LabelOptions {
+  /**
+   * True only from `agent.created`: the agent was just created by this build,
+   * whose creation hook gave it this build's role text, so it also gets
+   * `bm.instructions` (`instructions-label.ts`). The load-time scan never sets
+   * it — the agents it finds are older than this run, and stamping them would
+   * hide exactly what the outdated-agent check looks for.
+   */
+  created?: boolean;
+}
+
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -74,38 +94,69 @@ function nonEmpty(value: unknown): string | null {
 }
 
 /**
+ * False only when the snapshot shows a system prompt that does not hold this
+ * build's role text (the creation hook did not run on it); a snapshot without
+ * a readable prompt is taken at the hook's word.
+ */
+function promptHoldsRoleText(snapshot: LabelAgentSnapshot, role: BmRole): boolean {
+  const metadata = snapshot.persistence?.metadata;
+  const prompt = metadata !== null && typeof metadata === "object" ? (metadata as { systemPrompt?: unknown }).systemPrompt : undefined;
+  return typeof prompt !== "string" || prompt.includes(roleTextOf(role));
+}
+
+/**
  * One labeller per plugin run: it remembers which agents it has handled, so an
  * agent is labelled at most once whether `agent.created` or a scan sees it.
  */
 export function createAgentLabeller(deps: AgentLabelsDeps = {}) {
   const log = deps.log ?? ((message: string) => console.warn(message));
   const handled = new Set<string>();
+  // Agents `agent.created` has stamped with `bm.instructions`; separate from
+  // `handled`, so a scan that reached a new agent first does not cost it its stamp.
+  const stamped = new Set<string>();
 
-  /** Labels `agentId` when its provider is paseo-bm's and it has no valid `bm.role`. Never throws. */
-  async function labelAgent(agentId: string, provider: unknown, paseo: LabelPaseo): Promise<LabelOutcome> {
+  /**
+   * Labels `agentId` when its provider is paseo-bm's: `bm.role` (and a
+   * Manager's `bm.modeSet`) when it has no valid role label, and — only for
+   * `created` — `bm.instructions` with this build's hash, all in one command.
+   * Never throws.
+   */
+  async function labelAgent(agentId: string, provider: unknown, paseo: LabelPaseo, options: LabelOptions = {}): Promise<LabelOutcome> {
     const role = roleOfProvider(provider);
     if (role === null) return "not-bm";
-    if (handled.has(agentId)) return "already-handled";
+    const roleDone = handled.has(agentId);
+    const stamp = options.created === true && !stamped.has(agentId);
+    if (roleDone && !stamp) return "already-handled";
     // Marked before the first await: two events for one agent label it once.
     handled.add(agentId);
+    if (stamp) stamped.add(agentId);
     try {
       const snapshot = (await paseo.agents.ref(agentId).refresh())?.agent ?? null;
       if (snapshot === null) {
         log(`[paseo-bm] could not label ${agentId} as ${role}: Paseo returned no snapshot for it.`);
         return "failed";
       }
-      if (roleOfAgent({ labels: snapshot.labels ?? {} })?.labelled === true) return "already-labelled";
-      const labels: Record<string, string> = { "bm.role": role };
-      if (role === "manager") {
-        const mode = nonEmpty(snapshot.runtimeInfo?.modeId) ?? nonEmpty(snapshot.currentModeId);
-        if (mode !== null) labels["bm.modeSet"] = mode;
+      const current = snapshot.labels ?? {};
+      const labels: Record<string, string> = {};
+      const addRole = !roleDone && roleOfAgent({ labels: current })?.labelled !== true;
+      if (addRole) {
+        labels["bm.role"] = role;
+        if (role === "manager") {
+          const mode = nonEmpty(snapshot.runtimeInfo?.modeId) ?? nonEmpty(snapshot.currentModeId);
+          if (mode !== null) labels["bm.modeSet"] = mode;
+        }
       }
+      if (stamp && current[INSTRUCTIONS_LABEL] !== currentInstructionsHash(role)) {
+        if (promptHoldsRoleText(snapshot, role)) labels[INSTRUCTIONS_LABEL] = currentInstructionsHash(role);
+        else log(`[paseo-bm] ${agentId} was created without this build's ${role} instructions, so it is not marked as current.`);
+      }
+      if (Object.keys(labels).length === 0) return "already-labelled";
       const result = await setAgentLabels(agentId, labels, deps.cli);
       if (!result.ok) {
         log(`[paseo-bm] could not label ${agentId} as ${role}: ${result.reason}`);
         return "failed";
       }
-      log(`[paseo-bm] labelled ${agentId} as ${role} (it was created without bm.role).`);
+      if (addRole) log(`[paseo-bm] labelled ${agentId} as ${role} (it was created without bm.role).`);
       return "labelled";
     } catch (error) {
       log(`[paseo-bm] could not label ${agentId} as ${role}: ${describeError(error)}`);
@@ -147,12 +198,18 @@ export type AgentLabeller = ReturnType<typeof createAgentLabeller>;
 export type AgentLabelsHost = Partial<Pick<PluginServerContext, "on">>;
 
 /**
- * Registers `on("agent.created")` (label the new agent) and
- * `on("agent.turn_started")` (start the once-per-run scan) and returns their
- * remover; a no-op on a host without `on` (the stop propagation already logs
- * that host's one line). Neither handler waits for the scan.
+ * Registers `on("agent.created")` (label the new agent, and check the role
+ * pairing: `role-pairing.ts`, design §A.10) and `on("agent.turn_started")`
+ * (start the once-per-run scan) and returns their remover; a no-op on a host
+ * without `on` (the stop propagation already logs that host's one line).
+ * Neither handler waits for the scan. `pairing` is where a mismatch goes (the
+ * Inbox alerts store once the event bus is wired, a log line until then).
  */
-export function registerAgentLabels(host: AgentLabelsHost, labeller: AgentLabeller = createAgentLabeller()): () => void {
+export function registerAgentLabels(
+  host: AgentLabelsHost,
+  labeller: AgentLabeller = createAgentLabeller(),
+  pairing: RolePairingDeps = {},
+): () => void {
   if (typeof host.on !== "function") return () => {};
   const removers = [
     host.on("agent.created", async (event, context) => {
@@ -160,13 +217,28 @@ export function registerAgentLabels(host: AgentLabelsHost, labeller: AgentLabell
         // `PaseoApi` is structurally a `ScanPaseo`; typecheck:plugin checks it here.
         const paseo: ScanPaseo = context.paseo;
         void labeller.scanOnce(paseo);
-        await labeller.labelAgent(event.agent.id, event.agent.provider, paseo);
+        await labeller.labelAgent(event.agent.id, event.agent.provider, paseo, { created: true });
       } catch (error) {
         console.warn(`[paseo-bm] labelling a new agent failed: ${describeError(error)}`);
       }
       // Delta 20260921 §4.2.4: a Worker without Paseo tools (Pi without
       // pi-mcp-adapter) is reported to its Manager with BM-TOOLS.
-      const created = (event as { agent?: { id?: unknown; provider?: unknown; parentAgentId?: unknown } } | null)?.agent;
+      const created = (
+        event as { agent?: { id?: unknown; provider?: unknown; parentAgentId?: unknown; workspaceId?: unknown } } | null
+      )?.agent;
+      // Design §A.10: the creation hook cannot see the creator, so the pairing is checked here.
+      if (typeof created?.id === "string" && typeof created.provider === "string") {
+        await checkRolePairing(
+          {
+            id: created.id,
+            provider: created.provider,
+            parentAgentId: typeof created.parentAgentId === "string" ? created.parentAgentId : null,
+            workspaceId: typeof created.workspaceId === "string" ? created.workspaceId : null,
+          },
+          (context as { paseo?: unknown } | null)?.paseo as PairingPaseo | undefined,
+          pairing,
+        );
+      }
       if (typeof created?.id === "string" && typeof created.provider === "string" && roleOfProvider(created.provider) === "worker") {
         await checkWorkerTools(
           { id: created.id, provider: created.provider, parentAgentId: typeof created.parentAgentId === "string" ? created.parentAgentId : null },

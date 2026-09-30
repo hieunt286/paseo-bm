@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { roleConfigRevision, type RoleConfigView } from "../plugin/server/config-writer";
+import { rolePaseoToolsPolicy } from "../plugin/server/setup-roles";
 import {
   ROLE_FALLBACK_FILE,
   fallbackAliasEntry,
@@ -112,8 +113,8 @@ describe("roles.save-fallback", () => {
     expect(daemon.patches).toEqual([
       {
         providers: {
-          "bm-worker-fallback-1": { extends: "codex", label: "Worker (fallback 1)", paseoTools: { enabled: true } },
-          "bm-worker-fallback-2": { extends: "pi", label: "Worker (fallback 2)", paseoTools: { enabled: true } },
+          "bm-worker-fallback-1": { extends: "codex", label: "Worker (fallback 1)", paseoTools: rolePaseoToolsPolicy("worker") },
+          "bm-worker-fallback-2": { extends: "pi", label: "Worker (fallback 2)", paseoTools: rolePaseoToolsPolicy("worker") },
         },
       },
     ]);
@@ -139,7 +140,7 @@ describe("roles.save-fallback", () => {
     await save(daemon, { entries: [CODEX, PI] });
     await save(daemon, { entries: [PI] });
     expect(daemon.patches[1]).toEqual({
-      providers: { "bm-worker-fallback-1": { extends: "pi", label: "Worker (fallback 1)", paseoTools: { enabled: true } } },
+      providers: { "bm-worker-fallback-1": { extends: "pi", label: "Worker (fallback 1)", paseoTools: rolePaseoToolsPolicy("worker") } },
       removeProviders: ["bm-worker-fallback-2"],
     });
     expect(Object.keys(daemon.state.providers).filter((id) => id.startsWith("bm-worker-fallback"))).toEqual(["bm-worker-fallback-1"]);
@@ -230,12 +231,14 @@ describe("roles.save-fallback", () => {
 });
 
 describe("the Reviewer's chain (phase 2a-17, §4.5.1)", () => {
-  it("saves a Reviewer alias WITHOUT Paseo tools (ADR-006 D3)", async () => {
+  it("saves a Reviewer alias with Paseo tools switched off (autonomy design §A.10)", async () => {
     const daemon = fakeDaemon();
     const sonnet = { baseProvider: "claude", model: "claude-sonnet-5", thinkingOptionId: null, modeId: "default" };
     await save(daemon, { role: "reviewer", entries: [sonnet] });
-    expect(daemon.patches.at(-1)).toEqual({ providers: { "bm-reviewer-fallback-1": { extends: "claude", label: "Reviewer (fallback 1)" } } });
-    expect(daemon.state.providers["bm-reviewer-fallback-1"]).not.toHaveProperty("paseoTools");
+    expect(daemon.patches.at(-1)).toEqual({
+      providers: { "bm-reviewer-fallback-1": { extends: "claude", label: "Reviewer (fallback 1)", paseoTools: { enabled: false } } },
+    });
+    expect(daemon.state.providers["bm-reviewer-fallback-1"]).toHaveProperty("paseoTools", { enabled: false });
   });
 
   it("refuses a dangerous mode for a Reviewer entry, as for the Reviewer itself", async () => {
@@ -245,10 +248,10 @@ describe("the Reviewer's chain (phase 2a-17, §4.5.1)", () => {
 });
 
 describe("fallback aliases", () => {
-  it("give Manager and Worker aliases Paseo tools, and NEVER a Reviewer alias (ADR-006 D3)", () => {
-    expect(fallbackAliasEntry("worker", 1, "codex")).toEqual({ extends: "codex", label: "Worker (fallback 1)", paseoTools: { enabled: true } });
-    expect(fallbackAliasEntry("manager", 3, "claude")).toEqual({ extends: "claude", label: "Manager (fallback 3)", paseoTools: { enabled: true } });
-    expect(fallbackAliasEntry("reviewer", 2, "pi")).toEqual({ extends: "pi", label: "Reviewer (fallback 2)" });
+  it("carry their role's Paseo-tools policy: never more tools than the role, none for a Reviewer (§A.10)", () => {
+    expect(fallbackAliasEntry("worker", 1, "codex")).toEqual({ extends: "codex", label: "Worker (fallback 1)", paseoTools: rolePaseoToolsPolicy("worker") });
+    expect(fallbackAliasEntry("manager", 3, "claude")).toEqual({ extends: "claude", label: "Manager (fallback 3)", paseoTools: rolePaseoToolsPolicy("manager") });
+    expect(fallbackAliasEntry("reviewer", 2, "pi")).toEqual({ extends: "pi", label: "Reviewer (fallback 2)", paseoTools: { enabled: false } });
   });
 });
 

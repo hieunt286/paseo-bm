@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Generates plugin/server/{manager,worker,reviewer}-instructions.ts from
-// plugin/roles/{manager,worker,reviewer}.md.
+// Generates plugin/server/{manager,worker,reviewer,orchestrator}-instructions.ts
+// from plugin/roles/{manager,worker,reviewer,orchestrator}.md.
 //
 // Paseo 0.8 bundles the server entry as CommonJS and runs it in a forked worker
 // without a cwd, so the server code cannot locate files of its own payload at
@@ -10,7 +10,7 @@
 // the payload; test/plugin-bundle-cjs.test.ts fails when a generated module and
 // its markdown differ by a single byte.
 //
-// Manager instructions are set by `manager.ensure`; all three are also injected
+// Manager instructions are set by `manager.ensure`; all four are also injected
 // by the `before("agent.create")` hook, because agents created through Paseo's
 // `create_agent` tool get no system prompt at all (bm-hld).
 //
@@ -25,6 +25,7 @@ const roles = [
   { role: "manager", constant: "MANAGER" },
   { role: "worker", constant: "WORKER" },
   { role: "reviewer", constant: "REVIEWER" },
+  { role: "orchestrator", constant: "ORCHESTRATOR" },
 ];
 
 for (const { role, constant } of roles) {

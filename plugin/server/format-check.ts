@@ -368,7 +368,8 @@ export async function checkTurnFormat(event: FormatTurnEvent, deps: FormatDeps):
   const log = deps.log ?? ((message: string) => console.warn(message));
   try {
     const role = roleOfProvider(event?.agent?.provider);
-    if (role === null) return "ignored";
+    // The Orchestrator's assessment agent writes no BM-* block: nothing to check (orchestrator design §3.2).
+    if (role === null || role === "orchestrator") return "ignored";
     try {
       await detect(event, role, deps, log);
     } catch (error) {

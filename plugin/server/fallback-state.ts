@@ -17,7 +17,7 @@
  * 4. `managerId` — the chat whose card shows it;
  * 5. writes it `pending`, or `dismissed` when the policy is `off` (recorded all
  *    the same, so phase 2a-18 has real data), and tells the listeners
- *    (`onFallbackIncident`) — the BM-FALLBACK notice and the card.
+ *    (`onFallbackIncident`) — the `auto` policy and the owner's decision.
  *
  * `<install home>/role-fallback-state.json` is user data like
  * `role-extras.json` (F9): mode 0600, temp file then rename, symlink refused,
@@ -201,7 +201,7 @@ export async function usageOf(paseo: unknown, baseProvider: string, log: (messag
   try {
     const result = await withTimeout(listUsage.call(providers) as Promise<{ providers?: unknown } | null | undefined>, USAGE_TIMEOUT_MS);
     if (result === TIMED_OUT) {
-      log(`[paseo-bm] reading the usage of ${baseProvider} took longer than ${USAGE_TIMEOUT_MS} ms; the fallback card shows no reset time.`);
+      log(`[paseo-bm] reading the usage of ${baseProvider} took longer than ${USAGE_TIMEOUT_MS} ms; the fallback decision shows no reset time.`);
       return NO_USAGE;
     }
     const entry = (Array.isArray(result?.providers) ? (result.providers as unknown[]) : [])
@@ -224,7 +224,7 @@ export async function usageOf(paseo: unknown, baseProvider: string, log: (messag
     const perModelWindow = exhausted.every((window) => MODEL_FAMILY.test(String(window["id"] ?? "")));
     return { resetsAt: latest?.iso ?? null, perModelWindow };
   } catch (error) {
-    log(`[paseo-bm] could not read the usage of ${baseProvider} (${reasonOf(error)}); the fallback card shows no reset time.`);
+    log(`[paseo-bm] could not read the usage of ${baseProvider} (${reasonOf(error)}); the fallback decision shows no reset time.`);
     return NO_USAGE;
   }
 }
@@ -297,7 +297,7 @@ export type IncidentListener = (
 ) => void | Promise<void>;
 const listeners = new Set<IncidentListener>();
 
-/** Subscribes to every incident written (the BM-FALLBACK notice and the card); returns the remover. */
+/** Subscribes to every incident written (the `auto` policy and the owner's decision); returns the remover. */
 export function onFallbackIncident(listener: IncidentListener): () => void {
   listeners.add(listener);
   return () => {
@@ -350,7 +350,8 @@ export async function recordIncident(
     const agentProvider = event.agent.provider;
     const role = roleOfProvider(agentProvider);
     const workspaceId = event.agent.workspaceId ?? null;
-    if (role === null || workspaceId === null) return null;
+    // The Orchestrator has no fallback chain (orchestrator design §3.1).
+    if (role === null || role === "orchestrator" || workspaceId === null) return null;
     const hasOpen = (incidents: readonly FallbackIncident[]) =>
       incidents.some((incident) => incident.agentId === agentId && DEDUPE_STATUSES.has(incident.status));
 
@@ -474,9 +475,12 @@ export function registerFallbackDetection(host: FallbackHost, options: RegisterF
   const remove = host.on("agent.turn_ended", async (event, context) => {
     try {
       const outcome = event?.outcome?.kind;
-      if (roleOfProvider(event?.agent?.provider) === null) return;
+      const role = roleOfProvider(event?.agent?.provider);
+      if (role === null) return;
       const handle = (context as { paseo?: unknown } | undefined)?.paseo;
       if (handle !== undefined) options.onPaseo?.(handle);
+      // The Orchestrator has no fallback chain: nothing to read for its turn (orchestrator design §3.1).
+      if (role === "orchestrator") return;
       if (outcome !== "failed" && outcome !== "completed") return;
       const text =
         outcome === "failed"

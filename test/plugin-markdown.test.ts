@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseInline, parseMarkdown } from "../plugin/client/markdown";
-import { closedWorkspaces } from "../plugin/client/dashboard-view";
+import { closedWorkspaces } from "../plugin/client/surface-view";
 
 /** Bead descriptions rendered as Markdown (owner, 2026-09-16). */
 describe("Markdown for bead descriptions", () => {
@@ -73,6 +73,7 @@ describe("closed workspaces stay reachable", () => {
       workspaceId: "wks_gone",
       label: "xspace-customer",
       detail: "no longer in Paseo · /x · last active 2026-09-15 · 4 KB of history",
+      state: "orphaned",
     });
     expect(closed[0]?.label).toBe("wks_arch");
   });

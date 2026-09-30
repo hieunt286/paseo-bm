@@ -1,0 +1,32 @@
+{
+  "id": "S5",
+  "title": "Duplicate: a seeded open bead already covers the request",
+  "fixture": {
+    "kind": "node",
+    "seededBeads": [
+      {
+        "key": "subtract",
+        "title": "Add subtract(a, b) to math.js",
+        "description": "math.js only has add. Add subtract(a, b) returning a - b, with a node:test test in test/math.test.js.\n\n## Acceptance Criteria\n- subtract(5, 3) returns 2.\n- npm test passes.",
+        "type": "task",
+        "priority": 2
+      }
+    ],
+    "bareRemote": false
+  },
+  "requests": [
+    {
+      "text": "Please add a subtract(a, b) function to math.js, with a test.",
+      "delaySeconds": 0
+    }
+  ],
+  "owner": { "policy": "recommended", "overrides": [] },
+  "expect": {
+    "tier": ["small", "medium"],
+    "beads": { "expect": "updated", "seeded": "subtract" },
+    "testsGreen": true,
+    "git": { "commit": "none", "push": { "expect": "none" } },
+    "contains": [{ "path": "math.js", "text": "subtract" }]
+  },
+  "timeoutMinutes": 30
+}

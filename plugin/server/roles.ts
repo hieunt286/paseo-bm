@@ -21,17 +21,17 @@
  *
  * Read-only: nothing is patched.
  */
-import type { BmRole, RoleDescriptor } from "../shared/contracts";
+import type { RoleDescriptor, SetupRoleWithOrchestrator } from "../shared/contracts";
 
-const ROLE_ORDER: readonly BmRole[] = ["manager", "worker", "reviewer"];
+const ROLE_ORDER: readonly SetupRoleWithOrchestrator[] = ["manager", "worker", "reviewer", "orchestrator"];
 
 /** Derived provider id and agent profile id of a role, as the installer registers them (ADR-006). */
-export function roleConfigId(role: BmRole): string {
+export function roleConfigId(role: SetupRoleWithOrchestrator): string {
   return `bm-${role}`;
 }
 
 /** Name of a role's instructions inside the payload (embedded in the bundle for the Manager). */
-export function roleInstructionsName(role: BmRole): string {
+export function roleInstructionsName(role: SetupRoleWithOrchestrator): string {
   return `roles/${role}.md`;
 }
 
@@ -60,7 +60,7 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 /**
  * Handler body of `roles.describe`.
  *
- * For each role, in the order manager, worker, reviewer:
+ * For each role, in the order manager, worker, reviewer, orchestrator:
  * - `provider` is `extends` of the derived provider `agents.providers.bm-<role>`
  *   (the user's own tool), or `""` when the entry or the key is missing;
  * - `model` is `model` of the agent profile `bm-<role>`, or `""`;

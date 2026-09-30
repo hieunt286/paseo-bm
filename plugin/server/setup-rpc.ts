@@ -1,5 +1,5 @@
 /**
- * RPCs of the Setup screen (delta 20260916-setup-screen).
+ * RPCs behind Settings' set-up blocks (from the Setup screen, delta 20260916-setup-screen).
  */
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { join } from "node:path";
@@ -14,6 +14,7 @@ import {
   type Role,
 } from "./role-extras";
 import { readFileSync } from "node:fs";
+import { extraHashOf } from "./role-extra-hash";
 import { resolveDataHome, unusableDataHomeMessage } from "./data-home";
 import { agentToolsIn, readRoleConfig, type ConfigPaseo, type RoleConfigView } from "./config-writer";
 import { cleanupPaseoBm, grantAgentTools, installKind, providerLogins } from "./setup-machine";
@@ -45,19 +46,24 @@ async function requireHome(paseo: unknown, deps: SetupDeps): Promise<string> {
 
 export async function handleSetupStatus(paseo: unknown, deps: SetupDeps = {}): Promise<SetupStatus> {
   const home = dataHomeOf(deps);
-  const extras = home === null ? { manager: "", worker: "", reviewer: "" } : readRoleExtras(home);
+  const extras = home === null ? { manager: "", worker: "", reviewer: "", orchestrator: "" } : readRoleExtras(home);
   return {
     tools: await toolsStatus(deps),
     latestCheckedOn: LATEST_KNOWN.checkedOn,
     skills: skillsStatus(deps),
-    extras: { manager: extras.manager.length, worker: extras.worker.length, reviewer: extras.reviewer.length },
+    extras: {
+      manager: extras.manager.length,
+      worker: extras.worker.length,
+      reviewer: extras.reviewer.length,
+      orchestrator: extras.orchestrator.length,
+    },
     paseoTools: toolsSeen(),
     setup: await machineSetup(paseo, deps),
   };
 }
 
 /**
- * Everything the Setup screen shows about this machine, read only (§7.13.5).
+ * Everything Settings shows about this machine, read only (§7.13.5).
  *
  * Every part degrades on its own: a configuration that cannot be read leaves
  * the roles unknown rather than failing the whole call, because the screen that
@@ -120,6 +126,7 @@ export async function handleRolesInstructions(input: { role: Role }, paseo: unkn
     full: fullInstructions(input.role, extra),
     path: home === null ? null : join(home, ROLE_EXTRAS_FILE),
     maxChars: MAX_EXTRA_CHARS,
+    hash: extraHashOf(extra),
   };
 }
 

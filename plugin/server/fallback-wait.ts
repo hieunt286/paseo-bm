@@ -15,12 +15,13 @@
  * already past due fires at once.
  *
  * When it fires: the stopped agent archived, gone, running or already replaced
- * (`bm.replacedBy`) → `expired`. Otherwise it is sent `RESUME_NOTICE`, the
- * incident becomes `resumed`, and its Manager chat gets a `BM-FALLBACK` with
- * `status: resumed`. Never throws into a timer: failures cost one log line.
+ * (`bm.replacedBy`) → `expired`. Otherwise it is sent `RESUME_NOTICE` and the
+ * incident becomes `resumed`; its Manager is not told (autonomy design §A.5 d:
+ * the owner's decision was settled when the wait began). Never throws into a
+ * timer: failures cost one log line.
  */
 import { unusableDataHomeMessage } from "./data-home";
-import { decidePending, notifyFallback, type FallbackAction, type FallbackRpcDeps } from "./fallback-rpc";
+import { decidePending, type FallbackAction, type FallbackRpcDeps } from "./fallback-rpc";
 import { readIncidents, updateIncidents } from "./fallback-state";
 import { REPLACED_BY_LABEL } from "./fallback-detect";
 import { asRecord, reasonOf } from "./role-choices";
@@ -43,7 +44,7 @@ export interface WaiterDeps {
   log?: (message: string) => void;
   setTimer?: (fire: () => void, ms: number) => Timer;
   clearTimer?: (timer: Timer) => void;
-  /** The Manager chat notice; `notifyFallback` by default. */
+  /** Hears each incident resumed; nothing by default. */
   notify?: (incident: FallbackIncident, paseo: unknown) => Promise<unknown>;
   /** The data folder when the caller knows it (tests); looked up otherwise. */
   home?: string | null;
@@ -76,7 +77,7 @@ export function createFallbackWaiter(deps: WaiterDeps = {}): FallbackWaiter {
       return timer;
     });
   const clearTimer = deps.clearTimer ?? ((timer: Timer) => clearTimeout(timer));
-  const notify = deps.notify ?? ((incident: FallbackIncident, paseo: unknown) => notifyFallback(incident, paseo));
+  const notify = deps.notify ?? (async () => undefined);
   const timers = new Map<string, Timer>();
   let armed = false;
 
@@ -144,7 +145,7 @@ export function createFallbackWaiter(deps: WaiterDeps = {}): FallbackWaiter {
 
   const wait: FallbackAction = async (incident, paseo, rpcDeps: FallbackRpcDeps) => {
     const home = homeOf(rpcDeps.home);
-    if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", `${unusableDataHomeMessage()}; see Setup`);
+    if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", `${unusableDataHomeMessage()}; see Settings → Data`);
     const resetsAt = incident.resetsAt === null ? Number.NaN : Date.parse(incident.resetsAt);
     const at = (rpcDeps.now ?? now)();
     if (Number.isNaN(resetsAt)) throw new DashboardError("E_FALLBACK_NO_RESET", "the reset time of this limit is not known");

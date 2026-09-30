@@ -68,7 +68,7 @@ function deps(
 }
 
 describe("installSkills", () => {
-  it("runs exactly the command the Setup screen showed, in a login shell", async () => {
+  it("runs exactly the command Settings showed, in a login shell", async () => {
     const result = await installSkills(deps());
 
     expect(runs).toEqual([{ file: "/bin/zsh", args: ["-lc", COMMAND], timeoutMs: SKILLS_INSTALL_TIMEOUT_MS }]);

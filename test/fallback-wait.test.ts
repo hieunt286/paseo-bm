@@ -77,7 +77,7 @@ afterEach(() => {
 });
 
 describe("the wait action", () => {
-  it("records waiting until resetsAt + 60 s, then resumes the idle agent with the exact text and tells the Manager chat", async () => {
+  it("records waiting until resetsAt + 60 s, then resumes the idle agent with the exact text and tells the listener", async () => {
     write([incident()]);
     const notify = vi.fn(async () => undefined);
     const waiter = createFallbackWaiter({ home, log, notify });
@@ -148,10 +148,9 @@ describe("after a plugin reload", () => {
     await waiter.ensureArmed(paseo);
     expect(vi.getTimerCount()).toBe(1);
     await vi.advanceTimersByTimeAsync(2 * 60 * 60 * 1000 + WAIT_GRACE_MS);
-    // The agent is resumed, then its Manager chat is told (the default notice, through the queue).
-    expect(sent.map((entry) => entry.id)).toEqual(["wrk-1", "mgr-1"]);
+    // The agent is resumed; its Manager is told nothing (autonomy design §A.5 d).
+    expect(sent.map((entry) => entry.id)).toEqual(["wrk-1"]);
     expect(sent[0]!.text).toBe(RESUME_NOTICE);
-    expect(sent[1]!.text).toMatch(/^BM-FALLBACK\nincident: fb-0000000000aa\n[\s\S]*\nstatus: resumed\n/);
     expect(read()[0]).toMatchObject({ status: "resumed" });
   });
 

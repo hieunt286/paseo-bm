@@ -179,7 +179,8 @@ describe("client entry registration", () => {
         "slash:bm-worker-new",
         "slash:bm-worker-stop-all",
         "command:open-beads-manager",
-        "command:open-beads-dashboard",
+        "command:open-beads-project",
+        "command:open-beads-inbox",
         "settings:paseo-bm-settings",
         `panel:${AGENT_TREE_PANEL_ID}`,
         "panel:bm-chat-beads",
@@ -400,7 +401,7 @@ describe("role configuration (roles.describe)", () => {
     expect(shown).toContain(NO_ROLES_TEXT);
     expect(NO_ROLES_TEXT).toMatch(/not registered with Paseo/);
     // 0.4.0: the plugin creates them itself, so there is nothing to install.
-    expect(NO_ROLES_TEXT).toContain("Open Beads Manager → Setup to create them.");
+    expect(NO_ROLES_TEXT).toContain("Open Beads Manager → Settings to create them.");
     expect(NO_ROLES_TEXT).not.toMatch(/npx paseo-bm/);
   });
 });

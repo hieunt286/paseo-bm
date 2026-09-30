@@ -27,9 +27,10 @@ export type ProviderMode = { id: string; label?: string; description?: string; c
 /**
  * Roles whose start mode the hook chooses (delta 20260917c §4.6). The Manager
  * is left out on purpose: `manager.ensure` already sets its mode, and two
- * places deciding one value is worse than one.
+ * places deciding one value is worse than one. The Orchestrator falls under
+ * the Reviewer's rule (orchestrator design §3.1): it must stay read-only.
  */
-export const ROLE_GETS_MODE: Readonly<Record<Role, boolean>> = { manager: false, worker: true, reviewer: true };
+export const ROLE_GETS_MODE: Readonly<Record<Role, boolean>> = { manager: false, worker: true, reviewer: true, orchestrator: true };
 
 /**
  * How long the hook waits for one lookup. Well under the host's 30 s hook
@@ -73,7 +74,7 @@ const firstWithTier = (modes: readonly ProviderMode[], tier: string): string | u
  * (bm-msy, "the profile's mode if it has one"), except that a dangerous or
  * planning profile mode is not used for the Reviewer.
  *
- * - Reviewer: `auto` when present; else the first `moderate` whose id, label and
+ * - Reviewer, and the Orchestrator under the same rule: `auto` when present; else the first `moderate` whose id, label and
  *   description mention neither "full" nor "network"; else the first `safe`. Never
  *   `dangerous` or `planning`: a caller-chosen mode of either tier is
  *   downgraded, any other caller choice is kept, and a mode id the provider does
@@ -349,8 +350,9 @@ export interface RunPosture {
  *   profile's, else the FIRST listed one: the daemon refuses a cross-provider
  *   child without a mode (design F11). The Manager and the Worker get
  *   `auto_accept: true` when the provider offers it and nobody set it; the
- *   Reviewer ALWAYS gets `auto_accept: false`, over the profile and over a
- *   value the daemon may have set by itself (owner decision Q7 a).
+ *   Reviewer and the Orchestrator ALWAYS get `auto_accept: false`, over the
+ *   profile and over a value the daemon may have set by itself (owner
+ *   decision Q7 a; orchestrator design §3.1).
  * - `none`: no mode and no feature (Pi has neither; its lack of a permission
  *   layer was accepted by the owner, Q7 a): both are REMOVED from the request,
  *   whether the creator or the profile set them (review b4).
@@ -380,10 +382,12 @@ export function runPostureOf(
     const modeId = profileModeId !== null && listed.includes(profileModeId) ? profileModeId : listed[0];
     if (modeId !== undefined) posture.modeId = modeId;
   }
-  if (offersAutoApprove(features) || role === "reviewer") {
+  // The Orchestrator is read-only like the Reviewer (orchestrator design §3.1).
+  const neverAutoApprove = role === "reviewer" || role === "orchestrator";
+  if (offersAutoApprove(features) || neverAutoApprove) {
     const values = { ...(current.featureValues ?? {}) };
     const set = Object.prototype.hasOwnProperty.call(values, AUTO_APPROVE_FEATURE);
-    if (role === "reviewer") {
+    if (neverAutoApprove) {
       if (values[AUTO_APPROVE_FEATURE] !== false) {
         values[AUTO_APPROVE_FEATURE] = false;
         posture.featureValues = values;

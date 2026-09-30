@@ -29,7 +29,8 @@
     "generate:role-instructions": "node scripts/generate-role-instructions.mjs",
     "typecheck:plugin": "tsc -p plugin/tsconfig.json",
     "smoke:packed": "node scripts/smoke-packed.mjs",
-    "measure": "node scripts/measure-requests.mjs"
+    "eval:replay": "tsup --config tsup.eval.config.ts && node .eval-dist/replay.js",
+    "eval:suite": "tsup --config tsup.eval.config.ts && node .eval-dist/suite.js"
   },
   "devDependencies": {
     "@eslint/js": "^9.12.0",

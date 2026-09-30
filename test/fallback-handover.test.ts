@@ -1,11 +1,13 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WORKER_CLOSING, managerHandover, workerHandover } from "../plugin/server/fallback-handover";
-import { qaLedgerPath, recordEntries } from "../plugin/server/qa-ledger";
+import { DECISIONS_DIR_NAME, clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
 import { appendRecord, clearTraceStoreCache, type TraceStoreLocation } from "../plugin/server/trace-store";
 import { TRACE_STORE_SCHEMA_VERSION, type FallbackIncident, type ParsedReport, type TraceRecord } from "../plugin/shared/contracts";
+import { answerDecision, confirmDecision, markNeedsConfirmation, type Decision } from "../plugin/shared/decisions";
+import { makeDecision } from "./helpers/decisions";
 
 /**
  * Delta 20260921 §4.4.8 (REQ-065 d) and §4.5.2 (REQ-066 c): the handovers a
@@ -127,7 +129,23 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "bm-handover-"));
   location = { tracesDir: join(home, "traces") };
   clearTraceStoreCache();
+  clearDecisionStoreCache();
 });
+
+const ANSWERED_AT = "2026-09-22T02:40:00.000Z";
+
+/** Stores Worker question `Qn` of `requestId` in the decision store beside the trace store (autonomy design §A.4). */
+function ask(requestId: string, n: number, question: string, overrides: Partial<Decision> = {}): Decision {
+  const decision = makeDecision({ id: `q:${requestId}:Q${n}`, workspaceId: WS, requestId, question, askedBy: { role: "worker", agentId: WORKER }, ...overrides });
+  createDecisionStore(home).open(decision);
+  return decision;
+}
+
+/** Applies an answer-like transition to a stored decision. */
+function settle(id: string, step: Parameters<ReturnType<typeof createDecisionStore>["transition"]>[1]): void {
+  const result = createDecisionStore(home).transition(id, step, WS);
+  if (result.status !== "updated") throw new Error(`could not settle ${id}: ${result.status}`);
+}
 
 afterEach(() => {
   rmSync(home, { recursive: true, force: true });
@@ -188,7 +206,7 @@ describe("workerHandover", () => {
         "skillsUsed: feature-workflow, polishing-beads",
         // Written before the decided field existed: nothing recorded.
         "decided: none",
-        // A ledger file that does not exist yet: nothing was asked.
+        // No decision stored yet: nothing was asked.
         "questions: none",
         "",
         WORKER_CLOSING,
@@ -211,31 +229,23 @@ describe("workerHandover", () => {
   });
 
   /**
-   * Design delta 20260924-qa-ledger §8 (A6): without the questions, a
-   * replacement Worker starts from the original request alone and asks the
-   * user everything its predecessor already asked and had answered.
+   * Without the questions, a replacement Worker starts from the original
+   * request alone and asks the owner everything its predecessor already asked
+   * and had answered. They come from the decision store (autonomy design §A.4).
    */
-  it("A6: hands over every question with its latest answer, or open", async () => {
-    recordEntries(location, {
-      workspaceId: WS,
-      workerId: null,
-      questions: [
-        { requestId: REQ, id: "Q10", text: "Where does the list live?" },
-        { requestId: REQ, id: "Q2", text: "Rename the session cookie?" },
-        { requestId: REQ, id: "Q1", text: "Which storage?" },
-      ],
-      answers: [],
-    });
-    recordEntries(location, {
-      workspaceId: WS,
-      workerId: WORKER,
-      questions: [],
-      answers: [
-        { requestId: REQ, id: "Q1", text: "a — the existing table", via: "user" },
-        { requestId: REQ, id: "Q1", text: "other — a new table after all", via: "agent" },
-        { requestId: REQ, id: "Q3", text: "b — later", via: "user" },
-      ],
-    });
+  it("hands over every question of the request in number order, with its answer, open, or how it ended", async () => {
+    ask(REQ, 10, "Where does the list live?");
+    ask(REQ, 2, "Rename the session cookie?");
+    ask(REQ, 1, "Which storage?");
+    ask(REQ, 3, "Keep the old endpoint?");
+    ask(REQ, 4, "Which   library\nfor dates?");
+    ask(REQ, 5, "Deploy now?", { supersedes: `q:${REQ}:Q4` });
+    ask(REQ, 6, "Anything else?");
+    // Another request's question stays out.
+    ask("req-20260922T090000Z", 7, "Not this request");
+    settle(`q:${REQ}:Q1`, (decision) => answerDecision(decision, { via: "chat-card", words: "a new table after all", at: ANSWERED_AT }));
+    settle(`q:${REQ}:Q3`, (decision) => answerDecision(decision, { via: "inbox", optionKey: "c", at: ANSWERED_AT }));
+    settle(`q:${REQ}:Q6`, (decision) => markNeedsConfirmation(decision, { via: "chat-worker", at: ANSWERED_AT }));
     const { paseo } = fakePaseo([]);
     const text = await workerHandover(incident(), { paseo, location });
     expect(text).toContain(
@@ -243,16 +253,23 @@ describe("workerHandover", () => {
         "\nquestions:",
         "- Q1: Which storage? → other — a new table after all",
         "- Q2: Rename the session cookie? → open",
-        "- Q3: (question not recorded) → b — later",
+        "- Q3: Keep the old endpoint? → c — Hold",
+        `- Q4: Which library for dates? → superseded by Q5`,
+        "- Q5: Deploy now? → open",
+        // Waiting for the owner's confirmation is still open.
+        "- Q6: Anything else? → open",
         "- Q10: Where does the list live? → open",
         "",
       ].join("\n"),
     );
+    settle(`q:${REQ}:Q6`, (decision) => confirmDecision(decision, { answered: true, at: ANSWERED_AT }));
+    expect(await workerHandover(incident(), { paseo, location })).toContain("\n- Q6: Anything else? → answered in chat\n");
   });
 
-  it("A6: reads questions unknown for a corrupt ledger", async () => {
-    mkdirSync(join(home, "ui"), { recursive: true });
-    writeFileSync(qaLedgerPath(location), "{ nope");
+  it("reads questions unknown when the decision store cannot be read", async () => {
+    mkdirSync(join(home, "elsewhere"), { recursive: true });
+    // A symlinked decisions folder is refused, never followed.
+    symlinkSync(join(home, "elsewhere"), join(home, DECISIONS_DIR_NAME));
     const { paseo } = fakePaseo([]);
     expect(await workerHandover(incident(), { paseo, location })).toContain("\nquestions: unknown\n");
   });
@@ -390,15 +407,26 @@ describe("managerHandover", () => {
     typed("Build the login screen for Team Portal.", "c1"),
     said("On it."),
     typed("Also add a logout button. --token abc123secret", "c2"),
-    // Newest page: the pill's window.
+    // Newest page. A relayed question is not what makes it open: the decision store is.
     relayed(asking(REQ_A, ["Q1", "Q2"])),
     typed(`${"x".repeat(980)}${SECRET}${"y".repeat(100)}`, "c3"),
-    // A running Worker already has its answer: not an open question.
     relayed(asking(REQ_B, ["Q3"])),
     typed("BM-FALLBACK\nincident: fb-0000000000aa\nstatus: pending", "c-notice"),
     typed("Ship it when the review passes.", "c4"),
   ];
   const BLOCKERS = `Q1 and Q2 wait for the user:\n${"storage ".repeat(60)}`;
+
+  /**
+   * Worker A's two open questions, and Q3 of request B — already answered, so
+   * not open — plus an open question of a request no listed Worker carries.
+   */
+  function openQuestions(): void {
+    ask(REQ_A, 2, "Storage — where?", { askedBy: { role: "worker", agentId: WORKER_A } });
+    ask(REQ_A, 1, "Storage — where?", { askedBy: { role: "worker", agentId: WORKER_A } });
+    ask(REQ_B, 3, "Storage — where?", { askedBy: { role: "worker", agentId: WORKER_B } });
+    settle(`q:${REQ_B}:Q3`, (decision) => answerDecision(decision, { via: "chat-worker", optionKey: "a", at: ANSWERED_AT }));
+    ask("req-20260922T003000Z", 4, "Storage — where?", { askedBy: { role: "worker", agentId: "agent-worker-closed" } });
+  }
 
   async function storeReports(): Promise<void> {
     for (const [minute, extra] of [
@@ -412,6 +440,7 @@ describe("managerHandover", () => {
 
   it("fills the Workers, open questions, open incidents and the user's last three messages from fakes", async () => {
     await storeReports();
+    openQuestions();
     const { paseo, refetch } = managerPaseo(TIMELINE, 5);
     const log = vi.fn();
 
@@ -442,19 +471,15 @@ describe("managerHandover", () => {
     expect(log).not.toHaveBeenCalled();
   });
 
-  it("A6: leaves answered questions out of openQuestions, as the pill does (design delta 20260924-qa-ledger §8)", async () => {
+  it("leaves settled questions out of openQuestions: only what the decision store holds unsettled is open", async () => {
     await storeReports();
-    const answer = (ids: string[]) =>
-      recordEntries(location, {
-        workspaceId: WS,
-        workerId: WORKER_A,
-        questions: [],
-        answers: ids.map((id) => ({ requestId: REQ_A, id, text: "a", via: "user" as const })),
-      });
-    answer(["Q1"]);
+    openQuestions();
+    const answer = (n: number) =>
+      settle(`q:${REQ_A}:Q${n}`, (decision) => answerDecision(decision, { via: "inbox", optionKey: "a", at: ANSWERED_AT }));
+    answer(1);
     const partly = await managerHandover(managerIncident(), { paseo: managerPaseo(TIMELINE, 5).paseo, location, incidents: INCIDENTS, env: ENV, log: vi.fn() });
     expect(partly).toContain(`\nopenQuestions: ${WORKER_A}: Q2\n`);
-    answer(["Q2"]);
+    answer(2);
     const all = await managerHandover(managerIncident(), { paseo: managerPaseo(TIMELINE, 5).paseo, location, incidents: INCIDENTS, env: ENV, log: vi.fn() });
     expect(all).toContain("\nopenQuestions: none\n");
   });
@@ -465,7 +490,7 @@ describe("managerHandover", () => {
     for (const id of ["agent-worker-labelled", "agent-worker-switched", "agent-worker-archived", "agent-worker-closed", "agent-worker-elsewhere", "agent-rev-a", `- ${MANAGER}`]) {
       expect(text, id).not.toContain(id);
     }
-    // Without the switched incident its Worker counts again: two live Workers of REQ_A, so no one is waiting.
+    // Without the switched incident its Worker counts again; no question is stored, so none is open.
     const unswitched = await managerHandover(managerIncident(), { paseo, location, incidents: [], env: ENV, log: vi.fn() });
     expect(unswitched).toContain("\n- agent-worker-switched · requestId ");
     expect(unswitched).toContain("\nopenQuestions: none\nopenIncidents: none\n");
@@ -526,8 +551,9 @@ describe("managerHandover", () => {
     expect(await managerHandover(managerIncident(), { paseo: alone, location, incidents: [], log: vi.fn() })).toContain("\nworkers: none\n");
   });
 
-  it("keeps to its budget: a timeline that never answers costs only the questions and the messages", async () => {
+  it("keeps to its budget: a timeline that never answers costs only the messages", async () => {
     await storeReports();
+    openQuestions();
     const hanging = managerPaseo(TIMELINE, 5);
     hanging.refetch.mockImplementation(() => new Promise(() => undefined));
     // Snapshots that take real time still arrive: the hanging timeline does not use up their share.
@@ -541,7 +567,7 @@ describe("managerHandover", () => {
     const text = await managerHandover(managerIncident(), { paseo: hanging.paseo, location, incidents: INCIDENTS, env: ENV, budgetMs: 300, log });
     expect(Date.now() - started).toBeLessThan(2000);
     expect(text).toContain(`\n- ${WORKER_A} · requestId ${REQ_A} · bm-worker/claude-opus-5-20260901 · idle · last report: blocked at 2026-09-22T01:40:00.000Z · blockers: Q1 and Q2`);
-    expect(text).toContain("\nopenQuestions: unknown\nopenIncidents: fb-00000000000b, fb-00000000000c\n");
+    expect(text).toContain(`\nopenQuestions: ${WORKER_A}: Q1, Q2\nopenIncidents: fb-00000000000b, fb-00000000000c\n`);
     expect(text).toContain("(oldest first, verbatim):\nunknown\n");
     expect(log).toHaveBeenCalledWith(`[paseo-bm] the handover of incident fb-0000000000aa could not read the timeline of Manager ${MANAGER} within 300 ms; those parts read unknown.`);
   });

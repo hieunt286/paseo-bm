@@ -40,7 +40,7 @@ import { parseReports, parseReviews, requestIdFromText } from "./bm-report";
 import { isPluginNotice } from "./notices";
 import { stripNewRequestMarker } from "../shared/new-request";
 import { resolveDataHome } from "./data-home";
-import { roleOfProvider } from "./agent-role";
+import { roleOfProvider, type BmRole } from "./agent-role";
 import { providerId } from "./provider-id";
 import {
   TraceStoreLockTimeout,
@@ -58,6 +58,7 @@ import {
   type TraceRuntime,
   type Usage,
 } from "../shared/contracts";
+import { PLUGIN_VERSION } from "../shared/version";
 
 /** Timeline entries read back per turn when timestamps have to be recovered. */
 export const REFETCH_LIMIT = 200;
@@ -228,9 +229,10 @@ export function skillsFromItem(item: TimelineItem): string[] {
  *
  * This is the raw material for "did this request create beads?" (REQ-044b) and
  * the workflow table (REQ-045), so it records what was *observed*, never a
- * conclusion drawn from it.
+ * conclusion drawn from it. A command and a sub-agent's label are masked with
+ * `redactText` before they are kept, as messages are (REQ-048b).
  */
-export function evidenceFromItem(item: TimelineItem, agentId: string, at: string): Evidence[] {
+export function evidenceFromItem(item: TimelineItem, agentId: string, at: string, env: NodeJS.ProcessEnv = process.env): Evidence[] {
   if (item.type !== "tool_call") return [];
   const out: Evidence[] = skillsFromItem(item).map((skill) => ({ kind: "skill", detail: skill, agentId, at }));
   const detail = (item as { detail?: Record<string, unknown> }).detail;
@@ -240,7 +242,7 @@ export function evidenceFromItem(item: TimelineItem, agentId: string, at: string
   };
   switch (detail?.["type"]) {
     case "shell":
-      if (text("command") !== "") out.push({ kind: "shell", detail: text("command"), agentId, at });
+      if (text("command") !== "") out.push({ kind: "shell", detail: redactText(text("command"), env), agentId, at });
       break;
     case "edit":
     case "write":
@@ -248,7 +250,7 @@ export function evidenceFromItem(item: TimelineItem, agentId: string, at: string
       break;
     case "sub_agent": {
       const label = [text("subAgentType"), text("description")].filter((part) => part !== "").join(" — ");
-      out.push({ kind: "agent", detail: label === "" ? "sub_agent" : label, agentId, at });
+      out.push({ kind: "agent", detail: label === "" ? "sub_agent" : redactText(label, env), agentId, at });
       break;
     }
   }
@@ -353,6 +355,18 @@ export async function timestampsForTurn(
   return { entries, usage, requestIdLabel, runtime: runtimeOf(asRecord?.agent) };
 }
 
+/**
+ * The role a turn of this provider is recorded under, or null when it is not
+ * recorded: not a paseo-bm agent, or the Orchestrator's assessment agent. An
+ * assessment is not part of the request it assesses, its result has a store of
+ * its own, and a 0.4.1 plugin reading the trace store must never meet a role it
+ * cannot parse (orchestrator design §3.2).
+ */
+export function recordedRoleOf(provider: unknown): Exclude<BmRole, "orchestrator"> | null {
+  const role = roleOfProvider(provider);
+  return role === null || role === "orchestrator" ? null : role;
+}
+
 /** In-memory start marks, keyed by agent and turn. Lost on reload, which is fine. */
 const startMarks = new Map<string, string>();
 
@@ -363,7 +377,7 @@ function markKey(agentId: string, turnId: string | null): string {
 /** Records a turn's start time. */
 export function noteTurnStart(event: TurnStartedEvent, now: () => Date = () => new Date()): void {
   // Only paseo-bm's agents are collected, fallback aliases included (delta 20260921 §4.4.1).
-  if (roleOfProvider(event.agent.provider) === null) return;
+  if (recordedRoleOf(event.agent.provider) === null) return;
   startMarks.set(markKey(event.agent.id, event.turnId), now().toISOString());
 }
 
@@ -403,7 +417,7 @@ export async function buildRecord(
   event: TurnEndedEvent,
   deps: CollectorDeps,
 ): Promise<{ record: TraceRecord; workspaceName: string | null } | null> {
-  const role = roleOfProvider(event.agent.provider);
+  const role = recordedRoleOf(event.agent.provider);
   if (role === null) return null;
   if (event.agent.workspaceId === null) return null;
 
@@ -437,7 +451,7 @@ export async function buildRecord(
   let relayRequestId: string | null = null;
 
   for (const { item, at } of timed) {
-    evidence.push(...evidenceFromItem(item, event.agent.id, at));
+    evidence.push(...evidenceFromItem(item, event.agent.id, at, env));
     if (role === "manager" && relayRequestId === null) relayRequestId = relayRequestIdOf(item);
     const text = textOf(item);
     if (text === null) continue;
@@ -495,6 +509,7 @@ export async function buildRecord(
     evidence,
     usage,
     runtime,
+    pluginVersion: PLUGIN_VERSION,
   };
 
   const cwd = typeof event.agent.cwd === "string" && event.agent.cwd !== "" ? event.agent.cwd : null;
@@ -509,11 +524,16 @@ export async function buildRecord(
  * question has something to go on.
  */
 export async function collectTurnEnded(event: TurnEndedEvent, deps: CollectorDeps): Promise<boolean> {
+  return (await collectTurn(event, deps)) !== null;
+}
+
+/** `collectTurnEnded` that returns the record it wrote, or null when it wrote none. */
+export async function collectTurn(event: TurnEndedEvent, deps: CollectorDeps): Promise<TraceRecord | null> {
   const log = deps.log ?? ((message: string) => console.warn(message));
   try {
-    if (deps.location === null) return false;
+    if (deps.location === null) return null;
     const built = await buildRecord(event, deps);
-    if (built === null) return false;
+    if (built === null) return null;
 
     await appendRecord(deps.location, built.record, { timeoutMs: deps.lockTimeoutMs });
     startMarks.delete(markKey(event.agent.id, event.turnId));
@@ -528,14 +548,14 @@ export async function collectTurnEnded(event: TurnEndedEvent, deps: CollectorDep
       // Losing the label only costs recognisability of an orphaned workspace.
       log(`[paseo-bm] could not update trace workspace metadata: ${messageOf(error)}`);
     }
-    return true;
+    return built.record;
   } catch (error) {
     if (error instanceof TraceStoreLockTimeout) {
       log(`[paseo-bm] dropped one trace record: ${error.message}`);
-      return false;
+      return null;
     }
     log(`[paseo-bm] could not record a trace for agent ${event.agent.id}: ${messageOf(error)}`);
-    return false;
+    return null;
   }
 }
 
@@ -591,9 +611,11 @@ export interface RegisterCollectorOptions {
    * The review budget check hangs here rather than on its own
    * `on("agent.turn_ended")`: two handlers of one event give no ordering
    * guarantee, and a count read before the append is one call short.
-   * Its failures are contained like the collector's own.
+   * Its failures are contained like the collector's own. `record` is the
+   * record just written (texts already masked), so a step that reads the turn
+   * need not read the store back.
    */
-  onRecorded?: (event: TurnEndedEvent, input: { location: TraceStoreLocation; paseo: unknown }) => unknown;
+  onRecorded?: (event: TurnEndedEvent, input: { location: TraceStoreLocation; paseo: unknown; record: TraceRecord }) => unknown;
 }
 
 /**
@@ -641,7 +663,7 @@ export function registerCollector(
         return;
       }
       const paseo = (context as { paseo?: CollectorPaseo } | undefined)?.paseo;
-      const recorded = await collectTurnEnded(event, {
+      const record = await collectTurn(event, {
         location,
         paseo,
         now: options.now,
@@ -649,9 +671,9 @@ export function registerCollector(
         log,
         lockTimeoutMs: options.lockTimeoutMs,
       });
-      if (recorded && options.onRecorded !== undefined) {
+      if (record !== null && options.onRecorded !== undefined) {
         try {
-          await options.onRecorded(event, { location, paseo });
+          await options.onRecorded(event, { location, paseo, record });
         } catch (error) {
           log(`[paseo-bm] after-record step failed: ${messageOf(error)}`);
         }

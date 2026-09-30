@@ -1,24 +1,27 @@
 /**
- * The fallback card's server side (delta 20260921 §4.4.6, §4.4.10, REQ-065 c).
+ * The fallback incidents' server side (delta 20260921 §4.4.6, §4.4.10, REQ-065 c).
  *
- * - `BM-FALLBACK`: a new `pending` incident with a `managerId` is told to that
- *   Manager's chat through the notice queue (the Manager may be running, F13),
- *   and so is every later decision, with its new `status` and `replacement`.
- *   The chat renders the block as a card; the card's state always comes from
- *   `fallback.incidents`, never from the text.
- * - `fallback.incidents`: the recorded incidents, filtered by workspace or ids.
+ * - A new `pending` incident becomes the owner's decision `f:<incidentId>`
+ *   (autonomy design §A.5 d, `fallback-decisions.ts`); answering it runs
+ *   `fallback.act` below. The Manager is not told: it relays nothing.
+ * - `fallback.incidents`: the recorded incidents, filtered by workspace or ids
+ *   (the Inbox reads them).
  * - `fallback.act`: `dismiss` ("I'll handle it") marks the incident
  *   `dismissed` and touches no agent. `switch` (§4.4.7) and `wait` (§4.4.9)
- *   are handed in by the modules that implement them.
+ *   are handed in by the modules that implement them; `resend` is the Inbox's
+ *   Resend to Worker. After each action the decisions are aligned (an incident
+ *   decided here withdraws its open decision).
  *
- * Handlers throw only coded `DashboardError`s; the notice never throws.
+ * `fallbackNotice` writes the `BM-FALLBACK` block the Worker of a switched
+ * Reviewer gets its instructions in (`fallback-reviewer.ts`, §4.5.1).
+ *
+ * Handlers throw only coded `DashboardError`s.
  */
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { unusableDataHomeMessage } from "./data-home";
+import { autoActionOf, holdFallbackDecision, syncFallbackDecisions } from "./fallback-decisions";
 import { onFallbackIncident, readIncidents, updateIncidents } from "./fallback-state";
 import { FALLBACK_NOTICE_MARKER } from "./notices";
-import { enqueue as defaultEnqueue, type NoticeOutcome, type NoticePaseo } from "./notice-queue";
-import { aliasBases } from "./alias-bases";
 import { providerId } from "./provider-id";
 import { reasonOf } from "./role-choices";
 import { dataHomeOf } from "./role-extras";
@@ -33,10 +36,10 @@ const defaultLog = (message: string): void => console.warn(message);
 /**
  * The `BM-FALLBACK` block of an incident, word for word (agent-facing, so
  * English). `baseOf` gives the base provider an alias extends (`null` when
- * unknown, written `unknown`). `closing` replaces the Manager's closing line —
- * the Worker of a switched Reviewer gets its instructions there (§4.5.1).
+ * unknown, written `unknown`). `closing` is what the agent is told to do: the
+ * Worker of a switched Reviewer gets its instructions there (§4.5.1).
  */
-export function fallbackNotice(incident: FallbackIncident, baseOf: (alias: string) => string | null, closing?: string): string {
+export function fallbackNotice(incident: FallbackIncident, baseOf: (alias: string) => string | null, closing: string): string {
   const alias = providerId(incident.agentProvider) ?? incident.agentProvider;
   const message = incident.message.replace(/\s+/g, " ").trim().slice(0, NOTICE_MESSAGE_CHARS);
   const candidate =
@@ -57,39 +60,18 @@ export function fallbackNotice(incident: FallbackIncident, baseOf: (alias: strin
     `candidate: ${candidate}`,
     `replacement: ${incident.replacementId ?? "none"}`,
     "",
-    closing ??
-      `The ${incident.role} stopped because of its provider plan. The user decides on the card in this chat. Tell the user in one line; do not create an agent yourself. Once the status is switched, follow the agent on the replacement line instead.`,
+    closing,
   ].join("\n");
 }
 
 export { aliasBases } from "./alias-bases";
+export { AUTO_WAIT_WINDOW_MS, autoActionOf } from "./fallback-decisions";
 
-export interface FallbackNoticeDeps {
-  enqueue?: (targetId: string, kind: string, text: string, paseo?: NoticePaseo) => Promise<NoticeOutcome>;
-  log?: (message: string) => void;
-}
-
-/**
- * Tells the incident's Manager chat (kind `BM-FALLBACK`, through the notice
- * queue). No `managerId` → nothing (only the pill shows it). Never throws.
- */
-export async function notifyFallback(incident: FallbackIncident, paseo: unknown, deps: FallbackNoticeDeps = {}): Promise<NoticeOutcome | null> {
-  if (incident.managerId === null) return null;
-  const log = deps.log ?? defaultLog;
-  try {
-    const bases = await aliasBases(paseo);
-    const text = fallbackNotice(incident, (alias) => bases[alias] ?? null);
-    return await (deps.enqueue ?? defaultEnqueue)(incident.managerId, FALLBACK_NOTICE_MARKER, text, paseo as NoticePaseo);
-  } catch (error) {
-    log(`[paseo-bm] telling ${incident.managerId} about fallback incident ${incident.id} failed: ${reasonOf(error)}`);
-    return null;
-  }
-}
-
-export interface FallbackRpcDeps extends FallbackNoticeDeps {
+export interface FallbackRpcDeps {
   /** The data folder; the plugin looks it up, tests pass one. */
   home?: string | null;
   now?: () => Date;
+  log?: (message: string) => void;
 }
 
 /** The data folder, or `null` when there is none; `deps.home` stands in for it in tests. */
@@ -148,7 +130,7 @@ export async function decidePending(
 /** `dismiss` ("I'll handle it", §4.4.10): `dismissed`, no agent touched. */
 export const dismissIncident: FallbackAction = async (incident, _paseo, deps) => {
   const home = homeOf(deps);
-  if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", `${unusableDataHomeMessage()}; see Setup`);
+  if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", `${unusableDataHomeMessage()}; see Settings → Data`);
   const now = (deps.now ?? (() => new Date()))().toISOString();
   return decidePending(home, incident.id, (current) => ({ ...current, status: "dismissed", decidedAt: now }), deps.log ?? defaultLog);
 };
@@ -174,9 +156,10 @@ function oneActionAtATime<T>(work: () => Promise<T>): Promise<T> {
  * the incident is read and checked `pending` inside that lock, and the action
  * runs to its end before the next one reads it. So a Switch can never create a
  * Worker for an incident a concurrent Wait or Dismiss already decided, and a
- * second action on the same incident always finds it decided. Then the Manager
- * chat is told the new status. An action this build does not have yet fails
- * with its coded error.
+ * second action on the same incident always finds it decided. Then, inside
+ * the same lock and whatever the action did, the `f:` decisions are aligned
+ * with the incidents: an incident decided here withdraws its open decision.
+ * An action this build does not have yet fails with its coded error.
  */
 export function handleFallbackAct(
   input: FallbackActInput,
@@ -185,54 +168,52 @@ export function handleFallbackAct(
 ): Promise<{ incident: FallbackIncident }> {
   return oneActionAtATime(async () => {
     const home = homeOf(deps);
-    if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", `${unusableDataHomeMessage()}; see Setup`);
-    const found = readIncidents(home, deps.log ?? defaultLog).incidents.find((incident) => incident.id === input.incidentId);
-    if (found === undefined) throw new DashboardError("E_FALLBACK_NOT_FOUND", `no fallback incident ${input.incidentId}`);
-    const scoped = { ...deps, home };
-    if (input.action === "resend") {
-      // Only a switched Reviewer whose replacement never appeared; the Manager chat already shows `switched`.
-      if (found.role !== "reviewer" || found.status !== "switched" || found.replacementId !== null) {
-        throw new DashboardError("E_FALLBACK_NOT_PENDING", `incident ${found.id} has nothing to resend`);
-      }
-      if (deps.actions?.resend === undefined) throw new DashboardError("E_FALLBACK_CREATE_FAILED", "resending is not available in this build");
-      return { incident: await deps.actions.resend(found, paseo, scoped) };
+    if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", `${unusableDataHomeMessage()}; see Settings → Data`);
+    try {
+      return { incident: await actOn(input, home, paseo, deps) };
+    } finally {
+      syncFallbackDecisions(home, deps);
     }
-    if (found.status !== "pending") throw new DashboardError("E_FALLBACK_NOT_PENDING", `incident ${found.id} is ${found.status}, not pending`);
-    let action: FallbackAction;
-    if (input.action === "dismiss") action = dismissIncident;
-    else if (input.action === "switch") {
-      if (deps.actions?.switch === undefined) throw new DashboardError("E_FALLBACK_CREATE_FAILED", "switching is not available in this build");
-      action = deps.actions.switch;
-    } else {
-      if (deps.actions?.wait === undefined) throw new DashboardError("E_FALLBACK_NO_RESET", "waiting for the reset is not available in this build");
-      action = deps.actions.wait;
-    }
-    const incident = await action(found, paseo, scoped);
-    await notifyFallback(incident, paseo, deps);
-    return { incident };
   });
 }
 
-/** A reset this close is waited for rather than switched away from (§4.6, REQ-067 b). */
-export const AUTO_WAIT_WINDOW_MS = 30 * 60 * 1000;
-
-/**
- * What the `auto` policy chooses for a new `pending` incident (§4.6): `wait`
- * when the reset is known and at most 30 minutes away (a reset already past
- * counts), else `switch` when there is a candidate, else nothing — the
- * incident stays pending, as with "Ask me".
- */
-export function autoActionOf(incident: FallbackIncident, now: Date): "wait" | "switch" | null {
-  const resetsAt = incident.resetsAt === null ? Number.NaN : Date.parse(incident.resetsAt);
-  if (!Number.isNaN(resetsAt) && resetsAt - now.getTime() <= AUTO_WAIT_WINDOW_MS) return "wait";
-  return incident.candidate === null ? null : "switch";
+/** The checks and the action of `fallback.act`, inside its lock. */
+async function actOn(
+  input: FallbackActInput,
+  home: string,
+  paseo: unknown,
+  deps: FallbackRpcDeps & { actions?: FallbackActions },
+): Promise<FallbackIncident> {
+  const found = readIncidents(home, deps.log ?? defaultLog).incidents.find((incident) => incident.id === input.incidentId);
+  if (found === undefined) throw new DashboardError("E_FALLBACK_NOT_FOUND", `no fallback incident ${input.incidentId}`);
+  const scoped = { ...deps, home };
+  if (input.action === "resend") {
+    // Only a switched Reviewer whose replacement never appeared.
+    if (found.role !== "reviewer" || found.status !== "switched" || found.replacementId !== null) {
+      throw new DashboardError("E_FALLBACK_NOT_PENDING", `incident ${found.id} has nothing to resend`);
+    }
+    if (deps.actions?.resend === undefined) throw new DashboardError("E_FALLBACK_CREATE_FAILED", "resending is not available in this build");
+    return deps.actions.resend(found, paseo, scoped);
+  }
+  if (found.status !== "pending") throw new DashboardError("E_FALLBACK_NOT_PENDING", `incident ${found.id} is ${found.status}, not pending`);
+  let action: FallbackAction;
+  if (input.action === "dismiss") action = dismissIncident;
+  else if (input.action === "switch") {
+    if (deps.actions?.switch === undefined) throw new DashboardError("E_FALLBACK_CREATE_FAILED", "switching is not available in this build");
+    action = deps.actions.switch;
+  } else {
+    if (deps.actions?.wait === undefined) throw new DashboardError("E_FALLBACK_NO_RESET", "waiting for the reset is not available in this build");
+    action = deps.actions.wait;
+  }
+  return action(found, paseo, scoped);
 }
 
 /**
  * Runs the `auto` policy's choice for a new incident through `fallback.act`,
- * so it takes the same lock, the same checks and the same notices as a click.
- * Returns true when an action ran (its notice went out, or the failure's did);
- * false when nothing was chosen and the incident stays pending. Never throws.
+ * so it takes the same lock and the same checks as a click. Opens no
+ * decision. Returns true when an action ran (a failure is logged, and the
+ * incident is as the action left it); false when nothing was chosen and the
+ * incident stays pending. Never throws.
  */
 export async function decideAutomatically(
   incident: FallbackIncident,
@@ -246,20 +227,17 @@ export async function decideAutomatically(
     await handleFallbackAct({ incidentId: incident.id, action }, paseo, deps);
   } catch (error) {
     log(`[paseo-bm] the Auto switch policy could not ${action} for incident ${incident.id}: ${reasonOf(error)}`);
-    // The card shows what became of it; the chat is told the state it is in now.
-    const home = homeOf(deps);
-    const now = home === null ? undefined : readIncidents(home, log).incidents.find((entry) => entry.id === incident.id);
-    await notifyFallback(now ?? incident, paseo, deps);
   }
   return true;
 }
 
 /**
- * Registers `fallback.incidents` and `fallback.act`, and tells the Manager
- * chat about every new `pending` incident — after the `auto` policy has run
- * its choice, if the role has it (§4.6), so the chat hears the chosen state
- * once. `onPaseo` hears each handler's SDK handle (the wait timers are set
- * again from it, §4.4.9). Returns the remover of that listener.
+ * Registers `fallback.incidents` and `fallback.act`, and turns every new
+ * `pending` incident into the owner's decision `f:<incidentId>` (§A.5 d) —
+ * after the `auto` policy has run its choice, if the role has it (§4.6): the
+ * incident is held meanwhile, so it gets a decision only when the policy left
+ * it pending. `onPaseo` hears each handler's SDK handle (the wait timers are
+ * set again from it, §4.4.9). Returns the remover of that listener.
  */
 export function registerFallbackRpcs(
   server: PluginServerContext,
@@ -283,7 +261,14 @@ export function registerFallbackRpcs(
   });
   return onFallbackIncident(async (incident, paseo, context) => {
     if (incident.status !== "pending") return;
-    if (context?.policy === "auto" && (await decideAutomatically(incident, paseo, { actions, home: context.home }))) return;
-    await notifyFallback(incident, paseo);
+    if (context?.policy === "auto") {
+      const release = holdFallbackDecision(incident.id);
+      try {
+        await decideAutomatically(incident, paseo, { actions, home: context.home });
+      } finally {
+        release();
+      }
+    }
+    syncFallbackDecisions(context.home);
   });
 }

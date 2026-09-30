@@ -422,6 +422,22 @@ describe("Dashboard error codes", () => {
       "E_SETUP_WRITE_FAILED",
       "E_SKILLS_PRESENT",
       "E_SKILLS_INSTALL_FAILED",
+      // Orchestrator design §8: a failed write of the Orchestrator's store.
+      "E_ORCHESTRATOR_WRITE_FAILED",
+      // Orchestrator design §7: orchestrator.apply-suggestion.
+      "E_SUGGESTION_TOO_LONG",
+      "E_ROLE_EXTRA_CHANGED",
+      // Orchestrator design §3.3, §8: no bm-orchestrator profile, or its provider is not available.
+      "E_ORCHESTRATOR_UNAVAILABLE",
+      // Orchestrator design §6A, §8: set-autopilot on without its dialog.
+      "E_AUTOPILOT_NOT_CONFIRMED",
+      // Autonomy design §A.4, §A.6 (ADR-017): the decisions.* RPCs.
+      "E_DECISION_NOT_FOUND",
+      "E_DECISION_SETTLED",
+      "E_DECISION_ANSWER_INVALID",
+      "E_DECISION_NOT_CONFIRMED",
+      "E_DECISION_NOT_NEEDS_CONFIRMATION",
+      "E_DECISION_WRITE_FAILED",
     ]);
   });
 

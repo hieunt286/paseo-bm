@@ -2,16 +2,16 @@
 
 | Field | Value |
 |---|---|
-| Status | Active — acceptance of the only install path of 0.4.0: npm plugin, Setup, migration, removal |
+| Status | Active — acceptance of the only install path of 0.4.0: npm plugin, set-up in Settings, migration, removal |
 | Applies to | `paseo-bm-plugin` and `paseo-bm` `0.4.0`; Paseo CLI/daemon **0.9.2** (0.9.2 no longer has `cliVersion` in `daemon status --json`; the adapter falls back to `paseo --version` on its own) |
 | Related | [PRD](../product/paseo-bm-prd.md) · [Design §7.13, §11, §13](../design/paseo-bm.md) · [Design §4.3–§4.6](../design/paseo-bm.md) · [ADR-012](../adr/ADR-012-plugin-is-the-product.md) · [Plan 0.4.0](../plans/paseo-bm-plan-040-single-source.md) |
 | Origin | Rewritten from the 0.3.x installer checklist (`bm-wp-407-prerelease-8t7x.2`); the old installer no longer exists in 0.4.0 |
 
-This document describes **how to run and how to score**; it contains no measurements. Each run copies section 10 into its own run record at `docs/archive/operations/paseo-bm-install-run-<YYYYMMDD>.md`. Thresholds are taken verbatim from the PRD and the design; the checklist sets no new threshold. Run it when a release changes the install path, changes Setup, changes the migration command, or when moving to a new Paseo version.
+This document describes **how to run and how to score**; it contains no measurements. Each run copies section 10 into its own run record at `docs/archive/operations/paseo-bm-install-run-<YYYYMMDD>.md`. Thresholds are taken verbatim from the PRD and the design; the checklist sets no new threshold. Run it when a release changes the install path, changes Settings' set-up blocks, changes the migration command, or when moving to a new Paseo version.
 
 ## 1. Scope and principles
 
-- The run sequence: **fresh install from npm → Setup through every step that needs a click → migrate a 0.3.1 directory install to npm → update → remove → return the machine to its initial state**, on a **real Paseo daemon**.
+- The run sequence: **fresh install from npm → Settings through every step that needs a click → migrate a 0.3.1 directory install to npm → update → remove → return the machine to its initial state**, on a **real Paseo daemon**.
 - Put paseo-bm and the run's skills folder in a temporary `HOME` in the steps where that is possible, while `PASEO_HOME` still points at the real `~/.paseo` so the real daemon is used. That way the skills installed by the `skills` CLI do not land in your real skills folder.
 - **The run modifies the real `~/.paseo/config.json`**: Paseo writes the `plugins` entry, and the plugin creates the three `bm-*` roles and the `daemon.mcp.injectIntoAgents` switch when you click. Section 3 backs up first; section 9 returns to the initial state.
 - **Do not run `paseo daemon restart` or `stop`** at any step: it can kill a running agent.
@@ -28,7 +28,7 @@ export CLEAN_HOME=$RUN/home                 # temporary HOME for paseo-bm data a
 export REPO=/Users/Shared/work/self/paseo-plugins/paseo-bm
 export TAG=next                             # 0.4.0-alpha.0 is on dist-tag `next`
 mkdir -p "$EVID" "$CLEAN_HOME"
-# Simulate a machine that already has Claude Code and Codex: without these two folders Setup treats
+# Simulate a machine that already has Claude Code and Codex: without these two folders Settings treats
 # the two agents as NOT INSTALLED and their skills columns cannot be measured.
 mkdir -p "$CLEAN_HOME/.claude" "$CLEAN_HOME/.codex"
 ```
@@ -68,25 +68,25 @@ Passes when:
 - `plugin add` exits 0 and `plugin ls` reports `paseo-bm` with `status` `running` (or `disabled` if Paseo's plugin switch is off — turn it on and check again).
 - In `plugin ls --json`, the `paseo-bm` entry has `installation.identity.kind = "npm"` and `packageName = "paseo-bm-plugin"`. **This is the remaining part of Q-047**: copy `installation` verbatim into the run record.
 
-Then open the app and follow **exactly the Setup steps of design §7.13**, recording a screenshot or log for each step:
+Then open the app and follow **exactly the set-up steps of design §7.13** (each in its Settings group), recording a screenshot or log for each step:
 
 | Step | What to do | Passes when |
 |---|---|---|
-| a. Roles | Open **Beads Manager** in the sidebar | The plugin creates `bm-manager`, `bm-worker`, `bm-reviewer` on its own; Setup shows the line "paseo-bm created its roles with defaults (<provider> · <model>). Change them in Agents." |
-| b. Agent tools | **Setup → Set up paseo-bm → Allow agent tools…**, read the warning, then click **Allow for every agent** | `daemon.mcp.injectIntoAgents` becomes `true`; `ui/setup-state.json` has `agentTools.setBy = "plugin"` and `previous` equal to the value in `switch-before.txt` |
-| c. Skills | **Install skills…**, read the command, then click **Run it** | The command finishes, the skills column of Claude Code and Codex shows 5/5; Setup shows the line `Last run: … · exit 0` |
-| d. `br` / `bv` | **Setup → Beads tools**, install whichever is missing | `br` and `bv` have a path on the daemon's PATH |
-| e. Sign-in | **Setup → Agents → Sign-in** | The Worker's provider reports **Signed in**; if not, run the command Setup shows and reopen |
+| a. Roles | Open **Beads Manager** in the sidebar | The plugin creates `bm-manager`, `bm-worker`, `bm-reviewer` on its own; Settings → Agents shows the line "paseo-bm created its roles with defaults (<provider> · <model>). Change them in Settings → Agents." |
+| b. Agent tools | **Settings → Agents → Allow agent tools…**, read the warning, then click **Allow for every agent** | `daemon.mcp.injectIntoAgents` becomes `true`; `ui/setup-state.json` has `agentTools.setBy = "plugin"` and `previous` equal to the value in `switch-before.txt` |
+| c. Skills | **Settings → Tools & skills → Install skills…**, read the command, then click **Run it** | The command finishes, the skills column of Claude Code and Codex shows 5/5; Tools & skills shows the line `Last run: … · exit 0` |
+| d. `br` / `bv` | **Settings → Tools & skills**, **Install** whichever is missing | `br` and `bv` have a path on the daemon's PATH |
+| e. Sign-in | **Settings → Agents → Sign-in** | The Worker's provider reports **Signed in**; if not, run the command Settings shows and reopen |
 
 Then run one real request; this is **exit condition 1 of MVP-Lock**:
 
 - Manager can create a Worker.
 - Worker can create a Reviewer.
-- The **Metric** screen has the trace of that request.
+- **Work → the workspace → Requests** has that request (its stage bar, timeline and cost).
 
 Record `paseo plugin logs paseo-bm --json | tail -50 > "$EVID/01-plugin-logs.json"` for the run record.
 
-**Measure Q-045 here** (must pass): the npm plugin loads `zod` and `@getpaseo/plugin` even though `plugin/package.json` declares no `dependencies`. The evidence is that step a itself works — Setup and Manager both use both. If `plugin logs` has a module error, **stop**: `dependencies` must be added before release.
+**Measure Q-045 here** (must pass): the npm plugin loads `zod` and `@getpaseo/plugin` even though `plugin/package.json` declares no `dependencies`. The evidence is that step a itself works — Settings and Manager both use both. If `plugin logs` has a module error, **stop**: `dependencies` must be added before release.
 
 **Measure Q-047 (the remaining part)**: run `paseo plugin add` again in a shell **with no TTY** (for example `paseo plugin add … --json < /dev/null > out.json 2>err.txt`) on a temporary `--id`, remove it right away, and record: whether it asks for trust, whether it turns on `pluginsEnabled` by itself, and what shape of JSON it prints.
 
@@ -110,7 +110,7 @@ Passes when:
 - `$CLEAN_HOME/.paseo-bm/install.json` has `schemaVersion: 2` and `migratedTo: { source: "npm", package: "paseo-bm-plugin", version: "0.4.0-…", at: … }`.
 - **Data is kept intact**: `traces/`, `role-extras.json`, `role-fallback*.json`, `ui/` are all still there; `plugin/0.3.1/` and `backups/` are still there (0.4.0 does not delete them).
 - The `bm-*` roles in the config are **unchanged**, the `injectIntoAgents` switch is **unchanged**.
-- Reopen Beads Manager: Metric still shows the old traces. This is **exit condition 2 of MVP-Lock**.
+- Reopen Beads Manager: Work → the workspace → Requests still shows the old requests. This is **exit condition 2 of MVP-Lock**.
 
 The second time, with an install home other than the default:
 
@@ -148,7 +148,7 @@ Passes when: it exits 0, `status` returns to `running`, and the data in the data
 
 **(5) Removal.** Do it twice, rebuilding the install of section 4 first each time:
 
-1. First time, **keep data**: Setup → **Remove paseo-bm's settings…** → **Remove settings** → **Keep my data**.
+1. First time, **keep data**: Settings → Data → **Remove paseo-bm's settings…** → **Remove settings** → **Keep my data**.
 2. Second time, **delete data**: same path, but choose **Delete data**.
 
 Then each time:
@@ -163,9 +163,9 @@ Passes when (**exit condition 3 of MVP-Lock**):
 
 - `05-bm-entries-after.txt` is empty: no `bm-*` provider or profile is left, fallback aliases included.
 - `injectIntoAgents` returns to exactly the value in `switch-before.txt` — only when paseo-bm itself turned it on; if you had already turned it on, the screen must report **left on** and the value is **unchanged**.
-- First time: the data folder is intact. Second time: `traces/`, `role-extras.json`, `role-fallback*.json` and everything in `ui/` **except** `ui/setup-state.json` are gone; `install.json`, `plugin/`, `backups/`, `home.json` remain.
+- First time: the data folder is intact. Second time: `traces/`, `decisions/`, `inbox/`, `orchestrator/`, `role-extras.json`, `role-fallback*.json` and everything in `ui/` **except** `ui/setup-state.json` are gone; `install.json`, `plugin/`, `backups/`, `home.json` remain.
 - Both times: skills, `br`, `bv` are **not touched**.
-- Reinstall the plugin **without** clicking "Set up again": Setup reports that the settings were removed and **does not recreate the roles on its own** (REQ-012 e). Clicking **Set up again** recreates them.
+- Reinstall the plugin **without** clicking "Set up again": Settings → Agents reports that the settings were removed and **does not recreate the roles on its own** (REQ-012 e). Clicking **Set up again** recreates them.
 
 **(6) Id conflict.** Build a 0.3.1 directory install (as in section 5), then:
 
@@ -183,7 +183,7 @@ and following the README section "coming from `npx paseo-bm`" — that is, runni
 
 ## 9. Return the machine to its initial state
 
-1. Setup → **Remove paseo-bm's settings…** (if still there), then `paseo plugin remove paseo-bm`.
+1. Settings → Data → **Remove paseo-bm's settings…** (if still there), then `paseo plugin remove paseo-bm`.
 2. Compare `~/.paseo/config.json` with `$EVID/config.before.json`; wherever they differ, fix it by hand back to the backup, except the empty `plugins` key Paseo leaves behind (that key belongs to Paseo).
 3. Delete `$RUN` if it does not need keeping, and delete `~/.paseo-bm` **only if** it was created by this run.
 4. Do not run `paseo daemon restart`/`stop`.
@@ -203,8 +203,8 @@ Copy this section into `docs/archive/operations/paseo-bm-install-run-<YYYYMMDD>.
 
 | Item | Result | Evidence | Notes |
 |---|---|---|---|
-| (1) Fresh install from npm + every Setup step | pass / fail | | |
-| (1) Manager → Worker → Reviewer, Metric has the trace | pass / fail | | Exit condition 1 |
+| (1) Fresh install from npm + every set-up step in Settings | pass / fail | | |
+| (1) Manager → Worker → Reviewer, Work has the request | pass / fail | | Exit condition 1 |
 | (2) Migrate the directory install, default install home | pass / fail | | Exit condition 2 |
 | (2) Migrate the directory install, `--home` + `home.json` pointer | pass / fail | | |
 | (2) Rerun the migration command (case B) | pass / fail | | |
@@ -230,3 +230,5 @@ REQ-070 (e): record whether the migration kept the data, the roles and the switc
 - The checklist runs on **one machine, one daemon**; it does not measure several daemons or a multi-user machine.
 - `PASEO_BM_HOME` can only change the plugin's data folder if it can be set in the daemon's environment; if not, the run uses the real `~/.paseo-bm` and the run record must say so clearly.
 - The "remove then reinstall" sequence goes through real `paseo plugin remove`/`add`, so the `plugins` pointer in the real config changes several times in one run; section 9 is the only step that brings it back.
+
+*Revision 2026-09-29: the steps name the screens that exist after the autonomy programme's Phase 1 (retirement sweep, bead `bm-autonomy-phase1b-dbdv.6`): set-up in Settings (Agents, Tools & skills, Data) instead of Setup, a request's trace in Work → Requests instead of the Metric screen. Thresholds and exit conditions unchanged.*

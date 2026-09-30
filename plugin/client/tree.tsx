@@ -42,7 +42,8 @@ export interface AgentTreeViewProps {
   theme: PluginTheme;
   compact: boolean;
   agents: Loadable<readonly AgentNode[]>;
-  roles: Loadable<readonly RoleDescriptor[]>;
+  /** The role configuration in effect; left out where Settings shows it (Work → Agents). */
+  roles?: Loadable<readonly RoleDescriptor[]>;
   /** Undefined on hosts without `navigation.openAgent`: rows are then not pressable. */
   openAgent?: (input: { agentId: string }) => void;
   onRetryAgents?: () => void;
@@ -76,7 +77,7 @@ export function AgentTreePanel({ theme, layout, navigation, workspaceId }: Plugi
   );
 }
 
-function toLoadable<T>(query: { status: "pending" | "error" | "success"; data: T | undefined; error: unknown }): Loadable<T> {
+export function toLoadable<T>(query: { status: "pending" | "error" | "success"; data: T | undefined; error: unknown }): Loadable<T> {
   // Keep showing the last good data while a background poll fails.
   if (query.data !== undefined) return { status: "success", data: query.data };
   if (query.status === "error") return { status: "error", error: query.error };
@@ -97,8 +98,12 @@ export function AgentTreeView(props: AgentTreeViewProps) {
       ) : null}
       <AgentsBlock {...props} styles={styles} />
 
-      <Text style={styles.heading}>Role configuration</Text>
-      <RolesBlock {...props} styles={styles} />
+      {props.roles === undefined ? null : (
+        <>
+          <Text style={styles.heading}>Role configuration</Text>
+          <RolesBlock {...props} roles={props.roles} styles={styles} />
+        </>
+      )}
     </ScrollView>
   );
 }
@@ -166,7 +171,12 @@ function AgentsBlock({ theme, compact, agents, openAgent, onRetryAgents, styles 
   );
 }
 
-function RolesBlock({ theme, roles, onRetryRoles, styles }: AgentTreeViewProps & { styles: TreeStyles }) {
+function RolesBlock({
+  theme,
+  roles,
+  onRetryRoles,
+  styles,
+}: AgentTreeViewProps & { roles: Loadable<readonly RoleDescriptor[]>; styles: TreeStyles }) {
   if (roles.status === "pending") return <ActivityIndicator color={styles.spinner.color} />;
   if (roles.status === "error") {
     return (

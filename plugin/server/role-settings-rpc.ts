@@ -1,8 +1,8 @@
 /**
  * `roles.settings` and `roles.options`: the data of the Roles & models section
- * of the Setup screen (delta 20260921 §4.3.2, REQ-064 a/b). Both only read.
+ * of Settings → Agents (delta 20260921 §4.3.2, REQ-064 a/b). Both only read.
  *
- * - `roles.settings` describes the three roles from ONE `config.get()`. The
+ * - `roles.settings` describes the four roles from ONE `config.get()`. The
  *   SDK view is flat (design F12): `config.providers` is `agents.providers`,
  *   `config.agentProfiles` is `daemon.agentProfiles`. It hands the client the
  *   `revision` that `roles.save-settings` must send back.
@@ -37,7 +37,7 @@ import {
   rolesSaveSettingsRpc,
   rolesSettingsRpc,
   type RolesSaveSettingsInput,
-  type BmRole,
+  type SetupRoleWithOrchestrator,
   type RoleModeOption,
   type RoleModelOption,
   type RoleSetting,
@@ -85,12 +85,14 @@ export interface RoleSettingsDeps {
 
 const defaultLog = (message: string): void => console.warn(message);
 
-const ROLES: readonly BmRole[] = ["manager", "worker", "reviewer"];
+const ROLES: readonly SetupRoleWithOrchestrator[] = ["manager", "worker", "reviewer", "orchestrator"];
 
-const PROVIDER_IDS = { manager: "bm-manager", worker: "bm-worker", reviewer: "bm-reviewer" } as const satisfies Record<
-  BmRole,
-  RoleSetting["providerId"]
->;
+const PROVIDER_IDS = {
+  manager: "bm-manager",
+  worker: "bm-worker",
+  reviewer: "bm-reviewer",
+  orchestrator: "bm-orchestrator",
+} as const satisfies Record<SetupRoleWithOrchestrator, RoleSetting["providerId"]>;
 
 // ---------------------------------------------------------------------------
 // roles.settings
@@ -115,7 +117,7 @@ async function readConfig(paseo: unknown): Promise<ConfigRead> {
 }
 
 /** A role the configuration does not describe: every field `null`. */
-function emptySetting(role: BmRole): RoleSetting {
+function emptySetting(role: SetupRoleWithOrchestrator): RoleSetting {
   return {
     role,
     providerId: PROVIDER_IDS[role],
@@ -135,11 +137,11 @@ export function sharedPlanWarning(provider: string): string {
 }
 
 /**
- * Handler body of `roles.settings`. Always three roles, in the order manager,
- * worker, reviewer; a role the configuration lacks has `null` fields. The
+ * Handler body of `roles.settings`. Always four roles, in the order manager,
+ * worker, reviewer, orchestrator; a role the configuration lacks has `null` fields. The
  * capability is looked up once per distinct base provider.
  *
- * When the configuration cannot be read at all, the three roles come back
+ * When the configuration cannot be read at all, the four roles come back
  * empty with a warning, and `revision` is that of an empty configuration: a
  * save sent with it is then refused (`E_ROLE_SETTINGS_CONFLICT` against a
  * configuration that has roles) rather than written blind.
@@ -259,18 +261,24 @@ export async function handleRolesOptions(
 // roles.save-settings (delta 20260921 §4.3.3–§4.3.4, REQ-064, REQ-063 h)
 // ---------------------------------------------------------------------------
 
-/** The warnings of a saved role (REQ-063 h and the §4.3.3 notes); never blocking. */
+/**
+ * The warnings of a saved role (REQ-063 h and the §4.3.3 notes); never blocking.
+ * The Orchestrator is read-only the way the Reviewer is — by its instructions
+ * and its mode — so the Reviewer's two warnings apply to it too (orchestrator
+ * design §3.2).
+ */
 function saveWarnings(input: RolesSaveSettingsInput, capability: ProviderCapability, cost: RoleModelOption["cost"]): string[] {
   const warnings: string[] = [];
   const pi = input.baseProvider === "pi";
   if (pi && (input.role === "manager" || input.role === "worker")) {
     warnings.push("Pi needs pi-mcp-adapter to give this role Paseo tools.");
   }
-  if (input.role === "reviewer" && (pi || capability === "none")) {
-    warnings.push("Pi does not ask before running tools; the Reviewer's read-only rule is only in its instructions.");
+  const readOnly = input.role === "reviewer" ? "Reviewer" : input.role === "orchestrator" ? "Orchestrator" : null;
+  if (readOnly !== null && (pi || capability === "none")) {
+    warnings.push(`Pi does not ask before running tools; the ${readOnly}'s read-only rule is only in its instructions.`);
   }
-  if (input.role === "reviewer" && capability === "untiered" && input.modeId === null) {
-    warnings.push("The Reviewer runs with your OpenCode agent's permissions; paseo-bm never auto-approves for it.");
+  if (readOnly !== null && capability === "untiered" && input.modeId === null) {
+    warnings.push(`The ${readOnly} runs with your OpenCode agent's permissions; paseo-bm never auto-approves for it.`);
   }
   if (cost !== null) {
     warnings.push(`Priced at ~$${cost.inputUsdPerMTok} / $${cost.outputUsdPerMTok} per 1M tokens.`);

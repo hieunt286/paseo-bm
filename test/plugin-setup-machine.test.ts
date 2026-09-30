@@ -208,7 +208,7 @@ describe("providerLogins", () => {
       ["something-else", null, null],
     ]);
     expect(PI_SIGN_IN_GUIDANCE).toBe(
-      "Pi has no login command paseo-bm knows; sign in the way Pi's own documentation describes, then open Setup again.",
+      "Pi has no login command paseo-bm knows; sign in the way Pi's own documentation describes, then open Settings again.",
     );
   });
 

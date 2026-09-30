@@ -5,8 +5,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ManagerAgentHandle, ManagerAgentSnapshot, ManagerPaseo } from "../plugin/server/manager";
 import serverContribute from "../plugin/index.server";
+import { rolePaseoToolsPolicy } from "../plugin/server/setup-roles";
 import { managerEnsureRpc } from "../plugin/shared/contracts";
 import { createSlot } from "../plugin/client/slot";
+import { sectionRequests } from "../plugin/client/surface-view";
 import {
   LAUNCHER_ICON,
   LAUNCHER_SURFACE_ID,
@@ -121,11 +123,12 @@ function fakePaseo(initial: ManagerAgentSnapshot[] = []) {
           config: {
             // A machine that is already set up, so `ensureRoles` (0.4.0) finds
             // nothing missing and this test is about the launcher alone.
-            providers: { "bm-manager": {}, "bm-worker": {}, "bm-reviewer": {} },
+            providers: { "bm-manager": { paseoTools: rolePaseoToolsPolicy("manager") }, "bm-worker": { paseoTools: rolePaseoToolsPolicy("worker") }, "bm-reviewer": { paseoTools: rolePaseoToolsPolicy("reviewer") }, "bm-orchestrator": { paseoTools: rolePaseoToolsPolicy("orchestrator") } },
             agentProfiles: [
               { id: "bm-manager", provider: "bm-manager", model: "m" },
               { id: "bm-worker", provider: "bm-worker", model: "m" },
               { id: "bm-reviewer", provider: "bm-reviewer", model: "m" },
+              { id: "bm-orchestrator", provider: "bm-orchestrator", model: "m" },
             ],
           },
         };
@@ -194,7 +197,7 @@ function fakeClient() {
       settingsScreens.push(item);
       return () => removed.push(`settings:${item.id}`);
     },
-    // The chat cards (delta 20260916-chat-cards).
+    // The chat cards (cards v2, autonomy design §A.12).
     addTimelineTransformer: (item: (typeof transformers)[number]) => {
       transformers.push(item);
       return () => removed.push(`transformer:${item.id}`);
@@ -233,11 +236,21 @@ describe("client entry registrations", () => {
       ["bm-chat-received", "user_message"],
       ["bm-chat-sent", "assistant_message"],
     ]);
-    expect(fake.renderers).toMatchObject([{ kind: "bm-message", version: 1 }]);
+    expect(fake.renderers).toMatchObject([{ kind: "bm-message", version: 2 }]);
     const report = { type: "user_message", text: "BM-REPORT\nrequestId: req-20260916T062244Z\nphase: finished" };
     expect(fake.transformers[0]!.transform({ item: report, phase: "complete" })).toMatchObject({
-      items: [{ type: "plugin", kind: "bm-message", version: 1, data: { type: "report", phase: "finished" } }],
+      items: [{ type: "plugin", kind: "bm-message", version: 2, data: { type: "finished", report: { phase: "finished" } } }],
     });
+    // A report that asks is one decision card per question (cards v2, autonomy design §A.12).
+    const asking = {
+      type: "user_message",
+      text: "BM-REPORT\nrequestId: req-20260916T062244Z\nphase: blocked\n\nBM-QUESTIONS\nrequestId: req-20260916T062244Z\nQ1: Which?\n- a: this (recommended)\n- b: that\nQ2: And?\n- a: yes (recommended)\n- b: no",
+    };
+    const asked = fake.transformers[0]!.transform({ item: asking, phase: "complete" }) as { items: Array<{ data: { decision: { id: string } } }> };
+    expect(asked.items.map((item) => item.data.decision.id)).toEqual([
+      "q:req-20260916T062244Z:Q1",
+      "q:req-20260916T062244Z:Q2",
+    ]);
     expect(fake.transformers[1]!.transform({ item: { type: "assistant_message", text: "hello" }, phase: "complete" })).toBeUndefined();
   });
 
@@ -249,12 +262,16 @@ describe("client entry registrations", () => {
     expect(fake.sidebarItems).toEqual([
       { id: LAUNCHER_SURFACE_ID, title: "Beads Manager", icon: "Bot", surface: LAUNCHER_SURFACE_ID },
     ]);
-    // Two now: "Open Beads Manager" (WP-113) and "Open Beads Metric" (WP-211).
-    expect(fake.commandItems).toHaveLength(2);
+    // Three: "Open Beads Manager" (WP-113), "Open Beads project" (the
+    // workspace's project page in Work) and "Open Beads Inbox" (autonomy design §A.12).
+    expect(fake.commandItems).toHaveLength(3);
     expect(fake.commandItems.map((item) => item.id)).toEqual([
       "open-beads-manager",
-      "open-beads-dashboard",
+      "open-beads-project",
+      "open-beads-inbox",
     ]);
+    expect(fake.commandItems[1]).toMatchObject({ title: "Open Beads project", context: "workspace" });
+    expect(fake.commandItems[2]).toMatchObject({ title: "Open Beads Inbox", icon: "Inbox", context: "global" });
     expect(fake.settingsScreens.map((screen) => screen.id)).toEqual(["paseo-bm-settings"]);
     expect(fake.commandItems[0]).toMatchObject({
       id: "open-beads-manager",
@@ -270,7 +287,8 @@ describe("client entry registrations", () => {
         `surface:${LAUNCHER_SURFACE_ID}`,
         `sidebar:${LAUNCHER_SURFACE_ID}`,
         "command:open-beads-manager",
-        "command:open-beads-dashboard",
+        "command:open-beads-project",
+        "command:open-beads-inbox",
         "slash:bm-worker-new",
         "slash:bm-worker-stop-all",
         "settings:paseo-bm-settings",
@@ -306,6 +324,17 @@ describe("client entry registrations", () => {
 
     expect(openSurface).toHaveBeenCalledWith(LAUNCHER_SURFACE_ID);
     expect(launchRequests.take()).toBe("ws-cc");
+  });
+
+  it("\"Open Beads Inbox\" queues the Inbox section and opens the surface (autonomy design §A.12)", async () => {
+    const fake = fakeClient();
+    clientContribute(fake.client);
+    const openSurface = vi.fn();
+
+    await fake.commandItems[2]!.onSelect({ context: "global", openSurface });
+
+    expect(openSurface).toHaveBeenCalledWith(LAUNCHER_SURFACE_ID);
+    expect(sectionRequests.take()).toBe("inbox");
   });
 });
 
@@ -436,11 +465,12 @@ describe("pending and error states", () => {
     // Pressing again after an error is allowed.
     sdk.paseo.config.get = async () => ({
       config: {
-        providers: { "bm-manager": {}, "bm-worker": {}, "bm-reviewer": {} },
+        providers: { "bm-manager": { paseoTools: rolePaseoToolsPolicy("manager") }, "bm-worker": { paseoTools: rolePaseoToolsPolicy("worker") }, "bm-reviewer": { paseoTools: rolePaseoToolsPolicy("reviewer") }, "bm-orchestrator": { paseoTools: rolePaseoToolsPolicy("orchestrator") } },
         agentProfiles: [
           { id: "bm-manager", provider: "bm-manager" },
           { id: "bm-worker", provider: "bm-worker" },
           { id: "bm-reviewer", provider: "bm-reviewer" },
+          { id: "bm-orchestrator", provider: "bm-orchestrator" },
         ],
       },
     });
@@ -639,9 +669,11 @@ describe("the status strip on the main screen and the workspace list (delta 2026
     // checked on the source, like test/plugin-structure.test.ts reads files.
     const source = readFileSync(fileURLToPath(new URL("../plugin/client/launcher.tsx", import.meta.url)), "utf8");
     expect(source.match(/<LauncherStatus\b/g)).toHaveLength(1);
-    expect(source).toMatch(/<SetupScreen\b.*\bstatus=\{status\}/);
-    const listBranch = source.slice(source.indexOf("<ScrollView style={styles.screen}"));
-    expect(listBranch).toMatch(/^\s*\{status\}\s*$/m);
+    expect(source).toMatch(/<SettingsScreen\b.*\bstatus=\{status\}/);
+    expect(source).toMatch(/<InsightsScreen\b[^>]*\bstatus=\{status\}/);
+    // Work's list and a project's page get it too (work.tsx draws it under their headers).
+    expect(source).toMatch(/<WorkScreen\b[\s\S]*?\bstatus=\{status\}/);
+    expect(source).toMatch(/<ProjectPage\b[\s\S]*?\bstatus=\{status\}/);
   });
 });
 
@@ -650,7 +682,8 @@ describe("the workspace list order (delta 20260918f §4.5: pinning removed)", ()
 
   it("renders workspaces.data in the order it arrives (most recent activity first), with no pinning", () => {
     expect(launcher).toMatch(/sort: \[\{ key: "activity_at", direction: "desc" \}\]/);
-    expect(launcher).toMatch(/\{\(workspaces\.data \?\? \[\]\)\.map\(\(workspace\) =>/);
+    // Work's rows are `workspaces.data` mapped one to one; `workRows` keeps that order (plugin-work-model.test.ts).
+    expect(launcher).toMatch(/workspaces=\{workspaces\.data\?\.map\(\(workspace\) => \(\{/);
     expect(launcher).not.toMatch(/orderRows|pinnedOrder|savePinned|PinControls|DragHandle|PanResponder/);
   });
 
@@ -677,7 +710,7 @@ describe("launcher: what the machine still needs (0.4.0, design §7.3)", () => {
     const { describeLauncherState } = await import("../plugin/client/launch-manager");
     const modeNotice = "This Manager stays in the mode you chose.";
     const toolsNotice = "This Manager has no Paseo tools.";
-    const setupNotice = "paseo-bm created its roles with defaults (codex · gpt-5.6-sol). Change them in Setup → Agents.";
+    const setupNotice = "paseo-bm created its roles with defaults (codex · gpt-5.6-sol). Change them in Settings → Agents.";
 
     const notices = describeLauncherState({
       status: "opened",

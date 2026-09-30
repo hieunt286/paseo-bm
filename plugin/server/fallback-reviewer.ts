@@ -106,7 +106,7 @@ export function createReviewerSwitch(deps: ReviewerFallbackDeps = {}): FallbackA
   return async (incident, paseo, rpcDeps: FallbackRpcDeps) => {
     const now = rpcDeps.now ?? deps.now ?? (() => new Date());
     const home = rpcDeps.home ?? null;
-    if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", `${unusableDataHomeMessage()}; see Setup`);
+    if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", `${unusableDataHomeMessage()}; see Settings → Data`);
     if (incident.role !== "reviewer") throw new DashboardError("E_FALLBACK_NO_CANDIDATE", `not a Reviewer incident (${incident.role})`);
     const candidate = incident.candidate;
     if (candidate === null) throw new DashboardError("E_FALLBACK_NO_CANDIDATE", "the fallback chain has no entry left for this Reviewer");

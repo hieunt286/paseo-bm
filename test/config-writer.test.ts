@@ -1,21 +1,33 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  applyRoleToolPolicies,
   canonicalJson,
   createRoleEntries,
+  removeAllBmEntries,
   roleConfigRevision,
   writeRoleConfig,
   type ConfigPaseo,
   type RoleConfigView,
   type RoleConfigWrite,
 } from "../plugin/server/config-writer";
-import { ROLE_NAMES, ROLE_PROFILE_NOTES, roleAliasEntry, roleId, roleProfileEntry } from "../plugin/server/setup-roles";
+import {
+  ROLE_NAMES,
+  ROLE_PROFILE_NOTES,
+  paseoToolsPolicyOfAlias,
+  roleAliasEntry,
+  roleId,
+  rolePaseoToolsPolicy,
+  roleProfileEntry,
+} from "../plugin/server/setup-roles";
+import { fallbackAliasEntry } from "../plugin/server/fallback-settings";
 import { DashboardError } from "../plugin/shared/contracts";
 
 /**
  * Delta 20260921 §4.3.4, ADR-008 D3: the plugin's only write path to Paseo's
- * config. The fake daemon behaves like Paseo 0.8's `config.patch` (proposal
- * S10): `providers` deep-merged, `removeProviders` deletes, `agentProfiles`
- * replaced whole.
+ * config. The fake daemon behaves like Paseo's `config.patch` (proposal
+ * S10): `providers` merged per alias — and, as Paseo 0.9.2's
+ * `applyMutableProviderConfigToOverrides` does, `paseoTools` merged one level
+ * further — `removeProviders` deletes, `agentProfiles` replaced whole.
  */
 
 type Profile = Record<string, unknown>;
@@ -37,7 +49,12 @@ function fakeDaemon(initial: { providers: Record<string, Record<string, unknown>
         beforePatch = null;
         patches.push(structuredClone(patch));
         const providers = patch.providers as Record<string, Record<string, unknown>> | undefined;
-        for (const [id, entry] of Object.entries(providers ?? {})) state.providers[id] = { ...(state.providers[id] ?? {}), ...entry };
+        for (const [id, entry] of Object.entries(providers ?? {})) {
+          const previous = state.providers[id] ?? {};
+          const next: Record<string, unknown> = { ...previous, ...entry };
+          if (entry.paseoTools !== undefined) next.paseoTools = { ...(previous.paseoTools as object | undefined), ...(entry.paseoTools as object) };
+          state.providers[id] = next;
+        }
         for (const id of (patch.removeProviders as string[] | undefined) ?? []) delete state.providers[id];
         if (patch.agentProfiles !== undefined) state.agentProfiles = structuredClone(patch.agentProfiles as Profile[]);
         return { config: structuredClone(state) };
@@ -224,19 +241,21 @@ const bare = () => ({ providers: { "room-lead": { extends: "codex" } }, agentPro
 
 describe("createRoleEntries", () => {
 
-  it("creates all three in one patch, the Reviewer without Paseo tools", async () => {
+  it("creates all four in one patch, the Reviewer and the Orchestrator with Paseo tools off", async () => {
     const daemon = fakeDaemon(bare());
 
     const result = await createRoleEntries(daemon.paseo, rolesToCreate());
 
-    expect(result.created).toEqual(["bm-manager", "bm-worker", "bm-reviewer"]);
+    expect(result.created).toEqual(["bm-manager", "bm-worker", "bm-reviewer", "bm-orchestrator"]);
     expect(daemon.patches).toHaveLength(1);
     expect(daemon.patches[0]!.providers).toEqual({
-      "bm-manager": { extends: "claude", label: "Beads Manager", paseoTools: { enabled: true } },
-      "bm-worker": { extends: "claude", label: "Beads Worker", paseoTools: { enabled: true } },
-      "bm-reviewer": { extends: "claude", label: "Beads Reviewer" },
+      "bm-manager": { extends: "claude", label: "Beads Manager", paseoTools: rolePaseoToolsPolicy("manager") },
+      "bm-worker": { extends: "claude", label: "Beads Worker", paseoTools: rolePaseoToolsPolicy("worker") },
+      "bm-reviewer": { extends: "claude", label: "Beads Reviewer", paseoTools: { enabled: false } },
+      "bm-orchestrator": { extends: "claude", label: "Beads Orchestrator", paseoTools: { enabled: false } },
     });
-    expect(daemon.state().providers["bm-reviewer"]).not.toHaveProperty("paseoTools");
+    expect(daemon.state().providers["bm-reviewer"]).toHaveProperty("paseoTools", { enabled: false });
+    expect(daemon.state().providers["bm-orchestrator"]).toHaveProperty("paseoTools", { enabled: false });
   });
 
   it("appends the profiles at the end and leaves every other entry byte-identical", async () => {
@@ -246,7 +265,7 @@ describe("createRoleEntries", () => {
 
     const profiles = daemon.state().agentProfiles;
     expect(profiles[0]).toEqual(ROOM);
-    expect(profiles.map((entry) => entry.id)).toEqual(["room-lead", "bm-manager", "bm-worker", "bm-reviewer"]);
+    expect(profiles.map((entry) => entry.id)).toEqual(["room-lead", "bm-manager", "bm-worker", "bm-reviewer", "bm-orchestrator"]);
     expect(profiles[1]).toEqual({
       id: "bm-manager",
       name: "Beads Manager",
@@ -272,8 +291,8 @@ describe("createRoleEntries", () => {
 
     const result = await createRoleEntries(daemon.paseo, rolesToCreate());
 
-    expect(result.created).toEqual(["bm-manager"]);
-    expect(Object.keys(daemon.patches[0]!.providers as object)).toEqual(["bm-manager"]);
+    expect(result.created).toEqual(["bm-manager", "bm-orchestrator"]);
+    expect(Object.keys(daemon.patches[0]!.providers as object)).toEqual(["bm-manager", "bm-orchestrator"]);
     expect(daemon.state().providers["bm-worker"]).toEqual(worker);
     expect(daemon.state().agentProfiles[1]).toEqual(workerProfile);
   });
@@ -288,13 +307,13 @@ describe("createRoleEntries", () => {
 
     // The alias it already had is kept as it was; only the missing halves are written.
     expect(daemon.state().providers["bm-manager"]).toEqual({ extends: "codex", label: "Mine" });
-    expect(daemon.state().agentProfiles.map((entry) => entry.id)).toEqual(["bm-worker", "bm-manager", "bm-reviewer"]);
-    expect(Object.keys(daemon.patches[0]!.providers as object)).toEqual(["bm-worker", "bm-reviewer"]);
+    expect(daemon.state().agentProfiles.map((entry) => entry.id)).toEqual(["bm-worker", "bm-manager", "bm-reviewer", "bm-orchestrator"]);
+    expect(Object.keys(daemon.patches[0]!.providers as object)).toEqual(["bm-worker", "bm-reviewer", "bm-orchestrator"]);
   });
 
-  it("patches nothing when all three are there", async () => {
+  it("patches nothing when all four are there", async () => {
     const daemon = fakeDaemon({
-      providers: { "bm-manager": {}, "bm-worker": {}, "bm-reviewer": {} },
+      providers: { "bm-manager": {}, "bm-worker": {}, "bm-reviewer": {}, "bm-orchestrator": {} },
       agentProfiles: ROLE_NAMES.map((role) => ({ id: roleId(role) })),
     });
 
@@ -323,7 +342,7 @@ describe("createRoleEntries", () => {
     expect(daemon.patches).toHaveLength(0);
   });
 
-  it("refuses an id that is not one of the three main roles", async () => {
+  it("refuses an id that is not one of the four main roles", async () => {
     const daemon = fakeDaemon(bare());
 
     await expect(
@@ -341,14 +360,154 @@ describe("the texts that send a user to Setup", () => {
       writeRoleConfig(daemon.paseo, { expectedRevision: revision, ...patch } as RoleConfigWrite);
 
     await expect(write({ providers: { "bm-worker": { extends: "claude" } } })).rejects.toThrow(
-      'provider "bm-worker" is not registered; open Beads Manager → Setup, which creates it',
+      'provider "bm-worker" is not registered; open Beads Manager → Settings, which creates it',
     );
     await expect(write({ profiles: { "bm-worker": { model: "m" } } })).rejects.toThrow(
-      'profile "bm-worker" is not registered; open Beads Manager → Setup, which creates it',
+      'profile "bm-worker" is not registered; open Beads Manager → Settings, which creates it',
     );
     await expect(write({ removeProviders: ["bm-worker"] })).rejects.toThrow(
-      'provider "bm-worker" is a main role; only "Remove paseo-bm\'s settings" on Setup removes it',
+      'provider "bm-worker" is a main role; only "Remove paseo-bm\'s settings" in Settings removes it',
     );
     expect(daemon.patches).toHaveLength(0);
+  });
+});
+
+describe("bm-orchestrator is a main role for the writer (orchestrator design §3.1)", () => {
+  it("edits its profile in place like the other three, and refuses to remove it outside the cleanup", async () => {
+    const withOrchestrator = () => {
+      const config = initial();
+      return {
+        providers: { ...config.providers, "bm-orchestrator": roleAliasEntry("orchestrator", "claude") },
+        agentProfiles: [...config.agentProfiles, roleProfileEntry("orchestrator", "claude-opus-5")],
+      };
+    };
+    const daemon = fakeDaemon(withOrchestrator());
+
+    await writeRoleConfig(daemon.paseo, {
+      expectedRevision: roleConfigRevision(daemon.state()),
+      providers: { "bm-orchestrator": { extends: "codex" } },
+      profiles: { "bm-orchestrator": { model: "gpt-5.6-sol" } },
+    });
+
+    expect(daemon.state().providers["bm-orchestrator"]).toEqual({ extends: "codex", label: "Beads Orchestrator", paseoTools: { enabled: false } });
+    expect(daemon.state().agentProfiles.at(-1)).toMatchObject({ id: "bm-orchestrator", model: "gpt-5.6-sol" });
+    expect(daemon.state().agentProfiles.slice(0, 3)).toEqual(withOrchestrator().agentProfiles.slice(0, 3));
+    await expect(
+      writeRoleConfig(daemon.paseo, { expectedRevision: roleConfigRevision(daemon.state()), removeProviders: ["bm-orchestrator"] }),
+    ).rejects.toMatchObject({ code: "E_ROLE_SETTINGS_INVALID" });
+  });
+
+  it("never creates it from a settings save", async () => {
+    const daemon = fakeDaemon(initial());
+
+    await expect(
+      writeRoleConfig(daemon.paseo, { expectedRevision: roleConfigRevision(daemon.state()), profiles: { "bm-orchestrator": { model: "m" } } }),
+    ).rejects.toThrow('profile "bm-orchestrator" is not registered; open Beads Manager → Settings, which creates it');
+    expect(daemon.patches).toHaveLength(0);
+  });
+});
+
+// ── The Paseo-tools policy of every role alias (autonomy design §A.10, REQ-116) ──
+
+describe("applyRoleToolPolicies and the policy through a role's life", () => {
+  /** A machine set up before the policy existed: main roles, fallbacks, one alias of the user's, one non-bm provider. */
+  const beforePolicy = () => ({
+    providers: {
+      claude: { enabled: true },
+      "bm-manager": { extends: "claude", label: "Beads Manager", paseoTools: { enabled: true } },
+      "bm-worker": { extends: "codex", label: "Beads Worker", paseoTools: { enabled: true, disabledTools: ["x"] }, env: { MINE: "1" } },
+      "bm-reviewer": { extends: "codex", label: "Beads Reviewer" },
+      "bm-orchestrator": { extends: "claude", label: "Beads Orchestrator" },
+      "bm-manager-fallback-1": { extends: "codex", label: "Manager (fallback 1)", paseoTools: { enabled: true } },
+      "bm-worker-fallback-2": { extends: "opencode", label: "Worker (fallback 2)", paseoTools: { enabled: true } },
+      "bm-reviewer-fallback-1": { extends: "claude", label: "Reviewer (fallback 1)", paseoTools: { enabled: true, disabledTools: ["y"] } },
+      "bm-mine": { extends: "claude", note: "the user's own" },
+    } as Record<string, Record<string, unknown>>,
+    agentProfiles: [ROOM, ...ROLE_NAMES.map((role) => roleProfileEntry(role, "m"))],
+  });
+  const expected: Record<string, unknown> = {
+    "bm-manager": rolePaseoToolsPolicy("manager"),
+    "bm-worker": rolePaseoToolsPolicy("worker"),
+    "bm-reviewer": { enabled: false },
+    "bm-orchestrator": { enabled: false },
+    "bm-manager-fallback-1": rolePaseoToolsPolicy("manager"),
+    "bm-worker-fallback-2": rolePaseoToolsPolicy("worker"),
+    "bm-reviewer-fallback-1": { enabled: false },
+  };
+
+  it("gives every role alias and fallback alias exactly its policy, in one patch of paseoTools alone", async () => {
+    const daemon = fakeDaemon(beforePolicy());
+
+    const result = await applyRoleToolPolicies(daemon.paseo, paseoToolsPolicyOfAlias);
+
+    expect(result.updated).toEqual(Object.keys(expected));
+    expect(daemon.patches).toEqual([{ providers: Object.fromEntries(Object.entries(expected).map(([id, policy]) => [id, { paseoTools: policy }])) }]);
+    const after = daemon.state().providers;
+    for (const [id, policy] of Object.entries(expected)) {
+      // `enabled: false` switches every tool off whatever list Paseo merged in beside it.
+      expect(after[id]!.paseoTools, id).toMatchObject(policy as object);
+      const withoutPolicy = (entry: Record<string, unknown>) => Object.fromEntries(Object.entries(entry).filter(([key]) => key !== "paseoTools"));
+      expect(withoutPolicy(after[id]!), id).toEqual(withoutPolicy(beforePolicy().providers[id]!));
+    }
+    expect(after["bm-worker"]!.paseoTools).toEqual(rolePaseoToolsPolicy("worker"));
+    expect(after["bm-worker"]!.env).toEqual({ MINE: "1" });
+    expect(after["bm-mine"]).toEqual({ extends: "claude", note: "the user's own" });
+    expect(after["claude"]).toEqual({ enabled: true });
+    expect(daemon.state().agentProfiles).toEqual(beforePolicy().agentProfiles);
+  });
+
+  it("sends nothing when every alias already holds its policy", async () => {
+    const daemon = fakeDaemon(beforePolicy());
+    await applyRoleToolPolicies(daemon.paseo, paseoToolsPolicyOfAlias);
+
+    const again = await applyRoleToolPolicies(daemon.paseo, paseoToolsPolicyOfAlias);
+
+    expect(again.updated).toEqual([]);
+    expect(daemon.patches).toHaveLength(1);
+  });
+
+  it("reports a policy Paseo did not keep, and does not patch again", async () => {
+    const daemon = fakeDaemon(beforePolicy());
+    (daemon.paseo.config.patch as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => ({}));
+
+    await expect(applyRoleToolPolicies(daemon.paseo, paseoToolsPolicyOfAlias)).rejects.toMatchObject({ code: "E_SETUP_ROLES_FAILED" });
+    expect(daemon.patches).toHaveLength(0);
+  });
+
+  it("keeps the policy when the role settings are saved (a new base provider, a new model)", async () => {
+    const daemon = fakeDaemon(beforePolicy());
+    await applyRoleToolPolicies(daemon.paseo, paseoToolsPolicyOfAlias);
+
+    await writeRoleConfig(daemon.paseo, {
+      expectedRevision: roleConfigRevision(daemon.state()),
+      providers: { "bm-reviewer": { extends: "claude" }, "bm-worker": { extends: "claude" } },
+      profiles: { "bm-reviewer": { model: "opus" } },
+    });
+
+    expect(daemon.state().providers["bm-reviewer"]).toEqual({ extends: "claude", label: "Beads Reviewer", paseoTools: { enabled: false } });
+    expect(daemon.state().providers["bm-worker"]).toEqual({
+      extends: "claude",
+      label: "Beads Worker",
+      paseoTools: rolePaseoToolsPolicy("worker"),
+      env: { MINE: "1" },
+    });
+  });
+
+  it("a fallback alias saved from the screen carries its role's policy", () => {
+    expect(fallbackAliasEntry("worker", 1, "codex")).toEqual({ extends: "codex", label: "Worker (fallback 1)", paseoTools: rolePaseoToolsPolicy("worker") });
+    expect(fallbackAliasEntry("manager", 2, "claude")).toEqual({ extends: "claude", label: "Manager (fallback 2)", paseoTools: rolePaseoToolsPolicy("manager") });
+    expect(fallbackAliasEntry("reviewer", 3, "codex")).toEqual({ extends: "codex", label: "Reviewer (fallback 3)", paseoTools: { enabled: false } });
+  });
+
+  it("the cleanup removes the policies with the aliases, and nothing else", async () => {
+    const daemon = fakeDaemon(beforePolicy());
+    await applyRoleToolPolicies(daemon.paseo, paseoToolsPolicyOfAlias);
+
+    const removed = await removeAllBmEntries(daemon.paseo, null);
+
+    expect(removed.removedProviders.sort()).toEqual([...Object.keys(expected), "bm-mine"].sort());
+    expect(daemon.state().providers).toEqual({ claude: { enabled: true } });
+    expect(JSON.stringify(daemon.state())).not.toContain("paseoTools");
+    expect(daemon.state().agentProfiles).toEqual([ROOM]);
   });
 });

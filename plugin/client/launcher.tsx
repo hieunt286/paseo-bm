@@ -1,7 +1,14 @@
 /**
  * "Beads Manager" surface (WP-113): the screen behind the sidebar item and the
- * Command Center item. It only renders; the launch logic, texts and styles live
+ * Command Center items. It only renders; the launch logic, texts and styles live
  * in `launch-manager.ts`, which is tested without a renderer.
+ *
+ * It is the section router of the management surface (autonomy design §A.12):
+ * it opens on the Inbox, and a row of tabs switches Inbox · Work · Insights ·
+ * Settings, the Inbox tab carrying the count of what needs the owner (DQ-3).
+ * Work is `work.tsx` (the projects, and a project's Requests · Beads · Agents);
+ * Insights is `insights.tsx`;
+ * Settings is `settings-section.tsx`, built from the Setup screen's pieces — so nothing that existed is out of reach.
  *
  * Client rules: React Native primitives only, every color from theme.colors,
  * no Node builtin imports.
@@ -9,34 +16,34 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import { type PluginSurfaceProps, usePaseo, useRpc } from "@getpaseo/plugin/client";
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import {
-  AccessibilityInfo,
-  ActivityIndicator,
-  Animated,
-  Pressable,
-  ScrollView,
-  Text,
-  View,
-} from "react-native";
-import { BeadsScreen } from "./beads-screen";
-import { SetupScreen } from "./setup-screen";
-import { DashboardPanel } from "./dashboard";
-import { Icon } from "@getpaseo/plugin/client/react-native";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { AccessibilityInfo, Animated, Pressable, Text, View } from "react-native";
+import { SettingsScreen } from "./settings-section";
+import { InboxScreen, useInbox } from "./inbox";
+import { InsightsScreen } from "./insights";
+import { insightsProjects } from "./insights-model";
+import { inboxTab } from "./inbox-model";
+import { StatusTabs } from "./ui";
+import { ProjectPage, WorkScreen } from "./work";
 import {
   SURFACE_HOME_VIEW,
-  WORKSPACE_ACTIONS,
+  SURFACE_SECTIONS,
   backLabelOf,
   backOf,
   overviewPolling,
   closedWorkspaces,
-  dashboardRequests,
   launcherNotices,
+  projectRequests,
+  projectTabOf,
   screenTitleOf,
-  workspaceStats,
-  type DashboardViewName,
-} from "./dashboard-view";
-import { toneColor, type Tone } from "./dashboard-model";
+  sectionHomeOf,
+  sectionOf,
+  sectionRequests,
+  type SurfaceSection,
+  type SurfaceView,
+  type SurfaceWorkspace,
+} from "./surface-view";
+import { dashboardStyles, toneColor, type Tone } from "./dashboard-model";
 import { managerEnsureRpc, tracesWorkspacesRpc, workspacesOverviewRpc } from "../shared/contracts";
 import { PLUGIN_VERSION } from "../shared/version";
 import {
@@ -53,7 +60,7 @@ interface WorkspaceRow {
   id: string;
   label: string;
   detail: string;
-  /** Title of the Metric and Beads screens: the workspace and its project. */
+  /** Title of the project's page: the workspace and its project. */
   screenTitle: string;
 }
 
@@ -66,13 +73,18 @@ const DOT_ROLES = [
   ["manager", "Manager"],
   ["worker", "Worker"],
   ["reviewer", "Reviewer"],
+  ["orchestrator", "Orchestrator"],
 ] as const;
 
-/** Running bm agents of one workspace, per role (`workspaces.overview`). */
+/**
+ * Running bm agents of one workspace, per role (`workspaces.overview`).
+ * `orchestrator` is optional: an overview that does not count it counts none.
+ */
 export interface RunningAgentCounts {
   manager: number;
   worker: number;
   reviewer: number;
+  orchestrator?: number;
 }
 
 /** Everything the dot beside a project name shows; see `runningDotState`. */
@@ -89,7 +101,7 @@ export interface RunningDotState {
 
 /**
  * The dot that says a bm agent is working in this workspace right now
- * (delta 20260917e §4.2): it pulses while any of the three roles runs, and
+ * (delta 20260917e §4.2): it pulses while any of the roles runs, and
  * stands still and dim when none does.
  */
 export function runningDotState(
@@ -99,7 +111,8 @@ export function runningDotState(
   // The overview has not answered for this row yet. Unknown is not idle, and a
   // dim dot would claim "nothing is running" before anything was counted.
   if (counts === undefined) return null;
-  const total = counts.manager + counts.worker + counts.reviewer;
+  const count = (role: (typeof DOT_ROLES)[number][0]) => counts[role] ?? 0;
+  const total = DOT_ROLES.reduce((sum, [role]) => sum + count(role), 0);
   if (total === 0) {
     return { total, animate: false, opacity: DIM_OPACITY, label: "No Beads agent running", tone: "muted" };
   }
@@ -109,8 +122,8 @@ export function runningDotState(
     // and no loop is started at all.
     animate: !reduceMotion,
     opacity: 1,
-    label: DOT_ROLES.filter(([key]) => counts[key] > 0)
-      .map(([key, name]) => `${counts[key]} ${name}${counts[key] === 1 ? "" : "s"}`)
+    label: DOT_ROLES.filter(([key]) => count(key) > 0)
+      .map(([key, name]) => `${count(key)} ${name}${count(key) === 1 ? "" : "s"}`)
       .join(", "),
     tone: "success",
   };
@@ -170,8 +183,10 @@ function RunningDot(props: {
   counts: RunningAgentCounts | undefined;
   theme: PluginTheme;
   styles: ReturnType<typeof launcherStyles>;
+  /** The dot alone (Work rows name the agents themselves); the words stay in its accessibility label. */
+  bare?: boolean;
 }) {
-  const { counts, theme, styles } = props;
+  const { counts, theme, styles, bare } = props;
   const reduceMotion = useReduceMotion();
   const state = runningDotState(counts, reduceMotion);
   const opacity = useRef(new Animated.Value(DIM_OPACITY)).current;
@@ -191,7 +206,7 @@ function RunningDot(props: {
       {/* An idle row says it with the dim dot alone; spelling out "nothing is
           running" on every quiet project is noise. The accessibility label
           above carries the words in both states. */}
-      {state.total === 0 ? null : (
+      {state.total === 0 || bare === true ? null : (
         <Text style={[styles.statText, { color: toneColor(theme, state.tone) }]} numberOfLines={1}>
           {state.label}
         </Text>
@@ -203,8 +218,8 @@ function RunningDot(props: {
 /**
  * The surface's status strip: a slash command's notice (tap to dismiss), a host
  * too old to open agents, and the state of the last Manager launch. Built once
- * by the surface and drawn on both the main screen (Setup) and the workspace
- * list (delta 20260918e §4.2); the lines come from `launcherStatusLines`.
+ * by the surface and drawn on every section (delta 20260918e §4.2); the lines
+ * come from `launcherStatusLines`.
  */
 function LauncherStatus({
   lines,
@@ -247,11 +262,11 @@ function LauncherStatus({
 export function ManagerLauncherSurface(props: PluginSurfaceProps) {
   const { theme, layout, navigation } = props;
   const paseo = usePaseo();
-  // The Dashboard shares this surface (Q-036), so the view is state here and the
-  // Command Center hand-off is a queue, exactly like the launch request below.
-  // It opens on Setup, the main screen (delta 20260918e §4.2).
-  const [view, setView] = useState<DashboardViewName>(SURFACE_HOME_VIEW);
-  const [dashboardWorkspace, setDashboardWorkspace] = useState<{ id: string; label: string } | null>(null);
+  // Every section shares this surface (Q-036), so the view is state here and
+  // each Command Center hand-off is a queue, exactly like the launch request
+  // below. It opens on the Inbox (autonomy design §A.12).
+  const [view, setView] = useState<SurfaceView>(SURFACE_HOME_VIEW);
+  const [project, setProject] = useState<SurfaceWorkspace | null>(null);
   const ensure = useRpc(managerEnsureRpc);
   const listStored = useRpc(tracesWorkspacesRpc);
   const stored = useQuery({
@@ -259,8 +274,8 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
     queryFn: () => listStored({}),
   });
   const listOverview = useRpc(workspacesOverviewRpc);
-  // Bead counts and running Workers; read and refreshed only while the
-  // workspace list shows them (delta 20260918f F5).
+  // Bead counts and running agents; read and refreshed only while Work's list
+  // shows them (delta 20260918f F5).
   const overview = useQuery({
     queryKey: ["paseo-bm", "launcher", "overview"],
     queryFn: () => listOverview({}),
@@ -277,13 +292,14 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
     managerLauncher.getState,
   );
   // What a slash command had to say. It has no channel of its own except an
-  // error toast, which would paint a success red (dashboard-view.ts).
+  // error toast, which would paint a success red (surface-view.ts).
   const commandNotice = useSyncExternalStore(
     launcherNotices.subscribe,
     launcherNotices.peek,
     launcherNotices.peek,
   );
   const styles = useMemo(() => launcherStyles(theme, layout.compact), [theme, layout.compact]);
+  const tabStyles = useMemo(() => dashboardStyles(theme, layout.compact), [theme, layout.compact]);
 
   const workspaces = useQuery({
     queryKey: ["paseo-bm", "launcher", "workspaces"],
@@ -302,17 +318,43 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
     },
   });
 
-  // Open the Dashboard when the Command Center queued one.
+  // A project's name for the Inbox: open workspaces first, then the history of closed ones.
+  const projectOf = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const closed of stored.data?.workspaces ?? []) {
+      if (closed.lastKnownName !== null) names.set(closed.workspaceId, closed.lastKnownName);
+    }
+    for (const workspace of workspaces.data ?? []) names.set(workspace.id, workspace.screenTitle);
+    return (workspaceId: string) => names.get(workspaceId) ?? null;
+  }, [stored.data, workspaces.data]);
+  // Read every INBOX_POLL_MS while the Inbox shows, kept otherwise for the tab's count.
+  const inbox = useInbox({
+    visible: view === "inbox",
+    projectOf,
+    can: { openAgent: openAgent !== undefined, openWorkspace: navigation?.openWorkspace !== undefined },
+  });
+
+  // Open a section when a Command Center item queued one.
   useEffect(() => {
     const run = () => {
-      const workspaceId = dashboardRequests.take();
-      if (workspaceId === null) return;
-      const known = workspaces.data?.find((workspace) => workspace.id === workspaceId);
-      setDashboardWorkspace({ id: workspaceId, label: known?.screenTitle ?? workspaceId });
-      setView("dashboard");
+      const section = sectionRequests.take();
+      if (section !== null) setView(sectionHomeOf(section));
     };
     run();
-    return dashboardRequests.subscribe(run);
+    return sectionRequests.subscribe(run);
+  }, []);
+
+  // Open a project's page when the Command Center queued one.
+  useEffect(() => {
+    const run = () => {
+      const workspaceId = projectRequests.take();
+      if (workspaceId === null) return;
+      const known = workspaces.data?.find((workspace) => workspace.id === workspaceId);
+      setProject({ id: workspaceId, label: known?.screenTitle ?? workspaceId });
+      setView("project-requests");
+    };
+    run();
+    return projectRequests.subscribe(run);
   }, [workspaces.data]);
 
   // Run a launch queued by the Command Center item, now, whenever one arrives,
@@ -331,13 +373,31 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
   }, [ensure, openAgent]);
 
   const pending = state.status === "pending";
-  // Every ← goes where `backOf` says: Metric and Beads to the workspace list,
-  // the list to Setup. Setup is the main screen and has no ←.
+  // Every ← goes where `backOf` says: a project's page to the Work list.
+  // A section's own screen has no ←: the tabs reach it.
   const goBack = () => setView(backOf(view) ?? SURFACE_HOME_VIEW);
 
-  // Built ONCE and placed on every view of the surface (Setup, the workspace
-  // list, Metric, Beads), so a slash command's notice and a launch error are
-  // seen wherever the surface is.
+  // The section tabs, above every view: Inbox (with its count) · Work · Insights · Settings.
+  const tabs = SURFACE_SECTIONS.map((section) =>
+    section.key === "inbox" ? inboxTab(inbox.view?.count ?? null) : { key: section.key, label: section.label },
+  );
+  const framed = (screen: ReactNode) => (
+    <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
+      <View style={{ paddingHorizontal: tabStyles.content.padding, paddingTop: tabStyles.content.padding }}>
+        <StatusTabs
+          tabs={tabs}
+          selected={sectionOf(view)}
+          onSelect={(key) => setView(sectionHomeOf(key as SurfaceSection))}
+          styles={tabStyles}
+        />
+      </View>
+      <View style={{ flex: 1 }}>{screen}</View>
+    </View>
+  );
+
+  // Built ONCE and placed on every view of the surface (the Inbox, the Work
+  // list, a project's page, Insights, Settings), so a slash command's notice
+  // and a launch error are seen wherever the surface is.
   const status = (
     <LauncherStatus
       lines={launcherStatusLines({ commandNotice, canOpenAgents: openAgent !== undefined, state })}
@@ -347,170 +407,74 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
     />
   );
 
-  if (view === "setup") {
-    return <SetupScreen {...props} onOpenWorkspaces={() => setView("workspaces")} status={status} />;
+  if (view === "inbox") {
+    return framed(<InboxScreen {...props} data={inbox} status={status} onOpenWork={() => setView("work")} />);
   }
 
-  if (view === "beads" && dashboardWorkspace !== null) {
-    return (
-      <BeadsScreen
+  if (view === "insights") {
+    // Insights (experience concept §4.3): flow, cost and Beads figures, narrowed to a project by name.
+    return framed(
+      <InsightsScreen
         {...props}
-        workspaceId={dashboardWorkspace.id}
-        workspaceLabel={dashboardWorkspace.label}
-        onBack={goBack}
-        backLabel={backLabelOf(view) ?? undefined}
+        projects={insightsProjects(workspaces.data ?? [], stored.data?.workspaces ?? [])}
         status={status}
-      />
+      />,
     );
   }
 
-  if (view === "dashboard" && dashboardWorkspace !== null) {
-    return (
-      <DashboardPanel
+  if (view === "settings") {
+    // Settings (experience concept §4.4): Agents · Autonomy · Tools & skills · Data.
+    return framed(<SettingsScreen {...props} status={status} />);
+  }
+
+  const projectTab = projectTabOf(view);
+  if (projectTab !== null && project !== null) {
+    // A project's page (experience concept §4.2), opened on Requests or Beads.
+    return framed(
+      <ProjectPage
+        key={`${project.id}:${view}`}
         {...props}
-        workspaceId={dashboardWorkspace.id}
-        workspaceLabel={dashboardWorkspace.label}
+        workspaceId={project.id}
+        label={project.label}
+        initialTab={projectTab}
+        closed={project.closed}
         onBack={goBack}
         backLabel={backLabelOf(view) ?? undefined}
         status={status}
-      />
+        // A closed workspace has history only: no Manager to chat with.
+        onChat={openAgent === undefined || project.closed !== undefined ? undefined : () => void managerLauncher.launch(project.id, { ensure, openAgent })}
+        chatBusy={pending && state.workspaceId === project.id}
+      />,
     );
   }
 
-  return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={backLabelOf(view) ?? undefined}
-          onPress={goBack}
-          style={styles.iconButton}
-        >
-          <Text style={styles.rowTitle}>←</Text>
-        </Pressable>
-        <Text style={[styles.title, { flex: 1 }]}>Workspaces</Text>
-      </View>
-      <Text style={styles.body}>Chat with a workspace's Beads Manager, or open its metrics or beads.</Text>
-
-      {status}
-
-      {workspaces.isPending ? <ActivityIndicator color={styles.spinner.color} /> : null}
-      {workspaces.isError ? (
-        <Text style={[styles.notice, { color: toneColor(theme, "danger") }]}>
-          {`Could not load workspaces. ${errorMessageOf(workspaces.error)}`}
-        </Text>
-      ) : null}
-      {workspaces.data?.length === 0 ? (
-        <Text style={styles.body}>No workspaces on this host yet.</Text>
-      ) : null}
-
-      {/* The rows render even without `navigation.openAgent`: only the Manager
-          button needs it, while the Dashboard is read-only and must stay
-          reachable on an older host (REQ-040d). They keep the order
-          `workspaces.list` returns: most recent activity first, no pinning
-          (delta 20260918f §4.5). */}
-      {(workspaces.data ?? []).map((workspace) => {
-        const busyHere = pending && state.workspaceId === workspace.id;
-        const open = (view: "dashboard" | "beads") => {
-          setDashboardWorkspace({ id: workspace.id, label: workspace.screenTitle });
-          setView(view);
-        };
-        const stats = workspaceStats(overviewById.get(workspace.id));
-        return (
-          <View key={workspace.id} style={styles.row}>
-            <View style={{ gap: 4, flexShrink: 1 }}>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                <Text style={[styles.rowTitle, { flexShrink: 1 }]} numberOfLines={1}>
-                  {workspace.label}
-                </Text>
-                <RunningDot counts={overviewById.get(workspace.id)?.runningAgents} theme={theme} styles={styles} />
-              </View>
-              <Text style={styles.rowSubtitle} numberOfLines={1}>
-                {workspace.detail}
-              </Text>
-              {stats.length === 0 ? null : (
-                <View style={styles.stats} accessibilityLabel={stats.map((stat) => stat.label).join(", ")}>
-                  {stats.map((stat) => (
-                    <View key={stat.key} style={styles.stat}>
-                      <Icon name={stat.icon} size={13} color={toneColor(theme, stat.tone)} />
-                      <Text style={[styles.statText, { color: toneColor(theme, stat.tone) }]}>{stat.value}</Text>
-                    </View>
-                  ))}
-                </View>
-              )}
-            </View>
-            {/* The rows render even without `navigation.openAgent`: only the
-                Manager action needs it, while Metric and Beads are read-only
-                and must stay reachable on an older host (REQ-040d). */}
-            <View style={styles.actions}>
-              {WORKSPACE_ACTIONS.map((action) => {
-                if (action.key === "manager" && !openAgent) return null;
-                const primary = action.key === "manager";
-                const disabled = primary && pending;
-                const textStyle = primary ? styles.actionPrimaryText : styles.actionText;
-                return (
-                  <Pressable
-                    key={action.key}
-                    accessibilityRole="button"
-                    accessibilityLabel={
-                      action.key === "manager"
-                        ? `Go to the Beads Manager of ${workspace.label}`
-                        : action.key === "metric"
-                          ? `Open the Beads metrics for ${workspace.label}`
-                          : `Open the beads of ${workspace.label}`
-                    }
-                    accessibilityState={primary ? { disabled, busy: busyHere } : undefined}
-                    disabled={disabled}
-                    onPress={() => {
-                      if (action.key === "manager") void managerLauncher.launch(workspace.id, { ensure, openAgent: openAgent! });
-                      else open(action.key === "metric" ? "dashboard" : "beads");
-                    }}
-                    style={[styles.action, primary ? styles.actionPrimary : null, disabled ? styles.buttonDisabled : null]}
-                  >
-                    {primary && busyHere ? (
-                      <ActivityIndicator color={textStyle.color} />
-                    ) : (
-                      <>
-                        <Icon name={action.icon} size={14} color={textStyle.color} />
-                        <Text style={textStyle}>{action.label}</Text>
-                      </>
-                    )}
-                  </Pressable>
-                );
-              })}
-            </View>
-          </View>
-        );
-      })}
-
-      {/* History of workspaces Paseo no longer lists: still readable, and
-          movable onto the reopened workspace from its Metric screen. */}
-      {closedWorkspaces(stored.data?.workspaces ?? [], workspaces.data?.map((workspace) => workspace.id) ?? []).map(
-        (closed, index) => (
-          <View key={closed.workspaceId} style={{ gap: 6 }}>
-            {index === 0 ? <Text style={styles.title}>Closed workspaces with history</Text> : null}
-            <View style={styles.row}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.rowTitle}>{closed.label}</Text>
-                <Text style={styles.rowSubtitle}>{closed.detail}</Text>
-              </View>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={`Open the Beads metrics of the closed workspace ${closed.label}`}
-                onPress={() => {
-                  setDashboardWorkspace({ id: closed.workspaceId, label: closed.label });
-                  setView("dashboard");
-                }}
-                style={styles.button}
-              >
-                <Text style={styles.buttonText}>Metric</Text>
-              </Pressable>
-            </View>
-          </View>
-        ),
+  // Work's own screen (experience concept §4.2): the projects, most recent
+  // activity first as `workspaces.list` returns them (no pinning, delta
+  // 20260918f §4.5), one tab away (no ←). A row opens its project's page.
+  return framed(
+    <WorkScreen
+      theme={theme}
+      compact={layout.compact}
+      workspaces={workspaces.data?.map((workspace) => ({
+        id: workspace.id,
+        label: workspace.label,
+        detail: workspace.detail === workspace.label ? "" : workspace.detail,
+      }))}
+      workspacesError={workspaces.isError ? errorMessageOf(workspaces.error) : null}
+      overview={overviewById}
+      closed={closedWorkspaces(stored.data?.workspaces ?? [], workspaces.data?.map((workspace) => workspace.id) ?? [])}
+      status={status}
+      footer={`paseo-bm ${PLUGIN_VERSION}`}
+      renderDot={(workspaceId) => (
+        <RunningDot counts={overviewById.get(workspaceId)?.runningAgents} theme={theme} styles={styles} bare />
       )}
-
-      <Text style={styles.footer}>{`paseo-bm ${PLUGIN_VERSION}`}</Text>
-    </ScrollView>
+      onOpen={(workspaceId, label) => {
+        const known = workspaces.data?.find((workspace) => workspace.id === workspaceId);
+        // A workspace Paseo no longer lists: its page offers what can be done with its history.
+        const closed = known === undefined ? stored.data?.workspaces.find((entry) => entry.workspaceId === workspaceId)?.state : undefined;
+        setProject({ id: workspaceId, label: known?.screenTitle ?? label, ...(closed === undefined ? {} : { closed }) });
+        setView("project-requests");
+      }}
+    />,
   );
 }

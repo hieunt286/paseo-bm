@@ -399,6 +399,138 @@ function fakeHost() {
 
 const context = (paseo: unknown) => ({ paseo, signal: new AbortController().signal });
 
+describe("enqueueBatch: the batch kind (autonomy design §A.8)", () => {
+  const batch = { name: "BM-EVENTS", compose: (lines: readonly string[]) => ["BM-EVENTS", ...lines].join("\n") };
+  const item = (key: string, isCurrent?: () => boolean) => ({ key, line: `- ${key}`, ...(isCurrent === undefined ? {} : { isCurrent }) });
+
+  it("sends the items of one call to an idle target as ONE message", async () => {
+    const { paseo, sends, queue } = world({ orc: { status: "idle" } });
+    await expect(queue.enqueueBatch("orc", batch, [item("a"), item("b"), item("c")], paseo)).resolves.toEqual(["sent", "sent", "sent"]);
+    expect(texts(sends)).toEqual(["orc:BM-EVENTS\n- a\n- b\n- c"]);
+    expect(queue.pending("orc")).toEqual([]);
+  });
+
+  it("holds N items queued while the target runs, from several calls, and sends them as one message at its idle moment", async () => {
+    const { paseo, sends, set, queue, turnEnded } = world({ orc: { status: "running" } });
+    for (const key of ["a", "b", "c", "d", "e"]) await expect(queue.enqueueBatch("orc", batch, [item(key)], paseo)).resolves.toEqual(["queued"]);
+    expect(sends).toEqual([]);
+    set("orc", { status: "idle" });
+    await turnEnded("orc");
+    expect(texts(sends)).toEqual(["orc:BM-EVENTS\n- a\n- b\n- c\n- d\n- e"]);
+    // One idle moment, one message: nothing is left for a second one.
+    expect(queue.pending("orc")).toEqual([]);
+  });
+
+  it("never sends into a running turn: the batch waits while the target still reads running at its turn end", async () => {
+    const { paseo, sends, set, queue, turnEnded } = world({ orc: { status: "running" } });
+    await queue.enqueueBatch("orc", batch, [item("a")], paseo);
+    await turnEnded("orc");
+    expect(sends).toEqual([]);
+    set("orc", { status: "idle" });
+    await turnEnded("orc");
+    expect(texts(sends)).toEqual(["orc:BM-EVENTS\n- a"]);
+  });
+
+  it("drops an item whose subject settled before delivery, and sends nothing when every item settled", async () => {
+    const { paseo, sends, set, queue, turnEnded } = world({ orc: { status: "running" } });
+    let open = true;
+    await queue.enqueueBatch("orc", batch, [item("settles", () => open), item("stays", () => true)], paseo);
+    open = false;
+    set("orc", { status: "idle" });
+    await turnEnded("orc");
+    expect(texts(sends)).toEqual(["orc:BM-EVENTS\n- stays"]);
+
+    set("orc", { status: "running" });
+    await queue.enqueueBatch("orc", batch, [item("gone", () => false)], paseo);
+    set("orc", { status: "idle" });
+    await turnEnded("orc");
+    expect(sends).toHaveLength(1);
+    expect(queue.pending("orc")).toEqual([]);
+  });
+
+  it("counts a throwing isCurrent as settled, with one log line", async () => {
+    const { paseo, sends, logs, queue } = world({ orc: { status: "idle" } });
+    const outcomes = await queue.enqueueBatch(
+      "orc",
+      batch,
+      [
+        item("broken", () => {
+          throw new Error("store unreadable");
+        }),
+        item("fine"),
+      ],
+      paseo,
+    );
+    expect(outcomes).toEqual(["dropped", "sent"]);
+    expect(texts(sends)).toEqual(["orc:BM-EVENTS\n- fine"]);
+    expect(logs).toEqual([expect.stringMatching(/^\[paseo-bm\] could not tell whether the BM-EVENTS:broken notice is still current: store unreadable/)]);
+  });
+
+  it("replaces a queued item of the same key, and keeps other notices one idle moment apart", async () => {
+    const { paseo, sends, set, queue, turnEnded } = world({ orc: { status: "running" } });
+    await queue.enqueue("orc", "ask:1", "the owner asks", paseo);
+    await queue.enqueueBatch("orc", batch, [item("a"), item("b")], paseo);
+    await expect(queue.enqueueBatch("orc", batch, [{ key: "a", line: "- a again" }], paseo)).resolves.toEqual(["queued"]);
+    set("orc", { status: "idle" });
+    await turnEnded("orc");
+    // The older notice first; the batch at its next idle moment.
+    expect(texts(sends)).toEqual(["orc:the owner asks"]);
+    set("orc", { status: "idle" });
+    await turnEnded("orc");
+    expect(texts(sends)).toEqual(["orc:the owner asks", "orc:BM-EVENTS\n- b\n- a again"]);
+  });
+
+  it("goes on to the next notice at once when a whole batch settled", async () => {
+    const { paseo, sends, set, queue, turnEnded } = world({ orc: { status: "running" } });
+    await queue.enqueueBatch("orc", batch, [item("gone", () => false)], paseo);
+    await queue.enqueue("orc", "ask:1", "the owner asks", paseo);
+    set("orc", { status: "idle" });
+    await turnEnded("orc");
+    expect(texts(sends)).toEqual(["orc:the owner asks"]);
+  });
+
+  it("tells the batch which items went out, and the target's next turn end once per message, oldest first (A-7)", async () => {
+    const { paseo, set, queue, turnEnded, failing, logs } = world({ orc: { status: "idle" }, mgr: { status: "idle" } });
+    const told: string[] = [];
+    const observed = {
+      ...batch,
+      onSent: (targetId: string, keys: readonly string[]) => told.push(`sent ${targetId} ${keys.join(",")}`),
+      onTurnEnded: (targetId: string) => told.push(`ended ${targetId}`),
+    };
+    await queue.enqueueBatch("orc", observed, [item("a"), item("gone", () => false), item("b")], paseo);
+    expect(told).toEqual(["sent orc a,b"]);
+    // Another agent's turn end is not the target's.
+    await turnEnded("mgr");
+    expect(told).toEqual(["sent orc a,b"]);
+    // The next batch waits for the running turn; its turn end first ends the first message, then sends the second.
+    await queue.enqueueBatch("orc", observed, [item("c")], paseo);
+    set("orc", { status: "idle" });
+    await turnEnded("orc");
+    expect(told).toEqual(["sent orc a,b", "ended orc", "sent orc c"]);
+    set("orc", { status: "idle" });
+    await turnEnded("orc");
+    await turnEnded("orc");
+    expect(told).toEqual(["sent orc a,b", "ended orc", "sent orc c", "ended orc"]);
+
+    // A message that could not be sent is neither sent nor ended; a throwing observer is one log line.
+    failing.add("BM-EVENTS\n- d");
+    await queue.enqueueBatch("orc", observed, [item("d")], paseo);
+    await turnEnded("orc");
+    expect(told).toHaveLength(4);
+    const throwing = { ...batch, onSent: () => { throw new Error("store unreadable"); } };
+    await expect(queue.enqueueBatch("orc", throwing, [item("e")], paseo)).resolves.toEqual(["sent"]);
+    expect(logs.some((line) => /after sending the BM-EVENTS \(1\) notice to orc: store unreadable/.test(line))).toBe(true);
+  });
+
+  it("refuses bad input without throwing", async () => {
+    const { paseo, sends, logs, queue } = world({ orc: { status: "idle" } });
+    await expect(queue.enqueueBatch("", batch, [item("a")], paseo)).resolves.toEqual(["dropped"]);
+    await expect(queue.enqueueBatch("orc", batch, [{ key: "", line: "x" }, item("b")], paseo)).resolves.toEqual(["dropped", "sent"]);
+    expect(texts(sends)).toEqual(["orc:BM-EVENTS\n- b"]);
+    expect(logs).toHaveLength(2);
+  });
+});
+
 describe("registerNoticeQueue", () => {
   it("rides on the turn_ended hook registered through its host, after that hook's handler", async () => {
     const { paseo, sends, set, queue } = world({ mgr: { status: "running" } });
@@ -483,10 +615,9 @@ describe("the server entry", () => {
     });
     const server = { handle: vi.fn(), registerSettings: vi.fn(), before: vi.fn(() => () => {}), on };
     const cleanup = contribute(server as unknown as Parameters<typeof contribute>[0]);
-    // Unchanged by the queue: stop propagation, BM-FORMAT, the collector,
-    // (delta 20260921 §4.4.4) the fallback detection and (delta 20260924
-    // qa-ledger §3.2) the question–answer ledger.
-    expect(hooks.get("agent.turn_ended")).toHaveLength(5);
+    // Unchanged by the queue: stop propagation, BM-FORMAT, the collector and
+    // (delta 20260921 §4.4.4) the fallback detection.
+    expect(hooks.get("agent.turn_ended")).toHaveLength(4);
 
     // A non-bm agent, so every other hook ignores the turn end without touching Paseo.
     const { paseo, sends, set } = world({ "agent-1": { status: "running" } });

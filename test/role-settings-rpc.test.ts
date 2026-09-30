@@ -129,6 +129,7 @@ const CONFIG = {
     "bm-manager": { extends: "claude", label: "Beads Manager", paseoTools: { enabled: true } },
     "bm-worker": { extends: "opencode", label: "Beads Worker", paseoTools: { enabled: true } },
     "bm-reviewer": { extends: "pi", label: "Beads Reviewer" },
+    "bm-orchestrator": { extends: "codex", label: "Beads Orchestrator" },
   },
   agentProfiles: [
     { id: "mine", name: "My own", provider: "claude", model: "claude-opus-5" },
@@ -143,6 +144,7 @@ const CONFIG = {
     },
     { id: "bm-worker", name: "Beads Worker", provider: "bm-worker", model: "anthropic/claude-sonnet-4-6", featureValues: { auto_accept: true } },
     { id: "bm-reviewer", name: "Beads Reviewer", provider: "bm-reviewer", model: "pi-default", thinkingOptionId: "  " },
+    { id: "bm-orchestrator", name: "Beads Orchestrator", provider: "bm-orchestrator", model: "gpt-5.6-sol" },
   ],
 };
 
@@ -207,6 +209,7 @@ describe("roleSettingsRevision", () => {
           "bm-manager": CONFIG.providers["bm-manager"],
           "bm-worker": CONFIG.providers["bm-worker"],
           "bm-reviewer": CONFIG.providers["bm-reviewer"],
+          "bm-orchestrator": CONFIG.providers["bm-orchestrator"],
         },
         profiles: CONFIG.agentProfiles,
       }),
@@ -251,7 +254,7 @@ describe("roleSettingsRevision", () => {
 });
 
 describe("roles.settings", () => {
-  it("describes the three roles from config.providers and config.agentProfiles, with each capability class", async () => {
+  it("describes the four roles from config.providers and config.agentProfiles, with each capability class", async () => {
     const { paseo, patch } = fakePaseo();
     const result = await handleRolesSettings(paseo, { log });
     expect(result).toEqual({
@@ -290,7 +293,19 @@ describe("roles.settings", () => {
           featureValues: {},
           capability: "none",
         },
+        {
+          role: "orchestrator",
+          providerId: "bm-orchestrator",
+          baseProvider: "codex",
+          label: "Beads Orchestrator",
+          model: "gpt-5.6-sol",
+          thinkingOptionId: null,
+          modeId: null,
+          featureValues: {},
+          capability: "tiered",
+        },
       ],
+      // The Orchestrator has no fallback chain (orchestrator design §3.1).
       fallback: DEFAULT_FALLBACK,
       warnings: [],
       // No listAvailable on this fake: Paseo cannot say, so nothing to pick.
@@ -309,7 +324,7 @@ describe("roles.settings", () => {
     };
     const { paseo, listModes } = fakePaseo({ config });
     const result = await handleRolesSettings(paseo, { log });
-    expect(result.roles.map((role) => role.role)).toEqual(["manager", "worker", "reviewer"]);
+    expect(result.roles.map((role) => role.role)).toEqual(["manager", "worker", "reviewer", "orchestrator"]);
     expect(result.roles[1]).toEqual({
       role: "worker",
       providerId: "bm-worker",
@@ -377,19 +392,20 @@ describe("roles.settings", () => {
     };
     const { paseo, listModes } = fakePaseo({ config });
     const result = await handleRolesSettings(paseo, { log });
-    expect(result.roles.map((role) => role.capability)).toEqual(["unknown", "tiered", "tiered"]);
+    expect(result.roles.map((role) => role.capability)).toEqual(["unknown", "tiered", "tiered", "unknown"]);
     expect(listModes.mock.calls.map((call) => call[0]).sort()).toEqual(["claude", "warming"]);
     expect(logged).toHaveLength(1);
     expect(logged[0]).toMatch(/^\[paseo-bm\] could not read the modes of warming \(provider is still starting\)/);
   });
 
-  it("never throws when the configuration cannot be read: three empty roles, a warning and one log line", async () => {
+  it("never throws when the configuration cannot be read: four empty roles, a warning and one log line", async () => {
     const { paseo, listModes } = fakePaseo({ configError: new Error("daemon went away") });
     const result = await handleRolesSettings(paseo, { log });
     expect(result.roles.map((role) => [role.role, role.baseProvider, role.model, role.capability])).toEqual([
       ["manager", null, null, "unknown"],
       ["worker", null, null, "unknown"],
       ["reviewer", null, null, "unknown"],
+      ["orchestrator", null, null, "unknown"],
     ]);
     expect(result.fallback).toEqual(DEFAULT_FALLBACK);
     expect(result.warnings).toEqual([
@@ -418,7 +434,7 @@ describe("roles.settings", () => {
   it("never throws on a host without config.get or with a malformed answer", async () => {
     for (const paseo of [undefined, {}, { config: {} }, { config: { get: async () => null } }, { config: { get: async () => ({ config: [] }) } }]) {
       const result = await handleRolesSettings(paseo, { log });
-      expect(result.roles).toHaveLength(3);
+      expect(result.roles).toHaveLength(4);
       expect(result.warnings).toHaveLength(1);
     }
   });
@@ -592,7 +608,7 @@ describe("registration", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     try {
       const settings = (await handlers.get("roles.settings")!({}, { paseo })) as { roles: unknown[]; revision: string };
-      expect(settings.roles).toHaveLength(3);
+      expect(settings.roles).toHaveLength(4);
       expect(settings.revision).toBe(roleSettingsRevision(CONFIG));
       const options = (await handlers.get("roles.options")!({ provider: "claude" }, { paseo })) as { capability: string };
       expect(options.capability).toBe("tiered");
@@ -688,12 +704,13 @@ describe("roles.save-settings (delta 20260921 §4.3.3–§4.3.4, REQ-064 b/c/e/f
     expect(fake.patch).not.toHaveBeenCalled();
   });
 
-  it("never lets the Reviewer be saved in a dangerous or planning mode", async () => {
+  // The Orchestrator is read-only under the Reviewer's rule (orchestrator design §3.1).
+  it.each(["reviewer", "orchestrator"] as const)("never lets the %s be saved in a dangerous or planning mode", async (role) => {
     const fake = stateful();
     for (const modeId of ["bypassPermissions", "plan"]) {
       await expect(
-        handleRolesSaveSettings({ revision: roleSettingsRevision(fake.state()), role: "reviewer", baseProvider: "claude", model: "claude-opus-5", thinkingOptionId: null, modeId }, fake.paseo, { log }),
-      ).rejects.toMatchObject({ code: "E_ROLE_SETTINGS_INVALID" });
+        handleRolesSaveSettings({ revision: roleSettingsRevision(fake.state()), role, baseProvider: "claude", model: "claude-opus-5", thinkingOptionId: null, modeId }, fake.paseo, { log }),
+      ).rejects.toThrow(new RegExp(`E_ROLE_SETTINGS_INVALID: .*never runs in a (dangerous|planning) mode`));
     }
     expect(fake.patch).not.toHaveBeenCalled();
   });
@@ -729,6 +746,31 @@ describe("roles.save-settings (delta 20260921 §4.3.3–§4.3.4, REQ-064 b/c/e/f
     );
     expect(openCodeReviewer.warnings).toContain("The Reviewer runs with your OpenCode agent's permissions; paseo-bm never auto-approves for it.");
     expect(fake.patch).toHaveBeenCalledTimes(3);
+  });
+
+  it("saves the Orchestrator like the other roles, with the Reviewer's warnings, and tells no agent (orchestrator design §3.2)", async () => {
+    const fake = stateful();
+    const others = JSON.stringify(fake.state().agentProfiles.filter((entry) => entry.id !== "bm-orchestrator"));
+    const saved = await handleRolesSaveSettings(
+      { revision: roleSettingsRevision(fake.state()), role: "orchestrator", baseProvider: "pi", model: "pi-default", thinkingOptionId: null, modeId: null },
+      fake.paseo,
+      { log },
+    );
+    expect(fake.state().providers["bm-orchestrator"]).toEqual({ extends: "pi", label: "Beads Orchestrator" });
+    expect(fake.state().agentProfiles.find((entry) => entry.id === "bm-orchestrator")).toMatchObject({ model: "pi-default" });
+    expect(JSON.stringify(fake.state().agentProfiles.filter((entry) => entry.id !== "bm-orchestrator"))).toBe(others);
+    expect(saved.role).toMatchObject({ role: "orchestrator", providerId: "bm-orchestrator", baseProvider: "pi", model: "pi-default" });
+    expect(saved.warnings).toContain("Pi does not ask before running tools; the Orchestrator's read-only rule is only in its instructions.");
+    expect(saved.warnings).not.toContain("Pi needs pi-mcp-adapter to give this role Paseo tools.");
+    expect(saved.notified).toBe(0);
+
+    const openCode = await handleRolesSaveSettings(
+      { revision: saved.revision, role: "orchestrator", baseProvider: "opencode", model: "anthropic/claude-sonnet-4-6", thinkingOptionId: null, modeId: null },
+      fake.paseo,
+      { log },
+    );
+    expect(openCode.warnings).toContain("The Orchestrator runs with your OpenCode agent's permissions; paseo-bm never auto-approves for it.");
+    expect(fake.sent).toEqual([]);
   });
 
   it("tells every live Manager a changed Worker mode with BM-SETTINGS, and nobody when the line stays the same (§4.3.5)", async () => {

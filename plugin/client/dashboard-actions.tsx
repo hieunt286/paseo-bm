@@ -1,9 +1,11 @@
 /**
- * Destructive Dashboard flows: delete and reassign
- * (WP-211.2.2; REQ-054, REQ-055b, REQ-057d).
+ * The destructive flows over request history: delete and reassign
+ * (WP-211.2.2; REQ-054, REQ-055b, REQ-057d). Work's project page offers them
+ * for one request (its Details) and for a closed workspace (its Requests tab);
+ * Settings → Data offers them per workspace with history.
  *
  * These live in their own file because they are the only irreversible thing the
- * Dashboard can do, and they have their own review and evidence boundary.
+ * plugin's screens can do, and they have their own review and evidence boundary.
  *
  * The shape is always the same three steps, and none can be skipped:
  *
@@ -36,7 +38,8 @@ import { errorMessageOf } from "./launch-manager";
 
 export interface TraceActionsProps {
   theme: PluginSurfaceProps["theme"];
-  layout: PluginSurfaceProps["layout"];
+  /** A phone: the buttons stack. */
+  compact: boolean;
   styles: ReturnType<typeof dashboardStyles>;
   workspaceId: string;
   scope: "workspace" | "trace";
@@ -48,7 +51,7 @@ export interface TraceActionsProps {
 
 export function TraceActions({
   theme,
-  layout,
+  compact,
   styles,
   workspaceId,
   scope,
@@ -130,7 +133,7 @@ export function TraceActions({
   const described = pending === null ? null : describeAction(pending);
 
   return (
-    <View style={{ gap: layout.compact ? 6 : 8 }}>
+    <View style={{ gap: compact ? 6 : 8 }}>
       {error === null ? null : (
         <Text style={[styles.body, { color: toneColor(theme, "danger") }]} accessibilityLiveRegion="polite">
           {error}
@@ -138,11 +141,11 @@ export function TraceActions({
       )}
 
       {described === null ? (
-        <View style={{ flexDirection: layout.compact ? "column" : "row", gap: 8 }}>
+        <View style={{ flexDirection: compact ? "column" : "row", gap: 8 }}>
           {scope === "trace" && traceId !== undefined ? (
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Delete this trace"
+              accessibilityLabel="Delete the recorded history of this request"
               accessibilityState={{ disabled: busy }}
               disabled={busy}
               onPress={() => {
@@ -150,7 +153,7 @@ export function TraceActions({
               }}
               style={styles.dangerButton}
             >
-              <Text style={styles.dangerButtonText}>Delete this trace</Text>
+              <Text style={styles.dangerButtonText}>Delete this request&apos;s history</Text>
             </Pressable>
           ) : null}
 
@@ -193,7 +196,7 @@ export function TraceActions({
               {line}
             </Text>
           ))}
-          <View style={{ flexDirection: layout.compact ? "column" : "row", gap: 8 }}>
+          <View style={{ flexDirection: compact ? "column" : "row", gap: 8 }}>
             {/* Cancel first, so the safe choice is the one under the thumb. */}
             <Pressable
               accessibilityRole="button"

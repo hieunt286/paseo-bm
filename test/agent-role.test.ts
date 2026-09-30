@@ -1,8 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { listAllAgents, roleOfAgent, roleOfProvider } from "../plugin/server/agent-role";
 import { handleChatPeers } from "../plugin/server/chat-rpc";
-import { handleChatWaiting } from "../plugin/server/chat-waiting";
-import { bmAgentsOf, type DashboardPaseo } from "../plugin/server/dashboard-rpc";
+import { agentFactsOf, bmAgentsOf, type DashboardPaseo } from "../plugin/server/dashboard-rpc";
 import { FALLBACK_ROLES, fallbackAlias, fallbackAliasOf, positionOfAlias } from "../plugin/shared/fallback";
 
 /**
@@ -73,6 +72,7 @@ function directory(agents: Agent[], timelines: Record<string, unknown[]> = {}): 
 describe("roleOfAgent", () => {
   it("takes a valid bm.role label first", () => {
     expect(roleOfAgent({ labels: { "bm.role": "reviewer" }, provider: "bm-worker" })).toEqual({ role: "reviewer", labelled: true });
+    expect(roleOfAgent({ labels: { "bm.role": "orchestrator" }, provider: "bm-orchestrator" })).toEqual({ role: "orchestrator", labelled: true });
   });
 
   it("falls back to the provider when the label is missing or unknown", () => {
@@ -104,10 +104,13 @@ describe("fallback aliases (delta 20260921 §4.4.1, REQ-065 f)", () => {
     }
   });
 
-  it("leave the three main aliases as they were", () => {
+  it("leave the main aliases as they were, the Orchestrator's included", () => {
     expect(roleOfProvider("bm-manager")).toBe("manager");
     expect(roleOfProvider("bm-worker/claude-opus-5")).toBe("worker");
     expect(roleOfProvider("bm-reviewer/gpt-5.6-sol")).toBe("reviewer");
+    expect(roleOfProvider("bm-orchestrator/claude-opus-5")).toBe("orchestrator");
+    // The Orchestrator has no fallback chain (orchestrator design §3.1).
+    expect(roleOfProvider("bm-orchestrator-fallback-1")).toBeNull();
     expect(roleOfProvider("claude")).toBeNull();
     expect(roleOfProvider(undefined)).toBeNull();
   });
@@ -171,6 +174,23 @@ describe("bmAgentsOf", () => {
     expect(onePage.entries).toHaveLength(200);
   });
 
+  it("lists the Orchestrator's assessment agent only when asked, so no trace rebuild or chat peer meets it (orchestrator design §3.2)", async () => {
+    const orchestrators: Agent[] = [
+      { id: "o1", workspaceId: WORKSPACE, status: "running", labels: { "bm.role": "orchestrator" } },
+      { id: "o2", workspaceId: WORKSPACE, provider: "bm-orchestrator/claude-opus-5", status: "idle", labels: {} },
+    ];
+    const paseo = directory([...refactorDependency(), ...orchestrators]);
+    expect((await bmAgentsOf(paseo)).map((entry) => entry.facts.id)).toEqual([MANAGER_ID, WORKER_ID]);
+    expect([...(await agentFactsOf(paseo, WORKSPACE)).keys()]).toEqual([MANAGER_ID, WORKER_ID]);
+    const all = await bmAgentsOf(paseo, { includeOrchestrator: true });
+    expect(all.map((entry) => [entry.facts.id, entry.facts.role, entry.facts.labelled, entry.workspaceId])).toEqual([
+      [MANAGER_ID, "manager", false, WORKSPACE],
+      [WORKER_ID, "worker", true, WORKSPACE],
+      ["o1", "orchestrator", true, WORKSPACE],
+      ["o2", "orchestrator", false, WORKSPACE],
+    ]);
+  });
+
   it("is empty when the directory cannot be read", async () => {
     const paseo = directory([]);
     paseo.agents.list = vi.fn(async () => {
@@ -197,31 +217,3 @@ describe("chat.peers with the Refactor Dependency agents", () => {
   });
 });
 
-describe("chat.waiting with an unlabelled Manager", () => {
-  it("lists the Worker that waits in that Manager's chat", async () => {
-    const asking = [
-      "BM-REPORT",
-      `requestId: ${REQ}`,
-      "phase: blocked",
-      "tier: Large (changed: no)",
-      "filesChanged: none",
-      "beadsCreated: none",
-      "beadsUpdated: none",
-      "beadsClosed: none",
-      "beadsReady: none",
-      "reviewFindingsOpen: none",
-      "buildAndTests: not run",
-      "skillsUsed: feature-workflow",
-      "blockers: 1 question: Q1 — see BM-QUESTIONS",
-      "",
-      "BM-QUESTIONS",
-      `requestId: ${REQ}`,
-      "Q1: Cách thay thế 7 gói @cmc-dx.",
-      "- a: Mirror vào libs. (recommended)",
-      "- b: Port vào kit nội bộ.",
-    ].join("\n");
-    const timelines = { [MANAGER_ID]: [{ item: { type: "user_message", text: asking }, timestamp: "2026-09-18T07:06:00.000Z" }] };
-    const result = await handleChatWaiting(directory(refactorDependency(), timelines), { homedir: () => "/nonexistent-bm-home" });
-    expect(result.waiting.map((entry) => [entry.managerId, entry.workerId, entry.requestId])).toEqual([[MANAGER_ID, WORKER_ID, REQ]]);
-  });
-});

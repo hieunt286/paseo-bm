@@ -1,11 +1,12 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { tmpdir } from "node:os";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import contribute from "../plugin/index.server";
-import { ROLE_PROMPT_SEPARATOR, applyRoleInstructions, chooseModeId, type ProviderMode } from "../plugin/server/role-hook";
-import { LOOKUP_TIMEOUT_MS, TIMED_OUT, capabilityOf, forgetModes, modesFor, runPostureOf, withTimeout } from "../plugin/server/role-mode";
+import { ROLE_PROMPT_SEPARATOR, applyAgentTools, applyRoleInstructions, applyRoleModel, chooseModeId, registerRoleHook, type AgentCreateRequest, type ProviderMode } from "../plugin/server/role-hook";
+import { createOrchestratorStore, resetCorrectionWarning } from "../plugin/server/orchestrator-store";
+import { LOOKUP_TIMEOUT_MS, ROLE_GETS_MODE, TIMED_OUT, capabilityOf, forgetModes, modesFor, runPostureOf, withTimeout } from "../plugin/server/role-mode";
 
 // The entry resolves the install home from $HOME when Paseo's config names no
 // plugin path; point it at an empty directory so this machine's real
@@ -31,6 +32,7 @@ const roleMd = (role: string) => readFileSync(join(repoRoot, "plugin", "roles", 
 const managerMd = roleMd("manager");
 const workerMd = roleMd("worker");
 const reviewerMd = roleMd("reviewer");
+const orchestratorMd = roleMd("orchestrator");
 /**
  * What a Worker gets on a host that cannot read the bm-reviewer modes: its role
  * text plus the fallback Reviewer mode `auto` (delta 20260918g §4.9, owner
@@ -695,5 +697,193 @@ describe("run posture — review b4 fixes (delta 20260921 §4.2.2)", () => {
     const result = await run({ config: { provider: "bm-worker", cwd: "/repo", modeId: "bypassPermissions" } });
     expect(result?.config).not.toHaveProperty("modeId");
     expect(result?.config).not.toHaveProperty("featureValues");
+  });
+});
+
+/**
+ * The fourth role (orchestrator design §3.1, REQ-077 c): a `bm-orchestrator`
+ * creation gets roles/orchestrator.md, its profile's model and thinking, and a
+ * mode under the Reviewer's rule — never a dangerous or planning one, never
+ * auto-approve — no Paseo tools, and on a provider that can pre-approve MCP
+ * tools its own tools, all pre-approved, at `/mcp/orchestrator/<secret>`
+ * (§5.1, WP-603).
+ */
+describe("before(\"agent.create\") for bm-orchestrator (orchestrator design §3.1)", () => {
+  const orchestratorProfile = (extra: Record<string, unknown> = {}) => ({
+    id: "bm-orchestrator",
+    name: "Beads Orchestrator",
+    provider: "bm-orchestrator",
+    model: "claude-opus-5",
+    ...extra,
+  });
+  function paseoFor(options: { base?: string; modes?: ProviderMode[]; profile?: Record<string, unknown> | null; features?: unknown[] } = {}) {
+    const listModes = vi.fn(async () => ({ modes: options.modes ?? CLAUDE_MODES }));
+    const listFeatures = vi.fn(async () => ({ features: options.features ?? [] }));
+    const get = vi.fn(async () => ({
+      config: {
+        providers: { "bm-orchestrator": { extends: options.base ?? "claude", label: "Beads Orchestrator" } },
+        agentProfiles: options.profile === null ? [] : [options.profile ?? orchestratorProfile()],
+      },
+    }));
+    return { listModes, paseo: { providers: { listModes, listFeatures }, config: { get } } };
+  }
+  const SECRET = "ab".repeat(32);
+  /** The endpoint's URLs: the Orchestrator's carries the secret (§5.1). */
+  const urlFor = (role: string) => `http://127.0.0.1:4567/mcp/${role}${role === "orchestrator" ? `/${SECRET}` : ""}`;
+  const ORCHESTRATOR_URL = `http://127.0.0.1:4567/mcp/orchestrator/${SECRET}`;
+  const ORCHESTRATOR_GRANTS = ["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_set_autopilot", "bm_direct_worker", "bm_repo", "bm_note", "bm_assessment"].map((tool) => ({ kind: "mcp", server: "paseo-bm", tool }));
+  /** The hook as index.server registers it, with a tool endpoint serving every role. */
+  function hookWithTools(paseo: unknown, usePaseo?: (paseo: unknown) => void) {
+    let hook: ((input: { request: AgentCreateRequest }, context: unknown) => unknown) | undefined;
+    registerRoleHook({ before: ((_name: string, handler: typeof hook) => ((hook = handler), () => {})) as never }, { urlFor, ...(usePaseo === undefined ? {} : { usePaseo }) });
+    return async (config: Record<string, unknown>) =>
+      (await hook!({ request: { config } as unknown as AgentCreateRequest }, { paseo })) as AgentCreateRequest | undefined;
+  }
+
+  it("chooses its mode by the Reviewer's rule", () => {
+    expect(ROLE_GETS_MODE.orchestrator).toBe(true);
+    expect(chooseModeId("orchestrator", CLAUDE_MODES, undefined)).toBe("auto");
+    expect(chooseModeId("orchestrator", CODEX_MODES, "full-access")).toBe("auto");
+    expect(chooseModeId("orchestrator", CLAUDE_MODES, "plan")).toBe("auto");
+    expect(chooseModeId("orchestrator", CLAUDE_MODES, "bypassPermissions", "bypassPermissions")).toBe("auto");
+    expect(chooseModeId("orchestrator", CLAUDE_MODES, "default")).toBeUndefined();
+  });
+
+  it("gets roles/orchestrator.md, its profile's model and thinking, and auto, with its own tools and no Paseo tools", async () => {
+    const { listModes, paseo } = paseoFor({ profile: orchestratorProfile({ thinkingOptionId: "high" }) });
+    const create = hookWithTools(paseo);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = await create({ provider: "bm-orchestrator/claude-haiku-5", cwd: "/repo" });
+    expect(result?.config).toMatchObject({
+      provider: "bm-orchestrator/claude-opus-5",
+      systemPrompt: orchestratorMd,
+      thinkingOptionId: "high",
+      modeId: "auto",
+      cwd: "/repo",
+    });
+    expect(listModes).toHaveBeenCalledWith("bm-orchestrator", { cwd: "/repo" });
+    // No Paseo tools (it cannot create or message agents); only its own tool server, at the secret path (WP-603).
+    expect(result?.config).not.toHaveProperty("paseoTools");
+    expect(result?.config?.mcpServers).toEqual({ "paseo-bm": { type: "http", url: ORCHESTRATOR_URL, alwaysLoad: true } });
+    expect(result?.config?.toolPolicy).toEqual({ preapproved: ORCHESTRATOR_GRANTS });
+  });
+
+  it("hands the endpoint the context's Paseo handle on every paseo-bm creation, and a failing hand-over costs nothing", async () => {
+    const { paseo } = paseoFor();
+    const given: unknown[] = [];
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const create = hookWithTools(paseo, (handle) => given.push(handle));
+    await create({ provider: "bm-orchestrator/claude-opus-5", cwd: "/repo" });
+    await create({ provider: "claude/opus", cwd: "/repo" });
+    expect(given).toEqual([paseo]);
+    const broken = hookWithTools(paseo, () => {
+      throw new Error("boom");
+    });
+    expect((await broken({ provider: "bm-orchestrator/claude-opus-5", cwd: "/repo" }))?.config?.toolPolicy).toEqual({ preapproved: ORCHESTRATOR_GRANTS });
+  });
+
+  it.each([
+    ["dangerous", "bypassPermissions"],
+    ["planning", "plan"],
+  ])("replaces a %s mode, from its creator or from its profile, with the Reviewer's pick", async (_tier, modeId) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fromCreator = await hookWithTools(paseoFor().paseo)({ provider: "bm-orchestrator/claude-opus-5", cwd: "/repo", modeId });
+    expect(fromCreator?.config?.modeId).toBe("auto");
+    expect(warn.mock.calls.some(([line]) => String(line).includes(`"${modeId}"`))).toBe(true);
+    const fromProfile = await hookWithTools(paseoFor({ profile: orchestratorProfile({ modeId }) }).paseo)({ provider: "bm-orchestrator/claude-opus-5", cwd: "/repo" });
+    expect(fromProfile?.config?.modeId).toBe("auto");
+  });
+
+  it("keeps auto-approve off on an untiered provider, even when its profile turns it on", async () => {
+    const { paseo } = paseoFor({
+      base: "opencode",
+      modes: [{ id: "build", label: "Build" }, { id: "review", label: "Review" }],
+      features: [{ type: "toggle", id: "auto_accept", value: false }],
+      profile: orchestratorProfile({ model: "anthropic/claude-sonnet-4-6", featureValues: { auto_accept: true } }),
+    });
+    const result = await hookWithTools(paseo)({ provider: "bm-orchestrator/anthropic/claude-sonnet-4-6", cwd: "/repo" });
+    expect(result?.config?.featureValues).toEqual({ auto_accept: false });
+    expect(result?.config?.modeId).toBe("build");
+    expect(runPostureOf("orchestrator", "untiered", [{ id: "build" }], null, null)).toEqual({ modeId: "build", featureValues: { auto_accept: false } });
+  });
+
+  it("still gets its instructions when no profile or mode can be read", async () => {
+    const { run } = setup();
+    expect((await run({ config: { provider: "bm-orchestrator", cwd: "/repo" } }))?.config?.systemPrompt).toBe(orchestratorMd);
+  });
+
+  it("gets its tools at /mcp/orchestrator/<secret> on Claude, Codex and OpenCode only, and no other role gets any of them", () => {
+    const tools = { urlFor };
+    const request = { config: { provider: "bm-orchestrator/m", cwd: "/repo" } } as unknown as AgentCreateRequest;
+    for (const base of ["claude", "codex", "opencode"]) {
+      const out = applyAgentTools(request, tools, base);
+      expect(out?.config.mcpServers).toEqual({ "paseo-bm": { type: "http", url: ORCHESTRATOR_URL, alwaysLoad: true } });
+      expect(out?.config.toolPolicy).toEqual({ preapproved: ORCHESTRATOR_GRANTS });
+      expect(out?.config).not.toHaveProperty("paseoTools");
+      for (const provider of ["bm-manager/m", "bm-worker/m", "bm-reviewer/m", "bm-worker-fallback-2/m"]) {
+        const other = applyAgentTools({ config: { provider, cwd: "/repo" } } as unknown as AgentCreateRequest, tools, base);
+        expect(other?.config.mcpServers?.["paseo-bm"]).not.toMatchObject({ url: expect.stringContaining("orchestrator") });
+        // The Manager's bm_decisions is its own read-only face at /mcp/manager (autonomy design §A.9), not the Orchestrator's.
+        const orchestratorOnly = ORCHESTRATOR_GRANTS.map((entry) => entry.tool).filter((tool) => tool !== "bm_decisions");
+        for (const grant of other?.config.toolPolicy?.preapproved ?? []) expect(orchestratorOnly).not.toContain(grant.tool);
+      }
+    }
+    // Paseo refuses a toolPolicy on Pi, Oh My Pi, Copilot and other ACP providers: the agent must still be created.
+    for (const base of ["pi", "omp", "copilot", null]) expect(applyAgentTools(request, tools, base)).toBeUndefined();
+  });
+
+  it("the registered hook gives it no tool server when its base provider cannot pre-approve tools", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = await hookWithTools(paseoFor({ base: "pi" }).paseo)({ provider: "bm-orchestrator/claude-opus-5", cwd: "/repo" });
+    expect(result?.config?.systemPrompt).toBe(orchestratorMd);
+    expect(result?.config).not.toHaveProperty("mcpServers");
+    expect(result?.config).not.toHaveProperty("toolPolicy");
+    expect(result?.config).not.toHaveProperty("paseoTools");
+  });
+});
+
+/**
+ * The model-correction log (orchestrator design §4.3): each model the hook
+ * replaces is recorded for the `agent.model-corrected` rule, and the record
+ * can never fail the creation.
+ */
+describe("applyRoleModel records its corrections (orchestrator design §4.3)", () => {
+  const profile = { model: "claude-opus-5", modeId: null, thinkingOptionId: null, featureValues: null };
+  const request = (provider: string) => ({ config: { provider, cwd: "/repo/one" } }) as unknown as AgentCreateRequest;
+  let dataHome: string;
+  beforeEach(() => {
+    dataHome = mkdtempSync(join(isolatedHome, "bm-data-"));
+    process.env.PASEO_BM_HOME = dataHome;
+    resetCorrectionWarning();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    delete process.env.PASEO_BM_HOME;
+    rmSync(dataHome, { recursive: true, force: true });
+  });
+
+  it("writes one entry with the five fields when it corrects a model", () => {
+    const result = applyRoleModel(request("bm-worker/claude-sonnet-5"), profile);
+    expect(result?.config?.provider).toBe("bm-worker/claude-opus-5");
+    const entries = createOrchestratorStore(dataHome).readCorrections();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toEqual({ at: expect.any(String), alias: "bm-worker", requested: "claude-sonnet-5", profileModel: "claude-opus-5", cwd: "/repo/one" });
+    expect(Number.isNaN(Date.parse(entries[0]!.at))).toBe(false);
+  });
+
+  it("writes nothing when the model is already the profile's, or on a Manager", () => {
+    expect(applyRoleModel(request("bm-worker/claude-opus-5"), profile)).toBeUndefined();
+    expect(applyRoleModel(request("bm-manager/claude-sonnet-5"), profile)).toBeUndefined();
+    expect(createOrchestratorStore(dataHome).readCorrections()).toEqual([]);
+  });
+
+  it("still returns the corrected request when the log cannot be written (ENOTDIR)", () => {
+    const file = join(dataHome, "not-a-folder");
+    writeFileSync(file, "x");
+    process.env.PASEO_BM_HOME = file;
+    const warn = vi.mocked(console.warn);
+    const result = applyRoleModel(request("bm-reviewer/claude-sonnet-5"), profile);
+    expect(result?.config?.provider).toBe("bm-reviewer/claude-opus-5");
+    expect(warn.mock.calls.some(([line]) => /could not record a model correction/.test(String(line)))).toBe(true);
   });
 });

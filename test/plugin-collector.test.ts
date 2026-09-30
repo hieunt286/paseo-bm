@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NEW_REQUEST_MARKER } from "../plugin/shared/new-request";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -20,6 +20,7 @@ import {
 import { clearTraceStoreCache, readRecords, withWorkspaceLock } from "../plugin/server/trace-store";
 import { reconstructTraces } from "../plugin/server/traces";
 import { traceRecordSchema, traceRuntimeSchema } from "../plugin/shared/contracts";
+import { PLUGIN_VERSION } from "../plugin/shared/version";
 
 /**
  * WP-205: the turn collector.
@@ -139,6 +140,21 @@ describe("provider filtering", () => {
       location,
     });
     expect(built).toBeNull();
+  });
+
+  it("writes nothing for a turn of the Orchestrator's assessment agent (orchestrator design §3.2)", async () => {
+    // By the main alias or with a model: a 0.4.1 reader of the store must never meet the role.
+    for (const provider of ["bm-orchestrator", "bm-orchestrator/claude-opus-5"]) {
+      const turn = turnEnded({
+        agent: { ...turnEnded().agent, id: "agent-orchestrator", parentAgentId: null, provider },
+        timeline: [userMessage("Assess this request."), assistantMessage("BM-REPORT\nrequestId: req-1")],
+      });
+      noteTurnStart(asEvent({ ...turn, timeline: [] }));
+      expect(await buildRecord(asEvent(turn), { location })).toBeNull();
+      expect(await collectTurnEnded(asEvent(turn), { location })).toBe(false);
+    }
+    expect(readRecords(location, WS).records).toEqual([]);
+    expect(existsSync(location.tracesDir)).toBe(false);
   });
 
   it("ignores an agent with no workspace", async () => {
@@ -627,6 +643,16 @@ describe("evidence extraction", () => {
     ).toMatchObject({ kind: "agent" });
     expect(evidenceFromItem(userMessage("hi") as never, "a", at)).toEqual([]);
   });
+
+  it("masks secrets in a recorded command before it is kept, as in messages (REQ-048b)", () => {
+    const at = "2026-09-30T10:00:00.000Z";
+    const env = { PASEO_PASSWORD: "hunter2-pw" } as NodeJS.ProcessEnv;
+    const [flag] = evidenceFromItem(shellCall("npm publish --token s3cr3t-value --access public") as never, "a", at, env);
+    expect(flag!.detail).toBe("npm publish --token [redacted] --access public");
+    const [value] = evidenceFromItem(shellCall("curl -u admin:hunter2-pw https://example.test") as never, "a", at, env);
+    expect(value!.detail).not.toContain("hunter2-pw");
+    expect(value!.detail).toContain("[redacted]");
+  });
 });
 
 describe("collection end to end", () => {
@@ -761,9 +787,11 @@ describe("registration", () => {
   it("runs onRecorded only after the turn's record can be read (delta 20260917c §4.7)", async () => {
     const seen: number[] = [];
     const context = { paseo: { marker: true } };
-    const onRecorded = vi.fn((_event: unknown, input: { location: { tracesDir: string }; paseo: unknown }) => {
+    const onRecorded = vi.fn((_event: unknown, input: { location: { tracesDir: string }; paseo: unknown; record: { agentId: string } }) => {
       seen.push(readRecords(input.location, WS).records.length);
       expect(input.paseo).toBe(context.paseo);
+      // The record just written is handed over, so a step need not read the store back.
+      expect(input.record).toEqual(readRecords(input.location, WS).records[0]);
     });
     const handlers = collectorHandlers({ resolveLocation: async () => location, onRecorded });
     await handlers.get("agent.turn_ended")!(asEvent(turnEnded()), context);
@@ -877,7 +905,7 @@ describe("who wrote a message", () => {
    * Manager knows not to fold it into whatever is running (delta 20260917f).
    * The flag is the plugin's, the request is theirs: the line comes off here
    * and the message stays the user's. Treat it as a plugin notice instead and
-   * `firstUserText` would skip the whole thing, so the Metric screen would show
+   * `firstUserText` would skip the whole thing, so Work would show
    * a request with no words in it.
    */
   it("takes the new-request flag off, and still calls the message the user's", async () => {
@@ -971,5 +999,32 @@ describe("skills an agent loaded", () => {
       command: 'for s in feature-workflow reviewing-plan; do test -f "$d/$s/SKILL.md" && echo ok; ls ~/.claude/skills/$s/SKILL.md; done',
     });
     expect(skillsFromItem(check as never)).toEqual([]);
+  });
+});
+
+describe("the plugin version on every record (evaluation design §3)", () => {
+  it("is written as the version of the plugin that built the record", async () => {
+    const built = await buildRecord(asEvent(turnEnded()), { location: null });
+    expect(built!.record.pluginVersion).toBe(PLUGIN_VERSION);
+  });
+
+  it("a record written before the field parses with the new reader, without a version", async () => {
+    const built = await buildRecord(asEvent(turnEnded()), { location: null });
+    const older = JSON.parse(JSON.stringify(built!.record)) as Record<string, unknown>;
+    delete older.pluginVersion;
+    const parsed = traceRecordSchema.parse(older);
+    expect(parsed.pluginVersion).toBeUndefined();
+    expect(parsed.v).toBe(1);
+  });
+
+  it("a reader that predates the field drops it and reads the rest the same", async () => {
+    const built = await buildRecord(asEvent(turnEnded()), { location: null });
+    const onDisk = JSON.parse(JSON.stringify(built!.record)) as unknown;
+    const olderReader = traceRecordSchema.omit({ pluginVersion: true });
+    const parsed = olderReader.parse(onDisk);
+    expect(parsed).not.toHaveProperty("pluginVersion");
+    const rest: Record<string, unknown> = { ...traceRecordSchema.parse(onDisk) };
+    delete rest.pluginVersion;
+    expect(parsed).toEqual(rest);
   });
 });

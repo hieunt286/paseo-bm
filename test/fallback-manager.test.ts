@@ -7,10 +7,11 @@ import { handleFallbackAct } from "../plugin/server/fallback-rpc";
 import { ROLE_FALLBACK_STATE_FILE } from "../plugin/server/fallback-state";
 import { AGENT_TOOLS_OFF_SWITCH_MESSAGE, ensureManager } from "../plugin/server/manager";
 import { forgetModes } from "../plugin/server/role-mode";
+import { rolePaseoToolsPolicy } from "../plugin/server/setup-roles";
 import { managerIdNotice } from "../plugin/server/settings-notices";
-import { fallbackStatusLine } from "../plugin/client/chat-cards";
 import type { FallbackIncident } from "../plugin/shared/contracts";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
+import { currentInstructionsHash } from "../plugin/server/instructions-label";
 
 /**
  * Delta 20260921 §4.5.2 (REQ-066 c): "Switch" for a stopped Manager creates the
@@ -91,11 +92,17 @@ function fakeDaemon(options: { create?: () => Promise<unknown>; oldLabels?: Reco
       // nothing missing when `manager.ensure` runs below.
       get: async () => ({
         config: {
-          providers: { "bm-manager": { extends: "claude" }, "bm-worker": { extends: "claude" }, "bm-reviewer": { extends: "claude" } },
+          providers: {
+            "bm-manager": { extends: "claude", paseoTools: rolePaseoToolsPolicy("manager") },
+            "bm-worker": { extends: "claude", paseoTools: rolePaseoToolsPolicy("worker") },
+            "bm-reviewer": { extends: "claude", paseoTools: rolePaseoToolsPolicy("reviewer") },
+            "bm-orchestrator": { extends: "claude", paseoTools: rolePaseoToolsPolicy("orchestrator") },
+          },
           agentProfiles: [
             { id: "bm-manager", provider: "bm-manager", model: "claude-sonnet-5" },
             { id: "bm-worker", provider: "bm-worker", model: "claude-sonnet-5" },
             { id: "bm-reviewer", provider: "bm-reviewer", model: "claude-sonnet-5" },
+            { id: "bm-orchestrator", provider: "bm-orchestrator", model: "claude-sonnet-5" },
           ],
           ...(options.injectIntoAgents === undefined ? {} : { mcp: { injectIntoAgents: options.injectIntoAgents } }),
         },
@@ -150,7 +157,7 @@ describe("switch (Manager)", () => {
     expect(create).toHaveBeenCalledWith({
       config: { provider: "bm-manager-fallback-1/claude-sonnet-5", modeId: "bypassPermissions", thinkingOptionId: "high", systemPrompt: INSTRUCTIONS },
       title: expect.any(String),
-      labels: { "bm.role": "manager", "bm.version": PLUGIN_VERSION, "bm.replaces": OLD, "bm.modeSet": "bypassPermissions" },
+      labels: { "bm.role": "manager", "bm.version": PLUGIN_VERSION, "bm.instructions": currentInstructionsHash("manager"), "bm.replaces": OLD, "bm.modeSet": "bypassPermissions" },
       prompt: HANDOVER,
     });
     expect(setLabels).toHaveBeenCalledWith(OLD, { "bm.replacedBy": NEW });
@@ -176,7 +183,7 @@ describe("switch (Manager)", () => {
     write([incident()]);
     const { paseo, create } = fakeDaemon();
     const { action } = switcher();
-    const act = () => handleFallbackAct({ incidentId: "fb-0000000000ff", action: "switch" }, paseo, { home, log, enqueue: async () => "sent", actions: { switch: action } });
+    const act = () => handleFallbackAct({ incidentId: "fb-0000000000ff", action: "switch" }, paseo, { home, log, actions: { switch: action } });
     const results = await Promise.allSettled([act(), act()]);
     expect(create).toHaveBeenCalledTimes(1);
     expect(results.find((result) => result.status === "rejected")).toMatchObject({ reason: { code: "E_FALLBACK_NOT_PENDING" } });
@@ -227,14 +234,5 @@ describe("switch (Manager)", () => {
     // The old Manager has no bm.replacedBy label (labelling failed); the switched incident still hides it.
     const result = await ensureManager({ workspaceId: WS }, { paseo: paseo as never, readInstructions: async () => INSTRUCTIONS, home });
     expect(result).toMatchObject({ agentId: NEW, created: false, otherManagerIds: [] });
-  });
-});
-
-describe("the card of a switched Manager", () => {
-  it("points the user at the usual entries, since a timeline card cannot open an agent", () => {
-    const line = fallbackStatusLine(incident({ status: "switched", replacementId: NEW }), new Date("2026-09-22T06:10:00.000Z"));
-    expect(line?.text).toBe(
-      "A new Beads Manager is running on bm-manager-fallback-1 · Claude · claude-sonnet-5. Open Beads Manager from the sidebar or Command Center to continue with it.",
-    );
   });
 });

@@ -7,7 +7,6 @@ import { beadRowOf } from "./bead-actions";
 import { readBeads } from "./beads-store";
 import { bmAgentsOf, workspaceDirectory, type DashboardPaseo } from "./dashboard-rpc";
 import { readTimelinePages } from "./live-timeline";
-import { handleChatWaiting } from "./chat-waiting";
 import { peersOfWorkspace, workspaceRecordsReader } from "./chat-peers";
 import { replacementsFor } from "./fallback-state";
 import { beadIdCandidates } from "../shared/bead-ids";
@@ -15,7 +14,6 @@ import {
   beadsLookupRpc,
   chatBeadsRpc,
   chatPeersRpc,
-  chatWaitingRpc,
   type BeadRow,
   type ChatPeer,
 } from "../shared/contracts";
@@ -118,5 +116,4 @@ export function registerChatRpcs(server: PluginServerContext): void {
   server.handle(chatPeersRpc, (input, context) => handleChatPeers(input, sdk(context)));
   server.handle(beadsLookupRpc, (input, context) => handleBeadsLookup(input, sdk(context)));
   server.handle(chatBeadsRpc, (input, context) => handleChatBeads(input, sdk(context)));
-  server.handle(chatWaitingRpc, (_input, context) => handleChatWaiting(sdk(context)));
 }

@@ -37,7 +37,7 @@ vi.mock("react-native", () => {
 
 import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { LAUNCHER_SURFACE_ID, launchRequests } from "../plugin/client/launch-manager";
-import { launcherNotices } from "../plugin/client/dashboard-view";
+import { launcherNotices } from "../plugin/client/surface-view";
 import { NEW_REQUEST_MARKER, stripNewRequestMarker } from "../plugin/shared/new-request";
 import { agentsStopAllRpc, managerEnsureRpc } from "../plugin/shared/contracts";
 

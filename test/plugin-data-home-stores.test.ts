@@ -244,7 +244,7 @@ describe("a data folder that cannot be used", () => {
       /^E_ROLE_EXTRA_INVALID: cannot save: paseo-bm cannot use its data folder \(.+\)$/,
     );
     await expect(saveFallback({})).rejects.toThrow(
-      /^E_ROLE_SETTINGS_WRITE_FAILED: paseo-bm cannot use its data folder \(.+\); see Setup$/,
+      /^E_ROLE_SETTINGS_WRITE_FAILED: paseo-bm cannot use its data folder \(.+\); see Settings → Data$/,
     );
   });
 });

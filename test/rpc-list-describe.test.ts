@@ -89,6 +89,20 @@ describe("agents.list — tree", () => {
     ]);
   });
 
+  it("lists the Orchestrator as a paseo-bm agent, by its label or by its provider (orchestrator design §3.2)", async () => {
+    const { paseo } = fakeDirectory([
+      agent({ id: "mgr", createdAt: t(1), labels: { "bm.role": "manager" } }),
+      agent({ id: "orc", createdAt: t(2), labels: { "bm.role": "orchestrator" } }),
+      agent({ id: "orc-2", createdAt: t(3), provider: "bm-orchestrator/claude-opus-5", labels: {} }),
+    ]);
+    const output = await listWorkspaceAgents({ workspaceId: WS }, { paseo });
+    expect(agentsListRpc.output.parse(output).agents.map((a) => [a.id, a.role, a.labelled])).toEqual([
+      ["mgr", "manager", true],
+      ["orc", "orchestrator", true],
+      ["orc-2", "orchestrator", false],
+    ]);
+  });
+
   it("agent with missing or foreign bm.role label: role unknown, no error", async () => {
     const { paseo } = fakeDirectory([
       agent({ id: "mgr", createdAt: t(1), labels: { "bm.role": "manager" } }),
@@ -178,12 +192,14 @@ function daemonConfig(overrides: Partial<DaemonConfig> = {}): DaemonConfig {
       "bm-reviewer": { extends: "claude", label: "Beads Reviewer" },
       "bm-manager": { extends: "codex", label: "Beads Manager", paseoTools: { enabled: true } },
       "bm-worker": { extends: "codex", label: "Beads Worker", paseoTools: { enabled: true } },
+      "bm-orchestrator": { extends: "claude", label: "Beads Orchestrator" },
     },
     agentProfiles: [
       { id: "room-worker", provider: "room-worker", model: "haiku" },
       { id: "bm-reviewer", provider: "bm-reviewer", model: "opus" },
       { id: "bm-manager", provider: "bm-manager", model: "gpt-5.6-sol" },
       { id: "bm-worker", provider: "bm-worker", model: "gpt-5.6-sol" },
+      { id: "bm-orchestrator", provider: "bm-orchestrator", model: "sonnet" },
     ],
     ...overrides,
   };
@@ -203,7 +219,7 @@ function fakeConfig(config: DaemonConfig) {
 }
 
 describe("roles.describe", () => {
-  it("returns the three roles from the Paseo config in effect, in role order, ignoring foreign entries", async () => {
+  it("returns the four roles from the Paseo config in effect, in role order, ignoring foreign entries", async () => {
     const fake = fakeConfig(daemonConfig());
     const output = await describeRoles({ paseo: fake.paseo });
 
@@ -212,6 +228,7 @@ describe("roles.describe", () => {
         { role: "manager", provider: "codex", model: "gpt-5.6-sol", paseoTools: true, instructionsPath: "roles/manager.md" },
         { role: "worker", provider: "codex", model: "gpt-5.6-sol", paseoTools: true, instructionsPath: "roles/worker.md" },
         { role: "reviewer", provider: "claude", model: "opus", paseoTools: false, instructionsPath: "roles/reviewer.md" },
+        { role: "orchestrator", provider: "claude", model: "sonnet", paseoTools: false, instructionsPath: "roles/orchestrator.md" },
       ],
     });
     expect(fake.reads()).toBe(1);
@@ -232,6 +249,8 @@ describe("roles.describe", () => {
       ["manager", false],
       ["worker", false],
       ["reviewer", false],
+      // No provider entry left, but its profile is still there.
+      ["orchestrator", false],
     ]);
   });
 
@@ -272,8 +291,6 @@ describe("plugin server entry — agents.list and roles.describe", () => {
     expect(contracts.map((c: { name: string }) => c.name).sort()).toEqual([
       "agents.list",
       "agents.stop-all",
-      "answers.mark",
-      "answers.marks",
       "beads.action",
       "beads.get",
       "beads.list",
@@ -281,10 +298,20 @@ describe("plugin server entry — agents.list and roles.describe", () => {
       "beads.stats",
       "chat.beads",
       "chat.peers",
-      "chat.waiting",
+      "decisions.answer",
+      "decisions.confirm",
+      "decisions.get",
+      "decisions.list",
       "fallback.act",
       "fallback.incidents",
+      "inbox.alerts",
+      "insights.summary",
       "manager.ensure",
+      "orchestrator.apply-suggestion",
+      "orchestrator.open",
+      "orchestrator.open-preview",
+      "orchestrator.set-autopilot",
+      "orchestrator.state",
       "roles.describe",
       "roles.instructions",
       "roles.options",
@@ -318,7 +345,7 @@ describe("plugin server entry — agents.list and roles.describe", () => {
     const describeHandler = handle.mock.calls.find(([c]) => c === rolesDescribeRpc)![1];
     const fake = fakeConfig(daemonConfig());
     const output = await describeHandler({}, { paseo: fake.paseo });
-    expect(rolesDescribeRpc.output.parse(output).roles.map((r) => r.role)).toEqual(["manager", "worker", "reviewer"]);
+    expect(rolesDescribeRpc.output.parse(output).roles.map((r) => r.role)).toEqual(["manager", "worker", "reviewer", "orchestrator"]);
     expect(fake.reads()).toBe(1);
   });
 });

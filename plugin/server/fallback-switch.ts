@@ -16,7 +16,7 @@
  * 5. `bm.replacedBy` on the old Worker (Paseo CLI); a failure only logs — the
  *    incident's `replacementId` excludes the old Worker too (§4.4.8).
  * 6. The old Worker's RUNNING Reviewers get the existing stop notice.
- * 7. `switched`, `replacementId`, `decidedAt`; the caller sends BM-FALLBACK.
+ * 7. `switched`, `replacementId`, `decidedAt`; nothing is sent to the Manager.
  * 8. A creation that fails records `failed` with the error and returns
  *    `E_FALLBACK_CREATE_FAILED`: the incident never goes back to `pending`, so
  *    a repeated click can never create two Workers. A problem found BEFORE the
@@ -95,7 +95,7 @@ export function createWorkerSwitch(deps: SwitchDeps = {}): FallbackAction {
     serialised(async () => {
       const now = rpcDeps.now ?? deps.now ?? (() => new Date());
       const home = rpcDeps.home !== undefined ? rpcDeps.home : dataHomeOf();
-      if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", `${unusableDataHomeMessage()}; see Setup`);
+      if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", `${unusableDataHomeMessage()}; see Settings → Data`);
       if (incident.role !== "worker") throw new DashboardError("E_FALLBACK_NO_CANDIDATE", `switching a ${incident.role} arrives in a later release`);
 
       // 1. Still pending (a second click finds it decided) and not replaced yet.

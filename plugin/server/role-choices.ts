@@ -10,7 +10,7 @@
  */
 import { costOf } from "./model-costs";
 import { LOOKUP_TIMEOUT_MS, TIMED_OUT, capabilityOf, modesFor, withTimeout, type ProviderCapability, type ProviderMode } from "./role-mode";
-import { DashboardError, type BmRole, type RoleModelOption } from "../shared/contracts";
+import { DashboardError, type RoleModelOption, type SetupRoleWithOrchestrator } from "../shared/contracts";
 
 export const reasonOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
@@ -126,12 +126,12 @@ export interface RoleChoice {
  * `E_ROLE_SETTINGS_INVALID`: the base provider is available and is not a
  * `bm-*` alias; the model is one Paseo lists for it; the thinking level is one
  * of that model's; the mode is one the provider lists, and never `dangerous` /
- * `planning` for the Reviewer. Returns the model, as listed, and the
+ * `planning` for the Reviewer or the Orchestrator. Returns the model, as listed, and the
  * provider's capability. `available` lets a caller checking several choices
  * read the provider list once.
  */
 export async function checkRoleChoice(
-  role: BmRole,
+  role: SetupRoleWithOrchestrator,
   choice: RoleChoice,
   paseo: unknown,
   log: (message: string) => void,
@@ -153,8 +153,9 @@ export async function checkRoleChoice(
     const mode = (modes ?? []).find((entry) => entry?.id === choice.modeId);
     if (mode === undefined) throw invalid(`mode "${choice.modeId}" is not listed for ${choice.baseProvider}`);
     const tier = typeof mode.colorTier === "string" ? mode.colorTier.toLowerCase() : "";
-    if (role === "reviewer" && (tier === "dangerous" || tier === "planning")) {
-      throw invalid(`the Reviewer never runs in a ${tier} mode ("${choice.modeId}")`);
+    // The Orchestrator is read-only under the Reviewer's rule (orchestrator design §3.1).
+    if ((role === "reviewer" || role === "orchestrator") && (tier === "dangerous" || tier === "planning")) {
+      throw invalid(`the ${role === "reviewer" ? "Reviewer" : "Orchestrator"} never runs in a ${tier} mode ("${choice.modeId}")`);
     }
   }
   return { model, capability: capabilityOf(modes), modes };

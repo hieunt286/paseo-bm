@@ -13,14 +13,24 @@
  * fixtures do not change: a `BM-QUESTIONS` line has no `key:` shape, so it
  * already ends a report block there.
  *
+ * A question and an option may end in optional bracketed tags (autonomy design
+ * §A.5): `[subject: push-backends] [supersedes: Q2]` after a question,
+ * `[effects: push, commit]` after an option. A tag is read from the run of
+ * tags that ends the text and taken out of it; an unknown tag, or a known one
+ * whose value does not read, gives nothing, and an unknown tag stays in the
+ * text. A block without tags reads exactly as before.
+ *
  * Pure and environment-neutral: the chat card runs it on every message.
  */
+import { EFFECTS, type Effect } from "./decisions";
 
 export interface QuestionOption {
   /** Lowercase letter: `a`, `b`, … */
   key: string;
   text: string;
   recommended: boolean;
+  /** The option's declared effects (`[effects: …]`), each once, as written; absent without the tag. */
+  effects?: Effect[];
 }
 
 export interface Question {
@@ -28,6 +38,10 @@ export interface Question {
   id: string;
   text: string;
   options: QuestionOption[];
+  /** A short slug the asker gives (`[subject: …]`); absent without the tag. */
+  subject?: string;
+  /** The `Q<n>` of the same request this question asks again (`[supersedes: …]`); absent without the tag. */
+  supersedes?: string;
 }
 
 export interface QuestionSet {
@@ -58,6 +72,12 @@ const PAREN_OPTION = /^\s*(?:\(([a-z])\)|([a-z])\))\s+(.*)$/i;
 const RECOMMENDED = /\s*[([]\s*recommended\s*[)\]]/i;
 const RECOMMENDED_ALL = new RegExp(RECOMMENDED.source, "gi");
 const INDENTED = /^\s{2,}\S/;
+/** The last `[name: value]` tag of a text, and the text before it. */
+const LAST_TAG = /^([\s\S]*?)(\s*\[\s*([a-z][a-z-]*)\s*:\s*([^\][]*?)\s*\])\s*$/i;
+/** A subject slug (§A.5): at most 60 characters of `[a-z0-9-]`. */
+export const SUBJECT_PATTERN = /^[a-z0-9-]{1,60}$/;
+export const MAX_SUBJECT_CHARS = 60;
+const TAG_QUESTION_ID = /^Q([1-9]\d{0,2})$/i;
 const ABSENT = new Set(["", "none", "n/a", "na", "-", "null", "nil"]);
 
 function cut(text: string): string {
@@ -81,17 +101,56 @@ interface Draft {
   options: Array<{ key: string; text: string }>;
 }
 
+/**
+ * The tags that end `text`, by lowercase name, and the text without the
+ * known ones. Only the trailing run is read, so a bracket inside the text is
+ * text. The first of two tags with the same name wins; an unknown tag stays
+ * where it was, so a text without known tags comes back as it was.
+ */
+function trailingTags(text: string, known: readonly string[]): { text: string; tags: Map<string, string> } {
+  const tags = new Map<string, string>();
+  const kept: string[] = [];
+  let rest = text;
+  while (/\]\s*$/.test(rest)) {
+    const match = LAST_TAG.exec(rest);
+    if (match === null) break;
+    const name = match[3]!.toLowerCase();
+    rest = match[1]!;
+    // Read from the end, so the last write of a name is its first tag.
+    if (known.includes(name)) tags.set(name, match[4]!);
+    else kept.unshift(match[2]!);
+  }
+  return { text: `${rest}${kept.join("")}`.trim(), tags };
+}
+
+function effectsOf(value: string | undefined): Effect[] | undefined {
+  if (value === undefined) return undefined;
+  const named = value.split(",").map((part) => part.trim().toLowerCase());
+  const effects = [...new Set(named.filter((part): part is Effect => (EFFECTS as readonly string[]).includes(part)))];
+  return effects.length === 0 ? undefined : effects;
+}
+
 function finish(draft: Draft): Question {
-  const options = draft.options.map((option) => {
+  const options: QuestionOption[] = draft.options.map((option) => {
     const recommended = RECOMMENDED.test(option.text);
-    return { key: option.key, text: cut(option.text.replace(RECOMMENDED_ALL, "").trim()), recommended };
+    // "(recommended)" goes first, so the tags are read whichever side of it they sit.
+    const { text, tags } = trailingTags(option.text.replace(RECOMMENDED_ALL, "").trim(), ["effects"]);
+    const effects = effectsOf(tags.get("effects"));
+    return { key: option.key, text: cut(text), recommended, ...(effects === undefined ? {} : { effects }) };
   });
   // More than one recommendation is no recommendation: the card never picks.
   const marked = options.filter((option) => option.recommended).length;
+  const { text, tags } = trailingTags(draft.text.replace(/\*\*/g, "").trim(), ["subject", "supersedes"]);
+  const subject = tags.get("subject")?.toLowerCase();
+  const supersedes = TAG_QUESTION_ID.exec(tags.get("supersedes") ?? "");
+  const replaced = supersedes === null ? null : `Q${Number.parseInt(supersedes[1]!, 10)}`;
   return {
     id: draft.id,
-    text: cut(draft.text.replace(/\*\*/g, "").trim()),
+    text: cut(text),
     options: marked > 1 ? options.map((option) => ({ ...option, recommended: false })) : options,
+    ...(subject !== undefined && SUBJECT_PATTERN.test(subject) ? { subject } : {}),
+    // A question never replaces itself.
+    ...(replaced !== null && replaced !== draft.id ? { supersedes: replaced } : {}),
   };
 }
 

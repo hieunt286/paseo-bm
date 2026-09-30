@@ -113,7 +113,7 @@ const { applyDotPulse, readReduceMotion, runningDotState } = (await import(surfa
   ) => (() => void) | undefined;
   readReduceMotion: () => Promise<boolean>;
   runningDotState: (
-    counts: { manager: number; worker: number; reviewer: number } | undefined,
+    counts: { manager: number; worker: number; reviewer: number; orchestrator?: number } | undefined,
     reduceMotion: boolean,
   ) => { total: number; animate: boolean; opacity: number; label: string; tone: string } | null;
 };
@@ -132,6 +132,15 @@ describe("the running dot of a workspace row", () => {
       total: 3,
       label: "1 Manager, 2 Workers",
     });
+  });
+
+  it("counts a running Orchestrator, and none when the overview does not count it", () => {
+    expect(runningDotState({ manager: 1, worker: 0, reviewer: 0, orchestrator: 1 }, false)).toMatchObject({
+      total: 2,
+      animate: true,
+      label: "1 Manager, 1 Orchestrator",
+    });
+    expect(runningDotState({ manager: 0, worker: 0, reviewer: 0, orchestrator: 0 }, false)?.label).toBe("No Beads agent running");
   });
 
   it("is still and dim when nothing runs", () => {
@@ -227,7 +236,9 @@ describe("the dot on the workspace row", () => {
   // an unwired dot would leave every test above green.
   it("is rendered per row from the overview's runningAgents", () => {
     const source = readFileSync(fileURLToPath(new URL(surfacePath, import.meta.url)), "utf8");
-    expect(source).toMatch(/<RunningDot\b[^>]*counts=\{overviewById\.get\(workspace\.id\)\?\.runningAgents\}/);
+    // Work draws each project row through `renderDot` (work.tsx), with the dot alone.
+    expect(source).toMatch(/renderDot=\{\(workspaceId\) => \(\s*<RunningDot\b[^>]*counts=\{overviewById\.get\(workspaceId\)\?\.runningAgents\}[^>]*\bbare\b/);
+    expect(readFileSync(fileURLToPath(new URL("../plugin/client/work.tsx", import.meta.url)), "utf8")).toMatch(/dot=\{renderDot\(row\.workspaceId\)\}/);
     expect(source).toMatch(/<Animated\.View\b/);
   });
 });

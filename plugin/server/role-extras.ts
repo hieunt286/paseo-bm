@@ -17,6 +17,7 @@ import { z } from "zod";
 import { TRACES_DIR_NAME } from "./data-home";
 import { ensureDataHome, resolveDataHome } from "./data-home";
 import { MANAGER_INSTRUCTIONS } from "./manager-instructions";
+import { ORCHESTRATOR_INSTRUCTIONS } from "./orchestrator-instructions";
 import { REVIEWER_INSTRUCTIONS } from "./reviewer-instructions";
 import { WORKER_INSTRUCTIONS } from "./worker-instructions";
 import { writeStoreFileAtomically } from "./trace-store";
@@ -24,7 +25,7 @@ import { TIMED_OUT, capabilityOf, chooseModeId, lastModesOf, modesFor, profileMo
 import { DashboardError } from "../shared/contracts";
 import { skillsStatus, type SkillsStatus } from "./setup-skills";
 
-export type Role = "manager" | "worker" | "reviewer";
+export type Role = "manager" | "worker" | "reviewer" | "orchestrator";
 
 export const ROLE_EXTRAS_FILE = "role-extras.json";
 export const MAX_EXTRA_CHARS = 8000;
@@ -33,6 +34,7 @@ export const BASE_INSTRUCTIONS: Readonly<Record<Role, string>> = {
   manager: MANAGER_INSTRUCTIONS,
   worker: WORKER_INSTRUCTIONS,
   reviewer: REVIEWER_INSTRUCTIONS,
+  orchestrator: ORCHESTRATOR_INSTRUCTIONS,
 };
 
 /** Placed between the base and the user's text. Agent-facing, so English. */
@@ -42,18 +44,25 @@ export const EXTRA_HEADING = [
   "These add to the rules above and never override a RULES item.",
 ].join("\n");
 
+/**
+ * `orchestrator` came in version 1 as a key with a default, so a file written
+ * by 0.4.1 still reads. 0.4.1 reading this file drops the key, and its first
+ * save rewrites the file without it: a downgrade loses the Orchestrator's text,
+ * which orchestrator design §10 accepts.
+ */
 const extrasSchema = z.object({
   version: z.literal(1),
   roles: z.object({
     manager: z.string().max(MAX_EXTRA_CHARS).default(""),
     worker: z.string().max(MAX_EXTRA_CHARS).default(""),
     reviewer: z.string().max(MAX_EXTRA_CHARS).default(""),
+    orchestrator: z.string().max(MAX_EXTRA_CHARS).default(""),
   }),
 });
 
 export type RoleExtras = Record<Role, string>;
 
-const EMPTY: RoleExtras = { manager: "", worker: "", reviewer: "" };
+const EMPTY: RoleExtras = { manager: "", worker: "", reviewer: "", orchestrator: "" };
 
 /**
  * Facts the plugin resolves when it builds a role's instructions (delta
@@ -82,7 +91,7 @@ export interface RuntimeFacts {
 export function workerSkillsLine(missing: readonly string[]): string {
   return missing.length === 0
     ? "Worker skills: all present."
-    : `Worker skills: missing ${missing.map((name) => `\`${name}\``).join(", ")} — tell the user once, when you confirm the Worker, that it works with lower quality, and point to Beads Manager → Setup → Agent skills.`;
+    : `Worker skills: missing ${missing.map((name) => `\`${name}\``).join(", ")} — tell the user once, when you confirm the Worker, that it works with lower quality, and point to Beads Manager → Settings → Tools & skills.`;
 }
 
 /**
@@ -170,9 +179,12 @@ async function workerSkillFacts(paseo: unknown, skills: () => SkillsStatus, log:
   }
 }
 
-/** The mode facts of `runtimeFactsOf`. */
+/**
+ * The mode facts of `runtimeFactsOf`. The Reviewer and the Orchestrator create
+ * no agent, so they are told no child mode (orchestrator design §3.2).
+ */
 async function modeFactsOf(role: Role, paseo: unknown, cwd: string | undefined, log: (message: string) => void): Promise<RuntimeFacts> {
-  if (role === "reviewer") return {};
+  if (role === "reviewer" || role === "orchestrator") return {};
   try {
     if (role === "worker") {
       const profileModeId = await profileModeOf(paseo, "bm-reviewer");

@@ -43,11 +43,17 @@ describe("additional role instructions", () => {
   it("are saved per role, 0600, and read back; a broken file reads as empty", () => {
     saveRoleExtra(home, "worker", "Use pnpm.");
     const roles = saveRoleExtra(home, "reviewer", "Check i18n keys.");
-    expect(roles).toEqual({ manager: "", worker: "Use pnpm.", reviewer: "Check i18n keys." });
+    expect(roles).toEqual({ manager: "", worker: "Use pnpm.", reviewer: "Check i18n keys.", orchestrator: "" });
     expect(readRoleExtras(home)).toEqual(roles);
+    expect(saveRoleExtra(home, "orchestrator", "Score strictly.")).toEqual({ ...roles, orchestrator: "Score strictly." });
     expect(statSync(join(home, "role-extras.json")).mode & 0o777).toBe(0o600);
     writeFileSync(join(home, "role-extras.json"), "{broken");
-    expect(readRoleExtras(home)).toEqual({ manager: "", worker: "", reviewer: "" });
+    expect(readRoleExtras(home)).toEqual({ manager: "", worker: "", reviewer: "", orchestrator: "" });
+  });
+
+  it("reads a file written before the Orchestrator existed, its text empty (orchestrator design §3.2)", () => {
+    writeFileSync(join(home, "role-extras.json"), JSON.stringify({ version: 1, roles: { manager: "", worker: "Use pnpm.", reviewer: "" } }));
+    expect(readRoleExtras(home)).toEqual({ manager: "", worker: "Use pnpm.", reviewer: "", orchestrator: "" });
   });
 
   it("refuse text over the limit and a symlinked file", () => {
@@ -279,7 +285,7 @@ describe("setup.status", () => {
       run: async () => ({ code: 0, output: "" }),
     });
     expect(status.tools.map((entry) => entry.path)).toEqual([null, null, null]);
-    expect(status.extras).toEqual({ manager: 0, worker: 9, reviewer: 0 });
+    expect(status.extras).toEqual({ manager: 0, worker: 9, reviewer: 0, orchestrator: 0 });
     expect(status.skills.skills).toHaveLength(REQUIRED_SKILLS.length + OPTIONAL_SKILLS.length);
     expect(status.latestCheckedOn).toBe("2026-09-16");
     // The payload passes its own contract, the Pi and OpenCode columns intact.
@@ -319,8 +325,13 @@ describe("setup.status: what the machine's setup looks like (0.4.0, design §7.1
     config: {
       get: async () => ({
         config: {
-          providers: { "bm-manager": { extends: "claude" }, "bm-worker": { extends: "claude" }, "bm-reviewer": { extends: "codex" } },
-          agentProfiles: [{ id: "bm-manager" }, { id: "bm-worker" }, { id: "bm-reviewer" }],
+          providers: {
+            "bm-manager": { extends: "claude" },
+            "bm-worker": { extends: "claude" },
+            "bm-reviewer": { extends: "codex" },
+            "bm-orchestrator": { extends: "codex" },
+          },
+          agentProfiles: [{ id: "bm-manager" }, { id: "bm-worker" }, { id: "bm-reviewer" }, { id: "bm-orchestrator" }],
           mcp: { injectIntoAgents: true },
           ...overrides,
         },
@@ -334,11 +345,11 @@ describe("setup.status: what the machine's setup looks like (0.4.0, design §7.1
     const status = await handleSetupStatus(setUpDaemon(), statusDeps());
 
     expect(status.setup).toMatchObject({
-      roles: { present: ["manager", "worker", "reviewer"], missing: [], created: null, cleanedUpAt: null },
+      roles: { present: ["manager", "worker", "reviewer", "orchestrator"], missing: [], created: null, cleanedUpAt: null },
       agentTools: { injectIntoAgents: true, setBy: null },
       logins: [
         { provider: "claude", roles: ["manager", "worker"], state: "logged-in", loginCommand: "claude auth login" },
-        { provider: "codex", roles: ["reviewer"], state: "logged-out", loginCommand: "codex login" },
+        { provider: "codex", roles: ["reviewer", "orchestrator"], state: "logged-out", loginCommand: "codex login" },
       ],
       skillsRun: null,
       dataHome: { path: home, source: "default", reason: null },
@@ -358,7 +369,7 @@ describe("setup.status: what the machine's setup looks like (0.4.0, design §7.1
 
     const status = await handleSetupStatus(bare, statusDeps());
 
-    expect(status.setup?.roles).toMatchObject({ present: [], missing: ["manager", "worker", "reviewer"] });
+    expect(status.setup?.roles).toMatchObject({ present: [], missing: ["manager", "worker", "reviewer", "orchestrator"] });
     expect(status.setup?.agentTools).toEqual({ injectIntoAgents: false, setBy: null });
     expect(status.setup?.logins).toEqual([]);
   });

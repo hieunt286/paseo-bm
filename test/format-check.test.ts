@@ -356,6 +356,21 @@ describe("reviews and answers", () => {
     expect(sends[0]!.text).not.toContain("is missing");
   });
 
+  it("ignores the Orchestrator's assessment agent, even when the trace it reads quotes a broken block (orchestrator design §3.2)", async () => {
+    const orchestrator: Agent = {
+      id: "orc",
+      provider: "bm-orchestrator/claude-opus-5",
+      labels: { "bm.role": "orchestrator" },
+      status: "idle",
+      lastUserMessageAt: "2026-09-18T07:20:00.000Z",
+    };
+    const { paseo, sends, deps } = world([manager(), worker(), reviewer(), orchestrator]);
+    const outcome = await checkTurnFormat(turn(orchestrator, [received(`Assess this trace:\n${badReview}`), said(badReview)]), deps);
+    expect(outcome).toBe("ignored");
+    expect(sends).toEqual([]);
+    expect(paseo.agents.list).not.toHaveBeenCalled();
+  });
+
   it("tells the Manager when a relayed BM-ANSWERS breaks the template", async () => {
     const { sends, deps } = world([manager(), worker()]);
     await checkTurnFormat(turn(worker(), [received(`Continue ${REQ}.\nBM-ANSWERS\nrequestId: ${REQ}\nQ1 a`)]), deps);

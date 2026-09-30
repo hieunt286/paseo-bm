@@ -88,7 +88,8 @@ const FINDING_FIELDS = ["severity", "location", "reason", "suggestedFix"] as con
 
 const QUESTION = /^Q(\d+): \S.*$/;
 const OPTION = /^- ([a-z]): \S.*$/;
-const RECOMMENDED = /\(recommended\)\s*$/;
+/** `(recommended)` at the end of the option, or before its bracketed tags (`[effects: push]`, autonomy design §A.5). */
+const RECOMMENDED = /\(recommended\)(?:\s*\[[^\][\n]*\])*\s*$/;
 const ANSWER = new RegExp(`^Q(\\d+): (?:[a-z]|other) ${DASH} \\S.*$`);
 
 const isNone = (value: string) => value.trim().toLowerCase() === "none";

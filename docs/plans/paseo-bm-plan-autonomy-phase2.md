@@ -1,0 +1,62 @@
+# Implementation Plan — Calibrated autonomy, Phase 2 MVP: autonomy earned per decision class
+
+| Field | Value |
+|---|---|
+| Status | Active — converted to beads 2026-09-30 at the owner's request; re-checked at the phase start against what the previous phase measured (the phase's first bead) |
+| Plan-ready | PASS — 2026-09-30 — Claude under the owner's delegation (hieu.nt10 asked to convert the reviewed plans; `plan-ready-for-beads` self-evaluated) |
+| Owner | hieu.nt10 |
+| Routing decision | [PRD §0](../product/paseo-bm-autonomy-prd.md#0-routing-decision) |
+| Requirements | [Calibrated autonomy PRD](../product/paseo-bm-autonomy-prd.md) Phase 2 MVP: REQ-120 → REQ-125 |
+| Technical Design | [paseo-bm-autonomy.md](../design/paseo-bm-autonomy.md) Part B |
+| ADR | [ADR-018](../adr/ADR-018-calibrated-autonomy-per-class.md) |
+| Starts after | Phase 1 MVP exit |
+| Target release | None — one release for the whole programme |
+
+## 1. MVP-Lock
+
+- **In:** §B.1 → §B.8. Every WP that adds a mechanism an agent uses also updates that role's instructions within its budget (design §A.11), proved by `test/roles-content.test.ts`: the Worker's `class` and `subject` (WP-201, WP-206), the Orchestrator's `bm_predict` and `bm_decide` (WP-203, WP-205), the Manager's and Worker's use of injected precedents (WP-206).
+- **Out:** evidence rules for acting on a finish (Phase 3); holding actions before they run (Phase 4).
+- **Exit (PRD §10 Phase 2 MVP):** at least two weeks of shadow data on the owner's machine; A-1 ≤ 1.5 in the field; A-4 < 5 % and A-5 within the owner's own rate for every delegated class; A-7 < 20 % in the field (PRD cost NFR — the challenger adds wakes); `npm run verify` green; the owner's acceptance.
+- **Inherited from Phase 1 (change-002):** Autopilot is still on the server with no screen (`orchestrator.set-autopilot`, the Orchestrator's `bm_set_autopilot`, `orchestrator.apply-suggestion`, the `autopilot`/`allow` fields of `settings.json` and `orchestrator.state`); the Watch switch is already gone. The event bus wakes the Orchestrator only for a judgement (design §A.8: no `decision.opened` for a question with a `CONFIRM_EFFECTS` option, `request.finished` only with work left). A-7 reads `orchestrator/wakes.json`. The evaluation suite turns Autopilot on for the tree with `orchestrator.set-autopilot` (`scripts/eval/suite.ts`).
+- **Checkpoint posture:** every class can be returned to `owner` in one action per project (`autonomy.reset`); no rollback between phases — a clean reinstall and a fix forward (DQ-1).
+
+## 2. Work packages
+
+| WP | Outcome | REQ | Design | Needs | Exit |
+|---|---|---|---|---|---|
+| WP-201 | Decision classes: the `class` field, proposed by the asker (`bm_report`, `bm_ask_owner`), checked against effects, riskier wins | REQ-120 | §B.1 | — | Pure tests of the effect → class map and the conflict order; tool schema tests |
+| WP-202 | The policy: store, RPCs (`autonomy.policy/set/reset`), hard-owner classes refused, the Settings matrix; Autopilot (`orchestrator.set-autopilot`, `bm_set_autopilot`, the Orchestrator's Autopilot instructions), Allow… and the `settings.json` v3 fields removed; the suite driver sets the policy instead of Autopilot — for the tree, every class that may be delegated is delegated to the Orchestrator, the equivalent of owner decision E-2 ("the Orchestrator and Autopilot"); the live Worker watch and the Orchestrator's events, scoped to Autopilot projects in Phase 1, move to every project that has any class above `owner` (and the watch's `stuck`/`permission-waiting`/`danger` alerts to every project, since they cost no model call) | REQ-121 | §B.2, §B.8 | WP-201 | RPC and negative tests (delegate refused for release/data/security/cost; reset); Settings model tests; suite driver test (no retired RPC called for the tree); retired names gone |
+| WP-203 | Shadow and the agreement ledger: predictions recorded (recommended always; the Orchestrator's `bm_predict` when the challenger is on, DQ-4 — asked only for a class that may be delegated, never a hard-owner one), reversals detected, Insights → Autonomy; a recorded prediction is the action of its wake for A-7 (evaluation design §4 updated) | REQ-122 | §B.3 | WP-201 | Ledger tests (agreement, count, span, reversal kinds); prediction never shown to the owner before answering; no prediction asked for a hard-owner class; A-7 test: a wake answered by `bm_predict` is acted on; Insights model tests |
+| WP-204 | Promotion and demotion: eligibility (≥ 90 %, ≥ 20, ≥ 14 days, no reversal), **Delegate?** confirmed by the owner, automatic demotion with an alert | REQ-123 | §B.4 | WP-202, WP-203 | Threshold tests at each boundary; demotion on override and on each reversal kind |
+| WP-205 | Delegation executors: recommended by code, Orchestrator by `bm_decide`; delivery as an owner answer with `authority: policy:<class>`; the Phase 1 wake rule for `decision.opened` becomes the policy's — the Orchestrator is asked for a delegate cell whose predictor is `orchestrator` and for a shadow cell with the challenger on, never for an `owner` or hard-owner cell | REQ-121, REQ-123 | §B.5, §A.8 | WP-204 | Tests: a delegate cell answers at open; an owner cell never; a hard-owner class never, and wakes nobody; the command's `approved` never includes release/data/security/cost without a grant |
+| WP-206 | Precedents: store, **Save as precedent**, Settings list, injection at agent creation (`## Owner precedents`), resolution by `subject` within the policy | REQ-124 | §B.6 | WP-201, WP-202 | Store and expiry tests; hook test for the injected section (≤ 20, workspace + global); resolution tests incl. a hard-owner class shown as a suggestion only |
+| WP-207 | Digest and override in the Inbox; role additional instructions, `apply-suggestion`, rule flags used only for assessment removed | REQ-125 | §B.7, §B.8 | WP-205, WP-206 | Digest model tests; override supersedes and counts for demotion; retired names gone |
+| WP-208 | Phase exit: two weeks of field shadow, a live check on the isolated daemon of the three policy paths (a delegated class answered by policy, a hard-owner class reaching the Inbox, a precedent resolving a question), field replay, report | PRD §10 Phase 2 | Evaluation design §5, §7 | WP-207 | Field replay in the baseline report with A-1, A-4, A-5 against targets; the live check's run note; owner acceptance |
+
+## 3. Open decisions
+
+| ID | Decision | Owner | Status | Blocks |
+|---|---|---|---|---|
+| DQ-4 | The Orchestrator challenger in shadow is off by default per project | hieu.nt10 | **answered 2026-09-29** — yes | — |
+
+## 4. Test strategy
+
+Pure ledger, policy and precedent logic by unit tests; fake-SDK tests for delegation delivery; negative tests for hard-owner classes in the boundary suite; two weeks of field data and a live check for the exit; the suite runs at the programme's end (Phase 6 WP-604).
+
+## 5. Risks
+
+- **Anchoring:** agreement with the recommendation may reflect the owner deferring to it; reversal tracking and demotion bound the damage.
+- **Too few decisions in a class** to ever reach 20 in two weeks: the class stays `shadow`; that is the intended outcome.
+
+## 6. Revision History
+
+| Date | Who | Change |
+|---|---|---|
+| 2026-09-30 | Claude (owner's delegation) | Beads polished; [change-003](./paseo-bm-plan-autonomy-change-003-decisions-at-conversion.md) applied: design §B.9 decisions; new beads `bm-autonomy-phase2-t9lm.19` (policy authority for an Orchestrator command that answers no decision, replacing Autopilot's) and `.20` (A-4/A-5); `.5`'s negative test corrected; `bm_assessment` retired in `.16` |
+| 2026-09-30 | Claude (owner's delegation) | **Active**, `plan-ready-for-beads` PASS, converted to beads at the owner's request: epic `bm-autonomy-phase2-t9lm` with 18 leaves, the first a phase-start re-check whose assumptions list is settled through a delta; the phase-start re-check stays, as the phase's first bead, and changes the beads through a delta if the previous phase's figures call for it |
+| 2026-09-29 | Claude (owner's delegation) | Plan review after Phase 1 ([change-002](./paseo-bm-plan-autonomy-change-002-phase1-as-built.md)): what Phase 2 inherits; WP-202 names the Autopilot pieces left on the server and moves the suite driver from Autopilot to the policy (E-2); WP-203 asks predictions only where delegation is possible and counts them as a wake's action; WP-205 takes over the wake rule; A-7 in the exit |
+| 2026-09-29 | Claude (owner's delegation) | WP-202 carries the scope change of the live watch and events when Autopilot goes (found in Phase 1 bead .11) |
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | Plan review: role-instruction updates made explicit per WP |
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | Plan review: the phase exit uses the field replay and a small live check instead of the suite (owner decision: the suite runs once at the programme's end, Phase 6 WP-604) |
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | Design and ADR-018 approved; DQ-1 and DQ-4 applied; stays Draft until the phase start |
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | Plan for Phase 2 MVP |

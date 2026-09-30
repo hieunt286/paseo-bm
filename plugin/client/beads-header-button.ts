@@ -9,16 +9,15 @@
  * panel. On desktop the same button is a shortcut next to "+".
  *
  * A header button belongs to ONE workspace, so one is added per open workspace
- * and removed when the workspace goes, following the list the way
- * `waiting-pills` follows its Workers: read now, every `BEADS_HEADER_POLL_MS`,
- * and whenever Paseo reports a workspace update. A failed read keeps the
+ * and removed when the workspace goes, following the list: read now, every
+ * `BEADS_HEADER_POLL_MS`, and whenever Paseo reports a workspace update. A failed read keeps the
  * buttons as they are.
  *
  * No JSX and no React Native: the button is data, and the test drives it with a
  * fake client.
  */
 import type { PluginButton, PluginButtonRegistration, PluginClientContext } from "@getpaseo/plugin/client";
-import { BEADS_TAB_PANEL_ID } from "./dashboard-view";
+import { BEADS_TAB_PANEL_ID } from "./surface-view";
 
 /** One id for every workspace's button: Paseo keys a header button by id AND workspace. */
 export const BEADS_HEADER_BUTTON_ID = "bm-beads-open";
@@ -29,7 +28,7 @@ export const BEADS_HEADER_POLL_MS = 15_000;
 /** The button itself: an icon only, so it fits a phone's header. */
 export function beadsHeaderButton(openTab: () => void): PluginButton {
   return {
-    title: "Open the Beads tab: beads and metrics of this workspace",
+    title: "Open the Beads tab: this workspace's requests, beads and agents",
     icon: "ListChecks",
     behavior: { kind: "action", onPress: openTab },
   };

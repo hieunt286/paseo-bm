@@ -15,6 +15,10 @@ import {
 } from "../plugin/server/dashboard-rpc";
 import { appendRecord, clearTraceStoreCache, readRecords } from "../plugin/server/trace-store";
 import { clearBeadsCache } from "../plugin/server/beads-store";
+import { createOrchestratorStore } from "../plugin/server/orchestrator-store";
+import { createDecisionStore } from "../plugin/server/decision-store";
+import { withdrawDecision } from "../plugin/shared/decisions";
+import { makeDecision } from "./helpers/decisions";
 import { TRACE_STORE_SCHEMA_VERSION, type FallbackIncident, type TraceRecord } from "../plugin/shared/contracts";
 
 /**
@@ -225,6 +229,119 @@ describe("traces.delete handler", () => {
     expect(all.deleted.running).toBe(1);
     const onlyA = await handleTracesDelete({ workspaceId: WS, scope: { traceId: "req:req-A" }, dryRun: true }, paseo);
     expect(onlyA.deleted.running).toBe(0);
+  });
+
+  // Orchestrator design §5.3, REQ-075 e: an assessment is keyed by the request
+  // when the trace has one, else by the trace, and goes with its trace.
+  it("deletes the assessments of exactly the deleted traces, and none on a preview", async () => {
+    const location = { tracesDir: join(home, "traces") };
+    const ask = (requestId: string, at: string) =>
+      record({
+        agentId: "agent-manager",
+        role: "manager",
+        turnId: `m-${requestId}`,
+        requestId,
+        at,
+        sent: [{ agentId: null, at, text: `please do ${requestId}`, truncated: false }],
+      });
+    await appendRecord(location, ask("req-A", "2026-09-16T09:59:00.000Z"));
+    await appendRecord(location, record());
+    await appendRecord(location, ask("req-B", "2026-09-16T10:30:00.000Z"));
+    // A Manager turn with no request id: its trace is keyed by the trace id alone.
+    const at9 = "2026-09-16T11:00:00.000Z";
+    await appendRecord(location, record({ agentId: "agent-manager", role: "manager", turnId: "m-9", requestId: null, at: at9, sent: [{ agentId: null, at: at9, text: "what is left?", truncated: false }] }));
+    clearTraceStoreCache();
+    const unnamed = (await readTraceContext({ workspaceId: WS }, fakePaseo())).traces.find((trace) => trace.requestId === null);
+    expect(unnamed).toBeDefined();
+
+    const store = createOrchestratorStore(home);
+    const assessment = (assessmentId: string, requestId: string | null, traceId: string) => ({
+      v: 1 as const,
+      assessmentId,
+      requestId,
+      traceId,
+      agentId: null,
+      at: "2026-09-16T12:00:00.000Z",
+      status: "pending" as const,
+      provider: "bm-orchestrator",
+      model: null,
+    });
+    store.appendAssessment(WS, assessment("asm-A", "req-A", "req:req-A"));
+    store.appendAssessment(WS, assessment("asm-B", "req-B", "req:req-B"));
+    store.appendAssessment(WS, assessment("asm-9", null, unnamed!.traceId));
+    store.appendAssessment("wks_2", assessment("asm-other", "req-A", "req:req-A"));
+    const ids = (workspaceId: string) => store.readAssessments(workspaceId).map((line) => line.assessmentId).sort();
+
+    await handleTracesDelete({ workspaceId: WS, scope: { traceId: "req:req-A" }, dryRun: true }, fakePaseo());
+    expect(ids(WS)).toEqual(["asm-9", "asm-A", "asm-B"]);
+
+    await handleTracesDelete({ workspaceId: WS, scope: { traceId: "req:req-A" } }, fakePaseo());
+    expect(ids(WS)).toEqual(["asm-9", "asm-B"]);
+    // The same request id in another workspace is another request.
+    expect(ids("wks_2")).toEqual(["asm-other"]);
+
+    await handleTracesDelete({ workspaceId: WS, scope: { traceId: unnamed!.traceId } }, fakePaseo());
+    expect(ids(WS)).toEqual(["asm-B"]);
+
+    await handleTracesDelete({ workspaceId: WS, scope: { allOfWorkspace: true } }, fakePaseo());
+    expect(ids(WS)).toEqual([]);
+    expect(ids("wks_2")).toEqual(["asm-other"]);
+  });
+
+  it("deletes the assessments of the traces a cutoff reaches, and keeps the later ones", async () => {
+    const location = { tracesDir: join(home, "traces") };
+    const ask = (requestId: string, at: string) =>
+      record({ agentId: "agent-manager", role: "manager", turnId: `m-${requestId}`, requestId, at, sent: [{ agentId: null, at, text: `do ${requestId}`, truncated: false }] });
+    await appendRecord(location, ask("req-A", "2026-08-10T10:00:00.000Z"));
+    await appendRecord(location, ask("req-B", "2026-09-16T10:00:00.000Z"));
+    clearTraceStoreCache();
+    const store = createOrchestratorStore(home);
+    for (const id of ["A", "B"]) {
+      store.appendAssessment(WS, { v: 1, assessmentId: `asm-${id}`, requestId: `req-${id}`, traceId: `req:req-${id}`, agentId: null, at: "2026-09-16T12:00:00.000Z", status: "pending", provider: "bm-orchestrator", model: null });
+    }
+
+    const done = await handleTracesDelete({ workspaceId: WS, scope: { before: "2026-09-01T00:00:00.000Z" } }, fakePaseo());
+
+    expect(done.deleted.traces).toBe(1);
+    expect(store.readAssessments(WS).map((line) => line.assessmentId)).toEqual(["asm-B"]);
+  });
+
+  // Autonomy design §A.4: deleting a request's traces deletes its settled
+  // decisions; an open one stays for the owner to answer.
+  it("deletes the settled decisions of the deleted requests, and none on a preview", async () => {
+    const location = { tracesDir: join(home, "traces") };
+    const ask = (requestId: string, at: string) =>
+      record({ agentId: "agent-manager", role: "manager", turnId: `m-${requestId}`, requestId, at, sent: [{ agentId: null, at, text: `do ${requestId}`, truncated: false }] });
+    await appendRecord(location, ask("req-A", "2026-09-16T09:59:00.000Z"));
+    await appendRecord(location, ask("req-B", "2026-09-16T10:30:00.000Z"));
+    clearTraceStoreCache();
+    const decisions = createDecisionStore(home);
+    const at = "2026-09-16T12:00:00.000Z";
+    decisions.open(makeDecision({ workspaceId: WS, id: "q:req-A:Q1", requestId: "req-A" }));
+    decisions.open(makeDecision({ workspaceId: WS, id: "q:req-A:Q2", requestId: "req-A" }));
+    decisions.open(makeDecision({ workspaceId: WS, id: "q:req-B:Q1", requestId: "req-B" }));
+    decisions.transition("q:req-A:Q1", (d) => withdrawDecision(d, { at }));
+    decisions.transition("q:req-B:Q1", (d) => withdrawDecision(d, { at }));
+    const ids = () => decisions.list({ workspaceId: WS }).map((entry) => entry.id);
+
+    await handleTracesDelete({ workspaceId: WS, scope: { traceId: "req:req-A" }, dryRun: true }, fakePaseo());
+    expect(ids()).toEqual(["q:req-A:Q1", "q:req-A:Q2", "q:req-B:Q1"]);
+
+    await handleTracesDelete({ workspaceId: WS, scope: { traceId: "req:req-A" } }, fakePaseo());
+    expect(ids()).toEqual(["q:req-A:Q2", "q:req-B:Q1"]);
+  });
+
+  it("keeps the assessments when the trace store refuses the delete", async () => {
+    const location = { tracesDir: join(home, "traces") };
+    await appendRecord(location, record({ agentId: "agent-manager", role: "manager", turnId: "m-A", sent: [{ agentId: null, at: "2026-09-16T10:00:00.000Z", text: "do A", truncated: false }] }));
+    writeFileSync(join(location.tracesDir, "meta.json"), JSON.stringify({ schemaVersion: TRACE_STORE_SCHEMA_VERSION + 1, createdAt: "x", updatedAt: "y" }));
+    clearTraceStoreCache();
+    const store = createOrchestratorStore(home);
+    store.appendAssessment(WS, { v: 1, assessmentId: "asm-A", requestId: "req-A", traceId: "req:req-A", agentId: null, at: "2026-09-16T12:00:00.000Z", status: "pending", provider: "bm-orchestrator", model: null });
+
+    await expect(handleTracesDelete({ workspaceId: WS, scope: { traceId: "req:req-A" } }, fakePaseo())).rejects.toThrow(/E_TRACE_STORE_SCHEMA_TOO_NEW/);
+
+    expect(store.readAssessments(WS).map((line) => line.assessmentId)).toEqual(["asm-A"]);
   });
 
   it("refuses a trace id the Dashboard would not show", async () => {

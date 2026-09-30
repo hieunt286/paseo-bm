@@ -23,7 +23,8 @@
  * Steps 1 and 3 only narrow that window to one handler's round trip.
  *
  * Scope (ADR-008 D2): provider ids must start with `bm-`; profiles only
- * `bm-manager`, `bm-worker`, `bm-reviewer`, and only when they already exist.
+ * `bm-manager`, `bm-worker`, `bm-reviewer`, `bm-orchestrator`, and only when
+ * they already exist.
  * Creating one is `createRoleEntries` below — a separate path on purpose, so a
  * settings save can never bring a role into being as a side effect. The SDK
  * view is flat (design F12):
@@ -50,8 +51,8 @@ export interface ConfigPaseo {
   };
 }
 
-/** The three role profiles the plugin may edit. */
-export const ROLE_PROFILE_IDS: readonly string[] = ["bm-manager", "bm-worker", "bm-reviewer"];
+/** The four role profiles the plugin may edit (the fourth: orchestrator design §3.1). */
+export const ROLE_PROFILE_IDS: readonly string[] = ["bm-manager", "bm-worker", "bm-reviewer", "bm-orchestrator"];
 
 const isBmId = (id: string): boolean => id.startsWith("bm-");
 
@@ -128,16 +129,16 @@ function checkScope(write: RoleConfigWrite, config: RoleConfigView): void {
   }
   for (const id of Object.keys(write.providers ?? {})) {
     if (ROLE_PROFILE_IDS.includes(id) && !Object.prototype.hasOwnProperty.call(providers, id)) {
-      throw invalid(`provider "${id}" is not registered; open Beads Manager → Setup, which creates it`);
+      throw invalid(`provider "${id}" is not registered; open Beads Manager → Settings, which creates it`);
     }
   }
   for (const id of write.removeProviders ?? []) {
-    if (ROLE_PROFILE_IDS.includes(id)) throw invalid(`provider "${id}" is a main role; only "Remove paseo-bm's settings" on Setup removes it`);
+    if (ROLE_PROFILE_IDS.includes(id)) throw invalid(`provider "${id}" is a main role; only "Remove paseo-bm's settings" in Settings removes it`);
   }
   const profiles = Array.isArray(config.agentProfiles) ? config.agentProfiles : [];
   for (const id of Object.keys(write.profiles ?? {})) {
-    if (!ROLE_PROFILE_IDS.includes(id)) throw invalid(`the plugin only edits the bm-manager, bm-worker and bm-reviewer profiles, not "${id}"`);
-    if (!profiles.some((entry) => entry?.id === id)) throw invalid(`profile "${id}" is not registered; open Beads Manager → Setup, which creates it`);
+    if (!ROLE_PROFILE_IDS.includes(id)) throw invalid(`the plugin only edits the bm-manager, bm-worker, bm-reviewer and bm-orchestrator profiles, not "${id}"`);
+    if (!profiles.some((entry) => entry?.id === id)) throw invalid(`profile "${id}" is not registered; open Beads Manager → Settings, which creates it`);
   }
 }
 
@@ -229,8 +230,8 @@ export function writeRoleConfig(paseo: ConfigPaseo, write: RoleConfigWrite): Pro
  * Creates the missing main-role entries, and only those (ADR-012 decision 4,
  * design §7.13.2).
  *
- * This is the one path that may bring a `bm-manager`, `bm-worker` or
- * `bm-reviewer` entry into being, and it is deliberately not part of
+ * This is the one path that may bring a `bm-manager`, `bm-worker`,
+ * `bm-reviewer` or `bm-orchestrator` entry into being, and it is deliberately not part of
  * `writeRoleConfig`: a settings save must never create a role as a side effect,
  * and creation carries no `expectedRevision` because nobody showed the user
  * anything to be stale about — it runs when a role is absent, which is a fact
@@ -254,7 +255,7 @@ export function createRoleEntries(
       new DashboardError("E_SETUP_ROLES_FAILED", detail, cause === undefined ? undefined : { cause });
 
     for (const id of Object.keys(roles)) {
-      if (!ROLE_PROFILE_IDS.includes(id)) throw failed(`"${id}" is not one of the three main roles`);
+      if (!ROLE_PROFILE_IDS.includes(id)) throw failed(`"${id}" is not one of the four main roles`);
     }
 
     // Read inside the lock: what is missing is decided from the config this
@@ -310,6 +311,57 @@ export function createRoleEntries(
   });
 }
 
+export interface ApplyRoleToolPoliciesResult extends RoleConfigWriteResult {
+  /** The alias ids whose `paseoTools` was written, in config order; empty when every one already held its policy. */
+  updated: string[];
+}
+
+/**
+ * Gives every existing `bm-*` alias the Paseo-tools policy of its role
+ * (autonomy design §A.10, REQ-116): `policyOf(id)` names it, `null` leaves the
+ * alias alone.
+ *
+ * The one change it makes to an alias that already exists is its `paseoTools`
+ * key — `extends`, `label` and any key the user added stay as they are, because
+ * `providers` is deep-merged. An alias that already holds every key of its
+ * policy is not written, so on a machine that has them all this sends no
+ * patch. Like `createRoleEntries` it reads inside the lock instead of taking
+ * an `expectedRevision`: the write depends only on what is in the config now.
+ */
+export function applyRoleToolPolicies(
+  paseo: ConfigPaseo,
+  policyOf: (aliasId: string) => { enabled: boolean; disabledTools?: readonly string[] } | null,
+): Promise<ApplyRoleToolPoliciesResult> {
+  return serialised(async () => {
+    const failed = (detail: string, cause?: unknown): DashboardError =>
+      new DashboardError("E_SETUP_ROLES_FAILED", detail, cause === undefined ? undefined : { cause });
+
+    const { revision, config } = await readRoleConfig(paseo);
+    const providers = (config.providers ?? {}) as Record<string, unknown>;
+    const writes: Record<string, Record<string, unknown>> = {};
+    for (const [id, entry] of Object.entries(providers)) {
+      if (!isBmId(id)) continue;
+      const policy = policyOf(id);
+      if (policy === null) continue;
+      const current = (entry as { paseoTools?: unknown } | null | undefined)?.paseoTools;
+      if (!contains(current, policy)) writes[id] = { paseoTools: policy };
+    }
+    const updated = Object.keys(writes);
+    if (updated.length === 0) return { revision, config, updated };
+
+    try {
+      await paseo.config.patch({ providers: writes });
+    } catch (error) {
+      throw failed(error instanceof Error ? error.message : String(error), error);
+    }
+
+    const after = await readRoleConfig(paseo);
+    const missing = missingFromReadBack({ expectedRevision: revision, providers: writes }, after.config);
+    if (missing.length > 0) throw failed(`Paseo did not keep the Paseo-tools policy (${missing.join(", ")})`);
+    return { revision: after.revision, config: after.config, updated };
+  });
+}
+
 /**
  * Turns Paseo's machine-wide agent-tools switch on or off
  * (`daemon.mcp.injectIntoAgents`, design §6.1).
@@ -358,7 +410,7 @@ export interface RemoveAllResult extends RoleConfigWriteResult {
  *
  * Paseo has no hook that runs when a plugin is removed, so "uninstall" is a
  * button; this is the write half of it. It takes the whole `bm-*` prefix — the
- * three roles and every fallback alias — because a leftover alias points at a
+ * four roles and every fallback alias — because a leftover alias points at a
  * provider the user may later delete, and because a partial removal is the one
  * outcome a person cannot easily finish by hand.
  *

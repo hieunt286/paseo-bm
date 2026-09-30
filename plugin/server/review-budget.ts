@@ -39,12 +39,13 @@
  */
 import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
 import type { Tier } from "../shared/contracts";
-import { agentFactsOf, reviewerReplacementsFor, type DashboardPaseo } from "./dashboard-rpc";
+import type { DashboardPaseo } from "./dashboard-rpc";
 import { BUDGET_NOTICE_MARKER } from "./notices";
 import { roleOfProvider } from "./agent-role";
-import { readRecords, type TraceStoreLocation } from "./trace-store";
+import type { TraceStoreLocation } from "./trace-store";
 import type { BudgetTold } from "./budget-told";
-import { reconstructTraces, type ReconstructedTrace } from "./traces";
+import type { ReconstructedTrace } from "./traces";
+import { requestTraceOf } from "./request-trace";
 
 /**
  * Total review calls per request, by tier (PRD delta 20260924-worker-autonomy,
@@ -151,10 +152,11 @@ export async function checkReviewBudget(event: TurnEndedEvent, deps: BudgetDeps)
   let claimed: string | null = null;
   try {
     const agent = event?.agent;
-    // Every paseo-bm role counts, on its main alias or a fallback one (delta 20260921 §4.4.1).
+    // Every paseo-bm role counts, on its main alias or a fallback one (delta 20260921 §4.4.1),
+    // except the Orchestrator's assessment agent, which is no part of a request (orchestrator design §3.2).
     const role = roleOfProvider(agent?.provider);
     const workspaceId = agent?.workspaceId ?? null;
-    if (role === null || workspaceId === null) return "ignored";
+    if (role === null || role === "orchestrator" || workspaceId === null) return "ignored";
     const keyOf = (found: BudgetOverrun): string => `${workspaceId}::${found.requestId}`;
 
     let over: BudgetOverrun | undefined;
@@ -165,17 +167,9 @@ export async function checkReviewBudget(event: TurnEndedEvent, deps: BudgetDeps)
       over = [...pending.values()].find((found) => keyOf(found) === `${workspaceId}::${found.requestId}` && found.managerAgentId === agent.id);
       if (over === undefined) return "within";
     } else {
-      const records = readRecords(deps.location, workspaceId).records;
-      // A replacement Reviewer's first message is the stopped Reviewer's
-      // review call sent again, not a new one (delta 20260921 §4.5.1).
-      const [facts, replacementIds] = await Promise.all([
-        agentFactsOf(deps.paseo, workspaceId),
-        reviewerReplacementsFor({ home: deps.home }),
-      ]);
-      const trace = reconstructTraces({ records, agents: [...facts.values()], replacementIds }).find(
-        (candidate) => candidate.workerIds.includes(agent.id) || candidate.reviewerIds.includes(agent.id),
-      );
-      over = trace === undefined ? undefined : (overrunOf(trace) ?? undefined);
+      // The same rebuild the Orchestrator's rules read (request-trace.ts).
+      const found = await requestTraceOf(deps, workspaceId, agent.id);
+      over = found === null ? undefined : (overrunOf(found.trace) ?? undefined);
       if (over === undefined) return "within";
       pending.set(keyOf(over), over);
     }

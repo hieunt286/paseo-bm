@@ -737,6 +737,25 @@ describe("a Manager turn that names no request belongs to the request it names n
     expect(f2?.requestedAt).toBe("2026-09-16T07:06:35.000Z");
   });
 
+  it("keeps a turn with no inbound message (woken by its Worker) on the request already open, not the next", () => {
+    // Orchestrator acceptance 2026-09-28, finding P1: the Manager's summary of
+    // one request, written when its Worker ended its turn, became a phantom
+    // row of the next request, 41 s before the user asked it.
+    const wake = record({
+      at: "2026-09-16T07:00:05.000Z",
+      requestId: null,
+      endedAt: "2026-09-16T07:00:05.000Z",
+      turnId: "foreground-turn-wake",
+      sent: [],
+    });
+    const rows = reconstructTraces({ records: [...managerTurns(), wake], agents: [] });
+    const f1 = rows.find((trace) => trace.requestId === F1);
+    const f2 = rows.find((trace) => trace.requestId === F2);
+    expect(f1?.records.some((r) => r.turnId === "foreground-turn-wake")).toBe(true);
+    expect(f2?.records.some((r) => r.turnId === "foreground-turn-wake")).toBe(false);
+    expect(f2?.requestedAt).toBe("2026-09-16T07:06:35.000Z");
+  });
+
   it("still gives a provisional row to a request whose first report has not arrived", () => {
     const records = [
       inbound("2026-09-16T08:00:00.000Z", "Yêu cầu mới chưa có báo cáo nào"),

@@ -2,3 +2,5 @@
 .bv/
 node_modules/
 dist/
+# bundled evaluation scripts (npm run eval:*)
+.eval-dist/

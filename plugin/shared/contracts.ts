@@ -1,6 +1,10 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { modelPriceSchema } from "./prices";
+import { assessmentRubricEntrySchema, assessmentSuggestionSchema } from "./bm-assessment";
+import { decisionSchema, decisionStatusSchema } from "./decisions";
+import { alertSchema } from "./alerts";
+import { assessmentStatusSchema, gateCategorySchema, orchestratorNoteSchema, proposalSourceSchema, workerSignalSchema } from "./orchestrator";
 
 /**
  * RPC contracts for the paseo-bm plugin.
@@ -13,8 +17,23 @@ import { modelPriceSchema } from "./prices";
  * and the surfaces that call them live in `client/` (WP-113).
  */
 
-/** Value of the `bm.role` agent label that paseo-bm sets when it creates an agent. */
+/**
+ * The three roles with a fallback chain: the value of the `bm.role` label of a
+ * Manager, a Worker or a Reviewer.
+ *
+ * Kept at three when `bm-orchestrator` came (orchestrator design §3.2): this
+ * enum is also the schema of the fallback chain (`fallbackSettingsSchema`,
+ * `roles.save-fallback`) and of `fallbackIncidentSchema`, which 0.4.1 reads
+ * back from `role-fallback-state.json`. A place that lists every role uses
+ * `setupRoleWithOrchestratorSchema`.
+ */
 export const bmRoleSchema = z.enum(["manager", "worker", "reviewer"]);
+
+/**
+ * Every role the plugin registers: the three of `bmRoleSchema` and the
+ * assessment role `orchestrator` (`bm-orchestrator`, orchestrator design §3.1).
+ */
+export const setupRoleWithOrchestratorSchema = z.enum(["manager", "worker", "reviewer", "orchestrator"]);
 
 /** Identifier of a Paseo workspace, as returned by the Paseo SDK. */
 export const workspaceIdSchema = z.string().min(1);
@@ -32,6 +51,11 @@ export const agentIdSchema = z.string().min(1);
  * reported, never deleted or archived (Technical Design §7.3). It is the only
  * channel for the "báo trong panel" requirement (see the WP-112 report).
  *
+ * `replaceOutdated` (autonomy PRD §11 rule 3, the Inbox's `outdated-agent`
+ * alert): when the live Manager runs older instructions (`bm.instructions`),
+ * create a new one and mark the old one `bm.replacedBy`, never archiving it;
+ * `replacedManagerId` names it. A current Manager is returned as it is.
+ *
  * Failures are thrown as errors whose message starts with a registry code
  * (`E_PROVIDER_UNAVAILABLE`).
  */
@@ -39,6 +63,7 @@ export const managerEnsureRpc = defineRpc({
   name: "manager.ensure",
   input: z.object({
     workspaceId: workspaceIdSchema,
+    replaceOutdated: z.boolean().optional(),
   }),
   output: z.object({
     agentId: agentIdSchema,
@@ -62,14 +87,19 @@ export const managerEnsureRpc = defineRpc({
      * parses; the server always sends it.
      */
     setupNotice: z.string().nullable().optional(),
+    /**
+     * The outdated Manager this call replaced, or `null`. Optional so an older
+     * server's answer still parses; the server always sends it.
+     */
+    replacedManagerId: agentIdSchema.nullable().optional(),
   }),
 });
 
 /**
- * Role shown for a listed agent: one of the three roles, or `unknown` when the
+ * Role shown for a listed agent: one of the four roles, or `unknown` when the
  * `bm.role` label is missing or holds another value (Technical Design §7.3).
  */
-export const agentRoleSchema = z.enum(["manager", "worker", "reviewer", "unknown"]);
+export const agentRoleSchema = z.enum(["manager", "worker", "reviewer", "orchestrator", "unknown"]);
 
 /**
  * One node of the agent tree the workspace panel draws.
@@ -127,7 +157,7 @@ export const agentsListRpc = defineRpc({
  * on-disk path.
  */
 export const roleDescriptorSchema = z.object({
-  role: bmRoleSchema,
+  role: setupRoleWithOrchestratorSchema,
   provider: z.string(),
   model: z.string(),
   paseoTools: z.boolean(),
@@ -146,6 +176,8 @@ export const rolesDescribeRpc = defineRpc({
 });
 
 export type BmRole = z.infer<typeof bmRoleSchema>;
+/** Any registered role, the Orchestrator included. */
+export type SetupRoleWithOrchestrator = z.infer<typeof setupRoleWithOrchestratorSchema>;
 /** Input shape: `labelled` may be absent (meaning labelled), as from a server older than delta 20260918g. */
 export type AgentNode = z.input<typeof agentNodeSchema>;
 export type RoleDescriptor = z.infer<typeof roleDescriptorSchema>;
@@ -611,6 +643,12 @@ export const traceRecordSchema = z.object({
    * when the snapshot could not be read for this turn.
    */
   runtime: traceRuntimeSchema.nullable().optional(),
+  /**
+   * The paseo-bm version that wrote the record (evaluation design §3). Optional
+   * for the same reason as `runtime`: records written before it have none and
+   * are attributed by time window; `v` stays 1.
+   */
+  pluginVersion: z.string().nullable().optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -636,7 +674,7 @@ export const DASHBOARD_ERROR_CODES = [
   "E_ROLE_SETTINGS_INVALID",
   "E_ROLE_SETTINGS_CONFLICT",
   "E_ROLE_SETTINGS_WRITE_FAILED",
-  // Delta 20260921 §4.4.6: the fallback card's actions.
+  // Delta 20260921 §4.4.6: the fallback incident's actions (an f: decision's options).
   "E_FALLBACK_NOT_FOUND",
   "E_FALLBACK_NOT_PENDING",
   "E_FALLBACK_NO_CANDIDATE",
@@ -651,6 +689,30 @@ export const DASHBOARD_ERROR_CODES = [
   "E_SETUP_WRITE_FAILED",
   "E_SKILLS_PRESENT",
   "E_SKILLS_INSTALL_FAILED",
+  // Orchestrator design §8: a failed write of the Orchestrator's store
+  // (`<data folder>/orchestrator/`).
+  "E_ORCHESTRATOR_WRITE_FAILED",
+  // Orchestrator design §7: `orchestrator.apply-suggestion` — the addition
+  // would exceed the 8,000 characters, or the text changed since it was shown.
+  "E_SUGGESTION_TOO_LONG",
+  "E_ROLE_EXTRA_CHANGED",
+  // Orchestrator design §3.3, §8: no `bm-orchestrator` profile, or its provider
+  // is not available; nothing is created.
+  "E_ORCHESTRATOR_UNAVAILABLE",
+  // Orchestrator design §6A, §8 (ADR-015): Autopilot turned on for a project
+  // without its dialog.
+  "E_AUTOPILOT_NOT_CONFIRMED",
+  // Autonomy design §A.4, §A.6 (ADR-017): the `decisions.*` RPCs — no such
+  // decision; it is answered, superseded, withdrawn or expired; the answer is
+  // not exactly one known option or the owner's words; an answer granting a
+  // release, data, security or cost effect without its confirmation; `confirm`
+  // on a decision that is not waiting for one; the store cannot be written.
+  "E_DECISION_NOT_FOUND",
+  "E_DECISION_SETTLED",
+  "E_DECISION_ANSWER_INVALID",
+  "E_DECISION_NOT_CONFIRMED",
+  "E_DECISION_NOT_NEEDS_CONFIRMATION",
+  "E_DECISION_WRITE_FAILED",
 ] as const;
 
 export type DashboardErrorCode = (typeof DASHBOARD_ERROR_CODES)[number];
@@ -795,6 +857,8 @@ export const workspacesOverviewRpc = defineRpc({
           manager: z.number().int().nonnegative(),
           worker: z.number().int().nonnegative(),
           reviewer: z.number().int().nonnegative(),
+          /** Running Orchestrator assessments (orchestrator design §3.2); absent from a 0.4.x server. */
+          orchestrator: z.number().int().nonnegative().optional(),
         }),
       }),
     ),
@@ -818,31 +882,12 @@ export const agentsStopAllRpc = defineRpc({
   }),
 });
 
-const answerMarksOutput = z.object({
-  /** Card keys (`answeredKey`) the user marked as answered, oldest first. */
-  keys: z.array(z.string()),
-  notices: z.array(z.string()),
-});
-
-/** `answers.marks` — the cards the user marked as answered (delta 20260918d §4.9). */
-export const answersMarksRpc = defineRpc({
-  name: "answers.marks",
-  input: z.object({}),
-  output: answerMarksOutput,
-});
-
-/** `answers.mark` — marks one card as answered, or removes the mark (delta 20260918d §4.9). */
-export const answersMarkRpc = defineRpc({
-  name: "answers.mark",
-  input: z.object({ key: z.string().min(1).max(400), marked: z.boolean() }),
-  output: answerMarksOutput,
-});
-
 // ---------------------------------------------------------------------------
-// Setup screen (delta 20260916-setup-screen).
+// Machine set-up, behind Settings (delta 20260916-setup-screen).
 // ---------------------------------------------------------------------------
 
-export const setupRoleSchema = z.enum(["manager", "worker", "reviewer"]);
+/** The roles Setup lists, creates and keeps additional instructions for: all four. */
+export const setupRoleSchema = setupRoleWithOrchestratorSchema;
 const skillStateSchema = z.enum(["ok", "missing", "broken"]);
 
 /** One Paseo-tools check (`plugin/server/tools-check.ts`). */
@@ -927,7 +972,7 @@ export const setupStatusSchema = z.object({
         setBy: z.enum(["plugin", "installer"]).nullable(),
       }),
       /**
-       * One entry per distinct provider the three roles run on. Only the
+       * One entry per distinct provider the four roles run on. Only the
        * sign-in boolean is ever taken from Paseo's diagnostic; paseo-bm never
        * runs a login command and never sees a credential (design §9).
        */
@@ -951,8 +996,16 @@ export const setupStatusSchema = z.object({
       install: z.object({ kind: z.enum(["installer-directory", "other"]), pluginPath: z.string().nullable() }),
     })
     .optional(),
-  /** Characters of additional instructions per role; 0 when none. */
-  extras: z.object({ manager: z.number().int(), worker: z.number().int(), reviewer: z.number().int() }),
+  /**
+   * Characters of additional instructions per role; 0 when none. `orchestrator`
+   * is optional so an older server's answer still parses; the server always sends it.
+   */
+  extras: z.object({
+    manager: z.number().int(),
+    worker: z.number().int(),
+    reviewer: z.number().int(),
+    orchestrator: z.number().int().optional(),
+  }),
   /**
    * The last Paseo-tools check of a new Manager and of a new Worker in this
    * plugin run, `null` when none ran (delta 20260921 §4.2.4). Optional: an
@@ -969,8 +1022,8 @@ export type SetupStatus = z.infer<typeof setupStatusSchema>;
 export const setupStatusRpc = defineRpc({ name: "setup.status", input: z.object({}), output: setupStatusSchema });
 
 /**
- * `setup.ensure-roles` — creates whichever of the three roles is missing
- * (design §7.13.2, ADR-012 decision 4).
+ * `setup.ensure-roles` — creates whichever of the four roles is missing
+ * (design §7.13.2, ADR-012 decision 4; `orchestrator` from orchestrator design §3.1).
  *
  * No `confirmed` field, unlike the other setup verbs: creating the roles grants
  * nothing the user does not already have — the entries only describe agents
@@ -1044,7 +1097,7 @@ export const setupCleanupRpc = defineRpc({
 /** `setup.install-tool` — runs the documented installer for a missing `br` or `bv`, after the user confirmed. */
 export const setupInstallToolRpc = defineRpc({
   name: "setup.install-tool",
-  /** `confirmed` must be `true`: the Setup screen sends it only after the user confirmed the exact command. */
+  /** `confirmed` must be `true`: Settings sends it only after the user confirmed the exact command. */
   input: z.object({ tool: z.enum(["br", "bv"]), confirmed: z.literal(true) }),
   output: z.object({ command: z.string(), code: z.number().int(), tail: z.array(z.string()) }),
 });
@@ -1053,7 +1106,19 @@ export const setupInstallToolRpc = defineRpc({
 export const rolesInstructionsRpc = defineRpc({
   name: "roles.instructions",
   input: z.object({ role: setupRoleSchema }),
-  output: z.object({ base: z.string(), extra: z.string(), full: z.string(), path: z.string().nullable(), maxChars: z.number().int() }),
+  output: z.object({
+    base: z.string(),
+    extra: z.string(),
+    full: z.string(),
+    path: z.string().nullable(),
+    maxChars: z.number().int(),
+    /**
+     * sha256 (lowercase hex) of `extra`: what `orchestrator.apply-suggestion`
+     * takes back as `expectedHash`, so the client never hashes (Orchestrator
+     * design §7). Optional only because every new field is (design §7.12).
+     */
+    hash: z.string().optional(),
+  }),
 });
 
 /** `roles.save-extra` — replaces one role's additional instructions. Applies to agents created afterwards. */
@@ -1084,8 +1149,8 @@ export const providerCapabilitySchema = z.enum(["tiered", "untiered", "none", "u
  * (`featureValues`: `{}`); `capability` is that of `baseProvider`.
  */
 export const roleSettingSchema = z.object({
-  role: bmRoleSchema,
-  providerId: z.enum(["bm-manager", "bm-worker", "bm-reviewer"]),
+  role: setupRoleWithOrchestratorSchema,
+  providerId: z.enum(["bm-manager", "bm-worker", "bm-reviewer", "bm-orchestrator"]),
   baseProvider: z.string().nullable(),
   label: z.string().nullable(),
   model: z.string().nullable(),
@@ -1130,8 +1195,8 @@ export const fallbackSettingsSchema = z.object({
 });
 
 /**
- * `roles.settings` — the three roles, always in the order manager, worker,
- * reviewer. `revision` is what `roles.save-settings` must send back: sha256 of
+ * `roles.settings` — the four roles, always in the order manager, worker,
+ * reviewer, orchestrator. `revision` is what `roles.save-settings` must send back: sha256 of
  * the canonical JSON of every `bm-*` provider and the whole profile array
  * (§4.3.2). `fallback` holds the chain of each role whose chain is offered
  * (`FALLBACK_ROLES`, §4.4.3); `null` when none is.
@@ -1201,7 +1266,7 @@ export const rolesSaveSettingsRpc = defineRpc({
   name: "roles.save-settings",
   input: z.object({
     revision: z.string().min(1),
-    role: bmRoleSchema,
+    role: setupRoleWithOrchestratorSchema,
     baseProvider: z.string().min(1).max(200),
     model: z.string().min(1).max(200),
     thinkingOptionId: z.string().min(1).max(200).nullable(),
@@ -1275,9 +1340,9 @@ export const fallbackIncidentSchema = z.object({
 
 /**
  * `fallback.incidents` — the recorded incidents (§4.4.6), oldest first,
- * filtered by workspace and/or ids when given. The fallback card and the
- * waiting pill read their state here, never from the notice text, so an old
- * notice never shows a button that no longer applies.
+ * filtered by workspace and/or ids when given. The Inbox reads them here,
+ * never from a notice's text, so an old notice never shows a button that no
+ * longer applies.
  */
 export const fallbackIncidentsRpc = defineRpc({
   name: "fallback.incidents",
@@ -1340,53 +1405,6 @@ export const chatPeerSchema = z.object({
    * again. Defaults to false for older servers.
    */
   replaced: z.boolean().default(false),
-});
-
-/** One Worker waiting for the user's answer in a Manager's chat (delta 20260918d §4.8). */
-export const waitingWorkerSchema = z.object({
-  managerId: agentIdSchema,
-  workspaceId: workspaceIdSchema,
-  workerId: agentIdSchema,
-  workerTitle: z.string().nullable(),
-  requestId: z.string(),
-  /** The report message as the Manager received it: the client builds the same card from it. */
-  text: z.string(),
-  at: z.string().nullable(),
-  /**
-   * The report's questions the question–answer ledger holds an answer to
-   * (design delta 20260924-qa-ledger §4.1); the card shows them answered and
-   * the pill does not count them. Defaults to none for an older server.
-   */
-  answered: z.array(z.string()).default([]),
-});
-
-export type WaitingWorker = z.infer<typeof waitingWorkerSchema>;
-
-/**
- * One `pending` fallback incident waiting for the user's decision in a live
- * Manager's chat (delta 20260921 §4.4.6): `managerId` is the incident's, and
- * `workspaceId` that Manager's, where its pill goes.
- */
-export const waitingFallbackSchema = z.object({
-  managerId: agentIdSchema,
-  workspaceId: workspaceIdSchema,
-  incident: fallbackIncidentSchema,
-});
-
-export type WaitingFallback = z.infer<typeof waitingFallbackSchema>;
-
-/**
- * `chat.waiting` — for every paseo-bm Manager, the idle Workers whose latest
- * report to it is `blocked` with a `BM-QUESTIONS` block (delta 20260918d §4.8,
- * REQ-059 j), and the `pending` fallback incidents whose card is in its chat
- * (delta 20260921 §4.4.6), read from the incidents file, not the timeline, so
- * they show even when the Manager's own turn failed. `fallback` defaults to
- * empty for a server built before it. Read-only.
- */
-export const chatWaitingRpc = defineRpc({
-  name: "chat.waiting",
-  input: z.object({}),
-  output: z.object({ waiting: z.array(waitingWorkerSchema), fallback: z.array(waitingFallbackSchema).default([]) }),
 });
 
 /**
@@ -1552,3 +1570,431 @@ export const chatBeadsRpc = defineRpc({
     scannedItems: z.number().int(),
   }),
 });
+
+// ---------------------------------------------------------------------------
+// Orchestrator RPCs (Orchestrator design §8). Additions only; every
+// `orchestrator.*` contract lives in this block.
+// ---------------------------------------------------------------------------
+
+/**
+ * `orchestrator.apply-suggestion` — appends one assessment suggestion, after
+ * one blank line, to a role's Additional instructions (Orchestrator design §7,
+ * REQ-076). The only path by which a suggestion reaches instructions; applies
+ * to agents created afterwards.
+ *
+ * - `expectedHash` is the `hash` the client was given with the text it showed
+ *   (`roles.instructions`, or the previous `apply-suggestion`): sha256 hex of
+ *   the stored text. Different from the stored text now → `E_ROLE_EXTRA_CHANGED`,
+ *   nothing written, the client reloads.
+ * - The result above `maxChars` (8,000) → `E_SUGGESTION_TOO_LONG`, nothing
+ *   written, nothing cut.
+ * - `confirmed` is `z.literal(true)`: a call that has not gone through the
+ *   confirmation dialog fails input validation.
+ *
+ * `hash` in the output is the hash of the new `extra`, so a second suggestion
+ * needs no read in between.
+ */
+export const orchestratorApplySuggestionRpc = defineRpc({
+  name: "orchestrator.apply-suggestion",
+  input: z.object({
+    role: bmRoleSchema,
+    text: z.string().trim().min(1),
+    expectedHash: z.string().regex(/^[0-9a-f]{64}$/),
+    confirmed: z.literal(true),
+  }),
+  output: z.object({
+    extra: z.string(),
+    full: z.string(),
+    chars: z.number().int().nonnegative(),
+    maxChars: z.number().int(),
+    hash: z.string(),
+  }),
+});
+
+export type OrchestratorApplySuggestionInput = z.infer<typeof orchestratorApplySuggestionRpc.input>;
+export type OrchestratorApplySuggestionOutput = z.infer<typeof orchestratorApplySuggestionRpc.output>;
+
+/**
+ * `orchestrator.open-preview` — what the Open Orchestrator dialog shows before
+ * the user confirms (Orchestrator design §3.3, §8). Reads only; creates nothing.
+ *
+ * - `exists`: the one Orchestrator agent (labels `bm.role=orchestrator`,
+ *   `bm.orchestrator=main`, not archived) is already there, so `open` only
+ *   reopens it.
+ * - `provider` / `model`: the provider the `bm-orchestrator` alias extends and
+ *   its profile's model (`null` = the provider's default). Without a usable
+ *   profile and no agent to reopen → `E_ORCHESTRATOR_UNAVAILABLE`.
+ * - `workspace`: `"own"` — the agent is created in a workspace of its own
+ *   (`<data folder>/orchestrator/home`); `"choose"` — the user picks one of
+ *   their workspaces and `open` takes its `workspaceId` (design §3.3 fallback).
+ */
+export const orchestratorOpenPreviewRpc = defineRpc({
+  name: "orchestrator.open-preview",
+  input: z.object({}),
+  output: z.object({
+    exists: z.boolean(),
+    provider: z.string(),
+    model: z.string().nullable(),
+    workspace: z.enum(["own", "choose"]),
+  }),
+});
+
+export type OrchestratorOpenPreviewOutput = z.infer<typeof orchestratorOpenPreviewRpc.output>;
+
+/**
+ * `orchestrator.open` — returns the one Orchestrator agent, creating it first
+ * when there is none (Orchestrator design §3.3, REQ-075 a). `created` says
+ * which. `confirmed` is `z.literal(true)`: creating an agent spends the user's
+ * tokens, so a call that skipped the dialog fails input validation.
+ * `workspaceId` is used only when `open-preview` says `workspace: "choose"`.
+ * `recreate: true` creates a new Orchestrator when the existing one has lost
+ * its tools or is outdated (`orchestrator.state` says `toolsStale` or
+ * `outdated`, design §3.3, §5.1); the old one is left to the user, never
+ * archived, and the newest is the Orchestrator from then on. A current
+ * Orchestrator is returned as it is.
+ * Without a usable `bm-orchestrator` profile or provider →
+ * `E_ORCHESTRATOR_UNAVAILABLE`, nothing created.
+ */
+export const orchestratorOpenRpc = defineRpc({
+  name: "orchestrator.open",
+  input: z.object({
+    confirmed: z.literal(true),
+    workspaceId: z.string().min(1).optional(),
+    recreate: z.literal(true).optional(),
+  }),
+  output: z.object({
+    agentId: z.string(),
+    created: z.boolean(),
+  }),
+});
+
+export type OrchestratorOpenInput = z.infer<typeof orchestratorOpenRpc.input>;
+export type OrchestratorOpenOutput = z.infer<typeof orchestratorOpenRpc.output>;
+
+// ── orchestrator.state, set-autopilot (Orchestrator design §8; server/orchestrator-actions.ts)
+
+/** A workspace id as the trace store accepts it (`WORKSPACE_ID_PATTERN` of `server/trace-store.ts`). */
+const orchestratorWorkspaceIdSchema = z.string().regex(/^[A-Za-z0-9._-]{1,128}$/);
+
+/** A project's health (design §6B.7). */
+export const projectHealthSchema = z.enum(["ok", "waiting", "risk", "idle"]);
+export type ProjectHealth = z.infer<typeof projectHealthSchema>;
+
+/** Where a project's current request stands (design §6B.7): Work's stage on a project row. */
+export const projectStageSchema = z.enum(["idle", "received", "implementing", "reviewing", "waiting-user", "finished"]);
+export type ProjectStage = z.infer<typeof projectStageSchema>;
+
+/** One paseo-bm agent of a project, as Work's M W R letters show it (design §6B.7). */
+const projectAgentSchema = z.object({ id: z.string(), title: z.string().nullable(), status: z.string() });
+
+/**
+ * `orchestrator.state` — the Orchestrator agent and the projects, in one call
+ * (Orchestrator design §8): Work's project rows read it. Reads only: one
+ * `agents.list` walk, one `workspaces.list`, each workspace's trace store once
+ * and the Orchestrator's store.
+ *
+ * - `agent`: the one Orchestrator agent, or null before it is opened;
+ *   `createdAt` is when it was created (null when Paseo did not say).
+ *   `previousCount`: how many older non-archived Orchestrators it replaced
+ *   (design §3.3) are still in the owner's agent list, 0 without an agent.
+ *   `outdated`: it was created with other role instructions than this
+ *   plugin's (its `bm.instructions` label, design §3.3); the next wake-up
+ *   replaces it.
+ *   `toolsStale`: it was created before the plugin's endpoint secret last
+ *   changed, so it has lost its tools (design §5.1).
+ * - `projects`: workspaces with activity in the last 7 days, at most 30,
+ *   newest activity first. `state`: `running` when a paseo-bm agent of the
+ *   workspace runs, else `stalled` with an open `request-stalled` Inbox alert
+ *   (autonomy design §A.8), else `waiting-user` when its newest request's
+ *   last report is `blocked`, else `idle`. `requests` counts the requests
+ *   with activity in those 7 days. `assessment` is its newest workflow
+ *   assessment: `average` of the non-null scores (one decimal, null when none
+ *   or not `done`), `scores` the six rubric entries and `recommendations` the
+ *   suggestions, both empty until `done`. `autopilot`: the project has
+ *   Autopilot on (design §6A). `lastAction`: the newest command the
+ *   Orchestrator sent there — when, its first line and its `source` — or null.
+ *   Optional for an older server: `health` (`risk` with an open stall or
+ *   Worker signal, else `waiting` when its request waits on the owner, else
+ *   `ok` while work goes on, else `idle`); `stage` of the newest request
+ *   (from its last report and the running Workers and Reviewers); `agents` —
+ *   its Manager, and the Workers and Reviewers of the newest request, running
+ *   or with an open signal, each with its status; `lastProgressAt` (the
+ *   newest turn end or report of that request); `currentRequest` (its id and
+ *   the redacted first line of its text, null when not recorded);
+ *   `openSignals` (the open `stuck`, `permission-waiting` and `danger` Inbox
+ *   alerts of its Workers, design §6B.3, §A.8); `notes` (the Orchestrator's
+ *   notes of the project, §6B.4).
+ */
+export const orchestratorStateRpc = defineRpc({
+  name: "orchestrator.state",
+  input: z.object({}),
+  output: z.object({
+    agent: z
+      .object({ id: z.string(), status: z.string(), workspaceId: z.string().nullable(), createdAt: z.string().nullable().optional() })
+      .nullable(),
+    previousCount: z.number().int().nonnegative().optional(),
+    toolsStale: z.boolean(),
+    outdated: z.boolean(),
+    projects: z.array(
+      z.object({
+        workspaceId: z.string(),
+        workspaceLabel: z.string(),
+        managerId: z.string().nullable(),
+        managerTitle: z.string().nullable(),
+        managerStatus: z.string().nullable(),
+        state: z.enum(["running", "waiting-user", "stalled", "idle"]),
+        lastActivityAt: z.string().nullable(),
+        requests: z.number().int().nonnegative(),
+        autopilot: z.boolean(),
+        /** The gate categories the owner allowed for this project (design §6B.5, §6B.7); absent from an older server — read as none. */
+        allow: z.array(gateCategorySchema).optional(),
+        // Design §6B.7: all optional, absent from an older server.
+        health: projectHealthSchema.optional(),
+        stage: projectStageSchema.optional(),
+        /**
+         * The phase of the newest request's last Worker report that names a
+         * stage (`blocked` skipped), or null: lets Work's row tell Plan from
+         * Build (autonomy design §A.12). Optional, absent from an older server.
+         */
+        workPhase: reportPhaseSchema.nullable().optional(),
+        agents: z
+          .object({ manager: projectAgentSchema.nullable(), workers: z.array(projectAgentSchema), reviewers: z.array(projectAgentSchema) })
+          .optional(),
+        lastProgressAt: z.string().nullable().optional(),
+        currentRequest: z.object({ requestId: z.string(), title: z.string().nullable() }).nullable().optional(),
+        openSignals: z.array(z.object({ signal: workerSignalSchema, workerId: z.string(), since: z.string() })).optional(),
+        notes: z.array(orchestratorNoteSchema).optional(),
+        lastAction: z.object({ at: z.string(), text: z.string(), source: proposalSourceSchema }).nullable(),
+        assessment: z
+          .object({
+            assessmentId: z.string(),
+            at: z.string(),
+            status: assessmentStatusSchema,
+            average: z.number().nullable(),
+            scores: z.array(assessmentRubricEntrySchema),
+            recommendations: z.array(assessmentSuggestionSchema),
+          })
+          .nullable(),
+      }),
+    ),
+  }),
+});
+
+export type OrchestratorStateOutput = z.infer<typeof orchestratorStateRpc.output>;
+export type OrchestratorProjectRow = OrchestratorStateOutput["projects"][number];
+
+/**
+ * `orchestrator.set-autopilot` — Autopilot on or off for one project (design
+ * §6A, §8; ADR-015 decision 1). Turning it on without `confirmed: true` (the
+ * dialog that says what the Orchestrator will do on its own, and that it uses
+ * tokens) → `E_AUTOPILOT_NOT_CONFIRMED`, nothing written; turning it off needs
+ * no confirmation. Sends nothing. `since` is when it was turned on, null when
+ * off.
+ *
+ * `allow` (design §6B.5, §9 Allow…): with `enabled: true` — so behind the same
+ * confirmation — sets the gate categories the owner allows for the project
+ * (an empty list allows none); ignored when turning off, which forgets them.
+ * Absent keeps what is stored. The output's `allow` is what is stored.
+ */
+export const orchestratorSetAutopilotRpc = defineRpc({
+  name: "orchestrator.set-autopilot",
+  input: z.object({
+    workspaceId: orchestratorWorkspaceIdSchema,
+    enabled: z.boolean(),
+    confirmed: z.literal(true).optional(),
+    allow: z.array(gateCategorySchema).optional(),
+  }),
+  output: z.object({
+    workspaceId: z.string(),
+    autopilot: z.boolean(),
+    since: z.string().nullable(),
+    allow: z.array(gateCategorySchema).optional(),
+  }),
+});
+
+export type OrchestratorSetAutopilotInput = z.infer<typeof orchestratorSetAutopilotRpc.input>;
+export type OrchestratorSetAutopilotOutput = z.infer<typeof orchestratorSetAutopilotRpc.output>;
+
+// ---------------------------------------------------------------------------
+// Decisions (autonomy design §A.3, §A.4, §A.6; ADR-017): one stored record per
+// question to the owner, read and answered the same way on every surface.
+// ---------------------------------------------------------------------------
+
+/** Most decisions `decisions.list` returns, and its default. */
+export const DECISION_LIST_MAX = 500;
+export const DECISION_LIST_DEFAULT = 200;
+
+/**
+ * `decisions.list` — reads only.
+ *
+ * - `inbox`: the unsettled decisions (`open`, `needs-confirmation`) of every
+ *   workspace, or of `workspaceId`, oldest asked first.
+ * - `workspace`: every stored decision of `workspaceId`, newest asked first.
+ * - `request`: every stored decision of `requestId` (in `workspaceId` when
+ *   given, else in any workspace), newest asked first.
+ *
+ * `status` keeps only that status. At most `limit` come back; `truncated`
+ * says more matched. No usable data folder reads as none.
+ */
+export const decisionsListRpc = defineRpc({
+  name: "decisions.list",
+  input: z
+    .object({
+      scope: z.enum(["inbox", "workspace", "request"]),
+      workspaceId: workspaceIdSchema.optional(),
+      requestId: z.string().min(1).optional(),
+      status: decisionStatusSchema.optional(),
+      limit: z.number().int().min(1).max(DECISION_LIST_MAX).optional(),
+    })
+    .refine((input) => input.scope !== "workspace" || input.workspaceId !== undefined, {
+      message: "scope workspace needs a workspaceId",
+    })
+    .refine((input) => input.scope !== "request" || input.requestId !== undefined, {
+      message: "scope request needs a requestId",
+    }),
+  output: z.object({ decisions: z.array(decisionSchema), truncated: z.boolean() }),
+});
+
+/** `decisions.get` — one decision; unknown → `E_DECISION_NOT_FOUND`. */
+export const decisionsGetRpc = defineRpc({
+  name: "decisions.get",
+  input: z.object({ id: z.string().min(1) }),
+  output: z.object({ decision: decisionSchema }),
+});
+
+/**
+ * `decisions.answer` — the owner answers an unsettled decision with exactly
+ * one of `optionKey` or `words` (else `E_DECISION_ANSWER_INVALID`). The answer
+ * and its one-use grant are recorded, then the plugin delivers it.
+ *
+ * - Unknown id → `E_DECISION_NOT_FOUND`; answered, superseded, withdrawn or
+ *   expired → `E_DECISION_SETTLED` (the message names the replacing id).
+ * - An answer that would grant `publish`, `deploy`, `real-data`, `migration`,
+ *   `security` or `cost` needs `confirmed: true` (experience concept X-4),
+ *   else `E_DECISION_NOT_CONFIRMED`. Nothing is written on any refusal.
+ * - `via` is the surface the owner used: `inbox` (default) or `chat-card`.
+ */
+export const decisionsAnswerRpc = defineRpc({
+  name: "decisions.answer",
+  input: z.object({
+    id: z.string().min(1),
+    optionKey: z.string().min(1).optional(),
+    words: z.string().optional(),
+    confirmed: z.literal(true).optional(),
+    via: z.enum(["inbox", "chat-card"]).optional(),
+  }),
+  output: z.object({ decision: decisionSchema }),
+});
+
+/**
+ * `decisions.confirm` — the owner's tap on a decision that needs confirmation
+ * (§A.5 c: "Answered in the Worker's chat? · Close · Keep open"): `answered:
+ * true` closes it as answered in that chat, `false` returns it to `open`. A
+ * decision not waiting for one → `E_DECISION_NOT_NEEDS_CONFIRMATION`; settled
+ * → `E_DECISION_SETTLED`; unknown → `E_DECISION_NOT_FOUND`.
+ */
+export const decisionsConfirmRpc = defineRpc({
+  name: "decisions.confirm",
+  input: z.object({ id: z.string().min(1), answered: z.boolean() }),
+  output: z.object({ decision: decisionSchema }),
+});
+
+export type DecisionsListInput = z.infer<typeof decisionsListRpc.input>;
+export type DecisionsListOutput = z.infer<typeof decisionsListRpc.output>;
+export type DecisionsGetInput = z.infer<typeof decisionsGetRpc.input>;
+export type DecisionsAnswerInput = z.infer<typeof decisionsAnswerRpc.input>;
+export type DecisionsConfirmInput = z.infer<typeof decisionsConfirmRpc.input>;
+export type DecisionOutput = z.infer<typeof decisionsGetRpc.output>;
+
+// ---------------------------------------------------------------------------
+// The Inbox (autonomy design §A.8, §A.12): what needs the owner's eyes
+// without being a decision.
+// ---------------------------------------------------------------------------
+
+/** Most alerts `inbox.alerts` returns. */
+export const INBOX_ALERTS_MAX = 200;
+
+/**
+ * `inbox.alerts` — reads only. The OPEN alerts of the alerts store, of every
+ * workspace or of `workspaceId`, in `ALERT_KINDS` order and oldest first
+ * within a kind. At most `INBOX_ALERTS_MAX` come back; `truncated` says more
+ * were open. No usable data folder reads as none.
+ */
+export const inboxAlertsRpc = defineRpc({
+  name: "inbox.alerts",
+  input: z.object({ workspaceId: workspaceIdSchema.optional() }),
+  output: z.object({ alerts: z.array(alertSchema), truncated: z.boolean() }),
+});
+
+export type InboxAlertsInput = z.infer<typeof inboxAlertsRpc.input>;
+export type InboxAlertsOutput = z.infer<typeof inboxAlertsRpc.output>;
+
+// ---------------------------------------------------------------------------
+// Insights (autonomy design §A.12, experience concept §4.3): the flow and cost
+// figures of `shared/eval-metrics.ts` over the plugin's own data folder.
+// ---------------------------------------------------------------------------
+
+/** The windows Insights offers: the last 7, 30 or 90 days, or everything recorded. */
+export const INSIGHTS_WINDOWS = ["7d", "30d", "90d", "all"] as const;
+export type InsightsWindow = (typeof INSIGHTS_WINDOWS)[number];
+
+const insightsRoleCountsSchema = z.object({
+  manager: z.number(),
+  worker: z.number(),
+  reviewer: z.number(),
+  orchestrator: z.number(),
+  unknown: z.number(),
+});
+
+/**
+ * `insights.summary` — reads only. `computeEvalMetrics` over the data folder,
+ * read with the replay's reader (`server/eval-store.ts`: no lock, no write),
+ * for every workspace or `workspaceId`, over `window` ending now. **Numbers
+ * only**: no message text, no path, no label — the client names the projects.
+ * `available: false` when the data folder cannot be used (every figure then
+ * reads as none). A `null` figure is unknown, never zero.
+ */
+export const insightsSummaryRpc = defineRpc({
+  name: "insights.summary",
+  input: z.object({ window: z.enum(INSIGHTS_WINDOWS), workspaceId: workspaceIdSchema.optional() }),
+  output: z.object({
+    available: z.boolean(),
+    window: z.object({ key: z.enum(INSIGHTS_WINDOWS), since: z.string().nullable(), until: z.string().nullable() }),
+    requests: z.object({ inWindow: z.number().int(), finished: z.number().int() }),
+    /** Requests by the UTC day of their earliest activity, oldest first; days with none are left out. */
+    requestsByDay: z.array(z.object({ day: z.string(), requests: z.number().int() })),
+    /** A-1 over finished requests. */
+    questions: z.object({
+      asked: z.number().int(),
+      reachedOwner: z.number().int(),
+      answeredByAgents: z.number().int(),
+      perFinishedRequest: z.object({ asked: z.number(), reachedOwner: z.number(), answeredByAgents: z.number() }).nullable(),
+    }),
+    ownerWait: z.object({ questions: z.number().int(), medianMs: z.number().nullable(), p90Ms: z.number().nullable() }),
+    /** A-11: first turn to the finished report, the owner's wait taken out. */
+    timeToFinished: z.object({ medianMs: z.number().nullable(), requests: z.number().int() }),
+    /** A-8: tokens (input + cached + output) of finished requests. */
+    tokens: z.object({
+      total: z.number(),
+      byRole: insightsRoleCountsSchema,
+      perFinishedRequest: z.object({ total: z.number(), byRole: insightsRoleCountsSchema }).nullable(),
+      medianPerFinishedRequest: z.number().nullable(),
+      finishedRequestsWithMissingUsage: z.number().int(),
+    }),
+    errors: z.object({
+      failedTurns: z.object({ total: z.number().int(), byRole: insightsRoleCountsSchema }),
+      cancelledTurns: z.object({ total: z.number().int(), byRole: insightsRoleCountsSchema }),
+    }),
+    turnsByRole: insightsRoleCountsSchema,
+    /** What could not be read or counted: store lines and files, turns without usage, finished requests without a duration. */
+    unknowns: z.object({
+      malformedLines: z.number().int(),
+      unreadableFiles: z.number().int(),
+      turnsWithoutUsage: z.number().int(),
+      requestsWithoutDuration: z.number().int(),
+    }),
+  }),
+});
+
+export type InsightsSummaryInput = z.infer<typeof insightsSummaryRpc.input>;
+export type InsightsSummary = z.infer<typeof insightsSummaryRpc.output>;

@@ -1,6 +1,8 @@
 /**
- * The pieces the Metric and Beads screens share: stat cards, a bar chart, a
- * chip, the agent role mark, and the style of a bead title. Styling comes from
+ * The pieces the surface's screens share: stat cards, a bar chart, a chip, the
+ * agent role mark, the style of a bead title, the in-place confirmation
+ * Settings and the Inbox use, and the frame every card is
+ * drawn in — the chats' and the Inbox's (`CardFrame`, `CompactLine`). Styling comes from
  * `dashboardStyles`, colours from the theme.
  *
  * Client rules: React Native primitives only, no Node import, no `server/`
@@ -12,7 +14,9 @@ import type { BeadRow } from "../shared/contracts";
 import { beadEmphasis, emphasisTone, type BeadEmphasis, type KanbanColumn } from "./beads-model";
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import { Pressable, Text, View } from "react-native";
-import { ROLE_MARK, barShare, toneColor, type Badge, type Bar, type GraphNode, type dashboardStyles } from "./dashboard-model";
+import { ROLE_MARK, barShare, toneColor, type Badge, type Bar, type RoleMarkKind, type Tone, type dashboardStyles } from "./dashboard-model";
+import type { SetupDialog } from "./setup-model";
+import { MAX_BODY_LINES, NOTICE_DOT, type CardFrameView } from "./chat-cards";
 
 export type Styles = ReturnType<typeof dashboardStyles>;
 export type Theme = PluginSurfaceProps["theme"];
@@ -31,8 +35,8 @@ export interface WorkspaceScreenProps extends PluginSurfaceProps {
 }
 
 /**
- * The first row of the Beads and Metric screens: an optional ←, the title (or
- * a spacer when the screen sits in its own workspace tab), then the screen's
+ * The first row of a project's page and of the Beads board: an optional ←, the
+ * title (or a spacer when the page sits in its own workspace tab), then the screen's
  * own buttons. The surface's status strip, when given, sits right under it, so
  * a slash command's notice is seen on these screens too. Hook-free, so tests
  * can expand it.
@@ -228,8 +232,8 @@ export function BeadRowCard({
 /**
  * A row of tabs: one label per view, the chosen one filled in
  * (delta 20260925 §3.1, §3.3). Used for the Beads board's status columns on a
- * narrow screen and for the three sections of the Setup screen, so both read
- * the same. Hook-free.
+ * narrow screen, for the surface's four sections and a project's three tabs,
+ * so all read the same. Hook-free.
  */
 export function StatusTabs({
   tabs,
@@ -306,7 +310,7 @@ export function KanbanBoard({
 }
 
 /** A small role icon on a soft, round tint of the role's colour. */
-export function RoleMark({ kind, theme, size = 22 }: { kind: GraphNode["kind"]; theme: Theme; size?: number }) {
+export function RoleMark({ kind, theme, size = 22 }: { kind: RoleMarkKind; theme: Theme; size?: number }) {
   const mark = ROLE_MARK[kind];
   const colour = toneColor(theme, mark.tone);
   return (
@@ -331,16 +335,170 @@ export function RoleMark({ kind, theme, size = 22 }: { kind: GraphNode["kind"]; 
   );
 }
 
-/** One line naming each role next to its mark, so the graph reads without guessing. */
-export function RoleLegend({ styles, theme }: { styles: Styles; theme: Theme }) {
+/**
+ * A confirmation shown in place, with Cancel as the default. Shared by the
+ * Settings blocks and the Orchestrator line of the Inbox.
+ *
+ * The confirm button is deliberately not the first control and never
+ * pre-focused: every dialog that uses this grants something that is awkward to
+ * take back, so an accidental Return must do nothing (design §7.13.3, §7.13.4).
+ */
+export function ConfirmBlock({ dialog, busy, busyLabel, onConfirm, onCancel, styles, theme }: {
+  dialog: SetupDialog;
+  busy: boolean;
+  busyLabel: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+  styles: Styles;
+  theme: Theme;
+}) {
   return (
-    <View style={[styles.chipRow, { gap: 12 }]}>
-      {(Object.keys(ROLE_MARK) as Array<GraphNode["kind"]>).map((kind) => (
-        <View key={kind} style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-          <RoleMark kind={kind} theme={theme} size={18} />
-          <Text style={styles.body}>{`${ROLE_MARK[kind].role} · ${ROLE_MARK[kind].does}`}</Text>
+    <View style={{ gap: 6 }}>
+      <Text style={[styles.sectionTitle, { color: toneColor(theme, "warning") }]}>{dialog.title}</Text>
+      <Text style={styles.body} selectable>
+        {dialog.body}
+      </Text>
+      <View style={styles.chipRow}>
+        {busy ? null : (
+          <Pressable accessibilityRole="button" accessibilityLabel={dialog.cancelLabel} onPress={onCancel} style={styles.secondaryButton}>
+            <Text style={styles.secondaryButtonText}>{dialog.cancelLabel}</Text>
+          </Pressable>
+        )}
+        <Pressable accessibilityRole="button" accessibilityLabel={dialog.confirmLabel} disabled={busy} onPress={onConfirm} style={styles.button}>
+          <Text style={styles.buttonText}>{busy ? busyLabel : dialog.confirmLabel}</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+/**
+ * The one frame of every card (experience concept §5.1, autonomy design
+ * §A.12), in the chats and in the Inbox:
+ *
+ * ```
+ * ┌ <mark> <Actor> → <Recipient> · <authority>                 <time> ┐
+ * │ <STATUS CHIP>  <title>                                     <tag> │
+ * │ <body: at most 3 lines>                                          │
+ * │ <actions: one primary>                                Details ▸  │
+ * └──────────────────────────────────────────────────────────────────┘
+ * ```
+ *
+ * Hook-free: the view comes from the card models (`cardFrameOf`,
+ * `decisionCardView`), the actions and Details are passed in. Ids belong in
+ * Details only; the only coloured border is `view.outline`.
+ */
+export function CardFrame({
+  view,
+  actions,
+  details,
+  detailsOpen,
+  onToggleDetails,
+  styles,
+  theme,
+}: {
+  view: CardFrameView;
+  actions?: ReactNode;
+  details: ReactNode;
+  detailsOpen: boolean;
+  onToggleDetails: () => void;
+  styles: Styles;
+  theme: Theme;
+}) {
+  const outline = view.outline === null ? null : { borderColor: toneColor(theme, view.outline) };
+  return (
+    <View style={[styles.card, { gap: 6, marginVertical: 4 }, outline]}>
+      <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
+        <View style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          {view.actor.mark === null ? null : <RoleMark kind={view.actor.mark} theme={theme} size={20} />}
+          <Text style={[styles.body, { color: theme.colors.foreground, fontWeight: "600" }]} numberOfLines={1}>
+            {view.actor.name}
+          </Text>
+          {view.recipient === null ? null : (
+            <Text style={styles.body} numberOfLines={1}>
+              {`→ ${view.recipient}`}
+            </Text>
+          )}
+          {view.authority === null ? null : (
+            <Text style={styles.body} numberOfLines={1}>
+              {`· ${view.authority}`}
+            </Text>
+          )}
         </View>
+        <Text style={styles.body}>{view.time}</Text>
+      </View>
+
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        {view.chip === null ? null : <Chip badge={view.chip} styles={styles} theme={theme} />}
+        <Text style={[styles.sectionTitle, { flex: 1, minWidth: 160 }]} numberOfLines={detailsOpen ? undefined : 2}>
+          {view.title}
+        </Text>
+        {/* Neutral: a tag is read, never told apart by colour alone. */}
+        {view.tag === null ? null : <Text style={[styles.badge, { color: theme.colors.foregroundMuted }]}>{view.tag}</Text>}
+      </View>
+
+      {view.body.slice(0, MAX_BODY_LINES).map((line, index) => (
+        <Text key={`${index}:${line}`} style={styles.body} numberOfLines={detailsOpen ? undefined : 2}>
+          {line}
+        </Text>
       ))}
+
+      {actions === undefined || actions === null ? null : <View style={{ gap: 6 }}>{actions}</View>}
+
+      <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={detailsOpen ? "Hide details" : "Show details"}
+          accessibilityState={{ expanded: detailsOpen }}
+          onPress={onToggleDetails}
+          style={styles.secondaryButton}
+        >
+          <Text style={styles.secondaryButtonText}>{detailsOpen ? "Details ▾" : "Details ▸"}</Text>
+        </Pressable>
+      </View>
+      {view.status === null ? null : <Text style={[styles.body, { color: toneColor(theme, view.status.tone) }]}>{view.status.text}</Text>}
+      {detailsOpen ? <View style={[styles.card, { backgroundColor: theme.colors.surface0, gap: 4 }]}>{details}</View> : null}
+    </View>
+  );
+}
+
+/**
+ * A notice as one compact line — `● <what happened> · <time ago>` — with the
+ * whole notice on a tap (the `notice` card). Hook-free.
+ */
+export function CompactLine({
+  tone,
+  text,
+  expanded,
+  onToggle,
+  details,
+  styles,
+  theme,
+}: {
+  tone: Tone;
+  text: string;
+  expanded: boolean;
+  onToggle: () => void;
+  details: ReactNode;
+  styles: Styles;
+  theme: Theme;
+}) {
+  return (
+    <View style={{ marginVertical: 2, gap: 4 }}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`${text}. ${expanded ? "Hide" : "Show"} the whole notice`}
+        accessibilityState={{ expanded }}
+        onPress={onToggle}
+        style={{ flexDirection: "row", gap: 6 }}
+      >
+        <Text style={[styles.body, { color: toneColor(theme, tone) }]}>{NOTICE_DOT}</Text>
+        <Text style={[styles.body, { flex: 1 }]} numberOfLines={expanded ? undefined : 1}>
+          {text}
+        </Text>
+        <Text style={styles.body}>{expanded ? "▾" : "▸"}</Text>
+      </Pressable>
+      {expanded ? <View style={[styles.card, { backgroundColor: theme.colors.surface0 }]}>{details}</View> : null}
     </View>
   );
 }

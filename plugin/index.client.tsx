@@ -9,22 +9,23 @@ import { NEW_REQUEST_MARKER } from "./shared/new-request";
 import { ManagerLauncherSurface } from "./client/launcher";
 import { AGENT_TREE_ICON, AGENT_TREE_PANEL_ID } from "./client/agent-tree";
 import { AgentTreePanel } from "./client/tree";
-import { DASHBOARD_ICON } from "./client/dashboard-model";
-import { BEADS_TAB_PANEL_ID, launcherNotices, selectDashboardFromCommandCenter } from "./client/dashboard-view";
+import { BEADS_TAB_PANEL_ID, launcherNotices, selectProjectFromCommandCenter, selectSectionFromCommandCenter } from "./client/surface-view";
 import { DashboardSettingsScreen, SETTINGS_ICON, SETTINGS_SCREEN_ID } from "./client/settings";
-import { CHAT_CARD_KIND, CHAT_CARD_VERSION, chatCardSchema, toChatCard } from "./client/chat-cards";
+import { CHAT_CARD_KIND, CHAT_CARD_VERSION, chatCardSchema, toChatCards } from "./client/chat-cards";
 import { ChatCardView } from "./client/chat-card";
 import { ChatBeadsPanel } from "./client/bead-chips";
 import { BeadsTabPanel } from "./client/beads-tab";
 import { registerBeadsHeaderButtons } from "./client/beads-header-button";
-import { registerWaitingPills } from "./client/waiting-pills";
 
-/** A chat item as a paseo-bm card, or nothing (the item stays Paseo's). */
+/**
+ * A chat item as paseo-bm cards (v2, autonomy design §A.12), or nothing (the
+ * item stays Paseo's). A report that asks questions is one card per question.
+ */
 function chatCardItems(item: { type: string }, phase: "streaming" | "complete") {
-  const card = toChatCard(item, phase);
-  return card === undefined
+  const cards = toChatCards(item, phase);
+  return cards === undefined || cards.length === 0
     ? undefined
-    : { items: [{ type: "plugin" as const, kind: CHAT_CARD_KIND, version: CHAT_CARD_VERSION, data: card }] };
+    : { items: cards.map((card) => ({ type: "plugin" as const, kind: CHAT_CARD_KIND, version: CHAT_CARD_VERSION, data: card })) };
 }
 
 // ---------------------------------------------------------------------------
@@ -110,20 +111,18 @@ async function runWorkerStopAll(context: WorkspaceCommand): Promise<void> {
 /**
  * Client entry of the paseo-bm plugin (Technical Design §8).
  *
- * WP-211 adds the Dashboard to that same surface (Q-036): a "Dashboard" button
- * per workspace, a workspace Command Center item that queues a workspace and
- * opens the surface, and a plugin settings screen for the trace-store warning
- * threshold.
+ * It registers the "Beads Manager" surface — Inbox · Work · Insights ·
+ * Settings (autonomy design §A.12) — with its sidebar item and three Command
+ * Center items: "Open Beads Manager" opens the workspace's Manager through
+ * `manager.ensure` (WP-113), "Open Beads project" opens the workspace's project
+ * page in Work, and "Open Beads Inbox" opens the Inbox; plus a plugin settings
+ * screen for the trace-store warning threshold. It also registers the
+ * read-only "Beads agents" workspace panel (agent tree + role configuration).
  *
- * WP-113 registers the "Beads Manager" surface, its sidebar item and the
- * workspace Command Center item; both open the Manager through
- * `manager.ensure`. It also registers the read-only "Beads agents" workspace
- * panel (agent tree + role configuration).
- *
- * It also turns messages between the Manager, Workers and Reviewers into chat
- * cards (delta 20260916-chat-cards), registers the two slash commands of
- * delta 20260917e §4.4, and adds the "Beads" tab that Paseo lists in the "+"
- * menu of every workspace (delta 20260918e §4.1).
+ * It also turns paseo-bm's messages into chat cards (cards v2, autonomy design
+ * §A.12), registers the two slash commands of delta 20260917e §4.4, and adds
+ * the "Beads" tab that Paseo lists in the "+" menu of every workspace (delta
+ * 20260918e §4.1): the workspace's project page.
  *
  * This entry must never import from `server/`: that is a compile error.
  *
@@ -151,13 +150,24 @@ export default function contribute(client: PluginClientContext): () => void {
       context: "workspace",
       onSelect: (context) => selectFromCommandCenter(context),
     }),
+    // Autonomy design §A.12: this workspace's project page in Work, on its Requests.
     client.addCommandCenterItem({
-      id: "open-beads-dashboard",
-      title: "Open Beads Metric",
-      icon: DASHBOARD_ICON,
-      keywords: ["beads", "metric", "dashboard", "traces", "paseo-bm"],
+      id: "open-beads-project",
+      title: "Open Beads project",
+      icon: "LayoutDashboard",
+      keywords: ["beads", "work", "project", "requests", "paseo-bm"],
       context: "workspace",
-      onSelect: (context) => selectDashboardFromCommandCenter(context, LAUNCHER_SURFACE_ID),
+      onSelect: (context) => selectProjectFromCommandCenter(context, LAUNCHER_SURFACE_ID),
+    }),
+    // Autonomy design §A.12: the surface opens on a section through a slot,
+    // since a surface takes no parameter. From anywhere: the Inbox is global.
+    client.addCommandCenterItem({
+      id: "open-beads-inbox",
+      title: "Open Beads Inbox",
+      icon: "Inbox",
+      keywords: ["beads", "inbox", "decisions", "alerts", "paseo-bm"],
+      context: "global",
+      onSelect: (context) => selectSectionFromCommandCenter(context, LAUNCHER_SURFACE_ID, "inbox"),
     }),
     client.addSlashCommand({
       name: "bm-worker-new",
@@ -179,8 +189,9 @@ export default function contribute(client: PluginClientContext): () => void {
       icon: SETTINGS_ICON,
       Component: DashboardSettingsScreen,
     }),
-    // Messages between the Manager, Workers and Reviewers as cards
-    // (delta 20260916-chat-cards). Only paseo-bm's own messages are changed.
+    // paseo-bm's messages as cards v2 (autonomy design §A.12): decisions live
+    // from the store, reports, verdicts, briefs, delivered commands, and
+    // notices as compact lines. Only paseo-bm's own messages are changed.
     client.addTimelineTransformer({
       id: "bm-chat-received",
       query: { itemType: "user_message" },
@@ -223,8 +234,6 @@ export default function contribute(client: PluginClientContext): () => void {
       context: "workspace",
       Component: AgentTreePanel,
     }),
-    // A pill per Worker waiting for the user's answer (delta 20260918d §4.8).
-    registerWaitingPills(client),
   ];
   return () => {
     for (const remove of removers) void remove();

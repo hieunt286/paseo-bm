@@ -1,0 +1,24 @@
+{
+  "id": "S8",
+  "title": "Two-package TypeScript: rename a field the consumer uses",
+  "fixture": { "kind": "ts-two-package", "seededBeads": [], "bareRemote": false },
+  "requests": [
+    {
+      "text": "In the library package, rename the field `mean` of the object that summarize() returns to `average`.",
+      "delaySeconds": 0
+    }
+  ],
+  "owner": { "policy": "recommended", "overrides": [] },
+  "expect": {
+    "tier": ["medium", "large"],
+    "testsGreen": true,
+    "git": { "commit": "none", "push": { "expect": "none" } },
+    "changed": ["library/src/", "consumer/src/"],
+    "contains": [{ "path": "library/src/stats.ts", "text": "average" }],
+    "contractDoc": {
+      "paths": ["library/README.md", "CHANGELOG.md", "docs/"],
+      "orAsked": ["mean", "average", "rename", "breaking"]
+    }
+  },
+  "timeoutMinutes": 60
+}

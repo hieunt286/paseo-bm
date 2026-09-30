@@ -3,7 +3,8 @@ import { checkBlocks } from "../plugin/shared/bm-format";
 import { parseAnswers, parseQuestions } from "../plugin/shared/bm-questions";
 import { parseReports, parseReviews } from "../plugin/shared/bm-report";
 import { toolNamed, type ToolResult } from "../plugin/shared/bm-tools";
-import { summaryOf, toChatCard } from "../plugin/client/chat-cards";
+import { EFFECTS } from "../plugin/shared/decisions";
+import { cardFrameOf, toChatCards } from "../plugin/client/chat-cards";
 import { blocksCompletion } from "../plugin/server/traces";
 
 /**
@@ -73,8 +74,22 @@ describe("bm_report: what it builds is what every reader reads (500 generated re
           ? Array.from({ length: 1 + g.count(4) }, (_, index) => {
               const size = 2 + g.count(3);
               const recommended = g.count(size - 1);
-              const options = Array.from({ length: size }, (_, position) => ({ text: g.words(), ...(position === recommended ? { recommended: true } : {}) }));
-              return { id: `Q${index + 1 + (seed % 7)}`, text: g.words(), options };
+              // Effects: none, one, several (with a repeat) or `none` alone; the tags of autonomy design §A.5.
+              const effects = () => {
+                const roll = g.random();
+                if (roll < 0.4) return {};
+                if (roll < 0.5) return { effects: ["none"] };
+                return { effects: Array.from({ length: 1 + g.count(3) }, () => g.pick(EFFECTS.filter((effect) => effect !== "none"))) };
+              };
+              const options = Array.from({ length: size }, (_, position) => ({ text: g.words(), ...(position === recommended ? { recommended: true } : {}), ...effects() }));
+              const id = index + 1 + (seed % 7);
+              return {
+                id: `Q${id}`,
+                text: g.words(),
+                ...(g.random() < 0.5 ? { subject: g.pick(["push-backends", "storage", "q1-cookie", "x"]) } : {}),
+                ...(id > 1 && g.random() < 0.4 ? { supersedes: `Q${1 + g.count(id - 2)}` } : {}),
+                options,
+              };
             })
           : undefined;
       const input = {
@@ -125,17 +140,33 @@ describe("bm_report: what it builds is what every reader reads (500 generated re
       if (phase === "blocked") {
         expect(asked?.questions.map((question) => question.id), `seed ${seed}`).toEqual(questions!.map((question) => question.id));
         asked!.questions.forEach((question, index) => {
-          expect(question.options, `seed ${seed}`).toHaveLength(questions![index]!.options.length);
+          const given = questions![index]!;
+          expect(question.options, `seed ${seed}`).toHaveLength(given.options.length);
           expect(question.options.filter((option) => option.recommended), `seed ${seed}`).toHaveLength(1);
+          // The tags come back as given: each effect once, in the order written.
+          expect(question.subject, `seed ${seed}`).toBe(given.subject);
+          expect(question.supersedes, `seed ${seed}`).toBe(given.supersedes);
+          question.options.forEach((option, position) => {
+            const effects = given.options[position]!.effects;
+            expect(option.effects, `seed ${seed}`).toEqual(effects === undefined ? undefined : [...new Set(effects)]);
+          });
         });
       } else {
         expect(asked?.questions ?? [], `seed ${seed}`).toEqual([]);
       }
-      // The card in the Manager's chat.
-      const card = toChatCard({ type: "user_message", text: block }, "complete")!;
-      expect(card, `seed ${seed}`).toMatchObject({ type: "report", phase, formatIssues: [] });
-      expect(card.questions, `seed ${seed}`).toHaveLength(questions?.length ?? 0);
-      expect(/waiting on/.test(summaryOf(card)), `seed ${seed}`).toBe(phase !== "blocked" && ownWaits);
+      // The cards in the Manager's chat (cards v2): one decision card per question,
+      // else one report card that says what it waits on.
+      const cards = toChatCards({ type: "user_message", text: block }, "complete")!;
+      if (phase === "blocked") {
+        expect(cards.map((card) => card.decision?.id), `seed ${seed}`).toEqual(questions!.map((question) => `q:${REQ}:${question.id}`));
+        for (const card of cards) expect(card, `seed ${seed}`).toMatchObject({ type: "decision", formatIssues: [] });
+      } else {
+        expect(cards, `seed ${seed}`).toHaveLength(1);
+        const [card] = cards;
+        expect(card, `seed ${seed}`).toMatchObject({ type: phase === "finished" ? "finished" : "progress", report: { phase }, formatIssues: [] });
+        const waiting = cardFrameOf(card!, { owner: null, peers: [], at: new Date(), now: new Date() }).body.some((line) => line.startsWith("Waiting on: "));
+        expect(waiting, `seed ${seed}`).toBe(phase !== "finished" && ownWaits);
+      }
     }
     // The generator must mostly produce buildable reports, or the test proves little.
     expect(built).toBeGreaterThan(400);
@@ -165,8 +196,8 @@ describe("bm_review: the verdict and the count every reader takes (300 generated
       const blocking = findings.filter((finding) => finding.severity === "blocking").length;
       const [review] = parseReviews(block, { agentId: "r", at: "" });
       expect(review, `seed ${seed}`).toMatchObject({ batchId: input.batchId, verdict: blocking > 0 ? "changes-required" : "pass", blockingCount: blocking });
-      const card = toChatCard({ type: "assistant_message", text: block }, "complete")!;
-      expect(card, `seed ${seed}`).toMatchObject({ type: "review", verdict: review!.verdict, blocking, formatIssues: [] });
+      const [card] = toChatCards({ type: "assistant_message", text: block }, "complete")!;
+      expect(card, `seed ${seed}`).toMatchObject({ type: "verdict", review: { verdict: review!.verdict, blocking }, formatIssues: [] });
     }
     expect(built).toBeGreaterThan(250);
   });

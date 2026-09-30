@@ -1,13 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import {
   FALLBACK_POLICY_CHOICES,
   ROLES_APPLY_NOTICE,
   ROLES_CONFLICT_MESSAGE,
-  DEFAULT_SETUP_TAB,
   SETUP_ROLES,
-  SETUP_TABS,
   addFallback,
   applySavedRole,
   canAddFallback,
@@ -24,7 +20,6 @@ import {
   removeFallback,
   replaceFallback,
   saveFallbackInput,
-  extraCounter,
   installWarning,
   isSettingsConflict,
   modeChoices,
@@ -39,7 +34,6 @@ import {
   saveErrorText,
   saveSettingsInput,
   savedNotes,
-  setupHeadline,
   skillBadge,
   skillChips,
   skillDirsText,
@@ -47,7 +41,6 @@ import {
   toolBadge,
   AGENT_TOOLS_DIALOG,
   CLEANUP_DATA_DIALOG,
-  CLEANUP_NEXT_LINE,
   CLEANUP_WARNING_DIALOG,
   MIGRATION_BANNER_TEXT,
   cleanupDataQuestion,
@@ -64,9 +57,9 @@ import {
   skillsRunLine,
   ensureRolesLine,
   migrationBanner,
-  setupChecklist,
   skillsDialog,
 } from "../plugin/client/setup-model";
+import { rolesInstructionsRpc, rolesSaveExtraRpc, rolesSaveSettingsRpc } from "../plugin/shared/contracts";
 import type { FallbackSettings, RoleModelOption, RoleSetting, RolesOptions, RolesSettings, SetupStatus } from "../plugin/shared/contracts";
 
 type Tool = SetupStatus["tools"][number];
@@ -84,19 +77,6 @@ const tool = (overrides: Partial<Tool>): Tool => ({
   ...overrides,
 });
 
-const status = (tools: Tool[], missing: SetupStatus["skills"]["missingRequired"] = { claude: 0, codex: 0 }): SetupStatus => ({
-  tools,
-  latestCheckedOn: "2026-09-16",
-  skills: {
-    checkedAt: "",
-    dirs: { shared: "", claude: "", codex: "" },
-    skills: [1, 2, 3, 4, 5].map((n) => ({ name: `s${n}`, required: true, claude: "ok", codex: "ok", problem: null })),
-    missingRequired: missing,
-    installCommand: "",
-  },
-  extras: { manager: 0, worker: 0, reviewer: 0 },
-});
-
 describe("setup wording", () => {
   it("compares versions numerically, with or without a leading v", () => {
     expect(compareVersions("0.2.10", "0.6.0")).toBeLessThan(0);
@@ -112,25 +92,13 @@ describe("setup wording", () => {
     expect(toolBadge(tool({}))).toEqual({ text: "0.6.0", tone: "success" });
   });
 
-  it("says in one line whether the machine is ready", () => {
-    const bv = tool({ id: "bv", path: null, version: null });
-    expect(setupHeadline(status([tool({}), bv]))).toMatchObject({ tone: "danger" });
-    expect(setupHeadline(status([tool({}), bv])).text).toContain("Missing bv");
-    expect(setupHeadline(status([tool({}), tool({ id: "bv" })], { claude: 2, codex: 0 }))).toEqual({
-      text: "br and bv ready · skills: Claude 3/5, Codex 5/5",
-      tone: "success",
-    });
-    expect(setupHeadline(status([tool({})], { claude: 1, codex: 1 })).tone).toBe("warning");
-  });
-
-  it("labels skills, counts characters, and names what Install will run", () => {
+  it("labels skills and names what Install will run", () => {
     expect(skillBadge("Claude", "ok")).toEqual({ text: "Claude ✓", tone: "success" });
     expect(skillBadge("Codex", "broken").tone).toBe("danger");
     expect(skillBadge("Codex", "missing").tone).toBe("warning");
-    expect(extraCounter(1234, 8000)).toBe("1,234 / 8,000 characters");
     expect(installWarning(tool({}))).toContain("Homebrew");
     expect(installWarning(tool({ installCommand: "curl -fsSL x | bash" }))).toContain("install script from GitHub");
-    expect(SETUP_ROLES.map((entry) => entry.mark)).toEqual(["request", "worker", "reviewer"]);
+    expect(SETUP_ROLES.map((entry) => entry.mark)).toEqual(["request", "worker", "reviewer", "orchestrator"]);
   });
 
   describe("Pi and OpenCode columns (delta 20260921 §4.2.6)", () => {
@@ -157,14 +125,6 @@ describe("setup wording", () => {
       );
     });
 
-    it("count in the headline, and one ready agent is enough", () => {
-      const both = [tool({}), tool({ id: "bv" })];
-      expect(setupHeadline(status(both, { claude: 5, codex: 5, pi: 0, opencode: 2 }))).toEqual({
-        text: "br and bv ready · skills: Claude 0/5, Codex 0/5, Pi 5/5, OpenCode 3/5",
-        tone: "success",
-      });
-      expect(setupHeadline(status(both, { claude: 5, codex: 5, pi: 1, opencode: 2 })).tone).toBe("warning");
-    });
   });
 });
 
@@ -233,6 +193,7 @@ describe("Roles & models", () => {
       setting({ role: "manager", thinkingOptionId: "high", modeId: "bypassPermissions" }),
       setting({ role: "worker", thinkingOptionId: "high" }),
       setting({ role: "reviewer", baseProvider: "codex", model: "gpt-5.6-sol", modeId: "auto" }),
+      setting({ role: "orchestrator", modeId: "default" }),
     ],
     fallback: null,
     warnings: ["Manager and Worker share the claude plan: if the Worker hits its limit, the Manager stops too."],
@@ -247,15 +208,48 @@ describe("Roles & models", () => {
         ["manager", "Manager", "request"],
         ["worker", "Worker", "worker"],
         ["reviewer", "Reviewer", "reviewer"],
+        ["orchestrator", "Orchestrator", "orchestrator"],
       ]);
       expect(rows.map((row) => row.text)).toEqual([
         "Claude · Opus 5 · thinking high · mode Bypass",
         "Claude · Opus 5 · thinking high",
         "Codex · GPT-5.6-Sol · thinking provider default · mode Auto",
+        "Claude · Opus 5 · thinking provider default · mode Default",
       ]);
       // Whatever order the server sends is the order shown.
       const reversed = { ...settings, roles: [...settings.roles].reverse() };
-      expect(roleRows(reversed, byProvider).map((row) => row.role)).toEqual(["reviewer", "worker", "manager"]);
+      expect(roleRows(reversed, byProvider).map((row) => row.role)).toEqual(["orchestrator", "reviewer", "worker", "manager"]);
+    });
+
+    it("give the Orchestrator a fourth card with its own model, thinking and mode, and no fallback (orchestrator design §3.1)", () => {
+      const worker: FallbackSettings = { role: "worker", policy: "ask", entries: [], patternsFromFile: false };
+      const withChains: RolesSettings = { ...settings, fallback: { manager: { ...worker, role: "manager" }, worker, reviewer: { ...worker, role: "reviewer" } } };
+      const rows = roleRows(withChains, byProvider);
+      expect(rows).toHaveLength(4);
+      // The three older roles keep their chains; the Orchestrator's row has none, so no "Add fallback" button.
+      expect(rows.map((row) => [row.role, row.fallback?.role ?? null])).toEqual([
+        ["manager", "manager"],
+        ["worker", "worker"],
+        ["reviewer", "reviewer"],
+        ["orchestrator", null],
+      ]);
+      expect(fallbackBlocks(withChains).map((block) => block.role)).toEqual(["manager", "worker", "reviewer"]);
+      // Its Additional instructions card is listed with the others.
+      expect(SETUP_ROLES.map((entry) => [entry.role, entry.label])).toEqual([
+        ["manager", "Manager"],
+        ["worker", "Worker"],
+        ["reviewer", "Reviewer"],
+        ["orchestrator", "Orchestrator"],
+      ]);
+    });
+
+    it("reads and saves every card's settings and Additional instructions through the existing RPCs", () => {
+      for (const { role } of SETUP_ROLES) {
+        expect(rolesInstructionsRpc.input.safeParse({ role }).success).toBe(true);
+        expect(rolesSaveExtraRpc.input.safeParse({ role, text: "Answer in English." }).success).toBe(true);
+        const draft = { baseProvider: "claude", model: "claude-opus-5", thinkingOptionId: null, modeId: null };
+        expect(rolesSaveSettingsRpc.input.safeParse(saveSettingsInput("rev-1", role, draft)).success).toBe(true);
+      }
     });
 
     it("show ids while the options are not loaded, or when they are for another provider", () => {
@@ -329,6 +323,30 @@ describe("Roles & models", () => {
       const reviewer = form("reviewer", { baseProvider: "claude", model: "claude-opus-5", modeId: "bypassPermissions" }, claude);
       expect(reviewer.modes.map((choice) => choice.id)).not.toContain("bypassPermissions");
       expect(reviewer.draft.modeId).toBeNull();
+    });
+
+    it("puts the Orchestrator under the Reviewer's mode rule, and edits its model and thinking like any role", () => {
+      const ids = (choices: ReturnType<typeof modeChoices>) => choices.map((choice) => choice.id);
+      expect(ids(modeChoices("orchestrator", claude))).toEqual([null, "default", "acceptEdits"]);
+      expect(ids(modeChoices("orchestrator", codex))).toEqual([null, "auto"]);
+      expect(ids(modeChoices("orchestrator", opencode))).toEqual([null, "build", "plan"]);
+      expect(modeChoices("orchestrator", pi)).toEqual([]);
+      const view = form("orchestrator", { modeId: "bypassPermissions" });
+      expect(view.models.map((model) => model.id)).toEqual(["claude-opus-5", "claude-haiku"]);
+      expect(view.thinking.map((choice) => choice.id)).toEqual([null, "medium", "high"]);
+      expect(view.modes.map((choice) => choice.id)).toEqual([null, "default", "acceptEdits"]);
+      expect(view.draft.modeId).toBeNull();
+      // Saved through roles.save-settings, like the other three.
+      const edited = form("orchestrator", { thinkingOptionId: "high", modeId: "acceptEdits" });
+      expect(edited.changed).toBe(true);
+      expect(saveSettingsInput(settings.revision, "orchestrator", edited.draft)).toEqual({
+        revision: "rev-1",
+        role: "orchestrator",
+        baseProvider: "claude",
+        model: "claude-opus-5",
+        thinkingOptionId: "high",
+        modeId: "acceptEdits",
+      });
     });
 
     it("hides Mode for a provider without modes (capability none)", () => {
@@ -420,7 +438,7 @@ describe("Roles & models", () => {
     it("puts the saved role and the new revision in place until roles.settings is refetched", () => {
       const next = applySavedRole(settings, { revision: "rev-2", role: saved });
       expect(next.revision).toBe("rev-2");
-      expect(next.roles.map((entry) => entry.role)).toEqual(["manager", "worker", "reviewer"]);
+      expect(next.roles.map((entry) => entry.role)).toEqual(["manager", "worker", "reviewer", "orchestrator"]);
       expect(next.roles[1]).toBe(saved);
       expect(next.roles[0]).toBe(settings.roles[0]);
       expect(next.providers).toBe(settings.providers);
@@ -542,52 +560,7 @@ describe("Roles & models", () => {
   });
 });
 
-describe("the three tabs of the Setup screen (delta 20260925 §3.3)", () => {
-  const source = readFileSync(fileURLToPath(new URL("../plugin/client/setup-screen.tsx", import.meta.url)), "utf8");
-
-  it("names the three configurations the owner asked for, in that order, and opens on the first", () => {
-    expect(SETUP_TABS.map((tab) => [tab.key, tab.label])).toEqual([
-      ["tools", "Beads tools"],
-      ["skills", "Agent skills"],
-      ["agents", "Agents"],
-    ]);
-    // Every tab says what it holds, for the screen reader label.
-    expect(SETUP_TABS.every((tab) => tab.hint.length > 0)).toBe(true);
-    expect(DEFAULT_SETUP_TAB).toBe("tools");
-    expect(SETUP_TABS.some((tab) => tab.key === DEFAULT_SETUP_TAB)).toBe(true);
-  });
-
-  it("draws one section at a time, through the same tab row the Beads board uses", () => {
-    expect(source).toMatch(/<StatusTabs tabs=\{SETUP_TABS\} selected=\{tab\}/);
-    for (const key of ["tools", "skills", "agents"]) {
-      expect(source).toContain(`{tab !== "${key}" ? null : (`);
-    }
-    // The two role sections share the Agents tab: Roles & models and the
-    // additional instructions are one configuration.
-    const agents = source.slice(source.indexOf('{tab !== "agents" ? null : ('));
-    expect(agents).toMatch(/<RolesSection/);
-    expect(agents).toMatch(/Additional instructions/);
-    expect(agents).toMatch(/<RoleCard/);
-  });
-
-  it("keeps the headline and the tool warnings above the tabs, so no tab can hide a problem", () => {
-    const tabs = source.indexOf("<StatusTabs tabs={SETUP_TABS}");
-    expect(tabs).toBeGreaterThan(0);
-    const above = source.slice(0, tabs);
-    expect(above).toMatch(/setupHeadline\(data\)/);
-    expect(above).toMatch(/paseoToolsWarnings\(data\)/);
-    expect(above).toMatch(/\{statusStrip\}/);
-    // The version line and "This install" stay at the end of the screen,
-    // outside the tabs, so they are readable whichever tab is open.
-    const below = source.slice(source.lastIndexOf("<StatusTabs tabs={SETUP_TABS}"));
-    const footer = below.slice(below.lastIndexOf("paseo-bm ${PLUGIN_VERSION}"));
-    expect(footer).toMatch(/paseo-bm \$\{PLUGIN_VERSION\}/);
-    expect(footer).toMatch(/dataHomeLine\(data\)/);
-    expect(footer).toMatch(/PLUGIN_DIAGNOSTICS_LINE/);
-  });
-});
-
-// ── "Set up paseo-bm" (0.4.0, design §7.13 / Dashboard §11.3) ──────────────
+// ── A machine set up, for the banner and the sign-in rows (design §7.13) ──────
 
 const skillRow = (name: string, ok: boolean) => ({
   name,
@@ -633,165 +606,6 @@ const withSetup = (setup: Partial<NonNullable<SetupStatus["setup"]>>, rest: Part
   return { ...base, setup: { ...base.setup!, ...setup } } as SetupStatus;
 };
 
-describe("setupChecklist", () => {
-  it("shows no card at all when nothing is missing", () => {
-    expect(setupChecklist(readyStatus())).toEqual([]);
-  });
-
-  it("shows nothing for an older server that does not send the setup field", () => {
-    const old = { ...readyStatus(), setup: undefined };
-    expect(setupChecklist(old as SetupStatus)).toEqual([]);
-  });
-
-  it("names the missing roles, and carries the server's reason when there is one", () => {
-    const status = withSetup({ roles: { present: ["manager"], missing: ["worker", "reviewer"], created: null, cleanedUpAt: null } });
-
-    expect(setupChecklist(status)[0]).toEqual({
-      key: "roles",
-      title: "Roles",
-      status: "Not created: Worker, Reviewer.",
-      button: "Try again",
-      action: { kind: "ensure-roles" },
-      command: null,
-    });
-    expect(setupChecklist(status, "E_SETUP_ROLES_FAILED: Paseo reports no available provider")[0]?.status).toBe(
-      "Not created: Worker, Reviewer. E_SETUP_ROLES_FAILED: Paseo reports no available provider",
-    );
-  });
-
-  it("asks for the agent-tools switch only when Paseo says it is off", () => {
-    expect(setupChecklist(withSetup({ agentTools: { injectIntoAgents: false, setBy: null } }))).toEqual([
-      {
-        key: "agent-tools",
-        title: "Agent tools",
-        status: "Off — no new Beads Manager starts until you allow them.",
-        button: "Allow agent tools…",
-        action: { kind: "grant-agent-tools" },
-        command: null,
-      },
-    ]);
-    // Unknown is not off: a configuration that could not be read says nothing.
-    expect(setupChecklist(withSetup({ agentTools: { injectIntoAgents: null, setBy: null } }))).toEqual([]);
-  });
-
-  it("counts the skills of the Worker's own provider, and of no other", () => {
-    const claudeWorker = readyStatus();
-    claudeWorker.skills.missingRequired = { claude: 2, codex: 0, pi: 5, opencode: 5 };
-
-    expect(setupChecklist(claudeWorker)[0]).toMatchObject({
-      key: "skills",
-      status: "Required skills for the Worker (Claude Code): 3/5. The Worker works with lower quality without them.",
-      button: "Install skills…",
-      action: { kind: "install-skills" },
-    });
-
-    // A Claude Worker with all five is fine even when Codex is missing them.
-    const codexMissing = readyStatus();
-    codexMissing.skills.missingRequired = { claude: 0, codex: 5, pi: 5, opencode: 5 };
-    expect(setupChecklist(codexMissing)).toEqual([]);
-  });
-
-  it("follows a Worker that runs on Codex", () => {
-    const status = withSetup({
-      logins: [
-        { provider: "claude", roles: ["manager"], state: "logged-in", loginCommand: "claude auth login", guidance: null },
-        { provider: "codex", roles: ["worker", "reviewer"], state: "logged-in", loginCommand: "codex login", guidance: null },
-      ],
-    });
-    status.skills.missingRequired = { claude: 5, codex: 1, pi: 5, opencode: 5 };
-
-    expect(setupChecklist(status)[0]?.status).toBe(
-      "Required skills for the Worker (Codex): 4/5. The Worker works with lower quality without them.",
-    );
-  });
-
-  it("shows no skills row for a Worker on a provider with no column", () => {
-    const status = withSetup({
-      logins: [{ provider: "something-else", roles: ["manager", "worker", "reviewer"], state: "logged-in", loginCommand: null, guidance: null }],
-    });
-    status.skills.missingRequired = { claude: 5, codex: 5, pi: 5, opencode: 5 };
-
-    expect(setupChecklist(status)).toEqual([]);
-  });
-
-  it("shows no skills row when there is no Worker role yet", () => {
-    const status = withSetup({
-      roles: { present: ["manager"], missing: ["worker", "reviewer"], created: null, cleanedUpAt: null },
-      logins: [{ provider: "claude", roles: ["manager"], state: "logged-in", loginCommand: "claude auth login", guidance: null }],
-    });
-    status.skills.missingRequired = { claude: 5, codex: 5, pi: 5, opencode: 5 };
-
-    expect(setupChecklist(status).map((row) => row.key)).toEqual(["roles"]);
-  });
-
-  it("sends the user to the Beads tools tab for a missing br or bv", () => {
-    const status = readyStatus();
-    status.tools[0]!.path = null;
-
-    expect(setupChecklist(status)[0]).toMatchObject({
-      key: "tools",
-      status: "Missing br — the Worker cannot manage beads without it",
-      button: "Open Beads tools",
-      action: { kind: "open-tab", tab: "tools" },
-    });
-
-    status.tools[1]!.path = null;
-    expect(setupChecklist(status)[0]?.status).toBe("Missing br and bv — the Worker cannot manage beads without it");
-  });
-
-  it("reports a signed-out provider with its command, and says nothing about an unknown one", () => {
-    const out = withSetup({
-      logins: [{ provider: "codex", roles: ["manager", "worker"], state: "logged-out", loginCommand: "codex login", guidance: null }],
-    });
-
-    expect(setupChecklist(out).at(-1)).toEqual({
-      key: "sign-in",
-      title: "Sign-in",
-      status: "`codex` (used by Manager, Worker) is not signed in. Sign in with: `codex login`",
-      button: null,
-      action: { kind: "none" },
-      command: "codex login",
-    });
-
-    const unknown = withSetup({
-      logins: [{ provider: "codex", roles: ["manager"], state: "unknown", loginCommand: "codex login", guidance: null }],
-    });
-    expect(setupChecklist(unknown)).toEqual([]);
-  });
-
-  it("shows Pi's guidance instead of a command", () => {
-    const status = withSetup({
-      logins: [
-        {
-          provider: "pi",
-          roles: ["reviewer"],
-          state: "logged-out",
-          loginCommand: null,
-          guidance: "Pi has no login command paseo-bm knows; sign in the way Pi's own documentation describes, then open Setup again.",
-        },
-      ],
-    });
-
-    expect(setupChecklist(status)[0]).toMatchObject({
-      status:
-        "`pi` (used by Reviewer) is not signed in. Pi has no login command paseo-bm knows; sign in the way Pi's own documentation describes, then open Setup again.",
-      command: null,
-    });
-  });
-
-  it("keeps the rows in the order a user has to work through them", () => {
-    const status = withSetup({
-      roles: { present: [], missing: ["manager", "worker", "reviewer"], created: null, cleanedUpAt: null },
-      agentTools: { injectIntoAgents: false, setBy: null },
-      logins: [{ provider: "claude", roles: ["worker"], state: "logged-out", loginCommand: "claude auth login", guidance: null }],
-    });
-    status.skills.missingRequired = { claude: 5, codex: 5, pi: 5, opencode: 5 };
-    status.tools[0]!.path = null;
-
-    expect(setupChecklist(status).map((row) => row.key)).toEqual(["roles", "agent-tools", "skills", "tools", "sign-in"]);
-  });
-});
-
 describe("the migration banner", () => {
   it("appears only for a 0.3.x directory install, with its command", () => {
     expect(migrationBanner(withSetup({ install: { kind: "installer-directory", pluginPath: "/h/.paseo-bm/plugin/0.3.1" } }))).toEqual({
@@ -811,12 +625,22 @@ describe("the migration banner", () => {
 
 describe("what Setup says after ensure-roles", () => {
   it("celebrates roles it just created, dismissably", () => {
-    expect(ensureRolesLine({ created: ["manager", "worker", "reviewer"], baseProvider: "claude", model: "claude-opus-5", skipped: null })).toEqual({
+    const created = ["manager", "worker", "reviewer", "orchestrator"] as const;
+    expect(ensureRolesLine({ created: [...created], baseProvider: "claude", model: "claude-opus-5", skipped: null })).toEqual({
       tone: "success",
       text: "paseo-bm created its roles with defaults (claude · claude-opus-5). Change them in Agents.",
       dismissable: true,
       button: null,
     });
+  });
+
+  it("names only the roles it created, as on a machine updated from 0.4.x", () => {
+    expect(ensureRolesLine({ created: ["orchestrator"], baseProvider: "claude", model: "claude-opus-5", skipped: null })?.text).toBe(
+      "paseo-bm created its Beads Orchestrator role with defaults (claude · claude-opus-5). Change it in Agents.",
+    );
+    expect(ensureRolesLine({ created: ["reviewer", "worker"], baseProvider: "claude", model: "claude-opus-5", skipped: null })?.text).toBe(
+      "paseo-bm created its Beads Worker and Beads Reviewer roles with defaults (claude · claude-opus-5). Change them in Agents.",
+    );
   });
 
   it("says nothing when there was nothing to do", () => {
@@ -993,7 +817,7 @@ describe("the two questions before a cleanup", () => {
     const warning = cleanupWarning(readyStatus());
 
     expect(warning).toBe(
-      "This removes every bm-* provider and agent profile from Paseo (the three roles and their fallbacks). " +
+      "This removes every bm-* provider and agent profile from Paseo (the four roles and their fallbacks). " +
         "Agents already running on these roles will fail on their next turn: archive them first. Skills, br and bv stay.",
     );
   });
@@ -1036,7 +860,6 @@ describe("what the screen says after a cleanup", () => {
     expect(report.lines).toContain("Paseo's agent tools are back to what they were before paseo-bm.");
     expect(report.lines).toContain("Your data was kept.");
     expect(report.nextCommand).toBe("paseo plugin remove paseo-bm");
-    expect(CLEANUP_NEXT_LINE).toBe("Now remove the plugin: `paseo plugin remove paseo-bm`");
   });
 
   it("explains a switch it did not turn off", () => {

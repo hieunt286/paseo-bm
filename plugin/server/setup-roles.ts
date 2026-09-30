@@ -1,6 +1,7 @@
 /**
- * The three roles the plugin creates, and what it creates them with
- * (Technical Design §6.1, §7.13.2; ADR-012 decision 4).
+ * The four roles the plugin creates, and what it creates them with
+ * (Technical Design §6.1, §7.13.2; ADR-012 decision 4; the fourth,
+ * `orchestrator`, from orchestrator design §3.1).
  *
  * Until 0.3.x only the installer wrote these entries, so a user who installed
  * straight from paseo.cafe got the screens and no roles at all: the Manager
@@ -12,20 +13,22 @@
  * The texts are duplicated from `src/roles/register.ts` rather than imported:
  * the plugin bundle never pulls in `src/` (it is a separate npm package). A
  * test keeps the two copies identical for as long as both exist; the CLI's copy
- * goes when its role code does.
+ * goes when its role code does. The Orchestrator came after the installer
+ * retired, so its texts exist here only.
  */
 
 import { DashboardError } from "../shared/contracts";
-import { createRoleEntries, readRoleConfig, type ConfigPaseo } from "./config-writer";
+import { fallbackAliasOf } from "../shared/fallback";
+import { applyRoleToolPolicies, createRoleEntries, type ConfigPaseo } from "./config-writer";
 import { availableProviders, isRoleAlias, nonEmpty } from "./role-choices";
 import { TIMED_OUT, withTimeout } from "./role-mode";
-import { readSetupState, updateSetupState, type SetupStateDeps } from "./setup-state";
+import { SETUP_ROLE_NAMES, readSetupState, updateSetupState, type SetupRoleName, type SetupState, type SetupStateDeps } from "./setup-state";
 
-/** The three roles, in the order Setup lists them. */
-export const ROLE_NAMES = ["manager", "worker", "reviewer"] as const;
+/** The four roles, in the order Setup lists them. */
+export const ROLE_NAMES = ["manager", "worker", "reviewer", "orchestrator"] as const;
 export type RoleName = (typeof ROLE_NAMES)[number];
 
-/** `bm-manager`, `bm-worker`, `bm-reviewer` — the alias and profile id of a role. */
+/** `bm-manager`, `bm-worker`, `bm-reviewer`, `bm-orchestrator` — the alias and profile id of a role. */
 export const roleId = (role: RoleName): string => `bm-${role}`;
 
 /** Agent names, matching the names used throughout the documentation. */
@@ -33,6 +36,7 @@ export const ROLE_DISPLAY_NAMES: Readonly<Record<RoleName, string>> = {
   manager: "Beads Manager",
   worker: "Beads Worker",
   reviewer: "Beads Reviewer",
+  orchestrator: "Beads Orchestrator",
 };
 
 /** What the profile says about the role in Paseo's own Agents tab. */
@@ -47,16 +51,81 @@ export const ROLE_PROFILE_NOTES: Readonly<Record<RoleName, string>> = {
   reviewer:
     "paseo-bm Reviewer — read-only review of the batch of changes just made. It reports findings " +
     "by severity, does not edit anything, and must never create or stop an agent.",
+  orchestrator:
+    "paseo-bm Orchestrator — one coordinator for every paseo-bm project, opened from the Inbox of Beads Manager. " +
+    "It reads the projects' work and asks you in the Inbox, each option with its next step ready; it tells a Manager what to do itself only on " +
+    "Autopilot or your word in its chat, and assesses a project's workflow when asked; it edits nothing and never creates or stops an agent.",
 };
 
 /**
- * Whether the role's alias declares `paseoTools`.
+ * Whether the role's agents get any of Paseo's agent tools.
  *
  * ADR-006 decision 3: the Manager and the Worker create and message agents, the
- * Reviewer must not. The key is omitted for the Reviewer rather than set to
- * false — that is what ADR-006 says and what an uninstall leaves behind.
+ * Reviewer must not, and neither may the Orchestrator (orchestrator design
+ * §3.1). What each gets exactly is `rolePaseoToolsPolicy`.
  */
-export const roleGrantsPaseoTools = (role: RoleName): boolean => role !== "reviewer";
+export const roleGrantsPaseoTools = (role: RoleName): boolean => role === "manager" || role === "worker";
+
+/**
+ * The Paseo tools a Manager never gets (autonomy design §A.10, REQ-116): stopping,
+ * archiving or re-moding an agent, answering permission prompts, and every
+ * schedule and heartbeat. Names are Paseo 0.9.2's (`paseo-tools.js`). Nothing
+ * the Manager's instructions use is here: it keeps create_agent,
+ * send_agent_prompt, get_agent_status, get_agent_activity, list_agents,
+ * list_profiles and cancel_agent.
+ */
+export const MANAGER_DISABLED_PASEO_TOOLS: readonly string[] = [
+  "kill_agent",
+  "archive_agent",
+  "archive_workspace",
+  "respond_to_permission",
+  "list_pending_permissions",
+  "set_agent_mode",
+  "update_agent",
+  "create_schedule",
+  "update_schedule",
+  "delete_schedule",
+  "run_schedule_once",
+  "pause_schedule",
+  "resume_schedule",
+  "create_heartbeat",
+  "delete_heartbeat",
+];
+
+/** The Worker's list: the Manager's, plus making or renaming a workspace. */
+export const WORKER_DISABLED_PASEO_TOOLS: readonly string[] = [...MANAGER_DISABLED_PASEO_TOOLS, "create_workspace", "rename_workspace"];
+
+/** Paseo's per-provider tool policy (`agents.providers.<id>.paseoTools`). */
+export interface PaseoToolsPolicy {
+  enabled: boolean;
+  disabledTools?: string[];
+}
+
+/**
+ * The `paseoTools` policy a role's alias carries (autonomy design §A.10).
+ *
+ * Always written, never omitted: Paseo 0.9.2 treats a missing policy as enabled
+ * while `daemon.mcp.injectIntoAgents` is on (`isPaseoToolEnabled`), so an alias
+ * without the key hands its agents every Paseo tool. This supersedes ADR-006
+ * decision 3's "omitted rather than false" for the Reviewer.
+ */
+export function rolePaseoToolsPolicy(role: RoleName): PaseoToolsPolicy {
+  if (role === "manager") return { enabled: true, disabledTools: [...MANAGER_DISABLED_PASEO_TOOLS] };
+  if (role === "worker") return { enabled: true, disabledTools: [...WORKER_DISABLED_PASEO_TOOLS] };
+  return { enabled: false };
+}
+
+/**
+ * The policy a `bm-*` alias must carry: a main role's (`bm-worker`) or a
+ * fallback alias's (`bm-worker-fallback-2` runs a Worker), or `null` for any
+ * other `bm-*` id, which is not ours to limit.
+ */
+export function paseoToolsPolicyOfAlias(id: string): PaseoToolsPolicy | null {
+  const main = ROLE_NAMES.find((role) => roleId(role) === id);
+  if (main !== undefined) return rolePaseoToolsPolicy(main);
+  const fallback = fallbackAliasOf(id);
+  return fallback === null ? null : rolePaseoToolsPolicy(fallback.role);
+}
 
 /** The base provider and model a role is created on. */
 export interface RoleDefault {
@@ -64,10 +133,9 @@ export interface RoleDefault {
   model: string;
 }
 
-/** The provider alias for a role, exactly as the installer wrote it. */
+/** The provider alias for a role: its base provider, its label and its Paseo-tools policy. */
 export function roleAliasEntry(role: RoleName, baseProvider: string): Record<string, unknown> {
-  const entry: Record<string, unknown> = { extends: baseProvider, label: ROLE_DISPLAY_NAMES[role] };
-  return roleGrantsPaseoTools(role) ? { ...entry, paseoTools: { enabled: true } } : entry;
+  return { extends: baseProvider, label: ROLE_DISPLAY_NAMES[role], paseoTools: rolePaseoToolsPolicy(role) };
 }
 
 /**
@@ -92,7 +160,10 @@ export function roleProfileEntry(role: RoleName, model: string): Record<string, 
  * the plugin has no install hook: `contribute()` has no Paseo handle, so there
  * is no moment at load time when the roles could be created. It is therefore
  * written to do nothing at all — not one patch — on the overwhelmingly common
- * path where the three roles are already there.
+ * path where the four roles are already there with their Paseo-tools policy.
+ * It is also how a machine set up by 0.4.x gets the Orchestrator: of the three
+ * roles it has only `paseoTools` changes (autonomy design §A.10) and only the
+ * missing fourth is created (orchestrator design §3.1, REQ-077e).
  */
 export interface EnsureRolesResult {
   /** The role ids created, empty when there was nothing to do. */
@@ -167,7 +238,7 @@ async function firstModelOf(paseo: unknown, provider: string): Promise<string> {
 }
 
 /**
- * Creates whatever of the three roles is missing, with the installer's
+ * Creates whatever of the four roles is missing, with the installer's
  * defaults, and records that it did.
  *
  * A role counts as missing when EITHER its provider alias or its agent profile
@@ -197,7 +268,13 @@ export async function ensureRoles(paseo: unknown, deps: EnsureRolesDeps = {}): P
     if (cleanedUpThisRun || cleanedUpAt !== null) return { ...nothing, skipped: "cleaned-up" };
   }
 
-  const { config } = await readRoleConfig(paseo as ConfigPaseo);
+  // Every `bm-*` alias already there — main role or fallback — carries its
+  // role's Paseo-tools policy (autonomy design §A.10). A patch only when one
+  // differs, and it changes nothing but `paseoTools`; the roles created below
+  // get the policy from `roleAliasEntry`.
+  const policies = await applyRoleToolPolicies(paseo as ConfigPaseo, paseoToolsPolicyOfAlias);
+  if (policies.updated.length > 0) log(`[paseo-bm] set the Paseo-tools policy of ${policies.updated.join(", ")}`);
+  const { config } = policies;
   const providers = (config.providers ?? {}) as Record<string, unknown>;
   const profiles = Array.isArray(config.agentProfiles) ? config.agentProfiles : [];
   const missing = ROLE_NAMES.filter((role) => {
@@ -227,8 +304,17 @@ export async function ensureRoles(paseo: unknown, deps: EnsureRolesDeps = {}): P
 
   const created = missing.filter((role) => result.created.includes(roleId(role)));
   const at = new Date().toISOString();
+  // `rolesCreated.roles` keeps to the three roles an older release can parse:
+  // 0.4.1 reads the whole file with a three-role enum, and one unknown value
+  // there would make it drop `agentTools` and `cleanedUpAt` with it. The
+  // Orchestrator gets its own field, which an older release ignores
+  // (orchestrator design §3.2, §10).
+  const mains = created.filter((role): role is SetupRoleName => (SETUP_ROLE_NAMES as readonly string[]).includes(role));
+  const record: Partial<SetupState> = {};
+  if (mains.length > 0) record.rolesCreated = { at, roles: mains, baseProvider, model };
+  if (created.includes("orchestrator")) record.orchestratorCreatedAt = at;
   try {
-    updateSetupState({ rolesCreated: { at, roles: [...created], baseProvider, model } }, deps);
+    updateSetupState(record, deps);
   } catch (error) {
     // The configuration is already right; losing the note only costs Setup a
     // sentence about the defaults it used.

@@ -147,7 +147,7 @@ export interface InstallSkillsResult {
 }
 
 /**
- * Runs the `skills` CLI once, with the command the Setup screen showed.
+ * Runs the `skills` CLI once, with the command Settings showed.
  *
  * The plugin still never writes a skill folder itself (ADR-003): the only
  * thing that changes anything there is the CLI process the user chose to run,

@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** (2026-09-28) — together with the Orchestrator design at the `design-ready` gate |
+| Status | **Superseded** by [ADR-014](ADR-014-orchestrator-agent-proposes-owner-approves.md) (2026-09-28) — was Accepted 2026-09-28; built and tested, rejected by the owner before any release |
 | Date | 2026-09-28 |
 | Owner | hieu.nt10 |
 | Related | [Orchestrator PRD](../product/paseo-bm-orchestrator-prd.md) (REQ-075, REQ-078, REQ-079) · [Orchestrator Design](../design/paseo-bm-orchestrator.md) · [ADR-005](ADR-005-manager-as-agent.md) (agents belong to the user) · [ADR-007](ADR-007-dashboard-trace-store.md) (trace store) · [ADR-010](ADR-010-plugin-hosted-agent-tools.md) (MCP tools with no side effects — unchanged) · [ADR-012](ADR-012-plugin-is-the-product.md) (the plugin creates roles) |

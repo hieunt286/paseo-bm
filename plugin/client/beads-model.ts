@@ -368,8 +368,11 @@ export function filterBeads(beads: readonly BeadRow[], filter: BeadFilter): Bead
 // Groups and the closed-beads toggle (delta 20260918e §4.4, owner Q9 and Q10).
 // ---------------------------------------------------------------------------
 
-/** The order of the board's columns: work in progress first, then what is stuck. */
-export const STATUS_GROUP_ORDER: readonly StatusBucket[] = ["in_progress", "blocked", "ready", "closed"];
+/**
+ * The order of the board's columns (experience concept §4.2): work in
+ * progress first, then what can start, then what is stuck; Closed last.
+ */
+export const STATUS_GROUP_ORDER: readonly StatusBucket[] = ["in_progress", "ready", "blocked", "closed"];
 
 /** How many px a column needs before its rows stop being unreadable. */
 export const KANBAN_MIN_COLUMN = 260;
@@ -547,12 +550,12 @@ export function createSessionToggle(initial: boolean): SessionToggle {
 }
 
 /**
- * Whether the Beads screen shows the Closed column. Shown by default since
- * delta 20260925 (owner decision Q4: Closed is a column like the others), still
- * remembered while the app runs and back to shown after a reload. The screen on
- * the surface and the one in the "Beads" tab share it.
+ * Whether the Beads screen shows the Closed column. Hidden by default since
+ * Work (experience concept §4.2: In progress · Ready · Blocked, Closed behind
+ * the eye), remembered while the app runs and back to hidden after a reload.
+ * The screen on the surface and the one in the "Beads" tab share it.
  */
-export const closedBeadsVisibility = createSessionToggle(true);
+export const closedBeadsVisibility = createSessionToggle(false);
 
 export function toggle(set: ReadonlySet<string>, value: string): Set<string> {
   const next = new Set(set);

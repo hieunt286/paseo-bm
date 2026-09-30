@@ -3,7 +3,7 @@
  * up this machine (Technical Design §5.3, §5.4).
  *
  * This file replaces the only part of the installer's `install.json` the plugin
- * still needs. Three of its four fields exist because an undo has to be exact:
+ * still needs. Three of its five fields exist because an undo has to be exact:
  *
  * - `agentTools` is present **if and only if** paseo-bm turned
  *   `daemon.mcp.injectIntoAgents` on, and carries the value that was there
@@ -16,7 +16,13 @@
  *   after the user removed them — which is why the cleanup button keeps this
  *   one file and deletes the rest (design §7.13.7).
  *
- * `skillsRun` is only ever displayed.
+ * `skillsRun` is only ever displayed. `orchestratorCreatedAt` is when the
+ * plugin created the fourth role, `bm-orchestrator`; it is a field of its own
+ * rather than a fourth value of `rolesCreated.roles` because 0.4.1 parses the
+ * whole file with the three-role enum below, and one value it does not know
+ * would make it read the file as empty and lose `agentTools` and
+ * `cleanedUpAt` (orchestrator design §3.2, §10). An older release drops the
+ * unknown field and keeps the rest.
  *
  * The file never holds a secret or a path to one, and reads never repair it: a
  * file from a newer build reads as empty and is not overwritten, because
@@ -34,7 +40,10 @@ import { assertNoSymlinkOnPath, ensureStoreDir, writeStoreFileAtomically } from 
 export const SETUP_STATE_SCHEMA_VERSION = 1;
 export const SETUP_STATE_FILE_NAME = "setup-state.json";
 
-/** The roles the plugin creates, in the order Setup lists them. */
+/**
+ * The roles `rolesCreated.roles` may name, in the order Setup lists them.
+ * Three on purpose: see `orchestratorCreatedAt` above.
+ */
 export const SETUP_ROLE_NAMES = ["manager", "worker", "reviewer"] as const;
 export type SetupRoleName = (typeof SETUP_ROLE_NAMES)[number];
 
@@ -70,6 +79,8 @@ export interface SetupState {
   rolesCreated: RolesCreatedMark | null;
   skillsRun: SkillsRunMark | null;
   cleanedUpAt: string | null;
+  /** When the plugin created `bm-orchestrator`; `null` when it did not. */
+  orchestratorCreatedAt: string | null;
 }
 
 const setupStateFileSchema = z.object({
@@ -78,11 +89,12 @@ const setupStateFileSchema = z.object({
   rolesCreated: rolesCreatedMarkSchema.nullish(),
   skillsRun: skillsRunMarkSchema.nullish(),
   cleanedUpAt: z.string().min(1).nullish(),
+  orchestratorCreatedAt: z.string().min(1).nullish(),
 });
 
 /** What every field reads as before anything has been set up. */
 export function emptySetupState(): SetupState {
-  return { agentTools: null, rolesCreated: null, skillsRun: null, cleanedUpAt: null };
+  return { agentTools: null, rolesCreated: null, skillsRun: null, cleanedUpAt: null, orchestratorCreatedAt: null };
 }
 
 export interface SetupStateDeps extends DataHomeDeps {
@@ -158,6 +170,7 @@ function readFile(home: string): { state: SetupState; tooNew: boolean } {
       rolesCreated: result.data.rolesCreated ?? null,
       skillsRun: result.data.skillsRun ?? null,
       cleanedUpAt: result.data.cleanedUpAt ?? null,
+      orchestratorCreatedAt: result.data.orchestratorCreatedAt ?? null,
     },
     tooNew: false,
   };

@@ -646,6 +646,29 @@ describe("summary and detail", () => {
     expect(full.sent.workerInitialPrompts[0]?.text).toContain("requestId: req-A");
     expect(full.workflowSteps).toEqual([]);
   });
+
+  it("does not take a plugin notice that opens a Worker turn for its initial prompt", () => {
+    const worker = (turnId: string, text: string, at: string) =>
+      record({ agentId: "w1", role: "worker", turnId, at, startedAt: at, endedAt: at, sent: [msg(text, at)] });
+    const records = [
+      record({ sent: [msg("thêm màn hình báo cáo")] }),
+      worker("turn-1", "Your task\nrequestId: req-A", "2026-09-16T10:00:30.000Z"),
+      worker(
+        "turn-2",
+        "BM-RESUME The provider is back; continue the request where you stopped.",
+        "2026-09-16T10:02:00.000Z",
+      ),
+      worker("turn-3", "BM-STOP The user asked every Beads Worker and Reviewer in this workspace to stop.", "2026-09-16T10:03:00.000Z"),
+    ];
+    const { trace: built, agents } = trace(records, [agent({ id: "w1" })]);
+    const full = detail(built, {
+      agents,
+      workspaceState: "live",
+      reassignedFrom: null,
+      lookupBeads: () => ({ found: [], missing: [] }),
+    });
+    expect(full.sent.workerInitialPrompts.map((message) => message.text)).toEqual(["Your task\nrequestId: req-A"]);
+  });
 });
 
 describe("pagination", () => {

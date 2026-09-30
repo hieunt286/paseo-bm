@@ -2,116 +2,106 @@
 
 | Field | Value |
 |---|---|
-| Status | **Active** (2026-09-28) — `design-ready` PASS; owner approved |
+| Status | **Active** (2026-09-28) — rewritten for ADR-014 after the owner rejected the first design; `design-ready` PASS, owner approved |
 | Living document | Once Active, edited in place like the other designs, one Revision History line per edit |
 | Owner | hieu.nt10 (GitHub: hieunt286) |
 | Created | 2026-09-28 |
 | Requirements source | [PRD Orchestrator](../product/paseo-bm-orchestrator-prd.md) (REQ-071 → REQ-081, Accepted 2026-09-28) |
 | Routing decision | [PRD Orchestrator §0](../product/paseo-bm-orchestrator-prd.md#0-routing-decision) |
-| Related designs | [Design Dashboard](./paseo-bm-dashboard.md) (trace store, trace reconstruction, the Setup and Metric screens — this document builds on it) · [Base design](./paseo-bm.md) (roles, the `before("agent.create")` hook, `config.patch`, the notice queue, "Additional instructions") |
-| Related ADRs | **[ADR-013](../adr/ADR-013-orchestrator-assess-and-nudge.md)** (Proposed together with this document) · [ADR-005](../adr/ADR-005-manager-as-agent.md) (agents belong to the user) · [ADR-006](../adr/ADR-006-role-registration.md) / [ADR-008](../adr/ADR-008-role-settings-written-by-plugin.md) / [ADR-012](../adr/ADR-012-plugin-is-the-product.md) (the plugin creates and removes roles) · [ADR-007](../adr/ADR-007-dashboard-trace-store.md) (trace store) · [ADR-010](../adr/ADR-010-plugin-hosted-agent-tools.md) (the plugin's MCP tools, **unchanged**) |
+| Related designs | [Autonomy design](./paseo-bm-autonomy.md) (decisions, authority, events, the management surface; Phase 1 retired part of this design, §A.14) · [Design Dashboard](./paseo-bm-dashboard.md) (trace store, reconstruction) · [Base design](./paseo-bm.md) (roles, the `before("agent.create")` hook, `config.patch`, the notice queue, "Additional instructions", the plugin's MCP endpoint) |
+| Related ADRs | **[ADR-014](../adr/ADR-014-orchestrator-agent-proposes-owner-approves.md)** (Accepted 2026-09-28; supersedes [ADR-013](../adr/ADR-013-orchestrator-assess-and-nudge.md)) · [ADR-005](../adr/ADR-005-manager-as-agent.md) · [ADR-007](../adr/ADR-007-dashboard-trace-store.md) · [ADR-010](../adr/ADR-010-plugin-hosted-agent-tools.md) (extended for the Orchestrator's endpoint) · [ADR-011](../adr/ADR-011-manager-coordinates-workers.md) |
 | Reference environment | Paseo ≥ 0.9.0, `@getpaseo/plugin` 0.8.0, Node ≥ 22 |
 
 ## 1. Scope
 
-**This document owns:** the rule catalogue and the flag scorer; the aggregation for the Orchestrator tab; the `bm-orchestrator` role (instructions, the `bm_assessment` tool, how it is created, how its result is read, the assessment result store); the button that applies a suggestion; the `BM-NUDGE` nudge mechanism (settings, decision, deduplication, delivery); the hook's model-correction log; the `orchestrator.*` RPCs and their error codes.
+**This document owns:** the Orchestrator agent (how it is created, where it lives, its instructions, its tools); the rule catalogue as signals; the stall pass and the live watch of running Workers; Autopilot; the commands the Orchestrator sends and how they are delivered; workflow assessment; the Orchestrator line of the Inbox; the `orchestrator.*` RPCs and error codes; the removal of the first design's parts (§11).
 
-**Does not own:** the trace store, the collector and trace reconstruction (Design Dashboard §3, §6 — **read** only); the mode selection rule and instruction injection (Base design §7.2 — only **adds** the new role to the existing rule); the notice queue (Base design — only uses the `enqueue` API and adds a `drop` function); instruction content written by the user (only **appends** to it when the user presses a button).
+**Owned elsewhere since Phase 1 of the autonomy programme** ([autonomy design](./paseo-bm-autonomy.md)): the owner's decisions and their delivery (§A.3–§A.6), the authority of a command (§A.7), the event bus and the Inbox alerts (§A.8), the management surface — Inbox, Work, Insights, Settings — and the chat cards (§A.12). What Phase 1 retired from this design is listed in §A.14.
+
+**Does not own:** the trace store, the collector, reconstruction (Design Dashboard — **read** only); the mode rule and instruction injection (Base design §7.2 — the role is only **added**); the notice queue (Base design — used, with one new kind per delivery); instruction text written by the user (only **appended** to on a click).
 
 ## 2. Architecture
 
 ```
-                 ┌──────────────── plugin server ─────────────────────────────────────────┐
- agent.turn_ended│ collector ──► trace store (per-turn JSONL, ADR-007)                     │
- ──────────────► │     │ onRecorded                                                       │
-                 │     ├─► review-budget (BM-BUDGET, existing)                            │
-                 │     └─► nudge.ts ── reconstructTraces ─► rules.ts ─► enqueue(BM-NUDGE) │
-                 │                        ▲ (only when the switch is on) ▲ nudges.json    │
-                 │ assessment-reader ◄── turn_ended of a bm-orchestrator agent            │
-                 │     └─► assessments/<ws>.jsonl                                          │
- before          │ role-hook ── applyRoleModel ─► model-corrections.json                   │
- agent.create ─► │                                                                         │
- RPC orchestrator.* ─► overview / flags / settings / assess-preview / assess /            │
-                 │     assessments / apply-suggestion                                      │
-                 └─────────────────────────────────────────────────────────────────────────┘
- client: Setup ▸ Orchestrator tab (overview + nudge switch) ──► Metric ▸ RequestCard (flags, Assess, results)
+                 ┌─────────────────────── plugin server ───────────────────────────────┐
+ agent.turn_ended│ collector ──► trace store (ADR-007) ──► decision materialiser         │
+                 │ stall pass (always on, every 60 s) ── reconstruct ── rules            │
+                 │   └─► request-stalled Inbox alert; Autopilot project: event bus       │
+                 │ live Worker watch (Autopilot projects, every 2 min) ─► alert + event  │
+                 │ event bus ─► noticeQueue.enqueueBatch(Orchestrator, "BM-EVENTS")      │
+                 │ MCP /mcp/orchestrator/<secret>:                                       │
+                 │   bm_projects · bm_request · bm_agent_messages · bm_decisions (read)  │
+                 │   bm_ask_owner → decision store   bm_send_command · bm_direct_worker  │
+                 │     → noticeQueue.enqueue(agent, "command:<id>") → proposals.json log │
+                 │   bm_set_autopilot · bm_repo · bm_note · bm_assessment → assessments  │
+ RPC orchestrator.* ─► open-preview · open · state · set-autopilot · apply-suggestion     │
+ RPC decisions.answer ─► an o: decision's prepared command, or BM-ANSWER to the Orchestrator│
+                 └──────────────────────────────────────────────────────────────────────┘
+ client: the Inbox's Orchestrator line (open or start it) · Work's rows read orchestrator.state
 ```
 
-New modules (all in `plugin/`):
+Modules (all in `plugin/`):
 
 | Module | Job |
 |---|---|
-| `shared/orchestrator-rules.ts` | The rule catalogue and `flagsOf(detail, facts)` — a pure function, no I/O |
-| `shared/language-guess.ts` | Guesses the language `vi` / `en` / `unknown` of a piece of text, deterministically |
-| `server/orchestrator-store.ts` | Reads/writes `orchestrator/` in the data folder: settings, assessment results, the model-correction log, the nudged markers |
-| `server/orchestrator-rpc.ts` | The `orchestrator.*` RPCs (§7) |
-| `server/nudge.ts` | Decides on and sends `BM-NUDGE` at the end of a turn (§6) |
-| `server/assessment.ts` | Builds the content sent to the assessment agent, creates the agent, reads the result at the end of its turn (§5) |
-| `client/orchestrator-model.ts`, `client/orchestrator-tab.tsx` | Pure model and UI of the tab (§8.1) |
-| `roles/orchestrator.md` → `server/orchestrator-instructions.ts` | Instructions of the new role, generated by `scripts/generate-role-instructions.mjs` |
+| `shared/orchestrator-rules.ts`, `shared/language-guess.ts`, `shared/rule-input.ts`, `server/request-trace.ts` | Kept from the first design: the rule catalogue as signals (§4) |
+| `server/orchestrator-store.ts` | `orchestrator/` in the data folder: settings, the command log, interrupt allowances, notes, model-correction log, assessments (§5.4) |
+| `server/orchestrator-agent.ts` | Opens or creates the one Orchestrator agent, its workspace, its replacement (§3.3) |
+| `server/stall-watcher.ts`, `server/worker-watch.ts` | The stall pass (§6) and the live watch of running Workers (§6B.3), publishing through `server/event-bus.ts` (autonomy design §A.8) |
+| `server/orchestrator-tools.ts` (used by `agent-tools.ts`) | The Orchestrator's MCP tools (§5, §6A, §6B.4) |
+| `server/orchestrator-decisions.ts` | Delivers an answered Orchestrator decision (§7) |
+| `server/orchestrator-rpc.ts`, `server/orchestrator-actions.ts` | The `orchestrator.*` RPCs (§8) |
+| `server/assessment.ts` | Kept: the redacted, capped content builder, reused by `bm_request` and workflow assessment |
+| `client/orchestrator-model.ts`, `client/orchestrator-line.tsx` | The Orchestrator line of the Inbox, and the stage and agent letters of Work's rows (§9) |
+| `roles/orchestrator.md` → `server/orchestrator-instructions.ts` | The instructions (§3.2) |
 
-## 3. The `bm-orchestrator` role
+## 3. The Orchestrator agent
 
-### 3.1 Registration and configuration
+### 3.1 The role
 
-- Role key `orchestrator`, provider alias and profile `bm-orchestrator`, display name "Beads Orchestrator". Created by `ensureRoles` under the same rule as the other three roles (first `available` provider, first model; an existing entry is not changed; `cleanedUpAt` blocks it) — so a 0.4.x machine has this role on the first open after the update (REQ-077e).
-- The alias has **no** `paseoTools` (`roleGrantsPaseoTools` becomes `role === "manager" || role === "worker"`).
-- Mode: the Reviewer's rule (`chooseModeId` already puts every role that is not Worker under the Reviewer rule; `ROLE_GETS_MODE.orchestrator = true`; `runPostureOf` forces `auto_accept: false` for `reviewer` **and** `orchestrator`; `role-choices.ts` forbids `dangerous`/`planning` modes for both).
-- The `before("agent.create")` hook: injects `orchestrator-instructions`, applies the profile's model/thinking (`applyRoleModel`, `applyRoleProfile` extended to the new role), adds the tool endpoint `/mcp/orchestrator` when the base provider ∈ `TOOL_PROVIDERS`.
-- `config-writer.ts`: `ROLE_PROFILE_IDS` adds `bm-orchestrator` (`checkScope`, `createRoleEntries`); `removeAllBmEntries` already removes every `bm-*`.
-- **No** fallback chain in O1: the new role does **not** go into `FALLBACK_ROLES`, `fallback-detect` ignores it (one usage-limit hit of the assessment agent only makes that assessment `failed`, §5.4).
-- Setup → Agents: a fourth role card (model, thinking, mode under the Reviewer rule) and an "Additional instructions" field; no fallback button.
+Unchanged from the first design (it is already implemented and accepted by the 0.4.1 compatibility tests): role key `orchestrator`, alias and profile `bm-orchestrator`, display name "Beads Orchestrator"; created by `ensureRoles` like the three roles; **no** `paseoTools`; mode by the Reviewer's rule (never `dangerous`/`planning`, `auto_accept` off); the hook injects its instructions, its profile's model/thinking, and — on `claude`/`codex`/`opencode` — the plugin's MCP server at the Orchestrator's path with its tools pre-approved (§5.1). The collector, format check, review budget, fallback and stop propagation ignore it (Design §3.2 of the first version, kept). Settings → Agents has its card.
 
-### 3.2 Other places that must know the new role
+### 3.2 Instructions (`roles/orchestrator.md`)
 
-The full list comes from the code review of 2026-09-28; each place has an explicit decision:
+Rewritten for the autonomy programme (autonomy design §A.11; at most 100 lines, three limits):
 
-| Place | Decision |
-|---|---|
-| `agent-role.ts` (`BmRole`, `ROLE_BY_PROVIDER`), `setup-roles.ts` (`ROLE_NAMES`, display names, `ROLE_PROFILE_NOTES`), `roles.ts` (`ROLE_ORDER`), `role-settings-rpc.ts` (`ROLES`, `PROVIDER_IDS`, the Reviewer's warning), `agent-labels.ts`, `manager.ts` (where it filters by role), `scripts/generate-role-instructions.mjs`, `contracts.ts` (`agentRoleSchema`, `setupRoleSchema`, `extras`, `providerId`), client (`SETUP_ROLES`, `ROLE_LABELS`, `ROLE_MARK`, `DOT_ROLES`, `ChatRole`) | Add `orchestrator` |
-| `contracts.ts` `bmRoleSchema` | **Keep three roles.** It is also the schema of the fallback chain: `fallbackSettingsSchema`, the input of `roles.save-fallback` and `fallbackIncidentSchema` (stored in `role-fallback-state.json`). Places that need four roles use a new enum `setupRoleWithOrchestratorSchema` |
-| `role-extras.ts` `modeFactsOf` | Currently puts every role that is not Reviewer in the Manager's branch (reads the mode of `bm-worker`); add a branch for the new role: no Runtime facts |
-| `collector.ts` | **Does not record** turns of `bm-orchestrator` in the trace store (results go to a separate store, §5.3): the request's trace is not mixed with the assessment agent, and an older release reading the store does not meet an unknown role |
-| `format-check.ts` | Ignores the new role (does not require `BM-REVIEW`) |
-| `review-budget.ts`, `qa-ledger.ts`, `stop-propagation.ts`, `settings-notices.ts`, `fallback-*` | Do not count the new role |
-| `dashboard-rpc.ts` `runningAgents`, `agents.list` | Show the assessment agent as a paseo-bm agent (the user can see and archive it) |
-| `setup-state.ts` | Do **not** add `orchestrator` to `rolesCreated.roles` (an older release parses the whole file with the three-role enum — adding it would make the older release lose the `agentTools` and `cleanedUpAt` markers); record `orchestratorCreatedAt` separately (a new field, ignored by older releases) |
-| `role-extras.ts` | Add the key `orchestrator`, default `""`. A downgrade loses exactly this text (the older release rewrites the file without unknown keys) — accepted, recorded in the release notes |
-| `setup-machine.ts` (login), `setup-rpc.ts` (counts) | Include the new role |
-| `setup-machine.ts` `CLEANUP_DELETES` | Add `orchestrator` — without it the cleanup button keeps the folder and says "paseo-bm did not create it" |
-| Tests pinned to exactly three roles (`plugin-setup-roles`, `config-writer`, `plugin-setup-cleanup`, `role-settings-rpc`, `rpc-list-describe`, `plugin-setup-model`, `plugin-role-hook`, `plugin-setup-state`, `plugin-structure`) | Updated in the same change |
+- **What you are:** the owner's coordinator for paseo-bm across all their projects. You change nothing yourself, act only through your `bm_` tools and only as far as the owner's authority goes (autonomy design §A.7), and never guess what your tools do not show.
+- **Your tools:** the bounded read tools (`bm_projects`, `bm_request`, `bm_agent_messages`, `bm_decisions`, `bm_repo`), `bm_note`, and `bm_send_command`, `bm_direct_worker`, `bm_ask_owner`, `bm_set_autopilot`, `bm_assessment`.
+- **What reaches you:** the owner's messages; `BM-EVENTS` (Autopilot projects only, one line per event: `decision.opened`, `request.finished`, `request.stalled`, `worker.signal`) — the plugin's, never the owner's word; `BM-ANSWER`, the owner's answer to one of your decisions with its grant.
+- **Commands and decisions:** a command is written as the owner would, declares its intent and every effect its text shows, one per situation, never to a Reviewer; a refusal means nothing was sent. What your authority does not cover goes to the owner with `bm_ask_owner`: a question, a recommendation, two to five options you can carry out, each with its effects and, to act at once when chosen, a prepared command.
+- **"Assess the workflow of …":** read that project's recent requests, then call `bm_assessment` once (criteria and scale as in the first design: `sizing`, `process-weight`, `coordination`, `user-communication`, `report-quality`, `review-quality`, 1–5 or null; recommendations are paragraphs for a role's instructions, not code changes).
+- **Talking to the owner:** short, in the owner's language, as **Situation** / **Done** / **Needs you**; the owner's word wins.
 
-## 4. Rules (REQ-072)
+### 3.3 Where it lives, and opening it
+
+- **One agent** (REQ-075 a): the Orchestrator is the non-archived agent labelled `bm.role=orchestrator` and `bm.orchestrator=main`. `orchestrator.open` returns it if it exists (in any workspace); otherwise it creates it.
+- **Its workspace (Q-077):** `paseo.workspaces.open({ cwd: <data folder>/orchestrator/home })` — a folder the plugin creates (mode `0700`, no symlink on the way, like the store's folders) with a short `README.md` saying what it is. **Verified 2026-09-28** on an isolated daemon (Paseo 0.9.2, own home and port 6898, plugin installed from the working tree): `orchestrator.open { confirmed: true }` called `workspaces.open({ cwd })` from the plugin **server's** `paseo` object for the plain, non-git folder; Paseo registered a project `home` and a local workspace (`wks_…`, `cwd` = that folder), and `workspaces.ref(<id>).agents.create` created the agent there — provider `bm-orchestrator` · `claude-opus-5-5`, mode `auto` (the Reviewer rule), labels `bm.role=orchestrator`, `bm.orchestrator=main`, `bm.version`, title "Beads Orchestrator"; it answered its first prompt. A second `open` returned the same agent with `created: false`, and `open-preview` then said `exists: true`. So `open-preview` always says `workspace: "own"` and `open` ignores `workspaceId`. The **fallback** — the Open dialog lists the user's workspaces and creates the agent in the one the user picks, `open-preview` saying `workspace: "choose"` — stays described here only in case a later Paseo refuses the call; it is not implemented.
+- **Creation** (`server/orchestrator-agent.ts`)**:** like `orchestrator.assess` of the first design (`startAssessmentAgent`'s target and posture: `assessmentTargetOf`, `assessmentPostureOf`): provider `bm-orchestrator/<profile model>` (bare alias without a model), mode by the Reviewer rule, labels `bm.role=orchestrator`, `bm.orchestrator=main`, `bm.version`, `bm.instructions=<first 12 hex digits of the SHA-256 of ORCHESTRATOR_INSTRUCTIONS>`, title "Beads Orchestrator", and a first prompt that introduces the tools and asks it to wait for the user. Missing profile or provider not available → `E_ORCHESTRATOR_UNAVAILABLE`, nothing created; no usable data folder → `E_DATA_HOME_UNAVAILABLE`; the home folder cannot be written → `E_ORCHESTRATOR_WRITE_FAILED`. Calls that overlap share one creation. An agent whose provider did not start is kept (ADR-005), logged, and reopened by the next `open`. When the agent exists but its profile can no longer be read, `open-preview` still answers (`exists: true`, the agent's own provider, `model: null`) so it can be reopened.
+- **Outdated or tool-stale Orchestrators are replaced without the owner.** Paseo fixes an agent's system prompt when it is created, so an Orchestrator created before its role file changed keeps the old instructions (seen on the owner's machine on 2026-09-29: it ignored Autopilot). One whose `bm.instructions` label is missing or differs from the current hash is **outdated**; one created before the endpoint's secret was made is **tool-stale** (§5.1). `orchestrator.state` reports both (`outdated`, `toolsStale`), and `orchestrator.open { recreate: true }` replaces either. Every wake-up goes through `wakeableOrchestrator(paseo, deps)`: the main Orchestrator when it is current; when the newest one is outdated or tool-stale, a new one created exactly as `orchestrator.open { confirmed: true, recreate: true }` creates it — the owner consented to an Orchestrator when first opening it — which then gets the notice; **null** when there is none, since the plugin never creates an Orchestrator the owner never opened. The old one is left in the owner's list — never archived, stopped or messaged (ADR-005) — and one log line says it was replaced. Replacing lists again under the single-flight `open`, so two wake-ups at once create one agent. A replacement that fails (no profile, no data folder) is logged and the old one is woken, so the notice still reaches an agent that can tell the owner. The event bus (autonomy design §A.8) wakes it through it.
+- The client opens its chat with the host's `navigation.openAgent` (the Inbox's Orchestrator line, §9).
+- **Its first prompt** introduces its tools and asks it to wait for the owner; its first line is "The user opened you from the Inbox of Beads Manager (paseo-bm)." The chat check (`isOwnerWord`) matches the opening words every version's first prompt shares (`ORCHESTRATOR_FIRST_PROMPT_START` = "The user opened you from "), so no first prompt, of any version, is ever the owner's word. The home folder's `README.md` says what the agent is, that it sends a command itself only on Autopilot or the owner's word in its chat, and otherwise asks the owner in the Inbox with the command ready.
+
+## 4. Rules (signals)
 
 ### 4.1 The scoring function
 
-`flagsOf(input: RuleInput, facts: RuleFacts): Flag[]` — pure, deterministic. `RuleInput` is built by **one** shared function `ruleInputOf(trace: ReconstructedTrace, records)` from the result of `reconstructTraces` (Design Dashboard §6) — cheaper than `traces.get` (no pricing, no live bead lookup, no live timeline read) and it has things `TraceDetail` does not: each turn's recorded outcome, evidence with paths, user messages with the receiving agent. `orchestrator.flags` and `nudge.ts` both use it; the trace-building part of `review-budget.ts` is split out into a shared helper so that a finished turn builds only once. `facts` is `{ reviewBudget, corrections: ModelCorrection[], workspaceDirectory }`. A rule that lacks data returns `state: "unknown"` instead of staying silent (REQ-072d).
+Unchanged: `flagsOf(input: RuleInput, facts: RuleFacts): Flag[]`, pure and deterministic, `RuleInput` built by `ruleInputOf(trace, agents)` (`server/request-trace.ts`). Flags carry the trace's `linking`. No snapshot is stored.
 
-```ts
-type Flag = {
-  rule: RuleId; severity: "info" | "warning"; state: "raised" | "unknown";
-  observed: string;   // one sentence, in English
-  why: string;        // one sentence, in English
-  evidence: Array<{ agentId: string; at: string | null; kind: "report" | "sent" | "received" | "evidence" | "correction"; excerpt: string /* ≤ 160 characters */ }>;
-  nudge: { target: "manager" | "worker" } | null;   // null = the rule cannot nudge
-};
-```
+### 4.2 The catalogue
 
-**What deterministic means here (REQ-072c).** The same `detail` and `facts` always give the same flags. But `detail` is **reconstructed** on every read and depends on the list of agents that exist (Design Dashboard §6): deleting a Worker can change `workerIds`, `reviewCalls`. Flags therefore carry the trace's `linking`; the screen says "based on the agents that still exist" when `linking !== "exact"`. No snapshot of the flags is stored — stored, old flags would be wrong once a rule is fixed, and it would be one more store to delete.
+| ID | Severity | When it is raised | Evidence |
+|---|---|---|---|
+| `process.small-heavy` | warning | `tier = Small` and (beads were created — `beadCounts.created > 0`, or a `br create` command in the evidence (`RuleInput.brCreates`: `br create` names no id, so the bead count misses it) — **or** a file was **written or edited** under `docs/plans/` or `docs/adr/` according to `filesChanged` or edit/write evidence (`isProcessDocumentPath`); a plan or an ADR is process weight a Small request never needs, while `roles/worker.md` lets a Small request correct the product/design documents that describe it, so those do not count; evidence does not distinguish creating from editing, so the rule says "wrote or edited") | the report naming the bead/file, or the command in the evidence |
+| `process.no-review` | warning | `tier ∈ {Medium, Large}`, trace `completed`, and **no Reviewer at all** (`reviewerIds.length = 0`). A Reviewer exists but `reviewCalls` is `null` (none of its turns was recorded) → `unknown` | the `finished` report |
+| `review.over-budget` | warning | `reviewCalls > REVIEW_BUDGET[tier]` (Small 2 · Medium 2 · Large 4, `review-budget.ts`) | the review call turns |
+| `agent.failed-first-turn` | warning | the earliest **recorded** turn of a Worker/Reviewer has `outcome: "failed"` (from the turn records in `RuleInput`), or a live agent in an error state with no turn yet (`state = failed` and `lastActivityAt = null` in timing) | turn record / live state |
+| `agent.model-corrected` | info | there is a model-correction log entry (§4.3) matching a Worker/Reviewer of the trace | the log entry (marked **inferred**) |
+| `report.malformed` | warning | a report has `unparsedFields`/`incompleteFields`, **or** the trace is `completed` with no `received` report (without `finished` a trace is never `completed`, so that is not considered) | report / trace |
+| `manager.language-mismatch` | warning | the **most recent** message the user typed **to the Manager** (`origin: "user"`, receiving agent is the Manager — messages typed to the Worker do not count) is guessed `vi`/`en`, and **any** Manager reply timestamped after it is guessed the other language (a Vietnamese hand-off line followed by an English relay of a `BM-REPORT` is the case seen on 2026-09-26). A mismatching reply with the same timestamp as the user's message cannot be ordered (a recorded time can be the write time, not the send time): if it is the only mismatch → `unknown` | the two excerpts |
 
-### 4.2 First-release catalogue (proposal for Q-071)
+When a rule returns `unknown` (REQ-072d): `process.small-heavy` — beads or a plan/ADR were seen but no report gave the tier; `process.no-review` — a Reviewer exists with no recorded turn, or the request completed with neither a tier nor a Reviewer; `review.over-budget` — no tier and more calls than the smallest budget; `agent.failed-first-turn` — an agent that is not running has no recorded turn; `agent.model-corrected` — the workspace folder is unknown, or the agent's start time is unknown after a correction during the request; `report.malformed` — completed with no `received` report and no recorded Manager turn; `manager.language-mismatch` — the only mismatching reply has the same timestamp as the user's message. Flags come back in catalogue order, at most one per rule. Since ADR-014 no flag nudges anyone: flags are signals the Orchestrator reads with judgement (it checks, for example, whether the user asked for the beads a `process.small-heavy` flag counts) and that the stall pass uses (§6).
 
-| ID | Severity | When it is raised | Evidence | Nudge |
-|---|---|---|---|---|
-| `process.small-heavy` | warning | `tier = Small` and (beads were created — `beadCounts.created > 0`, which already includes `br create` commands inferred from evidence — **or** a file was **written or edited** under `docs/product|design|adr|plans/` according to `filesChanged` or edit/write evidence; evidence does not distinguish creating from editing, so the rule says "wrote or edited") | the report naming the bead/file, or the command in the evidence | **Worker** |
-| `process.no-review` | warning | `tier ∈ {Medium, Large}`, trace `completed`, and **no Reviewer at all** (`reviewerIds.length = 0`). A Reviewer exists but `reviewCalls` is `null` (none of its turns was recorded) → `unknown` | the `finished` report | no (raised once it is done) |
-| `review.over-budget` | warning | `reviewCalls > REVIEW_BUDGET[tier]` (Small 2 · Medium 2 · Large 4, `review-budget.ts`) | the review call turns | no (`BM-BUDGET` already nudged) |
-| `agent.failed-first-turn` | warning | the earliest **recorded** turn of a Worker/Reviewer has `outcome: "failed"` (from the turn records in `RuleInput`), or a live agent in an error state with no turn yet (`state = failed` and `lastActivityAt = null` in timing) | turn record / live state | no |
-| `agent.model-corrected` | info | there is a model-correction log entry (§4.3) matching a Worker/Reviewer of the trace | the log entry (marked **inferred**) | no |
-| `report.malformed` | warning | a report has `unparsedFields`/`incompleteFields`, **or** the trace is `completed` with no `received` report (without `finished` a trace is never `completed`, so that is not considered) | report / trace | no (`BM-FORMAT` already nudged) |
-| `manager.language-mismatch` | warning | the **most recent** message the user typed **to the Manager** (`origin: "user"`, receiving agent is the Manager — messages typed to the Worker do not count) is guessed `vi`/`en`, and the Manager's **first reply timestamped after it** is guessed the other language. Equal timestamps (a recorded time can be the write time, not the send time) → `unknown` | the two excerpts | **Manager** |
-
-Language guess (`language-guess.ts`): drop code blocks and backticked strings; count letters; `vi` when ≥ 3% of the letters are Vietnamese-specific characters (`ă â đ ê ô ơ ư` and vowels with tone marks); `en` when there are 0 of those characters and ≥ 20 Latin letters; otherwise `unknown`. Only `vi`/`en` are distinguished in O1 — enough for the case seen, and no false alarm for other languages (they come out `unknown`).
+Language guess (`language-guess.ts`): drop code blocks and backticked strings; count letters; `vi` when ≥ 3% of the letters are **Vietnamese-only** letters — the ones no other Latin language writes: `ă đ ơ ư`, any tone on `ă â ê ô ơ ư`, the hook above or dot below on any vowel, the tilde on `e i u y`, the grave on `y` (the accents Vietnamese shares with French, Spanish or Portuguese — `â ê ô à á é è ã …` — do not count, so dense French is not `vi`); `en` when there is **no accented letter at all** and ≥ 20 Latin letters; otherwise `unknown`. Only `vi`/`en` are distinguished in O1 — enough for the case seen, and no false alarm for other languages (they come out `unknown`).
 
 Not in O1 (REQ-081): "the Manager relays an irrelevant notice to the user" — it cannot be separated by a deterministic rule without false alarms.
 
@@ -119,195 +109,323 @@ Not in O1 (REQ-081): "the Manager relays an irrelevant notice to the user" — i
 
 `applyRoleModel` (hook) additionally writes, after `console.warn`, an entry to `orchestrator/model-corrections.json`: `{ at, alias, requested, profileModel, cwd }`, keeping the 500 newest entries, written without blocking (a write error is only logged; the hook never fails because of it). The hook does not know the `agentId` yet (the agent does not exist yet), so the rule matches an entry to an agent of the trace with the same alias, the same `cwd` (workspace folder) and a start time within 120 seconds after `at`. The start time is `startedAt` in the trace's timing: the live agent's `createdAt`, or failing that the start of the first recorded turn; the evidence carries the label **inferred**.
 
-## 5. Assessment (REQ-075)
+## 5. The Orchestrator's tools
 
-### 5.1 Flow
+### 5.1 The endpoint
 
-```
-Client (Assess) ──► orchestrator.assess-preview ──► {provider, model, chars, approxTokens}
-      │ the user confirms (default: cancel)
-      └──► orchestrator.assess {confirmed:true} ──► assessment.ts:
-              1. traces.get(detail) → build the content (§5.2) → redactText → cut to the cap
-              2. write a `pending` entry to assessments/<ws>.jsonl
-              3. workspaces.ref(ws).agents.create({ config:{provider:"bm-orchestrator/<model profile>", modeId:<by the Reviewer rule, as fallback-switch does>},
-                   title:"Beads Orchestrator — assessment", labels:{bm.role:"orchestrator", bm.version,
-                   bm.requestId?, bm.assessmentId}, prompt:<content> })   // the hook injects instructions, mode, tools
-              4. return {assessmentId, agentId}
-agent.turn_ended (agent with bm.role=orchestrator) ──► assessment-reader:
-              read that turn's timeline: prefer the input of the tool call whose name ends with `bm_assessment` (Claude shows `mcp__paseo-bm__bm_assessment`, Codex shows `paseo-bm.bm_assessment` — match the name's ending, not `split("__")`),
-              otherwise a hand-written `BM-ASSESSMENT` block in the reply → validate → write `done`
-              or `failed` with the raw reply (REQ-075f)
-```
+`agent-tools.ts` serves the Orchestrator's tools at `/mcp/orchestrator/<secret>`, where `<secret>` is 32 random bytes (hex); the hook builds the URL with it. A request to `/mcp/orchestrator` without the right secret gets `404`. **The secret outlives the plugin process**, like the port: it is kept in `<data folder>/ui/orchestrator-endpoint.json` (`{ schemaVersion: 1, secret, createdAt }`, `0600`, written atomically, read and written through no symlink) and reused by every later start, so a plugin reload no longer cuts an open Orchestrator off its tools (on 2026-09-29 the secret still lived in memory only, and the Orchestrator the owner had opened the day before answered "Error POSTing to endpoint" after a reload). A new secret is made and saved only when the file is missing or unusable — not JSON, another schema, a secret that is not 64 lower-case hex digits, a `createdAt` that cannot be read or lies ahead of the clock, a file readable by anyone but the user, or a symlink on the way; a secret that cannot be saved still serves that start (one log line), and the next start makes another. The secret never appears in a log line. `secretSince` is the stored `createdAt`; `orchestrator.state` reports `toolsStale` when the Orchestrator's `createdAt` is earlier (`toolsStaleSince`; an unknown creation time, or no endpoint, is never stale) — so only an Orchestrator created before the stored secret was (re)generated — and such an Orchestrator is replaced at its next wake-up or by `orchestrator.open { recreate: true }` (§3.3); the newest labelled agent is the Orchestrator from then on. A current Orchestrator is returned as it is. The tools are pre-approved for the Orchestrator only (`toolPolicy.preapproved`), on `TOOL_PROVIDERS` only.
 
-No other `agentId` is touched: the plugin does not archive or delete the assessment agent (REQ-075g).
+### 5.2 Read tools
 
-### 5.2 Content sent
+| Tool | Input | Returns (text, JSON inside) |
+|---|---|---|
+| `bm_projects` | `{ sinceHours?: 1-168 (default 24) }` | per workspace with paseo-bm activity in the period: id, label, directory, its Manager(s) (id, status), up to 10 recent requests (requestId, first line of the request, tier, state, last activity, `waitingSince` when blocked, raised signals by rule id, open stall situations) |
+| `bm_request` | `{ workspaceId, requestId }` | the assessment content of the first design (`buildAssessmentContent`: request, reports, reviews, Manager replies, user messages, signals), redacted, capped at 60,000 characters |
+| `bm_agent_messages` | `{ agentId, limit?: 1-50 (default 20) }` | the agent's most recent user messages and replies, redacted, each ≤ 12,000 characters (§6A); refused (`not a paseo-bm agent`) unless `agents.list` shows the agent with a `bm-manager`/`bm-worker`/`bm-reviewer` provider |
 
-From `TraceDetail`: the verbatim request, the size, the Worker's initial prompt, the `BM-REPORT`s by milestone, the review requests and `BM-REVIEW`s, the Manager's replies to the user, the user's messages, the feature-workflow steps, the time/token/review-call figures, and **the flags of §4** (so the agent does not have to rediscover what is already known). Every piece goes through the collector's `redactText`. Cap: 60,000 characters; above it, the longest messages are cut first (keeping the start and end of each message, marked `...[truncated]`), and the preview says it was cut. Token estimate = characters / 4 (for display only, labelled "approx.").
+All three read only the trace store, `agents.list`, `workspaces.list`, and the timelines of paseo-bm agents: `bm_agent_messages` reads that one agent's, and `bm_request` (built through `traces.get`, as Work's request timeline is) reads the request's own Manager, Workers and Reviewers (REQ-074). Stalls and requests are keyed by `requestId ?? traceId` (`requestKeyOf`). Each returns a bounded summary by default and the contents above with `detail: "full"`; `bm_decisions` lists the stored decisions, read-only (autonomy design §A.9).
 
-### 5.3 The result and the `bm_assessment` tool
+### 5.3 Asking the owner
 
-- A new tool on the endpoint `/mcp/orchestrator` (the path regex of `agent-tools.ts` adds the new role), **with no side effects**, like `bm_review` (ADR-010 decision 3): checks the input against the schema then returns a text block. The plugin reads **the tool call's input** from the timeline at the end of the turn, where `event.agent.id` says who called — ADR-010 unchanged.
-- Schema (proposal for Q-072):
+There is no proposal waiting for a click any more (autonomy design §A.14). What the Orchestrator's authority does not cover, it asks the owner with `bm_ask_owner`: an `o:` decision in the decision store — the question, its recommendation, options each with their declared effects and, optionally, a prepared command the plugin delivers itself when the owner picks that option (autonomy design §A.3, §A.6; §7). `bm_send_command` and `bm_direct_worker` without authority refuse with "…; ask the owner with bm_ask_owner, with this command prepared on an option", and send, record and spend nothing.
 
-```ts
-{
-  rubric: Array<{ criterion: "sizing" | "process-weight" | "coordination" | "user-communication" | "report-quality" | "review-quality";
-                  score: 1 | 2 | 3 | 4 | 5 | null;       // null = not enough data
-                  note: string }>,                       // exactly 6 entries, one per criterion
-  findings: Array<{ severity: "info" | "warning" | "problem"; text: string; evidence: string }>,   // ≤ 12
-  suggestions: Array<{ role: "manager" | "worker" | "reviewer"; text: string /* ≤ 600 characters */; why: string }>  // ≤ 5
-}
-```
+### 5.4 Stored data (`<data folder>/orchestrator/`, `0700`/`0600`)
 
-  Scale: 5 = exactly as the role instructions expect, 3 = deviates but does not harm the outcome, 1 = deviates in a way that clearly breaks or slows the request. The meaning of each criterion is in `roles/orchestrator.md`.
-- The key of an assessment: `requestId` when the trace has one (stable); otherwise `traceId` (the form `<agentId>:<turn>` can change to `req:<id>` when the trace is attached to a request, and turn ids are reused by Paseo) — in that case the assessment carries the label "linked by turn" and may not show again if the trace changes key.
-- Store: `<data>/orchestrator/assessments/<workspaceId>.jsonl`, one line each `{ v:1, assessmentId, requestId, traceId, agentId, at, status: "pending"|"done"|"failed", provider, model, result?, raw?, usage? }` (`raw` ≤ 8 KB, used when `failed`); modes `0600`/`0700`; append-only writes, the newest line of an `assessmentId` wins. `traces.delete` also deletes the assessments of the deleted trace (REQ-075e); removing paseo-bm's settings with "delete data" deletes the whole `orchestrator/` folder unless a keep rule in Base design §7.13.7 applies.
+- `settings.json`: `{ version: 3, autopilot: {} }` (§6A; an Autopilot entry is `{ enabled: true, since, by?: "tab" | "chat", allow?: Category[] }` (`allow`: §6B.5), and only projects with it on are stored; `by: "tab"` is `orchestrator.set-autopilot`). A `version: 2` file reads with no Autopilot project; a first-design file (`version: 1`, `nudge`) reads as the default. The Watch field of older files is ignored and dropped by the next write (autonomy design §A.8).
+- `proposals.json`: `{ version: 1, entries: Proposal[] }` — the **log of the commands the Orchestrator sent itself** (`bm_send_command`, `bm_direct_worker`): `status: "sent"`, `source: "autopilot" | "chat"`, the 200 newest (store API `appendCommand`, `listCommands`). `Proposal = { id, at, kind, workspaceId, managerId | null, requestId | null, situation, command, reason, source, status, settledAt, sentText, outcome: "sent" | "queued", error, to?, workerId? }`, with `situation` the block's `re:`, `command` its body, `reason` its `why:` and `sentText` the whole block (§6B.1). The loop guard (§6A) and a project's `lastAction` (§6B.7) read it. The schema keeps every shape the file has held, so an older file parses and the evaluation can count it; the proposal era's entries — `pending`, `dismissed` or `failed` proposals, commands of `source: "orchestrator"` or `"user"` sent from the retired screen, and entries of `kind: "decision"` — are ignored on read (`isSentCommand`) and dropped by the next write.
+- `stalls.json`: `{ version: 1, entries }` holding only **interrupt allowances**, `"<ws>::<workerId>::danger-open@<time>"` (§6B.3), at most 500 (oldest opened first). The stall, event and Worker-signal keys of older builds are ignored and dropped by the next write: stalls and signals are Inbox alerts (`inbox/alerts.json`, autonomy design §A.8).
+- `notes/<ws>.json`: the Orchestrator's notes about a project (§6B.4).
+- `wakes.json`: `{ version: 1, entries: { orchestratorId, at, endedAt | null, workspaceIds, events }[] }`, the 500 newest — one entry per `BM-EVENTS` message the event bus delivered, its end set at that Orchestrator's next turn end (the oldest open wake first). Ids, times and a count only; read by the evaluation's A-7 (evaluation design §4), never by the Orchestrator (store API `appendWake`, `endWake`, `readWakes`).
+- `model-corrections.json`, `assessments/<ws>.jsonl`: kept. A workflow assessment is a line with `requestId: null`, `traceId: "workspace"`, `scope: { requestIds: string[] }`.
+- Store rules (`orchestrator-store.ts`): every operation is synchronous, so a read-modify-write needs no lock. An entry of `proposals.json` or `stalls.json` that does not validate is skipped on its own. Deleting traces (`traces.delete`) also deletes a workflow line whose `scope` names a deleted request, since its result may quote that request.
+- The cleanup button deletes the whole `orchestrator/` folder, the retired entries with it. Removed: `nudges.json` (§11).
 
-### 5.4 Errors
+### 5.5 `bm_assessment` (workflow)
 
-| Case | Result |
+The first design's tool and schema (`shared/bm-assessment.ts`) plus a required `workspaceId`; the Orchestrator's endpoint records the result directly as a `done` line of `assessments/<workspaceId>.jsonl` — attached to the newest `pending` workflow line of that workspace when an older build left one, else a new line scoped to the project's requests of the last 7 days (at most 10). The owner asks for an assessment in the Orchestrator's chat ("Assess the workflow of …", §3.2). `orchestrator.state` carries each project's newest assessment (§6B.7). The first design's turn-end reader is removed (§11).
+
+## 6. The stall pass (REQ-073)
+
+`server/stall-watcher.ts`, as rebuilt by the autonomy programme (§A.8):
+
+- **Always on:** started at plugin load, stopped at unload, its timer `unref`ed; there is no switch. It costs no token: no timeline read, no model call.
+- **Its Paseo handle:** the plugin server has none of its own, so the pass keeps the last one an `orchestrator.*` call, a paseo-bm agent creation (the role hook) or a recorded turn (the collector) brought; a pass before any arrived does nothing.
+- **Every 60 seconds**, one non-overlapping pass: `agents.list` once; for each workspace whose trace store has activity in the last 24 hours (mtime cache), reconstruct its requests (`workspaceTracesOf`) and look at **every** request with activity in those 24 hours (a Manager often runs several at once).
+- **Why a request stalls** (`stallReasonsOf`, pure), never while a **Worker or Reviewer** of the request is `running` (the Manager is left out: it is shared by every request of its workspace):
+
+| Reason | Raised when |
 |---|---|
-| No `bm-orchestrator` profile, or the provider is not `available` | `E_ASSESS_UNAVAILABLE`, nothing is created |
-| The trace no longer exists | `E_TRACE_NOT_FOUND` (existing code) |
-| The created agent is broken (`startedBroken`) | a `failed` entry with the error; **not** archived (unlike the Manager: this agent was requested by the user, who cleans it up themselves) |
-| The turn ends without a valid result | a `failed` entry with `raw` |
-| The user sends more messages to the assessment agent | a later turn does not change a result that is `done`; only the first turn is read |
+| `idle-unfinished` | the last report is neither `finished` nor `blocked`, and nothing happened for ≥ **5 min** |
+| `review-over-budget` | `review.over-budget` is raised and the last report is not `finished` |
 
-## 6. Nudging agents — `BM-NUDGE` (REQ-078)
+  A request waiting on the owner (`blocked`) is not stalled: its question waits in the Inbox. A request with no Worker and no report — the Manager answered it itself — never stalls.
 
-### 6.1 Settings
+- **Once per stall:** one `request-stalled` Inbox alert per request (subject the request key, `detail` the reasons), raised while it holds and cleared when it no longer does (an agent runs, a new report arrives, the request leaves the 24-hour window or its trace is deleted); raised afresh after that.
+- **To the Orchestrator:** only for a project with Autopilot on, the pass that raises the alert publishes a `request.stalled` event on the event bus; it reaches the Orchestrator in the next `BM-EVENTS` batch and is dropped if the alert is cleared first (autonomy design §A.8). Outside Autopilot nothing is sent: the owner sees the alert in the Inbox.
+- The live watch of running Workers rides on the same timer (§6B.3).
 
-`<data>/orchestrator/settings.json`: `{ version: 1, nudge: { enabled: false, rules: RuleId[] } }`. Only rules with `nudge !== null` (§4.2: `process.small-heavy`, `manager.language-mismatch`) can be chosen; the default when first turned on is both. Read/written through `orchestrator.settings` / `orchestrator.save-settings`; turning it on (`enabled` from false → true) requires `confirmed: true`.
+## 6A. Autopilot and the owner's word in chat (ADR-015, REQ-082)
 
-### 6.2 The decision at the end of a turn
+Autopilot stays until Part B of the autonomy design replaces it with calibrated autonomy per class; there is no screen for it in Phase 1 (autonomy design §A.12: Settings → Autonomy is one line until then).
 
-Attached to the collector's `onRecorded`, in the same place as `review-budget` (Base design; no new hook), plus the live watcher of §6.5 for the Worker's rules:
+- **Settings** (`settings.json`, `version: 3`): `{ version: 3, autopilot: { "<workspaceId>": { enabled: true, since, by?, allow? } } }`. Turned on or off by `orchestrator.set-autopilot` (§8; `by: "tab"`, turning on needs `confirmed`) or by the Orchestrator's `bm_set_autopilot` on the owner's word (`by: "chat"`).
+- **Events** (autonomy design §A.8): for a project with Autopilot on, the event bus sends the Orchestrator, at its idle moment, **one** `BM-EVENTS` message holding every pending event — `decision.opened` (a Worker's new question), `request.finished` (a `finished` report in a recorded Manager turn), `request.stalled` (§6), `worker.signal` (§6B.3) — each one line with the ids to look up. An event whose subject settled first is dropped; turning Autopilot on sends nothing by itself; outside Autopilot nothing is sent. `BM-EVENTS` is a plugin notice, never the owner's word.
+- **Authority** (autonomy design §A.7, ADR-017): a command of the Orchestrator declares its `intent` and `effects`, and each declared effect must be covered — by the grant of an `o:` decision the owner answered (`decisionId`, any effect, one use within an hour), or, for every effect outside `push`, `publish`, `deploy`, `real-data`, `migration`, `security` and `cost`, by the project's Autopilot or by the owner's own latest inbound message in the Orchestrator's chat (`isOwnerWord`: a `user_message` with `clientMessageId` that is neither a plugin notice nor a first prompt; the notice queue's sends carry `clientMessageId` too, so the text decides). Without authority the command is refused (§5.3).
+- **Loop guard:** `bm_send_command` refuses ("Autopilot limit reached for this request; ask the owner with bm_ask_owner") when the Orchestrator already sent **12** commands (source `autopilot` or `chat`) for the same request — or, with no `requestId`, for the same project without a request — within the last **24 hours** (the command log, §5.4); nothing is sent or recorded. `bm_direct_worker` (§6B.4) counts and is counted the same way.
+- **Tools** (Orchestrator endpoint):
 
-1. Nudge switch off → stop at once (O-3). The turn's role ∉ {manager, worker} → stop.
-2. Build the `RuleInput` of the request that just had a turn (helper shared with `review-budget`, §4.1). Note on timing: a Worker report sent with `send_agent_prompt` only reaches the store when **the Manager's turn** is recorded; the Worker's evidence (`br` commands, file edits) reaches the store in the Worker's turn.
-3. The trace is neither running nor waiting → stop (REQ-078c).
-4. Score the chosen rules; for each `raised` flag, the deduplication key `<ws>::<requestKey>::<rule>` in `orchestrator/nudges.json` (claimed before any `await`, **committed when `enqueue` returns `sent` or `queued`**, released on `dropped`/`replaced` or an error). A pending nudge is lost if the plugin reloads — accepted (the queue lives in memory).
-   The record `orchestrator/nudges.json`: `{ "version": 1, "entries": { "<ws>::<requestKey>::<rule>": { "state": "claimed" | "delivered", "rule": RuleId, "target": "manager" | "worker", "targetId": string, "at": ISO time, "outcome": "queued" | "sent" | "interrupted" | null } } }`. `claimed` is written before the send and becomes `delivered` with its `outcome` after it (`queued`/`sent` from `enqueue` for the Manager; `sent` for an idle Worker, `interrupted` for a running one); a released claim is deleted. At most 500 entries, the oldest `delivered` first to go; a `claimed` entry older than 10 minutes counts as released (a plugin reload between claim and send). `orchestrator.flags` returns the `delivered` entries of the request as `nudges: [{ rule, at, target, outcome }]`; `orchestrator.overview` counts them (§7).
-5. **Rules that nudge the Manager** (`manager.language-mismatch`): scored at the end of the Manager's turn, right after the reply just recorded; `enqueue` sends at once because the Manager is idle — like `BM-SETTINGS`.
-6. **Rules that nudge the Worker** (`process.small-heavy`) — **(Q-074, owner decision 2026-09-28: the Orchestrator may interrupt a running Worker).** The stored trace learns about a Worker's work only when its turn ends (the collector writes at `agent.turn_ended`), which for a Small request is usually after the work is done; so a nudge that is to change the work has to come from a live look at the running Worker, and has to reach it inside its running turn. Therefore (§6.5):
-   - the Worker's rules are checked by the **live watcher** of §6.5 while the Worker runs, and again at the end of each Worker turn from the stored trace;
-   - a nudge is sent **at once** with `agents.ref(workerId).send(text)`; if the Worker is running, Paseo **replaces its current turn** with the nudge (the same mechanism `stop-propagation.ts` relies on) — the Worker then starts a new turn that begins with the nudge. The nudge text says the previous step was interrupted and tells the Worker to check the state of what it was doing (a command may have been cut short) before it continues;
-   - **never** to a Worker whose latest report — recorded, or seen in its live timeline (input of the `bm_report` tool or a `send_agent_prompt` message starting with `BM-REPORT`) — has phase `blocked` or `finished`: a Worker waiting for the user must not be woken, and a finished one has nothing to change. The check runs immediately before the `send`;
-   - at most once per rule per request (the key of step 4, committed after the `send` succeeds, released if it fails).
-7. Nudge switch turned off → the watcher stops at once and `noticeQueue.drop("BM-NUDGE")` drops every pending Manager nudge (REQ-078g). `drop(kind)` is the only addition to the queue; the three notice kinds already using it do not change behaviour.
+| Tool | Input | Behaviour |
+|---|---|---|
+| `bm_send_command` | `{ workspaceId, managerId, requestId?, re?, intent, effects, decisionId?, command ≤ 4,000, reason ≤ 300 }` | Checks the Manager (a non-archived `bm-manager` of the project), the authority, the block, the backstop (§6B.5) and the loop guard; then delivers the `BM-COMMAND` block (§6B.1) through the notice queue (`command:<id>`), spends the decision's grant once delivered, and records the command (§5.4); a Manager that cannot be reached records and spends nothing |
+| `bm_ask_owner` | `{ workspaceId, requestId?, managerId?, question, recommendation, options?: [{ label, effects, command? }], separate? }` | Stores an open `o:` decision (§5.3); a new one replaces the Orchestrator's open decision of the same request unless `separate`, and names the replaced id. Sends nothing to any agent |
+| `bm_set_autopilot` | `{ workspaceId, enabled }` | Only when the owner's own latest message in the chat asks for it; else refused. Sends nothing |
+| `bm_decisions` | `{ workspaceId?, requestId?, status?, limit? }` | Read-only: the stored decisions, redacted, with their answers and grants (autonomy design §A.9) |
 
-### 6.3 Format
+- **Reading enough:** `bm_agent_messages` returns up to 50 messages of up to 12,000 characters with `detail: "full"`; `bm_request` keeps the 60,000-character cap with `detail: "full"` (§5.2).
+
+## 6B. Coordinating running work (ADR-016)
+
+### 6B.1 `BM-COMMAND` — every command the plugin delivers
+
+Built by `commandBlockOf` in `shared/orchestrator-command.ts` (with its parser `parseCommandBlock`), used for every command the plugin delivers — the Orchestrator's own and the command it prepared on an option the owner chose. Version 2 (autonomy design §A.7):
 
 ```
-BM-NUDGE <rule id>
-Observed: <one sentence, from Flag.observed>
-Suggested: <one sentence, fixed per rule>
-This is a hint from the paseo-bm plugin, not a user message. The user's instructions win over it. Do not reply to this message; apply it from your next step.
+BM-COMMAND
+from: orchestrator | owner
+via: autopilot | chat | tab
+to: manager | worker
+copy: yes                       ← only on the Manager's copy of a Worker command
+requestId: req-… | none
+re: <subject, one line, ≤ 120>
+intent: answer | continue | redirect | stop | release | other
+effects: <effects, in EFFECTS order> | none
+authority: owner | autopilot | decision:<decision id>
+approved: <the effects the authority covers> | none
+limits: <derived>               ← only when from: orchestrator
+
+<body: the instructions, markdown allowed, ≤ 4,000; an answer to questions embeds a BM-ANSWERS block>
+
+why: <one line, ≤ 300>          ← optional
 ```
 
-A nudge sent to a running Worker adds one line after `Suggested:`: `Your previous step was interrupted by this notice: check the state of what you were doing (a command may have been cut short), then continue the request.`
+- **Limits** are derived: the fixed limits (`COMMAND_LIMITS`: no commit, push or deploy; no real data) less what `approved` covers (`limitsOf`), so a delivered command never carries a limit that contradicts its approval; a limit partly approved is split into `no-<effect>` for what it still withholds. A command `from: owner` carries none; no build of Phase 1 writes one — it is read from blocks older builds delivered.
+- **`via`:** `autopilot` or `chat` for the Orchestrator's own commands (§6A); `tab` for a prepared command delivered because the owner tapped its option (in the Inbox or on a decision card), always with `authority: decision:<id>`.
+- **Builder and parser** (`orchestrator-command.ts`): `commandBlockOf(input)` collapses `re:` and `why:` to one line, drops the blank lines around the body, writes `requestId: none` for no request, and throws on anything `commandInputProblems` reports — an empty `re:`/body, a limit exceeded, `copy` without `to: worker`, a request id that is not one token (1–128 of letters, digits, `.` `_` `:` `-`), or a body whose last paragraph is a lone `why:` line with no `why` given. `parseCommandBlock(text)` is strict — the marker alone on the first line, the header up to the first blank line (unknown keys ignored, a repeated or malformed line refused), the `why:` taken only from a last paragraph of one `why:` line; a v2 block whose limits withhold an approved effect, or that carries only some of the four v2 fields, is refused — and `parseCommandBlock(commandBlockOf(x))` equals `commandOf(x)`. A version 1 block (no `intent`, `effects`, `authority`, `approved`) still reads. An embedded `BM-ANSWERS` block stays as written; `parseAnswers` still reads it in the whole text.
+- **Stored** in the command log (§5.4): `sentText` is the whole block; `situation` holds the `re:` line, `command` the body and `reason` the `why:` line (empty when none).
+- `BM-COMMAND` is in `PREFIXES` (a plugin-delivered block, never counted as a new user request by the collector).
+- **Who writes which block:**
 
-`BM-NUDGE` goes into `PREFIXES` of `shared/notices.ts` (so it is excluded from report parsing, review counting and user messages like every notice); the generic notice chat card shows it. On the Metric screen, nudges are taken from `orchestrator/nudges.json` through `orchestrator.flags` (not from `TraceDetail`, which has no `sent` of the Manager/Worker) and shown as a line "Orchestrator nudge: <rule>" (REQ-073c). **Accompanying fix in the Dashboard:** `workerInitialPrompts` currently takes the first message of **every** Worker record, so a nudge that opens a Worker turn would wrongly show as "Worker initial prompt" — filter plugin notices out (`isPluginNotice`).
+| Path | `from` | `via` | `to` | `re:` | body | `why:` |
+|---|---|---|---|---|---|---|
+| `bm_send_command` | `orchestrator` | `autopilot` \| `chat` | `manager` | `re` given, else the command's first line | `command` | `reason` |
+| `bm_direct_worker` | `orchestrator` | `autopilot` \| `chat` | `worker` (the Manager's copy adds `copy: yes`) | `re` | `command` | `why` (optional) |
+| a prepared command the owner picked (`orchestrator-decisions.ts`, `preparedCommandOf`) | `orchestrator` | `tab` | the action's `to` | the option's label, else the body's first line | the action's `body` | "The owner chose "<label>" on decision <id>." |
 
-### 6.4 Changes to the role instructions
+  A subject taken from a line is that line with whitespace collapsed, cut to 120 characters with "…" (`commandSubjectOf`). A tool whose block cannot be written is refused with the builder's problems and sends nothing.
+- **Manager instructions:** a `BM-COMMAND` is the owner's word (an option they chose, or the Orchestrator on their authority); act on it as theirs, within its `approved:` and `limits:`; a `copy: yes` block is for context only.
+- **Worker instructions:** a `BM-COMMAND` with `to: worker` is the owner's word, from an option they chose or the Orchestrator: follow it within its rules; if it cut a step short, check that step first and report it as interrupted by the Orchestrator, not by the user (Claude shows the replaced turn's tool call as a user rejection; coordination run 2026-09-29, F4).
 
-`roles/manager.md` and `roles/worker.md` add `BM-NUDGE` to the sentence listing the plugin's notices, with one clause: a `BM-NUDGE` is a hint, the user's words win over it, do not reply to it. `worker.md` adds that a `BM-NUDGE` which says it interrupted the previous step means: check the state of what you were doing (a command may have been cut short) before continuing the request. Both files are at the line cap of `test/roles-content.test.ts` (manager 196/197, worker 397/398): write it compactly within the existing sentence; if that is not enough, raise the cap by **one** line with a comment giving the reason, as the earlier raises did. The regex tests of those two sentences are updated in the same change. New `roles/orchestrator.md`: read-only, runs no command that changes anything, assesses only from the content sent, calls `bm_assessment` exactly once (without the tool, writes a `BM-ASSESSMENT` block), the meaning of each criterion and the scale, a suggestion is a paragraph appended to the role's instructions (not a code change), answers in English.
+### 6B.2 Chat cards
 
-### 6.5 Live watcher for running Workers
+Cards v2 (`CHAT_CARD_VERSION` 2, autonomy design §A.12 as built; `client/chat-cards.ts`, drawn by `chat-card.tsx`):
 
-The one periodic task of the plugin, and it exists only while the user wants it:
+- A `BM-COMMAND` block is an **`action`** card in the one card frame: actor → recipient ("Orchestrator → Manager", "Orchestrator → Worker"), the authority ("Autopilot", "your word in chat", the decision), the command's `intent` as its chip, the `re:` line and at most three lines of the body, the effects and limits, the raw block under Details. The Worker a block names nothing about is named from the chat's peers (`commandWorkerName`, `soleWorkerOf`).
+- The Manager's `copy: yes` of a Worker command, and a `BM-EVENTS` batch in the Orchestrator's chat, are one compact **`notice`** line each: what happened in plain words, with the lines and their ids under Details.
+- A `BM-ANSWER` notice is the card of its decision (`decision`, live from the store).
+- The Orchestrator's answers to the owner follow its instructions' template (**Situation** / **Done** / **Needs you**), plain markdown.
 
-- **Runs only when** the nudge switch is on **and** at least one Worker rule is selected. Switch off, or no Worker rule selected → no timer at all (O-3, O-5).
-- **What it watches:** a Worker becomes watched when a recorded report of its request says `tier: Small` (known at the Manager's turn end that recorded the `received` report) and the Worker is `running`; it stops being watched at its `agent.turn_ended`, when it is nudged, when its request is no longer running, or after 30 minutes. At most 5 Workers are watched at once (the oldest watch is dropped first).
-- **How often:** one pass every 30 seconds, never overlapping. A pass reads, for each watched Worker, the tail of its live timeline since its turn started (`readTimelinePages` from `live-timeline.ts`, capped at 200 entries per pass) and looks for a `br create` shell command, or an edit/write tool call on a path under `docs/product|design|adr|plans/`. One hit raises `process.small-heavy` for that request → step 6 (check `blocked`/`finished`, then `send`).
-- **Cost:** one timeline read per watched Worker per 30 seconds, no model call. A read that throws or times out skips that Worker for the pass and is logged once per Worker.
-- The timer is `unref`ed and removed when the plugin unloads.
+### 6B.3 Live watch of running Workers
 
-## 7. RPC (new contract, additions only)
+`server/worker-watch.ts`, on the stall pass's timer (§6), for **Autopilot projects only**:
+
+- A pass every **2 minutes** (non-overlapping; the 60-second stall pass is unchanged) reads, for each running `bm-worker` of an Autopilot workspace (at most 5, oldest dropped), the tail of its timeline since its turn started (`readTimelinePages`, ≤ 300 entries), plus its snapshot.
+- **How** (`worker-watch.ts`, driven by the stall watcher): the Worker pass rides on the stall watcher's one timer, every second tick, with its own non-overlap flag, and stops with it; with no Autopilot project it reads the settings file only — no `agents.list`, no snapshot, no timeline. Per Worker: `agents.ref(id).refresh()` (the snapshot), then at most two pages of 150 entries, newest first; a page that reaches back before the turn start ends the read. The **turn start** is the snapshot's `activeTurn.startedAt`, else its `lastUserMessageAt`; a Worker whose snapshot gives neither, or that is no longer `running`, is not read. The **workspace directory** is the listed workspace's, else the trace store's last known one, else the Worker's `cwd`; unknown, `outside` and the outside-`rm -rf` rule are not judged.
+- **Rule details:** `stuck` counts from the newest entry read, never earlier than the turn start, and needs one entry read. `permission` counts from the snapshot's `attentionTimestamp` when its `attentionReason` is `permission`, else from when the watch first saw that pending permission (kept in memory). The tool-call rules look at `tool_call` entries since the turn start, once per `callId` (its first time, its latest state): `danger` at any status, on the command text (`git`/`npm`/`pnpm`/`yarn` flags before the verb allowed; SQL case-insensitive; `DELETE FROM` checked per statement; `rm` needs both a recursive and a force flag, and a target `/`, `~`, `$HOME` or — resolved against the call's `cwd`, else the workspace — outside the workspace; another variable is not judged); `failing` counts shell calls that failed — a `status` of `failed` or `error`, or a non-zero numeric `exitCode` (`shellFailureOf`): Paseo's timeline for a Claude Worker carries no `exitCode`, a failed call is `status: "failed"` with no output (coordination run 2026-09-29, F1) — per normalised command (trimmed, white space collapsed), and a call seen running and then ended counts once, as it ended; a command piped into another (`npm test | tail`) ends as its last part does, so its failure is not seen; `heavy` needs the request's tier (its latest report's) to be Small and a `br create` or an edit/write whose path `isProcessDocumentPath`; `outside` an edit/write on an absolute path.
+- Signals (each told to the Orchestrator **once per Worker turn**):
+
+| Signal | Raised when |
+|---|---|
+| `stuck` | the newest timeline entry is ≥ **10 min** old while the Worker is `running` |
+| `permission` | the snapshot shows a pending permission for ≥ **3 min** |
+| `danger` | a shell command matching: `git push`, `npm publish`, `pnpm publish`, `yarn publish`, `kubectl (apply\|delete)`, `terraform (apply\|destroy)`, `helm (install\|upgrade\|uninstall)`, `vercel .*--prod`, `docker push`, destructive SQL (`DROP (TABLE\|DATABASE)`, `TRUNCATE`, `DELETE FROM` without `WHERE`), `rm -rf` of `/`, `~` or a path outside the workspace |
+| `failing` | the same shell command (normalised) failed 3 times in the turn (`status` `failed`/`error`, or a non-zero exit code) |
+| `heavy` | the request's tier is Small and a `br create` or a write under `docs/plans/` or `docs/adr/` appears (`isProcessDocumentPath`) |
+| `outside` | an edit/write tool call on an absolute path outside the workspace directory |
+
+- **Where a signal goes** (autonomy design §A.8): every signal is one `worker.signal` event on the event bus — to the Orchestrator in the next `BM-EVENTS` batch (project, Worker, request, signal, redacted evidence, since), dropped when settled first. `stuck`, `permission` and `danger` are also **Inbox alerts** for the owner (`stuck`, `permission-waiting`, `danger`; subject the Worker id, `detail` the redacted evidence ≤ 300 characters), raised once while they hold; `stuck` and `permission` clear when no longer seen, all three at the Worker's recorded turn end, when it stops running, or when its project leaves Autopilot. `failing`, `heavy` and `outside` are events only.
+- **The interrupt allowance:** a newly raised `danger` alert opens the Worker's allowance for 10 minutes (`openDangerAllowance`, a `…::danger-open@<time>` entry of `stalls.json`; expired ones are dropped at the next opening; `isDangerOpen` is true while `now < opened + 10 min`); the `BM-EVENTS` line then says until when the Orchestrator may interrupt it. The plugin itself never interrupts anyone. An outdated or tool-stale Orchestrator is replaced before it is woken (`wakeableOrchestrator`).
+- Cost: one timeline read per watched Worker per 2 minutes; no model call.
+
+### 6B.4 Tools added (Orchestrator endpoint)
+
+| Tool | Input | Behaviour |
+|---|---|---|
+| `bm_direct_worker` | `{ workspaceId, workerId, requestId?, re, intent, effects, decisionId?, command, why?, interrupt?: boolean }` | Same authority as `bm_send_command` (§6A). Target must be a non-archived `bm-worker` of that workspace (never a Reviewer). Goes through the gate (§6B.5) and the cap. Delivers `BM-COMMAND to: worker` through the queue (at the Worker's turn end); with `interrupt: true` only while that Worker's interrupt allowance is open, then `agents.ref(workerId).send` at once (replaces its turn). Sends the Worker's Manager the same block with `copy: yes` through the queue. Records the command (`to: "worker"`) |
+| `bm_repo` | `{ workspaceId, action: "status" \| "diff-stat" \| "log" \| "show", path?: string, file?: string }` | Runs `git` read-only with `execFile` (no shell) in the workspace directory or a sub-directory `path` inside it (refused if it escapes): `status --short --branch`, `diff --stat` (plus `--cached`), `log --oneline -20`, `show HEAD:<file>` or the working-tree file (≤ 200 KB). Output redacted, capped at 20,000 characters, 10-second timeout, `GIT_TERMINAL_PROMPT=0`, no network command |
+| `bm_note` | `{ workspaceId, text, replace?: boolean }` | Per-project notes in `orchestrator/notes/<ws>.json`: at most 20 notes of ≤ 500 characters (oldest dropped); `replace` empties first. `bm_projects` returns each project's notes |
+
+`bm_ask_owner`'s options (at most 5, 1–80 characters each, with their effects and an optional prepared command) are one button each on the decision card, in the Inbox and in the chats (autonomy design §A.12).
+
+Notes (`orchestrator-store.ts` `readNotes`, `appendNote`): each note is `{ at, text }`, `text` trimmed and 1–500 characters (else refused, and nothing is written — `replace` included), kept oldest first; the file is `{ version: 1, entries }`, `0600` in a `0700` `notes/` folder, written atomically; a note that does not validate is skipped on its own. Notes are the Orchestrator's memory of a project, not an excerpt of one request: `traces.delete` leaves them, as it leaves the command log; cleanup deletes them with `orchestrator/`.
+
+Decided in implementing (bead ouuu.3):
+
+- **`bm_direct_worker`.** Checks, in this order, each refusal sending and recording nothing: the target is a non-archived `bm-worker` of the workspace by `agents.list` (a Reviewer, Manager, the Orchestrator or another provider's agent: "is not a paseo-bm Worker"); the authority (§6A; refused with "Autopilot is off for this project and the owner has not just told you to send; ask the owner with bm_ask_owner, with this command prepared on an option"); the block, the gate and the cap (as `bm_send_command`, `checkedCommand`); `interrupt: true` with no open allowance for that Worker ("interrupt is allowed only while a danger signal of this Worker is open; …"). The Worker's Manager is the agent that created it (`paseo.parent-agent-id`) when that is a non-archived `bm-manager` of the same workspace. The Worker is served first — the queue's `command:<id>`, or with an interrupt `agents.ref(workerId).send` at once — and a Worker that cannot be reached is refused, with no copy sent; then the copy goes to its Manager through the queue under the same kind. A Worker with no such Manager gets the command without a copy (the answer says so) and is recorded with `managerId: null`; a copy that cannot be delivered is said in the answer. Recorded `sent` with `to: "worker"`, `workerId`, `outcome` of the Worker's delivery, `situation`/`command`/`reason` as §6B.1. Answers `{ commandId, outcome, interrupted, managerId, copy: "sent" | "queued" | "failed" | null, source }` (`bm_send_command` answers `{ commandId, outcome, source, authority, approved }`).
+- **`bm_repo`.** The folder is the one `workspaces.list` gives for the workspace, else the trace store's `lastKnownDirectory`; the project must be a paseo-bm project (`requireProject`). `path` is resolved from that folder through symlinks (`realpath`) and must stay inside it, be a folder, and not be inside `.git`. `show` needs `file`: `HEAD:<path>` runs `git show --no-textconv HEAD:./<path>` (relative to `path`), a plain `<path>` reads the working-tree file; either is refused when it leaves the folder (a working-tree file also after `realpath`), lies inside `.git`, or has a name that marks a secret (`.env*`, `.envrc`, keys and certificates such as `*.pem`/`*.key`/`id_rsa`, `.npmrc`, `.netrc`, `.git-credentials`, `credentials*`, `secret*`); a working-tree file must also be a regular text file of at most 200 KB that git does not ignore (`git check-ignore -q`). The commands: `status --short --branch`; `diff --stat --no-ext-diff --no-textconv`, then the same with `--cached` (shown as "Not staged" / "Staged"); `log --oneline -20 --no-decorate`. Every one starts with `--no-pager -c core.fsmonitor=false -c color.ui=false -c core.quotePath=false` (`GIT_READ_ONLY_PREFIX`) and runs with `execFile` (no shell) in an environment without `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` and with `GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0` (so `status` does not refresh the index), `GIT_NO_LAZY_FETCH=1`, a 10-second timeout and a 200 KB output buffer. A failure is a refusal naming it (git missing, the timeout, the output too large, or git's first error line, redacted). The answer is a title line, then the output redacted and cut to 20,000 characters.
+- **`bm_note`** answers "Noted. …" with `{ workspaceId, notes: <count>, replaced }`; `bm_projects` gives each project `notes: [{ at, text }]`, oldest first, redacted (none when unreadable).
+- **`bm_ask_owner` options** are trimmed with whitespace collapsed; an empty list stores none.
+- **The first-prompt check** (`isOwnerWord`, `orchestrator-agent.ts`) matches the opening words every version's first prompt shares (`ORCHESTRATOR_FIRST_PROMPT_START`, §3.3), so an older Orchestrator's first prompt, with another opening line or tool list, is never the owner's word.
+
+### 6B.5 The big-decision gate
+
+`shared/decision-gate.ts` `gateOf(text) → category[]`, applied by `bm_send_command` and `bm_direct_worker` to `re` + body (never to the header). Since autonomy design §A.7 it is a **backstop**, not the authority: a category it finds that the command's declared effects do not cover refuses the command with "declare the effect or ask the owner with bm_ask_owner" — never a silent send (`undeclaredCategoriesOf`). Categories and patterns (case-insensitive, English and Vietnamese):
+
+| Category | Patterns |
+|---|---|
+| `security` | security, permission, authoriz, authenticat, login-as, impersonat, token, secret, password, credential, bảo mật, phân quyền, đăng nhập hộ, mật khẩu |
+| `release` | push, deploy, publish, release, production, prod, merge into main, triển khai, phát hành |
+| `data` | drop table, truncate, delete from, migrate, migration, real data, production data, xoá dữ liệu, dữ liệu thật, cơ sở dữ liệu thật |
+| `cost` | billing, cost, price, pricing, paid, subscription, chi phí |
+| `dependency` | npm install, pnpm add, yarn add, add a dependency, new dependency, license, thêm thư viện |
+
+A match preceded within 4 words by a negation (not, no, never, don't, do not, without, stop, avoid, không, đừng, chưa, cấm, dừng, tránh) does not count. A category the owner allowed for the project (`settings.autopilot[ws].allow: Category[]`, set through `orchestrator.set-autopilot`) does not count, until Part B of the autonomy design replaces it.
+
+**The stop of a dangerous Worker.** While a Worker's interrupt allowance is open (`isDangerOpen`, §6B.3), a `bm_direct_worker` command **to that Worker** whose `re:` line or body holds a stop word — stop, halt, cancel, do not, don't, never, dừng, không được, huỷ/hủy (`GATE_STOP_WORDS`, `isStopCommand`: word boundaries, case-insensitive, NFC, their inflections such as "stopped", "cancelling") — is not gated on `release` or `data` (`DANGER_STOP_CATEGORIES`). A stop has to name what it stops ("how many git push runs you made"), so without this the one moment an interrupt is allowed was the moment the gate held it (coordination run 2026-09-29, F2). Every other category still gates it; a command without a stop word, a command to another Worker, a command after the allowance expired, and every `bm_send_command` are gated as before. The exemption does not depend on `interrupt`: a queued stop passes too. Accepted risk: a command that holds a stop word and also asks for a push ("stop waiting and push") passes for that Worker during those 10 minutes; its `limits:` still say no push unless the owner said so.
+
+Matching details (`gateOf(text, allow)`, with `gateMatchesOf` for the evidence): the text is compared lower-cased in Unicode NFC; a term matches only on word boundaries (no letter, digit or `_` right before or after it — "product" is not "prod", "prepaid" is not "paid"), with its listed inflections ("pushed", "deployment", "credentials", "migrating"; `authoriz`, `authenticat`, `impersonat` take any ending) and both Vietnamese spellings `xoá`/`xóa`. The negation window is the 4 words before the match **in the same sentence** — it stops at `.`, `!`, `?`, `;` or a line break, so "Do not deploy. Push the fix." still gates the push; "don't" with a straight or curly apostrophe is one word. The result lists each category once, in the table's order (`GATE_CATEGORIES`).
+
+`allow` belongs to the project's Autopilot entry (`setAutopilotAllow`, `allowedCategories` in the store): absent reads as none, an empty list removes it, a category name the plugin does not know is dropped on read (the entry and Autopilot stay); setting it for a project with Autopilot off is refused and writes nothing, and turning Autopilot off forgets it — a project turned on again starts with none. A project without Autopilot is gated on every category. Any remaining category the declared effects do not cover refuses the command (`undeclaredRefusalOf`: "the text shows <category> that effects does not declare: declare the effect or ask the owner with bm_ask_owner") — the command is not sent, recorded or spent. The gate runs after the target and authority checks and before the loop guard (`checkedCommand`), on the `re:` line (the defaulted one included) and the body, for every command the Orchestrator sends itself. A prepared command the owner picked is not checked again: the backstop checked its text against its effects when it was asked. The allowed categories and the stop-word exemption stay until Phase 2 (autonomy design §A.7).
+
+### 6B.6 Fresh Orchestrator after a day
+
+`wakeableOrchestrator` also replaces a current Orchestrator older than 24 hours when it is idle and the newest owner message in its chat is older than 2 hours; the new one reads each project's notes through `bm_projects`.
+
+Decided in implementing (bead ouuu.3, `dayOldReasonOf`): "older than 24 hours" is its `createdAt` (unknown → kept); "idle" is a listed status other than `running` or `initializing` (unknown → kept); its chat is read (5 pages of 200 entries) only when both hold. The owner's messages are those `isOwnerWord` accepts; none in what was read counts as silence, one without a time as just now, and a chat that yields no entry keeps the Orchestrator. The replacement is `orchestrator.open`'s creation, shared with any in flight, and only while the day-old one is still the newest (`retire`), so two wake-ups, or one holding an older list, create one agent; the log line says "is more than a day old". The old one is never archived or messaged.
+
+### 6B.7 A project's facts in `orchestrator.state`
+
+`orchestrator.state` returns `{ agent, previousCount, toolsStale, outdated, projects }` (§8); what the retired screen alone read — the pending approvals, the stall rows, the log of interventions, the decisions of the proposal era, the summary line and the Watch switch — is gone (autonomy design §A.14). Work's project rows read `projects` (autonomy design §A.12): per project `state`, `health: "ok" | "waiting" | "risk" | "idle"`, `stage: "idle" | "received" | "implementing" | "reviewing" | "waiting-user" | "finished"`, `agents { manager, workers: [], reviewers: [] }` with statuses, `lastProgressAt`, `currentRequest { requestId, title }`, `openSignals: [{ signal, workerId, since }]`, `notes`, `autopilot`, `allow: Category[]`, `lastAction` and `assessment`. The per-project fields past the first design's are optional, so an older reader or server still parses.
+
+How `handleOrchestratorState` computes them (`orchestrator-actions.ts`), from one read of agents, workspaces, the stores and the open Inbox alerts:
+
+- **Projects:** workspaces with activity in the last 7 days, at most 30, newest activity first; `requests` counts their requests with activity in those 7 days.
+- **`state`:** `running` when a paseo-bm agent of the workspace runs, else `stalled` with an open `request-stalled` alert (§6), else `waiting-user` when its newest request's last report is `blocked`, else `idle`.
+- **Current request:** the project's newest request with activity in the last 7 days. `currentRequest` is its request id (its trace id when it has none) and the redacted first line of its text (`firstLine`, null when the text was not recorded); `lastProgressAt` is the later of its newest turn end and its last report.
+- **`agents`** (`projectAgentsOf`): the project's Manager, and of Workers and Reviewers the non-archived ones that belong to the current request, run now, or carry an open signal — at most 10 each, running ones first — each `{ id, title, status }`. Never every Worker the project ever had.
+- **`stage`** (`stageOf`): no current request → `idle`; a Reviewer running → `reviewing`; a Worker running → `implementing`; else from the last report: `blocked` → `waiting-user`, `finished` → `finished`, `documents-done` / `beads-done` / `bead-implemented` → `implementing`, `received` or none → `received`.
+- **`health`** (`healthOf`): an open stall or open Worker signal → `risk`; else the stage `waiting-user` → `waiting`; else an agent running or the stage `received` / `implementing` / `reviewing` → `ok`; else `idle`.
+- **`openSignals`**: the project's open `stuck`, `permission-waiting` and `danger` Inbox alerts, read as the signals `stuck`, `permission`, `danger` (§6B.3), `since` = when raised. **`notes`**: the project's notes, oldest first (`readNotes`).
+- **`lastAction`**: the newest command of the project in the command log (§5.4) — when it was sent, the `re:` line of its block (else its first line) and its `source` — or null. **`assessment`**: the newest workflow assessment (§5.5) with its average of the non-null scores, its scores and recommendations, or null.
+
+`orchestrator.set-autopilot` takes `allow?: Category[]`: with `enabled: true` — behind the same `confirmed` — it sets the project's allowed categories after the switch (`setAutopilotAllow`, an empty list allows none); absent keeps them; with `enabled: false` it is ignored, since turning off forgets them. Its output carries `allow`, the categories stored.
+
+## 7. Delivering commands (REQ-076)
+
+- **The Orchestrator's own commands:** `bm_send_command` and `bm_direct_worker` deliver their `BM-COMMAND` block (§6B.1) through the notice queue under a kind of its own per command, `command:<id>`, so two commands never replace each other: sent at once when the agent is idle, at its turn end when it runs (a Worker's interrupt, §6B.4, is the one exception). Each is recorded in the command log (§5.4) once delivered, and a decision's grant it uses is spent only then.
+- **The owner's option on an Orchestrator decision** (`decisions.answer`, from the Inbox or a decision card; `server/orchestrator-decisions.ts`, autonomy design §A.6): an option with a prepared command is delivered by the plugin itself, once, as a `BM-COMMAND` `from: orchestrator`, `via: tab`, `authority: decision:<id>`, `approved` the option's effects the answer granted (`preparedCommandOf`), to its Manager or Worker, which must still be a live paseo-bm agent of that role in the project; a Worker's Manager gets the copy. The grant is claimed and spent as `bm_send_command` spends it. An answer in the owner's own words, or an option without a command, goes to the Orchestrator as a `BM-ANSWER` notice with the grant it may spend on one command passing that `decisionId`; a prepared command that could not be delivered leaves the grant unused and says so in the same `BM-ANSWER`.
+- **They read as the owner's:** the notice queue sends through `agents.ref(id).send(text)`, which records the message with `clientMessageId` like the app (Base design §7.5); the text is a `BM-COMMAND` block, which the Manager's and Worker's instructions read as the owner's word.
+- **Talking to the Orchestrator** is the owner's own message in its chat; nothing of the plugin sends it the owner's words but a `BM-ANSWER`.
+- A queued command is lost if the plugin reloads before the target's turn ends (the queue is in memory, as for every notice); it stays recorded with `outcome: "queued"` (accepted limit).
+
+## 8. RPC
 
 | RPC | Input | Output |
 |---|---|---|
-| `orchestrator.overview` | `{ sinceDays: 7 \| 14 \| 30 }` | `{ requests: [{ workspaceId, workspaceLabel, traceId, requestId, at, tier, state, warnings, infos, nudges }], topFlags: [{ rule, count }], nudges: number, byTier: [{ tier, requests, avgDurationMs, avgCostUsd, avgReviewCalls }], truncated: boolean }` |
-| `orchestrator.flags` | `{ workspaceId, traceId }` | `{ flags: Flag[], linking, nudges: [{ rule, at, target, outcome }] }` |
-| `orchestrator.flag-counts` | `{ workspaceId, traceIds: string[] /* ≤ 50, one page of traces.list */ }` | `{ counts: [{ traceId, warnings, infos }] }` |
-| `orchestrator.settings` | `{}` | `{ nudge: { enabled, rules }, nudgeableRules: RuleId[] }` |
-| `orchestrator.save-settings` | `{ nudge: { enabled, rules }, confirmed?: true }` | as `orchestrator.settings` |
-| `orchestrator.assess-preview` | `{ workspaceId, traceId }` | `{ provider, model, chars, approxTokens, truncated }` |
-| `orchestrator.assess` | `{ workspaceId, traceId, confirmed: true }` | `{ assessmentId, agentId }` |
-| `orchestrator.assessments` | `{ workspaceId, traceId }` | `{ assessments: Assessment[] }` (newest first) |
-| `orchestrator.apply-suggestion` | `{ role, text, expectedHash, confirmed: true }` | `{ extra, full, chars, maxChars }` |
+| `orchestrator.state` | `{}` | `{ agent: { id, status, workspaceId, createdAt? } \| null, previousCount?, toolsStale: boolean, outdated: boolean, projects: [{ workspaceId, workspaceLabel, managerId, managerTitle, managerStatus, state: "running" \| "waiting-user" \| "stalled" \| "idle", lastActivityAt, requests, autopilot, allow?, health?, stage?, agents?, lastProgressAt?, currentRequest?, openSignals?, notes?, lastAction: { at, text, source } \| null, assessment: { assessmentId, at, status, average, scores, recommendations } \| null }] }` (§6B.7). Reads only; `agents.list` and `workspaces.list` once, each workspace store once (mtime cache) |
+| `orchestrator.open-preview` | `{}` | `{ exists, provider, model, workspace: "own" \| "choose" }` |
+| `orchestrator.open` | `{ confirmed: true, workspaceId?, recreate?: true }` | `{ agentId, created }` — `recreate` replaces an Orchestrator that lost its tools or is outdated (§3.3, §5.1) |
+| `orchestrator.set-autopilot` | `{ workspaceId, enabled, confirmed?: true, allow? }` | `{ workspaceId, autopilot, since, allow }` — turning on needs `confirmed`, else `E_AUTOPILOT_NOT_CONFIRMED`; sends nothing. No screen offers it in Phase 1 |
+| `orchestrator.apply-suggestion` | `{ role, text, expectedHash, confirmed: true }` | `{ extra, full, chars, maxChars, hash }` — kept from the first design; no screen offers it in Phase 1, and Part B of the autonomy design retires additional instructions |
 
-- `confirmed` of `orchestrator.assess` and `orchestrator.apply-suggestion` is `z.literal(true)` like the existing consent buttons (missing it is an input validation error, with no code of its own); `orchestrator.save-settings` only requires `confirmed` when turning the nudge switch on, so it has its own code.
-- **New error codes** (into `DASHBOARD_ERROR_CODES`): `E_ASSESS_UNAVAILABLE`, `E_NUDGE_NOT_CONFIRMED`, `E_ORCHESTRATOR_WRITE_FAILED`, `E_SUGGESTION_TOO_LONG` (the addition exceeds the 8,000 characters of "Additional instructions" — no cutting, no write), `E_ROLE_EXTRA_CHANGED`.
-- `orchestrator.apply-suggestion` **appends** the paragraph (separated by one blank line) to `role-extras.json` through `saveRoleExtra`. `saveRoleExtra` runs synchronously, so two calls do not interleave; the real risk is a **lost update**: `roles.save-extra` replaces the whole text from the draft on Setup. So the client sends `expectedHash` (sha256 of the current text it showed in the preview box); different from the stored text → `E_ROLE_EXTRA_CHANGED` (new code), no write, the client reloads. The length is checked **before** calling `saveRoleExtra` (that function throws `E_ROLE_EXTRA_INVALID` itself above 8,000 characters) in order to return `E_SUGGESTION_TOO_LONG`.
-- `orchestrator.overview` — caps: only workspaces with `lastSeenAt` in the period; at most the 50 newest requests per workspace and 300 in total; hitting a cap gives `truncated: true` and the tab says "showing the latest N". Default **14 days** (proposal for Q-073), changeable to 7/14/30. One call reads each workspace's store once (with the existing mtime cache) and calls `agents.list` once for all workspaces.
-- `traces.get`: unchanged (flags come through `orchestrator.flags` so the Dashboard contract stays as it is).
+- **Retired with the screen they served** (autonomy design §A.14): the Watch switch's settings RPC, the approve, dismiss and typed-command RPCs of proposals, the question box's RPC and the Assess-workflow button's RPC. The owner asks the Orchestrator — for an assessment too — in its chat, and answers its decisions in the Inbox.
+- **Error codes:** `E_ORCHESTRATOR_WRITE_FAILED`, `E_SUGGESTION_TOO_LONG`, `E_ROLE_EXTRA_CHANGED`, `E_ORCHESTRATOR_UNAVAILABLE`, `E_AUTOPILOT_NOT_CONFIRMED`. The codes of the retired RPCs left the registry, since nothing raises them; the first design's `E_ASSESS_UNAVAILABLE`, `E_NUDGE_NOT_CONFIRMED` were removed with their RPCs (§11).
 
-## 8. Client
+## 9. Opening the Orchestrator from the Inbox (REQ-071, autonomy design §A.12)
 
-### 8.1 The Orchestrator tab (REQ-071, REQ-078a-b, f)
+There is no Orchestrator screen: the owner decides in the **Inbox**, follows projects in **Work**, reads figures in **Insights** and sets the agents up in **Settings** (autonomy design §A.12), and talks to the Orchestrator in its chat. The Inbox's first line is the way into that chat (`client/orchestrator-line.tsx`, its words from `orchestratorLineView` in `client/orchestrator-model.ts`). It reads `orchestrator.state` once when the Inbox shows (the same query Work's rows poll), never polls it itself:
 
-- `SETUP_TABS` adds `{ key: "orchestrator", label: "Orchestrator", hint: "how the agents coordinate" }`; the tab body is `OrchestratorTab` in `orchestrator-tab.tsx`, the wording and calculations in `orchestrator-model.ts`.
-- At the top: the **Nudge running agents** block — state, on/off button; turning on goes through `ConfirmBlock` (default cancel) with the warning: "paseo-bm will send a short BM-NUDGE message into the chat of a running Manager or Worker when a rule below finds a deviation — at most once per rule and request. To reach a Worker in time, paseo-bm watches running Workers of Small requests every 30 seconds, and a nudge to a running Worker interrupts its current step (it then checks its state and continues). A Worker waiting for your answer is never nudged. Your instructions always win."; two checkboxes for the rules that can nudge.
-- Below: a 7/14/30-day period picker; the list of requests (workspace · time · size · state · number of warning/info flags · number of nudges); "Most frequent flags"; "Nudges sent: N" for the period (REQ-078f); the table by size. Empty → "No requests with a trace in the last N days."
-- Pressing a request → the surface switches to that workspace's Metric and opens that exact trace. Setup and Metric both live in `ManagerLauncherSurface`, so this goes through a callback like the existing `onOpenWorkspaces`: `onOpenTrace({ workspaceId, workspaceLabel, traceId })` sets `dashboardWorkspace` and `view`; a new prop `initialTraceId` of `DashboardPanel` → the `RequestCard` of that trace opens expanded (there is currently no way to open a trace directly).
-
-### 8.2 The Metric screen (REQ-073, REQ-075, REQ-076)
-
-- Trace row: the original subtitle adds `· ⚑ N` when there are warning flags; the counts of a page come from one `orchestrator.flag-counts` call with that page's trace ids (the `traces.list` contract does not change).
-- `RequestCard` expanded: a **Flags** chip group (one chip per flag, pressing opens `observed`, `why`, evidence); a line "Orchestrator nudge: …" for each nudge sent; an **Assess** button → `ConfirmBlock` with the content of `assess-preview` ("Runs one Beads Orchestrator agent on <provider> · <model>. Sends this request's trace (about N characters, secrets masked) to that provider. Uses tokens.").
-- **Assessments** block: each assessment (newest first) — state, model, the scores of the 6 criteria, findings, suggestions; each suggestion has an **Add to <Role>'s instructions** button → `ConfirmBlock` showing the text after the addition and `chars / 8,000` → `orchestrator.apply-suggestion`. When `pending`, it shows "Assessing…" and an **Open agent** button; refreshed through `useQuery` when the card is opened (no background polling; there is a Refresh button).
-
-## 9. Security and boundaries (REQ-074, REQ-079, REQ-080)
-
-- **Only paseo-bm's agents:** all data comes from the trace store (which records only `bm-*` agents) and `agents.list` filtered by role; no RPC takes an arbitrary `agentId` to read a timeline.
-- **Only two actions:** `agents.create` of `bm-orchestrator` in `orchestrator.assess` after `confirmed: true`; a `BM-NUDGE` when the nudge switch is on — `enqueue` for the Manager, `agents.ref(workerId).send` for a Worker (which replaces a running Worker's turn, §6.2 step 6), never to a Worker whose latest report is `blocked` or `finished`. No `send` of anything else, no `archive`, no `cancel`, no config write outside the existing role-creation path, no instruction write outside `apply-suggestion`.
-- **The assessment agent:** no `paseoTools` (it cannot create or message agents); the plugin's MCP server gives it only `bm_assessment`; but **the provider's own tools (shell, file editing) remain**, with the workspace as the working directory — being read-only rests on the role instructions and the mode selection rule (never a dangerous mode), **exactly like the Reviewer today**. The content sent has gone through `redactText`.
-- **Data:** `orchestrator/` mode `0700`, files `0600`, atomic writes (settings, nudges, corrections) or appends (assessments).
-- **REQ-047 of the Dashboard PRD** is amended in the same implementation: "The Dashboard is read-only; the only exception is the two Orchestrator actions (PRD Orchestrator REQ-079)".
-
-## 10. Compatibility and rollback
-
-| Data / contract | New release | Downgrade to 0.4.1 |
+| The state says | The line shows | A press |
 |---|---|---|
-| Paseo configuration | adds `bm-orchestrator` (alias + profile) | the older release only lists and saves its three roles, so the extra entry stays untouched; the older release's cleanup button removes every `bm-*`, so it still comes out clean. To be checked with a test on a fake SDK: saving a role in 0.4.1 when the config has `bm-orchestrator` does not break the save (§11) |
-| `ui/setup-state.json` | separate `orchestratorCreatedAt`, `rolesCreated.roles` keeps three roles | parses, the unknown field is dropped |
-| Trace store | no records of the new role | unchanged |
-| `role-extras.json` | adds the key `orchestrator` | the older release's first save loses the new role's text (accepted, recorded in the release notes) |
-| `orchestrator/` | new | the older release does not read it |
-| RPC | additions only | client and server ship in one package |
-| Role files | add `BM-NUDGE` | agents created by the older release do not know `BM-NUDGE`; the nudge switch is off by default, and the notice says itself that it is a hint |
-| Cleanup button | deletes `orchestrator/` when deleting data is chosen | the 0.4.1 cleanup button does **not** know `orchestrator/` and leaves it behind — including assessment results, which contain conversation excerpts with secrets masked. The release notes say how to delete it by hand |
+| no Orchestrator | "Beads Orchestrator — not open" · **Start the Orchestrator…** | `orchestrator.open-preview`, then the Open dialog in place — the provider and model, the cost sentence "Reads the work of every paseo-bm project on this machine; uses tokens.", Cancel first — and only its confirm calls `orchestrator.open { confirmed: true }` and opens the chat |
+| a current one | "Beads Orchestrator — running" (or "idle") · **Orchestrator chat ▸** | opens its chat with `navigation.openAgent` |
+| `toolsStale` or `outdated` | the same title, the reason ("… has lost its tools." / "… runs on older instructions than this paseo-bm.") · **Start a new Orchestrator…** | the recreate dialog (Cancel first; "The old one stays in your agent list") → `orchestrator.open { confirmed: true, recreate: true }` |
 
-Rollback: `paseo plugin update paseo-bm --version 0.4.1`, then, to remove the extra role, delete `bm-orchestrator` in Paseo (the older release does not show it). No data is irreversible; R3 is not needed.
+While an Orchestrator younger than 24 hours has replaced an older one still in the owner's list, the line adds "New Orchestrator since <time> ago — the old chat is no longer used." (`replacedLine`). On a host that cannot open an agent from a plugin it says "The Orchestrator is ready. Open Beads Orchestrator from your agent list."; a failure is said on the line. The outdated and tool-stale Orchestrators are also replaced without the owner at their next wake-up (§3.3).
 
-## 11. Testing
+## 10. Security and boundaries (REQ-074, REQ-079, REQ-080)
+
+- **Only paseo-bm's agents:** data comes from the trace store, `agents.list` filtered to `bm-*` providers, and the timelines of those agents only.
+- **What reaches a working agent:** a Manager receives only the prepared command of an option the owner picked (§7), `bm_send_command` (on the authority of §6A), and the copy of a `bm_direct_worker` command; a Worker receives only `bm_direct_worker` (the same authority; at its turn end, or at once only while its danger allowance is open) or a prepared command addressed to it. Every one is a `BM-COMMAND` block from the Orchestrator with its limits (§6B.1); the Orchestrator's own pass the backstop (§6B.5). Nothing sends to a Reviewer. `bm_repo` runs read-only git and writes nothing.
+- **What reaches the Orchestrator:** the owner's messages in its chat, `BM-EVENTS` (Autopilot projects only: `decision.opened`, `request.finished`, `request.stalled`, `worker.signal`; autonomy design §A.8) and `BM-ANSWER` (the owner's answer to one of its decisions, §7).
+- **What the plugin reads live:** the Worker watch (§6B.3) refreshes and reads the timeline of running `bm-worker` agents of Autopilot projects only — none of any other project, and nothing at all with no Autopilot project.
+- **No other action:** no `archive`, `cancel`, `stop`, `delete`; no config write outside role creation; instruction writes only through `apply-suggestion`; workspace creation only for the Orchestrator's own home (§3.3).
+- **Endpoint:** the path secret (§5.1); tools answer only with redacted content.
+- **The Orchestrator itself:** no Paseo agent tools; read-only by instructions and the Reviewer's mode rule; it keeps its provider's own tools, as the Reviewer does.
+- **REQ-047** of the Dashboard PRD is amended: the exceptions are creating the Orchestrator agent and its workspace, delivering a command the owner chose on a decision, approved in the Orchestrator's chat or delegated by Autopilot — to a Manager, or directly to a Worker with a copy to its Manager (ADR-016) — recording the Autopilot switch and its allowed categories, the Orchestrator's notes, and waking the Orchestrator (`BM-EVENTS` of Autopilot projects, the owner's answers).
+
+## 11. The first design: what is kept, what is removed
+
+| Part | Decision |
+|---|---|
+| Role `bm-orchestrator`, its card (Settings → Agents), 0.4.1 compatibility, cleanup | **Kept** |
+| Rules, `language-guess`, `rule-input`, `request-trace`, model-correction log | **Kept** as signals |
+| `bm_assessment` schema, `assessment.ts` content builder, `apply-suggestion`, `role-extra-hash` | **Kept** |
+| `nudge.ts` (turn-end nudge, Worker watcher, `BM-NUDGE` text), `NUDGE_NOTICE_MARKER`, the `BM-NUDGE` sentences of `roles/manager.md` and `roles/worker.md` (and their line-cap raises) | **Removed** |
+| RPCs `flags`, `flag-counts`, `overview`, `settings` (nudge shape), `assess-preview`, `assess`, `assessments`; the assessment turn-end reader | **Removed** (replaced by §8) |
+| Metric additions: `⚑ N`, Flags chips, nudge lines, Assess and Assessments block | **Removed** (REQ-071 f) |
+| The first design's screen (overview, nudge switch) | **Replaced** by ADR-014's one-screen tab, itself retired by the autonomy programme (§A.14) with the proposals and their approval: the Inbox, Work, Insights and Settings took its content, and §9 is what is left of it |
+| `workerInitialPrompts` ignoring plugin notices; the P1 fix of trace grouping | **Kept** (Dashboard corrections) |
+| The first design never shipped: no data migration is needed beyond reading an old `settings.json` as the default | — |
+
+## 12. Testing
 
 | Layer | Content |
 |---|---|
-| Pure | `flagsOf`: each rule has a raised case, a not-raised case, an `unknown` case; fixtures rebuild **the cases of the 2026-09-26 run record** (Small with beads, the Manager switching to English after `BM-REPORT`, a corrected model, a Worker failing its first turn) and a "clean" trace → 0 flags (O-1). `language-guess`: Vietnamese with/without full diacritics, English, code, mixed, other languages → `unknown`. Overview aggregation, caps and `truncated`. Building the assessment content: masking secrets, cutting, estimating. The assessment result parser: valid, missing criterion, extra entries, hand-written block |
-| Server with a fake SDK | Compatibility: a config with `bm-orchestrator` + the `roles.save-settings` code of 0.4.1 (taken from the tag `v0.4.1`) can still save another role; a `setup-state.json` with `orchestratorCreatedAt` still parses with the 0.4.1 schema. `ensureRoles` creates the fourth role on a machine that already has three roles, without touching the three; `setup-state` keeps three roles in `rolesCreated`; cleanup removes `bm-orchestrator`; the hook applies instructions/mode/tool for the new role and writes the model-correction log; the collector does not record turns of the new role; `nudge.ts`: switch off → 0 `enqueue` calls (O-3), once per rule per request (O-4), Worker `blocked` → no send and no claim, turning the switch off → `drop`; `assess`: missing `confirmed` → nothing created, exactly one agent created with the right labels, result read from the tool call and from the hand-written block, `failed` with `raw`; `apply-suggestion`: append only, over 8,000 → `E_SUGGESTION_TOO_LONG` with no write, a stale `expectedHash` → `E_ROLE_EXTRA_CHANGED` with no write |
-| Worker nudge and watcher | The watcher starts only with the switch on and a Worker rule selected, watches only running Workers of Small requests, at most 5, one non-overlapping pass every 30 s, stops at turn end, after a nudge, after 30 min, and at once when the switch goes off; a `br create` or an edit under `docs/…` in the live timeline raises the flag; the nudge is sent with `send` (a fake running agent shows its turn replaced); a latest report `blocked`/`finished` — recorded or live, through `bm_report` input and through a `send_agent_prompt` message — blocks the send; once per rule per request, key released when `send` fails; `drop(kind)`; the three existing notice kinds do not change behaviour (existing tests stay green) |
-| Dashboard | `workerInitialPrompts` no longer includes plugin notices |
-| Negative (REQ-079d, O-5) | No press and switch off → 0 `agents.create`, 0 `send`/`enqueue`; no path calls `archive`/`cancel`/config edits outside role creation; no RPC reads an agent outside `bm-*` |
-| Role files | `roles-content.test.ts`: `BM-NUDGE` in the Manager's and Worker's listing sentence, line caps; `orchestrator.md` has the read-only rules and the scale; the generated bundle matches |
-| Acceptance | Isolated daemon per `scripts/manual-test/`: updating from 0.4.1 gives the fourth role; a Small request that deliberately creates a bead → flag `process.small-heavy`; nudge switch turned on → the Worker receives exactly one `BM-NUDGE`; Assess a request → result `done` and apply one suggestion; clean removal of paseo-bm's settings. Run record in `docs/archive/operations/` |
+| Pure | Stall reasons on fixtures (each raised; a healthy running request raises none; cleared and raised again); the Orchestrator line's model (`orchestratorLineView`: start, open, restart with its reason, the replaced line) and its hook-free row; the Orchestrator's instructions (`roles-content`) |
+| Server with a fake SDK | `open`: creates once, reopens the same agent, labels and mode, `E_ORCHESTRATOR_UNAVAILABLE`, the workspace path and its fallback; tools: secret required, `bm_agent_messages` refuses a non-`bm-*` agent, `bm_send_command` and `bm_direct_worker` refused without authority, one delivery through the queue each, recorded in the command log with their source, a running Manager gets it at turn end; `orchestrator.state` answers only the agent and the projects, and reads a data folder with the proposal era's entries as if they were not there (`test/retired-data-files.test.ts`); the stall pass once per stall, an Inbox alert, an event only for an Autopilot project; the Worker watch's `failing` on Claude's entry shape (`status: "failed"`, no `exitCode`); `bm_direct_worker`'s stop of an open danger passing the gate only for that Worker and only with a stop word; the loop guard refuses the 13th command for a request in 24 h and sends nothing; `bm_assessment` attaches to a pending line or records a new one |
+| Negative (REQ-079 e, O-2 → O-4, REQ-083 → REQ-086; `test/orchestrator-boundary.test.ts`) | Across every path: no `send` to a Manager but a prepared command the owner picked, an allowed `bm_send_command` or a direct command's copy; to a Worker only `bm_direct_worker` on Autopilot or right after the owner's word, every block it gets copied to its Manager, and a running Worker's turn replaced only while its danger allowance is open; never a Reviewer; a gated command sends and records nothing, an allowed category or a negated mention passes, a stop naming the push passes only to the Worker whose danger allowance is open and only with a stop word; `bm_repo` stays in the folder and a real repository is unchanged byte for byte; the Worker watch refreshes and reads no Worker outside Autopilot projects; no Autopilot → no message to the Orchestrator, a stall only an Inbox alert; no Orchestrator agent and no token before the owner starts it; no `archive`/`cancel`/config write; no read of a non-paseo-bm agent; every RPC and tool covered; the mutants run against it are listed in its header |
+| Acceptance | Isolated daemon (`scripts/manual-test/` §5): Autopilot project — a Worker's question answered by the Orchestrator itself, the Manager receiving the answer as a `BM-COMMAND` with its limits, a `request.finished` event following, no owner action; non-Autopilot project — the Orchestrator asks the owner with `bm_ask_owner`, then sends after the owner's "Send it." in the chat (source `chat`), and a prepared command goes out when the owner picks its option (`decisions.answer`); ADR-016 — a running Worker's `git push` raising `worker-signal danger`, the Orchestrator's direct Worker command with an interrupt and the Manager's copy as `BM-COMMAND` blocks, a gated command becoming a decision with options (the 2026-09-29 run found that `failing` was never raised on Claude and that the gate held a stop naming the dangerous command: its findings F1, F2, fixed after the run — not yet re-run on a daemon), `bm_repo` verifying a claim, the project facts of `orchestrator.state`; cleanup. Run records in `docs/archive/operations/` (2026-09-28 agent run, 2026-09-29 Autopilot run, 2026-09-29 coordination run) |
 
-## 12. Open questions
+## 13. Open questions
 
 | ID | Question | Owner | Status |
 |---|---|---|---|
-| Q-071 | First-release rule catalogue, thresholds, rules that can nudge | hieu.nt10 | **answered (2026-09-28)** — the owner agreed to the proposal: §4.2, two rules that can nudge |
-| Q-072 | The criteria and scale of an assessment | hieu.nt10 | **answered (2026-09-28)** — §5.3: six criteria, scale 1–5, `null` when data is missing |
-| Q-073 | The tab's default period | hieu.nt10 | **answered (2026-09-28)** — 14 days, changeable to 7/14/30 (§7) |
-| Q-074 | Nudging while the Worker is waiting for the user | hieu.nt10 | **answered (2026-09-28)** — owner allows a more proactive Orchestrator, Workers included: a live watcher (§6.5) and a nudge that interrupts a running Worker (§6.2 step 6); a Worker whose latest report is `blocked` or `finished` is never nudged |
-| Q-075 | Should flags be snapshotted when a request ends so they do not change when an agent is deleted | hieu.nt10 | deferred — O1 takes no snapshot (§4.1); reconsider if users see flags "jump" |
+| Q-075 | Snapshot signals when a request ends | hieu.nt10 | deferred (unchanged) |
+| Q-077 | Can the plugin server call `workspaces.open` for the Orchestrator's home? | hieu.nt10 | **answered (2026-09-28)** — owner allows a workspace of its own; verified on an isolated daemon: yes (§3.3); the fallback is not needed |
+| Q-078 | Workflow assessment scope: last 7 days, at most 10 requests, content capped at 60,000 characters | hieu.nt10 | **answered (2026-09-28)** — approved |
 
-## 13. Revision History
+## 14. Revision History
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-09-29 | Claude (owner's delegation) | §5.4 `wakes.json`: the Orchestrator's wakes by the event bus and their ends, for the evaluation's A-7 (bead bm-autonomy-phase1b-dbdv.8) |
+| 2026-09-29 | Claude (owner's delegation) | Retirement sweep (autonomy design §A.14, bead bm-autonomy-phase1b-dbdv.6): §1, §2 and §3.2 describe the Orchestrator as it is now; §5.3 proposals retired — the Orchestrator asks the owner with `bm_ask_owner`; §5.4 `proposals.json` is the log of the commands the Orchestrator sent itself (proposal-era entries ignored and dropped), `stalls.json` holds interrupt allowances only, `settings.json` has no Watch field; §6 the always-on stall pass (Inbox alerts, events for Autopilot projects); §6A authority per autonomy §A.7, `BM-EVENTS` instead of the per-situation wake-ups; §6B.1 v2 blocks, `via: tab` = the owner's tap on an option; §6B.2 cards v2; §6B.3 signals as alerts and events; §6B.5 the gate as backstop; §6B.7 `orchestrator.state` = agent and projects; §7 delivery of commands and answered decisions; §8 the five RPCs left, retired RPCs and error codes; §9 the Inbox's Orchestrator line instead of a screen; §3.3 the first prompt's new opening line and the shared check; §10–§12 follow |
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | Fixes after the coordination run (its findings F1–F5): §6B.3 `failing` counts a shell call with `status` `failed`/`error` as well as a non-zero exit code (Claude's timeline has no exit code); §6B.5 a stop sent to a Worker whose danger allowance is open is not gated on `release`/`data` when it holds a stop word; §6A no `manager-turn` for a turn only the Orchestrator's own `BM-COMMAND` started; §6B.1 the Worker reports an interrupt as the Orchestrator's; the Orchestrator's instructions offer only options it can carry out (allowing a category is the owner's **Allow…**); §12 follows |
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | Closing ADR-016 (bead ouuu.7): §3.2 aligned with ADR-016 — commands go to a Manager, or directly to a Worker with a copy to its Manager under the same authority, as `BM-COMMAND` blocks (no limit line), with `bm_repo`, `bm_note` and the Situation / Done / Needs you answer; §6B.2 a command card leaves out a `re:` line that only repeats the body's first line; §10 the Worker watch's read surface and REQ-047's new exceptions; §12 the boundary suite's ADR-016 guarantees and the coordination acceptance run |
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | Implementing the dashboard (bead ouuu.6): §6B.7 how each addition is computed (current request, `agents` bounded to the current request / running / signalled, the stage and health orders, `summary` counts with `actionsToday` over 24 hours) and `projects[].notes` added for §9's Details; `set-autopilot` takes `allow` behind the same confirmation; §9 the option answer's confirmation, Needs you oldest first, Allow…'s confirmation, Override… of a Worker command through its Manager, Pause Autopilot only on Autopilot projects |
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | Implementing the live watch (bead ouuu.2): §6B.3 how the Worker pass runs (on the stall watcher's timer, every second tick; `refresh()` then two pages of 150 cut at the turn start), where the turn start and the workspace directory come from, each rule's details, the `BM-EVENT worker-signal <signal>` notice, and that a signal is recorded without an Orchestrator and cleared at the Worker's recorded turn end |
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | Implementing the chat cards (bead ouuu.5): §6B.2 how a `BM-COMMAND` card and the `BM-EVENT` / `BM-STALL` compact lines are recognised, named and worded, the Worker's name on a command, and the fallback to the generic notice card |
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | Implementing the tools and delivery (bead ouuu.3): §6B.1 who writes which block (`re:` defaults, the tab's lenient block) and the Q&A ledger reading a command's body; §6B.4 the order of `bm_direct_worker`'s checks, its Manager, the copy after the Worker's delivery, `bm_repo`'s commands, environment, refusals (secret names, ignored files, `.git`) and answers, `bm_send_command`'s `re?`, the first-prompt check by its opening line; §6B.5 where the gate runs; §6B.6 the day-old test; §6A the limit line is no longer appended; §7 and §10 follow |
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | Implementing the §6B foundations (bead ouuu.1): §6B.1 the builder's normalisation and refusals, the strict parser, the stored fields of a command; §6B.3 the Worker-signal and allowance store rules (once per key, open until cleared, expiry at the next opening, eviction like events); §6B.4 the note shape and that `traces.delete` leaves notes; §6B.5 word boundaries, inflections, NFC, the negation window stopping at a sentence end, `allow` belonging to the Autopilot entry; §6B.7 the optional contract fields and `workerId`; §5.4 follows |
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | ADR-016: §6B — `BM-COMMAND` blocks for every delivered command, chat cards, live watch of running Workers (six signals), `bm_direct_worker` with a Manager copy and danger-only interrupt, `bm_repo`, `bm_note`, `bm_ask_owner` options, the big-decision gate, a fresh Orchestrator after a day, dashboard state; §9 rewritten as a coordinator's dashboard |
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | Real use: the owner could not see what the Orchestrator did — it replaced an Orchestrator that lost its tools, sent commands to two Managers and asked a decision, while the owner watched the old chat, the tab did not refresh and Activity was collapsed. §9: **What the Orchestrator did** replaces Activity as the main block (by project, the command text without the limit line, 4 lines with Show all, decisions with their status, 24 hours with Show older), the header's Latest line and the new-Orchestrator notice, a 10-second refresh while the tab is shown, the project rows drop the latest action; §8: `agent.createdAt`, `previousCount`, `decisions`, 50 interventions |
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | Found on the owner's machine with Autopilot on: a Manager ended its turn asking the owner, or relaying a Worker's summary, with no parsed report, and nothing woke the Orchestrator; turning Autopilot on did nothing visible until the next event. §6A adds the `manager-turn` event (a Manager turn with no report event and no Worker or Reviewer running, once per record end time, its last words quoted), the `autopilot-on` takeover wake-up (once per project and `since`, from the tab and `bm_set_autopilot`), the loop guard of `bm_send_command` (12 commands per request in 24 h) and the instructions for both events; §5.4, §10, §12 follow |
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | Found on the owner's machine after a plugin reload: the Orchestrator opened the day before had lost its tools (the secret was in memory only) and kept its old instructions (Paseo fixes a system prompt at creation), so it ignored Autopilot. §5.1 the secret is kept in `ui/orchestrator-endpoint.json` and reused across starts; §3.3 the `bm.instructions` label, `outdated` in `orchestrator.state`, and `wakeableOrchestrator`, which replaces an outdated or tool-stale Orchestrator at its next wake-up so the owner never has to; §8 `outdated` |
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | After the Autopilot acceptance: the limit line asks the Manager not to repeat it; `bm_propose_command`'s answer and the role file name the chat approval; §10 REQ-047 wording and §12 acceptance row brought to ADR-015; the plugin's Assess-workflow prompt never counts as the owner's word |
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | Implementing the watcher and events of §6A (bead muzh.2): new module `autopilot-events.ts`; §6 how the timer follows Autopilot (`onAutopilotChanged`, `sync` at every recorded turn) and that a project not looked at keeps its open situations; §6A what `Report:` holds (a report has no summary field), which record is the turn's, nothing recorded without an Orchestrator, event keys never listed as stalls and evicted first; §12 the tests |
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | Implementing §6A's tools (bead muzh.3): §3.2 rewritten for Autopilot, the owner's word and the limit line; §5.2 `bm_agent_messages` 12,000 characters. The chat check also refuses a latest message that is a plugin notice by its text or the first prompt, since the notice queue's `send()` carries `clientMessageId` too (Base design §7.5); a command sent by `bm_send_command` is recorded on the pending proposal it settles (its `source` becomes `autopilot`/`chat`), so one send is one Activity line; `sentText` may be a 4,000-character command plus the limit line |
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | ADR-015: §6A Autopilot per project (events on questions and finished steps, `bm_send_command`, `bm_ask_owner`, `bm_set_autopilot`, approval by the owner's own chat message, the limit line, longer messages), `bm_propose_command` replaces the pending proposal, §6 watches every request active in 24 h and ignores the shared Manager's activity (the newest-request rule missed a waiting request), §8 `set-autopilot` and state additions, §9 tab simplified to Needs you / Projects / Activity |
+| 2026-09-28 | hieu.nt10 (drafted by Claude) | §5.1, §6, §8: found while implementing the stall watcher — where it takes its Paseo handle, that a request the Manager answered itself never stalls, stalls cleared when their request leaves the window, the `waiting-user` time, no late wake-up for an Orchestrator opened later; `toolsStale` from the secret's time and `orchestrator.open { recreate: true }` |
+| 2026-09-28 | hieu.nt10 (drafted by Claude) | §3.3, §13: Q-077 verified on an isolated daemon — the plugin server opens the Orchestrator's own workspace with `workspaces.open({ cwd })`, so `open-preview` says `own` and the fallback is not implemented; the errors, overlapping opens and a broken start of `orchestrator.open` |
+| 2026-09-28 | hieu.nt10 (drafted by Claude) | §5.4: the store's rules found while implementing it — pending match, eviction order, raising a stall, invalid entries, workflow lines deleted with a request of their scope |
+| 2026-09-28 | hieu.nt10 | **Active**, `design-ready` PASS with PRD and ADR-014; Q-077, Q-078 answered |
+| 2026-09-28 | hieu.nt10 (drafted by Claude) | **Rewritten, status Review**, for ADR-014 after the owner rejected the first design: one machine-wide Orchestrator agent with read tools and a proposal tool; commands to Managers only on the owner's click; stall watcher (5 min idle, 15 min waiting, review loops) waking the Orchestrator; workflow assessment per project; a one-screen tab; the first design's nudges, per-request assessment and Metric additions removed (§11) |
+| 2026-09-28 | hieu.nt10 (drafted by Claude) | §6.5: details found while implementing the live watcher — the 10-second read timeout, where the Worker's turn starts in the page read, no watch for a request already nudged or for a Worker past its 30 minutes until its turn ends, and the status and live-report checks right before the send |
+| 2026-09-28 | hieu.nt10 (drafted by Claude) | §6.3: the fixed `Suggested:` sentence of each nudgeable rule |
+| 2026-09-28 | hieu.nt10 (drafted by Claude) | §5.3: where the `bm_assessment` schema lives, what the tool returns, and that `findings`/`suggestions` may be left out (read as `[]`) |
+| 2026-09-28 | hieu.nt10 (drafted by Claude) | §3.1 Setup → Agents: the fourth card's label ("Orchestrator") and the RPCs it saves through |
+| 2026-09-28 | hieu.nt10 (drafted by Claude) | §3.2, the `dashboard-rpc.ts` row: how the assessment agent is shown without entering a trace — `runningAgents.orchestrator` (optional), `bmAgentsOf` lists it only with `includeOrchestrator` |
+| 2026-09-28 | hieu.nt10 (drafted by Claude) | Found while implementing the rules (bead .3.4): `process.small-heavy` counts only `docs/plans/` and `docs/adr/` (a Small request may correct its product/design documents per `roles/worker.md`, and edits cannot be told from creations); `manager.language-mismatch` checks every Manager reply after the user's message, not only the first (the 2026-09-26 slip came after a first reply in the right language); the watcher uses the same path test. Also corrected: `ruleInputOf` takes the live agents, `br create` is counted through `brCreates`, the language guess counts Vietnamese-only letters, the assessment line's nullable fields, the role-file caps |
 | 2026-09-28 | hieu.nt10 (drafted by Claude) | Filled gaps found by the plan review: the `orchestrator/nudges.json` record (§6.2), `orchestrator.flag-counts` for the trace list (§7, §8.2), nudge counts in `orchestrator.overview` and on the tab (§7, §8.1, REQ-078f); §11 no longer says mutex (`expectedHash`, as §7) |
 | 2026-09-28 | hieu.nt10 | **Active**, `design-ready` PASS. Owner decisions: the Orchestrator may interact more proactively, Workers included → §6.2 step 6 rewritten (a nudge is sent at once and interrupts a running Worker) and a live watcher added (§6.5); the downgrade note of §10 accepted; ADR-013 Accepted |
 | 2026-09-28 | hieu.nt10 (drafted by Claude) | Revised after an independent cross-check against the code (10 points): `RuleInput` built from `reconstructTraces` instead of `TraceDetail`; the data of `process.no-review`, `agent.failed-first-turn`, `process.small-heavy`, `report.malformed`, `manager.language-mismatch`; Q-074 redone with `onlyIfRunning` + a delivery-time `guard` because the `blocked` report reaches the store late; deduplication committed on `queued`; nudges shown from `nudges.json`; `expectedHash` instead of a mutex; `bmRoleSchema` keeps three roles; the remaining missing places and `CLEANUP_DELETES`; the assessment agent still has the provider's tools; tool name matched by suffix; key by `requestId` |

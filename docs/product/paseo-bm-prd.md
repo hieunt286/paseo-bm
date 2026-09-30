@@ -4,6 +4,7 @@
 |---|---|
 | Status | Accepted (2026-09-15) |
 | Owner | hieu.nt10 (GitHub: hieunt286) |
+| Programme | The [calibrated autonomy PRD](./paseo-bm-autonomy-prd.md) (Accepted 2026-09-29) **amends** this PRD as its phases land: "Worker does not touch git" becomes "effectful actions only through the policy or a one-use grant" (REQ-112, REQ-141); M-16 is kept for the decision classes the owner keeps; the roles are redefined (its §5) |
 | Created | 2026-09-14 |
 | Repo | https://github.com/hieunt286/paseo-bm |
 | Reference | https://github.com/cuongntr/paseo-room (npm `0.1.0-alpha.6`, commit `f426163`); recommended skills source: https://github.com/cuongntr/agent-skills |
@@ -343,6 +344,7 @@ Delta 20260921 (worker-fallback-and-role-settings): Phases 2a-13 → 2a-18 deliv
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-09-29 | hieu.nt10 (drafted by Claude) | The [calibrated autonomy PRD](./paseo-bm-autonomy-prd.md) was accepted: a Programme row in the header says what it amends here and when |
 | 2026-09-26 | hieu.nt10 (written by Claude) | REQ-031 (c): while Paseo tools for agents are still off, Beads Manager must not be created (a Manager created at that moment never receives the tools, found during a clean install on an isolated daemon) |
 | 2026-09-25 | hieu.nt10 (written by Claude) | **ADR-012: a single source — the plugin installed from paseo.cafe / npm is the whole product (target release 0.4.0).** Rewritten at the outcome level: REQ-001 (install through Paseo), REQ-002 (Paseo ≥ 0.9, missing tools are only warnings), REQ-003 (say beforehand every change that needs consent), REQ-004 (data folder created by the plugin itself), REQ-005, REQ-007 (install skills with a button on Setup), REQ-008, REQ-009, REQ-010 (update through Paseo), REQ-011 (Setup replaces `doctor`), REQ-012 (remove-settings button, data deleted after a second confirmation), REQ-014, REQ-015, REQ-027 (roles created automatically with defaults, sign-in status), REQ-031 (c) (a separate agent-tools button), REQ-032 (c), REQ-062 (c)–(e), REQ-063 (a), (f), REQ-035 (b), REQ-028; **dropped** REQ-006 and REQ-013 (rows kept, marked "Dropped from 0.4.0"); added REQ-070 (moving existing users with one run of the last `npx paseo-bm` release). M-1 → M-7, M-9, J-1 → J-5, J-8, added J-9; §1, §1.1, §2, §3 (Paseo 0.8 and the plugin switch out of scope), §4, §7, §8, §9 (0.4.0 milestone), Q-004 and Q-008 settled. Every row describing the target release is marked *Not implemented yet* until there is code. Independent review the same day: REQ-010 (a) states clearly that choosing a version is only safe among releases from 0.4.0 onwards |
 | 2026-09-25 | hieu.nt10 (written by Beads Worker) | **REQ-025 becomes "Tracking, coordinating and summarising results"**: added (d)–(g) — Manager wakes a waiting Worker by itself once it can verify the condition is met, answers pure fact questions itself, keeps order when two Workers collide, and speaks out every act of self-coordination. The owner's decision Q1 (c) of `req-20260925T051841Z`, recorded in [ADR-011](../adr/ADR-011-manager-coordinates-workers.md) |

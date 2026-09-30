@@ -6,7 +6,6 @@ import { createReviewerResend, createReviewerSwitch, linkReplacementReviewer, re
 import { fallbackNotice, handleFallbackAct } from "../plugin/server/fallback-rpc";
 import { ROLE_FALLBACK_STATE_FILE } from "../plugin/server/fallback-state";
 import { forgetModes } from "../plugin/server/role-mode";
-import { fallbackButtons } from "../plugin/client/chat-cards";
 import type { FallbackIncident } from "../plugin/shared/contracts";
 
 /**
@@ -109,7 +108,7 @@ describe("the instructions to the Worker", () => {
 });
 
 describe("Switch for a Reviewer", () => {
-  it("creates no agent: records switched and sends the Worker its BM-FALLBACK with the instructions; the Manager chat gets the card", async () => {
+  it("creates no agent: records switched and sends the Worker its BM-FALLBACK with the instructions; the Manager is sent nothing", async () => {
     write([incident()]);
     const { paseo, create } = fakeDaemon();
     const enqueue = vi.fn<(target: string, kind: string, text: string) => Promise<"sent">>(async () => "sent");
@@ -118,19 +117,18 @@ describe("Switch for a Reviewer", () => {
       home,
       log,
       now: NOW,
-      enqueue,
       actions: { switch: reviewerSwitch },
     });
     expect(create).not.toHaveBeenCalled();
     expect(after).toMatchObject({ status: "switched", replacementId: null, decidedAt: "2026-09-22T05:05:00.000Z" });
-    expect(enqueue.mock.calls.map((call) => call[0])).toEqual([WORKER, MANAGER]);
+    expect(enqueue.mock.calls.map((call) => call[0])).toEqual([WORKER]);
     const toWorker = enqueue.mock.calls[0]![2];
     expect(toWorker).toBe(
       fallbackNotice({ ...incident(), status: "switched", decidedAt: "2026-09-22T05:05:00.000Z" }, (alias) => (alias === "bm-reviewer" ? "claude" : null), reviewerInstructions(incident(), "auto", "high")),
     );
     expect(toWorker).toContain("\nstatus: switched\n");
     expect(toWorker).toContain("\nreplacement: none\n");
-    expect(enqueue.mock.calls[1]![2]).toContain("do not create an agent yourself");
+    expect(enqueue.mock.calls.some((call) => call[0] === MANAGER)).toBe(false);
   });
 
   it("tells the Worker not to pass a mode when the candidate's provider has none", async () => {
@@ -207,7 +205,7 @@ describe("Resend to Worker", () => {
     write([incident({ status: "switched", decidedAt: "2026-09-22T05:05:00.000Z" })]);
     const enqueue = vi.fn<(target: string, kind: string, text: string) => Promise<"sent">>(async () => "sent");
     const resend = createReviewerResend({ log, enqueue });
-    const { incident: after } = await handleFallbackAct({ incidentId: "fb-0000000000ee", action: "resend" }, fakeDaemon().paseo, { home, log, enqueue, actions: { resend } });
+    const { incident: after } = await handleFallbackAct({ incidentId: "fb-0000000000ee", action: "resend" }, fakeDaemon().paseo, { home, log, actions: { resend } });
     expect(after.status).toBe("switched");
     expect(enqueue).toHaveBeenCalledTimes(1);
     expect(enqueue.mock.calls[0]![0]).toBe(WORKER);
@@ -222,12 +220,5 @@ describe("Resend to Worker", () => {
         code: "E_FALLBACK_NOT_PENDING",
       });
     }
-  });
-
-  it("is the one button the card shows in that state", () => {
-    const now = new Date("2026-09-22T05:10:00.000Z");
-    expect(fallbackButtons(incident({ status: "switched" }), now, null)).toEqual([{ action: "resend", label: "Resend to Worker" }]);
-    expect(fallbackButtons(incident({ status: "switched", replacementId: NEW }), now, null)).toEqual([]);
-    expect(fallbackButtons(incident({ role: "worker", status: "switched" }), now, null)).toEqual([]);
   });
 });

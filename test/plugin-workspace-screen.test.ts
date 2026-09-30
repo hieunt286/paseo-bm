@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { allNodes, pressables, renderTree, texts, type RNode } from "./helpers/element-tree";
 
 /**
- * Delta 20260918f: the pieces the Beads and Metric screens share, expanded with
+ * Delta 20260918f: the pieces a project's page and the Beads board share, expanded with
  * the element-tree helper (hook-free views only). `react-native` is replaced by
  * named stand-ins, as in test/agent-tree.test.ts.
  */
@@ -51,7 +51,7 @@ function header(props: Record<string, unknown>): Array<RNode | string> {
 
 const source = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
 
-describe("the header of the Beads and Metric screens", () => {
+describe("the header of a project's page and the Beads board", () => {
   it("draws ←, the title and the screen's own buttons, and names the ← for screen readers", () => {
     const onBack = vi.fn();
     const tree = header({ title: "Beads · repo", onBack });
@@ -80,34 +80,32 @@ describe("the header of the Beads and Metric screens", () => {
     expect(header({ title: "Metric · repo" })).toHaveLength(1);
   });
 
-  it("gets the status strip on Metric and Beads inside the Beads Manager surface (F3)", () => {
+  it("gets the status strip on a project's page inside the Beads Manager surface (F3)", () => {
+    // Work → a project (work.tsx) is the surface's project page.
     const launcher = source("../plugin/client/launcher.tsx");
-    for (const screen of ["BeadsScreen", "DashboardPanel"]) {
-      const start = launcher.indexOf(`<${screen}`);
-      expect(start, screen).toBeGreaterThan(0);
-      const element = launcher.slice(start, launcher.indexOf("/>", start));
-      expect(element, screen).toMatch(/status=\{status\}/);
-    }
-    // Both screens hand it to their header.
-    for (const file of ["../plugin/client/beads-screen.tsx", "../plugin/client/dashboard.tsx"]) {
+    const start = launcher.indexOf("<ProjectPage");
+    expect(start).toBeGreaterThan(0);
+    const element = launcher.slice(start, launcher.indexOf("/>", start));
+    expect(element).toMatch(/status=\{status\}/);
+    // Every screen with this header hands it the strip.
+    for (const file of ["../plugin/client/beads-screen.tsx", "../plugin/client/work.tsx"]) {
       const text = source(file);
       const start = text.indexOf("<WorkspaceScreenHeader");
       expect(text.slice(start, text.indexOf("right=", start)), file).toMatch(/status=\{status\}/);
     }
   });
 
-  it("labels the ← of Metric and Beads from backLabelOf, and every ← goes back through one helper (F4, S5)", () => {
+  it("labels the ← of a project's page from backLabelOf, and every ← goes back through one helper (F4, S5)", () => {
     const launcher = source("../plugin/client/launcher.tsx");
-    for (const screen of ["BeadsScreen", "DashboardPanel"]) {
-      const start = launcher.indexOf(`<${screen}`);
-      const element = launcher.slice(start, launcher.indexOf("/>", start));
-      expect(element, screen).toMatch(/backLabel=\{backLabelOf\(view\)/);
-      expect(element, screen).toMatch(/onBack=\{goBack\}/);
-    }
+    const start = launcher.indexOf("<ProjectPage");
+    const element = launcher.slice(start, launcher.indexOf("/>", start));
+    expect(element).toMatch(/backLabel=\{backLabelOf\(view\)/);
+    expect(element).toMatch(/onBack=\{goBack\}/);
     // The back navigation is written once, inside `goBack`.
     expect(launcher.match(/setView\(backOf\(view\) \?\? SURFACE_HOME_VIEW\)/g)).toHaveLength(1);
     expect(launcher).toMatch(/const goBack = \(\) => setView\(backOf\(view\) \?\? SURFACE_HOME_VIEW\);/);
-    expect(launcher.match(/onPress=\{goBack\}/g)).toHaveLength(1);
+    // The workspace list is Work's own screen, reached by its tab: no ← of its own.
+    expect(launcher.match(/onPress=\{goBack\}/g)).toBeNull();
   });
 
   it("reads the workspace figures through overviewPolling (F5)", () => {
@@ -119,7 +117,7 @@ describe("the header of the Beads and Metric screens", () => {
 
   it("is the header both screens draw", () => {
     expect(source("../plugin/client/beads-screen.tsx")).toMatch(/<WorkspaceScreenHeader/);
-    expect(source("../plugin/client/dashboard.tsx")).toMatch(/<WorkspaceScreenHeader/);
+    expect(source("../plugin/client/work.tsx")).toMatch(/<WorkspaceScreenHeader/);
   });
 });
 

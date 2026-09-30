@@ -2,6 +2,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createDecisionStore } from "../plugin/server/decision-store";
+import { syncFallbackDecisions } from "../plugin/server/fallback-decisions";
 import { handleFallbackAct, type FallbackActions } from "../plugin/server/fallback-rpc";
 import { ROLE_FALLBACK_STATE_FILE } from "../plugin/server/fallback-state";
 import { FALLBACK_WORKER_TITLE, createWorkerSwitch } from "../plugin/server/fallback-switch";
@@ -231,7 +233,7 @@ describe("switch (Worker)", () => {
 
 describe("card actions against one another (review b6)", () => {
   const act = (action: "switch" | "wait" | "dismiss", paseo: unknown, actions: FallbackActions) =>
-    handleFallbackAct({ incidentId: "fb-0000000000cc", action }, paseo, { home, log, now: NOW, enqueue: async () => "sent", actions });
+    handleFallbackAct({ incidentId: "fb-0000000000cc", action }, paseo, { home, log, now: NOW, actions });
 
   it("a Dismiss sent while a Switch is under way waits for it, then finds the incident decided", async () => {
     write([incident()]);
@@ -271,15 +273,14 @@ describe("card actions against one another (review b6)", () => {
 });
 
 describe("fallback.act switch", () => {
-  it("tells the Manager chat the switch, with the replacement", async () => {
+  it("sends the Manager no BM-FALLBACK, and withdraws the incident's open decision (autonomy design §A.5 d)", async () => {
     write([incident()]);
-    const { paseo } = fakeDaemon();
-    const enqueue = vi.fn<(target: string, kind: string, text: string) => Promise<"sent">>(async () => "sent");
+    syncFallbackDecisions(home, { log });
+    const { paseo, sent } = fakeDaemon();
     const { action } = switcher();
-    const { incident: after } = await handleFallbackAct({ incidentId: "fb-0000000000cc", action: "switch" }, paseo, { home, log, enqueue, actions: { switch: action } });
-    expect(after.status).toBe("switched");
-    expect(enqueue.mock.calls[0]![0]).toBe(MANAGER);
-    expect(enqueue.mock.calls[0]![2]).toContain("\nstatus: switched\n");
-    expect(enqueue.mock.calls[0]![2]).toContain(`\nreplacement: ${NEW}\n`);
+    const { incident: after } = await handleFallbackAct({ incidentId: "fb-0000000000cc", action: "switch" }, paseo, { home, log, actions: { switch: action } });
+    expect(after).toMatchObject({ status: "switched", replacementId: NEW });
+    expect(sent.filter((entry) => entry.id === MANAGER || entry.text.startsWith("BM-FALLBACK"))).toEqual([]);
+    expect(createDecisionStore(home).get("f:fb-0000000000cc")).toMatchObject({ status: "withdrawn" });
   });
 });

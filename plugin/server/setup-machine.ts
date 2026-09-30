@@ -33,6 +33,9 @@ import { resolveDataHome } from "./data-home";
 import { ROLE_FALLBACK_FILE } from "./fallback-settings";
 import { ROLE_FALLBACK_STATE_FILE } from "./fallback-state";
 import { ROLE_EXTRAS_FILE } from "./role-extras";
+import { ORCHESTRATOR_DIR_NAME } from "./orchestrator-store";
+import { DECISIONS_DIR_NAME } from "./decision-store";
+import { INBOX_DIR_NAME } from "./alert-store";
 import { PLUGIN_ID, confirmInstallHome, installHomeFromPluginPath, type InstallHomeFs } from "./install-home";
 import { UI_DIR_NAME } from "./data-home";
 import { TIMED_OUT, withTimeout } from "./role-mode";
@@ -48,7 +51,7 @@ export interface GrantAgentToolsResult {
 export type GrantAgentToolsDeps = SetupStateDeps & { now?: () => Date };
 
 /**
- * Turns Paseo's agent tools on, after the Setup screen confirmed it with the
+ * Turns Paseo's agent tools on, after Settings confirmed it with the
  * user, and records that paseo-bm is the one who did it.
  */
 export async function grantAgentTools(
@@ -108,7 +111,7 @@ export const PROVIDER_LOGIN_COMMANDS: Readonly<Record<string, string>> = {
 /** Pi has no login command paseo-bm knows; this is what Setup says instead. */
 export const PI_PROVIDER_ID = "pi";
 export const PI_SIGN_IN_GUIDANCE =
-  "Pi has no login command paseo-bm knows; sign in the way Pi's own documentation describes, then open Setup again.";
+  "Pi has no login command paseo-bm knows; sign in the way Pi's own documentation describes, then open Settings again.";
 
 /** The one thing kept out of a provider diagnostic: whether it is signed in. */
 const LOGGED_IN_PATTERN = /"loggedIn"\s*:\s*(true|false)/;
@@ -142,12 +145,12 @@ export interface ProviderLogin {
 }
 
 /**
- * The sign-in state of every distinct provider the three roles run on.
+ * The sign-in state of every distinct provider the four roles run on.
  *
  * Distinct, because two roles usually share one provider and asking twice would
  * cost a round trip for the same answer. Every lookup is raced against the
- * usual budget and a miss is `unknown`, so a slow provider never holds up the
- * Setup screen.
+ * usual budget and a miss is `unknown`, so a slow provider never holds up
+ * Settings.
  */
 export async function providerLogins(paseo: unknown, config: RoleConfigView): Promise<ProviderLogin[]> {
   const providers = (config.providers ?? {}) as Record<string, { extends?: unknown } | undefined>;
@@ -247,6 +250,11 @@ export const CLEANUP_DELETES: readonly string[] = [
   ROLE_EXTRAS_FILE,
   ROLE_FALLBACK_FILE,
   ROLE_FALLBACK_STATE_FILE,
+  ORCHESTRATOR_DIR_NAME,
+  // Autonomy design §A.4: the decisions go with the rest of the data.
+  DECISIONS_DIR_NAME,
+  // Autonomy design §A.8: and the Inbox alerts.
+  INBOX_DIR_NAME,
 ];
 
 export type CleanupDeps = SetupStateDeps & { now?: () => Date };

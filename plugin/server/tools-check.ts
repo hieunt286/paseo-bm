@@ -8,7 +8,7 @@
  * `capabilities.supportsMcpServers` says so. For a new Worker the plugin tells
  * the parent Manager with a `BM-TOOLS` notice, through the notice queue, since
  * that Manager is usually still running the turn that created the Worker
- * (design F13). Every check is also kept in memory for the Setup screen.
+ * (design F13). Every check is also kept in memory for Settings.
  *
  * That `supportsMcpServers` is `false` for Pi without its adapter is inferred
  * from the code (proposal O4), not observed: the owner checks it on the real

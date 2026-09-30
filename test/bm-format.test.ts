@@ -246,6 +246,22 @@ describe("BM-QUESTIONS rules", () => {
     ]);
   });
 
+  it("accepts the bracketed tags of autonomy design §A.5, with (recommended) before an option's tags", () => {
+    const tagged = questions([
+      "Q4: Push both backends to origin/dev? [subject: push-backends] [supersedes: Q2]",
+      "- a: Push contract only (recommended) [effects: push]",
+      "- b: Push both, manifest by hand [effects: push, commit]",
+      "- c: Hold",
+    ]);
+    expect(issuesOf(tagged)).toEqual([]);
+    // Any tag, known or not, value that reads or not: the block check has no notice for tags.
+    expect(issuesOf(questions(["Q1: x? [owner: ops]", "- a: yes (recommended) [effects: teleport] [later: x]", "- b: no"]))).toEqual([]);
+    // A mark inside the text is still not a recommendation.
+    expect(issuesOf(questions(["Q1: x?", "- a: yes (recommended) and more [effects: push]", "- b: no"]))).toEqual([
+      "Q1: needs exactly one option ending in (recommended) (found 0)",
+    ]);
+  });
+
   it("every line is a question or an option", () => {
     expect(issuesOf(questions([...good, "(a) the old style"]))).toEqual(['-: line "(a) the old style" is neither "Q<n>: <question>" nor "- <letter>: <option>"']);
   });

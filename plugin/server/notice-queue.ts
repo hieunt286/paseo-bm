@@ -5,8 +5,9 @@
  *
  * `PaseoAgentHandle.send()` on a running agent REPLACES its turn (delta
  * 20260918g K10; `stop-propagation.ts` relies on exactly that to interrupt a
- * Reviewer). `BM-TOOLS`, `BM-SETTINGS` and `BM-FALLBACK` go to Managers and
- * Workers that are often mid-turn, so none of them calls `send()` itself.
+ * Reviewer). `BM-TOOLS`, `BM-SETTINGS`, `BM-FALLBACK`, `BM-DELIVERY` and
+ * `BM-COMMAND` go to Managers and Workers that are often mid-turn, so none of
+ * them calls `send()` itself.
  *
  * API — what consumer modules import:
  *
@@ -24,6 +25,18 @@
  *   of the same kind for the same target took its place before it went out.
  * - `noticeQueue`: the one shared queue `enqueue` uses. `createNoticeQueue()`
  *   makes a private one (tests).
+ * - `enqueueBatch(targetId, batch, items, paseo?)` → one `NoticeOutcome` per
+ *   item, never rejects: the **batch kind** (autonomy design §A.8). Each item
+ *   is one line (an event for the Orchestrator); every batched item of the same
+ *   `batch.name` still pending for the target when it is idle goes out as ONE
+ *   message, `batch.compose(lines)`, oldest first. An item whose `isCurrent()`
+ *   says false at that moment — its subject settled meanwhile — is dropped
+ *   (`"dropped"`); when none is left, nothing is sent. An item's kind is
+ *   `<batch.name>:<item.key>`, so a newer item of the same key replaces a
+ *   queued one. All items of one call are queued before the one delivery, so a
+ *   burst from one source is one message too. Once the message went out,
+ *   `batch.onSent(targetId, keys)` is told which items it carried, and the
+ *   target's next turn end calls `batch.onTurnEnded(targetId)` once, first.
  * - `registerNoticeQueue(host)` → `{ host, remove }`: the queue does not add a
  *   lifecycle hook of its own. It rides on an existing `agent.turn_ended` hook:
  *   pass the returned `host` to the module that registers one (index.server.ts
@@ -38,7 +51,8 @@
  *   just before, says the target is neither `running` nor `initializing`.
  * - **One notice per idle moment.** The notice sent starts a turn on the
  *   target, and a second `send()` would replace that turn; so each chance
- *   sends the oldest queued notice only, and that turn's end carries the next
+ *   sends the oldest queued notice only — a batch counts as one notice, at the
+ *   place of its oldest item — and that turn's end carries the next
  *   (the lesson `review-budget.ts` records). Queued notices therefore go out
  *   in order, one turn apart. A send that fails costs one log line and drops
  *   that notice; the next queued one is tried at once, after a fresh
@@ -85,9 +99,44 @@ export interface QueuedNotice {
   text: string;
 }
 
+/** How the items of one batch become one message (autonomy design §A.8). */
+export interface NoticeBatch {
+  /** The batch's name, for example `"BM-EVENTS"`; items of one name are merged. */
+  name: string;
+  /** The one message for these lines, oldest first; never called with none. */
+  compose(lines: readonly string[]): string;
+  /**
+   * Called once the message went out, with the target and the keys of the
+   * items it carried, oldest first (the event bus records the wake, A-7). A
+   * throw is logged and changes nothing.
+   */
+  onSent?(targetId: string, keys: readonly string[]): void;
+  /**
+   * Called at the target's first turn end after a message of this batch went
+   * out — once per message, oldest first, before anything else queued for it
+   * is delivered at that turn end (A-7: the wake ended). A throw is logged.
+   */
+  onTurnEnded?(targetId: string): void;
+}
+
+/** One line of a batch. */
+export interface BatchItem {
+  /** Dedupe key: a newer item of the same key replaces a queued one. */
+  key: string;
+  line: string;
+  /**
+   * Read at the idle moment, synchronously, just before the batch is sent:
+   * false drops the item (its subject settled before delivery). A throw counts
+   * as false. Always current when absent.
+   */
+  isCurrent?: () => boolean;
+}
+
 export interface NoticeQueue {
   /** Sends now when the target is idle, otherwise holds the notice for its next turn end. Never rejects. */
   enqueue(targetId: string, kind: NoticeKind, text: string, paseo?: NoticePaseo): Promise<NoticeOutcome>;
+  /** Queues every item, then delivers once: the batched items pending at the idle moment go as one message. Never rejects. */
+  enqueueBatch(targetId: string, batch: NoticeBatch, items: readonly BatchItem[], paseo?: NoticePaseo): Promise<NoticeOutcome[]>;
   /** One `agent.turn_ended`: delivers the ended agent's queued notices when it is idle. Never rejects. */
   turnEnded(event: unknown, paseo?: unknown): Promise<void>;
   /** What is queued for `targetId`, oldest first (a copy). */
@@ -103,9 +152,13 @@ export interface NoticeQueueDeps {
 
 interface Entry extends QueuedNotice {
   state: "queued" | "sending" | NoticeOutcome;
+  /** Set on a batched item: its batch, its own key, and whether it is still worth sending. */
+  batch?: NoticeBatch;
+  itemKey?: string;
+  isCurrent?: () => boolean;
 }
 
-type DeliveryStep = "empty" | "unknown" | "gone" | "busy" | "sent" | "failed";
+type DeliveryStep = "empty" | "unknown" | "gone" | "busy" | "sent" | "failed" | "settled";
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -139,6 +192,8 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
   const queued = new Map<string, Entry[]>();
   /** Targets being delivered to right now; `again` asks that delivery for one more look. */
   const delivering = new Map<string, { again: boolean }>();
+  /** Target → the batches of the messages sent to it whose turn end is still to come, oldest first. */
+  const awaitingEnd = new Map<string, NoticeBatch[]>();
   let lastPaseo: NoticePaseo | null = null;
 
   function handleFor(paseo: unknown): NoticePaseo | null {
@@ -161,6 +216,26 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
     const first = list?.shift();
     if (list !== undefined && list.length === 0) queued.delete(targetId);
     return first;
+  }
+
+  /** Takes every queued item of `name` for the target, in order; other notices stay. */
+  function takeBatch(targetId: string, name: string): Entry[] {
+    const list = queued.get(targetId) ?? [];
+    const taken = list.filter((entry) => entry.batch?.name === name);
+    const kept = list.filter((entry) => entry.batch?.name !== name);
+    if (kept.length === 0) queued.delete(targetId);
+    else queued.set(targetId, kept);
+    return taken;
+  }
+
+  function stillCurrent(entry: Entry): boolean {
+    if (entry.isCurrent === undefined) return true;
+    try {
+      return entry.isCurrent() === true;
+    } catch (error) {
+      log(`[paseo-bm] could not tell whether the ${entry.kind} notice is still current: ${describeError(error)}; dropped it.`);
+      return false;
+    }
   }
 
   function dropAll(targetId: string): void {
@@ -189,17 +264,43 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
       return "gone";
     }
     if (isBusy(agent.status)) return "busy";
-    const entry = take(targetId);
-    if (entry === undefined) return "empty";
+    const batch = queued.get(targetId)?.[0]?.batch;
+    // A batch: every item of it pending now, less those whose subject settled, as one message.
+    // Taken and judged synchronously right after the idle read, so nothing is added or settles in between.
+    const entries = batch === undefined ? [take(targetId)].filter((entry): entry is Entry => entry !== undefined) : takeBatch(targetId, batch.name);
+    const sending = entries.filter((entry) => {
+      if (stillCurrent(entry)) return true;
+      entry.state = "dropped";
+      return false;
+    });
+    if (entries.length === 0) return "empty";
+    if (sending.length === 0) return "settled";
     // Taken off the queue BEFORE the await: a turn end handled meanwhile never sends it twice.
-    entry.state = "sending";
+    for (const entry of sending) entry.state = "sending";
+    const text = batch === undefined ? sending[0]!.text : batch.compose(sending.map((entry) => entry.text));
+    const what = batch === undefined ? sending[0]!.kind : `${batch.name} (${sending.length})`;
+    // Before the await, so a turn end handled meanwhile finds it.
+    const awaiting = batch?.onTurnEnded === undefined ? null : batch;
+    if (awaiting !== null) awaitingEnd.set(targetId, [...(awaitingEnd.get(targetId) ?? []), awaiting]);
     try {
-      await paseo.agents.ref(targetId).send(entry.text);
-      entry.state = "sent";
+      await paseo.agents.ref(targetId).send(text);
+      for (const entry of sending) entry.state = "sent";
+      if (batch?.onSent !== undefined) {
+        try {
+          batch.onSent(targetId, sending.map((entry) => entry.itemKey ?? entry.kind));
+        } catch (error) {
+          log(`[paseo-bm] after sending the ${what} notice to ${targetId}: ${describeError(error)}`);
+        }
+      }
       return "sent";
     } catch (error) {
-      entry.state = "dropped";
-      log(`[paseo-bm] could not send the ${entry.kind} notice to ${targetId}: ${describeError(error)}; dropped it.`);
+      for (const entry of sending) entry.state = "dropped";
+      if (awaiting !== null) {
+        const list = (awaitingEnd.get(targetId) ?? []).filter((item) => item !== awaiting);
+        if (list.length === 0) awaitingEnd.delete(targetId);
+        else awaitingEnd.set(targetId, list);
+      }
+      log(`[paseo-bm] could not send the ${what} notice to ${targetId}: ${describeError(error)}; dropped it.`);
       return "failed";
     }
   }
@@ -219,8 +320,8 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
         const result = await step(targetId, paseo);
         // The notice started a turn; that turn's end carries the next one.
         if (result === "sent" || result === "empty" || result === "gone") return;
-        // The target stayed idle: the next queued notice may go now.
-        if (result === "failed") continue;
+        // The target stayed idle (a failed send, or a batch whose every item settled): the next queued notice may go now.
+        if (result === "failed" || result === "settled") continue;
         // Busy or unreadable: wait for its next turn end, unless something changed meanwhile.
         if (!flag.again) return;
       }
@@ -246,10 +347,52 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
     }
   }
 
+  async function enqueueBatch(
+    targetId: string,
+    batch: NoticeBatch,
+    items: readonly BatchItem[],
+    paseo?: NoticePaseo,
+  ): Promise<NoticeOutcome[]> {
+    try {
+      if (!nonEmpty(targetId) || !nonEmpty(batch?.name) || typeof batch.compose !== "function") {
+        log("[paseo-bm] a batch of plugin notices without a target or a batch was not queued.");
+        return items.map(() => "dropped");
+      }
+      const entries = items.map((item): Entry | null => {
+        if (!nonEmpty(item?.key) || !nonEmpty(item.line)) return null;
+        const entry: Entry = { kind: `${batch.name}:${item.key}`, text: item.line, state: "queued", batch, itemKey: item.key };
+        if (typeof item.isCurrent === "function") entry.isCurrent = item.isCurrent;
+        put(targetId, entry);
+        return entry;
+      });
+      if (entries.includes(null)) log(`[paseo-bm] ${batch.name}: an item without a key or a line was not queued.`);
+      const handle = handleFor(paseo);
+      if (handle !== null && entries.some((entry) => entry !== null)) await deliver(targetId, handle);
+      return entries.map((entry) => (entry === null ? "dropped" : entry.state === "sending" ? "queued" : entry.state));
+    } catch (error) {
+      log(`[paseo-bm] queueing the ${String(batch?.name)} batch for ${String(targetId)} failed: ${describeError(error)}`);
+      return items.map(() => "dropped");
+    }
+  }
+
+  /** The target's turn ended: the oldest batch message still waiting for that is told. */
+  function endOne(targetId: string): void {
+    const list = awaitingEnd.get(targetId);
+    const first = list?.shift();
+    if (list !== undefined && list.length === 0) awaitingEnd.delete(targetId);
+    if (first === undefined) return;
+    try {
+      first.onTurnEnded?.(targetId);
+    } catch (error) {
+      log(`[paseo-bm] after the turn end of ${targetId} (${first.name}): ${describeError(error)}`);
+    }
+  }
+
   async function turnEnded(event: unknown, paseo?: unknown): Promise<void> {
     try {
       const handle = handleFor(paseo);
       const targetId = agentIdOf(event);
+      if (targetId !== null) endOne(targetId);
       if (targetId === null || handle === null || !queued.has(targetId)) return;
       await deliver(targetId, handle);
     } catch (error) {
@@ -259,11 +402,13 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
 
   return {
     enqueue,
+    enqueueBatch,
     turnEnded,
     pending: (targetId) => (queued.get(targetId) ?? []).map(({ kind, text }) => ({ kind, text })),
     clear() {
       for (const list of queued.values()) for (const entry of list) entry.state = "dropped";
       queued.clear();
+      awaitingEnd.clear();
       lastPaseo = null;
     },
   };

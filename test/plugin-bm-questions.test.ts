@@ -186,6 +186,101 @@ describe("what it refuses to guess", () => {
   });
 });
 
+describe("tags: subject, supersedes and effects (autonomy design §A.5)", () => {
+  const TAGGED = [
+    "BM-QUESTIONS",
+    "requestId: req-20260929T073348Z",
+    "Q4: Push both backends to origin/dev? [subject: push-backends] [supersedes: Q2]",
+    "- a: Push contract only (recommended) [effects: push]",
+    "- b: Push both, manifest by hand [effects: push, commit]",
+    "- c: Hold",
+  ].join("\n");
+
+  it("reads the design's example into the question and its options, and takes the tags out of the text", () => {
+    expect(parseQuestions(TAGGED)).toEqual({
+      requestId: "req-20260929T073348Z",
+      questions: [
+        {
+          id: "Q4",
+          text: "Push both backends to origin/dev?",
+          subject: "push-backends",
+          supersedes: "Q2",
+          options: [
+            { key: "a", text: "Push contract only", recommended: true, effects: ["push"] },
+            { key: "b", text: "Push both, manifest by hand", recommended: false, effects: ["push", "commit"] },
+            { key: "c", text: "Hold", recommended: false },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("reads the tags however a model spells them: case, spacing, order, after (recommended), after a wrapped line", () => {
+    const set = parseQuestions(
+      [
+        "BM-QUESTIONS",
+        "**Q7:** Deploy? [Supersedes:q3]   [ SUBJECT : Deploy-Now ]",
+        "- a: yes [effects: Deploy ,  push] (recommended)",
+        "- b: no",
+        "  , wait a day [effects: none]",
+      ].join("\n"),
+    )!;
+    const [question] = set.questions;
+    expect(question).toMatchObject({ id: "Q7", text: "Deploy?", subject: "deploy-now", supersedes: "Q3" });
+    expect(question!.options).toEqual([
+      { key: "a", text: "yes", recommended: true, effects: ["deploy", "push"] },
+      { key: "b", text: "no , wait a day", recommended: false, effects: ["none"] },
+    ]);
+  });
+
+  it("ignores an unknown tag and leaves it in the text; reads the known tags around it", () => {
+    const set = parseQuestions(["BM-QUESTIONS", "Q1: Ship? [owner: ops] [subject: ship] [later: x]", "- a: yes [see: PR 12] [effects: publish] (recommended)", "- b: no"].join("\n"))!;
+    expect(set.questions[0]).toMatchObject({ text: "Ship? [owner: ops] [later: x]", subject: "ship" });
+    expect(set.questions[0]!.options[0]).toEqual({ key: "a", text: "yes [see: PR 12]", recommended: true, effects: ["publish"] });
+  });
+
+  it("gives nothing for a value that does not read, and never lets a question replace itself", () => {
+    const set = parseQuestions(
+      [
+        "BM-QUESTIONS",
+        `Q2: a? [subject: has spaces] [supersedes: 1]`,
+        "- a: x [effects: teleport, push, push] (recommended)",
+        "- b: y [effects: teleport]",
+        `Q3: b? [subject: ${"s".repeat(61)}] [supersedes: Q3]`,
+        "- a: x (recommended)",
+        "- b: y",
+      ].join("\n"),
+    )!;
+    const [second, third] = set.questions;
+    expect(second).not.toHaveProperty("subject");
+    expect(second).not.toHaveProperty("supersedes");
+    expect(second!.text).toBe("a?");
+    expect(second!.options.map((option) => option.effects)).toEqual([["push"], undefined]);
+    expect(second!.options[1]).not.toHaveProperty("effects");
+    expect(third).not.toHaveProperty("subject");
+    expect(third).not.toHaveProperty("supersedes");
+  });
+
+  it("reads a block without tags exactly as before: no new keys, brackets that are not tags kept", () => {
+    const set = parseQuestions(BLOCK)!;
+    for (const question of set.questions) {
+      expect(Object.keys(question).sort()).toEqual(["id", "options", "text"]);
+      for (const option of question.options) expect(Object.keys(option).sort()).toEqual(["key", "recommended", "text"]);
+    }
+    const plain = parseQuestions("BM-QUESTIONS\nQ1: Keep arr[i] as is? [yes]\n- a: use map[key] (recommended)\n- b: no [see docs]")!;
+    expect(plain.questions[0]!.text).toBe("Keep arr[i] as is? [yes]");
+    expect(plain.questions[0]!.options.map((option) => option.text)).toEqual(["use map[key]", "no [see docs]"]);
+  });
+
+  it("reads a line of 1,000 characters of tags quickly", () => {
+    const tags = " [x: y]".repeat(140);
+    const started = performance.now();
+    const set = parseQuestions(`BM-QUESTIONS\nQ1: q${tags}\n- a: a${tags} (recommended)\n- b: b${"]".repeat(900)}`)!;
+    expect(performance.now() - started).toBeLessThan(100);
+    expect(set.questions[0]!.options).toHaveLength(2);
+  });
+});
+
 describe("bounds", () => {
   it("still finds the block after a report longer than the block budget", () => {
     const files = Array.from({ length: 1200 }, (_, index) => `docs/some/long/path/file-${index}.md`).join(", ");

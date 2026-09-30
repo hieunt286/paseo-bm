@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -186,6 +186,16 @@ describe("recordIncident", () => {
     expect(incident).toMatchObject({ role: "reviewer", parentId: WORKER, managerId: MANAGER });
   });
 
+  it("records nothing for the Orchestrator: it has no fallback chain (orchestrator design §3.1)", async () => {
+    saveChain("ask", [CODEX]);
+    const { paseo, listUsage } = fakeDaemon();
+    for (const provider of ["bm-orchestrator", "bm-orchestrator/claude-opus-5"]) {
+      expect(await recordIncident(workerEvent(provider, "orc-1"), L1, { paseo, home, log, now: NOW, randomHex })).toBeNull();
+    }
+    expect(listUsage).not.toHaveBeenCalled();
+    expect(existsSync(join(home, ROLE_FALLBACK_STATE_FILE))).toBe(false);
+  });
+
   it("never overwrites an unusable state file, and records nothing", async () => {
     writeFileSync(join(home, ROLE_FALLBACK_STATE_FILE), "{broken");
     const { paseo } = fakeDaemon();
@@ -352,5 +362,18 @@ describe("registerFallbackDetection", () => {
     );
     await fake.handlers[0]!({ agent: { id: "x", provider: "claude", workspaceId: WORKSPACE }, turnId: "t3", outcome: { kind: "failed", error: { message: "usage limit" } } }, { paseo });
     expect(homeLookup).not.toHaveBeenCalled();
+  });
+
+  it("does not even look up the install home for an Orchestrator's usage-limit turn (orchestrator design §3.1)", async () => {
+    const homeLookup = vi.fn(() => home);
+    const fake = host();
+    registerFallbackDetection(fake.value as never, { log, now: NOW, home: homeLookup });
+    const { paseo, listUsage } = fakeDaemon({ snapshots: { "orc-1": { id: "orc-1", labels: { "bm.role": "orchestrator" } } } });
+    await fake.handlers[0]!(
+      { agent: { id: "orc-1", provider: "bm-orchestrator/claude-opus-5", workspaceId: WORKSPACE }, turnId: "t1", outcome: { kind: "failed", error: { message: L1.message } }, timeline: [] },
+      { paseo },
+    );
+    expect(homeLookup).not.toHaveBeenCalled();
+    expect(listUsage).not.toHaveBeenCalled();
   });
 });

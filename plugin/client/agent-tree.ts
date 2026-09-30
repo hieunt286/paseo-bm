@@ -122,6 +122,7 @@ const ROLE_LABELS: Record<AgentNode["role"], string> = {
   manager: "Manager",
   worker: "Worker",
   reviewer: "Reviewer",
+  orchestrator: "Orchestrator",
   unknown: "Unknown role",
 };
 
@@ -219,7 +220,7 @@ export function roleConfigRows(roles: readonly RoleDescriptor[]): RoleConfigRow[
 }
 
 export const NO_ROLES_TEXT =
-  "No role configuration found: paseo-bm's roles are not registered with Paseo. Open Beads Manager → Setup to create them.";
+  "No role configuration found: paseo-bm's roles are not registered with Paseo. Open Beads Manager → Settings to create them.";
 
 // ---------------------------------------------------------------------------
 // Errors.

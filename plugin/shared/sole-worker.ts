@@ -5,8 +5,9 @@
  * more than one. An archived agent never counts: sending to it would bring it
  * back (ADR-005), and a broken Worker the Manager replaced keeps the request's
  * label. Nor does a Worker a fallback Worker replaced (`replaced`, delta
- * 20260921 §4.4.8): the replacement carries the same request id. `chat.waiting` (server) and the chat card (client) both decide with
- * this, so a pill and its card always agree.
+ * 20260921 §4.4.8): the replacement carries the same request id. The chat
+ * cards and the delivery of answers (`decision-delivery.ts`) both decide with
+ * this, so a card names the Worker an answer goes to.
  *
  * Pure and environment-neutral.
  */
