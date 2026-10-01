@@ -313,10 +313,13 @@ export interface StripCell {
 /**
  * Figures in ONE bordered box, divided by 1px rules: an uppercase muted label,
  * the value 26/600, an optional muted unit after it and a muted line under it.
- * A phone wraps the cells two by two.
+ * A phone (the Mobile* artboards) wraps the cells two by two — an odd last
+ * cell takes the full width — with an 11px label, a 22px value and 12/14
+ * padding.
  */
 export function FigureStrip({ cells, compact, theme, valueSize = 26 }: { cells: readonly StripCell[]; compact: boolean; theme: Theme; valueSize?: number }) {
   const { colors } = theme;
+  const value = compact ? Math.min(valueSize, 22) : valueSize;
   return (
     <View style={{ flexDirection: "row", flexWrap: compact ? "wrap" : "nowrap", borderWidth: 1, borderColor: colors.border }}>
       {cells.map((cell, index) => (
@@ -326,20 +329,20 @@ export function FigureStrip({ cells, compact, theme, valueSize = 26 }: { cells: 
           style={{
             flex: 1,
             minWidth: compact ? "50%" : 0,
-            gap: 6,
-            paddingVertical: 16,
-            paddingHorizontal: 18,
+            gap: compact ? 4 : 6,
+            paddingVertical: compact ? 12 : 16,
+            paddingHorizontal: compact ? 14 : 18,
             ...(index === 0 || compact ? {} : { borderLeftWidth: 1, borderLeftColor: colors.border }),
             ...(compact && index % 2 === 1 ? { borderLeftWidth: 1, borderLeftColor: colors.border } : {}),
             ...(compact && index >= 2 ? { borderTopWidth: 1, borderTopColor: colors.border } : {}),
           }}
         >
-          <Text style={{ fontSize: 12, fontWeight: "500", textTransform: "uppercase", letterSpacing: 0.72, color: colors.foregroundMuted }}>{cell.label}</Text>
-          <Text style={{ fontSize: valueSize, fontWeight: "600", color: cell.valueColor ?? colors.foreground }}>
+          <Text style={{ fontSize: compact ? 11 : 12, fontWeight: "500", textTransform: "uppercase", letterSpacing: compact ? 0.66 : 0.72, color: colors.foregroundMuted }}>{cell.label}</Text>
+          <Text style={{ fontSize: value, fontWeight: "600", color: cell.valueColor ?? colors.foreground }}>
             {cell.value}
-            {cell.unit ? <Text style={{ fontSize: 14, fontWeight: "400", color: colors.foregroundMuted }}>{` ${cell.unit}`}</Text> : null}
+            {cell.unit ? <Text style={{ fontSize: compact ? 13 : 14, fontWeight: "400", color: colors.foregroundMuted }}>{` ${cell.unit}`}</Text> : null}
           </Text>
-          {cell.hint ? <Text style={{ fontSize: 12, color: colors.foregroundMuted }}>{cell.hint}</Text> : null}
+          {cell.hint ? <Text style={{ fontSize: compact ? 11 : 12, color: colors.foregroundMuted }}>{cell.hint}</Text> : null}
         </View>
       ))}
     </View>
@@ -364,36 +367,60 @@ function Track({ share, color, theme, height = 10 }: { share: number; color: str
   );
 }
 
-/** Tokens by role: name, a track with the role's colour, the mono value right-aligned; a role not recorded reads muted. */
-export function RoleTokenBars({ rows, theme, valueWidth = 110, valueSize = 14 }: { rows: readonly RoleTokenRow[]; theme: Theme; valueWidth?: number; valueSize?: number }) {
+/**
+ * Tokens by role: name, a track with the role's colour, the mono value
+ * right-aligned; a role not recorded reads muted. A phone narrows the name to
+ * 76 and the value to 64 (mono 12), with an 8px track.
+ */
+export function RoleTokenBars({
+  rows,
+  theme,
+  valueWidth = 110,
+  valueSize = 14,
+  compact = false,
+}: {
+  rows: readonly RoleTokenRow[];
+  theme: Theme;
+  valueWidth?: number;
+  valueSize?: number;
+  compact?: boolean;
+}) {
   const { colors } = theme;
   return (
-    <View style={{ gap: 10 }}>
-      {rows.map((row) => (
-        <View key={row.key} accessibilityLabel={`${row.label}: ${row.value}`} style={{ flexDirection: "row", alignItems: "center", gap: 16 }}>
-          <Text style={{ width: 110, fontSize: 14, color: row.recorded ? colors.foreground : colors.foregroundMuted }}>{row.label}</Text>
-          <Track share={row.share} color={row.recorded ? roleColor(theme, row.key) : null} theme={theme} />
-          <Text style={{ width: valueWidth, textAlign: "right", fontFamily: MONO, fontSize: valueSize, color: row.recorded ? colors.foreground : colors.foregroundMuted }}>{row.value}</Text>
+    <View style={{ gap: compact ? 8 : 10 }}>
+      {/* A phone keeps the roles it has figures for, as the phone artboard: "not recorded" does not fit there. */}
+      {(compact ? rows.filter((row) => row.recorded) : rows).map((row) => (
+        <View key={row.key} accessibilityLabel={`${row.label}: ${row.value}`} style={{ flexDirection: "row", alignItems: "center", gap: compact ? 10 : 16 }}>
+          <Text style={{ width: compact ? 76 : 110, fontSize: compact ? 13 : 14, color: row.recorded ? colors.foreground : colors.foregroundMuted }} numberOfLines={1}>
+            {row.label}
+          </Text>
+          <Track share={row.share} color={row.recorded ? roleColor(theme, row.key) : null} theme={theme} height={compact ? 8 : 10} />
+          <Text
+            style={{ width: compact ? 64 : valueWidth, textAlign: "right", fontFamily: MONO, fontSize: compact ? 12 : valueSize, color: row.recorded ? colors.foreground : colors.foregroundMuted }}
+            numberOfLines={1}
+          >
+            {row.value}
+          </Text>
         </View>
       ))}
     </View>
   );
 }
 
-/** Bead status: one 14px stacked bar — closed, deferred, open — and its legend of 8px squares. */
-export function BeadStatusBar({ view, theme }: { view: BeadStatusBarView; theme: Theme }) {
+/** Bead status: one 14px stacked bar — closed, deferred, open — and its legend of 8px squares (a phone: 12px, legend 12). */
+export function BeadStatusBar({ view, theme, compact = false }: { view: BeadStatusBarView; theme: Theme; compact?: boolean }) {
   const { colors } = theme;
   const colour = { closed: colors.accent, deferred: colors.border, open: colors.statusWarning } as const;
   return (
-    <View style={{ gap: 14 }} accessibilityLabel={view.accessibilityLabel}>
-      <View style={{ flexDirection: "row", height: 14, backgroundColor: colors.surface2 }}>
+    <View style={{ gap: compact ? 10 : 14 }} accessibilityLabel={view.accessibilityLabel}>
+      <View style={{ flexDirection: "row", height: compact ? 12 : 14, backgroundColor: colors.surface2 }}>
         {view.segments.map((segment) => (segment.value === 0 ? null : <View key={segment.key} style={{ width: `${segment.share * 100}%`, backgroundColor: colour[segment.key] }} />))}
       </View>
-      <View style={{ flexDirection: "row", flexWrap: "wrap", columnGap: 20, rowGap: 6 }}>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", columnGap: compact ? 16 : 20, rowGap: 6 }}>
         {view.segments.map((segment) => (
           <View key={segment.key} style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
             <View style={{ width: 8, height: 8, backgroundColor: colour[segment.key] }} />
-            <Text style={{ fontSize: 13, color: colors.foreground }}>{segment.label}</Text>
+            <Text style={{ fontSize: compact ? 12 : 13, color: colors.foreground }}>{segment.label}</Text>
           </View>
         ))}
       </View>
@@ -404,11 +431,37 @@ export function BeadStatusBar({ view, theme }: { view: BeadStatusBarView; theme:
 /** The tallest bar of Closed per day, in px. */
 const DAY_BAR_MAX = 90;
 
-/** Closed per day: vertical bars with their value above and their date below. */
-export function ClosedPerDayChart({ days, theme }: { days: readonly DayBar[]; theme: Theme }) {
+/**
+ * Closed per day: vertical bars with their value above and their date below.
+ * A phone (the MobileMetrics artboard) draws the bars alone, 96 tall with a gap
+ * of 6, and writes the dates short (`1/10`) in 11.
+ */
+export function ClosedPerDayChart({ days, theme, compact = false }: { days: readonly DayBar[]; theme: Theme; compact?: boolean }) {
   const { colors } = theme;
   if (days.length === 0) return <Text style={{ fontSize: 13, color: colors.foregroundMuted }}>No bead was closed in this period.</Text>;
   const top = Math.max(1, ...days.map((day) => day.value));
+  if (compact) {
+    return (
+      <View style={{ gap: 10 }}>
+        <View style={{ flexDirection: "row", alignItems: "flex-end", gap: 6, height: 96, borderBottomWidth: 1, borderBottomColor: colors.border }}>
+          {days.map((day) => (
+            <View
+              key={day.key}
+              accessibilityLabel={`${day.label}: ${day.value} closed`}
+              style={{ flex: 1, height: Math.max(1, Math.round((day.value / top) * DAY_BAR_MAX)), backgroundColor: colors.accent }}
+            />
+          ))}
+        </View>
+        <View style={{ flexDirection: "row", gap: 6 }}>
+          {days.map((day) => (
+            <Text key={day.key} style={{ flex: 1, textAlign: "center", fontSize: 11, color: colors.foregroundMuted }} numberOfLines={1}>
+              {day.short}
+            </Text>
+          ))}
+        </View>
+      </View>
+    );
+  }
   return (
     <View style={{ gap: 14 }}>
       <View style={{ flexDirection: "row", alignItems: "flex-end", gap: 10, height: 120, borderBottomWidth: 1, borderBottomColor: colors.border }}>
@@ -450,10 +503,47 @@ export function FeatureBars({ bars, theme }: { bars: readonly Bar[]; theme: Them
   );
 }
 
-/** How the work ran: Measure · This project · All projects, rows divided by 1px rules. */
+/** What the muted line under a phone's How the work ran says: which figure is which. */
+export const PROCESS_LEGEND = "This project · all projects";
+
+/**
+ * How the work ran: Measure · This project · All projects, rows divided by 1px
+ * rules. A phone (the MobileMetrics artboard) writes each measure as a row —
+ * the label, then `3 · 5.7` in mono, the all-projects figure muted — and a
+ * muted legend under them.
+ */
 export function ProcessTable({ rows, compact, theme }: { rows: readonly ProcessRow[]; compact: boolean; theme: Theme }) {
   const { colors } = theme;
-  const width = compact ? 90 : 140;
+  if (compact) {
+    return (
+      <View>
+        {rows.map((row, index) => (
+          <View
+            key={row.label}
+            accessibilityLabel={`${row.label}: ${row.project} in this project, ${row.all} in all projects`}
+            style={{
+              flexDirection: "row",
+              justifyContent: "space-between",
+              alignItems: "flex-start",
+              gap: 12,
+              paddingVertical: 10,
+              borderTopWidth: 1,
+              borderTopColor: colors.border,
+              ...(index === rows.length - 1 ? { borderBottomWidth: 1, borderBottomColor: colors.border } : {}),
+            }}
+          >
+            <Text style={{ flex: 1, minWidth: 0, fontSize: 13, color: colors.foreground }}>{row.label}</Text>
+            <Text style={{ fontFamily: MONO, fontSize: 13, color: colors.foreground }}>
+              {row.project}
+              <Text style={{ color: colors.foregroundMuted }}>{` · ${row.all}`}</Text>
+            </Text>
+          </View>
+        ))}
+        <Text style={{ fontSize: 11, color: colors.foregroundMuted, paddingTop: 6 }}>{PROCESS_LEGEND}</Text>
+      </View>
+    );
+  }
+  const width = 140;
   const head = { fontSize: 12, fontWeight: "500" as const, textTransform: "uppercase" as const, letterSpacing: 0.72, color: colors.foregroundMuted };
   return (
     <View>
@@ -477,12 +567,12 @@ export function ProcessTable({ rows, compact, theme }: { rows: readonly ProcessR
   );
 }
 
-/** Two sections side by side on a wide screen (gap 32), stacked on a phone. */
+/** Two sections side by side on a wide screen (gap 32), stacked on a phone (gap 16, the Mobile* artboards' rhythm). */
 function Pair({ compact, children }: { compact: boolean; children: [ReactNode, ReactNode] }) {
   return (
-    <View style={{ flexDirection: compact ? "column" : "row", gap: 32 }}>
-      <View style={{ flex: compact ? undefined : 1, minWidth: 0, gap: 14 }}>{children[0]}</View>
-      <View style={{ flex: compact ? undefined : 1, minWidth: 0, gap: 14 }}>{children[1]}</View>
+    <View style={{ flexDirection: compact ? "column" : "row", gap: compact ? 16 : 32 }}>
+      <View style={{ flex: compact ? undefined : 1, minWidth: 0, gap: compact ? 10 : 14 }}>{children[0]}</View>
+      <View style={{ flex: compact ? undefined : 1, minWidth: 0, gap: compact ? 10 : 14 }}>{children[1]}</View>
     </View>
   );
 }
@@ -516,7 +606,7 @@ export function MetricsBody(props: MetricsBodyProps) {
   const insights = view.insights;
   const muted = { fontSize: 13, color: colors.foregroundMuted };
   return (
-    <View style={{ gap: 32 }}>
+    <View style={{ gap: compact ? 16 : 32 }}>
       {loading && insights === null ? <ActivityIndicator color={styles.spinner.color} /> : null}
       {error === null ? null : <ToneText tone="danger" styles={styles} theme={theme}>{`Could not read the figures. ${error}`}</ToneText>}
       {beadsError === null ? null : <ToneText tone="danger" styles={styles} theme={theme}>{`Could not read the beads. ${beadsError}`}</ToneText>}
@@ -527,11 +617,11 @@ export function MetricsBody(props: MetricsBodyProps) {
         {[
           <>
             <SectionHeading title="Bead status" theme={theme} />
-            {view.beadStatus === null ? <ActivityIndicator color={styles.spinner.color} /> : <BeadStatusBar view={view.beadStatus} theme={theme} />}
+            {view.beadStatus === null ? <ActivityIndicator color={styles.spinner.color} /> : <BeadStatusBar view={view.beadStatus} theme={theme} compact={compact} />}
           </>,
           <>
             <SectionHeading title="Closed per day" theme={theme} />
-            {view.closedPerDay === null ? <ActivityIndicator color={styles.spinner.color} /> : <ClosedPerDayChart days={view.closedPerDay} theme={theme} />}
+            {view.closedPerDay === null ? <ActivityIndicator color={styles.spinner.color} /> : <ClosedPerDayChart days={view.closedPerDay} theme={theme} compact={compact} />}
           </>,
         ]}
       </Pair>
@@ -544,13 +634,13 @@ export function MetricsBody(props: MetricsBodyProps) {
           </>,
           <>
             <SectionHeading title="Tokens by role" theme={theme} />
-            {view.roleTokens.length === 0 ? <Text style={muted}>{OVERVIEW_NO_TOKENS_TEXT}</Text> : <RoleTokenBars rows={view.roleTokens} theme={theme} valueWidth={100} valueSize={12} />}
+            {view.roleTokens.length === 0 ? <Text style={muted}>{OVERVIEW_NO_TOKENS_TEXT}</Text> : <RoleTokenBars rows={view.roleTokens} theme={theme} valueWidth={100} valueSize={12} compact={compact} />}
             <Text style={{ fontSize: 12, color: colors.foregroundMuted }}>{TOKENS_BY_ROLE_NOTE}</Text>
           </>,
         ]}
       </Pair>
 
-      <View style={{ gap: 12 }}>
+      <View style={{ gap: compact ? 8 : 12 }}>
         <SectionHeading title="How the work ran" theme={theme} />
         <ProcessTable rows={view.process} compact={compact} theme={theme} />
       </View>

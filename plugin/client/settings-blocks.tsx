@@ -178,7 +178,7 @@ export function CommandLine({ label, command, styles, theme }: { label: string; 
       <Text style={styles.body}>{label}</Text>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
         <Text
-          style={[styles.mono, { flex: 1, backgroundColor: theme.colors.surface0, padding: 6, borderRadius: RADIUS }]}
+          style={[styles.mono, { flex: 1, minWidth: 0, backgroundColor: theme.colors.surface0, padding: 6, borderRadius: RADIUS }]}
           selectable
         >
           {command}
@@ -760,11 +760,13 @@ export function RolesSection({ styles, theme }: { styles: Styles; theme: Theme }
  * name in mono, what it is with its version, and on the right "installed",
  * the update available, or Install… behind its confirmation (Cancel first).
  * A missing tool says where it was looked for; an update shows its command.
+ * On a phone (`compact`) the name and the muted line stack, the state at the right.
  */
-export function ToolCard({ tool, first = false, styles, theme, onInstalled }: {
+export function ToolCard({ tool, first = false, compact = false, styles, theme, onInstalled }: {
   tool: SetupStatus["tools"][number];
   /** The first row draws the top border too. */
   first?: boolean;
+  compact?: boolean;
   styles: Styles;
   theme: Theme;
   onInstalled: () => void;
@@ -801,17 +803,28 @@ export function ToolCard({ tool, first = false, styles, theme, onInstalled }: {
       accessibilityLabel={`${row.name}: ${row.description}; ${row.state.text}`}
       style={{
         gap: 8,
-        paddingVertical: 13,
+        paddingVertical: compact ? 12 : 13,
         borderBottomWidth: 1,
         borderBottomColor: colors.border,
         ...(first ? { borderTopWidth: 1, borderTopColor: colors.border } : {}),
       }}
     >
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
-        <Text style={{ width: 140, color: colors.foreground, fontSize: 14, fontFamily: MONO }}>{row.name}</Text>
-        <Text style={{ flex: 1, color: colors.foregroundMuted, fontSize: 14 }} numberOfLines={2}>
-          {row.description}
-        </Text>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: compact ? 10 : 12 }}>
+        {compact ? (
+          <View style={{ flex: 1, minWidth: 0, gap: 3 }}>
+            <Text style={{ color: colors.foreground, fontSize: 14, fontFamily: MONO }}>{row.name}</Text>
+            <Text style={{ color: colors.foregroundMuted, fontSize: 12 }} numberOfLines={2}>
+              {row.description}
+            </Text>
+          </View>
+        ) : (
+          <>
+            <Text style={{ width: 140, color: colors.foreground, fontSize: 14, fontFamily: MONO }}>{row.name}</Text>
+            <Text style={{ flex: 1, color: colors.foregroundMuted, fontSize: 14 }} numberOfLines={2}>
+              {row.description}
+            </Text>
+          </>
+        )}
         {installable && !confirming ? (
           <Button
             label={`Install ${tool.id}…`}
@@ -822,7 +835,7 @@ export function ToolCard({ tool, first = false, styles, theme, onInstalled }: {
             styles={styles}
           />
         ) : (
-          <Text style={{ minWidth: 120, textAlign: "right", color: stateColor, fontSize: 13 }}>{row.state.text}</Text>
+          <Text style={{ ...(compact ? {} : { minWidth: 120 }), textAlign: "right", color: stateColor, fontSize: compact ? 12 : 13 }}>{row.state.text}</Text>
         )}
       </View>
       {tool.path === null ? (

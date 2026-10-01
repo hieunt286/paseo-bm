@@ -291,6 +291,7 @@ with each agent's status, and **Beads in this chat** (per agent) lists the beads
 
 The Inbox is read every 5 seconds while you look at it.
 
+- **On a phone**, the header has two rows (the Orchestrator's status, then four equal tabs: Inbox, Projects, Settings, Tools), Settings picks the project from a list, and wide tables turn into rows; nothing needs a sideways scroll except a project's tabs and long filters.
 - **The Orchestrator's status** is at the right of the header on every screen ("Orchestrator idle ·
   N projects watched"); press it to open the Orchestrator's chat. The Inbox lists what needs you per
   project, and the filter at the top shows All, Decisions, Actions (held actions) or Alerts. Before

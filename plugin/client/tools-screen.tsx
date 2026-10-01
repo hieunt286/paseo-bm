@@ -14,6 +14,11 @@
  * - **Command-line tools** — `br` and `bv`, one row each: installed, the
  *   update available, or Install… behind its confirmation.
  *
+ * On a phone (`layout.compact`, `MobileTools.dc.html`) the tables become
+ * stacked rows: a skill's name and install state with its count and Manage at
+ * the right; each role a block of three lines; each tool its name over its
+ * version line, its state at the right.
+ *
  * It reads `setup.status` through Settings' `useSetupStatus` (the same query,
  * so opening it ensures the roles too). What it says is
  * `tools-screen-model.ts`; `SkillsTable` and `AgentToolsTable` are hook-free
@@ -67,11 +72,12 @@ function headerText(theme: Theme) {
   return { color: theme.colors.foregroundMuted, fontSize: 12, fontWeight: "500" as const, textTransform: "uppercase" as const, letterSpacing: 0.72 };
 }
 
-/** The small secondary button of a row (Manage): a 1px border, muted text. */
-function SmallButton({ label, accessibilityLabel, expanded, onPress, theme }: {
+/** The small secondary button of a row (Manage): a 1px border, muted text; on a phone 5/8 padding, full-contrast text. */
+function SmallButton({ label, accessibilityLabel, expanded, compact = false, onPress, theme }: {
   label: string;
   accessibilityLabel: string;
   expanded?: boolean;
+  compact?: boolean;
   onPress: () => void;
   theme: Theme;
 }) {
@@ -81,9 +87,9 @@ function SmallButton({ label, accessibilityLabel, expanded, onPress, theme }: {
       accessibilityLabel={accessibilityLabel}
       {...(expanded === undefined ? {} : { accessibilityState: { expanded } })}
       onPress={onPress}
-      style={{ borderWidth: 1, borderColor: theme.colors.border, paddingVertical: 5, paddingHorizontal: 10 }}
+      style={{ borderWidth: 1, borderColor: theme.colors.border, paddingVertical: 5, paddingHorizontal: compact ? 8 : 10 }}
     >
-      <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{label}</Text>
+      <Text style={{ color: compact ? theme.colors.foreground : theme.colors.foregroundMuted, fontSize: 12 }}>{label}</Text>
     </Pressable>
   );
 }
@@ -108,12 +114,13 @@ export function SkillsTable({ rows, open = null, onManage = () => undefined, det
   theme: Theme;
 }) {
   const { colors } = theme;
-  const columns = narrow ? { usedBy: 0, used: 48, manage: 84 } : SKILL_COLUMNS;
+  if (narrow) return <SkillRowsCompact rows={rows} open={open} onManage={onManage} details={details} styles={styles} theme={theme} />;
+  const columns = SKILL_COLUMNS;
   return (
     <View>
       <TableHeader theme={theme}>
         <Text style={[headerText(theme), { flex: 1 }]}>Skill</Text>
-        {narrow ? null : <Text style={[headerText(theme), { width: columns.usedBy }]}>Used by</Text>}
+        <Text style={[headerText(theme), { width: columns.usedBy }]}>Used by</Text>
         <Text style={[headerText(theme), { width: columns.used, textAlign: "right" }]}>Used</Text>
         <View style={{ width: columns.manage }} />
       </TableHeader>
@@ -131,7 +138,7 @@ export function SkillsTable({ rows, open = null, onManage = () => undefined, det
                   </ToneText>
                 )}
               </View>
-              {narrow ? null : <Text style={{ width: columns.usedBy, color: colors.foreground, fontSize: 13 }}>{row.usedBy}</Text>}
+              <Text style={{ width: columns.usedBy, color: colors.foreground, fontSize: 13 }}>{row.usedBy}</Text>
               <Text style={{ width: columns.used, color: colors.foreground, fontSize: 14, fontFamily: MONO, textAlign: "right" }}>{row.used}</Text>
               <View style={{ width: columns.manage, alignItems: "flex-end" }}>
                 <SmallButton
@@ -143,20 +150,77 @@ export function SkillsTable({ rows, open = null, onManage = () => undefined, det
                 />
               </View>
             </View>
-            {expanded ? (
-              <View style={{ gap: 8, paddingLeft: 12, borderLeftWidth: 2, borderLeftColor: colors.border }}>
-                {row.chips.length === 0 ? (
-                  <Text style={{ color: colors.foregroundMuted, fontSize: 13 }}>{row.note ?? "No install state reported."}</Text>
-                ) : (
-                  <View style={styles.chipRow}>
-                    {row.chips.map((badge) => (
-                      <Chip key={badge.text} badge={badge} styles={styles} theme={theme} />
-                    ))}
-                  </View>
+            {expanded ? <SkillDetails row={row} details={details} styles={styles} theme={theme} /> : null}
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+/** What Manage opens under a skill: its install state per agent as chips (or its note), then `details`. */
+function SkillDetails({ row, details, styles, theme }: { row: SkillRowView; details?: ReactNode; styles: Styles; theme: Theme }) {
+  const { colors } = theme;
+  return (
+    <View style={{ gap: 8, paddingLeft: 12, borderLeftWidth: 2, borderLeftColor: colors.border }}>
+      {row.chips.length === 0 ? (
+        <Text style={{ color: colors.foregroundMuted, fontSize: 13 }}>{row.note ?? "No install state reported."}</Text>
+      ) : (
+        <View style={styles.chipRow}>
+          {row.chips.map((badge) => (
+            <Chip key={badge.text} badge={badge} styles={styles} theme={theme} />
+          ))}
+        </View>
+      )}
+      {details}
+    </View>
+  );
+}
+
+/**
+ * The skills on a phone (the approved phone mockup): no header row; each
+ * skill a row under a 1px rule — its name in mono 13 over its install state
+ * (12, muted or its tone), the Used count in mono at the right, and a small
+ * Manage, which opens the same details under the row. Hook-free.
+ */
+function SkillRowsCompact({ rows, open, onManage, details, styles, theme }: {
+  rows: readonly SkillRowView[];
+  open: string | null;
+  onManage: (name: string) => void;
+  details?: ReactNode;
+  styles: Styles;
+  theme: Theme;
+}) {
+  const { colors } = theme;
+  return (
+    <View>
+      {rows.map((row) => {
+        const expanded = open === row.name;
+        return (
+          <View key={row.name} style={{ paddingVertical: 12, gap: 10, borderTopWidth: 1, borderTopColor: colors.border }}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }} accessibilityLabel={row.accessibilityLabel}>
+              <View style={{ flex: 1, minWidth: 0, gap: 3 }}>
+                <Text style={{ color: colors.foreground, fontSize: 13, fontFamily: MONO }} numberOfLines={1}>
+                  {row.name}
+                </Text>
+                <Text style={{ color: row.summaryTone === "muted" ? colors.foregroundMuted : toneColor(theme, row.summaryTone), fontSize: 12 }}>{row.summary}</Text>
+                {row.problem === null ? null : (
+                  <ToneText tone="danger" style={{ fontSize: 12 }} styles={styles} theme={theme}>
+                    {row.problem}
+                  </ToneText>
                 )}
-                {details}
               </View>
-            ) : null}
+              <Text style={{ color: colors.foreground, fontSize: 13, fontFamily: MONO }}>{row.used}</Text>
+              <SmallButton
+                label={expanded ? "Close" : "Manage"}
+                accessibilityLabel={expanded ? `Close ${row.name}` : `Manage ${row.name}: its install state per agent`}
+                expanded={expanded}
+                compact
+                onPress={() => onManage(row.name)}
+                theme={theme}
+              />
+            </View>
+            {expanded ? <SkillDetails row={row} details={details} styles={styles} theme={theme} /> : null}
           </View>
         );
       })}
@@ -170,9 +234,39 @@ function paseoToolsColor(theme: Theme, paseo: AgentToolsRowView["paseo"]): strin
   return paseo.text === "none" ? theme.colors.foregroundMuted : theme.colors.foreground;
 }
 
-/** The agent tools by role (the approved mockup): Role · Paseo tools · paseo-bm tools, one row per role, Paseo's tools in their tone. Hook-free. */
-export function AgentToolsTable({ rows, theme }: { rows: readonly AgentToolsRowView[]; styles?: Styles; theme: Theme }) {
+/**
+ * The agent tools by role (the approved mockup): Role · Paseo tools · paseo-bm
+ * tools, one row per role, Paseo's tools in their tone. On a phone
+ * (`compact`) each role is a block: its name (500), Paseo's tools (12, left
+ * out when it has none) and paseo-bm's tools in mono 12. Hook-free.
+ */
+export function AgentToolsTable({ rows, compact = false, theme }: { rows: readonly AgentToolsRowView[]; compact?: boolean; styles?: Styles; theme: Theme }) {
   const { colors } = theme;
+  if (compact) {
+    return (
+      <View>
+        {rows.map((row, index) => (
+          <View
+            key={row.role}
+            accessibilityLabel={`${row.role}: Paseo tools ${row.paseo.text}; paseo-bm tools ${row.bm}`}
+            style={{
+              gap: 3,
+              paddingVertical: 10,
+              borderTopWidth: 1,
+              borderTopColor: colors.border,
+              ...(index === rows.length - 1 ? { borderBottomWidth: 1, borderBottomColor: colors.border } : {}),
+            }}
+          >
+            <Text style={{ color: colors.foreground, fontSize: 14, fontWeight: "500" }}>{row.role}</Text>
+            {row.paseo.text === "none" ? null : (
+              <Text style={{ fontSize: 12, color: row.paseo.tone === "muted" ? colors.foregroundMuted : toneColor(theme, row.paseo.tone) }}>{row.paseo.text}</Text>
+            )}
+            <Text style={{ color: colors.foreground, fontSize: 12, fontFamily: MONO }}>{row.bm}</Text>
+          </View>
+        ))}
+      </View>
+    );
+  }
   return (
     <View>
       <TableHeader theme={theme}>
@@ -218,31 +312,50 @@ function SkillsSection({ status, usage, usageError, testing, narrow, onTest, onD
   const runLine = skillsRunLine(status, now);
   const missing = anySkillMissing(status);
   const updateLabel = missing ? "Install skills…" : "Update all";
+  const checkAgain = (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel="Test the agent skills again"
+      accessibilityState={{ disabled: testing, busy: testing }}
+      disabled={testing}
+      onPress={onTest}
+    >
+      <Text style={{ color: colors.foregroundMuted, fontSize: 13 }}>{testing ? "Checking…" : "Check again"}</Text>
+    </Pressable>
+  );
+  const updateAll = (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`${updateLabel.replace("…", "")}: runs the skills command after a confirmation`}
+      onPress={() => setAsking(true)}
+      style={{ borderWidth: 1, borderColor: colors.border, ...(narrow ? { paddingVertical: 6, paddingHorizontal: 10 } : { paddingVertical: 8, paddingHorizontal: 14 }) }}
+    >
+      <Text style={{ color: colors.foreground, fontSize: narrow ? 13 : 14 }}>{updateLabel}</Text>
+    </Pressable>
+  );
   return (
     <View>
-      <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", columnGap: 12, rowGap: 6, marginBottom: 12 }}>
-        <Text accessibilityRole="header" style={{ color: colors.foreground, fontSize: 22, fontWeight: "600" }}>
-          Skills
-        </Text>
-        <Text style={{ flex: 1, minWidth: 200, color: colors.foregroundMuted, fontSize: 14 }}>{skillsHeaderText(status.skills.dirs)}</Text>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Test the agent skills again"
-          accessibilityState={{ disabled: testing, busy: testing }}
-          disabled={testing}
-          onPress={onTest}
-        >
-          <Text style={{ color: colors.foregroundMuted, fontSize: 13 }}>{testing ? "Checking…" : "Check again"}</Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`${updateLabel.replace("…", "")}: runs the skills command after a confirmation`}
-          onPress={() => setAsking(true)}
-          style={{ borderWidth: 1, borderColor: colors.border, paddingVertical: 8, paddingHorizontal: 14 }}
-        >
-          <Text style={{ color: colors.foreground, fontSize: 14 }}>{updateLabel}</Text>
-        </Pressable>
-      </View>
+      {narrow ? (
+        <View style={{ gap: 6, marginBottom: 8 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+            <Text accessibilityRole="header" style={{ flex: 1, color: colors.foreground, fontSize: 20, fontWeight: "600" }}>
+              Skills
+            </Text>
+            {checkAgain}
+            {updateAll}
+          </View>
+          <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{skillsHeaderText(status.skills.dirs)}</Text>
+        </View>
+      ) : (
+        <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", columnGap: 12, rowGap: 6, marginBottom: 12 }}>
+          <Text accessibilityRole="header" style={{ color: colors.foreground, fontSize: 22, fontWeight: "600" }}>
+            Skills
+          </Text>
+          <Text style={{ flex: 1, minWidth: 200, color: colors.foregroundMuted, fontSize: 14 }}>{skillsHeaderText(status.skills.dirs)}</Text>
+          {checkAgain}
+          {updateAll}
+        </View>
+      )}
       <SkillsInstallBlock command={status.skills.installCommand} onDone={onDone} asking={asking} onAskingChange={setAsking} styles={styles} theme={theme} />
       <SkillsTable
         rows={skillRowsView(status, usage)}
@@ -320,18 +433,18 @@ export function ToolsScreen({ theme, layout, status: statusStrip }: SettingsScre
             styles={styles}
             theme={theme}
           />
-          <View style={{ gap: 12 }}>
-            <SettingsSectionHeading title="Agent tools by role" meaning={null} state={null} size="group" styles={styles} theme={theme} />
-            <AgentToolsTable rows={agentToolsRows(data)} styles={styles} theme={theme} />
+          <View style={{ gap: layout.compact ? 8 : 12 }}>
+            <SettingsSectionHeading title="Agent tools by role" meaning={null} state={null} size="group" compact={layout.compact} styles={styles} theme={theme} />
+            <AgentToolsTable rows={agentToolsRows(data)} compact={layout.compact} styles={styles} theme={theme} />
           </View>
           <View>
-            <View style={{ marginBottom: 12 }}>
-              <SettingsSectionHeading title="Command-line tools" meaning={null} state={null} size="group" styles={styles} theme={theme} />
+            <View style={{ marginBottom: layout.compact ? 8 : 12 }}>
+              <SettingsSectionHeading title="Command-line tools" meaning={null} state={null} size="group" compact={layout.compact} styles={styles} theme={theme} />
             </View>
             {data.tools
               .filter((tool) => BEADS_TOOL_IDS.has(tool.id))
               .map((tool, index) => (
-                <ToolCard key={tool.id} tool={tool} first={index === 0} styles={styles} theme={theme} onInstalled={refetch} />
+                <ToolCard key={tool.id} tool={tool} first={index === 0} compact={layout.compact} styles={styles} theme={theme} onInstalled={refetch} />
               ))}
             <Text style={{ marginTop: 12, color: theme.colors.foregroundMuted, fontSize: 12 }}>
               {`Newest versions as of ${data.latestCheckedOn}; paseo-bm does not look them up online.`}

@@ -215,3 +215,39 @@ describe("ToolsScreen", () => {
     expect(typeof ToolsScreen).toBe("function");
   });
 });
+
+describe("Tools & skills on a phone (MobileTools.dc.html)", () => {
+  it("draws each skill as a row with no header: name and install state, the count at the right and a small Manage", () => {
+    const rows = skillRowsView(readyStatus(), [usage("feature-workflow", 247)]);
+    const onManage = vi.fn();
+    const nodes = renderTree(SkillsTable({ rows: rows.slice(0, 1), narrow: true, onManage, styles, theme }));
+    expect(texts(nodes)).toEqual(["feature-workflow", "Claude ✓ · Codex ✓", "247", "Manage"]);
+    const [manage] = pressables(nodes);
+    expect(manage!.props.accessibilityLabel).toBe("Manage feature-workflow: its install state per agent");
+    (manage!.props.onPress as () => void)();
+    expect(onManage.mock.calls).toEqual([["feature-workflow"]]);
+    const open = renderTree(SkillsTable({ rows: rows.slice(0, 1), narrow: true, open: "feature-workflow", onManage, styles, theme }));
+    expect(texts(open)).toEqual(expect.arrayContaining(["Close", "Claude ✓", "Codex ✓"]));
+  });
+
+  it("stacks each role as a block: the role, Paseo's tools when it has some, paseo-bm's tools", () => {
+    const rows = agentToolsRows(withSetup({ agentTools: { injectIntoAgents: false, setBy: null } }));
+    const nodes = renderTree(AgentToolsTable({ rows, compact: true, styles, theme }));
+    expect(texts(nodes)).toEqual([
+      "Manager",
+      rows[0]!.paseo.text,
+      rows[0]!.bm,
+      "Worker",
+      rows[1]!.paseo.text,
+      rows[1]!.bm,
+      "Reviewer",
+      rows[2]!.bm,
+      "Orchestrator",
+      rows[3]!.bm,
+    ]);
+    const warned = allNodes(nodes).find((node) => node.type === "Text" && texts([node])[0] === rows[0]!.paseo.text)!;
+    expect(JSON.stringify(warned.props.style)).toContain("#statusWarning");
+    const blocks = allNodes(nodes).filter((node) => node.type === "View" && typeof node.props.accessibilityLabel === "string");
+    expect(blocks.map((block) => String(block.props.accessibilityLabel))).toContain(`Reviewer: Paseo tools none; paseo-bm tools ${rows[2]!.bm}`);
+  });
+});

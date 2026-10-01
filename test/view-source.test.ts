@@ -316,7 +316,8 @@ describe("why.tsx: Work → request → Why? (autonomy design §E.2; change-011 
   it("opens from a request card's Why? in place of the list, for a request with an id, and ← returns to it", () => {
     expect(work).toMatch(/const whyOf = \(requestId: string \| null\) => \(requestId === null \? undefined : \(\) => setWhy\(requestId\)\);/);
     expect(work).toMatch(/onWhy=\{whyOf\(summary\.requestId\)\}/);
-    expect(work).toMatch(/if \(why !== null\) return <WhyScreen workspaceId=\{workspaceId\} requestId=\{why\} onBack=\{\(\) => setWhy\(null\)\}/);
+    // On a phone the page header stays above the chain (it scrolls with the list otherwise).
+    expect(work).toMatch(/if \(why !== null\) \{\s*const chain = <WhyScreen workspaceId=\{workspaceId\} requestId=\{why\} onBack=\{\(\) => setWhy\(null\)\}/);
     expect(work.match(/<WhyScreen\b/g)).toHaveLength(1);
   });
 });

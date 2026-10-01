@@ -44,7 +44,8 @@ import { allNodes, pressables, renderTree, texts, type RNode } from "./helpers/e
 // The root tsconfig has no `jsx`, so the .tsx module loads through a non-literal specifier.
 const sectionPath = "../plugin/client/settings-section.tsx";
 type Component = (props: Record<string, unknown>) => unknown;
-const { AdviceCadenceRow, SettingsGroupHeader, SettingsSectionHeading, RolesLineView, StorageRowView } = (await import(sectionPath)) as {
+const { AdviceCadenceRow, SettingsGroupHeader, SettingsSectionHeading, RolesLineView, StorageRowView, sectionContentStyle } = (await import(sectionPath)) as {
+  sectionContentStyle: (maxWidth: number, compact: boolean) => Record<string, unknown>;
   AdviceCadenceRow: Component;
   SettingsGroupHeader: Component;
   SettingsSectionHeading: Component;
@@ -602,5 +603,21 @@ describe("an install run's result (hook-free)", () => {
     const failed = renderTree(RunResultView({ result: { text: "E_SETUP_INSTALL_FAILED: exit 1", tone: "danger", tail: [] }, styles, theme }));
     expect(texts(failed)).toEqual(["E_SETUP_INSTALL_FAILED: exit 1"]);
     expect(JSON.stringify(allNodes(failed)[1]!.props.style)).toContain("#statusDanger");
+  });
+});
+
+describe("Settings on a phone (MobileSettings.dc.html)", () => {
+  it("pads 16 at the sides, 20 between sections, and titles the page at 20 and a section at 17", () => {
+    expect(sectionContentStyle(980, true)).toMatchObject({ paddingTop: 16, paddingHorizontal: 16, paddingBottom: 40, gap: 20 });
+    expect(sectionContentStyle(980, false)).toMatchObject({ paddingTop: 32, paddingHorizontal: 32, paddingBottom: 64, gap: 36 });
+    const sizeOf = (props: Record<string, unknown>) =>
+      (allNodes(renderTree(SettingsSectionHeading({ title: "T", meaning: "M", state: null, styles, theme, ...props }))).find((node) => node.type === "Text")!.props.style as { fontSize: number }).fontSize;
+    expect([sizeOf({ size: "page", compact: true }), sizeOf({ compact: true }), sizeOf({ size: "page" }), sizeOf({})]).toEqual([20, 17, 22, 18]);
+  });
+
+  it("puts the advice cadence's Save across the card", () => {
+    const view = adviceCadenceView({ stored: 5, draft: 3, defaultValue: 5, saving: false });
+    const nodes = renderTree(AdviceCadenceRow({ view, input: "3", busy: false, error: null, narrow: true, onInput: noop, onSave: noop, styles, theme }));
+    expect(JSON.stringify(pressables(nodes)[0]!.props.style)).toContain('"alignSelf":"stretch"');
   });
 });

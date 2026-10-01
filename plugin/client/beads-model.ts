@@ -682,6 +682,16 @@ export const BOARD_TITLES: Readonly<Record<BoardBucket, string>> = {
   closed: "Closed",
 };
 
+/** The columns' names on a phone's column chooser, short enough for one row of equal cells. */
+export const BOARD_SHORT_TITLES: Readonly<Record<BoardBucket, string>> = {
+  in_progress: "In progress",
+  ready: "Ready",
+  open_epics: "Epics",
+  deferred: "Deferred",
+  blocked: "Blocked",
+  closed: "Closed",
+};
+
 /** The column a bead sits in on the board. */
 export function boardBucket(bead: Pick<BeadRow, "status" | "ready" | "issueType">): BoardBucket {
   if (bead.status === "closed") return "closed";

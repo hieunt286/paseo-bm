@@ -941,7 +941,8 @@ describe("Decided for you: the Orchestrator's interventions since the owner last
     const row = interventionRowOf(unblock, input());
     const draw = (compact: boolean, expanded = false) => renderTree(DigestRowView({ row, expanded, onToggle: noop, onOverride: noop, state: undefined, compact, styles, theme }));
     const lineOf = (compact: boolean) => ((draw(compact)[0] as RNode).children[0] as RNode);
-    expect(lineOf(true).props["style"]).toMatchObject({ flexDirection: "column", alignItems: "stretch" });
+    // On a phone the Why? or Override sits under the line, left aligned (the MobileInbox artboard).
+    expect(lineOf(true).props["style"]).toMatchObject({ flexDirection: "column", alignItems: "flex-start" });
     expect(lineOf(false).props["style"]).toMatchObject({ flexDirection: "row", alignItems: "center" });
     // The line takes the width on a wide screen; on a phone it sizes to its content.
     expect(pressables(draw(false))[0]!.props["style"]).toMatchObject({ flex: 1 });

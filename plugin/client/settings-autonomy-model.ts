@@ -163,6 +163,10 @@ export function setLevelInputOf(workspaceId: string, level: AutonomyLevel): { wo
 /** The action boundary switch's name (autonomy design §D.2, change-014). */
 export const BOUNDARY_LABEL = "Hold risky actions for approval";
 
+/** The switch's name and line on a phone (the approved phone mockup); the accessibility label keeps the whole meaning. */
+export const BOUNDARY_SHORT_LABEL = "Hold risky actions";
+export const BOUNDARY_SHORT_MEANING = "Pushes, deploys and installs wait in the Inbox.";
+
 /** What the switch does, in one line (off by default). */
 export const BOUNDARY_MEANING =
   "Pushes, deploys, installs and writes outside the project wait in the Inbox, for this project's Workers and Reviewers.";
@@ -247,6 +251,46 @@ export function autonomyTabs(
     const level = levelText(levelOf(policy, project.id));
     return { key: project.id, label: project.label, suffix: level, accessibilityLabel: `${project.label}, level ${level}` };
   });
+}
+
+/** One project's row of the phone's project picker (the approved phone mockup): name, level, whether it is the one shown. */
+export interface ProjectPickerRow {
+  key: string;
+  label: string;
+  level: string;
+  current: boolean;
+  accessibilityLabel: string;
+}
+
+/**
+ * The phone's project picker: one full-width button showing the project
+ * shown and its level, and, while open, every project as a row (name and
+ * level, the shown one marked). Built from the tabs, so both read alike.
+ */
+export function projectPickerView(
+  tabs: ReadonlyArray<{ key: string; label: string; suffix: string }>,
+  selected: string,
+  open: boolean,
+): { button: { label: string; level: string; accessibilityLabel: string }; rows: ProjectPickerRow[] | null } {
+  const shown = tabs.find((tab) => tab.key === selected) ?? tabs[0];
+  const label = shown?.label ?? "";
+  const level = shown?.suffix ?? "";
+  return {
+    button: {
+      label,
+      level,
+      accessibilityLabel: `Project: ${label}, level ${level}. ${open ? "Close the list of projects" : "Choose another project"}`,
+    },
+    rows: open
+      ? tabs.map((tab) => ({
+          key: tab.key,
+          label: tab.label,
+          level: tab.suffix,
+          current: tab.key === shown?.key,
+          accessibilityLabel: `${tab.label}, level ${tab.suffix}${tab.key === shown?.key ? ", shown" : ""}`,
+        }))
+      : null,
+  };
 }
 
 /** One stop of the level control: `selected` is the level shown (the one set, or the one being confirmed). */

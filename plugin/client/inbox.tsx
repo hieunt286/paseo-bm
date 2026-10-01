@@ -26,9 +26,11 @@
  *   by time, one line per intervention of the Orchestrator's (§G.3, bead
  *   `t9lm.23`) with its outcome, and no Override.
  *
- * Layout: `layout.compact` (a phone) gives the tighter paddings and type of
- * `dashboardStyles`, and puts an alert's action under its line; a wide screen
- * keeps the column at a readable width and the action at the line's end.
+ * Layout: `layout.compact` (a phone, the MobileInbox artboard) gives the
+ * tighter paddings and type of `dashboardStyles`, the filter on its own row
+ * across the width, and puts an alert's action and Decided for you's Override
+ * or Why? under their line, left aligned; a wide screen keeps the column at a
+ * readable width and the action at the line's end.
  *
  * Client rules: React Native primitives only, colours from the theme
  * (`toneColor`), accessibility roles and labels on every pressable.
@@ -376,14 +378,14 @@ export function AlertRow({
 }) {
   const { colors } = theme;
   return (
-    <View style={[cardBoxStyle(theme, { compact, join, bar: true, row: true }), { gap: 8 }]}>
-      <View style={{ flexDirection: compact ? "column" : "row", alignItems: compact ? "stretch" : "center", gap: 12 }}>
+    <View style={[cardBoxStyle(theme, { compact, join, bar: true, row: true }), { gap: compact ? 10 : 8 }]}>
+      <View style={{ flexDirection: compact ? "column" : "row", alignItems: compact ? "flex-start" : "center", gap: compact ? 10 : 12 }}>
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={`${row.accessibilityLabel}. ${expanded ? "Hide" : "Show"} the details`}
           accessibilityState={{ expanded }}
           onPress={onToggle}
-          style={{ flex: compact ? undefined : 1, flexDirection: "row", alignItems: "center", gap: 12 }}
+          style={{ flex: compact ? undefined : 1, alignSelf: compact ? "stretch" : "auto", flexDirection: "row", alignItems: "center", gap: 12 }}
         >
           <Icon name={alertIcon(row.tone)} size={16} color={toneColor(theme, row.tone)} />
           <Text style={{ flex: 1, fontSize: 14, color: colors.foreground }} numberOfLines={expanded ? undefined : 2}>
@@ -453,13 +455,13 @@ export function DigestRowView({
         ...(last ? { borderBottomWidth: 1, borderBottomColor: colors.border } : {}),
       }}
     >
-      <View style={{ flexDirection: compact ? "column" : "row", alignItems: compact ? "stretch" : "center", gap: 12 }}>
+      <View style={{ flexDirection: compact ? "column" : "row", alignItems: compact ? "flex-start" : "center", gap: compact ? 8 : 12 }}>
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={`${row.accessibilityLabel}. ${expanded ? "Hide" : "Show"} the details`}
           accessibilityState={{ expanded }}
           onPress={onToggle}
-          style={{ flex: compact ? undefined : 1, flexDirection: "row", alignItems: "center", gap: 12 }}
+          style={{ flex: compact ? undefined : 1, alignSelf: compact ? "stretch" : "auto", flexDirection: "row", alignItems: "center", gap: 12 }}
         >
           <Icon name="Check" size={16} color={colors.accent} />
           <Text style={{ flex: 1, fontSize: 14, color: colors.foreground }} numberOfLines={expanded ? undefined : 2}>
@@ -525,7 +527,11 @@ export function EmptyInbox({ sentence, onOpenWork, styles }: { sentence: string;
   );
 }
 
-/** The title row: "Needs you", its count muted, and the filter at the right (none on the empty Inbox). */
+/**
+ * The title row: "Needs you", its count muted, and the filter at the right
+ * (none on the empty Inbox). On a phone the filter is its own row, its four
+ * cells sharing the width.
+ */
 export function InboxTitleRow({
   summary,
   filter,
@@ -539,9 +545,24 @@ export function InboxTitleRow({
   compact: boolean;
   theme: Theme;
 }) {
+  if (compact) {
+    return (
+      <View style={{ gap: 16 }}>
+        <View style={{ flexDirection: "row", alignItems: "baseline", flexWrap: "wrap", gap: 10 }}>
+          <Text accessibilityRole="header" style={{ color: theme.colors.foreground, fontSize: 20, fontWeight: "600" }}>
+            Needs you
+          </Text>
+          {summary === null ? null : <Text style={{ color: theme.colors.foregroundMuted, fontSize: 13 }}>{summary}</Text>}
+        </View>
+        {filter === null ? null : (
+          <Segmented segments={INBOX_FILTERS} selected={filter} onSelect={(key) => onFilter(key as InboxFilter)} theme={theme} fill />
+        )}
+      </View>
+    );
+  }
   return (
-    <View style={{ flexDirection: "row", alignItems: compact ? "center" : "baseline", flexWrap: "wrap", gap: compact ? 10 : 16 }}>
-      <Text accessibilityRole="header" style={{ color: theme.colors.foreground, fontSize: compact ? 20 : 22, fontWeight: "600" }}>
+    <View style={{ flexDirection: "row", alignItems: "baseline", flexWrap: "wrap", gap: 16 }}>
+      <Text accessibilityRole="header" style={{ color: theme.colors.foreground, fontSize: 22, fontWeight: "600" }}>
         Needs you
       </Text>
       {summary === null ? null : <Text style={{ color: theme.colors.foregroundMuted, fontSize: 14 }}>{summary}</Text>}
@@ -591,7 +612,7 @@ function InboxProjectView({
   const joinNext = (): CardJoin => (position++ === 0 ? "first" : "next");
   return (
     <View accessibilityRole="list">
-      <View style={{ marginBottom: 10 }}>
+      <View style={{ marginBottom: compact ? 8 : 10 }}>
         <SectionLabel theme={theme}>{projectHeading(project)}</SectionLabel>
       </View>
       {project.items.map((item) => (
@@ -681,8 +702,8 @@ export function InboxScreen({ theme, layout, navigation, data, status, onOpenWor
   };
 
   return (
-    <ScrollView style={{ flex: 1, backgroundColor: theme.colors.surface0 }} contentContainerStyle={{ paddingTop: compact ? 16 : 32, paddingHorizontal: compact ? 16 : 32, paddingBottom: 64 }}>
-      <View style={{ gap: compact ? 20 : 28, width: "100%", maxWidth: 1040, alignSelf: "center" }}>
+    <ScrollView style={{ flex: 1, backgroundColor: theme.colors.surface0 }} contentContainerStyle={{ paddingTop: compact ? 16 : 32, paddingHorizontal: compact ? 16 : 32, paddingBottom: compact ? 40 : 64 }}>
+      <View style={{ gap: compact ? 16 : 28, width: "100%", maxWidth: 1040, alignSelf: "center" }}>
         {status}
         {data.errors.map((line) => (
           <ToneText key={line} tone="danger" styles={styles} theme={theme}>
@@ -720,7 +741,7 @@ export function InboxScreen({ theme, layout, navigation, data, status, onOpenWor
             {view.alerts.truncated && (filter === "all" || filter === "alerts") ? <Text style={styles.body}>More alerts are open than the Inbox shows.</Text> : null}
 
             <View accessibilityRole="list">
-              <View style={{ marginBottom: 10 }}>
+              <View style={{ marginBottom: compact ? 8 : 10 }}>
                 <SectionLabel theme={theme}>{decidedHeading(view.decidedForYou.count)}</SectionLabel>
               </View>
               {view.decidedForYou.empty === null ? null : <Text style={styles.body}>{view.decidedForYou.empty}</Text>}

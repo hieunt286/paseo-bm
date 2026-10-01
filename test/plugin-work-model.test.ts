@@ -41,6 +41,7 @@ import {
   requestTokenFigures,
   stageBar,
   timelineEvents,
+  waitingByWorkspace,
   workRows,
   type RequestCardView,
   type StageBarView,
@@ -750,9 +751,9 @@ describe("a project row on screen", () => {
     (closed.props.onPress as () => void)();
     expect(onOpen).toHaveBeenCalledWith("ws-z", "old");
     const empty = renderTree(WorkList({ rows: [], closed: [], loading: false, error: null, selectedId: null, onOpen, compact: true, theme }));
-    expect(texts(empty)).toEqual(["No workspaces on this host yet."]);
+    expect(texts(empty)).toEqual(["Projects", "No workspaces on this host yet."]);
     const failed = renderTree(WorkList({ rows: [], closed: [], loading: false, error: "boom", selectedId: null, onOpen, compact: true, theme }));
-    expect(texts(failed)).toEqual(["Could not load the workspaces. boom"]);
+    expect(texts(failed)).toEqual(["Projects", "Could not load the workspaces. boom"]);
   });
 });
 
@@ -1391,3 +1392,118 @@ describe("a project's Overview on screen", () => {
   });
 });
 
+
+describe("Projects on a phone (the MobileProjects and MobileProject artboards)", () => {
+  const row: WorkRowView = {
+    workspaceId: "ws-a",
+    label: "xspace",
+    detail: "",
+    request: null,
+    status: { text: "idle", tone: "muted" },
+    agents: [],
+    time: null,
+    beads: null,
+    level: "Cruise",
+    line: "2 active · 1 stalled · Cruise",
+    accessibilityLabel: "xspace. Open the project",
+  };
+
+  it("counts what waits on the owner per project, settled decisions left out", () => {
+    const open = makeDecision();
+    const counts = waitingByWorkspace([
+      open,
+      makeDecision({ id: "q:r:Q2", status: "needs-confirmation" }),
+      makeDecision({ id: "q:r:Q3", workspaceId: "ws-b" }),
+      makeDecision({ id: "q:r:Q4", workspaceId: "ws-c", status: "expired" }),
+    ]);
+    expect([...counts.entries()]).toEqual([
+      [open.workspaceId, 2],
+      ["ws-b", 1],
+    ]);
+    expect(waitingByWorkspace(undefined).size).toBe(0);
+  });
+
+  it("draws a row as the name, its muted line, the amber waiting count when any and a ›", () => {
+    const onOpen = vi.fn();
+    const tree = renderTree(WorkRowItem({ row, selected: false, onOpen, compact: true, waiting: 3, theme }));
+    expect(texts(tree)).toEqual(["xspace", "2 active · 1 stalled · Cruise", "3", "›"]);
+    const [press] = pressables(tree);
+    expect(press!.props.accessibilityLabel).toBe("xspace. Open the project. 3 waiting on you");
+    expect(JSON.stringify(press!.props.style)).toContain("#border");
+    const badge = allNodes(tree).find((node) => node.type === "Text" && textOf(node) === "3")!;
+    expect(JSON.stringify(badge.props.style)).toContain("#statusWarning");
+    (press!.props.onPress as () => void)();
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(texts(renderTree(WorkRowItem({ row, selected: false, onOpen, compact: true, waiting: 0, theme })))).toEqual(["xspace", "2 active · 1 stalled · Cruise", "›"]);
+  });
+
+  it("titles the list Projects, counts each row's waiting decisions, then the closed workspaces under their label", () => {
+    const onOpen = vi.fn();
+    const tree = renderTree(
+      WorkList({
+        rows: [row, { ...row, workspaceId: "ws-b", label: "shop", line: "idle · Hands-on", accessibilityLabel: "shop. Open the project" }],
+        closed: [{ workspaceId: "ws-z", label: "old", detail: "no longer in Paseo", state: "orphaned" }],
+        loading: false,
+        error: null,
+        selectedId: null,
+        onOpen,
+        waiting: new Map([["ws-a", 3]]),
+        compact: true,
+        theme,
+      }),
+    );
+    expect(texts(tree)).toEqual(["Projects", "xspace", "2 active · 1 stalled · Cruise", "3", "›", "shop", "idle · Hands-on", "›", "Closed workspaces with history", "old", "no longer in Paseo"]);
+    const title = allNodes(tree).find((node) => node.type === "Text" && textOf(node) === "Projects")!;
+    expect(title.props.style).toMatchObject({ fontSize: 20, fontWeight: "600" });
+    (pressables(tree).find((node) => node.props.accessibilityLabel === "Open the requests of the closed workspace old")!.props.onPress as () => void)();
+    expect(onOpen).toHaveBeenCalledWith("ws-z", "old");
+  });
+
+  it("heads a project with ‹ Projects, the name 20/600, its directory on one line, the two actions as equal cells, the tabs scrolling, then the period", () => {
+    const onBack = vi.fn();
+    const tree = renderTree(
+      ProjectHeader({
+        label: "xspace",
+        directory: "/Users/me/work/xspace",
+        tab: "metrics",
+        onTab: noop,
+        onBack,
+        backLabel: "Back to Projects",
+        onChat: noop,
+        chatBusy: false,
+        level: "Cruise",
+        onOpenSettings: noop,
+        extra: "PERIOD",
+        compact: true,
+        theme,
+      }),
+    );
+    expect(texts(tree)).toEqual(["‹ Projects", "xspace", "/Users/me/work/xspace", "Open Manager", "Autonomy: Cruise", "Overview", "Requests", "Beads", "Metrics", "Agents"]);
+    // The period comes after the tabs, on its own row.
+    const json = JSON.stringify(tree);
+    expect(json.indexOf("PERIOD")).toBeGreaterThan(json.indexOf("Agents"));
+    (pressables(tree).find((node) => node.props.accessibilityLabel === "Back to Projects")!.props.onPress as () => void)();
+    expect(onBack).toHaveBeenCalled();
+    const name = allNodes(tree).find((node) => node.type === "Text" && textOf(node) === "xspace")!;
+    expect(name.props).toMatchObject({ numberOfLines: 1, style: { fontSize: 20, fontWeight: "600" } });
+    expect(allNodes(tree).find((node) => node.type === "Text" && textOf(node) === "/Users/me/work/xspace")!.props).toMatchObject({ numberOfLines: 1 });
+    for (const label of ["Chat with the Beads Manager of xspace", "Autonomy: Cruise. Open Settings to change it"]) {
+      expect(pressables(tree).find((node) => node.props.accessibilityLabel === label)!.props.style).toMatchObject({ flex: 1 });
+    }
+    expect(allNodes(tree).some((node) => node.type === "ScrollView" && node.props.horizontal === true)).toBe(true);
+    // A lone action keeps the first column.
+    const lone = renderTree(ProjectHeader({ label: "xspace", tab: "overview", onTab: noop, chatBusy: false, level: "Custom", compact: true, theme }));
+    expect(texts(lone)).toEqual(["xspace", "—", "Autonomy: Custom", "Overview", "Requests", "Beads", "Metrics", "Agents"]);
+  });
+
+  it("narrows Tokens by role to a 76px name and a 64px value, with 13px buttons", () => {
+    const view = projectOverviewView({ summary: overviewSummary(), window: "30d", requests: openRequests(["completed", "completed", "completed", "completed", "completed"]), decisions: [], now: NOW });
+    const tree = renderTree(ProjectOverviewBody({ view, error: null, onRequests: noop, compact: true, styles, theme }));
+    const worker = allNodes(tree).find((node) => node.type === "Text" && textOf(node) === "Worker")!;
+    expect(worker.props.style).toMatchObject({ width: 76, fontSize: 13 });
+    const value = allNodes(tree).filter((node) => node.type === "Text" && (node.props.style as { width?: number } | undefined)?.width === 64);
+    expect(value.length).toBeGreaterThan(0);
+    const older = pressables(tree).find((node) => node.props.accessibilityLabel === "Open the older finished requests in Requests");
+    expect(allNodes([older!]).find((node) => node.type === "Text")!.props.style).toMatchObject({ fontSize: 13 });
+  });
+});

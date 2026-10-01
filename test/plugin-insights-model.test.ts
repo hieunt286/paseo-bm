@@ -52,7 +52,7 @@ import { EMPTY_AUTONOMY_POLICY, type AutonomyPolicy } from "../plugin/shared/aut
 import type { AgreementCell, AgreementLedger } from "../plugin/shared/autonomy-ledger";
 import { INSIGHTS_WINDOWS, type BeadRow, type BeadStats, type InsightsSummary } from "../plugin/shared/contracts";
 import { INTERVENTION_KINDS } from "../plugin/shared/interventions";
-import { allNodes, pressables, renderTree, texts, type RNode } from "./helpers/element-tree";
+import { allNodes, pressables, renderTree, textOf, texts, type RNode } from "./helpers/element-tree";
 
 /**
  * A project's Metrics tab (change-014 outcome 5; the Insights section until
@@ -75,6 +75,7 @@ const { MetricsBody, InsightsFigures, BeadsFigures, AutonomyFigures, ReviewLiftF
   AutonomyFigures: Component;
   ReviewLiftFigures: Component;
 };
+const PROCESS_LEGEND = insightsModule.PROCESS_LEGEND as string;
 
 const theme = { colors: new Proxy({}, { get: (_target, key) => `#${String(key)}` }) };
 const styles = dashboardStyles(theme as never, false);
@@ -631,8 +632,8 @@ describe("the Metrics tab: the model", () => {
       beadAt("d", local(1, 8), null),
     ];
     expect(closedPerDay(beads, "30d", NOW)).toEqual([
-      { key: "2026-09-17", label: "17 Sep", value: 1 },
-      { key: "2026-09-26", label: "26 Sep", value: 2 },
+      { key: "2026-09-17", label: "17 Sep", short: "17/9", value: 1 },
+      { key: "2026-09-26", label: "26 Sep", short: "26/9", value: 2 },
     ]);
     expect(closedPerDay(beads, "7d", NOW).map((day) => day.label)).toEqual(["26 Sep"]);
     const many = Array.from({ length: 20 }, (_, index) => beadAt(`m${index}`, local(1, 8), new Date(2026, 8, 1 + index, 12).toISOString()));
@@ -776,6 +777,33 @@ describe("the Metrics tab", () => {
     };
     expect(direction(true)).toBe("column");
     expect(direction(false)).toBe("row");
+  });
+});
+
+describe("the Metrics tab on a phone (the MobileMetrics artboard)", () => {
+  const phone = () => renderTree(MetricsBody({ view: metricsOf(), loading: false, error: null, beadsError: null, autonomy: { kind: "choose", text: AUTONOMY_CHOOSE_PROJECT }, onRefresh: noop, compact: true, styles, theme }));
+
+  it("wraps the five figures two by two, Turns across the width, with an 11px label and a 22px value", () => {
+    const tree = phone();
+    const label = allNodes(tree).find((node) => node.type === "Text" && textOf(node) === "Beads closed")!;
+    expect(label.props.style).toMatchObject({ fontSize: 11 });
+    const value = allNodes(tree).find((node) => node.type === "Text" && textOf(node).startsWith("1") && (node.props.style as { fontSize?: number }).fontSize === 22);
+    expect(value).toBeDefined();
+    const cells = allNodes(tree).filter((node) => node.type === "View" && typeof node.props.accessibilityLabel === "string" && /^(Beads closed|Lead time · median|Requests|Tokens per request|Turns):/.test(node.props.accessibilityLabel as string));
+    expect(cells.map((node) => (node.props.style as { minWidth?: unknown }).minWidth)).toEqual(["50%", "50%", "50%", "50%", "50%"]);
+    // The fifth cell is alone on its row: flex 1 takes the full width.
+    expect(cells[4]!.props.style).toMatchObject({ flex: 1, borderTopWidth: 1 });
+  });
+
+  it("writes the days short under bare bars, and how the work ran as rows with a legend", () => {
+    const shown = texts(phone());
+    expect(shown).toContain("22/9");
+    expect(shown).not.toContain("22 Sep");
+    expect(shown).not.toContain("Measure");
+    expect(shown).toContain(PROCESS_LEGEND);
+    expect(PROCESS_LEGEND).toBe("This project · all projects");
+    const row = allNodes(phone()).find((node) => node.props.accessibilityLabel === "Median time to finished: 1 h 20 min in this project, 1 h 20 min in all projects")!;
+    expect(texts([row])).toEqual(["Median time to finished", "1 h 20 min · 1 h 20 min", " · 1 h 20 min"]);
   });
 });
 

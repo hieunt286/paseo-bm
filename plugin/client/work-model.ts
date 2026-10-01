@@ -311,6 +311,20 @@ export interface WorkRowView {
   accessibilityLabel: string;
 }
 
+/**
+ * How many decisions wait on the owner in each workspace: the amber count a
+ * phone's Projects list shows at a row's right (`decisions.list` of the Inbox;
+ * a settled decision is not counted). A workspace with none is absent.
+ */
+export function waitingByWorkspace(decisions: readonly Pick<Decision, "workspaceId" | "status">[] | undefined): ReadonlyMap<string, number> {
+  const counts = new Map<string, number>();
+  for (const decision of decisions ?? []) {
+    if (!isAnswerable(decision)) continue;
+    counts.set(decision.workspaceId, (counts.get(decision.workspaceId) ?? 0) + 1);
+  }
+  return counts;
+}
+
 function runningCount(overview: WorkspaceOverview | undefined): number {
   if (overview === undefined) return 0;
   const running = overview.runningAgents;

@@ -9,8 +9,11 @@
  * action is confirmed first and goes to the workspace's Beads Manager; this
  * screen never writes the bead store.
  *
- * On a phone the columns are one at a time behind a segmented control, and the
- * detail sits under the column.
+ * On a phone (the MobileBeads artboard) everything scrolls as one, under the
+ * project page's header: the features scroll sideways, the columns are one at
+ * a time behind a segmented control of equal cells with short names, and the
+ * selected bead's detail sits in a bordered panel under the column, its
+ * actions as a full-width Ask Manager to implement over a two-column grid.
  *
  * The overview figures (status, progress, by type, by priority, time) are the
  * project's Metrics tab: `BeadsFigures` (`insights.tsx`) draws them from `beadsOverview`,
@@ -28,6 +31,7 @@ import { beadsActionRpc, beadsGetRpc, beadsListRpc, type BeadAction, type BeadRo
 import { MarkdownView } from "./markdown-view";
 import {
   BEAD_ACTIONS_NOTE,
+  BOARD_SHORT_TITLES,
   EMPTY_FILTER,
   LABEL_PREVIEW,
   SORT_OPTIONS,
@@ -301,6 +305,46 @@ function timesLine(full: BeadRow & { blockedBy: string[]; children: string[] }, 
 }
 
 /**
+ * A phone's bead actions (the MobileBeads artboard): Ask Manager to implement
+ * across the width, then the others two by two as equal cells, Delete… in the
+ * danger colour. Each asks first, as on a wide screen.
+ */
+export function PhoneBeadActions({ bead, state, styles, theme }: { bead: BeadRow; state: BeadActionState; styles: Styles; theme: Theme }) {
+  const { colors } = theme;
+  const actions = actionsFor(bead);
+  const primary = actions.filter((action) => action === "implement");
+  const others = actions.filter((action) => action !== "implement");
+  const pairs: BeadAction[][] = [];
+  for (let index = 0; index < others.length; index += 2) pairs.push(others.slice(index, index + 2));
+  const button = (action: BeadAction, cell: boolean) => {
+    const spec = actionSpec(action, bead);
+    return (
+      <Button
+        key={action}
+        label={spec.label}
+        kind={action === "implement" ? "primary" : "secondary"}
+        disabled={state.busy}
+        onPress={() => state.ask(action)}
+        style={{ borderRadius: 0, paddingVertical: 10, paddingHorizontal: 12, ...(cell ? { flex: 1, minWidth: 0 } : {}) }}
+        textStyle={{ fontSize: 13, ...(spec.danger ? { color: colors.statusDanger } : {}) }}
+        styles={styles}
+      />
+    );
+  };
+  return (
+    <View style={{ gap: 8 }}>
+      {primary.map((action) => button(action, false))}
+      {pairs.map((pair) => (
+        <View key={pair.join(":")} style={{ flexDirection: "row", gap: 8 }}>
+          {pair.map((action) => button(action, true))}
+          {pair.length === 1 ? <View style={{ flex: 1 }} /> : null}
+        </View>
+      ))}
+    </View>
+  );
+}
+
+/**
  * The selected bead beside the board (the artboard's aside): id · type ·
  * priority, the title, Status / Feature / Parent / Worker, the description,
  * then Ask Manager to implement, Close… and Delete…, each confirmed first.
@@ -312,6 +356,7 @@ export function BeadDetailAside({
   styles,
   theme,
   navigation,
+  compact = false,
 }: {
   workspaceId: string;
   bead: BeadRow;
@@ -320,6 +365,8 @@ export function BeadDetailAside({
   styles: Styles;
   theme: Theme;
   navigation?: PluginSurfaceProps["navigation"];
+  /** A phone (the MobileBeads artboard): title 16, a 76px fact column, the actions as a full-width primary over a two-column grid. */
+  compact?: boolean;
 }) {
   const state = useBeadAction(workspaceId, bead);
   const { colors } = theme;
@@ -329,17 +376,17 @@ export function BeadDetailAside({
   const facts = beadFacts(bead, all, now);
   if (full !== undefined && full.blockedBy.length > 0) facts.push({ key: "Blocked by", value: full.blockedBy.join(", "), mono: true });
   return (
-    <View style={{ gap: 14 }}>
-      <Text style={{ fontFamily: MONO, fontSize: 12, color: colors.foregroundMuted }} selectable>
+    <View style={{ gap: compact ? 12 : 14 }}>
+      <Text style={{ fontFamily: MONO, fontSize: compact ? 11 : 12, color: colors.foregroundMuted }} selectable>
         {beadHeadLine(bead)}
       </Text>
-      <Text accessibilityRole="header" style={{ fontSize: 17, fontWeight: "600", lineHeight: 24, color: colors.foreground }}>
+      <Text accessibilityRole="header" style={{ fontSize: compact ? 16 : 17, fontWeight: "600", lineHeight: compact ? 22 : 24, color: colors.foreground }}>
         {bead.title ?? "(untitled)"}
       </Text>
-      <View style={{ gap: 8 }}>
+      <View style={{ gap: compact ? 6 : 8 }}>
         {facts.map((fact) => (
-          <View key={fact.key} style={{ flexDirection: "row", gap: 12 }}>
-            <Text style={{ width: 90, fontSize: 13, color: colors.foregroundMuted }}>{fact.key}</Text>
+          <View key={fact.key} style={{ flexDirection: "row", gap: compact ? 10 : 12 }}>
+            <Text style={{ width: compact ? 76 : 90, fontSize: 13, color: colors.foregroundMuted }}>{fact.key}</Text>
             <Text style={{ flex: 1, minWidth: 0, color: colors.foreground, ...(fact.mono ? { fontFamily: MONO, fontSize: 12 } : { fontSize: 13 }) }} selectable={fact.mono}>
               {fact.value}
             </Text>
@@ -365,7 +412,9 @@ export function BeadDetailAside({
         {full === undefined ? null : <Text style={{ fontSize: 12, color: colors.foregroundMuted }}>{timesLine(full, now)}</Text>}
       </View>
       <ActionResultLine result={state.result} navigation={navigation} styles={styles} theme={theme} />
-      {state.pending === null ? (
+      {state.pending === null && compact ? (
+        <PhoneBeadActions bead={bead} state={state} styles={styles} theme={theme} />
+      ) : state.pending === null ? (
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 4 }}>
           {actionsFor(bead).map((action) => {
             const spec = actionSpec(action, bead);
@@ -392,7 +441,22 @@ export function BeadDetailAside({
 }
 
 /** One bead on the board: id, title, meta; the selected one on surface2 with the 3px accent bar. Hook-free. */
-export function BoardBeadRow({ bead, meta, selected, onSelect, theme }: { bead: BeadRow; meta: string; selected: boolean; onSelect: () => void; theme: Theme }) {
+export function BoardBeadRow({
+  bead,
+  meta,
+  selected,
+  onSelect,
+  theme,
+  compact = false,
+}: {
+  bead: BeadRow;
+  meta: string;
+  selected: boolean;
+  onSelect: () => void;
+  theme: Theme;
+  /** A phone: padded 12/14, the title 14 (the MobileBeads artboard). */
+  compact?: boolean;
+}) {
   const { colors } = theme;
   return (
     <Pressable
@@ -403,7 +467,7 @@ export function BoardBeadRow({ bead, meta, selected, onSelect, theme }: { bead: 
       style={{
         gap: 4,
         paddingVertical: 12,
-        paddingHorizontal: 16,
+        paddingHorizontal: compact ? 14 : 16,
         borderBottomWidth: 1,
         borderBottomColor: colors.border,
         backgroundColor: selected ? colors.surface2 : "transparent",
@@ -413,7 +477,7 @@ export function BoardBeadRow({ bead, meta, selected, onSelect, theme }: { bead: 
       <Text style={{ fontFamily: MONO, fontSize: 11, color: colors.foregroundMuted }} numberOfLines={1}>
         {bead.id}
       </Text>
-      <Text style={{ fontSize: 13, lineHeight: 18, color: colors.foreground }}>{bead.title ?? "(untitled)"}</Text>
+      <Text style={{ fontSize: compact ? 14 : 13, lineHeight: compact ? 20 : 18, color: colors.foreground }}>{bead.title ?? "(untitled)"}</Text>
       <Text style={{ fontSize: 12, color: colors.foregroundMuted }} numberOfLines={1}>
         {meta}
       </Text>
@@ -440,7 +504,7 @@ export function BoardColumnView({ column, renderBead, last, theme }: { column: B
 }
 
 /** Show closed (N): a square box, filled with the accent and ticked while closed beads show. Hook-free. */
-export function ShowClosedToggle({ on, count, onToggle, theme }: { on: boolean; count: number; onToggle: () => void; theme: Theme }) {
+export function ShowClosedToggle({ on, count, onToggle, theme, compact = false }: { on: boolean; count: number; onToggle: () => void; theme: Theme; compact?: boolean }) {
   const { colors } = theme;
   return (
     <Pressable
@@ -463,7 +527,8 @@ export function ShowClosedToggle({ on, count, onToggle, theme }: { on: boolean; 
       >
         {on ? <Text style={{ fontSize: 10, lineHeight: 12, color: colors.accentForeground }}>✓</Text> : null}
       </View>
-      <Text style={{ fontSize: 13, color: colors.foregroundMuted }}>{`Show closed (${count})`}</Text>
+      {/* A phone's row is short: the count stays in the label read aloud. */}
+      <Text style={{ fontSize: 13, color: colors.foregroundMuted }}>{compact ? "Show closed" : `Show closed (${count})`}</Text>
     </Pressable>
   );
 }
@@ -471,7 +536,20 @@ export function ShowClosedToggle({ on, count, onToggle, theme }: { on: boolean; 
 /** The feature filter's key for "every feature". Not a label: labels are never empty. */
 const ALL_FEATURES = "";
 
-export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceLabel, onBack, backLabel, status }: WorkspaceScreenProps) {
+export function BeadsScreen({
+  theme,
+  layout,
+  navigation,
+  workspaceId,
+  workspaceLabel,
+  onBack,
+  backLabel,
+  status,
+  top,
+}: WorkspaceScreenProps & {
+  /** Drawn first on a phone, scrolling with the board: the project page's header (the MobileBeads artboard). */
+  top?: ReactNode;
+}) {
   const styles = useMemo(() => dashboardStyles(theme, layout.compact), [theme, layout.compact]);
   const { colors } = theme;
   const compact = layout.compact;
@@ -529,216 +607,264 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
       selected={selected?.id === bead.id}
       onSelect={() => setSelectedId(bead.id)}
       theme={theme}
+      compact={compact}
     />
   );
   const detail =
     selected === null ? null : (
-      <BeadDetailAside key={selected.id} workspaceId={workspaceId} bead={selected} all={rows} styles={styles} theme={theme} navigation={navigation} />
+      <BeadDetailAside key={selected.id} workspaceId={workspaceId} bead={selected} all={rows} styles={styles} theme={theme} navigation={navigation} compact={compact} />
     );
 
-  return (
-    <View style={{ flex: 1, backgroundColor: colors.surface0 }}>
-      {workspaceLabel === undefined && onBack === undefined && status === undefined ? null : (
-        <View style={{ paddingHorizontal: pad, paddingTop: 16, gap: 8 }}>
-          <WorkspaceScreenHeader
-            title={workspaceLabel === undefined ? null : `Beads · ${workspaceLabel}`}
-            onBack={onBack}
-            backLabel={backLabel ?? "Back"}
-            status={status}
-            styles={styles}
-            right={null}
-          />
-        </View>
-      )}
-
-      {/* The filter bar: features, Show closed, Filter · Sort (delta 20260925 §3.1; the artboard's bar). */}
-      <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 12, paddingVertical: 14, paddingHorizontal: pad, borderBottomWidth: 1, borderBottomColor: colors.border }}>
-        {features === undefined ? null : (
-          <Segmented
-            segments={[
-              { key: ALL_FEATURES, label: "All", count: rows.length, accessibilityLabel: `Every feature, ${rows.length} beads` },
-              ...features.values.map((entry) => ({
-                key: entry.value,
-                label: entry.value.slice("feature:".length),
-                count: entry.count,
-                accessibilityLabel: `Feature ${entry.value.slice("feature:".length)}, ${entry.count} beads`,
-              })),
-            ]}
-            selected={feature}
-            onSelect={pickFeature}
-            theme={theme}
-          />
-        )}
-        <View style={{ flex: 1 }} />
-        {done === null ? null : (
-          <Text style={{ fontSize: 13, color: colors.foregroundMuted }} accessibilityLabel={done.label}>
-            {done.text}
-          </Text>
-        )}
-        <ShowClosedToggle on={showClosed} count={board.closed} onToggle={() => closedBeadsVisibility.set(!showClosed)} theme={theme} />
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`${showFilters ? "Hide" : "Show"} the filters and the sort${filtersOn > 0 ? `, ${filtersOn} on` : ""}`}
-          accessibilityState={{ expanded: showFilters }}
-          onPress={() => setShowFilters(!showFilters)}
-          style={{ flexDirection: "row", alignItems: "center", gap: 6, borderWidth: 1, borderColor: colors.border, paddingVertical: 6, paddingHorizontal: 12 }}
-        >
-          <Icon name="ListFilter" size={14} color={colors.foreground} />
-          <Text style={{ fontSize: 13, color: colors.foreground }}>{`Filter · Sort${filtersOn > 0 ? ` (${filtersOn})` : ""}`}</Text>
-        </Pressable>
+  const screenHeader =
+    workspaceLabel === undefined && onBack === undefined && status === undefined ? null : (
+      <View style={{ paddingHorizontal: compact ? 0 : pad, paddingTop: compact ? 0 : 16, gap: 8 }}>
+        <WorkspaceScreenHeader
+          title={workspaceLabel === undefined ? null : `Beads · ${workspaceLabel}`}
+          onBack={onBack}
+          backLabel={backLabel ?? "Back"}
+          status={status}
+          styles={styles}
+          right={null}
+        />
       </View>
+    );
+  // The project's features: a segmented control, scrolling sideways on a phone.
+  const featureControl =
+    features === undefined ? null : (
+      <Segmented
+        segments={[
+          { key: ALL_FEATURES, label: "All", count: rows.length, accessibilityLabel: `Every feature, ${rows.length} beads` },
+          ...features.values.map((entry) => ({
+            key: entry.value,
+            label: entry.value.slice("feature:".length),
+            count: entry.count,
+            accessibilityLabel: `Feature ${entry.value.slice("feature:".length)}, ${entry.count} beads`,
+          })),
+        ]}
+        selected={feature}
+        onSelect={pickFeature}
+        theme={theme}
+        scroll={compact}
+      />
+    );
+  const doneLine =
+    done === null ? null : (
+      <Text style={{ fontSize: 13, color: colors.foregroundMuted }} accessibilityLabel={done.label}>
+        {done.text}
+      </Text>
+    );
+  const closedToggle = <ShowClosedToggle on={showClosed} count={board.closed} onToggle={() => closedBeadsVisibility.set(!showClosed)} theme={theme} compact={compact} />;
+  const filterButton = (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`${showFilters ? "Hide" : "Show"} the filters and the sort${filtersOn > 0 ? `, ${filtersOn} on` : ""}`}
+      accessibilityState={{ expanded: showFilters }}
+      onPress={() => setShowFilters(!showFilters)}
+      style={{ flexDirection: "row", alignItems: "center", gap: 6, borderWidth: 1, borderColor: colors.border, paddingVertical: 6, paddingHorizontal: compact ? 10 : 12, ...(compact ? { marginLeft: "auto" as const } : {}) }}
+    >
+      <Icon name="ListFilter" size={14} color={colors.foreground} />
+      <Text style={{ fontSize: 13, color: colors.foreground }}>{`Filter · Sort${filtersOn > 0 ? ` (${filtersOn})` : ""}`}</Text>
+    </Pressable>
+  );
 
-      {/* The filters in use stay in sight while the panel is folded. */}
-      {active.length > 0 ? (
-        <View style={[styles.chipRow, { paddingHorizontal: pad, paddingTop: 10 }]}>
-          {active.map((entry) => (
+  // The filters in use stay in sight while the panel is folded.
+  const activeChips = (
+    <>
+      {active.map((entry) => (
+        <Chip
+          key={`${entry.facet}:${entry.value}`}
+          badge={{ text: `${facetText(entry.value)} ✕`, tone: "info" }}
+          selected
+          onPress={() => setFilter({ ...filter, [entry.facet]: toggle(filter[entry.facet], entry.value) })}
+          styles={styles}
+          theme={theme}
+        />
+      ))}
+      <Pressable accessibilityRole="button" accessibilityLabel="Clear all filters" onPress={() => setFilter(EMPTY_FILTER)}>
+        {/* Removing filters loses nothing, so it is not painted like a danger. */}
+        <Text style={[styles.badge, { color: toneColor(theme, "plain"), paddingVertical: 2 }]}>Clear all</Text>
+      </Pressable>
+    </>
+  );
+  // Filters and sort, folded behind Filter · Sort
+  const filtersBody = (
+    <>
+      <TextInput
+        value={filter.text}
+        onChangeText={(text) => setFilter({ ...filter, text })}
+        placeholder="Search id or title"
+        placeholderTextColor={colors.foregroundMuted}
+        style={[styles.body, { color: colors.foreground, borderWidth: 1, borderColor: colors.border, borderRadius: 0, padding: 8 }]}
+      />
+      <FacetRow
+        title="Status"
+        values={facets.statuses}
+        selected={filter.statuses}
+        onToggle={(value) => setFilter({ ...filter, statuses: toggle(filter.statuses, value) })}
+        styles={styles}
+        theme={theme}
+      />
+      <FacetRow
+        title="Type"
+        values={facets.types}
+        selected={filter.types}
+        onToggle={(value) => setFilter({ ...filter, types: toggle(filter.types, value) })}
+        styles={styles}
+        theme={theme}
+      />
+      <FacetRow
+        title="Priority"
+        values={facets.priorities}
+        selected={filter.priorities}
+        onToggle={(value) => setFilter({ ...filter, priorities: toggle(filter.priorities, value) })}
+        styles={styles}
+        theme={theme}
+      />
+      {labelGroups.length === 0 ? null : (
+        <Pressable accessibilityRole="button" accessibilityState={{ expanded: showLabels }} onPress={() => setShowLabels(!showLabels)}>
+          <Text style={styles.body}>
+            {`${showLabels ? "▾" : "▸"} Labels · ${labelGroups.map((group) => `${group.category}${group.selected > 0 ? ` (${group.selected})` : ""}`).join(", ")}`}
+          </Text>
+        </Pressable>
+      )}
+      {showLabels
+        ? labelGroups.map((group) => (
+            <FacetRow
+              key={group.category}
+              title={group.category}
+              values={group.values}
+              selected={filter.labels}
+              onToggle={(value) => setFilter({ ...filter, labels: toggle(filter.labels, value) })}
+              styles={styles}
+              theme={theme}
+              expanded={expandedGroups.has(group.category)}
+              onExpand={() => setExpandedGroups(toggle(expandedGroups, group.category))}
+            />
+          ))
+        : null}
+      <View style={[styles.chipRow, { alignItems: "center" }]}>
+        <Text style={styles.body}>Sort</Text>
+        {SORT_OPTIONS.map((option) => {
+          const on = option.key === sortKey;
+          return (
             <Chip
-              key={`${entry.facet}:${entry.value}`}
-              badge={{ text: `${facetText(entry.value)} ✕`, tone: "info" }}
-              selected
-              onPress={() => setFilter({ ...filter, [entry.facet]: toggle(filter[entry.facet], entry.value) })}
+              key={option.key}
+              badge={{ text: on ? `${option.label} ${descending ? "↓" : "↑"}` : option.label, tone: on ? "info" : "muted" }}
+              selected={on}
+              onPress={() => {
+                if (on) setDescending(!descending);
+                else {
+                  setSortKey(option.key);
+                  setDescending(true);
+                }
+              }}
               styles={styles}
               theme={theme}
             />
-          ))}
-          <Pressable accessibilityRole="button" accessibilityLabel="Clear all filters" onPress={() => setFilter(EMPTY_FILTER)}>
-            {/* Removing filters loses nothing, so it is not painted like a danger. */}
-            <Text style={[styles.badge, { color: toneColor(theme, "plain"), paddingVertical: 2 }]}>Clear all</Text>
-          </Pressable>
-        </View>
-      ) : null}
-
-      {/* Filters and sort, folded behind Filter · Sort */}
-      {!showFilters ? null : (
-        <View style={{ gap: 10, paddingVertical: 14, paddingHorizontal: pad, borderBottomWidth: 1, borderBottomColor: colors.border, backgroundColor: colors.surface1 }}>
-          <TextInput
-            value={filter.text}
-            onChangeText={(text) => setFilter({ ...filter, text })}
-            placeholder="Search id or title"
-            placeholderTextColor={colors.foregroundMuted}
-            style={[styles.body, { color: colors.foreground, borderWidth: 1, borderColor: colors.border, borderRadius: 0, padding: 8 }]}
-          />
-          <FacetRow
-            title="Status"
-            values={facets.statuses}
-            selected={filter.statuses}
-            onToggle={(value) => setFilter({ ...filter, statuses: toggle(filter.statuses, value) })}
-            styles={styles}
-            theme={theme}
-          />
-          <FacetRow
-            title="Type"
-            values={facets.types}
-            selected={filter.types}
-            onToggle={(value) => setFilter({ ...filter, types: toggle(filter.types, value) })}
-            styles={styles}
-            theme={theme}
-          />
-          <FacetRow
-            title="Priority"
-            values={facets.priorities}
-            selected={filter.priorities}
-            onToggle={(value) => setFilter({ ...filter, priorities: toggle(filter.priorities, value) })}
-            styles={styles}
-            theme={theme}
-          />
-          {labelGroups.length === 0 ? null : (
-            <Pressable accessibilityRole="button" accessibilityState={{ expanded: showLabels }} onPress={() => setShowLabels(!showLabels)}>
-              <Text style={styles.body}>
-                {`${showLabels ? "▾" : "▸"} Labels · ${labelGroups.map((group) => `${group.category}${group.selected > 0 ? ` (${group.selected})` : ""}`).join(", ")}`}
-              </Text>
-            </Pressable>
-          )}
-          {showLabels
-            ? labelGroups.map((group) => (
-                <FacetRow
-                  key={group.category}
-                  title={group.category}
-                  values={group.values}
-                  selected={filter.labels}
-                  onToggle={(value) => setFilter({ ...filter, labels: toggle(filter.labels, value) })}
-                  styles={styles}
-                  theme={theme}
-                  expanded={expandedGroups.has(group.category)}
-                  onExpand={() => setExpandedGroups(toggle(expandedGroups, group.category))}
-                />
-              ))
-            : null}
-          <View style={[styles.chipRow, { alignItems: "center" }]}>
-            <Text style={styles.body}>Sort</Text>
-            {SORT_OPTIONS.map((option) => {
-              const on = option.key === sortKey;
-              return (
-                <Chip
-                  key={option.key}
-                  badge={{ text: on ? `${option.label} ${descending ? "↓" : "↑"}` : option.label, tone: on ? "info" : "muted" }}
-                  selected={on}
-                  onPress={() => {
-                    if (on) setDescending(!descending);
-                    else {
-                      setSortKey(option.key);
-                      setDescending(true);
-                    }
-                  }}
-                  styles={styles}
-                  theme={theme}
-                />
-              );
-            })}
-          </View>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
-            <Pressable accessibilityRole="button" accessibilityLabel="Read the beads again" onPress={() => void beads.refetch()}>
-              <Text style={{ fontSize: 13, color: colors.foregroundMuted }}>Refresh</Text>
-            </Pressable>
-            {beads.data === undefined ? null : (
-              <Text style={{ fontSize: 11, color: colors.foregroundMuted }} selectable>{`Read from ${beads.data.stats.source}`}</Text>
-            )}
-          </View>
-        </View>
-      )}
-
+          );
+        })}
+      </View>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+        <Pressable accessibilityRole="button" accessibilityLabel="Read the beads again" onPress={() => void beads.refetch()}>
+          <Text style={{ fontSize: 13, color: colors.foregroundMuted }}>Refresh</Text>
+        </Pressable>
+        {beads.data === undefined ? null : (
+          <Text style={{ fontSize: 11, color: colors.foregroundMuted }} selectable>{`Read from ${beads.data.stats.source}`}</Text>
+        )}
+      </View>
+    </>
+  );
+  // Reading, failed, empty, or every match closed; `inset` pads them on a wide screen.
+  const notices = (inset: number) => (
+    <>
       {beads.isPending ? <ActivityIndicator color={styles.spinner.color} style={{ padding: 16 }} /> : null}
       {beads.isError ? (
-        <View style={{ paddingHorizontal: pad, paddingTop: 12 }}>
+        <View style={{ paddingHorizontal: inset, paddingTop: inset === 0 ? 0 : 12 }}>
           <ToneText tone="danger" styles={styles} theme={theme}>{errorMessageOf(beads.error)}</ToneText>
         </View>
       ) : null}
       {beads.data !== undefined && rows.length === 0 ? (
-        <Text style={[styles.body, { paddingHorizontal: pad, paddingTop: 12 }]}>This workspace has no beads yet.</Text>
+        <Text style={[styles.body, { paddingHorizontal: inset, paddingTop: inset === 0 ? 0 : 12 }]}>This workspace has no beads yet.</Text>
       ) : null}
       {board.visible === 0 && board.closed > 0 ? (
-        <Text style={[styles.body, { paddingHorizontal: pad, paddingTop: 12 }]}>{`All ${board.closed} matching beads are closed. Show them with Show closed.`}</Text>
+        <Text style={[styles.body, { paddingHorizontal: inset, paddingTop: inset === 0 ? 0 : 12 }]}>{`All ${board.closed} matching beads are closed. Show them with Show closed.`}</Text>
       ) : null}
+    </>
+  );
 
-      {compact ? (
-        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 32 }}>
-          <View style={{ paddingHorizontal: pad, paddingTop: 12 }}>
-            <Segmented
-              segments={board.columns.map((column) => ({ key: column.bucket, label: column.title, count: column.total }))}
-              selected={phoneBucket}
-              onSelect={(key) => setOpenBucket(key as BoardBucket)}
-              theme={theme}
-            />
-          </View>
-          <View style={{ flexDirection: "row", marginTop: 12 }}>
-            {columns.map((column) => (
-              <BoardColumnView key={column.bucket} column={column} renderBead={renderBead} last theme={theme} />
+  // A phone (the MobileBeads artboard): one scroll — the page header, the features, a row of
+  // done · Show closed · Filter · Sort, the column chooser, the column's beads, then the
+  // selected bead's detail in a bordered panel under them.
+  if (compact) {
+    return (
+      <ScrollView style={{ flex: 1, backgroundColor: colors.surface0 }} contentContainerStyle={{ paddingTop: 16, paddingHorizontal: pad, paddingBottom: 40, gap: 14 }}>
+        {top}
+        {screenHeader}
+        {featureControl}
+        <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+          {doneLine}
+          {closedToggle}
+          {filterButton}
+        </View>
+        {active.length > 0 ? <View style={styles.chipRow}>{activeChips}</View> : null}
+        {!showFilters ? null : <View style={{ gap: 10, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface1, padding: 14 }}>{filtersBody}</View>}
+        {notices(0)}
+        {beads.data === undefined || rows.length === 0 ? null : (
+          <Segmented
+            segments={board.columns.map((column) => ({ key: column.bucket, label: BOARD_SHORT_TITLES[column.bucket], count: column.total, accessibilityLabel: `${column.title}, ${column.total} beads` }))}
+            selected={phoneBucket}
+            onSelect={(key) => setOpenBucket(key as BoardBucket)}
+            theme={theme}
+            fill
+          />
+        )}
+        {beads.data === undefined || rows.length === 0
+          ? null
+          : columns.map((column) => (
+              <View key={column.bucket} accessibilityLabel={`${column.title}: ${column.total}`}>
+                {column.beads.map(renderBead)}
+                {column.total === 0 ? <Text style={{ paddingVertical: 12, fontSize: 13, color: colors.foregroundMuted }}>Nothing here</Text> : null}
+                {column.hidden > 0 ? <Text style={{ paddingVertical: 10, fontSize: 12, color: colors.foregroundMuted }}>{`${column.hidden} more not shown`}</Text> : null}
+              </View>
             ))}
-          </View>
-          {detail === null ? null : <View style={{ padding: 16, backgroundColor: colors.surface1 }}>{detail}</View>}
-        </ScrollView>
-      ) : (
-        <View style={{ flex: 1, flexDirection: "row", minHeight: 0 }}>
-          <ScrollView style={{ flex: 1, borderRightWidth: 1, borderRightColor: colors.border }} contentContainerStyle={{ flexDirection: "row", minHeight: "100%" }}>
-            {columns.map((column, index) => (
-              <BoardColumnView key={column.bucket} column={column} renderBead={renderBead} last={index === columns.length - 1} theme={theme} />
-            ))}
-          </ScrollView>
-          <ScrollView style={{ width: BEAD_DETAIL_WIDTH, flexGrow: 0, backgroundColor: colors.surface1 }} contentContainerStyle={{ paddingVertical: 20, paddingHorizontal: 24 }}>
-            {detail ?? <Text style={{ fontSize: 13, color: colors.foregroundMuted }}>Choose a bead to see it here.</Text>}
-          </ScrollView>
+        {detail === null ? null : <View style={{ borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface1, padding: 16 }}>{detail}</View>}
+      </ScrollView>
+    );
+  }
+
+  return (
+    <View style={{ flex: 1, backgroundColor: colors.surface0 }}>
+      {screenHeader}
+
+      {/* The filter bar: features, Show closed, Filter · Sort (delta 20260925 §3.1; the artboard's bar). */}
+      <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 12, paddingVertical: 14, paddingHorizontal: pad, borderBottomWidth: 1, borderBottomColor: colors.border }}>
+        {featureControl}
+        <View style={{ flex: 1 }} />
+        {doneLine}
+        {closedToggle}
+        {filterButton}
+      </View>
+
+      {active.length > 0 ? <View style={[styles.chipRow, { paddingHorizontal: pad, paddingTop: 10 }]}>{activeChips}</View> : null}
+
+      {!showFilters ? null : (
+        <View style={{ gap: 10, paddingVertical: 14, paddingHorizontal: pad, borderBottomWidth: 1, borderBottomColor: colors.border, backgroundColor: colors.surface1 }}>
+          {filtersBody}
         </View>
       )}
+
+      {notices(pad)}
+
+      <View style={{ flex: 1, flexDirection: "row", minHeight: 0 }}>
+        <ScrollView style={{ flex: 1, borderRightWidth: 1, borderRightColor: colors.border }} contentContainerStyle={{ flexDirection: "row", minHeight: "100%" }}>
+          {columns.map((column, index) => (
+            <BoardColumnView key={column.bucket} column={column} renderBead={renderBead} last={index === columns.length - 1} theme={theme} />
+          ))}
+        </ScrollView>
+        <ScrollView style={{ width: BEAD_DETAIL_WIDTH, flexGrow: 0, backgroundColor: colors.surface1 }} contentContainerStyle={{ paddingVertical: 20, paddingHorizontal: 24 }}>
+          {detail ?? <Text style={{ fontSize: 13, color: colors.foregroundMuted }}>Choose a bead to see it here.</Text>}
+        </ScrollView>
+      </View>
     </View>
   );
 }

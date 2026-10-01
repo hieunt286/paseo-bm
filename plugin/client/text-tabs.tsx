@@ -9,7 +9,7 @@
  * import.
  */
 import type { ReactNode } from "react";
-import { Pressable, Text, View } from "react-native";
+import { Pressable, ScrollView, Text, View } from "react-native";
 import type { Theme } from "./ui";
 
 export interface TextTab {
@@ -37,6 +37,8 @@ export function TextTabs({
   height,
   divider = false,
   wrap = false,
+  fill = false,
+  scroll = false,
 }: {
   tabs: readonly TextTab[];
   selected: string | null;
@@ -45,9 +47,13 @@ export function TextTabs({
   height?: number;
   divider?: boolean;
   wrap?: boolean;
+  /** Each tab takes an equal share of the row (the phone's section nav). */
+  fill?: boolean;
+  /** The row scrolls sideways instead of overflowing (a project's tabs on a phone). */
+  scroll?: boolean;
 }) {
   const { colors } = theme;
-  return (
+  const row = (
     <View
       accessibilityRole="tablist"
       style={{
@@ -71,7 +77,8 @@ export function TextTabs({
               flexDirection: "row",
               alignItems: "center",
               gap: 8,
-              paddingHorizontal: height === undefined ? 14 : 16,
+              paddingHorizontal: fill ? 4 : height === undefined ? 14 : 16,
+              ...(fill ? { flex: 1, justifyContent: "center" as const } : {}),
               ...(height === undefined ? { paddingVertical: 10 } : {}),
               borderBottomWidth: 2,
               borderBottomColor: on ? colors.accent : "transparent",
@@ -99,6 +106,12 @@ export function TextTabs({
       })}
     </View>
   );
+  if (!scroll) return row;
+  return (
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={divider ? { borderBottomWidth: 1, borderBottomColor: colors.border } : undefined}>
+      {row}
+    </ScrollView>
+  );
 }
 
 export interface Segment {
@@ -115,15 +128,24 @@ export function Segmented({
   selected,
   onSelect,
   theme,
+  fill = false,
+  scroll = false,
 }: {
   segments: readonly Segment[];
   selected: string | null;
   onSelect: (key: string) => void;
   theme: Theme;
+  /** The cells share the row's width equally (a phone's filter). */
+  fill?: boolean;
+  /** The row scrolls sideways instead of overflowing (many cells on a phone). */
+  scroll?: boolean;
 }) {
   const { colors } = theme;
-  return (
-    <View accessibilityRole="radiogroup" style={{ flexDirection: "row", borderWidth: 1, borderColor: colors.border, alignSelf: "flex-start" }}>
+  const group = (
+    <View
+      accessibilityRole="radiogroup"
+      style={{ flexDirection: "row", borderWidth: 1, borderColor: colors.border, alignSelf: fill ? "stretch" : "flex-start" }}
+    >
       {segments.map((segment, index) => {
         const on = segment.key === selected;
         return (
@@ -137,8 +159,9 @@ export function Segmented({
               flexDirection: "row",
               alignItems: "center",
               gap: 6,
-              paddingVertical: 6,
-              paddingHorizontal: 12,
+              paddingVertical: fill ? 8 : 6,
+              paddingHorizontal: fill ? 4 : 12,
+              ...(fill ? { flex: 1, justifyContent: "center" as const } : {}),
               backgroundColor: on ? colors.surface2 : "transparent",
               ...(index === 0 ? {} : { borderLeftWidth: 1, borderLeftColor: colors.border }),
             }}
@@ -151,6 +174,12 @@ export function Segmented({
         );
       })}
     </View>
+  );
+  if (!scroll) return group;
+  return (
+    <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+      {group}
+    </ScrollView>
   );
 }
 

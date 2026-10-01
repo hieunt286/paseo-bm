@@ -3,7 +3,9 @@
  * §G.7; bead `7gxw.9`) and the review budget card (bead `7gxw.12`):
  * hook-free, drawn from `mechanismCardView` and `reviewBudgetCardView`
  * (`settings-coordination-model.ts`); the group that holds their state is in
- * `settings-section.tsx`.
+ * `settings-section.tsx`. On a phone (`narrow`, the approved phone mockup)
+ * every field is a row of its own — the label, then an 84px field —, the
+ * review budget's tiers too, and Save takes the card's width.
  *
  * Client rules: React Native primitives only, colours from the theme, no Node
  * import, no `server/` import.
@@ -32,12 +34,13 @@ export function coordinationCardStyle(theme: Theme) {
  * A number field of the mockup: mono, right-aligned, on the page ground in a
  * 1px border (the danger colour while its text is refused). Hook-free.
  */
-export function NumberField({ value, invalid, accessibilityLabel, editable, width = 96, onChange, theme }: {
+export function NumberField({ value, invalid, accessibilityLabel, editable, width = 96, inputMode = "decimal", onChange, theme }: {
   value: string;
   invalid: boolean;
   accessibilityLabel: string;
   editable: boolean;
   width?: number;
+  inputMode?: "decimal" | "numeric";
   onChange: (text: string) => void;
   theme: Theme;
 }) {
@@ -48,7 +51,7 @@ export function NumberField({ value, invalid, accessibilityLabel, editable, widt
       onChangeText={onChange}
       editable={editable}
       accessibilityLabel={accessibilityLabel}
-      inputMode="decimal"
+      inputMode={inputMode}
       style={{
         width,
         backgroundColor: colors.surface0,
@@ -75,8 +78,10 @@ export function footerShown(save: StepButton, refusals: readonly string[], error
  * why a save failed, and Save at the right. Nothing at rest, so the card reads
  * as the mockup draws it. Hook-free.
  */
-export function CardFooter({ save, refusals, error, onSave, styles, theme }: {
+export function CardFooter({ save, refusals, error, narrow = false, onSave, styles, theme }: {
   save: StepButton;
+  /** A phone: the reasons above, Save across the card's width. */
+  narrow?: boolean;
   refusals: readonly string[];
   error: string | null;
   onSave: () => void;
@@ -86,8 +91,8 @@ export function CardFooter({ save, refusals, error, onSave, styles, theme }: {
   if (!footerShown(save, refusals, error)) return null;
   const enabled = save.enabled && refusals.length === 0;
   return (
-    <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
-      <View style={{ flex: 1, minWidth: 160, gap: 2 }}>
+    <View style={narrow ? { gap: 10 } : { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
+      <View style={narrow ? { gap: 2 } : { flex: 1, minWidth: 160, gap: 2 }}>
         {[...refusals, ...(error === null ? [] : [error])].map((line) => (
           <ToneText key={line} tone="danger" selectable style={{ fontSize: 12 }} styles={styles} theme={theme}>
             {line}
@@ -101,7 +106,7 @@ export function CardFooter({ save, refusals, error, onSave, styles, theme }: {
         accessibilityState={{ disabled: !enabled }}
         disabled={!enabled}
         onPress={onSave}
-        style={{ borderRadius: 0, paddingVertical: 6, opacity: enabled ? 1 : 0.6 }}
+        style={{ borderRadius: 0, paddingVertical: narrow ? 10 : 6, opacity: enabled ? 1 : 0.6, ...(narrow ? { alignSelf: "stretch", alignItems: "center" } : {}) }}
         styles={styles}
       />
     </View>
@@ -127,13 +132,12 @@ function GridCell({ index, count, narrow, label, children, theme }: {
         flexDirection: "row",
         alignItems: "center",
         gap: 12,
-        paddingVertical: 12,
-        paddingHorizontal: 20,
+        ...(narrow ? { paddingVertical: 10, paddingHorizontal: 14 } : { paddingVertical: 12, paddingHorizontal: 20 }),
         ...(index < lastRowStart ? { borderBottomWidth: 1, borderBottomColor: colors.border } : {}),
         ...(!narrow && index % 2 === 0 ? { borderRightWidth: 1, borderRightColor: colors.border } : {}),
       }}
     >
-      <Text style={{ flex: 1, color: colors.foreground, fontSize: 14 }}>{label}</Text>
+      <Text style={{ flex: 1, minWidth: 0, color: colors.foreground, fontSize: narrow ? 13 : 14 }}>{label}</Text>
       {children}
     </View>
   );
@@ -165,14 +169,26 @@ export function MechanismCard({ view, inputs, dialog, busy, error, narrow = fals
 }) {
   const { colors } = theme;
   const refusals = inputErrorsOf(view.rows.map((row) => row.key), inputs);
+  const padH = narrow ? 14 : 20;
   return (
     <View style={coordinationCardStyle(theme)}>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 16, paddingVertical: 16, paddingHorizontal: 20, borderBottomWidth: 1, borderBottomColor: colors.border }}>
-        <View style={{ flex: 1, gap: 2 }}>
+      <View
+        style={{
+          flexDirection: "row",
+          alignItems: "center",
+          gap: narrow ? 12 : 16,
+          paddingVertical: narrow ? 14 : 16,
+          paddingHorizontal: padH,
+          borderBottomWidth: 1,
+          borderBottomColor: colors.border,
+        }}
+      >
+        <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
           <Text style={{ color: colors.foreground, fontSize: 14, fontWeight: "600" }}>{view.title}</Text>
-          <Text style={{ color: colors.foregroundMuted, fontSize: 13 }}>{view.meaning}</Text>
+          <Text style={{ color: colors.foregroundMuted, fontSize: narrow ? 12 : 13 }}>{view.meaning}</Text>
+          {narrow ? <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{view.helped}</Text> : null}
         </View>
-        <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{view.helped}</Text>
+        {narrow ? null : <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{view.helped}</Text>}
         <SquareSwitch
           on={!view.toggle.turnsOn}
           disabled={!view.toggle.enabled || dialog !== null}
@@ -182,7 +198,7 @@ export function MechanismCard({ view, inputs, dialog, busy, error, narrow = fals
         />
       </View>
       {view.status.tone === "warning" || dialog !== null ? (
-        <View style={{ gap: 10, paddingVertical: 12, paddingHorizontal: 20, borderBottomWidth: 1, borderBottomColor: colors.border }}>
+        <View style={{ gap: 10, paddingVertical: 12, paddingHorizontal: padH, borderBottomWidth: 1, borderBottomColor: colors.border }}>
           {view.status.tone === "warning" ? (
             <ToneText tone="warning" style={{ fontSize: 13 }} styles={styles} theme={theme}>
               {view.status.text}
@@ -201,6 +217,7 @@ export function MechanismCard({ view, inputs, dialog, busy, error, narrow = fals
               invalid={inputErrorsOf([row.key], inputs).length > 0}
               accessibilityLabel={row.accessibilityLabel}
               editable={!busy}
+              {...(narrow ? { width: 84 } : {})}
               onChange={(text) => onInput(row.key, text)}
               theme={theme}
             />
@@ -208,12 +225,12 @@ export function MechanismCard({ view, inputs, dialog, busy, error, narrow = fals
         ))}
       </View>
       {dialog === null && footerShown(view.save, refusals, error) ? (
-        <View style={{ paddingVertical: 12, paddingHorizontal: 20, borderTopWidth: 1, borderTopColor: colors.border }}>
-          <CardFooter save={view.save} refusals={refusals} error={error} onSave={onSave} styles={styles} theme={theme} />
+        <View style={{ paddingVertical: 12, paddingHorizontal: padH, borderTopWidth: 1, borderTopColor: colors.border }}>
+          <CardFooter save={view.save} refusals={refusals} error={error} narrow={narrow} onSave={onSave} styles={styles} theme={theme} />
         </View>
       ) : null}
       {dialog !== null && error !== null ? (
-        <View style={{ paddingVertical: 12, paddingHorizontal: 20 }}>
+        <View style={{ paddingVertical: 12, paddingHorizontal: padH }}>
           <ToneText tone="danger" selectable styles={styles} theme={theme}>
             {error}
           </ToneText>
@@ -226,10 +243,12 @@ export function MechanismCard({ view, inputs, dialog, busy, error, narrow = fals
 /**
  * The review budget per tier (the approved mockup): its title, three joined
  * cells — Small, Medium, Large — each a mono number field, what the budget
- * means, and Save at the foot while a tier changed. Hook-free.
+ * means, and Save at the foot while a tier changed. On a phone (`narrow`) the
+ * tiers stack, each a row — its name, then an 84px field. Hook-free.
  */
-export function ReviewBudgetCard({ view, inputs, busy, error, onInput, onSave, styles, theme }: {
+export function ReviewBudgetCard({ view, inputs, busy, error, narrow = false, onInput, onSave, styles, theme }: {
   view: ReviewBudgetCardView;
+  narrow?: boolean;
   inputs: CoordinationInputs;
   busy: boolean;
   error: string | null;
@@ -240,6 +259,46 @@ export function ReviewBudgetCard({ view, inputs, busy, error, onInput, onSave, s
 }) {
   const { colors } = theme;
   const refusals = inputErrorsOf(view.rows.map((row) => row.key), inputs);
+  if (narrow) {
+    return (
+      <View style={coordinationCardStyle(theme)}>
+        <View style={{ gap: 2, padding: 14, borderBottomWidth: 1, borderBottomColor: colors.border }}>
+          <Text style={{ color: colors.foreground, fontSize: 14, fontWeight: "600" }}>{view.title}</Text>
+          <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{view.meaning}</Text>
+        </View>
+        {view.rows.map((row, index) => (
+          <View
+            key={row.key}
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 10,
+              paddingVertical: 10,
+              paddingHorizontal: 14,
+              ...(index < view.rows.length - 1 ? { borderBottomWidth: 1, borderBottomColor: colors.border } : {}),
+            }}
+          >
+            <Text style={{ flex: 1, minWidth: 0, color: colors.foreground, fontSize: 13 }}>{row.label}</Text>
+            <NumberField
+              value={inputs[row.key] ?? row.inputText}
+              invalid={inputErrorsOf([row.key], inputs).length > 0}
+              accessibilityLabel={row.accessibilityLabel}
+              editable={!busy}
+              width={84}
+              inputMode="numeric"
+              onChange={(text) => onInput(row.key, text)}
+              theme={theme}
+            />
+          </View>
+        ))}
+        {footerShown(view.save, refusals, error) ? (
+          <View style={{ padding: 14, borderTopWidth: 1, borderTopColor: colors.border }}>
+            <CardFooter save={view.save} refusals={refusals} error={error} narrow onSave={onSave} styles={styles} theme={theme} />
+          </View>
+        ) : null}
+      </View>
+    );
+  }
   return (
     <View style={[coordinationCardStyle(theme), { flex: 1, gap: 12, paddingVertical: 16, paddingHorizontal: 20 }]}>
       <Text style={{ color: colors.foreground, fontSize: 14, fontWeight: "600" }}>{view.title}</Text>

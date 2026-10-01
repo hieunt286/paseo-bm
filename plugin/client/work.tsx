@@ -32,7 +32,12 @@
  *   context trend; the Agents tab gives each listed agent's over its life,
  *   under the tree. Both are read only while they show.
  *
- * Layout: `layout.compact` (a phone) shows the list or the page, draws the stage
+ * Layout: `layout.compact` (a phone, the Mobile* artboards) shows the list —
+ * "Projects" 20/600, full-width rows with the amber count of what waits on the
+ * owner (`decisions.list` of the Inbox, read while the list shows) and a › —
+ * or the page: ‹ Projects, the name 20/600, Open Manager and Autonomy as a
+ * two-column grid, the tabs scrolling sideways, the Metrics period on its own
+ * row under them; the header scrolls away with the tab (but Agents). It draws the stage
  * bar as five segments with its stage written under them, stacks the evidence
  * lines, and puts a timeline event's time and tag above its text. A wide screen
  * writes the five stages with the current one bold,
@@ -97,6 +102,7 @@ import {
   requestSummaries,
   requestTokenFigures,
   timelineEvents,
+  waitingByWorkspace,
   workRows,
   type AgentTokensView,
   type ContextTrendView,
@@ -128,6 +134,8 @@ export const workQueryKeys = {
   tokens: (workspaceId: string, traceId?: string) => ["paseo-bm", "work", "tokens", workspaceId, traceId ?? "agents"] as const,
   /** Each workspace's directory (`workspaces.list`), named under a project's title. */
   directories: ["paseo-bm", "work", "directories"] as const,
+  /** The Inbox's decisions, counted per project on a phone's Projects list. */
+  waiting: ["paseo-bm", "work", "waiting"] as const,
 };
 
 function column(compact: boolean, gap: number) {
@@ -152,24 +160,61 @@ export function AgentMarks({ agents, styles, theme }: { agents: WorkRowView["age
   );
 }
 
+/** The amber count of what waits on the owner: mono 11, dark text on statusWarning. */
+function CountBadge({ count, theme }: { count: number; theme: Theme }) {
+  return (
+    <Text style={{ fontFamily: MONO, fontSize: 11, color: theme.colors.surface0, backgroundColor: theme.colors.statusWarning, paddingHorizontal: 5 }}>
+      {String(count)}
+    </Text>
+  );
+}
+
 /**
  * One project in the Projects list (the artboard's aside): a full-width row,
  * the name in weight 500 and a muted line `2 active · 1 stalled · Cruise`; the
  * selected one on surface2 with a 3px accent bar at its left. The whole row
- * opens the project.
+ * opens the project. A phone (the MobileProjects artboard) draws it 14/16 with
+ * a rule above, and at its right the amber count of what waits on the owner
+ * (when any) and a ›.
  */
 export function WorkRowItem({
   row,
   selected,
   onOpen,
+  compact = false,
+  waiting = 0,
   theme,
 }: {
   row: WorkRowView;
   selected: boolean;
   onOpen: () => void;
+  compact?: boolean;
+  /** Decisions waiting on the owner in this project; shown on a phone when above 0. */
+  waiting?: number;
   theme: Theme;
 }) {
   const { colors } = theme;
+  if (compact) {
+    return (
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={waiting > 0 ? `${row.accessibilityLabel}. ${waiting} waiting on you` : row.accessibilityLabel}
+        onPress={onOpen}
+        style={{ flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 14, paddingHorizontal: 16, borderTopWidth: 1, borderTopColor: colors.border }}
+      >
+        <View style={{ flex: 1, minWidth: 0, gap: 4 }}>
+          <Text style={{ fontSize: 14, fontWeight: "500", color: colors.foreground }} numberOfLines={1}>
+            {row.label}
+          </Text>
+          <Text style={{ fontSize: 12, color: colors.foregroundMuted }} numberOfLines={1}>
+            {row.line}
+          </Text>
+        </View>
+        {waiting > 0 ? <CountBadge count={waiting} theme={theme} /> : null}
+        <Text style={{ fontSize: 14, color: colors.foregroundMuted }}>›</Text>
+      </Pressable>
+    );
+  }
   return (
     <Pressable
       accessibilityRole="button"
@@ -202,6 +247,7 @@ export function WorkList({
   footer,
   selectedId,
   onOpen,
+  waiting,
   compact,
   theme,
 }: {
@@ -213,10 +259,13 @@ export function WorkList({
   /** The project whose page shows beside the list; null on a phone's list. */
   selectedId: string | null;
   onOpen: (workspaceId: string, label: string) => void;
+  /** Decisions waiting on the owner per workspace (`waitingByWorkspace`); a phone shows them. */
+  waiting?: ReadonlyMap<string, number>;
   compact: boolean;
   theme: Theme;
 }) {
   const { colors } = theme;
+  if (compact) return <PhoneWorkList rows={rows} closed={closed} loading={loading} error={error} footer={footer} onOpen={onOpen} waiting={waiting} theme={theme} />;
   const muted = { fontSize: 13, color: colors.foregroundMuted, paddingHorizontal: 20 };
   return (
     <ScrollView
@@ -257,6 +306,81 @@ export function WorkList({
         );
       })}
       {footer === undefined ? null : <Text style={{ fontSize: 11, color: colors.foregroundMuted, paddingHorizontal: 20, paddingTop: 20 }}>{footer}</Text>}
+    </ScrollView>
+  );
+}
+
+/**
+ * The Projects list on a phone (the MobileProjects artboard): "Projects" 20/600,
+ * the projects as full-width rows divided by rules, then the closed workspaces
+ * under their uppercase label. Pressing a row opens its page.
+ */
+function PhoneWorkList({
+  rows,
+  closed,
+  loading,
+  error,
+  footer,
+  onOpen,
+  waiting,
+  theme,
+}: {
+  rows: readonly WorkRowView[];
+  closed: readonly ClosedWorkspace[];
+  loading: boolean;
+  error: string | null;
+  footer?: string;
+  onOpen: (workspaceId: string, label: string) => void;
+  waiting?: ReadonlyMap<string, number>;
+  theme: Theme;
+}) {
+  const { colors } = theme;
+  const muted = { fontSize: 13, color: colors.foregroundMuted, paddingHorizontal: 16, paddingVertical: 8 };
+  return (
+    <ScrollView accessibilityLabel="Projects" style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 40 }}>
+      <View style={{ paddingTop: 16, paddingHorizontal: 16, paddingBottom: 8 }}>
+        <Text accessibilityRole="header" style={{ fontSize: 20, fontWeight: "600", color: colors.foreground }}>
+          Projects
+        </Text>
+      </View>
+      {loading ? <ActivityIndicator color={colors.foregroundMuted} accessibilityLabel="Reading the projects" /> : null}
+      {error === null ? null : <Text style={[muted, { color: colors.statusDanger }]}>{`Could not load the workspaces. ${error}`}</Text>}
+      {!loading && error === null && rows.length === 0 ? <Text style={muted}>No workspaces on this host yet.</Text> : null}
+      <View style={rows.length === 0 ? undefined : { borderBottomWidth: 1, borderBottomColor: colors.border }}>
+        {rows.map((row) => (
+          <WorkRowItem
+            key={row.workspaceId}
+            row={row}
+            selected={false}
+            onOpen={() => onOpen(row.workspaceId, row.label)}
+            compact
+            waiting={waiting?.get(row.workspaceId) ?? 0}
+            theme={theme}
+          />
+        ))}
+      </View>
+      {closed.length === 0 ? null : (
+        <View style={{ paddingHorizontal: 16, paddingTop: 20, paddingBottom: 8 }}>
+          <SectionLabel theme={theme}>Closed workspaces with history</SectionLabel>
+        </View>
+      )}
+      {closed.map((entry) => (
+        <Pressable
+          key={entry.workspaceId}
+          accessibilityRole="button"
+          accessibilityLabel={`Open the requests of the closed workspace ${entry.label}`}
+          onPress={() => onOpen(entry.workspaceId, entry.label)}
+          style={{ gap: 4, paddingVertical: 12, paddingHorizontal: 16, borderTopWidth: 1, borderTopColor: colors.border }}
+        >
+          <Text style={{ fontSize: 14, fontWeight: "500", color: colors.foreground }} numberOfLines={1}>
+            {entry.label}
+          </Text>
+          <Text style={{ fontSize: 12, color: colors.foregroundMuted }} numberOfLines={2}>
+            {entry.detail}
+          </Text>
+        </Pressable>
+      ))}
+      {footer === undefined ? null : <Text style={{ fontSize: 11, color: colors.foregroundMuted, paddingHorizontal: 16, paddingTop: 20 }}>{footer}</Text>}
     </ScrollView>
   );
 }
@@ -554,8 +678,8 @@ export function RequestCard({
   );
 }
 
-/** A secondary button of the page header: 1px border, transparent, square. */
-function HeaderButton({ label, a11y, onPress, disabled, theme }: { label: string; a11y: string; onPress: () => void; disabled?: boolean; theme: Theme }) {
+/** A secondary button of the page header: 1px border, transparent, square. On a phone a cell of a two-column grid. */
+function HeaderButton({ label, a11y, onPress, disabled, cell = false, theme }: { label: string; a11y: string; onPress: () => void; disabled?: boolean; cell?: boolean; theme: Theme }) {
   return (
     <Pressable
       accessibilityRole="button"
@@ -563,9 +687,16 @@ function HeaderButton({ label, a11y, onPress, disabled, theme }: { label: string
       accessibilityState={disabled === undefined ? undefined : { disabled, busy: disabled }}
       disabled={disabled}
       onPress={onPress}
-      style={{ borderWidth: 1, borderColor: theme.colors.border, paddingVertical: 8, paddingHorizontal: 14, opacity: disabled === true ? 0.5 : 1 }}
+      style={{
+        borderWidth: 1,
+        borderColor: theme.colors.border,
+        opacity: disabled === true ? 0.5 : 1,
+        ...(cell ? { flex: 1, minWidth: 0, alignItems: "center" as const, paddingVertical: 10, paddingHorizontal: 12 } : { paddingVertical: 8, paddingHorizontal: 14 }),
+      }}
     >
-      <Text style={{ fontSize: 14, color: theme.colors.foreground }}>{label}</Text>
+      <Text style={{ fontSize: cell ? 13 : 14, color: theme.colors.foreground }} numberOfLines={cell ? 1 : undefined}>
+        {label}
+      </Text>
     </Pressable>
   );
 }
@@ -590,6 +721,7 @@ export function ProjectHeader({
   level,
   onOpenSettings,
   extra,
+  compact = false,
   theme,
 }: {
   /** Null in a workspace's own Beads tab, which already lives in its workspace. */
@@ -606,12 +738,71 @@ export function ProjectHeader({
   /** The project's level by name; null until `autonomy.policy` answered. */
   level?: string | null;
   onOpenSettings?: () => void;
-  /** Drawn first on the right: the Metrics period. */
+  /** Drawn first on the right: the Metrics period; on a phone its own row under the tabs. */
   extra?: ReactNode;
+  /** A phone (the MobileProject artboard): ‹ Projects, the name 20/600, the two actions as a grid, the tabs scrolling sideways. */
+  compact?: boolean;
   theme: Theme;
 }) {
   const { colors } = theme;
   const autonomy = level === undefined || level === null ? null : `Autonomy: ${level}`;
+  const tabs = (
+    <TextTabs
+      tabs={PROJECT_TABS.map((entry) => ({ key: entry.key, label: entry.label }))}
+      selected={tab}
+      onSelect={(key) => onTab(key as ProjectTab)}
+      theme={theme}
+      divider
+      scroll={compact}
+    />
+  );
+  if (compact) {
+    const chat =
+      onChat === undefined || label === null ? null : (
+        <HeaderButton label={chatBusy ? "Opening…" : "Open Manager"} a11y={`Chat with the Beads Manager of ${label}`} onPress={onChat} disabled={chatBusy} cell theme={theme} />
+      );
+    const levelCell =
+      autonomy === null ? null : onOpenSettings === undefined ? (
+        <View style={{ flex: 1, minWidth: 0, alignItems: "center", justifyContent: "center", paddingVertical: 10 }}>
+          <Text style={{ fontSize: 13, color: colors.foregroundMuted }} numberOfLines={1}>
+            {autonomy}
+          </Text>
+        </View>
+      ) : (
+        <HeaderButton label={autonomy} a11y={`${autonomy}. Open Settings to change it`} onPress={onOpenSettings} cell theme={theme} />
+      );
+    return (
+      <View style={{ gap: 16 }}>
+        {label === null ? null : (
+          <>
+            {onBack === undefined ? null : (
+              <Pressable accessibilityRole="button" accessibilityLabel={backLabel ?? "Back"} onPress={onBack} style={{ alignSelf: "flex-start" }}>
+                <Text style={{ fontSize: 13, color: colors.foregroundMuted }}>‹ Projects</Text>
+              </Pressable>
+            )}
+            <View style={{ gap: 4, minWidth: 0 }}>
+              <Text accessibilityRole="header" style={{ fontSize: 20, fontWeight: "600", color: colors.foreground }} numberOfLines={1}>
+                {label}
+              </Text>
+              <Text style={{ fontFamily: MONO, fontSize: 11, color: colors.foregroundMuted }} numberOfLines={1} selectable>
+                {directory ?? "—"}
+              </Text>
+            </View>
+            {chat === null && levelCell === null ? null : (
+              // Two equal columns; a lone action keeps the first.
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                {chat ?? levelCell}
+                {chat === null || levelCell === null ? <View style={{ flex: 1 }} /> : levelCell}
+              </View>
+            )}
+          </>
+        )}
+        {status}
+        {tabs}
+        {extra}
+      </View>
+    );
+  }
   return (
     <View style={{ gap: 16 }}>
       {label === null ? null : (
@@ -650,13 +841,7 @@ export function ProjectHeader({
         </View>
       )}
       {status}
-      <TextTabs
-        tabs={PROJECT_TABS.map((entry) => ({ key: entry.key, label: entry.label }))}
-        selected={tab}
-        onSelect={(key) => onTab(key as ProjectTab)}
-        theme={theme}
-        divider
-      />
+      {tabs}
     </View>
   );
 }
@@ -713,6 +898,7 @@ export function WorkScreen(props: WorkScreenProps) {
   const getState = useRpc(orchestratorStateRpc);
   const readPolicy = useRpc(autonomyPolicyRpc);
   const ensure = useRpc(managerEnsureRpc);
+  const listDecisions = useRpc(decisionsListRpc);
   const projects = useQuery({ queryKey: workQueryKeys.projects, queryFn: () => getState({}), refetchInterval: WORK_POLL_MS });
   // Each project's level; Settings reads and writes this same query, so a level set there shows here.
   const policy = useQuery({ queryKey: AUTONOMY_POLICY_KEY, queryFn: () => readPolicy({}) });
@@ -740,6 +926,14 @@ export function WorkScreen(props: WorkScreenProps) {
     layout: { compact, platform: Platform.OS === "ios" || Platform.OS === "android" ? Platform.OS : "web" },
   };
   const openAgent = surface.navigation?.openAgent;
+  // What waits on the owner per project: a phone's list shows it at each row's right (the MobileProjects artboard).
+  const decisions = useQuery({
+    queryKey: workQueryKeys.waiting,
+    queryFn: () => listDecisions({ scope: "inbox", limit: DECISION_LIST_MAX }),
+    refetchInterval: WORK_POLL_MS,
+    enabled: compact && current === null,
+  });
+  const waiting = useMemo(() => waitingByWorkspace(decisions.data?.decisions), [decisions.data]);
   // The page shows beside the list, so choosing a project stays on this screen (`onOpen` is not called).
   const open = (workspaceId: string) => {
     const closed = props.closed.find((entry) => entry.workspaceId === workspaceId);
@@ -755,6 +949,7 @@ export function WorkScreen(props: WorkScreenProps) {
       footer={props.footer}
       selectedId={current?.workspaceId ?? null}
       onOpen={open}
+      waiting={waiting}
       compact={compact}
       theme={theme}
     />
@@ -902,6 +1097,7 @@ function RequestsTab({
   workspaceId,
   closed,
   openAgent,
+  top,
   compact,
   styles,
   theme,
@@ -910,6 +1106,8 @@ function RequestsTab({
   /** Set for a workspace Paseo no longer lists. */
   closed?: StoredWorkspace["state"];
   openAgent?: (agentId: string) => void;
+  /** Drawn first, scrolling with the requests: the page header on a phone. */
+  top?: ReactNode;
   compact: boolean;
   styles: Styles;
   theme: Theme;
@@ -967,10 +1165,14 @@ function RequestsTab({
     />
   );
 
-  if (why !== null) return <WhyScreen workspaceId={workspaceId} requestId={why} onBack={() => setWhy(null)} compact={compact} theme={theme} />;
+  if (why !== null) {
+    const chain = <WhyScreen workspaceId={workspaceId} requestId={why} onBack={() => setWhy(null)} compact={compact} theme={theme} />;
+    return top === undefined ? chain : <View style={{ flex: 1 }}><View style={{ paddingTop: 16, paddingHorizontal: 16 }}>{top}</View>{chain}</View>;
+  }
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={{ paddingTop: compact ? 16 : 24, paddingHorizontal: compact ? 16 : 36, paddingBottom: 64 }}>
+      {top === undefined ? null : <View style={{ marginBottom: 16 }}>{top}</View>}
       <View style={column(compact, styles.content.gap)}>
         {traces.isError ? (
           <ToneText tone="danger" styles={styles} theme={theme}>{`Could not read the requests. ${errorMessageOf(traces.error)}`}</ToneText>
@@ -1106,13 +1308,14 @@ export function ProjectOverviewBody({
 }) {
   const { colors } = theme;
   const muted = { fontSize: 13, color: colors.foregroundMuted };
+  // A phone's text buttons are the MobileProject artboard's: 13, padded 10 for the thumb.
   const textButton = (label: string, a11y: string) => (
-    <Pressable accessibilityRole="button" accessibilityLabel={a11y} onPress={onRequests} style={{ alignSelf: "flex-start", paddingVertical: 4 }}>
-      <Text style={{ fontSize: 14, color: colors.foregroundMuted }}>{label}</Text>
+    <Pressable accessibilityRole="button" accessibilityLabel={a11y} onPress={onRequests} style={{ alignSelf: "flex-start", paddingVertical: compact ? 10 : 4 }}>
+      <Text style={{ fontSize: compact ? 13 : 14, color: colors.foregroundMuted }}>{label}</Text>
     </Pressable>
   );
   return (
-    <View style={{ gap: 28 }}>
+    <View style={{ gap: compact ? 16 : 28 }}>
       {error === null ? null : <ToneText tone="danger" styles={styles} theme={theme}>{`Could not read the figures. ${error}`}</ToneText>}
       <FigureStrip
         cells={view.figures.map((figure) => ({
@@ -1123,18 +1326,18 @@ export function ProjectOverviewBody({
         compact={compact}
         theme={theme}
       />
-      <View style={{ gap: 12 }}>
+      <View style={{ gap: compact ? 10 : 12 }}>
         <SectionHeading title={OVERVIEW_TOKENS_TITLE} tail={view.tokensScope} theme={theme} />
-        {view.tokensEmpty !== null ? <Text style={muted}>{view.tokensEmpty}</Text> : <RoleTokenBars rows={view.tokensByRole} theme={theme} />}
+        {view.tokensEmpty !== null ? <Text style={muted}>{view.tokensEmpty}</Text> : <RoleTokenBars rows={view.tokensByRole} compact={compact} theme={theme} />}
       </View>
       <View>
-        <View style={{ marginBottom: 12 }}>
+        <View style={{ marginBottom: compact ? 8 : 12 }}>
           <SectionHeading title={OVERVIEW_OPEN_TITLE} theme={theme} />
         </View>
         {view.requests === null ? <ActivityIndicator color={styles.spinner.color} accessibilityLabel="Reading the requests" /> : null}
         {view.requests !== null && view.requests.length === 0 ? <Text style={muted}>{OVERVIEW_NO_OPEN}</Text> : null}
         {view.requests === null || view.requests.length === 0 ? null : <OverviewRequestsTable rows={view.requests} onOpen={onRequests} compact={compact} theme={theme} />}
-        <View style={{ flexDirection: "row", flexWrap: "wrap", columnGap: 20, marginTop: 12 }}>
+        <View style={{ flexDirection: "row", flexWrap: "wrap", columnGap: 20, marginTop: compact ? 0 : 12 }}>
           {view.more === null ? null : textButton(view.more, "Open the other open requests in Requests")}
           {view.older === null ? null : textButton(view.older, "Open the older finished requests in Requests")}
           {view.older === null && view.more === null ? textButton(ALL_REQUESTS_LABEL, "Open every request of this project") : null}
@@ -1274,34 +1477,40 @@ export function ProjectPage(props: ProjectPageProps) {
   const openAgent = navigation?.openAgent;
   const side = compact ? 16 : PANE.side;
   const width = tab === "beads" ? undefined : PANE.width + 2 * side;
+  // The Metrics period: at the header's right on a wide screen, its own full-width row under the tabs on a phone.
+  const period =
+    tab === "metrics" ? (
+      <Segmented segments={WINDOW_SEGMENTS} selected={window} onSelect={(key) => setWindow(key as InsightsWindow)} theme={theme} fill={compact} />
+    ) : null;
+  const header = (
+    <ProjectHeader
+      label={label}
+      directory={directories.get(workspaceId) ?? null}
+      tab={tab}
+      onTab={setTab}
+      onBack={onBack}
+      backLabel={backLabel}
+      status={status}
+      onChat={onChat}
+      chatBusy={chatBusy === true}
+      level={levelNameOf(policy.data?.levels, workspaceId)}
+      onOpenSettings={onOpenSettings}
+      extra={period}
+      compact={compact}
+      theme={theme}
+    />
+  );
+  // A phone scrolls the header away with the tab's content (the Mobile* artboards); the Agents tab keeps it above its tree.
+  const headerScrolls = compact && tab !== "agents";
   const scrolled = (body: ReactNode) => (
-    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingTop: compact ? 16 : PANE.top, paddingHorizontal: side, paddingBottom: PANE.bottom }}>
+    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingTop: compact ? 16 : PANE.top, paddingHorizontal: side, paddingBottom: compact ? 40 : PANE.bottom }}>
+      {headerScrolls ? <View style={{ marginBottom: 16 }}>{header}</View> : null}
       <View style={{ width: "100%", maxWidth: PANE.width }}>{body}</View>
     </ScrollView>
   );
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
-      <View style={{ paddingHorizontal: side, paddingTop: compact ? 16 : PANE.top, width: "100%", maxWidth: width }}>
-        <ProjectHeader
-          label={label}
-          directory={directories.get(workspaceId) ?? null}
-          tab={tab}
-          onTab={setTab}
-          onBack={onBack}
-          backLabel={backLabel}
-          status={status}
-          onChat={onChat}
-          chatBusy={chatBusy === true}
-          level={levelNameOf(policy.data?.levels, workspaceId)}
-          onOpenSettings={onOpenSettings}
-          extra={
-            tab === "metrics" ? (
-              <Segmented segments={WINDOW_SEGMENTS} selected={window} onSelect={(key) => setWindow(key as InsightsWindow)} theme={theme} />
-            ) : null
-          }
-          theme={theme}
-        />
-      </View>
+      {headerScrolls ? null : <View style={{ paddingHorizontal: side, paddingTop: compact ? 16 : PANE.top, width: "100%", maxWidth: width }}>{header}</View>}
       <View style={{ flex: 1 }}>
         {tab === "overview" ? (
           scrolled(<OverviewTab workspaceId={workspaceId} onRequests={() => setTab("requests")} compact={compact} styles={styles} theme={theme} />)
@@ -1310,12 +1519,13 @@ export function ProjectPage(props: ProjectPageProps) {
             workspaceId={workspaceId}
             closed={closed}
             openAgent={openAgent === undefined ? undefined : (agentId) => openAgent({ agentId })}
+            {...(headerScrolls ? { top: header } : {})}
             compact={compact}
             styles={styles}
             theme={theme}
           />
         ) : tab === "beads" ? (
-          <BeadsScreen {...surface} workspaceId={workspaceId} />
+          <BeadsScreen {...surface} workspaceId={workspaceId} {...(headerScrolls ? { top: header } : {})} />
         ) : tab === "metrics" ? (
           scrolled(<ProjectMetrics workspaceId={workspaceId} label={label} window={window} compact={compact} theme={theme} />)
         ) : (

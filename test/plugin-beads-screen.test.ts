@@ -15,6 +15,8 @@ import type { DashboardPaseo } from "../plugin/server/paseo-directory";
 import { fakePaseo } from "./helpers/fake-paseo";
 import {
   BEAD_ACTIONS_NOTE,
+  BOARD_ORDER,
+  BOARD_SHORT_TITLES,
   EMPTY_FILTER,
   actionSpec,
   beadFacts,
@@ -47,7 +49,8 @@ import {
 } from "../plugin/client/beads-model";
 import { TRACE_STORE_SCHEMA_VERSION, type BeadRow, type BeadStats } from "../plugin/shared/contracts";
 import { localTimeText } from "../plugin/client/format";
-import { pressables, renderTree, texts } from "./helpers/element-tree";
+import { allNodes, pressables, renderTree, textOf, texts } from "./helpers/element-tree";
+import { dashboardStyles } from "../plugin/client/styles";
 
 /**
  * The Beads screen (design delta 20260916-beads-screen): list, detail, five
@@ -631,7 +634,10 @@ describe("done / total at the top of the Beads screen (delta 20260918e, Q11)", (
 // The root tsconfig has no `jsx`, so the .tsx module loads through a non-literal specifier.
 const screenPath = "../plugin/client/beads-screen.tsx";
 type Component = (props: Record<string, unknown>) => unknown;
-const { BoardBeadRow, BoardColumnView, ShowClosedToggle } = (await import(screenPath)) as Record<"BoardBeadRow" | "BoardColumnView" | "ShowClosedToggle", Component>;
+const { BoardBeadRow, BoardColumnView, ShowClosedToggle, PhoneBeadActions } = (await import(screenPath)) as Record<
+  "BoardBeadRow" | "BoardColumnView" | "ShowClosedToggle" | "PhoneBeadActions",
+  Component
+>;
 const theme = { colors: new Proxy({}, { get: (_target, key) => `#${String(key)}` }) };
 
 describe("the board as the artboard draws it: In progress · Ready · Open epics · Deferred, Blocked when one is, Closed while shown", () => {
@@ -733,5 +739,55 @@ describe("the board as the artboard draws it: In progress · Ready · Open epics
     expect(texts(tree)).toContain("Show closed (43)");
     (press!.props.onPress as () => void)();
     expect(onToggle).toHaveBeenCalled();
+  });
+});
+
+describe("the board on a phone (the MobileBeads artboard)", () => {
+  const bead = (overrides: Partial<BeadRow> = {}): BeadRow => ({
+    id: "r1",
+    title: "Bead r1",
+    status: "open",
+    issueType: "task",
+    priority: 1,
+    labels: [],
+    createdAt: null,
+    updatedAt: null,
+    closedAt: null,
+    ready: true,
+    parentId: null,
+    work: null,
+    ...overrides,
+  });
+  const styles = dashboardStyles(theme as never, true);
+  const noop = () => undefined;
+
+  it("names the columns short for one row of equal cells", () => {
+    expect(BOARD_ORDER.map((bucket) => BOARD_SHORT_TITLES[bucket])).toEqual(["In progress", "Ready", "Epics", "Deferred", "Blocked", "Closed"]);
+  });
+
+  it("draws a row padded 12/14 with a 14px title, and Show closed without its count (still read aloud)", () => {
+    const tree = renderTree(BoardBeadRow({ bead: bead(), meta: "P1 · task", selected: false, onSelect: noop, theme, compact: true }));
+    expect(pressables(tree)[0]!.props.style).toMatchObject({ paddingVertical: 12, paddingHorizontal: 14 });
+    expect(allNodes(tree).find((node) => node.type === "Text" && textOf(node) === "Bead r1")!.props.style).toMatchObject({ fontSize: 14 });
+    const toggle = renderTree(ShowClosedToggle({ on: false, count: 43, onToggle: noop, theme, compact: true }));
+    expect(texts(toggle)).toEqual(["Show closed"]);
+    expect(pressables(toggle)[0]!.props.accessibilityLabel).toBe("Show closed beads (43)");
+  });
+
+  it("puts Ask Manager to implement across the width, then Close… and Delete… as two equal cells; each asks first", () => {
+    const ask = vi.fn();
+    const state = { busy: false, ask };
+    const tree = renderTree(PhoneBeadActions({ bead: bead(), state, styles, theme }));
+    expect(texts(tree)).toEqual(["Ask Manager to implement", "Close…", "Delete…"]);
+    const [implement, close, remove] = pressables(tree);
+    const flat = (style: unknown) => Object.assign({}, ...[style].flat(Infinity)) as Record<string, unknown>;
+    expect(flat(implement!.props.style).flex).toBeUndefined();
+    expect(flat(close!.props.style)).toMatchObject({ flex: 1 });
+    expect(flat(remove!.props.style)).toMatchObject({ flex: 1 });
+    expect(JSON.stringify(allNodes([remove!]).find((node) => node.type === "Text")!.props.style)).toContain("#statusDanger");
+    (remove!.props.onPress as () => void)();
+    expect(ask).toHaveBeenCalledWith("delete");
+    // A closed bead has Delete… alone, in the first column.
+    expect(texts(renderTree(PhoneBeadActions({ bead: bead({ status: "closed" }), state, styles, theme })))).toEqual(["Delete…"]);
   });
 });

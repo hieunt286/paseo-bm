@@ -4,6 +4,8 @@ import {
   AUTONOMY_MEANING,
   BOUNDARY_LABEL,
   BOUNDARY_MEANING,
+  BOUNDARY_SHORT_LABEL,
+  BOUNDARY_SHORT_MEANING,
   CUSTOM_SUMMARY,
   DECIDER_LEGEND,
   DECIDER_LEGEND_ENTRIES,
@@ -16,6 +18,7 @@ import {
   deciderAtLevel,
   levelConfirmDialog,
   levelPressOf,
+  projectPickerView,
   setLevelInputOf,
   shownProjectOf,
 } from "../plugin/client/settings-autonomy-model";
@@ -60,7 +63,11 @@ import { allNodes, pressables, renderTree, texts } from "./helpers/element-tree"
 // The root tsconfig has no `jsx`, so the .tsx module loads through a non-literal specifier.
 const modulePath = "../plugin/client/settings-autonomy.tsx";
 type Component = (props: Record<string, unknown>) => unknown;
-const { LevelControl, BoundarySwitch } = (await import(modulePath)) as { LevelControl: Component; BoundarySwitch: Component };
+const { LevelControl, BoundarySwitch, ProjectPicker } = (await import(modulePath)) as {
+  LevelControl: Component;
+  BoundarySwitch: Component;
+  ProjectPicker: Component;
+};
 const precedentsPath = "../plugin/client/settings-precedents.tsx";
 const { PrecedentsList } = (await import(precedentsPath)) as { PrecedentsList: Component };
 
@@ -486,5 +493,72 @@ describe("the precedents under More (autonomy design §B.6, §B.9)", () => {
     const nodes = drawList(shown({ ...PRECEDENTS_UI_IDLE, error: "E_PRECEDENT_WRITE_FAILED: cannot save the precedents" }));
     const error = allNodes(nodes).find((node) => node.type === "Text" && texts([node])[0]?.startsWith("E_PRECEDENT_WRITE_FAILED"))!;
     expect(JSON.stringify(error.props.style)).toContain("#statusDanger");
+  });
+});
+
+describe("Autonomy on a phone (MobileSettings.dc.html)", () => {
+  const tabs = [
+    { key: "ws-1", label: "paseo-bm", suffix: "Cruise" },
+    { key: "ws-2", label: "shop", suffix: "Hands-on" },
+  ];
+  type Style = Record<string, unknown>;
+  const styleOf = (node: { props: Record<string, unknown> }) => node.props.style as Style;
+
+  it("picks the project with one full-width button that opens every project in place; choosing one is the only action of a row", () => {
+    expect(projectPickerView(tabs, "ws-2", false)).toEqual({
+      button: { label: "shop", level: "Hands-on", accessibilityLabel: "Project: shop, level Hands-on. Choose another project" },
+      rows: null,
+    });
+    expect(projectPickerView(tabs, "gone", true).rows!.map((row) => [row.label, row.level, row.current])).toEqual([
+      ["paseo-bm", "Cruise", true],
+      ["shop", "Hands-on", false],
+    ]);
+    const onToggle = vi.fn();
+    const onSelect = vi.fn();
+    const closed = renderTree(ProjectPicker({ tabs, selected: "ws-1", open: false, onToggle, onSelect, theme }));
+    expect(texts(closed)).toEqual(["Project", "paseo-bm", "Cruise", "▾"]);
+    const [button] = pressables(closed);
+    expect(button!.props.accessibilityState).toEqual({ expanded: false });
+    (button!.props.onPress as () => void)();
+    expect(onToggle).toHaveBeenCalledOnce();
+    const open = renderTree(ProjectPicker({ tabs, selected: "ws-1", open: true, onToggle, onSelect, theme }));
+    const rows = pressables(open).slice(1);
+    expect(rows.map((row) => texts([row]))).toEqual([
+      ["paseo-bm", "Cruise"],
+      ["shop", "Hands-on"],
+    ]);
+    expect(rows.map((row) => row.props.accessibilityState)).toEqual([{ selected: true }, { selected: false }]);
+    (rows[1]!.props.onPress as () => void)();
+    expect(onSelect).toHaveBeenCalledWith("ws-2");
+    expect(JSON.stringify(open)).not.toContain("ws-");
+  });
+
+  it("draws 32px knobs, names at 11 on up to two lines, the classes as one column of rows, and the confirmation's buttons sharing the row", () => {
+    const nodes = renderTree(
+      LevelControl({ view: view(atLevel(2), { confirmingLevel: 3 }), error: null, busy: false, compact: true, onPick: noop, onConfirm: noop, onCancel: noop, styles, theme }),
+    );
+    const radios = pressables(nodes).filter((node) => node.props.accessibilityRole === "radio");
+    const knob = allNodes([radios[0]!]).find((node) => node.type === "View")!;
+    expect([styleOf(knob).width, styleOf(knob).height]).toEqual([32, 32]);
+    const name = allNodes([radios[4]!]).filter((node) => node.type === "Text")[1]!;
+    expect([name.props.numberOfLines, styleOf(name).fontSize, styleOf(name).textAlign]).toEqual([2, 11, "center"]);
+    const classes = allNodes(nodes).filter((node) => node.type === "View" && /^[A-Za-z ]+: (You|Orchestrator)/.test(String(node.props.accessibilityLabel)));
+    expect(classes).toHaveLength(9);
+    expect(classes.every((row) => styleOf(row).width === "100%")).toBe(true);
+    const [cancel, confirm] = pressables(nodes).filter((node) => node.props.accessibilityRole === "button");
+    expect(texts([cancel!])).toEqual(["Cancel"]);
+    expect([styleOf(cancel!).flex, styleOf(confirm!).flex]).toEqual([1, 1]);
+    // The wide layout keeps its three columns and 36px knobs.
+    const wide = renderTree(LevelControl({ view: view(atLevel(2)), error: null, busy: false, onPick: noop, onConfirm: noop, onCancel: noop, styles, theme }));
+    const wideKnob = allNodes([pressables(wide)[0]!]).find((node) => node.type === "View")!;
+    expect(styleOf(wideKnob).width).toBe(36);
+  });
+
+  it("names the action boundary shortly, the whole meaning kept for the screen reader", () => {
+    const nodes = renderTree(
+      BoundarySwitch({ view: boundaryView(EMPTY_AUTONOMY_POLICY, PROJECT, false), busy: false, compact: true, onToggle: noop, onConfirm: noop, onCancel: noop, styles, theme }),
+    );
+    expect(texts(nodes)).toEqual([BOUNDARY_SHORT_LABEL, BOUNDARY_SHORT_MEANING]);
+    expect(String((nodes[0] as { props: Record<string, unknown> }).props.accessibilityLabel)).toContain(BOUNDARY_MEANING);
   });
 });

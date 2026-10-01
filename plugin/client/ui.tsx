@@ -9,7 +9,7 @@
  * import.
  */
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
-import type { ReactNode } from "react";
+import { Children, isValidElement, type ReactNode } from "react";
 import type { BeadRow } from "../shared/contracts";
 import { beadEmphasis, emphasisTone, type BeadEmphasis, type KanbanColumn } from "./beads-model";
 import { Icon } from "@getpaseo/plugin/client/react-native";
@@ -511,10 +511,11 @@ export function cardBoxStyle(
   options: { compact: boolean; join?: CardJoin; bar: boolean; row?: boolean },
 ): ViewStyle {
   const join = options.join ?? "alone";
-  const vertical = options.row ? (options.compact ? 12 : 16) : options.compact ? 14 : 20;
+  // A phone (the MobileInbox artboard): 16 all round on a card, 14×16 on a one-row card, 12 between its parts.
+  const vertical = options.row ? (options.compact ? 14 : 16) : options.compact ? 16 : 20;
   return {
     position: "relative",
-    gap: options.row ? 12 : options.compact ? 10 : 14,
+    gap: options.compact ? 12 : options.row ? 12 : 14,
     paddingVertical: vertical,
     paddingHorizontal: options.compact ? 16 : 24,
     borderRadius: 0,
@@ -548,7 +549,7 @@ export function CardTitle({ text, open, compact, theme }: { text: string; open: 
   return (
     <Text
       accessibilityRole="header"
-      style={{ color: theme.colors.foreground, fontSize: compact ? 15 : 17, fontWeight: "600", lineHeight: compact ? 21 : 24 }}
+      style={{ color: theme.colors.foreground, fontSize: compact ? 16 : 17, fontWeight: "600", lineHeight: compact ? 22 : 24 }}
       numberOfLines={open ? undefined : 3}
     >
       {coded && parts.length > 1
@@ -578,9 +579,9 @@ export function CardTitle({ text, open, compact, theme }: { text: string; open: 
 }
 
 /** A small kind label in mono capitals: a card's kind and class, a status, a tag. */
-function MetaLabel({ text, colour }: { text: string; colour: string }) {
+function MetaLabel({ text, colour, compact = false, shrink = false }: { text: string; colour: string; compact?: boolean; shrink?: boolean }) {
   return (
-    <Text style={{ fontFamily: MONO, fontSize: 12, color: colour, textTransform: "uppercase" }} numberOfLines={1}>
+    <Text style={{ fontFamily: MONO, fontSize: compact ? 11 : 12, color: colour, textTransform: "uppercase", flexShrink: shrink ? 1 : 0 }} numberOfLines={1}>
       {text}
     </Text>
   );
@@ -640,16 +641,20 @@ export function CardFrame({
   return (
     <View style={cardBoxStyle(theme, { compact, join: join ?? "alone", bar: barTone !== null })}>
       {barTone === null ? null : <KindBar tone={barTone} theme={theme} />}
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 10, flexWrap: compact ? "wrap" : "nowrap" }}>
+      {/* On a phone one line: the asker and time truncate, the kind label keeps its width. */}
+      <View style={{ flexDirection: "row", alignItems: "center", gap: compact ? 8 : 10 }}>
         {icon === null ? null : <Icon name={icon} size={16} color={colors.foregroundMuted} />}
-        <Text style={{ flex: 1, flexShrink: 1, minWidth: 120, fontSize: 13, color: colors.foregroundMuted }} numberOfLines={detailsOpen ? undefined : 1}>
+        <Text
+          style={{ flex: 1, flexShrink: 1, minWidth: compact ? 0 : 120, fontSize: compact ? 12 : 13, color: colors.foregroundMuted }}
+          numberOfLines={detailsOpen ? undefined : 1}
+        >
           <Text style={{ color: colors.foreground }}>{view.actor.name}</Text>
           {rest}
         </Text>
-        {view.chip === null ? null : <MetaLabel text={view.chip.text} colour={toneColor(theme, view.chip.tone)} />}
-        {view.label == null ? null : <MetaLabel text={view.label.text} colour={toneColor(theme, view.label.tone)} />}
+        {view.chip === null ? null : <MetaLabel text={view.chip.text} colour={toneColor(theme, view.chip.tone)} compact={compact} shrink={compact} />}
+        {view.label == null ? null : <MetaLabel text={view.label.text} colour={toneColor(theme, view.label.tone)} compact={compact} />}
         {/* Neutral: a tag is read, never told apart by colour alone. */}
-        {view.tag === null ? null : <MetaLabel text={view.tag} colour={colors.foregroundMuted} />}
+        {view.tag === null ? null : <MetaLabel text={view.tag} colour={colors.foregroundMuted} compact={compact} shrink={compact} />}
       </View>
 
       <CardTitle text={view.title} open={detailsOpen} compact={compact} theme={theme} />
@@ -663,7 +668,7 @@ export function CardFrame({
       {actions === undefined || actions === null ? null : <View style={{ gap: 10 }}>{actions}</View>}
 
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        {footer}
+        {compact ? footerCells(footer) : footer}
         <Button
           label="Details"
           kind="text"
@@ -680,6 +685,22 @@ export function CardFrame({
       ) : null}
     </View>
   );
+}
+
+/**
+ * The footer buttons on a phone, as the MobileInbox artboard's grid: each in
+ * an equal cell (two to a row at most, so a third and fourth wrap), Details
+ * after them at the right.
+ */
+export function footerCells(footer: ReactNode): ReactNode {
+  const items = Children.toArray(footer);
+  if (items.length === 0) return null;
+  const cell = items.length <= 2 ? { flex: 1, minWidth: 0 } : { flexGrow: 1, flexBasis: "40%" as const, minWidth: 0 };
+  return items.map((item, index) => (
+    <View key={isValidElement(item) && item.key !== null ? item.key : index} style={cell}>
+      {item}
+    </View>
+  ));
 }
 
 /**

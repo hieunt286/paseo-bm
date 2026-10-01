@@ -542,7 +542,7 @@ function AskBackButton({ label, onPress, styles, theme }: { label: string; onPre
       accessibilityRole="button"
       accessibilityLabel={label}
       onPress={onPress}
-      style={[styles.secondaryButton, { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 8, paddingHorizontal: 12, borderRadius: 0 }]}
+      style={[styles.secondaryButton, { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingVertical: 8, paddingHorizontal: 12, borderRadius: 0 }]}
     >
       <Icon name="MessageSquare" size={14} color={theme.colors.foreground} />
       <Text style={[styles.secondaryButtonText, { fontSize: 13 }]}>Ask back</Text>
@@ -631,11 +631,57 @@ export function PrecedentOffer({ view, on, styles, theme }: { view: PrecedentOff
  * mono, the label (wrapping), and at the right its mark ("Recommended",
  * "Orchestrator suggests") in small capitals. The primary option is filled
  * with the accent; the others are outlined. Hook-free.
+ *
+ * On a phone (`compact`, the MobileInbox artboard) the label gets the whole
+ * width: a top line with the key letter at the left and the mark at the
+ * right, both 11px, then the label under it.
  */
-export function OptionRow({ option, off, onChoose, theme }: { option: DecisionButton; off: boolean; onChoose: (key: string) => void; theme: Theme }) {
+export function OptionRow({
+  option,
+  off,
+  onChoose,
+  theme,
+  compact = false,
+}: {
+  option: DecisionButton;
+  off: boolean;
+  onChoose: (key: string) => void;
+  theme: Theme;
+  compact?: boolean;
+}) {
   const { colors } = theme;
   const on = option.primary;
   const ink = on ? colors.accentForeground : colors.foreground;
+  if (compact) {
+    return (
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={option.accessibilityLabel}
+        accessibilityState={{ disabled: off }}
+        disabled={off}
+        onPress={() => onChoose(option.key)}
+        style={{
+          alignSelf: "stretch",
+          gap: 4,
+          padding: 12,
+          borderWidth: 1,
+          borderColor: on ? colors.accent : colors.border,
+          backgroundColor: on ? colors.accent : "transparent",
+          opacity: off ? 0.5 : 1,
+        }}
+      >
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8, opacity: on ? 0.9 : 1 }}>
+          <Text style={{ fontFamily: MONO, fontSize: 11, color: on ? ink : colors.foregroundMuted }}>{option.key}</Text>
+          {option.mark === null ? null : (
+            <Text style={{ marginLeft: "auto", fontSize: 11, textTransform: "uppercase", color: on ? ink : colors.foregroundMuted }} numberOfLines={1}>
+              {option.mark}
+            </Text>
+          )}
+        </View>
+        <Text style={{ fontSize: 14, lineHeight: 20, color: ink, textAlign: "left" }}>{option.label}</Text>
+      </Pressable>
+    );
+  }
   return (
     <Pressable
       accessibilityRole="button"
@@ -773,7 +819,8 @@ export function DecisionCardBody({
     // Deny first, outlined; Allow once filled — the order the mockup draws.
     const ordered = [...view.options].sort((a, b) => Number(a.primary) - Number(b.primary));
     actions.push(
-      <View key="options" style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+      // On a phone a 2-column grid of equal buttons (the MobileInbox artboard).
+      <View key="options" style={{ flexDirection: "row", flexWrap: compact ? "nowrap" : "wrap", gap: 8 }}>
         {ordered.map((option) => (
           <Button
             key={option.key}
@@ -783,7 +830,7 @@ export function DecisionCardBody({
             accessibilityState={{ disabled: off }}
             disabled={off}
             onPress={() => onChoose(option.key)}
-            style={[HELD_BUTTON, { opacity: off ? 0.5 : 1 }]}
+            style={[HELD_BUTTON, { opacity: off ? 0.5 : 1 }, ...(compact ? [{ flex: 1, minWidth: 0, paddingVertical: 10, paddingHorizontal: 12 }] : [])]}
             styles={styles}
           />
         ))}
@@ -793,7 +840,7 @@ export function DecisionCardBody({
     actions.push(
       <View key="options" style={{ gap: 6 }}>
         {view.options.map((option) => (
-          <OptionRow key={option.key} option={option} off={off} onChoose={onChoose} theme={theme} />
+          <OptionRow key={option.key} option={option} off={off} onChoose={onChoose} theme={theme} compact={compact} />
         ))}
       </View>,
     );

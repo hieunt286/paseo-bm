@@ -15,8 +15,13 @@
  * action boundary (`autonomy.set-boundary`, §D.2, change-010; off by
  * default), each direction after an in-place confirmation, Cancel first.
  *
- * What it says is `settings-autonomy-model.ts`; `LevelControl` and
- * `BoundarySwitch` are hook-free and tested with the element-tree helper.
+ * On a phone (`compact`, the approved phone mockup) the project tabs become
+ * one full-width picker that opens the list of projects in place, the
+ * classes one column, and the confirmation's buttons a two-column grid.
+ *
+ * What it says is `settings-autonomy-model.ts`; `LevelControl`,
+ * `BoundarySwitch` and `ProjectPicker` are hook-free and tested with the
+ * element-tree helper.
  *
  * Client rules: React Native primitives only, colours from the theme, project
  * names only (no ids), no Node import, no `server/` import.
@@ -30,10 +35,13 @@ import type { InsightsProject } from "./insights-model";
 import { errorMessageOf } from "./errors";
 import {
   AUTONOMY_NO_PROJECTS,
+  BOUNDARY_SHORT_LABEL,
+  BOUNDARY_SHORT_MEANING,
   autonomyLevelView,
   autonomyProjects,
   autonomyTabs,
   levelPressOf,
+  projectPickerView,
   setLevelInputOf,
   shownProjectOf,
   type AutonomyBoundaryView,
@@ -61,9 +69,11 @@ function legendColor(theme: Theme, decider: ClassDecider): string {
  * name and what it does, and one square switch; the confirmation of the side
  * pressed opens under it, in place (Cancel first). Hook-free.
  */
-export function BoundarySwitch({ view, busy, onToggle, onConfirm, onCancel, styles, theme }: {
+export function BoundarySwitch({ view, busy, compact = false, onToggle, onConfirm, onCancel, styles, theme }: {
   view: AutonomyBoundaryView;
   busy: boolean;
+  /** A phone: the short name and line, 14 padding. */
+  compact?: boolean;
   onToggle: () => void;
   onConfirm: () => void;
   onCancel: () => void;
@@ -71,15 +81,17 @@ export function BoundarySwitch({ view, busy, onToggle, onConfirm, onCancel, styl
   theme: Theme;
 }) {
   const { colors } = theme;
+  const label = compact ? BOUNDARY_SHORT_LABEL : view.label;
+  const caption = compact ? BOUNDARY_SHORT_MEANING : view.caption;
   return (
     <View
-      style={{ gap: 12, borderWidth: 1, borderColor: colors.border, paddingVertical: 16, paddingHorizontal: 20 }}
+      style={{ gap: 12, borderWidth: 1, borderColor: colors.border, ...(compact ? { padding: 14 } : { paddingVertical: 16, paddingHorizontal: 20 }) }}
       accessibilityLabel={view.accessibilityLabel}
     >
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 16 }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: compact ? 12 : 16 }}>
         <View style={{ flex: 1, gap: 4 }}>
-          <Text style={{ color: colors.foreground, fontSize: 14, fontWeight: "500" }}>{view.label}</Text>
-          <Text style={{ color: colors.foregroundMuted, fontSize: 13 }}>{view.since === null ? view.caption : `${view.since}. ${view.caption}`}</Text>
+          <Text style={{ color: colors.foreground, fontSize: 14, fontWeight: "500" }}>{label}</Text>
+          <Text style={{ color: colors.foregroundMuted, fontSize: compact ? 12 : 13 }}>{view.since === null ? caption : `${view.since}. ${caption}`}</Text>
         </View>
         <SquareSwitch
           on={view.on}
@@ -102,29 +114,32 @@ export function BoundarySwitch({ view, busy, onToggle, onConfirm, onCancel, styl
  * then "Switch to <level>" outlined in the warning colour. While it saves,
  * Cancel is gone and the button says so. Hook-free.
  */
-export function LevelConfirmBox({ dialog, busy, onConfirm, onCancel, theme }: {
+export function LevelConfirmBox({ dialog, busy, compact = false, onConfirm, onCancel, theme }: {
   dialog: ConfirmDialog;
   busy: boolean;
+  /** A phone: the two buttons share the row equally. */
+  compact?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
   theme: Theme;
 }) {
   const { colors } = theme;
+  const cell = compact ? ({ flex: 1, minWidth: 0, alignItems: "center", paddingHorizontal: 8 } as const) : {};
   return (
     <View style={{ gap: 10, borderWidth: 1, borderColor: colors.statusWarning, backgroundColor: colors.surface2, paddingVertical: 14, paddingHorizontal: 16 }}>
       {dialog.title === null ? null : <Text style={{ color: colors.statusWarning, fontSize: 14, fontWeight: "600" }}>{dialog.title}</Text>}
       <Text style={{ color: colors.foreground, fontSize: 14 }} selectable>
         {dialog.body}
       </Text>
-      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+      <View style={{ flexDirection: "row", flexWrap: compact ? "nowrap" : "wrap", gap: 8 }}>
         {busy ? null : (
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={dialog.cancelAccessibilityLabel ?? dialog.cancelLabel}
             onPress={onCancel}
-            style={{ backgroundColor: colors.foreground, paddingVertical: 8, paddingHorizontal: 16 }}
+            style={{ backgroundColor: colors.foreground, paddingVertical: 8, paddingHorizontal: 16, ...cell }}
           >
-            <Text style={{ color: colors.surface0, fontSize: 14, fontWeight: "500" }}>{dialog.cancelLabel}</Text>
+            <Text style={{ color: colors.surface0, fontSize: 14, fontWeight: "500", textAlign: "center" }}>{dialog.cancelLabel}</Text>
           </Pressable>
         )}
         <Pressable
@@ -133,9 +148,9 @@ export function LevelConfirmBox({ dialog, busy, onConfirm, onCancel, theme }: {
           accessibilityState={{ disabled: busy, busy }}
           disabled={busy}
           onPress={onConfirm}
-          style={{ borderWidth: 1, borderColor: colors.statusWarning, paddingVertical: 8, paddingHorizontal: 16 }}
+          style={{ borderWidth: 1, borderColor: colors.statusWarning, paddingVertical: 8, paddingHorizontal: 16, ...cell }}
         >
-          <Text style={{ color: colors.statusWarning, fontSize: 14 }}>{busy ? "Saving…" : dialog.confirmLabel}</Text>
+          <Text style={{ color: colors.statusWarning, fontSize: 14, textAlign: "center" }}>{busy ? "Saving…" : dialog.confirmLabel}</Text>
         </Pressable>
       </View>
     </View>
@@ -156,12 +171,15 @@ function knobStyle(theme: Theme, place: "below" | "selected" | "above") {
  * up to the level shown, five numbered square knobs with their names, one
  * radio group —, what the shown level means, the confirmation of Turbo or
  * Full auto while it is asked, the nine classes in three columns with who
- * decides each, the legend, and a failed change's reason. Hook-free.
+ * decides each, the legend, and a failed change's reason. On a phone
+ * (`compact`): 32px knobs, names at 11 on up to two lines, and the classes
+ * as one column of rows. Hook-free.
  */
-export function LevelControl({ view, error, busy, onPick, onConfirm, onCancel, styles, theme }: {
+export function LevelControl({ view, error, busy, compact = false, onPick, onConfirm, onCancel, styles, theme }: {
   view: AutonomyLevelView;
   error: string | null;
   busy: boolean;
+  compact?: boolean;
   onPick: (level: AutonomyLevel) => void;
   onConfirm: () => void;
   onCancel: () => void;
@@ -170,10 +188,12 @@ export function LevelControl({ view, error, busy, onPick, onConfirm, onCancel, s
 }) {
   const { colors } = theme;
   // The knobs' centres sit at a tenth of the row from each side: the track runs between them.
-  const trackTop = 8 + 18 - 1;
+  const knobSize = compact ? 32 : 36;
+  const stopPadding = compact ? 4 : 8;
+  const trackTop = stopPadding + knobSize / 2 - 1;
   return (
-    <View style={{ borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface1 }}>
-      <View style={{ paddingTop: 28, paddingHorizontal: 28, paddingBottom: 8 }}>
+    <View style={{ borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface1, ...(compact ? { paddingVertical: 16, paddingHorizontal: 12, gap: 14 } : {}) }}>
+      <View style={compact ? {} : { paddingTop: 28, paddingHorizontal: 28, paddingBottom: 8 }}>
         <View accessibilityRole="radiogroup" accessibilityLabel={`Autonomy level of ${view.title}`} style={{ flexDirection: "row" }}>
           <View style={{ position: "absolute", left: "10%", right: "10%", top: trackTop, height: 2, backgroundColor: colors.border }} />
           <View style={{ position: "absolute", left: "10%", width: `${view.fill * 80}%`, top: trackTop, height: 2, backgroundColor: colors.accent }} />
@@ -187,14 +207,19 @@ export function LevelControl({ view, error, busy, onPick, onConfirm, onCancel, s
                 accessibilityState={{ selected: stop.selected, checked: stop.selected, disabled: !stop.enabled }}
                 disabled={!stop.enabled}
                 onPress={() => onPick(stop.level)}
-                style={{ flex: 1, minWidth: 0, alignItems: "center", gap: 10, paddingVertical: 8, paddingHorizontal: 4 }}
+                style={{ flex: 1, minWidth: 0, alignItems: "center", gap: compact ? 8 : 10, paddingVertical: stopPadding, paddingHorizontal: compact ? 2 : 4 }}
               >
-                <View style={{ width: 36, height: 36, alignItems: "center", justifyContent: "center", ...knob.box }}>
-                  <Text style={{ color: knob.text, fontFamily: MONO, fontWeight: "500", fontSize: 14 }}>{String(stop.level)}</Text>
+                <View style={{ width: knobSize, height: knobSize, alignItems: "center", justifyContent: "center", ...knob.box }}>
+                  <Text style={{ color: knob.text, fontFamily: MONO, fontWeight: "500", fontSize: compact ? 13 : 14 }}>{String(stop.level)}</Text>
                 </View>
                 <Text
-                  numberOfLines={1}
-                  style={{ color: stop.selected ? colors.foreground : colors.foregroundMuted, fontWeight: stop.selected ? "600" : "400", fontSize: 14, textAlign: "center" }}
+                  numberOfLines={compact ? 2 : 1}
+                  style={{
+                    color: stop.selected ? colors.foreground : colors.foregroundMuted,
+                    fontWeight: stop.selected ? "600" : "400",
+                    fontSize: compact ? 11 : 14,
+                    textAlign: "center",
+                  }}
                 >
                   {stop.name}
                 </Text>
@@ -203,28 +228,30 @@ export function LevelControl({ view, error, busy, onPick, onConfirm, onCancel, s
           })}
         </View>
       </View>
-      <View style={{ paddingTop: 16, paddingHorizontal: 28, paddingBottom: 24, gap: 14 }}>
-        <Text style={{ color: colors.foreground, fontSize: 15, lineHeight: 22 }}>{view.summary}</Text>
-        {view.confirm === null ? null : <LevelConfirmBox dialog={view.confirm.dialog} busy={busy} onConfirm={onConfirm} onCancel={onCancel} theme={theme} />}
-        <View style={{ flexDirection: "row", flexWrap: "wrap", borderTopWidth: 1, borderTopColor: colors.border }}>
+      <View style={compact ? { gap: 14 } : { paddingTop: 16, paddingHorizontal: 28, paddingBottom: 24, gap: 14 }}>
+        <Text style={{ color: colors.foreground, fontSize: compact ? 14 : 15, lineHeight: compact ? 21 : 22 }}>{view.summary}</Text>
+        {view.confirm === null ? null : (
+          <LevelConfirmBox dialog={view.confirm.dialog} busy={busy} compact={compact} onConfirm={onConfirm} onCancel={onCancel} theme={theme} />
+        )}
+        <View style={{ flexDirection: compact ? "column" : "row", flexWrap: compact ? "nowrap" : "wrap", borderTopWidth: 1, borderTopColor: colors.border }}>
           {view.classes.map((entry) => (
             <View
               key={entry.decisionClass}
               accessibilityLabel={`${entry.label}: ${entry.who}`}
               style={{
-                width: "33.33%",
+                width: compact ? "100%" : "33.33%",
                 flexDirection: "row",
                 alignItems: "center",
                 justifyContent: "space-between",
                 gap: 8,
-                paddingTop: 10,
-                paddingBottom: 10,
-                paddingRight: 12,
+                paddingTop: compact ? 9 : 10,
+                paddingBottom: compact ? 9 : 10,
+                paddingRight: compact ? 0 : 12,
                 borderBottomWidth: 1,
                 borderBottomColor: colors.border,
               }}
             >
-              <Text style={{ color: colors.foreground, fontSize: 14, flexShrink: 1 }} numberOfLines={1}>
+              <Text style={{ color: colors.foreground, fontSize: compact ? 13 : 14, flexShrink: 1 }} numberOfLines={1}>
                 {entry.label}
               </Text>
               <Text style={{ color: deciderColor(theme, entry.decider), fontSize: 12, fontFamily: MONO }}>{entry.who}</Text>
@@ -250,14 +277,80 @@ export function LevelControl({ view, error, busy, onPick, onConfirm, onCancel, s
 }
 
 /**
+ * The phone's project picker (the approved phone mockup): a "Project" label
+ * and one full-width button — the project's name, its level in muted mono
+ * and ▾ —; pressed, the list of every project opens under it in place (name
+ * and level, the shown one marked), and choosing one closes it. Hook-free.
+ */
+export function ProjectPicker({ tabs, selected, open, onToggle, onSelect, theme }: {
+  tabs: ReadonlyArray<{ key: string; label: string; suffix: string }>;
+  selected: string;
+  open: boolean;
+  onToggle: () => void;
+  onSelect: (key: string) => void;
+  theme: Theme;
+}) {
+  const { colors } = theme;
+  const picker = projectPickerView(tabs, selected, open);
+  return (
+    <View style={{ gap: 6 }}>
+      <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>Project</Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={picker.button.accessibilityLabel}
+        accessibilityState={{ expanded: open }}
+        onPress={onToggle}
+        style={{ flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: colors.surface1, borderWidth: 1, borderColor: colors.border, padding: 12 }}
+      >
+        <Text style={{ flex: 1, minWidth: 0, color: colors.foreground, fontSize: 14 }} numberOfLines={1}>
+          {picker.button.label}
+        </Text>
+        <Text style={{ color: colors.foregroundMuted, fontSize: 12, fontFamily: MONO }}>{picker.button.level}</Text>
+        <Text style={{ color: colors.foregroundMuted, fontSize: 14 }}>{open ? "▴" : "▾"}</Text>
+      </Pressable>
+      {picker.rows === null ? null : (
+        <View accessibilityRole="list" style={{ borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface1 }}>
+          {picker.rows.map((row, index) => (
+            <Pressable
+              key={row.key}
+              accessibilityRole="button"
+              accessibilityLabel={row.accessibilityLabel}
+              accessibilityState={{ selected: row.current }}
+              onPress={() => onSelect(row.key)}
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                gap: 8,
+                paddingVertical: 12,
+                paddingHorizontal: 12,
+                ...(row.current ? { backgroundColor: colors.surface2 } : {}),
+                ...(index === 0 ? {} : { borderTopWidth: 1, borderTopColor: colors.border }),
+              }}
+            >
+              <View style={{ width: 3, alignSelf: "stretch", backgroundColor: row.current ? colors.accent : "transparent" }} />
+              <Text style={{ flex: 1, minWidth: 0, color: colors.foreground, fontSize: 14, fontWeight: row.current ? "500" : "400" }} numberOfLines={1}>
+                {row.label}
+              </Text>
+              <Text style={{ color: colors.foregroundMuted, fontSize: 12, fontFamily: MONO }}>{row.level}</Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
+    </View>
+  );
+}
+
+/**
  * The Autonomy group's body (its title and meaning are the section's
  * heading): the project tabs — text tabs, each project by name with its level
  * in muted mono —, the chosen project's level panel and its action boundary.
  * A change returns the whole policy, which `onSaved` puts in the shared query.
  */
-export function AutonomyGroup({ policy, projects, onSaved, styles, theme }: {
+export function AutonomyGroup({ policy, projects, compact = false, onSaved, styles, theme }: {
   policy: AutonomyPolicy;
   projects: readonly InsightsProject[];
+  /** A phone: the project picker instead of the tabs, the compact level panel. */
+  compact?: boolean;
   onSaved: (policy: AutonomyPolicy) => void;
   styles: Styles;
   theme: Theme;
@@ -265,6 +358,8 @@ export function AutonomyGroup({ policy, projects, onSaved, styles, theme }: {
   const setLevel = useRpc(autonomySetLevelRpc);
   const setBoundary = useRpc(autonomySetBoundaryRpc);
   const [chosen, setChosen] = useState<string | null>(null);
+  // The phone's project list, open under its picker.
+  const [pickerOpen, setPickerOpen] = useState(false);
   // Turbo or Full auto pressed, its confirmation shown; or null.
   const [confirmingLevel, setConfirmingLevel] = useState<AutonomyLevel | null>(null);
   // The side of the action boundary whose confirmation is shown, or null.
@@ -285,25 +380,32 @@ export function AutonomyGroup({ policy, projects, onSaved, styles, theme }: {
     return <Text style={{ color: theme.colors.foregroundMuted, fontSize: 14 }}>{AUTONOMY_NO_PROJECTS}</Text>;
   }
   const view = autonomyLevelView({ policy, project, busy, confirmingLevel, confirmingBoundary });
+  const choose = (key: string) => {
+    setError(null);
+    setConfirmingLevel(null);
+    setConfirmingBoundary(null);
+    setChosen(key);
+    setPickerOpen(false);
+  };
   return (
-    <View style={{ gap: 18 }}>
-      <TextTabs
-        tabs={autonomyTabs(list, policy)}
-        selected={project.id}
-        divider
-        wrap
-        onSelect={(key) => {
-          setError(null);
-          setConfirmingLevel(null);
-          setConfirmingBoundary(null);
-          setChosen(key);
-        }}
-        theme={theme}
-      />
+    <View style={{ gap: compact ? 12 : 18 }}>
+      {compact ? (
+        <ProjectPicker
+          tabs={autonomyTabs(list, policy)}
+          selected={project.id}
+          open={pickerOpen}
+          onToggle={() => setPickerOpen((current) => !current)}
+          onSelect={choose}
+          theme={theme}
+        />
+      ) : (
+        <TextTabs tabs={autonomyTabs(list, policy)} selected={project.id} divider wrap onSelect={choose} theme={theme} />
+      )}
       <LevelControl
         view={view}
         error={error}
         busy={busy}
+        compact={compact}
         onPick={(level) => {
           setError(null);
           setConfirmingBoundary(null);
@@ -327,6 +429,7 @@ export function AutonomyGroup({ policy, projects, onSaved, styles, theme }: {
       <BoundarySwitch
         view={view.boundary}
         busy={busy}
+        compact={compact}
         onToggle={() => {
           setError(null);
           setConfirmingLevel(null);

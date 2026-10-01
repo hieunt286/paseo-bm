@@ -20,7 +20,9 @@
  * the same `setup.status` through `useSetupStatus`.
  *
  * Laid out as the approved mockup (`Settings.dc.html`): one column at most
- * 980 wide, the page's title being the section nav's.
+ * 980 wide, the page's title being the section nav's. On a phone
+ * (`layout.compact`) it follows `MobileSettings.dc.html`: 16 side padding,
+ * a 20px title, the project picker, one column of classes, every field a row.
  *
  * Built from the Setup screen's pieces (`settings-blocks.tsx`) and wording
  * (`settings-machine-model.ts`, `settings-roles-model.ts`); the rest of the old
@@ -126,8 +128,10 @@ export interface SettingsScreenProps extends PluginSurfaceProps {
  * bordered list; the whole row one button. A state with a problem keeps its
  * tone's colour. A group that does not open is plain text.
  */
-export function SettingsGroupHeader({ view, first = true, onToggle, theme }: {
+export function SettingsGroupHeader({ view, first = true, compact = false, onToggle, theme }: {
   view: GroupHeaderView;
+  /** A phone: 14 padding. */
+  compact?: boolean;
   /** The first row draws its top border; the others share the one above. */
   first?: boolean;
   onToggle: () => void;
@@ -152,7 +156,7 @@ export function SettingsGroupHeader({ view, first = true, onToggle, theme }: {
     alignItems: "center" as const,
     gap: 12,
     paddingVertical: 14,
-    paddingHorizontal: 20,
+    paddingHorizontal: compact ? 14 : 20,
     borderWidth: 1,
     borderColor: colors.border,
     ...(first ? {} : { borderTopWidth: 0 }),
@@ -249,8 +253,10 @@ export function StorageRowView({ row, open, onToggle, styles, children }: {
  * while the value changed. A refused value or a failed save says why there.
  * Hook-free.
  */
-export function AdviceCadenceRow({ view, input, busy, error, onInput, onSave, styles, theme }: {
+export function AdviceCadenceRow({ view, input, busy, error, narrow = false, onInput, onSave, styles, theme }: {
   view: AdviceCadenceView;
+  /** A phone: 14 padding, Save across the card. */
+  narrow?: boolean;
   /** The field's text while it is being typed in; null shows the value. */
   input: string | null;
   busy: boolean;
@@ -263,10 +269,10 @@ export function AdviceCadenceRow({ view, input, busy, error, onInput, onSave, st
   const { colors } = theme;
   const refusals = inputErrorsOf(["advice.everyFinished"], input === null ? {} : { "advice.everyFinished": input });
   return (
-    <View style={[coordinationCardStyle(theme), { flex: 1, gap: 12, paddingVertical: 16, paddingHorizontal: 20 }]}>
+    <View style={[coordinationCardStyle(theme), narrow ? { gap: 10, padding: 14 } : { flex: 1, gap: 12, paddingVertical: 16, paddingHorizontal: 20 }]}>
       <Text style={{ color: colors.foreground, fontSize: 14, fontWeight: "600" }}>{view.title}</Text>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
-        <Text style={{ flex: 1, color: colors.foreground, fontSize: 14 }}>{ADVICE_FIELD.before}</Text>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: narrow ? 10 : 12 }}>
+        <Text style={{ flex: 1, minWidth: 0, color: colors.foreground, fontSize: narrow ? 13 : 14 }}>{ADVICE_FIELD.before}</Text>
         <NumberField
           value={input ?? view.inputText}
           invalid={refusals.length > 0}
@@ -276,16 +282,15 @@ export function AdviceCadenceRow({ view, input, busy, error, onInput, onSave, st
           onChange={onInput}
           theme={theme}
         />
-        <Text style={{ color: colors.foregroundMuted, fontSize: 14 }}>{ADVICE_FIELD.after}</Text>
+        <Text style={{ color: colors.foregroundMuted, fontSize: narrow ? 13 : 14 }}>{ADVICE_FIELD.after}</Text>
       </View>
       <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{view.meaning}</Text>
-      <CardFooter save={view.save} refusals={refusals} error={error} onSave={onSave} styles={styles} theme={theme} />
+      <CardFooter save={view.save} refusals={refusals} error={error} narrow={narrow} onSave={onSave} styles={styles} theme={theme} />
     </View>
   );
 }
 
 /**
- * One of compaction and handoff/**
  * One of compaction and handoff (autonomy design §G.7): its switch saves at
  * once (turning on after a confirmation), its thresholds stay a draft (held
  * by the group, so its reset can fill them) until Save, which sends one
@@ -365,8 +370,9 @@ function MechanismGroup({ mechanism, data, draft, inputs, onInput, clearInputs, 
  * sends one `coordination.set` per changed tier. Only a Worker created
  * afterwards gets the new budget.
  */
-function ReviewBudgetGroup({ data, draft, inputs, onInput, clearInputs, setDraft, onSaved, styles, theme }: {
+function ReviewBudgetGroup({ data, draft, inputs, onInput, clearInputs, narrow, setDraft, onSaved, styles, theme }: {
   data: CoordinationSettingsOutput;
+  narrow: boolean;
   draft: ReviewBudgetDraft;
   inputs: CoordinationInputs;
   onInput: (key: CoordinationNumberKey, text: string) => void;
@@ -386,6 +392,7 @@ function ReviewBudgetGroup({ data, draft, inputs, onInput, clearInputs, setDraft
       inputs={inputs}
       busy={busy}
       error={error}
+      narrow={narrow}
       onInput={(key, text) => {
         setError(null);
         onInput(key, text);
@@ -447,7 +454,7 @@ function CoordinationGroup({ data, narrow, onSaved, styles, theme }: {
   const clearInputs = (keys: readonly CoordinationNumberKey[]) =>
     setInputs((current) => Object.fromEntries(Object.entries(current).filter(([key]) => !keys.includes(key as CoordinationNumberKey))));
   return (
-    <View style={{ gap: 14 }}>
+    <View style={{ gap: narrow ? 12 : 14 }}>
       {COORDINATION_MECHANISMS.map((mechanism) => (
         <MechanismGroup
           key={mechanism}
@@ -464,9 +471,10 @@ function CoordinationGroup({ data, narrow, onSaved, styles, theme }: {
           theme={theme}
         />
       ))}
-      <View style={{ flexDirection: narrow ? "column" : "row", gap: 14, alignItems: "stretch" }}>
+      <View style={{ flexDirection: narrow ? "column" : "row", gap: narrow ? 12 : 14, alignItems: "stretch" }}>
         <ReviewBudgetGroup
           data={data}
+          narrow={narrow}
           draft={review}
           inputs={inputs}
           onInput={onInput}
@@ -481,6 +489,7 @@ function CoordinationGroup({ data, narrow, onSaved, styles, theme }: {
           input={inputs["advice.everyFinished"] ?? null}
           busy={saving}
           error={error}
+          narrow={narrow}
           onInput={(text) => {
             setError(null);
             onInput("advice.everyFinished", text);
@@ -545,12 +554,14 @@ export function useSetupStatus() {
   });
 }
 
-/** The heading sizes of the mockup: the page's first section (22), a section (18), a group of rows (15). */
+/** The heading sizes of the mockup: the page's first section (22), a section (18), a group of rows (15); on a phone 20, 17 and 15. */
 const HEADING_SIZES = { page: 22, section: 18, group: 15 } as const;
+const COMPACT_HEADING_SIZES: Readonly<Record<keyof typeof HEADING_SIZES, number>> = { page: 20, section: 17, group: 15 };
 
 /** A section of the screen: its title, what it is in one line, and its one-line state when it has one. */
-export function SettingsSectionHeading({ title, meaning, state, size = "section", styles, theme }: {
+export function SettingsSectionHeading({ title, meaning, state, size = "section", compact = false, styles, theme }: {
   title: string;
+  compact?: boolean;
   meaning: string | null;
   state: GroupState | null;
   size?: keyof typeof HEADING_SIZES;
@@ -559,10 +570,10 @@ export function SettingsSectionHeading({ title, meaning, state, size = "section"
 }) {
   return (
     <View style={{ gap: 4 }}>
-      <Text accessibilityRole="header" style={{ color: theme.colors.foreground, fontSize: HEADING_SIZES[size], fontWeight: "600" }}>
+      <Text accessibilityRole="header" style={{ color: theme.colors.foreground, fontSize: (compact ? COMPACT_HEADING_SIZES : HEADING_SIZES)[size], fontWeight: "600" }}>
         {title}
       </Text>
-      {meaning === null ? null : <Text style={{ color: theme.colors.foregroundMuted, fontSize: 14 }}>{meaning}</Text>}
+      {meaning === null ? null : <Text style={{ color: theme.colors.foregroundMuted, fontSize: compact ? 13 : 14 }}>{meaning}</Text>}
       {state === null ? null : (
         <ToneText tone={state.tone} style={{ fontSize: 13 }} styles={styles} theme={theme}>
           {state.text}
@@ -572,7 +583,7 @@ export function SettingsSectionHeading({ title, meaning, state, size = "section"
   );
 }
 
-/** The content column of Settings and Tools & skills (the approved mockup): centred, at most `maxWidth` wide, 32/32/64 padding. */
+/** The content column of Settings and Tools & skills (the approved mockup): centred, at most `maxWidth` wide, 32/32/64 padding; a phone 16/16/40, 20 between sections. */
 export function sectionContentStyle(maxWidth: number, compact: boolean) {
   return {
     width: "100%" as const,
@@ -580,8 +591,8 @@ export function sectionContentStyle(maxWidth: number, compact: boolean) {
     alignSelf: "center" as const,
     paddingTop: compact ? 16 : 32,
     paddingHorizontal: compact ? 16 : 32,
-    paddingBottom: 64,
-    gap: 36,
+    paddingBottom: compact ? 40 : 64,
+    gap: compact ? 20 : 36,
   };
 }
 
@@ -756,6 +767,7 @@ export function SettingsScreen({ theme, layout, status: statusStrip, projects = 
     <AutonomyGroup
       policy={autonomy.data.policy}
       projects={projects}
+      compact={layout.compact}
       onSaved={(policy) => queryClient.setQueryData<AutonomyPolicyOutput>(AUTONOMY_POLICY_KEY, { policy, levels: levelsOf(policy) })}
       styles={styles}
       theme={theme}
@@ -778,17 +790,17 @@ export function SettingsScreen({ theme, layout, status: statusStrip, projects = 
       {status.isError ? (
         <ToneText tone="danger" styles={styles} theme={theme}>{errorMessageOf(status.error)}</ToneText>
       ) : null}
-      <View style={{ gap: 18 }}>
-        <SettingsSectionHeading title="Autonomy" meaning={AUTONOMY_MEANING} state={null} size="page" styles={styles} theme={theme} />
+      <View style={{ gap: layout.compact ? 12 : 18 }}>
+        <SettingsSectionHeading title="Autonomy" meaning={AUTONOMY_MEANING} state={null} size="page" compact={layout.compact} styles={styles} theme={theme} />
         {autonomyGroup}
       </View>
-      <View style={{ gap: 14 }}>
-        <SettingsSectionHeading title="Coordination" meaning={COORDINATION_MEANING} state={null} styles={styles} theme={theme} />
+      <View style={{ gap: layout.compact ? 12 : 14 }}>
+        <SettingsSectionHeading title="Coordination" meaning={COORDINATION_MEANING} state={null} compact={layout.compact} styles={styles} theme={theme} />
         {coordinationGroup}
       </View>
       <View>
         <View style={{ marginBottom: 10 }}>
-          <SettingsSectionHeading title="More" meaning={null} state={null} size="group" styles={styles} theme={theme} />
+          <SettingsSectionHeading title="More" meaning={null} state={null} size="group" compact={layout.compact} styles={styles} theme={theme} />
         </View>
         {SETTINGS_GROUPS.map((group, index) => {
           const expanded = open.has(group.key);
@@ -797,12 +809,13 @@ export function SettingsScreen({ theme, layout, status: statusStrip, projects = 
               <SettingsGroupHeader
                 view={groupHeaderView(group.key, states[group.key], expanded)}
                 first={index === 0}
+                compact={layout.compact}
                 onToggle={() => setOpen((current) => toggleGroup(current, group.key))}
                 styles={styles}
                 theme={theme}
               />
               {expanded ? (
-                <View style={{ gap: 10, padding: 20, borderWidth: 1, borderTopWidth: 0, borderColor: theme.colors.border }}>{bodies[group.key]}</View>
+                <View style={{ gap: 10, padding: layout.compact ? 14 : 20, borderWidth: 1, borderTopWidth: 0, borderColor: theme.colors.border }}>{bodies[group.key]}</View>
               ) : null}
             </View>
           );

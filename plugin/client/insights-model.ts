@@ -732,6 +732,8 @@ export function leadTimes(beads: readonly BeadRow[], window: InsightsWindow, now
 export interface DayBar {
   key: string;
   label: string;
+  /** The day as a phone writes it under its bar: `1/10` (day/month). */
+  short: string;
   value: number;
 }
 
@@ -755,7 +757,7 @@ export function closedPerDay(beads: readonly BeadRow[], window: InsightsWindow, 
   return [...counts.entries()]
     .sort((a, b) => (a[0] < b[0] ? -1 : 1))
     .slice(-CLOSED_PER_DAY_MAX)
-    .map(([key, { at, value }]) => ({ key, label: `${at.getDate()} ${MONTH_SHORT[at.getMonth()]}`, value }));
+    .map(([key, { at, value }]) => ({ key, label: `${at.getDate()} ${MONTH_SHORT[at.getMonth()]}`, short: `${at.getDate()}/${at.getMonth() + 1}`, value }));
 }
 
 /** The bead status bar: closed, deferred and open (the rest), with how many of the open ones are ready. */

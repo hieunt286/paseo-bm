@@ -394,3 +394,32 @@ describe("the review budget card (autonomy design §G.7)", () => {
     expect(JSON.stringify(error.props.style)).toContain("#statusDanger");
   });
 });
+
+describe("Coordination on a phone (MobileSettings.dc.html)", () => {
+  type Style = Record<string, unknown>;
+  const fieldWidths = (nodes: ReturnType<typeof renderTree>) => allNodes(nodes).filter((node) => node.type === "TextInput").map((node) => (node.props.style as Style).width);
+
+  it("puts each threshold in a full-width row of its own — the label, then an 84px field — and how often it helped under the title", () => {
+    const nodes = renderTree(
+      MechanismCard({ view: view(), inputs: {}, dialog: null, busy: false, error: null, narrow: true, onToggle: noop, onConfirm: noop, onCancel: noop, onInput: noop, onSave: noop, styles, theme }),
+    );
+    expect(fieldWidths(nodes)).toEqual([84, 84, 84, 84]);
+    const cells = allNodes(nodes).filter((node) => node.type === "View" && (node.props.style as Style | undefined)?.width === "100%");
+    expect(cells).toHaveLength(4);
+    expect(texts(nodes).slice(0, 3)).toEqual(["Compact", view().meaning, "helped —"]);
+  });
+
+  it("stacks the review budget's tiers as rows with 84px fields and puts Save across the card", () => {
+    const onSave = vi.fn();
+    const card = reviewBudgetCardView({ settings: D, defaults: D, draft: { "review.largeBudget": 6 }, saving: false });
+    const nodes = renderTree(
+      ReviewBudgetCard({ view: card, inputs: { "review.largeBudget": "6" }, busy: false, error: null, narrow: true, onInput: noop, onSave, styles, theme }),
+    );
+    expect(texts(nodes)).toEqual(["Review budget", card.meaning, "Small", "Medium", "Large", "Save"]);
+    expect(fieldWidths(nodes)).toEqual([84, 84, 84]);
+    const [save] = pressables(nodes);
+    expect(JSON.stringify(save!.props.style)).toContain('"alignSelf":"stretch"');
+    (save!.props.onPress as () => void)();
+    expect(onSave).toHaveBeenCalledOnce();
+  });
+});
