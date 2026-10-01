@@ -326,12 +326,15 @@ Read-only replay of the whole store after bead `i8fc.1`: 0 pairs of agents writi
 
 **Reinstalled** 2026-10-01T09:11:59Z: `paseo-bm-builds/final-rc10-65e0d3d` (commit `65e0d3d`, the role marker in agent titles; new agents only, no figure affected). A Worker was mid-turn; the owner chose to install at once.
 
+**Reinstalled** 2026-10-01T11:24:53Z: `paseo-bm-builds/final-rc11-8159e17-bundled` (commit `8159e17`, `plugin-package/` of 0.5.2: the same code bundled, ADR-026; no figure affected). The owner checked every screen in the app: normal.
+
 The owner chooses per project, in Settings → Autonomy, the action boundary (change-010) and the challenger; the choices are recorded here when made.
 
 ## Revision History
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the bundled 0.5.2 package (`8159e17`) |
 | 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the role marker in agent titles (`65e0d3d`) |
 | 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the phone layout (`8d93197`) |
 | 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the Tools & skills speed fix (`50cdda0`) |

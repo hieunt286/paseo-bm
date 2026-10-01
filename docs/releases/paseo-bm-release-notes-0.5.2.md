@@ -29,6 +29,7 @@ Nothing beyond [0.5.0](https://github.com/hieunt286/paseo-bm/releases/tag/v0.5.0
   - **Update from the real 0.5.1:** `running`, with clean logs. The 0.5.1 data and settings were read, and the 19 read RPCs behind the screens gave the same answers as on 0.5.1. The plugin now loads in 0.6 s instead of 6.5 s.
   - **Fresh install:** the Manager was created with its role instructions, tools and title marker, and removal left nothing behind.
   - **The client:** the client bundle the daemon compiled for 0.5.2 was evaluated the way the app evaluates it, beside 0.5.1's. Both registered the same 18 contributions, transformed 56 sample messages identically, and rendered 17 screens and cards to identical HTML.
+- **In the real app:** the owner ran this exact package on their own daemon and went through the Inbox, Projects, Settings, Tools & skills and the chat cards. Everything ran normally.
 
 ## Sources
 
