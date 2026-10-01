@@ -38,12 +38,11 @@ import {
   confirmDecision,
   decisionKindOf,
   needsOwnerConfirmation,
-  ownerViewOfDecision,
   type Decision,
   type TransitionRefusal,
 } from "../shared/decisions";
 import { createDecisionStore, type DecisionMutation, type DecisionStore } from "./decision-store";
-import { handleDecisionsOverride } from "./decision-override";
+import { handleDecisionsOverride, ownerViewsOf } from "./decision-override";
 import { supersedePrecedentsBy } from "./precedent-resolve";
 import { READ_FAILED, coded, dataHome, errorText, logOf, requireDataHome, type RpcHomeDeps } from "./rpc-kit";
 import { timeOrZero } from "../shared/time";
@@ -162,15 +161,16 @@ export function handleDecisionsList(input: DecisionsListInput, deps: DecisionRpc
     .sort((a, b) => direction * (timeOrZero(a.decision.askedAt) - timeOrZero(b.decision.askedAt)) || direction * (a.index - b.index))
     .map(({ decision }) => decision);
   const limit = input.limit ?? DECISION_LIST_DEFAULT;
-  return { decisions: ordered.slice(0, limit).map(ownerViewOfDecision), truncated: ordered.length > limit };
+  const ownerView = ownerViewsOf(deps);
+  return { decisions: ordered.slice(0, limit).map((decision) => ownerView(decision)), truncated: ordered.length > limit };
 }
 
-/** `decisions.get` (§A.6). An unsettled decision comes without the challenger's prediction (§B.3). */
+/** `decisions.get` (§A.6). An unsettled decision comes with the Orchestrator's proposal only at a level of 1 or more (`ownerViewsOf`). */
 export function handleDecisionsGet(input: DecisionsGetInput, deps: DecisionRpcDeps = {}): DecisionOutput {
   const store = storeOf(deps, "read the decision");
   const decision = reading("read the decision", () => store.get(input.id));
   if (decision === null) throw new DashboardError("E_DECISION_NOT_FOUND", `no decision ${input.id}`);
-  return { decision: ownerViewOfDecision(decision) };
+  return { decision: ownerViewsOf(deps)(decision) };
 }
 
 /**
@@ -234,8 +234,8 @@ export async function handleDecisionsConfirm(
     store.transition(input.id, (decision) => confirmDecision(decision, { answered: input.answered, at })),
   );
   const decision = settledOrThrow(input.id, mutation);
-  // Kept open: still the owner's to answer, so still without the challenger's prediction.
-  if (decision.status !== "answered") return { decision: ownerViewOfDecision(decision) };
+  // Kept open: still the owner's to answer, so the prediction only as a proposal at a level of 1 or more.
+  if (decision.status !== "answered") return { decision: ownerViewsOf(deps)(decision) };
   await handOver(decision, paseo, deps);
   return { decision: reread(store, decision) };
 }

@@ -14,12 +14,13 @@ import type { ProjectTab } from "./work-model";
 import { createSlot, type Slot } from "./slot";
 
 /**
- * The views of the Beads Manager surface (autonomy design §A.12): the Inbox
- * is the home; `work` is Work's list of projects, and `project-requests` and
- * `project-beads` a project's page opened on its Requests or its Beads tab
- * (`work.tsx`); `insights` and `settings` are those sections.
+ * The views of the Beads Manager surface (autonomy design §A.12, change-014
+ * outcome 5): the Inbox is the home; `projects` is the list of projects, and
+ * `project-overview`, `project-requests` and `project-beads` a project's page
+ * opened on that tab (`work.tsx`); `settings` and `tools` are those sections.
+ * Insights is no section any more: its figures are a project's Metrics tab.
  */
-export type SurfaceView = "inbox" | "work" | "project-requests" | "project-beads" | "insights" | "settings";
+export type SurfaceView = "inbox" | "projects" | "project-overview" | "project-requests" | "project-beads" | "settings" | "tools";
 
 /** Where the surface opens: the Inbox (experience concept §3). */
 export const SURFACE_HOME_VIEW: SurfaceView = "inbox";
@@ -27,9 +28,9 @@ export const SURFACE_HOME_VIEW: SurfaceView = "inbox";
 /** The four sections, always in this order, with the view each one opens on. */
 export const SURFACE_SECTIONS = [
   { key: "inbox", label: "Inbox", home: "inbox" },
-  { key: "work", label: "Work", home: "work" },
-  { key: "insights", label: "Insights", home: "insights" },
+  { key: "projects", label: "Projects", home: "projects" },
   { key: "settings", label: "Settings", home: "settings" },
+  { key: "tools", label: "Tools & skills", home: "tools" },
 ] as const satisfies ReadonlyArray<{ key: string; label: string; home: SurfaceView }>;
 
 export type SurfaceSection = (typeof SURFACE_SECTIONS)[number]["key"];
@@ -39,14 +40,15 @@ export function sectionOf(view: SurfaceView): SurfaceSection {
   switch (view) {
     case "inbox":
       return "inbox";
-    case "work":
+    case "projects":
+    case "project-overview":
     case "project-requests":
     case "project-beads":
-      return "work";
-    case "insights":
-      return "insights";
+      return "projects";
     case "settings":
       return "settings";
+    case "tools":
+      return "tools";
   }
 }
 
@@ -57,12 +59,21 @@ export function sectionHomeOf(section: SurfaceSection): SurfaceView {
 
 /** The project page's tab a view opens on; null for a view that is not a project's page. */
 export function projectTabOf(view: SurfaceView): ProjectTab | null {
-  return view === "project-requests" ? "requests" : view === "project-beads" ? "beads" : null;
+  switch (view) {
+    case "project-overview":
+      return "overview";
+    case "project-requests":
+      return "requests";
+    case "project-beads":
+      return "beads";
+    default:
+      return null;
+  }
 }
 
 /** Where ← leads from a view; `null` on a section's own screen, which the tabs reach. */
 export function backOf(view: SurfaceView): SurfaceView | null {
-  return projectTabOf(view) === null ? null : "work";
+  return projectTabOf(view) === null ? null : "projects";
 }
 
 /**
@@ -70,7 +81,7 @@ export function backOf(view: SurfaceView): SurfaceView | null {
  * owner decision Q6 a). `null` where there is no ←.
  */
 export function backLabelOf(view: SurfaceView): string | null {
-  return backOf(view) === "work" ? "Back to Work" : null;
+  return backOf(view) === "projects" ? "Back to Projects" : null;
 }
 
 /** The section a Command Center item asked for; one per loaded client bundle, like `projectRequests`. */
@@ -87,16 +98,16 @@ export function selectSectionFromCommandCenter(
   context.openSurface(surfaceId);
 }
 
-/** How often the per-workspace figures are refreshed while Work's list shows. */
+/** How often the per-workspace figures are refreshed while the Projects list shows. */
 export const OVERVIEW_POLL_MS = 10_000;
 
 /**
  * Whether the surface reads the per-workspace figures (`workspaces.overview`,
- * which touches every workspace's bead store) and how often. Only Work's list
- * shows them (delta 20260918f F5).
+ * which touches every workspace's bead store) and how often. Only the Projects
+ * list shows them (delta 20260918f F5).
  */
 export function overviewPolling(view: SurfaceView): { enabled: boolean; refetchInterval: number | false } {
-  return view === "work" ? { enabled: true, refetchInterval: OVERVIEW_POLL_MS } : { enabled: false, refetchInterval: false };
+  return view === "projects" ? { enabled: true, refetchInterval: OVERVIEW_POLL_MS } : { enabled: false, refetchInterval: false };
 }
 
 /** The workspace whose project page a Command Center item asked for; one per loaded client bundle, like `launchRequests`. */
@@ -155,7 +166,7 @@ export interface ClosedWorkspace {
 }
 
 /**
- * Workspaces with trace history that Work does not list any more — archived
+ * Workspaces with trace history that Projects does not list any more — archived
  * or removed from Paseo — newest activity first. Their history stays on disk,
  * so this is how it is reached again; the project page of a closed workspace
  * offers to delete it, or, once the project is reopened (a new workspace id),
@@ -195,7 +206,7 @@ export interface SurfaceWorkspace {
 
 // ---------------------------------------------------------------------------
 // The "Beads" tab of a workspace (delta 20260918e §4.1): one entry in the "+"
-// menu of the tab bar. It shows the workspace's project page (Work), opened on
+// menu of the tab bar. It shows the workspace's project page (Projects), opened on
 // its Beads, since a workspace panel cannot open the surface.
 // ---------------------------------------------------------------------------
 

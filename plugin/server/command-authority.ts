@@ -10,9 +10,10 @@
  *   delegated for the project, `policy:<class>`, autonomy design §B.9), or
  *   the owner's own latest inbound message in the Orchestrator's chat
  *   (`isOwnerWord`). It declares its `intent` and `effects`; each declared
- *   effect must be covered — by the grant for any effect, by the policy or
- *   the owner's word in the chat only outside `CONFIRM_EFFECTS` (push,
- *   publish, deploy, real data, migration, security, cost). It is a
+ *   effect must be covered — by the grant or the policy for any effect
+ *   (ADR-025: a push, publish, deploy, migration, real data, security or cost
+ *   where its class is delegated), by the owner's word in the chat only
+ *   outside `CONFIRM_EFFECTS`. It is a
  *   `BM-COMMAND` v2 block (`from: orchestrator`, `via: chat`, `authority`,
  *   `approved`, the limits that remain), delivered through the notice queue
  *   (`command:<id>`), and recorded in `orchestrator/proposals.json` with
@@ -169,7 +170,8 @@ export function commandClassesOf(effects: readonly Effect[]): DecisionClass[] {
  * (autonomy design §B.9): `riskiest`, the class its `policy:<class>` authority
  * would name, and `notDelegated`, its classes that are not `delegate` for the
  * project (`modeOf`), riskiest first. The policy authorises the command only
- * when `notDelegated` is empty; a hard-owner class never reads `delegate`. Pure.
+ * when `notDelegated` is empty — any class, release, data, security and cost
+ * included (ADR-025). Pure.
  */
 export function policyCoverOf(
   policy: AutonomyPolicy,
@@ -219,8 +221,7 @@ function answeredDecisionOf(decisionId: string, workspaceId: string, requestId: 
   if (decision.requestId !== null && decision.requestId !== requestId) {
     refuse(`decision ${decisionId} is about request ${decision.requestId}; a command on its authority names that request`);
   }
-  // A grant the owner's policy gave never holds what only the owner's own answer may (`answerDecision`
-  // refuses such a policy answer; code review 2026-09-30 §6), so the grant check below covers it.
+  // A grant the owner's policy gave holds only what its classes delegated allowed (ADR-025), so the grant check below covers it.
   if (declared.length > 0) {
     const refusal = grantRefusal(decision, declared, context.now.toISOString());
     if (refusal !== null) refuse(`${refusal.message}; ask the owner again with bm_ask_owner`);
@@ -237,16 +238,17 @@ function answeredDecisionOf(decisionId: string, workspaceId: string, requestId: 
  *   (`answeredDecisionOf`) — authority `decision:<id>`, covering any effect
  *   its grant covers; the grant is spent on delivery. It needs no word of the
  *   owner in the chat.
- * - else a command declaring one of `CONFIRM_EFFECTS` (release, data,
- *   security and cost: experience concept X-4) is refused: only a grant
- *   covers those, never the policy or the owner's word in the chat.
  * - else the owner's policy, read now (autonomy design §B.9): when every class
  *   of the declared effects (`commandClassesOf`) is `delegate` for the
- *   project, `policy:<class>` naming the riskiest — unless the command
+ *   project — release, data, security and cost included, at Turbo and Full
+ *   auto (ADR-025) —, `policy:<class>` naming the riskiest — unless the command
  *   approves `commit` or has the intent `release` while its request (`finish`:
  *   the command's, else its Worker's) stands finished-unverified (§C.6,
  *   change-008 C4): then only the owner's word in the chat covers it, else it
  *   is refused, naming `bm_ask_owner`.
+ * - else a command declaring one of `CONFIRM_EFFECTS` (release, data,
+ *   security and cost: experience concept X-4) is refused: beyond the policy
+ *   only a grant covers those, never the owner's word in the chat.
  * - else the owner's own latest word in the Orchestrator's chat (`owner`),
  *   else `refusal`, after the classes the owner has not delegated
  *   (`notDelegatedRefusalOf`).
@@ -273,10 +275,9 @@ async function authorityOf(
     answeredDecisionOf(input.decisionId, input.workspaceId, input.requestId, declared, context);
     return { authority: decisionAuthorityOf(input.decisionId), approved: declared, grantOf: declared.length > 0 ? input.decisionId : null };
   }
-  const needsDecision = declared.filter((effect) => CONFIRM_EFFECTS.includes(effect));
-  if (needsDecision.length > 0) refuse(needsDecisionMessageOf(needsDecision));
   // Read at each send, so a cell set back meanwhile refuses the command.
   const policy = policyCoverOf(currentPolicy(context.home), input.workspaceId, declared);
+  const needsDecision = declared.filter((effect) => CONFIRM_EFFECTS.includes(effect));
   if (policy.notDelegated.length === 0) {
     // Autonomy design §C.6 (change-008 C4): the policy acts on no unverified finish; read from the trace store now.
     const onFinish =
@@ -287,9 +288,12 @@ async function authorityOf(
         input.finish,
       ));
     if (!onFinish) return { authority: policyAuthorityOf(policy.riskiest), approved: declared, grantOf: null };
+    // The owner's word in the chat never covers what only a decision may (X-4).
+    if (needsDecision.length > 0) refuse(unverifiedFinishText(input.finish.requestId, UNVERIFIED_FINISH_INSTEAD));
     if (!(await ownerJustSpoke(context))) refuse(unverifiedFinishText(input.finish.requestId, UNVERIFIED_FINISH_INSTEAD));
     return { authority: "owner", approved: declared, grantOf: null };
   }
+  if (needsDecision.length > 0) refuse(needsDecisionMessageOf(needsDecision));
   if (!(await ownerJustSpoke(context))) refuse(notDelegatedRefusalOf(policy.notDelegated, refusal));
   return { authority: "owner", approved: declared, grantOf: null };
 }

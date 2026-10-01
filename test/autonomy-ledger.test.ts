@@ -171,8 +171,11 @@ describe("answers not given by the owner", () => {
   });
 
   it("counts the decisions the policy or a precedent answered apart, with their overrides and reversals", () => {
-    const policy = (at: string, predictor: "recommended" | "orchestrator" = "recommended") =>
-      ok(answerDecision(asked(), { by: "policy", via: "autopilot", optionKey: "a", reason: "recommended option, class delegated", class: "scope", predictor, at }));
+    // A recommended answer is one an older build stored (ADR-025): a new policy answer is the Orchestrator's.
+    const policy = (at: string, predictor: "recommended" | "orchestrator" = "recommended") => {
+      const answered = ok(answerDecision(asked(), { by: "policy", via: "autopilot", optionKey: "a", reason: "recommended option, class delegated", class: "scope", at }));
+      return predictor === "recommended" ? { ...answered, answer: { ...answered.answer!, predictor } } : answered;
+    };
     const precedent = (at: string) => ok(answerDecision(asked(), { by: "precedent", via: "inbox", words: "Keep lists in existing tables.", precedentId: "p-1", at }));
     const decisions = [
       policy(day(1)),

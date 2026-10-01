@@ -19,7 +19,7 @@ import {
 } from "../shared/settings";
 import { formatBytes } from "./format";
 import { HOST_SCOPE_NOTICE } from "./history-model";
-import { dashboardStyles } from "./styles";
+import { RADIUS, dashboardStyles } from "./styles";
 import { Button, ToneText } from "./ui";
 
 /** Settings screen id, used by `openSettings` from the Dashboard. */
@@ -68,7 +68,7 @@ export function DashboardSettingsScreen({ theme, layout }: PluginSurfaceProps) {
           keyboardType="number-pad"
           value={shown}
           onChangeText={(next) => setDraft(next)}
-          style={[styles.mono, { borderColor: theme.colors.border, borderWidth: 1, borderRadius: 8, padding: 8 }]}
+          style={[styles.mono, { borderColor: theme.colors.border, borderWidth: 1, borderRadius: RADIUS, padding: 8 }]}
         />
         <Text style={styles.body}>{`Currently ${formatBytes(current)}.`}</Text>
         {error !== null ? (

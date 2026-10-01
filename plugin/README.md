@@ -4,24 +4,29 @@ This package **is** paseo-bm: a small agent team for [Paseo](https://paseo.sh) p
 contributes. You describe a change in chat; a **Beads Manager** hands it to a **Beads Worker**, which
 turns it into documents (only where the change needs them), beads and working code, with a
 **Reviewer** checking each batch. Loading it gives you the **Beads Manager** surface: an **Inbox**
-(the decisions that need you, and alerts), **Work** (each project's requests with their stage and
-timeline, its beads board and its agents), **Insights** (flow, cost and beads figures) and
-**Settings** (roles and models, which decisions the agents may take for you, tools and skills,
-your data). A workspace's **Beads** tab shows that project's page.
+(the decisions that need you — with the Orchestrator's proposal and **Ask back** to question the
+asker first — and alerts), **Projects** (each project's Overview, Requests with their stage and
+timeline, Beads board, Metrics and Agents), **Settings** (one autonomy level per project, the
+coordination settings, and under More the roles and models, precedents and your data) and **Tools &
+skills** (skills with how often reports used them, agent tools by role, `br` and `bv`). Cards are
+flat; a bar at a card's left says what it is — amber waits for you, red is held or failing. A
+workspace's **Beads** tab shows that project's page.
 
 **Beads Orchestrator** is one agent for the whole machine, in a workspace of its own, that you start
 from the **Inbox** when you want it, and talk to in its chat. It reads the work of every paseo-bm
 project and tells each project's Manager what to do next, speaking as you. When something needs your
 decision it asks you in the Inbox, each option with what it would allow and often the command ready
 on it; picking the option sends that command once. It sends a command by itself only right after you
-tell it to in its chat, or where your autonomy policy (**Settings → Autonomy**) delegates, in that
-project, every kind of decision the command touches; a new install delegates nothing. It leaves every
-Worker's question to you, except the kinds your policy delegates to it. paseo-bm watches the running Workers of every project (stuck, waiting on a
+tell it to in its chat, or where the project's autonomy level (**Settings → Autonomy**: Hands-on,
+Co-pilot, Cruise, Turbo, Full auto) lets it decide every kind of decision the command touches; a new
+install is Hands-on. It leaves every Worker's question to you, except the kinds the level lets it
+decide; from Co-pilot up it proposes an answer on the others, for you to approve. paseo-bm watches the running Workers of every project (stuck, waiting on a
 permission, running a dangerous command, failing the same command, piling process onto a small
-request, writing outside the project); in a project where a kind of decision is Shadow or Delegated,
+request, writing outside the project); in a project at Co-pilot or above,
 those signals wake the Orchestrator, which can then correct a Worker directly within that authority,
 always with a copy to its Manager. Every command declares what it allows; a push, publish, deploy,
-real-data, migration, security or cost change needs a decision you answered, whatever your policy.
+real-data, migration or cost change needs a decision you answered unless the project is at Turbo,
+and a security change unless it is at Full auto — two levels you confirm when you choose them.
 It can check a report with read-only git in the project and keeps short notes per project. It uses tokens on its provider, and nothing of it exists until you start it.
 
 ![A project's beads (a screenshot of an earlier version: the board now comes first)](images/01-beads-screen.jpg)
@@ -36,18 +41,19 @@ paseo plugin add npm:paseo-bm-plugin
 
 Then open **Beads Manager** in Paseo's sidebar. The plugin creates its four agent roles
 (`bm-manager`, `bm-worker`, `bm-reviewer`, `bm-orchestrator`) the first time you open it, with the first provider and
-model Paseo reports as available; change them in **Settings → Agents**.
+model Paseo reports as available; change them in **Settings → More → Agents**.
 
-Open **Settings**. Three things need a press, because each grants something: **Allow agent tools**
-(Paseo's machine-wide `daemon.mcp.injectIntoAgents` switch, without which Beads Manager does not
-start, because a Manager started earlier could never create a Worker), **Install skills** (runs the
-third-party `skills` CLI once) and **Install `br` / `bv`** (the beads tools).
+Three things need a press, because each grants something: **Allow agent tools** in **Settings →
+More → Agents** (Paseo's machine-wide `daemon.mcp.injectIntoAgents` switch, without which Beads
+Manager does not start, because a Manager started earlier could never create a Worker), and in
+**Tools & skills** **Install skills** (runs the third-party `skills` CLI once) and **Install `br` /
+`bv`** (the beads tools).
 
 Update it with `paseo plugin update paseo-bm`.
 
 ## Removing it
 
-Open **Settings → Data**, press **Remove paseo-bm's settings…** and confirm, **then**:
+Open **Settings → More → Data**, press **Remove paseo-bm's settings…** and confirm, **then**:
 
 ```bash
 paseo plugin remove paseo-bm
@@ -85,8 +91,8 @@ The **Install skills** button runs a third-party tool that downloads from
 [cuongntr/agent-skills](https://github.com/cuongntr/agent-skills) (another author's repository);
 paseo-bm never writes to your skills folders itself. The Orchestrator, once you start it, sends the
 masked content of every paseo-bm project to its provider, and a command you approve — by picking an
-option, by telling it to send in its chat, or one it sends by itself where your autonomy policy
-delegates what the command does, to the Manager or directly to a Worker with a copy to its Manager —
+option, by telling it to send in its chat, or one it sends by itself where the project's autonomy
+level lets it decide what the command does, to the Manager or directly to a Worker with a copy to its Manager —
 reaches the agent as your own word. The full list of what paseo-bm records on your
 machine is in
 [GUIDE.md](https://github.com/hieunt286/paseo-bm/blob/main/GUIDE.md#before-you-install-read-these-warnings).
@@ -98,7 +104,7 @@ Check `paseo plugin ls` and `paseo plugin logs paseo-bm`.
 ## Documentation
 
 - [Repository and README](https://github.com/hieunt286/paseo-bm#readme)
-- [GUIDE.md](https://github.com/hieunt286/paseo-bm/blob/main/GUIDE.md) — requirements, the Inbox, Work, Insights and Settings, everything paseo-bm writes, updating, removal, migration, troubleshooting
+- [GUIDE.md](https://github.com/hieunt286/paseo-bm/blob/main/GUIDE.md) — requirements, the Inbox, Projects, Settings and Tools & skills, everything paseo-bm writes, updating, removal, migration, troubleshooting
 - [Guided tour](https://paseo-bm.erai.pro)
 
 ## License

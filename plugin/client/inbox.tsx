@@ -483,7 +483,7 @@ export function DigestRowView({
   );
 }
 
-/** The empty Inbox: one sentence, and the way to Work. */
+/** The empty Inbox: one sentence, and the way to Projects. */
 export function EmptyInbox({ sentence, onOpenWork, styles }: { sentence: string; onOpenWork: () => void; styles: Styles }) {
   return (
     <View style={[styles.card, { gap: 10 }]}>
@@ -491,7 +491,7 @@ export function EmptyInbox({ sentence, onOpenWork, styles }: { sentence: string;
         {sentence}
       </Text>
       <View style={styles.chipRow}>
-        <Button label="Open Work" kind="secondary" accessibilityLabel="Open Work: the projects and their requests" onPress={onOpenWork} styles={styles} />
+        <Button label="Open Projects" kind="secondary" accessibilityLabel="Open Projects: the projects and their requests" onPress={onOpenWork} styles={styles} />
       </View>
     </View>
   );

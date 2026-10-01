@@ -16,6 +16,12 @@ import * as setupRpc from "../plugin/server/setup-rpc";
 import { appendRecord, clearTraceStoreCache, writeWorkspaceMeta } from "../plugin/server/trace-store";
 import { ORCHESTRATOR_SERVER_TOOLS, toolFacesFor, toolNamed } from "../plugin/shared/bm-tools";
 import { DASHBOARD_ERROR_CODES } from "../plugin/shared/contracts";
+import * as autonomyRpc from "../plugin/server/autonomy-rpc";
+import * as autonomyStore from "../plugin/server/autonomy-store";
+import * as policyResolve from "../plugin/server/policy-resolve";
+import { ALERT_KINDS } from "../plugin/shared/alerts";
+import * as autonomy from "../plugin/shared/autonomy";
+import * as decisions from "../plugin/shared/decisions";
 import * as gate from "../plugin/shared/decision-gate";
 import { RULE_IDS } from "../plugin/shared/orchestrator";
 import { MANAGER, WORKSPACE_DIRECTORY, WORKSPACE_ID, msg, smallWithBead, turn } from "./fixtures/orchestrator-traces";
@@ -290,3 +296,27 @@ describe("retired pieces of the screens", () => {
     expect(screen).not.toMatch(/BeadsOverviewSection/);
   });
 });
+
+describe("the owner-only classes, the recommended predictor and demotion (ADR-025, change-014)", () => {
+  it("are gone: their error code, alert kind, exports and store method", () => {
+    expect(DASHBOARD_ERROR_CODES).not.toContain("E_AUTONOMY_OWNER_ONLY");
+    expect(ALERT_KINDS).not.toContain("autonomy-demoted");
+    for (const name of ["HARD_OWNER_CLASSES", "isHardOwnerClass"]) expect(decisions, name).not.toHaveProperty(name);
+    for (const name of ["recommendedDelegationOf", "policyReasonOf", "predictorOf", "DEFAULT_AUTONOMY_PREDICTOR", "withDemotion", "demotedAtOf", "autonomyDemotionsSchema"]) {
+      expect(autonomy, name).not.toHaveProperty(name);
+    }
+    expect(policyResolve).not.toHaveProperty("resolveByPolicy");
+    expect(autonomyRpc).not.toHaveProperty("demoteOnReversal");
+    expect(autonomyStore.createAutonomyStore("/nonexistent-home")).not.toHaveProperty("demote");
+  });
+
+  it("leave Settings no matrix, predictor choice, challenger switch or Return all to owner (change-014 outcome 5)", async () => {
+    const model = await import("../plugin/client/settings-autonomy-model");
+    for (const name of ["autonomyMatrixView", "autonomyGroupState", "AUTONOMY_ROW_ORDER", "OWNER_ONLY_REASONS", "RETURN_ALL_LABEL", "CHALLENGER_LABEL", "CHALLENGER_MEANING", "PREDICTOR_LABELS", "DECIDED_BY_LABEL"]) {
+      expect(model, name).not.toHaveProperty(name);
+    }
+    const code = source("../plugin/client/settings-autonomy.tsx").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(code).not.toMatch(/autonomySetRpc|autonomyResetRpc|autonomySetChallengerRpc|Return all to owner|Orchestrator predictions/);
+  });
+});
+

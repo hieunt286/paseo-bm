@@ -79,7 +79,8 @@ describe("the MCP conversation", () => {
     expect(init.body.result).toMatchObject({ protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: AGENT_TOOLS_SERVER } });
     expect((await rpc(url, { jsonrpc: "2.0", method: "notifications/initialized" })).status).toBe(202);
     const listed = await rpc(url, { jsonrpc: "2.0", id: 2, method: "tools/list" });
-    expect(listed.body.result.tools.map((tool: { name: string }) => tool.name)).toEqual(["bm_report"]);
+    // Change-014 outcome 3: the Worker's server-run bm_reply follows its block tool.
+    expect(listed.body.result.tools.map((tool: { name: string }) => tool.name)).toEqual(["bm_report", "bm_reply"]);
     expect(listed.body.result.tools[0].inputSchema.type).toBe("object");
     const called = await rpc(url, {
       jsonrpc: "2.0",
@@ -164,9 +165,9 @@ describe("the MCP conversation", () => {
 });
 
 describe("the Orchestrator's endpoint (orchestrator design §5.1)", () => {
-  const ORCHESTRATOR_TOOLS = ["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_predict", "bm_direct_worker", "bm_repo", "bm_note", "bm_findings", "bm_compact", "bm_handoff", "bm_why"];
-  /** The Orchestrator's tools no other role has: the Manager has a bm_decisions of its own. */
-  const ORCHESTRATOR_ONLY = ORCHESTRATOR_TOOLS.filter((name) => name !== "bm_decisions");
+  const ORCHESTRATOR_TOOLS = ["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_predict", "bm_direct_worker", "bm_repo", "bm_note", "bm_findings", "bm_compact", "bm_handoff", "bm_why", "bm_reply"];
+  /** The Orchestrator's tools no other role has: the Manager has a bm_decisions of its own, the Worker a bm_reply (change-014). */
+  const ORCHESTRATOR_ONLY = ORCHESTRATOR_TOOLS.filter((name) => name !== "bm_decisions" && name !== "bm_reply");
 
   it("serves the Orchestrator only under its 64-hex secret, and answers 404 without it", async () => {
     const { endpoint } = await start();
@@ -554,6 +555,7 @@ describe("the creation hook's part", () => {
         preapproved: [
           { kind: "mcp", server: "paseo", tool: "create_agent" },
           { kind: "mcp", server: AGENT_TOOLS_SERVER, tool: "bm_report" },
+          { kind: "mcp", server: AGENT_TOOLS_SERVER, tool: "bm_reply" },
         ],
       },
     });
@@ -566,11 +568,13 @@ describe("the creation hook's part", () => {
     const reviewer = applyAgentTools(request("bm-reviewer/gpt-5.6-sol"), tools, "codex");
     expect(reviewer?.config.mcpServers?.[AGENT_TOOLS_SERVER]).toEqual({ type: "http", url: "http://127.0.0.1:4567/mcp/reviewer", alwaysLoad: true });
     expect(reviewer?.config.toolPolicy?.preapproved).toEqual([{ kind: "mcp", server: AGENT_TOOLS_SERVER, tool: "bm_review" }]);
-    expect(applyAgentTools(request("bm-worker-fallback-1/x"), tools, "opencode")?.config.toolPolicy?.preapproved).toEqual([{ kind: "mcp", server: AGENT_TOOLS_SERVER, tool: "bm_report" }]);
+    expect(applyAgentTools(request("bm-worker-fallback-1/x"), tools, "opencode")?.config.toolPolicy?.preapproved).toEqual(
+      ["bm_report", "bm_reply"].map((tool) => ({ kind: "mcp", server: AGENT_TOOLS_SERVER, tool })),
+    );
     const orchestrator = applyAgentTools(request("bm-orchestrator/claude-opus-5"), tools, "claude");
     expect(orchestrator?.config.mcpServers?.[AGENT_TOOLS_SERVER]).toEqual({ type: "http", url: "http://127.0.0.1:4567/mcp/orchestrator", alwaysLoad: true });
     expect(orchestrator?.config.toolPolicy?.preapproved).toEqual(
-      ["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_predict", "bm_direct_worker", "bm_repo", "bm_note", "bm_findings", "bm_compact", "bm_handoff", "bm_why"].map((tool) => ({ kind: "mcp", server: AGENT_TOOLS_SERVER, tool })),
+      ["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_predict", "bm_direct_worker", "bm_repo", "bm_note", "bm_findings", "bm_compact", "bm_handoff", "bm_why", "bm_reply"].map((tool) => ({ kind: "mcp", server: AGENT_TOOLS_SERVER, tool })),
     );
     expect(applyAgentTools(request("bm-orchestrator"), tools, "copilot")).toBeUndefined();
     // Paseo refuses a toolPolicy on Pi, Oh My Pi or Copilot: the agent must still be created.

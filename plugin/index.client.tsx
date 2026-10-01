@@ -150,12 +150,12 @@ export default function contribute(client: PluginClientContext): () => void {
       context: "workspace",
       onSelect: (context) => selectFromCommandCenter(context),
     }),
-    // Autonomy design §A.12: this workspace's project page in Work, on its Requests.
+    // Autonomy design §A.12, change-014 outcome 5: this workspace's project page in Projects, on its Overview.
     client.addCommandCenterItem({
       id: "open-beads-project",
       title: "Open Beads project",
       icon: "LayoutDashboard",
-      keywords: ["beads", "work", "project", "requests", "paseo-bm"],
+      keywords: ["beads", "projects", "project", "overview", "requests", "paseo-bm"],
       context: "workspace",
       onSelect: (context) => selectProjectFromCommandCenter(context, LAUNCHER_SURFACE_ID),
     }),

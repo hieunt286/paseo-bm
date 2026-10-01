@@ -1,19 +1,21 @@
 /**
- * Settings, the fourth section of the management surface (experience concept
- * §4.4, autonomy design §A.12): five groups on one scrolling screen, each
- * folded to one line with its state.
+ * Settings, a section of the management surface (experience concept §4.4,
+ * autonomy design §A.12; change-014 outcome 5), on one scrolling screen:
  *
- * - **Agents** — the roles (provider, model, thinking, mode) with their
- *   fallback chains, sign-in, and Paseo's agent tools.
- * - **Autonomy** — the owner's policy, one matrix per project (autonomy
- *   design §B.2; `settings-autonomy.tsx`).
- * - **Coordination** — how often the Orchestrator advises, compaction
- *   and handoff, each switched on its own with its thresholds, and the review
- *   budget per tier (autonomy design §G.7; `settings-coordination.tsx`).
- * - **Tools & skills** — `br`, `bv` and the agent skills, with install or
- *   copy-command actions.
- * - **Data** — the data folder, the trace storage with its cleanup per
- *   workspace, and removing paseo-bm's settings.
+ * - **Autonomy**, open — one level per project, Hands-on to Full auto, and
+ *   the project's action boundary under it (ADR-025;
+ *   `settings-autonomy.tsx`).
+ * - **Coordination**, open — compaction and handoff, each switched on its
+ *   own with its thresholds, the review budget per tier and how often the
+ *   Orchestrator advises (autonomy design §G.7; `settings-coordination.tsx`),
+ *   then one reset to the defaults.
+ * - **More**, each folded to one line with its state: **Agents** (the roles
+ *   with their fallback chains, sign-in, Paseo's agent tools), **Precedents**
+ *   (`settings-precedents.tsx`) and **Data** (the data folder, the trace
+ *   storage with its cleanup per workspace, removing paseo-bm's settings).
+ *
+ * Tools & skills is a section of its own (`tools-screen.tsx`), which reads
+ * the same `setup.status` through `useSetupStatus`.
  *
  * Built from the Setup screen's pieces (`settings-blocks.tsx`) and wording
  * (`settings-machine-model.ts`, `settings-roles-model.ts`); the rest of the old
@@ -33,13 +35,14 @@ import {
   autonomyPolicyRpc,
   coordinationSetRpc,
   coordinationSettingsRpc,
+  precedentsListRpc,
   setupEnsureRolesRpc,
   setupStatusRpc,
   tracesWorkspacesRpc,
   type AutonomyPolicyOutput,
   type CoordinationSettingsOutput,
-  type SetupStatus,
 } from "../shared/contracts";
+import { levelsOf } from "../shared/autonomy";
 import { COORDINATION_MECHANISMS, type CoordinationMechanism } from "../shared/coordination";
 import { DEFAULT_WARN_ABOVE_BYTES, dashboardSettings } from "../shared/settings";
 import { PLUGIN_VERSION } from "../shared/version";
@@ -49,10 +52,13 @@ import { dashboardStyles } from "./styles";
 import { errorMessageOf } from "./errors";
 import type { InsightsProject } from "./insights-model";
 import { AutonomyGroup } from "./settings-autonomy";
-import { AUTONOMY_POLICY_KEY, autonomyGroupState } from "./settings-autonomy-model";
+import { AUTONOMY_POLICY_KEY, PRECEDENTS_QUERY_KEY, autonomyProjects } from "./settings-autonomy-model";
 import { MechanismCard, ReviewBudgetCard } from "./settings-coordination";
 import {
+  COORDINATION_MEANING,
   changedReviewBudget,
+  coordinationDefaultsDraft,
+  coordinationResetView,
   changedThresholds,
   defaultsDraft,
   mechanismCardView,
@@ -65,7 +71,6 @@ import {
   turnOnDialog,
   type ReviewBudgetDraft,
   type ThresholdDraft,
-  type ThresholdKey,
 } from "./settings-coordination-model";
 import {
   DEFAULT_OPEN_GROUPS,
@@ -76,42 +81,38 @@ import {
   coordinationGroupState,
   dataGroupState,
   groupHeaderView,
+  precedentsGroupState,
   stepAdviceCadence,
   storageSummary,
   toggleGroup,
-  toolsGroupState,
   type AdviceCadenceView,
   type GroupHeaderView,
+  type GroupState,
   type SettingsGroupKey,
   type StorageRow,
 } from "./settings-model";
 import {
   PLUGIN_DIAGNOSTICS_LINE,
-  SKILLS_COMMAND_LABEL,
-  anySkillMissing,
   dataHomeLine,
   ensureRolesLine,
   paseoToolsWarnings,
   rolesCreatedLine,
   signInRows,
-  skillChips,
-  skillDirsText,
-  skillsRunLine,
   type EnsureRolesLine,
 } from "./settings-machine-model";
-import { AgentToolsBlockView, CleanupBlock, CommandLine, RolesSection, SkillsInstallBlock, ToolCard, useBusyAction } from "./settings-blocks";
-import { Button, Chip, ToneText, type Styles, type Theme } from "./ui";
-import { localTimeText } from "./format";
+import { AgentToolsBlockView, CleanupBlock, CommandLine, RolesSection, useBusyAction } from "./settings-blocks";
+import { PrecedentsBlock } from "./settings-precedents";
+import { Button, ToneText, type Styles, type Theme } from "./ui";
 
-/** The query Settings reads: the roles ensured, then the status. */
-const SETUP_STATUS_KEY = ["paseo-bm", "setup", "status"] as const;
+/** The query Settings and Tools & skills read: the roles ensured, then the status. */
+export const SETUP_STATUS_KEY = ["paseo-bm", "setup", "status"] as const;
 const STORED_WORKSPACES_KEY = ["paseo-bm", "settings", "stored-workspaces"] as const;
 const COORDINATION_KEY = ["paseo-bm", "settings", "coordination"] as const;
 
 export interface SettingsScreenProps extends PluginSurfaceProps {
   /** The surface's status strip (slash-command notice, launch state), drawn under the title. */
   status?: ReactNode;
-  /** Projects the surface knows by name, as Insights names them: the Autonomy matrix's tabs. */
+  /** Projects the surface knows by name, as Insights names them: the Autonomy group's tabs and the precedents' projects. */
   projects?: readonly InsightsProject[];
 }
 
@@ -274,20 +275,23 @@ export function AdviceCadenceRow({ view, error, onStep, onSave, onReset, styles,
   );
 }
 
+
 /**
  * One of compaction and handoff (autonomy design §G.7): its switch saves at
- * once (turning on after a confirmation), its thresholds stay local until
- * Save, which sends one `coordination.set` per changed setting.
+ * once (turning on after a confirmation), its thresholds stay a draft (held
+ * by the group, so its reset can fill them) until Save, which sends one
+ * `coordination.set` per changed setting.
  */
-function MechanismGroup({ mechanism, data, onSaved, styles, theme }: {
+function MechanismGroup({ mechanism, data, draft, setDraft, onSaved, styles, theme }: {
   mechanism: CoordinationMechanism;
   data: CoordinationSettingsOutput;
+  draft: ThresholdDraft;
+  setDraft: (change: (current: ThresholdDraft) => ThresholdDraft) => void;
   onSaved: (settings: CoordinationSettingsOutput["settings"]) => void;
   styles: Styles;
   theme: Theme;
 }) {
   const save = useRpc(coordinationSetRpc);
-  const [draft, setDraft] = useState<ThresholdDraft>({});
   const [asking, setAsking] = useState(false);
   const { busy, run } = useBusyAction();
   const [error, setError] = useState<string | null>(null);
@@ -327,7 +331,7 @@ function MechanismGroup({ mechanism, data, onSaved, styles, theme }: {
             for (const change of changedThresholds(mechanism, settings, draft)) {
               const output = await save(change);
               onSaved(output.settings);
-              setDraft((current) => Object.fromEntries(Object.entries(current).filter(([key]) => key !== change.key)) as Partial<Record<ThresholdKey, number>>);
+              setDraft((current) => Object.fromEntries(Object.entries(current).filter(([key]) => key !== change.key)) as ThresholdDraft);
             }
           },
           (failure) => setError(errorMessageOf(failure)),
@@ -335,7 +339,7 @@ function MechanismGroup({ mechanism, data, onSaved, styles, theme }: {
       }
       onReset={() => {
         setError(null);
-        setDraft(defaultsDraft(mechanism, data.defaults));
+        setDraft((current) => ({ ...current, ...defaultsDraft(mechanism, data.defaults) }));
       }}
       styles={styles}
       theme={theme}
@@ -345,18 +349,19 @@ function MechanismGroup({ mechanism, data, onSaved, styles, theme }: {
 
 /**
  * The review budget per tier (autonomy design §C.4, §G.7; bead `7gxw.12`):
- * each tier's review calls stay a local draft until Save, which sends one
- * `coordination.set` per changed tier. Only a Worker created afterwards gets
- * the new budget.
+ * each tier's review calls stay a draft (held by the group) until Save, which
+ * sends one `coordination.set` per changed tier. Only a Worker created
+ * afterwards gets the new budget.
  */
-function ReviewBudgetGroup({ data, onSaved, styles, theme }: {
+function ReviewBudgetGroup({ data, draft, setDraft, onSaved, styles, theme }: {
   data: CoordinationSettingsOutput;
+  draft: ReviewBudgetDraft;
+  setDraft: (change: (current: ReviewBudgetDraft) => ReviewBudgetDraft) => void;
   onSaved: (settings: CoordinationSettingsOutput["settings"]) => void;
   styles: Styles;
   theme: Theme;
 }) {
   const save = useRpc(coordinationSetRpc);
-  const [draft, setDraft] = useState<ReviewBudgetDraft>({});
   const { busy, run } = useBusyAction();
   const [error, setError] = useState<string | null>(null);
   const settings = data.settings;
@@ -383,7 +388,7 @@ function ReviewBudgetGroup({ data, onSaved, styles, theme }: {
       }
       onReset={() => {
         setError(null);
-        setDraft(reviewBudgetDefaultsDraft(data.defaults));
+        setDraft(() => reviewBudgetDefaultsDraft(data.defaults));
       }}
       styles={styles}
       theme={theme}
@@ -392,10 +397,11 @@ function ReviewBudgetGroup({ data, onSaved, styles, theme }: {
 }
 
 /**
- * Settings → Coordination (autonomy design §G.7): the owner's settings of how
- * the Orchestrator coordinates — the advice cadence, then compaction and
- * handoff, each a card of its own, then the review budget. An edit stays
- * local until Save.
+ * Settings → Coordination (autonomy design §G.7; change-014 outcome 5),
+ * open on the screen: compaction and handoff, each a card of its own, the
+ * review budget, the Orchestrator's advice cadence, then **Reset coordination
+ * to defaults**, which fills every card's draft with the defaults. An edit
+ * stays a draft until its card's Save.
  */
 function CoordinationGroup({ data, onSaved, styles, theme }: {
   data: CoordinationSettingsOutput;
@@ -404,18 +410,34 @@ function CoordinationGroup({ data, onSaved, styles, theme }: {
   theme: Theme;
 }) {
   const save = useRpc(coordinationSetRpc);
-  const [draft, setDraft] = useState<number | null>(null);
+  const [adviceDraft, setAdviceDraft] = useState<number | null>(null);
+  const [thresholds, setThresholds] = useState<ThresholdDraft>({});
+  const [review, setReview] = useState<ReviewBudgetDraft>({});
   const { busy: saving, run } = useBusyAction();
   const [error, setError] = useState<string | null>(null);
   const stored = data.settings.advice.everyFinished;
-  const value = draft ?? stored;
+  const value = adviceDraft ?? stored;
   const view = adviceCadenceView({ stored, draft: value, defaultValue: data.defaults.advice.everyFinished, saving });
+  const reset = coordinationResetView(saving);
   const edit = (next: number) => {
     setError(null);
-    setDraft(next);
+    setAdviceDraft(next);
   };
   return (
     <View style={{ gap: 10 }}>
+      {COORDINATION_MECHANISMS.map((mechanism) => (
+        <MechanismGroup
+          key={mechanism}
+          mechanism={mechanism}
+          data={data}
+          draft={thresholds}
+          setDraft={setThresholds}
+          onSaved={onSaved}
+          styles={styles}
+          theme={theme}
+        />
+      ))}
+      <ReviewBudgetGroup data={data} draft={review} setDraft={setReview} onSaved={onSaved} styles={styles} theme={theme} />
       <AdviceCadenceRow
         view={view}
         error={error}
@@ -427,7 +449,7 @@ function CoordinationGroup({ data, onSaved, styles, theme }: {
               setError(null);
               const output = await save({ key: "advice.everyFinished", value });
               onSaved(output.settings);
-              setDraft(null);
+              setAdviceDraft(null);
             },
             (failure) => setError(errorMessageOf(failure)),
           )
@@ -435,68 +457,33 @@ function CoordinationGroup({ data, onSaved, styles, theme }: {
         styles={styles}
         theme={theme}
       />
-      {COORDINATION_MECHANISMS.map((mechanism) => (
-        <MechanismGroup key={mechanism} mechanism={mechanism} data={data} onSaved={onSaved} styles={styles} theme={theme} />
-      ))}
-      <ReviewBudgetGroup data={data} onSaved={onSaved} styles={styles} theme={theme} />
+      <View style={styles.chipRow}>
+        <Button
+          label={reset.label}
+          kind="secondary"
+          accessibilityLabel={reset.accessibilityLabel}
+          accessibilityState={{ disabled: !reset.enabled }}
+          disabled={!reset.enabled}
+          onPress={() => {
+            const defaults = coordinationDefaultsDraft(data.defaults);
+            setError(null);
+            setAdviceDraft(defaults.advice);
+            setThresholds(defaults.thresholds);
+            setReview(defaults.review);
+          }}
+          styles={styles}
+        />
+      </View>
     </View>
   );
 }
 
-/** The skills block of Tools & skills: Test, Install skills…, each skill's chips and the command to copy. */
-function SkillsBlock({ status, testing, onTest, onDone, styles, theme }: {
-  status: SetupStatus;
-  testing: boolean;
-  onTest: () => void;
-  onDone: () => void;
-  styles: Styles;
-  theme: Theme;
-}) {
-  const now = new Date();
-  const runLine = skillsRunLine(status, now);
-  return (
-    <>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-        <Text style={[styles.sectionTitle, { flex: 1 }]}>Agent skills</Text>
-        <Button
-          label={testing ? "Testing…" : "Test"}
-          kind="secondary"
-          accessibilityLabel="Test the agent skills again"
-          accessibilityState={{ disabled: testing, busy: testing }}
-          disabled={testing}
-          onPress={onTest}
-          styles={styles}
-        />
-      </View>
-      {anySkillMissing(status) ? (
-        <SkillsInstallBlock command={status.skills.installCommand} onDone={onDone} styles={styles} theme={theme} />
-      ) : null}
-      {runLine === null ? null : <Text style={[styles.body, { fontSize: 11 }]}>{runLine}</Text>}
-      <View style={[styles.card, { gap: 6 }]}>
-        <Text style={styles.body}>{`Checked ${localTimeText(new Date(status.skills.checkedAt), now)} · ${skillDirsText(status.skills.dirs)}`}</Text>
-        {status.skills.skills.map((skill) => (
-          <View key={skill.name} style={{ gap: 2 }}>
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-              <Text style={[styles.mono, { flex: 1 }]}>{`${skill.name}${skill.required ? "" : " (optional)"}`}</Text>
-              {skillChips(skill).map((badge) => (
-                <Chip key={badge.text} badge={badge} styles={styles} theme={theme} />
-              ))}
-            </View>
-            {skill.problem === null ? null : <ToneText tone="danger" styles={styles} theme={theme}>{skill.problem}</ToneText>}
-          </View>
-        ))}
-        <CommandLine label={SKILLS_COMMAND_LABEL} command={status.skills.installCommand} styles={styles} theme={theme} />
-      </View>
-    </>
-  );
-}
-
 /**
- * `setup.status` after `setup.ensure-roles`, in one chain and under the Setup
- * screen's key: opening Settings is a first-use trigger like opening the
+ * `setup.status` after `setup.ensure-roles`, in one chain and under one key:
+ * opening Settings or Tools & skills is a first-use trigger like opening the
  * Manager (design §7.13.2), and never shows a machine half set up.
  */
-function useSetupStatus() {
+export function useSetupStatus() {
   const getStatus = useRpc(setupStatusRpc);
   const ensure = useRpc(setupEnsureRolesRpc);
   return useQuery({
@@ -514,6 +501,29 @@ function useSetupStatus() {
   });
 }
 
+/** A section of the screen: its title, what it is in one line, and its one-line state when it has one. */
+export function SettingsSectionHeading({ title, meaning, state, styles, theme }: {
+  title: string;
+  meaning: string | null;
+  state: GroupState | null;
+  styles: Styles;
+  theme: Theme;
+}) {
+  return (
+    <View style={{ gap: 2, paddingTop: 8 }}>
+      <Text accessibilityRole="header" style={styles.sectionTitle}>
+        {title}
+      </Text>
+      {meaning === null ? null : <Text style={[styles.body, { fontSize: 11 }]}>{meaning}</Text>}
+      {state === null ? null : (
+        <ToneText tone={state.tone} style={{ fontSize: 11 }} styles={styles} theme={theme}>
+          {state.text}
+        </ToneText>
+      )}
+    </View>
+  );
+}
+
 export function SettingsScreen({ theme, layout, status: statusStrip, projects = [] }: SettingsScreenProps) {
   const styles = useMemo(() => dashboardStyles(theme, layout.compact), [theme, layout.compact]);
   const ensure = useRpc(setupEnsureRolesRpc);
@@ -525,6 +535,9 @@ export function SettingsScreen({ theme, layout, status: statusStrip, projects = 
   const coordination = useQuery({ queryKey: COORDINATION_KEY, queryFn: () => readCoordination({}) });
   const readAutonomy = useRpc(autonomyPolicyRpc);
   const autonomy = useQuery({ queryKey: AUTONOMY_POLICY_KEY, queryFn: () => readAutonomy({}) });
+  // The same query the precedents block reads: its count is the Precedents line.
+  const listPrecedents = useRpc(precedentsListRpc);
+  const precedents = useQuery({ queryKey: PRECEDENTS_QUERY_KEY, queryFn: () => listPrecedents({}) });
   const threshold = useSettings(dashboardSettings);
   const warnAboveBytes = threshold.status === "ready" ? threshold.values.warnAboveBytes : DEFAULT_WARN_ABOVE_BYTES;
 
@@ -546,11 +559,9 @@ export function SettingsScreen({ theme, layout, status: statusStrip, projects = 
     void queryClient.invalidateQueries({ queryKey: ["paseo-bm", "traces"] });
   };
 
-  const states: Record<SettingsGroupKey, ReturnType<typeof agentsGroupState>> = {
+  const states: Record<SettingsGroupKey, GroupState> = {
     agents: agentsGroupState(data, { error: rolesError, cleanedUp }),
-    autonomy: autonomyGroupState(autonomy.data?.policy, autonomy.isError),
-    coordination: coordinationGroupState(coordination.data?.settings, coordination.isError),
-    tools: toolsGroupState(data),
+    precedents: precedentsGroupState(precedents.data?.precedents, precedents.isError),
     data: dataGroupState(data, storage, cleanedUp),
   };
 
@@ -606,18 +617,6 @@ export function SettingsScreen({ theme, layout, status: statusStrip, projects = 
       )}
     </View>
   );
-
-  const tools =
-    data === undefined ? null : (
-      <View style={{ gap: 10 }}>
-        <Text style={styles.sectionTitle}>Beads tools</Text>
-        {data.tools.map((tool) => (
-          <ToolCard key={tool.id} tool={tool} styles={styles} theme={theme} onInstalled={refetch} />
-        ))}
-        <Text style={[styles.body, { fontSize: 11 }]}>{`Newest versions as of ${data.latestCheckedOn}; paseo-bm does not look them up online.`}</Text>
-        <SkillsBlock status={data} testing={status.isFetching} onTest={refetch} onDone={refetch} styles={styles} theme={theme} />
-      </View>
-    );
 
   const home = data === undefined ? null : dataHomeLine(data);
   const dataGroup = (
@@ -695,17 +694,19 @@ export function SettingsScreen({ theme, layout, status: statusStrip, projects = 
     <AutonomyGroup
       policy={autonomy.data.policy}
       projects={projects}
-      onSaved={(policy) => queryClient.setQueryData<AutonomyPolicyOutput>(AUTONOMY_POLICY_KEY, { policy })}
+      onSaved={(policy) => queryClient.setQueryData<AutonomyPolicyOutput>(AUTONOMY_POLICY_KEY, { policy, levels: levelsOf(policy) })}
       styles={styles}
       theme={theme}
     />
   );
 
+  const precedentsGroup = (
+    <PrecedentsBlock projects={autonomyProjects(projects, autonomy.data?.policy)} defaultScope={null} styles={styles} theme={theme} />
+  );
+
   const bodies: Record<SettingsGroupKey, ReactNode> = {
     agents,
-    autonomy: autonomyGroup,
-    coordination: coordinationGroup,
-    tools,
+    precedents: precedentsGroup,
     data: dataGroup,
   };
 
@@ -713,10 +714,20 @@ export function SettingsScreen({ theme, layout, status: statusStrip, projects = 
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
       <Text style={styles.title}>Settings</Text>
       {statusStrip}
-      {status.isPending ? <ActivityIndicator color={styles.spinner.color} /> : null}
       {status.isError ? (
         <ToneText tone="danger" styles={styles} theme={theme}>{errorMessageOf(status.error)}</ToneText>
       ) : null}
+      <SettingsSectionHeading title="Autonomy" meaning={null} state={null} styles={styles} theme={theme} />
+      {autonomyGroup}
+      <SettingsSectionHeading
+        title="Coordination"
+        meaning={COORDINATION_MEANING}
+        state={coordination.data === undefined && !coordination.isError ? null : coordinationGroupState(coordination.data?.settings, coordination.isError)}
+        styles={styles}
+        theme={theme}
+      />
+      {coordinationGroup}
+      <SettingsSectionHeading title="More" meaning={null} state={null} styles={styles} theme={theme} />
       {SETTINGS_GROUPS.map((group) => {
         const expanded = open.has(group.key);
         return (

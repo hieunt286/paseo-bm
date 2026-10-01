@@ -26,11 +26,13 @@
  * - **Allow or hold.** No held effect: allowed at once. Each held effect
  *   covered by a live grant of the request — the owner's answered `q:` or
  *   `o:` — allowed, each grant spent (`useGrant`). The rest covered by a
- *   `delegate` cell (dependency, environment): allowed, and stored as an
- *   `h:` decision answered at open `by: policy`. Otherwise held: the decision
+ *   `delegate` cell of the class its effects imply (any class, security
+ *   included at Full auto; ADR-025): allowed, and stored as an `h:` decision
+ *   answered at open `by: policy`. Otherwise held: the decision
  *   `h:<agentId>:<requestId>` opens (`heldDecisionOf`), the request is left
- *   pending, no event goes to the Orchestrator. An unreadable request, and a
- *   `security` effect, are never covered: only the owner allows them.
+ *   pending, no event goes to the Orchestrator. An unreadable request is never
+ *   covered, and a grant never covers a `security` finding: only the owner's
+ *   answer or the project's level allows them.
  * - **Answering.** Only ever a plain `{ behavior: "allow" }` (allow once) or
  *   `{ behavior: "deny", message }` — never Claude's `suggestions` or
  *   `updatedPermissions`, never OpenCode's `allow_always`. The owner's answer
@@ -54,7 +56,7 @@
 import { readFileSync as nodeReadFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { canDelegate, modeOf, predictorOf } from "../shared/autonomy";
+import { modeOf } from "../shared/autonomy";
 import {
   CLASS_OF_EFFECT,
   MAX_DECISION_TEXT_CHARS,
@@ -438,16 +440,16 @@ export function grantCoverOf(findings: readonly HeldFinding[], decisions: readon
 
 /**
  * The classes the owner's policy covers for these findings (§D.4): each is
- * of a class that can be delegated and whose cell is `delegate` in the
- * project. Null when one is not (a release, data, security or cost effect,
- * an unreadable request, an `owner` or `shadow` cell).
+ * of a class whose cell is `delegate` in the project — any class, release,
+ * data, security and cost included (ADR-025). Null when one is not (an
+ * unreadable request, an effect of no class, an `owner` or `shadow` cell).
  */
 export function policyCoverOf(findings: readonly HeldFinding[], cellOf: (decisionClass: DecisionClass) => "owner" | "shadow" | "delegate"): DecisionClass[] | null {
   const classes = new Set<DecisionClass>();
   for (const finding of findings) {
     if (finding.unreadable) return null;
     const decisionClass = CLASS_OF_EFFECT[finding.effects[0]!];
-    if (decisionClass === null || !canDelegate(decisionClass) || cellOf(decisionClass) !== "delegate") return null;
+    if (decisionClass === null || cellOf(decisionClass) !== "delegate") return null;
     classes.add(decisionClass);
   }
   return [...classes];
@@ -658,7 +660,6 @@ export function createActionBoundary(deps: ActionBoundaryDeps = {}): ActionBound
     const covered = policyCoverOf(findings, (decisionClass) => modeOf(policy, workspaceId, decisionClass));
     if (covered !== null) {
       const decisionClass = decision.class!;
-      const predictor = predictorOf(policy, workspaceId, decisionClass) ?? "recommended";
       store.open(decision);
       const mutation = store.transition(
         decision.id,
@@ -669,7 +670,6 @@ export function createActionBoundary(deps: ActionBoundaryDeps = {}): ActionBound
             optionKey: "allow",
             at,
             class: decisionClass,
-            predictor,
             reason: `The request was allowed by your policy: ${covered.join(" and ")} ${covered.length === 1 ? "is" : "are"} delegated in this project`,
           });
           return result.ok && result.decision.grant !== null ? useGrant(result.decision, { effects: result.decision.grant.effects, at }) : result;

@@ -3,6 +3,7 @@ import {
   ANSWER_NOTICE_MARKER,
   BUDGET_NOTICE_MARKER,
   HANDOFF_NOTICE_MARKER,
+  ASK_NOTICE_MARKER,
   INTERRUPTED_NOTICE_MARKER,
   REPLACED_NOTICE_MARKER,
   STATE_NOTICE_MARKER,
@@ -12,6 +13,7 @@ import {
   noticeMarkerOf,
 } from "../plugin/server/notices";
 import { interruptedNoticeText } from "../plugin/server/interruption-watch";
+import { askNoticeOf } from "../plugin/server/decision-ask";
 import { REVIEWER_STOP_NOTICE } from "../plugin/server/stop-propagation";
 import { NEW_REQUEST_MARKER, stripNewRequestMarker } from "../plugin/shared/new-request";
 
@@ -81,6 +83,14 @@ describe("isPluginNotice", () => {
     expect(isPluginNotice(interruptedNoticeText("2026-10-01T01:55:00.322Z"))).toBe(true);
     expect(noticeMarkerOf("BM-INTERRUPTED\ncutAt: x")).toBe(INTERRUPTED_NOTICE_MARKER);
     expect(isPluginNotice("BM-INTERRUPTEDX")).toBe(false);
+  });
+
+  it("knows BM-ASK as a whole word, so the owner's question an asker receives is never the owner's typing (change-014 outcome 3)", () => {
+    expect(ASK_NOTICE_MARKER).toBe("BM-ASK");
+    expect(isPluginNotice(askNoticeOf({ id: "q:req-20261001T073348Z:Q1", question: "Which format?" }, "Why?"))).toBe(true);
+    expect(noticeMarkerOf("BM-ASK\ndecisionId: x")).toBe(ASK_NOTICE_MARKER);
+    expect(isPluginNotice("BM-ASKED x")).toBe(false);
+    expect(isPluginNotice("BM-ASK-ME")).toBe(false);
   });
 
   it("is not fooled by a non-string", () => {

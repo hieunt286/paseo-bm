@@ -275,14 +275,14 @@ describe("the Inbox tab carries the count (DQ-3: no sidebar badge)", () => {
     expect(inboxTab(0)).toEqual({ key: "inbox", label: "Inbox", hint: "nothing needs you" });
     expect(inboxTab(null)).toEqual({ key: "inbox", label: "Inbox" });
     const nodes = renderTree(
-      StatusTabs({ tabs: [inboxTab(5), { key: "work", label: "Work" }, { key: "insights", label: "Insights" }, { key: "settings", label: "Settings" }], selected: "inbox", onSelect: noop, styles }),
+      StatusTabs({ tabs: [inboxTab(5), { key: "projects", label: "Projects" }, { key: "settings", label: "Settings" }, { key: "tools", label: "Tools & skills" }], selected: "inbox", onSelect: noop, styles }),
     );
-    expect(texts(nodes)).toEqual(["Inbox 5", "Work", "Insights", "Settings"]);
+    expect(texts(nodes)).toEqual(["Inbox 5", "Projects", "Settings", "Tools & skills"]);
     expect(pressables(nodes).map((node) => [node.props["accessibilityRole"], node.props["accessibilityLabel"]])).toEqual([
       ["tab", "Inbox: 5 items need you"],
-      ["tab", "Work"],
-      ["tab", "Insights"],
+      ["tab", "Projects"],
       ["tab", "Settings"],
+      ["tab", "Tools & skills"],
     ]);
   });
 });
@@ -386,25 +386,6 @@ describe("Alerts", () => {
     // A host without navigation offers nothing it cannot run.
     expect(alertRowOf(alert("stuck", "wrk-1", 3), input({ can: { openAgent: false, openWorkspace: false } })).action).toBeNull();
     expect(alertRowOf(alert("pairing-mismatch", "a-1", 3, { workspaceId: null }), input()).text).toBe("An agent was created by the wrong role · no project");
-  });
-
-  it("names a class taken back after a reversal, with its project and time; the reason and ids on a tap; nothing to open (§B.4)", () => {
-    const detail = `Scope decisions are back in Shadow: q:req-20260929T073348Z:Q1, answered for you by the recommended option, was overridden by you.`;
-    const demoted = alert("autonomy-demoted", "scope", 7, { detail });
-    const row = alertRowOf(demoted, input());
-    expect(row).toMatchObject({ tone: "warning", text: "Scope decisions went back to Shadow after a reversal · shop", time: "7 min ago", action: null });
-    expect(row.accessibilityLabel).toBe("Scope decisions went back to Shadow after a reversal · shop, 7 min ago");
-    expect(row.details).toEqual([detail, `Alert: autonomy-demoted:${DECISION_WS}:scope`, `Since: ${minutesAgo(7)}`]);
-    // A subject that is not a class still reads, without it.
-    expect(alertRowOf(alert("autonomy-demoted", "style", 7), input()).text).toBe("A delegated class went back to Shadow after a reversal · shop");
-    // Listed last, after the other kinds.
-    expect(orderedAlerts([demoted, alert("fallback-failed", "f:fb-1", 1)]).map((entry) => entry.kind)).toEqual(["fallback-failed", "autonomy-demoted"]);
-    // Drawn: the line without the decision id; the reason when opened.
-    const closed = renderTree(AlertRow({ row, expanded: false, onToggle: noop, onRun: noop, resend: undefined, compact: true, styles, theme }));
-    expect(texts(closed)).toEqual(["●", "Scope decisions went back to Shadow after a reversal · shop", "7 min ago ▸"]);
-    expect(pressables(closed)).toHaveLength(1);
-    const open = renderTree(AlertRow({ row, expanded: true, onToggle: noop, onRun: noop, resend: undefined, compact: true, styles, theme }));
-    expect(texts(open)).toContain(detail);
   });
 
   it("offers to replace a Manager on older instructions, and only to open a Worker or a Reviewer", () => {
@@ -522,10 +503,10 @@ describe("the drawn Inbox pieces", () => {
     expect(texts(failed)).toContain("Could not resend: E_X");
   });
 
-  it("draws the empty Inbox as its sentence and a way to Work", () => {
+  it("draws the empty Inbox as its sentence and a way to Projects", () => {
     const onOpenWork = vi.fn();
     const nodes = renderTree(EmptyInbox({ sentence: emptySentence(2), onOpenWork, styles }));
-    expect(texts(nodes)).toEqual(["Nothing needs you. 2 Workers are running.", "Open Work"]);
+    expect(texts(nodes)).toEqual(["Nothing needs you. 2 Workers are running.", "Open Projects"]);
     const [work] = pressables(nodes);
     expect(work!.props["accessibilityRole"]).toBe("button");
     (work!.props["onPress"] as () => void)();
@@ -614,24 +595,26 @@ describe("Decided for you: what the policy and precedents answered since the own
   /** A scope question of req-A answered for the owner — by the policy's recommended option unless told otherwise. */
   function decided(n: number, answeredMinutesAgo: number, answer: Partial<AnswerInput> = {}, overrides: Partial<Decision> = {}): Decision {
     const open = question("req-A", n, 60, { question: "Which date format on the invoices?", subject: "date-format", class: "scope", options: SCOPE, prediction: openingPrediction(SCOPE), ...overrides });
-    const result = answerDecision(open, { by: "policy", via: "inbox", optionKey: "a", class: "scope", predictor: "recommended", reason: POLICY_REASON, at: minutesAgo(answeredMinutesAgo), ...answer });
+    const result = answerDecision(open, { by: "policy", via: "inbox", optionKey: "a", class: "scope", reason: POLICY_REASON, at: minutesAgo(answeredMinutesAgo), ...answer });
     if (!result.ok) throw new Error(result.message);
     return result.decision;
   }
-  const byPolicy = decided(1, 2);
-  const byOrchestrator = decided(2, 5, { predictor: "orchestrator", reason: "Day first, as the owner writes." });
-  const byPrecedent = decided(3, 8, { by: "precedent", predictor: undefined, precedentId: "p:9f1c", reason: PRECEDENT_REASON, optionKey: null, words: "Day first, always" });
+  /** A policy answer as builds before ADR-025 stored it, naming the recommended option as its predictor. */
+  const storedRecommended = (decision: Decision): Decision => ({ ...decision, answer: { ...decision.answer!, predictor: "recommended" } });
+  const byPolicy = storedRecommended(decided(1, 2));
+  const byOrchestrator = decided(2, 5, { reason: "Day first, as the owner writes." });
+  const byPrecedent = decided(3, 8, { by: "precedent", precedentId: "p:9f1c", reason: PRECEDENT_REASON, optionKey: null, words: "Day first, always" });
 
   it("lists each answer with what was decided, the project, who decided and the reason, the latest first", () => {
     const section = decidedForYouOf(input({ digest: [byPolicy, byOrchestrator, byPrecedent], digestSince: minutesAgo(30) }));
     expect(section.count).toBe(3);
     expect(section.empty).toBeNull();
     expect(section.rows.map(({ what, where, reason, time }) => ({ what, where, reason, time }))).toEqual([
-      { what: "Which date format on the invoices? → dd/mm/yyyy", where: "shop · your policy (recommended option)", reason: POLICY_REASON, time: "2 min ago" },
-      { what: "Which date format on the invoices? → dd/mm/yyyy", where: "shop · your policy (the Orchestrator)", reason: "Day first, as the owner writes.", time: "5 min ago" },
+      { what: "Which date format on the invoices? → dd/mm/yyyy", where: "shop · your earlier policy", reason: POLICY_REASON, time: "2 min ago" },
+      { what: "Which date format on the invoices? → dd/mm/yyyy", where: "shop · the Orchestrator", reason: "Day first, as the owner writes.", time: "5 min ago" },
       { what: 'Which date format on the invoices? → "Day first, always"', where: "shop · your precedent", reason: PRECEDENT_REASON, time: "8 min ago" },
     ]);
-    expect(section.rows[0]!.accessibilityLabel).toBe("Decided for you: Which date format on the invoices? → dd/mm/yyyy, shop · your policy (recommended option), 2 min ago");
+    expect(section.rows[0]!.accessibilityLabel).toBe("Decided for you: Which date format on the invoices? → dd/mm/yyyy, shop · your earlier policy, 2 min ago");
     // An Orchestrator's decision shows its question's first line, not its recommendation.
     const asked = decided(4, 1, {}, { id: "o:4b1f0c2e", askedBy: { role: "orchestrator", agentId: "orch-1" }, requestId: null, round: null, question: "Merge the fix now?\n\nRecommendation: merge it." });
     expect(digestRowOf(asked, input()).what).toBe("Merge the fix now? → dd/mm/yyyy");
@@ -682,7 +665,7 @@ describe("Decided for you: what the policy and precedents answered since the own
     expect(view.empty).toBeNull();
     expect(view.count).toBe(0);
     expect(inboxTab(view.count)).toEqual({ key: "inbox", label: "Inbox", hint: "nothing needs you" });
-    expect(DECIDED_FOR_YOU_TRUNCATED).toBe("More was decided for you than the Inbox shows; Work has every decision.");
+    expect(DECIDED_FOR_YOU_TRUNCATED).toBe("More was decided for you than the Inbox shows; each project's Requests tab has every decision.");
     expect(inboxView(input({ digest: [] })).decidedForYou.empty).toBe(DECIDED_FOR_YOU_EMPTY);
   });
 
@@ -691,7 +674,7 @@ describe("Decided for you: what the policy and precedents answered since the own
     const onToggle = vi.fn();
     const onOverride = vi.fn();
     const closed = renderTree(DigestRowView({ row, expanded: false, onToggle, onOverride, state: undefined, compact: false, styles, theme }));
-    expect(texts(closed)).toEqual(["✓", "Which date format on the invoices? → dd/mm/yyyy", "2 min ago ▸", "shop · your policy (recommended option)", POLICY_REASON, "Override"]);
+    expect(texts(closed)).toEqual(["✓", "Which date format on the invoices? → dd/mm/yyyy", "2 min ago ▸", "shop · your earlier policy", POLICY_REASON, "Override"]);
     expect(texts(closed).join(" ")).not.toContain(byPolicy.id);
     const [toggle, override] = pressables(closed);
     expect(toggle!.props["accessibilityLabel"]).toBe(`${row.accessibilityLabel}. Show the details`);
@@ -788,7 +771,7 @@ describe("Decided for you: the Orchestrator's interventions since the owner last
       { key: "b", label: "yyyy-mm-dd", recommended: false, effects: ["commit"] },
     ];
     const open = question("req-A", n, 60, { question: "Which date format on the invoices?", subject: "date-format", class: "scope", options, prediction: openingPrediction(options) });
-    const result = answerDecision(open, { by: "policy", via: "inbox", optionKey: "a", class: "scope", predictor: "recommended", reason: "The recommended option", at: minutesAgo(minutes), ...answer });
+    const result = answerDecision(open, { by: "policy", via: "inbox", optionKey: "a", class: "scope", reason: "The recommended option", at: minutesAgo(minutes), ...answer });
     if (!result.ok) throw new Error(result.message);
     return result.decision;
   }
@@ -815,7 +798,7 @@ describe("Decided for you: the Orchestrator's interventions since the owner last
 
   it("lists each one since the last look — what it did and for whom, the project, why, its outcome — merged with the decisions, the latest first", () => {
     const byPolicy = decidedFor(1, 2);
-    const byOrchestrator = decidedFor(2, 5, { predictor: "orchestrator", reason: "Day first, as the owner writes." });
+    const byOrchestrator = decidedFor(2, 5, { reason: "Day first, as the owner writes." });
     const before = intervention("unblock", 45);
     const section = decidedForYouOf(
       input({ digest: [byPolicy, byOrchestrator], interventions: [unblock, correct, stop, advice, compact, before], digestSince: minutesAgo(30) }),
@@ -866,7 +849,7 @@ describe("Decided for you: the Orchestrator's interventions since the owner last
   });
 
   it("joins the Orchestrator's answer to its decision's line — its outcome there, no second line — and lists an answer without one on its own", () => {
-    const byOrchestrator = decidedFor(2, 5, { predictor: "orchestrator", reason: "Day first, as the owner writes." });
+    const byOrchestrator = decidedFor(2, 5, { reason: "Day first, as the owner writes." });
     const answered = intervention("answer", 5, { trigger: "decision.opened", decisionId: byOrchestrator.id, outcome: "met", checkedAt: minutesAgo(3), reason: "Day first, as the owner writes." });
     const elsewhere = intervention("answer", 7, { decisionId: "q:req-B:Q1", requestId: "req-B", reason: "The Worker's own recommendation." });
     const section = decidedForYouOf(input({ digest: [byOrchestrator], interventions: [answered, elsewhere] }));
@@ -875,7 +858,7 @@ describe("Decided for you: the Orchestrator's interventions since the owner last
     expect(line.outcome).toEqual({ outcome: "met", text: "Met · expected: the Worker resumes within 10 min", tone: "success" });
     expect(line.override?.state).toBe("offered");
     expect(line.details.slice(-2)).toEqual(["Intervention: iv-answer-5", `Checked: ${minutesAgo(3)}`]);
-    expect(line.accessibilityLabel).toBe("Decided for you: Which date format on the invoices? → dd/mm/yyyy, shop · your policy (the Orchestrator), Met · expected: the Worker resumes within 10 min, 5 min ago");
+    expect(line.accessibilityLabel).toBe("Decided for you: Which date format on the invoices? → dd/mm/yyyy, shop · the Orchestrator, Met · expected: the Worker resumes within 10 min, 5 min ago");
     expect(section.rows[1]).toMatchObject({ kind: "intervention", what: "Answered the Worker's question", reason: "On the Orchestrator's own look: The Worker's own recommendation." });
     // A decision the policy answered by itself carries no outcome.
     expect(digestRowOf(decidedFor(1, 2), input()).outcome).toBeNull();
@@ -906,7 +889,7 @@ describe("Decided for you: the Orchestrator's interventions since the owner last
     expect(view.decidedForYou).toMatchObject({ count: 1, empty: null, truncated: false, interventionsTruncated: true });
     expect(view.empty).toBeNull();
     expect(view.count).toBe(0);
-    expect(INTERVENTIONS_TRUNCATED).toBe("The Orchestrator intervened more often than the Inbox shows; Insights → Coordination counts every intervention.");
+    expect(INTERVENTIONS_TRUNCATED).toBe("The Orchestrator intervened more often than the Inbox shows; a project's Metrics → Coordination counts every intervention.");
     // Nothing since the last look: the same sentence as before, whatever came earlier.
     const quiet = inboxView(input({ interventions: [stop], digestSince: minutesAgo(5) }));
     expect(quiet.decidedForYou).toMatchObject({ count: 0, rows: [], empty: DECIDED_FOR_YOU_EMPTY, interventionsTruncated: false });
@@ -1041,7 +1024,6 @@ describe("a held request in the Inbox (§D.2)", () => {
       by: "policy",
       via: "inbox",
       optionKey: "allow",
-      predictor: "recommended",
       class: "dependency",
       at: new Date(NOW.getTime() - 30_000).toISOString(),
     });

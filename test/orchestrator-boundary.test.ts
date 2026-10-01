@@ -23,6 +23,7 @@ import { appendRecord, clearTraceStoreCache, writeWorkspaceMeta } from "../plugi
 import type { AgentFacts } from "../plugin/server/traces";
 import { effectsWithheldBy, commandBlockOf, limitsOf, parseCommandBlock, type CommandInput } from "../plugin/shared/orchestrator-command";
 import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
+import { createDecisionThreadStore } from "../plugin/server/decision-thread-store";
 import { handleDecisionsAnswer, settledByKind } from "../plugin/server/decision-rpc";
 import { createQuestionDecisionDelivery } from "../plugin/server/decision-delivery";
 import { createOrchestratorDecisionDelivery } from "../plugin/server/orchestrator-decisions";
@@ -485,7 +486,7 @@ function ownerScopes(workspaceId = WORKSPACE_ID, mode: "shadow" | "delegate" = "
  * checked from here on.
  */
 function ownerDelegatesToOrchestrator(decisionClass: "reversible-technical" | "scope" = "reversible-technical"): void {
-  createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: decisionClass, mode: "delegate", confirmed: true, predictor: "orchestrator" }, NOW.toISOString());
+  createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: decisionClass, mode: "delegate", confirmed: true }, NOW.toISOString());
   before = { ...before, data: dataOutsideStores() };
 }
 
@@ -1759,6 +1760,28 @@ const PATHS: BoundaryPath[] = [
     },
   },
   {
+    name: "tool bm_reply appends the Orchestrator's reply to the owner's open question about its own o: decision, answers nothing and sends nothing (change-014 outcome 3)",
+    rpc: null,
+    tool: "bm_reply",
+    run: async () => {
+      clearDecisionStoreCache();
+      const id = "o:boundary-reply-1";
+      createDecisionStore(home).open(makeDecision({ id, workspaceId: WORKSPACE_ID, requestId: REQUEST_ID, askedBy: { role: "orchestrator", agentId: ORCHESTRATOR_ID } }));
+      before = { ...before, data: dataOutsideStores() };
+      // Nobody asked: refused, nothing written.
+      expect((await callTool("bm_reply", { decisionId: id, text: "Unasked." })).isError).toBe(true);
+      expect(createDecisionThreadStore(home).read(WORKSPACE_ID, id).entries).toEqual([]);
+      createDecisionThreadStore(home).append(WORKSPACE_ID, id, { by: "owner", text: "Why stop the Worker?", at: at(5) });
+      const replied = await callTool("bm_reply", { decisionId: id, text: "It loops on the same failing test." });
+      expect(replied.isError).toBe(false);
+      expect(createDecisionThreadStore(home).read(WORKSPACE_ID, id).entries.map((entry) => entry.by)).toEqual(["owner", "asker"]);
+      // A Worker's question is not the Orchestrator's to reply to.
+      expect((await callTool("bm_reply", { decisionId: `q:${REQUEST_ID}:Q1`, text: "x" })).isError).toBe(true);
+      expect(createDecisionStore(home).get(id, WORKSPACE_ID)).toMatchObject({ status: "open", answer: null });
+      expect(allCommands()).toEqual([]);
+    },
+  },
+  {
     name: "tool bm_ask_owner with prepared changes of the owner's settings (a review budget among them) stores the decision and writes no setting; the policy, bm_decide and bm_predict never answer it (autonomy design §G.4)",
     rpc: null,
     tool: "bm_ask_owner",
@@ -1890,13 +1913,13 @@ const PATHS: BoundaryPath[] = [
       open(1, { class: "scope" });
       open(2);
       open(3);
-      // A release question in the delegated class: the owner's alone.
+      // A release question proposed as scope: its push makes it release, which is not delegated here (Cruise and below).
       open(4, { class: "scope", options: [{ key: "a", label: "Push the fix", recommended: true, effects: ["push"] }, { key: "b", label: "Hold", recommended: false, effects: ["none"] }] });
       expect(await callTool("bm_decide", { decisionId: qid(1), optionKey: "a", reason: "The owner asked for dd/mm/yyyy." })).toMatchObject({ isError: false });
-      expect(createDecisionStore(home).get(qid(1), WORKSPACE_ID)).toMatchObject({ status: "answered", answer: { by: "policy", predictor: "orchestrator", class: "scope" } });
+      expect(createDecisionStore(home).get(qid(1), WORKSPACE_ID)).toMatchObject({ status: "answered", answer: { by: "policy", class: "scope" } });
       for (const [n, text] of [
         [2, "reversible-technical is not delegated to you"],
-        [4, "is of the class release, which is always the owner's"],
+        [4, "release is not delegated to you"],
       ] as const) {
         expect(await callTool("bm_decide", { decisionId: qid(n), optionKey: "a", reason: "The owner asked for it." }), `Q${n}`).toMatchObject({ isError: true, text: expect.stringContaining(text) });
         expect(createDecisionStore(home).get(qid(n), WORKSPACE_ID)).toMatchObject({ status: "open", answer: null });
@@ -1985,16 +2008,12 @@ const PATHS: BoundaryPath[] = [
     },
   },
   {
-    name: "the owner's policy answers an Orchestrator question as it opens (autonomy design §B.5): one command to that Manager on policy:<class>, approved = the option's effects, the grant spent once; a release question stays the owner's and sends nothing",
+    name: "the owner's policy never answers an Orchestrator question as it opens (ADR-025: no instant answer): asked, open, nothing sent",
     rpc: null,
     tool: "bm_ask_owner",
-    sendsTo: [MANAGER],
-    limits: true,
     run: async () => {
       clearDecisionStoreCache();
-      // Every class that may be delegated, to the recommended option.
       ownerDelegatesAll();
-      fake.policy.sendTo.add(MANAGER);
       const asked = await callTool("bm_ask_owner", {
         workspaceId: WORKSPACE_ID,
         requestId: REQUEST_ID,
@@ -2007,32 +2026,9 @@ const PATHS: BoundaryPath[] = [
       });
       expect(asked.isError).toBe(false);
       const decisionId = (JSON.parse(asked.text.slice(asked.text.indexOf("{"))) as { decisionId: string }).decisionId;
-      expect(createDecisionStore(home).get(decisionId)).toMatchObject({
-        answer: { by: "policy", optionKey: "a", class: "reversible-technical", predictor: "recommended" },
-        grant: { effects: ["commit"], usedAt: NOW.toISOString() },
-        delivery: { to: MANAGER },
-      });
-      const blocks = [...fake.sends.filter((sent) => sent.id === MANAGER).map((sent) => sent.text), ...noticeQueue.pending(MANAGER).map((queued) => queued.text)].map(
-        (text) => parseCommandBlock(text)!,
-      );
-      expect(blocks).toMatchObject([{ via: "chat", to: "manager", authority: "policy:reversible-technical", effects: ["commit"], approved: ["commit"], limits: ["no-push", "no-deploy", "no-real-data"] }]);
-      // A release question under the same policy: asked, open, nothing more sent.
-      const push = await callTool("bm_ask_owner", {
-        workspaceId: WORKSPACE_ID,
-        requestId: REQUEST_ID,
-        separate: true,
-        question: "Push the date fix to origin/dev?",
-        recommendation: "Yes.",
-        options: [
-          { label: "Push the date fix", effects: ["push"], recommended: true, command: { to: "manager", agentId: MANAGER, intent: "release", body: "Push the date fix to origin/dev." } },
-          { label: "Hold", effects: ["none"] },
-        ],
-      });
-      const pushId = (JSON.parse(push.text.slice(push.text.indexOf("{"))) as { decisionId: string }).decisionId;
-      expect(createDecisionStore(home).get(pushId)).toMatchObject({ status: "open", answer: null, grant: null });
-      expect(enqueueSpy).toHaveBeenCalledTimes(1);
-      // The one command it delivered is in the commands store, where the loop guard counts it (bead 81y2.2).
-      expect(allCommands()).toEqual([expect.objectContaining({ managerId: MANAGER, requestId: REQUEST_ID, source: "chat", status: "sent", sentText: expect.stringContaining("authority: policy:reversible-technical") })]);
+      expect(createDecisionStore(home).get(decisionId)).toMatchObject({ status: "open", answer: null, grant: null, delivery: null });
+      expect(enqueueSpy).not.toHaveBeenCalled();
+      expect(allCommands()).toEqual([]);
     },
   },
   {

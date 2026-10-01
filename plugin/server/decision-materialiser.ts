@@ -31,23 +31,17 @@
  *   is supersession only. A `br reopen` in the turn's evidence whose reason
  *   cites an answered decision (`q:…`, `o:…`, or a `Qn` of the request)
  *   reverses it (`reopened`); a reopen citing none is ordinary work (a review
- *   finding), not a reversal. A reversal of an answer the policy or a
- *   precedent gave demotes its delegated class (`demoteOnReversal`, §B.4).
+ *   finding), not a reversal. A reversal is only recorded (ADR-025 decision
+ *   4): no cell or level changes.
  * - **Precedents** (autonomy design §B.6). A question that opens on the
- *   subject of an active precedent is answered by it at once unless its class
- *   is owner-fixed (`precedent-resolve.ts`), and goes to `onSettled` with the
- *   turn's other answers — except a subject a precedent already answered in
- *   the same request, which is the owner's. An owner's answer here that
- *   differs from a precedent on its subject supersedes it.
- * - **Delegation** (autonomy design §B.5). A question no precedent bears on,
- *   opening in a `delegate` cell whose predictor is `recommended`, is answered
- *   at once with its recommended option (`policy-resolve.ts`, `by: policy`)
- *   and goes to `onSettled` the same way — except a subject the policy or a
- *   precedent already answered in the same request: asked again, that answer
- *   did not do, so the owner decides (and the re-ask demotes the class). Nor
- *   while the request stands finished-unverified, when the recommended option
- *   commits or releases (autonomy design §C.6, change-008 C4: read from the
- *   trace store, `isFinishedUnverifiedNow`).
+ *   subject of an active precedent is answered by it at once
+ *   (`precedent-resolve.ts`), and goes to `onSettled` with the turn's other
+ *   answers — except a subject a precedent already answered in the same
+ *   request, which is the owner's. An owner's answer here that differs from a
+ *   precedent on its subject supersedes it.
+ * - **Delegation** (autonomy design §B.5). A question in a `delegate` cell is
+ *   not answered here: the event bus asks the Orchestrator to decide it
+ *   (`decision.opened`, `bm_decide`).
  * - **Round.** A block's questions share one round: the round of any of them
  *   already stored, else one more than the request's highest stored round.
  * - **Expiry.** A request's `finished` report means its Worker no longer
@@ -79,7 +73,7 @@
  * (REQ-048b): nothing here reads, stores or prints an unmasked message.
  * Nothing here throws into an agent's turn end: a failure is one log line.
  */
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
 import { parseAnswers, parseQuestions, type Answer, type Question } from "../shared/bm-questions";
 import { parseReports } from "../shared/bm-report";
@@ -103,17 +97,13 @@ import {
   type DecisionOption,
   type DecisionReversal,
 } from "../shared/decisions";
-import { actsOnFinish } from "../shared/autonomy";
 import { parseCommandBlock } from "../shared/orchestrator-command";
 import { BR_REOPEN } from "../shared/shell";
-import { demoteOnReversal } from "./autonomy-rpc";
 import { bmAgentsOf, type DashboardPaseo } from "./paseo-directory";
 import { createDecisionStore, type DecisionStore } from "./decision-store";
 import type { OnDecisionsSettled } from "./decision-rpc";
 import { isPluginNotice } from "./notices";
 import { resolveAtOpen } from "./policy-resolve";
-import { isFinishedUnverifiedNow } from "./request-trace";
-import { TRACES_DIR_NAME } from "./data-home";
 import { supersedePrecedentsBy } from "./precedent-resolve";
 import type { TraceStoreLocation } from "./trace-store";
 import { errorText } from "./rpc-kit";
@@ -334,8 +324,6 @@ export interface MaterialiserDeps {
   workerOf?: WorkerLookup;
   /** Called with every record after it is materialised and settled (the answers' delivery, §A.6); a no-op by default. */
   afterTurn?: AfterTurn;
-  /** The trace store a request's finish is read from (autonomy design §C.6); `<home>/traces` by default. */
-  location?: TraceStoreLocation;
 }
 
 /** What runs after a recorded turn is materialised: the answers' delivery notes arrivals and resumes (§A.6). */
@@ -399,8 +387,6 @@ interface Context {
   now: string;
   log: (message: string) => void;
   outcome: MaterialiseOutcome;
-  /** Whether a request of this workspace stands finished-unverified now (autonomy design §C.6, change-008 C4). */
-  finishedUnverified: (requestId: string) => Promise<boolean>;
 }
 
 function questionsOfRequest(context: Context, requestId: string): Decision[] {
@@ -430,8 +416,6 @@ function reverse(context: Context, id: string, reversal: DecisionReversal): void
     const mutation = context.store.transition(id, (current) => recordReversal(current, reversal), context.record.workspaceId);
     if (mutation.status === "updated" && (mutation.decision.reversals?.length ?? 0) > (decision.reversals?.length ?? 0)) {
       context.outcome.reversed.push(mutation.decision);
-      // §B.4: reversing what the policy or a precedent answered takes its delegated class back at once.
-      demoteOnReversal(mutation.decision, reversal.kind, { home: context.home, now: () => new Date(context.now), log: context.log });
     }
   } catch (error) {
     context.log(`[paseo-bm] could not record the reversal of decision ${id}: ${errorText(error)}`);
@@ -482,10 +466,6 @@ async function openBlock(
   const round = storedRound ?? existing.reduce((highest, decision) => Math.max(highest, decision.round ?? 0), 0) + 1;
   const agentId = await askedBy();
   const askedAt = validIso(message.at, context.now);
-  // Autonomy design §C.6 (change-008 C4): read once per block, and only when a recommended option commits or releases.
-  const finishedUnverified = fresh.some((question) => optionsOf(question).some((option) => option.recommended && actsOnFinish(option)))
-    ? await context.finishedUnverified(block.requestId)
-    : false;
 
   for (const question of fresh) {
     const id = questionDecisionId(block.requestId, question.id);
@@ -534,13 +514,9 @@ async function openBlock(
           now: new Date(context.now),
           log: context.log,
           store,
-          finishedUnverified,
-          // §B.6: an active precedent on its subject answers it at once, unless its class is owner-fixed. Not a
-          // subject a precedent already answered in this request: asked again, the same answer did not do, so the owner decides.
+          // §B.6: an active precedent on its subject answers it at once. Not a subject a precedent already
+          // answered in this request: asked again, the same answer did not do, so the owner decides.
           skipPrecedent: answeredBefore(["precedent"]),
-          // §B.5: then, when no precedent bears on it, a delegate cell of the recommended predictor answers it — never a
-          // subject the policy or a precedent already answered in this request (its re-ask demotes the class, below).
-          skipPolicy: answeredBefore(["policy", "precedent"]),
         });
         context.outcome.opened.push(atOpen.decision);
         if (atOpen.answered !== null) context.outcome.answered.push(atOpen.answered);
@@ -734,12 +710,6 @@ export async function materialiseTurn(record: TraceRecord, deps: MaterialiserDep
       now: (deps.now ?? (() => new Date()))().toISOString(),
       log,
       outcome,
-      finishedUnverified: (requestId) =>
-        isFinishedUnverifiedNow(
-          { location: deps.location ?? { tracesDir: join(deps.home, TRACES_DIR_NAME) }, paseo: deps.paseo as DashboardPaseo, home: deps.home, log },
-          record.workspaceId,
-          { requestId },
-        ),
     };
     if (record.role === "manager") {
       await materialiseManager(context, deps);
@@ -784,6 +754,6 @@ export function createDecisionMaterialiser(
 ): (event: TurnEndedEvent, input: { location: TraceStoreLocation; paseo: unknown; record?: TraceRecord }) => Promise<MaterialiseOutcome | null> {
   return async (_event, { location, paseo, record }) => {
     if (record === undefined) return null;
-    return materialiseTurn(record, { home: dirname(location.tracesDir), paseo, location, ...options });
+    return materialiseTurn(record, { home: dirname(location.tracesDir), paseo, ...options });
   };
 }

@@ -153,22 +153,13 @@ describe("a new incident after the Auto switch was retired (ADR-022 decision 4)"
     expect(sent).toEqual([]);
   });
 
-  it("is answered by itself when the owner delegates environment to the recommended option: by policy, run through fallback.act", async () => {
-    createAutonomyStore(home).set({ workspaceId: "wks_1", class: "environment", mode: "delegate", confirmed: true, predictor: "recommended" }, new Date().toISOString());
+  it("stays open when the owner delegates environment (ADR-025: no instant answer): it waits for the Orchestrator's bm_decide", async () => {
+    createAutonomyStore(home).set({ workspaceId: "wks_1", class: "environment", mode: "delegate", confirmed: true }, new Date().toISOString());
     const acts = actions();
     const sent = await recordUnder("auto", acts);
-    await vi.waitFor(() => expect(acts.roles).toEqual(["switched:worker"]));
-    expect(read()[0]!.status).toBe("switched");
-    await vi.waitFor(() =>
-      expect(decisions()).toMatchObject([
-        {
-          id: `f:${ID}`,
-          status: "answered",
-          answer: { by: "policy", optionKey: "switch", class: "environment", predictor: "recommended" },
-          delivery: { kind: "fallback:switch", outcome: "sent" },
-        },
-      ]),
-    );
+    expect(acts.roles).toEqual([]);
+    expect(read()[0]!.status).toBe("pending");
+    expect(decisions()).toMatchObject([{ id: `f:${ID}`, status: "open", answer: null }]);
     expect(sent).toEqual([]);
   });
 

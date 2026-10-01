@@ -1,14 +1,16 @@
 /**
  * What the Settings section of the management surface says (experience
- * concept §4.4, autonomy design §A.12, §G.7): five groups on one scrolling
- * screen, each collapsed to one line with its state.
+ * concept §4.4, autonomy design §A.12, §G.7; change-014 outcome 5): Autonomy
+ * and Coordination open on the screen, then **More** — Agents, Precedents and
+ * Data — each folded to one line with its state.
  *
  * The groups reuse the Setup screen's pieces and wording
- * (`settings-roles-model.ts`, `settings-machine-model.ts`); this file only decides the one-line state of each group, the Data group's
+ * (`settings-roles-model.ts`, `settings-machine-model.ts`); this file only decides the one-line state of each folded group, the Data group's
  * storage rows, the Coordination group's advice cadence, and which groups are
- * open; the Autonomy group's line and matrix are `settings-autonomy-model.ts`,
+ * open; the Autonomy level is `settings-autonomy-model.ts`,
  * the Coordination group's compaction and handoff cards
- * `settings-coordination-model.ts`.
+ * `settings-coordination-model.ts`. Tools & skills is a section of its own
+ * (`tools-screen-model.ts`).
  * The rest of the old Setup screen is retired (autonomy design §A.14): the
  * Orchestrator is opened from the Inbox, and no screen edits a role's
  * additional instructions.
@@ -17,29 +19,28 @@
  */
 import type { SetupStatus, StoreSize, WorkspaceState } from "../shared/contracts";
 import { ADVICE_EVERY_FINISHED, type CoordinationSettings } from "../shared/coordination";
+import type { Precedent } from "../shared/precedents";
 import { formatBytes } from "./format";
 import { storageView } from "./history-model";
 import { mechanismsText, switchedOffMechanisms, switchedOffText } from "./settings-coordination-model";
 import type { Badge, Tone } from "./tone";
-import { SKILL_COLUMNS, skillAgentOfProvider, toolBadge } from "./settings-machine-model";
 import { SETUP_ROLES, providerLabel } from "./settings-roles-model";
 
-export type SettingsGroupKey = "agents" | "autonomy" | "coordination" | "tools" | "data";
+/** The folded groups under More. */
+export type SettingsGroupKey = "agents" | "precedents" | "data";
 
 /**
- * The groups, in the order of experience concept §4.4, with Coordination
- * (autonomy design §G.7) after Autonomy (§B.2). A group with `opens: false`
- * would be one line that does not open; every group opens today.
+ * The groups under More, in the mockup's order (change-014 outcome 5). A
+ * group with `opens: false` would be one line that does not open; every group
+ * opens today.
  */
 export const SETTINGS_GROUPS: ReadonlyArray<{ key: SettingsGroupKey; title: string; hint: string; opens: boolean }> = [
   { key: "agents", title: "Agents", hint: "roles, models, fallbacks, sign-in and agent tools", opens: true },
-  { key: "autonomy", title: "Autonomy", hint: "which decisions the agents may take for you", opens: true },
-  { key: "coordination", title: "Coordination", hint: "advice, compaction and handoff", opens: true },
-  { key: "tools", title: "Tools & skills", hint: "br, bv and the agent skills", opens: true },
-  { key: "data", title: "Data", hint: "data folder, trace storage and cleanup", opens: true },
+  { key: "precedents", title: "Precedents", hint: "your standing answers", opens: true },
+  { key: "data", title: "Data", hint: "data folder, trace storage, remove settings", opens: true },
 ];
 
-/** Where the Settings section opens: every group folded, so the states read at a glance. */
+/** Where More opens: every group folded, so the states read at a glance. */
 export const DEFAULT_OPEN_GROUPS: ReadonlySet<SettingsGroupKey> = new Set();
 
 /** The set of open groups after a press on `key`; a group that does not open stays closed. */
@@ -106,37 +107,11 @@ export function agentsGroupState(
   });
 }
 
-/**
- * The Tools & skills group's line: `br` / `bv` missing or out of date, and the
- * required skills of the agent the Worker runs on (the one that uses them).
- */
-export function toolsGroupState(status: SetupStatus | undefined): GroupState {
-  if (status === undefined) return GROUP_LOADING;
-  const problems: Badge[] = [];
-  const beadsTools = status.tools.filter((tool) => tool.id === "br" || tool.id === "bv");
-  const missing = beadsTools.filter((tool) => tool.path === null).map((tool) => tool.id);
-  if (missing.length > 0) problems.push({ text: `Missing ${missing.join(" and ")}`, tone: "danger" });
-  for (const tool of beadsTools) {
-    if (tool.path !== null && toolBadge(tool).tone === "warning") problems.push({ text: `${tool.id} update available`, tone: "warning" });
-  }
-  const required = status.skills.skills.filter((skill) => skill.required).length;
-  const workerProvider = status.setup?.logins.find((entry) => entry.roles.includes("worker"))?.provider ?? null;
-  const column = workerProvider === null ? null : skillAgentOfProvider(workerProvider);
-  const workerMissing = column === null ? undefined : status.skills.missingRequired[column.key];
-  let skillsText: string;
-  if (column !== null && workerMissing !== undefined) {
-    skillsText = `Worker skills (${column.agent}) ${required - workerMissing}/${required}`;
-    if (workerMissing > 0) problems.push({ text: skillsText, tone: "warning" });
-  } else {
-    // No Worker provider known: every reported agent's count, as the Setup headline does.
-    const counts = SKILL_COLUMNS.flatMap(({ key, agent }) => {
-      const count = status.skills.missingRequired[key];
-      return count === undefined ? [] : [`${agent} ${required - count}/${required}`];
-    });
-    skillsText = `skills: ${counts.join(", ")}`;
-  }
-  const toolsText = missing.length === 0 ? "br and bv ready" : null;
-  return stateOf(problems, { text: [toolsText, skillsText].filter((part) => part !== null).join(" · "), tone: "success" });
+/** The Precedents group's line: how many are active, or none yet. */
+export function precedentsGroupState(precedents: readonly Precedent[] | undefined, failed = false): GroupState {
+  if (failed) return { text: "The precedents could not be read", tone: "danger" };
+  if (precedents === undefined) return GROUP_LOADING;
+  return { text: precedents.length === 0 ? "None yet" : `${precedents.length} active`, tone: "muted" };
 }
 
 /** One workspace with trace history, as `traces.workspaces` reports it. */
@@ -290,7 +265,7 @@ export function adviceCadenceView(input: { stored: number; draft: number; defaul
   const higher = stepAdviceCadence(draft, 1);
   const spoken = (value: number) => (value === 0 ? "0, off" : String(value));
   return {
-    title: "Advice",
+    title: "Orchestrator advice",
     meaning: ADVICE_MEANING,
     valueText: adviceCadenceText(draft),
     decrease: { enabled: !saving && lower !== draft, label: "−", accessibilityLabel: `Advice cadence: lower to ${spoken(lower)}` },

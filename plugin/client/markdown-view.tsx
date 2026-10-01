@@ -5,6 +5,7 @@
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { Text, View } from "react-native";
 import { parseMarkdown, type Inline, type MarkdownBlock } from "./markdown";
+import { RADIUS } from "./styles";
 
 type Theme = PluginSurfaceProps["theme"];
 
@@ -62,7 +63,7 @@ function Block({ block, theme, size }: { block: MarkdownBlock; theme: Theme; siz
       );
     case "code":
       return (
-        <View style={{ backgroundColor: theme.colors.surface2, borderRadius: 6, padding: 8 }}>
+        <View style={{ backgroundColor: theme.colors.surface2, borderRadius: RADIUS, padding: 8 }}>
           <Text style={{ fontFamily: MONO, fontSize: size - 1, color: theme.colors.foreground }} selectable>
             {block.text}
           </Text>
@@ -70,7 +71,7 @@ function Block({ block, theme, size }: { block: MarkdownBlock; theme: Theme; siz
       );
     case "table":
       return (
-        <View style={{ borderWidth: 1, borderColor: theme.colors.border, borderRadius: 6 }}>
+        <View style={{ borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS }}>
           {[block.header, ...block.rows].map((row, rowIndex) => (
             <View
               key={rowIndex}

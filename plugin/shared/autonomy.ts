@@ -4,54 +4,49 @@ import {
   decisionClassOf,
   decisionClassSchema,
   decisionKindOf,
-  isHardOwnerClass,
+  DECISION_CLASSES,
   notOpenRefusalOf,
-  predictorSchema,
   preparedChangeRefusalText,
   type Decision,
   type DecisionClass,
   type DecisionOption,
   type Effect,
-  type Predictor,
 } from "./decisions";
 
 /**
- * The owner's autonomy policy (autonomy design §B.2, ADR-018; PRD REQ-121):
- * for each project and decision class (§B.1), who decides.
+ * The owner's autonomy policy (autonomy design §B.2, ADR-018, ADR-025; PRD
+ * REQ-121): for each project and decision class (§B.1), who decides.
  *
  * - `owner` — the owner decides. An absent cell reads as `owner`, which is
  *   every cell of a new install (REQ-121 b, Q-102).
- * - `shadow` — the owner decides too; it behaves as `owner` when a decision
- *   opens (the predictions are recorded in both, §B.9). It is what a demotion
- *   sets (§B.4).
- * - `delegate` — decided for the owner by the cell's predictor: the
- *   recommended option, or the Orchestrator (§B.5). Never for release, data,
- *   security or cost (REQ-121 c): those pass only through the owner's grant.
+ * - `shadow` — the owner decides too, with the Orchestrator's prediction
+ *   shown as its proposal while the project's prediction switch is on.
+ * - `delegate` — the Orchestrator decides for the owner (`bm_decide`, §B.5),
+ *   any class (ADR-025: no class is the owner's by rule).
+ *
+ * The owner sets them as one **level** per project (ADR-025, `LEVELS`):
+ * `autonomy.set-level` writes the nine cells and the prediction switch in one
+ * write (`withLevel`), and `levelOf` reads the level back — `custom` when the
+ * cells match no level.
  *
  * Kept in `<data folder>/autonomy/policy.json` (`server/autonomy-store.ts`) =
- * `{ version: 1, projects: { <workspaceId>: { <class>: cell } }, challenger: { <workspaceId>: boolean }, demotions?: { <workspaceId>: { <class>: time } }, boundary?: { <workspaceId>: { enabled: true, at } } }`,
- * and served by `autonomy.policy`, `autonomy.set`, `autonomy.reset`,
- * `autonomy.set-challenger` and `autonomy.set-boundary` (`server/autonomy-rpc.ts`).
- * `boundary` is the action boundary's switch per project (§D.2, change-010:
- * off by default, set only by the owner with a confirmation, untouched by a
- * reset). The challenger switch
- * (§B.3, off by default per project, DQ-4) says whether the Orchestrator is
- * asked to predict the owner's answers in that project
- * (`predictionRefusalOf`). `demotions` holds each class's last demotion
- * (§B.4): the agreement ledger counts only the answers given since.
+ * `{ version: 1, projects: { <workspaceId>: { <class>: cell } }, challenger: { <workspaceId>: boolean }, boundary?: { <workspaceId>: { enabled: true, at } } }`,
+ * and served by `autonomy.policy`, `autonomy.set-level`, `autonomy.set`,
+ * `autonomy.reset`, `autonomy.set-challenger` and `autonomy.set-boundary`
+ * (`server/autonomy-rpc.ts`). `boundary` is the action boundary's switch per
+ * project (§D.2, change-010: off by default, set only by the owner with a
+ * confirmation, untouched by a reset and by a level). The challenger switch
+ * (§B.3, the prediction switch) says whether the Orchestrator is asked to
+ * predict the owner's answers in that project (`predictionRefusalOf`). A file
+ * of an older build may hold `demotions` and cells naming a predictor: both
+ * are read past (a `recommended` cell reads as the Orchestrator's) and
+ * dropped by the next write. An override is only recorded (ADR-025 decision 4).
  *
- * Delegating (§B.4; PRD REQ-123 a; ADR-023): the owner sets any class but
- * release, data, security and cost to `delegate` at any time, with one
- * confirmation; no agreement threshold gates it.
- *
- * Delegation (§B.5; PRD REQ-121, REQ-123): `recommendedDelegationOf` says
- * what a `delegate` cell whose predictor is `recommended` answers for a
- * decision that has just opened (`server/policy-resolve.ts` writes it);
- * `decideRefusalOf` says whether the Orchestrator may decide one for a cell
- * whose predictor is `orchestrator` (`bm_decide`, and the event that asks it).
- * While a request stands finished-unverified (Phase 3, design §C.3, §C.6
- * change-008 C4), neither predictor chooses an option that acts on it as done
- * (`actsOnFinish`, `unverifiedFinishRefusalOf`).
+ * Delegation (§B.5; PRD REQ-121, REQ-123): `decideRefusalOf` says whether the
+ * Orchestrator may decide a decision for the owner (`bm_decide`, and the
+ * event that asks it). While a request stands finished-unverified (Phase 3,
+ * design §C.3, §C.6 change-008 C4), it chooses no option that acts on it as
+ * done (`actsOnFinish`, `unverifiedFinishRefusalOf`).
  *
  * This module is `shared/`, so it stays free of Node and React Native imports.
  */
@@ -63,42 +58,65 @@ export const AUTONOMY_MODES = ["owner", "shadow", "delegate"] as const;
 export const autonomyModeSchema = z.enum(AUTONOMY_MODES);
 export type AutonomyMode = z.infer<typeof autonomyModeSchema>;
 
-/**
- * Who decides a delegated cell: the option marked recommended, or the
- * Orchestrator (§B.5) — the predictors of the agreement ledger
- * (`decisions.ts` `PREDICTORS`, the one list; code review 2026-09-30 §3.5).
- */
-export type AutonomyPredictor = Predictor;
-
-/**
- * A delegation's predictor when `autonomy.set` names none (§B.9). Settings
- * and Insights always name the predictor the owner chose; this default serves
- * a caller that names none.
- */
-export const DEFAULT_AUTONOMY_PREDICTOR: AutonomyPredictor = "recommended";
-
 const isoTimeSchema = z.string().min(1);
 
 /**
- * One cell: its mode and when it was set (`at`, ISO). A `delegate` cell also
- * records the predictor the owner chose for it.
+ * One cell: its mode and when it was set (`at`, ISO). A `delegate` cell is
+ * the Orchestrator's (ADR-025 decision 5); the `predictor` an older build
+ * stored on it is not read, so a `recommended` one reads as the Orchestrator's.
  */
 export const autonomyCellSchema = z.discriminatedUnion("mode", [
   z.object({ mode: z.literal("owner"), at: isoTimeSchema }),
   z.object({ mode: z.literal("shadow"), at: isoTimeSchema }),
-  z.object({ mode: z.literal("delegate"), predictor: predictorSchema, at: isoTimeSchema }),
+  z.object({ mode: z.literal("delegate"), at: isoTimeSchema }),
 ]);
 export type AutonomyCell = z.infer<typeof autonomyCellSchema>;
 
 export type AutonomyCells = Partial<Record<DecisionClass, AutonomyCell>>;
 
+// ---------------------------------------------------------------------------
+// Levels (ADR-025 decision 1, 2).
+// ---------------------------------------------------------------------------
+
+/** The five levels, 0–4. */
+export const AUTONOMY_LEVELS = [0, 1, 2, 3, 4] as const;
+export type AutonomyLevel = (typeof AUTONOMY_LEVELS)[number];
+export const autonomyLevelSchema = z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3), z.literal(4)]);
+
+/** A project's level as read back from its cells: one of the five, or `custom` when they match none. */
+export type AutonomyLevelReading = AutonomyLevel | "custom";
+export const autonomyLevelReadingSchema = z.union([autonomyLevelSchema, z.literal("custom")]);
+
+/** What one level is: its key, its name for display, and the classes the Orchestrator decides at it. */
+export interface LevelDefinition {
+  level: AutonomyLevel;
+  key: "hands-on" | "co-pilot" | "cruise" | "turbo" | "full-auto";
+  name: string;
+  /** The classes `delegate` at this level; every other class is `shadow` (levels 1–4) or `owner` (level 0). */
+  delegated: readonly DecisionClass[];
+}
+
+const CRUISE_CLASSES: readonly DecisionClass[] = ["reversible-technical", "preference", "scope", "environment", "dependency"];
+const TURBO_CLASSES: readonly DecisionClass[] = [...CRUISE_CLASSES, "cost", "release", "data"];
+
 /**
- * When each class of each project was last demoted (§B.4, §B.9), ISO. Written
- * only by a demotion, which replaces an older time; kept when the owner sets
- * the cell again or resets the project, so the agreement ledger counts the
- * class from the answers given after it. Absent from a policy with no demotion.
+ * The levels (ADR-025 decision 1): Hands-on — the owner decides everything,
+ * no prediction; Co-pilot — the Orchestrator proposes, the owner decides;
+ * Cruise — it decides the five technical classes; Turbo — also cost, release
+ * and data; Full auto — every class, security included.
  */
-export const autonomyDemotionsSchema = z.record(z.string().min(1), z.partialRecord(decisionClassSchema, isoTimeSchema));
+export const LEVELS: readonly LevelDefinition[] = [
+  { level: 0, key: "hands-on", name: "Hands-on", delegated: [] },
+  { level: 1, key: "co-pilot", name: "Co-pilot", delegated: [] },
+  { level: 2, key: "cruise", name: "Cruise", delegated: CRUISE_CLASSES },
+  { level: 3, key: "turbo", name: "Turbo", delegated: TURBO_CLASSES },
+  { level: 4, key: "full-auto", name: "Full auto", delegated: DECISION_CLASSES },
+];
+
+/** The levels that need the owner's confirmation (ADR-025 decision 3): Turbo and Full auto. */
+export function levelNeedsConfirmation(level: AutonomyLevel): boolean {
+  return level >= 3;
+}
 
 /**
  * One project's action boundary switch (autonomy design §D.2, change-010 C2):
@@ -112,7 +130,6 @@ export type BoundaryEntry = z.infer<typeof boundaryEntrySchema>;
 export const autonomyPolicySchema = z.object({
   projects: z.record(z.string().min(1), z.partialRecord(decisionClassSchema, autonomyCellSchema)),
   challenger: z.record(z.string().min(1), z.boolean()),
-  demotions: autonomyDemotionsSchema.optional(),
   /** The projects whose action boundary the owner turned on (§D.2, change-010); absent when none is. */
   boundary: z.record(z.string().min(1), boundaryEntrySchema).optional(),
 });
@@ -123,16 +140,29 @@ export const EMPTY_AUTONOMY_POLICY: AutonomyPolicy = { projects: {}, challenger:
 
 /**
  * `autonomy.set`'s input: one cell of one project. `confirmed: true` is needed
- * only for `delegate`; `predictor` is read only for `delegate`.
+ * only for `delegate`. Strict: a field it does not take — the `predictor` of
+ * builds before ADR-025 — is refused, not dropped.
  */
-export const autonomySetInputSchema = z.object({
-  workspaceId: z.string().min(1),
-  class: decisionClassSchema,
-  mode: autonomyModeSchema,
-  confirmed: z.boolean().optional(),
-  predictor: predictorSchema.optional(),
-});
+export const autonomySetInputSchema = z
+  .object({
+    workspaceId: z.string().min(1),
+    class: decisionClassSchema,
+    mode: autonomyModeSchema,
+    confirmed: z.boolean().optional(),
+  })
+  .strict();
 export type AutonomySetInput = z.infer<typeof autonomySetInputSchema>;
+
+/**
+ * `autonomy.set-level`'s input (ADR-025): one project's level. Turbo and Full
+ * auto (3, 4) need `confirmed: true`.
+ */
+export const autonomySetLevelInputSchema = z.object({
+  workspaceId: z.string().min(1),
+  level: autonomyLevelSchema,
+  confirmed: z.boolean().optional(),
+});
+export type AutonomySetLevelInput = z.infer<typeof autonomySetLevelInputSchema>;
 
 /**
  * `autonomy.set-challenger`'s input (§B.9): one project's challenger on or
@@ -156,9 +186,9 @@ export const autonomySetBoundaryInputSchema = z.object({
 });
 export type AutonomySetBoundaryInput = z.infer<typeof autonomySetBoundaryInputSchema>;
 
-/** False for release, data, security and cost (`isHardOwnerClass`): they are never `delegate`. */
+/** True for every class (ADR-025 decision 3): no class is the owner's by rule. */
 export function canDelegate(decisionClass: DecisionClass): boolean {
-  return !isHardOwnerClass(decisionClass);
+  return DECISION_CLASSES.includes(decisionClass);
 }
 
 /**
@@ -183,28 +213,15 @@ export function cellsOf(policy: AutonomyPolicy, workspaceId: string): AutonomyCe
   return hasOwn(policy.projects, workspaceId) ? (policy.projects[workspaceId] ?? {}) : {};
 }
 
-/**
- * A project's stored cell of one class, or null when there is none (it reads
- * as `owner`). A `delegate` cell of a hard-owner class never reads: whatever a
- * file says, those classes are the owner's.
- */
+/** A project's stored cell of one class, or null when there is none (it reads as `owner`). */
 export function cellOf(policy: AutonomyPolicy, workspaceId: string, decisionClass: DecisionClass): AutonomyCell | null {
   const cells = cellsOf(policy, workspaceId);
-  const cell = hasOwn(cells, decisionClass) ? cells[decisionClass] : undefined;
-  if (cell === undefined) return null;
-  if (cell.mode === "delegate" && !canDelegate(decisionClass)) return null;
-  return cell;
+  return (hasOwn(cells, decisionClass) ? cells[decisionClass] : undefined) ?? null;
 }
 
 /** Who decides this class in this project; an absent cell is `owner` (REQ-121 b). */
 export function modeOf(policy: AutonomyPolicy, workspaceId: string, decisionClass: DecisionClass): AutonomyMode {
   return cellOf(policy, workspaceId, decisionClass)?.mode ?? "owner";
-}
-
-/** The predictor of a delegated cell, or null when the cell is not `delegate`. */
-export function predictorOf(policy: AutonomyPolicy, workspaceId: string, decisionClass: DecisionClass): AutonomyPredictor | null {
-  const cell = cellOf(policy, workspaceId, decisionClass);
-  return cell?.mode === "delegate" ? cell.predictor : null;
 }
 
 /** Whether the project's challenger is on (§B.3); off unless the owner turned it on (DQ-4). */
@@ -224,21 +241,35 @@ export function boundaryProjects(policy: AutonomyPolicy): string[] {
   return Object.keys(policy.boundary ?? {}).filter((workspaceId) => isPolicyWorkspaceId(workspaceId) && boundaryOf(policy, workspaceId) !== null);
 }
 
-/** When a class of a project was last demoted (§B.4), or null when it never was. */
-export function demotedAtOf(policy: AutonomyPolicy, workspaceId: string, decisionClass: DecisionClass): string | null {
-  const demotions = policy.demotions;
-  if (demotions === undefined || !hasOwn(demotions, workspaceId)) return null;
-  const project = demotions[workspaceId] ?? {};
-  return hasOwn(project, decisionClass) ? (project[decisionClass] ?? null) : null;
+/**
+ * The level a project's cells and prediction switch read as (ADR-025 decision
+ * 2): 0 when no class is `delegate` and the switch is off; n of 1–4 when the
+ * switch is on and exactly level n's classes are `delegate` (every other class
+ * `owner` or `shadow`); `custom` otherwise. Pure.
+ */
+export function levelOf(policy: AutonomyPolicy, workspaceId: string): AutonomyLevelReading {
+  const delegated = DECISION_CLASSES.filter((decisionClass) => modeOf(policy, workspaceId, decisionClass) === "delegate");
+  const challenger = challengerOf(policy, workspaceId);
+  if (!challenger) return delegated.length === 0 ? 0 : "custom";
+  const match = LEVELS.find(
+    (definition) => definition.level >= 1 && definition.delegated.length === delegated.length && delegated.every((decisionClass) => definition.delegated.includes(decisionClass)),
+  );
+  return match?.level ?? "custom";
+}
+
+/** Every project the policy names (its cells, its prediction switch or its boundary), each with its level. */
+export function levelsOf(policy: AutonomyPolicy): Record<string, AutonomyLevelReading> {
+  const projects = new Set([...Object.keys(policy.projects), ...Object.keys(policy.challenger), ...Object.keys(policy.boundary ?? {})]);
+  return Object.fromEntries([...projects].filter(isPolicyWorkspaceId).map((workspaceId) => [workspaceId, levelOf(policy, workspaceId)]));
 }
 
 /**
  * Why the Orchestrator challenger may not predict `decision` now (§B.3, §B.9;
  * change-007 C1), or null when it may: a decision it did not ask — a Worker's
- * question (`q:`) or a fallback incident (`f:`) —, still `open`, of a class
- * that can be delegated, in an `owner` or `shadow` cell of a project whose
- * challenger is on, opened with its predictions recorded, and not predicted by
- * the Orchestrator yet. The rest of the project's policy does not matter: a
+ * question (`q:`) or a fallback incident (`f:`) —, still `open`, of any class
+ * in an `owner` or `shadow` cell of a project whose challenger is on (a level
+ * of 1 or more), opened with its predictions recorded, and not predicted by
+ * the Orchestrator yet. The owner sees the prediction as its proposal. The rest of the project's policy does not matter: a
  * project whose cells are all `owner` is asked too. Pure: the event bus asks
  * by it (`decision.opened`), and `bm_predict` records by it.
  */
@@ -261,7 +292,6 @@ export function predictionRefusalOf(policy: AutonomyPolicy, decision: Decision):
   });
   if (notOpen !== null) return notOpen;
   const decisionClass = decisionClassOf(decision);
-  if (!canDelegate(decisionClass)) return `decision ${decision.id} is of the class ${decisionClass}, which is always the owner's; it is never predicted`;
   if (modeOf(policy, decision.workspaceId, decisionClass) === "delegate") {
     return `${decisionClass} is delegated in project ${decision.workspaceId}; a delegated decision is not predicted`;
   }
@@ -276,51 +306,10 @@ export function predictionRefusalOf(policy: AutonomyPolicy, decision: Decision):
 // Delegation (§B.5; PRD REQ-121, REQ-123).
 // ---------------------------------------------------------------------------
 
-/** What a policy answer by the recommended option carries as its reason (§B.5): shown under Details and on the digest. */
-export function policyReasonOf(decisionClass: DecisionClass): string {
-  return `The recommended option: ${decisionClass} is delegated to it in this project`;
-}
-
-/** The answer the policy gives a decision for the owner (§B.5): the option, the cell's class and predictor, and why. */
-export interface PolicyAnswer {
-  optionKey: string;
-  class: DecisionClass;
-  predictor: "recommended";
-  reason: string;
-}
-
-/**
- * What the owner's policy answers for `decision` as it opens (§B.5; PRD
- * REQ-121, REQ-123), or null when the owner decides it: the decision is
- * `open`; its class (`decisionClassOf`) can be delegated and is `delegate` in
- * its project with the predictor `recommended`; and exactly one of its
- * options is recommended. The answer is that option. Since the class is
- * checked against every option's effects, a release, data, security or cost
- * effect anywhere keeps the decision the owner's; `answerDecision` refuses a
- * policy answer granting one as a second line. A `delegate` cell whose
- * predictor is the Orchestrator is not answered here: the Orchestrator
- * decides it (`bm_decide`, `decideRefusalOf`). Pure.
- */
-export function recommendedDelegationOf(policy: AutonomyPolicy, decision: Decision): PolicyAnswer | null {
-  // Autonomy design §B.7: the owner's override is never answered for them.
-  // §D.2: a held request is covered by the policy only as the boundary holds it (`server/action-boundary.ts`).
-  if (decisionKindOf(decision.id) === "override" || decisionKindOf(decision.id) === "held") return null;
-  // Autonomy design §G.4: a prepared change of the owner's settings is never the policy's to choose.
-  if (decision.status !== "open" || carriesPreparedChange(decision)) return null;
-  const decisionClass = decisionClassOf(decision);
-  // A hard-owner class never reads `delegate` (`cellOf`), so it has no predictor.
-  if (predictorOf(policy, decision.workspaceId, decisionClass) !== "recommended") return null;
-  const recommended = decision.options.filter((option) => option.recommended);
-  if (recommended.length !== 1) return null;
-  return { optionKey: recommended[0]!.key, class: decisionClass, predictor: "recommended", reason: policyReasonOf(decisionClass) };
-}
-
 /**
  * Whether choosing `option` acts on its request as done (design §C.6,
  * change-008 C4): it declares `commit`, or it carries a prepared command that
- * approves `commit` or has the intent `release`. A policy answer never grants
- * push, publish or deploy (§B.5), so these are what a delegate could do with
- * a finish. Pure.
+ * approves `commit` or has the intent `release`. Pure.
  */
 export function actsOnFinish(option: Pick<DecisionOption, "effects" | "action">): boolean {
   if (option.effects.includes("commit")) return true;
@@ -351,10 +340,9 @@ export function unverifiedFinishText(requestId: string | null, instead: string):
  * request stands finished-unverified — `finishedUnverified`, read by the
  * caller from the trace store (`server/request-trace.ts`
  * `isFinishedUnverifiedNow`) — an option that acts on the finish
- * (`actsOnFinish`) is left to the owner. Either predictor: the recommended
- * option at open (`server/policy-resolve.ts`) and the Orchestrator's
- * `bm_decide` (`decideRefusalOf`). A precedent's answer and the owner's own are
- * not asked. Pure.
+ * (`actsOnFinish`) is left to the owner: the Orchestrator's `bm_decide`
+ * (`decideRefusalOf`). A precedent's answer and the owner's own are not
+ * asked. Pure.
  */
 export function unverifiedFinishRefusalOf(decision: Pick<Decision, "id" | "requestId" | "options">, optionKey: string, finishedUnverified: boolean): string | null {
   if (!finishedUnverified) return null;
@@ -369,10 +357,8 @@ export function unverifiedFinishRefusalOf(decision: Pick<Decision, "id" | "reque
  * Worker's question (`q:`) or a fallback incident (`f:`); an `o:` decision is
  * the owner's whatever its cell —, still `open` (not waiting for a
  * confirmation, answered, superseded, withdrawn or expired), of a class that
- * can be delegated, and `delegate` in its project with the predictor
- * `orchestrator`. An `owner` or `shadow` cell, a cell of the recommended
- * predictor and release, data, security or cost stay the owner's (or the
- * plugin's). Pure: the event bus asks by it (`decision.opened`,
+ * is `delegate` in its project — any class (ADR-025). An `owner` or `shadow`
+ * cell stays the owner's. Pure: the event bus asks by it (`decision.opened`,
  * `asks: "decision"`), and `bm_decide` answers by it — with `choice`, the
  * option it chose and whether the decision's request stands finished-unverified
  * (design §C.6, change-008 C4: `unverifiedFinishRefusalOf`).
@@ -399,10 +385,9 @@ export function decideRefusalOf(
   });
   if (notOpen !== null) return notOpen;
   const decisionClass = decisionClassOf(decision);
-  if (!canDelegate(decisionClass)) return `decision ${decision.id} is of the class ${decisionClass}, which is always the owner's; leave it to the owner`;
-  const predictor = predictorOf(policy, decision.workspaceId, decisionClass);
-  if (predictor === null) return `${decisionClass} is not delegated to you in project ${decision.workspaceId}; the owner decides it, so leave it to the owner`;
-  if (predictor !== "orchestrator") return `${decisionClass} is delegated to the recommended option in project ${decision.workspaceId}, not to you; leave it to the owner`;
+  if (modeOf(policy, decision.workspaceId, decisionClass) !== "delegate") {
+    return `${decisionClass} is not delegated to you in project ${decision.workspaceId}; the owner decides it, so leave it to the owner`;
+  }
   return choice === undefined ? null : unverifiedFinishRefusalOf(decision, choice.optionKey, choice.finishedUnverified);
 }
 
@@ -427,12 +412,12 @@ export function projectsAboveOwner(policy: AutonomyPolicy): Set<string> {
 
 /**
  * The policy a parsed file body holds. Each cell is read on its own: one with
- * an unknown class, an unknown mode, a `delegate` without a predictor or a
- * `delegate` of a hard-owner class is skipped alone (it reads as `owner`) and
- * costs no other; a challenger entry that is not a boolean is skipped the
- * same way, and so is a demotion of a class that cannot be delegated or whose
- * time does not read. Unknown keys are ignored. The `version` is the caller's
- * to check.
+ * an unknown class or an unknown mode is skipped alone (it reads as `owner`)
+ * and costs no other; a `delegate` cell's stored `predictor` (older builds) is
+ * not read, so either reads as the Orchestrator's. A challenger entry that is
+ * not a boolean is skipped the same way. Unknown keys — `demotions` of an
+ * older build among them — are ignored, and dropped by the next write. The
+ * `version` is the caller's to check.
  */
 export function autonomyPolicyOf(body: unknown): AutonomyPolicy {
   const file = objectOf(body);
@@ -444,7 +429,6 @@ export function autonomyPolicyOf(body: unknown): AutonomyPolicy {
       const decisionClass = decisionClassSchema.safeParse(key);
       const cell = autonomyCellSchema.safeParse(rawCell);
       if (!decisionClass.success || !cell.success) continue;
-      if (cell.data.mode === "delegate" && !canDelegate(decisionClass.data)) continue;
       cells.push([decisionClass.data, cell.data]);
     }
     if (cells.length > 0) projects.push([workspaceId, Object.fromEntries(cells) as AutonomyCells]);
@@ -452,15 +436,6 @@ export function autonomyPolicyOf(body: unknown): AutonomyPolicy {
   const challenger = Object.entries(objectOf(file?.["challenger"]) ?? {}).filter(
     (entry): entry is [string, boolean] => isPolicyWorkspaceId(entry[0]) && typeof entry[1] === "boolean",
   );
-  const demotions: Array<[string, Partial<Record<DecisionClass, string>>]> = [];
-  for (const [workspaceId, rawTimes] of Object.entries(objectOf(file?.["demotions"]) ?? {})) {
-    if (!isPolicyWorkspaceId(workspaceId)) continue;
-    const times = Object.entries(objectOf(rawTimes) ?? {}).filter((entry): entry is [DecisionClass, string] => {
-      const decisionClass = decisionClassSchema.safeParse(entry[0]);
-      return decisionClass.success && canDelegate(decisionClass.data) && typeof entry[1] === "string" && !Number.isNaN(Date.parse(entry[1]));
-    });
-    if (times.length > 0) demotions.push([workspaceId, Object.fromEntries(times)]);
-  }
   // The action boundary (§D.2, change-010 C2): each entry on its own; one that is not `{ enabled: true, at }` reads as off.
   const boundary = Object.entries(objectOf(file?.["boundary"]) ?? {}).flatMap(([workspaceId, raw]): Array<[string, BoundaryEntry]> => {
     const entry = boundaryEntrySchema.safeParse(raw);
@@ -469,18 +444,15 @@ export function autonomyPolicyOf(body: unknown): AutonomyPolicy {
   return {
     projects: Object.fromEntries(projects),
     challenger: Object.fromEntries(challenger),
-    ...(demotions.length === 0 ? {} : { demotions: Object.fromEntries(demotions) }),
     ...(boundary.length === 0 ? {} : { boundary: Object.fromEntries(boundary) }),
   };
 }
 
 /** The policy of one project only (`autonomy.policy { workspaceId }`). */
 export function policyOfProject(policy: AutonomyPolicy, workspaceId: string): AutonomyPolicy {
-  const demotions = policy.demotions;
   return {
     projects: hasOwn(policy.projects, workspaceId) ? { [workspaceId]: cellsOf(policy, workspaceId) } : {},
     challenger: hasOwn(policy.challenger, workspaceId) ? { [workspaceId]: policy.challenger[workspaceId]! } : {},
-    ...(demotions !== undefined && hasOwn(demotions, workspaceId) ? { demotions: { [workspaceId]: demotions[workspaceId] ?? {} } } : {}),
     ...(boundaryOf(policy, workspaceId) === null ? {} : { boundary: { [workspaceId]: boundaryOf(policy, workspaceId)! } }),
   };
 }
@@ -494,24 +466,24 @@ export function withCell(policy: AutonomyPolicy, workspaceId: string, decisionCl
 }
 
 /**
- * `policy` with one class demoted at `at` (§B.4): its cell `shadow`, set at
- * `at`, and `at` as the class's last demotion. The caller has checked the cell
- * was `delegate`.
+ * `policy` with one project at `level` (ADR-025 decision 2), set at `at`: the
+ * level's classes `delegate`, every other class `shadow` (levels 1–4) or
+ * `owner` (level 0), all nine written, and the prediction switch on for
+ * levels 1–4, off for 0. Other projects and the action boundary stay as they are.
  */
-export function withDemotion(policy: AutonomyPolicy, workspaceId: string, decisionClass: DecisionClass, at: string): AutonomyPolicy {
-  const demotions = policy.demotions ?? {};
-  const project = hasOwn(demotions, workspaceId) ? (demotions[workspaceId] ?? {}) : {};
-  return {
-    ...withCell(policy, workspaceId, decisionClass, { mode: "shadow", at }),
-    demotions: { ...demotions, [workspaceId]: { ...project, [decisionClass]: at } },
-  };
+export function withLevel(policy: AutonomyPolicy, workspaceId: string, level: AutonomyLevel, at: string): AutonomyPolicy {
+  const definition = LEVELS[level]!;
+  const other: AutonomyMode = level === 0 ? "owner" : "shadow";
+  const cells = Object.fromEntries(
+    DECISION_CLASSES.map((decisionClass): [DecisionClass, AutonomyCell] => [decisionClass, { mode: definition.delegated.includes(decisionClass) ? "delegate" : other, at }]),
+  ) as AutonomyCells;
+  return withChallenger({ ...policy, projects: { ...policy.projects, [workspaceId]: cells } }, workspaceId, level >= 1);
 }
 
 /**
  * `policy` with every class of one project back to `owner` (REQ-121 d): its
  * cells removed, since an absent cell reads as `owner`. The challenger is not
- * a class and stays as it is; so do the demotions, which are history, not a
- * mode (§B.4).
+ * a class and stays as it is.
  */
 export function withProjectReset(policy: AutonomyPolicy, workspaceId: string): AutonomyPolicy {
   return {
@@ -539,7 +511,7 @@ export function withBoundary(policy: AutonomyPolicy, workspaceId: string, at: st
 
 /** Why `autonomy.set` refuses an input; each refusal writes nothing. */
 export type AutonomySetRefusal = {
-  code: "E_AUTONOMY_INVALID" | "E_AUTONOMY_OWNER_ONLY" | "E_AUTONOMY_NOT_CONFIRMED";
+  code: "E_AUTONOMY_INVALID" | "E_AUTONOMY_NOT_CONFIRMED";
   detail: string;
 };
 
@@ -548,17 +520,15 @@ const SET_FIELDS: Readonly<Record<string, string>> = {
   workspaceId: "a project",
   class: "one of the nine decision classes",
   mode: "owner, shadow or delegate",
-  predictor: "recommended or orchestrator",
   confirmed: "true or false",
 };
 
 /**
  * `autonomy.set`'s checks, in order (§B.9), before anything is read or
  * written: an input that is not one project, one known class and one known
- * mode → `E_AUTONOMY_INVALID`; `delegate` for release, data, security or cost,
- * confirmed or not → `E_AUTONOMY_OWNER_ONLY`; `delegate` without
- * `confirmed: true` → `E_AUTONOMY_NOT_CONFIRMED`. No agreement threshold is
- * checked (ADR-023): the owner delegates a class whenever they choose.
+ * mode → `E_AUTONOMY_INVALID`; `delegate` without `confirmed: true` →
+ * `E_AUTONOMY_NOT_CONFIRMED`. Any class may be delegated (ADR-025), and no
+ * agreement threshold is checked (ADR-023).
  */
 export function checkAutonomySet(input: unknown): { change: AutonomySetInput } | { refusal: AutonomySetRefusal } {
   const parsed = autonomySetInputSchema.safeParse(input);
@@ -577,20 +547,38 @@ export function checkAutonomySet(input: unknown): { change: AutonomySetInput } |
     };
   }
   const change = parsed.data;
-  if (change.mode === "delegate" && !canDelegate(change.class)) {
-    return {
-      refusal: {
-        code: "E_AUTONOMY_OWNER_ONLY",
-        detail: `${change.class} decisions are always the owner's and cannot be delegated; nothing was saved`,
-      },
-    };
-  }
   if (change.mode === "delegate" && change.confirmed !== true) {
     return {
       refusal: { code: "E_AUTONOMY_NOT_CONFIRMED", detail: `delegating ${change.class} needs the owner's confirmation; nothing was saved` },
     };
   }
   return { change };
+}
+
+/**
+ * `autonomy.set-level`'s check (ADR-025), before anything is read or written:
+ * one project and a level 0–4, else `E_AUTONOMY_INVALID`; Turbo or Full auto
+ * (3, 4) without `confirmed: true` → `E_AUTONOMY_NOT_CONFIRMED`.
+ */
+export function checkAutonomySetLevel(input: unknown): { change: AutonomySetLevelInput } | { refusal: AutonomySetRefusal } {
+  const parsed = autonomySetLevelInputSchema.safeParse(input);
+  if (!parsed.success || !isPolicyWorkspaceId(parsed.data.workspaceId)) {
+    const issue = parsed.success ? "workspaceId" : String(parsed.error.issues[0]?.path[0] ?? "workspaceId");
+    const field = issue === "level" || issue === "confirmed" ? issue : "workspaceId";
+    const got = JSON.stringify((objectOf(input) ?? {})[field] ?? null);
+    const expected = field === "level" ? "a level from 0 to 4" : field === "confirmed" ? "true or false" : "a project";
+    return { refusal: { code: "E_AUTONOMY_INVALID", detail: `${field} ${got} is not ${expected}; nothing was saved` } };
+  }
+  const { level } = parsed.data;
+  if (levelNeedsConfirmation(level) && parsed.data.confirmed !== true) {
+    return {
+      refusal: {
+        code: "E_AUTONOMY_NOT_CONFIRMED",
+        detail: `${LEVELS[level]!.name} lets the Orchestrator decide ${level === 4 ? "every class, security included" : "cost, release and data"} for you and needs the owner's confirmation; nothing was saved`,
+      },
+    };
+  }
+  return { change: parsed.data };
 }
 
 /**
@@ -636,7 +624,6 @@ export function checkAutonomySetBoundary(input: unknown): { change: AutonomySetB
 
 /** The cell `autonomy.set` stores for a checked change, set at `at`. */
 export function cellOfChange(change: AutonomySetInput, at: string): AutonomyCell {
-  if (change.mode === "delegate") return { mode: "delegate", predictor: change.predictor ?? DEFAULT_AUTONOMY_PREDICTOR, at };
   return { mode: change.mode, at };
 }
 

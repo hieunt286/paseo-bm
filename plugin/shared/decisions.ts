@@ -46,8 +46,9 @@ export type Effect = z.infer<typeof effectSchema>;
  * Effects whose answer needs the owner's explicit confirmation on the tap
  * (experience concept X-4, owner 2026-09-29: "confirmation only for RELEASE /
  * DATA / SECURITY / COST"): the effects of those classes. `release` is `push`,
- * `publish` and `deploy`; `data` is `real-data` and `migration`. The source
- * of `HARD_OWNER_CLASSES` (code review 2026-09-30 §3.5).
+ * `publish` and `deploy`; `data` is `real-data` and `migration`. Since
+ * ADR-025 no class is the owner's by rule: the policy may grant these too
+ * (at Turbo and Full auto), and the confirmation stays for the owner's own tap.
  */
 export const CONFIRM_EFFECTS: readonly Effect[] = ["push", "publish", "deploy", "real-data", "migration", "security", "cost"];
 
@@ -87,16 +88,6 @@ export const CLASS_OF_EFFECT: Readonly<Record<Effect, DecisionClass | null>> = {
   cost: "cost",
 };
 
-/**
- * The classes only the owner decides (PRD REQ-121 c): never `delegate`, they
- * pass only through the owner's grant (REQ-112). The classes of
- * `CONFIRM_EFFECTS` (`CLASS_OF_EFFECT`), in that order: release, data,
- * security, cost.
- */
-export const HARD_OWNER_CLASSES: readonly DecisionClass[] = [
-  ...new Set(CONFIRM_EFFECTS.flatMap((effect) => CLASS_OF_EFFECT[effect] ?? [])),
-];
-
 /** Every fallback incident (`f:`) is about the environment (§B.1). */
 export const FALLBACK_DECISION_CLASS: DecisionClass = "environment";
 
@@ -117,22 +108,21 @@ export const SETTLED_STATUSES: readonly DecisionStatus[] = ["answered", "superse
  * for those Phase 1 answers); the policy of a `delegate` cell (§B.5); or an
  * owner precedent (§B.6). Additive: every answer stored before it is the
  * owner's. `precedent` is written when a decision opens on an active
- * precedent's subject (`server/precedent-resolve.ts`); `policy` when one opens
- * in a `delegate` cell whose predictor is `recommended`
- * (`server/policy-resolve.ts`), or when the Orchestrator decides one in a cell
- * whose predictor is `orchestrator` (`bm_decide`, predictor `orchestrator`).
- * The policy never grants a release, data, security or cost effect
- * (`answerDecision` refuses it).
+ * precedent's subject (`server/precedent-resolve.ts`); `policy` when the
+ * Orchestrator decides one in a `delegate` cell (`bm_decide`), or when the
+ * action boundary allows a held request whose classes are delegated
+ * (`server/action-boundary.ts`). Since ADR-025 a policy answer may grant any
+ * effect its option declares.
  */
 export const ANSWER_BY = ["owner", "orchestrator", "policy", "precedent"] as const;
 export const answerBySchema = z.enum(ANSWER_BY);
 export type AnswerBy = z.infer<typeof answerBySchema>;
 
 /**
- * Who predicts the owner's answer (§B.3): the option the asker marked
- * recommended, or the Orchestrator challenger (`bm_predict`). A cell of the
- * agreement ledger is per predictor; a `delegate` cell records the predictor
- * the owner chose for it, and a `policy` answer names it.
+ * The predictions the agreement ledger measures (§B.3): the option the asker
+ * marked recommended, and the Orchestrator's (`bm_predict`). Measured, not
+ * chosen: since ADR-025 the Orchestrator is the only one that decides a
+ * delegated class, and no cell names a predictor.
  */
 export const PREDICTORS = ["recommended", "orchestrator"] as const;
 export const predictorSchema = z.enum(PREDICTORS);
@@ -267,7 +257,6 @@ export const preparedActionSchema = z.discriminatedUnion("kind", [
     kind: z.literal("autonomy.set"),
     class: decisionClassSchema,
     mode: z.enum(["owner", "shadow", "delegate"]),
-    predictor: predictorSchema.optional(),
   }),
   /** One Settings → Coordination setting (§G.7), as `coordination.set` takes it. */
   z.object({
@@ -340,7 +329,10 @@ export const decisionAnswerSchema = z
     reason: z.string().min(1).max(MAX_ANSWER_REASON_CHARS).optional(),
     /** A delegated answer's class (§B.5, §B.7): the cell that answered, for the digest. */
     class: decisionClassSchema.optional(),
-    /** A `policy` answer's predictor: the one the `delegate` cell names (§B.4, §B.5). */
+    /**
+     * A `policy` answer's predictor, as builds before ADR-025 stored it: read
+     * only, never written (`policyPredictorOf` reads an answer without it).
+     */
     predictor: predictorSchema.optional(),
     /** A `precedent` answer's precedent (§B.6), cited on the digest. */
     precedentId: z.string().min(1).max(MAX_PRECEDENT_ID_CHARS).optional(),
@@ -354,15 +346,14 @@ export const decisionAnswerSchema = z
     message: "the Orchestrator and the policy answer with an option",
   })
   .refine((answer) => answer.via !== "autopilot" || answer.by === "orchestrator" || answer.by === "policy", { message: "only an agent answers on Autopilot" })
-  .refine((answer) => answer.by !== "policy" || answer.predictor !== undefined, { message: "a policy answer names its predictor" })
   .refine((answer) => answer.by !== "precedent" || answer.precedentId !== undefined, { message: "a precedent answer names its precedent" });
 
 /**
  * What was predicted for a decision (§B.3), stored on the record: the option
  * marked recommended, set when it opens (null with none recommended), and the
  * Orchestrator challenger's prediction (`bm_predict`), null until it gives
- * one. The owner never sees `orchestrator` before answering
- * (`ownerViewOfDecision`).
+ * one. The owner sees `orchestrator` before answering only as the
+ * Orchestrator's proposal, at a level of 1 or more (`ownerViewOfDecision`).
  */
 export const decisionPredictionSchema = z.object({
   recommended: z.object({ optionKey: z.string().regex(OPTION_KEY_PATTERN) }).nullable(),
@@ -533,9 +524,18 @@ export function decisionClassOf(decision: Pick<Decision, "id" | "options" | "cla
   return checkedClass(own, declaredEffects(decision));
 }
 
-/** True for a class only the owner decides (`HARD_OWNER_CLASSES`). */
-export function isHardOwnerClass(decisionClass: DecisionClass): boolean {
-  return HARD_OWNER_CLASSES.includes(decisionClass);
+/**
+ * Who chose a `policy` answer (ADR-025 decision 5), for the agreement ledger
+ * and the metrics: the predictor an older build stored with it; else null for
+ * a held request (`h:`), which the action boundary allowed by the policy with
+ * no prediction; else the Orchestrator (`bm_decide`), the only predictor. Null
+ * for an answer that is not the policy's. Pure.
+ */
+export function policyPredictorOf(decision: Pick<Decision, "id" | "answer">): Predictor | null {
+  const answer = decision.answer;
+  if (answer === null || answer.by !== "policy") return null;
+  if (answer.predictor !== undefined) return answer.predictor;
+  return decisionKindOf(decision.id) === "held" ? null : "orchestrator";
 }
 
 /**
@@ -580,12 +580,14 @@ export function openingPrediction(options: readonly Pick<DecisionOption, "key" |
 }
 
 /**
- * A decision as the owner's screens may read it (§B.3): while it can still be
- * answered, the challenger's prediction is left out, so the owner never sees it
- * before answering. A settled decision is returned as it is.
+ * A decision as the owner's screens may read it (§B.3; ADR-025): while it can
+ * still be answered, the Orchestrator's prediction is shown only as its
+ * proposal — `proposalShown`, true when the decision's project is at a level
+ * of 1 or more (its prediction switch on) — and left out otherwise. A settled
+ * decision is returned as it is.
  */
-export function ownerViewOfDecision(decision: Decision): Decision {
-  if (!isAnswerable(decision) || decision.prediction?.orchestrator == null) return decision;
+export function ownerViewOfDecision(decision: Decision, proposalShown = false): Decision {
+  if (proposalShown || !isAnswerable(decision) || decision.prediction?.orchestrator == null) return decision;
   return { ...decision, prediction: { ...decision.prediction, orchestrator: null } };
 }
 
@@ -695,8 +697,6 @@ export interface AnswerInput {
   reason?: string | null;
   /** A delegated answer's class (§B.5); none by default. */
   class?: DecisionClass;
-  /** A `policy` answer's predictor (required for it, §B.5). */
-  predictor?: Predictor;
   /** A `precedent` answer's precedent (required for it, §B.6). */
   precedentId?: string;
 }
@@ -706,11 +706,11 @@ export interface AnswerInput {
  * (trimmed). The answer grants the chosen option's declared effects — or, for
  * own words, every effect the decision declares — for one use until
  * `at + GRANT_TTL_MS`; an answer that grants nothing carries no grant. The
- * policy's answer (`by: policy`, §B.5) is always an option, keeps its reason,
- * names its predictor and is refused for an option allowing a release, data,
- * security or cost effect. A new `by: orchestrator` answer is refused: the
- * Orchestrator decides through the policy (`bm_decide`, predictor
- * `orchestrator`), and its Phase 1 answers are only read. A decision that
+ * policy's answer (`by: policy`, §B.5) is always an option and keeps its
+ * reason; it grants what its option declares, as the owner's would (ADR-025:
+ * no class is the owner's by rule). A new `by: orchestrator` answer is refused: the
+ * Orchestrator decides through the policy (`bm_decide`), and its Phase 1
+ * answers are only read. A decision that
  * carries a prepared change of the owner's settings (§G.4) takes only the
  * owner's answer: the policy's and a precedent's are refused.
  */
@@ -735,7 +735,6 @@ export function answerDecision(decision: Decision, input: AnswerInput): Transiti
     return refuse("invalid-answer", "an answer names exactly one option or gives the owner's own words");
   }
   if (by === "policy" && optionKey === null) return refuse("invalid-answer", "the policy answers with one of the options");
-  if (by === "policy" && input.predictor === undefined) return refuse("invalid-answer", "a policy answer names the predictor of its cell");
   const precedentId = input.precedentId?.trim();
   if (precedentId !== undefined && (precedentId === "" || precedentId.length > MAX_PRECEDENT_ID_CHARS)) {
     return refuse("invalid-answer", `a precedent id must be 1–${MAX_PRECEDENT_ID_CHARS} characters`);
@@ -751,11 +750,6 @@ export function answerDecision(decision: Decision, input: AnswerInput): Transiti
     return refuse("unknown-option", `decision ${decision.id} has no option ${JSON.stringify(optionKey)}`);
   }
   const effects = effectsOfAnswer(decision, { optionKey });
-  // A second line under the class (§B.5): the policy never grants what only the owner's answer may (X-4, REQ-121 c).
-  if (by === "policy" && needsOwnerConfirmation(effects)) {
-    const held = effects.filter((effect) => CONFIRM_EFFECTS.includes(effect));
-    return refuse("invalid-answer", `the policy never answers with an option that allows ${held.join(", ")}; only the owner does`);
-  }
   const expiresAt = new Date(Date.parse(input.at) + GRANT_TTL_MS).toISOString();
   return {
     ok: true,
@@ -772,7 +766,6 @@ export function answerDecision(decision: Decision, input: AnswerInput): Transiti
         at: input.at,
         ...(reason === null ? {} : { reason }),
         ...(input.class === undefined ? {} : { class: input.class }),
-        ...(input.predictor === undefined ? {} : { predictor: input.predictor }),
         ...(precedentId === undefined ? {} : { precedentId }),
       },
       grant: effects.length === 0 ? null : { effects, expiresAt, usedAt: null },

@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  COORDINATION_MEANING,
   MECHANISM_THRESHOLDS,
   REVIEW_BUDGET_WORDS,
   changedReviewBudget,
   changedThresholds,
+  coordinationDefaultsDraft,
+  coordinationResetView,
   defaultsDraft,
   mechanismCardView,
   reviewBudgetCardView,
@@ -141,7 +144,9 @@ describe("a mechanism's card (autonomy design §G.7)", () => {
 
 describe("the Coordination group's line", () => {
   it("names the cadence and both switches, and puts a mechanism paseo-bm switched off first, as a warning", () => {
-    expect(SETTINGS_GROUPS.find((group) => group.key === "coordination")!.hint).toBe("advice, compaction and handoff");
+    // Coordination is open on the screen (change-014): not one of More's folded groups.
+    expect(SETTINGS_GROUPS.map((group) => group.key)).not.toContain("coordination");
+    expect(COORDINATION_MEANING.split("\n")).toHaveLength(1);
     expect(mechanismsText(D)).toBe("compaction and handoff on");
     expect(mechanismsText(ownerOff("handoff"))).toBe("compaction on, handoff off");
     expect(mechanismsText({ ...ownerOff("compact"), handoff: { ...D.handoff, enabled: false } })).toBe("compaction and handoff off");
@@ -150,6 +155,26 @@ describe("the Coordination group's line", () => {
     expect(coordinationGroupState(switchedOff("compact"))).toEqual({ text: "Compaction switched off below its target · Advice after every 5 finished requests", tone: "warning" });
     const both: CoordinationSettings = { ...switchedOff("compact"), handoff: { ...D.handoff, enabled: false }, guard: { ...switchedOff("compact").guard, handoff: switchedOff("handoff").guard.handoff } };
     expect(coordinationGroupState(both).text).toBe("Compaction and handoff switched off below their target · Advice after every 5 finished requests");
+  });
+});
+
+describe("Reset coordination to defaults (change-014 outcome 5)", () => {
+  it("fills every card's draft with the defaults — the cadence, both mechanisms' thresholds, the review budget — and saves nothing itself", () => {
+    const changed: CoordinationSettings = { ...D, advice: { everyFinished: 9 } };
+    const drafts = coordinationDefaultsDraft(D);
+    expect(drafts.advice).toBe(D.advice.everyFinished);
+    expect(drafts.thresholds).toEqual({ ...defaultsDraft("compact", D), ...defaultsDraft("handoff", D) });
+    expect(Object.keys(drafts.thresholds).sort()).toEqual([...MECHANISM_THRESHOLDS.compact, ...MECHANISM_THRESHOLDS.handoff].sort());
+    expect(drafts.review).toEqual(reviewBudgetDefaultsDraft(D));
+    // Against stored defaults the drafts change nothing; a card's Save sends only what differs.
+    expect(changedThresholds("compact", D, drafts.thresholds)).toEqual([]);
+    expect(changedReviewBudget(changed, drafts.review)).toEqual([]);
+    expect(coordinationResetView(false)).toEqual({
+      enabled: true,
+      label: "Reset coordination to defaults",
+      accessibilityLabel: "Fill every coordination setting with its default; each card saves with its own Save",
+    });
+    expect(coordinationResetView(true).enabled).toBe(false);
   });
 });
 

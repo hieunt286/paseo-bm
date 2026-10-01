@@ -14,11 +14,11 @@ import { formatBytes } from "./format";
 import type { Badge } from "./tone";
 
 /**
- * Told once where the stored history is managed, because Work's request
+ * Told once where the stored history is managed, because a project's request
  * timelines show agent conversation (REQ-048d).
  */
 export const PRIVACY_NOTICE =
-  "paseo-bm stores the agents' conversation of each request on this machine, and Work shows it. You can delete it at any time: here, or from a request's Details.";
+  "paseo-bm stores the agents' conversation of each request on this machine, and Projects shows it. You can delete it at any time: here, or from a request's Details.";
 
 /** Said next to the machine-wide threshold, since Paseo has no per-workspace settings (REQ-055e). */
 export const HOST_SCOPE_NOTICE = "This threshold applies to every workspace on this machine.";

@@ -181,7 +181,7 @@ describe("the message", () => {
   it("delivers the policy's answer (autonomy design §B.5) exactly as an owner answer: same block, same Worker, nothing cited", async () => {
     const byPolicy = store().transition(
       idOf(2),
-      (current) => answerDecision(current, { by: "policy", via: "inbox", optionKey: "a", class: "scope", predictor: "recommended", at: "2026-09-29T07:50:00.000Z" }),
+      (current) => answerDecision(current, { by: "policy", via: "inbox", optionKey: "a", class: "scope", at: "2026-09-29T07:50:00.000Z" }),
       WORKSPACE,
     );
     if (byPolicy.status !== "updated") throw new Error(`not answered: ${byPolicy.status}`);

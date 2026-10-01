@@ -98,7 +98,7 @@ docs/README.md         index of the docs: start here
 docs/product/          PRDs (Accepted, living): paseo-bm-prd.md, paseo-bm-dashboard-prd.md
 docs/design/           Technical Designs (Active, living): paseo-bm.md, paseo-bm-dashboard.md,
                        plus the research note on instructions by provider
-docs/adr/              ADR-001..024; which are in force is in the docs index
+docs/adr/              ADR-001..025; which are in force is in the docs index
 docs/operations/       living only: release runbook, acceptance checklists (install,
                        orchestration, worker fallback), the paseo.cafe listing record,
                        open requests to upstream Paseo

@@ -1,24 +1,17 @@
 /**
- * Everything Insights shows, without a renderer (experience concept §4.3,
- * autonomy design §A.12). Phase 1 shows the flow and cost figures that
- * `insights.summary` computes with the metric module, and the Beads figures
- * that used to open the Beads screen (`beadsOverview`); Phase 2 adds the
- * Orchestrator's interventions and how many reached their outcome (A-12,
- * §G.3), and autonomy by class — the agreement ledger of one project with each
- * class's mode (§B.3) and a **Delegate?** shortcut (§B.4, ADR-023), and
- * to Cost the tokens read per request and the heaviest requests (§G.2); Phase 3
- * adds review lift per size of request (§C.4).
+ * Everything a project's Metrics tab shows, without a renderer (change-014
+ * outcome 5; it was the Insights section until then — experience concept
+ * §4.3, autonomy design §A.12): the flow and cost figures that
+ * `insights.summary` computes with the metric module, the Beads figures
+ * (`beadsOverview`), the Orchestrator's interventions and how many reached
+ * their outcome (A-12, §G.3), autonomy by class — the agreement ledger of the
+ * project with each class's mode (§B.3), read only since ADR-025 —, the
+ * tokens read per request and the heaviest requests (§G.2), and review lift
+ * per size of request (§C.4).
  *
  * Pure: no React, no React Native, no `server/` import.
  */
-import {
-  canDelegate,
-  demotedAtOf,
-  modeOf,
-  predictorOf,
-  type AutonomyPolicy,
-  type AutonomySetInput,
-} from "../shared/autonomy";
+import { modeOf, type AutonomyPolicy } from "../shared/autonomy";
 import type { AgreementCell, AgreementLedger } from "../shared/autonomy-ledger";
 import { INSIGHTS_WINDOWS, type BeadRow, type BeadStats, type InsightsSummary, type InsightsWindow } from "../shared/contracts";
 import { DECISION_CLASSES, PREDICTORS, REVERSAL_KINDS, type DecisionClass, type Predictor, type ReversalKind } from "../shared/decisions";
@@ -26,8 +19,7 @@ import { A12_TARGET, type InterventionKind } from "../shared/interventions";
 import { beadsOverview, doneText, type BeadsOverview } from "./beads-model";
 import { formatDuration, formatTokens, type Bar, type OverviewCard } from "./format";
 import type { Tone } from "./tone";
-import { CLASS_LABELS, MODE_LABELS, PREDICTOR_WORDS, delegateDialog } from "./settings-autonomy-model";
-import type { ConfirmDialog } from "./ui-types";
+import { CLASS_LABELS, MODE_LABELS } from "./settings-autonomy-model";
 import { plural } from "../shared/text";
 
 const DAY_MS = 86_400_000;
@@ -72,8 +64,8 @@ export interface InsightsProject {
 }
 
 /**
- * The projects Insights can narrow to: the open workspaces in the surface's
- * order, then the closed ones that left history under a known name. A closed
+ * The projects the surface knows by name — Settings and Tools & skills name
+ * projects with them: the open workspaces in the surface's order, then the closed ones that left history under a known name. A closed
  * workspace with no name is left out rather than shown by its id.
  */
 export function insightsProjects(
@@ -85,11 +77,6 @@ export function insightsProjects(
     .filter((entry) => !seen.has(entry.workspaceId) && entry.lastKnownName !== null)
     .map((entry) => ({ id: entry.workspaceId, label: `${entry.lastKnownName ?? ""} (closed)` }));
   return [...open.map((workspace) => ({ id: workspace.id, label: workspace.screenTitle })), ...closed];
-}
-
-/** The project tabs: every project first, then each one the surface knows by name. */
-export function projectTabs(projects: readonly InsightsProject[]): Array<{ key: string; label: string }> {
-  return [{ key: ALL_PROJECTS, label: "All projects" }, ...projects.map((project) => ({ key: project.id, label: project.label }))];
 }
 
 /** One line saying what the figures cover: `Last 30 days · all projects`. */
@@ -389,60 +376,19 @@ export function beadsFiguresView(
 // ---------------------------------------------------------------------------
 // Autonomy by class (autonomy design §B.3, §A.12; PRD REQ-122 b): one
 // project's agreement ledger, a row per class with each predictor's figures
-// and the class's mode. Numbers only: no question, option or id. The figures
-// are information, never a condition (ADR-023): **Delegate?** on each
-// predictor's figures of a class that may be delegated and is not is a
-// shortcut to Settings' own delegation, confirmed in place (Cancel first)
-// before `autonomy.set` delegates the class.
+// and the class's mode. Numbers only: no question, option or id. Read only:
+// the figures are information, never a condition, and the project's autonomy
+// is its level, set in Settings (ADR-025; the Delegate? shortcut is retired).
 // ---------------------------------------------------------------------------
 
 export const AUTONOMY_TITLE = "Autonomy by class";
 
-/** What the figures are, that the window tabs do not narrow them, and that they never gate a delegation. */
+/** What the figures are, that the window tabs do not narrow them, and where autonomy is set. */
 export const AUTONOMY_NOTE =
-  "How often each prediction matched your answer, per class of decision — over every answer recorded, whatever the period above; " +
-  "a class that went back to Shadow counts again from then. " +
-  "The figures are for your information: you can delegate a class at any time, here with Delegate? or in Settings → Autonomy.";
+  "How often each prediction matched your answer, per class of decision — over every answer recorded, whatever the period above. " +
+  "The figures are for your information: the project's autonomy level is set in Settings → Autonomy.";
 
-export const DELEGATE_LABEL = "Delegate?";
-
-/** Which Delegate? confirmation is open, and how its change went (the screen's state). */
-export interface DelegationUi {
-  confirming: { decisionClass: DecisionClass; predictor: Predictor } | null;
-  /** `autonomy.set` is running. */
-  busy: boolean;
-  /** Why the last delegation failed. */
-  error: string | null;
-}
-
-export const DELEGATION_UI_IDLE: DelegationUi = { confirming: null, busy: false, error: null };
-
-/** Delegate? on one predictor's figures: a shortcut, on any class that may be delegated and is not delegated yet. */
-export interface DelegateOfferView {
-  decisionClass: DecisionClass;
-  predictor: Predictor;
-  label: string;
-  /** False while a delegation runs or a confirmation is open. */
-  enabled: boolean;
-  accessibilityLabel: string;
-}
-
-/** Delegate?'s confirmation, in place under its class, Cancel first. */
-export interface DelegateConfirmView {
-  dialog: ConfirmDialog;
-  busy: boolean;
-  busyLabel: string;
-  error: string | null;
-  /** What confirming sends: `autonomy.set` with `confirmed: true` and the predictor of the figures pressed. */
-  input: AutonomySetInput;
-}
-
-/** `autonomy.set`'s input for a confirmed Delegate?: the class, and the predictor of the figures pressed (§B.4). */
-export function delegateInputOf(workspaceId: string, decisionClass: DecisionClass, predictor: Predictor): AutonomySetInput {
-  return { workspaceId, class: decisionClass, mode: "delegate", confirmed: true, predictor };
-}
-
-export const AUTONOMY_CHOOSE_PROJECT = "Choose a project above to see how often its answers were foreseen.";
+export const AUTONOMY_CHOOSE_PROJECT = "Choose a project to see how often its answers were foreseen.";
 
 export const AUTONOMY_NO_DATA =
   "None of your answers in this project can be compared with a prediction yet. The figures start with the next question you answer.";
@@ -475,8 +421,6 @@ export interface AgreementFiguresView {
   reversalTone: Tone;
   /** Answers confirmed from a chat, never read, which count in neither figure; null when there is none. */
   unread: string | null;
-  /** Delegate?, on a class that may be delegated and is not (§B.4); else null. */
-  delegate: DelegateOfferView | null;
   accessibilityLabel: string;
 }
 
@@ -484,16 +428,11 @@ export interface AgreementFiguresView {
 export interface AutonomyClassRowView {
   decisionClass: DecisionClass;
   label: string;
-  /** `Owner`, `Shadow`, `Delegated (Recommended option)`, or `Owner only` for release, data, security and cost. */
+  /** `Owner`, `Shadow` or `Delegated (Orchestrator)`. */
   modeText: string;
   modeTone: Tone;
-  ownerOnly: boolean;
   /** One per predictor column, in `PREDICTORS` order. */
   figures: AgreementFiguresView[];
-  /** `Went back to Shadow on 2026-09-30 after a reversal; counted from then.`, or null for a class never demoted. */
-  demoted: string | null;
-  /** Delegate?'s confirmation for this class while it is open; else null. */
-  confirm: DelegateConfirmView | null;
   accessibilityLabel: string;
 }
 
@@ -528,23 +467,11 @@ function reversalsText(cell: AgreementCell): string {
   return `${cell.reversals} reversed: ${kinds.join(" · ")}`;
 }
 
-function agreementFigures(predictor: Predictor, cell: AgreementCell | undefined, ownerOnly: boolean, delegate: DelegateOfferView | null): AgreementFiguresView {
+function agreementFigures(predictor: Predictor, cell: AgreementCell | undefined): AgreementFiguresView {
   const label = LEDGER_PREDICTOR_LABELS[predictor];
   if (cell === undefined) {
-    // The Orchestrator is never asked to predict a class that is always the owner's (§B.3).
-    const count = predictor === "orchestrator" && ownerOnly ? "Not predicted: always yours" : "No answer yet";
-    return {
-      predictor,
-      label,
-      agreement: "—",
-      count,
-      span: null,
-      reversals: null,
-      reversalTone: "muted",
-      unread: null,
-      delegate: null,
-      accessibilityLabel: `${label}: ${count}`,
-    };
+    const count = "No answer yet";
+    return { predictor, label, agreement: "—", count, span: null, reversals: null, reversalTone: "muted", unread: null, accessibilityLabel: `${label}: ${count}` };
   }
   const agreement = percent(cell.agreed, cell.count);
   const count = cell.count === 0 ? "No answer counted" : `matched ${cell.agreed} of ${plural(cell.count, "answer")}`;
@@ -560,7 +487,6 @@ function agreementFigures(predictor: Predictor, cell: AgreementCell | undefined,
     reversals,
     reversalTone: cell.reversals === 0 ? "muted" : "warning",
     unread,
-    delegate,
     accessibilityLabel: [
       `${label}: ${agreement === "—" ? "no agreement yet" : `${agreement} agreement`}`,
       count,
@@ -574,100 +500,48 @@ function agreementFigures(predictor: Predictor, cell: AgreementCell | undefined,
 }
 
 function modeTextOf(policy: AutonomyPolicy, workspaceId: string, decisionClass: DecisionClass): { text: string; tone: Tone } {
-  if (!canDelegate(decisionClass)) return { text: "Owner only", tone: "muted" };
   const mode = modeOf(policy, workspaceId, decisionClass);
-  if (mode === "delegate") {
-    const predictor = predictorOf(policy, workspaceId, decisionClass);
-    return { text: predictor === null ? MODE_LABELS.delegate : `${MODE_LABELS.delegate} (${LEDGER_PREDICTOR_LABELS[predictor]})`, tone: "info" };
-  }
+  if (mode === "delegate") return { text: `${MODE_LABELS.delegate} (${LEDGER_PREDICTOR_LABELS.orchestrator})`, tone: "info" };
   return { text: MODE_LABELS[mode], tone: mode === "shadow" ? "plain" : "muted" };
 }
 
 /**
- * The Autonomy part for the chosen project: across all projects it asks for
- * one; then waits for the ledger and the policy, or says why it cannot. A
- * class has a row when the ledger has a cell of it or its mode is above
- * `owner`, in conflict order (riskiest first, `DECISION_CLASSES`); the
- * Orchestrator's column appears once it has a figure in the project. The
- * window does not narrow the ledger: the figures are over every answer (since
- * the class's last demotion, which the server already counts from).
- *
- * **Delegate?** (§B.4, ADR-023) is on each predictor's figures of a class
- * that may be delegated and is not delegated yet, in either `owner` or
- * `shadow` (§B.9), whatever the figures say. While `ui.confirming` names one
- * still offered, that class carries its confirmation and every offer waits.
+ * The Autonomy part for one project: waits for the ledger and the policy, or
+ * says why it cannot. A class has a row when the ledger has a cell of it or
+ * its mode is above `owner`, in conflict order (riskiest first,
+ * `DECISION_CLASSES`); the Orchestrator's column appears once it has a figure
+ * in the project. The window does not narrow the ledger: the figures are over
+ * every answer. Read only (ADR-025).
  */
 export function autonomyFiguresView(input: {
   projectId: string;
-  /** The chosen project's name, for the confirmation; "this project" when unknown. */
-  projectLabel?: string | null;
   ledger: AgreementLedger | undefined;
   policy: AutonomyPolicy | undefined;
   error: string | null;
-  ui?: DelegationUi;
 }): AutonomyFiguresView {
   const { projectId, ledger, policy, error } = input;
-  const ui = input.ui ?? DELEGATION_UI_IDLE;
   if (projectId === ALL_PROJECTS) return { kind: "choose", text: AUTONOMY_CHOOSE_PROJECT };
   if (error !== null) return { kind: "error", text: `Could not read the autonomy figures. ${error}` };
   if (ledger === undefined || policy === undefined) return { kind: "loading" };
-  const projectLabel = input.projectLabel ?? "this project";
   const cells = ledger.cells.filter((cell) => cell.workspaceId === projectId);
   const shown = DECISION_CLASSES.filter(
     (decisionClass) => cells.some((cell) => cell.class === decisionClass) || modeOf(policy, projectId, decisionClass) !== "owner",
   );
   if (shown.length === 0) return { kind: "empty", text: AUTONOMY_NO_DATA };
   const predictors = PREDICTORS.filter((predictor) => predictor === "recommended" || cells.some((cell) => cell.predictor === predictor));
-  const cellOfFigure = (decisionClass: DecisionClass, predictor: Predictor) =>
-    cells.find((cell) => cell.class === decisionClass && cell.predictor === predictor);
-  const offered = (decisionClass: DecisionClass, predictor: Predictor): AgreementCell | null => {
-    const cell = cellOfFigure(decisionClass, predictor);
-    if (cell === undefined || !canDelegate(decisionClass) || modeOf(policy, projectId, decisionClass) === "delegate") return null;
-    return cell;
-  };
-  const confirming = ui.confirming !== null && offered(ui.confirming.decisionClass, ui.confirming.predictor) !== null ? ui.confirming : null;
   const rows = shown.map((decisionClass): AutonomyClassRowView => {
     const label = CLASS_LABELS[decisionClass];
-    const ownerOnly = !canDelegate(decisionClass);
     const mode = modeTextOf(policy, projectId, decisionClass);
-    const figures = predictors.map((predictor) => {
-      const offer: DelegateOfferView | null =
-        offered(decisionClass, predictor) === null
-          ? null
-          : {
-              decisionClass,
-              predictor,
-              label: DELEGATE_LABEL,
-              enabled: !ui.busy && confirming === null,
-              accessibilityLabel: `Delegate ${label} decisions in ${projectLabel} to ${PREDICTOR_WORDS[predictor]}`,
-            };
-      return agreementFigures(predictor, cellOfFigure(decisionClass, predictor), ownerOnly, offer);
-    });
-    const demotedAt = demotedAtOf(policy, projectId, decisionClass);
-    const demoted = demotedAt === null ? null : `Went back to Shadow on ${utcDay(demotedAt)} after a reversal; counted from then.`;
-    const confirmedCell = confirming?.decisionClass === decisionClass ? offered(decisionClass, confirming.predictor) : null;
-    const confirm: DelegateConfirmView | null =
-      confirming === null || confirmedCell === null
-        ? null
-        : {
-            dialog: delegateDialog({ classLabel: label, projectLabel, predictor: confirming.predictor, agreement: confirmedCell }),
-            busy: ui.busy,
-            busyLabel: "Delegating…",
-            error: ui.error,
-            input: delegateInputOf(projectId, decisionClass, confirming.predictor),
-          };
+    const figures = predictors.map((predictor) =>
+      agreementFigures(predictor, cells.find((cell) => cell.class === decisionClass && cell.predictor === predictor)),
+    );
     return {
       decisionClass,
       label,
       modeText: mode.text,
       modeTone: mode.tone,
-      ownerOnly,
       figures,
-      demoted,
-      confirm,
-      accessibilityLabel: [`${label}, ${mode.text}.`, figures.map((figure) => figure.accessibilityLabel).join(". "), demoted]
-        .filter((part): part is string => part !== null)
-        .join(" "),
+      accessibilityLabel: `${label}, ${mode.text}. ${figures.map((figure) => figure.accessibilityLabel).join(". ")}`,
     };
   });
   const quiet = DECISION_CLASSES.filter((decisionClass) => !shown.includes(decisionClass));

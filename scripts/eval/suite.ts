@@ -57,7 +57,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { parseQuestions } from "../../plugin/shared/bm-questions.js";
-import { DECISION_CLASSES, isHardOwnerClass, type DecisionClass } from "../../plugin/shared/decisions.js";
+import { LEVELS } from "../../plugin/shared/autonomy.js";
+import { DECISION_CLASSES, type DecisionClass } from "../../plugin/shared/decisions.js";
 import { legacyChatWaitingRpc, type LegacyWaitingWorker } from "./legacy-contracts.js";
 import { buildFixture, type BuiltFixture } from "./fixtures.js";
 import {
@@ -185,26 +186,23 @@ export interface RpcCall {
 }
 
 /**
- * The classes the tree's scenario projects delegate: every class that may be
- * delegated — all but release, data, security and cost
- * (`HARD_OWNER_CLASSES`, which `autonomy.set` refuses to delegate) — riskiest
- * first.
+ * The classes the tree's scenario projects delegate: Cruise's (level 2,
+ * ADR-025) — all but release, data, security and cost —, riskiest first.
  */
-export const DELEGATED_CLASSES: readonly DecisionClass[] = DECISION_CLASSES.filter((decisionClass) => !isHardOwnerClass(decisionClass));
+export const DELEGATED_CLASSES: readonly DecisionClass[] = DECISION_CLASSES.filter((decisionClass) => LEVELS[2]!.delegated.includes(decisionClass));
 
 /**
  * What the driver sets on a scenario's workspace once it is registered (owner
  * decision E-2, evaluation design §11): for the tree, the owner's policy with
  * every class of `DELEGATED_CLASSES` delegated to the Orchestrator —
- * `autonomy.set { workspaceId, class, mode: "delegate", confirmed: true,
- * predictor: "orchestrator" }` each (the owner's own RPC, with its
- * confirmation). Nothing for a published build, which has no policy.
+ * `autonomy.set { workspaceId, class, mode: "delegate", confirmed: true }`
+ * each (the owner's own RPC, with its confirmation). Nothing for a published build, which has no policy.
  */
 export function scenarioPolicyCalls(version: VersionSpec, workspaceId: string): RpcCall[] {
   if (version.kind !== "tree") return [];
   return DELEGATED_CLASSES.map((decisionClass) => ({
     method: "autonomy.set",
-    input: { workspaceId, class: decisionClass, mode: "delegate", confirmed: true, predictor: "orchestrator" },
+    input: { workspaceId, class: decisionClass, mode: "delegate", confirmed: true },
   }));
 }
 

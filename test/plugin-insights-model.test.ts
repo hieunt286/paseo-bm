@@ -7,8 +7,6 @@ import {
   AUTONOMY_TITLE,
   BEADS_CHOOSE_PROJECT,
   COORDINATION_EMPTY,
-  DELEGATE_LABEL,
-  DELEGATION_UI_IDLE,
   COORDINATION_NOTE,
   HEAVIEST_TITLE,
   INSIGHTS_DEFAULT_WINDOW,
@@ -24,14 +22,12 @@ import {
   WINDOW_TABS,
   autonomyFiguresView,
   beadsFiguresView,
-  delegateInputOf,
   coordinationCards,
   costCards,
   flowCards,
   formatPerRequest,
   insightsProjects,
   insightsView,
-  projectTabs,
   requestTokensView,
   requestsPerDayBars,
   reviewLiftView,
@@ -49,8 +45,9 @@ import { INTERVENTION_KINDS } from "../plugin/shared/interventions";
 import { allNodes, pressables, renderTree, texts, type RNode } from "./helpers/element-tree";
 
 /**
- * Insights (experience concept §4.3, autonomy design §A.12): its model is
- * pure and tested here; its hook-free pieces (`InsightsBody`,
+ * A project's Metrics tab (change-014 outcome 5; the Insights section until
+ * then — experience concept §4.3, autonomy design §A.12): its model is
+ * pure and tested here; its hook-free pieces (`MetricsBody`,
  * `InsightsFigures`, `BeadsFigures`, `AutonomyFigures`, `ReviewLiftFigures`)
  * are expanded with the element-tree helper, at phone and desktop widths where
  * they differ. `react-native` and the SDK icon are named stand-ins.
@@ -60,9 +57,9 @@ import { allNodes, pressables, renderTree, texts, type RNode } from "./helpers/e
 const insightsPath = "../plugin/client/insights.tsx";
 type Component = (props: Record<string, unknown>) => unknown;
 const insightsModule = (await import(insightsPath)) as Record<string, unknown>;
-const { InsightsBody, InsightsFigures, BeadsFigures, AutonomyFigures, ReviewLiftFigures, HeavyRequestRow } = insightsModule as {
+const { MetricsBody, InsightsFigures, BeadsFigures, AutonomyFigures, ReviewLiftFigures, HeavyRequestRow } = insightsModule as {
   HeavyRequestRow: Component;
-  InsightsBody: Component;
+  MetricsBody: Component;
   InsightsFigures: Component;
   BeadsFigures: Component;
   AutonomyFigures: Component;
@@ -254,7 +251,7 @@ const POLICY: AutonomyPolicy = {
   projects: {
     wks_a: {
       scope: { mode: "shadow", at: "2026-09-02T00:00:00.000Z" },
-      preference: { mode: "delegate", predictor: "recommended", at: "2026-09-25T00:00:00.000Z" },
+      preference: { mode: "delegate", at: "2026-09-25T00:00:00.000Z" },
     },
   },
   challenger: { wks_a: true },
@@ -286,8 +283,6 @@ describe("choices", () => {
       { id: "wks_b", label: "docs · site" },
       { id: "wks_c", label: "old branch (closed)" },
     ]);
-    expect(projectTabs(projects).map((tab) => tab.label)).toEqual(["All projects", "main · app", "docs · site", "old branch (closed)"]);
-    expect(projectTabs(projects)[0]!.key).toBe(ALL_PROJECTS);
   });
 
   it("says what the figures cover", () => {
@@ -458,14 +453,13 @@ describe("autonomy by class: the agreement ledger (autonomy design §B.3; REQ-12
     expect(recommendedOnly.kind === "figures" && recommendedOnly.rows.every((row) => row.figures.map((entry) => entry.predictor).join() === "recommended")).toBe(true);
   });
 
-  it("shows each class's mode, and marks release, data, security and cost owner-only", () => {
-    expect(figures().rows.map((row) => [row.label, row.modeText, row.ownerOnly])).toEqual([
-      ["Release", "Owner only", true],
-      ["Scope", "Shadow", false],
-      ["Preference", "Delegated (Recommended option)", false],
-      ["Reversible technical", "Owner", false],
+  it("shows each class's mode; no class is owner-only (ADR-025), and a delegated one is the Orchestrator's", () => {
+    expect(figures().rows.map((row) => [row.label, row.modeText])).toEqual([
+      ["Release", "Owner"],
+      ["Scope", "Shadow"],
+      ["Preference", "Delegated (Orchestrator)"],
+      ["Reversible technical", "Owner"],
     ]);
-    expect(rowOf("Release").figures[1]).toMatchObject({ agreement: "—", count: "Not predicted: always yours", span: null, reversals: null });
     // A delegated class without an owner answer since has its row, with nothing to count.
     expect(rowOf("Preference").figures.map((entry) => [entry.agreement, entry.count])).toEqual([
       ["—", "No answer yet"],
@@ -503,13 +497,12 @@ describe("autonomy by class: the agreement ledger (autonomy design §B.3; REQ-12
     expect(directionOf(tree).flexDirection).toBe("column");
     const shown = texts(tree);
     const scope = shown.slice(shown.indexOf("Scope"));
-    expect(scope.slice(0, 9)).toEqual([
+    expect(scope.slice(0, 8)).toEqual([
       "Scope",
       "Shadow",
       "Recommended option · 91 %",
       "matched 31 of 34 answers · 2026-09-01 → 2026-09-28",
       "2 reversed: 1 asked again · 1 reopened",
-      DELEGATE_LABEL,
       "Orchestrator · 88 %",
       "matched 14 of 16 answers · 2026-09-10 → 2026-09-28",
       "No reversal",
@@ -527,18 +520,13 @@ describe("autonomy by class: the agreement ledger (autonomy design §B.3; REQ-12
     expect(shown.at(-1)).toBe("No answer to compare yet: Security · Data · Cost · Dependency · Environment");
   });
 
-  it("labels every row, offers Delegate? on each predictor's figures of a class that may be delegated and is not, and shows no id", () => {
+  it("labels every row, is read only — no Delegate? (ADR-025: autonomy is the project's level, set in Settings) —, and shows no id", () => {
     for (const compact of [true, false]) {
       const tree = draw(compact);
       const rows = allNodes(tree).filter((node) => node.type === "View" && typeof node.props.accessibilityLabel === "string");
       expect(rows).toHaveLength(4);
-      // Whatever the figures: Scope has two reversals and 88 %, Reversible technical one answer (ADR-023).
-      expect(pressables(tree).map((button) => button.props.accessibilityLabel)).toEqual([
-        "Delegate Scope decisions in this project to the recommended option",
-        "Delegate Scope decisions in this project to the Orchestrator",
-        "Delegate Reversible technical decisions in this project to the recommended option",
-      ]);
-      expect(texts(tree).join("\n")).not.toMatch(/wks_/);
+      expect(pressables(tree)).toEqual([]);
+      expect(texts(tree).join("\n")).not.toMatch(/wks_|Delegate\?/);
     }
     for (const view of [autonomyOf({ projectId: ALL_PROJECTS }), autonomyOf({ projectId: "wks_c", policy: EMPTY_AUTONOMY_POLICY })]) {
       expect(texts(renderTree(AutonomyFigures({ view, compact: true, styles, theme })))).toEqual([view.kind === "choose" ? AUTONOMY_CHOOSE_PROJECT : AUTONOMY_NO_DATA]);
@@ -551,178 +539,27 @@ describe("autonomy by class: the agreement ledger (autonomy design §B.3; REQ-12
   });
 });
 
-describe("Delegate? (autonomy design §B.4; REQ-123 a; ADR-023): a shortcut, never gated by the figures", () => {
-  const counted = (overrides: Partial<AgreementCell> & Pick<AgreementCell, "class" | "predictor">) =>
-    cell({ count: 20, agreed: 19, firstAt: "2026-09-01T08:00:00.000Z", lastAt: "2026-09-20T08:00:00.000Z", ...overrides });
-  const FIGURES: AgreementLedger = {
-    cells: [
-      // Always the owner's: never offered, whatever the figures.
-      counted({ class: "release", predictor: "recommended", count: 40, agreed: 40 }),
-      counted({ class: "scope", predictor: "recommended" }),
-      // 85 %: offered all the same.
-      counted({ class: "scope", predictor: "orchestrator", agreed: 17 }),
-      // Delegated already (POLICY): not offered again.
-      counted({ class: "preference", predictor: "recommended" }),
-      // Reversed once: offered all the same.
-      counted({ class: "environment", predictor: "recommended", reversals: 1, reversalsByKind: { "re-asked": 0, overridden: 0, reopened: 1 } }),
-      // An owner cell (no policy entry), with no counted answer: offered too.
-      cell({ class: "reversible-technical", predictor: "orchestrator", unread: 1 }),
-    ],
-    delegated: [],
-  };
-  const view = (overrides: Partial<Parameters<typeof autonomyFiguresView>[0]> = {}) => {
-    const result = autonomyOf({ ledger: FIGURES, projectLabel: "main · app", ...overrides });
-    if (result.kind !== "figures") throw new Error(`expected figures, got ${result.kind}`);
-    return result;
-  };
-  const offers = (figures: ReturnType<typeof view>) =>
-    figures.rows.flatMap((row) => row.figures.filter((entry) => entry.delegate !== null).map((entry) => [row.label, entry.predictor, entry.delegate!.enabled]));
-  const confirming = { ...DELEGATION_UI_IDLE, confirming: { decisionClass: "scope" as const, predictor: "recommended" as const } };
-
-  it("is offered on each predictor's figures of a delegable class not delegated yet, in owner or shadow, whatever the figures say", () => {
-    expect(offers(view())).toEqual([
-      ["Environment", "recommended", true],
-      ["Scope", "recommended", true],
-      ["Scope", "orchestrator", true],
-      ["Reversible technical", "orchestrator", true],
-    ]);
-    const [scope] = view().rows.filter((row) => row.label === "Scope");
-    expect(scope!.figures[0]!.delegate).toEqual({
-      decisionClass: "scope",
-      predictor: "recommended",
-      label: DELEGATE_LABEL,
-      enabled: true,
-      accessibilityLabel: "Delegate Scope decisions in main · app to the recommended option",
-    });
-    // A class once delegated is not offered again.
-    const delegated: AutonomyPolicy = { ...POLICY, projects: { wks_a: { ...POLICY.projects["wks_a"], scope: { mode: "delegate", predictor: "recommended", at: "2026-09-26T00:00:00.000Z" } } } };
-    expect(offers(view({ policy: delegated }))).toEqual([
-      ["Environment", "recommended", true],
-      ["Reversible technical", "orchestrator", true],
-    ]);
-  });
-
-  it("opens the confirmation Settings uses, in place, Cancel first and the default, with the agreement so far as information", () => {
-    const figures = view({ ui: confirming });
-    const scope = figures.rows.find((row) => row.label === "Scope")!;
-    expect(scope.confirm?.dialog).toEqual({
-      title: "Delegate Scope decisions in main · app?",
-      body: [
-        "• The recommended option answers them for you, without asking you.",
-        "• So far it matched 19 of your 20 answers (95 %).",
-        "• A reversal or an override sends the class back to Shadow at once; Return all to owner undoes it.",
-      ].join("\n"),
-      confirmLabel: "Delegate",
-      cancelLabel: "Cancel",
-      defaultAction: "cancel",
-    });
-    // Only that class carries it, and every offer waits while it is open.
-    expect(figures.rows.filter((row) => row.confirm !== null).map((row) => row.label)).toEqual(["Scope"]);
-    expect(offers(figures).map((offer) => offer[2])).toEqual([false, false, false, false]);
-    // Confirming sends autonomy.set with confirmed: true and the predictor of the figures pressed.
-    expect(scope.confirm?.input).toEqual({ workspaceId: "wks_a", class: "scope", mode: "delegate", confirmed: true, predictor: "recommended" });
-    expect(delegateInputOf("wks_a", "reversible-technical", "orchestrator")).toEqual({
-      workspaceId: "wks_a",
-      class: "reversible-technical",
-      mode: "delegate",
-      confirmed: true,
-      predictor: "orchestrator",
-    });
-    // The Orchestrator, with no counted answer: no figure line, and what it costs.
-    const orchestrator = view({ ui: { ...DELEGATION_UI_IDLE, confirming: { decisionClass: "reversible-technical", predictor: "orchestrator" } } });
-    expect(orchestrator.rows.find((row) => row.label === "Reversible technical")?.confirm?.dialog.body).toBe(
-      [
-        "• The Orchestrator answers them for you, without asking you.",
-        "• Each decision wakes the Orchestrator, which costs tokens.",
-        "• A reversal or an override sends the class back to Shadow at once; Return all to owner undoes it.",
-      ].join("\n"),
-    );
-    // A confirmation for a class no longer offered (delegated meanwhile) is not shown, and the offers are free again.
-    const stale = view({ ui: { ...DELEGATION_UI_IDLE, confirming: { decisionClass: "preference", predictor: "recommended" } } });
-    expect(stale.rows.every((row) => row.confirm === null)).toBe(true);
-    expect(offers(stale).map((offer) => offer[2])).toEqual([true, true, true, true]);
-  });
-
-  it("says when a class went back to Shadow, and that it counts from then; the note says the figures never gate a delegation", () => {
-    const demoted: AutonomyPolicy = { ...POLICY, demotions: { wks_a: { scope: "2026-09-26T10:00:00.000Z" }, wks_b: { preference: "2026-09-26T10:00:00.000Z" } } };
-    const rows = view({ policy: demoted }).rows;
-    expect(rows.find((row) => row.label === "Scope")?.demoted).toBe("Went back to Shadow on 2026-09-26 after a reversal; counted from then.");
-    expect(rows.filter((row) => row.demoted !== null).map((row) => row.label)).toEqual(["Scope"]);
-    expect(rows.find((row) => row.label === "Scope")?.accessibilityLabel).toMatch(/Went back to Shadow on 2026-09-26 after a reversal; counted from then\.$/);
-    expect(AUTONOMY_NOTE).toContain("The figures are for your information: you can delegate a class at any time, here with Delegate? or in Settings → Autonomy.");
-    expect(AUTONOMY_NOTE).not.toMatch(/\d+ %/);
-  });
-
-  // The hook-free piece: the button opens the confirmation; the confirmation's Cancel comes first.
-  const on = () => ({ delegate: vi.fn(), cancel: vi.fn(), confirm: vi.fn() });
-
-  it("draws Delegate? as a labelled button that only opens the confirmation", () => {
-    const actions = on();
-    for (const compact of [true, false]) {
-      const tree = renderTree(AutonomyFigures({ view: view(), compact, on: actions, styles, theme }));
-      const buttons = pressables(tree);
-      expect(buttons.map((button) => button.props.accessibilityLabel)).toEqual([
-        "Delegate Environment decisions in main · app to the recommended option",
-        "Delegate Scope decisions in main · app to the recommended option",
-        "Delegate Scope decisions in main · app to the Orchestrator",
-        "Delegate Reversible technical decisions in main · app to the Orchestrator",
-      ]);
-      for (const button of buttons) {
-        expect(button.props.accessibilityRole).toBe("button");
-        expect(texts([button])).toEqual([DELEGATE_LABEL]);
-      }
-      (buttons[1]!.props.onPress as () => void)();
-      expect(texts(tree).join("\n")).not.toMatch(/wks_/);
-    }
-    expect(actions.delegate).toHaveBeenLastCalledWith({ decisionClass: "scope", predictor: "recommended" });
-    expect(actions.confirm).not.toHaveBeenCalled();
-  });
-
-  it("draws the confirmation Cancel first; Cancel and Delegate call back, and a failure is said", () => {
-    const actions = on();
-    const tree = renderTree(AutonomyFigures({ view: view({ ui: confirming }), compact: true, on: actions, styles, theme }));
-    const labels = pressables(tree).map((button) => button.props.accessibilityLabel);
-    // Under the Scope row: its offers, then Cancel, then Delegate; the next row's offer after.
-    expect(labels).toEqual([
-      "Delegate Environment decisions in main · app to the recommended option",
-      "Delegate Scope decisions in main · app to the recommended option",
-      "Delegate Scope decisions in main · app to the Orchestrator",
-      "Cancel",
-      "Delegate",
-      "Delegate Reversible technical decisions in main · app to the Orchestrator",
-    ]);
-    expect(texts(tree)).toContain("Delegate Scope decisions in main · app?");
-    const byLabel = (label: string) => pressables(tree).find((button) => button.props.accessibilityLabel === label)!;
-    (byLabel("Cancel").props.onPress as () => void)();
-    (byLabel("Delegate").props.onPress as () => void)();
-    expect(actions.cancel).toHaveBeenCalledTimes(1);
-    expect(actions.confirm).toHaveBeenCalledWith({ workspaceId: "wks_a", class: "scope", mode: "delegate", confirmed: true, predictor: "recommended" });
-    // Every offer is disabled while it is open.
-    expect(byLabel("Delegate Scope decisions in main · app to the recommended option").props.disabled).toBe(true);
-
-    const failed = renderTree(AutonomyFigures({ view: view({ ui: { ...confirming, error: "E_AUTONOMY_WRITE_FAILED" } }), compact: false, on: actions, styles, theme }));
-    expect(texts(failed)).toContain("Could not delegate: E_AUTONOMY_WRITE_FAILED");
-    // While it runs, Cancel is gone and the button says so.
-    const busy = renderTree(AutonomyFigures({ view: view({ ui: { ...confirming, busy: true } }), compact: false, on: actions, styles, theme }));
-    expect(pressables(busy).map((button) => button.props.accessibilityLabel)).not.toContain("Cancel");
-    expect(texts(busy)).toContain("Delegating…");
+describe("autonomy by class is read only (ADR-025)", () => {
+  it("offers no shortcut and no demotion line; the note sends the owner to the level in Settings", () => {
+    const view = autonomyOf();
+    expect(view.kind === "figures" && view.rows.every((row) => Object.keys(row).sort().join() === "accessibilityLabel,decisionClass,figures,label,modeText,modeTone")).toBe(true);
+    expect(AUTONOMY_NOTE).toContain("The figures are for your information: the project's autonomy level is set in Settings → Autonomy.");
+    expect(AUTONOMY_NOTE).not.toMatch(/Delegate\?|\d+ %/);
   });
 });
 
-describe("the screen", () => {
+describe("the Metrics tab", () => {
   const body = (overrides: Record<string, unknown> = {}) =>
     renderTree(
-      InsightsBody({
+      MetricsBody({
         window: "30d",
-        projectId: ALL_PROJECTS,
-        projects: [{ id: "wks_a", label: "main · app" }],
+        projectLabel: "main · app",
         view: insightsView(summary(), NOW),
         loading: false,
         error: null,
         beads: { kind: "choose", text: BEADS_CHOOSE_PROJECT },
         autonomy: { kind: "choose", text: AUTONOMY_CHOOSE_PROJECT },
         onWindow: noop,
-        onProject: noop,
         onRefresh: noop,
         styles,
         theme,
@@ -730,19 +567,20 @@ describe("the screen", () => {
       }),
     );
 
-  it("reads top to bottom: title, choices, scope, flow, cost, beads, autonomy, then review lift", () => {
+  it("reads top to bottom: the window, scope, flow, cost, beads, autonomy, then review lift — no title and no project tabs", () => {
     const shown = texts(body());
-    const order = ["Insights", "Last 30 days · all projects", "Flow", "Questions per request", "Requests per day · last 14 days", "Cost", "Tokens per request by role", "Beads", BEADS_CHOOSE_PROJECT, AUTONOMY_TITLE, AUTONOMY_NOTE, AUTONOMY_CHOOSE_PROJECT, REVIEW_LIFT_TITLE, REVIEW_LIFT_NOTE, "Small", "Medium"];
+    expect(shown).not.toContain("Insights");
+    expect(shown).not.toContain("All projects");
+    const order = ["7 days", "30 days", "90 days", "All time", "Refresh", "Last 30 days · main · app", "Flow", "Questions per request", "Requests per day · last 14 days", "Cost", "Tokens per request by role", "Beads", BEADS_CHOOSE_PROJECT, AUTONOMY_TITLE, AUTONOMY_NOTE, AUTONOMY_CHOOSE_PROJECT, REVIEW_LIFT_TITLE, REVIEW_LIFT_NOTE, "Small", "Medium"];
     const positions = order.map((text) => shown.indexOf(text));
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
   });
 
-  it("every pressable is a labelled button or tab; the window and project tabs call back with their key", () => {
+  it("every pressable is a labelled button or tab; the window tabs call back with their key", () => {
     const onWindow = vi.fn();
-    const onProject = vi.fn();
     const onRefresh = vi.fn();
-    const nodes = body({ onWindow, onProject, onRefresh });
+    const nodes = body({ onWindow, onRefresh });
     const buttons = pressables(nodes);
     for (const button of buttons) {
       expect(["button", "tab"]).toContain(button.props.accessibilityRole);
@@ -750,17 +588,15 @@ describe("the screen", () => {
     }
     const byLabel = (label: string) => buttons.find((button) => button.props.accessibilityLabel === label)!;
     (byLabel("7 days").props.onPress as () => void)();
-    (byLabel("main · app").props.onPress as () => void)();
     (byLabel("Refresh the figures").props.onPress as () => void)();
     expect(onWindow).toHaveBeenCalledWith("7d");
-    expect(onProject).toHaveBeenCalledWith("wks_a");
     expect(onRefresh).toHaveBeenCalledTimes(1);
     expect(byLabel("30 days").props.accessibilityState).toEqual({ selected: true });
-    expect(byLabel("All projects").props.accessibilityState).toEqual({ selected: true });
+    expect(buttons.map((button) => button.props.accessibilityLabel)).toEqual(["7 days", "30 days", "90 days", "All time", "Refresh the figures"]);
   });
 
   it("shows no id: projects by name only", () => {
-    const shown = texts(body({ projectId: "wks_a", beads: { kind: "loading" }, autonomy: autonomyOf() })).join("\n");
+    const shown = texts(body({ beads: { kind: "loading" }, autonomy: autonomyOf() })).join("\n");
     expect(shown).toContain("Last 30 days · main · app");
     expect(shown).not.toContain("wks_a");
   });
@@ -884,10 +720,9 @@ describe("cost: tokens read per request and the heaviest requests (autonomy desi
     // The screen hands its width down: the heaviest requests stack on a phone.
     const direction = (compact: boolean) => {
       const tree = renderTree(
-        InsightsBody({
+        MetricsBody({
           window: "30d",
-          projectId: ALL_PROJECTS,
-          projects: PROJECTS,
+          projectLabel: "main · app",
           view: insightsView(withContext(), NOW, PROJECTS),
           loading: false,
           error: null,
@@ -895,7 +730,6 @@ describe("cost: tokens read per request and the heaviest requests (autonomy desi
           autonomy: { kind: "choose", text: AUTONOMY_CHOOSE_PROJECT },
           compact,
           onWindow: noop,
-          onProject: noop,
           onRefresh: noop,
           styles,
           theme,
@@ -969,17 +803,15 @@ describe("review lift (autonomy design §C.4)", () => {
     const draw = (view: ReturnType<typeof insightsView>) =>
       texts(
         renderTree(
-          InsightsBody({
+          MetricsBody({
             window: "30d",
-            projectId: ALL_PROJECTS,
-            projects: [{ id: "wks_a", label: "main · app" }],
+            projectLabel: "main · app",
             view,
             loading: false,
             error: null,
             beads: { kind: "choose", text: BEADS_CHOOSE_PROJECT },
             autonomy: { kind: "choose", text: AUTONOMY_CHOOSE_PROJECT },
             onWindow: noop,
-            onProject: noop,
             onRefresh: noop,
             styles,
             theme,

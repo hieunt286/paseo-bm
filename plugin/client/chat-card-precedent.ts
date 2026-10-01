@@ -112,7 +112,7 @@ export function precedentOfferView(decision: Decision | null, ui: PrecedentUi): 
     offer: null,
     form: {
       title: `Save as precedent for "${subject}"?`,
-      body: `Later questions on "${subject}" get this answer without asking you, for ${DEFAULT_PRECEDENT_DAYS} days — release, data, security and cost questions still come to you. End it any time in Settings → Autonomy.`,
+      body: `Later questions on "${subject}" get this answer without asking you, for ${DEFAULT_PRECEDENT_DAYS} days. End it any time in Settings → More → Precedents.`,
       text: ui.form.text,
       textLabel: "The precedent's answer",
       textHint,
@@ -154,8 +154,7 @@ export async function runPrecedentSave(input: {
 
 /**
  * The precedent an open decision's card suggests (autonomy design §B.6): the
- * owner's active precedent on its subject that did not answer it — a release,
- * data, security or cost question stays the owner's, and so does one asked
+ * owner's active precedent on its subject that did not answer it — one asked
  * again — or one saved after it opened.
  */
 export interface PrecedentSuggestionView {

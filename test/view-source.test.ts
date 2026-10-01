@@ -25,8 +25,8 @@ describe("launcher.tsx: the Beads Manager surface", () => {
   it("builds the status strip once and places it on the main screen, the workspace list and a project's page", () => {
     expect(launcher.match(/<LauncherStatus\b/g)).toHaveLength(1);
     expect(launcher).toMatch(/<SettingsScreen\b.*\bstatus=\{status\}/);
-    expect(launcher).toMatch(/<InsightsScreen\b[^>]*\bstatus=\{status\}/);
-    // Work's list and a project's page get it too (work.tsx draws it under their headers).
+    expect(launcher).toMatch(/<ToolsScreen\b.*\bstatus=\{status\}/);
+    // The Projects list and a project's page get it too (work.tsx draws it under their headers).
     expect(launcher).toMatch(/<WorkScreen\b[\s\S]*?\bstatus=\{status\}/);
     expect(launcher).toMatch(/<ProjectPage\b[\s\S]*?\bstatus=\{status\}/);
     // On a project's page inside the surface (F3).
@@ -35,19 +35,28 @@ describe("launcher.tsx: the Beads Manager surface", () => {
     expect(launcher.slice(start, launcher.indexOf("/>", start))).toMatch(/status=\{status\}/);
   });
 
-  it("shows Settings with the named projects and the strip, and no Setup screen", () => {
+  it("shows Settings and Tools & skills with the same props — the named projects and the strip —, and no Setup or Insights screen", () => {
     expect(launcher).toMatch(/<SettingsScreen \{\.\.\.props\} projects=\{insightsProjects\(.*\)\} status=\{status\} \/>/);
+    expect(launcher).toMatch(/<ToolsScreen \{\.\.\.props\} projects=\{insightsProjects\(.*\)\} status=\{status\} \/>/);
     expect(launcher).not.toMatch(/<SetupScreen\b/);
+    // Insights is no section (change-014 outcome 5): its figures are a project's Metrics tab.
+    expect(launcher).not.toMatch(/<InsightsScreen\b|"insights"/);
+  });
+
+  it("opens a project's page on its Overview, a closed workspace's on Requests, and its Autonomy action on Settings", () => {
+    expect(launcher).toMatch(/setView\(closed === undefined \? "project-overview" : "project-requests"\)/);
+    const start = launcher.indexOf("<ProjectPage");
+    expect(launcher.slice(start, launcher.indexOf("/>", start))).toMatch(/onOpenSettings=\{\(\) => setView\("settings"\)\}/);
   });
 
   it("renders workspaces.data in the order it arrives (most recent activity first; delta 20260918f §4.5)", () => {
     expect(launcher).toMatch(/sort: \[\{ key: "activity_at", direction: "desc" \}\]/);
-    // Work's rows are `workspaces.data` mapped one to one; `workRows` keeps that order (plugin-work-model.test.ts).
+    // The project rows are `workspaces.data` mapped one to one; `workRows` keeps that order (plugin-work-model.test.ts).
     expect(launcher).toMatch(/workspaces=\{workspaces\.data\?\.map\(\(workspace\) => \(\{/);
   });
 
   it("draws each workspace row's running dot from the overview's runningAgents, animated", () => {
-    // Work draws each project row through `renderDot` (work.tsx, rendered in plugin-work-model.test.ts), with the dot alone.
+    // The Projects list draws each project row through `renderDot` (work.tsx, rendered in plugin-work-model.test.ts), with the dot alone.
     expect(launcher).toMatch(/renderDot=\{\(workspaceId\) => \(\s*<RunningDot\b[^>]*counts=\{overviewById\.get\(workspaceId\)\?\.runningAgents\}[^>]*\bbare\b/);
     expect(launcher).toMatch(/<Animated\.View\b/);
   });
@@ -60,7 +69,7 @@ describe("launcher.tsx: the Beads Manager surface", () => {
     // The back navigation is written once, inside `goBack`.
     expect(launcher.match(/setView\(backOf\(view\) \?\? SURFACE_HOME_VIEW\)/g)).toHaveLength(1);
     expect(launcher).toMatch(/const goBack = \(\) => setView\(backOf\(view\) \?\? SURFACE_HOME_VIEW\);/);
-    // The workspace list is Work's own screen, reached by its tab: no ← of its own.
+    // The workspace list is the Projects section's own screen, reached by its tab: no ← of its own.
     expect(launcher.match(/onPress=\{goBack\}/g)).toBeNull();
   });
 
@@ -78,27 +87,54 @@ describe("launcher.tsx: the Beads Manager surface", () => {
 
 describe("settings-section.tsx: the Settings screen", () => {
   const section = source("settings-section.tsx");
+  const code = section.replace(/\/\*\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
 
-  it("builds each group from the Setup screen's pieces", () => {
-    const code = section.replace(/\/\*\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
-    for (const piece of ["<RolesSection", "<AgentToolsBlockView", "<ToolCard", "<SkillsInstallBlock", "<CleanupBlock", "<TraceActions", "signInRows(data)"]) {
+  it("builds More's groups from the Setup screen's pieces", () => {
+    for (const piece of ["<RolesSection", "<AgentToolsBlockView", "<CleanupBlock", "<TraceActions", "signInRows(data)", "<PrecedentsBlock"]) {
       expect(code).toContain(piece);
     }
+    // Tools & skills is its own section now (tools-screen.tsx).
+    for (const gone of ["<ToolCard", "<SkillsInstallBlock", "SkillsBlock"]) expect(code).not.toContain(gone);
   });
 
-  it("shows the Coordination group, saving one key through coordination.set", () => {
+  it("draws Autonomy, then Coordination, then More, in that order (change-014 outcome 5)", () => {
+    const at = (needle: string) => code.indexOf(needle);
+    expect(at('title="Autonomy"')).toBeGreaterThan(0);
+    expect(at('title="Autonomy"')).toBeLessThan(at('title="Coordination"'));
+    expect(at('title="Coordination"')).toBeLessThan(at('title="More"'));
+    expect(at('title="More"')).toBeLessThan(at("SETTINGS_GROUPS.map("));
+  });
+
+  it("shows the Coordination group, saving one key through coordination.set, and resets every draft to the defaults", () => {
     expect(section).toContain("<AdviceCadenceRow");
     expect(section).toMatch(/useRpc\(coordinationSettingsRpc\)/);
     expect(section).toMatch(/save\(\{ key: "advice\.everyFinished", value \}\)/);
+    expect(section).toContain("<CoordinationGroup");
+    expect(code).toMatch(/const defaults = coordinationDefaultsDraft\(data\.defaults\);\s+setError\(null\);\s+setAdviceDraft\(defaults\.advice\);\s+setThresholds\(defaults\.thresholds\);\s+setReview\(defaults\.review\);/);
   });
 
-  it("draws the Autonomy group from autonomy.policy, the matrix taking the surface's named projects", () => {
+  it("draws the Autonomy group from autonomy.policy with the surface's named projects, and counts the precedents from their own query", () => {
     expect(section).toMatch(/useRpc\(autonomyPolicyRpc\)/);
-    expect(section).toMatch(/autonomyGroupState\(autonomy\.data\?\.policy, autonomy\.isError\)/);
     expect(section).toContain("<AutonomyGroup");
     expect(section).toMatch(/projects=\{projects\}/);
-    // The Coordination group is left as it was.
-    expect(section).toContain("<CoordinationGroup");
+    expect(section).toMatch(/queryKey: PRECEDENTS_QUERY_KEY, queryFn: \(\) => listPrecedents\(\{\}\)/);
+    expect(section).toMatch(/precedentsGroupState\(precedents\.data\?\.precedents, precedents\.isError\)/);
+  });
+});
+
+describe("tools-screen.tsx: the Tools & skills section", () => {
+  const screen = source("tools-screen.tsx");
+
+  it("takes exactly Settings' props and reads setup.status through Settings' one query", () => {
+    expect(screen).toMatch(/export function ToolsScreen\(\{[^}]*\}: SettingsScreenProps\)/);
+    expect(screen).toMatch(/const status = useSetupStatus\(\);/);
+  });
+
+  it("reads skills.usage over 30 days of every project, and draws br and bv with the Setup screen's pieces", () => {
+    expect(screen).toMatch(/useRpc\(skillsUsageRpc\)/);
+    expect(screen).toMatch(/readUsage\(\{ sinceDays: SKILLS_USAGE_DAYS \}\)/);
+    expect(screen).not.toMatch(/readUsage\(\{[^}]*workspaceId/);
+    for (const piece of ["<ToolCard", "<SkillsInstallBlock", "<SkillsTable", "<AgentToolsTable", "BEADS_TOOL_IDS.has(tool.id)"]) expect(screen).toContain(piece);
   });
 });
 
@@ -124,40 +160,32 @@ describe("settings-blocks.tsx and dashboard-actions.tsx: the confirmations", () 
   });
 });
 
-describe("settings-autonomy.tsx and settings-precedents.tsx: the Autonomy group", () => {
+describe("settings-autonomy.tsx and settings-precedents.tsx: the Autonomy group and the precedents", () => {
   const autonomy = source("settings-autonomy.tsx");
+  const code = autonomy.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
 
-  it("returns every class to owner through autonomy.reset in one press, and sets one cell through autonomy.set", () => {
-    expect(autonomy).toMatch(/useRpc\(autonomyResetRpc\)/);
-    expect(autonomy).toMatch(/reset\(\{ workspaceId: project\.id \}\)/);
-    expect(autonomy).toMatch(/set\(\{ workspaceId: project\.id, class: decisionClass, mode \}\)/);
-    // One press: the reset is the safety path, with no confirmation (design §B.9).
-    expect(autonomy).toMatch(/onReset=\{\(\) => \{\s+setConfirmingDelegate\(null\);\s+run\(\(\) => reset\(\{ workspaceId: project\.id \}\)\);\s+\}\}/);
-    // Confirmed in the code: the action boundary, and a delegation through the model's input (`confirmed: true`, pinned in its model test).
-    const code = autonomy.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  it("sets a level only through autonomy.set-level: at once, or from its confirmation's own button (ADR-025)", () => {
+    expect(autonomy).toMatch(/useRpc\(autonomySetLevelRpc\)/);
+    // A press sets at once only when the model says so; Turbo and Full auto only ask.
+    expect(code).toMatch(/const press = levelPressOf\(view\.reading, level\);\s+if \(press === "set"\) run\(\(\) => setLevel\(setLevelInputOf\(project\.id, level\)\)\);\s+setConfirmingLevel\(press === "confirm" \? level : null\);/);
+    expect(code).toMatch(/onConfirm=\{\(\) => \{\s+const level = confirmingLevel;\s+if \(level === null\) return;\s+run\(async \(\) => \{\s+const saved = await setLevel\(setLevelInputOf\(project\.id, level\)\);/);
+    // `confirmed: true` for a level comes from the model (pinned in its test); the only literal one here is the boundary's.
     expect(code.match(/confirmed/g)).toEqual(["confirmed"]);
-    expect(code).toMatch(/onConfirm: \(asked\) =>\s+run\(async \(\) => \{\s+const saved = await set\(asked\.input\);/);
-    // Pressing Delegated only asks: the confirmation's own button sends.
-    expect(code).toMatch(/if \(mode === "delegate"\) \{\s+setConfirmingBoundary\(null\);\s+setConfirmingDelegate\(\{ decisionClass, predictor: "recommended" \}\);\s+return;/);
+    // The matrix, the predictor choice, the challenger and Return all to owner are gone.
+    for (const gone of ["autonomySetRpc", "autonomyResetRpc", "autonomySetChallengerRpc", "AutonomyMatrix", "PrecedentsBlock"]) expect(code).not.toContain(gone);
   });
 
-  it("turns the action boundary on or off through autonomy.set-boundary, after its confirmation in place (change-010 C2, C4)", () => {
+  it("holds risky actions through autonomy.set-boundary, after its confirmation in place (change-010 C2, C4)", () => {
     expect(autonomy).toMatch(/useRpc\(autonomySetBoundaryRpc\)/);
     expect(autonomy).toMatch(/setBoundary\(\{ workspaceId: project\.id, enabled, confirmed: true \}\)/);
-    // Pressing a side only asks; the confirmation's own button sends.
-    expect(autonomy).toMatch(/onBoundaryAsk=\{\(enabled\) => \{\s+setError\(null\);\s+setConfirmingDelegate\(null\);\s+setConfirmingBoundary\(enabled\);/);
+    // Pressing the switch only asks; the confirmation's own button sends.
+    expect(code).toMatch(/onToggle=\{\(\) => \{\s+setError\(null\);\s+setConfirmingLevel\(null\);\s+setConfirmingBoundary\(!view\.boundary\.on\);/);
     expect(autonomy).toMatch(/<ConfirmBlock dialog=\{view\.confirm\}/);
   });
 
-  it("switches the Orchestrator's predictions through autonomy.set-challenger", () => {
-    expect(autonomy).toMatch(/useRpc\(autonomySetChallengerRpc\)/);
-    expect(autonomy).toMatch(/setChallenger\(\{ workspaceId: project\.id, enabled \}\)/);
-  });
-
-  it("reads and writes the precedents through their RPCs, under the named projects", () => {
+  it("reads and writes the precedents through their RPCs", () => {
     const precedents = source("settings-precedents.tsx");
     for (const call of ["useRpc(precedentsListRpc)", "useRpc(precedentsSaveRpc)", "useRpc(precedentsEndRpc)", "queryKey: PRECEDENTS_QUERY_KEY"]) expect(precedents).toContain(call);
-    expect(autonomy).toMatch(/<PrecedentsBlock projects=\{list\}/);
   });
 });
 
@@ -195,7 +223,7 @@ describe("beads-screen.tsx and chat-beads-panel.tsx: the Beads board and the cha
     expect(screen).toMatch(/<KanbanBoard/);
     expect(screen).toMatch(/<StatusTabs/);
     expect(screen).toMatch(/onLayout=\{\(event\) => setBoardWidth\(event\.nativeEvent\.layout\.width\)\}/);
-    // The figures are Insights' (plugin-work-model.test.ts renders them there).
+    // The figures are the Metrics tab's (plugin-work-model.test.ts renders them there).
     expect(screen).not.toMatch(/<StatCards|<BarChart|<BeadsFigures/);
     const body = screen.slice(screen.indexOf("export function BeadsScreen("));
     expect(body.indexOf("<KanbanBoard")).toBeGreaterThan(0);
@@ -218,6 +246,39 @@ describe("work.tsx: a project's page", () => {
     expect(work).toMatch(/readAgents\(\{ workspaceId \}\)/);
     const inTree = work.slice(work.indexOf("<AgentTreeView "), work.indexOf("</AgentTreeView>"));
     expect(inTree).toContain("<TokenFigures state={tokens}");
+  });
+
+  it("draws Overview · Requests · Beads · Metrics · Agents, Metrics being the project's insights (change-014 outcome 5)", () => {
+    const page = work.slice(work.indexOf("export function ProjectPage("));
+    expect(page).toMatch(/tab === "overview" \? \(\s*<OverviewTab\b/);
+    expect(page).toMatch(/tab === "metrics" \? \(\s*<ProjectMetrics workspaceId=\{workspaceId\} label=\{label\}/);
+    expect(page).toMatch(/onRequests=\{\(\) => setTab\("requests"\)\}/);
+  });
+
+  it("reads the Overview from the Requests tab's queries, the Metrics tab's summary and the shared policy query", () => {
+    const tab = work.slice(work.indexOf("function OverviewTab("), work.indexOf("function AgentsTab("));
+    expect(tab).toMatch(/queryKey: workQueryKeys\.traces\(workspaceId\)/);
+    expect(tab).toMatch(/queryKey: workQueryKeys\.decisions\(workspaceId\)/);
+    expect(tab).toMatch(/queryKey: insightsQueryKey\(INSIGHTS_DEFAULT_WINDOW, workspaceId\)/);
+    expect(tab).toMatch(/queryKey: AUTONOMY_POLICY_KEY/);
+    expect(tab).toMatch(/level=\{levelNameOf\(policy\.data\?\.levels, workspaceId\)\}/);
+  });
+
+  it("names each project row's autonomy level from autonomy.policy's levels", () => {
+    const screen = work.slice(work.indexOf("export function WorkScreen("));
+    expect(screen).toMatch(/queryKey: AUTONOMY_POLICY_KEY/);
+    expect(screen).toMatch(/levels: policy\.data\.levels/);
+  });
+});
+
+describe("insights.tsx: a project's Metrics tab", () => {
+  const insights = source("insights.tsx");
+
+  it("reads insights.summary for its workspace with the window tabs, and offers no Delegate? (ADR-025)", () => {
+    const tab = insights.slice(insights.indexOf("export function ProjectMetrics("));
+    expect(tab).toMatch(/queryFn: \(\) => readSummary\(\{ window, workspaceId \}\)/);
+    expect(insights).toMatch(/<StatusTabs tabs=\{WINDOW_TABS\}/);
+    expect(insights).not.toMatch(/autonomySetRpc|Delegate|<InsightsScreen|export function InsightsScreen/);
   });
 });
 

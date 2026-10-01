@@ -534,8 +534,8 @@ export function createSessionToggle(initial: boolean): SessionToggle {
 
 /**
  * Whether the Beads screen shows the Closed column. Hidden by default since
- * Work (experience concept §4.2: In progress · Ready · Blocked, Closed behind
- * the eye), remembered while the app runs and back to hidden after a reload.
+ * Work, now Projects (experience concept §4.2: In progress · Ready · Blocked, Closed behind
+ * Show closed), remembered while the app runs and back to hidden after a reload.
  * The screen on the surface and the one in the "Beads" tab share it.
  */
 export const closedBeadsVisibility = createSessionToggle(false);

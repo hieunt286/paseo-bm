@@ -21,6 +21,7 @@ import type { PluginTheme } from "@getpaseo/plugin";
 import type { z } from "zod";
 import type { managerEnsureRpc } from "../shared/contracts";
 import type { Tone } from "./tone";
+import { RADIUS } from "./styles";
 import { createSlot, type Slot } from "./slot";
 import { codedTail, errorCodeOf, errorMessageOf } from "./errors";
 
@@ -264,7 +265,7 @@ export function launcherStyles(theme: PluginTheme, compact: boolean) {
       justifyContent: "space-between" as const,
       gap: compact ? 8 : 12,
       padding: compact ? 12 : 14,
-      borderRadius: 10,
+      borderRadius: RADIUS,
       borderWidth: 1,
       borderColor: theme.colors.border,
       backgroundColor: theme.colors.surface1,
@@ -284,14 +285,14 @@ export function launcherStyles(theme: PluginTheme, compact: boolean) {
       gap: 6,
       paddingVertical: compact ? 7 : 6,
       paddingHorizontal: 10,
-      borderRadius: 8,
+      borderRadius: RADIUS,
       borderWidth: 1,
       borderColor: theme.colors.border,
       backgroundColor: theme.colors.surface2,
     },
     iconButton: {
       padding: 8,
-      borderRadius: 8,
+      borderRadius: RADIUS,
       borderWidth: 1,
       borderColor: theme.colors.border,
       backgroundColor: theme.colors.surface1,
@@ -302,7 +303,7 @@ export function launcherStyles(theme: PluginTheme, compact: boolean) {
     button: {
       paddingVertical: 10,
       paddingHorizontal: 14,
-      borderRadius: 8,
+      borderRadius: RADIUS,
       alignItems: "center" as const,
       backgroundColor: theme.colors.accent,
     },

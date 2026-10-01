@@ -17,8 +17,7 @@
  *
  * - **Only what needs a judgement** (REQ-115 b, A-7): a decision wakes the
  *   Orchestrator only when the owner's policy asks it something of that
- *   decision (below) — never for release, data, security or cost, which are
- *   the owner's alone (X-4, REQ-121 c) and wait in the Inbox; a finished
+ *   decision (below), any class at the project's level (ADR-025); a finished
  *   report wakes it only when it shows work left — ready beads, open review
  *   findings, blockers, or failing checks (`workLeftOf`) — or when its request
  *   is finished-unverified (design §C.3, Phase 3: code changed and not every
@@ -56,17 +55,16 @@
  *   change on an option, about each finding worth acting on. 0 turns it off:
  *   nothing is counted, and a pending one is dropped at delivery.
  * - **`decision.opened`, per cell** (design §B.5, §B.9; change-007 C1). A
- *   decision the Orchestrator did not ask (`q:`, `f:`), still open, of a
- *   delegable class raises one exactly when:
- *   - its cell is `delegate` with the predictor `orchestrator`
- *     (`decideRefusalOf`): it asks for a decision (`asks: "decision"`), its
- *     line names `bm_decide`;
+ *   decision the Orchestrator did not ask (`q:`, `f:`), still open, of any
+ *   class (ADR-025) raises one exactly when:
+ *   - its cell is `delegate` (`decideRefusalOf`): it asks for a decision
+ *     (`asks: "decision"`), its line names `bm_decide`;
  *   - its cell is `owner` or `shadow` and the project's challenger is on
  *     (`predictionRefusalOf`): it asks for a prediction
- *     (`asks: "prediction"`), its line names `bm_predict`.
- *   Nothing else: not with the challenger off, not for a cell of the
- *   recommended predictor (answered at open, `policy-resolve.ts`), never for
- *   release, data, security or cost, never for the Orchestrator's own `o:`.
+ *     (`asks: "prediction"`), its line names `bm_predict`; the owner sees the
+ *     prediction as the Orchestrator's proposal.
+ *   Nothing else: not with the challenger off, never for the Orchestrator's
+ *   own `o:`.
  *   It is published whatever the policy scope — a project whose cells are all
  *   `owner` included, which is every new project. A decision that waits for
  *   `bm_decide` and gets none simply stays open in the Inbox for the owner:
@@ -300,7 +298,7 @@ export function eventLineOf(event: BmEvent): string {
       if (event.asks === "decision") {
         return `${opened} A decision is asked: the owner's policy delegates its class to you. Read it with bm_decisions and choose the option the owner would, with bm_decide and your reason in one line.`;
       }
-      return `${opened} A prediction is asked: read it with bm_decisions and give the option you expect the owner to choose with bm_predict. The owner decides it: answer nothing and tell the owner nothing.`;
+      return `${opened} A prediction is asked: read it with bm_decisions and give the option you expect the owner to choose with bm_predict, with your reason in one line. The owner sees it as your proposal and decides: answer nothing.`;
     }
     case "request.finished": {
       const finished = `- request.finished — ${project}, request ${event.requestId ?? "not named"}, Manager ${event.managerId}, at ${event.at}`;
@@ -444,16 +442,13 @@ export function eventsMessageOf(lines: readonly string[]): string {
  * Orchestrator, by the owner's `policy` per cell (design §B.5, §B.9;
  * change-007 C1), and for nothing else:
  *
- * - one delegated to it (`decideRefusalOf`: not its own, open, a delegable
- *   class `delegate` in its project with the predictor `orchestrator`) asks
- *   for a decision;
+ * - one delegated to it (`decideRefusalOf`: not its own, open, its class
+ *   `delegate` in its project) asks for a decision;
  * - one the challenger may predict (`predictionRefusalOf`: not its own, open,
- *   a delegable class in an `owner` or `shadow` cell, the project's challenger
- *   on) asks for a prediction, whatever else the project's policy holds.
+ *   any class in an `owner` or `shadow` cell, the project's challenger on)
+ *   asks for a prediction, whatever else the project's policy holds.
  *
- * The two never both hold (a `delegate` cell is not predicted). Release,
- * data, security and cost — by a proposed class or an option's effect — wake
- * nobody. Pure.
+ * The two never both hold (a `delegate` cell is not predicted). Pure.
  */
 export function decisionOpenedEventsOf(decisions: readonly Decision[], policy: AutonomyPolicy = EMPTY_AUTONOMY_POLICY): DecisionOpenedEvent[] {
   return decisions.flatMap((decision): DecisionOpenedEvent[] => {
@@ -733,7 +728,7 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
           const decision = createDecisionStore(home, { log }).get(event.decisionId, event.workspaceId);
           if (decision === null) return false;
           // Dropped once it may no longer be asked: settled, its cell changed meanwhile (a
-          // reset, a demotion), the challenger turned off, or the Orchestrator predicted it already.
+          // reset, a new level), the challenger turned off, or the Orchestrator predicted it already.
           return (event.asks === "decision" ? decideRefusalOf(policy, decision) : predictionRefusalOf(policy, decision)) === null;
         }
         case "request.finished":

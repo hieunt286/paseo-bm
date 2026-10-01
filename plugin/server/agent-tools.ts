@@ -15,6 +15,13 @@
  * request from the decision store. It writes nothing, so the path still asks
  * nobody who they are.
  *
+ * One tool of the Worker's path is served by the plugin as well: `bm_reply`
+ * (change-014 outcome 3, Ask back; `decision-ask.ts`). It appends the
+ * Worker's reply to a decision's thread, and only to a `q:` decision whose
+ * owner asked and got no reply yet, so the path still asks nobody who they
+ * are: a call can add one reply where the owner is waiting for one, nothing
+ * else.
+ *
  * The Orchestrator's tools read every paseo-bm project, ask the owner and
  * send commands (Orchestrator design §5, ADR-014 decision 3), so its path carries a secret:
  * `/mcp/orchestrator/<secret>`, 32 random bytes in hex. Any other
@@ -44,6 +51,7 @@ import { ensureDataHome, resolveDataHome, type DataHomeDeps } from "./data-home"
 import { UI_DIR_NAME } from "./data-home";
 import { createManagerTools, type ServerTools } from "./decision-tools";
 import { createOrchestratorTools, type OrchestratorTools } from "./orchestrator-tools";
+import { createWorkerTools } from "./decision-ask";
 import { assertNoSymlinkOnPath, ensureStoreDir, writeStoreFileAtomically } from "./trace-store";
 
 /** Name of the MCP server in an agent's config; Claude shows the tools as `mcp__paseo-bm__<tool>`. */
@@ -209,10 +217,11 @@ interface HandleContext {
   secret: string;
   orchestrator: OrchestratorTools;
   manager: ServerTools;
+  worker: ServerTools;
   log: (line: string) => void;
 }
 
-async function handle(request: IncomingMessage, response: ServerResponse, { secret, orchestrator, manager, log }: HandleContext): Promise<void> {
+async function handle(request: IncomingMessage, response: ServerResponse, { secret, orchestrator, manager, worker, log }: HandleContext): Promise<void> {
   // An agent's MCP client sends no Origin; a web page always does.
   if (request.headers.origin !== undefined) return send(response, 403);
   const host = (request.headers.host ?? "").replace(/:\d+$/, "").toLowerCase();
@@ -238,7 +247,9 @@ async function handle(request: IncomingMessage, response: ServerResponse, { secr
         ? await answerOrchestrator(message, orchestrator)
         : role === "manager"
           ? await answerWithServerTools(role, message, manager)
-          : answer(role, message);
+          : role === "worker"
+            ? await answerWithServerTools(role, message, worker)
+            : answer(role, message);
     // One line per call of a real tool, for the numbers of AT-5; an unknown tool is not worth one.
     if (reply !== null && "result" in reply && (message as JsonRpcRequest).method === "tools/call") {
       const name = String(((message as JsonRpcRequest).params as { name?: unknown }).name);
@@ -399,6 +410,8 @@ export interface StartOptions {
   orchestrator?: OrchestratorTools;
   /** The Manager's server-run tools (`bm_decisions`); `createManagerTools()` by default. */
   manager?: ServerTools;
+  /** The Worker's server-run tools (`bm_reply`, change-014 Ask back); `createWorkerTools()` by default. */
+  worker?: ServerTools;
   /** The clock that stamps a new secret's `secretSince`; tests only. */
   now?: () => Date;
 }
@@ -430,10 +443,11 @@ export function startAgentTools(options: StartOptions = {}): AgentToolsEndpoint 
   const path = resolved.path;
   const orchestrator = options.orchestrator ?? createOrchestratorTools();
   const manager = options.manager ?? createManagerTools();
+  const worker = options.worker ?? createWorkerTools();
   const { secret, since: secretSince } = orchestratorSecretOf(secretPathOf(path), (options.now ?? (() => new Date()))(), log);
   let port: number | null = null;
   const server = createServer((request, response) => {
-    handle(request, response, { secret, orchestrator, manager, log }).catch(() => send(response, 500));
+    handle(request, response, { secret, orchestrator, manager, worker, log }).catch(() => send(response, 500));
   });
   const ready = (async () => {
     try {

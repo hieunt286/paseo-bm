@@ -1,6 +1,6 @@
 /**
- * Settings → Autonomy → Precedents (autonomy design §B.6, §B.9; PRD REQ-124):
- * the owner's standing answers, below the policy matrix. Each active
+ * Settings → More → Precedents (autonomy design §B.6, §B.9; PRD REQ-124):
+ * the owner's standing answers. Each active
  * precedent shows its project, subject, answer and expiry with **End**
  * (`precedents.end`, a confirmation in place, Cancel first); **Add
  * precedent…** opens a form — project or all, subject, answer, Cancel first —
@@ -19,6 +19,7 @@ import { useState } from "react";
 import { ActivityIndicator, Text, TextInput, View } from "react-native";
 import { precedentsEndRpc, precedentsListRpc, precedentsSaveRpc } from "../shared/contracts";
 import { errorMessageOf } from "./errors";
+import { RADIUS } from "./styles";
 import {
   PRECEDENTS_QUERY_KEY,
   PRECEDENTS_UI_IDLE,
@@ -44,7 +45,7 @@ export interface PrecedentsHandlers {
   confirmEnd: () => void;
 }
 
-const INPUT_STYLE = { borderWidth: 1, borderRadius: 8, padding: 8 };
+const INPUT_STYLE = { borderWidth: 1, borderRadius: RADIUS, padding: 8 };
 
 /** One precedent: subject and project, the answer, expiry and source, and End or its confirmation. */
 function RowView({ row, busy, on, styles, theme }: { row: PrecedentRowView; busy: boolean; on: PrecedentsHandlers; styles: Styles; theme: Theme }) {
@@ -175,9 +176,9 @@ export function PrecedentsList({ view, on, styles, theme }: { view: PrecedentsVi
  * form, `precedents.end` after its confirmation.
  */
 export function PrecedentsBlock({ projects, defaultScope, styles, theme }: {
-  /** The projects of the matrix, by name: the form's choices and the rows' project names. */
+  /** The projects of Settings, by name: the form's choices and the rows' project names. */
   projects: readonly AutonomyProject[];
-  /** The project shown in the matrix: where Add precedent… starts. */
+  /** Where Add precedent… starts: a project, or null for all projects. */
   defaultScope: string | null;
   styles: Styles;
   theme: Theme;

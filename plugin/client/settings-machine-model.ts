@@ -119,7 +119,7 @@ export function installDialog(tool: Tool): ConfirmDialog {
 }
 
 // ---------------------------------------------------------------------------
-// Which agent's skills a role's provider needs (Settings → Tools & skills).
+// Which agent's skills a role's provider needs (the Tools & skills section).
 // ---------------------------------------------------------------------------
 
 /** The label Setup uses for the agent whose skills a provider needs. */

@@ -368,3 +368,40 @@ export function reviewBudgetCardView(input: {
     reset: atDefaults ? null : { enabled: !saving, label: "Use the defaults", accessibilityLabel: "Set the review budget back to its defaults" },
   };
 }
+
+// ---------------------------------------------------------------------------
+// The Coordination group as a whole (change-014 outcome 5): open on the
+// screen, under one line of what it is, ending with one reset.
+// ---------------------------------------------------------------------------
+
+/** What the Coordination group is, in one line under its title. */
+export const COORDINATION_MEANING =
+  "When the Orchestrator compacts an agent or hands a request to a fresh Worker, for every project. Each switches itself off if it stops helping.";
+
+/** The drafts of the whole group, every value at its default: the advice cadence, the thresholds of both mechanisms, the review budget. */
+export interface CoordinationDefaultsDraft {
+  advice: number;
+  thresholds: ThresholdDraft;
+  review: ReviewBudgetDraft;
+}
+
+export function coordinationDefaultsDraft(defaults: CoordinationSettings): CoordinationDefaultsDraft {
+  return {
+    advice: defaults.advice.everyFinished,
+    thresholds: Object.assign({}, ...COORDINATION_MECHANISMS.map((mechanism) => defaultsDraft(mechanism, defaults))) as ThresholdDraft,
+    review: reviewBudgetDefaultsDraft(defaults),
+  };
+}
+
+/**
+ * "Reset coordination to defaults": fills every card with its defaults, as
+ * each card's own "Use the defaults" does; nothing is saved until a card's
+ * Save. The switches are left as they are.
+ */
+export function coordinationResetView(saving: boolean): StepButton {
+  return {
+    enabled: !saving,
+    label: "Reset coordination to defaults",
+    accessibilityLabel: "Fill every coordination setting with its default; each card saves with its own Save",
+  };
+}

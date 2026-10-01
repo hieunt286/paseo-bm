@@ -213,7 +213,7 @@ describe("client entry registrations", () => {
       { id: LAUNCHER_SURFACE_ID, title: "Beads Manager", icon: "Bot", surface: LAUNCHER_SURFACE_ID },
     ]);
     // Three: "Open Beads Manager" (WP-113), "Open Beads project" (the
-    // workspace's project page in Work) and "Open Beads Inbox" (autonomy design §A.12).
+    // workspace's project page in Projects) and "Open Beads Inbox" (autonomy design §A.12).
     expect(fake.commandItems).toHaveLength(3);
     expect(fake.commandItems.map((item) => item.id)).toEqual([
       "open-beads-manager",

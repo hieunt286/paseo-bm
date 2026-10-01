@@ -4,9 +4,16 @@
  * answered everywhere on the next read. Split from `chat-cards.ts` (code
  * review 2026-09-30 §4).
  *
+ * Change-014 (ADR-025): at Co-pilot and up the Orchestrator's proposal is the
+ * primary option ("Orchestrator suggests · …") with its reason under the
+ * options; the asker's recommended option keeps its ★. A Worker's question or
+ * an Orchestrator's decision can be asked back (`decisions.ask`) and shows its
+ * conversation (`decisions.thread`); the decision stays open meanwhile.
+ *
  * Pure: no React, no React Native, no `server/` import.
  */
 import type { ChatPeer } from "../shared/contracts";
+import { askableKindOf, hasOpenAsk, type DecisionThread } from "../shared/decision-threads";
 import {
   decisionClassOf,
   decisionKindOf,
@@ -15,12 +22,12 @@ import {
   effectsOfAnswer,
   isAnswerable,
   needsOwnerConfirmation,
+  policyPredictorOf,
   realEffects,
   type AnswerVia,
   type ChatVia,
   type Decision,
   type Effect,
-  type Predictor,
 } from "../shared/decisions";
 import { MAX_BODY_LINES, type ChatCard, type ChatRole, type DecisionSeed } from "./chat-card-parse";
 import { actorName, party } from "./chat-card-parties";
@@ -96,7 +103,11 @@ export const DECISION_UI_IDLE: DecisionUi = { confirming: null, words: null, bus
 export interface DecisionButton {
   key: string;
   label: string;
-  /** The recommended option is the one primary action; the others are secondary. */
+  /**
+   * The one primary action: the option the Orchestrator suggests when it
+   * proposed one (Co-pilot and up, ADR-025), else the recommended option; the
+   * others are secondary.
+   */
   primary: boolean;
   /** Tapping it first asks for the confirmation (release, data, security, cost — X-4). */
   confirm: boolean;
@@ -113,8 +124,47 @@ export interface DecisionCardView {
   confirmChat: boolean;
   /** The in-place confirmation, Cancel first; null when none is asked. */
   confirm: ConfirmDialog | null;
+  /** The Orchestrator's reason for the option it suggests, one muted line under the options; null when it proposed none or the options are hidden. */
+  proposal: string | null;
+  /** Ask back and the conversation (change-014 outcome 3); null on a decision whose asker cannot be asked. */
+  askBack: AskBackView | null;
   details: string[];
 }
+
+/** Who wrote one entry of the conversation, oldest first. */
+export interface ConversationEntry {
+  key: string;
+  who: string;
+  text: string;
+}
+
+/** Ask back on a decision card: the conversation, the button, the box and the line under them. */
+export interface AskBackView {
+  /** "Ask back" offered: an unsettled `q:`/`o:` decision, no box, confirmation or own-words box open. */
+  offered: boolean;
+  /** What a screen reader hears for the Ask back button. */
+  accessibilityLabel: string;
+  /** The box, open: its label and whether Send can be pressed. */
+  box: { label: string; placeholder: string; busy: boolean; sendEnabled: boolean } | null;
+  /** The thread, oldest first; empty when nobody asked. */
+  conversation: ConversationEntry[];
+  /** Not delivered, waiting for the asker, sending, or what the last Send could not do. */
+  status: { text: string; tone: "muted" | "warning" | "danger" } | null;
+}
+
+/** The card's Ask back state: the box (open when not null), the call in flight, and what the last Send said. */
+export interface AskUi {
+  text: string | null;
+  busy: boolean;
+  error: string | null;
+  /** The last ask's delivery, from `decisions.ask`; null before one. */
+  delivery: "sent" | "queued" | "failed" | null;
+}
+
+export const ASK_UI_IDLE: AskUi = { text: null, busy: false, error: null, delivery: null };
+
+/** What a failed delivery of the owner's question says (the question is kept in the thread). */
+export const ASK_NOT_DELIVERED = "Not delivered: the asker could not be reached; your question is kept.";
 
 const VIA_WHERE: Readonly<Record<AnswerVia, string>> = {
   inbox: " in the Inbox",
@@ -132,15 +182,15 @@ const CHAT_WORDS: Readonly<Record<ChatVia, string>> = {
   "chat-orchestrator": "the Orchestrator's chat",
 };
 
-/** Who decided a delegated class for the owner (autonomy design §B.5): the cell's predictor, in the card's words. */
-const POLICY_PREDICTOR_WORDS: Readonly<Record<Predictor, string>> = {
-  recommended: "recommended option",
-  orchestrator: "the Orchestrator's choice",
-};
-
-/** The authority line of a decision the owner's policy answered (§B.5): "decided for you by the policy · recommended option". */
-function policyAnsweredText(answer: NonNullable<Decision["answer"]>): string {
-  return `decided for you by the policy · ${POLICY_PREDICTOR_WORDS[answer.predictor ?? "recommended"]}`;
+/**
+ * Who answered a decision for the owner on their policy (§B.5, ADR-025): the
+ * Orchestrator, the only predictor; "your earlier policy" for an answer a
+ * build before ADR-025 stored with the recommended option as its predictor;
+ * "your policy" for a held request the action boundary allowed (no predictor).
+ */
+function policyAnswererOf(decision: Decision): string {
+  const predictor = policyPredictorOf(decision);
+  return predictor === "orchestrator" ? "the Orchestrator" : predictor === "recommended" ? "your earlier policy" : "your policy";
 }
 
 const STATUS_CHIPS: Readonly<Record<Decision["status"], Badge>> = {
@@ -227,11 +277,15 @@ function decisionDetails(card: ChatCard, seed: DecisionSeed, decision: Decision 
     lines.push(`${option.key}: ${option.label}${option.recommended ? " (recommended)" : ""} — effects: ${effects.length === 0 ? "none" : effectWords(effects)}`);
   }
   lines.push(`Status: ${decision.status}${decision.settledAt === null ? "" : ` at ${decision.settledAt}`}`);
+  const proposal = proposalOf(decision);
+  if (proposal !== null) lines.push(`Orchestrator suggests: ${proposal.optionKey} at ${decision.prediction!.orchestrator!.at}`);
   if (decision.answer !== null) {
     if (decision.answer.by === "orchestrator") lines.push("Answered by: the Orchestrator");
     if (decision.answer.by === "precedent") lines.push(`Answered by: your precedent ${decision.answer.precedentId ?? ""}`.trimEnd());
     if (decision.answer.by === "policy") {
-      lines.push(`Answered by: your policy (${POLICY_PREDICTOR_WORDS[decision.answer.predictor ?? "recommended"]}${decision.answer.class === undefined ? "" : `, ${decision.answer.class} delegated`})`);
+      const predictor = policyPredictorOf(decision);
+      const cls = decision.answer.class ?? decisionClassOf(decision);
+      lines.push(`Answered by: ${policyAnswererOf(decision)} (${predictor === "recommended" ? `recommended option, ${cls}` : cls})`);
     }
     lines.push(`Answer via: ${decision.answer.via}`);
     // The Orchestrator's reason (bm_decide, change-004): in Details, never on the card's face.
@@ -255,6 +309,10 @@ export interface DecisionViewInput {
   /** The message's time in the timeline. */
   cardAt: Date;
   now: Date;
+  /** The decision's Ask back thread (`decisions.thread`); absent or null while not read. */
+  thread?: DecisionThread | null;
+  /** The card's Ask back state; idle when absent. */
+  ask?: AskUi;
 }
 
 /**
@@ -278,7 +336,16 @@ export function decisionCardView(input: DecisionViewInput): DecisionCardView {
     outline: null,
     status: ui.error === null ? (ui.busy ? { text: "Sending your answer…", tone: "muted" } : null) : { text: ui.error, tone: "danger" },
   };
-  const view: DecisionCardView = { frame, options: [], ownWords: false, confirmChat: false, confirm: null, details: decisionDetails(card, seed, decision) };
+  const view: DecisionCardView = {
+    frame,
+    options: [],
+    ownWords: false,
+    confirmChat: false,
+    confirm: null,
+    proposal: null,
+    askBack: null,
+    details: decisionDetails(card, seed, decision),
+  };
 
   if (decision === null) {
     const body =
@@ -297,14 +364,18 @@ export function decisionCardView(input: DecisionViewInput): DecisionCardView {
     case "open": {
       const declared = declaredEffects(decision);
       const held = decisionKindOf(decision.id) === "held";
+      const controls = answerControls(decision, ui);
       return {
         ...view,
-        ...answerControls(decision, ui),
+        ...controls,
+        askBack: askBackOf(decision, ui, controls.confirm !== null, input.thread ?? null, input.ask ?? ASK_UI_IDLE),
         frame: {
           ...frame,
           chip,
           tag: declared.length === 0 ? null : `effects: ${effectWords(declared)}`,
           body: decisionKindOf(decision.id) === "override" ? [OVERRIDE_CARD_LINE] : held ? [HELD_CARD_LINE] : [],
+          // A held action waits on the owner while its Worker is mid-call: the danger bar (change-014).
+          ...(held ? { bar: "danger" as const } : {}),
         },
       };
     }
@@ -317,6 +388,7 @@ export function decisionCardView(input: DecisionViewInput): DecisionCardView {
       return {
         ...view,
         ...controls,
+        askBack: askBackOf(decision, ui, controls.confirm !== null, input.thread ?? null, input.ask ?? ASK_UI_IDLE),
         frame: {
           ...frame,
           chip,
@@ -335,10 +407,11 @@ export function decisionCardView(input: DecisionViewInput): DecisionCardView {
           : answer.by === "precedent"
             ? "answered by your precedent"
             : answer.by === "policy"
-              ? policyAnsweredText(answer)
+              ? `decided for you by ${policyAnswererOf(decision)}`
               : `answered by you${VIA_WHERE[answer.via]}`;
       return {
         ...view,
+        askBack: askBackOf(decision, ui, false, input.thread ?? null, input.ask ?? ASK_UI_IDLE),
         frame: {
           ...frame,
           chip,
@@ -349,21 +422,44 @@ export function decisionCardView(input: DecisionViewInput): DecisionCardView {
       };
     }
     default:
-      return { ...view, frame: { ...frame, chip, body: [settledLine(decision) ?? ""].filter((line) => line !== "") } };
+      return {
+        ...view,
+        askBack: askBackOf(decision, ui, false, input.thread ?? null, input.ask ?? ASK_UI_IDLE),
+        frame: { ...frame, chip, body: [settledLine(decision) ?? ""].filter((line) => line !== "") },
+      };
   }
 }
 
+/** The prefix of the option the Orchestrator suggests (Co-pilot and up, ADR-025). */
+export const SUGGESTS_PREFIX = "Orchestrator suggests · ";
+
+/**
+ * The Orchestrator's proposal on a decision that can still be answered
+ * (`prediction.orchestrator`, returned only at a level of 1 or more), when it
+ * names one of the options; null otherwise.
+ */
+export function proposalOf(decision: Decision): { optionKey: string; reason: string } | null {
+  const predicted = decision.prediction?.orchestrator ?? null;
+  if (predicted === null || !isAnswerable(decision)) return null;
+  return decision.options.some((option) => option.key === predicted.optionKey) ? { optionKey: predicted.optionKey, reason: predicted.reason } : null;
+}
+
 /** The answer buttons, Own words… and the in-place confirmation of a decision that can still be answered. */
-function answerControls(decision: Decision, ui: DecisionUi): Pick<DecisionCardView, "options" | "ownWords" | "confirm"> {
+function answerControls(decision: Decision, ui: DecisionUi): Pick<DecisionCardView, "options" | "ownWords" | "confirm" | "proposal"> {
+  const proposal = proposalOf(decision);
   const options = decision.options.map(
     (option): DecisionButton => {
       const effects = realEffects(option.effects);
+      const suggested = proposal?.optionKey === option.key;
+      const label = option.recommended ? `${option.label} ★` : option.label;
+      const why = [...(suggested ? ["the Orchestrator suggests it"] : []), ...(option.recommended ? ["recommended"] : [])];
       return {
         key: option.key,
-        label: option.recommended ? `${option.label} ★` : option.label,
-        primary: option.recommended,
+        label: suggested ? `${SUGGESTS_PREFIX}${label}` : label,
+        // The Orchestrator's proposal is the primary action; the asker's recommendation keeps its ★ but is secondary when they differ.
+        primary: proposal === null ? option.recommended : suggested,
         confirm: needsOwnerConfirmation(effects),
-        accessibilityLabel: `Answer: ${option.label}${option.recommended ? " (recommended)" : ""}${effects.length === 0 ? "" : `; allows ${effectWords(effects)}`}`,
+        accessibilityLabel: `Answer: ${option.label}${why.length === 0 ? "" : ` (${why.join("; ")})`}${effects.length === 0 ? "" : `; allows ${effectWords(effects)}`}`,
       };
     },
   );
@@ -379,12 +475,79 @@ function answerControls(decision: Decision, ui: DecisionUi): Pick<DecisionCardVi
       defaultAction: "cancel",
     };
   }
+  const shown = confirm === null && ui.words === null;
   return {
-    options: confirm === null && ui.words === null ? options : [],
+    options: shown ? options : [],
     // A held request is allowed or denied, never answered in words (§D.2).
     ownWords: confirm === null && decisionKindOf(decision.id) !== "held",
     confirm,
+    proposal: shown && proposal !== null ? `Orchestrator: ${shorten(proposal.reason, 200)}` : null,
   };
+}
+
+/** Who the asker of an askable decision is, in the card's words. */
+function askerWord(decision: Decision): "Worker" | "Orchestrator" {
+  return askableKindOf(decision.id) === "orchestrator" ? "Orchestrator" : "Worker";
+}
+
+/**
+ * Ask back (change-014 outcome 3): the conversation of a `q:` or `o:`
+ * decision, oldest first, and — while it can still be answered — the button,
+ * the box, and the line under them. Null for a held request, a fallback
+ * incident or an override (no asker to ask), and for a settled decision
+ * nobody asked about.
+ */
+function askBackOf(decision: Decision, ui: DecisionUi, confirming: boolean, thread: DecisionThread | null, ask: AskUi): AskBackView | null {
+  if (askableKindOf(decision.id) === null) return null;
+  const asker = askerWord(decision);
+  const entries = thread?.entries ?? [];
+  const conversation = entries.map((entry, index) => ({ key: `${index}:${entry.at}`, who: entry.by === "owner" ? "You" : asker, text: entry.text }));
+  const accessibilityLabel = `Ask the ${asker} a question before you decide`;
+  if (!isAnswerable(decision)) return conversation.length === 0 ? null : { offered: false, accessibilityLabel, box: null, conversation, status: null };
+  const box =
+    ask.text === null || confirming
+      ? null
+      : { label: `Ask the ${asker}`, placeholder: `Ask the ${asker} before you decide…`, busy: ask.busy, sendEnabled: !ask.busy && ask.text.trim() !== "" };
+  const waiting = thread !== null && hasOpenAsk(thread);
+  const status: AskBackView["status"] =
+    ask.error !== null
+      ? { text: ask.error, tone: "danger" }
+      : ask.busy
+        ? { text: "Sending your question…", tone: "muted" }
+        : waiting && ask.delivery === "failed"
+          ? { text: ASK_NOT_DELIVERED, tone: "warning" }
+          : waiting
+            ? { text: `Waiting for the ${asker}…`, tone: "muted" }
+            : null;
+  return { offered: box === null && !confirming && ui.words === null, accessibilityLabel, box, conversation, status };
+}
+
+/**
+ * When to read a decision's thread again: every `DECISION_POLL_MS` while the
+ * decision can be answered and the owner's question waits for its reply;
+ * otherwise not (an ask from this card refreshes it at once).
+ */
+export function threadPollMs(decision: Decision | null, thread: DecisionThread | null | undefined): number | false {
+  if (decision === null || thread == null || !isAnswerable(decision)) return false;
+  return hasOpenAsk(thread) ? DECISION_POLL_MS : false;
+}
+
+export type DecisionAskResult = { ok: true; thread: DecisionThread; delivery: "sent" | "queued" | "failed" } | { ok: false; reason: string };
+
+/** One Ask back: ONE `decisions.ask` call; the decision stays open. */
+export async function runDecisionAsk(input: {
+  id: string;
+  text: string;
+  ask: (input: { id: string; text: string }) => Promise<{ thread: DecisionThread; delivery: "sent" | "queued" | "failed" }>;
+}): Promise<DecisionAskResult> {
+  const text = input.text.trim();
+  if (text === "") return { ok: false, reason: "Write your question first." };
+  try {
+    const { thread, delivery } = await input.ask({ id: input.id, text });
+    return { ok: true, thread, delivery };
+  } catch (failure) {
+    return { ok: false, reason: `Could not ask${codedReason(failure)}` };
+  }
 }
 
 export type DecisionChoice = { optionKey: string } | { words: string };

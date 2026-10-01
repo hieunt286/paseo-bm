@@ -130,41 +130,42 @@ describe("the Beads tab of a workspace (delta 20260918e; autonomy design §A.12)
   });
 });
 
-describe("the Beads Manager surface opens on the Inbox (autonomy design §A.12)", () => {
-  it("opens on the Inbox; a section's own screen has no ←, a project's page leads back to Work's list", () => {
+describe("the Beads Manager surface opens on the Inbox (autonomy design §A.12; change-014 outcome 5)", () => {
+  it("opens on the Inbox; a section's own screen has no ←, a project's page leads back to the Projects list", () => {
     expect(SURFACE_HOME_VIEW).toBe("inbox");
-    for (const view of ["inbox", "work", "insights", "settings"] as const) expect(backOf(view), view).toBeNull();
-    expect(backOf("project-requests")).toBe("work");
-    expect(backOf("project-beads")).toBe("work");
+    for (const view of ["inbox", "projects", "settings", "tools"] as const) expect(backOf(view), view).toBeNull();
+    for (const view of ["project-overview", "project-requests", "project-beads"] as const) expect(backOf(view), view).toBe("projects");
   });
 
   it("opens a project's page on the tab its view names", () => {
+    expect(projectTabOf("project-overview")).toBe("overview");
     expect(projectTabOf("project-requests")).toBe("requests");
     expect(projectTabOf("project-beads")).toBe("beads");
-    for (const view of ["inbox", "work", "insights", "settings"] as const) expect(projectTabOf(view), view).toBeNull();
+    for (const view of ["inbox", "projects", "settings", "tools"] as const) expect(projectTabOf(view), view).toBeNull();
   });
 
   it("labels each ← with where it leads (delta 20260918f F4, owner decision Q6 a)", () => {
     expect(backLabelOf("inbox")).toBeNull();
-    expect(backLabelOf("work")).toBeNull();
-    expect(backLabelOf("project-requests")).toBe("Back to Work");
-    expect(backLabelOf("project-beads")).toBe("Back to Work");
+    expect(backLabelOf("projects")).toBeNull();
+    expect(backLabelOf("project-overview")).toBe("Back to Projects");
+    expect(backLabelOf("project-requests")).toBe("Back to Projects");
+    expect(backLabelOf("project-beads")).toBe("Back to Projects");
   });
 
-  it("has four sections, always in the same order, each opening on its own view", () => {
+  it("has four sections — Inbox, Projects, Settings, Tools & skills —, always in that order, each opening on its own view; Insights is none", () => {
     expect(SURFACE_SECTIONS.map((section) => [section.key, section.label, section.home])).toEqual([
       ["inbox", "Inbox", "inbox"],
-      ["work", "Work", "work"],
-      ["insights", "Insights", "insights"],
+      ["projects", "Projects", "projects"],
       ["settings", "Settings", "settings"],
+      ["tools", "Tools & skills", "tools"],
     ]);
     for (const section of SURFACE_SECTIONS) {
       expect(sectionHomeOf(section.key)).toBe(section.home);
       expect(sectionOf(section.home)).toBe(section.key);
     }
-    // A project's page belongs to Work.
-    expect(sectionOf("project-requests")).toBe("work");
-    expect(sectionOf("project-beads")).toBe("work");
+    // A project's page belongs to Projects.
+    for (const view of ["project-overview", "project-requests", "project-beads"] as const) expect(sectionOf(view), view).toBe("projects");
+    expect(SURFACE_SECTIONS.map((section) => section.label)).not.toContain("Insights");
   });
 
   it("opens a section from the Command Center through a one-shot slot", () => {
@@ -178,10 +179,10 @@ describe("the Beads Manager surface opens on the Inbox (autonomy design §A.12)"
     expect(sectionRequests.take()).toBe("inbox");
   });
 
-  it("polls the workspace figures only while Work's list shows (delta 20260918f F5)", () => {
+  it("polls the workspace figures only while the Projects list shows (delta 20260918f F5)", () => {
     expect(OVERVIEW_POLL_MS).toBe(10_000);
-    expect(overviewPolling("work")).toEqual({ enabled: true, refetchInterval: OVERVIEW_POLL_MS });
-    for (const view of ["inbox", "insights", "settings", "project-requests", "project-beads"] as const) {
+    expect(overviewPolling("projects")).toEqual({ enabled: true, refetchInterval: OVERVIEW_POLL_MS });
+    for (const view of ["inbox", "settings", "tools", "project-overview", "project-requests", "project-beads"] as const) {
       expect(overviewPolling(view), view).toEqual({ enabled: false, refetchInterval: false });
     }
   });

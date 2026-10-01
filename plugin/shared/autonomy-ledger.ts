@@ -33,6 +33,7 @@ import {
   PREDICTORS,
   decisionClassOf,
   decisionClassSchema,
+  policyPredictorOf,
   predictorSchema,
   type Decision,
   type DecisionClass,
@@ -74,7 +75,7 @@ export const delegatedCellSchema = z.object({
   workspaceId: z.string().min(1),
   class: decisionClassSchema,
   by: z.enum(DELEGATED_BY),
-  /** The predictor of the `delegate` cell (`policy`); null for a precedent. */
+  /** Who chose a `policy` answer (`policyPredictorOf`): the Orchestrator, or the predictor an older build stored; null for a precedent and a held request. */
   predictor: predictorSchema.nullable(),
   count: countSchema,
   /** Decisions the owner overrode from the digest (§B.7; A-4). */
@@ -98,20 +99,6 @@ export interface AgreementLedgerOptions {
   workspaceId?: string;
   /** Only answers given at or after this time (ISO); an answer whose time does not read is then left out. */
   since?: string;
-  /**
-   * Each class's last demotion per project (the policy's `demotions`, §B.4):
-   * an agreement cell of a demoted class counts only the owner's answers
-   * given at or after it, so the figures start again. The delegated
-   * figures are not narrowed by it.
-   */
-  demotions?: Readonly<Record<string, Readonly<Partial<Record<DecisionClass, string>>>>>;
-}
-
-/** The last demotion of a class of a project, or null (own keys only: a workspace id is data). */
-function demotionOf(demotions: AgreementLedgerOptions["demotions"], workspaceId: string, decisionClass: DecisionClass): string | null {
-  if (demotions === undefined || !Object.prototype.hasOwnProperty.call(demotions, workspaceId)) return null;
-  const project = demotions[workspaceId] ?? {};
-  return Object.prototype.hasOwnProperty.call(project, decisionClass) ? (project[decisionClass] ?? null) : null;
 }
 
 /** The share of a cell's answers that agreed, or null when it has none (unknown, never zero). */
@@ -165,9 +152,6 @@ export function agreementLedger(decisions: readonly Decision[], options: Agreeme
     const kinds = reversalKindsOf(decision);
 
     if (answer.by === "owner") {
-      // After a demotion only the answers given since count (§B.4, §B.9).
-      const demotedAt = demotionOf(options.demotions, decision.workspaceId, decisionClass);
-      if (demotedAt !== null && !(Date.parse(answer.at) >= Date.parse(demotedAt))) continue;
       for (const predictor of PREDICTORS) {
         const predicted = decision.prediction?.[predictor] ?? null;
         if (predicted === null) continue;
@@ -202,7 +186,7 @@ export function agreementLedger(decisions: readonly Decision[], options: Agreeme
     }
 
     if (answer.by === "policy" || answer.by === "precedent") {
-      const predictor = answer.by === "policy" ? (answer.predictor ?? null) : null;
+      const predictor = policyPredictorOf(decision);
       const key = `${decision.workspaceId}\u0000${decisionClass}\u0000${answer.by}\u0000${predictor ?? ""}`;
       let cell = delegated.get(key);
       if (cell === undefined) {

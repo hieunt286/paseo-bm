@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -57,10 +57,6 @@ let ids: number;
 const log = (message: string) => void logs.push(message);
 const precedents = () => createPrecedentStore(home, { newId: () => `id-${++ids}` });
 const decisions = () => createDecisionStore(home);
-const decisionsFile = (workspaceId = DECISION_WS) => {
-  const path = join(home, DECISIONS_DIR_NAME, `${workspaceId}.json`);
-  return existsSync(path) ? readFileSync(path, "utf8") : null;
-};
 
 /** Saves a precedent (on `test-db` in the decision's project, "SQLite", 30 days) as the owner would. */
 function save(overrides: Partial<PrecedentDraft> = {}, at: Date = NOW): Precedent {
@@ -143,7 +139,7 @@ describe("which precedent bears on a decision", () => {
     expect(precedentAnswerOf(question(), { text: "Whatever the CI image has" })).toEqual({ words: "Whatever the CI image has" });
   });
 
-  it("resolves a delegable class, and only suggests for release, data, security and cost", () => {
+  it("resolves any class, release, data, security and cost included (ADR-025)", () => {
     const standing = precedent({});
     expect(precedentResolutionOf(question(), [standing], NOW)).toEqual({ kind: "resolve", precedent: standing, answer: { optionKey: "a" } });
     // An owner cell does not stop it (§B.9): nothing here reads the policy.
@@ -151,11 +147,10 @@ describe("which precedent bears on a decision", () => {
       expect(precedentResolutionOf(question({ class: decisionClass }), [standing], NOW)?.kind).toBe("resolve");
     }
     for (const decisionClass of ["release", "data", "security", "cost"] as DecisionClass[]) {
-      expect(precedentResolutionOf(question({ class: decisionClass }), [standing], NOW)).toEqual({ kind: "suggest", precedent: standing, why: "owner-fixed" });
+      expect(precedentResolutionOf(question({ class: decisionClass }), [standing], NOW)).toEqual({ kind: "resolve", precedent: standing, answer: { optionKey: "a" } });
     }
-    // A class its effects raise to one of the four is owner-fixed too, whatever was proposed.
     const pushing = question({ class: "preference", options: [{ key: "a", label: "SQLite", recommended: true, effects: ["push"] }] });
-    expect(precedentResolutionOf(pushing, [standing], NOW)?.kind).toBe("suggest");
+    expect(precedentResolutionOf(pushing, [standing], NOW)?.kind).toBe("resolve");
   });
 
   it("resolves a fallback incident only with one of its options, and nothing that is not open", () => {
@@ -265,7 +260,7 @@ describe("resolving a decision at open", () => {
     expect(openAndResolve(question({ subject: null }))).toMatchObject({ resolved: false, precedent: null, decision: { status: "open" } });
   });
 
-  it("keeps a release, data, security or cost decision open with the precedent as a suggestion, writing nothing", () => {
+  it("answers a release, data, security or cost decision too, granting its option's effects (ADR-025)", () => {
     const standing = save();
     const cases: Array<[string, Partial<Decision>]> = [
       ["release", { options: [{ key: "a", label: "SQLite", recommended: true, effects: ["push"] }] }],
@@ -275,10 +270,8 @@ describe("resolving a decision at open", () => {
     ];
     cases.forEach(([expected, overrides], index) => {
       const opened = decisions().open(question({ id: `q:req-20260929T073348Z:Q${index + 1}`, ...overrides })).decision;
-      const before = decisionsFile();
       const result = resolveByPrecedent(opened, { home, now: NOW, log });
-      expect(result, expected).toMatchObject({ resolved: false, precedent: { id: standing.id }, decision: { status: "open", answer: null } });
-      expect(decisionsFile(), expected).toBe(before);
+      expect(result, expected).toMatchObject({ resolved: true, precedent: { id: standing.id }, decision: { status: "answered", answer: { by: "precedent", optionKey: "a", class: expected } } });
     });
   });
 
@@ -390,15 +383,15 @@ describe("bm_ask_owner", () => {
     expect(answerNoticeOf(stored)).toContain(`precedent: ${standing.id}, the owner's standing answer on "${SUBJECT}"`);
   });
 
-  it("keeps a release question open for the owner, says the precedent is only a suggestion, and delivers nothing", async () => {
-    save();
+  it("answers a release question by the precedent too (ADR-025), granting its push, and hands it to onSettled", async () => {
+    const standing = save();
     const onSettled = vi.fn();
     const result = await (await tools(onSettled)).call("bm_ask_owner", ask(SUBJECT, ["push"]));
     expect(result.ok, result.text).toBe(true);
-    expect(result.text).toContain(`The owner's precedent on "${SUBJECT}" is shown to them as a suggestion only: a release question stays theirs.`);
+    expect(result.text).toContain(`Answered at once by the owner's precedent ${standing.id}`);
     const { decisionId } = JSON.parse(result.text.slice(result.text.indexOf("{"))) as { decisionId: string };
-    expect(decisions().get(decisionId, DECISION_WS)).toMatchObject({ status: "open", answer: null });
-    expect(onSettled).not.toHaveBeenCalled();
+    expect(decisions().get(decisionId, DECISION_WS)).toMatchObject({ status: "answered", answer: { by: "precedent", class: "release" }, grant: { effects: ["push"] } });
+    expect(onSettled).toHaveBeenCalledTimes(1);
   });
 });
 

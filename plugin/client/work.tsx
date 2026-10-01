@@ -1,13 +1,19 @@
 /**
- * Work (experience concept §4.2, autonomy design §A.12): the projects, and a
- * project's page with its Requests, Beads and Agents. What is shown and in
- * which order is `work-model.ts`; this file reads the data and draws it.
+ * Projects (change-014 outcome 5; Work until then — experience concept §4.2,
+ * autonomy design §A.12): the projects, and a project's page with its
+ * Overview, Requests, Beads, Metrics and Agents. What is shown and in which
+ * order is `work-model.ts`; this file reads the data and draws it.
  *
  * - `WorkScreen`: one row per workspace (most recent activity first) with the
- *   running dot, the current request, its stage, the agents and when it last
- *   moved. `orchestrator.state` is read every `WORK_POLL_MS` only while the
- *   rows show (the screen is mounted only then).
- * - `ProjectPage`: Requests (a stage bar, evidence lines and a timeline per
+ *   running dot, the current request, its stage, the agents, its autonomy
+ *   level (`autonomy.policy`'s `levels`) and when it last moved.
+ *   `orchestrator.state` is read every `WORK_POLL_MS` only while the rows show
+ *   (the screen is mounted only then).
+ * - `ProjectPage`: Overview (four figures and the tokens read by role from
+ *   `insights.summary` for the workspace, the open requests from the Requests
+ *   tab's own reads, and the autonomy level, which opens Settings), Metrics
+ *   (`insights.tsx`: what the Insights section showed, for this project),
+ *   Requests (a stage bar, evidence lines and a timeline per
  *   request, from `traces.list`, `traces.get` and `decisions.list`), Beads (the
  *   board, `beads-screen.tsx`) and Agents (the tree, `tree.tsx`). A request's
  *   Details offer to delete its history; the Requests tab of a closed
@@ -40,7 +46,9 @@ import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-nati
 import {
   DECISION_LIST_MAX,
   agentsListRpc,
+  autonomyPolicyRpc,
   decisionsListRpc,
+  insightsSummaryRpc,
   orchestratorStateRpc,
   tracesAgentsRpc,
   tracesGetRpc,
@@ -50,6 +58,9 @@ import {
 import type { Decision } from "../shared/decisions";
 import { AGENT_TREE_POLL_MS } from "./agent-tree";
 import { BeadsScreen } from "./beads-screen";
+import { INSIGHTS_STALE_MS, ProjectMetrics, insightsQueryKey } from "./insights";
+import { INSIGHTS_DEFAULT_WINDOW } from "./insights-model";
+import { AUTONOMY_POLICY_KEY } from "./settings-autonomy-model";
 import { TraceActions } from "./dashboard-actions";
 import { dashboardStyles } from "./styles";
 import { toneColor } from "./tone";
@@ -57,13 +68,20 @@ import { errorMessageOf } from "./errors";
 import type { ClosedWorkspace, StoredWorkspace } from "./surface-view";
 import { AgentTreeView, toLoadable } from "./tree";
 import { WhyScreen } from "./why";
-import { Button, StatusTabs, ToneText, WorkspaceScreenHeader, type Styles, type Theme } from "./ui";
+import { BarChart, Button, StatCards, StatusTabs, ToneText, WorkspaceScreenHeader, type Styles, type Theme } from "./ui";
 import {
+  ALL_REQUESTS_LABEL,
   NO_REQUESTS_TEXT,
+  OVERVIEW_NO_OPEN,
+  OVERVIEW_OPEN_TITLE,
+  OVERVIEW_TOKENS_NOTE,
+  OVERVIEW_TOKENS_TITLE,
   PROJECT_TABS,
   TOKEN_FIGURES_TITLE,
   WORK_POLL_MS,
   agentTokenFigures,
+  levelNameOf,
+  projectOverviewView,
   requestCardView,
   requestSummaries,
   requestTokenFigures,
@@ -72,6 +90,7 @@ import {
   type AgentTokensView,
   type ContextTrendView,
   type EvidenceLine,
+  type ProjectOverviewView,
   type ProjectTab,
   type RequestCardView,
   type RequestSummary,
@@ -82,7 +101,7 @@ import {
   type WorkspaceEntry,
 } from "./work-model";
 
-/** Widest a Work column grows on a large screen, so a line stays readable. */
+/** Widest a Projects column grows on a large screen, so a line stays readable. */
 const WIDE_COLUMN = 1100;
 
 export const workQueryKeys = {
@@ -152,6 +171,7 @@ export function WorkRowItem({
       </Text>
     );
   const beads = row.beads === null ? null : <Text style={styles.body}>{row.beads}</Text>;
+  const level = row.level === null ? null : <Text style={styles.body} numberOfLines={1}>{row.level}</Text>;
   const time = row.time === null ? null : <Text style={styles.body}>{row.time}</Text>;
   return (
     <Pressable
@@ -172,6 +192,7 @@ export function WorkRowItem({
             {status}
             <AgentMarks agents={row.agents} styles={styles} theme={theme} />
             {beads}
+            {level}
           </View>
         </>
       ) : (
@@ -181,6 +202,7 @@ export function WorkRowItem({
           {status}
           {beads}
           <AgentMarks agents={row.agents} styles={styles} theme={theme} />
+          {level}
           <View style={{ minWidth: 72, alignItems: "flex-end" }}>{time}</View>
         </View>
       )}
@@ -188,7 +210,7 @@ export function WorkRowItem({
   );
 }
 
-/** The Work list: the projects, then the history of workspaces Paseo no longer lists. */
+/** The Projects list: the projects, then the history of workspaces Paseo no longer lists. */
 export function WorkList({
   rows,
   closed,
@@ -286,7 +308,7 @@ export function StageBarRow({ bar, compact, styles, theme }: { bar: StageBarView
               style={{
                 flex: 1,
                 height: 4,
-                borderRadius: 2,
+                borderRadius: 0,
                 backgroundColor: step.state === "next" ? theme.colors.surface2 : step.state === "current" ? current : theme.colors.foregroundMuted,
               }}
             />
@@ -362,7 +384,7 @@ export function ContextBars({ trend, compact, theme }: { trend: ContextTrendView
       {trend.bars.map((height, index) => (
         <View
           key={index}
-          style={{ width: compact ? 3 : 4, height: Math.max(1, Math.round(height * TREND_HEIGHT)), borderRadius: 1, backgroundColor: toneColor(theme, "info") }}
+          style={{ width: compact ? 3 : 4, height: Math.max(1, Math.round(height * TREND_HEIGHT)), borderRadius: 0, backgroundColor: toneColor(theme, "info") }}
         />
       ))}
     </View>
@@ -554,7 +576,7 @@ export function RequestCard({
   );
 }
 
-/** The project page's first rows: ←, the project, Chat, and the three tabs. */
+/** The project page's first rows: ←, the project, Chat, and the five tabs. */
 export function ProjectHeader({
   label,
   tab,
@@ -623,16 +645,20 @@ export interface WorkScreenProps {
   onOpen: (workspaceId: string, label: string) => void;
 }
 
-/** Work's own screen: the project rows. Mounted only while it shows, so the projects are read only then. */
+/** The Projects list: the project rows. Mounted only while it shows, so the projects are read only then. */
 export function WorkScreen(props: WorkScreenProps) {
   const { theme, compact } = props;
   const styles = useMemo(() => dashboardStyles(theme, compact), [theme, compact]);
   const getState = useRpc(orchestratorStateRpc);
+  const readPolicy = useRpc(autonomyPolicyRpc);
   const projects = useQuery({ queryKey: workQueryKeys.projects, queryFn: () => getState({}), refetchInterval: WORK_POLL_MS });
+  // Each project's level; Settings reads and writes this same query, so a level set there shows here.
+  const policy = useQuery({ queryKey: AUTONOMY_POLICY_KEY, queryFn: () => readPolicy({}) });
   const rows = workRows({
     workspaces: props.workspaces ?? [],
     projects: projects.data?.projects ?? null,
     overview: props.overview,
+    ...(policy.data === undefined ? {} : { levels: policy.data.levels }),
     now: new Date(),
   });
   return (
@@ -850,6 +876,155 @@ function RequestsTab({
   );
 }
 
+/**
+ * The Overview tab but its data (change-014 outcome 5): the autonomy level —
+ * a button to Settings where the host can open it —, four figures, the tokens
+ * read by role, and the open requests with a way to all of them. Hook-free.
+ */
+export function ProjectOverviewBody({
+  view,
+  level,
+  error,
+  onOpenSettings,
+  onRequests,
+  compact,
+  styles,
+  theme,
+}: {
+  view: ProjectOverviewView;
+  /** The project's level by name; null until `autonomy.policy` answered. */
+  level: string | null;
+  /** Why the figures could not be read; null when they could (or are still being read). */
+  error: string | null;
+  /** Opens Settings; undefined where the page cannot (the workspace's own Beads tab). */
+  onOpenSettings?: () => void;
+  onRequests: () => void;
+  compact: boolean;
+  styles: Styles;
+  theme: Theme;
+}) {
+  const autonomy = level === null ? null : `Autonomy: ${level}`;
+  return (
+    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
+      <View style={column(compact, styles.content.gap)}>
+        {autonomy === null ? null : onOpenSettings === undefined ? (
+          <Text style={styles.body}>{autonomy}</Text>
+        ) : (
+          <View style={styles.chipRow}>
+            <Button
+              label={autonomy}
+              kind="secondary"
+              accessibilityLabel={`${autonomy}. Open Settings to change it`}
+              onPress={onOpenSettings}
+              styles={styles}
+            />
+          </View>
+        )}
+        {error === null ? null : <ToneText tone="danger" styles={styles} theme={theme}>{`Could not read the figures. ${error}`}</ToneText>}
+        <StatCards cards={view.figures} styles={styles} />
+        {view.tokensEmpty !== null ? (
+          <Text style={styles.body}>{view.tokensEmpty}</Text>
+        ) : view.tokensByRole.length === 0 ? null : (
+          <>
+            <BarChart title={OVERVIEW_TOKENS_TITLE} bars={view.tokensByRole} styles={styles} labelWidth={100} />
+            <Text style={[styles.body, { fontSize: 11 }]}>{OVERVIEW_TOKENS_NOTE}</Text>
+          </>
+        )}
+        <Text accessibilityRole="header" style={styles.sectionTitle}>
+          {OVERVIEW_OPEN_TITLE}
+        </Text>
+        {view.requests === null ? <ActivityIndicator color={styles.spinner.color} accessibilityLabel="Reading the requests" /> : null}
+        {view.requests !== null && view.requests.length === 0 ? <Text style={styles.body}>{OVERVIEW_NO_OPEN}</Text> : null}
+        {(view.requests ?? []).map((row) => (
+          <Pressable
+            key={row.key}
+            accessibilityRole="button"
+            accessibilityLabel={`${row.accessibilityLabel}. Open in Requests`}
+            onPress={onRequests}
+            style={[styles.card, { gap: 2 }]}
+          >
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <Text style={[styles.body, { color: theme.colors.foreground, flex: 1 }]} numberOfLines={1}>
+                {row.title}
+              </Text>
+              <ToneText tone={row.state.tone} numberOfLines={1} styles={styles} theme={theme}>
+                {row.state.text}
+              </ToneText>
+            </View>
+            <Text style={styles.body} numberOfLines={1}>
+              {row.meta}
+            </Text>
+          </Pressable>
+        ))}
+        {view.more === null ? null : <Text style={styles.body}>{view.more}</Text>}
+        <View style={styles.chipRow}>
+          <Button label={ALL_REQUESTS_LABEL} kind="secondary" accessibilityLabel="Open every request of this project" onPress={onRequests} styles={styles} />
+        </View>
+      </View>
+    </ScrollView>
+  );
+}
+
+/** The Overview tab: the Requests tab's reads (shared by key) and the project's summary over the default period. */
+function OverviewTab({
+  workspaceId,
+  onOpenSettings,
+  onRequests,
+  compact,
+  styles,
+  theme,
+}: {
+  workspaceId: string;
+  onOpenSettings?: () => void;
+  onRequests: () => void;
+  compact: boolean;
+  styles: Styles;
+  theme: Theme;
+}) {
+  const listTraces = useRpc(tracesListRpc);
+  const listDecisions = useRpc(decisionsListRpc);
+  const readSummary = useRpc(insightsSummaryRpc);
+  const readPolicy = useRpc(autonomyPolicyRpc);
+  const traces = useQuery({
+    queryKey: workQueryKeys.traces(workspaceId),
+    queryFn: () => listTraces({ workspaceId }),
+    refetchInterval: WORK_POLL_MS,
+  });
+  const decisions = useQuery({
+    queryKey: workQueryKeys.decisions(workspaceId),
+    queryFn: () => listDecisions({ scope: "workspace", workspaceId, limit: DECISION_LIST_MAX }),
+    refetchInterval: WORK_POLL_MS,
+  });
+  // The Metrics tab's own query for its opening window: one read for both.
+  const summary = useQuery({
+    queryKey: insightsQueryKey(INSIGHTS_DEFAULT_WINDOW, workspaceId),
+    queryFn: () => readSummary({ window: INSIGHTS_DEFAULT_WINDOW, workspaceId }),
+    staleTime: INSIGHTS_STALE_MS,
+  });
+  const policy = useQuery({ queryKey: AUTONOMY_POLICY_KEY, queryFn: () => readPolicy({}) });
+  const requests = useMemo(() => (traces.data === undefined ? undefined : requestSummaries(traces.data.traces)), [traces.data]);
+  const view = projectOverviewView({
+    summary: summary.data,
+    window: INSIGHTS_DEFAULT_WINDOW,
+    requests,
+    decisions: decisions.data?.decisions,
+    now: new Date(),
+  });
+  const error = summary.isError ? errorMessageOf(summary.error) : traces.isError ? errorMessageOf(traces.error) : null;
+  return (
+    <ProjectOverviewBody
+      view={view}
+      level={levelNameOf(policy.data?.levels, workspaceId)}
+      error={error}
+      onOpenSettings={onOpenSettings}
+      onRequests={onRequests}
+      compact={compact}
+      styles={styles}
+      theme={theme}
+    />
+  );
+}
+
 function AgentsTab({
   workspaceId,
   openAgent,
@@ -903,11 +1078,13 @@ export interface ProjectPageProps extends PluginSurfaceProps {
   /** Opens the project's Beads Manager chat; undefined on a host that cannot open agents. */
   onChat?: () => void;
   chatBusy?: boolean;
+  /** Opens Settings, where the autonomy level is set; undefined where the page cannot (the workspace's own Beads tab). */
+  onOpenSettings?: () => void;
 }
 
-/** A project: Requests · Beads · Agents under one header. */
+/** A project: Overview · Requests · Beads · Metrics · Agents under one header. */
 export function ProjectPage(props: ProjectPageProps) {
-  const { workspaceId, label, initialTab, closed, onBack, backLabel, status, onChat, chatBusy, ...surface } = props;
+  const { workspaceId, label, initialTab, closed, onBack, backLabel, status, onChat, chatBusy, onOpenSettings, ...surface } = props;
   const { theme, layout, navigation } = surface;
   const styles = useMemo(() => dashboardStyles(theme, layout.compact), [theme, layout.compact]);
   const [tab, setTab] = useState<ProjectTab>(initialTab);
@@ -928,7 +1105,16 @@ export function ProjectPage(props: ProjectPageProps) {
         />
       </View>
       <View style={{ flex: 1 }}>
-        {tab === "requests" ? (
+        {tab === "overview" ? (
+          <OverviewTab
+            workspaceId={workspaceId}
+            onOpenSettings={onOpenSettings}
+            onRequests={() => setTab("requests")}
+            compact={layout.compact}
+            styles={styles}
+            theme={theme}
+          />
+        ) : tab === "requests" ? (
           <RequestsTab
             workspaceId={workspaceId}
             closed={closed}
@@ -939,6 +1125,8 @@ export function ProjectPage(props: ProjectPageProps) {
           />
         ) : tab === "beads" ? (
           <BeadsScreen {...surface} workspaceId={workspaceId} />
+        ) : tab === "metrics" ? (
+          <ProjectMetrics workspaceId={workspaceId} label={label} compact={layout.compact} theme={theme} />
         ) : (
           <AgentsTab workspaceId={workspaceId} openAgent={openAgent} compact={layout.compact} styles={styles} theme={theme} />
         )}

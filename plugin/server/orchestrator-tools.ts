@@ -25,6 +25,9 @@
  *   owner's Settings.
  * - `orchestrator-why.ts`: `bm_why` (autonomy design §E.2), the chain behind
  *   a bead, a changed file or a decision, from `links.ts`, read-only.
+ * - `decision-ask.ts`: `bm_reply` (change-014 outcome 3, Ask back), the
+ *   Orchestrator's reply to the owner's question about one of its `o:`
+ *   decisions, appended to that decision's thread; it answers nothing.
  * - `orchestrator-tool-context.ts`: what they share — the call's context, the
  *   refusal, the paseo-bm agents and projects a tool may name.
  *
@@ -61,6 +64,7 @@ import { bmCompact, bmHandoff, type CompactInput, type CoordinationToolDeps, typ
 import { bmFindings } from "./orchestrator-findings";
 import { bmAgentMessages, bmNote, bmProjects, bmRequest } from "./orchestrator-read-tools";
 import { bmWhy, type WhyInput } from "./orchestrator-why";
+import { replyToDecision } from "./decision-ask";
 import { createOrchestratorStore } from "./orchestrator-store";
 import {
   Refusal,
@@ -159,6 +163,15 @@ export function createOrchestratorTools(deps: OrchestratorToolsDeps = {}): Orche
         return bmHandoff(input as HandoffInput, context, deps);
       case "bm_why":
         return bmWhy(input as WhyInput, context, deps);
+      case "bm_reply":
+        // Change-014 outcome 3 (Ask back): the Orchestrator's reply to the owner's question about one of its decisions.
+        return replyToDecision(input as { decisionId: string; text: string }, {
+          kind: "orchestrator",
+          home: context.home,
+          now: context.now,
+          env: context.env,
+          ...(deps.log === undefined ? {} : { log: deps.log }),
+        });
       default:
         return bmNote(input as { workspaceId: string; text: string; replace?: boolean }, context);
     }

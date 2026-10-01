@@ -15,7 +15,11 @@
  * (`ORCHESTRATOR_SERVER_TOOLS`), and `server/orchestrator-tools.ts` runs them.
  * The Manager's `bm_decisions` (autonomy design §A.9) reads the decision store,
  * so it is a server-run face too (`MANAGER_SERVER_TOOLS`, run by
- * `server/decision-tools.ts`); it only reads. `toolFacesFor` is what an
+ * `server/decision-tools.ts`); it only reads. `bm_reply` (change-014, Ask
+ * back) appends the asker's reply to a decision's thread, so the Worker's and
+ * the Orchestrator's faces are server-run too (`WORKER_SERVER_TOOLS`, and the
+ * last of `ORCHESTRATOR_SERVER_TOOLS`), run by `server/decision-ask.ts`.
+ * `toolFacesFor` is what an
  * endpoint lists and the creation hook pre-approves.
  *
  * A block tool has no side effect. It checks its input, builds the block the role
@@ -48,13 +52,13 @@ import {
   MAX_ASK_OWNER_RECOMMENDATION_CHARS,
   MAX_DECISION_TEXT_CHARS,
   OPTION_KEY_PATTERN,
-  PREDICTORS,
   PREPARED_CHANGE_KINDS,
   SUBJECT_PATTERN,
   type DecisionClass,
 } from "./decisions";
 import { DEFAULT_PRECEDENT_DAYS, MAX_PRECEDENT_DAYS, MAX_PRECEDENT_TEXT_CHARS } from "./precedents";
 import { MAX_NOTE_CHARS } from "./orchestrator";
+import { MAX_THREAD_TEXT_CHARS } from "./decision-threads";
 import { MAX_HANDOFF_NOTE_CHARS } from "./handoff";
 import { DECLARED_COMMAND_INTENTS, MAX_COMMAND_BODY_CHARS, MAX_COMMAND_DECISION_ID_CHARS, MAX_COMMAND_RE_CHARS, MAX_COMMAND_WHY_CHARS } from "./orchestrator-command";
 
@@ -342,7 +346,7 @@ const CHANGE_FIELD: JsonSchema = {
   additionalProperties: false,
   required: ["kind"],
   description:
-    'A change of the owner\'s settings the plugin applies itself when the owner picks this option, and only then: precedent.save { scope, subject, text, expiresInDays? }; autonomy.set { class, mode, predictor? } of this project (never release, data, security or cost); coordination.set { key, value }. The option then declares effects ["none"] and carries no command. Refused when the owner could not make it in Settings, or when it would change nothing.',
+    'A change of the owner\'s settings the plugin applies itself when the owner picks this option, and only then: precedent.save { scope, subject, text, expiresInDays? }; autonomy.set { class, mode } of this project (delegate means you decide that class); coordination.set { key, value }. The option then declares effects ["none"] and carries no command. Refused when the owner could not make it in Settings, or when it would change nothing.',
   properties: {
     kind: { type: "string", enum: PREPARED_CHANGE_KINDS, description: "Which setting it changes." },
     scope: { type: "string", enum: ["project", "all"], description: "precedent.save: this project, or all projects." },
@@ -351,7 +355,6 @@ const CHANGE_FIELD: JsonSchema = {
     expiresInDays: { type: "integer", minimum: 1, maximum: MAX_PRECEDENT_DAYS, description: `precedent.save: how long it holds, 1-${MAX_PRECEDENT_DAYS} days (default ${DEFAULT_PRECEDENT_DAYS}).` },
     class: { type: "string", enum: DECISION_CLASSES, description: "autonomy.set: the decision class whose cell it sets." },
     mode: { type: "string", enum: AUTONOMY_MODES, description: "autonomy.set: owner, shadow, or delegate." },
-    predictor: { type: "string", enum: PREDICTORS, description: "autonomy.set with delegate: the predictor that decides the class (default recommended)." },
     key: { type: "string", enum: COORDINATION_KEYS, description: "coordination.set: the setting." },
     value: {
       type: ["number", "boolean"],
@@ -774,7 +777,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
     name: "bm_send_command",
     role: "orchestrator",
     description:
-      "Send a command to a project's Manager now, in the language of that Manager's conversation with the owner. Without a decision it goes out on your own only where the owner delegated every class of its effects for the project (commit, or no effect, counts as reversible-technical; the authority is then policy:<class>), or right after the owner's own message in your chat telling you to send; with decisionId, on a decision of yours the owner answered. Otherwise it is refused, naming the class not delegated: ask the owner with bm_ask_owner, and prepare the command on an option. Declare its intent and every effect it allows: the owner's policy and the owner's word in your chat cover any effect but push, publish, deploy, real-data, migration, security and cost, which only the grant of an answered decision covers (one command, within an hour of the answer). A text that shows an effect you did not declare (a release, security, data, cost or dependency) is refused: declare it or ask the owner with bm_ask_owner. The plugin delivers a BM-COMMAND block with the authority, the approved effects and the limits that remain.",
+      "Send a command to a project's Manager now, in the language of that Manager's conversation with the owner. Without a decision it goes out on your own only where the owner delegated every class of its effects for the project (commit, or no effect, counts as reversible-technical; the authority is then policy:<class>), or right after the owner's own message in your chat telling you to send; with decisionId, on a decision of yours the owner answered. Otherwise it is refused, naming the class not delegated: ask the owner with bm_ask_owner, and prepare the command on an option. Declare its intent and every effect it allows: the owner's policy covers each effect whose class the project delegates (push, publish and deploy are release; real-data and migration are data; security; cost — delegated at Turbo and Full auto); the owner's word in your chat covers any effect but those seven, which otherwise only the grant of an answered decision covers (one command, within an hour of the answer). A text that shows an effect you did not declare (a release, security, data, cost or dependency) is refused: declare it or ask the owner with bm_ask_owner. The plugin delivers a BM-COMMAND block with the authority, the approved effects and the limits that remain.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -892,7 +895,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
     name: "bm_decide",
     role: "orchestrator",
     description:
-      "Decide for the owner an open decision you did not ask — a Worker's question (q:…) or a fallback incident (f:…) — when a decision.opened line asks you to: the owner's policy delegates its class to you in that project. Choose the option the owner would, and give your reason in one line; the owner sees both. The plugin then delivers it exactly as it delivers the owner's answers (to the Worker, or the incident's action). Refused, changing nothing, unless the decision is still open, its class may be delegated (never release, data, security or cost) and the owner delegated it to you, not to the recommended option; your own decisions (o:…) are always the owner's. A decision you leave stays open for the owner. Never answer a stored question in a command's BM-ANSWERS block.",
+      "Decide for the owner an open decision you did not ask — a Worker's question (q:…) or a fallback incident (f:…) — when a decision.opened line asks you to: the owner's policy delegates its class to you in that project. Choose the option the owner would, and give your reason in one line; the owner sees both. The plugin then delivers it exactly as it delivers the owner's answers (to the Worker, or the incident's action). Refused, changing nothing, unless the decision is still open and its class is delegated in that project (by the project's autonomy level; any class, a release, data, security or cost one included); your own decisions (o:…) are always the owner's. An option that pushes, publishes, deploys, migrates, touches real data or costs money is granted as the owner's choice of it would be. A decision you leave stays open for the owner. Never answer a stored question in a command's BM-ANSWERS block.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -918,7 +921,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
     name: "bm_predict",
     role: "orchestrator",
     description:
-      "Predict the owner's answer to an open decision you did not ask (a Worker's question q:… or a fallback incident f:…), when a decision.opened line asks for a prediction: the option you expect the owner to choose, and why. It answers nothing and sends nothing: the owner still decides, sees your prediction only after answering, and how often you foresee their answers is measured per class. Refused unless the owner turned your predictions on for the project, the decision is still open, its class may be delegated (never release, data, security or cost) and is not delegated already, and you have not predicted it yet; a refusal changes nothing. Do not tell the owner what you predicted.",
+      "Predict the owner's answer to an open decision you did not ask (a Worker's question q:… or a fallback incident f:…), when a decision.opened line asks for a prediction: the option you expect the owner to choose, and why. It answers nothing and sends nothing: the owner still decides, and sees your option and reason on the decision as your proposal; how often you foresee their answers is measured per class. Refused unless the project's autonomy level is 1 or more (Co-pilot and up), the decision is still open, its class is not delegated already (any class), and you have not predicted it yet; a refusal changes nothing.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1073,7 +1076,35 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
       },
     },
   },
+  replyFace("orchestrator", "^o:[A-Za-z0-9-]{1,64}$", "one of your open decisions (o:…)"),
 ];
+
+/**
+ * `bm_reply` (change-014 outcome 3, Ask back): the asker's answer to the
+ * owner's question about its open decision, which a `BM-ASK` notice brought.
+ * It appends to the decision's thread (`server/decision-ask.ts`), so it runs
+ * on the plugin server; one face per asker role, each taking only its own
+ * kind of decision id.
+ */
+function replyFace(role: ToolRole, idPattern: string, what: string): ToolFace {
+  return {
+    name: "bm_reply",
+    role,
+    description: `Reply to the owner's question about ${what}, after a BM-ASK notice asked it: your reply is added to the decision's thread, where the owner reads it on its card. A few lines; at most ${MAX_THREAD_TEXT_CHARS.toLocaleString("en-US")} characters, masked before it is stored. Only once per BM-ASK: refused when the owner has not asked, or you already replied. It answers nothing: the decision stays open until the owner chooses, so never answer it yourself and never ask it again. Returns text.`,
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["decisionId", "text"],
+      properties: {
+        decisionId: { type: "string", pattern: idPattern, description: "The decisionId line of the BM-ASK notice." },
+        text: { type: "string", minLength: 1, maxLength: MAX_THREAD_TEXT_CHARS, description: "Your reply to the owner's question, in a few lines." },
+      },
+    },
+  };
+}
+
+/** The Worker's server-run tool: `bm_reply` for its own questions (`q:`). */
+export const WORKER_SERVER_TOOLS: readonly ToolFace[] = [replyFace("worker", "^q:\\S+:Q\\d{1,3}$", "one of your open questions (q:…)")];
 
 /**
  * The Manager's server-run tool (autonomy design §A.9): `bm_decisions` of one
@@ -1139,18 +1170,19 @@ export function toolsFor(role: ToolRole): AgentTool[] {
 
 /** The faces the plugin server runs for `role` (they read or write plugin data), in the order an endpoint lists them. */
 export function serverToolsFor(role: ToolRole): ToolFace[] {
-  return [...ORCHESTRATOR_SERVER_TOOLS, ...MANAGER_SERVER_TOOLS].filter((candidate) => candidate.role === role);
+  return [...ORCHESTRATOR_SERVER_TOOLS, ...WORKER_SERVER_TOOLS, ...MANAGER_SERVER_TOOLS].filter((candidate) => candidate.role === role);
 }
 
 /**
  * Every tool an endpoint lists for `role`, and the creation hook pre-approves:
  * the Orchestrator's server-run tools first, then the role's own tools, then
- * the Manager's server-run `bm_decisions`.
+ * the Worker's server-run `bm_reply`, then the Manager's server-run `bm_decisions`.
  */
 export function toolFacesFor(role: ToolRole): ToolFace[] {
   return [
     ...ORCHESTRATOR_SERVER_TOOLS.filter((candidate) => candidate.role === role),
     ...toolsFor(role),
+    ...WORKER_SERVER_TOOLS.filter((candidate) => candidate.role === role),
     ...MANAGER_SERVER_TOOLS.filter((candidate) => candidate.role === role),
   ];
 }

@@ -14,7 +14,7 @@
  *   (with the owner's confirmation, which the tap on the option is: the
  *   question says exactly what it sets), a coordination setting through
  *   `coordination.set`'s — each with its checks, its refusals and its side
- *   effects (an `autonomy.set` ends the cell's `autonomy-demoted` alert).
+ *   effects.
  * - **Checked again first** (`preparedChangeCheckOf`): what the owner could
  *   not set in Settings now is refused, writing nothing; a change that would
  *   change nothing writes nothing and counts as applied.
@@ -93,7 +93,6 @@ function write(change: PreparedChange, workspaceId: string, deps: PreparedChange
           mode: change.mode,
           // The owner's tap on an option that says what it sets: the confirmation a delegation asks for.
           confirmed: true,
-          ...(change.predictor === undefined ? {} : { predictor: change.predictor }),
         },
         rpc,
       );

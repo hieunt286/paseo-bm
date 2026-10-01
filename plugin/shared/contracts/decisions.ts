@@ -2,6 +2,7 @@ import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { alertSchema } from "../alerts";
 import { decisionSchema, decisionStatusSchema } from "../decisions";
+import { MAX_THREAD_TEXT_CHARS, decisionThreadSchema } from "../decision-threads";
 import { interventionEntrySchema } from "../interventions";
 import { workspaceIdSchema } from "./persisted";
 
@@ -95,6 +96,43 @@ export const decisionsConfirmRpc = defineRpc({
   input: z.object({ id: z.string().min(1), answered: z.boolean() }),
   output: z.object({ decision: decisionSchema }),
 });
+
+/**
+ * `decisions.ask` — Ask back (change-014 outcome 3): the owner asks the asker
+ * of an open Worker question (`q:`) or Orchestrator decision (`o:`) about it.
+ * The text is masked and stored in the decision's thread; the decision stays
+ * open. The plugin delivers it to the asker as a `BM-ASK` notice through the
+ * notice queue: `delivery` is `sent` (the asker was idle), `queued` (it gets
+ * it at its next turn end) or `failed` (no asker found, or it is gone; the
+ * question stays in the thread).
+ *
+ * - Unknown id → `E_DECISION_NOT_FOUND`; a held request (`h:`), a fallback
+ *   incident (`f:`) or an override (`r:`) → `E_DECISION_NOT_ASKABLE`;
+ *   answered, superseded, withdrawn or expired → `E_DECISION_SETTLED`; a text
+ *   that is blank → `E_DECISION_ASK_INVALID`; the thread cannot be written →
+ *   `E_DECISION_WRITE_FAILED`. Nothing is written or sent on any refusal.
+ */
+export const decisionsAskRpc = defineRpc({
+  name: "decisions.ask",
+  input: z.object({ id: z.string().min(1), text: z.string().min(1).max(MAX_THREAD_TEXT_CHARS) }),
+  output: z.object({ thread: decisionThreadSchema, delivery: z.enum(["sent", "queued", "failed"]) }),
+});
+
+/**
+ * `decisions.thread` — reads only: the Ask back thread of one decision, oldest
+ * entry first; no entries when nobody asked. Unknown id →
+ * `E_DECISION_NOT_FOUND`.
+ */
+export const decisionsThreadRpc = defineRpc({
+  name: "decisions.thread",
+  input: z.object({ id: z.string().min(1) }),
+  output: z.object({ thread: decisionThreadSchema }),
+});
+
+export type DecisionsAskInput = z.infer<typeof decisionsAskRpc.input>;
+export type DecisionsAskOutput = z.infer<typeof decisionsAskRpc.output>;
+export type DecisionsThreadInput = z.infer<typeof decisionsThreadRpc.input>;
+export type DecisionsThreadOutput = z.infer<typeof decisionsThreadRpc.output>;
 
 export type DecisionsListInput = z.infer<typeof decisionsListRpc.input>;
 export type DecisionsListOutput = z.infer<typeof decisionsListRpc.output>;

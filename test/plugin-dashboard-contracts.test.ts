@@ -459,7 +459,6 @@ describe("Dashboard error codes", () => {
       "E_COORDINATION_INVALID",
       "E_COORDINATION_WRITE_FAILED",
       // Autonomy design §B.2, §B.9: autonomy.set and autonomy.reset.
-      "E_AUTONOMY_OWNER_ONLY",
       "E_AUTONOMY_NOT_CONFIRMED",
       "E_AUTONOMY_INVALID",
       "E_AUTONOMY_WRITE_FAILED",
@@ -470,6 +469,9 @@ describe("Dashboard error codes", () => {
       // Autonomy design §B.7: the Inbox's Decided for you and its last-opened time.
       "E_DECISION_NOT_DELEGATED",
       "E_INBOX_WRITE_FAILED",
+      // Change-014 outcome 3: decisions.ask (Ask back).
+      "E_DECISION_NOT_ASKABLE",
+      "E_DECISION_ASK_INVALID",
     ]);
   });
 

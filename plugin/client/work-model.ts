@@ -1,14 +1,17 @@
 /**
- * Work (experience concept §4.2, autonomy design §A.12): what the project
- * rows and a project's page show, without a renderer. `work.tsx` reads the
- * data and draws it.
+ * Projects (change-014 outcome 5; Work until then — experience concept §4.2,
+ * autonomy design §A.12): what the project rows and a project's page show,
+ * without a renderer. `work.tsx` reads the data and draws it.
  *
  * - **Rows**: every workspace, most recent activity first, each one line on a
- *   phone: the running dot, the current request, its stage, the agents, and
- *   when it last moved. The stage and the agents come from `orchestrator.state`
- *   (the coordinator's per-project facts), the dot and the bead figures from
- *   `workspaces.overview`.
- * - **A project page**: Requests · Beads · Agents. A request is a stage bar
+ *   phone: the running dot, the current request, its stage, the agents, its
+ *   autonomy level, and when it last moved. The stage and the agents come from
+ *   `orchestrator.state` (the coordinator's per-project facts), the dot and
+ *   the bead figures from `workspaces.overview`, the level from
+ *   `autonomy.policy`.
+ * - **A project page**: Overview · Requests · Beads · Metrics · Agents. The
+ *   Overview is four figures, the tokens read by role and the open requests
+ *   (`projectOverviewView`). A request is a stage bar
  *   (Received ▸ Plan ▸ Build ▸ Review ▸ Done), a few evidence lines taken from
  *   the Worker's reports, and a timeline of typed events built from the trace
  *   and the request's decisions. A step or an event that cannot be told is not
@@ -37,26 +40,36 @@ import type {
   TraceVerification,
   Usage,
   WorkspaceOverview,
+  InsightsSummary,
+  InsightsWindow,
 } from "../shared/contracts";
-import { decisionKindOf, deliveryKindOf, realEffects, type Decision, type Effect } from "../shared/decisions";
-import { ago, confidenceSuffix, excerptLine, formatCost, formatTokens, localTimeText } from "./format";
+import { decisionKindOf, deliveryKindOf, isAnswerable, policyPredictorOf, realEffects, type Decision, type Effect } from "../shared/decisions";
+import { ago, confidenceSuffix, excerptLine, formatCost, formatTokens, localTimeText, type Bar, type OverviewCard } from "./format";
 import type { Tone } from "./tone";
 import { agentDots, stageView } from "./orchestrator-model";
 import { timeOrNull } from "../shared/time";
 import { handoffBriefReplaces, holdsHandoffBrief } from "../shared/handoff";
 import { plural, shorten } from "../shared/text";
+import { LEVELS, type AutonomyLevelReading } from "../shared/autonomy";
+import { ROLE_LABELS, WINDOW_LABELS } from "./insights-model";
 import { DONE_UNVERIFIED_LABEL, checksText, claimCountsText, isShownVerification, verificationDetailLines } from "./verification-view";
 
-/** How often Work reads its rows and an open project's requests while they show. */
+/** How often Projects reads its rows and an open project's requests while they show. */
 export const WORK_POLL_MS = 10_000;
 
 // ---------------------------------------------------------------------------
 // The project page's tabs.
 // ---------------------------------------------------------------------------
 
+/**
+ * Overview · Requests · Beads · Metrics · Agents (change-014 outcome 5).
+ * Metrics carries what Insights showed for one project (`insights.tsx`).
+ */
 export const PROJECT_TABS = [
+  { key: "overview", label: "Overview" },
   { key: "requests", label: "Requests" },
   { key: "beads", label: "Beads" },
+  { key: "metrics", label: "Metrics" },
   { key: "agents", label: "Agents" },
 ] as const;
 
@@ -140,6 +153,13 @@ function reviewing(detail: TraceDetail, lastReport: ParsedReport | undefined): b
  * Done is finished-unverified (`unverified`) when the row's `verification`
  * says so (autonomy design §C.3).
  */
+/** Who answered for the owner's policy (ADR-025): the Orchestrator, a policy of an earlier build, or the policy itself for a held request. */
+function policyByWords(predictor: ReturnType<typeof policyPredictorOf>): string {
+  if (predictor === "orchestrator") return "the Orchestrator";
+  if (predictor === "recommended") return "your earlier policy";
+  return "your policy";
+}
+
 export function requestStage(
   summary: Pick<TraceSummary, "state" | "tier" | "beadCounts"> & { verification?: TraceVerification | null },
   detail: TraceDetail | null,
@@ -245,6 +265,17 @@ export function projectStageFacts(stage: OrchestratorProjectRow["stage"], workPh
 // Project rows.
 // ---------------------------------------------------------------------------
 
+/**
+ * A project's autonomy level by name (ADR-025): `Hands-on` … `Full auto`, or
+ * `Custom` when its cells match no level. A project `levels` does not name has
+ * nothing set, which reads as level 0. Null until `autonomy.policy` answered.
+ */
+export function levelNameOf(levels: Readonly<Record<string, AutonomyLevelReading>> | undefined, workspaceId: string): string | null {
+  if (levels === undefined) return null;
+  const reading = Object.hasOwn(levels, workspaceId) ? levels[workspaceId]! : 0;
+  return reading === "custom" ? "Custom" : (LEVELS.find((definition) => definition.level === reading)?.name ?? "Custom");
+}
+
 export interface WorkspaceEntry {
   id: string;
   label: string;
@@ -273,6 +304,8 @@ export interface WorkRowView {
   time: string | null;
   /** `2 in progress · 1 blocked`, or null when neither. */
   beads: string | null;
+  /** The project's autonomy level by name (`Cruise`, `Custom`); null until `autonomy.policy` answered. */
+  level: string | null;
   accessibilityLabel: string;
 }
 
@@ -296,6 +329,8 @@ export function workRows(input: {
   /** `orchestrator.state` projects; null before it answered (or when it failed). */
   projects: readonly OrchestratorProjectRow[] | null;
   overview: ReadonlyMap<string, WorkspaceOverview>;
+  /** `autonomy.policy`'s `levels`; undefined before it answered (or when it failed). */
+  levels?: Readonly<Record<string, AutonomyLevelReading>>;
   now: Date;
 }): WorkRowView[] {
   const byId = new Map((input.projects ?? []).map((project) => [project.workspaceId, project]));
@@ -333,6 +368,7 @@ export function workRows(input: {
             .map((dot) => ({ letter: dot.letter, tone: dot.filled ? "success" : "muted", label: dot.label }));
     const time = working && movedAt !== null ? ago(movedAt, input.now) : null;
     const beads = beadFigure(overview);
+    const level = levelNameOf(input.levels, workspace.id);
     return {
       workspaceId: workspace.id,
       label: workspace.label,
@@ -342,12 +378,14 @@ export function workRows(input: {
       agents,
       time,
       beads,
+      level,
       accessibilityLabel: [
         workspace.label,
         request,
         status.text.replace(/^▸ /, "Stage: "),
         agents.length === 0 ? null : agents.map((agent) => agent.label).join(", "),
         beads === null ? null : `beads: ${beads}`,
+        level === null ? null : `autonomy: ${level}`,
         time === null ? null : `moved ${time}`,
         "Open the project",
       ]
@@ -629,7 +667,7 @@ function decisionEvents(decision: Decision, nameOf: (agentId: string | null) => 
     const text =
       option !== undefined
         ? answer.by === "policy"
-          ? `Decided for you by the policy (${answer.predictor === "orchestrator" ? "the Orchestrator's choice" : "recommended option"}): "${shorten(option.label, 80)}"${to}`
+          ? `Decided for you by ${policyByWords(policyPredictorOf(decision))}: "${shorten(option.label, 80)}"${to}`
           : answer.via === "paseo"
             ? `You chose "${shorten(option.label, 80)}" in Paseo's own prompt`
             : `${who} chose "${shorten(option.label, 80)}"${to}`
@@ -1000,5 +1038,113 @@ export function agentTokenFigures(
       }),
       notes: tokenNotes(shown),
     },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Overview (change-014 outcome 5): the project at a glance — four figures,
+// the tokens read by role, the open requests and a way to all of them. The
+// figures come from `insights.summary` for the project, the requests from the
+// Requests tab's own reads (`traces.list`, `decisions.list`).
+// ---------------------------------------------------------------------------
+
+/** How many open requests the Overview lists; the rest are one press away, in Requests. */
+export const OVERVIEW_OPEN_MAX = 3;
+export const OVERVIEW_OPEN_TITLE = "Open requests";
+export const OVERVIEW_NO_OPEN = "No request is open.";
+export const OVERVIEW_TOKENS_TITLE = "Tokens by role";
+export const OVERVIEW_TOKENS_NOTE =
+  "Context read per turn, summed. Claude counts every model call of a turn, Codex and OpenCode only the last, so roles on different providers are not exactly comparable.";
+export const OVERVIEW_NO_TOKENS = "No turn read any tokens in this period.";
+export const ALL_REQUESTS_LABEL = "All requests ▸";
+
+/** The letter each role's turns are counted under in the Turns figure. */
+const ROLE_LETTERS: Readonly<Record<string, string>> = { manager: "M", worker: "W", reviewer: "R", orchestrator: "O" };
+
+export interface OverviewRequestRow {
+  key: string;
+  title: string;
+  /** `Needs you` (warning) or `Running` (info). */
+  state: { text: string; tone: Tone };
+  /** `Medium · started 2 h ago · 1.2M tokens`. */
+  meta: string;
+  accessibilityLabel: string;
+}
+
+export interface ProjectOverviewView {
+  /** Requests in the window, turns, tokens read, waiting on you — `—` while unknown, never 0. */
+  figures: OverviewCard[];
+  tokensByRole: Bar[];
+  /** Said instead of the bars; null when there are bars. */
+  tokensEmpty: string | null;
+  /** The newest open requests, at most `OVERVIEW_OPEN_MAX`; null until the requests were read. */
+  requests: OverviewRequestRow[] | null;
+  /** `2 more open requests in Requests`, or null. */
+  more: string | null;
+}
+
+function shareText(part: number, whole: number): string {
+  return whole <= 0 ? "—" : `${Math.round((100 * part) / whole)} %`;
+}
+
+/** The Overview of one project, from what has been read so far (each input undefined until it answered). */
+export function projectOverviewView(input: {
+  summary: InsightsSummary | undefined;
+  window: InsightsWindow;
+  requests: readonly RequestSummary[] | undefined;
+  decisions: readonly Decision[] | undefined;
+  now: Date;
+}): ProjectOverviewView {
+  const { summary, window, now } = input;
+  const turns = summary === undefined ? null : ROLE_LABELS.reduce((sum, [role]) => sum + summary.turnsByRole[role], 0);
+  const read = summary?.context?.tokensRead;
+  const waiting = input.decisions === undefined ? null : input.decisions.filter((decision) => isAnswerable(decision)).length;
+  const figures: OverviewCard[] = [
+    {
+      label: `Requests · ${WINDOW_LABELS[window]}`,
+      value: summary === undefined ? "—" : String(summary.requests.inWindow),
+      hint: summary === undefined ? "" : `${summary.requests.finished} finished`,
+    },
+    {
+      label: "Turns",
+      value: turns === null ? "—" : String(turns),
+      hint:
+        summary === undefined
+          ? ""
+          : ROLE_LABELS.filter(([role]) => ROLE_LETTERS[role] !== undefined && summary.turnsByRole[role] > 0)
+              .map(([role]) => `${ROLE_LETTERS[role]} ${summary.turnsByRole[role]}`)
+              .join(" · "),
+    },
+    { label: "Tokens read", value: read === undefined ? "—" : formatTokens(Math.round(read.total)), hint: read === undefined ? "" : "context read per turn" },
+    { label: "Waiting on you", value: waiting === null ? "—" : String(waiting), hint: waiting === null ? "" : waiting === 1 ? "open decision" : "open decisions" },
+  ];
+  const tokensByRole: Bar[] =
+    read === undefined
+      ? []
+      : ROLE_LABELS.filter(([role]) => read.byRole[role] > 0).map(([role, label]) => ({
+          label,
+          value: read.byRole[role],
+          display: `${formatTokens(Math.round(read.byRole[role]))} · ${shareText(read.byRole[role], read.total)}`,
+        }));
+  const open = input.requests?.filter((request) => request.state === "running" || request.state === "waiting_user");
+  const requests =
+    open === undefined
+      ? null
+      : open.slice(0, OVERVIEW_OPEN_MAX).map((request): OverviewRequestRow => {
+          const title = shorten(excerptLine(request.excerpt), 120);
+          const state = request.state === "waiting_user" ? { text: "Needs you", tone: "warning" as const } : { text: "Running", tone: "info" as const };
+          const usage = request.usage;
+          const meta = [request.tier, `started ${ago(request.requestedAt, now)}`, `${formatTokens(usage.inputTokens + usage.cachedInputTokens + usage.outputTokens)} tokens`]
+            .filter((part) => part !== null)
+            .join(" · ");
+          return { key: request.traceId, title, state, meta, accessibilityLabel: `${title}. ${state.text}. ${meta}` };
+        });
+  const hidden = open === undefined ? 0 : open.length - OVERVIEW_OPEN_MAX;
+  return {
+    figures,
+    tokensByRole,
+    tokensEmpty: summary === undefined || tokensByRole.length > 0 ? null : OVERVIEW_NO_TOKENS,
+    requests,
+    more: hidden > 0 ? `${plural(hidden, "more open request")} in Requests` : null,
   };
 }

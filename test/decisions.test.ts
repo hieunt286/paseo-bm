@@ -7,7 +7,6 @@ import {
   DECISION_CLASSES,
   DECISION_STATUSES,
   EFFECTS,
-  HARD_OWNER_CLASSES,
   GRANT_TTL_MS,
   MAX_ANSWER_REASON_CHARS,
   MAX_ANSWER_WORDS_CHARS,
@@ -29,11 +28,11 @@ import {
   grantRefusal,
   heldDecisionId,
   isAnswerable,
-  isHardOwnerClass,
   markNeedsConfirmation,
   needsOwnerConfirmation,
   openingPrediction,
   ownerViewOfDecision,
+  policyPredictorOf,
   preparedActionSchema,
   questionDecisionId,
   realEffects,
@@ -222,11 +221,9 @@ describe("classes (autonomy design §B.1, ADR-018)", () => {
     expect(checkedClass(null, [])).toBe("reversible-technical");
   });
 
-  it("names release, data, security and cost as the owner's alone: exactly the classes of the confirmation effects", () => {
-    // Derived from CONFIRM_EFFECTS (code review 2026-09-30 §3.5): the literal it replaces, in its order.
-    expect(HARD_OWNER_CLASSES).toEqual(["release", "data", "security", "cost"]);
-    expect(new Set(CONFIRM_EFFECTS.map((effect) => CLASS_OF_EFFECT[effect]))).toEqual(new Set(HARD_OWNER_CLASSES));
-    expect(DECISION_CLASSES.filter(isHardOwnerClass)).toEqual(["security", "data", "release", "cost"]);
+  it("the confirmation effects (X-4, the owner's tap) are those of release, data, security and cost", () => {
+    expect(new Set(CONFIRM_EFFECTS.map((effect) => CLASS_OF_EFFECT[effect]))).toEqual(new Set(["release", "data", "security", "cost"]));
+    expect(DECISION_CLASSES).toHaveLength(9);
   });
 
   it("stores the class as an additive field, and refuses one that is not a class", () => {
@@ -367,7 +364,7 @@ describe("the Orchestrator's Phase 1 answer (change-004): read, never written", 
     const refused = answerDecision(open, { by: "orchestrator" as never, via: "autopilot", optionKey: "c", reason: "Hold.", at: AT });
     expect(refusalOf(refused)).toBe("invalid-answer");
     expect(refused.ok ? "" : refused.message).toContain("decides through the policy (bm_decide)");
-    const decide = { by: "policy", predictor: "orchestrator", via: "inbox", optionKey: "c", at: AT } as const;
+    const decide = { by: "policy", via: "inbox", optionKey: "c", at: AT } as const;
     expect(refusalOf(answerDecision(open, { ...decide, reason: "   " }))).toBe("invalid-answer");
     expect(refusalOf(answerDecision(open, { ...decide, reason: "x".repeat(MAX_ANSWER_REASON_CHARS + 1) }))).toBe("invalid-answer");
     expect(refusalOf(answerDecision(open, { ...decide, optionKey: "z", reason: "Why not." }))).toBe("unknown-option");
@@ -379,7 +376,8 @@ describe("the Orchestrator's Phase 1 answer (change-004): read, never written", 
     expect(decisionSchema.safeParse(answered({ optionKey: null, words: "Hold it." })).success).toBe(false);
     expect(decisionSchema.safeParse(answered({ optionKey: null })).success).toBe(false);
     expect(decisionSchema.safeParse(answered({ by: "owner" })).success).toBe(false);
-    expect(decisionSchema.safeParse(answered({ by: "policy" })).success).toBe(false);
+    // A policy answer names no predictor since ADR-025.
+    expect(decisionSchema.safeParse(answered({ by: "policy" })).success).toBe(true);
     expect(decisionSchema.safeParse(answered({ reason: "x".repeat(MAX_ANSWER_REASON_CHARS + 1) })).success).toBe(false);
   });
 
@@ -402,22 +400,22 @@ describe("delegated answers, predictions and reversals (autonomy design §B.3, �
     expect(ANSWER_BY.map(answeredByText)).toEqual(["the owner", "the Orchestrator", "the policy", "an owner precedent"]);
   });
 
-  it("a policy answer is an option naming its predictor; a precedent answer names its precedent, in words or an option", () => {
+  it("a policy answer is an option and names no predictor (ADR-025); a precedent answer names its precedent, in words or an option", () => {
     const open = makeDecision({ options: makeDecision().options.map((option) => ({ ...option, effects: ["none"] })) });
-    const policy = ok(answerDecision(open, { by: "policy", via: "autopilot", optionKey: "a", reason: "recommended option, class delegated", class: "scope", predictor: "recommended", at: AT }));
-    expect(policy.answer).toEqual({ by: "policy", via: "autopilot", optionKey: "a", words: null, at: AT, reason: "recommended option, class delegated", class: "scope", predictor: "recommended" });
+    const policy = ok(answerDecision(open, { by: "policy", via: "autopilot", optionKey: "a", reason: "recommended option, class delegated", class: "scope", at: AT }));
+    expect(policy.answer).toEqual({ by: "policy", via: "autopilot", optionKey: "a", words: null, at: AT, reason: "recommended option, class delegated", class: "scope" });
     const precedent = ok(answerDecision(open, { by: "precedent", via: "inbox", words: "Always SQLite for tests.", precedentId: " p-1 ", at: AT }));
     expect(precedent.answer).toMatchObject({ by: "precedent", optionKey: null, words: "Always SQLite for tests.", precedentId: "p-1" });
 
-    expect(refusalOf(answerDecision(open, { by: "policy", via: "autopilot", words: "Hold.", predictor: "recommended", at: AT }))).toBe("invalid-answer");
-    expect(refusalOf(answerDecision(open, { by: "policy", via: "autopilot", optionKey: "a", at: AT }))).toBe("invalid-answer");
+    expect(refusalOf(answerDecision(open, { by: "policy", via: "autopilot", words: "Hold.", at: AT }))).toBe("invalid-answer");
     expect(refusalOf(answerDecision(open, { by: "precedent", via: "inbox", optionKey: "a", at: AT }))).toBe("invalid-answer");
     expect(refusalOf(answerDecision(open, { by: "precedent", via: "inbox", optionKey: "a", precedentId: "  ", at: AT }))).toBe("invalid-answer");
 
     const answered = (answer: Record<string, unknown>) =>
       decisionSchema.safeParse(makeDecision({ status: "answered", settledAt: AT, answer: { via: "inbox", optionKey: "c", words: null, at: AT, ...answer } as never })).success;
-    expect(answered({ by: "policy", predictor: "orchestrator" })).toBe(true);
-    expect(answered({ by: "policy" })).toBe(false);
+    // An older stored answer naming its predictor still parses.
+    expect(answered({ by: "policy", predictor: "recommended" })).toBe(true);
+    expect(answered({ by: "policy" })).toBe(true);
     expect(answered({ by: "policy", predictor: "orchestrator", optionKey: null, words: "Hold." })).toBe(false);
     expect(answered({ by: "precedent", precedentId: "p-1", optionKey: null, words: "Hold." })).toBe(true);
     expect(answered({ by: "precedent" })).toBe(false);
@@ -464,7 +462,31 @@ describe("delegated answers, predictions and reversals (autonomy design §B.3, �
     expect(full.reversals).toHaveLength(MAX_DECISION_REVERSALS);
   });
 
-  it("hides the challenger's prediction from the owner until the decision is settled", () => {
+  it("a policy answer grants any effect its option declares, a push or a migration too (ADR-025); the owner's tap still needs X-4's confirmation", () => {
+    const open = makeDecision({ class: "release", options: [{ key: "a", label: "Push it", recommended: true, effects: ["push", "migration"] }, { key: "b", label: "Hold", recommended: false, effects: [] }] });
+    const pushed = ok(answerDecision(open, { by: "policy", via: "inbox", optionKey: "a", class: "release", reason: "The review passed.", at: AT }));
+    expect(pushed.grant).toEqual({ effects: ["push", "migration"], expiresAt: plus(GRANT_TTL_MS), usedAt: null });
+    expect(needsOwnerConfirmation(["push"])).toBe(true);
+  });
+
+  it("names who chose a policy answer: the stored predictor of an older build, else the Orchestrator, none for a held request", () => {
+    const answeredBy = (answer: Record<string, unknown>, id = `q:${DECISION_REQUEST}:Q1`) =>
+      ({ id, answer: { by: "policy", via: "inbox", optionKey: "a", words: null, at: AT, ...answer } }) as Parameters<typeof policyPredictorOf>[0];
+    expect(policyPredictorOf(answeredBy({}))).toBe("orchestrator");
+    expect(policyPredictorOf(answeredBy({ predictor: "recommended" }))).toBe("recommended");
+    expect(policyPredictorOf(answeredBy({}, "h:agent-1:perm-1"))).toBeNull();
+    expect(policyPredictorOf(answeredBy({ by: "owner" }))).toBeNull();
+    expect(policyPredictorOf({ id: `q:${DECISION_REQUEST}:Q1`, answer: null })).toBeNull();
+  });
+
+  it("shows the Orchestrator's prediction as its proposal only when the project's level is 1 or more (proposalShown)", () => {
+    const open = makeDecision({ prediction: predicted });
+    expect(ownerViewOfDecision(open, true)).toBe(open);
+    expect(ownerViewOfDecision(open, true).prediction?.orchestrator).toEqual({ optionKey: "c", reason: "Hold until the review is in.", at: AT });
+    expect(ownerViewOfDecision(open, false).prediction?.orchestrator).toBeNull();
+  });
+
+  it("hides the challenger's prediction from the owner until the decision is settled, at level 0", () => {
     const open = makeDecision({ prediction: predicted });
     expect(ownerViewOfDecision(open).prediction).toEqual({ recommended: { optionKey: "a" }, orchestrator: null });
     expect(open.prediction).toEqual(predicted);

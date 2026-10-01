@@ -654,8 +654,8 @@ describe("orchestrator.md — decides what reaches it, verifies, declares effect
     const decision = eventLineOf({ type: "decision.opened", workspaceId: "w", requestId: "r", decisionId: "q:r:Q1", askedBy: null, asks: "decision" });
     expect(decision).toMatch(/A decision is asked: the owner's policy delegates its class to you\. Read it with bm_decisions and choose the option the owner would, with bm_decide and your reason in one line\.$/);
     const prediction = eventLineOf({ type: "decision.opened", workspaceId: "w", requestId: "r", decisionId: "q:r:Q1", askedBy: null, asks: "prediction" });
-    expect(prediction).toMatch(/A prediction is asked: read it with bm_decisions and give the option you expect the owner to choose with bm_predict\. The owner decides it: answer nothing and tell the owner nothing\.$/);
-    expect(orchestratorFace("bm_predict").description).toContain("Do not tell the owner what you predicted.");
+    expect(prediction).toMatch(/A prediction is asked: read it with bm_decisions and give the option you expect the owner to choose with bm_predict, with your reason in one line\. The owner sees it as your proposal and decides: answer nothing\.$/);
+    expect(orchestratorFace("bm_predict").description).toContain("sees your option and reason on the decision as your proposal");
     expect(O, "no answer to a stored question in a command").not.toMatch(/answer with `bm_direct_worker`|intent `answer`, a `BM-ANSWERS` block/);
     rule(O, "BM-ANSWER carries a grant", /\*\*`BM-ANSWER`\*\* is the owner's answer to one of your decisions, with its grant/);
     rule(O, "carries the answer out with one command passing its decisionId", /carry it out as it says, with one command passing its `decisionId`/);

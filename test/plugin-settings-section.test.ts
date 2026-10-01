@@ -14,10 +14,10 @@ import {
   coordinationGroupState,
   dataGroupState,
   groupHeaderView,
+  precedentsGroupState,
   stepAdviceCadence,
   storageSummary,
   toggleGroup,
-  toolsGroupState,
   type StoredWorkspaceBytes,
 } from "../plugin/client/settings-model";
 import {
@@ -34,18 +34,20 @@ import type { ConfirmDialog } from "../plugin/client/ui-types";
 import { allNodes, pressables, renderTree, texts, type RNode } from "./helpers/element-tree";
 
 /**
- * Settings (experience concept §4.4, autonomy design §A.12, §G.7): five groups,
- * each folded to one line with its state. The states are pure and tested
- * here; the hook-free pieces of `settings-section.tsx` are expanded with the
+ * Settings (experience concept §4.4, autonomy design §A.12, §G.7; change-014
+ * outcome 5): Autonomy and Coordination open, then More — Agents, Precedents
+ * and Data — each folded to one line with its state. The states are pure and
+ * tested here; the hook-free pieces of `settings-section.tsx` are expanded with the
  * element-tree helper, `react-native` and the SDK being named stand-ins.
  */
 
 // The root tsconfig has no `jsx`, so the .tsx module loads through a non-literal specifier.
 const sectionPath = "../plugin/client/settings-section.tsx";
 type Component = (props: Record<string, unknown>) => unknown;
-const { AdviceCadenceRow, SettingsGroupHeader, RolesLineView, StorageRowView } = (await import(sectionPath)) as {
+const { AdviceCadenceRow, SettingsGroupHeader, SettingsSectionHeading, RolesLineView, StorageRowView } = (await import(sectionPath)) as {
   AdviceCadenceRow: Component;
   SettingsGroupHeader: Component;
+  SettingsSectionHeading: Component;
   RolesLineView: Component;
   StorageRowView: Component;
 };
@@ -114,21 +116,44 @@ const stored = (overrides: Partial<StoredWorkspaceBytes> & { workspaceId: string
   ...overrides,
 });
 
-describe("the five groups (experience concept §4.4, autonomy design §G.7)", () => {
-  it("are Agents, Autonomy, Coordination, Tools & skills and Data, in that order, all folded at first", () => {
-    expect(SETTINGS_GROUPS.map((group) => group.title)).toEqual(["Agents", "Autonomy", "Coordination", "Tools & skills", "Data"]);
+describe("More's groups (change-014 outcome 5)", () => {
+  it("are Agents, Precedents and Data, in that order, all folded at first", () => {
+    expect(SETTINGS_GROUPS.map((group) => group.title)).toEqual(["Agents", "Precedents", "Data"]);
+    expect(SETTINGS_GROUPS.map((group) => group.hint)).toEqual([
+      "roles, models, fallbacks, sign-in and agent tools",
+      "your standing answers",
+      "data folder, trace storage, remove settings",
+    ]);
     expect(DEFAULT_OPEN_GROUPS.size).toBe(0);
-    expect(SETTINGS_GROUPS.every((group) => group.hint.length > 0)).toBe(true);
   });
 
-  it("open and close on a press, Autonomy (autonomy design §B.2) as the others", () => {
+  it("open and close on a press", () => {
     const agents = toggleGroup(DEFAULT_OPEN_GROUPS, "agents");
     expect([...agents]).toEqual(["agents"]);
     expect([...toggleGroup(agents, "data")].sort()).toEqual(["agents", "data"]);
     expect([...toggleGroup(agents, "agents")]).toEqual([]);
-    expect([...toggleGroup(DEFAULT_OPEN_GROUPS, "coordination")]).toEqual(["coordination"]);
-    expect([...toggleGroup(DEFAULT_OPEN_GROUPS, "autonomy")]).toEqual(["autonomy"]);
+    expect([...toggleGroup(DEFAULT_OPEN_GROUPS, "precedents")]).toEqual(["precedents"]);
     expect(SETTINGS_GROUPS.every((group) => group.opens)).toBe(true);
+  });
+
+  it("the Precedents line counts the active ones", () => {
+    expect(precedentsGroupState(undefined)).toEqual(GROUP_LOADING);
+    expect(precedentsGroupState(undefined, true)).toEqual({ text: "The precedents could not be read", tone: "danger" });
+    expect(precedentsGroupState([])).toEqual({ text: "None yet", tone: "muted" });
+    expect(precedentsGroupState([{}, {}] as never)).toEqual({ text: "2 active", tone: "muted" });
+  });
+});
+
+describe("a section heading (hook-free)", () => {
+  it("is a header with its meaning and its state in its tone; nothing pressable", () => {
+    const nodes = renderTree(
+      SettingsSectionHeading({ title: "Coordination", meaning: "What it is.", state: { text: "Compaction switched off below its target", tone: "warning" }, styles, theme }),
+    );
+    expect(texts(nodes)).toEqual(["Coordination", "What it is.", "Compaction switched off below its target"]);
+    expect(allNodes(nodes)[1]!.props.accessibilityRole).toBe("header");
+    expect(JSON.stringify(allNodes(nodes)[3]!.props.style)).toContain("#statusWarning");
+    expect(pressables(nodes)).toHaveLength(0);
+    expect(texts(renderTree(SettingsSectionHeading({ title: "More", meaning: null, state: null, styles, theme })))).toEqual(["More"]);
   });
 });
 
@@ -164,28 +189,6 @@ describe("the Agents line", () => {
 
   it("falls back to a plain line on a server without the setup block", () => {
     expect(agentsGroupState(readyStatus({ setup: undefined }))).toEqual({ text: "Roles, models and fallbacks", tone: "muted" });
-  });
-});
-
-describe("the Tools & skills line", () => {
-  it("says br and bv are ready and counts the Worker's skills on its own agent", () => {
-    expect(toolsGroupState(readyStatus())).toEqual({ text: "br and bv ready · Worker skills (Claude) 5/5", tone: "success" });
-  });
-
-  it("puts a missing tool first, in danger, then an update and missing Worker skills", () => {
-    const base = readyStatus();
-    const status = readyStatus({
-      tools: [
-        { ...base.tools[0]!, path: null },
-        { ...base.tools[1]!, version: "v0.24.0" },
-      ],
-      skills: { ...base.skills, missingRequired: { claude: 2, codex: 0 } },
-    });
-    expect(toolsGroupState(status)).toEqual({ text: "Missing br · bv update available · Worker skills (Claude) 3/5", tone: "danger" });
-  });
-
-  it("counts every reported agent when no Worker provider is known", () => {
-    expect(toolsGroupState(withSetup({ logins: [] })).text).toBe("br and bv ready · skills: Claude 5/5, Codex 5/5, Pi 0/5, OpenCode 0/5");
   });
 });
 
@@ -292,7 +295,7 @@ describe("the Coordination group (autonomy design §G.7)", () => {
     const onReset = vi.fn();
     const view = adviceCadenceView({ stored: 5, draft: 3, defaultValue: 5, saving: false });
     const nodes = renderTree(AdviceCadenceRow({ view, error: null, onStep, onSave, onReset, styles, theme }));
-    expect(texts(nodes)).toEqual(["Advice", ADVICE_MEANING, "−", "Advice after every 3 finished requests", "+", "Save", "Use the default (5)"]);
+    expect(texts(nodes)).toEqual(["Orchestrator advice", ADVICE_MEANING, "−", "Advice after every 3 finished requests", "+", "Save", "Use the default (5)"]);
     const buttons = pressables(nodes);
     expect(buttons.map((button) => button.props.accessibilityRole)).toEqual(["button", "button", "button", "button"]);
     expect(buttons.map((button) => button.props.accessibilityLabel)).toEqual([
@@ -349,13 +352,11 @@ describe("the group header (hook-free)", () => {
     expect(pressables(open)[0]!.props.accessibilityLabel).toMatch(/Collapse\.$/);
   });
 
-  it("opens Autonomy like the others: one button with the policy's line (autonomy design §B.2)", () => {
-    const nodes = header(groupHeaderView("autonomy", { text: "Every decision is yours, in every project", tone: "muted" }, false));
+  it("opens Precedents like the others: one button with its count", () => {
+    const nodes = header(groupHeaderView("precedents", { text: "2 active", tone: "muted" }, false));
     expect(pressables(nodes)).toHaveLength(1);
-    expect(texts(nodes)).toEqual(["▸ Autonomy", "Every decision is yours, in every project"]);
-    expect((nodes[0] as RNode).props.accessibilityLabel).toBe(
-      "Autonomy, which decisions the agents may take for you: Every decision is yours, in every project. Expand.",
-    );
+    expect(texts(nodes)).toEqual(["▸ Precedents", "2 active"]);
+    expect((nodes[0] as RNode).props.accessibilityLabel).toBe("Precedents, your standing answers: 2 active. Expand.");
   });
 });
 

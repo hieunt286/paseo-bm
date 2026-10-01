@@ -5,12 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAlertStore } from "../plugin/server/alert-store";
 import { handleAutonomyLedger } from "../plugin/server/autonomy-ledger-rpc";
 import {
-  demoteOnReversal,
   handleAutonomyPolicy,
   handleAutonomyReset,
   handleAutonomySet,
   handleAutonomySetBoundary,
   handleAutonomySetChallenger,
+  handleAutonomySetLevel,
   handlePrecedentsEnd,
   handlePrecedentsList,
   handlePrecedentsSave,
@@ -23,8 +23,7 @@ import { AUTONOMY_DIR_NAME, AUTONOMY_POLICY_FILE } from "../plugin/server/autono
 import { clearMaterialiserMemory, materialiseTurn, type MaterialiserDeps } from "../plugin/server/decision-materialiser";
 import { DECISIONS_DIR_NAME, clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
 import { PRECEDENTS_FILE } from "../plugin/server/precedent-store";
-import { alertKeyOf } from "../plugin/shared/alerts";
-import { EMPTY_AUTONOMY_POLICY, boundaryOf, canDelegate, challengerOf, demotedAtOf, modeOf, type AutonomyPredictor } from "../plugin/shared/autonomy";
+import { EMPTY_AUTONOMY_POLICY, LEVELS, boundaryOf, challengerOf, levelOf, modeOf } from "../plugin/shared/autonomy";
 import { AGENT_TOOLS, MANAGER_SERVER_TOOLS, ORCHESTRATOR_SERVER_TOOLS } from "../plugin/shared/bm-tools";
 import {
   DASHBOARD_ERROR_CODES,
@@ -33,27 +32,27 @@ import {
   autonomyResetRpc,
   autonomySetBoundaryRpc,
   autonomySetChallengerRpc,
+  autonomySetLevelRpc,
   autonomySetRpc,
   precedentsEndRpc,
   precedentsListRpc,
   precedentsSaveRpc,
 } from "../plugin/shared/contracts";
-import { DECISION_CLASSES, HARD_OWNER_CLASSES, PREPARED_CHANGE_KINDS, answerDecision, recordReversal, type Decision } from "../plugin/shared/decisions";
+import { DECISION_CLASSES, PREPARED_CHANGE_KINDS, answerDecision, type Decision } from "../plugin/shared/decisions";
 import { MANAGER, WORKER, WORKSPACE_ID, at, msg, turn } from "./fixtures/orchestrator-traces";
 import { DECISION_WS, makeDecision, storedOrchestratorAnswer } from "./helpers/decisions";
 
 /**
  * The owner's autonomy RPCs (autonomy design §B.2, §B.9; PRD REQ-121):
- * `autonomy.policy`, `autonomy.set`, `autonomy.reset` and
- * `autonomy.set-challenger`, with the negative
- * cases of the bead — `delegate` refused for release, data, security and cost
- * and without confirmation, unknown class or mode refused, each writing
- * nothing. A temporary data folder named by `PASEO_BM_HOME` only.
+ * `autonomy.policy`, `autonomy.set-level`, `autonomy.set`, `autonomy.reset`
+ * and `autonomy.set-challenger`, with the negative cases — Turbo and Full auto
+ * and `delegate` refused without confirmation, unknown level, class or mode
+ * refused, each writing nothing; any class may be delegated (ADR-025). A temporary data folder named by `PASEO_BM_HOME` only.
  */
 
 const NOW = new Date("2026-09-30T10:00:00.000Z");
 const AT = NOW.toISOString();
-const DELEGABLE = DECISION_CLASSES.filter((decisionClass) => canDelegate(decisionClass));
+const DELEGABLE = DECISION_CLASSES;
 
 let root: string;
 let home: string;
@@ -88,7 +87,7 @@ afterEach(() => {
 describe("autonomy.policy", () => {
   it("reads every cell as owner on a new install, and writes nothing", () => {
     const output = handleAutonomyPolicy({}, deps);
-    expect(autonomyPolicyRpc.output.parse(output)).toEqual({ policy: EMPTY_AUTONOMY_POLICY });
+    expect(autonomyPolicyRpc.output.parse(output)).toEqual({ policy: EMPTY_AUTONOMY_POLICY, levels: {} });
     for (const decisionClass of DECISION_CLASSES) expect(modeOf(output.policy, "w1", decisionClass)).toBe("owner");
     expect(existsSync(home)).toBe(false);
   });
@@ -101,7 +100,19 @@ describe("autonomy.policy", () => {
       projects: { w2: { preference: { mode: "shadow", at: AT } } },
       challenger: {},
     });
-    expect(handleAutonomyPolicy({ workspaceId: "w9" }, deps).policy).toEqual(EMPTY_AUTONOMY_POLICY);
+    expect(handleAutonomyPolicy({ workspaceId: "w9" }, deps)).toEqual({ policy: EMPTY_AUTONOMY_POLICY, levels: { w9: 0 } });
+  });
+
+  it("reports each project's level: 0-4 as set, custom for cells that match no level (ADR-025)", () => {
+    handleAutonomySetLevel({ workspaceId: "w1", level: 2 }, deps);
+    handleAutonomySetLevel({ workspaceId: "w2", level: 4, confirmed: true }, deps);
+    handleAutonomySetLevel({ workspaceId: "w3", level: 1 }, deps);
+    handleAutonomySet({ workspaceId: "w3", class: "cost", mode: "delegate", confirmed: true }, deps);
+    handleAutonomySetChallenger({ workspaceId: "w4", enabled: false }, deps);
+    const output = handleAutonomyPolicy({}, deps);
+    expect(autonomyPolicyRpc.output.parse(output)).toEqual(output);
+    expect(output.levels).toEqual({ w1: 2, w2: 4, w3: "custom", w4: 0 });
+    expect(handleAutonomyPolicy({ workspaceId: "w1" }, deps).levels).toEqual({ w1: 2 });
   });
 
   it("reads the empty policy, never throwing, with no usable data folder or an unreadable store (one log line)", () => {
@@ -126,11 +137,15 @@ describe("autonomy.set", () => {
     }
   });
 
-  it("records the predictor of a delegation: the one named, else recommended (no agreement threshold, ADR-023)", () => {
-    const named = handleAutonomySet({ workspaceId: "w1", class: "scope", mode: "delegate", confirmed: true, predictor: "orchestrator" }, deps);
-    expect(named.policy.projects["w1"]?.scope).toEqual({ mode: "delegate", predictor: "orchestrator", at: AT });
-    const unnamed = handleAutonomySet({ workspaceId: "w1", class: "preference", mode: "delegate", confirmed: true }, deps);
-    expect(unnamed.policy.projects["w1"]?.preference).toEqual({ mode: "delegate", predictor: "recommended", at: AT });
+  it("delegates any class, release and security included, to the Orchestrator with no predictor field (ADR-025; no agreement threshold, ADR-023)", () => {
+    for (const decisionClass of ["release", "data", "security", "cost"] as const) {
+      const output = handleAutonomySet({ workspaceId: "w1", class: decisionClass, mode: "delegate", confirmed: true }, deps);
+      expect(output.policy.projects["w1"]?.[decisionClass]).toEqual({ mode: "delegate", at: AT });
+    }
+    // The predictor of builds before ADR-025 is refused, not dropped: there is no choice of predictor.
+    expect(codeOf(() => handleAutonomySet({ workspaceId: "w1", class: "scope", mode: "delegate", confirmed: true, predictor: "orchestrator" }, deps))).toBe(
+      "E_AUTONOMY_INVALID",
+    );
   });
 
   it("needs no confirmation for owner and shadow", () => {
@@ -146,27 +161,9 @@ describe("autonomy.set refusals, each writing nothing", () => {
     before = fileBytes();
   });
 
-  it("refuses delegate for release, data, security and cost, with or without confirmed (E_AUTONOMY_OWNER_ONLY)", () => {
-    expect([...HARD_OWNER_CLASSES].sort()).toEqual(["cost", "data", "release", "security"]);
-    for (const decisionClass of HARD_OWNER_CLASSES) {
-      for (const extra of [{}, { confirmed: true }, { confirmed: false }, { confirmed: true, predictor: "orchestrator" }]) {
-        const input = { workspaceId: "w1", class: decisionClass, mode: "delegate", ...extra };
-        expect(codeOf(() => handleAutonomySet(input, deps))).toBe("E_AUTONOMY_OWNER_ONLY");
-      }
-      expect(() => handleAutonomySet({ workspaceId: "w1", class: decisionClass, mode: "delegate", confirmed: true }, deps)).toThrow(
-        new RegExp(`${decisionClass} decisions are always the owner's`),
-      );
-      // Also on a project with no file at all yet.
-      expect(codeOf(() => handleAutonomySet({ workspaceId: "w2", class: decisionClass, mode: "delegate", confirmed: true }, deps))).toBe(
-        "E_AUTONOMY_OWNER_ONLY",
-      );
-    }
-    expect(fileBytes()).toBe(before);
-  });
-
   it("refuses delegate without confirmed: true (E_AUTONOMY_NOT_CONFIRMED)", () => {
     for (const decisionClass of DELEGABLE) {
-      for (const extra of [{}, { confirmed: false }, { predictor: "orchestrator" }]) {
+      for (const extra of [{}, { confirmed: false }]) {
         const input = { workspaceId: "w1", class: decisionClass, mode: "delegate", ...extra };
         expect(codeOf(() => handleAutonomySet(input, deps))).toBe("E_AUTONOMY_NOT_CONFIRMED");
       }
@@ -204,7 +201,7 @@ describe("autonomy.set refusals, each writing nothing", () => {
   it("checks the input before the data folder, and refuses without one (E_DATA_HOME_UNAVAILABLE)", () => {
     const unusable = { env: { PASEO_BM_HOME: "relative/path" }, homedir: () => root };
     expect(codeOf(() => handleAutonomySet({ workspaceId: "w1", class: "release", mode: "delegate", confirmed: true }, unusable))).toBe(
-      "E_AUTONOMY_OWNER_ONLY",
+      "E_DATA_HOME_UNAVAILABLE",
     );
     expect(codeOf(() => handleAutonomySet({ workspaceId: "w1", class: "scope", mode: "delegate" }, unusable))).toBe("E_AUTONOMY_NOT_CONFIRMED");
     expect(codeOf(() => handleAutonomySet({ workspaceId: "w1", class: "scope", mode: "shadow" }, unusable))).toBe("E_DATA_HOME_UNAVAILABLE");
@@ -234,7 +231,7 @@ describe("autonomy.reset", () => {
       handleAutonomySet({ workspaceId: "w1", class: decisionClass, mode: decisionClass === "scope" ? "shadow" : "delegate", confirmed: true }, deps);
     }
     handleAutonomySet({ workspaceId: "w1", class: "release", mode: "shadow" }, deps);
-    handleAutonomySet({ workspaceId: "w2", class: "preference", mode: "delegate", confirmed: true, predictor: "orchestrator" }, deps);
+    handleAutonomySet({ workspaceId: "w2", class: "preference", mode: "delegate", confirmed: true }, deps);
     const other = handleAutonomyPolicy({ workspaceId: "w2" }, deps).policy;
 
     const output = handleAutonomyReset({ workspaceId: "w1" }, deps);
@@ -250,6 +247,52 @@ describe("autonomy.reset", () => {
     for (const input of [{}, { workspaceId: "" }, { workspaceId: 7 }, { workspaceId: "__proto__" }, null]) {
       expect(codeOf(() => handleAutonomyReset(input, deps))).toBe("E_AUTONOMY_INVALID");
     }
+  });
+});
+
+describe("autonomy.set-level (ADR-025)", () => {
+  it("writes each level's pattern in one write and reads it back", () => {
+    for (const level of [0, 1, 2, 3, 4] as const) {
+      const output = handleAutonomySetLevel({ workspaceId: "w1", level, confirmed: true }, deps);
+      expect(autonomySetLevelRpc.output.parse(output)).toEqual(output);
+      for (const decisionClass of DECISION_CLASSES) {
+        const delegated = LEVELS[level]!.delegated.includes(decisionClass);
+        expect(modeOf(output.policy, "w1", decisionClass)).toBe(delegated ? "delegate" : level === 0 ? "owner" : "shadow");
+      }
+      expect(challengerOf(output.policy, "w1")).toBe(level >= 1);
+      expect(handleAutonomyPolicy({ workspaceId: "w1" }, deps).levels).toEqual({ w1: level });
+      expect(JSON.parse(fileBytes()!)).toEqual({ version: 1, ...output.policy });
+    }
+  });
+
+  it("keeps the action boundary and the other projects as they are", () => {
+    handleAutonomySetBoundary({ workspaceId: "w1", enabled: true, confirmed: true }, deps);
+    handleAutonomySet({ workspaceId: "w2", class: "scope", mode: "shadow" }, deps);
+    const policy = handleAutonomySetLevel({ workspaceId: "w1", level: 3, confirmed: true }, deps).policy;
+    expect(boundaryOf(policy, "w1")).toEqual({ enabled: true, at: AT });
+    expect(policy.projects["w2"]).toEqual({ scope: { mode: "shadow", at: AT } });
+    expect(levelOf(policy, "w1")).toBe(3);
+  });
+
+  it("refuses Turbo and Full auto without confirmed: true (E_AUTONOMY_NOT_CONFIRMED), and a bad level or project (E_AUTONOMY_INVALID), before the data folder, writing nothing", () => {
+    handleAutonomySetLevel({ workspaceId: "w1", level: 2 }, deps);
+    const before = fileBytes();
+    for (const input of [{ workspaceId: "w1", level: 3 }, { workspaceId: "w1", level: 4, confirmed: false }, { workspaceId: "w2", level: 4 }]) {
+      expect(codeOf(() => handleAutonomySetLevel(input, deps)), JSON.stringify(input)).toBe("E_AUTONOMY_NOT_CONFIRMED");
+    }
+    expect(() => handleAutonomySetLevel({ workspaceId: "w1", level: 3 }, deps)).toThrow(/Turbo lets the Orchestrator decide cost, release and data for you/);
+    expect(() => handleAutonomySetLevel({ workspaceId: "w1", level: 4 }, deps)).toThrow(/Full auto lets the Orchestrator decide every class, security included/);
+    for (const input of [{}, { workspaceId: "w1" }, { workspaceId: "w1", level: 5 }, { workspaceId: "w1", level: -1 }, { workspaceId: "w1", level: "2" }, { workspaceId: "w1", level: 1.5 }, { workspaceId: "__proto__", level: 1 }, { workspaceId: "w1", level: 1, confirmed: "yes" }, null]) {
+      expect(codeOf(() => handleAutonomySetLevel(input, deps)), JSON.stringify(input)).toBe("E_AUTONOMY_INVALID");
+    }
+    expect(() => handleAutonomySetLevel({ workspaceId: "w1", level: 7 }, deps)).toThrow("level 7 is not a level from 0 to 4; nothing was saved");
+    expect(fileBytes()).toBe(before);
+    const unusable = { env: { PASEO_BM_HOME: "relative/path" }, homedir: () => root };
+    expect(codeOf(() => handleAutonomySetLevel({ workspaceId: "w1", level: 4 }, unusable))).toBe("E_AUTONOMY_NOT_CONFIRMED");
+    expect(codeOf(() => handleAutonomySetLevel({ workspaceId: "w1", level: 2 }, unusable))).toBe("E_DATA_HOME_UNAVAILABLE");
+    rmSync(join(home, AUTONOMY_DIR_NAME), { recursive: true });
+    symlinkSync(root, join(home, AUTONOMY_DIR_NAME));
+    expect(codeOf(() => handleAutonomySetLevel({ workspaceId: "w1", level: 1 }, deps))).toBe("E_AUTONOMY_WRITE_FAILED");
   });
 });
 
@@ -365,13 +408,14 @@ describe("autonomy.set-boundary (autonomy design §D.2, change-010)", () => {
     expect(readAutonomyPolicy(deps)).toEqual(EMPTY_AUTONOMY_POLICY);
   });
 
-  it("is the owner's only: no agent tool and no prepared change writes it; an autonomy.set carrying a boundary sets only its cell", () => {
+  it("is the owner's only: no agent tool and no prepared change writes it; an autonomy.set carrying a boundary is refused", () => {
     const names = [...ORCHESTRATOR_SERVER_TOOLS, ...MANAGER_SERVER_TOOLS, ...AGENT_TOOLS].map((tool) => tool.name);
     expect(names.filter((name) => /boundary/i.test(name))).toEqual([]);
     expect(PREPARED_CHANGE_KINDS).not.toContain("autonomy.set-boundary");
     expect(PREPARED_CHANGE_KINDS.filter((kind) => /boundary/.test(kind))).toEqual([]);
-    const set = handleAutonomySet({ workspaceId: "w1", class: "scope", mode: "shadow", boundary: { w1: { enabled: true, at: AT } }, enabled: true, confirmed: true }, deps);
-    expect(set.policy).not.toHaveProperty("boundary");
+    const carrying = { workspaceId: "w1", class: "scope", mode: "shadow", boundary: { w1: { enabled: true, at: AT } }, enabled: true, confirmed: true };
+    expect(codeOf(() => handleAutonomySet(carrying, deps))).toBe("E_AUTONOMY_INVALID");
+    expect(readAutonomyPolicy(deps)).not.toHaveProperty("boundary");
   });
 });
 
@@ -509,54 +553,45 @@ describe("precedents (autonomy design §B.6, §B.9)", () => {
   });
 });
 
-describe("demotion (autonomy design §B.4, §B.9; REQ-123 b)", () => {
+describe("a reversal is only recorded (ADR-025 decision 4: no demotion)", () => {
   const WS = WORKSPACE_ID;
   const REQUEST = "req-20260929T073348Z";
-  const DAY = 24 * 60 * 60 * 1000;
-  const later = (days: number) => new Date(NOW.getTime() + days * DAY);
   const OPTIONS = [
     { key: "a", label: "One test file per module", recommended: true, effects: [] },
     { key: "b", label: "One test file", recommended: false, effects: [] },
   ];
   const idOf = (qn: string) => `q:${REQUEST}:${qn}`;
-  const policyFile = () => fileBytes();
-  const demotionAlerts = (open?: boolean) => createAlertStore(home).list({ kinds: ["autonomy-demoted"], ...(open === undefined ? {} : { open }) });
-  const scopeKey = alertKeyOf("autonomy-demoted", WS, "scope");
   const materialiser = (): MaterialiserDeps => ({ home, now: () => NOW, log: (message) => logs.push(message), workerOf: async () => WORKER });
 
-  /** Stores question `qn` of the request, of class scope, answered with its recommended option by `by` at `when`. */
-  function answered(qn: string, by: "policy" | "precedent" | "owner", options: { when?: string; subject?: string; predictor?: AutonomyPredictor } = {}): Decision {
+  /** Stores question `qn` of the request, of class scope, answered with its recommended option by `by`. */
+  function answered(qn: string, by: "policy" | "precedent"): Decision {
     const open = makeDecision({
       id: idOf(qn),
       workspaceId: WS,
       requestId: REQUEST,
       class: "scope",
       options: OPTIONS,
-      subject: options.subject ?? "test-layout",
+      subject: "test-layout",
       prediction: { recommended: { optionKey: "a" }, orchestrator: null },
     });
-    const delegated = by === "owner" ? {} : { class: "scope" as const, ...(by === "policy" ? { predictor: options.predictor ?? "recommended" } : { precedentId: "p:3f2a" }) };
-    const result = answerDecision(open, { via: "inbox", optionKey: "a", at: options.when ?? at(4), by, ...delegated });
+    const delegated = by === "policy" ? { class: "scope" as const } : { class: "scope" as const, precedentId: "p:3f2a" };
+    const result = answerDecision(open, { via: "inbox", optionKey: "a", at: at(4), by, ...delegated });
     if (!result.ok) throw new Error(result.message);
     createDecisionStore(home).open(open);
     createDecisionStore(home).transition(open.id, () => ({ ok: true, decision: result.decision }), WS);
     return result.decision;
   }
-  const stored = (qn: string) => createDecisionStore(home).get(idOf(qn), WS);
-  const delegateScope = (predictor: AutonomyPredictor = "recommended") =>
-    handleAutonomySet({ workspaceId: WS, class: "scope", mode: "delegate", confirmed: true, predictor }, deps);
 
-  /** The Manager turn that brings a Worker question asking `subject` again in the same request. */
-  const reaskTurn = (qn: string, subject = "test-layout", when = at(5)) =>
+  const reaskTurn = (qn: string) =>
     turn({
       agentId: MANAGER,
       role: "manager",
       workspaceId: WS,
-      endedAt: when,
+      endedAt: at(5),
       sent: [
         msg(
           MANAGER,
-          when,
+          at(5),
           [
             "BM-REPORT",
             `requestId: ${REQUEST}`,
@@ -566,7 +601,7 @@ describe("demotion (autonomy design §B.4, §B.9; REQ-123 b)", () => {
             "",
             "BM-QUESTIONS",
             `requestId: ${REQUEST}`,
-            `${qn}: Which test layout, again? [subject: ${subject}] [class: scope]`,
+            `${qn}: Which test layout, again? [subject: test-layout] [class: scope]`,
             "- a: One test file per module (recommended)",
             "- b: One test file",
           ].join("\n"),
@@ -574,143 +609,28 @@ describe("demotion (autonomy design §B.4, §B.9; REQ-123 b)", () => {
         ),
       ],
     });
-  /** A Worker turn that reopened a bead with `reason`. */
-  const reopenTurn = (reason: string, when = at(10)) =>
-    turn({
-      agentId: WORKER,
-      role: "worker",
-      workspaceId: WS,
-      parentAgentId: MANAGER,
-      requestId: REQUEST,
-      endedAt: when,
-      evidence: [{ kind: "shell", detail: `br reopen bm-12 --reason "${reason}"`, agentId: WORKER, at: when }],
-    });
 
-  it("a re-ask with the same subject of what the policy answered takes the delegated class back to shadow at once, with one alert", async () => {
-    delegateScope();
-    const before = answered("Q1", "policy");
-    await materialiseTurn(reaskTurn("Q2"), materialiser());
-    const policy = readAutonomyPolicy(deps);
-    expect(policy.projects[WS]?.scope).toEqual({ mode: "shadow", at: AT });
-    expect(demotedAtOf(policy, WS, "scope")).toBe(AT);
-    expect(demotionAlerts()).toEqual([
-      {
-        key: scopeKey,
-        workspaceId: WS,
-        kind: "autonomy-demoted",
-        subject: "scope",
-        since: AT,
-        clearedAt: null,
-        detail: `Scope decisions are back in Shadow: ${idOf("Q1")}, answered for you by the recommended option, was asked again in the same request. They come to you again until you delegate them again in Settings → Autonomy.`,
-      },
-    ]);
-    // The answer already delivered is not touched: only the reversal is recorded on it.
-    expect(stored("Q1")).toEqual({ ...before, reversals: [{ kind: "re-asked", at: at(5), ref: idOf("Q2") }] });
-
-    // Another reversal in the same class finds it in shadow already: nothing more is written or raised.
-    answered("Q3", "policy", { subject: "branch-name", when: at(6) });
-    const bytes = policyFile();
-    await materialiseTurn(reaskTurn("Q4", "branch-name", at(7)), materialiser());
-    expect(stored("Q3")?.reversals).toHaveLength(1);
-    expect(policyFile()).toBe(bytes);
-    expect(demotionAlerts()).toHaveLength(1);
-  });
-
-  it("a bead reopened with a reason citing what a precedent answered demotes the class too", async () => {
-    delegateScope();
-    answered("Q1", "precedent");
-    await materialiseTurn(reopenTurn(`the owner reversed q:${REQUEST}:Q1: one file after all`), materialiser());
-    expect(modeOf(readAutonomyPolicy(deps), WS, "scope")).toBe("shadow");
-    const [alert] = demotionAlerts(true);
-    expect(alert?.detail).toContain("answered for you by your precedent, was reversed: a bead closed under it was reopened citing it");
-  });
-
-  it("an override from the digest demotes the class through the same function (the Override itself is bead t9lm.15)", () => {
-    delegateScope("orchestrator");
-    const reversed = recordReversal(answered("Q1", "policy", { predictor: "orchestrator" }), { kind: "overridden", at: AT, ref: "r:0d1e" });
-    if (!reversed.ok) throw new Error(reversed.message);
-    const result = demoteOnReversal(reversed.decision, "overridden", { home, now: () => NOW });
-    expect(result).toMatchObject({ demoted: true, workspaceId: WS, class: "scope", alert: { key: scopeKey, clearedAt: null } });
-    expect(result.demoted && result.alert?.detail).toContain("answered for you by the Orchestrator, was overridden by you");
-    expect(modeOf(readAutonomyPolicy(deps), WS, "scope")).toBe("shadow");
-    // Once more: the cell is not delegated any more.
-    expect(demoteOnReversal(reversed.decision, "overridden", { home, now: () => NOW })).toEqual({ demoted: false, reason: `scope is not delegated in ${WS}` });
-    expect(demotionAlerts()).toHaveLength(1);
-  });
-
-  it("the reversal of an owner's answer never demotes, nor does one in a cell that is not delegated or of a decision not answered", async () => {
-    delegateScope();
-    answered("Q1", "owner");
-    await materialiseTurn(reaskTurn("Q2"), materialiser());
-    expect(stored("Q1")?.reversals).toHaveLength(1);
-    expect(modeOf(readAutonomyPolicy(deps), WS, "scope")).toBe("delegate");
-    expect(demoteOnReversal(stored("Q1")!, "overridden", { home })).toEqual({ demoted: false, reason: `decision ${idOf("Q1")} was answered by the owner, not for the owner` });
-
-    handleAutonomySet({ workspaceId: WS, class: "scope", mode: "shadow" }, deps);
-    const bytes = policyFile();
-    expect(demoteOnReversal(answered("Q3", "policy", { subject: "branch-name" }), "re-asked", { home }).demoted).toBe(false);
-    expect(demoteOnReversal(makeDecision({ workspaceId: WS }), "re-asked", { home })).toEqual({ demoted: false, reason: `decision ${idOf("Q1")} is not answered` });
-    expect(policyFile()).toBe(bytes);
-    expect(demotionAlerts()).toEqual([]);
-  });
-
-  it("the alert clears on the owner's next change of that cell, and on a reset of the project", () => {
-    const demote = () => {
-      delegateScope();
-      return demoteOnReversal(stored("Q1")!, "overridden", { home, now: () => NOW });
-    };
+  it("a re-ask of what the policy answered records the reversal and leaves the cell, the level and the alerts as they were", async () => {
+    handleAutonomySetLevel({ workspaceId: WS, level: 2 }, deps);
+    const policyBefore = fileBytes();
     answered("Q1", "policy");
-    expect(demote().demoted).toBe(true);
-    // Another class, or another project, leaves it open.
-    handleAutonomySet({ workspaceId: WS, class: "preference", mode: "shadow" }, deps);
-    handleAutonomySet({ workspaceId: "wks_other", class: "scope", mode: "shadow" }, deps);
-    expect(demotionAlerts(true).map((alert) => alert.key)).toEqual([scopeKey]);
-    // The owner sets the cell: cleared.
-    handleAutonomySet({ workspaceId: WS, class: "scope", mode: "owner" }, deps);
-    expect(demotionAlerts(true)).toEqual([]);
-    // Demoted again, it opens afresh; Return all to owner clears it, and keeps the demotion's time.
-    expect(demote().demoted).toBe(true);
-    expect(demotionAlerts(true).map((alert) => alert.key)).toEqual([scopeKey]);
-    const reset = handleAutonomyReset({ workspaceId: WS }, deps).policy;
-    expect(demotionAlerts(true)).toEqual([]);
-    expect(modeOf(reset, WS, "scope")).toBe("owner");
-    expect(demotedAtOf(reset, WS, "scope")).toBe(AT);
-  });
-
-  it("the owner's answers never clear the alert (no agreement threshold, ADR-023); delegating the class again does, at once", () => {
-    delegateScope();
-    answered("Q1", "policy");
-    demoteOnReversal(stored("Q1")!, "overridden", { home, now: () => NOW });
-    // However many agreeing answers the owner gives since, the class stays in shadow and the alert open.
-    for (let index = 0; index < 20; index += 1) answered(`Q${index + 40}`, "owner", { when: later(index + 1).toISOString() });
-    expect(handleAutonomyLedger({ workspaceId: WS }, deps).cells.find((cell) => cell.class === "scope")).toMatchObject({ count: 20, agreed: 20 });
-    expect(modeOf(readAutonomyPolicy(deps), WS, "scope")).toBe("shadow");
-    expect(demotionAlerts(true).map((alert) => alert.key)).toEqual([scopeKey]);
-    // The owner delegates it again, with the confirmation: delegated, and the alert ends.
-    const policy = handleAutonomySet({ workspaceId: WS, class: "scope", mode: "delegate", confirmed: true, predictor: "orchestrator" }, deps).policy;
-    expect(policy.projects[WS]?.scope).toEqual({ mode: "delegate", predictor: "orchestrator", at: AT });
-    expect(demotionAlerts(true)).toEqual([]);
-  });
-
-  it("autonomy.ledger counts a demoted class from its demotion; the delegated figures stay whole", () => {
-    delegateScope();
-    const byPolicy = answered("Q1", "policy");
-    for (let index = 0; index < 5; index += 1) answered(`Q${index + 10}`, "owner", { when: new Date(NOW.getTime() - (index + 1) * DAY).toISOString() });
-    expect(handleAutonomyLedger({ workspaceId: WS }, deps).cells.find((cell) => cell.class === "scope")?.count).toBe(5);
-    demoteOnReversal(byPolicy, "overridden", { home, now: () => NOW });
-    answered("Q20", "owner", { when: later(1).toISOString() });
-    const ledger = handleAutonomyLedger({ workspaceId: WS }, deps);
-    expect(ledger.cells.filter((cell) => cell.class === "scope").map((cell) => [cell.predictor, cell.count])).toEqual([["recommended", 1]]);
-    expect(ledger.delegated.map((cell) => [cell.class, cell.by, cell.count])).toEqual([["scope", "policy", 1]]);
+    await materialiseTurn(reaskTurn("Q2"), materialiser());
+    expect(createDecisionStore(home).get(idOf("Q1"), WS)?.reversals).toEqual([{ kind: "re-asked", at: at(5), ref: idOf("Q2") }]);
+    expect(fileBytes()).toBe(policyBefore);
+    expect(levelOf(readAutonomyPolicy(deps), WS)).toBe(2);
+    expect(createAlertStore(home).list({})).toEqual([]);
+    // The ledger still counts the delegated answer, reversed.
+    expect(handleAutonomyLedger({ workspaceId: WS }, deps).delegated).toMatchObject([{ class: "scope", by: "policy", count: 1, reversals: 1 }]);
   });
 });
 
 describe("registration", () => {
-  it("registers the five policy RPCs and the three precedent RPCs, and their codes are in the registry", () => {
+  it("registers the six policy RPCs and the three precedent RPCs, and their codes are in the registry", () => {
     const handle = vi.fn();
     registerAutonomyRpcs({ handle } as unknown as Parameters<typeof registerAutonomyRpcs>[0], deps);
     expect(handle.mock.calls.map(([contract]) => (contract as { name: string }).name)).toEqual([
       "autonomy.policy",
+      "autonomy.set-level",
       "autonomy.set",
       "autonomy.reset",
       "autonomy.set-challenger",
@@ -721,12 +641,14 @@ describe("registration", () => {
     ]);
     const handler = (contract: unknown) => handle.mock.calls.find(([registered]) => registered === contract)![1] as (input: unknown) => unknown;
     handler(autonomySetRpc)({ workspaceId: "w1", class: "scope", mode: "shadow" });
-    expect(handler(autonomyPolicyRpc)({})).toEqual({ policy: { projects: { w1: { scope: { mode: "shadow", at: AT } } }, challenger: {} } });
+    expect(handler(autonomyPolicyRpc)({})).toEqual({ policy: { projects: { w1: { scope: { mode: "shadow", at: AT } } }, challenger: {} }, levels: { w1: 0 } });
     expect(handler(autonomyResetRpc)({ workspaceId: "w1" })).toEqual({ policy: EMPTY_AUTONOMY_POLICY });
     expect(handler(autonomySetChallengerRpc)({ workspaceId: "w1", enabled: true })).toEqual({ policy: { projects: {}, challenger: { w1: true } } });
-    for (const code of ["E_AUTONOMY_OWNER_ONLY", "E_AUTONOMY_NOT_CONFIRMED", "E_AUTONOMY_INVALID", "E_AUTONOMY_WRITE_FAILED"]) {
+    expect(handler(autonomySetLevelRpc)({ workspaceId: "w2", level: 1 })).toMatchObject({ policy: { challenger: { w1: true, w2: true } } });
+    for (const code of ["E_AUTONOMY_NOT_CONFIRMED", "E_AUTONOMY_INVALID", "E_AUTONOMY_WRITE_FAILED"]) {
       expect(DASHBOARD_ERROR_CODES).toContain(code);
     }
+    expect(DASHBOARD_ERROR_CODES).not.toContain("E_AUTONOMY_OWNER_ONLY");
     const saved = handler(precedentsSaveRpc)({ scope: "all", subject: "commit-style", text: "Conventional commits." }) as { precedent: { id: string } };
     expect(handler(precedentsListRpc)({})).toEqual({ precedents: [saved.precedent] });
     expect((handler(precedentsEndRpc)({ id: saved.precedent.id }) as { precedent: { expiresAt: string } }).precedent.expiresAt).toBe(AT);

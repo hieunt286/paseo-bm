@@ -16,9 +16,8 @@
  *
  * Pressed again, or after a write failed between 2 and 3, the reversal's id
  * gives the same override back (opened now if it was not stored): one
- * decision, one override. Only the call that recorded the override takes the
- * class back (`demoteOnReversal`, §B.4): a `delegate` cell becomes `shadow`
- * with an `autonomy-demoted` alert; any other cell is left as it is.
+ * decision, one override. The override is only recorded (ADR-025 decision
+ * 4): no cell, class or level changes.
  *
  * Override answers and sends nothing. The delegated answer, already
  * delivered, is not recalled; once the owner answers the override
@@ -28,16 +27,30 @@
 import { randomUUID } from "node:crypto";
 import { DashboardError, type DecisionsOverrideInput, type DecisionsOverrideOutput } from "../shared/contracts";
 import { overrideDecisionOf, overrideIdOf, overrideRefusalOf } from "../shared/decision-override";
+import { challengerOf } from "../shared/autonomy";
 import { OVERRIDE_ID_PREFIX, ownerViewOfDecision, recordReversal, type Decision } from "../shared/decisions";
-import { demoteOnReversal } from "./autonomy-rpc";
+import { currentPolicy } from "./autonomy-store";
 import { createDecisionStore } from "./decision-store";
 import type { DecisionRpcDeps } from "./decision-rpc";
-import { READ_FAILED, coded, logOf, requireDataHome } from "./rpc-kit";
+import { READ_FAILED, coded, dataHome, logOf, requireDataHome } from "./rpc-kit";
 
 export type DecisionOverrideDeps = DecisionRpcDeps & {
   /** The part after `r:` of a new override's id; `randomUUID` by default. */
   newId?: () => string;
 };
+
+/**
+ * The owner's view of decisions (§B.3, ADR-025 change-014 outcome 2): an
+ * unsettled decision keeps the Orchestrator's prediction, shown as its
+ * proposal, when its project's prediction switch is on (a level of 1 or more),
+ * and comes without it otherwise. The policy is read once per call; one that
+ * cannot be read reads as every switch off (the prediction left out).
+ */
+export function ownerViewsOf(deps: DecisionRpcDeps): (decision: Decision) => Decision {
+  const home = dataHome(deps);
+  const policy = home === null ? null : currentPolicy(home, (reason) => logOf(deps)(`[paseo-bm] could not read the autonomy policy; no proposal is shown: ${reason}`));
+  return (decision) => ownerViewOfDecision(decision, policy !== null && challengerOf(policy, decision.workspaceId));
+}
 
 interface Overridden {
   decision: Decision;
@@ -70,7 +83,5 @@ export function handleDecisionsOverride(input: DecisionsOverrideInput, deps: Dec
     const opened = store.open(overrideDecisionOf(reversed.decision, { id, at }));
     return { decision: opened.decision, overridden: reversed.decision, created: true };
   });
-  // §B.4: the owner's override of an answer made for them takes its delegated class back at once.
-  if (result.created) demoteOnReversal(result.overridden, "overridden", { home, now: () => now, log });
-  return { decision: ownerViewOfDecision(result.decision), overridden: result.overridden, created: result.created };
+  return { decision: ownerViewsOf(deps)(result.decision), overridden: result.overridden, created: result.created };
 }

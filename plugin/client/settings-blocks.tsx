@@ -37,6 +37,7 @@ import {
   type RolesSettings,
   type SetupStatus,
 } from "../shared/contracts";
+import { RADIUS } from "./styles";
 import { toneColor, type Badge } from "./tone";
 import { errorMessageOf } from "./errors";
 import {
@@ -140,7 +141,7 @@ export function CommandLine({ label, command, styles, theme }: { label: string; 
       <Text style={styles.body}>{label}</Text>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
         <Text
-          style={[styles.mono, { flex: 1, backgroundColor: theme.colors.surface0, padding: 6, borderRadius: 6 }]}
+          style={[styles.mono, { flex: 1, backgroundColor: theme.colors.surface0, padding: 6, borderRadius: RADIUS }]}
           selectable
         >
           {command}
@@ -164,7 +165,7 @@ export function RunResultView({ result, styles, theme }: { result: RunResult; st
     <View style={{ gap: 2 }}>
       <ToneText tone={result.tone} styles={styles} theme={theme}>{result.text}</ToneText>
       {result.tail.length === 0 ? null : (
-        <Text style={[styles.mono, { backgroundColor: theme.colors.surface0, padding: 6, borderRadius: 6 }]} selectable>
+        <Text style={[styles.mono, { backgroundColor: theme.colors.surface0, padding: 6, borderRadius: RADIUS }]} selectable>
           {result.tail.join("\n")}
         </Text>
       )}

@@ -141,7 +141,7 @@ export function reviewBudgetLine(budget: ReviewBudget): string {
 export function workerSkillsLine(missing: readonly string[]): string {
   return missing.length === 0
     ? "Worker skills: all present."
-    : `Worker skills: missing ${missing.map((name) => `\`${name}\``).join(", ")} — tell the user once, when you confirm the Worker, that it works with lower quality, and point to Beads Manager → Settings → Tools & skills.`;
+    : `Worker skills: missing ${missing.map((name) => `\`${name}\``).join(", ")} — tell the user once, when you confirm the Worker, that it works with lower quality, and point to Beads Manager → Tools & skills.`;
 }
 
 /**

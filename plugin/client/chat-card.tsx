@@ -22,9 +22,15 @@
  * cost question) shows "Precedent: <text> (saved <date>)" and **Use this
  * answer**, which taps its option or fills the own-words box with its text.
  *
- * A decision the owner's policy answered as it opened (autonomy design §B.5)
- * reads **Decided**, "decided for you by the policy · recommended option", with
- * no answer buttons and no Save as precedent (it was not the owner's answer).
+ * A decision answered for the owner on their policy (autonomy design §B.5,
+ * ADR-025) reads **Decided**, "decided for you by the Orchestrator", with no
+ * answer buttons and no Save as precedent (it was not the owner's answer).
+ *
+ * Change-014: an open decision the Orchestrator predicted shows its proposal
+ * as the primary option, its reason under the options; a Worker's question
+ * or an Orchestrator's decision offers **Ask back** (`decisions.ask`) and
+ * shows the conversation (`decisions.thread`, one query per decision,
+ * `decisionThreadQueryKey`), read again while the owner's question waits.
  *
  * A finished card reads its request's finish from `traces.list` (one query
  * per workspace, shared by the chat's finished cards; autonomy design §C.3,
@@ -37,8 +43,10 @@ import { Text, TextInput, View } from "react-native";
 import {
   chatPeersRpc,
   decisionsAnswerRpc,
+  decisionsAskRpc,
   decisionsConfirmRpc,
   decisionsGetRpc,
+  decisionsThreadRpc,
   precedentsListRpc,
   precedentsSaveRpc,
   tracesListRpc,
@@ -49,6 +57,7 @@ import type { ChatCard } from "./chat-card-parse";
 import { drawAsCard } from "./chat-card-parties";
 import { cardFrameOf, detailLinesOf, noticeLine, verificationOfRequest } from "./chat-card-frame";
 import {
+  ASK_UI_IDLE,
   DECISION_UI_IDLE,
   OWN_WORDS,
   choiceNeedsConfirmation,
@@ -56,11 +65,16 @@ import {
   decisionLookupOf,
   decisionPollMs,
   runDecisionAnswer,
+  runDecisionAsk,
   runDecisionConfirm,
+  threadPollMs,
+  type AskBackView,
+  type AskUi,
   type DecisionCardView,
   type DecisionChoice,
   type DecisionUi,
 } from "./chat-card-decision";
+import { askableKindOf } from "../shared/decision-threads";
 import {
   PRECEDENT_UI_IDLE,
   precedentFormOf,
@@ -73,7 +87,7 @@ import {
   type PrecedentUi,
 } from "./chat-card-precedent";
 import { fallbackMarkdown, markdownOf } from "./chat-card-markdown";
-import { dashboardStyles } from "./styles";
+import { RADIUS, dashboardStyles } from "./styles";
 import { MarkdownView } from "./markdown-view";
 import { PRECEDENTS_QUERY_KEY } from "./settings-autonomy-model";
 import { Button, CardFrame, CompactLine, ConfirmBlock, ToneText, type Styles, type Theme } from "./ui";
@@ -90,6 +104,9 @@ export const finishesQueryKey = (workspaceId: string) => ["paseo-bm", "chat-card
 
 /** One decision's state, shared by every card that shows it (the chats and the Inbox). */
 export const decisionQueryKey = (id: string) => ["paseo-bm", "decision", id] as const;
+
+/** One decision's Ask back thread, shared the same way (under the decision's key, so invalidating the decision reads it again too). */
+export const decisionThreadQueryKey = (id: string) => ["paseo-bm", "decision", id, "thread"] as const;
 
 export function ChatCardView(props: PluginTimelineItemProps<ChatCard>) {
   switch (props.item.data.type) {
@@ -248,6 +265,8 @@ export function DecisionCard({
   const confirmChat = useRpc(decisionsConfirmRpc);
   const savePrecedent = useRpc(precedentsSaveRpc);
   const listPrecedents = useRpc(precedentsListRpc);
+  const askBack = useRpc(decisionsAskRpc);
+  const readThread = useRpc(decisionsThreadRpc);
   const query = useQuery({
     queryKey: decisionQueryKey(id),
     queryFn: () => getDecision({ id }),
@@ -265,9 +284,19 @@ export function DecisionCard({
   const [ui, setUi] = useState<DecisionUi>(DECISION_UI_IDLE);
   const [precedentUi, setPrecedentUi] = useState<PrecedentUi>(PRECEDENT_UI_IDLE);
   const [details, setDetails] = useState(false);
+  const [askUi, setAskUi] = useState<AskUi>(ASK_UI_IDLE);
   const lookup = decisionLookupOf({ data: query.data, error: query.error });
-  const view = decisionCardView({ card, lookup, agents, ui, cardAt: at, now: new Date() });
   const decision = lookup.state === "found" ? lookup.decision : null;
+  // Change-014 outcome 3: only a Worker's question or an Orchestrator's decision has a thread; read again while the owner's question waits.
+  const thread = useQuery({
+    queryKey: decisionThreadQueryKey(id),
+    queryFn: () => readThread({ id }),
+    enabled: decision !== null && askableKindOf(id) !== null,
+    retry: false,
+    staleTime: Number.POSITIVE_INFINITY,
+    refetchInterval: (current: { state: { data?: { thread: Parameters<typeof threadPollMs>[1] } } }) => threadPollMs(decision, current.state.data?.thread),
+  });
+  const view = decisionCardView({ card, lookup, agents, ui, cardAt: at, now: new Date(), thread: thread.data?.thread ?? null, ask: askUi });
   const precedent = precedentOfferView(decision, precedentUi);
   // Autonomy design §B.6: an open decision's card suggests the owner's precedent on its subject, read per project.
   const workspaceId = decision?.workspaceId ?? "";
@@ -333,6 +362,20 @@ export function DecisionCard({
     else setUi({ ...ui, words: choice.words, error: null });
   };
 
+  const sendAsk = async () => {
+    const text = askUi.text ?? "";
+    setAskUi({ ...askUi, busy: true, error: null });
+    const result = await runDecisionAsk({ id, text, ask: askBack });
+    if (!result.ok) {
+      setAskUi({ ...askUi, busy: false, error: result.reason });
+      // Refused because it settled meanwhile: show where it is now.
+      void queryClient.invalidateQueries({ queryKey: decisionQueryKey(id) });
+      return;
+    }
+    queryClient.setQueryData(decisionThreadQueryKey(id), { thread: result.thread });
+    setAskUi({ ...ASK_UI_IDLE, delivery: result.delivery });
+  };
+
   const closeInChat = async (answered: boolean) => {
     setUi({ ...ui, busy: true, error: null });
     const result = await runDecisionConfirm({ id, answered, confirm: confirmChat });
@@ -358,6 +401,13 @@ export function DecisionCard({
       onCancel={() => setUi({ ...DECISION_UI_IDLE })}
       onConfirm={confirmed}
       onCloseInChat={(answered) => void closeInChat(answered)}
+      askText={askUi.text ?? ""}
+      onAsk={{
+        open: () => setAskUi({ ...askUi, text: "", error: null }),
+        text: (text) => setAskUi({ ...askUi, text }),
+        cancel: () => setAskUi({ ...ASK_UI_IDLE, delivery: askUi.delivery }),
+        send: () => void sendAsk(),
+      }}
       suggestion={suggestion}
       onUseSuggestion={pickSuggestion}
       precedent={precedent}
@@ -379,6 +429,78 @@ export function DecisionCard({
       theme={theme}
       compact={compact}
     />
+  );
+}
+
+/** What the owner does with Ask back: open the box, write, cancel, send. */
+export interface AskHandlers {
+  open: () => void;
+  text: (text: string) => void;
+  cancel: () => void;
+  send: () => void;
+}
+
+/** A text box on a card: square, one border, colours from the theme. */
+function boxStyle(styles: Styles, theme: Theme) {
+  return [styles.mono, { minHeight: 56, borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS, padding: 8 }];
+}
+
+/**
+ * The conversation of an asked-back decision (oldest first, "You" and the
+ * asker), the open box with Cancel first, and the line under them: not
+ * delivered, waiting for the asker, or what the last Send could not do.
+ * Hook-free. The Ask back button itself sits beside Own words….
+ */
+export function AskBackBlock({ view, text, on, styles, theme }: { view: AskBackView; text: string; on: AskHandlers; styles: Styles; theme: Theme }) {
+  const box = view.box;
+  if (view.conversation.length === 0 && box === null && view.status === null) return null;
+  return (
+    <View style={{ gap: 6 }}>
+      {view.conversation.length === 0 ? null : (
+        <View style={{ gap: 4 }}>
+          <Text style={styles.sectionLabel}>Conversation</Text>
+          {view.conversation.map((entry) => (
+            <View key={entry.key} style={{ flexDirection: "row", gap: 8 }}>
+              <Text style={[styles.body, { minWidth: 72 }]}>{entry.who}</Text>
+              <Text style={[styles.body, { flex: 1, color: theme.colors.foreground }]} selectable>
+                {entry.text}
+              </Text>
+            </View>
+          ))}
+        </View>
+      )}
+      {box === null ? null : (
+        <View style={{ gap: 6 }}>
+          <TextInput
+            value={text}
+            onChangeText={on.text}
+            editable={!box.busy}
+            multiline
+            accessibilityLabel={box.label}
+            placeholder={box.placeholder}
+            placeholderTextColor={theme.colors.foregroundMuted}
+            style={boxStyle(styles, theme)}
+          />
+          <View style={styles.chipRow}>
+            {box.busy ? null : <Button label="Cancel" kind="secondary" accessibilityLabel="Cancel the question" onPress={on.cancel} styles={styles} />}
+            <Button
+              label={box.busy ? "Sending…" : "Send"}
+              kind="primary"
+              accessibilityLabel={`Send your question to ${box.label.replace(/^Ask /, "")}`}
+              accessibilityState={{ disabled: !box.sendEnabled }}
+              disabled={!box.sendEnabled}
+              onPress={on.send}
+              styles={styles}
+            />
+          </View>
+        </View>
+      )}
+      {view.status === null ? null : (
+        <ToneText tone={view.status.tone} accessibilityLiveRegion="polite" styles={styles} theme={theme}>
+          {view.status.text}
+        </ToneText>
+      )}
+    </View>
   );
 }
 
@@ -417,7 +539,7 @@ export function PrecedentOffer({ view, on, styles, theme }: { view: PrecedentOff
             accessibilityLabel={form.textLabel}
             placeholder="The answer to keep"
             placeholderTextColor={theme.colors.foregroundMuted}
-            style={[styles.mono, { minHeight: 56, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 8, padding: 8 }]}
+            style={boxStyle(styles, theme)}
           />
           {form.textHint === null ? null : <ToneText tone="muted" style={{ fontSize: 11 }} styles={styles} theme={theme}>{form.textHint}</ToneText>}
           <View accessibilityRole="radiogroup" style={styles.chipRow}>
@@ -494,6 +616,8 @@ export function DecisionCardBody({
   onCancel,
   onConfirm,
   onCloseInChat,
+  onAsk,
+  askText = "",
   suggestion = null,
   onUseSuggestion,
   precedent = null,
@@ -514,6 +638,10 @@ export function DecisionCardBody({
   onCancel: () => void;
   onConfirm: () => void;
   onCloseInChat: (answered: boolean) => void;
+  /** Ask back's handlers; without them the card draws no Ask back. */
+  onAsk?: AskHandlers;
+  /** The text in the Ask back box. */
+  askText?: string;
   /** The owner's precedent on an open decision's subject (`precedentSuggestionView`); null or absent when none. */
   suggestion?: PrecedentSuggestionView | null;
   onUseSuggestion?: (choice: DecisionChoice) => void;
@@ -583,10 +711,26 @@ export function DecisionCardBody({
       </View>,
     );
   }
+  if (view.proposal !== null) {
+    actions.push(
+      <ToneText key="proposal" tone="muted" style={{ fontSize: 12 }} numberOfLines={1} styles={styles} theme={theme}>
+        {view.proposal}
+      </ToneText>,
+    );
+  }
+  const ask = onAsk === undefined ? null : view.askBack;
+  if (ask !== null && onAsk !== undefined) {
+    actions.push(<AskBackBlock key="ask" view={ask} text={askText} on={onAsk} styles={styles} theme={theme} />);
+  }
+  const askButton =
+    ask === null || onAsk === undefined || !ask.offered ? null : (
+      <Button key="ask-back" label="Ask back" kind="secondary" accessibilityLabel={ask.accessibilityLabel} onPress={onAsk.open} styles={styles} />
+    );
   if (view.ownWords && view.confirm === null) {
     actions.push(
       ui.words === null ? (
         <View key="words" style={styles.chipRow}>
+          {askButton}
           <Button
             label="Own words…"
             kind="secondary"
@@ -607,7 +751,7 @@ export function DecisionCardBody({
             accessibilityLabel="Your answer in your own words"
             placeholder="Your answer"
             placeholderTextColor={theme.colors.foregroundMuted}
-            style={[styles.mono, { minHeight: 56, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 8, padding: 8 }]}
+            style={boxStyle(styles, theme)}
           />
           <View style={styles.chipRow}>
             <Button label="Cancel" kind="secondary" accessibilityLabel="Cancel" onPress={onCancel} styles={styles} />
@@ -623,6 +767,12 @@ export function DecisionCardBody({
           </View>
         </View>
       ),
+    );
+  } else if (askButton !== null) {
+    actions.push(
+      <View key="words" style={styles.chipRow}>
+        {askButton}
+      </View>,
     );
   }
   if (view.confirmChat) {

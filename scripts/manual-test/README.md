@@ -191,15 +191,15 @@ Expected: `paseo logs` shows your question, then tool calls `[mcp__paseo-bm__bm_
 
 ### 5.3 Delegated classes: the Orchestrator decides the Worker's question and moves the finished request on by itself
 
-Delegate every class that can be delegated — all but release, data, security and cost — for the demo project, as the evaluation suite does (one `autonomy.set` per class, what Settings → Autonomy calls):
+Delegate Cruise's five classes — reversible-technical, preference, scope, environment, dependency — for the demo project, as the evaluation suite does (one `autonomy.set` per class; Settings → Autonomy sets the same five, with the predictions switch, as the level **Cruise**: `autonomy.set-level { level: 2 }`, ADR-025):
 
 ```bash
 node scripts/manual-test/rpc.mjs autonomy.set "{\"workspaceId\":\"$WS_ID\",\"class\":\"reversible-technical\",\"mode\":\"delegate\"}"                     # E_AUTONOMY_NOT_CONFIRMED, nothing saved
-node scripts/manual-test/rpc.mjs autonomy.set "{\"workspaceId\":\"$WS_ID\",\"class\":\"release\",\"mode\":\"delegate\",\"confirmed\":true}"             # E_AUTONOMY_OWNER_ONLY: release, data, security and cost stay yours
+node scripts/manual-test/rpc.mjs autonomy.set-level "{\"workspaceId\":\"$WS_ID\",\"level\":3}"                                          # E_AUTONOMY_NOT_CONFIRMED: Turbo (cost, release, data) needs the confirmation; nothing saved
 for C in reversible-technical preference scope environment dependency; do
-  node scripts/manual-test/rpc.mjs autonomy.set "{\"workspaceId\":\"$WS_ID\",\"class\":\"$C\",\"mode\":\"delegate\",\"confirmed\":true,\"predictor\":\"orchestrator\"}" > /dev/null || break
+  node scripts/manual-test/rpc.mjs autonomy.set "{\"workspaceId\":\"$WS_ID\",\"class\":\"$C\",\"mode\":\"delegate\",\"confirmed\":true}" > /dev/null || break
 done
-node scripts/manual-test/rpc.mjs autonomy.policy "{\"workspaceId\":\"$WS_ID\"}"    # projects.<WS_ID>: five cells { mode: "delegate", predictor: "orchestrator", at }
+node scripts/manual-test/rpc.mjs autonomy.policy "{\"workspaceId\":\"$WS_ID\"}"    # projects.<WS_ID>: five cells { mode: "delegate", at }; levels.<WS_ID>: 2 (Cruise) when the prediction switch is on, else "custom"
 cat "$PASEO_BM_HOME/autonomy/policy.json"                                           # version 1, the same five cells
 ```
 
@@ -223,7 +223,7 @@ cat "$PASEO_BM_HOME/orchestrator/proposals.json"
 ```
 Expected (rewritten for Phase 2; not yet re-run on a daemon — the Phase 2 live check runs it):
 - `prompts.mjs "$ORCH" BM-EVENTS` → one message per idle moment of the Orchestrator (autonomy design §A.8): first a `BM-EVENTS` message with a `- decision.opened — project <WS_ID>, request req-…, decision q:req-…:Q1, asked by Worker <worker>. A decision is asked: the owner's policy delegates its class to you. Read it with bm_decisions and choose the option the owner would, with bm_decide and your reason in one line.` line, later one with `- request.finished — project <WS_ID>, request req-…, Manager <MGR>, at <time>. Check it with bm_request.`; each line names ids only, the Orchestrator reads the rest with its tools (delegating a class sends nothing by itself);
-- on the question, the Orchestrator reads it with `bm_decisions` and decides it with `[mcp__paseo-bm__bm_decide]`, once, with a one-line reason (autonomy design §B.5; bead `t9lm.11`): `decisions.list` shows Q1 `answered` with `answer.by: "policy"`, `predictor: "orchestrator"`, the class and its reason, and `orchestrator/interventions.json` an `answer` entry; a command carrying the answer would be refused; nothing reaches the Manager for Q1. The plugin delivers the answer to the Worker exactly as yours (`BM-DELIVERY answers`, `Continue req-….` and a `BM-ANSWERS` block), and the Worker adds the function, creates the bead and reports `finished` with the bead under `beadsReady`. A question the Worker classes as release, data, security or cost wakes nobody and waits for you;
+- on the question, the Orchestrator reads it with `bm_decisions` and decides it with `[mcp__paseo-bm__bm_decide]`, once, with a one-line reason (autonomy design §B.5; bead `t9lm.11`): `decisions.list` shows Q1 `answered` with `answer.by: "policy"` (no `predictor` since ADR-025), the class and its reason, and `orchestrator/interventions.json` an `answer` entry; a command carrying the answer would be refused; nothing reaches the Manager for Q1. The plugin delivers the answer to the Worker exactly as yours (`BM-DELIVERY answers`, `Continue req-….` and a `BM-ANSWERS` block), and the Worker adds the function, creates the bead and reports `finished` with the bead under `beadsReady`. A question the Worker classes as release, data, security or cost is not delegated here and waits for you (ADR-025: only Turbo and Full auto delegate those);
 - `request.finished` comes only because that report shows work left and the project has a delegated class. The Orchestrator reads it with `bm_request` and calls `[mcp__paseo-bm__bm_send_command]` once to get the ready bead done — a command declaring no effect is reversible-technical, which you delegated — then tells you in one line what it sent;
 - `prompts.mjs "$MGR"` shows that command with `fromApp: true` as a `BM-COMMAND` block (`from: orchestrator`, `via: chat`, `to: manager`, `authority: policy:reversible-technical`, `approved: none`, `limits: no-commit-push-deploy, no-real-data`);
 - `orchestrator.state`: `projects.0` has no `autopilot` and no `allow` field, and `lastAction: { source: "chat", text: <the command's first line> }`; `orchestrator/proposals.json` has that command as its one entry, `source "chat"`, `status "sent"`, `sentText` the whole block; `inbox.alerts` has no `request-stalled` alert;
@@ -295,7 +295,7 @@ Delegate the classes again (5.4 reset them), and tell the Orchestrator — as th
 ```bash
 (cd "$BM_TEST_WORK/demo" && git remote -v | wc -l)   # 0: no remote
 for C in reversible-technical preference scope environment dependency; do
-  node scripts/manual-test/rpc.mjs autonomy.set "{\"workspaceId\":\"$WS_ID\",\"class\":\"$C\",\"mode\":\"delegate\",\"confirmed\":true,\"predictor\":\"orchestrator\"}" > /dev/null || break
+  node scripts/manual-test/rpc.mjs autonomy.set "{\"workspaceId\":\"$WS_ID\",\"class\":\"$C\",\"mode\":\"delegate\",\"confirmed\":true}" > /dev/null || break
 done
 node scripts/manual-test/rpc.mjs autonomy.policy "{\"workspaceId\":\"$WS_ID\"}"    # the five cells delegate again
 node scripts/manual-test/send.mjs "$ORCH" "Standing instruction for the demo project: whenever a running Worker there raises any worker signal, tell that Worker directly (bm_direct_worker) to stop what it is doing and report, even if I asked for the command myself; interrupt it when the plugin allows. Keep this as a note."
@@ -341,7 +341,7 @@ paseo logs "$ORCH" | tail -15
 ```
 Expected: `[mcp__paseo-bm__bm_repo] {"workspaceId":…,"action":"status"}` and an answer that matches `git status`; the plugin log has `bm_repo answered for the orchestrator`; `unchanged`.
 
-(d) The project's facts that Work's rows read:
+(d) The project's facts that the Projects rows read:
 
 ```bash
 node scripts/manual-test/rpc.mjs orchestrator.state | node scripts/manual-test/json.mjs projects.0

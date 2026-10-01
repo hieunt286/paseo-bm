@@ -6,7 +6,7 @@
  *
  * This module is `shared/`: no Node and no React Native imports.
  */
-import { decisionKindOf } from "../decisions";
+import { decisionKindOf, policyPredictorOf } from "../decisions";
 import { INTERVENTION_KINDS, a12ShareOf, interventionEntrySchema, type InterventionKind } from "../interventions";
 import { stallEntrySchema, type WakeEntry } from "../orchestrator";
 import { compareText, ratio, within, workspaceOfStallKey, type Bounds } from "./helpers";
@@ -40,12 +40,12 @@ function orchestratorActionsOf(stores: EvalStores, notes: readonly EvalNote[] | 
     if (at !== null && decisionKindOf(decision.id) === "orchestrator") actions.push({ workspaceId: decision.workspaceId, at });
     // A decision the Orchestrator answered: its action at the answer's time — Phase 1's Worker question
     // (`by: orchestrator`, change-004), or one it decided on the owner's policy (`bm_decide`: `by: policy`,
-    // predictor `orchestrator`, a `q:` or an `f:`, autonomy design §B.5, §B.9).
+    // `policyPredictorOf` the Orchestrator, a `q:` or an `f:`, autonomy design §B.5, §B.9).
     const answer = decision.answer;
     const byOrchestrator =
       answer !== null &&
       ((decisionKindOf(decision.id) === "question" && answer.by === "orchestrator") ||
-        (decisionKindOf(decision.id) !== "orchestrator" && answer.by === "policy" && answer.predictor === "orchestrator"));
+        (decisionKindOf(decision.id) !== "orchestrator" && policyPredictorOf(decision) === "orchestrator"));
     const answeredAt = byOrchestrator ? timeOrNull(answer.at) : null;
     if (answeredAt !== null) actions.push({ workspaceId: decision.workspaceId, at: answeredAt });
     // The challenger's prediction (autonomy design §B.3, §B.9): its wake's action at the prediction's time.

@@ -24,7 +24,10 @@ import { ORCHESTRATOR_FIRST_PROMPT, ORCHESTRATOR_FIRST_PROMPT_START, isOwnerWord
 import { createOrchestratorStore } from "../plugin/server/orchestrator-store";
 import { createAlertStore } from "../plugin/server/alert-store";
 import { createAutonomyStore } from "../plugin/server/autonomy-store";
-import { EMPTY_AUTONOMY_POLICY, canDelegate, decideRefusalOf, predictionRefusalOf, type AutonomyPolicy } from "../plugin/shared/autonomy";
+import { EMPTY_AUTONOMY_POLICY, LEVELS, decideRefusalOf, predictionRefusalOf, type AutonomyPolicy } from "../plugin/shared/autonomy";
+
+/** Cruise's classes (level 2, ADR-025), riskiest first: every class but release, data, security and cost. */
+const CRUISE = DECISION_CLASSES.filter((decisionClass) => LEVELS[2]!.delegated.includes(decisionClass));
 import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
 import { handleDecisionsAnswer, handleDecisionsGet, handleDecisionsList, settledByKind } from "../plugin/server/decision-rpc";
 import { DECISION_UI_IDLE, decisionCardView } from "../plugin/client/chat-card-decision";
@@ -152,7 +155,7 @@ function jsonOf(result: ServerToolResult): Record<string, unknown> {
  */
 function delegateAll(workspaceId = WORKSPACE_ID): void {
   const autonomy = createAutonomyStore(home);
-  for (const decisionClass of DECISION_CLASSES.filter(canDelegate)) autonomy.set({ workspaceId, class: decisionClass, mode: "delegate", confirmed: true }, NOW.toISOString());
+  for (const decisionClass of CRUISE) autonomy.set({ workspaceId, class: decisionClass, mode: "delegate", confirmed: true }, NOW.toISOString());
 }
 
 /** A `settings.json` as an earlier build left it: Autopilot on for the project, Allow… every category. Nothing reads it any more (autonomy design §B.8). */
@@ -528,7 +531,7 @@ describe("bounded reads by default (autonomy design §A.9)", () => {
 });
 
 describe("the tool set", () => {
-  it("lists the fifteen tools in order, and answers an unknown name without running anything", async () => {
+  it("lists the sixteen tools in order (bm_reply last, change-014), and answers an unknown name without running anything", async () => {
     const { paseo } = daemonWith([]);
     const tools = toolsWith(paseo);
     expect(tools.faces.map((face) => face.name)).toEqual([
@@ -547,6 +550,7 @@ describe("the tool set", () => {
       "bm_compact",
       "bm_handoff",
       "bm_why",
+      "bm_reply",
     ]);
     expect(tools.has("bm_report")).toBe(false);
     expect(await tools.call("bm_report", {})).toEqual({ ok: false, text: "Unknown tool: bm_report" });
@@ -827,7 +831,7 @@ describe("bm_send_command (design §6A, ADR-015)", () => {
     });
   });
 
-  it("the policy and the owner's word in the chat never cover push, publish, deploy, real data, migration, security or cost: refused, sends nothing", async () => {
+  it("at Cruise the policy and the owner's word in the chat never cover push, publish, deploy, real data, migration, security or cost: refused, sends nothing", async () => {
     expect(CONFIRM_EFFECTS).toEqual(["push", "publish", "deploy", "real-data", "migration", "security", "cost"]);
     for (const timeline of [OWNER_JUST_SPOKE, null]) {
       if (timeline === null) delegateAll();
@@ -967,7 +971,7 @@ describe("bm_send_command (design §6A, ADR-015)", () => {
     /** One cell of the project's policy, set as the owner's `autonomy.set` sets it. */
     const setCell = (decisionClass: DecisionClass, mode: "owner" | "shadow" | "delegate", workspaceId = WORKSPACE_ID) =>
       createAutonomyStore(home).set({ workspaceId, class: decisionClass, mode, confirmed: true }, NOW.toISOString());
-    const DELEGABLE = DECISION_CLASSES.filter(canDelegate);
+    const DELEGABLE = CRUISE;
     const sentBlocks = (enqueue: ReturnType<typeof sendingTools>["enqueue"]) => enqueue.mock.calls.map((call) => parseCommandBlock(call[2])!);
 
     it("maps the declared effects to their classes, none and commit counting as reversible-technical, riskiest first", () => {
@@ -1022,29 +1026,27 @@ describe("bm_send_command (design §6A, ADR-015)", () => {
       expect(sentBlocks(enqueue).map((block) => block.authority)).toEqual(["policy:dependency", "policy:dependency"]);
     });
 
-    it("a hard-owner effect is refused without a grant even when every delegable class is delegate — and a file claiming release delegated changes nothing", async () => {
-      // Written by hand: autonomy.set refuses delegate for release, data, security and cost, and the reader skips such a cell.
-      const cells = Object.fromEntries(
-        DECISION_CLASSES.map((decisionClass) => [decisionClass, { mode: "delegate", predictor: "recommended", at: NOW.toISOString() }]),
-      );
-      mkdirSync(join(home, "autonomy"), { recursive: true });
-      writeFileSync(join(home, "autonomy", "policy.json"), JSON.stringify({ version: 1, projects: { [WORKSPACE_ID]: cells }, challenger: {} }));
-      const { tools, enqueue } = sendingTools(OWNER_JUST_SPOKE);
+    it("a release, data, security or cost effect goes on the policy where its class is delegated (Full auto, ADR-025); the owner's word alone never covers one", async () => {
+      // Cruise: the owner's word in the chat does not cover a confirmation effect.
+      for (const decisionClass of DELEGABLE) setCell(decisionClass, "delegate");
+      const spoken = sendingTools(OWNER_JUST_SPOKE);
       for (const effect of CONFIRM_EFFECTS) {
-        expect(await tools.call("bm_send_command", { ...command, intent: "release", effects: [effect], command: "Go on." }), effect).toEqual({
+        expect(await spoken.tools.call("bm_send_command", { ...command, intent: "release", effects: [effect], command: "Go on." }), effect).toEqual({
           ok: false,
           text: `Refused: ${needsDecisionMessageOf([effect])}.`,
         });
       }
-      expect(await tools.call("bm_send_command", { ...command, intent: "release", effects: ["commit", "push"], command: "Commit and push the fix." })).toEqual({
-        ok: false,
-        text: `Refused: ${needsDecisionMessageOf(["push"])}.`,
-      });
-      expect(enqueue).not.toHaveBeenCalled();
-      // The delegable classes of that file still authorise what they cover.
-      expect(jsonOf(await tools.call("bm_send_command", { ...command, effects: ["network", "commit"], command: "Fetch the schema, then commit it." }))).toMatchObject({
-        authority: "policy:environment",
-      });
+      expect(spoken.enqueue).not.toHaveBeenCalled();
+      // Full auto: every class delegated, each effect goes on the policy of its class.
+      for (const decisionClass of DECISION_CLASSES) setCell(decisionClass, "delegate");
+      const { tools, enqueue } = sendingTools(null);
+      const classOf = { push: "release", publish: "release", deploy: "release", "real-data": "data", migration: "data", security: "security", cost: "cost" } as const;
+      for (const [index, effect] of CONFIRM_EFFECTS.entries()) {
+        const sent = await tools.call("bm_send_command", { ...command, requestId: `req-20260926T1001${String(index).padStart(2, "0")}Z`, intent: "release", effects: [effect], command: "Go on." });
+        expect(sent.ok, `${effect}: ${sent.text}`).toBe(true);
+        expect(jsonOf(sent), effect).toMatchObject({ authority: `policy:${classOf[effect as keyof typeof classOf]}`, approved: [effect] });
+      }
+      expect(sentBlocks(enqueue).map((block) => block.authority)).toEqual(CONFIRM_EFFECTS.map((effect) => `policy:${classOf[effect as keyof typeof classOf]}`));
     });
 
     it("in a project with no delegated class a command is refused without the owner's word or a grant — another project's delegation does not count", async () => {
@@ -1737,7 +1739,7 @@ describe("the loop guard counts every delivered command, whichever way it went (
     logs = [];
     deps.queue = { enqueue };
     // Reversible-technical is delegated to the recommended option: the policy answers a question that recommends one.
-    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "reversible-technical", mode: "delegate", confirmed: true, predictor: "recommended" }, NOW.toISOString());
+    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "reversible-technical", mode: "delegate", confirmed: true }, NOW.toISOString());
     // The owner's standing answer on SUBJECT: a question about it is answered by the precedent.
     createPrecedentStore(home, { newId: () => "prec-1" }).save({ scope: WORKSPACE_ID, subject: SUBJECT, text: "Commit the date fix", sourceDecisionId: null, expiresInDays: 30 }, NOW);
   });
@@ -1776,11 +1778,11 @@ describe("the loop guard counts every delivered command, whichever way it went (
   const commandsOfRequest = () => createOrchestratorStore(home).listCommands().filter((entry) => entry.requestId === REQUEST);
   const stored = (id: string) => createDecisionStore(home).get(id, WORKSPACE_ID)!;
 
-  /** Twelve commands delivered for the request: four each by the owner's choice, the policy and the precedent. */
+  /** Twelve commands delivered for the request: six each by the owner's choice and the precedent (the policy answers no o: decision, ADR-025). */
   async function twelveDelivered(setup: ReturnType<typeof setUp>) {
-    const paths = ["owner", "policy", "precedent"] as const;
+    const paths = ["owner", "precedent"] as const;
     for (let index = 0; index < COMMAND_LIMIT_PER_REQUEST; index += 1) {
-      const by = paths[index % 3]!;
+      const by = paths[index % 2]!;
       const { id } = await ask(setup.tools, by);
       if (by === "owner") {
         expect(stored(id)).toMatchObject({ status: "open" });
@@ -1791,7 +1793,7 @@ describe("the loop guard counts every delivered command, whichever way it went (
     }
   }
 
-  it("each delivered command is in the commands store once, under its own id: the owner's choice, the policy's and the precedent's", async () => {
+  it("each delivered command is in the commands store once, under its own id: the owner's choice and the precedent's", async () => {
     const setup = setUp();
     await twelveDelivered(setup);
     const commands = commandsOfRequest();
@@ -1800,7 +1802,6 @@ describe("the loop guard counts every delivered command, whichever way it went (
     expect(commands.every((entry) => entry.source === "chat" && entry.status === "sent" && entry.managerId === MANAGER && entry.command === COMMIT_BODY)).toBe(true);
     // The block each recorded is the one the Manager got.
     expect(commands.map((entry) => entry.sentText).sort()).toEqual(enqueue.mock.calls.map(([, , text]) => text).sort());
-    expect(commands.filter((entry) => entry.sentText!.includes("authority: policy:reversible-technical"))).toHaveLength(4);
     // Handed over again, a delivered decision sends and records nothing more.
     const first = createDecisionStore(home).list({ workspaceId: WORKSPACE_ID }).find((decision) => decision.answer?.by === "owner")!;
     await setup.onSettled([first], { paseo: setup.paseo });
@@ -1808,7 +1809,7 @@ describe("the loop guard counts every delivered command, whichever way it went (
     expect(commandsOfRequest()).toHaveLength(COMMAND_LIMIT_PER_REQUEST);
   });
 
-  it("negative: after 12 delivered by owner choice, policy and precedent, a 13th for the request is refused on every path the Orchestrator has, and nothing is sent", async () => {
+  it("negative: after 12 delivered by owner choice and precedent, a 13th for the request is refused on every path the Orchestrator has, and nothing is sent", async () => {
     const setup = setUp();
     await twelveDelivered(setup);
     const refusal = `Refused: ${COMMAND_LIMIT_MESSAGE}.`;
@@ -1824,14 +1825,14 @@ describe("the loop guard counts every delivered command, whichever way it went (
     const byPrecedent = await ask(setup.tools, "precedent");
     for (const asked of [byPolicy, byPrecedent]) {
       expect(asked.text).toMatch(/^Asked\. /);
-      expect(asked.text).toContain("12 commands went to this request in 24 hours: the owner answers this one, not a precedent or the policy.");
+      expect(asked.text).toContain("12 commands went to this request in 24 hours: the owner answers this one, not a precedent.");
       expect(stored(asked.id)).toMatchObject({ status: "open", answer: null, grant: null });
     }
 
     // Answered by the policy or a precedent all the same (a race with the guard): the command is not sent, the grant stays unused, and the Orchestrator is told why.
     const at = NOW.toISOString();
     const decisions = createDecisionStore(home);
-    decisions.transition(byPolicy.id, (decision) => answerDecision(decision, { by: "policy", via: "inbox", optionKey: "a", class: "reversible-technical", predictor: "recommended", at }), WORKSPACE_ID);
+    decisions.transition(byPolicy.id, (decision) => answerDecision(decision, { by: "policy", via: "inbox", optionKey: "a", class: "reversible-technical", at }), WORKSPACE_ID);
     decisions.transition(byPrecedent.id, (decision) => answerDecision(decision, { by: "precedent", via: "inbox", optionKey: "a", precedentId: "p:prec-1", class: "reversible-technical", at }), WORKSPACE_ID);
     await setup.onSettled([stored(byPolicy.id), stored(byPrecedent.id)], { paseo: setup.paseo });
     for (const id of [byPolicy.id, byPrecedent.id]) {
@@ -1901,8 +1902,8 @@ describe("bm_decide (autonomy design §B.5, §B.9; bead t9lm.11): the Orchestrat
     });
   const bytes = () => readFileSync(join(home, "decisions", `${WORKSPACE_ID}.json`), "utf8");
   const stored = (id: string) => createDecisionStore(home).get(id, WORKSPACE_ID)!;
-  const cell = (decisionClass: DecisionClass, mode: "owner" | "shadow" | "delegate", predictor: "recommended" | "orchestrator" = "orchestrator") =>
-    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: decisionClass, mode, confirmed: true, predictor }, NOW.toISOString());
+  const cell = (decisionClass: DecisionClass, mode: "owner" | "shadow" | "delegate") =>
+    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: decisionClass, mode, confirmed: true }, NOW.toISOString());
   let onSettled: ReturnType<typeof vi.fn<(decisions: Decision[], context: { paseo: unknown }) => Promise<void>>>;
   beforeEach(() => {
     onSettled = vi.fn(async () => undefined);
@@ -1916,7 +1917,7 @@ describe("bm_decide (autonomy design §B.5, §B.9; bead t9lm.11): the Orchestrat
   }
   const decide = (tools: ReturnType<typeof toolsWith>, decisionId: string, optionKey = "b", reason = REASON) => tools.call("bm_decide", { decisionId, optionKey, reason });
 
-  it("answers an open Worker question whose class the owner delegated to it: by policy, its predictor and reason, the owner's grant, handed to the owners' delivery", async () => {
+  it("answers an open Worker question whose class the owner delegated to it: by policy, its reason, the owner's grant, handed to the owners' delivery", async () => {
     cell("reversible-technical", "delegate");
     createDecisionStore(home).open(question(1));
     const { tools, sends } = decideTools();
@@ -1933,7 +1934,6 @@ describe("bm_decide (autonomy design §B.5, §B.9; bead t9lm.11): the Orchestrat
       optionKey: "b",
       class: "reversible-technical",
       answeredBy: "policy",
-      predictor: "orchestrator",
       grant: { effects: ["commit"], expiresAt, usedAt: null },
       delivery: null,
     });
@@ -1941,7 +1941,7 @@ describe("bm_decide (autonomy design §B.5, §B.9; bead t9lm.11): the Orchestrat
     expect(answered).toMatchObject({
       status: "answered",
       settledAt: NOW.toISOString(),
-      answer: { by: "policy", via: "inbox", optionKey: "b", words: null, at: NOW.toISOString(), class: "reversible-technical", predictor: "orchestrator", reason: "Kept short, as the owner asked before." },
+      answer: { by: "policy", via: "inbox", optionKey: "b", words: null, at: NOW.toISOString(), class: "reversible-technical", reason: "Kept short, as the owner asked before." },
       grant: { effects: ["commit"], expiresAt, usedAt: null },
     });
     // The delivery the owner's answers take, once; the tool itself sends nothing and records no command.
@@ -1964,19 +1964,19 @@ describe("bm_decide (autonomy design §B.5, §B.9; bead t9lm.11): the Orchestrat
     expect(result.text.split("\n")[0]).toBe(
       `Decided fallback incident ${FID} for the owner with option a (Wait for the reset), on the owner's policy: environment is delegated to you in this project. The owner sees your choice and your reason on the decision. The plugin runs the option's action as it runs the owner's choice. Send nothing more for it. Tell the owner in one line what you chose and why.`,
     );
-    expect(stored(FID)).toMatchObject({ status: "answered", answer: { by: "policy", optionKey: "a", class: "environment", predictor: "orchestrator" }, grant: null });
+    expect(stored(FID)).toMatchObject({ status: "answered", answer: { by: "policy", optionKey: "a", class: "environment" }, grant: null });
+    expect(stored(FID).answer).not.toHaveProperty("predictor");
     expect(onSettled).toHaveBeenCalledTimes(1);
   });
 
-  it("is refused for an owner or shadow cell and for a cell of the recommended predictor, writing, delivering and logging nothing", async () => {
+  it("is refused for an owner or shadow cell, writing, delivering and logging nothing; a stored recommended cell reads as the Orchestrator's", async () => {
     createDecisionStore(home).open(question(1));
     const { tools, sends } = decideTools();
     const setups: Array<[string, () => void, string]> = [
       ["owner (no cell)", () => {}, `reversible-technical is not delegated to you in project ${WORKSPACE_ID}; the owner decides it, so leave it to the owner`],
       ["owner (set)", () => cell("reversible-technical", "owner"), `reversible-technical is not delegated to you in project ${WORKSPACE_ID}; the owner decides it, so leave it to the owner`],
       ["shadow", () => cell("reversible-technical", "shadow"), `reversible-technical is not delegated to you in project ${WORKSPACE_ID}; the owner decides it, so leave it to the owner`],
-      ["the recommended predictor", () => cell("reversible-technical", "delegate", "recommended"), `reversible-technical is delegated to the recommended option in project ${WORKSPACE_ID}, not to you; leave it to the owner`],
-      ["another project only", () => createAutonomyStore(home).set({ workspaceId: OTHER_WORKSPACE, class: "reversible-technical", mode: "delegate", confirmed: true, predictor: "orchestrator" }, NOW.toISOString()), `reversible-technical is not delegated to you in project ${WORKSPACE_ID}; the owner decides it, so leave it to the owner`],
+      ["another project only", () => createAutonomyStore(home).set({ workspaceId: OTHER_WORKSPACE, class: "reversible-technical", mode: "delegate", confirmed: true }, NOW.toISOString()), `reversible-technical is not delegated to you in project ${WORKSPACE_ID}; the owner decides it, so leave it to the owner`],
     ];
     const before = bytes();
     for (const [name, setUp, message] of setups) {
@@ -1989,18 +1989,16 @@ describe("bm_decide (autonomy design §B.5, §B.9; bead t9lm.11): the Orchestrat
     expect(onSettled).not.toHaveBeenCalled();
     expect(sends).toEqual([]);
     expect(existsSync(join(home, "orchestrator", "interventions.json"))).toBe(false);
-  });
-
-  it("is refused for release, data, security and cost — by an option's effect or the proposed class — even with a hand-written file delegating them", async () => {
-    mkdirSync(join(home, "autonomy"), { recursive: true });
+    // A cell an older build stored with the recommended predictor is the Orchestrator's to decide now (ADR-025).
     writeFileSync(
       join(home, "autonomy", "policy.json"),
-      JSON.stringify({
-        version: 1,
-        projects: { [WORKSPACE_ID]: Object.fromEntries([...DECISION_CLASSES].map((c) => [c, { mode: "delegate", predictor: "orchestrator", at: NOW.toISOString() }])) },
-        challenger: {},
-      }),
+      JSON.stringify({ version: 1, projects: { [WORKSPACE_ID]: { "reversible-technical": { mode: "delegate", predictor: "recommended", at: NOW.toISOString() } } }, challenger: {} }),
     );
+    expect((await decide(tools, QID(1))).ok).toBe(true);
+  });
+
+  it("decides release, data, security and cost — by an option's effect or the proposed class — where they are delegated (Full auto, ADR-025), granting the option's effects", async () => {
+    for (const decisionClass of DECISION_CLASSES) cell(decisionClass, "delegate");
     const store = createDecisionStore(home);
     const cases: Array<[number, Effect[], Partial<Decision>, string]> = [
       [1, ["push"], {}, "release"],
@@ -2012,17 +2010,17 @@ describe("bm_decide (autonomy design §B.5, §B.9; bead t9lm.11): the Orchestrat
     ];
     for (const [n, effects, overrides] of cases) store.open(question(n, effects, overrides));
     const { tools } = decideTools();
-    const before = bytes();
-    for (const [n, , , decisionClass] of cases) {
-      for (const optionKey of ["a", "b"]) {
-        expect(await decide(tools, QID(n), optionKey), `Q${n} ${optionKey}`).toEqual({
-          ok: false,
-          text: `Refused: decision ${QID(n)} is of the class ${decisionClass}, which is always the owner's; leave it to the owner.`,
-        });
-      }
+    for (const [n, effects, , decisionClass] of cases) {
+      const result = await decide(tools, QID(n), "b");
+      expect(result.ok, `Q${n}: ${result.text}`).toBe(true);
+      const granted = effects.filter((effect) => effect !== "none");
+      expect(stored(QID(n)), `Q${n}`).toMatchObject({ status: "answered", answer: { by: "policy", optionKey: "b", class: decisionClass }, grant: granted.length === 0 ? null : { effects: granted } });
     }
-    expect(bytes()).toBe(before);
-    expect(onSettled).not.toHaveBeenCalled();
+    expect(onSettled).toHaveBeenCalledTimes(cases.length);
+    // At Cruise the same release question is not the Orchestrator's.
+    createAutonomyStore(home).setLevel({ workspaceId: WORKSPACE_ID, level: 2 }, NOW.toISOString());
+    store.open(question(7, ["push"]));
+    expect(await decide(tools, QID(7), "b")).toEqual({ ok: false, text: `Refused: release is not delegated to you in project ${WORKSPACE_ID}; the owner decides it, so leave it to the owner.` });
   });
 
   it("says why for its own decision, one it does not know, one no longer open, an option it does not have, and a blank reason", async () => {
@@ -2055,11 +2053,11 @@ describe("bm_decide (autonomy design §B.5, §B.9; bead t9lm.11): the Orchestrat
   });
 
   it("decideRefusalOf is the rule, pure: the policy and the stored decision only", () => {
-    const delegated: AutonomyPolicy = { projects: { [WORKSPACE_ID]: { "reversible-technical": { mode: "delegate", predictor: "orchestrator", at: "T" } } }, challenger: {} };
+    const delegated: AutonomyPolicy = { projects: { [WORKSPACE_ID]: { "reversible-technical": { mode: "delegate", at: "T" } } }, challenger: {} };
     expect(decideRefusalOf(delegated, question(1))).toBeNull();
     expect(decideRefusalOf(EMPTY_AUTONOMY_POLICY, question(1))).toContain("is not delegated to you");
     expect(decideRefusalOf(delegated, question(1, ["commit"], { status: "expired", settledAt: at(1) }))).toContain("is expired");
-    expect(decideRefusalOf(delegated, question(1, ["deploy"]))).toContain("of the class release");
+    expect(decideRefusalOf(delegated, question(1, ["deploy"]))).toContain("release is not delegated to you");
     // A decision the challenger may predict is never one it may decide, and the other way round.
     for (const policy of [delegated, { ...EMPTY_AUTONOMY_POLICY, challenger: { [WORKSPACE_ID]: true } }]) {
       const predictable = question(1, ["commit"], { prediction: { recommended: { optionKey: "a" }, orchestrator: null } });
@@ -2136,7 +2134,7 @@ describe("bm_predict (autonomy design §B.3, §B.9): the Orchestrator challenger
 
     expect(result.ok).toBe(true);
     expect(result.text.split("\n")[0]).toBe(
-      `Recorded your prediction for ${QID(1)}: option b. It answers nothing and went to nobody: the owner decides, and sees your prediction only after answering. Do not tell the owner what you predicted, and send nothing for it.`,
+      `Recorded your prediction for ${QID(1)}: option b. It answers nothing and went to no agent: the owner decides, and sees it on the decision as your proposal, with your reason. Send nothing for it.`,
     );
     expect(jsonOf(result)).toEqual({ decisionId: QID(1), optionKey: "b", class: "reversible-technical" });
     expect(stored(QID(1))).toMatchObject({
@@ -2179,7 +2177,7 @@ describe("bm_predict (autonomy design §B.3, §B.9): the Orchestrator challenger
     expect(stored(QID(1)).prediction?.orchestrator).toEqual({ optionKey: "b", reason: "The owner kept it twice before.", at: NOW.toISOString() });
   });
 
-  it("refuses, writing, answering and sending nothing: a settled decision, a hard-owner class, a delegate cell, the challenger off, its own decision, and what it cannot name", async () => {
+  it("refuses, writing, answering and sending nothing: a settled decision, a delegate cell, the challenger off, its own decision, and what it cannot name; any class is predicted (ADR-025)", async () => {
     const store = createDecisionStore(home);
     store.open(question(1));
     for (const n of [3, 4, 5, 10]) store.open(question(n));
@@ -2188,7 +2186,7 @@ describe("bm_predict (autonomy design §B.3, §B.9): the Orchestrator challenger
     store.transition(QID(5), (decision) => withdrawDecision(decision, { at: at(1) }), WORKSPACE_ID);
     // Expired while open (bead 81y2.26): settled like any other.
     store.transition(QID(10), (decision) => expireDecision(decision, { at: at(1) }), WORKSPACE_ID);
-    // Release by its effect, security by its proposed class: both the owner's alone (REQ-121 c).
+    // Release by its effect, security by its proposed class: predicted like any class (ADR-025), checked last below.
     store.open(question(6, ["push"]));
     store.open(question(7, ["none"], { class: "security" }));
     // A delegated cell is decided, not predicted.
@@ -2205,8 +2203,6 @@ describe("bm_predict (autonomy design §B.3, §B.9): the Orchestrator challenger
     expect(await refused(QID(4))).toBe(`Refused: decision ${QID(4)} waits for the owner to confirm an answer typed in a chat; it is not predicted.`);
     expect(await refused(QID(5))).toBe(`Refused: decision ${QID(5)} is withdrawn; only an open decision is predicted.`);
     expect(await refused(QID(10))).toBe(`Refused: decision ${QID(10)} is expired; only an open decision is predicted.`);
-    expect(await refused(QID(6))).toBe(`Refused: decision ${QID(6)} is of the class release, which is always the owner's; it is never predicted.`);
-    expect(await refused(QID(7))).toBe(`Refused: decision ${QID(7)} is of the class security, which is always the owner's; it is never predicted.`);
     expect(await refused(QID(8))).toBe(`Refused: preference is delegated in project ${WORKSPACE_ID}; a delegated decision is not predicted.`);
     expect(await refused(QID(9))).toBe(`Refused: decision ${QID(9)} was opened before predictions were recorded; it is not predicted.`);
     expect(await refused("o:asked-by-you", "a")).toBe(
@@ -2223,6 +2219,10 @@ describe("bm_predict (autonomy design §B.3, §B.9): the Orchestrator challenger
     expect(onSettled).not.toHaveBeenCalled();
     expect(sends).toEqual([]);
     for (const n of [1, 3, 4, 5, 6, 7, 8, 9, 10]) expect(stored(QID(n)).prediction?.orchestrator ?? null, QID(n)).toBeNull();
+    // With the challenger on, the release and security questions are predicted.
+    challenger(true);
+    expect((await predict(tools, QID(6))).ok).toBe(true);
+    expect((await predict(tools, QID(7))).ok).toBe(true);
   });
 
   it("predictionRefusalOf is the rule, pure: whatever else the project's policy holds, only its challenger and the decision's own cell count", () => {
@@ -2237,22 +2237,27 @@ describe("bm_predict (autonomy design §B.3, §B.9): the Orchestrator challenger
     // Another class delegated does not matter; this class delegated does.
     const delegated = (decisionClass: DecisionClass): AutonomyPolicy => ({
       ...on,
-      projects: { [WORKSPACE_ID]: { [decisionClass]: { mode: "delegate", predictor: "orchestrator", at: "T" } } },
+      projects: { [WORKSPACE_ID]: { [decisionClass]: { mode: "delegate", at: "T" } } },
     });
     expect(predictionRefusalOf(delegated("scope"), question(1))).toBeNull();
     expect(predictionRefusalOf(delegated("reversible-technical"), question(1))).toContain("is delegated");
-    for (const hard of ["release", "data", "security", "cost"] as const) {
-      expect(canDelegate(hard)).toBe(false);
-      expect(predictionRefusalOf(on, question(1, ["none"], { class: hard })), hard).toContain("always the owner's");
+    for (const decisionClass of ["release", "data", "security", "cost"] as const) {
+      expect(predictionRefusalOf(on, question(1, ["none"], { class: decisionClass })), decisionClass).toBeNull();
     }
   });
 
-  it("the owner never sees the prediction before answering: decisions.get, decisions.list, the Inbox and the card show none; once answered it is there to compare", async () => {
+  it("the owner sees the prediction as the Orchestrator's proposal while the project's level is 1 or more, and not at level 0; once answered it is there to compare", async () => {
     createDecisionStore(home).open(question(1));
     const { tools, paseo } = predictTools();
     expect((await predict(tools, QID(1))).ok).toBe(true);
     const rpcDeps = { env: deps.env, homedir: deps.homedir, now: () => NOW };
     const hidden = { recommended: { optionKey: "a" }, orchestrator: null };
+    const proposal = { recommended: { optionKey: "a" }, orchestrator: { optionKey: "b", reason: REASON, at: NOW.toISOString() } };
+    // The prediction switch on (Co-pilot and up): decisions.get and decisions.list carry the proposal, with its reason.
+    expect(handleDecisionsGet({ id: QID(1) }, rpcDeps).decision.prediction).toEqual(proposal);
+    expect(handleDecisionsList({ scope: "inbox" }, rpcDeps).decisions.map((decision) => decision.prediction)).toEqual([proposal]);
+    // Hands-on (the switch off): left out.
+    challenger(false);
 
     const got = handleDecisionsGet({ id: QID(1) }, rpcDeps).decision;
     expect(got.prediction).toEqual(hidden);
@@ -2272,9 +2277,9 @@ describe("bm_predict (autonomy design §B.3, §B.9): the Orchestrator challenger
     const cardOf = (decision: Decision) =>
       decisionCardView({ card: item.card, lookup: { state: "found", decision }, agents: [], ui: DECISION_UI_IDLE, cardAt: new Date(decision.askedAt), now: NOW });
     for (const shown of [inbox, cardOf(got)]) expect(JSON.stringify(shown)).not.toContain(REASON);
-    // The card draws no prediction at all, not even from the stored record.
+    // The level is the server's gate: the stored record keeps the prediction, and a card given it shows it as the proposal (change-014).
     expect(stored(QID(1)).prediction?.orchestrator?.reason).toBe(REASON);
-    expect(JSON.stringify(cardOf(stored(QID(1))))).not.toContain(REASON);
+    expect(cardOf(stored(QID(1))).proposal).toBe(`Orchestrator: ${REASON}`);
 
     // Once the owner has answered, the prediction is shown to be compared with the answer.
     await handleDecisionsAnswer({ id: QID(1), optionKey: "a" }, paseo, rpcDeps);
@@ -2928,7 +2933,7 @@ describe("the intervention log (autonomy design §G.3)", () => {
     expect((await loggingTools([]).tools.call("bm_decide", { decisionId: id, optionKey: "a", reason: "Nothing to change." })).ok).toBe(false);
     expect(logged()).toEqual([]);
 
-    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "reversible-technical", mode: "delegate", confirmed: true, predictor: "orchestrator" }, NOW.toISOString());
+    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "reversible-technical", mode: "delegate", confirmed: true }, NOW.toISOString());
     expect((await loggingTools([]).tools.call("bm_decide", { decisionId: id, optionKey: "a", reason: "Nothing to change." })).ok).toBe(true);
     // Q2 decided on its own look, outside a wake that carried it.
     expect((await loggingTools([]).tools.call("bm_decide", { decisionId: `q:${REQUEST}:Q2`, optionKey: "a", reason: "Same as Q1." })).ok).toBe(true);

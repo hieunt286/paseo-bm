@@ -1,13 +1,14 @@
 /**
- * The Beads screen (design delta 20260916-beads-screen; Work → Beads since the
- * experience concept §4.2): the board first — In progress · Ready · Blocked,
- * Closed behind the eye and hidden by default, the counts in the column
- * headers — with the filters and the sort folded behind one button, and a bead
- * detail with three hand-off actions. Every action is confirmed first and goes
+ * The Beads screen (design delta 20260916-beads-screen; a project's Beads tab
+ * since the experience concept §4.2): the board first — In progress · Ready ·
+ * Blocked, Closed behind Show closed and hidden by default, the counts in the
+ * column headers —, the project's features as one row of filters above it
+ * (change-014 outcome 5), the other filters and the sort folded behind one
+ * button, and a bead detail with three hand-off actions. Every action is confirmed first and goes
  * to the workspace's Beads Manager; this screen never writes the bead store.
  *
- * The overview figures (status, progress, by type, by priority, time) moved to
- * Insights: `BeadsFigures` (`insights.tsx`) draws them from `beadsOverview`,
+ * The overview figures (status, progress, by type, by priority, time) are the
+ * project's Metrics tab: `BeadsFigures` (`insights.tsx`) draws them from `beadsOverview`,
  * the one component that does (code review 2026-09-30 §5).
  *
  * Client rules: React Native primitives only, colours from `theme.colors`, no
@@ -48,7 +49,7 @@ import {
   type BeadFilter,
   type StatusBucket,
 } from "./beads-model";
-import { dashboardStyles } from "./styles";
+import { RADIUS, dashboardStyles } from "./styles";
 import { toneColor, type Badge } from "./tone";
 import { errorMessageOf } from "./errors";
 import {
@@ -297,6 +298,7 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
   // The filters and the sort sit behind one button, so the board comes first.
   const [showFilters, setShowFilters] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(new Set());
+  const [featuresExpanded, setFeaturesExpanded] = useState(false);
   // The board's own two pieces of state: how wide the list area measured, and
   // which column a narrow screen is showing.
   const [boardWidth, setBoardWidth] = useState<number | null>(null);
@@ -308,6 +310,9 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
 
   const rows = beads.data?.beads ?? [];
   const facets = useMemo(() => facetsOf(rows, filter), [rows, filter]);
+  // The features stay in sight above the board (the mockup's feature row); the other label groups fold.
+  const features = facets.labelGroups.find((group) => group.category === "feature");
+  const labelGroups = facets.labelGroups.filter((group) => group.category !== "feature");
   const shown = useMemo(() => sortBeads(filterBeads(rows, filter), sortKey, descending), [rows, filter, sortKey, descending]);
   // Closed beads are hidden by default; the eye button shows them for the rest of the app session (REQ-069c).
   const showClosed = useSyncExternalStore(closedBeadsVisibility.subscribe, closedBeadsVisibility.get, closedBeadsVisibility.get);
@@ -368,9 +373,22 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
           style={[styles.secondaryButton, { flexDirection: "row", alignItems: "center", gap: 6 }]}
         >
           <Icon name={showClosed ? "Eye" : "EyeOff"} size={16} color={theme.colors.foreground} />
-          <Text style={styles.secondaryButtonText}>{`Closed ${board.closed}`}</Text>
+          <Text style={styles.secondaryButtonText}>{`${showClosed ? "Hide" : "Show"} closed (${board.closed})`}</Text>
         </Pressable>
       </View>
+
+      {features === undefined ? null : (
+        <FacetRow
+          title="Feature"
+          values={features.values}
+          selected={filter.labels}
+          onToggle={(value) => setFilter({ ...filter, labels: toggle(filter.labels, value) })}
+          styles={styles}
+          theme={theme}
+          expanded={featuresExpanded}
+          onExpand={() => setFeaturesExpanded(!featuresExpanded)}
+        />
+      )}
 
       {/* The filters in use stay in sight while the panel is folded. */}
       {active.length > 0 ? (
@@ -401,7 +419,7 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
               onChangeText={(text) => setFilter({ ...filter, text })}
               placeholder="Search id or title"
               placeholderTextColor={theme.colors.foregroundMuted}
-              style={[styles.body, { borderWidth: 1, borderColor: theme.colors.border, borderRadius: 8, padding: 8 }]}
+              style={[styles.body, { borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS, padding: 8 }]}
             />
             <FacetRow
               title="Status"
@@ -427,15 +445,15 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
               styles={styles}
               theme={theme}
             />
-            {facets.labelGroups.length === 0 ? null : (
+            {labelGroups.length === 0 ? null : (
               <Pressable accessibilityRole="button" accessibilityState={{ expanded: showLabels }} onPress={() => setShowLabels(!showLabels)}>
                 <Text style={styles.body}>
-                  {`${showLabels ? "▾" : "▸"} Labels · ${facets.labelGroups.map((group) => `${group.category}${group.selected > 0 ? ` (${group.selected})` : ""}`).join(", ")}`}
+                  {`${showLabels ? "▾" : "▸"} Labels · ${labelGroups.map((group) => `${group.category}${group.selected > 0 ? ` (${group.selected})` : ""}`).join(", ")}`}
                 </Text>
               </Pressable>
             )}
             {showLabels
-              ? facets.labelGroups.map((group) => (
+              ? labelGroups.map((group) => (
                   <FacetRow
                     key={group.category}
                     title={group.category}
@@ -481,7 +499,7 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
         <Text style={styles.body}>This workspace has no beads yet.</Text>
       ) : null}
       {board.visible === 0 && board.closed > 0 ? (
-        <Text style={styles.body}>{`All ${board.closed} matching beads are closed. Show them with the eye button.`}</Text>
+        <Text style={styles.body}>{`All ${board.closed} matching beads are closed. Show them with Show closed.`}</Text>
       ) : null}
       {/* The width decides the shape: columns side by side when there is room,
           one column behind a row of status tabs when there is not. */}

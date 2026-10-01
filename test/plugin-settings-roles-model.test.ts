@@ -440,7 +440,7 @@ describe("Roles & models", () => {
     it("says once that a chain saved with the retired Auto switch now asks, until that chain is saved again (ADR-022 decision 4)", () => {
       const retired: FallbackSettings = { ...chain([CODEX]), migratedFromAuto: true };
       expect(FALLBACK_AUTO_RETIRED_NOTICE).toBe(
-        "Auto switch was retired: this role now asks you. Delegate the Environment class in Settings → Autonomy to let it answer by itself.",
+        "Auto switch was retired: this role now asks you. Set the project to Cruise or above in Settings → Autonomy to let the Orchestrator answer it.",
       );
       expect(fallbackAutoRetiredNotice(retired)).toBe(FALLBACK_AUTO_RETIRED_NOTICE);
       expect(fallbackAutoRetiredNotice(chain([CODEX]))).toBeNull();

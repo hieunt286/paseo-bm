@@ -7,14 +7,10 @@
  * folder, never repairs a file) and nothing is sent to any agent. The ledger
  * is derived on every call (§B.9) and hands out numbers and times only, so an
  * unsettled decision's prediction never leaves the server this way.
- *
- * A class the policy demoted (§B.4) counts only the owner's answers given
- * since its last demotion; the delegated figures are whole.
  */
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { agreementLedger } from "../shared/autonomy-ledger";
 import { autonomyLedgerRpc, type AutonomyLedgerInput, type AutonomyLedgerOutput } from "../shared/contracts";
-import { readAutonomyPolicy } from "./autonomy-rpc";
 import { createDecisionStore } from "./decision-store";
 import { READ_FAILED, coded, dataHome, type RpcHomeDeps, type RpcLogDeps } from "./rpc-kit";
 
@@ -35,11 +31,7 @@ export function handleAutonomyLedger(input: AutonomyLedgerInput, deps: AutonomyL
       ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
       statuses: ["answered"],
     });
-    const demotions = readAutonomyPolicy(deps).demotions;
-    return agreementLedger(decisions, {
-      ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
-      ...(demotions === undefined ? {} : { demotions }),
-    });
+    return agreementLedger(decisions, input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId });
   });
 }
 

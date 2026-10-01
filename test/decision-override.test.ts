@@ -23,7 +23,7 @@ import { answerNoticeOf, createOrchestratorDecisionDelivery } from "../plugin/se
 import { createOverrideDelivery, overrideAnswersMessageOf, overrideKindOf } from "../plugin/server/override-delivery";
 import { resolveAtOpen } from "../plugin/server/policy-resolve";
 import { createPrecedentStore } from "../plugin/server/precedent-store";
-import { decideRefusalOf, modeOf, policyReasonOf, predictionRefusalOf, recommendedDelegationOf } from "../plugin/shared/autonomy";
+import { decideRefusalOf, levelOf, modeOf, predictionRefusalOf } from "../plugin/shared/autonomy";
 import { agreementLedger } from "../plugin/shared/autonomy-ledger";
 import { DashboardError, INBOX_DIGEST_MAX, decisionsOverrideRpc, inboxDigestRpc, inboxSeenRpc } from "../plugin/shared/contracts";
 import { isDecidedForOwner, overrideDecisionOf, overrideIdOf, overrideRefusalOf } from "../plugin/shared/decision-override";
@@ -49,8 +49,8 @@ import { fakePaseo } from "./helpers/fake-paseo";
  * - `inbox.seen` / `inbox.digest`: what the owner's policy and precedents
  *   answered since the owner last looked, the last look kept on disk.
  * - `decisions.override`: a new owner decision `r:<uuid>` that supersedes the
- *   delegated one, counts as an override (reversal `overridden`, demotion
- *   with an alert), is never answered by a precedent, the policy or the
+ *   delegated one, counts as an override (reversal `overridden`, recorded
+ *   only: no cell or level changes, ADR-025), is never answered by a precedent, the policy or the
  *   Orchestrator, and whose answer reaches the agent concerned.
  *
  * A temporary data folder, the one fake Paseo and a private notice queue.
@@ -126,14 +126,13 @@ function scopeQuestion(n = 1, overrides: Partial<Decision> = {}): Decision {
   };
 }
 
-/** The policy's recommended option, as `resolveByPolicy` stores it. */
+/** A delegated answer, as `bm_decide` stores it. */
 const BY_POLICY: Omit<AnswerInput, "at"> = {
   by: "policy",
   via: "inbox",
   optionKey: "a",
   class: "scope",
-  predictor: "recommended",
-  reason: policyReasonOf("scope"),
+  reason: "The owner writes dates day first.",
 };
 
 /** Opens `decision` and answers it in the store; the delegated answer is marked delivered, as the Worker got it. */
@@ -147,8 +146,8 @@ function storeAnswered(decision: Decision, answer: Omit<AnswerInput, "at">, minu
   return stored(decision.id);
 }
 
-function delegate(decisionClass: "scope" | "environment" | "reversible-technical", predictor: "recommended" | "orchestrator" = "recommended"): void {
-  createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: decisionClass, mode: "delegate", confirmed: true, predictor }, minutesBefore(60));
+function delegate(decisionClass: "scope" | "environment" | "reversible-technical"): void {
+  createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: decisionClass, mode: "delegate", confirmed: true }, minutesBefore(60));
 }
 
 function codeOf(run: () => unknown): string | null {
@@ -236,24 +235,23 @@ describe("decisions.override (autonomy design §B.7, §B.9)", () => {
     expect(decisions().list({ statuses: ["open"] }).map((decision) => decision.id)).toEqual(["r:override-1"]);
   });
 
-  it("counts as an override: the delegated class goes back to Shadow at once, with an Inbox alert", () => {
-    delegate("scope");
+  it("counts as an override and is only recorded (ADR-025): the cells, the level and the alerts are untouched", () => {
+    createAutonomyStore(home).setLevel({ workspaceId: WORKSPACE_ID, level: 2 }, minutesBefore(60));
+    const policyBefore = readFileSync(join(home, "autonomy", "policy.json"), "utf8");
     const delegated = storeAnswered(scopeQuestion(), BY_POLICY);
     handleDecisionsOverride({ id: delegated.id }, deps());
 
+    expect(readFileSync(join(home, "autonomy", "policy.json"), "utf8")).toBe(policyBefore);
     const policy = createAutonomyStore(home).read();
-    expect(modeOf(policy, WORKSPACE_ID, "scope")).toBe("shadow");
-    expect(policy.demotions?.[WORKSPACE_ID]?.scope).toBe(NOW.toISOString());
-    const alerts = createAlertStore(home).list({ open: true, kinds: ["autonomy-demoted"] });
-    expect(alerts).toHaveLength(1);
-    expect(alerts[0]).toMatchObject({ workspaceId: WORKSPACE_ID, subject: "scope" });
-    expect(alerts[0]!.detail).toContain("was overridden by you");
-    // A-4's figure: the ledger counts it as a delegated decision overridden from the digest.
+    expect(modeOf(policy, WORKSPACE_ID, "scope")).toBe("delegate");
+    expect(levelOf(policy, WORKSPACE_ID)).toBe(2);
+    expect(createAlertStore(home).list()).toEqual([]);
+    // A-4's figure: the ledger counts it as a delegated decision overridden from the digest, the Orchestrator's.
     const [cell] = agreementLedger(decisions().list()).delegated;
-    expect(cell).toMatchObject({ class: "scope", by: "policy", predictor: "recommended", count: 1, overridden: 1, reversals: 1 });
+    expect(cell).toMatchObject({ class: "scope", by: "policy", predictor: "orchestrator", count: 1, overridden: 1, reversals: 1 });
   });
 
-  it("pressed again, returns the same override and raises no second alert", () => {
+  it("pressed again, returns the same override", () => {
     delegate("scope");
     const delegated = storeAnswered(scopeQuestion(), BY_POLICY);
     const first = handleDecisionsOverride({ id: delegated.id }, deps());
@@ -261,7 +259,6 @@ describe("decisions.override (autonomy design §B.7, §B.9)", () => {
     expect(again.created).toBe(false);
     expect(again.decision.id).toBe(first.decision.id);
     expect(decisions().list().filter((decision) => decisionKindOf(decision.id) === "override")).toHaveLength(1);
-    expect(createAlertStore(home).list({ kinds: ["autonomy-demoted"] })).toHaveLength(1);
     expect(stored(delegated.id).reversals).toHaveLength(1);
   });
 
@@ -273,12 +270,11 @@ describe("decisions.override (autonomy design §B.7, §B.9)", () => {
     expect(stored(delegated.id).reversals).toHaveLength(1);
   });
 
-  it("overrides a precedent's answer too; a class that was not delegated stays as it is and raises nothing", () => {
+  it("overrides a precedent's answer too; a class that was not delegated stays as it is", () => {
     const delegated = storeAnswered(scopeQuestion(), { by: "precedent", via: "inbox", optionKey: "a", class: "scope", precedentId: "p:1", reason: 'The owner\'s precedent on "date-format", saved 2026-09-20' });
     const out = handleDecisionsOverride({ id: delegated.id }, deps());
     expect(out.decision).toMatchObject({ status: "open", supersedes: delegated.id });
     expect(modeOf(createAutonomyStore(home).read(), WORKSPACE_ID, "scope")).toBe("owner");
-    expect(createAlertStore(home).list({ kinds: ["autonomy-demoted"] })).toEqual([]);
   });
 
   it("the owner's answer to the override of a precedent's answer supersedes that precedent (REQ-124 c)", async () => {
@@ -332,16 +328,14 @@ describe("the override is the owner's own: never answered for them", () => {
     const atOpen = resolveAtOpen(override, { home, now: NOW, log });
     expect(atOpen).toEqual({ decision: override, answered: null, by: null, precedent: null });
     expect(stored(override.id)).toMatchObject({ status: "open", answer: null });
-    const policy = createAutonomyStore(home).read();
-    expect(recommendedDelegationOf(policy, override)).toBeNull();
     expect(precedentResolutionOf(override, precedents, NOW)).toBeNull();
   });
 
   it("the Orchestrator neither decides nor predicts it", () => {
-    delegate("scope", "orchestrator");
-    const delegated = storeAnswered(scopeQuestion(), { ...BY_POLICY, predictor: "orchestrator", reason: "The owner writes dates day first." });
+    delegate("scope");
+    const delegated = storeAnswered(scopeQuestion(), { ...BY_POLICY, reason: "The owner writes dates day first." });
     const { decision: override } = handleDecisionsOverride({ id: delegated.id }, deps());
-    delegate("scope", "orchestrator");
+    delegate("scope");
     const policy = { ...createAutonomyStore(home).read(), challenger: { [WORKSPACE_ID]: true } };
     expect(decideRefusalOf(policy, override)).toContain("is the owner's override of an answer made for them");
     expect(predictionRefusalOf(policy, override)).toContain("only the owner answers it");
@@ -449,7 +443,7 @@ describe("the owner's answer to an override reaches the agent concerned", () => 
       options: [merge, hold],
       prediction: openingPrediction([merge, hold]),
     });
-    const delegated = storeAnswered(asked, { ...BY_POLICY, class: "reversible-technical", reason: policyReasonOf("reversible-technical") });
+    const delegated = storeAnswered(asked, { ...BY_POLICY, class: "reversible-technical", reason: "The review passed." });
     const { decision: override } = handleDecisionsOverride({ id: delegated.id }, deps());
     expect(override.id).toBe("r:override-1");
     const { fake, answer } = world();
@@ -484,7 +478,7 @@ describe("the owner's answer to an override reaches the agent concerned", () => 
       options: incidentOptions,
       prediction: openingPrediction(incidentOptions),
     });
-    const delegated = storeAnswered(incident, { ...BY_POLICY, optionKey: "switch", class: "environment", reason: policyReasonOf("environment") });
+    const delegated = storeAnswered(incident, { ...BY_POLICY, optionKey: "switch", class: "environment", reason: "The limit resets soon." });
     const { decision: override } = handleDecisionsOverride({ id: delegated.id }, deps());
     const acted: Array<{ incidentId: string; action: string }> = [];
     const { answer } = world(async (input) => {
@@ -661,7 +655,7 @@ describe("inbox.digest: what was decided for the owner since they last looked (�
   it("lists the policy's and the precedents' answers after `since`, the latest first; never an owner's answer", () => {
     storeAnswered(scopeQuestion(1), BY_POLICY, 30);
     storeAnswered(scopeQuestion(2), { by: "precedent", via: "inbox", optionKey: "a", class: "scope", precedentId: "p:1", reason: "The owner's precedent" }, 10);
-    storeAnswered(scopeQuestion(3), { ...BY_POLICY, predictor: "orchestrator", reason: "Day first, as the owner writes." }, 5);
+    storeAnswered(scopeQuestion(3), { ...BY_POLICY, reason: "Day first, as the owner writes." }, 5);
     storeAnswered(scopeQuestion(4), { via: "inbox", optionKey: "b" }, 2);
     decisions().open(scopeQuestion(5));
 
@@ -669,7 +663,7 @@ describe("inbox.digest: what was decided for the owner since they last looked (�
     expect(inboxDigestRpc.output.parse(all)).toEqual(all);
     expect(all.decisions.map((decision) => decision.id)).toEqual([3, 2, 1].map((n) => `q:${REQUEST}:Q${n}`));
     expect(all.truncated).toBe(false);
-    expect(all.decisions[0]!.answer).toMatchObject({ by: "policy", predictor: "orchestrator", reason: "Day first, as the owner writes." });
+    expect(all.decisions[0]!.answer).toMatchObject({ by: "policy", reason: "Day first, as the owner writes." });
 
     expect(handleInboxDigest({ since: minutesBefore(15) }, rpcDeps()).decisions.map((decision) => decision.id)).toEqual([`q:${REQUEST}:Q3`, `q:${REQUEST}:Q2`]);
     expect(handleInboxDigest({ since: minutesBefore(1) }, rpcDeps()).decisions).toEqual([]);

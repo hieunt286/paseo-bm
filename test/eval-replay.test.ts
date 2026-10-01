@@ -637,7 +637,7 @@ describe("replay of delegated decisions (A-4, A-5; autonomy design §B.9)", () =
       prediction: { recommended: { optionKey: "a" }, orchestrator: null },
     });
   const policy = (decision: Decision): Decision =>
-    ok(answerDecision(decision, { by: "policy", via: "inbox", optionKey: "a", reason: SECRET_REASON, class: decision.class, predictor: "recommended", at: when(6) }));
+    ok(answerDecision(decision, { by: "policy", via: "inbox", optionKey: "a", reason: SECRET_REASON, class: decision.class, at: when(6) }));
   const precedent = (decision: Decision): Decision => ok(answerDecision(decision, { by: "precedent", via: "inbox", words: SECRET_PRECEDENT, precedentId: "p-1", at: when(6) }));
   const owner = (decision: Decision, optionKey: string): Decision => ok(answerDecision(decision, { via: "inbox", optionKey, at: when(7) }));
 

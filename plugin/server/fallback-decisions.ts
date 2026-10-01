@@ -23,15 +23,11 @@
  *   the subject) is answered by it and its action runs as the owner's would.
  *   Otherwise, or when the precedent names no option, it stays open and the
  *   card shows the precedent as a suggestion.
- * - **Delegation** (autonomy design §B.5): on the same condition, a decision
- *   no precedent bears on is answered with its recommended option
- *   (`recommendedActionOf`) when the owner's policy delegates `environment`
- *   in its project to the recommended option (`policy-resolve.ts`), and its
- *   action runs as the owner's would. Without the delivery (the start-up
- *   pass, the pass after an action) it stays open. These two — and the
- *   Orchestrator's `bm_decide` where `environment` is delegated to it — are
- *   the only ways an incident is answered without the owner: the role's
- *   Auto switch was retired (ADR-022 decision 4).
+ * - **Delegation** (autonomy design §B.5, ADR-025): where the owner's policy
+ *   delegates `environment`, the decision stays open and the event bus asks
+ *   the Orchestrator, whose `bm_decide` runs its option as the owner's would.
+ *   A precedent and `bm_decide` are the only ways an incident is answered
+ *   without the owner: the role's Auto switch was retired (ADR-022 decision 4).
  * - **A failed action** (autonomy design §A.8): an answered `f:` decision whose
  *   `delivery.outcome` is `failed` while its incident is still pending keeps a
  *   `fallback-failed` Inbox alert open, so the owner can act again; the alert
@@ -95,8 +91,8 @@ export function incidentIdOf(decisionId: string): string | null {
 /**
  * The option a pending incident's decision recommends (§4.6): `wait` when the
  * reset is known and at most 30 minutes away (a reset already past counts),
- * else `switch` when there is a candidate, else none. The recommended
- * predictor answers with it where `environment` is delegated (§B.5).
+ * else `switch` when there is a candidate, else none: the recommended
+ * prediction the agreement ledger measures (§B.3).
  */
 export function recommendedActionOf(incident: FallbackIncident, now: Date): "wait" | "switch" | null {
   const resetsAt = incident.resetsAt === null ? Number.NaN : Date.parse(incident.resetsAt);
@@ -276,8 +272,7 @@ export function syncFallbackDecisions(home: string, deps: FallbackDecisionDeps =
       try {
         const opened = store.open(fallbackDecisionOf(incident, now));
         if (opened.created) result.opened.push(opened.decision.id);
-        // Autonomy design §B.6: a precedent naming one of its options answers it, when that answer can be delivered now;
-        // §B.5: else, when no precedent bears on it, the policy's recommended option where `environment` is delegated to it.
+        // Autonomy design §B.6: a precedent naming one of its options answers it, when that answer can be delivered now.
         if (opened.created && deps.settle !== undefined) {
           const atOpen = resolveAtOpen(opened.decision, { home, now, log, store });
           if (atOpen.answered !== null) resolved.push(atOpen.answered);
@@ -291,7 +286,7 @@ export function syncFallbackDecisions(home: string, deps: FallbackDecisionDeps =
       const { onSettled, paseo } = deps.settle;
       void Promise.resolve()
         .then(() => onSettled(resolved, { paseo }))
-        .catch((error: unknown) => log(`[paseo-bm] ${resolved.map((decision) => decision.id).join(", ")} answered by a precedent or the policy, but the delivery failed: ${reasonOf(error)}`));
+        .catch((error: unknown) => log(`[paseo-bm] ${resolved.map((decision) => decision.id).join(", ")} answered by a precedent, but the delivery failed: ${reasonOf(error)}`));
     }
     try {
       result.alerted = syncFallbackFailedAlerts(home, store, incidents, () => now).raised;

@@ -381,7 +381,7 @@ export const FALLBACK_POLICY_CHOICES: ReadonlyArray<{ id: FallbackDraft["policy"
 
 /** Shown once under a role whose saved chain still had the retired Auto switch, until that chain is saved again. */
 export const FALLBACK_AUTO_RETIRED_NOTICE =
-  "Auto switch was retired: this role now asks you. Delegate the Environment class in Settings → Autonomy to let it answer by itself.";
+  "Auto switch was retired: this role now asks you. Set the project to Cruise or above in Settings → Autonomy to let the Orchestrator answer it.";
 
 /** The button beside that notice: saves the chain as shown, which ends the notice. */
 export const FALLBACK_AUTO_RETIRED_ACK = "Got it";

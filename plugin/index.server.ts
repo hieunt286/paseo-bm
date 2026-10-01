@@ -25,8 +25,10 @@ import { registerSetupRpcs } from "./server/setup-rpc";
 import { registerRoleSettingsRpcs } from "./server/role-settings-rpc";
 import { registerChatRpcs } from "./server/chat-rpc";
 import { registerDecisionRpcs, settledByKind, type OnDecisionsSettled } from "./server/decision-rpc";
+import { createReplyFallback, registerDecisionAskRpcs } from "./server/decision-ask";
 import { registerInboxRpcs } from "./server/inbox-rpc";
 import { registerInsightsRpcs } from "./server/insights-rpc";
+import { registerSkillsUsageRpcs } from "./server/skills-usage";
 import { registerCoordinationRpcs } from "./server/coordination-rpc";
 import { registerAutonomyRpcs } from "./server/autonomy-rpc";
 import { registerAutonomyLedgerRpcs } from "./server/autonomy-ledger-rpc";
@@ -293,6 +295,10 @@ export default function contribute(server: PluginServerContext): () => void {
   });
   const onDecisionsSettled: OnDecisionsSettled = deliverSettled;
   registerDecisionRpcs(server, { onSettled: onDecisionsSettled });
+  // Change-014 outcome 3 (Ask back): the owner asks the asker of an open q:/o: decision; the BM-ASK
+  // notice goes through the notice queue, the asker replies with bm_reply (or BM-REPLY in its chat).
+  registerDecisionAskRpcs(server);
+  const replyFallback = createReplyFallback();
   // Autonomy PRD §11 rule 3 (design §A.11): a Manager, Worker or Reviewer on
   // older instructions is an `outdated-agent` alert. A throttled pass, started
   // by the Inbox's reads and by turn starts; an archived agent's alert clears.
@@ -315,6 +321,8 @@ export default function contribute(server: PluginServerContext): () => void {
   });
   // Autonomy design §A.12: Insights reads the metric module over the data folder, read-only.
   registerInsightsRpcs(server);
+  // Change-014 outcome 4: Tools & skills reads how often reports named each skill, read-only.
+  registerSkillsUsageRpcs(server);
   // Autonomy design §G.7: Settings → Coordination, the owner's settings (the advice cadence).
   registerCoordinationRpcs(server);
   // Autonomy design §B.2: Settings → Autonomy, the owner's policy per project and class.
@@ -334,6 +342,8 @@ export default function contribute(server: PluginServerContext): () => void {
     afterTurn: async (record, context) => {
       await questionDelivery.afterTurn(record, context);
       await overrideDelivery.afterTurn(record, context);
+      // A Worker created before bm_reply answers a BM-ASK in its chat: `BM-REPLY <decisionId>`.
+      replyFallback.afterTurn(record);
     },
   });
   // Autonomy design §F.1: two agents writing one file in overlapping turns — an Inbox alert, cleared once

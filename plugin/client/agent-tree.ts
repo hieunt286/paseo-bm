@@ -17,6 +17,7 @@ import type { PluginTheme } from "@getpaseo/plugin";
 import type { AgentNode, RoleDescriptor } from "../shared/contracts";
 import { codedTail, errorCodeOf, errorMessageOf } from "./errors";
 import type { NoticeTone } from "./launch-manager";
+import { RADIUS } from "./styles";
 
 /** Workspace panel id. */
 export const AGENT_TREE_PANEL_ID = "beads-agents";
@@ -263,7 +264,7 @@ export function treeStyles(theme: PluginTheme, compact: boolean) {
     screen: { flex: 1, backgroundColor: theme.colors.surface0 },
     content: { padding: compact ? 12 : 20, gap: compact ? 8 : 12 },
     heading: { color: theme.colors.foreground, fontSize: compact ? 16 : 18, fontWeight: "600" as const },
-    sectionTitle: { color: theme.colors.foregroundMuted, fontSize: 12, fontWeight: "600" as const },
+    sectionTitle: { color: theme.colors.foregroundMuted, fontSize: 12, fontWeight: "500" as const, textTransform: "uppercase" as const, letterSpacing: 0.6 },
     body: { color: theme.colors.foregroundMuted, fontSize: 13 },
     notice: { fontSize: 13 },
     row: {
@@ -273,7 +274,7 @@ export function treeStyles(theme: PluginTheme, compact: boolean) {
       gap: compact ? 2 : 12,
       paddingVertical: compact ? 8 : 10,
       paddingHorizontal: compact ? 10 : 12,
-      borderRadius: 8,
+      borderRadius: RADIUS,
       borderWidth: 1,
       borderColor: theme.colors.border,
       backgroundColor: theme.colors.surface1,
@@ -285,7 +286,7 @@ export function treeStyles(theme: PluginTheme, compact: boolean) {
     card: {
       gap: 4,
       padding: compact ? 10 : 12,
-      borderRadius: 8,
+      borderRadius: RADIUS,
       borderWidth: 1,
       borderColor: theme.colors.border,
       backgroundColor: theme.colors.surface1,
@@ -300,7 +301,7 @@ export function treeStyles(theme: PluginTheme, compact: boolean) {
       alignSelf: "flex-start" as const,
       paddingVertical: 6,
       paddingHorizontal: 12,
-      borderRadius: 6,
+      borderRadius: RADIUS,
       backgroundColor: theme.colors.accent,
     },
     buttonText: { color: theme.colors.accentForeground, fontSize: 13 },

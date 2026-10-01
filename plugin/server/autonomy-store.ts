@@ -1,10 +1,11 @@
 /**
  * The owner's autonomy policy (autonomy design §B.2, ADR-018; PRD REQ-121):
  * the store `<data folder>/autonomy/policy.json` =
- * `{ version: 1, projects: { <workspaceId>: { <class>: { mode, predictor?, at } } }, challenger: { <workspaceId>: boolean }, demotions?: { <workspaceId>: { <class>: at } }, boundary?: { <workspaceId>: { enabled: true, at } } }`.
+ * `{ version: 1, projects: { <workspaceId>: { <class>: { mode, at } } }, challenger: { <workspaceId>: boolean }, boundary?: { <workspaceId>: { enabled: true, at } } }`.
  * The schema and its pure rules are `shared/autonomy.ts`; the owner's RPCs over
- * it are `autonomy-rpc.ts`, and so is the demotion (§B.4), its one writer that
- * is not the owner.
+ * it are `autonomy-rpc.ts`, its only writer (ADR-025: no demotion). A file of
+ * an older build that holds `demotions`, or cells naming a predictor, reads
+ * past them and loses them at the next write.
  *
  * The file rules are every store's (`data-files.ts` `createJsonFileStore`,
  * code review 2026-09-30 §3.1): the folder is created `0700` only by a write,
@@ -29,17 +30,16 @@ import {
   checkAutonomySet,
   checkAutonomySetBoundary,
   checkAutonomySetChallenger,
+  checkAutonomySetLevel,
   boundaryOf,
   isPolicyWorkspaceId,
-  modeOf,
   withBoundary,
   withCell,
   withChallenger,
-  withDemotion,
+  withLevel,
   withProjectReset,
   type AutonomyPolicy,
 } from "../shared/autonomy";
-import type { DecisionClass } from "../shared/decisions";
 import { createJsonFileStore } from "./data-files";
 
 /** The folder inside the data folder; cleanup deletes it whole. */
@@ -57,6 +57,14 @@ export interface AutonomyStore {
    * newer paseo-bm (`E_AUTONOMY_WRITE_FAILED`).
    */
   set(input: unknown, at: string): AutonomyPolicy;
+  /**
+   * Sets one project's level (ADR-025), stamped `at`: its nine cells and its
+   * prediction switch in one write, its action boundary untouched; returns
+   * the whole policy. Throws, writing nothing, on each refusal of
+   * `checkAutonomySetLevel` and on a file written by a newer paseo-bm
+   * (`E_AUTONOMY_WRITE_FAILED`).
+   */
+  setLevel(input: unknown, at: string): AutonomyPolicy;
   /**
    * Returns every class of one project to `owner` in one write and returns the
    * whole policy. A project with no cell is already there: nothing is written.
@@ -79,14 +87,6 @@ export interface AutonomyStore {
    * (`E_AUTONOMY_WRITE_FAILED`).
    */
   setBoundary(input: unknown, at: string): AutonomyPolicy;
-  /**
-   * Demotes one class of one project at `at` (§B.4): a `delegate` cell becomes
-   * `shadow` and `at` its last demotion, in one write, and the whole policy is
-   * returned. A cell that is not `delegate` writes nothing and returns null.
-   * Throws, writing nothing, on a file written by a newer paseo-bm
-   * (`E_AUTONOMY_WRITE_FAILED`).
-   */
-  demote(workspaceId: string, decisionClass: DecisionClass, at: string): AutonomyPolicy | null;
 }
 
 /**
@@ -145,6 +145,15 @@ export function createAutonomyStore(home: string): AutonomyStore {
       return next;
     },
 
+    setLevel(input, at) {
+      const checked = checkAutonomySetLevel(input);
+      if ("refusal" in checked) throw new DashboardError(checked.refusal.code, checked.refusal.detail);
+      const { workspaceId, level } = checked.change;
+      const next = withLevel(loadForWrite(), workspaceId, level, at);
+      write(next);
+      return next;
+    },
+
     reset(workspaceId) {
       if (!isPolicyWorkspaceId(workspaceId)) throw invalidWorkspace(workspaceId);
       const policy = loadForWrite();
@@ -172,15 +181,6 @@ export function createAutonomyStore(home: string): AutonomyStore {
       const policy = loadForWrite();
       if ((boundaryOf(policy, workspaceId) !== null) === enabled) return policy;
       const next = withBoundary(policy, workspaceId, enabled ? at : null);
-      write(next);
-      return next;
-    },
-
-    demote(workspaceId, decisionClass, at) {
-      if (!isPolicyWorkspaceId(workspaceId)) return null;
-      const policy = loadForWrite();
-      if (modeOf(policy, workspaceId, decisionClass) !== "delegate") return null;
-      const next = withDemotion(policy, workspaceId, decisionClass, at);
       write(next);
       return next;
     },

@@ -577,3 +577,35 @@ export type BeadStats = z.infer<typeof beadStatsSchema>;
 export type StoreSize = z.infer<typeof storeSizeSchema>;
 export type RuntimeRow = z.infer<typeof runtimeRowSchema>;
 export type TraceDeleteScope = z.infer<typeof traceDeleteScopeSchema>;
+
+/**
+ * `skills.usage` — reads only (change-014 outcome 4). Per skill, how many
+ * recorded `BM-REPORT`s of the trace store named it in `skillsUsed`, over the
+ * last `sinceDays` days, for one workspace or all. `reports` counts reports,
+ * `requests` the distinct `requestId`s among them (a report without one adds
+ * none), `lastUsedAt` the latest such report's time. Sorted by `reports`
+ * descending, then `name`. Names are trimmed; an empty one is dropped; case is
+ * kept as written, so only exact duplicates merge. Reads nothing but the trace store.
+ */
+export const skillsUsageRpc = defineRpc({
+  name: "skills.usage",
+  input: z.object({
+    workspaceId: workspaceIdSchema.optional(),
+    sinceDays: z.number().int().min(1).max(365).default(30),
+  }),
+  output: z.object({
+    skills: z.array(
+      z.object({
+        name: z.string(),
+        reports: z.number().int().nonnegative(),
+        requests: z.number().int().nonnegative(),
+        lastUsedAt: z.string(),
+      }),
+    ),
+    window: z.object({ since: z.string(), until: z.string() }),
+  }),
+});
+
+export type SkillsUsageInput = z.input<typeof skillsUsageRpc.input>;
+export type SkillsUsage = z.infer<typeof skillsUsageRpc.output>;
+export type SkillUsage = SkillsUsage["skills"][number];

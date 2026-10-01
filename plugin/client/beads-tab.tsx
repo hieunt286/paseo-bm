@@ -3,12 +3,14 @@
  * workspace panel Paseo lists in the "+" menu of the tab bar — the dropdown on
  * desktop and the "New tab" screen on mobile.
  *
- * It is the workspace's project page of Work (autonomy design §A.12,
- * experience concept §3): Requests · Beads · Agents, opened on Beads. A
- * workspace panel cannot open the Beads Manager surface, so the page is drawn
- * here, without a back button or a title: the tab already lives in its
- * workspace. Its data stays in the React Query cache under Work's keys, so the
- * surface and the tab share one read.
+ * It is the workspace's project page of Projects (autonomy design §A.12,
+ * experience concept §3, change-014 outcome 5): Overview · Requests · Beads ·
+ * Metrics · Agents, opened on Beads. A workspace panel cannot open the Beads
+ * Manager surface, so the page is drawn here, without a back button or a
+ * title (and its Overview names the autonomy level without a way to
+ * Settings): the tab already lives in its workspace. Its data stays in the
+ * React Query cache under the same keys, so the surface and the tab share one
+ * read.
  *
  * Client rules: React Native primitives only, colours from `theme.colors`, no
  * Node import, no `server/` import.

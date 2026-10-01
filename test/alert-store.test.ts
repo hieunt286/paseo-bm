@@ -52,14 +52,11 @@ describe("the alerts file", () => {
       "pairing-mismatch",
       "outdated-agent",
       "fallback-failed",
-      "autonomy-demoted",
       "coordination-off",
       "boundary-off",
     ]);
     // Compaction or handoff switched off below A-12's target (§G.3, §G.7): one per mechanism, for every project.
     expect(alertKeyOf("coordination-off", null, "compact")).toBe("coordination-off:-:compact");
-    // A demoted class is keyed by project and class (autonomy design §B.9).
-    expect(alertKeyOf("autonomy-demoted", WS, "scope")).toBe(`autonomy-demoted:${WS}:scope`);
     expect(alertKeyOf("stuck", WS, "agent-w")).toBe(`stuck:${WS}:agent-w`);
     expect(alertKeyOf("pairing-mismatch", null, "agent-w")).toBe("pairing-mismatch:-:agent-w");
     // Two agents wrote one file in overlapping turns (§F.1): keyed by project and file, relative to the workspace folder.
@@ -79,22 +76,15 @@ describe("the alerts file", () => {
     expect(s.raise({ workspaceId: WS, kind: "writers-observed", subject: "src/math.js" })).toMatchObject({ raised: true, alert: { since: iso(T0 + 120_000) } });
   });
 
-  it("keeps one autonomy-demoted alert per project and class, cleared by what ends it and raised afresh by the next demotion", () => {
+  it("skips an alert of the removed autonomy-demoted kind (ADR-025) when it reads the file, and drops it at the next write", () => {
+    mkdirSync(join(home, INBOX_DIR_NAME), { recursive: true });
+    const old = { workspaceId: WS, kind: "autonomy-demoted", subject: "scope", since: iso(T0), clearedAt: null, detail: "Scope decisions are back in Shadow." };
+    const kept = { workspaceId: WS, kind: "stuck", subject: "agent-w", since: iso(T0), clearedAt: null };
+    writeFileSync(file(), JSON.stringify({ version: 1, entries: { [`autonomy-demoted:${WS}:scope`]: old, [`stuck:${WS}:agent-w`]: kept } }));
     const s = store();
-    const detail = "Scope decisions are back in Shadow: q:req-1:Q1, answered for you by the recommended option, was overridden by you.";
-    expect(s.raise({ workspaceId: WS, kind: "autonomy-demoted", subject: "scope", detail }).raised).toBe(true);
-    expect(s.raise({ workspaceId: WS, kind: "autonomy-demoted", subject: "scope", detail }).raised).toBe(false);
-    expect(s.raise({ workspaceId: WS, kind: "autonomy-demoted", subject: "preference" }).raised).toBe(true);
-    expect(s.raise({ workspaceId: "wks_2", kind: "autonomy-demoted", subject: "scope" }).raised).toBe(true);
-    expect(s.clearWhere((alert) => alert.kind === "autonomy-demoted" && alert.workspaceId === WS && alert.subject === "scope")).toEqual([
-      alertKeyOf("autonomy-demoted", WS, "scope"),
-    ]);
-    expect(s.list({ open: true, kinds: ["autonomy-demoted"] }).map((alert) => alert.key)).toEqual([
-      alertKeyOf("autonomy-demoted", WS, "preference"),
-      alertKeyOf("autonomy-demoted", "wks_2", "scope"),
-    ]);
-    clock = T0 + 60_000;
-    expect(s.raise({ workspaceId: WS, kind: "autonomy-demoted", subject: "scope" })).toMatchObject({ raised: true, alert: { since: iso(T0 + 60_000), clearedAt: null } });
+    expect(s.list({ open: true }).map((alert) => alert.key)).toEqual([`stuck:${WS}:agent-w`]);
+    expect(s.raise({ workspaceId: WS, kind: "danger", subject: "agent-w" }).raised).toBe(true);
+    expect(readFileSync(file(), "utf8")).not.toContain("autonomy-demoted");
   });
 
   it("creates nothing on a read, then a 0700 folder and a 0600 file on the first write, and cleanup deletes it", () => {

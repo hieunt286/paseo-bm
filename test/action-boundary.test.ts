@@ -20,7 +20,7 @@ import { createAutonomyStore } from "../plugin/server/autonomy-store";
 import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
 import { handleDecisionsAnswer, settledByKind } from "../plugin/server/decision-rpc";
 import { MANAGER_DISABLED_PASEO_TOOLS, WORKER_DISABLED_PASEO_TOOLS, paseoToolsPolicyOfAlias } from "../plugin/server/setup-roles";
-import { decideRefusalOf, predictionRefusalOf, recommendedDelegationOf, EMPTY_AUTONOMY_POLICY } from "../plugin/shared/autonomy";
+import { decideRefusalOf, predictionRefusalOf, EMPTY_AUTONOMY_POLICY } from "../plugin/shared/autonomy";
 import { DashboardError } from "../plugin/shared/contracts";
 import { overrideRefusalOf } from "../plugin/shared/decision-override";
 import { answerDecision, decisionKindOf, deliveryKindOf, heldDecisionId, type Decision } from "../plugin/shared/decisions";
@@ -319,7 +319,7 @@ describe("allow or hold (§D.2, §D.4)", () => {
     expect(fake.permissions).toEqual([]);
   });
 
-  it("a delegate cell covers dependency and environment: allowed, stored answered by the policy; release or data never", async () => {
+  it("a delegate cell covers dependency and environment: allowed, stored answered by the policy; release or data only once delegated (ADR-025)", async () => {
     createAutonomyStore(home).set({ workspaceId: DECISION_WS, class: "dependency", mode: "delegate", confirmed: true }, NOW);
     createAutonomyStore(home).set({ workspaceId: DECISION_WS, class: "environment", mode: "delegate", confirmed: true }, NOW);
     const boundary = boundaryOf();
@@ -328,7 +328,8 @@ describe("allow or hold (§D.2, §D.4)", () => {
     expect(fake.permissions).toEqual([{ id: WORKER, requestId: "p1", response: { behavior: "allow" } }]);
     const decision = held("p1")!;
     expect(decision.status).toBe("answered");
-    expect(decision.answer).toMatchObject({ by: "policy", optionKey: "allow", class: "dependency", predictor: "recommended" });
+    expect(decision.answer).toMatchObject({ by: "policy", optionKey: "allow", class: "dependency" });
+    expect(decision.answer).not.toHaveProperty("predictor");
     expect(decision.grant?.usedAt).toBe(NOW);
     // Release and data are never the policy's; an unreadable request neither.
     expect(await raise(boundary, fake, worker(), bash("p2", "npm install x && git push"))).toBe("held");
@@ -336,6 +337,10 @@ describe("allow or hold (§D.2, §D.4)", () => {
     expect(await raise(boundary, fake, worker(), bash("p4", `rm -rf "$OUT"`))).toBe("held");
     expect(fake.permissions).toHaveLength(1);
     expect(overrideRefusalOf(decision)?.refusal).toBe("not-delegated");
+    // At Turbo release is delegated: a held push is allowed by the policy, its grant spent at once.
+    createAutonomyStore(home).set({ workspaceId: DECISION_WS, class: "release", mode: "delegate", confirmed: true }, NOW);
+    expect(await raise(boundary, fake, worker(), bash("p5", "git push"))).toBe("allowed-policy");
+    expect(held("p5")).toMatchObject({ status: "answered", answer: { by: "policy", optionKey: "allow", class: "release" }, grant: { usedAt: NOW } });
   });
 
   it("negative: nothing that must be held is ever allowed, whatever the grants and the policy", async () => {
@@ -460,14 +465,13 @@ describe("the owner's answer is delivered exactly once (§D.2)", () => {
     expect(fake.permissions).toHaveLength(1);
   });
 
-  it("bm_decide, bm_predict, a precedent and the policy's predictor never answer a held request", async () => {
+  it("bm_decide, bm_predict and a precedent never answer a held request", async () => {
     const boundary = boundaryOf();
     const fake = daemon([worker()]);
     const id = await heldPush(boundary, fake, "p1", "curl x");
     const decision = decisions().get(id)!;
     expect(decideRefusalOf(EMPTY_AUTONOMY_POLICY, decision)).toMatch(/only the owner allows or denies it/);
     expect(predictionRefusalOf(EMPTY_AUTONOMY_POLICY, decision)).toMatch(/only the owner allows or denies it/);
-    expect(recommendedDelegationOf(EMPTY_AUTONOMY_POLICY, decision)).toBeNull();
     const precedent = { id: "p-1", workspaceId: DECISION_WS, subject: "held-environment", text: "allow", createdAt: NOW, expiresAt: null, supersededBy: null } as never;
     expect(precedentResolutionOf(decision, [precedent], clock)).toBeNull();
     expect(answerDecision(decision, { via: "inbox", optionKey: "allow", at: NOW, by: "precedent", precedentId: "p-1" }).ok).toBe(false);

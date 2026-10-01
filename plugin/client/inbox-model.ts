@@ -21,15 +21,13 @@
  *    joins that line instead of a second one.
  * 3. **Alerts**: the open alerts (`inbox.alerts`), in `ALERT_KINDS` order and
  *    oldest first, plus one follow-up per switched Reviewer whose replacement
- *    never appeared (`fallback.act` resend). A delegated class taken back
- *    after a reversal (`autonomy-demoted`, §B.4) names the class; why is in
- *    its detail, on a tap. Compaction or handoff switched off below A-12's
+ *    never appeared (`fallback.act` resend). Compaction or handoff switched off below A-12's
  *    target (`coordination-off`, §G.3) names the mechanism, for all projects;
  *    its figures and the way back are in its detail. Two agents that edited
  *    one file in overlapping turns (`writers-observed`, §F.1) open the
  *    project; the file and the agents are in its detail.
  *
- * An empty Inbox is one sentence with a way to Work. The Inbox tab's label
+ * An empty Inbox is one sentence with a way to Projects. The Inbox tab's label
  * carries the count of unsettled decisions and alerts (DQ-3: no sidebar badge).
  *
  * Pure: no React, no React Native, no `server/` import. Ids appear only in
@@ -38,13 +36,12 @@
 import type { DigestIntervention, DigestTargetRole, FallbackIncident } from "../shared/contracts";
 import { ALERT_KINDS, type Alert, type AlertKind } from "../shared/alerts";
 import { isDecidedForOwner, overrideIdOf } from "../shared/decision-override";
-import { decisionClassOf, decisionClassSchema, decisionKindOf, isAnswerable, type Decision } from "../shared/decisions";
+import { decisionClassOf, decisionKindOf, isAnswerable, policyPredictorOf, type Decision } from "../shared/decisions";
 import type { ExpectedOutcome, InterventionKind, InterventionOutcome, InterventionTrigger } from "../shared/interventions";
 import type { WorkerSignal } from "../shared/orchestrator";
 import { decisionCardOf, type ChatCard, type DecisionSeed } from "./chat-card-parse";
 import type { Tone } from "./tone";
 import { ago, formatDuration, localTimeText } from "./format";
-import { CLASS_LABELS } from "./settings-autonomy-model";
 import { providerLabel } from "./settings-roles-model";
 import { timeOrZero } from "../shared/time";
 import { plural, shorten } from "../shared/text";
@@ -62,10 +59,10 @@ export const RESEND_FOLLOW_UP_MS = 24 * 60 * 60 * 1000;
 export const DECIDED_FOR_YOU_EMPTY = "Nothing was decided for you since you last looked.";
 
 /** Under Decided for you when `inbox.digest` had more than it returned. */
-export const DECIDED_FOR_YOU_TRUNCATED = "More was decided for you than the Inbox shows; Work has every decision.";
+export const DECIDED_FOR_YOU_TRUNCATED = "More was decided for you than the Inbox shows; each project's Requests tab has every decision.";
 
 /** Under Decided for you when `inbox.digest` had more interventions than it returned (§G.3). */
-export const INTERVENTIONS_TRUNCATED = "The Orchestrator intervened more often than the Inbox shows; Insights → Coordination counts every intervention.";
+export const INTERVENTIONS_TRUNCATED = "The Orchestrator intervened more often than the Inbox shows; a project's Metrics → Coordination counts every intervention.";
 
 /** What an overridden line says while the owner's answer is awaited, and once it is not any more. */
 export const OVERRIDE_WAITING = "Overridden: it waits for your answer in Needs you.";
@@ -238,8 +235,6 @@ export const ALERT_WORDS: Readonly<Record<AlertKind, { what: string; tone: Tone;
   "pairing-mismatch": { what: "An agent was created by the wrong role", tone: "warning", opens: "agent", agentWord: "agent" },
   "outdated-agent": { what: "An agent runs on older instructions", tone: "muted", opens: "agent", agentWord: "agent" },
   "fallback-failed": { what: "A fallback action failed; the agent is still stopped", tone: "danger", opens: "project", agentWord: "" },
-  // Autonomy design §B.4: `autonomyDemotedWhat` names the class when the subject is one.
-  "autonomy-demoted": { what: "A delegated class went back to Shadow after a reversal", tone: "warning", opens: null, agentWord: "" },
   // Autonomy design §G.3, §G.7: `coordinationOffWhat` names the mechanism.
   "coordination-off": { what: "Compaction or handoff was switched off: below its target", tone: "warning", opens: null, agentWord: "" },
   // Autonomy design §D.2 (change-010 C6): a Worker or Reviewer only watched in a project whose boundary is on.
@@ -255,12 +250,6 @@ export function coordinationOffWhat(subject: string): string {
 
 /** Where an alert about every project is, instead of a project's name. */
 export const ALL_PROJECTS = "all projects";
-
-/** An `autonomy-demoted` alert's line, naming its class (its subject). */
-export function autonomyDemotedWhat(subject: string): string {
-  const decisionClass = decisionClassSchema.safeParse(subject);
-  return decisionClass.success ? `${CLASS_LABELS[decisionClass.data]} decisions went back to Shadow after a reversal` : ALERT_WORDS["autonomy-demoted"].what;
-}
 
 const ROLE_WORDS: Readonly<Record<FallbackIncident["role"], string>> = { manager: "Manager", worker: "Worker", reviewer: "Reviewer" };
 
@@ -402,8 +391,7 @@ function alertAction(alert: Alert, can: InboxInput["can"]): InboxAction | null {
 /** One alert as a row: what happened and where, its time, the detail on a tap. */
 export function alertRowOf(alert: Alert, input: Pick<InboxInput, "projectOf" | "can" | "now">): InboxAlertRow {
   const words = ALERT_WORDS[alert.kind];
-  const what =
-    alert.kind === "autonomy-demoted" ? autonomyDemotedWhat(alert.subject) : alert.kind === "coordination-off" ? coordinationOffWhat(alert.subject) : words.what;
+  const what = alert.kind === "coordination-off" ? coordinationOffWhat(alert.subject) : words.what;
   const where = alert.kind === "coordination-off" ? ALL_PROJECTS : projectName(alert.workspaceId, input.projectOf);
   const text = `${what} · ${where}`;
   const time = ago(alert.since, input.now);
@@ -487,11 +475,16 @@ export function needsYouGroups(input: Pick<InboxInput, "decisions" | "settledHer
 // Decided for you (autonomy design §B.7; PRD REQ-125).
 // ---------------------------------------------------------------------------
 
-/** Who answered for the owner, in the line's words: the policy's predictor, or a precedent. */
-export function decidedByWords(decision: Pick<Decision, "answer">): string {
-  const answer = decision.answer;
-  if (answer?.by === "precedent") return "your precedent";
-  return answer?.predictor === "orchestrator" ? "your policy (the Orchestrator)" : "your policy (recommended option)";
+/**
+ * Who answered for the owner, in the line's words (ADR-025): a precedent;
+ * the Orchestrator, the policy's only predictor; "your earlier policy" for an
+ * answer an older build stored with the recommended option as predictor;
+ * "your policy" for a held request the action boundary allowed.
+ */
+export function decidedByWords(decision: Pick<Decision, "id" | "answer">): string {
+  if (decision.answer?.by === "precedent") return "your precedent";
+  const predictor = policyPredictorOf(decision);
+  return predictor === "orchestrator" ? "the Orchestrator" : predictor === "recommended" ? "your earlier policy" : "your policy";
 }
 
 /** A question's first line, shortened: an Orchestrator's decision carries its recommendation below it. */

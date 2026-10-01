@@ -35,8 +35,9 @@
  * (`from: owner`, which builds before Phase 1 sent) carries no limits: it is
  * the owner's word. A `policy:<class>` authority — the owner's policy, for a
  * command of the Orchestrator's own or the prepared command of an option the
- * policy chose (autonomy design §B.5, §B.9) — never approves push, publish,
- * deploy, real-data, migration, security or cost: only a decision's grant does.
+ * policy chose (autonomy design §B.5, §B.9) — approves what the classes the
+ * owner delegated cover, push, publish, deploy, real-data, migration, security
+ * and cost included where those classes are delegated (ADR-025).
  *
  * A handoff (autonomy design §G.6, change-008 C3) is the one command on the
  * owner's Settings → Coordination switch: `intent: handoff` with
@@ -67,7 +68,7 @@
  * Pure and environment-neutral: its one import is the decision vocabulary
  * (`decisions.ts`, Zod and plain values), so the chat cards can use it.
  */
-import { CONFIRM_EFFECTS, DECISION_CLASSES, DECISION_ID_PATTERN, EFFECTS, realEffects, type DecisionClass, type Effect } from "./decisions";
+import { DECISION_CLASSES, DECISION_ID_PATTERN, EFFECTS, realEffects, type DecisionClass, type Effect } from "./decisions";
 
 /** The block's first line, alone on it. */
 export const COMMAND_MARKER = "BM-COMMAND";
@@ -392,9 +393,6 @@ export function commandInputProblems(input: CommandInput): string[] {
     problems.push(...handoffShapeProblems({ from: input.from, to: input.to, copy: input.copy === true, intent: input.intent ?? "other", authority, effects: realEffects(effects.filter(isEffect)), approved: realEffects(approved.filter(isEffect)) }));
   } else if (input.from === "owner" && authority !== "owner") {
     problems.push("the owner's own command has authority owner");
-  } else if (policyApprovesOwnerOnly(authority, realEffects(approved.filter(isEffect)))) {
-    const held = realEffects(approved.filter(isEffect)).filter((effect) => CONFIRM_EFFECTS.includes(effect));
-    problems.push(`the owner's policy never approves ${held.join(", ")}: only the grant of a decision the owner answered does (authority ${DECISION_AUTHORITY_PREFIX}<id>)`);
   }
   return problems;
 }
@@ -422,16 +420,6 @@ function handoffShapeProblems(command: {
   if (command.from !== "orchestrator" || command.to !== "manager" || command.copy) problems.push(`a handoff goes from the Orchestrator to a Manager`);
   if (command.effects.length > 0 || command.approved.length > 0) problems.push("a handoff declares and approves no effect");
   return problems;
-}
-
-/**
- * True when a `policy:<class>` authority approves a release, data, security or
- * cost effect (`CONFIRM_EFFECTS`): only the owner's grant covers those
- * (autonomy design §A.7, §B.5; PRD REQ-121 c, REQ-112), so the builder and the
- * reader refuse such a block, whatever produced it.
- */
-function policyApprovesOwnerOnly(authority: unknown, approved: readonly Effect[]): boolean {
-  return typeof authority === "string" && policyClassOfAuthority(authority) !== null && approved.some((effect) => CONFIRM_EFFECTS.includes(effect));
 }
 
 /** The command as the block will carry it: one-line fields collapsed, the body trimmed, the v2 fields and limits filled in. Throws on a problem. */
@@ -557,7 +545,6 @@ export function parseCommandBlock(text: unknown): CommandBlock | null {
     if (intent === null || effects === null || approved === null || !isReadCommandAuthority(authority)) return null;
     if (approved.some((effect) => !effects.includes(effect))) return null;
     if (from === "owner" && authority !== "owner") return null;
-    if (policyApprovesOwnerOnly(authority, approved)) return null;
     if (handoffShapeProblems({ from, to, copy, intent, authority, effects, approved }).length > 0) return null;
     // Phase 1 history: a block on Autopilot's authority left via Autopilot.
     if (authority === RETIRED_AUTOPILOT && via !== RETIRED_AUTOPILOT) return null;

@@ -1,6 +1,13 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { autonomyPolicySchema, autonomySetBoundaryInputSchema, autonomySetChallengerInputSchema, autonomySetInputSchema } from "../autonomy";
+import {
+  autonomyLevelReadingSchema,
+  autonomyPolicySchema,
+  autonomySetBoundaryInputSchema,
+  autonomySetChallengerInputSchema,
+  autonomySetInputSchema,
+  autonomySetLevelInputSchema,
+} from "../autonomy";
 import { agreementLedgerSchema } from "../autonomy-ledger";
 import { precedentSaveInputSchema, precedentSchema } from "../precedents";
 import { workspaceIdSchema } from "./persisted";
@@ -23,9 +30,7 @@ import { workspaceIdSchema } from "./persisted";
  * `workspaceId`: per project × class × predictor, the owner's answers counted,
  * agreed and unread, their first and last time and the decisions reversed;
  * and the decisions the policy or a precedent answered, overridden and
- * reversed. A class the policy demoted counts only the owner's answers given
- * since its last demotion (§B.4); the delegated figures are whole. Numbers
- * and times only: never a prediction, so never one of an unsettled decision.
+ * reversed. Numbers and times only: never a prediction, so never one of an unsettled decision.
  * No usable data folder reads as none.
  */
 export const autonomyLedgerRpc = defineRpc({
@@ -45,26 +50,45 @@ export type AutonomyLedgerOutput = z.infer<typeof autonomyLedgerRpc.output>;
 
 /**
  * `autonomy.policy` — reads only. The whole policy, or one project's with
- * `workspaceId`. An absent cell is `owner`; no usable data folder, or a store
- * that cannot be read, reads as the empty policy (every cell `owner`).
+ * `workspaceId`, and `levels`: each project's level read back from its cells
+ * (`levelOf`, ADR-025) — 0–4, or `custom` when they match no level — for every
+ * project the policy names, and for `workspaceId` always (an unknown project
+ * is 0). An absent cell is `owner`; no usable data folder, or a store that
+ * cannot be read, reads as the empty policy (every cell `owner`).
  */
 export const autonomyPolicyRpc = defineRpc({
   name: "autonomy.policy",
   input: z.object({ workspaceId: workspaceIdSchema.optional() }),
+  output: z.object({ policy: autonomyPolicySchema, levels: z.record(z.string().min(1), autonomyLevelReadingSchema) }),
+});
+
+/**
+ * `autonomy.set-level` — one project's level `{ workspaceId, level, confirmed? }`
+ * (ADR-025), returning the whole policy. Writes in one write the level's
+ * pattern: its classes `delegate` (the Orchestrator decides them), every other
+ * class `shadow` for levels 1–4 and `owner` for 0, and the prediction switch
+ * on for 1–4, off for 0; the action boundary is untouched. Turbo and Full auto
+ * (3, 4) without `confirmed: true` → `E_AUTONOMY_NOT_CONFIRMED`; an unknown
+ * project or a level outside 0–4 → `E_AUTONOMY_INVALID`; no usable data folder
+ * → `E_DATA_HOME_UNAVAILABLE`; a store written by a newer paseo-bm, or one
+ * that cannot be written → `E_AUTONOMY_WRITE_FAILED`. Nothing is written on any
+ * refusal. Sends nothing to any agent.
+ */
+export const autonomySetLevelRpc = defineRpc({
+  name: "autonomy.set-level",
+  input: autonomySetLevelInputSchema,
   output: z.object({ policy: autonomyPolicySchema }),
 });
 
 /**
  * `autonomy.set` — one cell `{ workspaceId, class, mode }`, returning the whole
- * policy. `delegate` for release, data, security or cost →
- * `E_AUTONOMY_OWNER_ONLY`, confirmed or not; `delegate` without
- * `confirmed: true` → `E_AUTONOMY_NOT_CONFIRMED`; it records `predictor`
- * (default `recommended`). An unknown project, class or mode →
- * `E_AUTONOMY_INVALID`; no usable data folder → `E_DATA_HOME_UNAVAILABLE`; a
- * store written by a newer paseo-bm, or one that cannot be written →
- * `E_AUTONOMY_WRITE_FAILED`. Nothing is written on any refusal. No agreement
- * threshold is checked (ADR-023). The owner's change of a cell ends its
- * `autonomy-demoted` alert (§B.4). Sends nothing to any agent.
+ * policy. Any class may be `delegate` (ADR-025), the Orchestrator deciding it;
+ * `delegate` without `confirmed: true` → `E_AUTONOMY_NOT_CONFIRMED`. An
+ * unknown project, class or mode → `E_AUTONOMY_INVALID`; no usable data folder
+ * → `E_DATA_HOME_UNAVAILABLE`; a store written by a newer paseo-bm, or one
+ * that cannot be written → `E_AUTONOMY_WRITE_FAILED`. Nothing is written on any
+ * refusal. No agreement threshold is checked (ADR-023). Sends nothing to any
+ * agent.
  */
 export const autonomySetRpc = defineRpc({
   name: "autonomy.set",
@@ -74,9 +98,8 @@ export const autonomySetRpc = defineRpc({
 
 /**
  * `autonomy.reset` — every class of one project back to `owner` in one write
- * (REQ-121 d), with no confirmation; other projects, the challenger and the
- * classes' last demotions are untouched, and the project's `autonomy-demoted`
- * alerts end. Returns the whole policy. Same refusals as `autonomy.set`'s
+ * (REQ-121 d), with no confirmation; other projects and the challenger are
+ * untouched. Returns the whole policy. Same refusals as `autonomy.set`'s
  * store ones.
  */
 export const autonomyResetRpc = defineRpc({
@@ -89,7 +112,7 @@ export const autonomyResetRpc = defineRpc({
  * `autonomy.set-challenger` — one project's Orchestrator challenger on or off
  * (autonomy design §B.3, §B.9; off by default, DQ-4), returning the whole
  * policy. No confirmation: it only asks the Orchestrator to predict the
- * owner's answers, which the owner never sees before answering. An unknown
+ * owner's answers, shown to the owner as its proposal. An unknown
  * project or a value that is not a boolean → `E_AUTONOMY_INVALID`; no usable
  * data folder → `E_DATA_HOME_UNAVAILABLE`; a store written by a newer
  * paseo-bm, or one that cannot be written → `E_AUTONOMY_WRITE_FAILED`.

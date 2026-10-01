@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { DECISION_CLASSES, HARD_OWNER_CLASSES } from "../plugin/shared/decisions";
+import { DECISION_CLASSES } from "../plugin/shared/decisions";
 import { checkAutonomySet } from "../plugin/shared/autonomy";
 import type { OwnerLogEntry } from "../scripts/eval/owner";
 import { legacyChatWaitingRpc } from "../scripts/eval/legacy-contracts";
@@ -130,18 +130,19 @@ describe("the tree's scenario policy (owner decision E-2, evaluation design §11
   /** RPCs no build the suite measures as the tree has any more (autonomy design §A.14, §B.8). */
   const RETIRED = ["orchestrator.set-autopilot", "chat.waiting", "orchestrator.state", "orchestrator.ask", "orchestrator.approve", "orchestrator.dismiss", "orchestrator.command", "answers.mark", "answers.marks"];
 
-  it("delegates exactly the classes that may be delegated to the Orchestrator, confirmed, on the run's workspace", () => {
+  it("delegates Cruise's classes (level 2, ADR-025) to the Orchestrator, confirmed, on the run's workspace", () => {
     const calls = scenarioPolicyCalls(parseVersion("tree"), "ws-run-1");
-    const delegable = DECISION_CLASSES.filter((decisionClass) => !HARD_OWNER_CLASSES.includes(decisionClass));
+    const ownerAtCruise = ["security", "data", "release", "cost"];
+    const delegable = DECISION_CLASSES.filter((decisionClass) => !ownerAtCruise.includes(decisionClass));
     expect(delegable).toHaveLength(5);
     expect(calls.map((call) => call.method)).toEqual(delegable.map(() => "autonomy.set"));
     expect(calls.map((call) => call.input["class"])).toEqual(delegable);
     for (const call of calls) {
-      expect(call.input).toEqual({ workspaceId: "ws-run-1", class: call.input["class"], mode: "delegate", confirmed: true, predictor: "orchestrator" });
-      // The plugin's own check accepts each one as it is sent: never a hard-owner class, always confirmed.
+      expect(call.input).toEqual({ workspaceId: "ws-run-1", class: call.input["class"], mode: "delegate", confirmed: true });
+      // The plugin's own check accepts each one as it is sent, confirmed.
       expect(checkAutonomySet(call.input)).toEqual({ change: call.input });
     }
-    for (const hardOwner of HARD_OWNER_CLASSES) expect(calls.some((call) => call.input["class"] === hardOwner), hardOwner).toBe(false);
+    for (const ownerClass of ownerAtCruise) expect(calls.some((call) => call.input["class"] === ownerClass), ownerClass).toBe(false);
   });
 
   it("the tree calls no retired RPC; the 0.4.1 run sets nothing and keeps its chat.waiting", () => {

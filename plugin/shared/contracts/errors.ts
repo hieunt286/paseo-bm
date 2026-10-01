@@ -61,11 +61,10 @@ export const DASHBOARD_ERROR_CODES = [
   // a value out of its bounds; the store cannot be written.
   "E_COORDINATION_INVALID",
   "E_COORDINATION_WRITE_FAILED",
-  // Autonomy design §B.2, §B.9 (ADR-018): `autonomy.set` / `autonomy.reset` —
-  // `delegate` for release, data, security or cost; `delegate` without the
-  // owner's confirmation; an unknown project, class or mode; the policy store
-  // cannot be written.
-  "E_AUTONOMY_OWNER_ONLY",
+  // Autonomy design §B.2, §B.9 (ADR-018, ADR-025): `autonomy.set-level` /
+  // `autonomy.set` / `autonomy.reset` — Turbo or Full auto, or `delegate`,
+  // without the owner's confirmation; an unknown project, level, class or
+  // mode; the policy store cannot be written.
   "E_AUTONOMY_NOT_CONFIRMED",
   "E_AUTONOMY_INVALID",
   "E_AUTONOMY_WRITE_FAILED",
@@ -81,6 +80,11 @@ export const DASHBOARD_ERROR_CODES = [
   // Inbox's last-opened time (`inbox/seen.json`) cannot be written.
   "E_DECISION_NOT_DELEGATED",
   "E_INBOX_WRITE_FAILED",
+  // Change-014 outcome 3: `decisions.ask` (Ask back) — a decision whose asker
+  // cannot be asked (a held request, a fallback incident, an override); a
+  // blank question.
+  "E_DECISION_NOT_ASKABLE",
+  "E_DECISION_ASK_INVALID",
 ] as const;
 
 export type DashboardErrorCode = (typeof DASHBOARD_ERROR_CODES)[number];

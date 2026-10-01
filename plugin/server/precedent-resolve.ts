@@ -6,18 +6,18 @@
  * - **At open** (`resolveByPrecedent`), before any policy delegation: a
  *   decision whose `subject` equals an active precedent's — the workspace's
  *   before a global one — is answered by it, `by: precedent` with its
- *   `precedentId` and a one-line reason, unless its class is owner-fixed
- *   (release, data, security, cost). The answer is the option whose label is
- *   the precedent's text, else the text as the owner's own words, with the
- *   grant an owner answer of that form gives — never a hard-owner effect, since
- *   such an effect raises the class. `via` is `inbox`: nothing was typed in a
+ *   `precedentId` and a one-line reason, whatever its class (ADR-025). The
+ *   answer is the option whose label is the precedent's text, else the text as
+ *   the owner's own words, with the grant an owner answer of that form gives.
+ *   `via` is `inbox`: nothing was typed in a
  *   chat, so the answer is delivered like one the owner gave in the Inbox. The
  *   caller hands the answered decision to `onSettled`; a precedent's answer is
  *   not an intervention of the Orchestrator's and is not logged as one.
  *   Called where decisions open: the materialiser (`q:`), `bm_ask_owner`
  *   (`o:`) and the fallback incidents (`f:`, when their delivery can run).
- * - **Owner-fixed**: the decision stays open and nothing is written; its card
- *   shows the precedent as a suggestion (`client/chat-card-precedent.ts`).
+ * - **Suggested only** (a fallback incident's decision whose options the
+ *   precedent names none of): the decision stays open and nothing is written;
+ *   its card shows the precedent as a suggestion (`client/chat-card-precedent.ts`).
  * - **On the owner's answer** (`supersedePrecedentsBy`): an answer on the same
  *   subject, where the precedent holds, whose text differs from it supersedes
  *   it (`supersededBy` = the decision's id), so the next decision meets the
@@ -64,9 +64,9 @@ function activePrecedentsOf(workspaceId: string, deps: PrecedentResolveDeps): Pr
 
 /**
  * Resolves a decision that has just opened by the active precedent on its
- * subject, when one bears on it and its class is not owner-fixed (see the
- * module comment). An owner-fixed decision, a decision with no subject or no
- * match, or one no longer `open`, is returned as it came.
+ * subject, when one bears on it (see the module comment). A decision it only
+ * suggests, a decision with no subject or no match, or one no longer `open`,
+ * is returned as it came.
  */
 export function resolveByPrecedent(decision: Decision, deps: PrecedentResolveDeps): PrecedentResolveResult {
   const log = deps.log ?? defaultLog;

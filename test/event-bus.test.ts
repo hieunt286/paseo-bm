@@ -102,7 +102,7 @@ const inScope = (workspaceId = WS, mode: "shadow" | "delegate" = "shadow") =>
  * `question(n)` is `reversible-technical`.
  */
 const delegateToOrchestrator = (workspaceId = WS, decisionClass: DecisionClass = "reversible-technical") =>
-  createAutonomyStore(home).set({ workspaceId, class: decisionClass, mode: "delegate", confirmed: true, predictor: "orchestrator" }, clock.toISOString());
+  createAutonomyStore(home).set({ workspaceId, class: decisionClass, mode: "delegate", confirmed: true }, clock.toISOString());
 const decisions = () => createDecisionStore(home, { log: () => {} });
 const alerts = () => createAlertStore(home, { now: () => clock });
 const orchestratorIdle = async (fake: ReturnType<typeof daemon>) => {
@@ -172,8 +172,8 @@ describe("events: types, keys, lines (design §A.8)", () => {
     const delegated: AutonomyPolicy = {
       projects: {
         [WS]: {
-          "reversible-technical": { mode: "delegate", predictor: "orchestrator", at: "T" },
-          environment: { mode: "delegate", predictor: "orchestrator", at: "T" },
+          "reversible-technical": { mode: "delegate", at: "T" },
+          environment: { mode: "delegate", at: "T" },
         },
       },
       challenger: {},
@@ -199,7 +199,7 @@ describe("events: types, keys, lines (design §A.8)", () => {
   it("wakes only for a judgement: release, data, security and cost wait for the owner (X-4), even with every other class delegated to the Orchestrator", () => {
     const delegated: AutonomyPolicy = {
       projects: { [WS]: Object.fromEntries(
-          (["reversible-technical", "scope", "preference", "environment", "dependency"] as const).map((c) => [c, { mode: "delegate" as const, predictor: "orchestrator" as const, at: "T" }]),
+          (["reversible-technical", "scope", "preference", "environment", "dependency"] as const).map((c) => [c, { mode: "delegate" as const, at: "T" }]),
         ) },
       challenger: { [WS]: true },
     };
@@ -360,14 +360,14 @@ describe("the policy's scope (design §A.8 Scope, §B.2; change-007 C1)", () => 
     const policy: AutonomyPolicy = {
       projects: {
         [WS]: { scope: { mode: "shadow", at: "T" } },
-        [OTHER_WS]: { preference: { mode: "owner", at: "T" }, "reversible-technical": { mode: "delegate", predictor: "recommended", at: "T" } },
+        [OTHER_WS]: { preference: { mode: "owner", at: "T" }, "reversible-technical": { mode: "delegate", at: "T" } },
         [THIRD_WS]: { scope: { mode: "owner", at: "T" }, environment: { mode: "owner", at: "T" } },
-        // A delegated hard-owner class never reads (REQ-121 c): still all-owner.
-        [NONE_WS]: { release: { mode: "delegate", predictor: "recommended", at: "T" } },
+        // Any class may be delegated (ADR-025): a delegated release cell puts the project in the scope.
+        [NONE_WS]: { release: { mode: "delegate", at: "T" } },
       },
       challenger: { [THIRD_WS]: true },
     };
-    expect([...projectsAboveOwner(policy)].sort()).toEqual([WS, OTHER_WS].sort());
+    expect([...projectsAboveOwner(policy)].sort()).toEqual([WS, OTHER_WS, NONE_WS].sort());
     expect(projectsAboveOwner(EMPTY_AUTONOMY_POLICY)).toEqual(new Set());
   });
 
@@ -458,12 +458,12 @@ describe("the challenger's predictions (design §B.3, §B.9; change-007 C1)", ()
   const policy = (over: Partial<AutonomyPolicy> = {}): AutonomyPolicy => ({ projects: {}, challenger: { [WS]: true }, ...over });
   const asks = (events: BmEvent[]) => events.map((event) => (event.type === "decision.opened" ? event.asks : event.type));
 
-  it("asks for a prediction for an owner or shadow cell of a delegable class with the challenger on, and its line names bm_predict", () => {
+  it("asks for a prediction for an owner or shadow cell of any class with the challenger on, and its line names bm_predict", () => {
     // Every cell owner (nothing stored), the challenger on.
     const [owner] = decisionOpenedEventsOf([predictable(1)], policy());
     expect(owner).toEqual({ type: "decision.opened", workspaceId: WS, requestId: REQUEST, decisionId: `q:${REQUEST}:Q1`, askedBy: "agent-worker", asks: "prediction" });
     expect(eventLineOf(owner!)).toBe(
-      `- decision.opened — project ${WS}, request ${REQUEST}, decision q:${REQUEST}:Q1, asked by Worker agent-worker. A prediction is asked: read it with bm_decisions and give the option you expect the owner to choose with bm_predict. The owner decides it: answer nothing and tell the owner nothing.`,
+      `- decision.opened — project ${WS}, request ${REQUEST}, decision q:${REQUEST}:Q1, asked by Worker agent-worker. A prediction is asked: read it with bm_decisions and give the option you expect the owner to choose with bm_predict, with your reason in one line. The owner sees it as your proposal and decides: answer nothing.`,
     );
     // Same type and dedupe key as every decision.opened.
     expect(eventKeyOf(owner!)).toBe(`decision.opened:q:${REQUEST}:Q1`);
@@ -475,24 +475,21 @@ describe("the challenger's predictions (design §B.3, §B.9; change-007 C1)", ()
     expect(asks(decisionOpenedEventsOf([incident, own], policy()))).toEqual(["prediction"]);
   });
 
-  it("asks none with the challenger off, for a delegate cell, for a hard-owner class, or for a decision opened before predictions", () => {
+  it("asks none with the challenger off, for a delegate cell, or for a decision opened before predictions; a release, data, security or cost class is predicted too (ADR-025)", () => {
     // The challenger off (the default, DQ-4), or on for another project: an owner or shadow cell wakes nobody.
     const shadowOff = policy({ projects: { [WS]: { "reversible-technical": { mode: "shadow", at: "T" } } }, challenger: {} });
     for (const off of [EMPTY_AUTONOMY_POLICY, policy({ challenger: { [WS]: false } }), policy({ challenger: { [OTHER_WS]: true } }), shadowOff]) {
       expect(decisionOpenedEventsOf([predictable(1)], off)).toEqual([]);
     }
-    // A delegate cell is decided, not predicted: by the Orchestrator when it is its predictor, by code (at open) when it is the recommended option's.
-    const delegated = policy({ projects: { [WS]: { "reversible-technical": { mode: "delegate", predictor: "orchestrator", at: "T" } } } });
+    // A delegate cell is decided by the Orchestrator, not predicted.
+    const delegated = policy({ projects: { [WS]: { "reversible-technical": { mode: "delegate", at: "T" } } } });
     expect(asks(decisionOpenedEventsOf([predictable(1)], delegated))).toEqual(["decision"]);
-    const byCode = policy({ projects: { [WS]: { "reversible-technical": { mode: "delegate", predictor: "recommended", at: "T" } } } });
-    expect(decisionOpenedEventsOf([predictable(1)], byCode)).toEqual([]);
-    // Release, data, security, cost: never a prediction — by an option's effect or by the proposed class.
+    // Release, data, security, cost: predicted like any class with the challenger on, by an option's effect or the proposed class.
     const release = predictable(3, { options: [...LOCAL_OPTIONS, { key: "c", label: "Deploy", recommended: false, effects: ["deploy"] }] });
-    expect(decisionOpenedEventsOf([release], policy())).toEqual([]);
-    // A class only the owner decides wakes nobody, even proposed with no effect (autonomy design §B.5).
-    for (const hard of ["release", "data", "security", "cost"] as const) {
-      expect(decisionOpenedEventsOf([predictable(4, { class: hard })], policy()), hard).toEqual([]);
-      expect(decisionOpenedEventsOf([predictable(4, { class: hard })], EMPTY_AUTONOMY_POLICY), hard).toEqual([]);
+    expect(asks(decisionOpenedEventsOf([release], policy()))).toEqual(["prediction"]);
+    for (const decisionClass of ["release", "data", "security", "cost"] as const) {
+      expect(asks(decisionOpenedEventsOf([predictable(4, { class: decisionClass })], policy())), decisionClass).toEqual(["prediction"]);
+      expect(decisionOpenedEventsOf([predictable(4, { class: decisionClass })], EMPTY_AUTONOMY_POLICY), decisionClass).toEqual([]);
     }
     // A settled decision, one the Orchestrator predicted already, one opened before predictions: none.
     expect(decisionOpenedEventsOf([predictable(5, { status: "withdrawn", settledAt: at(1) })], policy())).toEqual([]);
@@ -516,7 +513,7 @@ describe("the challenger's predictions (design §B.3, §B.9; change-007 C1)", ()
     });
     await orchestratorIdle(fake);
     expect(fake.sends).toHaveLength(1);
-    expect(fake.sends[0]!.text.split("\n").slice(2)).toEqual([expect.stringContaining("with bm_predict. The owner decides it")]);
+    expect(fake.sends[0]!.text.split("\n").slice(2)).toEqual([expect.stringContaining("with bm_predict, with your reason in one line. The owner sees it as your proposal")]);
     expect(events.wakeEventsOf(ORCHESTRATOR)).toEqual([expect.objectContaining({ decisionId: `q:${REQUEST}:Q1`, asks: "prediction" })]);
   });
 
@@ -540,7 +537,7 @@ describe("the challenger's predictions (design §B.3, §B.9; change-007 C1)", ()
     for (let n = 1; n <= 5; n += 1) decisions().open(predictable(n, n === 2 ? { class: "scope" } : {}));
     expect((await events.turnRecorded(undefined, [1, 2, 3, 4, 5].map((n) => predictable(n, n === 2 ? { class: "scope" } : {})), fake.paseo)).published).toHaveLength(5);
     // Before the Orchestrator is idle: the owner delegates scope, answers Q3; the Orchestrator predicted Q4 already.
-    createAutonomyStore(home).set({ workspaceId: WS, class: "scope", mode: "delegate", confirmed: true, predictor: "orchestrator" }, clock.toISOString());
+    createAutonomyStore(home).set({ workspaceId: WS, class: "scope", mode: "delegate", confirmed: true }, clock.toISOString());
     decisions().transition(`q:${REQUEST}:Q3`, (current) => answerDecision(current, { via: "inbox", optionKey: "a", at: clock.toISOString() }), WS);
     decisions().transition(`q:${REQUEST}:Q4`, (current) => ({ ok: true, decision: { ...current, prediction: { recommended: { optionKey: "a" }, orchestrator: { optionKey: "a", reason: "r", at: clock.toISOString() } } } }), WS);
     await orchestratorIdle(fake);
@@ -566,7 +563,7 @@ describe("the delegation to the Orchestrator (design §B.5, §B.9; bead t9lm.11)
   });
 
   it("a delegate cell whose predictor is the Orchestrator raises decision.opened asking bm_decide, for a Worker's question and a fallback incident", () => {
-    const delegated = cellPolicy({ mode: "delegate", predictor: "orchestrator", at: "T" }, false);
+    const delegated = cellPolicy({ mode: "delegate", at: "T" }, false);
     const [opened] = decisionOpenedEventsOf([predictable(1)], delegated);
     expect(opened).toEqual({ type: "decision.opened", workspaceId: WS, requestId: REQUEST, decisionId: `q:${REQUEST}:Q1`, askedBy: "agent-worker", asks: "decision" });
     expect(eventLineOf(opened!)).toBe(
@@ -576,59 +573,48 @@ describe("the delegation to the Orchestrator (design §B.5, §B.9; bead t9lm.11)
     // A fallback incident is environment: asked when that class is delegated to the Orchestrator.
     const incident = makeDecision({ id: "f:fb-1", workspaceId: WS, requestId: null, askedBy: { role: "plugin", agentId: null }, options: LOCAL_OPTIONS });
     expect(decisionOpenedEventsOf([incident], delegated)).toEqual([]);
-    const environment: AutonomyPolicy = { projects: { [WS]: { environment: { mode: "delegate", predictor: "orchestrator", at: "T" } } }, challenger: {} };
+    const environment: AutonomyPolicy = { projects: { [WS]: { environment: { mode: "delegate", at: "T" } } }, challenger: {} };
     expect(asks(decisionOpenedEventsOf([incident], environment))).toEqual(["decision"]);
     // Its own decision is the owner's whatever the cell.
     expect(decisionOpenedEventsOf([makeDecision({ id: "o:1", workspaceId: WS, options: LOCAL_OPTIONS })], delegated)).toEqual([]);
   });
 
-  it("per cell: delegate to the Orchestrator asks bm_decide; owner or shadow asks bm_predict with the challenger on and nothing with it off; the recommended predictor nothing", () => {
+  it("per cell: delegate asks bm_decide; owner or shadow asks bm_predict with the challenger on and nothing with it off", () => {
     const cases: Array<[string, AutonomyPolicy["projects"][string][DecisionClass] | null, boolean, string[]]> = [
-      ["delegate, Orchestrator, challenger off", { mode: "delegate", predictor: "orchestrator", at: "T" }, false, ["decision"]],
-      ["delegate, Orchestrator, challenger on", { mode: "delegate", predictor: "orchestrator", at: "T" }, true, ["decision"]],
+      ["delegate, challenger off", { mode: "delegate", at: "T" }, false, ["decision"]],
+      ["delegate, challenger on", { mode: "delegate", at: "T" }, true, ["decision"]],
       ["owner (absent), challenger on", null, true, ["prediction"]],
       ["owner (set), challenger on", { mode: "owner", at: "T" }, true, ["prediction"]],
       ["shadow, challenger on", { mode: "shadow", at: "T" }, true, ["prediction"]],
       ["owner (absent), challenger off", null, false, []],
       ["owner (set), challenger off", { mode: "owner", at: "T" }, false, []],
       ["shadow, challenger off", { mode: "shadow", at: "T" }, false, []],
-      ["delegate, recommended, challenger on", { mode: "delegate", predictor: "recommended", at: "T" }, true, []],
     ];
     for (const [name, cell, challenger, expected] of cases) {
       expect(asks(decisionOpenedEventsOf([predictable(1)], cellPolicy(cell, challenger))), name).toEqual(expected);
     }
   });
 
-  it("a hard-owner class never raises decision.opened, whatever the policy says, and it wakes nobody", async () => {
-    // A hand-written file delegating release to the Orchestrator never reads (REQ-121 c); the challenger on.
+  it("a release, data, security or cost class delegated (Full auto, ADR-025) asks bm_decide like any class", async () => {
     mkdirSync(join(home, "autonomy"), { recursive: true, mode: 0o700 });
     writeFileSync(
       join(home, "autonomy", "policy.json"),
       JSON.stringify({
         version: 1,
-        projects: { [WS]: Object.fromEntries(["release", "data", "security", "cost", "reversible-technical"].map((c) => [c, { mode: "delegate", predictor: "orchestrator", at: "T" }])) },
+        projects: { [WS]: Object.fromEntries(["release", "data", "security", "cost", "reversible-technical"].map((c) => [c, { mode: "delegate", at: "T" }])) },
         challenger: { [WS]: true },
       }),
     );
     const policy = createAutonomyStore(home).read();
-    expect(policy.projects[WS]).toEqual({ "reversible-technical": { mode: "delegate", predictor: "orchestrator", at: "T" } });
-    const hard = [
+    const risky = [
       ...(["release", "data", "security", "cost"] as const).map((decisionClass, index) => predictable(10 + index, { class: decisionClass })),
       // Proposed as reversible-technical, but an option migrates: data.
       predictable(20, { options: [...LOCAL_OPTIONS, { key: "c", label: "Add a table", recommended: false, effects: ["migration"] }] }),
     ];
-    expect(decisionOpenedEventsOf(hard, policy)).toEqual([]);
-    const fake = daemon();
-    const events = bus();
-    for (const decision of hard) decisions().open(decision);
-    expect(await events.turnRecorded(undefined, hard, fake.paseo)).toMatchObject({ status: "none", published: [] });
-    expect(await events.decisionsOpened(hard, fake.paseo)).toMatchObject({ status: "none", published: [] });
-    expect(fake.paseo.agents.list).not.toHaveBeenCalled();
-    expect(fake.sends).toEqual([]);
-    expect(createOrchestratorStore(home, { now: () => clock }).readWakes()).toEqual([]);
+    expect(asks(decisionOpenedEventsOf(risky, policy))).toEqual(["decision", "decision", "decision", "decision", "decision"]);
   });
 
-  it("drops a decision asked of the Orchestrator once it may no longer be decided before delivery: answered, the cell set back, reset, or given to the recommended option", async () => {
+  it("drops a decision asked of the Orchestrator once it may no longer be decided before delivery: answered, the cell set back, or reset", async () => {
     delegateToOrchestrator();
     delegateToOrchestrator(WS, "scope");
     delegateToOrchestrator(WS, "preference");
@@ -638,10 +624,10 @@ describe("the delegation to the Orchestrator (design §B.5, §B.9; bead t9lm.11)
     const opened = [question(1), question(2), question(3, { class: "scope" }), question(4, { class: "preference" })];
     for (const decision of opened) decisions().open(decision);
     expect((await events.turnRecorded(undefined, opened, fake.paseo)).published).toHaveLength(4);
-    // Before the Orchestrator is idle: the owner answers Q2, sets scope back to shadow and gives preference to the recommended option.
+    // Before the Orchestrator is idle: the owner answers Q2, sets scope back to shadow and preference to owner.
     decisions().transition(`q:${REQUEST}:Q2`, (current) => answerDecision(current, { via: "inbox", optionKey: "a", at: clock.toISOString() }), WS);
     createAutonomyStore(home).set({ workspaceId: WS, class: "scope", mode: "shadow" }, clock.toISOString());
-    createAutonomyStore(home).set({ workspaceId: WS, class: "preference", mode: "delegate", confirmed: true, predictor: "recommended" }, clock.toISOString());
+    createAutonomyStore(home).set({ workspaceId: WS, class: "preference", mode: "owner" }, clock.toISOString());
     await orchestratorIdle(fake);
     expect(fake.sends[0]!.text.split("\n").slice(2).map((line) => /decision (\S+),/.exec(line)?.[1])).toEqual([`q:${REQUEST}:Q1`]);
 

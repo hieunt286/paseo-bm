@@ -278,18 +278,18 @@ describe("validation of the builder's input", () => {
     ["a policy authority whose class is not written as a class", { authority: "policy:Release" as CommandInput["authority"] }, "or policy:<one of"],
     ["the owner's own command on the policy's authority", { from: "owner", via: "tab", authority: policyAuthorityOf("scope") }, "the owner's own command has authority owner"],
     ["the owner's own command on a decision's authority", { from: "owner", via: "tab", authority: decisionAuthorityOf("o:1a2b") }, "the owner's own command has authority owner"],
-    // Autonomy design §B.5: only a decision's grant approves release, data, security or cost; the owner's policy never does.
-    ["the policy approving a push", { intent: "release", effects: ["commit", "push"], authority: policyAuthorityOf("reversible-technical"), approved: ["commit", "push"] }, "the owner's policy never approves push: only the grant of a decision the owner answered does (authority decision:<id>)"],
-    ["the policy approving a migration and real data", { effects: ["migration", "real-data"], authority: policyAuthorityOf("scope"), approved: ["migration", "real-data"] }, "the owner's policy never approves real-data, migration"],
-    ["the policy approving security and cost", { effects: ["security", "cost"], authority: policyAuthorityOf("environment"), approved: ["security", "cost"] }, "the owner's policy never approves security, cost"],
-    ["the policy approving a publish or a deploy", { effects: ["publish", "deploy"], authority: policyAuthorityOf("dependency"), approved: ["publish", "deploy"] }, "the owner's policy never approves publish, deploy"],
   ])("refuses %s", (_label, over, problem) => {
     const bad = input(over as Partial<CommandInput>);
     expect(commandInputProblems(bad).join("\n")).toContain(problem);
     expect(() => commandBlockOf(bad)).toThrow(/^Not a valid BM-COMMAND: /);
   });
 
-  it("the policy may declare an owner-only effect it does not approve, and approve every other effect (autonomy design §B.5)", () => {
+  it("the policy may approve any effect, release, data, security and cost included (ADR-025: the send checks the classes are delegated)", () => {
+    for (const effects of [["commit", "push"], ["migration", "real-data"], ["security", "cost"], ["publish", "deploy"]] as Effect[][]) {
+      const approving = input({ intent: "release", effects, authority: policyAuthorityOf("release"), approved: effects });
+      expect(commandInputProblems(approving)).toEqual([]);
+      expect(parseCommandBlock(commandBlockOf(approving))).toMatchObject({ authority: "policy:release", approved: expect.arrayContaining(effects) });
+    }
     const withheld = input({ intent: "continue", effects: ["commit", "push"], authority: policyAuthorityOf("reversible-technical"), approved: ["commit"] });
     expect(commandInputProblems(withheld)).toEqual([]);
     expect(parseCommandBlock(commandBlockOf(withheld))).toMatchObject({ approved: ["commit"], limits: ["no-push", "no-deploy", "no-real-data"] });
@@ -346,8 +346,6 @@ describe("the parser refuses what the builder never writes", () => {
     ["the retired Autopilot's authority via chat", good.replace("authority: owner", "authority: autopilot")],
     ["a limit that withholds an approved effect", granted.replace("limits: no-commit, no-deploy, no-real-data", "limits: no-commit-push-deploy, no-real-data")],
     ["a no-<effect> limit that withholds an approved effect", granted.replace("limits: no-commit, no-deploy, no-real-data", "limits: no-push")],
-    // Autonomy design §B.5: the owner's policy never approves release, data, security or cost.
-    ["the policy's authority approving a push", granted.replace("authority: decision:o:1a2b", "authority: policy:reversible-technical")],
   ])("%s → null", (_label, text) => {
     expect(parseCommandBlock(text)).toBeNull();
   });

@@ -1255,9 +1255,11 @@ function settled(result: TransitionResult): Decision {
 const classQuestion = (n: number, decisionClass: DecisionClass, overrides: Partial<Decision> = {}): Decision =>
   storedQuestion({ id: `q:${R}:Q${n}`, class: decisionClass, options: PLAIN_OPTIONS, prediction: RECOMMENDED_PREDICTION, ...overrides });
 
-/** Answered by the owner's policy (§B.5), the recommended option. */
-const byPolicy = (decision: Decision, when: string, predictor: Predictor = "recommended"): Decision =>
-  settled(answerDecision(decision, { by: "policy", via: "inbox", optionKey: "a", reason: "your policy", class: decisionClassOf(decision), predictor, at: when }));
+/** Answered by the owner's policy (§B.5): the recommended option as an older build stored it, or the Orchestrator's (ADR-025). */
+const byPolicy = (decision: Decision, when: string, predictor: Predictor = "recommended"): Decision => {
+  const answered = settled(answerDecision(decision, { by: "policy", via: "inbox", optionKey: "a", reason: "your policy", class: decisionClassOf(decision), at: when }));
+  return predictor === "recommended" ? { ...answered, answer: { ...answered.answer!, predictor } } : answered;
+};
 
 /** Answered by a precedent (§B.6), in the owner's standing words. */
 const byPrecedent = (decision: Decision, when: string): Decision =>
@@ -1480,9 +1482,10 @@ describe("A-7 from the wake records (Phase 1)", () => {
 
   it("a decision the Orchestrator decided on the owner's policy (bm_decide, autonomy design §B.5) in the wake's turn is its action; the recommended option's answer is not", () => {
     const decidedBy = (decision: Decision, predictor: "orchestrator" | "recommended", when: string): Decision => {
-      const result = answerDecision(decision, { by: "policy", via: "inbox", optionKey: "a", class: "reversible-technical", predictor, reason: "Kept as before.", at: when });
+      const result = answerDecision(decision, { by: "policy", via: "inbox", optionKey: "a", class: "reversible-technical", reason: "Kept as before.", at: when });
       if (!result.ok) throw new Error(result.message);
-      return result.decision;
+      // A recommended answer is one an older build stored (ADR-025).
+      return predictor === "recommended" ? { ...result.decision, answer: { ...result.decision.answer!, predictor } } : result.decision;
     };
     const noPush = { options: [{ key: "a", label: "PDF", recommended: true, effects: ["none" as const] }] };
     // A Worker's question decided at minute 11 and a fallback incident at minute 21, both in their wake's turn.

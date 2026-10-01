@@ -1,4 +1,4 @@
-import { canDelegate, cellOf, type AutonomyPolicy } from "./autonomy";
+import { cellOf, type AutonomyPolicy } from "./autonomy";
 import {
   COORDINATION_KEYS,
   coordinationChangeSchema,
@@ -12,7 +12,6 @@ import {
   isPreparedChange,
   preparedActionSchema,
   type DecisionClass,
-  type Predictor,
   type PreparedChange,
   type PreparedChangeKind,
 } from "./decisions";
@@ -26,10 +25,9 @@ import { DEFAULT_PRECEDENT_DAYS, PRECEDENT_SCOPE_ALL, checkPrecedentSaveInput, s
  *
  * - `precedent.save { scope: project | all, subject, text, expiresInDays? }`:
  *   an owner precedent, as Settings → Autonomy writes one (§B.6).
- * - `autonomy.set { class, mode, predictor? }`: one cell of the decision's
- *   project, as the owner could set it in the matrix: `owner`, `shadow` or
- *   `delegate` (either predictor, ADR-023) of a class that may be delegated.
- *   Never a release, data, security or cost class, in any mode.
+ * - `autonomy.set { class, mode }`: one cell of the decision's project:
+ *   `owner`, `shadow` or `delegate` (the Orchestrator deciding it) of any
+ *   class (ADR-025).
  * - `coordination.set { key, value }`: one Settings → Coordination setting
  *   (§G.7), in its bounds: the advice cadence, and since Phase 3 the
  *   compaction and handoff switches and thresholds and the review budget per
@@ -47,7 +45,7 @@ import { DEFAULT_PRECEDENT_DAYS, PRECEDENT_SCOPE_ALL, checkPrecedentSaveInput, s
 /** The fields each kind takes besides `kind`: the required ones, then the optional ones. */
 export const PREPARED_CHANGE_FIELDS: Readonly<Record<PreparedChangeKind, { required: readonly string[]; optional: readonly string[] }>> = {
   "precedent.save": { required: ["scope", "subject", "text"], optional: ["expiresInDays"] },
-  "autonomy.set": { required: ["class", "mode"], optional: ["predictor"] },
+  "autonomy.set": { required: ["class", "mode"], optional: [] },
   "coordination.set": { required: ["key", "value"], optional: [] },
 };
 
@@ -84,8 +82,6 @@ function classWords(decisionClass: DecisionClass): string {
   const words = decisionClass.replace(/-/g, " ");
   return `${words.charAt(0).toUpperCase()}${words.slice(1)}`;
 }
-
-const PREDICTOR_WORDS: Readonly<Record<Predictor, string>> = { recommended: "the recommended option", orchestrator: "the Orchestrator" };
 
 /** A whole number with its thousands grouped: 5,700,000. The same on every machine (no locale). */
 function grouped(value: number): string {
@@ -131,7 +127,7 @@ export function preparedChangeTextOf(change: PreparedChange): string {
       return `saves your precedent on "${change.subject}" ${where}, for ${change.expiresInDays ?? DEFAULT_PRECEDENT_DAYS} days: "${change.text}"`;
     }
     case "autonomy.set": {
-      const mode = change.mode === "owner" ? "Owner" : change.mode === "shadow" ? "Shadow" : `Delegated to ${PREDICTOR_WORDS[change.predictor ?? "recommended"]}`;
+      const mode = change.mode === "owner" ? "Owner" : change.mode === "shadow" ? "Shadow" : "Delegated to the Orchestrator";
       return `sets ${classWords(change.class)} decisions in this project to ${mode}`;
     }
     case "coordination.set":
@@ -184,14 +180,9 @@ export function preparedChangeCheckOf(change: PreparedChange, facts: PreparedCha
       return same === undefined ? { ok: true } : { unchanged: `the owner's precedent on "${change.subject}" already says this` };
     }
     case "autonomy.set": {
-      if (!canDelegate(change.class)) return { refusal: `${change.class} decisions are always the owner's; their cell is fixed in Settings and never changed` };
-      const cell = cellOf(facts.policy, facts.workspaceId, change.class);
-      const current = cell?.mode ?? "owner";
-      if (change.mode !== "delegate") return current === change.mode ? { unchanged: `${change.class} is ${change.mode} in this project already` } : { ok: true };
-      const predictor = change.predictor ?? "recommended";
-      return cell?.mode === "delegate" && cell.predictor === predictor
-        ? { unchanged: `${change.class} is delegated to ${PREDICTOR_WORDS[predictor]} in this project already` }
-        : { ok: true };
+      const current = cellOf(facts.policy, facts.workspaceId, change.class)?.mode ?? "owner";
+      if (current !== change.mode) return { ok: true };
+      return { unchanged: change.mode === "delegate" ? `${change.class} is delegated to the Orchestrator in this project already` : `${change.class} is ${change.mode} in this project already` };
     }
     case "coordination.set": {
       const valid = coordinationChangeSchema.safeParse(change.change);

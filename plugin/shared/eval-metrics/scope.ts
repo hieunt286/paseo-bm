@@ -15,7 +15,7 @@
 import type { Evidence, ParsedReport, ParsedReview, TraceMessage, TraceRecord } from "../contracts";
 import { parseAnswers, parseQuestions } from "../bm-questions";
 import { ownReviewsOf, requestIdFromText } from "../bm-report";
-import { decisionKindOf, decisionSchema, isSettledStatus, realEffects, type Decision, type Effect } from "../decisions";
+import { decisionKindOf, decisionSchema, isSettledStatus, policyPredictorOf, realEffects, type Decision, type Effect } from "../decisions";
 import { isPluginNotice } from "../notices";
 import { decisionIdOfAuthority, parseCommandBlock, type CommandBlock } from "../orchestrator-command";
 import { proposalSchema, wakeEntrySchema, type Proposal, type WakeEntry } from "../orchestrator";
@@ -394,7 +394,7 @@ export function conversationOf(deliveries: readonly Delivery[], scope: EvalScope
     // policy with the Orchestrator as predictor (`bm_decide`); the recommended
     // option and a precedent are answered by agents, not by the Orchestrator
     // (Phase 2 live check, 2026-09-30).
-    const byOrchestrator = decision.answer.by === "orchestrator" || (decision.answer.by === "policy" && decision.answer.predictor === "orchestrator");
+    const byOrchestrator = decision.answer.by === "orchestrator" || policyPredictorOf(decision) === "orchestrator";
     push(answers, key, { requestId: decision.requestId, id, text: answerTextOf(decision.answer), at: answeredAt, owner: byOwner, fromOrchestrator: byOrchestrator });
     if (answeredAt !== null) push(answeredAtByRequest, decision.requestId, answeredAt);
   }

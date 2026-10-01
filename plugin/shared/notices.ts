@@ -142,6 +142,14 @@ export const REPLACED_NOTICE_MARKER = "BM-REPLACED";
 export const INTERRUPTED_NOTICE_MARKER = "BM-INTERRUPTED";
 
 /**
+ * First line of the owner's question to the asker of an open decision, which
+ * the plugin delivers (`server/decision-ask.ts`, change-014 outcome 3: Ask
+ * back). Listed so it is never the owner's words: the owner's question is
+ * quoted inside it, and the decision stays open. Matched as a whole word.
+ */
+export const ASK_NOTICE_MARKER = "BM-ASK";
+
+/**
  * First words of notices older builds sent and no build sends any more
  * (autonomy design §A.14). Stored history still holds them, so they are
  * recognised — and so ignored — like every notice: the notice that told a
@@ -168,10 +176,11 @@ const PREFIXES: readonly string[] = [
   HANDOFF_NOTICE_MARKER,
   REPLACED_NOTICE_MARKER,
   INTERRUPTED_NOTICE_MARKER,
+  ASK_NOTICE_MARKER,
 ];
 
 /** Markers that count only as a whole word: followed by whitespace or nothing. */
-const WHOLE_WORD_MARKERS: ReadonlySet<string> = new Set([ANSWER_NOTICE_MARKER, DELIVERY_NOTICE_MARKER, STATE_NOTICE_MARKER, HANDOFF_NOTICE_MARKER, REPLACED_NOTICE_MARKER, INTERRUPTED_NOTICE_MARKER]);
+const WHOLE_WORD_MARKERS: ReadonlySet<string> = new Set([ANSWER_NOTICE_MARKER, DELIVERY_NOTICE_MARKER, STATE_NOTICE_MARKER, HANDOFF_NOTICE_MARKER, REPLACED_NOTICE_MARKER, INTERRUPTED_NOTICE_MARKER, ASK_NOTICE_MARKER]);
 
 function startsWithMarker(text: string, prefix: string): boolean {
   if (!text.startsWith(prefix)) return false;

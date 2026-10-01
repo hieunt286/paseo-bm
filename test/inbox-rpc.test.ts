@@ -160,7 +160,7 @@ describe("inbox.digest: the Orchestrator's interventions since the owner last lo
     command("cmd-m", { reason: "" });
     const decisions = createDecisionStore(home);
     const asked = makeDecision({ id: "q:req-A:Q1", requestId: "req-A", class: "scope", options: SCOPE, prediction: openingPrediction(SCOPE) });
-    const answered = answerDecision(asked, { by: "policy", via: "inbox", optionKey: "a", class: "scope", predictor: "orchestrator", reason: "Day first, as the owner writes.", at: minutesBefore(6) });
+    const answered = answerDecision(asked, { by: "policy", via: "inbox", optionKey: "a", class: "scope", reason: "Day first, as the owner writes.", at: minutesBefore(6) });
     if (!answered.ok) throw new Error(answered.message);
     decisions.open(answered.decision);
     decisions.open(
@@ -322,7 +322,7 @@ describe("inbox.digest: the Orchestrator's interventions since the owner last lo
     // A log that cannot be read safely (a symlinked folder) reads as none, in one log line; the decisions still come.
     rmSync(join(home, ORCHESTRATOR_DIR_NAME), { recursive: true });
     const asked = makeDecision({ id: "q:req-A:Q1", requestId: "req-A", class: "scope", options: SCOPE, prediction: openingPrediction(SCOPE) });
-    const answered = answerDecision(asked, { by: "policy", via: "inbox", optionKey: "a", class: "scope", predictor: "recommended", reason: "The recommended option", at: minutesBefore(1) });
+    const answered = answerDecision(asked, { by: "policy", via: "inbox", optionKey: "a", class: "scope", reason: "The recommended option", at: minutesBefore(1) });
     if (!answered.ok) throw new Error(answered.message);
     createDecisionStore(home).open(answered.decision);
     const elsewhere = join(root, "elsewhere");

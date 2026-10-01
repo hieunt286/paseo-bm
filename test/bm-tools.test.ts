@@ -7,6 +7,7 @@ import {
   AGENT_TOOLS,
   MANAGER_SERVER_TOOLS,
   ORCHESTRATOR_SERVER_TOOLS,
+  WORKER_SERVER_TOOLS,
   WORKSPACE_ID_SOURCE,
   schemaIssues,
   serverToolsFor,
@@ -298,12 +299,14 @@ describe("the tool list", () => {
     }
   });
 
-  it("lists the Orchestrator's server-run tools only, the Manager's bm_decisions after bm_answers, and nothing new for the Worker and the Reviewer (orchestrator design §5, autonomy design §A.9)", () => {
-    expect(toolFacesFor("orchestrator").map((tool) => tool.name)).toEqual(["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_predict", "bm_direct_worker", "bm_repo", "bm_note", "bm_findings", "bm_compact", "bm_handoff", "bm_why"]);
-    for (const role of ["worker", "reviewer"] as const) expect(toolFacesFor(role)).toEqual(toolsFor(role));
+  it("lists the Orchestrator's server-run tools only, the Worker's bm_reply after bm_report, the Manager's bm_decisions after bm_answers, and nothing new for the Reviewer (orchestrator design §5, autonomy design §A.9, change-014)", () => {
+    expect(toolFacesFor("orchestrator").map((tool) => tool.name)).toEqual(["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_predict", "bm_direct_worker", "bm_repo", "bm_note", "bm_findings", "bm_compact", "bm_handoff", "bm_why", "bm_reply"]);
+    expect(toolFacesFor("reviewer")).toEqual(toolsFor("reviewer"));
+    expect(toolFacesFor("worker").map((tool) => tool.name)).toEqual(["bm_report", "bm_reply"]);
     expect(toolFacesFor("manager").map((tool) => tool.name)).toEqual(["bm_answers", "bm_decisions"]);
     expect(serverToolsFor("manager")).toEqual(MANAGER_SERVER_TOOLS);
-    expect(serverToolsFor("worker")).toEqual([]);
+    expect(serverToolsFor("worker")).toEqual(WORKER_SERVER_TOOLS);
+    expect(serverToolsFor("reviewer")).toEqual([]);
     // The Manager's face only reads, by request: its schema takes nothing that could name an action.
     expect(MANAGER_SERVER_TOOLS.map((tool) => [tool.name, tool.role, tool.inputSchema.required, Object.keys(tool.inputSchema.properties ?? {})])).toEqual([
       ["bm_decisions", "manager", ["requestId"], ["requestId", "status"]],
@@ -314,6 +317,21 @@ describe("the tool list", () => {
       expect(tool.description).not.toMatch(/send it verbatim/);
     }
     expect(toolNamed("bm_projects")).toBeUndefined();
+  });
+
+  it("the bm_reply faces: one per asker, each taking only its own kind of decision id and a bounded text (change-014 outcome 3)", () => {
+    const worker = WORKER_SERVER_TOOLS.find((tool) => tool.name === "bm_reply")!;
+    const orchestrator = ORCHESTRATOR_SERVER_TOOLS.find((tool) => tool.name === "bm_reply")!;
+    expect([worker.role, orchestrator.role]).toEqual(["worker", "orchestrator"]);
+    for (const face of [worker, orchestrator]) {
+      expect(face.inputSchema).toMatchObject({ type: "object", additionalProperties: false, required: ["decisionId", "text"] });
+      for (const part of ["BM-ASK", "the decision stays open until the owner chooses", "never answer it yourself", "2,000 characters"]) expect(face.description, part).toContain(part);
+      expect(face.description).not.toMatch(/send it verbatim/);
+    }
+    expect(schemaIssues(worker.inputSchema, { decisionId: `q:${REQ}:Q2`, text: "Because of the API limit." })).toEqual([]);
+    expect(schemaIssues(worker.inputSchema, { decisionId: "o:abc", text: "x" })).toHaveLength(1);
+    expect(schemaIssues(orchestrator.inputSchema, { decisionId: "o:abc-1", text: "x" })).toEqual([]);
+    expect(schemaIssues(orchestrator.inputSchema, { decisionId: `q:${REQ}:Q2`, text: "x".repeat(2_001) })).toHaveLength(2);
   });
 
   it("the bm_why face: read-only, one project and one of bead, file or decision, bounded as the §A.9 read tools (autonomy design §E.2)", () => {
@@ -401,10 +419,11 @@ describe("the tool list", () => {
     ]);
     expect(schemaIssues(face.inputSchema, { decisionId: "f:fb-0123456789ab", optionKey: "wait", reason: "The limit resets soon." })).toEqual([]);
     // Its authority is in its description, where the model reads it: the owner's policy delegating the class to the
-    // Orchestrator (autonomy design §B.5, §B.9, bead t9lm.11), never a hard-owner class.
+    // Orchestrator (autonomy design §B.5, §B.9, bead t9lm.11), any class at the project's level (ADR-025).
     expect(face.description).toMatch(/when a decision\.opened line asks you to: the owner's policy delegates its class to you in that project/);
     expect(face.description).toMatch(/a Worker's question \(q:…\) or a fallback incident \(f:…\)/);
-    expect(face.description).toMatch(/never release, data, security or cost/);
+    expect(face.description).toMatch(/its class is delegated in that project \(by the project's autonomy level; any class, a release, data, security or cost one included\)/);
+    expect(face.description).not.toMatch(/never release/);
     expect(face.description).toMatch(/your own decisions \(o:…\) are always the owner's/);
     expect(face.description).toMatch(/A decision you leave stays open for the owner/);
     // The command tools point at it for a stored question.
@@ -425,11 +444,11 @@ describe("the tool list", () => {
       "input.reason: must be at most 300 characters",
       "input.words: is not a field of this tool",
     ]);
-    // What it is and what it is not, where the model reads it: it answers and sends nothing, never for a hard-owner class, told to no one.
-    expect(face.description).toMatch(/It answers nothing and sends nothing: the owner still decides, sees your prediction only after answering/);
-    for (const hard of ["release", "data", "security", "cost"]) expect(face.description, hard).toContain(hard);
+    // What it is and what it is not, where the model reads it: it answers and sends nothing; the owner sees it as the proposal (ADR-025).
+    expect(face.description).toMatch(/It answers nothing and sends nothing: the owner still decides, and sees your option and reason on the decision as your proposal/);
+    expect(face.description).toMatch(/autonomy level is 1 or more \(Co-pilot and up\)/);
     expect(face.description).toMatch(/you have not predicted it yet/);
-    expect(face.description).toMatch(/Do not tell the owner what you predicted\.$/);
+    expect(face.description).not.toMatch(/Do not tell the owner/);
   });
 
   it("the workspace id rule is the trace store's", () => {

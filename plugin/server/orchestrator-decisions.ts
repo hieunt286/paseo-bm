@@ -57,7 +57,7 @@ import { applyPreparedChange, type PreparedChangeResult } from "./prepared-chang
 import { firstLine } from "./request-trace";
 import { dataHomeOf } from "./role-instructions";
 import { ANSWER_NOTICE_MARKER } from "../shared/notices";
-import { decisionClassOf, decisionKindOf, deliveryKindOf, grantRefusal, realEffects, type Decision, type DecisionDelivery, type Effect } from "../shared/decisions";
+import { decisionClassOf, decisionKindOf, deliveryKindOf, grantRefusal, policyPredictorOf, realEffects, type Decision, type DecisionDelivery, type Effect } from "../shared/decisions";
 import { errorText } from "./rpc-kit";
 
 const defaultLog = (message: string): void => console.warn(message);
@@ -91,7 +91,7 @@ export function answerNoticeOf(decision: Decision, failure: string | null = null
   // Autonomy design §B.6: an answer an owner precedent gave cites it.
   if (answer?.by === "precedent") lines.push(`precedent: ${answer.precedentId ?? "unknown"}, the owner's standing answer${decision.subject === null ? "" : ` on "${decision.subject}"`}`);
   // Autonomy design §B.5: an answer the owner's policy gave names the class it delegates.
-  if (answer?.by === "policy") lines.push(`policy: ${answer.class ?? decisionClassOf(decision)} is delegated to the ${answer.predictor === "orchestrator" ? "Orchestrator" : "recommended option"} in this project; the owner was not asked`);
+  if (answer?.by === "policy") lines.push(`policy: ${answer.class ?? decisionClassOf(decision)} is delegated to the ${policyPredictorOf(decision) === "recommended" ? "recommended option" : "Orchestrator"} in this project; the owner was not asked`);
   // Autonomy design §B.7: the owner's override corrects an answer made for them; it replaces that answer.
   if (decisionKindOf(decision.id) === "override") lines.push(`overrides: ${decision.supersedes ?? "unknown"}, answered earlier for the owner; this answer replaces that one`);
   if (failure !== null) lines.push(`delivery: the prepared command was not delivered (${failure}); nothing was sent, and the grant is unused`);

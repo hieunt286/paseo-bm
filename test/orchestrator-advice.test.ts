@@ -14,12 +14,12 @@ import { createOrchestratorDecisionDelivery } from "../plugin/server/orchestrato
 import { FINDINGS_NOTE, findingsText, type FindingsReport } from "../plugin/server/orchestrator-findings";
 import { createOrchestratorTools, type OrchestratorToolsDeps } from "../plugin/server/orchestrator-tools";
 import type { ServerToolResult } from "../plugin/server/orchestrator-tool-context";
-import { resolveAtOpen, resolveByPolicy } from "../plugin/server/policy-resolve";
+import { resolveAtOpen } from "../plugin/server/policy-resolve";
 import { resolveByPrecedent, supersedePrecedentsBy } from "../plugin/server/precedent-resolve";
 import { applyPreparedChange } from "../plugin/server/prepared-changes";
 import { createPrecedentStore } from "../plugin/server/precedent-store";
 import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store";
-import { AUTONOMY_MODES, decideRefusalOf, modeOf, predictionRefusalOf, recommendedDelegationOf } from "../plugin/shared/autonomy";
+import { AUTONOMY_MODES, decideRefusalOf, modeOf, predictionRefusalOf } from "../plugin/shared/autonomy";
 import { FINDINGS_MAX_CHARS, ORCHESTRATOR_SERVER_TOOLS } from "../plugin/shared/bm-tools";
 import { alertKeyOf } from "../plugin/shared/alerts";
 import { ADVICE_EVERY_FINISHED, DEFAULT_COORDINATION_SETTINGS } from "../plugin/shared/coordination";
@@ -205,13 +205,13 @@ describe("bm_ask_owner: an option may carry a prepared change of the owner's set
   it("each kind in the owner's words, and the fields each takes", () => {
     expect(PREPARED_CHANGE_FIELDS).toEqual({
       "precedent.save": { required: ["scope", "subject", "text"], optional: ["expiresInDays"] },
-      "autonomy.set": { required: ["class", "mode"], optional: ["predictor"] },
+      "autonomy.set": { required: ["class", "mode"], optional: [] },
       "coordination.set": { required: ["key", "value"], optional: [] },
     });
     expect(preparedChangeTextOf({ kind: "precedent.save", scope: "all", subject: "date-format", text: "dd/mm/yyyy" })).toBe(
       'saves your precedent on "date-format" for all projects, for 30 days: "dd/mm/yyyy"',
     );
-    expect(preparedChangeTextOf({ kind: "autonomy.set", class: "reversible-technical", mode: "delegate", predictor: "orchestrator" })).toBe(
+    expect(preparedChangeTextOf({ kind: "autonomy.set", class: "reversible-technical", mode: "delegate" })).toBe(
       "sets Reversible technical decisions in this project to Delegated to the Orchestrator",
     );
     expect(preparedChangeTextOf({ kind: "coordination.set", change: { key: "advice.everyFinished", value: 0 } })).toBe("turns Advice off (advice.everyFinished 0)");
@@ -228,12 +228,9 @@ describe("bm_ask_owner: an option may carry a prepared change of the owner's set
       expect(result.ok, JSON.stringify(change)).toBe(false);
       return result.text;
     };
-    // autonomy.set never on a hard-owner class, in any mode.
-    expect(await refused({ kind: "autonomy.set", class: "release", mode: "shadow" })).toContain(
-      "- input.options[0].change: release decisions are always the owner's; their cell is fixed in Settings and never changed",
-    );
-    expect(await refused({ kind: "autonomy.set", class: "security", mode: "delegate", predictor: "recommended" })).toContain("security decisions are always the owner's");
-    for (const hardOwner of ["data", "cost"]) expect(await refused({ kind: "autonomy.set", class: hardOwner, mode: "owner" })).toContain(`${hardOwner} decisions are always the owner's`);
+    // autonomy.set takes no predictor any more (ADR-025): one is refused as a field it does not take.
+    expect(await refused({ kind: "autonomy.set", class: "security", mode: "delegate", predictor: "recommended" })).toContain("- input.options[0].change.predictor: is not a field of this tool");
+    for (const decisionClass of ["data", "cost"]) expect(await refused({ kind: "autonomy.set", class: decisionClass, mode: "owner" })).toContain(`${decisionClass} is owner in this project already`);
     // Nothing to change.
     expect(await refused({ kind: "coordination.set", key: "advice.everyFinished", value: 5 })).toContain("- input.options[0].change: it would change nothing: advice.everyFinished is 5 already");
     expect(await refused({ kind: "autonomy.set", class: "scope", mode: "owner" })).toContain("it would change nothing: scope is owner in this project already");
@@ -296,10 +293,14 @@ describe("the owner's answer applies the prepared change of the option chosen, a
     expect(modeOf(policyNow(), WORKSPACE_ID, "scope")).toBe("shadow");
 
     // No answer of the owner's in preference yet: delegating it is still the owner's to choose.
-    const delegate = await asked(tools, [{ label: "Delegate preference", effects: ["none"], change: { kind: "autonomy.set", class: "preference", mode: "delegate", predictor: "recommended" } }, KEEP]);
+    const delegate = await asked(tools, [{ label: "Delegate preference", effects: ["none"], change: { kind: "autonomy.set", class: "preference", mode: "delegate" } }, KEEP]);
     await answer({ id: delegate, optionKey: "a" }, paseo);
-    expect(policyNow().projects[WORKSPACE_ID]?.preference).toEqual({ mode: "delegate", predictor: "recommended", at: NOW.toISOString() });
-    expect(notices()[1]).toContain("change: applied by the plugin — it sets Preference decisions in this project to Delegated to the recommended option");
+    expect(policyNow().projects[WORKSPACE_ID]?.preference).toEqual({ mode: "delegate", at: NOW.toISOString() });
+    expect(notices()[1]).toContain("change: applied by the plugin — it sets Preference decisions in this project to Delegated to the Orchestrator");
+    // Any class may be delegated (ADR-025): a release cell is a change the owner can make.
+    const release = await asked(tools, [{ label: "Delegate release", effects: ["none"], change: { kind: "autonomy.set", class: "release", mode: "delegate" } }, KEEP]);
+    await answer({ id: release, optionKey: "a" }, paseo);
+    expect(modeOf(policyNow(), WORKSPACE_ID, "release")).toBe("delegate");
   });
 
   it("precedent.save: the owner's precedent of this project, as Settings writes one; the decision itself never becomes one", async () => {
@@ -328,7 +329,7 @@ describe("the owner's answer applies the prepared change of the option chosen, a
     expect(whyNotPrecedent({ ...stored(id), subject: "advice-dates" })).toMatch(/is about your settings/);
   });
 
-  it("checked again when applied: autonomy.set of a hard-owner class is refused, writing nothing; what is so already writes nothing", async () => {
+  it("checked again when applied: autonomy.set of any class applies (ADR-025); what is so already writes nothing", async () => {
     const { tools, paseo } = toolsWith();
     const { answer, notices } = answering();
     // A decision no tool would store (bm_ask_owner refuses it), as a newer or broken build might have left it.
@@ -340,11 +341,8 @@ describe("the owner's answer applies the prepared change of the option chosen, a
       ],
     });
     await answer({ id: "o:stored-1", optionKey: "a" }, paseo);
-    expect(policyNow()).toEqual({ projects: {}, challenger: {} });
-    expect(existsSync(join(home, "autonomy"))).toBe(false);
-    expect(notices()[0]).toContain(
-      "\nchange: not applied (release decisions are always the owner's; their cell is fixed in Settings and never changed); nothing was changed — tell the owner, and set nothing yourself\n",
-    );
+    expect(modeOf(policyNow(), WORKSPACE_ID, "release")).toBe("shadow");
+    expect(notices()[0]).toContain("\nchange: applied by the plugin — it sets Release decisions in this project to Shadow");
 
     // Asked while scope is owner; the owner shadows it in Settings before answering: applied, nothing written.
     const id = await asked(tools, [{ label: "Shadow scope", effects: ["none"], change: { kind: "autonomy.set", class: "scope", mode: "shadow" } }, KEEP]);
@@ -359,9 +357,9 @@ describe("only the owner answers a decision that carries a prepared change: not 
   it("the policy at open: a delegate cell of its class leaves it open for the owner, and the policy's answer is refused", async () => {
     createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "reversible-technical", mode: "delegate", confirmed: true }, NOW.toISOString());
     const { tools } = toolsWith();
-    // Without a change, the same question is answered at once by the recommended option: the guard is what holds it.
+    // The policy answers nothing at open (ADR-025): an o: decision is the owner's, a change or not.
     const plain = await ask(tools, [{ label: "Advise after every 10", effects: ["none"], recommended: true }, KEEP], { separate: true });
-    expect(plain.text).toMatch(/^Answered at once by the owner's policy/);
+    expect(plain.text).toMatch(/^Asked\./);
 
     const result = await ask(tools, [cadence(10), KEEP], { separate: true });
     expect(result.text).toMatch(/^Asked\./);
@@ -370,10 +368,8 @@ describe("only the owner answers a decision that carries a prepared change: not 
     expect(decision.status).toBe("open");
     expect(cadenceNow()).toBe(ADVICE_EVERY_FINISHED.default);
     // Each line of the guard, on the stored decision.
-    expect(recommendedDelegationOf(policyNow(), decision)).toBeNull();
-    expect(resolveByPolicy(decision, { home, now: NOW, log: () => {} })).toEqual({ decision, resolved: false });
     expect(resolveAtOpen(decision, { home, now: NOW, log: () => {} })).toEqual({ decision, answered: null, by: null, precedent: null });
-    expect(answerDecision(decision, { by: "policy", predictor: "recommended", via: "inbox", optionKey: "a", at: NOW.toISOString() })).toEqual({
+    expect(answerDecision(decision, { by: "policy", via: "inbox", optionKey: "a", at: NOW.toISOString() })).toEqual({
       ok: false,
       refusal: "invalid-answer",
       message: `decision ${id} carries a prepared change of the owner's settings; only the owner answers it`,
@@ -405,7 +401,7 @@ describe("only the owner answers a decision that carries a prepared change: not 
   });
 
   it("bm_decide: refused even where the owner delegated its class to the Orchestrator; nothing is written or applied", async () => {
-    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "reversible-technical", mode: "delegate", confirmed: true, predictor: "orchestrator" }, NOW.toISOString());
+    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "reversible-technical", mode: "delegate", confirmed: true }, NOW.toISOString());
     const { tools } = toolsWith();
     const id = await asked(tools, [cadence(10), KEEP]);
     const decided = await tools.call("bm_decide", { decisionId: id, optionKey: "a", reason: "Five was too often." });
@@ -650,7 +646,8 @@ function readFileSafe(path: string): string {
 describe("preparedChangeCheckOf", () => {
   it("is the same check when asked and when applied: refusal, nothing to change, or ok", () => {
     const facts = { workspaceId: WORKSPACE_ID, policy: { projects: {}, challenger: {} }, settings: DEFAULT_COORDINATION_SETTINGS, precedents: [] };
-    expect(preparedChangeCheckOf({ kind: "autonomy.set", class: "cost", mode: "shadow" }, facts)).toHaveProperty("refusal");
+    expect(preparedChangeCheckOf({ kind: "autonomy.set", class: "cost", mode: "shadow" }, facts)).toEqual({ ok: true });
+    expect(preparedChangeCheckOf({ kind: "autonomy.set", class: "cost", mode: "owner" }, facts)).toEqual({ unchanged: "cost is owner in this project already" });
     expect(preparedChangeCheckOf({ kind: "autonomy.set", class: "preference", mode: "delegate" }, facts)).toEqual({ ok: true });
     expect(preparedChangeCheckOf({ kind: "coordination.set", change: { key: "advice.everyFinished", value: 5 } }, facts)).toHaveProperty("unchanged");
     expect(preparedChangeCheckOf({ kind: "precedent.save", scope: "all", subject: "date-format", text: "  " }, facts)).toHaveProperty("refusal");
@@ -727,7 +724,7 @@ describe("coordination.set on the compaction and handoff keys (design §G.4, §G
   });
 
   it("bm_decide cannot answer it, so the Orchestrator never turns a mechanism on itself", async () => {
-    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "reversible-technical", mode: "delegate", confirmed: true, predictor: "orchestrator" }, NOW.toISOString());
+    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "reversible-technical", mode: "delegate", confirmed: true }, NOW.toISOString());
     createCoordinationStore(home).set({ key: "handoff.enabled", value: false });
     const { tools } = toolsWith();
     const id = await asked(tools, [option("Hand off again", "handoff.enabled", true), KEEP]);
@@ -781,7 +778,7 @@ describe("coordination.set on the review budget per tier (design §G.4's review.
   });
 
   it("applies review.largeBudget only on the owner's own answer: not the policy's, not bm_decide's", async () => {
-    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "reversible-technical", mode: "delegate", confirmed: true, predictor: "orchestrator" }, NOW.toISOString());
+    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "reversible-technical", mode: "delegate", confirmed: true }, NOW.toISOString());
     const { tools, paseo } = toolsWith();
     const { answer, notices } = answering();
     const id = await asked(tools, [option("Large: 6 review calls", "review.largeBudget", 6), KEEP]);

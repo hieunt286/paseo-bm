@@ -15,11 +15,11 @@ import { beadEmphasis, emphasisTone, type BeadEmphasis, type KanbanColumn } from
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import { Pressable, Text, View, type AccessibilityRole, type AccessibilityState, type StyleProp, type TextStyle, type ViewStyle } from "react-native";
 import { barShare, type Bar } from "./format";
-import type { dashboardStyles } from "./styles";
+import { KIND_BAR_WIDTH, RADIUS, type dashboardStyles } from "./styles";
 import { ROLE_MARK, toneColor, type Badge, type RoleMarkKind, type Tone } from "./tone";
 import type { ConfirmDialog } from "./ui-types";
 import { MAX_BODY_LINES } from "./chat-card-parse";
-import { NOTICE_DOT, type CardFrameView } from "./chat-card-frame";
+import { NOTICE_DOT, kindBarOf, type CardFrameView } from "./chat-card-frame";
 
 export type Styles = ReturnType<typeof dashboardStyles>;
 export type Theme = PluginSurfaceProps["theme"];
@@ -231,7 +231,12 @@ export function BarChart({
   );
 }
 
-/** A coloured chip; pressable and selectable when `onPress` is given. */
+/**
+ * A chip: a small square in the tone's colour, then the label in small muted
+ * capitals — a label, not a pill (change-014 outcome 6). Pressable and
+ * selectable when `onPress` is given, and then outlined; a selected one is
+ * filled and its label reads in the text colour.
+ */
 export function Chip({
   badge,
   selected,
@@ -246,9 +251,18 @@ export function Chip({
   theme: Theme;
 }) {
   const colour = toneColor(theme, badge.tone);
+  const pressable = onPress !== undefined;
   const body = (
-    <View style={[styles.chip, { borderColor: colour, backgroundColor: selected ? theme.colors.surface2 : "transparent" }]}>
-      <Text style={[styles.badge, { color: colour }]}>{`${selected ? "● " : ""}${badge.text}`}</Text>
+    <View
+      style={[
+        styles.chip,
+        { borderColor: pressable ? theme.colors.border : "transparent", backgroundColor: selected ? theme.colors.surface2 : "transparent" },
+      ]}
+    >
+      <View style={[styles.chipMark, { backgroundColor: colour }]} />
+      <Text style={[styles.chipText, { color: selected ? theme.colors.foreground : theme.colors.foregroundMuted }]}>
+        {`${selected ? "● " : ""}${badge.text}`}
+      </Text>
     </View>
   );
   return onPress === undefined ? (
@@ -388,14 +402,14 @@ export function KanbanBoard({
   );
 }
 
-/** A small role icon on a soft, round tint of the role's colour. */
+/** A small role icon on a soft, square tint of the role's colour. */
 export function RoleMark({ kind, theme, size = 22 }: { kind: RoleMarkKind; theme: Theme; size?: number }) {
   const mark = ROLE_MARK[kind];
   const colour = toneColor(theme, mark.tone);
   return (
     <View
       accessibilityLabel={mark.role}
-      style={{ width: size, height: size, borderRadius: size / 2, alignItems: "center", justifyContent: "center" }}
+      style={{ width: size, height: size, borderRadius: RADIUS, alignItems: "center", justifyContent: "center" }}
     >
       <View
         style={{
@@ -404,9 +418,9 @@ export function RoleMark({ kind, theme, size = 22 }: { kind: RoleMarkKind; theme
           left: 0,
           right: 0,
           bottom: 0,
-          borderRadius: size / 2,
+          borderRadius: RADIUS,
           backgroundColor: colour,
-          opacity: 0.16,
+          opacity: 0.12,
         }}
       />
       <Icon name={mark.icon} size={Math.round(size * 0.6)} color={colour} />
@@ -479,7 +493,9 @@ export function ConfirmBlock({ dialog, busy, busyLabel, onConfirm, onCancel, sty
  *
  * Hook-free: the view comes from the card models (`cardFrameOf`,
  * `decisionCardView`), the actions and Details are passed in. Ids belong in
- * Details only; the only coloured border is `view.outline`.
+ * Details only. The only colour on the frame is the 3 px bar at its left that
+ * marks the card's kind (`kindBarOf`; change-014 outcome 6); a settled card
+ * has none, and the border stays the theme's.
  */
 export function CardFrame({
   view,
@@ -498,9 +514,10 @@ export function CardFrame({
   styles: Styles;
   theme: Theme;
 }) {
-  const outline = view.outline === null ? null : { borderColor: toneColor(theme, view.outline) };
+  const barTone = kindBarOf(view);
+  const bar = barTone === null ? null : { borderLeftWidth: KIND_BAR_WIDTH, borderLeftColor: toneColor(theme, barTone) };
   return (
-    <View style={[styles.card, { gap: 6, marginVertical: 4 }, outline]}>
+    <View style={[styles.card, { gap: 6, marginVertical: 4 }, bar]}>
       <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
         <View style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
           {view.actor.mark === null ? null : <RoleMark kind={view.actor.mark} theme={theme} size={20} />}

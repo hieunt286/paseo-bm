@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { DECISION_ID_PATTERN, SUBJECT_PATTERN, carriesPreparedChange, decisionClassOf, decisionKindOf, isHardOwnerClass, type Decision } from "./decisions";
+import { DECISION_ID_PATTERN, SUBJECT_PATTERN, carriesPreparedChange, decisionKindOf, type Decision } from "./decisions";
 import { timeOrZero } from "./time";
 
 /**
@@ -15,7 +15,7 @@ import { timeOrZero } from "./time";
  * (**Save as precedent** on its card) or by the owner in Settings → Autonomy.
  * Saving one with the scope and subject of an active one supersedes that one
  * (REQ-124 c). A decision that opens on the subject of an active one is
- * resolved by it unless its class is owner-fixed (`precedentResolutionOf`,
+ * resolved by it, whatever its class (`precedentResolutionOf`,
  * applied by `server/precedent-resolve.ts`); the owner's own answer that
  * differs from it supersedes it (`precedentsContradictedBy`). Injecting
  * precedents into agents is `t9lm.13`'s.
@@ -286,17 +286,16 @@ export function precedentReasonOf(precedent: Pick<Precedent, "subject" | "scope"
 /** What a precedent does to a decision that opens: answers it, or is shown on its card as a suggestion only. */
 export type PrecedentResolution =
   | { kind: "resolve"; precedent: Precedent; answer: { optionKey: string } | { words: string } }
-  | { kind: "suggest"; precedent: Precedent; why: "owner-fixed" | "no-option" };
+  | { kind: "suggest"; precedent: Precedent; why: "no-option" };
 
 /**
  * What an active precedent does to an `open` decision (§B.6, §B.9):
- * - `resolve`: it answers it — `answer` — when its class is not owner-fixed.
- *   An `owner` or `shadow` cell does not stop it: a precedent is the owner's
- *   own standing answer.
- * - `suggest`: it is only shown on the card — for a decision of a hard-owner
- *   class (release, data, security, cost: `owner-fixed`), and for a fallback
- *   incident's decision when the precedent names none of its options
- *   (`no-option`): only an option there runs an action.
+ * - `resolve`: it answers it — `answer` —, whatever its class (ADR-025: no
+ *   class is the owner's by rule). An `owner` or `shadow` cell does not stop
+ *   it: a precedent is the owner's own standing answer.
+ * - `suggest`: it is only shown on the card — for a fallback incident's
+ *   decision when the precedent names none of its options (`no-option`):
+ *   only an option there runs an action.
  *
  * Null when no active precedent bears on it, or it is not `open`. Pure.
  */
@@ -308,7 +307,6 @@ export function precedentResolutionOf(decision: Decision, precedents: readonly P
   if (decision.status !== "open" || carriesPreparedChange(decision)) return null;
   const precedent = precedentFor(decision, precedents, now);
   if (precedent === null) return null;
-  if (isHardOwnerClass(decisionClassOf(decision))) return { kind: "suggest", precedent, why: "owner-fixed" };
   const answer = precedentAnswerOf(decision, precedent);
   if ("words" in answer && decisionKindOf(decision.id) === "fallback") return { kind: "suggest", precedent, why: "no-option" };
   return { kind: "resolve", precedent, answer };

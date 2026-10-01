@@ -3,12 +3,16 @@
  * policy store (`autonomy-store.ts`):
  *
  * - `autonomy.policy { workspaceId? }` reads only: the whole policy, or one
- *   project's.
- * - `autonomy.set { workspaceId, class, mode, confirmed?, predictor? }` sets
- *   one cell. `delegate` is refused for release, data, security and cost
- *   (`E_AUTONOMY_OWNER_ONLY`) and needs `confirmed: true`
- *   (`E_AUTONOMY_NOT_CONFIRMED`); an unknown class or mode is
- *   `E_AUTONOMY_INVALID`. `owner` and `shadow` need no confirmation.
+ *   project's, with each project's level (`levelOf`, ADR-025).
+ * - `autonomy.set-level { workspaceId, level, confirmed? }` sets one
+ *   project's level (ADR-025): its nine cells and its prediction switch in one
+ *   write. Turbo and Full auto need `confirmed: true`
+ *   (`E_AUTONOMY_NOT_CONFIRMED`); an unknown project or level is
+ *   `E_AUTONOMY_INVALID`.
+ * - `autonomy.set { workspaceId, class, mode, confirmed? }` sets one cell, of
+ *   any class. `delegate` needs `confirmed: true` (`E_AUTONOMY_NOT_CONFIRMED`);
+ *   an unknown class or mode is `E_AUTONOMY_INVALID`. `owner` and `shadow`
+ *   need no confirmation.
  * - `autonomy.reset { workspaceId }` returns every class of that project to
  *   `owner` in one write, with no confirmation: it is the one-action safety
  *   path (REQ-121 d).
@@ -28,15 +32,9 @@
  * written by a newer paseo-bm or one that cannot be written →
  * `E_AUTONOMY_WRITE_FAILED` (rpc-kit `coded`, code review 2026-09-30 §3.2).
  *
- * These are the owner's RPCs (Settings, and Insights' Delegate? shortcut) and
- * the evaluation suite's; no agent tool sets the policy.
- *
- * The demotion (§B.4, §B.9) is the plugin's own writer of the policy, beside
- * them: `demoteOnReversal` takes a delegated class back to `shadow` at once
- * when a decision the policy or a precedent answered is reversed, and raises
- * the Inbox alert `autonomy-demoted` (keyed by project and class). The alert
- * clears when the owner next sets that cell (`autonomy.set`) or resets the
- * project (`autonomy.reset`).
+ * These are the owner's RPCs (Settings) and the evaluation suite's; no agent
+ * tool sets the policy, and nothing else writes it: an override or a
+ * reversal is only recorded (ADR-025 decision 4, no demotion).
  *
  * The owner's precedents (§B.6, §B.9; PRD REQ-124) are served here too, over
  * `precedent-store.ts` in the same folder:
@@ -61,6 +59,7 @@ import {
   autonomyResetRpc,
   autonomySetBoundaryRpc,
   autonomySetChallengerRpc,
+  autonomySetLevelRpc,
   autonomySetRpc,
   precedentsEndRpc,
   precedentsListRpc,
@@ -76,12 +75,14 @@ import {
   checkAutonomySet,
   checkAutonomySetBoundary,
   checkAutonomySetChallenger,
+  checkAutonomySetLevel,
   isPolicyWorkspaceId,
+  levelOf,
+  levelsOf,
   policyOfProject,
   type AutonomyPolicy,
 } from "../shared/autonomy";
 import type { Alert } from "../shared/alerts";
-import { decisionClassOf, type Decision, type DecisionClass, type ReversalKind } from "../shared/decisions";
 import { PRECEDENT_ID_PATTERN, checkPrecedentSaveInput, precedentDraftOf, type Precedent } from "../shared/precedents";
 import { createAlertStore } from "./alert-store";
 import { createAutonomyStore, currentPolicy, invalidWorkspace } from "./autonomy-store";
@@ -109,10 +110,11 @@ export function readAutonomyPolicy(deps: AutonomyRpcDeps = {}): AutonomyPolicy {
   return currentPolicy(home, (reason) => logOf(deps)(`[paseo-bm] could not read the autonomy policy: ${reason}`));
 }
 
-/** `autonomy.policy`: reads only. */
+/** `autonomy.policy`: reads only; with each project's level (ADR-025). */
 export function handleAutonomyPolicy(input: { workspaceId?: string } = {}, deps: AutonomyRpcDeps = {}): AutonomyPolicyOutput {
   const policy = readAutonomyPolicy(deps);
-  return { policy: input.workspaceId === undefined ? policy : policyOfProject(policy, input.workspaceId) };
+  if (input.workspaceId === undefined) return { policy, levels: levelsOf(policy) };
+  return { policy: policyOfProject(policy, input.workspaceId), levels: { [input.workspaceId]: levelOf(policy, input.workspaceId) } };
 }
 
 /** Runs a write with the data folder, coded by rpc-kit `coded` as `E_AUTONOMY_WRITE_FAILED`. */
@@ -121,34 +123,29 @@ function writing(deps: AutonomyRpcDeps, run: (home: string) => AutonomyPolicy): 
   return coded("E_AUTONOMY_WRITE_FAILED", "save the autonomy policy", () => ({ policy: run(home) }));
 }
 
-/**
- * `autonomy.set`: one cell, checked before the data folder. Returns the whole
- * policy. The owner's change of the cell ends its `autonomy-demoted` alert.
- */
+/** `autonomy.set-level`: one project's level (ADR-025), checked before the data folder. Returns the whole policy. */
+export function handleAutonomySetLevel(input: unknown, deps: AutonomyRpcDeps = {}): AutonomySetOutput {
+  const checked = checkAutonomySetLevel(input);
+  if ("refusal" in checked) throw new DashboardError(checked.refusal.code, checked.refusal.detail);
+  const { change } = checked;
+  const at = nowOf(deps).toISOString();
+  return writing(deps, (home) => createAutonomyStore(home).setLevel(change, at));
+}
+
+/** `autonomy.set`: one cell, checked before the data folder. Returns the whole policy. */
 export function handleAutonomySet(input: unknown, deps: AutonomyRpcDeps = {}): AutonomySetOutput {
   const checked = checkAutonomySet(input);
   if ("refusal" in checked) throw new DashboardError(checked.refusal.code, checked.refusal.detail);
   const { change } = checked;
   const at = nowOf(deps).toISOString();
-  return writing(deps, (home) => {
-    const policy = createAutonomyStore(home).set(change, at);
-    clearDemotionAlerts(home, (alert) => alert.workspaceId === change.workspaceId && alert.subject === change.class, deps);
-    return policy;
-  });
+  return writing(deps, (home) => createAutonomyStore(home).set(change, at));
 }
 
-/**
- * `autonomy.reset`: every class of one project back to `owner`. Returns the
- * whole policy. Ends every `autonomy-demoted` alert of the project.
- */
+/** `autonomy.reset`: every class of one project back to `owner`. Returns the whole policy. */
 export function handleAutonomyReset(input: unknown, deps: AutonomyRpcDeps = {}): AutonomySetOutput {
   const workspaceId = (input as { workspaceId?: unknown } | null | undefined)?.workspaceId;
   if (!isPolicyWorkspaceId(workspaceId)) throw invalidWorkspace(workspaceId);
-  return writing(deps, (home) => {
-    const policy = createAutonomyStore(home).reset(workspaceId);
-    clearDemotionAlerts(home, (alert) => alert.workspaceId === workspaceId, deps);
-    return policy;
-  });
+  return writing(deps, (home) => createAutonomyStore(home).reset(workspaceId));
 }
 
 /** `autonomy.set-challenger`: one project's challenger on or off, checked before the data folder. Returns the whole policy. */
@@ -175,24 +172,8 @@ export function handleAutonomySetBoundary(input: unknown, deps: AutonomyRpcDeps 
   });
 }
 
-// ---------------------------------------------------------------------------
-// Demotion (§B.4, §B.9; PRD REQ-123 b).
-// ---------------------------------------------------------------------------
-
 function nowOf(deps: { now?: () => Date }): Date {
   return (deps.now ?? (() => new Date()))();
-}
-
-/**
- * Clears the open `autonomy-demoted` alerts that match. Never throws: the
- * policy change it follows is already written, so a failure is one log line.
- */
-function clearDemotionAlerts(home: string, match: (alert: Alert) => boolean, deps: AutonomyRpcDeps): void {
-  try {
-    createAlertStore(home, deps.now === undefined ? {} : { now: deps.now }).clearWhere((alert) => alert.kind === "autonomy-demoted" && match(alert));
-  } catch (error) {
-    logOf(deps)(`[paseo-bm] could not clear a demotion alert: ${errorText(error)}`);
-  }
 }
 
 /** Clears the open alerts that match, after a policy change already written; a failure is one log line. */
@@ -202,86 +183,6 @@ function clearAlerts(home: string, match: (alert: Alert) => boolean, deps: Auton
   } catch (error) {
     logOf(deps)(`[paseo-bm] could not clear an alert after a policy change: ${errorText(error)}`);
   }
-}
-
-export interface DemotionDeps {
-  /** The data folder. */
-  home: string;
-  now?: () => Date;
-  log?: (message: string) => void;
-}
-
-export type DemotionResult =
-  | { demoted: true; workspaceId: string; class: DecisionClass; alert: Alert | null }
-  | { demoted: false; reason: string };
-
-/** How each reversal kind reads in the alert. */
-const REVERSED_HOW: Readonly<Record<ReversalKind, string>> = {
-  "re-asked": "was asked again in the same request",
-  overridden: "was overridden by you",
-  reopened: "was reversed: a bead closed under it was reopened citing it",
-};
-
-/** A class in the owner's words, for a line written on the server: `Reversible technical`. */
-function classWords(decisionClass: DecisionClass): string {
-  const words = decisionClass.replace(/-/g, " ");
-  return `${words.charAt(0).toUpperCase()}${words.slice(1)}`;
-}
-
-/** The alert's detail: which class went back to Shadow, and why (the decision's id is shown only on a tap). */
-function demotionDetail(decision: Decision, decisionClass: DecisionClass, kind: ReversalKind): string {
-  const answer = decision.answer!;
-  const who =
-    answer.by === "precedent" ? "your precedent" : answer.predictor === "orchestrator" ? "the Orchestrator" : "the recommended option";
-  return (
-    `${classWords(decisionClass)} decisions are back in Shadow: ${decision.id}, answered for you by ${who}, ${REVERSED_HOW[kind]}. ` +
-    "They come to you again until you delegate them again in Settings → Autonomy."
-  );
-}
-
-/**
- * Takes a delegated class back at once (§B.4, §B.9; PRD REQ-123 b), called
- * from every point that records a reversal: the materialiser's re-ask and
- * cited `br reopen` (§B.3) and the digest's Override (§B.7). When `decision`
- * was answered `by: policy | precedent` and its cell (the answer's class, else
- * the decision's) is `delegate`, the cell becomes `shadow`, stamped now, now
- * is the class's last demotion, and an `autonomy-demoted` alert is raised with
- * the class, the project and the reason. An answer of the owner, a cell that
- * is not `delegate` (already taken back, or never delegated) and a decision
- * not answered change nothing. It never touches a decision already delivered:
- * only what happens to the next decision of that class. Never throws: a
- * failure is one log line, and no alert is raised for a demotion that was not
- * written.
- */
-export function demoteOnReversal(decision: Decision, kind: ReversalKind, deps: DemotionDeps): DemotionResult {
-  const answer = decision.answer;
-  if (decision.status !== "answered" || answer === null) return { demoted: false, reason: `decision ${decision.id} is not answered` };
-  if (answer.by !== "policy" && answer.by !== "precedent") {
-    return { demoted: false, reason: `decision ${decision.id} was answered by ${answer.by === "owner" ? "the owner" : answer.by}, not for the owner` };
-  }
-  const decisionClass = answer.class ?? decisionClassOf(decision);
-  const { workspaceId } = decision;
-  const now = nowOf(deps);
-  let policy: AutonomyPolicy | null;
-  try {
-    policy = createAutonomyStore(deps.home).demote(workspaceId, decisionClass, now.toISOString());
-  } catch (error) {
-    logOf(deps)(`[paseo-bm] could not take ${decisionClass} in ${workspaceId} back to shadow after ${decision.id} ${kind}: ${errorText(error)}`);
-    return { demoted: false, reason: "the policy could not be written" };
-  }
-  if (policy === null) return { demoted: false, reason: `${decisionClass} is not delegated in ${workspaceId}` };
-  let alert: Alert | null = null;
-  try {
-    alert = createAlertStore(deps.home, { now: () => now }).raise({
-      workspaceId,
-      kind: "autonomy-demoted",
-      subject: decisionClass,
-      detail: demotionDetail(decision, decisionClass, kind),
-    }).alert;
-  } catch (error) {
-    logOf(deps)(`[paseo-bm] ${decisionClass} in ${workspaceId} is back in shadow, but its Inbox alert failed: ${errorText(error)}`);
-  }
-  return { demoted: true, workspaceId, class: decisionClass, alert };
 }
 
 // ---------------------------------------------------------------------------
@@ -346,6 +247,7 @@ export function handlePrecedentsEnd(input: unknown, deps: AutonomyRpcDeps = {}):
 
 export function registerAutonomyRpcs(server: PluginServerContext, deps: AutonomyRpcDeps = {}): void {
   server.handle(autonomyPolicyRpc, (input) => handleAutonomyPolicy(input, deps));
+  server.handle(autonomySetLevelRpc, (input) => handleAutonomySetLevel(input, deps));
   server.handle(autonomySetRpc, (input) => handleAutonomySet(input, deps));
   server.handle(autonomyResetRpc, (input) => handleAutonomyReset(input, deps));
   server.handle(autonomySetChallengerRpc, (input) => handleAutonomySetChallenger(input, deps));

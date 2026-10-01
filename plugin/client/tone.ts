@@ -37,6 +37,18 @@ export function toneColor(theme: PluginTheme, tone: Tone): string {
   }
 }
 
+/**
+ * The tone of the bar at a card's left that marks its kind (change-014
+ * outcome 6), from the tone that describes the card: something waiting reads
+ * warning, something held or failing danger, news (info) a muted grey; a
+ * settled or neutral card (success, muted, plain) has no bar. Colour stays in
+ * this small mark, and only where the owner may have to act.
+ */
+export function kindBarTone(tone: Tone | null): Tone | null {
+  if (tone === "warning" || tone === "danger") return tone;
+  return tone === "info" ? "muted" : null;
+}
+
 // ---------------------------------------------------------------------------
 // Role marks.
 // ---------------------------------------------------------------------------
@@ -45,8 +57,8 @@ export function toneColor(theme: PluginTheme, tone: Tone): string {
 export type RoleMarkKind = "request" | "worker" | "reviewer" | "orchestrator";
 
 /**
- * How each agent is drawn: a small Lucide icon on a soft tint of one theme
- * colour. `request` stands for the Manager, which handles the request. The
+ * How each agent is drawn: a small Lucide icon on a soft, square tint of one
+ * theme colour. `request` stands for the Manager, which handles the request. The
  * shape tells the role apart even where the colours look alike.
  */
 export const ROLE_MARK: Readonly<Record<RoleMarkKind, { role: string; icon: string; tone: Tone }>> = {

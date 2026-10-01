@@ -10,10 +10,10 @@
  *   class is the riskier of the one proposed and its effects' (autonomy design
  *   §B.1). It replaces the Orchestrator's open decision of the same request unless
  *   `separate`, and says which one it replaced; it sends nothing itself. An
- *   owner precedent (§B.6), else the owner's policy delegating its class to
- *   the recommended option (§B.5), may answer it at once (`resolveAtOpen`,
+ *   owner precedent (§B.6) may answer it at once (`resolveAtOpen`,
  *   `policy-resolve.ts`) while the loop guard has room for its request; that
- *   answer is delivered as the owner's would be. An option may carry a
+ *   answer is delivered as the owner's would be. The policy never answers an
+ *   `o:` decision: it is the owner's. An option may carry a
  *   prepared change of the owner's settings instead of a command (§G.4:
  *   `precedent.save`, `autonomy.set`, `coordination.set`), checked as the
  *   owner's Settings check it and written out on the question the owner
@@ -26,17 +26,19 @@
  *   (`decision-tools.ts`).
  * - `bm_decide` (change-004; autonomy design §B.5, §B.9) decides for the
  *   owner an open decision the Orchestrator did not ask (`q:`, `f:`) whose
- *   class the owner's policy delegates to it — a `delegate` cell whose
- *   predictor is `orchestrator` (`decideRefusalOf`) — answering `by: policy`
+ *   class the owner's policy delegates — a `delegate` cell, any class
+ *   (`decideRefusalOf`, ADR-025) — answering `by: policy`
  *   with its reason, and hands it to the delivery the owner's answers take
  *   (`onSettled`); it is logged as an `answer` intervention
  *   (`recordInterventionOf`). The log never holds back or fails the tool.
  * - `bm_predict` (autonomy design §B.3, §B.9) records the challenger's
  *   prediction of the owner's answer (`prediction.orchestrator`) on an open
- *   decision the Orchestrator did not ask, of a delegable class in an
- *   `owner` or `shadow` cell, where the owner turned the project's
- *   challenger on, once (`predictionRefusalOf`). It answers nothing, sends
- *   nothing and is no intervention; A-7 counts it as its wake's action.
+ *   decision the Orchestrator did not ask, of any class in an `owner` or
+ *   `shadow` cell, where the project's prediction switch is on (a level of 1
+ *   or more), once (`predictionRefusalOf`). The owner sees it as the
+ *   Orchestrator's proposal on the decision's card (ADR-025). It answers
+ *   nothing, sends nothing and is no intervention; A-7 counts it as its
+ *   wake's action.
  *
  * `bm_decide` and `bm_predict` write through one step, `transitionUnderPolicy`.
  * Nothing here sends to an agent.
@@ -195,13 +197,11 @@ function replacedByAsk(workspaceId: string, requestId: string | null, subject: s
  * replaces the Orchestrator's open decision of the same request unless
  * `separate: true`, and the answer names the id it replaced — only when the
  * store did replace one. An active owner precedent on its `subject` answers it
- * at once unless its class is owner-fixed (autonomy design §B.6); else, when
- * no precedent bears on it, the owner's policy answers it with its recommended
- * option where its class is delegated to that predictor (§B.5) — both through
- * `resolveAtOpen`. Either answer goes to `onSettled` like the owner's, and the
- * tool says so. Neither answers at once while the loop guard is full for its
- * request (`loopGuardFull`): the owner does, and the owner's choice is the one
- * command the guard never refuses.
+ * at once (autonomy design §B.6, `resolveAtOpen`); the answer goes to
+ * `onSettled` like the owner's, and the tool says so. It does not answer at
+ * once while the loop guard is full for its request (`loopGuardFull`): the
+ * owner does, and the owner's choice is the one command the guard never
+ * refuses.
  */
 export async function bmAskOwner(input: AskOwnerInput, context: ToolContext, deps: DecideToolDeps): Promise<ServerToolResult> {
   if (input.managerId !== undefined) await requireManager({ workspaceId: input.workspaceId, managerId: input.managerId }, context);
@@ -298,58 +298,37 @@ export async function bmAskOwner(input: AskOwnerInput, context: ToolContext, dep
   const replacedId = stored.superseded?.id ?? null;
   const replacedLine =
     replacedId === null ? null : `It replaced your open question ${replacedId} of this ${requestId === null ? "project" : "request"}, which can no longer be answered.`;
-  // The loop guard (design §6A) counts the commands a precedent or the policy chose too: once it is full for the
-  // request, neither answers at once — the owner does. A store that cannot be read counts as full: the owner is asked.
+  // The loop guard (design §6A) counts the commands a precedent chose too: once it is full for the request, no
+  // precedent answers at once — the owner does. A store that cannot be read counts as full: the owner is asked.
   let guardFull = false;
   try {
     guardFull = stored.created && loopGuardFull(context.home, input.workspaceId, commandRequestIdOf(requestId), context.now, deps.store);
   } catch {
     guardFull = true;
   }
-  // Autonomy design §C.6 (change-008 C4): while its request stands finished-unverified, the policy picks no option that
-  // acts on the finish. Read from the trace store now, only when the option it would pick does (a commit, a release).
-  const finishedUnverified =
-    stored.created && !guardFull && stored.decision.options.some((option) => option.recommended && actsOnFinish(option))
-      ? await isFinishedUnverifiedNow({ ...finishReadOf(context), ...(deps.log === undefined ? {} : { log: deps.log }) }, input.workspaceId, {
-          requestId,
-          agentId: workerOfCommands(stored.decision),
-        })
-      : false;
-  // Autonomy design §B.6, then §B.5: an owner precedent on its subject, else a delegate cell of the recommended predictor.
+  // Autonomy design §B.6: an owner precedent on its subject.
   const atOpen =
-    stored.created && !guardFull
-      ? resolveAtOpen(stored.decision, { home: context.home, now: context.now, finishedUnverified, ...(deps.log === undefined ? {} : { log: deps.log }) })
-      : null;
-  const precedentId = atOpen?.by === "precedent" ? (atOpen.precedent?.id ?? null) : null;
+    stored.created && !guardFull ? resolveAtOpen(stored.decision, { home: context.home, now: context.now, ...(deps.log === undefined ? {} : { log: deps.log }) }) : null;
   const answered = atOpen?.answered ?? null;
+  const precedentId = answered === null ? null : (atOpen?.precedent?.id ?? null);
   // Autonomy design §G.3, §G.4: advice the owner is left to answer is an `advice` intervention.
   if (answered === null && stored.created) await recordAdviceOf(stored.decision, context, deps);
   if (answered !== null) {
-    const who = precedentId !== null ? `precedent ${precedentId}` : "the policy";
-    await settle(answered, `answered by ${who}`, context, deps);
+    await settle(answered, `answered by precedent ${precedentId ?? "of the owner"}`, context, deps);
     const option = answered.options.find((entry) => entry.key === answered.answer?.optionKey);
     const answerText = option === undefined ? `in the owner's words: ${redactText(answered.answer?.words ?? "", context.env)}` : `option ${option.key}: ${option.label}`;
     const decisionClass = decisionClassOf(answered);
     const said = [
-      precedentId !== null
-        ? `Answered at once by the owner's precedent ${precedentId} on "${answered.subject}" (${answerText}); the owner is not asked.`
-        : `Answered at once by the owner's policy: ${decisionClass} is delegated to the recommended option in this project (${answerText}); the owner is not asked.`,
+      `Answered at once by the owner's precedent ${precedentId ?? ""} on "${answered.subject}" (${answerText}); the owner is not asked.`,
       replacedLine,
       option?.action !== undefined
-        ? precedentId !== null
-          ? "The plugin delivers the option's command itself, with the owner's authority."
-          : `The plugin delivers the option's command itself, on the policy's authority (policy:${decisionClass}).`
-        : precedentId !== null
-          ? "It comes back to you as a BM-ANSWER notice that cites the precedent; act on it as the owner's answer."
-          : "It comes back to you as a BM-ANSWER notice that names the policy; act on it as the owner's answer.",
+        ? "The plugin delivers the option's command itself, with the owner's authority."
+        : "It comes back to you as a BM-ANSWER notice that cites the precedent; act on it as the owner's answer.",
       "Tell the owner in one line here too.",
     ]
       .filter((line): line is string => line !== null)
       .join(" ");
-    const facts =
-      precedentId !== null
-        ? { decisionId: answered.id, replaced: replacedId, class: decisionClass, answeredBy: "precedent", precedentId }
-        : { decisionId: answered.id, replaced: replacedId, class: decisionClass, answeredBy: "policy", predictor: answered.answer?.predictor ?? "recommended" };
+    const facts = { decisionId: answered.id, replaced: replacedId, class: decisionClass, answeredBy: "precedent", precedentId };
     return { ok: true, text: `${said}\n${json(facts)}` };
   }
   const prepared = options.filter((option) => option.action?.kind === "command").length;
@@ -358,13 +337,8 @@ export async function bmAskOwner(input: AskOwnerInput, context: ToolContext, dep
   const said = [
     `Asked. The owner answers it in paseo-bm${options.length === 0 ? "" : ", with one button per option"}; nothing was sent to any agent.`,
     replacedLine,
-    guardFull ? `${COMMAND_LIMIT_PER_REQUEST} commands went to this request in ${COMMAND_LIMIT_WINDOW_HOURS} hours: the owner answers this one, not a precedent or the policy.` : null,
-    finishedUnverified
-      ? "Its request finished unverified: while it stands so, the owner's policy chooses no option that commits or releases, so the owner decides those."
-      : null,
-    suggested === null
-      ? null
-      : `The owner's precedent on "${suggested.subject}" is shown to them as a suggestion only: a ${decisionClassOf(stored.decision)} question stays theirs.`,
+    guardFull ? `${COMMAND_LIMIT_PER_REQUEST} commands went to this request in ${COMMAND_LIMIT_WINDOW_HOURS} hours: the owner answers this one, not a precedent.` : null,
+    suggested === null ? null : `The owner's precedent on "${suggested.subject}" is shown to them as a suggestion only.`,
     prepared === 0 ? null : "When the owner picks an option with a command, the plugin delivers that command itself, with the owner's authority.",
     changes === 0
       ? null
@@ -519,13 +493,13 @@ async function recordInterventionOf(of: Decision, context: ToolContext, deps: De
  * `bm_decide` (autonomy design §B.5, §B.9; change-004, bead `t9lm.11`): the
  * Orchestrator decides for the owner a decision it did not ask — a Worker's
  * question (`q:`) or a fallback incident (`f:`) — where the owner's policy
- * delegates its class to it: a `delegate` cell whose predictor is
- * `orchestrator` (`decideRefusalOf`, the policy read now). It answers with one
- * of the decision's options, `by: policy`, `via: inbox` (as the other policy
- * answers: nothing was typed in a chat), the cell's `class`, the predictor
- * `orchestrator` and the Orchestrator's reason (redacted, one line), with the
- * grant the owner's choice of that option would give — never a release, data,
- * security or cost one (`answerDecision` refuses it). From the read to the
+ * delegates its class: a `delegate` cell, any class at the project's level
+ * (`decideRefusalOf`, the policy read now; ADR-025). It answers with one of
+ * the decision's options, `by: policy`, `via: inbox` (as the other policy
+ * answers: nothing was typed in a chat), the cell's `class` and the
+ * Orchestrator's reason (redacted, one line), with the grant the owner's
+ * choice of that option would give — a push, publish, deploy, migration, real
+ * data or cost included where its class is delegated. From the read to the
  * write nothing awaits, and the write checks the rule again, so no other
  * answer comes between (the first answer wins: `transitionUnderPolicy`). The
  * answered decision then goes to `onSettled`, the delivery the owner's answers
@@ -556,7 +530,7 @@ export async function bmDecide(input: DecideInput, context: ToolContext, deps: D
     idsFrom: "a decision.opened line or bm_decisions gave",
     what: "the answer to",
     change: (current, { reason, at }) =>
-      answerDecision(current, { by: "policy", via: "inbox", optionKey: input.optionKey, class: decisionClassOf(current), predictor: "orchestrator", reason, at }),
+      answerDecision(current, { by: "policy", via: "inbox", optionKey: input.optionKey, class: decisionClassOf(current), reason, at }),
   });
   await settle(answered, "decided by the Orchestrator on the owner's policy", context, deps);
   // Autonomy design §G.3: an answer the Orchestrator gives is an `answer` intervention.
@@ -579,7 +553,7 @@ export async function bmDecide(input: DecideInput, context: ToolContext, deps: D
     decidedDeliveryText(now),
     "Send nothing more for it. Tell the owner in one line what you chose and why.",
   ].join(" ");
-  const facts = { decisionId: answered.id, optionKey: option.key, class: decisionClass, answeredBy: "policy", predictor: "orchestrator", grant: now.grant, delivery: now.delivery };
+  const facts = { decisionId: answered.id, optionKey: option.key, class: decisionClass, answeredBy: "policy", grant: now.grant, delivery: now.delivery };
   return { ok: true, text: `${said}\n${json(facts)}` };
 }
 
@@ -591,8 +565,9 @@ export async function bmDecide(input: DecideInput, context: ToolContext, deps: D
  * option the decision has. From the read to the write nothing awaits, and the
  * write checks again, so a decision gets one prediction
  * (`transitionUnderPolicy`). It answers nothing, delivers nothing and logs no
- * intervention: the owner decides, and sees the prediction only once the
- * decision is settled (`ownerViewOfDecision`). A refusal writes nothing.
+ * intervention: the owner decides, and sees the prediction on the decision's
+ * card as the Orchestrator's proposal while the project's level is 1 or more
+ * (`ownerViewOfDecision`, ADR-025). A refusal writes nothing.
  */
 export function bmPredict(input: DecideInput, context: ToolContext): ServerToolResult {
   const { decision: predicted } = transitionUnderPolicy(input, context, {
@@ -606,8 +581,8 @@ export function bmPredict(input: DecideInput, context: ToolContext): ServerToolR
   });
   const said = [
     `Recorded your prediction for ${predicted.id}: option ${input.optionKey}.`,
-    "It answers nothing and went to nobody: the owner decides, and sees your prediction only after answering.",
-    "Do not tell the owner what you predicted, and send nothing for it.",
+    "It answers nothing and went to no agent: the owner decides, and sees it on the decision as your proposal, with your reason.",
+    "Send nothing for it.",
   ].join(" ");
   return { ok: true, text: `${said}\n${json({ decisionId: predicted.id, optionKey: input.optionKey, class: decisionClassOf(predicted) })}` };
 }

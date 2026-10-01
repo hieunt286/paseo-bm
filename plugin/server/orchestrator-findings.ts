@@ -37,7 +37,7 @@ import { requireProject, type ServerToolResult, type ToolContext } from "./orche
 import { STALL_REASONS } from "./event-bus";
 import { errorText } from "./rpc-kit";
 import type { Alert } from "../shared/alerts";
-import { canDelegate, challengerOf, modeOf, type AutonomyPolicy } from "../shared/autonomy";
+import { challengerOf, modeOf, type AutonomyPolicy } from "../shared/autonomy";
 import { agreementLedger, agreementRateOf, type AgreementCell } from "../shared/autonomy-ledger";
 import { FINDINGS_MAX_CHARS, FINDINGS_WINDOW_DAYS } from "../shared/bm-tools";
 import type { Tier, TraceRecord } from "../shared/contracts";
@@ -142,19 +142,16 @@ function repeatedSubjectsOf(facts: FindingsFacts): Finding[] {
 }
 
 /**
- * Each predictor's agreement in a class that may be delegated and is not
- * (§B.3, §G.4): a plain figure, no threshold — the owner delegates a class
- * whenever they choose (ADR-023). Only cells with a counted answer, most
+ * Each predictor's agreement in a class that is not delegated (§B.3, §G.4;
+ * any class, ADR-025): a plain figure, no threshold — the owner delegates a
+ * class whenever they choose (ADR-023). Only cells with a counted answer, most
  * answers first.
  */
 function agreementOf(facts: FindingsFacts): Finding[] {
   const answered = facts.decisions.filter((decision) => decision.status === "answered");
-  const cells: AgreementCell[] = agreementLedger(answered, {
-    workspaceId: facts.workspaceId,
-    ...(facts.policy.demotions === undefined ? {} : { demotions: facts.policy.demotions }),
-  }).cells;
+  const cells: AgreementCell[] = agreementLedger(answered, { workspaceId: facts.workspaceId }).cells;
   return cells
-    .filter((cell) => cell.count > 0 && canDelegate(cell.class) && modeOf(facts.policy, facts.workspaceId, cell.class) !== "delegate")
+    .filter((cell) => cell.count > 0 && modeOf(facts.policy, facts.workspaceId, cell.class) !== "delegate")
     .sort((a, b) => b.count - a.count)
     .slice(0, FINDINGS_PER_KIND.agreement)
     .map((cell) => ({

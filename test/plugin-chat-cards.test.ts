@@ -14,7 +14,7 @@ import {
   type ChatCard,
 } from "../plugin/client/chat-card-parse";
 import { drawAsCard, markOf, ownerWarning, partiesOf, actorName } from "../plugin/client/chat-card-parties";
-import { cardFrameOf, detailLinesOf, noticeLine, verificationOfRequest, type CardFrameView } from "../plugin/client/chat-card-frame";
+import { cardFrameOf, detailLinesOf, kindBarOf, noticeLine, verificationOfRequest, type CardFrameView } from "../plugin/client/chat-card-frame";
 import { localTimeText } from "../plugin/client/format";
 import {
   DECISION_LOOKUP_WINDOW_MS,
@@ -58,8 +58,9 @@ import { fakePaseo } from "./helpers/fake-paseo";
 // The root tsconfig has no `jsx`, so the .tsx modules load through non-literal specifiers.
 const uiPath = "../plugin/client/ui.tsx";
 const cardPath = "../plugin/client/chat-card.tsx";
-const { CardFrame, CompactLine } = (await import(uiPath)) as {
+const { CardFrame, Chip, CompactLine } = (await import(uiPath)) as {
   CardFrame: (props: Record<string, unknown>) => unknown;
+  Chip: (props: Record<string, unknown>) => unknown;
   CompactLine: (props: Record<string, unknown>) => unknown;
 };
 const { DecisionCardBody } = (await import(cardPath)) as { DecisionCardBody: (props: Record<string, unknown>) => unknown };
@@ -568,7 +569,7 @@ describe("the decision card's view (experience concept §5.2)", () => {
     expect(JSON.stringify(shown.frame)).not.toContain("answered by you");
   });
 
-  it("shows the policy's answer (autonomy design §B.5) as Decided, decided for you by the policy, never as yours, with nothing to press but Details", () => {
+  it("shows the policy's answer (autonomy design §B.5, ADR-025) as Decided, decided for you by the Orchestrator, never as yours, with nothing to press but Details", () => {
     const scope = questionDecision({ class: "scope", options: [{ key: "a", label: "the existing table: no migration.", recommended: true, effects: ["commit"] }] });
     const decided = ok(
       answerDecision(scope, {
@@ -576,7 +577,6 @@ describe("the decision card's view (experience concept §5.2)", () => {
         via: "inbox",
         optionKey: "a",
         class: "scope",
-        predictor: "recommended",
         reason: "The recommended option: scope is delegated to it in this project",
         at: "2026-09-16T10:02:00.000Z",
       }),
@@ -585,13 +585,13 @@ describe("the decision card's view (experience concept §5.2)", () => {
     const shown = view(found(delivered));
     expect(shown.frame).toMatchObject({
       chip: { text: "Decided", tone: "success" },
-      authority: `decided for you by the policy · recommended option · ${localTimeText(new Date("2026-09-16T10:02:00.000Z"), NOW)}`,
+      authority: `decided for you by the Orchestrator · ${localTimeText(new Date("2026-09-16T10:02:00.000Z"), NOW)}`,
       tag: "grant: commit 1×",
       body: ["✓ the existing table: no migration.", "Sent to Worker · Contact redesign."],
     });
     expect(shown).toMatchObject({ options: [], ownWords: false, confirmChat: false, confirm: null });
     expect(shown.details).toEqual(
-      expect.arrayContaining(["Class: scope", "Answered by: your policy (recommended option, scope delegated)", "Answer via: inbox", "Reason: The recommended option: scope is delegated to it in this project"]),
+      expect.arrayContaining(["Class: scope", "Answered by: the Orchestrator (scope)", "Answer via: inbox", "Reason: The recommended option: scope is delegated to it in this project"]),
     );
     expect(JSON.stringify(shown.frame)).not.toContain("answered by you");
     // Settled: not read again; and not the owner's answer, so it cannot become a precedent.
@@ -837,21 +837,42 @@ describe("the drawn decision card", () => {
 });
 
 describe("the frame and the compact line, drawn", () => {
-  it("draws at most three body lines and colours only the outline of a finished card", () => {
+  it("draws at most three body lines, and colour only as the kind bar at the card's left", () => {
     const shown: CardFrameView = { ...frameOf(card(FINISHED)), body: ["one", "two", "three", "four"] };
     const nodes = renderTree(CardFrame({ view: shown, details: null, detailsOpen: false, onToggleDetails: noop, styles, theme }));
     expect(texts(nodes)).toEqual(expect.arrayContaining(["one", "two", "three"]));
     expect(texts(nodes)).not.toContain("four");
+    // A settled (finished) card has no bar and no coloured border.
     const outer = nodes[0] as RNode;
-    expect(outer.props["style"]).toEqual([{ name: "card" }, { gap: 6, marginVertical: 4 }, { borderColor: "#statusSuccess" }]);
-    const plain = renderTree(CardFrame({ view: frameOf(card(REPORT)), details: null, detailsOpen: false, onToggleDetails: noop, styles, theme }))[0] as RNode;
-    expect((plain.props["style"] as unknown[])[2]).toBeNull();
-    // The outline only: no element of either card draws a left border.
+    expect(outer.props["style"]).toEqual([{ name: "card" }, { gap: 6, marginVertical: 4 }, null]);
+    // A card at work: a muted bar, 3 px, from its info chip.
+    const working = renderTree(CardFrame({ view: frameOf(card(REPORT)), details: null, detailsOpen: false, onToggleDetails: noop, styles, theme }))[0] as RNode;
+    expect((working.props["style"] as unknown[])[2]).toEqual({ borderLeftWidth: 3, borderLeftColor: "#foregroundMuted" });
+    // Colour only on the left bar: no element of either card colours a whole border.
     const styleKeys = (tree: Array<RNode | string>) =>
       allNodes(tree).flatMap((node) => [node.props["style"]].flat(Infinity).flatMap((style) => (typeof style === "object" && style !== null ? Object.keys(style) : [])));
-    const keys = [...styleKeys(nodes), ...styleKeys([plain])];
-    expect(keys).toContain("borderColor");
-    expect(keys.filter((key) => key.startsWith("borderLeft"))).toEqual([]);
+    const keys = [...styleKeys(nodes), ...styleKeys([working])];
+    expect(keys.filter((key) => key.startsWith("borderLeft"))).toEqual(["borderLeftWidth", "borderLeftColor"]);
+  });
+
+  it("derives the kind bar from the card's own bar, its outline, then its chip", () => {
+    const base = frameOf(card(REPORT));
+    expect(kindBarOf({ ...base, outline: null, chip: { text: "Needs decision", tone: "warning" } })).toBe("warning");
+    expect(kindBarOf({ ...base, outline: "warning", chip: { text: "Finished", tone: "success" } })).toBe("warning");
+    expect(kindBarOf({ ...base, outline: "success", chip: { text: "Finished", tone: "success" } })).toBeNull();
+    expect(kindBarOf({ ...base, outline: null, chip: { text: "Superseded", tone: "muted" } })).toBeNull();
+    expect(kindBarOf({ ...base, outline: null, chip: null })).toBeNull();
+    expect(kindBarOf({ ...base, bar: "danger", chip: { text: "Needs decision", tone: "warning" } })).toBe("danger");
+    expect(kindBarOf({ ...base, bar: null, chip: { text: "Needs decision", tone: "warning" } })).toBeNull();
+  });
+
+  it("draws a chip as a coloured square and a muted label, not a pill", () => {
+    const chip = renderTree(Chip({ badge: { text: "Needs decision", tone: "warning" }, styles, theme }))[0] as RNode;
+    expect(chip.props["style"]).toEqual([{ name: "chip" }, { borderColor: "transparent", backgroundColor: "transparent" }]);
+    const [mark, label] = chip.children as RNode[];
+    expect(mark!.props["style"]).toEqual([{ name: "chipMark" }, { backgroundColor: "#statusWarning" }]);
+    expect(label!.props["style"]).toEqual([{ name: "chipText" }, { color: "#foregroundMuted" }]);
+    expect(texts([chip])).toEqual(["Needs decision"]);
   });
 
   it("draws a notice as one line that opens to the whole notice", () => {
@@ -1031,7 +1052,7 @@ describe("Save as precedent on the decision card (autonomy design §B.6, §B.9)"
       saveLabel: "Save precedent",
       saveEnabled: true,
     });
-    expect(shown.form!.body).toMatch(/for 30 days — release, data, security and cost questions still come to you/);
+    expect(shown.form!.body).toMatch(/for 30 days\. End it any time in Settings → More → Precedents\./);
     expect(shown.form!.scopes.map((scope) => [scope.label, scope.selected])).toEqual([
       ["This project", true],
       ["All projects", false],
@@ -1234,9 +1255,9 @@ describe("the finished card reads its request's finish (autonomy design §C.3, �
     expect(verificationOfRequest(undefined, REQ)).toBeNull();
   });
 
-  it("draws the warning chip and outline in the frame", () => {
+  it("draws the warning chip and the warning kind bar in the frame", () => {
     const nodes = renderTree(CardFrame({ view: finishedFrame(unverified), details: null, detailsOpen: false, onToggleDetails: noop, styles, theme }));
     expect(texts(nodes)).toContain("Finished — unverified");
-    expect((nodes[0] as RNode).props["style"]).toEqual([{ name: "card" }, { gap: 6, marginVertical: 4 }, { borderColor: "#statusWarning" }]);
+    expect((nodes[0] as RNode).props["style"]).toEqual([{ name: "card" }, { gap: 6, marginVertical: 4 }, { borderLeftWidth: 3, borderLeftColor: "#statusWarning" }]);
   });
 });

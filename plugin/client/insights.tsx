@@ -1,15 +1,15 @@
 /**
- * Insights (experience concept §4.3, autonomy design §A.12): how requests flow,
- * what they cost and how the Orchestrator's interventions turned out (A-12,
- * §G.3), from `insights.summary` (the metric module over the plugin's own data
- * folder); the Beads figures of one project; its autonomy by class — the
- * agreement ledger (`autonomy.ledger`) with each class's mode
- * (`autonomy.policy`, §B.3), and a **Delegate?** shortcut on a class that may
- * be delegated (ADR-023), which delegates it only once confirmed (`autonomy.set { confirmed: true,
- * predictor }`, §B.4); and review lift per size of request (§C.4). Cost ends
- * with the tokens read per request and the heaviest requests, by project name
- * (§G.2). What it shows is `insights-model.ts`; this file reads the data and
- * draws it.
+ * A project's Metrics tab (change-014 outcome 5; the Insights section until
+ * then — experience concept §4.3, autonomy design §A.12): how the project's
+ * requests flow, what they cost and how the Orchestrator's interventions
+ * turned out (A-12, §G.3), from `insights.summary` for the workspace (the
+ * metric module over the plugin's own data folder); its Beads figures; its
+ * autonomy by class — the agreement ledger (`autonomy.ledger`) with each
+ * class's mode (`autonomy.policy`, §B.3), read only (ADR-025: autonomy is the
+ * project's level, set in Settings) —; and review lift per size of request
+ * (§C.4). Cost ends with the tokens read per request and the heaviest
+ * requests (§G.2). What it shows is `insights-model.ts`; this file reads the
+ * data and draws it.
  *
  * Read once when shown and on Refresh — never polled: the figures move by the
  * day, not by the second.
@@ -18,30 +18,17 @@
  * (`toneColor`), accessibility roles and labels on every pressable, project
  * names only (no ids).
  */
-import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { useRpc } from "@getpaseo/plugin/client";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState, type ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
 import { ActivityIndicator, ScrollView, Text, View } from "react-native";
-import type { AutonomySetInput } from "../shared/autonomy";
-import {
-  autonomyLedgerRpc,
-  autonomyPolicyRpc,
-  autonomySetRpc,
-  beadsListRpc,
-  insightsSummaryRpc,
-  type AutonomyPolicyOutput,
-  type InsightsWindow,
-} from "../shared/contracts";
-import type { DecisionClass, Predictor } from "../shared/decisions";
+import { autonomyLedgerRpc, autonomyPolicyRpc, beadsListRpc, insightsSummaryRpc, type InsightsWindow } from "../shared/contracts";
 import { dashboardStyles } from "./styles";
 import { toneColor } from "./tone";
 import {
-  ALL_PROJECTS,
   AUTONOMY_NOTE,
   AUTONOMY_TITLE,
   COORDINATION_EMPTY,
-  DELEGATION_UI_IDLE,
   HEAVIEST_TITLE,
   COORDINATION_NOTE,
   INSIGHTS_DEFAULT_WINDOW,
@@ -51,16 +38,12 @@ import {
   autonomyFiguresView,
   beadsFiguresView,
   insightsView,
-  projectTabs,
   scopeLine,
   type AgreementFiguresView,
   type AutonomyClassRowView,
   type AutonomyFiguresView,
   type BeadsFiguresView,
-  type DelegateOfferView,
-  type DelegationUi,
   type HeavyRequestView,
-  type InsightsProject,
   type InsightsView,
   type RequestTokensView,
   type ReviewLiftView,
@@ -68,10 +51,10 @@ import {
 } from "./insights-model";
 import { errorMessageOf } from "./errors";
 import { AUTONOMY_POLICY_KEY } from "./settings-autonomy-model";
-import { BarChart, Button, ConfirmBlock, StatCards, StatusTabs, ToneText, type Styles, type Theme } from "./ui";
+import { BarChart, Button, StatCards, StatusTabs, ToneText, type Styles, type Theme } from "./ui";
 
 /** Figures change slowly; a read stays good for a minute. */
-const INSIGHTS_STALE_MS = 60_000;
+export const INSIGHTS_STALE_MS = 60_000;
 
 export const insightsQueryKey = (window: InsightsWindow, projectId: string) => ["paseo-bm", "insights", window, projectId] as const;
 
@@ -182,43 +165,15 @@ export function BeadsFigures({ view, styles, theme }: { view: BeadsFiguresView; 
   );
 }
 
-/** What the Autonomy part's presses do: open Delegate?'s confirmation, cancel it, confirm it. */
-export interface AutonomyActions {
-  delegate: (offer: { decisionClass: DecisionClass; predictor: Predictor }) => void;
-  cancel: () => void;
-  confirm: (input: AutonomySetInput) => void;
-}
-
-const NO_AUTONOMY_ACTIONS: AutonomyActions = { delegate: () => undefined, cancel: () => undefined, confirm: () => undefined };
-
-/** Delegate? on a predictor's figures: it opens the confirmation, never delegates by itself. Hook-free. */
-function DelegateButton({ offer, on, styles }: { offer: DelegateOfferView; on: AutonomyActions; styles: Styles }) {
-  return (
-    <View style={styles.chipRow}>
-      <Button
-        label={offer.label}
-        kind="secondary"
-        accessibilityLabel={offer.accessibilityLabel}
-        accessibilityState={{ disabled: !offer.enabled }}
-        disabled={!offer.enabled}
-        onPress={() => on.delegate({ decisionClass: offer.decisionClass, predictor: offer.predictor })}
-        style={{ opacity: offer.enabled ? 1 : 0.5 }}
-        styles={styles}
-      />
-    </View>
-  );
-}
-
 /**
  * One predictor's figures in a class row: two or three short lines on a phone,
- * a column of its own on a wide screen; Delegate? under them when offered. Hook-free.
+ * a column of its own on a wide screen. Hook-free.
  */
-function AgreementFigures({ figures, compact, on, styles, theme }: { figures: AgreementFiguresView; compact: boolean; on: AutonomyActions; styles: Styles; theme: Theme }) {
+function AgreementFigures({ figures, compact, styles, theme }: { figures: AgreementFiguresView; compact: boolean; styles: Styles; theme: Theme }) {
   const strong = [styles.body, { color: toneColor(theme, "plain"), fontWeight: "600" as const }];
   const reversals =
     figures.reversals === null ? null : <ToneText tone={figures.reversalTone} styles={styles} theme={theme}>{figures.reversals}</ToneText>;
   const unread = figures.unread === null ? null : <Text style={[styles.body, { fontSize: 11 }]}>{figures.unread}</Text>;
-  const delegate = figures.delegate === null ? null : <DelegateButton offer={figures.delegate} on={on} styles={styles} />;
   if (compact) {
     return (
       <View style={{ gap: 1 }}>
@@ -226,7 +181,6 @@ function AgreementFigures({ figures, compact, on, styles, theme }: { figures: Ag
         <Text style={styles.body}>{figures.span === null ? figures.count : `${figures.count} · ${figures.span}`}</Text>
         {reversals}
         {unread}
-        {delegate}
       </View>
     );
   }
@@ -238,24 +192,12 @@ function AgreementFigures({ figures, compact, on, styles, theme }: { figures: Ag
       {figures.span === null ? null : <Text style={styles.body}>{figures.span}</Text>}
       {reversals}
       {unread}
-      {delegate}
     </View>
   );
 }
 
-/**
- * One class: its name and mode, then each predictor's figures — stacked on a
- * phone, side by side on a wide screen —, when it last went back to Shadow,
- * and Delegate?'s confirmation in place (Cancel first). Hook-free.
- */
-export function AutonomyClassRow({ row, compact, on = NO_AUTONOMY_ACTIONS, styles, theme }: {
-  row: AutonomyClassRowView;
-  compact: boolean;
-  on?: AutonomyActions;
-  styles: Styles;
-  theme: Theme;
-}) {
-  const confirm = row.confirm;
+/** One class: its name and mode, then each predictor's figures — stacked on a phone, side by side on a wide screen. Hook-free. */
+export function AutonomyClassRow({ row, compact, styles, theme }: { row: AutonomyClassRowView; compact: boolean; styles: Styles; theme: Theme }) {
   return (
     <View style={styles.card} accessibilityLabel={row.accessibilityLabel}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -264,47 +206,22 @@ export function AutonomyClassRow({ row, compact, on = NO_AUTONOMY_ACTIONS, style
       </View>
       <View style={compact ? { flexDirection: "column", gap: 6 } : { flexDirection: "row", flexWrap: "wrap", gap: 16 }}>
         {row.figures.map((figures) => (
-          <AgreementFigures key={figures.predictor} figures={figures} compact={compact} on={on} styles={styles} theme={theme} />
+          <AgreementFigures key={figures.predictor} figures={figures} compact={compact} styles={styles} theme={theme} />
         ))}
       </View>
-      {row.demoted === null ? null : <Text style={[styles.body, { fontSize: 11 }]}>{row.demoted}</Text>}
-      {confirm === null ? null : (
-        <>
-          <ConfirmBlock
-            dialog={confirm.dialog}
-            busy={confirm.busy}
-            busyLabel={confirm.busyLabel}
-            onConfirm={() => on.confirm(confirm.input)}
-            onCancel={on.cancel}
-            styles={styles}
-            theme={theme}
-          />
-          {confirm.error === null ? null : (
-            <ToneText tone="danger" accessibilityLiveRegion="polite" styles={styles} theme={theme}>
-              {`Could not delegate: ${confirm.error}`}
-            </ToneText>
-          )}
-        </>
-      )}
     </View>
   );
 }
 
-/** The Autonomy part: a row per class of the chosen project, or why there is none. Hook-free. */
-export function AutonomyFigures({ view, compact, on, styles, theme }: {
-  view: AutonomyFiguresView;
-  compact: boolean;
-  on?: AutonomyActions;
-  styles: Styles;
-  theme: Theme;
-}) {
+/** The Autonomy part: a row per class of the project, or why there is none. Hook-free. */
+export function AutonomyFigures({ view, compact, styles, theme }: { view: AutonomyFiguresView; compact: boolean; styles: Styles; theme: Theme }) {
   if (view.kind === "choose" || view.kind === "empty") return <Text style={styles.body}>{view.text}</Text>;
   if (view.kind === "loading") return <ActivityIndicator color={styles.spinner.color} />;
   if (view.kind === "error") return <ToneText tone="danger" styles={styles} theme={theme}>{view.text}</ToneText>;
   return (
     <>
       {view.rows.map((row) => (
-        <AutonomyClassRow key={row.decisionClass} row={row} compact={compact} on={on ?? NO_AUTONOMY_ACTIONS} styles={styles} theme={theme} />
+        <AutonomyClassRow key={row.decisionClass} row={row} compact={compact} styles={styles} theme={theme} />
       ))}
       {view.quiet === null ? null : <Text style={[styles.body, { fontSize: 11 }]}>{view.quiet}</Text>}
     </>
@@ -356,49 +273,35 @@ export function ReviewLiftFigures({ view, compact, styles, theme }: { view: Revi
   );
 }
 
-export interface InsightsBodyProps {
+export interface MetricsBodyProps {
   window: InsightsWindow;
-  projectId: string;
-  projects: readonly InsightsProject[];
+  /** The project's name, for the scope line. */
+  projectLabel: string | null;
   /** Null until the summary has been read once. */
   view: InsightsView | null;
   loading: boolean;
   error: string | null;
   beads: BeadsFiguresView;
   autonomy: AutonomyFiguresView;
-  /** Delegate? and its confirmation (§B.4). */
-  onAutonomy?: AutonomyActions;
   /** Phone width: the autonomy figures, the heaviest requests and the review figures stack. */
   compact?: boolean;
   onWindow: (window: InsightsWindow) => void;
-  onProject: (projectId: string) => void;
   onRefresh: () => void;
-  status?: ReactNode;
   styles: Styles;
   theme: Theme;
 }
 
-/** The whole screen but its data: the choices, then Flow, Cost, Coordination, Beads, Autonomy and Review lift. Hook-free. */
-export function InsightsBody(props: InsightsBodyProps) {
-  const { window, projectId, projects, view, loading, error, beads, autonomy, styles, theme } = props;
-  const projectLabel = projects.find((project) => project.id === projectId)?.label ?? null;
+/** The Metrics tab but its data: the window, then Flow, Cost, Coordination, Beads, Autonomy and Review lift. Hook-free. */
+export function MetricsBody(props: MetricsBodyProps) {
+  const { window, projectLabel, view, loading, error, beads, autonomy, styles, theme } = props;
   return (
     <>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-        <Text style={[styles.title, { flex: 1 }]} numberOfLines={1}>
-          Insights
-        </Text>
-        <Button
-          label="Refresh"
-          kind="secondary"
-          accessibilityLabel="Refresh the figures"
-          onPress={props.onRefresh}
-          styles={styles}
-        />
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <View style={{ flex: 1 }}>
+          <StatusTabs tabs={WINDOW_TABS} selected={window} onSelect={(key) => props.onWindow(key as InsightsWindow)} styles={styles} />
+        </View>
+        <Button label="Refresh" kind="secondary" accessibilityLabel="Refresh the figures" onPress={props.onRefresh} styles={styles} />
       </View>
-      {props.status}
-      <StatusTabs tabs={WINDOW_TABS} selected={window} onSelect={(key) => props.onWindow(key as InsightsWindow)} styles={styles} />
-      <StatusTabs tabs={projectTabs(projects)} selected={projectId} onSelect={props.onProject} styles={styles} />
       <Text style={styles.body}>{scopeLine(window, projectLabel)}</Text>
 
       {loading && view === null ? <ActivityIndicator color={styles.spinner.color} /> : null}
@@ -410,7 +313,7 @@ export function InsightsBody(props: InsightsBodyProps) {
 
       <Text style={styles.sectionTitle}>{AUTONOMY_TITLE}</Text>
       <Text style={styles.body}>{AUTONOMY_NOTE}</Text>
-      <AutonomyFigures view={autonomy} compact={props.compact ?? false} on={props.onAutonomy} styles={styles} theme={theme} />
+      <AutonomyFigures view={autonomy} compact={props.compact ?? false} styles={styles} theme={theme} />
 
       {view === null || view.reviewLift === null ? null : (
         <>
@@ -423,97 +326,66 @@ export function InsightsBody(props: InsightsBodyProps) {
   );
 }
 
-export interface InsightsScreenProps extends PluginSurfaceProps {
-  /** Projects the surface knows by name: open workspaces first, then closed ones with history. */
-  projects: readonly InsightsProject[];
-  status?: ReactNode;
+export interface ProjectMetricsProps {
+  workspaceId: string;
+  /** The project's name; null in the workspace's own Beads tab. */
+  label: string | null;
+  compact: boolean;
+  theme: Theme;
 }
 
-export function InsightsScreen({ theme, layout, projects, status }: InsightsScreenProps) {
-  const styles = useMemo(() => dashboardStyles(theme, layout.compact), [theme, layout.compact]);
-  const queryClient = useQueryClient();
+/** A project's Metrics tab: mounted only while it shows, so its figures are read only then. */
+export function ProjectMetrics({ workspaceId, label, compact, theme }: ProjectMetricsProps) {
+  const styles = useMemo(() => dashboardStyles(theme, compact), [theme, compact]);
   const [window, setWindow] = useState<InsightsWindow>(INSIGHTS_DEFAULT_WINDOW);
-  const [projectId, setProjectId] = useState<string>(ALL_PROJECTS);
-  const [delegation, setDelegation] = useState<DelegationUi>(DELEGATION_UI_IDLE);
   const readSummary = useRpc(insightsSummaryRpc);
   const listBeads = useRpc(beadsListRpc);
   const readLedger = useRpc(autonomyLedgerRpc);
   const readPolicy = useRpc(autonomyPolicyRpc);
-  const setPolicy = useRpc(autonomySetRpc);
-  const chosen = projectId !== ALL_PROJECTS;
   const summary = useQuery({
-    queryKey: insightsQueryKey(window, projectId),
-    queryFn: () => readSummary(projectId === ALL_PROJECTS ? { window } : { window, workspaceId: projectId }),
+    queryKey: insightsQueryKey(window, workspaceId),
+    queryFn: () => readSummary({ window, workspaceId }),
     staleTime: INSIGHTS_STALE_MS,
   });
   // The Beads screen's own query: a project's beads read here are its beads there.
   const beads = useQuery({
-    queryKey: ["paseo-bm", "beads-list", projectId],
-    queryFn: () => listBeads({ workspaceId: projectId }),
-    enabled: chosen,
+    queryKey: ["paseo-bm", "beads-list", workspaceId],
+    queryFn: () => listBeads({ workspaceId }),
   });
   const ledger = useQuery({
-    queryKey: autonomyLedgerQueryKey(projectId),
-    queryFn: () => readLedger({ workspaceId: projectId }),
-    enabled: chosen,
+    queryKey: autonomyLedgerQueryKey(workspaceId),
+    queryFn: () => readLedger({ workspaceId }),
     staleTime: INSIGHTS_STALE_MS,
   });
-  // Settings reads and writes this same query, so a mode set there shows here.
-  const policy = useQuery({ queryKey: AUTONOMY_POLICY_KEY, queryFn: () => readPolicy({}), enabled: chosen });
+  // Settings reads and writes this same query, so a level set there shows here.
+  const policy = useQuery({ queryKey: AUTONOMY_POLICY_KEY, queryFn: () => readPolicy({}) });
   const now = new Date();
-  const view = summary.data === undefined ? null : insightsView(summary.data, now, projects);
-  const beadsView = beadsFiguresView(projectId, beads.data, beads.isError ? errorMessageOf(beads.error) : null, now);
+  const view = summary.data === undefined ? null : insightsView(summary.data, now, label === null ? [] : [{ id: workspaceId, label }]);
+  const beadsView = beadsFiguresView(workspaceId, beads.data, beads.isError ? errorMessageOf(beads.error) : null, now);
   const autonomyView = autonomyFiguresView({
-    projectId,
-    projectLabel: projects.find((project) => project.id === projectId)?.label ?? null,
+    projectId: workspaceId,
     ledger: ledger.data,
     policy: policy.data?.policy,
     error: ledger.isError ? errorMessageOf(ledger.error) : policy.isError ? errorMessageOf(policy.error) : null,
-    ui: delegation,
   });
-  // §B.4: a confirmed Delegate? sets `delegate`; the policy it returns is the one Settings reads too.
-  const onAutonomy: AutonomyActions = {
-    delegate: (offer) => setDelegation({ ...DELEGATION_UI_IDLE, confirming: offer }),
-    cancel: () => setDelegation(DELEGATION_UI_IDLE),
-    confirm: (input) =>
-      void (async () => {
-        setDelegation((current) => ({ ...current, busy: true, error: null }));
-        try {
-          const saved = await setPolicy(input);
-          queryClient.setQueryData<AutonomyPolicyOutput>(AUTONOMY_POLICY_KEY, saved);
-          setDelegation(DELEGATION_UI_IDLE);
-        } catch (failure) {
-          setDelegation((current) => ({ ...current, busy: false, error: errorMessageOf(failure) }));
-        }
-      })(),
-  };
-
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
-      <InsightsBody
+      <MetricsBody
         window={window}
-        projectId={projectId}
-        projects={projects}
+        projectLabel={label ?? "this project"}
         view={view}
         loading={summary.isPending}
         error={summary.isError ? errorMessageOf(summary.error) : null}
         beads={beadsView}
         autonomy={autonomyView}
-        onAutonomy={onAutonomy}
-        compact={layout.compact}
+        compact={compact}
         onWindow={setWindow}
-        onProject={(id) => {
-          setDelegation(DELEGATION_UI_IDLE);
-          setProjectId(id);
-        }}
         onRefresh={() => {
           void summary.refetch();
-          if (!chosen) return;
           void beads.refetch();
           void ledger.refetch();
           void policy.refetch();
         }}
-        status={status}
         styles={styles}
         theme={theme}
       />

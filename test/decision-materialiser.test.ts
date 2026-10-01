@@ -463,7 +463,7 @@ describe("expiry at a finished report (§A.3)", () => {
   it("bm_decide and bm_predict refuse an expired question as any settled one (their rules)", async () => {
     await ask();
     // Q2 is `dependency` by its effects: delegated to the Orchestrator, or predicted with the challenger on.
-    const delegated: AutonomyPolicy = { projects: { [WORKSPACE_ID]: { dependency: { mode: "delegate", predictor: "orchestrator", at: NOW } } }, challenger: {} };
+    const delegated: AutonomyPolicy = { projects: { [WORKSPACE_ID]: { dependency: { mode: "delegate", at: NOW } } }, challenger: {} };
     const challenger: AutonomyPolicy = { projects: {}, challenger: { [WORKSPACE_ID]: true } };
     expect(decideRefusalOf(delegated, get("Q2")!)).toBeNull();
     expect(predictionRefusalOf(challenger, get("Q2")!)).toBeNull();
@@ -692,19 +692,18 @@ describe("owner precedents (autonomy design §B.6)", () => {
     "- b: Postgres [effects: dependency-install]",
   ].join("\n");
 
-  it("answers a question on an active precedent's subject at open and hands it to onSettled; a release question stays the owner's", async () => {
+  it("answers a question on an active precedent's subject at open and hands it to onSettled, a release question too (ADR-025)", async () => {
     const database = savePrecedent("test-db", "SQLite");
-    savePrecedent("push-backends", "Hold");
+    const hold = savePrecedent("push-backends", "Hold");
     const outcome = await ask(ON_SUBJECTS);
     expect(outcome.opened.map((decision) => [decision.id, decision.status])).toEqual([
-      [idOf("Q1"), "open"],
+      [idOf("Q1"), "answered"],
       [idOf("Q2"), "answered"],
     ]);
     expect(get("Q2")).toMatchObject({ status: "answered", answer: { by: "precedent", via: "inbox", optionKey: "a", precedentId: database.id, at: NOW } });
-    expect(outcome.answered.map((decision) => decision.id)).toEqual([idOf("Q2")]);
-    expect(settled.map((entry) => entry.decisions.map((decision) => decision.id))).toEqual([[idOf("Q2")]]);
-    // Release: kept open, nothing delivered for it.
-    expect(get("Q1")).toMatchObject({ status: "open", answer: null });
+    expect(get("Q1")).toMatchObject({ status: "answered", answer: { by: "precedent", optionKey: "c", precedentId: hold.id } });
+    expect(outcome.answered.map((decision) => decision.id)).toEqual([idOf("Q1"), idOf("Q2")]);
+    expect(settled.map((entry) => entry.decisions.map((decision) => decision.id))).toEqual([[idOf("Q1"), idOf("Q2")]]);
   });
 
   it("leaves a subject a precedent already answered in the request to the owner when it is asked again", async () => {
@@ -731,17 +730,17 @@ describe("owner precedents (autonomy design §B.6)", () => {
     expect(precedents().get(database.id)?.supersededBy).toBe(idOf("Q2"));
   });
 
-  it("the owner's policy (autonomy design §B.5): a delegated class of the recommended predictor is answered at open and handed to onSettled; the precedent still comes first", async () => {
-    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "dependency", mode: "delegate", confirmed: true, predictor: "recommended" }, NOW);
+  it("the owner's policy (autonomy design §B.5, ADR-025): a delegated class is not answered at open, it waits for the Orchestrator; a precedent still answers", async () => {
+    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "dependency", mode: "delegate", confirmed: true }, NOW);
     const outcome = await ask(ON_SUBJECTS);
     expect(outcome.opened.map((decision) => [decision.id, decision.status])).toEqual([
       [idOf("Q1"), "open"],
-      [idOf("Q2"), "answered"],
+      [idOf("Q2"), "open"],
     ]);
-    expect(get("Q2")?.answer).toMatchObject({ by: "policy", via: "inbox", optionKey: "a", class: "dependency", predictor: "recommended", at: NOW });
-    expect(settled.map((entry) => entry.decisions.map((decision) => decision.id))).toEqual([[idOf("Q2")]]);
+    expect(outcome.answered).toEqual([]);
+    expect(settled).toEqual([]);
 
-    // Another request: the owner's precedent on the subject answers, not the recommended option.
+    // Another request: the owner's precedent on the subject answers.
     const database = savePrecedent("test-db", "Postgres");
     const other = await materialiseTurn(managerTurn({ sent: [msg(MANAGER, at(3), report(ON_SUBJECTS, OTHER_REQUEST), "agent")] }), deps());
     expect(other.answered.map((decision) => decision.id)).toEqual([idOf("Q2", OTHER_REQUEST)]);

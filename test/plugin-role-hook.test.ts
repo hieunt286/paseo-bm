@@ -747,7 +747,7 @@ describe("before(\"agent.create\") for bm-orchestrator (orchestrator design §3.
   /** The endpoint's URLs: the Orchestrator's carries the secret (§5.1). */
   const urlFor = (role: string) => `http://127.0.0.1:4567/mcp/${role}${role === "orchestrator" ? `/${SECRET}` : ""}`;
   const ORCHESTRATOR_URL = `http://127.0.0.1:4567/mcp/orchestrator/${SECRET}`;
-  const ORCHESTRATOR_GRANTS = ["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_predict", "bm_direct_worker", "bm_repo", "bm_note", "bm_findings", "bm_compact", "bm_handoff", "bm_why"].map((tool) => ({ kind: "mcp", server: "paseo-bm", tool }));
+  const ORCHESTRATOR_GRANTS = ["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_predict", "bm_direct_worker", "bm_repo", "bm_note", "bm_findings", "bm_compact", "bm_handoff", "bm_why", "bm_reply"].map((tool) => ({ kind: "mcp", server: "paseo-bm", tool }));
   /** The hook as index.server registers it, with a tool endpoint serving every role. */
   function hookWithTools(paseo: unknown, usePaseo?: (paseo: unknown) => void) {
     let hook: ((input: { request: AgentCreateRequest }, context: unknown) => unknown) | undefined;
@@ -839,8 +839,9 @@ describe("before(\"agent.create\") for bm-orchestrator (orchestrator design §3.
       for (const provider of ["bm-manager/m", "bm-worker/m", "bm-reviewer/m", "bm-worker-fallback-2/m"]) {
         const other = applyAgentTools({ config: { provider, cwd: "/repo" } } as unknown as AgentCreateRequest, tools, base);
         expect(other?.config.mcpServers?.["paseo-bm"]).not.toMatchObject({ url: expect.stringContaining("orchestrator") });
-        // The Manager's bm_decisions is its own read-only face at /mcp/manager (autonomy design §A.9), not the Orchestrator's.
-        const orchestratorOnly = ORCHESTRATOR_GRANTS.map((entry) => entry.tool).filter((tool) => tool !== "bm_decisions");
+        // The Manager's bm_decisions is its own read-only face at /mcp/manager (autonomy design §A.9), not the Orchestrator's;
+        // the Worker's bm_reply is its own face at /mcp/worker (change-014 outcome 3).
+        const orchestratorOnly = ORCHESTRATOR_GRANTS.map((entry) => entry.tool).filter((tool) => tool !== "bm_decisions" && tool !== "bm_reply");
         for (const grant of other?.config.toolPolicy?.preapproved ?? []) expect(orchestratorOnly).not.toContain(grant.tool);
       }
     }

@@ -18,7 +18,7 @@ import { soleWorkerOf } from "../shared/sole-worker";
 import { MAX_BODY_LINES, meaningfulLines, type ChatCard, type ReportFacts } from "./chat-card-parse";
 import { actorName, markOf, ownerWarning, partiesOf, party } from "./chat-card-parties";
 import { ago, localTimeText } from "./format";
-import type { Badge, RoleMarkKind, Tone } from "./tone";
+import { kindBarTone, type Badge, type RoleMarkKind, type Tone } from "./tone";
 import { plural, shorten } from "../shared/text";
 import { FINISHED_UNVERIFIED_CHIP, isShownVerification, verificationDetailLines } from "./verification-view";
 
@@ -37,10 +37,28 @@ export interface CardFrameView {
   tag: string | null;
   /** At most `MAX_BODY_LINES`. */
   body: string[];
-  /** The outline's tone, or null for the usual border. */
+  /**
+   * The tone the card is outlined in, or null for none. Drawn as the kind
+   * bar (`kindBarOf`), never as a coloured border (change-014 outcome 6).
+   */
   outline: Tone | null;
+  /**
+   * The 3 px bar at the card's left that marks its kind, or null for none.
+   * Absent: derived from the outline, then the chip (`kindBarOf`).
+   */
+  bar?: Tone | null;
   /** One line under the actions: an outcome or an error. */
   status: { text: string; tone: Tone } | null;
+}
+
+/**
+ * The tone of a card's kind bar: its own `bar` when set, else the first of its
+ * outline and its chip that marks a kind (`kindBarTone`). A settled card has
+ * none.
+ */
+export function kindBarOf(view: Pick<CardFrameView, "bar" | "outline" | "chip">): Tone | null {
+  if (view.bar !== undefined) return view.bar;
+  return kindBarTone(view.outline) ?? kindBarTone(view.chip?.tone ?? null);
 }
 
 /** The dot that opens a compact line. */
