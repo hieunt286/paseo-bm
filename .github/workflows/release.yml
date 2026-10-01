@@ -265,7 +265,7 @@ jobs:
         # to become available", so a short wait fails a healthy publish (bm-90a).
         run: |
           last=""
-          for attempt in $(seq 1 20); do
+          for attempt in $(seq 1 40); do
             published=$(npm view "paseo-bm-plugin@${DIST_TAG}" version 2>/dev/null || true)
             if [ "$published" = "$VERSION" ]; then
               echo "npm dist-tag ${DIST_TAG} -> paseo-bm-plugin@${published} (after $((attempt * 15))s)"
@@ -274,5 +274,5 @@ jobs:
             last="$published"
             sleep 15
           done
-          echo "paseo-bm-plugin@${DIST_TAG} still resolves to '${last}' after 5 minutes, expected ${VERSION}" >&2
+          echo "paseo-bm-plugin@${DIST_TAG} still resolves to '${last}' after 10 minutes, expected ${VERSION}" >&2
           exit 1

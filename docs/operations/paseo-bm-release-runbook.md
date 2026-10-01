@@ -55,7 +55,7 @@ gh release create v<version> --prerelease --title "v<version>" --notes-file docs
 gh release create v<version> --title "v<version>" --notes-file docs/releases/paseo-bm-release-notes-<version>.md
 ```
 
-Follow the run of the `release` event: the checks, `smoke:packed`, `Assert the plugin version`, the dry-run step, then `Publish payload to npm` → `Verify published payload` (waits up to 5 minutes, because npm answers "being processed").
+Follow the run of the `release` event: the checks, `smoke:packed`, `Assert the plugin version`, the dry-run step, then `Publish payload to npm` → `Verify published payload` (waits up to 10 minutes, because npm answers "being processed"; 0.5.0 took about 6).
 
 ## 3. Verification
 

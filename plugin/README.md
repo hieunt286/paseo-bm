@@ -34,7 +34,14 @@ applied only when you pick them), and may on its own have a Manager or Worker co
 conversation, or have a Manager hand a heavy request to a fresh Worker. It uses tokens on its
 provider, and nothing of it exists until you start it.
 
-![A project's beads (a screenshot of an earlier version: the board now comes first)](images/01-beads-screen.jpg)
+![The Inbox: decisions, held actions and alerts by project, plus Decided for you](images/01-inbox.jpg)
+
+| | |
+|---|---|
+| ![Projects: each project's autonomy level, requests and tokens by role](images/02-projects.jpg) | ![Beads: status columns, feature filters, and actions sent to the Manager](images/03-project-beads.jpg) |
+| ![Settings: autonomy levels per project, held risky actions and coordination thresholds](images/04-settings-autonomy.jpg) | ![Manager chat: one request from the ask to a verified finish](images/05-chat-manager.jpg) |
+
+*Design artboards of the 0.5 screens, as on [paseo-bm.erai.pro](https://paseo-bm.erai.pro/).*
 
 ## Install
 
