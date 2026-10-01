@@ -373,6 +373,15 @@ describe("answers in a Worker's chat (§A.5 c)", () => {
     expect(outcome.answered).toEqual([]);
   });
 
+  it("marks only questions asked before the owner's message, never ones the Worker asked after it", async () => {
+    // The owner's message started the Worker's turn; the Worker asked during it.
+    await ask(ROUND_ONE, at(5));
+    const outcome = await materialiseTurn(workerTurn({ sent: [msg(WORKER, at(4), "Redo the agent-flow section.", "user")] }), deps());
+    expect(outcome.marked).toEqual([]);
+    expect(get("Q1")?.status).toBe("open");
+    expect(get("Q2")?.status).toBe("open");
+  });
+
   it("marks nothing of another request, and nothing without a request", async () => {
     await ask();
     await materialiseTurn(workerTurn({ requestId: OTHER_REQUEST, sent: [msg(WORKER, at(8), "go on", "user")] }), deps());

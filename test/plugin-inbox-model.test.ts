@@ -314,14 +314,16 @@ describe("the Inbox's decision cards", () => {
       }),
     );
 
-  it("offers Keep open / Close as answered, and no option, on a decision that needs confirmation", () => {
+  it("offers the options and Own words… beside Keep open / Close as answered on a decision that needs confirmation", () => {
     const decision = markNeedsConfirmation(question("req-A", 1, 10), { via: "chat-worker", at: minutesAgo(2) });
     if (!decision.ok) throw new Error("fixture");
     const shown = cardOf(decision.decision);
-    expect([shown.confirmChat, shown.options, shown.ownWords]).toEqual([true, [], false]);
+    expect([shown.confirmChat, shown.ownWords]).toEqual([true, true]);
+    expect(shown.options.map((option) => option.key)).toEqual(decision.decision.options.map((option) => option.key));
     const onCloseInChat = vi.fn();
     const nodes = draw(shown, DECISION_UI_IDLE, { onCloseInChat });
-    const [keep, close] = pressables(nodes);
+    // The options, then Own words…, then Keep open and Close as answered.
+    const [keep, close] = pressables(nodes).slice(shown.options.length + 1);
     expect([keep!.props["accessibilityLabel"], close!.props["accessibilityLabel"]]).toEqual(["Keep the decision open", "Close the decision as answered"]);
     expect(texts(nodes)).toEqual(expect.arrayContaining(["Needs confirmation", "Keep open", "Close as answered"]));
     (keep!.props["onPress"] as () => void)();

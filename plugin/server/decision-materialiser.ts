@@ -10,7 +10,7 @@
  * | a Manager | inbound (`sent`) messages that are not the owner's, holding `BM-QUESTIONS` | opens `q:<requestId>:<Qn>` when absent (a) |
  * | a Manager whose inbound messages include the owner's typed one | `BM-ANSWERS` blocks in its replies (`received`) | settles those decisions, `via: chat-manager` (b) |
  * | a Worker | the owner's typed messages holding `BM-ANSWERS` | settles the named decisions, `via: chat-worker` (c) |
- * | a Worker | any other owner text while its request has open questions | marks them `needs-confirmation` (c) |
+ * | a Worker | any other owner text while its request has open questions | marks those asked before it `needs-confirmation` (c) |
  * | a Manager | inbound messages that are not the owner's, holding a `finished` `BM-REPORT` | expires that request's unsettled questions asked up to it (§A.3) |
  *
  * - **Origin.** A trace message's `origin` is `user` only when it was typed in
@@ -585,16 +585,21 @@ function settleBlock(context: Context, block: { requestId: string; answers: Answ
   }
 }
 
-/** Marks the open questions of a request `needs-confirmation`, once per owner message. */
+/**
+ * Marks the open questions of a request `needs-confirmation`, once per owner
+ * message. Only a question asked before the message: the owner's message that
+ * started the turn in which the Worker asked cannot have answered it.
+ */
 function markOpen(context: Context, requestId: string, message: TraceMessage, via: ChatVia): void {
   const key = `${context.record.agentId}|${message.at}|${message.text}`;
   if (markedMessages.has(key)) return;
+  const at = validIso(message.at, context.now);
   for (const decision of questionsOfRequest(context, requestId)) {
-    if (decision.status !== "open") continue;
+    if (decision.status !== "open" || !(Date.parse(decision.askedAt) < Date.parse(at))) continue;
     try {
       const mutation = context.store.transition(
         decision.id,
-        (current) => markNeedsConfirmation(current, { via, at: validIso(message.at, context.now) }),
+        (current) => markNeedsConfirmation(current, { via, at }),
         context.record.workspaceId,
       );
       if (mutation.status === "updated") context.outcome.marked.push(mutation.decision);

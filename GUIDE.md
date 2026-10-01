@@ -239,7 +239,7 @@ whichever place is at hand:
   answers in its reply; the plugin delivers them. An answer that fits no single question gets one
   short question back.
 - **In the Worker's chat.** When the plugin cannot tell which question you answered, the card says
-  **Needs confirmation**: **Close as answered** or **Keep open**.
+  **Needs confirmation**: pick an option as usual, or **Close as answered** if your chat message already answered it, or **Keep open**.
 
 A question you have not answered stays open on its card; the Worker carries on with what it does not
 touch and never picks a default for it. When the work changes a question, the Worker asks it again

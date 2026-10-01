@@ -639,7 +639,7 @@ export function DecisionCardBody({
         />
         <Button
           label="Close as answered"
-          kind="primary"
+          kind="secondary"
           accessibilityLabel="Close the decision as answered"
           accessibilityState={{ disabled: off }}
           disabled={off}

@@ -599,12 +599,19 @@ describe("the decision card's view (experience concept §5.2)", () => {
     expect(precedentOfferView(delivered, PRECEDENT_UI_IDLE)).toBeNull();
   });
 
-  it("asks whether a chat message answered it, and closes it without a grant", () => {
+  it("asks whether a chat message answered it, keeps the options, and closes it without a grant", () => {
     const marked = ok(markNeedsConfirmation(questionDecision(), { via: "chat-worker", at: "2026-09-16T10:04:00.000Z" }));
     const shown = view(found(marked));
     expect(shown.frame.chip).toEqual({ text: "Needs confirmation", tone: "warning" });
-    expect(shown.frame.body).toEqual([`You wrote in the Worker's chat at ${localTimeText(new Date("2026-09-16T10:04:00.000Z"), NOW)}. Did that answer it?`]);
-    expect(shown).toMatchObject({ confirmChat: true, options: [], ownWords: false });
+    expect(shown.frame.body).toEqual([
+      `You wrote in the Worker's chat at ${localTimeText(new Date("2026-09-16T10:04:00.000Z"), NOW)}. Choose an answer, or close it if that message answered it.`,
+    ]);
+    // Still answerable: the same buttons as an open decision, plus Close as answered / Keep open.
+    expect(shown).toMatchObject({ confirmChat: true, ownWords: true, confirm: null });
+    expect(shown.options.map((option) => option.key)).toEqual(view(found(questionDecision())).options.map((option) => option.key));
+    expect(shown.options.length).toBeGreaterThan(0);
+    // Writing own words or confirming an answer hides the chat row.
+    expect(view(found(marked), { ...DECISION_UI_IDLE, words: "" })).toMatchObject({ confirmChat: false, options: [] });
     const closed = ok(confirmDecision(marked, { answered: true, at: "2026-09-16T10:05:00.000Z" }));
     expect(view(found(closed)).frame.body).toEqual(["Answered in the Worker's chat (confirmed by you)."]);
   });
@@ -801,11 +808,14 @@ describe("the drawn decision card", () => {
     expect(labels(nodes)).toEqual(["Cancel", "Confirm and send", "Show details"]);
   });
 
-  it("draws Keep open / Close as answered for a decision that needs confirmation", () => {
+  it("draws the options, Own words… and Keep open / Close as answered for a decision that needs confirmation", () => {
     const onCloseInChat = vi.fn();
     const nodes = drawDecision(view(found(ok(markNeedsConfirmation(questionDecision(), { via: "chat-manager", at: "2026-09-16T10:04:00.000Z" })))), DECISION_UI_IDLE, false, { onCloseInChat });
-    expect(labels(nodes)).toEqual(["Keep the decision open", "Close the decision as answered", "Show details"]);
-    (pressables(nodes)[1]!.props["onPress"] as () => void)();
+    const shown = labels(nodes);
+    const answers = shown.filter((label) => String(label).startsWith("Answer: "));
+    expect(answers.length).toBe(questionDecision().options.length);
+    expect(shown.slice(answers.length)).toEqual(["Answer in your own words", "Keep the decision open", "Close the decision as answered", "Show details"]);
+    (pressables(nodes)[answers.length + 2]!.props["onPress"] as () => void)();
     expect(onCloseInChat).toHaveBeenCalledWith(true);
   });
 

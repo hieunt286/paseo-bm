@@ -105,11 +105,11 @@ export interface DecisionButton {
 
 export interface DecisionCardView {
   frame: CardFrameView;
-  /** The options, only while the decision is `open`. */
+  /** The options, while the decision can be answered (`open` or `needs-confirmation`). */
   options: DecisionButton[];
-  /** "Own words…" offered: only while `open`. */
+  /** "Own words…" offered: while the decision can be answered. */
   ownWords: boolean;
-  /** "Close as answered" / "Keep open", only while `needs-confirmation`. */
+  /** "Close as answered" / "Keep open", only while `needs-confirmation`, beside the options. */
   confirmChat: boolean;
   /** The in-place confirmation, Cancel first; null when none is asked. */
   confirm: ConfirmDialog | null;
@@ -296,49 +296,35 @@ export function decisionCardView(input: DecisionViewInput): DecisionCardView {
   switch (decision.status) {
     case "open": {
       const declared = declaredEffects(decision);
-      const options = decision.options.map(
-        (option): DecisionButton => {
-          const effects = realEffects(option.effects);
-          return {
-            key: option.key,
-            label: option.recommended ? `${option.label} ★` : option.label,
-            primary: option.recommended,
-            confirm: needsOwnerConfirmation(effects),
-            accessibilityLabel: `Answer: ${option.label}${option.recommended ? " (recommended)" : ""}${effects.length === 0 ? "" : `; allows ${effectWords(effects)}`}`,
-          };
-        },
-      );
-      let confirm: DecisionCardView["confirm"] = null;
-      if (ui.confirming !== null) {
-        const option = decision.options.find((entry) => entry.key === ui.confirming);
-        const effects = effectsOfAnswer(decision, { optionKey: option?.key ?? null });
-        confirm = {
-          title: option === undefined ? "Send your own words?" : `Answer: ${option.label}?`,
-          body: `This answer allows ${effectWords(effects)} once, within the hour. Nothing is sent until you confirm.`,
-          confirmLabel: "Confirm and send",
-          cancelLabel: "Cancel",
-          defaultAction: "cancel",
-        };
-      }
       const held = decisionKindOf(decision.id) === "held";
       return {
         ...view,
+        ...answerControls(decision, ui),
         frame: {
           ...frame,
           chip,
           tag: declared.length === 0 ? null : `effects: ${effectWords(declared)}`,
           body: decisionKindOf(decision.id) === "override" ? [OVERRIDE_CARD_LINE] : held ? [HELD_CARD_LINE] : [],
         },
-        options: confirm === null && ui.words === null ? options : [],
-        // A held request is allowed or denied, never answered in words (§D.2).
-        ownWords: confirm === null && !held,
-        confirm,
       };
     }
     case "needs-confirmation": {
+      // Still answerable: the options stay, and closing it as answered in the chat is one more choice beside them.
+      const declared = declaredEffects(decision);
       const where = decision.needsConfirmation === null ? "a chat" : CHAT_WORDS[decision.needsConfirmation.via];
       const at = decision.needsConfirmation === null ? "" : ` at ${localTimeText(new Date(decision.needsConfirmation.at), now)}`;
-      return { ...view, frame: { ...frame, chip, body: [`You wrote in ${where}${at}. Did that answer it?`] }, confirmChat: true };
+      const controls = answerControls(decision, ui);
+      return {
+        ...view,
+        ...controls,
+        frame: {
+          ...frame,
+          chip,
+          tag: declared.length === 0 ? null : `effects: ${effectWords(declared)}`,
+          body: [`You wrote in ${where}${at}. Choose an answer, or close it if that message answered it.`],
+        },
+        confirmChat: controls.confirm === null && ui.words === null,
+      };
     }
     case "answered": {
       const answer = decision.answer!;
@@ -365,6 +351,40 @@ export function decisionCardView(input: DecisionViewInput): DecisionCardView {
     default:
       return { ...view, frame: { ...frame, chip, body: [settledLine(decision) ?? ""].filter((line) => line !== "") } };
   }
+}
+
+/** The answer buttons, Own words… and the in-place confirmation of a decision that can still be answered. */
+function answerControls(decision: Decision, ui: DecisionUi): Pick<DecisionCardView, "options" | "ownWords" | "confirm"> {
+  const options = decision.options.map(
+    (option): DecisionButton => {
+      const effects = realEffects(option.effects);
+      return {
+        key: option.key,
+        label: option.recommended ? `${option.label} ★` : option.label,
+        primary: option.recommended,
+        confirm: needsOwnerConfirmation(effects),
+        accessibilityLabel: `Answer: ${option.label}${option.recommended ? " (recommended)" : ""}${effects.length === 0 ? "" : `; allows ${effectWords(effects)}`}`,
+      };
+    },
+  );
+  let confirm: DecisionCardView["confirm"] = null;
+  if (ui.confirming !== null) {
+    const option = decision.options.find((entry) => entry.key === ui.confirming);
+    const effects = effectsOfAnswer(decision, { optionKey: option?.key ?? null });
+    confirm = {
+      title: option === undefined ? "Send your own words?" : `Answer: ${option.label}?`,
+      body: `This answer allows ${effectWords(effects)} once, within the hour. Nothing is sent until you confirm.`,
+      confirmLabel: "Confirm and send",
+      cancelLabel: "Cancel",
+      defaultAction: "cancel",
+    };
+  }
+  return {
+    options: confirm === null && ui.words === null ? options : [],
+    // A held request is allowed or denied, never answered in words (§D.2).
+    ownWords: confirm === null && decisionKindOf(decision.id) !== "held",
+    confirm,
+  };
 }
 
 export type DecisionChoice = { optionKey: string } | { words: string };
