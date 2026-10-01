@@ -291,10 +291,30 @@ The supplementary blocking figure, the §G.8 guardrail reference, stays 1.46. St
 
 Read-only replay of the whole store after bead `i8fc.1`: 0 pairs of agents writing one file in overlapping turns, 0 files, 1 pair not judged (a turn without a recorded start or end), over 62 requests and 2,058 turns.
 
+### 6.8 The combined field period: install and the pre-install reference (2026-10-01)
+
+**Installed:** 2026-10-01T00:28:54Z on the owner's daemon, the frozen build `paseo-bm-builds/final-rc-20260930T200835Z` (identical to `plugin/` of commit `4c3ed5e`; checked on an isolated daemon first, `docs/archive/operations/paseo-bm-final-rc-check-20261001.md`). The window starts here (bead `i8fc.6`, change-006, change-012).
+
+**Pre-install reference** (read-only replay of the whole store just before the install, numbers only):
+
+| Figure | Value |
+|---|---|
+| Requests (finished) | 63 (60) |
+| A-1 questions reaching the owner per finished request | 5.63 |
+| A-8 tokens read per finished request | 100.2 M (Worker 93.3 M, Reviewer 4.2 M, Manager 2.8 M) |
+| Worker tokens read per request (59 requests) | median 38.7 M, p80 141.1 M, p90 298.3 M |
+| A-11 median time to finished (59 requests) | 36.3 min |
+| A-7 wakes with no action | 8 of 19 (approximate) |
+| Review lift: blocking findings per batch | 1.55 (supplementary reference 1.45) |
+| Reviews per reviewed request | 5.28 |
+
+The owner chooses per project, in Settings → Autonomy, the action boundary (change-010) and the challenger; the choices are recorded here when made.
+
 ## Revision History
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-10-01 | Claude (owner's request) | §6.8: the final build installed and the pre-install reference recorded (bead `i8fc.6`) |
 | 2026-10-01 | Claude (owner's delegation) | How to reproduce: the A-10 links audit command (bead `bm-autonomy-phase5-3e5v.6`) |
 | 2026-09-30 | Claude (owner's delegation) | §6.7: writers observed on the field store (bead `i8fc.1`) |
 | 2026-09-30 | Claude (owner's delegation) | §6.6: review figures corrected for a double count (beads `7gxw.5`, `7gxw.12`) |
