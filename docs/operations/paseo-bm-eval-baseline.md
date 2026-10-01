@@ -324,12 +324,15 @@ Read-only replay of the whole store after bead `i8fc.1`: 0 pairs of agents writi
 
 **Reinstalled** 2026-10-01T07:21:13Z: `paseo-bm-builds/final-rc9-8d93197` (commit `8d93197`, the phone layout; client only, no figure affected).
 
+**Reinstalled** 2026-10-01T09:11:59Z: `paseo-bm-builds/final-rc10-65e0d3d` (commit `65e0d3d`, the role marker in agent titles; new agents only, no figure affected). A Worker was mid-turn; the owner chose to install at once.
+
 The owner chooses per project, in Settings → Autonomy, the action boundary (change-010) and the challenger; the choices are recorded here when made.
 
 ## Revision History
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the role marker in agent titles (`65e0d3d`) |
 | 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the phone layout (`8d93197`) |
 | 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the Tools & skills speed fix (`50cdda0`) |
 | 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the fidelity pass (`ae76459`) |
