@@ -7,7 +7,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/hieunt286/paseo-bm.git",
-    "directory": "plugin"
+    "directory": "plugin-package"
   },
   "engines": {
     "node": ">=22"
@@ -16,17 +16,9 @@
     "paseo-plugin.json",
     "index.client.tsx",
     "index.server.ts",
-    "client/",
-    "server/",
-    "shared/",
-    "roles/",
-    "tsconfig.json",
     "LICENSE",
     "README.md"
   ],
-  "scripts": {
-    "typecheck": "tsc -p tsconfig.json"
-  },
   "keywords": [
     "paseo",
     "paseo-plugin",

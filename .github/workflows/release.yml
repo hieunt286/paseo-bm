@@ -90,19 +90,19 @@ jobs:
       - name: Build
         run: npm run build
 
-      # Packs the payload package (plugin/), checks its tarball and installs it
-      # offline into a temp project. Catches files missing from the plugin's
-      # package.json `files` field, which a source-tree run cannot see.
+      # Checks that plugin-package/ is what the build writes from plugin/, packs
+      # it, checks its tarball (exact contents, the paseo.cafe scan budget) and
+      # installs it offline into a temp project (ADR-026).
       - name: Smoke test packed package
         run: npm run smoke:packed
 
       # Cheap guard for the packaging rule in AGENTS.md: downloading the package
-      # must never run code on the installing machine. plugin/package.json is the
-      # published one; the root one is checked too, as it always was.
+      # must never run code on the installing machine. plugin-package/package.json
+      # is the published one (ADR-026); plugin/ and the root are checked too.
       - name: Assert no npm install lifecycle scripts
         run: |
           node -e '
-            for (const file of ["./package.json", "./plugin/package.json"]) {
+            for (const file of ["./package.json", "./plugin/package.json", "./plugin-package/package.json"]) {
               const s = require(file).scripts ?? {};
               const forbidden = ["preinstall", "install", "postinstall"].filter((k) => k in s);
               if (forbidden.length > 0) {
@@ -218,21 +218,23 @@ jobs:
         run: |
           node -e '
             const fs = require("node:fs");
-            const payload = JSON.parse(fs.readFileSync("plugin/package.json", "utf8"));
             const expected = process.argv[1];
-            if (payload.name !== "paseo-bm-plugin") {
-              console.error(`plugin/package.json name is ${payload.name}, expected paseo-bm-plugin`);
-              process.exit(1);
+            for (const file of ["plugin/package.json", "plugin-package/package.json"]) {
+              const payload = JSON.parse(fs.readFileSync(file, "utf8"));
+              if (payload.name !== "paseo-bm-plugin") {
+                console.error(`${file} name is ${payload.name}, expected paseo-bm-plugin`);
+                process.exit(1);
+              }
+              if (payload.version !== expected) {
+                console.error(`${file} version is ${payload.version}, expected ${expected}`);
+                process.exit(1);
+              }
+              console.log(`${file}: ${payload.name}@${payload.version}`);
             }
-            if (payload.version !== expected) {
-              console.error(`plugin/package.json version is ${payload.version}, expected ${expected}`);
-              process.exit(1);
-            }
-            console.log(`payload package ${payload.name}@${payload.version}`);
           ' "${VERSION}"
 
       - name: Publish payload (dry-run)
-        working-directory: plugin
+        working-directory: plugin-package
         env:
           VERSION: ${{ steps.meta.outputs.version }}
           DIST_TAG: ${{ steps.meta.outputs.dist_tag }}
@@ -245,10 +247,11 @@ jobs:
       # so the Release itself is the approval point. The dist-tag is resolved
       # above from the kind of version (prerelease -> `next`, stable -> `latest`),
       # and the GitHub Release's own prerelease flag must agree with it. The
-      # tarball root is the loadable plugin that paseo.cafe scans.
+      # tarball root is the loadable plugin that paseo.cafe scans: plugin-package/,
+      # the bundled entries (ADR-026).
       - name: Publish payload to npm
         if: github.event_name == 'release'
-        working-directory: plugin
+        working-directory: plugin-package
         env:
           VERSION: ${{ steps.meta.outputs.version }}
           DIST_TAG: ${{ steps.meta.outputs.dist_tag }}

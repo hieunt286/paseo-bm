@@ -223,3 +223,5 @@ What remains after the merge, not part of this phase: open the listing page and 
 *Revision 2026-09-30: Status — PR #284 merged 2026-09-28.*
 
 *Revision 2026-10-01: §5 and §6 — the listing images are now the site's five design artboards of the 0.5 screens, led by the Inbox (owner's request).*
+
+*Revision 2026-10-01 (later): the scan refused 0.5.1 (`scanner/incomplete`: 250 files, 3.5 MB against 200 files and 2,000,000 bytes, in Git and on npm; [PR #315](https://github.com/paseo-cafe/paseo-cafe/pull/315), run 36849724813). From 0.5.2 the listed and published form is `plugin-package/`, the bundled entries ([ADR-026](../adr/ADR-026-published-plugin-is-bundled.md)); PR #315 changes the entry's `path` to `"plugin-package"` together with the 0.5 caveats. Where §2, §5 and §6 say `plugin/`, read `plugin-package/` for what the scanner reads; the images are copied there from `plugin/images/` by the build.*

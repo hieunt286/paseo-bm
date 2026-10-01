@@ -43,9 +43,9 @@ const reviewerMd = readFileSync(join(repoRoot, "plugin", "roles", "reviewer.md")
 /** This fake host lists no workspace, so the hook cannot tell the project: the action boundary is off. */
 const BOUNDARY_UNKNOWN = "Action boundary: off — the project could not be told from the agent's folder";
 
-async function bundleServerEntry(): Promise<string> {
+async function bundleServerEntry(entryPoint: string = entry): Promise<string> {
   const result = await build({
-    entryPoints: [entry],
+    entryPoints: [entryPoint],
     bundle: true,
     format: "cjs",
     jsx: "automatic",
@@ -200,9 +200,13 @@ describe("embedded role instructions", () => {
   });
 });
 
-describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
+// The published entry (plugin-package/, ADR-026) is already a bundle; Paseo bundles it again exactly the same way.
+describe.each([
+  ["plugin/index.server.ts", entry],
+  ["plugin-package/index.server.ts", join(repoRoot, "plugin-package", "index.server.ts")],
+])("server entry %s bundled as Paseo 0.8 bundles it (CJS)", (_name, entryPoint) => {
   it("loads, registers every RPC, and manager.ensure / roles.describe run without throwing", async () => {
-    const code = await bundleServerEntry();
+    const code = await bundleServerEntry(entryPoint);
     const contribute = loadBundle(code);
 
     const { server, handlers, beforeHooks, onHooks } = fakeServer();

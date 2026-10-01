@@ -90,12 +90,18 @@ describe("plugin manifest", () => {
   });
 
   // There is deliberately no copy at the repo root. One existed while the
-  // paseo.cafe entry pointed at the repository root; now that the entry
-  // declares `path: "plugin"` and the payload package, nothing reads a root
+  // paseo.cafe entry pointed at the repository root; nothing reads a root
   // manifest, and leaving one would make a direct `paseo plugin add` find a
   // plugin with no runtime entry beside it. ADR-009, listing record §10.
-  it("is the repository's only manifest", () => {
+  // The only other one is plugin-package/'s, the generated published form
+  // (ADR-026), which carries its own two entries.
+  it("exists only in plugin/ and in plugin-package/", () => {
     expect(existsSync(join(repoRoot, "paseo-plugin.json"))).toBe(false);
+    const manifests = readdirSync(repoRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith(".") && entry.name !== "node_modules")
+      .filter((entry) => existsSync(join(repoRoot, entry.name, "paseo-plugin.json")))
+      .map((entry) => entry.name);
+    expect(manifests.sort()).toEqual(["plugin", "plugin-package"]);
   });
 });
 
