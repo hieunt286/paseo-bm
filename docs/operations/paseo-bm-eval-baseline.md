@@ -310,12 +310,15 @@ Read-only replay of the whole store after bead `i8fc.1`: 0 pairs of agents writi
 
 **Reinstalled** 2026-10-01T01:25:47Z: `paseo-bm-builds/final-rc2-f5e9610` (commit `f5e9610`, ADR-023: delegation without an eligibility gate). Per change-012 C3 and change-013, only A-4/A-5 restart, counted per class from its delegation; every other figure keeps the window that started at 00:28:54Z.
 
+**Reinstalled** 2026-10-01T01:42:47Z: `paseo-bm-builds/final-rc3-af22009` (commit `af22009`, a bug fix the owner reported: a Worker's question awaiting confirmation keeps its options, and an owner message no longer marks questions asked after it). No figure restarts: the fix changes which questions are marked, not how a question is counted.
+
 The owner chooses per project, in Settings → Autonomy, the action boundary (change-010) and the challenger; the choices are recorded here when made.
 
 ## Revision History
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the needs-confirmation fix (`af22009`) |
 | 2026-10-01 | Claude (owner's request) | §6.8: the final build installed and the pre-install reference recorded (bead `i8fc.6`) |
 | 2026-10-01 | Claude (owner's delegation) | How to reproduce: the A-10 links audit command (bead `bm-autonomy-phase5-3e5v.6`) |
 | 2026-09-30 | Claude (owner's delegation) | §6.7: writers observed on the field store (bead `i8fc.1`) |
