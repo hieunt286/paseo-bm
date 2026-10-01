@@ -130,6 +130,47 @@ export function commandsFor(id: ToolId, brewPath: string | null): { install: str
   return { install: script, update: script };
 }
 
+/**
+ * How long the tools' status is kept: each read runs `--version` on three
+ * binaries, which made every visit to Tools & skills wait (2026-10-01). A
+ * version changes only through an install or an update, so the status is kept
+ * for ten minutes, dropped when paseo-bm installs a tool, and read anew on
+ * Check again (`fresh`).
+ */
+export const TOOLS_STATUS_TTL_MS = 10 * 60_000;
+
+/** Keeps what `read` returns for `TOOLS_STATUS_TTL_MS`; `fresh` reads anew, `forget` drops it, a failed read is not kept. */
+export function createToolsStatusKeeper(read: () => Promise<ToolInfo[]>, ttlMs = TOOLS_STATUS_TTL_MS) {
+  let kept: { at: number; tools: Promise<ToolInfo[]> } | null = null;
+  return {
+    get(options: { fresh?: boolean; now?: number } = {}): Promise<ToolInfo[]> {
+      const now = options.now ?? Date.now();
+      if (options.fresh !== true && kept !== null && now - kept.at < ttlMs) return kept.tools;
+      const tools = read();
+      kept = { at: now, tools };
+      tools.catch(() => {
+        if (kept?.tools === tools) kept = null;
+      });
+      return tools;
+    },
+    forget(): void {
+      kept = null;
+    },
+  };
+}
+
+const keeper = createToolsStatusKeeper(() => toolsStatus());
+
+/** Forgets the kept status: the next read runs the tools again. */
+export function forgetToolsStatus(): void {
+  keeper.forget();
+}
+
+/** The tools' status, kept unless `fresh`; with injected dependencies (tests) it is read every time. */
+export function keptToolsStatus(options: { fresh?: boolean } = {}, deps: ToolDeps = {}): Promise<ToolInfo[]> {
+  return Object.keys(deps).length > 0 ? toolsStatus(deps) : keeper.get(options);
+}
+
 export async function toolsStatus(deps: ToolDeps = {}): Promise<ToolInfo[]> {
   const exec = deps.run ?? run;
   const brew = findTool("brew", deps);
@@ -164,9 +205,13 @@ export async function installTool(id: "br" | "bv", deps: ToolDeps = {}): Promise
   }
   const command = commandsFor(id, findTool("brew", deps)).install!;
   const exec = deps.run ?? run;
+  // Whatever the install did, the kept versions are stale now.
+  forgetToolsStatus();
   const env = deps.env ?? process.env;
   // A login shell, so the installer sees the user's usual PATH (brew, curl).
   const result = await exec(env.SHELL?.endsWith("zsh") ? "/bin/zsh" : "/bin/bash", ["-lc", command], INSTALL_TIMEOUT_MS);
+  // And again once it ran: a read made while it ran saw the old versions.
+  forgetToolsStatus();
   // Redacted before anything of it reaches a screen, and a run Node killed at
   // the deadline is called a timeout rather than flattened into "exited with 1"
   // — the same two rules `installSkills` follows.

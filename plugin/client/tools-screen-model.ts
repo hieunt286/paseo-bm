@@ -23,6 +23,17 @@ export const SKILLS_USAGE_DAYS = 30;
 /** `skills.usage` over the last 30 days, all projects. */
 export const SKILLS_USAGE_QUERY_KEY = ["paseo-bm", "tools", "skills-usage", SKILLS_USAGE_DAYS] as const;
 
+/** The machine's status as Tools & skills reads it: `setup.status` alone — roles are Settings' concern. */
+export const TOOLS_STATUS_QUERY_KEY = ["paseo-bm", "tools", "status"] as const;
+
+/**
+ * How long Tools & skills shows what it read without reading again: the
+ * server keeps the tools' versions ten minutes anyway, and Check again reads
+ * them anew. The surface reads both queries ahead when it opens (launcher.tsx),
+ * so the section shows at once.
+ */
+export const TOOLS_STALE_MS = 5 * 60_000;
+
 /** What the Used column counts, in one line under the Skills title. */
 export const SKILLS_USED_MEANING = `Used: how many Worker reports named the skill in the last ${SKILLS_USAGE_DAYS} days, in every project.`;
 

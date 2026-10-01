@@ -23,15 +23,15 @@
  * import, no `server/` import.
  */
 import { useRpc } from "@getpaseo/plugin/client";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState, type ReactNode } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
-import { skillsUsageRpc, type SetupStatus } from "../shared/contracts";
+import { setupStatusRpc, skillsUsageRpc, type SetupStatus } from "../shared/contracts";
 import { errorMessageOf } from "./errors";
 import { localTimeText } from "./format";
 import { SKILLS_COMMAND_LABEL, anySkillMissing, skillsRunLine } from "./settings-machine-model";
 import { CommandLine, SkillsInstallBlock, ToolCard } from "./settings-blocks";
-import { SettingsSectionHeading, sectionContentStyle, useSetupStatus, type SettingsScreenProps } from "./settings-section";
+import { SettingsSectionHeading, sectionContentStyle, type SettingsScreenProps } from "./settings-section";
 import { dashboardStyles } from "./styles";
 import { MONO } from "./text-tabs";
 import { toneColor } from "./tone";
@@ -39,6 +39,8 @@ import {
   BEADS_TOOL_IDS,
   SKILLS_USAGE_DAYS,
   SKILLS_USAGE_QUERY_KEY,
+  TOOLS_STALE_MS,
+  TOOLS_STATUS_QUERY_KEY,
   agentToolsRows,
   skillRowsView,
   skillsHeaderText,
@@ -265,14 +267,34 @@ function SkillsSection({ status, usage, usageError, testing, narrow, onTest, onD
   );
 }
 
+/**
+ * The two reads of Tools & skills — `setup.status` and `skills.usage` — as
+ * query options, so the surface can read them ahead when it opens
+ * (`queryClient.prefetchQuery`) and the section shows at once.
+ */
+export function useToolsQueries() {
+  const getStatus = useRpc(setupStatusRpc);
+  const readUsage = useRpc(skillsUsageRpc);
+  return useMemo(() => {
+    const read = (fresh: boolean): Promise<SetupStatus> => getStatus(fresh ? { fresh: true } : {});
+    return {
+      read,
+      status: { queryKey: TOOLS_STATUS_QUERY_KEY, queryFn: () => read(false), staleTime: TOOLS_STALE_MS },
+      usage: { queryKey: SKILLS_USAGE_QUERY_KEY, queryFn: () => readUsage({ sinceDays: SKILLS_USAGE_DAYS }), staleTime: TOOLS_STALE_MS },
+    };
+  }, [getStatus, readUsage]);
+}
+
 export function ToolsScreen({ theme, layout, status: statusStrip }: SettingsScreenProps) {
   const styles = useMemo(() => dashboardStyles(theme, layout.compact), [theme, layout.compact]);
-  const status = useSetupStatus();
-  const readUsage = useRpc(skillsUsageRpc);
-  const usage = useQuery({ queryKey: SKILLS_USAGE_QUERY_KEY, queryFn: () => readUsage({ sinceDays: SKILLS_USAGE_DAYS }) });
+  const queries = useToolsQueries();
+  const status = useQuery(queries.status);
+  const usage = useQuery(queries.usage);
+  const queryClient = useQueryClient();
   const data = status.data;
+  // Check again, and every install's end: the tools are run anew (`fresh`), not read from the server's keep.
   const refetch = () => {
-    void status.refetch();
+    void queryClient.fetchQuery({ ...queries.status, queryFn: () => queries.read(true), staleTime: 0 });
     void usage.refetch();
   };
 

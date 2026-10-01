@@ -117,9 +117,14 @@ describe("settings-section.tsx: the Settings screen", () => {
 describe("tools-screen.tsx: the Tools & skills section", () => {
   const screen = source("tools-screen.tsx");
 
-  it("takes exactly Settings' props and reads setup.status through Settings' one query", () => {
+  it("takes exactly Settings' props and reads setup.status alone, kept, with Check again reading the tools anew", () => {
     expect(screen).toMatch(/export function ToolsScreen\(\{[^}]*\}: SettingsScreenProps\)/);
-    expect(screen).toMatch(/const status = useSetupStatus\(\);/);
+    // No roles step before it (Settings' useSetupStatus): Tools only shows the machine.
+    expect(screen).not.toMatch(/useSetupStatus\(/);
+    expect(screen).toMatch(/staleTime: TOOLS_STALE_MS/);
+    expect(screen).toMatch(/queryFn: \(\) => queries\.read\(true\)/);
+    // The surface reads it ahead when it opens.
+    expect(source("launcher.tsx")).toMatch(/queryClient\.prefetchQuery\(toolsQueries\.status\)/);
   });
 
   it("reads skills.usage over 30 days of every project, and draws br and bv with the Setup screen's pieces", () => {

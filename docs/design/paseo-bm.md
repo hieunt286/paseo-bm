@@ -701,6 +701,8 @@ The whole section is the 0.4.0 target release (ADR-012 decisions 4–6, decision
 | Install skills with the `skills` CLI | No — a button with a third-party note | `setup.install-skills` |
 | Install `br` / `bv` | No — a button as today | `setup.install-tool` (unchanged) |
 | Provider login | Never run | `setup.status` only reports the state and that tool's own command |
+
+`setup.status { fresh? }` keeps the tools' `--version` results for ten minutes (`TOOLS_STATUS_TTL_MS`, `server/setup-tools.ts`), drops them when paseo-bm installs a tool, and runs them anew with `fresh: true` (Tools & skills' Check again). Tools & skills reads `setup.status` alone (no `setup.ensure-roles` before it; Settings keeps that order), keeps its read five minutes, and the surface reads it and `skills.usage` ahead when it opens, so the section shows at once (2026-10-01: every visit waited on three `--version` runs behind a roles step).
 | Cleanup | No — a button, two-layer confirmation | `setup.cleanup` |
 
 `ensureRoles` does not run when `setup-state.cleanedUpAt` is not `null`, or when the in-memory flag `cleanedUpThisRun` is set (set by `setup.cleanup`, so that deleting the data folder does not make the roles regenerate themselves before the user removes the plugin either); it then returns `skipped: "cleaned-up"`, and only `setup.ensure-roles { resume: true }` ("Set up again") clears that mark and continues.
@@ -877,6 +879,7 @@ Added to `DASHBOARD_ERROR_CODES` (§7.12): `E_SETUP_ROLES_FAILED` (cannot choose
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-10-01 | hieu.nt10 (owner report; fixed by Claude) | §7.13: `setup.status` keeps the tools' versions ten minutes, `fresh` on Check again; Tools & skills reads it alone and ahead |
 | 2026-10-01 | hieu.nt10 (owner decision; written by Claude) | Change-014 ([ADR-025](../adr/ADR-025-autonomy-levels.md), [change-014](../plans/paseo-bm-plan-autonomy-change-014-levels-and-flat-surface.md)): §7.4 `bm_reply` (Worker and Orchestrator, server-run) and the Worker's server tools, `bm_decide`/`bm_predict` and `bm_send_command` without owner-only classes, `bm_ask_owner` answered at open by a precedent only; §7.5 `BM-ASK` (whole word) beside `BM-INTERRUPTED`; §7.8 Ask back; §7.12 `skills.usage`, `decisions.ask`, `decisions.thread`, `autonomy.set-level`, `E_DECISION_NOT_ASKABLE`, `E_DECISION_ASK_INVALID`, `E_AUTONOMY_OWNER_ONLY` removed; the surface named Inbox · Projects · Settings · Tools & skills |
 | 2026-10-01 | hieu.nt10 (approved; written by Claude) | §7.5: `BM-INTERRUPTED`, a turn Paseo cut short told apart from the owner's stop by structure (ADR-024) |
 | 2026-10-01 | hieu.nt10 (bug report; fixed by Claude) | §7.4: where the endpoint's Paseo handle comes from (any hook or RPC, any turn start) |

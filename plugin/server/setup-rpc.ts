@@ -8,7 +8,7 @@ import { cleanupPaseoBm, grantAgentTools, providerLogins } from "./setup-machine
 import { ROLE_NAMES, ensureRoles, roleId } from "./setup-roles";
 import { emptySetupState, readSetupState } from "./setup-state";
 import { installSkills, skillsStatus, type SkillDeps } from "./setup-skills";
-import { LATEST_KNOWN, installTool, toolsStatus, type ToolDeps } from "./setup-tools";
+import { LATEST_KNOWN, installTool, keptToolsStatus, type ToolDeps } from "./setup-tools";
 import { toolsSeen } from "./tools-check";
 import {
   setupCleanupRpc,
@@ -22,9 +22,9 @@ import {
 
 export interface SetupDeps extends ToolDeps, SkillDeps {}
 
-export async function handleSetupStatus(paseo: unknown, deps: SetupDeps = {}): Promise<SetupStatus> {
+export async function handleSetupStatus(paseo: unknown, deps: SetupDeps = {}, options: { fresh?: boolean } = {}): Promise<SetupStatus> {
   return {
-    tools: await toolsStatus(deps),
+    tools: await keptToolsStatus(options, deps),
     latestCheckedOn: LATEST_KNOWN.checkedOn,
     skills: skillsStatus(deps),
     paseoTools: toolsSeen(),
@@ -85,7 +85,7 @@ async function machineSetup(paseo: unknown, deps: SetupDeps): Promise<SetupStatu
 }
 
 export function registerSetupRpcs(server: PluginServerContext): void {
-  server.handle(setupStatusRpc, (_input, context) => handleSetupStatus(context.paseo));
+  server.handle(setupStatusRpc, (input, context) => handleSetupStatus(context.paseo, {}, { fresh: input.fresh === true }));
   server.handle(setupEnsureRolesRpc, (input, context) =>
     ensureRoles(context.paseo, input.resume === undefined ? {} : { resume: input.resume }),
   );

@@ -18,11 +18,11 @@
  */
 import type { PluginTheme } from "@getpaseo/plugin";
 import { type PluginSurfaceProps, usePaseo, useRpc } from "@getpaseo/plugin/client";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { AccessibilityInfo, Animated, Pressable, Text, View } from "react-native";
 import { SettingsScreen } from "./settings-section";
-import { ToolsScreen } from "./tools-screen";
+import { ToolsScreen, useToolsQueries } from "./tools-screen";
 import { InboxScreen, useInbox } from "./inbox";
 import { insightsProjects } from "./insights-model";
 import { inboxTab } from "./inbox-model";
@@ -251,6 +251,15 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
     launcherNotices.peek,
   );
   const styles = useMemo(() => launcherStyles(theme, layout.compact), [theme, layout.compact]);
+
+  // Tools & skills reads the machine (three `--version` runs) and the skills' use: read both ahead
+  // when the surface opens, so the section shows at once when it is opened.
+  const toolsQueries = useToolsQueries();
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    void queryClient.prefetchQuery(toolsQueries.status);
+    void queryClient.prefetchQuery(toolsQueries.usage);
+  }, [queryClient, toolsQueries]);
 
   const workspaces = useQuery({
     queryKey: ["paseo-bm", "launcher", "workspaces"],

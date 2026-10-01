@@ -144,7 +144,12 @@ export const setupStatusSchema = z.object({
 export type SetupStatus = z.infer<typeof setupStatusSchema>;
 
 /** `setup.status` — tools and skills at a glance. Read-only; runs `--version` only. */
-export const setupStatusRpc = defineRpc({ name: "setup.status", input: z.object({}), output: setupStatusSchema });
+/**
+ * `setup.status` — the machine as Settings and Tools & skills show it. The
+ * tools' `--version` runs are kept for `TOOLS_STATUS_TTL_MS` (setup-tools.ts);
+ * `fresh: true` (Check again) runs them anew.
+ */
+export const setupStatusRpc = defineRpc({ name: "setup.status", input: z.object({ fresh: z.boolean().optional() }), output: setupStatusSchema });
 
 /**
  * `setup.ensure-roles` — creates whichever of the four roles is missing
