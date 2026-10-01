@@ -448,6 +448,7 @@ Each tool has a JSON Schema (what the model sees, and also the shape check); for
 | `BM-EVENTS` | the Orchestrator | events of an Autopilot project | queue, one batch per idle moment | autonomy design §A.8 |
 | `BM-ANSWER` | the Orchestrator | the owner answered one of its decisions in words | queue | autonomy design §A.6 |
 | `BM-COMMAND` | a Manager, or a Worker and its Manager | an Orchestrator command, or the command prepared on the option the owner picked | queue (`command:<id>`) | Design Orchestrator §6B.1 |
+| `BM-INTERRUPTED` | the Manager or Worker (claude or codex) whose turn Paseo cut | its canceled turn was followed within 3 s by a turn with no owner-typed message and no owner deny (`agent.permission_resolved`), and 20 s later it is idle, started no newer turn and has no agent of its own running; at most once per agent per 10 min (`interruption-watch.ts`, ADR-024) | queue | `BM-INTERRUPTED` / `cutAt: <time>` / the cut was Paseo delivering a message, not the owner; check whether the cut call took effect, redo it if not, carry on; `noted` if already done; the owner's later message wins (`interruptedNoticeText`) |
 
 An agent created before a notice existed reads it as an ordinary message; each text says by itself what the agent must do.
 
@@ -872,6 +873,7 @@ Added to `DASHBOARD_ERROR_CODES` (§7.12): `E_SETUP_ROLES_FAILED` (cannot choose
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-10-01 | hieu.nt10 (approved; written by Claude) | §7.5: `BM-INTERRUPTED`, a turn Paseo cut short told apart from the owner's stop by structure (ADR-024) |
 | 2026-10-01 | hieu.nt10 (bug report; fixed by Claude) | §7.4: where the endpoint's Paseo handle comes from (any hook or RPC, any turn start) |
 | 2026-09-30 | Claude (owner's delegation) | §7.4 `bm_compact` and `bm_handoff`; §7.6 `BM-REPORT`'s optional `handoffNote` (beads `7gxw.10`, `7gxw.11`) |
 | 2026-09-30 | Claude (owner's delegation) | §7.6 `BM-REPORT`: `buildAndTests` keeps its backticks (bead `bm-autonomy-phase3-7gxw.3`) |

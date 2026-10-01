@@ -274,7 +274,8 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
     // fallback detection on agent.turn_ended; the outdated-agents pass
     // (autonomy design §A.11) starts on agent.turn_started and clears on
     // agent.archived; the action boundary (autonomy design §D.2) answers
-    // agent.permission_requested and records agent.permission_resolved.
+    // agent.permission_requested and records agent.permission_resolved, which
+    // the interruption watch (ADR-024) reads too, for the owner's denies.
     expect([...onHooks.keys()].sort()).toEqual([
       "agent.archived",
       "agent.created",
@@ -284,7 +285,7 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
       "agent.turn_started",
     ]);
     expect(onHooks.get("agent.permission_requested")).toHaveLength(1);
-    expect(onHooks.get("agent.permission_resolved")).toHaveLength(1);
+    expect(onHooks.get("agent.permission_resolved")).toHaveLength(2);
     expect(onHooks.get("agent.turn_ended")).toHaveLength(4);
     expect(onHooks.get("agent.turn_started")).toHaveLength(3);
     expect(onHooks.get("agent.archived")).toHaveLength(1);

@@ -225,7 +225,7 @@ reviewFindingsOpen: <batchId: finding; ...>
 buildAndTests: <each check exactly as run, in backticks, pass/fail; or not run>
 skillsUsed: <skill names, comma-separated>
 decided: <choice> — <why>; <choice> — <why>
-blockers: <what waits for the owner; questions go in BM-QUESTIONS>
+blockers: <what you wait for; the owner only through BM-QUESTIONS>
 ```
 
 Messages from the plugin that start with `BM-` each say what to do: do exactly
@@ -240,7 +240,7 @@ a step short, check that step first and report it as interrupted by the Orchestr
 **A turn is a STOP only if it brings** a message that tells you to stop, halt,
 pause, cancel or wait, OR **nothing at all** right after a turn that was cut
 off; one starting `BM-STOP` always is. An instruction, a correction, an answer,
-"continue" or a Reviewer's finish notification is not: keep working. "Stop
+"continue", a Reviewer's finish notification or `BM-INTERRUPTED` is not. "Stop
 after this bead": do what it says. Truly unsure: ask in one line and wait.
 
 **On a stop, in this order:** (1) call `cancel_agent` on every Reviewer you

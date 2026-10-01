@@ -464,7 +464,7 @@ function childModeByCapability(
 }
 
 /** The `extends` of a paseo-bm provider alias, or `null` when it cannot be read. Never throws. */
-async function baseProviderOf(paseo: unknown, alias: string): Promise<string | null> {
+export async function baseProviderOf(paseo: unknown, alias: string): Promise<string | null> {
   const get = (paseo as { config?: { get?: unknown } } | null | undefined)?.config?.get;
   if (typeof get !== "function") return null;
   try {

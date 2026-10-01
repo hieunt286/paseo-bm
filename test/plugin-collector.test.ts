@@ -866,9 +866,9 @@ describe("registration", () => {
     let fail = false;
     registerCollector({ on } as never, {
       log,
-      onStarted: (paseo) => {
+      onStarted: (_event, paseo) => {
         if (fail) throw new Error("boom");
-        given.push(paseo);
+        if (paseo !== undefined) given.push(paseo);
       },
     });
     const paseo = { agents: {} };

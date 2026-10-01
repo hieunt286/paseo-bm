@@ -765,12 +765,13 @@ export interface RegisterCollectorOptions {
    */
   onRecorded?: (event: TurnEndedEvent, input: { location: TraceStoreLocation; paseo: unknown; record: TraceRecord }) => unknown;
   /**
-   * Gets the Paseo handle of every turn start, of any agent. After a plugin
-   * reload nothing else may bring one before an agent calls a tool that needs
-   * it: the Orchestrator's first turn would otherwise find its tools without a
+   * Told of every turn start, of any agent, with the hook's Paseo handle
+   * (`undefined` when the context brought none). After a plugin reload nothing
+   * else may bring a handle before an agent calls a tool that needs it: the
+   * Orchestrator's first turn would otherwise find its tools without a
    * connection. Its failures are contained.
    */
-  onStarted?: (paseo: unknown) => void;
+  onStarted?: (event: { agent?: { id?: unknown } } | undefined, paseo: unknown) => void;
 }
 
 /**
@@ -805,10 +806,9 @@ export function registerCollector(
     } catch {
       // A missing start mark only costs one duration.
     }
-    const paseo = (context as { paseo?: unknown } | undefined)?.paseo;
-    if (paseo === undefined || options.onStarted === undefined) return;
+    if (options.onStarted === undefined) return;
     try {
-      options.onStarted(paseo);
+      options.onStarted(event as { agent?: { id?: unknown } } | undefined, (context as { paseo?: unknown } | undefined)?.paseo);
     } catch (error) {
       log(`[paseo-bm] turn-start step failed: ${messageOf(error)}`);
     }

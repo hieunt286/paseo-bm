@@ -36,6 +36,7 @@ import { createQuestionDecisionDelivery } from "./server/decision-delivery";
 import { registerOrchestratorRpcs } from "./server/orchestrator-rpc";
 import { createStallWatcher } from "./server/stall-watcher";
 import { createOrchestratorTools } from "./server/orchestrator-tools";
+import { createInterruptionWatch } from "./server/interruption-watch";
 import { createOrchestratorDecisionDelivery } from "./server/orchestrator-decisions";
 import { createOverrideDelivery } from "./server/override-delivery";
 import { createEventBus } from "./server/event-bus";
@@ -338,9 +339,18 @@ export default function contribute(server: PluginServerContext): () => void {
   // Autonomy design §F.1: two agents writing one file in overlapping turns — an Inbox alert, cleared once
   // the later of the two requests finished, and a writers.observed event (in the policy's scope).
   const writersWatch = createWritersWatch();
+  // ADR-024: a turn Paseo cut short to deliver a message is not the owner's stop; the agent is told so
+  // (BM-INTERRUPTED) when it then sat idle. An owner's deny is read from agent.permission_resolved.
+  const interruptions = createInterruptionWatch();
+  const removeDenyWatch =
+    typeof server.on === "function" ? server.on("agent.permission_resolved", (event) => interruptions.permissionResolved(event)) : () => {};
   const removeCollector = registerCollector(server, {
     // Any agent's turn start brings a handle: the Orchestrator's first turn after a reload included.
-    onStarted: shareHandle,
+    // It also tells the interruption watch that the agent moved on (ADR-024).
+    onStarted: (event, paseo) => {
+      if (typeof event?.agent?.id === "string") interruptions.turnStarted(event.agent.id);
+      if (paseo !== undefined) shareHandle(paseo);
+    },
     onRecorded: async (event, { location, paseo, record }) => {
       // Orchestrator design §6B.3: a Worker's signals (and their alerts) hold for its turn only.
       stallWatcher.workerTurnEnded(event?.agent);
@@ -348,6 +358,7 @@ export default function contribute(server: PluginServerContext): () => void {
       coordinationGuard.afterCheck(interventionCheck.run());
       // Alerts need no Paseo handle; the events go with the bus's last one when this turn brought none.
       const writersObserved = writersWatch.turnRecorded(record, location, typeof event?.agent?.cwd === "string" ? event.agent.cwd : null);
+      interruptions.turnRecorded(record, paseo);
       if (paseo === undefined) {
         if (writersObserved.length > 0) await eventBus.publish(writersObserved);
         return undefined;
@@ -382,6 +393,7 @@ export default function contribute(server: PluginServerContext): () => void {
     removeFallbackRpcs();
     fallbackWaiter.clear();
     removeCollector();
+    removeDenyWatch();
     stallWatcher.stop();
     void agentTools.close();
   };

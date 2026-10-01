@@ -56,6 +56,7 @@ Each role's behaviour lives in its own instructions: [`plugin/roles/manager.md`]
 | [ADR-021](adr/ADR-021-orchestrator-measured-coordination-controller.md) | **Accepted** — the Orchestrator is a measured coordination controller: it may compact a Manager or a Worker and have the Manager hand a Worker's request over, on its own initiative within Settings; advice replaces the workflow assessment |
 | [ADR-022](adr/ADR-022-retirements-after-code-review.md) | **Accepted** — after the 2026-09-30 code review: the installer source, the 0.3.x migration banner, the 0.4.1 downgrade promise and the fallback chain's Auto switch are retired (the last folded into delegating `environment`) |
 | [ADR-023](adr/ADR-023-delegation-without-eligibility.md) | **Accepted** — the owner's decision of 2026-10-01: no eligibility gate; the owner delegates any delegable class at any time, with either predictor, after one confirmation in Settings → Autonomy; agreement is information; demotion and the hard-owner classes unchanged. Supersedes ADR-018's promotion thresholds |
+| [ADR-024](adr/ADR-024-structure-tells-stops-and-waits.md) | **Accepted** — a turn Paseo cut short is told from the owner's stop by structure (canceled, an at-once next turn without the owner's message or deny), answered with `BM-INTERRUPTED`; waiting on the owner means an unsettled decision in the store, so a `blocked` request with none stalls |
 
 An ADR is never rewritten; a new decision gets a new ADR that supersedes it.
 

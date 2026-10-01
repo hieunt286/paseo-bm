@@ -18,12 +18,18 @@
  * - **Why a request stalls** (`stallReasonsOf`, pure), never while a Worker or
  *   a Reviewer of the request is `running` (the Manager is left out: it is
  *   shared by every request of its workspace): `idle-unfinished` — the last
- *   report is neither `finished` nor `blocked` and nothing happened for 5
- *   minutes; `review-over-budget` — `review.over-budget` is raised, against the
- *   owner's review budget per tier (Settings → Coordination, §G.7), and the
- *   last report is not `finished`. A request waiting on the owner (`blocked`) is not
- *   stalled: its question waits in the Inbox. A request the Manager answered
- *   itself (no Worker, no report) never stalls.
+ *   report is not `finished`, the request waits on no decision of the owner,
+ *   and nothing happened for 5 minutes; `review-over-budget` —
+ *   `review.over-budget` is raised, against the owner's review budget per tier
+ *   (Settings → Coordination, §G.7), and the last report is not `finished`.
+ *   **Waiting on the owner is read from the decision store, never from what an
+ *   agent says** (ADR-024): a request with an unsettled decision (`q:`, `o:`,
+ *   `h:`, `f:`) is not stalled — it waits in the Inbox; a `blocked` report
+ *   whose questions are all answered, or a question asked only in chat words,
+ *   waits on nobody the Inbox shows, so it stalls like any other idle request.
+ *   When the store cannot be read, a `blocked` report counts as waiting, as
+ *   before. A request the Manager answered itself (no Worker, no report)
+ *   never stalls.
  * - **Once per stall.** The alert is raised once while it holds and cleared
  *   when it no longer does (an agent runs, a new report arrives, the request
  *   leaves the 24-hour window or its trace is deleted); raised afresh after
@@ -48,6 +54,8 @@ import { readReviewBudget } from "./coordination-rpc";
 import { TRACES_DIR_NAME, resolveDataHome, type DataHomeDeps } from "./data-home";
 import type { DashboardPaseo } from "./paseo-directory";
 import { createAlertStore } from "./alert-store";
+import { createDecisionStore } from "./decision-store";
+import { isAnswerable } from "../shared/decisions";
 import { createEventBus, eventScopeOf, type BmEvent, type EventBus, type StallReason } from "./event-bus";
 import { agentsOf, type OrchestratorStatePaseo } from "./orchestrator-state";
 import { lastActivityOf, recentWorkspacesOf, requestKeyOf, ruleInputOf, workspaceTracesOf } from "./request-trace";
@@ -80,13 +88,17 @@ export interface HeldStall {
  * The reasons one request is stalled at `now` (autonomy design §A.8), in the
  * order of `STALL_REASONS`. `agents` gives the live status of its Workers and
  * Reviewers — the Manager's is not looked at, since it serves every request of
- * its workspace; `flags` are the rules' flags for the request. Pure.
+ * its workspace; `flags` are the rules' flags for the request. `waitsOnOwner`
+ * is whether the request has an unsettled decision in the decision store;
+ * `null` when the store could not be read, and then a `blocked` report counts
+ * as waiting on the owner (ADR-024). Pure.
  */
 export function stallReasonsOf(
   trace: ReconstructedTrace,
   agents: ReadonlyMap<string, AgentFacts>,
   flags: readonly Flag[],
   now: Date,
+  waitsOnOwner: boolean | null = null,
 ): HeldStall[] {
   if ([...trace.workerIds, ...trace.reviewerIds].some((id) => agents.get(id)?.status === "running")) return [];
   // No Worker and no report: the Manager answered itself; nothing was handed over to stall.
@@ -95,13 +107,31 @@ export function stallReasonsOf(
   const phase = trace.reports.at(-1)?.phase ?? null;
   const lastActivityAt = lastActivityOf(trace);
   const held: HeldStall[] = [];
-  if (phase !== "finished" && phase !== "blocked" && now.getTime() - timeOrZero(lastActivityAt) >= IDLE_UNFINISHED_MS) {
+  const waiting = waitsOnOwner ?? phase === "blocked";
+  if (phase !== "finished" && !waiting && now.getTime() - timeOrZero(lastActivityAt) >= IDLE_UNFINISHED_MS) {
     held.push({ reason: "idle-unfinished", since: lastActivityAt });
   }
   if (phase !== "finished" && flags.some((flag) => flag.state === "raised" && flag.rule === "review.over-budget")) {
     held.push({ reason: "review-over-budget", since: lastActivityAt });
   }
   return held;
+}
+
+/**
+ * The requests of a workspace that wait on the owner: those with an unsettled
+ * decision of any kind. Null when the decision store cannot be read.
+ */
+function unsettledRequestsOf(home: string, workspaceId: string, log: (message: string) => void): Set<string> | null {
+  try {
+    const waiting = new Set<string>();
+    for (const decision of createDecisionStore(home).list({ workspaceId })) {
+      if (decision.requestId !== null && isAnswerable(decision)) waiting.add(decision.requestId);
+    }
+    return waiting;
+  } catch (error) {
+    log(`[paseo-bm] the stall pass could not read the decisions of workspace ${workspaceId}: ${errorText(error)}`);
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -245,12 +275,14 @@ export function createStallWatcher(deps: StallWatcherDeps = {}): StallWatcher {
           workspaceId,
         );
         if (!live()) return result("off");
+        const waitingRequests = unsettledRequestsOf(home, workspaceId, log);
         for (const trace of traces) {
           // The group of agents linked to no request has no Manager to name.
           if (trace.managerAgentId === null || timeOrZero(lastActivityOf(trace)) < since) continue;
           const requestKey = requestKeyOf(trace);
           examined.add(`${workspaceId}::${requestKey}`);
-          const held = stallReasonsOf(trace, agents, flagsOf(ruleInputOf(trace), facts), at);
+          const waitsOnOwner = waitingRequests === null ? null : trace.requestId !== null && waitingRequests.has(trace.requestId);
+          const held = stallReasonsOf(trace, agents, flagsOf(ruleInputOf(trace), facts), at, waitsOnOwner);
           if (held.length === 0) {
             done.cleared.push(...alerts.clearWhere((alert) => alert.kind === "request-stalled" && alert.workspaceId === workspaceId && alert.subject === requestKey));
             continue;

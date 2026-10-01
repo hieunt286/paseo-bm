@@ -26,6 +26,9 @@ import { flagsOf } from "../plugin/shared/orchestrator-rules";
 import { ruleInputOf } from "../plugin/server/request-trace";
 import { MANAGER, REVIEWER, WORKER, WORKSPACE_ID, agent, at, msg, report, turn } from "./fixtures/orchestrator-traces";
 import { fakePaseo } from "./helpers/fake-paseo";
+import { makeDecision } from "./helpers/decisions";
+import { createDecisionStore } from "../plugin/server/decision-store";
+import { answerDecision } from "../plugin/shared/decisions";
 
 /**
  * The stall pass (Orchestrator design §6, §12; autonomy design §A.8): the two
@@ -168,7 +171,23 @@ describe("stallReasonsOf (autonomy design §A.8)", () => {
 
   it("a request waiting on the owner is not stalled: its question waits in the Inbox (waiting-user is gone)", () => {
     const records = [...handedOver(), relayed("received", at(1, 10)), relayed("blocked", at(4))];
+    // The decision store could not be read: a blocked report counts as waiting, as before.
     expect(reasonsAt(records, agentsWith(), when(59))).toEqual([]);
+  });
+
+  it("waiting on the owner is read from the decision store, never from the report (ADR-024)", () => {
+    const blocked = [...handedOver(), relayed("received", at(1, 10)), relayed("blocked", at(4))];
+    const working = [...handedOver(), relayed("received", at(1, 10))];
+    const reasons = (records: TraceRecord[], waitsOnOwner: boolean) => {
+      const { trace, facts } = traceOf(records, agentsWith());
+      return stallReasonsOf(trace, facts, flagsOf(ruleInputOf(trace), { reviewBudget: REVIEW_BUDGET }), when(59), waitsOnOwner).map((entry) => entry.reason);
+    };
+    // Blocked, but every question answered (or asked only in chat words): nobody the Inbox shows is asked — a stall.
+    expect(reasons(blocked, false)).toEqual(["idle-unfinished"]);
+    expect(reasons(blocked, true)).toEqual([]);
+    // Not blocked, but an unsettled decision of the request: it waits on the owner.
+    expect(reasons(working, true)).toEqual([]);
+    expect(reasons(working, false)).toEqual(["idle-unfinished"]);
   });
 
   it("a malformed report alone is no stall any more", () => {
@@ -365,10 +384,17 @@ describe("the pass: one Inbox alert per stalled request, of every project", () =
     expect(await stalls.pass()).toEqual({ status: "done", raised: [], cleared: [], events: [] });
 
     await seed([relayed("blocked", at(4))]);
+    // The Worker's question is open in the decision store: it waits in the Inbox.
+    const question = makeDecision({ workspaceId: WORKSPACE_ID, requestId: REQUEST_ID, askedAt: at(4) });
+    createDecisionStore(home).open(question);
     fake.byId(WORKER)!.status = "idle";
     clock = when(59);
     expect(await stalls.pass()).toEqual({ status: "done", raised: [], cleared: [], events: [] });
     expect(alerts().list()).toEqual([]);
+
+    // Answered, and the Worker never went on: blocked on nothing — the stall the field met on 2026-10-01.
+    createDecisionStore(home).transition(question.id, (decision) => answerDecision(decision, { optionKey: "c", via: "inbox", at: at(58) }), WORKSPACE_ID);
+    expect(await stalls.pass()).toMatchObject({ raised: [alertOf()] });
   });
 
   it("clears the alert when an agent runs, and raises it afresh once it holds again", async () => {

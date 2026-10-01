@@ -134,6 +134,14 @@ export const HANDOFF_NOTICE_MARKER = "BM-HANDOFF";
 export const REPLACED_NOTICE_MARKER = "BM-REPLACED";
 
 /**
+ * First line of the plugin's word to a Manager or a Worker whose turn Paseo
+ * cut short to deliver a message, and which then sat idle
+ * (`server/interruption-watch.ts`, ADR-024): the cut was not the owner's stop.
+ * Listed so it is never the owner's words. Matched as a whole word.
+ */
+export const INTERRUPTED_NOTICE_MARKER = "BM-INTERRUPTED";
+
+/**
  * First words of notices older builds sent and no build sends any more
  * (autonomy design §A.14). Stored history still holds them, so they are
  * recognised — and so ignored — like every notice: the notice that told a
@@ -159,10 +167,11 @@ const PREFIXES: readonly string[] = [
   STATE_NOTICE_MARKER,
   HANDOFF_NOTICE_MARKER,
   REPLACED_NOTICE_MARKER,
+  INTERRUPTED_NOTICE_MARKER,
 ];
 
 /** Markers that count only as a whole word: followed by whitespace or nothing. */
-const WHOLE_WORD_MARKERS: ReadonlySet<string> = new Set([ANSWER_NOTICE_MARKER, DELIVERY_NOTICE_MARKER, STATE_NOTICE_MARKER, HANDOFF_NOTICE_MARKER, REPLACED_NOTICE_MARKER]);
+const WHOLE_WORD_MARKERS: ReadonlySet<string> = new Set([ANSWER_NOTICE_MARKER, DELIVERY_NOTICE_MARKER, STATE_NOTICE_MARKER, HANDOFF_NOTICE_MARKER, REPLACED_NOTICE_MARKER, INTERRUPTED_NOTICE_MARKER]);
 
 function startsWithMarker(text: string, prefix: string): boolean {
   if (!text.startsWith(prefix)) return false;

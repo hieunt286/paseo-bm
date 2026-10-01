@@ -3,6 +3,7 @@ import {
   ANSWER_NOTICE_MARKER,
   BUDGET_NOTICE_MARKER,
   HANDOFF_NOTICE_MARKER,
+  INTERRUPTED_NOTICE_MARKER,
   REPLACED_NOTICE_MARKER,
   STATE_NOTICE_MARKER,
   WORKER_STOP_NOTICE,
@@ -10,6 +11,7 @@ import {
   isPluginNotice,
   noticeMarkerOf,
 } from "../plugin/server/notices";
+import { interruptedNoticeText } from "../plugin/server/interruption-watch";
 import { REVIEWER_STOP_NOTICE } from "../plugin/server/stop-propagation";
 import { NEW_REQUEST_MARKER, stripNewRequestMarker } from "../plugin/shared/new-request";
 
@@ -72,6 +74,13 @@ describe("isPluginNotice", () => {
     expect(isPluginNotice("BM-REPLACED\nFrom the paseo-bm plugin, not the owner: request req-1 is handed over")).toBe(true);
     expect(noticeMarkerOf("BM-REPLACED\nStop working on it")).toBe(REPLACED_NOTICE_MARKER);
     expect(isPluginNotice("BM-REPLACEDBY x")).toBe(false);
+  });
+
+  it("knows BM-INTERRUPTED as a whole word, so the notice is never the owner's words (ADR-024)", () => {
+    expect(INTERRUPTED_NOTICE_MARKER).toBe("BM-INTERRUPTED");
+    expect(isPluginNotice(interruptedNoticeText("2026-10-01T01:55:00.322Z"))).toBe(true);
+    expect(noticeMarkerOf("BM-INTERRUPTED\ncutAt: x")).toBe(INTERRUPTED_NOTICE_MARKER);
+    expect(isPluginNotice("BM-INTERRUPTEDX")).toBe(false);
   });
 
   it("is not fooled by a non-string", () => {

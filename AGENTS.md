@@ -98,7 +98,7 @@ docs/README.md         index of the docs: start here
 docs/product/          PRDs (Accepted, living): paseo-bm-prd.md, paseo-bm-dashboard-prd.md
 docs/design/           Technical Designs (Active, living): paseo-bm.md, paseo-bm-dashboard.md,
                        plus the research note on instructions by provider
-docs/adr/              ADR-001..022; which are in force is in the docs index
+docs/adr/              ADR-001..024; which are in force is in the docs index
 docs/operations/       living only: release runbook, acceptance checklists (install,
                        orchestration, worker fallback), the paseo.cafe listing record,
                        open requests to upstream Paseo
@@ -252,6 +252,11 @@ Checked against a live daemon, Paseo CLI/daemon 0.8.0:
   - **The request's shape:** `name: "CodexMcpElicitation"`, `kind: "tool"`, `title` "MCP approval: <server>", `metadata.serverName`, and `input { mode: "form", requestedSchema, url: null }`. The tool name is only inside `description` (`… run tool "<tool>"?`); the arguments are not in the request.
   - **Which calls ask:** Paseo's own agent tools asked, even `list_agents`. paseo-bm's pre-approved `bm_report` ran without a request. So did `git add && git commit`, which the spike had seen ask.
   - **On Claude `default`:** `mcp__paseo__send_agent_prompt` asks. These raised no request: `Read`, `ToolSearch`, `ListAgents`, `TaskCreate`, `Skill`, `Task` (and its sub-agent's read-only `ls`), and paseo-bm's pre-approved tools.
+- **A message Paseo delivers to a running agent cuts its turn, and Claude Code calls the cut the user's** (verified 2026-10-01 on the owner's store and Claude transcripts). Every cut seen was an agent it created finishing (`notifyOnFinish`, `<paseo-system> Agent … finished`); a plugin's `send()` to a running agent replaces its turn the same way (the notice queue's K10).
+  - **What the transcript shows:** the running tool call returns "The user doesn't want to proceed with this tool use … STOP what you are doing and wait for the user", then `[Request interrupted by user for tool use]`. A `cancel_agent` cut this way had already taken effect.
+  - **What the trace store shows:** the cut turn has `outcome: "canceled"`, and the next turn starts within about 2 s with no `user_message`; the `<paseo-system>` notice is not in the timeline.
+  - **Scale:** 126 cuts in two weeks of the owner's store; in at least 10 of them the agent stopped and waited for an owner who had said nothing.
+  - **How paseo-bm handles it:** structure tells a cut from the owner's stop (ADR-024, `interruption-watch.ts`); never match the words.
 
 ## Safety boundaries when working in this repo
 

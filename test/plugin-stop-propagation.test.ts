@@ -135,9 +135,10 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     // plus delta 20260918g's agent.created labelling, its turn_started scan and
     // its turn_ended BM-FORMAT check, plus delta 20260921's fallback detection,
     // plus the outdated-agents pass (turn_started, agent.archived; autonomy
-    // design §A.11), plus the action boundary's two permission hooks (§D.2).
+    // design §A.11), plus the action boundary's two permission hooks (§D.2),
+    // plus the interruption watch's permission_resolved (ADR-024).
     // The question–answer ledger's turn_ended is retired (§A.14).
-    expect(server.on).toHaveBeenCalledTimes(11);
+    expect(server.on).toHaveBeenCalledTimes(12);
     expect([...hooks.keys()].sort()).toEqual([
       "agent.archived",
       "agent.created",
@@ -347,16 +348,18 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
   it("removes the hook on cleanup", () => {
     const { cleanup, hooks, removers } = setup();
     cleanup();
-    // Eleven removals: this hook, the WP-205 collector's turn_started and
+    // Twelve removals: this hook, the WP-205 collector's turn_started and
     // turn_ended, delta 20260918g's agent.created, turn_started scan and
     // turn_ended BM-FORMAT check, delta 20260921's fallback detection
-    // (turn_ended), the outdated-agents pass (turn_started, agent.archived) and
-    // the action boundary (permission_requested, permission_resolved; §D.2).
+    // (turn_ended), the outdated-agents pass (turn_started, agent.archived),
+    // the action boundary (permission_requested, permission_resolved; §D.2)
+    // and the interruption watch (permission_resolved; ADR-024).
     // The map must end up empty.
     expect([...removers].sort()).toEqual([
       "agent.archived",
       "agent.created",
       "agent.permission_requested",
+      "agent.permission_resolved",
       "agent.permission_resolved",
       "agent.turn_ended",
       "agent.turn_ended",

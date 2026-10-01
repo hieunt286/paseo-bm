@@ -148,10 +148,10 @@ There is no proposal waiting for a click any more (autonomy design §A.14). What
 
 | Reason | Raised when |
 |---|---|
-| `idle-unfinished` | the last report is neither `finished` nor `blocked`, and nothing happened for ≥ **5 min** |
+| `idle-unfinished` | the last report is not `finished`, the request waits on no decision of the owner, and nothing happened for ≥ **5 min** |
 | `review-over-budget` | `review.over-budget` is raised and the last report is not `finished` |
 
-  A request waiting on the owner (`blocked`) is not stalled: its question waits in the Inbox. A request with no Worker and no report — the Manager answered it itself — never stalls.
+  **Waiting on the owner is read from the decision store, never from a report** ([ADR-024](../adr/ADR-024-structure-tells-stops-and-waits.md)): a request with an unsettled decision (`q:`, `o:`, `h:`, `f:` of that request) is not stalled — it waits in the Inbox. A `blocked` report whose questions are all answered, or whose agent asked only in chat words or waits on another agent, waits on nothing the Inbox shows: after 5 idle minutes it stalls like any other request. When the decision store cannot be read, a `blocked` report counts as waiting, as before. A request with no Worker and no report — the Manager answered it itself — never stalls.
 
 - **Once per stall:** one `request-stalled` Inbox alert per request (subject the request key, `detail` the reasons), raised while it holds and cleared when it no longer does (an agent runs, a new report arrives, the request leaves the 24-hour window or its trace is deleted); raised afresh after that.
 - **To the Orchestrator:** only for a project in the policy's scope (a class `shadow` or `delegate`, autonomy design §A.8; Autopilot until Phase 2), the pass that raises the alert publishes a `request.stalled` event on the event bus; it reaches the Orchestrator in the next `BM-EVENTS` batch and is dropped if the alert is cleared first. Outside that scope nothing is sent: the owner sees the alert in the Inbox.
@@ -392,6 +392,7 @@ While an Orchestrator younger than 24 hours has replaced an older one still in t
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-10-01 | hieu.nt10 (approved; written by Claude) | §6: `idle-unfinished` reads waiting on the owner from the decision store, not from a `blocked` report (ADR-024; a Worker blocked on an answered question never stalled) |
 | 2026-10-01 | hieu.nt10 (bug report; fixed by Claude) | §6: every Paseo handle goes to every keeper, the agents' tools endpoint included, and any turn start brings one (after a reload the Orchestrator's tools refused every call until a new agent was created) |
 | 2026-10-01 | Claude (owner's delegation) | §3.2 the served tools: `bm_findings`, `bm_compact`, `bm_handoff`, `bm_why` (change-011 C6, bead `bm-autonomy-phase5-3e5v.3`) |
 | 2026-09-30 | Claude (owner's delegation) | §4.3, §5.4: the model-correction log is no longer written (bead `bm-consolidation-81y2.23`) |
