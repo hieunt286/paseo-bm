@@ -178,23 +178,24 @@ export default function contribute(server: PluginServerContext): () => void {
   // Orchestrator design §8: the `orchestrator.*` RPCs. An Orchestrator created
   // before the endpoint's stored secret was made has an old URL (§5.1).
   const isToolsStale = toolsStaleSince(agentTools.secretSince);
+  // The server gets no Paseo handle of its own: each hook or RPC context brings one. Every one of them is
+  // handed to everything that keeps the last handle, so after a plugin reload the first turn start, Inbox
+  // read or creation is enough — before, only a paseo-bm creation reached the agents' tools, and the
+  // Orchestrator's tools refused every call until a new agent was created.
+  const shareHandle = (paseo: unknown): void => {
+    agentTools.usePaseo(paseo);
+    stallWatcher.usePaseo(paseo);
+    eventBus.usePaseo(paseo);
+    actionBoundary.usePaseo(paseo);
+  };
   registerOrchestratorRpcs(server, {
     isToolsStale,
-    onPaseo: (paseo) => {
-      stallWatcher.usePaseo(paseo);
-      eventBus.usePaseo(paseo);
-      actionBoundary.usePaseo(paseo);
-    },
+    onPaseo: shareHandle,
   });
   stallWatcher.start();
   const removeRoleHook = registerRoleHook(server, {
     urlFor: (role) => agentTools.urlFor(role),
-    usePaseo: (paseo) => {
-      agentTools.usePaseo(paseo);
-      stallWatcher.usePaseo(paseo);
-      eventBus.usePaseo(paseo);
-      actionBoundary.usePaseo(paseo);
-    },
+    usePaseo: shareHandle,
   });
   const removeActionBoundary = actionBoundary.register(server);
   const removeStopPropagation = registerStopPropagation(server);
@@ -239,7 +240,7 @@ export default function contribute(server: PluginServerContext): () => void {
   const armWaits = (paseo: unknown) => {
     void fallbackWaiter.ensureArmed(paseo);
     syncFallbackDecisionsOnce();
-    actionBoundary.usePaseo(paseo);
+    shareHandle(paseo);
   };
   const removeFallbackDetection = registerFallbackDetection(server, { onPaseo: armWaits });
   // delta 20260921 §4.4.6: fallback.incidents and fallback.act; a new pending
@@ -307,7 +308,7 @@ export default function contribute(server: PluginServerContext): () => void {
   // Autonomy design §A.12: the Inbox reads its alerts (the stores' producers raise and clear them).
   registerInboxRpcs(server, {
     onRead: (paseo) => {
-      actionBoundary.usePaseo(paseo);
+      shareHandle(paseo);
       return outdatedAgents.run(paseo);
     },
   });
@@ -338,6 +339,8 @@ export default function contribute(server: PluginServerContext): () => void {
   // the later of the two requests finished, and a writers.observed event (in the policy's scope).
   const writersWatch = createWritersWatch();
   const removeCollector = registerCollector(server, {
+    // Any agent's turn start brings a handle: the Orchestrator's first turn after a reload included.
+    onStarted: shareHandle,
     onRecorded: async (event, { location, paseo, record }) => {
       // Orchestrator design §6B.3: a Worker's signals (and their alerts) hold for its turn only.
       stallWatcher.workerTurnEnded(event?.agent);
@@ -349,8 +352,7 @@ export default function contribute(server: PluginServerContext): () => void {
         if (writersObserved.length > 0) await eventBus.publish(writersObserved);
         return undefined;
       }
-      stallWatcher.usePaseo(paseo);
-      actionBoundary.usePaseo(paseo);
+      shareHandle(paseo);
       const outcome = await checkReviewBudget(event, { location, paseo: paseo as BudgetPaseo, told: budgetTold, pending: budgetPending });
       // Autonomy design §G.5: this turn may be its agent's safe point for a pending compaction, or
       // show the compaction completed (then the BM-STATE brief goes); before the events, which read it.

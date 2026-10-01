@@ -142,7 +142,7 @@ There is no proposal waiting for a click any more (autonomy design §A.14). What
 `server/stall-watcher.ts`, as rebuilt by the autonomy programme (§A.8):
 
 - **Always on:** started at plugin load, stopped at unload, its timer `unref`ed; there is no switch. It costs no token: no timeline read, no model call.
-- **Its Paseo handle:** the plugin server has none of its own, so the pass keeps the last one an `orchestrator.*` call, a paseo-bm agent creation (the role hook) or a recorded turn (the collector) brought; a pass before any arrived does nothing.
+- **Its Paseo handle:** the plugin server has none of its own, so the pass keeps the last one a hook or RPC brought. `index.server.ts` hands every handle it receives — an `orchestrator.*` call, an Inbox read, a fallback hook, a paseo-bm agent creation (the role hook), any agent's turn start or recorded turn (the collector) — to every keeper at once: the agents' tools endpoint, the stall watcher, the event bus and the action boundary; a pass before any arrived does nothing.
 - **Every 60 seconds**, one non-overlapping pass: `agents.list` once; for each workspace whose trace store has activity in the last 24 hours (mtime cache), reconstruct its requests (`workspaceTracesOf`) and look at **every** request with activity in those 24 hours (a Manager often runs several at once).
 - **Why a request stalls** (`stallReasonsOf`, pure), never while a **Worker or Reviewer** of the request is `running` (the Manager is left out: it is shared by every request of its workspace):
 
@@ -392,6 +392,7 @@ While an Orchestrator younger than 24 hours has replaced an older one still in t
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-10-01 | hieu.nt10 (bug report; fixed by Claude) | §6: every Paseo handle goes to every keeper, the agents' tools endpoint included, and any turn start brings one (after a reload the Orchestrator's tools refused every call until a new agent was created) |
 | 2026-10-01 | Claude (owner's delegation) | §3.2 the served tools: `bm_findings`, `bm_compact`, `bm_handoff`, `bm_why` (change-011 C6, bead `bm-autonomy-phase5-3e5v.3`) |
 | 2026-09-30 | Claude (owner's delegation) | §4.3, §5.4: the model-correction log is no longer written (bead `bm-consolidation-81y2.23`) |
 | 2026-09-30 | Claude (owner's delegation) | One home per rule (code review §3.5, §3.6, bead `bm-consolidation-81y2.9`): danger patterns in `shared/effectful-actions.ts`, check results in `interventions.ts` `namesFailingChecks`, `PREDICTORS` and the option caps in `decisions.ts`, derived `HARD_OWNER_CLASSES` / `GATE_CATEGORY_EFFECTS` / `ACTION_CATEGORY`, `currentPolicy`, `recentTracesOf`, `shared/shell.ts` |

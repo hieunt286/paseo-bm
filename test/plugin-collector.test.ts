@@ -855,6 +855,31 @@ describe("registration", () => {
     expect(readRecords(location, WS).records[0]?.startedAt).not.toBeNull();
   });
 
+  it("hands every turn start's Paseo handle to onStarted, and contains its failure", () => {
+    const handlers = new Map<string, (event: unknown, context: unknown) => Promise<void> | void>();
+    const on = vi.fn((name: string, handler: (event: unknown, context: unknown) => Promise<void> | void) => {
+      handlers.set(name, handler);
+      return () => {};
+    });
+    const given: unknown[] = [];
+    const log = vi.fn();
+    let fail = false;
+    registerCollector({ on } as never, {
+      log,
+      onStarted: (paseo) => {
+        if (fail) throw new Error("boom");
+        given.push(paseo);
+      },
+    });
+    const paseo = { agents: {} };
+    handlers.get("agent.turn_started")!(asEvent(turnEnded()), { paseo });
+    handlers.get("agent.turn_started")!(asEvent(turnEnded()), {});
+    expect(given).toEqual([paseo]);
+    fail = true;
+    expect(() => handlers.get("agent.turn_started")!(asEvent(turnEnded()), { paseo })).not.toThrow();
+    expect(String(log.mock.calls[0]?.[0])).toContain("turn-start step failed: boom");
+  });
+
   it("never lets a resolver failure escape into the agent turn", async () => {
     const log = vi.fn();
     const handlers = new Map<string, (event: unknown, context: unknown) => Promise<void> | void>();
