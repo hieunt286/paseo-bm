@@ -312,12 +312,15 @@ Read-only replay of the whole store after bead `i8fc.1`: 0 pairs of agents writi
 
 **Reinstalled** 2026-10-01T01:42:47Z: `paseo-bm-builds/final-rc3-af22009` (commit `af22009`, a bug fix the owner reported: a Worker's question awaiting confirmation keeps its options, and an owner message no longer marks questions asked after it). No figure restarts: the fix changes which questions are marked, not how a question is counted.
 
+**Reinstalled** 2026-10-01T01:50:18Z: `paseo-bm-builds/final-rc4-cccdcbb` (commit `cccdcbb`, a bug fix the owner reported: after a reload the Orchestrator's tools refused every call until a new agent was created; between 01:42:47Z and 01:50:18Z its 9 calls were refused, so its turns in that span sent nothing). No figure restarts.
+
 The owner chooses per project, in Settings → Autonomy, the action boundary (change-010) and the challenger; the choices are recorded here when made.
 
 ## Revision History
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the Orchestrator handle fix (`cccdcbb`) |
 | 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the needs-confirmation fix (`af22009`) |
 | 2026-10-01 | Claude (owner's request) | §6.8: the final build installed and the pre-install reference recorded (bead `i8fc.6`) |
 | 2026-10-01 | Claude (owner's delegation) | How to reproduce: the A-10 links audit command (bead `bm-autonomy-phase5-3e5v.6`) |
