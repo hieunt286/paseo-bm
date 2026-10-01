@@ -316,12 +316,15 @@ Read-only replay of the whole store after bead `i8fc.1`: 0 pairs of agents writi
 
 **Reinstalled** 2026-10-01T02:27:20Z: `paseo-bm-builds/final-rc5-588a210` (commit `588a210`, ADR-024: `BM-INTERRUPTED` for a turn Paseo cut short, and waiting on the owner read from the decision store by the stall pass). No figure restarts. A `BM-INTERRUPTED` goes only to Managers and Workers, so it adds turns there (A-8 tokens, slightly), never Orchestrator wakes (A-7).
 
+**Reinstalled** 2026-10-01T04:56:27Z: `paseo-bm-builds/final-rc6-98b08e2` (commit `98b08e2`, ADR-025 and change-014: autonomy levels, no owner-only class, no demotion, the Orchestrator as the only predictor, Ask back, the Projects / Settings / Tools & skills surface, a flat style). Both projects' stored policy reads as Cruise (the five Cruise classes delegated, predictions on), so no cell changed at the install. From here A-4/A-5 per class count any class delegated by a level change from that change; the hard-owner classes can now be delegated (Turbo, Full auto), and demotion no longer exists, so A-5's demotion figures stop.
+
 The owner chooses per project, in Settings → Autonomy, the action boundary (change-010) and the challenger; the choices are recorded here when made.
 
 ## Revision History
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with ADR-025 / change-014 (`98b08e2`) |
 | 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with ADR-024 (`588a210`) |
 | 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the Orchestrator handle fix (`cccdcbb`) |
 | 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the needs-confirmation fix (`af22009`) |
