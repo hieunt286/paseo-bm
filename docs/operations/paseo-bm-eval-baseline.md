@@ -320,12 +320,15 @@ Read-only replay of the whole store after bead `i8fc.1`: 0 pairs of agents writi
 
 **Reinstalled** 2026-10-01T06:20:53Z: `paseo-bm-builds/final-rc7-ae76459` (commit `ae76459`, the change-014 fidelity pass: the surface's layout as the approved mockup; client only, no figure affected).
 
+**Reinstalled** 2026-10-01: `paseo-bm-builds/final-rc8-50cdda0` (commit `50cdda0`, Tools & skills no longer waits on every visit; no figure affected).
+
 The owner chooses per project, in Settings → Autonomy, the action boundary (change-010) and the challenger; the choices are recorded here when made.
 
 ## Revision History
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the Tools & skills speed fix (`50cdda0`) |
 | 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the fidelity pass (`ae76459`) |
 | 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with ADR-025 / change-014 (`98b08e2`) |
 | 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with ADR-024 (`588a210`) |
