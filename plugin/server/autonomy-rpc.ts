@@ -28,16 +28,15 @@
  * written by a newer paseo-bm or one that cannot be written →
  * `E_AUTONOMY_WRITE_FAILED` (rpc-kit `coded`, code review 2026-09-30 §3.2).
  *
- * These are the owner's RPCs (Settings, and Insights' Delegate? with the
- * promotion) and the evaluation suite's; no agent tool sets the policy.
+ * These are the owner's RPCs (Settings, and Insights' Delegate? shortcut) and
+ * the evaluation suite's; no agent tool sets the policy.
  *
  * The demotion (§B.4, §B.9) is the plugin's own writer of the policy, beside
  * them: `demoteOnReversal` takes a delegated class back to `shadow` at once
  * when a decision the policy or a precedent answered is reversed, and raises
  * the Inbox alert `autonomy-demoted` (keyed by project and class). The alert
  * clears when the owner next sets that cell (`autonomy.set`) or resets the
- * project (`autonomy.reset`), or once the class is eligible again
- * (`clearRenewedDemotions`, after the owner's answers).
+ * project (`autonomy.reset`).
  *
  * The owner's precedents (§B.6, §B.9; PRD REQ-124) are served here too, over
  * `precedent-store.ts` in the same folder:
@@ -77,13 +76,11 @@ import {
   checkAutonomySet,
   checkAutonomySetBoundary,
   checkAutonomySetChallenger,
-  eligibility,
   isPolicyWorkspaceId,
   policyOfProject,
   type AutonomyPolicy,
 } from "../shared/autonomy";
-import { agreementLedger } from "../shared/autonomy-ledger";
-import { alertKeyOf, type Alert } from "../shared/alerts";
+import type { Alert } from "../shared/alerts";
 import { decisionClassOf, type Decision, type DecisionClass, type ReversalKind } from "../shared/decisions";
 import { PRECEDENT_ID_PATTERN, checkPrecedentSaveInput, precedentDraftOf, type Precedent } from "../shared/precedents";
 import { createAlertStore } from "./alert-store";
@@ -238,7 +235,7 @@ function demotionDetail(decision: Decision, decisionClass: DecisionClass, kind: 
     answer.by === "precedent" ? "your precedent" : answer.predictor === "orchestrator" ? "the Orchestrator" : "the recommended option";
   return (
     `${classWords(decisionClass)} decisions are back in Shadow: ${decision.id}, answered for you by ${who}, ${REVERSED_HOW[kind]}. ` +
-    "They come to you again; Insights offers Delegate? once the class earns it anew."
+    "They come to you again until you delegate them again in Settings → Autonomy."
   );
 }
 
@@ -285,45 +282,6 @@ export function demoteOnReversal(decision: Decision, kind: ReversalKind, deps: D
     logOf(deps)(`[paseo-bm] ${decisionClass} in ${workspaceId} is back in shadow, but its Inbox alert failed: ${errorText(error)}`);
   }
   return { demoted: true, workspaceId, class: decisionClass, alert };
-}
-
-/**
- * Ends the `autonomy-demoted` alerts of the classes `settled` answered by the
- * owner that are eligible again (§B.9): a predictor's cell of that class,
- * counted from its demotion, passes `eligibility`. Called after every
- * settlement (the `onSettled` hook), since only an owner's answer can make a
- * class eligible. Reads the decisions only while such an alert is open. Never
- * throws; returns the keys it cleared.
- */
-export function clearRenewedDemotions(settled: readonly Decision[], deps: AutonomyRpcDeps = {}): string[] {
-  const answered = settled.filter((decision) => decision.status === "answered" && decision.answer?.by === "owner");
-  if (answered.length === 0) return [];
-  const home = dataHome(deps);
-  if (home === null) return [];
-  try {
-    const keys = new Set(answered.map((decision) => alertKeyOf("autonomy-demoted", decision.workspaceId, decisionClassOf(decision))));
-    const alerts = createAlertStore(home, deps.now === undefined ? {} : { now: deps.now });
-    const open = alerts.list({ open: true, kinds: ["autonomy-demoted"] }).filter((alert) => keys.has(alert.key) && alert.workspaceId !== null);
-    if (open.length === 0) return [];
-    const policy = readAutonomyPolicy(deps);
-    const decisions = createDecisionStore(home, { log: logOf(deps) });
-    const now = nowOf(deps);
-    const cleared: string[] = [];
-    for (const workspaceId of new Set(open.map((alert) => alert.workspaceId!))) {
-      const ledger = agreementLedger(decisions.list({ workspaceId, statuses: ["answered"] }), {
-        workspaceId,
-        ...(policy.demotions === undefined ? {} : { demotions: policy.demotions }),
-      });
-      for (const alert of open.filter((entry) => entry.workspaceId === workspaceId)) {
-        const renewed = ledger.cells.some((cell) => cell.class === alert.subject && eligibility(cell, now).eligible);
-        if (renewed && alerts.clear(alert.key)) cleared.push(alert.key);
-      }
-    }
-    return cleared;
-  } catch (error) {
-    logOf(deps)(`[paseo-bm] could not check the demoted classes again: ${errorText(error)}`);
-    return [];
-  }
 }
 
 // ---------------------------------------------------------------------------

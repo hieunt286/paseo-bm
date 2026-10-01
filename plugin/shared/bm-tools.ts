@@ -342,7 +342,7 @@ const CHANGE_FIELD: JsonSchema = {
   additionalProperties: false,
   required: ["kind"],
   description:
-    'A change of the owner\'s settings the plugin applies itself when the owner picks this option, and only then: precedent.save { scope, subject, text, expiresInDays? }; autonomy.set { class, mode, predictor? } of this project (never release, data, security or cost; delegate only where Insights offers it); coordination.set { key, value }. The option then declares effects ["none"] and carries no command. Refused when the owner could not make it in Settings, or when it would change nothing.',
+    'A change of the owner\'s settings the plugin applies itself when the owner picks this option, and only then: precedent.save { scope, subject, text, expiresInDays? }; autonomy.set { class, mode, predictor? } of this project (never release, data, security or cost); coordination.set { key, value }. The option then declares effects ["none"] and carries no command. Refused when the owner could not make it in Settings, or when it would change nothing.',
   properties: {
     kind: { type: "string", enum: PREPARED_CHANGE_KINDS, description: "Which setting it changes." },
     scope: { type: "string", enum: ["project", "all"], description: "precedent.save: this project, or all projects." },
@@ -350,8 +350,8 @@ const CHANGE_FIELD: JsonSchema = {
     text: { type: "string", minLength: 1, maxLength: MAX_PRECEDENT_TEXT_CHARS, description: "precedent.save: the standing answer, as the owner answered it before." },
     expiresInDays: { type: "integer", minimum: 1, maximum: MAX_PRECEDENT_DAYS, description: `precedent.save: how long it holds, 1-${MAX_PRECEDENT_DAYS} days (default ${DEFAULT_PRECEDENT_DAYS}).` },
     class: { type: "string", enum: DECISION_CLASSES, description: "autonomy.set: the decision class whose cell it sets." },
-    mode: { type: "string", enum: AUTONOMY_MODES, description: "autonomy.set: owner, shadow, or delegate (only on a cell that has earned it)." },
-    predictor: { type: "string", enum: PREDICTORS, description: "autonomy.set with delegate: the predictor that earned the cell (default recommended)." },
+    mode: { type: "string", enum: AUTONOMY_MODES, description: "autonomy.set: owner, shadow, or delegate." },
+    predictor: { type: "string", enum: PREDICTORS, description: "autonomy.set with delegate: the predictor that decides the class (default recommended)." },
     key: { type: "string", enum: COORDINATION_KEYS, description: "coordination.set: the setting." },
     value: {
       type: ["number", "boolean"],
@@ -1010,7 +1010,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
   {
     name: "bm_findings",
     role: "orchestrator",
-    description: `A project's measured findings over the last ${FINDINGS_WINDOW_DAYS} days, for advice (an advice.due line, or the owner asking): question subjects asked again and again without a precedent, classes that earned delegation, interventions below their target, rounds blocked on the owner and how long the owner took, reviews and blocking findings per tier, stall reasons, the heaviest requests and the compaction and handoff candidates (estimates), with the settings they bear on. Figures and short labels only, at most 4,000 characters; read a decision with bm_decisions and a request with bm_request. Each finding names the change that acts on it, when there is one: ask the owner with bm_ask_owner, the change on an option. Read-only. Returns JSON.`,
+    description: `A project's measured findings over the last ${FINDINGS_WINDOW_DAYS} days, for advice (an advice.due line, or the owner asking): question subjects asked again and again without a precedent, each class's agreement with a predictor where it is not delegated, interventions below their target, rounds blocked on the owner and how long the owner took, reviews and blocking findings per tier, stall reasons, the heaviest requests and the compaction and handoff candidates (estimates), with the settings they bear on. Figures and short labels only, at most 4,000 characters; read a decision with bm_decisions and a request with bm_request. Each finding names the change that acts on it, when there is one: ask the owner with bm_ask_owner, the change on an option. Read-only. Returns JSON.`,
     inputSchema: {
       type: "object",
       additionalProperties: false,

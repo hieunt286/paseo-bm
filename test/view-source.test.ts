@@ -131,16 +131,21 @@ describe("settings-autonomy.tsx and settings-precedents.tsx: the Autonomy group"
     expect(autonomy).toMatch(/useRpc\(autonomyResetRpc\)/);
     expect(autonomy).toMatch(/reset\(\{ workspaceId: project\.id \}\)/);
     expect(autonomy).toMatch(/set\(\{ workspaceId: project\.id, class: decisionClass, mode \}\)/);
-    // One press: the reset is the safety path, with no confirmation (design §B.9); only the action boundary is confirmed.
-    expect(autonomy).toMatch(/onReset=\{\(\) => run\(\(\) => reset\(\{ workspaceId: project\.id \}\)\)\}/);
-    expect(autonomy.match(/confirmed/g)).toEqual(["confirmed"]);
+    // One press: the reset is the safety path, with no confirmation (design §B.9).
+    expect(autonomy).toMatch(/onReset=\{\(\) => \{\s+setConfirmingDelegate\(null\);\s+run\(\(\) => reset\(\{ workspaceId: project\.id \}\)\);\s+\}\}/);
+    // Confirmed in the code: the action boundary, and a delegation through the model's input (`confirmed: true`, pinned in its model test).
+    const code = autonomy.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(code.match(/confirmed/g)).toEqual(["confirmed"]);
+    expect(code).toMatch(/onConfirm: \(asked\) =>\s+run\(async \(\) => \{\s+const saved = await set\(asked\.input\);/);
+    // Pressing Delegated only asks: the confirmation's own button sends.
+    expect(code).toMatch(/if \(mode === "delegate"\) \{\s+setConfirmingBoundary\(null\);\s+setConfirmingDelegate\(\{ decisionClass, predictor: "recommended" \}\);\s+return;/);
   });
 
   it("turns the action boundary on or off through autonomy.set-boundary, after its confirmation in place (change-010 C2, C4)", () => {
     expect(autonomy).toMatch(/useRpc\(autonomySetBoundaryRpc\)/);
     expect(autonomy).toMatch(/setBoundary\(\{ workspaceId: project\.id, enabled, confirmed: true \}\)/);
     // Pressing a side only asks; the confirmation's own button sends.
-    expect(autonomy).toMatch(/onBoundaryAsk=\{\(enabled\) => \{\s+setError\(null\);\s+setConfirmingBoundary\(enabled\);/);
+    expect(autonomy).toMatch(/onBoundaryAsk=\{\(enabled\) => \{\s+setError\(null\);\s+setConfirmingDelegate\(null\);\s+setConfirmingBoundary\(enabled\);/);
     expect(autonomy).toMatch(/<ConfirmBlock dialog=\{view\.confirm\}/);
   });
 

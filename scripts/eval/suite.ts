@@ -197,8 +197,8 @@ export const DELEGATED_CLASSES: readonly DecisionClass[] = DECISION_CLASSES.filt
  * decision E-2, evaluation design §11): for the tree, the owner's policy with
  * every class of `DELEGATED_CLASSES` delegated to the Orchestrator —
  * `autonomy.set { workspaceId, class, mode: "delegate", confirmed: true,
- * predictor: "orchestrator" }` each (`autonomy.set` checks no eligibility, so
- * the suite may set it). Nothing for a published build, which has no policy.
+ * predictor: "orchestrator" }` each (the owner's own RPC, with its
+ * confirmation). Nothing for a published build, which has no policy.
  */
 export function scenarioPolicyCalls(version: VersionSpec, workspaceId: string): RpcCall[] {
   if (version.kind !== "tree") return [];

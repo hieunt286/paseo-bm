@@ -11,7 +11,7 @@
  * | Finding | From | Acts with |
  * |---|---|---|
  * | `repeated-subject` — a question subject asked again and again, with no active precedent | the decision store | `precedent.save` |
- * | `delegation-eligible` — a class whose predictor earned Delegate? and is not delegated | the agreement ledger (§B.4) | `autonomy.set` |
+ * | `agreement` — a predictor's agreement with the owner in a class that is not delegated (a figure, no threshold) | the agreement ledger (§B.3) | `autonomy.set` |
  * | `intervention-below-target` — an intervention kind below A-12's 80 % | the intervention log (§G.3) | `coordination.set` for `advice`, else none |
  * | `blocked-rounds` — rounds blocked on the owner, and how long the owner took | the metric module | — |
  * | `reviews` — review batches and blocking findings, per tier, with the tier's review budget | the metric module, per tier; Settings → Coordination | `coordination.set` on the tier's `review.*Budget` (§G.4's `review.budget`) |
@@ -37,7 +37,7 @@ import { requireProject, type ServerToolResult, type ToolContext } from "./orche
 import { STALL_REASONS } from "./event-bus";
 import { errorText } from "./rpc-kit";
 import type { Alert } from "../shared/alerts";
-import { canDelegate, challengerOf, eligibility, modeOf, type AutonomyPolicy } from "../shared/autonomy";
+import { canDelegate, challengerOf, modeOf, type AutonomyPolicy } from "../shared/autonomy";
 import { agreementLedger, agreementRateOf, type AgreementCell } from "../shared/autonomy-ledger";
 import { FINDINGS_MAX_CHARS, FINDINGS_WINDOW_DAYS } from "../shared/bm-tools";
 import type { Tier, TraceRecord } from "../shared/contracts";
@@ -54,7 +54,7 @@ const TIERS: readonly Tier[] = ["Small", "Medium", "Large"];
 /** A subject is a finding once asked at least this many times in the window. */
 export const REPEATED_SUBJECT_MIN = 2;
 /** The most findings of each listed kind. */
-export const FINDINGS_PER_KIND = { repeatedSubjects: 5, delegation: 3, heavyRequests: 3 } as const;
+export const FINDINGS_PER_KIND = { repeatedSubjects: 5, agreement: 3, heavyRequests: 3 } as const;
 /** The first line of the answer, before its JSON. */
 export const FINDINGS_NOTE =
   "Figures only. For each finding worth acting on, ask the owner with bm_ask_owner, its change (act) on an option; read a decision with bm_decisions, a request with bm_request.";
@@ -141,22 +141,29 @@ function repeatedSubjectsOf(facts: FindingsFacts): Finding[] {
     .slice(0, FINDINGS_PER_KIND.repeatedSubjects);
 }
 
-/** The cells that earned Delegate? (§B.4) and are not delegated: the owner could delegate them now. */
-function delegationOf(facts: FindingsFacts): Finding[] {
+/**
+ * Each predictor's agreement in a class that may be delegated and is not
+ * (§B.3, §G.4): a plain figure, no threshold — the owner delegates a class
+ * whenever they choose (ADR-023). Only cells with a counted answer, most
+ * answers first.
+ */
+function agreementOf(facts: FindingsFacts): Finding[] {
   const answered = facts.decisions.filter((decision) => decision.status === "answered");
   const cells: AgreementCell[] = agreementLedger(answered, {
     workspaceId: facts.workspaceId,
     ...(facts.policy.demotions === undefined ? {} : { demotions: facts.policy.demotions }),
   }).cells;
   return cells
-    .filter((cell) => canDelegate(cell.class) && modeOf(facts.policy, facts.workspaceId, cell.class) !== "delegate" && eligibility(cell, facts.now).eligible)
-    .slice(0, FINDINGS_PER_KIND.delegation)
+    .filter((cell) => cell.count > 0 && canDelegate(cell.class) && modeOf(facts.policy, facts.workspaceId, cell.class) !== "delegate")
+    .sort((a, b) => b.count - a.count)
+    .slice(0, FINDINGS_PER_KIND.agreement)
     .map((cell) => ({
-      finding: "delegation-eligible",
+      finding: "agreement",
       class: cell.class,
       predictor: cell.predictor,
       agreement: share(agreementRateOf(cell)),
       answers: cell.count,
+      reversals: cell.reversals,
       mode: modeOf(facts.policy, facts.workspaceId, cell.class),
       act: "autonomy.set" as const,
     }));
@@ -294,7 +301,7 @@ export function findingsOf(facts: FindingsFacts): FindingsReport {
     settings: settingsOf(facts),
     findings: [
       ...repeatedSubjectsOf(facts),
-      ...delegationOf(facts),
+      ...agreementOf(facts),
       ...interventionsOf(facts),
       ...blockedOf(facts),
       ...reviewsOf(facts),

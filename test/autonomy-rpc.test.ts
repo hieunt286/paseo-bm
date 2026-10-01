@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAlertStore } from "../plugin/server/alert-store";
 import { handleAutonomyLedger } from "../plugin/server/autonomy-ledger-rpc";
 import {
-  clearRenewedDemotions,
   demoteOnReversal,
   handleAutonomyPolicy,
   handleAutonomyReset,
@@ -127,7 +126,7 @@ describe("autonomy.set", () => {
     }
   });
 
-  it("records the predictor of a delegation: the one named, else recommended (eligibility is not checked here)", () => {
+  it("records the predictor of a delegation: the one named, else recommended (no agreement threshold, ADR-023)", () => {
     const named = handleAutonomySet({ workspaceId: "w1", class: "scope", mode: "delegate", confirmed: true, predictor: "orchestrator" }, deps);
     expect(named.policy.projects["w1"]?.scope).toEqual({ mode: "delegate", predictor: "orchestrator", at: AT });
     const unnamed = handleAutonomySet({ workspaceId: "w1", class: "preference", mode: "delegate", confirmed: true }, deps);
@@ -602,7 +601,7 @@ describe("demotion (autonomy design §B.4, §B.9; REQ-123 b)", () => {
         subject: "scope",
         since: AT,
         clearedAt: null,
-        detail: `Scope decisions are back in Shadow: ${idOf("Q1")}, answered for you by the recommended option, was asked again in the same request. They come to you again; Insights offers Delegate? once the class earns it anew.`,
+        detail: `Scope decisions are back in Shadow: ${idOf("Q1")}, answered for you by the recommended option, was asked again in the same request. They come to you again until you delegate them again in Settings → Autonomy.`,
       },
     ]);
     // The answer already delivered is not touched: only the reversal is recorded on it.
@@ -678,27 +677,19 @@ describe("demotion (autonomy design §B.4, §B.9; REQ-123 b)", () => {
     expect(demotedAtOf(reset, WS, "scope")).toBe(AT);
   });
 
-  it("the alert clears once the class is eligible again: 20 agreeing owner answers over 14 days since the demotion", () => {
+  it("the owner's answers never clear the alert (no agreement threshold, ADR-023); delegating the class again does, at once", () => {
     delegateScope();
     answered("Q1", "policy");
     demoteOnReversal(stored("Q1")!, "overridden", { home, now: () => NOW });
-    // Twenty answers the owner gave before the demotion count for nothing.
-    const before = Array.from({ length: 20 }, (_, index) => answered(`Q${index + 10}`, "owner", { when: new Date(NOW.getTime() - (index + 1) * DAY).toISOString() }));
-    const at40 = { ...deps, now: () => later(40) };
-    expect(clearRenewedDemotions(before, at40)).toEqual([]);
-    // Nineteen since: not yet.
-    const since = Array.from({ length: 20 }, (_, index) => answered(`Q${index + 40}`, "owner", { when: later(index + 1).toISOString() }));
-    createDecisionStore(home).transition(idOf("Q59"), (decision) => ({ ok: true, decision: { ...decision, status: "open", answer: null, settledAt: null } }), WS);
-    expect(clearRenewedDemotions(since.slice(0, 19), at40)).toEqual([]);
-    expect(handleAutonomyLedger({ workspaceId: WS }, deps).cells.find((cell) => cell.class === "scope")).toMatchObject({ count: 19, agreed: 19 });
-    // The twentieth: eligible again, the alert clears; the policy is left as the owner will set it.
-    createDecisionStore(home).transition(idOf("Q59"), () => ({ ok: true, decision: since[19]! }), WS);
-    expect(clearRenewedDemotions([since[19]!], at40)).toEqual([scopeKey]);
-    expect(demotionAlerts(true)).toEqual([]);
+    // However many agreeing answers the owner gives since, the class stays in shadow and the alert open.
+    for (let index = 0; index < 20; index += 1) answered(`Q${index + 40}`, "owner", { when: later(index + 1).toISOString() });
+    expect(handleAutonomyLedger({ workspaceId: WS }, deps).cells.find((cell) => cell.class === "scope")).toMatchObject({ count: 20, agreed: 20 });
     expect(modeOf(readAutonomyPolicy(deps), WS, "scope")).toBe("shadow");
-    // Answers the policy gave, or none, check nothing.
-    expect(clearRenewedDemotions([stored("Q1")!], at40)).toEqual([]);
-    expect(clearRenewedDemotions([], at40)).toEqual([]);
+    expect(demotionAlerts(true).map((alert) => alert.key)).toEqual([scopeKey]);
+    // The owner delegates it again, with the confirmation: delegated, and the alert ends.
+    const policy = handleAutonomySet({ workspaceId: WS, class: "scope", mode: "delegate", confirmed: true, predictor: "orchestrator" }, deps).policy;
+    expect(policy.projects[WS]?.scope).toEqual({ mode: "delegate", predictor: "orchestrator", at: AT });
+    expect(demotionAlerts(true)).toEqual([]);
   });
 
   it("autonomy.ledger counts a demoted class from its demotion; the delegated figures stay whole", () => {

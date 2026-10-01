@@ -21,14 +21,11 @@
  *
  * Never throws: a failure is the result's reason, which the caller reports.
  */
-import { agreementLedger } from "../shared/autonomy-ledger";
-import { canDelegate, eligibility } from "../shared/autonomy";
 import { isPreparedChange, type Decision, type PreparedChange } from "../shared/decisions";
 import { preparedChangeCheckOf, preparedChangeTextOf, type PreparedChangeFacts } from "../shared/prepared-changes";
 import { currentPolicy } from "./autonomy-store";
 import { handleAutonomySet, handlePrecedentsSave } from "./autonomy-rpc";
 import { handleCoordinationSet, readCoordinationSettings } from "./coordination-rpc";
-import { createDecisionStore } from "./decision-store";
 import { createPrecedentStore } from "./precedent-store";
 import { errorText } from "./rpc-kit";
 
@@ -43,10 +40,9 @@ export interface PreparedChangeDeps {
 
 /**
  * What a prepared change's checks read, for one project, now: the policy
- * (every class `owner` when it cannot be read), whether a cell has earned
- * Delegate? (the agreement ledger since the class's last demotion, read only
- * when asked), the coordination settings (the defaults when unreadable) and
- * the active precedents (none when unreadable). Never throws.
+ * (every class `owner` when it cannot be read), the coordination settings
+ * (the defaults when unreadable) and the active precedents (none when
+ * unreadable). Never throws.
  */
 export function preparedChangeFactsOf(workspaceId: string, deps: PreparedChangeDeps): PreparedChangeFacts {
   const log = deps.log ?? defaultLog;
@@ -57,21 +53,7 @@ export function preparedChangeFactsOf(workspaceId: string, deps: PreparedChangeD
   } catch (error) {
     log(`[paseo-bm] could not read the precedents for a prepared change: ${errorText(error)}`);
   }
-  let cells: ReturnType<typeof agreementLedger>["cells"] | null = null;
-  const eligible: PreparedChangeFacts["eligible"] = (decisionClass, predictor) => {
-    if (!canDelegate(decisionClass)) return false;
-    if (cells === null) {
-      try {
-        const answered = createDecisionStore(deps.home, { log }).list({ workspaceId, statuses: ["answered"] });
-        cells = agreementLedger(answered, { workspaceId, ...(policy.demotions === undefined ? {} : { demotions: policy.demotions }) }).cells;
-      } catch (error) {
-        log(`[paseo-bm] could not read the decisions for a prepared change: ${errorText(error)}`);
-        cells = [];
-      }
-    }
-    return cells.some((cell) => cell.class === decisionClass && cell.predictor === predictor && eligibility(cell, deps.now).eligible);
-  };
-  return { workspaceId, policy, eligible, settings: readCoordinationSettings({ home: deps.home, log }), precedents };
+  return { workspaceId, policy, settings: readCoordinationSettings({ home: deps.home, log }), precedents };
 }
 
 export type PreparedChangeResult =
@@ -109,7 +91,7 @@ function write(change: PreparedChange, workspaceId: string, deps: PreparedChange
           workspaceId,
           class: change.class,
           mode: change.mode,
-          // The owner's tap on an option that says what it sets: the confirmation Delegate? asks for.
+          // The owner's tap on an option that says what it sets: the confirmation a delegation asks for.
           confirmed: true,
           ...(change.predictor === undefined ? {} : { predictor: change.predictor }),
         },

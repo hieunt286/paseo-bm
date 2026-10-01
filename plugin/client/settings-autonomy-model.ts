@@ -3,11 +3,12 @@
  * concept §4.4; PRD REQ-121): the owner's policy as a matrix per project — a
  * row per decision class with who decides it — and **Return all to owner**.
  *
- * The matrix sets `owner` or `shadow` only. `delegate` is never offered here:
- * it is set through **Delegate?** in Insights on a cell that has earned it
- * (§B.4). A delegated cell shows its predictor and can be set back. The four
- * classes that are always the owner's (release, data, security, cost) are
- * fixed rows that say why.
+ * The matrix sets `owner` and `shadow` at once, and `delegate` (§B.4,
+ * ADR-023) at any time after a confirmation in place under the row: who
+ * decides (the recommended option or the Orchestrator), then what changes,
+ * Cancel first. No agreement threshold gates it. A delegated cell shows its
+ * predictor and can be set back. The four classes that are always the
+ * owner's (release, data, security, cost) are fixed rows that say why.
  *
  * Each project's matrix also has **Orchestrator predictions**, the challenger
  * switch (autonomy design §B.3, §B.9): off by default (DQ-4), one press each
@@ -31,7 +32,8 @@
  * Pure: no React, no React Native, no `server/` import.
  */
 import { boundaryOf, boundaryProjects, canDelegate, cellOf, challengerOf, modeOf, type AutonomyMode, type AutonomyPolicy, type AutonomyPredictor } from "../shared/autonomy";
-import { DECISION_CLASSES, SUBJECT_PATTERN, type DecisionClass } from "../shared/decisions";
+import { DECISION_CLASSES, PREDICTORS, SUBJECT_PATTERN, type DecisionClass } from "../shared/decisions";
+import { plural } from "../shared/text";
 import { MAX_PRECEDENT_TEXT_CHARS, PRECEDENT_SCOPE_ALL, type Precedent } from "../shared/precedents";
 import type { InsightsProject } from "./insights-model";
 import { GROUP_LOADING, type GroupState } from "./settings-model";
@@ -40,7 +42,7 @@ import type { ConfirmDialog } from "./ui-types";
 /** The owner's whole autonomy policy (`autonomy.policy {}`): Settings and Insights read this one query, and a screen that changes the policy writes it. */
 export const AUTONOMY_POLICY_KEY = ["paseo-bm", "autonomy", "policy"] as const;
 
-/** The rows, the classes the agents can earn first, least risky on top; the four that stay yours last. */
+/** The rows, the classes that can be delegated first, least risky on top; the four that stay yours last. */
 export const AUTONOMY_ROW_ORDER: readonly DecisionClass[] = [...DECISION_CLASSES].reverse();
 
 /** Each class in the owner's words. */
@@ -73,7 +75,7 @@ export const OWNER_ONLY_REASONS: Readonly<Partial<Record<DecisionClass, string>>
 
 /** What the modes mean, in one line. */
 export const AUTONOMY_MEANING =
-  "Owner and Shadow: you decide, and what the agents would have chosen is recorded beside your answer. Delegated: decided for you — set only through Delegate? in Insights, once a class has earned it.";
+  "Owner and Shadow: you decide, and what the agents would have chosen is recorded beside your answer. Delegated: decided for you by the recommended option or the Orchestrator, after one confirmation; a reversal or an override sends it back to Shadow.";
 
 /** The group's body when there is no project to show. */
 export const AUTONOMY_NO_PROJECTS = "No project yet. Each workspace you open in Paseo gets its own row of classes here.";
@@ -85,7 +87,7 @@ export const CHALLENGER_LABEL = "Orchestrator predictions";
 
 /** What the challenger does, in one line: what it records, that the owner never sees it first, and its cost. */
 export const CHALLENGER_MEANING =
-  "When on, the Orchestrator records the option it expects you to choose on the classes it could earn; you see it only after you answer. Predicting wakes the Orchestrator, which costs tokens.";
+  "When on, the Orchestrator records the option it expects you to choose on the classes that can be delegated; you see it only after you answer. Predicting wakes the Orchestrator, which costs tokens.";
 
 /** The action boundary switch's name (autonomy design §D.2). */
 export const BOUNDARY_LABEL = "Action boundary";
@@ -123,6 +125,53 @@ export function boundaryOffDialog(projectLabel: string): ConfirmDialog {
     confirmAccessibilityLabel: `Turn the action boundary off in ${projectLabel}`,
     defaultAction: "cancel",
   };
+}
+
+/** Each predictor as a choice: who decides a delegated class. */
+export const PREDICTOR_LABELS: Readonly<Record<AutonomyPredictor, string>> = {
+  recommended: "Recommended option",
+  orchestrator: "Orchestrator",
+};
+
+/** The label of the predictor choice in a delegation's confirmation. */
+export const DECIDED_BY_LABEL = "Decided by";
+
+/**
+ * The confirmation of delegating a class (§B.4, ADR-023), in Settings and from
+ * Insights' Delegate?: who answers for the owner, what it costs when that is
+ * the Orchestrator, the agreement so far when the caller has it (information,
+ * never a condition), and how it is taken back. Cancel is the default.
+ */
+export function delegateDialog(input: {
+  classLabel: string;
+  projectLabel: string;
+  predictor: AutonomyPredictor;
+  /** The predictor's agreement so far in this class; omitted where the screen does not read it. */
+  agreement?: { agreed: number; count: number } | null;
+}): ConfirmDialog {
+  const { classLabel, projectLabel, predictor, agreement } = input;
+  const who = PREDICTOR_WORDS[predictor];
+  const lines = [
+    `• ${who.charAt(0).toUpperCase()}${who.slice(1)} answers them for you, without asking you.`,
+    agreement === undefined || agreement === null || agreement.count === 0
+      ? null
+      : `• So far it matched ${agreement.agreed} of your ${plural(agreement.count, "answer")} (${Math.round((agreement.agreed / agreement.count) * 100)} %).`,
+    predictor === "orchestrator" ? "• Each decision wakes the Orchestrator, which costs tokens." : null,
+    `• A reversal or an override sends the class back to Shadow at once; ${RETURN_ALL_LABEL} undoes it.`,
+  ].filter((line): line is string => line !== null);
+  return {
+    title: `Delegate ${classLabel} decisions in ${projectLabel}?`,
+    body: lines.join("\n"),
+    confirmLabel: "Delegate",
+    cancelLabel: "Cancel",
+    defaultAction: "cancel",
+  };
+}
+
+/** The delegation being confirmed in the matrix: its class and the predictor chosen so far. */
+export interface DelegateConfirming {
+  decisionClass: DecisionClass;
+  predictor: AutonomyPredictor;
 }
 
 /** A project of the matrix: its id (never shown) and its name. */
@@ -216,9 +265,9 @@ export function autonomyGroupState(policy: AutonomyPolicy | undefined, failed = 
   return { text: boundaryText === null ? line : `${line} · ${boundaryText}`, tone: total.delegated > 0 || boundaryText !== null ? "info" : "muted" };
 }
 
-/** One choice of a row: `owner` or `shadow`, never `delegate`. */
+/** One choice of a row: `owner` and `shadow` set at once; `delegate` opens its confirmation. */
 export interface AutonomyChoiceView {
-  mode: "owner" | "shadow";
+  mode: AutonomyMode;
   label: string;
   selected: boolean;
   enabled: boolean;
@@ -235,7 +284,26 @@ export interface AutonomyRowView {
   /** Why a fixed row is fixed, or who decides a delegated cell; else null. */
   caption: string | null;
   choices: AutonomyChoiceView[];
+  /** The delegation's confirmation, in place under the row, while it is asked; else null. */
+  delegate: AutonomyDelegateView | null;
   accessibilityLabel: string;
+}
+
+/** One predictor of a delegation's "Decided by" choice. */
+export interface AutonomyPredictorChoiceView {
+  predictor: AutonomyPredictor;
+  label: string;
+  selected: boolean;
+  accessibilityLabel: string;
+}
+
+/** A delegation being confirmed: who decides, then the confirmation (Cancel first). */
+export interface AutonomyDelegateView {
+  label: string;
+  predictors: AutonomyPredictorChoiceView[];
+  dialog: ConfirmDialog;
+  /** What confirming sends: `autonomy.set` with `confirmed: true` and the predictor chosen. */
+  input: { workspaceId: string; class: DecisionClass; mode: "delegate"; confirmed: true; predictor: AutonomyPredictor };
 }
 
 /** One side of the challenger switch: `true` turns the predictions on. */
@@ -281,7 +349,7 @@ export interface AutonomyMatrixView {
   reset: { enabled: boolean; label: string; accessibilityLabel: string };
 }
 
-const SETTABLE_MODES = ["owner", "shadow"] as const;
+const SETTABLE_MODES = ["owner", "shadow", "delegate"] as const;
 
 /** The project's Orchestrator predictions, Off or On (off by default, DQ-4); one press each way, no confirmation. */
 function challengerView(policy: AutonomyPolicy, project: AutonomyProject, busy: boolean): AutonomyChallengerView {
@@ -342,7 +410,13 @@ export function boundaryView(policy: AutonomyPolicy, project: AutonomyProject, b
   };
 }
 
-function rowView(policy: AutonomyPolicy, project: AutonomyProject, decisionClass: DecisionClass, busy: boolean): AutonomyRowView {
+function rowView(
+  policy: AutonomyPolicy,
+  project: AutonomyProject,
+  decisionClass: DecisionClass,
+  busy: boolean,
+  confirming: DelegateConfirming | null,
+): AutonomyRowView {
   const label = CLASS_LABELS[decisionClass];
   const mode = modeOf(policy, project.id, decisionClass);
   if (!canDelegate(decisionClass)) {
@@ -356,12 +430,14 @@ function rowView(policy: AutonomyPolicy, project: AutonomyProject, decisionClass
       fixed: true,
       caption,
       choices: [],
+      delegate: null,
       accessibilityLabel: `${label}: ${modeText}. ${caption ?? ""}`.trim(),
     };
   }
   const cell = cellOf(policy, project.id, decisionClass);
   const caption = cell?.mode === "delegate" ? `Decided for you by ${PREDICTOR_WORDS[cell.predictor]} since ${cell.at.slice(0, 10)}` : null;
   const modeText = MODE_LABELS[mode];
+  const asked = confirming !== null && confirming.decisionClass === decisionClass && mode !== "delegate" ? confirming : null;
   return {
     decisionClass,
     label,
@@ -375,22 +451,46 @@ function rowView(policy: AutonomyPolicy, project: AutonomyProject, decisionClass
         mode: choice,
         label: MODE_LABELS[choice],
         selected,
-        enabled: !busy && !selected,
+        enabled: !busy && !selected && !(choice === "delegate" && asked !== null),
         accessibilityLabel: selected
           ? `${label} in ${project.label} is ${MODE_LABELS[choice]}`
-          : `Set ${label} in ${project.label} to ${MODE_LABELS[choice]}`,
+          : choice === "delegate"
+            ? `Delegate ${label} in ${project.label}…`
+            : `Set ${label} in ${project.label} to ${MODE_LABELS[choice]}`,
       };
     }),
+    delegate:
+      asked === null
+        ? null
+        : {
+            label: DECIDED_BY_LABEL,
+            predictors: PREDICTORS.map((predictor) => ({
+              predictor,
+              label: PREDICTOR_LABELS[predictor],
+              selected: predictor === asked.predictor,
+              accessibilityLabel: `${label} decided by ${PREDICTOR_WORDS[predictor]}`,
+            })),
+            dialog: delegateDialog({ classLabel: label, projectLabel: project.label, predictor: asked.predictor }),
+            input: { workspaceId: project.id, class: decisionClass, mode: "delegate", confirmed: true, predictor: asked.predictor },
+          },
     accessibilityLabel: caption === null ? `${label}: ${modeText}` : `${label}: ${modeText}. ${caption}`,
   };
 }
 
 /**
  * One project's matrix: its summary, the Orchestrator predictions switch, a
- * row per class, and Return all to owner (offered while a class is above
+ * row per class (the one whose delegation is asked carries its confirmation),
+ * and Return all to owner (offered while a class is above
  * `owner`; it leaves the predictions as they are).
  */
-export function autonomyMatrixView(input: { policy: AutonomyPolicy; project: AutonomyProject; busy: boolean; confirmingBoundary?: boolean | null }): AutonomyMatrixView {
+export function autonomyMatrixView(input: {
+  policy: AutonomyPolicy;
+  project: AutonomyProject;
+  busy: boolean;
+  confirmingBoundary?: boolean | null;
+  /** The delegation whose confirmation is open (§B.4), or none. */
+  confirmingDelegate?: DelegateConfirming | null;
+}): AutonomyMatrixView {
   const { policy, project, busy } = input;
   const counts = cellsAboveOwner(policy, project.id);
   const above = counts.delegated + counts.shadow > 0;
@@ -399,7 +499,7 @@ export function autonomyMatrixView(input: { policy: AutonomyPolicy; project: Aut
     summary: countsText(counts) ?? "Every decision in this project is yours",
     boundary: boundaryView(policy, project, busy, input.confirmingBoundary ?? null),
     challenger: challengerView(policy, project, busy),
-    rows: AUTONOMY_ROW_ORDER.map((decisionClass) => rowView(policy, project, decisionClass, busy)),
+    rows: AUTONOMY_ROW_ORDER.map((decisionClass) => rowView(policy, project, decisionClass, busy, input.confirmingDelegate ?? null)),
     reset: {
       enabled: !busy && above,
       label: RETURN_ALL_LABEL,

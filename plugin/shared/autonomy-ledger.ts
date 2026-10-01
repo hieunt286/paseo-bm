@@ -74,7 +74,7 @@ export const delegatedCellSchema = z.object({
   workspaceId: z.string().min(1),
   class: decisionClassSchema,
   by: z.enum(DELEGATED_BY),
-  /** The predictor that earned the `delegate` cell (`policy`); null for a precedent. */
+  /** The predictor of the `delegate` cell (`policy`); null for a precedent. */
   predictor: predictorSchema.nullable(),
   count: countSchema,
   /** Decisions the owner overrode from the digest (§B.7; A-4). */
@@ -101,7 +101,7 @@ export interface AgreementLedgerOptions {
   /**
    * Each class's last demotion per project (the policy's `demotions`, §B.4):
    * an agreement cell of a demoted class counts only the owner's answers
-   * given at or after it, so eligibility is earned anew. The delegated
+   * given at or after it, so the figures start again. The delegated
    * figures are not narrowed by it.
    */
   demotions?: Readonly<Record<string, Readonly<Partial<Record<DecisionClass, string>>>>>;

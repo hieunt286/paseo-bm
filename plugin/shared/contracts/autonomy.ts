@@ -62,8 +62,8 @@ export const autonomyPolicyRpc = defineRpc({
  * (default `recommended`). An unknown project, class or mode →
  * `E_AUTONOMY_INVALID`; no usable data folder → `E_DATA_HOME_UNAVAILABLE`; a
  * store written by a newer paseo-bm, or one that cannot be written →
- * `E_AUTONOMY_WRITE_FAILED`. Nothing is written on any refusal. Eligibility is
- * not checked here (§B.9). The owner's change of a cell ends its
+ * `E_AUTONOMY_WRITE_FAILED`. Nothing is written on any refusal. No agreement
+ * threshold is checked (ADR-023). The owner's change of a cell ends its
  * `autonomy-demoted` alert (§B.4). Sends nothing to any agent.
  */
 export const autonomySetRpc = defineRpc({

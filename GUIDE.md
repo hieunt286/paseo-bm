@@ -293,7 +293,7 @@ The Inbox is read every 5 seconds while you look at it.
   precedent) and why; tap a line for its details. **Override** takes one back: it returns to Needs
   you as your question, and your answer goes to the same agent and replaces the first one (work
   already done is not undone; the Worker is asked what changes). Overriding also returns that class
-  to Shadow, so its decisions come to you until it earns Delegate again. Lines you have seen leave
+  to Shadow, so its decisions come to you until you delegate it again. Lines you have seen leave
   the list when you come back after a few minutes away; Work keeps every decision.
   Decided for you also lists what the Orchestrator did since you last looked — an answer, unblock,
   correction, stop or advice — with why, and whether it worked: Pending, Met, Missed or Unknown.
@@ -409,7 +409,9 @@ Insights reads the recorded history once when you open it (and on **Refresh**), 
 - **Autonomy by class:** for one project, how often the recommended option (and the Orchestrator,
   once its predictions are on) matched your answer, per class of decision — the agreement, how many
   answers, from which day to which, and how many were reversed — with who decides each class now.
-  It counts every answer recorded, whatever the window.
+  It counts every answer recorded, whatever the window. The figures are for your information:
+  **Delegate?** beside a prediction's figures delegates that class to it at any time, after the
+  same confirmation as in Settings.
 
 - **Review lift:** per size of request, for the chosen window and project — reviews per request,
   blocking findings per batch, how many of the findings a first review found were fixed by the next
@@ -430,9 +432,11 @@ Five groups, each folded to one line that says its state:
 - **Autonomy** — which decisions the agents may take for you, as one matrix per project (a tab per
   project, named as in Insights): a row per kind of decision with who decides it. **Owner** and
   **Shadow** both leave the decision to you — what the agents would have chosen is recorded beside
-  your answer. A kind of decision is **Delegated** only through **Delegate?** in Insights, once it has
-  earned it; its row then says who decides it for you (the recommended option or the Orchestrator)
-  and since when, and one press sets it back. Release, data, security and cost are always yours and
+  your answer, and one press sets either. **Delegated** hands a kind of decision over whenever you
+  choose: pick who decides it for you (the recommended option or the Orchestrator, which costs
+  tokens), then confirm — **Cancel** comes first. A reversal or an override sends it back to Shadow
+  at once. Its row then says who decides it for you and since when, and one press sets it back; to
+  change who decides, set it to Shadow and delegate it again. Release, data, security and cost are always yours and
   say why. **Return all to owner** hands every kind of decision in that project back to you at once.
   **Orchestrator predictions** (off by default, one press each way) has the Orchestrator record, for
   each decision it could one day take for you, the option it expects you to choose; you see its
@@ -545,7 +549,7 @@ How far it goes without asking follows your autonomy policy (**Settings → Auto
 
 **Handoff.** With handoff on in **Settings → Coordination**, the Orchestrator may hand a request that has grown too heavy to a fresh Worker: the old Worker writes a short note, paseo-bm builds a brief from its records, and the request's Manager creates the successor from it — the request keeps its id. The old Worker stays in your list, marked replaced, and paseo-bm tells it in its chat ("Handed over to another Worker") to stop; nothing is archived. Work's timeline shows "Handed over to Worker 2 from Worker 1" and the command card reads "Coordination · handoff". A successor's finish is verified only by checks it ran itself. Turning handoff off stops a pending one at its next step.
 
-**Advice.** After every N finished requests of a project (**Settings → Coordination**, 5 by default, 0 turns it off) the Orchestrator reviews the project's figures — repeated questions, blocked rounds, reviews, stalls, heavy requests — and may ask you in the Inbox about one change: save a precedent, set a kind of decision's autonomy (never release, data, security or cost, and **Delegated** only where Insights offers it), or change the advice cadence. The question says exactly what each option sets, and paseo-bm applies it only when you pick that option yourself: your policy, a precedent or the Orchestrator never answers it. You can also ask the Orchestrator for advice in its chat at any time.
+**Advice.** After every N finished requests of a project (**Settings → Coordination**, 5 by default, 0 turns it off) the Orchestrator reviews the project's figures — repeated questions, blocked rounds, reviews, stalls, heavy requests — and may ask you in the Inbox about one change: save a precedent, set a kind of decision's autonomy (never release, data, security or cost), or change the advice cadence. The question says exactly what each option sets, and paseo-bm applies it only when you pick that option yourself: your policy, a precedent or the Orchestrator never answers it. You can also ask the Orchestrator for advice in its chat at any time.
 
 ### Big decisions
 

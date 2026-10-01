@@ -4,8 +4,8 @@
  * §G.3), from `insights.summary` (the metric module over the plugin's own data
  * folder); the Beads figures of one project; its autonomy by class — the
  * agreement ledger (`autonomy.ledger`) with each class's mode
- * (`autonomy.policy`, §B.3), and **Delegate?** where a class earned it, which
- * delegates it only once confirmed (`autonomy.set { confirmed: true,
+ * (`autonomy.policy`, §B.3), and a **Delegate?** shortcut on a class that may
+ * be delegated (ADR-023), which delegates it only once confirmed (`autonomy.set { confirmed: true,
  * predictor }`, §B.4); and review lift per size of request (§C.4). Cost ends
  * with the tokens read per request and the heaviest requests, by project name
  * (§G.2). What it shows is `insights-model.ts`; this file reads the data and
@@ -211,7 +211,7 @@ function DelegateButton({ offer, on, styles }: { offer: DelegateOfferView; on: A
 
 /**
  * One predictor's figures in a class row: two or three short lines on a phone,
- * a column of its own on a wide screen; Delegate? under them when earned. Hook-free.
+ * a column of its own on a wide screen; Delegate? under them when offered. Hook-free.
  */
 function AgreementFigures({ figures, compact, on, styles, theme }: { figures: AgreementFiguresView; compact: boolean; on: AutonomyActions; styles: Styles; theme: Theme }) {
   const strong = [styles.body, { color: toneColor(theme, "plain"), fontWeight: "600" as const }];
@@ -469,10 +469,9 @@ export function InsightsScreen({ theme, layout, projects, status }: InsightsScre
     ledger: ledger.data,
     policy: policy.data?.policy,
     error: ledger.isError ? errorMessageOf(ledger.error) : policy.isError ? errorMessageOf(policy.error) : null,
-    now,
     ui: delegation,
   });
-  // §B.4: only a confirmed Delegate? sets `delegate`; the policy it returns is the one Settings reads too.
+  // §B.4: a confirmed Delegate? sets `delegate`; the policy it returns is the one Settings reads too.
   const onAutonomy: AutonomyActions = {
     delegate: (offer) => setDelegation({ ...DELEGATION_UI_IDLE, confirming: offer }),
     cancel: () => setDelegation(DELEGATION_UI_IDLE),

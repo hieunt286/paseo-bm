@@ -5,19 +5,15 @@
  * that used to open the Beads screen (`beadsOverview`); Phase 2 adds the
  * Orchestrator's interventions and how many reached their outcome (A-12,
  * §G.3), and autonomy by class — the agreement ledger of one project with each
- * class's mode (§B.3) and **Delegate?** where a class earned it (§B.4), and
+ * class's mode (§B.3) and a **Delegate?** shortcut (§B.4, ADR-023), and
  * to Cost the tokens read per request and the heaviest requests (§G.2); Phase 3
  * adds review lift per size of request (§C.4).
  *
  * Pure: no React, no React Native, no `server/` import.
  */
 import {
-  ELIGIBLE_MIN_AGREEMENT,
-  ELIGIBLE_MIN_DECISIONS,
-  ELIGIBLE_MIN_SPAN_DAYS,
   canDelegate,
   demotedAtOf,
-  eligibility,
   modeOf,
   predictorOf,
   type AutonomyPolicy,
@@ -30,7 +26,7 @@ import { A12_TARGET, type InterventionKind } from "../shared/interventions";
 import { beadsOverview, doneText, type BeadsOverview } from "./beads-model";
 import { formatDuration, formatTokens, type Bar, type OverviewCard } from "./format";
 import type { Tone } from "./tone";
-import { CLASS_LABELS, MODE_LABELS, PREDICTOR_WORDS, RETURN_ALL_LABEL } from "./settings-autonomy-model";
+import { CLASS_LABELS, MODE_LABELS, PREDICTOR_WORDS, delegateDialog } from "./settings-autonomy-model";
 import type { ConfirmDialog } from "./ui-types";
 import { plural } from "../shared/text";
 
@@ -393,22 +389,20 @@ export function beadsFiguresView(
 // ---------------------------------------------------------------------------
 // Autonomy by class (autonomy design §B.3, §A.12; PRD REQ-122 b): one
 // project's agreement ledger, a row per class with each predictor's figures
-// and the class's mode. Numbers only: no question, option or id. Promotion
-// (§B.4; REQ-123 a): **Delegate?** on each predictor's figures that earned it,
-// confirmed in place (Cancel first) before `autonomy.set` delegates the class.
+// and the class's mode. Numbers only: no question, option or id. The figures
+// are information, never a condition (ADR-023): **Delegate?** on each
+// predictor's figures of a class that may be delegated and is not is a
+// shortcut to Settings' own delegation, confirmed in place (Cancel first)
+// before `autonomy.set` delegates the class.
 // ---------------------------------------------------------------------------
 
 export const AUTONOMY_TITLE = "Autonomy by class";
 
-/**
- * What the figures are, that the window tabs do not narrow them (a class earns
- * autonomy over every answer, §B.4), and when Delegate? is offered.
- */
+/** What the figures are, that the window tabs do not narrow them, and that they never gate a delegation. */
 export const AUTONOMY_NOTE =
   "How often each prediction matched your answer, per class of decision — over every answer recorded, whatever the period above; " +
   "a class that went back to Shadow counts again from then. " +
-  `Delegate? is offered once a prediction matched at least ${Math.round(ELIGIBLE_MIN_AGREEMENT * 100)} % of ${ELIGIBLE_MIN_DECISIONS} or more answers ` +
-  `over ${ELIGIBLE_MIN_SPAN_DAYS} days or more, none reversed.`;
+  "The figures are for your information: you can delegate a class at any time, here with Delegate? or in Settings → Autonomy.";
 
 export const DELEGATE_LABEL = "Delegate?";
 
@@ -423,7 +417,7 @@ export interface DelegationUi {
 
 export const DELEGATION_UI_IDLE: DelegationUi = { confirming: null, busy: false, error: null };
 
-/** Delegate? on one predictor's figures: only on an eligible cell of a delegable class that is not delegated yet. */
+/** Delegate? on one predictor's figures: a shortcut, on any class that may be delegated and is not delegated yet. */
 export interface DelegateOfferView {
   decisionClass: DecisionClass;
   predictor: Predictor;
@@ -439,11 +433,11 @@ export interface DelegateConfirmView {
   busy: boolean;
   busyLabel: string;
   error: string | null;
-  /** What confirming sends: `autonomy.set` with `confirmed: true` and the predictor that earned it. */
+  /** What confirming sends: `autonomy.set` with `confirmed: true` and the predictor of the figures pressed. */
   input: AutonomySetInput;
 }
 
-/** `autonomy.set`'s input for a confirmed Delegate?: the class, and the predictor that made the cell eligible (§B.4). */
+/** `autonomy.set`'s input for a confirmed Delegate?: the class, and the predictor of the figures pressed (§B.4). */
 export function delegateInputOf(workspaceId: string, decisionClass: DecisionClass, predictor: Predictor): AutonomySetInput {
   return { workspaceId, class: decisionClass, mode: "delegate", confirmed: true, predictor };
 }
@@ -481,7 +475,7 @@ export interface AgreementFiguresView {
   reversalTone: Tone;
   /** Answers confirmed from a chat, never read, which count in neither figure; null when there is none. */
   unread: string | null;
-  /** Delegate?, when this predictor's cell earned it (§B.4); else null. */
+  /** Delegate?, on a class that may be delegated and is not (§B.4); else null. */
   delegate: DelegateOfferView | null;
   accessibilityLabel: string;
 }
@@ -573,32 +567,9 @@ function agreementFigures(predictor: Predictor, cell: AgreementCell | undefined,
       span,
       reversals,
       unread,
-      delegate === null ? null : "can be delegated",
     ]
       .filter((part): part is string => part !== null)
       .join(", "),
-  };
-}
-
-/**
- * Delegate?'s confirmation (§B.4): the class, the project, who would decide,
- * the figures that earned it, and how it is taken back — a reversal or an
- * override at once, Return all to owner by hand. Cancel is the default.
- */
-export function delegateDialog(input: { classLabel: string; projectLabel: string; predictor: Predictor; cell: AgreementCell }): ConfirmDialog {
-  const { classLabel, projectLabel, predictor, cell } = input;
-  const from = cell.firstAt === null ? null : utcDay(cell.firstAt);
-  const to = cell.lastAt === null ? null : utcDay(cell.lastAt);
-  const span = from === null || to === null ? "" : ` from ${from} to ${to}`;
-  return {
-    title: `Delegate ${classLabel} decisions?`,
-    body:
-      `In ${projectLabel}, ${classLabel} questions will be answered for you by ${PREDICTOR_WORDS[predictor]}, without asking you. ` +
-      `It earned this: it matched ${cell.agreed} of your ${plural(cell.count, "answer")} (${percent(cell.agreed, cell.count)})${span}, none reversed. ` +
-      `A reversal or an override takes it back at once; ${RETURN_ALL_LABEL} in Settings → Autonomy undoes it.`,
-    confirmLabel: "Delegate",
-    cancelLabel: "Cancel",
-    defaultAction: "cancel",
   };
 }
 
@@ -618,13 +589,13 @@ function modeTextOf(policy: AutonomyPolicy, workspaceId: string, decisionClass: 
  * class has a row when the ledger has a cell of it or its mode is above
  * `owner`, in conflict order (riskiest first, `DECISION_CLASSES`); the
  * Orchestrator's column appears once it has a figure in the project. The
- * window does not narrow the ledger: eligibility is judged over every answer
- * (since the class's last demotion, which the server already counts from).
+ * window does not narrow the ledger: the figures are over every answer (since
+ * the class's last demotion, which the server already counts from).
  *
- * **Delegate?** (§B.4) is on each predictor's figures whose cell is eligible
- * (`eligibility` at `now`), for a delegable class not delegated yet, in
- * either `owner` or `shadow` (§B.9). While `ui.confirming` names one still
- * offered, that class carries its confirmation and every offer waits.
+ * **Delegate?** (§B.4, ADR-023) is on each predictor's figures of a class
+ * that may be delegated and is not delegated yet, in either `owner` or
+ * `shadow` (§B.9), whatever the figures say. While `ui.confirming` names one
+ * still offered, that class carries its confirmation and every offer waits.
  */
 export function autonomyFiguresView(input: {
   projectId: string;
@@ -633,10 +604,9 @@ export function autonomyFiguresView(input: {
   ledger: AgreementLedger | undefined;
   policy: AutonomyPolicy | undefined;
   error: string | null;
-  now: Date;
   ui?: DelegationUi;
 }): AutonomyFiguresView {
-  const { projectId, ledger, policy, error, now } = input;
+  const { projectId, ledger, policy, error } = input;
   const ui = input.ui ?? DELEGATION_UI_IDLE;
   if (projectId === ALL_PROJECTS) return { kind: "choose", text: AUTONOMY_CHOOSE_PROJECT };
   if (error !== null) return { kind: "error", text: `Could not read the autonomy figures. ${error}` };
@@ -650,19 +620,19 @@ export function autonomyFiguresView(input: {
   const predictors = PREDICTORS.filter((predictor) => predictor === "recommended" || cells.some((cell) => cell.predictor === predictor));
   const cellOfFigure = (decisionClass: DecisionClass, predictor: Predictor) =>
     cells.find((cell) => cell.class === decisionClass && cell.predictor === predictor);
-  const earned = (decisionClass: DecisionClass, predictor: Predictor): AgreementCell | null => {
+  const offered = (decisionClass: DecisionClass, predictor: Predictor): AgreementCell | null => {
     const cell = cellOfFigure(decisionClass, predictor);
     if (cell === undefined || !canDelegate(decisionClass) || modeOf(policy, projectId, decisionClass) === "delegate") return null;
-    return eligibility(cell, now).eligible ? cell : null;
+    return cell;
   };
-  const confirming = ui.confirming !== null && earned(ui.confirming.decisionClass, ui.confirming.predictor) !== null ? ui.confirming : null;
+  const confirming = ui.confirming !== null && offered(ui.confirming.decisionClass, ui.confirming.predictor) !== null ? ui.confirming : null;
   const rows = shown.map((decisionClass): AutonomyClassRowView => {
     const label = CLASS_LABELS[decisionClass];
     const ownerOnly = !canDelegate(decisionClass);
     const mode = modeTextOf(policy, projectId, decisionClass);
     const figures = predictors.map((predictor) => {
       const offer: DelegateOfferView | null =
-        earned(decisionClass, predictor) === null
+        offered(decisionClass, predictor) === null
           ? null
           : {
               decisionClass,
@@ -675,12 +645,12 @@ export function autonomyFiguresView(input: {
     });
     const demotedAt = demotedAtOf(policy, projectId, decisionClass);
     const demoted = demotedAt === null ? null : `Went back to Shadow on ${utcDay(demotedAt)} after a reversal; counted from then.`;
-    const confirmedCell = confirming?.decisionClass === decisionClass ? earned(decisionClass, confirming.predictor) : null;
+    const confirmedCell = confirming?.decisionClass === decisionClass ? offered(decisionClass, confirming.predictor) : null;
     const confirm: DelegateConfirmView | null =
       confirming === null || confirmedCell === null
         ? null
         : {
-            dialog: delegateDialog({ classLabel: label, projectLabel, predictor: confirming.predictor, cell: confirmedCell }),
+            dialog: delegateDialog({ classLabel: label, projectLabel, predictor: confirming.predictor, agreement: confirmedCell }),
             busy: ui.busy,
             busyLabel: "Delegating…",
             error: ui.error,

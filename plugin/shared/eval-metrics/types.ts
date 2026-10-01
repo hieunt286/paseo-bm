@@ -126,7 +126,7 @@ export interface InterventionCounts {
 export interface OverrideCounts {
   /** Decisions answered by the owner's policy or a precedent (`answer.by: policy | precedent`). */
   delegated: number;
-  /** Of `delegated`: answered by the policy, whichever predictor earned its cell. */
+  /** Of `delegated`: answered by the policy, whichever predictor its cell names. */
   byPolicy: number;
   /** Of `delegated`: answered by a precedent. */
   byPrecedent: number;

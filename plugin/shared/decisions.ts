@@ -132,7 +132,7 @@ export type AnswerBy = z.infer<typeof answerBySchema>;
  * Who predicts the owner's answer (§B.3): the option the asker marked
  * recommended, or the Orchestrator challenger (`bm_predict`). A cell of the
  * agreement ledger is per predictor; a `delegate` cell records the predictor
- * that earned it, and a `policy` answer names it.
+ * the owner chose for it, and a `policy` answer names it.
  */
 export const PREDICTORS = ["recommended", "orchestrator"] as const;
 export const predictorSchema = z.enum(PREDICTORS);
@@ -340,7 +340,7 @@ export const decisionAnswerSchema = z
     reason: z.string().min(1).max(MAX_ANSWER_REASON_CHARS).optional(),
     /** A delegated answer's class (§B.5, §B.7): the cell that answered, for the digest. */
     class: decisionClassSchema.optional(),
-    /** A `policy` answer's predictor: the one that earned the `delegate` cell (§B.4, §B.5). */
+    /** A `policy` answer's predictor: the one the `delegate` cell names (§B.4, §B.5). */
     predictor: predictorSchema.optional(),
     /** A `precedent` answer's precedent (§B.6), cited on the digest. */
     precedentId: z.string().min(1).max(MAX_PRECEDENT_ID_CHARS).optional(),
@@ -735,7 +735,7 @@ export function answerDecision(decision: Decision, input: AnswerInput): Transiti
     return refuse("invalid-answer", "an answer names exactly one option or gives the owner's own words");
   }
   if (by === "policy" && optionKey === null) return refuse("invalid-answer", "the policy answers with one of the options");
-  if (by === "policy" && input.predictor === undefined) return refuse("invalid-answer", "a policy answer names the predictor that earned its cell");
+  if (by === "policy" && input.predictor === undefined) return refuse("invalid-answer", "a policy answer names the predictor of its cell");
   const precedentId = input.precedentId?.trim();
   if (precedentId !== undefined && (precedentId === "" || precedentId.length > MAX_PRECEDENT_ID_CHARS)) {
     return refuse("invalid-answer", `a precedent id must be 1–${MAX_PRECEDENT_ID_CHARS} characters`);

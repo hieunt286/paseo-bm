@@ -1,115 +1,29 @@
 import { describe, expect, it } from "vitest";
 import {
-  ELIGIBILITY_UNMET,
-  ELIGIBLE_MIN_AGREEMENT,
-  ELIGIBLE_MIN_DECISIONS,
-  ELIGIBLE_MIN_SPAN_DAYS,
   EMPTY_AUTONOMY_POLICY,
   autonomyPolicyOf,
   autonomyPolicySchema,
   demotedAtOf,
-  eligibility,
-  eligibilitySpanMs,
   modeOf,
   policyOfProject,
   withCell,
   withDemotion,
   withProjectReset,
 } from "../plugin/shared/autonomy";
-import { agreementLedger, type AgreementCell } from "../plugin/shared/autonomy-ledger";
-import { DECISION_CLASSES, HARD_OWNER_CLASSES, type Decision, type DecisionClass } from "../plugin/shared/decisions";
+import { agreementLedger } from "../plugin/shared/autonomy-ledger";
+import type { Decision, DecisionClass } from "../plugin/shared/decisions";
 import { DECISION_REQUEST, DECISION_WS, makeDecision } from "./helpers/decisions";
 
 /**
- * Promotion eligibility (autonomy design §B.4, §B.9; PRD REQ-123 a, Q-105):
- * the pure `eligibility` of one agreement cell at each threshold's boundary,
- * the order of its reasons, and the demotion window — after a demotion only
- * the owner's answers given since count (`agreementLedger`'s `demotions`,
- * kept in the policy by `withDemotion`).
+ * The demotion window (autonomy design §B.4, §B.9): after a demotion only the
+ * owner's answers given since count in the agreement ledger
+ * (`agreementLedger`'s `demotions`, kept in the policy by `withDemotion`).
+ * The figures are information; no threshold gates a delegation (ADR-023).
  */
 
 const DAY = 24 * 60 * 60 * 1000;
-const HOUR = 60 * 60 * 1000;
 const T0 = Date.parse("2026-09-01T08:00:00.000Z");
 const iso = (ms: number) => new Date(ms).toISOString();
-const NOW = new Date(T0 + 30 * DAY);
-
-/** A cell that just earns Delegate?: 18 of 20 (90 %), exactly 14 days, no reversal. */
-function cell(overrides: Partial<AgreementCell> = {}): AgreementCell {
-  return {
-    workspaceId: DECISION_WS,
-    class: "scope",
-    predictor: "recommended",
-    count: 20,
-    agreed: 18,
-    unread: 0,
-    firstAt: iso(T0),
-    lastAt: iso(T0 + 14 * DAY),
-    reversals: 0,
-    reversalsByKind: { "re-asked": 0, overridden: 0, reopened: 0 },
-    ...overrides,
-  };
-}
-
-const unmetOf = (value: AgreementCell, now = NOW) => {
-  const result = eligibility(value, now);
-  return result.eligible ? null : result.unmet;
-};
-
-describe("eligibility (§B.4): each threshold at its boundary", () => {
-  it("names the thresholds as constants: 90 %, 20 decisions, 14 days", () => {
-    expect([ELIGIBLE_MIN_AGREEMENT, ELIGIBLE_MIN_DECISIONS, ELIGIBLE_MIN_SPAN_DAYS]).toEqual([0.9, 20, 14]);
-    expect(ELIGIBILITY_UNMET).toEqual(["owner-only", "agreement", "count", "span", "reversal"]);
-    expect(eligibility(cell(), NOW)).toEqual({ eligible: true });
-  });
-
-  it("agreement: 90 % is enough, 89.9 % is not", () => {
-    expect(unmetOf(cell({ count: 1000, agreed: 900 }))).toBeNull();
-    expect(unmetOf(cell({ count: 1000, agreed: 899 }))).toBe("agreement");
-    expect(unmetOf(cell({ count: 20, agreed: 18 }))).toBeNull();
-    expect(unmetOf(cell({ count: 20, agreed: 17 }))).toBe("agreement");
-    expect(unmetOf(cell({ count: 30, agreed: 27 }))).toBeNull();
-  });
-
-  it("count: 20 decisions are enough, 19 are not, even all agreed", () => {
-    expect(unmetOf(cell({ count: 20, agreed: 20 }))).toBeNull();
-    expect(unmetOf(cell({ count: 19, agreed: 19 }))).toBe("count");
-  });
-
-  it("span: 14 days are enough, 13 days 23 hours are not; a last answer after now does not lengthen it", () => {
-    expect(unmetOf(cell({ lastAt: iso(T0 + 14 * DAY) }))).toBeNull();
-    expect(unmetOf(cell({ lastAt: iso(T0 + 14 * DAY - HOUR) }))).toBe("span");
-    expect(eligibilitySpanMs(cell({ lastAt: iso(T0 + 14 * DAY - HOUR) }), NOW)).toBe(14 * DAY - HOUR);
-    // A clock that ran ahead: the last answer is read no later than now.
-    expect(unmetOf(cell({ lastAt: iso(T0 + 20 * DAY) }), new Date(T0 + 14 * DAY - HOUR))).toBe("span");
-    expect(unmetOf(cell({ lastAt: iso(T0 + 20 * DAY) }), new Date(T0 + 14 * DAY))).toBeNull();
-    // Times that do not read are no span.
-    expect(unmetOf(cell({ firstAt: "yesterday" }))).toBe("span");
-    expect(eligibilitySpanMs(cell({ firstAt: null, lastAt: null }), NOW)).toBe(0);
-  });
-
-  it("reversal: none is required; one is enough to refuse", () => {
-    expect(unmetOf(cell({ reversals: 0 }))).toBeNull();
-    expect(unmetOf(cell({ reversals: 1, reversalsByKind: { "re-asked": 1, overridden: 0, reopened: 0 } }))).toBe("reversal");
-  });
-
-  it("a release, data, security or cost cell is never eligible, whatever its figures", () => {
-    for (const decisionClass of HARD_OWNER_CLASSES) {
-      expect(unmetOf(cell({ class: decisionClass, count: 100, agreed: 100, lastAt: iso(T0 + 29 * DAY) }))).toBe("owner-only");
-    }
-    const delegable = DECISION_CLASSES.filter((decisionClass) => !HARD_OWNER_CLASSES.includes(decisionClass));
-    for (const decisionClass of delegable) expect(unmetOf(cell({ class: decisionClass }))).toBeNull();
-  });
-
-  it("gives the first unmet reason, in order: agreement, count, span, reversal", () => {
-    const reversed = { reversals: 1, reversalsByKind: { "re-asked": 0, overridden: 1, reopened: 0 } };
-    expect(unmetOf(cell({ count: 5, agreed: 3, lastAt: iso(T0), ...reversed }))).toBe("agreement");
-    expect(unmetOf(cell({ count: 0, agreed: 0, firstAt: null, lastAt: null }))).toBe("agreement");
-    expect(unmetOf(cell({ count: 5, agreed: 5, lastAt: iso(T0), ...reversed }))).toBe("count");
-    expect(unmetOf(cell({ lastAt: iso(T0), ...reversed }))).toBe("span");
-    expect(unmetOf(cell(reversed))).toBe("reversal");
-  });
-});
 
 describe("the demotion window (§B.4, §B.9): after a demotion, only answers given since count", () => {
   const OPTIONS = [
@@ -132,22 +46,20 @@ describe("the demotion window (§B.4, §B.9): after a demotion, only answers giv
   }
 
   /** 20 agreeing answers, one a day from T0. */
-  const earned = Array.from({ length: 20 }, (_, index) => ownerAnswer(index + 1, T0 + index * DAY));
+  const answers = Array.from({ length: 20 }, (_, index) => ownerAnswer(index + 1, T0 + index * DAY));
   const scopeCell = (decisions: readonly Decision[], demotions?: Record<string, Partial<Record<DecisionClass, string>>>) =>
     agreementLedger(decisions, demotions === undefined ? {} : { demotions }).cells.find((entry) => entry.class === "scope" && entry.predictor === "recommended");
 
   it("counts every answer without a demotion, and none given before one", () => {
-    const whole = scopeCell(earned)!;
+    const whole = scopeCell(answers)!;
     expect(whole).toMatchObject({ count: 20, agreed: 20 });
-    expect(eligibility(whole, NOW)).toEqual({ eligible: true });
 
     const demotedAt = iso(T0 + 20 * DAY);
-    expect(scopeCell(earned, { [DECISION_WS]: { scope: demotedAt } })).toBeUndefined();
+    expect(scopeCell(answers, { [DECISION_WS]: { scope: demotedAt } })).toBeUndefined();
     // Two answers since the demotion: those two only.
-    const since = [...earned, ownerAnswer(21, T0 + 21 * DAY), ownerAnswer(22, T0 + 22 * DAY, "b")];
+    const since = [...answers, ownerAnswer(21, T0 + 21 * DAY), ownerAnswer(22, T0 + 22 * DAY, "b")];
     const counted = scopeCell(since, { [DECISION_WS]: { scope: demotedAt } })!;
     expect(counted).toMatchObject({ count: 2, agreed: 1, firstAt: iso(T0 + 21 * DAY), lastAt: iso(T0 + 22 * DAY) });
-    expect(eligibility(counted, NOW)).toEqual({ eligible: false, unmet: "agreement" });
     // An answer at the demotion's own time counts; one a millisecond before does not.
     expect(scopeCell([ownerAnswer(30, Date.parse(demotedAt))], { [DECISION_WS]: { scope: demotedAt } })?.count).toBe(1);
     expect(scopeCell([ownerAnswer(30, Date.parse(demotedAt) - 1)], { [DECISION_WS]: { scope: demotedAt } })).toBeUndefined();
@@ -163,7 +75,7 @@ describe("the demotion window (§B.4, §B.9): after a demotion, only answers giv
       settledAt: iso(T0),
       answer: { by: "policy", via: "inbox", optionKey: "a", words: null, at: iso(T0), class: "scope", predictor: "recommended" },
     });
-    const ledger = agreementLedger([...earned, ...other, byPolicy], { demotions: { [DECISION_WS]: { scope: iso(T0 + 30 * DAY) }, wks_other: { preference: iso(T0 + 30 * DAY) } } });
+    const ledger = agreementLedger([...answers, ...other, byPolicy], { demotions: { [DECISION_WS]: { scope: iso(T0 + 30 * DAY) }, wks_other: { preference: iso(T0 + 30 * DAY) } } });
     expect(ledger.cells.map((entry) => [entry.class, entry.count])).toEqual([["preference", 3]]);
     expect(ledger.delegated.map((entry) => [entry.class, entry.count])).toEqual([["scope", 1]]);
   });

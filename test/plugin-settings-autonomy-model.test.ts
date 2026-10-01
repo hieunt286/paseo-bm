@@ -8,6 +8,7 @@ import {
   CHALLENGER_LABEL,
   CHALLENGER_MEANING,
   CLASS_LABELS,
+  DECIDED_BY_LABEL,
   OWNER_ONLY_REASONS,
   RETURN_ALL_LABEL,
   autonomyGroupState,
@@ -70,13 +71,23 @@ const row = (policy: AutonomyPolicy, label: string) => matrix(policy).rows.find(
 
 function draw(
   view: ReturnType<typeof autonomyMatrixView>,
-  handlers: { onChoose?: unknown; onChallenger?: unknown; onReset?: unknown; onBoundaryAsk?: unknown; onBoundaryConfirm?: unknown; onBoundaryCancel?: unknown; error?: string | null } = {},
+  handlers: {
+    onChoose?: unknown;
+    delegate?: unknown;
+    onChallenger?: unknown;
+    onReset?: unknown;
+    onBoundaryAsk?: unknown;
+    onBoundaryConfirm?: unknown;
+    onBoundaryCancel?: unknown;
+    error?: string | null;
+  } = {},
 ) {
   return renderTree(
     AutonomyMatrix({
       view,
       error: handlers.error ?? null,
       onChoose: handlers.onChoose ?? noop,
+      ...(handlers.delegate === undefined ? {} : { delegate: handlers.delegate }),
       onChallenger: handlers.onChallenger ?? noop,
       onBoundaryAsk: handlers.onBoundaryAsk ?? noop,
       onBoundaryConfirm: handlers.onBoundaryConfirm ?? noop,
@@ -100,18 +111,86 @@ describe("the matrix of one project", () => {
     expect(view.rows.every((entry) => entry.mode === "owner")).toBe(true);
   });
 
-  it("never offers delegate: a delegable row offers Owner and Shadow only; it is set through Delegate? in Insights", () => {
+  it("offers Delegated on every delegable row at any time, whatever the figures (ADR-023); pressing it only asks", () => {
     for (const policy of [EMPTY_AUTONOMY_POLICY, mixed]) {
-      for (const entry of matrix(policy).rows) {
-        expect(entry.choices.every((choice) => choice.mode === "owner" || choice.mode === "shadow")).toBe(true);
-        expect(entry.choices.map((choice) => choice.label)).not.toContain("Delegated");
+      for (const entry of matrix(policy).rows.filter((candidate) => !candidate.fixed)) {
+        expect(entry.choices.map((choice) => choice.label)).toEqual(["Owner", "Shadow", "Delegated"]);
+        expect(entry.delegate).toBeNull();
       }
     }
-    expect(AUTONOMY_MEANING).toMatch(/set only through Delegate\? in Insights/);
-    expect(AUTONOMY_MEANING.split("\n")).toHaveLength(1);
-    const nodes = draw(matrix(mixed));
-    expect(pressables(nodes).map((button) => texts([button])[0])).not.toContain("Delegate");
-    expect(texts(nodes).some((text) => /^Delegate\b/.test(text))).toBe(false);
+    expect(AUTONOMY_MEANING).toBe(
+      "Owner and Shadow: you decide, and what the agents would have chosen is recorded beside your answer. " +
+        "Delegated: decided for you by the recommended option or the Orchestrator, after one confirmation; a reversal or an override sends it back to Shadow.",
+    );
+    expect(row(EMPTY_AUTONOMY_POLICY, "Dependency").choices[2]).toEqual({
+      mode: "delegate",
+      label: "Delegated",
+      selected: false,
+      enabled: true,
+      accessibilityLabel: "Delegate Dependency in paseo-bm…",
+    });
+    const onChoose = vi.fn();
+    const nodes = draw(matrix(EMPTY_AUTONOMY_POLICY), { onChoose });
+    (pressables(nodes).find((button) => button.props.accessibilityLabel === "Delegate Dependency in paseo-bm…")!.props.onPress as () => void)();
+    expect(onChoose).toHaveBeenCalledWith("dependency", "delegate");
+    // Nothing is confirmed yet: no confirmation is drawn.
+    expect(texts(nodes)).not.toContain("Cancel");
+  });
+
+  it("asks who decides and says what changes, in place under the row, Cancel first; confirming sends autonomy.set with confirmed: true", () => {
+    const asked = (predictor: "recommended" | "orchestrator", policy: AutonomyPolicy = EMPTY_AUTONOMY_POLICY) =>
+      autonomyMatrixView({ policy, project: PROJECT, busy: false, confirmingDelegate: { decisionClass: "dependency", predictor } });
+    const view = asked("recommended");
+    const dependency = view.rows.find((entry) => entry.decisionClass === "dependency")!;
+    expect(view.rows.filter((entry) => entry.delegate !== null).map((entry) => entry.decisionClass)).toEqual(["dependency"]);
+    expect(dependency.choices[2]!.enabled).toBe(false);
+    expect(dependency.delegate).toEqual({
+      label: DECIDED_BY_LABEL,
+      predictors: [
+        { predictor: "recommended", label: "Recommended option", selected: true, accessibilityLabel: "Dependency decided by the recommended option" },
+        { predictor: "orchestrator", label: "Orchestrator", selected: false, accessibilityLabel: "Dependency decided by the Orchestrator" },
+      ],
+      dialog: {
+        title: "Delegate Dependency decisions in paseo-bm?",
+        body: [
+          "• The recommended option answers them for you, without asking you.",
+          "• A reversal or an override sends the class back to Shadow at once; Return all to owner undoes it.",
+        ].join("\n"),
+        confirmLabel: "Delegate",
+        cancelLabel: "Cancel",
+        defaultAction: "cancel",
+      },
+      input: { workspaceId: "ws-1", class: "dependency", mode: "delegate", confirmed: true, predictor: "recommended" },
+    });
+    // The Orchestrator: its cost is said, and confirming names it.
+    const orchestrator = asked("orchestrator").rows.find((entry) => entry.decisionClass === "dependency")!.delegate!;
+    expect(orchestrator.dialog.body).toContain("• Each decision wakes the Orchestrator, which costs tokens.");
+    expect(orchestrator.input.predictor).toBe("orchestrator");
+    // A class delegated meanwhile shows no confirmation.
+    const delegated = policyOf({ "ws-1": { dependency: { mode: "delegate", predictor: "recommended", at: AT } } });
+    expect(asked("recommended", delegated).rows.every((entry) => entry.delegate === null)).toBe(true);
+
+    // Drawn under the row: who decides, then Cancel before Delegate; each press calls back, and nothing else is sent.
+    const handlers = { onPredictor: vi.fn(), onConfirm: vi.fn(), onCancel: vi.fn() };
+    const nodes = draw(view, { delegate: handlers });
+    const labels = pressables(nodes).map((button) => String(button.props.accessibilityLabel));
+    const at = labels.indexOf("Delegate Dependency in paseo-bm…");
+    expect(labels.slice(at, at + 5)).toEqual([
+      "Delegate Dependency in paseo-bm…",
+      "Dependency decided by the recommended option",
+      "Dependency decided by the Orchestrator",
+      "Cancel",
+      "Delegate",
+    ]);
+    expect(texts(nodes)).toEqual(expect.arrayContaining([DECIDED_BY_LABEL, "Delegate Dependency decisions in paseo-bm?"]));
+    const byLabel = (label: string) => pressables(nodes).find((button) => button.props.accessibilityLabel === label)!;
+    (byLabel("Dependency decided by the Orchestrator").props.onPress as () => void)();
+    expect(handlers.onPredictor).toHaveBeenCalledWith("dependency", "orchestrator");
+    (byLabel("Cancel").props.onPress as () => void)();
+    expect(handlers.onCancel).toHaveBeenCalledOnce();
+    expect(handlers.onConfirm).not.toHaveBeenCalled();
+    (byLabel("Delegate").props.onPress as () => void)();
+    expect(handlers.onConfirm).toHaveBeenCalledWith(dependency.delegate);
   });
 
   it("shows the four hard-owner rows as owner with no choice, each with its one-line reason", () => {
@@ -138,6 +217,7 @@ describe("the matrix of one project", () => {
     expect(recommended.choices.map((choice) => [choice.label, choice.selected, choice.enabled])).toEqual([
       ["Owner", false, true],
       ["Shadow", false, true],
+      ["Delegated", true, false],
     ]);
 
     const onChoose = vi.fn();
@@ -155,6 +235,7 @@ describe("the matrix of one project", () => {
     expect(scope.choices.map((choice) => [choice.label, choice.selected, choice.enabled])).toEqual([
       ["Owner", false, true],
       ["Shadow", true, false],
+      ["Delegated", false, true],
     ]);
     expect(scope.choices[1]!.accessibilityLabel).toBe("Scope in paseo-bm is Shadow");
 

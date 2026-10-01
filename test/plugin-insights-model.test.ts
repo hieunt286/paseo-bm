@@ -260,7 +260,7 @@ const POLICY: AutonomyPolicy = {
   challenger: { wks_a: true },
 };
 const autonomyOf = (overrides: Partial<Parameters<typeof autonomyFiguresView>[0]> = {}) =>
-  autonomyFiguresView({ projectId: "wks_a", ledger: LEDGER, policy: POLICY, error: null, now: NOW, ...overrides });
+  autonomyFiguresView({ projectId: "wks_a", ledger: LEDGER, policy: POLICY, error: null, ...overrides });
 
 describe("choices", () => {
   it("offers every window in the contract's order, 30 days first chosen", () => {
@@ -503,12 +503,13 @@ describe("autonomy by class: the agreement ledger (autonomy design §B.3; REQ-12
     expect(directionOf(tree).flexDirection).toBe("column");
     const shown = texts(tree);
     const scope = shown.slice(shown.indexOf("Scope"));
-    expect(scope.slice(0, 8)).toEqual([
+    expect(scope.slice(0, 9)).toEqual([
       "Scope",
       "Shadow",
       "Recommended option · 91 %",
       "matched 31 of 34 answers · 2026-09-01 → 2026-09-28",
       "2 reversed: 1 asked again · 1 reopened",
+      DELEGATE_LABEL,
       "Orchestrator · 88 %",
       "matched 14 of 16 answers · 2026-09-10 → 2026-09-28",
       "No reversal",
@@ -526,12 +527,17 @@ describe("autonomy by class: the agreement ledger (autonomy design §B.3; REQ-12
     expect(shown.at(-1)).toBe("No answer to compare yet: Security · Data · Cost · Dependency · Environment");
   });
 
-  it("labels every row, offers nothing to press where no cell earned Delegate?, and shows no id", () => {
+  it("labels every row, offers Delegate? on each predictor's figures of a class that may be delegated and is not, and shows no id", () => {
     for (const compact of [true, false]) {
       const tree = draw(compact);
       const rows = allNodes(tree).filter((node) => node.type === "View" && typeof node.props.accessibilityLabel === "string");
       expect(rows).toHaveLength(4);
-      expect(pressables(tree)).toEqual([]);
+      // Whatever the figures: Scope has two reversals and 88 %, Reversible technical one answer (ADR-023).
+      expect(pressables(tree).map((button) => button.props.accessibilityLabel)).toEqual([
+        "Delegate Scope decisions in this project to the recommended option",
+        "Delegate Scope decisions in this project to the Orchestrator",
+        "Delegate Reversible technical decisions in this project to the recommended option",
+      ]);
       expect(texts(tree).join("\n")).not.toMatch(/wks_/);
     }
     for (const view of [autonomyOf({ projectId: ALL_PROJECTS }), autonomyOf({ projectId: "wks_c", policy: EMPTY_AUTONOMY_POLICY })]) {
@@ -545,28 +551,27 @@ describe("autonomy by class: the agreement ledger (autonomy design §B.3; REQ-12
   });
 });
 
-describe("Delegate? (autonomy design §B.4; REQ-123 a)", () => {
-  /** 19 of 20 (95 %) over 19 days, none reversed: eligible at NOW. */
-  const earned = (overrides: Partial<AgreementCell> & Pick<AgreementCell, "class" | "predictor">) =>
+describe("Delegate? (autonomy design §B.4; REQ-123 a; ADR-023): a shortcut, never gated by the figures", () => {
+  const counted = (overrides: Partial<AgreementCell> & Pick<AgreementCell, "class" | "predictor">) =>
     cell({ count: 20, agreed: 19, firstAt: "2026-09-01T08:00:00.000Z", lastAt: "2026-09-20T08:00:00.000Z", ...overrides });
-  const EARNED: AgreementLedger = {
+  const FIGURES: AgreementLedger = {
     cells: [
       // Always the owner's: never offered, whatever the figures.
-      earned({ class: "release", predictor: "recommended", count: 40, agreed: 40 }),
-      earned({ class: "scope", predictor: "recommended" }),
-      // 85 %: not eligible.
-      earned({ class: "scope", predictor: "orchestrator", agreed: 17 }),
+      counted({ class: "release", predictor: "recommended", count: 40, agreed: 40 }),
+      counted({ class: "scope", predictor: "recommended" }),
+      // 85 %: offered all the same.
+      counted({ class: "scope", predictor: "orchestrator", agreed: 17 }),
       // Delegated already (POLICY): not offered again.
-      earned({ class: "preference", predictor: "recommended" }),
-      // Reversed once: not eligible.
-      earned({ class: "environment", predictor: "recommended", reversals: 1, reversalsByKind: { "re-asked": 0, overridden: 0, reopened: 1 } }),
-      // An owner cell (no policy entry) earns it too.
-      earned({ class: "reversible-technical", predictor: "orchestrator" }),
+      counted({ class: "preference", predictor: "recommended" }),
+      // Reversed once: offered all the same.
+      counted({ class: "environment", predictor: "recommended", reversals: 1, reversalsByKind: { "re-asked": 0, overridden: 0, reopened: 1 } }),
+      // An owner cell (no policy entry), with no counted answer: offered too.
+      cell({ class: "reversible-technical", predictor: "orchestrator", unread: 1 }),
     ],
     delegated: [],
   };
   const view = (overrides: Partial<Parameters<typeof autonomyFiguresView>[0]> = {}) => {
-    const result = autonomyOf({ ledger: EARNED, projectLabel: "main · app", ...overrides });
+    const result = autonomyOf({ ledger: FIGURES, projectLabel: "main · app", ...overrides });
     if (result.kind !== "figures") throw new Error(`expected figures, got ${result.kind}`);
     return result;
   };
@@ -574,9 +579,11 @@ describe("Delegate? (autonomy design §B.4; REQ-123 a)", () => {
     figures.rows.flatMap((row) => row.figures.filter((entry) => entry.delegate !== null).map((entry) => [row.label, entry.predictor, entry.delegate!.enabled]));
   const confirming = { ...DELEGATION_UI_IDLE, confirming: { decisionClass: "scope" as const, predictor: "recommended" as const } };
 
-  it("is offered only on an eligible cell of a delegable class not delegated yet, per predictor, in owner or shadow", () => {
+  it("is offered on each predictor's figures of a delegable class not delegated yet, in owner or shadow, whatever the figures say", () => {
     expect(offers(view())).toEqual([
+      ["Environment", "recommended", true],
       ["Scope", "recommended", true],
+      ["Scope", "orchestrator", true],
       ["Reversible technical", "orchestrator", true],
     ]);
     const [scope] = view().rows.filter((row) => row.label === "Scope");
@@ -587,33 +594,32 @@ describe("Delegate? (autonomy design §B.4; REQ-123 a)", () => {
       enabled: true,
       accessibilityLabel: "Delegate Scope decisions in main · app to the recommended option",
     });
-    expect(scope!.figures[0]!.accessibilityLabel).toContain("can be delegated");
-    // A cell that earns it but is delegated already is not offered; nor is the class once delegated.
+    // A class once delegated is not offered again.
     const delegated: AutonomyPolicy = { ...POLICY, projects: { wks_a: { ...POLICY.projects["wks_a"], scope: { mode: "delegate", predictor: "recommended", at: "2026-09-26T00:00:00.000Z" } } } };
-    expect(offers(view({ policy: delegated }))).toEqual([["Reversible technical", "orchestrator", true]]);
-    // Nothing is offered a day short of the fourteen: the last answer is read no later than now.
-    expect(offers(view({ now: new Date("2026-09-14T08:00:00.000Z") }))).toEqual([]);
-    // The first ledger: nothing earned it (two reversals, 88 %, one answer, and release always yours).
-    expect(offers(autonomyOf({ ledger: LEDGER }) as ReturnType<typeof view>)).toEqual([]);
+    expect(offers(view({ policy: delegated }))).toEqual([
+      ["Environment", "recommended", true],
+      ["Reversible technical", "orchestrator", true],
+    ]);
   });
 
-  it("opens its confirmation in place, Cancel first and the default, naming the class, the predictor, the figures and Return all to owner", () => {
+  it("opens the confirmation Settings uses, in place, Cancel first and the default, with the agreement so far as information", () => {
     const figures = view({ ui: confirming });
     const scope = figures.rows.find((row) => row.label === "Scope")!;
     expect(scope.confirm?.dialog).toEqual({
-      title: "Delegate Scope decisions?",
-      body:
-        "In main · app, Scope questions will be answered for you by the recommended option, without asking you. " +
-        "It earned this: it matched 19 of your 20 answers (95 %) from 2026-09-01 to 2026-09-20, none reversed. " +
-        "A reversal or an override takes it back at once; Return all to owner in Settings → Autonomy undoes it.",
+      title: "Delegate Scope decisions in main · app?",
+      body: [
+        "• The recommended option answers them for you, without asking you.",
+        "• So far it matched 19 of your 20 answers (95 %).",
+        "• A reversal or an override sends the class back to Shadow at once; Return all to owner undoes it.",
+      ].join("\n"),
       confirmLabel: "Delegate",
       cancelLabel: "Cancel",
       defaultAction: "cancel",
     });
     // Only that class carries it, and every offer waits while it is open.
     expect(figures.rows.filter((row) => row.confirm !== null).map((row) => row.label)).toEqual(["Scope"]);
-    expect(offers(figures).map((offer) => offer[2])).toEqual([false, false]);
-    // Confirming sends autonomy.set with confirmed: true and the predictor that earned it.
+    expect(offers(figures).map((offer) => offer[2])).toEqual([false, false, false, false]);
+    // Confirming sends autonomy.set with confirmed: true and the predictor of the figures pressed.
     expect(scope.confirm?.input).toEqual({ workspaceId: "wks_a", class: "scope", mode: "delegate", confirmed: true, predictor: "recommended" });
     expect(delegateInputOf("wks_a", "reversible-technical", "orchestrator")).toEqual({
       workspaceId: "wks_a",
@@ -622,19 +628,29 @@ describe("Delegate? (autonomy design §B.4; REQ-123 a)", () => {
       confirmed: true,
       predictor: "orchestrator",
     });
-    // A confirmation for a cell that no longer earns it is not shown, and the offers are free again.
-    const stale = view({ ui: { ...DELEGATION_UI_IDLE, confirming: { decisionClass: "scope", predictor: "orchestrator" } } });
+    // The Orchestrator, with no counted answer: no figure line, and what it costs.
+    const orchestrator = view({ ui: { ...DELEGATION_UI_IDLE, confirming: { decisionClass: "reversible-technical", predictor: "orchestrator" } } });
+    expect(orchestrator.rows.find((row) => row.label === "Reversible technical")?.confirm?.dialog.body).toBe(
+      [
+        "• The Orchestrator answers them for you, without asking you.",
+        "• Each decision wakes the Orchestrator, which costs tokens.",
+        "• A reversal or an override sends the class back to Shadow at once; Return all to owner undoes it.",
+      ].join("\n"),
+    );
+    // A confirmation for a class no longer offered (delegated meanwhile) is not shown, and the offers are free again.
+    const stale = view({ ui: { ...DELEGATION_UI_IDLE, confirming: { decisionClass: "preference", predictor: "recommended" } } });
     expect(stale.rows.every((row) => row.confirm === null)).toBe(true);
-    expect(offers(stale).map((offer) => offer[2])).toEqual([true, true]);
+    expect(offers(stale).map((offer) => offer[2])).toEqual([true, true, true, true]);
   });
 
-  it("says when a class went back to Shadow, and that it counts from then", () => {
+  it("says when a class went back to Shadow, and that it counts from then; the note says the figures never gate a delegation", () => {
     const demoted: AutonomyPolicy = { ...POLICY, demotions: { wks_a: { scope: "2026-09-26T10:00:00.000Z" }, wks_b: { preference: "2026-09-26T10:00:00.000Z" } } };
     const rows = view({ policy: demoted }).rows;
     expect(rows.find((row) => row.label === "Scope")?.demoted).toBe("Went back to Shadow on 2026-09-26 after a reversal; counted from then.");
     expect(rows.filter((row) => row.demoted !== null).map((row) => row.label)).toEqual(["Scope"]);
     expect(rows.find((row) => row.label === "Scope")?.accessibilityLabel).toMatch(/Went back to Shadow on 2026-09-26 after a reversal; counted from then\.$/);
-    expect(AUTONOMY_NOTE).toContain("Delegate? is offered once a prediction matched at least 90 % of 20 or more answers over 14 days or more, none reversed.");
+    expect(AUTONOMY_NOTE).toContain("The figures are for your information: you can delegate a class at any time, here with Delegate? or in Settings → Autonomy.");
+    expect(AUTONOMY_NOTE).not.toMatch(/\d+ %/);
   });
 
   // The hook-free piece: the button opens the confirmation; the confirmation's Cancel comes first.
@@ -646,14 +662,16 @@ describe("Delegate? (autonomy design §B.4; REQ-123 a)", () => {
       const tree = renderTree(AutonomyFigures({ view: view(), compact, on: actions, styles, theme }));
       const buttons = pressables(tree);
       expect(buttons.map((button) => button.props.accessibilityLabel)).toEqual([
+        "Delegate Environment decisions in main · app to the recommended option",
         "Delegate Scope decisions in main · app to the recommended option",
+        "Delegate Scope decisions in main · app to the Orchestrator",
         "Delegate Reversible technical decisions in main · app to the Orchestrator",
       ]);
       for (const button of buttons) {
         expect(button.props.accessibilityRole).toBe("button");
         expect(texts([button])).toEqual([DELEGATE_LABEL]);
       }
-      (buttons[0]!.props.onPress as () => void)();
+      (buttons[1]!.props.onPress as () => void)();
       expect(texts(tree).join("\n")).not.toMatch(/wks_/);
     }
     expect(actions.delegate).toHaveBeenLastCalledWith({ decisionClass: "scope", predictor: "recommended" });
@@ -664,14 +682,16 @@ describe("Delegate? (autonomy design §B.4; REQ-123 a)", () => {
     const actions = on();
     const tree = renderTree(AutonomyFigures({ view: view({ ui: confirming }), compact: true, on: actions, styles, theme }));
     const labels = pressables(tree).map((button) => button.props.accessibilityLabel);
-    // Under the Scope row: its offer, then Cancel, then Delegate; the next row's offer after.
+    // Under the Scope row: its offers, then Cancel, then Delegate; the next row's offer after.
     expect(labels).toEqual([
+      "Delegate Environment decisions in main · app to the recommended option",
       "Delegate Scope decisions in main · app to the recommended option",
+      "Delegate Scope decisions in main · app to the Orchestrator",
       "Cancel",
       "Delegate",
       "Delegate Reversible technical decisions in main · app to the Orchestrator",
     ]);
-    expect(texts(tree)).toContain("Delegate Scope decisions?");
+    expect(texts(tree)).toContain("Delegate Scope decisions in main · app?");
     const byLabel = (label: string) => pressables(tree).find((button) => button.props.accessibilityLabel === label)!;
     (byLabel("Cancel").props.onPress as () => void)();
     (byLabel("Delegate").props.onPress as () => void)();

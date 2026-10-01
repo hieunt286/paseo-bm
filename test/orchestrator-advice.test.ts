@@ -135,8 +135,8 @@ async function asked(tools: ReturnType<typeof toolsWith>["tools"], options: unkn
   return (jsonOf(result) as { decisionId: string }).decisionId;
 }
 
-/** Twenty owner answers agreeing with the recommended option over 15 days: `preference` has earned Delegate? (§B.4). */
-function earnPreference(): void {
+/** Twenty owner answers agreeing with the recommended option over 15 days: `preference`'s agreement figure (§B.3). */
+function answerPreference(): void {
   const store = createDecisionStore(home);
   for (let n = 1; n <= 20; n += 1) {
     const requestId = `req-202609${String(10 + Math.floor(n / 2)).padStart(2, "0")}T0000${String(n).padStart(2, "0")}Z`;
@@ -234,10 +234,6 @@ describe("bm_ask_owner: an option may carry a prepared change of the owner's set
     );
     expect(await refused({ kind: "autonomy.set", class: "security", mode: "delegate", predictor: "recommended" })).toContain("security decisions are always the owner's");
     for (const hardOwner of ["data", "cost"]) expect(await refused({ kind: "autonomy.set", class: hardOwner, mode: "owner" })).toContain(`${hardOwner} decisions are always the owner's`);
-    // Delegate only where Insights offers Delegate?.
-    expect(await refused({ kind: "autonomy.set", class: "preference", mode: "delegate" })).toContain(
-      "- input.options[0].change: preference has not earned delegation to the recommended option in this project: Settings offers Delegate? only on a cell that has (Insights)",
-    );
     // Nothing to change.
     expect(await refused({ kind: "coordination.set", key: "advice.everyFinished", value: 5 })).toContain("- input.options[0].change: it would change nothing: advice.everyFinished is 5 already");
     expect(await refused({ kind: "autonomy.set", class: "scope", mode: "owner" })).toContain("it would change nothing: scope is owner in this project already");
@@ -291,7 +287,7 @@ describe("the owner's answer applies the prepared change of the option chosen, a
     expect(notices()[2]).not.toContain("change:");
   });
 
-  it("autonomy.set: owner or shadow as the matrix sets them; delegate only on a cell that earned it, the owner's tap its confirmation", async () => {
+  it("autonomy.set: owner, shadow or delegate as the matrix sets them, delegate with no agreement threshold (ADR-023), the owner's tap its confirmation", async () => {
     const { tools, paseo } = toolsWith();
     const { answer, notices } = answering();
     const shadow = await asked(tools, [{ label: "Shadow scope", effects: ["none"], recommended: true, change: { kind: "autonomy.set", class: "scope", mode: "shadow" } }, KEEP]);
@@ -299,7 +295,7 @@ describe("the owner's answer applies the prepared change of the option chosen, a
     await answer({ id: shadow, optionKey: "a" }, paseo);
     expect(modeOf(policyNow(), WORKSPACE_ID, "scope")).toBe("shadow");
 
-    earnPreference();
+    // No answer of the owner's in preference yet: delegating it is still the owner's to choose.
     const delegate = await asked(tools, [{ label: "Delegate preference", effects: ["none"], change: { kind: "autonomy.set", class: "preference", mode: "delegate", predictor: "recommended" } }, KEEP]);
     await answer({ id: delegate, optionKey: "a" }, paseo);
     expect(policyNow().projects[WORKSPACE_ID]?.preference).toEqual({ mode: "delegate", predictor: "recommended", at: NOW.toISOString() });
@@ -554,7 +550,7 @@ describe("bm_findings { workspaceId } (design §G.4)", () => {
     open(`q:${R2}:Q2`, R2, "push-backends", null);
     open(`q:${R3}:Q2`, R3, "one-off", "a");
     createPrecedentStore(home).save({ scope: WORKSPACE_ID, subject: "push-backends", text: "Contract only", sourceDecisionId: null, expiresInDays: 30 }, NOW);
-    earnPreference();
+    answerPreference();
     // Advice went unanswered three times of four: below A-12's target.
     mkdirSync(join(home, "orchestrator"), { recursive: true });
     const intervention = (n: number, outcome: string) => ({
@@ -600,7 +596,7 @@ describe("bm_findings { workspaceId } (design §G.4)", () => {
     });
     const byKind = (kind: string) => report.findings.filter((finding) => finding.finding === kind);
     expect(byKind("repeated-subject")).toEqual([{ finding: "repeated-subject", subject: "date-format", asked: 3, ownerAnswers: 3, sameAnswer: 3, lastDecisionId: expect.stringMatching(/^q:req-/), act: "precedent.save" }]);
-    expect(byKind("delegation-eligible")).toEqual([{ finding: "delegation-eligible", class: "preference", predictor: "recommended", agreement: 1, answers: 20, mode: "owner", act: "autonomy.set" }]);
+    expect(byKind("agreement")).toEqual([{ finding: "agreement", class: "preference", predictor: "recommended", agreement: 1, answers: 20, reversals: 0, mode: "owner", act: "autonomy.set" }]);
     expect(byKind("intervention-below-target")).toEqual([{ finding: "intervention-below-target", kind: "advice", met: 1, missed: 3, share: 0.25, target: 0.8, act: "coordination.set" }]);
     expect(byKind("blocked-rounds")).toEqual([expect.objectContaining({ finding: "blocked-rounds", rounds: 2, requestsBlocked: 1, perRequest: 1 })]);
     // With the tier's review budget and the setting that changes it (bead 7gxw.12, §G.4's review.budget).
@@ -653,7 +649,7 @@ function readFileSafe(path: string): string {
 // Keep the checks of a change pure and reachable without the tool.
 describe("preparedChangeCheckOf", () => {
   it("is the same check when asked and when applied: refusal, nothing to change, or ok", () => {
-    const facts = { workspaceId: WORKSPACE_ID, policy: { projects: {}, challenger: {} }, eligible: () => true, settings: DEFAULT_COORDINATION_SETTINGS, precedents: [] };
+    const facts = { workspaceId: WORKSPACE_ID, policy: { projects: {}, challenger: {} }, settings: DEFAULT_COORDINATION_SETTINGS, precedents: [] };
     expect(preparedChangeCheckOf({ kind: "autonomy.set", class: "cost", mode: "shadow" }, facts)).toHaveProperty("refusal");
     expect(preparedChangeCheckOf({ kind: "autonomy.set", class: "preference", mode: "delegate" }, facts)).toEqual({ ok: true });
     expect(preparedChangeCheckOf({ kind: "coordination.set", change: { key: "advice.everyFinished", value: 5 } }, facts)).toHaveProperty("unchanged");
@@ -741,7 +737,7 @@ describe("coordination.set on the compaction and handoff keys (design §G.4, §G
   });
 
   it("checks a threshold's change against the settings in effect", () => {
-    const facts = { workspaceId: WORKSPACE_ID, policy: { projects: {}, challenger: {} }, eligible: () => true, settings: DEFAULT_COORDINATION_SETTINGS, precedents: [] };
+    const facts = { workspaceId: WORKSPACE_ID, policy: { projects: {}, challenger: {} }, settings: DEFAULT_COORDINATION_SETTINGS, precedents: [] };
     expect(preparedChangeCheckOf({ kind: "coordination.set", change: { key: "compact.workerTokensPerTurn", value: 5_700_000 } }, facts)).toEqual({
       unchanged: "compact.workerTokensPerTurn is 5700000 already",
     });

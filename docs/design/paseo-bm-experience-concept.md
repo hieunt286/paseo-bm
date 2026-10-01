@@ -39,7 +39,7 @@ Beads Manager (the sidebar item; no badge — the SDK has none, X-1 revised) ope
 |---|---|---|
 | **Inbox** | What needs me; what was decided for me; what went wrong | Orchestrator tab's Needs you, the waiting pills, the report cards' question rows, the Manager's answer letters |
 | **Work** | What each project and request is doing now; its beads | The Workspaces list, the Beads screen, the Metric graph, the Orchestrator health cards, the "Beads agents" panel |
-| **Insights** | How well the agents work; how much autonomy each class has earned; what it costs | Metric overview cards, assessments, token and cost tables |
+| **Insights** | How well the agents work; how often each class's predictions matched the owner; what it costs | Metric overview cards, assessments, token and cost tables |
 | **Settings** | Agents and models; autonomy policy; tools and skills; data | Setup's four tabs, the Watch/Autopilot/Allow… switches, additional instructions |
 
 The Beads tab in a workspace and the Command Center items open **Work** on that project. The Orchestrator's chat stays the place to *talk*; the Inbox is the place to *decide*.
@@ -127,14 +127,14 @@ Cost        tokens/request 1.6 M (−18 %) · Worker 91 % · Reviewer 5 %
 Review      blocking findings/batch 0.6 · acted on 100 %
 ```
 
-Each figure opens its breakdown. The `[ Delegate? ]` button appears only when REQ-123's threshold is met.
+Each figure opens its breakdown. The `[ Delegate? ]` button is a shortcut on any class that may be delegated and is not yet: there is no threshold, and the figures are information ([ADR-023](../adr/ADR-023-delegation-without-eligibility.md)).
 
 ### 4.4 Settings
 
 Five groups on one scrolling screen, each collapsed to one line with its state:
 
 - **Agents** — per role: provider, model, thinking, mode; fallback chain; "the Reviewer uses another model family" note (REQ-133).
-- **Autonomy** — the policy matrix (projects × classes: owner / shadow / delegate), with a **Reset to owner** per project.
+- **Autonomy** — the policy matrix (projects × classes: owner / shadow / delegate), where the owner delegates a class at any time after one confirmation, with a **Reset to owner** per project.
 - **Coordination** — how often the Orchestrator advises (Phase 2), then compaction and handoff (Phase 3); autonomy design §G.7.
 - **Tools & skills** — `br`, `bv`, skills: healthy / missing, with install or copy-command actions.
 - **Data** — trace size, cleanup, removing paseo-bm's settings.
@@ -226,6 +226,7 @@ Reply boxes on report cards, Answered chips, Mark as answered, Use recommendatio
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-10-01 | hieu.nt10 (owner decision; written by Claude) | §4.1, §4.3, §4.4: no eligibility gate (ADR-023) — Delegate? is a shortcut on any delegable class, and Settings → Autonomy delegates at any time after one confirmation |
 | 2026-09-30 | Claude (owner's delegation) | §4.4: Settings gains Coordination, a fifth group after Autonomy (autonomy design §G.7, ADR-021) |
 | 2026-09-29 | hieu.nt10 (drafted by Claude) | Owner answered X-1 → X-4: badge on the sidebar item only, additional instructions removed, digest only in the Inbox, confirmation only for release/data/security/cost. The concept is ready to feed the Phase 1 design |
 | 2026-09-29 | hieu.nt10 (drafted by Claude) | Created as a Draft concept for the owner's review, with the calibrated autonomy PRD |

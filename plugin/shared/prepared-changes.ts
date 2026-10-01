@@ -27,10 +27,9 @@ import { DEFAULT_PRECEDENT_DAYS, PRECEDENT_SCOPE_ALL, checkPrecedentSaveInput, s
  * - `precedent.save { scope: project | all, subject, text, expiresInDays? }`:
  *   an owner precedent, as Settings → Autonomy writes one (§B.6).
  * - `autonomy.set { class, mode, predictor? }`: one cell of the decision's
- *   project, as the owner could set it: `owner` or `shadow` of a class that
- *   may be delegated (the matrix), `delegate` only where that predictor's
- *   cell has earned it (Insights' Delegate?, §B.4). Never a release, data,
- *   security or cost class, in any mode.
+ *   project, as the owner could set it in the matrix: `owner`, `shadow` or
+ *   `delegate` (either predictor, ADR-023) of a class that may be delegated.
+ *   Never a release, data, security or cost class, in any mode.
  * - `coordination.set { key, value }`: one Settings → Coordination setting
  *   (§G.7), in its bounds: the advice cadence, and since Phase 3 the
  *   compaction and handoff switches and thresholds and the review budget per
@@ -154,8 +153,6 @@ export interface PreparedChangeFacts {
   workspaceId: string;
   /** The owner's autonomy policy now. */
   policy: AutonomyPolicy;
-  /** Whether that predictor's agreement cell of that class has earned Delegate? in this project now (§B.4): what Insights offers. */
-  eligible: (decisionClass: DecisionClass, predictor: Predictor) => boolean;
   /** The coordination settings now. */
   settings: CoordinationSettings;
   /** The active precedents that hold in the project: its own and the global ones. */
@@ -192,13 +189,9 @@ export function preparedChangeCheckOf(change: PreparedChange, facts: PreparedCha
       const current = cell?.mode ?? "owner";
       if (change.mode !== "delegate") return current === change.mode ? { unchanged: `${change.class} is ${change.mode} in this project already` } : { ok: true };
       const predictor = change.predictor ?? "recommended";
-      if (cell?.mode === "delegate" && cell.predictor === predictor) return { unchanged: `${change.class} is delegated to ${PREDICTOR_WORDS[predictor]} in this project already` };
-      if (!facts.eligible(change.class, predictor)) {
-        return {
-          refusal: `${change.class} has not earned delegation to ${PREDICTOR_WORDS[predictor]} in this project: Settings offers Delegate? only on a cell that has (Insights)`,
-        };
-      }
-      return { ok: true };
+      return cell?.mode === "delegate" && cell.predictor === predictor
+        ? { unchanged: `${change.class} is delegated to ${PREDICTOR_WORDS[predictor]} in this project already` }
+        : { ok: true };
     }
     case "coordination.set": {
       const valid = coordinationChangeSchema.safeParse(change.change);

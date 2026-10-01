@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { agreementRateOf, type AgreementCell } from "./autonomy-ledger";
 import {
   carriesPreparedChange,
   decisionClassOf,
@@ -39,10 +38,11 @@ import {
  * (§B.3, off by default per project, DQ-4) says whether the Orchestrator is
  * asked to predict the owner's answers in that project
  * (`predictionRefusalOf`). `demotions` holds each class's last demotion
- * (§B.4): its eligibility counts only the answers given since.
+ * (§B.4): the agreement ledger counts only the answers given since.
  *
- * Promotion (§B.4; PRD REQ-123 a): `eligibility` says whether one agreement
- * cell has earned **Delegate?**, or the first threshold it misses.
+ * Delegating (§B.4; PRD REQ-123 a; ADR-023): the owner sets any class but
+ * release, data, security and cost to `delegate` at any time, with one
+ * confirmation; no agreement threshold gates it.
  *
  * Delegation (§B.5; PRD REQ-121, REQ-123): `recommendedDelegationOf` says
  * what a `delegate` cell whose predictor is `recommended` answers for a
@@ -71,9 +71,9 @@ export type AutonomyMode = z.infer<typeof autonomyModeSchema>;
 export type AutonomyPredictor = Predictor;
 
 /**
- * A delegation's predictor when `autonomy.set` names none (§B.9). **Delegate?**
- * in Insights always names the predictor that made the cell eligible (§B.4);
- * this default serves a caller that names none.
+ * A delegation's predictor when `autonomy.set` names none (§B.9). Settings
+ * and Insights always name the predictor the owner chose; this default serves
+ * a caller that names none.
  */
 export const DEFAULT_AUTONOMY_PREDICTOR: AutonomyPredictor = "recommended";
 
@@ -81,7 +81,7 @@ const isoTimeSchema = z.string().min(1);
 
 /**
  * One cell: its mode and when it was set (`at`, ISO). A `delegate` cell also
- * records the predictor that earned it or was chosen for it.
+ * records the predictor the owner chose for it.
  */
 export const autonomyCellSchema = z.discriminatedUnion("mode", [
   z.object({ mode: z.literal("owner"), at: isoTimeSchema }),
@@ -95,8 +95,8 @@ export type AutonomyCells = Partial<Record<DecisionClass, AutonomyCell>>;
 /**
  * When each class of each project was last demoted (§B.4, §B.9), ISO. Written
  * only by a demotion, which replaces an older time; kept when the owner sets
- * the cell again or resets the project, so a class earns delegation anew from
- * the answers given after it. Absent from a policy with no demotion.
+ * the cell again or resets the project, so the agreement ledger counts the
+ * class from the answers given after it. Absent from a policy with no demotion.
  */
 export const autonomyDemotionsSchema = z.record(z.string().min(1), z.partialRecord(decisionClassSchema, isoTimeSchema));
 
@@ -230,58 +230,6 @@ export function demotedAtOf(policy: AutonomyPolicy, workspaceId: string, decisio
   if (demotions === undefined || !hasOwn(demotions, workspaceId)) return null;
   const project = demotions[workspaceId] ?? {};
   return hasOwn(project, decisionClass) ? (project[decisionClass] ?? null) : null;
-}
-
-// ---------------------------------------------------------------------------
-// Promotion (§B.4; PRD REQ-123 a, Q-105).
-// ---------------------------------------------------------------------------
-
-/** The least share of the owner's answers a predictor must have foreseen. */
-export const ELIGIBLE_MIN_AGREEMENT = 0.9;
-/** The fewest owner answers counted. */
-export const ELIGIBLE_MIN_DECISIONS = 20;
-/** The shortest time, first to last counted answer, in days (Q-105: two weeks). */
-export const ELIGIBLE_MIN_SPAN_DAYS = 14;
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-/**
- * Why a cell is not eligible, in the order they are checked: a class that is
- * always the owner's, then agreement, count, span and a reversal.
- */
-export const ELIGIBILITY_UNMET = ["owner-only", "agreement", "count", "span", "reversal"] as const;
-export type EligibilityUnmet = (typeof ELIGIBILITY_UNMET)[number];
-
-export type Eligibility = { eligible: true } | { eligible: false; unmet: EligibilityUnmet };
-
-/**
- * The time from the first to the last counted answer, in ms. The last is
- * taken no later than `now`, so an answer stamped by a clock that ran ahead
- * never lengthens it; a time that does not read makes it 0.
- */
-export function eligibilitySpanMs(cell: Pick<AgreementCell, "firstAt" | "lastAt">, now: Date): number {
-  const first = cell.firstAt === null ? Number.NaN : Date.parse(cell.firstAt);
-  const last = cell.lastAt === null ? Number.NaN : Math.min(Date.parse(cell.lastAt), now.getTime());
-  const span = last - first;
-  return Number.isNaN(span) || span < 0 ? 0 : span;
-}
-
-/**
- * Whether one agreement cell (project × class × predictor, as the ledger
- * counts it) has earned **Delegate?** (§B.4): its predictor foresaw at least
- * 90 % of the owner's answers, over at least 20 of them, spanning at least
- * 14 days, none reversed. A release, data, security or cost cell never has.
- * After a demotion the ledger counts only the answers given since
- * (`agreementLedger`'s `demotions`), so the cell passed here already has only
- * those. Else the first threshold it misses.
- */
-export function eligibility(cell: AgreementCell, now: Date): Eligibility {
-  if (!canDelegate(cell.class)) return { eligible: false, unmet: "owner-only" };
-  const rate = agreementRateOf(cell);
-  if (rate === null || rate < ELIGIBLE_MIN_AGREEMENT) return { eligible: false, unmet: "agreement" };
-  if (cell.count < ELIGIBLE_MIN_DECISIONS) return { eligible: false, unmet: "count" };
-  if (eligibilitySpanMs(cell, now) < ELIGIBLE_MIN_SPAN_DAYS * DAY_MS) return { eligible: false, unmet: "span" };
-  if (cell.reversals > 0) return { eligible: false, unmet: "reversal" };
-  return { eligible: true };
 }
 
 /**
@@ -609,9 +557,8 @@ const SET_FIELDS: Readonly<Record<string, string>> = {
  * written: an input that is not one project, one known class and one known
  * mode → `E_AUTONOMY_INVALID`; `delegate` for release, data, security or cost,
  * confirmed or not → `E_AUTONOMY_OWNER_ONLY`; `delegate` without
- * `confirmed: true` → `E_AUTONOMY_NOT_CONFIRMED`. Eligibility is not checked:
- * this is the owner's own surface and the evaluation suite's; the screens
- * offer `delegate` only on an eligible cell.
+ * `confirmed: true` → `E_AUTONOMY_NOT_CONFIRMED`. No agreement threshold is
+ * checked (ADR-023): the owner delegates a class whenever they choose.
  */
 export function checkAutonomySet(input: unknown): { change: AutonomySetInput } | { refusal: AutonomySetRefusal } {
   const parsed = autonomySetInputSchema.safeParse(input);

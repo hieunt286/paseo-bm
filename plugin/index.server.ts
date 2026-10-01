@@ -28,7 +28,7 @@ import { registerDecisionRpcs, settledByKind, type OnDecisionsSettled } from "./
 import { registerInboxRpcs } from "./server/inbox-rpc";
 import { registerInsightsRpcs } from "./server/insights-rpc";
 import { registerCoordinationRpcs } from "./server/coordination-rpc";
-import { clearRenewedDemotions, registerAutonomyRpcs } from "./server/autonomy-rpc";
+import { registerAutonomyRpcs } from "./server/autonomy-rpc";
 import { registerAutonomyLedgerRpcs } from "./server/autonomy-ledger-rpc";
 import { registerLinksRpcs } from "./server/links-rpc";
 import { createDecisionMaterialiser } from "./server/decision-materialiser";
@@ -289,12 +289,7 @@ export default function contribute(server: PluginServerContext): () => void {
     // Autonomy design §D.2: the owner's Allow or Deny of a held request answers it, exactly once.
     held: actionBoundary.onSettled,
   });
-  // Autonomy design §B.4, §B.9: an owner's answer may make a demoted class
-  // eligible again, which ends its `autonomy-demoted` alert.
-  const onDecisionsSettled: OnDecisionsSettled = async (decisions, context) => {
-    await deliverSettled(decisions, context);
-    clearRenewedDemotions(decisions);
-  };
+  const onDecisionsSettled: OnDecisionsSettled = deliverSettled;
   registerDecisionRpcs(server, { onSettled: onDecisionsSettled });
   // Autonomy PRD §11 rule 3 (design §A.11): a Manager, Worker or Reviewer on
   // older instructions is an `outdated-agent` alert. A throttled pass, started
