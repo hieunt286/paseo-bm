@@ -31,6 +31,7 @@ import { PLUGIN_VERSION } from "../shared/version";
 import { setAgentLabel, setAgentMode, type PaseoCliDeps } from "./paseo-cli";
 import { listAllAgents, roleOfAgent } from "./agent-role";
 import { providerId } from "./provider-id";
+import { withoutRoleMarker } from "./role-title";
 import { AUTO_APPROVE_FEATURE, capabilityOf, featuresFor, managerModeFor, modesFor, runPostureOf } from "./role-mode";
 import { workspaceDirectory, type DashboardPaseo } from "./paseo-directory";
 import { readIncidents } from "./fallback-state";
@@ -826,7 +827,7 @@ export async function listWorkspaceAgents(
       return {
         id: agent.id,
         role: roleOf(agent),
-        title: agent.title,
+        title: withoutRoleMarker(agent.title),
         status: agent.status,
         parentId: parent !== undefined && members.has(parent) ? parent : null,
         updatedAt: agent.updatedAt,

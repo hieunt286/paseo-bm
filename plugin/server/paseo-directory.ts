@@ -12,6 +12,7 @@
  */
 import { listAllAgents, roleOfAgent } from "./agent-role";
 import type { AgentFacts } from "./traces";
+import { withoutRoleMarker } from "./role-title";
 
 /** The SDK slice the Dashboard and these readers use. `PaseoApi` is structurally assignable. */
 export interface DashboardPaseo {
@@ -134,7 +135,7 @@ export async function bmAgentsOf(
       requestIdLabel: labels["bm.requestId"] ?? null,
       batchIdLabel: labels["bm.batchId"] ?? null,
       archived: typeof agent["archivedAt"] === "string" && agent["archivedAt"] !== "",
-      title: typeof agent["title"] === "string" ? (agent["title"] as string) : null,
+      title: typeof agent["title"] === "string" ? withoutRoleMarker(agent["title"] as string) : null,
       replacedBy: labels["bm.replacedBy"] ?? null,
       // Autonomy design §G.6: the Worker it took the request over from, only when labelled.
       ...(typeof labels["bm.handoffFrom"] === "string" && labels["bm.handoffFrom"] !== "" ? { handoffFrom: labels["bm.handoffFrom"] } : {}),

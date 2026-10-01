@@ -124,6 +124,12 @@ describe("before(\"agent.create\") role hook", () => {
     expect(await run({ config: { provider: "bm-worker-fallback-4/qwen3-coder", cwd: "/repo" } })).toBeUndefined();
   });
 
+  it("marks a paseo-bm agent's title with its role, and leaves another provider's alone", async () => {
+    const { run } = setup();
+    expect((await run({ config: { provider: "bm-worker", cwd: "/repo", title: "Fix login" } }))?.config?.title).toBe("🔵 W · Fix login");
+    expect(await run({ config: { provider: "claude/opus", cwd: "/repo", title: "Mine" } })).toBeUndefined();
+  });
+
   it("gives bm-reviewer the text of roles/reviewer.md", async () => {
     const { run } = setup();
     expect((await run({ config: { provider: "bm-reviewer", cwd: "/repo" } }))?.config?.systemPrompt).toBe(reviewerWith());

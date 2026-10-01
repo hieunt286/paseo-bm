@@ -35,6 +35,7 @@ import {
 } from "./role-instructions";
 import { listedWorkspaces, type DashboardPaseo } from "./paseo-directory";
 import { rememberCreatedBoundary } from "./created-boundary";
+import { applyRoleTitle } from "./role-title";
 
 /**
  * Role instructions injected into every paseo-bm agent at creation (bm-hld).
@@ -488,6 +489,11 @@ function rememberBoundaryOf(request: AgentCreateRequest, posture: BoundaryPostur
   }
 }
 
+/** The request with its role marker in the title (`role-title.ts`), or `undefined` when nothing changed at all. */
+function marked(changed: AgentCreateRequest | undefined, request: AgentCreateRequest): AgentCreateRequest | undefined {
+  return applyRoleTitle(changed ?? request) ?? changed;
+}
+
 function isBmRequest(request: AgentCreateRequest): boolean {
   try {
     return roleOfProvider((request as Partial<AgentCreateRequest> | null | undefined)?.config?.provider) !== null;
@@ -562,7 +568,7 @@ export function registerRoleHook(host: RoleHookHost, tools: RoleHookTools | null
         );
         // The base provider is unknown here, so no tools: an agent Paseo refuses would cost more than a hand-written block.
         rememberBoundaryOf(request, null);
-        return applyRoleInstructions(request);
+        return marked(applyRoleInstructions(request), request);
       }
       const configured = applyRoleConfig(
         request,
@@ -574,7 +580,7 @@ export function registerRoleHook(host: RoleHookHost, tools: RoleHookTools | null
         { posture: prepared.boundary, base: prepared.base },
       );
       rememberBoundaryOf(request, prepared.boundary);
-      return applyAgentTools(configured ?? request, tools, prepared.base) ?? configured;
+      return marked(applyAgentTools(configured ?? request, tools, prepared.base) ?? configured, request);
     })();
   });
   return typeof remove === "function" ? remove : () => {};
