@@ -682,6 +682,8 @@ Data** shows the folder it is using and how it was found.
 | `~/.paseo-bm/inbox/alerts.json` | The Inbox's alerts: open ones, and the 500 newest cleared ones. |
 | `~/.paseo-bm/autonomy/policy.json` | Your autonomy levels from Settings → Autonomy, kept as who decides each kind of decision per project and when you set it, whether the Orchestrator proposes answers there, and whether risky actions are held. No file means Hands-on everywhere. Your data. |
 | `~/.paseo-bm/autonomy/precedents.json` | Your precedents, saved from a decision card or in Settings → More → Precedents: for each, the subject, the project (or all), your answer, the decision it came from, when it was saved, until when it holds and what replaced it. Every active one is kept, and the 500 newest ended, expired or replaced ones. Your data. |
+| `~/.paseo-bm/coordination/settings.json` | Your choices in Settings → Coordination: the advice cadence, compaction, handoff and the review budget, and which of compaction or handoff switched itself off. A missing file reads as the defaults. |
+| `~/.paseo-bm/handoffs/` | One file per handoff the Orchestrator asked for: the request, the outgoing Worker and its Manager, the reason, the outgoing Worker's note and the brief (secrets masked), and how far it got. |
 | `~/.paseo-bm/role-extras.json` | Additional role instructions saved with an earlier version. Never read now; deleted with the data by **Remove paseo-bm's settings…**. Your data. |
 | `~/.paseo-bm/role-fallback.json` | Your fallback chains from Roles & models: each role's policy and fallback entries (provider, model, thinking, mode), plus optional detection `patterns` you edit by hand. Your data. |
 | `~/.paseo-bm/role-fallback-state.json` | The fallback incidents: each agent that stopped on its provider plan, what was chosen on its card, and the replacement. At most 200 are kept. Your data. |
@@ -784,10 +786,11 @@ Orchestrator agent exists until you start it. Agents created by an earlier versi
 instructions: the Inbox lists them as alerts (**Replace Manager** for a Manager); Workers and
 Reviewers simply end with their request.
 
-Downgrading is supported only **within 0.4.0 and later**. Going back to 0.3.x is not a rollback: a
-0.3.x plugin does not trust a data folder whose `install.json` is missing or marked as migrated, so
-it would find no history. If a 0.4.x release breaks something for you, the way back is a later
-0.4.x.
+Downgrading is not promised ([ADR-022](docs/adr/ADR-022-retirements-after-code-review.md)): an
+earlier version may not read what a later one wrote, and agents created on a later version keep
+instructions that rely on its tools. If a release breaks something for you, the way back is the
+next patch release. Going back to 0.3.x is not a rollback at all: a 0.3.x plugin does not trust a
+data folder whose `install.json` is missing or marked as migrated, so it would find no history.
 
 ## Removing paseo-bm
 

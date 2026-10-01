@@ -10,7 +10,8 @@ timeline, Beads board, Metrics and Agents), **Settings** (one autonomy level per
 coordination settings, and under More the roles and models, precedents and your data) and **Tools &
 skills** (skills with how often reports used them, agent tools by role, `br` and `bv`). Cards are
 flat; a bar at a card's left says what it is — amber waits for you, red is held or failing. A
-workspace's **Beads** tab shows that project's page.
+workspace's **Beads** tab shows that project's page. Each paseo-bm agent's title starts with its
+role: 🟣 M Manager, 🔵 W Worker, 🟠 R Reviewer, 🟢 O Orchestrator.
 
 **Beads Orchestrator** is one agent for the whole machine, in a workspace of its own, that you start
 from the **Inbox** when you want it, and talk to in its chat. It reads the work of every paseo-bm
@@ -27,7 +28,11 @@ those signals wake the Orchestrator, which can then correct a Worker directly wi
 always with a copy to its Manager. Every command declares what it allows; a push, publish, deploy,
 real-data, migration or cost change needs a decision you answered unless the project is at Turbo,
 and a security change unless it is at Full auto — two levels you confirm when you choose them.
-It can check a report with read-only git in the project and keeps short notes per project. It uses tokens on its provider, and nothing of it exists until you start it.
+It can check a report with read-only git in the project and keeps short notes per project. Within
+**Settings → Coordination** it also brings you advice every few finished requests (as decisions,
+applied only when you pick them), and may on its own have a Manager or Worker compact its
+conversation, or have a Manager hand a heavy request to a fresh Worker. It uses tokens on its
+provider, and nothing of it exists until you start it.
 
 ![A project's beads (a screenshot of an earlier version: the board now comes first)](images/01-beads-screen.jpg)
 
@@ -49,7 +54,8 @@ Manager does not start, because a Manager started earlier could never create a W
 **Tools & skills** **Install skills** (runs the third-party `skills` CLI once) and **Install `br` /
 `bv`** (the beads tools).
 
-Update it with `paseo plugin update paseo-bm`.
+Update it with `paseo plugin update paseo-bm`. Agents created by an earlier version keep their old
+instructions; the Inbox lists them and offers **Replace Manager** for a Manager.
 
 ## Removing it
 
@@ -86,7 +92,11 @@ npx paseo-bm@0.4.0
 
 Paseo plugins run **without a sandbox**: this plugin has the same access to your machine as the
 Paseo daemon. The agent-tools switch applies to **every agent on this machine**, not only to
-paseo-bm's roles. The Worker runs without permission prompts, so review `git diff` before you commit.
+paseo-bm's roles. The Worker runs without permission prompts, so review `git diff` before you commit
+— unless you turn on **Hold risky actions for approval** for a project (Settings → Autonomy, off by
+default): its Claude and Codex Workers and Reviewers created afterwards then wait for you before a
+push, publish, deploy, real-data change, dependency install, network call or write outside the
+project.
 The **Install skills** button runs a third-party tool that downloads from
 [cuongntr/agent-skills](https://github.com/cuongntr/agent-skills) (another author's repository);
 paseo-bm never writes to your skills folders itself. The Orchestrator, once you start it, sends the

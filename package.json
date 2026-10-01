@@ -1,7 +1,7 @@
 {
   "name": "paseo-bm",
   "private": true,
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Beads Management for Paseo: the development root of paseo-bm-plugin, the plugin in plugin/. Private, never published; it holds the version the build writes into the plugin.",
   "type": "module",
   "license": "MIT",

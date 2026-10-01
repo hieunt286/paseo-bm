@@ -75,8 +75,9 @@ describe("embedded copies", () => {
     expect(PLUGIN_VERSION).toBe(manifest.version);
     // The minor moves with each feature wave: phase 2a was 0.2.x, delta
     // 20260921 moved it to 0.3.x, and ADR-012 — the plugin becoming the whole
-    // product, with the npx installer retired — moved it to 0.4.x.
-    expect(PLUGIN_VERSION.startsWith("0.4.")).toBe(true);
+    // product, with the npx installer retired — moved it to 0.4.x; calibrated
+    // autonomy and the Orchestrator moved it to 0.5.x (owner, 2026-10-01).
+    expect(PLUGIN_VERSION.startsWith("0.5.")).toBe(true);
   });
 });
 
