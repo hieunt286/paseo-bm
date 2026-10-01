@@ -308,6 +308,8 @@ Read-only replay of the whole store after bead `i8fc.1`: 0 pairs of agents writi
 | Review lift: blocking findings per batch | 1.55 (supplementary reference 1.45) |
 | Reviews per reviewed request | 5.28 |
 
+**Reinstalled** 2026-10-01T01:25:47Z: `paseo-bm-builds/final-rc2-f5e9610` (commit `f5e9610`, ADR-023: delegation without an eligibility gate). Per change-012 C3 and change-013, only A-4/A-5 restart, counted per class from its delegation; every other figure keeps the window that started at 00:28:54Z.
+
 The owner chooses per project, in Settings → Autonomy, the action boundary (change-010) and the challenger; the choices are recorded here when made.
 
 ## Revision History
