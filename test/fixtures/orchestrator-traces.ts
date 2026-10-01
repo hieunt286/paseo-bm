@@ -1,18 +1,19 @@
 /**
  * Trace fixtures for the Orchestrator's rules (Orchestrator design §4.2, §11;
- * PRD O-1): the four slips of the 2026-09-26 run record
+ * PRD O-1): three slips of the 2026-09-26 run record
  * (`docs/archive/operations/paseo-bm-install-run-20260926.md`) and one clean
- * request.
+ * request. The rules that flagged the slips are retired (autonomy design
+ * §B.9); the replay measures them now (`eval-metrics.ts`
+ * `supplementary.process`), and its tests read these fixtures.
  *
  * Each fixture is written as the trace store would hold it — turn records and
  * the live agent list — and goes through the real `reconstructTraces` and
- * `ruleInputOf`, so the rules are tested on what the server would hand them.
+ * `ruleInputOf`, so the remaining rule is tested on what the server would hand it.
  *
  * | Fixture | Run record | Slip |
  * |---|---|---|
  * | `smallWithBead` | Worker sizing (§3, `notes` of the Worker profile) | a Small request that still creates a bead |
  * | `languageAfterReport` | §5 "Manager behaviour", P4 | the Manager answers a Vietnamese user in English once a `BM-REPORT` arrives |
- * | `correctedModel` | T2.2, R1.4 | the Manager asks `bm-worker/claude-opus-5-5` after the Worker moved to Codex; a Reviewer asks for model `default` |
  * | `failedFirstTurn` | L3 | the Worker, created with the old Claude model on a Codex profile, fails its first turn |
  * | `clean` | T1.5, R1.3 | a Medium request done by the book |
  *
@@ -23,7 +24,6 @@ import { REVIEW_BUDGET } from "../../plugin/server/review-budget";
 import { reconstructTraces, type AgentFacts } from "../../plugin/server/traces";
 import { ruleInputOf } from "../../plugin/server/request-trace";
 import { TRACE_STORE_SCHEMA_VERSION, type Evidence, type ParsedReport, type TraceRecord } from "../../plugin/shared/contracts";
-import type { ModelCorrection } from "../../plugin/shared/orchestrator";
 import type { RuleFacts } from "../../plugin/shared/orchestrator-rules";
 import type { RuleInput } from "../../plugin/shared/rule-input";
 
@@ -132,14 +132,14 @@ export function agent(overrides: Partial<AgentFacts> & Pick<AgentFacts, "id" | "
 }
 
 export function factsWith(overrides: Partial<RuleFacts> = {}): RuleFacts {
-  return { reviewBudget: REVIEW_BUDGET, corrections: [], workspaceDirectory: WORKSPACE_DIRECTORY, ...overrides };
+  return { reviewBudget: REVIEW_BUDGET, ...overrides };
 }
 
 /** The `RuleInput` of one request, rebuilt from records and agents as the server does. */
 export function inputOf(requestId: string, records: TraceRecord[], agents: AgentFacts[]): RuleInput {
   const trace = reconstructTraces({ records, agents }).find((candidate) => candidate.requestId === requestId);
   if (trace === undefined) throw new Error(`fixture request ${requestId} was not reconstructed`);
-  return ruleInputOf(trace, new Map(agents.map((entry) => [entry.id, entry])));
+  return ruleInputOf(trace);
 }
 
 function reportText(requestId: string, phase: string, tier: string): string {
@@ -272,14 +272,7 @@ export function clean(): RuleFixture {
     records,
     agents,
     input: inputOf(requestId, records, agents),
-    facts: factsWith({
-      // Corrections of other requests: another workspace folder, and this
-      // folder but long before the Worker started.
-      corrections: [
-        { at: at(0, 29), alias: "bm-worker", requested: "claude-opus-5-5", profileModel: "gpt-5.6-sol", cwd: "/work/other-app" },
-        { at: "2026-09-26T09:00:00.000Z", alias: "bm-worker", requested: "claude-opus-5-5", profileModel: "gpt-5.6-sol", cwd: WORKSPACE_DIRECTORY },
-      ],
-    }),
+    facts: factsWith(),
   };
 }
 
@@ -300,34 +293,6 @@ export function languageAfterReport(): RuleFixture {
     ],
   });
   return { requestId, records, agents, input: inputOf(requestId, records, agents), facts: factsWith() };
-}
-
-/**
- * T2.2 / R1.4: the Worker and Reviewer were moved to Codex; the Manager still
- * asks for `bm-worker/claude-opus-5-5`, the Worker asks for a Reviewer with
- * model `default`, and the hook starts both on the profile's model.
- */
-export const MODEL_CORRECTIONS: readonly ModelCorrection[] = [
-  { at: at(0, 28), alias: "bm-worker/claude-opus-5-5", requested: "claude-opus-5-5", profileModel: "gpt-5.6-sol", cwd: WORKSPACE_DIRECTORY },
-  { at: at(3, 49), alias: "bm-reviewer/default", requested: "default", profileModel: "gpt-5.6-sol", cwd: WORKSPACE_DIRECTORY },
-];
-
-export function correctedModel(): RuleFixture {
-  const requestId = "req-20260926T100022Z";
-  const { records, agents } = mediumRequest({
-    requestId,
-    userText: VI_REQUEST,
-    managerTexts: [VI_HANDOFF, VI_RECEIVED, VI_FINISHED],
-    workerCreatedAt: at(0, 30),
-    reviewerCreatedAt: at(3, 50),
-  });
-  return {
-    requestId,
-    records,
-    agents,
-    input: inputOf(requestId, records, agents),
-    facts: factsWith({ corrections: MODEL_CORRECTIONS }),
-  };
 }
 
 /**

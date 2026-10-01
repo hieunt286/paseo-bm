@@ -1,12 +1,17 @@
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import type { Proposal } from "../plugin/shared/orchestrator";
+import { DECISION_CLASSES, HARD_OWNER_CLASSES } from "../plugin/shared/decisions";
+import { checkAutonomySet } from "../plugin/shared/autonomy";
 import type { OwnerLogEntry } from "../scripts/eval/owner";
+import { legacyChatWaitingRpc } from "../scripts/eval/legacy-contracts";
+import * as legacy from "../scripts/eval/legacy-contracts";
+import { buildScorecard, writeScorecard, type Scorecard } from "../scripts/eval/score";
 import {
   agentViewOf,
+  applyRoleModelSwap,
   assertIsolatedDaemon,
   assertIsolatedHomes,
   assertPort,
@@ -20,17 +25,19 @@ import {
   installSource,
   openQuestionsFromWaiting,
   orchestratorCost,
-  orchestratorViewFor,
   ownerHomes,
   ownerRoleModels,
+  parseRoleModel,
   parseSuiteArgs,
   parseVersion,
   POLL_MS,
   rolesToSave,
   runAgents,
+  scenarioPolicyCalls,
   SuiteGuardError,
   SuiteUsageError,
   toScoreOwnerLog,
+  USAGE,
   versionLabel,
   type AgentView,
   type LoopDecision,
@@ -119,9 +126,38 @@ describe("--version", () => {
   });
 });
 
+describe("the tree's scenario policy (owner decision E-2, evaluation design §11)", () => {
+  /** RPCs no build the suite measures as the tree has any more (autonomy design §A.14, §B.8). */
+  const RETIRED = ["orchestrator.set-autopilot", "chat.waiting", "orchestrator.state", "orchestrator.ask", "orchestrator.approve", "orchestrator.dismiss", "orchestrator.command", "answers.mark", "answers.marks"];
+
+  it("delegates exactly the classes that may be delegated to the Orchestrator, confirmed, on the run's workspace", () => {
+    const calls = scenarioPolicyCalls(parseVersion("tree"), "ws-run-1");
+    const delegable = DECISION_CLASSES.filter((decisionClass) => !HARD_OWNER_CLASSES.includes(decisionClass));
+    expect(delegable).toHaveLength(5);
+    expect(calls.map((call) => call.method)).toEqual(delegable.map(() => "autonomy.set"));
+    expect(calls.map((call) => call.input["class"])).toEqual(delegable);
+    for (const call of calls) {
+      expect(call.input).toEqual({ workspaceId: "ws-run-1", class: call.input["class"], mode: "delegate", confirmed: true, predictor: "orchestrator" });
+      // The plugin's own check accepts each one as it is sent: never a hard-owner class, always confirmed.
+      expect(checkAutonomySet(call.input)).toEqual({ change: call.input });
+    }
+    for (const hardOwner of HARD_OWNER_CLASSES) expect(calls.some((call) => call.input["class"] === hardOwner), hardOwner).toBe(false);
+  });
+
+  it("the tree calls no retired RPC; the 0.4.1 run sets nothing and keeps its chat.waiting", () => {
+    expect(scenarioPolicyCalls(parseVersion("tree"), "ws-run-1").some((call) => RETIRED.includes(call.method))).toBe(false);
+    expect(channelFor(parseVersion("tree"))).toBe("decision-rpc");
+    expect(scenarioPolicyCalls(parseVersion("0.4.1"), "ws-run-1")).toEqual([]);
+    expect(channelFor(parseVersion("0.4.1"))).toBe("0.4.1");
+    // legacy-contracts.ts keeps only what 0.4.1 needs.
+    expect(legacyChatWaitingRpc.name).toBe("chat.waiting");
+    expect(Object.keys(legacy).sort()).toEqual(["legacyChatWaitingRpc", "legacyWaitingWorkerSchema"]);
+  });
+});
+
 describe("command line", () => {
   it("has the defaults of the bead", () => {
-    expect(parseSuiteArgs(["--version", "tree"])).toEqual({ version: { kind: "tree" }, only: null, work: null, runs: DEFAULT_RUNS, port: DEFAULT_PORT });
+    expect(parseSuiteArgs(["--version", "tree"])).toEqual({ version: { kind: "tree" }, only: null, work: null, runs: DEFAULT_RUNS, port: DEFAULT_PORT, roleModel: null });
     expect(DEFAULT_RUNS).toBe(2);
     expect(DEFAULT_PORT).toBe(6899);
   });
@@ -133,6 +169,7 @@ describe("command line", () => {
       work: "/tmp/w",
       runs: 1,
       port: 6900,
+      roleModel: null,
     });
   });
 
@@ -259,14 +296,6 @@ describe("observation", () => {
     expect(openQuestionsFromWaiting(waiting, "ws1", firstSeen, 5000)[0]!.firstSeenAt).toBe(1000);
     expect(openQuestionsFromWaiting([{ ...waiting[0]!, answered: ["Q1", "Q2"] }], "ws1", new Map(), 0)).toEqual([]);
   });
-
-  it("keeps only the run workspace's Orchestrator decisions and proposals", () => {
-    const entry = (id: string, workspaceId: string): Proposal =>
-      ({ id, at: "2026-09-29T10:00:00Z", kind: "decision", workspaceId, managerId: "m", requestId: null, situation: "", command: "?", reason: "", source: "orchestrator", status: "pending", settledAt: null, sentText: null, outcome: null, error: null }) as unknown as Proposal;
-    const view = orchestratorViewFor({ approvals: [entry("p1", "ws1"), entry("p2", "ws0")], decisions: [entry("d1", "ws0"), entry("d2", "ws1")] }, "ws1");
-    expect(view.approvals.map((p) => p.id)).toEqual(["p1"]);
-    expect(view.decisions?.map((p) => p.id)).toEqual(["d2"]);
-  });
 });
 
 describe("owner models and log", () => {
@@ -307,12 +336,13 @@ describe("owner models and log", () => {
   });
 
   it("maps each delivered answer item to one scorer entry", () => {
-    const base = { channel: "tree-autopilot" as const, workspaceId: null, requestId: "req-1", text: "…", actions: 1 };
+    const base = { workspaceId: null, requestId: "req-1", text: "…", actions: 1 };
     const log: OwnerLogEntry[] = [
       {
         ...base,
+        channel: "0.4.1",
         at: "2026-09-29T10:01:00.000Z",
-        source: "orchestrator-miss",
+        source: "worker-questions",
         target: { agentId: "w1" },
         error: null,
         items: [
@@ -322,16 +352,17 @@ describe("owner models and log", () => {
       },
       {
         ...base,
+        channel: "decision-rpc",
         at: "2026-09-29T10:02:00.000Z",
-        source: "orchestrator-decision",
-        target: { rpc: "orchestrator.ask" },
+        source: "decision",
+        target: { rpc: "decisions.answer" },
         error: "boom",
         items: [{ id: "d1", question: "Lost?", answer: "x", rule: "recommended", keyword: null, note: null }],
       },
     ];
     expect(toScoreOwnerLog(log)).toEqual([
-      { at: "2026-09-29T10:01:00.000Z", channel: "orchestrator-miss", text: "a — yes, push", target: "Push to origin?" },
-      { at: "2026-09-29T10:01:00.000Z", channel: "orchestrator-miss", text: "b — sum", target: "Name?" },
+      { at: "2026-09-29T10:01:00.000Z", channel: "0.4.1", text: "a — yes, push", target: "Push to origin?" },
+      { at: "2026-09-29T10:01:00.000Z", channel: "0.4.1", text: "b — sum", target: "Name?" },
     ]);
   });
 });
@@ -373,5 +404,93 @@ describe("checkout", () => {
   it("finds the repository root from this test", () => {
     const here = dirname(fileURLToPath(import.meta.url));
     expect(findRepoRoot(here)).toBe(join(here, ".."));
+  });
+});
+
+describe("--role-model: the model-choice experiment (autonomy design §F.2, REQ-162; bead i8fc.3)", () => {
+  const owner = ownerRoleModels({
+    daemon: {
+      agentProfiles: [
+        { id: "bm-manager", provider: "bm-manager", model: "claude-opus-5-5" },
+        { id: "bm-worker", provider: "bm-worker", model: "claude-opus-5-5", modeId: "bypassPermissions", thinkingOptionId: "high" },
+        { id: "bm-reviewer", provider: "bm-reviewer", model: "gpt-5.6-sol", modeId: "auto-review", thinkingOptionId: "high" },
+        { id: "bm-orchestrator", provider: "bm-orchestrator", model: "claude-opus-5-5" },
+      ],
+    },
+    agents: { providers: { "bm-manager": { extends: "claude" }, "bm-worker": { extends: "claude" }, "bm-reviewer": { extends: "codex" }, "bm-orchestrator": { extends: "claude" } } },
+  });
+
+  it("parses <role>=<baseProvider>/<model>, the model keeping any further slash", () => {
+    expect(parseRoleModel("worker=claude/claude-sonnet-5")).toEqual({ role: "worker", baseProvider: "claude", model: "claude-sonnet-5" });
+    expect(parseRoleModel(" Reviewer=claude/claude-opus-5-5[1m] ")).toEqual({ role: "reviewer", baseProvider: "claude", model: "claude-opus-5-5[1m]" });
+    expect(parseRoleModel("manager=opencode/anthropic/claude-haiku-5")).toEqual({ role: "manager", baseProvider: "opencode", model: "anthropic/claude-haiku-5" });
+    expect(parseSuiteArgs(["--version", "tree", "--role-model", "orchestrator=codex/gpt-5.6-sol"])).toMatchObject({
+      version: { kind: "tree" },
+      roleModel: { role: "orchestrator", baseProvider: "codex", model: "gpt-5.6-sol" },
+    });
+    expect(USAGE).toContain("--role-model <role>=<baseProvider>/<model>");
+  });
+
+  it("refuses an unknown role", () => {
+    for (const bad of ["scout=claude/claude-sonnet-5", "workers=claude/x", "=claude/x"]) expect(() => parseRoleModel(bad), bad).toThrow(SuiteUsageError);
+    expect(() => parseRoleModel("scout=claude/claude-sonnet-5")).toThrow(/unknown role "scout"/);
+  });
+
+  it("refuses a malformed value", () => {
+    for (const bad of ["", "worker", "worker=", "worker=claude", "worker=claude/", "worker=/claude-sonnet-5", "worker=bm-worker/claude-sonnet-5", "worker=Claude Code/x", "worker=claude/claude sonnet", "worker=claude/x;rm -rf /", "worker=claude/$(id)", `worker=claude/${"m".repeat(201)}`]) {
+      expect(() => parseRoleModel(bad), bad).toThrow(SuiteUsageError);
+    }
+    expect(() => parseRoleModel("worker=bm-worker/x")).toThrow(/role alias/);
+    expect(() => parseSuiteArgs(["--version", "tree", "--role-model"])).toThrow(SuiteUsageError);
+  });
+
+  it("swaps one role only: a second --role-model is refused, even for the same role", () => {
+    expect(() => parseSuiteArgs(["--version", "tree", "--role-model", "worker=claude/claude-sonnet-5", "--role-model", "reviewer=claude/claude-opus-5-5"])).toThrow(/given once/);
+    expect(() => parseSuiteArgs(["--version", "tree", "--role-model", "worker=claude/a", "--role-model", "worker=claude/a"])).toThrow(SuiteUsageError);
+  });
+
+  it("refuses the Orchestrator on a published build, which has none", () => {
+    expect(() => parseSuiteArgs(["--version", "0.4.1", "--role-model", "orchestrator=claude/claude-sonnet-5"])).toThrow(/needs --version tree/);
+    expect(parseSuiteArgs(["--version", "0.4.1", "--role-model", "reviewer=claude/claude-opus-5-5"])?.roleModel).toEqual({ role: "reviewer", baseProvider: "claude", model: "claude-opus-5-5" });
+  });
+
+  it("changes only the swapped role; the owner's thinking and mode kept on their provider, the defaults on another", () => {
+    const sameProvider = applyRoleModelSwap(owner, parseRoleModel("worker=claude/claude-sonnet-5"));
+    expect(sameProvider.models.worker).toEqual({ baseProvider: "claude", model: "claude-sonnet-5", thinkingOptionId: "high", modeId: "bypassPermissions" });
+    for (const role of ["manager", "reviewer", "orchestrator"] as const) expect(sameProvider.models[role]).toEqual(owner[role]);
+    expect(sameProvider.record).toEqual({ role: "worker", owner: owner.worker, swapped: sameProvider.models.worker });
+
+    // Any family may take any role (autonomy design §C.6 is a default of setup, not a refusal).
+    const otherProvider = applyRoleModelSwap(owner, parseRoleModel("reviewer=claude/claude-opus-5-5"));
+    expect(otherProvider.models.reviewer).toEqual({ baseProvider: "claude", model: "claude-opus-5-5", thinkingOptionId: null, modeId: null });
+    for (const role of ["manager", "worker", "orchestrator"] as const) expect(otherProvider.models[role]).toEqual(owner[role]);
+    // The owner's models are not changed in place.
+    expect(owner.reviewer?.baseProvider).toBe("codex");
+
+    // A role without an owner model gets one; the record says there was none.
+    const withoutOrchestrator = { ...owner };
+    delete withoutOrchestrator.orchestrator;
+    expect(applyRoleModelSwap(withoutOrchestrator, parseRoleModel("orchestrator=claude/claude-sonnet-5")).record).toMatchObject({ role: "orchestrator", owner: null });
+  });
+
+  it("refuses a swap to the owner's own model: it would be no experiment", () => {
+    expect(() => applyRoleModelSwap(owner, parseRoleModel("worker=claude/claude-opus-5-5"))).toThrow(/already the owner's model/);
+  });
+
+  it("records the swap in scorecard.json, and null without one", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "bm-suite-card-"));
+    try {
+      const { record } = applyRoleModelSwap(owner, parseRoleModel("worker=claude/claude-sonnet-5"));
+      const path = await writeScorecard(dir, buildScorecard({ pluginVersion: "tree", scenarios: [], generatedAt: "2026-10-01T00:00:00.000Z", roleModelSwap: record }));
+      const card = JSON.parse(readFileSync(path, "utf8")) as Scorecard;
+      expect(card.roleModelSwap).toEqual({
+        role: "worker",
+        owner: { baseProvider: "claude", model: "claude-opus-5-5", thinkingOptionId: "high", modeId: "bypassPermissions" },
+        swapped: { baseProvider: "claude", model: "claude-sonnet-5", thinkingOptionId: "high", modeId: "bypassPermissions" },
+      });
+      expect(buildScorecard({ pluginVersion: "tree", scenarios: [] }).roleModelSwap).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

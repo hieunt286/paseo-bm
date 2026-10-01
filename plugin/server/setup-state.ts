@@ -11,7 +11,8 @@
  *   switch on for every agent on the machine or turn off a switch the user set
  *   themselves. It is written *before* the patch for the same reason.
  * - `rolesCreated` is what lets Setup say the three roles were created with
- *   defaults and can be changed in the Agents tab.
+ *   defaults — and where the Reviewer went, when it went to another model
+ *   family — and can be changed in the Agents tab.
  * - `cleanedUpAt` is the mark that stops the plugin creating the roles again
  *   after the user removed them — which is why the cleanup button keeps this
  *   one file and deletes the rest (design §7.13.7).
@@ -26,15 +27,19 @@
  *
  * The file never holds a secret or a path to one, and reads never repair it: a
  * file from a newer build reads as empty and is not overwritten, because
- * rewriting it would destroy a field this build cannot represent.
+ * rewriting it would destroy a field this build cannot represent. The file
+ * rules are every store's (`data-files.ts` `createJsonFileStore`, code review
+ * 2026-09-30 §3.1), with one code for every failure — a symlink on the way, a
+ * write that fails, a newer file refused: `E_DATA_HOME_UNAVAILABLE`, the data
+ * folder cannot be used. A file that cannot be read or parsed reads as empty,
+ * and the next write replaces it.
  */
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { z } from "zod";
 import { DashboardError } from "../shared/contracts";
+import { createJsonFileStore, type JsonFileStore } from "./data-files";
 import { UI_DIR_NAME } from "./data-home";
-import { ensureDataHome, resolveDataHome, type DataHomeDeps, type DataHomeResolution } from "./data-home";
-import { assertNoSymlinkOnPath, ensureStoreDir, writeStoreFileAtomically } from "./trace-store";
+import { resolveDataHome, type DataHomeDeps, type DataHomeResolution } from "./data-home";
 
 /** Bumped only when the shape below changes incompatibly. */
 export const SETUP_STATE_SCHEMA_VERSION = 1;
@@ -60,6 +65,12 @@ const rolesCreatedMarkSchema = z.object({
   roles: z.array(z.enum(SETUP_ROLE_NAMES)),
   baseProvider: z.string().min(1),
   model: z.string().min(1),
+  /**
+   * The Reviewer's own provider and model, only when it was created on
+   * another model family's provider than `baseProvider` (autonomy design
+   * §C.5). Optional, so a file without it reads as before; 0.4.1 drops it.
+   */
+  reviewer: z.object({ baseProvider: z.string().min(1), model: z.string().min(1) }).optional(),
 });
 
 const skillsRunMarkSchema = z.object({
@@ -83,8 +94,8 @@ export interface SetupState {
   orchestratorCreatedAt: string | null;
 }
 
-const setupStateFileSchema = z.object({
-  schemaVersion: z.number().int().positive(),
+/** The file's content after its `schemaVersion` (1), all or nothing: one field that does not validate makes the file read as empty. */
+const setupStateBodySchema = z.object({
   agentTools: agentToolsMarkSchema.nullish(),
   rolesCreated: rolesCreatedMarkSchema.nullish(),
   skillsRun: skillsRunMarkSchema.nullish(),
@@ -111,12 +122,12 @@ function unavailable(detail: string, cause?: unknown): DashboardError {
 }
 
 /** The data folder, or the coded error that says why there is none. */
-function requireDataHome(deps: SetupStateDeps): { home: string; tracesDir: string } {
+function requireDataHome(deps: SetupStateDeps): string {
   const resolution = deps.resolution ?? resolveDataHome(deps);
   if (resolution.home === null) {
     throw unavailable(`the paseo-bm data folder is not usable: ${resolution.reason}`);
   }
-  return { home: resolution.home, tracesDir: resolution.tracesDir };
+  return resolution.home;
 }
 
 /** `<data home>/ui/setup-state.json`. */
@@ -124,56 +135,28 @@ export function setupStatePath(home: string): string {
   return join(home, UI_DIR_NAME, SETUP_STATE_FILE_NAME);
 }
 
-/**
- * Reads the file without touching it.
- *
- * `tooNew` is separate from the state because the two answers are different:
- * an absent file and a file this build cannot read both give the empty state,
- * but only the second one makes writing unsafe.
- */
-function readFile(home: string): { state: SetupState; tooNew: boolean } {
-  const path = setupStatePath(home);
-  // Before the read, so a symlinked `ui/` or file is refused, not followed.
-  // The guard speaks the trace store's code; every failure of this file is one
-  // thing to the caller — the data folder cannot be used — so it is re-coded.
-  try {
-    assertNoSymlinkOnPath(home, path);
-  } catch (error) {
-    throw unavailable(`cannot use ${path}: ${error instanceof Error ? error.message : String(error)}`, error);
-  }
-
-  let raw: string;
-  try {
-    raw = readFileSync(path, "utf8");
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ENOTDIR") return { state: emptySetupState(), tooNew: false };
-    throw unavailable(`cannot read ${path}`, error);
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return { state: emptySetupState(), tooNew: false };
-  }
-
-  const result = setupStateFileSchema.safeParse(parsed);
-  if (!result.success) return { state: emptySetupState(), tooNew: false };
-  if (result.data.schemaVersion > SETUP_STATE_SCHEMA_VERSION) {
-    return { state: emptySetupState(), tooNew: true };
-  }
-
-  return {
-    state: {
-      agentTools: result.data.agentTools ?? null,
-      rolesCreated: result.data.rolesCreated ?? null,
-      skillsRun: result.data.skillsRun ?? null,
-      cleanedUpAt: result.data.cleanedUpAt ?? null,
-      orchestratorCreatedAt: result.data.orchestratorCreatedAt ?? null,
+/** The file in the data folder `home`. Creating it touches nothing on disk. */
+function setupStateFile(home: string): JsonFileStore<SetupState> {
+  return createJsonFileStore<SetupState>({
+    home,
+    dir: UI_DIR_NAME,
+    file: SETUP_STATE_FILE_NAME,
+    version: SETUP_STATE_SCHEMA_VERSION,
+    versionKey: "schemaVersion",
+    parse: (body) => {
+      const result = setupStateBodySchema.safeParse(body);
+      if (!result.success) throw new Error("the setup state does not have the expected shape");
+      return {
+        agentTools: result.data.agentTools ?? null,
+        rolesCreated: result.data.rolesCreated ?? null,
+        skillsRun: result.data.skillsRun ?? null,
+        cleanedUpAt: result.data.cleanedUpAt ?? null,
+        orchestratorCreatedAt: result.data.orchestratorCreatedAt ?? null,
+      };
     },
-    tooNew: false,
-  };
+    empty: emptySetupState,
+    codes: { unwritable: "E_DATA_HOME_UNAVAILABLE" },
+  });
 }
 
 /**
@@ -183,30 +166,12 @@ function readFile(home: string): { state: SetupState; tooNew: boolean } {
  * which is what a machine that has never been set up looks like.
  */
 export function readSetupState(deps: SetupStateDeps = {}): SetupState {
-  return readFile(requireDataHome(deps).home).state;
+  return setupStateFile(requireDataHome(deps)).read();
 }
 
 /** Replaces the whole file. `updateSetupState` is the usual way in. */
 export function writeSetupState(state: SetupState, deps: SetupStateDeps = {}): SetupState {
-  const { home, tracesDir } = requireDataHome(deps);
-  const path = setupStatePath(home);
-
-  if (readFile(home).tooNew) {
-    throw unavailable(
-      `${path} was written by a newer paseo-bm than this one (schemaVersion above ${SETUP_STATE_SCHEMA_VERSION}); refusing to overwrite it`,
-    );
-  }
-
-  try {
-    ensureDataHome(home, deps);
-    ensureStoreDir(tracesDir, dirname(path));
-    const body = JSON.stringify({ schemaVersion: SETUP_STATE_SCHEMA_VERSION, ...state }, null, 2);
-    writeStoreFileAtomically({ tracesDir }, path, `${body}\n`);
-  } catch (error) {
-    if (error instanceof DashboardError && error.code === "E_DATA_HOME_UNAVAILABLE") throw error;
-    throw unavailable(`cannot write ${path}: ${error instanceof Error ? error.message : String(error)}`, error);
-  }
-
+  setupStateFile(requireDataHome(deps)).write(state);
   return state;
 }
 
@@ -218,8 +183,5 @@ export function writeSetupState(state: SetupState, deps: SetupStateDeps = {}): S
  * blank out what another part of Setup recorded earlier.
  */
 export function updateSetupState(patch: Partial<SetupState>, deps: SetupStateDeps = {}): SetupState {
-  const resolution = deps.resolution ?? resolveDataHome(deps);
-  const withResolution: SetupStateDeps = { ...deps, resolution };
-  const current = readSetupState(withResolution);
-  return writeSetupState({ ...current, ...patch }, withResolution);
+  return setupStateFile(requireDataHome(deps)).update((current) => ({ ...current, ...patch }));
 }

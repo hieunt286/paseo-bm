@@ -13,9 +13,10 @@
  * Client rules: React Native primitives only, every color from theme.colors,
  * no Node builtin imports.
  */
-import { type PluginTheme } from "@getpaseo/plugin";
+import type { PluginTheme } from "@getpaseo/plugin";
 import { type PluginWorkspacePanelProps, useRpc } from "@getpaseo/plugin/client";
 import { useQuery } from "@tanstack/react-query";
+import type { ReactNode } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
 import { agentsListRpc, rolesDescribeRpc, type AgentNode, type RoleDescriptor } from "../shared/contracts";
 import {
@@ -48,6 +49,8 @@ export interface AgentTreeViewProps {
   openAgent?: (input: { agentId: string }) => void;
   onRetryAgents?: () => void;
   onRetryRoles?: () => void;
+  /** Drawn after the agents, before the role configuration: Work → Agents puts each agent's tokens and context there. */
+  children?: ReactNode;
 }
 
 export function AgentTreePanel({ theme, layout, navigation, workspaceId }: PluginWorkspacePanelProps) {
@@ -97,6 +100,7 @@ export function AgentTreeView(props: AgentTreeViewProps) {
         </Text>
       ) : null}
       <AgentsBlock {...props} styles={styles} />
+      {props.children}
 
       {props.roles === undefined ? null : (
         <>

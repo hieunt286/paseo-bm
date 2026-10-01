@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   REDACTED,
+  REFETCH_LIMIT,
   buildRecord,
   clearStartMarks,
   collectTurnEnded,
@@ -19,7 +20,7 @@ import {
 } from "../plugin/server/collector";
 import { clearTraceStoreCache, readRecords, withWorkspaceLock } from "../plugin/server/trace-store";
 import { reconstructTraces } from "../plugin/server/traces";
-import { traceRecordSchema, traceRuntimeSchema } from "../plugin/shared/contracts";
+import { TRACE_STORE_SCHEMA_VERSION, evidenceSchema, traceRecordSchema, traceRuntimeSchema } from "../plugin/shared/contracts";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
 
 /**
@@ -183,7 +184,7 @@ describe("record assembly", () => {
     expect(record?.reports[0]?.beadsCreated).toEqual(["bm-a1b"]);
     expect(record?.requestId).toBe("req-20260916T100000Z");
     expect(record?.evidence).toEqual([
-      { kind: "shell", detail: "br create --title=x", agentId: "agent-worker", at: "2026-09-16T10:00:00.000Z" },
+      { kind: "shell", detail: "br create --title=x", agentId: "agent-worker", at: "2026-09-16T10:00:00.000Z", status: "completed", callId: "c1" },
     ]);
     expect(built?.workspaceName).toBe("repo");
   });
@@ -485,6 +486,14 @@ describe("what the agent ran on (delta 20260918 §4.2)", () => {
     const record = await recordWith({ model: 42, runtimeInfo: "not an object", currentModeId: ["x"] });
 
     expect(record.runtime).toEqual({ model: null, thinkingOptionId: null, modeId: null, provider: null });
+  });
+
+  it("records whether the agent ran under the action boundary from its bm.boundary label, for the replay's split (autonomy design §D.2, change-010 C9)", async () => {
+    expect((await recordWith({ currentModeId: "default", labels: { "bm.boundary": "on" } })).runtime).toMatchObject({ modeId: "default", boundary: "on" });
+    expect((await recordWith({ labels: { "bm.boundary": "off" } })).runtime?.boundary).toBe("off");
+    // No label, or one that is neither: nothing recorded (the replay reads unknown).
+    expect((await recordWith({ labels: {} })).runtime).not.toHaveProperty("boundary");
+    expect((await recordWith({ labels: { "bm.boundary": "maybe" } })).runtime).not.toHaveProperty("boundary");
   });
 });
 
@@ -957,6 +966,22 @@ describe("plugin notices and streamed chunks", () => {
       "again",
     ]);
   });
+
+  // Bead 7gxw.12: the replay counted 7.48 reviews per reviewed request against a budget of 2 / 2 / 4.
+  it("counts a review once, in its Reviewer's own reply: a re-review prompt quoting it and a Manager relaying it add none", async () => {
+    const review = "BM-REVIEW\nrequestId: req-1\nbatchId: b1\nverdict: changes-required\nfindings:\n- severity: blocking\n  location: a.ts:1";
+    const reviewer = { ...turnEnded().agent, id: "agent-reviewer", provider: "bm-reviewer/gpt-5.6", parentAgentId: "agent-worker" };
+    const reReview = userMessage(`Re-review batch b1. Your review was:\n\n${review}\n\nThe blocking finding is fixed.`);
+    const answer = assistantMessage("BM-REVIEW\nrequestId: req-1\nbatchId: b1\nverdict: pass\nfindings: none");
+    const reviewed = await buildRecord(asEvent(turnEnded({ agent: reviewer, timeline: [reReview, answer] })), { location: null });
+    expect(reviewed?.record.reviews).toMatchObject([{ agentId: "agent-reviewer", batchId: "b1", verdict: "pass", blockingCount: 0 }]);
+
+    const manager = { ...turnEnded().agent, id: "agent-manager", provider: "bm-manager", parentAgentId: null };
+    const relayed = await buildRecord(asEvent(turnEnded({ agent: manager, timeline: [userMessage(review), assistantMessage(`The Reviewer said:\n\n${review}`)] })), { location: null });
+    expect(relayed?.record.reviews).toEqual([]);
+    const worker = await buildRecord(asEvent(turnEnded({ timeline: [userMessage(review), assistantMessage(review)] })), { location: null });
+    expect(worker?.record.reviews).toEqual([]);
+  });
 });
 
 describe("skills an agent loaded", () => {
@@ -1026,5 +1051,431 @@ describe("the plugin version on every record (evaluation design §3)", () => {
     const rest: Record<string, unknown> = { ...traceRecordSchema.parse(onDisk) };
     delete rest.pluginVersion;
     expect(parsed).toEqual(rest);
+  });
+});
+
+/**
+ * Autonomy design §G.2 (bead t9lm.21): what context measurement needs from each
+ * record. The entry shapes are the ones the isolated Paseo 0.9.2 daemon
+ * produced on 2026-09-30 for Claude, Codex and OpenCode (run note
+ * `docs/archive/operations/paseo-bm-context-fields-run-20260930.md`).
+ */
+describe("context, compaction and tool calls per turn (autonomy design §G.2)", () => {
+  const T = "2026-09-30T05:30:00.000Z";
+  const entry = (item: unknown, turnId = "turn-1") => ({ item, turnId, timestamp: T });
+  const tool = (callId: string, name: string, detail: Record<string, unknown>, status = "completed") => ({
+    type: "tool_call" as const,
+    callId,
+    name,
+    status,
+    error: status === "failed" ? { message: "exit 1" } : null,
+    detail,
+  });
+  const compaction = (fields: Record<string, unknown>) => ({ type: "compaction" as const, ...fields });
+
+  async function recordOf(entries: unknown[], agent: unknown = { model: "claude-haiku-4-5", lastUsage: null }, timeline: unknown[] = []) {
+    const refetch = vi.fn(async () => ({ entries, agent }));
+    const built = await buildRecord(asEvent(turnEnded({ timeline })), {
+      location: null,
+      paseo: { agents: { ref: () => ({ timeline: { refetch } }) } },
+    });
+    return built!.record;
+  }
+
+  it.each([
+    [
+      "Claude",
+      { inputTokens: 34, cachedInputTokens: 88287, outputTokens: 423, totalCostUsd: 0.0826, contextWindowMaxTokens: 200000, contextWindowUsedTokens: 29826 },
+      { contextUsed: 29826, contextMax: 200000 },
+    ],
+    [
+      "Codex",
+      { inputTokens: 21573, cachedInputTokens: 21248, outputTokens: 5, contextWindowMaxTokens: 258400, contextWindowUsedTokens: 21578 },
+      { contextUsed: 21578, contextMax: 258400 },
+    ],
+    [
+      "OpenCode",
+      { inputTokens: 35, cachedInputTokens: 19383, outputTokens: 3, contextWindowMaxTokens: 200000, contextWindowUsedTokens: 19421 },
+      { contextUsed: 19421, contextMax: 200000 },
+    ],
+  ])("keeps the context %s reports with the turn's tokens", async (_provider, lastUsage, context) => {
+    const record = await recordOf([entry(userMessage("go"))], { model: "m", lastUsage });
+    expect(record.usage).toMatchObject({
+      inputTokens: lastUsage.inputTokens,
+      cachedInputTokens: lastUsage.cachedInputTokens,
+      outputTokens: lastUsage.outputTokens,
+      ...context,
+    });
+    expect(traceRecordSchema.parse(record).usage).toMatchObject(context);
+  });
+
+  it("leaves the context fields out when the provider does not report them — never zero", async () => {
+    const tokensOnly = await recordOf([entry(userMessage("go"))], {
+      model: "claude-opus-5-5",
+      lastUsage: { inputTokens: 4, cachedInputTokens: 100, outputTokens: 2, totalCostUsd: 0.4 },
+    });
+    expect(tokensOnly.usage).toMatchObject({ inputTokens: 4, cachedInputTokens: 100, outputTokens: 2 });
+    expect(tokensOnly.usage).not.toHaveProperty("contextUsed");
+    expect(tokensOnly.usage).not.toHaveProperty("contextMax");
+
+    // A value that is not a finite count is not a report either; a window of 0 is none.
+    const odd = await recordOf([entry(userMessage("go"))], {
+      model: "m",
+      lastUsage: { inputTokens: 1, cachedInputTokens: 0, outputTokens: 1, contextWindowUsedTokens: "12", contextWindowMaxTokens: 0 },
+    });
+    expect(odd.usage).not.toHaveProperty("contextUsed");
+    expect(odd.usage).not.toHaveProperty("contextMax");
+    expect(traceRecordSchema.safeParse(odd).success).toBe(true);
+  });
+
+  it.each([
+    [
+      "Claude: the trigger and the size before it on the completed item",
+      [compaction({ status: "loading" }), compaction({ status: "completed", trigger: "manual", preTokens: 29827 })],
+      { trigger: "manual", preTokens: 29827, detail: "manual" },
+    ],
+    [
+      "Codex: the trigger on both items, no size",
+      [compaction({ status: "loading", trigger: "manual" }), compaction({ status: "completed", trigger: "manual" })],
+      { trigger: "manual", preTokens: null, detail: "manual" },
+    ],
+    [
+      "OpenCode: the trigger on the loading item only",
+      [compaction({ status: "loading", trigger: "manual" }), compaction({ status: "completed" })],
+      { trigger: "manual", preTokens: null, detail: "manual" },
+    ],
+    [
+      "an automatic one, nothing said but the status",
+      [compaction({ status: "completed" })],
+      { trigger: null, preTokens: null, detail: "unknown" },
+    ],
+  ])("a compaction becomes one piece of evidence — %s", async (_case, items, expected) => {
+    const record = await recordOf([entry(userMessage("/compact")), ...items.map((item) => entry(item))]);
+    expect(record.evidence).toEqual([{ kind: "compaction", agentId: "agent-worker", at: T, ...expected }]);
+    expect(traceRecordSchema.parse(record).evidence[0]).toMatchObject(expected);
+  });
+
+  it("a compaction still loading when the turn ended is not evidence; two compactions are two", async () => {
+    expect((await recordOf([entry(userMessage("go")), entry(compaction({ status: "loading", trigger: "auto" }))])).evidence).toEqual([]);
+    const twice = await recordOf([
+      entry(compaction({ status: "loading", trigger: "auto" })),
+      entry(compaction({ status: "completed", trigger: "auto", preTokens: 180000 })),
+      entry(tool("c1", "Bash", { type: "shell", command: "npm test" })),
+      entry(compaction({ status: "loading" })),
+      entry(compaction({ status: "completed", preTokens: 170000 })),
+    ]);
+    expect(twice.evidence.map((item) => [item.kind, item.trigger ?? null, item.preTokens ?? null])).toEqual([
+      ["compaction", "auto", 180000],
+      ["shell", null, null],
+      // The first compaction's trigger does not leak into the second.
+      ["compaction", null, 170000],
+    ]);
+  });
+
+  it("counts every tool call of the turn, whatever the tool or its outcome, and none of another turn", async () => {
+    const record = await recordOf([
+      entry(userMessage("an older turn"), "turn-0"),
+      entry(tool("c0", "Bash", { type: "shell", command: "ls" }), "turn-0"),
+      entry(userMessage("go")),
+      entry(tool("c1", "Bash", { type: "shell", command: "ls" })),
+      entry(tool("c2", "Read", { type: "read", filePath: "/repo/package.json" })),
+      entry(tool("c3", "Grep", { type: "search", query: "add" })),
+      entry(tool("c4", "mcp__paseo-bm__bm_review", { type: "unknown" })),
+      entry(tool("c5", "shell", { type: "shell", command: "npm test" }, "failed")),
+      entry(assistantMessage("DONE")),
+    ]);
+    expect(record.toolCalls).toBe(5);
+    // Only the shell calls are evidence; the count is of all of them.
+    expect(record.evidence.map((item) => item.kind)).toEqual(["shell", "shell"]);
+    expect((await recordOf([entry(userMessage("hello")), entry(assistantMessage("hi"))])).toolCalls).toBe(0);
+  });
+
+  it("a turn longer than one refetch page is counted from the hook payload too", async () => {
+    // The page holds only the tail of the turn: full, and its oldest entry already in this turn.
+    const page = Array.from({ length: REFETCH_LIMIT }, (_, i) => entry(tool(`p${i}`, "Bash", { type: "shell", command: "ls" })));
+    const whole = [
+      userMessage("an older turn"),
+      tool("old", "Bash", { type: "shell", command: "ls" }),
+      userMessage("go"),
+      ...Array.from({ length: REFETCH_LIMIT + 50 }, (_, i) => tool(`h${i}`, "Bash", { type: "shell", command: "ls" })),
+    ];
+    expect((await recordOf(page, undefined, whole)).toolCalls).toBe(REFETCH_LIMIT + 50);
+    // A full page that starts in an earlier turn is the whole of this one.
+    const fits = [entry(userMessage("before"), "turn-0"), ...page.slice(1)];
+    expect((await recordOf(fits, undefined, whole)).toolCalls).toBe(REFETCH_LIMIT - 1);
+  });
+
+  it("without the refetch, counts the tool calls of the hook payload's last turn", async () => {
+    const built = await buildRecord(
+      asEvent(turnEnded({ timeline: [userMessage("old"), shellCall("ls"), userMessage("new"), shellCall("ls"), shellCall("pwd")] })),
+      { location: null },
+    );
+    expect(built!.record.toolCalls).toBe(2);
+  });
+
+  it("a record written before these fields parses, and reads them as unknown", async () => {
+    const built = await recordOf([entry(userMessage("go")), entry(tool("c1", "Bash", { type: "shell", command: "ls" }))], {
+      model: "m",
+      lastUsage: { inputTokens: 1, cachedInputTokens: 2, outputTokens: 3, contextWindowUsedTokens: 6, contextWindowMaxTokens: 200000 },
+    });
+    const older = JSON.parse(JSON.stringify(built)) as Record<string, unknown> & { usage: Record<string, unknown> };
+    delete older.toolCalls;
+    delete older.usage.contextUsed;
+    delete older.usage.contextMax;
+    const parsed = traceRecordSchema.parse(older);
+    expect(parsed.toolCalls).toBeUndefined();
+    expect(parsed.usage).not.toHaveProperty("contextUsed");
+    expect(parsed.usage?.inputTokens).toBe(1);
+  });
+});
+
+/**
+ * Autonomy design §C.1 (bead 7gxw.2): a `shell` entry keeps the call's
+ * `status`, `exitCode`, `cwd` and `callId`, and every `detail` is masked. The
+ * shapes are the ones an isolated Paseo 0.9.2 daemon produced on 2026-09-30 for
+ * one passing (`node --version`) and one failing (`node -e "process.exit(3)"`)
+ * command per provider, with the paths replaced.
+ */
+describe("richer shell evidence (autonomy design §C.1)", () => {
+  const T = "2026-09-30T14:18:25.963Z";
+  const REPO = "/Users/test/repo";
+
+  const claudePassed = {
+    type: "tool_call",
+    callId: "toolu_019YSXB2SNdEBnTpEZJRLsij",
+    name: "Bash",
+    detail: { type: "shell", command: "node --version", output: "v26.8.2" },
+    status: "completed",
+    error: null,
+  };
+  const claudeFailed = {
+    type: "tool_call",
+    callId: "toolu_01SCQjZyDrSsFYvYsD7Ci771",
+    name: "Bash",
+    detail: { type: "shell", command: 'node -e "process.exit(3)"' },
+    status: "failed",
+    error: { type: "tool_result", content: "Exit code 3", is_error: true, tool_use_id: "toolu_01SCQjZyDrSsFYvYsD7Ci771" },
+  };
+  const codexPassed = {
+    type: "tool_call",
+    callId: "exec-06710c86-d30e-4b8b-ad45-44bc648f0213",
+    name: "shell",
+    status: "completed",
+    error: null,
+    detail: { type: "shell", command: "node --version", cwd: REPO, output: "v26.8.2\n", exitCode: 0 },
+  };
+  const codexFailed = {
+    type: "tool_call",
+    callId: "exec-41c5b723-f995-4738-9b39-3a6fb4187be1",
+    name: "shell",
+    status: "failed",
+    error: { message: "Tool call failed" },
+    detail: { type: "shell", command: 'node -e "process.exit(3)"', cwd: REPO, exitCode: 3 },
+  };
+  const openCodePassed = {
+    type: "tool_call",
+    callId: "call_function_8d0ukxghxiur_1",
+    name: "bash",
+    status: "completed",
+    detail: { type: "shell", command: "node --version", output: "v26.8.2\n" },
+    error: null,
+    metadata: { output: "v26.8.2\n", exit: 0, truncated: false },
+  };
+  const openCodeFailed = {
+    type: "tool_call",
+    callId: "call_function_368wwoik1kee_1",
+    name: "bash",
+    status: "completed",
+    detail: { type: "shell", command: 'node -e "process.exit(3)"', output: "(no output)" },
+    error: null,
+    metadata: { output: "(no output)", exit: 3, truncated: false },
+  };
+
+  const shellOf = (item: unknown, env?: NodeJS.ProcessEnv) => {
+    const entries = evidenceFromItem(item as never, "w1", T, env);
+    expect(entries).toHaveLength(1);
+    return entries[0]!;
+  };
+
+  it("Claude: a failed call keeps status failed and its callId, with no exit code; a completed one keeps no output", () => {
+    // The bead's acceptance shape, then the captured one.
+    const failed = shellOf({ type: "tool_call", callId: "c1", name: "Bash", status: "failed", error: { message: "exit 1" }, detail: { type: "shell", command: "npm test" } });
+    expect(failed).toEqual({ kind: "shell", detail: "npm test", agentId: "w1", at: T, status: "failed", callId: "c1" });
+    expect(failed).not.toHaveProperty("exitCode");
+    expect(failed).not.toHaveProperty("cwd");
+
+    expect(shellOf(claudeFailed)).toEqual({ kind: "shell", detail: 'node -e "process.exit(3)"', agentId: "w1", at: T, status: "failed", callId: claudeFailed.callId });
+    const passed = shellOf(claudePassed);
+    expect(passed).toEqual({ kind: "shell", detail: "node --version", agentId: "w1", at: T, status: "completed", callId: claudePassed.callId });
+    expect(JSON.stringify(passed)).not.toContain("v26.8.2");
+  });
+
+  it("Codex: exit code 0 and non-zero, and the folder it ran in", () => {
+    expect(shellOf(codexPassed)).toEqual({ kind: "shell", detail: "node --version", agentId: "w1", at: T, status: "completed", exitCode: 0, cwd: REPO, callId: codexPassed.callId });
+    expect(shellOf(codexFailed)).toEqual({ kind: "shell", detail: 'node -e "process.exit(3)"', agentId: "w1", at: T, status: "failed", exitCode: 3, cwd: REPO, callId: codexFailed.callId });
+  });
+
+  it("OpenCode: a failing command is completed too, so its exit code comes from metadata.exit", () => {
+    expect(shellOf(openCodePassed)).toEqual({ kind: "shell", detail: "node --version", agentId: "w1", at: T, status: "completed", exitCode: 0, callId: openCodePassed.callId });
+    expect(shellOf(openCodeFailed)).toEqual({ kind: "shell", detail: 'node -e "process.exit(3)"', agentId: "w1", at: T, status: "completed", exitCode: 3, callId: openCodeFailed.callId });
+  });
+
+  it("an exit code is kept only as the provider gave it: the detail's first, null when it said none, never a guess", () => {
+    const call = (detail: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({ type: "tool_call", callId: "c9", name: "shell", status: "completed", error: null, detail: { type: "shell", command: "ls", ...detail }, ...extra });
+    expect(shellOf(call({ exitCode: 2 }, { metadata: { exit: 0 } })).exitCode).toBe(2);
+    expect(shellOf(call({ exitCode: null })).exitCode).toBeNull();
+    expect(shellOf(call({ exitCode: null }, { metadata: { exit: 1 } })).exitCode).toBe(1);
+    expect(shellOf(call({ exitCode: "0" }))).not.toHaveProperty("exitCode");
+    expect(shellOf(call({ exitCode: 1.5 }))).not.toHaveProperty("exitCode");
+    expect(shellOf(call({}, { metadata: { exit: "3" } }))).not.toHaveProperty("exitCode");
+    // No status, no callId, a blank folder: the fields are left out, not invented.
+    const bare = shellOf({ type: "tool_call", name: "shell", detail: { type: "shell", command: "ls", cwd: "  " } });
+    expect(Object.keys(bare).sort()).toEqual(["agentId", "at", "detail", "kind"]);
+  });
+
+  it("the fields reach the record and the store, and no output does", async () => {
+    const entries = [userMessage("go"), codexPassed, codexFailed, openCodeFailed, claudeFailed].map((item, index) => ({ item, turnId: "turn-1", timestamp: `2026-09-30T14:18:2${index}.000Z` }));
+    const refetch = vi.fn(async () => ({ entries, agent: { model: "gpt-5.6-luna", lastUsage: null } }));
+    const now = () => new Date("2026-09-30T14:19:00.000Z");
+    expect(await collectTurnEnded(asEvent(turnEnded()), { location, now, paseo: { agents: { ref: () => ({ timeline: { refetch } }) } } })).toBe(true);
+
+    const [record] = readRecords(location, WS).records;
+    expect(record!.evidence.map((entry) => [entry.status, entry.exitCode ?? "none", entry.cwd ?? "none", entry.callId])).toEqual([
+      ["completed", 0, REPO, codexPassed.callId],
+      ["failed", 3, REPO, codexFailed.callId],
+      ["completed", 3, "none", openCodeFailed.callId],
+      ["failed", "none", "none", claudeFailed.callId],
+    ]);
+    const raw = readFileSync(join(location.tracesDir, WS, "events-202609.jsonl"), "utf8");
+    expect(raw).not.toContain("v26.8.2");
+    expect(raw).not.toContain("(no output)");
+    expect(raw).not.toContain("Exit code 3");
+  });
+
+  it("a record written before these fields parses and reads back unchanged; v does not move", async () => {
+    const before = {
+      v: 1,
+      kind: "turn",
+      at: "2026-09-29T10:00:00.000Z",
+      workspaceId: WS,
+      agentId: "agent-worker",
+      role: "worker",
+      turnId: "turn-0",
+      requestId: "req-old",
+      parentAgentId: "agent-manager",
+      agentCreatedAt: null,
+      startedAt: null,
+      endedAt: "2026-09-29T10:00:00.000Z",
+      outcome: "completed",
+      sent: [],
+      received: [],
+      reports: [],
+      reviews: [],
+      evidence: [
+        { kind: "shell", detail: "npm test", agentId: "agent-worker", at: "2026-09-29T10:00:00.000Z" },
+        { kind: "file", detail: "/Users/test/repo/math.js", agentId: "agent-worker", at: "2026-09-29T10:00:00.000Z" },
+      ],
+      usage: null,
+      runtime: null,
+      pluginVersion: "0.4.1",
+    };
+    expect(traceRecordSchema.parse(before)).toEqual(before);
+    expect(TRACE_STORE_SCHEMA_VERSION).toBe(1);
+
+    // Beside a new record in the same file, it still reads, and reads the same.
+    const refetch = vi.fn(async () => ({ entries: [{ item: codexFailed, turnId: "turn-1", timestamp: T }], agent: null }));
+    const now = () => new Date("2026-09-30T14:19:00.000Z");
+    expect(await collectTurnEnded(asEvent(turnEnded()), { location, now, paseo: { agents: { ref: () => ({ timeline: { refetch } }) } } })).toBe(true);
+    const monthlyFile = join(location.tracesDir, WS, "events-202609.jsonl");
+    writeFileSync(monthlyFile, `${JSON.stringify(before)}\n${readFileSync(monthlyFile, "utf8")}`);
+    clearTraceStoreCache();
+
+    const stored = readRecords(location, WS);
+    expect(stored.skippedLines).toBe(0);
+    const byTurn = new Map(stored.records.map((record) => [record.turnId, record]));
+    expect(byTurn.get("turn-0")).toEqual(before);
+    expect(byTurn.get("turn-1")!.v).toBe(1);
+    expect(byTurn.get("turn-1")!.evidence[0]).toMatchObject({ status: "failed", exitCode: 3, callId: codexFailed.callId });
+  });
+
+  it("a reader built before these fields drops them and reads the rest the same", async () => {
+    const built = await buildRecord(asEvent(turnEnded({ timeline: [userMessage("go"), codexFailed] })), { location: null });
+    const onDisk = JSON.parse(JSON.stringify(built!.record)) as unknown;
+    const olderReader = traceRecordSchema.extend({ evidence: evidenceSchema.omit({ status: true, exitCode: true, cwd: true, callId: true }).array() });
+    const parsed = olderReader.parse(onDisk);
+    expect(parsed.evidence).toEqual([{ kind: "shell", detail: 'node -e "process.exit(3)"', agentId: "agent-worker", at: expect.any(String) }]);
+  });
+
+  it("masks a secret in every detail and in the folder before it is kept: shell, file, skill and sub-agent", async () => {
+    const env = { PASEO_PASSWORD: "hunter2-pw" } as NodeJS.ProcessEnv;
+    const shell = {
+      ...codexPassed,
+      detail: { type: "shell", command: "deploy --token abc && echo hunter2-pw", cwd: "/Users/test/hunter2-pw/repo --token abc", exitCode: 0 },
+    };
+    const [command] = evidenceFromItem(shell as never, "w1", T, env);
+    expect(command!.detail).toBe(`deploy --token ${REDACTED} && echo ${REDACTED}`);
+    expect(command!.cwd).toBe(`/Users/test/${REDACTED}/repo --token ${REDACTED}`);
+
+    const tool = (name: string, detail: Record<string, unknown>) => ({ type: "tool_call", callId: "c2", name, status: "completed", error: null, detail });
+    const [file] = evidenceFromItem(tool("Write", { type: "write", filePath: "/Users/test/repo/hunter2-pw.txt" }) as never, "w1", T, env);
+    expect(file).toMatchObject({ kind: "file", detail: `/Users/test/repo/${REDACTED}.txt` });
+    const [skill] = evidenceFromItem(tool("Skill", { type: "plain_text", label: "deploy --token abc hunter2-pw" }) as never, "w1", T, env);
+    expect(skill).toMatchObject({ kind: "skill", detail: `deploy --token ${REDACTED} ${REDACTED}` });
+    const [agent] = evidenceFromItem(tool("Task", { type: "sub_agent", subAgentType: "general", description: "use --token abc and hunter2-pw", log: "" }) as never, "w1", T, env);
+    expect(agent).toMatchObject({ kind: "agent", detail: `general — use --token ${REDACTED} and ${REDACTED}` });
+
+    // And on disk: neither value is anywhere in the file.
+    const refetch = vi.fn(async () => ({ entries: [shell].map((item) => ({ item, turnId: "turn-1", timestamp: T })), agent: null }));
+    const now = () => new Date("2026-09-30T14:19:00.000Z");
+    expect(await collectTurnEnded(asEvent(turnEnded()), { location, now, env, paseo: { agents: { ref: () => ({ timeline: { refetch } }) } } })).toBe(true);
+    const raw = readFileSync(join(location.tracesDir, WS, "events-202609.jsonl"), "utf8");
+    expect(raw).not.toContain("hunter2-pw");
+    expect(raw).not.toMatch(/--token abc/);
+  });
+});
+
+/**
+ * Autonomy design §G.5 (bead 7gxw.10): the plugin's `/compact` is a
+ * `user_message` with a `clientMessageId` and no marker, so only the plugin's
+ * send log tells it from the owner's; the `BM-STATE` brief after it carries
+ * its marker. Neither is ever the owner's words — not for A-6, the owner's
+ * texts, a new request segment or an answer in chat.
+ */
+describe("what the plugin sent for a compaction", () => {
+  const typed = (text: string) => ({ type: "user_message" as const, text, messageId: "m1", clientMessageId: "c1" });
+
+  it("a /compact matching the plugin's send log is the plugin's; the same text with no entry stays the owner's; a leading /compact decides nothing", async () => {
+    const seen: Array<[string, string, string | null]> = [];
+    const pluginSent = (agentId: string, text: string, at: string | null) => {
+      seen.push([agentId, text, at]);
+      return agentId === "agent-worker" && text === "/compact";
+    };
+    const now = () => new Date("2026-09-30T12:00:00.000Z");
+    const plugin = await buildRecord(asEvent(turnEnded({ timeline: [typed("/compact")] })), { location: null, now, pluginSent });
+    expect(plugin?.record.sent).toMatchObject([{ text: "/compact", origin: "agent" }]);
+    expect(seen).toEqual([["agent-worker", "/compact", "2026-09-30T12:00:00.000Z"]]);
+    // The owner's own /compact (no entry), or one of another agent: the owner's.
+    const owner = await buildRecord(asEvent(turnEnded({ timeline: [typed("/compact keep the tests")] })), { location: null, now, pluginSent });
+    expect(owner?.record.sent).toMatchObject([{ origin: "user" }]);
+    const manager = await buildRecord(asEvent(turnEnded({ agent: { ...turnEnded().agent, id: "agent-manager", provider: "bm-manager" }, timeline: [typed("/compact")] })), { location: null, now, pluginSent });
+    expect(manager?.record.sent).toMatchObject([{ origin: "user" }]);
+    // No send log (no trace store): as before, the owner's.
+    expect((await buildRecord(asEvent(turnEnded({ timeline: [typed("/compact")] })), { location: null, now }))?.record.sent).toMatchObject([{ origin: "user" }]);
+  });
+
+  it("the BM-STATE brief is a plugin notice, and its report-like lines are never parsed as a report; a relayed message is never looked up", async () => {
+    const lookups: string[] = [];
+    const pluginSent = (_agentId: string, text: string) => {
+      lookups.push(text);
+      return false;
+    };
+    const brief = "BM-STATE\nFrom the paseo-bm plugin, not the owner: your context was just compacted.\nrole: worker\nrequestId: req-20260930T100000Z\nlastReport: finished at t";
+    const built = await buildRecord(asEvent(turnEnded({ timeline: [typed(brief)] })), { location: null, pluginSent });
+    expect(built?.record.sent).toMatchObject([{ origin: "agent" }]);
+    expect(built?.record.reports).toEqual([]);
+    const relayed = await buildRecord(asEvent(turnEnded({ timeline: [{ type: "user_message" as const, text: "/compact", messageId: "m2" }] })), { location: null, pluginSent });
+    expect(relayed?.record.sent).toMatchObject([{ origin: "agent" }]);
+    // Only a message that would otherwise be the owner's is looked up.
+    expect(lookups).toEqual([]);
   });
 });

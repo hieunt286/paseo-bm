@@ -4,7 +4,8 @@ import { parseAnswers, parseQuestions } from "../plugin/shared/bm-questions";
 import { parseReports, parseReviews } from "../plugin/shared/bm-report";
 import { toolNamed, type ToolResult } from "../plugin/shared/bm-tools";
 import { EFFECTS } from "../plugin/shared/decisions";
-import { cardFrameOf, toChatCards } from "../plugin/client/chat-cards";
+import { toChatCards } from "../plugin/client/chat-card-parse";
+import { cardFrameOf } from "../plugin/client/chat-card-frame";
 import { blocksCompletion } from "../plugin/server/traces";
 
 /**

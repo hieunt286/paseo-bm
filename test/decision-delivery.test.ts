@@ -147,6 +147,53 @@ describe("the message", () => {
     );
     expect(parseAnswers(text)).toEqual({ requestId: REQUEST, answers: [{ id: "Q1", text: "a — Option A of 1" }, { id: "Q3", text: "other — Keep the old name for now" }] });
   });
+
+  it("cites an owner precedent that answered a question, above the block (autonomy design §B.6)", () => {
+    const byPrecedent = (n: number, input: { optionKey?: string; words?: string }) =>
+      store().transition(
+        idOf(n),
+        (current) =>
+          answerDecision(
+            { ...current, subject: "test-db" },
+            { by: "precedent", precedentId: "p:9f2c", via: "inbox", optionKey: input.optionKey ?? null, words: input.words ?? null, at: "2026-09-29T07:50:00.000Z" },
+          ),
+        WORKSPACE,
+      );
+    byPrecedent(2, { words: "SQLite, always" });
+    const text = answersMessageOf(REQUEST, [get(2), answer(1)]);
+    expect(text).toBe(
+      [
+        "BM-DELIVERY answers",
+        `Continue ${REQUEST}.`,
+        `Q2 was answered by the owner's precedent p:9f2c on "test-db": it is the owner's standing answer.`,
+        "",
+        "BM-ANSWERS",
+        `requestId: ${REQUEST}`,
+        "Q1: a — Option A of 1",
+        "Q2: other — SQLite, always",
+      ].join("\n"),
+    );
+    // The block reads as before: the citation is outside it.
+    expect(parseAnswers(text)).toEqual({ requestId: REQUEST, answers: [{ id: "Q1", text: "a — Option A of 1" }, { id: "Q2", text: "other — SQLite, always" }] });
+    expect(isPluginNotice(text)).toBe(true);
+  });
+
+  it("delivers the policy's answer (autonomy design §B.5) exactly as an owner answer: same block, same Worker, nothing cited", async () => {
+    const byPolicy = store().transition(
+      idOf(2),
+      (current) => answerDecision(current, { by: "policy", via: "inbox", optionKey: "a", class: "scope", predictor: "recommended", at: "2026-09-29T07:50:00.000Z" }),
+      WORKSPACE,
+    );
+    if (byPolicy.status !== "updated") throw new Error(`not answered: ${byPolicy.status}`);
+    const owners = answer(1);
+    const text = answersMessageOf(REQUEST, [byPolicy.decision, owners]);
+    expect(text).toBe(["BM-DELIVERY answers", `Continue ${REQUEST}.`, "", "BM-ANSWERS", `requestId: ${REQUEST}`, "Q1: a — Option A of 1", "Q2: a — Option A of 2"].join("\n"));
+    expect(text).not.toMatch(/policy|precedent/);
+    const w = world();
+    await delivery(w.queue).onSettled([byPolicy.decision], { paseo: w.paseo });
+    expect(w.sends).toEqual([{ id: WORKER, text }]);
+    expect(get(2).delivery).toEqual({ to: WORKER, kind: answersKindOf(REQUEST), at: NOW.toISOString(), outcome: "sent" });
+  });
 });
 
 describe("delivering at the Worker's next idle moment", () => {
@@ -242,6 +289,32 @@ describe("delivering at the Worker's next idle moment", () => {
     await w.turnEnds();
     await deliver.onSettled([settled], { paseo: w.paseo });
     expect(w.sends).toHaveLength(1);
+  });
+});
+
+describe("a question that expired (autonomy design §A.3)", () => {
+  it("is never delivered: the request's finished report expires the open ones, and only the answered one goes", async () => {
+    const w = world();
+    const deliver = delivery(w.queue);
+    // Q1 answered but not handed over yet; Q2 and Q3 open when the Worker finishes.
+    answer(1);
+    const finished = ["BM-REPORT", `requestId: ${REQUEST}`, "phase: finished", "tier: Small", "blockers: none"].join("\n");
+    const record = turn({ agentId: "mgr-1", role: "manager", workspaceId: WORKSPACE, sent: [msg("mgr-1", "2026-09-29T07:55:00.000Z", finished, "agent")] });
+    await materialiseTurn(record, { home, paseo: w.paseo, now: () => NOW, log: (message) => logs.push(message), onSettled: settledByKind({ question: deliver.onSettled }), afterTurn: deliver.afterTurn });
+    expect([get(2).status, get(3).status]).toEqual(["expired", "expired"]);
+    expect(w.sends).toHaveLength(1);
+    expect(parseAnswers(w.sends[0]!.text)?.answers.map((entry) => entry.id)).toEqual(["Q1"]);
+
+    // Handed to the delivery, after a reload, or answered late: an expired question sends nothing and records nothing.
+    await deliver.onSettled([get(2), get(3)], { paseo: w.paseo });
+    const after = world();
+    await delivery(after.queue).afterTurn(record, { paseo: after.paseo });
+    await expect(handleDecisionsAnswer({ id: idOf(2), optionKey: "a" }, w.paseo, { env: { PASEO_BM_HOME: home }, homedir: () => root, now: () => NOW, onSettled: settledByKind({ question: deliver.onSettled }) })).rejects.toThrow(
+      "E_DECISION_SETTLED",
+    );
+    expect(w.sends).toHaveLength(1);
+    expect(after.sends).toEqual([]);
+    expect([get(2).delivery, get(3).delivery]).toEqual([null, null]);
   });
 });
 

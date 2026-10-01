@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,6 +8,7 @@ import {
   handleDecisionsGet,
   handleDecisionsList,
   registerDecisionRpcs,
+  settledByKind,
   type DecisionRpcDeps,
 } from "../plugin/server/decision-rpc";
 import { DECISIONS_DIR_NAME, clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
@@ -18,8 +19,8 @@ import {
   decisionsGetRpc,
   decisionsListRpc,
 } from "../plugin/shared/contracts";
-import { GRANT_TTL_MS, answerDecision, markNeedsConfirmation, supersedeDecision, withdrawDecision, type Decision } from "../plugin/shared/decisions";
-import { DECISION_REQUEST, DECISION_WS, makeDecision } from "./helpers/decisions";
+import { GRANT_TTL_MS, markNeedsConfirmation, supersedeDecision, withdrawDecision, type Decision } from "../plugin/shared/decisions";
+import { DECISION_REQUEST, DECISION_WS, makeDecision, storedOrchestratorAnswer } from "./helpers/decisions";
 
 /**
  * The `decisions.*` RPCs (autonomy design §A.6) against a temporary data
@@ -128,7 +129,7 @@ describe("decisions.answer", () => {
   it("refuses the owner's answer to a question the Orchestrator already answered (bm_decide, change-004), naming who answered", async () => {
     const s = store();
     s.open(q(1));
-    s.transition(q(1).id, (d) => answerDecision(d, { by: "orchestrator", via: "autopilot", optionKey: "c", reason: "Hold until the review.", at: NOW }));
+    s.transition(q(1).id, (d) => storedOrchestratorAnswer(d, { optionKey: "c", reason: "Hold until the review.", at: NOW }));
     const before = fileBytes();
     await expect(handleDecisionsAnswer({ id: q(1).id, optionKey: "a", confirmed: true, via: "chat-card" }, PASEO, deps)).rejects.toThrow(
       `E_DECISION_SETTLED: decision ${q(1).id} is answered by the Orchestrator; it can no longer be answered`,
@@ -184,6 +185,28 @@ describe("decisions.answer", () => {
     expect(await codeOf(() => handleDecisionsAnswer({ id: q(1).id, optionKey: "a", confirmed: true }, PASEO, bad))).toBe("E_DATA_HOME_UNAVAILABLE");
     expect(await codeOf(() => handleDecisionsGet({ id: q(1).id }, bad))).toBe("E_DATA_HOME_UNAVAILABLE");
     expect(handleDecisionsList({ scope: "inbox" }, bad)).toEqual({ decisions: [], truncated: false });
+  });
+
+  it("answers a store it cannot write E_DECISION_WRITE_FAILED, never the trace store's code (code review 2026-09-30 §3.2)", async () => {
+    store().open(q(1));
+    const dir = join(home, DECISIONS_DIR_NAME);
+    chmodSync(dir, 0o500);
+    try {
+      expect(await codeOf(() => handleDecisionsAnswer({ id: q(1).id, optionKey: "a", confirmed: true }, PASEO, deps))).toBe("E_DECISION_WRITE_FAILED");
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+    expect(settled).toEqual([]);
+  });
+
+  it("answers a store it cannot read E_DATA_HOME_UNAVAILABLE, never a write code", async () => {
+    store().open(q(1));
+    const dir = join(home, DECISIONS_DIR_NAME);
+    renameSync(dir, join(root, "moved"));
+    symlinkSync(join(root, "moved"), dir);
+    clearDecisionStoreCache();
+    expect(await codeOf(() => handleDecisionsGet({ id: q(1).id }, deps))).toBe("E_DATA_HOME_UNAVAILABLE");
+    expect(await codeOf(() => handleDecisionsList({ scope: "workspace", workspaceId: DECISION_WS }, deps))).toBe("E_DATA_HOME_UNAVAILABLE");
   });
 });
 
@@ -279,12 +302,42 @@ describe("decisions.get and decisions.list", () => {
   });
 });
 
+describe("the challenger's prediction reaches the owner only after the answer (autonomy design §B.3)", () => {
+  const predicted = { recommended: { optionKey: "a" }, orchestrator: { optionKey: "c", reason: "Hold until the review is in.", at: NOW } };
+  const hidden = { recommended: { optionKey: "a" }, orchestrator: null };
+
+  it("decisions.get and decisions.list of an unsettled decision carry no prediction.orchestrator; after the owner's answer they do", async () => {
+    store().open(q(1, { prediction: predicted }));
+    expect(handleDecisionsGet({ id: q(1).id }, deps).decision.prediction).toEqual(hidden);
+    for (const input of [
+      { scope: "inbox" as const },
+      { scope: "workspace" as const, workspaceId: DECISION_WS },
+      { scope: "request" as const, requestId: DECISION_REQUEST },
+    ]) {
+      const { decisions } = handleDecisionsList(input, deps);
+      expect(decisions.map((decision) => decision.prediction)).toEqual([hidden]);
+      expect(JSON.stringify(decisions)).not.toContain(predicted.orchestrator.reason);
+    }
+    // Waiting for a confirmation, or kept open, it is still the owner's to answer.
+    store().transition(q(1).id, (decision) => markNeedsConfirmation(decision, { via: "chat-worker", at: NOW }));
+    expect(handleDecisionsGet({ id: q(1).id }, deps).decision.prediction).toEqual(hidden);
+    expect((await handleDecisionsConfirm({ id: q(1).id, answered: false }, PASEO, deps)).decision.prediction).toEqual(hidden);
+    // The store keeps it all along.
+    expect(store().get(q(1).id)?.prediction).toEqual(predicted);
+
+    const answered = await handleDecisionsAnswer({ id: q(1).id, optionKey: "c" }, PASEO, deps);
+    expect(answered.decision.prediction).toEqual(predicted);
+    expect(handleDecisionsGet({ id: q(1).id }, deps).decision.prediction).toEqual(predicted);
+    expect(handleDecisionsList({ scope: "workspace", workspaceId: DECISION_WS }, deps).decisions[0]!.prediction).toEqual(predicted);
+  });
+});
+
 describe("registration", () => {
-  it("registers the four RPCs and passes the Paseo handle to the answer's hook", async () => {
+  it("registers the five RPCs (the digest's Override among them) and passes the Paseo handle to the answer's hook", async () => {
     const handle = vi.fn();
     registerDecisionRpcs({ handle } as unknown as Parameters<typeof registerDecisionRpcs>[0], deps);
     const contracts = handle.mock.calls.map(([contract]) => contract as { name: string });
-    expect(contracts.map((contract) => contract.name)).toEqual(["decisions.list", "decisions.get", "decisions.answer", "decisions.confirm"]);
+    expect(contracts.map((contract) => contract.name)).toEqual(["decisions.list", "decisions.get", "decisions.answer", "decisions.confirm", "decisions.override"]);
 
     store().open(q(1));
     const answer = handle.mock.calls.find(([contract]) => contract === decisionsAnswerRpc)![1] as (
@@ -294,5 +347,17 @@ describe("registration", () => {
     const { decision } = await answer({ id: q(1).id, optionKey: "a", confirmed: true }, { paseo: PASEO });
     expect(decision.status).toBe("answered");
     expect(settled[0]!.paseo).toBe(PASEO);
+  });
+});
+
+describe("the held kind's delivery (autonomy design §D.2)", () => {
+  it("settledByKind hands an answered h: decision to the held delivery only", async () => {
+    const seen: Record<string, string[]> = { held: [], question: [] };
+    const onSettled = settledByKind({
+      held: (decisions) => void seen.held!.push(...decisions.map((decision) => decision.id)),
+      question: (decisions) => void seen.question!.push(...decisions.map((decision) => decision.id)),
+    });
+    await onSettled([makeDecision({ id: "h:agent-1:perm-1", askedBy: { role: "plugin", agentId: "agent-1" }, round: null }), q(1)], { paseo: PASEO });
+    expect(seen).toEqual({ held: ["h:agent-1:perm-1"], question: [q(1).id] });
   });
 });

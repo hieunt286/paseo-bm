@@ -1,16 +1,20 @@
 /**
  * The live watch of running Workers (Orchestrator design §6B.3, ADR-016
- * decision 1; autonomy design §A.8): every 2 minutes, for the projects with
- * Autopilot on, the plugin reads the tail of each running Beads Worker's
- * timeline and raises deterministic **Worker signals**. Each signal is one
+ * decision 1; autonomy design §A.8): every 2 minutes, for every project, the
+ * plugin reads the tail of each running Beads Worker's timeline and raises
+ * deterministic **Worker signals**. `stuck`, `permission` and `danger` are
+ * Inbox alerts for the owner (`alert-store.ts`: `stuck`, `permission-waiting`,
+ * `danger`); for a project in the policy's scope each signal is also one
  * `worker.signal` event for the Orchestrator per Worker turn (`event-bus.ts`,
- * batched into `BM-EVENTS`); `stuck`, `permission` and `danger` are also Inbox
- * alerts for the owner (`alert-store.ts`: `stuck`, `permission-waiting`,
- * `danger`).
+ * batched into `BM-EVENTS`).
  *
- * - **Autopilot projects only.** A Worker of any other project is never
- *   refreshed and its timeline never read. With no Autopilot project the pass
- *   reads the settings file and nothing else.
+ * - **Alerts for every project, events in the policy's scope** (design §A.8,
+ *   §B.2; change-007 C1). The alerts cost no model call, so a running Worker
+ *   of any project is watched for them. `worker.signal` events, and the
+ *   `danger` interrupt allowance, are only for a project with a class above
+ *   `owner` (`eventScopeOf`); an alert raised while its project was outside
+ *   the scope is not told when the project enters it. With no running Worker
+ *   nothing is refreshed or read.
  * - **Bounded.** At most `MAX_WATCHED_WORKERS` running Workers per pass (the
  *   newest by creation; the oldest are dropped), each: one `refresh()` for its
  *   snapshot, then at most `WORKER_TAIL_ENTRIES` timeline entries, newest
@@ -29,10 +33,15 @@
  *   `permission` are cleared by the first pass that no longer sees them (new
  *   activity, the permission answered); all three at the Worker's recorded
  *   turn end (`clearWorkerTurnSignals`, the collector's `onRecorded`) or when a
- *   pass finds it no longer running, or its project no longer on Autopilot.
+ *   pass finds it no longer running. A project leaving the scope keeps its
+ *   alerts; its pending events are dropped at delivery (the event bus).
  * - **The other signals** (`failing`, `heavy`, `outside`) are events only,
  *   once per Worker turn (the event bus's key holds the turn start), settled at
  *   the Worker's turn end.
+ * - **Only what ran.** A call that was denied (Paseo's own denial entry of a
+ *   Codex call and the call it stands for; a Claude call whose held decision
+ *   was denied or withdrawn: `shared/denied-calls.ts`) or still waits on its
+ *   permission never raises `danger` (live check 2026-10-01 F3).
  * - **Danger.** A newly raised `danger` alert also opens the Worker's interrupt
  *   allowance for 10 minutes (`openDangerAllowance`): the only time the
  *   Orchestrator may interrupt it (design §6B.4). The plugin itself never
@@ -47,19 +56,26 @@
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { TRACES_DIR_NAME, type DataHomeDeps } from "./data-home";
 import { redactText } from "./collector";
-import { listedWorkspaces, type DashboardPaseo, type ListedWorkspace } from "./dashboard-rpc";
+import { listedWorkspaces, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
 import { readTimelinePages, type LiveTimelinePaseo } from "./live-timeline";
 import { createAlertStore, type AlertStore } from "./alert-store";
-import type { BmEvent, EventBus } from "./event-bus";
-import { agentsOf, type OrchestratorActionsPaseo } from "./orchestrator-actions";
+import { eventScopeOf, type BmEvent, type EventBus } from "./event-bus";
+import { agentsOf, type OrchestratorStatePaseo } from "./orchestrator-state";
 import { createOrchestratorStore } from "./orchestrator-store";
-import { requestKeyOf } from "./orchestrator-tools";
-import { traceOfAgent, workspaceTracesOf, type WorkspaceTraces } from "./request-trace";
+import { requestKeyOf, traceOfAgent, workspaceTracesOf, type WorkspaceTraces } from "./request-trace";
 import { readWorkspaceMeta, type TraceStoreLocation } from "./trace-store";
 import { WORKER_SIGNALS, type WorkerSignal } from "../shared/orchestrator";
 import { isProcessDocumentPath } from "../shared/orchestrator-rules";
+import { ACTION_EFFECTS, effectfulCommandOf } from "../shared/effectful-actions";
+import { decisionKindOf, type Effect } from "../shared/decisions";
+import { deniedHeldCallsOf, deniedTwinOf, isDeniedHeldCall } from "../shared/denied-calls";
+import { createDecisionStore, type DecisionStore } from "./decision-store";
+import { isHeldOpen } from "./action-boundary";
+import { normalisedCommand, shellFailureOf } from "../shared/shell";
 import type { AlertKind } from "../shared/alerts";
 import type { Tier } from "../shared/contracts";
+import { timeOrZero } from "../shared/time";
+import { errorText } from "./rpc-kit";
 
 /** How often the Worker pass runs (design §6B.3). */
 export const WORKER_PASS_MS = 2 * 60_000;
@@ -88,15 +104,6 @@ export const SIGNAL_ALERT_KINDS: Readonly<Partial<Record<WorkerSignal, AlertKind
 /** The alert kinds a Worker's signals raise. */
 export const WORKER_ALERT_KINDS: readonly AlertKind[] = ["stuck", "permission-waiting", "danger"];
 
-function timeOf(at: string | null | undefined): number {
-  const time = at === null || at === undefined ? Number.NaN : Date.parse(at);
-  return Number.isNaN(time) ? 0 : time;
-}
-
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 // ---------------------------------------------------------------------------
 // The signals (pure).
 // ---------------------------------------------------------------------------
@@ -113,6 +120,10 @@ interface ToolCall {
   name: string;
   /** The entry's `status` ("running", "completed", "failed", …); null when absent. */
   status: string | null;
+  /** Its call id; null when absent. */
+  id: string | null;
+  /** True when Paseo's own denial entry says it never ran (a Codex call, `metadata.denied`). */
+  denied: boolean;
   detail: {
     type?: unknown;
     command?: unknown;
@@ -138,6 +149,23 @@ export interface WorkerSignalInput {
   workspaceDirectory: string | null;
   /** The request's tier (the latest report's), for `heavy`. */
   tier: Tier | null;
+  /**
+   * The grants of the Worker's request, and when each was given (autonomy
+   * design §D.2, change-009 C7): an effectful action one of them covers,
+   * given before it ran, raises no `danger` — an allowed held request
+   * included. None by default.
+   */
+  grants?: ReadonlyArray<{ at: string; effects: readonly Effect[] }>;
+  /**
+   * The ids of the calls still waiting on a permission request (Claude's
+   * `metadata.toolUseId`, Codex's item id): not run yet, so never `danger`.
+   */
+  pendingCallIds?: ReadonlySet<string>;
+  /**
+   * True for a `failed` shell call that was a held request denied or
+   * withdrawn (`isDeniedHeldCall`): it never ran, so it is never `danger`.
+   */
+  deniedHeld?: (command: string, at: string) => boolean;
 }
 
 /** A signal that holds, since when, and its evidence (not yet redacted or capped). */
@@ -147,12 +175,17 @@ export interface HeldSignal {
   evidence: string;
 }
 
-/** The tool calls of the entries since `turnStart`, once per call id, oldest first. */
+/**
+ * The tool calls of the entries since `turnStart`, once per call id, oldest
+ * first. Paseo's denial entry of a Codex call (`metadata.denied`, call id
+ * `permission-<item id>`) marks itself and the call it stands for as denied.
+ */
 function toolCallsOf(entries: readonly WatchedEntry[], turnStart: number): ToolCall[] {
   const calls: ToolCall[] = [];
   const byId = new Map<string, ToolCall>();
+  const deniedIds = new Set<string>();
   for (const entry of entries) {
-    const item = entry.item as { type?: unknown; callId?: unknown; name?: unknown; status?: unknown; detail?: unknown } | null | undefined;
+    const item = entry.item as { type?: unknown; callId?: unknown; name?: unknown; status?: unknown; detail?: unknown; metadata?: unknown } | null | undefined;
     if (item?.type !== "tool_call" || typeof entry.timestamp !== "string") continue;
     const time = Date.parse(entry.timestamp);
     if (Number.isNaN(time) || time < turnStart) continue;
@@ -160,6 +193,10 @@ function toolCallsOf(entries: readonly WatchedEntry[], turnStart: number): ToolC
     const name = typeof item.name === "string" ? item.name : "tool";
     const status = typeof item.status === "string" ? item.status : null;
     const id = typeof item.callId === "string" && item.callId !== "" ? item.callId : null;
+    const metadata = (item.metadata ?? {}) as { denied?: unknown; permissionRequestId?: unknown };
+    if (metadata.denied === true) {
+      for (const denied of [id, deniedTwinOf(id), deniedTwinOf(text(metadata.permissionRequestId))]) if (denied !== null) deniedIds.add(denied);
+    }
     const known = id === null ? undefined : byId.get(id);
     if (known !== undefined) {
       // A call seen running and then ended: keep when it began, and how it ended.
@@ -168,10 +205,11 @@ function toolCallsOf(entries: readonly WatchedEntry[], turnStart: number): ToolC
       known.status = status;
       continue;
     }
-    const call: ToolCall = { at: entry.timestamp, name, status, detail };
+    const call: ToolCall = { at: entry.timestamp, name, status, id, denied: false, detail };
     calls.push(call);
     if (id !== null) byId.set(id, call);
   }
+  for (const call of calls) if (call.id !== null && deniedIds.has(call.id)) call.denied = true;
   return calls;
 }
 
@@ -196,104 +234,15 @@ function isInside(path: string, directory: string): boolean {
   return target === root || target.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
 }
 
-/** Shell patterns of §6B.3 `danger`, with the name the evidence gives. */
-const DANGER_PATTERNS: ReadonlyArray<{ name: string; pattern: RegExp }> = [
-  { name: "git push", pattern: /\bgit(?:\s+-{1,2}[\w-]+(?:[= ]\S+)?)*\s+push\b/ },
-  { name: "npm publish", pattern: /\bnpm(?:\s+-{1,2}[\w-]+(?:=\S+)?)*\s+publish\b/ },
-  { name: "pnpm publish", pattern: /\bpnpm(?:\s+-{1,2}[\w-]+(?:=\S+)?)*\s+publish\b/ },
-  { name: "yarn publish", pattern: /\byarn(?:\s+-{1,2}[\w-]+(?:=\S+)?)*\s+(?:npm\s+)?publish\b/ },
-  { name: "kubectl apply/delete", pattern: /\bkubectl\b[^\n;&|]*?\s(?:apply|delete)\b/ },
-  { name: "terraform apply/destroy", pattern: /\bterraform\b[^\n;&|]*?\s(?:apply|destroy)\b/ },
-  { name: "helm install/upgrade/uninstall", pattern: /\bhelm\b[^\n;&|]*?\s(?:install|upgrade|uninstall)\b/ },
-  { name: "vercel --prod", pattern: /\bvercel\b[^\n;&|]*?\s--prod\b/ },
-  { name: "docker push", pattern: /\bdocker\s+(?:image\s+)?push\b/ },
-  { name: "DROP TABLE/DATABASE", pattern: /\bdrop\s+(?:table|database)\b/i },
-  { name: "TRUNCATE", pattern: /\btruncate\s+(?:table\s+)?[\w"`[]/i },
-];
-
-/** Strips one pair of matching quotes around a shell word. */
-function unquoted(word: string): string {
-  return /^(["']).*\1$/.test(word) && word.length >= 2 ? word.slice(1, -1) : word;
-}
-
-/** True for a target of `rm -rf` that is `/`, the home folder, or (when the workspace is known) outside it. */
-function rmTargetIsDangerous(target: string, base: string | null, workspaceDirectory: string | null): boolean {
-  const word = unquoted(target);
-  if (/^\/+\*?$/.test(word)) return true;
-  if (/^~(?:\/|$)/.test(word) || /^\$\{?HOME\}?(?:\/|$)/.test(word)) return true;
-  // Another variable, a command substitution: nothing to judge from the text.
-  if (word.startsWith("$") || word.startsWith("`")) return false;
-  if (workspaceDirectory === null) return false;
-  if (!isAbsolute(word) && base === null) return false;
-  return !isInside(isAbsolute(word) ? word : resolve(base!, word), workspaceDirectory);
-}
-
-/** The `rm -rf` of a command that removes `/`, `~` or a path outside the workspace; null when none. */
-function dangerousRm(command: string, cwd: string | null, workspaceDirectory: string | null): string | null {
-  for (const segment of command.split(/&&|\|\||[;&|\n]/)) {
-    const words = segment.trim().split(/\s+/).filter((word) => word !== "");
-    let index = words.findIndex((word) => word === "rm" || word.endsWith("/rm"));
-    if (index < 0) continue;
-    let recursive = false;
-    let force = false;
-    const targets: string[] = [];
-    let flagsEnded = false;
-    for (index += 1; index < words.length; index += 1) {
-      const word = words[index]!;
-      if (!flagsEnded && word === "--") {
-        flagsEnded = true;
-      } else if (!flagsEnded && word.startsWith("--")) {
-        if (word === "--recursive") recursive = true;
-        if (word === "--force") force = true;
-      } else if (!flagsEnded && word.startsWith("-") && word.length > 1) {
-        if (/[rR]/.test(word)) recursive = true;
-        if (/f/.test(word)) force = true;
-      } else {
-        targets.push(word);
-      }
-    }
-    if (!recursive || !force) continue;
-    const base = cwd ?? workspaceDirectory;
-    const target = targets.find((candidate) => rmTargetIsDangerous(candidate, base, workspaceDirectory));
-    if (target !== undefined) return `rm -rf ${unquoted(target)}`;
-  }
-  return null;
-}
-
-/** `DELETE FROM` with no `WHERE` in the same statement. */
-function deleteWithoutWhere(command: string): boolean {
-  for (const match of command.matchAll(/\bdelete\s+from\b([^;]*)/gi)) {
-    if (!/\bwhere\b/i.test(match[1] ?? "")) return true;
-  }
-  return false;
-}
-
 /**
- * The name of the §6B.3 `danger` rule a shell command matches, or null. `cwd`
- * is where it ran (the workspace directory when unknown). Pure.
+ * The name of the §6B.3 `danger` rule a shell command matches, or null: an
+ * effectful action of the one list A-6 counts too (`shared/effectful-actions.ts`,
+ * code review 2026-09-30 §3.5), named as the evidence gives it. `cwd` is where
+ * it ran (the workspace directory when unknown). Pure.
  */
 export function dangerOfCommand(command: string, cwd: string | null, workspaceDirectory: string | null): string | null {
-  for (const { name, pattern } of DANGER_PATTERNS) if (pattern.test(command)) return name;
-  if (deleteWithoutWhere(command)) return "DELETE FROM without WHERE";
-  return dangerousRm(command, cwd, workspaceDirectory);
-}
-
-/** A shell command as `failing` compares it: trimmed, runs of white space made one space. */
-export function normalisedCommand(command: string): string {
-  return command.trim().replace(/\s+/g, " ");
-}
-
-/**
- * How a shell call failed, for `failing`: its non-zero exit code, "failed"
- * when the entry only says so, or null when it did not fail. Paseo's timeline
- * for a Claude Worker carries no `exitCode` — a failed call is `status:
- * "failed"` with no output (coordination run 2026-09-29, F1) — so the status
- * counts as well as a non-zero numeric exit code. Pure.
- */
-export function shellFailureOf(status: string | null, exitCode: unknown): number | "failed" | null {
-  if (typeof exitCode === "number" && exitCode !== 0) return exitCode;
-  if (status === "failed" || status === "error") return "failed";
-  return null;
+  const found = effectfulCommandOf(command, cwd, workspaceDirectory);
+  return found.action === null ? null : found.name;
 }
 
 /** True for a shell command that runs `br create`. */
@@ -319,7 +268,7 @@ function entrySummary(entry: WatchedEntry | undefined): string {
  */
 export function workerSignalsOf(input: WorkerSignalInput): HeldSignal[] {
   const now = input.now.getTime();
-  const turnStart = timeOf(input.turnStart);
+  const turnStart = timeOrZero(input.turnStart);
   const running = input.status === "running";
   const calls = toolCallsOf(input.entries, turnStart);
   const held: HeldSignal[] = [];
@@ -328,9 +277,9 @@ export function workerSignalsOf(input: WorkerSignalInput): HeldSignal[] {
   if (running && input.entries.length > 0) {
     let newest: WatchedEntry | undefined;
     for (const entry of input.entries) {
-      if (typeof entry.timestamp === "string" && (newest === undefined || timeOf(entry.timestamp) >= timeOf(newest.timestamp as string))) newest = entry;
+      if (typeof entry.timestamp === "string" && (newest === undefined || timeOrZero(entry.timestamp) >= timeOrZero(newest.timestamp as string))) newest = entry;
     }
-    const newestAt = Math.max(turnStart, newest === undefined ? 0 : timeOf(newest.timestamp as string));
+    const newestAt = Math.max(turnStart, newest === undefined ? 0 : timeOrZero(newest.timestamp as string));
     if (newestAt > 0 && now - newestAt >= STUCK_MS) {
       const since = new Date(newestAt).toISOString();
       held.push({ signal: "stuck", since, evidence: `No new timeline entry since ${since}. The newest: ${entrySummary(newest)}` });
@@ -338,17 +287,23 @@ export function workerSignalsOf(input: WorkerSignalInput): HeldSignal[] {
   }
 
   // permission — waiting 3 minutes.
-  if (running && input.permission !== null && now - timeOf(input.permission.since) >= PERMISSION_WAIT_MS) {
+  if (running && input.permission !== null && now - timeOrZero(input.permission.since) >= PERMISSION_WAIT_MS) {
     held.push({ signal: "permission", since: input.permission.since, evidence: input.permission.text });
   }
 
-  // danger — the first dangerous shell command of the turn.
+  // danger — the first dangerous shell command of the turn that no grant of its request covered before it ran.
   for (const call of calls) {
     const command = commandOf(call);
     if (command === null) continue;
-    const rule = dangerOfCommand(command, text(call.detail.cwd), input.workspaceDirectory);
-    if (rule === null) continue;
-    held.push({ signal: "danger", since: call.at, evidence: `${rule}: ${command}` });
+    // Denied, or still waiting on its permission: it did not run (live check 2026-10-01 F3).
+    if (call.denied || (call.id !== null && input.pendingCallIds?.has(call.id) === true)) continue;
+    if (call.status === "failed" && input.deniedHeld?.(command, call.at) === true) continue;
+    const found = effectfulCommandOf(command, text(call.detail.cwd), input.workspaceDirectory);
+    if (found.action === null) continue;
+    const effects = ACTION_EFFECTS[found.action];
+    const ran = timeOrZero(call.at);
+    if ((input.grants ?? []).some((grant) => timeOrZero(grant.at) <= ran && effects.some((effect) => grant.effects.includes(effect)))) continue;
+    held.push({ signal: "danger", since: call.at, evidence: `${found.name}: ${command}` });
     break;
   }
 
@@ -362,7 +317,7 @@ export function workerSignalsOf(input: WorkerSignalInput): HeldSignal[] {
     const known = failures.get(key);
     failures.set(key, { first: known?.first ?? call.at, count: (known?.count ?? 0) + 1, exit, output: text(call.detail.output) });
   }
-  const failing = [...failures.entries()].filter(([, entry]) => entry.count >= FAILING_COUNT).sort((a, b) => timeOf(a[1].first) - timeOf(b[1].first))[0];
+  const failing = [...failures.entries()].filter(([, entry]) => entry.count >= FAILING_COUNT).sort((a, b) => timeOrZero(a[1].first) - timeOrZero(b[1].first))[0];
   if (failing !== undefined) {
     const [command, entry] = failing;
     const output = entry.output === null ? "" : `\nLast output (end): ${[...entry.output].slice(-400).join("")}`;
@@ -404,7 +359,7 @@ export function workerSignalsOf(input: WorkerSignalInput): HeldSignal[] {
 // ---------------------------------------------------------------------------
 
 /** The SDK slice a Worker pass uses: the stall pass's; each agent's `timeline.refetch` is read through `LiveTimelinePaseo`. */
-export type WorkerWatchPaseo = OrchestratorActionsPaseo;
+export type WorkerWatchPaseo = OrchestratorStatePaseo;
 
 export interface WorkerWatchDeps extends DataHomeDeps {
   now?: () => Date;
@@ -494,7 +449,7 @@ function turnBoundedTimeline(handle: WorkerWatchPaseo, workerId: string, turnSta
                 refetch: async (options: Record<string, unknown>) => {
                   const page = (await ref.timeline.refetch(options)) as { entries?: WatchedEntry[]; hasOlder?: unknown } | null;
                   const entries = Array.isArray(page?.entries) ? page.entries : [];
-                  const reachesStart = entries.some((entry) => typeof entry.timestamp === "string" && timeOf(entry.timestamp) < turnStart);
+                  const reachesStart = entries.some((entry) => typeof entry.timestamp === "string" && timeOrZero(entry.timestamp) < turnStart);
                   return reachesStart ? { ...page, hasOlder: false } : page;
                 },
               },
@@ -527,12 +482,8 @@ export async function runWorkerPass(
   const env = deps.redactEnv ?? process.env;
   const store = createOrchestratorStore(home, { now });
   const alerts = createAlertStore(home, { now });
-  const autopilot = new Set(Object.keys(store.readSettings().autopilot));
-  if (autopilot.size === 0) {
-    // No project is watched: no Worker alert holds any more.
-    const cleared = clearWorkerAlerts(alerts, () => true);
-    return { ...workerPassResult("off"), cleared };
-  }
+  const decisions = createDecisionStore(home, { log });
+  const scope = eventScopeOf(home, log);
   const snapshot = await agentsOf(handle);
   if (!live()) return workerPassResult("off");
   const done = workerPassResult("done");
@@ -542,12 +493,11 @@ export async function runWorkerPass(
     .filter(
       (entry) =>
         entry.workspaceId !== null &&
-        autopilot.has(entry.workspaceId) &&
         entry.facts.role === "worker" &&
         !entry.facts.archived &&
         entry.facts.status === "running",
     )
-    .sort((a, b) => timeOf(b.facts.createdAt) - timeOf(a.facts.createdAt));
+    .sort((a, b) => timeOrZero(b.facts.createdAt) - timeOrZero(a.facts.createdAt));
   const runningIds = new Set(running.map((entry) => entry.facts.id));
 
   let listed: ReadonlyArray<ListedWorkspace> | null | undefined;
@@ -558,7 +508,7 @@ export async function runWorkerPass(
     let found = traces.get(workspaceId);
     if (found === undefined) {
       found = workspaceTracesOf({ location, paseo: handle as unknown as DashboardPaseo, home, allAgents: snapshot.bm }, workspaceId).catch((error: unknown) => {
-        log(`[paseo-bm] the Worker watch could not read the traces of workspace ${workspaceId}: ${describeError(error)}`);
+        log(`[paseo-bm] the Worker watch could not read the traces of workspace ${workspaceId}: ${errorText(error)}`);
         return null;
       });
       traces.set(workspaceId, found);
@@ -584,8 +534,11 @@ export async function runWorkerPass(
       const turnStart = turnStartOf(agent);
       if (turnStart === null) continue;
 
-      // The permission it waits on: since the snapshot says, else since first seen here.
-      const pending = Array.isArray(agent.pendingPermissions) ? (agent.pendingPermissions as Array<Record<string, unknown>>) : [];
+      // The permission it waits on: since the snapshot says, else since first seen here. A request the
+      // action boundary holds is the owner's decision already, one Inbox item (autonomy design §D.2).
+      const pending = (Array.isArray(agent.pendingPermissions) ? (agent.pendingPermissions as Array<Record<string, unknown>>) : []).filter(
+        (request) => !heldOpen(decisions, workerId, request["id"]),
+      );
       for (const key of [...permissionsSeen.keys()]) {
         if (key.startsWith(`${workerId}|`) && !pending.some((request) => key === `${workerId}|${String(request["id"])}`)) permissionsSeen.delete(key);
       }
@@ -599,7 +552,7 @@ export async function runWorkerPass(
       }
 
       const entries: WatchedEntry[] = [];
-      const turnStartMs = timeOf(turnStart);
+      const turnStartMs = timeOrZero(turnStart);
       await readTimelinePages(
         turnBoundedTimeline(handle, workerId, turnStartMs),
         workerId,
@@ -619,7 +572,21 @@ export async function runWorkerPass(
       }
       const workspaceDirectory =
         (await listedOnce())?.find((entry) => entry.id === workspaceId)?.directory ?? meta?.lastKnownDirectory ?? text(agent.cwd);
-      const held = workerSignalsOf({ now: now(), turnStart, status, entries, permission, workspaceDirectory, tier: trace?.tier ?? null });
+      const grants = grantsOfWorker(decisions, workspaceId!, trace?.requestId ?? null, workerId, log);
+      const denied = deniedHeldOfWorker(decisions, workspaceId!, workerId);
+      const held = workerSignalsOf({
+        now: now(),
+        turnStart,
+        status,
+        entries,
+        permission,
+        workspaceDirectory,
+        tier: trace?.tier ?? null,
+        grants,
+        pendingCallIds: pendingCallIdsOf(agent.pendingPermissions),
+        // The question quotes the command masked: compare it masked the same way.
+        deniedHeld: (command, at) => isDeniedHeldCall(denied, workerId, redactText(command, env), at),
+      });
       if (!live()) return done;
 
       // `stuck` and `permission` hold only while seen: new activity, or an answered permission, clears them.
@@ -634,15 +601,18 @@ export async function runWorkerPass(
         ),
       );
       const requestKey = trace === undefined ? null : requestKeyOf(trace);
+      // Events, and the danger allowance, only in the policy's scope; the alerts for every project.
+      const inScope = scope.has(workspaceId!);
       for (const signal of held) {
         const kind = SIGNAL_ALERT_KINDS[signal.signal];
         if (kind === undefined) {
-          done.events.push({ type: "worker.signal", workspaceId: workspaceId!, workerId, requestKey, signal: signal.signal, turnStart, alertKey: null, since: signal.since });
+          if (inScope) done.events.push({ type: "worker.signal", workspaceId: workspaceId!, workerId, requestKey, signal: signal.signal, turnStart, alertKey: null, since: signal.since });
           continue;
         }
         const raised = alerts.raise({ workspaceId: workspaceId!, kind, subject: workerId, detail: redactText(signal.evidence, env) });
         if (!raised.raised) continue;
         done.raised.push(raised.alert.key);
+        if (!inScope) continue;
         const allowance = signal.signal === "danger" ? store.openDangerAllowance(workspaceId!, workerId) : null;
         if (allowance !== null) done.allowances.push(workerId);
         done.events.push({
@@ -658,15 +628,73 @@ export async function runWorkerPass(
         });
       }
     } catch (error) {
-      log(`[paseo-bm] the Worker watch could not look at Worker ${workerId}: ${describeError(error)}`);
+      log(`[paseo-bm] the Worker watch could not look at Worker ${workerId}: ${errorText(error)}`);
     }
   }
 
-  // A Worker that stopped running, or whose project left Autopilot, has no signal any more.
+  // A Worker that stopped running has no signal any more.
   if (!live()) return done;
   done.cleared.push(...clearWorkerAlerts(alerts, (_workspaceId, workerId) => !runningIds.has(workerId)));
   if (done.events.length > 0 && deps.bus !== undefined) await deps.bus.publish(done.events, handle, snapshot.orchestrator);
   return done;
+}
+
+/** True when the Worker's permission request is an open held decision; an unreadable store holds nothing. */
+function heldOpen(decisions: DecisionStore, workerId: string, requestId: unknown): boolean {
+  if (typeof requestId !== "string") return false;
+  try {
+    return isHeldOpen(decisions, workerId, requestId);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The grants a Worker's actions ran under (autonomy design §D.2, change-009
+ * C7): every answered decision of its request, and every held request of its
+ * own, that granted effects, with when it was answered. An unreadable store
+ * gives none.
+ */
+function grantsOfWorker(
+  decisions: DecisionStore,
+  workspaceId: string,
+  requestId: string | null,
+  workerId: string,
+  log: (message: string) => void,
+): Array<{ at: string; effects: readonly Effect[] }> {
+  try {
+    const answered = decisions.list({ workspaceId, statuses: ["answered"] });
+    return answered
+      .filter(
+        (decision) =>
+          decision.grant !== null &&
+          decision.answer !== null &&
+          ((requestId !== null && decision.requestId === requestId) || (decisionKindOf(decision.id) === "held" && decision.askedBy.agentId === workerId)),
+      )
+      .map((decision) => ({ at: decision.answer!.at, effects: decision.grant!.effects }));
+  } catch (error) {
+    log(`[paseo-bm] the Worker watch could not read the grants of ${workerId}: ${errorText(error)}`);
+    return [];
+  }
+}
+
+/** The call ids of a Worker's pending permission requests: Claude's `metadata.toolUseId`, Codex's item id. */
+export function pendingCallIdsOf(pending: unknown): Set<string> {
+  const ids = new Set<string>();
+  for (const request of Array.isArray(pending) ? (pending as Array<Record<string, unknown> | null>) : []) {
+    const metadata = (request?.["metadata"] ?? {}) as { toolUseId?: unknown; itemId?: unknown };
+    for (const id of [text(metadata.toolUseId), text(metadata.itemId), deniedTwinOf(text(request?.["id"]))]) if (id !== null) ids.add(id);
+  }
+  return ids;
+}
+
+/** The held requests of this Worker that were denied or withdrawn; an unreadable store gives none. */
+function deniedHeldOfWorker(decisions: DecisionStore, workspaceId: string, workerId: string) {
+  try {
+    return deniedHeldCallsOf(decisions.list({ workspaceId, statuses: ["answered", "withdrawn", "expired"] })).filter((entry) => entry.agentId === workerId);
+  } catch {
+    return [];
+  }
 }
 
 /**

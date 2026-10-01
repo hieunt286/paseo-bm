@@ -3,9 +3,10 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ManagerAgentHandle, ManagerAgentSnapshot, ManagerPaseo } from "../plugin/server/manager";
+import type { ManagerAgentSnapshot, ManagerPaseo } from "../plugin/server/manager";
 import serverContribute from "../plugin/index.server";
 import { rolePaseoToolsPolicy } from "../plugin/server/setup-roles";
+import { fakePaseo } from "./helpers/fake-paseo";
 import { managerEnsureRpc } from "../plugin/shared/contracts";
 import { createSlot } from "../plugin/client/slot";
 import { sectionRequests } from "../plugin/client/surface-view";
@@ -15,8 +16,6 @@ import {
   createManagerLauncher,
   OLD_HOST_WARNING,
   describeLauncherState,
-  errorCodeOf,
-  errorMessageOf,
   launcherStatusLines,
   launchRequests,
   launcherStyles,
@@ -24,7 +23,8 @@ import {
   selectFromCommandCenter,
   type EnsureManagerOutput,
 } from "../plugin/client/launch-manager";
-import { toneColor } from "../plugin/client/dashboard-model";
+import { toneColor } from "../plugin/client/tone";
+import { errorCodeOf, errorMessageOf } from "../plugin/client/errors";
 
 // manager.ensure resolves the install home from $HOME when Paseo's config names
 // no plugin path (the instructions, and the fallback incidents of delta
@@ -53,14 +53,6 @@ afterAll(() => {
  * switching on a real Paseo client stay a manual check (WP-117 / WP-120).
  */
 
-vi.mock("react-native", () => ({
-  ActivityIndicator: () => null,
-  Pressable: () => null,
-  ScrollView: () => null,
-  Text: () => null,
-  View: () => null,
-}));
-
 // The root tsconfig has no `jsx` setting, so the .tsx entries are loaded through
 // a non-literal specifier that `tsc --noEmit` does not resolve.
 type ClientEntry = (client: unknown) => () => void;
@@ -75,67 +67,25 @@ const WS = "ws-1";
 
 // --- fake Paseo SDK behind the real server handler --------------------------
 
-function fakePaseo(initial: ManagerAgentSnapshot[] = []) {
-  const store = [...initial];
-  let creates = 0;
-  const paseo: ManagerPaseo = {
-    agents: {
-      async list({ filter }) {
-        const entries = store
-          .filter(
-            (a) =>
-              Object.entries(filter.labels ?? {}).every(([k, v]) => a.labels[k] === v) &&
-              (filter.includeArchived || !a.archivedAt),
-          )
-          .map((agent) => ({ agent: { ...agent } }));
-        return { entries, pageInfo: { hasMore: false, nextCursor: null } };
-      },
-    },
-    workspaces: {
-      ref(workspaceId) {
-        return {
-          agents: {
-            async create(options) {
-              creates += 1;
-              const snapshot: ManagerAgentSnapshot = {
-                id: `created-${creates}`,
-                workspaceId,
-                createdAt: new Date(Date.UTC(2026, 8, 15, 12, creates)).toISOString(),
-                status: "idle",
-                labels: { ...(options.labels ?? {}) },
-                archivedAt: null,
-              };
-              store.push(snapshot);
-              const handle: ManagerAgentHandle = {
-                id: snapshot.id,
-                current: () => ({ ...snapshot }),
-                archive: async () => ({}),
-              };
-              return handle;
-            },
-          },
-        };
-      },
-    },
+/**
+ * The shared fake SDK on a machine that is already set up, so `ensureRoles`
+ * (0.4.0) finds nothing missing and this test is about the launcher alone. The
+ * host lists no providers.
+ */
+function daemonWith(initial: ManagerAgentSnapshot[] = []) {
+  return fakePaseo<ManagerPaseo>({
+    agents: initial,
     config: {
-      async get() {
-        return {
-          config: {
-            // A machine that is already set up, so `ensureRoles` (0.4.0) finds
-            // nothing missing and this test is about the launcher alone.
-            providers: { "bm-manager": { paseoTools: rolePaseoToolsPolicy("manager") }, "bm-worker": { paseoTools: rolePaseoToolsPolicy("worker") }, "bm-reviewer": { paseoTools: rolePaseoToolsPolicy("reviewer") }, "bm-orchestrator": { paseoTools: rolePaseoToolsPolicy("orchestrator") } },
-            agentProfiles: [
-              { id: "bm-manager", provider: "bm-manager", model: "m" },
-              { id: "bm-worker", provider: "bm-worker", model: "m" },
-              { id: "bm-reviewer", provider: "bm-reviewer", model: "m" },
-              { id: "bm-orchestrator", provider: "bm-orchestrator", model: "m" },
-            ],
-          },
-        };
-      },
+      providers: { "bm-manager": { paseoTools: rolePaseoToolsPolicy("manager") }, "bm-worker": { paseoTools: rolePaseoToolsPolicy("worker") }, "bm-reviewer": { paseoTools: rolePaseoToolsPolicy("reviewer") }, "bm-orchestrator": { paseoTools: rolePaseoToolsPolicy("orchestrator") } },
+      agentProfiles: [
+        { id: "bm-manager", provider: "bm-manager", model: "m" },
+        { id: "bm-worker", provider: "bm-worker", model: "m" },
+        { id: "bm-reviewer", provider: "bm-reviewer", model: "m" },
+        { id: "bm-orchestrator", provider: "bm-orchestrator", model: "m" },
+      ],
     },
-  };
-  return { paseo, store, creates: () => creates };
+    omit: ["providers"],
+  });
 }
 
 type EnsureHandler = (input: unknown, ctx: { paseo: ManagerPaseo }) => Promise<unknown>;
@@ -340,7 +290,7 @@ describe("client entry registrations", () => {
 
 describe("full path: select -> manager.ensure (real handler) -> open agent", () => {
   it("Command Center: opens the created Manager; a second selection reopens it without creating another (REQ-020b)", async () => {
-    const sdk = fakePaseo();
+    const sdk = daemonWith();
     const ensure = wiredEnsure(sdk.paseo);
     const opened: string[] = [];
     const openAgent = (input: { agentId: string }) => {
@@ -361,12 +311,12 @@ describe("full path: select -> manager.ensure (real handler) -> open agent", () 
     select();
     expect(await runPendingRequest(requests, launcher, { ensure, openAgent })).toBe("opened");
     expect(opened).toEqual(["created-1", "created-1"]);
-    expect(sdk.creates()).toBe(1);
+    expect(sdk.creates.length).toBe(1);
     expect(launcher.getState()).toMatchObject({ status: "opened", agentId: "created-1", created: false });
   });
 
   it("sidebar surface button: first press creates, second press reopens the same Manager", async () => {
-    const sdk = fakePaseo();
+    const sdk = daemonWith();
     const ensure = wiredEnsure(sdk.paseo);
     const opened: string[] = [];
     const launcher = createManagerLauncher();
@@ -381,8 +331,8 @@ describe("full path: select -> manager.ensure (real handler) -> open agent", () 
     expect(await launcher.launch(WS, deps)).toBe("opened");
 
     expect(opened).toEqual(["created-1", "created-1"]);
-    expect(sdk.creates()).toBe(1);
-    expect(sdk.store.filter((a) => a.labels["bm.role"] === "manager")).toHaveLength(1);
+    expect(sdk.creates.length).toBe(1);
+    expect(sdk.agents.filter((a) => a.labels?.["bm.role"] === "manager")).toHaveLength(1);
   });
 
   it("does not run a queued request on a host without navigation.openAgent", async () => {
@@ -445,10 +395,10 @@ describe("pending and error states", () => {
   });
 
   it("shows the server's error code and opens nothing when manager.ensure fails", async () => {
-    const sdk = fakePaseo();
+    const sdk = daemonWith();
     // No roles at all and no provider Paseo can offer: `ensureRoles` fails, so
     // the launcher shows the coded error instead of a Manager.
-    sdk.paseo.config.get = async () => ({ config: { providers: {}, agentProfiles: [] } });
+    sdk.setConfig({ providers: {}, agentProfiles: [] });
     const ensure = wiredEnsure(sdk.paseo);
     const openAgent = vi.fn();
     const launcher = createManagerLauncher();
@@ -524,7 +474,7 @@ describe("pending and error states", () => {
       labels: { "bm.role": "manager" },
       archivedAt: null,
     }));
-    const sdk = fakePaseo(managers);
+    const sdk = daemonWith(managers);
     const ensure = wiredEnsure(sdk.paseo);
     const opened: string[] = [];
     const launcher = createManagerLauncher();
@@ -539,7 +489,7 @@ describe("pending and error states", () => {
     warn.mockRestore();
 
     expect(opened).toEqual(["mgr-new"]);
-    expect(sdk.store.every((a) => !a.archivedAt)).toBe(true);
+    expect(sdk.agents.every((a) => !a.archivedAt)).toBe(true);
     expect(describeLauncherState(launcher.getState())).toEqual([
       { tone: "muted", text: "Reopened the existing Beads Manager for this workspace." },
       {
@@ -664,28 +614,11 @@ describe("the status strip on the main screen and the workspace list (delta 2026
     expect(lines.every((line) => !line.dismissable)).toBe(true);
   });
 
-  it("is built once and placed on both the main screen and the workspace list", () => {
-    // The repo renders no React component in tests, so where the strip goes is
-    // checked on the source, like test/plugin-structure.test.ts reads files.
-    const source = readFileSync(fileURLToPath(new URL("../plugin/client/launcher.tsx", import.meta.url)), "utf8");
-    expect(source.match(/<LauncherStatus\b/g)).toHaveLength(1);
-    expect(source).toMatch(/<SettingsScreen\b.*\bstatus=\{status\}/);
-    expect(source).toMatch(/<InsightsScreen\b[^>]*\bstatus=\{status\}/);
-    // Work's list and a project's page get it too (work.tsx draws it under their headers).
-    expect(source).toMatch(/<WorkScreen\b[\s\S]*?\bstatus=\{status\}/);
-    expect(source).toMatch(/<ProjectPage\b[\s\S]*?\bstatus=\{status\}/);
-  });
+  // Where the strip goes is read from launcher.tsx, in view-source.test.ts.
 });
 
-describe("the workspace list order (delta 20260918f §4.5: pinning removed)", () => {
+describe("the surface's animation", () => {
   const launcher = readFileSync(fileURLToPath(new URL("../plugin/client/launcher.tsx", import.meta.url)), "utf8");
-
-  it("renders workspaces.data in the order it arrives (most recent activity first), with no pinning", () => {
-    expect(launcher).toMatch(/sort: \[\{ key: "activity_at", direction: "desc" \}\]/);
-    // Work's rows are `workspaces.data` mapped one to one; `workRows` keeps that order (plugin-work-model.test.ts).
-    expect(launcher).toMatch(/workspaces=\{workspaces\.data\?\.map\(\(workspace\) => \(\{/);
-    expect(launcher).not.toMatch(/orderRows|pinnedOrder|savePinned|PinControls|DragHandle|PanResponder/);
-  });
 
   it("never asks for the native driver", () => {
     // Paseo's renderer is react-native-web, which has none (P3). Moved here
@@ -725,6 +658,17 @@ describe("launcher: what the machine still needs (0.4.0, design §7.3)", () => {
 
     expect(notices.map((notice) => notice.text).slice(-3)).toEqual([modeNotice, toolsNotice, setupNotice]);
     expect(notices.at(-1)?.tone).toBe("warning");
+  });
+
+  it("shows the notice whole when it names a Reviewer on another model family", async () => {
+    const { describeLauncherState } = await import("../plugin/client/launch-manager");
+    const setupNotice =
+      "paseo-bm created its roles with defaults (codex · gpt-5.6-sol; the Reviewer on claude · claude-opus-5, another model family). " +
+      "Change them in Settings → Agents.";
+
+    const notices = describeLauncherState({ status: "opened", workspaceId: "ws", agentId: "m", created: true, otherManagerIds: [], modeNotice: null, setupNotice });
+
+    expect(notices.at(-1)).toMatchObject({ text: setupNotice, tone: "warning" });
   });
 
   it("shows nothing for a state built before the field existed", async () => {

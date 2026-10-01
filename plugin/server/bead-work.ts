@@ -12,7 +12,7 @@
  * Only Worker turns count: a Reviewer reading a bead with `br show` is not
  * working on it. Pure: records and agents in, marks out.
  */
-import { brActions } from "./shell";
+import { brActions } from "../shared/shell";
 import type { AgentFacts } from "./traces";
 import type { BeadWork, TraceRecord } from "../shared/contracts";
 

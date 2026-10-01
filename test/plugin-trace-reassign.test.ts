@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,16 +7,17 @@ import {
   classifyWorkspaces,
   clearTraceStoreCache,
   monthlyFileName,
-  reassignWorkspace,
   readRecords,
   readWorkspaceMeta,
   storedWorkspaceIds,
-  traceKeyOf,
   writeWorkspaceMeta,
   type TraceStoreLocation,
 } from "../plugin/server/trace-store";
-import { handleTracesReassign, listedWorkspaces, type DashboardPaseo } from "../plugin/server/dashboard-rpc";
+import { reassignWorkspace, traceKeyOf } from "../plugin/server/trace-store-rewrite";
+import { handleTracesReassign } from "../plugin/server/dashboard-rpc";
+import { listedWorkspaces, type DashboardPaseo } from "../plugin/server/paseo-directory";
 import { TRACE_STORE_SCHEMA_VERSION, type TraceRecord } from "../plugin/shared/contracts";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 /**
  * WP-210 part 2: workspace classification and reassignment.
@@ -217,24 +218,15 @@ describe("reassignment", () => {
 });
 
 describe("reassign handler", () => {
-  function fakePaseo(entries: Array<Record<string, unknown>>): DashboardPaseo {
-    return {
-      agents: { list: vi.fn(async () => ({ entries: [] })) },
-      workspaces: { list: vi.fn(async () => ({ entries })) },
-      config: {
-        get: vi.fn(async () => ({
-          config: { plugins: { "paseo-bm": { source: "directory", path: join(home, "plugin", "0.2.0") } } },
-        })),
-      },
-    };
-  }
+  /** The shared fake SDK listing these workspaces and no agent. */
+  const listing = (workspaces: Array<Record<string, unknown>>) => fakePaseo<DashboardPaseo>({ workspaces }).paseo;
 
   it("moves traces onto a workspace Paseo lists and reports the new size", async () => {
     await appendRecord(location, record());
     clearTraceStoreCache();
     const result = await handleTracesReassign(
       { fromWorkspaceId: FROM, toWorkspaceId: TO },
-      fakePaseo([{ id: TO, directory: "/repos/new" }]),
+      listing([{ id: TO, directory: "/repos/new" }]),
     );
     expect(result.moved.traces).toBe(1);
     expect(result.store.workspaceBytes).toBeGreaterThan(0);
@@ -244,12 +236,12 @@ describe("reassign handler", () => {
     await appendRecord(location, record());
     clearTraceStoreCache();
     await expect(
-      handleTracesReassign({ fromWorkspaceId: FROM, toWorkspaceId: TO }, fakePaseo([{ id: "other" }])),
+      handleTracesReassign({ fromWorkspaceId: FROM, toWorkspaceId: TO }, listing([{ id: "other" }])),
     ).rejects.toThrow(/E_TRACE_REASSIGN_INVALID/);
   });
 
   it("reads archived state from archivingAt and reports null on a failing list", async () => {
-    const listed = await listedWorkspaces(fakePaseo([{ id: TO, archivingAt: "2026-09-16T00:00:00.000Z" }]));
+    const listed = await listedWorkspaces(listing([{ id: TO, archivingAt: "2026-09-16T00:00:00.000Z" }]));
     expect(listed).toEqual([{ id: TO, archived: true, directory: null }]);
 
     const failing: DashboardPaseo = {
@@ -259,7 +251,6 @@ describe("reassign handler", () => {
           throw new Error("no daemon");
         },
       },
-      config: fakePaseo([]).config,
     };
     expect(await listedWorkspaces(failing)).toBeNull();
   });

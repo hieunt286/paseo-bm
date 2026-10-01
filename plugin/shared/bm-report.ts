@@ -15,13 +15,19 @@
  * previous shape (REQ-050b). The fixtures in
  * `test/plugin-bm-report.test.ts` are the enforcement.
  */
-import type { GuardrailReport, ParsedReport, ParsedReview, ReportPhase, Tier } from "./contracts";
+import type { GuardrailReport, ParsedReport, ParsedReview, ReportPhase, Tier, TraceRecord } from "./contracts";
 
 /** Values that mean "nothing here" in a block (roles/worker.md says to write `none`). */
 const ABSENT_VALUES = new Set(["", "none", "n/a", "na", "-", "null", "nil"]);
 
-const REPORT_MARKER = /^\s*>?\s*(?:[-*]\s*)?bm-report\s*$/i;
-const REVIEW_MARKER = /^\s*>?\s*(?:[-*]\s*)?bm-review\b(.*)$/i;
+/**
+ * A marker line: the marker alone, after an optional `>`, list bullet and `**`,
+ * with an optional closing `**` — `**BM-REPORT**`, as a model bolds it (base
+ * design, "Finding blocks"; Phase 3 live check F5). `BM-QUESTIONS` and
+ * `BM-ANSWERS` read the same way (`bm-questions.ts`).
+ */
+const REPORT_MARKER = /^\s*>?\s*(?:[-*]\s*)?(?:\*\*)?bm-report(?:\*\*)?\s*$/i;
+const REVIEW_MARKER = /^\s*>?\s*(?:[-*]\s*)?(?:\*\*)?bm-review\b(?:\*\*)?(.*)$/i;
 const FENCE = /^\s*>?\s*(?:```|~~~)/;
 const KEY_VALUE = /^\s*>?\s*([A-Za-z][A-Za-z0-9 _-]*)\s*:\s*(.*)$/;
 
@@ -54,6 +60,17 @@ export function valueOrNull(raw: string | undefined): string | null {
   const trimmed = raw.trim().replace(/^`+|`+$/g, "").trim();
   if (ABSENT_VALUES.has(trimmed.toLowerCase())) return null;
   return trimmed === "" ? null : trimmed;
+}
+
+/**
+ * `buildAndTests` as written, backticks kept: they mark the checks it names
+ * (autonomy design §C.6, `shared/evidence.ts`). `valueOrNull` strips a value's
+ * outer backticks, which cut the opening one of a value that starts with a
+ * check (`` `npm test` pass `` read `npm test` pass), and made a value of one
+ * check a word. An absent value still reads null.
+ */
+export function checksValueOrNull(raw: string | undefined): string | null {
+  return valueOrNull(raw) === null ? null : raw!.trim();
 }
 
 /**
@@ -147,11 +164,6 @@ export function parseBeadIdList(raw: string | undefined): BeadIdList {
     ids.push(id);
   }
   return { ids, complete };
-}
-
-/** Splits a list field on commas or whitespace and keeps only plausible bead ids. */
-export function parseBeadIds(raw: string | undefined): string[] {
-  return parseBeadIdList(raw).ids;
 }
 
 /** A skill directory name such as `feature-workflow` (roles/worker.md, `skillsUsed`). */
@@ -275,6 +287,7 @@ const REPORT_KEYS = new Map<string, keyof ParsedReport | "phase" | "tier" | "gua
   ["skillsused", "skillsUsed"],
   ["decided", "decided"],
   ["blockers", "blockers"],
+  ["handoffnote", "handoffNote"],
   ["guardrail", "guardrail"],
 ]);
 
@@ -302,7 +315,7 @@ function extractBlocks(text: string, marker: RegExp): RawBlock[] {
     const markerMatch = marker.exec(rawLine);
     if (markerMatch !== null) {
       if (current !== null) blocks.push(current);
-      current = { fields: new Map(), unknown: [], markerSuffix: (markerMatch[1] ?? "").trim(), tail: [] };
+      current = { fields: new Map(), unknown: [], markerSuffix: (markerMatch[1] ?? "").trim().replace(/\*\*$/, "").trim(), tail: [] };
       latest = current;
       continue;
     }
@@ -334,6 +347,12 @@ function extractBlocks(text: string, marker: RegExp): RawBlock[] {
   }
   if (current !== null) blocks.push(current);
   return blocks;
+}
+
+/** `{ handoffNote }` when the report carries one (autonomy design §G.6), else nothing: older reports keep their exact shape. */
+function handoffNoteOf(raw: string | undefined): { handoffNote?: string } {
+  const note = valueOrNull(raw);
+  return note === null ? {} : { handoffNote: note };
 }
 
 export interface ParseContext {
@@ -375,11 +394,13 @@ export function parseReports(text: string, context: ParseContext): ParsedReport[
       beadsClosed: lists.beadsClosed.ids,
       beadsReady: lists.beadsReady.ids,
       reviewFindingsOpen: valueOrNull(field("reviewfindingsopen")),
-      buildAndTests: valueOrNull(field("buildandtests")),
+      buildAndTests: checksValueOrNull(field("buildandtests")),
       skillsUsed: skills.names,
       decided: parseDecided(field("decided")),
       blockers: valueOrNull(field("blockers")),
       guardrail: parseGuardrail(field("guardrail")),
+      // Only an outgoing Worker's report carries it (autonomy design §G.6 step 1): absent otherwise.
+      ...handoffNoteOf(field("handoffnote")),
       unparsedFields: [...new Set(block.unknown)],
       incompleteFields: [
         ...Object.entries(lists)
@@ -434,6 +455,47 @@ export function parseReviews(text: string, context: ParseContext): ParsedReview[
     });
   }
   return out;
+}
+
+/** How many `BM-REVIEW` blocks the messages of each time hold. */
+function reviewBlocksByTime(messages: ReadonlyArray<{ at: string; text: string }>): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const message of messages) {
+    const found = parseReviews(message.text, { agentId: "", at: message.at }).length;
+    if (found > 0) counts.set(message.at, (counts.get(message.at) ?? 0) + found);
+  }
+  return counts;
+}
+
+/**
+ * The reviews of a trace record that are its own Reviewer's answers — the
+ * only ones a count may take (bead `7gxw.12`).
+ *
+ * A review is one Reviewer's reply. The same block quoted anywhere else — a
+ * Worker's re-review prompt, the plugin's format notice, a Manager relaying it
+ * to the owner — is that review again, and builds before `7gxw.12` stored it
+ * as another one (the replay of 2026-09-30: 121 of 404 reviews). The
+ * collector now keeps only a Reviewer's replies; a record written before is
+ * read the same way here: a Manager's or a Worker's record has none, and at a
+ * time a Reviewer's prompt quoted a block, only as many reviews as its replies
+ * of that time hold are its own — the last ones, a turn's prompt coming before
+ * its replies. Pure.
+ */
+export function ownReviewsOf(record: Pick<TraceRecord, "role" | "reviews" | "sent" | "received">): ParsedReview[] {
+  if (record.role !== "reviewer") return [];
+  const quoted = reviewBlocksByTime(record.sent);
+  if (quoted.size === 0) return record.reviews;
+  const replies = reviewBlocksByTime(record.received);
+  const kept: ParsedReview[] = [];
+  for (const review of [...record.reviews].reverse()) {
+    if (quoted.has(review.at)) {
+      const left = replies.get(review.at) ?? 0;
+      if (left === 0) continue;
+      replies.set(review.at, left - 1);
+    }
+    kept.push(review);
+  }
+  return kept.reverse();
 }
 
 /**

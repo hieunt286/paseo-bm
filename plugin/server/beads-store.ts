@@ -72,8 +72,8 @@ function unreadable(detail: string, cause?: unknown): DashboardError {
 /**
  * Resolves `<workspace>/.beads/issues.jsonl`, refusing to leave the workspace.
  *
- * Same no-follow principle as the trace store (design §3.8) and the installer's
- * `src/paths-guard.ts`: a symlinked `.beads` or `issues.jsonl` could point at
+ * Same no-follow principle as the trace store (design §3.8) and the retired
+ * installer's path guard: a symlinked `.beads` or `issues.jsonl` could point at
  * any file on the machine, and reading it would leak whatever it holds into the
  * Dashboard.
  */

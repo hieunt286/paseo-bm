@@ -1,20 +1,23 @@
+import { resolve } from "node:path";
 import type { PluginBeforeRequests, PluginServerContext } from "@getpaseo/plugin/server";
 import { roleOfProvider } from "./agent-role";
 import { TOOL_PROVIDERS, withAgentTools, type AgentToolsEndpoint } from "./agent-tools";
 import { aliasBases } from "./alias-bases";
-import { createOrchestratorStore } from "./orchestrator-store";
 import { providerId } from "./provider-id";
 import {
   LOOKUP_TIMEOUT_MS,
   ROLE_GETS_MODE,
   TIMED_OUT,
+  boundaryPostureOf,
   capabilityOf,
   chooseModeId,
+  creatorModeOffBoundary,
   featuresFor,
   modesFor,
   profileOf,
   runPostureOf,
   withTimeout,
+  type BoundaryPosture,
   type ProviderCapability,
   type ProviderFeature,
   type ProviderMode,
@@ -22,14 +25,16 @@ import {
 } from "./role-mode";
 import {
   BASE_INSTRUCTIONS,
+  OWNER_PRECEDENTS_HEADING,
+  RUNTIME_FACTS_HEADING,
+  creationProjectOf,
   fullInstructions,
-  dataHomeOf,
-  readRoleExtras,
   runtimeFactsOf,
-  type RoleExtras,
   type RuntimeFacts,
   type Role,
-} from "./role-extras";
+} from "./role-instructions";
+import { listedWorkspaces, type DashboardPaseo } from "./paseo-directory";
+import { rememberCreatedBoundary } from "./created-boundary";
 
 /**
  * Role instructions injected into every paseo-bm agent at creation (bm-hld).
@@ -42,9 +47,19 @@ import {
  *
  * The same hook sets the start mode of Workers and Reviewers (delta 20260917c
  * §4.6): what the role files used to teach in a paragraph each is one lookup
- * here, and it cannot be got wrong by an agent. The Orchestrator's assessment
- * agent gets its instructions, its profile and a mode under the Reviewer's
- * rule the same way, and no Paseo tools (orchestrator design §3.1).
+ * here, and it cannot be got wrong by an agent. The Orchestrator
+ * gets its instructions, its profile and a mode under the Reviewer's
+ * rule the same way, and no Paseo tools (orchestrator design §3.1). A new
+ * Manager or Worker also gets the owner's precedents of its workspace, found
+ * from its `cwd`, and the global ones (autonomy design §B.6).
+ *
+ * In a project whose action boundary the owner turned on (autonomy design
+ * §D.2, change-010; off by default), a Worker or Reviewer on Claude or Codex
+ * starts in the least permissive workable mode instead (`BOUNDARY_MODES`),
+ * whatever mode its creator passed; only a mode hand-set on its profile wins.
+ * Elsewhere today's rule applies, and a creator's boundary mode is moved back
+ * to today's pick. Its Runtime facts say which, as `Action boundary: on` or
+ * `off — <why>`.
  *
  * Provider ids map to roles through `roleOfProvider` (agent-role.ts), the
  * same rule every lookup uses to tell paseo-bm agents apart (delta 20260918g):
@@ -74,11 +89,7 @@ export type AgentCreateRequest = PluginBeforeRequests["agent.create"];
  * An existing, different system prompt is kept after the instructions,
  * separated by `ROLE_PROMPT_SEPARATOR`.
  */
-export function applyRoleInstructions(
-  request: AgentCreateRequest,
-  extras: Partial<RoleExtras> = {},
-  facts: RuntimeFacts = {},
-): AgentCreateRequest | undefined {
+export function applyRoleInstructions(request: AgentCreateRequest, facts: RuntimeFacts = {}): AgentCreateRequest | undefined {
   try {
     // Typed as required, but never trusted: a malformed request must not throw.
     const config = (request as Partial<AgentCreateRequest> | null | undefined)?.config;
@@ -86,12 +97,17 @@ export function applyRoleInstructions(
     const role = roleOfProvider(config.provider);
     if (role === null) return undefined;
     const base = BASE_INSTRUCTIONS[role];
-    // The role's additional instructions (from Phase 1 no screen edits them) come after the base, never instead of it.
-    // Runtime facts sit between the two, so manager.ensure and this hook write the same text.
-    const instructions = fullInstructions(role, extras[role] ?? "", facts);
+    // The base, then the Runtime facts and precedents: manager.ensure and this hook write the same text.
+    const instructions = fullInstructions(role, facts);
 
     const existing = typeof config.systemPrompt === "string" ? config.systemPrompt : "";
     if (existing.includes(instructions)) return undefined;
+    // Built by the plugin's own creator (`manager.ensure`) from the same parts,
+    // read a moment earlier: keep it rather than add a second copy of them.
+    const built = base.trimEnd();
+    if ([RUNTIME_FACTS_HEADING, OWNER_PRECEDENTS_HEADING].some((next) => existing.includes(`${built}\n\n${next}`))) {
+      return undefined;
+    }
     let systemPrompt: string;
     if (existing.includes(base)) {
       // Set by an older call with the base only: upgrade it in place.
@@ -150,33 +166,18 @@ function requestModelOf(config: { provider?: unknown; model?: unknown }): string
 /**
  * The roles whose own profile the hook applies: the model, the thinking level
  * and the features. The Manager is left alone: `manager.ensure` already passes
- * its profile. The Orchestrator's assessment agent is created by the plugin
+ * its profile. The Orchestrator is created by the plugin
  * with its profile's model, but the user may have changed the profile since
  * (orchestrator design §3.1).
  */
 const PROFILE_ROLES: ReadonlySet<Role | null> = new Set<Role>(["worker", "reviewer", "orchestrator"]);
 
 /**
- * Appends a model the hook replaced to `orchestrator/model-corrections.json`,
- * for the `agent.model-corrected` rule (orchestrator design §4.3). The agent
- * has no id yet, so the rule later matches by alias, `cwd` and time. Without a
- * data folder nothing is recorded; a failed write is only logged by the store,
- * and nothing here can fail the creation.
- */
-function recordCorrection(alias: string, requested: string, profileModel: string, cwd: string): void {
-  try {
-    const home = dataHomeOf();
-    if (home === null) return;
-    createOrchestratorStore(home).appendCorrection({ at: new Date().toISOString(), alias, requested, profileModel, cwd });
-  } catch {
-    // The correction itself matters more than its record.
-  }
-}
-
-/**
  * Returns the request with the model of a Worker's, Reviewer's or
  * Orchestrator's own profile when the creator named another one, or `undefined` when nothing changes.
- * Never throws.
+ * Never throws. The correction is one `[paseo-bm]` log line and nothing else:
+ * its log file (`model-corrections.json`) went with its only reader, the
+ * `agent.model-corrected` rule (autonomy design §B.9).
  *
  * The role files tell the creator to pass `bm-<role>/<model of the profile>`,
  * but a Manager reads the profile once and keeps it: after the user moved the
@@ -203,7 +204,6 @@ export function applyRoleModel(request: AgentCreateRequest, profile: RoleProfile
     // on the profile's; `applyRoleProfile` then sets the profile's own, if any.
     delete next.thinkingOptionId;
     console.warn(`[paseo-bm] ${id} was asked for model "${requested}", but its profile names "${profile.model}"; starting it on "${profile.model}".`);
-    recordCorrection(id, requested, profile.model, typeof config.cwd === "string" ? config.cwd : "");
     return { ...request, config: next as unknown as AgentCreateRequest["config"] };
   } catch {
     return undefined;
@@ -292,25 +292,90 @@ export function applyRunPosture(
   }
 }
 
+/**
+ * Returns the request in its boundary mode (autonomy design §D.2): the
+ * posture's `modeId`, and its provider options over the creator's. Any other
+ * mode the creator passed is moved; `undefined` when nothing changes. Never throws.
+ */
+export function applyBoundaryMode(request: AgentCreateRequest, posture: BoundaryPosture): AgentCreateRequest | undefined {
+  try {
+    if (!posture.on) return undefined;
+    const config = (request as Partial<AgentCreateRequest> | null | undefined)?.config;
+    if (config === null || typeof config !== "object") return undefined;
+    const next: Record<string, unknown> = { ...config };
+    let changed = false;
+    const current = typeof config.modeId === "string" && config.modeId.trim() !== "" ? config.modeId : undefined;
+    if (current !== posture.modeId) {
+      if (current !== undefined) {
+        console.warn(`[paseo-bm] ${providerId(config.provider)} was created in mode "${current}"; the action boundary starts it in "${posture.modeId}".`);
+      }
+      next.modeId = posture.modeId;
+      changed = true;
+    }
+    if (posture.providerOptions !== undefined) {
+      const own = (config as { providerOptions?: unknown }).providerOptions;
+      const creator = own !== null && typeof own === "object" && !Array.isArray(own) ? (own as Record<string, unknown>) : {};
+      const merged = { ...creator, ...posture.providerOptions };
+      if (JSON.stringify(merged) !== JSON.stringify(own ?? null)) {
+        next.providerOptions = merged;
+        changed = true;
+      }
+    }
+    return changed ? { ...request, config: next as unknown as AgentCreateRequest["config"] } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The request without its creator's mode when that is the role's boundary
+ * mode and the boundary is not applied (change-010 C5), so today's rule picks
+ * again; `undefined` otherwise. Only on a provider whose tiered list was read,
+ * where today's rule always picks a mode. Never throws.
+ */
+function withoutCreatorBoundaryMode(request: AgentCreateRequest, base: string | null, modes: readonly ProviderMode[] | null): AgentCreateRequest | undefined {
+  try {
+    if (modes === null || capabilityOf(modes) !== "tiered") return undefined;
+    const config = request.config;
+    const current = typeof config.modeId === "string" && config.modeId.trim() !== "" ? config.modeId : undefined;
+    if (current === undefined || creatorModeOffBoundary(roleOfProvider(config.provider), base, current) !== undefined) return undefined;
+    const next: Record<string, unknown> = { ...config };
+    delete next.modeId;
+    return { ...request, config: next as unknown as AgentCreateRequest["config"] };
+  } catch {
+    return undefined;
+  }
+}
+
+/** The action boundary as the hook read it for this creation (§D.2): what it applies, and the alias's base provider. */
+export interface BoundaryInput {
+  posture: BoundaryPosture | null;
+  base: string | null;
+}
+
 /** Instructions, profile settings and start posture together; `undefined` when none changes. */
 export function applyRoleConfig(
   request: AgentCreateRequest,
-  extras: Partial<RoleExtras> = {},
   modes: readonly ProviderMode[] | null = null,
   facts: RuntimeFacts = {},
   profileModeId: string | null = null,
   profile: RoleProfile | null = null,
   features: readonly ProviderFeature[] | null = null,
+  boundary: BoundaryInput | null = null,
 ): AgentCreateRequest | undefined {
-  const withInstructions = applyRoleInstructions(request, extras, facts);
+  const withInstructions = applyRoleInstructions(request, facts);
   // The model first: the profile's thinking level only applies on the profile's model.
   const withModel = applyRoleModel(withInstructions ?? request, profile) ?? withInstructions;
   const withProfile = applyRoleProfile(withModel ?? request, profile) ?? withModel;
+  // Under the boundary (§D.2): its mode, whatever the creator passed.
+  if (boundary?.posture?.on === true) return applyBoundaryMode(withProfile ?? request, boundary.posture) ?? withProfile;
+  // Otherwise today's rule; a creator's boundary mode counts as no mode, so today's pick replaces it.
+  const start = (boundary === null ? undefined : withoutCreatorBoundaryMode(withProfile ?? request, boundary.base, modes)) ?? withProfile ?? request;
   const capability = capabilityOf(modes);
   const posture =
     capability === "untiered" || capability === "none"
-      ? applyRunPosture(withProfile ?? request, capability, modes, features, profileModeId)
-      : applyRoleMode(withProfile ?? request, modes, profileModeId);
+      ? applyRunPosture(start, capability, modes, features, profileModeId)
+      : applyRoleMode(start, modes, profileModeId);
   return posture ?? withProfile;
 }
 
@@ -333,12 +398,30 @@ function modeLookupFor(request: AgentCreateRequest): string | null {
   }
 }
 
+/**
+ * The workspace whose folder is `folder` — the reverse of the Dashboard's
+ * `workspaceDirectory`, over the same `workspaces.list` — or `null` when
+ * Paseo lists none, more than one, or cannot be read: the hook's request
+ * carries the agent's `cwd`, not its workspace (design §B.9). An archived
+ * workspace does not count. Never throws.
+ */
+export async function workspaceOfFolder(paseo: unknown, folder: string): Promise<string | null> {
+  try {
+    const listed = await listedWorkspaces(paseo as DashboardPaseo);
+    if (listed === null) return null;
+    const wanted = resolve(folder);
+    const matches = listed.filter((entry) => !entry.archived && entry.id !== "" && entry.directory !== null && resolve(entry.directory) === wanted);
+    return matches.length === 1 ? matches[0]!.id : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Everything the hook needs from the daemon, gathered under one time budget. */
 async function prepare(
   request: AgentCreateRequest,
   paseo: unknown,
 ): Promise<{
-  extras: Partial<RoleExtras>;
   modes: ProviderMode[] | null;
   facts: RuntimeFacts;
   profileModeId: string | null;
@@ -346,17 +429,17 @@ async function prepare(
   features: ProviderFeature[] | null;
   /** The provider the alias extends (`claude`, `codex`, …), or null when unreadable. */
   base: string | null;
+  /** The action boundary for a Worker or Reviewer (§D.2); null for another role. */
+  boundary: BoundaryPosture | null;
 }> {
-  let extras: Partial<RoleExtras> = {};
-  try {
-    const home = dataHomeOf();
-    if (home !== null) extras = readRoleExtras(home);
-  } catch {
-    // Without the additions the agent still gets its base instructions.
-  }
   const cwd = typeof request?.config?.cwd === "string" ? request.config.cwd : undefined;
   const id = providerId(request?.config?.provider);
   const role = roleOfProvider(id) ?? undefined;
+  // The project of `cwd` and its action boundary switch (§D.2, change-010 C5), read beside the other lookups.
+  const projectLookup =
+    role === "manager" || role === "worker" || role === "reviewer"
+      ? creationProjectOf(cwd, { workspaceOf: (folder) => workspaceOfFolder(paseo, folder) })
+      : Promise.resolve({ workspaceId: null, boundary: "unknown" as const });
   // The Worker's, Reviewer's or Orchestrator's own profile: its mode (bm-msy), and its
   // thinking and features (delta 20260921 §4.1.1). One read, whether or not
   // the mode needs a lookup: a Worker created WITH a mode still gets the
@@ -374,9 +457,35 @@ async function prepare(
   const asked = request?.config ? requestModelOf(request.config) : null;
   const selection = id !== null && wanted !== null && asked !== null && asked !== wanted ? `${id}/${wanted}` : requested;
   const features = capabilityOf(modes) === "untiered" ? await featuresFor(paseo, selection, cwd) : null;
-  const facts = role === undefined ? {} : await runtimeFactsOf(role, paseo, cwd);
+  // Read once for the facts and the mode.
+  const project = await projectLookup;
+  // The owner's precedents go to a new Manager or Worker: of the workspace whose folder is `cwd`, and the global ones (design §B.6).
+  const facts =
+    role === undefined
+      ? {}
+      : await runtimeFactsOf(role, paseo, cwd, undefined, undefined, {
+          ...(project.workspaceId === null ? {} : { workspaceId: project.workspaceId }),
+          boundary: project.boundary,
+        });
   const base = id === null ? null : ((await aliasBases(paseo))[id] ?? null);
-  return { extras, modes, facts, profileModeId, profile, features, base };
+  const boundary = boundaryPostureOf({ role, base, project: project.boundary, modes, profileModeId });
+  return { modes, facts: boundary === null ? facts : { ...facts, actionBoundary: boundary }, profileModeId, profile, features, base, boundary };
+}
+
+/**
+ * Keeps the boundary this hook applies to a Worker or Reviewer for its
+ * `agent.created`, whose snapshot has no prompt to read yet (`created-boundary.ts`,
+ * live check 2026-10-01 F1). No posture — the lookups timed out — is off: the
+ * agent starts without the facts line and outside the boundary. Never throws.
+ */
+function rememberBoundaryOf(request: AgentCreateRequest, posture: BoundaryPosture | null): void {
+  try {
+    const role = roleOfProvider(request.config.provider);
+    if (role !== "worker" && role !== "reviewer") return;
+    rememberCreatedBoundary(request.config.provider, request.config.cwd, posture?.on === true ? "on" : "off");
+  } catch {
+    // The label is best effort; the permission handler still reads the prompt.
+  }
 }
 
 function isBmRequest(request: AgentCreateRequest): boolean {
@@ -406,7 +515,7 @@ export function applyAgentTools(
     if (tools === null || base === null || !TOOL_PROVIDERS.includes(base)) return undefined;
     const role = roleOfProvider(request.config.provider);
     // Every role has its own path. The Orchestrator's carries the endpoint's secret and serves its
-    // read tools, its decision and command tools and bm_assessment — and it never gets Paseo's tools (orchestrator design §3.1, §5.1).
+    // read tools and its decision and command tools — and it never gets Paseo's tools (orchestrator design §3.1, §5.1).
     const config = role === null ? undefined : withAgentTools(request.config, role, tools.urlFor(role));
     return config === undefined ? undefined : { ...request, config };
   } catch {
@@ -445,24 +554,26 @@ export function registerRoleHook(host: RoleHookHost, tools: RoleHookTools | null
     return (async () => {
       // The host fails the whole creation if this hook takes longer than 30 s,
       // so everything it looks up is raced as ONE budget: a slow daemon costs
-      // the extras, the mode and the facts, never the agent.
+      // the mode and the facts, never the agent.
       const prepared = await withTimeout(prepare(request, paseo), LOOKUP_TIMEOUT_MS);
       if (prepared === TIMED_OUT) {
         console.warn(
           `[paseo-bm] preparing the role config took longer than ${LOOKUP_TIMEOUT_MS} ms; the agent starts with its role instructions only.`,
         );
         // The base provider is unknown here, so no tools: an agent Paseo refuses would cost more than a hand-written block.
+        rememberBoundaryOf(request, null);
         return applyRoleInstructions(request);
       }
       const configured = applyRoleConfig(
         request,
-        prepared.extras,
         prepared.modes,
         prepared.facts,
         prepared.profileModeId,
         prepared.profile,
         prepared.features,
+        { posture: prepared.boundary, base: prepared.base },
       );
+      rememberBoundaryOf(request, prepared.boundary);
       return applyAgentTools(configured ?? request, tools, prepared.base) ?? configured;
     })();
   });

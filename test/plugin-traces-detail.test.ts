@@ -1,30 +1,20 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  TIMING_BASIS,
-  agentTiming,
-  beadActionsOf,
-  detail,
-  managerTurns,
-  paginate,
-  reconstructTraces,
-  subAgentTracesOf,
-  skillsOf,
-  userMessagesOf,
-  summarise,
-  summariseUsage,
-  totalMsOf,
-  usageOfTrace,
-  type AgentFacts,
-} from "../plugin/server/traces";
+import { reconstructTraces, type AgentFacts } from "../plugin/server/traces";
+import { TIMING_BASIS, agentTiming, beadActionsOf, managerTurns, totalMsOf } from "../plugin/server/trace-timing";
+import { agentTokenFiguresOf, summariseUsage, usageOfTrace } from "../plugin/server/trace-usage";
+import { detail, paginate, skillsOf, subAgentTracesOf, summarise, userMessagesOf } from "../plugin/server/trace-views";
 import { priceUsage } from "../plugin/server/cost";
-import { handleTracesGet, handleTracesList, type DashboardPaseo } from "../plugin/server/dashboard-rpc";
+import { handleTracesAgents, handleTracesGet, handleTracesList } from "../plugin/server/dashboard-rpc";
+import { createCompactionStore } from "../plugin/server/compaction-store";
+import type { DashboardPaseo } from "../plugin/server/paseo-directory";
 import { appendRecord, clearTraceStoreCache, writeWorkspaceMeta } from "../plugin/server/trace-store";
 import { clearBeadsCache } from "../plugin/server/beads-store";
 import { inferWorkflowSteps } from "../plugin/server/workflow-steps";
-import { TRACE_STORE_SCHEMA_VERSION, type TraceRecord } from "../plugin/shared/contracts";
+import { CONTEXT_TREND_MAX, TRACE_STORE_SCHEMA_VERSION, tracesAgentsRpc, type TraceRecord } from "../plugin/shared/contracts";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 /**
  * WP-206.1.2: timing, bead detail, summaries, pagination and the read RPCs.
@@ -37,6 +27,10 @@ const WS = "wks_1";
 const MANAGER = "agent-manager";
 let home: string;
 let workspace: string;
+
+/** The shared fake SDK with these agents and workspaces (the one at `workspace` by default); it honours the list filter, like the daemon. */
+const daemonWith = (agents: Array<Record<string, unknown> & { id: string }>, workspaces: Array<Record<string, unknown>> = [{ id: WS, directory: workspace }]) =>
+  fakePaseo<DashboardPaseo>({ agents, workspaces }).paseo;
 
 function record(overrides: Partial<TraceRecord> = {}): TraceRecord {
   return {
@@ -669,6 +663,43 @@ describe("summary and detail", () => {
     });
     expect(full.sent.workerInitialPrompts.map((message) => message.text)).toEqual(["Your task\nrequestId: req-A"]);
   });
+
+  it("names a successor by its bm.handoffFrom label and holds it to its own checks, with no brief marker in its first message (autonomy design §G.6; live check F2)", () => {
+    const shell = (agentId: string, at: string) => ({ kind: "shell" as const, detail: "npm test", agentId, at, status: "completed", exitCode: 0 });
+    const records = [
+      record({ sent: [msg("thêm màn hình báo cáo")] }),
+      record({
+        agentId: "w1",
+        role: "worker",
+        turnId: "w1-turn",
+        at: "2026-09-16T10:05:00.000Z",
+        startedAt: "2026-09-16T10:00:30.000Z",
+        endedAt: "2026-09-16T10:05:00.000Z",
+        sent: [msg("Your task\nrequestId: req-A", "2026-09-16T10:00:30.000Z")],
+        evidence: [{ kind: "file", detail: "src/a.ts", agentId: "w1", at: "2026-09-16T10:01:00.000Z" }, shell("w1", "2026-09-16T10:02:00.000Z")],
+      }),
+      record({
+        agentId: "w2",
+        role: "worker",
+        turnId: "w2-turn",
+        at: "2026-09-16T10:10:00.000Z",
+        startedAt: "2026-09-16T10:06:00.000Z",
+        endedAt: "2026-09-16T10:10:00.000Z",
+        sent: [msg("requestId: req-A\nrequest: thêm màn hình báo cáo", "2026-09-16T10:06:00.000Z")],
+        reports: [report({ agentId: "w2", filesChanged: ["src/a.ts"], buildAndTests: "`npm test` pass" })],
+      }),
+    ];
+    const facts = [agent({ id: "w1", replacedBy: "w2" }), agent({ id: "w2", createdAt: "2026-09-16T10:06:00.000Z", handoffFrom: "w1" })];
+    const { trace: built, agents } = trace(records, facts);
+    const full = detail(built, { agents, workspaceState: "live", reassignedFrom: null, lookupBeads: () => ({ found: [], missing: [] }) });
+    expect(full.handoffs).toEqual([{ agentId: "w2", from: "w1" }]);
+    expect(full.verification).toMatchObject({ checks: "self-reported", unverified: true });
+    // Without the label the predecessor's run after the last edit counts, and the detail names no handoff.
+    const plain = trace(records, [agent({ id: "w1" }), agent({ id: "w2", createdAt: "2026-09-16T10:06:00.000Z" })]);
+    const unlabelled = detail(plain.trace, { agents: plain.agents, workspaceState: "live", reassignedFrom: null, lookupBeads: () => ({ found: [], missing: [] }) });
+    expect(unlabelled.handoffs).toBeUndefined();
+    expect(unlabelled.verification).toMatchObject({ checks: "detected", unverified: false });
+  });
 });
 
 describe("pagination", () => {
@@ -685,29 +716,6 @@ describe("pagination", () => {
 });
 
 describe("read RPC handlers", () => {
-  function fakePaseo(agents: Array<Record<string, unknown>>): DashboardPaseo {
-    return {
-      // Honours a bm.role label filter when one is given, like the daemon does,
-      // and returns every agent without one (bmAgentsOf lists with none since
-      // delta 20260918g and reads each agent's own label).
-      agents: {
-        list: vi.fn(async (options) => {
-          const wanted = options.filter.labels?.["bm.role"];
-          const entries = agents
-            .filter((agent) => wanted === undefined || ((agent["labels"] ?? {}) as Record<string, string>)["bm.role"] === wanted)
-            .map((agent) => ({ agent }));
-          return { entries };
-        }),
-      },
-      workspaces: { list: vi.fn(async () => ({ entries: [{ id: WS, directory: workspace }] })) },
-      config: {
-        get: vi.fn(async () => ({
-          config: { plugins: { "paseo-bm": { source: "directory", path: join(home, "plugin", "0.2.0") } } },
-        })),
-      },
-    };
-  }
-
   async function seed(): Promise<void> {
     const location = { tracesDir: join(home, "traces") };
     for (const entry of baseRecords()) await appendRecord(location, entry);
@@ -716,7 +724,7 @@ describe("read RPC handlers", () => {
 
   it("lists traces newest first with the store size and notices", async () => {
     await seed();
-    const paseo = fakePaseo([
+    const paseo = daemonWith([
       { id: "w1", workspaceId: WS, status: "idle", createdAt: "2026-09-16T10:00:10.000Z", labels: { "bm.role": "worker", "bm.requestId": "req-A" } },
     ]);
     const result = await handleTracesList({ workspaceId: WS }, paseo);
@@ -728,13 +736,13 @@ describe("read RPC handlers", () => {
 
   it("caps the page at the agreed limit", async () => {
     await seed();
-    const result = await handleTracesList({ workspaceId: WS, limit: 999 }, fakePaseo([]));
+    const result = await handleTracesList({ workspaceId: WS, limit: 999 }, daemonWith([]));
     expect(result.traces.length).toBeLessThanOrEqual(50);
   });
 
   it("gets one trace by id and fails a missing id with the coded error", async () => {
     await seed();
-    const paseo = fakePaseo([
+    const paseo = daemonWith([
       { id: "w1", workspaceId: WS, status: "idle", createdAt: "2026-09-16T10:00:10.000Z", labels: { "bm.role": "worker", "bm.requestId": "req-A" } },
     ]);
     const listed = await handleTracesList({ workspaceId: WS }, paseo);
@@ -749,6 +757,26 @@ describe("read RPC handlers", () => {
     );
   });
 
+  it("leaves the plugin's own /compact out of what the owner typed, read live from the Worker's timeline (autonomy design §G.5)", async () => {
+    await seed();
+    // The send log of the data folder the trace store lives in.
+    createCompactionStore(home, { now: () => new Date("2026-09-16T10:05:00.000Z") }).logSend("w1", "/compact", "cmp-1");
+    const typed = (text: string) => ({ type: "user_message", text, messageId: "m", clientMessageId: "c" });
+    const paseo = fakePaseo<DashboardPaseo>({
+      agents: [{ id: "w1", workspaceId: WS, status: "idle", createdAt: "2026-09-16T10:00:10.000Z", labels: { "bm.role": "worker", "bm.requestId": "req-A" } }],
+      workspaces: [{ id: WS, directory: workspace }],
+      timelines: {
+        w1: [
+          { item: typed("/compact"), timestamp: "2026-09-16T10:05:01.000Z" },
+          { item: typed("use the contract only"), timestamp: "2026-09-16T10:06:00.000Z" },
+        ],
+      },
+    }).paseo;
+    const traceId = (await handleTracesList({ workspaceId: WS }, paseo)).traces[0]!.traceId;
+    const { trace: got } = await handleTracesGet({ workspaceId: WS, traceId }, paseo);
+    expect(got.userMessages.map((message) => message.text)).toEqual(["use the contract only"]);
+  });
+
   it("reads absolute file evidence against the workspace directory in the workflow table (delta 20260917-workflow-skills §5.5)", async () => {
     const location = { tracesDir: join(home, "traces") };
     const [manager, worker] = baseRecords();
@@ -758,7 +786,7 @@ describe("read RPC handlers", () => {
       evidence: [{ kind: "file", detail: join(workspace, "docs", "design", "x.md"), agentId: "w1", at: "2026-09-16T10:05:00.000Z" }],
     });
     clearTraceStoreCache();
-    const paseo = fakePaseo([
+    const paseo = daemonWith([
       { id: "w1", workspaceId: WS, status: "idle", createdAt: "2026-09-16T10:00:10.000Z", labels: { "bm.role": "worker", "bm.requestId": "req-A" } },
     ]);
     const traceId = (await handleTracesList({ workspaceId: WS }, paseo)).traces[0]!.traceId;
@@ -777,10 +805,8 @@ describe("read RPC handlers", () => {
     });
     writeWorkspaceMeta(location, WS, { lastKnownName: "repo", lastKnownDirectory: workspace, lastSeenAt: "2026-09-16T10:10:00.000Z" });
     clearTraceStoreCache();
-    const listed = fakePaseo([
-      { id: "w1", workspaceId: WS, status: "idle", createdAt: "2026-09-16T10:00:10.000Z", labels: { "bm.role": "worker", "bm.requestId": "req-A" } },
-    ]);
-    const gone: DashboardPaseo = { ...listed, workspaces: { list: vi.fn(async () => ({ entries: [] })) } };
+    // The Worker is still listed; its workspace no longer is.
+    const gone = daemonWith([{ id: "w1", workspaceId: WS, status: "idle", createdAt: "2026-09-16T10:00:10.000Z", labels: { "bm.role": "worker", "bm.requestId": "req-A" } }], []);
     const traceId = (await handleTracesList({ workspaceId: WS }, gone)).traces[0]!.traceId;
     const steps = (await handleTracesGet({ workspaceId: WS, traceId }, gone)).trace.workflowSteps;
     expect(steps.find((row) => row.step === "design")).toMatchObject({ status: "done", confidence: "inferred" });
@@ -788,20 +814,9 @@ describe("read RPC handlers", () => {
 
   it("survives an agents.list failure by reporting no agents rather than throwing", async () => {
     await seed();
-    const paseo: DashboardPaseo = {
-      agents: {
-        list: async () => {
-          throw new Error("no daemon");
-        },
-      },
-      workspaces: { list: async () => ({ entries: [{ id: WS, directory: workspace }] }) },
-      config: {
-        get: async () => ({
-          config: { plugins: { "paseo-bm": { source: "directory", path: join(home, "plugin", "0.2.0") } } },
-        }),
-      },
-    };
-    const result = await handleTracesList({ workspaceId: WS }, paseo);
+    const fake = fakePaseo<DashboardPaseo>({ workspaces: [{ id: WS, directory: workspace }] });
+    fake.api.agents.list.mockRejectedValue(new Error("no daemon"));
+    const result = await handleTracesList({ workspaceId: WS }, fake.paseo);
     expect(result.traces[0]?.workerIds).toEqual([]);
   });
 });
@@ -943,5 +958,185 @@ describe("user messages and skills in a trace", () => {
     expect(skillsOf(built).map((entry) => entry.skill)).toEqual(["feature-workflow", "implementing-beads"]);
     // Skill evidence is not a workflow step.
     expect(inferWorkflowSteps(built).every((row) => row.evidence.every((entry) => entry.kind !== "skill"))).toBe(true);
+  });
+});
+
+/**
+ * Autonomy design §G.2 Shown: `traces.agents` — each agent's tokens and
+ * context, over one request or over its life, every turn read with the metric
+ * module's `turnTokensOf` beside the agent's turn before it.
+ */
+describe("tokens and context per agent (traces.agents)", () => {
+  const usage = (input: number, cached: number, extra: Partial<NonNullable<TraceRecord["usage"]>> = {}): NonNullable<TraceRecord["usage"]> => ({
+    inputTokens: input,
+    cachedInputTokens: cached,
+    outputTokens: 500,
+    costUsd: null,
+    costBasis: "unavailable",
+    model: null,
+    pricesUpdatedAt: null,
+    ...extra,
+  });
+  const claude = { model: "claude-opus-5", thinkingOptionId: null, modeId: "default" };
+  const codex = { model: "gpt-5.6-sol", thinkingOptionId: null, modeId: "full-access" };
+  const turn = (agentId: string, role: TraceRecord["role"], at: string, overrides: Partial<TraceRecord> = {}) =>
+    record({ agentId, role, turnId: `${agentId}-${at}`, at, startedAt: at, endedAt: at, ...overrides });
+
+  const manager1 = turn(MANAGER, "manager", "2026-09-16T10:00:00.000Z", {
+    runtime: claude,
+    usage: usage(1_000, 9_000, { contextUsed: 10_000, contextMax: 200_000 }),
+    toolCalls: 2,
+  });
+  const manager2 = turn(MANAGER, "manager", "2026-09-16T11:00:00.000Z", {
+    runtime: claude,
+    usage: usage(2_000, 18_000, { contextUsed: 30_000, contextMax: 200_000 }),
+    toolCalls: 1,
+  });
+  // Codex: its input holds its cached tokens, and it reports the last model call only.
+  const worker1 = turn("w1", "worker", "2026-09-16T10:05:00.000Z", { runtime: codex, usage: usage(50_000, 40_000), toolCalls: 3 });
+  const worker2 = turn("w1", "worker", "2026-09-16T10:09:00.000Z", {
+    runtime: codex,
+    usage: usage(70_000, 60_000),
+    toolCalls: 5,
+    evidence: [{ kind: "compaction", detail: "auto", agentId: "w1", at: "2026-09-16T10:08:00.000Z", trigger: "auto", preTokens: null }],
+  });
+  // Claude with its tool calls counted: the context is an estimate, tokens read ÷ (tool calls + 1).
+  const worker3 = turn("w2", "worker", "2026-09-16T11:05:00.000Z", { runtime: claude, usage: usage(1_000, 99_000), toolCalls: 4 });
+  const reviewer = turn("r1", "reviewer", "2026-09-16T10:07:00.000Z");
+
+  it("reads each turn by its provider: Codex's input alone and a lower bound, a reported context, an estimate, a turn without usage", () => {
+    const all = [worker3, reviewer, worker2, manager2, manager1, worker1];
+    expect(agentTokenFiguresOf(all)).toEqual([
+      {
+        agentId: MANAGER,
+        role: "manager",
+        turns: 2,
+        turnsWithUsage: 2,
+        tokensRead: 30_000,
+        lastCallTurns: 0,
+        contextTrend: [10_000, 30_000],
+        contextTurns: 2,
+        contextEstimated: 0,
+        contextPeak: 30_000,
+        contextMax: 200_000,
+        compactions: 0,
+      },
+      {
+        agentId: "w1",
+        role: "worker",
+        turns: 2,
+        turnsWithUsage: 2,
+        tokensRead: 120_000,
+        lastCallTurns: 2,
+        contextTrend: [50_000, 70_000],
+        contextTurns: 2,
+        contextEstimated: 2,
+        contextPeak: 70_000,
+        contextMax: null,
+        compactions: 1,
+      },
+      {
+        agentId: "w2",
+        role: "worker",
+        turns: 1,
+        turnsWithUsage: 1,
+        tokensRead: 100_000,
+        lastCallTurns: 0,
+        contextTrend: [20_000],
+        contextTurns: 1,
+        contextEstimated: 1,
+        contextPeak: 20_000,
+        contextMax: null,
+        compactions: 0,
+      },
+      {
+        agentId: "r1",
+        role: "reviewer",
+        turns: 1,
+        turnsWithUsage: 0,
+        tokensRead: 0,
+        lastCallTurns: 0,
+        contextTrend: [],
+        contextTurns: 0,
+        contextEstimated: 0,
+        contextPeak: null,
+        contextMax: null,
+        compactions: 0,
+      },
+    ]);
+  });
+
+  it("counts only the turns in scope and the agents kept, and takes the role from the agent list first", () => {
+    const all = [manager1, worker1, worker2, manager2, worker3];
+    const scoped = agentTokenFiguresOf(all, { scope: new Set([manager2, worker3]), roleOf: (id) => (id === "w2" ? "unknown" : undefined) });
+    expect(scoped.map((entry) => [entry.agentId, entry.role, entry.turns, entry.tokensRead, entry.contextTrend])).toEqual([
+      [MANAGER, "manager", 1, 20_000, [30_000]],
+      ["w2", "unknown", 1, 100_000, [20_000]],
+    ]);
+    expect(agentTokenFiguresOf(all, { keep: (id) => id === "w1" }).map((entry) => entry.agentId)).toEqual(["w1"]);
+  });
+
+  it("knows an OpenCode turn that repeated the counts of the agent's turn before it, even when that turn is out of scope", () => {
+    const opencode = { model: "openai/gpt-5", thinkingOptionId: null, modeId: null };
+    const first = turn("w3", "worker", "2026-09-16T12:00:00.000Z", { runtime: opencode, usage: usage(40_000, 10_000), toolCalls: 2 });
+    const repeated = turn("w3", "worker", "2026-09-16T12:05:00.000Z", { runtime: opencode, usage: usage(40_000, 10_000), toolCalls: 0 });
+    const [figures] = agentTokenFiguresOf([first, repeated], { scope: new Set([repeated]) });
+    expect(figures).toMatchObject({ turns: 1, turnsWithUsage: 1, tokensRead: 0, lastCallTurns: 1, contextTrend: [], contextTurns: 0 });
+  });
+
+  it("sends at most the newest points of a long trend, with its peak and count over the whole scope", () => {
+    const turns = Array.from({ length: CONTEXT_TREND_MAX + 6 }, (_, index) =>
+      turn(MANAGER, "manager", new Date(Date.parse("2026-09-16T10:00:00.000Z") + index * 60_000).toISOString(), {
+        runtime: claude,
+        usage: usage(1_000, 1_000, { contextUsed: index === 0 ? 150_000 : 1_000 * (index + 1), contextMax: 200_000 }),
+      }),
+    );
+    const [figures] = agentTokenFiguresOf(turns);
+    expect(figures!.contextTrend).toHaveLength(CONTEXT_TREND_MAX);
+    expect(figures!.contextTrend.at(-1)).toBe(30_000);
+    expect(figures!.contextTurns).toBe(CONTEXT_TREND_MAX + 6);
+    expect(figures!.contextPeak).toBe(150_000);
+    expect(tracesAgentsRpc.output.parse({ agents: [figures] }).agents).toHaveLength(1);
+  });
+
+  describe("the handler", () => {
+    const listed = (id: string, role: string, extra: Record<string, unknown> = {}) => ({
+      id,
+      workspaceId: WS,
+      status: "idle",
+      createdAt: "2026-09-16T10:00:10.000Z",
+      labels: { "bm.role": role, ...(role === "manager" ? {} : { "bm.requestId": "req-A" }) },
+      ...extra,
+    });
+
+    async function seedTurns(): Promise<void> {
+      const location = { tracesDir: join(home, "traces") };
+      await appendRecord(location, { ...manager1, sent: [msg("add the report screen")] });
+      await appendRecord(location, { ...worker1, reports: [report({ phase: "received", at: worker1.at })] });
+      await appendRecord(location, { ...worker2, reports: [report({ at: worker2.at })] });
+      await appendRecord(location, { ...reviewer, requestId: "req-A" });
+      clearTraceStoreCache();
+    }
+
+    it("without a request: each agent Paseo lists and has not archived, over its life", async () => {
+      await seedTurns();
+      const paseo = daemonWith([listed(MANAGER, "manager"), listed("w1", "worker"), listed("r1", "reviewer", { archivedAt: "2026-09-17T00:00:00.000Z" })]);
+      const result = await handleTracesAgents({ workspaceId: WS }, paseo);
+      expect(result.agents.map((entry) => [entry.agentId, entry.role, entry.tokensRead])).toEqual([
+        [MANAGER, "manager", 10_000],
+        ["w1", "worker", 120_000],
+      ]);
+      expect(tracesAgentsRpc.output.parse(result).agents).toHaveLength(2);
+    });
+
+    it("with a request: every agent of it, listed or not; an unknown request fails with the coded error", async () => {
+      await seedTurns();
+      const paseo = daemonWith([listed("w1", "worker")]);
+      const traceId = (await handleTracesList({ workspaceId: WS }, paseo)).traces[0]!.traceId;
+      const result = await handleTracesAgents({ workspaceId: WS, traceId }, paseo);
+      expect(result.agents.map((entry) => entry.agentId)).toEqual(expect.arrayContaining([MANAGER, "w1"]));
+      expect(result.agents.find((entry) => entry.agentId === "w1")).toMatchObject({ turns: 2, lastCallTurns: 2, compactions: 1 });
+      await expect(handleTracesAgents({ workspaceId: WS, traceId: "req:nope" }, paseo)).rejects.toThrow(/E_TRACE_NOT_FOUND/);
+    });
   });
 });

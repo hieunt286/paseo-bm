@@ -17,6 +17,7 @@ import {
   sharedPlanWarning,
 } from "../plugin/server/role-settings-rpc";
 import { DashboardError, rolesOptionsRpc, rolesSettingsRpc } from "../plugin/shared/contracts";
+import { fakePaseo, type FakeApi, type FakePaseo } from "./helpers/fake-paseo";
 
 /**
  * Delta 20260921 §4.3.2 (REQ-064 a/b): `roles.settings` and `roles.options`,
@@ -156,33 +157,33 @@ interface FakeOptions {
   features?: Record<string, unknown>;
 }
 
-function fakePaseo(options: FakeOptions = {}) {
+/** Looks `key` up in `table`: an Error there is thrown, a missing key is `fallback`. */
+function answer(table: Record<string, unknown>, key: string, fallback: unknown): unknown {
+  const value = table[key];
+  if (value instanceof Error) throw value;
+  return value ?? fallback;
+}
+
+/**
+ * The shared fake SDK with the lookups these tests read: each provider's modes,
+ * models and features, and the configuration (or an error reading it). This
+ * host has no `listAvailable`: Paseo cannot say which providers exist.
+ */
+function daemonWith(options: FakeOptions = {}) {
   const modes = options.modes ?? MODES;
   const models = options.models ?? MODELS;
   const features = options.features ?? FEATURES;
-  const answer = (table: Record<string, unknown>, key: string, fallback: unknown) => {
-    const value = table[key];
-    if (value instanceof Error) throw value;
-    return value ?? fallback;
-  };
-  const listModes = vi.fn(async (provider: string) => answer(modes, provider, modeList(provider, [], `unknown provider ${provider}`)));
-  const listModels = vi.fn(async (provider: string) => answer(models, provider, modelList(provider, [], `unknown provider ${provider}`)));
-  const listFeatures = vi.fn(async (draft: { provider: string; cwd: string }) =>
-    answer(features, draft.provider, { provider: draft.provider, features: [] }),
-  );
-  const get = vi.fn(async () => {
-    if (options.configError !== undefined) throw options.configError;
-    return { requestId: "r-config", config: options.config ?? CONFIG };
+  const fake = fakePaseo({
+    config: options.configError ?? ((options.config ?? CONFIG) as Record<string, unknown>),
+    providers: {
+      modes: (provider) => answer(modes, provider, modeList(provider, [], `unknown provider ${provider}`)),
+      models: (provider) => answer(models, provider, modelList(provider, [], `unknown provider ${provider}`)),
+      features: (provider) => answer(features, provider, { provider, features: [] }),
+    },
+    omit: ["providers.listAvailable"],
   });
-  const patch = vi.fn();
-  return {
-    paseo: { providers: { listModes, listModels, listFeatures }, config: { get, patch } },
-    listModes,
-    listModels,
-    listFeatures,
-    get,
-    patch,
-  };
+  const { listModes, listModels, listFeatures } = fake.api.providers;
+  return { ...fake, listModes, listModels, listFeatures, get: fake.api.config.get, patch: fake.api.config.patch };
 }
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -255,7 +256,7 @@ describe("roleSettingsRevision", () => {
 
 describe("roles.settings", () => {
   it("describes the four roles from config.providers and config.agentProfiles, with each capability class", async () => {
-    const { paseo, patch } = fakePaseo();
+    const { paseo, patch } = daemonWith();
     const result = await handleRolesSettings(paseo, { log });
     expect(result).toEqual({
       revision: roleSettingsRevision(CONFIG),
@@ -322,7 +323,7 @@ describe("roles.settings", () => {
       // A profile without its provider, and junk entries that are skipped.
       agentProfiles: [null, "junk", { id: "bm-worker", provider: "bm-worker", model: "gpt-5.6-sol", featureValues: ["not", "a", "record"] }],
     };
-    const { paseo, listModes } = fakePaseo({ config });
+    const { paseo, listModes } = daemonWith({ config });
     const result = await handleRolesSettings(paseo, { log });
     expect(result.roles.map((role) => role.role)).toEqual(["manager", "worker", "reviewer", "orchestrator"]);
     expect(result.roles[1]).toEqual({
@@ -353,7 +354,7 @@ describe("roles.settings", () => {
   });
 
   it("describes every role as missing on a daemon without paseo-bm roles", async () => {
-    const { paseo, listModes } = fakePaseo({ config: { providers: { claude: {} }, agentProfiles: [] } });
+    const { paseo, listModes } = daemonWith({ config: { providers: { claude: {} }, agentProfiles: [] } });
     const result = await handleRolesSettings(paseo, { log });
     expect(result.roles.every((role) => role.baseProvider === null && role.model === null && role.capability === "unknown")).toBe(true);
     expect(result.warnings).toEqual([]);
@@ -365,7 +366,7 @@ describe("roles.settings", () => {
       ...CONFIG,
       providers: { ...CONFIG.providers, "bm-worker": base === undefined ? undefined : { extends: base, label: "Beads Worker" } },
     });
-    const warningsFor = async (config: unknown) => (await handleRolesSettings(fakePaseo({ config }).paseo, { log })).warnings;
+    const warningsFor = async (config: unknown) => (await handleRolesSettings(daemonWith({ config }).paseo, { log })).warnings;
 
     expect(await warningsFor(withWorkerOn("claude"))).toEqual([
       "Manager and Worker share the claude plan: if the Worker hits its limit, the Manager stops too.",
@@ -390,7 +391,7 @@ describe("roles.settings", () => {
         "bm-reviewer": { extends: "claude" },
       },
     };
-    const { paseo, listModes } = fakePaseo({ config });
+    const { paseo, listModes } = daemonWith({ config });
     const result = await handleRolesSettings(paseo, { log });
     expect(result.roles.map((role) => role.capability)).toEqual(["unknown", "tiered", "tiered", "unknown"]);
     expect(listModes.mock.calls.map((call) => call[0]).sort()).toEqual(["claude", "warming"]);
@@ -399,7 +400,7 @@ describe("roles.settings", () => {
   });
 
   it("never throws when the configuration cannot be read: four empty roles, a warning and one log line", async () => {
-    const { paseo, listModes } = fakePaseo({ configError: new Error("daemon went away") });
+    const { paseo, listModes } = daemonWith({ configError: new Error("daemon went away") });
     const result = await handleRolesSettings(paseo, { log });
     expect(result.roles.map((role) => [role.role, role.baseProvider, role.model, role.capability])).toEqual([
       ["manager", null, null, "unknown"],
@@ -442,7 +443,7 @@ describe("roles.settings", () => {
 
 describe("roles.options", () => {
   it("lists a tiered provider's models, thinking options, rates and modes, and no auto-accept", async () => {
-    const { paseo, listFeatures } = fakePaseo();
+    const { paseo, listFeatures } = daemonWith();
     const result = await handleRolesOptions({ provider: "claude" }, paseo, { log, homedir: () => "/fake-home" });
     expect(result).toEqual({
       provider: "claude",
@@ -484,7 +485,7 @@ describe("roles.options", () => {
   });
 
   it("offers auto-accept on an untiered provider that lists the toggle, reading features with the home directory as cwd", async () => {
-    const { paseo, listFeatures } = fakePaseo();
+    const { paseo, listFeatures } = daemonWith();
     const result = await handleRolesOptions({ provider: "opencode" }, paseo, { log, homedir: () => "/fake-home" });
     expect(result.capability).toBe("untiered");
     expect(result.autoAccept).toBe(true);
@@ -508,7 +509,7 @@ describe("roles.options", () => {
   });
 
   it("does not offer auto-accept on an untiered provider without the toggle", async () => {
-    const { paseo } = fakePaseo({
+    const { paseo } = daemonWith({
       features: { opencode: { provider: "opencode", features: [{ type: "select", id: "auto_accept", label: "x", value: "a", options: [] }] } },
     });
     const result = await handleRolesOptions({ provider: "opencode" }, paseo, { log, homedir: () => "/fake-home" });
@@ -517,7 +518,7 @@ describe("roles.options", () => {
   });
 
   it("gives a provider without modes (Pi) the none class, no modes and no auto-accept", async () => {
-    const { paseo, listFeatures } = fakePaseo();
+    const { paseo, listFeatures } = daemonWith();
     const result = await handleRolesOptions({ provider: "pi" }, paseo, { log });
     expect(result).toEqual({
       provider: "pi",
@@ -531,7 +532,7 @@ describe("roles.options", () => {
   });
 
   it("answers unknown and empty lists when Paseo cannot list the provider, one log line per failed lookup", async () => {
-    const { paseo, listFeatures } = fakePaseo();
+    const { paseo, listFeatures } = daemonWith();
     const result = await handleRolesOptions({ provider: "warming" }, paseo, { log });
     expect(result).toEqual({ provider: "warming", capability: "unknown", models: [], modes: [], autoAccept: false });
     expect(listFeatures).not.toHaveBeenCalled();
@@ -543,7 +544,7 @@ describe("roles.options", () => {
 
   it("never throws when a lookup throws or the host has no provider API", async () => {
     const boom = new Error("socket closed");
-    const { paseo } = fakePaseo({ models: { claude: boom }, modes: { claude: boom } });
+    const { paseo } = daemonWith({ models: { claude: boom }, modes: { claude: boom } });
     await expect(handleRolesOptions({ provider: "claude" }, paseo, { log })).resolves.toEqual({
       provider: "claude",
       capability: "unknown",
@@ -574,7 +575,7 @@ describe("roles.options", () => {
   it.each(["bm-worker", "bm-reviewer/gpt-5.6-sol", "bm-worker-fallback-1", "BM-Manager", " bm-manager"])(
     "refuses the role alias %j with E_ROLE_SETTINGS_INVALID, without a lookup",
     async (provider) => {
-      const { paseo, listModes, listModels, listFeatures } = fakePaseo();
+      const { paseo, listModes, listModels, listFeatures } = daemonWith();
       const call = handleRolesOptions({ provider }, paseo, { log });
       await expect(call).rejects.toBeInstanceOf(DashboardError);
       await expect(call).rejects.toMatchObject({ code: "E_ROLE_SETTINGS_INVALID" });
@@ -586,7 +587,7 @@ describe("roles.options", () => {
   );
 
   it("refuses an empty provider with E_ROLE_SETTINGS_INVALID", async () => {
-    const { paseo } = fakePaseo();
+    const { paseo } = daemonWith();
     await expect(handleRolesOptions({ provider: "  " }, paseo, { log })).rejects.toMatchObject({ code: "E_ROLE_SETTINGS_INVALID" });
     expect(rolesOptionsRpc.input.safeParse({ provider: "" }).success).toBe(false);
   });
@@ -604,7 +605,7 @@ describe("registration", () => {
     // roles.save-settings joined them with bead kj1p.3, roles.save-fallback with 332y.2.
     expect([...handlers.keys()].sort()).toEqual(["roles.options", "roles.save-fallback", "roles.save-settings", "roles.settings"]);
 
-    const { paseo } = fakePaseo();
+    const { paseo } = daemonWith();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     try {
       const settings = (await handlers.get("roles.settings")!({}, { paseo })) as { roles: unknown[]; revision: string };
@@ -621,40 +622,34 @@ describe("registration", () => {
 describe("roles.save-settings (delta 20260921 §4.3.3–§4.3.4, REQ-064 b/c/e/f, REQ-063 h)", () => {
   const AVAILABLE = { providers: ["claude", "codex", "opencode", "pi"].map((provider) => ({ provider, available: true })) };
 
-  /** A fake whose config.patch behaves like Paseo's: providers deep-merged, agentProfiles replaced whole. */
+  /**
+   * The shared fake SDK, its config.patch applied as Paseo's is: four providers
+   * available, and a bm-* alias answering with the modes of the provider it
+   * extends now, like the daemon. Live agents, for BM-SETTINGS (§4.3.5), are
+   * none unless a test adds some to `fake.agents`.
+   */
   function stateful(config: unknown = CONFIG) {
-    const fake = fakePaseo();
-    let state = structuredClone(config) as { providers: Record<string, Record<string, unknown>>; agentProfiles: Array<Record<string, unknown>> };
-    fake.get.mockImplementation(async () => ({ requestId: "r", config: structuredClone(state) }));
-    fake.patch.mockImplementation(async (patch: Record<string, unknown>) => {
-      for (const [id, entry] of Object.entries((patch.providers ?? {}) as Record<string, Record<string, unknown>>)) {
-        state.providers[id] = { ...(state.providers[id] ?? {}), ...entry };
-      }
-      if (patch.agentProfiles !== undefined) state.agentProfiles = structuredClone(patch.agentProfiles as Array<Record<string, unknown>>);
-      return {};
-    });
-    const listAvailable = vi.fn(async () => AVAILABLE);
-    (fake.paseo.providers as Record<string, unknown>).listAvailable = listAvailable;
-    // Like the daemon, a bm-* alias answers with the modes of the provider it extends now.
-    fake.listModes.mockImplementation(async (provider: string) => {
-      const base = provider.startsWith("bm-") ? String(state.providers[provider]?.extends ?? provider) : provider;
-      const answer = MODES[base] ?? modeList(provider, [], `unknown provider ${provider}`);
-      if (answer instanceof Error) throw answer;
-      return answer;
-    });
-    // Live agents, for BM-SETTINGS (§4.3.5); none unless a test adds some.
-    const agents: Array<{ id: string; provider: string; labels?: Record<string, string>; status: string }> = [];
-    const sent: Array<{ id: string; text: string }> = [];
-    (fake.paseo as Record<string, unknown>).agents = {
-      list: vi.fn(async () => ({ entries: agents.map((agent) => ({ agent })) })),
-      ref: (id: string) => ({
-        refresh: async () => ({ agent: agents.find((agent) => agent.id === id) ?? null }),
-        send: async (text: string) => {
-          sent.push({ id, text });
+    type State = { providers: Record<string, Record<string, unknown>>; agentProfiles: Array<Record<string, unknown>> };
+    const fake: FakePaseo<FakeApi> = fakePaseo({
+      config: config as Record<string, unknown>,
+      providers: {
+        available: AVAILABLE.providers,
+        modes: (provider) => {
+          const base = provider.startsWith("bm-") ? String(fake.config<State>().providers[provider]?.extends ?? provider) : provider;
+          return answer(MODES, base, modeList(provider, [], `unknown provider ${provider}`));
         },
-      }),
+        models: (provider) => answer(MODELS, provider, modelList(provider, [], `unknown provider ${provider}`)),
+        features: (provider) => answer(FEATURES, provider, { provider, features: [] }),
+      },
+    });
+    return {
+      ...fake,
+      patch: fake.api.config.patch,
+      listAvailable: fake.api.providers.listAvailable,
+      state: () => fake.config<State>(),
+      set: (next: State) => fake.setConfig(next),
+      sent: fake.sends,
     };
-    return { ...fake, state: () => state, set: (next: typeof state) => (state = next), listAvailable, agents, sent };
   }
 
   it("writes the role's base provider, model, thinking and mode into Paseo's config and returns the saved role", async () => {
@@ -805,6 +800,24 @@ describe("roles.save-settings (delta 20260921 §4.3.3–§4.3.4, REQ-064 b/c/e/f
     expect(fake.sent).toHaveLength(1);
   });
 
+  // Live check 2026-10-01 F4: the Manager of a project whose action boundary is on is told the Worker's boundary mode.
+  it("tells each live Manager the Worker mode of its own project's boundary", async () => {
+    const fake = stateful();
+    fake.agents.push(
+      { id: "m-on", provider: "bm-manager", labels: { "bm.role": "manager" }, status: "idle", workspaceId: "wks-on" },
+      { id: "m-off", provider: "bm-manager", labels: { "bm.role": "manager" }, status: "idle", workspaceId: "wks-off" },
+    );
+    const saved = await handleRolesSaveSettings(
+      { revision: roleSettingsRevision(fake.state()), role: "worker", baseProvider: "codex", model: "gpt-5.6-sol", thinkingOptionId: null, modeId: null },
+      fake.paseo,
+      { log, boundaryOn: (workspaceId) => workspaceId === "wks-on" },
+    );
+    expect(saved.notified).toBe(2);
+    const line = (id: string) => fake.sent.find((entry) => entry.id === id)?.text.split("\n")[1];
+    expect(line("m-on")).toBe("Worker mode: `auto` — pass it as `settings.modeId` when you create a Worker.");
+    expect(line("m-off")).toBe("Worker mode: `full-access` — pass it as `settings.modeId` when you create a Worker.");
+  });
+
   it("refuses when Paseo cannot say which providers are available", async () => {
     const fake = stateful();
     fake.listAvailable.mockImplementation(async () => {
@@ -829,7 +842,7 @@ describe("roles.save-settings (delta 20260921 §4.3.3–§4.3.4, REQ-064 b/c/e/f
 
 describe("roles.settings providers (the Edit form's Provider picker)", () => {
   it("lists the available base providers, sorted, never a bm-* alias or an unavailable one", async () => {
-    const { paseo } = fakePaseo();
+    const { paseo } = daemonWith();
     (paseo.providers as Record<string, unknown>).listAvailable = async () => ({
       providers: [
         { provider: "pi", available: true },

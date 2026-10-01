@@ -19,7 +19,7 @@
  * a Worker at all.
  */
 import { lstatSync, readdirSync, rmSync } from "node:fs";
-import { join, sep } from "node:path";
+import { join, relative as relativePath, sep } from "node:path";
 import { DashboardError } from "../shared/contracts";
 import {
   agentToolsIn,
@@ -29,14 +29,15 @@ import {
   type ConfigPaseo,
   type RoleConfigView,
 } from "./config-writer";
-import { resolveDataHome } from "./data-home";
+import { firstSymlinkBelow, resolveDataHome } from "./data-home";
 import { ROLE_FALLBACK_FILE } from "./fallback-settings";
 import { ROLE_FALLBACK_STATE_FILE } from "./fallback-state";
-import { ROLE_EXTRAS_FILE } from "./role-extras";
 import { ORCHESTRATOR_DIR_NAME } from "./orchestrator-store";
 import { DECISIONS_DIR_NAME } from "./decision-store";
 import { INBOX_DIR_NAME } from "./alert-store";
-import { PLUGIN_ID, confirmInstallHome, installHomeFromPluginPath, type InstallHomeFs } from "./install-home";
+import { COORDINATION_DIR_NAME } from "./coordination-store";
+import { HANDOFFS_DIR_NAME } from "./handoff-store";
+import { AUTONOMY_DIR_NAME } from "./autonomy-store";
 import { UI_DIR_NAME } from "./data-home";
 import { TIMED_OUT, withTimeout } from "./role-mode";
 import { ROLE_NAMES, markCleanedUpThisRun, roleId, type RoleName } from "./setup-roles";
@@ -186,33 +187,6 @@ export async function providerLogins(paseo: unknown, config: RoleConfigView): Pr
   );
 }
 
-export interface InstallKind {
-  /** `installer-directory`: this plugin is running from a 0.3.x installer-made directory. */
-  kind: "installer-directory" | "other";
-  pluginPath: string | null;
-}
-
-/**
- * Whether this plugin is running from a directory the old installer laid out.
- *
- * The shape of the registered path plus an `install.json` beside it is the
- * whole test — there is no `paseo plugin ls` call, because `config.get()` has
- * already been read and a directory install is exactly what the CLI wrote.
- * Setup uses it to show the banner that asks the user to run the migration
- * command once and move to the npm install.
- */
-export function installKind(config: { plugins?: Record<string, unknown> | null }, fs: InstallHomeFs): InstallKind {
-  const entry = config.plugins?.[PLUGIN_ID];
-  const pluginPath =
-    entry !== null && typeof entry === "object" && typeof (entry as { path?: unknown }).path === "string"
-      ? ((entry as { path: string }).path)
-      : null;
-  if (pluginPath === null) return { kind: "other", pluginPath: null };
-  const home = installHomeFromPluginPath(pluginPath);
-  if (home === null) return { kind: "other", pluginPath };
-  return { kind: confirmInstallHome(home, fs).ok ? "installer-directory" : "other", pluginPath };
-}
-
 // ---------------------------------------------------------------------------
 // "Remove paseo-bm's settings" (design §7.13.7, ADR-012 decision 6).
 // ---------------------------------------------------------------------------
@@ -247,7 +221,9 @@ export const CLEANUP_NEXT_COMMAND = "paseo plugin remove paseo-bm" as const;
  */
 export const CLEANUP_DELETES: readonly string[] = [
   "traces",
-  ROLE_EXTRAS_FILE,
+  // The per-role additional instructions, retired (autonomy design §B.8): never
+  // read any more, but a file an earlier build wrote still goes.
+  "role-extras.json",
   ROLE_FALLBACK_FILE,
   ROLE_FALLBACK_STATE_FILE,
   ORCHESTRATOR_DIR_NAME,
@@ -255,6 +231,12 @@ export const CLEANUP_DELETES: readonly string[] = [
   DECISIONS_DIR_NAME,
   // Autonomy design §A.8: and the Inbox alerts.
   INBOX_DIR_NAME,
+  // Autonomy design §G.7: and Settings → Coordination.
+  COORDINATION_DIR_NAME,
+  // Autonomy design §B.2: and the autonomy policy.
+  AUTONOMY_DIR_NAME,
+  // Autonomy design §G.6: and the handoffs with their briefs.
+  HANDOFFS_DIR_NAME,
 ];
 
 export type CleanupDeps = SetupStateDeps & { now?: () => Date };
@@ -329,31 +311,18 @@ function deleteDataFiles(deps: CleanupDeps): { deleted: string[]; kept: string[]
    * review b1 found: `readdir` follows a symlinked `ui/`, and the `lstat` of
    * `ui/<name>` then resolves through it and reports an ordinary file, so the
    * delete lands outside the folder. Every component from the data folder down
-   * is therefore checked before anything is read or removed.
+   * is therefore checked before anything is read or removed (`firstSymlinkBelow`).
    */
   const symlinkOn = (relative: string): string | null => {
     try {
       if (lstatSync(home).isSymbolicLink()) return "the data folder";
+      const found = firstSymlinkBelow(home, join(home, relative));
+      return found === null ? null : relativePath(home, found).split(sep).join("/");
     } catch {
+      // A component that cannot be inspected: nothing is reached through it,
+      // and the delete that follows reports the real problem.
       return null;
     }
-    let current = home;
-    const walked: string[] = [];
-    for (const part of relative.split(sep)) {
-      if (part === "" || part === ".") continue;
-      current = join(current, part);
-      walked.push(part);
-      let entry;
-      try {
-        entry = lstatSync(current);
-      } catch {
-        // Nothing below an absent component exists either, so nothing can be
-        // reached through it.
-        return null;
-      }
-      if (entry.isSymbolicLink()) return walked.join("/");
-    }
-    return null;
   };
 
   const remove = (relative: string): void => {

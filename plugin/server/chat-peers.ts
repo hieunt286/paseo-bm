@@ -4,7 +4,8 @@
  * so a chat card and a handover see the same Workers (delta 20260918f §4.9).
  */
 import type { ChatPeer, TraceRecord } from "../shared/contracts";
-import { requireLocation, type DashboardPaseo } from "./dashboard-rpc";
+import { requireLocation } from "./dashboard-rpc";
+import type { DashboardPaseo } from "./paseo-directory";
 import { readRecords } from "./trace-store";
 import { requestIdOfAgent, type AgentFacts } from "./traces";
 

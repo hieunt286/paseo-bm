@@ -2,18 +2,21 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { MIGRATION_BANNER_COMMAND, MIGRATION_BANNER_TEXT } from "../plugin/client/setup-model";
 
 /**
  * WP-405: nothing in the payload sends a user back to the retired installer.
  *
  * From 0.4.0 the plugin is the whole product (ADR-012): it creates its own
- * roles, runs the skills CLI from Setup, and cleans up from Setup. The one
- * place `npx paseo-bm` may still appear is the banner that asks a 0.3.x
- * directory install to move to npm — and even that names the exact version.
+ * roles, runs the skills CLI from Setup, and cleans up from Setup. The banner
+ * that asked a 0.3.x directory install to move to npm is gone too (ADR-022
+ * decision 2), so `npx paseo-bm` appears nowhere in the payload's code; only
+ * the README keeps the versioned migration command, for users coming from it.
  * A grep over the shipped payload is what keeps a stale sentence from coming
  * back with the next feature.
  */
+
+/** The 0.4.0 migration command, the README's one mention of `npx paseo-bm`. */
+const MIGRATION_COMMAND = "npx paseo-bm@0.4.0";
 
 const payload = join(dirname(fileURLToPath(import.meta.url)), "..", "plugin");
 
@@ -35,28 +38,18 @@ function sourceFiles(dir: string): string[] {
 const shipped = sourceFiles(payload).filter((path) => !/README\.md$/.test(path));
 
 describe("the payload's own wording", () => {
-  it("names `npx paseo-bm` only in the migration banner", () => {
-    const offenders = shipped.filter((path) => {
-      const text = readFileSync(path, "utf8");
-      return text.includes("npx paseo-bm") && !text.includes(MIGRATION_BANNER_COMMAND);
-    });
+  it("never names `npx paseo-bm`", () => {
+    const offenders = shipped.filter((path) => readFileSync(path, "utf8").includes("npx paseo-bm"));
 
     expect(offenders.map((path) => relative(payload, path))).toEqual([]);
-
-    // And in that one file, every mention is the versioned migration command.
-    const model = readFileSync(join(payload, "client", "setup-model.ts"), "utf8");
-    const mentions = model.match(/npx paseo-bm[^\s`"]*/g) ?? [];
-    expect(mentions.length).toBeGreaterThan(0);
-    expect([...new Set(mentions)]).toEqual([MIGRATION_BANNER_COMMAND]);
-    expect(MIGRATION_BANNER_TEXT).toContain(MIGRATION_BANNER_COMMAND);
   });
 
   it("never calls the data folder an install home where a user can read it", () => {
     const offenders: string[] = [];
     for (const path of shipped) {
       for (const line of readFileSync(path, "utf8").split("\n")) {
-        // Comments explain the history on purpose — `installHomeFromPluginPath`
-        // really is about the installer's layout. Strings are what users see.
+        // Comments explain the history on purpose — the old installer's layout
+        // really was an install home. Strings are what users see.
         const trimmed = line.trimStart();
         if (/^(\/\*|\*|\/\/|\{\/\*)/.test(trimmed)) continue;
         if (/install home/i.test(line)) offenders.push(`${relative(payload, path)}: ${line.trim()}`);
@@ -67,7 +60,7 @@ describe("the payload's own wording", () => {
   });
 
   it("points at Setup, not at a retired command, when something is missing", () => {
-    const facts = readFileSync(join(payload, "server", "role-extras.ts"), "utf8");
+    const facts = readFileSync(join(payload, "server", "role-instructions.ts"), "utf8");
     expect(facts).toContain("point to Beads Manager → Settings → Tools & skills.");
 
     const tree = readFileSync(join(payload, "client", "agent-tree.ts"), "utf8");
@@ -82,7 +75,7 @@ describe("the plugin package's README, shown on npm and paseo.cafe", () => {
     const section = readme.slice(readme.indexOf("## If you installed paseo-bm with"));
     const outside = readme.slice(0, readme.indexOf("## If you installed paseo-bm with"));
 
-    expect(section).toContain(MIGRATION_BANNER_COMMAND);
+    expect(section).toContain(MIGRATION_COMMAND);
     expect(outside).not.toContain("npx paseo-bm");
     // The refusal a user actually sees, so they can match it word for word.
     expect(section).toContain('Plugin ID "paseo-bm" is already configured; choose another ID with --id');

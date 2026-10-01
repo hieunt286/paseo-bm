@@ -4,11 +4,11 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerCollector } from "../plugin/server/collector";
 import { roleConfigRevision, type RoleConfigView } from "../plugin/server/config-writer";
-import { handleTracesList, type DashboardPaseo } from "../plugin/server/dashboard-rpc";
+import { handleTracesList } from "../plugin/server/dashboard-rpc";
+import type { DashboardPaseo } from "../plugin/server/paseo-directory";
 import { ROLE_FALLBACK_FILE, handleRolesSaveFallback } from "../plugin/server/fallback-settings";
-import { readRoleExtras } from "../plugin/server/role-extras";
-import { handleRolesSaveExtra } from "../plugin/server/setup-rpc";
 import { clearTraceStoreCache } from "../plugin/server/trace-store";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 const readText = (path: string): string => readFileSync(path, "utf8");
 
@@ -16,7 +16,7 @@ const readText = (path: string): string => readFileSync(path, "utf8");
  * WP-401: every store works on a machine the installer never touched.
  *
  * This is the compatibility seam, so it is tested from the outside — the
- * collector hook, three RPCs — rather than at the resolver. What matters is
+ * collector hook, two RPCs — rather than at the resolver. What matters is
  * that a paseo.cafe install with no `install.json` records traces and settings
  * at all (it did not before), that a 0.3.x user's folder is still the one used,
  * and that an unusable folder disables rather than silently writing somewhere
@@ -89,54 +89,33 @@ function collectorHook(): (event: unknown, context: unknown) => Promise<void> | 
 
 // ── the RPCs ───────────────────────────────────────────────────────────────
 
-function dashboardPaseo(): DashboardPaseo {
-  return {
-    agents: { list: vi.fn(async () => ({ entries: [] })) },
-    workspaces: { list: vi.fn(async () => ({ entries: [{ id: WS, directory: join(root, "repo"), name: "repo" }] })) },
-    config: { get: vi.fn(async () => ({ config: {} })) },
-  };
-}
+/** The shared fake SDK listing the one workspace at `<root>/repo`. */
+const dashboardPaseo = () => fakePaseo<DashboardPaseo>({ workspaces: [{ id: WS, directory: join(root, "repo"), name: "repo" }] }).paseo;
 
 const MODELS: Record<string, unknown[]> = {
   claude: [{ id: "claude-opus-5", label: "Opus 5", thinkingOptions: [] }],
   pi: [{ id: "pi-default", label: "Pi" }],
 };
 
-function fakeDaemon() {
-  const state: { providers: Record<string, Record<string, unknown>>; agentProfiles: Array<Record<string, unknown>> } = {
-    providers: {
-      claude: { enabled: true },
-      "bm-worker": { extends: "claude", label: "Beads Worker", paseoTools: { enabled: true } },
-    },
-    agentProfiles: [{ id: "bm-worker", name: "Worker", provider: "bm-worker", model: "claude-opus-5" }],
-  };
-  const paseo = {
-    providers: {
-      listAvailable: vi.fn(async () => ({ providers: ["claude", "pi"].map((provider) => ({ provider, available: true })) })),
-      listModels: vi.fn(async (provider: string) => ({ provider, models: MODELS[provider] ?? [], error: null })),
-      listModes: vi.fn(async (provider: string) => ({ provider, modes: [], error: null })),
-    },
+/** A machine with Claude and Pi and the Worker's alias; `config.patch` is applied for real, since `config-writer` reads back after every patch. */
+function daemonWith() {
+  const fake = fakePaseo({
+    providers: { available: ["claude", "pi"], models: MODELS },
     config: {
-      get: vi.fn(async () => ({ config: structuredClone(state) as RoleConfigView })),
-      patch: vi.fn(async (patch: Record<string, unknown>) => {
-        // Applied for real: `config-writer` reads back after every patch and
-        // refuses a daemon that did not keep the values.
-        for (const [id, entry] of Object.entries((patch["providers"] ?? {}) as Record<string, Record<string, unknown>>)) {
-          state.providers[id] = { ...(state.providers[id] ?? {}), ...entry };
-        }
-        for (const id of (patch["removeProviders"] as string[] | undefined) ?? []) delete state.providers[id];
-        if (patch["agentProfiles"] !== undefined) state.agentProfiles = structuredClone(patch["agentProfiles"]) as typeof state.agentProfiles;
-        return {};
-      }),
+      providers: {
+        claude: { enabled: true },
+        "bm-worker": { extends: "claude", label: "Beads Worker", paseoTools: { enabled: true } },
+      },
+      agentProfiles: [{ id: "bm-worker", name: "Worker", provider: "bm-worker", model: "claude-opus-5" }],
     },
-  };
-  return { paseo, revision: () => roleConfigRevision(state as RoleConfigView) };
+  });
+  return { paseo: fake.paseo, revision: () => roleConfigRevision(fake.config<RoleConfigView>()) };
 }
 
 const PI = { baseProvider: "pi", model: "pi-default", thinkingOptionId: null, modeId: null };
 
 const saveFallback = (deps: { homedir?: () => string; home?: string | null }) => {
-  const daemon = fakeDaemon();
+  const daemon = daemonWith();
   return handleRolesSaveFallback(
     { revision: daemon.revision(), role: "worker", policy: "ask", entries: [PI] },
     daemon.paseo,
@@ -151,9 +130,6 @@ async function everyStoreWorks(dataHome: string, homedir: () => string): Promise
   const listed = await handleTracesList({ workspaceId: WS }, dashboardPaseo(), { homedir });
   expect(listed.traces).toHaveLength(1);
   expect(listed.traces[0]).toMatchObject({ requestId: REQ, traceId: `req:${REQ}` });
-
-  await handleRolesSaveExtra({ role: "manager", text: "Answer in Vietnamese." }, {}, { homedir });
-  expect(readRoleExtras(dataHome).manager).toBe("Answer in Vietnamese.");
 
   const saved = await saveFallback({ homedir });
   expect(saved.fallback.entries).toHaveLength(1);
@@ -208,13 +184,9 @@ describe("a symlinked data folder", () => {
     mkdirSync(outside, { recursive: true });
     symlinkSync(outside, dataHome);
 
-    await expect(
-      handleRolesSaveExtra({ role: "manager", text: "x" }, {}, { homedir: () => home }),
-    ).rejects.toMatchObject({ code: "E_TRACE_STORE_UNWRITABLE" });
     await expect(saveFallback({ homedir: () => home })).rejects.toMatchObject({
       code: "E_ROLE_SETTINGS_WRITE_FAILED",
     });
-    expect(() => readText(join(outside, "role-extras.json"))).toThrow();
     expect(() => readText(join(outside, ROLE_FALLBACK_FILE))).toThrow();
   });
 });
@@ -233,16 +205,13 @@ describe("a data folder that cannot be used", () => {
     await collectorHook()(turnEnded() as never, { paseo: {} });
 
     await expect(handleTracesList({ workspaceId: WS }, dashboardPaseo())).rejects.toMatchObject({
-      code: "E_TRACE_STORE_UNWRITABLE",
+      code: "E_DATA_HOME_UNAVAILABLE",
     });
   });
 
   it("names the data folder and the reason in every message, with the codes unchanged", async () => {
     unsafe();
 
-    await expect(handleRolesSaveExtra({ role: "manager", text: "x" }, {})).rejects.toThrow(
-      /^E_ROLE_EXTRA_INVALID: cannot save: paseo-bm cannot use its data folder \(.+\)$/,
-    );
     await expect(saveFallback({})).rejects.toThrow(
       /^E_ROLE_SETTINGS_WRITE_FAILED: paseo-bm cannot use its data folder \(.+\); see Settings → Data$/,
     );

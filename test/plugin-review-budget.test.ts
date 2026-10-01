@@ -17,6 +17,11 @@ import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store
 import { buildRecord } from "../plugin/server/collector";
 import { reconstructTraces, type ReconstructedTrace } from "../plugin/server/traces";
 import { TRACE_STORE_SCHEMA_VERSION, type FallbackIncident, type TraceRecord } from "../plugin/shared/contracts";
+import { fakePaseo } from "./helpers/fake-paseo";
+import { createCoordinationStore } from "../plugin/server/coordination-store";
+import { readReviewBudget } from "../plugin/server/coordination-rpc";
+import { ruleInputOf } from "../plugin/server/request-trace";
+import { flagsOf } from "../plugin/shared/orchestrator-rules";
 
 /**
  * delta 20260917c §4.7 (REQ-037 errata): the plugin counts review calls and
@@ -216,70 +221,92 @@ async function reviewCall(reviewerId: string, minute: number): Promise<void> {
   );
 }
 
-function fakePaseo(options: { managerStatus?: () => string; managerArchivedAt?: string; send?: (text: string) => Promise<void>; reachable?: boolean } = {}) {
-  const sent: string[] = [];
-  const send = vi.fn(options.send ?? (async (text: string) => {
-    sent.push(text);
-  }));
-  const entries: Record<string, Array<Record<string, unknown>>> = {
-    manager: [{ agent: { id: MANAGER, workspaceId: WS, status: "idle", labels: { "bm.role": "manager" } } }],
-    worker: [
-      { agent: { id: "agent-worker-old", workspaceId: WS, status: "closed", labels: { "bm.role": "worker", "bm.requestId": OLD_REQ, "paseo.parent-agent-id": MANAGER } } },
+/**
+ * The shared fake SDK: the Manager, today's Worker and Reviewers, and
+ * yesterday's. `reachable: false` is a host without per-agent access.
+ */
+function daemonWith(options: { managerStatus?: string; managerArchivedAt?: string; reachable?: boolean } = {}) {
+  return fakePaseo<BudgetPaseo>({
+    agents: [
       {
-        agent: {
-          id: WORKER,
-          workspaceId: WS,
-          status: "running",
-          labels: { "bm.role": "worker", "bm.requestId": REQ, "paseo.parent-agent-id": MANAGER },
-        },
+        id: MANAGER,
+        workspaceId: WS,
+        status: options.managerStatus ?? "idle",
+        labels: { "bm.role": "manager" },
+        ...(options.managerArchivedAt === undefined ? {} : { archivedAt: options.managerArchivedAt }),
       },
+      { id: "agent-worker-old", workspaceId: WS, status: "closed", labels: { "bm.role": "worker", "bm.requestId": OLD_REQ, "paseo.parent-agent-id": MANAGER } },
+      { id: WORKER, workspaceId: WS, status: "running", labels: { "bm.role": "worker", "bm.requestId": REQ, "paseo.parent-agent-id": MANAGER } },
+      ...["agent-rev-1", "agent-rev-2"].map((id) => ({ id, workspaceId: WS, status: "idle", labels: { "bm.role": "reviewer", "bm.requestId": REQ, "paseo.parent-agent-id": WORKER } })),
+      { id: "agent-rev-old", workspaceId: WS, status: "idle", labels: { "bm.role": "reviewer", "bm.requestId": OLD_REQ, "paseo.parent-agent-id": "agent-worker-old" } },
     ],
-    reviewer: [
-      ...["agent-rev-1", "agent-rev-2"].map((id) => ({
-        agent: { id, workspaceId: WS, status: "idle", labels: { "bm.role": "reviewer", "bm.requestId": REQ, "paseo.parent-agent-id": WORKER } },
-      })),
-      { agent: { id: "agent-rev-old", workspaceId: WS, status: "idle", labels: { "bm.role": "reviewer", "bm.requestId": OLD_REQ, "paseo.parent-agent-id": "agent-worker-old" } } },
-    ],
-  };
-  const paseo = {
-    agents: {
-      list: async (input: { filter: { labels?: Record<string, string> } }) => ({
-        entries: input.filter.labels === undefined ? Object.values(entries).flat() : (entries[input.filter.labels["bm.role"]!] ?? []),
-      }),
-      ...(options.reachable === false
-        ? {}
-        : {
-            ref: (agentId: string) => ({
-              timeline: { refetch: async () => ({}) },
-              refresh: async () => ({
-                agent: {
-                  id: agentId,
-                  status: options.managerStatus?.() ?? "idle",
-                  ...(options.managerArchivedAt === undefined ? {} : { archivedAt: options.managerArchivedAt }),
-                },
-              }),
-              send,
-            }),
-          }),
-    },
-    workspaces: { list: async () => ({ entries: [] }) },
-    config: {},
-  } as unknown as BudgetPaseo;
-  return { paseo, send, sent };
+    omit: options.reachable === false ? ["agents.ref"] : [],
+  });
 }
 
 const ended = (id: string, provider: string) =>
   ({ agent: { id, workspaceId: WS, parentAgentId: null, provider, cwd: "/repo", title: null }, turnId: "t", outcome: { kind: "completed" }, timeline: [] }) as never;
 
+// Bead 7gxw.12 (autonomy design §C.4, §G.7; change-008 C6): the budget is the owner's, in Settings → Coordination.
+describe("the owner's review budget per tier (Settings → Coordination)", () => {
+  const store = () => createCoordinationStore(home);
+
+  it("a changed budget changes the notice: a Small request within 3 calls is quiet, past it the notice names 3", async () => {
+    await seedRequest();
+    await reviewCall("agent-rev-1", 5);
+    await reviewCall("agent-rev-1", 7);
+    store().set({ key: "review.smallBudget", value: 3 });
+    const { paseo, sends } = daemonWith();
+    const told = createBudgetTold(() => {});
+    const pending = new Map<string, BudgetOverrun>();
+    expect(await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told, pending })).toBe("within");
+    await reviewCall("agent-rev-1", 9);
+    expect(await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told, pending })).toBe("sent");
+    expect(sends.map((send) => send.text)).toEqual([budgetNotice({ requestId: REQ, tier: "Small", calls: 4, budget: 3, managerAgentId: MANAGER })]);
+    expect(sends[0]!.text).toContain("the Small budget is 3.");
+  });
+
+  it("a changed budget changes the review.over-budget rule the stall pass reads", () => {
+    const rule = (budget: ReturnType<typeof readReviewBudget>, calls: number) =>
+      flagsOf(ruleInputOf(trace({ tier: "Large", reviewCalls: calls, reviewerIds: ["agent-rev-1"] })), { reviewBudget: budget }).find((flag) => flag.rule === "review.over-budget")?.state;
+    expect(rule(readReviewBudget({ home }), 5)).toBe("raised");
+    store().set({ key: "review.largeBudget", value: 6 });
+    expect(readReviewBudget({ home })).toEqual({ Small: 2, Medium: 2, Large: 6 });
+    expect(rule(readReviewBudget({ home }), 5)).toBeUndefined();
+    expect(rule(readReviewBudget({ home }), 7)).toBe("raised");
+    expect(overrunOf(trace({ tier: "Large", reviewCalls: 5 }), readReviewBudget({ home }))).toBeNull();
+    expect(overrunOf(trace({ tier: "Large", reviewCalls: 7 }), readReviewBudget({ home }))).toMatchObject({ calls: 7, budget: 6 });
+  });
+
+  it("an unreadable store reads 2 / 2 / 4, with one log line; a missing one, silently", () => {
+    const log = vi.fn();
+    expect(readReviewBudget({ home, log })).toEqual(REVIEW_BUDGET);
+    expect(log).not.toHaveBeenCalled();
+    const elsewhere = mkdtempSync(join(tmpdir(), "bm-budget-elsewhere-"));
+    try {
+      symlinkSync(elsewhere, join(home, "coordination"));
+      expect(readReviewBudget({ home, log })).toEqual({ Small: 2, Medium: 2, Large: 4 });
+      expect(log).toHaveBeenCalledOnce();
+    } finally {
+      rmSync(join(home, "coordination"), { force: true });
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
+    // A file from a newer paseo-bm reads as the defaults too.
+    mkdirSync(join(home, "coordination"), { recursive: true });
+    writeFileSync(join(home, "coordination", "settings.json"), JSON.stringify({ version: 99, review: { smallBudget: 5 } }));
+    expect(readReviewBudget({ home, log: () => {} })).toEqual(REVIEW_BUDGET);
+  });
+});
+
 describe("checkReviewBudget", () => {
   it("stays quiet while the request is inside its budget", async () => {
     await seedRequest();
     await reviewCall("agent-rev-1", 5);
-    const { paseo, send } = fakePaseo();
+    const { paseo, sends } = daemonWith();
     const told = createBudgetTold(() => {});
     const pending = new Map<string, BudgetOverrun>();
     expect(await checkReviewBudget(ended("agent-rev-1", "bm-reviewer/gpt"), { location, paseo, told, pending })).toBe("within");
-    expect(send).not.toHaveBeenCalled();
+    expect(sends).toEqual([]);
     // "within" is also what an unattributed agent would get; one more call on
     // the same data proves the request really was found and counted.
     await reviewCall("agent-rev-1", 6);
@@ -290,36 +317,35 @@ describe("checkReviewBudget", () => {
     await seedRequest();
     await reviewCall("agent-rev-1", 5);
     await reviewCall("agent-rev-1", 7);
-    const { paseo, send, sent } = fakePaseo();
+    const { paseo, sends } = daemonWith();
     const told = createBudgetTold(() => {});
     const pending = new Map<string, BudgetOverrun>();
     expect(await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told, pending })).toBe("sent");
-    expect(send).toHaveBeenCalledTimes(1);
-    expect(sent[0]).toBe(budgetNotice({ requestId: REQ, tier: "Small", calls: 3, budget: 2, managerAgentId: MANAGER }));
+    expect(sends).toHaveLength(1);
+    expect(sends[0]!.text).toBe(budgetNotice({ requestId: REQ, tier: "Small", calls: 3, budget: 2, managerAgentId: MANAGER }));
 
     // A later turn of the Worker or of a new Reviewer does not repeat it.
     await reviewCall("agent-rev-2", 9);
     expect(await checkReviewBudget(ended(WORKER, "bm-worker/claude"), { location, paseo, told, pending })).toBe("already-told");
-    expect(send).toHaveBeenCalledTimes(1);
+    expect(sends).toHaveLength(1);
   });
 
   it("never interrupts a Manager that is running, and sends at a later turn end instead", async () => {
     await seedRequest();
     await reviewCall("agent-rev-1", 5);
     await reviewCall("agent-rev-1", 7);
-    let status = "running";
-    const { paseo, send } = fakePaseo({ managerStatus: () => status });
+    const { paseo, sends, byId } = daemonWith({ managerStatus: "running" });
     const told = createBudgetTold(() => {});
     const pending = new Map<string, BudgetOverrun>();
     expect(await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told, pending })).toBe("deferred");
-    expect(send).not.toHaveBeenCalled();
-    status = "idle";
+    expect(sends).toEqual([]);
+    byId(MANAGER)!.status = "idle";
     expect(await checkReviewBudget(ended(WORKER, "bm-worker"), { location, paseo, told, pending })).toBe("sent");
-    expect(send).toHaveBeenCalledTimes(1);
+    expect(sends).toHaveLength(1);
   });
 
   it("ignores agents that are not paseo-bm's, and agents with no workspace", async () => {
-    const { paseo, send } = fakePaseo();
+    const { paseo, sends } = daemonWith();
     const told = createBudgetTold(() => {});
     const pending = new Map<string, BudgetOverrun>();
     expect(await checkReviewBudget(ended("x", "claude"), { location, paseo, told, pending })).toBe("ignored");
@@ -331,14 +357,14 @@ describe("checkReviewBudget", () => {
         { location, paseo, told, pending },
       ),
     ).toBe("ignored");
-    expect(send).not.toHaveBeenCalled();
+    expect(sends).toEqual([]);
   });
 
   it("ignores the Orchestrator's assessment agent: no trace rebuilt, nothing counted or sent (orchestrator design §3.2)", async () => {
     await seedRequest();
     await reviewCall("agent-rev-1", 5);
     await reviewCall("agent-rev-1", 7);
-    const { paseo, send } = fakePaseo();
+    const { paseo, sends } = daemonWith();
     const list = vi.spyOn(paseo.agents, "list");
     const told = createBudgetTold(() => {});
     const pending = new Map<string, BudgetOverrun>();
@@ -347,7 +373,7 @@ describe("checkReviewBudget", () => {
     }
     expect(list).not.toHaveBeenCalled();
     expect(pending.size).toBe(0);
-    expect(send).not.toHaveBeenCalled();
+    expect(sends).toEqual([]);
     // The same over-budget request is still announced at the Reviewer's turn end.
     expect(await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told, pending })).toBe("sent");
   });
@@ -357,15 +383,14 @@ describe("checkReviewBudget", () => {
     await reviewCall("agent-rev-1", 5);
     await reviewCall("agent-rev-1", 7);
     // The Worker's `finished` report woke the Manager, then the Worker's turn ended.
-    let status = "running";
-    const { paseo, send } = fakePaseo({ managerStatus: () => status });
+    const { paseo, sends, byId } = daemonWith({ managerStatus: "running" });
     const told = createBudgetTold(() => {});
     const pending = new Map<string, BudgetOverrun>();
     expect(await checkReviewBudget(ended(WORKER, "bm-worker"), { location, paseo, told, pending })).toBe("deferred");
     // No Worker or Reviewer turn follows; only the Manager finishes answering.
-    status = "idle";
+    byId(MANAGER)!.status = "idle";
     expect(await checkReviewBudget(ended(MANAGER, "bm-manager/claude"), { location, paseo, told, pending })).toBe("sent");
-    expect(send).toHaveBeenCalledTimes(1);
+    expect(sends).toHaveLength(1);
   });
 
   it("never announces an old request on its own: a Manager turn end only flushes what was found in this process (review b2)", async () => {
@@ -388,32 +413,31 @@ describe("checkReviewBudget", () => {
       await appendRecord(location, turn({ agentId: "agent-rev-old", role: "reviewer", turnId: `old-${minute}`, requestId: OLD_REQ, parentAgentId: "agent-worker-old", at, sent: [msg("agent-rev-old", at, `Review batch b1 of ${OLD_REQ}.`)] }));
     }
 
-    const { paseo, send } = fakePaseo();
+    const { paseo, sends } = daemonWith();
     // A fresh process: nothing was found here yet, so a Manager turn end is silent.
     const told = createBudgetTold(() => {});
     const pending = new Map<string, BudgetOverrun>();
     expect(await checkReviewBudget(ended(MANAGER, "bm-manager"), { location, paseo, told, pending })).toBe("within");
-    expect(send).not.toHaveBeenCalled();
+    expect(sends).toEqual([]);
 
     // Only after a Reviewer turn end finds today's overrun can the Manager flush it.
-    let status = "running";
-    const busy = fakePaseo({ managerStatus: () => status });
+    const busy = daemonWith({ managerStatus: "running" });
     expect(await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo: busy.paseo, told, pending })).toBe("deferred");
-    status = "idle";
+    busy.byId(MANAGER)!.status = "idle";
     expect(await checkReviewBudget(ended(MANAGER, "bm-manager"), { location, paseo: busy.paseo, told, pending })).toBe("sent");
-    expect(busy.send).toHaveBeenCalledTimes(1);
-    expect(busy.sent[0]).toContain(REQ);
-    expect(busy.sent[0]).not.toContain(OLD_REQ);
+    expect(busy.sends).toHaveLength(1);
+    expect(busy.sends[0]!.text).toContain(REQ);
+    expect(busy.sends[0]!.text).not.toContain(OLD_REQ);
     // And never twice.
     expect(await checkReviewBudget(ended(MANAGER, "bm-manager"), { location, paseo: busy.paseo, told, pending })).toBe("within");
-    expect(busy.send).toHaveBeenCalledTimes(1);
+    expect(busy.sends).toHaveLength(1);
   });
 
   it("sends once when two turn ends of the same request are handled at the same time (review b2)", async () => {
     await seedRequest();
     await reviewCall("agent-rev-1", 5);
     await reviewCall("agent-rev-1", 7);
-    const { paseo, send } = fakePaseo();
+    const { paseo, sends } = daemonWith();
     const told = createBudgetTold(() => {});
     const pending = new Map<string, BudgetOverrun>();
     const results = await Promise.all([
@@ -421,7 +445,7 @@ describe("checkReviewBudget", () => {
       checkReviewBudget(ended("agent-rev-2", "bm-reviewer"), { location, paseo, told, pending }),
     ]);
     expect(results.filter((outcome) => outcome === "sent")).toHaveLength(1);
-    expect(send).toHaveBeenCalledTimes(1);
+    expect(sends).toHaveLength(1);
   });
 
   it("leaves an archived Manager alone (ADR-005): send() would un-archive and start a turn", async () => {
@@ -429,7 +453,7 @@ describe("checkReviewBudget", () => {
     await reviewCall("agent-rev-1", 5);
     await reviewCall("agent-rev-1", 7);
     const log = vi.fn();
-    const { paseo, send } = fakePaseo({ managerArchivedAt: "2026-09-17T02:00:00.000Z" });
+    const { paseo, sends } = daemonWith({ managerArchivedAt: "2026-09-17T02:00:00.000Z" });
     const told = createBudgetTold(() => {});
     const pending = new Map<string, BudgetOverrun>();
     // Recognised at the Reviewer's own turn end: nothing is deferred, so no
@@ -437,7 +461,7 @@ describe("checkReviewBudget", () => {
     expect(await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told, pending, log })).toBe("ignored");
     expect(pending.size).toBe(0);
     expect(await checkReviewBudget(ended(MANAGER, "bm-manager"), { location, paseo, told, pending, log })).toBe("within");
-    expect(send).not.toHaveBeenCalled();
+    expect(sends).toEqual([]);
     expect(String(log.mock.calls[0]?.[0])).toContain("archived");
   });
 
@@ -446,20 +470,21 @@ describe("checkReviewBudget", () => {
     await reviewCall("agent-rev-1", 5);
     await reviewCall("agent-rev-1", 7);
     const log = vi.fn();
-    const failing = fakePaseo({ send: async () => { throw new Error("socket closed"); } });
+    const failing = daemonWith();
+    failing.handle(MANAGER).send.mockRejectedValue(new Error("socket closed"));
     const told = createBudgetTold(() => {});
     const pending = new Map<string, BudgetOverrun>();
     await expect(checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo: failing.paseo, told, pending, log })).resolves.toBe("deferred");
     expect(String(log.mock.calls[0]?.[0])).toContain("socket closed");
     // The claim was released, so a later turn end may try the same overrun again.
 
-    const unreachable = fakePaseo({ reachable: false });
+    const unreachable = daemonWith({ reachable: false });
     await expect(checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo: unreachable.paseo, told, pending, log })).resolves.toBe("deferred");
     expect(String(log.mock.calls[1]?.[0])).toContain("cannot reach the Manager");
   });
 
   it("survives a malformed event", async () => {
-    const { paseo } = fakePaseo();
+    const { paseo } = daemonWith();
     await expect(checkReviewBudget(undefined as never, { location, paseo, told: createBudgetTold(() => {}), pending: new Map() })).resolves.toBe("ignored");
   });
 });
@@ -511,17 +536,17 @@ describe("the review-budget notice survives a reload", () => {
 
   it("a store built afresh from the same home does not repeat the notice", async () => {
     await overBudget();
-    const { paseo, send } = fakePaseo();
+    const { paseo, sends } = daemonWith();
     expect(
       await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told: createBudgetTold(() => {}), pending: new Map() }),
     ).toBe("sent");
-    expect(send).toHaveBeenCalledTimes(1);
+    expect(sends).toHaveLength(1);
 
     // The reload: everything in memory is gone, only the file is left.
     expect(
       await checkReviewBudget(ended(WORKER, "bm-worker"), { location, paseo, told: createBudgetTold(() => {}), pending: new Map() }),
     ).toBe("already-told");
-    expect(send).toHaveBeenCalledTimes(1);
+    expect(sends).toHaveLength(1);
     expect(JSON.parse(readFileSync(budgetToldPath(location), "utf8")).told).toEqual([
       { key: `${WS}::${REQ}`, calls: 3, at: expect.any(String) },
     ]);
@@ -535,26 +560,27 @@ describe("the review-budget notice survives a reload", () => {
    */
   it("an already-told overrun leaves nothing behind in pending", async () => {
     await overBudget();
-    const { paseo, send } = fakePaseo();
+    const { paseo, sends } = daemonWith();
     const pending = new Map<string, BudgetOverrun>();
     expect(await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told: createBudgetTold(() => {}), pending })).toBe("sent");
     expect(pending.size).toBe(0);
 
     expect(await checkReviewBudget(ended(WORKER, "bm-worker"), { location, paseo, told: createBudgetTold(() => {}), pending })).toBe("already-told");
     expect(pending.size).toBe(0);
-    expect(send).toHaveBeenCalledTimes(1);
+    expect(sends).toHaveLength(1);
   });
 
   it("a notice that did not go out is not remembered", async () => {
     await overBudget();
-    const failing = fakePaseo({ send: async () => { throw new Error("socket closed"); } });
+    const failing = daemonWith();
+    failing.handle(MANAGER).send.mockRejectedValue(new Error("socket closed"));
     const told = createBudgetTold(() => {});
     expect(
       await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo: failing.paseo, told, pending: new Map(), log: () => {} }),
     ).toBe("deferred");
-    const { paseo, send } = fakePaseo();
+    const { paseo, sends } = daemonWith();
     expect(await checkReviewBudget(ended(WORKER, "bm-worker"), { location, paseo, told, pending: new Map() })).toBe("sent");
-    expect(send).toHaveBeenCalledTimes(1);
+    expect(sends).toHaveLength(1);
   });
 
   it("refuses a symlinked ui directory without throwing into the turn", async () => {
@@ -563,13 +589,13 @@ describe("the review-budget notice survives a reload", () => {
     try {
       symlinkSync(elsewhere, join(home, "ui"));
       const notices: string[] = [];
-      const { paseo, send } = fakePaseo();
+      const { paseo, sends } = daemonWith();
       // The notice still goes out — a warning lost is worse than one repeated —
       // and nothing is written through the link.
       expect(
         await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told: createBudgetTold((m) => notices.push(m)), pending: new Map() }),
       ).toBe("sent");
-      expect(send).toHaveBeenCalledTimes(1);
+      expect(sends).toHaveLength(1);
       expect(notices.join(" ")).toContain("review-budget");
       expect(readdirSync(elsewhere)).toEqual([]);
     } finally {
@@ -585,8 +611,7 @@ describe("the review-budget notice survives a reload", () => {
    */
   it("a turn end that overlaps a deferral does not erase it", async () => {
     await overBudget();
-    let status = "running";
-    const busy = fakePaseo({ managerStatus: () => status });
+    const busy = daemonWith({ managerStatus: "running" });
     const told = createBudgetTold(() => {});
     const pending = new Map<string, BudgetOverrun>();
     // Both turn ends are in flight while the Manager is running: the first
@@ -599,9 +624,9 @@ describe("the review-budget notice survives a reload", () => {
     expect(pending.size).toBe(1);
 
     // No Worker or Reviewer turn follows; the Manager's own turn end must still deliver it.
-    status = "idle";
+    busy.byId(MANAGER)!.status = "idle";
     expect(await checkReviewBudget(ended(MANAGER, "bm-manager"), { location, paseo: busy.paseo, told, pending })).toBe("sent");
-    expect(busy.send).toHaveBeenCalledTimes(1);
+    expect(busy.sends).toHaveLength(1);
   });
 
   it("a corrupt or unreadable file means untold, never a lost warning", async () => {
@@ -609,12 +634,12 @@ describe("the review-budget notice survives a reload", () => {
     mkdirSync(dirname(budgetToldPath(location)), { recursive: true });
     writeFileSync(budgetToldPath(location), "{ this is not json");
     const notices: string[] = [];
-    const { paseo, send } = fakePaseo();
+    const { paseo, sends } = daemonWith();
     expect(
       await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told: createBudgetTold((m) => notices.push(m)), pending: new Map() }),
     ).toBe("sent");
-    expect(send).toHaveBeenCalledTimes(1);
-    expect(notices.join(" ")).toContain("not valid JSON");
+    expect(sends).toHaveLength(1);
+    expect(notices.join(" ")).toContain("cannot be used (not JSON");
   });
 
   it("a file from a newer version is never overwritten", async () => {
@@ -623,13 +648,15 @@ describe("the review-budget notice survives a reload", () => {
     const future = `${JSON.stringify({ schemaVersion: BUDGET_TOLD_SCHEMA_VERSION + 1, told: [] }, null, 2)}\n`;
     writeFileSync(budgetToldPath(location), future);
     const notices: string[] = [];
-    const { paseo, send } = fakePaseo();
+    const { paseo, sends } = daemonWith();
     expect(
       await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told: createBudgetTold((m) => notices.push(m)), pending: new Map() }),
     ).toBe("sent");
-    expect(send).toHaveBeenCalledTimes(1);
+    expect(sends).toHaveLength(1);
     expect(readFileSync(budgetToldPath(location), "utf8")).toBe(future);
     expect(notices.join(" ")).toContain("newer than this plugin understands");
+    // Not written, and not a failure either: the refusal costs no second line (code review 2026-09-30 §3.1).
+    expect(notices.join(" ")).not.toContain("could not record");
   });
 });
 
@@ -661,27 +688,28 @@ describe("checkReviewBudget with a replacement Reviewer", () => {
   it("stays within budget: the resend is the same review call; the next message counts", async () => {
     await resent();
     writeIncidents(home, [reviewerIncident()]);
-    const { paseo, send, sent } = fakePaseo();
+    const { paseo, sends } = daemonWith();
     expect(await check(paseo, home)).toBe("within");
-    expect(send).not.toHaveBeenCalled();
+    expect(sends).toEqual([]);
 
     // A second message to the replacement is a new call, and over a Small budget.
     await reviewCall("agent-rev-2", 9);
     expect(await check(paseo, home)).toBe("sent");
-    expect(sent[0]).toBe(budgetNotice({ requestId: REQ, tier: "Small", calls: 3, budget: 2, managerAgentId: MANAGER }));
+    expect(sends[0]!.text).toBe(budgetNotice({ requestId: REQ, tier: "Small", calls: 3, budget: 2, managerAgentId: MANAGER }));
   });
 
   it("counts the resend as today when the replacement is not recorded, or the file cannot be used", async () => {
     await resent();
-    const { paseo } = fakePaseo();
+    // Each check is its own scenario, with a Manager that is idle: a send starts its turn.
+    const idle = () => daemonWith().paseo;
     // No home, no file: over budget, exactly as before fallback existed.
-    expect(await check(paseo, null)).toBe("sent");
-    expect(await check(paseo, home)).toBe("sent");
+    expect(await check(idle(), null)).toBe("sent");
+    expect(await check(idle(), home)).toBe("sent");
     // A Worker incident, or a Reviewer incident with no replacement yet, names no replacement Reviewer.
     writeIncidents(home, [reviewerIncident({ role: "worker" }), reviewerIncident({ id: "fb-00000000000c", replacementId: null })]);
-    expect(await check(paseo, home)).toBe("sent");
+    expect(await check(idle(), home)).toBe("sent");
     writeFileSync(join(home, "role-fallback-state.json"), "{ not json");
-    expect(await check(paseo, home)).toBe("sent");
+    expect(await check(idle(), home)).toBe("sent");
   });
 
   it("finds the data folder itself when none is given, as the plugin runs", async () => {
@@ -690,7 +718,7 @@ describe("checkReviewBudget with a replacement Reviewer", () => {
     // the folder is found with `resolveDataHome` alone (design §5.1).
     process.env["PASEO_BM_HOME"] = home;
     try {
-      const { paseo } = fakePaseo();
+      const { paseo } = daemonWith();
       // The request is found and counted: over budget until the incident names the replacement.
       expect(await check(paseo)).toBe("sent");
       writeIncidents(home, [reviewerIncident()]);

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -152,9 +152,47 @@ describe("insights.summary", () => {
     expect(out.requestsByDay).toEqual([{ day: "2026-09-10", requests: 1 }]);
   });
 
-  it("carries numbers only: no message text, no label, no path", () => {
-    const text = JSON.stringify(handleInsightsSummary({ window: "all" }, deps));
-    for (const secret of [SECRET_QUESTION, SECRET_LABEL, SECRET_DIRECTORY, "Please export", home, WS_A, WS_B, R1]) expect(text).not.toContain(secret);
+  it("carries numbers only: no message text, no label, no path; a heaviest request's workspace is the one id", () => {
+    const out = handleInsightsSummary({ window: "all" }, deps);
+    const text = JSON.stringify(out);
+    for (const secret of [SECRET_QUESTION, SECRET_LABEL, SECRET_DIRECTORY, "Please export", home, R1, R2, WORKER, MANAGER]) expect(text).not.toContain(secret);
+    const heaviest = out.context?.tokensRead.heaviestRequests ?? [];
+    expect(heaviest.map((row) => Object.keys(row))).toEqual([
+      ["workspaceId", "tokensRead", "byRole", "turns", "finished"],
+      ["workspaceId", "tokensRead", "byRole", "turns", "finished"],
+    ]);
+    const withoutHeaviest = JSON.stringify({ ...out, context: { ...out.context, tokensRead: { ...out.context?.tokensRead, heaviestRequests: [] } } });
+    for (const id of [WS_A, WS_B]) expect(withoutHeaviest).not.toContain(id);
+  });
+
+  it("carries the context and token figures (autonomy design §G.2), and the Orchestrator's tokens from its wakes", () => {
+    mkdirSync(join(home, "orchestrator"), { recursive: true });
+    writeFileSync(
+      join(home, "orchestrator", "wakes.json"),
+      JSON.stringify({
+        version: 1,
+        entries: [
+          { orchestratorId: "agent-orchestrator", at: "2026-09-26T10:30:00.000Z", endedAt: "2026-09-26T10:31:00.000Z", workspaceIds: [WS_A], events: 1, usage: { inputTokens: 100, cachedInputTokens: 900, outputTokens: 20 } },
+        ],
+      }),
+    );
+    const out = handleInsightsSummary({ window: "all" }, deps);
+    expect(insightsSummaryRpc.output.parse(out)).toEqual(out);
+    // Each request: Manager 2,000, Worker 8,000, Reviewer 2,000 tokens read (no cached, no model id).
+    expect(out.context?.tokensRead.total).toBe(24_000);
+    expect(out.context?.tokensRead.perRequest.all).toEqual({ count: 2, median: 12_000, p75: 12_000, p80: 12_000, p90: 12_000, max: 12_000 });
+    expect(out.context?.tokensRead.perAgent.byRole.worker).toMatchObject({ count: 1, max: 16_000 });
+    expect(out.context?.tokensRead.heaviestRequests.map((row) => [row.workspaceId, row.tokensRead, row.turns, row.finished])).toEqual([
+      [WS_A, 12_000, 5, true],
+      [WS_B, 12_000, 5, true],
+    ]);
+    expect(out.context?.turns).toEqual({ withUsage: 10, byProvider: { claude: 0, codex: 0, opencode: 0, unknown: 10 }, repeated: 0, withToolCalls: 0 });
+    expect(out.context?.contextEstimate).toMatchObject({ reported: 0, estimated: 0, unknown: 10 });
+    expect(out.context?.orchestrator).toEqual({ wakes: 1, wakesWithUsage: 1, tokens: 1_020, perFinishedRequest: 510 });
+    // One project: its own requests, and the wakes that named it.
+    const beta = handleInsightsSummary({ window: "all", workspaceId: WS_B }, deps);
+    expect(beta.context?.tokensRead.heaviestRequests.map((row) => row.workspaceId)).toEqual([WS_B]);
+    expect(beta.context?.orchestrator).toMatchObject({ wakes: 0, tokens: 0 });
   });
 
   it("leaves every file of the data folder as it found it", () => {
@@ -179,5 +217,82 @@ describe("insights.summary", () => {
     expect(handle.mock.calls.map(([contract]) => (contract as { name: string }).name)).toEqual(["insights.summary"]);
     const handler = handle.mock.calls[0]![1] as (input: unknown) => { requests: { inWindow: number } };
     expect(handler({ window: "all" }).requests.inWindow).toBe(2);
+  });
+});
+
+describe("insights.summary: A-12 from the intervention log (autonomy design §G.3)", () => {
+  const entry = (id: string, workspaceId: string, outcome: "met" | "missed" | "unknown", at = "2026-09-26T10:00:00.000Z") => ({
+    id,
+    kind: "answer",
+    workspaceId,
+    requestId: R1,
+    targetAgentId: WORKER,
+    trigger: "decision.opened",
+    expected: "worker-resumes",
+    windowMs: 600_000,
+    at,
+    outcome,
+    checkedAt: at,
+  });
+
+  it("reads orchestrator/interventions.json, per kind, narrowed to a workspace and to the window, numbers only", () => {
+    mkdirSync(join(home, "orchestrator"), { recursive: true });
+    writeFileSync(
+      join(home, "orchestrator", "interventions.json"),
+      JSON.stringify({ version: 1, entries: [entry("i-1", WS_A, "met"), entry("i-2", WS_A, "missed"), entry("i-3", WS_B, "unknown"), entry("i-4", WS_A, "met", "2026-09-01T10:00:00.000Z")] }),
+    );
+    const all = handleInsightsSummary({ window: "all" }, deps);
+    expect(insightsSummaryRpc.output.parse(all)).toEqual(all);
+    expect(all.interventions.map((row) => row.kind)).toEqual(["answer", "unblock", "correct", "stop", "compact", "handoff", "advice"]);
+    expect(all.interventions[0]).toEqual({ kind: "answer", recorded: 4, met: 2, missed: 1, unknown: 1, pending: 0, share: 2 / 3 });
+    expect(handleInsightsSummary({ window: "all", workspaceId: WS_B }, deps).interventions[0]).toMatchObject({ recorded: 1, unknown: 1, share: null });
+    expect(handleInsightsSummary({ window: "7d" }, deps).interventions[0]).toMatchObject({ recorded: 3, met: 1, missed: 1, share: 0.5 });
+    expect(JSON.stringify(all)).not.toContain(WORKER);
+  });
+
+  it("reads no log as none recorded, never as zero percent", () => {
+    expect(handleInsightsSummary({ window: "all" }, deps).interventions.every((row) => row.recorded === 0 && row.share === null)).toBe(true);
+  });
+});
+
+describe("insights.summary: review lift (autonomy design §C.4)", () => {
+  /** A Reviewer turn of alpha's request with one review of batch b1. */
+  const reviewed = (minute: number, blockingCount: number, tokens: number): TraceRecord => {
+    const when = `2026-09-26T10:${minute}:00.000Z`;
+    return turn({
+      workspaceId: WS_A,
+      requestId: R1,
+      agentId: REVIEWER,
+      role: "reviewer",
+      at: when,
+      turnId: `r-${minute}-${R1}`,
+      startedAt: when,
+      endedAt: when,
+      usage: usage(tokens),
+      reviews: [{ agentId: REVIEWER, at: when, batchId: "b1", verdict: blockingCount === 0 ? "approved" : "changes", blockingCount }],
+    });
+  };
+  const REVIEWS = [reviewed(15, 2, 3000), reviewed(17, 0, 1000)];
+
+  it("carries it per tier as the metric module counts it, narrowed to a workspace, with no id", () => {
+    appendFileSync(join(home, "traces", WS_A, "events-202609.jsonl"), `${REVIEWS.map((record) => JSON.stringify(record)).join("\n")}\n`);
+    const out = handleInsightsSummary({ window: "all" }, deps);
+    expect(insightsSummaryRpc.output.parse(out)).toEqual(out);
+    const { reviewLift } = computeEvalMetrics({ records: [...ALPHA, ...BETA, ...REVIEWS], window: { since: null, until: null } });
+    expect(out.reviewLift).toEqual({ all: reviewLift.all, byTier: reviewLift.byTier, reviewerTurnsWithoutRequest: 0 });
+    // Alpha's Medium request: one batch whose 2 blocking findings were fixed by its re-review; its Reviewer's
+    // three turns (the failed one too) read 6,000 tokens over its two reviews. Beta's Reviewer sent no review.
+    expect(out.reviewLift?.byTier.Medium).toMatchObject({
+      requests: 1,
+      reviews: 2,
+      batches: 1,
+      blockingPerBatch: 2,
+      actedOn: { reReviewedBatches: 1, found: 2, fixed: 2, reviewedOnceBatches: 0 },
+      tokens: { reviews: 2, total: 6000, perReview: 3000 },
+      unknown: { requestsWithoutReview: 1 },
+    });
+    const beta = handleInsightsSummary({ window: "all", workspaceId: WS_B }, deps);
+    expect(beta.reviewLift?.all).toMatchObject({ requests: 0, reviews: 0, blockingPerBatch: null, tokens: { perReview: null }, unknown: { requestsWithoutReview: 1 } });
+    expect(JSON.stringify(out.reviewLift)).not.toMatch(/wks_|req-|agent-/);
   });
 });

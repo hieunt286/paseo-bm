@@ -24,7 +24,7 @@
 import { unusableDataHomeMessage } from "./data-home";
 import { peersOfWorkspace } from "./chat-peers";
 import { createLocationResolver, resolveLocationFromPaseo } from "./collector";
-import { bmAgentsOf, type DashboardPaseo } from "./dashboard-rpc";
+import { bmAgentsOf, type DashboardPaseo } from "./paseo-directory";
 import { REPLACED_BY_LABEL } from "./fallback-detect";
 import { liveWorkersOf, managerHandover } from "./fallback-handover";
 import { decidePending, type FallbackAction, type FallbackRpcDeps } from "./fallback-rpc";
@@ -34,7 +34,7 @@ import { enqueue as defaultEnqueue, type NoticeOutcome, type NoticePaseo } from 
 import { SETTINGS_NOTICE_MARKER } from "./notices";
 import { setAgentLabels, type CliResult } from "./paseo-cli";
 import { asRecord, availableProviders, nonEmpty, reasonOf } from "./role-choices";
-import { currentInstructions } from "./role-extras";
+import { currentInstructions } from "./role-instructions";
 import { capabilityOf, featuresFor, managerModeFor, modesFor, runPostureOf } from "./role-mode";
 import { managerIdNotice } from "./settings-notices";
 import type { TraceStoreLocation } from "./trace-store";
@@ -49,8 +49,8 @@ export interface ManagerSwitchDeps {
   /** `setAgentLabels` of `paseo-cli.ts` by default. */
   setLabels?: (agentId: string, labels: Record<string, string>) => Promise<CliResult>;
   enqueue?: (targetId: string, kind: string, text: string, paseo?: NoticePaseo) => Promise<NoticeOutcome>;
-  /** The Manager instructions; `currentInstructions("manager", paseo)` by default. */
-  readInstructions?: (paseo: unknown) => Promise<string>;
+  /** The Manager instructions for its workspace; `currentInstructions("manager", paseo, { workspaceId })` by default. */
+  readInstructions?: (paseo: unknown, workspaceId: string) => Promise<string>;
   /** `managerHandover` by default. */
   handover?: (incident: FallbackIncident, deps: { paseo: unknown; location: TraceStoreLocation | null; incidents: readonly FallbackIncident[] | null }) => Promise<string>;
   /** The workspace trace store; the collector's resolver by default. */
@@ -86,7 +86,7 @@ export function createManagerSwitch(deps: ManagerSwitchDeps = {}): FallbackActio
   const log = deps.log ?? ((message: string) => console.warn(message));
   const setLabels = deps.setLabels ?? ((agentId: string, labels: Record<string, string>) => setAgentLabels(agentId, labels));
   const enqueue = deps.enqueue ?? defaultEnqueue;
-  const readInstructions = deps.readInstructions ?? ((paseo: unknown) => currentInstructions("manager", paseo));
+  const readInstructions = deps.readInstructions ?? ((paseo: unknown, workspaceId: string) => currentInstructions("manager", paseo, { workspaceId }));
   const handover = deps.handover ?? managerHandover;
   const location = deps.location ?? createLocationResolver(resolveLocationFromPaseo);
 
@@ -136,7 +136,7 @@ export function createManagerSwitch(deps: ManagerSwitchDeps = {}): FallbackActio
         ...(posture.featureValues !== undefined ? { featureValues: posture.featureValues } : {}),
         labels: { [REPLACES_LABEL]: current.agentId, ...(posture.modeId !== undefined ? { [MODE_SET_LABEL]: posture.modeId } : {}) },
         prompt,
-        readInstructions: () => readInstructions(paseo),
+        readInstructions: (workspaceId) => readInstructions(paseo, workspaceId),
       });
     } catch (error) {
       const detail = `could not create the fallback Manager on ${candidate.alias}/${candidate.model}: ${reasonOf(error)}`;

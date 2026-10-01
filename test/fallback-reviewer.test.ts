@@ -7,6 +7,7 @@ import { fallbackNotice, handleFallbackAct } from "../plugin/server/fallback-rpc
 import { ROLE_FALLBACK_STATE_FILE } from "../plugin/server/fallback-state";
 import { forgetModes } from "../plugin/server/role-mode";
 import type { FallbackIncident } from "../plugin/shared/contracts";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 /**
  * Delta 20260921 §4.5.1 (REQ-066 b): a stopped Reviewer is replaced by its
@@ -55,17 +56,14 @@ const MODES: Record<string, unknown[]> = {
   "bm-reviewer-fallback-2": [],
 };
 
-function fakeDaemon(snapshots: Record<string, unknown> = {}) {
-  const create = vi.fn();
-  const paseo = {
-    agents: { create, ref: (id: string) => ({ refresh: async () => ({ agent: snapshots[id] ?? null }) }) },
-    providers: {
-      listAvailable: async () => ({ providers: ["claude", "codex", "pi"].map((provider) => ({ provider, available: true })) }),
-      listModes: async (provider: string) => ({ provider, modes: MODES[provider] ?? [], error: null }),
-    },
-    config: { get: async () => ({ config: { providers: { "bm-reviewer": { extends: "claude" }, "bm-reviewer-fallback-1": { extends: "codex" } } } }) },
-  };
-  return { paseo, create };
+/** A daemon holding these agents, with Claude, Codex and Pi and the Reviewer's chain configured. */
+function daemon(snapshots: Record<string, object> = {}) {
+  const fake = fakePaseo({
+    agents: Object.entries(snapshots).map(([id, snapshot]) => ({ ...snapshot, id })),
+    providers: { available: ["claude", "codex", "pi"], modes: MODES },
+    config: { providers: { "bm-reviewer": { extends: "claude" }, "bm-reviewer-fallback-1": { extends: "codex" } } },
+  });
+  return { paseo: fake.paseo, create: fake.api.agents.create };
 }
 
 let root: string;
@@ -110,7 +108,7 @@ describe("the instructions to the Worker", () => {
 describe("Switch for a Reviewer", () => {
   it("creates no agent: records switched and sends the Worker its BM-FALLBACK with the instructions; the Manager is sent nothing", async () => {
     write([incident()]);
-    const { paseo, create } = fakeDaemon();
+    const { paseo, create } = daemon();
     const enqueue = vi.fn<(target: string, kind: string, text: string) => Promise<"sent">>(async () => "sent");
     const reviewerSwitch = createReviewerSwitch({ log, enqueue });
     const { incident: after } = await handleFallbackAct({ incidentId: "fb-0000000000ee", action: "switch" }, paseo, {
@@ -135,15 +133,15 @@ describe("Switch for a Reviewer", () => {
     const pi = { ...CANDIDATE, alias: "bm-reviewer-fallback-2", baseProvider: "pi", model: "pi-default", thinkingOptionId: null, position: 2 };
     write([incident({ candidate: pi })]);
     const enqueue = vi.fn<(target: string, kind: string, text: string) => Promise<"sent">>(async () => "sent");
-    await createReviewerSwitch({ log, enqueue })(incident({ candidate: pi }), fakeDaemon().paseo, { home, now: NOW });
+    await createReviewerSwitch({ log, enqueue })(incident({ candidate: pi }), daemon().paseo, { home, now: NOW });
     expect(enqueue.mock.calls[0]![2]).toContain("provider `bm-reviewer-fallback-2/pi-default`, do not pass settings.modeId,");
   });
 
   it("refuses without a candidate or a known Worker, leaving the incident pending", async () => {
     write([incident({ candidate: null }), incident({ id: "fb-0000000000ef", parentId: null })]);
     const action = createReviewerSwitch({ log, enqueue: async () => "sent" });
-    await expect(action(incident({ candidate: null }), fakeDaemon().paseo, { home })).rejects.toMatchObject({ code: "E_FALLBACK_NO_CANDIDATE" });
-    await expect(action(incident({ id: "fb-0000000000ef", parentId: null }), fakeDaemon().paseo, { home })).rejects.toMatchObject({ code: "E_FALLBACK_CREATE_FAILED" });
+    await expect(action(incident({ candidate: null }), daemon().paseo, { home })).rejects.toMatchObject({ code: "E_FALLBACK_NO_CANDIDATE" });
+    await expect(action(incident({ id: "fb-0000000000ef", parentId: null }), daemon().paseo, { home })).rejects.toMatchObject({ code: "E_FALLBACK_CREATE_FAILED" });
     expect(read().map((entry) => entry.status)).toEqual(["pending", "pending"]);
   });
 });
@@ -158,7 +156,7 @@ describe("the replacement Reviewer", () => {
 
   it("completes the incident when a Reviewer with bm.replaces appears, and labels the old one", async () => {
     write([incident({ status: "switched" })]);
-    const { paseo } = fakeDaemon({ [NEW]: replacement() });
+    const { paseo } = daemon({ [NEW]: replacement() });
     const setLabels = vi.fn(async () => ({ ok: true as const }));
     const linked = await linkReplacementReviewer(NEW, "bm-reviewer-fallback-1/gpt-5.6-sol", paseo, { home, log, setLabels });
     expect(linked).toMatchObject({ replacementId: NEW });
@@ -169,10 +167,10 @@ describe("the replacement Reviewer", () => {
   it("ignores any other new agent: no label, not a Reviewer, or no switched incident for it", async () => {
     write([incident({ status: "switched" })]);
     const setLabels = vi.fn(async () => ({ ok: true as const }));
-    const noLabel = fakeDaemon({ [NEW]: { id: NEW, labels: { "bm.role": "reviewer" } } });
+    const noLabel = daemon({ [NEW]: { id: NEW, labels: { "bm.role": "reviewer" } } });
     expect(await linkReplacementReviewer(NEW, "bm-reviewer", noLabel.paseo, { home, log, setLabels })).toBeNull();
-    expect(await linkReplacementReviewer(NEW, "bm-worker", fakeDaemon({ [NEW]: { labels: { "bm.replaces": OLD } } }).paseo, { home, log, setLabels })).toBeNull();
-    const other = fakeDaemon({ [NEW]: replacement({ labels: { "bm.replaces": "rev-9" } }) });
+    expect(await linkReplacementReviewer(NEW, "bm-worker", daemon({ [NEW]: { labels: { "bm.replaces": OLD } } }).paseo, { home, log, setLabels })).toBeNull();
+    const other = daemon({ [NEW]: replacement({ labels: { "bm.replaces": "rev-9" } }) });
     expect(await linkReplacementReviewer(NEW, "bm-reviewer", other.paseo, { home, log, setLabels })).toBeNull();
     expect(setLabels).not.toHaveBeenCalled();
     expect(read()[0]!.replacementId).toBeNull();
@@ -186,7 +184,7 @@ describe("the replacement Reviewer", () => {
   ])("never lets a Reviewer of %s claim the incident, even with the right bm.replaces (review b7)", async (_label, snapshot) => {
     write([incident({ status: "switched" })]);
     const setLabels = vi.fn(async () => ({ ok: true as const }));
-    expect(await linkReplacementReviewer(NEW, "bm-reviewer", fakeDaemon({ [NEW]: snapshot }).paseo, { home, log, setLabels })).toBeNull();
+    expect(await linkReplacementReviewer(NEW, "bm-reviewer", daemon({ [NEW]: snapshot }).paseo, { home, log, setLabels })).toBeNull();
     expect(setLabels).not.toHaveBeenCalled();
     expect(read()[0]!.replacementId).toBeNull();
   });
@@ -195,7 +193,7 @@ describe("the replacement Reviewer", () => {
     write([incident({ status: "switched" })]);
     const snapshot = replacement();
     delete (snapshot.labels as Record<string, string>)["bm.requestId"];
-    const linked = await linkReplacementReviewer(NEW, "bm-reviewer", fakeDaemon({ [NEW]: snapshot }).paseo, { home, log, setLabels: async () => ({ ok: true }) });
+    const linked = await linkReplacementReviewer(NEW, "bm-reviewer", daemon({ [NEW]: snapshot }).paseo, { home, log, setLabels: async () => ({ ok: true }) });
     expect(linked).toMatchObject({ replacementId: NEW });
   });
 });
@@ -205,7 +203,7 @@ describe("Resend to Worker", () => {
     write([incident({ status: "switched", decidedAt: "2026-09-22T05:05:00.000Z" })]);
     const enqueue = vi.fn<(target: string, kind: string, text: string) => Promise<"sent">>(async () => "sent");
     const resend = createReviewerResend({ log, enqueue });
-    const { incident: after } = await handleFallbackAct({ incidentId: "fb-0000000000ee", action: "resend" }, fakeDaemon().paseo, { home, log, actions: { resend } });
+    const { incident: after } = await handleFallbackAct({ incidentId: "fb-0000000000ee", action: "resend" }, daemon().paseo, { home, log, actions: { resend } });
     expect(after.status).toBe("switched");
     expect(enqueue).toHaveBeenCalledTimes(1);
     expect(enqueue.mock.calls[0]![0]).toBe(WORKER);
@@ -216,7 +214,7 @@ describe("Resend to Worker", () => {
     write([incident({ status: "switched", replacementId: NEW }), incident({ id: "fb-0000000000ef" })]);
     const resend = createReviewerResend({ log, enqueue: async () => "sent" });
     for (const id of ["fb-0000000000ee", "fb-0000000000ef"]) {
-      await expect(handleFallbackAct({ incidentId: id, action: "resend" }, fakeDaemon().paseo, { home, log, actions: { resend } })).rejects.toMatchObject({
+      await expect(handleFallbackAct({ incidentId: id, action: "resend" }, daemon().paseo, { home, log, actions: { resend } })).rejects.toMatchObject({
         code: "E_FALLBACK_NOT_PENDING",
       });
     }

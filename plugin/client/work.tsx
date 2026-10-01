@@ -13,7 +13,13 @@
  *   Details offer to delete its history; the Requests tab of a closed
  *   workspace (archived, or removed from Paseo) offers to delete its history
  *   or, once removed, to move it onto a workspace that exists
- *   (`dashboard-actions.tsx`, each behind its own confirmation).
+ *   (`dashboard-actions.tsx`, each behind its own confirmation). A request's
+ *   **Why?** shows the chain behind it in place of the list (`why.tsx`, autonomy
+ *   design §E.2), read when it opens and on Refresh, never on the poll.
+ * - Tokens and context (autonomy design §G.2), from `traces.agents`: a
+ *   request's Details open with its tokens read by role and each agent's
+ *   context trend; the Agents tab gives each listed agent's over its life,
+ *   under the tree. Both are read only while they show.
  *
  * Layout: `layout.compact` (a phone) puts a row on two lines, draws the stage
  * bar as five segments with its stage written under them, stacks the evidence
@@ -36,6 +42,7 @@ import {
   agentsListRpc,
   decisionsListRpc,
   orchestratorStateRpc,
+  tracesAgentsRpc,
   tracesGetRpc,
   tracesListRpc,
   type WorkspaceOverview,
@@ -44,25 +51,33 @@ import type { Decision } from "../shared/decisions";
 import { AGENT_TREE_POLL_MS } from "./agent-tree";
 import { BeadsScreen } from "./beads-screen";
 import { TraceActions } from "./dashboard-actions";
-import { dashboardStyles, toneColor } from "./dashboard-model";
-import { errorMessageOf } from "./launch-manager";
+import { dashboardStyles } from "./styles";
+import { toneColor } from "./tone";
+import { errorMessageOf } from "./errors";
 import type { ClosedWorkspace, StoredWorkspace } from "./surface-view";
 import { AgentTreeView, toLoadable } from "./tree";
-import { StatusTabs, WorkspaceScreenHeader, type Styles, type Theme } from "./ui";
+import { WhyScreen } from "./why";
+import { Button, StatusTabs, ToneText, WorkspaceScreenHeader, type Styles, type Theme } from "./ui";
 import {
   NO_REQUESTS_TEXT,
   PROJECT_TABS,
+  TOKEN_FIGURES_TITLE,
   WORK_POLL_MS,
+  agentTokenFigures,
   requestCardView,
   requestSummaries,
+  requestTokenFigures,
   timelineEvents,
   workRows,
+  type AgentTokensView,
+  type ContextTrendView,
   type EvidenceLine,
   type ProjectTab,
   type RequestCardView,
   type RequestSummary,
   type StageBarView,
   type TimelineEvent,
+  type TokenFiguresState,
   type WorkRowView,
   type WorkspaceEntry,
 } from "./work-model";
@@ -75,6 +90,8 @@ export const workQueryKeys = {
   traces: (workspaceId: string) => ["paseo-bm", "work", "traces", workspaceId] as const,
   trace: (workspaceId: string, traceId: string) => ["paseo-bm", "work", "trace", workspaceId, traceId] as const,
   decisions: (workspaceId: string) => ["paseo-bm", "work", "decisions", workspaceId] as const,
+  /** `traces.agents`: of one request, or (no trace) of the Agents tab. */
+  tokens: (workspaceId: string, traceId?: string) => ["paseo-bm", "work", "tokens", workspaceId, traceId ?? "agents"] as const,
 };
 
 function column(compact: boolean, gap: number) {
@@ -91,9 +108,9 @@ export function AgentMarks({ agents, styles, theme }: { agents: WorkRowView["age
   return (
     <View style={{ flexDirection: "row", gap: 4 }} accessibilityLabel={agents.map((agent) => agent.label).join(", ")}>
       {agents.map((agent) => (
-        <Text key={agent.letter} style={[styles.badge, { color: toneColor(theme, agent.tone) }]}>
+        <ToneText key={agent.letter} tone={agent.tone} base={styles.badge} styles={styles} theme={theme}>
           {agent.letter}
-        </Text>
+        </ToneText>
       ))}
     </View>
   );
@@ -124,9 +141,9 @@ export function WorkRowItem({
     </View>
   );
   const status = (
-    <Text style={[styles.body, { color: toneColor(theme, row.status.tone) }]} numberOfLines={1}>
+    <ToneText tone={row.status.tone} numberOfLines={1} styles={styles} theme={theme}>
       {row.status.text}
-    </Text>
+    </ToneText>
   );
   const request =
     row.request === null ? null : (
@@ -203,7 +220,7 @@ export function WorkList({
         {status}
         {loading ? <ActivityIndicator color={styles.spinner.color} accessibilityLabel="Reading the projects" /> : null}
         {error === null ? null : (
-          <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{`Could not load the workspaces. ${error}`}</Text>
+          <ToneText tone="danger" styles={styles} theme={theme}>{`Could not load the workspaces. ${error}`}</ToneText>
         )}
         {!loading && error === null && rows.length === 0 ? <Text style={styles.body}>No workspaces on this host yet.</Text> : null}
         {rows.map((row) => (
@@ -300,9 +317,9 @@ export function EvidenceList({ lines, compact, styles, theme }: { lines: readonl
   return (
     <View style={{ flexDirection: compact ? "column" : "row", flexWrap: "wrap", gap: compact ? 2 : 16 }}>
       {lines.map((line) => (
-        <Text key={line.key} style={[styles.body, { color: toneColor(theme, line.tone) }]}>
+        <ToneText key={line.key} tone={line.tone} styles={styles} theme={theme}>
           {`${line.mark} ${line.text}`}
-        </Text>
+        </ToneText>
       ))}
     </View>
   );
@@ -317,16 +334,107 @@ export function TimelineList({ events, compact, styles, theme }: { events: reado
         compact ? (
           <View key={event.key} style={{ gap: 2 }}>
             <Text style={[styles.body, { fontSize: 11 }]}>{event.tag === null ? event.time : `${event.time} · ${event.tag}`}</Text>
-            <Text style={[styles.body, { color: toneColor(theme, event.tone) }]}>{event.text}</Text>
+            <ToneText tone={event.tone} styles={styles} theme={theme}>{event.text}</ToneText>
           </View>
         ) : (
           <View key={event.key} style={{ flexDirection: "row", alignItems: "flex-start", gap: 10 }}>
             <Text style={[styles.body, { width: 92 }]}>{event.time}</Text>
-            <Text style={[styles.body, { flex: 1, color: toneColor(theme, event.tone) }]}>{event.text}</Text>
-            {event.tag === null ? null : <Text style={[styles.badge, { color: toneColor(theme, "muted") }]}>{event.tag}</Text>}
+            <ToneText tone={event.tone} style={{ flex: 1 }} styles={styles} theme={theme}>{event.text}</ToneText>
+            {event.tag === null ? null : <ToneText tone="muted" base={styles.badge} styles={styles} theme={theme}>{event.tag}</ToneText>}
           </View>
         ),
       )}
+    </View>
+  );
+}
+
+/** Tallest bar of a context trend, in points. */
+const TREND_HEIGHT = 18;
+
+/** An agent's context over its turns: one bar per turn, oldest first, as tall as its share of the context window or of the largest point. */
+export function ContextBars({ trend, compact, theme }: { trend: ContextTrendView; compact: boolean; theme: Theme }) {
+  return (
+    <View
+      accessibilityRole="image"
+      accessibilityLabel={trend.accessibilityLabel}
+      style={{ flexDirection: "row", alignItems: "flex-end", gap: 1, height: TREND_HEIGHT }}
+    >
+      {trend.bars.map((height, index) => (
+        <View
+          key={index}
+          style={{ width: compact ? 3 : 4, height: Math.max(1, Math.round(height * TREND_HEIGHT)), borderRadius: 1, backgroundColor: toneColor(theme, "info") }}
+        />
+      ))}
+    </View>
+  );
+}
+
+/** One agent's tokens and context trend: stacked on a phone, one row on a wide screen. */
+export function AgentTokensRow({ row, compact, styles, theme }: { row: AgentTokensView; compact: boolean; styles: Styles; theme: Theme }) {
+  const name = (
+    <Text style={[styles.body, { color: theme.colors.foreground, fontWeight: "600", width: compact ? undefined : 180 }]} numberOfLines={1}>
+      {row.name}
+    </Text>
+  );
+  const tokens = <Text style={styles.body}>{row.note === null ? row.tokens : `${row.tokens} · ${row.note}`}</Text>;
+  const label = row.trend === null ? null : row.trend.estimate;
+  const estimate = label === null ? null : <ToneText tone="muted" base={styles.badge} styles={styles} theme={theme}>{label}</ToneText>;
+  const context =
+    row.trend === null ? (
+      <Text style={styles.body}>context not known</Text>
+    ) : (
+      <>
+        <ContextBars trend={row.trend} compact={compact} theme={theme} />
+        <Text style={[styles.body, { flexShrink: 1 }]}>{row.trend.text}</Text>
+        {estimate}
+      </>
+    );
+  if (compact) {
+    return (
+      <View style={{ gap: 2 }} accessibilityLabel={row.accessibilityLabel}>
+        {name}
+        <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 8 }}>{context}</View>
+        {tokens}
+      </View>
+    );
+  }
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }} accessibilityLabel={row.accessibilityLabel}>
+      {name}
+      <View style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 8 }}>{context}</View>
+      {tokens}
+    </View>
+  );
+}
+
+/** Tokens and context: the tokens read by role, each agent's row, then what the figures cannot say. */
+export function TokenFigures({ state, compact, styles, theme }: { state: TokenFiguresState; compact: boolean; styles: Styles; theme: Theme }) {
+  const body =
+    state.kind === "loading" ? (
+      <ActivityIndicator color={styles.spinner.color} accessibilityLabel="Reading the tokens and context" />
+    ) : state.kind === "error" ? (
+      <ToneText tone="danger" styles={styles} theme={theme}>{state.text}</ToneText>
+    ) : state.kind === "empty" ? (
+      <Text style={styles.body}>{state.text}</Text>
+    ) : (
+      <>
+        {state.view.byRole === null ? null : <Text style={[styles.body, { color: theme.colors.foreground }]}>{state.view.byRole}</Text>}
+        {state.view.agents.map((row) => (
+          <AgentTokensRow key={row.key} row={row} compact={compact} styles={styles} theme={theme} />
+        ))}
+        {state.view.notes.map((note) => (
+          <Text key={note} style={[styles.body, { fontSize: 11 }]}>
+            {note}
+          </Text>
+        ))}
+      </>
+    );
+  return (
+    <View style={{ gap: 6 }}>
+      <Text accessibilityRole="header" style={styles.sectionTitle}>
+        {TOKEN_FIGURES_TITLE}
+      </Text>
+      {body}
     </View>
   );
 }
@@ -341,7 +449,7 @@ function CardLink({ label, a11y, expanded, onPress, styles, theme }: { label: st
       onPress={onPress}
       style={{ paddingVertical: 4 }}
     >
-      <Text style={[styles.body, { color: toneColor(theme, "info") }]}>{label}</Text>
+      <ToneText tone="info" styles={styles} theme={theme}>{label}</ToneText>
     </Pressable>
   );
 }
@@ -357,7 +465,9 @@ export function RequestCard({
   onToggle,
   onToggleDetails,
   onOpenAgent,
+  onWhy,
   detailsExtra,
+  tokens,
   compact,
   styles,
   theme,
@@ -373,8 +483,12 @@ export function RequestCard({
   onToggleDetails: () => void;
   /** Undefined on a host that cannot open agents. */
   onOpenAgent?: (agentId: string) => void;
+  /** Opens the chain behind the request (autonomy design §E.2); undefined for a request with no id. */
+  onWhy?: () => void;
   /** Drawn under the ids while Details is open: the request's history actions. */
   detailsExtra?: ReactNode;
+  /** Drawn first while Details is open: the request's tokens and context (autonomy design §G.2). */
+  tokens?: TokenFiguresState;
   compact: boolean;
   styles: Styles;
   theme: Theme;
@@ -402,6 +516,9 @@ export function RequestCard({
         {onOpenAgent === undefined || view.workerId === null ? null : (
           <CardLink label="Open Worker ▸" a11y="Open the Worker of this request" onPress={() => onOpenAgent(view.workerId!)} styles={styles} theme={theme} />
         )}
+        {onWhy === undefined ? null : (
+          <CardLink label="Why? ▸" a11y="Show why: the decisions, beads, changes, checks and reviews behind this request" onPress={onWhy} styles={styles} theme={theme} />
+        )}
         <CardLink
           label={`Details ${detailsOpen ? "▾" : "▸"}`}
           a11y={`${detailsOpen ? "Hide" : "Show"} the ids of this request`}
@@ -412,7 +529,7 @@ export function RequestCard({
         />
       </View>
       {!expanded ? null : error !== null ? (
-        <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{error}</Text>
+        <ToneText tone="danger" styles={styles} theme={theme}>{error}</ToneText>
       ) : timeline === null ? (
         loading ? <ActivityIndicator color={styles.spinner.color} accessibilityLabel="Reading the timeline" /> : null
       ) : (
@@ -420,6 +537,11 @@ export function RequestCard({
       )}
       {detailsOpen ? (
         <View style={[styles.card, { backgroundColor: theme.colors.surface0, gap: 2 }]}>
+          {tokens === undefined ? null : (
+            <View style={{ marginBottom: 6 }}>
+              <TokenFigures state={tokens} compact={compact} styles={styles} theme={theme} />
+            </View>
+          )}
           {view.details.map((line) => (
             <Text key={line} style={styles.mono} selectable>
               {line}
@@ -465,16 +587,16 @@ export function ProjectHeader({
         styles={styles}
         right={
           onChat === undefined ? null : (
-            <Pressable
-              accessibilityRole="button"
+            <Button
+              label={chatBusy ? "Opening…" : "Chat ▸"}
+              kind="secondary"
               accessibilityLabel={label === null ? "Chat with the Beads Manager of this project" : `Chat with the Beads Manager of ${label}`}
               accessibilityState={{ disabled: chatBusy, busy: chatBusy }}
               disabled={chatBusy}
               onPress={onChat}
-              style={[styles.secondaryButton, { opacity: chatBusy ? 0.5 : 1 }]}
-            >
-              <Text style={styles.secondaryButtonText}>{chatBusy ? "Opening…" : "Chat ▸"}</Text>
-            </Pressable>
+              style={{ opacity: chatBusy ? 0.5 : 1 }}
+              styles={styles}
+            />
           )
         }
       />
@@ -540,6 +662,7 @@ function RequestCardContainer({
   onToggle,
   onChanged,
   openAgent,
+  onWhy,
   compact,
   styles,
   theme,
@@ -553,11 +676,13 @@ function RequestCardContainer({
   /** After the request's history was deleted: the list is read again. */
   onChanged: () => void;
   openAgent?: (agentId: string) => void;
+  onWhy?: () => void;
   compact: boolean;
   styles: Styles;
   theme: Theme;
 }) {
   const getTrace = useRpc(tracesGetRpc);
+  const readAgents = useRpc(tracesAgentsRpc);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const live = summary.state === "running" || summary.state === "waiting_user";
   const detail = useQuery({
@@ -567,21 +692,30 @@ function RequestCardContainer({
     enabled: expanded || detailsOpen,
     refetchInterval: expanded && live ? WORK_POLL_MS : false,
   });
-  const view = requestCardView(summary, detail.data ?? null, decisions, new Date());
+  const figures = useQuery({
+    queryKey: workQueryKeys.tokens(workspaceId, traceId),
+    queryFn: async () => (await readAgents({ workspaceId, traceId })).agents,
+    enabled: detailsOpen,
+    refetchInterval: detailsOpen && live ? WORK_POLL_MS : false,
+  });
+  const now = new Date();
+  const view = requestCardView(summary, detail.data ?? null, decisions, now);
   return (
     <RequestCard
       view={view}
       expanded={expanded}
-      timeline={detail.data === undefined ? null : timelineEvents(detail.data, decisions)}
+      timeline={detail.data === undefined ? null : timelineEvents(detail.data, decisions, now)}
       loading={detail.isPending}
       error={detail.isError && detail.data === undefined ? `Could not read the timeline. ${errorMessageOf(detail.error)}` : null}
       detailsOpen={detailsOpen}
       onToggle={onToggle}
       onToggleDetails={() => setDetailsOpen(!detailsOpen)}
       onOpenAgent={openAgent}
+      onWhy={onWhy}
       detailsExtra={
         <TraceActions theme={theme} compact={compact} styles={styles} workspaceId={workspaceId} scope="trace" traceId={traceId} onDone={onChanged} />
       }
+      tokens={requestTokenFigures(summary, figures.data, figures.isError && figures.data === undefined ? errorMessageOf(figures.error) : null)}
       compact={compact}
       styles={styles}
       theme={theme}
@@ -654,6 +788,10 @@ function RequestsTab({
   const summaries = useMemo(() => requestSummaries(traces.data?.traces ?? []), [traces.data]);
   // Null until the owner opens or closes one: the newest starts open.
   const [chosen, setChosen] = useState<ReadonlySet<string> | null>(null);
+  // Why? (autonomy design §E.2): the request whose chain shows in place of the list; ← returns to it.
+  const [why, setWhy] = useState<string | null>(null);
+  // A request with no id has no chain to show.
+  const whyOf = (requestId: string | null) => (requestId === null ? undefined : () => setWhy(requestId));
   const opening = summaries[0]?.traceId;
   const open = chosen ?? new Set(opening === undefined ? [] : [opening]);
   const toggle = (traceId: string) => {
@@ -667,6 +805,7 @@ function RequestsTab({
   const changed = () => {
     void queryClient.invalidateQueries({ queryKey: workQueryKeys.traces(workspaceId) });
     void queryClient.invalidateQueries({ queryKey: ["paseo-bm", "work", "trace", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["paseo-bm", "work", "tokens", workspaceId] });
   };
   const card = (summary: RequestSummary) => (
     <RequestCardContainer
@@ -679,20 +818,23 @@ function RequestsTab({
       onToggle={() => toggle(summary.traceId)}
       onChanged={changed}
       openAgent={openAgent}
+      onWhy={whyOf(summary.requestId)}
       compact={compact}
       styles={styles}
       theme={theme}
     />
   );
 
+  if (why !== null) return <WhyScreen workspaceId={workspaceId} requestId={why} onBack={() => setWhy(null)} compact={compact} theme={theme} />;
+
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
       <View style={column(compact, styles.content.gap)}>
         {traces.isError ? (
-          <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{`Could not read the requests. ${errorMessageOf(traces.error)}`}</Text>
+          <ToneText tone="danger" styles={styles} theme={theme}>{`Could not read the requests. ${errorMessageOf(traces.error)}`}</ToneText>
         ) : null}
         {decisions.isError ? (
-          <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{`Could not read the decisions. ${errorMessageOf(decisions.error)}`}</Text>
+          <ToneText tone="danger" styles={styles} theme={theme}>{`Could not read the decisions. ${errorMessageOf(decisions.error)}`}</ToneText>
         ) : null}
         {closed === undefined ? null : (
           <ClosedHistory workspaceId={workspaceId} state={closed} onChanged={changed} compact={compact} styles={styles} theme={theme} />
@@ -708,15 +850,43 @@ function RequestsTab({
   );
 }
 
-function AgentsTab({ workspaceId, openAgent, compact, theme }: { workspaceId: string; openAgent?: (input: { agentId: string }) => void; compact: boolean; theme: Theme }) {
+function AgentsTab({
+  workspaceId,
+  openAgent,
+  compact,
+  styles,
+  theme,
+}: {
+  workspaceId: string;
+  openAgent?: (input: { agentId: string }) => void;
+  compact: boolean;
+  styles: Styles;
+  theme: Theme;
+}) {
   const listAgents = useRpc(agentsListRpc);
+  const readAgents = useRpc(tracesAgentsRpc);
   // The same query the workspace's agent panel reads, so both show one answer.
   const agents = useQuery({
     queryKey: ["paseo-bm", "agent-tree", "agents", workspaceId],
     queryFn: async () => (await listAgents({ workspaceId })).agents,
     refetchInterval: AGENT_TREE_POLL_MS,
   });
-  return <AgentTreeView theme={theme} compact={compact} agents={toLoadable(agents)} openAgent={openAgent} onRetryAgents={() => void agents.refetch()} />;
+  // Each agent's tokens and context over its life (autonomy design §G.2), read while the tab shows.
+  const figures = useQuery({
+    queryKey: workQueryKeys.tokens(workspaceId),
+    queryFn: async () => (await readAgents({ workspaceId })).agents,
+    refetchInterval: WORK_POLL_MS,
+  });
+  const tokens = agentTokenFigures(figures.data, agents.data, figures.isError && figures.data === undefined ? errorMessageOf(figures.error) : null);
+  return (
+    <AgentTreeView theme={theme} compact={compact} agents={toLoadable(agents)} openAgent={openAgent} onRetryAgents={() => void agents.refetch()}>
+      {agents.isError && agents.data === undefined ? null : (
+        <View style={{ paddingTop: 8 }}>
+          <TokenFigures state={tokens} compact={compact} styles={styles} theme={theme} />
+        </View>
+      )}
+    </AgentTreeView>
+  );
 }
 
 export interface ProjectPageProps extends PluginSurfaceProps {
@@ -770,7 +940,7 @@ export function ProjectPage(props: ProjectPageProps) {
         ) : tab === "beads" ? (
           <BeadsScreen {...surface} workspaceId={workspaceId} />
         ) : (
-          <AgentsTab workspaceId={workspaceId} openAgent={openAgent} compact={layout.compact} theme={theme} />
+          <AgentsTab workspaceId={workspaceId} openAgent={openAgent} compact={layout.compact} styles={styles} theme={theme} />
         )}
       </View>
     </View>

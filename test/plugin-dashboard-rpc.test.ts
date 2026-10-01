@@ -1,24 +1,23 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   emptyBeadStats,
   handleBeadsStats,
   handleTracesDelete,
-  fallbackCountsOf,
-  incidentsIn,
   readTraceContext,
   requireLocation,
-  workspaceDirectory,
-  type DashboardPaseo,
 } from "../plugin/server/dashboard-rpc";
+import { fallbackCountsOf, incidentsIn } from "../plugin/server/fallback-state";
+import { workspaceDirectory, type DashboardPaseo } from "../plugin/server/paseo-directory";
 import { appendRecord, clearTraceStoreCache, readRecords } from "../plugin/server/trace-store";
 import { clearBeadsCache } from "../plugin/server/beads-store";
-import { createOrchestratorStore } from "../plugin/server/orchestrator-store";
+import { ORCHESTRATOR_DIR_NAME, RETIRED_ASSESSMENTS_DIR_NAME } from "../plugin/server/orchestrator-store";
 import { createDecisionStore } from "../plugin/server/decision-store";
 import { withdrawDecision } from "../plugin/shared/decisions";
 import { makeDecision } from "./helpers/decisions";
+import { fakePaseo } from "./helpers/fake-paseo";
 import { TRACE_STORE_SCHEMA_VERSION, type FallbackIncident, type TraceRecord } from "../plugin/shared/contracts";
 
 /**
@@ -35,22 +34,17 @@ const WS = "wks_1";
 let home: string;
 let workspace: string;
 
-function fakePaseo(overrides: { entries?: Array<Record<string, unknown>>; plugins?: Record<string, unknown> } = {}): DashboardPaseo {
-  return {
-    agents: { list: vi.fn(async () => ({ entries: [] })) },
-    workspaces: {
-      list: vi.fn(async () => ({
-        entries: overrides.entries ?? [{ id: WS, directory: workspace, name: "repo" }],
-      })),
-    },
-    config: {
-      get: vi.fn(async () => ({
-        config: {
-          plugins: overrides.plugins ?? { "paseo-bm": { source: "directory", path: join(home, "plugin", "0.2.0") } },
-        },
-      })),
-    },
-  };
+/** A line of the workflow assessments an earlier build kept, quoting a request (autonomy design §B.9). */
+const EARLIER_ASSESSMENT = `${JSON.stringify({ v: 1, assessmentId: "asm-A", requestId: "req-A", traceId: "req:req-A", status: "done", result: { findings: ["please do req-A"] } })}\n`;
+const assessmentsFile = (workspaceId: string) => join(home, ORCHESTRATOR_DIR_NAME, RETIRED_ASSESSMENTS_DIR_NAME, `${workspaceId}.jsonl`);
+function earlierAssessments(workspaceId: string): void {
+  mkdirSync(join(home, ORCHESTRATOR_DIR_NAME, RETIRED_ASSESSMENTS_DIR_NAME), { recursive: true });
+  writeFileSync(assessmentsFile(workspaceId), EARLIER_ASSESSMENT);
+}
+
+/** The shared fake SDK: these workspace entries (the one at `workspace` by default) and these agents. */
+function daemonWith(options: { entries?: Array<Record<string, unknown>>; agents?: Array<Record<string, unknown> & { id: string }> } = {}): DashboardPaseo {
+  return fakePaseo<DashboardPaseo>({ workspaces: options.entries ?? [{ id: WS, directory: workspace, name: "repo" }], agents: options.agents ?? [] }).paseo;
 }
 
 function record(overrides: Partial<TraceRecord> = {}): TraceRecord {
@@ -94,33 +88,28 @@ afterEach(() => {
 
 describe("requireLocation", () => {
   it("resolves the trace store inside the data folder, with no install.json", async () => {
-    const location = await requireLocation(fakePaseo());
+    const location = await requireLocation(daemonWith());
     expect(location.tracesDir).toBe(join(home, "traces"));
   });
 
-  it("resolves it even when Paseo has no plugin registered at all", async () => {
-    const location = await requireLocation(fakePaseo({ plugins: {} }));
-    expect(location.tracesDir).toBe(join(home, "traces"));
-  });
-
-  it("fails with a coded error when the data folder cannot be used", async () => {
+  it("fails E_DATA_HOME_UNAVAILABLE when the data folder cannot be used (code review 2026-09-30 §3.2)", async () => {
     process.env["PASEO_BM_HOME"] = "relative/bm";
-    await expect(requireLocation(fakePaseo())).rejects.toThrow(/E_TRACE_STORE_UNWRITABLE/);
+    await expect(requireLocation(daemonWith())).rejects.toThrow(/^E_DATA_HOME_UNAVAILABLE: cannot open the trace store: paseo-bm cannot use its data folder/);
   });
 });
 
 describe("workspaceDirectory", () => {
   it("finds the directory by workspace id", async () => {
-    expect(await workspaceDirectory(fakePaseo(), WS)).toBe(workspace);
+    expect(await workspaceDirectory(daemonWith(), WS)).toBe(workspace);
   });
 
   it("reads a nested workspace entry and the cwd fallback", async () => {
-    const nested = fakePaseo({ entries: [{ workspace: { id: WS, cwd: "/from/cwd" } }] });
+    const nested = daemonWith({ entries: [{ workspace: { id: WS, cwd: "/from/cwd" } }] });
     expect(await workspaceDirectory(nested, WS)).toBe("/from/cwd");
   });
 
   it("never reads a worktree's beads from the main checkout", async () => {
-    const worktree = fakePaseo({
+    const worktree = daemonWith({
       entries: [
         { id: WS, kind: "worktree", directory: "/repo/.worktrees/feature", projectRootPath: "/repo" },
         { id: "wks_2", kind: "worktree", projectRootPath: "/repo" },
@@ -134,17 +123,10 @@ describe("workspaceDirectory", () => {
   });
 
   it("returns null for an unknown workspace or a failing list", async () => {
-    expect(await workspaceDirectory(fakePaseo({ entries: [] }), WS)).toBeNull();
-    const failing: DashboardPaseo = {
-      agents: { list: async () => ({ entries: [] }) },
-      workspaces: {
-        list: async () => {
-          throw new Error("no daemon");
-        },
-      },
-      config: fakePaseo().config,
-    };
-    expect(await workspaceDirectory(failing, WS)).toBeNull();
+    expect(await workspaceDirectory(daemonWith({ entries: [] }), WS)).toBeNull();
+    const failing = fakePaseo<DashboardPaseo>();
+    failing.api.workspaces.list.mockRejectedValue(new Error("no daemon"));
+    expect(await workspaceDirectory(failing.paseo, WS)).toBeNull();
   });
 });
 
@@ -158,12 +140,12 @@ describe("beads.stats handler", () => {
       ].join("\n") + "\n",
     );
     clearBeadsCache();
-    const { stats } = await handleBeadsStats({ workspaceId: WS }, fakePaseo());
+    const { stats } = await handleBeadsStats({ workspaceId: WS }, daemonWith());
     expect(stats).toMatchObject({ total: 2, open: 1, closed: 1, ready: 1, present: true });
   });
 
   it("reports an empty store, not an error, for a workspace Paseo no longer lists", async () => {
-    const { stats } = await handleBeadsStats({ workspaceId: "wks_gone" }, fakePaseo());
+    const { stats } = await handleBeadsStats({ workspaceId: "wks_gone" }, daemonWith());
     expect(stats.present).toBe(false);
     expect(stats.source).toContain("not listed by Paseo");
     expect(emptyBeadStats("x").total).toBe(0);
@@ -172,7 +154,7 @@ describe("beads.stats handler", () => {
   it("reports an empty store for a workspace with no .beads directory", async () => {
     rmSync(join(workspace, ".beads"), { recursive: true, force: true });
     clearBeadsCache();
-    const { stats } = await handleBeadsStats({ workspaceId: WS }, fakePaseo());
+    const { stats } = await handleBeadsStats({ workspaceId: WS }, daemonWith());
     expect(stats.present).toBe(false);
   });
 });
@@ -200,12 +182,12 @@ describe("traces.delete handler", () => {
     // sends the row id matched nothing and deleted nothing, unnoticed.
     const preview = await handleTracesDelete(
       { workspaceId: WS, scope: { traceId: "req:req-A" }, dryRun: true },
-      fakePaseo(),
+      daemonWith(),
     );
     expect(preview.deleted.traces).toBe(1);
     expect(readRecords(location, WS).records).toHaveLength(4);
 
-    const done = await handleTracesDelete({ workspaceId: WS, scope: { traceId: "req:req-A" } }, fakePaseo());
+    const done = await handleTracesDelete({ workspaceId: WS, scope: { traceId: "req:req-A" } }, daemonWith());
     expect(done.deleted).toEqual(preview.deleted);
     // Both of req-A's records go — the Manager turn and the Worker turn — and
     // req-B's two stay.
@@ -218,92 +200,38 @@ describe("traces.delete handler", () => {
     await appendRecord(location, record({ agentId: "agent-manager", role: "manager", turnId: "m-A", sent: [{ agentId: null, at: "2026-09-16T09:59:00.000Z", text: "do A", truncated: false }] }));
     await appendRecord(location, record({ agentId: "agent-manager", role: "manager", turnId: "m-B", requestId: "req-B", at: "2026-09-16T10:30:00.000Z", sent: [{ agentId: null, at: "2026-09-16T10:30:00.000Z", text: "do B", truncated: false }] }));
     clearTraceStoreCache();
-    const paseo = fakePaseo();
-    paseo.agents.list = vi.fn(async ({ filter }) => ({
-      entries:
-        filter.labels === undefined || filter.labels["bm.role"] === "worker"
-          ? [{ id: "agent-running", workspaceId: WS, status: "running", labels: { "bm.role": "worker", "bm.requestId": "req-B" } }]
-          : [],
-    }));
+    const paseo = daemonWith({ agents: [{ id: "agent-running", workspaceId: WS, status: "running", labels: { "bm.role": "worker", "bm.requestId": "req-B" } }] });
     const all = await handleTracesDelete({ workspaceId: WS, scope: { allOfWorkspace: true }, dryRun: true }, paseo);
     expect(all.deleted.running).toBe(1);
     const onlyA = await handleTracesDelete({ workspaceId: WS, scope: { traceId: "req:req-A" }, dryRun: true }, paseo);
     expect(onlyA.deleted.running).toBe(0);
   });
 
-  // Orchestrator design §5.3, REQ-075 e: an assessment is keyed by the request
-  // when the trace has one, else by the trace, and goes with its trace.
-  it("deletes the assessments of exactly the deleted traces, and none on a preview", async () => {
+  // Orchestrator design §5.3, REQ-075 e; autonomy design §B.9: the workflow
+  // assessment is retired, but an earlier build's file may quote the project's
+  // requests, so it goes whole when any of their traces is deleted.
+  it("deletes the project's retired assessments file with a real delete, none on a preview or a cutoff that reaches nothing, and no other project's", async () => {
     const location = { tracesDir: join(home, "traces") };
     const ask = (requestId: string, at: string) =>
-      record({
-        agentId: "agent-manager",
-        role: "manager",
-        turnId: `m-${requestId}`,
-        requestId,
-        at,
-        sent: [{ agentId: null, at, text: `please do ${requestId}`, truncated: false }],
-      });
+      record({ agentId: "agent-manager", role: "manager", turnId: `m-${requestId}`, requestId, at, sent: [{ agentId: null, at, text: `please do ${requestId}`, truncated: false }] });
     await appendRecord(location, ask("req-A", "2026-09-16T09:59:00.000Z"));
-    await appendRecord(location, record());
     await appendRecord(location, ask("req-B", "2026-09-16T10:30:00.000Z"));
-    // A Manager turn with no request id: its trace is keyed by the trace id alone.
-    const at9 = "2026-09-16T11:00:00.000Z";
-    await appendRecord(location, record({ agentId: "agent-manager", role: "manager", turnId: "m-9", requestId: null, at: at9, sent: [{ agentId: null, at: at9, text: "what is left?", truncated: false }] }));
     clearTraceStoreCache();
-    const unnamed = (await readTraceContext({ workspaceId: WS }, fakePaseo())).traces.find((trace) => trace.requestId === null);
-    expect(unnamed).toBeDefined();
+    for (const workspaceId of [WS, "wks_2"]) earlierAssessments(workspaceId);
 
-    const store = createOrchestratorStore(home);
-    const assessment = (assessmentId: string, requestId: string | null, traceId: string) => ({
-      v: 1 as const,
-      assessmentId,
-      requestId,
-      traceId,
-      agentId: null,
-      at: "2026-09-16T12:00:00.000Z",
-      status: "pending" as const,
-      provider: "bm-orchestrator",
-      model: null,
-    });
-    store.appendAssessment(WS, assessment("asm-A", "req-A", "req:req-A"));
-    store.appendAssessment(WS, assessment("asm-B", "req-B", "req:req-B"));
-    store.appendAssessment(WS, assessment("asm-9", null, unnamed!.traceId));
-    store.appendAssessment("wks_2", assessment("asm-other", "req-A", "req:req-A"));
-    const ids = (workspaceId: string) => store.readAssessments(workspaceId).map((line) => line.assessmentId).sort();
+    await handleTracesDelete({ workspaceId: WS, scope: { traceId: "req:req-A" }, dryRun: true }, daemonWith());
+    expect(existsSync(assessmentsFile(WS))).toBe(true);
+    await handleTracesDelete({ workspaceId: WS, scope: { before: "2026-01-01T00:00:00.000Z" } }, daemonWith());
+    expect(existsSync(assessmentsFile(WS))).toBe(true);
 
-    await handleTracesDelete({ workspaceId: WS, scope: { traceId: "req:req-A" }, dryRun: true }, fakePaseo());
-    expect(ids(WS)).toEqual(["asm-9", "asm-A", "asm-B"]);
-
-    await handleTracesDelete({ workspaceId: WS, scope: { traceId: "req:req-A" } }, fakePaseo());
-    expect(ids(WS)).toEqual(["asm-9", "asm-B"]);
-    // The same request id in another workspace is another request.
-    expect(ids("wks_2")).toEqual(["asm-other"]);
-
-    await handleTracesDelete({ workspaceId: WS, scope: { traceId: unnamed!.traceId } }, fakePaseo());
-    expect(ids(WS)).toEqual(["asm-B"]);
-
-    await handleTracesDelete({ workspaceId: WS, scope: { allOfWorkspace: true } }, fakePaseo());
-    expect(ids(WS)).toEqual([]);
-    expect(ids("wks_2")).toEqual(["asm-other"]);
-  });
-
-  it("deletes the assessments of the traces a cutoff reaches, and keeps the later ones", async () => {
-    const location = { tracesDir: join(home, "traces") };
-    const ask = (requestId: string, at: string) =>
-      record({ agentId: "agent-manager", role: "manager", turnId: `m-${requestId}`, requestId, at, sent: [{ agentId: null, at, text: `do ${requestId}`, truncated: false }] });
-    await appendRecord(location, ask("req-A", "2026-08-10T10:00:00.000Z"));
-    await appendRecord(location, ask("req-B", "2026-09-16T10:00:00.000Z"));
-    clearTraceStoreCache();
-    const store = createOrchestratorStore(home);
-    for (const id of ["A", "B"]) {
-      store.appendAssessment(WS, { v: 1, assessmentId: `asm-${id}`, requestId: `req-${id}`, traceId: `req:req-${id}`, agentId: null, at: "2026-09-16T12:00:00.000Z", status: "pending", provider: "bm-orchestrator", model: null });
-    }
-
-    const done = await handleTracesDelete({ workspaceId: WS, scope: { before: "2026-09-01T00:00:00.000Z" } }, fakePaseo());
-
-    expect(done.deleted.traces).toBe(1);
-    expect(store.readAssessments(WS).map((line) => line.assessmentId)).toEqual(["asm-B"]);
+    await handleTracesDelete({ workspaceId: WS, scope: { traceId: "req:req-A" } }, daemonWith());
+    expect(existsSync(assessmentsFile(WS))).toBe(false);
+    // Another project's file stays, and so does req-B's trace.
+    expect(readFileSync(assessmentsFile("wks_2"), "utf8")).toBe(EARLIER_ASSESSMENT);
+    expect(readRecords(location, WS).records.map((entry) => entry.requestId)).toEqual(["req-B"]);
+    // Deleting again with the file gone is no error.
+    await handleTracesDelete({ workspaceId: WS, scope: { allOfWorkspace: true } }, daemonWith());
+    expect(readRecords(location, WS).records).toEqual([]);
   });
 
   // Autonomy design §A.4: deleting a request's traces deletes its settled
@@ -324,24 +252,23 @@ describe("traces.delete handler", () => {
     decisions.transition("q:req-B:Q1", (d) => withdrawDecision(d, { at }));
     const ids = () => decisions.list({ workspaceId: WS }).map((entry) => entry.id);
 
-    await handleTracesDelete({ workspaceId: WS, scope: { traceId: "req:req-A" }, dryRun: true }, fakePaseo());
+    await handleTracesDelete({ workspaceId: WS, scope: { traceId: "req:req-A" }, dryRun: true }, daemonWith());
     expect(ids()).toEqual(["q:req-A:Q1", "q:req-A:Q2", "q:req-B:Q1"]);
 
-    await handleTracesDelete({ workspaceId: WS, scope: { traceId: "req:req-A" } }, fakePaseo());
+    await handleTracesDelete({ workspaceId: WS, scope: { traceId: "req:req-A" } }, daemonWith());
     expect(ids()).toEqual(["q:req-A:Q2", "q:req-B:Q1"]);
   });
 
-  it("keeps the assessments when the trace store refuses the delete", async () => {
+  it("keeps the retired assessments file when the trace store refuses the delete", async () => {
     const location = { tracesDir: join(home, "traces") };
     await appendRecord(location, record({ agentId: "agent-manager", role: "manager", turnId: "m-A", sent: [{ agentId: null, at: "2026-09-16T10:00:00.000Z", text: "do A", truncated: false }] }));
     writeFileSync(join(location.tracesDir, "meta.json"), JSON.stringify({ schemaVersion: TRACE_STORE_SCHEMA_VERSION + 1, createdAt: "x", updatedAt: "y" }));
     clearTraceStoreCache();
-    const store = createOrchestratorStore(home);
-    store.appendAssessment(WS, { v: 1, assessmentId: "asm-A", requestId: "req-A", traceId: "req:req-A", agentId: null, at: "2026-09-16T12:00:00.000Z", status: "pending", provider: "bm-orchestrator", model: null });
+    earlierAssessments(WS);
 
-    await expect(handleTracesDelete({ workspaceId: WS, scope: { traceId: "req:req-A" } }, fakePaseo())).rejects.toThrow(/E_TRACE_STORE_SCHEMA_TOO_NEW/);
+    await expect(handleTracesDelete({ workspaceId: WS, scope: { traceId: "req:req-A" } }, daemonWith())).rejects.toThrow(/E_TRACE_STORE_SCHEMA_TOO_NEW/);
 
-    expect(store.readAssessments(WS).map((line) => line.assessmentId)).toEqual(["asm-A"]);
+    expect(readFileSync(assessmentsFile(WS), "utf8")).toBe(EARLIER_ASSESSMENT);
   });
 
   it("refuses a trace id the Dashboard would not show", async () => {
@@ -349,13 +276,13 @@ describe("traces.delete handler", () => {
     await appendRecord(location, record());
     clearTraceStoreCache();
     await expect(
-      handleTracesDelete({ workspaceId: WS, scope: { traceId: "req:req-missing" } }, fakePaseo()),
+      handleTracesDelete({ workspaceId: WS, scope: { traceId: "req:req-missing" } }, daemonWith()),
     ).rejects.toThrow(/E_TRACE_NOT_FOUND/);
   });
 
   it("surfaces the coded error for an invalid workspace id", async () => {
     await expect(
-      handleTracesDelete({ workspaceId: "../escape", scope: { allOfWorkspace: true } }, fakePaseo()),
+      handleTracesDelete({ workspaceId: "../escape", scope: { allOfWorkspace: true } }, daemonWith()),
     ).rejects.toThrow(/E_TRACE_STORE_UNWRITABLE/);
   });
 });
@@ -395,14 +322,13 @@ describe("review calls of a Reviewer that replaced a stopped one (delta 20260921
     }
     clearTraceStoreCache();
     const labels = (role: string) => ({ "bm.role": role, "bm.requestId": "req-A", "paseo.parent-agent-id": role === "worker" ? "agent-manager" : "agent-worker" });
-    const paseo = fakePaseo();
-    paseo.agents.list = vi.fn(async () => ({
-      entries: [
+    const paseo = daemonWith({
+      agents: [
         { id: "agent-worker", workspaceId: WS, status: "idle", labels: labels("worker") },
         { id: "agent-rev-1", workspaceId: WS, status: "idle", labels: labels("reviewer") },
         { id: "agent-rev-2", workspaceId: WS, status: "idle", labels: labels("reviewer") },
       ],
-    }));
+    });
     const reviewCalls = async () =>
       (await readTraceContext({ workspaceId: WS }, paseo)).traces.find((trace) => trace.requestId === "req-A")?.reviewCalls;
 
@@ -479,7 +405,7 @@ describe("fallback incidents that count as errors", () => {
     await appendRecord(location, record({ requestId: "req-A", agentId: "agent-manager", role: "manager" }));
     clearTraceStoreCache();
     writeFileSync(join(home, "role-fallback-state.json"), JSON.stringify({ version: 1, incidents: [base] }));
-    const context = await readTraceContext({ workspaceId: WS }, fakePaseo());
+    const context = await readTraceContext({ workspaceId: WS }, daemonWith());
     expect(context.fallbackCounts.get("req-A")).toBe(1);
     expect(context.fallbackCounts.get("req-B")).toBeUndefined();
   });

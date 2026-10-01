@@ -5,7 +5,10 @@
  * no longer relays answers; the plugin does.
  *
  * - **At once, whatever is answered.** Each time a `q:` decision is settled —
- *   in the Inbox, on a card, through the Manager's `BM-ANSWERS` — the Worker
+ *   in the Inbox, on a card, through the Manager's `BM-ANSWERS`, by an owner
+ *   precedent when it opened (§B.6, cited above the block), by the owner's
+ *   policy when it opened in a delegated class (§B.5: exactly as an owner
+ *   answer, not cited — its provenance is shown to the owner) — the Worker
  *   gets one message, `Continue <requestId>.` and a `BM-ANSWERS` block
  *   (`answersText`) holding **every** answered, undelivered question of that
  *   request. Questions still open stay open; nothing waits for the round.
@@ -36,20 +39,17 @@ import type { TraceRecord } from "../shared/contracts";
 import { answersText, type Pick as AnswerPick, type Question } from "../shared/bm-questions";
 import { decisionKindOf, type Decision, type DecisionDelivery } from "../shared/decisions";
 import { soleWorkerOf } from "../shared/sole-worker";
-import { bmAgentsOf, type DashboardPaseo } from "./dashboard-rpc";
+import { bmAgentsOf, type DashboardPaseo } from "./paseo-directory";
 import { answerBlockOf } from "./decision-materialiser";
 import type { OnDecisionsSettled } from "./decision-rpc";
 import { createDecisionStore, type DecisionStore } from "./decision-store";
 import { readIncidents, replacementsOf } from "./fallback-state";
 import { noticeQueue, type NoticePaseo, type NoticeQueue } from "./notice-queue";
 import { DELIVERY_NOTICE_MARKER } from "../shared/notices";
-import { dataHomeOf } from "./role-extras";
+import { dataHomeOf } from "./role-instructions";
+import { errorText } from "./rpc-kit";
 
 const defaultLog = (message: string): void => console.warn(message);
-
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 /** The notice-queue kind of a request's answers: one queued block per request and Worker. */
 export function answersKindOf(requestId: string): string {
@@ -73,7 +73,10 @@ function questionNumber(decisionId: string): number {
  * The message a Worker receives: the plugin's `BM-DELIVERY answers` line (so the
  * trace never counts it as the owner's typing), `Continue <requestId>.`, a blank line, then
  * the `BM-ANSWERS` block of `decisions` in question order — an option as
- * `Qn: a — <label>`, the owner's words as `Qn: other — <words>`. Throws when a
+ * `Qn: a — <label>`, the owner's words as `Qn: other — <words>`. A question an
+ * owner precedent answered (autonomy design §B.6) is cited on its own line
+ * above the block, with the precedent's id and subject; one the owner's policy
+ * answered (§B.5) reads exactly as the owner's. Throws when a
  * decision carries neither (a confirmed chat answer), as `answersText` does.
  */
 export function answersMessageOf(requestId: string, decisions: readonly Decision[]): string {
@@ -84,12 +87,18 @@ export function answersMessageOf(requestId: string, decisions: readonly Decision
     options: decision.options.map((option) => ({ key: option.key, text: option.label, recommended: option.recommended })),
   }));
   const picks: Record<string, AnswerPick> = {};
+  const cited: string[] = [];
   for (const decision of ordered) {
     const answer = decision.answer;
     if (answer?.optionKey != null) picks[questionIdOf(decision.id)] = { key: answer.optionKey };
     else if (answer?.words != null) picks[questionIdOf(decision.id)] = { other: answer.words };
+    if (answer?.by === "precedent") {
+      const subject = decision.subject === null ? "" : ` on "${decision.subject}"`;
+      cited.push(`${questionIdOf(decision.id)} was answered by the owner's precedent ${answer.precedentId ?? ""}${subject}: it is the owner's standing answer.`);
+    }
   }
-  return `${DELIVERY_NOTICE_MARKER} answers\nContinue ${requestId}.\n\n${answersText(requestId, questions, picks)}`;
+  const citations = cited.length === 0 ? "" : `\n${cited.join("\n")}`;
+  return `${DELIVERY_NOTICE_MARKER} answers\nContinue ${requestId}.${citations}\n\n${answersText(requestId, questions, picks)}`;
 }
 
 /** A settled Worker question the plugin may have to deliver. */
@@ -173,7 +182,7 @@ export function createQuestionDecisionDelivery(deps: QuestionDeliveryDeps = {}):
       if (delivery.outcome === "queued") queuedHere.set(decision.id, delivery.to);
       else queuedHere.delete(decision.id);
     } catch (error) {
-      log(`[paseo-bm] could not record the delivery of decision ${decision.id}: ${describeError(error)}`);
+      log(`[paseo-bm] could not record the delivery of decision ${decision.id}: ${errorText(error)}`);
     }
   };
 
@@ -218,7 +227,7 @@ export function createQuestionDecisionDelivery(deps: QuestionDeliveryDeps = {}):
       workerId = await workerOf({ workspaceId, requestId, home }, paseo);
     } catch (error) {
       // Not known now; a later settlement or the next plugin run tries again.
-      log(`[paseo-bm] could not find the Worker of ${requestId} to deliver its answers: ${describeError(error)}`);
+      log(`[paseo-bm] could not find the Worker of ${requestId} to deliver its answers: ${errorText(error)}`);
       return;
     }
     if (workerId === null) {
@@ -229,7 +238,7 @@ export function createQuestionDecisionDelivery(deps: QuestionDeliveryDeps = {}):
     try {
       text = answersMessageOf(requestId, pending);
     } catch (error) {
-      failAll(workerId, describeError(error));
+      failAll(workerId, errorText(error));
       return;
     }
     const outcome = await queue.enqueue(workerId, kind, text, paseo);
@@ -257,7 +266,7 @@ export function createQuestionDecisionDelivery(deps: QuestionDeliveryDeps = {}):
         try {
           await deliverOnce(workspaceId, requestId, paseo, home);
         } catch (error) {
-          log(`[paseo-bm] delivering the answers of ${requestId} failed: ${describeError(error)}`);
+          log(`[paseo-bm] delivering the answers of ${requestId} failed: ${errorText(error)}`);
         }
       } while (flag.again);
     } finally {
@@ -278,7 +287,7 @@ export function createQuestionDecisionDelivery(deps: QuestionDeliveryDeps = {}):
       }
       for (const { workspaceId, requestId } of requests.values()) await deliverRequest(workspaceId, requestId, paseo, home);
     } catch (error) {
-      log(`[paseo-bm] delivering the answers left from before this run failed: ${describeError(error)}`);
+      log(`[paseo-bm] delivering the answers left from before this run failed: ${errorText(error)}`);
     }
   };
 
@@ -303,7 +312,7 @@ export function createQuestionDecisionDelivery(deps: QuestionDeliveryDeps = {}):
       for (const { workspaceId, requestId } of requests.values()) await deliverRequest(workspaceId, requestId, paseo, home);
       await resume(paseo);
     } catch (error) {
-      log(`[paseo-bm] delivering answers failed: ${describeError(error)}`);
+      log(`[paseo-bm] delivering answers failed: ${errorText(error)}`);
     }
   };
 
@@ -334,7 +343,7 @@ export function createQuestionDecisionDelivery(deps: QuestionDeliveryDeps = {}):
       noteArrived(turn, home);
       await resume(paseo);
     } catch (error) {
-      log(`[paseo-bm] checking delivered answers failed: ${describeError(error)}`);
+      log(`[paseo-bm] checking delivered answers failed: ${errorText(error)}`);
     }
   };
 

@@ -18,8 +18,8 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { homedir } from "node:os";
 import { canonicalJson, roleConfigRevision, writeRoleConfig, type ConfigPaseo, type RoleConfigView } from "./config-writer";
 import { fallbackForSettings, handleRolesSaveFallback } from "./fallback-settings";
-import { asRecord, checkRoleChoice, isRoleAlias, modelOptionsOf, nonEmpty, pickableProviders, reasonOf } from "./role-choices";
-import { childFactLine, notifyChildFactChange, type SettingsPaseo } from "./settings-notices";
+import { asRecord, checkRoleChoice, isRoleAlias, modelOptionsOf, nonEmpty, pickableProviders } from "./role-choices";
+import { childFactLines, notifyChildFactChange, type SettingsPaseo } from "./settings-notices";
 import {
   LOOKUP_TIMEOUT_MS,
   TIMED_OUT,
@@ -30,6 +30,7 @@ import {
   withTimeout,
   type ProviderCapability,
 } from "./role-mode";
+import { errorText } from "./rpc-kit";
 import {
   DashboardError,
   rolesOptionsRpc,
@@ -81,6 +82,8 @@ export interface RoleSettingsDeps {
   log?: (message: string) => void;
   /** Home directory used as the `cwd` of the features lookup (the daemon requires one). */
   homedir?: () => string;
+  /** Whether a project's action boundary is on, for the `BM-SETTINGS` line of its agents; the owner's policy by default. */
+  boundaryOn?: (workspaceId: string) => boolean;
 }
 
 const defaultLog = (message: string): void => console.warn(message);
@@ -112,7 +115,7 @@ async function readConfig(paseo: unknown): Promise<ConfigRead> {
     if (view === null) return { failure: "the answer carried no configuration" };
     return { config: view as RoleSettingsConfig };
   } catch (error) {
-    return { failure: reasonOf(error) };
+    return { failure: errorText(error) };
   }
 }
 
@@ -304,8 +307,8 @@ export async function handleRolesSaveSettings(
   const { model, capability } = await checkRoleChoice(input.role, input, paseo, log);
 
   const id = PROVIDER_IDS[input.role];
-  // The creator's child line before the write, to tell live agents a change (§4.3.5).
-  const lineBefore = await childFactLine(input.role, paseo);
+  // The creator's child lines before the write, to tell live agents a change (§4.3.5), per project boundary (§D.2).
+  const lineBefore = await childFactLines(input.role, paseo);
   await writeRoleConfig(paseo as ConfigPaseo, {
     expectedRevision: input.revision,
     providers: { [id]: { extends: input.baseProvider } },
@@ -315,8 +318,11 @@ export async function handleRolesSaveSettings(
   const settings = await handleRolesSettings(paseo, deps);
   const role = settings.roles.find((entry) => entry.role === input.role) ?? emptySetting(input.role);
   const shared = settings.warnings.filter((warning) => warning.startsWith("Manager and Worker share"));
-  const lineAfter = await childFactLine(input.role, paseo);
-  const notified = await notifyChildFactChange(input.role, lineBefore, lineAfter, paseo as SettingsPaseo, { log });
+  const lineAfter = await childFactLines(input.role, paseo);
+  const notified = await notifyChildFactChange(input.role, lineBefore, lineAfter, paseo as SettingsPaseo, {
+    log,
+    ...(deps.boundaryOn !== undefined ? { boundaryOn: deps.boundaryOn } : {}),
+  });
   return { revision: settings.revision, role, warnings: [...shared, ...saveWarnings(input, capability, model.cost)], notified };
 }
 

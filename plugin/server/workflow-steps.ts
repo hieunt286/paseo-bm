@@ -27,7 +27,7 @@ import type {
   WorkflowStepResult,
 } from "../shared/contracts";
 import { isAbsolute, posix, relative, resolve } from "node:path";
-import { brActions, commandSegments, type BrVerb } from "./shell";
+import { brActions, commandSegments, type BrVerb } from "../shared/shell";
 import { byAt } from "../shared/order";
 import type { ReconstructedTrace } from "./traces";
 
@@ -103,7 +103,8 @@ function brEvidence(evidence: readonly Evidence[], verb: BrVerb): Evidence[] {
 
 /** A `buildAndTests` value that says nothing was run. */
 function saysNothingRan(value: string): boolean {
-  return /^\s*(not\s+run|none|n\/?a|skipped|no\b)/i.test(value);
+  // Backticks before it too: `buildAndTests` keeps them (`shared/bm-report.ts`).
+  return /^[\s`]*(not\s+run|none|n\/?a|skipped|no\b)/i.test(value);
 }
 
 /**

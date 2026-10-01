@@ -46,10 +46,12 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { checkBlocks, issueText, type BlockKind, type CheckedBlock } from "../shared/bm-format";
 import { roleOfProvider, type BmRole } from "./agent-role";
 import { joinStreamedText, sliceLastTurn } from "./collector";
-import { bmAgentsOf, requireLocation, type DashboardPaseo } from "./dashboard-rpc";
+import { requireLocation } from "./dashboard-rpc";
+import { bmAgentsOf, type DashboardPaseo } from "./paseo-directory";
 import { FORMAT_NOTICE_MARKER, isPluginNotice } from "./notices";
 import { readRecords } from "./trace-store";
 import { requestIdOfAgent, type AgentFacts } from "./traces";
+import { errorText } from "./rpc-kit";
 
 /** Notices per sender, request and kind (owner decision Q8 a). */
 export const MAX_NOTICES = 2;
@@ -161,10 +163,6 @@ function hashOf(text: string): string {
   return (hash >>> 0).toString(36);
 }
 
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 interface TimelineText {
   type: string;
   text: string;
@@ -219,7 +217,7 @@ async function snapshotOf(paseo: FormatPaseo, agentId: string): Promise<FormatAg
 
 /** `bmAgentsOf` reads only `agents.list`; hand it exactly that. */
 function directoryOf(paseo: FormatPaseo): DashboardPaseo {
-  return { agents: { list: (options) => paseo.agents.list(options) }, workspaces: paseo.workspaces, config: paseo.config };
+  return { agents: { list: (options) => paseo.agents.list(options) }, workspaces: paseo.workspaces };
 }
 
 /** The Worker of the workspace that owns `requestId`, when exactly one does. */
@@ -352,7 +350,7 @@ async function flush(endedId: string, deps: FormatDeps, log: (message: string) =
       deps.state.sent.set(counted, (deps.state.sent.get(counted) ?? 0) + 1);
       deps.state.notifiedBlocks.add(entry.hash);
     } catch (error) {
-      log(`[paseo-bm] could not send BM-FORMAT to ${entry.senderId}: ${describeError(error)}; trying again at a later turn end.`);
+      log(`[paseo-bm] could not send BM-FORMAT to ${entry.senderId}: ${errorText(error)}; trying again at a later turn end.`);
     } finally {
       deps.state.sending.delete(entry.key);
     }
@@ -373,12 +371,12 @@ export async function checkTurnFormat(event: FormatTurnEvent, deps: FormatDeps):
     try {
       await detect(event, role, deps, log);
     } catch (error) {
-      log(`[paseo-bm] checking the BM blocks of ${event.agent.id} failed: ${describeError(error)}`);
+      log(`[paseo-bm] checking the BM blocks of ${event.agent.id} failed: ${errorText(error)}`);
     }
     await flush(event.agent.id, deps, log);
     return "checked";
   } catch (error) {
-    log(`[paseo-bm] the BM-FORMAT check failed: ${describeError(error)}`);
+    log(`[paseo-bm] the BM-FORMAT check failed: ${errorText(error)}`);
     return "ignored";
   }
 }

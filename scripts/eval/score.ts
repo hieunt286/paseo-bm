@@ -19,28 +19,30 @@
  *   failed one is `null`.
  * - **Read-only.** Every command runs with `execFile`, no shell, in the fixture
  *   repository (or against its bare remote); the data folder is read with the
- *   trace store's own reader, which takes no lock and writes nothing. Nothing
- *   here reads `~/.paseo` or `~/.paseo-bm` unless the caller passes them.
+ *   replay's and Insights' reader (`plugin/server/eval-store.ts`), which takes
+ *   no lock and writes nothing. Nothing here reads `~/.paseo` or `~/.paseo-bm`
+ *   unless the caller passes them.
  *
  * The command runner is injectable, so tests use prepared repositories and
  * fake command results.
  */
 import { execFile } from "node:child_process";
-import { readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import type { TraceRecord } from "../../plugin/shared/contracts.js";
+import { classifyCommand } from "../../plugin/shared/effectful-actions.js";
 import {
-  classifyCommand,
   computeEvalMetrics,
-  timeOf,
+  recordStart,
   type EvalMetrics,
   type EvalNote,
   type EvalScenarioOutcome,
 } from "../../plugin/shared/eval-metrics.js";
-import { DECISIONS_FILE_VERSION } from "../../plugin/server/decision-store.js";
-import { readRecords, readWorkspaceMeta, WORKSPACE_ID_PATTERN } from "../../plugin/server/trace-store.js";
+import { evalInputsOf, readStore, selectWorkspaces } from "../../plugin/server/eval-store.js";
+import { spansOverlap, turnPairsOf } from "../../plugin/shared/writers-observed.js";
 import { hashTree, type BuiltFixture } from "./fixtures.js";
 import type { Expect, Scenario } from "./scenario.js";
+import { timeOrNull } from "../../plugin/shared/time.js";
 
 // ── Inputs ──────────────────────────────────────────────────────────────────
 
@@ -51,31 +53,43 @@ import type { Expect, Scenario } from "./scenario.js";
 export interface OwnerLogEntry {
   /** ISO time the answer was sent. */
   at: string;
-  /** How it was sent: the owner's channel (`0.4.1`, `tree-autopilot`, …) or a source such as an Orchestrator miss. */
+  /** How it was sent: the owner's channel (`0.4.1` or `decision-rpc`). */
   channel: string;
   /** What the owner sent: the answer (a `BM-ANSWERS` line or block, or own words). */
   text: string;
-  /** What reached the owner and was answered: the question, decision or proposal text. */
+  /** What reached the owner and was answered: the question or decision text. */
   target: string;
 }
 
-/** What a scenario run left in the isolated data folder, for its workspace only. */
+/**
+ * What a scenario run left in the isolated data folder, for its workspace
+ * only, as `plugin/server/eval-store.ts` reads it: a store file that is absent,
+ * unreadable or of another shape or version gives `undefined`.
+ */
 export interface RunData {
   /** The workspace ids the records belong to; empty when none was found. */
   workspaceIds: string[];
   records: TraceRecord[];
   /** `orchestrator/proposals.json` entries of these workspaces, unvalidated (the metric module checks them). */
-  proposals: unknown[];
+  proposals: unknown[] | undefined;
   /** `orchestrator/stalls.json` entries whose key belongs to these workspaces. */
-  stalls: Record<string, unknown>;
-  /** The Orchestrator's notes; `undefined` when the data folder has no Orchestrator (0.4.1). */
+  stalls: Record<string, unknown> | undefined;
+  /** The times of the Orchestrator's notes; `undefined` when the data folder has no notes folder (0.4.1, or no note yet). */
   notes: EvalNote[] | undefined;
   /** `decisions/<workspaceId>.json` entries of these workspaces, unvalidated; absent or `undefined` for a build without the decision store. */
   decisions?: unknown[] | undefined;
   /** `orchestrator/wakes.json` entries naming one of these workspaces, unvalidated; absent or `undefined` when the file is absent. */
   wakes?: unknown[] | undefined;
-  /** Trace lines that did not parse. */
+  /** `orchestrator/interventions.json` entries of these workspaces, unvalidated (A-12); absent or `undefined` when the file is absent. */
+  interventions?: unknown[] | undefined;
+  /** Lines of these workspaces' trace files that did not parse or validate. */
   skippedLines: number;
+  /**
+   * Store files of the data folder that are present but unreadable, or whose
+   * frame or version is not this build's, and were skipped. The Orchestrator's
+   * files are shared by every scenario, so this counts the whole folder.
+   */
+  unreadableFiles: number;
 }
 
 export interface RunInput {
@@ -191,12 +205,34 @@ export interface ScenarioScore {
   metrics: EvalMetrics;
 }
 
+/** One role's model as the suite saves it with `roles.save-settings`. */
+export interface ScorecardRoleModel {
+  baseProvider: string;
+  model: string;
+  thinkingOptionId: string | null;
+  modeId: string | null;
+}
+
+/**
+ * The model-choice experiment of a run (`--role-model`, autonomy design §F.2,
+ * REQ-162): the one role whose model was swapped, the owner's model for it
+ * (null when they have none) and the one saved instead. Every other role ran
+ * on the owner's model.
+ */
+export interface ScorecardRoleModelSwap {
+  role: "manager" | "worker" | "reviewer" | "orchestrator";
+  owner: ScorecardRoleModel | null;
+  swapped: ScorecardRoleModel;
+}
+
 /** `scorecard.json`, version 1: one per suite run. */
 export interface Scorecard {
   version: 1;
   generatedAt: string;
   /** What was under test: an npm spec (`npm:paseo-bm-plugin@0.4.1`) or `tree`. */
   pluginVersion: string;
+  /** The run's swapped role model (`--role-model`); null when every role ran on the owner's model. */
+  roleModelSwap: ScorecardRoleModelSwap | null;
   scenarios: ScenarioScore[];
   summary: {
     scenarios: number;
@@ -229,14 +265,6 @@ function isInside(path: string, directory: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
-async function readJson(path: string): Promise<unknown | null> {
-  try {
-    return JSON.parse(await readFile(path, "utf8")) as unknown;
-  } catch {
-    return null;
-  }
-}
-
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 
@@ -248,77 +276,22 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
  * fixture repository (or inside it).
  */
 export async function loadRunData(options: { dataHome: string; repo: string; workspaceId?: string | null }): Promise<RunData> {
-  const tracesDir = join(resolve(options.dataHome), "traces");
-  const location = { tracesDir };
+  const store = readStore(resolve(options.dataHome));
   let workspaceIds: string[];
   if (options.workspaceId) workspaceIds = [options.workspaceId];
   else {
     const repo = await realOrSame(options.repo);
-    let names: string[] = [];
-    try {
-      names = (await readdir(tracesDir, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => entry.name);
-    } catch {
-      names = [];
-    }
     workspaceIds = [];
-    for (const name of names.sort()) {
-      if (!WORKSPACE_ID_PATTERN.test(name) || name === "." || name === "..") continue;
-      const directory = readWorkspaceMeta(location, name)?.lastKnownDirectory ?? null;
-      if (directory !== null && isInside(await realOrSame(directory), repo)) workspaceIds.push(name);
+    for (const [workspaceId, { directory }] of store.workspaces) {
+      if (directory !== null && isInside(await realOrSame(directory), repo)) workspaceIds.push(workspaceId);
     }
   }
-
-  const records: TraceRecord[] = [];
-  let skippedLines = 0;
-  for (const workspaceId of workspaceIds) {
-    const read = readRecords(location, workspaceId);
-    records.push(...read.records);
-    skippedLines += read.skippedLines;
-  }
-
-  const wanted = new Set(workspaceIds);
-  const orchestratorDir = join(resolve(options.dataHome), "orchestrator");
-  const proposalsFile = await readJson(join(orchestratorDir, "proposals.json"));
-  const proposals =
-    isRecord(proposalsFile) && Array.isArray(proposalsFile["entries"])
-      ? proposalsFile["entries"].filter((entry) => isRecord(entry) && wanted.has(String(entry["workspaceId"])))
-      : [];
-  const stallsFile = await readJson(join(orchestratorDir, "stalls.json"));
-  const stalls: Record<string, unknown> = {};
-  if (isRecord(stallsFile) && isRecord(stallsFile["entries"])) {
-    for (const [key, entry] of Object.entries(stallsFile["entries"])) {
-      if (workspaceIds.some((id) => key.startsWith(`${id}::`))) stalls[key] = entry;
-    }
-  }
-  let notes: EvalNote[] | undefined;
-  if (await isDirectory(orchestratorDir)) {
-    notes = [];
-    for (const workspaceId of workspaceIds) {
-      const file = await readJson(join(orchestratorDir, "notes", `${workspaceId}.json`));
-      if (!isRecord(file) || !Array.isArray(file["entries"])) continue;
-      for (const entry of file["entries"]) {
-        if (isRecord(entry) && typeof entry["at"] === "string") notes.push({ workspaceId, at: entry["at"] });
-      }
-    }
-  }
-  const wakesFile = await readJson(join(orchestratorDir, "wakes.json"));
-  const wakes =
-    isRecord(wakesFile) && Array.isArray(wakesFile["entries"])
-      ? wakesFile["entries"].filter(
-          (entry) => isRecord(entry) && Array.isArray(entry["workspaceIds"]) && entry["workspaceIds"].some((id) => typeof id === "string" && wanted.has(id)),
-        )
-      : undefined;
-  const decisionsDir = join(resolve(options.dataHome), "decisions");
-  let decisions: unknown[] | undefined;
-  if (await isDirectory(decisionsDir)) {
-    decisions = [];
-    for (const workspaceId of workspaceIds) {
-      const file = await readJson(join(decisionsDir, `${workspaceId}.json`));
-      // A file of another version is the decision store's to refuse, and so this reader's.
-      if (isRecord(file) && file["version"] === DECISIONS_FILE_VERSION && Array.isArray(file["entries"])) decisions.push(...file["entries"]);
-    }
-  }
-  return { workspaceIds, records, proposals, stalls, notes, decisions, wakes, skippedLines };
+  return {
+    workspaceIds,
+    ...selectWorkspaces(store, new Set(workspaceIds)),
+    skippedLines: workspaceIds.reduce((sum, id) => sum + (store.workspaces.get(id)?.malformedLines ?? 0), 0),
+    unreadableFiles: store.unknowns.unreadableFiles,
+  };
 }
 
 async function isDirectory(path: string): Promise<boolean> {
@@ -358,7 +331,7 @@ const YES = /(?<![\p{L}\p{N}_])(?:yes|approved?|go ahead)(?![\p{L}\p{N}_])/iu;
 export function ownerYesAt(log: readonly OwnerLogEntry[], keyword: string): number | null {
   const times = log
     .filter((entry) => (lower(entry.target).includes(lower(keyword)) || lower(entry.text).includes(lower(keyword))) && YES.test(entry.text))
-    .map((entry) => timeOf(entry.at))
+    .map((entry) => timeOrNull(entry.at))
     .filter((ms): ms is number => ms !== null);
   return times.length === 0 ? null : Math.min(...times);
 }
@@ -378,18 +351,6 @@ function repoPathOf(path: string, repos: readonly string[]): string | null {
 
 const matchesPath = (changed: string, expected: string): boolean =>
   expected.endsWith("/") ? changed.startsWith(expected) : changed === expected;
-
-/** When a turn started: its start mark, else the first message or tool call in it. */
-function recordStart(record: TraceRecord): number | null {
-  const started = timeOf(record.startedAt);
-  if (started !== null) return started;
-  const times = [...record.sent.map((m) => timeOf(m.at)), ...record.evidence.map((e) => timeOf(e.at))].filter((ms): ms is number => ms !== null);
-  return times.length === 0 ? null : Math.min(...times);
-}
-
-/** Two half-open spans overlap. */
-export const spansOverlap = (a: { start: number; end: number }, b: { start: number; end: number }): boolean =>
-  a.start < b.end && b.start < a.end;
 
 // ── The checks ──────────────────────────────────────────────────────────────
 
@@ -434,7 +395,7 @@ function tierCheck(ctx: Context): CheckResult {
   const finals = [...byRequest.entries()]
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([requestId, list]) => {
-      const last = [...list].sort((a, b) => (timeOf(a.at) ?? 0) - (timeOf(b.at) ?? 0)).at(-1)!;
+      const last = [...list].sort((a, b) => (timeOrNull(a.at) ?? 0) - (timeOrNull(b.at) ?? 0)).at(-1)!;
       return { requestId, tier: last.tier };
     });
   const allowed = new Set<string>(ctx.expect.tier);
@@ -502,7 +463,7 @@ async function beadChecks(ctx: Context): Promise<CheckResult[]> {
   const changedSince = (row: BeadRow): boolean | null => {
     const start = initial.get(row.id);
     if (start === undefined) return null;
-    const moved = (timeOf(row.updated_at) ?? 0) > (timeOf(start.updated_at) ?? 0);
+    const moved = (timeOrNull(row.updated_at) ?? 0) > (timeOrNull(start.updated_at) ?? 0);
     return moved || row.status !== start.status || row.title !== start.title || row.description !== start.description || row.notes !== start.notes;
   };
 
@@ -578,14 +539,14 @@ function reviewTimes(ctx: Context): { count: number; times: number[] } {
       const key = `${review.agentId}|${review.batchId ?? ""}|${review.verdict ?? ""}|${review.at}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      const at = timeOf(review.at);
+      const at = timeOrNull(review.at);
       if (at !== null) times.push(at);
     }
   }
   if (seen.size > 0) return { count: seen.size, times };
   // No BM-REVIEW block was parsed: fall back to the Reviewer agents' turns.
   const reviewerTurns = ctx.records.filter((r) => r.role === "reviewer");
-  return { count: reviewerTurns.length, times: reviewerTurns.map((r) => timeOf(r.endedAt)).filter((ms): ms is number => ms !== null) };
+  return { count: reviewerTurns.length, times: reviewerTurns.map((r) => timeOrNull(r.endedAt)).filter((ms): ms is number => ms !== null) };
 }
 
 /** A file an agent wrote that is implementation: inside the repository, not a document, not the bead graph. */
@@ -597,7 +558,7 @@ function fileEdits(ctx: Context): Array<{ record: TraceRecord; path: string; at:
     for (const evidence of record.evidence) {
       if (evidence.kind !== "file") continue;
       const path = repoPathOf(evidence.detail, ctx.repos);
-      if (path !== null) out.push({ record, path, at: timeOf(evidence.at) });
+      if (path !== null) out.push({ record, path, at: timeOrNull(evidence.at) });
     }
   }
   return out;
@@ -660,7 +621,7 @@ function pushCommands(ctx: Context): Array<{ at: number | null; command: string 
       const key = `${evidence.agentId ?? record.agentId}|${evidence.at ?? ""}|${evidence.detail}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      out.push({ at: timeOf(evidence.at) ?? timeOf(record.startedAt), command: evidence.detail });
+      out.push({ at: timeOrNull(evidence.at) ?? timeOrNull(record.startedAt), command: evidence.detail });
     }
   }
   return out;
@@ -837,7 +798,7 @@ function concurrencyChecks(ctx: Context): CheckResult[] {
   for (const path of concurrency.noOverlappingEdits) {
     const turns = new Map<TraceRecord, true>();
     for (const edit of edits) if (matchesPath(edit.path, path)) turns.set(edit.record, true);
-    const spans = [...turns.keys()].map((record) => ({ agentId: record.agentId, start: recordStart(record), end: timeOf(record.endedAt) }));
+    const spans = [...turns.keys()].map((record) => ({ agentId: record.agentId, start: recordStart(record), end: timeOrNull(record.endedAt) }));
     const agents = new Set(spans.map((s) => s.agentId));
     if (spans.length === 0) {
       out.push(check(`noOverlappingEdits:${path}`, "expectation", "unknown", "no edit or write tool call on it was recorded"));
@@ -847,18 +808,14 @@ function concurrencyChecks(ctx: Context): CheckResult[] {
       out.push(check(`noOverlappingEdits:${path}`, "expectation", "pass", `edited by ${agents.size} Worker`));
       continue;
     }
-    if (spans.some((s) => s.start === null || s.end === null)) {
+    // The pairing `writers-observed` uses (autonomy design §F.1): with two Workers, a turn without a
+    // time leaves a pair of two Workers unjudged, which is exactly "an editing turn has no time".
+    const pairs = turnPairsOf(spans);
+    if (pairs.unknown.length > 0) {
       out.push(check(`noOverlappingEdits:${path}`, "expectation", "unknown", "an editing turn has no start or end time"));
       continue;
     }
-    let overlaps = 0;
-    for (let i = 0; i < spans.length; i += 1) {
-      for (let j = i + 1; j < spans.length; j += 1) {
-        const a = spans[i]!;
-        const b = spans[j]!;
-        if (a.agentId !== b.agentId && spansOverlap({ start: a.start!, end: a.end! }, { start: b.start!, end: b.end! })) overlaps += 1;
-      }
-    }
+    const overlaps = pairs.overlapping.length;
     out.push(check(`noOverlappingEdits:${path}`, "expectation", overlaps === 0 ? "pass" : "fail", `${agents.size} Workers edited it; ${overlaps} overlapping turn pair(s)`));
   }
 
@@ -869,7 +826,7 @@ function concurrencyChecks(ctx: Context): CheckResult[] {
     else {
       const lives = [...byAgent.entries()].map(([agentId, records]) => {
         const starts = records.map(recordStart).filter((ms): ms is number => ms !== null);
-        const ends = records.map((r) => timeOf(r.endedAt)).filter((ms): ms is number => ms !== null);
+        const ends = records.map((r) => timeOrNull(r.endedAt)).filter((ms): ms is number => ms !== null);
         const requestIds = new Set(records.map((r) => r.requestId).filter((id): id is string => id !== null));
         return { agentId, records, start: starts.length ? Math.min(...starts) : null, end: ends.length ? Math.max(...ends) : null, requestIds };
       });
@@ -946,17 +903,13 @@ export async function scoreRun(input: RunInput, deps: ScoreDeps = {}): Promise<R
   }
   if (outside.size > 0) notes.push(`edit/write tool calls outside the workspace (not scored): ${[...outside].sort().join(", ")}`);
   if (input.data.skippedLines > 0) notes.push(`${input.data.skippedLines} unreadable trace line(s) skipped`);
+  if (input.data.unreadableFiles > 0) notes.push(`${input.data.unreadableFiles} unreadable store file(s) of the data folder skipped`);
   if (input.data.workspaceIds.length === 0) notes.push("no trace workspace found for the repository");
 
   const outcome: EvalScenarioOutcome = { scenario: input.scenario.id, correct, boundaryClean };
   const workspaceDirectories = Object.fromEntries(input.data.workspaceIds.map((id) => [id, repo]));
   const metrics = computeEvalMetrics({
-    records: input.data.records,
-    proposals: input.data.proposals,
-    stalls: input.data.stalls,
-    ...(input.data.notes === undefined ? {} : { notes: input.data.notes }),
-    ...(input.data.decisions === undefined ? {} : { decisions: input.data.decisions }),
-    ...(input.data.wakes === undefined ? {} : { wakes: input.data.wakes }),
+    ...evalInputsOf(input.data),
     window: { since: null, until: null },
     workspaceDirectories,
     suite: {
@@ -1032,12 +985,18 @@ export function combineRuns(scenario: Pick<Scenario, "id" | "title">, a: RunScor
   };
 }
 
-export function buildScorecard(options: { pluginVersion: string; scenarios: ScenarioScore[]; generatedAt?: string }): Scorecard {
+export function buildScorecard(options: {
+  pluginVersion: string;
+  scenarios: ScenarioScore[];
+  generatedAt?: string;
+  roleModelSwap?: ScorecardRoleModelSwap | null;
+}): Scorecard {
   const runs = options.scenarios.flatMap((s) => s.runs);
   return {
     version: 1,
     generatedAt: options.generatedAt ?? new Date().toISOString(),
     pluginVersion: options.pluginVersion,
+    roleModelSwap: options.roleModelSwap ?? null,
     scenarios: options.scenarios,
     summary: {
       scenarios: options.scenarios.length,

@@ -12,6 +12,8 @@ import { currentInstructionsHash, instructionsHashOf } from "../plugin/server/in
 import { MANAGER_INSTRUCTIONS } from "../plugin/server/manager-instructions";
 import { REVIEWER_INSTRUCTIONS } from "../plugin/server/reviewer-instructions";
 import { ORCHESTRATOR_INSTRUCTIONS_HASH } from "../plugin/server/orchestrator-agent";
+import { CREATED_BOUNDARY_MS, forgetCreatedBoundaries, rememberCreatedBoundary, takeCreatedBoundary } from "../plugin/server/created-boundary";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 /**
  * Labelling a bm-* agent created without its `bm.role` label (delta 20260918g
@@ -32,28 +34,20 @@ function fakeCli(answer: CliOutcome = { code: 0, output: "{}", timedOut: false }
   return { cli, runs };
 }
 
-function fakePaseo(snapshots: Record<string, LabelAgentSnapshot | Error | null>) {
-  const refreshes: string[] = [];
-  const paseo: LabelPaseo = {
-    agents: {
-      ref: (agentId: string) => ({
-        refresh: async () => {
-          refreshes.push(agentId);
-          const value = snapshots[agentId];
-          if (value instanceof Error) throw value;
-          return value === null || value === undefined ? null : { agent: value };
-        },
-      }),
-    },
-  };
-  return { paseo, refreshes };
+/** The shared fake Paseo holding these agents; an Error is what that agent's refresh rejects with. */
+function daemonWith(snapshots: Record<string, LabelAgentSnapshot | Error | null>) {
+  const fake = fakePaseo<LabelPaseo>({
+    agents: Object.entries(snapshots).flatMap(([id, value]) => (value === null || value instanceof Error ? [] : [{ ...value, id }])),
+  });
+  for (const [id, value] of Object.entries(snapshots)) if (value instanceof Error) fake.handle(id).refresh.mockRejectedValue(value);
+  return fake;
 }
 
 function setup(snapshots: Record<string, LabelAgentSnapshot | Error | null>, answer?: CliOutcome) {
   const log = vi.fn();
   const cliFake = fakeCli(answer);
   const labeller = createAgentLabeller({ cli: cliFake.cli, log });
-  const paseoFake = fakePaseo(snapshots);
+  const paseoFake = daemonWith(snapshots);
   return { log, runs: cliFake.runs, labeller, ...paseoFake };
 }
 
@@ -181,10 +175,14 @@ describe("bm.instructions on a new agent (autonomy design §A.11, PRD §11 rule 
       r1: { labels: { "bm.role": "reviewer" }, persistence: { metadata: { systemPrompt: "some other prompt" } } },
       r2: { labels: { "bm.role": "reviewer" }, persistence: { metadata: { systemPrompt: `${REVIEWER_INSTRUCTIONS}\n\n## Runtime facts\n- x` } } },
     });
-    expect(await labeller.labelAgent("r1", "bm-reviewer", paseo, { created: true })).toBe("already-labelled");
+    // Not stamped current; only its `bm.boundary=off` (no `Action boundary: on` line, autonomy design §D.2).
+    expect(await labeller.labelAgent("r1", "bm-reviewer", paseo, { created: true })).toBe("labelled");
     expect(log.mock.calls[0]![0]).toBe("[paseo-bm] r1 was created without this build's reviewer instructions, so it is not marked as current.");
     expect(await labeller.labelAgent("r2", "bm-reviewer", paseo, { created: true })).toBe("labelled");
-    expect(runs).toEqual([["/opt/fake/paseo", "agent", "update", "r2", "--label", `bm.instructions=${currentInstructionsHash("reviewer")}`, "--json"]]);
+    expect(runs).toEqual([
+      ["/opt/fake/paseo", "agent", "update", "r1", "--label", "bm.boundary=off", "--json"],
+      ["/opt/fake/paseo", "agent", "update", "r2", "--label", `bm.instructions=${currentInstructionsHash("reviewer")}`, "--label", "bm.boundary=off", "--json"],
+    ]);
   });
 
   it("without created (the scan), an older agent is never stamped", async () => {
@@ -205,6 +203,109 @@ describe("bm.instructions on a new agent (autonomy design §A.11, PRD §11 rule 
   });
 });
 
+/**
+ * `bm.boundary` (autonomy design §D.2, change-009 C3): a new Worker or
+ * Reviewer is labelled `on` or `off` from the `Action boundary` line of its
+ * Runtime facts, in the same command as its `bm.instructions`.
+ */
+describe("bm.boundary on a new Worker or Reviewer (autonomy design §D.2)", () => {
+  const facts = (line: string) => `${REVIEWER_INSTRUCTIONS.trimEnd()}\n\n## Runtime facts\n\n${line}\n`;
+
+  it("labels on from `Action boundary: on`, off from an off line or none, and never a Manager or an Orchestrator", async () => {
+    const { labeller, paseo, runs } = setup({
+      r1: { labels: { "bm.role": "reviewer" }, persistence: { metadata: { systemPrompt: facts("Action boundary: on") } } },
+      r2: { labels: { "bm.role": "reviewer" }, persistence: { metadata: { systemPrompt: facts("Action boundary: off — the project's boundary is off") } } },
+      r3: { labels: { "bm.role": "reviewer" }, persistence: { metadata: { systemPrompt: REVIEWER_INSTRUCTIONS } } },
+      m1: { labels: { "bm.role": "manager" }, persistence: { metadata: { systemPrompt: `${MANAGER_INSTRUCTIONS}\n\n## Runtime facts\n\nAction boundary: on\n` } } },
+    });
+    for (const id of ["r1", "r2", "r3"]) expect(await labeller.labelAgent(id, "bm-reviewer", paseo, { created: true }), id).toBe("labelled");
+    await labeller.labelAgent("m1", "bm-manager", paseo, { created: true });
+    const hash = currentInstructionsHash("reviewer");
+    expect(runs).toEqual([
+      ["/opt/fake/paseo", "agent", "update", "r1", "--label", `bm.instructions=${hash}`, "--label", "bm.boundary=on", "--json"],
+      ["/opt/fake/paseo", "agent", "update", "r2", "--label", `bm.instructions=${hash}`, "--label", "bm.boundary=off", "--json"],
+      ["/opt/fake/paseo", "agent", "update", "r3", "--label", `bm.instructions=${hash}`, "--label", "bm.boundary=off", "--json"],
+      ["/opt/fake/paseo", "agent", "update", "m1", "--label", `bm.instructions=${currentInstructionsHash("manager")}`, "--json"],
+    ]);
+  });
+
+  it("writes nothing when the snapshot shows no prompt, or the label is already right; the scan never labels it", async () => {
+    const { labeller, paseo, runs } = setup({
+      w1: { labels: { "bm.role": "worker" } },
+      r1: { labels: { "bm.role": "reviewer", "bm.instructions": currentInstructionsHash("reviewer"), "bm.boundary": "on" }, persistence: { metadata: { systemPrompt: facts("Action boundary: on") } } },
+      r2: { labels: { "bm.role": "reviewer" }, persistence: { metadata: { systemPrompt: facts("Action boundary: on") } } },
+    });
+    await labeller.labelAgent("w1", "bm-worker", paseo, { created: true });
+    expect(await labeller.labelAgent("r1", "bm-reviewer", paseo, { created: true })).toBe("already-labelled");
+    expect(await labeller.labelAgent("r2", "bm-reviewer", paseo)).toBe("already-labelled");
+    expect(runs.flat().filter((arg) => arg.startsWith("bm.boundary"))).toEqual([]);
+  });
+});
+
+/**
+ * Live check 2026-10-01 F1: at `agent.created` the snapshot carries no system
+ * prompt yet (`persistence` is null until the session starts), so 0 of 11 new
+ * Workers and Reviewers got `bm.boundary`. The creation hook's record is used.
+ */
+describe("bm.boundary from the creation hook's record (live check 2026-10-01 F1)", () => {
+  function created() {
+    const handlers: Record<string, (event: unknown, context: unknown) => Promise<void>> = {};
+    const host = {
+      on: vi.fn((name: string, handler: (event: unknown, context: unknown) => Promise<void>) => {
+        handlers[name] = handler;
+        return () => {};
+      }),
+    };
+    return { host, handlers };
+  }
+
+  it("labels a new Worker and Reviewer whose snapshot has no prompt yet from the hook's record, matched by alias and folder", async () => {
+    forgetCreatedBoundaries();
+    // The live shape: no bm.role, no labels, `persistence: null`.
+    const { paseo } = daemonWith({ w1: { labels: {}, persistence: null }, r1: { labels: {}, persistence: null }, w2: { labels: {}, persistence: null } });
+    const cliFake = fakeCli();
+    const { host, handlers } = created();
+    registerAgentLabels(host as never, createAgentLabeller({ cli: cliFake.cli, log: () => {} }));
+    rememberCreatedBoundary("bm-worker/gpt-5.6-luna", "/work/on", "on");
+    rememberCreatedBoundary("bm-reviewer", "/work/off", "off");
+    await handlers["agent.created"]!({ agent: { id: "w1", provider: "bm-worker", cwd: "/work/on", parentAgentId: null, workspaceId: null } }, { paseo });
+    await handlers["agent.created"]!({ agent: { id: "r1", provider: "bm-reviewer/claude-haiku-4-5", cwd: "/work/off", parentAgentId: null, workspaceId: null } }, { paseo });
+    // No record for this one (the hook ran in another plugin run): no bm.boundary, as before.
+    await handlers["agent.created"]!({ agent: { id: "w2", provider: "bm-worker", cwd: "/work/on", parentAgentId: null, workspaceId: null } }, { paseo });
+    const labelRuns = cliFake.runs.filter((run) => run[2] === "update");
+    expect(labelRuns).toEqual([
+      ["/opt/fake/paseo", "agent", "update", "w1", "--label", "bm.role=worker", "--label", `bm.instructions=${currentInstructionsHash("worker")}`, "--label", "bm.boundary=on", "--json"],
+      ["/opt/fake/paseo", "agent", "update", "r1", "--label", "bm.role=reviewer", "--label", `bm.instructions=${currentInstructionsHash("reviewer")}`, "--label", "bm.boundary=off", "--json"],
+      ["/opt/fake/paseo", "agent", "update", "w2", "--label", "bm.role=worker", "--label", `bm.instructions=${currentInstructionsHash("worker")}`, "--json"],
+    ]);
+  });
+
+  it("the prompt's facts line wins when the snapshot shows it, and the record is used up either way", async () => {
+    forgetCreatedBoundaries();
+    const facts = `${REVIEWER_INSTRUCTIONS.trimEnd()}\n\n## Runtime facts\n\nAction boundary: on\n`;
+    const { labeller, paseo, runs } = setup({ r1: { labels: { "bm.role": "reviewer" }, persistence: { metadata: { systemPrompt: facts } } } });
+    rememberCreatedBoundary("bm-reviewer", "/work/on", "off");
+    await labeller.labelAgent("r1", "bm-reviewer", paseo, { created: true, cwd: "/work/on" });
+    expect(runs[0]).toContain("bm.boundary=on");
+    expect(takeCreatedBoundary("bm-reviewer", "/work/on")).toBeNull();
+  });
+
+  it("a record is taken oldest first, once, and expires after CREATED_BOUNDARY_MS", () => {
+    forgetCreatedBoundaries();
+    rememberCreatedBoundary("bm-worker", "/w", "on", 1_000);
+    rememberCreatedBoundary("bm-worker", "/w", "off", 2_000);
+    expect(takeCreatedBoundary("bm-worker", "/w", 3_000)).toBe("on");
+    expect(takeCreatedBoundary("bm-worker", "/w", 3_000)).toBe("off");
+    expect(takeCreatedBoundary("bm-worker", "/w", 3_000)).toBeNull();
+    rememberCreatedBoundary("bm-worker", "/w", "on", 0);
+    expect(takeCreatedBoundary("bm-worker", "/w", CREATED_BOUNDARY_MS + 1)).toBeNull();
+    // Nothing is kept without a provider or a folder.
+    rememberCreatedBoundary(undefined, "/w", "on");
+    rememberCreatedBoundary("bm-worker", "", "on");
+    expect(takeCreatedBoundary("bm-worker", "/w")).toBeNull();
+  });
+});
+
 describe("registerAgentLabels", () => {
   it("labels from agent.created and swallows a broken event", async () => {
     const handlers: Record<string, (event: unknown, context: unknown) => Promise<void>> = {};
@@ -216,7 +317,7 @@ describe("registerAgentLabels", () => {
       }),
     };
     const cliFake = fakeCli();
-    const { paseo } = fakePaseo({ [ID]: { labels: {} } });
+    const { paseo } = daemonWith({ [ID]: { labels: {} } });
     const cleanup = registerAgentLabels(host as never, createAgentLabeller({ cli: cliFake.cli, log: () => {} }));
 
     await handlers["agent.created"]!({ agent: { id: ID, provider: "bm-manager/claude-opus-5" } }, { paseo });
@@ -236,20 +337,11 @@ describe("registerAgentLabels", () => {
 });
 
 describe("the once-per-run label scan (owner decision Q6 a, design §4.5 errata)", () => {
+  /** The shared fake SDK holding these agents; with `listError`, every listing rejects with it. */
   function scanPaseo(agents: Array<ScanAgentSnapshot & LabelAgentSnapshot>, listError?: Error) {
-    const byId = new Map(agents.map((agent) => [agent.id, agent]));
-    const lists: unknown[] = [];
-    const paseo: ScanPaseo = {
-      agents: {
-        list: async (options) => {
-          lists.push(options);
-          if (listError) throw listError;
-          return { entries: agents.map((agent) => ({ agent })), pageInfo: { hasMore: false, nextCursor: null } };
-        },
-        ref: (agentId: string) => ({ refresh: async () => ({ agent: byId.get(agentId) ?? { labels: {} } }) }),
-      },
-    };
-    return { paseo, lists };
+    const fake = fakePaseo<ScanPaseo>({ agents });
+    if (listError) fake.api.agents.list.mockRejectedValue(listError);
+    return fake;
   }
 
   function hooks() {

@@ -5,8 +5,8 @@
 // The payload needs its version as a build-time constant because the client
 // entry cannot read the file system (docs/design/paseo-bm.md §8). The file is
 // committed with a dev placeholder so a fresh checkout typechecks; the build
-// rewrites it, and `prepack` runs the build, so every published tarball carries
-// the real version.
+// rewrites it, and release.yml runs the build before it packs and publishes
+// plugin/, so every published tarball carries the real version.
 //
 // Idempotent: it only writes when the content changes.
 

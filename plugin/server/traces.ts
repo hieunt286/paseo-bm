@@ -13,32 +13,22 @@
  *    the shipped daemon in WP-205.2), never opens a trace of its own.
  *
  * This module is pure: records in, rows out. No filesystem, no SDK, no clock.
+ * What is read off a rebuilt trace lives beside it (code review 2026-09-30
+ * §4): timing and bead actions in `trace-timing.ts`, tokens and cost in
+ * `trace-usage.ts`, the Dashboard's rows in `trace-views.ts`.
  */
-import { looksLikeReport, requestIdFromText } from "./bm-report";
+import { looksLikeReport, ownReviewsOf, requestIdFromText } from "./bm-report";
 import { isPluginNotice } from "./notices";
-import { brActions } from "./shell";
 import { byAt, uniqueBy } from "../shared/order";
 import type {
-  AgentTiming,
   Confidence,
-  Evidence,
   GuardrailReport,
   ParsedReport,
   ParsedReview,
-  RuntimeRow,
-  SubAgentTrace,
   Tier,
-  TraceBead,
-  TraceDetail,
-  TraceErrors,
   TraceMessage,
   TraceRecord,
   TraceState,
-  TraceSummary,
-  TurnTiming,
-  WorkflowStepResult,
-  Usage,
-  WorkspaceState,
 } from "../shared/contracts";
 
 /** Agent facts reconstruction needs, from `agents.list` or the store. */
@@ -67,9 +57,30 @@ export interface AgentFacts {
   labelled?: boolean;
   /** `bm.replacedBy` label: the agent that took over after a fallback switch (delta 20260921 §4.4.7). */
   replacedBy?: string | null;
+  /**
+   * `bm.handoffFrom` label: the Worker this one took its request over from by
+   * a handoff (autonomy design §G.6), checked by the plugin on `agent.created`.
+   * Absent when the agent carries none.
+   */
+  handoffFrom?: string | null;
 }
 
 /** One reconstructed request, before timing and bead enrichment (WP-206.1.2). */
+/**
+ * The Workers of a trace that took its request over by a handoff (autonomy
+ * design §G.6), each with the Worker it replaced: those whose facts carry a
+ * `bm.handoffFrom` label. The brief's first line is only a secondary signal
+ * (`shared/handoff.ts`), since the Manager may drop it. Pure.
+ */
+export function handoffSuccessorsOf(trace: Pick<ReconstructedTrace, "workerIds">, agents: ReadonlyMap<string, AgentFacts>): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const id of trace.workerIds) {
+    const from = agents.get(id)?.handoffFrom ?? null;
+    if (from !== null && from !== "") out.set(id, from);
+  }
+  return out;
+}
+
 export interface ReconstructedTrace {
   traceId: string;
   requestId: string | null;
@@ -265,7 +276,7 @@ function openBuckets(records: readonly TraceRecord[]): { buckets: Bucket[]; byRe
         reviewerIds: [],
         records: [record],
         reports: reportsBelongingTo(requestId, record.reports),
-        reviews: [...record.reviews],
+        reviews: ownReviewsOf(record),
         reviewCalls: null,
         guardrailReported: null,
         tier: null,
@@ -295,7 +306,7 @@ function openBuckets(records: readonly TraceRecord[]): { buckets: Bucket[]; byRe
     if (bucket.to < record.at) bucket.to = record.at;
     bucket.trace.records.push(record);
     bucket.trace.reports.push(...reportsBelongingTo(bucket.trace.requestId, record.reports));
-    bucket.trace.reviews.push(...record.reviews);
+    bucket.trace.reviews.push(...ownReviewsOf(record));
   };
 
   // Pass 1: every request the Manager actually named gets exactly one bucket.
@@ -708,7 +719,8 @@ export function reconstructTraces(options: ReconstructOptions): ReconstructedTra
       held.add(record);
       trace.records.push(record);
       trace.reports.push(...reportsBelongingTo(trace.requestId, record.reports));
-      trace.reviews.push(...record.reviews);
+      // Only a Reviewer's own answers: a quoted or relayed block is the same review again (bead 7gxw.12).
+      trace.reviews.push(...ownReviewsOf(record));
     };
     for (const record of ordered) {
       if (record.role !== "manager" && !held.has(record) && ownAgentIds.has(record.agentId)) take(record);
@@ -771,655 +783,4 @@ export function reconstructTraces(options: ReconstructOptions): ReconstructedTra
   }
   // Newest first (REQ-041c).
   return result.sort((a, b) => (a.requestedAt > b.requestedAt ? -1 : a.requestedAt < b.requestedAt ? 1 : 0));
-}
-
-// ---------------------------------------------------------------------------
-// Timing, bead detail, summaries and pages (WP-206.1.2; Dashboard Design §4.2, §4.3, §7).
-// ---------------------------------------------------------------------------
-
-/** Sentence printed next to every duration, so no number is read as machine time. */
-export const TIMING_BASIS =
-  "Wall-clock time, measured from the request to the last recorded activity. It includes any time spent waiting for you to answer.";
-
-function msBetween(from: string | null, to: string | null): number | null {
-  if (from === null || to === null) return null;
-  const start = Date.parse(from);
-  const end = Date.parse(to);
-  if (Number.isNaN(start) || Number.isNaN(end) || end < start) return null;
-  return end - start;
-}
-
-/** Turn timings of the Manager records of a trace (design §7.1). */
-export function managerTurns(trace: ReconstructedTrace): TurnTiming[] {
-  return trace.records
-    .filter((record) => record.role === "manager")
-    .map((record) => ({
-      turnId: record.turnId,
-      startedAt: record.startedAt ?? record.sent[0]?.at ?? null,
-      endedAt: record.endedAt,
-      ms: msBetween(record.startedAt ?? record.sent[0]?.at ?? null, record.endedAt),
-    }));
-}
-
-/**
- * Lifetime of one agent inside a trace.
- *
- * A Worker ends at its `finished` report, a Reviewer at its last `BM-REVIEW`;
- * without either, the last recorded activity is used. A running agent has no
- * end, so `ms` stays null rather than being measured against "now" — the UI
- * shows elapsed time instead (REQ-043d).
- */
-export function agentTiming(
-  agentId: string,
-  role: "worker" | "reviewer",
-  trace: ReconstructedTrace,
-  agents: ReadonlyMap<string, AgentFacts>,
-): AgentTiming {
-  const own = trace.records.filter((record) => record.agentId === agentId);
-  const startedAt = agents.get(agentId)?.createdAt ?? own[0]?.startedAt ?? own[0]?.at ?? null;
-  const lastActivityAt = own.at(-1)?.at ?? null;
-
-  const finishedAt =
-    role === "worker"
-      ? (trace.reports.filter((report) => report.agentId === agentId && report.phase === "finished").at(-1)?.at ??
-        null)
-      : (trace.reviews.filter((review) => review.agentId === agentId).at(-1)?.at ?? null);
-
-  const status = agents.get(agentId)?.status ?? "closed";
-  const endedAt = status === "running" ? null : (finishedAt ?? lastActivityAt);
-
-  return {
-    agentId,
-    role,
-    startedAt,
-    lastActivityAt,
-    ms: msBetween(startedAt, endedAt),
-    state: status === "running" ? "running" : status === "error" ? "failed" : "completed",
-  };
-}
-
-/** Total duration of a request, or null while anything is still running. */
-export function totalMsOf(trace: ReconstructedTrace): number | null {
-  if (trace.state === "running") return null;
-  const finished = trace.reports.filter((report) => report.phase === "finished").at(-1)?.at ?? null;
-  const lastRecord = trace.records.at(-1)?.at ?? null;
-  const end = finished !== null && lastRecord !== null ? (finished > lastRecord ? finished : lastRecord) : (finished ?? lastRecord);
-  return msBetween(trace.requestedAt, end);
-}
-
-/** Bead ids a trace touched, split by action, with the confidence of each source. */
-export interface BeadActions {
-  created: { ids: string[]; confidence: Confidence };
-  updated: { ids: string[]; confidence: Confidence };
-  closed: { ids: string[]; confidence: Confidence };
-  ready: { ids: string[]; confidence: Confidence };
-  evidenceById: Map<string, Evidence[]>;
-}
-
-/**
- * Collects bead actions from reports first, then from `br` commands seen in the
- * timeline.
- *
- * A report is `exact`; a command is `inferred`. When there is no report and no
- * command, the confidence is `unknown` — which is what stops the UI from
- * claiming "this request created no beads" (REQ-044c). Only a `finished` report
- * that says `beadsCreated: none` justifies that claim, and that shows up here
- * as an `exact` empty list.
- */
-export function beadActionsOf(trace: ReconstructedTrace): BeadActions {
-  const evidenceById = new Map<string, Evidence[]>();
-  const add = (bucket: Set<string>, ids: readonly string[], evidence: Evidence | null) => {
-    for (const id of ids) {
-      bucket.add(id);
-      if (evidence === null) continue;
-      evidenceById.set(id, [...(evidenceById.get(id) ?? []), evidence]);
-    }
-  };
-
-  const created = new Set<string>();
-  const updated = new Set<string>();
-  const closed = new Set<string>();
-  const ready = new Set<string>();
-
-  const reportEvidence = (report: ParsedReport): Evidence => ({
-    kind: "report",
-    detail: `BM-REPORT phase=${report.phase ?? "unknown"}`,
-    agentId: report.agentId,
-    at: report.at,
-  });
-  // Stable sort: reports with the same timestamp keep their order.
-  const byTime = [...trace.reports].sort(byAt);
-  for (const report of byTime) {
-    const evidence = reportEvidence(report);
-    add(created, report.beadsCreated, evidence);
-    add(updated, report.beadsUpdated, evidence);
-    add(closed, report.beadsClosed, evidence);
-  }
-  // `ready` is a state, not an action (delta 20260917 §5.2): only the latest
-  // report says what is ready now. The 2026-09-16 run showed 3 ready beads
-  // from `beads-done` although `finished` said `beadsReady: none`.
-  const latest = byTime.at(-1);
-  if (latest !== undefined) add(ready, latest.beadsReady, reportEvidence(latest));
-
-  let sawCommand = false;
-  for (const record of trace.records) {
-    for (const evidence of record.evidence) {
-      if (evidence.kind !== "shell") continue;
-      for (const { verb, ids } of brActions(evidence.detail)) {
-        if (ids.length === 0 && verb !== "create") continue;
-        sawCommand = true;
-        add(verb === "create" ? created : verb === "update" ? updated : closed, ids, evidence);
-      }
-    }
-  }
-
-  // A list the parser could not fully read is a lower bound (delta 20260917
-  // §5.1): the count is then `inferred`, not `exact`.
-  const confidenceFor = (fromReports: boolean, incomplete: boolean): Confidence =>
-    fromReports ? (incomplete ? "inferred" : "exact") : sawCommand ? "inferred" : "unknown";
-  const incompleteIn = (reports: readonly ParsedReport[], field: string): boolean =>
-    reports.some((report) => (report.incompleteFields ?? []).includes(field));
-
-  const reportedAny = trace.reports.length > 0;
-  return {
-    created: { ids: [...created], confidence: confidenceFor(reportedAny, incompleteIn(byTime, "beadsCreated")) },
-    updated: { ids: [...updated], confidence: confidenceFor(reportedAny, incompleteIn(byTime, "beadsUpdated")) },
-    closed: { ids: [...closed], confidence: confidenceFor(reportedAny, incompleteIn(byTime, "beadsClosed")) },
-    ready: {
-      ids: [...ready],
-      confidence: confidenceFor(reportedAny, latest !== undefined && incompleteIn([latest], "beadsReady")),
-    },
-    evidenceById,
-  };
-}
-
-/**
- * The model a turn actually ran on (delta 20260918 §4.2): the running model the
- * collector recorded in `runtime`, else the configured one in `usage`. Records
- * written before that delta only have the second. Every grouping by model uses
- * this one definition, so cost, the per-model lines and the overview agree.
- */
-export function effectiveModel(record: Pick<TraceRecord, "runtime" | "usage">): string | null {
-  return record.runtime?.model ?? record.usage?.model ?? null;
-}
-
-/**
- * Sums the tokens a trace used. Cost is left unpriced here (`unavailable`):
- * WP-209 owns the price table and applies it, so this module never has to know
- * about money.
- */
-export function summariseUsage(trace: ReconstructedTrace): Usage {
-  let inputTokens = 0;
-  let cachedInputTokens = 0;
-  let outputTokens = 0;
-  let model: string | null = null;
-  for (const record of trace.records) {
-    if (record.usage === null) continue;
-    inputTokens += record.usage.inputTokens;
-    cachedInputTokens += record.usage.cachedInputTokens;
-    outputTokens += record.usage.outputTokens;
-    // The model the turn ran on, so a part priced below is priced as what ran.
-    model = effectiveModel(record) ?? model;
-  }
-  return {
-    inputTokens,
-    cachedInputTokens,
-    outputTokens,
-    costUsd: null,
-    costBasis: "unavailable",
-    model,
-    pricesUpdatedAt: null,
-  };
-}
-
-const tokensOf = (usage: Usage) => usage.inputTokens + usage.cachedInputTokens + usage.outputTokens;
-
-/**
- * A trace's records grouped by the model they ran on (`effectiveModel`, delta
- * 20260918 §4.3), in order of first appearance, each summed and still unpriced.
- * Parts without tokens are dropped. `key` is the model without a provider
- * prefix — `bm-worker/claude-opus-5` and `claude-opus-5` are one model, and the
- * price table accepts both — or `""` when no model is known.
- */
-function modelParts(trace: ReconstructedTrace): Array<{ key: string; usage: Usage }> {
-  const byModel = new Map<string, TraceRecord[]>();
-  for (const record of trace.records) {
-    if (record.usage === null) continue;
-    const model = effectiveModel(record) ?? "";
-    const key = model.slice(model.lastIndexOf("/") + 1);
-    byModel.set(key, [...(byModel.get(key) ?? []), record]);
-  }
-  return [...byModel.entries()]
-    .map(([key, records]) => ({ key, usage: summariseUsage({ ...trace, records }) }))
-    .filter((part) => tokensOf(part.usage) > 0);
-}
-
-/**
- * Tokens and cost of a trace per model it ran on (delta 20260918 §4.3,
- * REQ-058d): the same parts `usageOfTrace` prices, so the lines add up to its
- * total. A model without a price keeps `costUsd: null` and shows tokens only.
- */
-export function usageByModelOf(
-  trace: ReconstructedTrace,
-  price?: (usage: Usage) => Usage,
-): Array<{ model: string | null; usage: Usage }> {
-  return modelParts(trace).map((part) => {
-    const model = part.key === "" ? null : part.key;
-    const usage = { ...part.usage, model };
-    return { model, usage: price === undefined ? usage : price(usage) };
-  });
-}
-
-/**
- * Tokens and cost per role and model (delta 20260918 §4.3, REQ-058e): the
- * per-model parts of each role's records, so a role's lines add up to what its
- * agents used and a model is keyed the same way as everywhere else.
- */
-export function usageByModelRoleOf(
-  trace: ReconstructedTrace,
-  price?: (usage: Usage) => Usage,
-): Array<{ role: TraceRecord["role"]; model: string | null; usage: Usage }> {
-  const roles = [...new Set(trace.records.map((record) => record.role))];
-  return roles.flatMap((role) =>
-    usageByModelOf({ ...trace, records: trace.records.filter((record) => record.role === role) }, price).map((entry) => ({
-      role,
-      ...entry,
-    })),
-  );
-}
-
-/**
- * What one agent ran on, turn by turn, folded into one row per distinct
- * combination in order of first appearance (delta 20260918 §4.3). A turn with
- * `runtime` gives a recorded row; one without keeps the model its `usage` knew,
- * and says thinking and mode were not recorded.
- */
-export function runtimeRowsOf(trace: ReconstructedTrace, agentId: string): RuntimeRow[] {
-  const rows = new Map<string, RuntimeRow>();
-  for (const record of trace.records) {
-    if (record.agentId !== agentId) continue;
-    const runtime = record.runtime ?? null;
-    const row: Omit<RuntimeRow, "turns"> =
-      runtime === null
-        ? { model: record.usage?.model ?? null, thinkingOptionId: null, modeId: null, recorded: false }
-        : { model: effectiveModel(record), thinkingOptionId: runtime.thinkingOptionId, modeId: runtime.modeId, recorded: true };
-    const key = JSON.stringify([row.model, row.thinkingOptionId, row.modeId, row.recorded]);
-    const current = rows.get(key);
-    rows.set(key, current === undefined ? { ...row, turns: 1 } : { ...current, turns: current.turns + 1 });
-  }
-  return [...rows.values()];
-}
-
-/**
- * A trace's total usage, priced per model (delta 20260917 §5.4).
- *
- * The total used to price the summed tokens of every agent with one model —
- * the model of the last record — so on 2026-09-16 the Codex Reviewers' tokens
- * were charged as claude-opus-5 and the total ($17.71) did not match the
- * agents ($0.68 + $14.55). Now each model is priced on its own, the money is
- * the sum of the priced parts, and tokens from a model without a price are
- * named in a notice instead of being priced wrongly or hiding the rest.
- */
-export function usageOfTrace(
-  trace: ReconstructedTrace,
-  price?: (usage: Usage) => Usage,
-): { usage: Usage; notice: string | null } {
-  const parts = modelParts(trace);
-  const total = summariseUsage(trace);
-  // No tokens at all: nothing to split, so keep the plain result.
-  if (parts.length === 0) return { usage: price === undefined ? total : price(total), notice: null };
-  const model = parts.length === 1 && parts[0]!.key !== "" ? parts[0]!.key : null;
-  if (price === undefined) return { usage: { ...total, model }, notice: null };
-
-  let costUsd: number | null = null;
-  let pricesUpdatedAt: string | null = null;
-  const unpricedModels: string[] = [];
-  let unpricedTokens = 0;
-  for (const part of parts) {
-    const priced = price(part.usage);
-    if (priced.costUsd === null) {
-      unpricedModels.push(part.key === "" ? "unknown model" : part.key);
-      unpricedTokens += tokensOf(part.usage);
-      continue;
-    }
-    costUsd = (costUsd ?? 0) + priced.costUsd;
-    pricesUpdatedAt = pricesUpdatedAt ?? priced.pricesUpdatedAt;
-  }
-  return {
-    usage: {
-      ...total,
-      model,
-      costUsd: costUsd === null ? null : Math.round(costUsd * 10_000) / 10_000,
-      costBasis: costUsd === null ? "unavailable" : "estimated",
-      pricesUpdatedAt,
-    },
-    notice:
-      unpricedModels.length === 0
-        ? null
-        : `Cost excludes ${unpricedTokens} tokens from models without a price: ${unpricedModels.join(", ")}.`,
-  };
-}
-
-/** Sub-agent traces of a trace: provider-internal agents, counted per parent (REQ-042e). */
-export function subAgentTracesOf(trace: ReconstructedTrace): SubAgentTrace[] {
-  const byAgent = new Map<string, { subAgentType: string | null; description: string | null; count: number }>();
-  for (const record of trace.records) {
-    for (const evidence of record.evidence) {
-      if (evidence.kind !== "agent") continue;
-      const current = byAgent.get(record.agentId) ?? { subAgentType: null, description: null, count: 0 };
-      const [type, description] = evidence.detail.split(" — ");
-      byAgent.set(record.agentId, {
-        subAgentType: current.subAgentType ?? (type ?? null),
-        description: current.description ?? (description ?? null),
-        count: current.count + 1,
-      });
-    }
-  }
-  return [...byAgent.entries()].map(([agentId, value]) => ({ agentId, ...value }));
-}
-
-/**
- * Tokens of one agent inside a trace, priced per model when a price table is
- * given (an agent can switch models between turns).
- */
-function usageOfAgent(trace: ReconstructedTrace, agentId: string, price?: (usage: Usage) => Usage): Usage {
-  return usageOfTrace({ ...trace, records: trace.records.filter((record) => record.agentId === agentId) }, price).usage;
-}
-
-export interface SummariseDeps {
-  agents: ReadonlyMap<string, AgentFacts>;
-  workspaceState: WorkspaceState;
-  reassignedFrom: string | null;
-  /**
-   * Applies the price table to a token sum (WP-209). Injected so this module
-   * never has to know about money; without it the row reports tokens only.
-   */
-  priceUsage?: (usage: Usage) => Usage;
-  /**
-   * How many provider-plan incidents of this request did not fail a turn
-   * (delta 20260925 §3.4). Injected, because the incidents live in a file this
-   * module does not read; without it the row reports none.
-   */
-  fallbacksOf?: (requestId: string | null) => number;
-}
-
-/**
- * The errors of a whole trace, whatever their reason (delta 20260925 §3.4).
- *
- * `failedTurns` is of the records it is given, so a per-turn row gets its own
- * count. The other two belong to the request, and `summariseSegments` keeps them
- * on the opening row so adding a request's rows up counts each failure once.
- */
-export function errorsOf(trace: ReconstructedTrace, deps: SummariseDeps): TraceErrors {
-  const failedTurns = trace.records.filter((record) => record.outcome === "failed").length;
-  // An agent in `error` almost always wrote a failed turn first; only one killed
-  // before that is a failure nothing else counted.
-  const failedAgents = new Set(
-    trace.records.filter((record) => record.outcome === "failed").map((record) => record.agentId),
-  );
-  const agentErrors = [...trace.workerIds, ...trace.reviewerIds].filter((id) => {
-    const agent = deps.agents.get(id);
-    return agent?.status === "error" && !failedAgents.has(id);
-  }).length;
-  return { failedTurns, agentErrors, fallbacks: deps.fallbacksOf?.(trace.requestId) ?? 0 };
-}
-
-/**
- * What the user typed directly to an agent of this request, oldest first.
- *
- * Only messages the collector marked `origin: "user"`; a record written before
- * that field existed says nothing either way and contributes nothing.
- */
-export function userMessagesOf(trace: ReconstructedTrace): TraceMessage[] {
-  const out: TraceMessage[] = [];
-  for (const record of trace.records) {
-    for (const message of record.sent) {
-      if (message.origin === "user") out.push({ ...message, agentId: record.agentId });
-    }
-  }
-  return out.sort(byAt);
-}
-
-/** Skills each agent loaded, oldest first, one entry per agent and skill. */
-export function skillsOf(trace: ReconstructedTrace): Array<{ agentId: string; skill: string; at: string | null }> {
-  const all = trace.records.flatMap((record) =>
-    record.evidence
-      .filter((entry) => entry.kind === "skill")
-      .map((entry) => ({ agentId: entry.agentId ?? record.agentId, skill: entry.detail, at: entry.at })),
-  );
-  return uniqueBy(all.sort(byAt), (entry) => `${entry.agentId}|${entry.skill}`);
-}
-
-/** One row for `traces.list` (design §4.2). */
-export function summarise(trace: ReconstructedTrace, deps: SummariseDeps): TraceSummary {
-  const beads = beadActionsOf(trace);
-  const total = usageOfTrace(trace, deps.priceUsage);
-  return {
-    traceId: trace.traceId,
-    requestId: trace.requestId,
-    requestedAt: trace.requestedAt,
-    excerpt: trace.requestText === null ? null : (trace.requestText.split("\n")[0]?.slice(0, 200) ?? ""),
-    turn: null,
-    state: trace.state,
-    workerIds: trace.workerIds,
-    reviewerIds: trace.reviewerIds,
-    reviewCalls: trace.reviewCalls,
-    guardrailReported: trace.guardrailReported,
-    durationMs: totalMsOf(trace),
-    usage: total.usage,
-    errors: errorsOf(trace, deps),
-    messageCount: trace.records.reduce((count, record) => count + record.sent.length + record.received.length, 0),
-    userMessageCount: userMessagesOf(trace).length,
-    workerUsage: trace.workerIds.map((agentId) => ({
-      agentId,
-      title: deps.agents.get(agentId)?.title ?? null,
-      usage: usageOfAgent(trace, agentId, deps.priceUsage),
-    })),
-    usageByModelRole: usageByModelRoleOf(trace, deps.priceUsage),
-    beadCounts: {
-      created: { count: beads.created.ids.length, confidence: beads.created.confidence },
-      updated: { count: beads.updated.ids.length, confidence: beads.updated.confidence },
-      closed: { count: beads.closed.ids.length, confidence: beads.closed.confidence },
-      ready: { count: beads.ready.ids.length, confidence: beads.ready.confidence },
-    },
-    tier: trace.tier,
-    linking: trace.linking,
-    agentsMissing: trace.agentsMissing,
-    workspaceState: deps.workspaceState,
-    reassignedFrom: deps.reassignedFrom,
-    notices: total.notice === null ? trace.notices : [...trace.notices, total.notice],
-  };
-}
-
-/**
- * One row per turn the user opened, instead of one row per request.
- *
- * The owner asked for each follow-up to be its own flow rather than being
- * folded into a row that is hard to trace (delta 20260917e §4.3, decision Q23:
- * the Dashboard splits, the `requestId` does not).
- *
- * What is split and what is not matters more than the split itself:
- * - **split**, because it belongs to one turn — when it was asked, what was
- *   asked, the tokens, the duration, the messages, the beads its reports name;
- * - **kept whole**, because it belongs to the request — the review calls above
- *   all. Counting those per turn would hand a user who asks three follow-ups
- *   three times the reviews their tier allows, which is the very thing the
- *   budget exists to stop. Also whole: the state, tier, linking, and the agents,
- *   which are the request's, not a turn's.
- *
- * A request nobody followed up returns exactly one row with `turn: null`, so
- * nothing changes for it.
- */
-export function summariseSegments(trace: ReconstructedTrace, deps: SummariseDeps): TraceSummary[] {
-  const whole = summarise(trace, deps);
-  if (trace.segments.length <= 1) return [whole];
-  const total = trace.segments.length;
-  return trace.segments.map((segment) => {
-    const part = summarise(
-      {
-        ...trace,
-        records: segment.records,
-        reports: segment.reports,
-        requestedAt: segment.startedAt,
-        requestText: segment.text,
-      },
-      deps,
-    );
-    return {
-      ...part,
-      turn: { index: segment.index, total },
-      // `failedTurns` is this turn's; the other two are the request's, so they
-      // stay on the opening row — the same rule `requestsPerDay` follows, and
-      // what keeps a sum over the rows from counting one failure twice
-      // (delta 20260925 §3.4).
-      //
-      // They come from `whole`, never from `part`: `errorsOf` suppresses an
-      // agent error that already has a failed turn record, and a segment only
-      // sees its own records. A Worker that died on the follow-up turn would
-      // otherwise count as an agent error on row 1 AND a failed turn on row 2.
-      errors: {
-        failedTurns: part.errors?.failedTurns ?? 0,
-        agentErrors: segment.index === 1 ? (whole.errors?.agentErrors ?? 0) : 0,
-        fallbacks: segment.index === 1 ? (whole.errors?.fallbacks ?? 0) : 0,
-      },
-      // Notices are the request's, and `summarise` derives one of them from the
-      // records it was given — which here are a single turn's. Everything else
-      // request-level (review calls, state, tier, linking, the agents) is
-      // carried through untouched by `summarise`, so it needs no override; the
-      // suite pins that invariant so a future change cannot start splitting it.
-      notices: whole.notices,
-    };
-  });
-}
-
-export interface DetailDeps extends SummariseDeps {
-  /** Current title and status of the beads a trace names (WP-208 lookup). */
-  lookupBeads: (ids: readonly string[]) => {
-    found: Array<{ id: string; title: string | null; status: string; updatedAt?: string }>;
-    missing: string[];
-  };
-  /**
-   * Feature-workflow table (WP-207). Injected rather than imported so this
-   * module stays free of the inference rules, and so a caller that does not
-   * want the table can leave it out.
-   */
-  workflowSteps?: (trace: ReconstructedTrace, beadStatus: (id: string) => string | null) => WorkflowStepResult[];
-}
-
-/** Full detail for `traces.get` (design §4.3). */
-export function detail(trace: ReconstructedTrace, deps: DetailDeps): TraceDetail {
-  const summary = summarise(trace, deps);
-  const actions = beadActionsOf(trace);
-
-  const allIds = [
-    ...new Set([...actions.created.ids, ...actions.updated.ids, ...actions.closed.ids, ...actions.ready.ids]),
-  ];
-  const { found, missing } = deps.lookupBeads(allIds);
-  const currentById = new Map(found.map((bead) => [bead.id, bead]));
-
-  const beadRows: TraceBead[] = [];
-  // A reported update is checked against the store: a bead whose `updated_at`
-  // is older than the request was not touched by it. WP-214 F-3: the Worker
-  // listed `repo-cv6` under beadsUpdated while the store still showed its
-  // creation time, and the screen repeated the claim as exact.
-  const contradicted: string[] = [];
-  const pushRows = (ids: readonly string[], action: TraceBead["action"], confidence: Confidence) => {
-    for (const id of ids) {
-      const current = currentById.get(id);
-      const untouched =
-        action === "updated" &&
-        current?.updatedAt !== undefined &&
-        current.updatedAt !== "" &&
-        current.updatedAt < trace.requestedAt;
-      if (untouched) contradicted.push(id);
-      beadRows.push({
-        id,
-        title: current?.title ?? null,
-        statusNow: current?.status ?? null,
-        action,
-        confidence: untouched ? "unknown" : confidence,
-        evidence: actions.evidenceById.get(id) ?? [],
-      });
-    }
-  };
-  pushRows(actions.created.ids, "created", actions.created.confidence);
-  pushRows(actions.updated.ids, "updated", actions.updated.confidence);
-  pushRows(actions.closed.ids, "closed", actions.closed.confidence);
-  pushRows(actions.ready.ids, "ready", actions.ready.confidence);
-
-  const notices = [...summary.notices];
-  if (missing.length > 0) {
-    notices.push(`${missing.length} reported bead(s) are not in the workspace's bead store.`);
-  }
-  if (contradicted.length > 0) {
-    notices.push(
-      `Reported as updated, but unchanged in the bead store since this request began: ${contradicted.join(", ")}.`,
-    );
-  }
-
-  // A Worker record's first message is its prompt only when a person or the
-  // Manager wrote it: a plugin notice that opens a Worker turn (a `BM-STOP`,
-  // a `BM-RESUME`) is not.
-  const workerPrompts = trace.records
-    .filter((record) => record.role === "worker")
-    .flatMap((record) => record.sent.slice(0, 1))
-    .filter((message) => !isPluginNotice(message.text));
-  const reviewRequests = trace.records
-    .filter((record) => record.role === "reviewer")
-    .flatMap((record) =>
-      record.sent.map((message) => ({ ...message, batchId: /batch[\s:-]*([A-Za-z0-9._-]+)/i.exec(message.text)?.[1] ?? null })),
-    );
-  const managerReplies = trace.records
-    .filter((record) => record.role === "manager")
-    .flatMap((record) => record.received);
-
-  return {
-    ...summary,
-    notices,
-    sent: {
-      // The message reconstruction chose as the request. The first Manager
-      // record's first message can be a Worker's BM-REPORT instead.
-      userRequest:
-        trace.records
-          .filter((record) => record.role === "manager")
-          .flatMap((record) => record.sent)
-          .find((message) => message.text === trace.requestText) ?? null,
-      workerInitialPrompts: workerPrompts,
-      reviewRequests,
-    },
-    received: {
-      reports: trace.reports,
-      reviews: trace.reviews,
-      managerReplies,
-    },
-    timing: {
-      totalMs: summary.durationMs,
-      managerTurns: managerTurns(trace),
-      workers: trace.workerIds.map((id) => agentTiming(id, "worker", trace, deps.agents)),
-      reviewers: trace.reviewerIds.map((id) => agentTiming(id, "reviewer", trace, deps.agents)),
-      basis: TIMING_BASIS,
-    },
-    usageByAgent: [...new Set(trace.records.map((record) => record.agentId))].map((agentId) => ({
-      agentId,
-      role: deps.agents.get(agentId)?.role ?? trace.records.find((record) => record.agentId === agentId)?.role ?? "unknown",
-      usage: usageOfAgent(trace, agentId, deps.priceUsage),
-      runtime: runtimeRowsOf(trace, agentId),
-    })),
-    usageByModel: usageByModelOf(trace, deps.priceUsage),
-    beads: beadRows,
-    workflowSteps:
-      deps.workflowSteps?.(trace, (id) => currentById.get(id)?.status ?? null) ?? [],
-    subAgentTraces: subAgentTracesOf(trace),
-    userMessages: userMessagesOf(trace),
-    skills: skillsOf(trace),
-  };
-}
-
-/** One page of rows, oldest cursor semantics: an opaque index into the sorted list. */
-export function paginate<T>(rows: readonly T[], limit: number, cursor?: string): { page: T[]; nextCursor: string | null; truncated: boolean } {
-  const start = cursor === undefined ? 0 : Math.max(0, Number.parseInt(cursor, 10) || 0);
-  const page = rows.slice(start, start + limit);
-  const nextIndex = start + page.length;
-  const hasMore = nextIndex < rows.length;
-  return { page: [...page], nextCursor: hasMore ? String(nextIndex) : null, truncated: hasMore };
 }

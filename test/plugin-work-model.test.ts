@@ -1,26 +1,34 @@
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type {
+  AgentTokenFigures,
   OrchestratorProjectRow,
   ParsedReport,
   TraceDetail,
   TraceSummary,
+  TraceVerification,
   Usage,
   WorkspaceOverview,
 } from "../plugin/shared/contracts";
 import { answerDecision, type Decision } from "../plugin/shared/decisions";
-import { formatClock } from "../plugin/client/beads-model";
+import { localTimeText } from "../plugin/client/format";
 import {
+  ESTIMATE_NOTE,
+  LOWER_BOUND_NOTE,
+  NO_AGENT_TOKENS_TEXT,
+  NO_REQUEST_TOKENS_TEXT,
   PROJECT_TABS,
+  TOKEN_FIGURES_TITLE,
   WORK_STAGES,
   agentNamer,
+  agentTokenFigures,
+  contextTrendView,
   evidenceLines,
   projectStageFacts,
   requestCardView,
   requestStage,
   runtimeDetailLines,
   requestSummaries,
+  requestTokenFigures,
   stageBar,
   timelineEvents,
   workRows,
@@ -39,30 +47,31 @@ import { allNodes, pressables, renderTree, textOf, texts, type RNode } from "./h
  * and the SDK icon are named stand-ins.
  */
 
-vi.mock("react-native", () => {
-  const make = (name: string) => Object.assign(() => null, { displayName: name, primitive: true });
-  return {
-    ActivityIndicator: make("ActivityIndicator"),
-    Pressable: make("Pressable"),
-    ScrollView: make("ScrollView"),
-    Text: make("Text"),
-    TextInput: make("TextInput"),
-    View: make("View"),
-  };
-});
-vi.mock("@getpaseo/plugin/client/react-native", () => ({ Icon: Object.assign(() => null, { displayName: "Icon", primitive: true }) }));
-
 // The root tsconfig has no `jsx`, so the .tsx modules load through non-literal specifiers.
 const workPath = "../plugin/client/work.tsx";
-const beadsScreenPath = "../plugin/client/beads-screen.tsx";
+const uiPath = "../plugin/client/ui.tsx";
+const insightsPath = "../plugin/client/insights.tsx";
 const treePath = "../plugin/client/tree.tsx";
 type Component = (props: Record<string, unknown>) => unknown;
-const { StageBarRow, WorkRowItem, WorkList, RequestCard, TimelineList, EvidenceList, ProjectHeader, AgentMarks } = (await import(workPath)) as Record<
-  "StageBarRow" | "WorkRowItem" | "WorkList" | "RequestCard" | "TimelineList" | "EvidenceList" | "ProjectHeader" | "AgentMarks",
+const { StageBarRow, WorkRowItem, WorkList, RequestCard, TimelineList, EvidenceList, ProjectHeader, AgentMarks, TokenFigures, AgentTokensRow, ContextBars } = (await import(
+  workPath
+)) as Record<
+  | "StageBarRow"
+  | "WorkRowItem"
+  | "WorkList"
+  | "RequestCard"
+  | "TimelineList"
+  | "EvidenceList"
+  | "ProjectHeader"
+  | "AgentMarks"
+  | "TokenFigures"
+  | "AgentTokensRow"
+  | "ContextBars",
   Component
 >;
-const { BeadsOverviewSection } = (await import(beadsScreenPath)) as { BeadsOverviewSection: Component };
+const { BeadsFigures } = (await import(insightsPath)) as { BeadsFigures: Component };
 const { AgentTreeView } = (await import(treePath)) as { AgentTreeView: Component };
+const { WorkspaceScreenHeader } = (await import(uiPath)) as { WorkspaceScreenHeader: Component };
 
 const styles = new Proxy({}, { get: (_target, key) => (key === "content" ? { padding: 12, gap: 8 } : { name: String(key) }) });
 const theme = { colors: new Proxy({}, { get: (_target, key) => `#${String(key)}` }) };
@@ -268,13 +277,11 @@ function project(overrides: Partial<OrchestratorProjectRow> = {}): OrchestratorP
     state: "running",
     lastActivityAt: at(2),
     requests: 1,
-    autopilot: false,
     stage: "implementing",
     agents: { manager: { id: "mgr-1", title: null, status: "idle" }, workers: [{ id: "wrk-1", title: null, status: "running" }], reviewers: [] },
     lastProgressAt: at(2),
     currentRequest: { requestId: "req-1", title: "Migrate fee list…" },
     lastAction: null,
-    assessment: null,
     ...overrides,
   };
 }
@@ -433,7 +440,7 @@ describe("the timeline of a request", () => {
     reviewerIds: ["rev-1"],
     userMessages: [{ agentId: "wrk-aaaaaaaa1", at: at(55), text: "Use the contract only", truncated: false, origin: "user" }],
   });
-  const events = timelineEvents(trace, [answered]);
+  const events = timelineEvents(trace, [answered], NOW);
 
   it("puts the events newest first, typed", () => {
     expect(events.map((event) => [event.kind, event.text])).toEqual([
@@ -451,7 +458,7 @@ describe("the timeline of a request", () => {
     ]);
     const times = events.map((event) => Date.parse(event.at));
     expect([...times].sort((a, b) => b - a)).toEqual(times);
-    expect(events[0]!.time).toBe(formatClock(at(30)));
+    expect(events[0]!.time).toBe(localTimeText(new Date(at(30)), NOW));
   });
 
   it("draws no unknown step: a report without a milestone, a review without a verdict, an event without a readable time", () => {
@@ -471,18 +478,108 @@ describe("the timeline of a request", () => {
       sent: { userRequest: null, workerInitialPrompts: [], reviewRequests: [] },
       received: { reports: [report("received", 10), report("documents-done", 10)], reviews: [], managerReplies: [] },
     });
-    expect(timelineEvents(same, []).map((event) => event.key)).toEqual(["report:1", "report:0"]);
+    expect(timelineEvents(same, [], NOW).map((event) => event.key)).toEqual(["report:1", "report:0"]);
   });
 
   it("names nobody by id, and only shows decisions of this request", () => {
     for (const event of events) expect(event.text).not.toMatch(/wrk-|rev-1|mgr-1|q:req/);
     const foreign = makeDecision({ id: "q:req-9:Q1", requestId: "req-9" });
-    expect(timelineEvents(trace, [foreign]).some((event) => event.kind === "decision-asked")).toBe(false);
+    expect(timelineEvents(trace, [foreign], NOW).some((event) => event.kind === "decision-asked")).toBe(false);
+  });
+
+  it("says the policy decided a delegated question for the owner (autonomy design §B.5), never that the owner chose", () => {
+    const scope = makeDecision({
+      id: "q:req-1:Q2",
+      requestId: "req-1",
+      class: "scope",
+      askedAt: at(60),
+      options: [{ key: "a", label: "dd/mm/yyyy", recommended: true, effects: ["none"] }, { key: "b", label: "yyyy-mm-dd", recommended: false, effects: ["commit"] }],
+    });
+    const result = answerDecision(scope, { by: "policy", via: "inbox", optionKey: "a", class: "scope", predictor: "recommended", at: at(59) });
+    if (!result.ok) throw new Error(result.message);
+    const decided = { ...result.decision, delivery: { to: "wrk-aaaaaaaa1", kind: "answers:req-1", at: at(59), outcome: "sent" } } as Decision;
+    const event = timelineEvents(trace, [decided], NOW).find((entry) => entry.kind === "decision-answered")!;
+    expect(event).toMatchObject({ text: 'Decided for you by the policy (recommended option): "dd/mm/yyyy" → Worker', tag: null, tone: "success" });
+    expect(event.text).not.toContain("You");
+  });
+
+  it("shows a held permission request: held by paseo-bm, then allowed in Paseo's prompt or withdrawn (autonomy design §D.2)", () => {
+    const heldOpen = makeDecision({
+      id: "h:wrk-aaaaaaaa1:perm-1",
+      requestId: "req-1",
+      askedBy: { role: "plugin", agentId: "wrk-aaaaaaaa1" },
+      askedAt: at(60),
+      round: null,
+      question: "The Worker asks to run `git push`. Held: git push. Allow it once?",
+      options: [
+        { key: "allow", label: "Allow once", recommended: false, effects: ["push"], action: { kind: "permission", agentId: "wrk-aaaaaaaa1", requestId: "perm-1", allow: true } },
+        { key: "deny", label: "Deny", recommended: false, effects: ["none"], action: { kind: "permission", agentId: "wrk-aaaaaaaa1", requestId: "perm-1", allow: false } },
+      ],
+    });
+    const asked = timelineEvents(trace, [heldOpen], NOW).find((entry) => entry.kind === "decision-asked")!;
+    expect(asked.text).toBe("paseo-bm held a request of Worker: The Worker asks to run `git push`. Held: git push. Allow it once?");
+    const allowed = answerDecision(heldOpen, { via: "paseo", optionKey: "allow", at: at(59) });
+    if (!allowed.ok) throw new Error(allowed.message);
+    expect(timelineEvents(trace, [allowed.decision], NOW).find((entry) => entry.kind === "decision-answered")!.text).toBe(`You chose "Allow once" in Paseo's own prompt`);
+    const withdrawn = { ...heldOpen, status: "withdrawn", settledAt: at(59) } as Decision;
+    expect(timelineEvents(trace, [withdrawn], NOW).find((entry) => entry.kind === "decision-closed")!.text).toBe("The held request was answered elsewhere, or its agent moved on");
+  });
+
+  it("shows a handoff: the successor's first message holds its brief, and the request keeps its id (autonomy design §G.6)", () => {
+    const brief = "Handoff h1: the Orchestrator hands request req-1 over.\n\nBM-HANDOFF-BRIEF h1\nrole: worker\nrequestId: req-1\nreplaces: wrk-aaaaaaaa1\nrequest: Migrate fee list";
+    const handedOver = detail(
+      {
+        sent: {
+          userRequest: null,
+          workerInitialPrompts: [
+            { agentId: "wrk-aaaaaaaa1", at: at(178), text: "go", truncated: false },
+            { agentId: "wrk-bbbbbbbb2", at: at(60), text: brief, truncated: false },
+          ],
+          reviewRequests: [],
+        },
+      },
+      { workerIds: ["wrk-aaaaaaaa1", "wrk-bbbbbbbb2"] },
+    );
+    const events = timelineEvents(handedOver, [], NOW);
+    expect(events.map((event) => [event.kind, event.text])).toEqual([
+      ["handoff", "Handed over to Worker 2 from Worker 1, with a brief of the records"],
+      ["handed-over", "The Manager handed it to Worker 1"],
+    ]);
+    expect(events[0]).toMatchObject({ key: "handoff:1", tag: "handoff", tone: "info" });
+    for (const event of events) expect(event.text).not.toMatch(/wrk-/);
+  });
+
+  it("shows a handoff the server names by the successor's label even when the Manager dropped the brief's marker line (Phase 3 live check F2)", () => {
+    const withoutMarker = "role: worker\nrequestId: req-1\nrequest: Migrate fee list";
+    const handedOver = detail(
+      {
+        sent: {
+          userRequest: null,
+          workerInitialPrompts: [
+            { agentId: "wrk-aaaaaaaa1", at: at(178), text: "go", truncated: false },
+            { agentId: "wrk-bbbbbbbb2", at: at(60), text: withoutMarker, truncated: false },
+            // A later turn's first message of the same successor is not a second handoff.
+            { agentId: "wrk-bbbbbbbb2", at: at(30), text: "Continue req-1.", truncated: false },
+          ],
+          reviewRequests: [],
+        },
+        handoffs: [{ agentId: "wrk-bbbbbbbb2", from: "wrk-aaaaaaaa1" }],
+      },
+      { workerIds: ["wrk-aaaaaaaa1", "wrk-bbbbbbbb2"] },
+    );
+    expect(timelineEvents(handedOver, [], NOW).map((event) => [event.kind, event.text])).toEqual([
+      ["handed-over", "The Manager handed it to Worker 2"],
+      ["handoff", "Handed over to Worker 2 from Worker 1, with a brief of the records"],
+      ["handed-over", "The Manager handed it to Worker 1"],
+    ]);
   });
 
   it("says a closed question without an answer was closed", () => {
     const withdrawn = { ...question, status: "withdrawn", settledAt: at(5) } as Decision;
-    expect(timelineEvents(trace, [withdrawn]).find((event) => event.kind === "decision-closed")).toMatchObject({ text: "The question was withdrawn", tone: "muted" });
+    expect(timelineEvents(trace, [withdrawn], NOW).find((event) => event.kind === "decision-closed")).toMatchObject({ text: "The question was withdrawn", tone: "muted" });
+    // A Worker's question expires when its request finishes (bead 81y2.26).
+    const expired = { ...question, status: "expired", settledAt: at(5) } as Decision;
+    expect(timelineEvents(trace, [expired], NOW).find((event) => event.kind === "decision-closed")).toMatchObject({ text: "The question expired when the request finished.", tone: "muted" });
   });
 });
 
@@ -623,7 +720,7 @@ describe("a project row on screen", () => {
         error: null,
         status: "STATUS",
         footer: "paseo-bm 0.5.0",
-        renderDot: () => null,
+        renderDot: (workspaceId: string) => `DOT ${workspaceId}`,
         onOpen,
         compact: false,
         styles,
@@ -631,6 +728,10 @@ describe("a project row on screen", () => {
       }),
     );
     expect(texts(tree)).toEqual(expect.arrayContaining(["Closed workspaces with history", "old", "paseo-bm 0.5.0"]));
+    // Each project row draws the dot `renderDot` gives for its workspace (the surface passes the running dot).
+    const projectRow = pressables(tree).find((node) => JSON.stringify(node).includes(`DOT ${row.workspaceId}`));
+    expect(projectRow?.props.accessibilityRole).toBe("button");
+    expect(JSON.stringify(tree).match(/DOT /g)).toHaveLength(1);
     const closed = pressables(tree).find((node) => node.props.accessibilityLabel === "Open the requests of the closed workspace old")!;
     (closed.props.onPress as () => void)();
     expect(onOpen).toHaveBeenCalledWith("ws-z", "old");
@@ -644,7 +745,7 @@ describe("a project row on screen", () => {
 describe("a request card on screen", () => {
   const entry = requestSummaries([summary({ beadCounts: counts(5, 3) })])[0]!;
   const view: RequestCardView = requestCardView(entry, withReports([report("beads-done", 10)]), [], NOW);
-  const events = timelineEvents(withReports([report("beads-done", 10)]), []);
+  const events = timelineEvents(withReports([report("beads-done", 10)]), [], NOW);
   const card = (overrides: Record<string, unknown> = {}) =>
     renderTree(
       RequestCard({
@@ -692,19 +793,6 @@ describe("a request card on screen", () => {
     expect(open.indexOf("HISTORY ACTIONS")).toBeGreaterThan(open.indexOf("Trace: tr-1"));
   });
 
-  it("offers deleting a request's history in its Details, and a closed workspace's history above its requests (autonomy design §A.12)", () => {
-    const work = readFileSync(fileURLToPath(new URL(workPath, import.meta.url)), "utf8");
-    // Per request: the same confirmed flow as before, scoped to the trace.
-    expect(work).toMatch(/detailsExtra=\{\s*<TraceActions [^>]*scope="trace" traceId=\{traceId\}/);
-    // A closed workspace: delete, or move onto a workspace that exists, behind the same confirmation.
-    expect(work).toMatch(/closed === undefined \? null : \(\s*<ClosedHistory workspaceId=\{workspaceId\} state=\{closed\}/);
-    expect(work).toMatch(/<TraceActions [^>]*scope="workspace" workspaceState=\{state\}/);
-    // The surface hands the page a closed workspace's state, and offers no chat for it.
-    const launcher = readFileSync(fileURLToPath(new URL("../plugin/client/launcher.tsx", import.meta.url)), "utf8");
-    expect(launcher).toMatch(/closed=\{project\.closed\}/);
-    expect(launcher).toMatch(/project\.closed !== undefined \? undefined/);
-  });
-
   it("puts a timeline event's time above its text on a phone, and in its own column on a wide screen", () => {
     const phone = renderTree(TimelineList({ events, compact: true, styles, theme }));
     const wide = renderTree(TimelineList({ events, compact: false, styles, theme }));
@@ -745,6 +833,14 @@ describe("the project page's header", () => {
     const inTab = renderTree(ProjectHeader({ label: null, tab: "beads", onTab, chatBusy: false, styles }));
     expect(texts(inTab)).toEqual(["Requests", "Beads", "Agents"]);
   });
+
+  it("is the header the Beads board draws too, with the surface's status strip right under it (F3)", () => {
+    const onBack = vi.fn();
+    const page = renderTree(ProjectHeader({ label: "xspace", tab: "requests", onTab: noop, onBack, backLabel: "Back to Work", status: "STATUS", chatBusy: false, styles }));
+    const shared = renderTree(WorkspaceScreenHeader({ title: "xspace", onBack, backLabel: "Back to Work", status: "STATUS", right: null, styles }));
+    expect(shared.at(-1)).toBe("STATUS");
+    expect(page.slice(0, shared.length)).toEqual(shared);
+  });
 });
 
 describe("Beads and Agents under Work", () => {
@@ -756,15 +852,11 @@ describe("Beads and Agents under Work", () => {
       byPriority: [],
       timing: [{ label: "Oldest open", value: "3 d", hint: "" }],
     };
-    expect(texts(renderTree(BeadsOverviewSection({ overview: overviewView, styles })))).toEqual(
+    const figures = { kind: "figures", overview: overviewView, done: { text: "✓ 1 / 4 done", label: "1 of 4 beads done" } };
+    expect(texts(renderTree(BeadsFigures({ view: figures, styles, theme })))).toEqual(
       expect.arrayContaining(["Total", "Progress", "1 of 4 done", "By type", "By priority", "Oldest open"]),
     );
-    // The Beads screen itself is the board first: no overview figures in it.
-    const source = readFileSync(fileURLToPath(new URL(beadsScreenPath, import.meta.url)), "utf8");
-    const screen = source.slice(source.indexOf("export function BeadsScreen("));
-    expect(screen).not.toMatch(/<StatCards|<BarChart|<BeadsOverviewSection/);
-    expect(screen.indexOf("<KanbanBoard")).toBeGreaterThan(0);
-    expect(screen.indexOf("beads`}</Text>")).toBeLessThan(screen.indexOf("Filters and sort"));
+    // The Beads screen itself is the board first, with no overview figures (view-source.test.ts).
   });
 
   it("shows the agent tree without the role configuration, which Settings shows", () => {
@@ -773,5 +865,328 @@ describe("Beads and Agents under Work", () => {
     );
     expect(texts(tree)).toContain("Beads agents");
     expect(texts(tree)).not.toContain("Role configuration");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tokens and context (autonomy design §G.2 Shown).
+// ---------------------------------------------------------------------------
+
+const figures = (overrides: Partial<AgentTokenFigures> & Pick<AgentTokenFigures, "agentId" | "role">): AgentTokenFigures => ({
+  turns: 4,
+  turnsWithUsage: 4,
+  tokensRead: 400_000,
+  lastCallTurns: 0,
+  contextTrend: [20_000, 60_000, 100_000, 80_000],
+  contextTurns: 4,
+  contextEstimated: 0,
+  contextPeak: 100_000,
+  contextMax: 200_000,
+  compactions: 0,
+  ...overrides,
+});
+
+const REQUEST_AGENTS: AgentTokenFigures[] = [
+  figures({ agentId: "mgr-1", role: "manager", tokensRead: 1_200_000 }),
+  // Two Workers, the second first by turn: named in the request's order, as the ids in Details are.
+  figures({ agentId: "wrk-bbbbbbbb2", role: "worker", tokensRead: 6_000_000, contextMax: null, contextEstimated: 4, compactions: 1 }),
+  figures({ agentId: "wrk-aaaaaaaa1", role: "worker", tokensRead: 2_400_000, lastCallTurns: 3, contextEstimated: 1, contextTurns: 30 }),
+  figures({ agentId: "rev-1", role: "reviewer", turns: 1, turnsWithUsage: 0, tokensRead: 0, contextTrend: [], contextTurns: 0, contextPeak: null, contextMax: null }),
+];
+const TWO_WORKERS = { workerIds: ["wrk-aaaaaaaa1", "wrk-bbbbbbbb2"], reviewerIds: ["rev-1"] };
+
+describe("tokens and context: the model", () => {
+  it("draws a context trend against the window, with its peak, or against its own largest point when no window was reported", () => {
+    expect(contextTrendView(REQUEST_AGENTS[0]!)).toEqual({
+      bars: [0.1, 0.3, 0.5, 0.4],
+      text: "context 80k of 200k (40 %) · peak 100k",
+      estimate: null,
+      accessibilityLabel: "Context over 4 turns: 20k to 80k of 200k",
+    });
+    const noWindow = contextTrendView(REQUEST_AGENTS[1]!)!;
+    expect(noWindow.bars).toEqual([0.2, 0.6, 1, 0.8]);
+    expect(noWindow.text).toBe("context 80k · peak 100k");
+    expect(contextTrendView(figures({ agentId: "a", role: "worker", contextTrend: [5_000, 9_000], contextPeak: 9_000 }))!.text).toBe("context 9.0k of 200k (5 %)");
+    expect(contextTrendView(REQUEST_AGENTS[3]!)).toBeNull();
+  });
+
+  it("labels an estimate: every point, some of them, and says when the trend holds only the last turns", () => {
+    expect(contextTrendView(REQUEST_AGENTS[1]!)!.estimate).toBe("estimate");
+    const partly = contextTrendView(REQUEST_AGENTS[2]!)!;
+    expect(partly.estimate).toBe("partly estimated");
+    expect(partly.accessibilityLabel).toBe("Context over the last 4 turns: 20k to 80k of 200k, partly estimated");
+  });
+
+  it("gives a request's Details its tokens read by role and each agent, named by role, never by id", () => {
+    const state = requestTokenFigures(TWO_WORKERS, REQUEST_AGENTS, null);
+    if (state.kind !== "figures") throw new Error(`expected figures, got ${state.kind}`);
+    const { view } = state;
+    expect(view.byRole).toBe("Tokens read: Manager 1.2M · Worker 8.4M");
+    expect(view.agents.map((row) => [row.name, row.tokens, row.note])).toEqual([
+      ["Manager", "1.2M read · 4 turns", null],
+      ["Worker 2", "6.0M read · 4 turns", "1 compaction"],
+      ["Worker 1", "at least 2.4M read · 4 turns", null],
+      ["Reviewer", "no usage recorded · 1 turn", null],
+    ]);
+    expect(view.agents[3]!.trend).toBeNull();
+    expect(view.agents[3]!.accessibilityLabel).toBe("Reviewer. no usage recorded · 1 turn. context not known");
+    expect(view.notes).toEqual([LOWER_BOUND_NOTE, ESTIMATE_NOTE]);
+    // What is drawn (everything but the list key) names nobody by id.
+    const drawn = view.agents.map((row) => [row.name, row.tokens, row.trend, row.note, row.accessibilityLabel]);
+    expect(JSON.stringify(drawn)).not.toMatch(/mgr-1|wrk-|rev-1/);
+    // Without a lower bound or an estimate, no note.
+    const exact = requestTokenFigures(TWO_WORKERS, [REQUEST_AGENTS[0]!], null);
+    expect(exact.kind === "figures" && exact.view.notes).toEqual([]);
+  });
+
+  it("waits, fails with the reason, or says a request has no turn yet", () => {
+    expect(requestTokenFigures(TWO_WORKERS, undefined, null)).toEqual({ kind: "loading" });
+    expect(requestTokenFigures(TWO_WORKERS, undefined, "E_TRACE_NOT_FOUND: gone")).toEqual({
+      kind: "error",
+      text: "Could not read the tokens and context. E_TRACE_NOT_FOUND: gone",
+    });
+    expect(requestTokenFigures(TWO_WORKERS, [], null)).toEqual({ kind: "empty", text: NO_REQUEST_TOKENS_TEXT });
+    // No turn with usage: no line by role.
+    const unused = requestTokenFigures(TWO_WORKERS, [REQUEST_AGENTS[3]!], null);
+    expect(unused.kind === "figures" && unused.view.byRole).toBeNull();
+  });
+
+  it("gives the Agents tab each listed agent over its life, by role and title, and waits for both reads", () => {
+    const listed = [
+      { id: "mgr-1", title: "Beads Manager" },
+      { id: "wrk-aaaaaaaa1", title: "Migrate fee list to the new repos" },
+      { id: "rev-1", title: null },
+    ];
+    const state = agentTokenFigures(REQUEST_AGENTS, listed, null);
+    if (state.kind !== "figures") throw new Error(`expected figures, got ${state.kind}`);
+    expect(state.view.byRole).toBeNull();
+    // An agent the tree no longer lists is left out.
+    expect(state.view.agents.map((row) => row.name)).toEqual(["Manager · Beads Manager", "Worker · Migrate fee list to the new repos", "Reviewer"]);
+    expect(state.view.notes).toEqual([LOWER_BOUND_NOTE, ESTIMATE_NOTE]);
+    expect(agentTokenFigures(undefined, listed, null)).toEqual({ kind: "loading" });
+    expect(agentTokenFigures(REQUEST_AGENTS, undefined, null)).toEqual({ kind: "loading" });
+    expect(agentTokenFigures(undefined, listed, "boom")).toEqual({ kind: "error", text: "Could not read the tokens and context. boom" });
+    expect(agentTokenFigures(REQUEST_AGENTS, [{ id: "other", title: "x" }], null)).toEqual({ kind: "empty", text: NO_AGENT_TOKENS_TEXT });
+    expect(agentTokenFigures([], listed, null)).toEqual({ kind: "empty", text: NO_AGENT_TOKENS_TEXT });
+  });
+});
+
+describe("tokens and context on screen", () => {
+  const state = requestTokenFigures(TWO_WORKERS, REQUEST_AGENTS, null);
+  const view = state.kind === "figures" ? state.view : null!;
+  const draw = (compact: boolean, drawn = state) => renderTree(TokenFigures({ state: drawn, compact, styles, theme }));
+
+  it("draws the title, the tokens by role, a row per agent and the notes, with the estimate beside its trend", () => {
+    for (const compact of [true, false]) {
+      const shown = texts(draw(compact));
+      const order = [TOKEN_FIGURES_TITLE, "Tokens read: Manager 1.2M · Worker 8.4M", "Manager", "Worker 2", "estimate", "6.0M read · 4 turns · 1 compaction", "Worker 1", "partly estimated", "Reviewer", "context not known", LOWER_BOUND_NOTE, ESTIMATE_NOTE];
+      const positions = order.map((text) => shown.indexOf(text));
+      expect(positions.every((position) => position >= 0), `${compact}: ${shown.join(" | ")}`).toBe(true);
+      expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+      expect(shown.join("\n")).not.toMatch(/mgr-1|wrk-|rev-1/);
+    }
+    const header = allNodes(draw(true)).find((node) => node.type === "Text" && textOf(node) === TOKEN_FIGURES_TITLE)!;
+    expect(header.props.accessibilityRole).toBe("header");
+  });
+
+  it("stacks an agent's name, trend and tokens on a phone, and puts them in one row on a wide screen", () => {
+    const row = (compact: boolean) => renderTree(AgentTokensRow({ row: view.agents[1]!, compact, styles, theme }))[0] as RNode;
+    expect((row(true).props.style as Record<string, unknown>).flexDirection).toBeUndefined();
+    expect((row(false).props.style as Record<string, unknown>).flexDirection).toBe("row");
+    for (const compact of [true, false]) {
+      expect(row(compact).props.accessibilityLabel).toBe("Worker 2. 6.0M read · 4 turns. Context over 4 turns: 20k to 80k, estimate. 1 compaction");
+      expect(texts([row(compact)])).toEqual(["Worker 2", "context 80k · peak 100k", "estimate", "6.0M read · 4 turns · 1 compaction"]);
+    }
+  });
+
+  it("draws the trend as one bar per turn, as tall as its share, coloured through toneColor and described for a screen reader", () => {
+    const trend = view.agents[0]!.trend!;
+    for (const compact of [true, false]) {
+      const [chart] = renderTree(ContextBars({ trend, compact, theme })) as RNode[];
+      expect(chart!.props).toMatchObject({ accessibilityRole: "image", accessibilityLabel: "Context over 4 turns: 20k to 80k of 200k" });
+      const bars = chart!.children as RNode[];
+      expect(bars.map((bar) => (bar.props.style as { height: number }).height)).toEqual([2, 5, 9, 7]);
+      expect(bars.every((bar) => (bar.props.style as { backgroundColor: string; width: number }).backgroundColor === "#accent")).toBe(true);
+      expect((bars[0]!.props.style as { width: number }).width).toBe(compact ? 3 : 4);
+    }
+    const estimate = allNodes(draw(false)).find((node) => node.type === "Text" && textOf(node) === "estimate")!;
+    expect(JSON.stringify(estimate.props.style)).toContain("#foregroundMuted");
+  });
+
+  it("says it is reading, why it failed, or that there is nothing yet", () => {
+    expect(allNodes(draw(true, { kind: "loading" })).map((node) => node.type)).toContain("ActivityIndicator");
+    const failed = allNodes(draw(false, { kind: "error", text: "Could not read the tokens and context. boom" }));
+    const line = failed.find((node) => node.type === "Text" && textOf(node) === "Could not read the tokens and context. boom")!;
+    expect(JSON.stringify(line.props.style)).toContain("#statusDanger");
+    expect(texts(draw(true, { kind: "empty", text: NO_REQUEST_TOKENS_TEXT }))).toEqual([TOKEN_FIGURES_TITLE, NO_REQUEST_TOKENS_TEXT]);
+  });
+
+  it("opens a request's Details with its tokens and context, before the ids, and only while Details is open", () => {
+    const entry = requestSummaries([summary()])[0]!;
+    const card = (detailsOpen: boolean) =>
+      texts(
+        renderTree(
+          RequestCard({
+            view: requestCardView(entry, null, [], NOW),
+            expanded: false,
+            timeline: null,
+            loading: false,
+            error: null,
+            detailsOpen,
+            onToggle: noop,
+            onToggleDetails: noop,
+            tokens: state,
+            compact: true,
+            styles,
+            theme,
+          }),
+        ),
+      );
+    expect(card(false)).not.toContain(TOKEN_FIGURES_TITLE);
+    const open = card(true);
+    expect(open.indexOf(TOKEN_FIGURES_TITLE)).toBeGreaterThan(-1);
+    expect(open.indexOf(TOKEN_FIGURES_TITLE)).toBeLessThan(open.indexOf("Request: req-1"));
+  });
+
+  it("puts each agent's figures under the tree in the Agents tab, before any role configuration", () => {
+    const tree = renderTree(
+      AgentTreeView({
+        theme,
+        compact: false,
+        agents: { status: "success", data: [] },
+        roles: { status: "success", data: [] },
+        openAgent: noop,
+        children: TokenFigures({ state: { kind: "empty", text: NO_AGENT_TOKENS_TEXT }, compact: false, styles, theme }),
+      }),
+    );
+    const shown = texts(tree);
+    expect(shown.indexOf("Beads agents")).toBeLessThan(shown.indexOf(TOKEN_FIGURES_TITLE));
+    expect(shown.indexOf(NO_AGENT_TOKENS_TEXT)).toBeLessThan(shown.indexOf("Role configuration"));
+    // The Agents tab reads them with `traces.agents` and draws them in the tree (view-source.test.ts).
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A finish, labelled (autonomy design §C.2, §C.3, §C.6; REQ-130; bead 7gxw.4).
+// ---------------------------------------------------------------------------
+
+describe("a finish, labelled: Done or Done — unverified, and each claim with its label", () => {
+  const verification = (overrides: Partial<TraceVerification> = {}): TraceVerification => ({
+    reportAt: at(5),
+    checks: "self-reported",
+    named: [
+      { check: "npm test", label: "detected" },
+      { check: "npm run lint", label: "self-reported" },
+    ],
+    files: [
+      { path: "src/fees.ts", label: "detected" },
+      { path: "src/repos.ts", label: "self-reported" },
+    ],
+    beads: [{ id: "bd-7", label: "detected" }],
+    changedFiles: true,
+    unverified: true,
+    ...overrides,
+  });
+  const verified = verification({ checks: "detected", named: [{ check: "npm test", label: "detected" }], unverified: false });
+  const finishedEntry = (finish?: TraceVerification, base: Partial<TraceSummary> = {}) =>
+    requestSummaries([summary({ state: "completed", beadCounts: counts(0, 2), ...base, ...(finish === undefined ? {} : { verification: finish }) })])[0]!;
+  const read = withReports([report("finished", 5, { buildAndTests: "`npm test` pass; `npm run lint` pass" })]);
+
+  it("reads Done for a verified finish and Done — unverified, in the warning tone, for an unverified one", () => {
+    expect(requestStage(finishedEntry(verified), read)).toEqual({ stage: "done", waiting: false, ended: null });
+    expect(stageBar(requestStage(finishedEntry(verified), read))).toMatchObject({ text: "Done · 5 of 5", tone: "success", accessibilityLabel: "Stage: Done, 5 of 5" });
+
+    const facts = requestStage(finishedEntry(verification()), read);
+    expect(facts).toEqual({ stage: "done", waiting: false, ended: null, unverified: true });
+    const unverified = stageBar(facts)!;
+    expect(unverified).toMatchObject({ current: "done", text: "Done — unverified · 5 of 5", note: null, tone: "warning", accessibilityLabel: "Stage: Done — unverified, 5 of 5" });
+    expect(unverified.steps.map((step) => step.label)).toEqual(["Received", "Plan", "Build", "Review", "Done — unverified"]);
+    // From the row alone, before the detail is read, too.
+    expect(requestStage(finishedEntry(verification()), null)).toMatchObject({ stage: "done", unverified: true });
+  });
+
+  it("reads Done as before for a request that is not checked, or whose finish the server does not send", () => {
+    const notChecked = verification({ checks: "not-checked", unverified: false });
+    expect(stageBar(requestStage(finishedEntry(notChecked), read))).toMatchObject({ text: "Done · 5 of 5", tone: "success" });
+    expect(stageBar(requestStage(finishedEntry(), read))).toMatchObject({ text: "Done · 5 of 5", tone: "success" });
+    // And the evidence line is the one of before: the closed count and the checks as reported.
+    expect(evidenceLines(finishedEntry(notChecked), read, [])).toEqual([{ key: "closed", mark: "✓", text: "2 closed · checks reported: `npm test` pass; `npm run lint` pass", tone: "plain" }]);
+    expect(requestCardView(finishedEntry(notChecked), read, [], NOW).details).not.toContain("Check: npm test — detected ✓");
+  });
+
+  it("names each check with its label, and counts the files changed and beads closed by theirs", () => {
+    expect(evidenceLines(finishedEntry(verification()), read, [])).toEqual([
+      { key: "checks", mark: "!", text: "checks: npm test — detected ✓ · npm run lint — self-reported", tone: "warning" },
+      { key: "files", mark: "✓", text: "files: 2 changed · 1 detected, 1 self-reported", tone: "plain" },
+      { key: "beads", mark: "✓", text: "beads: 1 closed · detected", tone: "plain" },
+    ]);
+    // Every check detected: a plain line; no bead claimed: the request's closed count stands in.
+    expect(evidenceLines(finishedEntry({ ...verified, files: [{ path: "src/fees.ts", label: "self-reported" }], beads: [] }), read, [])).toEqual([
+      { key: "checks", mark: "✓", text: "checks: npm test — detected ✓", tone: "plain" },
+      { key: "files", mark: "✓", text: "files: 1 changed · self-reported", tone: "plain" },
+      { key: "beads", mark: "✓", text: "beads: 2 closed", tone: "plain" },
+    ]);
+    // The report says nothing ran: each named check is unverified; none named at all says so.
+    expect(evidenceLines(finishedEntry(verification({ checks: "unverified", named: [{ check: "npm test", label: "self-reported" }] })), read, [])[0]).toEqual({
+      key: "checks",
+      mark: "!",
+      text: "checks: npm test — unverified",
+      tone: "warning",
+    });
+    expect(evidenceLines(finishedEntry(verification({ checks: "unverified", named: [] })), read, [])[0]!.text).toBe("checks: unverified, none shown to run");
+    // Many checks: three, then how many more; a long one is cut (Details has it whole).
+    const many = verification({ named: ["a", "b", "c", "d", "e"].map((name) => ({ check: `npm run ${name}`, label: "detected" as const })) });
+    expect(evidenceLines(finishedEntry(many), read, [])[0]!.text).toBe(
+      "checks: npm run a — detected ✓ · npm run b — detected ✓ · npm run c — detected ✓ · +2 more",
+    );
+    const long = verification({ named: [{ check: `npm test -- ${"x".repeat(60)}`, label: "detected" }] });
+    expect(evidenceLines(finishedEntry(long), read, [])[0]!.text.length).toBeLessThan(80);
+  });
+
+  it("keeps the finish when a request's turns are merged, and lists every check, file and bead under Details only", () => {
+    const rows = [
+      summary({ turn: { index: 1, total: 2 }, verification: verification() }),
+      summary({ turn: { index: 2, total: 2 }, state: "completed", verification: verification() }),
+    ];
+    const entry = requestSummaries(rows)[0]!;
+    expect(entry.verification).toEqual(verification());
+    expect(requestSummaries([summary()])[0]).not.toHaveProperty("verification");
+    const view = requestCardView(entry, read, [], NOW);
+    expect(view.details.slice(-6)).toEqual([
+      "Finished — unverified: code changed, and not every check the report names was seen to pass after the last edit.",
+      "Check: npm test — detected ✓",
+      "Check: npm run lint — self-reported",
+      "File: src/fees.ts — detected",
+      "File: src/repos.ts — self-reported",
+      "Bead: bd-7 — detected",
+    ]);
+    for (const text of [view.title, view.meta, view.cost, view.accessibilityLabel, ...view.evidence.map((line) => line.text)]) {
+      expect(text).not.toMatch(/src\/fees|bd-7/);
+    }
+    expect(view.accessibilityLabel).toContain("Stage: Done — unverified, 5 of 5");
+  });
+
+  it("draws Done — unverified in the warning colour, on a phone and on a wide screen", () => {
+    const warned = stageBar(requestStage(finishedEntry(verification()), read))!;
+    const phone = renderTree(StageBarRow({ bar: warned, compact: true, styles, theme }));
+    expect(texts(phone)).toEqual(["Done — unverified · 5 of 5"]);
+    const segments = allNodes(phone).filter((node) => node.type === "View" && (node.props.style as { height?: number } | undefined)?.height === 4);
+    expect((segments.at(-1)!.props.style as { backgroundColor: string }).backgroundColor).toBe("#statusWarning");
+    expect((phone[0] as RNode).props.accessibilityLabel).toBe("Stage: Done — unverified, 5 of 5");
+
+    const wide = renderTree(StageBarRow({ bar: warned, compact: false, styles, theme }));
+    expect(texts(wide)).toEqual(["Received", "Plan", "Build", "Review", "Done — unverified"]);
+    const done = allNodes(wide).find((node) => node.type === "Text" && textOf(node) === "Done — unverified")!;
+    expect(JSON.stringify(done.props.style)).toContain('"fontWeight":"700"');
+    expect(JSON.stringify(done.props.style)).toContain("#statusWarning");
+
+    const view = requestCardView(finishedEntry(verification()), read, [], NOW);
+    for (const compact of [true, false]) {
+      const card = renderTree(
+        RequestCard({ view, expanded: false, timeline: null, loading: false, error: null, detailsOpen: false, onToggle: noop, onToggleDetails: noop, compact, styles, theme }),
+      );
+      expect(texts(card)).toEqual(expect.arrayContaining(["! checks: npm test — detected ✓ · npm run lint — self-reported", "✓ files: 2 changed · 1 detected, 1 self-reported", "✓ beads: 1 closed · detected"]));
+      expect(texts(card).some((text) => text.includes("src/fees.ts"))).toBe(false);
+    }
   });
 });

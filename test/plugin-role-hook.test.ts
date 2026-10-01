@@ -1,16 +1,21 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { tmpdir } from "node:os";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import contribute from "../plugin/index.server";
-import { ROLE_PROMPT_SEPARATOR, applyAgentTools, applyRoleInstructions, applyRoleModel, chooseModeId, registerRoleHook, type AgentCreateRequest, type ProviderMode } from "../plugin/server/role-hook";
-import { createOrchestratorStore, resetCorrectionWarning } from "../plugin/server/orchestrator-store";
+import { ROLE_PROMPT_SEPARATOR, applyAgentTools, applyRoleInstructions, applyRoleModel, chooseModeId, registerRoleHook, workspaceOfFolder, type AgentCreateRequest, type ProviderMode } from "../plugin/server/role-hook";
 import { LOOKUP_TIMEOUT_MS, ROLE_GETS_MODE, TIMED_OUT, capabilityOf, forgetModes, modesFor, runPostureOf, withTimeout } from "../plugin/server/role-mode";
+import { OWNER_PRECEDENTS_HEADING, currentInstructions } from "../plugin/server/role-instructions";
+import { createCoordinationStore } from "../plugin/server/coordination-store";
+import { createAutonomyStore } from "../plugin/server/autonomy-store";
+import { BOUNDARY_MODES, boundaryPostureOf, creatorModeOffBoundary } from "../plugin/server/role-mode";
+import { currentInstructionsHash, instructionsHashOf, roleTextOf } from "../plugin/server/instructions-label";
+import { forgetCreatedBoundaries, takeCreatedBoundary } from "../plugin/server/created-boundary";
 
 // The entry resolves the install home from $HOME when Paseo's config names no
 // plugin path; point it at an empty directory so this machine's real
-// ~/.paseo-bm (and any role-extras.json in it) never leaks into the test.
+// ~/.paseo-bm never leaks into the test.
 const realHome = process.env.HOME;
 const isolatedHome = mkdtempSync(join(tmpdir(), "bm-isolated-home-"));
 beforeAll(() => {
@@ -39,7 +44,19 @@ const orchestratorMd = roleMd("orchestrator");
  * decisions Q4 a and Q9 a), because Paseo refuses a Reviewer created without
  * a mode. Before that delta it got the role text alone.
  */
-const workerWithFallback = `${workerMd.trimEnd()}\n\n## Runtime facts\n\nReviewer mode: \`auto\` — pass it as \`settings.modeId\` when you create a Reviewer.\n`;
+/** The owner's review budget a new Worker is told, at its defaults (autonomy design §G.7, bead 7gxw.12). */
+const BUDGET_LINE = "Review calls per request: Small 2, Medium 2, Large 4.";
+/**
+ * A Worker's and a Reviewer's own `Action boundary` facts line (autonomy design
+ * §D.2, change-010): off, with why, unless the project's switch is on. A host
+ * that lists no workspace cannot tell the project.
+ */
+const BOUNDARY_UNKNOWN = "Action boundary: off — the project could not be told from the agent's folder";
+const BOUNDARY_OFF = "Action boundary: off — the project's boundary is off";
+const workerFacts = (reviewerMode: string, boundary = BOUNDARY_UNKNOWN) =>
+  `${workerMd.trimEnd()}\n\n## Runtime facts\n\nReviewer mode: \`${reviewerMode}\` — pass it as \`settings.modeId\` when you create a Reviewer.\n${BUDGET_LINE}\n${boundary}\n`;
+const workerWithFallback = workerFacts("auto");
+const reviewerWith = (boundary = BOUNDARY_UNKNOWN) => `${reviewerMd.trimEnd()}\n\n## Runtime facts\n\n${boundary}\n`;
 
 // The fallback prefers a list read earlier in the run; start every test without one.
 beforeEach(() => forgetModes());
@@ -109,13 +126,13 @@ describe("before(\"agent.create\") role hook", () => {
 
   it("gives bm-reviewer the text of roles/reviewer.md", async () => {
     const { run } = setup();
-    expect((await run({ config: { provider: "bm-reviewer", cwd: "/repo" } }))?.config?.systemPrompt).toBe(reviewerMd);
+    expect((await run({ config: { provider: "bm-reviewer", cwd: "/repo" } }))?.config?.systemPrompt).toBe(reviewerWith());
   });
 
   it("puts the role instructions first and keeps a different existing system prompt after them", async () => {
     const { run } = setup();
     const result = (await run({ config: { provider: "bm-reviewer", cwd: "/repo", systemPrompt: "Review only src/." } }));
-    expect(result?.config?.systemPrompt).toBe(`${reviewerMd}${ROLE_PROMPT_SEPARATOR}Review only src/.`);
+    expect(result?.config?.systemPrompt).toBe(`${reviewerWith()}${ROLE_PROMPT_SEPARATOR}Review only src/.`);
   });
 
   it("does not duplicate instructions that are already in the system prompt", async () => {
@@ -251,8 +268,7 @@ describe("before(\"agent.create\") start mode", () => {
   // Errata 2026-09-18 of delta 20260917c §4.6 (owner decision Q1a): a Worker's
   // instructions carry the Reviewer mode it must pass, as the Manager's carry
   // the Worker mode.
-  const workerWithReviewerMode = (mode: string) =>
-    `${workerMd.trimEnd()}\n\n## Runtime facts\n\nReviewer mode: \`${mode}\` — pass it as \`settings.modeId\` when you create a Reviewer.\n`;
+  const workerWithReviewerMode = (mode: string) => workerFacts(mode);
 
   it("starts a Worker created without a mode in the no-prompt mode, looking up the bare provider id", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -351,7 +367,7 @@ describe("before(\"agent.create\") start mode", () => {
     expect((await run({ config: { provider: "bm-reviewer", cwd: "/repo" } }))?.config?.modeId).toBe("auto");
     expect(warn).not.toHaveBeenCalled();
     const downgraded = await run({ config: { provider: "bm-reviewer", cwd: "/repo", modeId: "full-access" } });
-    expect(downgraded?.config).toMatchObject({ modeId: "auto", systemPrompt: reviewerMd });
+    expect(downgraded?.config).toMatchObject({ modeId: "auto", systemPrompt: reviewerWith() });
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]![0])).toMatch(/full-access.*auto/);
   });
@@ -359,8 +375,8 @@ describe("before(\"agent.create\") start mode", () => {
   it("changes only the mode when the instructions are already in place", async () => {
     const { paseo } = paseoWith(async () => ({ modes: CODEX_MODES }));
     const { run } = setup(paseo);
-    const result = await run({ config: { provider: "bm-reviewer", cwd: "/repo", systemPrompt: reviewerMd } });
-    expect(result?.config).toEqual({ provider: "bm-reviewer", cwd: "/repo", systemPrompt: reviewerMd, modeId: "auto" });
+    const result = await run({ config: { provider: "bm-reviewer", cwd: "/repo", systemPrompt: reviewerWith() } });
+    expect(result?.config).toEqual({ provider: "bm-reviewer", cwd: "/repo", systemPrompt: reviewerWith(), modeId: "auto" });
   });
 
   it("never sets the Manager's own mode, and never looks anything up for other providers", async () => {
@@ -731,7 +747,7 @@ describe("before(\"agent.create\") for bm-orchestrator (orchestrator design §3.
   /** The endpoint's URLs: the Orchestrator's carries the secret (§5.1). */
   const urlFor = (role: string) => `http://127.0.0.1:4567/mcp/${role}${role === "orchestrator" ? `/${SECRET}` : ""}`;
   const ORCHESTRATOR_URL = `http://127.0.0.1:4567/mcp/orchestrator/${SECRET}`;
-  const ORCHESTRATOR_GRANTS = ["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_set_autopilot", "bm_direct_worker", "bm_repo", "bm_note", "bm_assessment"].map((tool) => ({ kind: "mcp", server: "paseo-bm", tool }));
+  const ORCHESTRATOR_GRANTS = ["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_predict", "bm_direct_worker", "bm_repo", "bm_note", "bm_findings", "bm_compact", "bm_handoff", "bm_why"].map((tool) => ({ kind: "mcp", server: "paseo-bm", tool }));
   /** The hook as index.server registers it, with a tool endpoint serving every role. */
   function hookWithTools(paseo: unknown, usePaseo?: (paseo: unknown) => void) {
     let hook: ((input: { request: AgentCreateRequest }, context: unknown) => unknown) | undefined;
@@ -843,18 +859,91 @@ describe("before(\"agent.create\") for bm-orchestrator (orchestrator design §3.
 });
 
 /**
- * The model-correction log (orchestrator design §4.3): each model the hook
- * replaces is recorded for the `agent.model-corrected` rule, and the record
- * can never fail the creation.
+ * A model the hook replaces is one `[paseo-bm]` log line: its log file,
+ * `model-corrections.json`, went with its only reader, the
+ * `agent.model-corrected` rule (autonomy design §B.9).
  */
-describe("applyRoleModel records its corrections (orchestrator design §4.3)", () => {
+describe("applyRoleModel logs its corrections and writes nothing", () => {
   const profile = { model: "claude-opus-5", modeId: null, thinkingOptionId: null, featureValues: null };
   const request = (provider: string) => ({ config: { provider, cwd: "/repo/one" } }) as unknown as AgentCreateRequest;
   let dataHome: string;
   beforeEach(() => {
     dataHome = mkdtempSync(join(isolatedHome, "bm-data-"));
     process.env.PASEO_BM_HOME = dataHome;
-    resetCorrectionWarning();
+  });
+  afterEach(() => {
+    delete process.env.PASEO_BM_HOME;
+    rmSync(dataHome, { recursive: true, force: true });
+  });
+
+  it("corrects the model with one log line, and leaves the data folder empty", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = applyRoleModel(request("bm-worker/claude-sonnet-5"), profile);
+    expect(result?.config?.provider).toBe("bm-worker/claude-opus-5");
+    expect(warn.mock.calls.map(([line]) => String(line))).toEqual([
+      '[paseo-bm] bm-worker was asked for model "claude-sonnet-5", but its profile names "claude-opus-5"; starting it on "claude-opus-5".',
+    ]);
+    expect(readdirSync(dataHome)).toEqual([]);
+  });
+
+  it("changes nothing when the model is already the profile's, or on a Manager", () => {
+    expect(applyRoleModel(request("bm-worker/claude-opus-5"), profile)).toBeUndefined();
+    expect(applyRoleModel(request("bm-manager/claude-sonnet-5"), profile)).toBeUndefined();
+  });
+});
+
+/**
+ * Autonomy design §B.6, §B.9 (PRD REQ-124 b, REQ-117 c): a new Manager or
+ * Worker is given the owner's active precedents of the workspace whose folder
+ * is its `cwd`, and the global ones, newest 20, as `## Owner precedents`
+ * after its Runtime facts. A Reviewer and the Orchestrator get none.
+ */
+describe("before(\"agent.create\") — the owner's precedents (design §B.6)", () => {
+  let dataHome: string;
+  const listing = {
+    workspaces: {
+      list: async () => ({
+        entries: [
+          { workspace: { id: "ws-1", directory: "/repo" } },
+          { workspace: { id: "ws-2", directory: "/other" } },
+          { workspace: { id: "ws-old", directory: "/repo", archivedAt: "2026-09-01T00:00:00.000Z" } },
+        ],
+      }),
+    },
+  };
+  const entry = (id: string, overrides: Record<string, unknown> = {}) => ({
+    id: `p:${id}`,
+    scope: "ws-1",
+    subject: `subject-${id}`,
+    text: `Answer ${id}.`,
+    sourceDecisionId: null,
+    createdAt: "2026-09-01T10:00:00.000Z",
+    expiresAt: "2099-10-20T10:00:00.000Z",
+    supersededBy: null,
+    ...overrides,
+  });
+  // 21 of the workspace's, one global (the newest), one of another workspace, one expired, one superseded.
+  const mine = Array.from({ length: 21 }, (_, i) => entry(`mine-${i}`, { createdAt: `2026-09-${String(i + 1).padStart(2, "0")}T10:00:00.000Z` }));
+  const entries = [
+    ...mine,
+    entry("global", { scope: "all", createdAt: "2026-09-29T10:00:00.000Z" }),
+    entry("theirs", { scope: "ws-2", createdAt: "2026-09-29T11:00:00.000Z" }),
+    entry("expired", { createdAt: "2026-09-29T12:00:00.000Z", expiresAt: "2000-01-01T00:00:00.000Z" }),
+    entry("superseded", { createdAt: "2026-09-29T13:00:00.000Z", supersededBy: "p:mine-20" }),
+  ];
+  const writePrecedents = (list: unknown[]) => {
+    mkdirSync(join(dataHome, "autonomy"), { recursive: true });
+    writeFileSync(join(dataHome, "autonomy", "precedents.json"), JSON.stringify({ version: 1, entries: list }));
+  };
+  const section = (prompt: unknown) => {
+    const text = String(prompt);
+    const at = text.indexOf(`${OWNER_PRECEDENTS_HEADING}\n\n`);
+    return at === -1 ? null : text.slice(at).split("\n").filter((line) => line.startsWith("- `"));
+  };
+
+  beforeEach(() => {
+    dataHome = mkdtempSync(join(isolatedHome, "bm-precedents-"));
+    process.env.PASEO_BM_HOME = dataHome;
     vi.spyOn(console, "warn").mockImplementation(() => {});
   });
   afterEach(() => {
@@ -862,28 +951,304 @@ describe("applyRoleModel records its corrections (orchestrator design §4.3)", (
     rmSync(dataHome, { recursive: true, force: true });
   });
 
-  it("writes one entry with the five fields when it corrects a model", () => {
-    const result = applyRoleModel(request("bm-worker/claude-sonnet-5"), profile);
-    expect(result?.config?.provider).toBe("bm-worker/claude-opus-5");
-    const entries = createOrchestratorStore(dataHome).readCorrections();
-    expect(entries).toHaveLength(1);
-    expect(entries[0]).toEqual({ at: expect.any(String), alias: "bm-worker", requested: "claude-sonnet-5", profileModel: "claude-opus-5", cwd: "/repo/one" });
-    expect(Number.isNaN(Date.parse(entries[0]!.at))).toBe(false);
+  it("never gives a new agent the additional instructions of an old role-extras.json, and leaves the file as it was (autonomy design §B.8)", async () => {
+    // What an earlier build wrote: the file is retired, never read and never written.
+    const old = `${JSON.stringify({ version: 1, roles: { manager: "HIDDEN-EXTRA-manager", worker: "HIDDEN-EXTRA-worker", reviewer: "HIDDEN-EXTRA-reviewer", orchestrator: "HIDDEN-EXTRA-orchestrator" } })}\n`;
+    writeFileSync(join(dataHome, "role-extras.json"), old);
+    const { run } = setup(listing);
+    for (const provider of ["bm-manager", "bm-worker", "bm-reviewer"]) {
+      const prompt = String((await run({ config: { provider, cwd: "/repo" } }))?.config?.systemPrompt);
+      expect(prompt).not.toMatch(/HIDDEN-EXTRA/);
+    }
+    const manager = await currentInstructions("manager", listing, { workspaceId: "ws-1" });
+    expect(manager).not.toMatch(/HIDDEN-EXTRA|Additional instructions/);
+    expect(readFileSync(join(dataHome, "role-extras.json"), "utf8")).toBe(old);
   });
 
-  it("writes nothing when the model is already the profile's, or on a Manager", () => {
-    expect(applyRoleModel(request("bm-worker/claude-opus-5"), profile)).toBeUndefined();
-    expect(applyRoleModel(request("bm-manager/claude-sonnet-5"), profile)).toBeUndefined();
-    expect(createOrchestratorStore(dataHome).readCorrections()).toEqual([]);
+  it("gives a new Worker the workspace's and the global active ones, newest 20, after its Runtime facts", async () => {
+    writePrecedents(entries);
+    const { run } = setup(listing);
+    const prompt = String((await run({ config: { provider: "bm-worker", cwd: "/repo" } }))?.config?.systemPrompt);
+    const lines = section(prompt);
+    expect(lines).toHaveLength(20);
+    expect(lines![0]).toBe("- `subject-global` — Answer global. (all projects, until 2099-10-20)");
+    expect(lines![1]).toBe("- `subject-mine-20` — Answer mine-20. (this project, until 2099-10-20)");
+    // The two oldest of the workspace's fall past the 20 newest.
+    expect(lines!.slice(1).map((line) => /`(subject-mine-\d+)`/.exec(line)?.[1])).toEqual(mine.slice(2).reverse().map((p) => p.subject));
+    for (const other of ["subject-theirs", "subject-expired", "subject-superseded"]) expect(prompt).not.toContain(other);
+    // After the role text and its Runtime facts, which keep their order.
+    expect(prompt.startsWith(`${workerFacts("auto", BOUNDARY_OFF).trimEnd()}\n\n${OWNER_PRECEDENTS_HEADING}\n\n`)).toBe(true);
+    // The bm.instructions label is the role file's hash, and agent-labels.ts still finds the role text in the prompt.
+    expect(prompt).toContain(roleTextOf("worker"));
+    expect(currentInstructionsHash("worker")).toBe(instructionsHashOf(workerMd));
   });
 
-  it("still returns the corrected request when the log cannot be written (ENOTDIR)", () => {
-    const file = join(dataHome, "not-a-folder");
-    writeFileSync(file, "x");
-    process.env.PASEO_BM_HOME = file;
+  it("gives a new Manager the same part, and a Reviewer or the Orchestrator none", async () => {
+    writePrecedents(entries);
+    const { run } = setup(listing);
+    const manager = String((await run({ config: { provider: "bm-manager", cwd: "/repo" } }))?.config?.systemPrompt);
+    expect(section(manager)).toHaveLength(20);
+    expect(manager).toContain(roleTextOf("manager"));
+    for (const provider of ["bm-reviewer", "bm-orchestrator"]) {
+      const prompt = (await run({ config: { provider, cwd: "/repo" } }))?.config?.systemPrompt;
+      expect(String(prompt), provider).not.toContain(OWNER_PRECEDENTS_HEADING);
+    }
+  });
+
+  it("gives only the global ones when the workspace of the cwd cannot be told", async () => {
+    writePrecedents(entries);
+    for (const [paseo, cwd] of [[listing, "/elsewhere"], [{}, "/repo"], [{ workspaces: { list: async () => { throw new Error("busy"); } } }, "/repo"]] as const) {
+      const { run } = setup(paseo);
+      const prompt = (await run({ config: { provider: "bm-worker", cwd } }))?.config?.systemPrompt;
+      expect(section(prompt)).toEqual(["- `subject-global` — Answer global. (all projects, until 2099-10-20)"]);
+    }
+  });
+
+  it("gives a new Worker the owner's review budget from Settings → Coordination; a Worker created before keeps its own (bead 7gxw.12)", async () => {
+    const { run } = setup(listing);
+    const before = String((await run({ config: { provider: "bm-worker", cwd: "/repo" } }))?.config?.systemPrompt);
+    expect(before).toContain(`\n${BUDGET_LINE}\n`);
+    createCoordinationStore(dataHome).set({ key: "review.largeBudget", value: 6 });
+    const after = String((await run({ config: { provider: "bm-worker", cwd: "/repo" } }))?.config?.systemPrompt);
+    expect(after).toContain("\nReview calls per request: Small 2, Medium 2, Large 6.\n");
+    // The earlier Worker's instructions were fixed when it was created: nothing sends it the new budget.
+    expect(before).toContain(`\n${BUDGET_LINE}\n`);
+    // Only a Worker is told a budget.
+    for (const provider of ["bm-manager", "bm-reviewer", "bm-orchestrator"]) {
+      expect(String((await run({ config: { provider, cwd: "/repo" } }))?.config?.systemPrompt), provider).not.toContain("Review calls per request");
+    }
+  });
+
+  it("writes no heading when there are none, or when the store cannot be read, and still creates the agent", async () => {
+    const { run } = setup(listing);
+    expect((await run({ config: { provider: "bm-worker", cwd: "/repo" } }))?.config?.systemPrompt).toBe(workerFacts("auto", BOUNDARY_OFF));
+    writePrecedents([entry("expired", { expiresAt: "2000-01-01T00:00:00.000Z" }), entry("theirs", { scope: "ws-2" })]);
+    expect((await run({ config: { provider: "bm-worker", cwd: "/repo" } }))?.config?.systemPrompt).toBe(workerFacts("auto", BOUNDARY_OFF));
+    writeFileSync(join(dataHome, "autonomy", "precedents.json"), "{ not json");
+    expect((await run({ config: { provider: "bm-manager", cwd: "/repo" } }))?.config?.systemPrompt).toBe(managerMd);
+  });
+
+  it("keeps a Manager's prompt that manager.ensure already built with its precedents, without a second copy", async () => {
+    writePrecedents(entries);
+    const { run } = setup(listing);
+    // manager.ensure read the store a moment earlier, when only the global one existed.
+    const built = `${managerMd.trimEnd()}\n\n${OWNER_PRECEDENTS_HEADING}\n\n- \`subject-global\` — Answer global. (all projects, until 2099-10-20)\n`;
+    expect(await run({ config: { provider: "bm-manager/opus", cwd: "/repo", systemPrompt: built } })).toBeUndefined();
+  });
+});
+
+describe("workspaceOfFolder", () => {
+  it("names the one live workspace whose folder is the cwd, else null", async () => {
+    const paseo = (entries: unknown[]) => ({ workspaces: { list: async () => ({ entries }) } });
+    expect(await workspaceOfFolder(paseo([{ workspace: { id: "ws-1", directory: "/repo" } }]), "/repo/")).toBe("ws-1");
+    expect(await workspaceOfFolder(paseo([{ workspace: { id: "ws-1", directory: "/repo" } }, { workspace: { id: "ws-2", directory: "/repo" } }]), "/repo")).toBeNull();
+    expect(await workspaceOfFolder(paseo([{ workspace: { id: "ws-1", directory: "/repo", archivedAt: "2026-09-01T00:00:00.000Z" } }]), "/repo")).toBeNull();
+    expect(await workspaceOfFolder(paseo([]), "/repo")).toBeNull();
+    expect(await workspaceOfFolder({}, "/repo")).toBeNull();
+    expect(await workspaceOfFolder(null, "/repo")).toBeNull();
+  });
+});
+
+/**
+ * The action boundary per project (autonomy design §D.2, change-009 C2,
+ * change-010 C1–C5): off by default; where the owner turned it on, a new
+ * Worker or Reviewer on Claude or Codex starts in the least permissive mode,
+ * and its Runtime facts say `Action boundary: on`. Elsewhere today's modes,
+ * and a creator's boundary mode is moved back to today's pick.
+ */
+describe("before(\"agent.create\") — the action boundary per project (autonomy design §D.2, change-010)", () => {
+  let dataHome: string;
+  const ON_AT = "2026-10-01T08:00:00.000Z";
+  const OPENCODE = [{ id: "bytes", label: "Bytes" }, { id: "review", label: "Review" }];
+  const MODES: Record<string, ProviderMode[]> = { claude: CLAUDE_MODES, codex: CODEX_MODES, opencode: OPENCODE, pi: [] };
+  const CODEX_WORKER_OPTIONS = { approval_policy: "untrusted", sandbox_mode: "danger-full-access", web_search: "disabled" };
+  const CODEX_REVIEWER_OPTIONS = { approval_policy: "untrusted", sandbox_mode: "workspace-write", web_search: "disabled" };
+  const ON = "Action boundary: on";
+
+  /** A host with two projects (`/on` has the boundary on, `/off` not), each alias on `bases`' provider, and the profiles given. */
+  function host(bases: Record<string, string>, profiles: Array<Record<string, unknown>> = []) {
+    return {
+      workspaces: {
+        list: async () => ({ entries: [{ workspace: { id: "ws-on", directory: "/on" } }, { workspace: { id: "ws-off", directory: "/off" } }] }),
+      },
+      providers: {
+        listModes: async (alias: string) => ({ modes: MODES[bases[alias] ?? ""] ?? [] }),
+        listFeatures: async () => ({ features: [{ type: "toggle", id: "auto_accept", value: false }] }),
+      },
+      config: {
+        get: async () => ({
+          config: { providers: Object.fromEntries(Object.entries(bases).map(([alias, base]) => [alias, { extends: base }])), agentProfiles: profiles },
+        }),
+      },
+    };
+  }
+  const prompt = (result: Request | undefined) => String(result?.config?.systemPrompt);
+  const boundaryLine = (result: Request | undefined) => {
+    const text = prompt(result);
+    const at = text.lastIndexOf("\n## Runtime facts\n");
+    return at === -1 ? null : (/^Action boundary: .*$/m.exec(text.slice(at))?.[0] ?? null);
+  };
+
+  beforeEach(() => {
+    dataHome = mkdtempSync(join(isolatedHome, "bm-boundary-"));
+    process.env.PASEO_BM_HOME = dataHome;
+    createAutonomyStore(dataHome).setBoundary({ workspaceId: "ws-on", enabled: true, confirmed: true }, ON_AT);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    delete process.env.PASEO_BM_HOME;
+    rmSync(dataHome, { recursive: true, force: true });
+  });
+
+  it("the modes table is §D.2's, by base provider and role", () => {
+    expect(BOUNDARY_MODES).toEqual({
+      claude: { worker: { modeId: "default" }, reviewer: { modeId: "default" } },
+      codex: { worker: { modeId: "auto", providerOptions: CODEX_WORKER_OPTIONS }, reviewer: { modeId: "auto", providerOptions: CODEX_REVIEWER_OPTIONS } },
+    });
+    const on = (role: "worker" | "reviewer" | "manager" | "orchestrator", base: string | null, profileModeId: string | null = null, modes: ProviderMode[] | null = CLAUDE_MODES) =>
+      boundaryPostureOf({ role, base, project: "on", modes, profileModeId });
+    expect(on("worker", "claude")).toEqual({ on: true, modeId: "default" });
+    expect(on("reviewer", "codex", null, CODEX_MODES)).toEqual({ on: true, modeId: "auto", providerOptions: CODEX_REVIEWER_OPTIONS });
+    expect(on("manager", "claude")).toBeNull();
+    expect(on("orchestrator", "claude")).toBeNull();
+    expect(on("worker", "opencode", null, OPENCODE)).toEqual({ on: false, reason: "its provider is only watched (detection)" });
+    expect(on("worker", null)).toEqual({ on: false, reason: "its provider could not be read" });
+    expect(on("worker", "claude", "acceptEdits")).toEqual({ on: false, reason: "its profile's mode is set by hand" });
+    // A list without the boundary mode: today's rule. A list that cannot be read: the table (Claude and Codex list them).
+    expect(on("worker", "claude", null, [m("bypassPermissions", "dangerous")])).toEqual({ on: false, reason: "its provider does not list the boundary's mode" });
+    expect(on("worker", "claude", null, null)).toEqual({ on: true, modeId: "default" });
+    expect(boundaryPostureOf({ role: "worker", base: "claude", project: "off", modes: CLAUDE_MODES, profileModeId: null })).toEqual({ on: false, reason: "the project's boundary is off" });
+    expect(boundaryPostureOf({ role: "worker", base: "claude", project: "unknown", modes: CLAUDE_MODES, profileModeId: null })).toEqual({
+      on: false,
+      reason: "the project could not be told from the agent's folder",
+    });
+    // Off: a creator's boundary mode counts as none; another mode is kept.
+    expect(creatorModeOffBoundary("worker", "claude", "default")).toBeUndefined();
+    expect(creatorModeOffBoundary("worker", "claude", "acceptEdits")).toBe("acceptEdits");
+    expect(creatorModeOffBoundary("orchestrator", "claude", "default")).toBe("default");
+  });
+
+  it("on: a Claude Worker and Reviewer start in default, a creator's bypassPermissions corrected with one log line", async () => {
+    const { run } = setup(host({ "bm-worker": "claude", "bm-reviewer": "claude", "bm-manager": "claude" }));
     const warn = vi.mocked(console.warn);
-    const result = applyRoleModel(request("bm-reviewer/claude-sonnet-5"), profile);
-    expect(result?.config?.provider).toBe("bm-reviewer/claude-opus-5");
-    expect(warn.mock.calls.some(([line]) => /could not record a model correction/.test(String(line)))).toBe(true);
+    const worker = await run({ config: { provider: "bm-worker", cwd: "/on", modeId: "bypassPermissions" } });
+    expect(worker?.config?.modeId).toBe("default");
+    expect(worker?.config).not.toHaveProperty("providerOptions");
+    expect(boundaryLine(worker)).toBe(ON);
+    expect(warn.mock.calls.some((call) => /"bypassPermissions".*action boundary.*"default"/.test(String(call[0])))).toBe(true);
+    // The Worker is told the Reviewer's boundary mode to pass.
+    expect(prompt(worker)).toContain("Reviewer mode: `default` — pass it as `settings.modeId` when you create a Reviewer.");
+    const reviewer = await run({ config: { provider: "bm-reviewer/claude-sonnet-5", cwd: "/on", modeId: "default" } });
+    expect(reviewer?.config?.modeId).toBe("default");
+    expect(boundaryLine(reviewer)).toBe(ON);
   });
+
+  it("on: a Codex Worker in auto with the danger-full-access options, a Codex Reviewer in auto with the workspace-write options", async () => {
+    const { run } = setup(host({ "bm-worker": "codex", "bm-reviewer": "codex" }));
+    const worker = await run({ config: { provider: "bm-worker", cwd: "/on", modeId: "full-access", providerOptions: { model_reasoning_summary: "auto", sandbox_mode: "read-only" } } });
+    expect(worker?.config).toMatchObject({ modeId: "auto", providerOptions: { model_reasoning_summary: "auto", ...CODEX_WORKER_OPTIONS } });
+    expect(boundaryLine(worker)).toBe(ON);
+    expect(prompt(worker)).toContain("Reviewer mode: `auto` —");
+    const reviewer = await run({ config: { provider: "bm-reviewer", cwd: "/on", modeId: "full-access" } });
+    expect(reviewer?.config).toMatchObject({ modeId: "auto", providerOptions: CODEX_REVIEWER_OPTIONS });
+    expect(boundaryLine(reviewer)).toBe(ON);
+  });
+
+  it("on: a mode hand-set on the profile wins, and the facts say the boundary is off for it", async () => {
+    const { run } = setup(host({ "bm-worker": "claude", "bm-reviewer": "claude", "bm-manager": "claude" }, [{ id: "bm-worker", modeId: "acceptEdits" }]));
+    const worker = await run({ config: { provider: "bm-worker", cwd: "/on" } });
+    expect(worker?.config?.modeId).toBe("acceptEdits");
+    expect(boundaryLine(worker)).toBe("Action boundary: off — its profile's mode is set by hand");
+    // The Manager is told the profile's mode, not the boundary's.
+    const manager = await run({ config: { provider: "bm-manager", cwd: "/on" } });
+    expect(prompt(manager)).toContain("Worker mode: `acceptEdits` —");
+  });
+
+  it("on: the Orchestrator keeps auto and gets no facts line; the Manager's own mode is untouched and it is told the Worker's boundary mode", async () => {
+    const { run } = setup(host({ "bm-worker": "claude", "bm-reviewer": "codex", "bm-manager": "claude", "bm-orchestrator": "claude" }));
+    const orchestrator = await run({ config: { provider: "bm-orchestrator", cwd: "/on" } });
+    expect(orchestrator?.config?.modeId).toBe("auto");
+    expect(prompt(orchestrator)).not.toContain("Action boundary");
+    const manager = await run({ config: { provider: "bm-manager", cwd: "/on", modeId: "bypassPermissions" } });
+    expect(manager?.config?.modeId).toBe("bypassPermissions");
+    expect(prompt(manager)).toContain("Worker mode: `default` — pass it as `settings.modeId` when you create a Worker.");
+    expect(prompt(manager)).not.toContain("Action boundary");
+  });
+
+  it("on: OpenCode and a provider without modes keep today's posture, only watched", async () => {
+    const { run } = setup(host({ "bm-worker": "opencode", "bm-reviewer": "pi" }));
+    const worker = await run({ config: { provider: "bm-worker", cwd: "/on" } });
+    expect(worker?.config).toMatchObject({ modeId: "bytes", featureValues: { auto_accept: true } });
+    expect(worker?.config).not.toHaveProperty("providerOptions");
+    expect(boundaryLine(worker)).toBe("Action boundary: off — its provider is only watched (detection)");
+    const reviewer = await run({ config: { provider: "bm-reviewer", cwd: "/on", modeId: "default" } });
+    expect(reviewer?.config).not.toHaveProperty("modeId");
+    expect(boundaryLine(reviewer)).toBe("Action boundary: off — its provider is only watched (detection)");
+  });
+
+  it("off, or a project it cannot find: today's modes, and a creator's boundary mode is moved back to today's pick", async () => {
+    const { run } = setup(host({ "bm-worker": "claude", "bm-reviewer": "claude", "bm-manager": "claude" }));
+    for (const [cwd, line] of [
+      ["/off", "Action boundary: off — the project's boundary is off"],
+      ["/elsewhere", "Action boundary: off — the project could not be told from the agent's folder"],
+    ] as const) {
+      const fresh = await run({ config: { provider: "bm-worker", cwd } });
+      expect(fresh?.config?.modeId, cwd).toBe("bypassPermissions");
+      expect(boundaryLine(fresh), cwd).toBe(line);
+      expect(prompt(fresh), cwd).toContain("Reviewer mode: `auto` —");
+      // Runtime facts written while the switch was on: the Worker would ask with nobody answering.
+      expect((await run({ config: { provider: "bm-worker", cwd, modeId: "default" } }))?.config?.modeId, cwd).toBe("bypassPermissions");
+      expect((await run({ config: { provider: "bm-reviewer", cwd, modeId: "default" } }))?.config?.modeId, cwd).toBe("auto");
+      // Another mode the creator chose is kept, as today.
+      expect((await run({ config: { provider: "bm-worker", cwd, modeId: "acceptEdits" } }))?.config?.modeId, cwd).toBe("acceptEdits");
+      const manager = await run({ config: { provider: "bm-manager", cwd } });
+      expect(prompt(manager), cwd).toContain("Worker mode: `bypassPermissions` —");
+    }
+    const { run: codex } = setup(host({ "bm-worker": "codex", "bm-reviewer": "codex" }));
+    const worker = await codex({ config: { provider: "bm-worker", cwd: "/off", modeId: "auto" } });
+    expect(worker?.config?.modeId).toBe("full-access");
+    expect(worker?.config).not.toHaveProperty("providerOptions");
+  });
+
+  // Live check 2026-10-01 F1: agent.created sees no prompt yet, so the hook keeps what it applied for it.
+  it("records the boundary it applied to each Worker and Reviewer, by alias and folder, for agent.created's bm.boundary", async () => {
+    forgetCreatedBoundaries();
+    const { run } = setup(host({ "bm-worker": "codex", "bm-reviewer": "claude", "bm-manager": "claude", "bm-orchestrator": "claude" }));
+    await run({ config: { provider: "bm-worker/gpt-5.6-luna", cwd: "/on", modeId: "full-access" } });
+    await run({ config: { provider: "bm-reviewer", cwd: "/off" } });
+    await run({ config: { provider: "bm-manager", cwd: "/on" } });
+    await run({ config: { provider: "bm-orchestrator", cwd: "/on" } });
+    // agent.created names the alias with or without the model, and the same folder.
+    expect(takeCreatedBoundary("bm-worker", "/on/")).toBe("on");
+    expect(takeCreatedBoundary("bm-worker", "/on")).toBeNull();
+    expect(takeCreatedBoundary("bm-reviewer/claude-sonnet-5", "/off")).toBe("off");
+    // Nothing for the roles the boundary does not cover.
+    expect(takeCreatedBoundary("bm-manager", "/on")).toBeNull();
+    expect(takeCreatedBoundary("bm-orchestrator", "/on")).toBeNull();
+  });
+
+  it("a Phase 2/3 policy file, an absent and a malformed entry read as off", async () => {
+    const { run } = setup(host({ "bm-worker": "claude", "bm-reviewer": "claude" }));
+    for (const boundary of [undefined, { "ws-on": { enabled: false, at: ON_AT } }, { "ws-on": { enabled: true } }, { "ws-on": true }, "on"]) {
+      writeFileSync(
+        join(dataHome, "autonomy", "policy.json"),
+        JSON.stringify({ version: 1, projects: {}, challenger: {}, ...(boundary === undefined ? {} : { boundary }) }),
+      );
+      const worker = await run({ config: { provider: "bm-worker", cwd: "/on" } });
+      expect(worker?.config?.modeId, JSON.stringify(boundary)).toBe("bypassPermissions");
+      expect(boundaryLine(worker), JSON.stringify(boundary)).toBe("Action boundary: off — the project's boundary is off");
+    }
+  });
+
+  it("a hook that runs out of its budget leaves the facts line off (no line) and the creator's mode as it was", async () => {
+    forgetCreatedBoundaries();
+    const never = new Promise(() => {});
+    const { run } = setup({ ...host({ "bm-worker": "claude" }), workspaces: { list: () => never }, providers: { listModes: () => never } });
+    const result = await run({ config: { provider: "bm-worker", cwd: "/on", modeId: "default" } });
+    expect(result?.config?.systemPrompt).toBe(workerMd);
+    expect(result?.config?.modeId).toBe("default");
+    expect(boundaryLine(result)).toBeNull();
+    // Outside the boundary, so agent.created labels it off (live check 2026-10-01 F1).
+    expect(takeCreatedBoundary("bm-worker", "/on")).toBe("off");
+  }, 20000);
 });

@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   ANSWER_NOTICE_MARKER,
   BUDGET_NOTICE_MARKER,
+  HANDOFF_NOTICE_MARKER,
+  REPLACED_NOTICE_MARKER,
+  STATE_NOTICE_MARKER,
   WORKER_STOP_NOTICE,
   WORKER_STOP_NOTICE_MARKER,
   isPluginNotice,
@@ -44,6 +47,31 @@ describe("isPluginNotice", () => {
     expect(isPluginNotice("BM-ANSWERS\nrequestId: req-1\nQ1: a")).toBe(false);
     expect(noticeMarkerOf("BM-ANSWERS\nrequestId: req-1")).toBeNull();
     expect(noticeMarkerOf("BM-ANSWERED requestId: req-1")).toBe("BM-ANSWERED");
+  });
+
+  it("knows the BM-STATE brief after a compaction as a whole word; the /compact before it is no notice — the send log tells it apart (autonomy design §G.5)", () => {
+    expect(STATE_NOTICE_MARKER).toBe("BM-STATE");
+    expect(isPluginNotice("BM-STATE\nFrom the paseo-bm plugin, not the owner: your context was just compacted.")).toBe(true);
+    expect(noticeMarkerOf("BM-STATE\nrole: worker")).toBe(STATE_NOTICE_MARKER);
+    expect(isPluginNotice("BM-STATEMENT of work")).toBe(false);
+    // The owner may type /compact too: a leading /compact is never a notice by its text.
+    expect(isPluginNotice("/compact")).toBe(false);
+    expect(isPluginNotice("/compact Keep: the owner's request")).toBe(false);
+  });
+
+  it("knows the BM-HANDOFF note request as a whole word; the successor's BM-HANDOFF-BRIEF, which the Manager sends, is no notice (autonomy design §G.6)", () => {
+    expect(HANDOFF_NOTICE_MARKER).toBe("BM-HANDOFF");
+    expect(isPluginNotice("BM-HANDOFF\nFrom the paseo-bm plugin, not the owner")).toBe(true);
+    expect(noticeMarkerOf("BM-HANDOFF\nWrite your handoff note now")).toBe(HANDOFF_NOTICE_MARKER);
+    expect(isPluginNotice("BM-HANDOFF-BRIEF h1\nrole: worker")).toBe(false);
+    expect(isPluginNotice("BM-HANDOFFS are fine")).toBe(false);
+  });
+
+  it("knows the BM-REPLACED word to an outgoing Worker as a whole word (autonomy design §G.6; live check F4)", () => {
+    expect(REPLACED_NOTICE_MARKER).toBe("BM-REPLACED");
+    expect(isPluginNotice("BM-REPLACED\nFrom the paseo-bm plugin, not the owner: request req-1 is handed over")).toBe(true);
+    expect(noticeMarkerOf("BM-REPLACED\nStop working on it")).toBe(REPLACED_NOTICE_MARKER);
+    expect(isPluginNotice("BM-REPLACEDBY x")).toBe(false);
   });
 
   it("is not fooled by a non-string", () => {

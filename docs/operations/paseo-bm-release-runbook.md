@@ -4,10 +4,10 @@
 |---|---|
 | Status | Active — the release process in force |
 | Workflow | [`.github/workflows/release.yml`](../../.github/workflows/release.yml) — the real publish runs only on a **GitHub Release** event (`release: published`); a manual run (`workflow_dispatch`) is a rehearsal and stops at `npm publish --dry-run` |
-| Packages | Since `0.4.1`: **`paseo-bm-plugin`** only (the payload in `plugin/`). `paseo-bm`, the migration command, was last published at `0.4.0` and is deprecated on npm; the root `package.json` is `"private": true` (§7 if it ever needs a fix). Up to `0.4.0` both were published at the same version from the same run |
+| Packages | Since `0.4.1`: **`paseo-bm-plugin`** only (the payload in `plugin/`). `paseo-bm`, the migration command, was last published at `0.4.0` and is deprecated on npm; its source lives only at the `v0.4.0` tag, and the root `package.json` is `"private": true` with no `bin`, `files` or `prepack` (§7 if the command ever needs a fix). Up to `0.4.0` both were published at the same version from the same run |
 | Dist-tag | The workflow picks it from the version: with a `-` (a prerelease, `0.4.0-alpha.0` for instance) → `next`; without one (stable, `0.4.0` for instance) → `latest` |
 | Release notes | `docs/releases/paseo-bm-release-notes-<version>.md`, used as the body of the GitHub Release |
-| Underlying decisions | [ADR-009](../adr/ADR-009-payload-as-npm-package.md) (the payload as its own package); [ADR-012](../adr/ADR-012-plugin-is-the-product.md) (the plugin is the product, `paseo-bm` stops at `0.4.0`); [design delta 20260925b](../archive/design/paseo-bm-delta-20260925b-stable-release.md) §2 (the dist-tag follows the kind of version) |
+| Underlying decisions | [ADR-009](../adr/ADR-009-payload-as-npm-package.md) (the payload as its own package); [ADR-012](../adr/ADR-012-plugin-is-the-product.md) (the plugin is the product, `paseo-bm` stops at `0.4.0`); [ADR-022](../adr/ADR-022-retirements-after-code-review.md) decision 1 (the command's source deleted, a fix made from its tag); [design delta 20260925b](../archive/design/paseo-bm-delta-20260925b-stable-release.md) §2 (the dist-tag follows the kind of version) |
 
 ## 0. Rules that do not change
 
@@ -24,7 +24,7 @@
    ```bash
    npm version <version> --no-git-tag-version
    npm run build          # writes plugin/package.json and PLUGIN_VERSION
-   npm run verify         # typecheck, typecheck:plugin, lint, test, build
+   npm run verify         # typecheck, typecheck:plugin, lint, test, test:bench, test:eval, build
    ```
    Verifying before building, after a version change, goes red because the two generated sources do not agree yet.
 3. **Write the release notes** at `docs/releases/paseo-bm-release-notes-<version>.md`, **in English**, following the shape of the most recent one: what this version brings, what to know when upgrading, rollback, evidence, sources. Name every change in the behaviour of the agents (`plugin/roles/*.md`) and of the screens.
@@ -95,9 +95,18 @@ Both current packages already have a trusted publisher (`paseo-bm` since `0.1.0-
 
 ## 7. Only if the `paseo-bm` command needs a fix after 0.4.0
 
-`release.yml` no longer publishes `paseo-bm`. Its trusted publisher still points at `release.yml`, so one more release of it goes through the same workflow: for that one release, set `"private": false` in the root `package.json`, restore the three `paseo-bm` steps removed in 0.4.1 (`Publish (dry-run)`, `Publish to npm` before the payload, and `Verify published version`; `git show v0.4.0:.github/workflows/release.yml` has them), and put both back as they are after it. Both packages then carry the release's version, as before 0.4.1. The deprecation message names `npx paseo-bm@0.4.0`; if the fix must reach users, the owner reruns `npm deprecate` with the new number (a one-time password is needed).
+`main` no longer holds the command: its source, tests and packaging were deleted after 0.4.1 ([ADR-022](../adr/ADR-022-retirements-after-code-review.md) decision 1). The fix is made on a branch from the `v0.4.0` tag, whose tree still builds, tests, packs and publishes the command; that branch is never merged back into `main`. Its trusted publisher still points at `release.yml`, which is the file name npm checks, so the branch's own copy of the workflow publishes it.
+
+1. **Branch from the tag** and make the fix in `src/` there, with its test: `git switch -c paseo-bm-fix-<version> v0.4.0`.
+2. **Pick `<version>` with the owner.** It must not be published for `paseo-bm` yet (`npm view paseo-bm versions`), and `v<version>` must not be a tag of this repository already: both packages share the tag names, and the workflow requires the tag to be `v` + the root version. `npm version <version> --no-git-tag-version` on the branch.
+3. **Publish only `paseo-bm` from that branch.** In the branch's `release.yml`, delete `Publish payload (dry-run)`, `Publish payload to npm` and `Verify published payload`, so the run cannot publish a second `paseo-bm-plugin` from the old payload; `paseo-bm-plugin` is released from `main` only.
+4. **Verify there:** `npm run build && npm run verify && npm run smoke:packed`. That tree's `verify` and smoke are 0.4.0's (one Vitest run; the smoke packs both tarballs).
+5. **Rehearse and release** as §1.6 and §2 say, on the branch: `gh workflow run release.yml --ref paseo-bm-fix-<version> -f tag=v<version>`, then tag the branch's head `v<version>`, push the tag and publish the GitHub Release from it. A release runs the workflow as it is at the tag, so the branch's copy is the one that runs.
+6. **Tell users.** The deprecation message names `npx paseo-bm@0.4.0`; if the fix must reach users, the owner reruns `npm deprecate` with the new number (a one-time password is needed).
 
 ---
+
+*Revision 2026-09-30: the migration command's source is deleted from `main` (ADR-022 decision 1); §7 now makes a fix on a branch from the `v0.4.0` tag, whose own `release.yml` publishes `paseo-bm` alone.*
 
 *Revision 2026-09-28: `release.yml` publishes only `paseo-bm-plugin` from `0.4.1` (the `paseo-bm` steps removed, the root package private, the lifecycle-script check covers `plugin/package.json`); §3 verifies one package and installs it on an isolated daemon; §5 goes back with `paseo plugin update --version`; new §7 for a fix of the migration command.*
 

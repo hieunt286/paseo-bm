@@ -64,3 +64,11 @@ jobs:
 
       - name: Test
         run: npm test
+
+      # The wall-clock benchmarks and the eval tooling tests are their own
+      # Vitest projects (vitest.workspace.ts), kept out of the default run.
+      - name: Test benchmarks
+        run: npm run test:bench
+
+      - name: Test eval tooling
+        run: npm run test:eval

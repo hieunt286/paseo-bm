@@ -2,18 +2,12 @@
   "name": "paseo-bm",
   "private": true,
   "version": "0.4.1",
-  "description": "Beads Management for Paseo: the last version of the paseo-bm command, which moves an install made by an earlier npx paseo-bm to the plugin on npm. The product itself is the paseo-bm-plugin package.",
+  "description": "Beads Management for Paseo: the development root of paseo-bm-plugin, the plugin in plugin/. Private, never published; it holds the version the build writes into the plugin.",
   "type": "module",
   "license": "MIT",
   "engines": {
     "node": ">=22"
   },
-  "bin": {
-    "paseo-bm": "dist/index.js"
-  },
-  "files": [
-    "dist/"
-  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/hieunt286/paseo-bm.git"
@@ -21,10 +15,11 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "test": "vitest run",
-    "build": "npm run generate:plugin-version && npm run generate:role-instructions && tsup",
-    "verify": "npm run typecheck && npm run typecheck:plugin && npm run lint && npm run test && npm run build",
-    "prepack": "npm run build",
+    "test": "vitest run --project default",
+    "test:bench": "vitest run --project bench",
+    "test:eval": "vitest run --project eval",
+    "build": "npm run generate:plugin-version && npm run generate:role-instructions",
+    "verify": "npm run typecheck && npm run typecheck:plugin && npm run lint && npm run test && npm run test:bench && npm run test:eval && npm run build",
     "generate:plugin-version": "node scripts/generate-plugin-version.mjs",
     "generate:role-instructions": "node scripts/generate-role-instructions.mjs",
     "typecheck:plugin": "tsc -p plugin/tsconfig.json",

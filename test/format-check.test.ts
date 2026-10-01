@@ -40,7 +40,6 @@ function world(agents: Agent[]) {
       }),
     },
     workspaces: { list: vi.fn(async () => ({ entries: [] })) },
-    config: { get: vi.fn(async () => ({ config: {} })) },
   };
   const set = (id: string, change: Partial<Agent>) => Object.assign(byId.get(id)!, change);
   const state = createFormatState();

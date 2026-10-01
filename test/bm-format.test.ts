@@ -174,6 +174,17 @@ describe("BM-REPORT rules", () => {
     expect(issuesOf(`${report()}\n- a stray bullet`)).toEqual(['-: line "- a stray bullet" is not a field of the template']);
   });
 
+  it("an outgoing Worker's handoffNote, when asked, is the last field: after blockers, once, never empty (autonomy design §G.6)", () => {
+    expect(issuesOf(`${report()}\nhandoffNote: Tried the ISO parser; next, bm-d2.`)).toEqual([]);
+    expect(issuesOf(report().replace("blockers:", "handoffNote: next, bm-d2.\nblockers:"))).toEqual([
+      `-: fields must follow the template order (${REPORT_FIELDS.join(", ")}); "handoffNote" is out of place`,
+    ]);
+    expect(issuesOf(`${report()}\nhandoffNote: a\nhandoffNote: b`)).toEqual(["handoffNote: appears twice"]);
+    expect(issuesOf(`${report()}\nhandoffNote:`)).toEqual(["handoffNote: is empty; write none"]);
+    // The template itself stays as the Worker's role shows it.
+    expect(REPORT_FIELDS).not.toContain("handoffNote");
+  });
+
   it("requestId, phase and tier values", () => {
     expect(issuesOf(report({ requestId: "req-2026-09-18" }))).toEqual(['requestId: must look like req-YYYYMMDDTHHMMSSZ (got "req-2026-09-18")']);
     expect(issuesOf(report({ phase: "done" }))).toEqual(['phase: must be one of received, beads-done, blocked, finished (got "done")']);
@@ -246,9 +257,9 @@ describe("BM-QUESTIONS rules", () => {
     ]);
   });
 
-  it("accepts the bracketed tags of autonomy design §A.5, with (recommended) before an option's tags", () => {
+  it("accepts the bracketed tags of autonomy design §A.5 and §B.9, with (recommended) before an option's tags", () => {
     const tagged = questions([
-      "Q4: Push both backends to origin/dev? [subject: push-backends] [supersedes: Q2]",
+      "Q4: Push both backends to origin/dev? [subject: push-backends] [supersedes: Q2] [class: release]",
       "- a: Push contract only (recommended) [effects: push]",
       "- b: Push both, manifest by hand [effects: push, commit]",
       "- c: Hold",

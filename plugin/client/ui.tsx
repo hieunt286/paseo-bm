@@ -1,9 +1,9 @@
 /**
- * The pieces the surface's screens share: stat cards, a bar chart, a chip, the
- * agent role mark, the style of a bead title, the in-place confirmation
- * Settings and the Inbox use, and the frame every card is
- * drawn in — the chats' and the Inbox's (`CardFrame`, `CompactLine`). Styling comes from
- * `dashboardStyles`, colours from the theme.
+ * The pieces the surface's screens share: a button, text in a tone's colour,
+ * stat cards, a bar chart, a chip, the agent role mark, the style of a bead
+ * title, the in-place confirmation Settings and the Inbox use, and the frame
+ * every card is drawn in — the chats' and the Inbox's (`CardFrame`,
+ * `CompactLine`). Styling comes from `dashboardStyles`, colours from the theme.
  *
  * Client rules: React Native primitives only, no Node import, no `server/`
  * import.
@@ -13,13 +13,96 @@ import type { ReactNode } from "react";
 import type { BeadRow } from "../shared/contracts";
 import { beadEmphasis, emphasisTone, type BeadEmphasis, type KanbanColumn } from "./beads-model";
 import { Icon } from "@getpaseo/plugin/client/react-native";
-import { Pressable, Text, View } from "react-native";
-import { ROLE_MARK, barShare, toneColor, type Badge, type Bar, type RoleMarkKind, type Tone, type dashboardStyles } from "./dashboard-model";
-import type { SetupDialog } from "./setup-model";
-import { MAX_BODY_LINES, NOTICE_DOT, type CardFrameView } from "./chat-cards";
+import { Pressable, Text, View, type AccessibilityRole, type AccessibilityState, type StyleProp, type TextStyle, type ViewStyle } from "react-native";
+import { barShare, type Bar } from "./format";
+import type { dashboardStyles } from "./styles";
+import { ROLE_MARK, toneColor, type Badge, type RoleMarkKind, type Tone } from "./tone";
+import type { ConfirmDialog } from "./ui-types";
+import { MAX_BODY_LINES } from "./chat-card-parse";
+import { NOTICE_DOT, type CardFrameView } from "./chat-card-frame";
 
 export type Styles = ReturnType<typeof dashboardStyles>;
 export type Theme = PluginSurfaceProps["theme"];
+
+/** The three looks of a button: filled (the one to take), outlined, and outlined in the danger colour. */
+export type ButtonKind = "primary" | "secondary" | "danger";
+
+const BUTTON_STYLES = {
+  primary: { box: "button", text: "buttonText" },
+  secondary: { box: "secondaryButton", text: "secondaryButtonText" },
+  danger: { box: "dangerButton", text: "dangerButtonText" },
+} as const satisfies Record<ButtonKind, { box: keyof Styles; text: keyof Styles }>;
+
+/** `base`, then `extra` flattened after it; `base` itself when there is no extra. */
+function withBase<T>(base: T, extra: StyleProp<T> | undefined): StyleProp<T> {
+  if (extra === undefined) return base;
+  return Array.isArray(extra) ? [base, ...(extra as ReadonlyArray<StyleProp<T>>)] : [base, extra];
+}
+
+/**
+ * A button: its label in one of the three looks (code review 2026-09-30 §3.6).
+ * `style` and `textStyle` add to the look (`alignSelf`, an opacity); the
+ * accessibility props reach the Pressable exactly as given, and the role is
+ * `button` unless another is. Hook-free.
+ */
+export function Button({
+  label,
+  kind,
+  style,
+  textStyle,
+  styles,
+  ...press
+}: {
+  label: string;
+  kind: ButtonKind;
+  style?: StyleProp<ViewStyle>;
+  textStyle?: StyleProp<TextStyle>;
+  styles: Styles;
+  onPress: () => void;
+  accessibilityRole?: AccessibilityRole;
+  accessibilityLabel?: string;
+  accessibilityState?: AccessibilityState;
+  disabled?: boolean;
+}) {
+  const look = BUTTON_STYLES[kind];
+  return (
+    <Pressable accessibilityRole="button" {...press} style={withBase<ViewStyle>(styles[look.box], style)}>
+      <Text style={withBase<TextStyle>(styles[look.text], textStyle)}>{label}</Text>
+    </Pressable>
+  );
+}
+
+/**
+ * Text in a tone's colour: an error, a warning, an outcome (code review
+ * 2026-09-30 §3.6). Drawn as `[base, { ...style, color }]`, `base` being
+ * `styles.body` unless given. Hook-free.
+ */
+export function ToneText({
+  tone,
+  base,
+  style,
+  styles,
+  theme,
+  children,
+  ...text
+}: {
+  tone: Tone;
+  base?: TextStyle;
+  /** More of the text's own style, beside the colour (`fontSize`, `flex`). */
+  style?: TextStyle;
+  styles: Styles;
+  theme: Theme;
+  children: ReactNode;
+  numberOfLines?: number;
+  selectable?: boolean;
+  accessibilityLiveRegion?: "none" | "polite" | "assertive";
+}) {
+  return (
+    <Text {...text} style={[base ?? styles.body, { ...style, color: toneColor(theme, tone) }]}>
+      {children}
+    </Text>
+  );
+}
 
 /** Props of the two per-workspace screens, Beads and Metric. */
 export interface WorkspaceScreenProps extends PluginSurfaceProps {
@@ -60,9 +143,7 @@ export function WorkspaceScreenHeader({
     <>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
         {onBack === undefined ? null : (
-          <Pressable accessibilityRole="button" accessibilityLabel={backLabel} onPress={onBack} style={styles.secondaryButton}>
-            <Text style={styles.secondaryButtonText}>←</Text>
-          </Pressable>
+          <Button label="←" kind="secondary" accessibilityLabel={backLabel} onPress={onBack} styles={styles} />
         )}
         {title === null ? (
           <View style={{ flex: 1 }} />
@@ -251,18 +332,16 @@ export function StatusTabs({
       {tabs.map((tab) => {
         const on = tab.key === selected;
         return (
-          <Pressable
+          <Button
             key={tab.key}
+            label={tab.count === undefined ? tab.label : `${tab.label} ${tab.count}`}
+            kind={on ? "primary" : "secondary"}
             accessibilityRole="tab"
             accessibilityState={{ selected: on }}
             accessibilityLabel={tab.hint === undefined ? tab.label : `${tab.label}: ${tab.hint}`}
             onPress={() => onSelect(tab.key)}
-            style={on ? styles.button : styles.secondaryButton}
-          >
-            <Text style={on ? styles.buttonText : styles.secondaryButtonText}>
-              {tab.count === undefined ? tab.label : `${tab.label} ${tab.count}`}
-            </Text>
-          </Pressable>
+            styles={styles}
+          />
         );
       })}
     </View>
@@ -337,14 +416,16 @@ export function RoleMark({ kind, theme, size = 22 }: { kind: RoleMarkKind; theme
 
 /**
  * A confirmation shown in place, with Cancel as the default. Shared by the
- * Settings blocks and the Orchestrator line of the Inbox.
+ * Settings blocks (a tool's Install, agent tools, skills, the cleanup warning),
+ * the Orchestrator line of the Inbox, a chat's decision card and Insights.
  *
  * The confirm button is deliberately not the first control and never
  * pre-focused: every dialog that uses this grants something that is awkward to
  * take back, so an accidental Return must do nothing (design §7.13.3, §7.13.4).
+ * While `busy`, Cancel is gone and the confirm button says `busyLabel`.
  */
 export function ConfirmBlock({ dialog, busy, busyLabel, onConfirm, onCancel, styles, theme }: {
-  dialog: SetupDialog;
+  dialog: ConfirmDialog;
   busy: boolean;
   busyLabel: string;
   onConfirm: () => void;
@@ -354,19 +435,31 @@ export function ConfirmBlock({ dialog, busy, busyLabel, onConfirm, onCancel, sty
 }) {
   return (
     <View style={{ gap: 6 }}>
-      <Text style={[styles.sectionTitle, { color: toneColor(theme, "warning") }]}>{dialog.title}</Text>
-      <Text style={styles.body} selectable>
+      {dialog.title === null ? null : (
+        <ToneText tone="warning" base={styles.sectionTitle} styles={styles} theme={theme}>{dialog.title}</ToneText>
+      )}
+      <Text style={dialog.bodyTone === undefined ? styles.body : [styles.body, { color: toneColor(theme, dialog.bodyTone) }]} selectable>
         {dialog.body}
       </Text>
       <View style={styles.chipRow}>
         {busy ? null : (
-          <Pressable accessibilityRole="button" accessibilityLabel={dialog.cancelLabel} onPress={onCancel} style={styles.secondaryButton}>
-            <Text style={styles.secondaryButtonText}>{dialog.cancelLabel}</Text>
-          </Pressable>
+          <Button
+            label={dialog.cancelLabel}
+            kind="secondary"
+            accessibilityLabel={dialog.cancelAccessibilityLabel ?? dialog.cancelLabel}
+            onPress={onCancel}
+            styles={styles}
+          />
         )}
-        <Pressable accessibilityRole="button" accessibilityLabel={dialog.confirmLabel} disabled={busy} onPress={onConfirm} style={styles.button}>
-          <Text style={styles.buttonText}>{busy ? busyLabel : dialog.confirmLabel}</Text>
-        </Pressable>
+        <Button
+          label={busy ? busyLabel : dialog.confirmLabel}
+          kind="primary"
+          accessibilityLabel={dialog.confirmAccessibilityLabel ?? dialog.confirmLabel}
+          accessibilityState={{ disabled: busy, busy }}
+          disabled={busy}
+          onPress={onConfirm}
+          styles={styles}
+        />
       </View>
     </View>
   );
@@ -446,17 +539,16 @@ export function CardFrame({
       {actions === undefined || actions === null ? null : <View style={{ gap: 6 }}>{actions}</View>}
 
       <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
-        <Pressable
-          accessibilityRole="button"
+        <Button
+          label={detailsOpen ? "Details ▾" : "Details ▸"}
+          kind="secondary"
           accessibilityLabel={detailsOpen ? "Hide details" : "Show details"}
           accessibilityState={{ expanded: detailsOpen }}
           onPress={onToggleDetails}
-          style={styles.secondaryButton}
-        >
-          <Text style={styles.secondaryButtonText}>{detailsOpen ? "Details ▾" : "Details ▸"}</Text>
-        </Pressable>
+          styles={styles}
+        />
       </View>
-      {view.status === null ? null : <Text style={[styles.body, { color: toneColor(theme, view.status.tone) }]}>{view.status.text}</Text>}
+      {view.status === null ? null : <ToneText tone={view.status.tone} styles={styles} theme={theme}>{view.status.text}</ToneText>}
       {detailsOpen ? <View style={[styles.card, { backgroundColor: theme.colors.surface0, gap: 4 }]}>{details}</View> : null}
     </View>
   );
@@ -492,7 +584,7 @@ export function CompactLine({
         onPress={onToggle}
         style={{ flexDirection: "row", gap: 6 }}
       >
-        <Text style={[styles.body, { color: toneColor(theme, tone) }]}>{NOTICE_DOT}</Text>
+        <ToneText tone={tone} styles={styles} theme={theme}>{NOTICE_DOT}</ToneText>
         <Text style={[styles.body, { flex: 1 }]} numberOfLines={expanded ? undefined : 1}>
           {text}
         </Text>

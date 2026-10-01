@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { reconstructTraces, summarise, type AgentFacts } from "../plugin/server/traces";
+import { reconstructTraces, type AgentFacts } from "../plugin/server/traces";
+import { summarise } from "../plugin/server/trace-views";
 import { inferWorkflowSteps } from "../plugin/server/workflow-steps";
 import { TRACE_STORE_SCHEMA_VERSION, type TraceRecord } from "../plugin/shared/contracts";
 

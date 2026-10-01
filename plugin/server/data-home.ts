@@ -108,9 +108,8 @@ function pickEnv(env: Readonly<Record<string, string | undefined>>, name: string
 
 /**
  * Directories a data folder may never touch, with the environment variable
- * that moves each one. Same list as the installer's `assertSafeInstallHome`
- * (`src/layout.ts`), copied rather than imported because the plugin bundle
- * never pulls in `src/`.
+ * that moves each one. Same list as the 0.4.0 installer's
+ * `assertSafeInstallHome` (`src/layout.ts` at the `v0.4.0` tag; ADR-022).
  */
 const PROTECTED_DIRS: readonly (readonly [label: string, envVar: string | null, dirName: string])[] = [
   ["Paseo home", "PASEO_HOME", ".paseo"],
@@ -268,46 +267,68 @@ export function unusableDataHomeMessage(deps: DataHomeDeps = {}): string {
 }
 
 /**
- * Refuses any symlink between `root` and `target`, without following one.
+ * The first symlink strictly below `root` on the way down to `target`
+ * (`target` included), or null when there is none; nothing is followed. The
+ * plugin's one symlink walk (code review 2026-09-30 §3.1): `data-files.ts`
+ * builds every store's check on it, and `ensureDataHome` below.
  *
- * Same shape as `trace-store.ts` `assertNoSymlinkOnPath`: a component that does
- * not exist yet ends the walk, because nothing below it exists either and there
- * is nothing to escape through.
+ * The root itself is only probed for existence, never judged: `$HOME` is a
+ * symlink on plenty of machines (a home relocated to another mount), and
+ * refusing it would leave the data folder — and with it the trace store, the
+ * setup state and the cleanup mark — permanently uncreatable. A caller that
+ * must judge a folder as well walks from that folder's parent.
+ *
+ * ENOENT: nothing below exists either. ENOTDIR: a regular file stands in the
+ * path, so nothing below it can exist. Both end the walk with nothing to escape
+ * through, and the operation that follows reports the real problem.
+ *
+ * Throws a plain `Error` when `target` is not inside `root`, or when a
+ * component cannot be inspected (the `lstat` failure is its `cause`); callers
+ * turn it into their own error.
  */
-function assertNoSymlinkOnPath(root: string, target: string): void {
+export function firstSymlinkBelow(root: string, target: string): string | null {
   const rootAbsolute = resolve(root);
   const targetAbsolute = resolve(target);
+  const rel = relative(rootAbsolute, targetAbsolute);
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new Error(`${targetAbsolute} is not inside ${rootAbsolute}`);
+  }
 
   /** What stands at `path`, without following a link. */
   const inspect = (path: string): "missing" | "symlink" | "plain" => {
     try {
       return lstatSync(path).isSymbolicLink() ? "symlink" : "plain";
     } catch (error) {
-      // ENOENT: nothing below exists either. ENOTDIR: a regular file stands in
-      // the path, so nothing below it can exist. Both end the walk with nothing
-      // to escape through, and `mkdir` then reports the real problem.
       const code = (error as NodeJS.ErrnoException).code;
       if (code === "ENOENT" || code === "ENOTDIR") return "missing";
-      throw new DataHomeError(`cannot inspect ${path}`, { cause: error });
+      throw new Error(`cannot inspect ${path}`, { cause: error });
     }
   };
 
-  // The root itself is only probed for existence, never judged: `$HOME` is a
-  // symlink on plenty of machines (a home relocated to another mount), and
-  // refusing it would leave the data folder — and with it the trace store, the
-  // setup state and the cleanup mark — permanently uncreatable.
-  if (inspect(rootAbsolute) === "missing") return;
-  if (targetAbsolute === rootAbsolute) return;
+  if (inspect(rootAbsolute) === "missing") return null;
 
   let current = rootAbsolute;
-  for (const part of relative(rootAbsolute, targetAbsolute).split(sep)) {
+  for (const part of rel.split(sep)) {
     if (part === "" || part === ".") continue;
     current = join(current, part);
     const found = inspect(current);
-    if (found === "missing") return;
-    if (found === "symlink") {
-      throw new DataHomeError(`refusing to use a symlinked path for the data folder: ${current}`);
-    }
+    if (found === "missing") return null;
+    if (found === "symlink") return current;
+  }
+  return null;
+}
+
+/** Refuses any symlink between `root` and `target` (`firstSymlinkBelow`), as a `DataHomeError`. */
+function assertNoSymlinkOnPath(root: string, target: string): void {
+  let found: string | null;
+  try {
+    found = firstSymlinkBelow(root, target);
+  } catch (error) {
+    const walk = error as Error;
+    throw new DataHomeError(walk.message, { cause: walk.cause ?? walk });
+  }
+  if (found !== null) {
+    throw new DataHomeError(`refusing to use a symlinked path for the data folder: ${found}`);
   }
 }
 

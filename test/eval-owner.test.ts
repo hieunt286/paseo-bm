@@ -2,22 +2,19 @@ import { describe, expect, it } from "vitest";
 import { parseAnswers, parseQuestions, type Question } from "../plugin/shared/bm-questions";
 import { decisionsAnswerRpc, decisionsListRpc } from "../plugin/shared/contracts";
 import { decisionSchema, type Decision } from "../plugin/shared/decisions";
-import type { Proposal } from "../plugin/shared/orchestrator";
 import {
   answerableDecisions,
-  chooseDecisionAnswer,
+  CHANNELS,
   chooseStoredDecisionAnswer,
   DECISIONS_ANSWER_RPC,
   DECISIONS_LIST_RPC,
   chooseWorkerAnswer,
   FOLLOW_RECOMMENDATION_WORDS,
-  isOrchestratorMiss,
   NO_RECOMMENDATION_WORDS,
-  ORCHESTRATOR_MISS_MS,
   SimulatedOwner,
   workerAnswersBlock,
   workerReplyText,
-  type OrchestratorView,
+  type ChannelName,
   type OwnerTransport,
 } from "../scripts/eval/owner";
 import { OwnerSchema, type Owner } from "../scripts/eval/scenario";
@@ -34,7 +31,6 @@ class FakeTransport implements OwnerTransport {
   clock = T0;
   sent: Array<{ agentId: string; text: string }> = [];
   calls: Array<{ method: string; input: unknown }> = [];
-  state: OrchestratorView = { approvals: [], decisions: [] };
   /** What `decisions.list` returns: every stored decision, settled ones included (the fake does not filter). */
   stored: Decision[] = [];
   failRpc: string | null = null;
@@ -45,8 +41,7 @@ class FakeTransport implements OwnerTransport {
 
   async rpc(method: string, input: unknown): Promise<unknown> {
     this.calls.push({ method, input });
-    if (this.failRpc !== null && method === this.failRpc) throw new Error("E_PROPOSAL_SETTLED");
-    if (method === "orchestrator.state") return fullState(this.state);
+    if (this.failRpc !== null && method === this.failRpc) throw new Error("E_DECISION_SETTLED");
     if (method === "decisions.list") return { decisions: this.stored, truncated: false };
     return {};
   }
@@ -54,20 +49,6 @@ class FakeTransport implements OwnerTransport {
   now(): number {
     return this.clock;
   }
-}
-
-function fullState(view: OrchestratorView): unknown {
-  return {
-    agent: null,
-    toolsStale: false,
-    outdated: false,
-    watch: { enabled: false },
-    approvals: view.approvals,
-    stalls: [],
-    projects: [],
-    interventions: [],
-    decisions: view.decisions,
-  };
 }
 
 const QUESTIONS_TEXT = [
@@ -83,25 +64,6 @@ const QUESTIONS_TEXT = [
 
 function questions(): Question[] {
   return parseQuestions(QUESTIONS_TEXT)!.questions;
-}
-
-function proposal(fields: Partial<Proposal> & Pick<Proposal, "id" | "command">): Proposal {
-  return {
-    at: "2026-09-29T10:00:00.000Z",
-    kind: "command",
-    workspaceId: "ws-1",
-    managerId: "mgr-1",
-    requestId: "req-7",
-    situation: "",
-    reason: "",
-    source: "orchestrator",
-    status: "pending",
-    settledAt: null,
-    sentText: null,
-    outcome: null,
-    error: null,
-    ...fields,
-  };
 }
 
 describe("answer policy", () => {
@@ -147,16 +109,6 @@ describe("answer policy", () => {
     expect(chooseWorkerAnswer(owner(), question)).toMatchObject({ pick: { other: NO_RECOMMENDATION_WORDS }, rule: "no-recommendation" });
   });
 
-  it("answers a decision with the option its recommendation names, or by the override", () => {
-    const decision = { command: "Release 1.2 now or wait?", reason: "Wait for the review: it is cheap.", options: ["Release now", "Wait for the review"] };
-    expect(chooseDecisionAnswer(owner(), decision)).toMatchObject({ text: "Wait for the review", rule: "recommended" });
-    expect(chooseDecisionAnswer(owner([{ keyword: "release", answer: { option: "A" } }]), decision)).toMatchObject({ text: "Release now", rule: "override" });
-    expect(chooseDecisionAnswer(owner([{ keyword: "release", answer: { words: "Release it." } }]), decision).text).toBe("Release it.");
-    expect(chooseDecisionAnswer(owner(), { command: "Push?", reason: "I would not.", options: undefined }).text).toBe(FOLLOW_RECOMMENDATION_WORDS);
-    // Whole words only: "No" is not in "I know".
-    expect(chooseDecisionAnswer(owner(), { command: "Push?", reason: "I know it is safe.", options: ["Yes", "No"] }).text).toBe(FOLLOW_RECOMMENDATION_WORDS);
-    expect(chooseDecisionAnswer(owner(), { command: "Push?", reason: "No: wait for CI.", options: ["Yes", "No"] }).text).toBe("No");
-  });
 });
 
 describe("BM-ANSWERS text", () => {
@@ -179,14 +131,6 @@ describe("BM-ANSWERS text", () => {
   });
 });
 
-describe("miss rule", () => {
-  it("is ten minutes from when the question was first seen", () => {
-    expect(ORCHESTRATOR_MISS_MS).toBe(10 * MINUTE);
-    expect(isOrchestratorMiss(T0, T0 + 10 * MINUTE - 1)).toBe(false);
-    expect(isOrchestratorMiss(T0, T0 + 10 * MINUTE)).toBe(true);
-  });
-});
-
 describe("channel 0.4.1", () => {
   it("sends one BM-ANSWERS message to the waiting Worker, once, and counts it", async () => {
     const transport = new FakeTransport();
@@ -204,7 +148,7 @@ describe("channel 0.4.1", () => {
     expect((await sim.step({ workerQuestions: [open] })).status).toBe("idle");
     expect(transport.sent).toHaveLength(1);
 
-    expect(sim.counts).toEqual({ messages: 1, rpcCalls: 0, confirmations: 0, actions: 1, misses: 0 });
+    expect(sim.counts).toEqual({ messages: 1, rpcCalls: 0, confirmations: 0, actions: 1 });
     expect(sim.log[0]).toMatchObject({
       channel: "0.4.1",
       source: "worker-questions",
@@ -245,89 +189,9 @@ describe("channel 0.4.1", () => {
   });
 });
 
-describe("channel tree-autopilot", () => {
-  const decision = proposal({
-    id: "dec-1",
-    kind: "decision",
-    managerId: null,
-    command: "Push the branch to origin?",
-    reason: "Yes, push: the owner asked for it.",
-    source: "autopilot",
-    options: ["Yes, push", "No"],
-  });
-  const command = proposal({ id: "prop-1", command: "Continue req-7 with option a.", at: "2026-09-29T10:01:00.000Z" });
-  const settled = proposal({ id: "prop-0", command: "Old.", status: "sent" });
-
-  it("answers a pending decision and approves a pending proposal, and leaves a fresh Worker question alone", async () => {
-    const transport = new FakeTransport();
-    transport.state = { approvals: [command, decision, settled], decisions: [decision] };
-    const sim = new SimulatedOwner({ owner: owner(), channel: "tree-autopilot", transport });
-    const open = { workerId: "wrk-1", requestId: "req-7", questions: questions(), firstSeenAt: T0 };
-
-    transport.clock = T0 + 5 * MINUTE;
-    const result = await sim.step({ workerQuestions: [open] });
-    expect(result.status).toBe("acted");
-    expect(transport.calls).toEqual([
-      { method: "orchestrator.state", input: {} },
-      { method: "orchestrator.ask", input: { decisionId: "dec-1", text: "Yes, push" } },
-      { method: "orchestrator.approve", input: { proposalId: "prop-1", text: "Continue req-7 with option a.", confirmed: true } },
-    ]);
-    expect(transport.sent).toEqual([]);
-    expect(sim.log.map((entry) => entry.source)).toEqual(["orchestrator-decision", "orchestrator-proposal"]);
-    expect(sim.counts).toEqual({ messages: 0, rpcCalls: 2, confirmations: 0, actions: 2, misses: 0 });
-
-    // Seen again (the state not yet refreshed): not answered twice.
-    await sim.step({ workerQuestions: [open] });
-    expect(transport.calls.filter((call) => call.method !== "orchestrator.state")).toHaveLength(2);
-  });
-
-  it("uses the state the driver passes, without reading it again", async () => {
-    const transport = new FakeTransport();
-    const sim = new SimulatedOwner({ owner: owner(), channel: "tree-autopilot", transport });
-    await sim.step({ orchestratorState: { approvals: [decision], decisions: [decision] } });
-    expect(transport.calls.map((call) => call.method)).toEqual(["orchestrator.ask"]);
-  });
-
-  it("answers a Worker question after ten simulated minutes, as 0.4.1 does, and logs an Orchestrator miss", async () => {
-    const transport = new FakeTransport();
-    const sim = new SimulatedOwner({ owner: owner(), channel: "tree-autopilot", transport });
-    const open = { workerId: "wrk-1", requestId: "req-7", questions: questions(), firstSeenAt: T0 };
-
-    transport.clock = T0 + 10 * MINUTE - 1;
-    expect((await sim.step({ workerQuestions: [open] })).status).toBe("idle");
-    expect(transport.sent).toEqual([]);
-
-    transport.clock = T0 + 10 * MINUTE;
-    const result = await sim.step({ workerQuestions: [open] });
-    expect(result.status).toBe("acted");
-    expect(transport.sent).toEqual([
-      { agentId: "wrk-1", text: "Reply from the user about `req-7`:\n\nBM-ANSWERS\nrequestId: req-7\nQ6: a — A JSON file\nQ7: b — No, I will push myself" },
-    ]);
-    expect(sim.log[0]).toMatchObject({ source: "orchestrator-miss", channel: "tree-autopilot", at: "2026-09-29T10:10:00.000Z" });
-    expect(sim.counts).toEqual({ messages: 1, rpcCalls: 0, confirmations: 0, actions: 1, misses: 1 });
-
-    transport.clock = T0 + 20 * MINUTE;
-    await sim.step({ workerQuestions: [open] });
-    expect(transport.sent).toHaveLength(1);
-  });
-
-  it("logs a failed answer once and does not try it again", async () => {
-    const transport = new FakeTransport();
-    transport.failRpc = "orchestrator.ask";
-    const sim = new SimulatedOwner({ owner: owner(), channel: "tree-autopilot", transport });
-    await sim.step({ orchestratorState: { approvals: [decision] } });
-    await sim.step({ orchestratorState: { approvals: [decision] } });
-    expect(transport.calls.filter((call) => call.method === "orchestrator.ask")).toHaveLength(1);
-    expect(sim.log[0]!.error).toBe("E_PROPOSAL_SETTLED");
-    expect(sim.counts.actions).toBe(1);
-    expect(sim.ownerActionsPerDecision()).toEqual([]);
-  });
-});
-
 describe("permission requests", () => {
-  it.each(["0.4.1", "tree-autopilot", "decision-rpc"] as const)("are never answered, and stop the owner (%s)", async (channel) => {
+  it.each(["0.4.1", "decision-rpc"] as const)("are never answered, and stop the owner (%s)", async (channel) => {
     const transport = new FakeTransport();
-    transport.state = { approvals: [proposal({ id: "prop-1", command: "Go on." })] };
     transport.stored = [stored({ id: "q:req-7:Q6" })];
     const sim = new SimulatedOwner({ owner: owner(), channel, transport });
     const open = { workerId: "wrk-1", requestId: "req-7", questions: questions(), firstSeenAt: T0 - 60 * MINUTE };
@@ -343,16 +207,19 @@ describe("permission requests", () => {
     expect(later.status).toBe("needed-a-human");
     expect(transport.sent).toEqual([]);
     expect(transport.calls).toEqual([]);
-    expect(sim.counts).toEqual({ messages: 0, rpcCalls: 0, confirmations: 0, actions: 0, misses: 0 });
+    expect(sim.counts).toEqual({ messages: 0, rpcCalls: 0, confirmations: 0, actions: 0 });
     expect(sim.neededHuman).not.toBeNull();
   });
 });
 
 describe("channels", () => {
-  it("implements every channel name", () => {
-    for (const channel of ["0.4.1", "tree-autopilot", "decision-rpc"] as const) {
+  it("implements the two builds the suite measures, 0.4.1 and the tree, and nothing else", () => {
+    for (const channel of ["0.4.1", "decision-rpc"] as const) {
       expect(new SimulatedOwner({ owner: owner(), channel, transport: new FakeTransport() }).channel).toBe(channel);
     }
+    // The channel that measured the tree before Phase 1, on Autopilot, went with its RPCs (autonomy design §B.8).
+    expect(Object.keys(CHANNELS)).toEqual(["0.4.1", "decision-rpc"]);
+    expect(() => new SimulatedOwner({ owner: owner(), channel: "tree-autopilot" as ChannelName, transport: new FakeTransport() })).toThrow(/Unknown owner channel/);
   });
 });
 
@@ -499,7 +366,7 @@ describe("channel decision-rpc", () => {
       ["decision", { rpc: "decisions.answer" }, "a — A JSON file", 1, "decision-rpc"],
       ["decision", { rpc: "decisions.answer" }, "b — No, keep it local", 1, "decision-rpc"],
     ]);
-    expect(sim.counts).toEqual({ messages: 0, rpcCalls: 2, confirmations: 0, actions: 2, misses: 0 });
+    expect(sim.counts).toEqual({ messages: 0, rpcCalls: 2, confirmations: 0, actions: 2 });
     expect(sim.ownerActionsPerDecision()).toEqual([1, 1]);
 
     // Still listed (the store not re-read yet): not answered twice.
@@ -527,7 +394,7 @@ describe("channel decision-rpc", () => {
       items: [{ question: "Push the branch to origin when done?", rule: "override", keyword: "push" }],
     });
     expect(sim.log[0]!.confirmed).toBeUndefined();
-    expect(sim.counts).toEqual({ messages: 0, rpcCalls: 2, confirmations: 1, actions: 3, misses: 0 });
+    expect(sim.counts).toEqual({ messages: 0, rpcCalls: 2, confirmations: 1, actions: 3 });
     expect(sim.ownerActionsPerDecision()).toEqual([1, 2]);
   });
 
@@ -569,17 +436,16 @@ describe("channel decision-rpc", () => {
     await sim.step({ decisions: [decision] });
     await sim.step({ decisions: [decision] });
     expect(transport.calls).toHaveLength(1);
-    expect(sim.log[0]!.error).toBe("E_PROPOSAL_SETTLED");
+    expect(sim.log[0]!.error).toBe("E_DECISION_SETTLED");
     expect(sim.ownerActionsPerDecision()).toEqual([]);
   });
 
   it("never calls a retired RPC or sends a message, whatever it is shown", async () => {
     const transport = new FakeTransport();
-    transport.state = { approvals: [proposal({ id: "prop-1", command: "Go on." })], decisions: [] };
     transport.stored = [stored({ id: "q:req-7:Q6" })];
     const sim = new SimulatedOwner({ owner: owner(), channel: "decision-rpc", transport });
     const open = { workerId: "wrk-1", requestId: "req-7", questions: questions(), firstSeenAt: T0 - 60 * MINUTE };
-    await sim.step({ workerQuestions: [open], orchestratorState: transport.state });
+    await sim.step({ workerQuestions: [open] });
     transport.clock = T0 + 60 * MINUTE;
     await sim.step({ workerQuestions: [open] });
     expect(transport.calls.map((call) => call.method)).toEqual(["decisions.list", "decisions.answer", "decisions.list"]);

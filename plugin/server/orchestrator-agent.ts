@@ -9,14 +9,14 @@
  *   folder the plugin creates (`0700`) with a short `README.md`, opened as a
  *   workspace with `paseo.workspaces.open({ cwd })` (Q-077, verified on an
  *   isolated daemon — design §3.3).
- * - It is created as the first design's assessment agent was
- *   (`assessment.ts`): provider `bm-orchestrator/<profile model>` (the bare
- *   alias without a model), mode by the Reviewer rule
- *   (`assessmentPostureOf`, never `dangerous`/`planning`), the labels above
+ * - It is created as the first design's assessment agent was: provider
+ *   `bm-orchestrator/<profile model>` (the bare alias without a model,
+ *   `orchestratorProviderSelection`), mode by the Reviewer rule
+ *   (`orchestratorPostureOf`, never `dangerous`/`planning`), the labels above
  *   plus `bm.version`, the title "Beads Orchestrator", and a short first
  *   prompt. The `agent.create` hook adds its instructions and its tools.
  * - No usable profile or provider → `E_ORCHESTRATOR_UNAVAILABLE`, nothing
- *   created (`assessmentTargetOf`).
+ *   created (`orchestratorTargetOf`).
  * - Paseo fixes an agent's system prompt when it is created, so each
  *   Orchestrator carries `bm.instructions=<hash of its instructions>`; one
  *   without the current hash is **outdated**. One created before the endpoint's
@@ -43,20 +43,20 @@ import {
 } from "../shared/contracts";
 import { PLUGIN_VERSION } from "../shared/version";
 import { listAllAgents } from "./agent-role";
-import {
-  assessmentPostureOf,
-  assessmentProviderSelection,
-  assessmentStartedBroken,
-  assessmentTargetOf,
-  type AssessmentAgentSnapshot,
-} from "./assessment";
-import { DataHomeError, TRACES_DIR_NAME, ensureDataHome, resolveDataHome, unusableDataHomeMessage, type DataHomeDeps } from "./data-home";
+import { aliasBases } from "./alias-bases";
+import { availableProviders } from "./role-choices";
+import { capabilityOf, chooseModeId, featuresFor, modesFor, profileOf, runPostureOf } from "./role-mode";
+import { TRACES_DIR_NAME, ensureDataHome, type DataHomeDeps } from "./data-home";
 import { readTimelinePages, type LiveTimelinePaseo } from "./live-timeline";
 import { isPluginNotice } from "./notices";
 import { ORCHESTRATOR_INSTRUCTIONS } from "./orchestrator-instructions";
 import { INSTRUCTIONS_LABEL, instructionsHashOf } from "./instructions-label";
 import { orchestratorDirOf } from "./orchestrator-store";
+import { coded, errorText, requireDataHome } from "./rpc-kit";
 import { ensureStoreDir, writeStoreFileAtomically } from "./trace-store";
+
+/** The profile and provider alias the Orchestrator runs on (design §3.1). */
+export const ORCHESTRATOR_PROVIDER_ID = "bm-orchestrator";
 
 /** The label pair that marks the one Orchestrator (design §3.3). */
 export const ORCHESTRATOR_ROLE_LABEL = "bm.role";
@@ -90,9 +90,10 @@ export const ORCHESTRATOR_HOME_README = `# Beads Orchestrator
 
 This folder is the workspace of paseo-bm's Beads Orchestrator: the agent that
 reads the work of every paseo-bm project on this machine and tells their Beads
-Managers what to do. It sends a command itself only in a project where you
-turned Autopilot on, or right after you tell it to in its chat; otherwise it
-asks you in the Inbox of Beads Manager, with the command ready on an option. It
+Managers what to do. It sends a command itself only where you delegated what
+the command does, in Settings → Autonomy, or right after you tell it to in its
+chat; otherwise it asks you in the Inbox of Beads Manager, with the command
+ready on an option. It
 never asks for a commit, push or deploy, or to touch real data, unless you said
 so, and it asks you on big decisions.
 
@@ -111,7 +112,7 @@ export const ORCHESTRATOR_FIRST_PROMPT_START = "The user opened you from ";
 /** The first message of a new Orchestrator: its tools, and to wait for the user. */
 export const ORCHESTRATOR_FIRST_PROMPT = [
   `${ORCHESTRATOR_FIRST_PROMPT_START}the Inbox of Beads Manager (paseo-bm).`,
-  "Your tools: bm_projects (where the paseo-bm projects stand), bm_request (one request), bm_agent_messages (recent messages of a paseo-bm agent), bm_decisions (the owner's decisions, their answers and grants), bm_repo (read-only git in a project's workspace), bm_note (your notes on a project), bm_ask_owner (put a decision to the owner, with a prepared command per option), bm_decide (answer a Worker's stored question with one of its options, on a project's Autopilot), bm_send_command (a command to a project's Manager, within the owner's authority), bm_direct_worker (correct a Worker, on the same terms; its Manager gets a copy), bm_set_autopilot (only when the owner asks) and bm_assessment (the result of a workflow assessment).",
+  "Your tools: bm_projects (where the paseo-bm projects stand), bm_request (one request), bm_agent_messages (recent messages of a paseo-bm agent), bm_decisions (the owner's decisions, their answers and grants), bm_repo (read-only git in a project's workspace), bm_note (your notes on a project), bm_findings (a project's measured findings, for advice), bm_why (why a bead, a changed file or a decision exists: the chain behind it), bm_ask_owner (put a decision to the owner, with a prepared command or change per option), bm_decide (answer a Worker's stored question with one of its options, where the owner delegated its class to you), bm_predict (predict the owner's answer when asked), bm_send_command (a command to a project's Manager, within the owner's authority), bm_direct_worker (correct a Worker, on the same terms; its Manager gets a copy), bm_compact (have a Manager or a Worker compact its context at its next safe point, within the owner's Settings) and bm_handoff (have a Worker's request handed to a new Worker at its next safe point, within the owner's Settings).",
   "Do not look at any project yet. Reply with one short line saying you are ready, then wait for the user.",
 ].join("\n");
 
@@ -169,7 +170,7 @@ export interface OrchestratorAgentPaseo {
           title: string;
           labels: Record<string, string>;
           prompt: string;
-        }): Promise<{ readonly id: string; current(): AssessmentAgentSnapshot | null }>;
+        }): Promise<{ readonly id: string; current(): CreatedAgentSnapshot | null }>;
       };
     };
   };
@@ -185,6 +186,91 @@ export interface OrchestratorAgentDeps extends DataHomeDeps {
   isToolsStale?: (agent: { id: string; createdAt: string | null }) => boolean;
   /** The clock of the daily replacement (design §6B.6); `new Date()` by default. */
   now?: () => Date;
+}
+
+// ---------------------------------------------------------------------------
+// Where it runs (design §3.1, §3.3).
+// ---------------------------------------------------------------------------
+
+export interface OrchestratorTarget {
+  /** The provider the `bm-orchestrator` alias extends (`claude`, `codex`, …). */
+  provider: string;
+  /** The profile's model; null when the profile sets none (the provider's default). */
+  model: string | null;
+  /** The mode set by hand on the profile; null when it sets none. Used only under the Reviewer rule. */
+  modeId: string | null;
+}
+
+/**
+ * The provider and model the Orchestrator will run on, from the
+ * `bm-orchestrator` profile and the provider its alias extends. Fails
+ * `E_ORCHESTRATOR_UNAVAILABLE` — and nothing may be created — when the profile
+ * cannot be read or does not exist, the alias names no provider, or Paseo does
+ * not report that provider as available (including when it cannot say).
+ */
+export async function orchestratorTargetOf(paseo: unknown): Promise<OrchestratorTarget> {
+  const unavailable = (detail: string) => new DashboardError("E_ORCHESTRATOR_UNAVAILABLE", detail);
+  const quiet = (): void => {};
+  const [profile, bases] = await Promise.all([profileOf(paseo, ORCHESTRATOR_PROVIDER_ID, quiet), aliasBases(paseo)]);
+  if (profile === null) {
+    throw unavailable(
+      `Paseo has no ${ORCHESTRATOR_PROVIDER_ID} profile paseo-bm can read; open Beads Manager → Settings to create the Beads Orchestrator role`,
+    );
+  }
+  const provider = bases[ORCHESTRATOR_PROVIDER_ID];
+  if (provider === undefined) {
+    throw unavailable(`the ${ORCHESTRATOR_PROVIDER_ID} provider names no provider it extends; choose one in Settings → Agents`);
+  }
+  const available = await availableProviders(paseo);
+  if (available === null) throw unavailable(`Paseo cannot say whether ${provider} is available right now; try again`);
+  if (!available.has(provider)) throw unavailable(`${provider} is not available in Paseo right now`);
+  return { provider, model: profile.model, modeId: profile.modeId };
+}
+
+/** `bm-orchestrator/<profile model>`, or the bare alias when the profile sets no model. */
+export function orchestratorProviderSelection(target: OrchestratorTarget): string {
+  return target.model === null ? ORCHESTRATOR_PROVIDER_ID : `${ORCHESTRATOR_PROVIDER_ID}/${target.model}`;
+}
+
+/**
+ * The Orchestrator's start posture, chosen as `fallback-switch.ts` chooses a
+ * replacement Worker's but under the Reviewer rule (design §3.1): the daemon
+ * refuses a creation whose mode it cannot inherit, so the mode is passed
+ * explicitly. Tiered providers (Claude, Codex) get `chooseModeId` — never a
+ * `dangerous` or `planning` mode; an untiered one (OpenCode) a listed mode and
+ * `auto_accept: false`; a provider without modes (Pi) neither.
+ */
+export async function orchestratorPostureOf(
+  paseo: unknown,
+  target: OrchestratorTarget,
+  cwd: string | undefined,
+  log: (message: string) => void,
+): Promise<{ modeId?: string; featureValues?: Record<string, unknown> }> {
+  const modes = await modesFor(paseo, ORCHESTRATOR_PROVIDER_ID, log, cwd);
+  const capability = capabilityOf(modes);
+  const features = capability === "untiered" ? await featuresFor(paseo, orchestratorProviderSelection(target), cwd, log) : null;
+  const posture = runPostureOf("orchestrator", capability, modes ?? [], features, target.modeId);
+  const modeId =
+    capability === "tiered" && modes !== null
+      ? chooseModeId("orchestrator", modes, undefined, target.modeId)
+      : (posture?.modeId ?? undefined);
+  const featureValues = posture?.featureValues ?? undefined;
+  return {
+    ...(modeId !== undefined ? { modeId } : {}),
+    ...(featureValues !== undefined ? { featureValues } : {}),
+  };
+}
+
+/** What a just-created agent says about itself; the fields `manager.ts` reads for a broken start. */
+export interface CreatedAgentSnapshot {
+  status?: string;
+  providerUnavailable?: boolean;
+  lastError?: string;
+}
+
+/** The snapshot of a just-created agent says its provider could not start (as `manager.ts` reads it). */
+export function startedBroken(snapshot: CreatedAgentSnapshot | null): boolean {
+  return snapshot !== null && (snapshot.status === "error" || snapshot.providerUnavailable === true);
 }
 
 /** Newest first by `createdAt`; ties (or unparsable times) broken by id so the choice is stable. */
@@ -261,32 +347,20 @@ export function orchestratorHomeOf(home: string): string {
 /**
  * Creates `<data folder>/orchestrator/home` (`0700`, no symlink on the way, as
  * every store folder) and writes its `README.md` when the text differs.
- * Returns the folder. No data folder → `E_DATA_HOME_UNAVAILABLE`; a failed
- * write → `E_ORCHESTRATOR_WRITE_FAILED`.
+ * Returns the folder. No data folder, or one that cannot be created →
+ * `E_DATA_HOME_UNAVAILABLE`; a failed write → `E_ORCHESTRATOR_WRITE_FAILED`
+ * (rpc-kit `coded`, code review 2026-09-30 §3.2).
  */
 export function ensureOrchestratorHome(deps: DataHomeDeps = {}): string {
-  let home: string | null;
-  try {
-    home = resolveDataHome(deps).home;
-  } catch {
-    home = null;
-  }
-  if (home === null) {
-    throw new DashboardError("E_DATA_HOME_UNAVAILABLE", `cannot open the Orchestrator: ${unusableDataHomeMessage(deps)}`);
-  }
+  const home = requireDataHome(deps, "open the Orchestrator");
   const folder = orchestratorHomeOf(home);
   const location = { tracesDir: join(home, TRACES_DIR_NAME) };
-  try {
+  return coded("E_ORCHESTRATOR_WRITE_FAILED", `prepare the Orchestrator's folder ${folder}`, () => {
     ensureDataHome(home, deps);
     ensureStoreDir(location.tracesDir, folder);
     writeStoreFileAtomically(location, join(folder, "README.md"), ORCHESTRATOR_HOME_README);
-  } catch (error) {
-    const detail = error instanceof DataHomeError || error instanceof DashboardError ? error.message : String(error);
-    throw new DashboardError("E_ORCHESTRATOR_WRITE_FAILED", `cannot prepare the Orchestrator's folder ${folder}: ${detail}`, {
-      cause: error,
-    });
-  }
-  return folder;
+    return folder;
+  });
 }
 
 /**
@@ -299,11 +373,11 @@ export function ensureOrchestratorHome(deps: DataHomeDeps = {}): string {
 export async function handleOrchestratorOpenPreview(paseo: OrchestratorAgentPaseo): Promise<OrchestratorOpenPreviewOutput> {
   const existing = await findOrchestratorAgent(paseo);
   if (existing === null) {
-    const target = await assessmentTargetOf(paseo);
+    const target = await orchestratorTargetOf(paseo);
     return { exists: false, provider: target.provider, model: target.model, workspace: ORCHESTRATOR_WORKSPACE };
   }
   try {
-    const target = await assessmentTargetOf(paseo);
+    const target = await orchestratorTargetOf(paseo);
     return { exists: true, provider: target.provider, model: target.model, workspace: ORCHESTRATOR_WORKSPACE };
   } catch (error) {
     if (!(error instanceof DashboardError) || error.code !== "E_ORCHESTRATOR_UNAVAILABLE") throw error;
@@ -332,13 +406,13 @@ async function openOnce(
   const replace = existing !== null && ((recreate && replacementReasonOf(existing, deps) !== null) || existing.id === retire);
   if (existing !== null && !replace) return { agentId: existing.id, created: false };
 
-  const target = await assessmentTargetOf(paseo);
+  const target = await orchestratorTargetOf(paseo);
   const folder = ensureOrchestratorHome(deps);
   const log = deps.log ?? ((message: string) => console.warn(message));
   const workspace = await paseo.workspaces.open({ cwd: folder });
-  const posture = await assessmentPostureOf(paseo, target, folder, log);
+  const posture = await orchestratorPostureOf(paseo, target, folder, log);
   const handle = await paseo.workspaces.ref(workspace.id).agents.create({
-    config: { provider: assessmentProviderSelection(target), ...posture },
+    config: { provider: orchestratorProviderSelection(target), ...posture },
     title: ORCHESTRATOR_TITLE,
     labels: {
       [ORCHESTRATOR_ROLE_LABEL]: ORCHESTRATOR_ROLE_VALUE,
@@ -348,7 +422,7 @@ async function openOnce(
     },
     prompt: ORCHESTRATOR_FIRST_PROMPT,
   });
-  if (assessmentStartedBroken(handle.current())) {
+  if (startedBroken(handle.current())) {
     // Kept, not archived (ADR-005): its chat shows the provider's error, and the next open reopens it.
     const snapshot = handle.current();
     log(`[paseo-bm] the Beads Orchestrator ${handle.id} did not start: ${snapshot?.lastError ?? "its provider is unavailable"}`);
@@ -388,7 +462,7 @@ async function openShared(paseo: OrchestratorAgentPaseo, deps: OrchestratorAgent
  * it is current; a new one, created as `orchestrator.open { confirmed: true,
  * recreate: true }` creates it, when the newest is outdated or has lost its
  * tools — the owner consented to an Orchestrator when first opening it, and
- * waking one that ignores Autopilot or has no tools helps nobody — or when a
+ * waking one on older instructions or with no tools helps nobody — or when a
  * current one is more than a day old, idle, and the owner has been quiet in
  * its chat for 2 hours (design §6B.6, `dayOldReasonOf`), so its context stays
  * small; null when there is none, since the plugin never creates one the
@@ -416,7 +490,7 @@ export async function wakeableOrchestrator(
   try {
     reason = stale ?? (await dayOldReasonOf(paseo, existing, deps));
   } catch (error) {
-    log(`[paseo-bm] could not tell whether the Beads Orchestrator ${existing.id} is a day old: ${error instanceof Error ? error.message : String(error)}`);
+    log(`[paseo-bm] could not tell whether the Beads Orchestrator ${existing.id} is a day old: ${errorText(error)}`);
     reason = null;
   }
   if (reason === null) return existing;
@@ -429,7 +503,7 @@ export async function wakeableOrchestrator(
     return { id: opened.agentId };
   } catch (error) {
     log(
-      `[paseo-bm] the Beads Orchestrator ${existing.id} ${reason} and could not be replaced: ${error instanceof Error ? error.message : String(error)}`,
+      `[paseo-bm] the Beads Orchestrator ${existing.id} ${reason} and could not be replaced: ${errorText(error)}`,
     );
     return existing;
   }

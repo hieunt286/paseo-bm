@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { pressables, renderTree, texts, type RNode } from "./helpers/element-tree";
-import { DECISION_UI_IDLE, decisionCardOf, decisionCardView, type DecisionUi } from "../plugin/client/chat-cards";
+import { decisionCardOf } from "../plugin/client/chat-card-parse";
+import { DECISION_UI_IDLE, decisionCardView, type DecisionUi } from "../plugin/client/chat-card-decision";
 import { seedOf } from "../plugin/client/inbox-model";
 import type { Decision } from "../plugin/shared/decisions";
 
@@ -10,12 +11,6 @@ import type { Decision } from "../plugin/shared/decisions";
  * of the chat). Short answers stay side by side; once one is a sentence, every
  * option takes the card's width and its text wraps.
  */
-
-vi.mock("react-native", () => {
-  const make = (name: string) => Object.assign(() => null, { displayName: name, primitive: true });
-  return { Pressable: make("Pressable"), ScrollView: make("ScrollView"), Text: make("Text"), TextInput: make("TextInput"), View: make("View") };
-});
-vi.mock("@getpaseo/plugin/client/react-native", () => ({ Icon: Object.assign(() => null, { displayName: "Icon", primitive: true }) }));
 
 // The root tsconfig has no `jsx`, so the .tsx module loads through a non-literal specifier.
 const cardPath = "../plugin/client/chat-card.tsx";

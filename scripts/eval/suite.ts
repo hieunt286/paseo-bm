@@ -3,7 +3,11 @@
  * §6.5, §8):
  *
  *   npm run eval:suite -- --version <npm spec | tree> [--only S1,S2] [--work <dir>]
- *                         [--runs <n>] [--port <n>]
+ *                         [--runs <n>] [--port <n>] [--role-model <role>=<baseProvider>/<model>]
+ *
+ * `--role-model` is the model-choice experiment of autonomy design §F.2
+ * (REQ-162): exactly one role runs on another model, the others on the
+ * owner's; the swap is recorded in `scorecard.json` (`roleModelSwap`).
  *
  * It only sequences the building blocks: `scenario.ts` (what to run),
  * `fixtures.ts` (the repository), `owner.ts` (the simulated owner), `score.ts`
@@ -17,8 +21,10 @@
  * 3. `setup.ensure-roles`, every role set to the owner's model (read, read-only,
  *    from the owner's `~/.paseo/config.json` `bm-*` profiles) with
  *    `roles.save-settings`, `setup.grant-agent-tools { confirmed: true }`;
- * 4. `tree` only: `orchestrator.open { confirmed: true }`, and Autopilot on for
- *    each scenario workspace;
+ * 4. `tree` only: `orchestrator.open { confirmed: true }`, and for each scenario
+ *    workspace the owner's policy with every class that may be delegated
+ *    delegated to the Orchestrator (`autonomy.set`, `scenarioPolicyCalls`;
+ *    owner decision E-2, evaluation design §11);
  * 5. per scenario and run: fixture, project and workspace, `manager.ensure`, the
  *    requests sent as the app sends them, the simulated owner every 15 s (for
  *    the tree through the `decision-rpc` channel: `decisions.list` of the run's
@@ -51,16 +57,15 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { parseQuestions } from "../../plugin/shared/bm-questions.js";
-import { legacyChatWaitingRpc, legacyOrchestratorStateRpc, type LegacyWaitingWorker } from "./legacy-contracts.js";
+import { DECISION_CLASSES, isHardOwnerClass, type DecisionClass } from "../../plugin/shared/decisions.js";
+import { legacyChatWaitingRpc, type LegacyWaitingWorker } from "./legacy-contracts.js";
 import { buildFixture, type BuiltFixture } from "./fixtures.js";
 import {
   answerableDecisions,
   DECISIONS_LIST_RPC,
-  pendingForOwner,
   SimulatedOwner,
   type ChannelName,
   type OpenWorkerQuestions,
-  type OrchestratorView,
   type OwnerLogEntry,
   type OwnerTransport,
   type PendingPermission,
@@ -100,7 +105,7 @@ export const ORCHESTRATOR_SETTLE_TIMEOUT_MS = 5 * 60_000;
 export const AGENTS_PAGE_LIMIT = 200;
 
 export const USAGE = `usage: npm run eval:suite -- --version <npm spec | tree> [--only S1,S2] [--work <dir>]
-                           [--runs <n>] [--port <n>]
+                           [--runs <n>] [--port <n>] [--role-model <role>=<baseProvider>/<model>]
 
   --version <v>   what to test: "tree" (this checkout's plugin/), or an npm spec:
                   npm:paseo-bm-plugin@0.4.1, paseo-bm-plugin@0.4.1 or 0.4.1
@@ -108,6 +113,10 @@ export const USAGE = `usage: npm run eval:suite -- --version <npm spec | tree> [
   --work <dir>    the run folder, new or empty (default: a new folder under the OS temp dir)
   --runs <n>      runs per scenario, 1-${MAX_RUNS} (default ${DEFAULT_RUNS})
   --port <n>      the isolated daemon's port (default ${DEFAULT_PORT}; never ${OWNER_DAEMON_PORT})
+  --role-model <role>=<baseProvider>/<model>
+                  an experiment: run one role (manager, worker, reviewer, orchestrator) on this
+                  model instead of the owner's; every other role stays the owner's. Given once;
+                  recorded in scorecard.json
 
 Starts an isolated Paseo daemon under <work>, runs the scenarios with the simulated
 owner, writes <work>/scorecard.json and <work>/replay.json, and stops that daemon.
@@ -163,11 +172,40 @@ export function versionLabel(version: VersionSpec): string {
 /**
  * How the simulated owner answers: the tree (Phase 1 and later) through the
  * decision RPCs (`decision-rpc`, autonomy design §A.13); a published build
- * with `BM-ANSWERS` to its Workers (`0.4.1`). `tree-autopilot` measured the
- * tree before Phase 1, whose RPCs the tree no longer has.
+ * with `BM-ANSWERS` to its Workers (`0.4.1`).
  */
 export function channelFor(version: VersionSpec): ChannelName {
   return version.kind === "tree" ? "decision-rpc" : "0.4.1";
+}
+
+/** One plugin RPC the driver calls, by its contract name. */
+export interface RpcCall {
+  method: string;
+  input: Record<string, unknown>;
+}
+
+/**
+ * The classes the tree's scenario projects delegate: every class that may be
+ * delegated — all but release, data, security and cost
+ * (`HARD_OWNER_CLASSES`, which `autonomy.set` refuses to delegate) — riskiest
+ * first.
+ */
+export const DELEGATED_CLASSES: readonly DecisionClass[] = DECISION_CLASSES.filter((decisionClass) => !isHardOwnerClass(decisionClass));
+
+/**
+ * What the driver sets on a scenario's workspace once it is registered (owner
+ * decision E-2, evaluation design §11): for the tree, the owner's policy with
+ * every class of `DELEGATED_CLASSES` delegated to the Orchestrator —
+ * `autonomy.set { workspaceId, class, mode: "delegate", confirmed: true,
+ * predictor: "orchestrator" }` each (`autonomy.set` checks no eligibility, so
+ * the suite may set it). Nothing for a published build, which has no policy.
+ */
+export function scenarioPolicyCalls(version: VersionSpec, workspaceId: string): RpcCall[] {
+  if (version.kind !== "tree") return [];
+  return DELEGATED_CLASSES.map((decisionClass) => ({
+    method: "autonomy.set",
+    input: { workspaceId, class: decisionClass, mode: "delegate", confirmed: true, predictor: "orchestrator" },
+  }));
 }
 
 /** What `paseo plugin add` installs. */
@@ -182,6 +220,8 @@ export interface SuiteOptions {
   work: string | null;
   runs: number;
   port: number;
+  /** `--role-model`: the one role whose model this run swaps (autonomy design §F.2, REQ-162); null = every role the owner's. */
+  roleModel: RoleModelSwap | null;
 }
 
 function positiveInteger(flag: string, raw: string | undefined): number {
@@ -196,6 +236,7 @@ export function parseSuiteArgs(argv: readonly string[]): SuiteOptions | null {
   let work: string | null = null;
   let runs = DEFAULT_RUNS;
   let port = DEFAULT_PORT;
+  let roleModel: RoleModelSwap | null = null;
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index]!;
     const next = (): string => {
@@ -230,13 +271,19 @@ export function parseSuiteArgs(argv: readonly string[]): SuiteOptions | null {
       case "--port":
         port = positiveInteger(flag, next());
         break;
+      case "--role-model":
+        // One role per run: a second swap would leave the scorecard unable to say which one changed the result.
+        if (roleModel !== null) throw new SuiteUsageError("--role-model swaps one role's model per run; it is given once");
+        roleModel = parseRoleModel(next());
+        break;
       default:
         throw new SuiteUsageError(`unknown argument: ${flag}`);
     }
   }
   if (version === null) throw new SuiteUsageError("--version is required");
+  if (roleModel?.role === "orchestrator" && version.kind !== "tree") throw new SuiteUsageError("--role-model orchestrator=… needs --version tree: 0.4.1 has no Orchestrator");
   assertPort(port);
-  return { version, only, work, runs, port };
+  return { version, only, work, runs, port, roleModel };
 }
 
 // ── Guards (pure) ────────────────────────────────────────────────────────────
@@ -349,6 +396,79 @@ export function rolesToSave(listed: readonly string[], version: VersionSpec, mod
   return roles;
 }
 
+// ── The model-choice experiment (pure) ───────────────────────────────────────
+
+/** `--role-model <role>=<baseProvider>/<model>`: the one role whose model a run swaps. */
+export interface RoleModelSwap {
+  role: SuiteRole;
+  baseProvider: string;
+  model: string;
+}
+
+/** What `scorecard.json` records of a swap: the owner's model for the role (null when they have none) and the one saved instead. */
+export interface RoleModelSwapRecord {
+  role: SuiteRole;
+  owner: RoleModel | null;
+  swapped: RoleModel;
+}
+
+/** A base provider id as Paseo names one (`claude`, `codex`, `opencode`, `pi`); a `bm-*` role alias is refused apart. */
+const BASE_PROVIDER = /^[a-z][a-z0-9._-]*$/;
+/** A model id: `claude-opus-5-5[1m]`, `gpt-5.6-sol`, OpenCode's `<provider>/<model>`; no space, no shell syntax. */
+const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:@/[\]-]*$/;
+const MODEL_ID_MAX = 200;
+
+/**
+ * Reads `<role>=<baseProvider>/<model>`: the role is one of `SUITE_ROLES`, the
+ * base provider is split at the first `/` (the model may hold more, as
+ * OpenCode's do) and is never a `bm-*` alias. Throws `SuiteUsageError` for
+ * anything else. Pure.
+ */
+export function parseRoleModel(raw: string): RoleModelSwap {
+  const value = raw.trim();
+  const usage = `--role-model ${JSON.stringify(raw)}: expected <role>=<baseProvider>/<model>, role one of ${SUITE_ROLES.join(", ")}`;
+  const equals = value.indexOf("=");
+  if (equals <= 0) throw new SuiteUsageError(usage);
+  const role = value.slice(0, equals).trim().toLowerCase();
+  const target = value.slice(equals + 1).trim();
+  if (!(SUITE_ROLES as readonly string[]).includes(role)) throw new SuiteUsageError(`--role-model: unknown role ${JSON.stringify(role)}; one of ${SUITE_ROLES.join(", ")}`);
+  const slash = target.indexOf("/");
+  if (slash <= 0 || slash === target.length - 1) throw new SuiteUsageError(usage);
+  const baseProvider = target.slice(0, slash);
+  const model = target.slice(slash + 1);
+  if (/^bm-/i.test(baseProvider)) throw new SuiteUsageError(`--role-model: ${baseProvider} is a paseo-bm role alias; name its base provider (claude, codex, …)`);
+  if (!BASE_PROVIDER.test(baseProvider)) throw new SuiteUsageError(`--role-model: ${JSON.stringify(baseProvider)} is not a provider id`);
+  if (model.length > MODEL_ID_MAX || !MODEL_ID.test(model)) throw new SuiteUsageError(`--role-model: ${JSON.stringify(model)} is not a model id`);
+  return { role: role as SuiteRole, baseProvider, model };
+}
+
+/**
+ * The role models with the swap applied, and its record. Only the swapped
+ * role changes. On the owner's base provider it keeps their thinking level
+ * and mode (`roles.save-settings` refuses a thinking level the new model does
+ * not list, before any scenario runs); on another provider both fall to null
+ * — the model's default thinking and the plugin's own posture for the role,
+ * as a fresh setup gives it. A swap to the owner's own model is refused: the
+ * run would be labelled an experiment and be none. Pure.
+ */
+export function applyRoleModelSwap(
+  models: Partial<Record<SuiteRole, RoleModel>>,
+  swap: RoleModelSwap,
+): { models: Partial<Record<SuiteRole, RoleModel>>; record: RoleModelSwapRecord } {
+  const owner = models[swap.role] ?? null;
+  if (owner !== null && owner.baseProvider === swap.baseProvider && owner.model === swap.model) {
+    throw new SuiteUsageError(`--role-model: ${swap.baseProvider}/${swap.model} is already the owner's model for the ${swap.role}; nothing to swap`);
+  }
+  const sameProvider = owner !== null && owner.baseProvider === swap.baseProvider;
+  const swapped: RoleModel = {
+    baseProvider: swap.baseProvider,
+    model: swap.model,
+    thinkingOptionId: sameProvider ? owner.thinkingOptionId : null,
+    modeId: sameProvider ? owner.modeId : null,
+  };
+  return { models: { ...models, [swap.role]: swapped }, record: { role: swap.role, owner, swapped } };
+}
+
 // ── Observation (pure) ───────────────────────────────────────────────────────
 
 /** An agent as the driver reads it from `fetchAgents`. */
@@ -418,7 +538,7 @@ export function pendingPermissionsOf(agents: readonly AgentView[]): PendingPermi
  * The Worker questions still open in the run's workspace, from `chat.waiting`
  * of a build before Phase 1 (`legacy-contracts.ts`; what its app showed the
  * owner): the questions of each waiting Worker's report not answered yet. `firstSeen` remembers when a
- * set was first seen (the Orchestrator-miss clock); it is updated in place.
+ * set was first seen (the oldest is answered first); it is updated in place.
  */
 export function openQuestionsFromWaiting(
   waiting: readonly Pick<LegacyWaitingWorker, "workspaceId" | "workerId" | "requestId" | "text" | "answered">[],
@@ -439,20 +559,12 @@ export function openQuestionsFromWaiting(
   return out;
 }
 
-/** The pending decisions and proposals of the run's workspace only. */
-export function orchestratorViewFor(state: OrchestratorView, workspaceId: string): OrchestratorView {
-  return {
-    approvals: state.approvals.filter((entry) => entry.workspaceId === workspaceId),
-    decisions: (state.decisions ?? []).filter((entry) => entry.workspaceId === workspaceId),
-  };
-}
-
 // ── The loop decision (pure) ─────────────────────────────────────────────────
 
 export interface LoopPoll {
   /** A watched agent is running or initializing. */
   busy: boolean;
-  /** Open Worker questions plus pending Orchestrator decisions and proposals (or 1 when they could not be read). */
+  /** Open Worker questions, or unsettled decisions (or 1 when they could not be read). */
   pending: number;
   /** What the owner did on this poll. */
   owner: "acted" | "idle" | "needed-a-human";
@@ -482,7 +594,7 @@ export function decideLoop(quietPolls: number, poll: LoopPoll, now: number, dead
 
 /**
  * One scorer entry per answered item of every delivered answer: `target` is
- * what reached the owner (the question, decision or proposal), `text` the
+ * what reached the owner (the question or decision), `text` the
  * answer given to it, so "asked about X" and "yes about X" are judged per
  * question. An answer whose send failed never reached its agent and is left out.
  */
@@ -492,7 +604,7 @@ export function toScoreOwnerLog(entries: readonly OwnerLogEntry[]): ScoreOwnerLo
     .flatMap((entry) =>
       entry.items.map((item) => ({
         at: entry.at,
-        channel: entry.source === "orchestrator-miss" ? "orchestrator-miss" : entry.channel,
+        channel: entry.channel,
         text: item.answer,
         target: item.question,
       })),
@@ -826,7 +938,7 @@ class Suite {
       workspaceId = await this.registerWorkspace(fixture.repo, id.toLowerCase());
       record["workspaceId"] = workspaceId;
       if (tree) costBefore = orchestratorCost(await this.agents(true));
-      if (tree) await this.rpc("orchestrator.set-autopilot", { workspaceId, enabled: true, confirmed: true });
+      for (const call of scenarioPolicyCalls(this.#options.version, workspaceId)) await this.rpc(call.method, call.input);
       const managerId = await this.managerFor(workspaceId);
       record["managerId"] = managerId;
       this.#io.log(`${stamp()} workspace ${workspaceId}, Manager ${managerId}`);
@@ -877,18 +989,8 @@ class Suite {
             pendingUnknown = true;
             this.#io.log(`${stamp()} chat.waiting failed: ${errorText(error)}`);
           }
-          let orchestratorState: OrchestratorView | undefined;
-          if (owner.channel === "tree-autopilot") {
-            try {
-              orchestratorState = orchestratorViewFor(legacyOrchestratorStateRpc.output.parse(await this.rpc(legacyOrchestratorStateRpc.name, {})), workspaceId);
-            } catch (error) {
-              pendingUnknown = true;
-              orchestratorState = { approvals: [], decisions: [] };
-              this.#io.log(`${stamp()} orchestrator.state failed: ${errorText(error)}`);
-            }
-          }
-          step = await owner.step({ workerQuestions, permissions, ...(orchestratorState === undefined ? {} : { orchestratorState }) });
-          pending = pendingUnknown ? 1 : workerQuestions.length + (orchestratorState === undefined ? 0 : pendingForOwner(orchestratorState).length);
+          step = await owner.step({ workerQuestions, permissions });
+          pending = pendingUnknown ? 1 : workerQuestions.length;
         }
         const busy = watched.some(isBusy);
         const acted = step.status === "acted" ? ` · owner answered ${step.entries.length}` : "";
@@ -1016,10 +1118,12 @@ export async function runSuite(argv: readonly string[], io: Io = { log: (line) =
   const owner = ownerHomes(nodeHomedir());
   let scenarios: Scenario[];
   let models: Partial<Record<SuiteRole, RoleModel>>;
+  let roleModelSwap: RoleModelSwapRecord | null = null;
   const suite = new Suite(options, io, repo);
   try {
     scenarios = await loadScenarios(repo, options.only);
     models = ownerRoleModels(readOwnerConfig(owner));
+    if (options.roleModel !== null) ({ models, record: roleModelSwap } = applyRoleModelSwap(models, options.roleModel));
     rolesToSave(["manager", "worker", "reviewer"], options.version, models);
     await suite.prepare();
   } catch (error) {
@@ -1032,6 +1136,10 @@ export async function runSuite(argv: readonly string[], io: Io = { log: (line) =
 
   const guardBefore = fingerprintOwner(owner);
   io.log(`${stamp()} run folder ${suite.work} · ${versionLabel(options.version)} · ${scenarios.map((s) => s.id).join(",")} × ${options.runs}`);
+  if (roleModelSwap !== null) {
+    const from = roleModelSwap.owner === null ? "no owner model" : `${roleModelSwap.owner.baseProvider}/${roleModelSwap.owner.model}`;
+    io.log(`${stamp()} experiment: the ${roleModelSwap.role} runs ${roleModelSwap.swapped.baseProvider}/${roleModelSwap.swapped.model} instead of ${from}; every other role is the owner's`);
+  }
   const onSignal = (signal: NodeJS.Signals) => {
     io.log(`${stamp()} ${signal}: stopping the isolated daemon`);
     suite.stopDaemon();
@@ -1070,7 +1178,7 @@ export async function runSuite(argv: readonly string[], io: Io = { log: (line) =
   }
 
   if (scored.length > 0) {
-    const scorecard = buildScorecard({ pluginVersion: versionLabel(options.version), scenarios: scored });
+    const scorecard = buildScorecard({ pluginVersion: versionLabel(options.version), scenarios: scored, roleModelSwap });
     const path = await writeScorecard(suite.work, scorecard);
     const s = scorecard.summary;
     io.log(`${stamp()} scorecard ${path}: ${s.runs} run(s), ${s.correctRuns} correct, ${s.boundaryCleanRuns} boundary-clean, ${s.unknownRuns} unknown; stable ${s.stable}/${s.scenarios}`);

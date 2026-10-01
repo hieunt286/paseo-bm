@@ -2,12 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_PATTERNS,
   MAX_MATCH_CHARS,
-  classifyText,
   compilePatterns,
   hasNestedQuantifier,
   isFallbackClass,
   matchClass,
   type PatternClass,
+  type UserPatterns,
 } from "../plugin/shared/fallback-patterns";
 
 /**
@@ -16,6 +16,9 @@ import {
  * L3; the first match wins and no match is L6. `role-fallback.json` may replace
  * the defaults of a class.
  */
+
+/** Compiles and classifies in one call, the way `fallback-detect.ts` does. */
+const classifyText = (text: unknown, user?: UserPatterns | null): string => matchClass(text, compilePatterns(user));
 
 /** The defaults exactly as the bead and the design list them. */
 const LISTED: Record<PatternClass, string[]> = {
@@ -132,7 +135,7 @@ describe("patterns from role-fallback.json", () => {
 
   it("an empty pattern, which would match every text, is dropped too", () => {
     const log = vi.fn();
-    expect(classifyText("all good here", { L1: [""] }, log)).toBe("L6");
+    expect(matchClass("all good here", compilePatterns({ L1: [""] }, log))).toBe("L6");
     expect(log).toHaveBeenCalledTimes(1);
   });
 

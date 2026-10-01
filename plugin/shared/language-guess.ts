@@ -2,9 +2,10 @@
  * A deterministic guess of the language of a piece of text: Vietnamese,
  * English, or `unknown` (Orchestrator design §4.2, "Language guess").
  *
- * The `manager.language-mismatch` rule compares the user's message with the
- * Manager's reply, and a false alarm must be rare, so anything unclear is
- * `unknown`: other languages, text that is too short, code only.
+ * The replay compares the user's message with the Manager's reply
+ * (`eval-metrics.ts` `supplementary.process.languageMismatch`, once a runtime
+ * rule), and a false alarm must be rare, so anything unclear is `unknown`:
+ * other languages, text that is too short, code only.
  *
  * Pure: no I/O, the same text always gives the same answer.
  */

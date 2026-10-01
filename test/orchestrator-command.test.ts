@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { parseAnswers } from "../plugin/shared/bm-questions";
 import { COMMAND_NOTICE_MARKER, isPluginNotice, noticeMarkerOf } from "../plugin/shared/notices";
-import { MAX_PROPOSAL_COMMAND_CHARS, MAX_PROPOSAL_REASON_CHARS, MAX_SENT_TEXT_CHARS } from "../plugin/shared/orchestrator";
-import { EFFECTS, preparedActionSchema, type Effect } from "../plugin/shared/decisions";
+import { MAX_PROPOSAL_COMMAND_CHARS, MAX_PROPOSAL_REASON_CHARS } from "../plugin/shared/orchestrator";
+import { DECISION_CLASSES, EFFECTS, preparedActionSchema, type Effect } from "../plugin/shared/decisions";
 import {
   COMMAND_FROM,
   COMMAND_INTENTS,
+  COORDINATION_HANDOFF_AUTHORITY,
+  DECLARED_COMMAND_INTENTS,
+  HANDOFF_INTENT,
   COMMAND_LIMITS,
   COMMAND_MARKER,
   COMMAND_TO,
@@ -22,8 +25,13 @@ import {
   decisionIdOfAuthority,
   effectsWithheldBy,
   isCommandAuthority,
+  isReadCommandAuthority,
   limitsOf,
   parseCommandBlock,
+  policyAuthorityOf,
+  policyClassOfAuthority,
+  READ_COMMAND_VIA,
+  RETIRED_AUTOPILOT,
   type CommandInput,
 } from "../plugin/shared/orchestrator-command";
 
@@ -33,7 +41,7 @@ const REQ = "req-20260929T101500Z";
 
 const input = (over: Partial<CommandInput> = {}): CommandInput => ({
   from: "orchestrator",
-  via: "autopilot",
+  via: "chat",
   to: "manager",
   requestId: REQ,
   re: "Answer the Worker's question on the export format",
@@ -48,13 +56,13 @@ describe("the block's exact shape (autonomy design §A.7)", () => {
       [
         "BM-COMMAND",
         "from: orchestrator",
-        "via: autopilot",
+        "via: chat",
         "to: manager",
         `requestId: ${REQ}`,
         "re: Answer the Worker's question on the export format",
         "intent: answer",
         "effects: none",
-        "authority: autopilot",
+        "authority: owner",
         "approved: none",
         "limits: no-commit-push-deploy, no-real-data",
         "",
@@ -98,9 +106,8 @@ describe("the block's exact shape (autonomy design §A.7)", () => {
     );
   });
 
-  it("an input without the v2 fields gets intent other, no effect, and the authority its path implies", () => {
-    expect(commandOf(input())).toMatchObject({ version: 2, intent: "other", effects: [], authority: "autopilot", approved: [] });
-    expect(commandOf(input({ via: "chat" })).authority).toBe("owner");
+  it("an input without the v2 fields gets intent other, no effect, and the owner's authority", () => {
+    expect(commandOf(input())).toMatchObject({ version: 2, intent: "other", effects: [], authority: "owner", approved: [] });
     expect(commandOf(input({ via: "tab" })).authority).toBe("owner");
     expect(commandOf(input({ from: "owner", via: "tab" })).authority).toBe("owner");
   });
@@ -143,7 +150,7 @@ describe("round trip: parseCommandBlock(commandBlockOf(x)) equals commandOf(x)",
   }
 
   it(`covers ${cases.length} combinations of from, via, to, copy, requestId, why and body`, () => {
-    expect(cases.length).toBe(2 * 3 * 3 * 3 * 2 * 3);
+    expect(cases.length).toBe(2 * 2 * 3 * 3 * 2 * 3);
     for (const command of cases) {
       const parsed = parseCommandBlock(commandBlockOf(command));
       expect(parsed, JSON.stringify(command)).toEqual(commandOf(command));
@@ -153,13 +160,14 @@ describe("round trip: parseCommandBlock(commandBlockOf(x)) equals commandOf(x)",
 
   it("round-trips every intent, every effect declared and approved, and every authority", () => {
     const real = EFFECTS.filter((effect) => effect !== "none");
-    const authorities = ["autopilot", "owner", "decision:o:1a2b", "decision:q:req-1:Q4", "decision:f:incident-7"] as const;
+    const authorities = ["owner", "decision:o:1a2b", "decision:q:req-1:Q4", "decision:f:incident-7"] as const;
     let count = 0;
-    for (const intent of COMMAND_INTENTS) {
+    // `handoff` goes only on `coordination:handoff` (its own round trip below).
+    for (const intent of DECLARED_COMMAND_INTENTS) {
       for (const authority of authorities) {
         for (const effect of real) {
           for (const approved of [[], [effect]] as Effect[][]) {
-            const command = input({ via: authority === "autopilot" ? "autopilot" : "chat", intent, effects: [effect, "none"], authority, approved });
+            const command = input({ via: "chat", intent, effects: [effect, "none"], authority, approved });
             const parsed = parseCommandBlock(commandBlockOf(command));
             expect(parsed, JSON.stringify(command)).toEqual(commandOf(command));
             expect(parsed!.limits.flatMap(effectsWithheldBy).some((withheld) => parsed!.approved.includes(withheld))).toBe(false);
@@ -168,7 +176,20 @@ describe("round trip: parseCommandBlock(commandBlockOf(x)) equals commandOf(x)",
         }
       }
     }
-    expect(count).toBe(COMMAND_INTENTS.length * authorities.length * real.length * 2);
+    expect(count).toBe(DECLARED_COMMAND_INTENTS.length * authorities.length * real.length * 2);
+    expect(DECLARED_COMMAND_INTENTS).toEqual(COMMAND_INTENTS.filter((intent) => intent !== "handoff"));
+  });
+
+  it("round-trips policy:<class> for each of the nine classes, from the Orchestrator's chat and on a tab (autonomy design §B.9)", () => {
+    for (const decisionClass of DECISION_CLASSES) {
+      for (const via of COMMAND_VIA) {
+        const command = input({ via, intent: "continue", effects: ["commit", "dependency-install"], authority: policyAuthorityOf(decisionClass), approved: ["commit", "dependency-install"] });
+        const block = commandBlockOf(command);
+        expect(block, decisionClass).toContain(`\nauthority: policy:${decisionClass}\n`);
+        expect(parseCommandBlock(block), `${decisionClass} via ${via}`).toEqual(commandOf(command));
+        expect(policyClassOfAuthority(parseCommandBlock(block)!.authority)).toBe(decisionClass);
+      }
+    }
   });
 
   it("a body that already ends with a why paragraph keeps it when a why is given", () => {
@@ -243,23 +264,44 @@ describe("validation of the builder's input", () => {
     ["the request id none", { requestId: "none" }, "requestId must be one token"],
     ["a body ending in a why paragraph without why", { body: "Do it.\n\nwhy: because", why: null }, 'the body\'s last paragraph is a "why:" line'],
     ["an unknown from", { from: "someone" as CommandInput["from"] }, "from must be one of orchestrator, owner"],
-    ["an unknown intent", { intent: "ship" as CommandInput["intent"] }, "intent must be one of answer, continue, redirect, stop, release, other"],
+    ["an unknown intent", { intent: "ship" as CommandInput["intent"] }, "intent must be one of answer, continue, redirect, stop, release, handoff, other"],
     ["an unknown effect", { effects: ["rocket" as Effect] }, "effects must be among"],
     ["an approved effect not declared", { effects: ["commit"], approved: ["commit", "push"] }, "approved names push, which effects does not declare"],
-    ["an authority that is none of the three", { authority: "policy:tests" as CommandInput["authority"] }, "authority must be owner, autopilot or decision:"],
-    ["a decision authority with no decision id", { authority: "decision:tomorrow" as CommandInput["authority"] }, "authority must be owner, autopilot or decision:"],
-    ["the owner's own command on another authority", { from: "owner", via: "tab", authority: "autopilot" }, "the owner's own command has authority owner"],
-    ["autopilot authority off Autopilot", { via: "chat", authority: "autopilot" }, "authority autopilot is only for a command via autopilot"],
+    ["an authority that is none of the three", { authority: "delegated" as CommandInput["authority"] }, "authority must be owner, decision:"],
+    ["a decision authority with no decision id", { authority: "decision:tomorrow" as CommandInput["authority"] }, "authority must be owner, decision:"],
+    // Autopilot is retired (autonomy design §B.8): the builder writes neither its authority nor its via.
+    ["the retired Autopilot's authority", { authority: RETIRED_AUTOPILOT as CommandInput["authority"] }, "authority must be owner, decision:"],
+    ["the retired Autopilot's authority via Autopilot", { via: RETIRED_AUTOPILOT as CommandInput["via"], authority: RETIRED_AUTOPILOT as CommandInput["authority"] }, "via must be one of chat, tab"],
+    ["the retired via autopilot", { via: RETIRED_AUTOPILOT as CommandInput["via"] }, "via must be one of chat, tab"],
+    ["a policy authority of an unknown class", { authority: "policy:tests" as CommandInput["authority"] }, "or policy:<one of security, data, release, cost, dependency, environment, scope, preference, reversible-technical>"],
+    ["a policy authority with no class", { authority: "policy:" as CommandInput["authority"] }, "or policy:<one of"],
+    ["a policy authority whose class is not written as a class", { authority: "policy:Release" as CommandInput["authority"] }, "or policy:<one of"],
+    ["the owner's own command on the policy's authority", { from: "owner", via: "tab", authority: policyAuthorityOf("scope") }, "the owner's own command has authority owner"],
+    ["the owner's own command on a decision's authority", { from: "owner", via: "tab", authority: decisionAuthorityOf("o:1a2b") }, "the owner's own command has authority owner"],
+    // Autonomy design §B.5: only a decision's grant approves release, data, security or cost; the owner's policy never does.
+    ["the policy approving a push", { intent: "release", effects: ["commit", "push"], authority: policyAuthorityOf("reversible-technical"), approved: ["commit", "push"] }, "the owner's policy never approves push: only the grant of a decision the owner answered does (authority decision:<id>)"],
+    ["the policy approving a migration and real data", { effects: ["migration", "real-data"], authority: policyAuthorityOf("scope"), approved: ["migration", "real-data"] }, "the owner's policy never approves real-data, migration"],
+    ["the policy approving security and cost", { effects: ["security", "cost"], authority: policyAuthorityOf("environment"), approved: ["security", "cost"] }, "the owner's policy never approves security, cost"],
+    ["the policy approving a publish or a deploy", { effects: ["publish", "deploy"], authority: policyAuthorityOf("dependency"), approved: ["publish", "deploy"] }, "the owner's policy never approves publish, deploy"],
   ])("refuses %s", (_label, over, problem) => {
     const bad = input(over as Partial<CommandInput>);
     expect(commandInputProblems(bad).join("\n")).toContain(problem);
     expect(() => commandBlockOf(bad)).toThrow(/^Not a valid BM-COMMAND: /);
   });
 
-  it("the body limit is the proposal's command limit, why fits a proposal's reason, and a whole block fits the stored text sent", () => {
+  it("the policy may declare an owner-only effect it does not approve, and approve every other effect (autonomy design §B.5)", () => {
+    const withheld = input({ intent: "continue", effects: ["commit", "push"], authority: policyAuthorityOf("reversible-technical"), approved: ["commit"] });
+    expect(commandInputProblems(withheld)).toEqual([]);
+    expect(parseCommandBlock(commandBlockOf(withheld))).toMatchObject({ approved: ["commit"], limits: ["no-push", "no-deploy", "no-real-data"] });
+    const delegable = ["commit", "dependency-install", "network", "outside-workspace"] as Effect[];
+    expect(commandInputProblems(input({ effects: delegable, authority: policyAuthorityOf("environment"), approved: delegable }))).toEqual([]);
+    // A decision's grant covers any of them.
+    expect(commandInputProblems(input({ effects: ["push"], authority: decisionAuthorityOf("o:1a2b"), approved: ["push"] }))).toEqual([]);
+  });
+
+  it("the body limit is the proposal's command limit, and why fits a proposal's reason", () => {
     expect(MAX_COMMAND_BODY_CHARS).toBe(MAX_PROPOSAL_COMMAND_CHARS);
     expect(MAX_COMMAND_WHY_CHARS).toBe(MAX_PROPOSAL_REASON_CHARS);
-    expect(MAX_SENT_TEXT_CHARS).toBeGreaterThanOrEqual(MAX_COMMAND_BLOCK_CHARS);
   });
 });
 
@@ -279,7 +321,7 @@ describe("the parser refuses what the builder never writes", () => {
     ["no to", without("to:")],
     ["no requestId", without("requestId:")],
     ["no re", without("re:")],
-    ["an unknown via", good.replace("via: autopilot", "via: email")],
+    ["an unknown via", good.replace("via: chat", "via: email")],
     ["copy on a Manager command", good.replace("to: manager", "to: manager\ncopy: yes")],
     ["copy that is not yes", commandBlockOf(input({ to: "worker", copy: true })).replace("copy: yes", "copy: no")],
     ["a repeated key", good.replace("to: manager", "to: manager\nto: worker")],
@@ -296,11 +338,16 @@ describe("the parser refuses what the builder never writes", () => {
     ["none beside an effect", good.replace("effects: none", "effects: none, push")],
     ["a repeated effect", granted.replace("effects: push", "effects: push, push")],
     ["an approved effect not declared", granted.replace("approved: push", "approved: push, deploy")],
-    ["an unknown authority", good.replace("authority: autopilot", "authority: policy:tests")],
-    ["the owner's command on the Autopilot's authority", ownerGood.replace("authority: owner", "authority: autopilot")],
-    ["autopilot authority via chat", good.replace("via: autopilot", "via: chat")],
+    ["an unknown authority", good.replace("authority: owner", "authority: delegated")],
+    ["a policy authority of an unknown class", good.replace("authority: owner", "authority: policy:tests")],
+    ["a policy authority with no class", good.replace("authority: owner", "authority: policy:")],
+    ["the owner's command on the policy's authority", ownerGood.replace("authority: owner", "authority: policy:scope")],
+    ["the owner's command on the retired Autopilot's authority", ownerGood.replace("authority: owner", "authority: autopilot")],
+    ["the retired Autopilot's authority via chat", good.replace("authority: owner", "authority: autopilot")],
     ["a limit that withholds an approved effect", granted.replace("limits: no-commit, no-deploy, no-real-data", "limits: no-commit-push-deploy, no-real-data")],
     ["a no-<effect> limit that withholds an approved effect", granted.replace("limits: no-commit, no-deploy, no-real-data", "limits: no-push")],
+    // Autonomy design §B.5: the owner's policy never approves release, data, security or cost.
+    ["the policy's authority approving a push", granted.replace("authority: decision:o:1a2b", "authority: policy:reversible-technical")],
   ])("%s → null", (_label, text) => {
     expect(parseCommandBlock(text)).toBeNull();
   });
@@ -312,6 +359,37 @@ describe("the parser refuses what the builder never writes", () => {
   it("ignores a header key it does not know, and reads keys in any case", () => {
     expect(parseCommandBlock(good.replace("to: manager", "to: manager\npriority: high"))).toEqual(commandOf(input()));
     expect(parseCommandBlock(good.replace("requestId:", "REQUESTID:"))).toEqual(commandOf(input()));
+  });
+});
+
+describe("Phase 1 history on Autopilot still reads; the builder writes none of it (autonomy design §B.8)", () => {
+  /** A block as Phase 1 wrote it on a project's Autopilot. */
+  const onAutopilot = commandBlockOf(input({ intent: "continue", effects: ["commit"], approved: ["commit"] }))
+    .replace("via: chat", "via: autopilot")
+    .replace("authority: owner", "authority: autopilot");
+
+  it("via: autopilot and authority: autopilot parse as they were written", () => {
+    expect(onAutopilot).toContain("\nvia: autopilot\n");
+    expect(parseCommandBlock(onAutopilot)).toMatchObject({ version: 2, via: RETIRED_AUTOPILOT, authority: RETIRED_AUTOPILOT, approved: ["commit"], limits: ["no-push", "no-deploy", "no-real-data"] });
+    // A decision's grant or the policy with Autopilot on left via autopilot too.
+    expect(parseCommandBlock(onAutopilot.replace("authority: autopilot", "authority: decision:o:1a2b"))).toMatchObject({ via: RETIRED_AUTOPILOT, authority: "decision:o:1a2b" });
+    expect(parseCommandBlock(onAutopilot.replace("authority: autopilot", "authority: policy:scope"))).toMatchObject({ via: RETIRED_AUTOPILOT, authority: "policy:scope" });
+  });
+
+  it("the builder refuses both, so no build writes them again", () => {
+    const refused = { ...input(), via: RETIRED_AUTOPILOT, authority: RETIRED_AUTOPILOT } as unknown as CommandInput;
+    expect(commandInputProblems(refused)).toEqual(["via must be one of chat, tab", expect.stringMatching(/^authority must be owner, decision:/)]);
+    expect(() => commandBlockOf(refused)).toThrow(/^Not a valid BM-COMMAND: /);
+    expect(COMMAND_VIA).toEqual(["chat", "tab"]);
+    expect(READ_COMMAND_VIA).toEqual(["chat", "tab", "autopilot"]);
+  });
+
+  it("a stored block on Autopilot of the longest size still fits the stored text sent", () => {
+    const longest = commandBlockOf(
+      input({ to: "worker", copy: true, requestId: "r".repeat(128), re: "r".repeat(MAX_COMMAND_RE_CHARS), body: "b".repeat(MAX_COMMAND_BODY_CHARS), why: "w".repeat(MAX_COMMAND_WHY_CHARS), authority: `decision:q:${"i".repeat(MAX_COMMAND_DECISION_ID_CHARS - 5)}:Q1` }),
+    ).replace("via: chat", "via: autopilot");
+    expect(longest.length).toBeLessThanOrEqual(MAX_COMMAND_BLOCK_CHARS);
+    expect(parseCommandBlock(longest)?.via).toBe(RETIRED_AUTOPILOT);
   });
 });
 
@@ -396,9 +474,13 @@ describe("limits never contradict the approval (autonomy design §A.7)", () => {
 });
 
 describe("authority values", () => {
-  it("owner, autopilot, or decision:<a decision id> of at most 200 characters", () => {
+  it("owner, or decision:<a decision id> of at most 200 characters; the retired autopilot is read only", () => {
     expect(isCommandAuthority("owner")).toBe(true);
-    expect(isCommandAuthority("autopilot")).toBe(true);
+    expect(isCommandAuthority("autopilot")).toBe(false);
+    expect(isReadCommandAuthority("autopilot")).toBe(true);
+    expect(isReadCommandAuthority("owner")).toBe(true);
+    expect(isReadCommandAuthority("policy:scope")).toBe(true);
+    expect(isReadCommandAuthority("Autopilot")).toBe(false);
     expect(isCommandAuthority(decisionAuthorityOf("o:1a2b"))).toBe(true);
     expect(isCommandAuthority("decision:q:req-20260929T073348Z:Q4")).toBe(true);
     expect(isCommandAuthority(`decision:f:${"x".repeat(MAX_COMMAND_DECISION_ID_CHARS - 1)}`)).toBe(false);
@@ -408,10 +490,79 @@ describe("authority values", () => {
     expect(decisionIdOfAuthority(null)).toBeNull();
   });
 
+  it("policy:<class> for each of the nine classes, and no other class (autonomy design §B.9)", () => {
+    for (const decisionClass of DECISION_CLASSES) {
+      expect(policyAuthorityOf(decisionClass)).toBe(`policy:${decisionClass}`);
+      expect(isCommandAuthority(`policy:${decisionClass}`), decisionClass).toBe(true);
+      expect(policyClassOfAuthority(`policy:${decisionClass}`)).toBe(decisionClass);
+      expect(decisionIdOfAuthority(`policy:${decisionClass}`)).toBeNull();
+    }
+    for (const bad of ["policy:", "policy:tests", "policy:Release", "policy:release ", "policy:reversible technical", "Policy:scope"]) {
+      expect(isCommandAuthority(bad), bad).toBe(false);
+      expect(policyClassOfAuthority(bad), bad).toBeNull();
+    }
+    expect(policyClassOfAuthority("decision:o:1a2b")).toBeNull();
+    expect(policyClassOfAuthority("owner")).toBeNull();
+    expect(policyClassOfAuthority(null)).toBeNull();
+  });
+
   it("the intents are a prepared command's", () => {
     // Every intent is one a prepared command takes, and nothing else is.
     const prepared = (intent: string) => preparedActionSchema.safeParse({ kind: "command", to: "worker", agentId: "a", intent, body: "b", effects: [] }).success;
-    for (const intent of COMMAND_INTENTS) expect(prepared(intent), intent).toBe(true);
+    for (const intent of DECLARED_COMMAND_INTENTS) expect(prepared(intent), intent).toBe(true);
     expect(prepared("ship")).toBe(false);
+    // A handoff is only bm_handoff's (autonomy design §G.6): no option prepares one.
+    expect(prepared(HANDOFF_INTENT)).toBe(false);
+  });
+});
+
+describe("the handoff command (autonomy design §G.6, change-008 C3): intent handoff on coordination:handoff, and nothing else", () => {
+  const handoff = (over: Partial<CommandInput> = {}): CommandInput =>
+    input({ re: `Hand request ${REQ} over to a new Worker`, body: "Handoff h1: create the new Worker.", intent: "handoff", effects: [], authority: COORDINATION_HANDOFF_AUTHORITY, approved: [], ...over });
+
+  it("writes and reads back intent handoff with authority coordination:handoff, no effect, both fixed limits", () => {
+    const block = commandBlockOf(handoff());
+    expect(block.split("\n").slice(0, 11)).toEqual([
+      "BM-COMMAND",
+      "from: orchestrator",
+      "via: chat",
+      "to: manager",
+      `requestId: ${REQ}`,
+      `re: Hand request ${REQ} over to a new Worker`,
+      "intent: handoff",
+      "effects: none",
+      "authority: coordination:handoff",
+      "approved: none",
+      "limits: no-commit-push-deploy, no-real-data",
+    ]);
+    const parsed = parseCommandBlock(block);
+    expect(parsed).toEqual(commandOf(handoff()));
+    expect(parsed).toMatchObject({ version: 2, intent: "handoff", authority: "coordination:handoff", effects: [], approved: [], to: "manager" });
+    expect(isCommandAuthority(COORDINATION_HANDOFF_AUTHORITY)).toBe(true);
+    expect(isReadCommandAuthority(COORDINATION_HANDOFF_AUTHORITY)).toBe(true);
+  });
+
+  it.each([
+    ["coordination:handoff with another intent", { intent: "continue" }, "authority coordination:handoff covers only intent handoff"],
+    ["intent handoff on the owner's word", { authority: "owner" }, "intent handoff goes only on authority coordination:handoff"],
+    ["intent handoff on a decision's grant", { authority: decisionAuthorityOf("o:1a2b") }, "intent handoff goes only on authority coordination:handoff"],
+    ["intent handoff on the policy", { authority: policyAuthorityOf("scope") }, "intent handoff goes only on authority coordination:handoff"],
+    ["a handoff to a Worker", { to: "worker" }, "a handoff goes from the Orchestrator to a Manager"],
+    ["the owner's own handoff", { from: "owner", via: "tab" }, "a handoff goes from the Orchestrator to a Manager"],
+    ["a handoff declaring an effect", { effects: ["commit"] }, "a handoff declares and approves no effect"],
+    ["a handoff approving an effect", { effects: ["commit"], approved: ["commit"] }, "a handoff declares and approves no effect"],
+  ] as const)("refuses %s, in the builder and the reader", (_label, over, problem) => {
+    const bad = handoff(over as Partial<CommandInput>);
+    expect(commandInputProblems(bad).join("\n")).toContain(problem);
+    expect(() => commandBlockOf(bad)).toThrow(/^Not a valid BM-COMMAND: /);
+  });
+
+  it("the reader refuses a block whose intent and authority do not go together", () => {
+    const good = commandBlockOf(handoff());
+    expect(parseCommandBlock(good.replace("intent: handoff", "intent: continue"))).toBeNull();
+    expect(parseCommandBlock(good.replace("authority: coordination:handoff", "authority: owner"))).toBeNull();
+    expect(parseCommandBlock(good.replace("to: manager", "to: worker"))).toBeNull();
+    expect(parseCommandBlock(good.replace("effects: none", "effects: commit"))).toBeNull();
+    expect(parseCommandBlock(good.replace("from: orchestrator", "from: owner"))).toBeNull();
   });
 });

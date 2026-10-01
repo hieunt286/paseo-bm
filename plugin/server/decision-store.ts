@@ -3,10 +3,11 @@
  * `<data folder>/decisions/<workspaceId>.json` = `{ version: 1, entries }`.
  *
  * The one module that reads and writes that folder. The containment rules are
- * the Orchestrator store's, built on the same `trace-store.ts` and
- * `data-home.ts` helpers: the folder is created `0700` only by a write, never by
- * a read; files are `0600` and replaced atomically (temp file, then rename); a
- * symlink anywhere below the data folder is refused.
+ * every store's (`data-files.ts` `createJsonFileStore`, code review 2026-09-30
+ * §3.1): the folder is created `0700` only by a write, never by a read; files
+ * are `0600` and replaced atomically (temp file, then rename); a symlink
+ * anywhere below the data folder is refused (`E_TRACE_STORE_UNWRITABLE`, as a
+ * failed write).
  *
  * **No lock, on purpose, as in `orchestrator-store.ts`:** every operation here
  * is synchronous and the plugin server is one thread, so a read-modify-write
@@ -16,16 +17,15 @@
  * Reads never repair a file. A missing or corrupt file reads as empty; an entry
  * that does not validate is skipped on its own and dropped by the next write. A
  * file whose `version` is newer than this build reads as empty and is never
- * written: a newer paseo-bm owns it.
+ * written: a newer paseo-bm owns it, and a write throws `E_DECISION_WRITE_FAILED`.
  *
  * Open decisions are never evicted; of the settled ones the 500 newest (by
  * `settledAt`) are kept per workspace. Reads across workspaces go through a
  * per-file cache keyed by mtime and size, refreshed by every write from here.
  */
-import { lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { z } from "zod";
-import { DashboardError } from "../shared/contracts";
+import { DashboardError, type DashboardErrorCode } from "../shared/contracts";
 import {
   decisionSchema,
   isSettledStatus,
@@ -35,15 +35,9 @@ import {
   type TransitionRefusal,
   type TransitionResult,
 } from "../shared/decisions";
-import { TRACES_DIR_NAME, ensureDataHome } from "./data-home";
-import {
-  WORKSPACE_ID_PATTERN,
-  assertNoSymlinkOnPath,
-  assertWorkspaceId,
-  ensureStoreDir,
-  writeStoreFileAtomically,
-  type TraceStoreLocation,
-} from "./trace-store";
+import { assertNoSymlink, capBy, createJsonFileStore, type JsonFileStore } from "./data-files";
+import { WORKSPACE_ID_PATTERN, assertWorkspaceId } from "./trace-store";
+import { timeOrZero } from "../shared/time";
 
 /** The folder inside the data folder; cleanup deletes it whole. */
 export const DECISIONS_DIR_NAME = "decisions";
@@ -112,12 +106,20 @@ export interface DecisionStore {
   deleteSettled(workspaceId: string, requestIds: readonly string[]): number;
 }
 
-const fileFrameSchema = z.object({ version: z.number(), entries: z.array(z.unknown()) });
+/**
+ * One workspace's file, `{ version: 1, entries }`. `skipped` counts the entries
+ * `parse` dropped; it is never written, because the cap rebuilds the body as
+ * `{ entries }`.
+ */
+type DecisionsFile = { entries: Decision[]; skipped?: number };
+
+/** A symlink on the way, and every failure to write a file: the code this store has always had. */
+const UNWRITABLE: DashboardErrorCode = "E_TRACE_STORE_UNWRITABLE";
 
 interface CachedFile {
   mtimeMs: number;
   size: number;
-  value: WorkspaceDecisions & { tooNew: boolean };
+  value: WorkspaceDecisions;
 }
 
 /** Per-file read cache, keyed by absolute path, invalidated by mtime and size. */
@@ -137,28 +139,14 @@ function isWorkspaceId(name: string): boolean {
   return WORKSPACE_ID_PATTERN.test(name) && name !== "." && name !== "..";
 }
 
-function timeOf(iso: string | null): number {
-  if (iso === null) return 0;
-  const at = Date.parse(iso);
-  return Number.isNaN(at) ? 0 : at;
-}
-
 /**
  * Keeps every unsettled decision and the `DECISION_SETTLED_LIMIT` newest
  * settled ones (by `settledAt`; a tie keeps the later in the file), in file order.
  */
 export function capDecisions(entries: readonly Decision[]): Decision[] {
-  const settled = entries
-    .map((entry, index) => ({ entry, index }))
-    .filter(({ entry }) => isSettledStatus(entry.status));
-  if (settled.length <= DECISION_SETTLED_LIMIT) return [...entries];
-  const evict = new Set(
-    settled
-      .sort((a, b) => timeOf(a.entry.settledAt) - timeOf(b.entry.settledAt) || a.index - b.index)
-      .slice(0, settled.length - DECISION_SETTLED_LIMIT)
-      .map(({ index }) => index),
-  );
-  return entries.filter((_, index) => !evict.has(index));
+  const settled = entries.flatMap((entry, index) => (isSettledStatus(entry.status) ? [index] : []));
+  const kept = new Set(capBy(settled, DECISION_SETTLED_LIMIT, (index) => timeOrZero(entries[index]!.settledAt)));
+  return entries.filter((entry, index) => !isSettledStatus(entry.status) || kept.has(index));
 }
 
 function writeFailed(detail: string, cause?: unknown): DashboardError {
@@ -172,19 +160,36 @@ function writeFailed(detail: string, cause?: unknown): DashboardError {
 export function createDecisionStore(home: string, deps: DecisionStoreDeps = {}): DecisionStore {
   const log = deps.log ?? ((message: string) => console.warn(message));
   const dir = decisionsDirOf(home);
-  // `trace-store.ts` roots its symlink checks at the parent of `tracesDir`,
-  // which is exactly the data folder.
-  const location: TraceStoreLocation = { tracesDir: join(home, TRACES_DIR_NAME) };
 
-  const pathOf = (workspaceId: string): string => {
+  const fileOf = (workspaceId: string): JsonFileStore<DecisionsFile> => {
     assertWorkspaceId(workspaceId);
-    return join(dir, `${workspaceId}.json`);
+    return createJsonFileStore<DecisionsFile>({
+      home,
+      dir: DECISIONS_DIR_NAME,
+      file: `${workspaceId}.json`,
+      version: DECISIONS_FILE_VERSION,
+      parse: (body) => {
+        const raw = Array.isArray(body["entries"]) ? (body["entries"] as unknown[]) : [];
+        const entries: Decision[] = [];
+        for (const entry of raw) {
+          const valid = decisionSchema.safeParse(entry);
+          // An entry filed under another workspace is as unusable as a broken one.
+          if (valid.success && valid.data.workspaceId === workspaceId) entries.push(valid.data);
+        }
+        return { entries, skipped: raw.length - entries.length };
+      },
+      empty: () => ({ entries: [], skipped: 0 }),
+      cap: ({ entries }) => ({ entries: capDecisions(entries) }),
+      codes: { unwritable: UNWRITABLE, tooNew: "E_DECISION_WRITE_FAILED" },
+    });
   };
 
   /** Reads one file through the cache; a symlink on the way throws before anything is read. */
-  const readFile = (workspaceId: string): CachedFile["value"] => {
-    const path = pathOf(workspaceId);
-    assertNoSymlinkOnPath(home, path);
+  const readFile = (workspaceId: string): WorkspaceDecisions => {
+    const file = fileOf(workspaceId);
+    const path = file.path;
+    // Before the `stat`, so a cached read refuses a symlink as a fresh one does.
+    assertNoSymlink(home, path, UNWRITABLE);
     let mtimeMs: number;
     let size: number;
     try {
@@ -193,63 +198,31 @@ export function createDecisionStore(home: string, deps: DecisionStoreDeps = {}):
       size = stat.size;
     } catch {
       readCache.delete(path);
-      return { entries: [], skipped: 0, tooNew: false };
+      return { entries: [], skipped: 0 };
     }
     const cached = readCache.get(path);
     if (cached !== undefined && cached.mtimeMs === mtimeMs && cached.size === size) return cached.value;
 
-    let raw: unknown = null;
-    try {
-      raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
-    } catch {
-      raw = null;
-    }
-    const value = parseFile(raw, workspaceId);
+    const { entries, skipped = 0 } = file.read();
+    const value = { entries, skipped };
     readCache.set(path, { mtimeMs, size, value });
     return value;
   };
 
-  const parseFile = (raw: unknown, workspaceId: string): CachedFile["value"] => {
-    const frame = fileFrameSchema.safeParse(raw);
-    if (!frame.success) return { entries: [], skipped: 0, tooNew: false };
-    if (frame.data.version !== DECISIONS_FILE_VERSION) {
-      return { entries: [], skipped: 0, tooNew: frame.data.version > DECISIONS_FILE_VERSION };
-    }
-    const entries: Decision[] = [];
-    let skipped = 0;
-    for (const entry of frame.data.entries) {
-      const valid = decisionSchema.safeParse(entry);
-      // An entry filed under another workspace is as unusable as a broken one.
-      if (valid.success && valid.data.workspaceId === workspaceId) entries.push(valid.data);
-      else skipped += 1;
-    }
-    return { entries, skipped, tooNew: false };
-  };
-
+  /** Writes one file (refused on a newer one), capped, and keeps the cache in step. */
   const write = (workspaceId: string, entries: readonly Decision[]): void => {
-    const path = pathOf(workspaceId);
-    if (readFile(workspaceId).tooNew) {
-      throw writeFailed(`${path} was written by a newer paseo-bm; it is left as it is`);
-    }
-    const kept = capDecisions(entries);
+    const file = fileOf(workspaceId);
+    const { entries: kept } = file.write({ entries: [...entries] });
     try {
-      ensureDataHome(home);
-      ensureStoreDir(location.tracesDir, dir);
-      writeStoreFileAtomically(location, path, `${JSON.stringify({ version: DECISIONS_FILE_VERSION, entries: kept }, null, 2)}\n`);
-    } catch (error) {
-      if (error instanceof DashboardError) throw error;
-      throw writeFailed(`cannot write ${path}: ${error instanceof Error ? error.message : String(error)}`, error);
-    }
-    try {
-      const stat = statSync(path);
-      readCache.set(path, { mtimeMs: stat.mtimeMs, size: stat.size, value: { entries: kept, skipped: 0, tooNew: false } });
+      const stat = statSync(file.path);
+      readCache.set(file.path, { mtimeMs: stat.mtimeMs, size: stat.size, value: { entries: kept, skipped: 0 } });
     } catch {
-      readCache.delete(path);
+      readCache.delete(file.path);
     }
   };
 
   const workspaceIds = (): string[] => {
-    assertNoSymlinkOnPath(home, dir);
+    assertNoSymlink(home, dir, UNWRITABLE);
     try {
       return readdirSync(dir, { withFileTypes: true })
         .filter((entry) => entry.name.endsWith(".json"))

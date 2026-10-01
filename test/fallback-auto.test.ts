@@ -2,30 +2,35 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createAutonomyStore } from "../plugin/server/autonomy-store";
 import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
+import { RECOMMENDED_WAIT_WINDOW_MS, recommendedActionOf } from "../plugin/server/fallback-decisions";
+import { decidePending, registerFallbackRpcs, type FallbackAction } from "../plugin/server/fallback-rpc";
 import { ROLE_FALLBACK_FILE } from "../plugin/server/fallback-settings";
-import { AUTO_WAIT_WINDOW_MS, autoActionOf, decidePending, decideAutomatically, registerFallbackRpcs, type FallbackAction } from "../plugin/server/fallback-rpc";
 import { ROLE_FALLBACK_STATE_FILE, recordIncident } from "../plugin/server/fallback-state";
-import { createWorkerSwitch } from "../plugin/server/fallback-switch";
+import { createPrecedentStore } from "../plugin/server/precedent-store";
 import { noticeQueue } from "../plugin/server/notice-queue";
 import type { FallbackIncident } from "../plugin/shared/contracts";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 /**
- * Delta 20260921 §4.6 (REQ-067, phase 2a-18, owner decision Q17 b): with a
- * role's policy on "Auto switch", the plugin decides a new incident at once —
- * wait when the reset is at most 30 minutes away, else switch through the
- * role's own path, else leave it pending — through the same `fallback.act`
- * path as a click. Autonomy design §A.5 d: an incident the policy decides
- * opens no decision; one it leaves pending, or one under "Ask me", opens
- * exactly one; nothing is sent to the Manager. Fake daemon, temporary install home.
+ * ADR-022 decision 4: the fallback chain's Auto switch is retired. A role's
+ * policy is Ask me or Off; a file that still stores `auto` reads as Ask me. A
+ * new incident becomes the owner's `f:` decision (class `environment`), and it
+ * is answered without the owner only by the owner's autonomy policy (the
+ * recommended option at open, where `environment` is delegated; the
+ * Orchestrator's `bm_decide` is covered in `autonomy-delegation.test.ts`) or
+ * by a precedent — then its action runs through `fallback.act`, as a click's
+ * would. Nothing is sent to the Manager. Fake daemon, temporary data folder.
  */
 
 const NOW = new Date("2026-09-22T07:00:00.000Z");
 const at = (minutes: number) => new Date(NOW.getTime() + minutes * 60_000).toISOString();
 const CANDIDATE = { position: 1, alias: "bm-worker-fallback-1", baseProvider: "codex", model: "gpt-5.6-sol", thinkingOptionId: null, modeId: null };
+const ID = "fb-000000000a01";
 
 const incident = (overrides: Partial<FallbackIncident> = {}): FallbackIncident => ({
-  id: "fb-000000000a01",
+  id: ID,
   role: "worker",
   workspaceId: "wks_1",
   requestId: "req-20260922T070000Z",
@@ -53,7 +58,6 @@ let root: string;
 let home: string;
 const log = vi.fn();
 const read = (): FallbackIncident[] => JSON.parse(readFileSync(join(home, ROLE_FALLBACK_STATE_FILE), "utf8")).incidents;
-const write = (incidents: FallbackIncident[]) => writeFileSync(join(home, ROLE_FALLBACK_STATE_FILE), JSON.stringify({ version: 1, incidents }));
 const decisions = () => createDecisionStore(home).list();
 
 /** Actions that only record their decision, as the real ones do at their last step. */
@@ -65,6 +69,34 @@ function actions() {
       return decidePending(deps.home!, current.id, (entry) => ({ ...entry, status, decidedAt: NOW.toISOString() }));
     });
   return { roles, switch: decide("switched"), wait: decide("waiting") };
+}
+
+/** The Worker `wrk-1` under its Manager `mgr-1`, on a machine with Claude and Codex. */
+const daemon = () =>
+  fakePaseo({
+    agents: [
+      { id: "wrk-1", labels: { "bm.role": "worker", "bm.requestId": "req-20260922T070000Z", "paseo.parent-agent-id": "mgr-1" } },
+      { id: "mgr-1", status: "idle" },
+    ],
+    providers: { available: ["codex", "claude"] },
+    config: { providers: { "bm-worker": { extends: "claude" }, "bm-worker-fallback-1": { extends: "codex" } } },
+  });
+
+/** A Worker's L2 incident recorded through the plugin's listener, with the chain stored under `policy`. */
+async function recordUnder(policy: "ask" | "off" | "auto", acts: ReturnType<typeof actions>) {
+  writeFileSync(join(home, ROLE_FALLBACK_FILE), JSON.stringify({ version: 1, roles: { worker: { policy, entries: [CANDIDATE] } } }));
+  const remove = registerFallbackRpcs({ handle: vi.fn() } as never, { switch: acts.switch, wait: acts.wait });
+  const { paseo, sends } = daemon();
+  try {
+    await recordIncident(
+      { agent: { id: "wrk-1", provider: "bm-worker/claude-opus-5", workspaceId: "wks_1" } },
+      { class: "L2", signal: "failed", message: "credit balance too low" },
+      { paseo, home, log, now: () => NOW, randomHex: () => "000000000a01" },
+    );
+  } finally {
+    remove();
+  }
+  return sends;
 }
 
 beforeEach(() => {
@@ -80,158 +112,85 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-describe("autoActionOf", () => {
+describe("recommendedActionOf (the option an incident's decision recommends)", () => {
   it("waits for a reset at most 30 minutes away, a past one included", () => {
-    expect(AUTO_WAIT_WINDOW_MS).toBe(30 * 60 * 1000);
-    expect(autoActionOf(incident({ resetsAt: at(30) }), NOW)).toBe("wait");
-    expect(autoActionOf(incident({ resetsAt: at(5) }), NOW)).toBe("wait");
-    expect(autoActionOf(incident({ resetsAt: at(-10) }), NOW)).toBe("wait");
-    expect(autoActionOf(incident({ resetsAt: at(30), candidate: null }), NOW)).toBe("wait");
+    expect(RECOMMENDED_WAIT_WINDOW_MS).toBe(30 * 60 * 1000);
+    expect(recommendedActionOf(incident({ resetsAt: at(30) }), NOW)).toBe("wait");
+    expect(recommendedActionOf(incident({ resetsAt: at(5) }), NOW)).toBe("wait");
+    expect(recommendedActionOf(incident({ resetsAt: at(-10) }), NOW)).toBe("wait");
+    expect(recommendedActionOf(incident({ resetsAt: at(30), candidate: null }), NOW)).toBe("wait");
   });
 
-  it("switches when the reset is further or unknown and there is a candidate, else leaves it pending", () => {
-    expect(autoActionOf(incident({ resetsAt: at(31) }), NOW)).toBe("switch");
-    expect(autoActionOf(incident({ resetsAt: null }), NOW)).toBe("switch");
-    expect(autoActionOf(incident({ resetsAt: at(31), candidate: null }), NOW)).toBeNull();
-    expect(autoActionOf(incident({ resetsAt: null, candidate: null }), NOW)).toBeNull();
-  });
-});
-
-describe("decideAutomatically", () => {
-  it.each(["worker", "reviewer", "manager"] as const)("switches a %s through the role's own switch path, opening no decision", async (role) => {
-    write([incident({ role })]);
-    const acts = actions();
-    expect(await decideAutomatically(incident({ role }), {}, { home, log, now: () => NOW, actions: acts })).toBe(true);
-    expect(acts.roles).toEqual([`switched:${role}`]);
-    expect(read()[0]!.status).toBe("switched");
-    expect(decisions()).toEqual([]);
-  });
-
-  it("waits when the reset is 30 minutes away or less", async () => {
-    write([incident({ resetsAt: at(20) })]);
-    const acts = actions();
-    await decideAutomatically(incident({ resetsAt: at(20) }), {}, { home, log, now: () => NOW, actions: acts });
-    expect(acts.roles).toEqual(["waiting:worker"]);
-  });
-
-  it("chooses nothing without a near reset or a candidate: the incident stays pending", async () => {
-    write([incident({ candidate: null })]);
-    const acts = actions();
-    expect(await decideAutomatically(incident({ candidate: null }), {}, { home, log, now: () => NOW, actions: acts })).toBe(false);
-    expect(acts.roles).toEqual([]);
-    expect(read()[0]!.status).toBe("pending");
-  });
-
-  it("leaves the incident pending when Paseo's agent tools are off (real Worker switch), so it becomes the owner's decision", async () => {
-    write([incident()]);
-    const create = vi.fn();
-    const paseo = {
-      agents: { create, ref: (id: string) => ({ refresh: async () => ({ agent: { id, cwd: "/repo", status: "idle", labels: { "bm.role": "worker" } } }) }) },
-      providers: { listAvailable: async () => ({ providers: [{ provider: "codex", available: true }] }) },
-      config: { get: async () => ({ config: { mcp: { injectIntoAgents: false } } }) },
-    };
-    const worker = createWorkerSwitch({ log, now: () => NOW, setLabels: vi.fn(), stopReviewers: vi.fn(), handover: vi.fn(), location: async () => null });
-    expect(await decideAutomatically(incident(), paseo, { home, log, now: () => NOW, actions: { switch: worker } })).toBe(true);
-    expect(create).not.toHaveBeenCalled();
-    expect(read()[0]!.status).toBe("pending");
-    expect(decisions().map((decision) => [decision.id, decision.status])).toEqual([["f:fb-000000000a01", "open"]]);
-    expect(log).toHaveBeenCalledWith(expect.stringMatching(/could not switch .*agent tools are off/));
-  });
-
-  it("logs a failed switch instead of throwing, and opens no decision for the failed incident", async () => {
-    write([incident()]);
-    const failing: FallbackAction = async (current, _paseo, deps) => {
-      await decidePending(deps.home!, current.id, (entry) => ({ ...entry, status: "failed", error: "provider not logged in" }));
-      throw new Error("E_FALLBACK_CREATE_FAILED: provider not logged in");
-    };
-    expect(await decideAutomatically(incident(), {}, { home, log, now: () => NOW, actions: { switch: failing } })).toBe(true);
-    expect(read()[0]!.status).toBe("failed");
-    expect(decisions()).toEqual([]);
-    expect(log).toHaveBeenCalledWith(expect.stringMatching(/^\[paseo-bm\] the Auto switch policy could not switch/));
+  it("switches when the reset is further or unknown and there is a candidate, else recommends nothing", () => {
+    expect(recommendedActionOf(incident({ resetsAt: at(31) }), NOW)).toBe("switch");
+    expect(recommendedActionOf(incident({ resetsAt: null }), NOW)).toBe("switch");
+    expect(recommendedActionOf(incident({ resetsAt: at(31), candidate: null }), NOW)).toBeNull();
+    expect(recommendedActionOf(incident({ resetsAt: null, candidate: null }), NOW)).toBeNull();
   });
 });
 
-describe("a new incident on a role with Auto switch", () => {
-  function fakeDaemon() {
-    const sent: Array<{ id: string; text: string }> = [];
-    const paseo = {
-      agents: {
-        ref: (id: string) => ({
-          refresh: async () => ({
-            agent: id === "wrk-1" ? { id, labels: { "bm.role": "worker", "bm.requestId": "req-20260922T070000Z", "paseo.parent-agent-id": "mgr-1" } } : { id, status: "idle" },
-          }),
-          send: async (text: string) => void sent.push({ id, text }),
-        }),
-      },
-      providers: { listAvailable: async () => ({ providers: [{ provider: "codex", available: true }, { provider: "claude", available: true }] }) },
-      config: { get: async () => ({ config: { providers: { "bm-worker": { extends: "claude" }, "bm-worker-fallback-1": { extends: "codex" } } } }) },
-    };
-    return { paseo, sent };
-  }
-
-  function register(acts: ReturnType<typeof actions>) {
-    const server = { handle: vi.fn() };
-    return registerFallbackRpcs(server as never, { switch: acts.switch, wait: acts.wait });
-  }
-
-  it("is switched at once, with no decision and nothing sent to the Manager", async () => {
-    writeFileSync(join(home, ROLE_FALLBACK_FILE), JSON.stringify({ version: 1, roles: { worker: { policy: "auto", entries: [CANDIDATE] } } }));
+describe("a new incident after the Auto switch was retired (ADR-022 decision 4)", () => {
+  it.each(["auto", "ask"] as const)("under a stored %s policy, runs no action: it stays pending and opens exactly one environment decision", async (policy) => {
     const acts = actions();
-    const remove = register(acts);
-    const { paseo, sent } = fakeDaemon();
-    try {
-      await recordIncident({ agent: { id: "wrk-1", provider: "bm-worker/claude-opus-5", workspaceId: "wks_1" } }, { class: "L2", signal: "failed", message: "credit balance too low" }, { paseo, home, log, now: () => NOW });
-    } finally {
-      remove();
-    }
-    expect(acts.roles).toEqual(["switched:worker"]);
-    expect(read()[0]!.status).toBe("switched");
-    expect(decisions()).toEqual([]);
-    expect(sent).toEqual([]);
-  });
-
-  it("when the policy cannot act, the incident is held until it has tried, then opens exactly one decision", async () => {
-    writeFileSync(join(home, ROLE_FALLBACK_FILE), JSON.stringify({ version: 1, roles: { worker: { policy: "auto", entries: [CANDIDATE] } } }));
-    const refusing: FallbackAction = async () => {
-      throw new Error("E_FALLBACK_CREATE_FAILED: agent tools are off");
-    };
-    // The policy's failure is logged after fallback.act has aligned the decisions, before the hold ends.
-    const seenWhenLogged: string[][] = [];
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => void seenWhenLogged.push(decisions().map((decision) => decision.id)));
-    const server = { handle: vi.fn() };
-    const remove = registerFallbackRpcs(server as never, { switch: refusing });
-    const { paseo, sent } = fakeDaemon();
-    try {
-      await recordIncident({ agent: { id: "wrk-1", provider: "bm-worker/claude-opus-5", workspaceId: "wks_1" } }, { class: "L2", signal: "failed", message: "credit balance too low" }, { paseo, home, log, now: () => NOW, randomHex: () => "000000000a01" });
-    } finally {
-      remove();
-      warn.mockRestore();
-    }
-    expect(seenWhenLogged).toEqual([[]]);
-    expect(read()[0]!.status).toBe("pending");
-    expect(decisions().map((decision) => [decision.id, decision.status])).toEqual([["f:fb-000000000a01", "open"]]);
-    expect(sent).toEqual([]);
-  });
-
-  it("with Ask me, stays pending and opens exactly one decision with the card's options (no automatic action, nothing sent)", async () => {
-    writeFileSync(join(home, ROLE_FALLBACK_FILE), JSON.stringify({ version: 1, roles: { worker: { policy: "ask", entries: [CANDIDATE] } } }));
-    const acts = actions();
-    const remove = register(acts);
-    const { paseo, sent } = fakeDaemon();
-    try {
-      await recordIncident({ agent: { id: "wrk-1", provider: "bm-worker/claude-opus-5", workspaceId: "wks_1" } }, { class: "L2", signal: "failed", message: "credit balance too low" }, { paseo, home, log, now: () => NOW });
-    } finally {
-      remove();
-    }
+    const sent = await recordUnder(policy, acts);
     expect(acts.roles).toEqual([]);
     expect(read()[0]!.status).toBe("pending");
     const [decision, ...others] = decisions();
     expect(others).toEqual([]);
-    expect(decision).toMatchObject({ id: `f:${read()[0]!.id}`, status: "open", workspaceId: "wks_1", requestId: "req-20260922T070000Z", askedBy: { role: "plugin", agentId: null } });
+    expect(decision).toMatchObject({
+      id: `f:${ID}`,
+      status: "open",
+      class: "environment",
+      answer: null,
+      workspaceId: "wks_1",
+      requestId: "req-20260922T070000Z",
+      askedBy: { role: "plugin", agentId: null },
+    });
     expect(decision!.options.map((option) => [option.key, option.recommended, option.action])).toEqual([
-      ["switch", true, { kind: "fallback", action: "switch", target: read()[0]!.id }],
-      ["dismiss", false, { kind: "fallback", action: "dismiss", target: read()[0]!.id }],
+      ["switch", true, { kind: "fallback", action: "switch", target: ID }],
+      ["dismiss", false, { kind: "fallback", action: "dismiss", target: ID }],
     ]);
     expect(sent).toEqual([]);
+  });
+
+  it("is answered by itself when the owner delegates environment to the recommended option: by policy, run through fallback.act", async () => {
+    createAutonomyStore(home).set({ workspaceId: "wks_1", class: "environment", mode: "delegate", confirmed: true, predictor: "recommended" }, new Date().toISOString());
+    const acts = actions();
+    const sent = await recordUnder("auto", acts);
+    await vi.waitFor(() => expect(acts.roles).toEqual(["switched:worker"]));
+    expect(read()[0]!.status).toBe("switched");
+    await vi.waitFor(() =>
+      expect(decisions()).toMatchObject([
+        {
+          id: `f:${ID}`,
+          status: "answered",
+          answer: { by: "policy", optionKey: "switch", class: "environment", predictor: "recommended" },
+          delivery: { kind: "fallback:switch", outcome: "sent" },
+        },
+      ]),
+    );
+    expect(sent).toEqual([]);
+  });
+
+  it("is answered by itself when an owner precedent names one of its options: by precedent, run through fallback.act", async () => {
+    createPrecedentStore(home, { newId: () => "prec-1" }).save(
+      { scope: "wks_1", subject: "fallback-worker", text: "I'll handle it", sourceDecisionId: null, expiresInDays: 30 },
+      new Date(),
+    );
+    const acts = actions();
+    await recordUnder("auto", acts);
+    await vi.waitFor(() => expect(read()[0]!.status).toBe("dismissed"));
+    expect(acts.roles).toEqual([]);
+    await vi.waitFor(() =>
+      expect(decisions()).toMatchObject([{ id: `f:${ID}`, status: "answered", answer: { by: "precedent", optionKey: "dismiss" }, delivery: { kind: "fallback:dismiss", outcome: "sent" } }]),
+    );
+  });
+
+  it("under Off, is recorded dismissed and opens no decision", async () => {
+    const acts = actions();
+    await recordUnder("off", acts);
+    expect(read()[0]!.status).toBe("dismissed");
+    expect(acts.roles).toEqual([]);
+    expect(decisions()).toEqual([]);
   });
 });

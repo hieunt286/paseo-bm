@@ -36,7 +36,8 @@
  *   queued one. All items of one call are queued before the one delivery, so a
  *   burst from one source is one message too. Once the message went out,
  *   `batch.onSent(targetId, keys)` is told which items it carried, and the
- *   target's next turn end calls `batch.onTurnEnded(targetId)` once, first.
+ *   target's next turn end calls `batch.onTurnEnded(targetId, paseo)` once,
+ *   first, and waits for it.
  * - `registerNoticeQueue(host)` → `{ host, remove }`: the queue does not add a
  *   lifecycle hook of its own. It rides on an existing `agent.turn_ended` hook:
  *   pass the returned `host` to the module that registers one (index.server.ts
@@ -71,6 +72,7 @@
  *   with `[paseo-bm]`.
  */
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { errorText } from "./rpc-kit";
 
 /** A notice's marker, for example `"BM-TOOLS"`; one queued notice per kind and target. */
 export type NoticeKind = string;
@@ -114,9 +116,11 @@ export interface NoticeBatch {
   /**
    * Called at the target's first turn end after a message of this batch went
    * out — once per message, oldest first, before anything else queued for it
-   * is delivered at that turn end (A-7: the wake ended). A throw is logged.
+   * is delivered at that turn end (A-7: the wake ended). `paseo` is the
+   * handle of that turn end's hook. A returned promise is awaited before that
+   * delivery; a throw or a rejection is logged.
    */
-  onTurnEnded?(targetId: string): void;
+  onTurnEnded?(targetId: string, paseo?: unknown): unknown;
 }
 
 /** One line of a batch. */
@@ -159,10 +163,6 @@ interface Entry extends QueuedNotice {
 }
 
 type DeliveryStep = "empty" | "unknown" | "gone" | "busy" | "sent" | "failed" | "settled";
-
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 function nonEmpty(value: unknown): value is string {
   return typeof value === "string" && value.trim() !== "";
@@ -233,7 +233,7 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
     try {
       return entry.isCurrent() === true;
     } catch (error) {
-      log(`[paseo-bm] could not tell whether the ${entry.kind} notice is still current: ${describeError(error)}; dropped it.`);
+      log(`[paseo-bm] could not tell whether the ${entry.kind} notice is still current: ${errorText(error)}; dropped it.`);
       return false;
     }
   }
@@ -256,7 +256,7 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
     try {
       agent = (await paseo.agents.ref(targetId).refresh())?.agent ?? null;
     } catch (error) {
-      log(`[paseo-bm] could not read ${targetId} to deliver its ${head.kind} notice: ${describeError(error)}; it waits for that agent's next turn end.`);
+      log(`[paseo-bm] could not read ${targetId} to deliver its ${head.kind} notice: ${errorText(error)}; it waits for that agent's next turn end.`);
       return "unknown";
     }
     if (agent === null || agent.archivedAt != null || agent.status === "closed") {
@@ -289,7 +289,7 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
         try {
           batch.onSent(targetId, sending.map((entry) => entry.itemKey ?? entry.kind));
         } catch (error) {
-          log(`[paseo-bm] after sending the ${what} notice to ${targetId}: ${describeError(error)}`);
+          log(`[paseo-bm] after sending the ${what} notice to ${targetId}: ${errorText(error)}`);
         }
       }
       return "sent";
@@ -300,7 +300,7 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
         if (list.length === 0) awaitingEnd.delete(targetId);
         else awaitingEnd.set(targetId, list);
       }
-      log(`[paseo-bm] could not send the ${what} notice to ${targetId}: ${describeError(error)}; dropped it.`);
+      log(`[paseo-bm] could not send the ${what} notice to ${targetId}: ${errorText(error)}; dropped it.`);
       return "failed";
     }
   }
@@ -342,7 +342,7 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
       if (handle !== null) await deliver(targetId, handle);
       return entry.state === "sending" ? "queued" : entry.state;
     } catch (error) {
-      log(`[paseo-bm] queueing the ${String(kind)} notice for ${String(targetId)} failed: ${describeError(error)}`);
+      log(`[paseo-bm] queueing the ${String(kind)} notice for ${String(targetId)} failed: ${errorText(error)}`);
       return "dropped";
     }
   }
@@ -370,21 +370,21 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
       if (handle !== null && entries.some((entry) => entry !== null)) await deliver(targetId, handle);
       return entries.map((entry) => (entry === null ? "dropped" : entry.state === "sending" ? "queued" : entry.state));
     } catch (error) {
-      log(`[paseo-bm] queueing the ${String(batch?.name)} batch for ${String(targetId)} failed: ${describeError(error)}`);
+      log(`[paseo-bm] queueing the ${String(batch?.name)} batch for ${String(targetId)} failed: ${errorText(error)}`);
       return items.map(() => "dropped");
     }
   }
 
   /** The target's turn ended: the oldest batch message still waiting for that is told. */
-  function endOne(targetId: string): void {
+  async function endOne(targetId: string, paseo: unknown): Promise<void> {
     const list = awaitingEnd.get(targetId);
     const first = list?.shift();
     if (list !== undefined && list.length === 0) awaitingEnd.delete(targetId);
     if (first === undefined) return;
     try {
-      first.onTurnEnded?.(targetId);
+      await first.onTurnEnded?.(targetId, paseo);
     } catch (error) {
-      log(`[paseo-bm] after the turn end of ${targetId} (${first.name}): ${describeError(error)}`);
+      log(`[paseo-bm] after the turn end of ${targetId} (${first.name}): ${errorText(error)}`);
     }
   }
 
@@ -392,11 +392,11 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
     try {
       const handle = handleFor(paseo);
       const targetId = agentIdOf(event);
-      if (targetId !== null) endOne(targetId);
+      if (targetId !== null) await endOne(targetId, paseo);
       if (targetId === null || handle === null || !queued.has(targetId)) return;
       await deliver(targetId, handle);
     } catch (error) {
-      log(`[paseo-bm] delivering queued notices failed: ${describeError(error)}`);
+      log(`[paseo-bm] delivering queued notices failed: ${errorText(error)}`);
     }
   }
 

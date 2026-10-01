@@ -15,8 +15,8 @@
 // `create_agent` tool get no system prompt at all (bm-hld).
 //
 // The files are committed so a fresh checkout typechecks and tests; the build
-// rewrites them, and `prepack` runs the build, so every tarball carries the
-// current text. Idempotent: it only writes when the content changes.
+// rewrites them, and release.yml runs the build before it packs and publishes
+// plugin/, so every tarball carries the current text. Idempotent: it only writes when the content changes.
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";

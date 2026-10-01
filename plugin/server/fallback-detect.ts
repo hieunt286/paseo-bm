@@ -42,6 +42,7 @@ import { parseReports, parseReviews } from "./bm-report";
 import { REFETCH_LIMIT, sliceLastTurn, timestampsForTurn, type CollectorPaseo } from "./collector";
 import { isPluginNotice } from "./notices";
 import type { Usage } from "../shared/contracts";
+import { errorText } from "./rpc-kit";
 
 type TurnEndedEvent = PluginLifecycleEvents["agent.turn_ended"];
 
@@ -66,10 +67,6 @@ export interface FallbackDetectDeps {
   /** The `patterns` of `role-fallback.json`, read by the caller; absent means the defaults of every class. */
   patterns?: UserPatterns | null;
   log?: (message: string) => void;
-}
-
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function isFallbackRole(role: unknown): boolean {
@@ -177,7 +174,7 @@ export async function classifyTurn(event: TurnEndedEvent, deps: FallbackDetectDe
     if (outcome.kind === "completed" && !quietTokens(usage, items)) return null;
     return { class: found, signal: outcome.kind, message };
   } catch (error) {
-    log(`[paseo-bm] fallback detection skipped a turn of agent ${agentId}: ${describeError(error)}`);
+    log(`[paseo-bm] fallback detection skipped a turn of agent ${agentId}: ${errorText(error)}`);
     return null;
   }
 }

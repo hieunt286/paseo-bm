@@ -131,10 +131,11 @@ Each figure opens its breakdown. The `[ Delegate? ]` button appears only when RE
 
 ### 4.4 Settings
 
-Four groups on one scrolling screen, each collapsed to one line with its state:
+Five groups on one scrolling screen, each collapsed to one line with its state:
 
 - **Agents** — per role: provider, model, thinking, mode; fallback chain; "the Reviewer uses another model family" note (REQ-133).
 - **Autonomy** — the policy matrix (projects × classes: owner / shadow / delegate), with a **Reset to owner** per project.
+- **Coordination** — how often the Orchestrator advises (Phase 2), then compaction and handoff (Phase 3); autonomy design §G.7.
 - **Tools & skills** — `br`, `bv`, skills: healthy / missing, with install or copy-command actions.
 - **Data** — trace size, cleanup, removing paseo-bm's settings.
 
@@ -225,5 +226,6 @@ Reply boxes on report cards, Answered chips, Mark as answered, Use recommendatio
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-09-30 | Claude (owner's delegation) | §4.4: Settings gains Coordination, a fifth group after Autonomy (autonomy design §G.7, ADR-021) |
 | 2026-09-29 | hieu.nt10 (drafted by Claude) | Owner answered X-1 → X-4: badge on the sidebar item only, additional instructions removed, digest only in the Inbox, confirmation only for release/data/security/cost. The concept is ready to feed the Phase 1 design |
 | 2026-09-29 | hieu.nt10 (drafted by Claude) | Created as a Draft concept for the owner's review, with the calibrated autonomy PRD |

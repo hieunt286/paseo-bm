@@ -15,13 +15,11 @@ import { join, relative } from "node:path";
 import {
   appendRecord,
   clearTraceStoreCache,
-  deleteTraces,
-  planDeletion,
   readRecords,
-  traceKeyOf,
   withWorkspaceLock,
   type TraceStoreLocation,
 } from "../plugin/server/trace-store";
+import { deleteTraces, planDeletion, traceKeyOf } from "../plugin/server/trace-store-rewrite";
 import { TRACE_STORE_SCHEMA_VERSION, type TraceRecord } from "../plugin/shared/contracts";
 
 /**
@@ -273,6 +271,7 @@ describe("no automatic deletion path", () => {
       readFileSync("plugin/server/collector.ts", "utf8"),
       readFileSync("plugin/index.server.ts", "utf8"),
       readFileSync("plugin/server/trace-store.ts", "utf8"),
+      readFileSync("plugin/server/trace-store-rewrite.ts", "utf8"),
     ].join("\n");
     // The only mention of deleteTraces in the payload is its own definition.
     expect(sources.match(/deleteTraces/g) ?? []).toHaveLength(1);

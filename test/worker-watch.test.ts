@@ -7,6 +7,7 @@ import { isPluginNotice } from "../plugin/server/notices";
 import { ORCHESTRATOR_INSTRUCTIONS_HASH } from "../plugin/server/orchestrator-agent";
 import { createOrchestratorStore } from "../plugin/server/orchestrator-store";
 import { createAlertStore } from "../plugin/server/alert-store";
+import { createAutonomyStore } from "../plugin/server/autonomy-store";
 import { createEventBus } from "../plugin/server/event-bus";
 import { STALL_PASS_MS, createStallWatcher, type StallWatcher, type StallWatcherDeps } from "../plugin/server/stall-watcher";
 import { appendRecord, clearTraceStoreCache, writeWorkspaceMeta } from "../plugin/server/trace-store";
@@ -18,6 +19,7 @@ import {
   WORKER_TAIL_ENTRIES,
   SIGNAL_ALERT_KINDS,
   dangerOfCommand,
+  pendingCallIdsOf,
   workerSignalsOf,
   type WatchedEntry,
   type WorkerSignalInput,
@@ -26,6 +28,11 @@ import type { TraceRecord } from "../plugin/shared/contracts";
 import { DANGER_ALLOWANCE_MS, type WorkerSignal } from "../plugin/shared/orchestrator";
 import { MAX_ALERT_DETAIL_CHARS, alertKeyOf } from "../plugin/shared/alerts";
 import { MANAGER, WORKER, WORKSPACE_DIRECTORY, WORKSPACE_ID, at, msg, report, turn } from "./fixtures/orchestrator-traces";
+import { fakePaseo } from "./helpers/fake-paseo";
+import { heldDecisionOf } from "../plugin/server/action-boundary";
+import { createDecisionStore } from "../plugin/server/decision-store";
+import { answerDecision, withdrawDecision } from "../plugin/shared/decisions";
+import { boundaryVerdictOfCommand } from "../plugin/shared/effectful-actions";
 
 /**
  * The live watch of running Workers (Orchestrator design §6B.3, ADR-016
@@ -35,9 +42,11 @@ import { MANAGER, WORKER, WORKSPACE_DIRECTORY, WORKSPACE_ID, at, msg, report, tu
  * `permission` and `danger` also Inbox alerts, raised once and cleared when
  * they end; the interrupt allowance a `danger` opens and its expiry; the
  * bounds (five Workers, 300 entries, the turn start); the 2-minute pass on
- * the stall pass's timer; projects without Autopilot never read. A fake Paseo
- * SDK, a private notice queue and a temporary data folder named by
- * `PASEO_BM_HOME` — never the real HOME or a daemon.
+ * the stall pass's timer; the alerts for every project, the events and the
+ * interrupt allowance only for a project with a class above `owner` in the
+ * policy (change-007 C1). A fake Paseo SDK, a private notice queue and a
+ * temporary data folder named by `PASEO_BM_HOME` — never the real HOME or a
+ * daemon.
  */
 
 const REQUEST_ID = "req-20260926T100020Z";
@@ -350,54 +359,21 @@ function workerAgent(extra: Partial<FakeAgent> & { turnStart?: string | null } =
 }
 
 /**
- * The fake SDK: `agents.list`, `refresh()` (the table's agent and its
- * snapshot fields), `timeline.refetch` (paged from the newest, with
- * `startCursor` and `hasOlder`, as Paseo 0.8 answers), `send` (recorded;
- * starts a turn) and `workspaces.list`.
+ * The shared fake SDK: the table's agents in the project folder, each with its
+ * snapshot fields (the turn and the permissions) and its own timeline, paged
+ * from the newest with `startCursor` and `hasOlder` as Paseo 0.8 answers;
+ * `send` is recorded and starts a turn.
  */
-function fakePaseo(initial: FakeAgent[]) {
-  const agents = [...initial];
-  const sends: Array<{ id: string; text: string }> = [];
-  const refreshes: string[] = [];
-  const reads: Array<{ id: string; options: Record<string, unknown>; entries: number }> = [];
-  const byId = (id: string) => agents.find((entry) => entry.id === id);
-  const paseo = {
-    agents: {
-      list: vi.fn(async () => ({ entries: agents.map((entry) => ({ agent: { ...entry, snapshot: undefined, timeline: undefined } })) })),
-      ref: vi.fn((id: string) => ({
-        refresh: async () => {
-          refreshes.push(id);
-          const found = byId(id);
-          return { agent: found === undefined ? null : { id, status: found.status, archivedAt: found.archivedAt ?? null, cwd: WORKSPACE_DIRECTORY, ...found.snapshot } };
-        },
-        send: async (text: string) => {
-          sends.push({ id, text });
-          const found = byId(id);
-          if (found !== undefined) found.status = "running";
-        },
-        timeline: {
-          refetch: async (options: { direction?: string; cursor?: number; limit?: number }) => {
-            const all = byId(id)?.timeline ?? [];
-            const limit = options.limit ?? 200;
-            const end = options.direction === "before" ? (options.cursor ?? all.length) : all.length;
-            const start = Math.max(0, end - limit);
-            const entries = all.slice(start, end);
-            reads.push({ id, options, entries: entries.length });
-            return { entries, hasOlder: start > 0, startCursor: start };
-          },
-        },
-      })),
-    },
-    workspaces: {
-      list: vi.fn(async () => ({
-        entries: [
-          { id: WORKSPACE_ID, name: "invoice-app", directory: WORKSPACE_DIRECTORY },
-          { id: OTHER_WORKSPACE, name: "other-app", directory: "/work/other-app" },
-        ],
-      })),
-    },
-  };
-  return { paseo, agents, sends, refreshes, reads, byId };
+function daemonWith(initial: FakeAgent[]) {
+  const fake = fakePaseo({
+    agents: initial.map(({ snapshot, ...agent }) => ({ ...agent, timeline: undefined, cwd: WORKSPACE_DIRECTORY, ...snapshot })),
+    timelines: Object.fromEntries(initial.map((agent) => [agent.id, agent.timeline ?? []])),
+    workspaces: [
+      { id: WORKSPACE_ID, name: "invoice-app", directory: WORKSPACE_DIRECTORY },
+      { id: OTHER_WORKSPACE, name: "other-app", directory: "/work/other-app" },
+    ],
+  });
+  return { ...fake, reads: fake.refetches };
 }
 
 /** The request, sized Small, handed to the Worker. */
@@ -445,7 +421,9 @@ let watchers: StallWatcher[];
 const location = () => ({ tracesDir: join(home, "traces") });
 const store = () => createOrchestratorStore(home, { now: () => clock });
 const alerts = () => createAlertStore(home, { now: () => clock });
-const autopilotOn = (workspaceId = WORKSPACE_ID) => store().setAutopilot(workspaceId, true, "tab");
+/** Puts a project in the events' scope: one class above `owner` in the policy. */
+const inScope = (workspaceId = WORKSPACE_ID, mode: "shadow" | "delegate" = "shadow") =>
+  createAutonomyStore(home).set({ workspaceId, class: "scope", mode, confirmed: true }, clock.toISOString());
 const alertOf = (signal: WorkerSignal, workerId = WORKER) => alertKeyOf(SIGNAL_ALERT_KINDS[signal]!, WORKSPACE_ID, workerId);
 /** The event lines of every BM-EVENTS message sent. */
 const eventLines = (sends: Array<{ text: string }>) => sends.flatMap((sent) => sent.text.split("\n").filter((line) => line.startsWith("- ")));
@@ -464,8 +442,20 @@ function watcher(extra: StallWatcherDeps = {}): StallWatcher {
   return created;
 }
 
+/** The daemon's view of `agent` changes: its snapshot fields replaced, its timeline or its status as given. */
+function change(fake: ReturnType<typeof daemonWith>, agent: FakeAgent, next: Pick<FakeAgent, "snapshot" | "timeline"> & { status?: string }) {
+  const live = fake.byId(agent.id)!;
+  if (next.snapshot !== undefined) {
+    for (const key of Object.keys(agent.snapshot ?? {})) delete live[key];
+    Object.assign(live, next.snapshot);
+  }
+  if (next.timeline !== undefined) fake.setTimeline(agent.id, next.timeline);
+  if (next.status !== undefined) live.status = next.status;
+  Object.assign(agent, next);
+}
+
 function watching(agents: FakeAgent[]) {
-  const fake = fakePaseo(agents);
+  const fake = daemonWith(agents);
   const watch = watcher();
   watch.usePaseo(fake.paseo);
   return { fake, watch };
@@ -494,7 +484,7 @@ afterEach(() => {
 describe("the Worker pass: each signal is one worker.signal event per Worker turn (design §6B.3, §A.8)", () => {
   it("a healthy Worker is read and raises nothing; nothing is sent", async () => {
     await seed();
-    autopilotOn();
+    inScope();
     const { fake, watch } = watching([managerAgent(), workerAgent(), orchestratorAgent()]);
 
     expect(await watch.workerPass()).toMatchObject({ status: "done", watched: [WORKER], raised: [], events: [] });
@@ -534,7 +524,7 @@ describe("the Worker pass: each signal is one worker.signal event per Worker tur
     const alertKind = SIGNAL_ALERT_KINDS[signal];
     it(`${signal}: one event to the Orchestrator in a BM-EVENTS message${alertKind === undefined ? "" : `, and a ${alertKind} alert`}`, async () => {
       await seed();
-      autopilotOn();
+      inScope();
       if (clockAt !== undefined) clock = clockAt;
       const { fake, watch } = watching([managerAgent(), worker(), orchestratorAgent()]);
 
@@ -565,9 +555,9 @@ describe("the Worker pass: each signal is one worker.signal event per Worker tur
 
   it("the alert's detail is redacted and capped", async () => {
     await seed();
-    autopilotOn();
+    inScope();
     const long = `npm publish --token sk-flag-secret --otp=${"9".repeat(6)} # daemon password pw-env-secret ${"x".repeat(2_000)}`;
-    const fake = fakePaseo([managerAgent(), workerAgent({ timeline: [...healthyTurn(), shellCall(long, at(24, 10))] }), orchestratorAgent()]);
+    const fake = daemonWith([managerAgent(), workerAgent({ timeline: [...healthyTurn(), shellCall(long, at(24, 10))] }), orchestratorAgent()]);
     const watch = watcher({ redactEnv: { PASEO_PASSWORD: "pw-env-secret" } });
     watch.usePaseo(fake.paseo);
     await watch.workerPass();
@@ -582,7 +572,7 @@ describe("the Worker pass: each signal is one worker.signal event per Worker tur
 
   it("a new turn tells the Orchestrator again; the Worker's recorded turn end clears its alerts", async () => {
     await seed();
-    autopilotOn();
+    inScope();
     const worker = workerAgent({ timeline: [...healthyTurn(), shellCall("br create x", at(24, 10)), shellCall("git push", at(24, 20))] });
     const { fake, watch } = watching([managerAgent(), worker, orchestratorAgent()]);
 
@@ -596,8 +586,7 @@ describe("the Worker pass: each signal is one worker.signal event per Worker tur
 
     // The next turn starts at 10:30 and runs br create again.
     const next = at(30);
-    worker.snapshot = { activeTurn: { turnId: "t-2", startedAt: next } };
-    worker.timeline = [...healthyTurn(), userMessage("Go on.", next), shellCall("br create y", at(31))];
+    change(fake, worker, { snapshot: { activeTurn: { turnId: "t-2", startedAt: next } }, timeline: [...healthyTurn(), userMessage("Go on.", next), shellCall("br create y", at(31))] });
     clock = when(32);
     fake.byId(ORCHESTRATOR)!.status = "idle";
     expect(await watch.workerPass()).toMatchObject({ raised: [], events: [expect.objectContaining({ signal: "heavy", turnStart: next })] });
@@ -607,7 +596,7 @@ describe("the Worker pass: each signal is one worker.signal event per Worker tur
 
   it("an event whose Worker turn ended before the Orchestrator was idle is dropped", async () => {
     await seed();
-    autopilotOn();
+    inScope();
     const orchestrator = { ...orchestratorAgent(), status: "running" };
     const { fake, watch } = watching([managerAgent(), workerAgent({ timeline: [...healthyTurn(), shellCall("br create x", at(24, 10))] }), orchestrator]);
     await watch.workerPass();
@@ -620,7 +609,7 @@ describe("the Worker pass: each signal is one worker.signal event per Worker tur
 
   it("stuck clears when the Worker moves again, permission when it is answered, all when the Worker stops", async () => {
     await seed();
-    autopilotOn();
+    inScope();
     const worker = workerAgent({
       snapshot: {
         activeTurn: { turnId: "t-1", startedAt: TURN_START },
@@ -631,22 +620,24 @@ describe("the Worker pass: each signal is one worker.signal event per Worker tur
       timeline: [userMessage("Go.", TURN_START), shellCall("git push", at(21, 10))],
     });
     clock = new Date(when(21, 10).getTime() + STUCK_MS);
-    const { watch } = watching([managerAgent(), worker, orchestratorAgent()]);
+    const { fake, watch } = watching([managerAgent(), worker, orchestratorAgent()]);
     expect((await watch.workerPass()).raised.sort()).toEqual([alertOf("danger"), alertOf("permission"), alertOf("stuck")].sort());
 
     // Answered, and the Worker moves again: those two are cleared; danger holds until the turn ends.
-    worker.snapshot = { activeTurn: { turnId: "t-1", startedAt: TURN_START } };
-    worker.timeline = [...worker.timeline!, assistant("Pushed.", new Date(clock.getTime() - 1_000).toISOString())];
+    change(fake, worker, {
+      snapshot: { activeTurn: { turnId: "t-1", startedAt: TURN_START } },
+      timeline: [...worker.timeline!, assistant("Pushed.", new Date(clock.getTime() - 1_000).toISOString())],
+    });
     expect((await watch.workerPass()).cleared.sort()).toEqual([alertOf("permission"), alertOf("stuck")].sort());
     expect(alerts().list({ open: true }).map((alert) => alert.kind)).toEqual(["danger"]);
 
-    worker.status = "idle";
+    change(fake, worker, { status: "idle" });
     expect(await watch.workerPass()).toMatchObject({ watched: [], cleared: [alertOf("danger")] });
   });
 
   it("without an Orchestrator the alert is kept, and nothing is sent", async () => {
     await seed();
-    autopilotOn();
+    inScope();
     const { fake, watch } = watching([managerAgent(), workerAgent({ timeline: [...healthyTurn(), shellCall("git push", at(24, 10))] })]);
     expect(await watch.workerPass()).toMatchObject({ raised: [alertOf("danger")] });
     expect(fake.sends).toEqual([]);
@@ -654,7 +645,7 @@ describe("the Worker pass: each signal is one worker.signal event per Worker tur
 
   it("a permission the snapshot gives no time for counts from when the watch first saw it", async () => {
     await seed();
-    autopilotOn();
+    inScope();
     const worker = workerAgent({
       snapshot: { activeTurn: { turnId: "t-1", startedAt: TURN_START }, pendingPermissions: [{ id: "perm-1", name: "Bash" }] },
       timeline: [userMessage("Go.", TURN_START), shellCall("curl https://example.com", at(24, 50), { status: "running" })],
@@ -671,14 +662,14 @@ describe("the Worker pass: each signal is one worker.signal event per Worker tur
 describe("danger opens the interrupt allowance for 10 minutes (design §6B.3)", () => {
   it("opens on danger, never on another signal, says so in the event, and expires", async () => {
     await seed();
-    autopilotOn();
+    inScope();
     const worker = workerAgent({ timeline: [...healthyTurn(), shellCall("br create x", at(24, 5))] });
     const { fake, watch } = watching([managerAgent(), worker, orchestratorAgent()]);
 
     expect(await watch.workerPass()).toMatchObject({ raised: [], allowances: [] });
     expect(store().isDangerOpen(WORKSPACE_ID, WORKER)).toBe(false);
 
-    worker.timeline = [...worker.timeline!, shellCall("git push origin main", at(25, 10))];
+    change(fake, worker, { timeline: [...worker.timeline!, shellCall("git push origin main", at(25, 10))] });
     clock = when(26);
     fake.byId(ORCHESTRATOR)!.status = "idle";
     expect(await watch.workerPass()).toMatchObject({ raised: [alertOf("danger")], allowances: [WORKER] });
@@ -696,36 +687,22 @@ describe("danger opens the interrupt allowance for 10 minutes (design §6B.3)", 
   });
 });
 
-describe("bounds: Autopilot projects only, five Workers, 300 entries since the turn start (design §6B.3)", () => {
-  it("no Autopilot project: the pass is off, lists, refreshes and reads nothing, and clears the Worker alerts left", async () => {
+describe("bounds: five Workers, 300 entries since the turn start, nothing read without a running Worker (design §6B.3)", () => {
+  it("no running Worker: the pass lists the agents once, refreshes and reads nothing, and clears the Worker alerts left", async () => {
     await seed();
+    inScope();
     alerts().raise({ workspaceId: WORKSPACE_ID, kind: "danger", subject: WORKER });
-    const { fake, watch } = watching([managerAgent(), workerAgent({ timeline: [...healthyTurn(), shellCall("git push", at(24))] }), orchestratorAgent()]);
-    expect(await watch.workerPass()).toMatchObject({ status: "off", raised: [], cleared: [alertOf("danger")] });
-    expect(fake.paseo.agents.list).not.toHaveBeenCalled();
+    const other = workerAgent({ id: "agent-worker-other", workspaceId: OTHER_WORKSPACE, status: "idle" });
+    const { fake, watch } = watching([managerAgent(), managerAgent(OTHER_WORKSPACE, "agent-manager-other"), other, orchestratorAgent()]);
+    expect(await watch.workerPass()).toMatchObject({ status: "done", watched: [], raised: [], cleared: [alertOf("danger")], events: [] });
+    expect(fake.paseo.agents.list).toHaveBeenCalledTimes(1);
     expect(fake.refreshes).toEqual([]);
     expect(fake.reads).toEqual([]);
   });
 
-  it("a Worker of a project without Autopilot is never refreshed or read, and raises nothing", async () => {
-    await seed();
-    autopilotOn();
-    const other = workerAgent({
-      id: "agent-worker-other",
-      workspaceId: OTHER_WORKSPACE,
-      labels: { "bm.role": "worker", "paseo.parent-agent-id": "agent-manager-other" },
-      timeline: [...healthyTurn(), shellCall("git push", at(24))],
-    });
-    const { fake, watch } = watching([managerAgent(), managerAgent(OTHER_WORKSPACE, "agent-manager-other"), other, workerAgent(), orchestratorAgent()]);
-    expect(await watch.workerPass()).toMatchObject({ watched: [WORKER], raised: [] });
-    expect(fake.refreshes).not.toContain(other.id);
-    expect(fake.reads.map((read) => read.id)).not.toContain(other.id);
-    expect(fake.sends).toEqual([]);
-  });
-
   it("a Worker that is not running, or whose snapshot gives no turn start, is not read", async () => {
     await seed();
-    autopilotOn();
+    inScope();
     const idle = workerAgent({ id: "agent-worker-idle", status: "idle", timeline: [shellCall("git push", at(24))] });
     const unknownTurn = workerAgent({ id: "agent-worker-unknown", turnStart: null, timeline: [shellCall("git push", at(24))] });
     const { fake, watch } = watching([managerAgent(), idle, unknownTurn, orchestratorAgent()]);
@@ -736,7 +713,7 @@ describe("bounds: Autopilot projects only, five Workers, 300 entries since the t
 
   it(`at most ${MAX_WATCHED_WORKERS} running Workers: the oldest are dropped`, async () => {
     await seed();
-    autopilotOn();
+    inScope();
     const workers = Array.from({ length: 7 }, (_, index) =>
       workerAgent({ id: `agent-worker-${index}`, createdAt: at(index), labels: { "bm.role": "worker", "paseo.parent-agent-id": MANAGER } }),
     );
@@ -748,7 +725,7 @@ describe("bounds: Autopilot projects only, five Workers, 300 entries since the t
 
   it(`reads at most ${WORKER_TAIL_ENTRIES} entries, newest first, and no page older than the turn start`, async () => {
     await seed();
-    autopilotOn();
+    inScope();
     // A long turn: 1,000 entries since 10:20, one every half second.
     const longTurn = Array.from({ length: 1_000 }, (_, index) => assistant(`step ${index}`, new Date(when(20).getTime() + index * 500).toISOString()));
     const long = workerAgent({ id: "agent-worker-long", createdAt: at(1), timeline: longTurn });
@@ -767,11 +744,79 @@ describe("bounds: Autopilot projects only, five Workers, 300 entries since the t
   });
 });
 
+describe("the policy's scope: alerts for every project, events in scope (design §A.8, change-007 C1)", () => {
+  const OTHER_WORKER = "agent-worker-other";
+  const otherWorker = (timeline: WatchedEntry[]) =>
+    workerAgent({ id: OTHER_WORKER, workspaceId: OTHER_WORKSPACE, labels: { "bm.role": "worker", "paseo.parent-agent-id": "agent-manager-other" }, timeline });
+
+  it("a Worker of an all-owner project raises its stuck, permission-waiting and danger alerts; no worker.signal event and no interrupt allowance", async () => {
+    await seed();
+    // A cell set back to owner leaves the project all-owner.
+    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "scope", mode: "owner" }, clock.toISOString());
+    const worker = workerAgent({
+      snapshot: {
+        activeTurn: { turnId: "t-1", startedAt: TURN_START },
+        pendingPermissions: [{ id: "perm-1", name: "Bash", title: "Run a command" }],
+        attentionReason: "permission",
+        attentionTimestamp: at(21),
+      },
+      timeline: [userMessage("Go.", TURN_START), shellCall("git push", at(21, 10)), shellCall("br create x", at(21, 20))],
+    });
+    clock = new Date(when(21, 20).getTime() + STUCK_MS);
+    const { fake, watch } = watching([managerAgent(), worker, orchestratorAgent()]);
+    const pass = await watch.workerPass();
+    expect(pass).toMatchObject({ watched: [WORKER], events: [], allowances: [] });
+    expect(pass.raised.sort()).toEqual([alertOf("danger"), alertOf("permission"), alertOf("stuck")].sort());
+    expect(fake.sends).toEqual([]);
+    expect(queue.pending(ORCHESTRATOR)).toEqual([]);
+    expect(store().isDangerOpen(WORKSPACE_ID, WORKER)).toBe(false);
+  });
+
+  it("of two projects, the one in scope gets its alerts, its events and the allowance; the all-owner one its alerts only", async () => {
+    await seed();
+    inScope(OTHER_WORKSPACE, "delegate");
+    const { fake, watch } = watching([
+      managerAgent(),
+      managerAgent(OTHER_WORKSPACE, "agent-manager-other"),
+      workerAgent({ timeline: [...healthyTurn(), shellCall("git push", at(24))] }),
+      // Its own directory is /work/other-app: a timeline with no file write, so no `outside`.
+      otherWorker([userMessage("Go.", TURN_START), shellCall("git push", at(24))]),
+      orchestratorAgent(),
+    ]);
+    const pass = await watch.workerPass();
+    expect(pass.watched.sort()).toEqual([OTHER_WORKER, WORKER].sort());
+    expect(pass.raised.sort()).toEqual([alertOf("danger"), alertKeyOf("danger", OTHER_WORKSPACE, OTHER_WORKER)].sort());
+    expect(pass.events).toEqual([expect.objectContaining({ type: "worker.signal", workspaceId: OTHER_WORKSPACE, workerId: OTHER_WORKER, signal: "danger" })]);
+    expect(pass.allowances).toEqual([OTHER_WORKER]);
+    expect(eventLines(fake.sends)).toEqual([expect.stringMatching(new RegExp(`^- worker\\.signal danger — project ${OTHER_WORKSPACE}, Worker ${OTHER_WORKER},`))]);
+    expect(store().isDangerOpen(WORKSPACE_ID, WORKER)).toBe(false);
+  });
+
+  it("a project that leaves the scope keeps its alerts; its pending events are dropped at delivery", async () => {
+    await seed();
+    inScope();
+    const orchestrator = { ...orchestratorAgent(), status: "running" };
+    const { fake, watch } = watching([managerAgent(), workerAgent({ timeline: [...healthyTurn(), shellCall("git push", at(24)), shellCall("br create x", at(24, 10))] }), orchestrator]);
+    expect((await watch.workerPass()).events.map((event) => event.type === "worker.signal" && event.signal)).toEqual(["danger", "heavy"]);
+    expect(queue.pending(ORCHESTRATOR)).toHaveLength(2);
+    // The owner returns every class to owner before the Orchestrator is idle.
+    createAutonomyStore(home).reset(WORKSPACE_ID);
+    fake.byId(ORCHESTRATOR)!.status = "idle";
+    await queue.turnEnded({ agent: { id: ORCHESTRATOR } }, fake.paseo);
+    expect(fake.sends).toEqual([]);
+    expect(alerts().list({ open: true }).map((alert) => alert.key)).toEqual([alertOf("danger")]);
+    // The next pass, outside the scope: the alert holds, nothing is told.
+    clock = new Date(clock.getTime() + WORKER_PASS_MS);
+    expect(await watch.workerPass()).toMatchObject({ raised: [], cleared: [], events: [] });
+    expect(alerts().isOpen(alertOf("danger"))).toBe(true);
+  });
+});
+
 describe("the 2-minute Worker pass rides on the stall pass's timer", () => {
   it("one timer; the Worker pass every second tick, none after the timer stops", async () => {
     await seed();
-    autopilotOn();
-    const fake = fakePaseo([managerAgent(), workerAgent(), orchestratorAgent()]);
+    inScope();
+    const fake = daemonWith([managerAgent(), workerAgent(), orchestratorAgent()]);
     vi.useFakeTimers({ now: when(25) });
     const watch = watcher({ now: undefined });
     watch.usePaseo(fake.paseo);
@@ -794,23 +839,23 @@ describe("the 2-minute Worker pass rides on the stall pass's timer", () => {
     expect(fake.reads).toHaveLength(2);
   });
 
-  it("without Autopilot the timer runs for stalls, and no Worker is ever refreshed or read", async () => {
+  it("for an all-owner project the timer's Worker pass raises the alerts and tells the Orchestrator nothing", async () => {
     await seed();
-    const fake = fakePaseo([managerAgent(), workerAgent({ timeline: [...healthyTurn(), shellCall("git push", at(24))] }), orchestratorAgent()]);
+    const fake = daemonWith([managerAgent(), workerAgent({ timeline: [...healthyTurn(), shellCall("git push", at(24))] }), orchestratorAgent()]);
     vi.useFakeTimers({ now: when(25) });
     const watch = watcher({ now: undefined });
     watch.usePaseo(fake.paseo);
     watch.start();
-    await vi.advanceTimersByTimeAsync(10 * WORKER_PASS_MS);
-    expect(fake.refreshes.filter((id) => id === WORKER)).toEqual([]);
-    expect(fake.reads).toEqual([]);
-    expect(alerts().list({ kinds: ["danger", "stuck", "permission-waiting"] })).toEqual([]);
+    await vi.advanceTimersByTimeAsync(WORKER_PASS_MS);
+    expect(fake.reads.map((read) => read.id)).toEqual([WORKER]);
+    expect(alerts().list({ open: true, kinds: ["danger", "stuck", "permission-waiting"] })).toEqual([expect.objectContaining({ kind: "danger", subject: WORKER })]);
+    expect(fake.sends).toEqual([]);
   });
 
   it("a pass under way when the timer stops writes and sends nothing more; two passes never overlap", async () => {
     await seed();
-    autopilotOn();
-    const fake = fakePaseo([managerAgent(), workerAgent({ timeline: [...healthyTurn(), shellCall("git push", at(24))] }), orchestratorAgent()]);
+    inScope();
+    const fake = daemonWith([managerAgent(), workerAgent({ timeline: [...healthyTurn(), shellCall("git push", at(24))] }), orchestratorAgent()]);
     const watch = watcher();
     watch.usePaseo(fake.paseo);
     watch.start();
@@ -826,5 +871,133 @@ describe("the 2-minute Worker pass rides on the stall pass's timer", () => {
     expect(fake.sends).toEqual([]);
     expect(alerts().list()).toEqual([]);
     expect(store().listDangerAllowances()).toEqual([]);
+  });
+});
+
+// ── The action boundary: one Inbox item per action (autonomy design §D.2, change-009 C7) ──
+
+describe("the action boundary's held requests in the watch (§D.2, change-009 C7)", () => {
+  /** An `h:` decision of the Worker's request `permissionId`, for `command`: open, or allowed by the owner at `answeredAt`. */
+  function heldOf(permissionId: string, command: string, answeredAt: string | null = null) {
+    const open = heldDecisionOf({
+      agentId: WORKER,
+      permissionId,
+      workspaceId: WORKSPACE_ID,
+      requestId: REQUEST_ID,
+      question: `The Worker asks to run \`${command}\`.`,
+      findings: boundaryVerdictOfCommand(command, { cwd: WORKSPACE_DIRECTORY, workspaceDirectory: WORKSPACE_DIRECTORY }).findings,
+      at: at(21),
+    });
+    if (answeredAt === null) return open;
+    const answered = answerDecision(open, { via: "inbox", optionKey: "allow", at: answeredAt });
+    if (!answered.ok) throw new Error(answered.message);
+    return answered.decision;
+  }
+
+  it("danger: an action a grant of its request covered before it ran raises none; one after, or another action, still does", () => {
+    const entries = [...healthyTurn(), shellCall("git push origin main", at(24, 10))];
+    expect(signalsOf(entries, { grants: [{ at: at(24), effects: ["push"] }] })).toEqual([]);
+    expect(signalsOf(entries, { grants: [{ at: at(24, 20), effects: ["push"] }] })).toEqual(["danger"]);
+    expect(signalsOf(entries, { grants: [{ at: at(24), effects: ["publish"] }] })).toEqual(["danger"]);
+  });
+
+  /**
+   * Live check 2026-10-01 F3: a Codex push held, denied with `paseo permit
+   * deny` (its `h:` withdrawn) and never run raised `danger` 6 s later. Paseo
+   * had put two entries for it on the timeline: its denial entry, and the
+   * call's own item, left `running`.
+   */
+  const codexDenied = (itemId: string, command: string, time: string, denialTime: string): WatchedEntry[] => [
+    {
+      item: { type: "tool_call", callId: `permission-${itemId}`, name: "shell", status: "failed", error: { message: "Permission denied" }, detail: { type: "shell", command, cwd: WORKSPACE_DIRECTORY }, metadata: { permissionRequestId: `permission-${itemId}`, denied: true } },
+      timestamp: denialTime,
+    },
+    { item: { type: "tool_call", callId: itemId, name: "shell", status: "running", error: null, detail: { type: "shell", command, cwd: WORKSPACE_DIRECTORY } }, timestamp: time },
+  ];
+
+  it("danger: a denied Codex call (Paseo's denial entry and the call it stands for) and a call still waiting on its permission never count", () => {
+    const push = "git push origin HEAD:main";
+    expect(signalsOf([...healthyTurn(), ...codexDenied("exec-04c2", push, at(24, 11), at(24, 10))])).toEqual([]);
+    // Only the call's own item (the denial entry lost to the tail): still not run when its permission is pending.
+    const pending = [...healthyTurn(), { item: { type: "tool_call", callId: "exec-7", name: "shell", status: "running", detail: { type: "shell", command: push } }, timestamp: at(24, 10) }];
+    expect(signalsOf(pending, { pendingCallIds: new Set(["exec-7"]) })).toEqual([]);
+    expect(signalsOf(pending)).toEqual(["danger"]);
+    // Another call denied does not hide one that ran.
+    expect(signalsOf([...healthyTurn(), ...codexDenied("exec-1", push, at(24, 11), at(24, 10)), shellCall("npm publish", at(24, 30))])).toEqual(["danger"]);
+    expect(pendingCallIdsOf([{ id: "permission-exec-9", name: "CodexBash" }, { id: "permission-abc", name: "Bash", metadata: { toolUseId: "toolu_1" } }, { id: "p", metadata: { itemId: "item-2" } }])).toEqual(
+      new Set(["exec-9", "toolu_1", "abc", "item-2"]),
+    );
+  });
+
+  it("no danger alert for the live case: a Codex push denied and withdrawn, and a Claude push whose held decision the owner denied; a push that ran and failed still raises it", async () => {
+    await seed();
+    const push = "git push origin HEAD:main";
+    const store = createDecisionStore(home);
+    const withdrawn = withdrawDecision(heldOf("permission-exec-04c2", push), { at: at(24, 10) });
+    if (!withdrawn.ok) throw new Error(withdrawn.message);
+    store.open(withdrawn.decision);
+    const codex = await (async () => {
+      const { watch } = watching([managerAgent(), workerAgent({ timeline: [...healthyTurn(), ...codexDenied("exec-04c2", push, at(24, 11), at(24, 10))] })]);
+      return watch.workerPass();
+    })();
+    expect(codex.raised).not.toContain(alertOf("danger"));
+
+    // Claude: the denied call keeps its own id and ends `failed`; its held decision was answered Deny.
+    const claudePush = "git push origin main";
+    const denied = answerDecision(heldOf("permission-claude-1", claudePush), { via: "inbox", optionKey: "deny", at: at(24, 20) });
+    if (!denied.ok) throw new Error(denied.message);
+    createDecisionStore(home).open(denied.decision);
+    const claudeDenied = [...healthyTurn(), shellCall(claudePush, at(24, 5), { callId: "toolu_01", status: "failed" })];
+    const { watch } = watching([managerAgent(), workerAgent({ timeline: claudeDenied })]);
+    expect((await watch.workerPass()).raised).not.toContain(alertOf("danger"));
+    // The same failed push with no denied decision ran (and failed): danger.
+    expect(signalsOf(claudeDenied)).toEqual(["danger"]);
+  });
+
+  it("no permission-waiting alert for a held request, while another pending request keeps it", async () => {
+    await seed();
+    const worker = workerAgent({
+      snapshot: {
+        activeTurn: { turnId: "t-1", startedAt: TURN_START },
+        pendingPermissions: [{ id: "perm-held", name: "Bash", title: "Run a command" }],
+        attentionReason: "permission",
+        attentionTimestamp: at(21),
+      },
+    });
+    createDecisionStore(home).open(heldOf("perm-held", "git push"));
+    clock = new Date(when(21).getTime() + PERMISSION_WAIT_MS + 60_000);
+    const { fake, watch } = watching([managerAgent(), worker]);
+    expect((await watch.workerPass()).raised).not.toContain(alertOf("permission"));
+    change(fake, worker, {
+      snapshot: {
+        activeTurn: { turnId: "t-1", startedAt: TURN_START },
+        pendingPermissions: [{ id: "perm-held", name: "Bash" }, { id: "perm-other", name: "AskUserQuestion" }],
+        attentionReason: "permission",
+        attentionTimestamp: at(21),
+      },
+    });
+    expect((await watch.workerPass()).raised).toContain(alertOf("permission"));
+  });
+
+  it("no danger alert for a push the owner allowed from its held decision before it ran", async () => {
+    await seed();
+    createDecisionStore(home).open(heldOf("perm-push", "git push origin main", at(24)));
+    const { watch } = watching([managerAgent(), workerAgent({ timeline: [...healthyTurn(), shellCall("git push origin main", at(24, 10))] })]);
+    const pass = await watch.workerPass();
+    expect(pass.raised).not.toContain(alertOf("danger"));
+    expect(alerts().list({ open: true })).toEqual([]);
+  });
+
+  it("the boundary's scan runs before each Worker pass", async () => {
+    await seed();
+    const scanned: unknown[] = [];
+    const { fake, watch } = (() => {
+      const fake = daemonWith([managerAgent(), workerAgent()]);
+      const watch = watcher({ beforeWorkerPass: async (handle) => void scanned.push(handle) });
+      watch.usePaseo(fake.paseo);
+      return { fake, watch };
+    })();
+    await watch.workerPass();
+    expect(scanned).toEqual([fake.paseo]);
   });
 });

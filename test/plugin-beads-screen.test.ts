@@ -10,8 +10,9 @@ import {
   handleBeadsGet,
   handleBeadsList,
   handleWorkspacesOverview,
-  type DashboardPaseo,
 } from "../plugin/server/dashboard-rpc";
+import type { DashboardPaseo } from "../plugin/server/paseo-directory";
+import { fakePaseo } from "./helpers/fake-paseo";
 import {
   EMPTY_FILTER,
   actionSpec,
@@ -32,13 +33,13 @@ import {
   beadsOverview,
   facetsOf,
   filterBeads,
-  formatDays,
   statusBadge,
   statusBucket,
   toggle,
   workSummary,
 } from "../plugin/client/beads-model";
 import { TRACE_STORE_SCHEMA_VERSION, type BeadRow, type BeadStats } from "../plugin/shared/contracts";
+import { localTimeText } from "../plugin/client/format";
 
 /**
  * The Beads screen (design delta 20260916-beads-screen): list, detail, five
@@ -69,13 +70,9 @@ function writeStore(lines: unknown[]): void {
   clearBeadsCache();
 }
 
-function fakePaseo(): DashboardPaseo & { agents: { ref: (id: string) => { send: ReturnType<typeof vi.fn> } } } {
-  const send = vi.fn(async () => undefined);
-  return {
-    agents: { list: vi.fn(async () => ({ entries: [] })), ref: () => ({ send }) },
-    workspaces: { list: vi.fn(async () => ({ entries: [{ id: WS, directory: workspace }] })) },
-    config: { get: vi.fn(async () => ({ config: {} })) },
-  } as never;
+/** The shared fake SDK: the workspace at `workspace` and these agents (none by default). */
+function daemonWith(options: { agents?: Array<Record<string, unknown> & { id: string }>; workspaces?: Array<Record<string, unknown>> } = {}) {
+  return fakePaseo<DashboardPaseo>({ agents: options.agents ?? [], workspaces: options.workspaces ?? [{ id: WS, directory: workspace }] });
 }
 
 beforeEach(() => {
@@ -138,33 +135,35 @@ describe("actions go to the Manager, never to the store", () => {
   });
 
   it("ensures a Manager and sends it the request", async () => {
-    const send = vi.fn<(text: string) => Promise<void>>(async () => undefined);
+    const fake = daemonWith({ agents: [{ id: "mgr-1", workspaceId: WS, status: "idle", labels: { "bm.role": "manager" } }] });
     const ensure = vi.fn<(workspaceId: string) => Promise<{ agentId: string; created: boolean }>>(async () => ({
       agentId: "mgr-1",
       created: true,
     }));
     const result = await runBeadAction(
       { workspaceId: WS, action: "implement", bead: { id: "demo-b", title: "Blocked one" } },
-      { paseo: { agents: { ref: () => ({ send }) } }, ensure },
+      { paseo: fake.api, ensure },
     );
     expect(result).toEqual({ managerId: "mgr-1", created: true });
     expect(ensure).toHaveBeenCalledWith(WS);
-    expect(send.mock.calls[0]?.[0]).toContain("implement bead demo-b");
+    expect(fake.sends.map(({ id }) => id)).toEqual(["mgr-1"]);
+    expect(fake.sends[0]?.text).toContain("implement bead demo-b");
   });
 
   it("sends nothing for an unknown bead", async () => {
-    const paseo = fakePaseo();
+    const fake = daemonWith();
     const ensure = vi.fn(async () => ({ agentId: "mgr-1", created: false }));
     await expect(
-      handleBeadsAction({ workspaceId: WS, id: "demo-missing", action: "close" }, paseo as never, ensure),
+      handleBeadsAction({ workspaceId: WS, id: "demo-missing", action: "close" }, fake.paseo as never, ensure),
     ).rejects.toThrow(/E_BEAD_NOT_FOUND/);
     expect(ensure).not.toHaveBeenCalled();
+    expect(fake.sends).toEqual([]);
   });
 
   it("leaves the bead store byte-identical", async () => {
     const { readFileSync } = await import("node:fs");
     const before = readFileSync(join(workspace, ".beads", "issues.jsonl"), "utf8");
-    await handleBeadsAction({ workspaceId: WS, id: "demo-b", action: "delete" }, fakePaseo() as never, async () => ({
+    await handleBeadsAction({ workspaceId: WS, id: "demo-b", action: "delete" }, daemonWith().paseo as never, async () => ({
       agentId: "mgr-1",
       created: false,
     }));
@@ -174,12 +173,12 @@ describe("actions go to the Manager, never to the store", () => {
 
 describe("list and get handlers", () => {
   it("list returns rows and stats; get returns one bead", async () => {
-    const list = await handleBeadsList({ workspaceId: WS }, fakePaseo(), { homedir: () => join(workspace, "no-home") });
+    const list = await handleBeadsList({ workspaceId: WS }, daemonWith().paseo, { homedir: () => join(workspace, "no-home") });
     expect(list.beads).toHaveLength(4);
     // No trace store: the list is complete, only the names are missing.
     expect(list.beads.find((row) => row.id === "demo-c")?.work).toBeNull();
     expect(list.stats.total).toBe(4);
-    expect((await handleBeadsGet({ workspaceId: WS, id: "demo-c" }, fakePaseo())).bead.status).toBe("in_progress");
+    expect((await handleBeadsGet({ workspaceId: WS, id: "demo-c" }, daemonWith().paseo)).bead.status).toBe("in_progress");
   });
 
   it("list names the Worker of an in-progress bead from the trace store", async () => {
@@ -192,7 +191,8 @@ describe("list and get handlers", () => {
       evidence: [{ kind: "shell", detail: "br update demo-c --status in_progress", agentId: "w1", at: "2026-09-16T09:30:00.000Z" }],
     });
     clearTraceStoreCache();
-    const paseo = fakePaseo();
+    // A daemon answers a bm.role=worker query with agents that carry that label.
+    const { paseo } = daemonWith({ agents: [{ id: "w1", workspaceId: WS, status: "idle", title: "Worker for C", labels: { "bm.role": "worker" } }] });
     // From 0.4.0 the store is found with `resolveDataHome` (design §5.1), not
     // through the plugin path Paseo registered.
     const listWithStore = async () => {
@@ -203,13 +203,6 @@ describe("list and get handlers", () => {
         delete process.env["PASEO_BM_HOME"];
       }
     };
-    // A daemon answers a bm.role=worker query with agents that carry that label.
-    paseo.agents.list = vi.fn(async ({ filter }: { filter: { labels?: Record<string, string> } }) => ({
-      entries:
-        filter.labels === undefined || filter.labels["bm.role"] === "worker"
-          ? [{ id: "w1", workspaceId: WS, status: "idle", title: "Worker for C", labels: { "bm.role": "worker" } }]
-          : [],
-    })) as never;
     const list = await listWithStore();
     expect(list.beads.find((row) => row.id === "demo-c")?.work?.started).toEqual({
       agentId: "w1", at: "2026-09-16T09:30:00.000Z", title: "Worker for C", status: "idle",
@@ -218,22 +211,14 @@ describe("list and get handlers", () => {
   });
 
   it("list is empty for a workspace Paseo does not list", async () => {
-    const list = await handleBeadsList({ workspaceId: "wks_gone" }, fakePaseo(), { homedir: () => join(workspace, "no-home") });
+    const list = await handleBeadsList({ workspaceId: "wks_gone" }, daemonWith().paseo, { homedir: () => join(workspace, "no-home") });
     expect(list).toMatchObject({ beads: [], stats: { present: false } });
   });
 });
 
 describe("workspaces.overview", () => {
   it("counts beads and running Workers per listed workspace, and skips archived ones", async () => {
-    const paseo = fakePaseo();
-    paseo.workspaces.list = vi.fn(async () => ({
-      entries: [
-        { id: WS, directory: workspace },
-        { id: "wks_nobeads", directory: join(workspace, "missing") },
-        { id: "wks_archived", directory: workspace, archivingAt: "2026-09-16T00:00:00.000Z" },
-      ],
-    }));
-    const byRole: Record<string, Array<Record<string, unknown>>> = {
+    const byRole: Record<string, Array<{ id: string; workspaceId: string; status: string; labels: Record<string, string> }>> = {
       worker: [
         { id: "w1", workspaceId: WS, status: "running", labels: {} },
         { id: "w2", workspaceId: WS, status: "idle", labels: {} },
@@ -247,11 +232,16 @@ describe("workspaces.overview", () => {
     };
     // Each agent carries the bm.role label of its group, as the daemon's would.
     const labelled = Object.entries(byRole).flatMap(([role, agents]) =>
-      agents.map((agent) => ({ ...agent, labels: { ...(agent["labels"] as Record<string, string>), "bm.role": role } })),
+      agents.map((agent) => ({ ...agent, labels: { ...agent.labels, "bm.role": role } })),
     );
-    paseo.agents.list = vi.fn(async ({ filter }: { filter: { labels?: Record<string, string> } }) => ({
-      entries: labelled.filter((agent) => filter.labels === undefined || agent.labels["bm.role"] === filter.labels["bm.role"]),
-    })) as never;
+    const { paseo } = daemonWith({
+      agents: labelled,
+      workspaces: [
+        { id: WS, directory: workspace },
+        { id: "wks_nobeads", directory: join(workspace, "missing") },
+        { id: "wks_archived", directory: workspace, archivingAt: "2026-09-16T00:00:00.000Z" },
+      ],
+    });
     const { workspaces } = await handleWorkspacesOverview(paseo);
     expect(workspaces).toEqual([
       {
@@ -275,14 +265,7 @@ describe("workspaces.overview", () => {
    * was happening — this case goes red if anyone reverts to that.
    */
   it("reports a workspace as busy when only a Reviewer is running", async () => {
-    const paseo = fakePaseo();
-    paseo.workspaces.list = vi.fn(async () => ({ entries: [{ id: WS, directory: workspace }] }));
-    paseo.agents.list = vi.fn(async ({ filter }: { filter: { labels?: Record<string, string> } }) => ({
-      entries:
-        filter.labels === undefined || filter.labels["bm.role"] === "reviewer"
-          ? [{ id: "r1", workspaceId: WS, status: "running", labels: { "bm.role": "reviewer" } }]
-          : [],
-    })) as never;
+    const { paseo } = daemonWith({ agents: [{ id: "r1", workspaceId: WS, status: "running", labels: { "bm.role": "reviewer" } }] });
     const { workspaces } = await handleWorkspacesOverview(paseo);
     const row = workspaces[0]!;
     expect(row.runningAgents).toEqual({ manager: 0, worker: 0, reviewer: 1, orchestrator: 0 });
@@ -294,15 +277,13 @@ describe("workspaces.overview", () => {
   });
 
   it("counts a running Orchestrator assessment as a paseo-bm agent, by its label or its provider (orchestrator design §3.2)", async () => {
-    const paseo = fakePaseo();
-    paseo.workspaces.list = vi.fn(async () => ({ entries: [{ id: WS, directory: workspace }] }));
-    paseo.agents.list = vi.fn(async () => ({
-      entries: [
+    const { paseo } = daemonWith({
+      agents: [
         { id: "o1", workspaceId: WS, status: "running", labels: { "bm.role": "orchestrator" } },
         { id: "o2", workspaceId: WS, status: "running", provider: "bm-orchestrator/claude-opus-5", labels: {} },
         { id: "o3", workspaceId: WS, status: "idle", labels: { "bm.role": "orchestrator" } },
       ],
-    })) as never;
+    });
     const { workspaces } = await handleWorkspacesOverview(paseo);
     expect(workspaces[0]!.runningAgents).toEqual({ manager: 0, worker: 0, reviewer: 0, orchestrator: 2 });
     expect(workspaces[0]!.runningWorkers).toBe(0);
@@ -327,18 +308,12 @@ describe("the five overview sections", () => {
     expect(view.byType.map((bar) => [bar.label, bar.value])).toEqual([["task", 2], ["epic", 1], ["bug", 1]]);
     expect(view.byPriority.map((bar) => bar.label)).toEqual(["P1", "P2"]);
     const timing = Object.fromEntries(view.timing.map((card) => [card.label, card.value]));
-    expect(timing["Median time to close"]).toBe("2.0d");
-    expect(timing["Longest in progress"]).toBe("1.1d");
+    expect(timing["Median time to close"]).toBe("2 d");
+    expect(timing["Longest in progress"]).toBe("1 d 2 h");
     // Last updated six days ago: not stale yet.
     expect(timing["Stale"]).toBe("0");
     const later = beadsOverview(rows(), stats, new Date("2026-09-18T12:00:00.000Z"));
     expect(later.timing.find((card) => card.label === "Stale")?.value).toBe("2");
-  });
-
-  it("formats durations in hours or days", () => {
-    expect(formatDays(null)).toBe("—");
-    expect(formatDays(2 * 3_600_000)).toBe("2h");
-    expect(formatDays(36 * 3_600_000)).toBe("1.5d");
   });
 });
 
@@ -420,7 +395,7 @@ describe("an in-progress bead says who is on it", () => {
 
   it("names the Worker, the start and how long it has run", () => {
     const summary = workSummary({ status: "in_progress", work: { started: mark(), last: mark({ at: "2026-09-16T10:14:11.000Z" }) } }, now)!;
-    expect(summary.headline).toMatch(/^Contact dialog · since \d\d\/09 \d\d:\d\d \(2h 34m\) · running$/);
+    expect(summary.headline).toBe(`Contact dialog · since ${localTimeText(new Date("2026-09-16T09:25:40.000Z"), now)} (2 h 34 min) · running`);
     expect(summary.agentId).toBe("d91ccf32-aaaa");
     expect(summary.tone).toBe("plain");
     expect(summary.lines.join("\n")).toContain("Last activity");
@@ -438,7 +413,7 @@ describe("an in-progress bead says who is on it", () => {
       now,
     )!;
     expect(summary.agentId).toBe("w2");
-    expect(summary.headline).toMatch(/^Second worker · last active \d\d\/09 \d\d:00 · no longer in Paseo$/);
+    expect(summary.headline).toBe(`Second worker · last active ${localTimeText(new Date("2026-09-16T11:00:00.000Z"), now)} · no longer in Paseo`);
     // Gone is told by the words, not by an amber line (delta 20260925 §3.2).
     expect(summary.tone).toBe("muted");
   });

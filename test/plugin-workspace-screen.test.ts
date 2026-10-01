@@ -1,24 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { allNodes, pressables, renderTree, texts, type RNode } from "./helpers/element-tree";
 
 /**
  * Delta 20260918f: the pieces a project's page and the Beads board share, expanded with
  * the element-tree helper (hook-free views only). `react-native` is replaced by
- * named stand-ins, as in test/agent-tree.test.ts.
+ * the named stand-ins of test/stubs/react-native.ts. Which screens draw them,
+ * which hold their state in hooks, is read from the source in view-source.test.ts;
+ * the project page's header is rendered in plugin-work-model.test.ts.
  */
-
-vi.mock("react-native", () => {
-  const make = (name: string) => Object.assign(() => null, { displayName: name, primitive: true });
-  return {
-    ActivityIndicator: make("ActivityIndicator"),
-    Pressable: make("Pressable"),
-    ScrollView: make("ScrollView"),
-    Text: make("Text"),
-    View: make("View"),
-  };
-});
 
 // The root tsconfig has no `jsx`, so the .tsx module is loaded through a
 // non-literal specifier that `tsc --noEmit` does not resolve.
@@ -49,8 +38,6 @@ function header(props: Record<string, unknown>): Array<RNode | string> {
   return renderTree(WorkspaceScreenHeader({ styles, right: "RIGHT", backLabel: "Back to workspaces", ...props }));
 }
 
-const source = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
-
 describe("the header of a project's page and the Beads board", () => {
   it("draws ←, the title and the screen's own buttons, and names the ← for screen readers", () => {
     const onBack = vi.fn();
@@ -79,46 +66,6 @@ describe("the header of a project's page and the Beads board", () => {
     expect(withStatus[1]).toBe("STATUS");
     expect(header({ title: "Metric · repo" })).toHaveLength(1);
   });
-
-  it("gets the status strip on a project's page inside the Beads Manager surface (F3)", () => {
-    // Work → a project (work.tsx) is the surface's project page.
-    const launcher = source("../plugin/client/launcher.tsx");
-    const start = launcher.indexOf("<ProjectPage");
-    expect(start).toBeGreaterThan(0);
-    const element = launcher.slice(start, launcher.indexOf("/>", start));
-    expect(element).toMatch(/status=\{status\}/);
-    // Every screen with this header hands it the strip.
-    for (const file of ["../plugin/client/beads-screen.tsx", "../plugin/client/work.tsx"]) {
-      const text = source(file);
-      const start = text.indexOf("<WorkspaceScreenHeader");
-      expect(text.slice(start, text.indexOf("right=", start)), file).toMatch(/status=\{status\}/);
-    }
-  });
-
-  it("labels the ← of a project's page from backLabelOf, and every ← goes back through one helper (F4, S5)", () => {
-    const launcher = source("../plugin/client/launcher.tsx");
-    const start = launcher.indexOf("<ProjectPage");
-    const element = launcher.slice(start, launcher.indexOf("/>", start));
-    expect(element).toMatch(/backLabel=\{backLabelOf\(view\)/);
-    expect(element).toMatch(/onBack=\{goBack\}/);
-    // The back navigation is written once, inside `goBack`.
-    expect(launcher.match(/setView\(backOf\(view\) \?\? SURFACE_HOME_VIEW\)/g)).toHaveLength(1);
-    expect(launcher).toMatch(/const goBack = \(\) => setView\(backOf\(view\) \?\? SURFACE_HOME_VIEW\);/);
-    // The workspace list is Work's own screen, reached by its tab: no ← of its own.
-    expect(launcher.match(/onPress=\{goBack\}/g)).toBeNull();
-  });
-
-  it("reads the workspace figures through overviewPolling (F5)", () => {
-    const launcher = source("../plugin/client/launcher.tsx");
-    const start = launcher.indexOf('queryKey: ["paseo-bm", "launcher", "overview"]');
-    expect(start).toBeGreaterThan(0);
-    expect(launcher.slice(start, launcher.indexOf("});", start))).toMatch(/\.\.\.overviewPolling\(view\)/);
-  });
-
-  it("is the header both screens draw", () => {
-    expect(source("../plugin/client/beads-screen.tsx")).toMatch(/<WorkspaceScreenHeader/);
-    expect(source("../plugin/client/work.tsx")).toMatch(/<WorkspaceScreenHeader/);
-  });
 });
 
 describe("one bead row for the Beads screen and the Beads in this chat panel (S4)", () => {
@@ -143,11 +90,6 @@ describe("one bead row for the Beads screen and the Beads in this chat panel (S4
     expect(texts(tree)[0]).toBe("▾ Lock an account");
     expect(allNodes(tree).find((node) => node.type === "Text")!.props.numberOfLines).toBeUndefined();
     expect((tree[0] as RNode).children.at(-1)).toBe("DETAIL");
-  });
-
-  it("is the row both lists draw", () => {
-    expect(source("../plugin/client/beads-screen.tsx")).toMatch(/<BeadRowCard/);
-    expect(source("../plugin/client/bead-chips.tsx")).toMatch(/<BeadRowCard/);
   });
 });
 
@@ -234,14 +176,5 @@ describe("the Beads board and its status tabs (delta 20260925 §3.1)", () => {
     expect(tabs[0]!.props.style).toBe(styles.secondaryButton);
     (tabs[0]!.props.onPress as () => void)();
     expect(onSelect).toHaveBeenCalledWith("in_progress");
-  });
-
-  it("is what the Beads screen draws, measuring its own width", () => {
-    const screen = source("../plugin/client/beads-screen.tsx");
-    expect(screen).toMatch(/<KanbanBoard/);
-    expect(screen).toMatch(/<StatusTabs/);
-    expect(screen).toMatch(/onLayout=\{\(event\) => setBoardWidth\(event\.nativeEvent\.layout\.width\)\}/);
-    // No column is drawn by hand, and the old flat list is gone.
-    expect(screen).not.toMatch(/beadListItems/);
   });
 });

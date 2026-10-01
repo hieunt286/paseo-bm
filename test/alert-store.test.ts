@@ -11,6 +11,7 @@ import {
 } from "../plugin/server/alert-store";
 import { CLEANUP_DELETES } from "../plugin/server/setup-machine";
 import { ALERT_KINDS, MAX_ALERT_DETAIL_CHARS, alertKeyOf } from "../plugin/shared/alerts";
+import { DashboardError } from "../plugin/shared/contracts";
 
 /**
  * The Inbox alerts store (autonomy design §A.8): `<data>/inbox/alerts.json`,
@@ -41,10 +42,59 @@ afterEach(() => {
 });
 
 describe("the alerts file", () => {
-  it("names the seven kinds of the design", () => {
-    expect(ALERT_KINDS).toEqual(["request-stalled", "permission-waiting", "danger", "stuck", "pairing-mismatch", "outdated-agent", "fallback-failed"]);
+  it("names the eleven kinds of the design", () => {
+    expect(ALERT_KINDS).toEqual([
+      "request-stalled",
+      "permission-waiting",
+      "danger",
+      "stuck",
+      "writers-observed",
+      "pairing-mismatch",
+      "outdated-agent",
+      "fallback-failed",
+      "autonomy-demoted",
+      "coordination-off",
+      "boundary-off",
+    ]);
+    // Compaction or handoff switched off below A-12's target (§G.3, §G.7): one per mechanism, for every project.
+    expect(alertKeyOf("coordination-off", null, "compact")).toBe("coordination-off:-:compact");
+    // A demoted class is keyed by project and class (autonomy design §B.9).
+    expect(alertKeyOf("autonomy-demoted", WS, "scope")).toBe(`autonomy-demoted:${WS}:scope`);
     expect(alertKeyOf("stuck", WS, "agent-w")).toBe(`stuck:${WS}:agent-w`);
     expect(alertKeyOf("pairing-mismatch", null, "agent-w")).toBe("pairing-mismatch:-:agent-w");
+    // Two agents wrote one file in overlapping turns (§F.1): keyed by project and file, relative to the workspace folder.
+    expect(alertKeyOf("writers-observed", WS, "src/math.js")).toBe(`writers-observed:${WS}:src/math.js`);
+  });
+
+  it("keeps one writers-observed alert per project and file: raised once, its detail updated while open, raised afresh once cleared (§F.1, §F.3)", () => {
+    const s = store();
+    const first = s.raise({ workspaceId: WS, kind: "writers-observed", subject: "src/math.js", detail: "src/math.js: Worker w-1 and Worker w-2 wrote it in overlapping turns." });
+    expect(first).toMatchObject({ raised: true, alert: { key: `writers-observed:${WS}:src/math.js`, since: iso(T0), clearedAt: null } });
+    clock = T0 + 60_000;
+    const again = s.raise({ workspaceId: WS, kind: "writers-observed", subject: "src/math.js", detail: "src/math.js: Worker w-1, Worker w-2 and Reviewer r-1 wrote it in overlapping turns." });
+    expect(again).toMatchObject({ raised: false, alert: { since: iso(T0), detail: "src/math.js: Worker w-1, Worker w-2 and Reviewer r-1 wrote it in overlapping turns." } });
+    expect(s.raise({ workspaceId: WS, kind: "writers-observed", subject: "src/util.js" }).raised).toBe(true);
+    expect(s.clear(`writers-observed:${WS}:src/math.js`)).toBe(true);
+    clock = T0 + 120_000;
+    expect(s.raise({ workspaceId: WS, kind: "writers-observed", subject: "src/math.js" })).toMatchObject({ raised: true, alert: { since: iso(T0 + 120_000) } });
+  });
+
+  it("keeps one autonomy-demoted alert per project and class, cleared by what ends it and raised afresh by the next demotion", () => {
+    const s = store();
+    const detail = "Scope decisions are back in Shadow: q:req-1:Q1, answered for you by the recommended option, was overridden by you.";
+    expect(s.raise({ workspaceId: WS, kind: "autonomy-demoted", subject: "scope", detail }).raised).toBe(true);
+    expect(s.raise({ workspaceId: WS, kind: "autonomy-demoted", subject: "scope", detail }).raised).toBe(false);
+    expect(s.raise({ workspaceId: WS, kind: "autonomy-demoted", subject: "preference" }).raised).toBe(true);
+    expect(s.raise({ workspaceId: "wks_2", kind: "autonomy-demoted", subject: "scope" }).raised).toBe(true);
+    expect(s.clearWhere((alert) => alert.kind === "autonomy-demoted" && alert.workspaceId === WS && alert.subject === "scope")).toEqual([
+      alertKeyOf("autonomy-demoted", WS, "scope"),
+    ]);
+    expect(s.list({ open: true, kinds: ["autonomy-demoted"] }).map((alert) => alert.key)).toEqual([
+      alertKeyOf("autonomy-demoted", WS, "preference"),
+      alertKeyOf("autonomy-demoted", "wks_2", "scope"),
+    ]);
+    clock = T0 + 60_000;
+    expect(s.raise({ workspaceId: WS, kind: "autonomy-demoted", subject: "scope" })).toMatchObject({ raised: true, alert: { since: iso(T0 + 60_000), clearedAt: null } });
   });
 
   it("creates nothing on a read, then a 0700 folder and a 0600 file on the first write, and cleanup deletes it", () => {
@@ -143,6 +193,23 @@ describe("the alerts file", () => {
     writeFileSync(file(), newer);
     expect(store().list()).toEqual([]);
     expect(() => store().raise({ workspaceId: WS, kind: "stuck", subject: "w" })).toThrow(/newer paseo-bm/);
+    expect(readFileSync(file(), "utf8")).toBe(newer);
+  });
+
+  it("refuses a newer file with a coded error, whatever else it holds (code review 2026-09-30 §3.1)", () => {
+    mkdirSync(join(home, INBOX_DIR_NAME), { recursive: true });
+    // Entries this build cannot even frame: the version alone decides.
+    const newer = JSON.stringify({ version: 2, entries: [{ anything: true }] });
+    writeFileSync(file(), newer);
+    let thrown: unknown = null;
+    try {
+      store().raise({ workspaceId: WS, kind: "stuck", subject: "w" });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(DashboardError);
+    expect((thrown as DashboardError).code).toBe("E_TRACE_STORE_UNWRITABLE");
+    expect(store().clear(alertKeyOf("stuck", WS, "w"))).toBe(false);
     expect(readFileSync(file(), "utf8")).toBe(newer);
   });
 

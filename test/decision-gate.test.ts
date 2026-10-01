@@ -1,28 +1,21 @@
 import { describe, expect, it } from "vitest";
 import {
-  DANGER_STOP_CATEGORIES,
   GATE_CATEGORIES,
   GATE_NEGATIONS,
-  GATE_STOP_WORDS,
   gateMatchesOf,
   GATE_CATEGORY_EFFECTS,
   gateOf,
-  isGateCategory,
-  isStopCommand,
   undeclaredCategoriesOf,
   undeclaredRefusalOf,
   type GateCategory,
 } from "../plugin/shared/decision-gate";
-import { EFFECTS } from "../plugin/shared/decisions";
-import { ORCHESTRATOR_LIMIT_LINE } from "../plugin/shared/orchestrator";
+import { CONFIRM_EFFECTS, EFFECTS } from "../plugin/shared/decisions";
 
 /** The big-decision gate (Orchestrator design §6B.5, ADR-016 decision 3). */
 
 describe("categories", () => {
   it("names the five categories in the design's order", () => {
     expect(GATE_CATEGORIES).toEqual(["security", "release", "data", "cost", "dependency"]);
-    expect(isGateCategory("release")).toBe(true);
-    expect(isGateCategory("deploy")).toBe(false);
   });
 
   const cases: Array<[GateCategory, string[]]> = [
@@ -192,10 +185,6 @@ describe("negations within 4 words (design §6B.5)", () => {
     expect(gateOf("Another deploy")).toEqual(["release"]);
   });
 
-  it("the Orchestrator's own limit line would be negated, but the gate never reads the limits field", () => {
-    expect(gateMatchesOf(ORCHESTRATOR_LIMIT_LINE).filter((match) => match.category === "release").every((match) => match.negated)).toBe(true);
-  });
-
   it("reports every match with its negation, in text order", () => {
     expect(gateMatchesOf("Do not push; deploy the fix")).toEqual([
       { category: "release", term: "push", index: 7, negated: true },
@@ -204,24 +193,30 @@ describe("negations within 4 words (design §6B.5)", () => {
   });
 });
 
-describe("categories the owner allowed", () => {
-  it("an allowed category does not count; the others still do", () => {
+describe("nothing silences the gate: Allow… is retired (autonomy design §B.8)", () => {
+  /** What a caller of an earlier build passed: the categories the owner allowed for the project. */
+  const withAllow = (fn: (...args: never[]) => GateCategory[], ...args: unknown[]) => (fn as unknown as (...rest: unknown[]) => GateCategory[])(...args);
+
+  it("every category the text shows counts, and a list of allowed categories changes nothing", () => {
     const text = "Push the fix and rotate the token";
     expect(gateOf(text)).toEqual(["security", "release"]);
-    expect(gateOf(text, ["release"])).toEqual(["security"]);
-    expect(gateOf(text, ["release", "security"])).toEqual([]);
-    expect(gateOf("Triển khai và thêm thư viện", ["dependency"])).toEqual(["release"]);
+    expect(withAllow(gateOf, text, ["release", "security"])).toEqual(["security", "release"]);
+    expect(withAllow(gateOf, "Triển khai và thêm thư viện", ["dependency"])).toEqual(["release", "dependency"]);
+    // The backstop refuses an undeclared category even where Allow… once allowed it.
+    expect(withAllow(undeclaredCategoriesOf, text, [], ["release", "security"])).toEqual(["security", "release"]);
+    expect(gateOf.length).toBe(1);
+    expect(undeclaredCategoriesOf.length).toBe(2);
   });
 
-  it("nothing matched, or nothing given, gates nothing", () => {
+  it("nothing matched gates nothing", () => {
     expect(gateOf("Run the tests and report.")).toEqual([]);
     expect(gateOf("")).toEqual([]);
   });
-
 });
 
 describe("the backstop: a category the declared effects do not cover (autonomy design §A.7)", () => {
   it("maps every category to the effects that declare it, all of them real effects", () => {
+    // Derived from CLASS_OF_EFFECT (code review 2026-09-30 §3.5): the literal it replaces.
     expect(GATE_CATEGORY_EFFECTS).toEqual({
       security: ["security"],
       release: ["push", "publish", "deploy"],
@@ -246,10 +241,18 @@ describe("the backstop: a category the declared effects do not cover (autonomy d
     expect(undeclaredCategoriesOf("npm install left-pad", ["commit", "network"])).toEqual(["dependency"]);
   });
 
-  it("negated mentions, allowed categories and a declared-nothing text pass", () => {
+  it("negated mentions and a declared-nothing text pass", () => {
     expect(undeclaredCategoriesOf("Fix the date. Do not push.", [])).toEqual([]);
-    expect(undeclaredCategoriesOf("Push the fix and rotate the token", [], ["release"])).toEqual(["security"]);
     expect(undeclaredCategoriesOf("Run the tests and report.", [])).toEqual([]);
+  });
+
+  it("whatever the authority (autonomy design §B.9): no effect the owner's policy can cover declares a release, data, security or cost the text shows", () => {
+    // The policy covers every effect but CONFIRM_EFFECTS; a text that shows one of those is refused under any authority.
+    const delegable = EFFECTS.filter((effect) => effect !== "none" && !CONFIRM_EFFECTS.includes(effect));
+    expect(delegable).toEqual(["commit", "dependency-install", "network", "outside-workspace"]);
+    expect(undeclaredCategoriesOf("Commit, then git push.", ["none"])).toEqual(["release"]);
+    expect(undeclaredCategoriesOf("Commit, then git push.", ["commit"])).toEqual(["release"]);
+    expect(undeclaredCategoriesOf("Commit, git push, drop table users, rotate the token, upgrade the paid plan.", delegable)).toEqual(["security", "release", "data", "cost"]);
   });
 
   it("the refusal names what the text shows and says to declare the effect or ask the owner", () => {
@@ -259,47 +262,19 @@ describe("the backstop: a category the declared effects do not cover (autonomy d
   });
 });
 
-describe("a stop of a Worker's open danger (design §6B.5, coordination run 2026-09-29 F2)", () => {
-  /** The Orchestrator's stop the gate held in the run, word for word. */
+describe("a stop of a Worker's open danger has no exemption any more (autonomy design §B.8)", () => {
+  /** The Orchestrator's stop the gate held in the coordination run of 2026-09-29 (F2), word for word. */
   const F2_STOP =
     "stop and report\nStop what you are doing now: run no more git push and no more waits. Send your report: how many git push runs you made, what git said each time, which steps you didn't run, and confirm that nothing was changed or sent anywhere.";
 
-  it("the run's stop names the push un-negated, so the gate alone holds it as release", () => {
+  it("a stop that names the push un-negated is held as release, as any command", () => {
     expect(gateOf(F2_STOP)).toEqual(["release"]);
-    expect(isStopCommand(F2_STOP)).toBe(true);
-    expect(gateOf(F2_STOP, DANGER_STOP_CATEGORIES)).toEqual([]);
+    expect(undeclaredCategoriesOf(F2_STOP, ["none"])).toEqual(["release"]);
   });
 
-  it("the exemption covers release and data only", () => {
-    expect(DANGER_STOP_CATEGORIES).toEqual(["release", "data"]);
-    expect(gateOf("Stop. Rotate the token and tell me the cost.", DANGER_STOP_CATEGORIES)).toEqual(["security", "cost"]);
-  });
-
-  it("every stop word counts, in any case, with its inflections; Vietnamese in both spellings", () => {
-    expect(GATE_STOP_WORDS).toEqual(["stop", "halt", "cancel", "do not", "don't", "never", "dừng", "không được", "huỷ", "hủy"]);
-    for (const text of [
-      "STOP the push now",
-      "Halt the deploy.",
-      "Cancel the migration and report.",
-      "Cancelled: report how far the migration got.",
-      "Do  not push again.",
-      "Don't push again.",
-      "Don’t push again.",
-      "Never push from this branch; report.",
-      "Stopping here: report how many pushes ran.",
-      "Dừng git push lại và báo cáo.",
-      "Không được push nữa.",
-      "Huỷ lệnh push.",
-      "Hủy lệnh push.",
-      "Hu\u1ef7 l\u1ec7nh push.".normalize("NFD"),
-    ]) {
-      expect([text, isStopCommand(text)]).toEqual([text, true]);
-    }
-  });
-
-  it("a word that only contains a stop word, or no stop word at all, is not a stop", () => {
-    for (const text of ["Push the fix to main.", "Run the unstoppable build and push.", "The cancellation policy: push it.", "Unhalting worker: push.", "Report the backstop and push.", ""]) {
-      expect([text, isStopCommand(text)]).toEqual([text, false]);
+  it("a stop word before what it stops is a negation, so the stop itself passes", () => {
+    for (const text of ["Stop the push now and report.", "Do not push again.", "Don't push again.", "Never push from this branch; report.", "Dừng git push lại và báo cáo."]) {
+      expect([text, undeclaredCategoriesOf(text, ["none"])]).toEqual([text, []]);
     }
   });
 });

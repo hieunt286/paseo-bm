@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -17,6 +17,7 @@ import {
   type CandidateInput,
 } from "../plugin/server/fallback-state";
 import type { FallbackIncident } from "../plugin/shared/contracts";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 /**
  * Delta 20260921 §4.4.5 (REQ-065 a, g, i, j): one incident per classified turn,
@@ -36,33 +37,22 @@ const PI = { baseProvider: "pi", model: "pi-default", thinkingOptionId: null, mo
 
 type Windows = Array<{ id: string; usedPct?: number | null; remainingPct?: number | null; resetsAt?: string | null }>;
 
-function fakeDaemon(options: { windows?: Windows; available?: string[]; bases?: Record<string, string>; snapshots?: Record<string, unknown> } = {}) {
-  const snapshots: Record<string, unknown> = {
+/** The Worker `WORKER` under `MANAGER`, the providers' bases, and Claude's usage windows. */
+function daemonWith(options: { windows?: Windows; available?: string[]; bases?: Record<string, string>; snapshots?: Record<string, object> } = {}) {
+  const snapshots: Record<string, object> = {
     [WORKER]: { id: WORKER, model: "claude-opus-5", runtimeInfo: { model: "claude-opus-5" }, labels: { "bm.role": "worker", "bm.requestId": REQ, "paseo.parent-agent-id": MANAGER } },
     ...options.snapshots,
   };
-  const listUsage = vi.fn(async () => ({
-    requestId: "r",
-    fetchedAt: "2026-09-22T10:00:00.000Z",
-    providers: [{ providerId: "claude", status: "available", windows: options.windows ?? [] }],
-  }));
   const bases = options.bases ?? { "bm-worker": "claude", "bm-worker-fallback-1": "codex", "bm-worker-fallback-2": "claude", "bm-reviewer": "codex" };
-  const paseo = {
-    agents: {
-      ref: (id: string) => ({
-        refresh: async () => ({ agent: snapshots[id] ?? null }),
-        timeline: { refetch: async () => ({ agent: snapshots[id] ?? null, entries: [] }) },
-      }),
-    },
+  const fake = fakePaseo({
+    agents: Object.entries(snapshots).map(([id, snapshot]) => ({ ...snapshot, id })),
     providers: {
-      listUsage,
-      listAvailable: vi.fn(async () => ({ providers: (options.available ?? ["claude", "codex", "pi"]).map((provider) => ({ provider, available: true })) })),
+      available: options.available ?? ["claude", "codex", "pi"],
+      usage: { requestId: "r", fetchedAt: "2026-09-22T10:00:00.000Z", providers: [{ providerId: "claude", status: "available", windows: options.windows ?? [] }] },
     },
-    config: {
-      get: vi.fn(async () => ({ config: { providers: Object.fromEntries(Object.entries(bases).map(([id, base]) => [id, { extends: base }])) } })),
-    },
-  };
-  return { paseo, listUsage };
+    config: { providers: Object.fromEntries(Object.entries(bases).map(([id, base]) => [id, { extends: base }])) },
+  });
+  return { paseo: fake.paseo, listUsage: fake.api.providers.listUsage };
 }
 
 let root: string;
@@ -95,7 +85,7 @@ afterEach(() => {
 describe("recordIncident", () => {
   it("records a pending L1 incident with the latest reset of the exhausted windows and the next candidate", async () => {
     saveChain("ask", [CODEX, SONNET]);
-    const { paseo, listUsage } = fakeDaemon({
+    const { paseo, listUsage } = daemonWith({
       windows: [
         { id: "five_hour", usedPct: 100, resetsAt: "2026-09-22T12:00:00.000Z" },
         { id: "seven_day", remainingPct: 0, resetsAt: "2026-09-25T00:00:00.000Z" },
@@ -134,7 +124,7 @@ describe("recordIncident", () => {
 
   it("dedupes: an agent with a pending incident gets no second one, and no second listUsage", async () => {
     saveChain("ask", [CODEX]);
-    const { paseo, listUsage } = fakeDaemon({ windows: [{ id: "five_hour", usedPct: 100 }] });
+    const { paseo, listUsage } = daemonWith({ windows: [{ id: "five_hour", usedPct: 100 }] });
     expect(await recordIncident(workerEvent(), L1, { paseo, home, log, now: NOW, randomHex })).not.toBeNull();
     expect(await recordIncident(workerEvent(), L1, { paseo, home, log, now: NOW, randomHex })).toBeNull();
     expect(listUsage).toHaveBeenCalledTimes(1);
@@ -143,7 +133,7 @@ describe("recordIncident", () => {
 
   it("with policy off records the incident as dismissed and never reads usage", async () => {
     saveChain("off", [CODEX]);
-    const { paseo, listUsage } = fakeDaemon({ windows: [{ id: "five_hour", usedPct: 100 }] });
+    const { paseo, listUsage } = daemonWith({ windows: [{ id: "five_hour", usedPct: 100 }] });
     const incident = await recordIncident(workerEvent(), L1, { paseo, home, log, now: NOW, randomHex });
     expect(incident).toMatchObject({ status: "dismissed", decidedAt: "2026-09-22T10:00:00.000Z", resetsAt: null });
     expect(listUsage).not.toHaveBeenCalled();
@@ -151,21 +141,21 @@ describe("recordIncident", () => {
 
   it.each(["L2", "L4", "L5"] as const)("never reads usage for %s", async (cls) => {
     saveChain("ask", [CODEX]);
-    const { paseo, listUsage } = fakeDaemon();
+    const { paseo, listUsage } = daemonWith();
     expect(await recordIncident(workerEvent(), { ...L1, class: cls }, { paseo, home, log, now: NOW, randomHex })).toMatchObject({ class: cls });
     expect(listUsage).not.toHaveBeenCalled();
   });
 
   it("never reads usage for an L1 on a base provider other than claude or codex", async () => {
     saveChain("ask", [CODEX]);
-    const { paseo, listUsage } = fakeDaemon({ bases: { "bm-worker": "opencode", "bm-worker-fallback-1": "codex" } });
+    const { paseo, listUsage } = daemonWith({ bases: { "bm-worker": "opencode", "bm-worker-fallback-1": "codex" } });
     expect(await recordIncident(workerEvent("bm-worker/big-pickle"), L1, { paseo, home, log, now: NOW, randomHex })).toMatchObject({ resetsAt: null });
     expect(listUsage).not.toHaveBeenCalled();
   });
 
   it("masks secrets like every trace record (REQ-048b) and cuts the message to 500 characters", async () => {
     saveChain("ask", []);
-    const { paseo } = fakeDaemon();
+    const { paseo } = daemonWith();
     const message = `billing failed: run paseo login --token abc123secret ${"x".repeat(600)}`;
     const incident = await recordIncident(workerEvent(), { ...L1, class: "L2", message }, { paseo, home, log, now: NOW, randomHex });
     expect(incident?.message).toHaveLength(500);
@@ -175,7 +165,7 @@ describe("recordIncident", () => {
 
   it("finds a Reviewer's card in its Worker's Manager's chat", async () => {
     saveChain("ask", []);
-    const { paseo } = fakeDaemon({
+    const { paseo } = daemonWith({
       snapshots: { "rev-1": { id: "rev-1", labels: { "bm.role": "reviewer", "bm.requestId": REQ, "paseo.parent-agent-id": WORKER } } },
     });
     const incident = await recordIncident(
@@ -188,7 +178,7 @@ describe("recordIncident", () => {
 
   it("records nothing for the Orchestrator: it has no fallback chain (orchestrator design §3.1)", async () => {
     saveChain("ask", [CODEX]);
-    const { paseo, listUsage } = fakeDaemon();
+    const { paseo, listUsage } = daemonWith();
     for (const provider of ["bm-orchestrator", "bm-orchestrator/claude-opus-5"]) {
       expect(await recordIncident(workerEvent(provider, "orc-1"), L1, { paseo, home, log, now: NOW, randomHex })).toBeNull();
     }
@@ -198,15 +188,49 @@ describe("recordIncident", () => {
 
   it("never overwrites an unusable state file, and records nothing", async () => {
     writeFileSync(join(home, ROLE_FALLBACK_STATE_FILE), "{broken");
-    const { paseo } = fakeDaemon();
+    const { paseo } = daemonWith();
     expect(await recordIncident(workerEvent(), L1, { paseo, home, log, now: NOW, randomHex })).toBeNull();
     expect(readFileSync(join(home, ROLE_FALLBACK_STATE_FILE), "utf8")).toBe("{broken");
     expect(logged.some((line) => line.startsWith("[paseo-bm]") && line.includes("not usable"))).toBe(true);
   });
 
+  it("records the first incident on a fresh data home: the write creates the folder (code review 2026-09-30 §2.4)", async () => {
+    rmSync(home, { recursive: true });
+    const { paseo } = daemonWith();
+    const incident = await recordIncident(workerEvent(), { ...L1, class: "L4" }, { paseo, home, log, now: NOW, randomHex });
+    expect(incident).not.toBeNull();
+    expect(statSync(home).mode & 0o777).toBe(0o700);
+    const path = join(home, ROLE_FALLBACK_STATE_FILE);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ version: 1, incidents: [incident] });
+  });
+
+  it("refuses a symlinked state file on a read, never following it, and records nothing (code review 2026-09-30 §2.4)", async () => {
+    const outside = join(root, "outside.json");
+    const target = JSON.stringify({ version: 1, incidents: [] });
+    writeFileSync(outside, target);
+    symlinkSync(outside, join(home, ROLE_FALLBACK_STATE_FILE));
+    const read = readIncidents(home, log);
+    expect(read.incidents).toEqual([]);
+    expect(read.error).toMatch(/symlinked path/);
+    expect(logged.some((line) => line.startsWith("[paseo-bm]") && line.includes("not usable"))).toBe(true);
+    const { paseo } = daemonWith();
+    expect(await recordIncident(workerEvent(), { ...L1, class: "L4" }, { paseo, home, log, now: NOW, randomHex })).toBeNull();
+    expect(readFileSync(outside, "utf8")).toBe(target);
+  });
+
+  it("never writes a state file a newer paseo-bm wrote", async () => {
+    const newer = JSON.stringify({ version: 2, incidents: [{ id: "from-a-newer-build" }] });
+    writeFileSync(join(home, ROLE_FALLBACK_STATE_FILE), newer);
+    expect(readIncidents(home, log).error).toMatch(/newer paseo-bm/);
+    const { paseo } = daemonWith();
+    expect(await recordIncident(workerEvent(), { ...L1, class: "L4" }, { paseo, home, log, now: NOW, randomHex })).toBeNull();
+    expect(readFileSync(join(home, ROLE_FALLBACK_STATE_FILE), "utf8")).toBe(newer);
+  });
+
   it("tells every listener, once per incident", async () => {
     saveChain("ask", [CODEX]);
-    const { paseo } = fakeDaemon();
+    const { paseo } = daemonWith();
     const seen: string[] = [];
     const remove = onFallbackIncident((incident) => void seen.push(incident.id));
     await recordIncident(workerEvent(), { ...L1, class: "L4" }, { paseo, home, log, now: NOW, randomHex });
@@ -266,7 +290,7 @@ describe("candidateOf — the four skip rules of §4.4.5", () => {
 });
 
 describe("usageOf", () => {
-  const withWindows = (windows: Windows) => fakeDaemon({ windows }).paseo;
+  const withWindows = (windows: Windows) => daemonWith({ windows }).paseo;
 
   it("takes the latest reset among the exhausted windows only", async () => {
     const paseo = withWindows([
@@ -339,7 +363,7 @@ describe("registerFallbackDetection", () => {
 
   it("records an incident for a failed Worker turn that classifies as L1", async () => {
     saveChain("ask", [CODEX]);
-    const { paseo, listUsage } = fakeDaemon({ windows: [{ id: "five_hour", usedPct: 100, resetsAt: "2026-09-22T15:00:00.000Z" }] });
+    const { paseo, listUsage } = daemonWith({ windows: [{ id: "five_hour", usedPct: 100, resetsAt: "2026-09-22T15:00:00.000Z" }] });
     const fake = host();
     registerFallbackDetection(fake.value as never, { log, now: NOW, home: () => home });
     await fake.handlers[0]!(
@@ -354,7 +378,7 @@ describe("registerFallbackDetection", () => {
     const homeLookup = vi.fn(() => home);
     const fake = host();
     registerFallbackDetection(fake.value as never, { log, now: NOW, home: homeLookup });
-    const { paseo } = fakeDaemon();
+    const { paseo } = daemonWith();
     const toolCall = { type: "tool_call", name: "Bash" };
     await fake.handlers[0]!(
       { agent: { id: WORKER, provider: "bm-worker", workspaceId: WORKSPACE }, turnId: "t2", outcome: { kind: "completed" }, timeline: [{ type: "user_message", text: "go" }, toolCall] },
@@ -368,7 +392,7 @@ describe("registerFallbackDetection", () => {
     const homeLookup = vi.fn(() => home);
     const fake = host();
     registerFallbackDetection(fake.value as never, { log, now: NOW, home: homeLookup });
-    const { paseo, listUsage } = fakeDaemon({ snapshots: { "orc-1": { id: "orc-1", labels: { "bm.role": "orchestrator" } } } });
+    const { paseo, listUsage } = daemonWith({ snapshots: { "orc-1": { id: "orc-1", labels: { "bm.role": "orchestrator" } } } });
     await fake.handlers[0]!(
       { agent: { id: "orc-1", provider: "bm-orchestrator/claude-opus-5", workspaceId: WORKSPACE }, turnId: "t1", outcome: { kind: "failed", error: { message: L1.message } }, timeline: [] },
       { paseo },

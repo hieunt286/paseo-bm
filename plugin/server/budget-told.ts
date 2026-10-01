@@ -19,13 +19,16 @@
  * Reads never repair the file. A corrupt or too-new file reads as "nothing told"
  * — the safe direction, because one notice too many only costs the user a
  * question, while one too few loses the only warning they get. Writing over a
- * newer version's file is refused.
+ * newer version's file is refused. The file rules are every store's
+ * (`data-files.ts` `createJsonFileStore`, code review 2026-09-30 §3.1), with
+ * the code this file has always had, `E_TRACE_STORE_UNWRITABLE`; nothing here
+ * throws into a turn end.
  */
-import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { z } from "zod";
+import { capBy, createJsonFileStore, type JsonFileStore } from "./data-files";
 import { UI_DIR_NAME } from "./data-home";
-import { assertNoSymlinkOnPath, ensureStoreDir, writeStoreFileAtomically, type TraceStoreLocation } from "./trace-store";
+import type { TraceStoreLocation } from "./trace-store";
 
 /** Bumped only when the shape below changes incompatibly. */
 export const BUDGET_TOLD_SCHEMA_VERSION = 1;
@@ -33,8 +36,8 @@ export const BUDGET_TOLD_FILE_NAME = "budget-told.json";
 /** Oldest entries go first once there are more; a request only matters while it runs. */
 export const BUDGET_TOLD_LIMIT = 500;
 
-const budgetToldFileSchema = z.object({
-  schemaVersion: z.number().int().positive(),
+/** The file's content after its `schemaVersion` (1), all or nothing: one entry that does not validate makes the whole file untold. */
+const budgetToldBodySchema = z.object({
   told: z.array(z.object({ key: z.string().min(1), calls: z.number().int().nonnegative(), at: z.string() })),
 });
 
@@ -44,38 +47,35 @@ export function budgetToldPath(location: TraceStoreLocation): string {
   return join(dirname(location.tracesDir), UI_DIR_NAME, BUDGET_TOLD_FILE_NAME);
 }
 
-function readFile(location: TraceStoreLocation): { told: Entry[]; notices: string[]; tooNew: boolean } {
-  const path = budgetToldPath(location);
-  // Before the read, so a symlinked path is refused rather than followed.
-  assertNoSymlinkOnPath(dirname(location.tracesDir), path);
+/** The file beside the trace store at `location`. Creating it touches nothing on disk. */
+function toldFile(location: TraceStoreLocation): JsonFileStore<{ told: Entry[] }> {
+  return createJsonFileStore({
+    home: dirname(location.tracesDir),
+    dir: UI_DIR_NAME,
+    file: BUDGET_TOLD_FILE_NAME,
+    version: BUDGET_TOLD_SCHEMA_VERSION,
+    versionKey: "schemaVersion",
+    parse: (body) => {
+      const result = budgetToldBodySchema.safeParse(body);
+      if (!result.success) throw new Error("it does not have the expected shape");
+      return { told: result.data.told };
+    },
+    empty: () => ({ told: [] }),
+    cap: ({ told }) => ({ told: capBy(told, BUDGET_TOLD_LIMIT) }),
+    codes: { unwritable: "E_TRACE_STORE_UNWRITABLE" },
+  });
+}
 
-  let raw: string;
-  try {
-    raw = readFileSync(path, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { told: [], notices: [], tooNew: false };
-    return { told: [], notices: [`Could not read the review-budget notices already sent (${(error as Error).message}).`], tooNew: false };
+/** What the file says, and a notice when it exists but cannot be used. Throws on a symlink, refused rather than followed. */
+function readFile(location: TraceStoreLocation): { told: Entry[]; notices: string[] } {
+  const found = toldFile(location).inspect();
+  if (found.state === "too-new") {
+    return { told: [], notices: [`The review-budget file is newer than this plugin understands (${found.problem}); nothing will be written to it.`] };
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return { told: [], notices: ["The review-budget file is not valid JSON; treating every overrun as untold."], tooNew: false };
+  if (found.state === "unusable") {
+    return { told: [], notices: [`The review-budget file cannot be used (${found.problem}); treating every overrun as untold.`] };
   }
-  const result = budgetToldFileSchema.safeParse(parsed);
-  if (!result.success) {
-    return { told: [], notices: ["The review-budget file does not have the expected shape; treating every overrun as untold."], tooNew: false };
-  }
-  if (result.data.schemaVersion > BUDGET_TOLD_SCHEMA_VERSION) {
-    return {
-      told: [],
-      notices: [
-        `The review-budget file is version ${result.data.schemaVersion}, newer than this plugin understands (${BUDGET_TOLD_SCHEMA_VERSION}); nothing will be written to it.`,
-      ],
-      tooNew: true,
-    };
-  }
-  return { told: result.data.told, notices: [], tooNew: false };
+  return { told: found.value.told, notices: [] };
 }
 
 /** Why a notice may or may not go out; see `BudgetTold.claim`. */
@@ -135,16 +135,15 @@ export function createBudgetTold(log: (message: string) => void = (message) => c
     commit(location, key, calls) {
       claiming.delete(key);
       try {
-        const current = readFile(location);
-        if (current.tooNew) {
+        const file = toldFile(location);
+        const current = file.inspect();
+        if (current.state === "too-new") {
           // A newer version owns the file; the in-memory note still stops a repeat this session.
           (cache ??= new Map()).set(key, calls);
           return;
         }
-        const others = current.told.filter((entry) => entry.key !== key);
-        const told = [...others, { key, calls, at: new Date().toISOString() }].slice(-BUDGET_TOLD_LIMIT);
-        ensureStoreDir(location.tracesDir, join(dirname(location.tracesDir), UI_DIR_NAME));
-        writeStoreFileAtomically(location, budgetToldPath(location), `${JSON.stringify({ schemaVersion: BUDGET_TOLD_SCHEMA_VERSION, told }, null, 2)}\n`);
+        const others = current.value.told.filter((entry) => entry.key !== key);
+        const { told } = file.write({ told: [...others, { key, calls, at: new Date().toISOString() }] });
         cache = new Map(told.map((entry) => [entry.key, entry.calls]));
       } catch (error) {
         // Never throw into an agent's turn end: the notice already went out, and

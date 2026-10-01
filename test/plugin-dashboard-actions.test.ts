@@ -1,10 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  OLDER_THAN_DAYS,
-  createConfirmationGate,
-  describeAction,
-  olderThanCutoff,
-} from "../plugin/client/dashboard-model";
+import { OLDER_THAN_DAYS, createConfirmationGate, describeAction, olderThanCutoff } from "../plugin/client/history-model";
 
 /**
  * WP-211.2.2: the destructive flows.

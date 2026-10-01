@@ -1,14 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beadIdCandidates } from "../plugin/shared/bead-ids";
-import { beadChipText } from "../plugin/client/beads-model";
 import { clearBeadsCache } from "../plugin/server/beads-store";
-import { handleBeadsLookup, handleChatBeads } from "../plugin/server/chat-rpc";
-import type { DashboardPaseo } from "../plugin/server/dashboard-rpc";
+import { handleChatBeads } from "../plugin/server/chat-rpc";
+import type { DashboardPaseo } from "../plugin/server/paseo-directory";
+import { fakePaseo } from "./helpers/fake-paseo";
 
-/** Bead ids in chat: chips on cards and the "Beads in this chat" panel. */
+/** Bead ids in chat: the "Beads in this chat" panel. */
 
 describe("finding bead-shaped ids", () => {
   it("finds real id shapes in prose, code and commands, once each, in order", () => {
@@ -23,12 +23,6 @@ describe("finding bead-shaped ids", () => {
     const text = "req-20260916T062244Z at /repo/src/foo-bar.ts, --dry-run, https://x.dev/a-b and plugin/client/bead-chips.tsx";
     expect(beadIdCandidates(text)).toEqual([]);
     expect(beadIdCandidates("a-1 b-2 c-3", 2)).toEqual(["a-1", "b-2"]);
-  });
-
-  it("shows a chip title first", () => {
-    expect(beadChipText({ id: "bm-dcz", title: "Role icons on the Metric graph" })).toBe("Role icons on the Metric graph · bm-dcz");
-    expect(beadChipText({ id: "bm-dcz", title: null })).toBe("bm-dcz");
-    expect(beadChipText({ id: "x-1", title: "a".repeat(60) }, 10)).toBe("aaaaaaaaa… · x-1");
   });
 });
 
@@ -45,39 +39,20 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(workspace, { recursive: true, force: true }));
 
-function paseo(pages: Array<{ entries: unknown[]; hasOlder?: boolean; startCursor?: string }> = []): DashboardPaseo {
-  const refetch = vi.fn(async (options: Record<string, unknown>) => (options.direction === "tail" ? pages[0] : pages[1]) ?? { entries: [] });
-  return {
-    agents: { list: vi.fn(async () => ({ entries: [] })), ref: () => ({ timeline: { refetch } }) },
-    workspaces: { list: vi.fn(async () => ({ entries: [{ id: WS, directory: workspace }] })) },
-    config: { get: vi.fn(async () => ({ config: {} })) },
-  };
+/** The shared fake SDK listing the workspace, with w1's timeline in pages given newest first; `omit` drops members. */
+function paseo(pages: unknown[][] = [], omit: string[] = []): DashboardPaseo {
+  return fakePaseo<DashboardPaseo>({ workspaces: [{ id: WS, directory: workspace }], timelines: { w1: { pages: [...pages].reverse() } }, omit }).paseo;
 }
-
-describe("beads.lookup", () => {
-  it("returns only ids the store has, in the order asked", async () => {
-    const { beads } = await handleBeadsLookup({ workspaceId: WS, ids: ["demo-b2", "feature-workflow", "demo-a1", "demo-b2"] }, paseo());
-    expect(beads.map((row) => [row.id, row.title, row.status])).toEqual([
-      ["demo-b2", "Second", "in_progress"],
-      ["demo-a1", "First", "open"],
-    ]);
-    expect((await handleBeadsLookup({ workspaceId: "wks_gone", ids: ["demo-a1"] }, paseo())).beads).toEqual([]);
-  });
-});
 
 describe("chat.beads", () => {
   it("lists beads named in messages and shell commands, newest mention first, counting mentions", async () => {
     const pages = [
-      {
-        entries: [
-          { item: { type: "user_message", text: "Please implement demo-a1." }, timestamp: "2026-09-16T10:00:00Z" },
-          { item: { type: "tool_call", detail: { type: "shell", command: "br update demo-a1 --status in_progress" } }, timestamp: "2026-09-16T10:01:00Z" },
-          { item: { type: "assistant_message", text: "Should demo-b2 wait for demo-a1? Also feature-workflow." }, timestamp: "2026-09-16T10:02:00Z" },
-        ],
-        hasOlder: true,
-        startCursor: "c1",
-      },
-      { entries: [{ item: { type: "user_message", text: "Old note about demo-b2" }, timestamp: "2026-09-16T09:00:00Z" }] },
+      [
+        { item: { type: "user_message", text: "Please implement demo-a1." }, timestamp: "2026-09-16T10:00:00Z" },
+        { item: { type: "tool_call", detail: { type: "shell", command: "br update demo-a1 --status in_progress" } }, timestamp: "2026-09-16T10:01:00Z" },
+        { item: { type: "assistant_message", text: "Should demo-b2 wait for demo-a1? Also feature-workflow." }, timestamp: "2026-09-16T10:02:00Z" },
+      ],
+      [{ item: { type: "user_message", text: "Old note about demo-b2" }, timestamp: "2026-09-16T09:00:00Z" }],
     ];
     const result = await handleChatBeads({ workspaceId: WS, agentId: "w1" }, paseo(pages));
     expect(result.scannedItems).toBe(4);
@@ -89,8 +64,6 @@ describe("chat.beads", () => {
 
   it("is empty for an unknown workspace or an agent without a timeline", async () => {
     expect(await handleChatBeads({ workspaceId: "wks_gone", agentId: "w1" }, paseo())).toEqual({ beads: [], scannedItems: 0 });
-    const noRef = paseo();
-    delete (noRef.agents as { ref?: unknown }).ref;
-    expect(await handleChatBeads({ workspaceId: WS, agentId: "w1" }, noRef)).toEqual({ beads: [], scannedItems: 0 });
+    expect(await handleChatBeads({ workspaceId: WS, agentId: "w1" }, paseo([], ["agents.ref"]))).toEqual({ beads: [], scannedItems: 0 });
   });
 });

@@ -30,7 +30,7 @@
 import { priceFor, type ListedPrices } from "./cost";
 import { providerId } from "./provider-id";
 import { LOOKUP_TIMEOUT_MS, TIMED_OUT, withTimeout } from "./role-mode";
-import { effectiveModel } from "./traces";
+import { effectiveModel } from "./trace-usage";
 import { modelPriceSchema, type ModelPrice } from "../shared/prices";
 import type { TraceRecord } from "../shared/contracts";
 

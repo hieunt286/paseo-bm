@@ -15,7 +15,8 @@
  */
 import type { PluginTheme } from "@getpaseo/plugin";
 import type { AgentNode, RoleDescriptor } from "../shared/contracts";
-import { codedTail, errorCodeOf, errorMessageOf, type NoticeTone } from "./launch-manager";
+import { codedTail, errorCodeOf, errorMessageOf } from "./errors";
+import type { NoticeTone } from "./launch-manager";
 
 /** Workspace panel id. */
 export const AGENT_TREE_PANEL_ID = "beads-agents";

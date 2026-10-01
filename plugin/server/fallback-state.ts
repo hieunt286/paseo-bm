@@ -17,34 +17,39 @@
  * 4. `managerId` — the chat whose card shows it;
  * 5. writes it `pending`, or `dismissed` when the policy is `off` (recorded all
  *    the same, so phase 2a-18 has real data), and tells the listeners
- *    (`onFallbackIncident`) — the `auto` policy and the owner's decision.
+ *    (`onFallbackIncident`) — the owner's decision.
  *
- * `<install home>/role-fallback-state.json` is user data like
- * `role-extras.json` (F9): mode 0600, temp file then rename, symlink refused,
- * never touched by an update, `--prune` or uninstall. At most 200 incidents,
+ * `<install home>/role-fallback-state.json` is user data (F9):
+ * mode 0600, temp file then rename, symlink refused on
+ * a read as on a write, the data folder created by the first write, never
+ * touched by an update, `--prune` or uninstall (`data-files.ts`
+ * `createJsonFileStore`; code review 2026-09-30 §2.4). At most 200 incidents,
  * the oldest finished ones dropped first; every read-modify-write runs under
- * one in-process mutex. A file that does not parse is never overwritten:
- * nothing is recorded, with one log line each time, until it is fixed or deleted.
+ * one in-process mutex. A file that does not parse — or that a newer paseo-bm
+ * wrote, or reached through a symlink — is never overwritten: nothing is
+ * recorded, with one log line each time, until it is fixed or deleted.
+ *
+ * What a request's figures read of the incidents — the Reviewers that replaced
+ * a stopped one, and the incidents that count as errors — is here too, for
+ * the Dashboard and every rebuild of a trace (code review 2026-09-30 §4).
  *
  * Never throws into an agent turn: every failure costs one `[paseo-bm]` line.
  */
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { z } from "zod";
 import { roleOfProvider } from "./agent-role";
 import { aliasBases } from "./alias-bases";
 import { redactText, sliceLastTurn, type CollectorPaseo } from "./collector";
+import { capBy, createJsonFileStore, type JsonFileRead, type JsonFileStore } from "./data-files";
 import { classifyTurn, quietReply } from "./fallback-detect";
-import { chainOf, readRoleFallback, type FallbackChain } from "./fallback-settings";
-import { TRACES_DIR_NAME } from "./data-home";
+import { chainOf, issueOf, readRoleFallback, type FallbackChain } from "./fallback-settings";
 import { PARENT_AGENT_LABEL } from "./manager";
 import { providerId } from "./provider-id";
 import { asRecord, availableProviders, nonEmpty, reasonOf } from "./role-choices";
-import { dataHomeOf } from "./role-extras";
+import { dataHomeOf } from "./role-instructions";
 import { TIMED_OUT, withTimeout } from "./role-mode";
-import { writeStoreFileAtomically } from "./trace-store";
+import { dataHome } from "./rpc-kit";
 import { fallbackAlias, positionOfAlias } from "../shared/fallback";
 import { fallbackIncidentSchema, type BmRole, type FallbackIncident } from "../shared/contracts";
 import type { FallbackClass } from "../shared/fallback-patterns";
@@ -70,7 +75,8 @@ const MODEL_FAMILY = /(opus|sonnet|haiku|gpt)/i;
 const OPEN_STATUSES: ReadonlySet<FallbackIncident["status"]> = new Set(["pending", "waiting"]);
 const DEDUPE_STATUSES: ReadonlySet<FallbackIncident["status"]> = new Set(["pending", "waiting", "switched"]);
 
-const stateFileSchema = z.object({ version: z.literal(1), incidents: z.array(fallbackIncidentSchema) });
+/** The file's content after its `version` (1), all or nothing: one invalid incident makes the file unusable. */
+const stateBodySchema = z.object({ incidents: z.array(fallbackIncidentSchema) });
 
 const defaultLog = (message: string): void => console.warn(message);
 
@@ -78,32 +84,45 @@ const defaultLog = (message: string): void => console.warn(message);
 // The file.
 // ---------------------------------------------------------------------------
 
+/**
+ * `role-fallback-state.json` in `home`. User data, so a file that cannot be
+ * used is never overwritten (`keepUnusable`); a failed write keeps the code it
+ * has always had, `E_TRACE_STORE_UNWRITABLE`.
+ */
+function incidentsFile(home: string): JsonFileStore<{ incidents: FallbackIncident[] }> {
+  return createJsonFileStore({
+    home,
+    dir: "",
+    file: ROLE_FALLBACK_STATE_FILE,
+    version: 1,
+    parse: (body) => {
+      const result = stateBodySchema.safeParse(body);
+      if (!result.success) throw new Error(issueOf(result.error));
+      return { incidents: result.data.incidents };
+    },
+    empty: () => ({ incidents: [] }),
+    cap: ({ incidents }) => ({ incidents: capIncidents(incidents) }),
+    codes: { unwritable: "E_TRACE_STORE_UNWRITABLE" },
+    keepUnusable: true,
+  });
+}
+
 /** The incidents in `home`; `error` when the file exists but cannot be used. Never throws. */
 export function readIncidents(home: string, log: (message: string) => void = defaultLog): { incidents: FallbackIncident[]; error: string | null } {
-  const path = join(home, ROLE_FALLBACK_STATE_FILE);
+  const file = incidentsFile(home);
   const invalid = (reason: string) => {
-    log(`[paseo-bm] ${path} is not usable (${reason}); no fallback incident is recorded until it is fixed or deleted.`);
+    log(`[paseo-bm] ${file.path} is not usable (${reason}); no fallback incident is recorded until it is fixed or deleted.`);
     return { incidents: [], error: reason };
   };
-  let text: string;
+  let found: JsonFileRead<{ incidents: FallbackIncident[] }>;
   try {
-    text = readFileSync(path, "utf8");
+    found = file.inspect();
   } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { incidents: [], error: null };
+    // A symlink on the way is refused, never followed (code review 2026-09-30 §2.4).
     return invalid(reasonOf(error));
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch (error) {
-    return invalid(`not JSON: ${reasonOf(error)}`);
-  }
-  const result = stateFileSchema.safeParse(parsed);
-  if (!result.success) {
-    const issue = result.error.issues[0];
-    return invalid(issue === undefined ? "unexpected content" : `${issue.path.join(".") || "(root)"}: ${issue.message}`);
-  }
-  return { incidents: result.data.incidents, error: null };
+  if (found.problem !== null) return invalid(found.problem);
+  return { incidents: found.value.incidents, error: null };
 }
 
 /**
@@ -135,12 +154,7 @@ export function replacementsFor(deps: { homedir?: () => string; home?: string | 
 
 /** At most `MAX_INCIDENTS`: the oldest finished incidents go first, then the oldest of all. */
 export function capIncidents(incidents: readonly FallbackIncident[]): FallbackIncident[] {
-  const kept = [...incidents];
-  while (kept.length > MAX_INCIDENTS) {
-    const finished = kept.findIndex((incident) => !OPEN_STATUSES.has(incident.status));
-    kept.splice(finished === -1 ? 0 : finished, 1);
-  }
-  return kept;
+  return capBy(incidents, MAX_INCIDENTS, (incident) => (OPEN_STATUSES.has(incident.status) ? 1 : 0));
 }
 
 let queue: Promise<unknown> = Promise.resolve();
@@ -167,14 +181,79 @@ export function updateIncidents(
     if (read.error !== null) return null;
     const next = change(read.incidents);
     if (next === null) return null;
-    const incidents = capIncidents(next);
-    writeStoreFileAtomically(
-      { tracesDir: join(home, TRACES_DIR_NAME) },
-      join(home, ROLE_FALLBACK_STATE_FILE),
-      `${JSON.stringify({ version: 1, incidents }, null, 2)}\n`,
-    );
-    return incidents;
+    // Creates the data folder on a fresh machine (code review 2026-09-30 §2.4).
+    return incidentsFile(home).write({ incidents: next }).incidents;
   });
+}
+
+// ---------------------------------------------------------------------------
+// What a request's figures read of the incidents: replacement Reviewers and
+// error counts (delta 20260921 §4.5.1, delta 20260925 §3.4; code review
+// 2026-09-30 §4).
+// ---------------------------------------------------------------------------
+
+/**
+ * Ids of the Reviewers that replaced one stopped on its provider plan: the
+ * `replacementId` of every Reviewer incident that has one (delta 20260921
+ * §4.5.1). Their first message is the old Reviewer's review call sent again,
+ * which `reviewCallsOf` does not count a second time.
+ */
+export function reviewerReplacementIds(incidents: readonly FallbackIncident[]): Set<string> {
+  const out = new Set<string>();
+  for (const incident of incidents) {
+    if (incident.role === "reviewer" && incident.replacementId !== null) out.add(incident.replacementId);
+  }
+  return out;
+}
+
+/**
+ * The recorded fallback incidents of `<home>/role-fallback-state.json`, read
+ * once per Dashboard call. Empty without a home, or when the file is missing or
+ * unusable, so every count stays what it was before fallback existed. Silent:
+ * fallback detection already logs an unusable file, and a Dashboard refresh or a
+ * turn end must not repeat it. Never throws.
+ */
+export function incidentsIn(home: string | null): FallbackIncident[] {
+  return home === null ? [] : readIncidents(home, () => {}).incidents;
+}
+
+/**
+ * How many provider-plan incidents each request of a workspace had that did not
+ * already fail a turn (delta 20260925 §3.4).
+ *
+ * Only `signal: "completed"` counts here: an incident with `signal: "failed"`
+ * came from a turn whose record says `failed`, which `errorsOf` counts as a
+ * failed turn, and one failure must read as one error. An incident without a
+ * `requestId` is a Manager's and belongs to no request.
+ */
+export function fallbackCountsOf(
+  incidents: readonly FallbackIncident[],
+  workspaceId: string,
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const incident of incidents) {
+    if (incident.workspaceId !== workspaceId || incident.requestId === null) continue;
+    if (incident.signal !== "completed") continue;
+    counts.set(incident.requestId, (counts.get(incident.requestId) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/** `reviewerReplacementIds` of that file. Kept for callers that need only those ids. */
+export function reviewerReplacementsIn(home: string | null): Set<string> {
+  return reviewerReplacementIds(incidentsIn(home));
+}
+
+/**
+ * `reviewerReplacementsIn` the plugin's own data folder, unless `deps.home`
+ * names it (tests). Never throws.
+ */
+export function reviewerReplacementsFor(deps: { home?: string | null } = {}): Set<string> {
+  try {
+    return reviewerReplacementsIn(dataHome(deps));
+  } catch {
+    return new Set();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -289,15 +368,11 @@ interface SnapshotPaseo {
   agents: { ref(agentId: string): { refresh(): Promise<{ agent?: unknown } | null> } };
 }
 
-/** Gets each written incident, the Paseo handle of the hook that wrote it, the role's policy then, and the data folder. */
-export type IncidentListener = (
-  incident: FallbackIncident,
-  paseo: unknown,
-  context: { policy: FallbackChain["policy"]; home: string },
-) => void | Promise<void>;
+/** Gets each written incident, the Paseo handle of the hook that wrote it, and the data folder. */
+export type IncidentListener = (incident: FallbackIncident, paseo: unknown, context: { home: string }) => void | Promise<void>;
 const listeners = new Set<IncidentListener>();
 
-/** Subscribes to every incident written (the `auto` policy and the owner's decision); returns the remover. */
+/** Subscribes to every incident written (the owner's decision); returns the remover. */
 export function onFallbackIncident(listener: IncidentListener): () => void {
   listeners.add(listener);
   return () => {
@@ -426,7 +501,7 @@ export async function recordIncident(
     if (written === null) return null;
     for (const listener of listeners) {
       try {
-        await listener(incident, deps.paseo, { policy: chain.policy, home: deps.home });
+        await listener(incident, deps.paseo, { home: deps.home });
       } catch (error) {
         log(`[paseo-bm] a fallback incident listener failed: ${reasonOf(error)}`);
       }

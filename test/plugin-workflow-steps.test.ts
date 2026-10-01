@@ -232,14 +232,11 @@ describe("inferred evidence from the timeline", () => {
   });
 
   it("marks review from a BM-REVIEW, and infers it from a Reviewer that merely exists", () => {
-    const withReview = traceWith(
-      {
-        reviews: [{ agentId: "rev-1", at: "2026-09-16T10:09:00.000Z", batchId: "batch-1", verdict: "approved", blockingCount: null }],
-      },
-      [agent({ id: "w1" }), agent({ id: "rev-1", role: "reviewer", parentAgentId: "w1" })],
-    );
+    // A review is its Reviewer's own answer: one on a Worker's record is not counted (bead 7gxw.12), so it is given to the trace here.
+    const review = { agentId: "rev-1", at: "2026-09-16T10:09:00.000Z", batchId: "batch-1", verdict: "approved", blockingCount: null };
+    const withReview = traceWith({}, [agent({ id: "w1" }), agent({ id: "rev-1", role: "reviewer", parentAgentId: "w1" })]);
     // The review record has to belong to the Reviewer agent for the exact path.
-    const exactSteps = inferWorkflowSteps({ ...withReview, reviews: withReview.reviews, reviewerIds: ["rev-1"] });
+    const exactSteps = inferWorkflowSteps({ ...withReview, reviews: [review], reviewerIds: ["rev-1"] });
     expect(rowFor(exactSteps, "review_batches")).toMatchObject({ status: "done", confidence: "exact" });
 
     const inferredSteps = inferWorkflowSteps({ ...withReview, reviews: [], reviewerIds: ["rev-1"] });
@@ -506,6 +503,7 @@ describe("false positives the WP-214 acceptance run found", () => {
     "n/a",
     "skipped",
     "no tests in this repo",
+    "`not run`",
   ])("does not count buildAndTests %o as a run", (value) => {
     const steps = inferWorkflowSteps(traceWith({ reports: [report({ buildAndTests: value })] }));
     expect(rowFor(steps, "build_and_tests").status).toBe("unknown");

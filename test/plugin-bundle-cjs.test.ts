@@ -6,6 +6,7 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { rolePaseoToolsPolicy } from "../plugin/server/setup-roles";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 // The entry resolves the install home from $HOME when Paseo's config names no
 // plugin path; point it at an empty directory so this machine's real
@@ -39,6 +40,8 @@ const entry = join(repoRoot, "plugin", "index.server.ts");
 const managerMd = readFileSync(join(repoRoot, "plugin", "roles", "manager.md"), "utf8");
 const workerMd = readFileSync(join(repoRoot, "plugin", "roles", "worker.md"), "utf8");
 const reviewerMd = readFileSync(join(repoRoot, "plugin", "roles", "reviewer.md"), "utf8");
+/** This fake host lists no workspace, so the hook cannot tell the project: the action boundary is off. */
+const BOUNDARY_UNKNOWN = "Action boundary: off — the project could not be told from the agent's folder";
 
 async function bundleServerEntry(): Promise<string> {
   const result = await build({
@@ -125,54 +128,28 @@ function fakeServer() {
   return { server, handlers, beforeHooks, onHooks };
 }
 
-function fakePaseo() {
-  const created: Array<{ workspaceId: string; options: { config: { systemPrompt?: string } } }> = [];
-  const paseo = {
-    agents: {
-      async list() {
-        return { entries: [], pageInfo: { nextCursor: null, hasMore: false } };
-      },
-    },
-    workspaces: {
-      ref(workspaceId: string) {
-        return {
-          agents: {
-            async create(options: { config: { systemPrompt?: string } }) {
-              created.push({ workspaceId, options });
-              return {
-                id: "created-1",
-                current: () => ({ id: "created-1", createdAt: "2026-09-15T12:00:00.000Z", status: "initializing", labels: {} }),
-                archive: async () => ({}),
-              };
-            },
-          },
-        };
-      },
-    },
+/** A machine set up with the four roles; the host lists no providers, so it lists no modes. */
+function daemon() {
+  const fake = fakePaseo({
     config: {
-      async get() {
-        return {
-          requestId: "r-1",
-          config: {
-            providers: {
-              claude: {},
-              "bm-manager": { extends: "claude", label: "Beads Manager", paseoTools: rolePaseoToolsPolicy("manager") },
-              "bm-worker": { extends: "codex", label: "Beads Worker", paseoTools: rolePaseoToolsPolicy("worker") },
-              "bm-reviewer": { extends: "claude", label: "Beads Reviewer", paseoTools: rolePaseoToolsPolicy("reviewer") },
-              "bm-orchestrator": { extends: "claude", label: "Beads Orchestrator", paseoTools: rolePaseoToolsPolicy("orchestrator") },
-            },
-            agentProfiles: [
-              { id: "bm-manager", name: "Beads Manager", provider: "bm-manager", model: "opus" },
-              { id: "bm-worker", name: "Beads Worker", provider: "bm-worker", model: "gpt-5.6-sol" },
-              { id: "bm-reviewer", name: "Beads Reviewer", provider: "bm-reviewer", model: "sonnet" },
-              { id: "bm-orchestrator", name: "Beads Orchestrator", provider: "bm-orchestrator", model: "sonnet" },
-            ],
-          },
-        };
+      providers: {
+        claude: {},
+        "bm-manager": { extends: "claude", label: "Beads Manager", paseoTools: rolePaseoToolsPolicy("manager") },
+        "bm-worker": { extends: "codex", label: "Beads Worker", paseoTools: rolePaseoToolsPolicy("worker") },
+        "bm-reviewer": { extends: "claude", label: "Beads Reviewer", paseoTools: rolePaseoToolsPolicy("reviewer") },
+        "bm-orchestrator": { extends: "claude", label: "Beads Orchestrator", paseoTools: rolePaseoToolsPolicy("orchestrator") },
       },
+      agentProfiles: [
+        { id: "bm-manager", name: "Beads Manager", provider: "bm-manager", model: "opus" },
+        { id: "bm-worker", name: "Beads Worker", provider: "bm-worker", model: "gpt-5.6-sol" },
+        { id: "bm-reviewer", name: "Beads Reviewer", provider: "bm-reviewer", model: "sonnet" },
+        { id: "bm-orchestrator", name: "Beads Orchestrator", provider: "bm-orchestrator", model: "sonnet" },
+      ],
     },
-  };
-  return { paseo, created };
+    created: () => ({ createdAt: "2026-09-15T12:00:00.000Z", status: "initializing", labels: {} }),
+    omit: ["providers"],
+  });
+  return { paseo: fake.paseo, created: fake.creates };
 }
 
 function pluginSourceFiles(dir: string): string[] {
@@ -236,31 +213,41 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
     expect([...handlers.keys()].sort()).toEqual([
       "agents.list",
       "agents.stop-all",
+      "autonomy.ledger",
+      "autonomy.policy",
+      "autonomy.reset",
+      "autonomy.set",
+      "autonomy.set-boundary",
+      "autonomy.set-challenger",
       "beads.action",
       "beads.get",
       "beads.list",
-      "beads.lookup",
       "beads.stats",
       "chat.beads",
       "chat.peers",
+      "coordination.set",
+      "coordination.settings",
       "decisions.answer",
       "decisions.confirm",
       "decisions.get",
       "decisions.list",
+      "decisions.override",
       "fallback.act",
       "fallback.incidents",
       "inbox.alerts",
+      "inbox.digest",
+      "inbox.seen",
       "insights.summary",
+      "links.why",
       "manager.ensure",
-      "orchestrator.apply-suggestion",
       "orchestrator.open",
       "orchestrator.open-preview",
-      "orchestrator.set-autopilot",
       "orchestrator.state",
+      "precedents.end",
+      "precedents.list",
+      "precedents.save",
       "roles.describe",
-      "roles.instructions",
       "roles.options",
-      "roles.save-extra",
       "roles.save-fallback",
       "roles.save-settings",
       "roles.settings",
@@ -270,6 +257,7 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
       "setup.install-skills",
       "setup.install-tool",
       "setup.status",
+      "traces.agents",
       "traces.delete",
       "traces.get",
       "traces.list",
@@ -285,21 +273,31 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
     // BM-FORMAT check runs on agent.turn_ended; delta 20260921 adds the
     // fallback detection on agent.turn_ended; the outdated-agents pass
     // (autonomy design §A.11) starts on agent.turn_started and clears on
-    // agent.archived.
-    expect([...onHooks.keys()].sort()).toEqual(["agent.archived", "agent.created", "agent.turn_ended", "agent.turn_started"]);
+    // agent.archived; the action boundary (autonomy design §D.2) answers
+    // agent.permission_requested and records agent.permission_resolved.
+    expect([...onHooks.keys()].sort()).toEqual([
+      "agent.archived",
+      "agent.created",
+      "agent.permission_requested",
+      "agent.permission_resolved",
+      "agent.turn_ended",
+      "agent.turn_started",
+    ]);
+    expect(onHooks.get("agent.permission_requested")).toHaveLength(1);
+    expect(onHooks.get("agent.permission_resolved")).toHaveLength(1);
     expect(onHooks.get("agent.turn_ended")).toHaveLength(4);
     expect(onHooks.get("agent.turn_started")).toHaveLength(3);
     expect(onHooks.get("agent.archived")).toHaveLength(1);
     expect(onHooks.get("agent.created")).toHaveLength(1);
 
-    const { paseo, created } = fakePaseo();
+    const { paseo, created } = daemon();
     const ensured = await handlers.get("manager.ensure")!({ workspaceId: "ws-1" }, { paseo });
     expect(ensured).toEqual({ agentId: "created-1", created: true, otherManagerIds: [], modeNotice: null, toolsNotice: null, setupNotice: null, replacedManagerId: null });
     expect(created).toHaveLength(1);
     // The base, then the Runtime facts: `bm-worker` extends codex here, so the
     // plugin states the Worker's skills (design delta 20260924-instruction-quality
     // §3). Which skills this machine has is not the test's business.
-    const prompt = created[0]!.options.config.systemPrompt as string;
+    const prompt = created[0]!.options.config["systemPrompt"] as string;
     expect(prompt.startsWith(managerMd.trimEnd())).toBe(true);
     expect(prompt).toMatch(/\n## Runtime facts\n\n(?:Worker mode: [^\n]*\n)?Worker skills: (all present\.|missing `)/);
 
@@ -318,11 +316,13 @@ describe("server entry bundled as Paseo 0.8 bundles it (CJS)", () => {
     const run = async (config: Record<string, unknown>) =>
       (await hook({ request: { config } }, { paseo })) as { config: { systemPrompt?: string } } | undefined;
     // This fake host lists no modes, so the bundled hook also gives the Worker
-    // the fallback Reviewer mode `auto` (delta 20260918g §4.9, Q4 a / Q9 a).
+    // the fallback Reviewer mode `auto` (delta 20260918g §4.9, Q4 a / Q9 a), and
+    // the owner's review budget, here its defaults (bead 7gxw.12).
     expect((await run({ provider: "bm-worker/gpt-5.6-sol", cwd: "/repo" }))?.config.systemPrompt).toBe(
-      `${workerMd.trimEnd()}\n\n## Runtime facts\n\nReviewer mode: \`auto\` — pass it as \`settings.modeId\` when you create a Reviewer.\n`,
+      `${workerMd.trimEnd()}\n\n## Runtime facts\n\nReviewer mode: \`auto\` — pass it as \`settings.modeId\` when you create a Reviewer.\nReview calls per request: Small 2, Medium 2, Large 4.\n${BOUNDARY_UNKNOWN}\n`,
     );
-    expect((await run({ provider: "bm-reviewer", cwd: "/repo" }))?.config.systemPrompt).toBe(reviewerMd);
+    // A Worker's and a Reviewer's own facts say whether they run under the action boundary (autonomy design §D.2).
+    expect((await run({ provider: "bm-reviewer", cwd: "/repo" }))?.config.systemPrompt).toBe(`${reviewerMd.trimEnd()}\n\n## Runtime facts\n\n${BOUNDARY_UNKNOWN}\n`);
     // A Manager that already carries its full instructions (base + Runtime facts) is left alone.
     expect(await run({ provider: "bm-manager", cwd: "/repo", systemPrompt: prompt })).toBeUndefined();
     // Another provider's agent is answered at once, without a lookup.

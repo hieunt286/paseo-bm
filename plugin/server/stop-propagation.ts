@@ -2,6 +2,7 @@ import type { PluginLifecycleEvents, PluginServerContext } from "@getpaseo/plugi
 import { PARENT_AGENT_LABEL } from "./manager";
 import { REVIEWER_STOP_NOTICE_PREFIX, WORKER_STOP_NOTICE } from "./notices";
 import { listAllAgents, roleOfAgent, roleOfProvider } from "./agent-role";
+import { errorText } from "./rpc-kit";
 
 /**
  * Stop propagation from a Beads Worker to its running Reviewers (bm-wq6, REQ-026f).
@@ -86,10 +87,6 @@ export type TurnEndedEvent = PluginLifecycleEvents["agent.turn_ended"];
 export interface StopPropagationContext {
   paseo: StopPaseo;
   signal?: AbortSignal;
-}
-
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function isAborted(signal: AbortSignal | undefined): boolean {
@@ -180,7 +177,7 @@ export async function stopRunningReviewers(
     reviewers = await listRunningReviewers(paseo, workerId, workspaceId);
   } catch (error) {
     if (!isAborted(signal)) {
-      console.warn(`${LOG_PREFIX} could not list the Reviewers of Worker ${workerId}: ${describeError(error)}`);
+      console.warn(`${LOG_PREFIX} could not list the Reviewers of Worker ${workerId}: ${errorText(error)}`);
     }
     return stopped;
   }
@@ -195,7 +192,7 @@ export async function stopRunningReviewers(
       stopped.push(reviewer.id);
     } catch (error) {
       if (isAborted(signal)) return stopped;
-      console.warn(`${LOG_PREFIX} could not stop Reviewer ${reviewer.id} of Worker ${workerId}: ${describeError(error)}`);
+      console.warn(`${LOG_PREFIX} could not stop Reviewer ${reviewer.id} of Worker ${workerId}: ${errorText(error)}`);
     }
   }
   return stopped;
@@ -235,7 +232,7 @@ export async function propagateWorkerStop(
       }
     } catch (error) {
       if (!isAborted(signal)) {
-        console.warn(`${LOG_PREFIX} could not re-read Worker ${workerId}: ${describeError(error)}`);
+        console.warn(`${LOG_PREFIX} could not re-read Worker ${workerId}: ${errorText(error)}`);
       }
       return;
     }
@@ -244,7 +241,7 @@ export async function propagateWorkerStop(
     await stopRunningReviewers(paseo, workerId, workspaceId, signal);
   } catch (error) {
     if (!isAborted(signal)) {
-      console.warn(`${LOG_PREFIX} unexpected failure: ${describeError(error)}`);
+      console.warn(`${LOG_PREFIX} unexpected failure: ${errorText(error)}`);
     }
   }
 }

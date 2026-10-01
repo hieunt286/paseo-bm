@@ -5,13 +5,12 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { beadRowOf } from "./bead-actions";
 import { readBeads } from "./beads-store";
-import { bmAgentsOf, workspaceDirectory, type DashboardPaseo } from "./dashboard-rpc";
+import { bmAgentsOf, workspaceDirectory, type DashboardPaseo } from "./paseo-directory";
 import { readTimelinePages } from "./live-timeline";
 import { peersOfWorkspace, workspaceRecordsReader } from "./chat-peers";
 import { replacementsFor } from "./fallback-state";
 import { beadIdCandidates } from "../shared/bead-ids";
 import {
-  beadsLookupRpc,
   chatBeadsRpc,
   chatPeersRpc,
   type BeadRow,
@@ -42,22 +41,6 @@ export async function handleChatPeers(
     owner: peers.find((peer) => peer.id === input.agentId) ?? null,
     peers: peers.filter((peer) => peer.id !== input.agentId),
     workspaceId: found.workspaceId,
-  };
-}
-
-/** `beads.lookup` handler: the listed ids the bead store has, in the order asked. Read-only. */
-export async function handleBeadsLookup(
-  input: { workspaceId: string; ids: readonly string[] },
-  paseo: DashboardPaseo,
-): Promise<{ beads: BeadRow[] }> {
-  const directory = await workspaceDirectory(paseo, input.workspaceId);
-  if (directory === null) return { beads: [] };
-  const { beads } = readBeads(directory);
-  return {
-    beads: [...new Set(input.ids)].flatMap((id) => {
-      const bead = beads.get(id);
-      return bead === undefined ? [] : [beadRowOf(bead, beads)];
-    }),
   };
 }
 
@@ -114,6 +97,5 @@ export async function handleChatBeads(
 export function registerChatRpcs(server: PluginServerContext): void {
   const sdk = (context: { paseo: unknown }) => context.paseo as DashboardPaseo;
   server.handle(chatPeersRpc, (input, context) => handleChatPeers(input, sdk(context)));
-  server.handle(beadsLookupRpc, (input, context) => handleBeadsLookup(input, sdk(context)));
   server.handle(chatBeadsRpc, (input, context) => handleChatBeads(input, sdk(context)));
 }

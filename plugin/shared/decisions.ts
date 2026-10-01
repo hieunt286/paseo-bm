@@ -1,8 +1,10 @@
 /**
  * The decision model (autonomy design §A.3, ADR-017): a question to the owner
- * is one stored record — identity, request, asker, options with one
- * recommendation and their declared effects, lifecycle, answer, one-use grant
- * — rendered the same way on every surface.
+ * is one stored record — identity, request, asker, class (§B.1, ADR-018),
+ * options with one recommendation and their declared effects, lifecycle,
+ * answer, one-use grant, and what the agreement ledger reads (§B.3: the
+ * predictions made at open, the reversals of the answer) — rendered the same
+ * way on every surface.
  *
  * This module holds the schema and the **pure** transitions. The store
  * (`server/decision-store.ts`) persists what these functions return; the RPCs
@@ -13,6 +15,7 @@
  * `shared/`: Zod and plain values only, no Node or React Native imports.
  */
 import { z } from "zod";
+import { coordinationChangeSchema } from "./coordination";
 
 // ---------------------------------------------------------------------------
 // Vocabulary.
@@ -42,11 +45,63 @@ export type Effect = z.infer<typeof effectSchema>;
 /**
  * Effects whose answer needs the owner's explicit confirmation on the tap
  * (experience concept X-4, owner 2026-09-29: "confirmation only for RELEASE /
- * DATA / SECURITY / COST"). `release` is `publish` and `deploy`; `data` is
- * `real-data` and `migration`.
+ * DATA / SECURITY / COST"): the effects of those classes. `release` is `push`,
+ * `publish` and `deploy`; `data` is `real-data` and `migration`. The source
+ * of `HARD_OWNER_CLASSES` (code review 2026-09-30 §3.5).
  */
-/** Effects of the classes release, data, security and cost (experience concept X-4): an answer granting one needs `confirmed`. A push is a release. */
 export const CONFIRM_EFFECTS: readonly Effect[] = ["push", "publish", "deploy", "real-data", "migration", "security", "cost"];
+
+/**
+ * What a decision is about (autonomy design §B.1, ADR-018), riskiest first:
+ * on a conflict the class earlier in this list wins. The asker proposes one;
+ * the plugin keeps the riskier of the proposal and its declared effects'
+ * classes (`checkedClass`).
+ */
+export const DECISION_CLASSES = [
+  "security",
+  "data",
+  "release",
+  "cost",
+  "dependency",
+  "environment",
+  "scope",
+  "preference",
+  "reversible-technical",
+] as const;
+export const decisionClassSchema = z.enum(DECISION_CLASSES);
+export type DecisionClass = z.infer<typeof decisionClassSchema>;
+
+/** The class each effect implies (§B.1); `none` and `commit` imply none. */
+export const CLASS_OF_EFFECT: Readonly<Record<Effect, DecisionClass | null>> = {
+  none: null,
+  commit: null,
+  push: "release",
+  publish: "release",
+  deploy: "release",
+  "real-data": "data",
+  migration: "data",
+  "dependency-install": "dependency",
+  network: "environment",
+  "outside-workspace": "environment",
+  security: "security",
+  cost: "cost",
+};
+
+/**
+ * The classes only the owner decides (PRD REQ-121 c): never `delegate`, they
+ * pass only through the owner's grant (REQ-112). The classes of
+ * `CONFIRM_EFFECTS` (`CLASS_OF_EFFECT`), in that order: release, data,
+ * security, cost.
+ */
+export const HARD_OWNER_CLASSES: readonly DecisionClass[] = [
+  ...new Set(CONFIRM_EFFECTS.flatMap((effect) => CLASS_OF_EFFECT[effect] ?? [])),
+];
+
+/** Every fallback incident (`f:`) is about the environment (§B.1). */
+export const FALLBACK_DECISION_CLASS: DecisionClass = "environment";
+
+/** The class of a decision with no proposal and no effect that implies one (§B.9). */
+export const DEFAULT_DECISION_CLASS: DecisionClass = "reversible-technical";
 
 export const DECISION_STATUSES = ["open", "needs-confirmation", "answered", "superseded", "withdrawn", "expired"] as const;
 export const decisionStatusSchema = z.enum(DECISION_STATUSES);
@@ -57,19 +112,49 @@ export const UNSETTLED_STATUSES: readonly DecisionStatus[] = ["open", "needs-con
 export const SETTLED_STATUSES: readonly DecisionStatus[] = ["answered", "superseded", "withdrawn", "expired"];
 
 /**
- * Who answered (§A.3): the owner, or the Orchestrator (`bm_decide`, a Worker's
- * question on the project's Autopilot, change-004). Additive: every answer
- * stored before it is the owner's.
+ * Who answered (§A.3, §B.9): the owner; the Orchestrator (`bm_decide`, a
+ * Worker's question on the project's Autopilot, change-004 — kept readable
+ * for those Phase 1 answers); the policy of a `delegate` cell (§B.5); or an
+ * owner precedent (§B.6). Additive: every answer stored before it is the
+ * owner's. `precedent` is written when a decision opens on an active
+ * precedent's subject (`server/precedent-resolve.ts`); `policy` when one opens
+ * in a `delegate` cell whose predictor is `recommended`
+ * (`server/policy-resolve.ts`), or when the Orchestrator decides one in a cell
+ * whose predictor is `orchestrator` (`bm_decide`, predictor `orchestrator`).
+ * The policy never grants a release, data, security or cost effect
+ * (`answerDecision` refuses it).
  */
-export const ANSWER_BY = ["owner", "orchestrator"] as const;
+export const ANSWER_BY = ["owner", "orchestrator", "policy", "precedent"] as const;
 export const answerBySchema = z.enum(ANSWER_BY);
 export type AnswerBy = z.infer<typeof answerBySchema>;
 
 /**
- * Where the answer came from (§A.3): the owner's surface or chat, or
- * `autopilot` — the Orchestrator's answer under the project's Autopilot.
+ * Who predicts the owner's answer (§B.3): the option the asker marked
+ * recommended, or the Orchestrator challenger (`bm_predict`). A cell of the
+ * agreement ledger is per predictor; a `delegate` cell records the predictor
+ * that earned it, and a `policy` answer names it.
  */
-export const ANSWER_VIA = ["inbox", "chat-card", "chat-manager", "chat-worker", "chat-orchestrator", "autopilot"] as const;
+export const PREDICTORS = ["recommended", "orchestrator"] as const;
+export const predictorSchema = z.enum(PREDICTORS);
+export type Predictor = z.infer<typeof predictorSchema>;
+
+/**
+ * How a settled decision was reversed (§B.3): re-asked with the same
+ * `subject` in the same request after it was answered; overridden from the
+ * digest (Inbox → Decided for you → Override); or a bead closed under it
+ * reopened with a reason citing it.
+ */
+export const REVERSAL_KINDS = ["re-asked", "overridden", "reopened"] as const;
+export const reversalKindSchema = z.enum(REVERSAL_KINDS);
+export type ReversalKind = z.infer<typeof reversalKindSchema>;
+
+/**
+ * Where the answer came from (§A.3): the owner's surface or chat, or
+ * `autopilot` — the Orchestrator's answer under the project's Autopilot —, or
+ * `paseo`: a held request (`h:`, §D.2) the owner allowed in Paseo's own
+ * permission prompt or with `paseo permit` (no paseo-bm role can answer one).
+ */
+export const ANSWER_VIA = ["inbox", "chat-card", "chat-manager", "chat-worker", "chat-orchestrator", "autopilot", "paseo"] as const;
 export const answerViaSchema = z.enum(ANSWER_VIA);
 export type AnswerVia = z.infer<typeof answerViaSchema>;
 
@@ -89,12 +174,29 @@ export const MAX_DECISION_TEXT_CHARS = 1000;
 export const MAX_DECISION_LABEL_CHARS = 1000;
 /** Most options on one decision; the same cap as `bm-questions.ts` `MAX_OPTIONS`. */
 export const MAX_DECISION_OPTIONS_COUNT = 8;
+/**
+ * The Orchestrator's own decisions are tighter (`bm_ask_owner`, Orchestrator
+ * design §6B.4): at most this many options, one button each, each label at
+ * most this long, and a recommendation at most this long. With the caps above,
+ * the one set of decision caps (code review 2026-09-30 §3.5): the tool's
+ * schema and keys, and the decisions of older builds in `proposals.json`, read
+ * them.
+ */
+export const MAX_ASK_OWNER_OPTIONS = 5;
+export const MAX_ASK_OWNER_LABEL_CHARS = 80;
+export const MAX_ASK_OWNER_RECOMMENDATION_CHARS = 500;
 /** Longest answer in the owner's own words. */
 export const MAX_ANSWER_WORDS_CHARS = 4000;
 /** Longest reason an answer carries (the Orchestrator's, `bm_decide`). */
 export const MAX_ANSWER_REASON_CHARS = 300;
 /** Longest body of a prepared command; the same cap as a proposal's command. */
 export const MAX_PREPARED_BODY_CHARS = 4000;
+/** Longest reference a reversal keeps: the re-asking decision id, the override id or the reopened bead id. */
+export const MAX_REVERSAL_REF_CHARS = 200;
+/** Most reversals one decision keeps; one more of any kind changes nothing (it is reversed already). */
+export const MAX_DECISION_REVERSALS = 20;
+/** Longest precedent id an answer names. */
+export const MAX_PRECEDENT_ID_CHARS = 128;
 /** A subject slug (§A.5: ≤ 60 characters of `[a-z0-9-]`). */
 export const SUBJECT_PATTERN = /^[a-z0-9-]{1,60}$/;
 /** An option key: a Worker's letter (`a`), or a word for a prepared action (`switch`). */
@@ -103,9 +205,23 @@ export const OPTION_KEY_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
 /**
  * The deterministic id (§A.3): `q:<requestId>:<Qn>` for a Worker question,
  * `o:<uuid>` for an Orchestrator decision, `f:<incidentId>` for a fallback
- * incident. None holds whitespace.
+ * incident, `r:<uuid>` for the owner's override of a decision answered for
+ * them (§B.7, §B.9), `h:<agentId>:<permission request id>` for a held
+ * permission request (§D.2, §D.4). None holds whitespace. A build before
+ * `h:` skips such an entry when it reads the store.
  */
-export const DECISION_ID_PATTERN = /^(?:q:\S+:Q\d{1,3}|o:[A-Za-z0-9-]{1,64}|f:\S{1,128})$/;
+export const DECISION_ID_PATTERN = /^(?:q:\S+:Q\d{1,3}|o:[A-Za-z0-9-]{1,64}|f:\S{1,128}|r:[A-Za-z0-9-]{1,64}|h:[^\s:]{1,128}:\S{1,200})$/;
+
+/** Every override id starts with this (§B.7, §B.9): `r:<uuid>`. */
+export const OVERRIDE_ID_PREFIX = "r:";
+
+/** Every held request's id starts with this (§D.2, §D.4): `h:<agentId>:<requestId>`. */
+export const HELD_ID_PREFIX = "h:";
+
+/** `h:<agentId>:<requestId>`: the decision of a held permission request. */
+export function heldDecisionId(agentId: string, requestId: string): string {
+  return `${HELD_ID_PREFIX}${agentId}:${requestId}`;
+}
 
 // ---------------------------------------------------------------------------
 // Schema.
@@ -132,8 +248,75 @@ export const preparedActionSchema = z.discriminatedUnion("kind", [
     action: z.enum(["switch", "wait", "resend", "dismiss"]),
     target: z.string().min(1),
   }),
+  /**
+   * A change of the owner's settings (autonomy design §G.4), applied by the
+   * plugin only on the owner's own answer (`carriesPreparedChange`). Each is
+   * about the decision's own project; the owner's checks run again when it is
+   * applied (`server/prepared-changes.ts`).
+   */
+  /** An owner precedent (§B.6): `project` holds in the decision's project, `all` in every project. */
+  z.object({
+    kind: z.literal("precedent.save"),
+    scope: z.enum(["project", "all"]),
+    subject: z.string().regex(SUBJECT_PATTERN),
+    text: z.string().min(1).max(MAX_DECISION_LABEL_CHARS),
+    expiresInDays: z.number().int().positive().optional(),
+  }),
+  /** One autonomy cell of the decision's project (§B.2); the modes are `shared/autonomy.ts` `AUTONOMY_MODES`, which imports this module. */
+  z.object({
+    kind: z.literal("autonomy.set"),
+    class: decisionClassSchema,
+    mode: z.enum(["owner", "shadow", "delegate"]),
+    predictor: predictorSchema.optional(),
+  }),
+  /** One Settings → Coordination setting (§G.7), as `coordination.set` takes it. */
+  z.object({
+    kind: z.literal("coordination.set"),
+    change: coordinationChangeSchema,
+  }),
+  /**
+   * Answers a held permission request (§D.2): a plain allow-once, or a deny.
+   * `requestId` is Paseo's permission request id, not a paseo-bm request.
+   */
+  z.object({
+    kind: z.literal("permission"),
+    agentId: z.string().min(1),
+    requestId: z.string().min(1),
+    allow: z.boolean(),
+  }),
 ]);
 export type PreparedAction = z.infer<typeof preparedActionSchema>;
+
+/**
+ * The prepared changes of the owner's settings (autonomy design §G.4): a
+ * precedent, an autonomy cell, a coordination setting. Unlike a command, the
+ * plugin applies one only on the owner's own answer — never the policy's, a
+ * precedent's or the Orchestrator's (`bm_decide`, `bm_predict`) — so nothing
+ * but the owner ever changes the owner's settings.
+ */
+export const PREPARED_CHANGE_KINDS = ["precedent.save", "autonomy.set", "coordination.set"] as const;
+export type PreparedChangeKind = (typeof PREPARED_CHANGE_KINDS)[number];
+export type PreparedChange = Extract<PreparedAction, { kind: PreparedChangeKind }>;
+
+/** True for a prepared change of the owner's settings (`PREPARED_CHANGE_KINDS`). */
+export function isPreparedChange(action: PreparedAction | undefined): action is PreparedChange {
+  return action !== undefined && (PREPARED_CHANGE_KINDS as readonly string[]).includes(action.kind);
+}
+
+/**
+ * True when an option of the decision carries a prepared change: then only
+ * the owner answers it (`answerDecision`, `decideRefusalOf`,
+ * `predictionRefusalOf`, `recommendedDelegationOf`, `precedentResolutionOf`,
+ * `resolveAtOpen`).
+ */
+export function carriesPreparedChange(decision: Pick<Decision, "options">): boolean {
+  return decision.options.some((option) => isPreparedChange(option.action));
+}
+
+/** Why a decision that carries a prepared change is only the owner's, for every refusal of another answerer. */
+export function preparedChangeRefusalText(decisionId: string): string {
+  return `decision ${decisionId} carries a prepared change of the owner's settings; only the owner answers it`;
+}
 
 export const decisionOptionSchema = z.object({
   key: z.string().regex(OPTION_KEY_PATTERN),
@@ -153,23 +336,56 @@ export const decisionAnswerSchema = z
     /** The owner's own words, or null. */
     words: z.string().min(1).max(MAX_ANSWER_WORDS_CHARS).nullable(),
     at: isoTimeSchema,
-    /** Why this answer, in one line: the Orchestrator's (`bm_decide`); absent on the owner's answers. */
+    /** Why this answer, in one line: the Orchestrator's (`bm_decide`), the policy's or the precedent's (`precedentReasonOf`); absent on the owner's answers. */
     reason: z.string().min(1).max(MAX_ANSWER_REASON_CHARS).optional(),
+    /** A delegated answer's class (§B.5, §B.7): the cell that answered, for the digest. */
+    class: decisionClassSchema.optional(),
+    /** A `policy` answer's predictor: the one that earned the `delegate` cell (§B.4, §B.5). */
+    predictor: predictorSchema.optional(),
+    /** A `precedent` answer's precedent (§B.6), cited on the digest. */
+    precedentId: z.string().min(1).max(MAX_PRECEDENT_ID_CHARS).optional(),
   })
   // Both null: the owner confirmed an answer typed in a chat (`decisions.confirm`),
   // whose text the plugin did not parse.
   .refine((answer) => answer.optionKey === null || answer.words === null, { message: "an answer is an option or words, not both" })
-  // Only options, never own words, for the Orchestrator (change-004).
-  .refine((answer) => answer.by === "owner" || (answer.optionKey !== null && answer.words === null), { message: "the Orchestrator answers with an option" })
-  .refine((answer) => answer.via !== "autopilot" || answer.by === "orchestrator", { message: "only the Orchestrator answers on Autopilot" });
-export type DecisionAnswer = z.infer<typeof decisionAnswerSchema>;
+  // Only options, never own words, for the Orchestrator (change-004) and the policy (§B.5).
+  // A precedent may answer in the owner's own standing words (§B.9).
+  .refine((answer) => answer.by === "owner" || answer.by === "precedent" || (answer.optionKey !== null && answer.words === null), {
+    message: "the Orchestrator and the policy answer with an option",
+  })
+  .refine((answer) => answer.via !== "autopilot" || answer.by === "orchestrator" || answer.by === "policy", { message: "only an agent answers on Autopilot" })
+  .refine((answer) => answer.by !== "policy" || answer.predictor !== undefined, { message: "a policy answer names its predictor" })
+  .refine((answer) => answer.by !== "precedent" || answer.precedentId !== undefined, { message: "a precedent answer names its precedent" });
+
+/**
+ * What was predicted for a decision (§B.3), stored on the record: the option
+ * marked recommended, set when it opens (null with none recommended), and the
+ * Orchestrator challenger's prediction (`bm_predict`), null until it gives
+ * one. The owner never sees `orchestrator` before answering
+ * (`ownerViewOfDecision`).
+ */
+export const decisionPredictionSchema = z.object({
+  recommended: z.object({ optionKey: z.string().regex(OPTION_KEY_PATTERN) }).nullable(),
+  orchestrator: z
+    .object({ optionKey: z.string().regex(OPTION_KEY_PATTERN), reason: z.string().min(1).max(MAX_ANSWER_REASON_CHARS), at: isoTimeSchema })
+    .nullable(),
+});
+export type DecisionPrediction = z.infer<typeof decisionPredictionSchema>;
+
+/** One reversal of an answered decision (§B.3): its kind, when, and what reversed it. */
+export const decisionReversalSchema = z.object({
+  kind: reversalKindSchema,
+  at: isoTimeSchema,
+  /** `re-asked`: the new decision's id; `overridden`: the override's id; `reopened`: the bead reopened. */
+  ref: z.string().min(1).max(MAX_REVERSAL_REF_CHARS),
+});
+export type DecisionReversal = z.infer<typeof decisionReversalSchema>;
 
 export const decisionGrantSchema = z.object({
   effects: z.array(effectSchema).min(1),
   expiresAt: isoTimeSchema,
   usedAt: isoTimeSchema.nullable(),
 });
-export type DecisionGrant = z.infer<typeof decisionGrantSchema>;
 
 export const decisionDeliverySchema = z.object({
   /** The agent the answer or action went to. */
@@ -193,6 +409,12 @@ export const decisionSchema = z
     round: z.number().int().nonnegative().nullable(),
     question: z.string().min(1).max(MAX_DECISION_TEXT_CHARS),
     subject: z.string().regex(SUBJECT_PATTERN).nullable(),
+    /**
+     * What it is about (§B.1): the asker's proposal, raised to its effects'
+     * class. Absent on a decision stored before classes, which stays
+     * `version: 1`: read it with `decisionClassOf`.
+     */
+    class: decisionClassSchema.optional(),
     options: z.array(decisionOptionSchema).max(MAX_DECISION_OPTIONS_COUNT),
     status: decisionStatusSchema,
     /** When the decision left `open`/`needs-confirmation` for good; null while unsettled. */
@@ -204,6 +426,14 @@ export const decisionSchema = z
     delivery: decisionDeliverySchema.nullable(),
     supersedes: z.string().regex(DECISION_ID_PATTERN).nullable(),
     supersededBy: z.string().regex(DECISION_ID_PATTERN).nullable(),
+    /**
+     * The predictions of the agreement ledger (§B.3). Additive: absent on a
+     * decision opened before it, which the ledger leaves out (change-007 §3.3:
+     * no prediction is read back from the options afterwards).
+     */
+    prediction: decisionPredictionSchema.optional(),
+    /** How the answer was reversed (§B.3); additive, absent or empty while it stands. */
+    reversals: z.array(decisionReversalSchema).max(MAX_DECISION_REVERSALS).optional(),
   })
   .superRefine((decision, context) => {
     const issue = (message: string) => context.addIssue({ code: "custom", message });
@@ -224,6 +454,9 @@ export const decisionSchema = z
     if (decision.answer?.optionKey != null && !decision.options.some((option) => option.key === decision.answer?.optionKey)) {
       issue("the answer names one of the options");
     }
+    const predicted = [decision.prediction?.recommended?.optionKey, decision.prediction?.orchestrator?.optionKey];
+    if (predicted.some((key) => key != null && !decision.options.some((option) => option.key === key))) issue("a prediction names one of the options");
+    if ((decision.reversals?.length ?? 0) > 0 && decision.status !== "answered") issue("only an answered decision is reversed");
   });
 export type Decision = z.infer<typeof decisionSchema>;
 
@@ -263,10 +496,73 @@ export function needsOwnerConfirmation(effects: readonly Effect[]): boolean {
   return effects.some((effect) => CONFIRM_EFFECTS.includes(effect));
 }
 
-/** What kind of asker the id names, or null for an id that is not a decision id. */
-export function decisionKindOf(id: string): "question" | "orchestrator" | "fallback" | null {
+/** The riskier of two classes: the one earlier in `DECISION_CLASSES`. */
+export function riskierClass(a: DecisionClass, b: DecisionClass): DecisionClass {
+  return DECISION_CLASSES.indexOf(a) <= DECISION_CLASSES.indexOf(b) ? a : b;
+}
+
+/** The riskiest class these effects imply, or null when none implies one (`none`, `commit`, nothing). */
+export function classOfEffects(effects: readonly Effect[]): DecisionClass | null {
+  let riskiest: DecisionClass | null = null;
+  for (const effect of effects) {
+    const implied = CLASS_OF_EFFECT[effect];
+    if (implied !== null) riskiest = riskiest === null ? implied : riskierClass(riskiest, implied);
+  }
+  return riskiest;
+}
+
+/**
+ * The class the plugin keeps (§B.1): the riskier of the asker's proposal and
+ * the class of every declared effect — so an option that pushes makes the
+ * decision `release` whatever was proposed. With neither, `reversible-technical`.
+ */
+export function checkedClass(proposed: DecisionClass | null | undefined, effects: readonly Effect[]): DecisionClass {
+  const implied = classOfEffects(effects);
+  if (proposed == null) return implied ?? DEFAULT_DECISION_CLASS;
+  return implied === null ? proposed : riskierClass(proposed, implied);
+}
+
+/**
+ * A stored decision's class (§B.1, §B.9): its own, checked again against its
+ * options' effects. One stored before classes reads as a fallback incident's
+ * `environment` when it is one, else as its effects' class, else
+ * `reversible-technical`.
+ */
+export function decisionClassOf(decision: Pick<Decision, "id" | "options" | "class">): DecisionClass {
+  const own = decision.class ?? (decisionKindOf(decision.id) === "fallback" ? FALLBACK_DECISION_CLASS : null);
+  return checkedClass(own, declaredEffects(decision));
+}
+
+/** True for a class only the owner decides (`HARD_OWNER_CLASSES`). */
+export function isHardOwnerClass(decisionClass: DecisionClass): boolean {
+  return HARD_OWNER_CLASSES.includes(decisionClass);
+}
+
+/**
+ * What kind of asker the id names, or null for an id that is not a decision
+ * id. `override` is the owner's correction of a decision answered for them
+ * (§B.7): never answered by a precedent, the policy or the Orchestrator.
+ * `held` is a permission request the action boundary held (§D.2): answered
+ * by the owner only (the policy only at open, never a precedent or the
+ * Orchestrator), delivered as a `permission` answer.
+ */
+export function decisionKindOf(id: string): "question" | "orchestrator" | "fallback" | "override" | "held" | null {
   if (!DECISION_ID_PATTERN.test(id)) return null;
-  return id.startsWith("q:") ? "question" : id.startsWith("o:") ? "orchestrator" : "fallback";
+  if (id.startsWith(HELD_ID_PREFIX)) return "held";
+  return id.startsWith("q:") ? "question" : id.startsWith("o:") ? "orchestrator" : id.startsWith(OVERRIDE_ID_PREFIX) ? "override" : "fallback";
+}
+
+/**
+ * The kind whose delivery a decision's answer takes (§A.6): its own; an
+ * override's (§B.7) is the kind of the decision it overrides (`supersedes`),
+ * so the corrected answer reaches the same agent. Null for an override that
+ * names no such decision.
+ */
+export function deliveryKindOf(decision: Pick<Decision, "id" | "supersedes">): "question" | "orchestrator" | "fallback" | "held" | null {
+  const kind = decisionKindOf(decision.id);
+  if (kind !== "override") return kind;
+  const overridden = decision.supersedes === null ? null : decisionKindOf(decision.supersedes);
+  return overridden === "override" ? null : overridden;
 }
 
 /** `q:<requestId>:<Qn>`. */
@@ -274,9 +570,23 @@ export function questionDecisionId(requestId: string, questionId: string): strin
   return `q:${requestId}:${questionId}`;
 }
 
-/** Epoch milliseconds of an ISO time; NaN when it does not parse. */
-function timeOf(iso: string): number {
-  return Date.parse(iso);
+/**
+ * The prediction a decision opens with (§B.3): the option marked recommended
+ * (null when none is), and no challenger prediction yet.
+ */
+export function openingPrediction(options: readonly Pick<DecisionOption, "key" | "recommended">[]): DecisionPrediction {
+  const recommended = options.find((option) => option.recommended);
+  return { recommended: recommended === undefined ? null : { optionKey: recommended.key }, orchestrator: null };
+}
+
+/**
+ * A decision as the owner's screens may read it (§B.3): while it can still be
+ * answered, the challenger's prediction is left out, so the owner never sees it
+ * before answering. A settled decision is returned as it is.
+ */
+export function ownerViewOfDecision(decision: Decision): Decision {
+  if (!isAnswerable(decision) || decision.prediction?.orchestrator == null) return decision;
+  return { ...decision, prediction: { ...decision.prediction, orchestrator: null } };
 }
 
 // ---------------------------------------------------------------------------
@@ -300,7 +610,9 @@ export type TransitionRefusal =
   /** The grant's hour is over. */
   | "grant-expired"
   /** An effect asked for is not in the grant. */
-  | "effect-not-granted";
+  | "effect-not-granted"
+  /** A reversal names a decision that was never answered. */
+  | "not-answered";
 
 export type TransitionResult =
   | { ok: true; decision: Decision }
@@ -310,19 +622,61 @@ function refuse(refusal: TransitionRefusal, message: string): TransitionResult {
   return { ok: false, refusal, message };
 }
 
-/** Who answered, for a refusal: "the owner" or "the Orchestrator". */
+const ANSWERED_BY_TEXT: Readonly<Record<AnswerBy, string>> = {
+  owner: "the owner",
+  orchestrator: "the Orchestrator",
+  policy: "the policy",
+  precedent: "an owner precedent",
+};
+
+/** Who answered, for a refusal: "the owner", "the Orchestrator", "the policy" or "an owner precedent". */
 export function answeredByText(by: AnswerBy): string {
-  return by === "orchestrator" ? "the Orchestrator" : "the owner";
+  return ANSWERED_BY_TEXT[by];
+}
+
+/**
+ * What a refusal says of a decision in each status but `open`, in its caller's
+ * words: who answered it and when, what superseded it, or the status itself.
+ */
+export interface NotOpenWords {
+  needsConfirmation: string;
+  answered: (by: string, at: string | null) => string;
+  superseded: (by: string | null) => string;
+  /** Withdrawn or expired. */
+  closed: (status: DecisionStatus) => string;
+}
+
+/**
+ * Why a decision is not `open`, in the caller's words, or null while it is:
+ * the one ladder over a decision's status that every refusal goes down (code
+ * review 2026-09-30 §3.5) — the transitions (`refuseSettled`), `bm_decide`
+ * and `bm_predict` (`shared/autonomy.ts`) and a command's `BM-ANSWERS` line
+ * (`server/command-authority.ts`). Pure.
+ */
+export function notOpenRefusalOf(decision: Pick<Decision, "status" | "answer" | "settledAt" | "supersededBy">, words: NotOpenWords): string | null {
+  switch (decision.status) {
+    case "open":
+      return null;
+    case "needs-confirmation":
+      return words.needsConfirmation;
+    case "answered":
+      return words.answered(answeredByText(decision.answer?.by ?? "owner"), decision.answer?.at ?? decision.settledAt);
+    case "superseded":
+      return words.superseded(decision.supersededBy);
+    default:
+      return words.closed(decision.status);
+  }
 }
 
 function refuseSettled(decision: Decision): TransitionResult {
-  const by =
-    decision.status === "superseded" && decision.supersededBy !== null
-      ? ` by ${decision.supersededBy}`
-      : decision.status === "answered" && decision.answer !== null
-        ? ` by ${answeredByText(decision.answer.by)}`
-        : "";
-  return refuse("settled", `decision ${decision.id} is ${decision.status}${by}; it can no longer be answered`);
+  const cannot = (by: string | null) => `decision ${decision.id} is ${decision.status}${by === null ? "" : ` by ${by}`}; it can no longer be answered`;
+  const message = notOpenRefusalOf(decision, {
+    needsConfirmation: cannot(null),
+    answered: (by) => cannot(by),
+    superseded: (by) => cannot(by),
+    closed: () => cannot(null),
+  });
+  return refuse("settled", message ?? cannot(null));
 }
 
 export interface AnswerInput {
@@ -331,10 +685,20 @@ export interface AnswerInput {
   words?: string | null;
   /** The time of the answer, ISO. */
   at: string;
-  /** Who answers; the owner by default. The Orchestrator answers only with an option. */
-  by?: AnswerBy;
+  /**
+   * Who answers; the owner by default. The policy answers only with an
+   * option. Never `orchestrator`: that is only read, in answers stored before
+   * the Orchestrator decided through the policy (§B.9).
+   */
+  by?: Exclude<AnswerBy, "orchestrator">;
   /** Why, in one line (trimmed, at most `MAX_ANSWER_REASON_CHARS`); none by default. */
   reason?: string | null;
+  /** A delegated answer's class (§B.5); none by default. */
+  class?: DecisionClass;
+  /** A `policy` answer's predictor (required for it, §B.5). */
+  predictor?: Predictor;
+  /** A `precedent` answer's precedent (required for it, §B.6). */
+  precedentId?: string;
 }
 
 /**
@@ -342,19 +706,41 @@ export interface AnswerInput {
  * (trimmed). The answer grants the chosen option's declared effects — or, for
  * own words, every effect the decision declares — for one use until
  * `at + GRANT_TTL_MS`; an answer that grants nothing carries no grant. The
- * Orchestrator's answer (`by: orchestrator`) is always an option, grants what
- * the owner's choice of it would, and keeps its reason.
+ * policy's answer (`by: policy`, §B.5) is always an option, keeps its reason,
+ * names its predictor and is refused for an option allowing a release, data,
+ * security or cost effect. A new `by: orchestrator` answer is refused: the
+ * Orchestrator decides through the policy (`bm_decide`, predictor
+ * `orchestrator`), and its Phase 1 answers are only read. A decision that
+ * carries a prepared change of the owner's settings (§G.4) takes only the
+ * owner's answer: the policy's and a precedent's are refused.
  */
 export function answerDecision(decision: Decision, input: AnswerInput): TransitionResult {
   if (!isAnswerable(decision)) return refuseSettled(decision);
+  // `AnswerInput` leaves it out; refused at run time too, for a caller the compiler did not check.
+  if ((input.by as AnswerBy | undefined) === "orchestrator") {
+    return refuse("invalid-answer", "the Orchestrator no longer answers a decision itself; it decides through the policy (bm_decide)");
+  }
   const by = input.by ?? "owner";
+  // Autonomy design §G.4: a prepared change of the owner's settings is the owner's alone, whoever else would answer.
+  if (by !== "owner" && carriesPreparedChange(decision)) return refuse("invalid-answer", preparedChangeRefusalText(decision.id));
+  // Autonomy design §D.2: a held request is allowed or denied, by the owner (the policy only as it opens); never in words, never by a precedent.
+  if (decisionKindOf(decision.id) === "held") {
+    if (input.words != null) return refuse("invalid-answer", `decision ${decision.id} is a held request; answer it Allow or Deny`);
+    if (by === "precedent") return refuse("invalid-answer", `decision ${decision.id} is a held request; a precedent never answers it`);
+  }
   const optionKey = input.optionKey ?? null;
   const words = input.words == null ? null : input.words.trim();
   const reason = input.reason == null ? null : input.reason.trim();
   if ((optionKey === null) === (words === null)) {
     return refuse("invalid-answer", "an answer names exactly one option or gives the owner's own words");
   }
-  if (by === "orchestrator" && optionKey === null) return refuse("invalid-answer", "the Orchestrator answers with one of the options, never in its own words");
+  if (by === "policy" && optionKey === null) return refuse("invalid-answer", "the policy answers with one of the options");
+  if (by === "policy" && input.predictor === undefined) return refuse("invalid-answer", "a policy answer names the predictor that earned its cell");
+  const precedentId = input.precedentId?.trim();
+  if (precedentId !== undefined && (precedentId === "" || precedentId.length > MAX_PRECEDENT_ID_CHARS)) {
+    return refuse("invalid-answer", `a precedent id must be 1–${MAX_PRECEDENT_ID_CHARS} characters`);
+  }
+  if (by === "precedent" && precedentId === undefined) return refuse("invalid-answer", "a precedent answer names its precedent");
   if (words !== null && (words.length === 0 || words.length > MAX_ANSWER_WORDS_CHARS)) {
     return refuse("invalid-answer", `the owner's words must be 1–${MAX_ANSWER_WORDS_CHARS} characters`);
   }
@@ -365,7 +751,12 @@ export function answerDecision(decision: Decision, input: AnswerInput): Transiti
     return refuse("unknown-option", `decision ${decision.id} has no option ${JSON.stringify(optionKey)}`);
   }
   const effects = effectsOfAnswer(decision, { optionKey });
-  const expiresAt = new Date(timeOf(input.at) + GRANT_TTL_MS).toISOString();
+  // A second line under the class (§B.5): the policy never grants what only the owner's answer may (X-4, REQ-121 c).
+  if (by === "policy" && needsOwnerConfirmation(effects)) {
+    const held = effects.filter((effect) => CONFIRM_EFFECTS.includes(effect));
+    return refuse("invalid-answer", `the policy never answers with an option that allows ${held.join(", ")}; only the owner does`);
+  }
+  const expiresAt = new Date(Date.parse(input.at) + GRANT_TTL_MS).toISOString();
   return {
     ok: true,
     decision: {
@@ -373,7 +764,17 @@ export function answerDecision(decision: Decision, input: AnswerInput): Transiti
       status: "answered",
       settledAt: input.at,
       needsConfirmation: null,
-      answer: { by, via: input.via, optionKey, words, at: input.at, ...(reason === null ? {} : { reason }) },
+      answer: {
+        by,
+        via: input.via,
+        optionKey,
+        words,
+        at: input.at,
+        ...(reason === null ? {} : { reason }),
+        ...(input.class === undefined ? {} : { class: input.class }),
+        ...(input.predictor === undefined ? {} : { predictor: input.predictor }),
+        ...(precedentId === undefined ? {} : { precedentId }),
+      },
       grant: effects.length === 0 ? null : { effects, expiresAt, usedAt: null },
     },
   };
@@ -437,6 +838,25 @@ export function expireDecision(decision: Decision, input: { at: string }): Trans
 }
 
 /**
+ * Records that an answered decision was reversed (§B.3) — the one function
+ * every reversal goes through: the materialiser's re-ask (`re-asked`), the
+ * digest's Override (`overridden`) and a cited `br reopen` (`reopened`).
+ * Idempotent: the same kind and `ref` again, or one more past
+ * `MAX_DECISION_REVERSALS`, returns the decision unchanged. A decision that was
+ * never answered has nothing to reverse.
+ */
+export function recordReversal(decision: Decision, reversal: DecisionReversal): TransitionResult {
+  if (decision.status !== "answered") {
+    return refuse("not-answered", `decision ${decision.id} is ${decision.status}; only an answered decision can be reversed`);
+  }
+  const ref = reversal.ref.trim();
+  if (ref === "" || ref.length > MAX_REVERSAL_REF_CHARS) return refuse("invalid-answer", `a reversal's reference must be 1–${MAX_REVERSAL_REF_CHARS} characters`);
+  const kept = decision.reversals ?? [];
+  if (kept.length >= MAX_DECISION_REVERSALS || kept.some((entry) => entry.kind === reversal.kind && entry.ref === ref)) return { ok: true, decision };
+  return { ok: true, decision: { ...decision, reversals: [...kept, { kind: reversal.kind, at: reversal.at, ref }] } };
+}
+
+/**
  * Why the decision's grant does not cover `effects` at `at`, or null when it
  * does: the grant is unused, `at` is before `expiresAt`, and every real effect
  * asked for is granted.
@@ -449,8 +869,8 @@ export function grantRefusal(
   const grant = decision.grant;
   if (grant === null) return { refusal: "no-grant", message: `decision ${decision.id} granted nothing` };
   if (grant.usedAt !== null) return { refusal: "grant-used", message: `the grant of decision ${decision.id} was used at ${grant.usedAt}` };
-  const now = timeOf(at);
-  const expires = timeOf(grant.expiresAt);
+  const now = Date.parse(at);
+  const expires = Date.parse(grant.expiresAt);
   if (Number.isNaN(now) || Number.isNaN(expires) || now >= expires) {
     return { refusal: "grant-expired", message: `the grant of decision ${decision.id} expired at ${grant.expiresAt}` };
   }
@@ -459,11 +879,6 @@ export function grantRefusal(
     return { refusal: "effect-not-granted", message: `decision ${decision.id} did not grant ${missing.join(", ")}` };
   }
   return null;
-}
-
-/** True when the grant covers `effects` at `at` (see `grantRefusal`). */
-export function grantCovers(decision: Pick<Decision, "id" | "grant">, effects: readonly Effect[], at: string): boolean {
-  return grantRefusal(decision, effects, at) === null;
 }
 
 /** Spends the grant on `effects` at `at`: one use, within its hour, only effects it names. */

@@ -7,7 +7,8 @@
  * to the workspace's Beads Manager; this screen never writes the bead store.
  *
  * The overview figures (status, progress, by type, by priority, time) moved to
- * Insights: `BeadsOverviewSection` draws them from `beadsOverview`.
+ * Insights: `BeadsFigures` (`insights.tsx`) draws them from `beadsOverview`,
+ * the one component that does (code review 2026-09-30 §5).
  *
  * Client rules: React Native primitives only, colours from `theme.colors`, no
  * Node import, no `server/` import.
@@ -34,7 +35,6 @@ import {
   beadResultKey,
   beadsOverview,
   closedBeadsVisibility,
-  type BeadsOverview,
   doneText,
   kanbanColumns,
   kanbanLayout,
@@ -48,21 +48,23 @@ import {
   type BeadFilter,
   type StatusBucket,
 } from "./beads-model";
-import { dashboardStyles, toneColor, type Badge } from "./dashboard-model";
-import { errorMessageOf } from "./launch-manager";
+import { dashboardStyles } from "./styles";
+import { toneColor, type Badge } from "./tone";
+import { errorMessageOf } from "./errors";
 import {
-  BarChart,
   BeadRowCard,
+  Button,
   Chip,
   KanbanBoard,
   RoleMark,
-  StatCards,
   StatusTabs,
+  ToneText,
   WorkspaceScreenHeader,
   type Styles,
   type Theme,
   type WorkspaceScreenProps,
 } from "./ui";
+import { localTimeText } from "./format";
 
 const facetText = (value: string) => value.replace("in_progress", "in progress");
 
@@ -166,13 +168,14 @@ export function BeadDetailPanel({
   };
 
   const full = detail.data?.bead;
-  const work = workSummary(bead, new Date());
+  const now = new Date();
+  const work = workSummary(bead, now);
   const spec = pending === null ? null : actionSpec(pending, bead);
   return (
     <View style={{ gap: 6, paddingTop: 6 }}>
       {detail.isPending ? <ActivityIndicator color={styles.spinner.color} /> : null}
       {detail.isError ? (
-        <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{errorMessageOf(detail.error)}</Text>
+        <ToneText tone="danger" styles={styles} theme={theme}>{errorMessageOf(detail.error)}</ToneText>
       ) : null}
       {full === undefined ? null : (
         <>
@@ -183,9 +186,9 @@ export function BeadDetailPanel({
           </View>
           <Text style={styles.body}>
             {[
-              full.createdAt === null ? null : `created ${full.createdAt.slice(0, 16).replace("T", " ")}`,
-              full.updatedAt === null ? null : `updated ${full.updatedAt.slice(0, 16).replace("T", " ")}`,
-              full.closedAt === null ? null : `closed ${full.closedAt.slice(0, 16).replace("T", " ")}`,
+              full.createdAt === null ? null : `created ${localTimeText(new Date(full.createdAt), now)}`,
+              full.updatedAt === null ? null : `updated ${localTimeText(new Date(full.updatedAt), now)}`,
+              full.closedAt === null ? null : `closed ${localTimeText(new Date(full.closedAt), now)}`,
               full.parentId === null ? null : `parent ${full.parentId}`,
               full.blockedBy.length === 0 ? null : `blocked by ${full.blockedBy.join(", ")}`,
               full.children.length === 0 ? null : `${full.children.length} child bead(s)`,
@@ -205,13 +208,13 @@ export function BeadDetailPanel({
                 </Text>
               ))}
               {work.agentId !== null && navigation?.openAgent !== undefined ? (
-                <Pressable
-                  accessibilityRole="button"
+                <Button
+                  label="Open the Worker"
+                  kind="secondary"
                   onPress={() => navigation.openAgent({ agentId: work.agentId! })}
-                  style={[styles.secondaryButton, { alignSelf: "flex-start" }]}
-                >
-                  <Text style={styles.secondaryButtonText}>Open the Worker</Text>
-                </Pressable>
+                  style={{ alignSelf: "flex-start" }}
+                  styles={styles}
+                />
               ) : null}
             </View>
           )}
@@ -228,15 +231,15 @@ export function BeadDetailPanel({
 
       {result === null ? null : (
         <View style={{ gap: 4 }}>
-          <Text style={[styles.body, { color: toneColor(theme, result.tone) }]}>{result.text}</Text>
+          <ToneText tone={result.tone} styles={styles} theme={theme}>{result.text}</ToneText>
           {result.managerId !== null && navigation?.openAgent !== undefined ? (
-            <Pressable
-              accessibilityRole="button"
+            <Button
+              label="Open the Beads Manager"
+              kind="secondary"
               onPress={() => navigation.openAgent({ agentId: result.managerId! })}
-              style={[styles.secondaryButton, { alignSelf: "flex-start" }]}
-            >
-              <Text style={styles.secondaryButtonText}>Open the Beads Manager</Text>
-            </Pressable>
+              style={{ alignSelf: "flex-start" }}
+              styles={styles}
+            />
           ) : null}
         </View>
       )}
@@ -246,18 +249,17 @@ export function BeadDetailPanel({
           {actionsFor(bead).map((action) => {
             const label = actionSpec(action, bead);
             return (
-              <Pressable
+              <Button
                 key={action}
-                accessibilityRole="button"
+                label={label.label}
+                kind={label.danger ? "danger" : "primary"}
                 disabled={busy}
                 onPress={() => {
                   setResult(null);
                   setPending(action);
                 }}
-                style={label.danger ? styles.dangerButton : styles.button}
-              >
-                <Text style={label.danger ? styles.dangerButtonText : styles.buttonText}>{label.label}</Text>
-              </Pressable>
+                styles={styles}
+              />
             );
           })}
         </View>
@@ -267,50 +269,20 @@ export function BeadDetailPanel({
           <Text style={styles.body}>{spec.body}</Text>
           <View style={styles.chipRow}>
             {/* Cancel first: the safe choice is the one under the thumb. */}
-            <Pressable accessibilityRole="button" onPress={() => setPending(null)} style={styles.secondaryButton}>
-              <Text style={styles.secondaryButtonText}>No, cancel</Text>
-            </Pressable>
-            <Pressable
-              accessibilityRole="button"
+            <Button label="No, cancel" kind="secondary" onPress={() => setPending(null)} styles={styles} />
+            <Button
+              label={busy ? "Sending…" : spec.confirmLabel}
+              kind={spec.danger ? "danger" : "primary"}
               disabled={busy}
               onPress={() => {
                 void confirm(pending!);
               }}
-              style={spec.danger ? styles.dangerButton : styles.button}
-            >
-              <Text style={spec.danger ? styles.dangerButtonText : styles.buttonText}>
-                {busy ? "Sending…" : spec.confirmLabel}
-              </Text>
-            </Pressable>
+              styles={styles}
+            />
           </View>
         </View>
       )}
     </View>
-  );
-}
-
-/**
- * The overview figures of a workspace's beads — status, progress (epics left
- * out), by type, by priority, time — for Insights (experience concept §4.3).
- * Hook-free: the caller reads `beads.list` and builds `beadsOverview`.
- */
-export function BeadsOverviewSection({ overview, styles }: { overview: BeadsOverview; styles: Styles }) {
-  return (
-    <>
-      <StatCards cards={overview.status} styles={styles} />
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Progress</Text>
-        <View style={styles.barTrack}>
-          <View style={[styles.barFill, { width: `${Math.round(overview.progress.share * 100)}%` }]} />
-        </View>
-        <Text style={styles.body}>{overview.progress.label}</Text>
-      </View>
-      <View style={styles.cards}>
-        <BarChart title="By type" bars={overview.byType} styles={styles} labelWidth={70} />
-        <BarChart title="By priority" bars={overview.byPriority} styles={styles} labelWidth={70} />
-      </View>
-      <StatCards cards={overview.timing} styles={styles} />
-    </>
   );
 }
 
@@ -366,31 +338,28 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
                 {done.text}
               </Text>
             )}
-            <Pressable accessibilityRole="button" accessibilityLabel="Read the beads again" onPress={() => void beads.refetch()} style={styles.secondaryButton}>
-              <Text style={styles.secondaryButtonText}>Refresh</Text>
-            </Pressable>
+            <Button label="Refresh" kind="secondary" accessibilityLabel="Read the beads again" onPress={() => void beads.refetch()} styles={styles} />
           </>
         }
       />
 
       {beads.isPending ? <ActivityIndicator color={styles.spinner.color} /> : null}
       {beads.isError ? (
-        <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{errorMessageOf(beads.error)}</Text>
+        <ToneText tone="danger" styles={styles} theme={theme}>{errorMessageOf(beads.error)}</ToneText>
       ) : null}
 
       {/* Board header: the count, the filters, and closed beads behind the eye
           (delta 20260925 §3.1; delta 20260918e §4.4 for the eye) */}
       <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
         <Text style={[styles.sectionTitle, { flex: 1 }]}>{`${board.visible} of ${rows.length} beads`}</Text>
-        <Pressable
-          accessibilityRole="button"
+        <Button
+          label={`Filter${filtersOn > 0 ? ` (${filtersOn})` : ""} ${showFilters ? "▾" : "▸"}`}
+          kind="secondary"
           accessibilityLabel={`${showFilters ? "Hide" : "Show"} the filters and the sort${filtersOn > 0 ? `, ${filtersOn} on` : ""}`}
           accessibilityState={{ expanded: showFilters }}
           onPress={() => setShowFilters(!showFilters)}
-          style={styles.secondaryButton}
-        >
-          <Text style={styles.secondaryButtonText}>{`Filter${filtersOn > 0 ? ` (${filtersOn})` : ""} ${showFilters ? "▾" : "▸"}`}</Text>
-        </Pressable>
+          styles={styles}
+        />
         <Pressable
           accessibilityRole="button"
           accessibilityState={{ selected: showClosed }}
@@ -563,9 +532,9 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
             {work === null ? null : (
               <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4 }}>
                 <RoleMark kind="worker" theme={theme} size={16} />
-                <Text style={[styles.body, { flex: 1, color: toneColor(theme, work.tone) }]} numberOfLines={1}>
+                <ToneText tone={work.tone} style={{ flex: 1 }} numberOfLines={1} styles={styles} theme={theme}>
                   {work.headline}
-                </Text>
+                </ToneText>
               </View>
             )}
           </>

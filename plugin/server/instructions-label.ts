@@ -2,8 +2,8 @@
  * Which role instructions an agent was created with (autonomy PRD §11 rule 3,
  * REQ-117; design §A.11, §A.14): `bm.instructions=<first 12 hex digits of the
  * SHA-256 of the role text>`, the role text being `roles/<role>.md` as this
- * build embeds it — never the owner's Additional instructions or the Runtime
- * facts, so editing those does not make an agent outdated.
+ * build embeds it — never the Runtime facts or the owner's precedents, so a
+ * change to those does not make an agent outdated.
  *
  * Paseo fixes an agent's system prompt when it is created, so an agent whose
  * label is missing or holds another hash runs older instructions. There is no
@@ -13,12 +13,12 @@
  * The Orchestrator has carried this label since its design §3.3
  * (`orchestrator-agent.ts`); this module is the one place the hash is made.
  */
+import { createHash } from "node:crypto";
 import type { BmRole } from "./agent-role";
 import { MANAGER_INSTRUCTIONS } from "./manager-instructions";
 import { ORCHESTRATOR_INSTRUCTIONS } from "./orchestrator-instructions";
 import { REVIEWER_INSTRUCTIONS } from "./reviewer-instructions";
 import { WORKER_INSTRUCTIONS } from "./worker-instructions";
-import { extraHashOf } from "./role-extra-hash";
 
 /** The label key. */
 export const INSTRUCTIONS_LABEL = "bm.instructions";
@@ -26,9 +26,9 @@ export const INSTRUCTIONS_LABEL = "bm.instructions";
 /** Hex digits the label keeps, so it stays small. */
 export const INSTRUCTIONS_HASH_LENGTH = 12;
 
-/** The label value for a role text. */
+/** The label value for a role text: lowercase hex SHA-256 of its UTF-8 bytes, cut to `INSTRUCTIONS_HASH_LENGTH`. */
 export function instructionsHashOf(text: string): string {
-  return extraHashOf(text).slice(0, INSTRUCTIONS_HASH_LENGTH);
+  return createHash("sha256").update(text, "utf8").digest("hex").slice(0, INSTRUCTIONS_HASH_LENGTH);
 }
 
 /** The text each role is created with in this build (the same texts `BASE_INSTRUCTIONS` holds). */

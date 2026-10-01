@@ -7,6 +7,7 @@ import {
 import { describeRoles, type RolesConfigPaseo } from "../plugin/server/roles";
 import contribute from "../plugin/index.server";
 import { agentsListRpc, rolesDescribeRpc } from "../plugin/shared/contracts";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 /**
  * WP-112 `agents.list` and `roles.describe` against a fake Paseo SDK. Since
@@ -29,32 +30,14 @@ function agent(overrides: Partial<ListedAgentSnapshot> & { id: string }): Listed
   };
 }
 
-function fakeDirectory(agents: ListedAgentSnapshot[], pageSize = 200) {
-  const filters: unknown[] = [];
-  const paseo: AgentDirectoryPaseo = {
-    agents: {
-      async list({ filter, page }) {
-        filters.push(filter);
-        const matching = agents.filter((a) => filter.includeArchived || !a.archivedAt);
-        const start = page.cursor ? Number(page.cursor) : 0;
-        const slice = matching.slice(start, start + Math.min(pageSize, page.limit));
-        const next = start + slice.length;
-        const hasMore = next < matching.length;
-        return {
-          entries: slice.map((a) => ({ agent: { ...a, labels: { ...a.labels } } })),
-          pageInfo: { hasMore, nextCursor: hasMore ? String(next) : null },
-        };
-      },
-    },
-  };
-  return { paseo, filters };
-}
+/** The shared fake SDK holding these agents, paging `pageSize` at a time; `lists` records each listing. */
+const directory = (agents: ListedAgentSnapshot[], pageSize = 200) => fakePaseo<AgentDirectoryPaseo>({ agents, pageSize });
 
 const t = (minute: number) => `2026-09-15T08:${String(minute).padStart(2, "0")}:00.000Z`;
 
 describe("agents.list — tree", () => {
   it("full tree: Manager → Worker → Reviewer, parent links and fields preserved", async () => {
-    const { paseo, filters } = fakeDirectory([
+    const { paseo, lists } = directory([
       agent({ id: "rev", createdAt: t(3), labels: { "bm.role": "reviewer", "paseo.parent-agent-id": "wrk" } }),
       agent({ id: "mgr", createdAt: t(1), title: "Beads Manager", status: "running", labels: { "bm.role": "manager" } }),
       agent({ id: "wrk", createdAt: t(2), labels: { "bm.role": "worker", "paseo.parent-agent-id": "mgr" } }),
@@ -70,11 +53,11 @@ describe("agents.list — tree", () => {
       ],
     });
     // No label filter (unlabeled children must be reachable), archived excluded.
-    expect(filters).toEqual([{ includeArchived: false }]);
+    expect(lists.map((list) => list.filter)).toEqual([{ includeArchived: false }]);
   });
 
   it("names the agent that replaced one, by its bm.replacedBy label or by a switched incident (delta 20260921 §4.4.8)", async () => {
-    const { paseo } = fakeDirectory([
+    const { paseo } = directory([
       agent({ id: "mgr", createdAt: t(1), labels: { "bm.role": "manager" } }),
       agent({ id: "wrk", createdAt: t(2), labels: { "bm.role": "worker", "paseo.parent-agent-id": "mgr", "bm.replacedBy": "wrk-2" } }),
       agent({ id: "wrk-2", createdAt: t(3), labels: { "bm.role": "worker", "paseo.parent-agent-id": "mgr" } }),
@@ -90,7 +73,7 @@ describe("agents.list — tree", () => {
   });
 
   it("lists the Orchestrator as a paseo-bm agent, by its label or by its provider (orchestrator design §3.2)", async () => {
-    const { paseo } = fakeDirectory([
+    const { paseo } = directory([
       agent({ id: "mgr", createdAt: t(1), labels: { "bm.role": "manager" } }),
       agent({ id: "orc", createdAt: t(2), labels: { "bm.role": "orchestrator" } }),
       agent({ id: "orc-2", createdAt: t(3), provider: "bm-orchestrator/claude-opus-5", labels: {} }),
@@ -104,7 +87,7 @@ describe("agents.list — tree", () => {
   });
 
   it("agent with missing or foreign bm.role label: role unknown, no error", async () => {
-    const { paseo } = fakeDirectory([
+    const { paseo } = directory([
       agent({ id: "mgr", createdAt: t(1), labels: { "bm.role": "manager" } }),
       agent({ id: "wrk", createdAt: t(2), title: null, labels: { "paseo.parent-agent-id": "mgr" } }),
       agent({ id: "rev", createdAt: t(3), labels: { "paseo.parent-agent-id": "wrk" } }),
@@ -124,7 +107,7 @@ describe("agents.list — tree", () => {
   });
 
   it("a Manager started outside Beads Manager (no labels, bm-manager provider) is a manager root, labelled: false (delta 20260918g)", async () => {
-    const { paseo } = fakeDirectory([
+    const { paseo } = directory([
       agent({ id: "user-mgr", createdAt: t(1), provider: "bm-manager/claude-opus-5", labels: {} }),
       agent({ id: "wrk", createdAt: t(2), provider: "bm-worker/claude-opus-5", labels: { "bm.role": "worker", "paseo.parent-agent-id": "user-mgr" } }),
       agent({ id: "plain", createdAt: t(3), provider: "claude", labels: {} }),
@@ -139,7 +122,7 @@ describe("agents.list — tree", () => {
   });
 
   it("orphaned Worker (Manager deleted or archived) still listed as a root with its Reviewer", async () => {
-    const { paseo } = fakeDirectory([
+    const { paseo } = directory([
       agent({ id: "mgr-archived", createdAt: t(0), archivedAt: t(5), labels: { "bm.role": "manager" } }),
       agent({ id: "wrk-1", createdAt: t(1), labels: { "bm.role": "worker", "paseo.parent-agent-id": "mgr-deleted" } }),
       agent({ id: "wrk-2", createdAt: t(2), labels: { "bm.role": "worker", "paseo.parent-agent-id": "mgr-archived" } }),
@@ -156,12 +139,12 @@ describe("agents.list — tree", () => {
   });
 
   it("empty list", async () => {
-    const { paseo } = fakeDirectory([]);
+    const { paseo } = directory([]);
     expect(await listWorkspaceAgents({ workspaceId: WS }, { paseo })).toEqual({ agents: [] });
   });
 
   it("keeps only this workspace, skips unrelated unlabeled agents, walks every page", async () => {
-    const { paseo, filters } = fakeDirectory(
+    const { paseo, lists } = directory(
       [
         agent({ id: "user-agent", createdAt: t(0) }),
         agent({ id: "other-mgr", createdAt: t(1), workspaceId: "ws-2", labels: { "bm.role": "manager" } }),
@@ -177,7 +160,7 @@ describe("agents.list — tree", () => {
       ["mgr", "closed", null],
       ["wrk", "idle", "mgr"],
     ]);
-    expect(filters).toHaveLength(4);
+    expect(lists).toHaveLength(4);
   });
 });
 
@@ -205,22 +188,15 @@ function daemonConfig(overrides: Partial<DaemonConfig> = {}): DaemonConfig {
   };
 }
 
-function fakeConfig(config: DaemonConfig) {
-  let reads = 0;
-  const paseo: RolesConfigPaseo = {
-    config: {
-      async get() {
-        reads += 1;
-        return { config };
-      },
-    },
-  };
-  return { paseo, reads: () => reads };
+/** The shared fake SDK with this daemon config; `reads()` counts the `config.get` calls. */
+function configured(config: DaemonConfig) {
+  const fake = fakePaseo<RolesConfigPaseo>({ config: config as Record<string, unknown> });
+  return { paseo: fake.paseo, reads: () => fake.api.config.get.mock.calls.length };
 }
 
 describe("roles.describe", () => {
   it("returns the four roles from the Paseo config in effect, in role order, ignoring foreign entries", async () => {
-    const fake = fakeConfig(daemonConfig());
+    const fake = configured(daemonConfig());
     const output = await describeRoles({ paseo: fake.paseo });
 
     expect(rolesDescribeRpc.output.parse(output)).toEqual({
@@ -235,7 +211,7 @@ describe("roles.describe", () => {
   });
 
   it("paseoTools follows the stored {enabled} shape: only enabled === true grants", async () => {
-    const { paseo } = fakeConfig(
+    const { paseo } = configured(
       daemonConfig({
         providers: {
           "bm-manager": { extends: "codex", paseoTools: { enabled: false } },
@@ -255,14 +231,14 @@ describe("roles.describe", () => {
   });
 
   it("no bm-* providers or profiles (paseo-bm roles not registered): empty roles", async () => {
-    const { paseo } = fakeConfig({ providers: { claude: {} }, agentProfiles: [] });
+    const { paseo } = configured({ providers: { claude: {} }, agentProfiles: [] });
     expect(await describeRoles({ paseo })).toEqual({ roles: [] });
-    const bare = fakeConfig({});
+    const bare = configured({});
     expect(await describeRoles({ paseo: bare.paseo })).toEqual({ roles: [] });
   });
 
   it("half-registered role: reports what is there, empty strings for the rest, no error", async () => {
-    const { paseo } = fakeConfig({
+    const { paseo } = configured({
       providers: { "bm-worker": { label: "Beads Worker", paseoTools: { enabled: true } } },
       agentProfiles: [{ id: "bm-manager", provider: "bm-manager" }],
     });
@@ -291,31 +267,41 @@ describe("plugin server entry — agents.list and roles.describe", () => {
     expect(contracts.map((c: { name: string }) => c.name).sort()).toEqual([
       "agents.list",
       "agents.stop-all",
+      "autonomy.ledger",
+      "autonomy.policy",
+      "autonomy.reset",
+      "autonomy.set",
+      "autonomy.set-boundary",
+      "autonomy.set-challenger",
       "beads.action",
       "beads.get",
       "beads.list",
-      "beads.lookup",
       "beads.stats",
       "chat.beads",
       "chat.peers",
+      "coordination.set",
+      "coordination.settings",
       "decisions.answer",
       "decisions.confirm",
       "decisions.get",
       "decisions.list",
+      "decisions.override",
       "fallback.act",
       "fallback.incidents",
       "inbox.alerts",
+      "inbox.digest",
+      "inbox.seen",
       "insights.summary",
+      "links.why",
       "manager.ensure",
-      "orchestrator.apply-suggestion",
       "orchestrator.open",
       "orchestrator.open-preview",
-      "orchestrator.set-autopilot",
       "orchestrator.state",
+      "precedents.end",
+      "precedents.list",
+      "precedents.save",
       "roles.describe",
-      "roles.instructions",
       "roles.options",
-      "roles.save-extra",
       "roles.save-fallback",
       "roles.save-settings",
       "roles.settings",
@@ -325,6 +311,7 @@ describe("plugin server entry — agents.list and roles.describe", () => {
       "setup.install-skills",
       "setup.install-tool",
       "setup.status",
+      "traces.agents",
       "traces.delete",
       "traces.get",
       "traces.list",
@@ -334,7 +321,7 @@ describe("plugin server entry — agents.list and roles.describe", () => {
     ]);
 
     const listHandler = handle.mock.calls.find(([c]) => c === agentsListRpc)![1];
-    const { paseo } = fakeDirectory([agent({ id: "mgr", labels: { "bm.role": "manager" } })]);
+    const { paseo } = directory([agent({ id: "mgr", labels: { "bm.role": "manager" } })]);
     const output = await listHandler({ workspaceId: WS }, { paseo });
     expect(output.agents.map((a: { id: string }) => a.id)).toEqual(["mgr"]);
   });
@@ -343,7 +330,7 @@ describe("plugin server entry — agents.list and roles.describe", () => {
     const handle = vi.fn();
     contribute({ handle, registerSettings: vi.fn() } as unknown as Parameters<typeof contribute>[0]);
     const describeHandler = handle.mock.calls.find(([c]) => c === rolesDescribeRpc)![1];
-    const fake = fakeConfig(daemonConfig());
+    const fake = configured(daemonConfig());
     const output = await describeHandler({}, { paseo: fake.paseo });
     expect(rolesDescribeRpc.output.parse(output).roles.map((r) => r.role)).toEqual(["manager", "worker", "reviewer", "orchestrator"]);
     expect(fake.reads()).toBe(1);

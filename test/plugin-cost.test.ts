@@ -5,11 +5,13 @@ import { join } from "node:path";
 import { priceFor, priceUsage, type ListedPrices } from "../plugin/server/cost";
 import { costOf, forgetModelCosts, listedPricesFor, priceOfCost } from "../plugin/server/model-costs";
 import { LOOKUP_TIMEOUT_MS } from "../plugin/server/role-mode";
-import { handleTracesGet, handleTracesList, type DashboardPaseo } from "../plugin/server/dashboard-rpc";
+import { handleTracesGet, handleTracesList } from "../plugin/server/dashboard-rpc";
+import type { DashboardPaseo } from "../plugin/server/paseo-directory";
 import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store";
 import { clearBeadsCache } from "../plugin/server/beads-store";
 import { MODEL_PRICES, PRICES_UPDATED_AT } from "../plugin/shared/prices";
 import { TRACE_STORE_SCHEMA_VERSION, type TraceRecord, type Usage } from "../plugin/shared/contracts";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 /**
  * WP-209: tokens and cost.
@@ -144,18 +146,15 @@ const SONNET_LISTED = {
 
 const GPT = { id: "gpt-5.6-sol", label: "GPT-5.6-Sol", metadata: { cost: { input: 1.25, output: 10, cache: { read: 0.125 } } } };
 
-function fakeProviders(
+/** The shared fake SDK answering `providers.listModels` from `answers` (an Error rejects); any other provider lists no model. */
+function modelsAnswering(
   answers: Record<string, unknown> = {
     "bm-worker": modelList([KIMI, QWEN, SONNET_LISTED]),
     "bm-reviewer": modelList([GPT]),
   },
 ) {
-  const listModels = vi.fn(async (provider: string) => {
-    const answer = answers[provider];
-    if (answer instanceof Error) throw answer;
-    return answer ?? modelList([]);
-  });
-  return { paseo: { providers: { listModels } }, listModels };
+  const fake = fakePaseo({ providers: { models: (provider) => answers[provider] ?? modelList([]) } });
+  return { paseo: fake.paseo, listModels: fake.api.providers.listModels };
 }
 
 const silent = () => undefined;
@@ -166,7 +165,7 @@ beforeEach(() => {
 
 describe("a rate from Paseo's model list (costOf)", () => {
   it("maps input, output and cache.read, and ignores tiers and experimentalOver200K", async () => {
-    const { paseo } = fakeProviders();
+    const { paseo } = modelsAnswering();
     expect(await costOf(paseo, "bm-worker", "openrouter/moonshotai/kimi-k2", silent)).toEqual({
       inputUsdPerMTok: 0.6,
       cacheReadUsdPerMTok: 0.15,
@@ -175,7 +174,7 @@ describe("a rate from Paseo's model list (costOf)", () => {
   });
 
   it("prices a cache read at the input rate when the model lists no cache.read", async () => {
-    const { paseo } = fakeProviders();
+    const { paseo } = modelsAnswering();
     expect(await costOf(paseo, "bm-worker", "openrouter/qwen/qwen3-coder", silent)).toEqual({
       inputUsdPerMTok: 0.4,
       cacheReadUsdPerMTok: 0.4,
@@ -189,13 +188,13 @@ describe("a rate from Paseo's model list (costOf)", () => {
   });
 
   it("matches a model id containing slashes whole, never by its last part", async () => {
-    const { paseo } = fakeProviders();
+    const { paseo } = modelsAnswering();
     expect(await costOf(paseo, "bm-worker", "kimi-k2", silent)).toBeNull();
     expect(await costOf(paseo, "bm-worker", "moonshotai/kimi-k2", silent)).toBeNull();
   });
 
   it("returns null for a model the list does not name or names without a usable cost", async () => {
-    const { paseo } = fakeProviders({
+    const { paseo } = modelsAnswering({
       "bm-worker": modelList([
         { id: "no-cost", label: "x" },
         { id: "half-cost", label: "x", metadata: { cost: { input: 1 } } },
@@ -208,7 +207,7 @@ describe("a rate from Paseo's model list (costOf)", () => {
   });
 
   it("asks each provider once per plugin run, whatever the model", async () => {
-    const { paseo, listModels } = fakeProviders();
+    const { paseo, listModels } = modelsAnswering();
     await costOf(paseo, "bm-worker", "openrouter/moonshotai/kimi-k2", silent);
     await costOf(paseo, "bm-worker", "openrouter/qwen/qwen3-coder", silent);
     await costOf(paseo, "bm-worker/openrouter/qwen/qwen3-coder", "openrouter/qwen/qwen3-coder", silent);
@@ -218,7 +217,7 @@ describe("a rate from Paseo's model list (costOf)", () => {
   });
 
   it("never throws: a failing, erroring or missing listModels gives null and one warn line", async () => {
-    const failing = fakeProviders({ "bm-worker": new Error("daemon went away") });
+    const failing = modelsAnswering({ "bm-worker": new Error("daemon went away") });
     const log = vi.fn();
     expect(await costOf(failing.paseo, "bm-worker", "openrouter/qwen/qwen3-coder", log)).toBeNull();
     expect(await costOf(failing.paseo, "bm-worker", "openrouter/moonshotai/kimi-k2", log)).toBeNull();
@@ -227,7 +226,7 @@ describe("a rate from Paseo's model list (costOf)", () => {
     expect(log.mock.calls[0]![0]).toMatch(/^\[paseo-bm\] could not read the models of bm-worker \(daemon went away\)/);
 
     forgetModelCosts();
-    const erroring = fakeProviders({ "bm-worker": { provider: "bm-worker", models: [], error: "provider is loading", fetchedAt: FETCHED_AT } });
+    const erroring = modelsAnswering({ "bm-worker": { provider: "bm-worker", models: [], error: "provider is loading", fetchedAt: FETCHED_AT } });
     const log2 = vi.fn();
     expect(await costOf(erroring.paseo, "bm-worker", "openrouter/qwen/qwen3-coder", log2)).toBeNull();
     expect(log2).toHaveBeenCalledTimes(1);
@@ -308,7 +307,7 @@ function ranOn(model: string, provider: string | undefined, extra: Partial<Trace
 
 describe("listed rates for the records a Dashboard answer prices (listedPricesFor)", () => {
   it("prices an unpriced model from the provider its record names", async () => {
-    const { paseo } = fakeProviders();
+    const { paseo } = modelsAnswering();
     const listed = await listedPricesFor(paseo, [ranOn("openrouter/moonshotai/kimi-k2", "bm-worker")], silent);
     // Keyed as recorded and by the last segment the trace roll-up groups on.
     expect(listed.get("openrouter/moonshotai/kimi-k2")).toEqual({
@@ -319,7 +318,7 @@ describe("listed rates for the records a Dashboard answer prices (listedPricesFo
   });
 
   it("uses only the bundled table for a record without runtime.provider", async () => {
-    const { paseo, listModels } = fakeProviders();
+    const { paseo, listModels } = modelsAnswering();
     const listed = await listedPricesFor(
       paseo,
       [ranOn("gpt-5.6-sol", undefined), ranOn("openrouter/qwen/qwen3-coder", undefined), turn({ usage: usageOn("gpt-5.6-sol") })],
@@ -330,14 +329,14 @@ describe("listed rates for the records a Dashboard answer prices (listedPricesFo
   });
 
   it("never asks for a model the bundled table prices", async () => {
-    const { paseo, listModels } = fakeProviders();
+    const { paseo, listModels } = modelsAnswering();
     const listed = await listedPricesFor(paseo, [ranOn("claude-sonnet-4-6", "bm-worker")], silent);
     expect(listed.size).toBe(0);
     expect(listModels).not.toHaveBeenCalled();
   });
 
   it("gives no listed rate to ids that share a last segment but not a rate", async () => {
-    const { paseo } = fakeProviders({
+    const { paseo } = modelsAnswering({
       "bm-worker": modelList([
         { id: "a/same-model", label: "x", metadata: { cost: { input: 1, output: 2 } } },
         { id: "b/same-model", label: "x", metadata: { cost: { input: 3, output: 4 } } },
@@ -352,7 +351,7 @@ describe("listed rates for the records a Dashboard answer prices (listedPricesFo
   });
 
   it("never throws, and a provider that cannot be read leaves its models unpriced", async () => {
-    const { paseo } = fakeProviders({ "bm-worker": new Error("down"), "bm-reviewer": modelList([GPT]) });
+    const { paseo } = modelsAnswering({ "bm-worker": new Error("down"), "bm-reviewer": modelList([GPT]) });
     const listed = await listedPricesFor(
       paseo,
       [ranOn("openrouter/qwen/qwen3-coder", "bm-worker"), ranOn("gpt-5.6-sol", "bm-reviewer")],
@@ -406,23 +405,18 @@ describe("the Dashboard read RPCs price from the listed rates", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  function dashboardPaseo(): { paseo: DashboardPaseo; listModels: ReturnType<typeof fakeProviders>["listModels"] } {
-    const { paseo: providers, listModels } = fakeProviders();
-    const agents = [
-      { id: "w1", workspaceId: WS, status: "idle", createdAt: "2026-09-21T10:00:10.000Z", labels: { "bm.role": "worker", "bm.requestId": "req-A" } },
-      { id: "r1", workspaceId: WS, status: "idle", createdAt: "2026-09-21T10:00:20.000Z", labels: { "bm.role": "reviewer", "bm.requestId": "req-A", "paseo.parent-agent-id": "w1" } },
-    ];
-    const paseo: DashboardPaseo & typeof providers = {
-      ...providers,
-      agents: { list: vi.fn(async () => ({ entries: agents.map((agent) => ({ agent })) })) },
-      workspaces: { list: vi.fn(async () => ({ entries: [{ id: WS, directory: workspace }] })) },
-      config: {
-        get: vi.fn(async () => ({
-          config: { plugins: { "paseo-bm": { source: "directory", path: join(home, "plugin", "0.2.0") } } },
-        })),
-      },
-    };
-    return { paseo, listModels };
+  /** The shared fake SDK with the request's Worker and Reviewer, the workspace, and the default model answers. */
+  function dashboardPaseo() {
+    const answers: Record<string, unknown> = { "bm-worker": modelList([KIMI, QWEN, SONNET_LISTED]), "bm-reviewer": modelList([GPT]) };
+    const fake = fakePaseo<DashboardPaseo>({
+      agents: [
+        { id: "w1", workspaceId: WS, status: "idle", createdAt: "2026-09-21T10:00:10.000Z", labels: { "bm.role": "worker", "bm.requestId": "req-A" } },
+        { id: "r1", workspaceId: WS, status: "idle", createdAt: "2026-09-21T10:00:20.000Z", labels: { "bm.role": "reviewer", "bm.requestId": "req-A", "paseo.parent-agent-id": "w1" } },
+      ],
+      workspaces: [{ id: WS, directory: workspace }],
+      providers: { models: (provider) => answers[provider] ?? modelList([]) },
+    });
+    return { paseo: fake.paseo, listModels: fake.api.providers.listModels };
   }
 
   async function seed(): Promise<void> {

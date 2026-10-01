@@ -2,19 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  BASE_INSTRUCTIONS,
-  EXTRA_HEADING,
-  MAX_EXTRA_CHARS,
-  fullInstructions,
-  readRoleExtras,
-  saveRoleExtra,
-} from "../plugin/server/role-extras";
+import { BASE_INSTRUCTIONS, fullInstructions } from "../plugin/server/role-instructions";
 import { applyRoleInstructions } from "../plugin/server/role-hook";
 import { OPTIONAL_SKILLS, REQUIRED_SKILLS, checkSkillAt, skillsStatus } from "../plugin/server/setup-skills";
 import { commandsFor, findTool, installTool, toolsStatus, versionOf } from "../plugin/server/setup-tools";
-import { handleRolesInstructions, handleRolesSaveExtra, handleSetupStatus } from "../plugin/server/setup-rpc";
-import { setupStatusSchema } from "../plugin/shared/contracts";
+import { handleSetupStatus } from "../plugin/server/setup-rpc";
+import { setupEnsureRolesRpc, setupStatusSchema } from "../plugin/shared/contracts";
 import { updateSetupState } from "../plugin/server/setup-state";
 
 /** Setup screen (delta 20260916-setup-screen). */
@@ -31,77 +24,16 @@ afterEach(() => rmSync(root, { recursive: true, force: true }));
 const paseo = { config: { get: async () => ({ config: {} }) } };
 const deps = () => ({ homedir: () => root });
 
-describe("additional role instructions", () => {
-  it("append after the base under a heading that keeps the rules on top", () => {
-    const full = fullInstructions("worker", "  Always answer in Vietnamese.  ");
-    expect(full.startsWith(BASE_INSTRUCTIONS.worker.trimEnd())).toBe(true);
-    expect(full).toContain(EXTRA_HEADING);
-    expect(full.trimEnd().endsWith("Always answer in Vietnamese.")).toBe(true);
-    expect(fullInstructions("worker", "   ")).toBe(BASE_INSTRUCTIONS.worker);
-  });
-
-  it("are saved per role, 0600, and read back; a broken file reads as empty", () => {
-    saveRoleExtra(home, "worker", "Use pnpm.");
-    const roles = saveRoleExtra(home, "reviewer", "Check i18n keys.");
-    expect(roles).toEqual({ manager: "", worker: "Use pnpm.", reviewer: "Check i18n keys.", orchestrator: "" });
-    expect(readRoleExtras(home)).toEqual(roles);
-    expect(saveRoleExtra(home, "orchestrator", "Score strictly.")).toEqual({ ...roles, orchestrator: "Score strictly." });
-    expect(statSync(join(home, "role-extras.json")).mode & 0o777).toBe(0o600);
-    writeFileSync(join(home, "role-extras.json"), "{broken");
-    expect(readRoleExtras(home)).toEqual({ manager: "", worker: "", reviewer: "", orchestrator: "" });
-  });
-
-  it("reads a file written before the Orchestrator existed, its text empty (orchestrator design §3.2)", () => {
-    writeFileSync(join(home, "role-extras.json"), JSON.stringify({ version: 1, roles: { manager: "", worker: "Use pnpm.", reviewer: "" } }));
-    expect(readRoleExtras(home)).toEqual({ manager: "", worker: "Use pnpm.", reviewer: "", orchestrator: "" });
-  });
-
-  it("refuse text over the limit and a symlinked file", () => {
-    expect(() => saveRoleExtra(home, "worker", "x".repeat(MAX_EXTRA_CHARS + 1))).toThrow(/E_ROLE_EXTRA_INVALID/);
-    // A data folder that is a symlink to somewhere else is refused.
-    const target = join(root, "outside");
-    mkdirSync(target);
-    rmSync(home, { recursive: true });
-    symlinkSync(target, home);
-    expect(() => saveRoleExtra(home, "worker", "x")).toThrow(/E_TRACE_STORE_UNWRITABLE/);
-  });
-
-  it("reach agents through the create hook, and upgrade a base-only prompt in place", () => {
-    const extras = { worker: "Use pnpm.", manager: "Reply in Vietnamese." };
-    const worker = applyRoleInstructions({ config: { provider: "bm-worker", cwd: "/r" } } as never, extras);
-    expect(worker?.config.systemPrompt).toBe(fullInstructions("worker", "Use pnpm."));
-    const manager = applyRoleInstructions(
-      { config: { provider: "bm-manager", cwd: "/r", systemPrompt: BASE_INSTRUCTIONS.manager } } as never,
-      extras,
-    );
-    expect(manager?.config.systemPrompt).toBe(fullInstructions("manager", "Reply in Vietnamese."));
+describe("role instructions: the additional instructions are retired (autonomy design §B.8)", () => {
+  it("reach agents through the create hook as the base, and upgrade a base-only prompt in place", () => {
+    const worker = applyRoleInstructions({ config: { provider: "bm-worker", cwd: "/r" } } as never);
+    expect(worker?.config.systemPrompt).toBe(fullInstructions("worker"));
+    expect(fullInstructions("worker")).toBe(BASE_INSTRUCTIONS.worker);
+    const facts = { workerModeId: "bypassPermissions" };
+    const manager = applyRoleInstructions({ config: { provider: "bm-manager", cwd: "/r", systemPrompt: BASE_INSTRUCTIONS.manager } } as never, facts);
+    expect(manager?.config.systemPrompt).toBe(fullInstructions("manager", facts));
     // Already complete: nothing to do.
-    expect(
-      applyRoleInstructions({ config: { provider: "bm-worker", systemPrompt: fullInstructions("worker", "Use pnpm.") } } as never, extras),
-    ).toBeUndefined();
-  });
-
-  it("are served and saved through the RPCs", async () => {
-    await handleRolesSaveExtra({ role: "manager", text: "Keep it short." }, paseo, deps());
-    const got = await handleRolesInstructions({ role: "manager" }, paseo, deps());
-    expect(got).toMatchObject({ extra: "Keep it short.", base: BASE_INSTRUCTIONS.manager, path: join(home, "role-extras.json"), maxChars: MAX_EXTRA_CHARS });
-    expect(got.full).toBe(fullInstructions("manager", "Keep it short."));
-    // A home the plugin has never seen is no longer a failure: from 0.4.0 the
-    // first save creates the data folder (design §5.1).
-    const fresh = join(root, "fresh");
-    await handleRolesSaveExtra({ role: "manager", text: "x" }, paseo, { homedir: () => fresh });
-    expect(readRoleExtras(join(fresh, ".paseo-bm")).manager).toBe("x");
-    expect(statSync(join(fresh, ".paseo-bm")).mode & 0o777).toBe(0o700);
-
-    // A data folder that cannot be used is still refused, with its reason.
-    process.env["PASEO_BM_HOME"] = "relative/bm";
-    try {
-      await expect(handleRolesSaveExtra({ role: "manager", text: "x" }, paseo, deps())).rejects.toThrow(
-        /E_ROLE_EXTRA_INVALID: cannot save: paseo-bm cannot use its data folder \(/,
-      );
-    } finally {
-      delete process.env["PASEO_BM_HOME"];
-    }
+    expect(applyRoleInstructions({ config: { provider: "bm-worker", systemPrompt: fullInstructions("worker") } } as never)).toBeUndefined();
   });
 });
 
@@ -111,8 +43,8 @@ describe("skills", () => {
     writeFileSync(join(dir, name, "SKILL.md"), `---\nname: ${declared}\ndescription: x\n---\nbody`);
   };
 
-  // These were checked against a second copy in `src/skills/detect.ts` until
-  // WP-406 deleted the installer; the plugin's lists are now the only ones.
+  // These were checked against a second copy in the installer's skill detection
+  // until WP-406 deleted it; the plugin's lists are now the only ones.
   it("names the five skills the Worker needs, and the two that are optional", () => {
     expect([...REQUIRED_SKILLS]).toEqual([
       "feature-workflow",
@@ -276,8 +208,7 @@ describe("br and bv", () => {
 });
 
 describe("setup.status", () => {
-  it("reports tools, skills and extra lengths together", async () => {
-    saveRoleExtra(home, "worker", "Use pnpm.");
+  it("reports tools and skills together", async () => {
     const status = await handleSetupStatus(paseo, {
       ...deps(),
       env: { PATH: "" },
@@ -285,7 +216,6 @@ describe("setup.status", () => {
       run: async () => ({ code: 0, output: "" }),
     });
     expect(status.tools.map((entry) => entry.path)).toEqual([null, null, null]);
-    expect(status.extras).toEqual({ manager: 0, worker: 9, reviewer: 0, orchestrator: 0 });
     expect(status.skills.skills).toHaveLength(REQUIRED_SKILLS.length + OPTIONAL_SKILLS.length);
     expect(status.latestCheckedOn).toBe("2026-09-16");
     // The payload passes its own contract, the Pi and OpenCode columns intact.
@@ -304,7 +234,6 @@ describe("setup.status", () => {
         missingRequired: { claude: 0, codex: 1 },
         installCommand: "npx -y skills add x",
       },
-      extras: { manager: 0, worker: 0, reviewer: 0 },
     };
     const parsed = setupStatusSchema.parse(old);
     expect(parsed).toEqual(old);
@@ -341,7 +270,7 @@ describe("setup.status: what the machine's setup looks like (0.4.0, design §7.1
 
   const statusDeps = () => ({ ...deps(), env: { PATH: "" }, isExecutable: () => false, run: async () => ({ code: 0, output: "" }) });
 
-  it("reports the roles, the switch, the sign-ins, the data folder and the install kind", async () => {
+  it("reports the roles, the switch, the sign-ins and the data folder", async () => {
     const status = await handleSetupStatus(setUpDaemon(), statusDeps());
 
     expect(status.setup).toMatchObject({
@@ -353,7 +282,6 @@ describe("setup.status: what the machine's setup looks like (0.4.0, design §7.1
       ],
       skillsRun: null,
       dataHome: { path: home, source: "default", reason: null },
-      install: { kind: "other", pluginPath: null },
     });
     expect(setupStatusSchema.parse(status)).toEqual(status);
   });
@@ -386,7 +314,13 @@ describe("setup.status: what the machine's setup looks like (0.4.0, design §7.1
     updateSetupState(
       {
         agentTools: { setBy: "plugin", previous: false, at: "2026-09-25T10:00:00.000Z" },
-        rolesCreated: { at: "2026-09-25T09:00:00.000Z", roles: ["manager"], baseProvider: "claude", model: "claude-opus-5" },
+        rolesCreated: {
+          at: "2026-09-25T09:00:00.000Z",
+          roles: ["manager", "reviewer"],
+          baseProvider: "claude",
+          model: "claude-opus-5",
+          reviewer: { baseProvider: "codex", model: "gpt-5.6-sol" },
+        },
         skillsRun: { at: "2026-09-25T09:30:00.000Z", command: "npx -y skills add x", code: 0, outcome: "ok" },
         cleanedUpAt: "2026-09-25T11:00:00.000Z",
       },
@@ -396,17 +330,18 @@ describe("setup.status: what the machine's setup looks like (0.4.0, design §7.1
     const status = await handleSetupStatus(setUpDaemon(), statusDeps());
 
     expect(status.setup?.agentTools.setBy).toBe("plugin");
-    expect(status.setup?.roles.created).toMatchObject({ roles: ["manager"], baseProvider: "claude" });
+    expect(status.setup?.roles.created).toMatchObject({ roles: ["manager", "reviewer"], baseProvider: "claude" });
+    // The Reviewer apart survives the contract, which an older server's answer (no field) also passes.
+    expect(setupStatusSchema.parse(status).setup?.roles.created?.reviewer).toEqual({ baseProvider: "codex", model: "gpt-5.6-sol" });
     expect(status.setup?.roles.cleanedUpAt).toBe("2026-09-25T11:00:00.000Z");
     expect(status.setup?.skillsRun).toMatchObject({ outcome: "ok" });
   });
 
-  it("recognises a 0.3.x directory install from the registered plugin path", async () => {
-    writeFileSync(join(home, "install.json"), JSON.stringify({ schemaVersion: 1 }));
-
-    const status = await handleSetupStatus(setUpDaemon({ plugins: { "paseo-bm": { path: join(home, "plugin", "0.3.1") } } }), statusDeps());
-
-    expect(status.setup?.install).toEqual({ kind: "installer-directory", pluginPath: join(home, "plugin", "0.3.1") });
+  it("setup.ensure-roles carries the Reviewer apart only when there is one", () => {
+    const base = { created: ["reviewer"], baseProvider: "claude", model: "claude-opus-5", skipped: null };
+    const reviewer = { baseProvider: "codex", model: "gpt-5.6-sol" };
+    expect(setupEnsureRolesRpc.output.parse({ ...base, reviewer })).toEqual({ ...base, reviewer });
+    expect(setupEnsureRolesRpc.output.parse(base)).not.toHaveProperty("reviewer");
   });
 
   it("reports an unusable data folder with its reason instead of failing", async () => {

@@ -3,9 +3,10 @@ import { defineConfig } from "tsup";
 /**
  * Bundles the evaluation scripts (docs/design/paseo-bm-evaluation.md §2) into
  * the git-ignored `.eval-dist/`, because the plugin modules they import use
- * extension-less paths that Node cannot load directly. Separate from
- * `tsup.config.ts` on purpose: the published build (`src/index.ts` → `dist/`)
- * must not change. Each npm script runs this config and then its own bundle;
+ * extension-less paths that Node cannot load directly. It is the repository's
+ * only tsup config: the plugin ships as TypeScript that Paseo compiles, and
+ * `npm run build` only regenerates its version and instruction modules. Each
+ * npm script runs this config and then its own bundle;
  * a new script adds its entry here. `suite` must never import `replay`: with
  * code splitting a shared entry moves into a chunk and its "am I the main
  * module" check would stop matching, so the suite runs the replay bundle instead.

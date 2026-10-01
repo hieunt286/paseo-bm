@@ -1,39 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 /**
  * The client entry pulls in the whole surface tree, which imports `react-native`
  * — Flow source that neither Vite nor Node can parse. Nothing here renders, so
- * the components only have to exist; a stub module is enough to let the entry
- * load and register its contributions.
+ * the components only have to exist; the stub vitest.config.ts aliases it to
+ * (test/stubs/react-native.ts) is enough to let the entry load and register its
+ * contributions.
  */
-vi.mock("react-native", () => {
-  const component = () => null;
-  return {
-    View: component,
-    Text: component,
-    Pressable: component,
-    ScrollView: component,
-    TextInput: component,
-    Switch: component,
-    ActivityIndicator: component,
-    Animated: {
-      View: component,
-      Value: class {},
-      loop: () => ({ start() {}, stop() {} }),
-      timing: () => ({ start() {} }),
-    },
-    LayoutAnimation: { configureNext() {}, Presets: {} },
-    PanResponder: { create: () => ({ panHandlers: {} }) },
-    AccessibilityInfo: {
-      isReduceMotionEnabled: async () => false,
-      addEventListener: () => ({ remove() {} }),
-    },
-    Platform: { OS: "web" },
-    StyleSheet: { create: (styles: unknown) => styles, flatten: (styles: unknown) => styles },
-    Linking: { openURL: async () => {} },
-    useWindowDimensions: () => ({ width: 1024, height: 768 }),
-  };
-});
 
 import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { LAUNCHER_SURFACE_ID, launchRequests } from "../plugin/client/launch-manager";

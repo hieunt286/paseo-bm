@@ -53,7 +53,7 @@ The complete reference for `paseo-bm`. For a short overview and the quick start,
 > **5. Agent conversation is recorded on this machine.** From the first turn after the plugin loads, it writes one record per agent turn into `~/.paseo-bm/traces/`, so **Work** can still show a request after its agents are deleted. Records contain the text your agents sent and received, including anything quoted from your repository. Nothing is uploaded. See [Trace storage](#trace-storage).
 
 > [!NOTE]
-> **6. The Orchestrator sends only what you allowed.** Nothing of it exists until you press **Start the Orchestrator…** in the Inbox and confirm. Then one agent for the whole machine reads the work of every paseo-bm project, secrets masked, on the provider of the Beads Orchestrator role, and uses tokens there. A command it writes reaches a project's Manager and speaks as you, in three cases only: you pick an option of one of its decisions in the Inbox, you tell it in its chat to send, or the project is on **Autopilot**. In those last two cases it may also correct a **Worker** directly, and that Worker's Manager always gets a copy; it can stop a running Worker at once only while that Worker is doing something dangerous; it never writes to a Reviewer. On Autopilot it answers the project's questions and directs the work without asking you — an answer is recorded on the question, which then shows as answered by the Orchestrator and leaves your Inbox — and paseo-bm watches that project's running Workers. Every command it sends carries the limits — no commit, push or deploy, and no touching real data, unless you said so — and a big decision (push, publish, deploy, real data, migrations, security, cost) goes out only on a decision you answered. Autopilot is off until you ask for it; each wake-up uses tokens. See [The Orchestrator](#the-orchestrator-one-coordinator-for-every-project).
+> **6. The Orchestrator sends only what you allowed.** Nothing of it exists until you press **Start the Orchestrator…** in the Inbox and confirm. Then one agent for the whole machine reads the work of every paseo-bm project, secrets masked, on the provider of the Beads Orchestrator role, and uses tokens there. A command it writes reaches a project's Manager and speaks as you, in three cases only: you pick an option of one of its decisions in the Inbox, you tell it in its chat to send, or your autonomy policy (**Settings → Autonomy**) delegates, in that project, every kind of decision the command touches. In those last two cases it may also correct a **Worker** directly, and that Worker's Manager always gets a copy; it can stop a running Worker at once only while that Worker is doing something dangerous; it never writes to a Reviewer. It answers a Worker's question only where your policy delegates that kind of decision to it; the rest stay yours, in the Inbox. Every command it sends carries the limits — no commit, push or deploy, and no touching real data, unless you said so — and a big decision (push, publish, deploy, real data, migrations, security, cost) goes out only on a decision you answered; no policy covers one. A new install delegates nothing. In a project where you set a kind of decision to Shadow or Delegated, what happens there wakes it, and each wake-up uses tokens. See [The Orchestrator](#the-orchestrator-one-coordinator-for-every-project).
 
 Your requests and source code go to the model providers you choose for each role. paseo-bm has no telemetry.
 
@@ -89,12 +89,15 @@ time, so paseo-bm does its setup lazily, the first time you open **Beads Manager
    agent exists until you start it from the Inbox (see
    [The Orchestrator](#the-orchestrator-one-coordinator-for-every-project)). The defaults are the first provider
    Paseo reports as available and that provider's first model — the same rule the retired installer
-   used.
+   used. One exception: when a provider of another model family (the model's vendor: Claude is
+   Anthropic, Codex is OpenAI) is also signed in, a new Beads Reviewer goes to the first such
+   provider, so its review does not share the Worker's blind spots. When the Reviewer and the Worker
+   share a family, **Settings → Agents** says so under the Reviewer.
    Existing entries are never changed, so anything you set yourself is kept. **Settings → Agents** says
    so, and is where you change them. What you set there is what a new Worker or Reviewer runs on, even
    when a Manager or Worker created earlier asks for the old model (and even for one you start by hand
    on `bm-worker` or `bm-reviewer` with another model).
-2. **Settings says what is still missing.** Its four groups are folded to one line each, and the
+2. **Settings says what is still missing.** Its five groups are folded to one line each, and the
    line names the problem — "Agent tools off", "Missing bv", "Worker skills (Claude) 3/5", a
    provider not signed in. Three steps are buttons, because each grants something and nothing runs
    before you press it:
@@ -189,8 +192,13 @@ button, and **Details ▸** for the ids and the full message.
   Manager's: answer it once, on any copy. An answer that allows a push, publish or deploy, real data,
   a migration, a security change or a cost asks you to confirm right there, Cancel first. Chips say
   **Needs decision**, **Needs confirmation**, **Decided**, **Superseded**, **Withdrawn** or
-  **Expired**. A question the Orchestrator answered on Autopilot reads "answered by the
+  **Expired** — a Worker's question you had not answered expires when the Worker finishes its
+  request ("The request finished."): it leaves the Inbox and can no longer be answered, so message
+  the Worker if it still matters. A question an earlier version's Orchestrator answered reads "answered by the
   Orchestrator", with its reason under **Details**, and has no buttons: the first answer counts.
+  A question you answered that carries a subject offers **Save as precedent…**: your answer (you
+  can edit it) becomes a standing answer for later questions on that subject, in this project or in
+  all projects, for 30 days — you choose, Cancel first.
 - **Progress, finished and verdict** — a Worker's reports to the Manager (**Received**, **Working**,
   **Blocked**, **Finished**) and a Reviewer's verdict (**Passed**, **Changes required**).
 - **Brief** — the Manager's instructions in a Worker's chat, and a Worker's review request in a
@@ -199,8 +207,9 @@ button, and **Details ▸** for the ids and the full message.
 - **Notice** — every other notice of the plugin, as one compact line.
 
 **Commands.** Every command paseo-bm delivers arrives as a `BM-COMMAND` block and shows as an action
-card: the Orchestrator → the Manager or a Worker, on whose authority (Autopilot, your word in its
-chat, or a decision you answered), what it is for, the effects it allows, and the limits — **No
+card: the Orchestrator → the Manager or a Worker, on whose authority (your word in its chat, a
+decision you answered, or **Policy · <kind>** — your autonomy policy; a command an earlier version
+sent on Autopilot says **Autopilot (retired)**), what it is for, the effects it allows, and the limits — **No
 commit/push/deploy**, **No real data** — unless your answer lifted them. In a Manager's chat, a copy
 of what the Orchestrator told its Worker is a notice line. The card has no reply box: the block is
 your word.
@@ -278,12 +287,24 @@ The Inbox is read every 5 seconds while you look at it.
   fallback, wait for the reset, or handle it yourself). Each is the same decision card as in the chats
   ([Message cards](#message-cards-in-the-chat)). A card you answer stays in place, answered, until
   you leave the Inbox.
-- **Decided for you** — empty for now; a later version lists what the agents decided for you.
+- **Decided for you** — when you delegate a class of decisions or save a precedent, some decisions
+  are answered without asking you. The Inbox lists the ones answered since you last looked: what was
+  decided, in which project, by whom (your policy's recommended option, the Orchestrator, or your
+  precedent) and why; tap a line for its details. **Override** takes one back: it returns to Needs
+  you as your question, and your answer goes to the same agent and replaces the first one (work
+  already done is not undone; the Worker is asked what changes). Overriding also returns that class
+  to Shadow, so its decisions come to you until it earns Delegate again. Lines you have seen leave
+  the list when you come back after a few minutes away; Work keeps every decision.
+  Decided for you also lists what the Orchestrator did since you last looked — an answer, unblock,
+  correction, stop or advice — with why, and whether it worked: Pending, Met, Missed or Unknown.
+  These lines have no Override; tap a line for its ids.
 - **Alerts** — one line each (what · project · time), details on a tap: a request that stalled, a
   Worker stuck, waiting on a permission or running a dangerous command, a Worker or Reviewer created
   by the wrong role, an agent on older instructions (for a Manager, **Replace Manager** starts a
   current one and opens it; the old one stays yours), a fallback that failed (**Resend to Worker**
-  when a switched Reviewer never appeared). **Open Worker** / **Open project** where Paseo allows it.
+  when a switched Reviewer never appeared), two agents that edited one file at the same time (the
+  file and the agents under Details; it clears when both requests finish). **Open Worker** /
+  **Open project** where Paseo allows it.
 
 With nothing open, the Inbox says so and offers Work.
 
@@ -301,12 +322,23 @@ have recorded requests, with their last name, path, last activity and history si
 
 - a **stage bar**: Received ▸ Plan ▸ Build ▸ Review ▸ Done, the current stage bold, marked
   *waiting* while it is blocked on you. A stage that cannot be told is not drawn;
-- **evidence lines** taken from the Worker's reports: the plan, what was closed and with which checks,
-  the last review verdict, the decisions still open;
+- **evidence lines** taken from the Worker's reports: the plan, the checks, files and beads it
+  claims — each labelled *detected ✓* (paseo-bm saw it: a check passing after the last edit, the
+  file edited, the bead closed), *self-reported* (only the report says so) or *unverified* (the
+  report says nothing ran) — the last review verdict and the decisions still open. When a request
+  that changed code finishes without every check it names seen to pass, the stage bar reads
+  **Done — unverified** and its finished card in the chat **Finished — unverified**, both in amber;
+  while it stands so, your policy never commits or releases it for you — such a decision waits for
+  you, and the Orchestrator asks before a commit or release. A new finish whose checks are all seen
+  ends it. Requests recorded before this build read Done as before;
 - **Timeline ▸** — what happened, newest first: what you asked, the hand-over to the Worker, its
   reports, reviews asked and their verdicts, your messages and the Manager's replies, decisions asked,
-  answered and closed. Only events that can be read are drawn;
-- the request's cost, **Open Worker ▸**, and **Details ▸** with the ids and **Delete this request's
+  answered and closed (a Worker's question you had not answered reads "The question expired when the
+  request finished."). Only events that can be read are drawn;
+- the request's cost, **Open Worker ▸**, **Why? ▸** — the chain behind the request, in order: its
+  decisions, beads, changes (with commits), checks, reviews and each agent's turns; each link is
+  found, none (with why) or missing (with why), anything replaced says "replaced by", and it reads
+  once when opened and again on Refresh — and **Details ▸** with the ids and **Delete this request's
   history**.
 
 **Beads** — the board ([below](#beads-the-workspaces-beads)). **Agents** — the Manager → Worker →
@@ -318,7 +350,9 @@ exists. Each action first shows what would go and asks, Cancel first. A closed w
 
 **Numbers say how sure they are.** A value from a Worker's own report is shown plainly; one worked out
 from the timeline is marked *(inferred)*; anything that cannot be established is left out rather than
-guessed. Durations are wall-clock and include time spent waiting for you.
+guessed. Durations are wall-clock and include time spent waiting for you. Every screen writes them the
+same way (`12 s`, `3 min 5 s`, `1 h 20 min`, `2 d 3 h`) and times as `15:40` today, `yesterday 15:40`,
+or `Thu 24 Sep 15:40`, in your device's time zone.
 
 **Costs are estimates, not an invoice.** Cost is estimated from the tokens of each turn with a price
 table shipped in this version. Cached input tokens are priced at the cache rate. A model that is not
@@ -372,19 +406,54 @@ Insights reads the recorded history once when you open it (and on **Refresh**), 
   and requests per day.
 - **Cost:** tokens per request (with its median) and tokens per request by role.
 - **Beads:** for one project, the board's figures — status, progress, by type, by priority, time.
+- **Autonomy by class:** for one project, how often the recommended option (and the Orchestrator,
+  once its predictions are on) matched your answer, per class of decision — the agreement, how many
+  answers, from which day to which, and how many were reversed — with who decides each class now.
+  It counts every answer recorded, whatever the window.
 
-Autonomy by class and review lift are placeholders for later versions. What could not be counted is
-said in one line.
+- **Review lift:** per size of request, for the chosen window and project — reviews per request,
+  blocking findings per batch, how many of the findings a first review found were fixed by the next
+  one, and tokens per review.
+
+What could not be counted is said in one line.
 
 ## Settings
 
-Four groups, each folded to one line that says its state:
+Five groups, each folded to one line that says its state:
 
 - **Agents** — each role's provider, model, thinking and mode, with an Edit form, and its fallback
   chain where one is offered (the Orchestrator has none, and like the Reviewer it is never offered a
   full-access or planning mode); sign-in per provider with the command to run yourself; Paseo's agent
-  tools and **Allow agent tools…**. What you set applies to agents created afterwards.
-- **Autonomy** — one line: coming in the next version.
+  tools and **Allow agent tools…**. What you set applies to agents created afterwards. A fallback
+  chain's policy is **Ask me** or **Off**; to let a stopped agent be switched or wait without asking
+  you, delegate the **Environment** class in **Autonomy**.
+- **Autonomy** — which decisions the agents may take for you, as one matrix per project (a tab per
+  project, named as in Insights): a row per kind of decision with who decides it. **Owner** and
+  **Shadow** both leave the decision to you — what the agents would have chosen is recorded beside
+  your answer. A kind of decision is **Delegated** only through **Delegate?** in Insights, once it has
+  earned it; its row then says who decides it for you (the recommended option or the Orchestrator)
+  and since when, and one press sets it back. Release, data, security and cost are always yours and
+  say why. **Return all to owner** hands every kind of decision in that project back to you at once.
+  **Orchestrator predictions** (off by default, one press each way) has the Orchestrator record, for
+  each decision it could one day take for you, the option it expects you to choose; you see its
+  prediction only after you answer, and predicting wakes the Orchestrator, which costs tokens.
+  Return all to owner leaves it as it is. **Action boundary** (off by default; you confirm either
+  way) holds a project's Claude and Codex Workers and Reviewers before an action leaves the
+  workspace: those created after you turn it on run in the least permissive mode, and a push,
+  publish, deploy, real-data change, dependency install, network call, write outside the project —
+  or a command paseo-bm cannot read — waits for you as one Inbox item with the command, **Allow once**
+  (release, data and security ask you to confirm) or **Deny**, unless an answer you gave for that
+  request or a delegated kind covers it. You can also answer in Paseo's own prompt. Ordinary work runs
+  without asking; agents that already exist keep their mode, and turning it off does not strand the
+  ones created while it was on. The Inbox says when an agent of such a project runs without it.
+  A new install leaves every decision yours. Below the matrix, **Precedents** lists your standing
+  answers: the subject, the project (or all projects), the answer, and until when it holds (30 days
+  by default). A later question on that subject gets the answer without asking you, except release,
+  data, security and cost questions, which still come to you. **End** stops one (you confirm, Cancel
+  first). **Add precedent…** writes one yourself: a project or all, the subject a question carries
+  (shown under a decision's **Details**), and the answer. A new precedent on the same subject and
+  project replaces the old one.
+- **Coordination** — how often the Orchestrator reviews a project and brings you its advice: after every N finished requests (5 by default; 0 turns it off); advice arrives as decisions in the Inbox, each with the change ready on one option. Below it, **Compaction** and **Handoff**: whether the Orchestrator may, on its own, have a Manager or Worker compact its conversation, or have a Manager hand a heavy request to a fresh Worker, and at which thresholds (a Claude turn is judged by its tokens read, a Codex or OpenCode turn by how full its context is). Turning one off is one tap; turning it on asks you first. If one misses its goal too often — fewer than 8 of its last 10 — paseo-bm switches it off and the Inbox says so; only you turn it back on. Last, **Review budget**: how many review calls a Worker may make per request of each size (2–8; 2, 2 and 4 by default); only Workers created afterwards get new numbers, and the Orchestrator's advice may offer a change, applied only when you pick it.
 - **Tools & skills** — whether `br` and `bv` are on the PATH the Paseo daemon uses, their versions,
   **Install** for a missing one (after you confirm its command; updates are a command to copy); each
   required and optional agent skill, **Test** to check again, **Install skills…** and the command to
@@ -393,68 +462,66 @@ Four groups, each folded to one line that says its state:
   where you can delete history and, for a workspace Paseo no longer has, move it onto one that exists;
   the version; and **Remove paseo-bm's settings…**.
 
-Earlier versions edited additional instructions per role on their setup screen; no screen does now.
-Instructions you saved there (`role-extras.json`) still apply to new agents.
+Earlier versions edited additional instructions per role on their setup screen. They are retired:
+a `role-extras.json` saved then is never read, and **Remove paseo-bm's settings…** deletes it when
+you also delete the data.
 
 ## The Orchestrator: one coordinator for every project
 
 The **Beads Orchestrator** is one agent for the whole machine that you chat with. It reads the work of every paseo-bm project — where each request stands, the Workers' reports, the decisions waiting on you — and tells each project's Manager (and, where you allow it, its Worker) what to do next. How far it goes is up to you, per project:
 
-- **Autopilot off** (the default): before it sends anything, it asks you. Its question is a decision in the [Inbox](#inbox-what-needs-you), each option saying what it would allow, and often with the command ready on it: picking that option sends the command once, on your answer. You can also answer in its chat, or tell it there to send ("send it", "go ahead and send").
-- **Autopilot on**: it answers that project's questions and tells its Manager what to do without asking you, keeps unfinished work going, and watches the project's running Workers — within fixed limits, and big decisions still come to you ([Autopilot](#autopilot)).
+- **By default** (every kind of decision yours, as a new install leaves it): before it sends anything, it asks you. Its question is a decision in the [Inbox](#inbox-what-needs-you), each option saying what it would allow, and often with the command ready on it: picking that option sends the command once, on your answer. You can also answer in its chat, or tell it there to send ("send it", "go ahead and send").
+- **Where your autonomy policy delegates** (Settings → Autonomy): in a project where every kind of decision a command touches is **Delegated**, it may send that command without asking you. A project where a kind of decision is **Shadow** or **Delegated** also wakes it when a request finishes with work left, stalls, or a Worker shows a signal — within fixed limits, and big decisions still come to you ([What it does on its own](#what-it-does-on-its-own)).
 
-Commands normally go to a project's **Manager**, which directs its Worker. In an Autopilot project, or right after you tell it to in its chat, the Orchestrator may also correct a **Worker** directly; the plugin then sends that Worker's Manager a copy, so the Manager always knows what its Worker was told. A Worker's question is never answered in a command: on Autopilot the Orchestrator answers it on the question itself (below). Nothing ever goes to a Reviewer.
+Commands normally go to a project's **Manager**, which directs its Worker. Where your policy covers the command, or right after you tell it to in its chat, the Orchestrator may also correct a **Worker** directly; the plugin then sends that Worker's Manager a copy, so the Manager always knows what its Worker was told. A Worker's question is never answered in a command: the Orchestrator decides one only where your policy delegates its kind of decision to it (it gives its reason, and the Worker gets the answer as yours), and the rest stay yours, in the Inbox. Nothing ever goes to a Reviewer.
 
 - **One per machine, in a workspace of its own.** paseo-bm creates it only when you press **Start the Orchestrator…** in the Inbox and confirm; after that, **Orchestrator chat ▸** opens the same agent. It does not live in one of your projects: its workspace is the folder `~/.paseo-bm/orchestrator/home`, which Paseo lists as a project named `home`. The folder holds no code, only a short `README.md` saying what it is.
 - **What it reads.** Only paseo-bm's own data, through tools the plugin gives it: where each project stands, one request in full, the decisions and their answers, and the recent messages of one paseo-bm Manager, Worker or Reviewer — long enough to read a question with all its options — never another agent's conversation. Everything goes through the same secret masking as the traces. The tools reach it when its provider is Claude, Codex or OpenCode.
 - **It checks for itself.** When a report says "tests pass" or "it's committed", the Orchestrator can look: a read-only tool shows a project's `git status`, the summary of what changed, the last 20 commits, or one file — only inside that project's folder, never a file that holds secrets (`.env`, keys, credentials). The tool cannot change, fetch or push anything.
 - **It keeps notes.** It writes short notes per project — a decision you made, a standing instruction — and reads them back with the projects. They survive a new Orchestrator.
-- **What it cannot do.** It has no Paseo agent tools, so it cannot message, create or stop agents on its own: everything it sends goes through the plugin, which checks the authority (a decision you answered, the project's Autopilot, or your own latest message in its chat), stops a big decision ([below](#big-decisions)), sends the command as a `BM-COMMAND` block with its limits, and records it. It runs in the mode the Reviewer would get (never a full-access or planning mode) and, like the Reviewer, keeps its provider's own shell and file tools; that it changes no file, bead or setting rests on its instructions.
-- **It costs tokens.** Every conversation, wake-up and assessment uses tokens on the provider of the **Beads Orchestrator** role (`bm-orchestrator`, set in Settings → Agents), and the masked content of every paseo-bm project goes to that provider. On Autopilot, the events of that project wake it (batched, one turn at a time); the watch itself calls no model. Nothing is created and nothing is spent until you start it.
+- **What it cannot do.** It has no Paseo agent tools, so it cannot message, create or stop agents on its own: everything it sends goes through the plugin, which checks the authority at every send (a decision you answered, your autonomy policy for that project, or your own latest message in its chat), stops a big decision ([below](#big-decisions)), sends the command as a `BM-COMMAND` block with its limits, and records it. It runs in the mode the Reviewer would get (never a full-access or planning mode) and, like the Reviewer, keeps its provider's own shell and file tools; that it changes no file, bead or setting rests on its instructions.
+- **It costs tokens.** Every conversation and wake-up uses tokens on the provider of the **Beads Orchestrator** role (`bm-orchestrator`, set in Settings → Agents), and the masked content of every paseo-bm project goes to that provider. Events wake it (batched, one turn at a time): a Worker's question it is asked to decide or predict, and the finished steps, stalls and Worker signals of a project where a kind of decision is **Shadow** or **Delegated** ([below](#what-it-does-on-its-own)); the watch itself calls no model. Nothing is created and nothing is spent until you start it.
 - **It is yours.** paseo-bm never archives, stops or deletes it. An Orchestrator started with older instructions, or one that lost its tools, is replaced by a new one the next time paseo-bm wakes it; the Inbox's Orchestrator line says so and offers **Start a new Orchestrator…** at once. After a day, when it is idle and you have not written to it for 2 hours, the next wake-up also starts a fresh one, so its conversation stays short; its notes carry over. The old one stays in your agent list for you to archive.
 
 Earlier versions had an Orchestrator screen with its own buttons (send, skip, ask, command, a stall switch, assessments); they are gone. Decisions are in the Inbox, projects in Work, figures in Insights, and everything else you tell the Orchestrator in its chat.
 
 ### Talking to it
 
-Open **Orchestrator chat ▸** and write as you would to a colleague: "How does invoice-app stand?", "What is the Checkout request waiting for?", "Assess the workflow of project invoice-app." It answers in its chat. It sends nothing to your projects' agents unless the authority is there:
+Open **Orchestrator chat ▸** and write as you would to a colleague: "How does invoice-app stand?", "What is the Checkout request waiting for?" It answers in its chat. It sends nothing to your projects' agents unless the authority is there:
 
 - **A decision you answered.** When it needs you, it asks with a decision in the Inbox: the question, its recommendation, and the options, each with what it would allow. Picking an option with a command ready on it sends that command once, within an hour of your answer; your own words go to the Orchestrator, which acts on them.
 - **Your word in its chat.** paseo-bm lets it send only when the latest message in its chat is one **you** typed in the app ("send it", "go ahead", "decide it yourself and send it"). A notice from the plugin never counts, and neither does a message the Orchestrator wrote itself.
-- **Autopilot** on the project ([below](#autopilot)).
+- **Your autonomy policy.** In a project where every kind of decision a command touches is **Delegated** (Settings → Autonomy), it may send that command on its own; a command with no effect, or only a commit, counts as reversible-technical. The card says **Policy · <kind>**. Release, data, security and cost still need a decision you answered, and setting a kind back refuses its next command at once ([What it does on its own](#what-it-does-on-its-own)).
 
 **A command speaks as you.** paseo-bm delivers it the way the app delivers what you type, as a `BM-COMMAND` block that the Manager's and the Worker's instructions read as your word, and that their chats show as an [action card](#message-cards-in-the-chat). It can answer a question, pick an option, redirect the work or stop part of it. An idle agent gets it at once; a working one when its turn ends. A block looks like this:
 
 ```
 BM-COMMAND
 from: orchestrator
-via: autopilot
+via: chat
 to: manager
 requestId: req-20260929T081500Z
-re: Answer Q2: keep the old table
-intent: answer
+re: Continue with the two ready beads
+intent: continue
 effects: none
-authority: autopilot
+authority: policy:reversible-technical
 approved: none
 limits: no-commit-push-deploy, no-real-data
 
-Q2: a — keep the existing table and add the new column.
+Have the Worker take the two ready beads next; the rest of the report is done.
 
-why: The Worker's recommendation, and nothing else depends on the table.
+why: The report shows work left, and none of it needs the owner's decision.
 ```
 
 It says what the command is for (`intent`), what it lets the agent do (`effects`), on whose authority, and which of those effects the authority covers (`approved`). The `limits:` line keeps what was not approved: no commit, push or deploy, and no touching real data, unless you said so.
 
-**Workflow assessments.** Asked to assess a project's workflow, it reads the project's recent requests and scores Sizing, Process weight, Coordination, User communication, Report quality and Review quality from 1 to 5 (or "no data"), with recommendations, and tells you the result in its chat. paseo-bm stores the assessment; nothing is changed.
 
-### Autopilot
+### What it does on its own
 
-Autopilot is set **per project**, and it is **off** by default. In this version no screen has its switch: tell the Orchestrator in its chat to take a project over ("run invoice-app on Autopilot") or to stop. It switches Autopilot only right after your own message, and turning it off takes effect at once.
+How far it goes without asking follows your autonomy policy (**Settings → Autonomy**), per project, and paseo-bm checks it at every send. A command goes out on its own only when every kind of decision it touches is **Delegated** in that project; a command with no effect, or only a commit, counts as reversible-technical. Setting a kind back refuses its next command at once. A new install delegates nothing, so until you delegate a kind it acts only on a decision you answered or on your word in its chat, and asks you in the Inbox for everything else, with the command ready on an option.
 
-With Autopilot on, for that project:
-
-- **It wakes when something happens.** A question a Worker put to you, a finished request, a request that stalled, or a Worker signal (below) is an event; paseo-bm hands the Orchestrator every event waiting at its next idle moment as one `BM-EVENTS` message, and drops an event whose subject was settled meanwhile — a question you already answered, for example.
-- **It watches the Workers while they work.** Every 2 minutes paseo-bm reads the recent activity of the project's running Workers (at most 5, no model call) and, once per Worker turn, raises one of six signals with the evidence:
+- **It wakes when something happens.** In a project where at least one kind of decision is **Shadow** or **Delegated**, a request that finished with work left (ready beads, open findings, failing checks), a request that stalled and a Worker signal (below) are events. A Worker's question, or an agent a provider stopped, is an event only when the Orchestrator is asked something of it: to decide it, where you delegated that kind of decision to the Orchestrator, or to predict your answer, in a project where you turned **Orchestrator predictions** on — never when an option would allow a push, publish or deploy, real data, a migration, a security change or a cost. A question it does not decide stays yours in the Inbox; nothing answers it for you by default. paseo-bm hands the Orchestrator every event waiting at its next idle moment as one `BM-EVENTS` message, and drops an event whose subject was settled meanwhile — a question you already answered, for example.
+- **paseo-bm watches the Workers while they work.** Every 2 minutes it reads the recent activity of the running Workers of every project (at most 5 per pass, no model call) and, once per Worker turn, raises one of six signals with the evidence:
 
   | Signal | Raised when |
   |---|---|
@@ -465,15 +532,24 @@ With Autopilot on, for that project:
   | Heavy process on a Small request | a Small request creates beads, or writes a plan or an ADR |
   | Writing outside the workspace | a file edited outside the project's folder |
 
-  Stuck, waiting on a permission and dangerous command are also **alerts** in your Inbox until they clear. paseo-bm itself never stops anyone; the Orchestrator decides.
-- **It answers and directs.** It reads a Worker's question in full and answers it by choosing one of its options, with a one-line reason. paseo-bm records that answer on the question — the card then reads "answered by the Orchestrator", with the reason under **Details**, and it leaves your Inbox — and delivers it to the Worker exactly as it delivers yours, at the Worker's next idle moment. It never picks an option that would allow a push, publish or deploy, real data, a migration, a security change, a cost, network access or a change outside the project, nor a dependency install unless you allowed dependencies for that project: those questions stay in your Inbox. The first answer counts: once it has answered, your tap on the same question is refused as already answered, and once you have answered, so is its. After a finished step, it checks that what you asked for is done and, if work remains, tells the Manager what to do next. To correct a Worker — one looping on the same failure, or growing process on a small request — it can write to the **Worker** directly: the Worker gets the command when its turn ends, and its Manager gets a copy at the same time. It can stop a Worker in the middle of its turn only within 10 minutes of a **Dangerous command** signal of that Worker.
+  Stuck, waiting on a permission and dangerous command are **alerts** in your Inbox, in every project, until they clear. A signal reaches the Orchestrator only in a project where a kind of decision is Shadow or Delegated. paseo-bm itself never stops anyone.
+- **It leaves Workers' questions to you.** In this version it answers none of them, whatever your policy says: they stay yours, in the Inbox.
+- **It moves unfinished work on, within your policy.** After a finished step with work left, it checks that what you asked for is done and, where your policy covers the command, tells the Manager what to do next; otherwise it asks you. To correct a Worker — one looping on the same failure, or growing process on a small request — it can write to the **Worker** directly, on the same authority: the Worker gets the command when its turn ends, and its Manager gets a copy at the same time. In a project where a kind of decision is Shadow or Delegated, a **Dangerous command** signal opens a 10-minute window in which it may stop that Worker in the middle of its turn; the stop still needs the authority any command needs. Outside that window it cannot interrupt a Worker.
 - **The limits hold whatever it decides.** Every command it sends carries the `limits:` line: no commit, push or deploy, and no touching real data, unless you said so.
-- **Big decisions come to you** ([below](#big-decisions)).
+- **Big decisions come to you** ([below](#big-decisions)): no policy covers them.
 - **A loop guard.** It sends at most 12 commands for one request (or one project, without a request) in 24 hours; after that it has to ask you.
+
+**Why something exists.** Ask the Orchestrator why a bead, a changed file or a decision exists: it reads the chain behind it — the request, its decisions, beads, changes, checks and reviews — without changing anything.
+
+**Compaction.** When a Manager's or Worker's conversation crosses the thresholds in **Settings → Coordination**, the Orchestrator may have it compact: paseo-bm sends `/compact` at a safe moment (after a Worker's report, or when a Manager is idle), then a `BM-STATE` note restoring what matters from paseo-bm's records — the request, your words, the decisions, the report's facts. The agent's chat shows both (the note as "State restored after compaction"); they are paseo-bm's, not yours — Work does not show them as your words — and a `/compact` you type yourself stays yours. Inbox → Decided for you lists it with whether it worked. Turning compaction off in Settings stops it at once.
+
+**Handoff.** With handoff on in **Settings → Coordination**, the Orchestrator may hand a request that has grown too heavy to a fresh Worker: the old Worker writes a short note, paseo-bm builds a brief from its records, and the request's Manager creates the successor from it — the request keeps its id. The old Worker stays in your list, marked replaced, and paseo-bm tells it in its chat ("Handed over to another Worker") to stop; nothing is archived. Work's timeline shows "Handed over to Worker 2 from Worker 1" and the command card reads "Coordination · handoff". A successor's finish is verified only by checks it ran itself. Turning handoff off stops a pending one at its next step.
+
+**Advice.** After every N finished requests of a project (**Settings → Coordination**, 5 by default, 0 turns it off) the Orchestrator reviews the project's figures — repeated questions, blocked rounds, reviews, stalls, heavy requests — and may ask you in the Inbox about one change: save a precedent, set a kind of decision's autonomy (never release, data, security or cost, and **Delegated** only where Insights offers it), or change the advice cadence. The question says exactly what each option sets, and paseo-bm applies it only when you pick that option yourself: your policy, a precedent or the Orchestrator never answers it. You can also ask the Orchestrator for advice in its chat at any time.
 
 ### Big decisions
 
-A command must declare what it allows. Push, publish or deploy, real data, a migration, a security change and a cost are **big decisions**: neither Autopilot nor your word in its chat covers them — only a decision you answered does, for one command within an hour of your answer. Your answer to such a decision asks you to confirm first.
+A command must declare what it allows. Push, publish or deploy, real data, a migration, a security change and a cost are **big decisions**: neither your autonomy policy nor your word in its chat covers them — only a decision you answered does, for one command within an hour of your answer. Your answer to such a decision asks you to confirm first.
 
 As a backstop, before a command of the Orchestrator leaves, paseo-bm also reads its subject and instructions for words of five kinds:
 
@@ -485,33 +561,21 @@ As a backstop, before a command of the Orchestrator leaves, paseo-bm also reads 
 | Cost | billing, cost, pricing, paid, subscription |
 | New dependencies | npm install, pnpm add, yarn add, a new dependency, license |
 
-(Vietnamese words for the same things count too.) A word that follows a "not" in the same sentence — "do not push", "without deploying" — does not count. A match that the command did not declare stops it: nothing is sent, and the Orchestrator is told to declare the effect or ask you. The check is a word rule, so a harmless mention ("the security page") also comes to you; it never lets a matching command through. Kinds you allowed for a project in an earlier version are kept until the next version replaces them; no screen changes them now.
+(Vietnamese words for the same things count too.) A word with a "not", "no", "never", "without", "avoid" or "stop" up to four words before it in the same sentence — "do not push", "without deploying", "stop the push" — does not count. A match that the command did not declare stops it: nothing is sent, and the Orchestrator is told to declare the effect or ask you. The check is a word rule, so a harmless mention ("the security page") also comes to you; it never lets a matching command through. Nothing switches the word check off: kinds an earlier version let you allow per project no longer count.
 
-A wrong answer costs a Worker turn, not your data: you can always overrule it by writing to the Manager yourself.
+A wrong command costs a Worker turn, not your data: you can always overrule it by writing to the Manager yourself.
 
 ### Stalled work
 
-paseo-bm looks once a minute at the recorded traces and the agent list — no conversation is read and no model is called — at every request with activity in the last 24 hours. A request stalls when it is neither finished nor waiting for you and none of its Workers and Reviewers has run for **5 minutes**, or when it has more review calls than its size's budget. It becomes a **Request stalled** alert in your Inbox, once, and clears when an agent runs again. A request waiting for your answer is not stalled: its question is already in the Inbox. For a project on Autopilot, the stall is also an event for the Orchestrator; otherwise nothing is sent to anyone.
+paseo-bm looks once a minute at the recorded traces and the agent list — no conversation is read and no model is called — at every request with activity in the last 24 hours. A request stalls when it is neither finished nor waiting for you and none of its Workers and Reviewers has run for **5 minutes**, or when it has more review calls than its size's budget. It becomes a **Request stalled** alert in your Inbox, once, and clears when an agent runs again. A request waiting for your answer is not stalled: its question is already in the Inbox. In a project where a kind of decision is **Shadow** or **Delegated**, the stall is also an event for the Orchestrator; otherwise nothing is sent to anyone.
 
-### Signals the Orchestrator reads
+### What the Orchestrator reads
 
-Seven rules look at each request. They are plain rules over the recorded traces, with no model call. No screen shows them and they never send anything: they are signals the Orchestrator weighs with judgement (it checks, for example, whether you asked for the beads a Small request created).
-
-| Signal | Rule id | Raised when |
-|---|---|---|
-| Small request with heavy process | `process.small-heavy` | A Small request created beads, or wrote or edited a file under `docs/plans/` or `docs/adr/`. A Small request may still correct the documents that describe what it changes, so those do not count. |
-| Medium or Large request without a review | `process.no-review` | A Medium or Large request finished with no Reviewer at all |
-| More review calls than the budget | `review.over-budget` | More review calls than the size's budget (Small 2, Medium 2, Large 4) |
-| Agent failed its first turn | `agent.failed-first-turn` | A Worker's or Reviewer's first recorded turn failed, or it is in an error state without any turn |
-| Agent model corrected by paseo-bm | `agent.model-corrected` | paseo-bm replaced the model a Worker or Reviewer was asked to run on with the one set in Settings → Agents (the match is by role, workspace and time, so it is marked inferred) |
-| Report malformed or missing | `report.malformed` | A Worker report had fields that could not be read or were incomplete, or a finished request has no `received` report |
-| Manager answered in another language | `manager.language-mismatch` | After your latest message to the Manager, one of its replies is in the other language. Only Vietnamese and English are told apart; a request in any other language is never flagged. |
-
-A rule that lacks the data it needs says **unknown** instead of staying silent.
+It reads your projects through its tools — the requests, their reports and questions, the agents' recent messages, the repository read-only — not through flags. One rule stays: a request with **more review calls than its size's budget** (Small 2, Medium 2, Large 4) is a stall (above). The other process figures earlier versions flagged per request — a Small request with heavy process, a Medium or Large request without a review, an agent that failed its first turn, a malformed report, a reply in another language — are now measured across requests by the replay (`npm run eval:replay`, *Process* figures).
 
 ### Its data, and cleaning up
 
-- **On disk:** `~/.paseo-bm/orchestrator/` — the projects on Autopilot, the commands it sent, the open 10-minute allowances to stop a Worker, its notes, the workflow assessments and its `home` folder; its decisions are in `~/.paseo-bm/decisions/` with the Workers' questions ([the full list](#the-data-folder-paseo-bm)). Deleting a request's history also deletes the workflow assessments that covered it.
+- **On disk:** `~/.paseo-bm/orchestrator/` — the commands it sent, the open 10-minute allowances to stop a Worker, its notes and its `home` folder; its decisions are in `~/.paseo-bm/decisions/` with the Workers' questions ([the full list](#the-data-folder-paseo-bm)). Deleting a request's history also deletes the workflow assessments that covered it.
 - **In Paseo:** the **Beads Orchestrator** agent and its `home` workspace, created only by your confirmation of **Start the Orchestrator…**. paseo-bm never archives or deletes them; archive the agent and remove the workspace in Paseo when you no longer want them.
 - **Remove paseo-bm's settings…** removes the `bm-orchestrator` role with the other three, and — if you also choose to delete the data — the whole `~/.paseo-bm/orchestrator/` folder. The agent and its workspace in Paseo stay until you remove them.
 
@@ -523,7 +587,7 @@ Records live in `~/.paseo-bm/traces/`: one directory per workspace, one file per
 - **You can delete** one request (its **Details** in Work), and every trace older than 30 days or every trace of a workspace (**Settings → Data → Trace storage**, or a closed workspace's page in Work). Settings → Data also reminds you that this history holds your agents' conversation.
 - **Every deletion shows first** how many traces and how many bytes will go, and how many of those requests are still running. It then asks you to confirm, and the safe answer is the default.
 - **Deletion is irreversible.** There is no undo and no bin.
-- Deleting a request's traces also deletes the Orchestrator's workflow assessments that covered it.
+- Deleting a project's traces also deletes a workflow-assessments file an earlier version kept for that project, since it may quote them.
 - Deleting traces removes only paseo-bm's own recording. Your beads, documents, agents and Paseo conversations are untouched.
 - Updating paseo-bm never deletes the store.
 
@@ -552,10 +616,12 @@ Data** shows the folder it is using and how it was found.
 | `~/.paseo-bm/traces/` | The recorded requests Work shows: `meta.json`, plus one directory per workspace with `meta.json` and `events-<YYYYMM>.jsonl`. **Your data**: an update never touches it. Delete it from Work or Settings → Data. |
 | `~/.paseo-bm/decisions/` | One file per workspace with every decision put to you — a Worker's questions, the Orchestrator's decisions, a stopped agent's incident — with its options, your answer, what it allowed and what was delivered. Open ones are always kept; of the settled ones, the 500 newest. Your data. |
 | `~/.paseo-bm/inbox/alerts.json` | The Inbox's alerts: open ones, and the 500 newest cleared ones. |
-| `~/.paseo-bm/role-extras.json` | Additional role instructions saved with an earlier version. No screen edits them now; they still apply to new agents. Your data. |
+| `~/.paseo-bm/autonomy/policy.json` | Your autonomy policy from Settings → Autonomy: per project and kind of decision, who decides it, when you set it and, for a delegated one, who decides it for you; and per project whether the Orchestrator predicts your answers. No file means every decision is yours. Your data. |
+| `~/.paseo-bm/autonomy/precedents.json` | Your precedents, saved from a decision card or in Settings → Autonomy: for each, the subject, the project (or all), your answer, the decision it came from, when it was saved, until when it holds and what replaced it. Every active one is kept, and the 500 newest ended, expired or replaced ones. Your data. |
+| `~/.paseo-bm/role-extras.json` | Additional role instructions saved with an earlier version. Never read now; deleted with the data by **Remove paseo-bm's settings…**. Your data. |
 | `~/.paseo-bm/role-fallback.json` | Your fallback chains from Roles & models: each role's policy and fallback entries (provider, model, thinking, mode), plus optional detection `patterns` you edit by hand. Your data. |
 | `~/.paseo-bm/role-fallback-state.json` | The fallback incidents: each agent that stopped on its provider plan, what was chosen on its card, and the replacement. At most 200 are kept. Your data. |
-| `~/.paseo-bm/orchestrator/` | The Orchestrator's files: `settings.json` (the projects on **Autopilot**), `proposals.json` (every command the Orchestrator sent, with its authority — Autopilot or your word in chat — and whether it was delivered; the 200 newest), `stalls.json` (each open 10-minute allowance to stop a Worker; at most 500), `notes/<workspace id>.json` (the Orchestrator's notes on a project, the 20 newest), `model-corrections.json` (the models the creation hook replaced, the 500 newest), `assessments/<workspace id>.jsonl` (workflow assessments, which may quote the project's messages with secrets masked) and `home/` (the Orchestrator's own workspace, with a `README.md`). Your data. |
+| `~/.paseo-bm/orchestrator/` | The Orchestrator's files: `proposals.json` (every command the Orchestrator sent, with its authority — your policy, a decision you answered or your word in chat — and whether it was delivered; the 200 newest), `stalls.json` (each open 10-minute allowance to stop a Worker; at most 500), `notes/<workspace id>.json` (the Orchestrator's notes on a project, the 20 newest), and `home/` (the Orchestrator's own workspace, with a `README.md`). A `settings.json` (the projects an earlier version had on Autopilot), an `assessments/` folder or a `model-corrections.json` an earlier version wrote there is ignored, and deleted with the folder. Your data. |
 | `~/.paseo-bm/ui/` | Small files of the plugin's own: `budget-told.json` (which review-budget overruns were announced), `agent-tools.json` (the port of the agents' tool endpoint), and `setup-state.json` (what setup has done: which roles were created, whether paseo-bm turned Paseo's agent tools on and what they were before, the last skills run, and whether you removed paseo-bm's settings). |
 | `~/.paseo-bm/home.json` | A pointer to a data folder somewhere else, written **only** by `npx paseo-bm@0.4.0` when it migrates an install that used `--home`. Delete the file to drop the pointer. |
 
@@ -564,9 +630,9 @@ nothing in 0.4.0 and are never deleted by it. After migrating you can delete `pl
 by hand.
 
 Files earlier 0.4 versions wrote and this one no longer reads — `ui/qa-ledger.json`,
-`ui/answer-marks.json`, and older kinds of entry in the Orchestrator's `proposals.json`, `stalls.json`
-and `settings.json` — do no harm: they are ignored, the Orchestrator's older entries are dropped the
-next time that file is written, and **Remove paseo-bm's settings…** deletes all of them with your data.
+`ui/answer-marks.json`, the Orchestrator's `settings.json`, and older kinds of entry in its
+`proposals.json` and `stalls.json` — do no harm: they are ignored, those older entries are dropped the
+next time their file is written, and **Remove paseo-bm's settings…** deletes all of them with your data.
 
 Every write goes to a temporary file first, is `fsync`ed and then renamed into place, with mode
 `0600` and a check that no component of the path is a symlink. A run killed mid-write can leave a
@@ -806,7 +872,6 @@ the npm plugin would not load and your directory install was put back — nothin
 - **Beads of a closed workspace are not shown.** Its request history is still readable from **Closed workspaces with history** in Work.
 - **Costs are estimates** from a bundled price table.
 - **Only paseo-bm's own messages become chat cards**; a Worker's ordinary chat text stays plain (use the **Beads in this chat** panel for its beads).
-- **The Orchestrator is one model's view, on rules that are simple.** Its signals are worked out again from the recorded traces every time, so they can change when agents are deleted; the language check tells only Vietnamese from English, and `process.small-heavy` counts beads, plans and ADRs only. Its read-only behaviour, and on Autopilot its judgement of a large change of scope or anything irreversible, rest on its instructions, as the Reviewer's behaviour does; the plugin enforces where a command may go, when it may be sent, its limits, when a Worker may be stopped mid-turn, and the big-decision gate — a word rule, which stops a harmless mention and cannot catch a risk put in other words. The live watch looks every 2 minutes at 5 Workers at most, so a short dangerous command can finish before anyone looks. A Claude Worker's timeline does not carry a command's exit code, so **Same command failing** is not raised for Workers on Claude. The backstop also reads the Orchestrator's own stop commands: a stop that names the risky command ("run no more git push") is refused unless it declares that effect, so the stop may wait for your answer. Outside Autopilot a stall is resolved only when you look — the Inbox alert — and act or tell the Orchestrator. A command queued for a working Manager is lost if the plugin reloads before that turn ends. Autopilot has no switch on a screen in this version: you turn it on and off in the Orchestrator's chat.
-- **Additional role instructions saved with an earlier version** still apply to new agents in every workspace; no screen edits them in this version.
+- **The Orchestrator is one model's view.** It reads your projects through bounded tools; the replay's process figures are worked out again from the recorded traces every time, so they can change when agents are deleted; its language check tells only Vietnamese from English. Its read-only behaviour, and where your policy lets it act, its judgement of a large change of scope or anything irreversible, rest on its instructions, as the Reviewer's behaviour does; the plugin enforces where a command may go, when it may be sent, its limits, when a Worker may be stopped mid-turn, and the big-decision gate — a word rule, which stops a harmless mention and cannot catch a risk put in other words. The live watch looks every 2 minutes at 5 Workers at most, so a short dangerous command can finish before anyone looks. A Claude Worker's timeline does not carry a command's exit code, so **Same command failing** is not raised for Workers on Claude. The backstop also reads the Orchestrator's own stop commands: "Stop the push" passes, but a stop whose text also names the risky command with no negation before it ("how many git push runs did you make?") is refused unless it declares that effect, which only a decision you answered covers — so that stop waits for your answer. In a project where no kind of decision is Shadow or Delegated, a stall reaches only you — the Inbox alert — and is resolved when you act or tell the Orchestrator. A command queued for a working Manager is lost if the plugin reloads before that turn ends. In this version the Orchestrator answers no Worker's question: they all come to you.
 - **Paseo has no uninstall hook**, so removing paseo-bm's configuration is a button you press before removing the plugin.
-- Not available yet: decisions the agents take for you (the Inbox's **Decided for you**), suggested extra agent profiles, a limit on parallel Workers, report export, remote daemons, Windows support, and a code-enforced review budget.
+- Not available yet: suggested extra agent profiles, a limit on parallel Workers, report export, remote daemons, Windows support, and a code-enforced review budget.

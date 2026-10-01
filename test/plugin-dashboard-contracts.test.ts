@@ -19,10 +19,13 @@ import {
   tracesListRpc,
   tracesReassignRpc,
   usageSchema,
+  checksVerdictSchema,
+  claimLabelSchema,
   type TraceDetail,
   type TraceRecord,
   type TraceSummary,
 } from "../plugin/shared/contracts";
+import { CHECKS_VERDICTS, CLAIM_LABELS } from "../plugin/shared/evidence";
 
 /**
  * WP-201: the Dashboard contracts and the persisted record schema.
@@ -244,6 +247,27 @@ describe("Dashboard data contracts", () => {
     expect(() => traceSummarySchema.parse({ ...summary, errors: { failedTurns: 1 } })).toThrow();
   });
 
+  it("carries a request's finish as an optional, additive field (autonomy design §C.6; bead 7gxw.4)", () => {
+    const verification = {
+      reportAt: "2026-09-16T09:18:00.000Z",
+      checks: "self-reported",
+      named: [{ check: "npm test", label: "self-reported" }],
+      files: [{ path: "src/a.ts", label: "detected" }],
+      beads: [{ id: "bd-1", label: "detected" }],
+      changedFiles: true,
+      unverified: true,
+    };
+    expect(traceSummarySchema.parse({ ...summary, verification }).verification).toEqual(verification);
+    expect(traceDetailSchema.parse({ ...detail, verification }).verification).toEqual(verification);
+    // Without it, a row parses as before; the state keeps its values.
+    expect(traceSummarySchema.parse(summary)).not.toHaveProperty("verification");
+    expect(() => traceSummarySchema.parse({ ...summary, state: "finished-unverified" })).toThrow();
+    expect(() => traceSummarySchema.parse({ ...summary, verification: { ...verification, checks: "probably" } })).toThrow();
+    // The contract's enums are the ones shared/evidence.ts labels with.
+    expect(checksVerdictSchema.options).toEqual([...CHECKS_VERDICTS]);
+    expect(claimLabelSchema.options).toEqual([...CLAIM_LABELS]);
+  });
+
   it("rejects a summary that is missing a required field", () => {
     const withoutLinking: Record<string, unknown> = { ...summary };
     delete withoutLinking.linking;
@@ -395,7 +419,6 @@ describe("Dashboard RPC contracts", () => {
 describe("Dashboard error codes", () => {
   it("registers exactly the approved codes", () => {
     expect([...DASHBOARD_ERROR_CODES]).toEqual([
-      "E_TIMELINE_UNAVAILABLE",
       "E_BEADS_STORE_UNREADABLE",
       "E_TRACE_NOT_FOUND",
       "E_TRACE_STORE_UNWRITABLE",
@@ -404,7 +427,6 @@ describe("Dashboard error codes", () => {
       // Beads screen delta, 2026-09-16.
       "E_BEAD_NOT_FOUND",
       // Setup screen delta, 2026-09-16.
-      "E_ROLE_EXTRA_INVALID",
       "E_TOOL_PRESENT",
       "E_TOOL_INSTALL_FAILED",
       // Worker-fallback-and-role-settings delta 20260921 §5 (ADR-008).
@@ -424,13 +446,8 @@ describe("Dashboard error codes", () => {
       "E_SKILLS_INSTALL_FAILED",
       // Orchestrator design §8: a failed write of the Orchestrator's store.
       "E_ORCHESTRATOR_WRITE_FAILED",
-      // Orchestrator design §7: orchestrator.apply-suggestion.
-      "E_SUGGESTION_TOO_LONG",
-      "E_ROLE_EXTRA_CHANGED",
       // Orchestrator design §3.3, §8: no bm-orchestrator profile, or its provider is not available.
       "E_ORCHESTRATOR_UNAVAILABLE",
-      // Orchestrator design §6A, §8: set-autopilot on without its dialog.
-      "E_AUTOPILOT_NOT_CONFIRMED",
       // Autonomy design §A.4, §A.6 (ADR-017): the decisions.* RPCs.
       "E_DECISION_NOT_FOUND",
       "E_DECISION_SETTLED",
@@ -438,6 +455,21 @@ describe("Dashboard error codes", () => {
       "E_DECISION_NOT_CONFIRMED",
       "E_DECISION_NOT_NEEDS_CONFIRMATION",
       "E_DECISION_WRITE_FAILED",
+      // Autonomy design §G.7: coordination.set.
+      "E_COORDINATION_INVALID",
+      "E_COORDINATION_WRITE_FAILED",
+      // Autonomy design §B.2, §B.9: autonomy.set and autonomy.reset.
+      "E_AUTONOMY_OWNER_ONLY",
+      "E_AUTONOMY_NOT_CONFIRMED",
+      "E_AUTONOMY_INVALID",
+      "E_AUTONOMY_WRITE_FAILED",
+      // Autonomy design §B.6, §B.9: the precedents.
+      "E_PRECEDENT_INVALID",
+      "E_PRECEDENT_NOT_FOUND",
+      "E_PRECEDENT_WRITE_FAILED",
+      // Autonomy design §B.7: the Inbox's Decided for you and its last-opened time.
+      "E_DECISION_NOT_DELEGATED",
+      "E_INBOX_WRITE_FAILED",
     ]);
   });
 

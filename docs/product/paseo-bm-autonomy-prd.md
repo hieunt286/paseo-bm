@@ -174,8 +174,8 @@ Priority: **P1** = required for the phase it belongs to; **P2** = in that phase 
 | ID | Requirement | Pri | Acceptance criteria |
 |---|---|---|---|
 | REQ-140 | **Spike** | P1 | A report on whether Paseo's permission events can hold an action before it runs, per provider (Claude, Codex, OpenCode): reliability, added latency, behaviour when the plugin is down |
-| REQ-141 | **Held before it runs** | P1 (if the spike passes) | Release, real-data, outside-the-workspace, dependency-install and network actions are held before they run and become decisions, unless a grant or the policy covers them; A-6 = 0 on the suite |
-| REQ-142 | **Fallback** | P1 (if the spike fails) | Detection signals plus capability limits stay, documented as detection, not prevention |
+| REQ-141 | **Held before it runs** | P1 (the spike passed for Claude and Codex; built per project, off by default — owner's decision, 2026-10-01) | In the projects where the owner turns the action boundary on (it is off by default), release, real-data, outside-the-workspace, dependency-install and network actions of the Workers and Reviewers created afterwards are held before they run and become decisions, unless a grant or the policy covers them; turning it on or off is the owner's alone, after a confirmation that says what changes; A-6 = 0 on the suite and, in the field, over the requests run with the boundary on |
+| REQ-142 | **Detection where nothing is held** | P1 | For every role the boundary does not hold — every project whose boundary is off (the default), providers it does not cover, a role whose mode the owner set by hand, an agent created without it — detection signals plus capability limits stay, documented as detection, not prevention; the user-facing docs say which roles are held before they run and which are only watched |
 
 ### Phase 5 — Traceability
 
@@ -226,7 +226,7 @@ Priority: **P1** = required for the phase it belongs to; **P2** = in that phase 
 
 ## 10. Phase scope
 
-Each phase ends with its exit gate: its tests, the replay of the owner's own use of the new build (field), a small live check on an isolated daemon where the phase changes live behaviour, and the owner's acceptance. **The full evaluation suite runs once, after every other piece of work is done** (owner decision 2026-09-29): on `paseo-bm-plugin@0.4.1` and on the final build, as the programme's closing gate (Phase 6, programme evaluation). A phase whose field metrics did not improve is not followed by the next one until its design is revisited.
+Each phase ends with its exit gate: its tests, the replay of the owner's own use of the new build (field), a small live check on an isolated daemon where the phase changes live behaviour, and the owner's acceptance. **Since 2026-09-30 (owner decision, change-006) the phases are built one after another without waiting for each other's field gate**: every phase's tests and isolated live checks run while it is built, and every phase's field exit is judged together, in one combined field period on the final build, before the programme evaluation. **The full evaluation suite runs once, after every other piece of work is done** (owner decision 2026-09-29): on `paseo-bm-plugin@0.4.1` and on the final build, as the programme's closing gate (Phase 6, programme evaluation). A phase whose field metrics did not improve is not followed by the next one until its design is revisited.
 
 **One release for the programme** (Q-101, owner 2026-09-29): phases are internal milestones, run and accepted on the owner's machine from the working tree. Nothing is released per phase; the programme is released once, after every phase below has met its exit criteria and the owner has accepted the whole. The version and the release itself stay the owner's.
 
@@ -266,6 +266,8 @@ The owner accepts deleting what no longer fits (2026-09-29). Rules:
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-10-01 | hieu.nt10 (drafted by Claude, bead `loga.4`) | REQ-141 as built on the pass path: the action boundary is turned on per project by the owner and is off by default (owner's decision, change-010); REQ-142 is no longer the fail path's alternative but the detection that stays for every role the boundary does not hold (change-009 C1) |
+| 2026-09-30 | hieu.nt10 (drafted by Claude) | §10: the phases are built continuously and their field exits judged together in one combined field period on the final build (owner decision, change-006); targets and scope unchanged |
 | 2026-09-30 | hieu.nt10 (drafted by Claude) | Owner decisions on coordination: the Orchestrator may compact a Manager or a Worker and have the Manager hand a Worker's request over, on its own initiative, within Settings (REQ-134–136, Phase 3); measurement, an intervention log with outcomes and proactive advice every N finished requests come first (REQ-126–128, Phase 2); A-8 gets a Phase 3 reduction target on the heaviest requests; A-12 added; the Orchestrator persona widened. See ADR-021 and design Part G |
 | 2026-09-29 | Claude (owner's delegation) | A-3 target refined at the Phase 1 live check: the in-place confirmation X-4 requires for a release, data, security or cost effect is a real tap and counts, so such a decision's target is 2 and every other decision's stays 1 (§2, §10) |
 | 2026-09-29 | Claude (owner's delegation) | Phase 0 exit: targets confirmed, approved by Claude under the owner's delegation (2026-09-29). Two amendments from a critical review: A-8 drops "−20 % by Phase 3" (no phase before 6 has a mechanism acting on the Worker's 93 % of tokens — a target needs a mechanism); A-1 is checked at the Phase 2 start against the measured class mix. A-6 is measured exactly from Phase 1 on |
@@ -314,4 +316,4 @@ Confirmed or corrected by each phase's design (§11).
 | Setup → Agents → per-role "additional instructions" (`role-extras.json`, Preview, `apply-suggestion`) | Precedents per project and the rewritten roles (experience concept X-2, owner 2026-09-29) | 2 |
 | Runtime rule flags used only for assessment (`process.small-heavy`, `manager.language-mismatch`, …) | Metrics in the replay | 2 |
 | Worker-signal regexes as the safety mechanism (`danger`, `outside`) | Hold before execution (REQ-141), or kept as documented fallback (REQ-142) | 4 |
-| The `npx paseo-bm` migration CLI in `src/` | Removed from the repository after the owner confirms no 0.3.x install remains | owner's call |
+| The `npx paseo-bm` migration CLI in `src/` | Removed from the repository on 2026-09-30 ([ADR-022](../adr/ADR-022-retirements-after-code-review.md)); its source is the `v0.4.0` tag | done |

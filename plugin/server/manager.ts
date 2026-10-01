@@ -32,9 +32,9 @@ import { setAgentLabel, setAgentMode, type PaseoCliDeps } from "./paseo-cli";
 import { listAllAgents, roleOfAgent } from "./agent-role";
 import { providerId } from "./provider-id";
 import { AUTO_APPROVE_FEATURE, capabilityOf, featuresFor, managerModeFor, modesFor, runPostureOf } from "./role-mode";
-import { workspaceDirectory, type DashboardPaseo } from "./dashboard-rpc";
+import { workspaceDirectory, type DashboardPaseo } from "./paseo-directory";
 import { readIncidents } from "./fallback-state";
-import { dataHomeOf } from "./role-extras";
+import { dataHomeOf } from "./role-instructions";
 import { ensureRoles, type EnsureRolesResult } from "./setup-roles";
 import { recordTools } from "./tools-check";
 import { INSTRUCTIONS_LABEL, currentInstructionsHash, hasOutdatedInstructions } from "./instructions-label";
@@ -178,8 +178,12 @@ export interface ManagerPaseo {
 
 export interface EnsureManagerDeps {
   paseo: ManagerPaseo;
-  /** Returns the text of `roles/manager.md`. */
-  readInstructions: () => Promise<string>;
+  /**
+   * Returns the text of `roles/manager.md`, with the Runtime facts and the
+   * owner's precedents of the workspace the Manager is created in (autonomy
+   * design §B.6).
+   */
+  readInstructions: (workspaceId: string) => Promise<string>;
   /** Plugin version written to `bm.version`. Defaults to the baked-in version. */
   version?: string;
   /** Where a failed mode lookup is reported. Defaults to `console.warn`. */
@@ -606,7 +610,7 @@ export async function createManager(
   options: CreateManagerOptions,
 ): Promise<CreateManagerResult> {
   const { providerSelection: selection, modeId, thinkingOptionId, featureValues, prompt } = options;
-  const systemPrompt = await options.readInstructions();
+  const systemPrompt = await options.readInstructions(workspaceId);
   // `manager.ensure` names the profile, as it always has; a replacement names its provider.
   const alias = providerId(selection) ?? selection;
   const source = alias === MANAGER_PROFILE_ID ? `profile "${MANAGER_PROFILE_ID}"` : `provider "${selection}"`;

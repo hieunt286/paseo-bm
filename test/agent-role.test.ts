@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { listAllAgents, roleOfAgent, roleOfProvider } from "../plugin/server/agent-role";
 import { handleChatPeers } from "../plugin/server/chat-rpc";
-import { agentFactsOf, bmAgentsOf, type DashboardPaseo } from "../plugin/server/dashboard-rpc";
+import { agentFactsOf, bmAgentsOf, type DashboardPaseo } from "../plugin/server/paseo-directory";
 import { FALLBACK_ROLES, fallbackAlias, fallbackAliasOf, positionOfAlias } from "../plugin/shared/fallback";
 
 /**

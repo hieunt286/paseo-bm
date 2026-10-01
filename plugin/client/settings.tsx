@@ -12,12 +12,15 @@
  */
 import { type PluginSurfaceProps, useSettings } from "@getpaseo/plugin/client";
 import { useMemo, useState } from "react";
-import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { ScrollView, Text, TextInput, View } from "react-native";
 import {
   DEFAULT_WARN_ABOVE_BYTES,
   dashboardSettings,
 } from "../shared/settings";
-import { HOST_SCOPE_NOTICE, dashboardStyles, formatBytes, toneColor } from "./dashboard-model";
+import { formatBytes } from "./format";
+import { HOST_SCOPE_NOTICE } from "./history-model";
+import { dashboardStyles } from "./styles";
+import { Button, ToneText } from "./ui";
 
 /** Settings screen id, used by `openSettings` from the Dashboard. */
 export const SETTINGS_SCREEN_ID = "paseo-bm-settings";
@@ -69,35 +72,34 @@ export function DashboardSettingsScreen({ theme, layout }: PluginSurfaceProps) {
         />
         <Text style={styles.body}>{`Currently ${formatBytes(current)}.`}</Text>
         {error !== null ? (
-          <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{error}</Text>
+          <ToneText tone="danger" styles={styles} theme={theme}>{error}</ToneText>
         ) : null}
         {settings.status === "error" ? (
-          <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{settings.error}</Text>
+          <ToneText tone="danger" styles={styles} theme={theme}>{settings.error}</ToneText>
         ) : null}
-        <Pressable
-          accessibilityRole="button"
+        <Button
+          label={settings.saving ? "Saving…" : "Save"}
+          kind="primary"
           accessibilityLabel="Save the warning threshold"
           accessibilityState={{ disabled: settings.saving }}
           disabled={settings.saving}
           onPress={() => {
             void save();
           }}
-          style={[styles.button, settings.saving ? { opacity: 0.5 } : null]}
-        >
-          <Text style={styles.buttonText}>{settings.saving ? "Saving…" : "Save"}</Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
+          style={settings.saving ? { opacity: 0.5 } : null}
+          styles={styles}
+        />
+        <Button
+          label={`Reset to ${formatBytes(DEFAULT_WARN_ABOVE_BYTES)}`}
+          kind="secondary"
           accessibilityLabel="Reset the warning threshold to the default"
           onPress={() => {
             setDraft(null);
             setError(null);
             void settings.reset();
           }}
-          style={styles.secondaryButton}
-        >
-          <Text style={styles.secondaryButtonText}>{`Reset to ${formatBytes(DEFAULT_WARN_ABOVE_BYTES)}`}</Text>
-        </Pressable>
+          styles={styles}
+        />
       </View>
     </ScrollView>
   );

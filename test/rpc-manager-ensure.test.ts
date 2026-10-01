@@ -8,7 +8,6 @@ import {
   ensureManager,
   AGENT_TOOLS_OFF_MESSAGE,
   ManagerEnsureError,
-  type ManagerAgentHandle,
   type ManagerAgentProfile,
   type ManagerAgentSnapshot,
   type ManagerPaseo,
@@ -21,6 +20,7 @@ import { managerEnsureRpc, type FallbackIncident } from "../plugin/shared/contra
 import { createAlertStore } from "../plugin/server/alert-store";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
 import { currentInstructionsHash } from "../plugin/server/instructions-label";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 const MANAGER_HASH = currentInstructionsHash("manager");
 
@@ -57,10 +57,6 @@ const bmManagerProfile: ManagerAgentProfile = {
   thinkingOptionId: "high",
 };
 
-type CreateOptions = Parameters<
-  ReturnType<ManagerPaseo["workspaces"]["ref"]>["agents"]["create"]
->[0];
-
 interface FakeOptions {
   agents?: ManagerAgentSnapshot[];
   profiles?: ManagerAgentProfile[];
@@ -85,6 +81,8 @@ interface FakeOptions {
   available?: Array<{ provider: string; available: boolean }>;
   /** What `providers.listModels` answers per provider. */
   models?: Record<string, Array<{ id: string }>>;
+  /** The Worker, Reviewer and Orchestrator profiles; absent → `otherRoleProfiles()`. */
+  otherProfiles?: ManagerAgentProfile[];
 }
 
 /** The four aliases of a machine that has been set up (0.4.0, design §6.1; orchestrator design §3.1). */
@@ -113,115 +111,50 @@ function agent(overrides: Partial<ManagerAgentSnapshot> & { id: string }): Manag
   };
 }
 
-function fakePaseo(options: FakeOptions = {}) {
-  const store: ManagerAgentSnapshot[] = [...(options.agents ?? [])];
-  const calls: string[] = [];
-  const patches: Array<Record<string, unknown>> = [];
-  const createCalls: Array<{ workspaceId: string; options: CreateOptions }> = [];
-  const configState: { providers: Record<string, unknown>; agentProfiles: ManagerAgentProfile[]; mcp?: { injectIntoAgents: boolean } } = {
-    providers: options.providers ?? roleAliases(),
-    agentProfiles: [...(options.profiles ?? [bmManagerProfile]), ...otherRoleProfiles()],
-    ...(options.injectIntoAgents === undefined ? {} : { mcp: { injectIntoAgents: options.injectIntoAgents } }),
-  };
-  const archived: string[] = [];
-  const listFilters: unknown[] = [];
-  const pageSize = options.pageSize ?? 200;
-  let seq = 0;
-
-  const paseo: ManagerPaseo = {
-    agents: {
-      async list({ filter, page }) {
-        calls.push("list");
-        listFilters.push(filter);
-        const matching = store.filter(
-          (a) =>
-            Object.entries(filter.labels ?? {}).every(([k, v]) => a.labels[k] === v) &&
-            (filter.includeArchived || !a.archivedAt),
-        );
-        const start = page.cursor ? Number(page.cursor) : 0;
-        const slice = matching.slice(start, start + Math.min(pageSize, page.limit));
-        const next = start + slice.length;
-        const hasMore = next < matching.length;
-        return {
-          entries: slice.map((a) => ({ agent: { ...a } })),
-          pageInfo: { hasMore, nextCursor: hasMore ? String(next) : null },
-        };
-      },
-    },
-    workspaces: {
-      ref(workspaceId) {
-        return {
-          agents: {
-            async create(createOptions) {
-              calls.push("create");
-              createCalls.push({ workspaceId, options: createOptions });
-              if (options.createRejects) throw options.createRejects;
-              seq += 1;
-              const snapshot = agent({
-                id: `created-${seq}`,
-                workspaceId,
-                createdAt: "2026-09-15T12:00:00.000Z",
-                labels: { ...(createOptions.labels ?? {}) },
-                status: "initializing",
-                ...options.createdSnapshot,
-              });
-              store.push(snapshot);
-              const handle: ManagerAgentHandle = {
-                id: snapshot.id,
-                current: () => ({ ...snapshot }),
-                async archive() {
-                  archived.push(snapshot.id);
-                  snapshot.archivedAt = "2026-09-15T12:00:01.000Z";
-                  return { archivedAt: snapshot.archivedAt };
-                },
-              };
-              return handle;
-            },
-          },
-        };
-      },
-    },
+/**
+ * The shared fake SDK on a machine set up as `options` say. The host has only
+ * the provider lookups a test names (`modes`, `available`, `models`); a created
+ * agent is `initializing` unless `createdSnapshot` says otherwise.
+ */
+function daemonWith(options: FakeOptions = {}) {
+  const lookups: Array<[unknown, string]> = [
+    [options.modes, "providers.listModes"],
+    [options.available, "providers.listAvailable"],
+    [options.models, "providers.listModels"],
+    [undefined, "providers.listFeatures"],
+    [undefined, "providers.listUsage"],
+  ];
+  const fake = fakePaseo<ManagerPaseo>({
+    agents: options.agents ?? [],
+    pageSize: options.pageSize ?? 200,
     config: {
-      async get() {
-        calls.push("config.get");
-        return { config: structuredClone(configState) };
-      },
-      async patch(patch: Record<string, unknown>) {
-        calls.push("config.patch");
-        patches.push(structuredClone(patch));
-        for (const [id, entry] of Object.entries((patch["providers"] ?? {}) as Record<string, Record<string, unknown>>)) {
-          configState.providers[id] = { ...((configState.providers[id] ?? {}) as object), ...entry };
-        }
-        if (patch["agentProfiles"] !== undefined) configState.agentProfiles = structuredClone(patch["agentProfiles"]) as ManagerAgentProfile[];
-        return {};
+      providers: options.providers ?? roleAliases(),
+      agentProfiles: [...(options.profiles ?? [bmManagerProfile]), ...(options.otherProfiles ?? otherRoleProfiles())],
+      ...(options.injectIntoAgents === undefined ? {} : { mcp: { injectIntoAgents: options.injectIntoAgents } }),
+    },
+    providers: {
+      ...(options.available === undefined ? {} : { available: options.available }),
+      ...(options.models === undefined ? {} : { models: options.models }),
+      modes: () => {
+        if (options.modes === "reject") throw new Error("provider warming up");
+        if (options.modes === "hang") return new Promise<never>(() => {});
+        return options.modes;
       },
     },
-    ...(options.modes === undefined && options.available === undefined && options.models === undefined
-      ? {}
-      : {
-          providers: {
-            ...(options.modes === undefined
-              ? {}
-              : {
-                  listModes(provider: string) {
-                    calls.push(`listModes:${provider}`);
-                    if (options.modes === "reject") return Promise.reject(new Error("provider warming up"));
-                    if (options.modes === "hang") return new Promise<never>(() => {});
-                    return Promise.resolve({ modes: options.modes });
-                  },
-                }),
-            ...(options.available === undefined ? {} : { listAvailable: async () => ({ providers: options.available }) }),
-            ...(options.models === undefined
-              ? {}
-              : { listModels: async (provider: string) => ({ provider, models: options.models?.[provider] ?? [] }) }),
-          },
-        }),
+    created: () => {
+      if (options.createRejects) throw options.createRejects;
+      return { createdAt: "2026-09-15T12:00:00.000Z", status: "initializing", ...options.createdSnapshot };
+    },
+    omit: lookups.every(([given]) => given === undefined) ? ["providers"] : lookups.filter(([given]) => given === undefined).map(([, path]) => path),
+  });
+  return {
+    ...fake,
+    store: fake.agents,
+    createCalls: fake.creates,
+    archived: fake.archives,
+    liveManagers: () => fake.agents.filter((a) => a.labels?.["bm.role"] === "manager" && !a.archivedAt && a.status !== "closed"),
+    config: () => fake.config<{ providers: Record<string, unknown>; agentProfiles: ManagerAgentProfile[] }>(),
   };
-
-  const liveManagers = () =>
-    store.filter((a) => a.labels["bm.role"] === "manager" && !a.archivedAt && a.status !== "closed");
-
-  return { paseo, store, calls, patches, createCalls, archived, listFilters, liveManagers, config: () => configState };
 }
 
 const deps = (paseo: ManagerPaseo) => ({
@@ -234,7 +167,7 @@ const deps = (paseo: ManagerPaseo) => ({
 
 describe("manager.ensure — no Manager yet", () => {
   it("looks up the workspace's Managers first, then creates one from bm-manager with manager.md and both labels", async () => {
-    const fake = fakePaseo({
+    const fake = daemonWith({
       agents: [
         // Not a Manager, and a Manager of another workspace: neither counts.
         agent({ id: "worker-1", labels: { "bm.role": "worker" } }),
@@ -245,11 +178,11 @@ describe("manager.ensure — no Manager yet", () => {
     const result = await ensureManager({ workspaceId: WS }, deps(fake.paseo));
 
     expect(result).toEqual({ agentId: "created-1", created: true, otherManagerIds: [], modeNotice: null, toolsNotice: null, setupNotice: null, replacedManagerId: null });
-    expect(fake.calls.indexOf("list")).toBeLessThan(fake.calls.indexOf("create"));
+    expect(fake.calls.indexOf("agents.list")).toBeLessThan(fake.calls.indexOf("workspaces.agents.create"));
     // No label filter since delta 20260918g §4.2–§4.3: a Manager started from
     // Paseo's own new-agent flow carries no bm.role label and is recognised by
     // its bm-manager provider, which a label filter would hide from this lookup.
-    expect(fake.listFilters[0]).toEqual({ includeArchived: false });
+    expect(fake.lists[0]!.filter).toEqual({ includeArchived: false });
 
     expect(fake.createCalls).toHaveLength(1);
     const { workspaceId, options } = fake.createCalls[0]!;
@@ -265,7 +198,7 @@ describe("manager.ensure — no Manager yet", () => {
   });
 
   it("creates a new one when the only Managers are archived or closed", async () => {
-    const fake = fakePaseo({
+    const fake = daemonWith({
       agents: [
         agent({ id: "archived", archivedAt: "2026-09-14T00:00:00.000Z" }),
         agent({ id: "closed", status: "closed" }),
@@ -292,7 +225,7 @@ describe("manager.ensure — a new Manager's mode (delta 20260918 §4.1)", () =>
   const installedProfile: ManagerAgentProfile = { id: "bm-manager", provider: "bm-manager", model: "claude-opus-5" };
 
   async function create(options: FakeOptions) {
-    const fake = fakePaseo({ profiles: [installedProfile], ...options });
+    const fake = daemonWith({ profiles: [installedProfile], ...options });
     const logs: string[] = [];
     await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), log: (message) => logs.push(message) });
     return { fake, logs, options: fake.createCalls[0]!.options };
@@ -301,7 +234,7 @@ describe("manager.ensure — a new Manager's mode (delta 20260918 §4.1)", () =>
   it("starts in the provider's no-prompt mode and says so in bm.modeSet", async () => {
     const { fake, options, logs } = await create({ modes: claudeModes });
 
-    expect(fake.calls).toContain("listModes:bm-manager");
+    expect(fake.calls).toContain("providers.listModes:bm-manager");
     expect(options.config.modeId).toBe("bypassPermissions");
     expect(options.labels).toEqual({
       "bm.role": "manager",
@@ -374,7 +307,7 @@ describe("manager.ensure — a new Manager's mode (delta 20260918 §4.1)", () =>
   it("a mode lookup that never answers costs 5 s and the mode, never the Manager", async () => {
     vi.useFakeTimers();
     try {
-      const fake = fakePaseo({ profiles: [installedProfile], modes: "hang" });
+      const fake = daemonWith({ profiles: [installedProfile], modes: "hang" });
       const logs: string[] = [];
       const pending = ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), log: (message) => logs.push(message) });
       await vi.advanceTimersByTimeAsync(5000);
@@ -395,7 +328,7 @@ describe("manager.ensure — Manager already exists", () => {
     const fillers = Array.from({ length: 5 }, (_, i) =>
       agent({ id: `elsewhere-${i}`, workspaceId: "ws-2" }),
     );
-    const fake = fakePaseo({
+    const fake = daemonWith({
       // Already switched by paseo-bm (bm.modeSet): opening it costs no lookup at all.
       agents: [...fillers, agent({ id: "mgr-existing", labels: { "bm.role": "manager", "bm.modeSet": "bypassPermissions" } })],
       pageSize: 2,
@@ -436,7 +369,7 @@ describe("manager.ensure — an existing Manager is switched once (delta 2026091
   }
 
   async function open(manager: Partial<ManagerAgentSnapshot>, cliFake = fakeCli(), extra: FakeOptions = {}) {
-    const fake = fakePaseo({
+    const fake = daemonWith({
       agents: [agent({ id: "mgr-1", currentModeId: "default", ...manager })],
       profiles: [installedProfile],
       modes: claudeModes,
@@ -527,7 +460,7 @@ describe("manager.ensure — an existing Manager is switched once (delta 2026091
 
 describe("manager.ensure — two live Managers", () => {
   it("picks the newest, reports the other, and deletes or archives nothing", async () => {
-    const fake = fakePaseo({
+    const fake = daemonWith({
       agents: [
         agent({ id: "mgr-old", createdAt: "2026-09-15T08:00:00.000Z" }),
         agent({ id: "mgr-new", createdAt: "2026-09-15T10:00:00.000Z", status: "running" }),
@@ -557,7 +490,7 @@ describe("manager.ensure — a Manager without the bm.role label (delta 20260918
         return { code: 0, output: "{}", timedOut: false };
       },
     };
-    const fake = fakePaseo({
+    const fake = daemonWith({
       agents: [unlabelled({ id: "user-mgr" })],
       profiles: [{ id: "bm-manager", provider: "bm-manager", model: "claude-opus-5" }],
       modes: [
@@ -574,7 +507,7 @@ describe("manager.ensure — a Manager without the bm.role label (delta 20260918
   });
 
   it("prefers a labelled Manager over a newer unlabelled one, and reports the unlabelled one", async () => {
-    const fake = fakePaseo({
+    const fake = daemonWith({
       agents: [
         agent({ id: "bm-mgr", createdAt: "2026-09-15T08:00:00.000Z" }),
         unlabelled({ id: "user-mgr", createdAt: "2026-09-15T10:00:00.000Z" }),
@@ -588,7 +521,7 @@ describe("manager.ensure — a Manager without the bm.role label (delta 20260918
   });
 
   it("does not take another provider's unlabelled agent for a Manager", async () => {
-    const fake = fakePaseo({ agents: [agent({ id: "plain-claude", provider: "claude", labels: {} })] });
+    const fake = daemonWith({ agents: [agent({ id: "plain-claude", provider: "claude", labels: {} })] });
 
     const result = await ensureManager({ workspaceId: WS }, deps(fake.paseo));
 
@@ -599,7 +532,7 @@ describe("manager.ensure — a Manager without the bm.role label (delta 20260918
 
 describe("manager.ensure — creation fails", () => {
   it("provider not ready (create rejects): coded error, no agent left behind", async () => {
-    const fake = fakePaseo({
+    const fake = daemonWith({
       createRejects: new Error("provider bm-manager is not available"),
     });
 
@@ -618,7 +551,7 @@ describe("manager.ensure — creation fails", () => {
   ])(
     "agent created but already failed (%s): coded error, archives exactly that agent",
     async (_label, createdSnapshot) => {
-      const fake = fakePaseo({
+      const fake = daemonWith({
         agents: [agent({ id: "worker-1", labels: { "bm.role": "worker" } })],
         createdSnapshot,
       });
@@ -635,7 +568,7 @@ describe("manager.ensure — creation fails", () => {
   );
 
   it("bm-manager profile missing and nothing to create it with: coded error, nothing created", async () => {
-    const fake = fakePaseo({ profiles: [{ id: "room-worker", provider: "codex" }] });
+    const fake = daemonWith({ profiles: [{ id: "room-worker", provider: "codex" }] });
 
     const error = await ensureManager({ workspaceId: WS }, deps(fake.paseo)).catch((e: unknown) => e);
 
@@ -646,8 +579,8 @@ describe("manager.ensure — creation fails", () => {
 
 describe("manager.ensure sets the machine up (0.4.0, ADR-012 decision 4)", () => {
   /** A daemon with nothing of paseo-bm in it, and a provider to create the roles on. */
-  const fresh = (extra: Parameters<typeof fakePaseo>[0] = {}) =>
-    fakePaseo({
+  const fresh = (extra: Parameters<typeof daemonWith>[0] = {}) =>
+    daemonWith({
       providers: {},
       profiles: [],
       available: [{ provider: "codex", available: true }],
@@ -668,6 +601,22 @@ describe("manager.ensure sets the machine up (0.4.0, ADR-012 decision 4)", () =>
     );
   });
 
+  it("names the Reviewer's provider when it went to another model family (autonomy design §C.5)", async () => {
+    // A machine with nothing of paseo-bm at all: a Reviewer created whole may move (§C.5).
+    const fake = fresh({
+      otherProfiles: [],
+      available: [{ provider: "codex", available: true }, { provider: "claude", available: true }],
+      models: { codex: [{ id: "gpt-5.6-sol" }], claude: [{ id: "claude-opus-5" }] },
+    });
+
+    const result = await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), log: () => {} });
+
+    expect(result.setupNotice).toBe(
+      "paseo-bm created its roles with defaults (codex · gpt-5.6-sol; the Reviewer on claude · claude-opus-5, another model family). " +
+        "Change them in Settings → Agents.",
+    );
+  });
+
   it("names only the Orchestrator on a machine updated from 0.4.x, which had the other three roles", async () => {
     const threeRoles = roleAliases();
     delete threeRoles["bm-orchestrator"];
@@ -682,7 +631,7 @@ describe("manager.ensure sets the machine up (0.4.0, ADR-012 decision 4)", () =>
   });
 
   it("says nothing when the machine is already set up and Paseo's agent tools are on", async () => {
-    const fake = fakePaseo({ injectIntoAgents: true });
+    const fake = daemonWith({ injectIntoAgents: true });
 
     const result = await ensureManager({ workspaceId: WS }, deps(fake.paseo));
 
@@ -691,7 +640,7 @@ describe("manager.ensure sets the machine up (0.4.0, ADR-012 decision 4)", () =>
   });
 
   it("warns about Paseo's agent-tools switch on every call that opens a Manager", async () => {
-    const fake = fakePaseo({ agents: [agent({ id: "mgr-1" })], injectIntoAgents: false });
+    const fake = daemonWith({ agents: [agent({ id: "mgr-1" })], injectIntoAgents: false });
 
     const first = await ensureManager({ workspaceId: WS }, deps(fake.paseo));
     const second = await ensureManager({ workspaceId: WS }, deps(fake.paseo));
@@ -732,7 +681,7 @@ describe("manager.ensure sets the machine up (0.4.0, ADR-012 decision 4)", () =>
   });
 
   it("refuses with the agent-tools sentence alone when the roles already existed", async () => {
-    const fake = fakePaseo({ injectIntoAgents: false });
+    const fake = daemonWith({ injectIntoAgents: false });
 
     const error = await ensureManager({ workspaceId: WS }, deps(fake.paseo)).catch((e: unknown) => e);
 
@@ -751,7 +700,7 @@ describe("manager.ensure sets the machine up (0.4.0, ADR-012 decision 4)", () =>
   });
 
   it("creates no Manager when the roles cannot be created, and points at Setup", async () => {
-    const fake = fakePaseo({ providers: {}, profiles: [], available: [{ provider: "codex", available: false }] });
+    const fake = daemonWith({ providers: {}, profiles: [], available: [{ provider: "codex", available: false }] });
 
     const error = await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), log: () => {} }).catch((e: unknown) => e);
 
@@ -795,7 +744,7 @@ describe("plugin server entry", () => {
     const registration = handle.mock.calls.find(([contract]) => contract === managerEnsureRpc);
     expect(registration).toBeDefined();
 
-    const fake = fakePaseo({
+    const fake = daemonWith({
       agents: [
         agent({ id: "mgr-old", createdAt: "2026-09-15T08:00:00.000Z" }),
         agent({ id: "mgr-new", createdAt: "2026-09-15T09:00:00.000Z" }),
@@ -819,6 +768,48 @@ describe("plugin server entry", () => {
   it("reads roles/manager.md from the payload", async () => {
     expect(await readManagerInstructions()).toBe(managerMd);
   });
+
+  it("creates the Manager with the owner's precedents of its workspace and the global ones, under the role file's label (autonomy design §B.6)", async () => {
+    const dataHome = mkdtempSync(join(isolatedHome, "bm-precedents-"));
+    process.env.PASEO_BM_HOME = dataHome;
+    try {
+      const entry = (id: string, scope: string, createdAt: string) => ({
+        id: `p:${id}`,
+        scope,
+        subject: `subject-${id}`,
+        text: `Answer ${id}.`,
+        sourceDecisionId: null,
+        createdAt,
+        expiresAt: "2099-10-20T10:00:00.000Z",
+        supersededBy: null,
+      });
+      mkdirSync(join(dataHome, "autonomy"), { recursive: true });
+      writeFileSync(
+        join(dataHome, "autonomy", "precedents.json"),
+        JSON.stringify({ version: 1, entries: [entry("global", "all", "2026-09-20T10:00:00.000Z"), entry("mine", WS, "2026-09-21T10:00:00.000Z"), entry("theirs", "ws-2", "2026-09-22T10:00:00.000Z")] }),
+      );
+      const handle = vi.fn();
+      contribute({ handle, registerSettings: vi.fn() } as unknown as Parameters<typeof contribute>[0]);
+      const registration = handle.mock.calls.find(([contract]) => contract === managerEnsureRpc);
+      const fake = daemonWith();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      await registration![1]({ workspaceId: WS }, { paseo: fake.paseo });
+      warn.mockRestore();
+
+      const { options } = fake.createCalls[0]!;
+      const prompt = String(options.config.systemPrompt);
+      expect(prompt.startsWith(managerMd.trimEnd())).toBe(true);
+      expect(prompt).toContain(
+        "## Owner precedents\n\n- `subject-mine` — Answer mine. (this project, until 2099-10-20)\n- `subject-global` — Answer global. (all projects, until 2099-10-20)\n",
+      );
+      expect(prompt).not.toContain("subject-theirs");
+      // Precedents never make a Manager outdated: the label hashes the role file only.
+      expect(options.labels).toMatchObject({ "bm.instructions": MANAGER_HASH });
+    } finally {
+      delete process.env.PASEO_BM_HOME;
+      rmSync(dataHome, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("manager.ensure — posture by provider capability (delta 20260921 §4.2.2, REQ-063)", () => {
@@ -826,14 +817,14 @@ describe("manager.ensure — posture by provider capability (delta 20260921 §4.
   const openCodeFeatures = [{ type: "toggle", id: "auto_accept", label: "Auto Accept", value: false }];
   const openCodeProfile: ManagerAgentProfile = { id: "bm-manager", provider: "bm-manager", model: "anthropic/claude-sonnet-4-6" };
 
-  function withFeatures(fake: ReturnType<typeof fakePaseo>, features: unknown[] = openCodeFeatures) {
+  function withFeatures(fake: ReturnType<typeof daemonWith>, features: unknown[] = openCodeFeatures) {
     const listFeatures = vi.fn(async () => ({ features }));
     (fake.paseo as unknown as { providers: Record<string, unknown> }).providers.listFeatures = listFeatures;
     return listFeatures;
   }
 
   it("creates a Manager on OpenCode in a listed mode with auto-approve on, reading the features in the workspace's directory", async () => {
-    const fake = fakePaseo({ profiles: [openCodeProfile], modes: openCodeModes });
+    const fake = daemonWith({ profiles: [openCodeProfile], modes: openCodeModes });
     const listFeatures = withFeatures(fake);
     const logs: string[] = [];
     await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), workspaceDirectory: async () => "/repo", log: (m) => logs.push(m) });
@@ -846,7 +837,7 @@ describe("manager.ensure — posture by provider capability (delta 20260921 §4.
   });
 
   it("keeps the profile's own OpenCode agent and its own auto_accept", async () => {
-    const fake = fakePaseo({ profiles: [{ ...openCodeProfile, modeId: "review", featureValues: { auto_accept: false } }], modes: openCodeModes });
+    const fake = daemonWith({ profiles: [{ ...openCodeProfile, modeId: "review", featureValues: { auto_accept: false } }], modes: openCodeModes });
     withFeatures(fake);
     await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), workspaceDirectory: async () => "/repo", log: () => {} });
     const options = fake.createCalls[0]!.options;
@@ -855,7 +846,7 @@ describe("manager.ensure — posture by provider capability (delta 20260921 §4.
   });
 
   it("creates a Manager on Pi (no modes) with no mode, no feature and no label, and says nothing", async () => {
-    const fake = fakePaseo({ profiles: [{ id: "bm-manager", provider: "bm-manager", model: "qwen" }], modes: [] });
+    const fake = daemonWith({ profiles: [{ id: "bm-manager", provider: "bm-manager", model: "qwen" }], modes: [] });
     const listFeatures = withFeatures(fake, []);
     const logs: string[] = [];
     await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), log: (m) => logs.push(m) });
@@ -869,7 +860,7 @@ describe("manager.ensure — posture by provider capability (delta 20260921 §4.
 
   it("does not switch an existing labelled Manager on OpenCode, and says why, unless it already auto-approves", async () => {
     const make = (features?: Array<{ id: string; value: unknown }>) =>
-      fakePaseo({
+      daemonWith({
         agents: [agent({ id: "mgr-1", currentModeId: "bytes", ...(features ? { features } : {}) })],
         profiles: [openCodeProfile],
         modes: openCodeModes,
@@ -888,7 +879,7 @@ describe("manager.ensure — a new Manager without Paseo tools (delta 20260921 �
   it("returns toolsNotice when the created Manager reports supportsMcpServers false, and records it for Settings", async () => {
     const { toolsSeen, forgetTools } = await import("../plugin/server/tools-check");
     forgetTools();
-    const fake = fakePaseo({ profiles: [{ id: "bm-manager", provider: "bm-manager", model: "qwen" }], modes: [], createdSnapshot: { capabilities: { supportsMcpServers: false } } });
+    const fake = daemonWith({ profiles: [{ id: "bm-manager", provider: "bm-manager", model: "qwen" }], modes: [], createdSnapshot: { capabilities: { supportsMcpServers: false } } });
     const result = await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), log: () => {} });
     expect(result.toolsNotice).toBe(
       "This Manager runs on bm-manager/qwen without Paseo tools (on Pi this means pi-mcp-adapter is missing): it cannot create or message a Worker.",
@@ -897,11 +888,11 @@ describe("manager.ensure — a new Manager without Paseo tools (delta 20260921 �
   });
 
   it("says nothing when the Manager has its tools, when Paseo does not say, or when the Manager already existed", async () => {
-    const withTools = fakePaseo({ createdSnapshot: { capabilities: { supportsMcpServers: true } } });
+    const withTools = daemonWith({ createdSnapshot: { capabilities: { supportsMcpServers: true } } });
     expect((await ensureManager({ workspaceId: WS }, { ...deps(withTools.paseo), log: () => {} })).toolsNotice).toBeNull();
-    const silent = fakePaseo({});
+    const silent = daemonWith({});
     expect((await ensureManager({ workspaceId: WS }, { ...deps(silent.paseo), log: () => {} })).toolsNotice).toBeNull();
-    const existing = fakePaseo({ agents: [agent({ id: "mgr-1", labels: { "bm.role": "manager", "bm.modeSet": "x" } })] });
+    const existing = daemonWith({ agents: [agent({ id: "mgr-1", labels: { "bm.role": "manager", "bm.modeSet": "x" } })] });
     expect((await ensureManager({ workspaceId: WS }, { ...deps(existing.paseo), log: () => {} })).toolsNotice).toBeNull();
   });
 
@@ -912,7 +903,7 @@ describe("manager.ensure — a new Manager without Paseo tools (delta 20260921 �
 
 describe("manager.ensure — review b4: a Manager on Pi gets no feature from its profile", () => {
   it("drops the profile's featureValues and modeId on a provider without modes", async () => {
-    const fake = fakePaseo({ profiles: [{ id: "bm-manager", provider: "bm-manager", model: "qwen", modeId: "x", featureValues: { fast_mode: true } }], modes: [] });
+    const fake = daemonWith({ profiles: [{ id: "bm-manager", provider: "bm-manager", model: "qwen", modeId: "x", featureValues: { fast_mode: true } }], modes: [] });
     await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), log: () => {} });
     const options = fake.createCalls[0]!.options;
     expect(options.config).not.toHaveProperty("modeId");
@@ -960,7 +951,7 @@ describe("manager.ensure — a replaced Manager is skipped (delta 20260921 §4.5
   ];
 
   it("by its bm.replacedBy label: opens the other live Manager and never reports the replaced one", async () => {
-    const fake = fakePaseo({ agents: managers({ "bm.replacedBy": "mgr-other" }) });
+    const fake = daemonWith({ agents: managers({ "bm.replacedBy": "mgr-other" }) });
 
     const result = await ensureManager({ workspaceId: WS }, deps(fake.paseo));
 
@@ -978,7 +969,7 @@ describe("manager.ensure — a replaced Manager is skipped (delta 20260921 §4.5
       mkdirSync(home, { recursive: true });
       if (lookedUp) writeFileSync(join(home, "install.json"), JSON.stringify({ schemaVersion: 1 }));
       writeFileSync(join(home, "role-fallback-state.json"), JSON.stringify({ version: 1, incidents }));
-      const fake = fakePaseo({ agents: managers() });
+      const fake = daemonWith({ agents: managers() });
 
       const result = await ensureManager(
         { workspaceId: WS },
@@ -1022,7 +1013,7 @@ describe("manager.ensure { replaceOutdated } — a Manager on older instructions
   it("creates one new Manager, marks the old one replaced, clears its alert, and archives nothing", async () => {
     await withHome(async (home) => {
       createAlertStore(home).raise({ workspaceId: WS, kind: "outdated-agent", subject: "mgr-old" });
-      const fake = fakePaseo({ agents: [outdated()] });
+      const fake = daemonWith({ agents: [outdated()] });
       const cliFake = fakeCli();
       const replace = () => ensureManager({ workspaceId: WS, replaceOutdated: true }, { ...deps(fake.paseo), home, cli: cliFake.cli, log: () => {} });
 
@@ -1054,7 +1045,7 @@ describe("manager.ensure { replaceOutdated } — a Manager on older instructions
   });
 
   it("returns a current Manager as it is", async () => {
-    const fake = fakePaseo({ agents: [agent({ id: "mgr-1", labels: { "bm.role": "manager", "bm.modeSet": "x", "bm.instructions": MANAGER_HASH } })] });
+    const fake = daemonWith({ agents: [agent({ id: "mgr-1", labels: { "bm.role": "manager", "bm.modeSet": "x", "bm.instructions": MANAGER_HASH } })] });
     const cliFake = fakeCli();
     const result = await ensureManager({ workspaceId: WS, replaceOutdated: true }, { ...deps(fake.paseo), cli: cliFake.cli });
     expect(result).toMatchObject({ agentId: "mgr-1", created: false, replacedManagerId: null });
@@ -1063,14 +1054,14 @@ describe("manager.ensure { replaceOutdated } — a Manager on older instructions
   });
 
   it("without replaceOutdated, an outdated Manager is still opened, not replaced", async () => {
-    const fake = fakePaseo({ agents: [outdated()] });
+    const fake = daemonWith({ agents: [outdated()] });
     const result = await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), cli: fakeCli().cli });
     expect(result).toMatchObject({ agentId: "mgr-old", created: false, replacedManagerId: null });
     expect(fake.createCalls).toEqual([]);
   });
 
   it("a failed replacedBy label costs one log line; the new Manager is still returned", async () => {
-    const fake = fakePaseo({ agents: [outdated()] });
+    const fake = daemonWith({ agents: [outdated()] });
     const log = vi.fn();
     const result = await ensureManager(
       { workspaceId: WS, replaceOutdated: true },
@@ -1084,7 +1075,7 @@ describe("manager.ensure { replaceOutdated } — a Manager on older instructions
   });
 
   it("with Paseo's agent tools off, creates nothing and leaves the old Manager as it is", async () => {
-    const fake = fakePaseo({ agents: [outdated()], injectIntoAgents: false });
+    const fake = daemonWith({ agents: [outdated()], injectIntoAgents: false });
     const cliFake = fakeCli();
     await expect(
       ensureManager({ workspaceId: WS, replaceOutdated: true }, { ...deps(fake.paseo), cli: cliFake.cli }),
@@ -1096,7 +1087,7 @@ describe("manager.ensure { replaceOutdated } — a Manager on older instructions
 
 describe("createManager — the one path that creates a Manager (delta 20260921 §4.5.2)", () => {
   it("creates a replacement like manager.ensure creates a Manager, plus its own labels and first message", async () => {
-    const fake = fakePaseo();
+    const fake = daemonWith();
 
     const result = await createManager(fake.paseo, WS, {
       providerSelection: "bm-manager-fallback-1/gpt-5.6-sol",
@@ -1120,11 +1111,22 @@ describe("createManager — the one path that creates a Manager (delta 20260921 
     ]);
   });
 
+  it("reads its instructions for the workspace it creates the Manager in (autonomy design §B.6)", async () => {
+    const fake = daemonWith();
+    const readInstructions = vi.fn(async (workspaceId: string) => `${managerMd}for ${workspaceId}`);
+
+    await createManager(fake.paseo, WS, { providerSelection: "bm-manager/gpt-5.6-sol", labels: {}, readInstructions });
+
+    expect(readInstructions).toHaveBeenCalledWith(WS);
+    expect(fake.createCalls[0]!.options.config.systemPrompt).toBe(`${managerMd}for ${WS}`);
+    expect(fake.createCalls[0]!.options.labels).toMatchObject({ "bm.instructions": MANAGER_HASH });
+  });
+
   it.each([
     ["bm-manager/gpt-5.6-sol", 'with profile "bm-manager"'],
     ["bm-manager-fallback-1/gpt-5.6-sol", 'with provider "bm-manager-fallback-1/gpt-5.6-sol"'],
   ])("a rejected create of %s names %s", async (providerSelection, named) => {
-    const fake = fakePaseo({ createRejects: new Error("usage limit") });
+    const fake = daemonWith({ createRejects: new Error("usage limit") });
 
     const error = await createManager(fake.paseo, WS, { providerSelection, labels: {}, readInstructions: readManagerInstructions }).catch(
       (e: unknown) => e,

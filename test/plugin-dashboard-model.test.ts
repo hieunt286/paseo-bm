@@ -1,22 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  HOST_SCOPE_NOTICE,
-  PRIVACY_NOTICE,
-  ROLE_MARK,
-  barShare,
-  confidenceSuffix,
-  createConfirmationGate,
-  dashboardStyles,
-  describeAction,
-  formatBytes,
-  formatCost,
-  formatDuration,
-  formatTokens,
-  requestsPerDay,
-  storageView,
-  toneColor,
-} from "../plugin/client/dashboard-model";
-import type { TraceSummary, Usage } from "../plugin/shared/contracts";
+import { ago, barShare, confidenceSuffix, formatBytes, formatCost, formatDuration, formatTokens, localTimeText, shortSpan } from "../plugin/client/format";
+import { HOST_SCOPE_NOTICE, PRIVACY_NOTICE, createConfirmationGate, describeAction, storageView } from "../plugin/client/history-model";
+import { dashboardStyles } from "../plugin/client/styles";
+import { ROLE_MARK, toneColor } from "../plugin/client/tone";
+import type { Usage } from "../plugin/shared/contracts";
+import { plural, shorten } from "../plugin/shared/text";
+import { timeOrNull, timeOrZero } from "../plugin/shared/time";
 
 /**
  * WP-211.1: the Dashboard's logic and wording, with no renderer.
@@ -54,54 +43,50 @@ const usage = (overrides: Partial<Usage> = {}): Usage => ({
   ...overrides,
 });
 
-const counts = (created: number, confidence: TraceSummary["beadCounts"]["created"]["confidence"]) => ({
-  created: { count: created, confidence },
-  updated: { count: 0, confidence },
-  closed: { count: 0, confidence },
-  ready: { count: 0, confidence },
-});
-
-const trace = (overrides: Partial<TraceSummary> = {}): TraceSummary => ({
-  traceId: "req:req-A",
-  requestId: "req-A",
-  turn: null,
-  requestedAt: "2026-09-16T10:00:00.000Z",
-  excerpt: "thêm màn hình báo cáo",
-  state: "completed",
-  workerIds: ["w1"],
-  reviewerIds: ["rev-1"],
-  reviewCalls: 2,
-  guardrailReported: null,
-  durationMs: 600_000,
-  usage: usage(),
-  messageCount: 8,
-  userMessageCount: 0,
-  workerUsage: [{ agentId: "w1", title: null, usage: usage() }],
-  beadCounts: counts(2, "exact"),
-  tier: "Medium",
-  linking: "exact",
-  agentsMissing: [],
-  workspaceState: "live",
-  reassignedFrom: null,
-  notices: [],
-  ...overrides,
-});
-
 describe("formatting", () => {
   it("never reads an unknown duration as zero", () => {
     expect(formatDuration(null)).toBe("—");
     expect(formatDuration(0)).toBe("0 ms");
   });
 
+  // The one duration style of every screen (code review 2026-09-30 §3.6).
   it.each([
     [500, "500 ms"],
-    [1_500, "2s"],
-    [65_000, "1m 5s"],
-    [120_000, "2m"],
-    [3_600_000, "1h"],
-    [7_830_000, "2h 10m"],
+    [1_500, "2 s"],
+    [65_000, "1 min 5 s"],
+    [120_000, "2 min"],
+    [3_600_000, "1 h"],
+    [7_830_000, "2 h 10 min"],
+    [86_400_000, "1 d"],
+    [129_600_000, "1 d 12 h"],
   ])("formats %i ms as %s", (ms, expected) => {
     expect(formatDuration(ms)).toBe(expected);
+  });
+
+  it("says a span to the minute in the same style, and how long ago", () => {
+    expect(shortSpan(30_000)).toBe("under 1 min");
+    expect(shortSpan(12 * 60_000 + 40_000)).toBe("12 min");
+    expect(shortSpan(180 * 60_000)).toBe("3 h");
+    expect(shortSpan(185 * 60_000)).toBe("3 h 5 min");
+    expect(shortSpan(3 * 86_400_000)).toBe("3 d");
+    expect(shortSpan(-5_000)).toBe("under 1 min");
+    const now = new Date("2026-09-30T12:00:00.000Z");
+    expect(ago("2026-09-30T11:59:30.000Z", now)).toBe("just now");
+    expect(ago("2026-09-30T11:55:00.000Z", now)).toBe("5 min ago");
+    expect(ago("2026-09-28T10:00:00.000Z", now)).toBe("2 d 2 h ago");
+    expect(ago(null, now)).toBe("—");
+    expect(ago("not a time", now)).toBe("—");
+  });
+
+  // The one date style of every screen, in the device's time zone (code review 2026-09-30 §3.6).
+  it("writes a moment as the time today, yesterday or tomorrow, else with its day", () => {
+    const now = new Date(2026, 8, 30, 18, 0);
+    expect(localTimeText(new Date(2026, 8, 30, 15, 40), now)).toBe("15:40");
+    expect(localTimeText(new Date(2026, 8, 29, 9, 5), now)).toBe("yesterday 09:05");
+    expect(localTimeText(new Date(2026, 9, 1, 7, 0), now)).toBe("tomorrow 07:00");
+    expect(localTimeText(new Date(2026, 8, 24, 15, 40), now)).toBe("Thu 24 Sep 15:40");
+    expect(localTimeText(new Date(2025, 8, 24, 15, 40), now)).toBe("Wed 24 Sep 2025 15:40");
+    expect(localTimeText(new Date("not a time"), now)).toBe("");
   });
 
   it.each([
@@ -123,6 +108,31 @@ describe("formatting", () => {
     expect(formatTokens(tokens)).toBe(expected);
   });
 
+});
+
+describe("the shared text and time helpers (code review 2026-09-30 §3.6)", () => {
+  it("counts with a plural, regular or given", () => {
+    expect(plural(1, "bead")).toBe("1 bead");
+    expect(plural(3, "bead")).toBe("3 beads");
+    expect(plural(0, "item needs", "items need")).toBe("0 items need");
+  });
+
+  it("shortens to one line of at most the given length, with an ellipsis", () => {
+    expect(shorten("  a\n b  ", 10)).toBe("a b");
+    expect(shorten("abcdefghij", 10)).toBe("abcdefghij");
+    expect(shorten("abcdefghijk", 10)).toBe("abcdefghi…");
+    expect(shorten("abcd efghijk", 6)).toBe("abcd…");
+  });
+
+  it("reads an ISO time as milliseconds, or null / 0 when it is absent or does not read", () => {
+    const at = "2026-09-30T12:00:00.000Z";
+    expect(timeOrNull(at)).toBe(Date.parse(at));
+    expect(timeOrZero(at)).toBe(Date.parse(at));
+    for (const missing of [null, undefined, "", "not a time"]) {
+      expect(timeOrNull(missing)).toBeNull();
+      expect(timeOrZero(missing)).toBe(0);
+    }
+  });
 });
 
 describe("cost wording (REQ-052)", () => {
@@ -263,19 +273,6 @@ describe("the confirmation gate defaults to No", () => {
 });
 
 describe("figures", () => {
-  it("counts requests per day, oldest first", () => {
-    const bars = requestsPerDay(
-      [trace({ requestedAt: "2026-09-16T10:00:00.000Z" }), trace({ requestedAt: "2026-09-15T09:00:00.000Z" })],
-      new Date("2026-09-16T12:00:00.000Z"),
-      3,
-    );
-    expect(bars.map((bar) => [bar.label, bar.value])).toEqual([
-      ["09-14", 0],
-      ["09-15", 1],
-      ["09-16", 1],
-    ]);
-  });
-
   it("scales a bar to the largest of its chart", () => {
     const bars = [
       { label: "a", value: 1000, display: "1.0k" },
@@ -311,43 +308,5 @@ describe("styles and the privacy notice", () => {
   it("tells the user the history holds conversation they can delete", () => {
     expect(PRIVACY_NOTICE).toContain("conversation");
     expect(PRIVACY_NOTICE).toContain("delete");
-  });
-});
-
-
-/**
- * One row per question (delta 20260917e §4.3), and the chart that must NOT
- * follow it (owner decision Q27).
- */
-describe("turns of a request", () => {
-  const turned = (index: number, total: number, at: string) =>
-    trace({ turn: { index, total }, requestedAt: at, traceId: "req:req-A", requestId: "req-A" });
-
-  it("counts a request once however many times the user asked", () => {
-    const day = "2026-09-17";
-    const bars = requestsPerDay(
-      [turned(1, 3, `${day}T09:00:00.000Z`), turned(2, 3, `${day}T09:10:00.000Z`), turned(3, 3, `${day}T09:20:00.000Z`)],
-      new Date(`${day}T23:00:00.000Z`),
-    );
-    // Three rows, one request.
-    expect(bars.at(-1)).toEqual({ label: "09-17", value: 1, display: "1" });
-  });
-
-  it("still counts a request that was never followed up", () => {
-    const day = "2026-09-17";
-    const bars = requestsPerDay([trace({ requestedAt: `${day}T09:00:00.000Z` })], new Date(`${day}T23:00:00.000Z`));
-    expect(bars.at(-1)?.value).toBe(1);
-  });
-
-  it("counts two separate requests on the same day as two", () => {
-    const day = "2026-09-17";
-    const bars = requestsPerDay(
-      [
-        trace({ traceId: "req:req-A", requestId: "req-A", requestedAt: `${day}T09:00:00.000Z` }),
-        trace({ traceId: "req:req-B", requestId: "req-B", requestedAt: `${day}T11:00:00.000Z` }),
-      ],
-      new Date(`${day}T23:00:00.000Z`),
-    );
-    expect(bars.at(-1)?.value).toBe(2);
   });
 });

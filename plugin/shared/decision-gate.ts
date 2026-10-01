@@ -1,18 +1,22 @@
 /**
  * The big-decision gate (Orchestrator design §6B.5, ADR-016 decision 3), now
  * a **backstop** (autonomy design §A.7, ADR-017 decision 5): the authority of
- * a command is its declared effects and the grant or Autopilot that covers
- * them (`server/orchestrator-tools.ts`); this file only checks that the text
- * does not show an effect the command did not declare.
+ * a command is its declared effects and the grant, the owner's policy
+ * (§B.9) or the owner's word that covers them
+ * (`server/command-authority.ts`); this file only checks that the text
+ * does not show an effect the command did not declare, whatever the
+ * authority — it takes none as input.
  *
  * Before a command of the Orchestrator leaves (`bm_send_command`,
  * `bm_direct_worker`), the plugin matches its `re:` line and body — never the
  * header — against fixed categories. A category found whose effects
  * (`GATE_CATEGORY_EFFECTS`) the command does not declare refuses it with
  * "declare the effect or ask the owner" (`undeclaredCategoriesOf`,
- * `undeclaredRefusalOf`) — never a silent send — unless the owner allowed that
- * category for the project. It is a rule, not the Orchestrator's judgement: a
- * false positive (a harmless mention of "security") is refused too.
+ * `undeclaredRefusalOf`) — never a silent send. Nothing silences it: the
+ * categories the owner once allowed for a project (Allow…) and the exemption a
+ * stop of a dangerous Worker had are retired (autonomy design §B.8). It is a
+ * rule, not the Orchestrator's judgement: a false positive (a harmless mention
+ * of "security") is refused too.
  *
  * Matching:
  * - case-insensitive, English and Vietnamese; the text is compared in Unicode
@@ -25,21 +29,13 @@
  * - a match preceded, within the 4 words before it in the same sentence, by a
  *   negation (not, no, never, don't, do not, without, không, đừng, chưa, cấm)
  *   does not count. A sentence ends at `.`, `!`, `?`, `;` or a line break, so
- *   "Do not deploy. Push the fix." still counts the push.
+ *   "Do not deploy. Push the fix." still counts the push. A stop word is a
+ *   negation too, so "Stop the push" does not count it.
  *
- * The stop of a dangerous Worker (`isStopCommand`, `DANGER_STOP_CATEGORIES`):
- * a command that stops a Worker's push or destructive SQL has to name it
- * ("how many git push runs you made"), so while that Worker's danger
- * allowance is open, `bm_direct_worker` to that Worker does not count
- * `release` or `data` when the text holds a stop word (coordination run
- * 2026-09-29, F2). The caller decides when the exemption applies; this file
- * only says which words and which categories. The exemption and the allowed
- * categories stay only until Phase 2 removes Autopilot; they are not extended.
- *
- * Pure and environment-neutral: no runtime import (the effect names are a type).
+ * Pure and environment-neutral: it imports only the effect vocabulary
+ * (`decisions.ts`).
  */
-import type { Effect } from "./decisions";
-
+import { CLASS_OF_EFFECT, EFFECTS, type Effect } from "./decisions";
 
 /** The categories, in the order of design §6B.5; `gateOf` returns them in this order. */
 export const GATE_CATEGORIES = ["security", "release", "data", "cost", "dependency"] as const;
@@ -50,12 +46,6 @@ export const GATE_NEGATIONS: readonly string[] = ["not", "no", "never", "don't",
 
 /** How many words before a match a negation may stand. */
 export const GATE_NEGATION_WINDOW = 4;
-
-/** The categories a stop of a Worker's open danger is not gated on (design §6B.5): the ones its evidence names. */
-export const DANGER_STOP_CATEGORIES: readonly GateCategory[] = ["release", "data"];
-
-/** The words that make a command a stop, for `isStopCommand` (design §6B.5). */
-export const GATE_STOP_WORDS: readonly string[] = ["stop", "halt", "cancel", "do not", "don't", "never", "dừng", "không được", "huỷ", "hủy"];
 
 /** A space between two words of a term: any run of whitespace. */
 const _ = String.raw`\s+`;
@@ -130,21 +120,6 @@ const PATTERNS: ReadonlyArray<{ category: GateCategory; pattern: RegExp }> = GAT
 
 const NEGATIONS = new Set(GATE_NEGATIONS);
 
-/** `GATE_STOP_WORDS` as one pattern: their inflections, any whitespace inside, a straight or curly apostrophe; no lookbehind, as above. */
-const STOP_PATTERN = new RegExp(
-  `(?:^|[^\\p{L}\\p{N}_])(?:stop(?:s|ped|ping)?|halt(?:s|ed|ing)?|cancel(?:s|led|ed|ling|ing)?|do${_}not|don['’]t|never|dừng|không${_}được|huỷ|hủy)(?![\\p{L}\\p{N}_])`,
-  "iu",
-);
-
-/**
- * True when `text` holds a stop word (`GATE_STOP_WORDS`, on word boundaries,
- * case-insensitive, NFC): the command asks a Worker to stop, cancel or not do
- * something. Pure.
- */
-export function isStopCommand(text: string): boolean {
-  return typeof text === "string" && STOP_PATTERN.test(comparable(text));
-}
-
 /** One term found in the text. */
 export interface GateMatch {
   category: GateCategory;
@@ -187,33 +162,32 @@ export function gateMatchesOf(text: string): GateMatch[] {
 
 /**
  * The categories a command's text falls in (design §6B.5): those with at
- * least one match that is not negated, less the categories the owner allowed
- * for the project, in `GATE_CATEGORIES` order. Empty: the command may go.
+ * least one match that is not negated, in `GATE_CATEGORIES` order. Empty: the
+ * command may go.
  */
-export function gateOf(text: string, allow: readonly GateCategory[] = []): GateCategory[] {
+export function gateOf(text: string): GateCategory[] {
   const found = new Set(gateMatchesOf(text).flatMap((match) => (match.negated ? [] : [match.category])));
-  return GATE_CATEGORIES.filter((category) => found.has(category) && !allow.includes(category));
+  return GATE_CATEGORIES.filter((category) => found.has(category));
 }
 
 /**
  * The effects that declare each category (autonomy design §A.3 effects): a
  * text in a category is declared when the command declares any one of them.
+ * Each category is a decision class, and its effects are the effects of that
+ * class (`CLASS_OF_EFFECT`, the one map; code review 2026-09-30 §3.5), in
+ * `EFFECTS` order.
  */
-export const GATE_CATEGORY_EFFECTS: Readonly<Record<GateCategory, readonly Effect[]>> = {
-  security: ["security"],
-  release: ["push", "publish", "deploy"],
-  data: ["real-data", "migration"],
-  cost: ["cost"],
-  dependency: ["dependency-install"],
-};
+export const GATE_CATEGORY_EFFECTS: Readonly<Record<GateCategory, readonly Effect[]>> = Object.fromEntries(
+  GATE_CATEGORIES.map((category): [GateCategory, readonly Effect[]] => [category, EFFECTS.filter((effect) => CLASS_OF_EFFECT[effect] === category)]),
+) as Record<GateCategory, readonly Effect[]>;
 
 /**
- * The categories `text` falls in (`gateOf`, less `allow`) that the declared
- * `effects` do not cover, in `GATE_CATEGORIES` order. Empty: the text shows
- * nothing the command did not declare.
+ * The categories `text` falls in (`gateOf`) that the declared `effects` do
+ * not cover, in `GATE_CATEGORIES` order. Empty: the text shows nothing the
+ * command did not declare.
  */
-export function undeclaredCategoriesOf(text: string, effects: readonly Effect[], allow: readonly GateCategory[] = []): GateCategory[] {
-  return gateOf(text, allow).filter((category) => !GATE_CATEGORY_EFFECTS[category].some((effect) => effects.includes(effect)));
+export function undeclaredCategoriesOf(text: string, effects: readonly Effect[]): GateCategory[] {
+  return gateOf(text).filter((category) => !GATE_CATEGORY_EFFECTS[category].some((effect) => effects.includes(effect)));
 }
 
 /** The refusal a command whose text shows an undeclared effect gets (autonomy design §A.7); the command is not sent. */
@@ -221,9 +195,4 @@ export function undeclaredRefusalOf(categories: readonly GateCategory[]): string
   const orList = (effects: readonly string[]) => (effects.length < 2 ? effects.join("") : `${effects.slice(0, -1).join(", ")} or ${effects.at(-1)!}`);
   const shown = categories.map((category) => `${category} (${orList(GATE_CATEGORY_EFFECTS[category])})`).join(", ");
   return `the text shows ${shown} that effects does not declare: declare the effect or ask the owner with bm_ask_owner`;
-}
-
-/** True when `value` names a gate category. */
-export function isGateCategory(value: unknown): value is GateCategory {
-  return typeof value === "string" && (GATE_CATEGORIES as readonly string[]).includes(value);
 }

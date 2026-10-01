@@ -14,15 +14,15 @@
  * already ends a report block there.
  *
  * A question and an option may end in optional bracketed tags (autonomy design
- * §A.5): `[subject: push-backends] [supersedes: Q2]` after a question,
- * `[effects: push, commit]` after an option. A tag is read from the run of
- * tags that ends the text and taken out of it; an unknown tag, or a known one
- * whose value does not read, gives nothing, and an unknown tag stays in the
- * text. A block without tags reads exactly as before.
+ * §A.5, §B.9): `[subject: push-backends] [supersedes: Q2] [class: release]`
+ * after a question, `[effects: push, commit]` after an option. A tag is read
+ * from the run of tags that ends the text and taken out of it; an unknown tag,
+ * or a known one whose value does not read, gives nothing, and an unknown tag
+ * stays in the text. A block without tags reads exactly as before.
  *
  * Pure and environment-neutral: the chat card runs it on every message.
  */
-import { EFFECTS, type Effect } from "./decisions";
+import { DECISION_CLASSES, EFFECTS, type DecisionClass, type Effect } from "./decisions";
 
 export interface QuestionOption {
   /** Lowercase letter: `a`, `b`, … */
@@ -42,6 +42,8 @@ export interface Question {
   subject?: string;
   /** The `Q<n>` of the same request this question asks again (`[supersedes: …]`); absent without the tag. */
   supersedes?: string;
+  /** The class the asker proposes (`[class: …]`, one of `DECISION_CLASSES`); absent without the tag. */
+  class?: DecisionClass;
 }
 
 export interface QuestionSet {
@@ -123,6 +125,10 @@ function trailingTags(text: string, known: readonly string[]): { text: string; t
   return { text: `${rest}${kept.join("")}`.trim(), tags };
 }
 
+function isDecisionClass(value: string | undefined): value is DecisionClass {
+  return value !== undefined && (DECISION_CLASSES as readonly string[]).includes(value);
+}
+
 function effectsOf(value: string | undefined): Effect[] | undefined {
   if (value === undefined) return undefined;
   const named = value.split(",").map((part) => part.trim().toLowerCase());
@@ -140,8 +146,9 @@ function finish(draft: Draft): Question {
   });
   // More than one recommendation is no recommendation: the card never picks.
   const marked = options.filter((option) => option.recommended).length;
-  const { text, tags } = trailingTags(draft.text.replace(/\*\*/g, "").trim(), ["subject", "supersedes"]);
+  const { text, tags } = trailingTags(draft.text.replace(/\*\*/g, "").trim(), ["subject", "supersedes", "class"]);
   const subject = tags.get("subject")?.toLowerCase();
+  const proposed = tags.get("class")?.toLowerCase();
   const supersedes = TAG_QUESTION_ID.exec(tags.get("supersedes") ?? "");
   const replaced = supersedes === null ? null : `Q${Number.parseInt(supersedes[1]!, 10)}`;
   return {
@@ -151,6 +158,7 @@ function finish(draft: Draft): Question {
     ...(subject !== undefined && SUBJECT_PATTERN.test(subject) ? { subject } : {}),
     // A question never replaces itself.
     ...(replaced !== null && replaced !== draft.id ? { supersedes: replaced } : {}),
+    ...(isDecisionClass(proposed) ? { class: proposed } : {}),
   };
 }
 

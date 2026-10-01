@@ -3,7 +3,9 @@
  *
  * - A new `pending` incident becomes the owner's decision `f:<incidentId>`
  *   (autonomy design §A.5 d, `fallback-decisions.ts`); answering it runs
- *   `fallback.act` below. The Manager is not told: it relays nothing.
+ *   `fallback.act` below. The Manager is not told: it relays nothing. It is
+ *   answered without the owner only by a precedent or the owner's autonomy
+ *   policy (the role's Auto switch was retired, ADR-022 decision 4).
  * - `fallback.incidents`: the recorded incidents, filtered by workspace or ids
  *   (the Inbox reads them).
  * - `fallback.act`: `dismiss` ("I'll handle it") marks the incident
@@ -15,18 +17,20 @@
  * `fallbackNotice` writes the `BM-FALLBACK` block the Worker of a switched
  * Reviewer gets its instructions in (`fallback-reviewer.ts`, §4.5.1).
  *
- * Handlers throw only coded `DashboardError`s.
+ * Handlers throw only coded `DashboardError`s. No usable data folder is
+ * `E_DATA_HOME_UNAVAILABLE`, as for every RPC (rpc-kit, code review
+ * 2026-09-30 §3.2).
  */
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { unusableDataHomeMessage } from "./data-home";
-import { autoActionOf, holdFallbackDecision, syncFallbackDecisions } from "./fallback-decisions";
+import { createDecisionStore } from "./decision-store";
+import { createFallbackDecisionDelivery, syncFallbackDecisions } from "./fallback-decisions";
 import { onFallbackIncident, readIncidents, updateIncidents } from "./fallback-state";
 import { FALLBACK_NOTICE_MARKER } from "./notices";
 import { providerId } from "./provider-id";
-import { reasonOf } from "./role-choices";
-import { dataHomeOf } from "./role-extras";
+import { dataHome, errorText, requireDataHome, tapPaseo, withPaseoTap } from "./rpc-kit";
 import { FALLBACK_CLASS_LABELS } from "../shared/bm-fallback";
 import { DashboardError, fallbackActRpc, fallbackIncidentsRpc, type FallbackActInput, type FallbackIncident } from "../shared/contracts";
+import type { Decision } from "../shared/decisions";
 
 /** Longest message line of the notice. */
 export const NOTICE_MESSAGE_CHARS = 300;
@@ -65,7 +69,6 @@ export function fallbackNotice(incident: FallbackIncident, baseOf: (alias: strin
 }
 
 export { aliasBases } from "./alias-bases";
-export { AUTO_WAIT_WINDOW_MS, autoActionOf } from "./fallback-decisions";
 
 export interface FallbackRpcDeps {
   /** The data folder; the plugin looks it up, tests pass one. */
@@ -74,18 +77,13 @@ export interface FallbackRpcDeps {
   log?: (message: string) => void;
 }
 
-/** The data folder, or `null` when there is none; `deps.home` stands in for it in tests. */
-function homeOf(deps: FallbackRpcDeps): string | null {
-  return deps.home !== undefined ? deps.home : dataHomeOf();
-}
-
 /** Handler body of `fallback.incidents`: oldest first; an unreadable file or unknown home reads as none. */
 export async function handleFallbackIncidents(
   input: { workspaceId?: string; ids?: string[] },
   paseo: unknown,
   deps: FallbackRpcDeps = {},
 ): Promise<{ incidents: FallbackIncident[] }> {
-  const home = homeOf(deps);
+  const home = dataHome(deps);
   if (home === null) return { incidents: [] };
   const ids = input?.ids === undefined ? null : new Set(input.ids);
   const incidents = readIncidents(home, deps.log ?? defaultLog).incidents.filter(
@@ -129,8 +127,7 @@ export async function decidePending(
 
 /** `dismiss` ("I'll handle it", §4.4.10): `dismissed`, no agent touched. */
 export const dismissIncident: FallbackAction = async (incident, _paseo, deps) => {
-  const home = homeOf(deps);
-  if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", `${unusableDataHomeMessage()}; see Settings → Data`);
+  const home = requireDataHome(deps, "dismiss the fallback incident");
   const now = (deps.now ?? (() => new Date()))().toISOString();
   return decidePending(home, incident.id, (current) => ({ ...current, status: "dismissed", decidedAt: now }), deps.log ?? defaultLog);
 };
@@ -167,8 +164,7 @@ export function handleFallbackAct(
   deps: FallbackRpcDeps & { actions?: FallbackActions } = {},
 ): Promise<{ incident: FallbackIncident }> {
   return oneActionAtATime(async () => {
-    const home = homeOf(deps);
-    if (home === null) throw new DashboardError("E_FALLBACK_NOT_FOUND", `${unusableDataHomeMessage()}; see Settings → Data`);
+    const home = requireDataHome(deps, "act on the fallback incident");
     try {
       return { incident: await actOn(input, home, paseo, deps) };
     } finally {
@@ -209,66 +205,43 @@ async function actOn(
 }
 
 /**
- * Runs the `auto` policy's choice for a new incident through `fallback.act`,
- * so it takes the same lock and the same checks as a click. Opens no
- * decision. Returns true when an action ran (a failure is logged, and the
- * incident is as the action left it); false when nothing was chosen and the
- * incident stays pending. Never throws.
- */
-export async function decideAutomatically(
-  incident: FallbackIncident,
-  paseo: unknown,
-  deps: FallbackRpcDeps & { actions: FallbackActions },
-): Promise<boolean> {
-  const log = deps.log ?? defaultLog;
-  const action = autoActionOf(incident, (deps.now ?? (() => new Date()))());
-  if (action === null) return false;
-  try {
-    await handleFallbackAct({ incidentId: incident.id, action }, paseo, deps);
-  } catch (error) {
-    log(`[paseo-bm] the Auto switch policy could not ${action} for incident ${incident.id}: ${reasonOf(error)}`);
-  }
-  return true;
-}
-
-/**
  * Registers `fallback.incidents` and `fallback.act`, and turns every new
- * `pending` incident into the owner's decision `f:<incidentId>` (§A.5 d) —
- * after the `auto` policy has run its choice, if the role has it (§4.6): the
- * incident is held meanwhile, so it gets a decision only when the policy left
- * it pending. `onPaseo` hears each handler's SDK handle (the wait timers are
- * set again from it, §4.4.9). Returns the remover of that listener.
+ * `pending` incident into the owner's decision `f:<incidentId>` (§A.5 d).
+ * `onPaseo` hears each handler's SDK handle (rpc-kit `withPaseoTap`; the wait
+ * timers are set again from it, §4.4.9). `onDecisionsOpened` hears the
+ * decisions that listener opened, as stored after a precedent or the policy
+ * answered them (the event bus: a decision the owner's policy asks the
+ * Orchestrator to decide or predict, autonomy design §A.8, §B.9); its failure
+ * is one log line.
+ * Returns the remover of that listener.
  */
 export function registerFallbackRpcs(
   server: PluginServerContext,
   actions: FallbackActions = {},
-  options: { onPaseo?: (paseo: unknown) => void } = {},
+  options: { onPaseo?: (paseo: unknown) => void; onDecisionsOpened?: (opened: Decision[], paseo: unknown) => unknown } = {},
 ): () => void {
-  const seen = (paseo: unknown) => {
-    try {
-      options.onPaseo?.(paseo);
-    } catch {
-      // Setting the wait timers again never fails a card action.
-    }
-  };
-  server.handle(fallbackIncidentsRpc, (input, context) => {
-    seen(context.paseo);
-    return handleFallbackIncidents(input, context.paseo);
-  });
-  server.handle(fallbackActRpc, (input, context) => {
-    seen(context.paseo);
-    return handleFallbackAct(input, context.paseo, { actions });
-  });
+  // Setting the wait timers again never fails a card action.
+  const tapped = withPaseoTap(server, options.onPaseo);
+  tapped.handle(fallbackIncidentsRpc, (input, context) => handleFallbackIncidents(input, context.paseo));
+  tapped.handle(fallbackActRpc, (input, context) => handleFallbackAct(input, context.paseo, { actions }));
   return onFallbackIncident(async (incident, paseo, context) => {
     if (incident.status !== "pending") return;
-    if (context?.policy === "auto") {
-      const release = holdFallbackDecision(incident.id);
-      try {
-        await decideAutomatically(incident, paseo, { actions, home: context.home });
-      } finally {
-        release();
-      }
+    // Autonomy design §B.6, §B.5: an owner precedent, or the owner's policy where `environment` is delegated, may answer the
+    // new decision; its action then runs through fallback.act, as the owner's would.
+    const settle = createFallbackDecisionDelivery(
+      (input, handle) => {
+        tapPaseo(options.onPaseo, handle);
+        return handleFallbackAct(input, handle, { actions, home: context.home });
+      },
+      { home: () => context.home },
+    );
+    const sync = syncFallbackDecisions(context.home, { settle: { onSettled: settle, paseo } });
+    if (sync.opened.length === 0 || options.onDecisionsOpened === undefined) return;
+    try {
+      const store = createDecisionStore(context.home);
+      await options.onDecisionsOpened(sync.opened.flatMap((id) => store.get(id) ?? []), paseo);
+    } catch (error) {
+      defaultLog(`[paseo-bm] the decisions of fallback incident ${incident.id} could not be told to the Orchestrator: ${errorText(error)}`);
     }
-    syncFallbackDecisions(context.home);
   });
 }

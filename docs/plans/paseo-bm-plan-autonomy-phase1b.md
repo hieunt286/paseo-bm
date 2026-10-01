@@ -49,6 +49,7 @@ Hook-free view models and pure card models by unit tests (the repository's clien
 
 | Date | Who | Change |
 |---|---|---|
+| 2026-09-30 | hieu.nt10 (drafted by Claude) | [change-006](./paseo-bm-plan-autonomy-change-006-build-then-field.md): built without waiting for the previous phase's field gate; this phase's exit is judged in the combined field period on the final build |
 | 2026-09-30 | Claude (at the owner's request) | The fixed build (commit `685baf9`, change-004) installed on the owner's daemon at 04:46 UTC as the frozen copy `phase1-685baf9`; the Phase 1 field window restarts there |
 | 2026-09-30 | Claude (owner approved) | [change-004](./paseo-bm-plan-autonomy-change-004-orchestrator-answers.md): WP-113 from the owner's field report — the Orchestrator's answers go through the decision store (`bm_decide`); decision options wrap; the field window restarts at the fixed build |
 | 2026-09-30 | Claude (owner's delegation) | WP-111: the owner installed commit `df6b182` as a frozen copy on 2026-09-30 03:02 UTC (field window starts there); the install path is written as it was done |

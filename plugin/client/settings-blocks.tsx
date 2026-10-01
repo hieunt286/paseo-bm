@@ -8,14 +8,18 @@
  * confirmed Install, the agent skills, Paseo's agent tools and the cleanup.
  * `settings-section.tsx` places them.
  *
- * Wording lives in `setup-model.ts`. Client rules: React Native primitives
- * only, colours from the theme, no Node import, no `server/` import.
+ * Wording lives in `settings-roles-model.ts` (roles and fallbacks) and
+ * `settings-machine-model.ts` (the machine's set-up). Every confirmation is a
+ * `ConfirmBlock`, Cancel first, except the cleanup's data question, whose safe
+ * answer ("Keep my data") is itself the first button. Client rules: React
+ * Native primitives only, colours from the theme, no Node import, no `server/`
+ * import.
  */
 import { useRpc } from "@getpaseo/plugin/client";
 import { copyText } from "@getpaseo/plugin/client/react-native";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { ActivityIndicator, Pressable, Text, View } from "react-native";
+import { ActivityIndicator, Text, View } from "react-native";
 import {
   rolesOptionsRpc,
   rolesSaveFallbackRpc,
@@ -33,60 +37,88 @@ import {
   type RolesSettings,
   type SetupStatus,
 } from "../shared/contracts";
-import { toneColor, type Badge } from "./dashboard-model";
-import { errorMessageOf } from "./launch-manager";
+import { toneColor, type Badge } from "./tone";
+import { errorMessageOf } from "./errors";
 import {
   AGENT_TOOLS_DIALOG,
   CLEANUP_BUTTON_ACCESSIBILITY_LABEL,
   CLEANUP_BUTTON_LABEL,
   CLEANUP_DATA_DIALOG,
-  CLEANUP_WARNING_DIALOG,
   agentToolsBlock,
+  cleanupDataQuestion,
+  cleanupInput,
+  cleanupReport,
+  cleanupWarningDialog,
+  installDialog,
+  skillsDialog,
+  toolBadge,
+  type CleanupReport,
+} from "./settings-machine-model";
+import {
+  FALLBACK_AUTO_RETIRED_ACK,
   FALLBACK_POLICY_CHOICES,
   ROLES_APPLY_NOTICE,
   addFallback,
   applySavedRole,
   canAddFallback,
-  cleanupDataQuestion,
-  cleanupInput,
-  cleanupReport,
-  cleanupWarning,
   entryAsSetting,
   entryOfDraft,
+  fallbackAutoRetiredNotice,
   fallbackDraftChanged,
   fallbackDraftOf,
   fallbackEntryText,
-  fallbackPolicyWarning,
   fallbackPriceText,
-  moveFallback,
-  removeFallback,
-  skillsDialog,
-  replaceFallback,
-  saveFallbackInput,
-  installWarning,
   isSettingsConflict,
+  moveFallback,
   providerLabel,
+  removeFallback,
+  replaceFallback,
   roleDraftOf,
   roleFormView,
+  reviewerFamilyNote,
+  roleBoundaryNote,
   roleRows,
   rowOptionProviders,
   saveErrorText,
+  saveFallbackInput,
   saveSettingsInput,
   savedNotes,
-  toolBadge,
   type FallbackDraft,
   type RoleChoice,
   type RoleDraft,
-  type CleanupReport,
+  type RoleFormView,
   type SetupRole,
-} from "./setup-model";
-import { Chip, ConfirmBlock, RoleMark, type Styles, type Theme } from "./ui";
+} from "./settings-roles-model";
+import { Button, Chip, ConfirmBlock, RoleMark, ToneText, type Styles, type Theme } from "./ui";
+
+/**
+ * The busy flag of one action, and the one way a Settings action runs:
+ * `run(action, onFailure)` sets the flag, awaits the action and clears the flag
+ * whether the action finished or threw; a throw goes to `onFailure`.
+ */
+export function useBusyAction(): { busy: boolean; run: (action: () => Promise<void>, onFailure: (failure: unknown) => void) => void } {
+  const [busy, setBusy] = useState(false);
+  const run = (action: () => Promise<void>, onFailure: (failure: unknown) => void) => {
+    setBusy(true);
+    void (async () => {
+      try {
+        await action();
+      } catch (failure) {
+        onFailure(failure);
+      } finally {
+        setBusy(false);
+      }
+    })();
+  };
+  return { busy, run };
+}
 
 function CopyButton({ text, label, styles }: { text: string; label: string; styles: Styles }) {
   const [copied, setCopied] = useState(false);
   return (
-    <Pressable
-      accessibilityRole="button"
+    <Button
+      label={copied ? "Copied" : "Copy"}
+      kind="secondary"
       accessibilityLabel={copied ? "Copied" : `Copy: ${label}`}
       onPress={() => {
         void copyText(text).then(
@@ -97,10 +129,8 @@ function CopyButton({ text, label, styles }: { text: string; label: string; styl
           () => setCopied(false),
         );
       }}
-      style={styles.secondaryButton}
-    >
-      <Text style={styles.secondaryButtonText}>{copied ? "Copied" : "Copy"}</Text>
-    </Pressable>
+      styles={styles}
+    />
   );
 }
 
@@ -117,6 +147,27 @@ export function CommandLine({ label, command, styles, theme }: { label: string; 
         </Text>
         <CopyButton text={command} label={label} styles={styles} />
       </View>
+    </View>
+  );
+}
+
+/** What an install run says: its line in its tone, then the last lines of its output. */
+export interface RunResult {
+  text: string;
+  tone: "success" | "danger";
+  tail: string[];
+}
+
+/** A run's result under its button: the line, then the output tail when there is one. Hook-free. */
+export function RunResultView({ result, styles, theme }: { result: RunResult; styles: Styles; theme: Theme }) {
+  return (
+    <View style={{ gap: 2 }}>
+      <ToneText tone={result.tone} styles={styles} theme={theme}>{result.text}</ToneText>
+      {result.tail.length === 0 ? null : (
+        <Text style={[styles.mono, { backgroundColor: theme.colors.surface0, padding: 6, borderRadius: 6 }]} selectable>
+          {result.tail.join("\n")}
+        </Text>
+      )}
     </View>
   );
 }
@@ -155,6 +206,96 @@ function ChoiceField({ title, choices, selected, onSelect, styles, theme }: {
   );
 }
 
+/** What `RoleFields` draws, from `useRoleForm`. */
+export interface RoleFieldsProps {
+  view: RoleFormView;
+  /** `roles.options` of the drafted provider is loading. */
+  loading: boolean;
+  /** Why `roles.options` failed; it replaces the blocker line. */
+  error: string | null;
+  onChange: (next: (draft: RoleDraft) => RoleDraft) => void;
+}
+
+/**
+ * The fields both Edit forms share, a role's and a fallback entry's
+ * (`roleFormView`): provider, model and its price, thinking, mode, and why the
+ * form cannot finish yet. Hook-free.
+ */
+export function RoleFields({ view, loading, error, onChange, styles, theme }: RoleFieldsProps & { styles: Styles; theme: Theme }) {
+  const set = (patch: Partial<RoleDraft>) => onChange((current) => ({ ...current, ...patch }));
+  return (
+    <>
+      {view.providers.length === 0 ? (
+        <Text style={styles.body}>Paseo reports no available provider right now.</Text>
+      ) : (
+        <ChoiceField
+          title="Provider"
+          choices={view.providers.map((provider) => ({ id: provider, label: providerLabel(provider) }))}
+          selected={view.draft.baseProvider === "" ? null : view.draft.baseProvider}
+          onSelect={(id) => set({ baseProvider: id ?? "" })}
+          styles={styles}
+          theme={theme}
+        />
+      )}
+      {loading ? <ActivityIndicator color={styles.spinner.color} /> : null}
+      {error === null ? null : <ToneText tone="danger" styles={styles} theme={theme}>{error}</ToneText>}
+      {view.models.length === 0 ? null : (
+        <ChoiceField
+          title="Model"
+          choices={view.models.map((model) => ({ id: model.id, label: model.label }))}
+          selected={view.draft.model}
+          onSelect={(id) => set({ model: id })}
+          styles={styles}
+          theme={theme}
+        />
+      )}
+      {view.price === null ? null : <Text style={styles.body}>{view.price}</Text>}
+      {view.thinking.length === 0 ? null : (
+        <ChoiceField
+          title="Thinking"
+          choices={view.thinking}
+          selected={view.draft.thinkingOptionId}
+          onSelect={(id) => set({ thinkingOptionId: id })}
+          styles={styles}
+          theme={theme}
+        />
+      )}
+      {view.modes.length === 0 ? null : (
+        <ChoiceField
+          title="Mode"
+          choices={view.modes}
+          selected={view.draft.modeId}
+          onSelect={(id) => set({ modeId: id })}
+          styles={styles}
+          theme={theme}
+        />
+      )}
+      {view.modeNote === null ? null : <ToneText tone="warning" styles={styles} theme={theme}>{view.modeNote}</ToneText>}
+      {view.blocker === null || error !== null ? null : <Text style={styles.body}>{view.blocker}</Text>}
+    </>
+  );
+}
+
+/**
+ * The state of one Edit form, a role's or a fallback entry's: the draft, the
+ * drafted provider's `roles.options`, and what the form shows.
+ */
+function useRoleForm(role: SetupRole, setting: RoleSetting, available: readonly string[]): RoleFieldsProps {
+  const getOptions = useRpc(rolesOptionsRpc);
+  const [draft, setDraft] = useState<RoleDraft>(() => roleDraftOf(setting));
+  const options = useQuery({
+    queryKey: roleOptionsKey(draft.baseProvider),
+    queryFn: () => getOptions({ provider: draft.baseProvider }),
+    enabled: draft.baseProvider !== "",
+  });
+  return {
+    view: roleFormView({ role, setting, available, draft, options: options.data }),
+    loading: options.isLoading,
+    error: options.isError ? errorMessageOf(options.error) : null,
+    onChange: setDraft,
+  };
+}
+
 /**
  * The Edit form of one role (design §4.3.1). `revision` is the one the form
  * was opened with: a save against a configuration changed since then is
@@ -171,113 +312,57 @@ function RoleEditForm({ role, label, setting, available, revision, styles, theme
   onClose: () => void;
   onSaved: (notes: Badge[]) => void;
 }) {
-  const getOptions = useRpc(rolesOptionsRpc);
   const saveSettings = useRpc(rolesSaveSettingsRpc);
   const queryClient = useQueryClient();
-  const [draft, setDraft] = useState<RoleDraft>(() => roleDraftOf(setting));
-  const [saving, setSaving] = useState(false);
+  const form = useRoleForm(role, setting, available);
+  const { busy: saving, run } = useBusyAction();
   const [error, setError] = useState<string | null>(null);
-  const options = useQuery({
-    queryKey: roleOptionsKey(draft.baseProvider),
-    queryFn: () => getOptions({ provider: draft.baseProvider }),
-    enabled: draft.baseProvider !== "",
-  });
-  const view = roleFormView({ role, setting, available, draft, options: options.data });
-  const input = saveSettingsInput(revision, role, view.draft);
-  const canSave = input !== null && view.blocker === null && view.changed && !saving;
+  const input = saveSettingsInput(revision, role, form.view.draft);
+  const canSave = input !== null && form.view.blocker === null && form.view.changed && !saving;
 
-  const save = async () => {
+  const save = () => {
     if (input === null) return;
-    setSaving(true);
-    setError(null);
-    try {
-      const result = await saveSettings(input);
-      queryClient.setQueryData<RolesSettings>(ROLES_SETTINGS_KEY, (old) => (old === undefined ? old : applySavedRole(old, result)));
-      void queryClient.invalidateQueries({ queryKey: ROLES_SETTINGS_KEY });
-      setSaving(false);
-      onSaved(savedNotes(result));
-    } catch (failure) {
-      setError(saveErrorText(failure));
-      setSaving(false);
-      // Show the configuration as it is now; this form keeps its revision, so only reopening saves over it.
-      if (isSettingsConflict(failure)) void queryClient.invalidateQueries({ queryKey: ROLES_SETTINGS_KEY });
-    }
+    run(
+      async () => {
+        setError(null);
+        const result = await saveSettings(input);
+        queryClient.setQueryData<RolesSettings>(ROLES_SETTINGS_KEY, (old) => (old === undefined ? old : applySavedRole(old, result)));
+        void queryClient.invalidateQueries({ queryKey: ROLES_SETTINGS_KEY });
+        onSaved(savedNotes(result));
+      },
+      (failure) => {
+        setError(saveErrorText(failure));
+        // Show the configuration as it is now; this form keeps its revision, so only reopening saves over it.
+        if (isSettingsConflict(failure)) void queryClient.invalidateQueries({ queryKey: ROLES_SETTINGS_KEY });
+      },
+    );
   };
 
   return (
     <View style={[styles.card, { backgroundColor: theme.colors.surface0, gap: 8 }]}>
       <Text style={styles.sectionTitle}>{`Edit ${label}`}</Text>
-      {view.providers.length === 0 ? (
-        <Text style={styles.body}>Paseo reports no available provider right now.</Text>
-      ) : (
-        <ChoiceField
-          title="Provider"
-          choices={view.providers.map((provider) => ({ id: provider, label: providerLabel(provider) }))}
-          selected={draft.baseProvider === "" ? null : draft.baseProvider}
-          onSelect={(id) => setDraft((current) => ({ ...current, baseProvider: id ?? "" }))}
-          styles={styles}
-          theme={theme}
-        />
-      )}
-      {options.isLoading ? <ActivityIndicator color={styles.spinner.color} /> : null}
-      {options.isError ? (
-        <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{errorMessageOf(options.error)}</Text>
-      ) : null}
-      {view.models.length === 0 ? null : (
-        <ChoiceField
-          title="Model"
-          choices={view.models.map((model) => ({ id: model.id, label: model.label }))}
-          selected={view.draft.model}
-          onSelect={(id) => setDraft((current) => ({ ...current, model: id }))}
-          styles={styles}
-          theme={theme}
-        />
-      )}
-      {view.price === null ? null : <Text style={styles.body}>{view.price}</Text>}
-      {view.thinking.length === 0 ? null : (
-        <ChoiceField
-          title="Thinking"
-          choices={view.thinking}
-          selected={view.draft.thinkingOptionId}
-          onSelect={(id) => setDraft((current) => ({ ...current, thinkingOptionId: id }))}
-          styles={styles}
-          theme={theme}
-        />
-      )}
-      {view.modes.length === 0 ? null : (
-        <ChoiceField
-          title="Mode"
-          choices={view.modes}
-          selected={view.draft.modeId}
-          onSelect={(id) => setDraft((current) => ({ ...current, modeId: id }))}
-          styles={styles}
-          theme={theme}
-        />
-      )}
-      {view.modeNote === null ? null : <Text style={[styles.body, { color: toneColor(theme, "warning") }]}>{view.modeNote}</Text>}
-      {view.blocker === null || options.isError ? null : <Text style={styles.body}>{view.blocker}</Text>}
+      <RoleFields {...form} styles={styles} theme={theme} />
       <View style={styles.chipRow}>
-        <Pressable
-          accessibilityRole="button"
+        <Button
+          label={saving ? "Saving…" : "Save"}
+          kind="primary"
           accessibilityLabel={`Save the ${label} settings`}
           accessibilityState={{ disabled: !canSave, busy: saving }}
           disabled={!canSave}
-          onPress={() => void save()}
-          style={[styles.button, canSave ? null : { opacity: 0.5 }]}
-        >
-          <Text style={styles.buttonText}>{saving ? "Saving…" : "Save"}</Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
+          onPress={save}
+          style={canSave ? null : { opacity: 0.5 }}
+          styles={styles}
+        />
+        <Button
+          label="Cancel"
+          kind="secondary"
           accessibilityLabel={`Cancel: keep the ${label} settings as they are`}
           disabled={saving}
           onPress={onClose}
-          style={styles.secondaryButton}
-        >
-          <Text style={styles.secondaryButtonText}>Cancel</Text>
-        </Pressable>
+          styles={styles}
+        />
       </View>
-      {error === null ? null : <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{error}</Text>}
+      {error === null ? null : <ToneText tone="danger" styles={styles} theme={theme}>{error}</ToneText>}
     </View>
   );
 }
@@ -296,83 +381,26 @@ function FallbackEntryForm({ role, entry, available, styles, theme, onDone, onCa
   onDone: (entry: FallbackEntryInput) => void;
   onCancel: () => void;
 }) {
-  const getOptions = useRpc(rolesOptionsRpc);
   const setting = useMemo(() => entryAsSetting(role, entry), [role, entry]);
-  const [draft, setDraft] = useState<RoleDraft>(() => roleDraftOf(setting));
-  const options = useQuery({
-    queryKey: roleOptionsKey(draft.baseProvider),
-    queryFn: () => getOptions({ provider: draft.baseProvider }),
-    enabled: draft.baseProvider !== "",
-  });
-  const view = roleFormView({ role, setting, available, draft, options: options.data });
-  const done = view.blocker === null ? entryOfDraft(view.draft) : null;
+  const form = useRoleForm(role, setting, available);
+  const done = form.view.blocker === null ? entryOfDraft(form.view.draft) : null;
 
   return (
     <View style={[styles.card, { backgroundColor: theme.colors.surface0, gap: 8 }]}>
       <Text style={styles.sectionTitle}>{entry === null ? "Add fallback" : "Edit fallback"}</Text>
-      {view.providers.length === 0 ? (
-        <Text style={styles.body}>Paseo reports no available provider right now.</Text>
-      ) : (
-        <ChoiceField
-          title="Provider"
-          choices={view.providers.map((provider) => ({ id: provider, label: providerLabel(provider) }))}
-          selected={draft.baseProvider === "" ? null : draft.baseProvider}
-          onSelect={(id) => setDraft((current) => ({ ...current, baseProvider: id ?? "" }))}
-          styles={styles}
-          theme={theme}
-        />
-      )}
-      {options.isLoading ? <ActivityIndicator color={styles.spinner.color} /> : null}
-      {options.isError ? (
-        <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{errorMessageOf(options.error)}</Text>
-      ) : null}
-      {view.models.length === 0 ? null : (
-        <ChoiceField
-          title="Model"
-          choices={view.models.map((model) => ({ id: model.id, label: model.label }))}
-          selected={view.draft.model}
-          onSelect={(id) => setDraft((current) => ({ ...current, model: id }))}
-          styles={styles}
-          theme={theme}
-        />
-      )}
-      {view.price === null ? null : <Text style={styles.body}>{view.price}</Text>}
-      {view.thinking.length === 0 ? null : (
-        <ChoiceField
-          title="Thinking"
-          choices={view.thinking}
-          selected={view.draft.thinkingOptionId}
-          onSelect={(id) => setDraft((current) => ({ ...current, thinkingOptionId: id }))}
-          styles={styles}
-          theme={theme}
-        />
-      )}
-      {view.modes.length === 0 ? null : (
-        <ChoiceField
-          title="Mode"
-          choices={view.modes}
-          selected={view.draft.modeId}
-          onSelect={(id) => setDraft((current) => ({ ...current, modeId: id }))}
-          styles={styles}
-          theme={theme}
-        />
-      )}
-      {view.modeNote === null ? null : <Text style={[styles.body, { color: toneColor(theme, "warning") }]}>{view.modeNote}</Text>}
-      {view.blocker === null || options.isError ? null : <Text style={styles.body}>{view.blocker}</Text>}
+      <RoleFields {...form} styles={styles} theme={theme} />
       <View style={styles.chipRow}>
-        <Pressable
-          accessibilityRole="button"
+        <Button
+          label={entry === null ? "Add" : "Done"}
+          kind="primary"
           accessibilityLabel={entry === null ? "Add this fallback" : "Done editing this fallback"}
           accessibilityState={{ disabled: done === null }}
           disabled={done === null}
           onPress={() => done !== null && onDone(done)}
-          style={[styles.button, done === null ? { opacity: 0.5 } : null]}
-        >
-          <Text style={styles.buttonText}>{entry === null ? "Add" : "Done"}</Text>
-        </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Cancel: leave this fallback as it is" onPress={onCancel} style={styles.secondaryButton}>
-          <Text style={styles.secondaryButtonText}>Cancel</Text>
-        </Pressable>
+          style={done === null ? { opacity: 0.5 } : null}
+          styles={styles}
+        />
+        <Button label="Cancel" kind="secondary" accessibilityLabel="Cancel: leave this fallback as it is" onPress={onCancel} styles={styles} />
       </View>
     </View>
   );
@@ -387,15 +415,15 @@ function RowButton({ label, accessibilityLabel, disabled, onPress, styles }: {
   styles: Styles;
 }) {
   return (
-    <Pressable
-      accessibilityRole="button"
+    <Button
+      label={label}
+      kind="secondary"
       accessibilityLabel={accessibilityLabel}
       disabled={disabled}
       onPress={onPress}
-      style={[styles.secondaryButton, disabled ? { opacity: 0.4 } : null]}
-    >
-      <Text style={styles.secondaryButtonText}>{label}</Text>
-    </Pressable>
+      style={disabled ? { opacity: 0.4 } : null}
+      styles={styles}
+    />
   );
 }
 
@@ -403,7 +431,9 @@ function RowButton({ label, accessibilityLabel, disabled, onPress, styles }: {
  * The fallback chain of one role (§4.3.1): the policy, the entries with
  * reorder, edit and remove, and "Add fallback". Edits stay local until Save;
  * the block keeps the `revision` it had when the user started editing, so a
- * save over a configuration changed since then is refused.
+ * save over a configuration changed since then is refused. A chain still
+ * stored with the retired Auto switch shows its notice once, with a button
+ * that saves the chain as shown (ADR-022 decision 4); any save ends it.
  */
 function FallbackBlock({ chain, label, revision, available, optionsOf, styles, theme }: {
   chain: FallbackSettings;
@@ -418,11 +448,12 @@ function FallbackBlock({ chain, label, revision, available, optionsOf, styles, t
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState<{ draft: FallbackDraft; revision: string } | null>(null);
   const [form, setForm] = useState<{ index: number | null } | null>(null);
-  const [saving, setSaving] = useState(false);
+  const { busy: saving, run } = useBusyAction();
   const [notes, setNotes] = useState<Badge[]>([]);
   const [error, setError] = useState<string | null>(null);
   const draft = editing?.draft ?? fallbackDraftOf(chain);
   const changed = editing !== null && fallbackDraftChanged(chain, editing.draft);
+  const retired = fallbackAutoRetiredNotice(chain);
 
   const edit = (next: (current: FallbackDraft) => FallbackDraft) => {
     setNotes([]);
@@ -430,21 +461,21 @@ function FallbackBlock({ chain, label, revision, available, optionsOf, styles, t
     setEditing((current) => ({ draft: next(current?.draft ?? fallbackDraftOf(chain)), revision: current?.revision ?? revision }));
   };
 
-  const save = async () => {
-    if (editing === null) return;
-    setSaving(true);
-    setError(null);
-    try {
-      const result = await saveFallback(saveFallbackInput(editing.revision, chain.role, editing.draft));
-      setEditing(null);
-      setNotes(savedNotes(result));
-      void queryClient.invalidateQueries({ queryKey: ROLES_SETTINGS_KEY });
-    } catch (failure) {
-      setError(saveErrorText(failure));
-      if (isSettingsConflict(failure)) void queryClient.invalidateQueries({ queryKey: ROLES_SETTINGS_KEY });
-    } finally {
-      setSaving(false);
-    }
+  const save = (next: { draft: FallbackDraft; revision: string } | null = editing) => {
+    if (next === null) return;
+    run(
+      async () => {
+        setError(null);
+        const result = await saveFallback(saveFallbackInput(next.revision, chain.role, next.draft));
+        setEditing(null);
+        setNotes(savedNotes(result));
+        void queryClient.invalidateQueries({ queryKey: ROLES_SETTINGS_KEY });
+      },
+      (failure) => {
+        setError(saveErrorText(failure));
+        if (isSettingsConflict(failure)) void queryClient.invalidateQueries({ queryKey: ROLES_SETTINGS_KEY });
+      },
+    );
   };
 
   return (
@@ -465,8 +496,19 @@ function FallbackBlock({ chain, label, revision, available, optionsOf, styles, t
           );
         })}
       </View>
-      {fallbackPolicyWarning(chain.role, draft.policy) === null ? null : (
-        <Text style={[styles.body, { color: toneColor(theme, "warning") }]}>{fallbackPolicyWarning(chain.role, draft.policy)}</Text>
+      {retired === null ? null : (
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <ToneText tone="warning" style={{ flex: 1, minWidth: 160 }} styles={styles} theme={theme}>{retired}</ToneText>
+          {editing === null ? (
+            <RowButton
+              label={FALLBACK_AUTO_RETIRED_ACK}
+              accessibilityLabel={`Save the ${label} fallbacks as shown`}
+              disabled={saving}
+              onPress={() => save({ draft: fallbackDraftOf(chain), revision })}
+              styles={styles}
+            />
+          ) : null}
+        </View>
       )}
       {draft.entries.map((entry, index) => {
         const saved = editing === null ? chain.entries[index] : undefined;
@@ -527,18 +569,19 @@ function FallbackBlock({ chain, label, revision, available, optionsOf, styles, t
       ) : null}
       {editing === null ? null : (
         <View style={styles.chipRow}>
-          <Pressable
-            accessibilityRole="button"
+          <Button
+            label={saving ? "Saving…" : "Save fallbacks"}
+            kind="primary"
             accessibilityLabel={`Save the ${label} fallbacks`}
             accessibilityState={{ disabled: !changed || saving, busy: saving }}
             disabled={!changed || saving}
-            onPress={() => void save()}
-            style={[styles.button, changed && !saving ? null : { opacity: 0.5 }]}
-          >
-            <Text style={styles.buttonText}>{saving ? "Saving…" : "Save fallbacks"}</Text>
-          </Pressable>
-          <Pressable
-            accessibilityRole="button"
+            onPress={() => save()}
+            style={changed && !saving ? null : { opacity: 0.5 }}
+            styles={styles}
+          />
+          <Button
+            label="Discard"
+            kind="secondary"
             accessibilityLabel={`Discard the changes to the ${label} fallbacks`}
             disabled={saving}
             onPress={() => {
@@ -546,23 +589,37 @@ function FallbackBlock({ chain, label, revision, available, optionsOf, styles, t
               setForm(null);
               setError(null);
             }}
-            style={styles.secondaryButton}
-          >
-            <Text style={styles.secondaryButtonText}>Discard</Text>
-          </Pressable>
+            styles={styles}
+          />
         </View>
       )}
       {notes.map((line, index) => (
-        <Text key={`${index}:${line.text}`} style={[styles.body, { color: toneColor(theme, line.tone) }]}>
+        <ToneText key={`${index}:${line.text}`} tone={line.tone} styles={styles} theme={theme}>
           {line.text}
-        </Text>
+        </ToneText>
       ))}
-      {error === null ? null : <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{error}</Text>}
+      {error === null ? null : <ToneText tone="danger" styles={styles} theme={theme}>{error}</ToneText>}
     </View>
   );
 }
 
-/** "Roles & models": one row per role in the order `roles.settings` returns, each with an Edit form. */
+/**
+ * The line under the Reviewer's row when it runs on the Worker's model family
+ * (`reviewerFamilyNote`, autonomy design §C.5); nothing otherwise. Hook-free.
+ */
+export function ReviewerFamilyNoteView({ note, styles, theme }: { note: Badge | null; styles: Styles; theme: Theme }) {
+  if (note === null) return null;
+  return (
+    <ToneText tone={note.tone} styles={styles} theme={theme}>
+      {note.text}
+    </ToneText>
+  );
+}
+
+/**
+ * "Roles & models": one row per role in the order `roles.settings` returns,
+ * each with an Edit form; under the Reviewer's, the same-family line.
+ */
 export function RolesSection({ styles, theme }: { styles: Styles; theme: Theme }) {
   const getSettings = useRpc(rolesSettingsRpc);
   const getOptions = useRpc(rolesOptionsRpc);
@@ -574,6 +631,7 @@ export function RolesSection({ styles, theme }: { styles: Styles; theme: Theme }
   });
   const optionsOf = (provider: string) => optionQueries[providers.indexOf(provider)]?.data;
   const rows = data === undefined ? [] : roleRows(data, optionsOf);
+  const familyNote = data === undefined ? null : reviewerFamilyNote(data);
   const [editing, setEditing] = useState<{ role: SetupRole; revision: string } | null>(null);
   const [notes, setNotes] = useState<{ role: SetupRole; lines: Badge[] } | null>(null);
 
@@ -582,7 +640,7 @@ export function RolesSection({ styles, theme }: { styles: Styles; theme: Theme }
       <Text style={styles.sectionTitle}>Roles & models</Text>
       {settings.isPending ? <ActivityIndicator color={styles.spinner.color} /> : null}
       {settings.isError ? (
-        <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{errorMessageOf(settings.error)}</Text>
+        <ToneText tone="danger" styles={styles} theme={theme}>{errorMessageOf(settings.error)}</ToneText>
       ) : null}
       {data === undefined ? null : (
         <View style={[styles.card, { gap: 10 }]}>
@@ -596,24 +654,25 @@ export function RolesSection({ styles, theme }: { styles: Styles; theme: Theme }
                   <Text style={[styles.body, { flex: 1, minWidth: 160 }]} selectable>
                     {row.text}
                   </Text>
-                  <Pressable
-                    accessibilityRole="button"
+                  <Button
+                    label={open ? "Close" : "Edit"}
+                    kind="secondary"
                     accessibilityLabel={open ? `Close the ${row.label} form` : `Edit the ${row.label} provider, model, thinking and mode`}
                     accessibilityState={{ expanded: open }}
                     onPress={() => {
                       setNotes(null);
                       setEditing(open ? null : { role: row.role, revision: data.revision });
                     }}
-                    style={styles.secondaryButton}
-                  >
-                    <Text style={styles.secondaryButtonText}>{open ? "Close" : "Edit"}</Text>
-                  </Pressable>
+                    styles={styles}
+                  />
                 </View>
+                {row.role === "reviewer" ? <ReviewerFamilyNoteView note={familyNote} styles={styles} theme={theme} /> : null}
+                <ReviewerFamilyNoteView note={roleBoundaryNote(row.setting)} styles={styles} theme={theme} />
                 {notes?.role === row.role
                   ? notes.lines.map((line, index) => (
-                      <Text key={`${index}:${line.text}`} style={[styles.body, { color: toneColor(theme, line.tone) }]}>
+                      <ToneText key={`${index}:${line.text}`} tone={line.tone} styles={styles} theme={theme}>
                         {line.text}
-                      </Text>
+                      </ToneText>
                     ))
                   : null}
                 {row.fallback === null ? null : (
@@ -649,9 +708,9 @@ export function RolesSection({ styles, theme }: { styles: Styles; theme: Theme }
         </View>
       )}
       {data?.warnings.map((warning) => (
-        <Text key={warning} style={[styles.body, { color: toneColor(theme, "warning") }]}>
+        <ToneText key={warning} tone="warning" styles={styles} theme={theme}>
           {warning}
-        </Text>
+        </ToneText>
       ))}
       <Text style={styles.body}>{ROLES_APPLY_NOTICE}</Text>
     </>
@@ -666,25 +725,27 @@ export function ToolCard({ tool, styles, theme, onInstalled }: {
 }) {
   const install = useRpc(setupInstallToolRpc);
   const [confirming, setConfirming] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ text: string; tone: "success" | "danger"; tail: string[] } | null>(null);
+  const { busy, run } = useBusyAction();
+  const [result, setResult] = useState<RunResult | null>(null);
   const badge = toolBadge(tool);
   const installable = tool.path === null && tool.installCommand !== null && (tool.id === "br" || tool.id === "bv");
 
-  const run = async () => {
-    if (tool.id === "bd") return;
-    setBusy(true);
-    setResult(null);
-    try {
-      const done = await install({ tool: tool.id, confirmed: true });
-      setResult({ text: `Installed with \`${done.command}\`.`, tone: "success", tail: done.tail });
-      onInstalled();
-    } catch (failure) {
-      setResult({ text: errorMessageOf(failure), tone: "danger", tail: [] });
-    } finally {
-      setBusy(false);
-      setConfirming(false);
-    }
+  const confirm = () => {
+    const id = tool.id;
+    if (id === "bd") return;
+    run(
+      async () => {
+        setResult(null);
+        const done = await install({ tool: id, confirmed: true });
+        setResult({ text: `Installed with \`${done.command}\`.`, tone: "success", tail: done.tail });
+        onInstalled();
+        setConfirming(false);
+      },
+      (failure) => {
+        setResult({ text: errorMessageOf(failure), tone: "danger", tail: [] });
+        setConfirming(false);
+      },
+    );
   };
 
   return (
@@ -699,58 +760,32 @@ export function ToolCard({ tool, styles, theme, onInstalled }: {
       </Text>
       {installable ? (
         confirming ? (
-          <View style={{ gap: 6 }}>
-            <Text style={[styles.body, { color: toneColor(theme, "warning") }]}>{installWarning(tool)}</Text>
-            {/* Cancel first: the safe choice is the default (autonomy design §A.12). */}
-            <View style={styles.chipRow}>
-              {busy ? null : (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={`Cancel: do not install ${tool.id}`}
-                  onPress={() => setConfirming(false)}
-                  style={styles.secondaryButton}
-                >
-                  <Text style={styles.secondaryButtonText}>Cancel</Text>
-                </Pressable>
-              )}
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={`Install ${tool.id} on this machine`}
-                accessibilityState={{ disabled: busy, busy }}
-                disabled={busy}
-                onPress={() => void run()}
-                style={styles.button}
-              >
-                <Text style={styles.buttonText}>{busy ? "Installing… (up to 5 minutes)" : `Install ${tool.id}`}</Text>
-              </Pressable>
-            </View>
-          </View>
+          <ConfirmBlock
+            dialog={installDialog(tool)}
+            busy={busy}
+            busyLabel="Installing… (up to 5 minutes)"
+            onCancel={() => setConfirming(false)}
+            onConfirm={confirm}
+            styles={styles}
+            theme={theme}
+          />
         ) : (
           <View style={{ gap: 6 }}>
             <CommandLine label="Install command" command={tool.installCommand!} styles={styles} theme={theme} />
-            <Pressable
-              accessibilityRole="button"
+            <Button
+              label={`Install ${tool.id}…`}
+              kind="primary"
               accessibilityLabel={`Install ${tool.id}: asks before anything runs`}
               onPress={() => setConfirming(true)}
-              style={[styles.button, { alignSelf: "flex-start" }]}
-            >
-              <Text style={styles.buttonText}>{`Install ${tool.id}…`}</Text>
-            </Pressable>
+              style={{ alignSelf: "flex-start" }}
+              styles={styles}
+            />
           </View>
         )
       ) : tool.updateCommand !== null ? (
         <CommandLine label="Update it yourself with" command={tool.updateCommand} styles={styles} theme={theme} />
       ) : null}
-      {result === null ? null : (
-        <View style={{ gap: 2 }}>
-          <Text style={[styles.body, { color: toneColor(theme, result.tone) }]}>{result.text}</Text>
-          {result.tail.length === 0 ? null : (
-            <Text style={[styles.mono, { backgroundColor: theme.colors.surface0, padding: 6, borderRadius: 6 }]} selectable>
-              {result.tail.join("\n")}
-            </Text>
-          )}
-        </View>
-      )}
+      {result === null ? null : <RunResultView result={result} styles={styles} theme={theme} />}
       <Text style={[styles.body, { fontSize: 11 }]} selectable>
         {tool.homepage}
       </Text>
@@ -770,7 +805,7 @@ export function AgentToolsBlockView({ status, onDone, styles, theme }: {
 }) {
   const grant = useRpc(setupGrantAgentToolsRpc);
   const [asking, setAsking] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const { busy, run } = useBusyAction();
   const [failure, setFailure] = useState<string | null>(null);
   const block = agentToolsBlock(status);
   if (block === null) return null;
@@ -778,7 +813,7 @@ export function AgentToolsBlockView({ status, onDone, styles, theme }: {
   return (
     <View style={[styles.card, { gap: 6 }]}>
       <Text style={styles.sectionTitle}>Paseo agent tools</Text>
-      <Text style={[styles.body, { color: toneColor(theme, block.tone) }]}>{block.text}</Text>
+      <ToneText tone={block.tone} styles={styles} theme={theme}>{block.text}</ToneText>
       {asking ? (
         <ConfirmBlock
           dialog={AGENT_TOOLS_DIALOG}
@@ -786,34 +821,30 @@ export function AgentToolsBlockView({ status, onDone, styles, theme }: {
           busyLabel="Allowing…"
           onCancel={() => setAsking(false)}
           onConfirm={() =>
-            void (async () => {
-              setBusy(true);
-              setFailure(null);
-              try {
+            run(
+              async () => {
+                setFailure(null);
                 await grant({ confirmed: true });
                 setAsking(false);
                 onDone();
-              } catch (error) {
-                setFailure(errorMessageOf(error));
-              } finally {
-                setBusy(false);
-              }
-            })()
+              },
+              (error) => setFailure(errorMessageOf(error)),
+            )
           }
           styles={styles}
           theme={theme}
         />
       ) : block.button === null ? null : (
-        <Pressable
-          accessibilityRole="button"
+        <Button
+          label={block.button}
+          kind="primary"
           accessibilityLabel={`${block.button} Asks before anything changes.`}
           onPress={() => setAsking(true)}
-          style={[styles.button, { alignSelf: "flex-start" }]}
-        >
-          <Text style={styles.buttonText}>{block.button}</Text>
-        </Pressable>
+          style={{ alignSelf: "flex-start" }}
+          styles={styles}
+        />
       )}
-      {failure === null ? null : <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{failure}</Text>}
+      {failure === null ? null : <ToneText tone="danger" styles={styles} theme={theme}>{failure}</ToneText>}
     </View>
   );
 }
@@ -827,8 +858,8 @@ export function SkillsInstallBlock({ command, onDone, styles, theme }: {
 }) {
   const installSkills = useRpc(setupInstallSkillsRpc);
   const [asking, setAsking] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ text: string; tone: "success" | "danger"; tail: string[] } | null>(null);
+  const { busy, run } = useBusyAction();
+  const [result, setResult] = useState<RunResult | null>(null);
 
   return (
     <View style={{ gap: 6 }}>
@@ -839,44 +870,73 @@ export function SkillsInstallBlock({ command, onDone, styles, theme }: {
           busyLabel="Running… (up to 5 minutes)"
           onCancel={() => setAsking(false)}
           onConfirm={() =>
-            void (async () => {
-              setBusy(true);
-              setResult(null);
-              try {
+            run(
+              async () => {
+                setResult(null);
                 const done = await installSkills({ confirmed: true });
                 setResult({ text: `Ran \`${done.command}\`, exit ${done.code}.`, tone: "success", tail: done.tail });
                 setAsking(false);
                 onDone();
-              } catch (error) {
-                setResult({ text: errorMessageOf(error), tone: "danger", tail: [] });
-              } finally {
-                setBusy(false);
-              }
-            })()
+              },
+              (error) => setResult({ text: errorMessageOf(error), tone: "danger", tail: [] }),
+            )
           }
           styles={styles}
           theme={theme}
         />
       ) : (
-        <Pressable
-          accessibilityRole="button"
+        <Button
+          label="Install skills…"
+          kind="primary"
           accessibilityLabel="Install skills: asks before anything runs"
           onPress={() => setAsking(true)}
-          style={[styles.button, { alignSelf: "flex-start" }]}
-        >
-          <Text style={styles.buttonText}>Install skills…</Text>
-        </Pressable>
+          style={{ alignSelf: "flex-start" }}
+          styles={styles}
+        />
       )}
-      {result === null ? null : (
-        <View style={{ gap: 2 }}>
-          <Text style={[styles.body, { color: toneColor(theme, result.tone) }]}>{result.text}</Text>
-          {result.tail.length === 0 ? null : (
-            <Text style={[styles.mono, { backgroundColor: theme.colors.surface0, padding: 6, borderRadius: 6 }]} selectable>
-              {result.tail.join("\n")}
-            </Text>
-          )}
-        </View>
-      )}
+      {result === null ? null : <RunResultView result={result} styles={styles} theme={theme} />}
+    </View>
+  );
+}
+
+/**
+ * The cleanup's second question: the data. "Keep my data" is the first button
+ * and the default; "Delete data" is gone while the cleanup runs. Hook-free.
+ */
+export function CleanupDataView({ question, busy, onKeep, onDelete, styles, theme }: {
+  question: string;
+  busy: boolean;
+  onKeep: () => void;
+  onDelete: () => void;
+  styles: Styles;
+  theme: Theme;
+}) {
+  return (
+    <View style={{ gap: 6 }}>
+      <ToneText tone="warning" selectable styles={styles} theme={theme}>
+        {question}
+      </ToneText>
+      <View style={styles.chipRow}>
+        <Button
+          label={busy ? "Removing…" : CLEANUP_DATA_DIALOG.keepLabel}
+          kind="primary"
+          accessibilityLabel="Remove the settings and keep my data"
+          accessibilityState={{ disabled: busy, busy }}
+          disabled={busy}
+          onPress={onKeep}
+          styles={styles}
+        />
+        {busy ? null : (
+          <Button
+            label={CLEANUP_DATA_DIALOG.deleteLabel}
+            kind="secondary"
+            accessibilityLabel="Remove the settings and delete paseo-bm's data"
+            onPress={onDelete}
+            textStyle={{ color: toneColor(theme, "danger") }}
+            styles={styles}
+          />
+        )}
+      </View>
     </View>
   );
 }
@@ -897,24 +957,20 @@ export function CleanupBlock({ status, onCleaned, styles, theme }: {
 }) {
   const cleanup = useRpc(setupCleanupRpc);
   const [step, setStep] = useState<"idle" | "warning" | "data">("idle");
-  const [busy, setBusy] = useState(false);
+  const { busy, run } = useBusyAction();
   const [failure, setFailure] = useState<string | null>(null);
   const [report, setReport] = useState<CleanupReport | null>(null);
 
-  const run = (deleteData: boolean) =>
-    void (async () => {
-      setBusy(true);
-      setFailure(null);
-      try {
+  const remove = (deleteData: boolean) =>
+    run(
+      async () => {
+        setFailure(null);
         setReport(cleanupReport(await cleanup(cleanupInput(deleteData))));
         setStep("idle");
         onCleaned();
-      } catch (error) {
-        setFailure(errorMessageOf(error));
-      } finally {
-        setBusy(false);
-      }
-    })();
+      },
+      (error) => setFailure(errorMessageOf(error)),
+    );
 
   if (report !== null) {
     return (
@@ -930,75 +986,42 @@ export function CleanupBlock({ status, onCleaned, styles, theme }: {
     );
   }
 
+  const warning = cleanupWarningDialog(status);
   return (
     <View style={{ gap: 6 }}>
       {step === "idle" ? (
-        <Pressable
-          accessibilityRole="button"
+        <Button
+          label={CLEANUP_BUTTON_LABEL}
+          kind="secondary"
           accessibilityLabel={CLEANUP_BUTTON_ACCESSIBILITY_LABEL}
           onPress={() => setStep("warning")}
-          style={[styles.secondaryButton, { alignSelf: "flex-start", borderColor: toneColor(theme, "danger") }]}
-        >
-          <Text style={[styles.secondaryButtonText, { color: toneColor(theme, "danger") }]}>{CLEANUP_BUTTON_LABEL}</Text>
-        </Pressable>
+          style={{ alignSelf: "flex-start", borderColor: toneColor(theme, "danger") }}
+          textStyle={{ color: toneColor(theme, "danger") }}
+          styles={styles}
+        />
       ) : null}
       {step === "warning" ? (
-        <View style={{ gap: 6 }}>
-          <Text style={[styles.body, { color: toneColor(theme, "danger") }]} selectable>
-            {cleanupWarning(status)}
-          </Text>
-          <View style={styles.chipRow}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Cancel: keep paseo-bm's settings"
-              onPress={() => setStep("idle")}
-              style={styles.secondaryButton}
-            >
-              <Text style={styles.secondaryButtonText}>{CLEANUP_WARNING_DIALOG.cancelLabel}</Text>
-            </Pressable>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Remove settings, then choose what happens to the data"
-              onPress={() => setStep("data")}
-              style={styles.button}
-            >
-              <Text style={styles.buttonText}>{CLEANUP_WARNING_DIALOG.confirmLabel}</Text>
-            </Pressable>
-          </View>
-        </View>
+        <ConfirmBlock
+          dialog={warning}
+          busy={false}
+          busyLabel={warning.confirmLabel}
+          onCancel={() => setStep("idle")}
+          onConfirm={() => setStep("data")}
+          styles={styles}
+          theme={theme}
+        />
       ) : null}
       {step === "data" ? (
-        <View style={{ gap: 6 }}>
-          <Text style={[styles.body, { color: toneColor(theme, "warning") }]} selectable>
-            {cleanupDataQuestion(status)}
-          </Text>
-          <View style={styles.chipRow}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Remove the settings and keep my data"
-              accessibilityState={{ disabled: busy, busy }}
-              disabled={busy}
-              onPress={() => run(false)}
-              style={styles.button}
-            >
-              <Text style={styles.buttonText}>{busy ? "Removing…" : CLEANUP_DATA_DIALOG.keepLabel}</Text>
-            </Pressable>
-            {busy ? null : (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Remove the settings and delete paseo-bm's data"
-                onPress={() => run(true)}
-                style={styles.secondaryButton}
-              >
-                <Text style={[styles.secondaryButtonText, { color: toneColor(theme, "danger") }]}>
-                  {CLEANUP_DATA_DIALOG.deleteLabel}
-                </Text>
-              </Pressable>
-            )}
-          </View>
-        </View>
+        <CleanupDataView
+          question={cleanupDataQuestion(status)}
+          busy={busy}
+          onKeep={() => remove(false)}
+          onDelete={() => remove(true)}
+          styles={styles}
+          theme={theme}
+        />
       ) : null}
-      {failure === null ? null : <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{failure}</Text>}
+      {failure === null ? null : <ToneText tone="danger" styles={styles} theme={theme}>{failure}</ToneText>}
     </View>
   );
 }

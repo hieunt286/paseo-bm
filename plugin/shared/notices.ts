@@ -10,7 +10,7 @@
  *
  * Kept in its own module so the pure modules (`traces.ts`), the senders
  * (`stop-propagation.ts`, `review-budget.ts`) and the chat cards
- * (`client/chat-cards.ts`, which draw a notice as a card) share one
+ * (`client/chat-card-parse.ts`, which draw a notice as a card) share one
  * definition without importing each other. Pure: no import at all.
  */
 
@@ -105,6 +105,35 @@ export const ANSWER_NOTICE_MARKER = "BM-ANSWER";
 export const DELIVERY_NOTICE_MARKER = "BM-DELIVERY";
 
 /**
+ * First line of the state brief the plugin sends a Manager or a Worker right
+ * after the compaction the Orchestrator asked for (`server/compaction.ts`,
+ * autonomy design §G.5 step 4): what the stores hold, so what matters is
+ * restored from artifacts. Listed so it is never the owner's words; the
+ * `/compact` before it has no marker, and the send log tells it apart
+ * (`server/compaction-store.ts`). Matched as a whole word.
+ */
+export const STATE_NOTICE_MARKER = "BM-STATE";
+
+/**
+ * First line of the plugin's request to an outgoing Worker for its handoff
+ * note (`server/handoff.ts`, autonomy design §G.6 step 1): `bm_report` with
+ * `handoffNote`, posted in its own chat. Listed so it is never the owner's
+ * words. Matched as a whole word: the successor's brief starts
+ * `BM-HANDOFF-BRIEF` (`shared/handoff.ts`), which the Manager sends, and is no
+ * notice.
+ */
+export const HANDOFF_NOTICE_MARKER = "BM-HANDOFF";
+
+/**
+ * First line of the plugin's word to the outgoing Worker once its successor
+ * appeared (`server/handoff.ts`, autonomy design §G.6 step 3): its request is
+ * handed to that Worker; it stops working on it and ends its turn. The plugin
+ * tells it, not the Manager, whose own attempt could miss (Phase 3 live check
+ * F4). Listed so it is never the owner's words. Matched as a whole word.
+ */
+export const REPLACED_NOTICE_MARKER = "BM-REPLACED";
+
+/**
  * First words of notices older builds sent and no build sends any more
  * (autonomy design §A.14). Stored history still holds them, so they are
  * recognised — and so ignored — like every notice: the notice that told a
@@ -127,10 +156,13 @@ const PREFIXES: readonly string[] = [
   COMMAND_NOTICE_MARKER,
   ANSWER_NOTICE_MARKER,
   DELIVERY_NOTICE_MARKER,
+  STATE_NOTICE_MARKER,
+  HANDOFF_NOTICE_MARKER,
+  REPLACED_NOTICE_MARKER,
 ];
 
 /** Markers that count only as a whole word: followed by whitespace or nothing. */
-const WHOLE_WORD_MARKERS: ReadonlySet<string> = new Set([ANSWER_NOTICE_MARKER, DELIVERY_NOTICE_MARKER]);
+const WHOLE_WORD_MARKERS: ReadonlySet<string> = new Set([ANSWER_NOTICE_MARKER, DELIVERY_NOTICE_MARKER, STATE_NOTICE_MARKER, HANDOFF_NOTICE_MARKER, REPLACED_NOTICE_MARKER]);
 
 function startsWithMarker(text: string, prefix: string): boolean {
   if (!text.startsWith(prefix)) return false;

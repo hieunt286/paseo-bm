@@ -8,13 +8,14 @@
  * cleared key raised again opens afresh with a new `since`. Alerts are data the
  * Inbox reads: nothing here ever messages the owner or an agent.
  *
- * The file rules are the decision store's (`decision-store.ts`), on the same
- * `trace-store.ts` and `data-home.ts` helpers: the folder is created `0700`
- * only by a write, never by a read; the file is `0600` and replaced atomically;
- * a symlink anywhere below the data folder is refused. A missing or corrupt
- * file reads as empty; an entry that does not validate is skipped on its own
- * and dropped by the next write; a file whose `version` is newer than this
- * build reads as empty and is never written.
+ * The file rules are every store's (`data-files.ts` `createJsonFileStore`,
+ * code review 2026-09-30 §3.1): the folder is created `0700` only by a write,
+ * never by a read; the file is `0600` and replaced atomically; a symlink
+ * anywhere below the data folder is refused. A missing or corrupt file reads
+ * as empty; an entry that does not validate is skipped on its own and dropped
+ * by the next write; a file whose `version` is newer than this build reads as
+ * empty and is never written — a write throws `E_TRACE_STORE_UNWRITABLE`, the
+ * code of every failure of this file.
  *
  * Open alerts are never evicted; of the cleared ones the `ALERT_CLEARED_LIMIT`
  * newest (by `clearedAt`) are kept.
@@ -22,21 +23,19 @@
  * **No lock, on purpose:** every operation is synchronous and the plugin
  * server is one thread, so a read-modify-write cannot interleave.
  */
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import {
   ALERTS_FILE_VERSION,
   MAX_ALERT_DETAIL_CHARS,
   alertEntrySchema,
   alertKeyOf,
-  alertsFileSchema,
   type Alert,
   type AlertEntry,
   type AlertKind,
   type AlertRole,
 } from "../shared/alerts";
-import { TRACES_DIR_NAME, ensureDataHome, resolveDataHome, type DataHomeDeps } from "./data-home";
-import { assertNoSymlinkOnPath, ensureStoreDir, writeStoreFileAtomically, type TraceStoreLocation } from "./trace-store";
+import { capBy, createJsonFileStore, keyedEntriesOf } from "./data-files";
+import { resolveDataHome, type DataHomeDeps } from "./data-home";
+import { timeOrZero } from "../shared/time";
 
 /** The folder inside the data folder; cleanup deletes it whole. */
 export const INBOX_DIR_NAME = "inbox";
@@ -90,17 +89,6 @@ export interface AlertStore {
   list(filter?: AlertFilter): Alert[];
 }
 
-/** `<home>/inbox`. */
-export function inboxDirOf(home: string): string {
-  return join(home, INBOX_DIR_NAME);
-}
-
-function timeOf(iso: string | null): number {
-  if (iso === null) return 0;
-  const at = Date.parse(iso);
-  return Number.isNaN(at) ? 0 : at;
-}
-
 function detailOf(detail: string | null | undefined): string | undefined {
   if (typeof detail !== "string") return undefined;
   const line = detail.replace(/\s+/g, " ").trim();
@@ -109,52 +97,32 @@ function detailOf(detail: string | null | undefined): string | undefined {
   return chars.length <= MAX_ALERT_DETAIL_CHARS ? line : `${chars.slice(0, MAX_ALERT_DETAIL_CHARS - 1).join("")}…`;
 }
 
-/** Keeps every open alert and the `ALERT_CLEARED_LIMIT` newest cleared ones. */
+/** Keeps every open alert and the `ALERT_CLEARED_LIMIT` newest cleared ones (by `clearedAt`; of a tie, the later key). */
 export function capAlerts(entries: Record<string, AlertEntry>): Record<string, AlertEntry> {
   const cleared = Object.entries(entries).filter(([, entry]) => entry.clearedAt !== null);
-  if (cleared.length <= ALERT_CLEARED_LIMIT) return entries;
-  const evict = new Set(
-    cleared
-      .sort((a, b) => timeOf(a[1].clearedAt) - timeOf(b[1].clearedAt))
-      .slice(0, cleared.length - ALERT_CLEARED_LIMIT)
-      .map(([key]) => key),
-  );
-  return Object.fromEntries(Object.entries(entries).filter(([key]) => !evict.has(key)));
+  const kept = new Set(capBy(cleared, ALERT_CLEARED_LIMIT, ([, entry]) => timeOrZero(entry.clearedAt)).map(([key]) => key));
+  return Object.fromEntries(Object.entries(entries).filter(([key, entry]) => entry.clearedAt === null || kept.has(key)));
 }
 
 /** The store rooted at the data folder `home`. Creating it touches nothing on disk. */
 export function createAlertStore(home: string, deps: AlertStoreDeps = {}): AlertStore {
   const now = deps.now ?? (() => new Date());
-  const dir = inboxDirOf(home);
-  const path = join(dir, ALERTS_FILE);
-  // `trace-store.ts` roots its symlink checks at the parent of `tracesDir`, which is the data folder.
-  const location: TraceStoreLocation = { tracesDir: join(home, TRACES_DIR_NAME) };
+  const file = createJsonFileStore<{ entries: Record<string, AlertEntry> }>({
+    home,
+    dir: INBOX_DIR_NAME,
+    file: ALERTS_FILE,
+    version: ALERTS_FILE_VERSION,
+    // An entry filed under another key is as unusable as a broken one.
+    parse: (body) => ({ entries: keyedEntriesOf(alertEntrySchema, body["entries"], (key, entry) => alertKeyOf(entry.kind, entry.workspaceId, entry.subject) === key) }),
+    empty: () => ({ entries: {} }),
+    cap: ({ entries }) => ({ entries: capAlerts(entries) }),
+    // The code this file has always had; a newer file's refusal gets it too (it used to be a plain Error).
+    codes: { unwritable: "E_TRACE_STORE_UNWRITABLE" },
+  });
 
-  const read = (): { entries: Record<string, AlertEntry>; tooNew: boolean } => {
-    assertNoSymlinkOnPath(home, path);
-    let raw: unknown = null;
-    try {
-      raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
-    } catch {
-      raw = null;
-    }
-    const frame = alertsFileSchema.safeParse(raw);
-    if (!frame.success) return { entries: {}, tooNew: false };
-    if (frame.data.version !== ALERTS_FILE_VERSION) return { entries: {}, tooNew: frame.data.version > ALERTS_FILE_VERSION };
-    const entries: Record<string, AlertEntry> = {};
-    for (const [key, entry] of Object.entries(frame.data.entries)) {
-      const valid = alertEntrySchema.safeParse(entry);
-      // An entry filed under another key is as unusable as a broken one.
-      if (valid.success && alertKeyOf(valid.data.kind, valid.data.workspaceId, valid.data.subject) === key) entries[key] = valid.data;
-    }
-    return { entries, tooNew: false };
-  };
-
+  const read = (): { entries: Record<string, AlertEntry> } => file.read();
   const write = (entries: Record<string, AlertEntry>): void => {
-    if (read().tooNew) throw new Error(`${path} was written by a newer paseo-bm; it is left as it is`);
-    ensureDataHome(home);
-    ensureStoreDir(location.tracesDir, dir);
-    writeStoreFileAtomically(location, path, `${JSON.stringify({ version: ALERTS_FILE_VERSION, entries: capAlerts(entries) }, null, 2)}\n`);
+    file.write({ entries });
   };
 
   const view = (key: string, entry: AlertEntry): Alert => ({ key, ...entry });
@@ -166,7 +134,7 @@ export function createAlertStore(home: string, deps: AlertStoreDeps = {}): Alert
     (filter.subject === undefined || alert.subject === filter.subject);
 
   return {
-    path,
+    path: file.path,
 
     raise(input) {
       const key = alertKeyOf(input.kind, input.workspaceId, input.subject);
@@ -226,7 +194,7 @@ export function createAlertStore(home: string, deps: AlertStoreDeps = {}): Alert
       return Object.entries(read().entries)
         .map(([key, entry]) => view(key, entry))
         .filter((alert) => matches(alert, filter))
-        .sort((a, b) => timeOf(a.since) - timeOf(b.since));
+        .sort((a, b) => timeOrZero(a.since) - timeOrZero(b.since));
     },
   };
 }

@@ -11,9 +11,9 @@ import { AGENT_TREE_ICON, AGENT_TREE_PANEL_ID } from "./client/agent-tree";
 import { AgentTreePanel } from "./client/tree";
 import { BEADS_TAB_PANEL_ID, launcherNotices, selectProjectFromCommandCenter, selectSectionFromCommandCenter } from "./client/surface-view";
 import { DashboardSettingsScreen, SETTINGS_ICON, SETTINGS_SCREEN_ID } from "./client/settings";
-import { CHAT_CARD_KIND, CHAT_CARD_VERSION, chatCardSchema, toChatCards } from "./client/chat-cards";
+import { CHAT_CARD_KIND, CHAT_CARD_VERSION, chatCardSchema, toChatCards } from "./client/chat-card-parse";
 import { ChatCardView } from "./client/chat-card";
-import { ChatBeadsPanel } from "./client/bead-chips";
+import { ChatBeadsPanel } from "./client/chat-beads-panel";
 import { BeadsTabPanel } from "./client/beads-tab";
 import { registerBeadsHeaderButtons } from "./client/beads-header-button";
 

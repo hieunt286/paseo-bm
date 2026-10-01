@@ -1,55 +1,63 @@
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import type { SetupStatus } from "../plugin/shared/contracts";
+import type { RoleSetting, RolesOptions, SetupStatus } from "../plugin/shared/contracts";
+import { DEFAULT_COORDINATION_SETTINGS } from "../plugin/shared/coordination";
+import { dashboardStyles } from "../plugin/client/styles";
 import {
-  AUTONOMY_COMING,
+  ADVICE_MEANING,
   DEFAULT_OPEN_GROUPS,
   GROUP_LOADING,
   SETTINGS_GROUPS,
   THRESHOLD_NOTE,
+  adviceCadenceText,
+  adviceCadenceView,
   agentsGroupState,
+  coordinationGroupState,
   dataGroupState,
   groupHeaderView,
+  stepAdviceCadence,
   storageSummary,
   toggleGroup,
   toolsGroupState,
   type StoredWorkspaceBytes,
 } from "../plugin/client/settings-model";
-import { ensureRolesLine, MIGRATION_BANNER_TEXT } from "../plugin/client/setup-model";
+import {
+  AGENT_TOOLS_DIALOG,
+  cleanupDataQuestion,
+  cleanupWarning,
+  cleanupWarningDialog,
+  ensureRolesLine,
+  installDialog,
+  skillsDialog,
+} from "../plugin/client/settings-machine-model";
+import { SAME_FAMILY_NOTICE, roleDraftOf, roleFormView } from "../plugin/client/settings-roles-model";
+import type { ConfirmDialog } from "../plugin/client/ui-types";
 import { allNodes, pressables, renderTree, texts, type RNode } from "./helpers/element-tree";
 
 /**
- * Settings (experience concept §4.4, autonomy design §A.12): four groups,
+ * Settings (experience concept §4.4, autonomy design §A.12, §G.7): five groups,
  * each folded to one line with its state. The states are pure and tested
  * here; the hook-free pieces of `settings-section.tsx` are expanded with the
  * element-tree helper, `react-native` and the SDK being named stand-ins.
  */
 
-vi.mock("react-native", () => {
-  const make = (name: string) => Object.assign(() => null, { displayName: name, primitive: true });
-  return {
-    ActivityIndicator: make("ActivityIndicator"),
-    Pressable: make("Pressable"),
-    ScrollView: make("ScrollView"),
-    Text: make("Text"),
-    TextInput: make("TextInput"),
-    View: make("View"),
-  };
-});
-vi.mock("@getpaseo/plugin/client/react-native", () => ({
-  Icon: Object.assign(() => null, { displayName: "Icon", primitive: true }),
-  copyText: async () => undefined,
-}));
-
 // The root tsconfig has no `jsx`, so the .tsx module loads through a non-literal specifier.
 const sectionPath = "../plugin/client/settings-section.tsx";
 type Component = (props: Record<string, unknown>) => unknown;
-const { SettingsGroupHeader, RolesLineView, StorageRowView } = (await import(sectionPath)) as {
+const { AdviceCadenceRow, SettingsGroupHeader, RolesLineView, StorageRowView } = (await import(sectionPath)) as {
+  AdviceCadenceRow: Component;
   SettingsGroupHeader: Component;
   RolesLineView: Component;
   StorageRowView: Component;
 };
+const blocksPath = "../plugin/client/settings-blocks.tsx";
+const { CleanupDataView, ReviewerFamilyNoteView, RoleFields, RunResultView } = (await import(blocksPath)) as {
+  CleanupDataView: Component;
+  ReviewerFamilyNoteView: Component;
+  RoleFields: Component;
+  RunResultView: Component;
+};
+const uiPath = "../plugin/client/ui.tsx";
+const { ConfirmBlock } = (await import(uiPath)) as { ConfirmBlock: Component };
 
 const styles = new Proxy({}, { get: (_target, key) => ({ name: String(key) }) });
 const theme = { colors: new Proxy({}, { get: (_target, key) => `#${String(key)}` }) };
@@ -88,7 +96,6 @@ function readyStatus(overrides: Partial<SetupStatus> = {}): SetupStatus {
       logins: [{ provider: "claude", roles: ["manager", "worker", "reviewer"], state: "logged-in", loginCommand: "claude auth login", guidance: null }],
       skillsRun: null,
       dataHome: { path: "/h/.paseo-bm", source: "default", reason: null },
-      install: { kind: "other", pluginPath: null },
     },
     ...overrides,
   } as SetupStatus;
@@ -107,37 +114,21 @@ const stored = (overrides: Partial<StoredWorkspaceBytes> & { workspaceId: string
   ...overrides,
 });
 
-describe("the four groups (experience concept §4.4)", () => {
-  it("are Agents, Autonomy, Tools & skills and Data, in that order, all folded at first", () => {
-    expect(SETTINGS_GROUPS.map((group) => group.title)).toEqual(["Agents", "Autonomy", "Tools & skills", "Data"]);
+describe("the five groups (experience concept §4.4, autonomy design §G.7)", () => {
+  it("are Agents, Autonomy, Coordination, Tools & skills and Data, in that order, all folded at first", () => {
+    expect(SETTINGS_GROUPS.map((group) => group.title)).toEqual(["Agents", "Autonomy", "Coordination", "Tools & skills", "Data"]);
     expect(DEFAULT_OPEN_GROUPS.size).toBe(0);
     expect(SETTINGS_GROUPS.every((group) => group.hint.length > 0)).toBe(true);
   });
 
-  it("open and close on a press; Autonomy says in one line that it comes in Phase 2, and never opens", () => {
+  it("open and close on a press, Autonomy (autonomy design §B.2) as the others", () => {
     const agents = toggleGroup(DEFAULT_OPEN_GROUPS, "agents");
     expect([...agents]).toEqual(["agents"]);
     expect([...toggleGroup(agents, "data")].sort()).toEqual(["agents", "data"]);
     expect([...toggleGroup(agents, "agents")]).toEqual([]);
-    expect([...toggleGroup(DEFAULT_OPEN_GROUPS, "autonomy")]).toEqual([]);
-    expect(AUTONOMY_COMING).toMatch(/^Coming in the next phase: /);
-    expect(AUTONOMY_COMING.split("\n")).toHaveLength(1);
-  });
-
-  it("carry neither the Orchestrator tab nor the additional-instructions editor", () => {
-    const source = readFileSync(fileURLToPath(new URL("../plugin/client/settings-section.tsx", import.meta.url)), "utf8");
-    const code = source.replace(/\/\*\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
-    expect(code).not.toMatch(/OrchestratorTab|orchestrator-tab|RoleCard|rolesSaveExtra|rolesInstructions|Additional instructions|SETUP_TABS|StatusTabs/);
-    // What each group is built from: the Setup screen's pieces.
-    for (const piece of ["<RolesSection", "<AgentToolsBlockView", "<ToolCard", "<SkillsInstallBlock", "<CleanupBlock", "<TraceActions", "signInRows(data)"]) {
-      expect(code).toContain(piece);
-    }
-  });
-
-  it("is what the surface's Settings tab shows, with the status strip", () => {
-    const launcher = readFileSync(fileURLToPath(new URL("../plugin/client/launcher.tsx", import.meta.url)), "utf8");
-    expect(launcher).toMatch(/<SettingsScreen \{\.\.\.props\} status=\{status\} \/>/);
-    expect(launcher).not.toMatch(/<SetupScreen\b/);
+    expect([...toggleGroup(DEFAULT_OPEN_GROUPS, "coordination")]).toEqual(["coordination"]);
+    expect([...toggleGroup(DEFAULT_OPEN_GROUPS, "autonomy")]).toEqual(["autonomy"]);
+    expect(SETTINGS_GROUPS.every((group) => group.opens)).toBe(true);
   });
 });
 
@@ -234,16 +225,103 @@ describe("the Data group", () => {
     expect(dataGroupState(undefined, null)).toEqual(GROUP_LOADING);
   });
 
-  it("names an unusable data folder, a cleanup, and an install from the old installer", () => {
-    const status = withSetup({
-      dataHome: { path: null, source: null, reason: "EACCES" },
-      install: { kind: "installer-directory", pluginPath: "/x" },
-    });
+  it("names an unusable data folder and a cleanup", () => {
+    const status = withSetup({ dataHome: { path: null, source: null, reason: "EACCES" } });
     expect(dataGroupState(status, null, true)).toEqual({
-      text: "The data folder cannot be used · Settings removed · Installed by the old npx installer",
+      text: "The data folder cannot be used · Settings removed",
       tone: "danger",
     });
-    expect(MIGRATION_BANNER_TEXT).toMatch(/npx installer/);
+  });
+});
+
+describe("the Coordination group (autonomy design §G.7)", () => {
+  const settings = (everyFinished: number) => ({ ...DEFAULT_COORDINATION_SETTINGS, advice: { everyFinished } });
+
+  it("reads 'Checking…' until the settings answer, then the advice cadence in words (0 is off) and the two switches", () => {
+    expect(coordinationGroupState(undefined)).toEqual(GROUP_LOADING);
+    expect(coordinationGroupState(settings(5))).toEqual({ text: "Advice after every 5 finished requests · compaction and handoff on", tone: "muted" });
+    expect(coordinationGroupState(settings(1)).text).toBe("Advice after every finished request · compaction and handoff on");
+    expect(coordinationGroupState(settings(0)).text).toBe("Advice off · compaction and handoff on");
+    expect(coordinationGroupState(undefined, true)).toEqual({ text: "The coordination settings could not be read", tone: "danger" });
+    expect(adviceCadenceText(12)).toBe("Advice after every 12 finished requests");
+  });
+
+  it("says what the cadence means in one line", () => {
+    expect(ADVICE_MEANING.split("\n")).toHaveLength(1);
+    expect(ADVICE_MEANING).toMatch(/finished requests/);
+    expect(ADVICE_MEANING).toMatch(/0 turns advice off\.$/);
+  });
+
+  it("steps within 0 and 50", () => {
+    expect(stepAdviceCadence(5, 1)).toBe(6);
+    expect(stepAdviceCadence(5, -1)).toBe(4);
+    expect(stepAdviceCadence(0, -1)).toBe(0);
+    expect(stepAdviceCadence(50, 1)).toBe(50);
+  });
+
+  it("offers Save only for a changed value, the default only away from it, and nothing while saving", () => {
+    const unchanged = adviceCadenceView({ stored: 5, draft: 5, defaultValue: 5, saving: false });
+    expect(unchanged.save).toMatchObject({ enabled: false, label: "Save" });
+    expect(unchanged.reset).toBeNull();
+    expect(unchanged.valueText).toBe("Advice after every 5 finished requests");
+    expect(unchanged.decrease).toEqual({ enabled: true, label: "−", accessibilityLabel: "Advice cadence: lower to 4" });
+    expect(unchanged.increase).toEqual({ enabled: true, label: "+", accessibilityLabel: "Advice cadence: raise to 6" });
+
+    const off = adviceCadenceView({ stored: 5, draft: 0, defaultValue: 5, saving: false });
+    expect(off.valueText).toBe("Advice off");
+    expect(off.decrease.enabled).toBe(false);
+    expect(off.save).toEqual({ enabled: true, label: "Save", accessibilityLabel: "Save the advice cadence: Advice off" });
+    expect(off.reset).toEqual({
+      enabled: true,
+      label: "Use the default (5)",
+      accessibilityLabel: "Set the advice cadence back to its default: Advice after every 5 finished requests",
+    });
+    expect(adviceCadenceView({ stored: 5, draft: 1, defaultValue: 5, saving: false }).decrease.accessibilityLabel).toBe(
+      "Advice cadence: lower to 0, off",
+    );
+    expect(adviceCadenceView({ stored: 5, draft: 50, defaultValue: 5, saving: false }).increase.enabled).toBe(false);
+
+    const saving = adviceCadenceView({ stored: 5, draft: 7, defaultValue: 5, saving: true });
+    expect(saving.save).toMatchObject({ enabled: false, label: "Saving…" });
+    expect([saving.decrease.enabled, saving.increase.enabled, saving.reset?.enabled]).toEqual([false, false, false]);
+  });
+
+  it("is a card with the meaning, − value +, Save and the default, each pressable labelled (hook-free)", () => {
+    const onStep = vi.fn();
+    const onSave = vi.fn();
+    const onReset = vi.fn();
+    const view = adviceCadenceView({ stored: 5, draft: 3, defaultValue: 5, saving: false });
+    const nodes = renderTree(AdviceCadenceRow({ view, error: null, onStep, onSave, onReset, styles, theme }));
+    expect(texts(nodes)).toEqual(["Advice", ADVICE_MEANING, "−", "Advice after every 3 finished requests", "+", "Save", "Use the default (5)"]);
+    const buttons = pressables(nodes);
+    expect(buttons.map((button) => button.props.accessibilityRole)).toEqual(["button", "button", "button", "button"]);
+    expect(buttons.map((button) => button.props.accessibilityLabel)).toEqual([
+      "Advice cadence: lower to 2",
+      "Advice cadence: raise to 4",
+      "Save the advice cadence: Advice after every 3 finished requests",
+      "Set the advice cadence back to its default: Advice after every 5 finished requests",
+    ]);
+    for (const button of buttons) expect(button.props.accessibilityState).toEqual({ disabled: false });
+    (buttons[0]!.props.onPress as () => void)();
+    (buttons[1]!.props.onPress as () => void)();
+    (buttons[2]!.props.onPress as () => void)();
+    (buttons[3]!.props.onPress as () => void)();
+    expect(onStep.mock.calls).toEqual([[-1], [1]]);
+    expect(onSave).toHaveBeenCalledOnce();
+    expect(onReset).toHaveBeenCalledOnce();
+  });
+
+  it("disables Save for an unchanged value and shows a failed save in the danger colour", () => {
+    const view = adviceCadenceView({ stored: 5, draft: 5, defaultValue: 5, saving: false });
+    const nodes = renderTree(
+      AdviceCadenceRow({ view, error: "E_COORDINATION_INVALID: nothing was saved", onStep: noop, onSave: noop, onReset: noop, styles, theme }),
+    );
+    const save = pressables(nodes).find((button) => texts([button])[0] === "Save")!;
+    expect(save.props.disabled).toBe(true);
+    expect(save.props.accessibilityState).toEqual({ disabled: true });
+    expect(pressables(nodes)).toHaveLength(3);
+    const error = allNodes(nodes).find((node) => node.type === "Text" && texts([node])[0]?.startsWith("E_COORDINATION_INVALID"))!;
+    expect(JSON.stringify(error.props.style)).toContain("#statusDanger");
   });
 });
 
@@ -271,11 +349,13 @@ describe("the group header (hook-free)", () => {
     expect(pressables(open)[0]!.props.accessibilityLabel).toMatch(/Collapse\.$/);
   });
 
-  it("is plain text for Autonomy: nothing to press, one line", () => {
-    const nodes = header(groupHeaderView("autonomy", { text: AUTONOMY_COMING, tone: "muted" }, false));
-    expect(pressables(nodes)).toHaveLength(0);
-    expect(texts(nodes)).toEqual(["Autonomy", AUTONOMY_COMING]);
-    expect((nodes[0] as RNode).props.accessibilityLabel).toBe(`Autonomy: ${AUTONOMY_COMING}`);
+  it("opens Autonomy like the others: one button with the policy's line (autonomy design §B.2)", () => {
+    const nodes = header(groupHeaderView("autonomy", { text: "Every decision is yours, in every project", tone: "muted" }, false));
+    expect(pressables(nodes)).toHaveLength(1);
+    expect(texts(nodes)).toEqual(["▸ Autonomy", "Every decision is yours, in every project"]);
+    expect((nodes[0] as RNode).props.accessibilityLabel).toBe(
+      "Autonomy, which decisions the agents may take for you: Every decision is yours, in every project. Expand.",
+    );
   });
 });
 
@@ -323,24 +403,201 @@ describe("a storage row (hook-free)", () => {
   });
 });
 
-describe("every confirmation Settings shows defaults to Cancel", () => {
-  const setup = readFileSync(fileURLToPath(new URL("../plugin/client/settings-blocks.tsx", import.meta.url)), "utf8");
-  const ui = readFileSync(fileURLToPath(new URL("../plugin/client/ui.tsx", import.meta.url)), "utf8");
-  const actions = readFileSync(fileURLToPath(new URL("../plugin/client/dashboard-actions.tsx", import.meta.url)), "utf8");
-  const before = (source: string, first: string, second: string) => {
-    const a = source.indexOf(first);
-    const b = source.indexOf(second, a);
-    return a >= 0 && b > a;
-  };
+describe("every confirmation Settings shows defaults to Cancel (rendered at phone and desktop widths)", () => {
+  const status = readyStatus();
+  const brMissing = { ...status.tools[0]!, path: null, installCommand: "brew install dicklesworthstone/tap/br" };
+  /** The confirmation of each Settings block that grants something, as the block builds it. */
+  const dialogs = [
+    { name: "a tool's Install", dialog: installDialog(brMissing), busyLabel: "Installing… (up to 5 minutes)" },
+    { name: "Paseo's agent tools", dialog: AGENT_TOOLS_DIALOG, busyLabel: "Allowing…" },
+    { name: "the skills CLI", dialog: skillsDialog(status.skills.installCommand), busyLabel: "Running… (up to 5 minutes)" },
+    { name: "the cleanup warning", dialog: cleanupWarningDialog(status), busyLabel: "Remove settings" },
+  ];
+  const widths = [
+    { name: "phone", styles: dashboardStyles(theme as never, true) },
+    { name: "desktop", styles: dashboardStyles(theme as never, false) },
+  ];
+  const draw = (dialog: ConfirmDialog, busy: boolean, width: (typeof widths)[number], on = { confirm: noop, cancel: noop }) =>
+    renderTree(ConfirmBlock({ dialog, busy, busyLabel: "Working…", onConfirm: on.confirm, onCancel: on.cancel, styles: width.styles, theme }));
 
-  it("puts Cancel before the confirm button: tool install, agent tools and skills (ConfirmBlock), cleanup, traces", () => {
-    const tool = setup.slice(setup.indexOf("export function ToolCard("), setup.indexOf("function SetupChecklistCard("));
-    expect(before(tool, "Cancel: do not install", "Install ${tool.id} on this machine")).toBe(true);
-    const confirm = ui.slice(ui.indexOf("export function ConfirmBlock("));
-    expect(before(confirm, "dialog.cancelLabel", "dialog.confirmLabel")).toBe(true);
-    const cleanup = setup.slice(setup.indexOf("export function CleanupBlock("));
-    expect(before(cleanup, "CLEANUP_WARNING_DIALOG.cancelLabel", "CLEANUP_WARNING_DIALOG.confirmLabel")).toBe(true);
-    expect(before(cleanup, "CLEANUP_DATA_DIALOG.keepLabel", "CLEANUP_DATA_DIALOG.deleteLabel")).toBe(true);
-    expect(before(actions, "No, keep them", "described.confirmLabel}</Text>")).toBe(true);
+  for (const width of widths) {
+    for (const { name, dialog } of dialogs) {
+      it(`${name}: Cancel comes first and is the only other button, on a ${width.name}`, () => {
+        const confirm = vi.fn();
+        const cancel = vi.fn();
+        const nodes = draw(dialog, false, width, { confirm, cancel });
+        const buttons = pressables(nodes);
+        expect(buttons.map((button) => texts([button])[0])).toEqual([dialog.cancelLabel, dialog.confirmLabel]);
+        expect(buttons.map((button) => button.props.accessibilityLabel)).toEqual([
+          dialog.cancelAccessibilityLabel ?? dialog.cancelLabel,
+          dialog.confirmAccessibilityLabel ?? dialog.confirmLabel,
+        ]);
+        expect(buttons[0]!.props.style).toBe(width.styles.secondaryButton);
+        expect(buttons[1]!.props.style).toBe(width.styles.button);
+        // The two buttons share one row that wraps, so a phone never pushes Install off the screen.
+        const row = allNodes(nodes).find(
+          (node) => node.type === "View" && node.children.filter((child) => typeof child !== "string" && child.type === "Pressable").length === 2,
+        )!;
+        expect(row.props.style).toMatchObject({ flexDirection: "row", flexWrap: "wrap" });
+        (buttons[0]!.props.onPress as () => void)();
+        expect(cancel).toHaveBeenCalledOnce();
+        expect(confirm).not.toHaveBeenCalled();
+        (buttons[1]!.props.onPress as () => void)();
+        expect(confirm).toHaveBeenCalledOnce();
+      });
+    }
+  }
+
+  it("a tool's Install and the cleanup warning read as before: no title, the warning in its colour, then the buttons", () => {
+    const [install, , , warning] = dialogs;
+    for (const width of widths) {
+      const tool = draw(install!.dialog, false, width);
+      expect(texts(tool)).toEqual(["This runs Homebrew on this machine: brew install dicklesworthstone/tap/br", "Cancel", "Install br"]);
+      expect(JSON.stringify(allNodes(tool)[1]!.props.style)).toContain("#statusWarning");
+      const cleanup = draw(warning!.dialog, false, width);
+      expect(texts(cleanup)).toEqual([cleanupWarning(status), "Cancel", "Remove settings"]);
+      expect(JSON.stringify(allNodes(cleanup)[1]!.props.style)).toContain("#statusDanger");
+    }
+    // A dialog with a title keeps it, in the warning colour, above a plain body.
+    const titled = draw(AGENT_TOOLS_DIALOG, false, widths[1]!);
+    expect(texts(titled).slice(0, 2)).toEqual([AGENT_TOOLS_DIALOG.title, AGENT_TOOLS_DIALOG.body]);
+    expect(JSON.stringify(allNodes(titled)[1]!.props.style)).toContain("#statusWarning");
+    expect(allNodes(titled)[2]!.props.style).toBe(widths[1]!.styles.body);
+  });
+
+  it("while it runs, Cancel is gone and the confirm button says what is happening, disabled", () => {
+    const nodes = renderTree(
+      ConfirmBlock({ dialog: dialogs[0]!.dialog, busy: true, busyLabel: dialogs[0]!.busyLabel, onConfirm: noop, onCancel: noop, styles, theme }),
+    );
+    const buttons = pressables(nodes);
+    expect(buttons.map((button) => texts([button])[0])).toEqual(["Installing… (up to 5 minutes)"]);
+    expect(buttons[0]!.props.disabled).toBe(true);
+    expect(buttons[0]!.props.accessibilityState).toEqual({ disabled: true, busy: true });
+    expect(buttons[0]!.props.accessibilityLabel).toBe("Install br on this machine");
+  });
+
+  it("the cleanup's data question puts Keep my data first, and hides Delete while it runs", () => {
+    const question = cleanupDataQuestion(status);
+    for (const width of widths) {
+      const onKeep = vi.fn();
+      const onDelete = vi.fn();
+      const idle = renderTree(CleanupDataView({ question, busy: false, onKeep, onDelete, styles: width.styles, theme }));
+      expect(texts(idle)).toEqual([question, "Keep my data", "Delete data"]);
+      const [keep, remove] = pressables(idle);
+      expect(keep!.props.accessibilityLabel).toBe("Remove the settings and keep my data");
+      expect(keep!.props.style).toBe(width.styles.button);
+      expect(remove!.props.accessibilityLabel).toBe("Remove the settings and delete paseo-bm's data");
+      expect(JSON.stringify(remove!.props.style)).not.toContain("#statusDanger");
+      expect(JSON.stringify(allNodes([remove!]).find((node) => node.type === "Text")!.props.style)).toContain("#statusDanger");
+      (keep!.props.onPress as () => void)();
+      (remove!.props.onPress as () => void)();
+      expect(onKeep).toHaveBeenCalledOnce();
+      expect(onDelete).toHaveBeenCalledOnce();
+
+      const busy = renderTree(CleanupDataView({ question, busy: true, onKeep: noop, onDelete: noop, styles: width.styles, theme }));
+      expect(pressables(busy).map((button) => texts([button])[0])).toEqual(["Removing…"]);
+      expect(pressables(busy)[0]!.props.accessibilityState).toEqual({ disabled: true, busy: true });
+    }
+  });
+});
+
+describe("the role fields both Edit forms share (hook-free)", () => {
+  const claude: RolesOptions = {
+    provider: "claude",
+    capability: "tiered",
+    models: [
+      {
+        id: "claude-opus-5",
+        label: "Opus 5",
+        thinkingOptions: [{ id: "high", label: "High" }],
+        defaultThinkingOptionId: null,
+        cost: { inputUsdPerMTok: 5, cacheReadUsdPerMTok: 0.5, outputUsdPerMTok: 25 },
+      },
+    ],
+    modes: [{ id: "default", label: "Default", colorTier: "safe" }],
+    autoAccept: false,
+  };
+  const setting: RoleSetting = {
+    role: "worker",
+    providerId: "bm-worker",
+    baseProvider: "claude",
+    label: null,
+    model: "claude-opus-5",
+    thinkingOptionId: "high",
+    modeId: null,
+    featureValues: {},
+    capability: "tiered",
+  };
+  const view = (options: RolesOptions | undefined) =>
+    roleFormView({ role: "worker", setting, available: ["claude", "codex"], draft: roleDraftOf(setting), options });
+
+  for (const compact of [true, false]) {
+    it(`draw provider, model with its price, thinking and mode, on a ${compact ? "phone" : "desktop"}`, () => {
+      const width = dashboardStyles(theme as never, compact);
+      const onChange = vi.fn();
+      const nodes = renderTree(RoleFields({ view: view(claude), loading: false, error: null, onChange, styles: width, theme }));
+      expect(texts(nodes)).toEqual([
+        "Provider",
+        "● Claude",
+        "Codex",
+        "Model",
+        "● Opus 5",
+        "~$5 / $25 per 1M tokens",
+        "Thinking",
+        "Provider default",
+        "● High",
+        "Mode",
+        "● Not set",
+        "Default",
+      ]);
+      // Every row of chips wraps, so a phone stacks them instead of overflowing.
+      const rows = allNodes(nodes).filter((node) => node.type === "View" && node.props.style === width.chipRow);
+      expect(rows).toHaveLength(4);
+      expect(width.chipRow).toMatchObject({ flexDirection: "row", flexWrap: "wrap" });
+      // A chip edits the draft through one function, the same for both forms.
+      const codex = pressables(nodes).find((button) => texts([button])[0] === "Codex")!;
+      (codex.props.onPress as () => void)();
+      const next = onChange.mock.calls[0]![0] as (draft: ReturnType<typeof roleDraftOf>) => ReturnType<typeof roleDraftOf>;
+      expect(next(roleDraftOf(setting))).toEqual({ ...roleDraftOf(setting), baseProvider: "codex" });
+    });
+  }
+
+  it("show the spinner while the options load, and the failure instead of the blocker", () => {
+    const loading = renderTree(RoleFields({ view: view(undefined), loading: true, error: null, onChange: noop, styles, theme }));
+    expect(allNodes(loading).some((node) => node.type === "ActivityIndicator")).toBe(true);
+    expect(texts(loading)).toContain("Loading the models of Claude…");
+    const failed = renderTree(RoleFields({ view: view(undefined), loading: false, error: "E_ROLE_OPTIONS: boom", onChange: noop, styles, theme }));
+    expect(texts(failed)).toContain("E_ROLE_OPTIONS: boom");
+    expect(texts(failed)).not.toContain("Loading the models of Claude…");
+    const error = allNodes(failed).find((node) => node.type === "Text" && texts([node])[0] === "E_ROLE_OPTIONS: boom")!;
+    expect(JSON.stringify(error.props.style)).toContain("#statusDanger");
+  });
+});
+
+describe("the Reviewer's same-family line (hook-free, autonomy design §C.5)", () => {
+  const note = { text: SAME_FAMILY_NOTICE, tone: "warning" as const };
+
+  for (const compact of [true, false]) {
+    it(`is one line in the warning colour, and nothing without a note, on a ${compact ? "phone" : "desktop"}`, () => {
+      const width = dashboardStyles(theme as never, compact);
+      const nodes = renderTree(ReviewerFamilyNoteView({ note, styles: width, theme }));
+      expect(texts(nodes)).toEqual([SAME_FAMILY_NOTICE]);
+      expect(pressables(nodes)).toHaveLength(0);
+      const line = allNodes(nodes).find((node) => node.type === "Text")!;
+      expect(JSON.stringify(line.props.style)).toContain("#statusWarning");
+      expect(renderTree(ReviewerFamilyNoteView({ note: null, styles: width, theme }))).toEqual([]);
+    });
+  }
+});
+
+describe("an install run's result (hook-free)", () => {
+  it("shows its line in its tone and the output tail only when there is one", () => {
+    const done = renderTree(RunResultView({ result: { text: "Installed with `brew install br`.", tone: "success", tail: ["==> Pouring br", "done"] }, styles, theme }));
+    expect(texts(done)).toEqual(["Installed with `brew install br`.", "==> Pouring br\ndone"]);
+    expect(JSON.stringify(allNodes(done)[1]!.props.style)).toContain("#statusSuccess");
+    expect(allNodes(done)[2]!.props.selectable).toBe(true);
+    const failed = renderTree(RunResultView({ result: { text: "E_SETUP_INSTALL_FAILED: exit 1", tone: "danger", tail: [] }, styles, theme }));
+    expect(texts(failed)).toEqual(["E_SETUP_INSTALL_FAILED: exit 1"]);
+    expect(JSON.stringify(allNodes(failed)[1]!.props.style)).toContain("#statusDanger");
   });
 });

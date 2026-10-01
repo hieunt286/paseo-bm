@@ -10,15 +10,14 @@
  * them with, which are exactly the installer's defaults so a machine set up
  * either way ends up the same.
  *
- * The texts are duplicated from `src/roles/register.ts` rather than imported:
- * the plugin bundle never pulls in `src/` (it is a separate npm package). A
- * test keeps the two copies identical for as long as both exist; the CLI's copy
- * goes when its role code does. The Orchestrator came after the installer
- * retired, so its texts exist here only.
+ * The texts were first written by the retired installer, whose source now
+ * lives only at the `v0.4.0` tag (ADR-022 decision 1); this module is their one
+ * copy in the repository. The Orchestrator came after the installer retired.
  */
 
 import { DashboardError } from "../shared/contracts";
 import { fallbackAliasOf } from "../shared/fallback";
+import { modelFamily } from "../shared/model-family";
 import { applyRoleToolPolicies, createRoleEntries, type ConfigPaseo } from "./config-writer";
 import { availableProviders, isRoleAlias, nonEmpty } from "./role-choices";
 import { TIMED_OUT, withTimeout } from "./role-mode";
@@ -53,8 +52,8 @@ export const ROLE_PROFILE_NOTES: Readonly<Record<RoleName, string>> = {
     "by severity, does not edit anything, and must never create or stop an agent.",
   orchestrator:
     "paseo-bm Orchestrator — one coordinator for every paseo-bm project, opened from the Inbox of Beads Manager. " +
-    "It reads the projects' work and asks you in the Inbox, each option with its next step ready; it tells a Manager what to do itself only on " +
-    "Autopilot or your word in its chat, and assesses a project's workflow when asked; it edits nothing and never creates or stops an agent.",
+    "It reads the projects' work and asks you in the Inbox, each option with its next step ready; it tells a Manager what to do itself only " +
+    "where you delegated it or on your word in its chat, and assesses a project's workflow when asked; it edits nothing and never creates or stops an agent.",
 };
 
 /**
@@ -127,12 +126,6 @@ export function paseoToolsPolicyOfAlias(id: string): PaseoToolsPolicy | null {
   return fallback === null ? null : rolePaseoToolsPolicy(fallback.role);
 }
 
-/** The base provider and model a role is created on. */
-export interface RoleDefault {
-  baseProvider: string;
-  model: string;
-}
-
 /** The provider alias for a role: its base provider, its label and its Paseo-tools policy. */
 export function roleAliasEntry(role: RoleName, baseProvider: string): Record<string, unknown> {
   return { extends: baseProvider, label: ROLE_DISPLAY_NAMES[role], paseoTools: rolePaseoToolsPolicy(role) };
@@ -170,6 +163,11 @@ export interface EnsureRolesResult {
   created: RoleName[];
   baseProvider: string | null;
   model: string | null;
+  /**
+   * The Reviewer's provider and model, only when this call created it on
+   * another model family's provider than `baseProvider` (autonomy design §C.5).
+   */
+  reviewer?: { baseProvider: string; model: string };
   /** `"cleaned-up"` when the user removed paseo-bm's settings and has not resumed. */
   skipped: "cleaned-up" | null;
 }
@@ -199,42 +197,86 @@ function failed(detail: string, cause?: unknown): DashboardError {
 }
 
 /**
- * The provider a missing role is created on: the first one Paseo reports as
- * available that is not one of our own aliases, in Paseo's own order.
+ * The providers a missing role may be created on: those Paseo reports as
+ * available that are not one of our own aliases, in Paseo's own order. The
+ * first is the one every role gets, the Reviewer aside (`independentReviewer`).
  *
  * Deliberately not sorted and deliberately not "the one the user used last":
- * this is the installer's rule (`src/roles/config.ts` `defaultProvider`), and
- * matching it is what makes a machine set up by the plugin identical to one set
- * up by the retired installer. Unlike it, a machine with nothing available
+ * this is the retired installer's rule (its `defaultProvider`), and matching it
+ * is what makes a machine set up by the plugin identical to one set up by that
+ * installer. Unlike it, a machine with nothing available
  * fails instead of pointing a role at a provider that cannot run.
  */
-async function firstAvailableProvider(paseo: unknown): Promise<string> {
+async function availableBaseProviders(paseo: unknown): Promise<string[]> {
   const available = await availableProviders(paseo);
-  const first = available === null ? undefined : [...available].find((id) => !isRoleAlias(id));
-  if (first === undefined) throw failed("Paseo reports no available provider");
-  return first;
+  const bases = available === null ? [] : [...available].filter((id) => !isRoleAlias(id));
+  if (bases.length === 0) throw failed("Paseo reports no available provider");
+  return bases;
 }
 
-/** The first model Paseo lists for `provider`. */
-async function firstModelOf(paseo: unknown, provider: string): Promise<string> {
+/** The first model Paseo lists for `provider`, or `null` when it lists none or cannot say. Never throws. */
+async function firstListedModel(paseo: unknown, provider: string): Promise<string | null> {
   const providers = (paseo as { providers?: { listModels?: unknown } } | null | undefined)?.providers;
   const listModels = providers?.listModels;
-  const none = (): never => {
-    throw failed(`Paseo lists no model for ${provider}`);
-  };
-  if (typeof listModels !== "function") return none();
+  if (typeof listModels !== "function") return null;
   let result: { models?: unknown } | null | undefined | typeof TIMED_OUT;
   try {
     result = await withTimeout(listModels.call(providers, provider) as Promise<{ models?: unknown }>);
   } catch {
-    return none();
+    return null;
   }
-  if (result === TIMED_OUT || !Array.isArray(result?.models)) return none();
+  if (result === TIMED_OUT || !Array.isArray(result?.models)) return null;
   for (const entry of result.models as Array<{ id?: unknown }>) {
     const id = nonEmpty(entry?.id);
     if (id !== null) return id;
   }
-  return none();
+  return null;
+}
+
+/** `firstListedModel` read once per provider in one `ensureRoles` call. */
+function modelLookup(paseo: unknown): (provider: string) => Promise<string | null> {
+  const seen = new Map<string, Promise<string | null>>();
+  return (provider) => {
+    let found = seen.get(provider);
+    if (found === undefined) {
+      found = firstListedModel(paseo, provider);
+      seen.set(provider, found);
+    }
+    return found;
+  };
+}
+
+/** The first model Paseo lists for `provider`; a coded failure when there is none. */
+async function firstModelOf(modelOf: (provider: string) => Promise<string | null>, provider: string): Promise<string> {
+  const model = await modelOf(provider);
+  if (model === null) throw failed(`Paseo lists no model for ${provider}`);
+  return model;
+}
+
+/**
+ * Where a new Reviewer runs so its review is independent (autonomy design
+ * §C.5, REQ-133): the first available base provider, in Paseo's order, whose
+ * family (`modelFamily`) differs from the Worker's, with that provider's first
+ * model. `null` — the Reviewer then gets the default provider, like every
+ * other role — when the Worker's family cannot be told or no other family is
+ * signed in ("signed in" = listed `available: true`, §C.6). A provider whose
+ * models cannot be read is passed over.
+ */
+async function independentReviewer(
+  bases: readonly string[],
+  workerFamily: string | null,
+  modelOf: (provider: string) => Promise<string | null>,
+): Promise<{ provider: string; model: string } | null> {
+  if (workerFamily === null) return null;
+  for (const provider of bases) {
+    // Claude Code and Codex are known without reading their models.
+    if (modelFamily(provider, null) === workerFamily) continue;
+    const model = await modelOf(provider);
+    if (model === null) continue;
+    const family = modelFamily(provider, model);
+    if (family !== null && family !== workerFamily) return { provider, model };
+  }
+  return null;
 }
 
 /**
@@ -244,6 +286,12 @@ async function firstModelOf(paseo: unknown, provider: string): Promise<string> {
  * A role counts as missing when EITHER its provider alias or its agent profile
  * is absent: half an entry is what a hand-edited config or an interrupted
  * uninstall leaves, and a profile without its alias cannot start an agent.
+ *
+ * Every role is created on the first available provider, except a Reviewer
+ * created whole while another family is signed in: that one goes to the first
+ * provider of a family other than the Worker's (`independentReviewer`). The
+ * result's and the setup state's `baseProvider` / `model` stay the default's;
+ * their `reviewer` names the Reviewer's own, only when it differs.
  */
 export async function ensureRoles(paseo: unknown, deps: EnsureRolesDeps = {}): Promise<EnsureRolesResult> {
   const log = deps.log ?? ((line: string) => console.warn(line));
@@ -285,17 +333,42 @@ export async function ensureRoles(paseo: unknown, deps: EnsureRolesDeps = {}): P
   });
   if (missing.length === 0) return nothing;
 
-  const baseProvider = await firstAvailableProvider(paseo);
-  const model = await firstModelOf(paseo, baseProvider);
+  const hasAlias = (id: string) => Object.prototype.hasOwnProperty.call(providers, id);
+  const profileOf = (id: string) => profiles.find((entry) => entry?.id === id);
+  const modelOf = modelLookup(paseo);
+  const bases = await availableBaseProviders(paseo);
+  const baseProvider = bases[0]!;
+  const model = await firstModelOf(modelOf, baseProvider);
+
+  // Only a Reviewer created whole — neither its alias nor its profile there —
+  // moves to another family (autonomy design §C.5): a half that exists is the
+  // user's, and a new alias on another vendor under an existing profile would
+  // pair it with a model that provider does not run.
+  let reviewer: { provider: string; model: string } | null = null;
+  const reviewerId = roleId("reviewer");
+  if (missing.includes("reviewer") && !hasAlias(reviewerId) && profileOf(reviewerId) === undefined) {
+    // The Worker as it runs once this call is done: its alias's base, else the
+    // default it is about to get; its profile's model, else the one it gets.
+    const workerId = roleId("worker");
+    const workerBase = hasAlias(workerId) ? nonEmpty((providers[workerId] as { extends?: unknown } | undefined)?.extends) : baseProvider;
+    const workerProfile = profileOf(workerId);
+    const workerModel =
+      workerProfile !== undefined ? nonEmpty(workerProfile["model"]) : workerBase === null ? null : await modelOf(workerBase);
+    reviewer = await independentReviewer(bases, modelFamily(workerBase, workerModel), modelOf);
+  }
 
   const wanted: Record<string, { alias: Record<string, unknown>; profile: Record<string, unknown> }> = {};
   for (const role of missing) {
     const id = roleId(role);
+    if (role === "reviewer" && reviewer !== null) {
+      wanted[id] = { alias: roleAliasEntry(role, reviewer.provider), profile: roleProfileEntry(role, reviewer.model) };
+      continue;
+    }
     // A role that has its alias but not its profile keeps the provider it is
     // already pointed at: the user may have moved it, and only the missing
     // half is ours to invent.
     const existingBase = nonEmpty((providers[id] as { extends?: unknown } | undefined)?.extends);
-    const profileModel = existingBase === null ? model : await firstModelOf(paseo, existingBase);
+    const profileModel = existingBase === null ? model : await firstModelOf(modelOf, existingBase);
     wanted[id] = { alias: roleAliasEntry(role, baseProvider), profile: roleProfileEntry(role, profileModel) };
   }
 
@@ -303,6 +376,13 @@ export async function ensureRoles(paseo: unknown, deps: EnsureRolesDeps = {}): P
   if (result.created.length === 0) return nothing;
 
   const created = missing.filter((role) => result.created.includes(roleId(role)));
+  // Recorded only when the Reviewer really runs elsewhere: the defaults'
+  // sentence then names it (`rolesDefaultsText`).
+  const apart =
+    reviewer !== null && created.includes("reviewer") && (reviewer.provider !== baseProvider || reviewer.model !== model)
+      ? { baseProvider: reviewer.provider, model: reviewer.model }
+      : null;
+  const reviewerField = apart === null ? {} : { reviewer: apart };
   const at = new Date().toISOString();
   // `rolesCreated.roles` keeps to the three roles an older release can parse:
   // 0.4.1 reads the whole file with a three-role enum, and one unknown value
@@ -311,7 +391,7 @@ export async function ensureRoles(paseo: unknown, deps: EnsureRolesDeps = {}): P
   // (orchestrator design §3.2, §10).
   const mains = created.filter((role): role is SetupRoleName => (SETUP_ROLE_NAMES as readonly string[]).includes(role));
   const record: Partial<SetupState> = {};
-  if (mains.length > 0) record.rolesCreated = { at, roles: mains, baseProvider, model };
+  if (mains.length > 0) record.rolesCreated = { at, roles: mains, baseProvider, model, ...reviewerField };
   if (created.includes("orchestrator")) record.orchestratorCreatedAt = at;
   try {
     updateSetupState(record, deps);
@@ -320,6 +400,11 @@ export async function ensureRoles(paseo: unknown, deps: EnsureRolesDeps = {}): P
     // sentence about the defaults it used.
     log(`[paseo-bm] could not record the roles it created: ${error instanceof Error ? error.message : String(error)}`);
   }
-  log(`[paseo-bm] created roles ${created.map(roleId).join(", ")} on ${baseProvider} · ${model}`);
-  return { created, baseProvider, model, skipped: null };
+  const together = created.filter((role) => apart === null || role !== "reviewer").map(roleId);
+  const parts = [
+    ...(together.length > 0 ? [`${together.join(", ")} on ${baseProvider} · ${model}`] : []),
+    ...(apart === null ? [] : [`${reviewerId} on ${apart.baseProvider} · ${apart.model}`]),
+  ];
+  log(`[paseo-bm] created roles ${parts.join("; ")}`);
+  return { created, baseProvider, model, ...reviewerField, skipped: null };
 }

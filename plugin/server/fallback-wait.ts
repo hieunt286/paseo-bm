@@ -25,7 +25,7 @@ import { decidePending, type FallbackAction, type FallbackRpcDeps } from "./fall
 import { readIncidents, updateIncidents } from "./fallback-state";
 import { REPLACED_BY_LABEL } from "./fallback-detect";
 import { asRecord, reasonOf } from "./role-choices";
-import { dataHomeOf } from "./role-extras";
+import { dataHomeOf } from "./role-instructions";
 import { DashboardError, FALLBACK_MAX_WAIT_MS, type FallbackIncident } from "../shared/contracts";
 
 /** What the stopped agent is sent when its usage reset (agent-facing, so English). */

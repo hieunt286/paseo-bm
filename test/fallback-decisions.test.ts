@@ -15,7 +15,7 @@ import {
 } from "../plugin/server/fallback-decisions";
 import { decidePending, handleFallbackAct, type FallbackAction, type FallbackActions } from "../plugin/server/fallback-rpc";
 import { ROLE_FALLBACK_STATE_FILE } from "../plugin/server/fallback-state";
-import { MAX_DECISION_TEXT_CHARS, decisionSchema, type Decision } from "../plugin/shared/decisions";
+import { MAX_DECISION_TEXT_CHARS, decisionClassOf, decisionSchema, type Decision } from "../plugin/shared/decisions";
 import type { FallbackIncident } from "../plugin/shared/contracts";
 
 /**
@@ -90,6 +90,10 @@ describe("the decision of an incident", () => {
       askedBy: { role: "plugin", agentId: null },
       askedAt: "2026-09-29T07:55:00.000Z",
       subject: "fallback-worker",
+      // Every incident is about the environment (autonomy design §B.1).
+      class: "environment",
+      // The recommended option is the recommended prediction (autonomy design §B.3).
+      prediction: { recommended: { optionKey: "switch" }, orchestrator: null },
       status: "open",
       grant: null,
       delivery: null,
@@ -116,7 +120,7 @@ describe("the decision of an incident", () => {
     ]);
   });
 
-  it("recommends what the Auto policy would do, offers Wait only for a reset within 7 days, and Switch only with a candidate", () => {
+  it("recommends Wait for a reset within 30 minutes else Switch, offers Wait only for a reset within 7 days, and Switch only with a candidate", () => {
     const keys = (overrides: Partial<FallbackIncident>) =>
       fallbackDecisionOf(incident(overrides), NOW).options.map((option) => `${option.key}${option.recommended ? "*" : ""}`);
     expect(keys({ resetsAt: at(20) })).toEqual(["switch", "wait*", "dismiss"]);
@@ -124,6 +128,8 @@ describe("the decision of an incident", () => {
     expect(fallbackDecisionOf(incident({ resetsAt: at(-5) }), NOW).options[1]!.label).toBe(`Resume now (the limit reset at ${at(-5)})`);
     expect(keys({ resetsAt: at(8 * 24 * 60) })).toEqual(["switch*", "dismiss"]);
     expect(keys({ resetsAt: null, candidate: null })).toEqual(["dismiss"]);
+    // Nothing recommended: no recommended prediction (autonomy design §B.3).
+    expect(fallbackDecisionOf(incident({ resetsAt: null, candidate: null }), NOW).prediction).toEqual({ recommended: null, orchestrator: null });
     expect(fallbackDecisionOf(incident({ candidate: null }), NOW).question).toContain("No fallback model is left in its chain.");
   });
 
@@ -150,6 +156,20 @@ describe("syncFallbackDecisions", () => {
     expect(syncFallbackDecisions(home, { now, log })).toEqual({ opened: [`f:${ID}`, "f:fb-000000000d03"], withdrawn: [], alerted: [] });
     expect(syncFallbackDecisions(home, { now, log })).toEqual({ opened: [], withdrawn: [], alerted: [] });
     expect(decisions().map((decision) => decision.id).sort()).toEqual([`f:${ID}`, "f:fb-000000000d03"]);
+    expect(decisions().map((decision) => decision.class)).toEqual(["environment", "environment"]);
+  });
+
+  it("an incident's decision stored before classes reads as environment, and the next pass leaves it as it was (autonomy design §B.1, §B.9)", () => {
+    writeIncidents([incident()]);
+    const older: Decision = fallbackDecisionOf(incident(), NOW);
+    delete older.class;
+    store().open(older);
+    const before = readFileSync(join(home, "decisions", "wks_1.json"), "utf8");
+    expect(syncFallbackDecisions(home, { now, log })).toEqual({ opened: [], withdrawn: [], alerted: [] });
+    expect(readFileSync(join(home, "decisions", "wks_1.json"), "utf8")).toBe(before);
+    const stored = store().get(`f:${ID}`)!;
+    expect(stored).not.toHaveProperty("class");
+    expect(decisionClassOf(stored)).toBe("environment");
   });
 
   it("withdraws the open decision of an incident resolved another way, or gone from the file", () => {
@@ -162,7 +182,7 @@ describe("syncFallbackDecisions", () => {
 
   it("never reopens a settled decision of a still-pending incident, nor touches other decisions", () => {
     writeIncidents([incident()]);
-    const other = { ...fallbackDecisionOf(incident(), NOW), id: "q:req-20260929T073348Z:Q1", subject: null, options: [] } as Decision;
+    const other = { ...fallbackDecisionOf(incident(), NOW), id: "q:req-20260929T073348Z:Q1", subject: null, options: [], prediction: { recommended: null, orchestrator: null } } as Decision;
     store().open(other);
     syncFallbackDecisions(home, { now, log });
     store().transition(`f:${ID}`, (decision) => ({ ok: true, decision: { ...decision, status: "expired", settledAt: NOW.toISOString() } }));
@@ -321,6 +341,7 @@ describe("answering a fallback decision", () => {
     const decision: Decision = {
       ...fallbackDecisionOf(incident({ role: "reviewer" }), NOW),
       options: [{ key: "resend", label: "Resend to Worker", recommended: true, effects: ["none"], action: { kind: "fallback", action: "resend", target: ID } }],
+      prediction: { recommended: { optionKey: "resend" }, orchestrator: null },
     };
     store().open(decision);
     const acts = actions();

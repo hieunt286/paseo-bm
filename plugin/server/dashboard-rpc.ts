@@ -3,52 +3,50 @@
  *
  * One place resolves the trace store and one place turns a thrown
  * `DashboardError` into the coded message the client reads with `errorCodeOf`.
- * Handlers stay thin: the behaviour lives in `trace-store.ts`, `beads-store.ts`
- * and `traces.ts`, which are all testable without a daemon.
+ * Handlers stay thin: the behaviour lives in `trace-store.ts`,
+ * `trace-store-rewrite.ts`, `beads-store.ts`, the rebuild of `traces.ts` and
+ * the rows of `trace-views.ts`, which are all testable without a daemon. What
+ * Paseo lists — workspaces, their directories, the paseo-bm agents — is read
+ * through `paseo-directory.ts`, and the fallback incidents' counts through
+ * `fallback-state.ts` (code review 2026-09-30 §4).
  *
- * Workspace directory: `beads.stats` needs the repository path, which only the
- * workspace snapshot has, so it is read through `paseo.workspaces.list()` and
- * matched by id. A workspace that is not in the list is reported as an empty
- * bead store rather than an error — it may simply have been archived.
+ * `beads.stats` needs the workspace's repository path (`workspaceDirectory`);
+ * a workspace that Paseo no longer lists is reported as an empty bead store
+ * rather than an error — it may simply have been archived.
  */
-import { homedir } from "node:os";
+import { join } from "node:path";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { listAllAgents, roleOfAgent } from "./agent-role";
 import { beadStats, lookupBeads } from "./beads-store";
-import { resolveDataHome, type DataHomeDeps } from "./data-home";
+import { TRACES_DIR_NAME, type DataHomeDeps } from "./data-home";
 import { priceUsage } from "./cost";
 import { listedPricesFor } from "./model-costs";
 import { inferWorkflowSteps } from "./workflow-steps";
 import { mergeExtras, readLiveExtras } from "./live-timeline";
+import { pluginSentBeside } from "./collector";
 import { getBeadDetail, listBeadRows, runBeadAction, type BeadActionPaseo } from "./bead-actions";
 import { beadWorkOf } from "./bead-work";
 import { stopAllInWorkspace, type StopPaseo } from "./stop-propagation";
-import { readIncidents } from "./fallback-state";
-import { dataHomeOf } from "./role-extras";
+import { fallbackCountsOf, incidentsIn, reviewerReplacementIds } from "./fallback-state";
+import { agentFactsOf, bmAgentsOf, directoryIn, listedWorkspaces, workspaceDirectory, type DashboardPaseo } from "./paseo-directory";
+import { workspaceTracesOf } from "./request-trace";
+import { requireDataHome } from "./rpc-kit";
 import { createOrchestratorStore } from "./orchestrator-store";
 import { createDecisionStore } from "./decision-store";
-import {
-  detail,
-  paginate,
-  reconstructTraces,
-  summariseSegments,
-  type AgentFacts,
-  type ReconstructedTrace,
-} from "./traces";
+import type { AgentFacts, ReconstructedTrace } from "./traces";
+import { agentTokenFiguresOf } from "./trace-usage";
+import { detail, paginate, summariseSegments } from "./trace-views";
 import {
   assertWritableSchema,
   classifyWorkspaces,
-  readRecords,
-  deleteTraces,
   measureStore,
-  reassignWorkspace,
+  readRecords,
   readWorkspaceMeta,
   recordKeyOf,
-  type DeleteScope,
   type TraceStoreLocation,
   type WorkspaceClassification,
 } from "./trace-store";
-import type { FallbackIncident, WorkspaceState } from "../shared/contracts";
+import { deleteTraces, reassignWorkspace, type DeleteScope } from "./trace-store-rewrite";
+import type { WorkspaceState } from "../shared/contracts";
 import {
   TRACE_LIST_LIMIT,
   DashboardError,
@@ -58,6 +56,7 @@ import {
   beadsActionRpc,
   workspacesOverviewRpc,
   agentsStopAllRpc,
+  tracesAgentsRpc,
   tracesGetRpc,
   tracesListRpc,
   tracesWorkspacesRpc,
@@ -69,30 +68,14 @@ import {
   type BeadStats,
   type WorkspaceOverview,
   type StoreSize,
+  type AgentTokenFigures,
   type TraceDetail,
   type TraceSummary,
 } from "../shared/contracts";
 
-/** The SDK slice these handlers use. `PaseoApi` is structurally assignable. */
-export interface DashboardPaseo {
-  agents: {
-    /** Absent on hosts (and fakes) without per-agent timeline access. */
-    ref?(agentId: string): { timeline: { refetch(options: Record<string, unknown>): Promise<unknown> } };
-    list(options: {
-      filter: { labels?: Record<string, string>; includeArchived: boolean };
-      page: { limit: number; cursor?: string };
-    }): Promise<{ entries: Array<Record<string, unknown>>; pageInfo?: { nextCursor: string | null; hasMore: boolean } }>;
-  };
-  workspaces: {
-    list(options?: unknown): Promise<{ entries: Array<Record<string, unknown>> }>;
-  };
-  config: {
-    get(): Promise<{ config: { plugins?: Record<string, unknown> } }>;
-  };
-}
-
 /**
- * Resolves the trace store for a handler, or throws a coded error.
+ * Resolves the trace store for a handler, or throws `E_DATA_HOME_UNAVAILABLE`
+ * (rpc-kit `requireDataHome`, code review 2026-09-30 §3.2).
  *
  * `homedir` is injectable so a test never depends on the machine it runs on:
  * the default fallback path is inside the real user's home, and a real
@@ -111,125 +94,8 @@ async function requireInstallHome(
   paseo: DashboardPaseo,
   deps: DataHomeDeps,
 ): Promise<{ home: string; location: TraceStoreLocation }> {
-  const resolution = resolveDataHome({ ...deps, homedir: deps.homedir ?? homedir });
-  if (resolution.home === null) {
-    throw new DashboardError(
-      "E_TRACE_STORE_UNWRITABLE",
-      `the paseo-bm trace store is unavailable: ${resolution.reason}`,
-    );
-  }
-  return { home: resolution.home, location: { tracesDir: resolution.tracesDir } };
-}
-
-/**
- * Ids of the Reviewers that replaced one stopped on its provider plan: the
- * `replacementId` of every Reviewer incident that has one (delta 20260921
- * §4.5.1). Their first message is the old Reviewer's review call sent again,
- * which `reviewCallsOf` does not count a second time.
- */
-export function reviewerReplacementIds(incidents: readonly FallbackIncident[]): Set<string> {
-  const out = new Set<string>();
-  for (const incident of incidents) {
-    if (incident.role === "reviewer" && incident.replacementId !== null) out.add(incident.replacementId);
-  }
-  return out;
-}
-
-/**
- * The recorded fallback incidents of `<home>/role-fallback-state.json`, read
- * once per Dashboard call. Empty without a home, or when the file is missing or
- * unusable, so every count stays what it was before fallback existed. Silent:
- * fallback detection already logs an unusable file, and a Dashboard refresh or a
- * turn end must not repeat it. Never throws.
- */
-export function incidentsIn(home: string | null): FallbackIncident[] {
-  return home === null ? [] : readIncidents(home, () => {}).incidents;
-}
-
-/**
- * How many provider-plan incidents each request of a workspace had that did not
- * already fail a turn (delta 20260925 §3.4).
- *
- * Only `signal: "completed"` counts here: an incident with `signal: "failed"`
- * came from a turn whose record says `failed`, which `errorsOf` counts as a
- * failed turn, and one failure must read as one error. An incident without a
- * `requestId` is a Manager's and belongs to no request.
- */
-export function fallbackCountsOf(
-  incidents: readonly FallbackIncident[],
-  workspaceId: string,
-): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const incident of incidents) {
-    if (incident.workspaceId !== workspaceId || incident.requestId === null) continue;
-    if (incident.signal !== "completed") continue;
-    counts.set(incident.requestId, (counts.get(incident.requestId) ?? 0) + 1);
-  }
-  return counts;
-}
-
-/** `reviewerReplacementIds` of that file. Kept for callers that need only those ids. */
-export function reviewerReplacementsIn(home: string | null): Set<string> {
-  return reviewerReplacementIds(incidentsIn(home));
-}
-
-/**
- * `reviewerReplacementsIn` the plugin's own data folder, unless `deps.home`
- * names it (tests). Never throws.
- */
-export function reviewerReplacementsFor(deps: { home?: string | null } = {}): Set<string> {
-  try {
-    return reviewerReplacementsIn(deps.home !== undefined ? deps.home : dataHomeOf());
-  } catch {
-    return new Set();
-  }
-}
-
-export interface ListedWorkspace {
-  id: string;
-  archived: boolean;
-  directory: string | null;
-}
-
-/**
- * Workspaces Paseo currently lists, or null when the list could not be read.
- *
- * `null` is load-bearing: `classifyWorkspaces` must not label anything orphaned
- * because of one failed call (REQ-057a).
- */
-export async function listedWorkspaces(paseo: DashboardPaseo): Promise<ListedWorkspace[] | null> {
-  let entries: Array<Record<string, unknown>>;
-  try {
-    ({ entries } = await paseo.workspaces.list());
-  } catch {
-    return null;
-  }
-  return entries.map((entry) => {
-    const workspace = (entry["workspace"] ?? entry) as Record<string, unknown>;
-    const archivingAt = workspace["archivingAt"] ?? workspace["archivedAt"];
-    // The workspace's own directory. The project root is only the same place
-    // for a plain checkout: a worktree's root is the main checkout, and reading
-    // beads there would show another workspace's beads.
-    const kind = workspace["kind"] ?? workspace["workspaceKind"];
-    const keys = kind === "worktree" ? ["directory", "workspaceDirectory", "cwd"] : ["directory", "workspaceDirectory", "cwd", "projectRootPath"];
-    const directory = keys
-      .map((key) => workspace[key])
-      .find((value): value is string => typeof value === "string" && value !== "");
-    return {
-      id: String(workspace["id"] ?? ""),
-      archived: typeof archivingAt === "string" && archivingAt !== "",
-      directory: directory ?? null,
-    };
-  });
-}
-
-function directoryIn(listed: readonly ListedWorkspace[] | null, workspaceId: string): string | null {
-  return listed?.find((entry) => entry.id === workspaceId)?.directory ?? null;
-}
-
-/** Repository path of a workspace, or null when Paseo no longer lists it. */
-export async function workspaceDirectory(paseo: DashboardPaseo, workspaceId: string): Promise<string | null> {
-  return directoryIn(await listedWorkspaces(paseo), workspaceId);
+  const home = requireDataHome(deps, "open the trace store");
+  return { home, location: { tracesDir: join(home, TRACES_DIR_NAME) } };
 }
 
 /** The empty answer for a workspace whose directory cannot be found. */
@@ -287,19 +153,16 @@ export async function handleTracesDelete(
     recordKeys = new Set(trace.records.map((record) => recordKeyOf(record)));
   }
   if (input.dryRun !== true && inScope.length > 0) {
-    // The assessments of the deleted traces go with them (orchestrator design
-    // §5.3, REQ-075 e). An assessment is keyed by the request when the trace has
-    // one, else by the trace, so both ids are named. Before the traces, not
-    // after: a failure here then leaves everything in place for a retry, where
-    // the other order would leave excerpts of traces that are already gone. The
+    // An earlier build's workflow assessments of the project may quote the
+    // deleted traces, so its retired file goes with them (orchestrator design
+    // §5.3, REQ-075 e; autonomy design §B.9). Before the traces, not after: a
+    // failure here then leaves everything in place for a retry, where the
+    // other order would leave excerpts of traces that are already gone. The
     // store's own refusal comes first for the same reason.
     assertWritableSchema(location);
     const { home } = await requireInstallHome(paseo, deps);
     const requestIds = inScope.flatMap((trace) => (trace.requestId === null ? [] : [trace.requestId]));
-    createOrchestratorStore(home).deleteAssessmentsFor(input.workspaceId, {
-      traceIds: inScope.map((trace) => trace.traceId),
-      requestIds,
-    });
+    createOrchestratorStore(home).deleteRetiredAssessments(input.workspaceId);
     // Autonomy design §A.4: a deleted request's settled decisions go with it;
     // an open one stays, because the owner still has to answer it.
     createDecisionStore(home).deleteSettled(input.workspaceId, requestIds);
@@ -314,18 +177,8 @@ export async function handleTracesDelete(
   };
 }
 
-/**
- * Everything the two read handlers need, gathered once: the store, the agent
- * facts, the workspace's state and the reconstructed traces.
- *
- * `agents.list` is filtered by `bm.role` label exactly as `manager.ts` does, and
- * then by workspace, because the daemon's directory filter has no workspace key.
- */
-export async function readTraceContext(
-  input: { workspaceId: string },
-  paseo: DashboardPaseo,
-  deps: DataHomeDeps = {},
-): Promise<{
+/** One workspace's traces and everything the read handlers show beside them (`readTraceContext`). */
+export interface TraceContext {
   location: TraceStoreLocation;
   traces: ReconstructedTrace[];
   agents: Map<string, AgentFacts>;
@@ -342,24 +195,37 @@ export async function readTraceContext(
   store: StoreSize;
   /** Provider-plan incidents per request that did not fail a turn (delta 20260925 §3.4). */
   fallbackCounts: Map<string, number>;
-}> {
+}
+
+/**
+ * Everything the read handlers need, gathered once: the store, the agent
+ * facts, the workspace's state and the reconstructed traces. Not a handler:
+ * the Orchestrator's `bm_request` reads its request through it too.
+ *
+ * The traces are `request-trace.ts`'s rebuild (`workspaceTracesOf`), the one
+ * the Orchestrator's readers and the BM-BUDGET check read: `agents.list` walked
+ * once, no label filter, then kept to the workspace, because the daemon's
+ * directory filter has no workspace key.
+ */
+export async function readTraceContext(
+  input: { workspaceId: string },
+  paseo: DashboardPaseo,
+  deps: DataHomeDeps = {},
+): Promise<TraceContext> {
   const { home, location } = await requireInstallHome(paseo, deps);
-  const read = readRecords(location, input.workspaceId);
-  const agents = await agentFactsOf(paseo, input.workspaceId);
-  const listed = await listedWorkspaces(paseo);
-  const classified = classifyWorkspaces(location, listed).find(
-    (entry) => entry.workspaceId === input.workspaceId,
-  );
   // One read of the incidents file for both things that need it: the review
   // count and the error count (delta 20260925 §3.4).
   const incidents = incidentsIn(home);
   // The same review count as the BM-BUDGET check: a replacement Reviewer's
   // first message is not a new call (delta 20260921 §4.5.1).
-  const traces = reconstructTraces({
-    records: read.records,
-    agents: [...agents.values()],
-    replacementIds: reviewerReplacementIds(incidents),
-  });
+  const { traces, agents, notices } = await workspaceTracesOf(
+    { location, paseo, home, replacementIds: reviewerReplacementIds(incidents) },
+    input.workspaceId,
+  );
+  const listed = await listedWorkspaces(paseo);
+  const classified = classifyWorkspaces(location, listed).find(
+    (entry) => entry.workspaceId === input.workspaceId,
+  );
   return {
     location,
     traces,
@@ -368,76 +234,10 @@ export async function readTraceContext(
     evidenceDirectory:
       directoryIn(listed, input.workspaceId) ?? readWorkspaceMeta(location, input.workspaceId)?.lastKnownDirectory ?? null,
     workspaceState: classified?.state ?? (listed === null ? "unknown" : "live"),
-    notices: read.notices,
+    notices,
     store: measureStore(location, input.workspaceId),
     fallbackCounts: fallbackCountsOf(incidents, input.workspaceId),
   };
-}
-
-/** Agent facts of one workspace, keyed by id (design §6.1 step 1). */
-export async function agentFactsOf(
-  paseo: DashboardPaseo,
-  workspaceId: string,
-): Promise<Map<string, AgentFacts>> {
-  const all = await bmAgentsOf(paseo);
-  return new Map(all.filter((entry) => entry.workspaceId === workspaceId).map((entry) => [entry.facts.id, entry.facts]));
-}
-
-/**
- * Every paseo-bm agent on this host, with its workspace. One walk over every
- * page of `agents.list`, no label filter: the role comes from `roleOfAgent`, so
- * an agent started from Paseo's own new-agent flow with a paseo-bm profile
- * (no `bm.role` label) is found too, marked `labelled: false` (delta 20260918g
- * §4.2). The daemon's directory filter has no workspace key.
- *
- * The Orchestrator's assessment agent is left out unless `includeOrchestrator`
- * asks for it: it is a paseo-bm agent the user sees and archives, but no part
- * of a request, so nothing that rebuilds a trace or picks a chat peer may meet
- * it (orchestrator design §3.2).
- */
-export async function bmAgentsOf(
-  paseo: DashboardPaseo,
-  options: { includeOrchestrator?: boolean } = {},
-): Promise<Array<{ workspaceId: string | null; facts: AgentFacts }>> {
-  let listed: Array<Record<string, unknown>>;
-  try {
-    listed = await listAllAgents(
-      async (options) => {
-        const result = await paseo.agents.list(options);
-        // Entries are `{ agent }` on the SDK; older fakes hand the agent itself.
-        return {
-          entries: result.entries.map((entry) => ({ agent: (entry["agent"] ?? entry) as Record<string, unknown> })),
-          ...(result.pageInfo === undefined ? {} : { pageInfo: result.pageInfo }),
-        };
-      },
-      { includeArchived: true },
-    );
-  } catch {
-    return [];
-  }
-  const out: Array<{ workspaceId: string | null; facts: AgentFacts }> = [];
-  for (const agent of listed) {
-    const fact = roleOfAgent(agent);
-    const id = String(agent["id"] ?? "");
-    if (fact === null || id === "") continue;
-    if (fact.role === "orchestrator" && options.includeOrchestrator !== true) continue;
-    const labels = (agent["labels"] ?? {}) as Record<string, string>;
-    const facts: AgentFacts = {
-      id,
-      role: fact.role,
-      labelled: fact.labelled,
-      status: String(agent["status"] ?? "closed"),
-      parentAgentId: labels["paseo.parent-agent-id"] ?? (agent["parentAgentId"] as string | null) ?? null,
-      createdAt: typeof agent["createdAt"] === "string" ? (agent["createdAt"] as string) : null,
-      requestIdLabel: labels["bm.requestId"] ?? null,
-      batchIdLabel: labels["bm.batchId"] ?? null,
-      archived: typeof agent["archivedAt"] === "string" && agent["archivedAt"] !== "",
-      title: typeof agent["title"] === "string" ? (agent["title"] as string) : null,
-      replacedBy: labels["bm.replacedBy"] ?? null,
-    };
-    out.push({ workspaceId: typeof agent["workspaceId"] === "string" ? agent["workspaceId"] : null, facts });
-  }
-  return out;
 }
 
 /** `traces.list` handler (REQ-041). Read-only. */
@@ -471,6 +271,7 @@ export async function handleTracesList(
         reassignedFrom: reassignedFromOf(trace, input.workspaceId),
         priceUsage: (usage) => priceUsage(usage, listed),
         fallbacksOf: (requestId) => (requestId === null ? 0 : (context.fallbackCounts.get(requestId) ?? 0)),
+        workspaceDirectory: context.evidenceDirectory,
       }),
     ),
     nextCursor,
@@ -494,6 +295,21 @@ export async function handleTracesGet(
       `no trace ${input.traceId} in workspace ${input.workspaceId}; the agents it belonged to may have been deleted`,
     );
   }
+  return { trace: await traceDetailOf({ workspaceId: input.workspaceId, trace }, context, paseo) };
+}
+
+/**
+ * The full detail of one trace of `context` (design §4.3): priced, its beads
+ * looked up, its workflow steps inferred, and what its agents' timelines still
+ * hold. Not a handler: `traces.get` and the Orchestrator's `bm_request` both
+ * build their request with it (code review 2026-09-30 §4).
+ */
+export async function traceDetailOf(
+  input: { workspaceId: string; trace: ReconstructedTrace },
+  context: TraceContext,
+  paseo: DashboardPaseo,
+): Promise<TraceDetail> {
+  const { trace } = input;
   const { directory } = context;
   const listed = await listedPricesFor(paseo, trace.records, undefined, directory ?? undefined);
   const built = detail(trace, {
@@ -502,15 +318,46 @@ export async function handleTracesGet(
     reassignedFrom: reassignedFromOf(trace, input.workspaceId),
     priceUsage: (usage) => priceUsage(usage, listed),
     fallbacksOf: (requestId) => (requestId === null ? 0 : (context.fallbackCounts.get(requestId) ?? 0)),
+    workspaceDirectory: context.evidenceDirectory,
     lookupBeads: (ids) => (directory === null ? { found: [], missing: [...ids] } : lookupBeads(directory, ids)),
     workflowSteps: (reconstructed, beadStatus) =>
       inferWorkflowSteps(reconstructed, { beadStatus, workspaceDir: context.evidenceDirectory }),
   });
   // What the agents did before the collector saw them is still in their
-  // timelines: add their skills and the user's messages from there.
+  // timelines: add their skills and the user's messages from there — never
+  // what the plugin sent for a compaction, which its send log tells apart as
+  // it does for the collector (autonomy design §G.5).
   const present = [...trace.workerIds, ...trace.reviewerIds].filter((id) => context.agents.has(id));
-  const extras = mergeExtras(built, await readLiveExtras(paseo, present));
-  return { trace: { ...built, skills: extras.skills, userMessages: extras.userMessages } };
+  const extras = mergeExtras(built, await readLiveExtras(paseo, present, process.env, pluginSentBeside(context.location)));
+  return { ...built, skills: extras.skills, userMessages: extras.userMessages };
+}
+
+/**
+ * `traces.agents` handler (autonomy design §G.2 Shown). Read-only. With
+ * `traceId`: every agent of that request over its turns there; unknown id
+ * fails `E_TRACE_NOT_FOUND`. Without: each agent Paseo lists in the workspace
+ * and has not archived — the agents Work's Agents tab shows — over its life.
+ */
+export async function handleTracesAgents(
+  input: { workspaceId: string; traceId?: string },
+  paseo: DashboardPaseo,
+  deps: DataHomeDeps = {},
+): Promise<{ agents: AgentTokenFigures[] }> {
+  const context = await readTraceContext(input, paseo, deps);
+  const records = [...new Set(context.traces.flatMap((trace) => trace.records))];
+  const roleOf = (agentId: string) => context.agents.get(agentId)?.role;
+  if (input.traceId === undefined) {
+    const keep = (agentId: string) => context.agents.get(agentId)?.archived === false;
+    return { agents: agentTokenFiguresOf(records, { keep, roleOf }) };
+  }
+  const trace = context.traces.find((candidate) => candidate.traceId === input.traceId);
+  if (trace === undefined) {
+    throw new DashboardError(
+      "E_TRACE_NOT_FOUND",
+      `no trace ${input.traceId} in workspace ${input.workspaceId}; the agents it belonged to may have been deleted`,
+    );
+  }
+  return { agents: agentTokenFiguresOf(records, { scope: new Set(trace.records), roleOf }) };
 }
 
 /**
@@ -682,6 +529,7 @@ export function registerDashboardRpcs(
   const sdk = (context: { paseo: unknown }) => context.paseo as DashboardPaseo & BeadActionPaseo;
   server.handle(tracesListRpc, (input, context) => handleTracesList(input, sdk(context)));
   server.handle(tracesGetRpc, (input, context) => handleTracesGet(input, sdk(context)));
+  server.handle(tracesAgentsRpc, (input, context) => handleTracesAgents(input, sdk(context)));
   server.handle(tracesDeleteRpc, (input, context) => handleTracesDelete(input, sdk(context)));
   server.handle(tracesReassignRpc, (input, context) => handleTracesReassign(input, sdk(context)));
   server.handle(tracesWorkspacesRpc, (_input, context) => handleTracesWorkspaces(sdk(context)));

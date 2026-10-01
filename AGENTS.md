@@ -25,8 +25,8 @@ Read this before touching anything in this repository.
 | Area | Choice |
 |---|---|
 | Language / runtime | TypeScript, ESM, Node >= 22 |
-| Build | `tsup` → `dist/index.js`; `bin: { "paseo-bm": "dist/index.js" }` |
-| Test | Vitest. Integration tests run against a fake `$HOME` with fake `paseo` / `skills` binaries on `PATH` |
+| Build | None to bundle: the payload ships as TypeScript that Paseo compiles. `npm run build` only regenerates `plugin/package.json`'s version, `PLUGIN_VERSION` and the role-instruction modules (`scripts/generate-*.mjs`); `tsup` bundles only the eval scripts (`tsup.eval.config.ts`) |
+| Test | Vitest, three projects (`vitest.workspace.ts`): `default`, `bench`, `eval`. Every test gets a fake `$HOME`; a test that runs a tool puts a fake binary on `PATH` |
 | Lint / types | ESLint, `tsc --noEmit` |
 | Plugin payload | Paseo plugin API v0.8: split `index.client.tsx` + `index.server.ts`, Zod contracts in `shared/`, React Native primitives only in `client/` |
 | Issue tracking | Beads via `br`; `.beads/issues.jsonl` is the source of truth |
@@ -41,12 +41,15 @@ Since 0.4.1 a release publishes **one npm package, `paseo-bm-plugin`**, from `re
 | Package | What it is | Root of its tarball | Published |
 |---|---|---|---|
 | `paseo-bm-plugin` | the product: the payload in `plugin/` | **a loadable plugin**: `paseo-plugin.json` + `index.client.tsx` + `index.server.ts` | every release |
-| `paseo-bm` | the migration command you run with `npx`, once | `dist/` only — no `plugin/`, no manifest | last at **0.4.0**; deprecated on npm; the root `package.json` is `"private": true` |
+| `paseo-bm` | the migration command you run with `npx`, once | `dist/` only — no `plugin/`, no manifest | last at **0.4.0**; deprecated on npm; its source lives only at the `v0.4.0` tag |
 
 Up to 0.4.0 both packages were published at the same version from the same run. The root
-`package.json` is still the one hand-edited version source and the build still runs from it; it
-is simply never published. If the migration command ever needs a fix, the
-[release runbook](docs/operations/paseo-bm-release-runbook.md) §7 says how to publish it once more.
+`package.json` is `"private": true` and has no `bin`, `files` or `prepack`: it is the one
+hand-edited version source, the scripts and the devDependencies, and it is never published. The
+migration command's source was deleted from this repository
+([ADR-022](docs/adr/ADR-022-retirements-after-code-review.md) decision 1); if it ever needs a fix,
+the fix is made on a branch from the `v0.4.0` tag, as the
+[release runbook](docs/operations/paseo-bm-release-runbook.md) §7 says.
 
 This exists because [paseo.cafe](https://paseo.cafe) lists paseo-bm, and its security scan
 demands a Paseo runtime entry at the plugin root — reading the npm tarball root whatever the
@@ -72,7 +75,8 @@ What breaks the listing, so do not do it:
   tag by hand, still needs a one-time password and is the owner's step, not an agent's.
 - **Adding a `test` script to `plugin/package.json` to win the listing's health badge.** There is
   no test in `plugin/`; a script that exists to turn a check green is a fake check.
-- **Putting anything at the installer tarball's root that looks like a plugin.**
+- **Putting anything at the installer tarball's root that looks like a plugin** (on a fix branch
+  of the migration command, the only place that tarball is still built).
 
 The registry entry lives in the other repository, at `registry/paseo-bm.json` in
 `paseo-cafe/paseo-cafe`, and declares `path: "plugin"` with `package: "paseo-bm-plugin"`. Two
@@ -94,7 +98,7 @@ docs/README.md         index of the docs: start here
 docs/product/          PRDs (Accepted, living): paseo-bm-prd.md, paseo-bm-dashboard-prd.md
 docs/design/           Technical Designs (Active, living): paseo-bm.md, paseo-bm-dashboard.md,
                        plus the research note on instructions by provider
-docs/adr/              ADR-001..010 (Accepted)
+docs/adr/              ADR-001..022; which are in force is in the docs index
 docs/operations/       living only: release runbook, acceptance checklists (install,
                        orchestration, worker fallback), the paseo.cafe listing record,
                        open requests to upstream Paseo
@@ -104,9 +108,12 @@ docs/archive/          history, never edited: merged deltas (design/, product/),
                        cite deltas by name and section; find them here
 docs/plans/            created only for a piece of Designed work; archived when it completes
 .beads/                bead graph; issues.jsonl is tracked, *.db is gitignored
-src/                   CLI source: the installer published as the npm package `paseo-bm`
-plugin/                Paseo plugin payload, published as its own npm package `paseo-bm-plugin`;
-                       has its own package.json, README.md, LICENSE, and images/ for the listing
+plugin/                Paseo plugin payload, published as the npm package `paseo-bm-plugin` (the
+                       only one); has its own package.json, README.md, LICENSE, and images/ for
+                       the listing
+scripts/               the build's generators, the packed smoke (`smoke:packed`), the eval
+                       tooling (eval/) and the isolated-daemon kit (manual-test/)
+test/                  Vitest tests of the plugin and the eval tooling
 ```
 
 There is deliberately **no `paseo-plugin.json` at the repo root**. One existed for a day while
@@ -128,7 +135,7 @@ The product is shipped (0.4.x); this repository is in maintenance, not in a buil
 
 **Triggers for Designed** — a change that:
 
-- changes a contract others consume: `npx paseo-bm` flags, exit and error codes, `--json` output, `install.json` / trace-store / any on-disk schema, the `BM-*` block formats and notices, plugin RPC contracts in `plugin/shared/contracts.ts` read across versions;
+- changes a contract others consume: `install.json` / trace-store / any on-disk schema, the `BM-*` block formats and notices, plugin RPC contracts in `plugin/shared/contracts.ts` (the barrel over `plugin/shared/contracts/*`) read across versions;
 - writes to the user's Paseo configuration, agent skill directories or anything outside the install home;
 - touches credentials, permissions, agent modes or anything the safety boundaries below guard;
 - touches release, publishing or the one-published-package rule;
@@ -232,9 +239,19 @@ Checked against a live daemon, Paseo CLI/daemon 0.8.0:
 - Paseo delivers `config.systemPrompt` differently per provider: Claude gets it as `append` to the `claude_code` preset (after the whole preset, which brings its own memory, `AskUserQuestion` and commit instructions), with `CLAUDE.md` injected into the conversation, not the system prompt; Codex gets it as `developerInstructions` (after a collaboration mode's own `developer_instructions`), with each `AGENTS.md` as a separate user-role message; OpenCode gets it as `system`. A daemon-level `appendSystemPrompt` (empty unless configured) follows it in all three. Details and sources: `docs/design/paseo-bm-research-20260918-instructions-by-model.md`.
 - A plugin's server process **can serve its own MCP endpoint** and give it to agents (verified 2026-09-24, Claude): `node:http` listening on `127.0.0.1` inside the plugin process works, and `before("agent.create")` returning `config.mcpServers["<name>"] = { type: "http", url, alwaysLoad: true }` plus `config.toolPolicy.preapproved = [{ kind: "mcp", server, tool }]` gives the new agent the tool as `mcp__<name>__<tool>`, with **no permission prompt**. Without `alwaysLoad` Claude hides the tool behind a ToolSearch step. Agents that already exist never get it (`agent.session_open` changes only `env`). paseo-bm's endpoint: ADR-010, `plugin/server/agent-tools.ts`.
 - **`toolPolicy` is refused outright on a provider that cannot pre-approve MCP tools.** Paseo 0.8 `applyProviderConfiguration` throws `Provider '<id>' cannot preapprove exact MCP tools for unattended execution` — the agent is never created — unless the provider's contract has `applyToolPolicy`: only **claude, codex, opencode** (`PROVIDER_CONTRACTS.supportsExactMcpPreapproval`); Pi, Oh My Pi, Copilot and other ACP providers do not. It also throws when a grant names a server missing from `mcpServers`. For Codex, `applyCodexToolPolicy` turns the grants into `mcp_servers.<server>.enabled_tools` plus `tools.<tool>.approval_mode = "approve"`. Verified 2026-09-24 through fallback aliases: a Codex agent created through Paseo calls the tool (shown as `paseo-bm.bm_review`) with no approval prompt; an OpenCode creation carrying `toolPolicy` is accepted; a Pi creation without it succeeds. The creation hook reads the alias's base provider with `config.get()` → `config.providers[<alias>].extends` (the SDK's shape; the file keeps them under `agents.providers`).
-- Paseo **0.9.2** `daemon status --json` has **no `cliVersion`** (it still has `home`, `daemonVersion`, `listen`); `paseo --version` prints the bare CLI version. The adapter falls back to it (bm-qh4c). `plugin ls` / `plugin logs --json` kept their 0.8 shape.
+- Paseo **0.9.2** `daemon status --json` has **no `cliVersion`** (it still has `home`, `daemonVersion`, `listen`); `paseo --version` prints the bare CLI version. The 0.4.0 migration command's adapter falls back to it (bm-qh4c). `plugin ls` / `plugin logs --json` kept their 0.8 shape.
 - Paseo 0.9.2 `before("agent.create")` **does not see the creating agent** (verified 2026-09-29, isolated daemon + probe plugin): the request is `{ config, env }` only — `config` keys `provider, cwd, modeId, model, thinkingOptionId, title` (plus `featureValues` / `providerOptions` / `mcpServers` / `toolPolicy` when set), `env` empty for an MCP `create_agent`; the daemon's `createAgentInternal` passes nothing else, and the `paseo.parent-agent-id` label goes to the create options, not the hook. The **`agent.created`** event does carry it, as `agent.parentAgentId` (the caller's id for an MCP creation, `null` for a client `createAgent` with no parent). Role pairing is therefore checked there (`plugin/server/role-pairing.ts`).
 - A **throw from `before("agent.create")` surfaces cleanly** to an agent's `create_agent` (verified 2026-09-29): the tool returns `isError: true` with the text `Plugin <plugin id> before agent.create failed: <the thrown message>`, and no agent is created (the hook runs before any agent state is written). The daemon runs plugins' `before` hooks in plugin-id order and stops at the first throw.
+- **A plugin answers a permission request** with the SDK in its hook or RPC context: `context.paseo.agents.ref(agentId).respondToPermission({ requestId, response })` (Paseo 0.9.2, verified 2026-09-30 on an isolated daemon; round trip ≤ 1 ms; `@getpaseo/plugin`'s typings do not show it, `@getpaseo/client`'s `PaseoApi` does). A plain `{ behavior: "allow" }` is allow-once everywhere; Claude requests offer `suggestions` (permanent allow rules in the workspace's local settings, `setMode acceptEdits`) and OpenCode requests `actions` (`allow_always`) — never take them. `paseo permit ls | allow | deny` answers the same requests from the CLI. Unanswered requests **wait indefinitely** (15 min measured, Claude and Codex, turn still `running`), also while the plugin is disabled, and sit in the agent snapshot's `pendingPermissions` with the whole request, where the app shows them. **Nothing is replayed to a restarted plugin**: it reads them from `paseo.agents.list()`. `agent.permission_resolved` arrives for Claude and Codex, **never for OpenCode**. Run note: `docs/archive/operations/paseo-bm-action-boundary-spike-20260930.md`.
+- **Which calls raise a request** (same run): Claude `default` — every edit/write, every non-read-only `Bash`, `WebFetch`, every MCP tool (`mcp__paseo__*` included); `acceptEdits` — the same minus edits inside the workspace; **`auto` — none** (its classifier decided; push, `DROP TABLE`, `rm -rf` outside all ran). Codex `auto` (`on-request`, `workspace-write`) — only when the model escalates (`rm -rf` outside, an `apply_patch` outside); in-workspace effects run unseen, network and outside writes fail in the sandbox; **`auto-review` — none reach the plugin** (the auto-reviewer approved a push and an `rm -rf`). `providerOptions.approval_policy: "untrusted"` makes Codex ask for every command but known-safe reads and for every file change; with `sandbox_mode: "workspace-write"` an **allowed command still runs sandboxed** (an allowed `curl` / `git push` failed), with `"danger-full-access"` it runs. `providerOptions.web_search: "disabled"` removes Codex's server-side `web_search`, which never raises a request. OpenCode follows the user's own OpenCode config (here `bash: allow`: nothing asked); `OPENCODE_PERMISSION` in the creation `env` (Paseo then starts a dedicated OpenCode server) makes `bash`, `webfetch`, `external_directory` ask, but OpenCode-plugin tools and MCP tools still do not. Every request had `kind: "tool"`.
+- **What a request carries:** Claude `Bash` → `detail.command`, **no cwd**; `Edit`/`Write` → `detail.filePath` (absolute); `WebFetch` → `detail.url`. Codex `CodexBash` → `detail.command` (unwrapped from `/bin/zsh -lc`) and `detail.cwd`. **Codex `CodexFileChange` carries no path** — only `metadata.itemId`; the path is on the pending timeline `tool_call` whose `callId` equals that id (`status: "running"`, `detail.filePath` relative inside the workspace, absolute outside), found by `timeline.refetch({ direction: "tail" })` 5/5 times in ≤ 3 ms. OpenCode `bash` → `detail.command`, no cwd; `webfetch` → `input.metadata.url`; `external_directory` → `input.metadata.command` and `directories`.
+
+- **Token counts differ per provider** (verified 2026-09-30 on an isolated daemon, Paseo 0.9.2; run note `docs/archive/operations/paseo-bm-context-fields-run-20260930.md`): Claude's `lastUsage` tokens are the **sum over the turn's model calls**; Codex and OpenCode report only the **last model call**, and Codex's `cachedInputTokens` are already inside its `inputTokens`. `contextWindowUsedTokens` / `contextWindowMaxTokens` are reported by all three at every turn end and mean the same thing — prefer them for context size. A `/compact` turn reports 0 tokens (Claude, Codex) or repeats the previous turn's (OpenCode); a Codex `/compact` runs as a separate `autonomous-…` turn with no user message.
+- **`/compact <focus>` honours the focus on Claude only** (verified 2026-09-30 on an isolated daemon, Paseo 0.9.2; run note `docs/archive/operations/paseo-bm-compaction-spike-20260930.md`): Claude Code receives the whole text, and its summary kept what the focus named and dropped what it excluded. Paseo passes nothing after `/compact` to Codex (`thread/compact/start { threadId }`) or OpenCode (`session.summarize` with the model only), so their compactions are generic. The message is a `user_message` with `clientMessageId` on all three (on Codex with `turnId` null), so it reads as the user's own. The context reported right after a compaction understates the real one: Claude 2,748 and Codex 4,817 against 23,970 and 16,807 at the next turn end, and OpenCode repeats the figure from before. Read it at the next turn end. Only Claude reports `totalCostUsd`, and the compaction's own model call is in no turn's usage.
+- **Codex with `approval_policy: "untrusted"` asks before every MCP tool call that `toolPolicy` did not pre-approve** (verified 2026-10-01 on an isolated daemon, Paseo 0.9.2, `gpt-5.6-luna`; run note `docs/archive/operations/paseo-bm-phase4-live-check-20261001.md`).
+  - **The request's shape:** `name: "CodexMcpElicitation"`, `kind: "tool"`, `title` "MCP approval: <server>", `metadata.serverName`, and `input { mode: "form", requestedSchema, url: null }`. The tool name is only inside `description` (`… run tool "<tool>"?`); the arguments are not in the request.
+  - **Which calls ask:** Paseo's own agent tools asked, even `list_agents`. paseo-bm's pre-approved `bm_report` ran without a request. So did `git add && git commit`, which the spike had seen ask.
+  - **On Claude `default`:** `mcp__paseo__send_agent_prompt` asks. These raised no request: `Read`, `ToolSearch`, `ListAgents`, `TaskCreate`, `Skill`, `Task` (and its sub-agent's read-only `ls`), and paseo-bm's pre-approved tools.
 
 ## Safety boundaries when working in this repo
 
@@ -247,5 +264,13 @@ Checked against a live daemon, Paseo CLI/daemon 0.8.0:
 
 ```bash
 npm run typecheck && npm run lint && npm test && npm run build
+npm run test:bench && npm run test:eval                           # when you touched what they cover
 br lint -s all && br dep cycles                                   # only when you changed beads
 ```
+
+`npm test` runs the product tests only (the `default` project in `vitest.workspace.ts`).
+`npm run test:bench` runs the two wall-clock benchmarks (collector, traces) one file at a time,
+and `npm run test:eval` the eval-tooling tests (`scripts/eval`); `npm run verify` runs typecheck,
+typecheck:plugin, lint, all three test runs and the build. One file:
+`npm test -- test/<name>.test.ts`, `npm run test:bench -- test/<name>-benchmark.test.ts`,
+`npm run test:eval -- test/eval-<name>.test.ts`.

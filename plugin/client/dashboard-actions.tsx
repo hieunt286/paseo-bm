@@ -23,18 +23,12 @@
 import { type PluginSurfaceProps, useRpc, usePaseo } from "@getpaseo/plugin/client";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState, useSyncExternalStore } from "react";
-import { ActivityIndicator, Pressable, Text, View } from "react-native";
+import { ActivityIndicator, Text, View } from "react-native";
 import { tracesDeleteRpc, tracesReassignRpc, type WorkspaceState } from "../shared/contracts";
-import type { dashboardStyles } from "./dashboard-model";
-import {
-  OLDER_THAN_DAYS,
-  createConfirmationGate,
-  describeAction,
-  olderThanCutoff,
-  toneColor,
-  type DeleteScope,
-} from "./dashboard-model";
-import { errorMessageOf } from "./launch-manager";
+import type { dashboardStyles } from "./styles";
+import { OLDER_THAN_DAYS, createConfirmationGate, describeAction, olderThanCutoff, type DeleteScope } from "./history-model";
+import { errorMessageOf } from "./errors";
+import { Button, ToneText } from "./ui";
 
 export interface TraceActionsProps {
   theme: PluginSurfaceProps["theme"];
@@ -135,54 +129,51 @@ export function TraceActions({
   return (
     <View style={{ gap: compact ? 6 : 8 }}>
       {error === null ? null : (
-        <Text style={[styles.body, { color: toneColor(theme, "danger") }]} accessibilityLiveRegion="polite">
+        <ToneText tone="danger" accessibilityLiveRegion="polite" styles={styles} theme={theme}>
           {error}
-        </Text>
+        </ToneText>
       )}
 
       {described === null ? (
         <View style={{ flexDirection: compact ? "column" : "row", gap: 8 }}>
           {scope === "trace" && traceId !== undefined ? (
-            <Pressable
-              accessibilityRole="button"
+            <Button
+              label="Delete this request's history"
+              kind="danger"
               accessibilityLabel="Delete the recorded history of this request"
               accessibilityState={{ disabled: busy }}
               disabled={busy}
               onPress={() => {
                 void preview({ traceId });
               }}
-              style={styles.dangerButton}
-            >
-              <Text style={styles.dangerButtonText}>Delete this request&apos;s history</Text>
-            </Pressable>
+              styles={styles}
+            />
           ) : null}
 
           {scope === "workspace" ? (
             <>
-              <Pressable
-                accessibilityRole="button"
+              <Button
+                label={`Delete traces older than ${OLDER_THAN_DAYS} days`}
+                kind="danger"
                 accessibilityLabel={`Delete traces older than ${OLDER_THAN_DAYS} days`}
                 accessibilityState={{ disabled: busy }}
                 disabled={busy}
                 onPress={() => {
                   void preview({ before: olderThanCutoff(new Date()) });
                 }}
-                style={styles.dangerButton}
-              >
-                <Text style={styles.dangerButtonText}>{`Delete traces older than ${OLDER_THAN_DAYS} days`}</Text>
-              </Pressable>
-              <Pressable
-                accessibilityRole="button"
+                styles={styles}
+              />
+              <Button
+                label="Delete all traces here"
+                kind="danger"
                 accessibilityLabel="Delete every trace of this workspace"
                 accessibilityState={{ disabled: busy }}
                 disabled={busy}
                 onPress={() => {
                   void preview({ allOfWorkspace: true });
                 }}
-                style={styles.dangerButton}
-              >
-                <Text style={styles.dangerButtonText}>Delete all traces here</Text>
-              </Pressable>
+                styles={styles}
+              />
             </>
           ) : null}
 
@@ -198,29 +189,27 @@ export function TraceActions({
           ))}
           <View style={{ flexDirection: compact ? "column" : "row", gap: 8 }}>
             {/* Cancel first, so the safe choice is the one under the thumb. */}
-            <Pressable
-              accessibilityRole="button"
+            <Button
+              label="No, keep them"
+              kind="secondary"
               accessibilityLabel="Cancel and keep the traces"
               onPress={() => {
                 setError(null);
                 gate.cancel();
               }}
-              style={styles.secondaryButton}
-            >
-              <Text style={styles.secondaryButtonText}>No, keep them</Text>
-            </Pressable>
-            <Pressable
-              accessibilityRole="button"
+              styles={styles}
+            />
+            <Button
+              label={busy ? "Working…" : described.confirmLabel}
+              kind="danger"
               accessibilityLabel={described.confirmLabel}
               accessibilityState={{ disabled: busy }}
               disabled={busy}
               onPress={() => {
                 void runPending();
               }}
-              style={styles.dangerButton}
-            >
-              <Text style={styles.dangerButtonText}>{busy ? "Working…" : described.confirmLabel}</Text>
-            </Pressable>
+              styles={styles}
+            />
           </View>
         </View>
       )}
@@ -237,19 +226,18 @@ export function TraceActions({
             <Text style={styles.body}>There is no other workspace to move them to.</Text>
           ) : null}
           {targets.data?.map((target) => (
-            <Pressable
+            <Button
               key={target.id}
-              accessibilityRole="button"
+              label={`Reassign to ${target.label}`}
+              kind="secondary"
               accessibilityLabel={`Reassign these traces to ${target.label}`}
               accessibilityState={{ disabled: busy }}
               disabled={busy}
               onPress={() => {
                 void previewReassign(target.id);
               }}
-              style={styles.secondaryButton}
-            >
-              <Text style={styles.secondaryButtonText}>{`Reassign to ${target.label}`}</Text>
-            </Pressable>
+              styles={styles}
+            />
           ))}
         </View>
       ) : null}

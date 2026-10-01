@@ -11,13 +11,15 @@ import {
   traceOfManagerTurn,
   workspaceTracesOf,
 } from "../plugin/server/request-trace";
-import type { DashboardPaseo } from "../plugin/server/dashboard-rpc";
+import type { DashboardPaseo } from "../plugin/server/paseo-directory";
 import { TRACE_STORE_SCHEMA_VERSION, type ParsedReport, type TraceRecord } from "../plugin/shared/contracts";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 /**
- * Orchestrator design §4.1, §4.2: `ruleInputOf` gives the rules every datum they
- * read, from a reconstructed trace, and the helper `review-budget.ts` shares
- * rebuilds that trace once per finished turn.
+ * Orchestrator design §4.1, §4.2: `ruleInputOf` gives the one rule left,
+ * `review.over-budget`, every datum it reads, from a reconstructed trace, and
+ * the helper `review-budget.ts` shares rebuilds that trace once per finished
+ * turn.
  */
 
 const WS = "wks_rules";
@@ -190,92 +192,31 @@ function fixtureAgents(): AgentFacts[] {
   ];
 }
 
-function rebuild(records: TraceRecord[], agents: AgentFacts[]): { trace: ReconstructedTrace; byId: Map<string, AgentFacts> } {
+function rebuild(records: TraceRecord[], agents: AgentFacts[]): { trace: ReconstructedTrace } {
   const trace = reconstructTraces({ records, agents }).find((candidate) => candidate.requestId === REQ);
   if (trace === undefined) throw new Error("fixture request was not reconstructed");
-  return { trace, byId: new Map(agents.map((agent) => [agent.id, agent])) };
+  return { trace };
 }
 
 describe("ruleInputOf on a reconstructed fixture", () => {
-  const { trace, byId } = rebuild(fixtureRecords(), fixtureAgents());
-  const input = ruleInputOf(trace, byId);
+  const { trace } = rebuild(fixtureRecords(), fixtureAgents());
+  const input = ruleInputOf(trace);
 
-  it("carries the request's identity, tier, state, linking and agents (all rules)", () => {
-    expect(input).toMatchObject({
-      traceId: `req:${REQ}`,
-      requestId: REQ,
-      requestedAt: at(0),
-      managerAgentId: MANAGER,
-      workerIds: [WORKER],
-      reviewerIds: [REVIEWER, DEAD_REVIEWER],
-      tier: "Small",
-      linking: "exact",
-      agentsMissing: [],
-    });
-    // A failed Worker turn and a Reviewer in `error`: the trace's own verdict, unchanged.
-    expect(input.state).toBe("failed");
-    expect(input.state).toBe(trace.state);
+  it("carries the request's identity and tier, and nothing the retired rules read (autonomy design §B.9)", () => {
+    expect(input).toMatchObject({ traceId: `req:${REQ}`, requestId: REQ, tier: "Small" });
+    expect(Object.keys(input).sort()).toEqual(["inbound", "requestId", "reviewCalls", "tier", "traceId"]);
   });
 
-  it("counts review calls as the review budget does, and keeps null for unknown (process.no-review, review.over-budget)", () => {
+  it("counts review calls as the review budget does, and keeps null for unknown (review.over-budget)", () => {
     expect(input.reviewCalls).toBe(2);
     const noReviewerTurns = rebuild(
       fixtureRecords().filter((record) => record.role !== "reviewer"),
       fixtureAgents(),
     );
-    expect(ruleInputOf(noReviewerTurns.trace, noReviewerTurns.byId).reviewCalls).toBeNull();
+    expect(ruleInputOf(noReviewerTurns.trace).reviewCalls).toBeNull();
   });
 
-  it("gives the bead counts, the files reports name, and the edit/write and br create evidence with paths (process.small-heavy)", () => {
-    expect(input.beadCounts.created).toEqual({ count: 1, confidence: "inferred" });
-    expect(input.beadCounts.updated).toEqual({ count: 1, confidence: "exact" });
-    expect(input.filesChanged).toEqual(["docs/design/date.md", "src/date.ts"]);
-    expect(input.fileEdits.map((entry) => [entry.detail, entry.at])).toEqual([
-      ["docs/design/date.md", at(5, 20)],
-      ["src/date.ts", at(5, 25)],
-    ]);
-    expect(input.fileEdits.every((entry) => entry.kind === "file" && entry.agentId === WORKER)).toBe(true);
-    // `--help` only looked; the `br create` that acted names no id, so it is kept apart from the count.
-    expect(input.brCreates.map((entry) => entry.detail)).toEqual([`br create "Fix the date format" -l feature:date`]);
-  });
-
-  it("keeps every recorded turn with its outcome, oldest first (agent.failed-first-turn)", () => {
-    expect(input.turns.map((entry) => [entry.agentId, entry.role, entry.turnId, entry.outcome])).toEqual([
-      [MANAGER, "manager", "turn-1", "completed"],
-      [WORKER, "worker", "w-1", "failed"],
-      [REVIEWER, "reviewer", "r-1", "completed"],
-      [WORKER, "worker", "w-2", "completed"],
-      [MANAGER, "manager", "turn-2", "completed"],
-    ]);
-    const firstWorkerTurn = input.turns.find((entry) => entry.agentId === WORKER);
-    expect(firstWorkerTurn).toMatchObject({ startedAt: at(2, 30), endedAt: at(3), at: at(3) });
-  });
-
-  it("gives each Worker and Reviewer its live state and timing (agent.failed-first-turn, agent.model-corrected)", () => {
-    expect(input.agents).toEqual([
-      { agentId: WORKER, role: "worker", status: "idle", state: "completed", startedAt: at(2), lastActivityAt: at(8) },
-      // No creation time listed: the start of its first recorded turn (design §4.3).
-      { agentId: REVIEWER, role: "reviewer", status: "idle", state: "completed", startedAt: at(5, 50), lastActivityAt: at(7) },
-      // In error with no turn yet: `failed` and no activity.
-      {
-        agentId: DEAD_REVIEWER,
-        role: "reviewer",
-        status: "error",
-        state: "failed",
-        startedAt: at(6, 40),
-        lastActivityAt: null,
-      },
-    ]);
-  });
-
-  it("keeps the reports with their phase and unreadable fields (report.malformed)", () => {
-    expect(input.reports.map((entry) => [entry.phase, entry.unparsedFields, entry.incompleteFields])).toEqual([
-      ["received", ["tier"], []],
-      ["finished", [], ["beadsCreated"]],
-    ]);
-  });
-
-  it("gives inbound messages their receiving agent, origin and time, and the Manager's replies (manager.language-mismatch)", () => {
+  it("gives inbound messages their receiving agent, origin and time (review.over-budget's evidence)", () => {
     expect(input.inbound.map((entry) => [entry.agentId, entry.role, entry.at, entry.origin])).toEqual([
       [MANAGER, "manager", at(0), "user"],
       [WORKER, "worker", at(2, 30), "agent"],
@@ -286,40 +227,12 @@ describe("ruleInputOf on a reconstructed fixture", () => {
       [MANAGER, "manager", at(9, 30), "agent"],
     ]);
     expect(input.inbound[0]?.text).toBe("Fix the date format on the invoice screen.");
-    expect(input.managerReplies.map((entry) => [entry.agentId, entry.at, entry.text])).toEqual([
-      [MANAGER, at(0, 30), "Handing this to a Worker."],
-      [MANAGER, at(10), "Done: the design was updated."],
-    ]);
-  });
-
-  it("says when an agent is gone and when the link was only inferred", () => {
-    // The user deleted the Worker: its records still name the request.
-    const deleted = rebuild(
-      fixtureRecords(),
-      fixtureAgents().filter((agent) => agent.id !== WORKER),
-    );
-    const gone = ruleInputOf(deleted.trace, deleted.byId);
-    expect(gone.agentsMissing).toContain(WORKER);
-    expect(gone.agents.find((agent) => agent.agentId === WORKER)).toBeUndefined();
-
-    // A Worker with no request id anywhere is linked by its creation time.
-    const unlabelled = rebuild(
-      fixtureRecords().map((record) =>
-        record.agentId === WORKER
-          ? { ...record, requestId: null, sent: record.sent.map((message) => ({ ...message, text: "Fix the date format." })) }
-          : record,
-      ),
-      fixtureAgents().map((agent) => (agent.id === WORKER ? { ...agent, requestIdLabel: null } : agent)),
-    );
-    const inferred = ruleInputOf(unlabelled.trace, unlabelled.byId);
-    expect(inferred.linking).toBe("inferred");
-    expect(inferred.workerIds).toEqual([WORKER]);
   });
 
   it("is pure: the same trace gives the same input, and the trace is left untouched", () => {
     const again = rebuild(fixtureRecords(), fixtureAgents());
     const before = JSON.stringify(again.trace);
-    expect(ruleInputOf(again.trace, again.byId)).toEqual(input);
+    expect(ruleInputOf(again.trace)).toEqual(input);
     expect(JSON.stringify(again.trace)).toBe(before);
   });
 });
@@ -339,21 +252,17 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true });
 });
 
-function fakePaseo(): DashboardPaseo {
-  const entry = (id: string, labels: Record<string, string>, status = "idle") => ({
-    agent: { id, workspaceId: WS, status, labels },
-  });
-  const entries = [
-    entry(MANAGER, { "bm.role": "manager" }),
-    entry(WORKER, { "bm.role": "worker", "bm.requestId": REQ, "paseo.parent-agent-id": MANAGER }),
-    entry(REVIEWER, { "bm.role": "reviewer", "bm.requestId": REQ, "paseo.parent-agent-id": WORKER }),
-    entry("agent-worker-2", { "bm.role": "worker", "bm.requestId": OTHER_REQ, "paseo.parent-agent-id": MANAGER }, "running"),
-  ];
-  return {
-    agents: { list: async () => ({ entries }) },
-    workspaces: { list: async () => ({ entries: [] }) },
-    config: {},
-  } as unknown as DashboardPaseo;
+/** The shared fake SDK with the Manager, the request's Worker and Reviewer, and a second Worker still running. */
+function daemon(): DashboardPaseo {
+  const agent = (id: string, labels: Record<string, string>, status = "idle") => ({ id, workspaceId: WS, status, labels });
+  return fakePaseo<DashboardPaseo>({
+    agents: [
+      agent(MANAGER, { "bm.role": "manager" }),
+      agent(WORKER, { "bm.role": "worker", "bm.requestId": REQ, "paseo.parent-agent-id": MANAGER }),
+      agent(REVIEWER, { "bm.role": "reviewer", "bm.requestId": REQ, "paseo.parent-agent-id": WORKER }),
+      agent("agent-worker-2", { "bm.role": "worker", "bm.requestId": OTHER_REQ, "paseo.parent-agent-id": MANAGER }, "running"),
+    ],
+  }).paseo;
 }
 
 async function seedStore(): Promise<void> {
@@ -375,7 +284,7 @@ async function seedStore(): Promise<void> {
 describe("the shared request-trace rebuild", () => {
   it("rebuilds the workspace's traces from the store and the live agent list", async () => {
     await seedStore();
-    const { records, agents, traces } = await workspaceTracesOf({ location, paseo: fakePaseo(), home }, WS);
+    const { records, agents, traces } = await workspaceTracesOf({ location, paseo: daemon(), home }, WS);
     expect(records).toHaveLength(6);
     expect([...agents.keys()].sort()).toEqual([MANAGER, WORKER, "agent-worker-2", REVIEWER].sort());
     expect(traces.map((trace) => trace.requestId)).toEqual([OTHER_REQ, REQ]);
@@ -383,12 +292,13 @@ describe("the shared request-trace rebuild", () => {
 
   it("finds the request of a Worker or Reviewer, and none for an agent it does not know", async () => {
     await seedStore();
-    const deps = { location, paseo: fakePaseo(), home };
+    const deps = { location, paseo: daemon(), home };
     const byReviewer = await requestTraceOf(deps, WS, REVIEWER);
     expect(byReviewer?.trace.requestId).toBe(REQ);
     expect(byReviewer?.trace.reviewCalls).toBe(2);
     expect(byReviewer?.agents.get(REVIEWER)?.role).toBe("reviewer");
-    expect(ruleInputOf(byReviewer!.trace, byReviewer!.agents).reviewerIds).toEqual([REVIEWER]);
+    expect(byReviewer?.trace.reviewerIds).toEqual([REVIEWER]);
+    expect(ruleInputOf(byReviewer!.trace).reviewCalls).toBe(2);
     expect((await requestTraceOf(deps, WS, "agent-worker-2"))?.trace.requestId).toBe(OTHER_REQ);
     expect(await requestTraceOf(deps, WS, "agent-stranger")).toBeNull();
     // A Manager serves many requests: it is never matched as a Worker or Reviewer.
@@ -397,7 +307,7 @@ describe("the shared request-trace rebuild", () => {
 
   it("takes a Manager's request from its newest recorded turn", async () => {
     await seedStore();
-    const { traces } = await workspaceTracesOf({ location, paseo: fakePaseo(), home }, WS);
+    const { traces } = await workspaceTracesOf({ location, paseo: daemon(), home }, WS);
     expect(traceOfManagerTurn(traces, MANAGER)?.requestId).toBe(OTHER_REQ);
     expect(traceOfManagerTurn(traces, "agent-other-manager")).toBeUndefined();
     expect(traceOfAgent(traces, WORKER)?.requestId).toBe(REQ);

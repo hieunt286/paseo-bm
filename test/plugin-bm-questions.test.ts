@@ -103,6 +103,14 @@ describe("shapes a model writes instead", () => {
     expectExample(BLOCK.split("\n").map((line) => `> ${line}`).join("\n"));
   });
 
+  it("reads a bolded marker with its closing ** (Phase 3 live check F5)", () => {
+    expectExample(BLOCK.replace("BM-QUESTIONS", "**BM-QUESTIONS**"));
+    expectExample(`\`\`\`\n${BLOCK.replace("BM-QUESTIONS", "**BM-QUESTIONS**")}\n\`\`\``);
+    expect(parseAnswers("**BM-ANSWERS**\nrequestId: req-20260922T135101Z\nQ1: a — keep")).toEqual({ requestId: "req-20260922T135101Z", answers: [{ id: "Q1", text: "a — keep" }] });
+    // A bolded report after the answers still ends them.
+    expect(parseAnswers("BM-ANSWERS\nrequestId: req-20260922T135101Z\nQ1: a\n**BM-REPORT**\nQ2: x")?.answers.map((a) => a.id)).toEqual(["Q1"]);
+  });
+
   it("reads bold ids", () => {
     expectExample(BLOCK.replace("Q1:", "**Q1:**").replace("Q2:", "**Q2**:"));
   });
@@ -259,6 +267,43 @@ describe("tags: subject, supersedes and effects (autonomy design §A.5)", () => 
     expect(second!.options[1]).not.toHaveProperty("effects");
     expect(third).not.toHaveProperty("subject");
     expect(third).not.toHaveProperty("supersedes");
+  });
+
+  it("reads the proposed class after the other tags, however it is spelled (autonomy design §B.9)", () => {
+    const set = parseQuestions(
+      [
+        "BM-QUESTIONS",
+        "requestId: req-20260929T073348Z",
+        "Q4: Push both backends to origin/dev? [subject: push-backends] [supersedes: Q2] [class: release]",
+        "- a: Push contract only (recommended) [effects: push]",
+        "- b: Hold",
+        "Q5: Rename the column? [ CLASS : Reversible-Technical ]",
+        "- a: yes (recommended)",
+        "- b: no",
+      ].join("\n"),
+    )!;
+    const [q4, q5] = set.questions;
+    expect(q4).toEqual({
+      id: "Q4",
+      text: "Push both backends to origin/dev?",
+      subject: "push-backends",
+      supersedes: "Q2",
+      class: "release",
+      options: [
+        { key: "a", text: "Push contract only", recommended: true, effects: ["push"] },
+        { key: "b", text: "Hold", recommended: false },
+      ],
+    });
+    expect(q5).toMatchObject({ text: "Rename the column?", class: "reversible-technical" });
+  });
+
+  it("ignores a class that is not one of the nine, and takes it out of the text", () => {
+    const set = parseQuestions(["BM-QUESTIONS", "Q1: Ship? [subject: ship] [class: urgent]", "- a: yes (recommended)", "- b: no", "Q2: Keep? [class: ]", "- a: yes"].join("\n"))!;
+    const [q1, q2] = set.questions;
+    expect(q1).toMatchObject({ text: "Ship?", subject: "ship" });
+    expect(q1).not.toHaveProperty("class");
+    expect(q2!.text).toBe("Keep?");
+    expect(q2).not.toHaveProperty("class");
   });
 
   it("reads a block without tags exactly as before: no new keys, brackets that are not tags kept", () => {

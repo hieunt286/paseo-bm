@@ -1,86 +1,18 @@
-import { describe, expect, it, vi } from "vitest";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+import { recorder as rn } from "./stubs/react-native";
 
 /**
  * WP-238.2 (delta 20260917e §4.2): the dot beside a project name that says a bm
  * agent is working in that workspace right now.
  *
  * The repo has no React Native renderer, so the surface is never rendered and
- * `react-native` is replaced here by a recording stand-in. That stand-in is the
- * point of the file: the three states of the dot are decided by
- * `runningDotState`, and what reaches `Animated` is decided by `applyDotPulse`,
- * so "reduced motion starts no animation" is an assertion about calls that were
- * never made, not about a rendered frame.
+ * `react-native` is the recording stand-in of test/stubs/react-native.ts (the
+ * alias in vitest.config.ts). What it records is the point of the file: the
+ * three states of the dot are decided by `runningDotState`, and what reaches
+ * `Animated` is decided by `applyDotPulse`, so "reduced motion starts no
+ * animation" is an assertion about calls that were never made, not about a
+ * rendered frame.
  */
-
-const rn = vi.hoisted(() => {
-  interface Timing {
-    toValue: number;
-    duration: number;
-    useNativeDriver: boolean;
-  }
-  return {
-    /** What `AccessibilityInfo.isReduceMotionEnabled()` answers; swapped per test. */
-    answerReduceMotion: (): Promise<boolean> => Promise.resolve(false),
-    setValues: [] as number[],
-    timings: [] as Timing[],
-    sequences: 0,
-    loops: 0,
-    starts: 0,
-    stops: 0,
-    reset() {
-      this.answerReduceMotion = () => Promise.resolve(false);
-      this.setValues = [];
-      this.timings = [];
-      this.sequences = 0;
-      this.loops = 0;
-      this.starts = 0;
-      this.stops = 0;
-    },
-  };
-});
-
-vi.mock("react-native", () => {
-  const composite = {
-    start: () => {
-      rn.starts += 1;
-    },
-    stop: () => {
-      rn.stops += 1;
-    },
-  };
-  return {
-    AccessibilityInfo: { isReduceMotionEnabled: () => rn.answerReduceMotion() },
-    ActivityIndicator: () => null,
-    Animated: {
-      // The surface keeps one of these in a ref; tests use `pulseValue()`.
-      Value: class {
-        setValue(value: number) {
-          rn.setValues.push(value);
-        }
-      },
-      View: () => null,
-      timing: (_value: unknown, config: { toValue: number; duration: number; useNativeDriver: boolean }) => {
-        rn.timings.push({ toValue: config.toValue, duration: config.duration, useNativeDriver: config.useNativeDriver });
-        return composite;
-      },
-      sequence: (animations: unknown[]) => {
-        rn.sequences += animations.length > 0 ? 1 : 0;
-        return composite;
-      },
-      loop: () => {
-        rn.loops += 1;
-        return composite;
-      },
-    },
-    Pressable: () => null,
-    ScrollView: () => null,
-    Text: () => null,
-    TextInput: () => null,
-    View: () => null,
-  };
-});
 
 /**
  * The slice of `Animated.Value` the pulse touches, declared here rather than
@@ -228,17 +160,5 @@ describe("reading the reduced-motion preference", () => {
     rn.reset();
     rn.answerReduceMotion = () => Promise.reject(new Error("no accessibility bridge"));
     await expect(readReduceMotion()).resolves.toBe(false);
-  });
-});
-
-describe("the dot on the workspace row", () => {
-  // Without a renderer nothing else proves the helpers are wired to a row, and
-  // an unwired dot would leave every test above green.
-  it("is rendered per row from the overview's runningAgents", () => {
-    const source = readFileSync(fileURLToPath(new URL(surfacePath, import.meta.url)), "utf8");
-    // Work draws each project row through `renderDot` (work.tsx), with the dot alone.
-    expect(source).toMatch(/renderDot=\{\(workspaceId\) => \(\s*<RunningDot\b[^>]*counts=\{overviewById\.get\(workspaceId\)\?\.runningAgents\}[^>]*\bbare\b/);
-    expect(readFileSync(fileURLToPath(new URL("../plugin/client/work.tsx", import.meta.url)), "utf8")).toMatch(/dot=\{renderDot\(row\.workspaceId\)\}/);
-    expect(source).toMatch(/<Animated\.View\b/);
   });
 });

@@ -12,6 +12,7 @@ import { forgetModes } from "../plugin/server/role-mode";
 import { REVIEWER_STOP_NOTICE } from "../plugin/server/stop-propagation";
 import type { FallbackIncident } from "../plugin/shared/contracts";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 /**
  * Delta 20260921 §4.4.7 (REQ-065 d): "Switch" creates the replacement Worker on
@@ -64,37 +65,27 @@ const MODES: Record<string, unknown[]> = {
   "bm-worker-fallback-3": [],
 };
 
-function fakeDaemon(options: { oldLabels?: Record<string, string>; reviewers?: Array<{ id: string; status: string }>; create?: () => Promise<{ id: string }>; available?: string[]; injectIntoAgents?: boolean } = {}) {
-  const sent: Array<{ id: string; text: string }> = [];
-  const reviewers = (options.reviewers ?? []).map((reviewer) => ({
-    ...reviewer,
-    workspaceId: "wks_1",
-    provider: "bm-reviewer",
-    labels: { "bm.role": "reviewer", "paseo.parent-agent-id": OLD },
-  }));
-  const snapshots: Record<string, unknown> = {
-    [OLD]: { id: OLD, cwd: "/repo", status: "idle", labels: { "bm.role": "worker", "bm.requestId": REQ, ...options.oldLabels } },
-    ...Object.fromEntries(reviewers.map((reviewer) => [reviewer.id, reviewer])),
-  };
-  type CreateOptions = { config: Record<string, unknown>; [key: string]: unknown };
-  const create = vi.fn<(options: CreateOptions) => Promise<{ id: string }>>(options.create ?? (async () => ({ id: NEW })));
-  const paseo = {
-    agents: {
-      create,
-      list: vi.fn(async () => ({ entries: reviewers.map((agent) => ({ agent })), pageInfo: { nextCursor: null, hasMore: false } })),
-      ref: (id: string) => ({
-        refresh: async () => ({ agent: snapshots[id] ?? null }),
-        send: async (text: string) => void sent.push({ id, text }),
-      }),
-    },
+/** The Worker `OLD` in /repo and its Reviewers; a creation makes `NEW`. */
+function daemonWith(options: { oldLabels?: Record<string, string>; reviewers?: Array<{ id: string; status: string }>; create?: () => Promise<never>; available?: string[]; injectIntoAgents?: boolean } = {}) {
+  const fake = fakePaseo({
+    agents: [
+      { id: OLD, cwd: "/repo", status: "idle", labels: { "bm.role": "worker", "bm.requestId": REQ, ...options.oldLabels } },
+      ...(options.reviewers ?? []).map((reviewer) => ({
+        ...reviewer,
+        workspaceId: "wks_1",
+        provider: "bm-reviewer",
+        labels: { "bm.role": "reviewer", "paseo.parent-agent-id": OLD },
+      })),
+    ],
     providers: {
-      listAvailable: async () => ({ providers: (options.available ?? ["claude", "codex", "opencode", "pi"]).map((provider) => ({ provider, available: true })) }),
-      listModes: async (provider: string) => ({ provider, modes: MODES[provider] ?? [], error: null }),
-      listFeatures: async () => ({ features: [{ type: "toggle", id: "auto_accept", label: "Auto-accept", value: false }] }),
+      available: options.available ?? ["claude", "codex", "opencode", "pi"],
+      modes: MODES,
+      features: () => [{ type: "toggle", id: "auto_accept", label: "Auto-accept", value: false }],
     },
-    ...(options.injectIntoAgents === undefined ? {} : { config: { get: async () => ({ config: { mcp: { injectIntoAgents: options.injectIntoAgents } } }) } }),
-  };
-  return { paseo, create, sent };
+    config: options.injectIntoAgents === undefined ? {} : { mcp: { injectIntoAgents: options.injectIntoAgents } },
+    created: options.create ?? (() => ({ id: NEW })),
+  });
+  return { paseo: fake.paseo, create: fake.api.agents.create, sent: fake.sends };
 }
 
 let root: string;
@@ -127,7 +118,7 @@ afterEach(() => {
 describe("switch (Worker)", () => {
   it("creates exactly one Worker with the exact config, cwd, parent, title, labels and prompt, then records switched", async () => {
     write([incident()]);
-    const { paseo, create } = fakeDaemon();
+    const { paseo, create } = daemonWith();
     const { action, setLabels, stopReviewers } = switcher();
     const after = await action(incident(), paseo, { home });
     expect(create).toHaveBeenCalledTimes(1);
@@ -149,7 +140,7 @@ describe("switch (Worker)", () => {
   it("creates no replacement Worker while Paseo's agent tools are off, and leaves the incident pending", async () => {
     // Without the tools a Worker could neither send a BM-REPORT nor create a Reviewer.
     write([incident()]);
-    const off = fakeDaemon({ injectIntoAgents: false });
+    const off = daemonWith({ injectIntoAgents: false });
     const { action, setLabels, stopReviewers } = switcher();
     await expect(action(incident(), off.paseo, { home })).rejects.toMatchObject({ code: "E_FALLBACK_CREATE_FAILED", message: expect.stringContaining(AGENT_TOOLS_OFF_SWITCH_MESSAGE) });
     expect(off.create).not.toHaveBeenCalled();
@@ -157,13 +148,13 @@ describe("switch (Worker)", () => {
     expect(stopReviewers).not.toHaveBeenCalled();
     expect(read()[0]).toMatchObject({ status: "pending" });
 
-    const on = fakeDaemon({ injectIntoAgents: true });
+    const on = daemonWith({ injectIntoAgents: true });
     await expect(action(incident(), on.paseo, { home })).resolves.toMatchObject({ status: "switched", replacementId: NEW });
   });
 
   it("creates one Worker for two clicks at once: the second finds the incident decided", async () => {
     write([incident()]);
-    const { paseo, create } = fakeDaemon();
+    const { paseo, create } = daemonWith();
     const { action } = switcher();
     const results = await Promise.allSettled([action(incident(), paseo, { home }), action(incident(), paseo, { home })]);
     expect(create).toHaveBeenCalledTimes(1);
@@ -173,7 +164,7 @@ describe("switch (Worker)", () => {
 
   it("only logs when the old Worker cannot be labelled", async () => {
     write([incident()]);
-    const { paseo } = fakeDaemon();
+    const { paseo } = daemonWith();
     const { action } = switcher({ setLabels: vi.fn(async () => ({ ok: false as const, reason: "paseo: command not found" })) });
     await expect(action(incident(), paseo, { home })).resolves.toMatchObject({ status: "switched", replacementId: NEW });
     expect(log).toHaveBeenCalledWith(expect.stringMatching(/^\[paseo-bm\] could not label Worker wrk-1 as replaced by wrk-2: paseo: command not found/));
@@ -181,7 +172,7 @@ describe("switch (Worker)", () => {
 
   it("stops the old Worker's running Reviewers, never its idle ones", async () => {
     write([incident()]);
-    const { paseo, sent } = fakeDaemon({ reviewers: [{ id: "rev-running", status: "running" }, { id: "rev-idle", status: "idle" }] });
+    const { paseo, sent } = daemonWith({ reviewers: [{ id: "rev-running", status: "running" }, { id: "rev-idle", status: "idle" }] });
     const { action } = switcher({ stopReviewers: undefined });
     await action(incident(), paseo, { home });
     expect(sent).toEqual([{ id: "rev-running", text: REVIEWER_STOP_NOTICE }]);
@@ -189,7 +180,7 @@ describe("switch (Worker)", () => {
 
   it("records failed with the error when the creation fails, and never goes back to pending", async () => {
     write([incident()]);
-    const { paseo, create } = fakeDaemon({
+    const { paseo, create } = daemonWith({
       create: async () => {
         throw new Error("provider codex is not logged in");
       },
@@ -204,11 +195,11 @@ describe("switch (Worker)", () => {
 
   it("refuses, creating nothing and leaving it pending, when the candidate's provider is gone or the Worker was already replaced", async () => {
     write([incident()]);
-    const gone = fakeDaemon({ available: ["claude"] });
+    const gone = daemonWith({ available: ["claude"] });
     await expect(switcher().action(incident(), gone.paseo, { home })).rejects.toMatchObject({ code: "E_FALLBACK_NO_CANDIDATE" });
-    const replaced = fakeDaemon({ oldLabels: { "bm.replacedBy": "wrk-9" } });
+    const replaced = daemonWith({ oldLabels: { "bm.replacedBy": "wrk-9" } });
     await expect(switcher().action(incident(), replaced.paseo, { home })).rejects.toMatchObject({ code: "E_FALLBACK_NOT_PENDING" });
-    const noCandidate = fakeDaemon();
+    const noCandidate = daemonWith();
     write([incident({ candidate: null })]);
     await expect(switcher().action(incident({ candidate: null }), noCandidate.paseo, { home })).rejects.toMatchObject({ code: "E_FALLBACK_NO_CANDIDATE" });
     expect(gone.create).not.toHaveBeenCalled();
@@ -219,13 +210,13 @@ describe("switch (Worker)", () => {
   it("starts the Worker by the candidate provider's capability: OpenCode gets a listed mode and auto_accept, Pi gets neither", async () => {
     const opencode = { ...CANDIDATE, position: 2, alias: "bm-worker-fallback-2", baseProvider: "opencode", model: "big-pickle", thinkingOptionId: null };
     write([incident({ candidate: opencode })]);
-    const first = fakeDaemon();
+    const first = daemonWith();
     await switcher().action(incident({ candidate: opencode }), first.paseo, { home });
     expect(first.create.mock.calls[0]![0].config).toEqual({ provider: "bm-worker-fallback-2/big-pickle", modeId: "build", featureValues: { auto_accept: true } });
 
     const pi = { ...CANDIDATE, position: 3, alias: "bm-worker-fallback-3", baseProvider: "pi", model: "pi-default", thinkingOptionId: null, modeId: null };
     write([incident({ candidate: pi })]);
-    const second = fakeDaemon();
+    const second = daemonWith();
     await switcher().action(incident({ candidate: pi }), second.paseo, { home });
     expect(second.create.mock.calls[0]![0].config).toEqual({ provider: "bm-worker-fallback-3/pi-default" });
   });
@@ -237,7 +228,7 @@ describe("card actions against one another (review b6)", () => {
 
   it("a Dismiss sent while a Switch is under way waits for it, then finds the incident decided", async () => {
     write([incident()]);
-    const { paseo, create } = fakeDaemon();
+    const { paseo, create } = daemonWith();
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
     const { action } = switcher({ handover: async () => (await gate, HANDOVER) });
@@ -254,7 +245,7 @@ describe("card actions against one another (review b6)", () => {
 
   it.each(["dismiss", "wait"] as const)("a %s decided first means the Switch creates no agent at all", async (first) => {
     write([incident({ resetsAt: "2026-09-22T06:00:00.000Z" })]);
-    const { paseo, create, sent } = fakeDaemon();
+    const { paseo, create, sent } = daemonWith();
     const { action, setLabels, stopReviewers } = switcher();
     const wait = vi.fn(async (current: FallbackIncident) => {
       const { decidePending } = await import("../plugin/server/fallback-rpc");
@@ -276,7 +267,7 @@ describe("fallback.act switch", () => {
   it("sends the Manager no BM-FALLBACK, and withdraws the incident's open decision (autonomy design §A.5 d)", async () => {
     write([incident()]);
     syncFallbackDecisions(home, { log });
-    const { paseo, sent } = fakeDaemon();
+    const { paseo, sent } = daemonWith();
     const { action } = switcher();
     const { incident: after } = await handleFallbackAct({ incidentId: "fb-0000000000cc", action: "switch" }, paseo, { home, log, actions: { switch: action } });
     expect(after).toMatchObject({ status: "switched", replacementId: NEW });

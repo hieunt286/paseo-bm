@@ -3,9 +3,10 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   looksLikeReport,
-  parseBeadIds,
+  parseBeadIdList,
   parseGuardrail,
   parseReports,
+  ownReviewsOf,
   parseReviews,
   valueOrNull,
 } from "../plugin/server/bm-report";
@@ -70,23 +71,32 @@ describe("value normalisation", () => {
   it("keeps a real value and strips backticks", () => {
     expect(valueOrNull(" `npm test` ")).toBe("npm test");
   });
+
+  it("keeps buildAndTests' backticks: they mark the checks it names (autonomy design §C.6)", () => {
+    const checks = (value: string) => parseReports(`BM-REPORT\nrequestId: req-20260930T000000Z\nphase: finished\nbuildAndTests: ${value}`, ctx)[0]?.buildAndTests;
+    expect(checks("`npm test` pass; `npm run lint` pass")).toBe("`npm test` pass; `npm run lint` pass");
+    expect(checks(" `npm test` ")).toBe("`npm test`");
+    expect(checks("npm test - pass")).toBe("npm test - pass");
+    expect(checks("`none`")).toBeNull();
+    expect(checks("none")).toBeNull();
+  });
 });
 
 describe("bead id lists", () => {
   it("splits on commas and whitespace and de-duplicates", () => {
-    expect(parseBeadIds("bm-a1b, bm-c2d bm-a1b")).toEqual(["bm-a1b", "bm-c2d"]);
+    expect(parseBeadIdList("bm-a1b, bm-c2d bm-a1b").ids).toEqual(["bm-a1b", "bm-c2d"]);
   });
 
   it("accepts child suffixes and strips punctuation", () => {
-    expect(parseBeadIds("`bm-wp-201-cp6.1`, (bm-wp-202-4xi.1).")).toEqual([
+    expect(parseBeadIdList("`bm-wp-201-cp6.1`, (bm-wp-202-4xi.1).").ids).toEqual([
       "bm-wp-201-cp6.1",
       "bm-wp-202-4xi.1",
     ]);
   });
 
   it("drops things that are not bead ids", () => {
-    expect(parseBeadIds("none")).toEqual([]);
-    expect(parseBeadIds("see the plan")).toEqual([]);
+    expect(parseBeadIdList("none").ids).toEqual([]);
+    expect(parseBeadIdList("see the plan").ids).toEqual([]);
   });
 });
 
@@ -361,6 +371,19 @@ describe("report parsing", () => {
     expect(parseReports("just a chat message", ctx)).toEqual([]);
     expect(parseReports("", ctx)).toEqual([]);
   });
+
+  it("reads a bolded marker, **BM-REPORT** with its closing **, in a fence or not (Phase 3 live check F5)", () => {
+    const body = ["requestId: req-20260930T162000Z", "phase: finished", "buildAndTests: `npm test` pass"];
+    for (const marker of ["**BM-REPORT**", "**BM-REPORT", "BM-REPORT**", "- **BM-REPORT**", "> **BM-REPORT**"]) {
+      const fenced = parseReports(["```", marker, ...body, "```"].join("\n"), ctx);
+      expect(fenced, marker).toHaveLength(1);
+      expect(fenced[0], marker).toMatchObject({ requestId: "req-20260930T162000Z", phase: "finished", buildAndTests: "`npm test` pass" });
+      expect(parseReports([marker, ...body].join("\n"), ctx), marker).toHaveLength(1);
+      expect(looksLikeReport([marker, ...body].join("\n")), marker).toBe(true);
+    }
+    // The marker must still stand alone on its line.
+    for (const line of ["**BM-REPORT** below", "**BM-REPORTS**", "BM-REPORT: see below"]) expect(parseReports([line, ...body].join("\n"), ctx), line).toEqual([]);
+  });
 });
 
 describe("review parsing", () => {
@@ -380,6 +403,12 @@ describe("review parsing", () => {
   it("reads the stop answer whose verdict is on the marker line", () => {
     const [review] = parseReviews("BM-REVIEW STOPPED", { agentId: "agent-reviewer", at: ctx.at });
     expect(review).toMatchObject({ verdict: "STOPPED", batchId: null, blockingCount: null });
+    // Bolded, with its closing ** before or after STOPPED (Phase 3 live check F5).
+    for (const line of ["**BM-REVIEW** STOPPED", "**BM-REVIEW STOPPED**"]) {
+      expect(parseReviews(line, { agentId: "agent-reviewer", at: ctx.at })[0], line).toMatchObject({ verdict: "STOPPED" });
+    }
+    const [bold] = parseReviews(["**BM-REVIEW**", "batchId: b1", "verdict: pass", "blocking: 0"].join("\n"), { agentId: "agent-reviewer", at: ctx.at });
+    expect(bold).toMatchObject({ batchId: "b1", verdict: "pass", blockingCount: 0 });
   });
 
   it("reads an approved review with no blocking findings as zero", () => {
@@ -434,6 +463,26 @@ describe("review parsing", () => {
     // Two reviews in one message: each counts its own findings.
     const second = pass.replace("batchId: b1", "batchId: b2").replace("verdict: pass", "verdict: changes-required").replace("- severity: non-blocking", "- severity: blocking");
     expect(parseReviews(`${second}\n\n${pass}`, ctx).map((review) => review.blockingCount)).toEqual([1, 0]);
+  });
+
+  // Bead 7gxw.12: a stored record of an earlier build holds its prompt's quoted blocks beside its reply's.
+  it("ownReviewsOf keeps only a Reviewer's own answers: none of a Manager or a Worker, none a prompt quoted, the reply's at a shared time", () => {
+    const block = (verdict: string) => `BM-REVIEW\nbatchId: b1\nverdict: ${verdict}`;
+    const at = (minute: number) => `2026-09-16T10:0${minute}:00.000Z`;
+    const message = (minute: number, text: string) => ({ agentId: "r", at: at(minute), text, truncated: false });
+    const review = (minute: number, verdict: string) => ({ agentId: "r", at: at(minute), batchId: "b1", verdict, blockingCount: 0 });
+    const record = (role: "manager" | "worker" | "reviewer", sent: ReturnType<typeof message>[], received: ReturnType<typeof message>[], reviews: ReturnType<typeof review>[]) => ({ role, sent, received, reviews });
+    const own = [review(2, "pass")];
+    expect(ownReviewsOf(record("reviewer", [message(1, "Review b1.")], [message(2, block("pass"))], own))).toEqual(own);
+    expect(ownReviewsOf(record("manager", [], [message(2, block("pass"))], own))).toEqual([]);
+    expect(ownReviewsOf(record("worker", [message(2, block("pass"))], [], own))).toEqual([]);
+    // The prompt quoted the first review: only the reply's review is the Reviewer's.
+    const quoted = record("reviewer", [message(1, `Re-review. You said:\n${block("changes-required")}`)], [message(2, block("pass"))], [review(1, "changes-required"), review(2, "pass")]);
+    expect(ownReviewsOf(quoted)).toEqual([review(2, "pass")]);
+    // Every message stamped with the write time: as many as the replies hold, the last ones.
+    const stamped = record("reviewer", [message(3, `Re-review. You said:\n${block("changes-required")}`)], [message(3, block("pass"))], [review(3, "changes-required"), review(3, "pass")]);
+    expect(ownReviewsOf(stamped)).toEqual([review(3, "pass")]);
+    expect(ownReviewsOf(record("reviewer", [message(3, "- BM-REVIEW checked: is missing")], [], [review(3, "checked: is missing")]))).toEqual([]);
   });
 });
 

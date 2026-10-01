@@ -7,7 +7,6 @@ import {
   roleConfigRevision,
   writeRoleConfig,
   type ConfigPaseo,
-  type RoleConfigView,
   type RoleConfigWrite,
 } from "../plugin/server/config-writer";
 import {
@@ -21,53 +20,36 @@ import {
 } from "../plugin/server/setup-roles";
 import { fallbackAliasEntry } from "../plugin/server/fallback-settings";
 import { DashboardError } from "../plugin/shared/contracts";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 /**
  * Delta 20260921 §4.3.4, ADR-008 D3: the plugin's only write path to Paseo's
- * config. The fake daemon behaves like Paseo's `config.patch` (proposal
- * S10): `providers` merged per alias — and, as Paseo 0.9.2's
- * `applyMutableProviderConfigToOverrides` does, `paseoTools` merged one level
- * further — `removeProviders` deletes, `agentProfiles` replaced whole.
+ * config. The shared fake (test/helpers/fake-paseo.ts `applyConfigPatch`)
+ * behaves like Paseo's `config.patch` (proposal S10): `providers` merged per
+ * alias — and, as Paseo 0.9.2's `applyMutableProviderConfigToOverrides` does,
+ * `paseoTools` merged one level further — `removeProviders` deletes,
+ * `agentProfiles` replaced whole.
  */
 
 type Profile = Record<string, unknown>;
 
-function fakeDaemon(initial: { providers: Record<string, Record<string, unknown>>; agentProfiles: Profile[] }) {
-  let state = structuredClone(initial);
-  const patches: Array<Record<string, unknown>> = [];
-  /** Runs once, between the write's first read and its patch (a concurrent writer). */
-  let beforePatch: (() => void) | null = null;
-  let getCalls = 0;
-  const paseo: ConfigPaseo = {
-    config: {
-      get: vi.fn(async () => {
-        getCalls += 1;
-        return { config: structuredClone(state) as RoleConfigView };
-      }),
-      patch: vi.fn(async (patch: Record<string, unknown>) => {
-        beforePatch?.();
-        beforePatch = null;
-        patches.push(structuredClone(patch));
-        const providers = patch.providers as Record<string, Record<string, unknown>> | undefined;
-        for (const [id, entry] of Object.entries(providers ?? {})) {
-          const previous = state.providers[id] ?? {};
-          const next: Record<string, unknown> = { ...previous, ...entry };
-          if (entry.paseoTools !== undefined) next.paseoTools = { ...(previous.paseoTools as object | undefined), ...(entry.paseoTools as object) };
-          state.providers[id] = next;
-        }
-        for (const id of (patch.removeProviders as string[] | undefined) ?? []) delete state.providers[id];
-        if (patch.agentProfiles !== undefined) state.agentProfiles = structuredClone(patch.agentProfiles as Profile[]);
-        return { config: structuredClone(state) };
-      }),
-    },
-  };
+/** The shared fake Paseo holding this configuration. */
+function daemonWith(initial: { providers: Record<string, Record<string, unknown>>; agentProfiles: Profile[] }) {
+  const fake = fakePaseo<ConfigPaseo>({ config: initial });
   return {
-    paseo,
-    patches,
-    state: () => state,
-    set: (next: typeof state) => (state = next),
-    concurrently: (change: () => void) => (beforePatch = change),
-    getCalls: () => getCalls,
+    paseo: fake.paseo,
+    patches: fake.patches,
+    state: () => fake.config<typeof initial>(),
+    set: (next: typeof initial) => fake.setConfig(next),
+    /** Runs `change` once, between the write's first read and its patch (a concurrent writer). */
+    concurrently: (change: () => void) => {
+      const apply = fake.api.config.patch.getMockImplementation()!;
+      fake.api.config.patch.mockImplementationOnce(async (patch) => {
+        change();
+        return apply(patch);
+      });
+    },
+    getCalls: () => fake.api.config.get.mock.calls.length,
   };
 }
 
@@ -98,7 +80,7 @@ describe("roleConfigRevision", () => {
 
 describe("writeRoleConfig", () => {
   it("writes one patch that changes only the named bm-* entries; every other profile stays byte-identical", async () => {
-    const daemon = fakeDaemon(initial());
+    const daemon = daemonWith(initial());
     const revision = roleConfigRevision(daemon.state());
     const result = await writeRoleConfig(daemon.paseo, {
       expectedRevision: revision,
@@ -117,7 +99,7 @@ describe("writeRoleConfig", () => {
   });
 
   it("writes nothing when the revision changed since the user opened the screen", async () => {
-    const daemon = fakeDaemon(initial());
+    const daemon = daemonWith(initial());
     const stale = roleConfigRevision(daemon.state());
     daemon.set({ ...daemon.state(), agentProfiles: [{ ...ROOM, model: "gpt-6" }, ...daemon.state().agentProfiles.slice(1)] });
     await expect(writeRoleConfig(daemon.paseo, { expectedRevision: stale, profiles: { "bm-worker": { model: "x" } } })).rejects.toMatchObject({
@@ -127,7 +109,7 @@ describe("writeRoleConfig", () => {
   });
 
   it("sends no agentProfiles array at all when no role profile changes", async () => {
-    const daemon = fakeDaemon(initial());
+    const daemon = daemonWith(initial());
     await writeRoleConfig(daemon.paseo, {
       expectedRevision: roleConfigRevision(daemon.state()),
       providers: { "bm-worker-fallback-1": { extends: "codex", label: "Worker (fallback 1)", paseoTools: { enabled: true } } },
@@ -137,14 +119,14 @@ describe("writeRoleConfig", () => {
   });
 
   it("deletes a bm-* alias with removeProviders", async () => {
-    const daemon = fakeDaemon({ ...initial(), providers: { ...initial().providers, "bm-worker-fallback-2": { extends: "pi" } } });
+    const daemon = daemonWith({ ...initial(), providers: { ...initial().providers, "bm-worker-fallback-2": { extends: "pi" } } });
     await writeRoleConfig(daemon.paseo, { expectedRevision: roleConfigRevision(daemon.state()), removeProviders: ["bm-worker-fallback-2"] });
     expect(daemon.patches[0]).toEqual({ removeProviders: ["bm-worker-fallback-2"] });
     expect(daemon.state().providers).not.toHaveProperty("bm-worker-fallback-2");
   });
 
   it("refuses anything outside its scope, before any write", async () => {
-    const daemon = fakeDaemon(initial());
+    const daemon = daemonWith(initial());
     const revision = roleConfigRevision(daemon.state());
     const cases: Array<Omit<RoleConfigWrite, "expectedRevision">> = [
       { providers: { "room-lead": { extends: "claude" } } },
@@ -161,7 +143,7 @@ describe("writeRoleConfig", () => {
   });
 
   it("checks its OWN entries on the read-back (Q15 a): a write Paseo did not keep is an error", async () => {
-    const daemon = fakeDaemon(initial());
+    const daemon = daemonWith(initial());
     const revision = roleConfigRevision(daemon.state());
     daemon.paseo.config.patch = vi.fn(async () => ({}));
     await expect(
@@ -170,7 +152,7 @@ describe("writeRoleConfig", () => {
   });
 
   it("reports a removal the read-back still shows", async () => {
-    const daemon = fakeDaemon({ ...initial(), providers: { ...initial().providers, "bm-worker-fallback-2": { extends: "pi" } } });
+    const daemon = daemonWith({ ...initial(), providers: { ...initial().providers, "bm-worker-fallback-2": { extends: "pi" } } });
     daemon.paseo.config.patch = vi.fn(async () => ({}));
     await expect(
       writeRoleConfig(daemon.paseo, { expectedRevision: roleConfigRevision(daemon.state()), removeProviders: ["bm-worker-fallback-2"] }),
@@ -178,7 +160,7 @@ describe("writeRoleConfig", () => {
   });
 
   it("accepts a read-back where another writer changed an unrelated profile after the write", async () => {
-    const daemon = fakeDaemon(initial());
+    const daemon = daemonWith(initial());
     const revision = roleConfigRevision(daemon.state());
     const original = daemon.paseo.config.patch;
     daemon.paseo.config.patch = vi.fn(async (patch: Record<string, unknown>) => {
@@ -191,7 +173,7 @@ describe("writeRoleConfig", () => {
   });
 
   it("reports the daemon's refusal as E_ROLE_SETTINGS_WRITE_FAILED", async () => {
-    const daemon = fakeDaemon(initial());
+    const daemon = daemonWith(initial());
     daemon.paseo.config.patch = vi.fn(async () => {
       throw new Error("invalid config: agentProfiles[1].model");
     });
@@ -201,7 +183,7 @@ describe("writeRoleConfig", () => {
   });
 
   it("runs two writes one after the other, so the second sees the first", async () => {
-    const daemon = fakeDaemon(initial());
+    const daemon = daemonWith(initial());
     const revision = roleConfigRevision(daemon.state());
     const first = writeRoleConfig(daemon.paseo, { expectedRevision: revision, profiles: { "bm-worker": { model: "a" } } });
     // Queued behind the first: by the time it reads, the revision has moved on.
@@ -212,7 +194,7 @@ describe("writeRoleConfig", () => {
   });
 
   it("KNOWN LIMIT (owner question Q15): a change landing between its read and its patch is overwritten and cannot be reported", async () => {
-    const daemon = fakeDaemon(initial());
+    const daemon = daemonWith(initial());
     const revision = roleConfigRevision(daemon.state());
     daemon.concurrently(() => {
       const state = daemon.state();
@@ -242,7 +224,7 @@ const bare = () => ({ providers: { "room-lead": { extends: "codex" } }, agentPro
 describe("createRoleEntries", () => {
 
   it("creates all four in one patch, the Reviewer and the Orchestrator with Paseo tools off", async () => {
-    const daemon = fakeDaemon(bare());
+    const daemon = daemonWith(bare());
 
     const result = await createRoleEntries(daemon.paseo, rolesToCreate());
 
@@ -259,7 +241,7 @@ describe("createRoleEntries", () => {
   });
 
   it("appends the profiles at the end and leaves every other entry byte-identical", async () => {
-    const daemon = fakeDaemon(bare());
+    const daemon = daemonWith(bare());
 
     await createRoleEntries(daemon.paseo, rolesToCreate());
 
@@ -276,7 +258,7 @@ describe("createRoleEntries", () => {
   });
 
   it("writes no command, env, modeId or thinkingOptionId", async () => {
-    const daemon = fakeDaemon(bare());
+    const daemon = daemonWith(bare());
 
     await createRoleEntries(daemon.paseo, rolesToCreate());
 
@@ -285,7 +267,7 @@ describe("createRoleEntries", () => {
   });
 
   it("creates only what is missing and never touches what is there", async () => {
-    const daemon = fakeDaemon(initial());
+    const daemon = daemonWith(initial());
     const worker = structuredClone(daemon.state().providers["bm-worker"]);
     const workerProfile = structuredClone(daemon.state().agentProfiles[1]);
 
@@ -298,7 +280,7 @@ describe("createRoleEntries", () => {
   });
 
   it("creates the missing half of a half-created role", async () => {
-    const daemon = fakeDaemon({
+    const daemon = daemonWith({
       providers: { "bm-manager": { extends: "codex", label: "Mine" } },
       agentProfiles: [{ id: "bm-worker", name: "W", provider: "bm-worker", model: "m" }],
     });
@@ -312,7 +294,7 @@ describe("createRoleEntries", () => {
   });
 
   it("patches nothing when all four are there", async () => {
-    const daemon = fakeDaemon({
+    const daemon = daemonWith({
       providers: { "bm-manager": {}, "bm-worker": {}, "bm-reviewer": {}, "bm-orchestrator": {} },
       agentProfiles: ROLE_NAMES.map((role) => ({ id: roleId(role) })),
     });
@@ -324,7 +306,7 @@ describe("createRoleEntries", () => {
   });
 
   it("reports a refused patch as E_SETUP_ROLES_FAILED with the daemon's message", async () => {
-    const daemon = fakeDaemon(bare());
+    const daemon = daemonWith(bare());
     vi.spyOn(daemon.paseo.config, "patch").mockRejectedValueOnce(new Error("Request failed: providers is read-only"));
 
     await expect(createRoleEntries(daemon.paseo, rolesToCreate())).rejects.toMatchObject({
@@ -334,7 +316,7 @@ describe("createRoleEntries", () => {
   });
 
   it("reports a read-back that lost an entry, and does not patch again", async () => {
-    const daemon = fakeDaemon(bare());
+    const daemon = daemonWith(bare());
     // The daemon answers the patch, then shows a config without what was sent.
     vi.spyOn(daemon.paseo.config, "patch").mockImplementationOnce(async () => ({}));
 
@@ -343,7 +325,7 @@ describe("createRoleEntries", () => {
   });
 
   it("refuses an id that is not one of the four main roles", async () => {
-    const daemon = fakeDaemon(bare());
+    const daemon = daemonWith(bare());
 
     await expect(
       createRoleEntries(daemon.paseo, { "bm-worker-fallback-1": { alias: {}, profile: {} } }),
@@ -354,7 +336,7 @@ describe("createRoleEntries", () => {
 
 describe("the texts that send a user to Setup", () => {
   it("names Setup, not the retired installer, when a main role is missing or would be removed", async () => {
-    const daemon = fakeDaemon(bare());
+    const daemon = daemonWith(bare());
     const revision = roleConfigRevision(daemon.state());
     const write = (patch: Partial<RoleConfigWrite>) =>
       writeRoleConfig(daemon.paseo, { expectedRevision: revision, ...patch } as RoleConfigWrite);
@@ -381,7 +363,7 @@ describe("bm-orchestrator is a main role for the writer (orchestrator design §3
         agentProfiles: [...config.agentProfiles, roleProfileEntry("orchestrator", "claude-opus-5")],
       };
     };
-    const daemon = fakeDaemon(withOrchestrator());
+    const daemon = daemonWith(withOrchestrator());
 
     await writeRoleConfig(daemon.paseo, {
       expectedRevision: roleConfigRevision(daemon.state()),
@@ -398,7 +380,7 @@ describe("bm-orchestrator is a main role for the writer (orchestrator design §3
   });
 
   it("never creates it from a settings save", async () => {
-    const daemon = fakeDaemon(initial());
+    const daemon = daemonWith(initial());
 
     await expect(
       writeRoleConfig(daemon.paseo, { expectedRevision: roleConfigRevision(daemon.state()), profiles: { "bm-orchestrator": { model: "m" } } }),
@@ -436,7 +418,7 @@ describe("applyRoleToolPolicies and the policy through a role's life", () => {
   };
 
   it("gives every role alias and fallback alias exactly its policy, in one patch of paseoTools alone", async () => {
-    const daemon = fakeDaemon(beforePolicy());
+    const daemon = daemonWith(beforePolicy());
 
     const result = await applyRoleToolPolicies(daemon.paseo, paseoToolsPolicyOfAlias);
 
@@ -457,7 +439,7 @@ describe("applyRoleToolPolicies and the policy through a role's life", () => {
   });
 
   it("sends nothing when every alias already holds its policy", async () => {
-    const daemon = fakeDaemon(beforePolicy());
+    const daemon = daemonWith(beforePolicy());
     await applyRoleToolPolicies(daemon.paseo, paseoToolsPolicyOfAlias);
 
     const again = await applyRoleToolPolicies(daemon.paseo, paseoToolsPolicyOfAlias);
@@ -467,7 +449,7 @@ describe("applyRoleToolPolicies and the policy through a role's life", () => {
   });
 
   it("reports a policy Paseo did not keep, and does not patch again", async () => {
-    const daemon = fakeDaemon(beforePolicy());
+    const daemon = daemonWith(beforePolicy());
     (daemon.paseo.config.patch as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => ({}));
 
     await expect(applyRoleToolPolicies(daemon.paseo, paseoToolsPolicyOfAlias)).rejects.toMatchObject({ code: "E_SETUP_ROLES_FAILED" });
@@ -475,7 +457,7 @@ describe("applyRoleToolPolicies and the policy through a role's life", () => {
   });
 
   it("keeps the policy when the role settings are saved (a new base provider, a new model)", async () => {
-    const daemon = fakeDaemon(beforePolicy());
+    const daemon = daemonWith(beforePolicy());
     await applyRoleToolPolicies(daemon.paseo, paseoToolsPolicyOfAlias);
 
     await writeRoleConfig(daemon.paseo, {
@@ -500,7 +482,7 @@ describe("applyRoleToolPolicies and the policy through a role's life", () => {
   });
 
   it("the cleanup removes the policies with the aliases, and nothing else", async () => {
-    const daemon = fakeDaemon(beforePolicy());
+    const daemon = daemonWith(beforePolicy());
     await applyRoleToolPolicies(daemon.paseo, paseoToolsPolicyOfAlias);
 
     const removed = await removeAllBmEntries(daemon.paseo, null);

@@ -4,8 +4,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createNoticeQueue, type NoticeQueue } from "../plugin/server/notice-queue";
 import { ORCHESTRATOR_INSTRUCTIONS_HASH } from "../plugin/server/orchestrator-agent";
-import { createOrchestratorStore } from "../plugin/server/orchestrator-store";
 import { createAlertStore } from "../plugin/server/alert-store";
+import { createAutonomyStore } from "../plugin/server/autonomy-store";
+import { createCoordinationStore } from "../plugin/server/coordination-store";
 import { createEventBus, type EventBusDeps } from "../plugin/server/event-bus";
 import { toolsStaleSince } from "../plugin/server/agent-tools";
 import { REVIEW_BUDGET } from "../plugin/server/review-budget";
@@ -24,13 +25,15 @@ import { alertKeyOf } from "../plugin/shared/alerts";
 import { flagsOf } from "../plugin/shared/orchestrator-rules";
 import { ruleInputOf } from "../plugin/server/request-trace";
 import { MANAGER, REVIEWER, WORKER, WORKSPACE_ID, agent, at, msg, report, turn } from "./fixtures/orchestrator-traces";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 /**
  * The stall pass (Orchestrator design §6, §12; autonomy design §A.8): the two
  * reasons on fixtures; one `request-stalled` Inbox alert per stalled request
  * of every project, raised once, cleared and raised again; a `request.stalled`
- * event only for an Autopilot project, through the event bus, as a batched
- * `BM-EVENTS` message to the Orchestrator and never to anybody else; every
+ * event only for a project with a class above `owner` in the policy, through
+ * the event bus, as a batched `BM-EVENTS` message to the Orchestrator and
+ * never to anybody else; every
  * request of a Manager watched (the 2026-09-28 regression); the timer always
  * on. A fake Paseo SDK, a private notice queue and a temporary data folder
  * named by `PASEO_BM_HOME` — never the real HOME or a daemon.
@@ -145,7 +148,7 @@ function traceOf(records: TraceRecord[], agents: AgentFacts[]): { trace: Reconst
 /** The reasons `stallReasonsOf` sees at `now`, with the flags the server would compute. */
 function reasonsAt(records: TraceRecord[], agents: AgentFacts[], now: Date) {
   const { trace, facts } = traceOf(records, agents);
-  const flags = flagsOf(ruleInputOf(trace, facts), { reviewBudget: REVIEW_BUDGET, corrections: [], workspaceDirectory: null });
+  const flags = flagsOf(ruleInputOf(trace), { reviewBudget: REVIEW_BUDGET });
   return stallReasonsOf(trace, facts, flags, now);
 }
 
@@ -192,7 +195,7 @@ describe("stallReasonsOf (autonomy design §A.8)", () => {
     const agents = agentsWith({ reviewer: "idle" });
     const { trace, facts } = traceOf(records, agents);
     expect(trace.reviewCalls).toBeGreaterThan(REVIEW_BUDGET.Medium);
-    const flags = flagsOf(ruleInputOf(trace, facts), { reviewBudget: REVIEW_BUDGET, corrections: [], workspaceDirectory: null });
+    const flags = flagsOf(ruleInputOf(trace), { reviewBudget: REVIEW_BUDGET });
     expect(stallReasonsOf(trace, facts, flags, when(6, 40)).map((entry) => entry.reason)).toEqual(["review-over-budget"]);
     expect(stallReasonsOf(trace, facts, flags, when(12)).map((entry) => entry.reason)).toEqual(["idle-unfinished", "review-over-budget"]);
   });
@@ -254,69 +257,25 @@ function fakeAgentsFor(status: { manager?: string; worker?: string } = {}): Fake
   ];
 }
 
-/** A fake SDK: reads answer from the table; `send` records and starts a turn; a timeline read throws (the stall pass never reads one). */
-function fakePaseo(initial: FakeAgent[]) {
-  const agents = [...initial];
-  const sends: Array<{ id: string; text: string }> = [];
-  const byId = (id: string) => agents.find((entry) => entry.id === id);
-  const paseo = {
-    agents: {
-      list: vi.fn(async () => ({ entries: agents.map((entry) => ({ agent: { ...entry } })) })),
-      ref: vi.fn((id: string) => ({
-        refresh: async () => {
-          const found = byId(id);
-          return { agent: found === undefined ? null : { status: found.status, archivedAt: found.archivedAt ?? null } };
-        },
-        send: async (text: string) => {
-          sends.push({ id, text });
-          // A message starts a turn, as on the daemon.
-          const found = byId(id);
-          if (found !== undefined) found.status = "running";
-        },
-        timeline: {
-          refetch: vi.fn(async () => {
-            throw new Error("the stall pass must not read a timeline");
-          }),
-        },
-      })),
-    },
-    workspaces: {
-      list: vi.fn(async () => ({ entries: [{ id: WORKSPACE_ID, name: "invoice-app", directory: "/work/invoice-app" }] })),
-      // What replacing an outdated Orchestrator uses (orchestrator-agent.ts): its own workspace and one creation.
-      open: vi.fn(async (input: { cwd: string }) => ({ id: "wks-own", directory: input.cwd })),
-      ref: vi.fn((workspaceId: string) => ({
-        agents: {
-          create: vi.fn(async (request: { config: { provider: string }; labels: Record<string, string> }) => {
-            const created: FakeAgent = {
-              id: `agent-orchestrator-new-${creates.length + 1}`,
-              provider: request.config.provider,
-              status: "idle",
-              workspaceId,
-              labels: request.labels,
-              createdAt: at(30),
-            };
-            creates.push(request);
-            agents.push(created);
-            return { id: created.id, current: () => ({ status: "idle" }) };
-          }),
-        },
-      })),
-    },
+/**
+ * The shared fake SDK: `send` records and starts a turn; replacing an outdated
+ * Orchestrator (orchestrator-agent.ts) opens its own workspace and creates one
+ * agent. The stall pass never reads a timeline: the tests check `refetches`.
+ */
+function daemonWith(initial: FakeAgent[]) {
+  return fakePaseo({
+    agents: initial,
+    workspaces: [{ id: WORKSPACE_ID, name: "invoice-app", directory: "/work/invoice-app" }],
     config: {
-      get: vi.fn(async () => ({
-        config: {
-          providers: { "bm-orchestrator": { extends: "claude", label: "Beads Orchestrator" } },
-          agentProfiles: [{ id: "bm-orchestrator", name: "Beads Orchestrator", provider: "bm-orchestrator", model: "claude-opus-5-5" }],
-        },
-      })),
+      providers: { "bm-orchestrator": { extends: "claude", label: "Beads Orchestrator" } },
+      agentProfiles: [{ id: "bm-orchestrator", name: "Beads Orchestrator", provider: "bm-orchestrator", model: "claude-opus-5-5" }],
     },
     providers: {
-      listAvailable: vi.fn(async () => ({ providers: [{ provider: "claude", available: true }] })),
-      listModes: vi.fn(async () => ({ modes: [{ id: "default", label: "Default", colorTier: "safe" }, { id: "auto", label: "Auto", colorTier: "moderate" }] })),
+      available: ["claude"],
+      modes: () => [{ id: "default", label: "Default", colorTier: "safe" }, { id: "auto", label: "Auto", colorTier: "moderate" }],
     },
-  };
-  const creates: Array<{ config: { provider: string }; labels: Record<string, string> }> = [];
-  return { paseo, agents, sends, byId, creates };
+    created: (_request, { n }) => ({ id: `agent-orchestrator-new-${n}`, createdAt: at(30) }),
+  });
 }
 
 /** The second Worker, on the daemon. */
@@ -337,10 +296,11 @@ let deps: StallWatcherDeps;
 let watchers: StallWatcher[];
 
 const location = () => ({ tracesDir: join(home, "traces") });
-const store = () => createOrchestratorStore(home, { now: () => clock });
 const alerts = () => createAlertStore(home, { now: () => clock });
 const alertOf = (requestId = REQUEST_ID, workspaceId = WORKSPACE_ID) => alertKeyOf("request-stalled", workspaceId, requestId);
-const autopilotOn = (workspaceId = WORKSPACE_ID) => store().setAutopilot(workspaceId, true, "tab");
+/** Puts a project in the events' scope: one class above `owner` in the policy. */
+const inScope = (workspaceId = WORKSPACE_ID, mode: "shadow" | "delegate" = "shadow") =>
+  createAutonomyStore(home).set({ workspaceId, class: "scope", mode, confirmed: true }, clock.toISOString());
 
 async function seed(records: TraceRecord[]): Promise<void> {
   for (const record of records) await appendRecord(location(), record);
@@ -377,9 +337,9 @@ afterEach(() => {
 });
 
 describe("the pass: one Inbox alert per stalled request, of every project", () => {
-  it("raises the alert once, without Autopilot and without an Orchestrator, and messages nobody", async () => {
+  it("raises the alert once, for an all-owner project and without an Orchestrator, and messages nobody", async () => {
     await seed([...handedOver(), relayed("received", at(1, 10))]);
-    const fake = fakePaseo(fakeAgentsFor());
+    const fake = daemonWith(fakeAgentsFor());
     const stalls = watcher();
     stalls.usePaseo(fake.paseo);
 
@@ -394,12 +354,12 @@ describe("the pass: one Inbox alert per stalled request, of every project", () =
     expect(fake.sends).toEqual([]);
     expect(fake.creates).toEqual([]);
     // No timeline read, ever.
-    for (const call of fake.paseo.agents.ref.mock.results) expect((call.value as { timeline: { refetch: { mock: { calls: unknown[] } } } }).timeline.refetch.mock.calls).toEqual([]);
+    expect(fake.refetches).toEqual([]);
   });
 
   it("a healthy running request, or one waiting on the owner, raises nothing", async () => {
     await seed([...handedOver(), relayed("received", at(1, 10))]);
-    const fake = fakePaseo([...fakeAgentsFor({ worker: "running" }), orchestratorAgent()]);
+    const fake = daemonWith([...fakeAgentsFor({ worker: "running" }), orchestratorAgent()]);
     const stalls = watcher();
     stalls.usePaseo(fake.paseo);
     expect(await stalls.pass()).toEqual({ status: "done", raised: [], cleared: [], events: [] });
@@ -413,7 +373,7 @@ describe("the pass: one Inbox alert per stalled request, of every project", () =
 
   it("clears the alert when an agent runs, and raises it afresh once it holds again", async () => {
     await seed([...handedOver(), relayed("received", at(1, 10))]);
-    const fake = fakePaseo(fakeAgentsFor());
+    const fake = daemonWith(fakeAgentsFor());
     const stalls = watcher();
     stalls.usePaseo(fake.paseo);
 
@@ -431,7 +391,7 @@ describe("the pass: one Inbox alert per stalled request, of every project", () =
 
   it("clears the alert when a new report arrives, and when the request leaves the 24-hour window", async () => {
     await seed([...handedOver(), relayed("received", at(1, 10))]);
-    const fake = fakePaseo(fakeAgentsFor());
+    const fake = daemonWith(fakeAgentsFor());
     const stalls = watcher();
     stalls.usePaseo(fake.paseo);
     await stalls.pass();
@@ -447,6 +407,42 @@ describe("the pass: one Inbox alert per stalled request, of every project", () =
     expect(await stalls.pass()).toMatchObject({ raised: [], cleared: [alertOf()] });
   });
 
+  // Bead 7gxw.12 (autonomy design §G.7): the pass reads the owner's review budget per tier, 2 / 2 / 4 by default.
+  it("judges review-over-budget by the owner's review budget in Settings → Coordination", async () => {
+    const reviewCall = (minute: number) =>
+      turn({
+        agentId: REVIEWER,
+        role: "reviewer",
+        at: at(minute, 30),
+        turnId: `r-${minute}`,
+        requestId: REQUEST_ID,
+        parentAgentId: WORKER,
+        startedAt: at(minute),
+        endedAt: at(minute, 30),
+        sent: [msg(REVIEWER, at(minute), `Review batch b1 of ${REQUEST_ID}, stage implementation, round ${minute}.`, "agent")],
+        received: [msg(REVIEWER, at(minute, 30), `BM-REVIEW\nrequestId: ${REQUEST_ID}\nbatchId: b1\nverdict: changes-required`)],
+      });
+    // A Medium request with three review calls, its agents idle, a minute after the last: over 2, within 3.
+    await seed([...handedOver(), relayed("received", at(1, 10)), reviewCall(4), reviewCall(5), reviewCall(6)]);
+    const reviewer: FakeAgent = {
+      id: REVIEWER,
+      provider: "bm-reviewer",
+      status: "idle",
+      workspaceId: WORKSPACE_ID,
+      labels: { "bm.role": "reviewer", "paseo.parent-agent-id": WORKER, "bm.requestId": REQUEST_ID },
+      createdAt: at(4),
+    };
+    const fake = daemonWith([...fakeAgentsFor(), reviewer]);
+    const stalls = watcher();
+    stalls.usePaseo(fake.paseo);
+    clock = when(7, 30);
+    createCoordinationStore(home).set({ key: "review.mediumBudget", value: 3 });
+    expect(await stalls.pass()).toEqual({ status: "done", raised: [], cleared: [], events: [] });
+    createCoordinationStore(home).set({ key: "review.mediumBudget", value: 2 });
+    expect((await stalls.pass()).raised).toEqual([alertOf()]);
+    expect(alerts().list({ open: true })).toMatchObject([{ detail: "review-over-budget" }]);
+  });
+
   it("does nothing before a Paseo handle arrives", async () => {
     await seed([...handedOver(), relayed("received", at(1, 10))]);
     const stalls = watcher();
@@ -457,11 +453,11 @@ describe("the pass: one Inbox alert per stalled request, of every project", () =
   });
 });
 
-describe("request.stalled: an event for the Orchestrator of an Autopilot project only", () => {
+describe("request.stalled: an event for the Orchestrator of a project in the policy's scope only", () => {
   it("publishes the event once, as one BM-EVENTS message to the Orchestrator and nobody else", async () => {
     await seed([...handedOver(), relayed("received", at(1, 10))]);
-    autopilotOn();
-    const fake = fakePaseo([...fakeAgentsFor(), orchestratorAgent()]);
+    inScope();
+    const fake = daemonWith([...fakeAgentsFor(), orchestratorAgent()]);
     const stalls = watcher();
     stalls.usePaseo(fake.paseo);
 
@@ -474,7 +470,7 @@ describe("request.stalled: an event for the Orchestrator of an Autopilot project
         id: ORCHESTRATOR,
         text: [
           "BM-EVENTS",
-          "From the paseo-bm plugin, not the owner: 1 event of projects with Autopilot on, oldest first. Look before you act; when nothing needs doing, do nothing.",
+          "From the paseo-bm plugin, not the owner: 1 event, oldest first. Look before you act; when nothing needs doing, do nothing.",
           `- request.stalled idle-unfinished — project ${WORKSPACE_ID}, request ${REQUEST_ID}, Manager ${MANAGER}, since ${when(20).toISOString()}. Look with bm_request.`,
         ].join("\n"),
       },
@@ -484,20 +480,32 @@ describe("request.stalled: an event for the Orchestrator of an Autopilot project
     expect(fake.sends).toHaveLength(1);
   });
 
-  it("a project without Autopilot gets its alert and no event", async () => {
+  it("an all-owner project gets its alert and no event, whatever the other projects' cells", async () => {
     await seed([...handedOver(), relayed("received", at(1, 10))]);
-    autopilotOn("wks_other");
-    const fake = fakePaseo([...fakeAgentsFor(), orchestratorAgent()]);
+    inScope("wks_other");
+    // A cell set back to owner leaves the project all-owner.
+    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "scope", mode: "owner" }, clock.toISOString());
+    const fake = daemonWith([...fakeAgentsFor(), orchestratorAgent()]);
     const stalls = watcher();
     stalls.usePaseo(fake.paseo);
     expect(await stalls.pass()).toMatchObject({ raised: [alertOf()], events: [] });
     expect(fake.sends).toEqual([]);
   });
 
+  it("a project with a delegated class gets the event as well", async () => {
+    await seed([...handedOver(), relayed("received", at(1, 10))]);
+    inScope(WORKSPACE_ID, "delegate");
+    const fake = daemonWith([...fakeAgentsFor(), orchestratorAgent()]);
+    const stalls = watcher();
+    stalls.usePaseo(fake.paseo);
+    expect(await stalls.pass()).toMatchObject({ raised: [alertOf()], events: [expect.objectContaining({ type: "request.stalled", workspaceId: WORKSPACE_ID })] });
+    expect(fake.sends.map((sent) => sent.id)).toEqual([ORCHESTRATOR]);
+  });
+
   it("drops the event when the stall ends before the Orchestrator is idle", async () => {
     await seed([...handedOver(), relayed("received", at(1, 10))]);
-    autopilotOn();
-    const fake = fakePaseo([...fakeAgentsFor(), orchestratorAgent({ status: "running" })]);
+    inScope();
+    const fake = daemonWith([...fakeAgentsFor(), orchestratorAgent({ status: "running" })]);
     const stalls = watcher();
     stalls.usePaseo(fake.paseo);
     expect((await stalls.pass()).events).toHaveLength(1);
@@ -515,12 +523,12 @@ describe("request.stalled: an event for the Orchestrator of an Autopilot project
 
   it("without an Orchestrator only the alert is kept; one opened later is not told about it", async () => {
     await seed([...handedOver(), relayed("received", at(1, 10))]);
-    autopilotOn();
-    const fake = fakePaseo(fakeAgentsFor());
+    inScope();
+    const fake = daemonWith(fakeAgentsFor());
     const stalls = watcher();
     stalls.usePaseo(fake.paseo);
     expect((await stalls.pass()).raised).toEqual([alertOf()]);
-    fake.agents.push(orchestratorAgent());
+    fake.agents.push({ ...orchestratorAgent() });
     clock = when(25);
     await stalls.pass();
     expect(fake.sends).toEqual([]);
@@ -535,14 +543,14 @@ describe("request.stalled: an event for the Orchestrator of an Autopilot project
     "an Orchestrator that is %s is replaced once, and the new one gets the events; the old one is left alone",
     async (_case, extra, extraDeps) => {
       await seed([...handedOver(), relayed("received", at(1, 10))]);
-      autopilotOn();
-      const fake = fakePaseo([...fakeAgentsFor(), orchestratorAgent(extra)]);
+      inScope();
+      const fake = daemonWith([...fakeAgentsFor(), orchestratorAgent(extra)]);
       const stalls = watcher(extraDeps);
       stalls.usePaseo(fake.paseo);
 
       expect((await stalls.pass()).events).toHaveLength(1);
       expect(fake.creates).toHaveLength(1);
-      expect(fake.creates[0]!.labels).toMatchObject({ "bm.role": "orchestrator", "bm.orchestrator": "main", "bm.instructions": ORCHESTRATOR_INSTRUCTIONS_HASH });
+      expect(fake.creates[0]!.options.labels).toMatchObject({ "bm.role": "orchestrator", "bm.orchestrator": "main", "bm.instructions": ORCHESTRATOR_INSTRUCTIONS_HASH });
       expect(fake.sends.map((sent) => [sent.id, sent.text.split("\n")[0]])).toEqual([["agent-orchestrator-new-1", "BM-EVENTS"]]);
       expect(fake.byId(ORCHESTRATOR)?.archivedAt).toBeUndefined();
     },
@@ -552,7 +560,7 @@ describe("request.stalled: an event for the Orchestrator of an Autopilot project
 describe("every request of a Manager is watched, and the shared Manager is left out (regression of 2026-09-28)", () => {
   it("a stalled request of a Manager that has a newer, running request is still raised; both stall on their own", async () => {
     await seed([...handedOver(), relayed("received", at(1, 10)), ...secondRequest()]);
-    const fake = fakePaseo([...fakeAgentsFor({ manager: "running" }), secondWorker("running")]);
+    const fake = daemonWith([...fakeAgentsFor({ manager: "running" }), secondWorker("running")]);
     const stalls = watcher();
     stalls.usePaseo(fake.paseo);
 
@@ -568,7 +576,7 @@ describe("every request of a Manager is watched, and the shared Manager is left 
 describe("the timer: always on (the Watch switch is gone)", () => {
   it("start() sets one unref'd pass a minute; stop() ends it and nothing more runs", async () => {
     await seed([...handedOver(), relayed("received", at(1, 10))]);
-    const fake = fakePaseo(fakeAgentsFor());
+    const fake = daemonWith(fakeAgentsFor());
     vi.useFakeTimers({ now: when(20) });
     const stalls = watcher({ now: undefined });
     stalls.usePaseo(fake.paseo);
@@ -590,15 +598,15 @@ describe("the timer: always on (the Watch switch is gone)", () => {
 
   it("a pass under way when the timer stops writes and publishes nothing more", async () => {
     await seed([...handedOver(), relayed("received", at(1, 10))]);
-    autopilotOn();
-    const fake = fakePaseo([...fakeAgentsFor(), orchestratorAgent()]);
+    inScope();
+    const fake = daemonWith([...fakeAgentsFor(), orchestratorAgent()]);
     const stalls = watcher();
     stalls.usePaseo(fake.paseo);
     stalls.start();
     const list = fake.paseo.agents.list.getMockImplementation()!;
-    fake.paseo.agents.list.mockImplementationOnce(async () => {
+    fake.paseo.agents.list.mockImplementationOnce(async (options) => {
       stalls.stop();
-      return list();
+      return list(options);
     });
     expect(await stalls.pass()).toMatchObject({ status: "off" });
     expect(fake.sends).toEqual([]);

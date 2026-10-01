@@ -24,7 +24,7 @@ import { enqueue as defaultEnqueue, type NoticeOutcome, type NoticePaseo } from 
 import { setAgentLabels, type CliResult } from "./paseo-cli";
 import { roleOfProvider } from "./agent-role";
 import { asRecord, availableProviders, nonEmpty, reasonOf } from "./role-choices";
-import { REVIEWER_FALLBACK_MODE, REVIEWER_FALLBACK_PROVIDERS, dataHomeOf } from "./role-extras";
+import { REVIEWER_FALLBACK_MODE, REVIEWER_FALLBACK_PROVIDERS, dataHomeOf } from "./role-instructions";
 import { capabilityOf, chooseModeId, featuresFor, modesFor, runPostureOf } from "./role-mode";
 import { DashboardError, type FallbackIncident } from "../shared/contracts";
 

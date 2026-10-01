@@ -15,6 +15,12 @@
  * Verified on Paseo 0.8: `timeline.refetch({ direction: "tail" })` returns the
  * newest page and `startCursor`; `direction: "before"` with that cursor pages
  * back. Real agents needed 2–5 pages of 200 and under 200 ms.
+ *
+ * A typed message is the owner's only when the plugin did not send it: its
+ * notices are told apart by their marker, and what it sent for a compaction
+ * (the `/compact`) by its send log, through the collector's own matcher
+ * (`pluginSentBeside`, autonomy design §G.5) — the same reading the recorded
+ * turns get.
  */
 import { redactText, skillsFromItem } from "./collector";
 import { isPluginNotice } from "./notices";
@@ -33,6 +39,11 @@ export interface LiveTimelinePaseo {
     };
   };
 }
+
+/** Whether the plugin sent this `user_message` to the agent around `at` (`collector.ts` `pluginSentBeside`). */
+export type PluginSentMatcher = (agentId: string, text: string, at: string | null) => boolean;
+
+const NOTHING_SENT: PluginSentMatcher = () => false;
 
 export interface LiveExtras {
   skills: Array<{ agentId: string; skill: string; at: string | null }>;
@@ -86,8 +97,8 @@ export async function readTimelinePages(
   return read;
 }
 
-/** Skills and typed user messages of one agent's timeline, back to the start (bounded). */
-async function readAgent(paseo: LiveTimelinePaseo, agentId: string, out: LiveExtras, env: NodeJS.ProcessEnv): Promise<void> {
+/** Skills and the owner's typed messages of one agent's timeline, back to the start (bounded). */
+async function readAgent(paseo: LiveTimelinePaseo, agentId: string, out: LiveExtras, env: NodeJS.ProcessEnv, pluginSent: PluginSentMatcher): Promise<void> {
   await readTimelinePages(paseo, agentId, { pages: LIVE_MAX_PAGES, limit: LIVE_PAGE_LIMIT }, (entries) => {
     for (const entry of entries) {
       const item = entry.item as { type?: unknown; text?: unknown; clientMessageId?: unknown } | undefined;
@@ -98,7 +109,8 @@ async function readAgent(paseo: LiveTimelinePaseo, agentId: string, out: LiveExt
         item.type === "user_message" &&
         typeof item.clientMessageId === "string" &&
         typeof item.text === "string" &&
-        !isPluginNotice(item.text)
+        !isPluginNotice(item.text) &&
+        !pluginSent(agentId, item.text, at)
       ) {
         const { text, truncated } = capped(redactText(item.text, env));
         out.userMessages.push({ agentId, at: at ?? "", text, truncated, origin: "user" });
@@ -107,13 +119,15 @@ async function readAgent(paseo: LiveTimelinePaseo, agentId: string, out: LiveExt
   });
 }
 
+/** `pluginSent`: the send log's matcher; by default nothing counts as the plugin's but its notices. */
 export async function readLiveExtras(
   paseo: LiveTimelinePaseo,
   agentIds: readonly string[],
   env: NodeJS.ProcessEnv = process.env,
+  pluginSent: PluginSentMatcher = NOTHING_SENT,
 ): Promise<LiveExtras> {
   const out: LiveExtras = { skills: [], userMessages: [] };
-  await Promise.all(agentIds.map((agentId) => readAgent(paseo, agentId, out, env)));
+  await Promise.all(agentIds.map((agentId) => readAgent(paseo, agentId, out, env, pluginSent)));
   return out;
 }
 

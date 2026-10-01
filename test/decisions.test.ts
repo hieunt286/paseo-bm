@@ -1,33 +1,51 @@
 import { describe, expect, it } from "vitest";
 import {
+  ANSWER_BY,
+  ANSWER_VIA,
+  CLASS_OF_EFFECT,
   CONFIRM_EFFECTS,
+  DECISION_CLASSES,
   DECISION_STATUSES,
   EFFECTS,
+  HARD_OWNER_CLASSES,
   GRANT_TTL_MS,
   MAX_ANSWER_REASON_CHARS,
   MAX_ANSWER_WORDS_CHARS,
+  MAX_DECISION_REVERSALS,
+  PREDICTORS,
+  REVERSAL_KINDS,
   answerDecision,
+  answeredByText,
+  checkedClass,
+  classOfEffects,
   confirmDecision,
+  decisionClassOf,
   decisionKindOf,
   decisionSchema,
   declaredEffects,
+  deliveryKindOf,
   effectsOfAnswer,
   expireDecision,
-  grantCovers,
   grantRefusal,
+  heldDecisionId,
   isAnswerable,
+  isHardOwnerClass,
   markNeedsConfirmation,
   needsOwnerConfirmation,
+  openingPrediction,
+  ownerViewOfDecision,
   preparedActionSchema,
   questionDecisionId,
   realEffects,
+  recordReversal,
+  riskierClass,
   supersedeDecision,
   useGrant,
   withdrawDecision,
   type Decision,
   type TransitionResult,
 } from "../plugin/shared/decisions";
-import { DECISION_REQUEST, makeDecision } from "./helpers/decisions";
+import { DECISION_ASKED_AT, DECISION_REQUEST, makeDecision, storedOrchestratorAnswer } from "./helpers/decisions";
 
 /**
  * The decision model and its pure transitions (autonomy design §A.3,
@@ -101,6 +119,30 @@ describe("vocabulary", () => {
     expect(decisionKindOf("x:1")).toBeNull();
     expect(decisionKindOf(`q:${DECISION_REQUEST}:4`)).toBeNull();
     expect(decisionKindOf("q:has space:Q1")).toBeNull();
+    // Autonomy design §D.2, §D.4: a held permission request, a kind of its own (change-009 C6).
+    expect(heldDecisionId("agent-1", "toolu_01ABC")).toBe("h:agent-1:toolu_01ABC");
+    expect(decisionKindOf("h:agent-1:toolu_01ABC")).toBe("held");
+    expect(deliveryKindOf({ id: "h:agent-1:toolu_01ABC", supersedes: null })).toBe("held");
+    expect(decisionKindOf("h:agent 1:x")).toBeNull();
+    expect(decisionKindOf("h:agent-1")).toBeNull();
+  });
+
+  it("a held request is answered Allow or Deny: never in words, never by a precedent", () => {
+    const heldOpen = makeDecision({
+      id: "h:agent-1:perm-1",
+      askedBy: { role: "plugin", agentId: "agent-1" },
+      round: null,
+      options: [
+        { key: "allow", label: "Allow once", recommended: false, effects: ["push"], action: { kind: "permission", agentId: "agent-1", requestId: "perm-1", allow: true } },
+        { key: "deny", label: "Deny", recommended: false, effects: ["none"], action: { kind: "permission", agentId: "agent-1", requestId: "perm-1", allow: false } },
+      ],
+    });
+    expect(decisionSchema.safeParse(heldOpen).success).toBe(true);
+    expect(answerDecision(heldOpen, { via: "inbox", words: "yes", at: DECISION_ASKED_AT })).toMatchObject({ ok: false, refusal: "invalid-answer" });
+    expect(answerDecision(heldOpen, { via: "inbox", optionKey: "allow", by: "precedent", precedentId: "p-1", at: DECISION_ASKED_AT })).toMatchObject({ ok: false });
+    const allowed = answerDecision(heldOpen, { via: "paseo", optionKey: "allow", at: DECISION_ASKED_AT });
+    expect(allowed).toMatchObject({ ok: true, decision: { answer: { by: "owner", via: "paseo" }, grant: { effects: ["push"] } } });
+    expect(ANSWER_VIA).toContain("paseo");
   });
 
   it("drops none, repeats and order from a list of effects", () => {
@@ -109,6 +151,103 @@ describe("vocabulary", () => {
     expect(effectsOfAnswer(makeDecision(), { optionKey: "c" })).toEqual([]);
     expect(effectsOfAnswer(makeDecision(), { optionKey: "zzz" })).toEqual([]);
     expect(effectsOfAnswer(makeDecision(), { optionKey: null })).toEqual(["push", "publish"]);
+  });
+});
+
+describe("classes (autonomy design §B.1, ADR-018)", () => {
+  it("lists the nine classes riskiest first, the conflict order", () => {
+    expect(DECISION_CLASSES).toEqual(["security", "data", "release", "cost", "dependency", "environment", "scope", "preference", "reversible-technical"]);
+  });
+
+  it.each([
+    ["none", null],
+    ["commit", null],
+    ["push", "release"],
+    ["publish", "release"],
+    ["deploy", "release"],
+    ["real-data", "data"],
+    ["migration", "data"],
+    ["dependency-install", "dependency"],
+    ["network", "environment"],
+    ["outside-workspace", "environment"],
+    ["security", "security"],
+    ["cost", "cost"],
+  ] as const)("maps the effect %s to %s", (effect, decisionClass) => {
+    expect(CLASS_OF_EFFECT[effect]).toBe(decisionClass);
+    expect(classOfEffects([effect])).toBe(decisionClass);
+  });
+
+  it("maps every effect, and no class of the order is missing from it but the three no effect implies", () => {
+    expect(Object.keys(CLASS_OF_EFFECT).sort()).toEqual([...EFFECTS].sort());
+    const implied = new Set(Object.values(CLASS_OF_EFFECT).filter((entry) => entry !== null));
+    expect(DECISION_CLASSES.filter((entry) => !implied.has(entry))).toEqual(["scope", "preference", "reversible-technical"]);
+  });
+
+  it("keeps the riskier class in both argument orders, for every pair", () => {
+    for (const [i, a] of DECISION_CLASSES.entries()) {
+      for (const [j, b] of DECISION_CLASSES.entries()) {
+        const riskier = i <= j ? a : b;
+        expect(riskierClass(a, b), `${a} vs ${b}`).toBe(riskier);
+        expect(riskierClass(b, a), `${b} vs ${a}`).toBe(riskier);
+      }
+    }
+    expect(riskierClass("reversible-technical", "release")).toBe("release");
+    expect(riskierClass("cost", "security")).toBe("security");
+  });
+
+  it("reads the riskiest class of several effects, or none", () => {
+    expect(classOfEffects([])).toBeNull();
+    expect(classOfEffects(["none", "commit"])).toBeNull();
+    expect(classOfEffects(["network", "push"])).toBe("release");
+    expect(classOfEffects(["cost", "migration", "push"])).toBe("data");
+    expect(classOfEffects(["outside-workspace", "dependency-install"])).toBe("dependency");
+  });
+
+  it("keeps a proposal riskier than the effects, and raises one less risky to the effects' class", () => {
+    expect(checkedClass("security", ["push"])).toBe("security");
+    expect(checkedClass("cost", ["network"])).toBe("cost");
+    expect(checkedClass("preference", ["migration"])).toBe("data");
+    expect(checkedClass("scope", ["none"])).toBe("scope");
+    expect(checkedClass("preference", [])).toBe("preference");
+  });
+
+  it("never lets an asker propose reversible-technical past an option that pushes (negative)", () => {
+    expect(checkedClass("reversible-technical", ["push"])).toBe("release");
+    expect(checkedClass("reversible-technical", declaredEffects(makeDecision()))).toBe("release");
+  });
+
+  it("without a proposal: the effects' class, else reversible-technical (§B.9)", () => {
+    expect(checkedClass(undefined, ["network"])).toBe("environment");
+    expect(checkedClass(null, ["commit", "none"])).toBe("reversible-technical");
+    expect(checkedClass(null, [])).toBe("reversible-technical");
+  });
+
+  it("names release, data, security and cost as the owner's alone: exactly the classes of the confirmation effects", () => {
+    // Derived from CONFIRM_EFFECTS (code review 2026-09-30 §3.5): the literal it replaces, in its order.
+    expect(HARD_OWNER_CLASSES).toEqual(["release", "data", "security", "cost"]);
+    expect(new Set(CONFIRM_EFFECTS.map((effect) => CLASS_OF_EFFECT[effect]))).toEqual(new Set(HARD_OWNER_CLASSES));
+    expect(DECISION_CLASSES.filter(isHardOwnerClass)).toEqual(["security", "data", "release", "cost"]);
+  });
+
+  it("stores the class as an additive field, and refuses one that is not a class", () => {
+    const classed = makeDecision({ class: "release" });
+    expect(decisionSchema.parse(JSON.parse(JSON.stringify(classed)))).toEqual(classed);
+    expect(decisionSchema.safeParse(makeDecision({ class: "urgent" as never })).success).toBe(false);
+    // A transition keeps it.
+    expect(ok(answerDecision(classed, { via: "inbox", optionKey: "a", at: AT })).class).toBe("release");
+  });
+
+  it("reads a decision stored before classes by its effects, a fallback incident as environment, else reversible-technical (§B.9)", () => {
+    const older = decisionSchema.parse(JSON.parse(JSON.stringify(makeDecision())));
+    expect(older).not.toHaveProperty("class");
+    expect(decisionClassOf(older)).toBe("release");
+    expect(decisionClassOf(makeDecision({ options: [{ key: "a", label: "Go", recommended: true, effects: ["commit"] }] }))).toBe("reversible-technical");
+    expect(decisionClassOf(makeDecision({ options: [] }))).toBe("reversible-technical");
+    const incident = makeDecision({ id: "f:fb-0123456789ab", requestId: null, options: [{ key: "dismiss", label: "I'll handle it", recommended: false, effects: ["none"] }] });
+    expect(decisionClassOf(incident)).toBe("environment");
+    // A stored class is read as stored, and still never below its effects.
+    expect(decisionClassOf(makeDecision({ class: "security" }))).toBe("security");
+    expect(decisionClassOf(makeDecision({ class: "preference" }))).toBe("release");
   });
 });
 
@@ -207,19 +346,13 @@ describe("answering", () => {
   });
 });
 
-describe("the Orchestrator's answer (bm_decide, change-004)", () => {
-  const decided = () =>
-    ok(answerDecision(makeDecision(), { by: "orchestrator", via: "autopilot", optionKey: "c", reason: "  Hold: the review is not in yet.  ", at: AT }));
+describe("the Orchestrator's Phase 1 answer (change-004): read, never written", () => {
+  const decided = () => ok(storedOrchestratorAnswer(makeDecision(), { optionKey: "c", reason: "Hold: the review is not in yet.", at: AT }));
 
-  it("round-trips by: orchestrator with its reason, and grants what the owner's choice of that option would", () => {
+  it("round-trips a stored by: orchestrator answer with its reason", () => {
     const decision = decided();
     expect(decision.answer).toEqual({ by: "orchestrator", via: "autopilot", optionKey: "c", words: null, at: AT, reason: "Hold: the review is not in yet." });
     expect(decisionSchema.parse(JSON.parse(JSON.stringify(decision)))).toEqual(decision);
-    expect(ok(answerDecision(makeDecision(), { by: "orchestrator", via: "autopilot", optionKey: "a", reason: "Only the contract.", at: AT })).grant).toEqual({
-      effects: ["push"],
-      expiresAt: plus(GRANT_TTL_MS),
-      usedAt: null,
-    });
   });
 
   it("still reads an answer stored before it: the owner's, without by-orchestrator or a reason", () => {
@@ -229,12 +362,15 @@ describe("the Orchestrator's answer (bm_decide, change-004)", () => {
     expect(parsed.answer).not.toHaveProperty("reason");
   });
 
-  it("answers only with an option and a reason of 1-300 characters", () => {
+  it("refuses a new by: orchestrator answer: the Orchestrator decides through the policy, whose reason is 1-300 characters", () => {
     const open = makeDecision();
-    expect(refusalOf(answerDecision(open, { by: "orchestrator", via: "autopilot", words: "Hold it.", at: AT }))).toBe("invalid-answer");
-    expect(refusalOf(answerDecision(open, { by: "orchestrator", via: "autopilot", optionKey: "c", reason: "   ", at: AT }))).toBe("invalid-answer");
-    expect(refusalOf(answerDecision(open, { by: "orchestrator", via: "autopilot", optionKey: "c", reason: "x".repeat(MAX_ANSWER_REASON_CHARS + 1), at: AT }))).toBe("invalid-answer");
-    expect(refusalOf(answerDecision(open, { by: "orchestrator", via: "autopilot", optionKey: "z", reason: "Why not.", at: AT }))).toBe("unknown-option");
+    const refused = answerDecision(open, { by: "orchestrator" as never, via: "autopilot", optionKey: "c", reason: "Hold.", at: AT });
+    expect(refusalOf(refused)).toBe("invalid-answer");
+    expect(refused.ok ? "" : refused.message).toContain("decides through the policy (bm_decide)");
+    const decide = { by: "policy", predictor: "orchestrator", via: "inbox", optionKey: "c", at: AT } as const;
+    expect(refusalOf(answerDecision(open, { ...decide, reason: "   " }))).toBe("invalid-answer");
+    expect(refusalOf(answerDecision(open, { ...decide, reason: "x".repeat(MAX_ANSWER_REASON_CHARS + 1) }))).toBe("invalid-answer");
+    expect(refusalOf(answerDecision(open, { ...decide, optionKey: "z", reason: "Why not." }))).toBe("unknown-option");
   });
 
   it("the schema holds it: never own words or no option for the Orchestrator, Autopilot only for the Orchestrator, a reason ≤ 300", () => {
@@ -251,8 +387,92 @@ describe("the Orchestrator's answer (bm_decide, change-004)", () => {
     const result = answerDecision(decided(), { via: "inbox", optionKey: "a", at: plus(60_000) });
     expect(refusalOf(result)).toBe("settled");
     expect(result.ok ? "" : result.message).toBe(`decision q:${DECISION_REQUEST}:Q1 is answered by the Orchestrator; it can no longer be answered`);
-    const byOwner = answerDecision(inStatus("answered"), { by: "orchestrator", via: "autopilot", optionKey: "c", at: plus(60_000) });
+    const byOwner = answerDecision(inStatus("answered"), { via: "inbox", optionKey: "c", at: plus(60_000) });
     expect(byOwner.ok ? "" : byOwner.message).toContain("is answered by the owner");
+  });
+});
+
+describe("delegated answers, predictions and reversals (autonomy design §B.3, §B.9)", () => {
+  const predicted = { recommended: { optionKey: "a" }, orchestrator: { optionKey: "c", reason: "Hold until the review is in.", at: AT } };
+
+  it("answer.by is owner, orchestrator, policy or precedent (change-007 C4); two predictors; three reversal kinds", () => {
+    expect(ANSWER_BY).toEqual(["owner", "orchestrator", "policy", "precedent"]);
+    expect(PREDICTORS).toEqual(["recommended", "orchestrator"]);
+    expect(REVERSAL_KINDS).toEqual(["re-asked", "overridden", "reopened"]);
+    expect(ANSWER_BY.map(answeredByText)).toEqual(["the owner", "the Orchestrator", "the policy", "an owner precedent"]);
+  });
+
+  it("a policy answer is an option naming its predictor; a precedent answer names its precedent, in words or an option", () => {
+    const open = makeDecision({ options: makeDecision().options.map((option) => ({ ...option, effects: ["none"] })) });
+    const policy = ok(answerDecision(open, { by: "policy", via: "autopilot", optionKey: "a", reason: "recommended option, class delegated", class: "scope", predictor: "recommended", at: AT }));
+    expect(policy.answer).toEqual({ by: "policy", via: "autopilot", optionKey: "a", words: null, at: AT, reason: "recommended option, class delegated", class: "scope", predictor: "recommended" });
+    const precedent = ok(answerDecision(open, { by: "precedent", via: "inbox", words: "Always SQLite for tests.", precedentId: " p-1 ", at: AT }));
+    expect(precedent.answer).toMatchObject({ by: "precedent", optionKey: null, words: "Always SQLite for tests.", precedentId: "p-1" });
+
+    expect(refusalOf(answerDecision(open, { by: "policy", via: "autopilot", words: "Hold.", predictor: "recommended", at: AT }))).toBe("invalid-answer");
+    expect(refusalOf(answerDecision(open, { by: "policy", via: "autopilot", optionKey: "a", at: AT }))).toBe("invalid-answer");
+    expect(refusalOf(answerDecision(open, { by: "precedent", via: "inbox", optionKey: "a", at: AT }))).toBe("invalid-answer");
+    expect(refusalOf(answerDecision(open, { by: "precedent", via: "inbox", optionKey: "a", precedentId: "  ", at: AT }))).toBe("invalid-answer");
+
+    const answered = (answer: Record<string, unknown>) =>
+      decisionSchema.safeParse(makeDecision({ status: "answered", settledAt: AT, answer: { via: "inbox", optionKey: "c", words: null, at: AT, ...answer } as never })).success;
+    expect(answered({ by: "policy", predictor: "orchestrator" })).toBe(true);
+    expect(answered({ by: "policy" })).toBe(false);
+    expect(answered({ by: "policy", predictor: "orchestrator", optionKey: null, words: "Hold." })).toBe(false);
+    expect(answered({ by: "precedent", precedentId: "p-1", optionKey: null, words: "Hold." })).toBe(true);
+    expect(answered({ by: "precedent" })).toBe(false);
+    expect(answered({ by: "owner", via: "autopilot" })).toBe(false);
+    expect(answered({ by: "precedent", precedentId: "p-1", via: "autopilot" })).toBe(false);
+  });
+
+  it("opens with the recommended option as its prediction, or none when no option is recommended", () => {
+    expect(openingPrediction(makeDecision().options)).toEqual({ recommended: { optionKey: "a" }, orchestrator: null });
+    expect(openingPrediction(makeDecision().options.map((option) => ({ ...option, recommended: false })))).toEqual({ recommended: null, orchestrator: null });
+    expect(openingPrediction([])).toEqual({ recommended: null, orchestrator: null });
+  });
+
+  it("keeps predictions and reversals additive and consistent", () => {
+    // A decision stored before them reads as it is.
+    expect(decisionSchema.parse(makeDecision())).not.toHaveProperty("prediction");
+    expect(decisionSchema.safeParse(makeDecision({ prediction: predicted })).success).toBe(true);
+    expect(decisionSchema.safeParse(makeDecision({ prediction: { recommended: { optionKey: "z" }, orchestrator: null } })).success).toBe(false);
+    expect(decisionSchema.safeParse(makeDecision({ prediction: { ...predicted, orchestrator: { ...predicted.orchestrator, optionKey: "z" } } })).success).toBe(false);
+    // Only an answer is reversed.
+    expect(decisionSchema.safeParse(makeDecision({ reversals: [{ kind: "reopened", at: AT, ref: "bm-1" }] })).success).toBe(false);
+    expect(decisionSchema.safeParse({ ...inStatus("answered"), reversals: [{ kind: "reopened", at: AT, ref: "bm-1" }] }).success).toBe(true);
+    expect(decisionSchema.safeParse({ ...inStatus("answered"), reversals: [{ kind: "undone", at: AT, ref: "bm-1" }] }).success).toBe(false);
+  });
+
+  it("records a reversal of an answered decision once per kind and reference, and refuses one of a decision never answered", () => {
+    const answered = inStatus("answered");
+    const once = ok(recordReversal(answered, { kind: "re-asked", at: plus(1), ref: `q:${DECISION_REQUEST}:Q4` }));
+    expect(once.reversals).toEqual([{ kind: "re-asked", at: plus(1), ref: `q:${DECISION_REQUEST}:Q4` }]);
+    expect(answered).not.toHaveProperty("reversals");
+    // The same again changes nothing; another reference or kind is kept beside it.
+    const again = recordReversal(once, { kind: "re-asked", at: plus(2), ref: `q:${DECISION_REQUEST}:Q4` });
+    expect(again.ok && again.decision).toBe(once);
+    const twice = ok(recordReversal(once, { kind: "reopened", at: plus(3), ref: " bm-7 " }));
+    expect(twice.reversals?.map((reversal) => `${reversal.kind}:${reversal.ref}`)).toEqual([`re-asked:q:${DECISION_REQUEST}:Q4`, "reopened:bm-7"]);
+
+    for (const status of ["open", "needs-confirmation", "superseded", "withdrawn", "expired"] as const) {
+      expect(refusalOf(recordReversal(inStatus(status), { kind: "overridden", at: AT, ref: "r:1" }))).toBe("not-answered");
+    }
+    expect(refusalOf(recordReversal(answered, { kind: "overridden", at: AT, ref: "  " }))).toBe("invalid-answer");
+    // Past the cap it is reversed already: nothing more is kept.
+    let full = answered;
+    for (let n = 0; n < MAX_DECISION_REVERSALS + 3; n += 1) full = ok(recordReversal(full, { kind: "reopened", at: AT, ref: `bm-${n}` }));
+    expect(full.reversals).toHaveLength(MAX_DECISION_REVERSALS);
+  });
+
+  it("hides the challenger's prediction from the owner until the decision is settled", () => {
+    const open = makeDecision({ prediction: predicted });
+    expect(ownerViewOfDecision(open).prediction).toEqual({ recommended: { optionKey: "a" }, orchestrator: null });
+    expect(open.prediction).toEqual(predicted);
+    expect(ownerViewOfDecision(ok(markNeedsConfirmation(open, { via: "chat-worker", at: AT }))).prediction?.orchestrator).toBeNull();
+    const answered = ok(answerDecision(open, { via: "inbox", optionKey: "c", at: AT }));
+    expect(ownerViewOfDecision(answered)).toBe(answered);
+    const plain = makeDecision();
+    expect(ownerViewOfDecision(plain)).toBe(plain);
   });
 });
 
@@ -315,8 +535,8 @@ describe("grant arithmetic (REQ-112 b)", () => {
   it("covers the granted effects until the hour is over, and only them", () => {
     const decision = answered();
     expect(decision.grant?.effects).toEqual(["push", "publish"]);
-    expect(grantCovers(decision, ["push"], AT)).toBe(true);
-    expect(grantCovers(decision, ["push", "publish", "none"], plus(GRANT_TTL_MS - 1))).toBe(true);
+    expect(grantRefusal(decision, ["push"], AT)).toBeNull();
+    expect(grantRefusal(decision, ["push", "publish", "none"], plus(GRANT_TTL_MS - 1))).toBeNull();
     expect(grantRefusal(decision, ["push"], plus(GRANT_TTL_MS))?.refusal).toBe("grant-expired");
     expect(grantRefusal(decision, ["deploy"], AT)?.refusal).toBe("effect-not-granted");
     expect(grantRefusal(decision, ["push", "deploy"], AT)?.message).toContain("deploy");
@@ -326,7 +546,7 @@ describe("grant arithmetic (REQ-112 b)", () => {
     const used = ok(useGrant(answered(), { effects: ["push"], at: plus(60_000) }));
     expect(used.grant?.usedAt).toBe(plus(60_000));
     expect(refusalOf(useGrant(used, { effects: ["push"], at: plus(120_000) }))).toBe("grant-used");
-    expect(grantCovers(used, ["push"], plus(120_000))).toBe(false);
+    expect(grantRefusal(used, ["push"], plus(120_000))?.refusal).toBe("grant-used");
   });
 
   it("refuses a use after expiry, for an undeclared effect, or without a grant", () => {

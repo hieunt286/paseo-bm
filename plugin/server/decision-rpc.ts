@@ -11,9 +11,10 @@
  * or `BM-ANSWER` (`orchestrator-decisions.ts`), and the fallback incidents'
  * `fallback.act` (`fallback-decisions.ts`). The answer
  * stands whatever the hook does: a failing hook is logged, never turned into a
- * failed answer. The same hook delivers a Worker's question the Orchestrator
- * answered with `bm_decide` (`orchestrator-tools.ts`, change-004), so its
- * answer reaches the Worker exactly as the owner's does.
+ * failed answer. The same hook delivers a decision the Orchestrator decided
+ * with `bm_decide` on the owner's policy (`orchestrator-decide-tools.ts`, autonomy
+ * design §B.5), so its answer reaches the Worker, or runs the incident's
+ * action, exactly as the owner's does.
  */
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import {
@@ -23,6 +24,7 @@ import {
   decisionsConfirmRpc,
   decisionsGetRpc,
   decisionsListRpc,
+  decisionsOverrideRpc,
   type DecisionOutput,
   type DecisionsAnswerInput,
   type DecisionsConfirmInput,
@@ -36,11 +38,15 @@ import {
   confirmDecision,
   decisionKindOf,
   needsOwnerConfirmation,
+  ownerViewOfDecision,
   type Decision,
   type TransitionRefusal,
 } from "../shared/decisions";
-import { resolveDataHome, unusableDataHomeMessage, type DataHomeDeps } from "./data-home";
 import { createDecisionStore, type DecisionMutation, type DecisionStore } from "./decision-store";
+import { handleDecisionsOverride } from "./decision-override";
+import { supersedePrecedentsBy } from "./precedent-resolve";
+import { READ_FAILED, coded, dataHome, errorText, logOf, requireDataHome, type RpcHomeDeps } from "./rpc-kit";
+import { timeOrZero } from "../shared/time";
 
 /** What a settled decision is handed to: the delivery of §A.6. */
 export type OnDecisionsSettled = (decisions: Decision[], context: { paseo: unknown }) => void | Promise<void>;
@@ -69,13 +75,13 @@ export function settledByKind(
       try {
         await handlers[kind]!(group, context);
       } catch (error) {
-        log(`[paseo-bm] delivering ${group.map((decision) => decision.id).join(", ")} failed: ${error instanceof Error ? error.message : String(error)}`);
+        log(`[paseo-bm] delivering ${group.map((decision) => decision.id).join(", ")} failed: ${errorText(error)}`);
       }
     }
   };
 }
 
-export type DecisionRpcDeps = DataHomeDeps & {
+export type DecisionRpcDeps = RpcHomeDeps & {
   /** The clock; `new Date()` by default. */
   now?: () => Date;
   /** Called after an answer or a confirmed chat answer is stored; a no-op by default. */
@@ -84,29 +90,17 @@ export type DecisionRpcDeps = DataHomeDeps & {
   log?: (message: string) => void;
 };
 
-function homeOf(deps: DataHomeDeps): string | null {
-  try {
-    return resolveDataHome(deps).home;
-  } catch {
-    return null;
-  }
-}
-
 function storeOf(deps: DecisionRpcDeps, what: string): DecisionStore {
-  const home = homeOf(deps);
-  if (home === null) throw new DashboardError("E_DATA_HOME_UNAVAILABLE", `cannot ${what}: ${unusableDataHomeMessage(deps)}`);
-  return createDecisionStore(home, deps.log === undefined ? {} : { log: deps.log });
+  return createDecisionStore(requireDataHome(deps, what), deps.log === undefined ? {} : { log: deps.log });
 }
 
-/** Runs one store operation; a failure that is not already coded becomes `E_DECISION_WRITE_FAILED`. */
-function inStore<T>(what: string, operation: () => T): T {
-  try {
-    return operation();
-  } catch (error) {
-    if (error instanceof DashboardError) throw error;
-    throw new DashboardError("E_DECISION_WRITE_FAILED", `cannot ${what}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
-  }
-}
+/**
+ * The codes of a store operation (rpc-kit `coded`, code review 2026-09-30
+ * §3.2): a read that fails is `READ_FAILED`, a write `E_DECISION_WRITE_FAILED`;
+ * a data folder that cannot be created is `E_DATA_HOME_UNAVAILABLE`.
+ */
+const reading = <T>(what: string, operation: () => T): T => coded(READ_FAILED, what, operation);
+const writing = <T>(what: string, operation: () => T): T => coded("E_DECISION_WRITE_FAILED", what, operation);
 
 const REFUSAL_CODES: Record<TransitionRefusal, DashboardError["code"]> = {
   settled: "E_DECISION_SETTLED",
@@ -117,6 +111,7 @@ const REFUSAL_CODES: Record<TransitionRefusal, DashboardError["code"]> = {
   "grant-used": "E_DECISION_SETTLED",
   "grant-expired": "E_DECISION_SETTLED",
   "effect-not-granted": "E_DECISION_SETTLED",
+  "not-answered": "E_DECISION_ANSWER_INVALID",
 };
 
 /** The decision a mutation left, or the coded error it amounts to. */
@@ -131,9 +126,7 @@ async function handOver(decision: Decision, paseo: unknown, deps: DecisionRpcDep
   try {
     await deps.onSettled([decision], { paseo });
   } catch (error) {
-    (deps.log ?? ((message: string) => console.warn(message)))(
-      `[paseo-bm] decision ${decision.id} is answered, but its delivery failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    logOf(deps)(`[paseo-bm] decision ${decision.id} is answered, but its delivery failed: ${errorText(error)}`);
   }
 }
 
@@ -146,22 +139,17 @@ function reread(store: DecisionStore, decision: Decision): Decision {
   }
 }
 
-function timeOf(iso: string): number {
-  const at = Date.parse(iso);
-  return Number.isNaN(at) ? 0 : at;
-}
-
 // ---------------------------------------------------------------------------
 // Handlers.
 // ---------------------------------------------------------------------------
 
 /** `decisions.list` (§A.6). Reads only; no usable data folder reads as none. */
 export function handleDecisionsList(input: DecisionsListInput, deps: DecisionRpcDeps = {}): DecisionsListOutput {
-  const home = homeOf(deps);
+  const home = dataHome(deps);
   if (home === null) return { decisions: [], truncated: false };
   const store = createDecisionStore(home, deps.log === undefined ? {} : { log: deps.log });
   const inbox = input.scope === "inbox";
-  const matched = inStore("read the decisions", () =>
+  const matched = reading("read the decisions", () =>
     store.list({
       ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
       ...(input.scope === "request" && input.requestId !== undefined ? { requestId: input.requestId } : {}),
@@ -171,22 +159,23 @@ export function handleDecisionsList(input: DecisionsListInput, deps: DecisionRpc
   const direction = inbox ? 1 : -1;
   const ordered = matched
     .map((decision, index) => ({ decision, index }))
-    .sort((a, b) => direction * (timeOf(a.decision.askedAt) - timeOf(b.decision.askedAt)) || direction * (a.index - b.index))
+    .sort((a, b) => direction * (timeOrZero(a.decision.askedAt) - timeOrZero(b.decision.askedAt)) || direction * (a.index - b.index))
     .map(({ decision }) => decision);
   const limit = input.limit ?? DECISION_LIST_DEFAULT;
-  return { decisions: ordered.slice(0, limit), truncated: ordered.length > limit };
+  return { decisions: ordered.slice(0, limit).map(ownerViewOfDecision), truncated: ordered.length > limit };
 }
 
-/** `decisions.get` (§A.6). */
+/** `decisions.get` (§A.6). An unsettled decision comes without the challenger's prediction (§B.3). */
 export function handleDecisionsGet(input: DecisionsGetInput, deps: DecisionRpcDeps = {}): DecisionOutput {
   const store = storeOf(deps, "read the decision");
-  const decision = inStore("read the decision", () => store.get(input.id));
+  const decision = reading("read the decision", () => store.get(input.id));
   if (decision === null) throw new DashboardError("E_DECISION_NOT_FOUND", `no decision ${input.id}`);
-  return { decision };
+  return { decision: ownerViewOfDecision(decision) };
 }
 
 /**
  * `decisions.answer` (§A.6, REQ-112): records the owner's answer and its grant,
+ * supersedes the precedents on its subject it contradicts (§B.6, REQ-124 c),
  * then hands the decision to `onSettled`. Every refusal writes nothing.
  */
 export async function handleDecisionsAnswer(
@@ -202,7 +191,7 @@ export async function handleDecisionsAnswer(
   const store = storeOf(deps, "answer the decision");
   const at = (deps.now?.() ?? new Date()).toISOString();
   // One synchronous block: nothing can settle the decision between the read and the write.
-  const mutation = inStore("answer the decision", (): DecisionMutation => {
+  const mutation = writing("answer the decision", (): DecisionMutation => {
     const current = store.get(input.id);
     if (current === null) return { status: "not-found" };
     const result = answerDecision(current, {
@@ -222,6 +211,9 @@ export async function handleDecisionsAnswer(
     return store.transition(input.id, () => result, current.workspaceId);
   });
   const answered = settledOrThrow(input.id, mutation);
+  // Autonomy design §B.6 (REQ-124 c): an answer that differs from a standing precedent on its subject supersedes it.
+  const home = dataHome(deps);
+  if (home !== null) supersedePrecedentsBy(answered, { home, now: new Date(at), ...(deps.log === undefined ? {} : { log: deps.log }) });
   await handOver(answered, paseo, deps);
   return { decision: reread(store, answered) };
 }
@@ -238,11 +230,12 @@ export async function handleDecisionsConfirm(
 ): Promise<DecisionOutput> {
   const store = storeOf(deps, "confirm the decision");
   const at = (deps.now?.() ?? new Date()).toISOString();
-  const mutation = inStore("confirm the decision", () =>
+  const mutation = writing("confirm the decision", () =>
     store.transition(input.id, (decision) => confirmDecision(decision, { answered: input.answered, at })),
   );
   const decision = settledOrThrow(input.id, mutation);
-  if (decision.status !== "answered") return { decision };
+  // Kept open: still the owner's to answer, so still without the challenger's prediction.
+  if (decision.status !== "answered") return { decision: ownerViewOfDecision(decision) };
   await handOver(decision, paseo, deps);
   return { decision: reread(store, decision) };
 }
@@ -256,4 +249,6 @@ export function registerDecisionRpcs(server: PluginServerContext, deps: Decision
   server.handle(decisionsGetRpc, (input) => handleDecisionsGet(input, deps));
   server.handle(decisionsAnswerRpc, (input, context) => handleDecisionsAnswer(input, context?.paseo, deps));
   server.handle(decisionsConfirmRpc, (input, context) => handleDecisionsConfirm(input, context?.paseo, deps));
+  // Autonomy design §B.7: the digest's Override opens an owner decision; its answer takes `onSettled` like any other.
+  server.handle(decisionsOverrideRpc, (input) => handleDecisionsOverride(input, deps));
 }

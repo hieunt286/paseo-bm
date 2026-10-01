@@ -1,19 +1,7 @@
 import { describe, expect, it } from "vitest";
-import {
-  cardFrameOf,
-  chatCardSchema,
-  commandAuthorityText,
-  commandEffectsText,
-  commandWorkerName,
-  detailLinesOf,
-  eventsNoticeOf,
-  eventsOf,
-  eventTone,
-  eventWhat,
-  noticeLine,
-  toChatCards,
-  type ChatCard,
-} from "../plugin/client/chat-cards";
+import { chatCardSchema, toChatCards, type ChatCard } from "../plugin/client/chat-card-parse";
+import { eventsNoticeOf, eventsOf, eventTone, eventWhat } from "../plugin/client/chat-card-events";
+import { cardFrameOf, commandAuthorityText, commandEffectsText, commandWorkerName, detailLinesOf, noticeLine } from "../plugin/client/chat-card-frame";
 import { commandBlockOf, type CommandInput } from "../plugin/shared/orchestrator-command";
 import { eventLineOf, eventsMessageOf } from "../plugin/server/event-bus";
 import type { ChatPeer } from "../plugin/shared/contracts";
@@ -105,7 +93,7 @@ describe("a delivered BM-COMMAND becomes an action card", () => {
   it("says on whose authority it went and what it may do", () => {
     const text = (overrides: Partial<CommandInput>) => commandAuthorityText(commandCard(overrides).command!);
     expect(text({ from: "owner", via: "tab", authority: "owner" })).toBe("your command");
-    expect(text({ via: "autopilot", authority: "autopilot" })).toBe("Autopilot");
+    expect(text({ authority: "owner" })).toBe("your word in chat");
     expect(text({ authority: `decision:${DECISION}`, approved: ["commit"] })).toBe("your decision");
     expect(commandEffectsText(commandCard({ effects: [] }).command!)).toBe("no effects");
     expect(commandEffectsText(commandCard({ effects: ["commit", "push"], approved: ["push"], authority: `decision:${DECISION}` }).command!)).toBe("approved: push");
@@ -113,6 +101,36 @@ describe("a delivered BM-COMMAND becomes an action card", () => {
     const decided = commandCard({ authority: `decision:${DECISION}`, approved: ["commit"] });
     expect(JSON.stringify(frame(decided))).not.toContain(DECISION);
     expect(detailLinesOf(decided, manager)).toContain(`Decision: ${DECISION}`);
+  });
+
+  it("a command on the owner's policy says Policy · <class>, the class its authority names (autonomy design §B.9)", () => {
+    const delegated = commandCard({ effects: ["commit", "dependency-install"], authority: "policy:dependency", approved: ["commit", "dependency-install"] });
+    expect(commandAuthorityText(delegated.command!)).toBe("Policy · dependency");
+    expect(frame(delegated)).toMatchObject({ authority: "Policy · dependency", tag: "approved: commit, dependency-install" });
+    expect(chatCardSchema.parse(delegated)).toEqual(delegated);
+    expect(detailLinesOf(delegated, manager)).toContain("Authority: policy:dependency");
+    expect(detailLinesOf(delegated, manager).some((line) => line.startsWith("Decision:"))).toBe(false);
+    expect(commandAuthorityText(commandCard({ effects: ["none"], authority: "policy:reversible-technical" }).command!)).toBe("Policy · reversible-technical");
+  });
+
+  it("a handoff reads \"Coordination · handoff\": the owner's Settings switch, no effect, a Handoff chip (autonomy design §G.6)", () => {
+    const handoff = commandCard({ re: `Hand request ${REQUEST} over to a new Worker`, body: "Handoff h1: create the new Worker.", intent: "handoff", effects: [], authority: "coordination:handoff" });
+    expect(handoff.type).toBe("action");
+    expect(commandAuthorityText(handoff.command!)).toBe("Coordination · handoff");
+    expect(frame(handoff)).toMatchObject({ authority: "Coordination · handoff", chip: { text: "Handoff", tone: "info" }, tag: "no effects", recipient: "Manager" });
+    expect(chatCardSchema.parse(handoff)).toEqual(handoff);
+    expect(detailLinesOf(handoff, manager)).toEqual(expect.arrayContaining(["Intent: handoff", "Authority: coordination:handoff"]));
+  });
+
+  it("a stored block of Phase 1 sent on Autopilot reads as the retired Autopilot (autonomy design §B.8)", () => {
+    const stored = commandBlockOf(input({ effects: ["none"] })).replace("via: chat", "via: autopilot").replace("authority: owner", "authority: autopilot");
+    const card = received(stored)![0]!;
+    expect(card).toMatchObject({ type: "action", command: { version: 2, via: "autopilot", authority: "autopilot" } });
+    expect(chatCardSchema.parse(card)).toEqual(card);
+    expect(frame(card)).toMatchObject({ authority: "Autopilot (retired)" });
+    // With the policy or a decision's grant, the authority names itself whatever the via.
+    const onPolicy = received(stored.replace("authority: autopilot", "authority: policy:scope"))![0]!;
+    expect(commandAuthorityText(onPolicy.command!)).toBe("Policy · scope");
   });
 
   it("still reads a version 1 block, by how it left", () => {
@@ -129,7 +147,7 @@ describe("a delivered BM-COMMAND becomes an action card", () => {
     ].join("\n");
     const card = received(v1)![0]!;
     expect(card).toMatchObject({ type: "action", command: { version: 1, intent: null, authority: null } });
-    expect(frame(card)).toMatchObject({ authority: "Autopilot", chip: null, tag: null, title: "Carry on" });
+    expect(frame(card)).toMatchObject({ authority: "Autopilot (retired)", chip: null, tag: null, title: "Carry on" });
     expect(detailLinesOf(card, manager)).toContain("Limits: no-commit-push-deploy, no-real-data");
   });
 
@@ -174,8 +192,8 @@ describe("a Manager's copy of a Worker command is a notice line, not a card", ()
 describe("BM-EVENTS is one compact line (autonomy design §A.8)", () => {
   const events = eventsMessageOf([
     eventLineOf({ type: "request.finished", workspaceId: "ws-a", requestId: REQUEST, managerId: "m1", at: "2026-09-29T10:00:00Z" }),
-    eventLineOf({ type: "decision.opened", workspaceId: "ws-a", requestId: REQUEST, decisionId: `q:${REQUEST}:Q1`, askedBy: "w1aaaaaaaaaa" }),
-    eventLineOf({ type: "decision.opened", workspaceId: "ws-a", requestId: REQUEST, decisionId: `q:${REQUEST}:Q2`, askedBy: "w1aaaaaaaaaa" }),
+    eventLineOf({ type: "decision.opened", workspaceId: "ws-a", requestId: REQUEST, decisionId: `q:${REQUEST}:Q1`, askedBy: "w1aaaaaaaaaa", asks: "prediction" }),
+    eventLineOf({ type: "decision.opened", workspaceId: "ws-a", requestId: REQUEST, decisionId: `q:${REQUEST}:Q2`, askedBy: "w1aaaaaaaaaa", asks: "decision" }),
   ]);
 
   it("reads each event line of the plugin's message", () => {
@@ -207,11 +225,33 @@ describe("BM-EVENTS is one compact line (autonomy design §A.8)", () => {
     expect(eventWhat({ type: "request.stalled", detail: "review-over-budget" })).toBe("a review went over its budget");
     expect(eventWhat({ type: "worker.signal", detail: "sleepy" })).toBe("a Worker signal: sleepy");
     expect(eventWhat({ type: "project.renamed", detail: null })).toBe("event: project.renamed");
+    // Autonomy design §G.4: advice due, from the line the event bus writes.
+    const advice = eventsMessageOf([eventLineOf({ type: "advice.due", workspaceId: "ws-a", finished: 5, at: "T" })]);
+    expect(eventsOf(advice)).toEqual([{ type: "advice.due", detail: null }]);
+    expect(eventsNoticeOf(advice)).toEqual({ what: "1 event: advice is due for a project", tone: "info" });
     expect(eventsNoticeOf("BM-EVENTS\nnothing here")).toEqual({ what: "Events for the Orchestrator", tone: "muted" });
   });
+});
 
-  it("leaves the retired BM-EVENT and BM-STALL notices to Paseo", () => {
-    expect(received("BM-EVENT finished\nProject: Checkout (ws-a)")).toBeUndefined();
-    expect(received("BM-STALL idle-unfinished\nProject: Checkout (ws-a)")).toBeUndefined();
+describe("a writers.observed event in a BM-EVENTS card (autonomy design §F.1; bead i8fc.1)", () => {
+  it("reads the line the event bus writes, says it in plain words, in the warning colour, without the file or the ids", () => {
+    const line = eventLineOf({
+      type: "writers.observed",
+      workspaceId: "ws-a",
+      file: "src/math.js",
+      writers: [
+        { agentId: "w-1", role: "worker", requestId: "req-1", startedAt: "T0" },
+        { agentId: "w-2", role: "worker", requestId: null, startedAt: "T1" },
+      ],
+      alertKey: "writers-observed:ws-a:src/math.js",
+      at: "T2",
+    });
+    const message = eventsMessageOf([line]);
+    expect(eventsOf(message)).toEqual([{ type: "writers.observed", detail: null }]);
+    expect(eventWhat({ type: "writers.observed", detail: null })).toBe("two agents edited one file at the same time");
+    expect(eventTone({ type: "writers.observed", detail: null })).toBe("warning");
+    const notice = eventsNoticeOf(message);
+    expect(notice).toEqual({ what: "1 event: two agents edited one file at the same time", tone: "warning" });
+    for (const hidden of ["src/math.js", "w-1", "req-1"]) expect(notice.what).not.toContain(hidden);
   });
 });

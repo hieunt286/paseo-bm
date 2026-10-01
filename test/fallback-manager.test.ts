@@ -12,6 +12,7 @@ import { managerIdNotice } from "../plugin/server/settings-notices";
 import type { FallbackIncident } from "../plugin/shared/contracts";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
 import { currentInstructionsHash } from "../plugin/server/instructions-label";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 /**
  * Delta 20260921 §4.5.2 (REQ-066 c): "Switch" for a stopped Manager creates the
@@ -53,63 +54,43 @@ const incident = (overrides: Partial<FallbackIncident> = {}): FallbackIncident =
   ...overrides,
 });
 
-type Agent = { id: string; workspaceId: string; status: string; provider: string; labels: Record<string, string>; createdAt?: string; archivedAt?: string | null };
-
-function fakeDaemon(options: { create?: () => Promise<unknown>; oldLabels?: Record<string, string>; injectIntoAgents?: boolean } = {}) {
-  const agents: Agent[] = [
-    { id: OLD, workspaceId: WS, status: "idle", provider: "bm-manager", labels: { "bm.role": "manager", "bm.modeSet": "bypassPermissions", ...options.oldLabels }, createdAt: "2026-09-22T01:00:00.000Z" },
-    { id: "wrk-idle", workspaceId: WS, status: "idle", provider: "bm-worker", labels: { "bm.role": "worker", "bm.requestId": "req-1", "paseo.parent-agent-id": OLD } },
-    { id: "wrk-busy", workspaceId: WS, status: "running", provider: "bm-worker", labels: { "bm.role": "worker", "bm.requestId": "req-2", "paseo.parent-agent-id": OLD } },
-    { id: "wrk-old", workspaceId: WS, status: "idle", provider: "bm-worker", labels: { "bm.role": "worker", "bm.requestId": "req-3", "bm.replacedBy": "wrk-new" } },
-    { id: "wrk-other", workspaceId: "wks_other", status: "idle", provider: "bm-worker", labels: { "bm.role": "worker" } },
-  ];
-  const create = vi.fn(
-    options.create ??
-      (async (request: { labels: Record<string, string> }) => {
-        agents.push({ id: NEW, workspaceId: WS, status: "idle", provider: "bm-manager-fallback-1", labels: request.labels, createdAt: "2026-09-22T06:05:00.000Z" });
-        return { id: NEW, current: () => ({ id: NEW, status: "idle", capabilities: { supportsMcpServers: true } }), archive: async () => {} };
-      }),
-  );
-  const paseo = {
-    agents: {
-      list: vi.fn(async () => ({ entries: agents.map((agent) => ({ agent })), pageInfo: { nextCursor: null, hasMore: false } })),
-      ref: (id: string) => ({ refresh: async () => ({ agent: agents.find((agent) => agent.id === id) ?? null }) }),
-    },
-    workspaces: { ref: () => ({ agents: { create } }), list: async () => ({ entries: [] }) },
+/** The workspace's Manager `OLD` and its Workers, on a machine that is already set up; a creation makes `NEW`. */
+function daemon(options: { create?: () => Promise<never>; oldLabels?: Record<string, string>; injectIntoAgents?: boolean } = {}) {
+  const fake = fakePaseo({
+    agents: [
+      { id: OLD, workspaceId: WS, status: "idle", provider: "bm-manager", labels: { "bm.role": "manager", "bm.modeSet": "bypassPermissions", ...options.oldLabels }, createdAt: "2026-09-22T01:00:00.000Z" },
+      { id: "wrk-idle", workspaceId: WS, status: "idle", provider: "bm-worker", labels: { "bm.role": "worker", "bm.requestId": "req-1", "paseo.parent-agent-id": OLD } },
+      { id: "wrk-busy", workspaceId: WS, status: "running", provider: "bm-worker", labels: { "bm.role": "worker", "bm.requestId": "req-2", "paseo.parent-agent-id": OLD } },
+      { id: "wrk-old", workspaceId: WS, status: "idle", provider: "bm-worker", labels: { "bm.role": "worker", "bm.requestId": "req-3", "bm.replacedBy": "wrk-new" } },
+      { id: "wrk-other", workspaceId: "wks_other", status: "idle", provider: "bm-worker", labels: { "bm.role": "worker" } },
+    ],
     providers: {
-      listAvailable: async () => ({ providers: ["claude", "codex"].map((provider) => ({ provider, available: true })) }),
-      listModes: async (provider: string) => ({
-        provider,
-        modes: [
-          { id: "default", label: "Default", colorTier: "safe" },
-          { id: "bypassPermissions", label: "Bypass", colorTier: "dangerous" },
-        ],
-        error: null,
-      }),
+      available: ["claude", "codex"],
+      modes: () => [
+        { id: "default", label: "Default", colorTier: "safe" },
+        { id: "bypassPermissions", label: "Bypass", colorTier: "dangerous" },
+      ],
     },
+    // A machine that is already set up, so `ensureRoles` (0.4.0) finds
+    // nothing missing when `manager.ensure` runs below.
     config: {
-      // A machine that is already set up, so `ensureRoles` (0.4.0) finds
-      // nothing missing when `manager.ensure` runs below.
-      get: async () => ({
-        config: {
-          providers: {
-            "bm-manager": { extends: "claude", paseoTools: rolePaseoToolsPolicy("manager") },
-            "bm-worker": { extends: "claude", paseoTools: rolePaseoToolsPolicy("worker") },
-            "bm-reviewer": { extends: "claude", paseoTools: rolePaseoToolsPolicy("reviewer") },
-            "bm-orchestrator": { extends: "claude", paseoTools: rolePaseoToolsPolicy("orchestrator") },
-          },
-          agentProfiles: [
-            { id: "bm-manager", provider: "bm-manager", model: "claude-sonnet-5" },
-            { id: "bm-worker", provider: "bm-worker", model: "claude-sonnet-5" },
-            { id: "bm-reviewer", provider: "bm-reviewer", model: "claude-sonnet-5" },
-            { id: "bm-orchestrator", provider: "bm-orchestrator", model: "claude-sonnet-5" },
-          ],
-          ...(options.injectIntoAgents === undefined ? {} : { mcp: { injectIntoAgents: options.injectIntoAgents } }),
-        },
-      }),
+      providers: {
+        "bm-manager": { extends: "claude", paseoTools: rolePaseoToolsPolicy("manager") },
+        "bm-worker": { extends: "claude", paseoTools: rolePaseoToolsPolicy("worker") },
+        "bm-reviewer": { extends: "claude", paseoTools: rolePaseoToolsPolicy("reviewer") },
+        "bm-orchestrator": { extends: "claude", paseoTools: rolePaseoToolsPolicy("orchestrator") },
+      },
+      agentProfiles: [
+        { id: "bm-manager", provider: "bm-manager", model: "claude-sonnet-5" },
+        { id: "bm-worker", provider: "bm-worker", model: "claude-sonnet-5" },
+        { id: "bm-reviewer", provider: "bm-reviewer", model: "claude-sonnet-5" },
+        { id: "bm-orchestrator", provider: "bm-orchestrator", model: "claude-sonnet-5" },
+      ],
+      ...(options.injectIntoAgents === undefined ? {} : { mcp: { injectIntoAgents: options.injectIntoAgents } }),
     },
-  };
-  return { paseo, create, agents };
+    created: options.create ?? (() => ({ id: NEW, createdAt: "2026-09-22T06:05:00.000Z", capabilities: { supportsMcpServers: true } })),
+  });
+  return { paseo: fake.paseo, create: fake.api.workspaces.ref(WS).agents.create, agents: fake.agents };
 }
 
 let root: string;
@@ -150,7 +131,7 @@ afterEach(() => {
 describe("switch (Manager)", () => {
   it("creates one Manager through createManager with the exact provider, mode, labels and prompt, then records switched", async () => {
     write([incident()]);
-    const { paseo, create } = fakeDaemon();
+    const { paseo, create } = daemon();
     const { action, setLabels } = switcher();
     const after = await action(incident(), paseo, { home });
     expect(create).toHaveBeenCalledTimes(1);
@@ -167,7 +148,7 @@ describe("switch (Manager)", () => {
 
   it("tells every live, non-replaced Worker of the workspace the new Manager's id (queued for a running one)", async () => {
     write([incident()]);
-    const { paseo } = fakeDaemon();
+    const { paseo } = daemon();
     const { action, enqueue } = switcher();
     await action(incident(), paseo, { home });
     expect(enqueue.mock.calls.map((call) => [call[0], call[1]])).toEqual([
@@ -181,7 +162,7 @@ describe("switch (Manager)", () => {
 
   it("creates one Manager for two clicks at once through fallback.act", async () => {
     write([incident()]);
-    const { paseo, create } = fakeDaemon();
+    const { paseo, create } = daemon();
     const { action } = switcher();
     const act = () => handleFallbackAct({ incidentId: "fb-0000000000ff", action: "switch" }, paseo, { home, log, actions: { switch: action } });
     const results = await Promise.allSettled([act(), act()]);
@@ -191,7 +172,7 @@ describe("switch (Manager)", () => {
 
   it("records failed when the creation fails, and never goes back to pending", async () => {
     write([incident()]);
-    const { paseo } = fakeDaemon({
+    const { paseo } = daemon({
       create: async () => {
         throw new Error("provider not logged in");
       },
@@ -207,7 +188,7 @@ describe("switch (Manager)", () => {
     // A Manager gets the tools only when it is created: a replacement made now
     // would become the Manager Beads Manager opens, unable to create a Worker.
     write([incident()]);
-    const off = fakeDaemon({ injectIntoAgents: false });
+    const off = daemon({ injectIntoAgents: false });
     const { action, setLabels, enqueue } = switcher();
     await expect(action(incident(), off.paseo, { home })).rejects.toMatchObject({ code: "E_FALLBACK_CREATE_FAILED", message: expect.stringContaining(AGENT_TOOLS_OFF_SWITCH_MESSAGE) });
     expect(off.create).not.toHaveBeenCalled();
@@ -215,21 +196,21 @@ describe("switch (Manager)", () => {
     expect(enqueue).not.toHaveBeenCalled();
     expect(read()[0]).toMatchObject({ status: "pending" });
 
-    const on = fakeDaemon({ injectIntoAgents: true });
+    const on = daemon({ injectIntoAgents: true });
     await expect(action(incident(), on.paseo, { home })).resolves.toMatchObject({ status: "switched", replacementId: NEW });
     expect(on.create).toHaveBeenCalledTimes(1);
   });
 
   it("refuses a Manager already replaced, creating nothing", async () => {
     write([incident()]);
-    const { paseo, create } = fakeDaemon({ oldLabels: { "bm.replacedBy": "mgr-9" } });
+    const { paseo, create } = daemon({ oldLabels: { "bm.replacedBy": "mgr-9" } });
     await expect(switcher().action(incident(), paseo, { home })).rejects.toMatchObject({ code: "E_FALLBACK_NOT_PENDING" });
     expect(create).not.toHaveBeenCalled();
   });
 
   it("makes manager.ensure open the new Manager afterwards", async () => {
     write([incident()]);
-    const { paseo } = fakeDaemon();
+    const { paseo } = daemon();
     await switcher({ setLabels: vi.fn(async () => ({ ok: false as const, reason: "label failed" })) }).action(incident(), paseo, { home });
     // The old Manager has no bm.replacedBy label (labelling failed); the switched incident still hides it.
     const result = await ensureManager({ workspaceId: WS }, { paseo: paseo as never, readInstructions: async () => INSTRUCTIONS, home });

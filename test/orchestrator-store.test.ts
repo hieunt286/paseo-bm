@@ -3,15 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  ASSESSMENTS_DIR_NAME,
-  MAX_ASSESSMENT_RAW_CHARS,
-  MODEL_CORRECTIONS_FILE,
-  MODEL_CORRECTION_LIMIT,
   NOTES_DIR_NAME,
   ORCHESTRATOR_DIR_NAME,
-  ORCHESTRATOR_SETTINGS_FILE,
   COMMAND_LOG_LIMIT,
   PROPOSALS_FILE,
+  RETIRED_ASSESSMENTS_DIR_NAME,
   STALLS_FILE,
   STALL_ENTRY_LIMIT,
   WAKES_FILE,
@@ -19,27 +15,20 @@ import {
   createOrchestratorStore,
   dangerOpenKey,
   parseDangerOpenKey,
-  resetCorrectionWarning,
   type SentCommandInput,
 } from "../plugin/server/orchestrator-store";
 import { CLEANUP_DELETES } from "../plugin/server/setup-machine";
 import {
   DANGER_ALLOWANCE_MS,
-  DEFAULT_ORCHESTRATOR_SETTINGS,
   MAX_NOTES,
   MAX_NOTE_CHARS,
   MAX_PROPOSAL_COMMAND_CHARS,
   MAX_PROPOSAL_REASON_CHARS,
   RULE_IDS,
   WORKER_SIGNALS,
-  WORKFLOW_ASSESSMENT_TRACE_ID,
-  commandTargetOf,
   isSentCommand,
-  type AssessmentLine,
-  type ModelCorrection,
   type Proposal,
 } from "../plugin/shared/orchestrator";
-import { TRUNCATION_MARKER } from "../plugin/server/trace-store";
 
 /**
  * The Orchestrator's store (Orchestrator design §4.3, §5.4). Runs against a
@@ -54,8 +43,7 @@ let home: string;
 let clock: number;
 let nextId: number;
 
-const store = (log: (message: string) => void = () => {}) =>
-  createOrchestratorStore(home, { now: () => new Date(clock), log, newId: () => `prop-${++nextId}` });
+const store = () => createOrchestratorStore(home, { now: () => new Date(clock), newId: () => `prop-${++nextId}` });
 const modeOf = (path: string): number => statSync(path).mode & 0o777;
 const orchestratorDir = () => join(home, ORCHESTRATOR_DIR_NAME);
 
@@ -64,7 +52,6 @@ beforeEach(() => {
   home = join(root, "data");
   clock = T0;
   nextId = 0;
-  resetCorrectionWarning();
 });
 
 afterEach(() => {
@@ -72,38 +59,9 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-const correction = (i: number): ModelCorrection => ({
-  at: new Date(T0 + i * 1000).toISOString(),
-  alias: "bm-worker",
-  requested: `model-${i}`,
-  profileModel: "claude-opus-5",
-  cwd: "/repo",
-});
-
-const assessment = (over: Partial<AssessmentLine> = {}): AssessmentLine => ({
-  v: 1,
-  assessmentId: "asm-1",
-  requestId: "req-20260928T100000Z",
-  traceId: "req:req-20260928T100000Z",
-  agentId: null,
-  at: new Date(clock).toISOString(),
-  status: "pending",
-  provider: "bm-orchestrator",
-  model: "claude-opus-5",
-  ...over,
-});
-
 describe("shared shapes", () => {
-  it("names the seven first-release rules", () => {
-    expect(RULE_IDS).toEqual([
-      "process.small-heavy",
-      "process.no-review",
-      "review.over-budget",
-      "agent.failed-first-turn",
-      "agent.model-corrected",
-      "report.malformed",
-      "manager.language-mismatch",
-    ]);
+  it("names only the rule the stall pass reads; the assessment-only rules are retired (autonomy design §B.9)", () => {
+    expect(RULE_IDS).toEqual(["review.over-budget"]);
   });
 });
 
@@ -114,7 +72,6 @@ const commandInput = (over: Partial<SentCommandInput> = {}): SentCommandInput =>
   situation: "answer to Q2",
   command: "Tell the Worker to go on with option B.",
   reason: "The owner answered in the Worker's chat.",
-  source: "autopilot",
   sentText: "BM-COMMAND\nfrom: orchestrator\nre: answer to Q2\n\nTell the Worker to go on with option B.",
   outcome: "sent",
   ...over,
@@ -123,34 +80,20 @@ const commandInput = (over: Partial<SentCommandInput> = {}): SentCommandInput =>
 describe("folder and file modes", () => {
   it("creates nothing on a read", () => {
     const s = store();
-    expect(s.readSettings()).toEqual(DEFAULT_ORCHESTRATOR_SETTINGS);
-    expect(s.isAutopilot(WS)).toBe(false);
-    expect(s.setAutopilot(WS, false)).toEqual(DEFAULT_ORCHESTRATOR_SETTINGS);
     expect(s.listCommands()).toEqual([]);
     expect(s.listDangerAllowances()).toEqual([]);
     expect(s.isDangerOpen(WS, "wrk-1")).toBe(false);
-    expect(s.readCorrections()).toEqual([]);
-    expect(s.readAssessments(WS)).toEqual([]);
+    expect(s.deleteRetiredAssessments(WS)).toBe(false);
     expect(existsSync(home)).toBe(false);
   });
 
   it("creates the folder 0700 and every file 0600 on first write", () => {
     const s = store();
-    s.setAutopilot(WS, true);
     s.appendCommand(commandInput());
     s.openDangerAllowance(WS, "wrk-1");
-    s.appendCorrection(correction(0));
-    s.appendAssessment(WS, assessment());
 
     expect(modeOf(orchestratorDir())).toBe(0o700);
-    expect(modeOf(join(orchestratorDir(), ASSESSMENTS_DIR_NAME))).toBe(0o700);
-    for (const file of [
-      ORCHESTRATOR_SETTINGS_FILE,
-      PROPOSALS_FILE,
-      STALLS_FILE,
-      MODEL_CORRECTIONS_FILE,
-      join(ASSESSMENTS_DIR_NAME, `${WS}.jsonl`),
-    ]) {
+    for (const file of [PROPOSALS_FILE, STALLS_FILE]) {
       expect(modeOf(join(orchestratorDir(), file)), file).toBe(0o600);
     }
     // No temp file of an atomic write is left behind.
@@ -162,113 +105,22 @@ describe("folder and file modes", () => {
   });
 });
 
-describe("settings.json (version 3)", () => {
-  const settingsFile = () => join(orchestratorDir(), ORCHESTRATOR_SETTINGS_FILE);
-  const writeRaw = (value: unknown): void => {
-    mkdirSync(orchestratorDir(), { recursive: true });
-    writeFileSync(settingsFile(), typeof value === "string" ? value : JSON.stringify(value));
-  };
+describe("settings.json is retired with Autopilot and Allow… (autonomy design §B.8)", () => {
+  const settingsFile = () => join(orchestratorDir(), "settings.json");
 
-  it("defaults to no Autopilot when missing, corrupt or unrecognised", () => {
+  it("never reads or writes the file an earlier build left, and no write creates one", () => {
     const s = store();
-    expect(s.readSettings()).toEqual({ version: 3, autopilot: {} });
-    writeRaw("{not json");
-    expect(s.readSettings()).toEqual(DEFAULT_ORCHESTRATOR_SETTINGS);
-    writeRaw({ version: 3, autopilot: "none" });
-    expect(s.readSettings()).toEqual(DEFAULT_ORCHESTRATOR_SETTINGS);
-    writeRaw({ version: 4, autopilot: {} });
-    expect(s.readSettings()).toEqual(DEFAULT_ORCHESTRATOR_SETTINGS);
-  });
+    s.appendCommand(commandInput());
+    s.openDangerAllowance(WS, "wrk-1");
+    s.appendNote(WS, "The owner prefers small commits.");
+    expect(existsSync(settingsFile())).toBe(false);
 
-  it("reads a first-design version-1 file and a version-2 (Watch only) file as no Autopilot", () => {
-    const s = store();
-    writeRaw({ version: 1, nudge: { enabled: true, rules: ["process.small-heavy", "manager.language-mismatch"] } });
-    expect(s.readSettings()).toEqual(DEFAULT_ORCHESTRATOR_SETTINGS);
-    writeRaw({ version: 2, watch: { enabled: true } });
-    expect(s.readSettings()).toEqual(DEFAULT_ORCHESTRATOR_SETTINGS);
-    // The next write replaces it.
-    s.setAutopilot(WS, true);
-    expect(JSON.parse(readFileSync(settingsFile(), "utf8"))).toEqual({
-      version: 3,
-      autopilot: { [WS]: { enabled: true, since: new Date(T0).toISOString() } },
-    });
-  });
-
-  it("ignores the Watch switch an older version-3 file carries, and drops it at the next write (autonomy design §A.8)", () => {
-    const s = store();
-    const since = new Date(T0).toISOString();
-    writeRaw({ version: 3, watch: { enabled: true }, autopilot: { [WS]: { enabled: true, since } } });
-    expect(s.readSettings()).toEqual({ version: 3, autopilot: { [WS]: { enabled: true, since } } });
-    s.setAutopilot("wks_2", true);
-    expect(JSON.parse(readFileSync(settingsFile(), "utf8"))).not.toHaveProperty("watch");
-  });
-
-  it("keeps the previous content when a write fails before its rename", () => {
-    const s = store();
-    s.setAutopilot(WS, true);
-    const before = readFileSync(settingsFile(), "utf8");
-    vi.spyOn(Date, "now").mockReturnValue(424243);
-    writeFileSync(join(orchestratorDir(), `${ORCHESTRATOR_SETTINGS_FILE}.tmp-${process.pid}-424243`), "partial");
-    expect(() => s.setAutopilot(WS, false)).toThrow();
-    expect(readFileSync(settingsFile(), "utf8")).toBe(before);
-    expect(s.isAutopilot(WS)).toBe(true);
-  });
-
-  it("turns Autopilot on and off per project, recording since and by", () => {
-    const s = store();
-    const on = s.setAutopilot(WS, true, "tab");
-    expect(on).toEqual({ version: 3, autopilot: { [WS]: { enabled: true, since: new Date(T0).toISOString(), by: "tab" } } });
-    expect(s.isAutopilot(WS)).toBe(true);
-    expect(s.isAutopilot("wks_2")).toBe(false);
-
-    // On again: the entry keeps its first time, and nothing is written.
-    clock = T0 + 5_000;
-    const before = readFileSync(settingsFile(), "utf8");
-    expect(s.setAutopilot(WS, true, "chat")).toEqual(on);
-    expect(readFileSync(settingsFile(), "utf8")).toBe(before);
-
-    s.setAutopilot("wks_2", true);
-    expect(Object.keys(s.readSettings().autopilot)).toEqual([WS, "wks_2"]);
-    expect(s.readSettings().autopilot["wks_2"]).toEqual({ enabled: true, since: new Date(T0 + 5_000).toISOString() });
-
-    // Off removes the entry.
-    expect(s.setAutopilot(WS, false)).toEqual({
-      version: 3,
-      autopilot: { wks_2: { enabled: true, since: new Date(T0 + 5_000).toISOString() } },
-    });
-    expect(s.isAutopilot(WS)).toBe(false);
-  });
-
-  it("skips an Autopilot entry that does not validate, or whose key is not a workspace id, on its own", () => {
-    const s = store();
-    const since = new Date(T0).toISOString();
-    writeRaw({
-      version: 3,
-      autopilot: { [WS]: { enabled: true, since }, wks_off: { enabled: false, since }, "../x": { enabled: true, since }, wks_bad: "yes" },
-    });
-    expect(s.readSettings().autopilot).toEqual({ [WS]: { enabled: true, since } });
-    expect(s.isAutopilot("wks_off")).toBe(false);
-    expect(s.isAutopilot("../x")).toBe(false);
-  });
-
-  it("never lets a workspace id reach a prototype", () => {
-    const s = store();
-    const since = new Date(T0).toISOString();
-    writeRaw(`{"version":3,"autopilot":{"__proto__":{"enabled":true,"since":"${since}"}}}`);
-    const read = s.readSettings();
-    expect(Object.getPrototypeOf(read.autopilot)).toBe(Object.prototype);
-    expect(({} as Record<string, unknown>)["enabled"]).toBeUndefined();
-    expect(s.isAutopilot("toString")).toBe(false);
-    s.setAutopilot("constructor", true);
-    expect(Object.keys(s.readSettings().autopilot)).toEqual(["constructor"]);
-    expect(s.isAutopilot("constructor")).toBe(true);
-    expect(s.isAutopilot("hasOwnProperty")).toBe(false);
-  });
-
-  it("refuses an Autopilot switch for a workspace id the store would refuse, writing nothing", () => {
-    const s = store();
-    expect(() => s.setAutopilot("../x", true)).toThrow();
-    expect(existsSync(home)).toBe(false);
+    const earlier = JSON.stringify({ version: 3, watch: { enabled: true }, autopilot: { [WS]: { enabled: true, since: new Date(T0).toISOString(), by: "tab", allow: ["release"] } } });
+    writeFileSync(settingsFile(), earlier);
+    s.appendCommand(commandInput({ situation: "go on" }));
+    s.openDangerAllowance(WS, "wrk-2");
+    s.appendNote(WS, "Another note.");
+    expect(readFileSync(settingsFile(), "utf8")).toBe(earlier);
   });
 });
 
@@ -293,7 +145,7 @@ describe("proposals.json: the commands the Orchestrator sent (autonomy design §
       situation: "answer to Q2",
       command: "Tell the Worker to go on with option B.",
       reason: "The owner answered in the Worker's chat.",
-      source: "autopilot",
+      source: "chat",
       status: "sent",
       settledAt: new Date(T0).toISOString(),
       sentText: commandInput().sentText,
@@ -306,14 +158,20 @@ describe("proposals.json: the commands the Orchestrator sent (autonomy design §
     expect(isSentCommand(command)).toBe(true);
   });
 
-  it("stores a Worker command with its Worker and Manager; a Manager command has no target field and reads as manager", () => {
+  it("records a command under the id it was sent with (command-send.ts), and refuses an id already used", () => {
+    const s = store();
+    expect(s.appendCommand(commandInput({ id: "cmd-given" })).id).toBe("cmd-given");
+    expect(s.appendCommand(commandInput()).id).toBe("prop-1");
+    expect(() => s.appendCommand(commandInput({ id: "cmd-given" }))).toThrow("command id already used: cmd-given");
+    expect(s.listCommands().map((entry) => entry.id).sort()).toEqual(["cmd-given", "prop-1"]);
+  });
+
+  it("stores a Worker command with its Worker and Manager; a Manager command has no target field", () => {
     const s = store();
     const toManager = s.appendCommand(commandInput());
-    const toWorker = s.appendCommand(commandInput({ source: "chat", to: "worker", workerId: "wkr-1", managerId: null }));
+    const toWorker = s.appendCommand(commandInput({ to: "worker", workerId: "wkr-1", managerId: null }));
     expect(toManager.to).toBeUndefined();
-    expect(commandTargetOf(toManager)).toBe("manager");
     expect(toWorker).toMatchObject({ to: "worker", workerId: "wkr-1", managerId: null, source: "chat" });
-    expect(commandTargetOf(toWorker)).toBe("worker");
   });
 
   it("refuses a command the file cannot hold, writing nothing", () => {
@@ -349,7 +207,8 @@ describe("proposals.json: the commands the Orchestrator sent (autonomy design §
   });
 
   it("ignores the proposal era's entries, and drops them at the next write", () => {
-    const sent = { ...commandInput(), id: "kept", at: new Date(T0).toISOString(), kind: "command", status: "sent", settledAt: new Date(T0).toISOString(), error: null };
+    // A command Phase 1 sent on a project's Autopilot: history, still a command the Orchestrator sent (autonomy design §B.8).
+    const sent = { ...commandInput(), source: "autopilot", id: "kept", at: new Date(T0).toISOString(), kind: "command", status: "sent", settledAt: new Date(T0).toISOString(), error: null };
     const proposalEra = [
       // A proposal waiting for the tab's Send, one dismissed, one that failed.
       { ...sent, id: "pending", source: "orchestrator", status: "pending", settledAt: null, sentText: null, outcome: null },
@@ -419,6 +278,30 @@ describe("wakes.json: each wake of the Orchestrator (evaluation design §4, A-7)
     expect(s.endWake(ORCH)).toBeNull();
   });
 
+  it("the end carries the closing turn's tokens (change-007 C6); a wake written before them still reads", () => {
+    mkdirSync(orchestratorDir(), { recursive: true });
+    // An ended wake from a build before C6: no `usage` at all.
+    const before = { orchestratorId: ORCH, at: new Date(T0 - 60_000).toISOString(), endedAt: new Date(T0 - 30_000).toISOString(), workspaceIds: [WS], events: 1 };
+    writeFileSync(wakesFile(), JSON.stringify({ version: 1, entries: [before] }));
+    const s = store();
+    expect(s.readWakes()).toEqual([before]);
+
+    s.appendWake({ orchestratorId: ORCH, workspaceIds: [WS], events: 2 });
+    clock += 1_000;
+    const usage = { inputTokens: 12, cachedInputTokens: 30_500, outputTokens: 410 };
+    expect(s.endWake(ORCH, usage)).toMatchObject({ endedAt: new Date(T0 + 1_000).toISOString(), usage });
+    expect(s.readWakes().map((wake) => wake.usage)).toEqual([undefined, usage]);
+    expect(JSON.parse(readFileSync(wakesFile(), "utf8")).entries[1].usage).toEqual(usage);
+
+    // Unknown tokens, or tokens that do not validate, are null — and never cost the wake its end.
+    s.appendWake({ orchestratorId: ORCH, workspaceIds: [WS], events: 1 });
+    clock += 1_000;
+    expect(s.endWake(ORCH)).toMatchObject({ endedAt: new Date(T0 + 2_000).toISOString(), usage: null });
+    s.appendWake({ orchestratorId: ORCH, workspaceIds: [WS], events: 1 });
+    expect(s.endWake(ORCH, { inputTokens: -1, cachedInputTokens: 0.5, outputTokens: 1 })).toMatchObject({ usage: null });
+    expect(s.readWakes().every((wake) => wake.endedAt !== null)).toBe(true);
+  });
+
   it("keeps the 500 newest; an entry that does not validate is skipped and dropped by the next write", () => {
     mkdirSync(orchestratorDir(), { recursive: true });
     const seeded = Array.from({ length: WAKE_LOG_LIMIT }, (_, i) => ({
@@ -449,189 +332,64 @@ describe("wakes.json: each wake of the Orchestrator (evaluation design §4, A-7)
   });
 });
 
-describe("model-corrections.json", () => {
-  it("keeps the 500 newest entries", () => {
+describe("model-corrections.json is retired with its rule (autonomy design §B.9)", () => {
+  it("leaves the file an earlier build wrote as it is", () => {
     const s = store();
     mkdirSync(orchestratorDir(), { recursive: true });
-    const seeded = Array.from({ length: MODEL_CORRECTION_LIMIT - 1 }, (_, i) => correction(i));
-    writeFileSync(join(orchestratorDir(), MODEL_CORRECTIONS_FILE), JSON.stringify({ version: 1, entries: seeded }));
-    for (let i = MODEL_CORRECTION_LIMIT - 1; i < MODEL_CORRECTION_LIMIT + 2; i++) s.appendCorrection(correction(i));
-    const entries = s.readCorrections();
-    expect(entries).toHaveLength(MODEL_CORRECTION_LIMIT);
-    expect(entries[0]).toEqual(correction(2));
-    expect(entries.at(-1)).toEqual(correction(MODEL_CORRECTION_LIMIT + 1));
-  });
-
-  it("never throws when the folder cannot be written (ENOTDIR), and warns once", () => {
-    mkdirSync(home, { recursive: true });
-    writeFileSync(orchestratorDir(), "a regular file where the folder should be");
-    const log = vi.fn();
-    const s = store(log);
-    expect(() => s.appendCorrection(correction(0))).not.toThrow();
-    expect(() => s.appendCorrection(correction(1))).not.toThrow();
-    expect(log).toHaveBeenCalledTimes(1);
-    expect(String(log.mock.calls[0]![0])).toContain("[paseo-bm] could not record a model correction");
+    const file = join(orchestratorDir(), "model-corrections.json");
+    const earlier = JSON.stringify({ version: 1, entries: [{ at: new Date(T0).toISOString(), alias: "bm-worker", requested: "a", profileModel: "b", cwd: "/repo" }] });
+    writeFileSync(file, earlier);
+    s.appendCommand(commandInput());
+    s.appendNote(WS, "A note.");
+    expect(readFileSync(file, "utf8")).toBe(earlier);
   });
 });
 
-describe("assessments/<workspaceId>.jsonl", () => {
-  const file = () => join(orchestratorDir(), ASSESSMENTS_DIR_NAME, `${WS}.jsonl`);
+describe("assessments/<workspaceId>.jsonl is retired with the workflow assessment (autonomy design §B.9)", () => {
+  const dir = () => join(orchestratorDir(), RETIRED_ASSESSMENTS_DIR_NAME);
+  const file = (workspaceId = WS) => join(dir(), `${workspaceId}.jsonl`);
+  const earlierLine = JSON.stringify({ v: 1, assessmentId: "asm-1", requestId: "req-20260928T100000Z", traceId: "req:req-20260928T100000Z", status: "done", result: { findings: ["quotes the request"] } });
+  const earlierBuild = (workspaceId = WS): void => {
+    mkdirSync(dir(), { recursive: true });
+    writeFileSync(file(workspaceId), `${earlierLine}\n`);
+  };
 
-  it("appends one line per write and reads the newest line of each assessment, newest first", () => {
+  it("deletes an earlier build's file of the workspace, and only that one", () => {
+    earlierBuild();
+    earlierBuild("wks_other");
     const s = store();
-    s.appendAssessment(WS, assessment());
-    s.appendAssessment(WS, assessment({ assessmentId: "asm-2", traceId: "agent-9:turn-1", requestId: null }));
-    clock = T0 + 60_000;
-    s.appendAssessment(WS, assessment({ agentId: "agent-o", status: "done", result: { rubric: [] }, usage: { outputTokens: 12 } }));
-
-    expect(readFileSync(file(), "utf8").trim().split("\n")).toHaveLength(3);
-    const read = s.readAssessments(WS);
-    expect(read.map((line) => [line.assessmentId, line.status])).toEqual([
-      ["asm-1", "done"],
-      ["asm-2", "pending"],
-    ]);
-    expect(read[0]).toMatchObject({ agentId: "agent-o", result: { rubric: [] }, usage: { outputTokens: 12 } });
-  });
-
-  it("skips a half-written trailing line", () => {
-    const s = store();
-    s.appendAssessment(WS, assessment());
-    writeFileSync(file(), `${readFileSync(file(), "utf8")}{"v":1,"assessmentId":"asm-1","sta`);
-    expect(s.readAssessments(WS)).toHaveLength(1);
-    expect(s.readAssessments(WS)[0]!.status).toBe("pending");
-  });
-
-  it("cuts a raw reply over 8 KB", () => {
-    const s = store();
-    const stored = s.appendAssessment(WS, assessment({ status: "failed", raw: "x".repeat(MAX_ASSESSMENT_RAW_CHARS + 500) }));
-    expect(stored.raw).toBe(`${"x".repeat(MAX_ASSESSMENT_RAW_CHARS)}${TRUNCATION_MARKER}`);
-    expect(s.readAssessments(WS)[0]!.raw).toBe(stored.raw);
-    const small = s.appendAssessment(WS, assessment({ assessmentId: "asm-2", status: "failed", raw: "short" }));
-    expect(small.raw).toBe("short");
-  });
-
-  it("deletes only the named traces' lines", () => {
-    const s = store();
-    s.appendAssessment(WS, assessment());
-    s.appendAssessment(WS, assessment({ assessmentId: "asm-2", traceId: "agent-9:turn-1", requestId: null }));
-    s.appendAssessment(WS, assessment({ assessmentId: "asm-3", traceId: "req:req-other", requestId: "req-other" }));
-    s.appendAssessment(WS, assessment({ status: "done" }));
-
-    expect(s.deleteAssessmentsFor(WS, { traceIds: ["agent-9:turn-1"] })).toBe(1);
-    expect(s.readAssessments(WS).map((line) => line.assessmentId)).toEqual(["asm-1", "asm-3"]);
-    expect(s.deleteAssessmentsFor(WS, { requestIds: ["req-20260928T100000Z"] })).toBe(2);
-    expect(s.readAssessments(WS).map((line) => line.assessmentId)).toEqual(["asm-3"]);
-    expect(modeOf(file())).toBe(0o600);
-    expect(s.deleteAssessmentsFor(WS, { traceIds: ["nothing"] })).toBe(0);
-
-    expect(s.deleteAssessmentsFor(WS, { traceIds: ["req:req-other"] })).toBe(1);
+    expect(s.deleteRetiredAssessments(WS)).toBe(true);
     expect(existsSync(file())).toBe(false);
-    expect(readdirSync(join(orchestratorDir(), ASSESSMENTS_DIR_NAME))).toEqual([]);
+    expect(readFileSync(file("wks_other"), "utf8")).toBe(`${earlierLine}\n`);
+    // Already gone: nothing to delete, and no folder is created.
+    expect(s.deleteRetiredAssessments(WS)).toBe(false);
   });
 
-  const workflow = (over: Partial<AssessmentLine> = {}): AssessmentLine =>
-    assessment({
-      assessmentId: "wf-1",
-      requestId: null,
-      traceId: WORKFLOW_ASSESSMENT_TRACE_ID,
-      scope: { requestIds: ["req-20260928T100000Z", "req-other"] },
-      ...over,
-    });
-
-  it("stores a workflow assessment: requestId null, traceId workspace, a scope", () => {
-    const s = store();
-    s.appendAssessment(WS, workflow());
-    clock = T0 + 60_000;
-    s.appendAssessment(WS, workflow({ status: "done", agentId: "agent-o", result: { average: 4.2 } }));
-    expect(s.readAssessments(WS)).toEqual([
-      workflow({ status: "done", agentId: "agent-o", result: { average: 4.2 }, at: new Date(T0 + 60_000).toISOString() }),
-    ]);
-    expect(s.readAssessments(WS)[0]!.scope).toEqual({ requestIds: ["req-20260928T100000Z", "req-other"] });
+  it("answers false without a file, creating nothing", () => {
+    expect(store().deleteRetiredAssessments(WS)).toBe(false);
+    expect(existsSync(home)).toBe(false);
   });
 
-  it("refuses a workspace-wide line without a scope or with a request id", () => {
-    const s = store();
-    expect(() => s.appendAssessment(WS, assessment({ requestId: null, traceId: WORKFLOW_ASSESSMENT_TRACE_ID }))).toThrow();
-    expect(() => s.appendAssessment(WS, workflow({ requestId: "req-x" }))).toThrow();
-    expect(existsSync(file())).toBe(false);
-  });
-
-  it("deletes a workflow line with the first request of its scope that is deleted, and only then", () => {
-    const s = store();
-    s.appendAssessment(WS, workflow());
-    s.appendAssessment(WS, workflow({ assessmentId: "wf-2", scope: { requestIds: ["req-third"] } }));
-    s.appendAssessment(WS, assessment());
-
-    // A trace without a request, or a request outside every scope, leaves the workflow lines.
-    expect(s.deleteAssessmentsFor(WS, { traceIds: ["agent-9:turn-1", WORKFLOW_ASSESSMENT_TRACE_ID] })).toBe(0);
-    expect(s.deleteAssessmentsFor(WS, { traceIds: ["req:req-other"], requestIds: ["req-other"] })).toBe(1);
-    expect(s.readAssessments(WS).map((line) => line.assessmentId)).toEqual(["asm-1", "wf-2"]);
-    expect(s.deleteAssessmentsFor(WS, { requestIds: ["req-20260928T100000Z"] })).toBe(1);
-    expect(s.readAssessments(WS).map((line) => line.assessmentId)).toEqual(["wf-2"]);
+  it("refuses a symlinked file, leaving what it points at", () => {
+    const outside = join(root, "outside.jsonl");
+    writeFileSync(outside, "keep me");
+    mkdirSync(dir(), { recursive: true });
+    symlinkSync(outside, file());
+    expect(() => store().deleteRetiredAssessments(WS)).toThrow(/^E_ORCHESTRATOR_WRITE_FAILED/);
+    expect(readFileSync(outside, "utf8")).toBe("keep me");
   });
 
   it("refuses a workspace id that is not a safe file name", () => {
+    earlierBuild();
     const s = store();
-    expect(() => s.appendAssessment("../escape", assessment())).toThrow();
-    expect(() => s.readAssessments("..")).toThrow();
-  });
-});
-
-// ── ADR-016 additions (design §6B.3, §6B.4, §6B.5, §6B.7) ──────────────────
-
-describe("Autopilot allow: gate categories per project (design §6B.5)", () => {
-  const settingsFile = () => join(orchestratorDir(), ORCHESTRATOR_SETTINGS_FILE);
-
-  it("allows none by default, and refuses — writing nothing — for a project with Autopilot off", () => {
-    const s = store();
-    expect(s.allowedCategories(WS)).toEqual([]);
-    expect(s.setAutopilotAllow(WS, ["release"])).toBeNull();
-    expect(existsSync(home)).toBe(false);
-    s.setAutopilot(WS, true, "tab");
-    expect(s.allowedCategories(WS)).toEqual([]);
-    expect(s.readSettings().autopilot[WS]).toEqual({ enabled: true, since: new Date(T0).toISOString(), by: "tab" });
+    expect(() => s.deleteRetiredAssessments("../escape")).toThrow();
+    expect(() => s.deleteRetiredAssessments("..")).toThrow();
+    expect(existsSync(file())).toBe(true);
   });
 
-  it("stores the categories once each in the gate's order, keeps since and by, and an empty list removes allow", () => {
-    const s = store();
-    s.setAutopilot(WS, true, "chat");
-    s.setAutopilot("wks_2", true);
-    clock = T0 + 5_000;
-    const set = s.setAutopilotAllow(WS, ["dependency", "release", "dependency"]);
-    expect(set?.autopilot[WS]).toEqual({ enabled: true, since: new Date(T0).toISOString(), by: "chat", allow: ["release", "dependency"] });
-    expect(s.allowedCategories(WS)).toEqual(["release", "dependency"]);
-    expect(s.allowedCategories("wks_2")).toEqual([]);
-    expect(Object.keys(s.readSettings().autopilot)).toEqual([WS, "wks_2"]);
-
-    // Turning Autopilot on again keeps the entry, allowance included.
-    s.setAutopilot(WS, true, "tab");
-    expect(s.allowedCategories(WS)).toEqual(["release", "dependency"]);
-
-    s.setAutopilotAllow(WS, []);
-    expect(JSON.parse(readFileSync(settingsFile(), "utf8")).autopilot[WS]).toEqual({ enabled: true, since: new Date(T0).toISOString(), by: "chat" });
-  });
-
-  it("forgets the allowance when Autopilot goes off: on again starts with none", () => {
-    const s = store();
-    s.setAutopilot(WS, true);
-    s.setAutopilotAllow(WS, ["cost"]);
-    s.setAutopilot(WS, false);
-    expect(s.allowedCategories(WS)).toEqual([]);
-    s.setAutopilot(WS, true);
-    expect(s.allowedCategories(WS)).toEqual([]);
-  });
-
-  it("drops a category it does not know when reading, keeping the entry and Autopilot on", () => {
-    const s = store();
-    const since = new Date(T0).toISOString();
-    mkdirSync(orchestratorDir(), { recursive: true });
-    writeFileSync(settingsFile(), JSON.stringify({ version: 3, watch: { enabled: false }, autopilot: { [WS]: { enabled: true, since, allow: ["release", "telepathy", 7] } } }));
-    expect(s.isAutopilot(WS)).toBe(true);
-    expect(s.allowedCategories(WS)).toEqual(["release"]);
-  });
-
-  it("refuses a workspace id the store would refuse", () => {
-    expect(() => store().setAutopilotAllow("../x", ["release"])).toThrow();
+  it("lives inside the folder cleanup deletes whole", () => {
+    expect(file().startsWith(`${orchestratorDir()}/`)).toBe(true);
+    expect(CLEANUP_DELETES).toContain(ORCHESTRATOR_DIR_NAME);
   });
 });
 
@@ -776,5 +534,38 @@ describe("notes/<workspaceId>.json (design §6B.4 bm_note)", () => {
     store().appendNote(WS, "kept");
     expect(notesFile().startsWith(`${orchestratorDir()}/`)).toBe(true);
     expect(CLEANUP_DELETES).toContain(ORCHESTRATOR_DIR_NAME);
+  });
+});
+
+describe("a file written by a newer paseo-bm (code review 2026-09-30 §2.3)", () => {
+  const newer = (entries: unknown) => JSON.stringify({ version: 2, entries, addedLater: true });
+  const ORCH = "orch-1";
+
+  it("reads as its default and is never written: every write throws E_ORCHESTRATOR_WRITE_FAILED and leaves it byte for byte", () => {
+    mkdirSync(join(orchestratorDir(), NOTES_DIR_NAME), { recursive: true });
+    const files = {
+      [join(orchestratorDir(), PROPOSALS_FILE)]: newer([{ id: "from-the-future" }]),
+      [join(orchestratorDir(), STALLS_FILE)]: JSON.stringify({ version: 2, entries: { [dangerOpenKey(WS, "wrk-1", new Date(T0).toISOString())]: {} } }),
+      [join(orchestratorDir(), WAKES_FILE)]: newer([{ orchestratorId: ORCH }]),
+      [join(orchestratorDir(), NOTES_DIR_NAME, `${WS}.json`)]: newer([{ text: "a newer note" }]),
+    };
+    for (const [path, text] of Object.entries(files)) writeFileSync(path, text);
+
+    const s = store();
+    expect(s.listCommands()).toEqual([]);
+    expect(s.listDangerAllowances()).toEqual([]);
+    expect(s.readWakes()).toEqual([]);
+    expect(s.readNotes(WS)).toEqual([]);
+
+    const refused = /^E_ORCHESTRATOR_WRITE_FAILED: .* was written by a newer paseo-bm; it is left as it is$/;
+    expect(() => s.appendCommand(commandInput())).toThrow(refused);
+    expect(() => s.openDangerAllowance(WS, "wrk-1")).toThrow(refused);
+    expect(() => s.appendWake({ orchestratorId: ORCH, workspaceIds: [WS], events: 1 })).toThrow(refused);
+    expect(() => s.appendNote(WS, "mine")).toThrow(refused);
+    expect(() => s.appendNote(WS, "mine", { replace: true })).toThrow(refused);
+    // Nothing to end reads nothing into being, and throws nothing.
+    expect(s.endWake(ORCH)).toBeNull();
+
+    for (const [path, text] of Object.entries(files)) expect(readFileSync(path, "utf8"), path).toBe(text);
   });
 });

@@ -165,7 +165,8 @@ describe("Paseo 0.8 import boundaries", () => {
 });
 
 describe("shared/contracts.ts", () => {
-  const source = read("shared/contracts.ts");
+  // The barrel re-exports `shared/contracts/*`, where the RPCs are defined.
+  const source = [read("shared/contracts.ts"), ...sourceFilesUnder("shared/contracts").map(read)].join("\n");
 
   it.each([
     "manager.ensure",
@@ -180,6 +181,7 @@ describe("shared/contracts.ts", () => {
     "beads.get",
     "beads.action",
     "traces.workspaces",
+    "links.why",
   ])("defines the %s RPC", (name) => {
     expect(source).toContain(`name: "${name}"`);
   });

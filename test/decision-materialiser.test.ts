@@ -3,16 +3,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  LAST_TOUCHED_BEAD,
   answerInputOf,
+  citedDecisionIds,
   clearMaterialiserMemory,
   createDecisionMaterialiser,
   materialiseTurn,
   normalisedQuestion,
+  reopensOf,
   workerOfRequest,
   type MaterialiserDeps,
 } from "../plugin/server/decision-materialiser";
 import { DECISIONS_DIR_NAME, clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
-import { GRANT_TTL_MS, confirmDecision, type Decision } from "../plugin/shared/decisions";
+import { handleDecisionsAnswer, handleDecisionsList } from "../plugin/server/decision-rpc";
+import { createAutonomyStore } from "../plugin/server/autonomy-store";
+import { createPrecedentStore } from "../plugin/server/precedent-store";
+import { decideRefusalOf, predictionRefusalOf, type AutonomyPolicy } from "../plugin/shared/autonomy";
+import { GRANT_TTL_MS, answerDecision, confirmDecision, markNeedsConfirmation, type Decision } from "../plugin/shared/decisions";
 import type { TraceRecord } from "../plugin/shared/contracts";
 import { MANAGER, WORKER, WORKSPACE_ID, at, msg, turn } from "./fixtures/orchestrator-traces";
 
@@ -173,6 +180,45 @@ describe("opening at a Manager's turn end (§A.5 a)", () => {
     const outcome = await materialiseTurn(turn({ role: "reviewer", workspaceId: WORKSPACE_ID, sent: [msg(MANAGER, at(2), report(ROUND_ONE), "agent")] }), deps());
     expect(outcome.role).toBeNull();
     expect(fileBytes()).toBeNull();
+  });
+});
+
+describe("classes (autonomy design §B.1)", () => {
+  it("stores the class its effects imply when the Worker proposes none", async () => {
+    await ask();
+    expect(get("Q1")?.class).toBe("release");
+    expect(get("Q2")?.class).toBe("dependency");
+    await ask("Q3: Rename the helper?\n- a: Yes (recommended) [effects: commit]\n- b: No", at(4));
+    expect(get("Q3")?.class).toBe("reversible-technical");
+  });
+
+  it("stores the Worker's proposal when it is the riskier, and raises it to the effects' class when not", async () => {
+    await ask(
+      [
+        "Q1: Ship the auth change? [subject: auth] [class: security]",
+        "- a: Push it (recommended) [effects: push]",
+        "- b: Hold",
+        "Q2: Push the fix now? [class: reversible-technical]",
+        "- a: Push (recommended) [effects: push]",
+        "- b: Hold [effects: none]",
+        "Q3: Which wording? [class: preference]",
+        "- a: Short (recommended)",
+        "- b: Long",
+      ].join("\n"),
+    );
+    expect(get("Q1")?.class).toBe("security");
+    // Negative: reversible-technical on an option that pushes is a release.
+    expect(get("Q2")?.class).toBe("release");
+    expect(get("Q3")?.class).toBe("preference");
+  });
+
+  it("changes nothing when the same turn is read again, whatever class the block names then", async () => {
+    await ask("Q1: Which wording? [class: preference]\n- a: Short (recommended)\n- b: Long");
+    const before = fileBytes();
+    const again = await ask("Q1: Which wording? [class: security]\n- a: Short (recommended)\n- b: Long");
+    expect(again.opened).toEqual([]);
+    expect(fileBytes()).toBe(before);
+    expect(get("Q1")?.class).toBe("preference");
   });
 });
 
@@ -353,6 +399,220 @@ describe("answers in a Worker's chat (§A.5 c)", () => {
   });
 });
 
+describe("expiry at a finished report (§A.3)", () => {
+  /** A Worker's finished report, as the Manager receives it. */
+  const finished = (requestId = REQUEST) =>
+    ["BM-REPORT", `requestId: ${requestId}`, "phase: finished", "tier: Medium", "buildAndTests: npm test: pass", "blockers: none"].join("\n");
+  const finishedTurn = (when = at(6), requestId = REQUEST) => managerTurn({ sent: [msg(MANAGER, when, finished(requestId), "agent")] });
+  const rpc = () => ({ env: { PASEO_BM_HOME: home }, homedir: () => root, now: () => new Date(NOW) });
+
+  it("expires the request's unsettled q: decisions and nothing else", async () => {
+    await ask();
+    await ask("Q3: Rename the table?\n- a: Yes (recommended)\n- b: No", at(3));
+    await materialiseTurn(managerTurn({ sent: [msg(MANAGER, at(3), report("Q1: Which port?\n- a: 8080 (recommended)", OTHER_REQUEST), "agent")] }), deps());
+    store().transition(idOf("Q2"), (decision) => answerDecision(decision, { via: "inbox", optionKey: "a", at: at(4) }), WORKSPACE_ID);
+    store().transition(idOf("Q3"), (decision) => markNeedsConfirmation(decision, { via: "chat-worker", at: at(4) }), WORKSPACE_ID);
+    const base = get("Q1")!;
+    store().open({ ...base, id: "o:ask-1", askedBy: { role: "orchestrator", agentId: null }, round: null, subject: null });
+    store().open({ ...base, id: "f:fb-1", askedBy: { role: "plugin", agentId: null }, round: null, subject: null });
+    const answered = get("Q2");
+
+    const outcome = await materialiseTurn(finishedTurn(at(6)), deps());
+
+    expect(outcome.expired.map((decision) => decision.id)).toEqual([idOf("Q1"), idOf("Q3")]);
+    expect(get("Q1")).toMatchObject({ status: "expired", settledAt: at(6), needsConfirmation: null, answer: null, grant: null, delivery: null });
+    expect(get("Q3")).toMatchObject({ status: "expired", settledAt: at(6), needsConfirmation: null });
+    // Settled already, another request, the Orchestrator's own and a fallback incident: untouched.
+    expect(get("Q2")).toEqual(answered);
+    expect(get("Q1", OTHER_REQUEST)?.status).toBe("open");
+    expect(store().get("o:ask-1", WORKSPACE_ID)?.status).toBe("open");
+    expect(store().get("f:fb-1", WORKSPACE_ID)?.status).toBe("open");
+    expect(outcome.answered).toEqual([]);
+    expect(settled).toEqual([]);
+  });
+
+  it("an answer after expiry is refused, and the Inbox no longer lists them", async () => {
+    await ask();
+    const inbox = () => handleDecisionsList({ scope: "inbox", workspaceId: WORKSPACE_ID }, rpc()).decisions.map((decision) => decision.id).sort();
+    expect(inbox()).toEqual([idOf("Q1"), idOf("Q2")]);
+    await materialiseTurn(finishedTurn(), deps());
+    expect(inbox()).toEqual([]);
+
+    const before = fileBytes();
+    await expect(handleDecisionsAnswer({ id: idOf("Q1"), optionKey: "c" }, PASEO, rpc())).rejects.toThrow(
+      `E_DECISION_SETTLED: decision ${idOf("Q1")} is expired; it can no longer be answered`,
+    );
+    await expect(handleDecisionsAnswer({ id: idOf("Q2"), words: "SQLite" }, PASEO, rpc())).rejects.toThrow("E_DECISION_SETTLED");
+    expect(fileBytes()).toBe(before);
+    // Still stored and readable, so the card can say why.
+    expect(handleDecisionsList({ scope: "request", workspaceId: WORKSPACE_ID, requestId: REQUEST }, rpc()).decisions.map((decision) => decision.status)).toEqual([
+      "expired",
+      "expired",
+    ]);
+  });
+
+  it("bm_decide and bm_predict refuse an expired question as any settled one (their rules)", async () => {
+    await ask();
+    // Q2 is `dependency` by its effects: delegated to the Orchestrator, or predicted with the challenger on.
+    const delegated: AutonomyPolicy = { projects: { [WORKSPACE_ID]: { dependency: { mode: "delegate", predictor: "orchestrator", at: NOW } } }, challenger: {} };
+    const challenger: AutonomyPolicy = { projects: {}, challenger: { [WORKSPACE_ID]: true } };
+    expect(decideRefusalOf(delegated, get("Q2")!)).toBeNull();
+    expect(predictionRefusalOf(challenger, get("Q2")!)).toBeNull();
+    await materialiseTurn(finishedTurn(), deps());
+    expect(decideRefusalOf(delegated, get("Q2")!)).toBe(`decision ${idOf("Q2")} is expired; it can no longer be answered`);
+    expect(predictionRefusalOf(challenger, get("Q2")!)).toBe(`decision ${idOf("Q2")} is expired; only an open decision is predicted`);
+  });
+
+  it("a question asked after the report stays open, and reading the turn again changes nothing", async () => {
+    await ask();
+    const done = finishedTurn(at(4));
+    await materialiseTurn(done, deps());
+    // The owner sent the Worker on, and it asks again.
+    await ask("Q3: Keep the old endpoint?\n- a: Yes (recommended)\n- b: No", at(6));
+    const before = fileBytes();
+    const again = await materialiseTurn(done, deps());
+    expect(again.expired).toEqual([]);
+    expect(get("Q3")?.status).toBe("open");
+    expect(fileBytes()).toBe(before);
+  });
+
+  it("the owner's answer in the same turn stands, and a question opened and finished in one turn is handed on expired", async () => {
+    const outcome = await materialiseTurn(
+      managerTurn({
+        sent: [msg(MANAGER, at(2), report(ROUND_ONE), "agent"), msg(MANAGER, at(3), finished(), "agent"), msg(MANAGER, at(4), "Push the contract only.", "user")],
+        received: [msg(MANAGER, at(5), ["BM-ANSWERS", `requestId: ${REQUEST}`, "Q1: a — Push contract only"].join("\n"))],
+      }),
+      deps(),
+    );
+    expect(get("Q1")).toMatchObject({ status: "answered", answer: { via: "chat-manager", optionKey: "a" } });
+    expect(outcome.expired.map((decision) => decision.id)).toEqual([idOf("Q2")]);
+    // As stored: no event asks the Orchestrator about a question that expired.
+    expect(outcome.opened.map((decision) => [decision.id, decision.status])).toEqual([
+      [idOf("Q1"), "open"],
+      [idOf("Q2"), "expired"],
+    ]);
+    expect(settled.map((entry) => entry.decisions.map((decision) => decision.id))).toEqual([[idOf("Q1")]]);
+  });
+
+  it("expires nothing on a report that is not the Worker's finished one for that request", async () => {
+    await ask();
+    const before = fileBytes();
+    const records = [
+      // The owner's typed text, a plugin notice, no request, another phase, another request.
+      managerTurn({ sent: [msg(MANAGER, at(6), finished(), "user")] }),
+      managerTurn({ sent: [msg(MANAGER, at(6), `BM-COMMAND\nfrom: orchestrator\n${finished()}`, "agent")] }),
+      managerTurn({ sent: [msg(MANAGER, at(6), finished().replace(`requestId: ${REQUEST}\n`, ""), "agent")] }),
+      managerTurn({ sent: [msg(MANAGER, at(6), finished().replace("phase: finished", "phase: beads-done"), "agent")] }),
+      finishedTurn(at(6), OTHER_REQUEST),
+      // The Manager's own reply, and a Worker's own turn.
+      managerTurn({ received: [msg(MANAGER, at(6), finished())] }),
+      workerTurn({ received: [msg(WORKER, at(6), finished())] }),
+    ];
+    for (const record of records) expect((await materialiseTurn(record, deps())).expired).toEqual([]);
+    expect([get("Q1")?.status, get("Q2")?.status]).toEqual(["open", "open"]);
+    expect(fileBytes()).toBe(before);
+  });
+});
+
+describe("predictions and reversals (autonomy design §B.3)", () => {
+  /** The owner answers a question with an option, in the Inbox, at `when`. */
+  const answer = (qn: string, optionKey: string, when: string) =>
+    store().transition(idOf(qn), (decision) => answerDecision(decision, { via: "inbox", optionKey, at: when }), WORKSPACE_ID);
+  /** A Worker turn that ran one shell command at `when`, as the collector records it. */
+  const ranTurn = (command: string, when = at(10)) => workerTurn({ endedAt: when, evidence: [{ kind: "shell", detail: command, agentId: WORKER, at: when }] });
+
+  it("records the recommended option as the prediction when a question opens, and none without one", async () => {
+    await ask();
+    expect(get("Q1")?.prediction).toEqual({ recommended: { optionKey: "a" }, orchestrator: null });
+    expect(get("Q2")?.prediction).toEqual({ recommended: { optionKey: "a" }, orchestrator: null });
+    await ask("Q3: Rename the table? [subject: table-name]\n- a: Yes\n- b: No", at(3));
+    expect(get("Q3")?.prediction).toEqual({ recommended: null, orchestrator: null });
+  });
+
+  it("a re-ask with the same subject after the answer reverses it (kind 1); before the answer it is supersession only", async () => {
+    await ask();
+    // Still open: the re-ask supersedes Q1, which is no reversal.
+    const early = await ask("Q3: Push which backends? [subject: push-backends] [supersedes: Q1]\n- a: Contract only (recommended) [effects: push]\n- b: Hold", at(3));
+    expect(get("Q1")).toMatchObject({ status: "superseded", supersededBy: idOf("Q3") });
+    expect(get("Q1")).not.toHaveProperty("reversals");
+    expect(early.reversed).toEqual([]);
+
+    expect(answer("Q3", "a", at(4)).status).toBe("updated");
+    const reask = "Q4: Push the manifest as well? [subject: push-backends]\n- a: Yes [effects: push]\n- b: No";
+    const later = await ask(reask, at(5));
+    expect(get("Q3")?.reversals).toEqual([{ kind: "re-asked", at: at(5), ref: idOf("Q4") }]);
+    expect(later.reversed.map((decision) => decision.id)).toEqual([idOf("Q3")]);
+    // The superseded Q1 was never answered: nothing to reverse.
+    expect(get("Q1")).not.toHaveProperty("reversals");
+
+    // Reading the same turn again records nothing more; another subject reverses nothing.
+    const before = fileBytes();
+    expect((await ask(reask, at(5))).reversed).toEqual([]);
+    expect(fileBytes()).toBe(before);
+    await ask("Q5: Name the branch? [subject: branch-name]\n- a: dev", at(6));
+    expect(get("Q3")?.reversals).toHaveLength(1);
+  });
+
+  it("a br reopen whose reason cites q:<req>:Q2 reverses that answered decision (kind 3); a reopen citing nothing records nothing", async () => {
+    await ask();
+    answer("Q2", "a", at(4));
+    const before = fileBytes();
+    // A review finding, the baseline's noise: no reason, or one that cites no decision.
+    for (const command of ["br reopen bm-12", `br reopen bm-12 --reason "blocking review finding: the migration test is missing"`]) {
+      expect((await materialiseTurn(ranTurn(command), deps())).reversed).toEqual([]);
+    }
+    expect(fileBytes()).toBe(before);
+
+    const cited = await materialiseTurn(ranTurn(`br reopen bm-12 --reason "the owner reversed q:${REQUEST}:Q2: Postgres after all"`), deps());
+    expect(get("Q2")?.reversals).toEqual([{ kind: "reopened", at: at(10), ref: "bm-12" }]);
+    expect(cited.reversed.map((decision) => decision.id)).toEqual([idOf("Q2")]);
+    // The same record read again (Paseo reuses turn ids) records nothing more.
+    const once = fileBytes();
+    expect((await materialiseTurn(ranTurn(`br reopen bm-12 --reason "the owner reversed q:${REQUEST}:Q2: Postgres after all"`), deps())).reversed).toEqual([]);
+    expect(fileBytes()).toBe(once);
+  });
+
+  it("a bare Qn cites the Worker's request; an open decision, or a reopen before the answer, is not reversed", async () => {
+    await ask();
+    answer("Q2", "b", at(4));
+    await materialiseTurn(ranTurn("cd /work/invoice-app && br reopen bm-7 bm-8 -r 'Q2 changed: SQLite' && br update bm-7 --status in_progress", at(11)), deps());
+    expect(get("Q2")?.reversals).toEqual([
+      { kind: "reopened", at: at(11), ref: "bm-7" },
+      { kind: "reopened", at: at(11), ref: "bm-8" },
+    ]);
+    // Q1 is still open: there is no answer to reverse.
+    await materialiseTurn(ranTurn(`br reopen bm-9 --reason "Q1 changed"`, at(12)), deps());
+    expect(get("Q1")?.status).toBe("open");
+    expect(get("Q1")).not.toHaveProperty("reversals");
+    // A reopen timed before the answer did not reverse it.
+    answer("Q1", "a", at(20));
+    await materialiseTurn(ranTurn(`br reopen --reason "Q1 changed"`, at(13)), deps());
+    expect(get("Q1")).not.toHaveProperty("reversals");
+    // Naming no bead reopens the last touched one.
+    await materialiseTurn(ranTurn(`br reopen --reason "Q1 changed"`, at(21)), deps());
+    expect(get("Q1")?.reversals).toEqual([{ kind: "reopened", at: at(21), ref: LAST_TOUCHED_BEAD }]);
+  });
+
+  it("reads the br reopen calls of a shell command, with their beads and reason", () => {
+    expect(reopensOf(`br reopen bm-1 --reason "Q2 changed"`)).toEqual([{ beads: ["bm-1"], reason: "Q2 changed" }]);
+    expect(reopensOf("br --no-db reopen bm-1 bm-2 -r 'it was q:req-1:Q2' --json")).toEqual([{ beads: ["bm-1", "bm-2"], reason: "it was q:req-1:Q2" }]);
+    expect(reopensOf("br reopen --reason=late --actor me bm-3; br reopen bm-4")).toEqual([
+      { beads: ["bm-3"], reason: "late" },
+      { beads: ["bm-4"], reason: null },
+    ]);
+    expect(reopensOf(`br close bm-1 --reason "Q2"`)).toEqual([]);
+    expect(reopensOf(`br reopen bm-1 --reason "say \\"Q2\\" again" | tail -1`)).toEqual([{ beads: ["bm-1"], reason: 'say "Q2" again' }]);
+  });
+
+  it("finds the decisions a reason cites: ids, and a bare Qn of the request it names or of the Worker's", () => {
+    expect(citedDecisionIds(`reverses q:${REQUEST}:Q2 and o:3f2a-9c`, null)).toEqual([idOf("Q2"), "o:3f2a-9c"]);
+    expect(citedDecisionIds("Q2 changed", REQUEST)).toEqual([idOf("Q2")]);
+    expect(citedDecisionIds(`Q3 of ${OTHER_REQUEST}`, REQUEST)).toEqual([idOf("Q3", OTHER_REQUEST)]);
+    expect(citedDecisionIds("Q2 changed", null)).toEqual([]);
+    expect(citedDecisionIds("blocking review finding, see FAQ1 and SEQ2", REQUEST)).toEqual([]);
+  });
+});
+
 describe("pure readers", () => {
   const decision = { options: [{ key: "a", label: "A", recommended: false, effects: [] }, { key: "b", label: "B", recommended: false, effects: [] }] };
 
@@ -406,5 +666,76 @@ describe("wiring", () => {
     expect(await workerOfRequest(input, paseoWith([snapshot("w1"), snapshot("w2", {}, { "bm.replacedBy": "w3" })]))).toBe("w1");
     expect(await workerOfRequest(input, paseoWith([snapshot("w1"), snapshot("w2")]))).toBeNull();
     expect(await workerOfRequest(input, undefined)).toBeNull();
+  });
+});
+
+describe("owner precedents (autonomy design §B.6)", () => {
+  let precedentIds = 0;
+  const precedents = () => createPrecedentStore(home, { newId: () => `b${++precedentIds}` });
+  const savePrecedent = (subject: string, text: string) =>
+    precedents().save({ scope: WORKSPACE_ID, subject, text, sourceDecisionId: null, expiresInDays: 30 }, new Date(NOW)).precedent;
+  const ON_SUBJECTS = [
+    "Q1: Push both backends to origin/dev? [subject: push-backends]",
+    "- a: Push contract only (recommended) [effects: push]",
+    "- c: Hold",
+    "Q2: Which database for the tests? [subject: test-db]",
+    "- a: SQLite (recommended)",
+    "- b: Postgres [effects: dependency-install]",
+  ].join("\n");
+
+  it("answers a question on an active precedent's subject at open and hands it to onSettled; a release question stays the owner's", async () => {
+    const database = savePrecedent("test-db", "SQLite");
+    savePrecedent("push-backends", "Hold");
+    const outcome = await ask(ON_SUBJECTS);
+    expect(outcome.opened.map((decision) => [decision.id, decision.status])).toEqual([
+      [idOf("Q1"), "open"],
+      [idOf("Q2"), "answered"],
+    ]);
+    expect(get("Q2")).toMatchObject({ status: "answered", answer: { by: "precedent", via: "inbox", optionKey: "a", precedentId: database.id, at: NOW } });
+    expect(outcome.answered.map((decision) => decision.id)).toEqual([idOf("Q2")]);
+    expect(settled.map((entry) => entry.decisions.map((decision) => decision.id))).toEqual([[idOf("Q2")]]);
+    // Release: kept open, nothing delivered for it.
+    expect(get("Q1")).toMatchObject({ status: "open", answer: null });
+  });
+
+  it("leaves a subject a precedent already answered in the request to the owner when it is asked again", async () => {
+    savePrecedent("test-db", "SQLite");
+    await ask(ON_SUBJECTS);
+    settled = [];
+    // Asked in a later turn, after the precedent's answer.
+    const later = "2026-09-26T11:05:00.000Z";
+    const again = await ask(["Q3: Which database, really? [subject: test-db]", "- a: SQLite (recommended)", "- b: Postgres"].join("\n"), later);
+    expect(again.opened.map((decision) => decision.id)).toEqual([idOf("Q3")]);
+    expect(get("Q3")).toMatchObject({ status: "open", answer: null });
+    expect(settled).toEqual([]);
+    // Asked again after its answer: that answer is reversed, as any re-ask (§B.3).
+    expect(get("Q2")?.reversals).toEqual([{ kind: "re-asked", at: later, ref: idOf("Q3") }]);
+  });
+
+  it("an owner's answer in the Worker's chat that differs from the precedent supersedes it", async () => {
+    await ask(ON_SUBJECTS);
+    // Saved after the question opened, so it did not answer it.
+    const database = savePrecedent("test-db", "SQLite");
+    const reply = ["BM-ANSWERS", `requestId: ${REQUEST}`, "Q2: b — Postgres"].join("\n");
+    await materialiseTurn(workerTurn({ sent: [msg(WORKER, at(8), reply, "user")] }), deps());
+    expect(get("Q2")?.answer).toMatchObject({ by: "owner", optionKey: "b" });
+    expect(precedents().get(database.id)?.supersededBy).toBe(idOf("Q2"));
+  });
+
+  it("the owner's policy (autonomy design §B.5): a delegated class of the recommended predictor is answered at open and handed to onSettled; the precedent still comes first", async () => {
+    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "dependency", mode: "delegate", confirmed: true, predictor: "recommended" }, NOW);
+    const outcome = await ask(ON_SUBJECTS);
+    expect(outcome.opened.map((decision) => [decision.id, decision.status])).toEqual([
+      [idOf("Q1"), "open"],
+      [idOf("Q2"), "answered"],
+    ]);
+    expect(get("Q2")?.answer).toMatchObject({ by: "policy", via: "inbox", optionKey: "a", class: "dependency", predictor: "recommended", at: NOW });
+    expect(settled.map((entry) => entry.decisions.map((decision) => decision.id))).toEqual([[idOf("Q2")]]);
+
+    // Another request: the owner's precedent on the subject answers, not the recommended option.
+    const database = savePrecedent("test-db", "Postgres");
+    const other = await materialiseTurn(managerTurn({ sent: [msg(MANAGER, at(3), report(ON_SUBJECTS, OTHER_REQUEST), "agent")] }), deps());
+    expect(other.answered.map((decision) => decision.id)).toEqual([idOf("Q2", OTHER_REQUEST)]);
+    expect(get("Q2", OTHER_REQUEST)?.answer).toMatchObject({ by: "precedent", optionKey: "b", precedentId: database.id });
   });
 });

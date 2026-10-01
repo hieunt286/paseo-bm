@@ -128,6 +128,20 @@ describe("writeSetupState / updateSetupState", () => {
     expect(readSetupState(deps())).toEqual({ ...emptySetupState(), agentTools, rolesCreated });
   });
 
+  it("keeps rolesCreated.reviewer when there is one, and reads a file without it as before", () => {
+    // Set only when the Reviewer went to another model family (autonomy design §C.5); additive, same schema version.
+    const apart: RolesCreatedMark = { ...rolesCreated, reviewer: { baseProvider: "codex", model: "gpt-5.6-sol" } };
+    updateSetupState({ agentTools, rolesCreated: apart }, deps());
+
+    expect(readSetupState(deps()).rolesCreated).toEqual(apart);
+    expect(JSON.parse(readFileSync(statePath(), "utf8")).schemaVersion).toBe(1);
+
+    writeRaw(JSON.stringify({ schemaVersion: 1, agentTools, rolesCreated, cleanedUpAt: null }));
+    const older = readSetupState(deps());
+    expect(older).toEqual({ ...emptySetupState(), agentTools, rolesCreated });
+    expect(older.rolesCreated).not.toHaveProperty("reviewer");
+  });
+
   it("keeps rolesCreated.roles to the three roles: a fourth value makes the whole file unreadable", () => {
     // Why `bm-orchestrator` has its own field (orchestrator design §3.2): the
     // enum refuses the value, and the file then reads as empty — agentTools

@@ -6,8 +6,8 @@
  *   first time, restarted when it lost its tools or its instructions are
  *   outdated (Orchestrator design §3.3, §5.1) — and the note that a new one
  *   replaced the old;
- * - the time wording, the stage bar and the M W R letters that Work's project
- *   rows use (design §6B.7).
+ * - the stage bar and the M W R letters that Work's project rows use
+ *   (design §6B.7); their times are written by `format.ts`.
  *
  * The owner talks to the Orchestrator in its chat and decides in the Inbox;
  * nothing here sends it anything.
@@ -16,8 +16,9 @@
  * times. Pure: no React, no React Native, no `server/` import.
  */
 import type { OrchestratorOpenPreviewOutput, OrchestratorProjectRow, OrchestratorStateOutput, ProjectStage } from "../shared/contracts";
-import type { Tone } from "./dashboard-model";
-import type { SetupDialog } from "./setup-model";
+import type { Tone } from "./tone";
+import type { ConfirmDialog } from "./ui-types";
+import { ago, spanSince } from "./format";
 
 // ---------------------------------------------------------------------------
 // Fixed wording (design §9).
@@ -40,33 +41,6 @@ export const OPEN_COST_TEXT = "Reads the work of every paseo-bm project on this 
 
 /** Said when the host cannot open an agent from a plugin (no `navigation.openAgent`). */
 export const OPEN_IN_APP_TEXT = "The Orchestrator is ready. Open Beads Orchestrator from your agent list.";
-
-// ---------------------------------------------------------------------------
-// Time.
-// ---------------------------------------------------------------------------
-
-/** A span for a person: `under 1 min`, `12 min`, `3 h`, `3 h 5 min`, `2 d`. */
-export function shortSpan(ms: number): string {
-  const minutes = Math.floor(Math.max(0, ms) / 60_000);
-  if (minutes < 1) return "under 1 min";
-  if (minutes < 60) return `${minutes} min`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return minutes % 60 === 0 ? `${hours} h` : `${hours} h ${minutes % 60} min`;
-  return `${Math.floor(hours / 24)} d`;
-}
-
-function spanSince(at: string | null, now: Date): string | null {
-  if (at === null) return null;
-  const time = Date.parse(at);
-  return Number.isNaN(time) ? null : shortSpan(now.getTime() - time);
-}
-
-/** `12 min ago`, `just now`, or `—` when the time is unknown. */
-export function ago(at: string | null, now: Date): string {
-  const span = spanSince(at, now);
-  if (span === null) return "—";
-  return span === "under 1 min" ? "just now" : `${span} ago`;
-}
 
 // ---------------------------------------------------------------------------
 // The Orchestrator line.
@@ -106,7 +80,7 @@ export function previewModelLine(preview: Pick<OrchestratorOpenPreviewOutput, "p
 }
 
 /** Starting the Orchestrator, when there is none yet (REQ-075 a). Cancel is the default. */
-export function openDialog(preview: OrchestratorOpenPreviewOutput): SetupDialog {
+export function openDialog(preview: OrchestratorOpenPreviewOutput): ConfirmDialog {
   return {
     title: preview.exists ? "Open the Beads Orchestrator?" : "Start the Beads Orchestrator?",
     body: `${previewModelLine(preview)}\n\n${OPEN_COST_TEXT}`,
@@ -117,7 +91,7 @@ export function openDialog(preview: OrchestratorOpenPreviewOutput): SetupDialog 
 }
 
 /** Starting a new Orchestrator when the old one lost its tools or is outdated (design §3.3, §5.1). Cancel is the default. */
-export function recreateDialog(preview: OrchestratorOpenPreviewOutput): SetupDialog {
+export function recreateDialog(preview: OrchestratorOpenPreviewOutput): ConfirmDialog {
   return {
     title: "Start a new Beads Orchestrator?",
     body:

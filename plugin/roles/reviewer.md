@@ -89,10 +89,9 @@ limit" is **non-blocking** — protection nobody asked for and no design require
 
 Build your answer with `bm_review`: it writes the verdict (`changes-required`
 when a finding is blocking, `pass` otherwise). Your final answer is what it
-returns, verbatim; when it lists problems, fix those fields and call it again.
-Only without that tool, answer exactly this block (`none` for empty fields,
-`findings: none` for none; `checked` and `notChecked` may run over several
-lines, each line after the first indented):
+returns, verbatim. Only without that tool, answer exactly this block (`none`
+for empty fields, `findings: none` for none; `checked` and `notChecked` may run
+over several lines, each line after the first indented):
 
 ```
 BM-REVIEW

@@ -164,16 +164,7 @@ describe("the MCP conversation", () => {
 });
 
 describe("the Orchestrator's endpoint (orchestrator design §5.1)", () => {
-  const assessment = {
-    rubric: ["sizing", "process-weight", "coordination", "user-communication", "report-quality", "review-quality"].map((criterion, index) => ({
-      criterion,
-      score: index === 5 ? null : 4,
-      note: `Note on ${criterion}.`,
-    })),
-    findings: [{ severity: "warning", text: "Beads for a Small request.", evidence: "br create after tier: Small" }],
-    suggestions: [{ role: "worker", text: "A Small request gets no bead.", why: "The beads finding." }],
-  };
-  const ORCHESTRATOR_TOOLS = ["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_set_autopilot", "bm_direct_worker", "bm_repo", "bm_note", "bm_assessment"];
+  const ORCHESTRATOR_TOOLS = ["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_predict", "bm_direct_worker", "bm_repo", "bm_note", "bm_findings", "bm_compact", "bm_handoff", "bm_why"];
   /** The Orchestrator's tools no other role has: the Manager has a bm_decisions of its own. */
   const ORCHESTRATOR_ONLY = ORCHESTRATOR_TOOLS.filter((name) => name !== "bm_decisions");
 
@@ -210,13 +201,13 @@ describe("the Orchestrator's endpoint (orchestrator design §5.1)", () => {
     const { endpoint, logs } = await start(dir);
     const url = endpoint.urlFor("orchestrator")!;
     const before = snapshot(dir);
-    const called = await rpc(url, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "bm_assessment", arguments: { workspaceId: "wks_a", ...assessment } } });
+    const called = await rpc(url, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "bm_note", arguments: { workspaceId: "wks_a", text: "A note." } } });
     expect(called.body.result.isError).toBe(true);
     expect(called.body.result.content[0].text).toMatch(/^Refused: paseo-bm has no connection to Paseo yet/);
-    const invalid = await rpc(url, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "bm_assessment", arguments: assessment } });
-    expect(invalid.body.result.content[0].text).toBe("The call was refused. Fix these and call bm_assessment again:\n- input.workspaceId: is required");
+    const invalid = await rpc(url, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "bm_note", arguments: { text: "A note." } } });
+    expect(invalid.body.result.content[0].text).toBe("The call was refused. Fix these and call bm_note again:\n- input.workspaceId: is required");
     expect(snapshot(dir)).toEqual(before);
-    expect(logs).toEqual(["[paseo-bm] bm_assessment refused a call for the orchestrator", "[paseo-bm] bm_assessment refused a call for the orchestrator"]);
+    expect(logs).toEqual(["[paseo-bm] bm_note refused a call for the orchestrator", "[paseo-bm] bm_note refused a call for the orchestrator"]);
   });
 
   it("runs a tool with the handle the creation hook gave it", async () => {
@@ -286,6 +277,8 @@ describe("the Manager's bm_decisions (autonomy design §A.9)", () => {
     expect(answer.decisions.map((decision) => decision.id)).toEqual(["o:push-contract", `q:${REQUEST}:Q1`]);
     expect(answer).toMatchObject({ total: 2, truncated: false });
     expect(answer.decisions[1]).toMatchObject({ status: "answered", answer: { via: "inbox", optionKey: "a", words: null } });
+    // Each with its class; one stored without it reads by its effects (autonomy design §B.1, §B.9).
+    expect(answer.decisions.map((decision) => decision["class"])).toEqual(["release", "release"]);
     expect(answer.decisions[0]!["options"]).toEqual([
       { key: "a", label: "Push", recommended: true, effects: ["push"], action: "command to the manager agent-manager (release), delivered by the plugin when chosen" },
     ]);
@@ -577,7 +570,7 @@ describe("the creation hook's part", () => {
     const orchestrator = applyAgentTools(request("bm-orchestrator/claude-opus-5"), tools, "claude");
     expect(orchestrator?.config.mcpServers?.[AGENT_TOOLS_SERVER]).toEqual({ type: "http", url: "http://127.0.0.1:4567/mcp/orchestrator", alwaysLoad: true });
     expect(orchestrator?.config.toolPolicy?.preapproved).toEqual(
-      ["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_set_autopilot", "bm_direct_worker", "bm_repo", "bm_note", "bm_assessment"].map((tool) => ({ kind: "mcp", server: AGENT_TOOLS_SERVER, tool })),
+      ["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_predict", "bm_direct_worker", "bm_repo", "bm_note", "bm_findings", "bm_compact", "bm_handoff", "bm_why"].map((tool) => ({ kind: "mcp", server: AGENT_TOOLS_SERVER, tool })),
     );
     expect(applyAgentTools(request("bm-orchestrator"), tools, "copilot")).toBeUndefined();
     // Paseo refuses a toolPolicy on Pi, Oh My Pi or Copilot: the agent must still be created.

@@ -37,9 +37,12 @@
  * Lifecycle belongs to the user (ADR-005): nothing here archives, deletes or
  * cancels anything.
  */
+import { dirname } from "node:path";
 import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
 import type { Tier } from "../shared/contracts";
-import type { DashboardPaseo } from "./dashboard-rpc";
+import { DEFAULT_COORDINATION_SETTINGS, reviewBudgetOf, type ReviewBudget } from "../shared/coordination";
+import { readReviewBudget } from "./coordination-rpc";
+import type { DashboardPaseo } from "./paseo-directory";
 import { BUDGET_NOTICE_MARKER } from "./notices";
 import { roleOfProvider } from "./agent-role";
 import type { TraceStoreLocation } from "./trace-store";
@@ -48,13 +51,17 @@ import type { ReconstructedTrace } from "./traces";
 import { requestTraceOf } from "./request-trace";
 
 /**
- * Total review calls per request, by tier (PRD delta 20260924-worker-autonomy,
- * REQ-037d): one implementation batch — a review and one re-review — at every
- * tier, plus the documents-and-beads batch a Large request reviews before it
- * implements. Replaces 1 / 4 / 6, which paid for three batches of a Large
- * request and a Small request with no re-review.
+ * Total review calls per request, by tier, by default (PRD delta
+ * 20260924-worker-autonomy, REQ-037d): one implementation batch — a review and
+ * one re-review — at every tier, plus the documents-and-beads batch a Large
+ * request reviews before it implements. Replaces 1 / 4 / 6, which paid for
+ * three batches of a Large request and a Small request with no re-review.
+ *
+ * Since bead `7gxw.12` (autonomy design §C.4, §G.7; change-008 C6) the budget
+ * in effect is the owner's, in Settings → Coordination (`review.*Budget`,
+ * `readReviewBudget`); these are its defaults.
  */
-export const REVIEW_BUDGET: Readonly<Record<Tier, number>> = { Small: 2, Medium: 2, Large: 4 };
+export const REVIEW_BUDGET: ReviewBudget = reviewBudgetOf(DEFAULT_COORDINATION_SETTINGS);
 
 /** First word of the notice; `roles/manager.md` tells the Manager what to do with it. */
 export { BUDGET_NOTICE_MARKER } from "./notices";
@@ -85,14 +92,15 @@ export interface BudgetOverrun {
 }
 
 /**
- * The overrun of one reconstructed request, or `null` when it is within
- * budget, or when its tier, its call count, its request id or its Manager is
- * not known — an unknown number never produces a notice.
+ * The overrun of one reconstructed request against `reviewBudget` (the
+ * defaults unless given), or `null` when it is within budget, or when its
+ * tier, its call count, its request id or its Manager is not known — an
+ * unknown number never produces a notice.
  */
-export function overrunOf(trace: ReconstructedTrace): BudgetOverrun | null {
+export function overrunOf(trace: ReconstructedTrace, reviewBudget: ReviewBudget = REVIEW_BUDGET): BudgetOverrun | null {
   if (trace.requestId === null || trace.tier === null || trace.reviewCalls === null) return null;
   if (trace.managerAgentId === null) return null;
-  const budget = REVIEW_BUDGET[trace.tier];
+  const budget = reviewBudget[trace.tier];
   if (budget === undefined || trace.reviewCalls <= budget) return null;
   return {
     requestId: trace.requestId,
@@ -167,9 +175,10 @@ export async function checkReviewBudget(event: TurnEndedEvent, deps: BudgetDeps)
       over = [...pending.values()].find((found) => keyOf(found) === `${workspaceId}::${found.requestId}` && found.managerAgentId === agent.id);
       if (over === undefined) return "within";
     } else {
-      // The same rebuild the Orchestrator's rules read (request-trace.ts).
+      // The same rebuild the Orchestrator's rules read (request-trace.ts), against
+      // the owner's budget in the same data folder as the traces (§G.7).
       const found = await requestTraceOf(deps, workspaceId, agent.id);
-      over = found === null ? undefined : (overrunOf(found.trace) ?? undefined);
+      over = found === null ? undefined : (overrunOf(found.trace, readReviewBudget({ home: dirname(deps.location.tracesDir), log })) ?? undefined);
       if (over === undefined) return "within";
       pending.set(keyOf(over), over);
     }

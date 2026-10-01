@@ -6,22 +6,23 @@ turns it into documents (only where the change needs them), beads and working co
 **Reviewer** checking each batch. Loading it gives you the **Beads Manager** surface: an **Inbox**
 (the decisions that need you, and alerts), **Work** (each project's requests with their stage and
 timeline, its beads board and its agents), **Insights** (flow, cost and beads figures) and
-**Settings** (roles and models, tools and skills, your data). A workspace's **Beads** tab shows that
-project's page.
+**Settings** (roles and models, which decisions the agents may take for you, tools and skills,
+your data). A workspace's **Beads** tab shows that project's page.
 
 **Beads Orchestrator** is one agent for the whole machine, in a workspace of its own, that you start
 from the **Inbox** when you want it, and talk to in its chat. It reads the work of every paseo-bm
 project and tells each project's Manager what to do next, speaking as you. When something needs your
 decision it asks you in the Inbox, each option with what it would allow and often the command ready
 on it; picking the option sends that command once. It sends a command by itself only right after you
-tell it to in its chat, or in a project where **Autopilot** is on — there it answers the project's
-questions and directs the work, and paseo-bm also watches the project's running Workers (stuck,
-waiting on a permission, running a dangerous command, failing the same command, piling process onto
-a small request, writing outside the project), so the Orchestrator can correct a Worker directly,
+tell it to in its chat, or where your autonomy policy (**Settings → Autonomy**) delegates, in that
+project, every kind of decision the command touches; a new install delegates nothing. It leaves every
+Worker's question to you, except the kinds your policy delegates to it. paseo-bm watches the running Workers of every project (stuck, waiting on a
+permission, running a dangerous command, failing the same command, piling process onto a small
+request, writing outside the project); in a project where a kind of decision is Shadow or Delegated,
+those signals wake the Orchestrator, which can then correct a Worker directly within that authority,
 always with a copy to its Manager. Every command declares what it allows; a push, publish, deploy,
-real-data, migration, security or cost change needs a decision you answered. It can check a report
-with read-only git in the project, keeps short notes per project, and scores a project's workflow
-when you ask. It uses tokens on its provider, and nothing of it exists until you start it.
+real-data, migration, security or cost change needs a decision you answered, whatever your policy.
+It can check a report with read-only git in the project and keeps short notes per project. It uses tokens on its provider, and nothing of it exists until you start it.
 
 ![A project's beads (a screenshot of an earlier version: the board now comes first)](images/01-beads-screen.jpg)
 
@@ -84,8 +85,9 @@ The **Install skills** button runs a third-party tool that downloads from
 [cuongntr/agent-skills](https://github.com/cuongntr/agent-skills) (another author's repository);
 paseo-bm never writes to your skills folders itself. The Orchestrator, once you start it, sends the
 masked content of every paseo-bm project to its provider, and a command you approve — by picking an
-option, by telling it to send in its chat, or one it sends by itself in a project on Autopilot, to
-the Manager or directly to a Worker with a copy to its Manager — reaches the agent as your own word. The full list of what paseo-bm records on your
+option, by telling it to send in its chat, or one it sends by itself where your autonomy policy
+delegates what the command does, to the Manager or directly to a Worker with a copy to its Manager —
+reaches the agent as your own word. The full list of what paseo-bm records on your
 machine is in
 [GUIDE.md](https://github.com/hieunt286/paseo-bm/blob/main/GUIDE.md#before-you-install-read-these-warnings).
 

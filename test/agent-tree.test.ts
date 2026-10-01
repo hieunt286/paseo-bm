@@ -31,17 +31,6 @@ import {
 
 const PRIMITIVES = ["ActivityIndicator", "Pressable", "ScrollView", "Text", "View"] as const;
 
-vi.mock("react-native", () => {
-  const make = (name: string) => Object.assign(() => null, { displayName: name, primitive: true });
-  return {
-    ActivityIndicator: make("ActivityIndicator"),
-    Pressable: make("Pressable"),
-    ScrollView: make("ScrollView"),
-    Text: make("Text"),
-    View: make("View"),
-  };
-});
-
 // The root tsconfig has no `jsx` setting, so the .tsx modules are loaded through
 // a non-literal specifier that `tsc --noEmit` does not resolve.
 type ClientEntry = (client: unknown) => () => void;
@@ -52,7 +41,7 @@ const { AgentTreePanel, AgentTreeView } = (await import(treePath)) as {
   AgentTreePanel: unknown;
   AgentTreeView: (props: Record<string, unknown>) => unknown;
 };
-const chatBeadsPath = "../plugin/client/bead-chips.tsx";
+const chatBeadsPath = "../plugin/client/chat-beads-panel.tsx";
 const { ChatBeadsPanel } = (await import(chatBeadsPath)) as { ChatBeadsPanel: unknown };
 const beadsTabPath = "../plugin/client/beads-tab.tsx";
 const { BeadsTabPanel } = (await import(beadsTabPath)) as { BeadsTabPanel: unknown };

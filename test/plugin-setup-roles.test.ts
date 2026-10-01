@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   ROLE_DISPLAY_NAMES,
   ROLE_NAMES,
@@ -18,12 +18,14 @@ import {
   roleProfileEntry,
 } from "../plugin/server/setup-roles";
 import { readSetupState, updateSetupState } from "../plugin/server/setup-state";
+import { modelFamily } from "../plugin/shared/model-family";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 /**
  * WP-402: the values the plugin creates the four roles with (design §6.1; the
  * fourth, `bm-orchestrator`, from orchestrator design §3.1).
  *
- * These used to be checked against a second copy in `src/roles/`, so a machine
+ * These used to be checked against a second copy in the installer, so a machine
  * set up by the plugin matched one set up by `npx paseo-bm`. WP-406 deleted the
  * installer's copy, so the plugin's is now the only one and what is pinned here
  * is its shape and its exact texts.
@@ -125,38 +127,24 @@ describe("what a created role looks like", () => {
 // ── ensureRoles (design §7.13.2) ───────────────────────────────────────────
 
 /** A daemon that behaves like Paseo 0.8's `config.patch` and lists providers. */
-function fakeDaemon(initial: {
+/** A daemon with this configuration and these providers; `patch` refuses every patch (an Error) or keeps none of them (`"ignore"`). */
+function daemonWith(initial: {
   providers?: Record<string, Record<string, unknown>>;
   agentProfiles?: Array<Record<string, unknown>>;
   available?: Array<{ provider: string; available: boolean }>;
   models?: Record<string, Array<{ id: string }>>;
+  patch?: Error | "ignore";
 }) {
-  const state = {
-    providers: structuredClone(initial.providers ?? {}),
-    agentProfiles: structuredClone(initial.agentProfiles ?? []),
-  };
-  const models = initial.models ?? { claude: [{ id: "claude-opus-5" }, { id: "claude-sonnet-5" }], codex: [{ id: "gpt-5.6-sol" }] };
-  const patches: Array<Record<string, unknown>> = [];
-  const paseo = {
+  const fake = fakePaseo({
     providers: {
-      listAvailable: vi.fn(async () => ({
-        providers: initial.available ?? [{ provider: "claude", available: true }, { provider: "codex", available: true }],
-      })),
-      listModels: vi.fn(async (provider: string) => ({ provider, models: models[provider] ?? [], error: null })),
+      available: initial.available ?? [{ provider: "claude", available: true }, { provider: "codex", available: true }],
+      models: initial.models ?? { claude: [{ id: "claude-opus-5" }, { id: "claude-sonnet-5" }], codex: [{ id: "gpt-5.6-sol" }] },
     },
-    config: {
-      get: vi.fn(async () => ({ config: structuredClone(state) })),
-      patch: vi.fn(async (patch: Record<string, unknown>) => {
-        patches.push(structuredClone(patch));
-        for (const [id, entry] of Object.entries((patch["providers"] ?? {}) as Record<string, Record<string, unknown>>)) {
-          state.providers[id] = { ...(state.providers[id] ?? {}), ...entry };
-        }
-        if (patch["agentProfiles"] !== undefined) state.agentProfiles = structuredClone(patch["agentProfiles"]) as typeof state.agentProfiles;
-        return {};
-      }),
-    },
-  };
-  return { paseo, patches, state: () => state };
+    config: { providers: initial.providers ?? {}, agentProfiles: initial.agentProfiles ?? [] },
+    ...(initial.patch === undefined ? {} : { patch: initial.patch }),
+  });
+  type State = { providers: Record<string, Record<string, unknown>>; agentProfiles: Array<Record<string, unknown>> };
+  return { paseo: fake.paseo, patches: fake.patches, state: () => fake.config<State>() };
 }
 
 let home: string;
@@ -174,7 +162,7 @@ afterEach(() => {
 
 describe("ensureRoles", () => {
   it("creates all four on a machine the installer never touched, in one patch", async () => {
-    const daemon = fakeDaemon({});
+    const daemon = daemonWith({});
 
     const result = await ensureRoles(daemon.paseo, deps());
 
@@ -182,6 +170,8 @@ describe("ensureRoles", () => {
       created: ["manager", "worker", "reviewer", "orchestrator"],
       baseProvider: "claude",
       model: "claude-opus-5",
+      // Codex is signed in too, so the Reviewer went to another family (§C.5).
+      reviewer: { baseProvider: "codex", model: "gpt-5.6-sol" },
       skipped: null,
     });
     expect(daemon.patches).toHaveLength(1);
@@ -189,7 +179,7 @@ describe("ensureRoles", () => {
   });
 
   it("records what it created in the setup state, the Orchestrator in its own field", async () => {
-    const daemon = fakeDaemon({});
+    const daemon = daemonWith({});
 
     await ensureRoles(daemon.paseo, deps());
 
@@ -215,7 +205,7 @@ describe("ensureRoles", () => {
       { id: "bm-worker", name: "Beads Worker", provider: "bm-worker", model: "claude-sonnet-5", thinkingOptionId: "high", icon: "bot" },
       { id: "bm-reviewer", name: "Beads Reviewer", provider: "bm-reviewer", model: "gpt-5.6-sol", notes: "mine" },
     ];
-    const daemon = fakeDaemon({ providers, agentProfiles });
+    const daemon = daemonWith({ providers, agentProfiles });
     const earlier = { at: "2026-09-20T08:00:00.000Z", roles: ["manager", "worker", "reviewer"] as const, baseProvider: "codex", model: "gpt-5.6-sol" };
     updateSetupState({ rolesCreated: { ...earlier, roles: [...earlier.roles] } }, deps());
 
@@ -255,7 +245,7 @@ describe("ensureRoles", () => {
   });
 
   it("creates only the ones that are missing", async () => {
-    const daemon = fakeDaemon({
+    const daemon = daemonWith({
       providers: { "bm-manager": { extends: "codex" }, "bm-worker": { extends: "codex" } },
       agentProfiles: [{ id: "bm-manager" }, { id: "bm-worker" }],
     });
@@ -267,7 +257,7 @@ describe("ensureRoles", () => {
   });
 
   it("completes a half-created role: a profile for an alias keeps that alias's provider", async () => {
-    const daemon = fakeDaemon({
+    const daemon = daemonWith({
       providers: {
         "bm-manager": { extends: "codex" },
         "bm-worker": { extends: "claude" },
@@ -285,7 +275,7 @@ describe("ensureRoles", () => {
   });
 
   it("completes the other half: an alias for a profile, on the default provider", async () => {
-    const daemon = fakeDaemon({
+    const daemon = daemonWith({
       providers: { "bm-manager": {}, "bm-worker": {}, "bm-orchestrator": {} },
       agentProfiles: [{ id: "bm-manager" }, { id: "bm-worker" }, { id: "bm-reviewer", name: "Mine", model: "mine" }, { id: "bm-orchestrator" }],
     });
@@ -298,7 +288,7 @@ describe("ensureRoles", () => {
   });
 
   it("patches nothing when all four are there with their policy", async () => {
-    const daemon = fakeDaemon({
+    const daemon = daemonWith({
       providers: Object.fromEntries(ROLE_NAMES.map((role) => [roleId(role), { paseoTools: rolePaseoToolsPolicy(role) }])),
       agentProfiles: [{ id: "bm-manager" }, { id: "bm-worker" }, { id: "bm-reviewer" }, { id: "bm-orchestrator" }],
     });
@@ -310,7 +300,7 @@ describe("ensureRoles", () => {
   });
 
   it("gives roles that exist without a policy theirs, in one patch of paseoTools alone, and keeps a key the user added", async () => {
-    const daemon = fakeDaemon({
+    const daemon = daemonWith({
       providers: {
         claude: { enabled: true },
         "bm-manager": { extends: "claude", label: "Beads Manager", paseoTools: { enabled: true } },
@@ -350,7 +340,7 @@ describe("ensureRoles", () => {
   });
 
   it("leaves the policy alone after the user removed paseo-bm's settings", async () => {
-    const daemon = fakeDaemon({
+    const daemon = daemonWith({
       providers: { "bm-manager": { extends: "claude" } },
       agentProfiles: [{ id: "bm-manager" }],
     });
@@ -361,8 +351,7 @@ describe("ensureRoles", () => {
   });
 
   it("fails loudly when Paseo does not keep the policy, and creates nothing after it", async () => {
-    const daemon = fakeDaemon({ providers: { "bm-reviewer": { extends: "claude" } }, agentProfiles: [] });
-    daemon.paseo.config.patch.mockImplementationOnce(async () => ({}));
+    const daemon = daemonWith({ providers: { "bm-reviewer": { extends: "claude" } }, agentProfiles: [], patch: "ignore" });
 
     await expect(ensureRoles(daemon.paseo, deps())).rejects.toMatchObject({ code: "E_SETUP_ROLES_FAILED" });
     expect(daemon.state().providers["bm-reviewer"]).toEqual({ extends: "claude" });
@@ -370,7 +359,7 @@ describe("ensureRoles", () => {
   });
 
   it("uses the first provider Paseo returns, not the alphabetically first", async () => {
-    const daemon = fakeDaemon({
+    const daemon = daemonWith({
       available: [{ provider: "bm-worker", available: true }, { provider: "codex", available: true }, { provider: "claude", available: true }],
     });
 
@@ -382,33 +371,31 @@ describe("ensureRoles", () => {
   });
 
   it("writes nothing when Paseo reports no available provider", async () => {
-    const daemon = fakeDaemon({ available: [{ provider: "claude", available: false }] });
+    const daemon = daemonWith({ available: [{ provider: "claude", available: false }] });
 
     await expect(ensureRoles(daemon.paseo, deps())).rejects.toThrow("E_SETUP_ROLES_FAILED: Paseo reports no available provider");
     expect(daemon.patches).toHaveLength(0);
   });
 
   it("writes nothing when Paseo lists no model for that provider", async () => {
-    const daemon = fakeDaemon({ models: { claude: [] } });
+    const daemon = daemonWith({ models: { claude: [] } });
 
     await expect(ensureRoles(daemon.paseo, deps())).rejects.toThrow("E_SETUP_ROLES_FAILED: Paseo lists no model for claude");
     expect(daemon.patches).toHaveLength(0);
   });
 
   it("reports a refused patch and a read-back that lost the entries", async () => {
-    const refusing = fakeDaemon({});
-    vi.spyOn(refusing.paseo.config, "patch").mockRejectedValueOnce(new Error("Request failed: read-only"));
+    const refusing = daemonWith({ patch: new Error("Request failed: read-only") });
     await expect(ensureRoles(refusing.paseo, deps())).rejects.toMatchObject({ code: "E_SETUP_ROLES_FAILED" });
 
-    const forgetful = fakeDaemon({});
-    vi.spyOn(forgetful.paseo.config, "patch").mockImplementationOnce(async () => ({}));
+    const forgetful = daemonWith({ patch: "ignore" });
     await expect(ensureRoles(forgetful.paseo, deps())).rejects.toMatchObject({ code: "E_SETUP_ROLES_FAILED" });
   });
 });
 
 describe("the mark left by \"Remove paseo-bm's settings\"", () => {
   it("stops the roles being created again, from the state file", async () => {
-    const daemon = fakeDaemon({});
+    const daemon = daemonWith({});
     updateSetupState({ cleanedUpAt: "2026-09-25T12:00:00.000Z" }, deps());
 
     const result = await ensureRoles(daemon.paseo, deps());
@@ -418,7 +405,7 @@ describe("the mark left by \"Remove paseo-bm's settings\"", () => {
   });
 
   it("stops bm-orchestrator being created on a machine that still has the three roles", async () => {
-    const daemon = fakeDaemon({
+    const daemon = daemonWith({
       providers: { "bm-manager": {}, "bm-worker": {}, "bm-reviewer": {} },
       agentProfiles: [{ id: "bm-manager" }, { id: "bm-worker" }, { id: "bm-reviewer" }],
     });
@@ -430,7 +417,7 @@ describe("the mark left by \"Remove paseo-bm's settings\"", () => {
   });
 
   it("stops them for the rest of the run even before anything is written", async () => {
-    const daemon = fakeDaemon({});
+    const daemon = daemonWith({});
     markCleanedUpThisRun(true);
 
     expect(await ensureRoles(daemon.paseo, deps())).toMatchObject({ skipped: "cleaned-up" });
@@ -438,7 +425,7 @@ describe("the mark left by \"Remove paseo-bm's settings\"", () => {
   });
 
   it("is cleared by resume, which then creates the roles", async () => {
-    const daemon = fakeDaemon({});
+    const daemon = daemonWith({});
     updateSetupState({ cleanedUpAt: "2026-09-25T12:00:00.000Z" }, deps());
     markCleanedUpThisRun(true);
 
@@ -451,7 +438,7 @@ describe("the mark left by \"Remove paseo-bm's settings\"", () => {
   });
 
   it("creates the roles on a machine whose data folder cannot be read at all", async () => {
-    const daemon = fakeDaemon({});
+    const daemon = daemonWith({});
 
     const result = await ensureRoles(daemon.paseo, { env: { PASEO_BM_HOME: "relative/bm" }, homedir: () => home, log: () => {} });
 
@@ -461,11 +448,200 @@ describe("the mark left by \"Remove paseo-bm's settings\"", () => {
 
 describe("two callers at once", () => {
   it("produce exactly one patch: Setup opening while manager.ensure runs", async () => {
-    const daemon = fakeDaemon({});
+    const daemon = daemonWith({});
 
     const [first, second] = await Promise.all([ensureRoles(daemon.paseo, deps()), ensureRoles(daemon.paseo, deps())]);
 
     expect(daemon.patches).toHaveLength(1);
     expect([first.created.length, second.created.length].sort()).toEqual([0, 4]);
+  });
+});
+
+// ── Independent review by default (autonomy design §C.5, §C.6; REQ-133) ────
+
+describe("the model family", () => {
+  it("is the vendor: Claude Code is Anthropic and Codex is OpenAI, whatever the model", () => {
+    expect(modelFamily("claude", "claude-opus-5")).toBe("anthropic");
+    expect(modelFamily("claude", null)).toBe("anthropic");
+    expect(modelFamily("codex", "gpt-5.6-sol")).toBe("openai");
+    expect(modelFamily("codex", null)).toBe("openai");
+  });
+
+  it("is the vendor prefix of the model id on any other provider", () => {
+    expect(modelFamily("opencode", "openai/gpt-5.6-sol")).toBe("openai");
+    expect(modelFamily("opencode", "anthropic/claude-sonnet-5")).toBe("anthropic");
+    expect(modelFamily("pi", "google/gemini-3-pro")).toBe("google");
+  });
+
+  it("is the base provider for an unprefixed model", () => {
+    expect(modelFamily("opencode", "big-pickle")).toBe("opencode");
+    expect(modelFamily("my-acp", "m1")).toBe("my-acp");
+  });
+
+  it("cannot be told without a base provider, from a bm-* alias, or without a model on another provider", () => {
+    expect(modelFamily(null, "claude-opus-5")).toBeNull();
+    expect(modelFamily("", "claude-opus-5")).toBeNull();
+    expect(modelFamily("bm-worker", "claude-opus-5")).toBeNull();
+    expect(modelFamily("opencode", null)).toBeNull();
+    expect(modelFamily("opencode", " ")).toBeNull();
+  });
+});
+
+describe("ensureRoles and the Reviewer's family", () => {
+  const aliasOf = (daemon: ReturnType<typeof daemonWith>, role: (typeof ROLE_NAMES)[number]) => daemon.state().providers[roleId(role)];
+  const profileOf = (daemon: ReturnType<typeof daemonWith>, role: (typeof ROLE_NAMES)[number]) =>
+    daemon.state().agentProfiles.find((entry) => entry.id === roleId(role));
+
+  it("puts all four roles on the one provider signed in, as before", async () => {
+    const daemon = daemonWith({ available: [{ provider: "claude", available: true }, { provider: "codex", available: false }] });
+
+    const result = await ensureRoles(daemon.paseo, deps());
+
+    expect(result).toMatchObject({ created: [...ROLE_NAMES], baseProvider: "claude", model: "claude-opus-5" });
+    // Nothing apart to name: no `reviewer`, in the result or in the setup state.
+    expect(result).not.toHaveProperty("reviewer");
+    expect(readSetupState(deps()).rolesCreated).not.toHaveProperty("reviewer");
+    for (const role of ROLE_NAMES) {
+      expect(aliasOf(daemon, role), role).toEqual(roleAliasEntry(role, "claude"));
+      expect(profileOf(daemon, role), role).toEqual(roleProfileEntry(role, "claude-opus-5"));
+    }
+  });
+
+  it("with two signed in, puts the Worker on the first and the Reviewer on the other, with that provider's first model", async () => {
+    const daemon = daemonWith({ models: { claude: [{ id: "claude-opus-5" }], codex: [{ id: "gpt-5.6-sol" }, { id: "gpt-5.6-mini" }] } });
+    const lines: string[] = [];
+
+    const result = await ensureRoles(daemon.paseo, { ...deps(), log: (line: string) => lines.push(line) });
+
+    // The result and the setup state keep naming the default every other role
+    // got, and name the Reviewer's own apart.
+    const reviewer = { baseProvider: "codex", model: "gpt-5.6-sol" };
+    expect(result).toEqual({ created: [...ROLE_NAMES], baseProvider: "claude", model: "claude-opus-5", reviewer, skipped: null });
+    expect(daemon.patches).toHaveLength(1);
+    for (const role of ["manager", "worker", "orchestrator"] as const) {
+      expect(aliasOf(daemon, role), role).toEqual(roleAliasEntry(role, "claude"));
+      expect(profileOf(daemon, role), role).toEqual(roleProfileEntry(role, "claude-opus-5"));
+    }
+    expect(aliasOf(daemon, "reviewer")).toEqual(roleAliasEntry("reviewer", "codex"));
+    expect(profileOf(daemon, "reviewer")).toEqual(roleProfileEntry("reviewer", "gpt-5.6-sol"));
+    expect(readSetupState(deps()).rolesCreated).toEqual({
+      at: expect.any(String),
+      roles: ["manager", "worker", "reviewer"],
+      baseProvider: "claude",
+      model: "claude-opus-5",
+      reviewer,
+    });
+    expect(lines).toContain("[paseo-bm] created roles bm-manager, bm-worker, bm-orchestrator on claude · claude-opus-5; bm-reviewer on codex · gpt-5.6-sol");
+  });
+
+  it("creates the Reviewer on claude when the Worker's alias is already on codex", async () => {
+    const daemon = daemonWith({
+      available: [{ provider: "codex", available: true }, { provider: "claude", available: true }],
+      providers: { "bm-worker": { extends: "codex", label: "Beads Worker", paseoTools: rolePaseoToolsPolicy("worker") } },
+      agentProfiles: [{ id: "bm-worker", name: "Beads Worker", provider: "bm-worker", model: "gpt-5.6-sol" }],
+    });
+
+    const result = await ensureRoles(daemon.paseo, deps());
+
+    expect(result).toMatchObject({
+      created: ["manager", "reviewer", "orchestrator"],
+      baseProvider: "codex",
+      model: "gpt-5.6-sol",
+      reviewer: { baseProvider: "claude", model: "claude-opus-5" },
+    });
+    expect(aliasOf(daemon, "manager")).toEqual(roleAliasEntry("manager", "codex"));
+    expect(aliasOf(daemon, "reviewer")).toEqual(roleAliasEntry("reviewer", "claude"));
+    expect(profileOf(daemon, "reviewer")).toEqual(roleProfileEntry("reviewer", "claude-opus-5"));
+  });
+
+  it("names no Reviewer apart when the other family it went to is the default", async () => {
+    // The Worker's alias is on codex, the default is claude: the Reviewer's
+    // other family is the default itself, so there is nothing apart to name.
+    const daemon = daemonWith({
+      providers: { "bm-worker": { extends: "codex", label: "Beads Worker", paseoTools: rolePaseoToolsPolicy("worker") } },
+      agentProfiles: [{ id: "bm-worker", name: "Beads Worker", provider: "bm-worker", model: "gpt-5.6-sol" }],
+    });
+
+    const result = await ensureRoles(daemon.paseo, deps());
+
+    expect(aliasOf(daemon, "reviewer")).toEqual(roleAliasEntry("reviewer", "claude"));
+    expect(result).toEqual({ created: ["manager", "reviewer", "orchestrator"], baseProvider: "claude", model: "claude-opus-5", skipped: null });
+    expect(readSetupState(deps()).rolesCreated).not.toHaveProperty("reviewer");
+  });
+
+  it("reads another provider's family from its first model, and passes over one of the Worker's family", async () => {
+    const daemon = daemonWith({
+      available: ["codex", "opencode", "claude"].map((provider) => ({ provider, available: true })),
+      models: { codex: [{ id: "gpt-5.6-sol" }], opencode: [{ id: "openai/gpt-5.6-sol" }], claude: [{ id: "claude-opus-5" }] },
+    });
+
+    await ensureRoles(daemon.paseo, deps());
+
+    // OpenCode on openai/… is OpenAI, the Worker's family: the Reviewer goes to Claude.
+    expect(aliasOf(daemon, "worker")).toEqual(roleAliasEntry("worker", "codex"));
+    expect(aliasOf(daemon, "reviewer")).toEqual(roleAliasEntry("reviewer", "claude"));
+  });
+
+  it("takes an OpenCode model of another vendor, and an unprefixed one as a family of its own", async () => {
+    const vendored = daemonWith({
+      available: ["claude", "opencode"].map((provider) => ({ provider, available: true })),
+      models: { claude: [{ id: "claude-opus-5" }], opencode: [{ id: "google/gemini-3-pro" }] },
+    });
+    await ensureRoles(vendored.paseo, deps());
+    expect(aliasOf(vendored, "reviewer")).toEqual(roleAliasEntry("reviewer", "opencode"));
+    expect(profileOf(vendored, "reviewer")).toEqual(roleProfileEntry("reviewer", "google/gemini-3-pro"));
+
+    const own = daemonWith({
+      available: ["claude", "opencode"].map((provider) => ({ provider, available: true })),
+      models: { claude: [{ id: "claude-opus-5" }], opencode: [{ id: "big-pickle" }] },
+    });
+    await ensureRoles(own.paseo, deps());
+    expect(profileOf(own, "reviewer")).toEqual(roleProfileEntry("reviewer", "big-pickle"));
+  });
+
+  it("keeps the Reviewer on the default when only the Worker's family is signed in, or no other provider lists a model", async () => {
+    const sameFamily = daemonWith({
+      available: ["claude", "opencode"].map((provider) => ({ provider, available: true })),
+      models: { claude: [{ id: "claude-opus-5" }], opencode: [{ id: "anthropic/claude-sonnet-5" }] },
+    });
+    expect(await ensureRoles(sameFamily.paseo, deps())).not.toHaveProperty("reviewer");
+    expect(aliasOf(sameFamily, "reviewer")).toEqual(roleAliasEntry("reviewer", "claude"));
+
+    const noModels = daemonWith({ models: { claude: [{ id: "claude-opus-5" }], codex: [] } });
+    await ensureRoles(noModels.paseo, deps());
+    expect(aliasOf(noModels, "reviewer")).toEqual(roleAliasEntry("reviewer", "claude"));
+    expect(profileOf(noModels, "reviewer")).toEqual(roleProfileEntry("reviewer", "claude-opus-5"));
+  });
+
+  it("keeps the Reviewer on the default when the Worker's family cannot be told", async () => {
+    // A Worker alias with no base provider: nothing to be independent of.
+    const daemon = daemonWith({ providers: { "bm-worker": { label: "Beads Worker" } }, agentProfiles: [{ id: "bm-worker" }] });
+
+    await ensureRoles(daemon.paseo, deps());
+
+    expect(aliasOf(daemon, "reviewer")).toEqual(roleAliasEntry("reviewer", "claude"));
+  });
+
+  it("never touches an existing Reviewer alias, and completes a half Reviewer as before", async () => {
+    const reviewer = { extends: "claude", label: "My Reviewer", paseoTools: { enabled: false }, env: { MINE: "1" } };
+    const whole = daemonWith({
+      providers: { "bm-reviewer": reviewer },
+      agentProfiles: [{ id: "bm-reviewer", name: "Mine", provider: "bm-reviewer", model: "claude-sonnet-5" }],
+    });
+    const result = await ensureRoles(whole.paseo, deps());
+    expect(result.created).toEqual(["manager", "worker", "orchestrator"]);
+    expect(aliasOf(whole, "reviewer")).toEqual(reviewer);
+    expect(profileOf(whole, "reviewer")).toEqual({ id: "bm-reviewer", name: "Mine", provider: "bm-reviewer", model: "claude-sonnet-5" });
+
+    // Its alias there without a profile: the profile follows that alias, never another family.
+    const aliasOnly = daemonWith({ providers: { "bm-reviewer": reviewer } });
+    await ensureRoles(aliasOnly.paseo, deps());
+    expect(aliasOf(aliasOnly, "reviewer")).toEqual(reviewer);
+    expect(profileOf(aliasOnly, "reviewer")).toEqual(roleProfileEntry("reviewer", "claude-opus-5"));
+
+    // Its profile there without an alias: the alias goes on the default, so the profile's model still runs.
+    const profileOnly = daemonWith({ agentProfiles: [{ id: "bm-reviewer", name: "Mine", provider: "bm-reviewer", model: "claude-sonnet-5" }] });
+    await ensureRoles(profileOnly.paseo, deps());
+    expect(aliasOf(profileOnly, "reviewer")).toEqual(roleAliasEntry("reviewer", "claude"));
   });
 });

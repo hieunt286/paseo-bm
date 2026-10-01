@@ -1,11 +1,15 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { COORDINATION_DIR_NAME, createCoordinationStore } from "../plugin/server/coordination-store";
+import { AUTONOMY_DIR_NAME, createAutonomyStore } from "../plugin/server/autonomy-store";
+import { createInterventionStore } from "../plugin/server/intervention-store";
 import { cleanupPaseoBm } from "../plugin/server/setup-machine";
 import { ensureRoles, markCleanedUpThisRun } from "../plugin/server/setup-roles";
 import { readSetupState, updateSetupState } from "../plugin/server/setup-state";
 import { setupCleanupRpc } from "../plugin/shared/contracts";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 /**
  * WP-404: "Remove paseo-bm's settings" (design §7.13.7, ADR-012 decision 6).
@@ -34,41 +38,29 @@ afterEach(() => {
 
 const ROOM = { id: "room-lead", name: "Lead", provider: "room-lead", model: "gpt-5" };
 
-function fakeDaemon(options: { injectIntoAgents?: boolean; patchFails?: boolean } = {}) {
-  const state: { providers: Record<string, unknown>; agentProfiles: Array<Record<string, unknown>>; mcp: { injectIntoAgents: boolean } } = {
-    providers: {
-      claude: { enabled: true },
-      "room-lead": { extends: "codex" },
-      "bm-manager": { extends: "claude" },
-      "bm-worker": { extends: "claude" },
-      "bm-reviewer": { extends: "codex" },
-      "bm-orchestrator": { extends: "claude" },
-      "bm-worker-fallback-1": { extends: "codex" },
-      "bm-worker-fallback-2": { extends: "pi" },
-      "bm-reviewer-fallback-1": { extends: "pi" },
-    },
-    agentProfiles: [ROOM, { id: "bm-manager" }, { id: "bm-worker" }, { id: "bm-reviewer" }, { id: "bm-orchestrator" }],
-    mcp: { injectIntoAgents: options.injectIntoAgents ?? true },
-  };
-  const patches: Array<Record<string, unknown>> = [];
-  const paseo = {
+/** A machine set up with the four roles, their fallbacks and a room of the user's own; Claude can be offered again. */
+function daemonWith(options: { injectIntoAgents?: boolean; patchFails?: boolean } = {}) {
+  const fake = fakePaseo({
+    providers: { available: ["claude"], models: { claude: [{ id: "claude-opus-5" }] } },
     config: {
-      get: vi.fn(async () => ({ config: structuredClone(state) })),
-      patch: vi.fn(async (patch: Record<string, unknown>) => {
-        if (options.patchFails === true) throw new Error("Request failed: config is read-only");
-        patches.push(structuredClone(patch));
-        for (const [id, entry] of Object.entries((patch["providers"] ?? {}) as Record<string, Record<string, unknown>>)) {
-          state.providers[id] = { ...((state.providers[id] ?? {}) as object), ...entry };
-        }
-        for (const id of (patch["removeProviders"] as string[] | undefined) ?? []) delete state.providers[id];
-        if (patch["agentProfiles"] !== undefined) state.agentProfiles = structuredClone(patch["agentProfiles"]) as typeof state.agentProfiles;
-        const mcp = patch["mcp"] as { injectIntoAgents?: boolean } | undefined;
-        if (mcp?.injectIntoAgents !== undefined) state.mcp.injectIntoAgents = mcp.injectIntoAgents;
-        return {};
-      }),
+      providers: {
+        claude: { enabled: true },
+        "room-lead": { extends: "codex" },
+        "bm-manager": { extends: "claude" },
+        "bm-worker": { extends: "claude" },
+        "bm-reviewer": { extends: "codex" },
+        "bm-orchestrator": { extends: "claude" },
+        "bm-worker-fallback-1": { extends: "codex" },
+        "bm-worker-fallback-2": { extends: "pi" },
+        "bm-reviewer-fallback-1": { extends: "pi" },
+      },
+      agentProfiles: [ROOM, { id: "bm-manager" }, { id: "bm-worker" }, { id: "bm-reviewer" }, { id: "bm-orchestrator" }],
+      mcp: { injectIntoAgents: options.injectIntoAgents ?? true },
     },
-  };
-  return { paseo, patches, state: () => state };
+    ...(options.patchFails === true ? { patch: new Error("Request failed: config is read-only") } : {}),
+  });
+  type State = { providers: Record<string, unknown>; agentProfiles: Array<Record<string, unknown>>; mcp: { injectIntoAgents: boolean } };
+  return { paseo: fake.paseo, patches: fake.patches, state: () => fake.config<State>() };
 }
 
 /** A data folder with one of everything the button may and may not touch. */
@@ -105,7 +97,7 @@ function fillDataHome(): void {
 
 describe("setup.cleanup", () => {
   it("removes every bm-* entry in one patch and leaves everything else alone", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
 
     const result = await cleanupPaseoBm(daemon.paseo, { deleteData: false }, deps());
 
@@ -126,7 +118,7 @@ describe("setup.cleanup", () => {
   });
 
   it("puts the agent-tools switch back when paseo-bm turned it on", async () => {
-    const daemon = fakeDaemon({ injectIntoAgents: true });
+    const daemon = daemonWith({ injectIntoAgents: true });
     updateSetupState({ agentTools: { setBy: "plugin", previous: false, at: "2026-09-25T10:00:00.000Z" } }, deps());
 
     const result = await cleanupPaseoBm(daemon.paseo, { deleteData: false }, deps());
@@ -137,7 +129,7 @@ describe("setup.cleanup", () => {
   });
 
   it("leaves a switch the user turned on exactly where it is", async () => {
-    const daemon = fakeDaemon({ injectIntoAgents: true });
+    const daemon = daemonWith({ injectIntoAgents: true });
 
     const result = await cleanupPaseoBm(daemon.paseo, { deleteData: false }, deps());
 
@@ -147,13 +139,13 @@ describe("setup.cleanup", () => {
   });
 
   it("says off when the switch was never on", async () => {
-    const daemon = fakeDaemon({ injectIntoAgents: false });
+    const daemon = daemonWith({ injectIntoAgents: false });
 
     expect((await cleanupPaseoBm(daemon.paseo, { deleteData: false }, deps())).agentTools).toBe("off");
   });
 
   it("restores a switch that was on before paseo-bm, to what was recorded", async () => {
-    const daemon = fakeDaemon({ injectIntoAgents: true });
+    const daemon = daemonWith({ injectIntoAgents: true });
     updateSetupState({ agentTools: { setBy: "installer", previous: true, at: "2026-09-01T00:00:00.000Z" } }, deps());
 
     const result = await cleanupPaseoBm(daemon.paseo, { deleteData: false }, deps());
@@ -163,7 +155,7 @@ describe("setup.cleanup", () => {
   });
 
   it("writes the cleanup mark and forgets that the switch was ever ours", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     updateSetupState({ agentTools: { setBy: "plugin", previous: false, at: "2026-09-25T10:00:00.000Z" } }, deps());
 
     await cleanupPaseoBm(daemon.paseo, { deleteData: false }, deps());
@@ -172,7 +164,7 @@ describe("setup.cleanup", () => {
   });
 
   it("writes no mark and deletes nothing when the patch is refused", async () => {
-    const daemon = fakeDaemon({ patchFails: true });
+    const daemon = daemonWith({ patchFails: true });
     fillDataHome();
 
     await expect(cleanupPaseoBm(daemon.paseo, { deleteData: true }, deps())).rejects.toMatchObject({
@@ -184,7 +176,7 @@ describe("setup.cleanup", () => {
   });
 
   it("keeps the data folder untouched unless asked", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     fillDataHome();
 
     const result = await cleanupPaseoBm(daemon.paseo, { deleteData: false }, deps());
@@ -198,7 +190,7 @@ describe("setup.cleanup", () => {
 
 describe("deleting the data too", () => {
   it("deletes what the plugin made and keeps what it did not", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     fillDataHome();
 
     const result = await cleanupPaseoBm(daemon.paseo, { deleteData: true }, deps());
@@ -230,7 +222,7 @@ describe("deleting the data too", () => {
   });
 
   it("keeps the setup state, because it carries the mark", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     fillDataHome();
 
     const result = await cleanupPaseoBm(daemon.paseo, { deleteData: true }, deps());
@@ -241,7 +233,7 @@ describe("deleting the data too", () => {
   });
 
   it("skips a symlink instead of following it", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     fillDataHome();
     const outside = join(home, "outside");
     mkdirSync(outside, { recursive: true });
@@ -257,7 +249,7 @@ describe("deleting the data too", () => {
   });
 
   it("keeps a symlinked orchestrator/ and what it points at", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     fillDataHome();
     const outside = join(home, "outside-orchestrator");
     mkdirSync(outside, { recursive: true });
@@ -272,12 +264,52 @@ describe("deleting the data too", () => {
     expect(readFileSync(join(outside, "settings.json"), "utf8")).toBe("keep me");
   });
 
+  it("deletes Settings → Coordination with the rest (autonomy design §G.7)", async () => {
+    const daemon = daemonWith();
+    fillDataHome();
+    createCoordinationStore(dataHome).set({ key: "advice.everyFinished", value: 0 });
+    expect(existsSync(join(dataHome, COORDINATION_DIR_NAME, "settings.json"))).toBe(true);
+
+    const result = await cleanupPaseoBm(daemon.paseo, { deleteData: true }, deps());
+
+    expect(result.data?.deleted).toContain(COORDINATION_DIR_NAME);
+    expect(existsSync(join(dataHome, COORDINATION_DIR_NAME))).toBe(false);
+    expect(result.data?.kept.join("\n")).not.toContain(COORDINATION_DIR_NAME);
+  });
+
+  it("deletes the autonomy policy with the rest (autonomy design §B.2)", async () => {
+    const daemon = daemonWith();
+    fillDataHome();
+    createAutonomyStore(dataHome).set({ workspaceId: "w1", class: "scope", mode: "delegate", confirmed: true }, "2026-09-30T10:00:00.000Z");
+    expect(existsSync(join(dataHome, AUTONOMY_DIR_NAME, "policy.json"))).toBe(true);
+
+    const result = await cleanupPaseoBm(daemon.paseo, { deleteData: true }, deps());
+
+    expect(result.data?.deleted).toContain(AUTONOMY_DIR_NAME);
+    expect(existsSync(join(dataHome, AUTONOMY_DIR_NAME))).toBe(false);
+    expect(result.data?.kept.join("\n")).not.toContain(AUTONOMY_DIR_NAME);
+  });
+
+  it("deletes the intervention log with orchestrator/ (autonomy design §G.3)", async () => {
+    const daemon = daemonWith();
+    fillDataHome();
+    const log = createInterventionStore(dataHome);
+    log.record({ kind: "stop", workspaceId: "w1", requestId: null, targetAgentId: "agent-w", trigger: "orchestrator" });
+    expect(existsSync(log.path)).toBe(true);
+
+    const result = await cleanupPaseoBm(daemon.paseo, { deleteData: true }, deps());
+
+    expect(result.data?.deleted).toContain("orchestrator");
+    expect(existsSync(log.path)).toBe(false);
+    expect(existsSync(join(dataHome, "orchestrator"))).toBe(false);
+  });
+
   // Review b1: checking only the last component is not enough. `readdir`
   // follows a symlinked `ui/`, and the `lstat` of `ui/<name>` then resolves
   // through it and reports an ordinary file, so the delete lands outside the
   // data folder.
   it("does not list, let alone delete through, a symlinked ui/", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     fillDataHome();
     const outside = join(home, "outside-ui");
     mkdirSync(outside, { recursive: true });
@@ -293,7 +325,7 @@ describe("deleting the data too", () => {
   });
 
   it("deletes nothing at all when the data folder itself is a symlink", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     const elsewhere = join(home, "elsewhere");
     mkdirSync(join(elsewhere, "traces"), { recursive: true });
     writeFileSync(join(elsewhere, "role-extras.json"), "keep me");
@@ -308,7 +340,7 @@ describe("deleting the data too", () => {
   });
 
   it("says so, rather than failing, when the data folder cannot be used", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
 
     const result = await cleanupPaseoBm(daemon.paseo, { deleteData: true }, { env: { PASEO_BM_HOME: "relative/bm" }, homedir: () => home });
 
@@ -320,7 +352,7 @@ describe("deleting the data too", () => {
 
 describe("after the button, before `paseo plugin remove`", () => {
   it("does not recreate the roles, even once the plugin has reloaded", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     await cleanupPaseoBm(daemon.paseo, { deleteData: true }, deps());
 
     // A reload clears the in-memory flag; the mark on disk is what remains.
@@ -332,14 +364,11 @@ describe("after the button, before `paseo plugin remove`", () => {
   });
 
   it("creates them again when the user asks to set up again", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     await cleanupPaseoBm(daemon.paseo, { deleteData: false }, deps());
     markCleanedUpThisRun(false);
 
-    const again = await ensureRoles(
-      { ...daemon.paseo, providers: { listAvailable: async () => ({ providers: [{ provider: "claude", available: true }] }), listModels: async () => ({ models: [{ id: "claude-opus-5" }] }) } },
-      { ...deps(), log: () => {}, resume: true },
-    );
+    const again = await ensureRoles(daemon.paseo, { ...deps(), log: () => {}, resume: true });
 
     expect(again.created).toEqual(["manager", "worker", "reviewer", "orchestrator"]);
   });

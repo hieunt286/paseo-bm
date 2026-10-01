@@ -19,7 +19,7 @@
  * against `LOOKUP_TIMEOUT_MS` and a slow answer costs the mode, never the
  * agent.
  */
-import type { Role } from "./role-extras";
+import type { Role } from "./role-instructions";
 
 /** A mode as `providers.listModes` returns it (`AgentMode` in @getpaseo/protocol). */
 export type ProviderMode = { id: string; label?: string; description?: string; colorTier?: string };
@@ -28,7 +28,9 @@ export type ProviderMode = { id: string; label?: string; description?: string; c
  * Roles whose start mode the hook chooses (delta 20260917c §4.6). The Manager
  * is left out on purpose: `manager.ensure` already sets its mode, and two
  * places deciding one value is worse than one. The Orchestrator falls under
- * the Reviewer's rule (orchestrator design §3.1): it must stay read-only.
+ * the Reviewer's rule (orchestrator design §3.1): it must stay read-only. In
+ * a project whose action boundary is on, a Worker's and a Reviewer's mode is
+ * `boundaryPostureOf`'s instead (§D.2); the Orchestrator keeps this rule.
  */
 export const ROLE_GETS_MODE: Readonly<Record<Role, boolean>> = { manager: false, worker: true, reviewer: true, orchestrator: true };
 
@@ -110,6 +112,112 @@ export function chooseModeId(
   const chosen = usable.find((mode) => mode.id === current);
   if (chosen === undefined) return undefined;
   return tierOf(chosen) === "dangerous" || tierOf(chosen) === "planning" ? reviewerMode : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// The action boundary's modes (autonomy design §D.2, change-009 C2, change-010).
+// ---------------------------------------------------------------------------
+
+/** The roles the action boundary covers: the Manager and the Orchestrator keep their rules. */
+export type BoundaryRole = "worker" | "reviewer";
+
+/** A role's start posture under the boundary: its mode and the provider options set with it at creation. */
+export interface BoundaryMode {
+  modeId: string;
+  providerOptions?: Readonly<Record<string, string>>;
+}
+
+/**
+ * The least permissive workable mode per base provider and role (§D.2's table,
+ * the spike's pass modes). Codex's Worker runs without its sandbox so that an
+ * allowed release can run (the plugin is the barrier); its Reviewer keeps the
+ * sandbox as a second barrier. A base provider that is not a key here keeps
+ * today's rules and detection (§D.3). If loga.6's Codex MCP gate fails, the
+ * Codex column is removed here and nowhere else.
+ */
+export const BOUNDARY_MODES: Readonly<Record<string, Readonly<Record<BoundaryRole, BoundaryMode>>>> = {
+  claude: { worker: { modeId: "default" }, reviewer: { modeId: "default" } },
+  codex: {
+    worker: { modeId: "auto", providerOptions: { approval_policy: "untrusted", sandbox_mode: "danger-full-access", web_search: "disabled" } },
+    reviewer: { modeId: "auto", providerOptions: { approval_policy: "untrusted", sandbox_mode: "workspace-write", web_search: "disabled" } },
+  },
+};
+
+/** The label that says whether a Worker or Reviewer runs under the boundary (`on` / `off`), set on `agent.created`. */
+export const BOUNDARY_LABEL = "bm.boundary";
+
+/** The base providers whose Workers and Reviewers can run under the boundary. */
+export const BOUNDARY_PROVIDERS: readonly string[] = Object.keys(BOUNDARY_MODES);
+
+/** The role as one the boundary covers, or null. */
+export function boundaryRoleOf(role: Role | null | undefined): BoundaryRole | null {
+  return role === "worker" || role === "reviewer" ? role : null;
+}
+
+/** The boundary mode of a role on a base provider, or null when the boundary does not cover it. */
+export function boundaryModeOf(role: Role | null | undefined, base: string | null | undefined): BoundaryMode | null {
+  const covered = boundaryRoleOf(role);
+  if (covered === null || typeof base !== "string" || !Object.prototype.hasOwnProperty.call(BOUNDARY_MODES, base)) return null;
+  return BOUNDARY_MODES[base]![covered];
+}
+
+/**
+ * The project's switch as the hook reads it at creation: `on` or `off`, or
+ * `unknown` when the project of the agent's folder cannot be told (read as off).
+ */
+export type BoundarySwitch = "on" | "off" | "unknown";
+
+/**
+ * What the hook applies to a Worker or Reviewer (§D.2): the boundary mode, or
+ * today's rule with the reason written on the `Action boundary` facts line.
+ */
+export type BoundaryPosture = ({ on: true } & BoundaryMode) | { on: false; reason: string };
+
+/** The reasons of an `off` facts line, agent-facing (English). */
+export const BOUNDARY_OFF_REASONS = {
+  projectOff: "the project's boundary is off",
+  projectUnknown: "the project could not be told from the agent's folder",
+  provider: "its provider is only watched (detection)",
+  base: "its provider could not be read",
+  handSet: "its profile's mode is set by hand",
+  modes: "its provider does not list the boundary's mode",
+} as const;
+
+/**
+ * The posture of a Worker or Reviewer, or null for another role (no facts
+ * line). On only when the project's switch is on, the base provider has a
+ * column in `BOUNDARY_MODES`, the role's profile sets no mode by hand (§D.4:
+ * the owner's mode wins) and the provider lists the boundary mode (or its
+ * list cannot be read: the table is trusted).
+ */
+export function boundaryPostureOf(input: {
+  role: Role | null | undefined;
+  base: string | null;
+  project: BoundarySwitch;
+  modes: readonly ProviderMode[] | null;
+  profileModeId: string | null;
+}): BoundaryPosture | null {
+  if (boundaryRoleOf(input.role) === null) return null;
+  if (input.project === "unknown") return { on: false, reason: BOUNDARY_OFF_REASONS.projectUnknown };
+  if (input.project === "off") return { on: false, reason: BOUNDARY_OFF_REASONS.projectOff };
+  if (input.base === null) return { on: false, reason: BOUNDARY_OFF_REASONS.base };
+  const mode = boundaryModeOf(input.role, input.base);
+  if (mode === null) return { on: false, reason: BOUNDARY_OFF_REASONS.provider };
+  if (input.profileModeId !== null) return { on: false, reason: BOUNDARY_OFF_REASONS.handSet };
+  // A list that cannot be read: the table (Claude and Codex list these modes); one without the mode: today's rule.
+  if (input.modes !== null && !input.modes.some((listed) => listed?.id === mode.modeId)) return { on: false, reason: BOUNDARY_OFF_REASONS.modes };
+  return { on: true, ...mode };
+}
+
+/**
+ * The mode a creator passed, as today's rule should see it (change-010 C5): a
+ * creator's BOUNDARY mode, from Runtime facts written while the project's
+ * switch was on, counts as no mode, so today's pick replaces it and no agent
+ * asks with nobody answering. Any other mode is kept as it was.
+ */
+export function creatorModeOffBoundary(role: Role | null | undefined, base: string | null, current: string | undefined): string | undefined {
+  const mode = boundaryModeOf(role, base);
+  return mode !== null && current === mode.modeId ? undefined : current;
 }
 
 /**

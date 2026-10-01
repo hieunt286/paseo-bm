@@ -31,17 +31,21 @@
  *   every record and parse every old report again.
  * - the `refetch` payload also carries an `agent` snapshot whose `lastUsage`
  *   gives tokens and (sometimes) cost, which is where a record's `usage` comes
- *   from.
+ *   from — and, on Paseo 0.9.2 for Claude, Codex and OpenCode alike, the
+ *   context in use and the window (`contextWindowUsedTokens` /
+ *   `contextWindowMaxTokens`; run note 2026-09-30, autonomy design §G.2).
  */
 import { homedir } from "node:os";
-import { basename } from "node:path";
+import { basename, dirname } from "node:path";
 import type { PluginLifecycleEvents, PluginServerContext } from "@getpaseo/plugin/server";
 import { parseReports, parseReviews, requestIdFromText } from "./bm-report";
+import { pluginSentMatcher } from "./compaction-store";
 import { isPluginNotice } from "./notices";
 import { stripNewRequestMarker } from "../shared/new-request";
 import { resolveDataHome } from "./data-home";
 import { roleOfProvider, type BmRole } from "./agent-role";
 import { providerId } from "./provider-id";
+import { BOUNDARY_LABEL } from "./role-mode";
 import {
   TraceStoreLockTimeout,
   appendRecord,
@@ -66,10 +70,9 @@ export const REFETCH_LIMIT = 200;
 /**
  * Secret masking, applied **before** anything reaches the disk (REQ-048b).
  *
- * Same rule set as the CLI's `src/redact.ts` (Technical Design §9): the *values* of these
- * environment variables, and the value following a password-shaped flag. The
- * plugin payload cannot import `src/`, so the constants are duplicated; they
- * are a short closed list by design.
+ * Same rule set as the retired installer's masking (Technical Design §9): the
+ * *values* of these environment variables, and the value following a
+ * password-shaped flag. They are a short closed list by design.
  */
 export const SECRET_ENV_VARS: readonly string[] = ["PASEO_PASSWORD", "PASEO_DAEMON_PASSWORD"];
 export const SECRET_ARGV_FLAGS: readonly string[] = ["--password", "--token", "--secret"];
@@ -123,6 +126,23 @@ export interface CollectorDeps {
   log?: (message: string) => void;
   /** How long to wait for the workspace lock before dropping the turn (design §3.8). */
   lockTimeoutMs?: number;
+  /**
+   * Whether the plugin itself sent this `user_message` to the agent around
+   * `at` (autonomy design §G.5): the send log of the compactions the
+   * Orchestrator asked for (`compaction-store.ts` `pluginSentMatcher`). By
+   * default the log of the data folder the trace store lives in, read once per
+   * turn and only for a message that would otherwise be the owner's.
+   */
+  pluginSent?: (agentId: string, text: string, at: string | null) => boolean;
+}
+
+/**
+ * The send log beside the trace store `location` (the data folder is its
+ * parent, `data-home.ts`); none without a store. Work's live view reads the
+ * timelines with it too (`live-timeline.ts`).
+ */
+export function pluginSentBeside(location: TraceStoreLocation | null): (agentId: string, text: string, at: string | null) => boolean {
+  return pluginSentMatcher(location === null ? null : dirname(location.tracesDir));
 }
 
 function textOf(item: TimelineItem): string | null {
@@ -223,18 +243,51 @@ export function skillsFromItem(item: TimelineItem): string[] {
   return [];
 }
 
+type ShellFacts = Pick<Evidence, "status" | "exitCode" | "cwd" | "callId">;
+
+/**
+ * What a `shell` entry keeps besides its command (autonomy design §C.1): the
+ * call's `status` and `callId`, its exit code, and the folder it ran in, masked
+ * like the command. Never its `output`, which can hold anything and is bulk.
+ *
+ * Captured on an isolated Paseo 0.9.2 daemon (2026-09-30), one passing and one
+ * failing command per provider:
+ * - Claude `Bash`: no `cwd` and no exit code; a failing command is
+ *   `status: "failed"` (its code only in the error text), a passing one
+ *   `completed`.
+ * - Codex `shell`: `cwd` and `exitCode` on the detail (0, or the code); a
+ *   failing command is `failed` as well.
+ * - OpenCode `bash`: no `cwd`, and a failing command is `completed` too — its
+ *   code is only in `metadata.exit`, so that is read when the detail has none.
+ *   Without it an OpenCode failure would read as a success.
+ */
+function shellFactsOf(item: TimelineItem, cwd: string, env: NodeJS.ProcessEnv): ShellFacts {
+  const call = item as { callId?: unknown; status?: unknown; detail?: { exitCode?: unknown }; metadata?: { exit?: unknown } };
+  const facts: ShellFacts = {};
+  if (typeof call.status === "string" && call.status !== "") facts.status = call.status;
+  const said = call.detail?.exitCode;
+  const exit = call.metadata?.exit;
+  if (Number.isInteger(said)) facts.exitCode = said as number;
+  else if (Number.isInteger(exit)) facts.exitCode = exit as number;
+  else if (said === null) facts.exitCode = null;
+  if (cwd !== "") facts.cwd = redactText(cwd, env);
+  if (typeof call.callId === "string" && call.callId !== "") facts.callId = call.callId;
+  return facts;
+}
+
 /**
  * Evidence a turn leaves behind: skills loaded, commands run, files written,
  * sub-agents started.
  *
  * This is the raw material for "did this request create beads?" (REQ-044b) and
  * the workflow table (REQ-045), so it records what was *observed*, never a
- * conclusion drawn from it. A command and a sub-agent's label are masked with
- * `redactText` before they are kept, as messages are (REQ-048b).
+ * conclusion drawn from it. Every `detail` — command, file path, skill name,
+ * sub-agent label — and a command's folder are masked with `redactText` before
+ * they are kept, as messages are (REQ-048b, autonomy design §C.1).
  */
 export function evidenceFromItem(item: TimelineItem, agentId: string, at: string, env: NodeJS.ProcessEnv = process.env): Evidence[] {
   if (item.type !== "tool_call") return [];
-  const out: Evidence[] = skillsFromItem(item).map((skill) => ({ kind: "skill", detail: skill, agentId, at }));
+  const out: Evidence[] = skillsFromItem(item).map((skill) => ({ kind: "skill", detail: redactText(skill, env), agentId, at }));
   const detail = (item as { detail?: Record<string, unknown> }).detail;
   const text = (key: string): string => {
     const value = detail?.[key];
@@ -242,11 +295,11 @@ export function evidenceFromItem(item: TimelineItem, agentId: string, at: string
   };
   switch (detail?.["type"]) {
     case "shell":
-      if (text("command") !== "") out.push({ kind: "shell", detail: redactText(text("command"), env), agentId, at });
+      if (text("command") !== "") out.push({ kind: "shell", detail: redactText(text("command"), env), agentId, at, ...shellFactsOf(item, text("cwd"), env) });
       break;
     case "edit":
     case "write":
-      if (text("filePath") !== "") out.push({ kind: "file", detail: text("filePath"), agentId, at });
+      if (text("filePath") !== "") out.push({ kind: "file", detail: redactText(text("filePath"), env), agentId, at });
       break;
     case "sub_agent": {
       const label = [text("subAgentType"), text("description")].filter((part) => part !== "").join(" — ");
@@ -257,6 +310,80 @@ export function evidenceFromItem(item: TimelineItem, agentId: string, at: string
   return out;
 }
 
+/** A token count a provider reported: a finite number ≥ 0, rounded; anything else is not reported. */
+function tokenCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined;
+}
+
+type CompactionTrigger = "auto" | "manual";
+
+/**
+ * Tracks the `compaction` items of one turn and turns each compaction into one
+ * piece of evidence (autonomy design §G.2), from its `completed` item.
+ *
+ * Measured on Paseo 0.9.2 (run note 2026-09-30): every provider shows a
+ * `loading` item first and a `completed` item after, and the timeline keeps
+ * both — nothing merges them — so counting both would count each compaction
+ * twice, and one still loading when the turn ended did not happen yet. Claude
+ * puts the trigger and `preTokens` on the completed item; Codex the trigger on
+ * both; OpenCode the trigger on the loading item only, so a completed item
+ * without one takes its loading item's. What no item says reads `null`.
+ */
+export function compactionTracker(agentId: string): (item: TimelineItem, at: string) => Evidence | null {
+  let started: CompactionTrigger | null = null;
+  return (item, at) => {
+    if (item.type !== "compaction") return null;
+    const { status, trigger: said, preTokens } = item as { status?: unknown; trigger?: unknown; preTokens?: unknown };
+    const known: CompactionTrigger | null = said === "auto" || said === "manual" ? said : null;
+    if (status !== "completed") {
+      started = known ?? started;
+      return null;
+    }
+    const trigger = known ?? started;
+    started = null;
+    return { kind: "compaction", detail: trigger ?? "unknown", agentId, at, trigger, preTokens: tokenCount(preTokens) ?? null };
+  };
+}
+
+/**
+ * The usage of the turn that just ended, from an agent snapshot's `lastUsage`
+ * (the `agent` of a `timeline.refetch` payload); null when there is none.
+ *
+ * Its token counts are that turn's as the provider reports them — the sum
+ * over the turn's model calls on Claude, the last model call only on Codex and
+ * OpenCode, and Codex's cached tokens are part of its input (run note
+ * 2026-09-30 §4). Its `totalCostUsd` is the agent's running SESSION total
+ * (AGENTS.md): across the twelve Manager turns of the WP-214 acceptance run it
+ * rose monotonically (0.3956 → 0.4492 → … → 2.2712) while the token counts
+ * beside it went up and down per turn. Summing it over a request's turns would
+ * multiply the bill, so a per-turn record never claims a provider cost and the
+ * request cost is estimated from the per-turn tokens instead (defect 11).
+ *
+ * `contextUsed` / `contextMax` (autonomy design §G.2) are kept only when the
+ * provider reported `contextWindowUsedTokens` / `contextWindowMaxTokens`, so an
+ * absent field means "not reported", never zero.
+ */
+export function usageOfSnapshot(snapshot: unknown): Usage | null {
+  if (snapshot === null || typeof snapshot !== "object") return null;
+  const agent = snapshot as { lastUsage?: unknown; model?: unknown };
+  const lastUsage = agent.lastUsage;
+  if (lastUsage === undefined || lastUsage === null || typeof lastUsage !== "object") return null;
+  const reported = lastUsage as Record<string, unknown>;
+  const contextUsed = tokenCount(reported["contextWindowUsedTokens"]);
+  const contextMax = tokenCount(reported["contextWindowMaxTokens"]);
+  return {
+    inputTokens: Number(reported["inputTokens"] ?? 0) || 0,
+    cachedInputTokens: Number(reported["cachedInputTokens"] ?? 0) || 0,
+    outputTokens: Number(reported["outputTokens"] ?? 0) || 0,
+    costUsd: null,
+    costBasis: "unavailable",
+    model: typeof agent.model === "string" ? agent.model : null,
+    pricesUpdatedAt: null,
+    ...(contextUsed === undefined ? {} : { contextUsed }),
+    ...(contextMax === undefined || contextMax === 0 ? {} : { contextMax }),
+  };
+}
+
 interface RefetchEntry {
   item: unknown;
   turnId?: string;
@@ -264,6 +391,12 @@ interface RefetchEntry {
 }
 
 const nonEmpty = (value: unknown): string | null => (typeof value === "string" && value.trim() !== "" ? value : null);
+
+/** `{ boundary }` from an agent's `bm.boundary` label, or nothing when it carries none. */
+function boundaryOfLabels(labels: unknown): { boundary?: "on" | "off" } {
+  const value = labels !== null && typeof labels === "object" ? (labels as Record<string, unknown>)[BOUNDARY_LABEL] : undefined;
+  return value === "on" || value === "off" ? { boundary: value } : {};
+}
 
 /**
  * What the agent ran on this turn, from the snapshot `timeline.refetch` returns
@@ -276,6 +409,8 @@ const nonEmpty = (value: unknown): string | null => (typeof value === "string" &
  * reduced to the provider id the way every other paseo-bm reader does
  * (`bm-worker/<model>` → `bm-worker`), so a later price lookup can hand it to
  * `providers.listModels` as is. `null` when the snapshot names none.
+ * `boundary` is its `bm.boundary` label, when it has one (autonomy design
+ * §D.2, change-010 C9).
  */
 export function runtimeOf(snapshot: unknown): TraceRuntime | null {
   try {
@@ -288,19 +423,26 @@ export function runtimeOf(snapshot: unknown): TraceRuntime | null {
         nonEmpty(info["thinkingOptionId"]) ?? nonEmpty(agent["effectiveThinkingOptionId"]) ?? nonEmpty(agent["thinkingOptionId"]),
       modeId: nonEmpty(info["modeId"]) ?? nonEmpty(agent["currentModeId"]),
       provider: nonEmpty(providerId(agent["provider"])),
+      // Autonomy design §D.2 (change-010 C9): whether it ran under the action boundary, for the replay's split.
+      ...boundaryOfLabels(agent["labels"]),
     };
   } catch {
     return null;
   }
 }
 
-/** Reads `timestamp`s back for one turn with a single `refetch` call (assumption A-2). */
+/**
+ * Reads `timestamp`s back for one turn with a single `refetch` call (assumption A-2).
+ *
+ * `cut` says the page may have lost the start of the turn: it is full and its
+ * oldest entry already belongs to this turn.
+ */
 export async function timestampsForTurn(
   deps: CollectorDeps,
   agentId: string,
   turnId: string | null,
-): Promise<{ entries: RefetchEntry[]; usage: Usage | null; requestIdLabel: string | null; runtime: TraceRuntime | null }> {
-  if (deps.paseo === undefined) return { entries: [], usage: null, requestIdLabel: null, runtime: null };
+): Promise<{ entries: RefetchEntry[]; usage: Usage | null; requestIdLabel: string | null; runtime: TraceRuntime | null; cut: boolean }> {
+  if (deps.paseo === undefined) return { entries: [], usage: null, requestIdLabel: null, runtime: null, cut: false };
   let payload: unknown;
   try {
     payload = await deps.paseo.agents.ref(agentId).timeline.refetch({
@@ -308,7 +450,7 @@ export async function timestampsForTurn(
       limit: REFETCH_LIMIT,
     });
   } catch {
-    return { entries: [], usage: null, requestIdLabel: null, runtime: null };
+    return { entries: [], usage: null, requestIdLabel: null, runtime: null, cut: false };
   }
   const asRecord = payload as { entries?: unknown; agent?: unknown } | null;
   const rawEntries = Array.isArray(asRecord?.entries) ? (asRecord?.entries as RefetchEntry[]) : [];
@@ -323,36 +465,32 @@ export async function timestampsForTurn(
     turnId === null
       ? sliceLastTurn(rawEntries, (entry) => entry.item)
       : rawEntries.filter((entry) => entry.turnId === turnId);
-  const snapshot = asRecord?.agent as
-    | { lastUsage?: Record<string, unknown>; model?: unknown; labels?: Record<string, unknown> }
-    | null;
+  const snapshot = asRecord?.agent as { labels?: Record<string, unknown> } | null;
   // The agent's own `bm.requestId` label, set when it was created. A Worker's
   // later turns rarely repeat the id in their text, so without this its records
   // carry no request id and are lost from the trace once the agent is deleted
   // (WP-214, D-8's delete leg: 14 of 14 F-1 Worker records had none).
   const label = snapshot?.labels?.["bm.requestId"];
   const requestIdLabel = typeof label === "string" && label !== "" ? label : null;
-  const lastUsage = snapshot?.lastUsage;
-  const usage: Usage | null =
-    lastUsage === undefined || lastUsage === null
-      ? null
-      : {
-          inputTokens: Number(lastUsage["inputTokens"] ?? 0) || 0,
-          cachedInputTokens: Number(lastUsage["cachedInputTokens"] ?? 0) || 0,
-          outputTokens: Number(lastUsage["outputTokens"] ?? 0) || 0,
-          // `lastUsage.totalCostUsd` is the agent's running SESSION total, not
-          // the cost of this turn: across the twelve Manager turns of the
-          // WP-214 acceptance run it rose monotonically (0.3956 → 0.4492 → …
-          // → 2.2712) while the token counts beside it went up and down per
-          // turn. Summing it over a request's turns would multiply the bill,
-          // so a per-turn record never claims a provider cost and the request
-          // cost is estimated from the per-turn tokens instead (defect 11).
-          costUsd: null,
-          costBasis: "unavailable",
-          model: typeof snapshot?.model === "string" ? (snapshot.model as string) : null,
-          pricesUpdatedAt: null,
-        };
-  return { entries, usage, requestIdLabel, runtime: runtimeOf(asRecord?.agent) };
+  const cut = turnId !== null && rawEntries.length >= REFETCH_LIMIT && rawEntries[0]?.turnId === turnId;
+  return { entries, usage: usageOfSnapshot(snapshot), requestIdLabel, runtime: runtimeOf(asRecord?.agent), cut };
+}
+
+const isToolCall = (item: unknown): boolean =>
+  item !== null && typeof item === "object" && (item as { type?: unknown }).type === "tool_call";
+
+/**
+ * How many tool calls the turn made (autonomy design §G.2): every `tool_call`
+ * item of its entries, whatever the tool. The timeline merges a call's updates
+ * into one item by its call id, so each call counts once.
+ *
+ * A turn longer than one refetch page (`cut`) is counted from the hook
+ * payload as well — the whole conversation, cut from the last user message —
+ * and the larger count is kept: the page alone would count only its tail.
+ */
+export function toolCallsOf(timed: readonly TimedItem[], hookItems: readonly unknown[], cut: boolean): number {
+  const counted = timed.filter((entry) => isToolCall(entry.item)).length;
+  return cut ? Math.max(counted, sliceLastTurn(hookItems).filter(isToolCall).length) : counted;
 }
 
 /**
@@ -426,7 +564,7 @@ export async function buildRecord(
   const env = deps.env ?? process.env;
 
   const items = Array.isArray(event.timeline) ? event.timeline : [];
-  const { entries, usage, requestIdLabel, runtime } = await timestampsForTurn(deps, event.agent.id, event.turnId);
+  const { entries, usage, requestIdLabel, runtime, cut } = await timestampsForTurn(deps, event.agent.id, event.turnId);
 
   // Preferred source: the refetch entries for this turn, which carry both the
   // item and its timestamp. Fallback: the hook payload, which is the whole
@@ -449,9 +587,13 @@ export async function buildRecord(
   const reviews: ParsedReview[] = [];
   const evidence: Evidence[] = [];
   let relayRequestId: string | null = null;
+  const compaction = compactionTracker(event.agent.id);
+  const pluginSent = deps.pluginSent ?? pluginSentBeside(deps.location);
 
   for (const { item, at } of timed) {
     evidence.push(...evidenceFromItem(item, event.agent.id, at, env));
+    const compacted = compaction(item, at);
+    if (compacted !== null) evidence.push(compacted);
     if (role === "manager" && relayRequestId === null) relayRequestId = relayRequestIdOf(item);
     const text = textOf(item);
     if (text === null) continue;
@@ -461,24 +603,29 @@ export async function buildRecord(
     // here and the message stays theirs (delta 20260917f §4.1).
     const safe = stripNewRequestMarker(redactText(text, env));
     const message: TraceMessage = { agentId: event.agent.id, at, text: safe, truncated: false };
+    // The plugin's `/compact` (autonomy design §G.5): a `user_message` with a
+    // `clientMessageId` and no marker, told apart only by the plugin's send log.
+    let sentByPlugin = false;
     if (item.type === "user_message") {
       // Typed in Paseo's app → `clientMessageId`; sent by an agent → none.
       // Verified on the owner's Manager: 15/15 typed vs 43/43 agent reports.
       // The plugin's own notices carry a clientMessageId too (the SDK adds one),
-      // so they are recognised by their text instead (review b2).
-      message.origin =
-        typeof (item as { clientMessageId?: unknown }).clientMessageId === "string" && !isPluginNotice(safe)
-          ? "user"
-          : "agent";
+      // so they are recognised by their text instead (review b2), and what the
+      // plugin sent for a compaction by its send log.
+      const typed = typeof (item as { clientMessageId?: unknown }).clientMessageId === "string" && !isPluginNotice(safe);
+      sentByPlugin = typed && pluginSent(event.agent.id, text, at);
+      message.origin = typed && !sentByPlugin ? "user" : "agent";
       sent.push(message);
     } else {
       received.push(message);
     }
     // A plugin notice quotes block names ("- BM-REVIEW checked: is missing"),
     // which parsed as a review with the verdict "checked: is missing".
-    if (isPluginNotice(safe)) continue;
+    if (isPluginNotice(safe) || sentByPlugin) continue;
     reports.push(...parseReports(safe, { agentId: event.agent.id, at }));
-    reviews.push(...parseReviews(safe, { agentId: event.agent.id, at }));
+    // A review is its Reviewer's own reply: a block quoted in its prompt or
+    // relayed by a Worker or Manager is the same review again (bead 7gxw.12).
+    if (role === "reviewer" && item.type === "assistant_message") reviews.push(...parseReviews(safe, { agentId: event.agent.id, at }));
   }
 
   const requestIdFromReports = reports.find((report) => report.requestId !== null)?.requestId ?? null;
@@ -510,6 +657,7 @@ export async function buildRecord(
     usage,
     runtime,
     pluginVersion: PLUGIN_VERSION,
+    toolCalls: toolCallsOf(timed, items, cut),
   };
 
   const cwd = typeof event.agent.cwd === "string" && event.agent.cwd !== "" ? event.agent.cwd : null;

@@ -1,14 +1,15 @@
 /**
  * The agents' tools that build `BM-*` blocks (design delta 20260924b-agent-tools,
- * ADR-010): `bm_report` for a Worker, `bm_review` for a Reviewer, `bm_answers`
- * for a Manager, and `bm_assessment` for the Orchestrator (Orchestrator design
- * §5.5), whose schema lives in `shared/bm-assessment.ts`.
+ * ADR-010): `bm_report` for a Worker, `bm_review` for a Reviewer and
+ * `bm_answers` for a Manager. The Orchestrator's workflow assessment tool is
+ * retired (autonomy design §B.9).
  *
- * The Orchestrator's other tools (design §5.2–§5.3, §6A, §6B.4: `bm_projects`,
+ * The Orchestrator's tools (design §5.2–§5.3, §6A, §6B.4: `bm_projects`,
  * `bm_request`, `bm_agent_messages`, `bm_send_command`, `bm_decisions`,
- * `bm_ask_owner`, `bm_decide`, `bm_set_autopilot`, `bm_direct_worker`,
- * `bm_repo`, `bm_note`) read plugin data and repositories, record and answer
- * decisions, record commands and notes, and send commands, so they cannot be
+ * `bm_ask_owner`, `bm_decide`, `bm_predict`, `bm_direct_worker`, `bm_repo`,
+ * `bm_note`, `bm_findings`, `bm_compact`, `bm_handoff`, `bm_why`) read plugin data and repositories,
+ * record, answer and predict decisions, record commands and notes, and send
+ * commands, so they cannot be
  * pure: only their
  * faces — name, description, input schema — live here
  * (`ORCHESTRATOR_SERVER_TOOLS`), and `server/orchestrator-tools.ts` runs them.
@@ -33,22 +34,33 @@
  * Pure and environment-neutral: no Node API, no React, and no tool schema or
  * check built with Zod (the daemon's copy of Zod is the host's, not ours).
  */
+import { AUTONOMY_MODES } from "./autonomy";
 import { checkBlocks, issueText, type BlockKind } from "./bm-format";
-import { ASSESSMENT_BLOCK, ASSESSMENT_INPUT_SCHEMA, rubricIssues } from "./bm-assessment";
 import { MAX_OPTIONS, MAX_SUBJECT_CHARS } from "./bm-questions";
-import { DECISION_STATUSES, EFFECTS, MAX_ANSWER_REASON_CHARS, OPTION_KEY_PATTERN, SUBJECT_PATTERN } from "./decisions";
+import { COORDINATION_KEYS, coordinationRuleOf } from "./coordination";
 import {
-  MAX_DECISION_OPTIONS,
-  MAX_DECISION_OPTION_CHARS,
-  MAX_DECISION_QUESTION_CHARS,
-  MAX_DECISION_RECOMMENDATION_CHARS,
-  MAX_NOTE_CHARS,
-} from "./orchestrator";
-import { COMMAND_INTENTS, MAX_COMMAND_BODY_CHARS, MAX_COMMAND_DECISION_ID_CHARS, MAX_COMMAND_RE_CHARS, MAX_COMMAND_WHY_CHARS } from "./orchestrator-command";
+  DECISION_CLASSES,
+  DECISION_STATUSES,
+  EFFECTS,
+  MAX_ANSWER_REASON_CHARS,
+  MAX_ASK_OWNER_LABEL_CHARS,
+  MAX_ASK_OWNER_OPTIONS,
+  MAX_ASK_OWNER_RECOMMENDATION_CHARS,
+  MAX_DECISION_TEXT_CHARS,
+  OPTION_KEY_PATTERN,
+  PREDICTORS,
+  PREPARED_CHANGE_KINDS,
+  SUBJECT_PATTERN,
+  type DecisionClass,
+} from "./decisions";
+import { DEFAULT_PRECEDENT_DAYS, MAX_PRECEDENT_DAYS, MAX_PRECEDENT_TEXT_CHARS } from "./precedents";
+import { MAX_NOTE_CHARS } from "./orchestrator";
+import { MAX_HANDOFF_NOTE_CHARS } from "./handoff";
+import { DECLARED_COMMAND_INTENTS, MAX_COMMAND_BODY_CHARS, MAX_COMMAND_DECISION_ID_CHARS, MAX_COMMAND_RE_CHARS, MAX_COMMAND_WHY_CHARS } from "./orchestrator-command";
 
 export type ToolRole = "worker" | "reviewer" | "manager" | "orchestrator";
 
-type JsonType = "object" | "string" | "array" | "boolean" | "integer" | "null";
+type JsonType = "object" | "string" | "array" | "boolean" | "integer" | "number" | "null";
 
 export interface JsonSchema {
   /** One type, or several (`["integer", "null"]`). */
@@ -292,11 +304,14 @@ interface ReportInput {
   decided?: Array<{ choice: string; why: string }>;
   blockers?: string;
   suggestions?: string[];
+  /** Only when the plugin asks for it (`BM-HANDOFF`, autonomy design §G.6 step 1): what was tried and what is next. */
+  handoffNote?: string;
   questions?: Array<{
     id: string;
     text: string;
     subject?: string;
     supersedes?: string;
+    class?: DecisionClass;
     options: Array<{ text: string; recommended?: boolean; effects?: Array<(typeof EFFECTS)[number]> }>;
   }>;
 }
@@ -307,6 +322,42 @@ const BEAD_IDS: JsonSchema = {
   type: "array",
   items: { type: "string", pattern: "^[A-Za-z][A-Za-z0-9]*-[A-Za-z0-9][A-Za-z0-9.-]*$", description: "A full bead id, as br prints it." },
   description: `Full bead ids. ${EMPTY}`,
+};
+
+/** A decision's class as its asker proposes it (autonomy design §B.1): `bm_report`'s questions and `bm_ask_owner`. */
+const CLASS_FIELD: JsonSchema = {
+  type: "string",
+  enum: DECISION_CLASSES,
+  description: `What is decided, riskiest first: ${DECISION_CLASSES.join(", ")}. The riskier one when unsure. The plugin keeps the riskier of yours and what the options' effects imply (push, publish or deploy is release; real-data or migration, data; dependency-install, dependency; network or outside-workspace, environment).`,
+};
+
+/**
+ * A prepared change of the owner's settings on an option of `bm_ask_owner`
+ * (autonomy design §G.4): flat, `kind` naming which fields it takes
+ * (`shared/prepared-changes.ts` `PREPARED_CHANGE_FIELDS`, which the server
+ * checks).
+ */
+const CHANGE_FIELD: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["kind"],
+  description:
+    'A change of the owner\'s settings the plugin applies itself when the owner picks this option, and only then: precedent.save { scope, subject, text, expiresInDays? }; autonomy.set { class, mode, predictor? } of this project (never release, data, security or cost; delegate only where Insights offers it); coordination.set { key, value }. The option then declares effects ["none"] and carries no command. Refused when the owner could not make it in Settings, or when it would change nothing.',
+  properties: {
+    kind: { type: "string", enum: PREPARED_CHANGE_KINDS, description: "Which setting it changes." },
+    scope: { type: "string", enum: ["project", "all"], description: "precedent.save: this project, or all projects." },
+    subject: { type: "string", pattern: SUBJECT_PATTERN.source, description: "precedent.save: the question subject the precedent answers (as bm_findings gave it)." },
+    text: { type: "string", minLength: 1, maxLength: MAX_PRECEDENT_TEXT_CHARS, description: "precedent.save: the standing answer, as the owner answered it before." },
+    expiresInDays: { type: "integer", minimum: 1, maximum: MAX_PRECEDENT_DAYS, description: `precedent.save: how long it holds, 1-${MAX_PRECEDENT_DAYS} days (default ${DEFAULT_PRECEDENT_DAYS}).` },
+    class: { type: "string", enum: DECISION_CLASSES, description: "autonomy.set: the decision class whose cell it sets." },
+    mode: { type: "string", enum: AUTONOMY_MODES, description: "autonomy.set: owner, shadow, or delegate (only on a cell that has earned it)." },
+    predictor: { type: "string", enum: PREDICTORS, description: "autonomy.set with delegate: the predictor that earned the cell (default recommended)." },
+    key: { type: "string", enum: COORDINATION_KEYS, description: "coordination.set: the setting." },
+    value: {
+      type: ["number", "boolean"],
+      description: `coordination.set: its new value, in the setting's bounds: ${COORDINATION_KEYS.map((key) => coordinationRuleOf(key)).join("; ")}.`,
+    },
+  },
 };
 
 const REPORT_SCHEMA: JsonSchema = {
@@ -338,7 +389,11 @@ const REPORT_SCHEMA: JsonSchema = {
       description: `Review findings still open. ${EMPTY}`,
       items: { type: "object", additionalProperties: false, required: ["batchId", "finding"], properties: { batchId: BATCH_ID, finding: TEXT } },
     },
-    buildAndTests: { ...TEXT, description: "Commands run and pass/fail, or \"not run\"." },
+    buildAndTests: {
+      ...TEXT,
+      description:
+        "Each check exactly as you ran it, in backticks, with pass/fail — `npm test` pass; `npm run lint` pass — or \"not run\". Backticks only around commands. The plugin confirms a check only from a run after your last edit, without pipes or redirections.",
+    },
     skillsUsed: {
       type: "array",
       items: { type: "string", pattern: "^[a-z0-9][a-z0-9-]*$", description: "A skill name, such as feature-workflow; no notes." },
@@ -351,6 +406,12 @@ const REPORT_SCHEMA: JsonSchema = {
     },
     blockers: { ...TEXT, description: "Only what waits for the user; omit when nothing does. When blocked, the tool writes the questions line itself." },
     suggestions: { type: "array", items: TEXT, description: `What you noticed but did not do: extra tests, refactors, docs, cleanups, related bugs, other beads. ${EMPTY}` },
+    handoffNote: {
+      type: "string",
+      minLength: 1,
+      maxLength: MAX_HANDOFF_NOTE_CHARS,
+      description: `Only when a BM-HANDOFF message asks for it: for the Worker who takes the request over, what you tried and what is next, at most ${MAX_HANDOFF_NOTE_CHARS.toLocaleString("en-US")} characters.`,
+    },
     questions: {
       type: "array",
       minItems: 1,
@@ -370,6 +431,7 @@ const REPORT_SCHEMA: JsonSchema = {
             description: `A short slug naming what is decided, such as push-backends: lowercase letters, digits and -, at most ${MAX_SUBJECT_CHARS} characters. Keep it when you ask the same thing again.`,
           },
           supersedes: { ...QUESTION_ID, description: "The earlier question of this request that this one asks again, such as Q2; leave it out for a new question." },
+          class: CLASS_FIELD,
           options: {
             type: "array",
             minItems: 2,
@@ -435,7 +497,8 @@ function blockersText(input: ReportInput): string {
 /**
  * A question or option on one line, with any `[name: value]` of its own
  * written in parentheses: the questions reader takes a bracketed tag at the
- * end of the line for the block's own `subject`, `supersedes` or `effects`.
+ * end of the line for the block's own `subject`, `supersedes`, `class` or
+ * `effects`.
  */
 function tagFree(text: string): string {
   return line(text).replace(/\[(\s*[a-z][a-z-]*\s*:[^\][]*)\]/gi, "($1)");
@@ -457,14 +520,16 @@ function buildReport(input: ReportInput): string {
     `skillsUsed: ${list(input.skillsUsed)}`,
     `decided: ${list((input.decided ?? []).map((entry) => `${item(entry.choice)} — ${item(entry.why)}`), "; ")}`,
     `blockers: ${blockersText(input)}`,
+    ...(input.handoffNote === undefined || line(input.handoffNote) === "" ? [] : [`handoffNote: ${line(input.handoffNote)}`]),
   ];
   if (input.phase !== "blocked") return lines.join("\n");
   const asked = ["BM-QUESTIONS", `requestId: ${input.requestId}`];
-  // Tags in the documented order (autonomy design §A.5): subject, supersedes; "(recommended)" before effects.
+  // Tags in the documented order (autonomy design §A.5, §B.9): subject, supersedes, class; "(recommended)" before effects.
   for (const question of input.questions ?? []) {
     const subject = question.subject === undefined ? "" : ` [subject: ${question.subject}]`;
     const supersedes = question.supersedes === undefined ? "" : ` [supersedes: ${question.supersedes}]`;
-    asked.push(`${question.id}: ${tagFree(question.text)}${subject}${supersedes}`);
+    const proposed = question.class === undefined ? "" : ` [class: ${question.class}]`;
+    asked.push(`${question.id}: ${tagFree(question.text)}${subject}${supersedes}${proposed}`);
     question.options.forEach((option, index) => {
       const effects = [...new Set(option.effects ?? [])];
       const tag = effects.length === 0 ? "" : ` [effects: ${effects.join(", ")}]`;
@@ -602,48 +667,6 @@ function buildAnswers(input: AnswersInput): string {
   return lines.join("\n");
 }
 
-// bm_assessment — the Orchestrator's workflow assessment (orchestrator.md, design §5.5).
-// ---------------------------------------------------------------------------
-
-/**
- * The same rules as `WORKSPACE_ID_PATTERN` of `server/trace-store.ts`, which
- * this module cannot import: a workspace id the stores would refuse is refused
- * here first, by its path.
- */
-export const WORKSPACE_ID_SOURCE = "^[A-Za-z0-9._-]{1,128}$";
-const WORKSPACE_ID: JsonSchema = { type: "string", pattern: WORKSPACE_ID_SOURCE, description: "The workspace id bm_projects gave for the project." };
-
-/** The assessment's own shape (`ASSESSMENT_INPUT_SCHEMA`) plus the project it is about. */
-export const ASSESSMENT_TOOL_INPUT_SCHEMA: JsonSchema = {
-  ...ASSESSMENT_INPUT_SCHEMA,
-  required: ["workspaceId", ...(ASSESSMENT_INPUT_SCHEMA.required ?? [])],
-  properties: { workspaceId: WORKSPACE_ID, ...ASSESSMENT_INPUT_SCHEMA.properties },
-};
-
-/**
- * Not built through `tool()`: it writes no block the other readers know, and a
- * `null` score means "not enough data", so nulls are kept, not dropped. The
- * pure part checks the input and returns the result — without `workspaceId` —
- * as the `BM-ASSESSMENT` text; the Orchestrator's endpoint
- * (`server/orchestrator-tools.ts`) runs it and then records that result in
- * the workspace's assessment store.
- */
-const assessmentTool: AgentTool = {
-  name: "bm_assessment",
-  role: "orchestrator",
-  description:
-    "Record your assessment of one project's workflow (workspaceId from bm_projects): every criterion scored once, your findings and your recommendations. Arguments are JSON. The plugin stores it with the project; call it once per assessment. On error, fix the listed fields and call again.",
-  inputSchema: ASSESSMENT_TOOL_INPUT_SCHEMA,
-  run(input) {
-    const shape = schemaIssues(ASSESSMENT_TOOL_INPUT_SCHEMA, input);
-    if (shape.length > 0) return { ok: false, issues: shape };
-    const broken = rubricIssues(input);
-    if (broken.length > 0) return { ok: false, issues: broken };
-    const { rubric, findings = [], suggestions = [] } = input as { rubric: unknown[]; findings?: unknown[]; suggestions?: unknown[] };
-    return { ok: true, text: `${ASSESSMENT_BLOCK}\n${JSON.stringify({ rubric, findings, suggestions })}` };
-  },
-};
-
 // ---------------------------------------------------------------------------
 // The Orchestrator's server-run tools (design §5.2, §5.3, §6A): faces only.
 // ---------------------------------------------------------------------------
@@ -653,14 +676,18 @@ export const PROJECTS_SINCE_HOURS = { min: 1, max: 168, default: 24 } as const;
 /** `bm_agent_messages`' count (design §5.2); with `detail: "full"`, `default` when no `limit` is given. */
 export const AGENT_MESSAGES_LIMIT = { min: 1, max: 50, default: 20 } as const;
 /**
- * How much `bm_projects`, `bm_request` and `bm_agent_messages` return
+ * How much `bm_projects`, `bm_request`, `bm_agent_messages` and `bm_why` return
  * (autonomy design §A.9): a bounded summary by default, today's limits with
  * `full`.
  */
 export const READ_DETAILS = ["summary", "full"] as const;
 export type ReadDetail = (typeof READ_DETAILS)[number];
-/** The most characters `bm_request` returns by default, its bounded note included (autonomy design §A.9). */
+/** The most characters `bm_request` and `bm_why` return by default, the bounded note included (autonomy design §A.9, §E.2). */
 export const REQUEST_SUMMARY_MAX_CHARS = 4_000;
+/** The window `bm_findings` reads, in days (autonomy design §G.4): Insights' 30-day window. */
+export const FINDINGS_WINDOW_DAYS = 30;
+/** The most characters `bm_findings` returns (autonomy design §G.4); the description says "4,000". */
+export const FINDINGS_MAX_CHARS = 4_000;
 /** `bm_agent_messages` by default (autonomy design §A.9): at most this many messages, each at most this long. */
 export const AGENT_MESSAGES_SUMMARY = { count: 5, maxChars: 1_500 } as const;
 /** What `bm_repo` can run (design §6B.4); each is a fixed read-only git command. */
@@ -671,10 +698,16 @@ export const DECISIONS_TOOL_LIMIT = { min: 1, max: 50, default: 20 } as const;
 /** `bm_decisions`' status filter: one status, or `unsettled` for `open` and `needs-confirmation` together. */
 export const DECISIONS_TOOL_STATUSES = [...DECISION_STATUSES, "unsettled"] as const;
 export type DecisionsToolStatus = (typeof DECISIONS_TOOL_STATUSES)[number];
-/** The most options `bm_ask_owner` takes (design §6B.4). */
-export const ASK_OWNER_OPTIONS = MAX_DECISION_OPTIONS;
 
 const ID: JsonSchema = { type: "string", minLength: 1, maxLength: 200 };
+
+/**
+ * The same rules as `WORKSPACE_ID_PATTERN` of `server/trace-store.ts`, which
+ * this module cannot import: a workspace id the stores would refuse is refused
+ * here first, by its path.
+ */
+export const WORKSPACE_ID_SOURCE = "^[A-Za-z0-9._-]{1,128}$";
+const WORKSPACE_ID: JsonSchema = { type: "string", pattern: WORKSPACE_ID_SOURCE, description: "The workspace id bm_projects gave for the project." };
 
 function detailOf(summary: string, full: string): JsonSchema {
   return { type: "string", enum: READ_DETAILS, description: `"summary" (default): ${summary}. "full": ${full}.` };
@@ -685,7 +718,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
     name: "bm_projects",
     role: "orchestrator",
     description:
-      "Where paseo-bm work stands on this machine: each project (workspace) with activity in the period and its Manager(s). By default only counts (requests by state, waiting on the owner, with signals, open stall situations, your notes) and the owner's open decisions; with detail: \"full\", up to 10 recent requests with their size, state, what they wait on, the plugin's signals and open stall situations, and your notes about the project (bm_note). Read-only. Returns JSON.",
+      "Where paseo-bm work stands on this machine: each project (workspace) with activity in the period and its Manager(s). By default only counts (requests by state, waiting on the owner, open stall situations, your notes) and the owner's open decisions; with detail: \"full\", up to 10 recent requests with their size, state, what they wait on and open stall situations, and your notes about the project (bm_note). Read-only. Returns JSON.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -696,7 +729,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
           maximum: PROJECTS_SINCE_HOURS.max,
           description: `How far back to look, in hours: ${PROJECTS_SINCE_HOURS.min}-${PROJECTS_SINCE_HOURS.max}, default ${PROJECTS_SINCE_HOURS.default}.`,
         },
-        detail: detailOf("counts and open decisions per project", "each recent request, its signals and stalls, and your notes"),
+        detail: detailOf("counts and open decisions per project", "each recent request, its stalls, and your notes"),
       },
     },
   },
@@ -704,7 +737,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
     name: "bm_request",
     role: "orchestrator",
     description:
-      "One request, redacted: what the user asked, the Worker's reports, the reviews, the Manager's replies, the user's messages, and the plugin's signals. At most 4,000 characters by default, the longest messages cut first; detail: \"full\" for up to 60,000. Read-only. Returns text.",
+      "One request, redacted: what the user asked, the Worker's reports, the reviews, the Manager's replies, the user's messages, and its time, tokens and review calls. At most 4,000 characters by default, the longest messages cut first; detail: \"full\" for up to 60,000. Read-only. Returns text.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -741,7 +774,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
     name: "bm_send_command",
     role: "orchestrator",
     description:
-      "Send a command to a project's Manager now, in the language of that Manager's conversation with the owner. Allowed with Autopilot on for the project, right after the owner's own message in your chat telling you to send, or with decisionId: a decision of yours the owner answered; otherwise refused: ask the owner with bm_ask_owner, and prepare the command on an option. Declare its intent and every effect it allows: Autopilot and the owner's word in your chat cover any effect but push, publish, deploy, real-data, migration, security and cost, which only the grant of an answered decision covers (one command, within an hour of the answer). A text that shows an effect you did not declare (a release, security, data, cost or dependency) is refused: declare it or ask the owner with bm_ask_owner. The plugin delivers a BM-COMMAND block with the authority, the approved effects and the limits that remain.",
+      "Send a command to a project's Manager now, in the language of that Manager's conversation with the owner. Without a decision it goes out on your own only where the owner delegated every class of its effects for the project (commit, or no effect, counts as reversible-technical; the authority is then policy:<class>), or right after the owner's own message in your chat telling you to send; with decisionId, on a decision of yours the owner answered. Otherwise it is refused, naming the class not delegated: ask the owner with bm_ask_owner, and prepare the command on an option. Declare its intent and every effect it allows: the owner's policy and the owner's word in your chat cover any effect but push, publish, deploy, real-data, migration, security and cost, which only the grant of an answered decision covers (one command, within an hour of the answer). A text that shows an effect you did not declare (a release, security, data, cost or dependency) is refused: declare it or ask the owner with bm_ask_owner. The plugin delivers a BM-COMMAND block with the authority, the approved effects and the limits that remain.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -751,7 +784,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
         managerId: { ...ID, description: "The Manager's agent id, as bm_projects gave it." },
         requestId: { ...ID, description: "The request it is about, when it is about one." },
         re: { type: "string", minLength: 1, maxLength: MAX_COMMAND_RE_CHARS, description: "The subject, one line (for example: answer to Q2). Defaults to the command's first line." },
-        intent: { type: "string", enum: COMMAND_INTENTS, description: "What the command is for: answer, continue, redirect, stop, release (push, publish or deploy) or other." },
+        intent: { type: "string", enum: DECLARED_COMMAND_INTENTS, description: "What the command is for: answer, continue, redirect, stop, release (push, publish or deploy) or other." },
         effects: {
           type: "array",
           minItems: 1,
@@ -774,7 +807,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
     name: "bm_decisions",
     role: "orchestrator",
     description:
-      "The owner's decisions as the plugin stores them: your own questions (o:…), the Workers' questions (q:…) and the fallback incidents (f:…), newest asked first, redacted. Each with its status (open, needs-confirmation, answered, superseded, withdrawn, expired), its options and their effects, the answer (the owner's, or yours with bm_decide and your reason), the grant it gave (effects, until when, used or not) and what the plugin delivered. Filter by project, request or status (unsettled: open or needs-confirmation). Read-only. Returns JSON.",
+      "The owner's decisions as the plugin stores them: your own questions (o:…), the Workers' questions (q:…) and the fallback incidents (f:…), newest asked first, redacted. Each with its status (open, needs-confirmation, answered, superseded, withdrawn, expired), its class, its options and their effects, the answer (the owner's, or yours with bm_decide and your reason), the grant it gave (effects, until when, used or not) and what the plugin delivered. Filter by project, request or status (unsettled: open or needs-confirmation). Read-only. Returns JSON.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -795,7 +828,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
     name: "bm_ask_owner",
     role: "orchestrator",
     description:
-      "Put a decision to the owner (security, cost, a release, a large change of scope, anything irreversible or on real data): it is stored as a decision the owner answers in paseo-bm, with your recommendation. Give each option the effects it allows and, when choosing it should act at once, the command to run: the plugin then delivers that command itself with the owner's authority as soon as the owner picks it. An answer in the owner's own words comes back to you as a BM-ANSWER notice with a one-use grant. One open question per request: a new one replaces your open question of the same request (the answer names the replaced id) unless separate: true. Sends nothing to any agent now.",
+      "Put a decision to the owner (security, cost, a release, a large change of scope, anything irreversible or on real data): it is stored as a decision the owner answers in paseo-bm, with your recommendation. Give each option the effects it allows and, when choosing it should act at once, the command to run: the plugin then delivers that command itself with the owner's authority as soon as the owner picks it. For advice, an option may carry instead a change of the owner's settings (a precedent, an autonomy cell of this project, a coordination setting): the question then says what it applies, and the plugin applies it only when the owner picks it — never on a precedent's, the policy's or your answer. An answer in the owner's own words comes back to you as a BM-ANSWER notice with a one-use grant. One open question per request: a new one replaces your open question of the same request (the answer names the replaced id) unless separate: true. Sends nothing to any agent now.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -807,20 +840,20 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
         question: {
           type: "string",
           minLength: 1,
-          maxLength: MAX_DECISION_QUESTION_CHARS,
-          description: `The question for the owner. With the recommendation, at most ${MAX_DECISION_QUESTION_CHARS} characters.`,
+          maxLength: MAX_DECISION_TEXT_CHARS,
+          description: `The question for the owner. With the recommendation (and a line per change an option carries), at most ${MAX_DECISION_TEXT_CHARS} characters.`,
         },
-        recommendation: { type: "string", minLength: 1, maxLength: MAX_DECISION_RECOMMENDATION_CHARS, description: "What you recommend, and why, in a few sentences." },
+        recommendation: { type: "string", minLength: 1, maxLength: MAX_ASK_OWNER_RECOMMENDATION_CHARS, description: "What you recommend, and why, in a few sentences." },
         options: {
           type: "array",
-          maxItems: ASK_OWNER_OPTIONS,
-          description: `The answers the owner can pick, one button each: at most ${ASK_OWNER_OPTIONS}. The owner can always answer in their own words instead.`,
+          maxItems: MAX_ASK_OWNER_OPTIONS,
+          description: `The answers the owner can pick, one button each: at most ${MAX_ASK_OWNER_OPTIONS}. The owner can always answer in their own words instead.`,
           items: {
             type: "object",
             additionalProperties: false,
             required: ["label", "effects"],
             properties: {
-              label: { type: "string", minLength: 1, maxLength: MAX_DECISION_OPTION_CHARS, description: `The button's text, 1-${MAX_DECISION_OPTION_CHARS} characters.` },
+              label: { type: "string", minLength: 1, maxLength: MAX_ASK_OWNER_LABEL_CHARS, description: `The button's text, 1-${MAX_ASK_OWNER_LABEL_CHARS} characters.` },
               effects: {
                 type: "array",
                 minItems: 1,
@@ -837,10 +870,11 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
                 properties: {
                   to: { type: "string", enum: ["manager", "worker"], description: "A Manager, or a Worker (its Manager gets a copy). Never a Reviewer." },
                   agentId: { ...ID, description: "The Manager's or the Worker's agent id, of this project." },
-                  intent: { type: "string", enum: COMMAND_INTENTS, description: "What the command is for: answer, continue, redirect, stop, release (push, publish or deploy) or other." },
+                  intent: { type: "string", enum: DECLARED_COMMAND_INTENTS, description: "What the command is for: answer, continue, redirect, stop, release (push, publish or deploy) or other." },
                   body: { type: "string", minLength: 1, maxLength: MAX_COMMAND_BODY_CHARS, description: "The instructions the agent receives: the body of the BM-COMMAND block." },
                 },
               },
+              change: CHANGE_FIELD,
             },
           },
         },
@@ -849,6 +883,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
           pattern: SUBJECT_PATTERN.source,
           description: "A short slug for what is decided (for example push-backends): lower-case letters, digits and -, at most 60.",
         },
+        class: CLASS_FIELD,
         separate: { type: "boolean", description: "true keeps your open question of the same request open beside this one instead of replacing it." },
       },
     },
@@ -857,7 +892,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
     name: "bm_decide",
     role: "orchestrator",
     description:
-      "Answer a Worker's open question (a q:… decision) yourself, with one of its options, on a project whose Autopilot is on. The option may allow none of push, publish, deploy, real-data, migration, security, cost, network or outside-workspace, and dependency-install only where the owner allowed dependency; anything else is the owner's. The plugin records the answer as yours, with your reason, and delivers it to the Worker at its next idle moment, exactly as it delivers the owner's. The first answer wins: a question already answered, waiting for the owner's confirmation or no longer open is refused, and a refusal changes nothing. Never answer a stored question in a command's BM-ANSWERS block.",
+      "Decide for the owner an open decision you did not ask — a Worker's question (q:…) or a fallback incident (f:…) — when a decision.opened line asks you to: the owner's policy delegates its class to you in that project. Choose the option the owner would, and give your reason in one line; the owner sees both. The plugin then delivers it exactly as it delivers the owner's answers (to the Worker, or the incident's action). Refused, changing nothing, unless the decision is still open, its class may be delegated (never release, data, security or cost) and the owner delegated it to you, not to the recommended option; your own decisions (o:…) are always the owner's. A decision you leave stays open for the owner. Never answer a stored question in a command's BM-ANSWERS block.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -867,7 +902,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
           type: "string",
           minLength: 1,
           maxLength: MAX_COMMAND_DECISION_ID_CHARS,
-          description: "The Worker's question, q:<requestId>:<Qn>, as a decision.opened line or bm_decisions gave it.",
+          description: "The decision, q:<requestId>:<Qn> or f:<incidentId>, as a decision.opened line or bm_decisions gave it.",
         },
         optionKey: { type: "string", pattern: OPTION_KEY_PATTERN.source, description: "The key of the option you choose (a, b, …)." },
         reason: {
@@ -880,17 +915,28 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
     },
   },
   {
-    name: "bm_set_autopilot",
+    name: "bm_predict",
     role: "orchestrator",
     description:
-      "Turn Autopilot on or off for one project. Allowed only when the latest message in your chat is the owner's own and asks for it; otherwise refused.",
+      "Predict the owner's answer to an open decision you did not ask (a Worker's question q:… or a fallback incident f:…), when a decision.opened line asks for a prediction: the option you expect the owner to choose, and why. It answers nothing and sends nothing: the owner still decides, sees your prediction only after answering, and how often you foresee their answers is measured per class. Refused unless the owner turned your predictions on for the project, the decision is still open, its class may be delegated (never release, data, security or cost) and is not delegated already, and you have not predicted it yet; a refusal changes nothing. Do not tell the owner what you predicted.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["workspaceId", "enabled"],
+      required: ["decisionId", "optionKey", "reason"],
       properties: {
-        workspaceId: WORKSPACE_ID,
-        enabled: { type: "boolean", description: "true turns Autopilot on for the project, false turns it off." },
+        decisionId: {
+          type: "string",
+          minLength: 1,
+          maxLength: MAX_COMMAND_DECISION_ID_CHARS,
+          description: "The decision, q:<requestId>:<Qn> or f:<incidentId>, as the decision.opened line gave it.",
+        },
+        optionKey: { type: "string", pattern: OPTION_KEY_PATTERN.source, description: "The key of the option you expect the owner to choose (a, b, …)." },
+        reason: {
+          type: "string",
+          minLength: 1,
+          maxLength: MAX_ANSWER_REASON_CHARS,
+          description: `Why you expect it, in one line; kept with the prediction. 1-${MAX_ANSWER_REASON_CHARS} characters.`,
+        },
       },
     },
   },
@@ -898,7 +944,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
     name: "bm_direct_worker",
     role: "orchestrator",
     description:
-      "Command a running project's Worker directly: a correction, or the answer to a question of its that has no stored decision (a stored one, q:…, is answered with bm_decide). Same authority as bm_send_command (Autopilot on, the owner's own latest message in your chat, or decisionId), the same declared intent and effects, and the same check of the text against them. Delivered as a BM-COMMAND block when the Worker's turn ends, and its Manager always gets a copy. interrupt: true delivers at once, replacing the Worker's turn, and is allowed only while a danger signal of that Worker is open. Never a Reviewer.",
+      "Command a running project's Worker directly: a correction, or the answer to a question of its that has no stored decision (a stored one, q:…, is answered with bm_decide). Same authority as bm_send_command (without a decision: the owner's policy delegating every class of its effects, or the owner's own latest message in your chat; else decisionId), the same declared intent and effects, and the same check of the text against them. Delivered as a BM-COMMAND block when the Worker's turn ends, and its Manager always gets a copy. interrupt: true delivers at once, replacing the Worker's turn, and is allowed only while a danger signal of that Worker is open. Never a Reviewer.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -908,7 +954,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
         workerId: { ...ID, description: "The Worker's agent id, as bm_projects or bm_agent_messages gave it." },
         requestId: { ...ID, description: "The request it is about, when it is about one." },
         re: { type: "string", minLength: 1, maxLength: MAX_COMMAND_RE_CHARS, description: "The subject, one line (for example: stop the push)." },
-        intent: { type: "string", enum: COMMAND_INTENTS, description: "What the command is for: answer, continue, redirect, stop, release (push, publish or deploy) or other." },
+        intent: { type: "string", enum: DECLARED_COMMAND_INTENTS, description: "What the command is for: answer, continue, redirect, stop, release (push, publish or deploy) or other." },
         effects: {
           type: "array",
           minItems: 1,
@@ -961,6 +1007,72 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
       },
     },
   },
+  {
+    name: "bm_findings",
+    role: "orchestrator",
+    description: `A project's measured findings over the last ${FINDINGS_WINDOW_DAYS} days, for advice (an advice.due line, or the owner asking): question subjects asked again and again without a precedent, classes that earned delegation, interventions below their target, rounds blocked on the owner and how long the owner took, reviews and blocking findings per tier, stall reasons, the heaviest requests and the compaction and handoff candidates (estimates), with the settings they bear on. Figures and short labels only, at most 4,000 characters; read a decision with bm_decisions and a request with bm_request. Each finding names the change that acts on it, when there is one: ask the owner with bm_ask_owner, the change on an option. Read-only. Returns JSON.`,
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["workspaceId"],
+      properties: {
+        workspaceId: WORKSPACE_ID,
+      },
+    },
+  },
+  {
+    name: "bm_compact",
+    role: "orchestrator",
+    description:
+      "Have a project's Manager or Worker compact its context, on your own initiative within the owner's Settings → Coordination (a threshold.crossed line names it, or you see its context grow). The plugin waits for that agent's next idle moment after a safe point (a Worker right after a report, a Manager with nothing queued for it), never inside a running turn, and at most an hour; it sends the provider's /compact (on Claude with a fixed focus: the request and the owner's words, decisions, plan and bead state, open findings, files changed; bare on Codex and OpenCode), then a BM-STATE brief built from the plugin's records. Refused, changing nothing, when compaction is off, the agent is not a Manager or a Worker of a project (never a Reviewer, never you), a compaction of it is pending, it reached the owner's limit of compactions per agent (a Worker's next step is a handoff), its provider cannot compact, or its last measured turn is below the owner's threshold. Logged as a compact intervention, judged on its next three turns. Returns text.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["agentId", "reason"],
+      properties: {
+        agentId: { ...ID, description: "The Manager's or the Worker's agent id, as bm_projects, bm_agent_messages or a threshold.crossed line gave it." },
+        reason: { type: "string", minLength: 1, maxLength: MAX_COMMAND_WHY_CHARS, description: "Why, in one line, for the owner: kept with the compaction." },
+      },
+    },
+  },
+  {
+    name: "bm_handoff",
+    role: "orchestrator",
+    description:
+      "Have a Worker's request handed over to a new Worker, on your own initiative within the owner's Settings → Coordination (a threshold.crossed handoff line names it, or you see the request grow heavy). The plugin waits for that Worker's next safe point (a bead closed, beads-done, a review verdict) and its idle moment, at most an hour; asks it for a short handoff note (it goes on without one after 10 minutes); builds a masked brief from its records (the request and the owner's words, decisions, plan and bead state, the last report, open findings, branch and diff stat, the note); then sends the Worker's Manager a BM-COMMAND to create the successor with that brief and tell the old Worker it is replaced. The request keeps its id; the old Worker stays idle and is never archived; the successor proves its work again. Refused, changing nothing, when handoff is off, the agent is not the live Worker of an unfinished request with a Manager, a handoff of that request is pending, the request reached the owner's limit of handoffs, its tokens since it started (or its last handoff) are below the owner's threshold, or its commands reached the loop guard. Logged as a handoff intervention, judged on the successor's first hour. Returns text.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["workerId", "reason"],
+      properties: {
+        workerId: { ...ID, description: "The Worker's agent id, as bm_request, bm_projects or a threshold.crossed line gave it." },
+        reason: { type: "string", minLength: 1, maxLength: MAX_COMMAND_WHY_CHARS, description: "Why, in one line, for the owner: kept with the handoff and told to the successor." },
+      },
+    },
+  },
+  {
+    name: "bm_why",
+    role: "orchestrator",
+    description:
+      "Why a bead, a changed file or a decision exists: the chain of each request behind it — the request, its decisions (and the precedents that answered them), beads, changes, commits, checks, review verdicts and turns per agent — each link found, absent or missing with its reason, and the supersession, split, handoff and replacement edges. Give exactly one of bead, file or decision. Ids, statuses and short masked labels; at most 4,000 characters by default, the longest lists cut first with a note; detail: \"full\" for up to 60,000 (each link's source, every turn, the commits' files). An unknown project or id answers found: false with the reason. Read-only. Returns JSON.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["workspaceId"],
+      properties: {
+        workspaceId: WORKSPACE_ID,
+        bead: { ...ID, description: "A bead id (bm-…): the requests whose reports or br commands name it." },
+        file: { type: "string", minLength: 1, maxLength: 500, description: "A changed file, relative to the project's folder (or absolute): the requests whose reports or recorded edits name it." },
+        decision: {
+          type: "string",
+          minLength: 1,
+          maxLength: MAX_COMMAND_DECISION_ID_CHARS,
+          description: "A decision id (q:…, o:…, f:…, h:…, r:…), as bm_decisions gave it: the decision and its request's chain.",
+        },
+        detail: detailOf("at most 4,000 characters, the longest lists cut first", "up to 60,000 characters, with each link's source and every turn"),
+      },
+    },
+  },
 ];
 
 /**
@@ -972,7 +1084,7 @@ export const MANAGER_SERVER_TOOLS: readonly ToolFace[] = [
     name: "bm_decisions",
     role: "manager",
     description:
-      "The owner's decisions of one request, as the plugin stores them: the Worker's questions and the Orchestrator's, newest asked first, redacted, each with its status (open, needs-confirmation, answered, superseded, withdrawn, expired), its options, the owner's answer and what the plugin delivered. Read-only: answering is the owner's, in paseo-bm. Returns JSON.",
+      "The owner's decisions of one request, as the plugin stores them: the Worker's questions and the Orchestrator's, newest asked first, redacted, each with its status (open, needs-confirmation, answered, superseded, withdrawn, expired), its class, its options, the owner's answer and what the plugin delivered. Read-only: answering is the owner's, in paseo-bm. Returns JSON.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1018,10 +1130,9 @@ export const AGENT_TOOLS: readonly AgentTool[] = [
     build: buildAnswers,
     kinds: () => ["BM-ANSWERS"],
   }),
-  assessmentTool,
 ];
 
-/** The tools that run here, in this module: the block tools and `bm_assessment`'s check. */
+/** The tools that run here, in this module: the block tools. */
 export function toolsFor(role: ToolRole): AgentTool[] {
   return AGENT_TOOLS.filter((candidate) => candidate.role === role);
 }

@@ -11,6 +11,7 @@ import {
   createDecisionStore,
 } from "../plugin/server/decision-store";
 import { CLEANUP_DELETES } from "../plugin/server/setup-machine";
+import { DashboardError } from "../plugin/shared/contracts";
 import { answerDecision, withdrawDecision, type Decision } from "../plugin/shared/decisions";
 import { DECISION_REQUEST, DECISION_WS, makeDecision } from "./helpers/decisions";
 
@@ -100,6 +101,23 @@ describe("files and permissions", () => {
     writeFileSync(fileOf(DECISION_WS), body);
     expect(store().list()).toEqual([]);
     expect(() => store().open(question(1))).toThrow(/E_DECISION_WRITE_FAILED/);
+    expect(readFileSync(fileOf(DECISION_WS), "utf8")).toBe(body);
+  });
+
+  it("refuses a newer file with a coded error, whatever else it holds (code review 2026-09-30 §3.1)", () => {
+    mkdirSync(join(home, DECISIONS_DIR_NAME), { recursive: true });
+    // No entries array at all: the version alone decides.
+    const body = JSON.stringify({ version: 2 });
+    writeFileSync(fileOf(DECISION_WS), body);
+    let thrown: unknown = null;
+    try {
+      store().open(question(1));
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(DashboardError);
+    expect((thrown as DashboardError).code).toBe("E_DECISION_WRITE_FAILED");
+    expect(store().deleteSettled(DECISION_WS, [DECISION_REQUEST])).toBe(0);
     expect(readFileSync(fileOf(DECISION_WS), "utf8")).toBe(body);
   });
 });

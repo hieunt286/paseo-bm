@@ -1,7 +1,8 @@
 /**
  * Reading a paseo-bm data folder for the metrics (evaluation design §5,
- * autonomy design §A.12): what the replay (`scripts/eval/replay.ts`) and the
- * Insights RPC (`insights-rpc.ts`) hand to `shared/eval-metrics.ts`.
+ * autonomy design §A.12): what the replay (`scripts/eval/replay.ts`), the
+ * suite's scoring (`scripts/eval/score.ts`) and the Insights RPC
+ * (`insights-rpc.ts`) hand to `shared/eval-metrics.ts`.
  *
  * Read-only by construction: files are opened for reading only
  * (`readFileSync`, `readdirSync`), no lock is taken and nothing is written, so
@@ -14,12 +15,14 @@
  * - `traces/<workspaceId>/events-<YYYYMM>.jsonl` — the turn records, with the
  *   Dashboard's de-duplication (`dedupeRecords`);
  * - `traces/<workspaceId>/meta.json` — the workspace's label (`lastKnownName`)
- *   and directory (`lastKnownDirectory`, for A-6 only, never shown);
+ *   and directory (`lastKnownDirectory`, for A-6 and `writers-observed`, never
+ *   shown);
  * - `decisions/<workspaceId>.json` — the stored decisions (Phase 1: A-1,
  *   A-2 (c), A-6), each entry handed on unvalidated;
  * - `orchestrator/proposals.json`, `orchestrator/stalls.json`,
- *   `orchestrator/wakes.json` (A-7) and the times of
- *   `orchestrator/notes/<workspaceId>.json`, when present.
+ *   `orchestrator/wakes.json` (A-7), `orchestrator/interventions.json`
+ *   (A-12) and the times of `orchestrator/notes/<workspaceId>.json`, when
+ *   present.
  *
  * Moved here from the replay so the plugin can read with the very same code.
  */
@@ -27,7 +30,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { traceRecordSchema, traceWorkspaceMetaSchema, type TraceRecord } from "../shared/contracts";
-import { workspaceOfStallKey, type EvalNote } from "../shared/eval-metrics";
+import { workspaceOfStallKey, type EvalInput, type EvalNote } from "../shared/eval-metrics";
+import { INTERVENTIONS_FILE_VERSION, interventionsFileSchema } from "../shared/interventions";
 import { notesFileSchema, proposalLogSchema, stallRecordSchema, wakeLogSchema } from "../shared/orchestrator";
 import { DECISIONS_FILE_VERSION } from "./decision-store";
 import { dedupeRecords } from "./trace-store";
@@ -35,8 +39,12 @@ import { dedupeRecords } from "./trace-store";
 export interface StoreRead {
   /** De-duplicated records of every workspace. */
   records: TraceRecord[];
-  /** Per workspace id: its label and directory from `meta.json` (null when absent). */
-  workspaces: Map<string, { label: string | null; directory: string | null }>;
+  /**
+   * Per workspace id: its label and directory from `meta.json` (null when
+   * absent), and how many lines of its `events-*.jsonl` did not parse or
+   * validate (its share of `unknowns.malformedLines`).
+   */
+  workspaces: Map<string, { label: string | null; directory: string | null; malformedLines: number }>;
   /** `proposals.json` → `entries`, unvalidated; `undefined` when the file is absent. */
   proposals: unknown[] | undefined;
   /** `stalls.json` → `entries`, unvalidated; `undefined` when the file is absent. */
@@ -47,6 +55,8 @@ export interface StoreRead {
   decisions: unknown[] | undefined;
   /** `wakes.json` → `entries`, unvalidated; `undefined` when the file is absent. */
   wakes: unknown[] | undefined;
+  /** `interventions.json` → `entries`, unvalidated; `undefined` when the file is absent. */
+  interventions: unknown[] | undefined;
   unknowns: {
     /** Lines of `events-*.jsonl` that did not parse or validate (a blank last line is not one). */
     malformedLines: number;
@@ -103,7 +113,7 @@ export function readStore(home: string): StoreRead {
   const unknowns = { malformedLines: 0, unreadableFiles: 0, duplicateRecords: 0 };
   const tracesDir = join(home, "traces");
   const collected: TraceRecord[] = [];
-  const workspaces = new Map<string, { label: string | null; directory: string | null }>();
+  const workspaces = new Map<string, { label: string | null; directory: string | null; malformedLines: number }>();
 
   const dirs = listDir(tracesDir, true);
   if (dirs.kind === "bad") unknowns.unreadableFiles += 1;
@@ -113,7 +123,7 @@ export function readStore(home: string): StoreRead {
     const parsedMeta = meta.kind === "ok" ? traceWorkspaceMetaSchema.safeParse(meta.value) : null;
     if (meta.kind === "bad" || (parsedMeta !== null && !parsedMeta.success)) unknowns.unreadableFiles += 1;
     const known = parsedMeta?.success === true ? parsedMeta.data : null;
-    workspaces.set(workspaceId, { label: known?.lastKnownName ?? null, directory: known?.lastKnownDirectory ?? null });
+    const malformedBefore = unknowns.malformedLines;
 
     const files = listDir(dir);
     if (files.kind === "bad") unknowns.unreadableFiles += 1;
@@ -144,6 +154,11 @@ export function readStore(home: string): StoreRead {
         else unknowns.malformedLines += 1;
       }
     }
+    workspaces.set(workspaceId, {
+      label: known?.lastKnownName ?? null,
+      directory: known?.lastKnownDirectory ?? null,
+      malformedLines: unknowns.malformedLines - malformedBefore,
+    });
   }
   const records = dedupeRecords(collected);
   unknowns.duplicateRecords = collected.length - records.length;
@@ -201,6 +216,17 @@ export function readStore(home: string): StoreRead {
     unknowns.unreadableFiles += 1;
   }
 
+  let interventions: unknown[] | undefined;
+  const interventionFile = readJson(join(orchestratorDir, "interventions.json"));
+  if (interventionFile.kind === "ok") {
+    const frame = interventionsFileSchema.safeParse(interventionFile.value);
+    // A file of another version is not this reader's to read, as the intervention store's own reader says.
+    if (frame.success && frame.data.version === INTERVENTIONS_FILE_VERSION) interventions = frame.data.entries;
+    else unknowns.unreadableFiles += 1;
+  } else if (interventionFile.kind === "bad") {
+    unknowns.unreadableFiles += 1;
+  }
+
   let decisions: unknown[] | undefined;
   const decisionsDir = join(home, "decisions");
   const decisionFiles = listDir(decisionsDir);
@@ -223,7 +249,7 @@ export function readStore(home: string): StoreRead {
     }
   }
 
-  return { records, workspaces, proposals, stalls, notes, decisions, wakes, unknowns };
+  return { records, workspaces, proposals, stalls, notes, decisions, wakes, interventions, unknowns };
 }
 
 /** What a store read holds for some workspaces: the metric module's inputs, filtered. */
@@ -234,6 +260,29 @@ export interface WorkspaceSelection {
   notes: EvalNote[] | undefined;
   decisions: unknown[] | undefined;
   wakes: unknown[] | undefined;
+  interventions: unknown[] | undefined;
+}
+
+/** A selection's metric inputs: the records, and each store file's entries, `undefined` when the file was not read. */
+export type StoreInputs = Pick<WorkspaceSelection, "records"> & Partial<Omit<WorkspaceSelection, "records">>;
+
+/**
+ * The store part of `computeEvalMetrics`'s input, written once for the
+ * replay, the suite's scoring and Insights: the records, and each file's
+ * entries only when the file was read. An unread file leaves its key out,
+ * because absent is not empty — A-7 and A-12 report whether their file was
+ * read.
+ */
+export function evalInputsOf(selection: StoreInputs): Pick<EvalInput, "records" | "proposals" | "stalls" | "notes" | "decisions" | "wakes" | "interventions"> {
+  return {
+    records: selection.records,
+    ...(selection.proposals === undefined ? {} : { proposals: selection.proposals }),
+    ...(selection.stalls === undefined ? {} : { stalls: selection.stalls }),
+    ...(selection.notes === undefined ? {} : { notes: selection.notes }),
+    ...(selection.decisions === undefined ? {} : { decisions: selection.decisions }),
+    ...(selection.wakes === undefined ? {} : { wakes: selection.wakes }),
+    ...(selection.interventions === undefined ? {} : { interventions: selection.interventions }),
+  };
 }
 
 /** The projects a wake record names; none when it names none (it then belongs to no selection but "all"). */
@@ -250,8 +299,8 @@ const workspaceOfEntry = (entry: unknown): string | null => {
 /**
  * The records and Orchestrator entries of the given workspaces; `null` keeps
  * them all. A stall key is attributed by its `<workspaceId>::` prefix, a
- * proposal and a decision by its `workspaceId`, a note by its file, a wake by
- * any of the projects whose events it carried.
+ * proposal, a decision and an intervention by its `workspaceId`, a note by
+ * its file, a wake by any of the projects whose events it carried.
  */
 export function selectWorkspaces(store: StoreRead, workspaceIds: ReadonlySet<string> | null): WorkspaceSelection {
   const inWorkspace = (id: string | null): boolean => workspaceIds === null || (id !== null && workspaceIds.has(id));
@@ -263,10 +312,11 @@ export function selectWorkspaces(store: StoreRead, workspaceIds: ReadonlySet<str
     notes: store.notes?.filter((note) => inWorkspace(note.workspaceId)),
     decisions: store.decisions?.filter((entry) => inWorkspace(workspaceOfEntry(entry))),
     wakes: store.wakes?.filter((entry) => workspaceIds === null || workspacesOfWake(entry).some((id) => workspaceIds.has(id))),
+    interventions: store.interventions?.filter((entry) => inWorkspace(workspaceOfEntry(entry))),
   };
 }
 
-/** Workspace directory by id, for A-6's `rm -rf` rule; never shown. */
+/** Workspace directory by id, for A-6's `rm -rf` rule and `writers-observed`'s file paths (autonomy design §F.1); never shown. */
 export function workspaceDirectoriesOf(store: StoreRead): Record<string, string> {
   const directories: Record<string, string> = {};
   for (const [id, meta] of store.workspaces) if (meta.directory !== null) directories[id] = meta.directory;

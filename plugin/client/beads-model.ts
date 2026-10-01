@@ -5,7 +5,10 @@
  * Pure: no React, no React Native, no `server/` import.
  */
 import type { BeadAction, BeadRow, BeadStats, BeadWork } from "../shared/contracts";
-import { formatDuration, type Badge, type Bar, type OverviewCard, type Tone } from "./dashboard-model";
+import { formatDuration, localTimeText, type Bar, type OverviewCard } from "./format";
+import type { Badge, Tone } from "./tone";
+import { timeOrNull } from "../shared/time";
+import { median } from "../shared/eval-metrics/helpers";
 
 const DAY_MS = 86_400_000;
 
@@ -66,26 +69,6 @@ export function statusBadge(bead: Pick<BeadRow, "status" | "ready">): Badge {
   return { text: STATUS_TEXT[statusBucket(bead)], tone: emphasisTone(beadEmphasis(bead)) };
 }
 
-function median(values: readonly number[]): number | null {
-  if (values.length === 0) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
-}
-
-export function formatDays(ms: number | null): string {
-  if (ms === null) return "—";
-  const days = ms / DAY_MS;
-  if (days < 1) return `${Math.max(1, Math.round(ms / 3_600_000))}h`;
-  return `${days < 10 ? days.toFixed(1) : Math.round(days)}d`;
-}
-
-const parse = (at: string | null): number | null => {
-  if (at === null) return null;
-  const value = Date.parse(at);
-  return Number.isNaN(value) ? null : value;
-};
-
 export interface BeadsOverview {
   /** 1. Status. */
   status: OverviewCard[];
@@ -117,8 +100,8 @@ export function beadsOverview(beads: readonly BeadRow[], stats: BeadStats, now: 
 
   const cycle = beads
     .map((bead) => {
-      const created = parse(bead.createdAt);
-      const closed = parse(bead.closedAt);
+      const created = timeOrNull(bead.createdAt);
+      const closed = timeOrNull(bead.closedAt);
       return created === null || closed === null ? null : closed - created;
     })
     .filter((value): value is number => value !== null && value >= 0);
@@ -127,13 +110,13 @@ export function beadsOverview(beads: readonly BeadRow[], stats: BeadStats, now: 
     ...beads
       .filter((bead) => bead.status === "in_progress")
       .map((bead) => {
-        const since = parse(bead.work?.started?.at ?? null) ?? parse(bead.updatedAt) ?? parse(bead.createdAt);
+        const since = timeOrNull(bead.work?.started?.at ?? null) ?? timeOrNull(bead.updatedAt) ?? timeOrNull(bead.createdAt);
         return since === null ? -1 : now.getTime() - since;
       }),
   );
   const stale = beads.filter((bead) => {
     if (bead.status === "closed") return false;
-    const updated = parse(bead.updatedAt);
+    const updated = timeOrNull(bead.updatedAt);
     return updated !== null && now.getTime() - updated > STALE_MS;
   }).length;
 
@@ -157,10 +140,10 @@ export function beadsOverview(beads: readonly BeadRow[], stats: BeadStats, now: 
     byType: count((bead) => bead.issueType),
     byPriority: count((bead) => priorityLabel(bead.priority), ["P0", "P1", "P2", "P3", "P4", "P?"]),
     timing: [
-      { label: "Median time to close", value: formatDays(median(cycle)), hint: `over ${cycle.length} closed bead(s)` },
+      { label: "Median time to close", value: formatDuration(median(cycle)), hint: `over ${cycle.length} closed bead(s)` },
       {
         label: "Longest in progress",
-        value: oldestInProgress < 0 ? "—" : formatDays(oldestInProgress),
+        value: oldestInProgress < 0 ? "—" : formatDuration(oldestInProgress),
         hint: "since it started, or its last update",
       },
       { label: "Stale", value: String(stale), hint: "open, no update for 7+ days" },
@@ -616,14 +599,6 @@ export function actionsFor(bead: Pick<BeadRow, "status">): BeadAction[] {
 
 type WorkMark = NonNullable<BeadWork["started"]>;
 
-/** Local `DD/MM HH:MM`: the screen is read by the person at this machine. */
-export function formatClock(at: string): string {
-  const date = new Date(at);
-  if (Number.isNaN(date.getTime())) return at;
-  const two = (value: number) => String(value).padStart(2, "0");
-  return `${two(date.getDate())}/${two(date.getMonth() + 1)} ${two(date.getHours())}:${two(date.getMinutes())}`;
-}
-
 function workerName(mark: WorkMark): string {
   return mark.title ?? `Worker ${mark.agentId.slice(0, 8)}`;
 }
@@ -663,17 +638,17 @@ export function workSummary(bead: Pick<BeadRow, "status" | "work">, now: Date): 
   // later is shown with its own last activity instead.
   const since =
     current === started
-      ? `since ${formatClock(started.at)} (${formatDuration(Math.max(0, now.getTime() - Date.parse(started.at)))})`
+      ? `since ${localTimeText(new Date(started.at), now)} (${formatDuration(Math.max(0, now.getTime() - Date.parse(started.at)))})`
       : started === null
         ? "start not recorded"
-        : `last active ${formatClock(current.at)}`;
+        : `last active ${localTimeText(new Date(current.at), now)}`;
   const lines: string[] = [];
   lines.push(
     started === null
       ? "Started: not recorded (the status was set before recording, or not with a br command)."
-      : `Started ${formatClock(started.at)} by ${workerName(started)}.`,
+      : `Started ${localTimeText(new Date(started.at), now)} by ${workerName(started)}.`,
   );
-  if (last !== null) lines.push(`Last activity ${formatClock(last.at)} by ${workerName(last)}.`);
+  if (last !== null) lines.push(`Last activity ${localTimeText(new Date(last.at), now)} by ${workerName(last)}.`);
   lines.push(`${workerName(current)} is ${agentState(current)} now.`);
   return {
     headline: `${workerName(current)} · ${since} · ${agentState(current)}`,
@@ -683,12 +658,4 @@ export function workSummary(bead: Pick<BeadRow, "status" | "work">, now: Date): 
     // The words already say idle, gone, or not recorded (delta 20260925 §3.2).
     tone: current.status === "running" ? "plain" : "muted",
   };
-}
-
-/** A bead as a chat chip: its title first, then its id. */
-export function beadChipText(bead: Pick<BeadRow, "id" | "title">, maxTitle = 48): string {
-  const title = bead.title?.trim() ?? "";
-  if (title === "") return bead.id;
-  const short = title.length > maxTitle ? `${title.slice(0, maxTitle - 1)}…` : title;
-  return `${short} · ${bead.id}`;
 }

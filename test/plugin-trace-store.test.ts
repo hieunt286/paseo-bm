@@ -142,6 +142,37 @@ describe("append and read round trip", () => {
     expect(byTurn.get("turn-old")?.reports[0]?.skillsUsed).toEqual([]);
   });
 
+  it("keeps the context fields, compaction evidence and tool calls, and reads records written before them as unknown (autonomy design §G.2)", async () => {
+    const usage = {
+      inputTokens: 34,
+      cachedInputTokens: 88287,
+      outputTokens: 423,
+      costUsd: null,
+      costBasis: "unavailable" as const,
+      model: "claude-haiku-4-5",
+      pricesUpdatedAt: null,
+    };
+    const compaction = { kind: "compaction" as const, detail: "manual", agentId: "agent-worker", at: "2026-09-16T10:00:00.000Z", trigger: "manual" as const, preTokens: 29827 };
+    await appendRecord(location, record({ usage: { ...usage, contextUsed: 29826, contextMax: 200000 }, evidence: [compaction], toolCalls: 3 }));
+    // Written by a build before them: no `toolCalls`, no context in `usage`, only the old evidence kinds.
+    const path = join(location.tracesDir, WS, "events-202609.jsonl");
+    const older = { ...record({ turnId: "turn-old", at: "2026-09-16T10:01:00.000Z", usage }), evidence: [{ kind: "shell", detail: "ls", agentId: "agent-worker", at: null }] };
+    appendFileSync(path, `${JSON.stringify(older)}\n`);
+    clearTraceStoreCache();
+
+    const result = readRecords(location, WS);
+    expect(result.skippedLines).toBe(0);
+    const byTurn = new Map(result.records.map((r) => [r.turnId, r]));
+    expect(byTurn.get("turn-1")?.usage).toMatchObject({ contextUsed: 29826, contextMax: 200000 });
+    expect(byTurn.get("turn-1")?.evidence).toEqual([compaction]);
+    expect(byTurn.get("turn-1")?.toolCalls).toBe(3);
+    const old = byTurn.get("turn-old")!;
+    expect(old.toolCalls).toBeUndefined();
+    expect(old.usage).not.toHaveProperty("contextUsed");
+    expect(old.usage).not.toHaveProperty("contextMax");
+    expect(old.evidence[0]).not.toHaveProperty("trigger");
+  });
+
   it("stamps the store schema version once", async () => {
     await appendRecord(location, record());
     const meta = readStoreMeta(location);

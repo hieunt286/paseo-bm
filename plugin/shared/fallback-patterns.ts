@@ -194,8 +194,3 @@ export function matchClass(text: unknown, table: PatternTable): TextClass {
   }
   return "L6";
 }
-
-/** Compiles and classifies in one call. Pure apart from the log line of a dropped user pattern. */
-export function classifyText(text: unknown, user?: UserPatterns | null, log?: (message: string) => void): TextClass {
-  return matchClass(text, compilePatterns(user, log));
-}

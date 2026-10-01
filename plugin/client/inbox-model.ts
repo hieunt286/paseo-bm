@@ -7,10 +7,27 @@
  *    oldest question first inside it. A decision the owner settled HERE stays
  *    in its place, drawn settled, until the Inbox is left, so the owner sees
  *    what the tap did (for a fallback incident: what became of the agent).
- * 2. **Decided for you**: empty in Phase 1 (delegation is Part B).
+ * 2. **Decided for you** (autonomy design §B.7; PRD REQ-125): the decisions
+ *    the owner's policy or an owner precedent answered since the owner last
+ *    looked (`inbox.seen`, `inbox.digest`), the latest first, one line each —
+ *    what was decided, the project and who decided — with its reason, the ids
+ *    under Details, and **Override**, which opens the decision again as the
+ *    owner's (`decisions.override`). Once overridden, the line says so.
+ *    Merged with them by time, the Orchestrator's interventions since then
+ *    (§G.3, REQ-127 c; bead `t9lm.23`): what it did and for whom, the
+ *    project, why, and the outcome — pending, met, missed or unknown — with
+ *    no Override (only decisions are overridden, REQ-125). An answer the
+ *    Orchestrator gave (`bm_decide`) is already a decision line: its outcome
+ *    joins that line instead of a second one.
  * 3. **Alerts**: the open alerts (`inbox.alerts`), in `ALERT_KINDS` order and
  *    oldest first, plus one follow-up per switched Reviewer whose replacement
- *    never appeared (`fallback.act` resend).
+ *    never appeared (`fallback.act` resend). A delegated class taken back
+ *    after a reversal (`autonomy-demoted`, §B.4) names the class; why is in
+ *    its detail, on a tap. Compaction or handoff switched off below A-12's
+ *    target (`coordination-off`, §G.3) names the mechanism, for all projects;
+ *    its figures and the way back are in its detail. Two agents that edited
+ *    one file in overlapping turns (`writers-observed`, §F.1) open the
+ *    project; the file and the agents are in its detail.
  *
  * An empty Inbox is one sentence with a way to Work. The Inbox tab's label
  * carries the count of unsettled decisions and alerts (DQ-3: no sidebar badge).
@@ -18,13 +35,19 @@
  * Pure: no React, no React Native, no `server/` import. Ids appear only in
  * `details`, never in a line the owner reads first.
  */
-import type { FallbackIncident } from "../shared/contracts";
+import type { DigestIntervention, DigestTargetRole, FallbackIncident } from "../shared/contracts";
 import { ALERT_KINDS, type Alert, type AlertKind } from "../shared/alerts";
-import { isAnswerable, type Decision } from "../shared/decisions";
-import { decisionCardOf, localTimeText, type ChatCard, type DecisionSeed } from "./chat-cards";
-import type { Tone } from "./dashboard-model";
-import { ago } from "./orchestrator-model";
-import { providerLabel } from "./setup-model";
+import { isDecidedForOwner, overrideIdOf } from "../shared/decision-override";
+import { decisionClassOf, decisionClassSchema, decisionKindOf, isAnswerable, type Decision } from "../shared/decisions";
+import type { ExpectedOutcome, InterventionKind, InterventionOutcome, InterventionTrigger } from "../shared/interventions";
+import type { WorkerSignal } from "../shared/orchestrator";
+import { decisionCardOf, type ChatCard, type DecisionSeed } from "./chat-card-parse";
+import type { Tone } from "./tone";
+import { ago, formatDuration, localTimeText } from "./format";
+import { CLASS_LABELS } from "./settings-autonomy-model";
+import { providerLabel } from "./settings-roles-model";
+import { timeOrZero } from "../shared/time";
+import { plural, shorten } from "../shared/text";
 
 /** How often the Inbox reads its decisions, alerts and incidents while it is shown (REQ-111 b). */
 export const INBOX_POLL_MS = 5_000;
@@ -35,8 +58,18 @@ export const INBOX_POLL_MS = 5_000;
  */
 export const RESEND_FOLLOW_UP_MS = 24 * 60 * 60 * 1000;
 
-/** The Decided-for-you section until delegation exists (Part B). */
-export const DECIDED_FOR_YOU_EMPTY = "Nothing is decided for you yet: every decision comes to you.";
+/** Decided for you with nothing in it (§B.7). */
+export const DECIDED_FOR_YOU_EMPTY = "Nothing was decided for you since you last looked.";
+
+/** Under Decided for you when `inbox.digest` had more than it returned. */
+export const DECIDED_FOR_YOU_TRUNCATED = "More was decided for you than the Inbox shows; Work has every decision.";
+
+/** Under Decided for you when `inbox.digest` had more interventions than it returned (§G.3). */
+export const INTERVENTIONS_TRUNCATED = "The Orchestrator intervened more often than the Inbox shows; Insights → Coordination counts every intervention.";
+
+/** What an overridden line says while the owner's answer is awaited, and once it is not any more. */
+export const OVERRIDE_WAITING = "Overridden: it waits for your answer in Needs you.";
+export const OVERRIDE_DONE = "Overridden.";
 
 /** The sentence of an empty Inbox, before the running count. */
 export const EMPTY_INBOX = "Nothing needs you.";
@@ -88,9 +121,65 @@ export interface InboxAlertRow {
   action: InboxAction | null;
 }
 
+/** What a Decided-for-you line offers: Override, or what became of the override. */
+export type DigestOverride =
+  | { state: "offered"; label: string; accessibilityLabel: string }
+  | { state: "waiting" | "done"; text: string; tone: Tone };
+
+/**
+ * What became of an intervention (§G.3): the outcome its check settled —
+ * `pending`, `met`, `missed` or `unknown`, each said as such — with the
+ * outcome it waits for and its window: `Met · expected: the Worker resumes
+ * within 10 min`.
+ */
+export interface DigestOutcome {
+  outcome: InterventionOutcome;
+  text: string;
+  tone: Tone;
+}
+
+/** What every line of Decided for you has. */
+interface DigestLine {
+  /** Unique within the section: the decision's id, or `intervention:<id>`. Never shown. */
+  key: string;
+  /** A decision: `<question> → <answer>`. An intervention: what the Orchestrator did, and for whom. */
+  what: string;
+  /** `<project> · <who decided>`, or `<project> · the Orchestrator`. */
+  where: string;
+  /** Why, in one line (the policy's, the precedent's or the Orchestrator's reason); null when none was stored. */
+  reason: string | null;
+  /** An intervention's outcome, or that of the Orchestrator's answer a decision line carries; null otherwise. */
+  outcome: DigestOutcome | null;
+  /** `12 min ago`: when it was answered or done. */
+  time: string;
+  /** What the line says aloud, with its time. */
+  accessibilityLabel: string;
+  /** Ids and times, shown on a tap. */
+  details: string[];
+}
+
+/** One decision of Decided for you (§B.7), with Override. */
+export interface DigestDecisionRow extends DigestLine {
+  kind: "decision";
+  /** The decision's id: a key and the Override's target, never shown but under Details. */
+  decisionId: string;
+  /** Null for a held request the policy allowed (autonomy design §D.2): it already ran, there is nothing to take back. */
+  override: DigestOverride | null;
+}
+
+/** One intervention of the Orchestrator's in Decided for you (§G.3): no Override. */
+export interface DigestInterventionRow extends DigestLine {
+  kind: "intervention";
+  interventionKind: InterventionKind;
+}
+
+/** One line of Decided for you: a decision answered for the owner, or an intervention of the Orchestrator's. */
+export type DigestRow = DigestDecisionRow | DigestInterventionRow;
+
 export interface InboxView {
   needsYou: { count: number; groups: InboxGroup[] };
-  decidedForYou: { empty: string };
+  /** `empty` is the section's sentence when it has no line, else null; `interventionsTruncated`: more interventions than shown. */
+  decidedForYou: { count: number; rows: DigestRow[]; empty: string | null; truncated: boolean; interventionsTruncated: boolean };
   alerts: { count: number; rows: InboxAlertRow[]; truncated: boolean };
   /** The one sentence of an empty Inbox; null when anything is shown. */
   empty: string | null;
@@ -108,6 +197,14 @@ export interface InboxInput {
   alertsTruncated?: boolean;
   /** `fallback.incidents`, every workspace. */
   incidents: readonly FallbackIncident[];
+  /** `inbox.digest`: the decisions answered for the owner since they last looked, the latest first; none when not read. */
+  digest?: readonly Decision[];
+  digestTruncated?: boolean;
+  /** `inbox.digest`'s interventions of the Orchestrator since the owner last looked, the latest first; none when not read. */
+  interventions?: readonly DigestIntervention[];
+  interventionsTruncated?: boolean;
+  /** Where the digest starts: when the owner last looked before this visit (`inbox.seen`); null when never, or not known. */
+  digestSince?: string | null;
   /** The project name of a workspace id, when the surface knows it. */
   projectOf: (workspaceId: string) => string | null;
   /** Running Workers across the projects, for the empty sentence; null when unknown. */
@@ -136,20 +233,40 @@ export const ALERT_WORDS: Readonly<Record<AlertKind, { what: string; tone: Tone;
   "permission-waiting": { what: "A Worker is waiting for a permission", tone: "warning", opens: "agent", agentWord: "Worker" },
   danger: { what: "A Worker ran a risky command", tone: "danger", opens: "agent", agentWord: "Worker" },
   stuck: { what: "A Worker looks stuck", tone: "warning", opens: "agent", agentWord: "Worker" },
+  // Autonomy design §F.1: the file and the agents are in its detail, on a tap.
+  "writers-observed": { what: "Two agents edited one file at the same time", tone: "warning", opens: "project", agentWord: "" },
   "pairing-mismatch": { what: "An agent was created by the wrong role", tone: "warning", opens: "agent", agentWord: "agent" },
   "outdated-agent": { what: "An agent runs on older instructions", tone: "muted", opens: "agent", agentWord: "agent" },
   "fallback-failed": { what: "A fallback action failed; the agent is still stopped", tone: "danger", opens: "project", agentWord: "" },
+  // Autonomy design §B.4: `autonomyDemotedWhat` names the class when the subject is one.
+  "autonomy-demoted": { what: "A delegated class went back to Shadow after a reversal", tone: "warning", opens: null, agentWord: "" },
+  // Autonomy design §G.3, §G.7: `coordinationOffWhat` names the mechanism.
+  "coordination-off": { what: "Compaction or handoff was switched off: below its target", tone: "warning", opens: null, agentWord: "" },
+  // Autonomy design §D.2 (change-010 C6): a Worker or Reviewer only watched in a project whose boundary is on.
+  "boundary-off": { what: "An agent runs without the action boundary", tone: "warning", opens: "agent", agentWord: "agent" },
 };
+
+/** A `coordination-off` alert's line, naming its mechanism (its subject). */
+export function coordinationOffWhat(subject: string): string {
+  if (subject === "compact") return "Compaction was switched off: below its target";
+  if (subject === "handoff") return "Handoff was switched off: below its target";
+  return ALERT_WORDS["coordination-off"].what;
+}
+
+/** Where an alert about every project is, instead of a project's name. */
+export const ALL_PROJECTS = "all projects";
+
+/** An `autonomy-demoted` alert's line, naming its class (its subject). */
+export function autonomyDemotedWhat(subject: string): string {
+  const decisionClass = decisionClassSchema.safeParse(subject);
+  return decisionClass.success ? `${CLASS_LABELS[decisionClass.data]} decisions went back to Shadow after a reversal` : ALERT_WORDS["autonomy-demoted"].what;
+}
 
 const ROLE_WORDS: Readonly<Record<FallbackIncident["role"], string>> = { manager: "Manager", worker: "Worker", reviewer: "Reviewer" };
 
 function candidateWords(incident: FallbackIncident): string | null {
   const candidate = incident.candidate;
   return candidate === null ? null : `${providerLabel(candidate.baseProvider)} · ${candidate.model}`;
-}
-
-function plural(count: number, one: string, many: string): string {
-  return `${count} ${count === 1 ? one : many}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -285,7 +402,10 @@ function alertAction(alert: Alert, can: InboxInput["can"]): InboxAction | null {
 /** One alert as a row: what happened and where, its time, the detail on a tap. */
 export function alertRowOf(alert: Alert, input: Pick<InboxInput, "projectOf" | "can" | "now">): InboxAlertRow {
   const words = ALERT_WORDS[alert.kind];
-  const text = `${words.what} · ${projectName(alert.workspaceId, input.projectOf)}`;
+  const what =
+    alert.kind === "autonomy-demoted" ? autonomyDemotedWhat(alert.subject) : alert.kind === "coordination-off" ? coordinationOffWhat(alert.subject) : words.what;
+  const where = alert.kind === "coordination-off" ? ALL_PROJECTS : projectName(alert.workspaceId, input.projectOf);
+  const text = `${what} · ${where}`;
   const time = ago(alert.since, input.now);
   return {
     key: alert.key,
@@ -328,8 +448,7 @@ export function seedOf(decision: Decision): DecisionSeed {
 }
 
 function askedAtOf(decision: Decision): number {
-  const at = Date.parse(decision.askedAt);
-  return Number.isNaN(at) ? 0 : at;
+  return timeOrZero(decision.askedAt);
 }
 
 /**
@@ -365,6 +484,247 @@ export function needsYouGroups(input: Pick<InboxInput, "decisions" | "settledHer
 }
 
 // ---------------------------------------------------------------------------
+// Decided for you (autonomy design §B.7; PRD REQ-125).
+// ---------------------------------------------------------------------------
+
+/** Who answered for the owner, in the line's words: the policy's predictor, or a precedent. */
+export function decidedByWords(decision: Pick<Decision, "answer">): string {
+  const answer = decision.answer;
+  if (answer?.by === "precedent") return "your precedent";
+  return answer?.predictor === "orchestrator" ? "your policy (the Orchestrator)" : "your policy (recommended option)";
+}
+
+/** A question's first line, shortened: an Orchestrator's decision carries its recommendation below it. */
+function questionLine(question: string, max: number): string {
+  return shorten(question.split("\n")[0] ?? question, max);
+}
+
+/** What was chosen: the option's label, or the precedent's words in quotes. */
+function answerLine(decision: Decision): string {
+  const answer = decision.answer;
+  const option = answer?.optionKey == null ? undefined : decision.options.find((entry) => entry.key === answer.optionKey);
+  if (option !== undefined) return shorten(option.label, 60);
+  return answer?.words == null ? "answered" : `"${shorten(answer.words, 60)}"`;
+}
+
+function overrideOf(decision: Decision, question: string, open: ReadonlySet<string>): DigestOverride {
+  const overrideId = overrideIdOf(decision);
+  if (overrideId === null) {
+    return {
+      state: "offered",
+      label: "Override",
+      accessibilityLabel: `Override "${question}": it comes back to you as a question, and your answer replaces this one`,
+    };
+  }
+  return open.has(overrideId) ? { state: "waiting", text: OVERRIDE_WAITING, tone: "warning" } : { state: "done", text: OVERRIDE_DONE, tone: "muted" };
+}
+
+// ---------------------------------------------------------------------------
+// The Orchestrator's interventions in Decided for you (autonomy design §G.3;
+// PRD REQ-127 c; bead t9lm.23).
+// ---------------------------------------------------------------------------
+
+/** Whom an intervention was for, in the line's words; null when the stores could not tell. */
+const TARGET_WORDS: Readonly<Record<DigestTargetRole, string>> = { manager: "Manager", worker: "Worker", owner: "you" };
+
+/** What the Orchestrator did, by kind, for its target (`Worker`, `Manager`, or null when not known). */
+const INTERVENTION_WHAT: Readonly<Record<InterventionKind, (target: string | null) => string>> = {
+  answer: (target) => (target === null ? "Answered a question" : `Answered the ${target}'s question`),
+  unblock: (target) => (target === null ? "Unblocked a request" : `Unblocked the ${target}`),
+  correct: (target) => (target === null ? "Sent a correction" : `Corrected the ${target}`),
+  stop: (target) => (target === null ? "Stopped a turn" : `Stopped the ${target}'s turn`),
+  compact: (target) => (target === null ? "Had an agent compact its context" : `Had the ${target} compact its context`),
+  handoff: (target) => (target === null ? "Handed an agent's work to a new one" : `Handed the ${target}'s work to a new ${target}`),
+  advice: () => "Advised you",
+};
+
+/** What a Worker signal said, as the reason of a correction or a stop. */
+const SIGNAL_REASON: Readonly<Record<WorkerSignal, string>> = {
+  stuck: "The Worker looked stuck",
+  permission: "The Worker was waiting for a permission",
+  danger: "The Worker ran a risky command",
+  failing: "The Worker's command kept failing",
+  heavy: "The Worker used heavy process for small work",
+  outside: "The Worker edited outside the project",
+};
+
+/** What set an intervention off (its trigger), as the start of its reason. */
+function triggerWords(trigger: InterventionTrigger, signal: WorkerSignal | undefined): string {
+  switch (trigger) {
+    case "decision.opened":
+      return "A question was waiting";
+    case "request.stalled":
+      return "The request stopped moving";
+    case "worker.signal":
+      return signal === undefined ? "The Worker needed a look" : SIGNAL_REASON[signal];
+    case "advice.due":
+      return "Advice was due for the project";
+    case "threshold.crossed":
+      return "An agent crossed its threshold in Settings";
+    case "owner":
+      return "You asked for it in the Orchestrator's chat";
+    case "orchestrator":
+      return "On the Orchestrator's own look";
+  }
+}
+
+/** The outcome each kind waits for, as the outcome line says it. */
+const EXPECTED_WORDS: Readonly<Record<ExpectedOutcome, string>> = {
+  "worker-resumes": "the Worker resumes",
+  "stall-clears": "the request moves again",
+  "signal-clears-or-checks-pass": "the problem clears or the checks pass",
+  "turn-ends": "the turn ends",
+  "tokens-per-turn-down": "fewer tokens per turn",
+  "successor-progresses": "the successor makes progress",
+  "owner-answers": "you answer it",
+};
+
+/** Each outcome's word and colour: `unknown` is said as such, never hidden. */
+const OUTCOME_WORDS: Readonly<Record<InterventionOutcome, { word: string; tone: Tone }>> = {
+  pending: { word: "Pending", tone: "info" },
+  met: { word: "Met", tone: "success" },
+  missed: { word: "Missed", tone: "warning" },
+  unknown: { word: "Unknown", tone: "muted" },
+};
+
+/** `Met · expected: the Worker resumes within 10 min`. */
+export function digestOutcomeOf(entry: Pick<DigestIntervention, "outcome" | "expected" | "windowMs">): DigestOutcome {
+  const { word, tone } = OUTCOME_WORDS[entry.outcome];
+  return { outcome: entry.outcome, text: `${word} · expected: ${EXPECTED_WORDS[entry.expected]} within ${formatDuration(entry.windowMs)}`, tone };
+}
+
+/** An intervention's ids and times, for Details. */
+function interventionDetails(entry: DigestIntervention): string[] {
+  return [
+    `Intervention: ${entry.id}`,
+    `Kind: ${entry.kind} · trigger: ${entry.trigger}`,
+    ...(entry.requestId === null ? [] : [`Request: ${entry.requestId}`]),
+    ...(entry.targetAgentId === null ? [] : [`Agent: ${entry.targetAgentId}`]),
+    ...(entry.commandId === undefined ? [] : [`Command: ${entry.commandId}`]),
+    ...(entry.decisionId === undefined ? [] : [`Decision: ${entry.decisionId}`]),
+    ...(entry.alertKey === undefined ? [] : [`Alert: ${entry.alertKey}`]),
+    `At: ${entry.at}`,
+    ...(entry.checkedAt === null ? [] : [`Checked: ${entry.checkedAt}`]),
+  ];
+}
+
+/**
+ * One intervention line (§G.3): what the Orchestrator did and for whom · the
+ * project · why (what set it off, then the Orchestrator's own words when a
+ * store kept them) · its outcome, pending, met, missed or unknown. No
+ * Override. Ids only under Details.
+ */
+export function interventionRowOf(entry: DigestIntervention, input: Pick<InboxInput, "projectOf" | "now">): DigestInterventionRow {
+  const target = entry.targetRole === null ? null : TARGET_WORDS[entry.targetRole];
+  const what = INTERVENTION_WHAT[entry.kind](target);
+  const where = `${projectName(entry.workspaceId, input.projectOf)} · the Orchestrator`;
+  const trigger = triggerWords(entry.trigger, entry.signal);
+  const outcome = digestOutcomeOf(entry);
+  const time = ago(entry.at, input.now);
+  return {
+    kind: "intervention",
+    key: `intervention:${entry.id}`,
+    interventionKind: entry.kind,
+    what,
+    where,
+    reason: entry.reason === null ? `${trigger}.` : `${trigger}: ${shorten(entry.reason, 300)}`,
+    outcome,
+    time,
+    accessibilityLabel: `The Orchestrator: ${what}, ${where}, ${outcome.text}, ${time}`,
+    details: interventionDetails(entry),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Decided for you: the lines, merged.
+// ---------------------------------------------------------------------------
+
+/**
+ * One Decided-for-you line: what was decided (the question and the answer),
+ * the project, who decided, the reason, and Override — or, once overridden,
+ * whether the owner's answer is still awaited (`open`: the unsettled
+ * decisions' ids). `answered`: the Orchestrator's `answer` intervention for
+ * this decision (§G.3), whose outcome the line then carries. Ids only under
+ * Details.
+ */
+export function digestRowOf(
+  decision: Decision,
+  input: Pick<InboxInput, "projectOf" | "now">,
+  open: ReadonlySet<string> = new Set(),
+  answered: DigestIntervention | null = null,
+): DigestDecisionRow {
+  const answer = decision.answer;
+  const question = questionLine(decision.question, 80);
+  const what = `${question} → ${answerLine(decision)}`;
+  const where = `${projectName(decision.workspaceId, input.projectOf)} · ${decidedByWords(decision)}`;
+  const time = ago(answer?.at ?? decision.settledAt, input.now);
+  const overrideId = overrideIdOf(decision);
+  const outcome = answered === null ? null : digestOutcomeOf(answered);
+  return {
+    kind: "decision",
+    key: decision.id,
+    decisionId: decision.id,
+    what,
+    where,
+    reason: answer?.reason === undefined ? null : shorten(answer.reason, 300),
+    outcome,
+    time,
+    accessibilityLabel: `Decided for you: ${what}, ${where}, ${outcome === null ? "" : `${outcome.text}, `}${time}`,
+    details: [
+      `Decision: ${decision.id}`,
+      ...(decision.requestId === null ? [] : [`Request: ${decision.requestId}`]),
+      `Class: ${answer?.class ?? decisionClassOf(decision)}`,
+      ...(answer?.precedentId === undefined ? [] : [`Precedent: ${answer.precedentId}`]),
+      `Answered: ${answer?.at ?? "unknown"}`,
+      ...(decision.delivery === null ? [] : [`Delivery: ${decision.delivery.outcome} to ${decision.delivery.to} at ${decision.delivery.at}`]),
+      ...(overrideId === null ? [] : [`Override: ${overrideId}`]),
+      ...(answered === null ? [] : [`Intervention: ${answered.id}`, ...(answered.checkedAt === null ? [] : [`Checked: ${answered.checkedAt}`])]),
+    ],
+    override: decisionKindOf(decision.id) === "held" ? null : overrideOf(decision, question, open),
+  };
+}
+
+/**
+ * Decided for you: one line per decision `inbox.digest` returned — only
+ * answers the policy or a precedent gave, and only after `digestSince` when
+ * it is known: an owner's answer is never one — and one per intervention of
+ * the Orchestrator's after it, merged into one list, the latest first (a
+ * tie keeps the decision first). An `answer` intervention whose decision is
+ * a line already gives that line its outcome instead of a line of its own.
+ */
+export function decidedForYouOf(
+  input: Pick<InboxInput, "digest" | "digestTruncated" | "digestSince" | "interventions" | "interventionsTruncated" | "decisions" | "projectOf" | "now">,
+): InboxView["decidedForYou"] {
+  const open = new Set(input.decisions.filter((decision) => isAnswerable(decision)).map((decision) => decision.id));
+  const since = input.digestSince == null ? null : timeOrZero(input.digestSince);
+  const decisions = (input.digest ?? []).filter((decision) => isDecidedForOwner(decision) && (since === null || timeOrZero(decision.answer!.at) > since));
+  const interventions = (input.interventions ?? []).filter((entry) => since === null || timeOrZero(entry.at) > since);
+  const lined = new Set(decisions.map((decision) => decision.id));
+  const answers = new Map<string, DigestIntervention>();
+  for (const entry of interventions) {
+    // The latest answer of a decision wins; there is one per decision.
+    if (entry.kind === "answer" && entry.decisionId !== undefined && lined.has(entry.decisionId) && !answers.has(entry.decisionId)) answers.set(entry.decisionId, entry);
+  }
+  const folded = new Set([...answers.values()].map((entry) => entry.id));
+  const timed = [
+    ...decisions.map((decision) => ({ at: timeOrZero(decision.answer!.at), row: digestRowOf(decision, input, open, answers.get(decision.id) ?? null) as DigestRow })),
+    ...interventions.filter((entry) => !folded.has(entry.id)).map((entry) => ({ at: timeOrZero(entry.at), row: interventionRowOf(entry, input) as DigestRow })),
+  ];
+  // Stable: each list keeps `inbox.digest`'s order within a tie, decisions first.
+  const rows = timed
+    .map((line, index) => ({ ...line, index }))
+    .sort((a, b) => b.at - a.at || a.index - b.index)
+    .map((line) => line.row);
+  return {
+    count: rows.length,
+    rows,
+    empty: rows.length === 0 ? DECIDED_FOR_YOU_EMPTY : null,
+    truncated: input.digestTruncated === true,
+    interventionsTruncated: input.interventionsTruncated === true,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // The whole Inbox.
 // ---------------------------------------------------------------------------
 
@@ -382,11 +742,13 @@ export function inboxView(input: InboxInput): InboxView {
   );
   const rows = [...orderedAlerts(input.alerts).map((alert) => alertRowOf(alert, input)), ...resendFollowUps(input.incidents, onCards, input)];
   const count = decisionsCount + rows.length;
+  // Decided for you is shown, never counted: nothing in it waits for the owner.
+  const decidedForYou = decidedForYouOf(input);
   return {
     needsYou: { count: decisionsCount, groups },
-    decidedForYou: { empty: DECIDED_FOR_YOU_EMPTY },
+    decidedForYou,
     alerts: { count: rows.length, rows, truncated: input.alertsTruncated === true },
-    empty: groups.length === 0 && rows.length === 0 ? emptySentence(input.runningWorkers) : null,
+    empty: groups.length === 0 && rows.length === 0 && decidedForYou.count === 0 ? emptySentence(input.runningWorkers) : null,
     count,
   };
 }
@@ -398,7 +760,7 @@ export function inboxTab(count: number | null): { key: "inbox"; label: string; c
 }
 
 /** Section headings, with their counts. */
-export function sectionHeading(title: "Needs you" | "Alerts", count: number): string {
+export function sectionHeading(title: "Needs you" | "Decided for you" | "Alerts", count: number): string {
   return `${title} · ${count}`;
 }
 

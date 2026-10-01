@@ -1,11 +1,12 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { roleConfigRevision, type RoleConfigView } from "../plugin/server/config-writer";
 import { rolePaseoToolsPolicy } from "../plugin/server/setup-roles";
 import {
   ROLE_FALLBACK_FILE,
+  chainOf,
   fallbackAliasEntry,
   fallbackForSettings,
   handleRolesSaveFallback,
@@ -14,6 +15,7 @@ import {
 import { forgetModelCosts } from "../plugin/server/model-costs";
 import { forgetModes } from "../plugin/server/role-mode";
 import type { RolesSaveFallbackInput } from "../plugin/shared/contracts";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 /**
  * Delta 20260921 §4.4.1–§4.4.3 (REQ-065 f): a role's fallback chain is saved
@@ -44,39 +46,26 @@ const MODELS: Record<string, unknown[]> = {
   pi: [{ id: "pi-default", label: "Pi" }],
 };
 
-function fakeDaemon(providers: Providers = {}) {
-  const state: { providers: Providers; agentProfiles: Profile[] } = {
-    providers: {
-      claude: { enabled: true },
-      "bm-worker": { extends: "claude", label: "Beads Worker", paseoTools: { enabled: true } },
-      "bm-reviewer": { extends: "codex", label: "Beads Reviewer" },
-      ...providers,
-    },
-    agentProfiles: [
-      { id: "mine", name: "Mine", provider: "claude", model: "claude-opus-5" },
-      { id: "bm-worker", name: "Worker", provider: "bm-worker", model: "claude-opus-5" },
-      { id: "bm-reviewer", name: "Reviewer", provider: "bm-reviewer", model: "gpt-5.6-sol" },
-    ],
-  };
-  const patches: Array<Record<string, unknown>> = [];
-  const paseo = {
-    providers: {
-      listAvailable: vi.fn(async () => ({ providers: ["claude", "codex", "pi"].map((provider) => ({ provider, available: true })) })),
-      listModels: vi.fn(async (provider: string) => ({ provider, models: MODELS[provider] ?? [], error: null })),
-      listModes: vi.fn(async (provider: string) => ({ provider, modes: MODES[provider] ?? [], error: null })),
-    },
+/** A machine with Claude, Codex and Pi, the Worker and Reviewer aliases, and one profile of the user's own. */
+function daemonWith(providers: Providers = {}) {
+  const fake = fakePaseo({
+    providers: { available: ["claude", "codex", "pi"], models: MODELS, modes: MODES },
     config: {
-      get: vi.fn(async () => ({ config: structuredClone(state) as RoleConfigView })),
-      patch: vi.fn(async (patch: Record<string, unknown>) => {
-        patches.push(structuredClone(patch));
-        for (const [id, entry] of Object.entries((patch.providers ?? {}) as Providers)) state.providers[id] = { ...(state.providers[id] ?? {}), ...entry };
-        for (const id of (patch.removeProviders as string[] | undefined) ?? []) delete state.providers[id];
-        if (patch.agentProfiles !== undefined) state.agentProfiles = structuredClone(patch.agentProfiles as Profile[]);
-        return {};
-      }),
+      providers: {
+        claude: { enabled: true },
+        "bm-worker": { extends: "claude", label: "Beads Worker", paseoTools: { enabled: true } },
+        "bm-reviewer": { extends: "codex", label: "Beads Reviewer" },
+        ...providers,
+      },
+      agentProfiles: [
+        { id: "mine", name: "Mine", provider: "claude", model: "claude-opus-5" },
+        { id: "bm-worker", name: "Worker", provider: "bm-worker", model: "claude-opus-5" },
+        { id: "bm-reviewer", name: "Reviewer", provider: "bm-reviewer", model: "gpt-5.6-sol" },
+      ],
     },
-  };
-  return { paseo, state, patches, revision: () => roleConfigRevision(state as RoleConfigView) };
+  });
+  const state = fake.config<{ providers: Providers; agentProfiles: Profile[] }>();
+  return { paseo: fake.paseo, state, patches: fake.patches, revision: () => roleConfigRevision(state as RoleConfigView) };
 }
 
 const CODEX = { baseProvider: "codex", model: "gpt-5.6-sol", thinkingOptionId: "high", modeId: "full-access" };
@@ -100,7 +89,7 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-const save = (daemon: ReturnType<typeof fakeDaemon>, input: Partial<RolesSaveFallbackInput>) =>
+const save = (daemon: ReturnType<typeof daemonWith>, input: Partial<RolesSaveFallbackInput>) =>
   handleRolesSaveFallback({ revision: daemon.revision(), role: "worker", policy: "ask", entries: [], ...input } as RolesSaveFallbackInput, daemon.paseo, {
     log,
     home,
@@ -108,7 +97,7 @@ const save = (daemon: ReturnType<typeof fakeDaemon>, input: Partial<RolesSaveFal
 
 describe("roles.save-fallback", () => {
   it("writes one alias per entry, then role-fallback.json (0600), and returns the chain as the screen shows it", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     const result = await save(daemon, { entries: [CODEX, PI] });
     expect(daemon.patches).toEqual([
       {
@@ -136,7 +125,7 @@ describe("roles.save-fallback", () => {
   });
 
   it("renumbers when entry 1 is removed: alias 1 takes entry 2's provider, alias 2 is removed", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     await save(daemon, { entries: [CODEX, PI] });
     await save(daemon, { entries: [PI] });
     expect(daemon.patches[1]).toEqual({
@@ -148,7 +137,7 @@ describe("roles.save-fallback", () => {
   });
 
   it("changes only the file when the aliases already match (policy off)", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     await save(daemon, { entries: [CODEX] });
     await save(daemon, { entries: [CODEX], policy: "off" });
     expect(daemon.patches).toHaveLength(1);
@@ -160,31 +149,25 @@ describe("roles.save-fallback", () => {
     ["an entry equal to the Worker itself", { entries: [{ baseProvider: "claude", model: "claude-opus-5", thinkingOptionId: null, modeId: null }] }],
     ["a role that is not paseo-bm's", { role: "planner" as never, entries: [PI] }],
     ["a policy that does not exist", { policy: "sometimes" as never }],
+    ["the retired Auto switch (ADR-022 decision 4)", { policy: "auto" as never }],
     ["a model the provider does not list", { entries: [{ ...CODEX, model: "gpt-9" }] }],
     ["a bm-* alias as base provider", { entries: [{ ...CODEX, baseProvider: "bm-reviewer" }] }],
     ["four entries", { entries: [CODEX, PI, CODEX, PI] }],
   ])("refuses %s with E_ROLE_SETTINGS_INVALID, writing nothing", async (_label, input) => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     await expect(save(daemon, input)).rejects.toMatchObject({ code: "E_ROLE_SETTINGS_INVALID" });
     expect(daemon.paseo.config.patch).not.toHaveBeenCalled();
     expect(() => readFileSync(join(home, ROLE_FALLBACK_FILE))).toThrow();
   });
 
-  it("saves the Auto switch policy since phase 2a-18 (§4.6, owner decision Q17 b)", async () => {
-    const daemon = fakeDaemon();
-    const result = await save(daemon, { entries: [CODEX], policy: "auto" });
-    expect(result.fallback.policy).toBe("auto");
-    expect(JSON.parse(readFileSync(join(home, ROLE_FALLBACK_FILE), "utf8")).roles.worker.policy).toBe("auto");
-  });
-
   it("warns, never refuses, for an entry on the Worker's own base provider", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     const result = await save(daemon, { entries: [{ baseProvider: "claude", model: "claude-sonnet-5", thinkingOptionId: null, modeId: null }] });
     expect(result.warnings).toEqual(["Fallback 1 runs on claude like the Worker itself: it only helps when the limit is per model."]);
   });
 
   it("refuses a stale revision with E_ROLE_SETTINGS_CONFLICT and leaves the file alone", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     const stale = daemon.revision();
     daemon.state.agentProfiles[0] = { ...daemon.state.agentProfiles[0], model: "claude-sonnet-5" };
     await expect(save(daemon, { revision: stale, entries: [CODEX] })).rejects.toMatchObject({ code: "E_ROLE_SETTINGS_CONFLICT" });
@@ -193,7 +176,7 @@ describe("roles.save-fallback", () => {
   });
 
   it("never overwrites an invalid role-fallback.json: the save is refused and the file kept byte for byte", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     writeFileSync(join(home, ROLE_FALLBACK_FILE), '{"version": 1, "patterns": {"L1": ["my limit"]}, "roles": {"worker": {"policy": "sometimes"}}}');
     await expect(save(daemon, { entries: [CODEX] })).rejects.toMatchObject({ code: "E_ROLE_SETTINGS_INVALID" });
     expect(readFileSync(join(home, ROLE_FALLBACK_FILE), "utf8")).toContain('"sometimes"');
@@ -201,7 +184,7 @@ describe("roles.save-fallback", () => {
   });
 
   it("keeps the keys it does not own (hand-edited patterns) when it rewrites the file", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     writeFileSync(join(home, ROLE_FALLBACK_FILE), JSON.stringify({ version: 1, roles: {}, patterns: { L1: ["my limit"] } }));
     const result = await save(daemon, { entries: [PI] });
     expect(JSON.parse(readFileSync(join(home, ROLE_FALLBACK_FILE), "utf8"))).toEqual({
@@ -213,7 +196,7 @@ describe("roles.save-fallback", () => {
   });
 
   it("refuses to write through a symlinked install home", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     const outside = join(root, "outside");
     mkdirSync(outside);
     rmSync(home, { recursive: true });
@@ -222,8 +205,42 @@ describe("roles.save-fallback", () => {
     expect(() => readFileSync(join(outside, ROLE_FALLBACK_FILE))).toThrow();
   });
 
+  it("saves on a fresh data home: the first save creates the folder (code review 2026-09-30 §2.4)", async () => {
+    const daemon = daemonWith();
+    rmSync(home, { recursive: true });
+    await save(daemon, { entries: [PI] });
+    expect(statSync(home).mode & 0o777).toBe(0o700);
+    const path = join(home, ROLE_FALLBACK_FILE);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ version: 1, roles: { worker: { policy: "ask", entries: [PI] } } });
+  });
+
+  it("refuses a symlinked role-fallback.json on a read, never following it; a save fails as a write (code review 2026-09-30 §2.4)", async () => {
+    const outside = join(root, "outside.json");
+    const target = JSON.stringify({ version: 1, roles: { worker: { policy: "off", entries: [CODEX] } } });
+    writeFileSync(outside, target);
+    symlinkSync(outside, join(home, ROLE_FALLBACK_FILE));
+    const read = readRoleFallback(home, log);
+    expect(read.file).toEqual({ version: 1, roles: {} });
+    expect(read.error).toMatch(/symlinked path/);
+    expect(logged).toHaveLength(1);
+    const daemon = daemonWith();
+    await expect(save(daemon, { entries: [PI] })).rejects.toMatchObject({ code: "E_ROLE_SETTINGS_WRITE_FAILED" });
+    expect(daemon.paseo.config.patch).not.toHaveBeenCalled();
+    expect(readFileSync(outside, "utf8")).toBe(target);
+  });
+
+  it("never writes a role-fallback.json a newer paseo-bm wrote: the save fails as a write", async () => {
+    const daemon = daemonWith();
+    const newer = JSON.stringify({ version: 2, roles: {}, future: true });
+    writeFileSync(join(home, ROLE_FALLBACK_FILE), newer);
+    await expect(save(daemon, { entries: [PI] })).rejects.toThrow(/^E_ROLE_SETTINGS_WRITE_FAILED: .* written by a newer paseo-bm/);
+    expect(daemon.paseo.config.patch).not.toHaveBeenCalled();
+    expect(readFileSync(join(home, ROLE_FALLBACK_FILE), "utf8")).toBe(newer);
+  });
+
   it("reports an install home it cannot find as E_ROLE_SETTINGS_WRITE_FAILED", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     await expect(
       handleRolesSaveFallback({ revision: daemon.revision(), role: "worker", policy: "ask", entries: [] }, daemon.paseo, { log, home: null }),
     ).rejects.toMatchObject({ code: "E_ROLE_SETTINGS_WRITE_FAILED" });
@@ -232,7 +249,7 @@ describe("roles.save-fallback", () => {
 
 describe("the Reviewer's chain (phase 2a-17, §4.5.1)", () => {
   it("saves a Reviewer alias with Paseo tools switched off (autonomy design §A.10)", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     const sonnet = { baseProvider: "claude", model: "claude-sonnet-5", thinkingOptionId: null, modeId: "default" };
     await save(daemon, { role: "reviewer", entries: [sonnet] });
     expect(daemon.patches.at(-1)).toEqual({
@@ -242,7 +259,7 @@ describe("the Reviewer's chain (phase 2a-17, §4.5.1)", () => {
   });
 
   it("refuses a dangerous mode for a Reviewer entry, as for the Reviewer itself", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     await expect(save(daemon, { role: "reviewer", entries: [{ ...CODEX, modeId: "full-access" }] })).rejects.toMatchObject({ code: "E_ROLE_SETTINGS_INVALID" });
   });
 });
@@ -267,7 +284,7 @@ describe("role-fallback.json and roles.settings", () => {
     expect(read.file).toEqual({ version: 1, roles: {} });
     expect(read.error).toMatch(/^not JSON/);
     expect(logged).toHaveLength(1);
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     const settings = await fallbackForSettings(daemon.paseo, { log, home });
     expect(settings.fallback).toEqual({
       worker: { role: "worker", policy: "ask", entries: [], patternsFromFile: false },
@@ -278,8 +295,32 @@ describe("role-fallback.json and roles.settings", () => {
     expect(settings.warnings[0]).toMatch(/^role-fallback\.json is not valid/);
   });
 
+  it("reads a stored Auto switch as Ask me and says so for that role only, until its next save writes Ask me (ADR-022 decision 4)", async () => {
+    writeFileSync(
+      join(home, ROLE_FALLBACK_FILE),
+      JSON.stringify({ version: 1, roles: { worker: { policy: "auto", entries: [CODEX] }, reviewer: { policy: "off", entries: [] } }, patterns: { L1: ["my limit"] } }),
+    );
+    const daemon = daemonWith();
+    const before = await fallbackForSettings(daemon.paseo, { log, home });
+    expect(before.warnings).toEqual([]);
+    expect(before.fallback?.worker).toMatchObject({ role: "worker", policy: "ask", migratedFromAuto: true });
+    expect(before.fallback?.reviewer).toEqual({ role: "reviewer", policy: "off", entries: [], patternsFromFile: true });
+    expect(before.fallback?.manager).not.toHaveProperty("migratedFromAuto");
+    expect(chainOf(readRoleFallback(home, log).file, "worker")).toEqual({ policy: "ask", entries: [CODEX] });
+
+    const saved = await save(daemon, { entries: [CODEX] });
+    expect(saved.fallback).not.toHaveProperty("migratedFromAuto");
+    expect(JSON.parse(readFileSync(join(home, ROLE_FALLBACK_FILE), "utf8"))).toEqual({
+      version: 1,
+      roles: { worker: { policy: "ask", entries: [CODEX] }, reviewer: { policy: "off", entries: [] } },
+      patterns: { L1: ["my limit"] },
+    });
+    expect((await fallbackForSettings(daemon.paseo, { log, home })).fallback?.worker).not.toHaveProperty("migratedFromAuto");
+    expect(logged).toEqual([]);
+  });
+
   it("shows the chain of every role this release offers: all three since phase 2a-17", async () => {
-    const daemon = fakeDaemon();
+    const daemon = daemonWith();
     await save(daemon, { entries: [CODEX] });
     const settings = await fallbackForSettings(daemon.paseo, { log, home });
     expect(Object.keys(settings.fallback ?? {})).toEqual(["worker", "reviewer", "manager"]);

@@ -2,31 +2,15 @@
  * RPCs behind Settings' set-up blocks (from the Setup screen, delta 20260916-setup-screen).
  */
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { join } from "node:path";
-import {
-  BASE_INSTRUCTIONS,
-  MAX_EXTRA_CHARS,
-  ROLE_EXTRAS_FILE,
-  fullInstructions,
-  dataHomeOf,
-  readRoleExtras,
-  saveRoleExtra,
-  type Role,
-} from "./role-extras";
-import { readFileSync } from "node:fs";
-import { extraHashOf } from "./role-extra-hash";
-import { resolveDataHome, unusableDataHomeMessage } from "./data-home";
+import { resolveDataHome } from "./data-home";
 import { agentToolsIn, readRoleConfig, type ConfigPaseo, type RoleConfigView } from "./config-writer";
-import { cleanupPaseoBm, grantAgentTools, installKind, providerLogins } from "./setup-machine";
+import { cleanupPaseoBm, grantAgentTools, providerLogins } from "./setup-machine";
 import { ROLE_NAMES, ensureRoles, roleId } from "./setup-roles";
 import { emptySetupState, readSetupState } from "./setup-state";
 import { installSkills, skillsStatus, type SkillDeps } from "./setup-skills";
 import { LATEST_KNOWN, installTool, toolsStatus, type ToolDeps } from "./setup-tools";
 import { toolsSeen } from "./tools-check";
 import {
-  DashboardError,
-  rolesInstructionsRpc,
-  rolesSaveExtraRpc,
   setupCleanupRpc,
   setupEnsureRolesRpc,
   setupGrantAgentToolsRpc,
@@ -38,25 +22,11 @@ import {
 
 export interface SetupDeps extends ToolDeps, SkillDeps {}
 
-async function requireHome(paseo: unknown, deps: SetupDeps): Promise<string> {
-  const home = dataHomeOf(deps);
-  if (home === null) throw new DashboardError("E_ROLE_EXTRA_INVALID", `cannot save: ${unusableDataHomeMessage()}`);
-  return home;
-}
-
 export async function handleSetupStatus(paseo: unknown, deps: SetupDeps = {}): Promise<SetupStatus> {
-  const home = dataHomeOf(deps);
-  const extras = home === null ? { manager: "", worker: "", reviewer: "", orchestrator: "" } : readRoleExtras(home);
   return {
     tools: await toolsStatus(deps),
     latestCheckedOn: LATEST_KNOWN.checkedOn,
     skills: skillsStatus(deps),
-    extras: {
-      manager: extras.manager.length,
-      worker: extras.worker.length,
-      reviewer: extras.reviewer.length,
-      orchestrator: extras.orchestrator.length,
-    },
     paseoTools: toolsSeen(),
     setup: await machineSetup(paseo, deps),
   };
@@ -111,28 +81,7 @@ async function machineSetup(paseo: unknown, deps: SetupDeps): Promise<SetupStatu
       resolution.home === null
         ? { path: null, source: null, reason: resolution.reason }
         : { path: resolution.home, source: resolution.source, reason: null },
-    install: installKind(config as { plugins?: Record<string, unknown> | null }, {
-      readFileSync: (path, encoding) => readFileSync(path, encoding),
-    }),
   };
-}
-
-export async function handleRolesInstructions(input: { role: Role }, paseo: unknown, deps: SetupDeps = {}) {
-  const home = dataHomeOf(deps);
-  const extra = home === null ? "" : readRoleExtras(home)[input.role];
-  return {
-    base: BASE_INSTRUCTIONS[input.role],
-    extra,
-    full: fullInstructions(input.role, extra),
-    path: home === null ? null : join(home, ROLE_EXTRAS_FILE),
-    maxChars: MAX_EXTRA_CHARS,
-    hash: extraHashOf(extra),
-  };
-}
-
-export async function handleRolesSaveExtra(input: { role: Role; text: string }, paseo: unknown, deps: SetupDeps = {}) {
-  const roles = saveRoleExtra(await requireHome(paseo, deps), input.role, input.text);
-  return { extra: roles[input.role], full: fullInstructions(input.role, roles[input.role]) };
 }
 
 export function registerSetupRpcs(server: PluginServerContext): void {
@@ -144,6 +93,4 @@ export function registerSetupRpcs(server: PluginServerContext): void {
   server.handle(setupGrantAgentToolsRpc, (_input, context) => grantAgentTools(context.paseo));
   server.handle(setupInstallSkillsRpc, () => installSkills());
   server.handle(setupInstallToolRpc, (input) => installTool(input.tool));
-  server.handle(rolesInstructionsRpc, (input, context) => handleRolesInstructions(input, context.paseo));
-  server.handle(rolesSaveExtraRpc, (input, context) => handleRolesSaveExtra(input, context.paseo));
 }

@@ -2,8 +2,9 @@
  * The stall pass (Orchestrator design §6, REQ-073; autonomy design §A.8): once
  * a minute it looks for paseo-bm requests that stopped moving, keeps one
  * `request-stalled` **Inbox alert** per such request (`alert-store.ts`), and
- * for a project with Autopilot on publishes a `request.stalled` event to the
- * Orchestrator (`event-bus.ts`). It never messages the owner.
+ * for a project in the policy's scope (a class above `owner`, `eventScopeOf`)
+ * publishes a `request.stalled` event to the Orchestrator (`event-bus.ts`). It
+ * never messages the owner.
  *
  * - **Always on.** The Watch for stalled work switch is gone (§A.8): the pass
  *   costs no token (no timeline read, no model call), and a stalled request
@@ -18,8 +19,9 @@
  *   a Reviewer of the request is `running` (the Manager is left out: it is
  *   shared by every request of its workspace): `idle-unfinished` — the last
  *   report is neither `finished` nor `blocked` and nothing happened for 5
- *   minutes; `review-over-budget` — `review.over-budget` is raised and the last
- *   report is not `finished`. A request waiting on the owner (`blocked`) is not
+ *   minutes; `review-over-budget` — `review.over-budget` is raised, against the
+ *   owner's review budget per tier (Settings → Coordination, §G.7), and the
+ *   last report is not `finished`. A request waiting on the owner (`blocked`) is not
  *   stalled: its question waits in the Inbox. A request the Manager answered
  *   itself (no Worker, no report) never stalls.
  * - **Once per stall.** The alert is raised once while it holds and cleared
@@ -30,7 +32,7 @@
  * - **The live watch of running Workers** (design §6B.3, `worker-watch.ts`)
  *   rides on the same timer: every second tick (2 minutes) a Worker pass of
  *   its own, never overlapping another Worker pass, looks at the running
- *   Workers of the Autopilot projects. `workerTurnEnded` clears a Worker's
+ *   Workers of every project. `workerTurnEnded` clears a Worker's
  *   alerts and settles its events when the collector records the end of its
  *   turn.
  *
@@ -42,20 +44,20 @@
  * pass tries again.
  */
 import { join } from "node:path";
-import { REVIEW_BUDGET } from "./review-budget";
+import { readReviewBudget } from "./coordination-rpc";
 import { TRACES_DIR_NAME, resolveDataHome, type DataHomeDeps } from "./data-home";
-import type { DashboardPaseo } from "./dashboard-rpc";
+import type { DashboardPaseo } from "./paseo-directory";
 import { createAlertStore } from "./alert-store";
-import { createEventBus, type BmEvent, type EventBus, type StallReason } from "./event-bus";
-import { agentsOf, type OrchestratorActionsPaseo } from "./orchestrator-actions";
-import { createOrchestratorStore } from "./orchestrator-store";
-import { lastActivityOf, requestKeyOf } from "./orchestrator-tools";
-import { ruleInputOf, workspaceTracesOf } from "./request-trace";
-import { readWorkspaceMeta, storedWorkspaceIds, type TraceStoreLocation } from "./trace-store";
+import { createEventBus, eventScopeOf, type BmEvent, type EventBus, type StallReason } from "./event-bus";
+import { agentsOf, type OrchestratorStatePaseo } from "./orchestrator-state";
+import { lastActivityOf, recentWorkspacesOf, requestKeyOf, ruleInputOf, workspaceTracesOf } from "./request-trace";
+import type { TraceStoreLocation } from "./trace-store";
 import type { AgentFacts, ReconstructedTrace } from "./traces";
 import { flagsOf, type Flag } from "../shared/orchestrator-rules";
 import { roleOfProvider } from "./agent-role";
 import { WORKER_PASS_MS, clearWorkerTurnSignals, runWorkerPass, workerPassResult, type PermissionFirstSeen, type WorkerPassResult } from "./worker-watch";
+import { errorText } from "./rpc-kit";
+import { timeOrZero } from "../shared/time";
 
 /** How often a pass runs (design §6). */
 export const STALL_PASS_MS = 60_000;
@@ -63,15 +65,6 @@ export const STALL_PASS_MS = 60_000;
 export const IDLE_UNFINISHED_MS = 5 * 60_000;
 /** Only workspaces and requests with activity in this window are looked at (design §6). */
 export const STALL_WINDOW_MS = 24 * 3_600_000;
-
-function timeOf(at: string | null | undefined): number {
-  const time = at === null || at === undefined ? Number.NaN : Date.parse(at);
-  return Number.isNaN(time) ? 0 : time;
-}
-
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 // ---------------------------------------------------------------------------
 // Why a request stalls (pure).
@@ -102,7 +95,7 @@ export function stallReasonsOf(
   const phase = trace.reports.at(-1)?.phase ?? null;
   const lastActivityAt = lastActivityOf(trace);
   const held: HeldStall[] = [];
-  if (phase !== "finished" && phase !== "blocked" && now.getTime() - timeOf(lastActivityAt) >= IDLE_UNFINISHED_MS) {
+  if (phase !== "finished" && phase !== "blocked" && now.getTime() - timeOrZero(lastActivityAt) >= IDLE_UNFINISHED_MS) {
     held.push({ reason: "idle-unfinished", since: lastActivityAt });
   }
   if (phase !== "finished" && flags.some((flag) => flag.state === "raised" && flag.rule === "review.over-budget")) {
@@ -116,7 +109,7 @@ export function stallReasonsOf(
 // ---------------------------------------------------------------------------
 
 /** The SDK slice a pass uses; `PaseoApi` is structurally assignable. */
-export type StallWatcherPaseo = OrchestratorActionsPaseo;
+export type StallWatcherPaseo = OrchestratorStatePaseo;
 
 export interface StallWatcherDeps extends DataHomeDeps {
   now?: () => Date;
@@ -134,6 +127,12 @@ export interface StallWatcherDeps extends DataHomeDeps {
    * this watcher makes when none is given.
    */
   isToolsStale?: (agent: { id: string; createdAt: string | null }) => boolean;
+  /**
+   * Runs with the handle before each Worker pass (autonomy design §D.2: the
+   * action boundary's scan of pending requests), so the watch reads what it
+   * left. A failure is logged; the pass goes on.
+   */
+  beforeWorkerPass?: (handle: StallWatcherPaseo) => Promise<unknown>;
 }
 
 /** What one pass did, for the tests and the log. */
@@ -225,36 +224,33 @@ export function createStallWatcher(deps: StallWatcherDeps = {}): StallWatcher {
   async function run(handle: StallWatcherPaseo, home: string, live: () => boolean): Promise<StallPassResult> {
     const done = result("done");
     const at = now();
-    const store = createOrchestratorStore(home, { now });
     const alerts = createAlertStore(home, { now });
-    const autopilot = new Set(Object.keys(store.readSettings().autopilot));
+    const scope = eventScopeOf(home, log);
     const location: TraceStoreLocation = { tracesDir: join(home, TRACES_DIR_NAME) };
     const snapshot = await agentsOf(handle);
     if (!live()) return result("off");
-    const corrections = store.readCorrections();
     const since = at.getTime() - STALL_WINDOW_MS;
+    // The owner's budget, read once per pass (an unreadable store reads 2 / 2 / 4).
+    const facts = { reviewBudget: readReviewBudget({ home, log }) };
     const examined = new Set<string>();
     /** Workspaces whose open alerts stay as they are: unreadable ones. */
     const untouched = new Set<string>();
 
-    for (const workspaceId of storedWorkspaceIds(location)) {
+    // A workspace the store did not see in 24 hours has no request in the window.
+    for (const { workspaceId } of recentWorkspacesOf(location, since)) {
       if (!live()) return result("off");
       try {
-        const meta = readWorkspaceMeta(location, workspaceId);
-        // A workspace the store did not see in 24 hours has no request in the window.
-        if (meta !== null && timeOf(meta.lastSeenAt) < since) continue;
         const { agents, traces } = await workspaceTracesOf(
           { location, paseo: handle as unknown as DashboardPaseo, home, allAgents: snapshot.bm },
           workspaceId,
         );
         if (!live()) return result("off");
-        const facts = { reviewBudget: REVIEW_BUDGET, corrections, workspaceDirectory: meta?.lastKnownDirectory ?? null };
         for (const trace of traces) {
           // The group of agents linked to no request has no Manager to name.
-          if (trace.managerAgentId === null || timeOf(lastActivityOf(trace)) < since) continue;
+          if (trace.managerAgentId === null || timeOrZero(lastActivityOf(trace)) < since) continue;
           const requestKey = requestKeyOf(trace);
           examined.add(`${workspaceId}::${requestKey}`);
-          const held = stallReasonsOf(trace, agents, flagsOf(ruleInputOf(trace, agents), facts), at);
+          const held = stallReasonsOf(trace, agents, flagsOf(ruleInputOf(trace), facts), at);
           if (held.length === 0) {
             done.cleared.push(...alerts.clearWhere((alert) => alert.kind === "request-stalled" && alert.workspaceId === workspaceId && alert.subject === requestKey));
             continue;
@@ -267,7 +263,7 @@ export function createStallWatcher(deps: StallWatcherDeps = {}): StallWatcher {
           });
           if (!raised.raised) continue;
           done.raised.push(raised.alert.key);
-          if (!autopilot.has(workspaceId)) continue;
+          if (!scope.has(workspaceId)) continue;
           done.events.push({
             type: "request.stalled",
             workspaceId,
@@ -280,7 +276,7 @@ export function createStallWatcher(deps: StallWatcherDeps = {}): StallWatcher {
         }
       } catch (error) {
         untouched.add(workspaceId);
-        log(`[paseo-bm] the stall pass could not look at workspace ${workspaceId}: ${describeError(error)}`);
+        log(`[paseo-bm] the stall pass could not look at workspace ${workspaceId}: ${errorText(error)}`);
       }
     }
 
@@ -309,7 +305,7 @@ export function createStallWatcher(deps: StallWatcherDeps = {}): StallWatcher {
     try {
       return await run(handle, home, () => epoch === started);
     } catch (error) {
-      log(`[paseo-bm] a stall pass failed: ${describeError(error)}`);
+      log(`[paseo-bm] a stall pass failed: ${errorText(error)}`);
       return result("failed");
     } finally {
       passing = false;
@@ -325,9 +321,16 @@ export function createStallWatcher(deps: StallWatcherDeps = {}): StallWatcher {
     workerPassing = true;
     const started = epoch;
     try {
+      if (deps.beforeWorkerPass !== undefined) {
+        try {
+          await deps.beforeWorkerPass(handle);
+        } catch (error) {
+          log(`[paseo-bm] the step before a Worker watch pass failed: ${errorText(error)}`);
+        }
+      }
       return await runWorkerPass(handle, home, () => epoch === started, { ...deps, log, now, bus }, permissionsSeen);
     } catch (error) {
-      log(`[paseo-bm] a Worker watch pass failed: ${describeError(error)}`);
+      log(`[paseo-bm] a Worker watch pass failed: ${errorText(error)}`);
       return workerPassResult("failed");
     } finally {
       workerPassing = false;
@@ -342,7 +345,7 @@ export function createStallWatcher(deps: StallWatcherDeps = {}): StallWatcher {
     try {
       return clearWorkerTurnSignals(home, agent.id, { now });
     } catch (error) {
-      log(`[paseo-bm] the Worker watch could not clear the alerts of ${agent.id}: ${describeError(error)}`);
+      log(`[paseo-bm] the Worker watch could not clear the alerts of ${agent.id}: ${errorText(error)}`);
       return [];
     }
   }

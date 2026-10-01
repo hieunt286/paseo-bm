@@ -5,12 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   PI_SIGN_IN_GUIDANCE,
   grantAgentTools,
-  installKind,
   loginStateFromDiagnostic,
   providerLogins,
 } from "../plugin/server/setup-machine";
 import { readSetupState, updateSetupState } from "../plugin/server/setup-state";
 import { setupGrantAgentToolsRpc } from "../plugin/shared/contracts";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 /**
  * WP-403: Paseo's machine-wide agent-tools switch (design §7.13.3).
@@ -32,32 +32,21 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true });
 });
 
-function fakeDaemon(injectIntoAgents = false, options: { patchFails?: boolean; keepsIt?: boolean } = {}) {
-  const state: { providers: Record<string, unknown>; agentProfiles: unknown[]; mcp: { injectIntoAgents: boolean } } = {
-    providers: {},
-    agentProfiles: [],
-    mcp: { injectIntoAgents },
-  };
-  const patches: Array<Record<string, unknown>> = [];
-  const paseo = {
-    config: {
-      get: vi.fn(async () => ({ config: structuredClone(state) })),
-      patch: vi.fn(async (patch: Record<string, unknown>) => {
-        if (options.patchFails === true) throw new Error("Request failed: daemon.mcp is read-only");
-        patches.push(structuredClone(patch));
-        const mcp = patch["mcp"] as { injectIntoAgents?: boolean } | undefined;
-        // `keepsIt: false` is a daemon that answers yes and changes nothing.
-        if (mcp?.injectIntoAgents !== undefined && options.keepsIt !== false) state.mcp.injectIntoAgents = mcp.injectIntoAgents;
-        return {};
-      }),
-    },
-  };
-  return { paseo, patches, state: () => state };
+/**
+ * A daemon with Paseo's agent-tools switch as given. `patchFails` refuses every
+ * patch; `keepsIt: false` answers yes and changes nothing.
+ */
+function daemonWith(injectIntoAgents = false, options: { patchFails?: boolean; keepsIt?: boolean } = {}) {
+  const fake = fakePaseo({
+    config: { providers: {}, agentProfiles: [], mcp: { injectIntoAgents } },
+    ...(options.patchFails === true ? { patch: new Error("Request failed: daemon.mcp is read-only") } : options.keepsIt === false ? { patch: "ignore" as const } : {}),
+  });
+  return { paseo: fake.paseo, patches: fake.patches, state: () => fake.config<{ mcp: { injectIntoAgents: boolean } }>() };
 }
 
 describe("setup.grant-agent-tools", () => {
   it("records what was there before, then turns the switch on", async () => {
-    const daemon = fakeDaemon(false);
+    const daemon = daemonWith(false);
 
     const result = await grantAgentTools(daemon.paseo, deps());
 
@@ -71,13 +60,13 @@ describe("setup.grant-agent-tools", () => {
   });
 
   it("writes the record before the patch, not after", async () => {
-    const daemon = fakeDaemon(false);
+    const daemon = daemonWith(false);
     const order: string[] = [];
-    daemon.paseo.config.patch.mockImplementationOnce(async () => {
+    const apply = daemon.paseo.config.patch.getMockImplementation()!;
+    daemon.paseo.config.patch.mockImplementationOnce(async (patch) => {
       // Whatever happens to the patch, the record is already on disk.
       order.push(readSetupState(deps()).agentTools === null ? "no record yet" : "record already written");
-      daemon.state().mcp.injectIntoAgents = true;
-      return {};
+      return apply(patch);
     });
 
     await grantAgentTools(daemon.paseo, deps());
@@ -86,7 +75,7 @@ describe("setup.grant-agent-tools", () => {
   });
 
   it("does nothing the second time", async () => {
-    const daemon = fakeDaemon(false);
+    const daemon = daemonWith(false);
     await grantAgentTools(daemon.paseo, deps());
     const recorded = readSetupState(deps()).agentTools;
 
@@ -98,7 +87,7 @@ describe("setup.grant-agent-tools", () => {
   });
 
   it("claims nothing when the user had already turned it on", async () => {
-    const daemon = fakeDaemon(true);
+    const daemon = daemonWith(true);
 
     const result = await grantAgentTools(daemon.paseo, deps());
 
@@ -109,7 +98,7 @@ describe("setup.grant-agent-tools", () => {
   });
 
   it("puts the record back when the patch is refused", async () => {
-    const daemon = fakeDaemon(false, { patchFails: true });
+    const daemon = daemonWith(false, { patchFails: true });
     updateSetupState({ agentTools: { setBy: "installer", previous: true, at: "2026-09-01T00:00:00.000Z" } }, deps());
 
     await expect(grantAgentTools(daemon.paseo, deps())).rejects.toMatchObject({ code: "E_SETUP_WRITE_FAILED" });
@@ -118,7 +107,7 @@ describe("setup.grant-agent-tools", () => {
   });
 
   it("puts the record back when the daemon answers yes and keeps nothing", async () => {
-    const daemon = fakeDaemon(false, { keepsIt: false });
+    const daemon = daemonWith(false, { keepsIt: false });
 
     await expect(grantAgentTools(daemon.paseo, deps())).rejects.toMatchObject({ code: "E_SETUP_WRITE_FAILED" });
 
@@ -126,7 +115,7 @@ describe("setup.grant-agent-tools", () => {
   });
 
   it("patches nothing when the record cannot be written", async () => {
-    const daemon = fakeDaemon(false);
+    const daemon = daemonWith(false);
     mkdirSync(join(home, ".paseo-bm"), { recursive: true, mode: 0o700 });
     writeFileSync(join(home, ".paseo-bm", "ui"), "a file where the folder should be");
 
@@ -233,33 +222,5 @@ describe("providerLogins", () => {
 
   it("returns nothing for a machine whose roles have no provider yet", async () => {
     expect(await providerLogins({}, {})).toEqual([]);
-  });
-});
-
-describe("installKind", () => {
-  const fs = (files: Record<string, string>) => ({
-    readFileSync: (path: string) => {
-      const found = files[path];
-      if (found === undefined) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
-      return found;
-    },
-  });
-
-  it("recognises a 0.3.x directory install by its layout and its install.json", () => {
-    const record = fs({ "/Users/t/.paseo-bm/install.json": JSON.stringify({ schemaVersion: 1 }) });
-
-    expect(installKind({ plugins: { "paseo-bm": { path: "/Users/t/.paseo-bm/plugin/0.3.1" } } }, record)).toEqual({
-      kind: "installer-directory",
-      pluginPath: "/Users/t/.paseo-bm/plugin/0.3.1",
-    });
-  });
-
-  it("calls an npm install, a path of the wrong shape and no entry at all something else", () => {
-    const npm = "/Users/t/.paseo/plugins/paseo-bm/abc/node_modules/paseo-bm-plugin";
-
-    expect(installKind({ plugins: { "paseo-bm": { path: npm } } }, fs({})).kind).toBe("other");
-    expect(installKind({ plugins: { "paseo-bm": { path: "relative" } } }, fs({})).kind).toBe("other");
-    expect(installKind({ plugins: {} }, fs({}))).toEqual({ kind: "other", pluginPath: null });
-    expect(installKind({}, fs({}))).toEqual({ kind: "other", pluginPath: null });
   });
 });

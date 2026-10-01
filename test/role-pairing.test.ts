@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createAgentLabeller, registerAgentLabels } from "../plugin/server/agent-labels";
 import { createAlertStore, raiseInboxAlert } from "../plugin/server/alert-store";
+import { fakePaseo } from "./helpers/fake-paseo";
 import {
   checkRolePairing,
   describeRolePairingMismatch,
@@ -20,21 +21,13 @@ import {
  * creation hook never sees the creator (run note 20260929).
  */
 
-function paseoWith(providers: Record<string, string | Error | null>): { paseo: PairingPaseo; reads: string[] } {
-  const reads: string[] = [];
-  const paseo: PairingPaseo = {
-    agents: {
-      ref: (agentId: string) => ({
-        refresh: async () => {
-          reads.push(agentId);
-          const value = providers[agentId];
-          if (value instanceof Error) throw value;
-          return value === null || value === undefined ? null : { agent: { provider: value } };
-        },
-      }),
-    },
-  };
-  return { paseo, reads };
+/** The shared fake SDK holding agents with these providers; an Error is what that agent's refresh rejects with. `reads` are the refreshes. */
+function paseoWith(providers: Record<string, string | Error | null>) {
+  const fake = fakePaseo<PairingPaseo>({
+    agents: Object.entries(providers).flatMap(([id, provider]) => (typeof provider === "string" ? [{ id, provider }] : [])),
+  });
+  for (const [id, provider] of Object.entries(providers)) if (provider instanceof Error) fake.handle(id).refresh.mockRejectedValue(provider);
+  return { paseo: fake.paseo, reads: fake.refreshes };
 }
 
 describe("rolePairingMismatch", () => {
@@ -241,5 +234,27 @@ describe("the pairing check on agent.created", () => {
     );
     warn.mockRestore();
     expect(raiseAlert).toHaveBeenCalledWith(expect.objectContaining({ agentId: "w1", creatorId: "w0", creatorRole: "worker", workspaceId: "wks_1" }));
+  });
+
+  it("a handoff's successor, created by the Manager, pairs; the same hook hands it to the handoff check (autonomy design §G.6)", async () => {
+    const { host: h, handlers } = host();
+    const raiseAlert = vi.fn();
+    const onCreated = vi.fn(async () => null);
+    const labeller = createAgentLabeller({ cli: { find: () => null, run: async () => ({ code: 0, output: "{}", timedOut: false }) }, log: () => {} });
+    registerAgentLabels(h as never, labeller, { raiseAlert, log: () => {} }, onCreated);
+    const withRefresh = {
+      agents: {
+        ref: (id: string) => ({
+          refresh: async () =>
+            id === "m0" ? { agent: { provider: "bm-manager", labels: { "bm.role": "manager" } } } : { agent: { labels: { "bm.role": "worker", "bm.handoffFrom": "w0", "bm.requestId": "req-1" } } },
+        }),
+        list: async () => ({ entries: [] }),
+      },
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await handlers["agent.created"]!({ agent: { id: "w1", provider: "bm-worker", parentAgentId: "m0", workspaceId: "wks_1", cwd: "/r", title: null } }, { paseo: withRefresh });
+    warn.mockRestore();
+    expect(raiseAlert).not.toHaveBeenCalled();
+    expect(onCreated).toHaveBeenCalledWith({ id: "w1", provider: "bm-worker", parentAgentId: "m0", workspaceId: "wks_1" }, withRefresh);
   });
 });

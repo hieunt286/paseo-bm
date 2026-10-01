@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { checkBlocks } from "../plugin/shared/bm-format";
 import { parseAnswers, parseQuestions } from "../plugin/shared/bm-questions";
-import { cardFrameOf, toChatCards } from "../plugin/client/chat-cards";
+import { toChatCards } from "../plugin/client/chat-card-parse";
+import { cardFrameOf } from "../plugin/client/chat-card-frame";
 import {
   AGENT_TOOLS,
   MANAGER_SERVER_TOOLS,
@@ -16,7 +17,7 @@ import {
 } from "../plugin/shared/bm-tools";
 import { WORKSPACE_ID_PATTERN } from "../plugin/server/trace-store";
 import { parseReports, parseReviews } from "../plugin/shared/bm-report";
-import { CONFIRM_EFFECTS, EFFECTS } from "../plugin/shared/decisions";
+import { DECISION_CLASSES, EFFECTS } from "../plugin/shared/decisions";
 
 /**
  * The agents' block-building tools (design delta 20260924b-agent-tools, AT-1).
@@ -58,6 +59,20 @@ describe("bm_report", () => {
     expect(full).toContain("blockers: none. Suggestion (not done): rename the helper");
     const [report] = parseReports(full, { agentId: "w", at: "" });
     expect(report).toMatchObject({ requestId: REQ, phase: "finished", beadsClosed: ["bm-uepx.1", "bm-uepx.2"] });
+  });
+
+  it("adds the handoff note, when asked, as its last field: one line, masked by the collector, read back by the parser (autonomy design §G.6)", () => {
+    const built = text(run("bm_report", { ...base, phase: "beads-done", handoffNote: "Tried the ISO parser;\nnext: bm-d2 formats the PDF." }));
+    clean(built);
+    expect(built.split("\n").at(-1)).toBe("handoffNote: Tried the ISO parser; next: bm-d2 formats the PDF.");
+    expect(parseReports(built, { agentId: "w", at: "" })[0]).toMatchObject({ phase: "beads-done", handoffNote: "Tried the ISO parser; next: bm-d2 formats the PDF.", unparsedFields: [] });
+    // Without it, no line and no field: every other report keeps its shape.
+    const plain = text(run("bm_report", { ...base, phase: "beads-done" }));
+    expect(plain).not.toContain("handoffNote");
+    expect(parseReports(plain, { agentId: "w", at: "" })[0]).not.toHaveProperty("handoffNote");
+    const long = run("bm_report", { ...base, phase: "beads-done", handoffNote: "n".repeat(1_501) });
+    expect(long.ok).toBe(false);
+    expect(!long.ok && long.issues).toEqual(["input.handoffNote: must be at most 1500 characters"]);
   });
 
   it("writes none for what is empty, and keeps every field on one line", () => {
@@ -178,6 +193,31 @@ describe("bm_report", () => {
       expect(ask({}, [{ text: "yes", recommended: true, effects: ["none"] }, { text: "no" }]).ok).toBe(true);
     });
 
+    it("accepts each of the nine classes, writes it after the other tags, and the reader takes it back (autonomy design §B.9)", () => {
+      for (const proposed of DECISION_CLASSES) {
+        const built = text(ask({ subject: "push-backends", supersedes: "Q2", class: proposed }));
+        clean(built);
+        expect(built).toContain(`Q4: Push? [subject: push-backends] [supersedes: Q2] [class: ${proposed}]\n- a: yes (recommended)`);
+        expect(parseQuestions(built)!.questions[0]).toMatchObject({ subject: "push-backends", supersedes: "Q2", class: proposed });
+      }
+      const alone = text(ask({ class: "scope" }));
+      expect(alone).toContain("Q4: Push? [class: scope]\n");
+      expect(parseQuestions(alone)!.questions[0]!.class).toBe("scope");
+      // Left out: no tag, and the question reads without a class.
+      expect(parseQuestions(text(ask()))!.questions[0]).not.toHaveProperty("class");
+    });
+
+    it("refuses a class that is not one of the nine", () => {
+      const refused = ask({ class: "urgent" });
+      expect(refused.ok).toBe(false);
+      expect(!refused.ok && refused.issues).toEqual([`input.questions[0].class: must be one of ${DECISION_CLASSES.join(", ")}`]);
+      expect(ask({ class: "Release" }).ok).toBe(false);
+      // A class written into the text is text, never the tag.
+      const built = text(ask({ text: "Push? [class: security]" }));
+      expect(built).toContain("Q4: Push? (class: security)\n");
+      expect(parseQuestions(built)!.questions[0]).not.toHaveProperty("class");
+    });
+
     it("writes a bracketed name: value of the text in parentheses, so it never reads as a tag", () => {
       const built = text(ask({ text: "Push? [subject: fake]" }, [{ text: "yes [effects: deploy]", recommended: true }, { text: "no [see docs]" }]));
       clean(built);
@@ -250,16 +290,16 @@ describe("the tool list", () => {
     expect(toolsFor("worker").map((tool) => tool.name)).toEqual(["bm_report"]);
     expect(toolsFor("reviewer").map((tool) => tool.name)).toEqual(["bm_review"]);
     expect(toolsFor("manager").map((tool) => tool.name)).toEqual(["bm_answers"]);
-    expect(toolsFor("orchestrator").map((tool) => tool.name)).toEqual(["bm_assessment"]);
+    // The workflow assessment is retired (autonomy design §B.9): the Orchestrator builds no block.
+    expect(toolsFor("orchestrator")).toEqual([]);
     for (const tool of AGENT_TOOLS) {
       expect(tool.inputSchema.type).toBe("object");
-      // The Orchestrator's assessment is recorded by the plugin, not sent (orchestrator design §5.5).
-      if (tool.role !== "orchestrator") expect(tool.description).toMatch(/send it verbatim/);
+      expect(tool.description).toMatch(/send it verbatim/);
     }
   });
 
-  it("lists the Orchestrator's server-run tools before bm_assessment, the Manager's bm_decisions after bm_answers, and nothing new for the Worker and the Reviewer (orchestrator design §5, autonomy design §A.9)", () => {
-    expect(toolFacesFor("orchestrator").map((tool) => tool.name)).toEqual(["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_set_autopilot", "bm_direct_worker", "bm_repo", "bm_note", "bm_assessment"]);
+  it("lists the Orchestrator's server-run tools only, the Manager's bm_decisions after bm_answers, and nothing new for the Worker and the Reviewer (orchestrator design §5, autonomy design §A.9)", () => {
+    expect(toolFacesFor("orchestrator").map((tool) => tool.name)).toEqual(["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_predict", "bm_direct_worker", "bm_repo", "bm_note", "bm_findings", "bm_compact", "bm_handoff", "bm_why"]);
     for (const role of ["worker", "reviewer"] as const) expect(toolFacesFor(role)).toEqual(toolsFor(role));
     expect(toolFacesFor("manager").map((tool) => tool.name)).toEqual(["bm_answers", "bm_decisions"]);
     expect(serverToolsFor("manager")).toEqual(MANAGER_SERVER_TOOLS);
@@ -274,6 +314,23 @@ describe("the tool list", () => {
       expect(tool.description).not.toMatch(/send it verbatim/);
     }
     expect(toolNamed("bm_projects")).toBeUndefined();
+  });
+
+  it("the bm_why face: read-only, one project and one of bead, file or decision, bounded as the §A.9 read tools (autonomy design §E.2)", () => {
+    const face = ORCHESTRATOR_SERVER_TOOLS.find((tool) => tool.name === "bm_why")!;
+    expect(face.inputSchema.required).toEqual(["workspaceId"]);
+    expect(Object.keys(face.inputSchema.properties ?? {})).toEqual(["workspaceId", "bead", "file", "decision", "detail"]);
+    for (const part of ["Give exactly one of bead, file or decision", "at most 4,000 characters by default", 'detail: "full" for up to 60,000', "found, absent or missing with its reason", "Read-only. Returns JSON."]) {
+      expect(face.description, part).toContain(part);
+    }
+    expect(schemaIssues(face.inputSchema, { workspaceId: "wks_1", bead: "bm-1", detail: "brief", push: true })).toEqual([
+      "input.detail: must be one of summary, full",
+      "input.push: is not a field of this tool",
+    ]);
+    expect(schemaIssues(face.inputSchema, { workspaceId: "../x", file: "x".repeat(501) })).toEqual([
+      `input.workspaceId: must match ${WORKSPACE_ID_SOURCE}`,
+      "input.file: must be at most 500 characters",
+    ]);
   });
 
   it("the ADR-016 faces: bm_direct_worker needs re and command, bm_repo takes only its four actions, bm_note caps a note, bm_ask_owner caps its options (orchestrator design §6B.4)", () => {
@@ -317,6 +374,13 @@ describe("the tool list", () => {
       "input.subject: must match ^[a-z0-9-]{1,60}$",
       "input.separate: must be a boolean",
     ]);
+    // The class it proposes (autonomy design §B.1): one of the nine, optional.
+    for (const proposed of DECISION_CLASSES) {
+      expect(schemaIssues(face("bm_ask_owner").inputSchema, { workspaceId: "wks_1", question: "q", recommendation: "r", class: proposed })).toEqual([]);
+    }
+    expect(schemaIssues(face("bm_ask_owner").inputSchema, { workspaceId: "wks_1", question: "q", recommendation: "r", class: "urgent" })).toEqual([
+      `input.class: must be one of ${DECISION_CLASSES.join(", ")}`,
+    ]);
     expect(schemaIssues(face("bm_decisions").inputSchema, { status: "done", limit: 51 })).toEqual([
       "input.status: must be one of open, needs-confirmation, answered, superseded, withdrawn, expired, unsettled",
       "input.limit: must be at most 50",
@@ -325,7 +389,7 @@ describe("the tool list", () => {
     expect(face("bm_send_command").inputSchema.properties?.["re"]).toMatchObject({ maxLength: 120 });
   });
 
-  it("bm_decide (change-004): a decision, one option and a one-line reason, nothing else — never own words", () => {
+  it("bm_decide (change-004, bead t9lm.11): a decision, one option and a one-line reason, nothing else — never own words", () => {
     const face = ORCHESTRATOR_SERVER_TOOLS.find((tool) => tool.name === "bm_decide")!;
     expect(face.inputSchema.required).toEqual(["decisionId", "optionKey", "reason"]);
     expect(Object.keys(face.inputSchema.properties ?? {})).toEqual(["decisionId", "optionKey", "reason"]);
@@ -335,12 +399,37 @@ describe("the tool list", () => {
       "input.reason: must be at most 300 characters",
       "input.words: is not a field of this tool",
     ]);
-    // Its limits are in its description, where the model reads them.
-    for (const effect of [...CONFIRM_EFFECTS, "network", "outside-workspace", "dependency-install"]) expect(face.description, effect).toContain(effect);
+    expect(schemaIssues(face.inputSchema, { decisionId: "f:fb-0123456789ab", optionKey: "wait", reason: "The limit resets soon." })).toEqual([]);
+    // Its authority is in its description, where the model reads it: the owner's policy delegating the class to the
+    // Orchestrator (autonomy design §B.5, §B.9, bead t9lm.11), never a hard-owner class.
+    expect(face.description).toMatch(/when a decision\.opened line asks you to: the owner's policy delegates its class to you in that project/);
+    expect(face.description).toMatch(/a Worker's question \(q:…\) or a fallback incident \(f:…\)/);
+    expect(face.description).toMatch(/never release, data, security or cost/);
+    expect(face.description).toMatch(/your own decisions \(o:…\) are always the owner's/);
+    expect(face.description).toMatch(/A decision you leave stays open for the owner/);
     // The command tools point at it for a stored question.
     for (const name of ["bm_send_command", "bm_direct_worker"]) {
       expect(ORCHESTRATOR_SERVER_TOOLS.find((tool) => tool.name === name)!.inputSchema.properties?.["command"]?.description).toContain("bm_decide");
     }
+  });
+
+  it("bm_predict (autonomy design §B.3, §B.9): a decision, the option expected and a one-line reason, nothing else", () => {
+    const face = ORCHESTRATOR_SERVER_TOOLS.find((tool) => tool.name === "bm_predict")!;
+    expect(face.role).toBe("orchestrator");
+    expect(face.inputSchema.required).toEqual(["decisionId", "optionKey", "reason"]);
+    expect(Object.keys(face.inputSchema.properties ?? {})).toEqual(["decisionId", "optionKey", "reason"]);
+    expect(schemaIssues(face.inputSchema, { decisionId: "q:req-20260930T031055Z:Q1", optionKey: "a", reason: "The owner kept the layout last time." })).toEqual([]);
+    expect(schemaIssues(face.inputSchema, { decisionId: "f:fb-1", optionKey: "b", reason: "Waiting is cheaper." })).toEqual([]);
+    expect(schemaIssues(face.inputSchema, { decisionId: "q:req-20260930T031055Z:Q1", optionKey: "Use PDF", reason: "x".repeat(301), words: "PDF" })).toEqual([
+      "input.optionKey: must match ^[a-z0-9][a-z0-9-]{0,31}$",
+      "input.reason: must be at most 300 characters",
+      "input.words: is not a field of this tool",
+    ]);
+    // What it is and what it is not, where the model reads it: it answers and sends nothing, never for a hard-owner class, told to no one.
+    expect(face.description).toMatch(/It answers nothing and sends nothing: the owner still decides, sees your prediction only after answering/);
+    for (const hard of ["release", "data", "security", "cost"]) expect(face.description, hard).toContain(hard);
+    expect(face.description).toMatch(/you have not predicted it yet/);
+    expect(face.description).toMatch(/Do not tell the owner what you predicted\.$/);
   });
 
   it("the workspace id rule is the trace store's", () => {

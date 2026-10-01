@@ -5,8 +5,10 @@ import {
   STOP_RECHECK_MS,
   propagateWorkerStop,
   stopAllInWorkspace,
+  type StopPaseo,
 } from "../plugin/server/stop-propagation";
 import { WORKER_STOP_NOTICE } from "../plugin/server/notices";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 /**
  * bm-wq6 (REQ-026f): when the user stops a Beads Worker, Paseo only cancels the
@@ -53,62 +55,22 @@ function event(provider = "bm-worker", outcome: Event["outcome"] = { kind: "canc
 }
 
 /**
- * Fake `paseo`: `list` ignores the filter (so client-side filtering is
- * exercised) and pages two entries at a time; `ref(id).refresh()` walks a
- * per-agent status script, sticking on its last value.
+ * The shared fake SDK. Its listing ignores the filter (so client-side filtering
+ * is exercised) and pages two entries at a time. It holds the stopped Worker (no
+ * labels, idle unless `statuses` says otherwise) and the given agents;
+ * `statuses` is what successive re-reads of an agent report, sticking on the
+ * last; `listError` rejects every listing and `sendError` a send to that agent.
  */
-function fakePaseo(options: {
-  agents: Snapshot[];
-  statuses?: Record<string, string[]>;
-  listError?: Error;
-  sendError?: Record<string, Error>;
-}) {
-  const listCalls: unknown[] = [];
-  const sends: Array<{ id: string; text: string }> = [];
-  const refreshes: string[] = [];
-  const scripts = new Map(Object.entries(options.statuses ?? {}).map(([id, list]) => [id, [...list]]));
-  const byId = new Map(options.agents.map((agent) => [agent.id, agent]));
-  const handles = new Map<string, { refresh: ReturnType<typeof vi.fn>; send: ReturnType<typeof vi.fn> }>();
-
-  const statusOf = (id: string): string => {
-    const script = scripts.get(id);
-    if (script && script.length > 1) return script.shift()!;
-    if (script && script.length === 1) return script[0]!;
-    return byId.get(id)?.status ?? "idle";
-  };
-
-  const paseo = {
-    agents: {
-      list: vi.fn(async (opts: { page: { limit: number; cursor?: string } }) => {
-        listCalls.push(opts);
-        if (options.listError) throw options.listError;
-        const start = opts.page.cursor === undefined ? 0 : Number(opts.page.cursor);
-        const entries = options.agents.slice(start, start + 2).map((agent) => ({ agent }));
-        const next = start + 2 < options.agents.length ? String(start + 2) : null;
-        return { entries, pageInfo: { nextCursor: next, hasMore: next !== null } };
-      }),
-      ref: vi.fn((id: string) => {
-        let handle = handles.get(id);
-        if (!handle) {
-          handle = {
-            refresh: vi.fn(async () => {
-              refreshes.push(id);
-              const base = byId.get(id) ?? { id, workspaceId: WS, labels: {}, status: "idle" };
-              return { agent: { ...base, status: statusOf(id) }, project: null };
-            }),
-            send: vi.fn(async (text: string) => {
-              const error = options.sendError?.[id];
-              if (error) throw error;
-              sends.push({ id, text });
-            }),
-          };
-          handles.set(id, handle);
-        }
-        return handle;
-      }),
-    },
-  };
-  return { paseo, sends, listCalls, refreshes };
+function daemonWith(options: { agents: Snapshot[]; statuses?: Record<string, string[]>; listError?: Error; sendError?: Record<string, Error> }) {
+  const fake = fakePaseo<StopPaseo>({
+    agents: [{ id: WORKER, workspaceId: WS, status: "idle", labels: {} }, ...options.agents],
+    statuses: options.statuses ?? {},
+    pageSize: 2,
+    ignoresListFilter: true,
+  });
+  if (options.listError) fake.api.agents.list.mockRejectedValue(options.listError);
+  for (const [id, error] of Object.entries(options.sendError ?? {})) fake.handle(id).send.mockRejectedValue(error);
+  return { paseo: fake.paseo, sends: fake.sends, listCalls: fake.lists, refreshes: fake.refreshes, handle: fake.handle };
 }
 
 function fakeServer(options: { withOn?: boolean } = {}) {
@@ -173,15 +135,23 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     // plus delta 20260918g's agent.created labelling, its turn_started scan and
     // its turn_ended BM-FORMAT check, plus delta 20260921's fallback detection,
     // plus the outdated-agents pass (turn_started, agent.archived; autonomy
-    // design §A.11). The question–answer ledger's turn_ended is retired (§A.14).
-    expect(server.on).toHaveBeenCalledTimes(9);
-    expect([...hooks.keys()].sort()).toEqual(["agent.archived", "agent.created", "agent.turn_ended", "agent.turn_started"]);
+    // design §A.11), plus the action boundary's two permission hooks (§D.2).
+    // The question–answer ledger's turn_ended is retired (§A.14).
+    expect(server.on).toHaveBeenCalledTimes(11);
+    expect([...hooks.keys()].sort()).toEqual([
+      "agent.archived",
+      "agent.created",
+      "agent.permission_requested",
+      "agent.permission_resolved",
+      "agent.turn_ended",
+      "agent.turn_started",
+    ]);
     expect(hooks.get("agent.turn_ended")).toHaveLength(4);
   });
 
   it("sends the notice only to the stopped Worker's running Reviewers (idle Worker on refresh)", async () => {
     const { run } = setup();
-    const { paseo, sends, listCalls } = fakePaseo({
+    const { paseo, sends, listCalls } = daemonWith({
       agents: [
         reviewer("rev-a"),
         reviewer("rev-other-worker", {}, { "paseo.parent-agent-id": "worker-2" }),
@@ -199,7 +169,8 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
       { id: "rev-a", text: REVIEWER_STOP_NOTICE },
       { id: "rev-b", text: REVIEWER_STOP_NOTICE },
     ]);
-    expect(listCalls.length).toBe(4);
+    // Eight Reviewers and the stopped Worker itself: five pages of two.
+    expect(listCalls.length).toBe(5);
     // Parent label only since delta 20260918g §4.2: the reviewer role is decided
     // per agent (label, else bm-reviewer provider), not by the daemon's filter.
     expect(listCalls[0]).toEqual({
@@ -210,7 +181,7 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
   });
 
   it("stops a running Reviewer of the Worker that carries no bm.role label, by its bm-reviewer provider (delta 20260918g)", async () => {
-    const { paseo, sends } = fakePaseo({
+    const { paseo, sends } = daemonWith({
       agents: [
         reviewer("rev-plain", { labels: { "paseo.parent-agent-id": WORKER }, provider: "bm-reviewer/gpt-5.6-sol" }),
         { id: "m-plain", workspaceId: WS, status: "running", labels: { "paseo.parent-agent-id": WORKER }, provider: "bm-manager" },
@@ -223,7 +194,7 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
 
   it("does nothing when an Orchestrator's turn is canceled, and never stops an Orchestrator child of the Worker (orchestrator design §3.2)", async () => {
     const orchestratorChild = reviewer("orc-child", { provider: "bm-orchestrator" }, { "bm.role": "orchestrator" });
-    const { paseo, sends, listCalls } = fakePaseo({ agents: [orchestratorChild, reviewer("rev-a")], statuses: { [WORKER]: ["idle"] } });
+    const { paseo, sends, listCalls } = daemonWith({ agents: [orchestratorChild, reviewer("rev-a")], statuses: { [WORKER]: ["idle"] } });
     for (const provider of ["bm-orchestrator", "bm-orchestrator/claude-opus-5"]) {
       await propagateWorkerStop(event(provider) as never, { paseo: paseo as never });
     }
@@ -235,21 +206,21 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
 
   it("recognises a bm-worker/<model> provider", async () => {
     const { run } = setup();
-    const { paseo, sends } = fakePaseo({ agents: [reviewer("rev-a")], statuses: { [WORKER]: ["idle"] } });
+    const { paseo, sends } = daemonWith({ agents: [reviewer("rev-a")], statuses: { [WORKER]: ["idle"] } });
     await run(event("bm-worker/gpt-5.6-sol"), paseo);
     expect(sends).toEqual([{ id: "rev-a", text: REVIEWER_STOP_NOTICE }]);
   });
 
   it("recognises a fallback Worker bm-worker-fallback-1/<model> (delta 20260921 §4.4.1)", async () => {
     const { run } = setup();
-    const { paseo, sends } = fakePaseo({ agents: [reviewer("rev-a")], statuses: { [WORKER]: ["idle"] } });
+    const { paseo, sends } = daemonWith({ agents: [reviewer("rev-a")], statuses: { [WORKER]: ["idle"] } });
     await run(event("bm-worker-fallback-1/qwen3-coder"), paseo);
     expect(sends).toEqual([{ id: "rev-a", text: REVIEWER_STOP_NOTICE }]);
   });
 
   it("does nothing when the Worker is still running after the re-check (a message replaced the turn)", async () => {
     const { run } = setup();
-    const { paseo, sends, refreshes } = fakePaseo({
+    const { paseo, sends, refreshes } = daemonWith({
       agents: [reviewer("rev-a")],
       statuses: { [WORKER]: ["running", "running"] },
     });
@@ -261,7 +232,7 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
 
   it("waits STOP_RECHECK_MS once, then sends when the Worker has gone idle", async () => {
     const { hooks } = setup();
-    const { paseo, sends, refreshes } = fakePaseo({
+    const { paseo, sends, refreshes } = daemonWith({
       agents: [reviewer("rev-a")],
       statuses: { [WORKER]: ["running", "idle"] },
     });
@@ -284,7 +255,7 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     ["bm-workers", event("bm-workers")],
   ])("ignores %s", async (_name, ev) => {
     const { run } = setup();
-    const { paseo, sends } = fakePaseo({ agents: [reviewer("rev-a")], statuses: { [WORKER]: ["idle"] } });
+    const { paseo, sends } = daemonWith({ agents: [reviewer("rev-a")], statuses: { [WORKER]: ["idle"] } });
     await run(ev, paseo);
     expect(paseo.agents.ref).not.toHaveBeenCalled();
     expect(paseo.agents.list).not.toHaveBeenCalled();
@@ -293,7 +264,7 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
 
   it("skips a Reviewer that became idle before the send", async () => {
     const { run } = setup();
-    const { paseo, sends } = fakePaseo({
+    const { paseo, sends } = daemonWith({
       agents: [reviewer("rev-a"), reviewer("rev-b")],
       statuses: { [WORKER]: ["idle"], "rev-a": ["idle"] },
     });
@@ -304,7 +275,7 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
   it("resolves and logs when list rejects", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { run } = setup();
-    const { paseo, sends } = fakePaseo({ agents: [reviewer("rev-a")], statuses: { [WORKER]: ["idle"] }, listError: new Error("daemon gone") });
+    const { paseo, sends } = daemonWith({ agents: [reviewer("rev-a")], statuses: { [WORKER]: ["idle"] }, listError: new Error("daemon gone") });
     await run(event(), paseo);
     expect(sends).toEqual([]);
     expect(warn).toHaveBeenCalledTimes(1);
@@ -314,7 +285,7 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
   it("resolves, logs and carries on with the next Reviewer when send rejects", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { run } = setup();
-    const { paseo, sends } = fakePaseo({
+    const { paseo, sends } = daemonWith({
       agents: [reviewer("rev-a"), reviewer("rev-b")],
       statuses: { [WORKER]: ["idle"] },
       sendError: { "rev-a": new Error("send refused") },
@@ -327,15 +298,10 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
 
   it("resolves and logs when the Worker cannot be re-read", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const { paseo, sends } = fakePaseo({ agents: [reviewer("rev-a")] });
-    const broken = {
-      agents: {
-        ...paseo.agents,
-        ref: (id: string) => ({ ...paseo.agents.ref(id), refresh: async () => Promise.reject(new Error("no snapshot")) }),
-      },
-    };
+    const { paseo, sends, handle } = daemonWith({ agents: [reviewer("rev-a")] });
+    handle(WORKER).refresh.mockRejectedValue(new Error("no snapshot"));
     const { run } = setup();
-    await run(event(), broken);
+    await run(event(), paseo);
     expect(sends).toEqual([]);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]![0])).toMatch(/^\[paseo-bm\] stop propagation: .*no snapshot/);
@@ -344,7 +310,7 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
   it("sends nothing when the signal is already aborted", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { run } = setup();
-    const { paseo, sends } = fakePaseo({ agents: [reviewer("rev-a")], statuses: { [WORKER]: ["idle"] } });
+    const { paseo, sends } = daemonWith({ agents: [reviewer("rev-a")], statuses: { [WORKER]: ["idle"] } });
     const controller = new AbortController();
     controller.abort();
     await run(event(), paseo, controller.signal);
@@ -353,7 +319,7 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
   });
 
   it("sends nothing when the signal aborts during the re-check wait", async () => {
-    const { paseo, sends } = fakePaseo({
+    const { paseo, sends } = daemonWith({
       agents: [reviewer("rev-a")],
       statuses: { [WORKER]: ["running", "idle"] },
     });
@@ -373,7 +339,7 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     ["event without agent", { outcome: { kind: "canceled", reason: "x" } }],
   ])("never throws on a malformed event (%s)", async (_name, ev) => {
     const { run } = setup();
-    const { paseo, sends } = fakePaseo({ agents: [reviewer("rev-a")] });
+    const { paseo, sends } = daemonWith({ agents: [reviewer("rev-a")] });
     await run(ev as unknown as Event, paseo);
     expect(sends).toEqual([]);
   });
@@ -381,14 +347,17 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
   it("removes the hook on cleanup", () => {
     const { cleanup, hooks, removers } = setup();
     cleanup();
-    // Nine removals: this hook, the WP-205 collector's turn_started and
+    // Eleven removals: this hook, the WP-205 collector's turn_started and
     // turn_ended, delta 20260918g's agent.created, turn_started scan and
     // turn_ended BM-FORMAT check, delta 20260921's fallback detection
-    // (turn_ended) and the outdated-agents pass (turn_started, agent.archived).
+    // (turn_ended), the outdated-agents pass (turn_started, agent.archived) and
+    // the action boundary (permission_requested, permission_resolved; §D.2).
     // The map must end up empty.
     expect([...removers].sort()).toEqual([
       "agent.archived",
       "agent.created",
+      "agent.permission_requested",
+      "agent.permission_resolved",
       "agent.turn_ended",
       "agent.turn_ended",
       "agent.turn_ended",
@@ -455,7 +424,7 @@ describe("stopAllInWorkspace", () => {
   });
 
   it("asks every running Worker and Reviewer of the workspace", async () => {
-    const { paseo, sends } = fakePaseo({ agents: [worker("w1"), reviewer("rev-a")] });
+    const { paseo, sends } = daemonWith({ agents: [worker("w1"), reviewer("rev-a")] });
     const result = await stopAllInWorkspace(paseo as never, WS);
     expect(result).toEqual({ workers: 1, reviewers: 1, skipped: 0 });
     expect(sends.map((s) => s.id).sort()).toEqual(["rev-a", "w1"]);
@@ -466,14 +435,14 @@ describe("stopAllInWorkspace", () => {
   it("never asks the Manager, whatever the daemon's filter returns", async () => {
     // The fake ignores the label filter on purpose, so this exercises the
     // client-side check. The Manager is the user's point of contact.
-    const { paseo, sends } = fakePaseo({ agents: [managerAgent("m1"), worker("w1")] });
+    const { paseo, sends } = daemonWith({ agents: [managerAgent("m1"), worker("w1")] });
     const result = await stopAllInWorkspace(paseo as never, WS);
     expect(sends.map((s) => s.id)).toEqual(["w1"]);
     expect(result.workers).toBe(1);
   });
 
   it("leaves another workspace alone", async () => {
-    const { paseo, sends } = fakePaseo({
+    const { paseo, sends } = daemonWith({
       agents: [worker("w1"), worker("w-elsewhere", { workspaceId: "wks_other" })],
     });
     await stopAllInWorkspace(paseo as never, WS);
@@ -485,7 +454,7 @@ describe("stopAllInWorkspace", () => {
     // catch this — the listing filter and the re-read before the send — so the
     // assertion is on `refreshes`: without the listing filter the archived
     // agent would still be re-read, and only the second layer would save it.
-    const { paseo, sends, refreshes } = fakePaseo({
+    const { paseo, sends, refreshes } = daemonWith({
       agents: [worker("w-archived", { archivedAt: "2026-09-17T00:00:00.000Z" }), worker("w1")],
     });
     const result = await stopAllInWorkspace(paseo as never, WS);
@@ -495,14 +464,14 @@ describe("stopAllInWorkspace", () => {
   });
 
   it("skips an agent that stopped running between the listing and the send", async () => {
-    const { paseo, sends } = fakePaseo({ agents: [worker("w1")], statuses: { w1: ["idle"] } });
+    const { paseo, sends } = daemonWith({ agents: [worker("w1")], statuses: { w1: ["idle"] } });
     const result = await stopAllInWorkspace(paseo as never, WS);
     expect(sends).toEqual([]);
     expect(result).toEqual({ workers: 0, reviewers: 0, skipped: 1 });
   });
 
   it("counts a failed send as skipped and keeps going", async () => {
-    const { paseo, sends } = fakePaseo({
+    const { paseo, sends } = daemonWith({
       agents: [worker("w1"), worker("w2")],
       sendError: { w1: new Error("agent gone") },
     });
@@ -514,7 +483,7 @@ describe("stopAllInWorkspace", () => {
   });
 
   it("asks a running Worker and Reviewer that carry no bm.role label, by their provider (delta 20260918g)", async () => {
-    const { paseo, sends } = fakePaseo({
+    const { paseo, sends } = daemonWith({
       agents: [
         worker("w-plain", { labels: {}, provider: "bm-worker/claude-opus-5" }),
         reviewer("rev-plain", { labels: { "paseo.parent-agent-id": WORKER }, provider: "bm-reviewer/gpt-5.6-sol" }),
@@ -533,7 +502,7 @@ describe("stopAllInWorkspace", () => {
   });
 
   it("never asks a Manager, labelled or recognised only by its bm-manager provider", async () => {
-    const { paseo, sends } = fakePaseo({
+    const { paseo, sends } = daemonWith({
       agents: [
         managerAgent("m-labelled"),
         { id: "m-plain", workspaceId: WS, status: "running", labels: {}, provider: "bm-manager/claude-opus-5" },
@@ -546,7 +515,7 @@ describe("stopAllInWorkspace", () => {
   });
 
   it("never asks the Orchestrator's assessment agent, labelled or recognised only by its provider (orchestrator design §3.2)", async () => {
-    const { paseo, sends, refreshes } = fakePaseo({
+    const { paseo, sends, refreshes } = daemonWith({
       agents: [
         { id: "orc-labelled", workspaceId: WS, status: "running", labels: { "bm.role": "orchestrator" } },
         { id: "orc-plain", workspaceId: WS, status: "running", labels: {}, provider: "bm-orchestrator/claude-opus-5" },
@@ -562,7 +531,7 @@ describe("stopAllInWorkspace", () => {
 
   it("walks every page", async () => {
     // The fake pages two at a time; five agents means three pages.
-    const { paseo, sends } = fakePaseo({
+    const { paseo, sends } = daemonWith({
       agents: [worker("w1"), worker("w2"), worker("w3"), worker("w4"), worker("w5")],
     });
     const result = await stopAllInWorkspace(paseo as never, WS);

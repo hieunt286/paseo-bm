@@ -10,13 +10,11 @@ import {
   activeLockCount,
   assertNoSymlinkOnPath,
   assertWorkspaceId,
-  closeQuietly,
-  createStoreTempFile,
   ensureStoreDir,
-  openStoreFileForAppend,
   storePath,
   withWorkspaceLock,
 } from "../plugin/server/trace-store";
+import { closeQuietly, createTempFile, openForAppend } from "../plugin/server/data-files";
 import { DashboardError } from "../plugin/shared/contracts";
 
 /**
@@ -32,6 +30,10 @@ let tracesDir: string;
 let outside: string;
 
 const WS = "wks_1";
+
+// The opens the trace store makes: `data-files.ts`'s, with the store's code.
+const openStoreFileForAppend = (path: string): number => openForAppend(path, "E_TRACE_STORE_UNWRITABLE");
+const createStoreTempFile = (path: string): number => createTempFile(path, "E_TRACE_STORE_UNWRITABLE");
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "bm-store-"));

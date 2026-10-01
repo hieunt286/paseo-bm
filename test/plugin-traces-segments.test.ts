@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { reconstructTraces, summarise, summariseSegments, type AgentFacts } from "../plugin/server/traces";
-import { TRACE_STORE_SCHEMA_VERSION, type TraceRecord } from "../plugin/shared/contracts";
+import { reconstructTraces, type AgentFacts } from "../plugin/server/traces";
+import { summarise, summariseSegments } from "../plugin/server/trace-views";
+import { TRACE_STORE_SCHEMA_VERSION, type ParsedReport, type TraceRecord } from "../plugin/shared/contracts";
 
 /**
  * One row per turn the user opened, instead of one row per request
@@ -293,5 +294,76 @@ describe("a request whose last turn died", () => {
     expect(total).toBe(1);
     // And the whole request says the same number.
     expect(summarise(trace, withAgents).errors).toEqual({ failedTurns: 1, agentErrors: 0, fallbacks: 0 });
+  });
+});
+
+/**
+ * The request's finish, labelled (autonomy design §C.3, §C.6; bead 7gxw.4):
+ * `traces.list` rows and `traces.get` carry it while the request's latest
+ * report is `finished`, the same on every row, as the state is.
+ */
+describe("a request's finish on its rows", () => {
+  const WORKER = "agent-worker";
+  const finished = (at: string, phase: ParsedReport["phase"] = "finished"): ParsedReport => ({
+    agentId: MANAGER,
+    at,
+    requestId: REQ,
+    phase,
+    tier: "Small",
+    filesChanged: phase === "finished" ? ["src/ci.ts"] : [],
+    beadsCreated: [],
+    beadsUpdated: [],
+    beadsClosed: [],
+    beadsReady: [],
+    reviewFindingsOpen: null,
+    buildAndTests: phase === "finished" ? "`npm test` pass" : null,
+    skillsUsed: [],
+    blockers: null,
+    guardrail: null,
+    unparsedFields: [],
+    incompleteFields: [],
+  });
+  const workerTurn = (at: string, evidence: TraceRecord["evidence"]) =>
+    record({ agentId: WORKER, role: "worker", at, endedAt: at, turnId: `worker-${at.slice(14, 16)}`, evidence });
+  const reportTurn = (at: string, report: ParsedReport) => record({ at, endedAt: at, turnId: `report-${at.slice(14, 16)}`, reports: [report] });
+  const edit = (path: string, at: string) => ({ kind: "file" as const, detail: path, agentId: WORKER, at });
+
+  it("is the whole request's on every row, finished-unverified while its checks were not seen to run", () => {
+    const records = [
+      turn("2026-09-17T09:00:00.000Z", "Sửa giúp tôi cái CI đang đỏ", "user", 100),
+      workerTurn("2026-09-17T09:02:00.000Z", [edit("/work/ci/src/ci.ts", "2026-09-17T09:01:00.000Z")]),
+      reportTurn("2026-09-17T09:04:00.000Z", finished("2026-09-17T09:04:00.000Z")),
+      turn("2026-09-17T09:10:00.000Z", "Tiện thể thêm cả test cho case rỗng", "user", 7),
+    ];
+    const trace = traceOf(records);
+    const whole = summarise(trace, { ...deps, workspaceDirectory: "/work/ci" });
+    expect(whole.verification).toEqual({
+      reportAt: "2026-09-17T09:04:00.000Z",
+      checks: "self-reported",
+      named: [{ check: "npm test", label: "self-reported" }],
+      // Absolute in the record, relative in the report: one file, below the workspace folder.
+      files: [{ path: "src/ci.ts", label: "detected" }],
+      beads: [],
+      changedFiles: true,
+      unverified: true,
+    });
+    const rows = summariseSegments(trace, { ...deps, workspaceDirectory: "/work/ci" });
+    expect(rows).toHaveLength(2);
+    for (const row of rows) expect(row.verification).toEqual(whole.verification);
+  });
+
+  it("is verified once the check ran after the last edit, and gone once a later report ended the finish", () => {
+    const checked = [
+      turn("2026-09-17T09:00:00.000Z", "Sửa giúp tôi cái CI đang đỏ", "user", 100),
+      workerTurn("2026-09-17T09:02:00.000Z", [
+        edit("src/ci.ts", "2026-09-17T09:01:00.000Z"),
+        { kind: "shell", detail: "npm test", agentId: WORKER, at: "2026-09-17T09:01:30.000Z", status: "completed" },
+      ]),
+      reportTurn("2026-09-17T09:04:00.000Z", finished("2026-09-17T09:04:00.000Z")),
+    ];
+    expect(summarise(traceOf(checked), deps).verification).toMatchObject({ checks: "detected", unverified: false });
+    const followedUp = [...checked, reportTurn("2026-09-17T09:12:00.000Z", finished("2026-09-17T09:12:00.000Z", "received"))];
+    expect(summarise(traceOf(followedUp), deps)).not.toHaveProperty("verification");
+    for (const row of summariseSegments(traceOf(followedUp), deps)) expect(row.verification).toBeUndefined();
   });
 });

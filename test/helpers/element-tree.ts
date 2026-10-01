@@ -2,8 +2,9 @@
  * A minimal element tree for hook-free views (moved from test/agent-tree.test.ts
  * by delta 20260918f so several files can use it).
  *
- * The repo has no React Native renderer. A test file mocks `react-native` with
- * named stand-ins that carry `primitive: true` and a `displayName`; this
+ * The repo has no React Native renderer. vitest.config.ts aliases `react-native`
+ * to test/stubs/react-native.ts, whose named stand-ins carry `primitive: true`
+ * and a `displayName`; this
  * expands our own components by calling them and keeps the primitives as
  * nodes, so a test can read texts, styles and press handlers. Only hook-free
  * components can be expanded this way.

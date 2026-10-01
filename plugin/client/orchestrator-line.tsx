@@ -21,13 +21,12 @@
 import { type PluginSurfaceProps, useRpc } from "@getpaseo/plugin/client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { Pressable, Text, View } from "react-native";
+import { Text, View } from "react-native";
 import { orchestratorOpenPreviewRpc, orchestratorOpenRpc, orchestratorStateRpc, type OrchestratorOpenPreviewOutput } from "../shared/contracts";
-import { toneColor } from "./dashboard-model";
-import { errorMessageOf } from "./launch-manager";
+import { errorMessageOf } from "./errors";
 import { OPEN_IN_APP_TEXT, openDialog, orchestratorLineView, recreateDialog, type OrchestratorLineView } from "./orchestrator-model";
-import type { SetupDialog } from "./setup-model";
-import { ConfirmBlock, type Styles, type Theme } from "./ui";
+import type { ConfirmDialog } from "./ui-types";
+import { Button, ConfirmBlock, ToneText, type Styles, type Theme } from "./ui";
 import { workQueryKeys } from "./work";
 
 /** The line itself: the state, the one button, and what it has to say. Hook-free. */
@@ -50,7 +49,7 @@ export function OrchestratorLineRow({
   note: string | null;
   error: string | null;
   /** The Open or recreate dialog while it is shown; null otherwise. */
-  dialog: SetupDialog | null;
+  dialog: ConfirmDialog | null;
   onConfirm: () => void;
   onCancel: () => void;
   styles: Styles;
@@ -63,23 +62,23 @@ export function OrchestratorLineRow({
           {view.title}
         </Text>
         {dialog !== null ? null : (
-          <Pressable
-            accessibilityRole="button"
+          <Button
+            label={busy ? "Opening…" : view.label}
+            kind={view.action === "open" ? "secondary" : "primary"}
             accessibilityLabel={view.label.replace(/[…▸]/g, "").trim()}
             accessibilityState={{ disabled: busy, busy }}
             disabled={busy}
             onPress={onPress}
-            style={[view.action === "open" ? styles.secondaryButton : styles.button, { opacity: busy ? 0.5 : 1 }]}
-          >
-            <Text style={view.action === "open" ? styles.secondaryButtonText : styles.buttonText}>{busy ? "Opening…" : view.label}</Text>
-          </Pressable>
+            style={{ opacity: busy ? 0.5 : 1 }}
+            styles={styles}
+          />
         )}
       </View>
-      {view.warning === null ? null : <Text style={[styles.body, { color: toneColor(theme, "warning") }]}>{view.warning}</Text>}
+      {view.warning === null ? null : <ToneText tone="warning" styles={styles} theme={theme}>{view.warning}</ToneText>}
       {view.replaced === null ? null : <Text style={styles.body}>{view.replaced}</Text>}
       {dialog === null ? null : <ConfirmBlock dialog={dialog} busy={busy} busyLabel="Opening…" onConfirm={onConfirm} onCancel={onCancel} styles={styles} theme={theme} />}
       {note === null ? null : <Text style={styles.body}>{note}</Text>}
-      {error === null ? null : <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{error}</Text>}
+      {error === null ? null : <ToneText tone="danger" styles={styles} theme={theme}>{error}</ToneText>}
     </View>
   );
 }

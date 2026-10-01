@@ -17,9 +17,21 @@
  *   through `fallback.act`'s own handler — the same lock, checks and actions as
  *   a click — once per decision, and its outcome is recorded as the decision's
  *   `delivery`.
- * - **Auto policy:** an incident the `auto` policy is deciding is held
- *   (`holdFallbackDecision`), so it gets a decision only when the policy
- *   leaves it pending.
+ * - **Precedents** (autonomy design §B.6): when the pass is given the
+ *   delivery (`settle`, from a new incident's listener), a decision that opens
+ *   with an active precedent naming one of its options (`fallback-<role>` is
+ *   the subject) is answered by it and its action runs as the owner's would.
+ *   Otherwise, or when the precedent names no option, it stays open and the
+ *   card shows the precedent as a suggestion.
+ * - **Delegation** (autonomy design §B.5): on the same condition, a decision
+ *   no precedent bears on is answered with its recommended option
+ *   (`recommendedActionOf`) when the owner's policy delegates `environment`
+ *   in its project to the recommended option (`policy-resolve.ts`), and its
+ *   action runs as the owner's would. Without the delivery (the start-up
+ *   pass, the pass after an action) it stays open. These two — and the
+ *   Orchestrator's `bm_decide` where `environment` is delegated to it — are
+ *   the only ways an incident is answered without the owner: the role's
+ *   Auto switch was retired (ADR-022 decision 4).
  * - **A failed action** (autonomy design §A.8): an answered `f:` decision whose
  *   `delivery.outcome` is `failed` while its incident is still pending keeps a
  *   `fallback-failed` Inbox alert open, so the owner can act again; the alert
@@ -28,6 +40,7 @@
  *
  * The options declare no effect: the plugin runs the action itself, so an
  * answer grants nothing an agent could spend (§A.3 grants are for commands).
+ * Every `f:` decision is of the class `environment` (autonomy design §B.1).
  * The fallback's own safety rules stay in the action code; the decision only
  * chooses the action.
  */
@@ -36,14 +49,18 @@ import { createDecisionStore, type DecisionStore } from "./decision-store";
 import { readIncidents } from "./fallback-state";
 import { providerId } from "./provider-id";
 import { reasonOf } from "./role-choices";
-import { dataHomeOf } from "./role-extras";
+import { dataHomeOf } from "./role-instructions";
 import type { OnDecisionsSettled } from "./decision-rpc";
+import { resolveAtOpen } from "./policy-resolve";
 import { FALLBACK_CLASS_LABELS } from "../shared/bm-fallback";
 import { FALLBACK_MAX_WAIT_MS, type FallbackActInput, type FallbackIncident } from "../shared/contracts";
 import { alertKeyOf } from "../shared/alerts";
 import {
+  FALLBACK_DECISION_CLASS,
   MAX_DECISION_TEXT_CHARS,
   UNSETTLED_STATUSES,
+  decisionKindOf,
+  openingPrediction,
   withdrawDecision,
   type Decision,
   type DecisionDelivery,
@@ -56,8 +73,8 @@ export const FALLBACK_DECISION_PREFIX = "f:";
 /** Longest provider message quoted in the question. */
 export const QUESTION_MESSAGE_CHARS = 300;
 
-/** A reset this close is waited for rather than switched away from (§4.6, REQ-067 b). */
-export const AUTO_WAIT_WINDOW_MS = 30 * 60 * 1000;
+/** A reset this close is waited for rather than switched away from: Wait is then the recommended option (§4.6, REQ-067 b). */
+export const RECOMMENDED_WAIT_WINDOW_MS = 30 * 60 * 1000;
 
 const defaultLog = (message: string): void => console.warn(message);
 
@@ -76,25 +93,25 @@ export function incidentIdOf(decisionId: string): string | null {
 }
 
 /**
- * What the `auto` policy chooses for a new `pending` incident (§4.6): `wait`
- * when the reset is known and at most 30 minutes away (a reset already past
- * counts), else `switch` when there is a candidate, else nothing — the
- * incident stays pending, as with "Ask me". The decision recommends the same.
+ * The option a pending incident's decision recommends (§4.6): `wait` when the
+ * reset is known and at most 30 minutes away (a reset already past counts),
+ * else `switch` when there is a candidate, else none. The recommended
+ * predictor answers with it where `environment` is delegated (§B.5).
  */
-export function autoActionOf(incident: FallbackIncident, now: Date): "wait" | "switch" | null {
+export function recommendedActionOf(incident: FallbackIncident, now: Date): "wait" | "switch" | null {
   const resetsAt = incident.resetsAt === null ? Number.NaN : Date.parse(incident.resetsAt);
-  if (!Number.isNaN(resetsAt) && resetsAt - now.getTime() <= AUTO_WAIT_WINDOW_MS) return "wait";
+  if (!Number.isNaN(resetsAt) && resetsAt - now.getTime() <= RECOMMENDED_WAIT_WINDOW_MS) return "wait";
   return incident.candidate === null ? null : "switch";
 }
 
 /**
  * The options of a pending incident's decision, as the card offers them: Switch
  * when there is a candidate, Wait when the reset is known and at most 7 days
- * ahead (a past one resumes at once), and "I'll handle it" always. The option
- * the `auto` policy would choose is recommended.
+ * ahead (a past one resumes at once), and "I'll handle it" always; the one
+ * `recommendedActionOf` names is recommended.
  */
 export function fallbackOptionsOf(incident: FallbackIncident, now: Date): DecisionOption[] {
-  const recommended = autoActionOf(incident, now);
+  const recommended = recommendedActionOf(incident, now);
   const option = (key: "switch" | "wait" | "dismiss", label: string): DecisionOption => ({
     key,
     label,
@@ -140,6 +157,7 @@ export function fallbackQuestionOf(incident: FallbackIncident): string {
 
 /** The open decision of a pending incident (§A.5 d). */
 export function fallbackDecisionOf(incident: FallbackIncident, now: Date): Decision {
+  const options = fallbackOptionsOf(incident, now);
   return {
     id: fallbackDecisionId(incident.id),
     workspaceId: incident.workspaceId,
@@ -149,7 +167,9 @@ export function fallbackDecisionOf(incident: FallbackIncident, now: Date): Decis
     round: null,
     question: fallbackQuestionOf(incident),
     subject: `fallback-${incident.role}`,
-    options: fallbackOptionsOf(incident, now),
+    // Every incident is about the environment (§B.1); its options declare no effect to raise it.
+    class: FALLBACK_DECISION_CLASS,
+    options,
     status: "open",
     settledAt: null,
     needsConfirmation: null,
@@ -158,6 +178,8 @@ export function fallbackDecisionOf(incident: FallbackIncident, now: Date): Decis
     delivery: null,
     supersedes: null,
     supersededBy: null,
+    // The recommended option is the recommended predictor's prediction (autonomy design §B.3).
+    prediction: openingPrediction(options),
   };
 }
 
@@ -197,20 +219,18 @@ export function syncFallbackFailedAlerts(
   return { raised, cleared };
 }
 
-/** Incidents the `auto` policy is deciding right now: no decision is opened for them meanwhile. */
-const held = new Set<string>();
-
-/** Holds back the decision of an incident until the returned release is called. */
-export function holdFallbackDecision(incidentId: string): () => void {
-  held.add(incidentId);
-  return () => {
-    held.delete(incidentId);
-  };
-}
-
 export interface FallbackDecisionDeps {
   now?: () => Date;
   log?: (message: string) => void;
+  /**
+   * Where a decision an owner precedent (autonomy design §B.6) or the policy
+   * (§B.5) answers as it opens is delivered — the `fallback` delivery
+   * (`createFallbackDecisionDelivery`) — with the Paseo handle it needs.
+   * Without it neither answers: the decision stays open for the owner (a
+   * precedent shown on its card), since an answered incident whose action
+   * never runs would stay stopped.
+   */
+  settle?: { onSettled: OnDecisionsSettled; paseo: unknown };
 }
 
 export interface FallbackDecisionSync {
@@ -250,14 +270,28 @@ export function syncFallbackDecisions(home: string, deps: FallbackDecisionDeps =
         log(`[paseo-bm] could not withdraw decision ${decision.id}: ${reasonOf(error)}`);
       }
     }
+    const resolved: Decision[] = [];
     for (const incident of read.incidents) {
-      if (incident.status !== "pending" || held.has(incident.id)) continue;
+      if (incident.status !== "pending") continue;
       try {
         const opened = store.open(fallbackDecisionOf(incident, now));
         if (opened.created) result.opened.push(opened.decision.id);
+        // Autonomy design §B.6: a precedent naming one of its options answers it, when that answer can be delivered now;
+        // §B.5: else, when no precedent bears on it, the policy's recommended option where `environment` is delegated to it.
+        if (opened.created && deps.settle !== undefined) {
+          const atOpen = resolveAtOpen(opened.decision, { home, now, log, store });
+          if (atOpen.answered !== null) resolved.push(atOpen.answered);
+        }
       } catch (error) {
         log(`[paseo-bm] could not open the decision of fallback incident ${incident.id}: ${reasonOf(error)}`);
       }
+    }
+    if (resolved.length > 0 && deps.settle !== undefined) {
+      // Not awaited: this pass stays synchronous, and `fallback.act` queues behind any action under way.
+      const { onSettled, paseo } = deps.settle;
+      void Promise.resolve()
+        .then(() => onSettled(resolved, { paseo }))
+        .catch((error: unknown) => log(`[paseo-bm] ${resolved.map((decision) => decision.id).join(", ")} answered by a precedent or the policy, but the delivery failed: ${reasonOf(error)}`));
     }
     try {
       result.alerted = syncFallbackFailedAlerts(home, store, incidents, () => now).raised;
@@ -316,7 +350,8 @@ export function createFallbackDecisionDelivery(act: FallbackAct, deps: FallbackD
 
   return async (decisions, { paseo }) => {
     for (const decision of decisions) {
-      const incidentId = incidentIdOf(decision.id);
+      // Autonomy design §B.7: the owner's override of an `f:` decision runs its action on the same incident.
+      const incidentId = incidentIdOf(decisionKindOf(decision.id) === "override" ? (decision.supersedes ?? "") : decision.id);
       if (incidentId === null || decision.status !== "answered" || decision.answer === null) continue;
       const action = decision.options.find((option) => option.key === decision.answer?.optionKey)?.action;
       if (action?.kind !== "fallback") {

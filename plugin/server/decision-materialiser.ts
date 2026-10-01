@@ -11,17 +11,54 @@
  * | a Manager whose inbound messages include the owner's typed one | `BM-ANSWERS` blocks in its replies (`received`) | settles those decisions, `via: chat-manager` (b) |
  * | a Worker | the owner's typed messages holding `BM-ANSWERS` | settles the named decisions, `via: chat-worker` (c) |
  * | a Worker | any other owner text while its request has open questions | marks them `needs-confirmation` (c) |
+ * | a Manager | inbound messages that are not the owner's, holding a `finished` `BM-REPORT` | expires that request's unsettled questions asked up to it (§A.3) |
  *
  * - **Origin.** A trace message's `origin` is `user` only when it was typed in
  *   the app (it carries `clientMessageId` and is not a plugin notice); a
  *   `BM-COMMAND` and every plugin notice are `agent` (`collector.ts`). A
  *   Manager's block never settles anything without the owner's typed message
  *   in the same turn.
+ * - **Class.** An opened question keeps the riskier of the class the Worker
+ *   proposed (`[class: …]`) and the classes its options' effects imply
+ *   (autonomy design §B.1); with neither, `reversible-technical`.
  * - **Supersession.** A question tagged `[supersedes: Qn]`, or whose
  *   normalised text equals an unsettled question of the same request, replaces
  *   that one (`decision-store.ts` `open` supersedes it in the same write).
+ * - **Predictions and reversals** (autonomy design §B.3). An opened question
+ *   records its recommended option as `prediction.recommended`. A new
+ *   question with the `subject` of an **answered** question of the same
+ *   request reverses that answer (`re-asked`); re-asking one still unsettled
+ *   is supersession only. A `br reopen` in the turn's evidence whose reason
+ *   cites an answered decision (`q:…`, `o:…`, or a `Qn` of the request)
+ *   reverses it (`reopened`); a reopen citing none is ordinary work (a review
+ *   finding), not a reversal. A reversal of an answer the policy or a
+ *   precedent gave demotes its delegated class (`demoteOnReversal`, §B.4).
+ * - **Precedents** (autonomy design §B.6). A question that opens on the
+ *   subject of an active precedent is answered by it at once unless its class
+ *   is owner-fixed (`precedent-resolve.ts`), and goes to `onSettled` with the
+ *   turn's other answers — except a subject a precedent already answered in
+ *   the same request, which is the owner's. An owner's answer here that
+ *   differs from a precedent on its subject supersedes it.
+ * - **Delegation** (autonomy design §B.5). A question no precedent bears on,
+ *   opening in a `delegate` cell whose predictor is `recommended`, is answered
+ *   at once with its recommended option (`policy-resolve.ts`, `by: policy`)
+ *   and goes to `onSettled` the same way — except a subject the policy or a
+ *   precedent already answered in the same request: asked again, that answer
+ *   did not do, so the owner decides (and the re-ask demotes the class). Nor
+ *   while the request stands finished-unverified, when the recommended option
+ *   commits or releases (autonomy design §C.6, change-008 C4: read from the
+ *   trace store, `isFinishedUnverifiedNow`).
  * - **Round.** A block's questions share one round: the round of any of them
  *   already stored, else one more than the request's highest stored round.
+ * - **Expiry.** A request's `finished` report means its Worker no longer
+ *   waits: after the turn's opening and answers, each `q:` decision of that
+ *   request still `open` or `needs-confirmation` and asked no later than the
+ *   report becomes `expired`, in its own write re-checked on the stored
+ *   decision, so an answer given meanwhile stands. So does the owner's open
+ *   override (`r:`, autonomy design §B.7) of such a question: its corrected
+ *   answer has no Worker left to reach. `o:` and `f:` decisions, and their
+ *   overrides, are never expired here; a question asked after the report (the
+ *   owner sent the Worker on) stays open.
  * - **Idempotent.** Paseo reuses turn ids, and a record may be read again:
  *   opening is keyed by id and answering a settled decision is refused, so
  *   neither changes anything the second time. A `needs-confirmation` mark is
@@ -42,26 +79,44 @@
  * (REQ-048b): nothing here reads, stores or prints an unmasked message.
  * Nothing here throws into an agent's turn end: a failure is one log line.
  */
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
 import { parseAnswers, parseQuestions, type Answer, type Question } from "../shared/bm-questions";
+import { parseReports } from "../shared/bm-report";
 import type { TraceMessage, TraceRecord } from "../shared/contracts";
 import {
+  DECISION_ID_PATTERN,
   answerDecision,
+  checkedClass,
+  declaredEffects,
   decisionKindOf,
+  deliveryKindOf,
+  expireDecision,
+  isAnswerable,
   markNeedsConfirmation,
+  openingPrediction,
   questionDecisionId,
+  recordReversal,
   type AnswerVia,
   type ChatVia,
   type Decision,
   type DecisionOption,
+  type DecisionReversal,
 } from "../shared/decisions";
+import { actsOnFinish } from "../shared/autonomy";
 import { parseCommandBlock } from "../shared/orchestrator-command";
-import { bmAgentsOf, type DashboardPaseo } from "./dashboard-rpc";
+import { BR_REOPEN } from "../shared/shell";
+import { demoteOnReversal } from "./autonomy-rpc";
+import { bmAgentsOf, type DashboardPaseo } from "./paseo-directory";
 import { createDecisionStore, type DecisionStore } from "./decision-store";
 import type { OnDecisionsSettled } from "./decision-rpc";
 import { isPluginNotice } from "./notices";
+import { resolveAtOpen } from "./policy-resolve";
+import { isFinishedUnverifiedNow } from "./request-trace";
+import { TRACES_DIR_NAME } from "./data-home";
+import { supersedePrecedentsBy } from "./precedent-resolve";
 import type { TraceStoreLocation } from "./trace-store";
+import { errorText } from "./rpc-kit";
 
 type TurnEndedEvent = PluginLifecycleEvents["agent.turn_ended"];
 
@@ -164,6 +219,101 @@ function validIso(at: string, fallback: string): string {
   return Number.isNaN(Date.parse(at)) ? fallback : at;
 }
 
+/** `br` flags that take the next word as their value. */
+const BR_VALUE_FLAGS = new Set(["--db", "--actor", "--lock-timeout"]);
+/** A decision id a reason may cite: a Worker's question or an Orchestrator decision (§B.3). */
+const CITED_DECISION_ID = /(?<![\w:])(q:[^\s:]+:Q\d{1,3}|o:[A-Za-z0-9-]{1,64})/g;
+/** A bare question number (`Q2`), not one inside a `q:…:Q2` id. */
+const CITED_QUESTION = /(?<![\w:])(Q\d{1,3})\b/g;
+/** The bead a `br reopen` naming none reopens (the last touched): one reference for them all. */
+export const LAST_TOUCHED_BEAD = "last-touched";
+
+/**
+ * The words of a shell command from its start up to the first separator
+ * outside quotes (`;`, `&`, `|`, a newline): single quotes literal, double
+ * quotes and a backslash escaping as a shell does. Enough to read a `br`
+ * call's arguments; nothing is expanded.
+ */
+function wordsUntilSeparator(text: string): string[] {
+  const words: string[] = [];
+  let word = "";
+  let inWord = false;
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i]!;
+    if (quote === "'") {
+      if (char === "'") quote = null;
+      else word += char;
+      continue;
+    }
+    if (quote === '"') {
+      if (char === '"') quote = null;
+      else if (char === "\\" && i + 1 < text.length && '"\\$`'.includes(text[i + 1]!)) word += text[++i]!;
+      else word += char;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      inWord = true;
+    } else if (char === "\\" && i + 1 < text.length) {
+      word += text[++i]!;
+      inWord = true;
+    } else if (";&|\n".includes(char)) {
+      break;
+    } else if (/\s/.test(char)) {
+      if (inWord) words.push(word);
+      word = "";
+      inWord = false;
+    } else {
+      word += char;
+      inWord = true;
+    }
+  }
+  if (inWord) words.push(word);
+  return words;
+}
+
+/**
+ * Every `br reopen` a shell command runs: the beads it names (none: the last
+ * touched) and its `--reason` / `-r`, or null without one. Pure.
+ */
+export function reopensOf(command: string): Array<{ beads: string[]; reason: string | null }> {
+  const out: Array<{ beads: string[]; reason: string | null }> = [];
+  for (const match of command.matchAll(new RegExp(BR_REOPEN.source, "g"))) {
+    const words = wordsUntilSeparator(command.slice(match.index + match[0].length));
+    const beads: string[] = [];
+    let reason: string | null = null;
+    for (let i = 0; i < words.length; i += 1) {
+      const word = words[i]!;
+      if (word === "-r" || word === "--reason") reason = words[++i] ?? null;
+      else if (word.startsWith("--reason=")) reason = word.slice("--reason=".length);
+      else if (word.startsWith("-r") && !word.startsWith("--")) reason = word.slice(2);
+      else if (BR_VALUE_FLAGS.has(word)) i += 1;
+      else if (!word.startsWith("-") && word !== "") beads.push(word);
+    }
+    out.push({ beads, reason });
+  }
+  return out;
+}
+
+/**
+ * The decisions a reopen's reason cites (§B.3, §B.9): each `q:…` or `o:…` id
+ * it names, and each bare `Qn` as a question of the request ids it names —
+ * of `requestId` when it names none. Pure; each id once, in order.
+ */
+export function citedDecisionIds(reason: string, requestId: string | null): string[] {
+  const ids = new Set<string>();
+  for (const match of reason.matchAll(CITED_DECISION_ID)) {
+    if (DECISION_ID_PATTERN.test(match[1]!)) ids.add(match[1]!);
+  }
+  const named = [...reason.matchAll(new RegExp(ANY_REQUEST_ID.source, "g"))].map((match) => match[1]!);
+  const requests = named.length > 0 ? [...new Set(named)] : requestId === null ? [] : [requestId];
+  for (const match of reason.matchAll(CITED_QUESTION)) {
+    for (const request of requests) ids.add(questionDecisionId(request, match[1]!));
+  }
+  return [...ids];
+}
+
 // ---------------------------------------------------------------------------
 // The materialiser.
 // ---------------------------------------------------------------------------
@@ -184,6 +334,8 @@ export interface MaterialiserDeps {
   workerOf?: WorkerLookup;
   /** Called with every record after it is materialised and settled (the answers' delivery, §A.6); a no-op by default. */
   afterTurn?: AfterTurn;
+  /** The trace store a request's finish is read from (autonomy design §C.6); `<home>/traces` by default. */
+  location?: TraceStoreLocation;
 }
 
 /** What runs after a recorded turn is materialised: the answers' delivery notes arrivals and resumes (§A.6). */
@@ -199,6 +351,10 @@ export interface MaterialiseOutcome {
   answered: Decision[];
   /** Decisions this turn marked `needs-confirmation`. */
   marked: Decision[];
+  /** Answered decisions this turn reversed (§B.3), as stored after the reversal. */
+  reversed: Decision[];
+  /** Worker questions a `finished` report in this turn expired (§A.3). */
+  expired: Decision[];
 }
 
 /** Owner messages already acted on for a `needs-confirmation` mark, in this plugin run. */
@@ -215,10 +371,6 @@ function remember(key: string): void {
   if (markedMessages.size <= MARKED_MESSAGES_LIMIT) return;
   const oldest = markedMessages.values().next().value;
   if (oldest !== undefined) markedMessages.delete(oldest);
-}
-
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 /**
@@ -240,17 +392,68 @@ export const workerOfRequest: WorkerLookup = async ({ requestId, workspaceId, ma
 };
 
 interface Context {
+  /** The data folder: the precedents are read from it (§B.6). */
+  home: string;
   store: DecisionStore;
   record: TraceRecord;
   now: string;
   log: (message: string) => void;
   outcome: MaterialiseOutcome;
+  /** Whether a request of this workspace stands finished-unverified now (autonomy design §C.6, change-008 C4). */
+  finishedUnverified: (requestId: string) => Promise<boolean>;
 }
 
 function questionsOfRequest(context: Context, requestId: string): Decision[] {
   return context.store
     .list({ workspaceId: context.record.workspaceId, requestId })
     .filter((decision) => decisionKindOf(decision.id) === "question");
+}
+
+/** The request's Worker questions and the owner's overrides of them (§B.7): what its `finished` report expires. */
+function expirableOfRequest(context: Context, requestId: string): Decision[] {
+  return context.store
+    .list({ workspaceId: context.record.workspaceId, requestId })
+    .filter((decision) => deliveryKindOf(decision) === "question");
+}
+
+/**
+ * Records one reversal of `id` (§B.3) when it is answered, the reversal is not
+ * earlier than the answer, and it is not recorded yet; writes nothing
+ * otherwise.
+ */
+function reverse(context: Context, id: string, reversal: DecisionReversal): void {
+  try {
+    const decision = context.store.get(id, context.record.workspaceId);
+    if (decision === null || decision.status !== "answered" || decision.answer === null) return;
+    if (Date.parse(reversal.at) < Date.parse(decision.answer.at)) return;
+    if ((decision.reversals ?? []).some((entry) => entry.kind === reversal.kind && entry.ref === reversal.ref)) return;
+    const mutation = context.store.transition(id, (current) => recordReversal(current, reversal), context.record.workspaceId);
+    if (mutation.status === "updated" && (mutation.decision.reversals?.length ?? 0) > (decision.reversals?.length ?? 0)) {
+      context.outcome.reversed.push(mutation.decision);
+      // §B.4: reversing what the policy or a precedent answered takes its delegated class back at once.
+      demoteOnReversal(mutation.decision, reversal.kind, { home: context.home, now: () => new Date(context.now), log: context.log });
+    }
+  } catch (error) {
+    context.log(`[paseo-bm] could not record the reversal of decision ${id}: ${errorText(error)}`);
+  }
+}
+
+/** Reversal kind (3): a `br reopen` in the turn's evidence whose reason cites an answered decision (§B.3, §B.9). */
+function reverseReopened(context: Context): void {
+  const { record } = context;
+  for (const evidence of record.evidence) {
+    if (evidence.kind !== "shell") continue;
+    for (const reopen of reopensOf(evidence.detail)) {
+      if (reopen.reason === null) continue;
+      const cited = citedDecisionIds(reopen.reason, record.requestId);
+      if (cited.length === 0) continue;
+      const at = validIso(evidence.at ?? record.endedAt, context.now);
+      const beads = reopen.beads.length === 0 ? [LAST_TOUCHED_BEAD] : reopen.beads;
+      for (const id of cited) {
+        for (const bead of beads) reverse(context, id, { kind: "reopened", at, ref: bead });
+      }
+    }
+  }
 }
 
 function optionsOf(question: Question): DecisionOption[] {
@@ -279,6 +482,10 @@ async function openBlock(
   const round = storedRound ?? existing.reduce((highest, decision) => Math.max(highest, decision.round ?? 0), 0) + 1;
   const agentId = await askedBy();
   const askedAt = validIso(message.at, context.now);
+  // Autonomy design §C.6 (change-008 C4): read once per block, and only when a recommended option commits or releases.
+  const finishedUnverified = fresh.some((question) => optionsOf(question).some((option) => option.recommended && actsOnFinish(option)))
+    ? await context.finishedUnverified(block.requestId)
+    : false;
 
   for (const question of fresh) {
     const id = questionDecisionId(block.requestId, question.id);
@@ -291,6 +498,7 @@ async function openBlock(
       text === ""
         ? null
         : (current.find((decision) => decision.id !== id && (decision.status === "open" || decision.status === "needs-confirmation") && normalisedQuestion(decision.question) === text)?.id ?? null);
+    const options = optionsOf(question);
     const decision: Decision = {
       id,
       workspaceId: record.workspaceId,
@@ -300,7 +508,9 @@ async function openBlock(
       round,
       question: question.text.trim() === "" ? question.id : question.text,
       subject: question.subject ?? null,
-      options: optionsOf(question),
+      // The Worker's proposal, raised to what its options' effects imply (§B.1).
+      class: checkedClass(question.class, declaredEffects({ options })),
+      options,
       status: "open",
       settledAt: null,
       needsConfirmation: null,
@@ -309,13 +519,43 @@ async function openBlock(
       delivery: null,
       supersedes: byTag ?? byText,
       supersededBy: null,
+      // The option the Worker recommends is the recommended predictor's prediction (§B.3).
+      prediction: openingPrediction(options),
     };
+    let created = false;
     try {
       const result = store.open(decision);
-      if (result.created) context.outcome.opened.push(result.decision);
+      created = result.created;
+      if (result.created) {
+        const answeredBefore = (by: readonly string[]) =>
+          decision.subject !== null && current.some((earlier) => earlier.subject === decision.subject && by.includes(earlier.answer?.by ?? ""));
+        const atOpen = resolveAtOpen(result.decision, {
+          home: context.home,
+          now: new Date(context.now),
+          log: context.log,
+          store,
+          finishedUnverified,
+          // §B.6: an active precedent on its subject answers it at once, unless its class is owner-fixed. Not a
+          // subject a precedent already answered in this request: asked again, the same answer did not do, so the owner decides.
+          skipPrecedent: answeredBefore(["precedent"]),
+          // §B.5: then, when no precedent bears on it, a delegate cell of the recommended predictor answers it — never a
+          // subject the policy or a precedent already answered in this request (its re-ask demotes the class, below).
+          skipPolicy: answeredBefore(["policy", "precedent"]),
+        });
+        context.outcome.opened.push(atOpen.decision);
+        if (atOpen.answered !== null) context.outcome.answered.push(atOpen.answered);
+      }
       if (result.superseded !== null) context.outcome.superseded.push(result.superseded);
     } catch (error) {
-      context.log(`[paseo-bm] could not open decision ${id}: ${describeError(error)}`);
+      context.log(`[paseo-bm] could not open decision ${id}: ${errorText(error)}`);
+    }
+    // Reversal kind (1): asked again with the subject of an answered question of
+    // this request. An unsettled one was superseded above, which is no reversal.
+    if (!created || decision.subject === null) continue;
+    for (const earlier of questionsOfRequest(context, block.requestId)) {
+      if (earlier.id !== id && earlier.status === "answered" && earlier.subject === decision.subject) {
+        reverse(context, earlier.id, { kind: "re-asked", at: askedAt, ref: id });
+      }
     }
   }
 }
@@ -334,9 +574,13 @@ function settleBlock(context: Context, block: { requestId: string; answers: Answ
         (current) => answerDecision(current, { via, at, ...("optionKey" in input ? { optionKey: input.optionKey } : { words: input.words }) }),
         context.record.workspaceId,
       );
-      if (mutation.status === "updated") context.outcome.answered.push(mutation.decision);
+      if (mutation.status === "updated") {
+        context.outcome.answered.push(mutation.decision);
+        // REQ-124 c: the owner's answer that differs from a standing precedent on its subject supersedes it.
+        supersedePrecedentsBy(mutation.decision, { home: context.home, now: new Date(context.now), log: context.log });
+      }
     } catch (error) {
-      context.log(`[paseo-bm] could not settle decision ${id}: ${describeError(error)}`);
+      context.log(`[paseo-bm] could not settle decision ${id}: ${errorText(error)}`);
     }
   }
 }
@@ -355,7 +599,7 @@ function markOpen(context: Context, requestId: string, message: TraceMessage, vi
       );
       if (mutation.status === "updated") context.outcome.marked.push(mutation.decision);
     } catch (error) {
-      context.log(`[paseo-bm] could not mark decision ${decision.id}: ${describeError(error)}`);
+      context.log(`[paseo-bm] could not mark decision ${decision.id}: ${errorText(error)}`);
     }
   }
   remember(key);
@@ -385,7 +629,7 @@ async function materialiseManager(context: Context, deps: MaterialiserDeps): Pro
     if (found === undefined) {
       found = (deps.workerOf ?? workerOfRequest)({ requestId, workspaceId: record.workspaceId, managerId: record.agentId }, deps.paseo).catch(
         (error: unknown) => {
-          context.log(`[paseo-bm] could not find the Worker of ${requestId}: ${describeError(error)}`);
+          context.log(`[paseo-bm] could not find the Worker of ${requestId}: ${errorText(error)}`);
           return null;
         },
       );
@@ -406,6 +650,51 @@ async function materialiseManager(context: Context, deps: MaterialiserDeps): Pro
   if (owner.length === 0) return;
   const at = validIso(owner.at(-1)!.at, context.now);
   for (const block of replyBlocks(record)) settleBlock(context, block, "chat-manager", at);
+}
+
+/**
+ * The `finished` reports that reached the Manager in this turn — from its
+ * Worker, never the owner's typed text or a plugin notice — each with the
+ * request it names and the time of its message. A report naming no request is
+ * left out.
+ */
+function finishedReportsOf(context: Context): Array<{ requestId: string; at: string }> {
+  const out: Array<{ requestId: string; at: string }> = [];
+  for (const message of context.record.sent) {
+    if (message.origin === "user" || isPluginNotice(message.text)) continue;
+    const at = validIso(message.at, context.now);
+    for (const report of parseReports(message.text, { agentId: context.record.agentId, at })) {
+      const requestId = ANY_REQUEST_ID.exec(report.requestId ?? "")?.[1];
+      if (report.phase === "finished" && requestId !== undefined) out.push({ requestId, at });
+    }
+  }
+  return out;
+}
+
+/**
+ * Expiry (§A.3): a request's `finished` report expires its Worker questions,
+ * and the owner's overrides of them (§B.7), still unsettled and asked no later
+ * than the report — the Worker no longer
+ * waits for them. Each goes in its own write, re-checked on the stored
+ * decision, so an answer given meanwhile stands.
+ */
+function expireFinished(context: Context): void {
+  for (const report of finishedReportsOf(context)) {
+    const until = Date.parse(report.at);
+    for (const decision of expirableOfRequest(context, report.requestId)) {
+      if (!isAnswerable(decision) || !(Date.parse(decision.askedAt) <= until)) continue;
+      try {
+        const mutation = context.store.transition(decision.id, (current) => expireDecision(current, { at: report.at }), context.record.workspaceId);
+        if (mutation.status === "updated") context.outcome.expired.push(mutation.decision);
+      } catch (error) {
+        context.log(`[paseo-bm] could not expire decision ${decision.id}: ${errorText(error)}`);
+      }
+    }
+  }
+  // A question opened and expired in this same turn is handed on as stored, so no event asks about it.
+  if (context.outcome.expired.length === 0) return;
+  const expired = new Map(context.outcome.expired.map((decision) => [decision.id, decision]));
+  context.outcome.opened = context.outcome.opened.map((decision) => expired.get(decision.id) ?? decision);
 }
 
 function materialiseWorker(context: Context): void {
@@ -429,34 +718,45 @@ function materialiseWorker(context: Context): void {
  */
 export async function materialiseTurn(record: TraceRecord, deps: MaterialiserDeps): Promise<MaterialiseOutcome> {
   const log = deps.log ?? ((message: string) => console.warn(message));
-  const outcome: MaterialiseOutcome = { role: null, opened: [], superseded: [], answered: [], marked: [] };
+  const outcome: MaterialiseOutcome = { role: null, opened: [], superseded: [], answered: [], marked: [], reversed: [], expired: [] };
   try {
     if (record.role !== "manager" && record.role !== "worker") return outcome;
     outcome.role = record.role;
     const context: Context = {
+      home: deps.home,
       store: createDecisionStore(deps.home, { log }),
       record,
       now: (deps.now ?? (() => new Date()))().toISOString(),
       log,
       outcome,
+      finishedUnverified: (requestId) =>
+        isFinishedUnverifiedNow(
+          { location: deps.location ?? { tracesDir: join(deps.home, TRACES_DIR_NAME) }, paseo: deps.paseo as DashboardPaseo, home: deps.home, log },
+          record.workspaceId,
+          { requestId },
+        ),
     };
-    if (record.role === "manager") await materialiseManager(context, deps);
-    else materialiseWorker(context);
+    if (record.role === "manager") {
+      await materialiseManager(context, deps);
+      // After the turn's opening and answers: the owner's answer in the same turn stands.
+      expireFinished(context);
+    } else materialiseWorker(context);
+    reverseReopened(context);
   } catch (error) {
-    log(`[paseo-bm] reading the decisions of ${record?.agentId ?? "an agent"}'s turn failed: ${describeError(error)}`);
+    log(`[paseo-bm] reading the decisions of ${record?.agentId ?? "an agent"}'s turn failed: ${errorText(error)}`);
   }
   if (outcome.answered.length > 0 && deps.onSettled !== undefined) {
     try {
       await deps.onSettled(outcome.answered, { paseo: deps.paseo });
     } catch (error) {
-      log(`[paseo-bm] ${outcome.answered.map((decision) => decision.id).join(", ")} answered, but the delivery failed: ${describeError(error)}`);
+      log(`[paseo-bm] ${outcome.answered.map((decision) => decision.id).join(", ")} answered, but the delivery failed: ${errorText(error)}`);
     }
   }
   if (deps.afterTurn !== undefined) {
     try {
       await deps.afterTurn(record, { paseo: deps.paseo });
     } catch (error) {
-      log(`[paseo-bm] after ${record?.agentId ?? "an agent"}'s turn, the answers' delivery failed: ${describeError(error)}`);
+      log(`[paseo-bm] after ${record?.agentId ?? "an agent"}'s turn, the answers' delivery failed: ${errorText(error)}`);
     }
   }
   return outcome;
@@ -479,6 +779,6 @@ export function createDecisionMaterialiser(
 ): (event: TurnEndedEvent, input: { location: TraceStoreLocation; paseo: unknown; record?: TraceRecord }) => Promise<MaterialiseOutcome | null> {
   return async (_event, { location, paseo, record }) => {
     if (record === undefined) return null;
-    return materialiseTurn(record, { home: dirname(location.tracesDir), paseo, ...options });
+    return materialiseTurn(record, { home: dirname(location.tracesDir), paseo, location, ...options });
   };
 }

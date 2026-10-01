@@ -7,13 +7,11 @@ import {
   TOOLS_STALE_TEXT,
   agentDots,
   agentStateOf,
-  ago,
   headerTitle,
   openDialog,
   orchestratorLineView,
   recreateDialog,
   replacedLine,
-  shortSpan,
   stageView,
 } from "../plugin/client/orchestrator-model";
 
@@ -47,24 +45,8 @@ const PROJECT = {
   state: "waiting-user" as const,
   lastActivityAt: minutesAgo(20),
   requests: 3,
-  autopilot: false,
   lastAction: null,
-  assessment: null,
 };
-
-describe("time", () => {
-  it("says spans in minutes, hours and days", () => {
-    expect(shortSpan(30_000)).toBe("under 1 min");
-    expect(shortSpan(12 * 60_000)).toBe("12 min");
-    expect(shortSpan(180 * 60_000)).toBe("3 h");
-    expect(shortSpan(185 * 60_000)).toBe("3 h 5 min");
-    expect(shortSpan(3 * 86_400_000)).toBe("3 d");
-    expect(ago(minutesAgo(0), NOW)).toBe("just now");
-    expect(ago(minutesAgo(5), NOW)).toBe("5 min ago");
-    expect(ago(null, NOW)).toBe("—");
-    expect(ago("not a time", NOW)).toBe("—");
-  });
-});
 
 describe("the Orchestrator line", () => {
   it("says the agent's state: running, idle or not open", () => {

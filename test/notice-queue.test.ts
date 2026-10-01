@@ -522,6 +522,35 @@ describe("enqueueBatch: the batch kind (autonomy design §A.8)", () => {
     expect(logs.some((line) => /after sending the BM-EVENTS \(1\) notice to orc: store unreadable/.test(line))).toBe(true);
   });
 
+  it("hands the turn end's handle to the batch and waits for it before delivering the next message (change-007 C6)", async () => {
+    const { paseo, set, queue, turnEnded, logs } = world({ orc: { status: "idle" } });
+    const told: string[] = [];
+    let handle: unknown = null;
+    const observed = {
+      ...batch,
+      onSent: (_targetId: string, keys: readonly string[]) => told.push(`sent ${keys.join(",")}`),
+      onTurnEnded: async (targetId: string, received?: unknown) => {
+        handle = received;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        told.push(`ended ${targetId}`);
+      },
+    };
+    await queue.enqueueBatch("orc", observed, [item("a")], paseo);
+    await queue.enqueueBatch("orc", observed, [item("b")], paseo);
+    set("orc", { status: "idle" });
+    await turnEnded("orc");
+    expect(handle).toBe(paseo);
+    expect(told).toEqual(["sent a", "ended orc", "sent b"]);
+    // A rejection is one log line, and the next message still goes.
+    const rejecting = { ...batch, onTurnEnded: async () => Promise.reject(new Error("snapshot unreadable")) };
+    await queue.enqueueBatch("orc", rejecting, [item("c")], paseo);
+    set("orc", { status: "idle" });
+    await turnEnded("orc");
+    set("orc", { status: "idle" });
+    await turnEnded("orc");
+    expect(logs.some((line) => /after the turn end of orc \(BM-EVENTS\): snapshot unreadable/.test(line))).toBe(true);
+  });
+
   it("refuses bad input without throwing", async () => {
     const { paseo, sends, logs, queue } = world({ orc: { status: "idle" } });
     await expect(queue.enqueueBatch("", batch, [item("a")], paseo)).resolves.toEqual(["dropped"]);

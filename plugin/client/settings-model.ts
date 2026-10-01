@@ -1,39 +1,45 @@
 /**
  * What the Settings section of the management surface says (experience
- * concept §4.4, autonomy design §A.12): four groups on one scrolling screen,
- * each collapsed to one line with its state.
+ * concept §4.4, autonomy design §A.12, §G.7): five groups on one scrolling
+ * screen, each collapsed to one line with its state.
  *
- * The groups reuse the Setup screen's pieces and wording (`setup-model.ts`);
- * this file only decides the one-line state of each group, the Data group's
- * storage rows, and which groups are open. The rest of the old Setup screen
- * is retired (autonomy design §A.14): the Orchestrator is opened from the
- * Inbox, and no screen edits a role's additional instructions.
+ * The groups reuse the Setup screen's pieces and wording
+ * (`settings-roles-model.ts`, `settings-machine-model.ts`); this file only decides the one-line state of each group, the Data group's
+ * storage rows, the Coordination group's advice cadence, and which groups are
+ * open; the Autonomy group's line and matrix are `settings-autonomy-model.ts`,
+ * the Coordination group's compaction and handoff cards
+ * `settings-coordination-model.ts`.
+ * The rest of the old Setup screen is retired (autonomy design §A.14): the
+ * Orchestrator is opened from the Inbox, and no screen edits a role's
+ * additional instructions.
  *
  * Pure: no React, no React Native, no `server/` import.
  */
 import type { SetupStatus, StoreSize, WorkspaceState } from "../shared/contracts";
-import { formatBytes, storageView, type Badge, type Tone } from "./dashboard-model";
-import { SETUP_ROLES, migrationBanner, providerLabel, skillAgentOfProvider, toolBadge, SKILL_COLUMNS } from "./setup-model";
+import { ADVICE_EVERY_FINISHED, type CoordinationSettings } from "../shared/coordination";
+import { formatBytes } from "./format";
+import { storageView } from "./history-model";
+import { mechanismsText, switchedOffMechanisms, switchedOffText } from "./settings-coordination-model";
+import type { Badge, Tone } from "./tone";
+import { SKILL_COLUMNS, skillAgentOfProvider, toolBadge } from "./settings-machine-model";
+import { SETUP_ROLES, providerLabel } from "./settings-roles-model";
 
-export type SettingsGroupKey = "agents" | "autonomy" | "tools" | "data";
+export type SettingsGroupKey = "agents" | "autonomy" | "coordination" | "tools" | "data";
 
 /**
- * The groups, in the order of experience concept §4.4. Autonomy is listed
- * where it will live, but it has no content before Phase 2: it is one line
- * and does not open.
+ * The groups, in the order of experience concept §4.4, with Coordination
+ * (autonomy design §G.7) after Autonomy (§B.2). A group with `opens: false`
+ * would be one line that does not open; every group opens today.
  */
 export const SETTINGS_GROUPS: ReadonlyArray<{ key: SettingsGroupKey; title: string; hint: string; opens: boolean }> = [
   { key: "agents", title: "Agents", hint: "roles, models, fallbacks, sign-in and agent tools", opens: true },
-  { key: "autonomy", title: "Autonomy", hint: "which decisions the agents may take for you", opens: false },
+  { key: "autonomy", title: "Autonomy", hint: "which decisions the agents may take for you", opens: true },
+  { key: "coordination", title: "Coordination", hint: "advice, compaction and handoff", opens: true },
   { key: "tools", title: "Tools & skills", hint: "br, bv and the agent skills", opens: true },
   { key: "data", title: "Data", hint: "data folder, trace storage and cleanup", opens: true },
 ];
 
-/** The Autonomy group's one line until Phase 2 brings the policy matrix. */
-export const AUTONOMY_COMING =
-  "Coming in the next phase: per project, which kinds of decision the agents may take for you and which stay yours.";
-
-/** Where the Settings section opens: every group folded, so the four states read at a glance. */
+/** Where the Settings section opens: every group folded, so the states read at a glance. */
 export const DEFAULT_OPEN_GROUPS: ReadonlySet<SettingsGroupKey> = new Set();
 
 /** The set of open groups after a press on `key`; a group that does not open stays closed. */
@@ -201,9 +207,8 @@ export function storageSummary(workspaces: readonly StoredWorkspaceBytes[], warn
 export const THRESHOLD_NOTE = "Change the warning size in Paseo's settings, under Beads Dashboard.";
 
 /**
- * The Data group's line: the data folder unusable, the settings removed, an
- * install from the retired npx installer, the trace store over its threshold.
- * Nothing wrong: how much the traces take.
+ * The Data group's line: the data folder unusable, the settings removed, the
+ * trace store over its threshold. Nothing wrong: how much the traces take.
  */
 export function dataGroupState(
   status: SetupStatus | undefined,
@@ -214,7 +219,6 @@ export function dataGroupState(
   const problems: Badge[] = [];
   if (status.setup?.dataHome.path === null) problems.push({ text: "The data folder cannot be used", tone: "danger" });
   if (cleanedUp) problems.push({ text: "Settings removed", tone: "warning" });
-  if (migrationBanner(status) !== null) problems.push({ text: "Installed by the old npx installer", tone: "warning" });
   if (storage !== null && storage.warning !== null) {
     problems.push({ text: `Traces ${formatBytes(storage.totalBytes)}, over the warning size`, tone: "warning" });
   }
@@ -223,6 +227,88 @@ export function dataGroupState(
       ? { text: "Data folder, traces and cleanup", tone: "muted" as const }
       : { text: storage.rows.length === 0 ? "No traces yet" : `${formatBytes(storage.totalBytes)} of traces`, tone: "muted" as const };
   return stateOf(problems, ok);
+}
+
+// ---------------------------------------------------------------------------
+// Coordination (autonomy design §G.7): the advice cadence. The compaction and
+// handoff cards of Phase 3 are `settings-coordination-model.ts`.
+// ---------------------------------------------------------------------------
+
+/** What the advice cadence means, in one line. */
+export const ADVICE_MEANING =
+  "After this many finished requests in a project, the Orchestrator reviews its figures and asks you about anything worth changing. 0 turns advice off.";
+
+/** The cadence in words. */
+export function adviceCadenceText(everyFinished: number): string {
+  if (everyFinished <= 0) return "Advice off";
+  return everyFinished === 1 ? "Advice after every finished request" : `Advice after every ${everyFinished} finished requests`;
+}
+
+/**
+ * The Coordination group's line: the cadence and the two switches in words; a
+ * mechanism paseo-bm switched off below A-12's target first, as a warning; or
+ * that the settings could not be read.
+ */
+export function coordinationGroupState(settings: CoordinationSettings | undefined, failed = false): GroupState {
+  if (failed) return { text: "The coordination settings could not be read", tone: "danger" };
+  if (settings === undefined) return GROUP_LOADING;
+  const advice = adviceCadenceText(settings.advice.everyFinished);
+  const switchedOff = switchedOffMechanisms(settings);
+  if (switchedOff.length > 0) return { text: `${switchedOffText(switchedOff)} · ${advice}`, tone: "warning" };
+  return { text: `${advice} · ${mechanismsText(settings)}`, tone: "muted" };
+}
+
+/** The cadence one step down or up, kept within its bounds. */
+export function stepAdviceCadence(value: number, step: -1 | 1): number {
+  return Math.min(ADVICE_EVERY_FINISHED.max, Math.max(ADVICE_EVERY_FINISHED.min, value + step));
+}
+
+/** A button of the cadence row: whether it can be pressed and what a screen reader says. */
+export interface CadenceButton {
+  enabled: boolean;
+  label: string;
+  accessibilityLabel: string;
+}
+
+/** The advice cadence row: its meaning, the value being edited with − and +, Save, and the default. */
+export interface AdviceCadenceView {
+  title: string;
+  meaning: string;
+  /** The value being edited, in words. */
+  valueText: string;
+  decrease: CadenceButton;
+  increase: CadenceButton;
+  /** Enabled while the edited value differs from the stored one. */
+  save: CadenceButton;
+  /** Offered while the edited value is not the default. */
+  reset: CadenceButton | null;
+}
+
+export function adviceCadenceView(input: { stored: number; draft: number; defaultValue: number; saving: boolean }): AdviceCadenceView {
+  const { stored, draft, defaultValue, saving } = input;
+  const lower = stepAdviceCadence(draft, -1);
+  const higher = stepAdviceCadence(draft, 1);
+  const spoken = (value: number) => (value === 0 ? "0, off" : String(value));
+  return {
+    title: "Advice",
+    meaning: ADVICE_MEANING,
+    valueText: adviceCadenceText(draft),
+    decrease: { enabled: !saving && lower !== draft, label: "−", accessibilityLabel: `Advice cadence: lower to ${spoken(lower)}` },
+    increase: { enabled: !saving && higher !== draft, label: "+", accessibilityLabel: `Advice cadence: raise to ${spoken(higher)}` },
+    save: {
+      enabled: !saving && draft !== stored,
+      label: saving ? "Saving…" : "Save",
+      accessibilityLabel: `Save the advice cadence: ${adviceCadenceText(draft)}`,
+    },
+    reset:
+      draft === defaultValue
+        ? null
+        : {
+            enabled: !saving,
+            label: `Use the default (${defaultValue})`,
+            accessibilityLabel: `Set the advice cadence back to its default: ${adviceCadenceText(defaultValue)}`,
+          },
+  };
 }
 
 /** The header of a group: what it shows and what a screen reader says. */

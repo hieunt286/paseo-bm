@@ -1,19 +1,24 @@
 /**
  * Settings, the fourth section of the management surface (experience concept
- * §4.4, autonomy design §A.12): four groups on one scrolling screen, each
+ * §4.4, autonomy design §A.12): five groups on one scrolling screen, each
  * folded to one line with its state.
  *
  * - **Agents** — the roles (provider, model, thinking, mode) with their
  *   fallback chains, sign-in, and Paseo's agent tools.
- * - **Autonomy** — one line until Phase 2 brings the policy matrix.
+ * - **Autonomy** — the owner's policy, one matrix per project (autonomy
+ *   design §B.2; `settings-autonomy.tsx`).
+ * - **Coordination** — how often the Orchestrator advises, compaction
+ *   and handoff, each switched on its own with its thresholds, and the review
+ *   budget per tier (autonomy design §G.7; `settings-coordination.tsx`).
  * - **Tools & skills** — `br`, `bv` and the agent skills, with install or
  *   copy-command actions.
  * - **Data** — the data folder, the trace storage with its cleanup per
  *   workspace, and removing paseo-bm's settings.
  *
  * Built from the Setup screen's pieces (`settings-blocks.tsx`) and wording
- * (`setup-model.ts`); the rest of the old Setup screen is retired (autonomy
- * design §A.14). Every confirmation puts Cancel first.
+ * (`settings-machine-model.ts`, `settings-roles-model.ts`); the rest of the old
+ * Setup screen is retired (autonomy design §A.14). Every confirmation puts
+ * Cancel first.
  * The one-line states come from `settings-model.ts`, tested without a
  * renderer; the hook-free pieces below are tested with the element-tree helper.
  *
@@ -24,23 +29,58 @@ import { type PluginSurfaceProps, useRpc, useSettings } from "@getpaseo/plugin/c
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState, type ReactNode } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
-import { setupEnsureRolesRpc, setupStatusRpc, tracesWorkspacesRpc, type SetupStatus } from "../shared/contracts";
+import {
+  autonomyPolicyRpc,
+  coordinationSetRpc,
+  coordinationSettingsRpc,
+  setupEnsureRolesRpc,
+  setupStatusRpc,
+  tracesWorkspacesRpc,
+  type AutonomyPolicyOutput,
+  type CoordinationSettingsOutput,
+  type SetupStatus,
+} from "../shared/contracts";
+import { COORDINATION_MECHANISMS, type CoordinationMechanism } from "../shared/coordination";
 import { DEFAULT_WARN_ABOVE_BYTES, dashboardSettings } from "../shared/settings";
 import { PLUGIN_VERSION } from "../shared/version";
 import { TraceActions } from "./dashboard-actions";
-import { PRIVACY_NOTICE, dashboardStyles, toneColor } from "./dashboard-model";
-import { errorMessageOf } from "./launch-manager";
+import { PRIVACY_NOTICE } from "./history-model";
+import { dashboardStyles } from "./styles";
+import { errorMessageOf } from "./errors";
+import type { InsightsProject } from "./insights-model";
+import { AutonomyGroup } from "./settings-autonomy";
+import { AUTONOMY_POLICY_KEY, autonomyGroupState } from "./settings-autonomy-model";
+import { MechanismCard, ReviewBudgetCard } from "./settings-coordination";
 import {
-  AUTONOMY_COMING,
+  changedReviewBudget,
+  changedThresholds,
+  defaultsDraft,
+  mechanismCardView,
+  reviewBudgetCardView,
+  reviewBudgetDefaultsDraft,
+  reviewBudgetValueOf,
+  stepReviewBudget,
+  stepThreshold,
+  thresholdValueOf,
+  turnOnDialog,
+  type ReviewBudgetDraft,
+  type ThresholdDraft,
+  type ThresholdKey,
+} from "./settings-coordination-model";
+import {
   DEFAULT_OPEN_GROUPS,
   SETTINGS_GROUPS,
   THRESHOLD_NOTE,
+  adviceCadenceView,
   agentsGroupState,
+  coordinationGroupState,
   dataGroupState,
   groupHeaderView,
+  stepAdviceCadence,
   storageSummary,
   toggleGroup,
   toolsGroupState,
+  type AdviceCadenceView,
   type GroupHeaderView,
   type SettingsGroupKey,
   type StorageRow,
@@ -51,7 +91,6 @@ import {
   anySkillMissing,
   dataHomeLine,
   ensureRolesLine,
-  migrationBanner,
   paseoToolsWarnings,
   rolesCreatedLine,
   signInRows,
@@ -59,22 +98,26 @@ import {
   skillDirsText,
   skillsRunLine,
   type EnsureRolesLine,
-} from "./setup-model";
-import { AgentToolsBlockView, CleanupBlock, CommandLine, RolesSection, SkillsInstallBlock, ToolCard } from "./settings-blocks";
-import { Chip, type Styles, type Theme } from "./ui";
+} from "./settings-machine-model";
+import { AgentToolsBlockView, CleanupBlock, CommandLine, RolesSection, SkillsInstallBlock, ToolCard, useBusyAction } from "./settings-blocks";
+import { Button, Chip, ToneText, type Styles, type Theme } from "./ui";
+import { localTimeText } from "./format";
 
 /** The query Settings reads: the roles ensured, then the status. */
 const SETUP_STATUS_KEY = ["paseo-bm", "setup", "status"] as const;
 const STORED_WORKSPACES_KEY = ["paseo-bm", "settings", "stored-workspaces"] as const;
+const COORDINATION_KEY = ["paseo-bm", "settings", "coordination"] as const;
 
 export interface SettingsScreenProps extends PluginSurfaceProps {
   /** The surface's status strip (slash-command notice, launch state), drawn under the title. */
   status?: ReactNode;
+  /** Projects the surface knows by name, as Insights names them: the Autonomy matrix's tabs. */
+  projects?: readonly InsightsProject[];
 }
 
 /**
  * The folded line of one group: marker, title and state, the whole line one
- * button. A group that does not open (Autonomy, before Phase 2) is plain text.
+ * button. A group that does not open is plain text.
  */
 export function SettingsGroupHeader({ view, onToggle, styles, theme }: {
   view: GroupHeaderView;
@@ -85,9 +128,9 @@ export function SettingsGroupHeader({ view, onToggle, styles, theme }: {
   const line = (
     <View style={{ gap: 2 }}>
       <Text style={styles.sectionTitle}>{view.marker === null ? view.title : `${view.marker} ${view.title}`}</Text>
-      <Text style={[styles.body, { color: toneColor(theme, view.state.tone) }]} numberOfLines={2}>
+      <ToneText tone={view.state.tone} numberOfLines={2} styles={styles} theme={theme}>
         {view.state.text}
-      </Text>
+      </ToneText>
     </View>
   );
   if (view.marker === null) {
@@ -121,26 +164,24 @@ export function RolesLineView({ line, busy, onAct, onDismiss, styles, theme }: {
 }) {
   return (
     <View style={{ gap: 6 }}>
-      <Text style={[styles.body, { color: toneColor(theme, line.tone) }]} selectable>
+      <ToneText tone={line.tone} selectable styles={styles} theme={theme}>
         {line.text}
-      </Text>
+      </ToneText>
       <View style={styles.chipRow}>
         {line.button === null ? null : (
-          <Pressable
-            accessibilityRole="button"
+          <Button
+            label={line.button}
+            kind="primary"
             accessibilityLabel={line.button === "Set up again" ? "Set up paseo-bm's roles again" : "Try to create the roles again"}
             accessibilityState={{ disabled: busy, busy }}
             disabled={busy}
             onPress={onAct}
-            style={[styles.button, { alignSelf: "flex-start" }]}
-          >
-            <Text style={styles.buttonText}>{line.button}</Text>
-          </Pressable>
+            style={{ alignSelf: "flex-start" }}
+            styles={styles}
+          />
         )}
         {line.dismissable ? (
-          <Pressable accessibilityRole="button" accessibilityLabel="Dismiss this line" onPress={onDismiss} style={styles.secondaryButton}>
-            <Text style={styles.secondaryButtonText}>Dismiss</Text>
-          </Pressable>
+          <Button label="Dismiss" kind="secondary" accessibilityLabel="Dismiss this line" onPress={onDismiss} styles={styles} />
         ) : null}
       </View>
     </View>
@@ -164,17 +205,240 @@ export function StorageRowView({ row, open, onToggle, styles, children }: {
           </Text>
           <Text style={[styles.body, { fontSize: 11 }]}>{row.detail}</Text>
         </View>
-        <Pressable
-          accessibilityRole="button"
+        <Button
+          label={open ? "Close" : "Clean up…"}
+          kind="secondary"
           accessibilityLabel={open ? `Close the traces of ${row.label}` : `Delete or move the traces of ${row.label}`}
           accessibilityState={{ expanded: open }}
           onPress={onToggle}
-          style={styles.secondaryButton}
-        >
-          <Text style={styles.secondaryButtonText}>{open ? "Close" : "Clean up…"}</Text>
-        </Pressable>
+          styles={styles}
+        />
       </View>
       {open ? children : null}
+    </View>
+  );
+}
+
+/** One button of the advice cadence row, labelled and disabled as its view says. */
+function CadenceButtonView({ button, primary, onPress, styles }: {
+  button: AdviceCadenceView["save"];
+  primary: boolean;
+  onPress: () => void;
+  styles: Styles;
+}) {
+  return (
+    <Button
+      label={button.label}
+      kind={primary ? "primary" : "secondary"}
+      accessibilityLabel={button.accessibilityLabel}
+      accessibilityState={{ disabled: !button.enabled }}
+      disabled={!button.enabled}
+      onPress={onPress}
+      styles={styles}
+    />
+  );
+}
+
+/**
+ * The advice cadence (autonomy design §G.7): its meaning in one line, the
+ * value with − and +, Save, and the default. A failed save says why under it.
+ */
+export function AdviceCadenceRow({ view, error, onStep, onSave, onReset, styles, theme }: {
+  view: AdviceCadenceView;
+  error: string | null;
+  onStep: (step: -1 | 1) => void;
+  onSave: () => void;
+  onReset: () => void;
+  styles: Styles;
+  theme: Theme;
+}) {
+  return (
+    <View style={[styles.card, { gap: 6 }]}>
+      <Text style={styles.sectionTitle}>{view.title}</Text>
+      <Text style={[styles.body, { fontSize: 11 }]}>{view.meaning}</Text>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <CadenceButtonView button={view.decrease} primary={false} onPress={() => onStep(-1)} styles={styles} />
+        <Text style={styles.body}>{view.valueText}</Text>
+        <CadenceButtonView button={view.increase} primary={false} onPress={() => onStep(1)} styles={styles} />
+      </View>
+      <View style={styles.chipRow}>
+        <CadenceButtonView button={view.save} primary onPress={onSave} styles={styles} />
+        {view.reset === null ? null : <CadenceButtonView button={view.reset} primary={false} onPress={onReset} styles={styles} />}
+      </View>
+      {error === null ? null : (
+        <ToneText tone="danger" selectable styles={styles} theme={theme}>
+          {error}
+        </ToneText>
+      )}
+    </View>
+  );
+}
+
+/**
+ * One of compaction and handoff (autonomy design §G.7): its switch saves at
+ * once (turning on after a confirmation), its thresholds stay local until
+ * Save, which sends one `coordination.set` per changed setting.
+ */
+function MechanismGroup({ mechanism, data, onSaved, styles, theme }: {
+  mechanism: CoordinationMechanism;
+  data: CoordinationSettingsOutput;
+  onSaved: (settings: CoordinationSettingsOutput["settings"]) => void;
+  styles: Styles;
+  theme: Theme;
+}) {
+  const save = useRpc(coordinationSetRpc);
+  const [draft, setDraft] = useState<ThresholdDraft>({});
+  const [asking, setAsking] = useState(false);
+  const { busy, run } = useBusyAction();
+  const [error, setError] = useState<string | null>(null);
+  const settings = data.settings;
+  const view = mechanismCardView({ mechanism, settings, defaults: data.defaults, draft, saving: busy, now: new Date() });
+  const setSwitch = (value: boolean) =>
+    run(
+      async () => {
+        setError(null);
+        const output = await save(mechanism === "compact" ? { key: "compact.enabled", value } : { key: "handoff.enabled", value });
+        onSaved(output.settings);
+        setAsking(false);
+      },
+      (failure) => setError(errorMessageOf(failure)),
+    );
+  return (
+    <MechanismCard
+      view={view}
+      dialog={asking ? turnOnDialog(mechanism, settings) : null}
+      busy={busy}
+      error={error}
+      onToggle={() => {
+        setError(null);
+        if (view.toggle.turnsOn) setAsking(true);
+        else setSwitch(false);
+      }}
+      onConfirm={() => setSwitch(true)}
+      onCancel={() => setAsking(false)}
+      onStep={(key, step) => {
+        setError(null);
+        setDraft((current) => ({ ...current, [key]: stepThreshold(key, thresholdValueOf(settings, current, key), step) }));
+      }}
+      onSave={() =>
+        run(
+          async () => {
+            setError(null);
+            for (const change of changedThresholds(mechanism, settings, draft)) {
+              const output = await save(change);
+              onSaved(output.settings);
+              setDraft((current) => Object.fromEntries(Object.entries(current).filter(([key]) => key !== change.key)) as Partial<Record<ThresholdKey, number>>);
+            }
+          },
+          (failure) => setError(errorMessageOf(failure)),
+        )
+      }
+      onReset={() => {
+        setError(null);
+        setDraft(defaultsDraft(mechanism, data.defaults));
+      }}
+      styles={styles}
+      theme={theme}
+    />
+  );
+}
+
+/**
+ * The review budget per tier (autonomy design §C.4, §G.7; bead `7gxw.12`):
+ * each tier's review calls stay a local draft until Save, which sends one
+ * `coordination.set` per changed tier. Only a Worker created afterwards gets
+ * the new budget.
+ */
+function ReviewBudgetGroup({ data, onSaved, styles, theme }: {
+  data: CoordinationSettingsOutput;
+  onSaved: (settings: CoordinationSettingsOutput["settings"]) => void;
+  styles: Styles;
+  theme: Theme;
+}) {
+  const save = useRpc(coordinationSetRpc);
+  const [draft, setDraft] = useState<ReviewBudgetDraft>({});
+  const { busy, run } = useBusyAction();
+  const [error, setError] = useState<string | null>(null);
+  const settings = data.settings;
+  return (
+    <ReviewBudgetCard
+      view={reviewBudgetCardView({ settings, defaults: data.defaults, draft, saving: busy })}
+      error={error}
+      onStep={(key, step) => {
+        setError(null);
+        setDraft((current) => ({ ...current, [key]: stepReviewBudget(key, reviewBudgetValueOf(settings, current, key), step) }));
+      }}
+      onSave={() =>
+        run(
+          async () => {
+            setError(null);
+            for (const change of changedReviewBudget(settings, draft)) {
+              const output = await save(change);
+              onSaved(output.settings);
+              setDraft((current) => Object.fromEntries(Object.entries(current).filter(([key]) => key !== change.key)) as ReviewBudgetDraft);
+            }
+          },
+          (failure) => setError(errorMessageOf(failure)),
+        )
+      }
+      onReset={() => {
+        setError(null);
+        setDraft(reviewBudgetDefaultsDraft(data.defaults));
+      }}
+      styles={styles}
+      theme={theme}
+    />
+  );
+}
+
+/**
+ * Settings → Coordination (autonomy design §G.7): the owner's settings of how
+ * the Orchestrator coordinates — the advice cadence, then compaction and
+ * handoff, each a card of its own, then the review budget. An edit stays
+ * local until Save.
+ */
+function CoordinationGroup({ data, onSaved, styles, theme }: {
+  data: CoordinationSettingsOutput;
+  onSaved: (settings: CoordinationSettingsOutput["settings"]) => void;
+  styles: Styles;
+  theme: Theme;
+}) {
+  const save = useRpc(coordinationSetRpc);
+  const [draft, setDraft] = useState<number | null>(null);
+  const { busy: saving, run } = useBusyAction();
+  const [error, setError] = useState<string | null>(null);
+  const stored = data.settings.advice.everyFinished;
+  const value = draft ?? stored;
+  const view = adviceCadenceView({ stored, draft: value, defaultValue: data.defaults.advice.everyFinished, saving });
+  const edit = (next: number) => {
+    setError(null);
+    setDraft(next);
+  };
+  return (
+    <View style={{ gap: 10 }}>
+      <AdviceCadenceRow
+        view={view}
+        error={error}
+        onStep={(step) => edit(stepAdviceCadence(value, step))}
+        onReset={() => edit(data.defaults.advice.everyFinished)}
+        onSave={() =>
+          run(
+            async () => {
+              setError(null);
+              const output = await save({ key: "advice.everyFinished", value });
+              onSaved(output.settings);
+              setDraft(null);
+            },
+            (failure) => setError(errorMessageOf(failure)),
+          )
+        }
+        styles={styles}
+        theme={theme}
+      />
+      {COORDINATION_MECHANISMS.map((mechanism) => (
+        <MechanismGroup key={mechanism} mechanism={mechanism} data={data} onSaved={onSaved} styles={styles} theme={theme} />
+      ))}
+      <ReviewBudgetGroup data={data} onSaved={onSaved} styles={styles} theme={theme} />
     </View>
   );
 }
@@ -188,28 +452,28 @@ function SkillsBlock({ status, testing, onTest, onDone, styles, theme }: {
   styles: Styles;
   theme: Theme;
 }) {
-  const runLine = skillsRunLine(status);
+  const now = new Date();
+  const runLine = skillsRunLine(status, now);
   return (
     <>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
         <Text style={[styles.sectionTitle, { flex: 1 }]}>Agent skills</Text>
-        <Pressable
-          accessibilityRole="button"
+        <Button
+          label={testing ? "Testing…" : "Test"}
+          kind="secondary"
           accessibilityLabel="Test the agent skills again"
           accessibilityState={{ disabled: testing, busy: testing }}
           disabled={testing}
           onPress={onTest}
-          style={styles.secondaryButton}
-        >
-          <Text style={styles.secondaryButtonText}>{testing ? "Testing…" : "Test"}</Text>
-        </Pressable>
+          styles={styles}
+        />
       </View>
       {anySkillMissing(status) ? (
         <SkillsInstallBlock command={status.skills.installCommand} onDone={onDone} styles={styles} theme={theme} />
       ) : null}
       {runLine === null ? null : <Text style={[styles.body, { fontSize: 11 }]}>{runLine}</Text>}
       <View style={[styles.card, { gap: 6 }]}>
-        <Text style={styles.body}>{`Checked ${new Date(status.skills.checkedAt).toLocaleTimeString()} · ${skillDirsText(status.skills.dirs)}`}</Text>
+        <Text style={styles.body}>{`Checked ${localTimeText(new Date(status.skills.checkedAt), now)} · ${skillDirsText(status.skills.dirs)}`}</Text>
         {status.skills.skills.map((skill) => (
           <View key={skill.name} style={{ gap: 2 }}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
@@ -218,7 +482,7 @@ function SkillsBlock({ status, testing, onTest, onDone, styles, theme }: {
                 <Chip key={badge.text} badge={badge} styles={styles} theme={theme} />
               ))}
             </View>
-            {skill.problem === null ? null : <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{skill.problem}</Text>}
+            {skill.problem === null ? null : <ToneText tone="danger" styles={styles} theme={theme}>{skill.problem}</ToneText>}
           </View>
         ))}
         <CommandLine label={SKILLS_COMMAND_LABEL} command={status.skills.installCommand} styles={styles} theme={theme} />
@@ -250,13 +514,17 @@ function useSetupStatus() {
   });
 }
 
-export function SettingsScreen({ theme, layout, status: statusStrip }: SettingsScreenProps) {
+export function SettingsScreen({ theme, layout, status: statusStrip, projects = [] }: SettingsScreenProps) {
   const styles = useMemo(() => dashboardStyles(theme, layout.compact), [theme, layout.compact]);
   const ensure = useRpc(setupEnsureRolesRpc);
   const listStored = useRpc(tracesWorkspacesRpc);
   const queryClient = useQueryClient();
   const status = useSetupStatus();
   const stored = useQuery({ queryKey: STORED_WORKSPACES_KEY, queryFn: () => listStored({}) });
+  const readCoordination = useRpc(coordinationSettingsRpc);
+  const coordination = useQuery({ queryKey: COORDINATION_KEY, queryFn: () => readCoordination({}) });
+  const readAutonomy = useRpc(autonomyPolicyRpc);
+  const autonomy = useQuery({ queryKey: AUTONOMY_POLICY_KEY, queryFn: () => readAutonomy({}) });
   const threshold = useSettings(dashboardSettings);
   const warnAboveBytes = threshold.status === "ready" ? threshold.values.warnAboveBytes : DEFAULT_WARN_ABOVE_BYTES;
 
@@ -280,7 +548,8 @@ export function SettingsScreen({ theme, layout, status: statusStrip }: SettingsS
 
   const states: Record<SettingsGroupKey, ReturnType<typeof agentsGroupState>> = {
     agents: agentsGroupState(data, { error: rolesError, cleanedUp }),
-    autonomy: { text: AUTONOMY_COMING, tone: "muted" },
+    autonomy: autonomyGroupState(autonomy.data?.policy, autonomy.isError),
+    coordination: coordinationGroupState(coordination.data?.settings, coordination.isError),
     tools: toolsGroupState(data),
     data: dataGroupState(data, storage, cleanedUp),
   };
@@ -314,9 +583,9 @@ export function SettingsScreen({ theme, layout, status: statusStrip }: SettingsS
       {data === undefined
         ? null
         : paseoToolsWarnings(data).map((warning) => (
-            <Text key={warning} style={[styles.body, { color: toneColor(theme, "warning") }]}>
+            <ToneText key={warning} tone="warning" styles={styles} theme={theme}>
               {warning}
-            </Text>
+            </ToneText>
           ))}
       <RolesSection styles={styles} theme={theme} />
       {data === undefined ? null : <AgentToolsBlockView status={data} onDone={refetch} styles={styles} theme={theme} />}
@@ -327,9 +596,9 @@ export function SettingsScreen({ theme, layout, status: statusStrip }: SettingsS
           {signInRows(data).map((row) => (
             <View key={row.provider} style={{ gap: 2 }}>
               <Text style={styles.body}>{`${row.provider} · ${row.usedBy}`}</Text>
-              <Text style={[styles.body, { color: toneColor(theme, row.tone) }]} selectable>
+              <ToneText tone={row.tone} selectable styles={styles} theme={theme}>
                 {row.text}
-              </Text>
+              </ToneText>
               {row.command === null ? null : <CommandLine label="Run it yourself" command={row.command} styles={styles} theme={theme} />}
             </View>
           ))}
@@ -351,33 +620,23 @@ export function SettingsScreen({ theme, layout, status: statusStrip }: SettingsS
     );
 
   const home = data === undefined ? null : dataHomeLine(data);
-  const banner = data === undefined ? null : migrationBanner(data);
   const dataGroup = (
     <View style={{ gap: 10 }}>
       {home === null ? null : (
-        <Text style={[styles.body, { color: toneColor(theme, home.tone) }]} selectable>
+        <ToneText tone={home.tone} selectable styles={styles} theme={theme}>
           {home.text}
-        </Text>
-      )}
-      {/* This install came from the retired `npx` installer (design §7.13.6). */}
-      {banner === null ? null : (
-        <View style={[styles.card, { gap: 6 }]}>
-          <Text style={[styles.body, { color: toneColor(theme, "warning") }]} selectable>
-            {banner.text}
-          </Text>
-          <CommandLine label="Run it once" command={banner.command} styles={styles} theme={theme} />
-        </View>
+        </ToneText>
       )}
       <Text style={styles.sectionTitle}>Trace storage</Text>
       {stored.isPending ? <ActivityIndicator color={styles.spinner.color} /> : null}
       {stored.isError ? (
-        <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{errorMessageOf(stored.error)}</Text>
+        <ToneText tone="danger" styles={styles} theme={theme}>{errorMessageOf(stored.error)}</ToneText>
       ) : null}
       {storage === null ? null : (
         <>
           <Text style={styles.body}>{storage.summary}</Text>
           {storage.warning === null ? null : (
-            <Text style={[styles.body, { color: toneColor(theme, storage.warning.tone) }]}>{storage.warning.text}</Text>
+            <ToneText tone={storage.warning.tone} styles={styles} theme={theme}>{storage.warning.text}</ToneText>
           )}
           <Text style={[styles.body, { fontSize: 11 }]}>{THRESHOLD_NOTE}</Text>
           <Text style={[styles.body, { fontSize: 11 }]}>{PRIVACY_NOTICE}</Text>
@@ -413,7 +672,42 @@ export function SettingsScreen({ theme, layout, status: statusStrip }: SettingsS
     </View>
   );
 
-  const bodies: Record<SettingsGroupKey, ReactNode> = { agents, autonomy: null, tools, data: dataGroup };
+  const coordinationGroup = coordination.isError ? (
+    <ToneText tone="danger" styles={styles} theme={theme}>{errorMessageOf(coordination.error)}</ToneText>
+  ) : coordination.data === undefined ? (
+    <ActivityIndicator color={styles.spinner.color} />
+  ) : (
+    <CoordinationGroup
+      data={coordination.data}
+      onSaved={(settings) =>
+        queryClient.setQueryData<CoordinationSettingsOutput>(COORDINATION_KEY, (current) => (current === undefined ? current : { ...current, settings }))
+      }
+      styles={styles}
+      theme={theme}
+    />
+  );
+
+  const autonomyGroup = autonomy.isError ? (
+    <ToneText tone="danger" styles={styles} theme={theme}>{errorMessageOf(autonomy.error)}</ToneText>
+  ) : autonomy.data === undefined ? (
+    <ActivityIndicator color={styles.spinner.color} />
+  ) : (
+    <AutonomyGroup
+      policy={autonomy.data.policy}
+      projects={projects}
+      onSaved={(policy) => queryClient.setQueryData<AutonomyPolicyOutput>(AUTONOMY_POLICY_KEY, { policy })}
+      styles={styles}
+      theme={theme}
+    />
+  );
+
+  const bodies: Record<SettingsGroupKey, ReactNode> = {
+    agents,
+    autonomy: autonomyGroup,
+    coordination: coordinationGroup,
+    tools,
+    data: dataGroup,
+  };
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
@@ -421,7 +715,7 @@ export function SettingsScreen({ theme, layout, status: statusStrip }: SettingsS
       {statusStrip}
       {status.isPending ? <ActivityIndicator color={styles.spinner.color} /> : null}
       {status.isError ? (
-        <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{errorMessageOf(status.error)}</Text>
+        <ToneText tone="danger" styles={styles} theme={theme}>{errorMessageOf(status.error)}</ToneText>
       ) : null}
       {SETTINGS_GROUPS.map((group) => {
         const expanded = open.has(group.key);

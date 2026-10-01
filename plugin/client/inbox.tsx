@@ -3,9 +3,10 @@
  * Manager opens. What it shows and in which order is `inbox-model.ts`; this
  * file reads the data and draws it.
  *
- * - `useInbox` reads `decisions.list {scope: inbox}`, `inbox.alerts` and
- *   `fallback.incidents` every `INBOX_POLL_MS` **only while the Inbox is
- *   shown** (REQ-111 b), and keeps the last read otherwise, so the Inbox tab's
+ * - `useInbox` reads `decisions.list {scope: inbox}`, `inbox.alerts`,
+ *   `fallback.incidents` and Decided for you (`inbox.seen`, then
+ *   `inbox.digest` from the time it answers) every `INBOX_POLL_MS` **only
+ *   while the Inbox is shown** (REQ-111 b), and keeps the last read otherwise, so the Inbox tab's
  *   count stays on the other sections. The surface calls it, because the tab
  *   bar is the surface's. Each read of the list is written into every
  *   decision's own query (`decisionQueryKey`), so the Inbox's cards read
@@ -16,6 +17,11 @@
  *   confirmation.
  * - Above them, the Orchestrator line (`orchestrator-line.tsx`): the way into
  *   the Orchestrator's chat, or to start it.
+ * - Decided for you (autonomy design §B.7): one line per decision answered
+ *   for the owner, with **Override** — one press, `decisions.override` — after
+ *   which the decision is back in Needs you as the owner's; merged with them
+ *   by time, one line per intervention of the Orchestrator's (§G.3, bead
+ *   `t9lm.23`) with its outcome, and no Override.
  *
  * Layout: `layout.compact` (a phone) gives the tighter paddings and type of
  * `dashboardStyles`, and puts an alert's action under its line; a wide screen
@@ -32,21 +38,27 @@ import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-nati
 import {
   chatPeersRpc,
   decisionsListRpc,
+  decisionsOverrideRpc,
   fallbackActRpc,
   fallbackIncidentsRpc,
   inboxAlertsRpc,
+  inboxDigestRpc,
+  inboxSeenRpc,
   managerEnsureRpc,
   workspacesOverviewRpc,
   type ChatPeer,
 } from "../shared/contracts";
 import type { Decision } from "../shared/decisions";
 import { DecisionCard, decisionQueryKey } from "./chat-card";
-import { dashboardStyles, toneColor } from "./dashboard-model";
+import { dashboardStyles } from "./styles";
 import { OVERVIEW_POLL_MS } from "./surface-view";
 import {
+  DECIDED_FOR_YOU_TRUNCATED,
   INBOX_POLL_MS,
+  INTERVENTIONS_TRUNCATED,
   inboxView,
   sectionHeading,
+  type DigestRow,
   type FallbackOutcome,
   type InboxAction,
   type InboxAlertRow,
@@ -54,9 +66,9 @@ import {
   type InboxInput,
   type InboxView,
 } from "./inbox-model";
-import { errorMessageOf } from "./launch-manager";
+import { errorMessageOf } from "./errors";
 import { OrchestratorLine } from "./orchestrator-line";
-import type { Styles, Theme } from "./ui";
+import { Button, ToneText, type Styles, type Theme } from "./ui";
 
 /** Peers change rarely; one lookup per project group is plenty. */
 const PEERS_STALE_MS = 30_000;
@@ -65,6 +77,7 @@ export const inboxQueryKeys = {
   decisions: ["paseo-bm", "inbox", "decisions"] as const,
   alerts: ["paseo-bm", "inbox", "alerts"] as const,
   incidents: ["paseo-bm", "inbox", "incidents"] as const,
+  digest: ["paseo-bm", "inbox", "digest"] as const,
 };
 
 /** A Resend (per incident) or Replace Manager (per workspace) press in flight, or its error. */
@@ -82,6 +95,9 @@ export interface InboxData {
   /** Replaces the workspace's outdated Manager, then hands the new Manager's id to `onReplaced`. */
   replaceManager: (workspaceId: string, onReplaced: (agentId: string) => void) => void;
   replacing: ResendState;
+  /** Overrides a decision answered for the owner (autonomy design §B.7): it comes back to Needs you. */
+  override: (decisionId: string) => void;
+  overriding: ResendState;
 }
 
 function pollWhile(visible: boolean, every: number) {
@@ -108,9 +124,13 @@ export function useInbox({
   const listOverview = useRpc(workspacesOverviewRpc);
   const act = useRpc(fallbackActRpc);
   const ensureManager = useRpc(managerEnsureRpc);
+  const markSeen = useRpc(inboxSeenRpc);
+  const readDigest = useRpc(inboxDigestRpc);
+  const overrideDecision = useRpc(decisionsOverrideRpc);
   const [settledHere, setSettledHere] = useState<Decision[]>([]);
   const [resending, setResending] = useState<ResendState>({});
   const [replacing, setReplacing] = useState<ResendState>({});
+  const [overriding, setOverriding] = useState<ResendState>({});
 
   // Leaving the Inbox lets the cards settled in it go.
   useEffect(() => {
@@ -129,6 +149,23 @@ export function useInbox({
   });
   const alerts = useQuery({ queryKey: inboxQueryKeys.alerts, queryFn: () => listAlerts({}), ...pollWhile(visible, INBOX_POLL_MS) });
   const incidents = useQuery({ queryKey: inboxQueryKeys.incidents, queryFn: () => listIncidents({}), ...pollWhile(visible, INBOX_POLL_MS) });
+  // Autonomy design §B.7: each read while shown records the showing (`inbox.seen`), which answers where this
+  // visit's digest starts; without it, the digest reads everything decided for the owner (at most its cap).
+  const digest = useQuery({
+    queryKey: inboxQueryKeys.digest,
+    queryFn: async () => {
+      let since: string | null = null;
+      let seenError: string | null = null;
+      try {
+        since = (await markSeen({})).since;
+      } catch (error) {
+        seenError = errorMessageOf(error);
+      }
+      const read = await readDigest(since === null ? {} : { since });
+      return { ...read, since, seenError };
+    },
+    ...pollWhile(visible, INBOX_POLL_MS),
+  });
 
   const base = {
     decisions: decisions.data?.decisions ?? [],
@@ -136,6 +173,11 @@ export function useInbox({
     alerts: alerts.data?.alerts ?? [],
     alertsTruncated: alerts.data?.truncated ?? false,
     incidents: incidents.data?.incidents ?? [],
+    digest: digest.data?.decisions ?? [],
+    digestTruncated: digest.data?.truncated ?? false,
+    interventions: digest.data?.interventions ?? [],
+    interventionsTruncated: digest.data?.interventionsTruncated ?? false,
+    digestSince: digest.data?.since ?? null,
     projectOf,
     can,
     now: new Date(),
@@ -154,6 +196,8 @@ export function useInbox({
     decisions.isError ? `Could not read the decisions: ${errorMessageOf(decisions.error)}` : null,
     alerts.isError ? `Could not read the alerts: ${errorMessageOf(alerts.error)}` : null,
     incidents.isError ? `Could not read the fallback incidents: ${errorMessageOf(incidents.error)}` : null,
+    digest.isError ? `Could not read what was decided for you: ${errorMessageOf(digest.error)}` : null,
+    digest.data?.seenError == null ? null : `Could not record that you looked: ${digest.data.seenError}`,
   ].filter((line) => line !== null);
 
   const resend = (incidentId: string) => {
@@ -187,6 +231,21 @@ export function useInbox({
     );
   };
 
+  const override = (decisionId: string) => {
+    setOverriding((current) => ({ ...current, [decisionId]: { busy: true, error: null } }));
+    overrideDecision({ id: decisionId }).then(
+      () => {
+        setOverriding((current) => Object.fromEntries(Object.entries(current).filter(([id]) => id !== decisionId)));
+        void queryClient.invalidateQueries({ queryKey: inboxQueryKeys.decisions });
+        void queryClient.invalidateQueries({ queryKey: inboxQueryKeys.digest });
+      },
+      (error: unknown) => {
+        setOverriding((current) => ({ ...current, [decisionId]: { busy: false, error: `Could not override: ${errorMessageOf(error)}` } }));
+        void queryClient.invalidateQueries({ queryKey: inboxQueryKeys.digest });
+      },
+    );
+  };
+
   return {
     view: decisions.data === undefined ? null : inboxView({ ...base, runningWorkers }),
     errors,
@@ -195,6 +254,8 @@ export function useInbox({
     resending,
     replaceManager,
     replacing,
+    override,
+    overriding,
   };
 }
 
@@ -224,16 +285,16 @@ export function InboxActionButton({
   styles: Styles;
 }) {
   return (
-    <Pressable
-      accessibilityRole="button"
+    <Button
+      label={busy ? "Sending…" : action.label}
+      kind="secondary"
       accessibilityLabel={action.accessibilityLabel}
       accessibilityState={{ disabled: busy, busy }}
       disabled={busy}
       onPress={() => onRun(action)}
-      style={[styles.secondaryButton, { opacity: busy ? 0.5 : 1 }]}
-    >
-      <Text style={styles.secondaryButtonText}>{busy ? "Sending…" : action.label}</Text>
-    </Pressable>
+      style={{ opacity: busy ? 0.5 : 1 }}
+      styles={styles}
+    />
   );
 }
 
@@ -253,15 +314,15 @@ export function OutcomeLine({
 }) {
   return (
     <View style={{ gap: 6, marginBottom: 4 }}>
-      <Text accessibilityLiveRegion="polite" style={[styles.body, { color: toneColor(theme, outcome.tone) }]}>
+      <ToneText tone={outcome.tone} accessibilityLiveRegion="polite" styles={styles} theme={theme}>
         {outcome.text}
-      </Text>
+      </ToneText>
       {outcome.action === null ? null : (
         <View style={styles.chipRow}>
           <InboxActionButton action={outcome.action} busy={resend?.busy === true} onRun={onRun} styles={styles} />
         </View>
       )}
-      {resend?.error == null ? null : <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{resend.error}</Text>}
+      {resend?.error == null ? null : <ToneText tone="danger" styles={styles} theme={theme}>{resend.error}</ToneText>}
     </View>
   );
 }
@@ -299,7 +360,7 @@ export function AlertRow({
           onPress={onToggle}
           style={{ flex: compact ? undefined : 1, flexDirection: "row", gap: 6 }}
         >
-          <Text style={[styles.body, { color: toneColor(theme, row.tone) }]}>●</Text>
+          <ToneText tone={row.tone} styles={styles} theme={theme}>●</ToneText>
           <Text style={[styles.body, { flex: 1, color: theme.colors.foreground }]} numberOfLines={expanded ? undefined : 2}>
             {row.text}
           </Text>
@@ -311,7 +372,104 @@ export function AlertRow({
           </View>
         )}
       </View>
-      {resend?.error == null ? null : <Text style={[styles.body, { color: toneColor(theme, "danger") }]}>{resend.error}</Text>}
+      {resend?.error == null ? null : <ToneText tone="danger" styles={styles} theme={theme}>{resend.error}</ToneText>}
+      {expanded ? (
+        <View style={[styles.card, { backgroundColor: theme.colors.surface0, gap: 4 }]}>
+          {row.details.map((line, index) => (
+            <Text key={`${index}:${line}`} style={styles.mono} selectable>
+              {line}
+            </Text>
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+/**
+ * One line of Decided for you (autonomy design §B.7): what was decided · the
+ * project · who decided, its time, the reason under it, and **Override** at
+ * the end of the line (under it on a phone) — or, once overridden, what
+ * became of it. The ids and times on a tap. `busy` greys the button while
+ * its call runs; `error` is said under the line.
+ *
+ * An intervention of the Orchestrator's (§G.3) is drawn the same way with
+ * its own mark, what it did and for whom, the project, why, and its outcome
+ * in the outcome's colour — and nothing to press but the line: it has no
+ * Override. A decision the Orchestrator answered carries its outcome too.
+ */
+export function DigestRowView({
+  row,
+  expanded,
+  onToggle,
+  onOverride,
+  state,
+  compact,
+  styles,
+  theme,
+}: {
+  row: DigestRow;
+  expanded: boolean;
+  onToggle: () => void;
+  onOverride: (decisionId: string) => void;
+  state: { busy: boolean; error: string | null } | undefined;
+  compact: boolean;
+  styles: Styles;
+  theme: Theme;
+}) {
+  const busy = state?.busy === true;
+  const override = row.kind === "decision" ? row.override : null;
+  return (
+    <View style={[styles.card, { gap: 6 }]}>
+      <View style={{ flexDirection: compact ? "column" : "row", alignItems: compact ? "stretch" : "center", gap: 8 }}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`${row.accessibilityLabel}. ${expanded ? "Hide" : "Show"} the details`}
+          accessibilityState={{ expanded }}
+          onPress={onToggle}
+          style={{ flex: compact ? undefined : 1, gap: 2 }}
+        >
+          <View style={{ flexDirection: "row", gap: 6 }}>
+            <ToneText tone="info" styles={styles} theme={theme}>{row.kind === "decision" ? "✓" : "↪"}</ToneText>
+            <Text style={[styles.body, { flex: 1, color: theme.colors.foreground }]} numberOfLines={expanded ? undefined : 2}>
+              {row.what}
+            </Text>
+            <Text style={styles.body}>{`${row.time} ${expanded ? "▾" : "▸"}`}</Text>
+          </View>
+          <Text style={styles.body} numberOfLines={expanded ? undefined : 1}>
+            {row.where}
+          </Text>
+          {row.reason === null ? null : (
+            <Text style={styles.body} numberOfLines={expanded ? undefined : 2}>
+              {row.reason}
+            </Text>
+          )}
+          {row.outcome === null ? null : (
+            <ToneText tone={row.outcome.tone} styles={styles} theme={theme}>
+              {row.outcome.text}
+            </ToneText>
+          )}
+        </Pressable>
+        {row.kind === "intervention" || override === null ? null : override.state === "offered" ? (
+          <View style={styles.chipRow}>
+            <Button
+              label={busy ? "Overriding…" : override.label}
+              kind="secondary"
+              accessibilityLabel={override.accessibilityLabel}
+              accessibilityState={{ disabled: busy, busy }}
+              disabled={busy}
+              onPress={() => onOverride(row.decisionId)}
+              style={{ opacity: busy ? 0.5 : 1 }}
+              styles={styles}
+            />
+          </View>
+        ) : (
+          <ToneText tone={override.tone} accessibilityLiveRegion="polite" styles={styles} theme={theme}>
+            {override.text}
+          </ToneText>
+        )}
+      </View>
+      {state?.error == null ? null : <ToneText tone="danger" styles={styles} theme={theme}>{state.error}</ToneText>}
       {expanded ? (
         <View style={[styles.card, { backgroundColor: theme.colors.surface0, gap: 4 }]}>
           {row.details.map((line, index) => (
@@ -333,9 +491,7 @@ export function EmptyInbox({ sentence, onOpenWork, styles }: { sentence: string;
         {sentence}
       </Text>
       <View style={styles.chipRow}>
-        <Pressable accessibilityRole="button" accessibilityLabel="Open Work: the projects and their requests" onPress={onOpenWork} style={styles.secondaryButton}>
-          <Text style={styles.secondaryButtonText}>Open Work</Text>
-        </Pressable>
+        <Button label="Open Work" kind="secondary" accessibilityLabel="Open Work: the projects and their requests" onPress={onOpenWork} styles={styles} />
       </View>
     </View>
   );
@@ -436,9 +592,9 @@ export function InboxScreen({ theme, layout, navigation, data, status, onOpenWor
         {status}
         <OrchestratorLine navigation={navigation} styles={styles} theme={theme} />
         {data.errors.map((line) => (
-          <Text key={line} style={[styles.body, { color: toneColor(theme, "danger") }]}>
+          <ToneText key={line} tone="danger" styles={styles} theme={theme}>
             {line}
-          </Text>
+          </ToneText>
         ))}
         {view === null ? (
           data.errors.length === 0 ? <ActivityIndicator color={styles.spinner.color} accessibilityLabel="Reading the Inbox" /> : null
@@ -460,8 +616,23 @@ export function InboxScreen({ theme, layout, navigation, data, status, onOpenWor
               />
             ))}
 
-            <InboxHeading text="Decided for you" styles={styles} />
-            <Text style={styles.body}>{view.decidedForYou.empty}</Text>
+            <InboxHeading text={sectionHeading("Decided for you", view.decidedForYou.count)} styles={styles} />
+            {view.decidedForYou.empty === null ? null : <Text style={styles.body}>{view.decidedForYou.empty}</Text>}
+            {view.decidedForYou.rows.map((row) => (
+              <DigestRowView
+                key={row.key}
+                row={row}
+                expanded={expanded.has(row.key)}
+                onToggle={() => toggle(row.key)}
+                onOverride={data.override}
+                state={row.kind === "decision" ? data.overriding[row.decisionId] : undefined}
+                compact={layout.compact}
+                styles={styles}
+                theme={theme}
+              />
+            ))}
+            {view.decidedForYou.truncated ? <Text style={styles.body}>{DECIDED_FOR_YOU_TRUNCATED}</Text> : null}
+            {view.decidedForYou.interventionsTruncated ? <Text style={styles.body}>{INTERVENTIONS_TRUNCATED}</Text> : null}
 
             <InboxHeading text={sectionHeading("Alerts", view.alerts.count)} styles={styles} />
             {view.alerts.rows.length === 0 ? <Text style={styles.body}>No alerts.</Text> : null}

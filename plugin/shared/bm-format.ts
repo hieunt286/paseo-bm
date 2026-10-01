@@ -16,6 +16,7 @@
  * and the server (BM-FORMAT notice) import it alike.
  */
 import { BEAD_ID } from "./bm-report";
+import { shorten } from "./text";
 
 export type BlockKind = "BM-REPORT" | "BM-QUESTIONS" | "BM-ANSWERS" | "BM-REVIEW";
 
@@ -44,6 +45,8 @@ const FIELD = /^([A-Za-z][A-Za-z0-9]*):(?:\s(.*))?$/;
 const REQUEST_ID = /^req-\d{8}T\d{6}Z$/;
 const PLACEHOLDER = /^<[^>]*>$/;
 const DASH = "(?:—|–|-)";
+/** The longest line or value an issue quotes. */
+const QUOTED_CHARS = 60;
 
 export const REPORT_FIELDS = [
   "requestId",
@@ -60,8 +63,15 @@ export const REPORT_FIELDS = [
   "decided",
   "blockers",
 ] as const;
-/** Fields a report may leave out: `decided` came later, and older Workers never write it. */
-const OPTIONAL_REPORT_FIELDS: ReadonlySet<string> = new Set(["decided"]);
+/**
+ * The field a report may add after the template's last one: the handoff note
+ * the plugin asks an outgoing Worker for (`BM-HANDOFF`, autonomy design §G.6).
+ */
+const HANDOFF_NOTE_FIELD = "handoffNote";
+/** Every field a report may carry, in order. */
+const KNOWN_REPORT_FIELDS: readonly string[] = [...REPORT_FIELDS, HANDOFF_NOTE_FIELD];
+/** Fields a report may leave out: `decided` came later, and older Workers never write it; `handoffNote` only when asked. */
+const OPTIONAL_REPORT_FIELDS: ReadonlySet<string> = new Set(["decided", HANDOFF_NOTE_FIELD]);
 const PHASES = ["received", "beads-done", "blocked", "finished"];
 const TIER_SHELL = /^(?:Small|Medium|Large) \(changed: ([\s\S]+)\)$/;
 /**
@@ -226,21 +236,16 @@ function fieldsOf(lines: readonly string[]): Array<{ key: string | null; value: 
   });
 }
 
-function shorten(line: string): string {
-  const flat = line.trim();
-  return flat.length > 60 ? `${flat.slice(0, 57)}…` : flat;
-}
-
 function checkReport(block: RawBlock, questions: RawBlock | undefined, issue: (field: string | null, message: string) => void): string | null {
   const fields = fieldsOf(block.lines);
   const seen = new Map<string, string>();
   const order: string[] = [];
   for (const { key, value, line } of fields) {
     if (key === null) {
-      issue(null, `line "${shorten(line)}" is not a field of the template`);
+      issue(null, `line "${shorten(line, QUOTED_CHARS)}" is not a field of the template`);
       continue;
     }
-    if (!(REPORT_FIELDS as readonly string[]).includes(key)) {
+    if (!KNOWN_REPORT_FIELDS.includes(key)) {
       issue(key, "is not a field of the template");
       continue;
     }
@@ -252,16 +257,16 @@ function checkReport(block: RawBlock, questions: RawBlock | undefined, issue: (f
     order.push(key);
   }
   for (const key of REPORT_FIELDS) if (!seen.has(key) && !OPTIONAL_REPORT_FIELDS.has(key)) issue(key, "is missing");
-  const expected = REPORT_FIELDS.filter((key) => seen.has(key));
+  const expected = KNOWN_REPORT_FIELDS.filter((key) => seen.has(key));
   const outOfPlace = order.findIndex((key, position) => key !== expected[position]);
   if (outOfPlace !== -1) {
     issue(null, `fields must follow the template order (${REPORT_FIELDS.join(", ")}); "${order[outOfPlace]}" is out of place`);
   }
 
   const requestId = seen.get("requestId");
-  if (requestId !== undefined && !REQUEST_ID.test(requestId)) issue("requestId", `must look like req-YYYYMMDDTHHMMSSZ (got "${shorten(requestId)}")`);
+  if (requestId !== undefined && !REQUEST_ID.test(requestId)) issue("requestId", `must look like req-YYYYMMDDTHHMMSSZ (got "${shorten(requestId, QUOTED_CHARS)}")`);
   const phase = seen.get("phase");
-  if (phase !== undefined && !PHASES.includes(phase)) issue("phase", `must be one of ${PHASES.join(", ")} (got "${shorten(phase)}")`);
+  if (phase !== undefined && !PHASES.includes(phase)) issue("phase", `must be one of ${PHASES.join(", ")} (got "${shorten(phase, QUOTED_CHARS)}")`);
   const tier = seen.get("tier");
   if (tier !== undefined && !tierIsWellFormed(tier)) {
     issue("tier", 'must be "Small|Medium|Large (changed: no)" or "… (changed: from <tier>, <reason>)"; a short note may follow either');
@@ -274,7 +279,7 @@ function checkReport(block: RawBlock, questions: RawBlock | undefined, issue: (f
       continue;
     }
     const bad = value.split(",").map((part) => part.trim()).filter((part) => !BEAD_ID.test(part) || /^\.\d/.test(part));
-    if (bad.length > 0) issue(key, `must be none or full bead ids separated by commas ("${shorten(bad[0]!)}" is not one)`);
+    if (bad.length > 0) issue(key, `must be none or full bead ids separated by commas ("${shorten(bad[0]!, QUOTED_CHARS)}" is not one)`);
   }
   const skills = seen.get("skillsUsed");
   if (skills !== undefined && !isNone(skills) && skills.split(",").some((part) => !SKILL.test(part.trim()))) {
@@ -284,7 +289,7 @@ function checkReport(block: RawBlock, questions: RawBlock | undefined, issue: (f
   if (findings !== undefined && !isNoneWithNote(findings) && splitTopLevel(findings, ";").some((part) => !FINDING_OPEN.test(part.trim()))) {
     issue("reviewFindingsOpen", 'must be none or "b<n>: <finding>" items separated by ";" — write none when no finding is open');
   }
-  for (const key of ["filesChanged", "buildAndTests", "decided", "blockers"]) {
+  for (const key of ["filesChanged", "buildAndTests", "decided", "blockers", HANDOFF_NOTE_FIELD]) {
     if (seen.get(key) === "") issue(key, "is empty; write none");
   }
 
@@ -315,7 +320,7 @@ function checkQuestions(block: RawBlock, reportRequestId: string | null, issue: 
     issue("requestId", "must be the first line of the block");
   } else {
     requestId = (head[2] ?? "").trim();
-    if (!REQUEST_ID.test(requestId)) issue("requestId", `must look like req-YYYYMMDDTHHMMSSZ (got "${shorten(requestId)}")`);
+    if (!REQUEST_ID.test(requestId)) issue("requestId", `must look like req-YYYYMMDDTHHMMSSZ (got "${shorten(requestId, QUOTED_CHARS)}")`);
     else if (reportRequestId !== null && requestId !== reportRequestId) issue("requestId", `must equal the report's ${reportRequestId}`);
   }
   const body = head !== null && head[1] === "requestId" ? rest : block.lines;
@@ -331,7 +336,7 @@ function checkQuestions(block: RawBlock, reportRequestId: string | null, issue: 
       questions.at(-1)!.options.push(line);
       continue;
     }
-    issue(null, `line "${shorten(line)}" is neither "Q<n>: <question>" nor "- <letter>: <option>"`);
+    issue(null, `line "${shorten(line, QUOTED_CHARS)}" is neither "Q<n>: <question>" nor "- <letter>: <option>"`);
   }
   if (questions.length < 1 || questions.length > 5) issue(null, `needs 1 to 5 questions (found ${questions.length})`);
   const seen = new Set<string>();
@@ -359,14 +364,14 @@ function checkAnswers(block: RawBlock, issue: (field: string | null, message: st
   if (head === null || head[1] !== "requestId") issue("requestId", "must be the first line of the block");
   else {
     requestId = (head[2] ?? "").trim();
-    if (!REQUEST_ID.test(requestId)) issue("requestId", `must look like req-YYYYMMDDTHHMMSSZ (got "${shorten(requestId)}")`);
+    if (!REQUEST_ID.test(requestId)) issue("requestId", `must look like req-YYYYMMDDTHHMMSSZ (got "${shorten(requestId, QUOTED_CHARS)}")`);
   }
   const body = head !== null && head[1] === "requestId" ? rest : block.lines;
   const seen = new Set<string>();
   for (const line of body) {
     const answer = ANSWER.exec(line);
     if (answer === null) {
-      issue(null, `line "${shorten(line)}" must be "Q<n>: <letter> — <option>" or "Q<n>: other — <words>"`);
+      issue(null, `line "${shorten(line, QUOTED_CHARS)}" must be "Q<n>: <letter> — <option>" or "Q<n>: other — <words>"`);
       continue;
     }
     const id = `Q${answer[1]}`;
@@ -401,7 +406,7 @@ function checkReview(block: RawBlock, issue: (field: string | null, message: str
     if (!inFindings && PROSE_REVIEW_FIELDS.has(lastField ?? "") && /^\s+\S/.test(line)) continue;
     const field = FIELD.exec(line);
     if (field === null) {
-      issue(null, `line "${shorten(line)}" is not a field of the template`);
+      issue(null, `line "${shorten(line, QUOTED_CHARS)}" is not a field of the template`);
       continue;
     }
     const key = field[1]!;
@@ -413,9 +418,9 @@ function checkReview(block: RawBlock, issue: (field: string | null, message: str
   }
   for (const key of REVIEW_FIELDS) if (!seen.has(key)) issue(key, "is missing");
   const requestId = seen.get("requestId");
-  if (requestId !== undefined && !REQUEST_ID.test(requestId)) issue("requestId", `must look like req-YYYYMMDDTHHMMSSZ (got "${shorten(requestId)}")`);
+  if (requestId !== undefined && !REQUEST_ID.test(requestId)) issue("requestId", `must look like req-YYYYMMDDTHHMMSSZ (got "${shorten(requestId, QUOTED_CHARS)}")`);
   const batchId = seen.get("batchId");
-  if (batchId !== undefined && !/^b\d+$/.test(batchId)) issue("batchId", `must look like b<n> (got "${shorten(batchId)}")`);
+  if (batchId !== undefined && !/^b\d+$/.test(batchId)) issue("batchId", `must look like b<n> (got "${shorten(batchId, QUOTED_CHARS)}")`);
   const kind = seen.get("reviewKind");
   if (kind !== undefined && kind !== "first" && kind !== "re-review") issue("reviewKind", "must be first or re-review");
   const verdict = seen.get("verdict");

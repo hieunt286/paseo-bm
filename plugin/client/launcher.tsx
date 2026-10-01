@@ -43,11 +43,11 @@ import {
   type SurfaceView,
   type SurfaceWorkspace,
 } from "./surface-view";
-import { dashboardStyles, toneColor, type Tone } from "./dashboard-model";
+import { dashboardStyles } from "./styles";
+import { toneColor, type Tone } from "./tone";
 import { managerEnsureRpc, tracesWorkspacesRpc, workspacesOverviewRpc } from "../shared/contracts";
 import { PLUGIN_VERSION } from "../shared/version";
 import {
-  errorMessageOf,
   launcherStatusLines,
   launcherStyles,
   launchRequests,
@@ -55,6 +55,7 @@ import {
   runPendingRequest,
   type StatusLine,
 } from "./launch-manager";
+import { errorMessageOf } from "./errors";
 
 interface WorkspaceRow {
   id: string;
@@ -423,8 +424,11 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
   }
 
   if (view === "settings") {
-    // Settings (experience concept §4.4): Agents · Autonomy · Tools & skills · Data.
-    return framed(<SettingsScreen {...props} status={status} />);
+    // Settings (experience concept §4.4): Agents · Autonomy · Coordination · Tools & skills · Data;
+    // the Autonomy matrix names projects as Insights does.
+    return framed(
+      <SettingsScreen {...props} projects={insightsProjects(workspaces.data ?? [], stored.data?.workspaces ?? [])} status={status} />,
+    );
   }
 
   const projectTab = projectTabOf(view);

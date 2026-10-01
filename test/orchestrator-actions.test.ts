@@ -1,32 +1,31 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  handleOrchestratorSetAutopilot,
   handleOrchestratorState,
   workPhaseOf,
-  type OrchestratorActionsDeps,
-  type OrchestratorActionsPaseo,
-} from "../plugin/server/orchestrator-actions";
+  type OrchestratorStateDeps,
+  type OrchestratorStatePaseo,
+} from "../plugin/server/orchestrator-state";
 import { toolsStaleSince } from "../plugin/server/agent-tools";
 import { ORCHESTRATOR_INSTRUCTIONS_HASH } from "../plugin/server/orchestrator-agent";
-import { createOrchestratorStore, type OrchestratorStore, type SentCommandInput } from "../plugin/server/orchestrator-store";
+import { ORCHESTRATOR_DIR_NAME, createOrchestratorStore, type OrchestratorStore, type SentCommandInput } from "../plugin/server/orchestrator-store";
 import { createAlertStore } from "../plugin/server/alert-store";
 import { alertKeyOf } from "../plugin/shared/alerts";
 import { registerOrchestratorRpcs } from "../plugin/server/orchestrator-rpc";
 import { appendRecord, clearTraceStoreCache, writeWorkspaceMeta } from "../plugin/server/trace-store";
-import { ASSESSMENT_CRITERIA } from "../plugin/shared/bm-assessment";
-import { DASHBOARD_ERROR_CODES, DashboardError, orchestratorSetAutopilotRpc, type TraceRecord } from "../plugin/shared/contracts";
-import { WORKFLOW_ASSESSMENT_TRACE_ID } from "../plugin/shared/orchestrator";
+import { DashboardError, type TraceRecord } from "../plugin/shared/contracts";
 import { msg, report, turn } from "./fixtures/orchestrator-traces";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 /**
- * The Orchestrator's read and switch RPCs (Orchestrator design §8): `state`
- * and `set-autopilot`, against a fake Paseo SDK, a private notice queue and a
- * temporary data folder named by `PASEO_BM_HOME` — never the real HOME or a
- * daemon. The tab's approve, dismiss, command, ask and assess-workflow are
- * retired with the tab (autonomy design §A.14).
+ * The Orchestrator's read RPC (Orchestrator design §8): `state`, against a
+ * fake Paseo SDK, a private notice queue and a temporary data folder named by
+ * `PASEO_BM_HOME` — never the real HOME or a daemon. The tab's approve,
+ * dismiss, command, ask and assess-workflow are retired with the tab (autonomy
+ * design §A.14), `set-autopilot` with Autopilot (§B.8), and `apply-suggestion`
+ * and the workflow assessment with the additional instructions (§B.8, §B.9).
  */
 
 const NOW = new Date("2026-09-26T12:00:00.000Z");
@@ -69,33 +68,12 @@ const orchestratorAgent = (extra: Partial<FakeAgent> = {}): FakeAgent => ({
   ...extra,
 });
 
-/** A fake SDK: `send` records, `refresh` answers from the table, `list` counts its calls. */
-function fakePaseo(initial: FakeAgent[], workspaces: Array<Record<string, unknown>> = []) {
-  const agents = [...initial];
-  const sends: Array<{ id: string; text: string }> = [];
-  const byId = (id: string) => agents.find((agent) => agent.id === id);
-  const paseo = {
-    agents: {
-      list: vi.fn(async () => ({ entries: agents.map((agent) => ({ agent: { ...agent } })) })),
-      ref: vi.fn((id: string) => ({
-        refresh: async () => {
-          const agent = byId(id);
-          return { agent: agent === undefined ? null : { status: agent.status, archivedAt: agent.archivedAt ?? null } };
-        },
-        send: vi.fn(async (text: string) => {
-          sends.push({ id, text });
-        }),
-      })),
-    },
-    workspaces: { list: vi.fn(async () => ({ entries: workspaces })) },
-    config: { get: vi.fn(async () => ({ config: {} })) },
-  };
-  return { paseo: paseo as unknown as OrchestratorActionsPaseo, raw: paseo, agents, sends, byId };
-}
+/** The shared fake SDK holding these agents and workspaces, typed as the state handler takes it. */
+const daemonWith = (agents: FakeAgent[], workspaces: Array<Record<string, unknown>> = []) => fakePaseo<OrchestratorStatePaseo>({ agents, workspaces });
 
 let root: string;
 let home: string;
-let deps: OrchestratorActionsDeps;
+let deps: OrchestratorStateDeps;
 
 const location = () => ({ tracesDir: join(home, "traces") });
 const storeOf = (): OrchestratorStore => createOrchestratorStore(home, { now: () => NOW });
@@ -122,7 +100,6 @@ function sentCommand(store: OrchestratorStore, over: Partial<SentCommandInput> =
     situation: "",
     command: "Go on.",
     reason: "",
-    source: "autopilot",
     sentText: "Go on.",
     outcome: "sent",
     ...over,
@@ -144,102 +121,10 @@ afterEach(() => {
 // ── Error codes ─────────────────────────────────────────────────────────────
 
 describe("error codes and registration (design §8)", () => {
-  it("registers E_AUTOPILOT_NOT_CONFIRMED", () => {
-    expect(DASHBOARD_ERROR_CODES).toContain("E_AUTOPILOT_NOT_CONFIRMED");
-  });
-
-  it("the contract refuses Autopilot on without its dialog, and a workspace id the store would refuse", () => {
-    expect(orchestratorSetAutopilotRpc.input.safeParse({ workspaceId: WS, enabled: true, confirmed: false }).success).toBe(false);
-    expect(orchestratorSetAutopilotRpc.input.safeParse({ workspaceId: "../x", enabled: false }).success).toBe(false);
-  });
-
-  it("registers state, set-autopilot, open-preview, open and apply-suggestion, and none of the retired tab's RPCs", () => {
+  it("registers state, open-preview and open, and nothing else", () => {
     const names: string[] = [];
     registerOrchestratorRpcs({ handle: (rpc: { name: string }) => names.push(rpc.name) } as never, deps);
-    expect(names.sort()).toEqual([
-      "orchestrator.apply-suggestion",
-      "orchestrator.open",
-      "orchestrator.open-preview",
-      "orchestrator.set-autopilot",
-      "orchestrator.state",
-    ]);
-  });
-});
-
-// ── set-autopilot ───────────────────────────────────────────────────────────
-
-describe("orchestrator.set-autopilot (design §6A, §8)", () => {
-  const settingsPath = () => join(home, "orchestrator", "settings.json");
-
-  it("refuses to turn Autopilot on without confirmed: E_AUTOPILOT_NOT_CONFIRMED, nothing written", async () => {
-    const error = await failure(handleOrchestratorSetAutopilot({ workspaceId: WS, enabled: true }, deps));
-    expect(codeOf(error)).toBe("E_AUTOPILOT_NOT_CONFIRMED");
-    expect(existsSync(settingsPath())).toBe(false);
-  });
-
-  it("turns it on with confirmed and off without, per project, recording it from the tab", async () => {
-    await expect(handleOrchestratorSetAutopilot({ workspaceId: WS, enabled: true, confirmed: true }, deps)).resolves.toEqual({
-      workspaceId: WS,
-      autopilot: true,
-      since: NOW.toISOString(),
-      allow: [],
-    });
-    await handleOrchestratorSetAutopilot({ workspaceId: "wks_other", enabled: true, confirmed: true }, deps);
-    expect(JSON.parse(readFileSync(settingsPath(), "utf8"))).toEqual({
-      version: 3,
-      autopilot: {
-        [WS]: { enabled: true, since: NOW.toISOString(), by: "tab" },
-        wks_other: { enabled: true, since: NOW.toISOString(), by: "tab" },
-      },
-    });
-    await expect(handleOrchestratorSetAutopilot({ workspaceId: WS, enabled: false }, deps)).resolves.toEqual({
-      workspaceId: WS,
-      autopilot: false,
-      since: null,
-      allow: [],
-    });
-    expect(storeOf().isAutopilot(WS)).toBe(false);
-    expect(storeOf().isAutopilot("wks_other")).toBe(true);
-  });
-
-  it("sends nothing when turned on through the RPC: turning Autopilot on wakes nobody (design §A.8)", async () => {
-    const fake = fakePaseo([managerAgent(MANAGER, WS), orchestratorAgent()], [{ id: WS, name: "invoice-app", directory: "/work/invoice-app" }]);
-    const handlers = new Map<string, (input: unknown, context: unknown) => unknown>();
-    registerOrchestratorRpcs({ handle: (rpc: { name: string }, handler: (input: unknown, context: unknown) => unknown) => handlers.set(rpc.name, handler) } as never, deps);
-    await handlers.get("orchestrator.set-autopilot")!({ workspaceId: WS, enabled: true, confirmed: true }, { paseo: fake.paseo });
-    expect(storeOf().isAutopilot(WS)).toBe(true);
-    expect(fake.sends).toEqual([]);
-  });
-
-  it("allow: sets the gate categories with the switch on, keeps them when absent, forgets them when turned off (design §6B.5, §9 Allow…)", async () => {
-    await expect(
-      handleOrchestratorSetAutopilot({ workspaceId: WS, enabled: true, confirmed: true, allow: ["dependency", "cost", "dependency"] }, deps),
-    ).resolves.toEqual({ workspaceId: WS, autopilot: true, since: NOW.toISOString(), allow: ["cost", "dependency"] });
-    expect(storeOf().allowedCategories(WS)).toEqual(["cost", "dependency"]);
-    // Already on: absent `allow` keeps what is stored.
-    await expect(handleOrchestratorSetAutopilot({ workspaceId: WS, enabled: true, confirmed: true }, deps)).resolves.toMatchObject({
-      allow: ["cost", "dependency"],
-    });
-    // An empty list allows none.
-    await expect(handleOrchestratorSetAutopilot({ workspaceId: WS, enabled: true, confirmed: true, allow: [] }, deps)).resolves.toMatchObject({ allow: [] });
-    await handleOrchestratorSetAutopilot({ workspaceId: WS, enabled: true, confirmed: true, allow: ["release"] }, deps);
-    // Turning off ignores `allow` and forgets the categories; on again starts with none.
-    await expect(handleOrchestratorSetAutopilot({ workspaceId: WS, enabled: false, allow: ["cost"] }, deps)).resolves.toEqual({
-      workspaceId: WS,
-      autopilot: false,
-      since: null,
-      allow: [],
-    });
-    await handleOrchestratorSetAutopilot({ workspaceId: WS, enabled: true, confirmed: true }, deps);
-    expect(storeOf().allowedCategories(WS)).toEqual([]);
-    // Behind the same confirmation, and only known categories pass the contract.
-    expect(codeOf(await failure(handleOrchestratorSetAutopilot({ workspaceId: WS, enabled: true, allow: ["cost"] }, deps)))).toBe("E_AUTOPILOT_NOT_CONFIRMED");
-    expect(orchestratorSetAutopilotRpc.input.safeParse({ workspaceId: WS, enabled: true, confirmed: true, allow: ["everything"] }).success).toBe(false);
-  });
-
-  it("fails E_DATA_HOME_UNAVAILABLE without a usable data folder", async () => {
-    const error = await failure(handleOrchestratorSetAutopilot({ workspaceId: WS, enabled: false }, { ...deps, env: { PASEO_BM_HOME: "relative/path" } }));
-    expect(codeOf(error)).toBe("E_DATA_HOME_UNAVAILABLE");
+    expect(names.sort()).toEqual(["orchestrator.open", "orchestrator.open-preview", "orchestrator.state"]);
   });
 });
 
@@ -292,7 +177,7 @@ describe("orchestrator.state (design §8)", () => {
   }
 
   it("answers an empty machine: no agent, no project", async () => {
-    const fake = fakePaseo([]);
+    const fake = daemonWith([]);
     await expect(handleOrchestratorState(fake.paseo, deps)).resolves.toEqual({
       agent: null,
       previousCount: 0,
@@ -304,7 +189,7 @@ describe("orchestrator.state (design §8)", () => {
 
   it("agent.createdAt and previousCount: the newest Orchestrator, and how many older non-archived ones it replaced (design §3.3, §9)", async () => {
     const labels = { "bm.role": "orchestrator", "bm.orchestrator": "main" };
-    const fake = fakePaseo([
+    const fake = daemonWith([
       orchestratorAgent({ id: "orch-old", createdAt: at(1), labels }),
       orchestratorAgent({ id: "orch-older", createdAt: at(0), labels }),
       orchestratorAgent({ id: "orch-archived", createdAt: at(0), labels, archivedAt: at(2) }),
@@ -315,32 +200,32 @@ describe("orchestrator.state (design §8)", () => {
     const state = await handleOrchestratorState(fake.paseo, deps);
     expect(state.agent).toEqual({ id: "orch-new", status: "idle", workspaceId: "wks-own", createdAt: at(3) });
     expect(state.previousCount).toBe(2);
-    const single = await handleOrchestratorState(fakePaseo([orchestratorAgent()]).paseo, deps);
+    const single = await handleOrchestratorState(daemonWith([orchestratorAgent()]).paseo, deps);
     expect(single).toMatchObject({ agent: { id: ORCHESTRATOR, createdAt: at(1) }, previousCount: 0 });
-    const unknown = await handleOrchestratorState(fakePaseo([orchestratorAgent({ createdAt: undefined })]).paseo, deps);
+    const unknown = await handleOrchestratorState(daemonWith([orchestratorAgent({ createdAt: undefined })]).paseo, deps);
     expect(unknown.agent!.createdAt).toBeNull();
   });
 
   it("toolsStale: true for an Orchestrator created before the endpoint's secret, false for one created after (design §5.1)", async () => {
     const isToolsStale = toolsStaleSince(new Date(at(5)));
-    const before = fakePaseo([orchestratorAgent({ createdAt: at(1) })]);
+    const before = daemonWith([orchestratorAgent({ createdAt: at(1) })]);
     await expect(handleOrchestratorState(before.paseo, { ...deps, isToolsStale })).resolves.toMatchObject({ agent: { id: ORCHESTRATOR }, toolsStale: true });
-    const after = fakePaseo([orchestratorAgent({ createdAt: at(6) })]);
+    const after = daemonWith([orchestratorAgent({ createdAt: at(6) })]);
     await expect(handleOrchestratorState(after.paseo, { ...deps, isToolsStale })).resolves.toMatchObject({ agent: { id: ORCHESTRATOR }, toolsStale: false });
-    const none = fakePaseo([]);
+    const none = daemonWith([]);
     await expect(handleOrchestratorState(none.paseo, { ...deps, isToolsStale })).resolves.toMatchObject({ agent: null, toolsStale: false });
   });
 
   it("outdated: true for an Orchestrator without the current instructions label, false for a current one or none (design §3.3)", async () => {
-    const unlabelled = fakePaseo([orchestratorAgent()]);
+    const unlabelled = daemonWith([orchestratorAgent()]);
     await expect(handleOrchestratorState(unlabelled.paseo, deps)).resolves.toMatchObject({ agent: { id: ORCHESTRATOR }, outdated: true });
-    const older = fakePaseo([orchestratorAgent({ labels: { "bm.role": "orchestrator", "bm.orchestrator": "main", "bm.instructions": "000000000000" } })]);
+    const older = daemonWith([orchestratorAgent({ labels: { "bm.role": "orchestrator", "bm.orchestrator": "main", "bm.instructions": "000000000000" } })]);
     await expect(handleOrchestratorState(older.paseo, deps)).resolves.toMatchObject({ outdated: true });
-    const current = fakePaseo([
+    const current = daemonWith([
       orchestratorAgent({ labels: { "bm.role": "orchestrator", "bm.orchestrator": "main", "bm.instructions": ORCHESTRATOR_INSTRUCTIONS_HASH } }),
     ]);
     await expect(handleOrchestratorState(current.paseo, deps)).resolves.toMatchObject({ agent: { id: ORCHESTRATOR }, outdated: false });
-    await expect(handleOrchestratorState(fakePaseo([]).paseo, deps)).resolves.toMatchObject({ agent: null, outdated: false });
+    await expect(handleOrchestratorState(daemonWith([]).paseo, deps)).resolves.toMatchObject({ agent: null, outdated: false });
   });
 
   it("builds every section from fixtures with one agents.list and one workspaces.list", async () => {
@@ -358,25 +243,14 @@ describe("orchestrator.state (design §8)", () => {
     // A cleared stall is not listed.
     const cleared = alerts.raise({ workspaceId: "wks_idle", kind: "request-stalled", subject: REQ("wks_idle"), detail: "idle-unfinished" });
     alerts.clear(cleared.alert.key);
-    store.setAutopilot("wks_running", true, "tab");
-    sentCommand(store, { workspaceId: "wks_idle", managerId: "mgr-idle", command: "Thanks.", sentText: "Thanks.", source: "chat", outcome: "queued" });
-    const rubric = ASSESSMENT_CRITERIA.map((criterion, index) => ({ criterion, score: index === 5 ? null : index < 2 ? 5 : 4, note: "Seen." }));
-    const suggestions = [{ role: "worker" as const, text: "Keep Small requests free of beads.", why: "A bead on a Small request." }];
-    store.appendAssessment("wks_idle", {
-      v: 1,
-      assessmentId: "as-1",
-      requestId: null,
-      traceId: WORKFLOW_ASSESSMENT_TRACE_ID,
-      agentId: ORCHESTRATOR,
-      at: at(25),
-      status: "done",
-      provider: "bm-orchestrator",
-      model: null,
-      result: { rubric, findings: [], suggestions },
-      scope: { requestIds: [REQ("wks_idle")] },
-    });
+    sentCommand(store, { workspaceId: "wks_idle", managerId: "mgr-idle", command: "Thanks.", sentText: "Thanks.", outcome: "queued" });
+    // A workflow assessment an earlier build recorded (autonomy design §B.9): never read.
+    const assessments = join(home, "orchestrator", "assessments");
+    mkdirSync(assessments, { recursive: true });
+    const oldLine = { v: 1, assessmentId: "as-1", requestId: null, traceId: "workspace", agentId: ORCHESTRATOR, at: at(25), status: "done", provider: "bm-orchestrator", model: null, result: { rubric: [], findings: [], suggestions: [] }, scope: { requestIds: [REQ("wks_idle")] } };
+    writeFileSync(join(assessments, "wks_idle.jsonl"), `${JSON.stringify(oldLine)}\n`);
 
-    const fake = fakePaseo(
+    const fake = daemonWith(
       [
         managerAgent("mgr-running", "wks_running"),
         { ...managerAgent("worker-running", "wks_running"), provider: "bm-worker", labels: { "bm.role": "worker" }, status: "running" },
@@ -391,8 +265,8 @@ describe("orchestrator.state (design §8)", () => {
     const isToolsStale = vi.fn(() => true);
     const state = await handleOrchestratorState(fake.paseo, { ...deps, isToolsStale });
 
-    expect(fake.raw.agents.list).toHaveBeenCalledTimes(1);
-    expect(fake.raw.workspaces.list).toHaveBeenCalledTimes(1);
+    expect(fake.api.agents.list).toHaveBeenCalledTimes(1);
+    expect(fake.api.workspaces.list).toHaveBeenCalledTimes(1);
     expect(fake.sends).toEqual([]);
 
     expect(state.agent).toEqual({ id: ORCHESTRATOR, status: "running", workspaceId: "wks-own", createdAt: at(1) });
@@ -414,13 +288,9 @@ describe("orchestrator.state (design §8)", () => {
       managerStatus: "idle",
       lastActivityAt: at(20),
       requests: 1,
-      autopilot: false,
       lastAction: { at: NOW.toISOString(), text: "Thanks.", source: "chat" },
     });
-    expect(state.projects.find((project) => project.workspaceId === "wks_running")).toMatchObject({ autopilot: true, lastAction: null });
-    // (5 + 5 + 4 + 4 + 4) / 5, the null score left out.
-    expect(idle.assessment).toEqual({ assessmentId: "as-1", at: at(25), status: "done", average: 4.4, scores: rubric, recommendations: suggestions });
-    expect(state.projects.find((project) => project.workspaceId === "wks_running")!.assessment).toBeNull();
+    expect(state.projects.find((project) => project.workspaceId === "wks_running")).toMatchObject({ lastAction: null });
   });
 
   it("lastAction is each project's newest command the Orchestrator sent, first line only; the proposal era's entries are not actions", async () => {
@@ -428,39 +298,42 @@ describe("orchestrator.state (design §8)", () => {
     await seed("wks_b", "mgr-b", "finished", 30);
     let clock = NOW.getTime();
     const store = createOrchestratorStore(home, { now: () => new Date((clock += 60_000)) });
-    const sent = (workspaceId: string, managerId: string, text: string, source: "autopilot" | "chat") =>
-      sentCommand(store, { workspaceId, managerId, command: text, sentText: text, source });
-    sent("wks_a", "mgr-a", "Older command.", "chat");
-    const newestA = sent("wks_a", "mgr-a", "Answer Q23: use option B.\nThen run the tests.", "autopilot");
-    const onlyB = sent("wks_b", "mgr-b", "Go on with the export.", "chat");
-    store.setAutopilot("wks_a", true);
-    // A command sent from the retired tab, newer than wks_b's own: ignored.
+    const sent = (workspaceId: string, managerId: string, text: string) => sentCommand(store, { workspaceId, managerId, command: text, sentText: text });
+    sent("wks_a", "mgr-a", "Older command.");
+    const newestA = sent("wks_a", "mgr-a", "Answer Q23: use option B.\nThen run the tests.");
+    const onlyB = sent("wks_b", "mgr-b", "Go on with the export.");
     const file = join(home, "orchestrator", "proposals.json");
-    const entries = (JSON.parse(readFileSync(file, "utf8")) as { entries: unknown[] }).entries;
+    const entries = (JSON.parse(readFileSync(file, "utf8")) as { entries: Array<{ id: string }> }).entries;
     writeFileSync(
       file,
-      JSON.stringify({ version: 1, entries: [...entries, { ...onlyB, id: "from-tab", source: "user", command: "From the tab.", sentText: "From the tab.", settledAt: at(59) }] }),
+      JSON.stringify({
+        version: 1,
+        entries: [
+          // wks_a's newest was sent on its Autopilot in Phase 1: history, still the project's last action (autonomy design §B.8).
+          ...entries.map((entry) => (entry.id === newestA.id ? { ...entry, source: "autopilot" } : entry)),
+          // A command sent from the retired tab, newer than wks_b's own: ignored.
+          { ...onlyB, id: "from-tab", source: "user", command: "From the tab.", sentText: "From the tab.", settledAt: at(59) },
+        ],
+      }),
     );
 
-    const state = await handleOrchestratorState(fakePaseo([managerAgent("mgr-a", "wks_a"), managerAgent("mgr-b", "wks_b")]).paseo, deps);
+    const state = await handleOrchestratorState(daemonWith([managerAgent("mgr-a", "wks_a"), managerAgent("mgr-b", "wks_b")]).paseo, deps);
     expect(state.projects.find((project) => project.workspaceId === "wks_a")).toMatchObject({
-      autopilot: true,
       lastAction: { at: newestA.settledAt, text: "Answer Q23: use option B.", source: "autopilot" },
     });
     expect(state.projects.find((project) => project.workspaceId === "wks_b")).toMatchObject({
-      autopilot: false,
       lastAction: { at: onlyB.settledAt, text: "Go on with the export.", source: "chat" },
     });
   });
 
   it("says waiting-user for a project whose newest request is blocked and nothing is raised", async () => {
     await seed("wks_waiting", "mgr-waiting", "blocked", 40);
-    const fake = fakePaseo([managerAgent("mgr-waiting", "wks_waiting")]);
+    const fake = daemonWith([managerAgent("mgr-waiting", "wks_waiting")]);
     const state = await handleOrchestratorState(fake.paseo, deps);
     expect(state.projects).toEqual([expect.objectContaining({ workspaceId: "wks_waiting", state: "waiting-user", managerId: "mgr-waiting" })]);
   });
 
-  it("the per-project facts (design §6B.7): health, stage, agents, progress, request, signals, allow, notes", async () => {
+  it("the per-project facts (design §6B.7): health, stage, agents, progress, request, signals, notes", async () => {
     await seed("wks_impl", "mgr-impl", "received", 50);
     await seed("wks_rev", "mgr-rev", "bead-implemented", 45);
     await seed("wks_wait", "mgr-wait", "blocked", 40);
@@ -469,9 +342,9 @@ describe("orchestrator.state (design §8)", () => {
     await seed("wks_idle", "mgr-idle", "finished", 20);
 
     const store = storeOf();
-    store.setAutopilot("wks_impl", true, "tab");
-    store.setAutopilotAllow("wks_impl", ["cost"]);
-    store.setAutopilot("wks_sig", true, "tab");
+    // Autopilot with Allow… cost, as an earlier build stored it: read by nothing (autonomy design §B.8).
+    mkdirSync(join(home, "orchestrator"), { recursive: true });
+    writeFileSync(join(home, "orchestrator", "settings.json"), JSON.stringify({ version: 3, autopilot: { wks_impl: { enabled: true, since: at(1), by: "tab", allow: ["cost"] } } }));
     // The live watch's signals are Inbox alerts (autonomy design §A.8).
     const alerts = createAlertStore(home, { now: () => NOW });
     alerts.raise({ workspaceId: "wks_sig", kind: "stuck", subject: "worker-sig" });
@@ -488,7 +361,7 @@ describe("orchestrator.state (design §8)", () => {
       status,
       ...extra,
     });
-    const fake = fakePaseo([
+    const fake = daemonWith([
       managerAgent("mgr-impl", "wks_impl"),
       agent("worker-impl", "wks_impl", "worker", "running"),
       // An old idle Worker of the project that has nothing to do with the newest request: not listed.
@@ -514,7 +387,6 @@ describe("orchestrator.state (design §8)", () => {
       ["wks_idle", "idle", "finished"],
     ]);
     expect(row("wks_impl")).toMatchObject({
-      allow: ["cost"],
       agents: {
         manager: { id: "mgr-impl", title: "Manager of wks_impl", status: "idle" },
         workers: [{ id: "worker-impl", title: "worker worker-impl", status: "running" }],
@@ -531,7 +403,6 @@ describe("orchestrator.state (design §8)", () => {
       reviewers: [{ id: "reviewer-rev", title: "reviewer reviewer-rev", status: "running" }],
     });
     expect(row("wks_sig")).toMatchObject({
-      allow: [],
       openSignals: [{ signal: "stuck", workerId: "worker-sig", since: NOW.toISOString() }],
       agents: { workers: [{ id: "worker-sig", status: "idle" }] },
     });
@@ -557,7 +428,7 @@ describe("orchestrator.state (design §8)", () => {
       }),
     );
     writeWorkspaceMeta(location, "wks_b", { lastKnownName: "b-app", lastKnownDirectory: "/work/b", lastSeenAt: at(30) });
-    const state = await handleOrchestratorState(fakePaseo([managerAgent("mgr-a", "wks_a"), managerAgent("mgr-b", "wks_b")]).paseo, {
+    const state = await handleOrchestratorState(daemonWith([managerAgent("mgr-a", "wks_a"), managerAgent("mgr-b", "wks_b")]).paseo, {
       ...deps,
       redactEnv: { PASEO_PASSWORD: secret },
     });
@@ -569,14 +440,23 @@ describe("orchestrator.state (design §8)", () => {
 
   it("lists at most 30 projects, the most recent first", async () => {
     for (let index = 0; index < 32; index += 1) await seed(`wks_${String(index).padStart(2, "0")}`, `mgr-${index}`, "finished", 10 + index);
-    const state = await handleOrchestratorState(fakePaseo([]).paseo, deps);
+    const state = await handleOrchestratorState(daemonWith([]).paseo, deps);
     expect(state.projects).toHaveLength(30);
     expect(state.projects[0]!.workspaceId).toBe("wks_31");
     expect(state.projects.map((project) => project.workspaceId)).not.toContain("wks_00");
   });
 
   it("fails E_DATA_HOME_UNAVAILABLE without a usable data folder", async () => {
-    const error = await failure(handleOrchestratorState(fakePaseo([]).paseo, { ...deps, env: { PASEO_BM_HOME: "relative/path" } }));
+    const error = await failure(handleOrchestratorState(daemonWith([]).paseo, { ...deps, env: { PASEO_BM_HOME: "relative/path" } }));
     expect(codeOf(error)).toBe("E_DATA_HOME_UNAVAILABLE");
+  });
+
+  it("fails E_DATA_HOME_UNAVAILABLE, never the store's write code, on a store it cannot read (code review 2026-09-30 §3.2)", async () => {
+    mkdirSync(join(root, "elsewhere"));
+    mkdirSync(home, { recursive: true });
+    symlinkSync(join(root, "elsewhere"), join(home, ORCHESTRATOR_DIR_NAME));
+    const error = await failure(handleOrchestratorState(daemonWith([]).paseo, deps));
+    expect(codeOf(error)).toBe("E_DATA_HOME_UNAVAILABLE");
+    expect(String((error as Error).message)).toMatch(/^E_DATA_HOME_UNAVAILABLE: cannot read the Orchestrator's store: refusing to use a symlinked path/);
   });
 });

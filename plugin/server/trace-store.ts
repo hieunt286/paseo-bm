@@ -2,10 +2,12 @@
  * Trace store primitives: the one writable-path resolver and the one lock
  * (WP-203, Dashboard Design §3.8).
  *
- * Everything that mutates `<install home>/traces` goes through this module.
- * That is not a style preference — it is the containment boundary. A caller
- * that builds a path itself bypasses the symlink check, and a caller that
- * writes without the lock can interleave with a delete and lose a record.
+ * Everything that mutates `<install home>/traces` goes through this module:
+ * the append here, and deletion and reassignment in `trace-store-rewrite.ts`,
+ * which is built on the primitives below. That is not a style preference — it
+ * is the containment boundary. A caller that builds a path itself bypasses the
+ * symlink check, and a caller that writes without the lock can interleave with
+ * a delete and lose a record.
  *
  * Two mechanisms, and the reason each exists:
  *
@@ -13,7 +15,11 @@
  *    store directory is NOT enough: if `traces/<workspaceId>` is a symlink to
  *    somewhere else, the prefix still matches and the write lands outside the
  *    store. So every existing component from the install home down is `lstat`ed
- *    and any symlink is refused, and the final open uses `O_NOFOLLOW`.
+ *    and any symlink is refused, and the final open uses `O_NOFOLLOW`. The
+ *    walk, the modes, the `O_NOFOLLOW` opens and the atomic rewrite are
+ *    `data-files.ts`'s, shared by every store in the data folder (code review
+ *    2026-09-30 §3.1); this module applies them with its own code,
+ *    `E_TRACE_STORE_UNWRITABLE`.
  * 2. **In-process mutex keyed by workspace id.** The collector and every RPC
  *    handler run in the same forked plugin-server worker, so a file lock would
  *    be pointless ceremony; one async mutex per workspace is exactly enough.
@@ -24,23 +30,9 @@
  * uninstall, and that is handled by ordering rather than locking: uninstall
  * stops the plugin (`paseo plugin remove`) before it touches `traces/`.
  */
-import {
-  closeSync,
-  constants as fsConstants,
-  fsyncSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  readdirSync,
-  renameSync,
-  rmSync,
-  statSync,
-  unlinkSync,
-  writeSync,
-} from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
   DashboardError,
   TRACE_STORE_SCHEMA_VERSION,
@@ -48,13 +40,21 @@ import {
   traceStoreMetaSchema,
   traceWorkspaceMetaSchema,
   type StoreSize,
-  type TraceDeleteScope,
   type TraceMessage,
   type TraceRecord,
   type TraceStoreMeta,
   type TraceWorkspaceMeta,
   type WorkspaceState,
+  type DashboardErrorCode,
 } from "../shared/contracts";
+import {
+  DATA_DIR_MODE,
+  DATA_FILE_MODE,
+  appendToFile,
+  assertNoSymlink,
+  makeDataDir,
+  writeFileAtomically,
+} from "./data-files";
 
 /** Workspace ids are used as directory names, so they are restricted (design §3.8). */
 export const WORKSPACE_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
@@ -62,12 +62,21 @@ export const WORKSPACE_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 /** How long a mutation waits for the workspace lock before giving up (design §3.8). */
 export const LOCK_WAIT_TIMEOUT_MS = 5_000;
 
-/** Directory and file modes of the store (REQ-048c). */
-export const STORE_DIR_MODE = 0o700;
-export const STORE_FILE_MODE = 0o600;
+/** Directory and file modes of the store (REQ-048c): the data folder's (`data-files.ts`). */
+export const STORE_DIR_MODE = DATA_DIR_MODE;
+export const STORE_FILE_MODE = DATA_FILE_MODE;
 
-function unwritable(detail: string, cause?: unknown): DashboardError {
-  return new DashboardError("E_TRACE_STORE_UNWRITABLE", detail, cause ? { cause } : undefined);
+/** The code of every failure to write the store (design §3.8). */
+const UNWRITABLE: DashboardErrorCode = "E_TRACE_STORE_UNWRITABLE";
+
+/** A failure to write the store, with its code (design §3.8). */
+export function unwritable(detail: string, cause?: unknown): DashboardError {
+  return new DashboardError(UNWRITABLE, detail, cause ? { cause } : undefined);
+}
+
+/** The data folder `tracesDir` sits in (design §5.1): the root of every symlink check. */
+export function dataFolderOf(tracesDir: string): string {
+  return dirname(resolve(tracesDir));
 }
 
 /**
@@ -86,38 +95,12 @@ export function assertWorkspaceId(workspaceId: string): void {
 }
 
 /**
- * Refuses any symlink between `root` and `target`, without following one.
- *
- * Components that do not exist yet are fine: nothing below them exists either,
- * so there is nothing to escape through. A component that exists and is a
- * symlink fails before the caller opens, renames or unlinks anything.
+ * Refuses any symlink from `root` (included) down to `target`, without
+ * following one: `data-files.ts` `assertNoSymlink` with this store's code.
+ * Components that do not exist yet are fine: nothing below them exists either.
  */
 export function assertNoSymlinkOnPath(root: string, target: string): void {
-  const rootAbsolute = resolve(root);
-  const targetAbsolute = resolve(target);
-
-  const check = (path: string): boolean => {
-    try {
-      if (lstatSync(path).isSymbolicLink()) {
-        throw unwritable(`refusing to use a symlinked path inside the trace store: ${path}`);
-      }
-      return true;
-    } catch (error) {
-      if (error instanceof DashboardError) throw error;
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-      throw unwritable(`cannot inspect ${path}`, error);
-    }
-  };
-
-  if (!check(rootAbsolute)) return;
-  if (targetAbsolute === rootAbsolute) return;
-
-  let current = rootAbsolute;
-  for (const part of relative(rootAbsolute, targetAbsolute).split(sep)) {
-    if (part === "" || part === ".") continue;
-    current = join(current, part);
-    if (!check(current)) return;
-  }
+  assertNoSymlink(root, target, UNWRITABLE);
 }
 
 /**
@@ -143,63 +126,17 @@ export function storePath(tracesDir: string, workspaceId: string, ...segments: s
   if (rel.startsWith("..") || isAbsolute(rel)) {
     throw unwritable(`path escapes the trace store: ${target}`);
   }
-  assertNoSymlinkOnPath(dirname(root), target);
+  assertNoSymlink(dataFolderOf(tracesDir), target, UNWRITABLE);
   return target;
 }
 
 /**
  * Creates a store directory with mode 0700, checking for symlinks before and
- * after. The second check closes the window where a component appears between
- * the check and the `mkdir`.
+ * after (`data-files.ts` `makeDataDir`). The second check closes the window
+ * where a component appears between the check and the `mkdir`.
  */
 export function ensureStoreDir(tracesDir: string, directory: string): void {
-  const root = resolve(tracesDir);
-  assertNoSymlinkOnPath(dirname(root), directory);
-  try {
-    mkdirSync(directory, { recursive: true, mode: STORE_DIR_MODE });
-  } catch (error) {
-    throw unwritable(`cannot create ${directory}`, error);
-  }
-  assertNoSymlinkOnPath(dirname(root), directory);
-}
-
-/**
- * Opens a store file for appending with `O_NOFOLLOW`, so the final component
- * cannot be a symlink even if it appears after the path check.
- */
-export function openStoreFileForAppend(path: string): number {
-  const flags =
-    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_APPEND | fsConstants.O_NOFOLLOW;
-  try {
-    return openSync(path, flags, STORE_FILE_MODE);
-  } catch (error) {
-    throw unwritable(`cannot append to ${path}`, error);
-  }
-}
-
-/**
- * Creates a temporary file for a rewrite, in the destination's own directory so
- * the later `rename` stays inside one filesystem. `O_EXCL` means an existing
- * file — including one an attacker just created — fails instead of being reused.
- */
-export function createStoreTempFile(path: string): number {
-  const flags =
-    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW;
-  try {
-    return openSync(path, flags, STORE_FILE_MODE);
-  } catch (error) {
-    throw unwritable(`cannot create the temporary file ${path}`, error);
-  }
-}
-
-/** Closes a descriptor without masking the error that made the caller close it. */
-export function closeQuietly(fd: number | null): void {
-  if (fd === null) return;
-  try {
-    closeSync(fd);
-  } catch {
-    // Nothing useful to do: the write already reported the real failure.
-  }
+  makeDataDir(dataFolderOf(tracesDir), directory, UNWRITABLE);
 }
 
 /**
@@ -294,8 +231,8 @@ export function activeLockCount(): number {
 // Store operations (WP-203 part 2, Dashboard Design §3.2, §3.3, §3.4, §3.6).
 //
 // Built only on the primitives above: no other path construction, no other
-// mutation path. Append is the normal write; the only rewrite is deletion,
-// which WP-210 owns.
+// mutation path. Append is the normal write; the rewrites — deletion and
+// reassignment, which WP-210 owns — are in `trace-store-rewrite.ts`.
 // ---------------------------------------------------------------------------
 
 /** Longest single message text kept in a record (design §3.3). */
@@ -379,6 +316,11 @@ export function clearTraceStoreCache(): void {
   readCache.clear();
 }
 
+/** Drops one file's cached read: after that file was rewritten or removed. */
+export function forgetCachedFile(path: string): void {
+  readCache.delete(path);
+}
+
 function readJsonFile(path: string): unknown | null {
   try {
     return JSON.parse(readFileSync(path, "utf8")) as unknown;
@@ -418,32 +360,16 @@ export function assertWritableSchema(location: TraceStoreLocation): void {
   }
 }
 
-/** Temp-then-rename write, used for both `meta.json` files and later rewrites. */
+/**
+ * Temp-then-rename write, used for both `meta.json` files and later rewrites
+ * (`data-files.ts` `writeFileAtomically`, rooted at the data folder).
+ */
 export function writeStoreFileAtomically(
   location: TraceStoreLocation,
   path: string,
   body: string,
 ): void {
-  const tempPath = `${path}.tmp-${process.pid}-${Date.now()}`;
-  assertNoSymlinkOnPath(dirname(resolve(location.tracesDir)), tempPath);
-  let fd: number | null = null;
-  try {
-    fd = createStoreTempFile(tempPath);
-    writeSync(fd, body);
-    fsyncSync(fd);
-  } finally {
-    closeQuietly(fd);
-  }
-  try {
-    renameSync(tempPath, path);
-  } catch (error) {
-    try {
-      unlinkSync(tempPath);
-    } catch {
-      // Leaving a stray temp file behind beats masking the rename failure.
-    }
-    throw unwritable(`cannot replace ${path}`, error);
-  }
+  writeFileAtomically(dataFolderOf(location.tracesDir), path, body, UNWRITABLE);
 }
 
 /** Creates the store skeleton and stamps the schema version. Idempotent. */
@@ -524,14 +450,7 @@ export async function appendRecord(
       ensureStore(location);
       const path = storePath(location.tracesDir, record.workspaceId, monthlyFileName(record.at));
       ensureStoreDir(location.tracesDir, dirname(path));
-      let fd: number | null = null;
-      try {
-        fd = openStoreFileForAppend(path);
-        writeSync(fd, line);
-        fsyncSync(fd);
-      } finally {
-        closeQuietly(fd);
-      }
+      appendToFile(path, line, UNWRITABLE);
       readCache.delete(path);
     },
     options,
@@ -756,200 +675,13 @@ export function countTraces(records: readonly TraceRecord[]): number {
 export function recordKeyOf(record: TraceRecord): string {
   return `${record.agentId}|${record.turnId ?? ""}|${record.at}`;
 }
-
 // ---------------------------------------------------------------------------
-// Deletion (WP-210, Dashboard Design §3.5).
-//
-// The only rewrite path in the store, and the only irreversible operation in
-// the feature: there is no undo and no bin. Two rules therefore hold without
-// exception — every mutation goes through the guard and the mutex above, and
-// **nothing in the product calls this except a user action** (REQ-054f). There
-// is deliberately no timer, hook or retention policy that can reach it.
-// ---------------------------------------------------------------------------
-
-/** How many traces and bytes a delete would remove, or removed. */
-export interface DeleteOutcome {
-  traces: number;
-  bytes: number;
-}
-
-/** Scope of a deletion, as `traces.delete` validated it. */
-export type DeleteScope = TraceDeleteScope;
-
-/** Trace key of a record: the request it belongs to, or a per-turn fallback. */
-export function traceKeyOf(record: TraceRecord): string {
-  return record.requestId ?? `${record.agentId}::${record.turnId ?? record.at}`;
-}
-
-function matchesScope(record: TraceRecord, scope: DeleteScope, recordKeys?: ReadonlySet<string>): boolean {
-  if ("allOfWorkspace" in scope) return true;
-  if ("traceId" in scope) {
-    // The caller resolves a trace to its records (a trace spans several agents
-    // and unnamed Manager turns); a bare key match is only the fallback.
-    if (recordKeys !== undefined) return recordKeys.has(recordKeyOf(record));
-    return traceKeyOf(record) === scope.traceId || `req:${traceKeyOf(record)}` === scope.traceId;
-  }
-  return record.at < scope.before;
-}
-
-function bytesOf(path: string): number {
-  try {
-    return statSync(path).size;
-  } catch {
-    return 0;
-  }
-}
-
-/** Splits one monthly file into the lines a scope keeps and the ones it drops. */
-function splitMonthlyFile(
-  path: string,
-  scope: DeleteScope,
-  recordKeys?: ReadonlySet<string>,
-): { keptLines: string[]; dropped: TraceRecord[]; droppedLines: number; fileBytes: number } {
-  let body: string;
-  try {
-    body = readFileSync(path, "utf8");
-  } catch {
-    return { keptLines: [], dropped: [], droppedLines: 0, fileBytes: 0 };
-  }
-  const keptLines: string[] = [];
-  const dropped: TraceRecord[] = [];
-  let droppedLines = 0;
-  for (const line of body.split("\n")) {
-    if (line === "") continue;
-    const parsed = traceRecordSchema.safeParse(safeJson(line));
-    // An unreadable line matches no trace, so it is kept: deletion must only
-    // remove what the user asked for, never data it failed to understand.
-    if (!parsed.success || !matchesScope(parsed.data, scope, recordKeys)) {
-      keptLines.push(line);
-      continue;
-    }
-    droppedLines += 1;
-    dropped.push(parsed.data);
-  }
-  return { keptLines, dropped, droppedLines, fileBytes: Buffer.byteLength(body, "utf8") };
-}
-
-/**
- * Plans a deletion: what would go.
- *
- * `traces.delete` with `dryRun: true` returns exactly this, so the confirmation
- * the user sees is computed by the same code that does the work — a preview
- * that can disagree with the deletion is worse than no preview at all.
- */
-export function planDeletion(
-  location: TraceStoreLocation,
-  workspaceId: string,
-  scope: DeleteScope,
-  options: { recordKeys?: ReadonlySet<string> } = {},
-): DeleteOutcome {
-  const doomed: TraceRecord[] = [];
-  let bytes = 0;
-
-  for (const path of monthlyFiles(location, workspaceId)) {
-    const split = splitMonthlyFile(path, scope, options.recordKeys);
-    if (split.droppedLines === 0) continue;
-    doomed.push(...split.dropped);
-    bytes +=
-      split.keptLines.length === 0
-        ? split.fileBytes
-        : split.fileBytes - Buffer.byteLength(`${split.keptLines.join("\n")}\n`, "utf8");
-  }
-
-  if ("allOfWorkspace" in scope) {
-    bytes += bytesOf(storePath(location.tracesDir, workspaceId, "meta.json"));
-  }
-
-  return {
-    traces: "traceId" in scope ? (doomed.length > 0 ? 1 : 0) : countTraces(doomed),
-    bytes,
-  };
-}
-
-/**
- * Deletes traces. Irreversible: no bin, no undo.
- *
- * Whole months and whole workspaces are removed outright; a month that keeps
- * some records is rewritten through the store's temp + `fsync` + `rename` path,
- * so a crash leaves either the old file or the new one, never a half file.
- */
-export async function deleteTraces(
-  location: TraceStoreLocation,
-  workspaceId: string,
-  scope: DeleteScope,
-  options: {
-    dryRun?: boolean;
-    /** Records a trace-scoped delete removes, from the reconstructed trace. */
-    recordKeys?: ReadonlySet<string>;
-    timeoutMs?: number;
-  } = {},
-): Promise<DeleteOutcome> {
-  assertWorkspaceId(workspaceId);
-  // Validate the path family before anything is touched, so an escaping id
-  // fails with nothing written.
-  storePath(location.tracesDir, workspaceId, "meta.json");
-
-  if (options.dryRun === true) {
-    return planDeletion(location, workspaceId, scope, options);
-  }
-
-  return withWorkspaceLock(
-    workspaceId,
-    () => {
-      assertWritableSchema(location);
-      const planned = planDeletion(location, workspaceId, scope, options);
-
-      if ("allOfWorkspace" in scope) {
-        const dir = dirname(storePath(location.tracesDir, workspaceId, "meta.json"));
-        assertNoSymlinkOnPath(dirname(resolve(location.tracesDir)), dir);
-        try {
-          rmSync(dir, { recursive: true, force: true });
-        } catch (error) {
-          throw unwritable(`cannot remove ${dir}`, error);
-        }
-        clearTraceStoreCache();
-        return planned;
-      }
-
-      for (const path of monthlyFiles(location, workspaceId)) {
-        const split = splitMonthlyFile(path, scope, options.recordKeys);
-        if (split.droppedLines === 0) continue;
-        if (split.keptLines.length === 0) {
-          assertNoSymlinkOnPath(dirname(resolve(location.tracesDir)), path);
-          try {
-            unlinkSync(path);
-          } catch (error) {
-            throw unwritable(`cannot remove ${path}`, error);
-          }
-        } else {
-          writeStoreFileAtomically(location, path, `${split.keptLines.join("\n")}\n`);
-        }
-        readCache.delete(path);
-      }
-
-      clearTraceStoreCache();
-      return planned;
-    },
-    { timeoutMs: options.timeoutMs },
-  );
-}
-
-function safeJson(line: string): unknown {
-  try {
-    return JSON.parse(line) as unknown;
-  } catch {
-    return null;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Workspace classification and reassignment (WP-210, Dashboard Design §3.7).
+// Workspace classification (WP-210, Dashboard Design §3.7).
 //
 // A workspace the user removed from Paseo must not take its history with it,
-// and it must not be guessed back onto a new workspace either: matching by
-// repository path would merge two different lines of work the first time
-// someone reuses a directory. So the store reports what it sees, and only a
-// user action moves anything (REQ-057f).
+// and it must not be guessed back onto a new workspace either. So the store
+// reports what it sees, and only a user action moves anything (REQ-057f;
+// reassignment is in `trace-store-rewrite.ts`).
 // ---------------------------------------------------------------------------
 
 /** Workspace ids that have a directory in the store. */
@@ -1004,134 +736,4 @@ export function classifyWorkspaces(
       lastKnownDirectory: meta?.lastKnownDirectory ?? null,
     };
   });
-}
-
-/** How many traces and bytes a reassignment would move, or moved. */
-export interface ReassignOutcome {
-  traces: number;
-  bytes: number;
-}
-
-function reassignInvalid(detail: string): DashboardError {
-  return new DashboardError("E_TRACE_REASSIGN_INVALID", detail);
-}
-
-/**
- * Moves every trace of `fromWorkspaceId` onto `toWorkspaceId`.
- *
- * An empty destination is a single `rename` of the directory: one syscall, so
- * an interruption cannot leave half the traces behind. A destination that
- * already has files is merged month by month with the same `dedupeRecords` key,
- * which is also what makes an interrupted merge harmless — the worst case is
- * both copies existing, and the reader keeps one (REQ-057e).
- *
- * The `workspaceId` inside each record is left alone: it is the historical
- * fact. Directory position is what decides which workspace a trace belongs to,
- * and the caller reports the difference as `reassignedFrom`.
- */
-export async function reassignWorkspace(
-  location: TraceStoreLocation,
-  fromWorkspaceId: string,
-  toWorkspaceId: string,
-  options: {
-    dryRun?: boolean;
-    /** Ids Paseo currently lists; the destination must be one of them. */
-    destinationExists?: boolean;
-    timeoutMs?: number;
-  } = {},
-): Promise<ReassignOutcome> {
-  assertWorkspaceId(fromWorkspaceId);
-  assertWorkspaceId(toWorkspaceId);
-  if (fromWorkspaceId === toWorkspaceId) {
-    throw reassignInvalid(`cannot reassign workspace ${fromWorkspaceId} onto itself`);
-  }
-  if (options.destinationExists === false) {
-    throw reassignInvalid(`Paseo does not list a workspace ${toWorkspaceId} to reassign onto`);
-  }
-
-  const sourceDir = dirname(storePath(location.tracesDir, fromWorkspaceId, "meta.json"));
-  const destinationDir = dirname(storePath(location.tracesDir, toWorkspaceId, "meta.json"));
-  const sourceFiles = monthlyFiles(location, fromWorkspaceId);
-
-  const moving: TraceRecord[] = [];
-  let bytes = 0;
-  for (const path of sourceFiles) {
-    bytes += bytesOf(path);
-    moving.push(...linesOf(path).records);
-  }
-  const planned: ReassignOutcome = { traces: countTraces(moving), bytes };
-  if (options.dryRun === true) return planned;
-
-  // Both workspaces are mutated, so both locks are taken, always in id order
-  // so two concurrent reassignments cannot deadlock against each other.
-  const [firstId, secondId] = [fromWorkspaceId, toWorkspaceId].sort();
-  return withWorkspaceLock(
-    firstId!,
-    () =>
-      withWorkspaceLock(
-        secondId!,
-        () => {
-          assertWritableSchema(location);
-          const root = dirname(resolve(location.tracesDir));
-          assertNoSymlinkOnPath(root, sourceDir);
-          assertNoSymlinkOnPath(root, destinationDir);
-
-          let destinationExisting: string[];
-          try {
-            destinationExisting = readdirSync(destinationDir);
-          } catch {
-            destinationExisting = [];
-          }
-
-          if (destinationExisting.length === 0) {
-            try {
-              rmSync(destinationDir, { recursive: true, force: true });
-              renameSync(sourceDir, destinationDir);
-            } catch (error) {
-              throw unwritable(`cannot move ${sourceDir} to ${destinationDir}`, error);
-            }
-            clearTraceStoreCache();
-            return planned;
-          }
-
-          ensureStoreDir(location.tracesDir, destinationDir);
-          for (const sourcePath of sourceFiles) {
-            const name = sourcePath.slice(sourcePath.lastIndexOf("/") + 1);
-            const destinationPath = storePath(location.tracesDir, toWorkspaceId, name);
-            const destination = linesOf(destinationPath);
-            const source = linesOf(sourcePath);
-            const merged = dedupeRecords([...destination.records, ...source.records]);
-            // Lines this version cannot read are carried over as they are: a
-            // merge must not delete data it failed to understand.
-            const body = [
-              ...merged.map((record) => JSON.stringify(record)),
-              ...destination.unreadable,
-              ...source.unreadable,
-            ].join("\n");
-            writeStoreFileAtomically(location, destinationPath, `${body}\n`);
-            try {
-              unlinkSync(sourcePath);
-            } catch (error) {
-              throw unwritable(`cannot remove ${sourcePath} after merging it`, error);
-            }
-          }
-          // The destination keeps its own metadata; the source directory goes.
-          try {
-            rmSync(sourceDir, { recursive: true, force: true });
-          } catch (error) {
-            throw unwritable(`cannot remove ${sourceDir}`, error);
-          }
-          clearTraceStoreCache();
-          return planned;
-        },
-        { timeoutMs: options.timeoutMs },
-      ),
-    { timeoutMs: options.timeoutMs },
-  );
-}
-
-/** Records of one monthly file and the lines that are not records, uncached. */
-function linesOf(path: string): { records: TraceRecord[]; unreadable: string[] } {
-  const split = splitMonthlyFile(path, { allOfWorkspace: true });
-  return { records: split.dropped, unreadable: split.keptLines };
 }

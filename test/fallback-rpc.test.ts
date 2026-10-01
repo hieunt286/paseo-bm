@@ -9,6 +9,7 @@ import { ROLE_FALLBACK_STATE_FILE } from "../plugin/server/fallback-state";
 import { isPluginNotice } from "../plugin/server/notices";
 import { parseFallbackNotice } from "../plugin/shared/bm-fallback";
 import type { FallbackIncident } from "../plugin/shared/contracts";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 /**
  * Delta 20260921 §4.4.6, §4.4.10 (REQ-065 c): the BM-FALLBACK block (still
@@ -59,19 +60,15 @@ const EXPECTED = [
   "CLOSING",
 ].join("\n");
 
-function fakePaseo(statuses: Record<string, string> = {}) {
-  const sent: Array<{ id: string; text: string }> = [];
-  const paseo = {
-    agents: {
-      ref: (id: string) => ({
-        refresh: async () => ({ agent: { status: statuses[id] ?? "idle" } }),
-        send: async (text: string) => void sent.push({ id, text }),
-      }),
-    },
-    config: { get: async () => ({ config: { providers: { "bm-worker": { extends: "claude" }, "bm-worker-fallback-1": { extends: "codex" } } } }) },
-  };
-  return { paseo, sent, statuses };
-}
+/** The Worker `wrk-1` and its Manager `mgr-1`, both idle, with the Worker's chain configured. */
+const daemon = () =>
+  fakePaseo({
+    agents: [
+      { id: "wrk-1", status: "idle" },
+      { id: "mgr-1", status: "idle" },
+    ],
+    config: { providers: { "bm-worker": { extends: "claude" }, "bm-worker-fallback-1": { extends: "codex" } } },
+  });
 
 let root: string;
 let home: string;
@@ -160,7 +157,7 @@ describe("fallback.incidents", () => {
     const a = incident();
     const b = incident({ id: "fb-000000000001", workspaceId: "wks_2" });
     writeIncidents([a, b]);
-    const paseo = fakePaseo().paseo;
+    const paseo = daemon().paseo;
     expect((await handleFallbackIncidents({}, paseo, { home })).incidents).toEqual([a, b]);
     expect((await handleFallbackIncidents({ workspaceId: "wks_2" }, paseo, { home })).incidents).toEqual([b]);
     expect((await handleFallbackIncidents({ ids: [a.id] }, paseo, { home })).incidents).toEqual([a]);
@@ -174,17 +171,24 @@ describe("fallback.act", () => {
   it("dismiss marks a pending incident dismissed, touches no agent, tells no Manager, and withdraws its decision", async () => {
     writeIncidents([incident()]);
     expect(syncFallbackDecisions(home, { now: NOW, log }).opened).toEqual([fallbackDecisionId("fb-3f9a2c1d7e4b")]);
-    const fake = fakePaseo();
+    const fake = daemon();
     const { incident: after } = await handleFallbackAct({ incidentId: "fb-3f9a2c1d7e4b", action: "dismiss" }, fake.paseo, { home, now: NOW, log });
     expect(after).toMatchObject({ status: "dismissed", decidedAt: "2026-09-21T14:05:00.000Z", replacementId: null });
     expect(JSON.parse(readFileSync(join(home, ROLE_FALLBACK_STATE_FILE), "utf8")).incidents[0].status).toBe("dismissed");
-    expect(fake.sent).toEqual([]);
+    expect(fake.sends).toEqual([]);
     expect(createDecisionStore(home).get(fallbackDecisionId("fb-3f9a2c1d7e4b"))).toMatchObject({ status: "withdrawn", settledAt: "2026-09-21T14:05:00.000Z" });
+  });
+
+  it("fails E_DATA_HOME_UNAVAILABLE without a usable data folder, as every RPC (code review 2026-09-30 §3.2)", async () => {
+    const paseo = daemon().paseo;
+    await expect(handleFallbackAct({ incidentId: "fb-3f9a2c1d7e4b", action: "dismiss" }, paseo, { home: null, log })).rejects.toThrow(
+      /^E_DATA_HOME_UNAVAILABLE: cannot act on the fallback incident: paseo-bm cannot use its data folder/,
+    );
   });
 
   it("refuses an incident that is no longer pending, and an unknown one", async () => {
     writeIncidents([incident({ status: "dismissed" })]);
-    const paseo = fakePaseo().paseo;
+    const paseo = daemon().paseo;
     await expect(handleFallbackAct({ incidentId: "fb-3f9a2c1d7e4b", action: "dismiss" }, paseo, { home, log })).rejects.toMatchObject({
       code: "E_FALLBACK_NOT_PENDING",
     });
@@ -195,7 +199,7 @@ describe("fallback.act", () => {
 
   it("hands switch and wait to the modules that implement them, with a coded error until then", async () => {
     writeIncidents([incident()]);
-    const paseo = fakePaseo().paseo;
+    const paseo = daemon().paseo;
     await expect(handleFallbackAct({ incidentId: "fb-3f9a2c1d7e4b", action: "switch" }, paseo, { home, log })).rejects.toMatchObject({
       code: "E_FALLBACK_CREATE_FAILED",
     });

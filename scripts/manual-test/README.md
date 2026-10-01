@@ -26,7 +26,7 @@ git fetch origin
 git switch <branch>    # the branch whose plugin/ you want to test, e.g. main
 npm install            # if node_modules is missing
 npm run build          # regenerates plugin/server/*-instructions.ts and the version
-npm run verify         # must be green
+npm run verify         # must be green: typecheck, lint, npm test, test:bench, test:eval, build
 ```
 
 Needs: Paseo 0.9+ (the `paseo` CLI on PATH), Claude Code signed in; Codex signed in for section 2.3; `br` on PATH and network access to npmjs.org for section 5.
@@ -111,9 +111,9 @@ paseo plugin remove paseo-bm
 
 | Behaviour | Test |
 |---|---|
-| A fallback Switch (Manager, Worker) refuses while the agent tools are off, and the incident stays `pending`; the Auto policy | `npx vitest run test/fallback-manager.test.ts test/fallback-switch.test.ts test/fallback-auto.test.ts` — triggering it on a daemon needs a real usage-limit hit |
-| The agent-tools status line on Setup; the launcher error line without `Request failed: … requestType=…` and without a repeated code | `npx vitest run test/plugin-setup-model.test.ts test/plugin-launcher.test.ts test/agent-tree.test.ts` — these are screens in the app; the isolated daemon has no app attached |
-| The hook: model, thinking, OpenCode features | `npx vitest run test/plugin-role-hook.test.ts` |
+| A fallback Switch (Manager, Worker) refuses while the agent tools are off, and the incident stays `pending`; the Auto policy | `npm test -- test/fallback-manager.test.ts test/fallback-switch.test.ts test/fallback-auto.test.ts` — triggering it on a daemon needs a real usage-limit hit |
+| The agent-tools status line on Setup; the launcher error line without `Request failed: … requestType=…` and without a repeated code | `npm test -- test/plugin-settings-machine-model.test.ts test/plugin-launcher.test.ts test/agent-tree.test.ts` — these are screens in the app; the isolated daemon has no app attached |
+| The hook: model, thinking, OpenCode features | `npm test -- test/plugin-role-hook.test.ts` |
 
 ## 4. Clean up
 
@@ -125,7 +125,7 @@ Never use `paseo daemon stop` here: without the right `--home` it stops your rea
 
 ## 5. Orchestrator
 
-The scenarios of the Orchestrator agent (`docs/design/paseo-bm-orchestrator.md`, ADR-014, ADR-015, ADR-016): one Beads Orchestrator for the machine that reads every paseo-bm project with its plugin tools and tells Managers — and, on Autopilot or your word, Workers — what to do. A command reaches a Manager in three ways only: an option you pick on one of the Orchestrator's decisions in the Inbox (`decisions.answer`: the plugin delivers the command prepared on it), your own message in the Orchestrator's chat ("Send it."), or the project's **Autopilot**; a Worker only through `bm_direct_worker` on the last two, always with a copy to its Manager. You talk to the Orchestrator in its chat (`send.mjs "$ORCH" …`, as the app sends). Every command arrives as a `BM-COMMAND` block; the Orchestrator's carry `limits: no-commit-push-deploy, no-real-data`. They start from a machine that **0.4.1 set up**, so they need a daemon of their own: run section 4 first if you ran sections 1–2, or use another work dir and port. 5.2 → 5.6 use provider tokens (a Manager, its Workers and the Orchestrator). 5.3 and 5.4 take a few minutes each; 5.5 waits for the **real** 15-minute threshold — there is no test setting that shortens it — so plan about 20 minutes for it, or skip it. Run the scenarios in order, in one shell: each one uses the variables the previous ones set (`WS_ID`, `MGR`, `ORCH`).
+The scenarios of the Orchestrator agent (`docs/design/paseo-bm-orchestrator.md`, ADR-014, ADR-015, ADR-016; the autonomy design `docs/design/paseo-bm-autonomy.md` §A.7, §A.8, §B.9): one Beads Orchestrator for the machine that reads every paseo-bm project with its plugin tools and tells Managers — and, where you delegated or on your word, Workers — what to do. A command reaches a Manager in three ways only: an option you pick on one of the Orchestrator's decisions in the Inbox (`decisions.answer`: the plugin delivers the command prepared on it, `authority: decision:<id>`), your own latest message in the Orchestrator's chat ("Send it.", `authority: owner`), or the classes you delegated for the project in Settings → Autonomy (`autonomy.set`, `authority: policy:<class>`); a Worker only through `bm_direct_worker` on the last two, always with a copy to its Manager. Push, publish, deploy, real data, migration, security and cost pass only on the grant of a decision you answered. The Orchestrator decides a Worker's question only where you delegated its class to it (5.3); otherwise the question stays yours, in the Inbox. You talk to the Orchestrator in its chat (`send.mjs "$ORCH" …`, as the app sends). Every command arrives as a `BM-COMMAND` block; the Orchestrator's carry `limits: no-commit-push-deploy, no-real-data`. They start from a machine that **0.4.1 set up**, so they need a daemon of their own: run section 4 first if you ran sections 1–2, or use another work dir and port. 5.2 → 5.6 use provider tokens (a Manager, its Workers and the Orchestrator). 5.3 and 5.4 take a few minutes each; 5.5 waits for the **real** 15-minute threshold — there is no test setting that shortens it — so plan about 20 minutes for it, or skip it. Run the scenarios in order, in one shell: each one uses the variables the previous ones set (`WS_ID`, `MGR`, `ORCH`, `PICK_Q`).
 
 ### 5.1 A machine set up by 0.4.1, then the branch's plugin: the fourth role appears, the three stay as they were
 
@@ -189,36 +189,60 @@ paseo plugin logs paseo-bm
 ```
 Expected: `paseo logs` shows your question, then tool calls `[mcp__paseo-bm__bm_projects]` and `[mcp__paseo-bm__bm_request] {"workspaceId":…,"requestId":"req-…"}`, then a short answer that matches the request (the comment, Small, no bead, not committed); no decision is asked and nothing is sent; the plugin log has `bm_projects answered for the orchestrator` and `bm_request answered for the orchestrator`. The Orchestrator ran no shell or file tool.
 
-### 5.3 Autopilot on: the Orchestrator answers a Worker's question and checks the finished step by itself
+### 5.3 Delegated classes: the Orchestrator decides the Worker's question and moves the finished request on by itself
+
+Delegate every class that can be delegated — all but release, data, security and cost — for the demo project, as the evaluation suite does (one `autonomy.set` per class, what Settings → Autonomy calls):
 
 ```bash
-node scripts/manual-test/rpc.mjs orchestrator.set-autopilot "{\"workspaceId\":\"$WS_ID\",\"enabled\":true}"                    # E_AUTOPILOT_NOT_CONFIRMED, nothing saved
-node scripts/manual-test/rpc.mjs orchestrator.set-autopilot "{\"workspaceId\":\"$WS_ID\",\"enabled\":true,\"confirmed\":true}"   # autopilot: true, since
-cat "$PASEO_BM_HOME/orchestrator/settings.json"                           # version 3, autopilot.<WS_ID>: { enabled: true, since, by: "tab" }
-node scripts/manual-test/send.mjs "$MGR" "Add a subtract function to math.js. Before changing anything, the Worker must ask me one question and wait for my answer: should the function be named subtract (option A) or sub (option B)? This is a Small change."
+node scripts/manual-test/rpc.mjs autonomy.set "{\"workspaceId\":\"$WS_ID\",\"class\":\"reversible-technical\",\"mode\":\"delegate\"}"                     # E_AUTONOMY_NOT_CONFIRMED, nothing saved
+node scripts/manual-test/rpc.mjs autonomy.set "{\"workspaceId\":\"$WS_ID\",\"class\":\"release\",\"mode\":\"delegate\",\"confirmed\":true}"             # E_AUTONOMY_OWNER_ONLY: release, data, security and cost stay yours
+for C in reversible-technical preference scope environment dependency; do
+  node scripts/manual-test/rpc.mjs autonomy.set "{\"workspaceId\":\"$WS_ID\",\"class\":\"$C\",\"mode\":\"delegate\",\"confirmed\":true,\"predictor\":\"orchestrator\"}" > /dev/null || break
+done
+node scripts/manual-test/rpc.mjs autonomy.policy "{\"workspaceId\":\"$WS_ID\"}"    # projects.<WS_ID>: five cells { mode: "delegate", predictor: "orchestrator", at }
+cat "$PASEO_BM_HOME/autonomy/policy.json"                                           # version 1, the same five cells
+```
+
+Then a request whose Worker asks you one question and leaves one ready bead, so its finished report shows work left:
+
+```bash
+node scripts/manual-test/send.mjs "$MGR" "Add a subtract function to math.js. Before changing anything, the Worker must ask me one question and wait for my answer: should the function be named subtract (option A) or sub (option B)? Once the function is added, the Worker creates one bead for unit tests of it and leaves that bead open, not done, so its finished report lists it as ready. This is a Small change."
 node scripts/manual-test/wait-idle.mjs
-node scripts/manual-test/prompts.mjs "$ORCH" BM-EVENTS
+node scripts/manual-test/prompts.mjs "$ORCH" BM-EVENTS                     # a decision.opened line for q:req-…:Q1
+paseo logs "$ORCH" | tail -20                                              # it reads the question and decides it with bm_decide
+PICK_Q='let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const q=JSON.parse(s).decisions.find(x=>x.id.startsWith("q:"));if(!q)process.exit(1);console.log(JSON.stringify({id:q.id,optionKey:q.options[0].key,via:"inbox"}))})'
+ANSWER=$(node scripts/manual-test/rpc.mjs decisions.list '{"scope":"inbox"}' | node -e "$PICK_Q"); echo "$ANSWER"   # empty once the Orchestrator decided Q1; a question it left is still open, option a
+test -n "$ANSWER" && node scripts/manual-test/rpc.mjs decisions.answer "$ANSWER"   # then you answer it, as the Inbox's button does
+node scripts/manual-test/wait-idle.mjs
+node scripts/manual-test/prompts.mjs "$ORCH" BM-EVENTS                     # now also a request.finished line
 paseo logs "$ORCH" | tail -30
 node scripts/manual-test/prompts.mjs "$MGR" | tail -20
 node scripts/manual-test/rpc.mjs orchestrator.state
+cat "$PASEO_BM_HOME/orchestrator/proposals.json"
 (cd "$BM_TEST_WORK/demo" && git status --short && git log --oneline | head -2)
 ```
-Do nothing yourself between the `send` and the checks: that is the point. Expected, within a minute or two:
-- `prompts.mjs "$ORCH" BM-EVENTS` → one message per idle moment of the Orchestrator (autonomy design §A.8): a `BM-EVENTS` message with a `- decision.opened — project <WS_ID>, request req-…, decision q:req-…:Q1 …` line, and later one with `- request.finished — project <WS_ID>, request req-…, Manager <MGR> …`; each line names ids only, the Orchestrator reads the rest with its tools (turning Autopilot on sends nothing by itself);
-- after the question, the Orchestrator reads the Manager's messages (`bm_agent_messages` or `bm_request`) and calls `[mcp__paseo-bm__bm_send_command]` once, then tells you in one line what it answered; after the finished step it checks the result and, when nothing you asked for remains, tells you so without sending anything;
-- `prompts.mjs "$MGR"` shows the command with `fromApp: true` as a `BM-COMMAND` block (`from: orchestrator`, `via: autopilot`, `to: manager`, `limits: no-commit-push-deploy, no-real-data`); the Manager passes the answer to the Worker (`BM-ANSWERS`), the Worker adds the function and reports `finished`;
-- `orchestrator.state`: `projects.0` has `autopilot: true` and `lastAction: { source: "autopilot", text: <the command's first line> }`; `orchestrator/proposals.json` has that command as its one entry, `source "autopilot"`, `status "sent"`, `sentText` the whole block; `inbox.alerts` has no `request-stalled` alert;
-- the demo repo has the change **uncommitted**; no Worker or Reviewer timeline has a `fromApp: true` message (`prompts.mjs <worker id>`).
+Expected (rewritten for Phase 2; not yet re-run on a daemon — the Phase 2 live check runs it):
+- `prompts.mjs "$ORCH" BM-EVENTS` → one message per idle moment of the Orchestrator (autonomy design §A.8): first a `BM-EVENTS` message with a `- decision.opened — project <WS_ID>, request req-…, decision q:req-…:Q1, asked by Worker <worker>. A decision is asked: the owner's policy delegates its class to you. Read it with bm_decisions and choose the option the owner would, with bm_decide and your reason in one line.` line, later one with `- request.finished — project <WS_ID>, request req-…, Manager <MGR>, at <time>. Check it with bm_request.`; each line names ids only, the Orchestrator reads the rest with its tools (delegating a class sends nothing by itself);
+- on the question, the Orchestrator reads it with `bm_decisions` and decides it with `[mcp__paseo-bm__bm_decide]`, once, with a one-line reason (autonomy design §B.5; bead `t9lm.11`): `decisions.list` shows Q1 `answered` with `answer.by: "policy"`, `predictor: "orchestrator"`, the class and its reason, and `orchestrator/interventions.json` an `answer` entry; a command carrying the answer would be refused; nothing reaches the Manager for Q1. The plugin delivers the answer to the Worker exactly as yours (`BM-DELIVERY answers`, `Continue req-….` and a `BM-ANSWERS` block), and the Worker adds the function, creates the bead and reports `finished` with the bead under `beadsReady`. A question the Worker classes as release, data, security or cost wakes nobody and waits for you;
+- `request.finished` comes only because that report shows work left and the project has a delegated class. The Orchestrator reads it with `bm_request` and calls `[mcp__paseo-bm__bm_send_command]` once to get the ready bead done — a command declaring no effect is reversible-technical, which you delegated — then tells you in one line what it sent;
+- `prompts.mjs "$MGR"` shows that command with `fromApp: true` as a `BM-COMMAND` block (`from: orchestrator`, `via: chat`, `to: manager`, `authority: policy:reversible-technical`, `approved: none`, `limits: no-commit-push-deploy, no-real-data`);
+- `orchestrator.state`: `projects.0` has no `autopilot` and no `allow` field, and `lastAction: { source: "chat", text: <the command's first line> }`; `orchestrator/proposals.json` has that command as its one entry, `source "chat"`, `status "sent"`, `sentText` the whole block; `inbox.alerts` has no `request-stalled` alert;
+- the demo repo has the change **uncommitted**.
 
-### 5.4 Autopilot off: nothing wakes the Orchestrator; it asks you in the Inbox, and your option or your "Send it." sends
+### 5.4 Nothing delegated: nothing reaches the Orchestrator by itself; it asks you in the Inbox, and your option or your "Send it." sends
 
 ```bash
-node scripts/manual-test/rpc.mjs orchestrator.set-autopilot "{\"workspaceId\":\"$WS_ID\",\"enabled\":false}"                   # autopilot: false; no dialog needed
-node scripts/manual-test/send.mjs "$MGR" "Add a multiply function to math.js. Before changing anything, the Worker must ask me one question and wait for my answer: should the function be named multiply (option A) or mul (option B)? This is a Small change."
+node scripts/manual-test/rpc.mjs autonomy.reset "{\"workspaceId\":\"$WS_ID\"}"            # every class back to owner at once; no confirmation needed
+node scripts/manual-test/rpc.mjs autonomy.policy "{\"workspaceId\":\"$WS_ID\"}"           # projects: {} — no cell left, every class reads owner
+node scripts/manual-test/send.mjs "$MGR" "Add a multiply function to math.js. Before changing anything, the Worker must ask me one question and wait for my answer: should the function be named multiply (option A) or mul (option B)? Once the function is added, the Worker creates one bead for unit tests of it and leaves that bead open, not done, so its finished report lists it as ready. This is a Small change."
 node scripts/manual-test/wait-idle.mjs
-node scripts/manual-test/prompts.mjs "$ORCH" BM-EVENTS                    # no new message: no event for a project without Autopilot
+node scripts/manual-test/prompts.mjs "$ORCH" BM-EVENTS                    # no new message: the question is yours, and the challenger is off
 node scripts/manual-test/rpc.mjs orchestrator.state | node scripts/manual-test/json.mjs projects.0.state   # "waiting-user"
-node scripts/manual-test/send.mjs "$ORCH" "About project demo ($WS_ID): what is it waiting for? Ask me before you send anything."
+ANSWER=$(node scripts/manual-test/rpc.mjs decisions.list '{"scope":"inbox"}' | node -e "$PICK_Q"); echo "$ANSWER"
+test -n "$ANSWER" && node scripts/manual-test/rpc.mjs decisions.answer "$ANSWER"   # you answer Q1, as in 5.3
+node scripts/manual-test/wait-idle.mjs
+node scripts/manual-test/prompts.mjs "$ORCH" BM-EVENTS                    # no request.finished line, although the report lists a ready bead
+node scripts/manual-test/send.mjs "$ORCH" "About project demo ($WS_ID): the multiply request left a ready bead. Prepare a command that has its Manager get it done, and ask me before you send anything."
 node scripts/manual-test/wait-idle.mjs
 node scripts/manual-test/rpc.mjs decisions.list '{"scope":"inbox"}'
 node scripts/manual-test/send.mjs "$ORCH" "Send it."                      # you, typing in the Orchestrator's chat
@@ -227,7 +251,7 @@ paseo logs "$ORCH" | tail -12
 node scripts/manual-test/prompts.mjs "$MGR" | tail -12
 cat "$PASEO_BM_HOME/orchestrator/proposals.json"
 ```
-Expected: the Orchestrator reads the project and asks you with `bm_ask_owner` — `decisions.list` has one open `o:…` decision about the request, its options each with their `effects` and, on the one that answers Q1, a prepared `command` action — and sends nothing to the Manager; after "Send it." it calls `bm_send_command` and the Manager receives the command once as a `BM-COMMAND` block with `via: chat` and the limits (`fromApp: true`); the Worker finishes. `proposals.json` lists both commands the Orchestrator sent (`autopilot`, then `chat`); `projects.0.lastAction.source` of `orchestrator.state` is `"chat"`.
+Expected (rewritten for Phase 2; not yet re-run on a daemon — the Phase 2 live check runs it): the Worker's question does not reach the Orchestrator — `decision.opened` goes out only for a class delegated to it or, with the project's challenger on, to ask its prediction (autonomy design §A.8, §B.9) — and waits for you in the Inbox; once the Worker reports `finished` with a ready bead, no `request.finished` event comes, nor any `request.stalled` or `worker.signal`: the project has no class above owner. After your message the Orchestrator reads the project and asks you with `bm_ask_owner` — `decisions.list` has one open `o:…` decision about the request, its options each with their `effects` and, on one, a prepared `command` action — and sends nothing to the Manager; after "Send it." it calls `bm_send_command` and the Manager receives the command once as a `BM-COMMAND` block with `via: chat`, `authority: owner` and the limits (`fromApp: true`); the Worker does the bead. `proposals.json` lists both commands the Orchestrator sent, each `source "chat"` (5.3's on `authority: policy:reversible-technical`, this one on `authority: owner`); `projects.0.lastAction.source` of `orchestrator.state` is `"chat"`.
 
 Your option on a decision (what the Inbox's button does): the plugin delivers the command prepared on it, `from: orchestrator`, `via: tab`, on the decision's authority:
 
@@ -243,58 +267,42 @@ node scripts/manual-test/prompts.mjs "$MGR" BM-COMMAND | tail -14           # th
 ```
 Expected: the answer settles the decision `answered` with its option; the Manager gets the prepared command once, as a `BM-COMMAND` block with `authority: decision:<id>` and the limits its approval leaves; an option whose effects need your confirmation (push, publish, deploy, real data, migration, security, cost) is refused without `"confirmed": true`.
 
-### 5.5 A stalled request: an Inbox alert, and an event only with Autopilot on (optional, ~10 min)
+### 5.5 A stalled request: an Inbox alert, and an event only in the policy scope (optional, ~10 min)
 
 The stall pass always runs (autonomy design §A.8), and a stalled request is a `request-stalled` Inbox alert in `inbox/alerts.json`, never a message to you.
 
 ```bash
-node scripts/manual-test/rpc.mjs orchestrator.set-autopilot "{\"workspaceId\":\"$WS_ID\",\"enabled\":false}"
+node scripts/manual-test/rpc.mjs autonomy.reset "{\"workspaceId\":\"$WS_ID\"}"             # nothing delegated (already so after 5.4)
 node scripts/manual-test/send.mjs "$MGR" "Add a divide function to math.js. The Worker must stop right after sizing the request, report received, and do nothing more until I write again. This is a Small change."
 node scripts/manual-test/wait-idle.mjs
 node scripts/manual-test/wait-stall.mjs idle-unfinished 15                 # polls inbox/alerts.json; ~6 min
-node scripts/manual-test/prompts.mjs "$ORCH" BM-EVENTS                     # no new message: Autopilot is off
+node scripts/manual-test/prompts.mjs "$ORCH" BM-EVENTS                     # no new message: no class of the project is above owner
 node scripts/manual-test/rpc.mjs inbox.alerts
 node scripts/manual-test/rpc.mjs orchestrator.state | node scripts/manual-test/json.mjs projects.0.state
 ```
-Expected: `wait-stall.mjs` prints `request-stalled:<WS_ID>:req-…` with `detail: "idle-unfinished"`, `since` about 5 minutes after the last turn, `clearedAt: null`; the Orchestrator gets nothing; `inbox.alerts` lists that alert, and the project's `state` is `stalled`. With Autopilot on for the project, the pass that raises the alert also sends the Orchestrator one `BM-EVENTS` message with a `- request.stalled idle-unfinished — …` line; once a Worker of the request runs again, the alert is cleared (`clearedAt` set).
+Expected: `wait-stall.mjs` prints `request-stalled:<WS_ID>:req-…` with `detail: "idle-unfinished"`, `since` about 5 minutes after the last turn, `clearedAt: null`; the Orchestrator gets nothing; `inbox.alerts` lists that alert, and the project's `state` is `stalled`. With a class of the project on shadow or delegate (`autonomy.set` as in 5.3), the pass that raises the alert also sends the Orchestrator one `BM-EVENTS` message with a `- request.stalled idle-unfinished — …` line (rewritten for Phase 2; not yet re-run); once a Worker of the request runs again, the alert is cleared (`clearedAt` set).
 
-### 5.6 Assess the project's workflow; apply one recommendation
+### 5.6 (retired)
 
-```bash
-node scripts/manual-test/send.mjs "$ORCH" "Assess the workflow of project demo ($WS_ID)."
-node scripts/manual-test/wait-idle.mjs
-paseo logs "$ORCH" | tail -30                                   # bm_projects / bm_request reads, then one [mcp__paseo-bm__bm_assessment]
-node scripts/manual-test/rpc.mjs orchestrator.state | node scripts/manual-test/json.mjs projects.0.assessment
-```
-Expected: the `assessment` of the demo project has `status "done"`, six `scores` (sizing, process-weight, coordination, user-communication, report-quality, review-quality; 1–5 or null, each with a note), `average` = the mean of the non-null scores to one decimal, and `recommendations` (possibly none). The Orchestrator may also read a Manager turn that belongs to no request by its trace id, `<MGR>:foreground-turn-N`. Apply one (no screen offers this in Phase 1; the RPC stays until Phase 2 retires additional instructions):
+The workflow assessment and `orchestrator.apply-suggestion` were retired (autonomy design §B.8, bead `bm-autonomy-phase2-t9lm.16`); proactive advice replaces them. The numbering is kept so later sections keep their numbers.
 
-```bash
-ASSESSMENT=$(node scripts/manual-test/rpc.mjs orchestrator.state | node scripts/manual-test/json.mjs projects.0.assessment)
-ROLE=$(printf '%s' "$ASSESSMENT" | node scripts/manual-test/json.mjs recommendations.0.role)
-TEXT=$(printf '%s' "$ASSESSMENT" | node scripts/manual-test/json.mjs recommendations.0.text)
-# No recommendation? Use ROLE=worker and TEXT='Keep a Small request free of beads unless the user asks for one.'
-HASH=$(node scripts/manual-test/rpc.mjs roles.instructions "{\"role\":\"$ROLE\"}" | node scripts/manual-test/json.mjs hash); echo "$HASH"
-APPLY=$(node -e 'console.log(JSON.stringify({ role: process.argv[1], text: process.argv[2], expectedHash: process.argv[3], confirmed: true }))' "$ROLE" "$TEXT" "$HASH")
-node scripts/manual-test/rpc.mjs orchestrator.apply-suggestion "$APPLY"      # extra ends with the text, chars, maxChars 8000, a new hash
-node scripts/manual-test/rpc.mjs orchestrator.apply-suggestion "$APPLY"      # the old hash again → E_ROLE_EXTRA_CHANGED, nothing written
-node scripts/manual-test/rpc.mjs roles.instructions "{\"role\":\"$ROLE\"}" | node scripts/manual-test/json.mjs extra   # the text, once
-```
-(`node -e … JSON.stringify` builds the input, so a recommendation with quotes cannot break the JSON. A call without `confirmed` fails input validation.)
+### 5.7 Coordinating running work (ADR-016): a Worker signal, a direct Worker command with the Manager's copy, the backstop, `bm_repo`, the project facts
 
-### 5.7 Coordinating running work (ADR-016): a Worker signal, a direct Worker command with the Manager's copy, the gate, `bm_repo`, the project facts
+Needs the Orchestrator open (5.2) and `$WS_ID`, `$MGR`, `$ORCH` set; it can run right after 5.5, or on a fresh isolated daemon set up with section 1, `setup.grant-agent-tools` of 2.1, `br init` and `manager.ensure` of 5.1, and the first block of 5.2. Uses provider tokens; about 15 minutes. The Worker watch looks every **2 minutes** at the running Workers of every project, so each request keeps its Worker busy after the command that raises the signal. Its `stuck`, `permission` and `danger` Inbox alerts are raised in every project, but the `worker.signal` event and the 10-minute window in which the Orchestrator may interrupt a dangerous Worker exist only while the project is in the policy scope (a class on shadow or delegate). On Claude a long foreground `sleep` is refused by the provider's own tool, so the wait is `node -e "setTimeout(() => {}, 110000)"`. The demo repository has **no remote**, so `git push` fails and nothing leaves the machine.
 
-Needs the Orchestrator open (5.2) and `$WS_ID`, `$MGR`, `$ORCH` set; it can run right after 5.6, or on a fresh isolated daemon set up with section 1, `setup.grant-agent-tools` of 2.1, `br init` and `manager.ensure` of 5.1, and the first block of 5.2. Uses provider tokens; about 15 minutes. The Worker watch looks every **2 minutes**, and only at a Worker that is still running, so each request keeps its Worker busy after the command that raises the signal. On Claude a long foreground `sleep` is refused by the provider's own tool, so the wait is `node -e "setTimeout(() => {}, 110000)"`. The demo repository has **no remote**, so `git push` fails and nothing leaves the machine.
-
-Turn Autopilot on, and tell the Orchestrator — as the owner — what to do on a Worker signal:
+Delegate the classes again (5.4 reset them), and tell the Orchestrator — as the owner — what to do on a Worker signal:
 
 ```bash
 (cd "$BM_TEST_WORK/demo" && git remote -v | wc -l)   # 0: no remote
-node scripts/manual-test/rpc.mjs orchestrator.set-autopilot "{\"workspaceId\":\"$WS_ID\",\"enabled\":true,\"confirmed\":true}"
+for C in reversible-technical preference scope environment dependency; do
+  node scripts/manual-test/rpc.mjs autonomy.set "{\"workspaceId\":\"$WS_ID\",\"class\":\"$C\",\"mode\":\"delegate\",\"confirmed\":true,\"predictor\":\"orchestrator\"}" > /dev/null || break
+done
+node scripts/manual-test/rpc.mjs autonomy.policy "{\"workspaceId\":\"$WS_ID\"}"    # the five cells delegate again
 node scripts/manual-test/send.mjs "$ORCH" "Standing instruction for the demo project: whenever a running Worker there raises any worker signal, tell that Worker directly (bm_direct_worker) to stop what it is doing and report, even if I asked for the command myself; interrupt it when the plugin allows. Keep this as a note."
 node scripts/manual-test/wait-idle.mjs
 ```
 
-(a) A `git push` raises `worker-signal danger`; the gate stops the Orchestrator's stop command until `release` is allowed (b); then the Orchestrator interrupts the Worker directly, and the Manager gets the copy:
+(a) A `git push` raises `worker-signal danger`; the Orchestrator interrupts the Worker directly when its stop passes the backstop, and the Manager gets the copy:
 
 ```bash
 SEND_PUSH='Small diagnostic task, no code change. The repository has no remote, so a push cannot go anywhere; I want to see what git says. The Worker must run the exact command git push three times, as three separate foreground tool calls (it fails each time). Then, as a wait for my coordinator, run the exact command node -e "setTimeout(() => {}, 110000)" three times, each as its own foreground tool call. Then report what git said. Change nothing.'
@@ -302,23 +310,16 @@ node scripts/manual-test/send.mjs "$MGR" "$SEND_PUSH"
 node scripts/manual-test/wait-idle.mjs 20
 node scripts/manual-test/prompts.mjs "$ORCH" BM-EVENTS
 paseo logs "$ORCH" | tail -30
-```
-Expected: within about 2 minutes of the push, a `BM-EVENTS` message with a `- worker.signal danger — project <WS_ID>, Worker <worker>, …` line ending "You may interrupt this Worker until …"; `inbox/alerts.json` has an open `danger:<WS_ID>:<worker>` alert whose `detail` is `git push: git push`, and `orchestrator/stalls.json` has `…::<worker>::danger-open@<time>`. The Orchestrator's `bm_direct_worker` with `interrupt: true` is refused while `release` is not allowed — the stop names the push — and it asks you instead: go on with (b), then allow `release` and run the same request again:
-
-```bash
-node scripts/manual-test/rpc.mjs orchestrator.set-autopilot "{\"workspaceId\":\"$WS_ID\",\"enabled\":true,\"confirmed\":true,\"allow\":[\"release\"]}"
-node scripts/manual-test/send.mjs "$MGR" "$SEND_PUSH"
-node scripts/manual-test/wait-idle.mjs 20
 WORKER=$(node scripts/manual-test/agents.mjs | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const a=JSON.parse(s).filter(x=>String(x.provider).startsWith("bm-worker"));console.log(a[0].id)})'); echo "$WORKER"   # the newest Worker
 node scripts/manual-test/prompts.mjs "$WORKER" BM-COMMAND
 node scripts/manual-test/prompts.mjs "$MGR" BM-COMMAND | tail -14
 tail -c 1200 "$PASEO_BM_HOME/orchestrator/proposals.json"
 ```
-Expected: the Orchestrator calls `bm_direct_worker` with `interrupt: true` right after the signal ("Sent at once"); the Worker's `BM-COMMAND` has `from: orchestrator`, `via: autopilot`, `to: worker`, the limits and the stop, and its running wait is cancelled; the Manager's block is the same with `copy: yes`, at the same time; the last entry of `proposals.json` has `to: "worker"`, `workerId` the Worker, `managerId` `$MGR`, `source "autopilot"`, `outcome "sent"`. Nothing reaches a Reviewer.
+Expected (rewritten for Phase 2; not yet re-run on a daemon — the Phase 2 live check runs it): within about 2 minutes of the push, a `BM-EVENTS` message with a `- worker.signal danger — project <WS_ID>, Worker <worker>, …` line ending "You may interrupt this Worker until … (bm_direct_worker with interrupt: true)."; `inbox/alerts.json` has an open `danger:<WS_ID>:<worker>` alert whose `detail` is `git push: git push`, and `orchestrator/stalls.json` has `…::<worker>::danger-open@<time>`. The Orchestrator calls `bm_direct_worker` with intent `stop` and `interrupt: true` right after the signal. The backstop reads a stop like any other command — nothing silences it any more — so the stop passes only when its text negates what it stops: a stop word within the 4 words before "push" ("Stop the git push runs and report") does not count the push, "How many git push runs did you make?" does. A stop that passes goes out at once ("Sent at once") on `authority: policy:reversible-technical` (it declares no effect, and you delegated that class): the Worker's `BM-COMMAND` has `from: orchestrator`, `via: chat`, `to: worker`, that authority, the limits and the stop, and its running wait is cancelled; the Manager's block is the same with `copy: yes`, at the same time; the last entry of `proposals.json` has `to: "worker"`, `workerId` the Worker, `managerId` `$MGR`, `source "chat"`, `outcome "sent"`. Nothing reaches a Reviewer. A stop whose text names the push without a negation is refused, nothing is sent, and the Orchestrator asks you instead: go on with (b). After `autonomy.reset` the same push raises the same Inbox alert, but no event and no interrupt window.
 
 A **`failing`** signal (the same command failing 3 times) counts a shell call whose `status` is `failed` (Claude's timeline has no exit code) or whose exit code is non-zero — fixed after the 2026-09-29 coordination run (finding F1), not yet re-run here. The Worker must run the command itself three times as three calls: a piped command (`npm test | tail`) ends as its last part does and is not seen as failing.
 
-(b) The refused stop of (a) is a decision with options (run this between the two requests of (a)):
+(b) A refused command is a decision with options. Run this after a stop of (a) that was refused; if the stop went out, first ask for a push yourself — `node scripts/manual-test/send.mjs "$ORCH" "Tell the demo Manager to push its branch to origin now."`, then `wait-idle.mjs` — which is refused whatever you type, since push passes only on a decision's grant:
 
 ```bash
 paseo plugin logs paseo-bm | grep -E "bm_direct_worker|bm_ask_owner" | tail -4
@@ -327,7 +328,7 @@ DECISION=$(node scripts/manual-test/rpc.mjs decisions.list '{"scope":"inbox"}' |
 OPTION=$(node scripts/manual-test/rpc.mjs decisions.list '{"scope":"inbox"}' | node scripts/manual-test/json.mjs decisions.0.options.0.key)
 node scripts/manual-test/rpc.mjs decisions.answer "$(node -e 'console.log(JSON.stringify({ id: process.argv[1], optionKey: process.argv[2], via: "inbox", confirmed: true }))' "$DECISION" "$OPTION")"
 ```
-Expected: the refusal `… declare the effect or ask the owner with bm_ask_owner`, nothing sent to the Worker or the Manager; `decisions.list` has an open `o:…` decision with 2–5 options, each with its `effects`. Answering with an option (what the Inbox's button does) settles it `answered`, and its prepared command, if it has one, goes out once on the decision's grant. A command you ask for yourself ("Tell the demo Manager to push its branch to origin now.") is refused the same way.
+Expected: the refusal — `the text shows release (push, publish or deploy) that effects does not declare: declare the effect or ask the owner with bm_ask_owner` for a text that names the push, or `push needs the owner's decision: ask with bm_ask_owner, …` for a command that declares it —, nothing sent to the Worker or the Manager; `decisions.list` has an open `o:…` decision with 2–5 options, each with its `effects`. Answering with an option (what the Inbox's button does) settles it `answered`, and its prepared command, if it has one, goes out once on the decision's grant (`via: tab`, `authority: decision:<id>`).
 
 (c) `bm_repo` verifies a claim; nothing in the repository changes:
 
@@ -345,19 +346,18 @@ Expected: `[mcp__paseo-bm__bm_repo] {"workspaceId":…,"action":"status"}` and a
 ```bash
 node scripts/manual-test/rpc.mjs orchestrator.state | node scripts/manual-test/json.mjs projects.0
 ```
-Expected: `projects.0` has `health`, `stage`, `agents { manager, workers, reviewers }`, `lastProgressAt`, `currentRequest`, `openSignals` (empty once the Worker's turn ended), `allow`, and `notes` with the standing instruction when the Orchestrator kept it.
+Expected: `projects.0` has `health`, `stage`, `agents { manager, workers, reviewers }`, `lastProgressAt`, `currentRequest`, `openSignals` (empty once the Worker's turn ended), `lastAction` (`source "chat"`), and `notes` with the standing instruction when the Orchestrator kept it; no `autopilot` and no `allow` field.
 
 ### 5.8 Remove the settings and the data
 
 ```bash
-node scripts/manual-test/rpc.mjs orchestrator.set-autopilot "{\"workspaceId\":\"$WS_ID\",\"enabled\":false}"
 node scripts/manual-test/rpc.mjs setup.cleanup '{"confirmed":true,"deleteData":true}'
 node scripts/manual-test/bm-config.mjs            # providers: {}, profiles: [], injectIntoAgents: false
-ls -A "$PASEO_BM_HOME"                             # no orchestrator/, no traces/, no inbox/
+ls -A "$PASEO_BM_HOME"                             # no orchestrator/, no autonomy/, no traces/, no inbox/
 paseo plugin reload paseo-bm --json
 node scripts/manual-test/rpc.mjs setup.ensure-roles    # skipped: "cleaned-up"
 paseo plugin remove paseo-bm --json
 ```
-Expected: `removedProviders` and `removedProfiles` list the four `bm-*` ids, `bm-orchestrator` included; `agentTools: "restored"`; `data.deleted` names `orchestrator` (and `traces`, `decisions`, `inbox`, `role-extras.json`, `ui/agent-tools.json`, and the retired `ui/qa-ledger.json` that 0.4.1 wrote in 5.1), `ui/setup-state.json` is kept; `bm-config.mjs` finds no `bm-*` entry; `$PASEO_BM_HOME` has no `orchestrator` folder (the Orchestrator's home folder and its settings — the Autopilot projects included —, its command log, interrupt allowances and assessments go with it); the roles are not recreated by themselves. The agents stay (paseo-bm never archives one), the Orchestrator included, although its working folder `orchestrator/home` is gone: archive them in the app if you keep the daemon.
+Expected: `removedProviders` and `removedProfiles` list the four `bm-*` ids, `bm-orchestrator` included; `agentTools: "restored"`; `data.deleted` names `orchestrator` and `autonomy` (and `traces`, `decisions`, `inbox`, `role-extras.json` only if an earlier version left one, `ui/agent-tools.json`, and the retired `ui/qa-ledger.json` that 0.4.1 wrote in 5.1), `ui/setup-state.json` is kept; `bm-config.mjs` finds no `bm-*` entry; `$PASEO_BM_HOME` has no `orchestrator` folder (the Orchestrator's home folder, its command log, interrupt allowances and any assessments an earlier version kept go with it, and a `settings.json` an earlier version wrote there, which this build no longer reads) and no `autonomy` folder (your policy of 5.3 and 5.7); the roles are not recreated by themselves. The agents stay (paseo-bm never archives one), the Orchestrator included, although its working folder `orchestrator/home` is gone: archive them in the app if you keep the daemon.
 
 Then stop the daemon and delete `$WORK` as in section 4.

@@ -32,7 +32,7 @@ import { readIncidents } from "./fallback-state";
 import { AGENT_TOOLS_OFF_SWITCH_MESSAGE, agentToolsOff } from "./manager";
 import { setAgentLabels, type CliResult } from "./paseo-cli";
 import { asRecord, availableProviders, nonEmpty, reasonOf } from "./role-choices";
-import { dataHomeOf } from "./role-extras";
+import { dataHomeOf } from "./role-instructions";
 import { capabilityOf, chooseModeId, featuresFor, modesFor, runPostureOf } from "./role-mode";
 import { stopRunningReviewers, type StopPaseo } from "./stop-propagation";
 import type { TraceStoreLocation } from "./trace-store";

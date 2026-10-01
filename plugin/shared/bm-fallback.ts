@@ -10,6 +10,8 @@
  * card never trusts the text for its state: it reads `fallback.incidents`.
  */
 
+import { FALLBACK_STATUSES } from "./contracts/fallback";
+
 /** First line of the notice. */
 export const BM_FALLBACK_MARKER = "BM-FALLBACK";
 
@@ -26,7 +28,7 @@ const KEY_VALUE = /^\s*>?\s*([A-Za-z][A-Za-z0-9 _-]*)\s*:\s*(.*)$/;
 const INCIDENT_ID = /^fb-[0-9a-f]{12}$/;
 const ABSENT = new Set(["", "none", "unknown", "n/a", "-", "null"]);
 
-export const FALLBACK_STATUSES = ["pending", "switched", "waiting", "resumed", "dismissed", "exhausted", "expired", "failed"] as const;
+/** A status the notice may name: one of the incident's (`FALLBACK_STATUSES`). */
 export type FallbackNoticeStatus = (typeof FALLBACK_STATUSES)[number];
 
 /** What a `BM-FALLBACK` block says; a field it cannot read is `null`. */

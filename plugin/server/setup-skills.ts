@@ -3,10 +3,9 @@
  * daemon sees them (delta 20260916-setup-screen §3.3). Read-only: the plugin
  * never installs or removes a skill.
  *
- * Same lists and rules as the CLI (`src/skills/detect.ts`) and `manager.md`:
- * Claude Code counts only its own directory; Codex counts the shared
- * `~/.agents/skills` or its own. The plugin payload cannot import `src/`, so
- * the two short lists are repeated here and pinned by a test.
+ * Same lists and rules as the retired installer and `manager.md`: Claude Code
+ * counts only its own directory; Codex counts the shared `~/.agents/skills` or
+ * its own. The two short lists are pinned by a test.
  *
  * Pi and OpenCode (delta 20260921 §4.2.6, F8) count only their own
  * directory, `~/.pi/agent/skills` and `~/.config/opencode/skill` (singular),

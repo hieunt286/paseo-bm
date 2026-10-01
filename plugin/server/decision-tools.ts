@@ -3,7 +3,7 @@
  * decision store as an agent's tool reads them — bounded, redacted, newest
  * asked first.
  *
- * - The Orchestrator's face (`server/orchestrator-tools.ts`) lists every
+ * - The Orchestrator's face (`server/orchestrator-decide-tools.ts`) lists every
  *   decision of the machine, of one project or of one request, with the grant
  *   each answer gave.
  * - The Manager's face (`createManagerTools`, served at `/mcp/manager` by
@@ -13,12 +13,14 @@
  * folder, never repairs a file), so the Manager's tools stay side-effect free
  * (ADR-010). No Paseo handle is needed.
  */
-import { cutText } from "./assessment";
+import { cutText } from "./request-render";
 import { redactText } from "./collector";
 import { resolveDataHome, type DataHomeDeps } from "./data-home";
 import { createDecisionStore, type DecisionFilter } from "./decision-store";
 import { DECISIONS_TOOL_LIMIT, MANAGER_SERVER_TOOLS, schemaIssues, type DecisionsToolStatus, type ToolFace } from "../shared/bm-tools";
-import { UNSETTLED_STATUSES, type Decision, type DecisionStatus, type PreparedAction } from "../shared/decisions";
+import { UNSETTLED_STATUSES, decisionClassOf, type Decision, type DecisionStatus, type PreparedAction } from "../shared/decisions";
+import { preparedChangeTextOf } from "../shared/prepared-changes";
+import { timeOrZero } from "../shared/time";
 
 /** The longest owner's words `bm_decisions` hands out per decision; the rest is cut in the middle. */
 export const DECISION_WORDS_MAX_CHARS = 1_000;
@@ -49,12 +51,18 @@ function actionLineOf(action: PreparedAction | undefined): string | null {
       return "the answer goes to the Worker";
     case "command":
       return `command to the ${action.to} ${action.agentId} (${action.intent}), delivered by the plugin when chosen`;
-    default:
+    case "fallback":
       return `fallback ${action.action} on incident ${action.target}`;
+    case "permission":
+      // Autonomy design §D.2: a held permission request, answered by the plugin once the owner chooses.
+      return `${action.allow ? "allow" : "deny"} permission request ${action.requestId} of ${action.agentId}, sent by the plugin only when the owner chooses it`;
+    default:
+      // Autonomy design §G.4: a change of the owner's settings, applied only on the owner's own answer.
+      return `${action.kind}: the plugin ${preparedChangeTextOf(action)}, only when the owner chooses it`;
   }
 }
 
-/** One decision as the tool hands it out: redacted, the owner's words cut; the grant only when asked for. */
+/** One decision as the tool hands it out: redacted, the owner's words cut, its class; the grant only when asked for. */
 export function decisionSummaryOf(decision: Decision, env: NodeJS.ProcessEnv, options: { grant: boolean }) {
   const words = decision.answer?.words ?? null;
   return {
@@ -65,13 +73,15 @@ export function decisionSummaryOf(decision: Decision, env: NodeJS.ProcessEnv, op
     askedAt: decision.askedAt,
     status: decision.status,
     subject: decision.subject,
+    // Stored, or read for a decision stored before classes (autonomy design §B.1, §B.9).
+    class: decisionClassOf(decision),
     question: redactText(decision.question, env),
     options: decision.options.map((option) => ({
       key: option.key,
       label: redactText(option.label, env),
       recommended: option.recommended,
       effects: option.effects,
-      ...(option.action === undefined ? {} : { action: actionLineOf(option.action) }),
+      ...(option.action === undefined ? {} : { action: redactText(actionLineOf(option.action) ?? "", env) }),
     })),
     answer:
       decision.answer === null
@@ -92,11 +102,6 @@ export function decisionSummaryOf(decision: Decision, env: NodeJS.ProcessEnv, op
   };
 }
 
-function timeOf(iso: string): number {
-  const at = Date.parse(iso);
-  return Number.isNaN(at) ? 0 : at;
-}
-
 /**
  * The decisions matching `query` in the data folder `home`, newest asked
  * first, at most `limit`; `total` is how many matched. A folder that holds no
@@ -113,7 +118,7 @@ export function listDecisions(home: string, query: DecisionsQuery, log?: (messag
   const matched = createDecisionStore(home, log === undefined ? {} : { log })
     .list(filter)
     .map((decision, index) => ({ decision, index }))
-    .sort((a, b) => timeOf(b.decision.askedAt) - timeOf(a.decision.askedAt) || b.index - a.index)
+    .sort((a, b) => timeOrZero(b.decision.askedAt) - timeOrZero(a.decision.askedAt) || b.index - a.index)
     .map(({ decision }) => decision);
   return { decisions: matched.slice(0, query.limit ?? DECISIONS_TOOL_LIMIT.default), total: matched.length };
 }

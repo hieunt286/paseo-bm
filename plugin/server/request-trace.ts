@@ -4,23 +4,34 @@
  *
  * `review-budget.ts` rebuilt this on its own; the rules need the same trace,
  * so the rebuild lives here and every check shares it.
- * Built from the store's records and the live agent list, the same way the
- * Dashboard builds it (Dashboard design §6) — never from `traces.get`, so
- * there is no pricing, no bead lookup and no timeline read.
+ * Built from the store's records and the live agent list (Dashboard design
+ * §6) — never from `traces.get`, so there is no pricing, no bead lookup and no
+ * timeline read. The Dashboard's `readTraceContext` rebuilds through
+ * `workspaceTracesOf` too, so both read one rebuild (code review 2026-09-30
+ * §4).
+ *
+ * It also keeps what the Orchestrator's tools, `orchestrator.state` and the
+ * watchers read of a rebuilt trace (`firstLine`, `requestKeyOf`,
+ * `lastActivityOf`, `waitingSinceOf`), so none of them imports another's
+ * module for it (code review 2026-09-30 §4), and their one scan of recent
+ * requests (`recentWorkspacesOf`, `recentTracesOf`, §3.5).
  */
-import type { RuleAgent, RuleInput, RuleMessage } from "../shared/rule-input";
-import type { TraceRecord } from "../shared/contracts";
+import type { RuleInput, RuleMessage } from "../shared/rule-input";
+import type { ParsedReport, TraceRecord, TraceWorkspaceMeta } from "../shared/contracts";
+import { isFinishedUnverified, requestFinishOf, verificationOf, type RequestFinish } from "../shared/evidence";
 import { byAt } from "../shared/order";
-import { agentFactsOf, reviewerReplacementsFor, type DashboardPaseo } from "./dashboard-rpc";
-import { brActions } from "./shell";
-import { readRecords, type TraceStoreLocation } from "./trace-store";
+import { redactText } from "./collector";
+import { errorText } from "./rpc-kit";
+import { reviewerReplacementsFor } from "./fallback-state";
+import { agentFactsOf, type DashboardPaseo } from "./paseo-directory";
+import { readRecords, readWorkspaceMeta, storedWorkspaceIds, type TraceStoreLocation } from "./trace-store";
 import {
-  agentTiming,
-  beadActionsOf,
+  handoffSuccessorsOf,
   reconstructTraces,
   type AgentFacts,
   type ReconstructedTrace,
 } from "./traces";
+import { timeOrZero } from "../shared/time";
 
 export interface RequestTraceDeps {
   location: TraceStoreLocation;
@@ -30,6 +41,12 @@ export interface RequestTraceDeps {
    * that replaced a stopped one (delta 20260921 §4.5.1); looked up otherwise.
    */
   home?: string | null;
+  /**
+   * Those Reviewers, when the caller has read the incidents already (the
+   * Dashboard reads them once for this and for the error count); read from
+   * `home` otherwise.
+   */
+  replacementIds?: ReadonlySet<string>;
   /**
    * Every paseo-bm agent on the host, already listed by `bmAgentsOf`. A caller
    * that reads many workspaces lists the agents once and hands them in here;
@@ -43,9 +60,83 @@ export interface WorkspaceTraces {
   records: TraceRecord[];
   agents: Map<string, AgentFacts>;
   traces: ReconstructedTrace[];
+  /** What reading the store had to say: a newer schema, unreadable lines (`readRecords`). */
+  notices: string[];
 }
 
-/** One request's trace, with the agent facts `ruleInputOf` needs beside it. */
+/** The longest first line of a request in `bm_projects`. */
+export const REQUEST_LINE_MAX_CHARS = 200;
+
+/** The first non-empty line of `text`, redacted and cut; `bm_projects` and `orchestrator.state` use it. */
+export function firstLine(text: string | null, env: NodeJS.ProcessEnv): string | null {
+  if (text === null) return null;
+  const line = redactText(text, env)
+    .split("\n")
+    .map((part) => part.trim())
+    .find((part) => part !== "");
+  if (line === undefined) return null;
+  // One line, always: `cutText` would put its truncation marker on lines of its own.
+  const chars = [...line];
+  return chars.length <= REQUEST_LINE_MAX_CHARS ? line : `${chars.slice(0, REQUEST_LINE_MAX_CHARS - 1).join("")}…`;
+}
+
+/**
+ * The key a request's stall situations are stored under (design §5.4):
+ * its request id, or its trace id when it has none.
+ */
+export function requestKeyOf(trace: Pick<ReconstructedTrace, "requestId" | "traceId">): string {
+  return trace.requestId ?? trace.traceId;
+}
+
+/** The newest time anything of the request was recorded. */
+export function lastActivityOf(trace: ReconstructedTrace): string {
+  let latest = trace.requestedAt;
+  for (const record of trace.records) if (timeOrZero(record.endedAt) > timeOrZero(latest)) latest = record.endedAt;
+  return latest;
+}
+
+/**
+ * The workspaces a scan of recent requests reads (`bm_projects`,
+ * `orchestrator.state`, the stall pass; code review 2026-09-30 §3.5): every
+ * workspace of the store, with its `meta.json`, that the store saw at or
+ * after `since` (epoch ms), has no `meta.json`, or is in `running`; in the
+ * store's order.
+ */
+export function recentWorkspacesOf(
+  location: TraceStoreLocation,
+  since: number,
+  running: ReadonlySet<string> = new Set(),
+): Array<{ workspaceId: string; meta: TraceWorkspaceMeta | null }> {
+  return storedWorkspaceIds(location)
+    .map((workspaceId) => ({ workspaceId, meta: readWorkspaceMeta(location, workspaceId) }))
+    .filter(({ workspaceId, meta }) => running.has(workspaceId) || meta === null || timeOrZero(meta.lastSeenAt) >= since);
+}
+
+/** A workspace's traces with activity at or after `since` (epoch ms), newest first, each with its last activity (`lastActivityOf`). */
+export function recentTracesOf(traces: readonly ReconstructedTrace[], since: number): Array<{ trace: ReconstructedTrace; lastActivityAt: string }> {
+  return traces
+    .map((trace) => ({ trace, lastActivityAt: lastActivityOf(trace) }))
+    .filter((entry) => timeOrZero(entry.lastActivityAt) >= since)
+    .sort((a, b) => timeOrZero(b.lastActivityAt) - timeOrZero(a.lastActivityAt));
+}
+
+/**
+ * When the request started waiting on the user: the time of its last report,
+ * when that one is `blocked`. A stored message time can be the write time
+ * (AGENTS.md), which is never before the end of the turn that carried the
+ * report, so that end time is used when it is earlier (design §6).
+ */
+export function waitingSinceOf(trace: ReconstructedTrace): string | null {
+  const last = trace.reports.at(-1);
+  if (last?.phase !== "blocked") return null;
+  const carrier = trace.records.find((record) =>
+    record.reports.some((entry) => entry === last || (entry.agentId === last.agentId && entry.at === last.at && entry.phase === "blocked")),
+  );
+  const endedAt = carrier === undefined ? 0 : timeOrZero(carrier.endedAt);
+  return endedAt > 0 && endedAt < timeOrZero(last.at) ? carrier!.endedAt : last.at;
+}
+
+/** One request's trace, with the live facts of its agents beside it. */
 export interface RequestTrace {
   trace: ReconstructedTrace;
   agents: Map<string, AgentFacts>;
@@ -56,7 +147,7 @@ export interface RequestTrace {
  * the turn that triggered it, or that turn is missing from the result.
  */
 export async function workspaceTracesOf(deps: RequestTraceDeps, workspaceId: string): Promise<WorkspaceTraces> {
-  const records = readRecords(deps.location, workspaceId).records;
+  const { records, notices } = readRecords(deps.location, workspaceId);
   // A replacement Reviewer's first message is the stopped Reviewer's
   // review call sent again, not a new one (delta 20260921 §4.5.1).
   const [agents, replacementIds] = await Promise.all([
@@ -67,10 +158,10 @@ export async function workspaceTracesOf(deps: RequestTraceDeps, workspaceId: str
             .filter((entry) => entry.workspaceId === workspaceId)
             .map((entry) => [entry.facts.id, entry.facts] as const),
         ),
-    reviewerReplacementsFor({ home: deps.home }),
+    deps.replacementIds ?? reviewerReplacementsFor({ home: deps.home }),
   ]);
   const traces = reconstructTraces({ records, agents: [...agents.values()], replacementIds });
-  return { records, agents, traces };
+  return { records, agents, traces, notices };
 }
 
 /** The request a Worker or Reviewer belongs to, or undefined when it is linked to none. */
@@ -107,6 +198,102 @@ export async function requestTraceOf(
   return trace === undefined ? null : { trace, agents };
 }
 
+/** A request to read: by its id, else the one an agent (a Worker or Reviewer) belongs to. */
+export interface RequestRef {
+  requestId: string | null;
+  agentId?: string | null;
+}
+
+/** The trace of one request: by its id, else the request `agentId` belongs to (`traceOfAgent`). */
+export function traceOfRequest(traces: readonly ReconstructedTrace[], ref: RequestRef): ReconstructedTrace | undefined {
+  const byId = ref.requestId === null ? undefined : traces.find((trace) => trace.requestId === ref.requestId);
+  if (byId !== undefined || ref.agentId === null || ref.agentId === undefined) return byId;
+  return traceOfAgent(traces, ref.agentId);
+}
+
+/** The workspace folder the store last saw, for a report's file paths (autonomy design §C.2); null when unknown. */
+function workspaceDirectoryOf(location: TraceStoreLocation, workspaceId: string): string | null {
+  return readWorkspaceMeta(location, workspaceId)?.lastKnownDirectory ?? null;
+}
+
+/**
+ * A request's finish now (autonomy design §C.3, §C.6): the request rebuilt
+ * from the trace store at the call, its latest report labelled when that is
+ * `finished` (`requestFinishOf`). Null when the request is not on record or
+ * its latest report is not `finished`. Rejects when the store cannot be read.
+ */
+export async function requestFinishNow(deps: RequestTraceDeps, workspaceId: string, ref: RequestRef): Promise<RequestFinish | null> {
+  const { traces, agents } = await workspaceTracesOf(deps, workspaceId);
+  const trace = traceOfRequest(traces, ref);
+  if (trace === undefined) return null;
+  return requestFinishOf({
+    reports: trace.reports,
+    records: trace.records,
+    workspaceDirectory: workspaceDirectoryOf(deps.location, workspaceId),
+    handoffSuccessors: new Set(handoffSuccessorsOf(trace, agents).keys()),
+  });
+}
+
+/**
+ * Whether a request stands finished-unverified now, the state a delegate may
+ * not act on (autonomy design §C.6, change-008 C4): read from the trace store
+ * at the call, so a later report of the request ends it. False with no request
+ * and no agent to read. A store that cannot be read counts as unverified —
+ * the owner's side: the delegate leaves it to the owner — with one log line.
+ * Never rejects.
+ */
+export async function isFinishedUnverifiedNow(
+  deps: RequestTraceDeps & { log?: (message: string) => void },
+  workspaceId: string,
+  ref: RequestRef,
+): Promise<boolean> {
+  if (ref.requestId === null && (ref.agentId ?? null) === null) return false;
+  try {
+    return (await requestFinishNow(deps, workspaceId, ref))?.unverified === true;
+  } catch (error) {
+    const what = ref.requestId === null ? `the request of ${ref.agentId}` : `request ${ref.requestId}`;
+    (deps.log ?? ((message: string) => console.warn(message)))(
+      `[paseo-bm] could not read ${what} to check its finish; it is left to the owner: ${errorText(error)}`,
+    );
+    return true;
+  }
+}
+
+/**
+ * Which `finished` reports of a recorded Manager turn leave their request
+ * finished-unverified (autonomy design §C.3, §A.8): each labelled against
+ * every record of its request — by the report's request id, else the Manager's
+ * newest turn — read once the collector has written the turn. The answer is a
+ * test for `requestFinishedEventsOf`. For any other turn nothing is read, and
+ * nothing is unverified; so too when the store cannot be read (one log line):
+ * the events are then as before. Never rejects.
+ */
+export async function unverifiedFinishesOf(
+  deps: RequestTraceDeps & { log?: (message: string) => void },
+  record: TraceRecord | null | undefined,
+): Promise<(report: ParsedReport) => boolean> {
+  const none = () => false;
+  if (record === null || record === undefined || record.role !== "manager") return none;
+  const finished = record.reports.filter((report) => report.phase === "finished");
+  if (finished.length === 0) return none;
+  try {
+    const { traces, agents } = await workspaceTracesOf(deps, record.workspaceId);
+    const workspaceDirectory = workspaceDirectoryOf(deps.location, record.workspaceId);
+    const unverified = new Set<ParsedReport>();
+    for (const report of finished) {
+      const requestId = report.requestId ?? record.requestId;
+      const trace = (requestId === null ? undefined : traceOfRequest(traces, { requestId })) ?? traceOfManagerTurn(traces, record.agentId);
+      if (trace === undefined) continue;
+      const handoffSuccessors = new Set(handoffSuccessorsOf(trace, agents).keys());
+      if (isFinishedUnverified(verificationOf({ report, records: trace.records, workspaceDirectory, handoffSuccessors }))) unverified.add(report);
+    }
+    return (report) => unverified.has(report);
+  } catch (error) {
+    (deps.log ?? ((message: string) => console.warn(message)))(`[paseo-bm] could not check the finish of ${record.agentId}'s turn: ${errorText(error)}`);
+    return none;
+  }
+}
+
 function messagesOf(records: readonly TraceRecord[], pick: (record: TraceRecord) => TraceRecord["sent"]): RuleMessage[] {
   return records
     .flatMap((record) =>
@@ -123,65 +310,15 @@ function messagesOf(records: readonly TraceRecord[], pick: (record: TraceRecord)
 }
 
 /**
- * What the rules read about one request. Pure: the trace and the agent facts it
- * was rebuilt from in, one `RuleInput` out. `agents` gives the live status and
- * creation time; everything else comes from the trace's own records.
+ * What the rule reads about one request. Pure: the trace in, one `RuleInput`
+ * out, everything from the trace's own records.
  */
-export function ruleInputOf(trace: ReconstructedTrace, agents: ReadonlyMap<string, AgentFacts>): RuleInput {
-  const beads = beadActionsOf(trace);
-  const evidence = trace.records.flatMap((record) => record.evidence).sort(byAt);
-  const agentOf = (agentId: string, role: RuleAgent["role"]): RuleAgent => {
-    const timing = agentTiming(agentId, role, trace, agents);
-    return {
-      agentId,
-      role,
-      status: agents.get(agentId)?.status ?? null,
-      state: timing.state,
-      startedAt: timing.startedAt,
-      lastActivityAt: timing.lastActivityAt,
-    };
-  };
+export function ruleInputOf(trace: ReconstructedTrace): RuleInput {
   return {
     traceId: trace.traceId,
     requestId: trace.requestId,
-    requestedAt: trace.requestedAt,
-    managerAgentId: trace.managerAgentId,
-    workerIds: [...trace.workerIds],
-    reviewerIds: [...trace.reviewerIds],
     tier: trace.tier,
-    state: trace.state,
-    linking: trace.linking,
-    agentsMissing: [...trace.agentsMissing],
     reviewCalls: trace.reviewCalls,
-    beadCounts: {
-      created: { count: beads.created.ids.length, confidence: beads.created.confidence },
-      updated: { count: beads.updated.ids.length, confidence: beads.updated.confidence },
-      closed: { count: beads.closed.ids.length, confidence: beads.closed.confidence },
-      ready: { count: beads.ready.ids.length, confidence: beads.ready.confidence },
-    },
-    filesChanged: [...new Set(trace.reports.flatMap((report) => report.filesChanged))],
-    fileEdits: evidence.filter((entry) => entry.kind === "file"),
-    brCreates: evidence.filter(
-      (entry) => entry.kind === "shell" && brActions(entry.detail).some((action) => action.verb === "create"),
-    ),
-    turns: trace.records.map((record) => ({
-      agentId: record.agentId,
-      role: record.role,
-      turnId: record.turnId,
-      at: record.at,
-      startedAt: record.startedAt,
-      endedAt: record.endedAt,
-      outcome: record.outcome,
-    })),
-    agents: [
-      ...trace.workerIds.map((id) => agentOf(id, "worker")),
-      ...trace.reviewerIds.map((id) => agentOf(id, "reviewer")),
-    ],
-    reports: [...trace.reports],
     inbound: messagesOf(trace.records, (record) => record.sent),
-    managerReplies: messagesOf(
-      trace.records.filter((record) => record.role === "manager"),
-      (record) => record.received,
-    ),
   };
 }

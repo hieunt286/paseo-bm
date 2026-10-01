@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Active — checks on a real daemon the role-settings and fallback features present in `0.3.0` |
+| Status | Active — checks on a real daemon the role-settings and fallback features present in `0.3.0`. **Its installer steps are out of date:** the `node dist/index.js install` / `doctor` / `--role` commands belong to the 0.3.x installer, which 0.4.0 replaced by the plugin's Settings (roles and fallback chains) and whose source is gone from the tree since [ADR-022](../adr/ADR-022-retirements-after-code-review.md). Until this checklist is rewritten, run those steps through Settings → Agents instead; the fallback Auto switch is retired too (ADR-022 decision 4) |
 | Source | [PRD delta §5](../archive/product/paseo-bm-prd-delta-20260921-worker-fallback-and-role-settings.md#5-bằng-chứng-thành-công), [design delta §8](../archive/design/paseo-bm-delta-20260921-worker-fallback-and-role-settings.md#8-testing-strategy), [plan delta §1.3](../archive/plans/paseo-bm-implementation-plan-delta-20260921-worker-fallback-and-role-settings.md#13-điều-kiện-ra) |
 | Run by | the owner (hieu.nt10), on a real daemon |
 | Scoring rule | An item not measured yet is recorded as **Not measured**, never as Pass. An item that fails is recorded as **Fail** with the measurement |
@@ -95,20 +95,20 @@ Needs a fallback chain for the Reviewer and for the Manager (Beads Manager → S
 | 17.6 | The Worker reports to the new Manager | After 17.4, a running Worker sends its next report | The Worker has received `BM-SETTINGS` with the line `Manager agent id: …`; the next report reaches the new Manager | Not measured |
 
 
-## Auto switch and auto wait (REQ-067, since `0.3.0-alpha.4`)
+## Environment delegated (REQ-067, replaces the Auto switch since ADR-022)
 
-Item 18.1 is the prerequisite before turning on **Auto switch**: the patterns must classify at least one real incident correctly (it was a release condition of `0.3.0-alpha.4`, decided by the owner in Q17 b; already Passed on the owner's machine). The other items need a fallback chain, and the **Auto switch** policy set separately for the role being checked (Beads Manager → Settings → Agents → Roles & models). As in the Worker fallback part: a real incident is best, otherwise stage a failed turn with a fake provider; never try to push a provider to its usage limit.
+The Auto switch was retired ([ADR-022](../adr/ADR-022-retirements-after-code-review.md) decision 4): a role's policy is **Ask me** or **Off**, and an incident is answered without the owner only where the owner delegates the **Environment** class for the project (Settings → Autonomy) or a precedent answers it. Item 18.1 still comes first: the patterns must classify at least one real incident correctly.
 
 | # | Check | How | Expected result | Result |
 |---|---|---|---|---|
-| 18.1 | The patterns classify a real incident correctly (REQ-067 c) | Read `~/.paseo-bm/role-fallback-state.json` (read only) | At least one incident has a `signal` and `message` produced by a real provider, and a `class` that is correct for that error according to the patterns (default or from the file) | **Pass** — read 2026-09-23 (`req-20260923T040415Z`). The file has 1 incident: `fb-d3c9430912b2`, `role` `worker`, `signal` `completed`, `message` `"Failed to authenticate. API Error: 401 API key is invalid."` — produced by the real Anthropic refusing a Claude Code turn, `class` `L4`, `status` `switched`. There is no `~/.paseo-bm/role-fallback.json`, so the patterns in force are `DEFAULT_PATTERNS`. Running the actual `classifyText` of `plugin/shared/fallback-patterns.ts` on that `message`: returns `L4`, matching pattern `/\b401\b/i`, `isFallbackClass` true — **the same** as the `class` recorded in the file. |
-| 18.2 | Choice and warning | Choose **Auto switch** for Worker, then for Manager; **Save fallbacks** | Under the policy row there is a cost warning; Manager's also has "The chat you use may be replaced."; `role-fallback.json` has `policy: "auto"` for exactly that role, other roles unchanged | Not measured |
-| 18.3 | Auto switch | A Worker with Auto switch stops because of its provider plan, with no known reset time (or a reset time more than 30 minutes away) | No click needed: there is a replacement Worker as in 16.4; the Manager chat receives **one** card, in the switched state — no "pending" card before it | Not measured |
-| 18.4 | Auto wait | An L1 incident of Claude or Codex with a reset time ≤ 30 minutes away | The incident is `waiting` right away, no agent is created; at the reset time the old agent receives `BM-RESUME` as in 16.7 | Not measured |
-| 18.5 | No candidate | A role with Auto switch but an empty chain (or every candidate already used) | The incident stays `pending`, the decision as with Ask me | Not measured |
-| 18.6 | Ask me unchanged | A role left on "Ask me" | As 16.2: a `pending` incident with its decision in the Inbox, nothing runs by itself | Not measured |
+| 18.1 | The patterns classify a real incident correctly (REQ-067) | Read `~/.paseo-bm/role-fallback-state.json` (read only) | At least one incident has a `signal` and `message` produced by a real provider, and a `class` that is correct for that error | Passed on the owner's machine (before ADR-022) |
+| 18.2 | An old Auto setting | A role whose `role-fallback.json` still says `policy: "auto"` | Settings → Agents shows Ask me for it, with the one-time notice and **Got it**; after Got it the file says `ask` | Not measured |
+| 18.3 | Delegated Environment switches | Environment delegated to the recommended option for the project; a Worker stops on its provider plan, no known reset time (or more than 30 minutes away) | No click needed: a replacement Worker as in 16.4; the decision is answered `by: policy`, listed in the Inbox's Decided for you digest | Not measured |
+| 18.4 | Delegated Environment waits | As 18.3, an L1 incident of Claude or Codex with a reset time ≤ 30 minutes away | The incident is `waiting` right away, no agent is created; at the reset time the old agent receives `BM-RESUME` as in 16.7 | Not measured |
+| 18.5 | No candidate | As 18.3 with an empty chain (or every candidate already used) | The decision stays open for the owner, as with Ask me | Not measured |
+| 18.6 | Not delegated | Environment left to the owner | As 16.2: a `pending` incident with its decision in the Inbox, nothing runs by itself | Not measured |
 
-Known risk: turning on Auto switch while 18.1 has not passed means one misclassification creates a surplus agent. If 18.3 creates an agent for a turn that is not a plan error, record that turn verbatim in the Result column and set "Ask me" back.
+Known risk: delegating Environment while 18.1 has not passed means one misclassification creates a surplus agent. If 18.3 creates an agent for a turn that is not a plan error, record that turn verbatim in the Result column and take the delegation back (a reversal also demotes the class).
 
 ---
 

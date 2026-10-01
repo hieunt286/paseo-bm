@@ -1,51 +1,51 @@
 import { describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { allNodes, pressables, renderTree, texts, type RNode } from "./helpers/element-tree";
 import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store";
 import {
   CHAT_CARD_VERSION,
+  MAX_BODY_LINES,
+  chatCardSchema,
+  decisionCardOf,
+  fallbackDecisionSeed,
+  toChatCards,
+  type ChatCard,
+} from "../plugin/client/chat-card-parse";
+import { drawAsCard, markOf, ownerWarning, partiesOf, actorName } from "../plugin/client/chat-card-parties";
+import { cardFrameOf, detailLinesOf, noticeLine, verificationOfRequest, type CardFrameView } from "../plugin/client/chat-card-frame";
+import { localTimeText } from "../plugin/client/format";
+import {
   DECISION_LOOKUP_WINDOW_MS,
   DECISION_POLL_MS,
   DECISION_UI_IDLE,
-  MAX_BODY_LINES,
   OWN_WORDS,
-  cardFrameOf,
-  chatCardSchema,
   choiceNeedsConfirmation,
-  decisionCardOf,
   decisionCardView,
   decisionLookupOf,
   decisionPollMs,
-  detailLinesOf,
-  drawAsCard,
-  fallbackDecisionSeed,
-  fallbackMarkdown,
-  localTimeText,
-  markOf,
-  markdownOf,
-  noticeLine,
-  ownerWarning,
-  partiesOf,
-  actorName,
   runDecisionAnswer,
   runDecisionConfirm,
-  toChatCards,
-  type CardFrameView,
-  type ChatCard,
   type DecisionLookup,
   type DecisionUi,
-} from "../plugin/client/chat-cards";
+} from "../plugin/client/chat-card-decision";
+import { fallbackMarkdown, markdownOf } from "../plugin/client/chat-card-markdown";
 import { parseMarkdown } from "../plugin/client/markdown";
 import { handleChatPeers } from "../plugin/server/chat-rpc";
 import { fallbackNotice } from "../plugin/server/fallback-rpc";
 import { answerNoticeOf } from "../plugin/server/orchestrator-decisions";
-import type { DashboardPaseo } from "../plugin/server/dashboard-rpc";
-import { DashboardError, TRACE_STORE_SCHEMA_VERSION, type ChatPeer, type FallbackIncident } from "../plugin/shared/contracts";
-import { answerDecision, confirmDecision, markNeedsConfirmation, supersedeDecision, withdrawDecision, type Decision } from "../plugin/shared/decisions";
+import { stateBriefOf } from "../plugin/server/compaction";
+import type { DashboardPaseo } from "../plugin/server/paseo-directory";
+import { DashboardError, TRACE_STORE_SCHEMA_VERSION, type ChatPeer, type FallbackIncident, type TraceVerification } from "../plugin/shared/contracts";
+import { answerDecision, confirmDecision, expireDecision, markNeedsConfirmation, supersedeDecision, withdrawDecision, type Decision } from "../plugin/shared/decisions";
+import { storedOrchestratorAnswer } from "./helpers/decisions";
 import { soleWorkerOf } from "../plugin/shared/sole-worker";
+// Save as precedent on the decision card (autonomy design §B.6).
+import { PRECEDENT_UI_IDLE, SAVE_AS_PRECEDENT_LABEL, precedentFormOf, precedentOfferView, runPrecedentSave, type PrecedentUi } from "../plugin/client/chat-card-precedent";
+import { USE_PRECEDENT_LABEL, precedentSuggestionView } from "../plugin/client/chat-card-precedent";
+import type { Precedent } from "../plugin/shared/precedents";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 /**
  * Chat cards v2 (autonomy design §A.12, experience concept §5): one frame
@@ -54,12 +54,6 @@ import { soleWorkerOf } from "../plugin/shared/sole-worker";
  * `DecisionCardBody`) are expanded with the element-tree helper;
  * `react-native` and the SDK's icon are named stand-ins.
  */
-
-vi.mock("react-native", () => {
-  const make = (name: string) => Object.assign(() => null, { displayName: name, primitive: true });
-  return { Pressable: make("Pressable"), ScrollView: make("ScrollView"), Text: make("Text"), TextInput: make("TextInput"), View: make("View") };
-});
-vi.mock("@getpaseo/plugin/client/react-native", () => ({ Icon: Object.assign(() => null, { displayName: "Icon", primitive: true }) }));
 
 // The root tsconfig has no `jsx`, so the .tsx modules load through non-literal specifiers.
 const uiPath = "../plugin/client/ui.tsx";
@@ -242,6 +236,39 @@ describe("the plugin's own notices", () => {
     expect(fallbackDecisionSeed("fb 1", "worker")).toBeNull();
     // One that names no usable incident still is the plugin's: a notice line.
     expect(notice(fallbackNotice(incident(), () => "claude", "Create the replacement Reviewer.").replace("fb-3f9a2c1d7e4b", "fb-nope"))[0]).toMatchObject({ type: "notice", notice: { marker: "BM-FALLBACK" } });
+  });
+
+  it("title the state brief after a compaction (BM-STATE, autonomy design §G.5) instead of showing its marker", () => {
+    const home = mkdtempSync(join(tmpdir(), "bm-state-card-"));
+    try {
+      const brief = stateBriefOf(
+        {
+          id: "cmp-1",
+          workspaceId: "wks_1",
+          requestId: REQ,
+          agentId: "wrk-1",
+          role: "worker",
+          provider: "claude",
+          interventionId: null,
+          reason: "Over the threshold.",
+          state: "compacting",
+          requestedAt: "2026-09-16T09:50:00.000Z",
+          sentAt: "2026-09-16T09:55:00.000Z",
+          compactedAt: "2026-09-16T09:56:00.000Z",
+          briefAt: null,
+          endedAt: null,
+          ending: null,
+        },
+        home,
+        {},
+      );
+      const [c] = notice(brief);
+      expect(c).toMatchObject({ type: "notice", notice: { marker: "BM-STATE", what: "State restored after compaction", tone: "muted" } });
+      expect(chatCardSchema.parse(c)).toEqual(c);
+      expect(noticeLine(c!, AT, NOW)).toMatch(/^State restored after compaction — From the paseo-bm plugin, not the owner/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 
@@ -472,6 +499,9 @@ describe("the decision card's view (experience concept §5.2)", () => {
     expect(shown).toMatchObject({ ownWords: true, confirmChat: false, confirm: null });
     // Ids, effects per option and the subject are in Details.
     expect(shown.details).toEqual(expect.arrayContaining([`Decision: ${Q_ID}`, `Request: ${REQ}`, "Subject: storage", "b: a file on disk: simplest. — effects: push"]));
+    // The class too (autonomy design §B.1): stored, or read by the effects for one stored before classes.
+    expect(shown.details).toContain("Class: release");
+    expect(view(found(questionDecision({ class: "security" }))).details).toContain("Class: security");
     expect(JSON.stringify(shown.frame)).not.toContain(Q_ID);
   });
 
@@ -520,7 +550,7 @@ describe("the decision card's view (experience concept §5.2)", () => {
 
   it("shows the Orchestrator's answer (bm_decide, change-004) as the Orchestrator's, its reason in Details, and no answer buttons", () => {
     const decided = ok(
-      answerDecision(questionDecision(), { by: "orchestrator", via: "autopilot", optionKey: "a", reason: "No migration: the table already holds the list.", at: "2026-09-16T10:02:00.000Z" }),
+      storedOrchestratorAnswer(questionDecision(), { optionKey: "a", reason: "No migration: the table already holds the list.", at: "2026-09-16T10:02:00.000Z" }),
     );
     const delivered = { ...decided, delivery: { to: "w1", kind: `answers:${REQ}`, at: "2026-09-16T10:02:01.000Z", outcome: "queued" as const } };
     const shown = view(found(delivered));
@@ -536,6 +566,37 @@ describe("the decision card's view (experience concept §5.2)", () => {
     expect(shown.details).toEqual(expect.arrayContaining(["Answered by: the Orchestrator", "Answer via: autopilot", "Reason: No migration: the table already holds the list."]));
     expect(JSON.stringify(shown.frame)).not.toContain("No migration: the table");
     expect(JSON.stringify(shown.frame)).not.toContain("answered by you");
+  });
+
+  it("shows the policy's answer (autonomy design §B.5) as Decided, decided for you by the policy, never as yours, with nothing to press but Details", () => {
+    const scope = questionDecision({ class: "scope", options: [{ key: "a", label: "the existing table: no migration.", recommended: true, effects: ["commit"] }] });
+    const decided = ok(
+      answerDecision(scope, {
+        by: "policy",
+        via: "inbox",
+        optionKey: "a",
+        class: "scope",
+        predictor: "recommended",
+        reason: "The recommended option: scope is delegated to it in this project",
+        at: "2026-09-16T10:02:00.000Z",
+      }),
+    );
+    const delivered = { ...decided, delivery: { to: "w1", kind: `answers:${REQ}`, at: "2026-09-16T10:02:01.000Z", outcome: "sent" as const } };
+    const shown = view(found(delivered));
+    expect(shown.frame).toMatchObject({
+      chip: { text: "Decided", tone: "success" },
+      authority: `decided for you by the policy · recommended option · ${localTimeText(new Date("2026-09-16T10:02:00.000Z"), NOW)}`,
+      tag: "grant: commit 1×",
+      body: ["✓ the existing table: no migration.", "Sent to Worker · Contact redesign."],
+    });
+    expect(shown).toMatchObject({ options: [], ownWords: false, confirmChat: false, confirm: null });
+    expect(shown.details).toEqual(
+      expect.arrayContaining(["Class: scope", "Answered by: your policy (recommended option, scope delegated)", "Answer via: inbox", "Reason: The recommended option: scope is delegated to it in this project"]),
+    );
+    expect(JSON.stringify(shown.frame)).not.toContain("answered by you");
+    // Settled: not read again; and not the owner's answer, so it cannot become a precedent.
+    expect(decisionPollMs(found(delivered), AT, NOW)).toBe(false);
+    expect(precedentOfferView(delivered, PRECEDENT_UI_IDLE)).toBeNull();
   });
 
   it("asks whether a chat message answered it, and closes it without a grant", () => {
@@ -559,7 +620,14 @@ describe("the decision card's view (experience concept §5.2)", () => {
       chip: { text: "Withdrawn" },
       body: ["The incident was handled another way."],
     });
-    for (const settled of [superseded, withdrawn]) expect(view(found(settled))).toMatchObject({ options: [], ownWords: false, confirmChat: false });
+    // A Worker's question expires when its request finishes (autonomy design §A.3).
+    const expired = ok(expireDecision(questionDecision(), { at: "2026-09-16T10:06:00.000Z" }));
+    expect(view(found(expired)).frame).toMatchObject({ chip: { text: "Expired", tone: "muted" }, body: ["The request finished."] });
+    expect(view(found(expired)).details).toContain("Status: expired at 2026-09-16T10:06:00.000Z");
+    expect(decisionPollMs(found(expired), AT, NOW)).toBe(false);
+    const expiredIncident = ok(expireDecision(questionDecision({ id: "f:fb-3f9a2c1d7e4b", requestId: null, askedBy: { role: "plugin", agentId: null }, round: null }), { at: "2026-09-16T10:06:00.000Z" }));
+    expect(view(found(expiredIncident), DECISION_UI_IDLE, fallbackCard).frame.body).toEqual(["Nobody answered in time."]);
+    for (const settled of [superseded, withdrawn, expired]) expect(view(found(settled))).toMatchObject({ options: [], ownWords: false, confirmChat: false });
   });
 
   it("shows the seed until the store answers, and says why nothing can be answered", () => {
@@ -768,8 +836,12 @@ describe("the frame and the compact line, drawn", () => {
     expect(outer.props["style"]).toEqual([{ name: "card" }, { gap: 6, marginVertical: 4 }, { borderColor: "#statusSuccess" }]);
     const plain = renderTree(CardFrame({ view: frameOf(card(REPORT)), details: null, detailsOpen: false, onToggleDetails: noop, styles, theme }))[0] as RNode;
     expect((plain.props["style"] as unknown[])[2]).toBeNull();
-    const source = readFileSync(fileURLToPath(new URL("../plugin/client/ui.tsx", import.meta.url)), "utf8");
-    expect(source).not.toMatch(/borderLeft(Width|Color)/);
+    // The outline only: no element of either card draws a left border.
+    const styleKeys = (tree: Array<RNode | string>) =>
+      allNodes(tree).flatMap((node) => [node.props["style"]].flat(Infinity).flatMap((style) => (typeof style === "object" && style !== null ? Object.keys(style) : [])));
+    const keys = [...styleKeys(nodes), ...styleKeys([plain])];
+    expect(keys).toContain("borderColor");
+    expect(keys.filter((key) => key.startsWith("borderLeft"))).toEqual([]);
   });
 
   it("draws a notice as one line that opens to the whole notice", () => {
@@ -783,29 +855,6 @@ describe("the frame and the compact line, drawn", () => {
   });
 });
 
-describe("the retired question UI is gone from the chat code", () => {
-  const source = (file: string) => readFileSync(fileURLToPath(new URL(`../plugin/client/${file}`, import.meta.url)), "utf8");
-
-  it("uses neither the answer marks, chat.waiting, the session answer state, nor fallback.act", () => {
-    for (const file of ["chat-card.tsx", "chat-cards.ts"]) {
-      const text = source(file);
-      for (const retired of ["answersMark", "chatWaiting", "answer-state", "fallbackAct", "fallbackIncidents", "sendReply", "QuestionForm", "replyText"]) {
-        expect(text, `${file}: ${retired}`).not.toContain(retired);
-      }
-    }
-    // The drawing code has none of the retired controls' words.
-    for (const words of ["Mark as answered", "Use recommendations", "Reply to", "Answered\""]) expect(source("chat-card.tsx")).not.toContain(words);
-  });
-
-  it("answers only through decisions.answer and decisions.confirm, as the chat card", () => {
-    const text = source("chat-card.tsx");
-    expect(text).toContain("useRpc(decisionsAnswerRpc)");
-    expect(text).toContain("useRpc(decisionsConfirmRpc)");
-    expect(text).toContain('via="chat-card"');
-    expect(text).not.toMatch(/agents\.ref\([^)]*\)\.send/);
-  });
-});
-
 describe("the message in Details", () => {
   it("renders report fields as a bold-key list, not one paragraph", () => {
     const blocks = parseMarkdown(markdownOf(["```", REPORT, "```", "", "Anything else?"].join("\n")));
@@ -814,6 +863,15 @@ describe("the message in Details", () => {
     expect(bullets).toHaveLength(12);
     expect(bullets[0]).toMatchObject({ spans: [{ text: "requestId", bold: true }, { text: `: ${REQ}` }] });
     expect(blocks.some((block) => block.kind === "code")).toBe(false);
+  });
+
+  it("lays out a bolded marker, **BM-REPORT**, as a block too (Phase 3 live check F5)", () => {
+    const bolded = REPORT.replace(/^BM-REPORT$/m, "**BM-REPORT**");
+    expect(bolded).not.toBe(REPORT);
+    const blocks = parseMarkdown(markdownOf(["```", bolded, "```"].join("\n")));
+    expect(blocks[0]).toMatchObject({ kind: "paragraph", spans: [{ text: "BM-REPORT", bold: true }] });
+    expect(blocks.filter((block) => block.kind === "bullet")).toHaveLength(12);
+    expect(markdownOf("**BM-REVIEW** STOPPED").split("\n")[0]).toBe("**BM-REVIEW STOPPED**");
   });
 
   it("leaves free text as it is, and lays a plain-text card out the same way", () => {
@@ -826,34 +884,27 @@ describe("the message in Details", () => {
 });
 
 describe("chat.peers", () => {
-  const entry = (id: string, role: string, workspaceId: string, labels: Record<string, string> = {}) => ({
-    agent: { id, workspaceId, status: "idle", title: `${role} ${id}`, labels: { "bm.role": role, ...labels } },
+  const agent = (id: string, role: string, workspaceId: string, labels: Record<string, string> = {}) => ({
+    id,
+    workspaceId,
+    status: "idle",
+    title: `${role} ${id}`,
+    labels: { "bm.role": role, ...labels },
   });
-  const paseo = (): DashboardPaseo => ({
-    agents: {
-      // The daemon applies a labels filter only when one is given (delta 20260918g lists with none).
-      list: vi.fn(async ({ filter }: { filter: { labels?: Record<string, string> } }) => ({
-        entries: [
-          entry("m1", "manager", "wks_a"),
-          entry("w1", "worker", "wks_a", { "bm.requestId": "req-1", "paseo.parent-agent-id": "m1" }),
-          entry("w9", "worker", "wks_b"),
-          entry("r1", "reviewer", "wks_a", { "bm.requestId": "req-1", "bm.batchId": "b2", "paseo.parent-agent-id": "w1" }),
-        ].filter((e) => filter.labels === undefined || e.agent.labels["bm.role"] === filter.labels["bm.role"]),
-      })),
-    },
-    workspaces: { list: vi.fn(async () => ({ entries: [] })) },
-    config: { get: vi.fn(async () => ({ config: {} })) },
-  });
+  /** The shared fake SDK with the agents of two workspaces, and any `more`. */
+  const paseo = (more: Array<ReturnType<typeof agent> & { archivedAt?: string }> = []) =>
+    fakePaseo<DashboardPaseo>({
+      agents: [
+        agent("m1", "manager", "wks_a"),
+        agent("w1", "worker", "wks_a", { "bm.requestId": "req-1", "paseo.parent-agent-id": "m1" }),
+        agent("w9", "worker", "wks_b"),
+        agent("r1", "reviewer", "wks_a", { "bm.requestId": "req-1", "bm.batchId": "b2", "paseo.parent-agent-id": "w1" }),
+        ...more,
+      ],
+    }).paseo;
 
   it("says which agents are archived (delta 20260918f F12)", async () => {
-    const withArchived = paseo();
-    const list = withArchived.agents.list;
-    withArchived.agents.list = vi.fn(async (options: { filter: { labels?: Record<string, string> } }) => {
-      const result = await list(options as never);
-      const old = { agent: { ...entry("w0", "worker", "wks_a", { "bm.requestId": "req-1" }).agent, archivedAt: "2026-09-18T00:00:00.000Z" } };
-      const wantsWorkers = options.filter.labels === undefined || options.filter.labels["bm.role"] === "worker";
-      return wantsWorkers ? { entries: [...result.entries, old] } : result;
-    }) as never;
+    const withArchived = paseo([{ ...agent("w0", "worker", "wks_a", { "bm.requestId": "req-1" }), archivedAt: "2026-09-18T00:00:00.000Z" }]);
     const result = await handleChatPeers({ agentId: "m1" }, withArchived, { homedir: () => "/nonexistent-bm-home" });
     expect(result.owner?.archived).toBe(false);
     expect(Object.fromEntries(result.peers.map((p) => [p.id, p.archived]))).toEqual({ w0: true, w1: false, r1: false });
@@ -878,13 +929,7 @@ describe("chat.peers", () => {
         sent: [{ agentId: null, at: "2026-09-16T09:59:00.000Z", text: `CONTINUE — \`${REQ}\``, truncated: false }],
       });
       clearTraceStoreCache();
-      const withUnlabelled = paseo();
-      const list = withUnlabelled.agents.list;
-      withUnlabelled.agents.list = vi.fn(async (options: { filter: { labels?: Record<string, string> } }) => {
-        const result = await list(options as never);
-        const wantsWorkers = options.filter.labels === undefined || options.filter.labels["bm.role"] === "worker";
-        return wantsWorkers ? { entries: [...result.entries, entry("w0", "worker", "wks_a")] } : result;
-      }) as never;
+      const withUnlabelled = paseo([agent("w0", "worker", "wks_a")]);
       const result = await handleChatPeers({ agentId: "m1" }, withUnlabelled, { homedir: () => home });
       expect(result.peers.find((p) => p.id === "w0")?.requestId).toBe(REQ);
       expect(result.peers.find((p) => p.id === "w1")?.requestId).toBe("req-1");
@@ -900,17 +945,11 @@ describe("chat.peers", () => {
       writeFileSync(join(home, ".paseo-bm", "install.json"), JSON.stringify({ schemaVersion: 1 }));
       const switched = { ...incident({ id: "fb-0000000000dd", workspaceId: "wks_a", requestId: "req-1", agentId: "w0", parentId: "m1", managerId: "m1", message: "" }), status: "switched", decidedAt: "2026-09-22T00:01:00.000Z", replacementId: "w1" };
       writeFileSync(join(home, ".paseo-bm", "role-fallback-state.json"), JSON.stringify({ version: 1, incidents: [switched] }));
-      const sdk = paseo();
-      const list = sdk.agents.list;
-      sdk.agents.list = vi.fn(async (options: { filter: { labels?: Record<string, string> } }) => {
-        const result = await list(options as never);
-        const extra = [
-          // Label missing (labelling failed), but the incident says it was switched.
-          entry("w0", "worker", "wks_a", { "bm.requestId": "req-1", "paseo.parent-agent-id": "m1" }),
-          entry("w8", "worker", "wks_a", { "bm.requestId": "req-8", "bm.replacedBy": "w1" }),
-        ];
-        return options.filter.labels === undefined ? { entries: [...result.entries, ...extra] } : result;
-      }) as never;
+      const sdk = paseo([
+        // Label missing (labelling failed), but the incident says it was switched.
+        agent("w0", "worker", "wks_a", { "bm.requestId": "req-1", "paseo.parent-agent-id": "m1" }),
+        agent("w8", "worker", "wks_a", { "bm.requestId": "req-8", "bm.replacedBy": "w1" }),
+      ]);
       const result = await handleChatPeers({ agentId: "m1" }, sdk, { homedir: () => home });
       const replaced = Object.fromEntries(result.peers.map((p) => [p.id, p.replaced]));
       expect(replaced).toEqual({ w1: false, r1: false, w0: true, w8: true });
@@ -923,5 +962,271 @@ describe("chat.peers", () => {
 
   it("has nothing for an agent that is not paseo-bm's", async () => {
     expect(await handleChatPeers({ agentId: "someone-else" }, paseo(), { homedir: () => "/nonexistent-bm-home" })).toEqual({ owner: null, peers: [], workspaceId: null });
+  });
+});
+
+describe("Save as precedent on the decision card (autonomy design §B.6, §B.9)", () => {
+  const answeredBy = (answer: { optionKey?: string; words?: string }, overrides: Partial<Decision> = {}) =>
+    ok(answerDecision(questionDecision(overrides), { via: "chat-card", optionKey: answer.optionKey ?? null, words: answer.words ?? null, at: "2026-09-16T10:02:00.000Z" }));
+  const PRECEDENT = {
+    id: "p:1",
+    scope: "wks_a",
+    subject: "storage",
+    text: "the existing table: no migration.",
+    sourceDecisionId: Q_ID,
+    createdAt: "2026-09-16T10:03:00.000Z",
+    expiresAt: "2026-10-16T10:03:00.000Z",
+    supersededBy: null,
+  };
+  const on = { open: noop, text: noop, scope: noop, cancel: noop, save: noop };
+  const drawWith = (decision: Decision, precedentUi: PrecedentUi, handlers: Partial<typeof on> = {}) =>
+    drawDecision(view(found(decision)), DECISION_UI_IDLE, false, { precedent: precedentOfferView(decision, precedentUi), onPrecedent: { ...on, ...handlers } });
+
+  it("is offered only on a decision the owner answered that carries a subject", () => {
+    expect(precedentOfferView(answeredBy({ optionKey: "a" }), PRECEDENT_UI_IDLE)?.offer).toEqual({
+      label: SAVE_AS_PRECEDENT_LABEL,
+      accessibilityLabel: 'Save this answer as a precedent for "storage"',
+    });
+    // Open, needing confirmation, superseded; no subject; answered by the Orchestrator; not read yet: nothing.
+    expect(precedentOfferView(questionDecision(), PRECEDENT_UI_IDLE)).toBeNull();
+    expect(precedentOfferView(ok(markNeedsConfirmation(questionDecision(), { via: "chat-worker", at: "2026-09-16T10:04:00.000Z" })), PRECEDENT_UI_IDLE)).toBeNull();
+    expect(precedentOfferView(ok(supersedeDecision(questionDecision(), { by: `q:${REQ}:Q9`, at: "2026-09-16T10:06:00.000Z" })), PRECEDENT_UI_IDLE)).toBeNull();
+    expect(precedentOfferView(answeredBy({ optionKey: "a" }, { subject: null }), PRECEDENT_UI_IDLE)).toBeNull();
+    const byOrchestrator = ok(storedOrchestratorAnswer(questionDecision(), { optionKey: "a", reason: "No migration.", at: "2026-09-16T10:02:00.000Z" }));
+    expect(precedentOfferView(byOrchestrator, PRECEDENT_UI_IDLE)).toBeNull();
+    expect(precedentOfferView(null, PRECEDENT_UI_IDLE)).toBeNull();
+
+    // Drawn: one secondary button on the answered card, none on an open one — and no text box until pressed.
+    const onOpen = vi.fn();
+    const nodes = drawWith(answeredBy({ optionKey: "a" }), PRECEDENT_UI_IDLE, { open: onOpen });
+    expect(labels(nodes)).toEqual(['Save this answer as a precedent for "storage"', "Show details"]);
+    expect(allNodes(nodes).filter((node) => node.type === "TextInput")).toEqual([]);
+    (pressables(nodes)[0]!.props["onPress"] as () => void)();
+    expect(onOpen).toHaveBeenCalledOnce();
+    expect(texts(drawWith(questionDecision(), PRECEDENT_UI_IDLE))).not.toContain(SAVE_AS_PRECEDENT_LABEL);
+  });
+
+  it("opens a form with the answer as the text, this project first, and Cancel before Save", () => {
+    expect(precedentFormOf(answeredBy({ optionKey: "a" }))).toEqual({ text: "the existing table: no migration.", scope: "project" });
+    expect(precedentFormOf(answeredBy({ words: "A file, later." }))).toEqual({ text: "A file, later.", scope: "project" });
+    const decision = answeredBy({ optionKey: "a" });
+    const ui: PrecedentUi = { ...PRECEDENT_UI_IDLE, form: precedentFormOf(decision) };
+    const shown = precedentOfferView(decision, ui)!;
+    expect(shown.offer).toBeNull();
+    expect(shown.form).toMatchObject({
+      title: 'Save as precedent for "storage"?',
+      text: "the existing table: no migration.",
+      textHint: null,
+      cancelLabel: "Cancel",
+      saveLabel: "Save precedent",
+      saveEnabled: true,
+    });
+    expect(shown.form!.body).toMatch(/for 30 days — release, data, security and cost questions still come to you/);
+    expect(shown.form!.scopes.map((scope) => [scope.label, scope.selected])).toEqual([
+      ["This project", true],
+      ["All projects", false],
+    ]);
+
+    const onScope = vi.fn();
+    const onSave = vi.fn();
+    const nodes = drawWith(decision, ui, { scope: onScope, save: onSave });
+    expect(allNodes(nodes).find((node) => node.type === "TextInput")?.props["accessibilityLabel"]).toBe("The precedent's answer");
+    // The scope choices, then Cancel first, then Save; every pressable labelled.
+    expect(labels(nodes)).toEqual(["Keep it for this project only", "Keep it for every project", "Cancel", "Save the precedent for this project", "Show details"]);
+    for (const button of pressables(nodes)) expect(String(button.props["accessibilityLabel"] ?? "")).not.toBe("");
+    (pressables(nodes)[1]!.props["onPress"] as () => void)();
+    expect(onScope).toHaveBeenCalledWith("all");
+    (pressables(nodes)[3]!.props["onPress"] as () => void)();
+    expect(onSave).toHaveBeenCalledOnce();
+    // No id on the card's face.
+    expect(texts(nodes).join("\n")).not.toContain(Q_ID);
+  });
+
+  it("will not save an empty or too long text, says it was saved, or why not", () => {
+    const decision = answeredBy({ optionKey: "a" });
+    const blank = precedentOfferView(decision, { ...PRECEDENT_UI_IDLE, form: { text: "  ", scope: "all" } })!;
+    expect(blank.form).toMatchObject({ saveEnabled: false, textHint: "Write the answer to keep." });
+    expect(precedentOfferView(decision, { ...PRECEDENT_UI_IDLE, form: { text: "x".repeat(1001), scope: "all" } })!.form?.textHint).toBe("At most 1000 characters (now 1001).");
+    const busy = precedentOfferView(decision, { ...PRECEDENT_UI_IDLE, busy: true, form: { text: "x", scope: "all" } })!;
+    expect(busy.form).toMatchObject({ saveEnabled: false, saveLabel: "Saving…", busy: true });
+    expect(labels(drawWith(decision, { ...PRECEDENT_UI_IDLE, busy: true, form: { text: "x", scope: "all" } }))).not.toContain("Cancel");
+
+    const saved = precedentOfferView(decision, { ...PRECEDENT_UI_IDLE, saved: { scope: "all", expiresAt: PRECEDENT.expiresAt } })!;
+    expect(saved).toEqual({ offer: null, form: null, status: { text: "Saved as a precedent for all projects until 2026-10-16.", tone: "success" } });
+    const refused = precedentOfferView(decision, { ...PRECEDENT_UI_IDLE, error: "Could not save the precedent (E_PRECEDENT_INVALID): no" })!;
+    expect(refused.status).toEqual({ text: "Could not save the precedent (E_PRECEDENT_INVALID): no", tone: "danger" });
+    const nodes = drawWith(decision, { ...PRECEDENT_UI_IDLE, saved: { scope: "project", expiresAt: PRECEDENT.expiresAt } });
+    expect(texts(nodes)).toContain("Saved as a precedent for this project until 2026-10-16.");
+    expect(labels(nodes)).toEqual(["Show details"]);
+  });
+
+  it("saves with ONE precedents.save call: the decision, its project or all, the text as left", async () => {
+    const decision = answeredBy({ optionKey: "a" });
+    const save = vi.fn(async () => ({ precedent: PRECEDENT }));
+    expect(await runPrecedentSave({ decision, form: { text: " the table ", scope: "project" }, save })).toEqual({ ok: true, precedent: PRECEDENT });
+    await runPrecedentSave({ decision, form: { text: "the table", scope: "all" }, save });
+    expect(save.mock.calls).toEqual([
+      [{ decisionId: Q_ID, scope: "wks_a", text: "the table" }],
+      [{ decisionId: Q_ID, scope: "all", text: "the table" }],
+    ]);
+    expect(await runPrecedentSave({ decision, form: { text: " ", scope: "all" }, save })).toEqual({ ok: false, reason: "Write the answer to keep first." });
+    expect(save).toHaveBeenCalledTimes(2);
+    const refused = vi.fn(async () => {
+      throw new DashboardError("E_PRECEDENT_INVALID", "decision has no subject; nothing was saved");
+    });
+    expect(await runPrecedentSave({ decision, form: { text: "x", scope: "all" }, save: refused })).toEqual({
+      ok: false,
+      reason: "Could not save the precedent (E_PRECEDENT_INVALID): decision has no subject; nothing was saved",
+    });
+  });
+});
+
+// A precedent on the card of an open decision it did not answer, and a decision a precedent answered (autonomy design §B.6).
+describe("owner precedents on the decision card", () => {
+  const STANDING: Precedent = {
+    id: "p:7c1d",
+    scope: "wks_a",
+    subject: "storage",
+    text: "the existing table: no migration.",
+    sourceDecisionId: null,
+    createdAt: "2026-09-12T09:00:00.000Z",
+    expiresAt: "2026-10-12T09:00:00.000Z",
+    supersededBy: null,
+  };
+
+  it("suggests the precedent on an open release question with the option it names; nothing when none bears on it", () => {
+    // Option b pushes, so this question is a release one: the precedent did not answer it.
+    const decision = questionDecision();
+    expect(precedentSuggestionView(decision, [STANDING], DECISION_UI_IDLE, NOW)).toEqual({
+      line: "Precedent: the existing table: no migration. (saved 2026-09-12)",
+      use: { label: USE_PRECEDENT_LABEL, accessibilityLabel: "Use your precedent's answer: the existing table: no migration.", choice: { optionKey: "a" } },
+    });
+    // Its own words when no option is its text.
+    expect(precedentSuggestionView(decision, [{ ...STANDING, text: "Keep it in memory" }], DECISION_UI_IDLE, NOW)?.use?.choice).toEqual({ words: "Keep it in memory" });
+    // Nothing to pick while a confirmation or the own-words box is open; the line stays.
+    const confirming = precedentSuggestionView(decision, [STANDING], { ...DECISION_UI_IDLE, confirming: "b" }, NOW);
+    expect(confirming).toMatchObject({ line: expect.stringContaining("Precedent:"), use: null });
+    expect(precedentSuggestionView(decision, [STANDING], { ...DECISION_UI_IDLE, words: "" }, NOW)?.use).toBeNull();
+    // None: not read yet, another subject or project, expired, no subject, not open.
+    expect(precedentSuggestionView(decision, undefined, DECISION_UI_IDLE, NOW)).toBeNull();
+    expect(precedentSuggestionView(decision, [{ ...STANDING, subject: "sessions" }], DECISION_UI_IDLE, NOW)).toBeNull();
+    expect(precedentSuggestionView(decision, [{ ...STANDING, scope: "wks_b" }], DECISION_UI_IDLE, NOW)).toBeNull();
+    expect(precedentSuggestionView(decision, [{ ...STANDING, expiresAt: "2026-09-16T10:00:00.000Z" }], DECISION_UI_IDLE, NOW)).toBeNull();
+    expect(precedentSuggestionView(questionDecision({ subject: null }), [STANDING], DECISION_UI_IDLE, NOW)).toBeNull();
+    expect(precedentSuggestionView(ok(answerDecision(decision, { via: "inbox", optionKey: "a", at: "2026-09-16T10:02:00.000Z" })), [STANDING], DECISION_UI_IDLE, NOW)).toBeNull();
+    expect(precedentSuggestionView(null, [STANDING], DECISION_UI_IDLE, NOW)).toBeNull();
+    // A fallback incident's words run no action: shown, not offered.
+    const fallback = questionDecision({ id: "f:fb-3f9a2c1d7e4b", requestId: null, askedBy: { role: "plugin", agentId: null }, round: null });
+    expect(precedentSuggestionView(fallback, [{ ...STANDING, text: "Always wait" }], DECISION_UI_IDLE, NOW)?.use).toBeNull();
+  });
+
+  it("draws the suggestion first, labelled, and picks it on a press", () => {
+    const onUseSuggestion = vi.fn();
+    const decision = questionDecision();
+    const suggestion = precedentSuggestionView(decision, [STANDING], DECISION_UI_IDLE, NOW);
+    const nodes = drawDecision(view(found(decision)), DECISION_UI_IDLE, false, { suggestion, onUseSuggestion });
+    expect(texts(nodes)).toEqual(expect.arrayContaining(["Precedent: the existing table: no migration. (saved 2026-09-12)", USE_PRECEDENT_LABEL]));
+    expect(labels(nodes)[0]).toBe("Use your precedent's answer: the existing table: no migration.");
+    (pressables(nodes)[0]!.props["onPress"] as () => void)();
+    expect(onUseSuggestion).toHaveBeenCalledWith({ optionKey: "a" });
+    // Without one, the card is as before.
+    expect(labels(drawDecision(view(found(decision)), DECISION_UI_IDLE, false, { suggestion: null, onUseSuggestion }))).toEqual(labels(drawDecision(view(found(decision)))));
+  });
+
+  it("shows a decision a precedent answered as answered by your precedent, citing it in Details", () => {
+    const decided = ok(
+      answerDecision(questionDecision({ options: [{ key: "a", label: "the existing table: no migration.", recommended: true, effects: ["none"] }] }), {
+        by: "precedent",
+        precedentId: STANDING.id,
+        reason: `The owner's precedent on "storage", saved 2026-09-12`,
+        via: "inbox",
+        optionKey: "a",
+        at: "2026-09-16T10:02:00.000Z",
+      }),
+    );
+    const shown = view(found(decided));
+    expect(shown.frame).toMatchObject({
+      chip: { text: "Decided", tone: "success" },
+      authority: `answered by your precedent · ${localTimeText(new Date("2026-09-16T10:02:00.000Z"), NOW)}`,
+      body: ["✓ the existing table: no migration."],
+    });
+    expect(shown.details).toEqual(expect.arrayContaining([`Answered by: your precedent ${STANDING.id}`, `Reason: The owner's precedent on "storage", saved 2026-09-12`]));
+    expect(JSON.stringify(shown.frame)).not.toContain(STANDING.id);
+    expect(JSON.stringify(shown.frame)).not.toContain("answered by you in");
+    const inWords = ok(answerDecision(questionDecision(), { by: "precedent", precedentId: STANDING.id, via: "inbox", words: "Keep it in memory", at: "2026-09-16T10:02:00.000Z" }));
+    expect(view(found(inWords)).frame.body[0]).toBe("Your precedent: Keep it in memory");
+    // Not the owner's own answer, so it cannot become a precedent in turn.
+    expect(precedentOfferView(decided, PRECEDENT_UI_IDLE)).toBeNull();
+  });
+});
+
+describe("the finished card reads its request's finish (autonomy design §C.3, §C.6; bead 7gxw.4)", () => {
+  const unverified: TraceVerification = {
+    reportAt: "2026-09-16T10:00:00.000Z",
+    checks: "self-reported",
+    named: [
+      { check: "npm test", label: "self-reported" },
+      { check: "npm run lint", label: "detected" },
+    ],
+    files: [{ path: "src/contact.tsx", label: "detected" }],
+    beads: [{ id: "bd-12", label: "self-reported" }],
+    changedFiles: true,
+    unverified: true,
+  };
+  const verified: TraceVerification = { ...unverified, checks: "detected", named: [{ check: "npm test", label: "detected" }], unverified: false };
+  const finishedFrame = (verification: TraceVerification | null | undefined) =>
+    cardFrameOf(card(FINISHED), { owner: manager, peers: [worker, otherWorker, reviewer], at: AT, now: NOW, ...(verification === undefined ? {} : { verification }) });
+
+  it("chips Finished — unverified, in the warning tone, for an unverified finish; Finished otherwise", () => {
+    expect(finishedFrame(unverified)).toMatchObject({ chip: { text: "Finished — unverified", tone: "warning" }, outline: "warning", title: "Contact form redesigned and tested." });
+    for (const shownAsBefore of [verified, { ...unverified, checks: "not-checked" as const, unverified: false }, null, undefined]) {
+      expect(finishedFrame(shownAsBefore)).toMatchObject({ chip: { text: "Finished", tone: "success" }, outline: "success" });
+    }
+    // The face keeps its body, and no path or bead id.
+    expect(finishedFrame(unverified).body).toEqual(finishedFrame(null).body);
+    const face = (view: CardFrameView) => [view.actor.name, view.recipient, view.authority, view.chip?.text, view.title, view.tag, ...view.body].join("\n");
+    expect(face(finishedFrame(unverified))).not.toMatch(/src\/contact|bd-12/);
+    // Only a finished card reads it.
+    expect(cardFrameOf(card(REPORT), { owner: manager, peers: [], at: AT, now: NOW, verification: unverified }).chip).toEqual({ text: "Working", tone: "info" });
+  });
+
+  it("lists the checks, files and beads with their labels under Details", () => {
+    expect(detailLinesOf(card(FINISHED), manager, unverified)).toEqual([
+      `Request: ${REQ}`,
+      "Phase: finished",
+      "Finished — unverified: code changed, and not every check the report names was seen to pass after the last edit.",
+      "Check: npm test — self-reported",
+      "Check: npm run lint — detected ✓",
+      "File: src/contact.tsx — detected",
+      "Bead: bd-12 — self-reported",
+    ]);
+    expect(detailLinesOf(card(FINISHED), manager, verified).slice(2)).toEqual([
+      "Checks: detected",
+      "Check: npm test — detected ✓",
+      "File: src/contact.tsx — detected",
+      "Bead: bd-12 — self-reported",
+    ]);
+    // Not checked, or not known: as before.
+    expect(detailLinesOf(card(FINISHED), manager, { ...unverified, checks: "not-checked", unverified: false })).toEqual([`Request: ${REQ}`, "Phase: finished"]);
+    expect(detailLinesOf(card(FINISHED), manager)).toEqual([`Request: ${REQ}`, "Phase: finished"]);
+    expect(detailLinesOf(card(REPORT), manager, unverified)).toEqual([`Request: ${REQ}`, "Phase: beads-done"]);
+  });
+
+  it("finds the finish by the card's request among the traces.list rows", () => {
+    const rows = [
+      { requestId: "req-other", verification: verified },
+      { requestId: REQ },
+      { requestId: REQ, verification: unverified },
+    ];
+    expect(verificationOfRequest(rows, REQ)).toEqual(unverified);
+    expect(verificationOfRequest(rows, "req-none")).toBeNull();
+    expect(verificationOfRequest(rows, null)).toBeNull();
+    expect(verificationOfRequest(undefined, REQ)).toBeNull();
+  });
+
+  it("draws the warning chip and outline in the frame", () => {
+    const nodes = renderTree(CardFrame({ view: finishedFrame(unverified), details: null, detailsOpen: false, onToggleDetails: noop, styles, theme }));
+    expect(texts(nodes)).toContain("Finished — unverified");
+    expect((nodes[0] as RNode).props["style"]).toEqual([{ name: "card" }, { gap: 6, marginVertical: 4 }, { borderColor: "#statusWarning" }]);
   });
 });

@@ -26,14 +26,21 @@
  * `agent.turn_started`; neither waits for it. `agent.archived` clears the
  * archived agent's alert at once. A listing that fails changes nothing.
  *
+ * The same pass, over the same listing, raises and clears the `boundary-off`
+ * alerts (`boundary-off.ts`, autonomy design §D.2, change-010 C6), and
+ * `agent.archived` clears that agent's one too.
+ *
  * Nothing here messages, stops or archives an agent, and nothing throws.
  */
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { listAllAgents, roleOfAgent, type BmRole } from "./agent-role";
 import { createAlertStore, type AlertInput, type AlertStore } from "./alert-store";
+import { currentPolicy } from "./autonomy-store";
+import { boundaryConfigOf, detectBoundaryOff } from "./boundary-off";
 import { resolveDataHome, type DataHomeDeps } from "./data-home";
 import { REPLACED_BY_LABEL } from "./fallback-detect";
 import { INSTRUCTIONS_LABEL, hasOutdatedInstructions } from "./instructions-label";
+import { errorText } from "./rpc-kit";
 
 /** Least time between two passes. */
 export const OUTDATED_PASS_INTERVAL_MS = 60_000;
@@ -53,6 +60,8 @@ export interface OutdatedAgentSnapshot {
   archivedAt?: string | null;
   status?: string;
   createdAt?: string;
+  /** The system prompt, when the listing carries it: the `boundary-off` check reads its facts line until `bm.boundary` is written. */
+  persistence?: unknown;
 }
 
 /** Minimal SDK view: list every agent. `PaseoApi` is structurally assignable. */
@@ -139,8 +148,9 @@ export async function detectOutdatedAgents(
   paseo: OutdatedPaseo,
   store: Pick<AlertStore, "raise" | "clearWhere">,
   now: number = Date.now(),
+  listed?: readonly (OutdatedAgentSnapshot | null | undefined)[],
 ): Promise<OutdatedPassResult> {
-  const agents = await listAllAgents((options) => paseo.agents.list(options), { includeArchived: false });
+  const agents = listed ?? (await listAllAgents((options) => paseo.agents.list(options), { includeArchived: false }));
   const outdated = agents.map((agent) => (agent ? outdatedAgentOf(agent, now) : null)).filter((agent): agent is OutdatedAgent => agent !== null);
   const keep = new Set<string>();
   const raised: string[] = [];
@@ -168,10 +178,6 @@ export interface OutdatedAgentsPass {
   clearAgent(agentId: string): void;
 }
 
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function isListingPaseo(paseo: unknown): paseo is OutdatedPaseo {
   return (
     typeof paseo === "object" &&
@@ -188,10 +194,9 @@ export function createOutdatedAgentsPass(deps: OutdatedAgentsDeps = {}): Outdate
   let lastStart = Number.NEGATIVE_INFINITY;
   let running: Promise<void> | null = null;
 
-  const storeOf = (): AlertStore | null => {
-    const home = resolveDataHome(deps).home;
-    return home === null ? null : createAlertStore(home, { now: () => new Date(now()) });
-  };
+  const homeOf = (): string | null => resolveDataHome(deps).home;
+  const storeOf = (home: string | null = homeOf()): AlertStore | null =>
+    home === null ? null : createAlertStore(home, { now: () => new Date(now()) });
 
   return {
     run(paseo) {
@@ -202,11 +207,16 @@ export function createOutdatedAgentsPass(deps: OutdatedAgentsDeps = {}): Outdate
       lastStart = at;
       running = (async () => {
         try {
-          const store = storeOf();
-          if (store === null) return;
-          await detectOutdatedAgents(paseo, store, at);
+          const home = homeOf();
+          const store = storeOf(home);
+          if (home === null || store === null) return;
+          const agents = await listAllAgents((options) => paseo.agents.list(options), { includeArchived: false });
+          await detectOutdatedAgents(paseo, store, at, agents);
+          // The action boundary's alert (§D.2): only with the config read; an unreadable one changes nothing.
+          const config = await boundaryConfigOf(paseo);
+          if (config !== null) detectBoundaryOff(agents, store, currentPolicy(home, (reason) => log(`[paseo-bm] could not read the autonomy policy: ${reason}`)), config);
         } catch (error) {
-          log(`[paseo-bm] could not check the agents for older instructions: ${describeError(error)}`);
+          log(`[paseo-bm] could not check the agents for older instructions: ${errorText(error)}`);
         } finally {
           running = null;
         }
@@ -217,9 +227,9 @@ export function createOutdatedAgentsPass(deps: OutdatedAgentsDeps = {}): Outdate
     clearAgent(agentId) {
       try {
         const store = storeOf();
-        store?.clearWhere((alert) => alert.kind === "outdated-agent" && alert.subject === agentId);
+        store?.clearWhere((alert) => (alert.kind === "outdated-agent" || alert.kind === "boundary-off") && alert.subject === agentId);
       } catch (error) {
-        log(`[paseo-bm] could not clear the older-instructions alert of ${agentId}: ${describeError(error)}`);
+        log(`[paseo-bm] could not clear the older-instructions alert of ${agentId}: ${errorText(error)}`);
       }
     },
   };

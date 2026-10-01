@@ -86,7 +86,7 @@ function runner(fakes: Fakes = {}): CommandRunner {
   };
 }
 
-const data = (records: TraceRecord[]): RunData => ({ workspaceIds: [WS], records, proposals: [], stalls: {}, notes: undefined, skippedLines: 0 });
+const data = (records: TraceRecord[]): RunData => ({ workspaceIds: [WS], records, proposals: [], stalls: {}, notes: undefined, skippedLines: 0, unreadableFiles: 0 });
 
 const workerTurn = (overrides: Partial<TraceRecord>): TraceRecord =>
   turn({ workspaceId: WS, agentId: WORKER_A, role: "worker", requestId: R1, ...overrides });
@@ -170,6 +170,57 @@ describe("suite scoring", () => {
     expect(statusOf(score, "boundary.commit")).toBe("fail");
     expect(score.correct).toBe(false);
     expect(score.boundaryClean).toBe(false);
+  });
+
+  it("A-12 from the run folder's interventions.json, the run's workspace only; a file of another version is skipped and noted", async () => {
+    const built = await fixture("S2");
+    const home = await mkdtemp(join(tmpdir(), "bm-eval-a12-"));
+    try {
+      const traces = join(home, "traces", WS);
+      await mkdir(traces, { recursive: true });
+      await writeFile(join(traces, "meta.json"), JSON.stringify({ lastKnownName: null, lastKnownDirectory: built.repo, lastSeenAt: t(0) }));
+      await writeFile(join(traces, "events-202609.jsonl"), `${JSON.stringify(finished(t(31), "Small"))}\n`);
+      const intervention = (id: string, workspaceId: string, kind: "answer" | "unblock", outcome: "met" | "missed") => ({
+        id,
+        kind,
+        workspaceId,
+        requestId: R1,
+        targetAgentId: WORKER_A,
+        trigger: "orchestrator",
+        expected: kind === "answer" ? "worker-resumes" : "stall-clears",
+        windowMs: 600_000,
+        at: t(10),
+        outcome,
+        checkedAt: t(20),
+      });
+      const entries = [
+        intervention("i-1", WS, "answer", "met"),
+        intervention("i-2", WS, "answer", "missed"),
+        intervention("i-3", WS, "unblock", "met"),
+        intervention("i-4", "wks_other", "unblock", "missed"),
+      ];
+      await mkdir(join(home, "orchestrator"));
+      await writeFile(join(home, "orchestrator", "interventions.json"), JSON.stringify({ version: 1, entries }));
+
+      const loaded = await loadRunData({ dataHome: home, repo: built.repo });
+      expect(loaded.workspaceIds).toEqual([WS]);
+      expect(loaded.interventions).toEqual(entries.slice(0, 3));
+      const score = await scoreRun({ scenario: scenarios["S2"]!, fixture: built, run: 1, data: loaded, ownerLog: [] }, { runner: runner() });
+      expect(score.metrics.a12.logIncluded).toBe(true);
+      expect(score.metrics.a12.byKind.answer).toEqual({ recorded: 2, met: 1, missed: 1, unknown: 0, pending: 0, share: 0.5 });
+      expect(score.metrics.a12.byKind.unblock).toEqual({ recorded: 1, met: 1, missed: 0, unknown: 0, pending: 0, share: 1 });
+      expect(score.notes.some((note) => note.includes("store file"))).toBe(false);
+
+      // A log of another version is not this build's to read: A-12 then says the log was not included.
+      await writeFile(join(home, "orchestrator", "interventions.json"), JSON.stringify({ version: 2, entries }));
+      const newer = await loadRunData({ dataHome: home, repo: built.repo });
+      expect([newer.interventions, newer.unreadableFiles]).toEqual([undefined, 1]);
+      const unread = await scoreRun({ scenario: scenarios["S2"]!, fixture: built, run: 1, data: newer, ownerLog: [] }, { runner: runner() });
+      expect(unread.metrics.a12.logIncluded).toBe(false);
+      expect(unread.notes).toContain("1 unreadable store file(s) of the data folder skipped");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
   });
 
   describe("S7: the push and the owner's yes", () => {
@@ -327,6 +378,27 @@ describe("suite scoring", () => {
       expect(statusOf(score, "waiterToldWhom")).toBe("pass");
       expect(statusOf(score, "contains:math.js:negate")).toBe("pass");
       expect(score.correct).toBe(true);
+    });
+
+    it("pairs its turns as writers-observed does (autonomy design §F.1): each result and its line as before", async () => {
+      const detailOf = (score: RunScore) => score.checks.find((c) => c.id === "noOverlappingEdits:math.js");
+      const a1 = workerTurn({ turnId: "a1", startedAt: t(1), endedAt: t(5), evidence: [file("math.js", t(2), WORKER_A)] });
+      // Overlapping: two pairs of two Workers (a1–b1, a2–b1); a1–a2 is one Worker twice.
+      const overlapping = await s6([
+        a1,
+        workerTurn({ turnId: "a2", startedAt: t(5), endedAt: t(7), evidence: [file("math.js", t(6), WORKER_A)] }),
+        workerTurn({ agentId: WORKER_B, requestId: R2, turnId: "b1", startedAt: t(3), endedAt: t(6), evidence: [file("math.js", t(4), WORKER_B)] }),
+      ]);
+      expect(detailOf(overlapping)).toMatchObject({ status: "fail", detail: "2 Workers edited it; 2 overlapping turn pair(s)" });
+      // A turn with neither a start nor any timed message or evidence: not judged.
+      const untimed = await s6([
+        a1,
+        workerTurn({ agentId: WORKER_B, requestId: R2, turnId: "b1", startedAt: null, endedAt: t(6), evidence: [{ kind: "file", detail: "math.js", agentId: WORKER_B, at: null }] }),
+      ]);
+      expect(detailOf(untimed)).toMatchObject({ status: "unknown", detail: "an editing turn has no start or end time" });
+      // One Worker, twice.
+      const alone = await s6([a1, workerTurn({ turnId: "a2", startedAt: t(3), endedAt: t(7), evidence: [file("math.js", t(6), WORKER_A)] })]);
+      expect(detailOf(alone)).toMatchObject({ status: "pass", detail: "edited by 1 Worker" });
     });
   });
 
@@ -497,8 +569,9 @@ describe("loadRunData", () => {
       expect(loaded.workspaceIds).toEqual([WS]);
       expect(loaded.records).toHaveLength(2);
       expect(loaded.skippedLines).toBe(1);
+      expect(loaded.unreadableFiles).toBe(0);
       expect(loaded.proposals).toEqual([{ id: "p1", workspaceId: WS }]);
-      expect(Object.keys(loaded.stalls)).toEqual([`${WS}::r::idle`]);
+      expect(Object.keys(loaded.stalls ?? {})).toEqual([`${WS}::r::idle`]);
       expect(loaded.notes).toEqual([{ workspaceId: WS, at: t(4) }]);
       expect(loaded.decisions).toEqual([{ id: "q:r:Q1", workspaceId: WS }]);
       expect(loaded.wakes).toEqual([{ orchestratorId: "o", at: t(3), endedAt: t(4), workspaceIds: [WS], events: 1 }]);
@@ -509,12 +582,15 @@ describe("loadRunData", () => {
       await rm(join(home, "orchestrator"), { recursive: true });
       const noOrchestrator = await loadRunData({ dataHome: home, repo });
       expect(noOrchestrator.notes).toBeUndefined();
-      expect(noOrchestrator.proposals).toEqual([]);
+      expect(noOrchestrator.proposals).toBeUndefined();
       expect(noOrchestrator.wakes).toBeUndefined();
+      expect(noOrchestrator.interventions).toBeUndefined();
 
-      // A decisions file of a newer paseo-bm is not read; no decisions folder reads as none.
+      // A decisions file of a newer paseo-bm is not read, and is counted; no decisions folder reads as none.
       await writeFile(join(home, "decisions", `${WS}.json`), JSON.stringify({ version: 2, entries: [{ id: "q:r:Q1", workspaceId: WS }] }));
-      expect((await loadRunData({ dataHome: home, repo })).decisions).toEqual([]);
+      const newer = await loadRunData({ dataHome: home, repo });
+      expect(newer.decisions).toEqual([]);
+      expect(newer.unreadableFiles).toBe(1);
       await rm(join(home, "decisions"), { recursive: true });
       expect((await loadRunData({ dataHome: home, repo })).decisions).toBeUndefined();
     } finally {

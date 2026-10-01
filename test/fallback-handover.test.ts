@@ -1,13 +1,16 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createCoordinationStore } from "../plugin/server/coordination-store";
 import { WORKER_CLOSING, managerHandover, workerHandover } from "../plugin/server/fallback-handover";
+import { createCompactionStore } from "../plugin/server/compaction-store";
 import { DECISIONS_DIR_NAME, clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
 import { appendRecord, clearTraceStoreCache, type TraceStoreLocation } from "../plugin/server/trace-store";
 import { TRACE_STORE_SCHEMA_VERSION, type FallbackIncident, type ParsedReport, type TraceRecord } from "../plugin/shared/contracts";
 import { answerDecision, confirmDecision, markNeedsConfirmation, type Decision } from "../plugin/shared/decisions";
 import { makeDecision } from "./helpers/decisions";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 /**
  * Delta 20260921 §4.4.8 (REQ-065 d) and §4.5.2 (REQ-066 c): the handovers a
@@ -94,32 +97,18 @@ const report = (at: string, overrides: Partial<ParsedReport> = {}): ParsedReport
 
 const msg = (agentId: string, at: string, text: string) => ({ agentId, at, text, truncated: false });
 
-function fakePaseo(timeline: Array<{ type: string; text?: string }> = [], reviewers: string[] = ["agent-rev-1"]) {
+/** The Manager, its Worker and the Worker's Reviewers; the Worker's timeline in two pages: its first message, then the rest. */
+function daemonWith(timeline: Array<{ type: string; text?: string }> = [], reviewers: string[] = ["agent-rev-1"]) {
   const labels = (role: string, parent?: string) => ({ "bm.role": role, "bm.requestId": REQ, ...(parent === undefined ? {} : { "paseo.parent-agent-id": parent }) });
-  const agents = [
-    { id: MANAGER, workspaceId: WS, status: "idle", labels: { "bm.role": "manager" } },
-    { id: WORKER, workspaceId: WS, status: "idle", labels: labels("worker", MANAGER) },
-    ...reviewers.map((id) => ({ id, workspaceId: WS, status: "idle", labels: labels("reviewer", WORKER) })),
-  ];
-  // Two pages of the Worker's timeline: the tail first, then the older one with the first message.
-  const older = timeline.slice(0, 1);
-  const tail = timeline.slice(1);
-  const refetch = vi.fn(async (options: { direction?: string }) =>
-    options.direction === "tail"
-      ? { entries: tail.map((item) => ({ item })), hasOlder: older.length > 0, startCursor: "c1" }
-      : { entries: older.map((item) => ({ item })), hasOlder: false, startCursor: null },
-  );
-  return {
-    refetch,
-    paseo: {
-      agents: {
-        list: async () => ({ entries: agents.map((agent) => ({ agent })) }),
-        ref: () => ({ timeline: { refetch } }),
-      },
-      workspaces: { list: async () => ({ entries: [] }) },
-      config: {},
-    },
-  };
+  const entries = timeline.map((item) => ({ item }));
+  return fakePaseo({
+    agents: [
+      { id: MANAGER, workspaceId: WS, status: "idle", labels: { "bm.role": "manager" } },
+      { id: WORKER, workspaceId: WS, status: "idle", labels: labels("worker", MANAGER) },
+      ...reviewers.map((id) => ({ id, workspaceId: WS, status: "idle", labels: labels("reviewer", WORKER) })),
+    ],
+    timelines: { [WORKER]: { pages: [entries.slice(0, 1), entries.slice(1)] } },
+  });
 }
 
 let home: string;
@@ -180,7 +169,7 @@ describe("workerHandover", () => {
         turn({ agentId: "agent-rev-1", role: "reviewer", turnId: `t-${minute}`, requestId: REQ, parentAgentId: WORKER, at, sent: [msg("agent-rev-1", at, `Review batch b1 of ${REQ}.`)] }),
       );
     }
-    const { paseo } = fakePaseo([
+    const { paseo } = daemonWith([
       { type: "user_message", text: "Build a login screen for Team Portal. --token abc123" },
       { type: "assistant_message", text: "On it." },
       { type: "user_message", text: "Continue." },
@@ -219,7 +208,7 @@ describe("workerHandover", () => {
   });
 
   it("reads unknown / none / unavailable for what it cannot find, and never throws", async () => {
-    const { paseo } = fakePaseo([]);
+    const { paseo } = daemonWith([]);
     const text = await workerHandover(incident({ managerId: null }), { paseo, location: null });
     expect(text).toContain("\nmanagerAgentId: none\n");
     expect(text).toContain("\nlastReport: none\ntier: unknown\nfilesChanged: unknown\n");
@@ -246,7 +235,7 @@ describe("workerHandover", () => {
     settle(`q:${REQ}:Q1`, (decision) => answerDecision(decision, { via: "chat-card", words: "a new table after all", at: ANSWERED_AT }));
     settle(`q:${REQ}:Q3`, (decision) => answerDecision(decision, { via: "inbox", optionKey: "c", at: ANSWERED_AT }));
     settle(`q:${REQ}:Q6`, (decision) => markNeedsConfirmation(decision, { via: "chat-worker", at: ANSWERED_AT }));
-    const { paseo } = fakePaseo([]);
+    const { paseo } = daemonWith([]);
     const text = await workerHandover(incident(), { paseo, location });
     expect(text).toContain(
       [
@@ -270,14 +259,14 @@ describe("workerHandover", () => {
     mkdirSync(join(home, "elsewhere"), { recursive: true });
     // A symlinked decisions folder is refused, never followed.
     symlinkSync(join(home, "elsewhere"), join(home, DECISIONS_DIR_NAME));
-    const { paseo } = fakePaseo([]);
+    const { paseo } = daemonWith([]);
     expect(await workerHandover(incident(), { paseo, location })).toContain("\nquestions: unknown\n");
   });
 
   it("keeps to its budget: a timeline that never answers costs only the request text", async () => {
     await appendRecord(location, turn({ requestId: REQ, reports: [report("2026-09-22T02:01:00.000Z", { tier: "Small" })] }));
-    const hanging = fakePaseo();
-    hanging.refetch.mockImplementation(() => new Promise(() => undefined));
+    const hanging = daemonWith();
+    hanging.handle(WORKER).timeline.refetch.mockImplementation(() => new Promise(() => undefined));
     const started = Date.now();
     const text = await workerHandover(incident(), { paseo: hanging.paseo, location, budgetMs: 100 });
     expect(Date.now() - started).toBeLessThan(2000);
@@ -296,13 +285,16 @@ describe("workerHandover", () => {
         turn({ agentId, role: "reviewer", turnId: `t-${minute}`, requestId: REQ, parentAgentId: WORKER, at, sent: [msg(agentId, at, `Review batch b1 of ${REQ}.`)] }),
       );
     }
-    const { paseo } = fakePaseo([], ["agent-rev-1", "agent-rev-2"]);
+    const { paseo } = daemonWith([], ["agent-rev-1", "agent-rev-2"]);
     const switched = incident({ id: "fb-00000000000b", role: "reviewer", agentId: "agent-rev-1", parentId: WORKER, status: "switched", replacementId: "agent-rev-2" });
 
     expect(await workerHandover(incident(), { paseo, location, incidents: [switched] })).toContain("\nreviewCalls: 1 of 2\n");
     // Without them — none given and no install home the fake can name, or `null` — counted as before.
     expect(await workerHandover(incident(), { paseo, location })).toContain("\nreviewCalls: 2 of 2\n");
     expect(await workerHandover(incident(), { paseo, location, incidents: null })).toContain("\nreviewCalls: 2 of 2\n");
+    // Bead 7gxw.12: against the owner's budget in Settings → Coordination, beside the traces (autonomy design §G.7).
+    createCoordinationStore(home).set({ key: "review.mediumBudget", value: 5 });
+    expect(await workerHandover(incident(), { paseo, location, incidents: null })).toContain("\nreviewCalls: 2 of 5\n");
   });
 });
 
@@ -380,27 +372,11 @@ describe("managerHandover", () => {
   ];
 
   /** The old Manager's timeline in two pages: the newest `tail` entries first, then the older ones. */
-  function managerPaseo(timeline: Entry[], tail: number) {
-    const older = timeline.slice(0, timeline.length - tail);
-    const newest = timeline.slice(timeline.length - tail);
-    const refetch = vi.fn(async (agentId: string, options: { direction?: string }) => {
-      if (agentId !== MANAGER) return { entries: [], hasOlder: false, startCursor: null };
-      return options.direction === "tail"
-        ? { entries: newest, hasOlder: older.length > 0, startCursor: "c1" }
-        : { entries: older, hasOlder: false, startCursor: null };
+  function managerDaemon(timeline: Entry[], tail: number) {
+    return fakePaseo({
+      agents: AGENTS.map((agent) => ({ ...agent, ...SNAPSHOTS[agent.id] })),
+      timelines: { [MANAGER]: { pages: [timeline.slice(0, timeline.length - tail), timeline.slice(timeline.length - tail)] } },
     });
-    return {
-      refetch,
-      paseo: {
-        agents: {
-          list: async () => ({ entries: AGENTS.map((agent) => ({ agent })) }),
-          ref: (agentId: string) => ({
-            timeline: { refetch: (options: { direction?: string }) => refetch(agentId, options) },
-            refresh: async () => ({ agent: SNAPSHOTS[agentId] }),
-          }),
-        },
-      },
-    };
   }
 
   const TIMELINE: Entry[] = [
@@ -441,7 +417,7 @@ describe("managerHandover", () => {
   it("fills the Workers, open questions, open incidents and the user's last three messages from fakes", async () => {
     await storeReports();
     openQuestions();
-    const { paseo, refetch } = managerPaseo(TIMELINE, 5);
+    const { paseo, refetches } = managerDaemon(TIMELINE, 5);
     const log = vi.fn();
 
     expect(await managerHandover(managerIncident(), { paseo, location, incidents: INCIDENTS, env: ENV, log })).toBe(
@@ -467,7 +443,7 @@ describe("managerHandover", () => {
       ].join("\n"),
     );
     // The third message sat on the older page; nothing was late.
-    expect(refetch).toHaveBeenCalledTimes(2);
+    expect(refetches).toHaveLength(2);
     expect(log).not.toHaveBeenCalled();
   });
 
@@ -477,15 +453,15 @@ describe("managerHandover", () => {
     const answer = (n: number) =>
       settle(`q:${REQ_A}:Q${n}`, (decision) => answerDecision(decision, { via: "inbox", optionKey: "a", at: ANSWERED_AT }));
     answer(1);
-    const partly = await managerHandover(managerIncident(), { paseo: managerPaseo(TIMELINE, 5).paseo, location, incidents: INCIDENTS, env: ENV, log: vi.fn() });
+    const partly = await managerHandover(managerIncident(), { paseo: managerDaemon(TIMELINE, 5).paseo, location, incidents: INCIDENTS, env: ENV, log: vi.fn() });
     expect(partly).toContain(`\nopenQuestions: ${WORKER_A}: Q2\n`);
     answer(2);
-    const all = await managerHandover(managerIncident(), { paseo: managerPaseo(TIMELINE, 5).paseo, location, incidents: INCIDENTS, env: ENV, log: vi.fn() });
+    const all = await managerHandover(managerIncident(), { paseo: managerDaemon(TIMELINE, 5).paseo, location, incidents: INCIDENTS, env: ENV, log: vi.fn() });
     expect(all).toContain("\nopenQuestions: none\n");
   });
 
   it("does not list a replaced, archived, closed or other workspace's Worker", async () => {
-    const { paseo } = managerPaseo(TIMELINE, 5);
+    const { paseo } = managerDaemon(TIMELINE, 5);
     const text = await managerHandover(managerIncident(), { paseo, location, incidents: INCIDENTS, env: ENV, log: vi.fn() });
     for (const id of ["agent-worker-labelled", "agent-worker-switched", "agent-worker-archived", "agent-worker-closed", "agent-worker-elsewhere", "agent-rev-a", `- ${MANAGER}`]) {
       expect(text, id).not.toContain(id);
@@ -497,7 +473,7 @@ describe("managerHandover", () => {
   });
 
   it("quotes only what the user typed: messages without clientMessageId, notices and handovers are left out", async () => {
-    const { paseo } = managerPaseo(
+    const { paseo } = managerDaemon(
       [
         typed("Fix the build.", "c1"),
         typed("BM-HANDOVER\nrole: manager", "c2"),
@@ -511,14 +487,25 @@ describe("managerHandover", () => {
     expect(text).toContain("(oldest first, verbatim):\n1. Fix the build.\n\nYou are the Beads Manager");
     expect(text).not.toContain("progress update");
 
-    const { paseo: silent } = managerPaseo([relayed("Worker agent-worker-a: progress update.")], 1);
+    const { paseo: silent } = managerDaemon([relayed("Worker agent-worker-a: progress update.")], 1);
     expect(await managerHandover(managerIncident(), { paseo: silent, location, incidents: [], env: ENV, log: vi.fn() })).toContain(
       "(oldest first, verbatim):\nnone\n",
     );
   });
 
+  it("reads a message the plugin's send log says it sent (a compaction's /compact) as the plugin's, never the owner's words (autonomy design §G.5)", async () => {
+    // The plugin sent the old Manager a /compact: a `user_message` with a clientMessageId and no marker.
+    createCompactionStore(dirname(location.tracesDir)).logSend(MANAGER, "/compact", "c-1");
+    const { paseo } = managerDaemon([typed("Fix the build.", "c1"), typed("/compact", "c2"), typed("Ship it after the review.", "c3")], 5);
+    const text = await managerHandover(managerIncident(), { paseo, location, incidents: [], env: ENV, log: vi.fn() });
+    expect(text).toContain("(oldest first, verbatim):\n1. Fix the build.\n2. Ship it after the review.\n\nYou are the Beads Manager");
+    expect(text).not.toContain("/compact");
+    // A /compact the send log does not hold is the owner's own: it stays.
+    expect(await managerHandover(managerIncident(), { paseo, location, incidents: [], env: ENV, log: vi.fn(), pluginSent: () => false })).toContain("2. /compact\n");
+  });
+
   it("never lets a masked secret into the handover, even across the 1 000-character cut", async () => {
-    const { paseo } = managerPaseo(
+    const { paseo } = managerDaemon(
       [
         typed(`Deploy with --password=${SECRET}-flag and --secret "quoted value" please.`, "c1"),
         typed(`My daemon password is ${SECRET}.`, "c2"),
@@ -544,7 +531,7 @@ describe("managerHandover", () => {
     expect(log.mock.calls[0]![0]).toMatch(/^\[paseo-bm\] the handover of incident fb-0000000000aa could not read the agent list, the timeline/);
 
     // Tracing off: the Workers are listed, their reports read unknown; no Worker at all reads none.
-    const { paseo } = managerPaseo(TIMELINE, 5);
+    const { paseo } = managerDaemon(TIMELINE, 5);
     const untraced = await managerHandover(managerIncident(), { paseo, location: null, incidents: INCIDENTS, env: ENV, log: vi.fn() });
     expect(untraced).toContain(`- ${WORKER_A} · requestId ${REQ_A} · bm-worker/claude-opus-5-20260901 · idle · last report: unknown · blockers: unknown\n`);
     const alone = { agents: { list: async () => ({ entries: [{ agent: AGENTS[0] }] }) } };
@@ -554,14 +541,14 @@ describe("managerHandover", () => {
   it("keeps to its budget: a timeline that never answers costs only the messages", async () => {
     await storeReports();
     openQuestions();
-    const hanging = managerPaseo(TIMELINE, 5);
-    hanging.refetch.mockImplementation(() => new Promise(() => undefined));
-    // Snapshots that take real time still arrive: the hanging timeline does not use up their share.
-    const ref = hanging.paseo.agents.ref;
-    hanging.paseo.agents.ref = (agentId: string) => ({
-      ...ref(agentId),
-      refresh: () => new Promise((resolve) => setTimeout(() => resolve({ agent: SNAPSHOTS[agentId] }), 20)),
-    });
+    const hanging = managerDaemon(TIMELINE, 5);
+    for (const { id } of hanging.agents) {
+      const agent = hanging.handle(id);
+      agent.timeline.refetch.mockImplementation(() => new Promise(() => undefined));
+      // Snapshots that take real time still arrive: the hanging timeline does not use up their share.
+      const snapshot = agent.current();
+      agent.refresh.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve(snapshot === null ? null : { agent: snapshot, project: null }), 20)));
+    }
     const log = vi.fn();
     const started = Date.now();
     const text = await managerHandover(managerIncident(), { paseo: hanging.paseo, location, incidents: INCIDENTS, env: ENV, budgetMs: 300, log });
