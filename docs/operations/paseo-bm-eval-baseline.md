@@ -314,12 +314,15 @@ Read-only replay of the whole store after bead `i8fc.1`: 0 pairs of agents writi
 
 **Reinstalled** 2026-10-01T01:50:18Z: `paseo-bm-builds/final-rc4-cccdcbb` (commit `cccdcbb`, a bug fix the owner reported: after a reload the Orchestrator's tools refused every call until a new agent was created; between 01:42:47Z and 01:50:18Z its 9 calls were refused, so its turns in that span sent nothing). No figure restarts.
 
+**Reinstalled** 2026-10-01T02:27:20Z: `paseo-bm-builds/final-rc5-588a210` (commit `588a210`, ADR-024: `BM-INTERRUPTED` for a turn Paseo cut short, and waiting on the owner read from the decision store by the stall pass). No figure restarts; A-7 may count the extra `noted` turns a `BM-INTERRUPTED` causes, which the window report names.
+
 The owner chooses per project, in Settings → Autonomy, the action boundary (change-010) and the challenger; the choices are recorded here when made.
 
 ## Revision History
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with ADR-024 (`588a210`) |
 | 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the Orchestrator handle fix (`cccdcbb`) |
 | 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the needs-confirmation fix (`af22009`) |
 | 2026-10-01 | Claude (owner's request) | §6.8: the final build installed and the pre-install reference recorded (bead `i8fc.6`) |
