@@ -5,8 +5,10 @@
  * review 2026-09-30 §4).
  *
  * Change-014 (ADR-025): at Co-pilot and up the Orchestrator's proposal is the
- * primary option ("Orchestrator suggests · …") with its reason under the
- * options; the asker's recommended option keeps its ★. A Worker's question or
+ * primary option, marked "Orchestrator suggests", with its reason under the
+ * options; the asker's recommended option keeps its "Recommended" mark. The
+ * card's meta line names its kind and class ("DECISION · SCOPE", "HELD ACTION
+ * · RELEASE"), as the approved mockup draws it. A Worker's question or
  * an Orchestrator's decision can be asked back (`decisions.ask`) and shows its
  * conversation (`decisions.thread`); the decision stays open meanwhile.
  *
@@ -17,7 +19,6 @@ import { askableKindOf, hasOpenAsk, type DecisionThread } from "../shared/decisi
 import {
   decisionClassOf,
   decisionKindOf,
-  declaredEffects,
   deliveryKindOf,
   effectsOfAnswer,
   isAnswerable,
@@ -102,7 +103,10 @@ export const DECISION_UI_IDLE: DecisionUi = { confirming: null, words: null, bus
 
 export interface DecisionButton {
   key: string;
+  /** The option's own label, unmarked. */
   label: string;
+  /** What the row says at its right: `RECOMMENDED_MARK`, `SUGGESTS_MARK`, both, or null. */
+  mark: string | null;
   /**
    * The one primary action: the option the Orchestrator suggests when it
    * proposed one (Co-pilot and up, ADR-025), else the recommended option; the
@@ -128,6 +132,8 @@ export interface DecisionCardView {
   proposal: string | null;
   /** Ask back and the conversation (change-014 outcome 3); null on a decision whose asker cannot be asked. */
   askBack: AskBackView | null;
+  /** A held action (`h:`): Deny and Allow once as two buttons, not option rows. */
+  held: boolean;
   details: string[];
 }
 
@@ -205,6 +211,24 @@ const STATUS_CHIPS: Readonly<Record<Decision["status"], Badge>> = {
 function agentNamed(id: string | null, agents: readonly ChatPeer[], fallback: ChatRole | null): string {
   const peer = id === null ? undefined : agents.find((candidate) => candidate.id === id);
   return actorName(party(peer, fallback));
+}
+
+/** The kind label of a decision card's meta line: `DECISION · SCOPE`, `HELD ACTION · RELEASE`. */
+export function decisionKindLabel(decision: Decision): string {
+  const kind = decisionKindOf(decision.id) === "held" ? "HELD ACTION" : "DECISION";
+  return `${kind} · ${decisionClassOf(decision).toUpperCase()}`;
+}
+
+/**
+ * A held request's question (`heldQuestionOf`: "The Worker asks to run
+ * `<command>`. Held: <why>. Allow it once?") as the card's title — "Run
+ * `<command>`?" — and its reason as a line; null when it reads otherwise.
+ */
+export function heldTitleOf(question: string): { title: string; why: string } | null {
+  const match = /^(?:The )?\S+ asks to (.+?) (`[^`]*`)\. Held: ([\s\S]*?)\.? Allow it once\?$/.exec(question.trim());
+  if (match === null) return null;
+  const verb = match[1]!;
+  return { title: `${verb.charAt(0).toUpperCase()}${verb.slice(1)} ${match[2]!}?`, why: `Held: ${match[3]!}.` };
 }
 
 function askerOf(role: DecisionSeed["asker"], agentId: string | null, agents: readonly ChatPeer[]): CardFrameView["actor"] {
@@ -326,7 +350,8 @@ export function decisionCardView(input: DecisionViewInput): DecisionCardView {
   const decision = lookup.state === "found" ? lookup.decision : null;
   const frame: CardFrameView = {
     actor: askerOf(decision?.askedBy.role ?? seed.asker, decision?.askedBy.agentId ?? null, agents),
-    recipient: "you",
+    // The mockup's meta line: the asker, then when; a decision is always for the owner.
+    recipient: null,
     authority: null,
     time: decision === null ? localTimeText(input.cardAt, now) : `asked ${ago(decision.askedAt, now)}`,
     chip: null,
@@ -344,6 +369,7 @@ export function decisionCardView(input: DecisionViewInput): DecisionCardView {
     confirm: null,
     proposal: null,
     askBack: null,
+    held: false,
     details: decisionDetails(card, seed, decision),
   };
 
@@ -360,39 +386,48 @@ export function decisionCardView(input: DecisionViewInput): DecisionCardView {
   }
 
   const chip = STATUS_CHIPS[decision.status];
+  const held = decisionKindOf(decision.id) === "held";
+  const heldTitle = held ? heldTitleOf(decision.question) : null;
+  // A decision that waits on the owner: its kind in the kind colour, the bar beside it; a settled one muted, no bar of its own.
+  const waiting = isAnswerable(decision);
+  const kindTone = waiting ? (held ? ("danger" as const) : ("warning" as const)) : ("muted" as const);
+  const labelled: CardFrameView = {
+    ...frame,
+    label: { text: decisionKindLabel(decision), tone: kindTone },
+    ...(heldTitle === null ? {} : { title: heldTitle.title }),
+    // The mockup's lock: an action held at the boundary, not a question.
+    ...(held ? { icon: "Lock" } : {}),
+    ...(waiting ? { bar: kindTone } : {}),
+  };
   switch (decision.status) {
     case "open": {
-      const declared = declaredEffects(decision);
-      const held = decisionKindOf(decision.id) === "held";
       const controls = answerControls(decision, ui);
       return {
         ...view,
         ...controls,
+        held,
         askBack: askBackOf(decision, ui, controls.confirm !== null, input.thread ?? null, input.ask ?? ASK_UI_IDLE),
         frame: {
-          ...frame,
-          chip,
-          tag: declared.length === 0 ? null : `effects: ${effectWords(declared)}`,
-          body: decisionKindOf(decision.id) === "override" ? [OVERRIDE_CARD_LINE] : held ? [HELD_CARD_LINE] : [],
-          // A held action waits on the owner while its Worker is mid-call: the danger bar (change-014).
-          ...(held ? { bar: "danger" as const } : {}),
+          ...labelled,
+          // The kind label says it waits on the owner; the effects are in each option's label aloud and in Details.
+          chip: null,
+          body: decisionKindOf(decision.id) === "override" ? [OVERRIDE_CARD_LINE] : held ? [...(heldTitle === null ? [] : [heldTitle.why]), HELD_CARD_LINE] : [],
         },
       };
     }
     case "needs-confirmation": {
       // Still answerable: the options stay, and closing it as answered in the chat is one more choice beside them.
-      const declared = declaredEffects(decision);
       const where = decision.needsConfirmation === null ? "a chat" : CHAT_WORDS[decision.needsConfirmation.via];
       const at = decision.needsConfirmation === null ? "" : ` at ${localTimeText(new Date(decision.needsConfirmation.at), now)}`;
       const controls = answerControls(decision, ui);
       return {
         ...view,
         ...controls,
+        held,
         askBack: askBackOf(decision, ui, controls.confirm !== null, input.thread ?? null, input.ask ?? ASK_UI_IDLE),
         frame: {
-          ...frame,
+          ...labelled,
           chip,
-          tag: declared.length === 0 ? null : `effects: ${effectWords(declared)}`,
           body: [`You wrote in ${where}${at}. Choose an answer, or close it if that message answered it.`],
         },
         confirmChat: controls.confirm === null && ui.words === null,
@@ -413,7 +448,7 @@ export function decisionCardView(input: DecisionViewInput): DecisionCardView {
         ...view,
         askBack: askBackOf(decision, ui, false, input.thread ?? null, input.ask ?? ASK_UI_IDLE),
         frame: {
-          ...frame,
+          ...labelled,
           chip,
           authority: `${by} · ${localTimeText(new Date(answer.at), now)}`,
           tag: grantTag(decision),
@@ -425,13 +460,15 @@ export function decisionCardView(input: DecisionViewInput): DecisionCardView {
       return {
         ...view,
         askBack: askBackOf(decision, ui, false, input.thread ?? null, input.ask ?? ASK_UI_IDLE),
-        frame: { ...frame, chip, body: [settledLine(decision) ?? ""].filter((line) => line !== "") },
+        frame: { ...labelled, chip, body: [settledLine(decision) ?? ""].filter((line) => line !== "") },
       };
   }
 }
 
-/** The prefix of the option the Orchestrator suggests (Co-pilot and up, ADR-025). */
-export const SUGGESTS_PREFIX = "Orchestrator suggests · ";
+/** The mark at the right of the asker's recommended option (drawn in capitals). */
+export const RECOMMENDED_MARK = "Recommended";
+/** The mark at the right of the option the Orchestrator suggests (Co-pilot and up, ADR-025). */
+export const SUGGESTS_MARK = "Orchestrator suggests";
 
 /**
  * The Orchestrator's proposal on a decision that can still be answered
@@ -447,17 +484,20 @@ export function proposalOf(decision: Decision): { optionKey: string; reason: str
 /** The answer buttons, Own words… and the in-place confirmation of a decision that can still be answered. */
 function answerControls(decision: Decision, ui: DecisionUi): Pick<DecisionCardView, "options" | "ownWords" | "confirm" | "proposal"> {
   const proposal = proposalOf(decision);
+  const held = decisionKindOf(decision.id) === "held";
   const options = decision.options.map(
     (option): DecisionButton => {
       const effects = realEffects(option.effects);
       const suggested = proposal?.optionKey === option.key;
-      const label = option.recommended ? `${option.label} ★` : option.label;
+      const marks = [...(suggested ? [SUGGESTS_MARK] : []), ...(option.recommended ? [RECOMMENDED_MARK] : [])];
       const why = [...(suggested ? ["the Orchestrator suggests it"] : []), ...(option.recommended ? ["recommended"] : [])];
       return {
         key: option.key,
-        label: suggested ? `${SUGGESTS_PREFIX}${label}` : label,
-        // The Orchestrator's proposal is the primary action; the asker's recommendation keeps its ★ but is secondary when they differ.
-        primary: proposal === null ? option.recommended : suggested,
+        label: option.label,
+        mark: marks.length === 0 ? null : marks.join(" · "),
+        // The Orchestrator's proposal is the primary action; the asker's recommendation keeps its mark but is secondary when they differ.
+        // A held request recommends nothing: Allow once is its primary button, Deny beside it (§D.2).
+        primary: held ? option.key === "allow" : proposal === null ? option.recommended : suggested,
         confirm: needsOwnerConfirmation(effects),
         accessibilityLabel: `Answer: ${option.label}${why.length === 0 ? "" : ` (${why.join("; ")})`}${effects.length === 0 ? "" : `; allows ${effectWords(effects)}`}`,
       };

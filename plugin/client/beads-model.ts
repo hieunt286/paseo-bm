@@ -9,6 +9,7 @@ import { formatDuration, localTimeText, type Bar, type OverviewCard } from "./fo
 import type { Badge, Tone } from "./tone";
 import { timeOrNull } from "../shared/time";
 import { median } from "../shared/eval-metrics/helpers";
+import { plural } from "../shared/text";
 
 const DAY_MS = 86_400_000;
 
@@ -563,7 +564,7 @@ export function actionSpec(action: BeadAction, bead: Pick<BeadRow, "id" | "statu
   switch (action) {
     case "implement":
       return {
-        label: "Assign a Worker",
+        label: "Ask Manager to implement",
         title: `Assign ${bead.id} to a Worker?`,
         body: "The Beads Manager creates a Worker that implements this bead until it is closed with evidence. This uses model quota.",
         confirmLabel: "Yes, assign a Worker",
@@ -571,7 +572,7 @@ export function actionSpec(action: BeadAction, bead: Pick<BeadRow, "id" | "statu
       };
     case "delete":
       return {
-        label: "Delete",
+        label: "Delete…",
         title: `Ask a Worker to delete ${bead.id}?`,
         body: "A Worker first checks whether this bead is still needed. It deletes the bead only if it is not, and tells you why either way.",
         confirmLabel: "Yes, assess and delete",
@@ -579,7 +580,7 @@ export function actionSpec(action: BeadAction, bead: Pick<BeadRow, "id" | "statu
       };
     case "close":
       return {
-        label: "Close",
+        label: "Close…",
         title: `Ask a Worker to close ${bead.id}?`,
         body: "A Worker checks whether the acceptance criteria are met. It closes the bead with evidence only if they are, otherwise it reports what is missing.",
         confirmLabel: "Yes, check and close",
@@ -659,3 +660,124 @@ export function workSummary(bead: Pick<BeadRow, "status" | "work">, now: Date): 
     tone: current.status === "running" ? "plain" : "muted",
   };
 }
+
+// ---------------------------------------------------------------------------
+// The board as the approved mockup draws it (change-014 fidelity pass,
+// ProjectBeads artboard): In progress · Ready · Open epics · Deferred, Closed
+// while shown, and Blocked only when a bead is blocked (the mockup had none to
+// show, and a blocked bead must not vanish). Each row carries a muted meta
+// line; the detail beside the board names Status, Feature, Parent and Worker.
+// ---------------------------------------------------------------------------
+
+export type BoardBucket = "in_progress" | "ready" | "open_epics" | "deferred" | "blocked" | "closed";
+
+export const BOARD_ORDER: readonly BoardBucket[] = ["in_progress", "ready", "open_epics", "deferred", "blocked", "closed"];
+
+export const BOARD_TITLES: Readonly<Record<BoardBucket, string>> = {
+  in_progress: "In progress",
+  ready: "Ready",
+  open_epics: "Open epics",
+  deferred: "Deferred",
+  blocked: "Blocked",
+  closed: "Closed",
+};
+
+/** The column a bead sits in on the board. */
+export function boardBucket(bead: Pick<BeadRow, "status" | "ready" | "issueType">): BoardBucket {
+  if (bead.status === "closed") return "closed";
+  if (bead.status === "in_progress") return "in_progress";
+  if (bead.status === "deferred") return "deferred";
+  if (bead.issueType === "epic") return "open_epics";
+  return bead.ready && bead.status !== "blocked" ? "ready" : "blocked";
+}
+
+export interface BoardColumn {
+  bucket: BoardBucket;
+  title: string;
+  /** Every bead of the column after the filters, the rows the limit cut included. */
+  total: number;
+  beads: BeadRow[];
+  hidden: number;
+}
+
+/**
+ * The board's columns from an already filtered and sorted list. In progress,
+ * Ready, Open epics and Deferred always come back, empty or not, so the board
+ * does not jump; Blocked only when it holds a bead; Closed only while shown.
+ * The row limit is spent per column.
+ */
+export function boardColumns(
+  beads: readonly BeadRow[],
+  options: { showClosed: boolean; limit?: number },
+): { columns: BoardColumn[]; visible: number; closed: number } {
+  const limit = options.limit ?? KANBAN_COLUMN_LIMIT;
+  const byBucket = new Map<BoardBucket, BeadRow[]>(BOARD_ORDER.map((bucket) => [bucket, []]));
+  for (const bead of beads) byBucket.get(boardBucket(bead))!.push(bead);
+  const closed = byBucket.get("closed")!.length;
+  const columns: BoardColumn[] = [];
+  let visible = 0;
+  for (const bucket of BOARD_ORDER) {
+    const all = byBucket.get(bucket)!;
+    if (bucket === "closed" && !options.showClosed) continue;
+    if (bucket === "blocked" && all.length === 0) continue;
+    visible += all.length;
+    const taken = all.slice(0, Math.max(0, limit));
+    columns.push({ bucket, title: BOARD_TITLES[bucket], total: all.length, beads: taken, hidden: all.length - taken.length });
+  }
+  return { columns, visible, closed };
+}
+
+/** A bead's feature slug (`feature:<slug>`), or null. */
+export function featureOf(bead: Pick<BeadRow, "labels">): string | null {
+  const label = bead.labels.find((entry) => entry.startsWith("feature:"));
+  return label === undefined ? null : label.slice("feature:".length);
+}
+
+/** An epic's children, counted from the list: how many there are and how many are closed. */
+function childCounts(epic: Pick<BeadRow, "id">, all: readonly BeadRow[]): { closed: number; total: number } {
+  const children = all.filter((bead) => bead.parentId === epic.id);
+  return { closed: children.filter((bead) => bead.status === "closed").length, total: children.length };
+}
+
+/**
+ * The muted line under a bead's title on the board: `epic · 18 / 19` for an
+ * epic, who works on an in-progress bead, when a closed one closed, else its
+ * priority and type with its first label that is not a feature.
+ */
+export function beadRowMeta(bead: BeadRow, all: readonly BeadRow[], now: Date): string {
+  if (bead.issueType === "epic") {
+    const { closed, total } = childCounts(bead, all);
+    return total === 0 ? "epic" : `epic · ${closed} / ${total}`;
+  }
+  const work = workSummary(bead, now);
+  if (work !== null) return work.headline;
+  if (bead.status === "closed" && bead.closedAt !== null) return `closed ${localTimeText(new Date(bead.closedAt), now)}`;
+  const label = bead.labels.find((entry) => !entry.startsWith("feature:"));
+  return [`${priorityLabel(bead.priority)} · ${bead.issueType}`, label ?? null].filter((part) => part !== null).join(" · ");
+}
+
+/** The detail's key / value grid: Status, Feature, Parent, Worker. */
+export function beadFacts(bead: BeadRow, all: readonly BeadRow[], now: Date): Array<{ key: string; value: string; mono: boolean }> {
+  let status = STATUS_TEXT[statusBucket(bead)];
+  if (bead.status === "deferred") status = "Deferred";
+  if (bead.issueType === "epic" && bead.status !== "closed") {
+    const { closed, total } = childCounts(bead, all);
+    status = total === 0 ? "Open" : `Open · ${closed} of ${plural(total, "child", "children")} closed`;
+  }
+  const work = workSummary(bead, now);
+  const started = bead.work?.started ?? bead.work?.last ?? null;
+  return [
+    { key: "Status", value: status, mono: false },
+    { key: "Feature", value: featureOf(bead) ?? "—", mono: true },
+    { key: "Parent", value: bead.parentId ?? "—", mono: true },
+    { key: "Worker", value: work === null ? (started === null ? "none yet" : (started.title ?? started.agentId.slice(0, 8))) : work.headline.split(" · ")[0]!, mono: false },
+  ];
+}
+
+/** The detail's first line: `bms-0s0.7 · task · P1`. */
+export function beadHeadLine(bead: Pick<BeadRow, "id" | "issueType" | "priority">): string {
+  return `${bead.id} · ${bead.issueType} · ${priorityLabel(bead.priority)}`;
+}
+
+/** The note under the detail's actions (the mockup's words). */
+export const BEAD_ACTIONS_NOTE = "Every action asks first, then goes to this project's Manager. This screen never writes the bead store.";

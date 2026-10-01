@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { SetupStatus, SkillUsage } from "../plugin/shared/contracts";
 import { toolFacesFor } from "../plugin/shared/bm-tools";
 import { GROUP_LOADING } from "../plugin/client/settings-model";
@@ -8,6 +8,8 @@ import {
   agentToolsRows,
   orchestratorToolsText,
   skillRowsView,
+  skillsHeaderText,
+  toolRowView,
   toolsGroupState,
 } from "../plugin/client/tools-screen-model";
 import { allNodes, pressables, renderTree, texts } from "./helpers/element-tree";
@@ -115,23 +117,50 @@ describe("the skills with their use counts (skills.usage, 30 days, every project
     ]);
     expect(rows[0]!.accessibilityLabel).toBe("feature-workflow: Claude ✓, Codex ✓; used in 247 reports in the last 30 days");
     expect(rows[1]!.accessibilityLabel).toBe("reviewing-plan: Claude missing, Codex missing; not used in the last 30 days");
+    // The muted line under the name (the approved mockup's description): the install state, in the warning colour when one is missing.
+    expect(rows.map((row) => [row.summary, row.summaryTone, row.usedBy])).toEqual([
+      ["Claude ✓ · Codex ✓", "muted", "Worker"],
+      ["optional · Claude missing · Codex missing", "warning", "Worker"],
+    ]);
     expect(skillRowsView(status, null).map((row) => row.used)).toEqual(["…", "…"]);
   });
 
   it("adds the skills the reports named that paseo-bm does not check, after the checked ones", () => {
     const rows = skillRowsView(readyStatus(), [usage("simplify", 8), usage("feature-workflow", 3), usage("unused", 0)]);
     expect(rows.map((row) => row.name)).toEqual(["feature-workflow", "reviewing-plan", "converting-plan-to-beads", "polishing-beads", "implementing-beads", "simplify"]);
-    expect(rows.at(-1)).toMatchObject({ note: "not checked by paseo-bm", chips: [], used: "8" });
+    expect(rows.at(-1)).toMatchObject({ note: "not checked by paseo-bm", summary: "not checked by paseo-bm", chips: [], used: "8" });
   });
 
-  it("is a table: Skill and Used headings, each row's name, count, chips and problem (hook-free)", () => {
+  it("says where the skills are installed and what Used counts, beside the title", () => {
+    expect(skillsHeaderText(readyStatus().skills.dirs)).toBe(
+      "installed for Claude, Codex · used = reports that name it, last 30 days",
+    );
+  });
+
+  it("is a table: Skill, Used by and Used headings, each row's name, install state, problem, roles and count, and Manage opening its details (hook-free)", () => {
     const base = readyStatus();
     const status = readyStatus({ skills: { ...base.skills, skills: [{ ...skillRow("feature-workflow", true), problem: "broken link" }] } });
-    const nodes = renderTree(SkillsTable({ rows: skillRowsView(status, [usage("feature-workflow", 2)]), styles, theme }));
-    expect(texts(nodes)).toEqual(["Skill", "Used", "feature-workflow", "2", "Claude ✓", "Codex ✓", "broken link"]);
+    const rows = skillRowsView(status, [usage("feature-workflow", 2)]);
+    const onManage = vi.fn();
+    const nodes = renderTree(SkillsTable({ rows, onManage, styles, theme }));
+    expect(texts(nodes)).toEqual(["Skill", "Used by", "Used", "feature-workflow", "Claude ✓ · Codex ✓", "broken link", "Worker", "2", "Manage"]);
     const problem = allNodes(nodes).find((node) => node.type === "Text" && texts([node])[0] === "broken link")!;
     expect(JSON.stringify(problem.props.style)).toContain("#statusDanger");
-    expect(pressables(nodes)).toHaveLength(0);
+    const [manage] = pressables(nodes);
+    expect(manage!.props).toMatchObject({ accessibilityRole: "button", accessibilityLabel: "Manage feature-workflow: its install state per agent", accessibilityState: { expanded: false } });
+    (manage!.props.onPress as () => void)();
+    expect(onManage.mock.calls).toEqual([["feature-workflow"]]);
+    const open = renderTree(SkillsTable({ rows, open: "feature-workflow", onManage, styles, theme }));
+    expect(texts(open)).toEqual(expect.arrayContaining(["Close", "Claude ✓", "Codex ✓"]));
+  });
+});
+
+describe("the command-line tools", () => {
+  it("reads installed, the update available, or missing, with what the tool is and its version", () => {
+    const [br, bv] = readyStatus().tools;
+    expect(toolRowView({ ...br!, purpose: "Beads issue tracker" })).toEqual({ name: "br", description: "Beads issue tracker · 0.6.0", state: { text: "installed", kind: "installed" } });
+    expect(toolRowView({ ...bv!, version: "v0.24.0" }).state).toEqual({ text: "v0.25.0 available", kind: "update" });
+    expect(toolRowView({ ...br!, path: null, version: null }).state).toEqual({ text: "missing", kind: "missing" });
   });
 });
 
@@ -170,10 +199,10 @@ describe("the agent tools by role", () => {
     expect(missing[0]!.paseo.tone).toBe("muted");
   });
 
-  it("is one block per role with both columns, the Paseo tools in their tone (hook-free)", () => {
+  it("is a table, Role · Paseo tools · paseo-bm tools, one row per role, the Paseo tools in their tone (hook-free)", () => {
     const rows = agentToolsRows(withSetup({ agentTools: { injectIntoAgents: false, setBy: null } }));
     const nodes = renderTree(AgentToolsTable({ rows, styles, theme }));
-    expect(texts(nodes).slice(0, 5)).toEqual(["Manager", "Paseo tools", "create, message, cancel agents · off for every agent", "paseo-bm tools", rows[0]!.bm]);
+    expect(texts(nodes).slice(0, 6)).toEqual(["Role", "Paseo tools", "paseo-bm tools", "Manager", "create, message, cancel agents · off for every agent", rows[0]!.bm]);
     const warned = allNodes(nodes).find((node) => node.type === "Text" && texts([node])[0] === rows[0]!.paseo.text)!;
     expect(JSON.stringify(warned.props.style)).toContain("#statusWarning");
     const blocks = allNodes(nodes).filter((node) => node.type === "View" && typeof node.props.accessibilityLabel === "string");

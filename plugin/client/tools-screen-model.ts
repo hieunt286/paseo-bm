@@ -15,7 +15,7 @@ import { toolFacesFor, type ToolRole } from "../shared/bm-tools";
 import type { SetupStatus, SkillUsage } from "../shared/contracts";
 import { GROUP_LOADING, type GroupState } from "./settings-model";
 import { SKILL_COLUMNS, skillAgentOfProvider, skillChips, toolBadge } from "./settings-machine-model";
-import type { Badge } from "./tone";
+import type { Badge, Tone } from "./tone";
 
 /** How far back the Used column counts, in days, over every project. */
 export const SKILLS_USAGE_DAYS = 30;
@@ -25,6 +25,13 @@ export const SKILLS_USAGE_QUERY_KEY = ["paseo-bm", "tools", "skills-usage", SKIL
 
 /** What the Used column counts, in one line under the Skills title. */
 export const SKILLS_USED_MEANING = `Used: how many Worker reports named the skill in the last ${SKILLS_USAGE_DAYS} days, in every project.`;
+
+/** Where each agent's skills are installed, then what Used counts: the line beside the Skills title (the approved mockup). */
+export function skillsHeaderText(dirs: SetupStatus["skills"]["dirs"]): string {
+  // The agents only, as the mockup's one short line; each skill's row says where it is missing.
+  const agents = ["Claude", "Codex", ...(dirs.pi === undefined ? [] : ["Pi"]), ...(dirs.opencode === undefined ? [] : ["OpenCode"])];
+  return `installed for ${agents.join(", ")} · used = reports that name it, last ${SKILLS_USAGE_DAYS} days`;
+}
 
 /** The tools that are the Beads tools of this section. */
 export const BEADS_TOOL_IDS: ReadonlySet<string> = new Set(["br", "bv"]);
@@ -68,6 +75,12 @@ export function toolsGroupState(status: SetupStatus | undefined): GroupState {
 /** One skill row: its name, its install state per agent, how often it was used, and its problem. */
 export interface SkillRowView {
   name: string;
+  /** The muted line under the name: the install state per agent ("Claude ✓ · Codex ✓"), "optional" first for a skill paseo-bm does not require. */
+  summary: string;
+  /** The tone of the worst install state, so a missing or broken skill shows in its colour. */
+  summaryTone: Tone;
+  /** Who uses it: the Worker, whose reports Used counts and whose skills paseo-bm checks. */
+  usedBy: string;
   /** "(optional)" for a skill paseo-bm does not require; "not checked by paseo-bm" for one only the reports name. */
   note: string | null;
   chips: Badge[];
@@ -75,6 +88,30 @@ export interface SkillRowView {
   used: string;
   problem: string | null;
   accessibilityLabel: string;
+}
+
+const TONE_RANK: Readonly<Record<Tone, number>> = { danger: 3, warning: 2, info: 1, success: 0, muted: 0, plain: 0 };
+
+/** The worst tone of the chips: danger or warning when a state is wrong, else muted. */
+function worstTone(chips: readonly Badge[]): Tone {
+  const worst = [...chips].sort((a, b) => TONE_RANK[b.tone] - TONE_RANK[a.tone])[0];
+  return worst !== undefined && TONE_RANK[worst.tone] >= 2 ? worst.tone : "muted";
+}
+
+/** One command-line tool's row: name, what it is with its version, and its state on the right. */
+export interface ToolRowView {
+  name: string;
+  description: string;
+  /** "installed" (accent), an update (warning) or missing (danger). */
+  state: { text: string; kind: "installed" | "update" | "missing" };
+}
+
+export function toolRowView(tool: SetupStatus["tools"][number]): ToolRowView {
+  const badge = toolBadge(tool);
+  const description = [tool.purpose || null, tool.version].filter((part) => part !== null && part !== "").join(" · ");
+  if (tool.path === null) return { name: tool.name, description, state: { text: tool.required ? "missing" : "not installed", kind: "missing" } };
+  if (badge.tone === "warning") return { name: tool.name, description, state: { text: `${tool.latestKnown} available`, kind: "update" } };
+  return { name: tool.name, description, state: { text: "installed", kind: "installed" } };
 }
 
 function usedText(reports: number | undefined, usage: readonly SkillUsage[] | null): string {
@@ -100,6 +137,9 @@ export function skillRowsView(status: SetupStatus, usage: readonly SkillUsage[] 
     const used = usedText(reportsOf.get(skill.name), usage);
     return {
       name: skill.name,
+      summary: [...(skill.required ? [] : ["optional"]), ...chips.map((chip) => chip.text)].join(" · "),
+      summaryTone: worstTone(chips),
+      usedBy: "Worker",
       note: skill.required ? null : "(optional)",
       chips,
       used,
@@ -114,6 +154,9 @@ export function skillRowsView(status: SetupStatus, usage: readonly SkillUsage[] 
       const used = String(entry.reports);
       return {
         name: entry.name,
+        summary: "not checked by paseo-bm",
+        summaryTone: "muted",
+        usedBy: "Worker",
         note: "not checked by paseo-bm",
         chips: [],
         used,

@@ -11,6 +11,14 @@
  * requests (§G.2). What it shows is `insights-model.ts`; this file reads the
  * data and draws it.
  *
+ * Drawn as the approved ProjectMetrics artboard (change-014 fidelity pass):
+ * five figures in one strip, Bead status and Closed per day (from
+ * `beads.list`), By feature and Tokens by role, How the work ran beside all
+ * projects (a second `insights.summary` without a workspace); the sections
+ * the artboard has no place for follow. The period is the page header's
+ * segmented control (`work.tsx`); the Beads figures that opened the old tab
+ * (`BeadsFigures`) are no longer drawn — Bead status says the same in one bar.
+ *
  * Read once when shown and on Refresh — never polled: the figures move by the
  * day, not by the second.
  *
@@ -20,38 +28,43 @@
  */
 import { useRpc } from "@getpaseo/plugin/client";
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
-import { ActivityIndicator, ScrollView, Text, View } from "react-native";
+import { useMemo, type ReactNode } from "react";
+import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { autonomyLedgerRpc, autonomyPolicyRpc, beadsListRpc, insightsSummaryRpc, type InsightsWindow } from "../shared/contracts";
 import { dashboardStyles } from "./styles";
 import { toneColor } from "./tone";
+import type { Bar } from "./format";
 import {
+  ALL_PROJECTS,
   AUTONOMY_NOTE,
   AUTONOMY_TITLE,
   COORDINATION_EMPTY,
   HEAVIEST_TITLE,
   COORDINATION_NOTE,
-  INSIGHTS_DEFAULT_WINDOW,
   REVIEW_LIFT_NOTE,
   REVIEW_LIFT_TITLE,
-  WINDOW_TABS,
+  TOKENS_BY_ROLE_NOTE,
   autonomyFiguresView,
-  beadsFiguresView,
-  insightsView,
-  scopeLine,
+  metricsView,
   type AgreementFiguresView,
   type AutonomyClassRowView,
   type AutonomyFiguresView,
+  type BeadStatusBarView,
   type BeadsFiguresView,
+  type DayBar,
   type HeavyRequestView,
   type InsightsView,
+  type MetricsView,
+  type ProcessRow,
   type RequestTokensView,
   type ReviewLiftView,
   type ReviewTierRowView,
+  type RoleTokenRow,
 } from "./insights-model";
 import { errorMessageOf } from "./errors";
 import { AUTONOMY_POLICY_KEY } from "./settings-autonomy-model";
-import { BarChart, Button, StatCards, StatusTabs, ToneText, type Styles, type Theme } from "./ui";
+import { MONO } from "./text-tabs";
+import { BarChart, StatCards, ToneText, type Styles, type Theme } from "./ui";
 
 /** Figures change slowly; a read stays good for a minute. */
 export const INSIGHTS_STALE_MS = 60_000;
@@ -273,71 +286,336 @@ export function ReviewLiftFigures({ view, compact, styles, theme }: { view: Revi
   );
 }
 
+// ---------------------------------------------------------------------------
+// The flat pieces of the approved mockup (change-014 fidelity pass), shared
+// with the Overview (`work.tsx`). Hook-free; colours from the theme only.
+// ---------------------------------------------------------------------------
+
+/** A section heading: 15/600, with an optional muted tail after it (`· last 30 days, context read per turn`). */
+export function SectionHeading({ title, tail, theme }: { title: string; tail?: string | null; theme: Theme }) {
+  return (
+    <Text accessibilityRole="header" style={{ fontSize: 15, fontWeight: "600", color: theme.colors.foreground }}>
+      {title}
+      {tail === undefined || tail === null ? null : <Text style={{ fontSize: 13, fontWeight: "400", color: theme.colors.foregroundMuted }}>{` ${tail}`}</Text>}
+    </Text>
+  );
+}
+
+/** One cell of a figure strip, the value optionally in its own colour (Waiting on you). */
+export interface StripCell {
+  label: string;
+  value: string;
+  unit?: string | null;
+  hint?: string | null;
+  valueColor?: string;
+}
+
+/**
+ * Figures in ONE bordered box, divided by 1px rules: an uppercase muted label,
+ * the value 26/600, an optional muted unit after it and a muted line under it.
+ * A phone wraps the cells two by two.
+ */
+export function FigureStrip({ cells, compact, theme, valueSize = 26 }: { cells: readonly StripCell[]; compact: boolean; theme: Theme; valueSize?: number }) {
+  const { colors } = theme;
+  return (
+    <View style={{ flexDirection: "row", flexWrap: compact ? "wrap" : "nowrap", borderWidth: 1, borderColor: colors.border }}>
+      {cells.map((cell, index) => (
+        <View
+          key={cell.label}
+          accessibilityLabel={`${cell.label}: ${cell.value}${cell.unit ? ` ${cell.unit}` : ""}${cell.hint ? `, ${cell.hint}` : ""}`}
+          style={{
+            flex: 1,
+            minWidth: compact ? "50%" : 0,
+            gap: 6,
+            paddingVertical: 16,
+            paddingHorizontal: 18,
+            ...(index === 0 || compact ? {} : { borderLeftWidth: 1, borderLeftColor: colors.border }),
+            ...(compact && index % 2 === 1 ? { borderLeftWidth: 1, borderLeftColor: colors.border } : {}),
+            ...(compact && index >= 2 ? { borderTopWidth: 1, borderTopColor: colors.border } : {}),
+          }}
+        >
+          <Text style={{ fontSize: 12, fontWeight: "500", textTransform: "uppercase", letterSpacing: 0.72, color: colors.foregroundMuted }}>{cell.label}</Text>
+          <Text style={{ fontSize: valueSize, fontWeight: "600", color: cell.valueColor ?? colors.foreground }}>
+            {cell.value}
+            {cell.unit ? <Text style={{ fontSize: 14, fontWeight: "400", color: colors.foregroundMuted }}>{` ${cell.unit}`}</Text> : null}
+          </Text>
+          {cell.hint ? <Text style={{ fontSize: 12, color: colors.foregroundMuted }}>{cell.hint}</Text> : null}
+        </View>
+      ))}
+    </View>
+  );
+}
+
+/** The bar colour of each role: Worker accent, Manager muted, Reviewer amber; the rest neutral. */
+export function roleColor(theme: Theme, role: RoleTokenRow["key"]): string {
+  const { colors } = theme;
+  if (role === "worker") return colors.accent;
+  if (role === "manager") return colors.foregroundMuted;
+  if (role === "reviewer") return colors.statusWarning;
+  return colors.border;
+}
+
+/** A horizontal bar: a 10px track on surface2 with a fill of `share`. */
+function Track({ share, color, theme, height = 10 }: { share: number; color: string | null; theme: Theme; height?: number }) {
+  return (
+    <View style={{ flex: 1, minWidth: 0, height, backgroundColor: theme.colors.surface2 }}>
+      {color === null ? null : <View style={{ height, width: `${Math.max(0, Math.min(1, share)) * 100}%`, backgroundColor: color }} />}
+    </View>
+  );
+}
+
+/** Tokens by role: name, a track with the role's colour, the mono value right-aligned; a role not recorded reads muted. */
+export function RoleTokenBars({ rows, theme, valueWidth = 110, valueSize = 14 }: { rows: readonly RoleTokenRow[]; theme: Theme; valueWidth?: number; valueSize?: number }) {
+  const { colors } = theme;
+  return (
+    <View style={{ gap: 10 }}>
+      {rows.map((row) => (
+        <View key={row.key} accessibilityLabel={`${row.label}: ${row.value}`} style={{ flexDirection: "row", alignItems: "center", gap: 16 }}>
+          <Text style={{ width: 110, fontSize: 14, color: row.recorded ? colors.foreground : colors.foregroundMuted }}>{row.label}</Text>
+          <Track share={row.share} color={row.recorded ? roleColor(theme, row.key) : null} theme={theme} />
+          <Text style={{ width: valueWidth, textAlign: "right", fontFamily: MONO, fontSize: valueSize, color: row.recorded ? colors.foreground : colors.foregroundMuted }}>{row.value}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+/** Bead status: one 14px stacked bar — closed, deferred, open — and its legend of 8px squares. */
+export function BeadStatusBar({ view, theme }: { view: BeadStatusBarView; theme: Theme }) {
+  const { colors } = theme;
+  const colour = { closed: colors.accent, deferred: colors.border, open: colors.statusWarning } as const;
+  return (
+    <View style={{ gap: 14 }} accessibilityLabel={view.accessibilityLabel}>
+      <View style={{ flexDirection: "row", height: 14, backgroundColor: colors.surface2 }}>
+        {view.segments.map((segment) => (segment.value === 0 ? null : <View key={segment.key} style={{ width: `${segment.share * 100}%`, backgroundColor: colour[segment.key] }} />))}
+      </View>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", columnGap: 20, rowGap: 6 }}>
+        {view.segments.map((segment) => (
+          <View key={segment.key} style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+            <View style={{ width: 8, height: 8, backgroundColor: colour[segment.key] }} />
+            <Text style={{ fontSize: 13, color: colors.foreground }}>{segment.label}</Text>
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+/** The tallest bar of Closed per day, in px. */
+const DAY_BAR_MAX = 90;
+
+/** Closed per day: vertical bars with their value above and their date below. */
+export function ClosedPerDayChart({ days, theme }: { days: readonly DayBar[]; theme: Theme }) {
+  const { colors } = theme;
+  if (days.length === 0) return <Text style={{ fontSize: 13, color: colors.foregroundMuted }}>No bead was closed in this period.</Text>;
+  const top = Math.max(1, ...days.map((day) => day.value));
+  return (
+    <View style={{ gap: 14 }}>
+      <View style={{ flexDirection: "row", alignItems: "flex-end", gap: 10, height: 120, borderBottomWidth: 1, borderBottomColor: colors.border }}>
+        {days.map((day) => (
+          <View key={day.key} accessibilityLabel={`${day.label}: ${day.value} closed`} style={{ flex: 1, alignItems: "center", justifyContent: "flex-end", gap: 6, height: "100%" }}>
+            <Text style={{ fontFamily: MONO, fontSize: 12, color: colors.foreground }}>{String(day.value)}</Text>
+            <View style={{ width: "100%", maxWidth: 56, height: Math.max(1, Math.round((day.value / top) * DAY_BAR_MAX)), backgroundColor: colors.accent }} />
+          </View>
+        ))}
+      </View>
+      <View style={{ flexDirection: "row", gap: 10 }}>
+        {days.map((day) => (
+          <Text key={day.key} style={{ flex: 1, textAlign: "center", fontSize: 12, color: colors.foregroundMuted }} numberOfLines={1}>
+            {day.label}
+          </Text>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+/** By feature: the feature in mono, a track, the count. */
+export function FeatureBars({ bars, theme }: { bars: readonly Bar[]; theme: Theme }) {
+  const { colors } = theme;
+  if (bars.length === 0) return <Text style={{ fontSize: 13, color: colors.foregroundMuted }}>No bead carries a feature label.</Text>;
+  const top = Math.max(1, ...bars.map((bar) => bar.value));
+  return (
+    <View style={{ gap: 10 }}>
+      {bars.map((bar) => (
+        <View key={bar.label} accessibilityLabel={`${bar.label}: ${bar.display}`} style={{ flexDirection: "row", alignItems: "center", gap: 14 }}>
+          <Text style={{ width: 130, fontFamily: MONO, fontSize: 12, color: colors.foreground }} numberOfLines={1}>
+            {bar.label}
+          </Text>
+          <Track share={bar.value / top} color={colors.foregroundMuted} theme={theme} />
+          <Text style={{ width: 40, textAlign: "right", fontFamily: MONO, fontSize: 12, color: colors.foreground }}>{bar.display}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+/** How the work ran: Measure · This project · All projects, rows divided by 1px rules. */
+export function ProcessTable({ rows, compact, theme }: { rows: readonly ProcessRow[]; compact: boolean; theme: Theme }) {
+  const { colors } = theme;
+  const width = compact ? 90 : 140;
+  const head = { fontSize: 12, fontWeight: "500" as const, textTransform: "uppercase" as const, letterSpacing: 0.72, color: colors.foregroundMuted };
+  return (
+    <View>
+      <View style={{ flexDirection: "row", paddingBottom: 8, borderBottomWidth: 1, borderBottomColor: colors.border }}>
+        <Text style={[head, { flex: 1 }]}>Measure</Text>
+        <Text style={[head, { width, textAlign: "right" }]}>This project</Text>
+        <Text style={[head, { width, textAlign: "right" }]}>All projects</Text>
+      </View>
+      {rows.map((row) => (
+        <View
+          key={row.label}
+          accessibilityLabel={`${row.label}: ${row.project} in this project, ${row.all} in all projects`}
+          style={{ flexDirection: "row", alignItems: "center", paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.border }}
+        >
+          <Text style={{ flex: 1, fontSize: 14, color: colors.foreground }}>{row.label}</Text>
+          <Text style={{ width, textAlign: "right", fontFamily: MONO, fontSize: 14, color: colors.foreground }}>{row.project}</Text>
+          <Text style={{ width, textAlign: "right", fontFamily: MONO, fontSize: 14, color: colors.foreground }}>{row.all}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+/** Two sections side by side on a wide screen (gap 32), stacked on a phone. */
+function Pair({ compact, children }: { compact: boolean; children: [ReactNode, ReactNode] }) {
+  return (
+    <View style={{ flexDirection: compact ? "column" : "row", gap: 32 }}>
+      <View style={{ flex: compact ? undefined : 1, minWidth: 0, gap: 14 }}>{children[0]}</View>
+      <View style={{ flex: compact ? undefined : 1, minWidth: 0, gap: 14 }}>{children[1]}</View>
+    </View>
+  );
+}
+
 export interface MetricsBodyProps {
-  window: InsightsWindow;
-  /** The project's name, for the scope line. */
-  projectLabel: string | null;
-  /** Null until the summary has been read once. */
-  view: InsightsView | null;
+  view: MetricsView;
   loading: boolean;
   error: string | null;
-  beads: BeadsFiguresView;
+  /** Why the beads could not be read; null when they could (or are still being read). */
+  beadsError: string | null;
   autonomy: AutonomyFiguresView;
-  /** Phone width: the autonomy figures, the heaviest requests and the review figures stack. */
+  /** Phone width: the pairs, the autonomy figures, the heaviest requests and the review figures stack. */
   compact?: boolean;
-  onWindow: (window: InsightsWindow) => void;
   onRefresh: () => void;
   styles: Styles;
   theme: Theme;
 }
 
-/** The Metrics tab but its data: the window, then Flow, Cost, Coordination, Beads, Autonomy and Review lift. Hook-free. */
+/**
+ * The Metrics tab but its data, as the ProjectMetrics artboard draws it: the
+ * five figures, Bead status beside Closed per day, By feature beside Tokens by
+ * role, How the work ran; then what the tab showed before the mockup and the
+ * mockup has no place for — the Orchestrator's interventions, tokens read per
+ * request, autonomy by class, review lift and what was not counted. The
+ * period is the page header's segmented control (`work.tsx`). Hook-free.
+ */
 export function MetricsBody(props: MetricsBodyProps) {
-  const { window, projectLabel, view, loading, error, beads, autonomy, styles, theme } = props;
+  const { view, loading, error, beadsError, autonomy, styles, theme } = props;
+  const compact = props.compact ?? false;
+  const { colors } = theme;
+  const insights = view.insights;
+  const muted = { fontSize: 13, color: colors.foregroundMuted };
   return (
-    <>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <View style={{ flex: 1 }}>
-          <StatusTabs tabs={WINDOW_TABS} selected={window} onSelect={(key) => props.onWindow(key as InsightsWindow)} styles={styles} />
-        </View>
-        <Button label="Refresh" kind="secondary" accessibilityLabel="Refresh the figures" onPress={props.onRefresh} styles={styles} />
-      </View>
-      <Text style={styles.body}>{scopeLine(window, projectLabel)}</Text>
-
-      {loading && view === null ? <ActivityIndicator color={styles.spinner.color} /> : null}
+    <View style={{ gap: 32 }}>
+      {loading && insights === null ? <ActivityIndicator color={styles.spinner.color} /> : null}
       {error === null ? null : <ToneText tone="danger" styles={styles} theme={theme}>{`Could not read the figures. ${error}`}</ToneText>}
-      {view === null ? null : <InsightsFigures view={view} compact={props.compact ?? false} styles={styles} />}
+      {beadsError === null ? null : <ToneText tone="danger" styles={styles} theme={theme}>{`Could not read the beads. ${beadsError}`}</ToneText>}
+      {insights === null || insights.empty === null ? null : <Text style={muted}>{insights.empty}</Text>}
+      <FigureStrip cells={view.strip} compact={compact} theme={theme} />
 
-      <Text style={styles.sectionTitle}>Beads</Text>
-      <BeadsFigures view={beads} styles={styles} theme={theme} />
+      <Pair compact={compact}>
+        {[
+          <>
+            <SectionHeading title="Bead status" theme={theme} />
+            {view.beadStatus === null ? <ActivityIndicator color={styles.spinner.color} /> : <BeadStatusBar view={view.beadStatus} theme={theme} />}
+          </>,
+          <>
+            <SectionHeading title="Closed per day" theme={theme} />
+            {view.closedPerDay === null ? <ActivityIndicator color={styles.spinner.color} /> : <ClosedPerDayChart days={view.closedPerDay} theme={theme} />}
+          </>,
+        ]}
+      </Pair>
 
-      <Text style={styles.sectionTitle}>{AUTONOMY_TITLE}</Text>
-      <Text style={styles.body}>{AUTONOMY_NOTE}</Text>
-      <AutonomyFigures view={autonomy} compact={props.compact ?? false} styles={styles} theme={theme} />
+      <Pair compact={compact}>
+        {[
+          <>
+            <SectionHeading title="By feature" theme={theme} />
+            {view.features === null ? <ActivityIndicator color={styles.spinner.color} /> : <FeatureBars bars={view.features} theme={theme} />}
+          </>,
+          <>
+            <SectionHeading title="Tokens by role" theme={theme} />
+            {view.roleTokens.length === 0 ? <Text style={muted}>{OVERVIEW_NO_TOKENS_TEXT}</Text> : <RoleTokenBars rows={view.roleTokens} theme={theme} valueWidth={100} valueSize={12} />}
+            <Text style={{ fontSize: 12, color: colors.foregroundMuted }}>{TOKENS_BY_ROLE_NOTE}</Text>
+          </>,
+        ]}
+      </Pair>
 
-      {view === null || view.reviewLift === null ? null : (
-        <>
-          <Text style={styles.sectionTitle}>{REVIEW_LIFT_TITLE}</Text>
-          <Text style={styles.body}>{REVIEW_LIFT_NOTE}</Text>
-          <ReviewLiftFigures view={view.reviewLift} compact={props.compact ?? false} styles={styles} theme={theme} />
-        </>
+      <View style={{ gap: 12 }}>
+        <SectionHeading title="How the work ran" theme={theme} />
+        <ProcessTable rows={view.process} compact={compact} theme={theme} />
+      </View>
+
+      {insights === null ? null : (
+        <View style={{ gap: 12 }}>
+          <SectionHeading title="Orchestrator interventions" theme={theme} />
+          <Text style={muted}>{COORDINATION_NOTE}</Text>
+          {insights.coordination.length === 0 ? (
+            <Text style={muted}>{COORDINATION_EMPTY}</Text>
+          ) : (
+            <FigureStrip cells={insights.coordination.map((card) => ({ label: card.label, value: card.value, hint: card.hint }))} compact={compact} theme={theme} valueSize={18} />
+          )}
+        </View>
       )}
-    </>
+
+      {insights === null || insights.requestTokens === null ? null : (
+        <View style={{ gap: 12 }}>
+          <RequestTokens view={insights.requestTokens} compact={compact} styles={styles} />
+        </View>
+      )}
+
+      <View style={{ gap: 12 }}>
+        <SectionHeading title={AUTONOMY_TITLE} theme={theme} />
+        <Text style={muted}>{AUTONOMY_NOTE}</Text>
+        <AutonomyFigures view={autonomy} compact={compact} styles={styles} theme={theme} />
+      </View>
+
+      {insights === null || insights.reviewLift === null ? null : (
+        <View style={{ gap: 12 }}>
+          <SectionHeading title={REVIEW_LIFT_TITLE} theme={theme} />
+          <Text style={muted}>{REVIEW_LIFT_NOTE}</Text>
+          <ReviewLiftFigures view={insights.reviewLift} compact={compact} styles={styles} theme={theme} />
+        </View>
+      )}
+
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+        {insights === null || insights.unknowns === null ? null : <Text style={{ fontSize: 12, color: colors.foregroundMuted, flexShrink: 1 }}>{insights.unknowns}</Text>}
+        <Pressable accessibilityRole="button" accessibilityLabel="Refresh the figures" onPress={props.onRefresh} style={{ paddingVertical: 4 }}>
+          <Text style={muted}>Refresh</Text>
+        </Pressable>
+      </View>
+    </View>
   );
 }
+
+/** Said in Tokens by role when the server sends no context figures. */
+const OVERVIEW_NO_TOKENS_TEXT = "No turn read any tokens in this period.";
 
 export interface ProjectMetricsProps {
   workspaceId: string;
   /** The project's name; null in the workspace's own Beads tab. */
   label: string | null;
+  /** The period, chosen in the page header's segmented control. */
+  window: InsightsWindow;
   compact: boolean;
   theme: Theme;
 }
 
+/** The query key of the summary over every project, for How the work ran's second column. */
+export const allProjectsQueryKey = (window: InsightsWindow) => insightsQueryKey(window, ALL_PROJECTS);
+
 /** A project's Metrics tab: mounted only while it shows, so its figures are read only then. */
-export function ProjectMetrics({ workspaceId, label, compact, theme }: ProjectMetricsProps) {
+export function ProjectMetrics({ workspaceId, label, window, compact, theme }: ProjectMetricsProps) {
   const styles = useMemo(() => dashboardStyles(theme, compact), [theme, compact]);
-  const [window, setWindow] = useState<InsightsWindow>(INSIGHTS_DEFAULT_WINDOW);
   const readSummary = useRpc(insightsSummaryRpc);
   const listBeads = useRpc(beadsListRpc);
   const readLedger = useRpc(autonomyLedgerRpc);
@@ -345,6 +623,12 @@ export function ProjectMetrics({ workspaceId, label, compact, theme }: ProjectMe
   const summary = useQuery({
     queryKey: insightsQueryKey(window, workspaceId),
     queryFn: () => readSummary({ window, workspaceId }),
+    staleTime: INSIGHTS_STALE_MS,
+  });
+  // The same period over every project: How the work ran's All projects column.
+  const all = useQuery({
+    queryKey: allProjectsQueryKey(window),
+    queryFn: () => readSummary({ window }),
     staleTime: INSIGHTS_STALE_MS,
   });
   // The Beads screen's own query: a project's beads read here are its beads there.
@@ -360,8 +644,14 @@ export function ProjectMetrics({ workspaceId, label, compact, theme }: ProjectMe
   // Settings reads and writes this same query, so a level set there shows here.
   const policy = useQuery({ queryKey: AUTONOMY_POLICY_KEY, queryFn: () => readPolicy({}) });
   const now = new Date();
-  const view = summary.data === undefined ? null : insightsView(summary.data, now, label === null ? [] : [{ id: workspaceId, label }]);
-  const beadsView = beadsFiguresView(workspaceId, beads.data, beads.isError ? errorMessageOf(beads.error) : null, now);
+  const view = metricsView({
+    summary: summary.data,
+    all: all.data,
+    beads: beads.data?.beads,
+    window,
+    projects: label === null ? [] : [{ id: workspaceId, label }],
+    now,
+  });
   const autonomyView = autonomyFiguresView({
     projectId: workspaceId,
     ledger: ledger.data,
@@ -369,26 +659,22 @@ export function ProjectMetrics({ workspaceId, label, compact, theme }: ProjectMe
     error: ledger.isError ? errorMessageOf(ledger.error) : policy.isError ? errorMessageOf(policy.error) : null,
   });
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
-      <MetricsBody
-        window={window}
-        projectLabel={label ?? "this project"}
-        view={view}
-        loading={summary.isPending}
-        error={summary.isError ? errorMessageOf(summary.error) : null}
-        beads={beadsView}
-        autonomy={autonomyView}
-        compact={compact}
-        onWindow={setWindow}
-        onRefresh={() => {
-          void summary.refetch();
-          void beads.refetch();
-          void ledger.refetch();
-          void policy.refetch();
-        }}
-        styles={styles}
-        theme={theme}
-      />
-    </ScrollView>
+    <MetricsBody
+      view={view}
+      loading={summary.isPending}
+      error={summary.isError ? errorMessageOf(summary.error) : null}
+      beadsError={beads.isError ? errorMessageOf(beads.error) : null}
+      autonomy={autonomyView}
+      compact={compact}
+      onRefresh={() => {
+        void summary.refetch();
+        void all.refetch();
+        void beads.refetch();
+        void ledger.refetch();
+        void policy.refetch();
+      }}
+      styles={styles}
+      theme={theme}
+    />
   );
 }

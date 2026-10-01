@@ -19,7 +19,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { copyText } from "@getpaseo/plugin/client/react-native";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { ActivityIndicator, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import {
   rolesOptionsRpc,
   rolesSaveFallbackRpc,
@@ -38,6 +38,8 @@ import {
   type SetupStatus,
 } from "../shared/contracts";
 import { RADIUS } from "./styles";
+import { MONO } from "./text-tabs";
+import { toolRowView } from "./tools-screen-model";
 import { toneColor, type Badge } from "./tone";
 import { errorMessageOf } from "./errors";
 import {
@@ -52,7 +54,6 @@ import {
   cleanupWarningDialog,
   installDialog,
   skillsDialog,
-  toolBadge,
   type CleanupReport,
 } from "./settings-machine-model";
 import {
@@ -91,6 +92,42 @@ import {
   type SetupRole,
 } from "./settings-roles-model";
 import { Button, Chip, ConfirmBlock, RoleMark, ToneText, type Styles, type Theme } from "./ui";
+
+/**
+ * The square switch of the flat surface (the approved mockup): 44×24, the
+ * accent when on with its square knob at the right, the border colour when
+ * off with a muted knob at the left. Hook-free.
+ */
+export function SquareSwitch({ on, disabled = false, accessibilityLabel, onPress, theme }: {
+  on: boolean;
+  disabled?: boolean;
+  accessibilityLabel: string;
+  onPress: () => void;
+  theme: Theme;
+}) {
+  const { colors } = theme;
+  return (
+    <Pressable
+      accessibilityRole="switch"
+      accessibilityLabel={accessibilityLabel}
+      accessibilityState={{ checked: on, disabled }}
+      disabled={disabled}
+      onPress={onPress}
+      style={{ width: 44, height: 24, backgroundColor: on ? colors.accent : colors.border, opacity: disabled ? 0.6 : 1 }}
+    >
+      <View
+        style={{
+          position: "absolute",
+          top: 3,
+          width: 18,
+          height: 18,
+          backgroundColor: on ? colors.accentForeground : colors.foregroundMuted,
+          ...(on ? { right: 3 } : { left: 3 }),
+        }}
+      />
+    </Pressable>
+  );
+}
 
 /**
  * The busy flag of one action, and the one way a Settings action runs:
@@ -718,8 +755,16 @@ export function RolesSection({ styles, theme }: { styles: Styles; theme: Theme }
   );
 }
 
-export function ToolCard({ tool, styles, theme, onInstalled }: {
+/**
+ * One command-line tool as a row of Tools & skills (the approved mockup): the
+ * name in mono, what it is with its version, and on the right "installed",
+ * the update available, or Install… behind its confirmation (Cancel first).
+ * A missing tool says where it was looked for; an update shows its command.
+ */
+export function ToolCard({ tool, first = false, styles, theme, onInstalled }: {
   tool: SetupStatus["tools"][number];
+  /** The first row draws the top border too. */
+  first?: boolean;
   styles: Styles;
   theme: Theme;
   onInstalled: () => void;
@@ -728,8 +773,9 @@ export function ToolCard({ tool, styles, theme, onInstalled }: {
   const [confirming, setConfirming] = useState(false);
   const { busy, run } = useBusyAction();
   const [result, setResult] = useState<RunResult | null>(null);
-  const badge = toolBadge(tool);
+  const row = toolRowView(tool);
   const installable = tool.path === null && tool.installCommand !== null && (tool.id === "br" || tool.id === "bv");
+  const { colors } = theme;
 
   const confirm = () => {
     const id = tool.id;
@@ -749,16 +795,39 @@ export function ToolCard({ tool, styles, theme, onInstalled }: {
     );
   };
 
+  const stateColor = row.state.kind === "installed" ? colors.accent : row.state.kind === "update" ? colors.statusWarning : colors.statusDanger;
   return (
-    <View style={[styles.card, { gap: 6 }]}>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <Text style={[styles.sectionTitle, { flex: 1 }]}>{tool.name}</Text>
-        <Chip badge={badge} styles={styles} theme={theme} />
+    <View
+      accessibilityLabel={`${row.name}: ${row.description}; ${row.state.text}`}
+      style={{
+        gap: 8,
+        paddingVertical: 13,
+        borderBottomWidth: 1,
+        borderBottomColor: colors.border,
+        ...(first ? { borderTopWidth: 1, borderTopColor: colors.border } : {}),
+      }}
+    >
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+        <Text style={{ width: 140, color: colors.foreground, fontSize: 14, fontFamily: MONO }}>{row.name}</Text>
+        <Text style={{ flex: 1, color: colors.foregroundMuted, fontSize: 14 }} numberOfLines={2}>
+          {row.description}
+        </Text>
+        {installable && !confirming ? (
+          <Button
+            label={`Install ${tool.id}…`}
+            kind="primary"
+            accessibilityLabel={`Install ${tool.id}: asks before anything runs`}
+            onPress={() => setConfirming(true)}
+            style={{ borderRadius: 0, paddingVertical: 6 }}
+            styles={styles}
+          />
+        ) : (
+          <Text style={{ minWidth: 120, textAlign: "right", color: stateColor, fontSize: 13 }}>{row.state.text}</Text>
+        )}
       </View>
-      <Text style={styles.body}>{tool.purpose}</Text>
-      <Text style={styles.body} selectable>
-        {tool.path === null ? "Not found on the daemon's PATH or the usual install folders." : `Found at ${tool.path}`}
-      </Text>
+      {tool.path === null ? (
+        <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>Not found on the daemon's PATH or the usual install folders.</Text>
+      ) : null}
       {installable ? (
         confirming ? (
           <ConfirmBlock
@@ -771,25 +840,12 @@ export function ToolCard({ tool, styles, theme, onInstalled }: {
             theme={theme}
           />
         ) : (
-          <View style={{ gap: 6 }}>
-            <CommandLine label="Install command" command={tool.installCommand!} styles={styles} theme={theme} />
-            <Button
-              label={`Install ${tool.id}…`}
-              kind="primary"
-              accessibilityLabel={`Install ${tool.id}: asks before anything runs`}
-              onPress={() => setConfirming(true)}
-              style={{ alignSelf: "flex-start" }}
-              styles={styles}
-            />
-          </View>
+          <CommandLine label="Install command" command={tool.installCommand!} styles={styles} theme={theme} />
         )
-      ) : tool.updateCommand !== null ? (
+      ) : tool.path !== null && row.state.kind === "update" && tool.updateCommand !== null ? (
         <CommandLine label="Update it yourself with" command={tool.updateCommand} styles={styles} theme={theme} />
       ) : null}
       {result === null ? null : <RunResultView result={result} styles={styles} theme={theme} />}
-      <Text style={[styles.body, { fontSize: 11 }]} selectable>
-        {tool.homepage}
-      </Text>
     </View>
   );
 }
@@ -850,15 +906,25 @@ export function AgentToolsBlockView({ status, onDone, styles, theme }: {
   );
 }
 
-/** The Agent skills tab's own Install button, with the same dialog as the card. */
-export function SkillsInstallBlock({ command, onDone, styles, theme }: {
+/**
+ * The skills CLI run (`setup.install-skills`), behind its confirmation, Cancel
+ * first. Uncontrolled it draws its own "Install skills…" button; with `asking`
+ * and `onAskingChange` the caller owns the button (Tools & skills' Update all)
+ * and this draws only the confirmation and the run's result.
+ */
+export function SkillsInstallBlock({ command, onDone, asking: askingProp, onAskingChange, styles, theme }: {
   command: string;
   onDone: () => void;
+  asking?: boolean;
+  onAskingChange?: (asking: boolean) => void;
   styles: Styles;
   theme: Theme;
 }) {
   const installSkills = useRpc(setupInstallSkillsRpc);
-  const [asking, setAsking] = useState(false);
+  const [askingOwn, setAskingOwn] = useState(false);
+  const controlled = askingProp !== undefined && onAskingChange !== undefined;
+  const asking = controlled ? askingProp : askingOwn;
+  const setAsking = controlled ? onAskingChange : setAskingOwn;
   const { busy, run } = useBusyAction();
   const [result, setResult] = useState<RunResult | null>(null);
 
@@ -885,7 +951,7 @@ export function SkillsInstallBlock({ command, onDone, styles, theme }: {
           styles={styles}
           theme={theme}
         />
-      ) : (
+      ) : controlled ? null : (
         <Button
           label="Install skills…"
           kind="primary"

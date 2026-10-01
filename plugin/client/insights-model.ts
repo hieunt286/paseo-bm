@@ -21,6 +21,8 @@ import { formatDuration, formatTokens, type Bar, type OverviewCard } from "./for
 import type { Tone } from "./tone";
 import { CLASS_LABELS, MODE_LABELS } from "./settings-autonomy-model";
 import { plural } from "../shared/text";
+import { timeOrNull } from "../shared/time";
+import { median, percentile } from "../shared/eval-metrics/helpers";
 
 const DAY_MS = 86_400_000;
 
@@ -664,4 +666,293 @@ export function reviewLiftView(reviewLift: InsightsSummary["reviewLift"]): Revie
   const unknowns = reviewUnknownsLine(reviewLift);
   if (rows.length === 0) return { kind: "empty", text: unknowns === null ? REVIEW_LIFT_EMPTY : `${REVIEW_LIFT_EMPTY} ${unknowns}` };
   return { kind: "figures", rows, unknowns };
+}
+
+// ---------------------------------------------------------------------------
+// The Metrics tab as the approved mockup draws it (change-014 fidelity pass,
+// ProjectMetrics artboard): the period as a segmented control, a strip of five
+// figures, the bead status bar, closed beads per day, beads by feature, tokens
+// by role, and "How the work ran" for this project beside all projects. The
+// bead figures are computed here from `beads.list` rows (`createdAt`,
+// `closedAt`), the rest from `insights.summary`. A figure that cannot be had
+// reads `—`, never 0.
+// ---------------------------------------------------------------------------
+
+/** The period cells, in `INSIGHTS_WINDOWS` order: the windows the server offers, written short. */
+export const WINDOW_SHORT_LABELS: Readonly<Record<InsightsWindow, string>> = { "7d": "7 d", "30d": "30 d", "90d": "90 d", all: "All" };
+
+export const WINDOW_SEGMENTS: ReadonlyArray<{ key: InsightsWindow; label: string; accessibilityLabel: string }> = INSIGHTS_WINDOWS.map((key) => ({
+  key,
+  label: WINDOW_SHORT_LABELS[key],
+  accessibilityLabel: key === "all" ? "Everything recorded" : `Last ${WINDOW_LABELS[key]}`,
+}));
+
+/** At most this many days are drawn in Closed per day: the newest days with a closed bead. */
+export const CLOSED_PER_DAY_MAX = 14;
+
+export const TOKENS_BY_ROLE_NOTE =
+  "Context read per turn, summed. Claude counts every model call of a turn, Codex only the last, so roles on different providers are not exactly comparable.";
+
+/** One cell of a figure strip: an uppercase label, a large value, an optional unit after it and a muted line under it. */
+export interface FigureCell {
+  label: string;
+  value: string;
+  /** `/ 50` after `43`, smaller and muted; null for none. */
+  unit: string | null;
+  hint: string | null;
+}
+
+const MONTH_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
+
+/** The start of the window, in ms; null for everything recorded. */
+function windowStart(window: InsightsWindow, now: Date): number | null {
+  const days = WINDOW_DAYS[window];
+  return days === null ? null : now.getTime() - days * DAY_MS;
+}
+
+function inWindow(at: number, start: number | null, now: Date): boolean {
+  return (start === null || at >= start) && at <= now.getTime();
+}
+
+/** How long the work beads closed in the window took, created to closed: median, p90 and how many. Epics left out. */
+export function leadTimes(beads: readonly BeadRow[], window: InsightsWindow, now: Date): { median: number | null; p90: number | null; count: number } {
+  const start = windowStart(window, now);
+  const spans: number[] = [];
+  for (const bead of beads) {
+    if (bead.issueType === "epic" || bead.status !== "closed") continue;
+    const created = timeOrNull(bead.createdAt);
+    const closed = timeOrNull(bead.closedAt);
+    if (created === null || closed === null || closed < created || !inWindow(closed, start, now)) continue;
+    spans.push(closed - created);
+  }
+  return { median: median(spans), p90: percentile(spans, 90), count: spans.length };
+}
+
+/** One day of Closed per day: `1 Oct` and how many beads closed that local day. */
+export interface DayBar {
+  key: string;
+  label: string;
+  value: number;
+}
+
+/**
+ * The beads closed per local day in the window, oldest first: only days with
+ * a closed bead, the newest `CLOSED_PER_DAY_MAX` of them (the mockup's bars
+ * skip quiet days).
+ */
+export function closedPerDay(beads: readonly BeadRow[], window: InsightsWindow, now: Date): DayBar[] {
+  const start = windowStart(window, now);
+  const counts = new Map<string, { at: Date; value: number }>();
+  for (const bead of beads) {
+    const closed = timeOrNull(bead.closedAt);
+    if (closed === null || !inWindow(closed, start, now)) continue;
+    const at = new Date(closed);
+    const key = `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, "0")}-${String(at.getDate()).padStart(2, "0")}`;
+    const entry = counts.get(key);
+    if (entry === undefined) counts.set(key, { at, value: 1 });
+    else entry.value += 1;
+  }
+  return [...counts.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .slice(-CLOSED_PER_DAY_MAX)
+    .map(([key, { at, value }]) => ({ key, label: `${at.getDate()} ${MONTH_SHORT[at.getMonth()]}`, value }));
+}
+
+/** The bead status bar: closed, deferred and open (the rest), with how many of the open ones are ready. */
+export interface BeadStatusBarView {
+  total: number;
+  segments: Array<{ key: "closed" | "deferred" | "open"; label: string; value: number; share: number }>;
+  accessibilityLabel: string;
+}
+
+export function beadStatusBar(beads: readonly BeadRow[]): BeadStatusBarView {
+  const total = beads.length;
+  const closed = beads.filter((bead) => bead.status === "closed").length;
+  const deferred = beads.filter((bead) => bead.status === "deferred").length;
+  const open = total - closed - deferred;
+  const ready = beads.filter((bead) => bead.status !== "closed" && bead.ready).length;
+  const share = (value: number) => (total === 0 ? 0 : value / total);
+  const segments: BeadStatusBarView["segments"] = [
+    { key: "closed", label: `Closed ${closed}`, value: closed, share: share(closed) },
+    { key: "deferred", label: `Deferred ${deferred}`, value: deferred, share: share(deferred) },
+    { key: "open", label: ready > 0 ? `Open ${open} · ${ready} ready` : `Open ${open}`, value: open, share: share(open) },
+  ];
+  return { total, segments, accessibilityLabel: `${total} beads: ${segments.map((segment) => segment.label).join(", ")}` };
+}
+
+/** Beads per feature (`feature:<slug>` labels), most first; a bead without one is not counted. */
+export function featureBars(beads: readonly BeadRow[]): Bar[] {
+  const counts = new Map<string, number>();
+  for (const bead of beads) {
+    for (const label of bead.labels) {
+      if (!label.startsWith("feature:")) continue;
+      const feature = label.slice("feature:".length);
+      counts.set(feature, (counts.get(feature) ?? 0) + 1);
+    }
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([label, value]) => ({ label, value, display: String(value) }));
+}
+
+/** One row of Tokens by role: the role, its value and its share of the total read, or `not recorded`. */
+export interface RoleTokenRow {
+  key: Role;
+  label: string;
+  value: string;
+  /** 0–1: the bar's length. */
+  share: number;
+  recorded: boolean;
+}
+
+/** The roles in the mockup's order: Worker, Manager, Reviewer, then Orchestrator; Other only when it read something. */
+const ROLE_TOKEN_ORDER: readonly Role[] = ["worker", "manager", "reviewer", "orchestrator", "unknown"];
+
+/**
+ * Tokens read by role (context read per turn, summed), or `[]` from a server
+ * that sends no context figures. The Orchestrator's row stays, reading `not
+ * recorded`, when none of its turns was recorded.
+ */
+export function roleTokenRows(context: InsightsSummary["context"], options: { orchestrator: boolean } = { orchestrator: true }): RoleTokenRow[] {
+  if (context === undefined) return [];
+  const read = context.tokensRead;
+  const label = (role: Role) => ROLE_LABELS.find(([key]) => key === role)![1];
+  return ROLE_TOKEN_ORDER.flatMap((role): RoleTokenRow[] => {
+    const value = read.byRole[role];
+    if (value > 0) return [{ key: role, label: label(role), value: formatTokens(Math.round(value)), share: read.total <= 0 ? 0 : value / read.total, recorded: true }];
+    if (role === "orchestrator" && options.orchestrator) return [{ key: role, label: label(role), value: "not recorded", share: 0, recorded: false }];
+    return [];
+  });
+}
+
+/** The letter of each role in the Turns figure: `M 160 · W 123 · R 30`. */
+const TURN_LETTERS: ReadonlyArray<[Role, string]> = [
+  ["manager", "M"],
+  ["worker", "W"],
+  ["reviewer", "R"],
+  ["orchestrator", "O"],
+];
+
+export function turnsCell(summary: InsightsSummary | undefined): FigureCell {
+  if (summary === undefined) return { label: "Turns", value: "—", unit: null, hint: null };
+  const total = ROLE_LABELS.reduce((sum, [role]) => sum + summary.turnsByRole[role], 0);
+  const hint = TURN_LETTERS.filter(([role]) => summary.turnsByRole[role] > 0)
+    .map(([role, letter]) => `${letter} ${summary.turnsByRole[role]}`)
+    .join(" · ");
+  return { label: "Turns", value: String(total), unit: null, hint: hint === "" ? null : hint };
+}
+
+/** Context read per request: the tokens read over the requests that read any. */
+export function tokensPerRequestText(summary: InsightsSummary | undefined): string {
+  const read = summary?.context?.tokensRead;
+  if (read === undefined || read.perRequest.all.count === 0) return "—";
+  return formatTokens(Math.round(read.total / read.perRequest.all.count));
+}
+
+/** The Metrics strip: beads closed, lead time, requests, tokens per request, turns. */
+export function metricsStrip(input: {
+  summary: InsightsSummary | undefined;
+  beads: readonly BeadRow[] | undefined;
+  window: InsightsWindow;
+  now: Date;
+}): FigureCell[] {
+  const { summary, beads, window, now } = input;
+  const closed = beads === undefined ? null : beads.filter((bead) => bead.status === "closed").length;
+  const lead = beads === undefined ? null : leadTimes(beads, window, now);
+  return [
+    { label: "Beads closed", value: closed === null ? "—" : String(closed), unit: beads === undefined ? null : `/ ${beads.length}`, hint: null },
+    {
+      label: "Lead time · median",
+      value: lead === null ? "—" : formatMs(lead.median),
+      unit: null,
+      hint: lead === null || lead.count === 0 ? null : `p90 ${formatMs(lead.p90)} · ${plural(lead.count, "task")}`,
+    },
+    { label: "Requests", value: summary === undefined ? "—" : String(summary.requests.inWindow), unit: null, hint: null },
+    { label: "Tokens per request", value: tokensPerRequestText(summary), unit: null, hint: "context read" },
+    turnsCell(summary),
+  ];
+}
+
+/** One measure of How the work ran: this project beside all projects. */
+export interface ProcessRow {
+  label: string;
+  project: string;
+  all: string;
+}
+
+function processFigures(summary: InsightsSummary | undefined) {
+  if (summary === undefined) return null;
+  return {
+    questions: formatPerRequest(summary.questions.perFinishedRequest?.reachedOwner ?? null),
+    reviews: formatPerRequest(summary.reviewLift?.all.reviewsPerRequest ?? null),
+    finished: formatMs(summary.timeToFinished.medianMs),
+    // Paseo's stall count is not in the summary yet: it reads as unknown, never 0.
+    cut: `${summary.errors.cancelledTurns.total} · —`,
+    wait: formatMs(summary.ownerWait.medianMs),
+    failed: String(summary.errors.failedTurns.total),
+  };
+}
+
+/** How the work ran, as a table: the mockup's four measures, then your wait and failed turns (what the Flow cards said). */
+export function processRows(project: InsightsSummary | undefined, all: InsightsSummary | undefined): ProcessRow[] {
+  const here = processFigures(project);
+  const every = processFigures(all);
+  const row = (label: string, key: keyof NonNullable<ReturnType<typeof processFigures>>): ProcessRow => ({
+    label,
+    project: here === null ? "—" : here[key],
+    all: every === null ? "—" : every[key],
+  });
+  return [
+    row("Questions reaching you per finished request", "questions"),
+    row("Reviews per reviewed request", "reviews"),
+    row("Median time to finished", "finished"),
+    row("Turns cut by Paseo · stalls", "cut"),
+    row("Your wait · median", "wait"),
+    row("Failed turns", "failed"),
+  ];
+}
+
+/** The three cells of the Overview's How the work ran. */
+export function processCells(summary: InsightsSummary | undefined): Array<{ label: string; value: string }> {
+  const recorded = summary === undefined ? null : summary.interventions.reduce((sum, row) => sum + row.recorded, 0);
+  const helped = summary === undefined ? 0 : summary.interventions.reduce((sum, row) => sum + row.met, 0);
+  return [
+    { label: "Reviews per reviewed request", value: summary === undefined ? "—" : formatPerRequest(summary.reviewLift?.all.reviewsPerRequest ?? null) },
+    { label: "Questions reaching you per request", value: summary === undefined ? "—" : formatPerRequest(summary.questions.perFinishedRequest?.reachedOwner ?? null) },
+    { label: "Orchestrator interventions", value: recorded === null ? "—" : `${recorded} · ${helped} helped` },
+  ];
+}
+
+/** Everything the Metrics tab draws, from what has been read so far (each input undefined until it answered). */
+export interface MetricsView {
+  strip: FigureCell[];
+  /** Null until the beads were read. */
+  beadStatus: BeadStatusBarView | null;
+  closedPerDay: DayBar[] | null;
+  features: Bar[] | null;
+  roleTokens: RoleTokenRow[];
+  process: ProcessRow[];
+  /** Coordination, tokens read per request, review lift and what was not counted; null until the summary was read. */
+  insights: InsightsView | null;
+}
+
+export function metricsView(input: {
+  summary: InsightsSummary | undefined;
+  /** The same window over every project, for How the work ran's second column. */
+  all: InsightsSummary | undefined;
+  beads: readonly BeadRow[] | undefined;
+  window: InsightsWindow;
+  projects: readonly InsightsProject[];
+  now: Date;
+}): MetricsView {
+  const { summary, beads, window, now } = input;
+  return {
+    strip: metricsStrip({ summary, beads, window, now }),
+    beadStatus: beads === undefined ? null : beadStatusBar(beads),
+    closedPerDay: beads === undefined ? null : closedPerDay(beads, window, now),
+    features: beads === undefined ? null : featureBars(beads),
+    roleTokens: roleTokenRows(summary?.context, { orchestrator: false }),
+    process: processRows(summary, input.all),
+    insights: summary === undefined ? null : insightsView(summary, now, input.projects),
+  };
 }

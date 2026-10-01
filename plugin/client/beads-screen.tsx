@@ -1,11 +1,16 @@
 /**
  * The Beads screen (design delta 20260916-beads-screen; a project's Beads tab
- * since the experience concept §4.2): the board first — In progress · Ready ·
- * Blocked, Closed behind Show closed and hidden by default, the counts in the
- * column headers —, the project's features as one row of filters above it
- * (change-014 outcome 5), the other filters and the sort folded behind one
- * button, and a bead detail with three hand-off actions. Every action is confirmed first and goes
- * to the workspace's Beads Manager; this screen never writes the bead store.
+ * since the experience concept §4.2), drawn as the approved ProjectBeads
+ * artboard (change-014 fidelity pass): a filter bar — the project's features
+ * as a segmented control, Show closed, and Filter · Sort, which unfolds the
+ * other filters and the sort —, then the board — In progress · Ready · Open
+ * epics · Deferred, Blocked when a bead is blocked, Closed while shown — and
+ * beside it the selected bead's detail with three hand-off actions. Every
+ * action is confirmed first and goes to the workspace's Beads Manager; this
+ * screen never writes the bead store.
+ *
+ * On a phone the columns are one at a time behind a segmented control, and the
+ * detail sits under the column.
  *
  * The overview figures (status, progress, by type, by priority, time) are the
  * project's Metrics tab: `BeadsFigures` (`insights.tsx`) draws them from `beadsOverview`,
@@ -17,11 +22,12 @@
 import { type PluginSurfaceProps, useRpc } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState, useSyncExternalStore } from "react";
+import { useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { beadsActionRpc, beadsGetRpc, beadsListRpc, type BeadAction, type BeadRow } from "../shared/contracts";
 import { MarkdownView } from "./markdown-view";
 import {
+  BEAD_ACTIONS_NOTE,
   EMPTY_FILTER,
   LABEL_PREVIEW,
   SORT_OPTIONS,
@@ -33,41 +39,33 @@ import {
   actionSpec,
   actionsFor,
   beadActionResults,
+  beadFacts,
+  beadHeadLine,
   beadResultKey,
+  beadRowMeta,
   beadsOverview,
+  boardColumns,
   closedBeadsVisibility,
   doneText,
-  kanbanColumns,
-  kanbanLayout,
   facetsOf,
   filterBeads,
-  priorityLabel,
-  statusBadge,
   toggle,
-  visibleKanbanBucket,
   workSummary,
   type BeadFilter,
-  type StatusBucket,
+  type BoardBucket,
+  type BoardColumn,
 } from "./beads-model";
-import { RADIUS, dashboardStyles } from "./styles";
+import { dashboardStyles } from "./styles";
 import { toneColor, type Badge } from "./tone";
 import { errorMessageOf } from "./errors";
-import {
-  BeadRowCard,
-  Button,
-  Chip,
-  KanbanBoard,
-  RoleMark,
-  StatusTabs,
-  ToneText,
-  WorkspaceScreenHeader,
-  type Styles,
-  type Theme,
-  type WorkspaceScreenProps,
-} from "./ui";
+import { Button, Chip, RoleMark, ToneText, WorkspaceScreenHeader, type Styles, type Theme, type WorkspaceScreenProps } from "./ui";
 import { localTimeText } from "./format";
+import { MONO, Segmented } from "./text-tabs";
 
 const facetText = (value: string) => value.replace("in_progress", "in progress");
+
+/** The width of the bead detail beside the board (the artboard's). */
+export const BEAD_DETAIL_WIDTH = 380;
 
 function FacetRow({
   title,
@@ -118,31 +116,23 @@ function FacetRow({
   );
 }
 
-/** A bead's detail and actions; also opened from a chat card or the chat panel. */
-export function BeadDetailPanel({
-  workspaceId,
-  bead,
-  styles,
-  theme,
-  navigation,
-}: {
-  workspaceId: string;
-  bead: BeadRow;
-  styles: Styles;
-  theme: Theme;
-  navigation?: PluginSurfaceProps["navigation"];
-}) {
+type ActionResult = { text: string; managerId: string | null; tone: Badge["tone"] };
+
+/**
+ * A bead's detail read and its three actions, shared by the board's detail and
+ * the chat's bead panel. What the last action reported lives outside the
+ * component: a bead that changes status moves to another column and its
+ * detail is built again — and the line telling the user the request was sent
+ * must not vanish with it (delta 20260925 §3.1, keeping F9 of 20260918f).
+ */
+function useBeadAction(workspaceId: string, bead: BeadRow) {
   const getBead = useRpc(beadsGetRpc);
   const runAction = useRpc(beadsActionRpc);
   const [pending, setPending] = useState<BeadAction | null>(null);
   const [busy, setBusy] = useState(false);
-  // What the last action reported lives outside this panel: the board draws each
-  // status as its own column, so a bead that changes status gets a new row and
-  // this panel is built again — and the line telling the user the request was
-  // sent must not vanish with it (delta 20260925 §3.1, keeping F9 of 20260918f).
   const resultKey = beadResultKey(workspaceId, bead.id);
   const result = useSyncExternalStore(beadActionResults.subscribe, () => beadActionResults.get(resultKey) ?? null);
-  const setResult = (next: { text: string; managerId: string | null; tone: Badge["tone"] } | null) => {
+  const setResult = (next: ActionResult | null) => {
     if (next === null) beadActionResults.clear(resultKey);
     else beadActionResults.set(resultKey, next);
   };
@@ -150,7 +140,6 @@ export function BeadDetailPanel({
     queryKey: ["paseo-bm", "bead", workspaceId, bead.id],
     queryFn: () => getBead({ workspaceId, id: bead.id }),
   });
-
   const confirm = async (action: BeadAction) => {
     setBusy(true);
     try {
@@ -167,11 +156,79 @@ export function BeadDetailPanel({
       setPending(null);
     }
   };
+  const ask = (action: BeadAction) => {
+    setResult(null);
+    setPending(action);
+  };
+  return { detail, pending, setPending, busy, result, confirm, ask };
+}
 
+type BeadActionState = ReturnType<typeof useBeadAction>;
+
+/** What the last action reported, with a way to its Manager. */
+function ActionResultLine({ result, navigation, styles, theme }: { result: ActionResult | null; navigation?: PluginSurfaceProps["navigation"]; styles: Styles; theme: Theme }) {
+  if (result === null) return null;
+  return (
+    <View style={{ gap: 4 }}>
+      <ToneText tone={result.tone} styles={styles} theme={theme}>{result.text}</ToneText>
+      {result.managerId !== null && navigation?.openAgent !== undefined ? (
+        <Button
+          label="Open the Beads Manager"
+          kind="secondary"
+          onPress={() => navigation.openAgent({ agentId: result.managerId! })}
+          style={{ alignSelf: "flex-start", borderRadius: 0, paddingVertical: 8 }}
+          styles={styles}
+        />
+      ) : null}
+    </View>
+  );
+}
+
+/** The confirmation an action asks first: what it does, then No, cancel and the confirm. */
+function ActionConfirm({ bead, state, styles, theme }: { bead: BeadRow; state: BeadActionState; styles: Styles; theme: Theme }) {
+  const spec = state.pending === null ? null : actionSpec(state.pending, bead);
+  if (spec === null) return null;
+  return (
+    <View style={{ gap: 8, borderWidth: 1, borderColor: theme.colors.border, padding: 14 }}>
+      <Text style={[styles.body, { color: theme.colors.foreground, fontWeight: "600" }]}>{spec.title}</Text>
+      <Text style={styles.body}>{spec.body}</Text>
+      <View style={styles.chipRow}>
+        {/* Cancel first: the safe choice is the one under the thumb. */}
+        <Button label="No, cancel" kind="secondary" onPress={() => state.setPending(null)} style={{ borderRadius: 0, paddingVertical: 8 }} styles={styles} />
+        <Button
+          label={state.busy ? "Sending…" : spec.confirmLabel}
+          kind={spec.danger ? "danger" : "primary"}
+          disabled={state.busy}
+          onPress={() => {
+            void state.confirm(state.pending!);
+          }}
+          style={{ borderRadius: 0, paddingVertical: 8 }}
+          styles={styles}
+        />
+      </View>
+    </View>
+  );
+}
+
+/** A bead's detail and actions in the chat's bead panel (opened in place under its row). */
+export function BeadDetailPanel({
+  workspaceId,
+  bead,
+  styles,
+  theme,
+  navigation,
+}: {
+  workspaceId: string;
+  bead: BeadRow;
+  styles: Styles;
+  theme: Theme;
+  navigation?: PluginSurfaceProps["navigation"];
+}) {
+  const state = useBeadAction(workspaceId, bead);
+  const { detail } = state;
   const full = detail.data?.bead;
   const now = new Date();
   const work = workSummary(bead, now);
-  const spec = pending === null ? null : actionSpec(pending, bead);
   return (
     <View style={{ gap: 6, paddingTop: 6 }}>
       {detail.isPending ? <ActivityIndicator color={styles.spinner.color} /> : null}
@@ -185,18 +242,7 @@ export function BeadDetailPanel({
               <Chip key={label} badge={{ text: label, tone: "info" }} styles={styles} theme={theme} />
             ))}
           </View>
-          <Text style={styles.body}>
-            {[
-              full.createdAt === null ? null : `created ${localTimeText(new Date(full.createdAt), now)}`,
-              full.updatedAt === null ? null : `updated ${localTimeText(new Date(full.updatedAt), now)}`,
-              full.closedAt === null ? null : `closed ${localTimeText(new Date(full.closedAt), now)}`,
-              full.parentId === null ? null : `parent ${full.parentId}`,
-              full.blockedBy.length === 0 ? null : `blocked by ${full.blockedBy.join(", ")}`,
-              full.children.length === 0 ? null : `${full.children.length} child bead(s)`,
-            ]
-              .filter((part) => part !== null)
-              .join(" · ")}
-          </Text>
+          <Text style={styles.body}>{timesLine(full, now)}</Text>
           {work === null ? null : (
             <View style={[styles.card, { gap: 4 }]}>
               <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
@@ -209,13 +255,7 @@ export function BeadDetailPanel({
                 </Text>
               ))}
               {work.agentId !== null && navigation?.openAgent !== undefined ? (
-                <Button
-                  label="Open the Worker"
-                  kind="secondary"
-                  onPress={() => navigation.openAgent({ agentId: work.agentId! })}
-                  style={{ alignSelf: "flex-start" }}
-                  styles={styles}
-                />
+                <Button label="Open the Worker" kind="secondary" onPress={() => navigation.openAgent({ agentId: work.agentId! })} style={{ alignSelf: "flex-start" }} styles={styles} />
               ) : null}
             </View>
           )}
@@ -229,80 +269,223 @@ export function BeadDetailPanel({
           )}
         </>
       )}
-
-      {result === null ? null : (
-        <View style={{ gap: 4 }}>
-          <ToneText tone={result.tone} styles={styles} theme={theme}>{result.text}</ToneText>
-          {result.managerId !== null && navigation?.openAgent !== undefined ? (
-            <Button
-              label="Open the Beads Manager"
-              kind="secondary"
-              onPress={() => navigation.openAgent({ agentId: result.managerId! })}
-              style={{ alignSelf: "flex-start" }}
-              styles={styles}
-            />
-          ) : null}
-        </View>
-      )}
-
-      {spec === null ? (
+      <ActionResultLine result={state.result} navigation={navigation} styles={styles} theme={theme} />
+      {state.pending === null ? (
         <View style={styles.chipRow}>
           {actionsFor(bead).map((action) => {
             const label = actionSpec(action, bead);
             return (
+              <Button key={action} label={label.label} kind={label.danger ? "danger" : "primary"} disabled={state.busy} onPress={() => state.ask(action)} styles={styles} />
+            );
+          })}
+        </View>
+      ) : (
+        <ActionConfirm bead={bead} state={state} styles={styles} theme={theme} />
+      )}
+    </View>
+  );
+}
+
+/** Created, updated, closed, blocked by, children: one muted line. */
+function timesLine(full: BeadRow & { blockedBy: string[]; children: string[] }, now: Date): string {
+  return [
+    full.createdAt === null ? null : `created ${localTimeText(new Date(full.createdAt), now)}`,
+    full.updatedAt === null ? null : `updated ${localTimeText(new Date(full.updatedAt), now)}`,
+    full.closedAt === null ? null : `closed ${localTimeText(new Date(full.closedAt), now)}`,
+    full.parentId === null ? null : `parent ${full.parentId}`,
+    full.blockedBy.length === 0 ? null : `blocked by ${full.blockedBy.join(", ")}`,
+    full.children.length === 0 ? null : `${full.children.length} child bead(s)`,
+  ]
+    .filter((part) => part !== null)
+    .join(" · ");
+}
+
+/**
+ * The selected bead beside the board (the artboard's aside): id · type ·
+ * priority, the title, Status / Feature / Parent / Worker, the description,
+ * then Ask Manager to implement, Close… and Delete…, each confirmed first.
+ */
+export function BeadDetailAside({
+  workspaceId,
+  bead,
+  all,
+  styles,
+  theme,
+  navigation,
+}: {
+  workspaceId: string;
+  bead: BeadRow;
+  /** Every bead of the project: an epic's children are counted from them. */
+  all: readonly BeadRow[];
+  styles: Styles;
+  theme: Theme;
+  navigation?: PluginSurfaceProps["navigation"];
+}) {
+  const state = useBeadAction(workspaceId, bead);
+  const { colors } = theme;
+  const full = state.detail.data?.bead;
+  const now = new Date();
+  const work = workSummary(bead, now);
+  const facts = beadFacts(bead, all, now);
+  if (full !== undefined && full.blockedBy.length > 0) facts.push({ key: "Blocked by", value: full.blockedBy.join(", "), mono: true });
+  return (
+    <View style={{ gap: 14 }}>
+      <Text style={{ fontFamily: MONO, fontSize: 12, color: colors.foregroundMuted }} selectable>
+        {beadHeadLine(bead)}
+      </Text>
+      <Text accessibilityRole="header" style={{ fontSize: 17, fontWeight: "600", lineHeight: 24, color: colors.foreground }}>
+        {bead.title ?? "(untitled)"}
+      </Text>
+      <View style={{ gap: 8 }}>
+        {facts.map((fact) => (
+          <View key={fact.key} style={{ flexDirection: "row", gap: 12 }}>
+            <Text style={{ width: 90, fontSize: 13, color: colors.foregroundMuted }}>{fact.key}</Text>
+            <Text style={{ flex: 1, minWidth: 0, color: colors.foreground, ...(fact.mono ? { fontFamily: MONO, fontSize: 12 } : { fontSize: 13 }) }} selectable={fact.mono}>
+              {fact.value}
+            </Text>
+          </View>
+        ))}
+      </View>
+      {work !== null && work.agentId !== null && navigation?.openAgent !== undefined ? (
+        <Pressable accessibilityRole="button" accessibilityLabel="Open the Worker of this bead" onPress={() => navigation.openAgent({ agentId: work.agentId! })} style={{ alignSelf: "flex-start" }}>
+          <Text style={{ fontSize: 13, color: colors.foregroundMuted }}>Open the Worker ▸</Text>
+        </Pressable>
+      ) : null}
+      <View style={{ borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 12, gap: 8 }}>
+        {state.detail.isPending ? <ActivityIndicator color={styles.spinner.color} /> : null}
+        {state.detail.isError ? <ToneText tone="danger" styles={styles} theme={theme}>{errorMessageOf(state.detail.error)}</ToneText> : null}
+        {full === undefined ? null : full.description === null ? (
+          <Text style={{ fontSize: 13, color: colors.foregroundMuted }}>(no description)</Text>
+        ) : (
+          <MarkdownView source={full.description} theme={theme} compact />
+        )}
+        {full === undefined || full.closeReason === null ? null : (
+          <Text style={{ fontSize: 13, color: colors.foreground }} selectable>{`Close reason: ${full.closeReason}`}</Text>
+        )}
+        {full === undefined ? null : <Text style={{ fontSize: 12, color: colors.foregroundMuted }}>{timesLine(full, now)}</Text>}
+      </View>
+      <ActionResultLine result={state.result} navigation={navigation} styles={styles} theme={theme} />
+      {state.pending === null ? (
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 4 }}>
+          {actionsFor(bead).map((action) => {
+            const spec = actionSpec(action, bead);
+            return (
               <Button
                 key={action}
-                label={label.label}
-                kind={label.danger ? "danger" : "primary"}
-                disabled={busy}
-                onPress={() => {
-                  setResult(null);
-                  setPending(action);
-                }}
+                label={spec.label}
+                kind={action === "implement" ? "primary" : "secondary"}
+                disabled={state.busy}
+                onPress={() => state.ask(action)}
+                style={{ borderRadius: 0, paddingVertical: 8, paddingHorizontal: action === "implement" ? 14 : 12 }}
+                textStyle={{ fontSize: 13, ...(spec.danger ? { color: colors.statusDanger } : {}) }}
                 styles={styles}
               />
             );
           })}
         </View>
       ) : (
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>{spec.title}</Text>
-          <Text style={styles.body}>{spec.body}</Text>
-          <View style={styles.chipRow}>
-            {/* Cancel first: the safe choice is the one under the thumb. */}
-            <Button label="No, cancel" kind="secondary" onPress={() => setPending(null)} styles={styles} />
-            <Button
-              label={busy ? "Sending…" : spec.confirmLabel}
-              kind={spec.danger ? "danger" : "primary"}
-              disabled={busy}
-              onPress={() => {
-                void confirm(pending!);
-              }}
-              styles={styles}
-            />
-          </View>
-        </View>
+        <ActionConfirm bead={bead} state={state} styles={styles} theme={theme} />
       )}
+      <Text style={{ fontSize: 12, color: colors.foregroundMuted }}>{BEAD_ACTIONS_NOTE}</Text>
     </View>
   );
 }
 
+/** One bead on the board: id, title, meta; the selected one on surface2 with the 3px accent bar. Hook-free. */
+export function BoardBeadRow({ bead, meta, selected, onSelect, theme }: { bead: BeadRow; meta: string; selected: boolean; onSelect: () => void; theme: Theme }) {
+  const { colors } = theme;
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityState={{ selected }}
+      accessibilityLabel={`${bead.id}: ${bead.title ?? "untitled"}. ${meta}`}
+      onPress={onSelect}
+      style={{
+        gap: 4,
+        paddingVertical: 12,
+        paddingHorizontal: 16,
+        borderBottomWidth: 1,
+        borderBottomColor: colors.border,
+        backgroundColor: selected ? colors.surface2 : "transparent",
+      }}
+    >
+      {selected ? <View style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, backgroundColor: colors.accent }} /> : null}
+      <Text style={{ fontFamily: MONO, fontSize: 11, color: colors.foregroundMuted }} numberOfLines={1}>
+        {bead.id}
+      </Text>
+      <Text style={{ fontSize: 13, lineHeight: 18, color: colors.foreground }}>{bead.title ?? "(untitled)"}</Text>
+      <Text style={{ fontSize: 12, color: colors.foregroundMuted }} numberOfLines={1}>
+        {meta}
+      </Text>
+    </Pressable>
+  );
+}
+
+/** One column: its uppercase title and mono count, then its beads, or "Nothing here". Hook-free. */
+export function BoardColumnView({ column, renderBead, last, theme }: { column: BoardColumn; renderBead: (bead: BeadRow) => ReactNode; last: boolean; theme: Theme }) {
+  const { colors } = theme;
+  return (
+    <View style={{ flex: 1, minWidth: 0, borderRightWidth: last ? 0 : 1, borderRightColor: colors.border }}>
+      <View accessibilityRole="header" style={{ flexDirection: "row", gap: 8, paddingVertical: 14, paddingHorizontal: 16, borderBottomWidth: 1, borderBottomColor: colors.border }}>
+        <Text style={{ fontSize: 12, fontWeight: "500", textTransform: "uppercase", letterSpacing: 0.72, color: colors.foregroundMuted }}>{column.title}</Text>
+        <Text style={{ fontFamily: MONO, fontSize: 12, color: colors.foreground }}>{String(column.total)}</Text>
+      </View>
+      {column.beads.map(renderBead)}
+      {column.total === 0 ? <Text style={{ paddingVertical: 14, paddingHorizontal: 16, fontSize: 13, color: colors.foregroundMuted }}>Nothing here</Text> : null}
+      {column.hidden > 0 ? (
+        <Text style={{ paddingVertical: 10, paddingHorizontal: 16, fontSize: 12, color: colors.foregroundMuted }}>{`${column.hidden} more not shown`}</Text>
+      ) : null}
+    </View>
+  );
+}
+
+/** Show closed (N): a square box, filled with the accent and ticked while closed beads show. Hook-free. */
+export function ShowClosedToggle({ on, count, onToggle, theme }: { on: boolean; count: number; onToggle: () => void; theme: Theme }) {
+  const { colors } = theme;
+  return (
+    <Pressable
+      accessibilityRole="checkbox"
+      accessibilityState={{ checked: on }}
+      accessibilityLabel={`Show closed beads (${count})`}
+      onPress={onToggle}
+      style={{ flexDirection: "row", alignItems: "center", gap: 8 }}
+    >
+      <View
+        style={{
+          width: 14,
+          height: 14,
+          borderWidth: 1,
+          borderColor: on ? colors.accent : colors.border,
+          backgroundColor: on ? colors.accent : "transparent",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        {on ? <Text style={{ fontSize: 10, lineHeight: 12, color: colors.accentForeground }}>✓</Text> : null}
+      </View>
+      <Text style={{ fontSize: 13, color: colors.foregroundMuted }}>{`Show closed (${count})`}</Text>
+    </Pressable>
+  );
+}
+
+/** The feature filter's key for "every feature". Not a label: labels are never empty. */
+const ALL_FEATURES = "";
+
 export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceLabel, onBack, backLabel, status }: WorkspaceScreenProps) {
   const styles = useMemo(() => dashboardStyles(theme, layout.compact), [theme, layout.compact]);
+  const { colors } = theme;
+  const compact = layout.compact;
   const listBeads = useRpc(beadsListRpc);
   const [filter, setFilter] = useState<BeadFilter>(EMPTY_FILTER);
-  const [openId, setOpenId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>("updated");
   const [descending, setDescending] = useState(true);
   const [showLabels, setShowLabels] = useState(false);
-  // The filters and the sort sit behind one button, so the board comes first.
+  // The other filters and the sort sit behind Filter · Sort, so the board comes first.
   const [showFilters, setShowFilters] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(new Set());
-  const [featuresExpanded, setFeaturesExpanded] = useState(false);
-  // The board's own two pieces of state: how wide the list area measured, and
-  // which column a narrow screen is showing.
-  const [boardWidth, setBoardWidth] = useState<number | null>(null);
-  const [openBucket, setOpenBucket] = useState<StatusBucket | null>(null);
+  // Which column a phone is showing.
+  const [openBucket, setOpenBucket] = useState<BoardBucket | null>(null);
   const beads = useQuery({
     queryKey: ["paseo-bm", "beads-list", workspaceId],
     queryFn: () => listBeads({ workspaceId }),
@@ -310,89 +493,104 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
 
   const rows = beads.data?.beads ?? [];
   const facets = useMemo(() => facetsOf(rows, filter), [rows, filter]);
-  // The features stay in sight above the board (the mockup's feature row); the other label groups fold.
+  // The features are the segmented control above the board; the other label groups fold.
   const features = facets.labelGroups.find((group) => group.category === "feature");
   const labelGroups = facets.labelGroups.filter((group) => group.category !== "feature");
+  const featureLabels = new Set(features?.values.map((entry) => entry.value) ?? []);
+  const feature = [...filter.labels].find((label) => label.startsWith("feature:")) ?? ALL_FEATURES;
+  const pickFeature = (key: string) => {
+    const others = [...filter.labels].filter((label) => !label.startsWith("feature:"));
+    setFilter({ ...filter, labels: new Set(key === ALL_FEATURES ? others : [...others, key]) });
+  };
   const shown = useMemo(() => sortBeads(filterBeads(rows, filter), sortKey, descending), [rows, filter, sortKey, descending]);
-  // Closed beads are hidden by default; the eye button shows them for the rest of the app session (REQ-069c).
+  // Closed beads are hidden by default; Show closed shows them for the rest of the app session (REQ-069c).
   const showClosed = useSyncExternalStore(closedBeadsVisibility.subscribe, closedBeadsVisibility.get, closedBeadsVisibility.get);
-  const board = useMemo(() => kanbanColumns(shown, { showClosed }), [shown, showClosed]);
-  const active = activeFilters(filter);
-  // How many filters are on, the search included: said on the folded Filter button.
+  const board = useMemo(() => boardColumns(shown, { showClosed }), [shown, showClosed]);
+  const active = activeFilters(filter).filter((entry) => !(entry.facet === "labels" && featureLabels.has(entry.value)));
+  // How many filters are on, the search included: said on Filter · Sort.
   const filtersOn = active.length + (filter.text.trim() === "" ? 0 : 1);
   const overview = beads.data === undefined ? null : beadsOverview(rows, beads.data.stats, new Date());
-  const shape = kanbanLayout(boardWidth, layout.compact, board.columns.length);
-  const bucket = visibleKanbanBucket(board.columns, openBucket);
-  const shownColumns = shape.mode === "tabs" ? board.columns.filter((column) => column.bucket === bucket) : board.columns;
-  // Done / total at a glance, counted like the Progress card (Q11).
   const done = overview === null ? null : doneText(overview.progress);
   const now = new Date();
+  // The detail shows the chosen bead while it is on the board, else the first bead of the first column that has one.
+  const onBoard = board.columns.flatMap((column) => column.beads);
+  const selected = onBoard.find((bead) => bead.id === selectedId) ?? onBoard[0] ?? null;
+  const phoneBucket = openBucket !== null && board.columns.some((column) => column.bucket === openBucket)
+    ? openBucket
+    : (board.columns.find((column) => column.total > 0) ?? board.columns[0])?.bucket ?? "in_progress";
+  const columns = compact ? board.columns.filter((column) => column.bucket === phoneBucket) : board.columns;
+  const pad = compact ? 16 : 32;
+
+  const renderBead = (bead: BeadRow) => (
+    <BoardBeadRow
+      key={bead.id}
+      bead={bead}
+      meta={beadRowMeta(bead, rows, now)}
+      selected={selected?.id === bead.id}
+      onSelect={() => setSelectedId(bead.id)}
+      theme={theme}
+    />
+  );
+  const detail =
+    selected === null ? null : (
+      <BeadDetailAside key={selected.id} workspaceId={workspaceId} bead={selected} all={rows} styles={styles} theme={theme} navigation={navigation} />
+    );
 
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
-      <WorkspaceScreenHeader
-        title={workspaceLabel === undefined ? null : `Beads · ${workspaceLabel}`}
-        onBack={onBack}
-        backLabel={backLabel ?? "Back"}
-        status={status}
-        styles={styles}
-        right={
-          <>
-            {done === null ? null : (
-              <Text style={styles.body} accessibilityLabel={done.label}>
-                {done.text}
-              </Text>
-            )}
-            <Button label="Refresh" kind="secondary" accessibilityLabel="Read the beads again" onPress={() => void beads.refetch()} styles={styles} />
-          </>
-        }
-      />
+    <View style={{ flex: 1, backgroundColor: colors.surface0 }}>
+      {workspaceLabel === undefined && onBack === undefined && status === undefined ? null : (
+        <View style={{ paddingHorizontal: pad, paddingTop: 16, gap: 8 }}>
+          <WorkspaceScreenHeader
+            title={workspaceLabel === undefined ? null : `Beads · ${workspaceLabel}`}
+            onBack={onBack}
+            backLabel={backLabel ?? "Back"}
+            status={status}
+            styles={styles}
+            right={null}
+          />
+        </View>
+      )}
 
-      {beads.isPending ? <ActivityIndicator color={styles.spinner.color} /> : null}
-      {beads.isError ? (
-        <ToneText tone="danger" styles={styles} theme={theme}>{errorMessageOf(beads.error)}</ToneText>
-      ) : null}
-
-      {/* Board header: the count, the filters, and closed beads behind the eye
-          (delta 20260925 §3.1; delta 20260918e §4.4 for the eye) */}
-      <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-        <Text style={[styles.sectionTitle, { flex: 1 }]}>{`${board.visible} of ${rows.length} beads`}</Text>
-        <Button
-          label={`Filter${filtersOn > 0 ? ` (${filtersOn})` : ""} ${showFilters ? "▾" : "▸"}`}
-          kind="secondary"
+      {/* The filter bar: features, Show closed, Filter · Sort (delta 20260925 §3.1; the artboard's bar). */}
+      <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 12, paddingVertical: 14, paddingHorizontal: pad, borderBottomWidth: 1, borderBottomColor: colors.border }}>
+        {features === undefined ? null : (
+          <Segmented
+            segments={[
+              { key: ALL_FEATURES, label: "All", count: rows.length, accessibilityLabel: `Every feature, ${rows.length} beads` },
+              ...features.values.map((entry) => ({
+                key: entry.value,
+                label: entry.value.slice("feature:".length),
+                count: entry.count,
+                accessibilityLabel: `Feature ${entry.value.slice("feature:".length)}, ${entry.count} beads`,
+              })),
+            ]}
+            selected={feature}
+            onSelect={pickFeature}
+            theme={theme}
+          />
+        )}
+        <View style={{ flex: 1 }} />
+        {done === null ? null : (
+          <Text style={{ fontSize: 13, color: colors.foregroundMuted }} accessibilityLabel={done.label}>
+            {done.text}
+          </Text>
+        )}
+        <ShowClosedToggle on={showClosed} count={board.closed} onToggle={() => closedBeadsVisibility.set(!showClosed)} theme={theme} />
+        <Pressable
+          accessibilityRole="button"
           accessibilityLabel={`${showFilters ? "Hide" : "Show"} the filters and the sort${filtersOn > 0 ? `, ${filtersOn} on` : ""}`}
           accessibilityState={{ expanded: showFilters }}
           onPress={() => setShowFilters(!showFilters)}
-          styles={styles}
-        />
-        <Pressable
-          accessibilityRole="button"
-          accessibilityState={{ selected: showClosed }}
-          accessibilityLabel={`${showClosed ? "Hide" : "Show"} closed beads (${board.closed})`}
-          onPress={() => closedBeadsVisibility.set(!showClosed)}
-          style={[styles.secondaryButton, { flexDirection: "row", alignItems: "center", gap: 6 }]}
+          style={{ flexDirection: "row", alignItems: "center", gap: 6, borderWidth: 1, borderColor: colors.border, paddingVertical: 6, paddingHorizontal: 12 }}
         >
-          <Icon name={showClosed ? "Eye" : "EyeOff"} size={16} color={theme.colors.foreground} />
-          <Text style={styles.secondaryButtonText}>{`${showClosed ? "Hide" : "Show"} closed (${board.closed})`}</Text>
+          <Icon name="ListFilter" size={14} color={colors.foreground} />
+          <Text style={{ fontSize: 13, color: colors.foreground }}>{`Filter · Sort${filtersOn > 0 ? ` (${filtersOn})` : ""}`}</Text>
         </Pressable>
       </View>
 
-      {features === undefined ? null : (
-        <FacetRow
-          title="Feature"
-          values={features.values}
-          selected={filter.labels}
-          onToggle={(value) => setFilter({ ...filter, labels: toggle(filter.labels, value) })}
-          styles={styles}
-          theme={theme}
-          expanded={featuresExpanded}
-          onExpand={() => setFeaturesExpanded(!featuresExpanded)}
-        />
-      )}
-
       {/* The filters in use stay in sight while the panel is folded. */}
       {active.length > 0 ? (
-        <View style={styles.chipRow}>
+        <View style={[styles.chipRow, { paddingHorizontal: pad, paddingTop: 10 }]}>
           {active.map((entry) => (
             <Chip
               key={`${entry.facet}:${entry.value}`}
@@ -410,66 +608,62 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
         </View>
       ) : null}
 
-      {/* Filters and sort, folded behind the Filter button */}
+      {/* Filters and sort, folded behind Filter · Sort */}
       {!showFilters ? null : (
-        <View style={{ gap: 8 }}>
-          <View style={[styles.card, { gap: 8 }]}>
-            <TextInput
-              value={filter.text}
-              onChangeText={(text) => setFilter({ ...filter, text })}
-              placeholder="Search id or title"
-              placeholderTextColor={theme.colors.foregroundMuted}
-              style={[styles.body, { borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS, padding: 8 }]}
-            />
-            <FacetRow
-              title="Status"
-              values={facets.statuses}
-              selected={filter.statuses}
-              onToggle={(value) => setFilter({ ...filter, statuses: toggle(filter.statuses, value) })}
-              styles={styles}
-              theme={theme}
-            />
-            <FacetRow
-              title="Type"
-              values={facets.types}
-              selected={filter.types}
-              onToggle={(value) => setFilter({ ...filter, types: toggle(filter.types, value) })}
-              styles={styles}
-              theme={theme}
-            />
-            <FacetRow
-              title="Priority"
-              values={facets.priorities}
-              selected={filter.priorities}
-              onToggle={(value) => setFilter({ ...filter, priorities: toggle(filter.priorities, value) })}
-              styles={styles}
-              theme={theme}
-            />
-            {labelGroups.length === 0 ? null : (
-              <Pressable accessibilityRole="button" accessibilityState={{ expanded: showLabels }} onPress={() => setShowLabels(!showLabels)}>
-                <Text style={styles.body}>
-                  {`${showLabels ? "▾" : "▸"} Labels · ${labelGroups.map((group) => `${group.category}${group.selected > 0 ? ` (${group.selected})` : ""}`).join(", ")}`}
-                </Text>
-              </Pressable>
-            )}
-            {showLabels
-              ? labelGroups.map((group) => (
-                  <FacetRow
-                    key={group.category}
-                    title={group.category}
-                    values={group.values}
-                    selected={filter.labels}
-                    onToggle={(value) => setFilter({ ...filter, labels: toggle(filter.labels, value) })}
-                    styles={styles}
-                    theme={theme}
-                    expanded={expandedGroups.has(group.category)}
-                    onExpand={() => setExpandedGroups(toggle(expandedGroups, group.category))}
-                  />
-                ))
-              : null}
-          </View>
-
-          {/* Sort */}
+        <View style={{ gap: 10, paddingVertical: 14, paddingHorizontal: pad, borderBottomWidth: 1, borderBottomColor: colors.border, backgroundColor: colors.surface1 }}>
+          <TextInput
+            value={filter.text}
+            onChangeText={(text) => setFilter({ ...filter, text })}
+            placeholder="Search id or title"
+            placeholderTextColor={colors.foregroundMuted}
+            style={[styles.body, { color: colors.foreground, borderWidth: 1, borderColor: colors.border, borderRadius: 0, padding: 8 }]}
+          />
+          <FacetRow
+            title="Status"
+            values={facets.statuses}
+            selected={filter.statuses}
+            onToggle={(value) => setFilter({ ...filter, statuses: toggle(filter.statuses, value) })}
+            styles={styles}
+            theme={theme}
+          />
+          <FacetRow
+            title="Type"
+            values={facets.types}
+            selected={filter.types}
+            onToggle={(value) => setFilter({ ...filter, types: toggle(filter.types, value) })}
+            styles={styles}
+            theme={theme}
+          />
+          <FacetRow
+            title="Priority"
+            values={facets.priorities}
+            selected={filter.priorities}
+            onToggle={(value) => setFilter({ ...filter, priorities: toggle(filter.priorities, value) })}
+            styles={styles}
+            theme={theme}
+          />
+          {labelGroups.length === 0 ? null : (
+            <Pressable accessibilityRole="button" accessibilityState={{ expanded: showLabels }} onPress={() => setShowLabels(!showLabels)}>
+              <Text style={styles.body}>
+                {`${showLabels ? "▾" : "▸"} Labels · ${labelGroups.map((group) => `${group.category}${group.selected > 0 ? ` (${group.selected})` : ""}`).join(", ")}`}
+              </Text>
+            </Pressable>
+          )}
+          {showLabels
+            ? labelGroups.map((group) => (
+                <FacetRow
+                  key={group.category}
+                  title={group.category}
+                  values={group.values}
+                  selected={filter.labels}
+                  onToggle={(value) => setFilter({ ...filter, labels: toggle(filter.labels, value) })}
+                  styles={styles}
+                  theme={theme}
+                  expanded={expandedGroups.has(group.category)}
+                  onExpand={() => setExpandedGroups(toggle(expandedGroups, group.category))}
+                />
+              ))
+            : null}
           <View style={[styles.chipRow, { alignItems: "center" }]}>
             <Text style={styles.body}>Sort</Text>
             {SORT_OPTIONS.map((option) => {
@@ -492,73 +686,59 @@ export function BeadsScreen({ theme, layout, navigation, workspaceId, workspaceL
               );
             })}
           </View>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+            <Pressable accessibilityRole="button" accessibilityLabel="Read the beads again" onPress={() => void beads.refetch()}>
+              <Text style={{ fontSize: 13, color: colors.foregroundMuted }}>Refresh</Text>
+            </Pressable>
+            {beads.data === undefined ? null : (
+              <Text style={{ fontSize: 11, color: colors.foregroundMuted }} selectable>{`Read from ${beads.data.stats.source}`}</Text>
+            )}
+          </View>
         </View>
       )}
 
+      {beads.isPending ? <ActivityIndicator color={styles.spinner.color} style={{ padding: 16 }} /> : null}
+      {beads.isError ? (
+        <View style={{ paddingHorizontal: pad, paddingTop: 12 }}>
+          <ToneText tone="danger" styles={styles} theme={theme}>{errorMessageOf(beads.error)}</ToneText>
+        </View>
+      ) : null}
       {beads.data !== undefined && rows.length === 0 ? (
-        <Text style={styles.body}>This workspace has no beads yet.</Text>
+        <Text style={[styles.body, { paddingHorizontal: pad, paddingTop: 12 }]}>This workspace has no beads yet.</Text>
       ) : null}
       {board.visible === 0 && board.closed > 0 ? (
-        <Text style={styles.body}>{`All ${board.closed} matching beads are closed. Show them with Show closed.`}</Text>
+        <Text style={[styles.body, { paddingHorizontal: pad, paddingTop: 12 }]}>{`All ${board.closed} matching beads are closed. Show them with Show closed.`}</Text>
       ) : null}
-      {/* The width decides the shape: columns side by side when there is room,
-          one column behind a row of status tabs when there is not. */}
-      <View onLayout={(event) => setBoardWidth(event.nativeEvent.layout.width)} style={{ gap: layout.compact ? 6 : 8 }}>
-        {shape.mode === "tabs" ? (
-          <StatusTabs
-            tabs={board.columns.map((column) => ({ key: column.bucket, label: column.label, count: column.total }))}
-            selected={bucket}
-            onSelect={(key) => setOpenBucket(key as StatusBucket)}
-            styles={styles}
-          />
-        ) : null}
-        <KanbanBoard
-          columns={shownColumns}
-          perRow={shape.perRow}
-          gap={layout.compact ? 6 : 8}
-          renderBead={renderRow}
-          styles={styles}
-        />
-      </View>
-      {beads.data === undefined ? null : (
-        <Text style={[styles.body, { fontSize: 11 }]} selectable>{`Read from ${beads.data.stats.source}`}</Text>
-      )}
-    </ScrollView>
-  );
 
-  function renderRow(bead: BeadRow) {
-    const open = openId === bead.id;
-    const work = workSummary(bead, now);
-    return (
-      <BeadRowCard
-        key={bead.id}
-        bead={bead}
-        open={open}
-        onToggle={() => setOpenId(open ? null : bead.id)}
-        styles={styles}
-        theme={theme}
-        meta={
-          <>
-            <View style={{ flexDirection: "row", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 2 }}>
-              <Text style={[styles.body, { fontSize: 12 }]} selectable numberOfLines={1}>
-                {bead.id}
-              </Text>
-              <View style={{ flex: 1 }} />
-              <Chip badge={{ text: `${priorityLabel(bead.priority)} · ${bead.issueType}`, tone: "muted" }} styles={styles} theme={theme} />
-              <Chip badge={statusBadge(bead)} styles={styles} theme={theme} />
-            </View>
-            {work === null ? null : (
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4 }}>
-                <RoleMark kind="worker" theme={theme} size={16} />
-                <ToneText tone={work.tone} style={{ flex: 1 }} numberOfLines={1} styles={styles} theme={theme}>
-                  {work.headline}
-                </ToneText>
-              </View>
-            )}
-          </>
-        }
-        detail={<BeadDetailPanel workspaceId={workspaceId} bead={bead} styles={styles} theme={theme} navigation={navigation} />}
-      />
-    );
-  }
+      {compact ? (
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 32 }}>
+          <View style={{ paddingHorizontal: pad, paddingTop: 12 }}>
+            <Segmented
+              segments={board.columns.map((column) => ({ key: column.bucket, label: column.title, count: column.total }))}
+              selected={phoneBucket}
+              onSelect={(key) => setOpenBucket(key as BoardBucket)}
+              theme={theme}
+            />
+          </View>
+          <View style={{ flexDirection: "row", marginTop: 12 }}>
+            {columns.map((column) => (
+              <BoardColumnView key={column.bucket} column={column} renderBead={renderBead} last theme={theme} />
+            ))}
+          </View>
+          {detail === null ? null : <View style={{ padding: 16, backgroundColor: colors.surface1 }}>{detail}</View>}
+        </ScrollView>
+      ) : (
+        <View style={{ flex: 1, flexDirection: "row", minHeight: 0 }}>
+          <ScrollView style={{ flex: 1, borderRightWidth: 1, borderRightColor: colors.border }} contentContainerStyle={{ flexDirection: "row", minHeight: "100%" }}>
+            {columns.map((column, index) => (
+              <BoardColumnView key={column.bucket} column={column} renderBead={renderBead} last={index === columns.length - 1} theme={theme} />
+            ))}
+          </ScrollView>
+          <ScrollView style={{ width: BEAD_DETAIL_WIDTH, flexGrow: 0, backgroundColor: colors.surface1 }} contentContainerStyle={{ paddingVertical: 20, paddingHorizontal: 24 }}>
+            {detail ?? <Text style={{ fontSize: 13, color: colors.foregroundMuted }}>Choose a bead to see it here.</Text>}
+          </ScrollView>
+        </View>
+      )}
+    </View>
+  );
 }

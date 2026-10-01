@@ -4,9 +4,10 @@ import {
   AUTONOMY_MEANING,
   BOUNDARY_LABEL,
   BOUNDARY_MEANING,
-  CLASS_LABELS,
   CUSTOM_SUMMARY,
   DECIDER_LEGEND,
+  DECIDER_LEGEND_ENTRIES,
+  LEVEL_CLASS_LABELS,
   LEVEL_SUMMARIES,
   autonomyLevelView,
   autonomyProjects,
@@ -105,8 +106,12 @@ describe("the level control of one project (ADR-025, change-014 outcome 5)", () 
     const radios = pressables([group]);
     expect(radios.map((radio) => radio.props.accessibilityRole)).toEqual(["radio", "radio", "radio", "radio", "radio"]);
     expect(radios.map((radio) => radio.props.accessibilityLabel)).toEqual(LEVELS.map((level) => `Level ${level.level}: ${level.name}`));
-    // The selected stop is the primary button, the others secondary.
-    expect(radios.map((radio) => (radio.props.style as { name: string }).name)).toEqual(["button", "secondaryButton", "secondaryButton", "secondaryButton", "secondaryButton"]);
+    // Each stop is a numbered square knob over its name (the approved mockup); the selected knob is filled with the accent.
+    expect(radios.map((radio) => texts([radio]))).toEqual(LEVELS.map((level) => [String(level.level), level.name]));
+    const knobFill = (radio: (typeof radios)[number]) => (allNodes([radio]).find((node) => node.type === "View")!.props.style as { backgroundColor: string }).backgroundColor;
+    expect(radios.map(knobFill)).toEqual(["#accent", "#surface1", "#surface1", "#surface1", "#surface1"]);
+    expect(shown.stops.map((stop) => stop.place)).toEqual(["selected", "above", "above", "above", "above"]);
+    expect(shown.fill).toBe(0);
     expect(radios[0]!.props.accessibilityState).toEqual({ selected: true, checked: true, disabled: true });
     expect(AUTONOMY_MEANING).toMatch(/Your overrides are recorded; they never change the level\.$/);
   });
@@ -134,10 +139,19 @@ describe("the level control of one project (ADR-025, change-014 outcome 5)", () 
     expect(LEVEL_SUMMARIES[3]).toBe("Turbo. As Cruise, plus cost, release and data. Security still waits for your approval.");
 
     const nodes = draw(view(atLevel(2)));
-    expect(texts(nodes)).toEqual(expect.arrayContaining([LEVEL_SUMMARIES[2], DECIDER_LEGEND, ...Object.values(CLASS_LABELS)]));
+    expect(texts(nodes)).toEqual(expect.arrayContaining([LEVEL_SUMMARIES[2], ...DECIDER_LEGEND_ENTRIES.map((entry) => entry.text), ...Object.values(LEVEL_CLASS_LABELS)]));
+    expect(DECIDER_LEGEND).toBe("Orchestrator decides, you can override · Orchestrator proposes, you approve · You decide");
+    // Below the level shown the knobs are outlined in the accent; the track is filled half way at Cruise.
+    const cruise = view(atLevel(2));
+    expect(cruise.stops.map((stop) => stop.place)).toEqual(["below", "below", "selected", "above", "above"]);
+    expect(cruise.fill).toBe(0.5);
+    // Who decides is coloured: the Orchestrator in the accent, your approval in full contrast, you muted.
+    const who = (text: string) => allNodes(nodes).find((node) => node.type === "Text" && texts([node])[0] === text)!;
+    expect(JSON.stringify(who("Orchestrator").props.style)).toContain("#accent");
+    expect(JSON.stringify(who("You approve").props.style)).toContain("#foreground");
     // Three columns: each class a third of the row.
     const cells = allNodes(nodes).filter((node) => node.type === "View" && typeof node.props.accessibilityLabel === "string" && String(node.props.accessibilityLabel).includes(": "));
-    expect(cells.map((cell) => cell.props.accessibilityLabel).slice(0, 2)).toEqual(["Reversible technical: Orchestrator", "Preference: Orchestrator"]);
+    expect(cells.map((cell) => cell.props.accessibilityLabel).slice(0, 2)).toEqual(["Technical: Orchestrator", "Preference: Orchestrator"]);
     expect(cells.every((cell) => (cell.props.style as { width: string }).width === "33.33%")).toBe(true);
   });
 
@@ -276,14 +290,15 @@ describe("the action boundary switch (change-010 C2–C4)", () => {
     const onConfirm = vi.fn();
     const onCancel = vi.fn();
     const closed = renderTree(BoundarySwitch({ view: boundaryView(EMPTY_AUTONOMY_POLICY, PROJECT, false), busy: false, onToggle, onConfirm: noop, onCancel: noop, styles, theme }));
-    expect(texts(closed)).toEqual([BOUNDARY_LABEL, BOUNDARY_MEANING, "Off"]);
+    expect(texts(closed)).toEqual([BOUNDARY_LABEL, BOUNDARY_MEANING]);
     const [toggle] = pressables(closed);
     expect(toggle!.props.accessibilityRole).toBe("switch");
     expect(toggle!.props.accessibilityState).toEqual({ checked: false, disabled: false });
     (toggle!.props.onPress as () => void)();
     expect(onToggle).toHaveBeenCalledOnce();
     const open = renderTree(BoundarySwitch({ view: boundaryView(EMPTY_AUTONOMY_POLICY, PROJECT, false, true), busy: false, onToggle, onConfirm, onCancel, styles, theme }));
-    expect(pressables(open).map((button) => texts([button])[0])).toEqual(["Off", "Cancel", "Turn on"]);
+    expect(pressables(open).map((button) => texts([button])[0])).toEqual([undefined, "Cancel", "Turn on"]);
+    expect(pressables(open)[0]!.props.accessibilityRole).toBe("switch");
     expect(pressables(open)[0]!.props.disabled).toBe(true);
     (pressables(open)[1]!.props.onPress as () => void)();
     expect(onCancel).toHaveBeenCalledOnce();
@@ -332,10 +347,10 @@ describe("the projects and their tabs", () => {
   it("gives each tab its project's level, Custom included", () => {
     const policy = withCell(withChallenger(atLevel(2), "ws-2", true), "ws-2", "security", { mode: "delegate", at: AT });
     expect(autonomyTabs(named, policy)).toEqual([
-      { key: "ws-1", label: "paseo-bm · Cruise", hint: "level Cruise" },
-      { key: "ws-2", label: "shop (closed) · Custom", hint: "level Custom" },
+      { key: "ws-1", label: "paseo-bm", suffix: "Cruise", accessibilityLabel: "paseo-bm, level Cruise" },
+      { key: "ws-2", label: "shop (closed)", suffix: "Custom", accessibilityLabel: "shop (closed), level Custom" },
     ]);
-    expect(autonomyTabs(named, EMPTY_AUTONOMY_POLICY).map((tab) => tab.label)).toEqual(["paseo-bm · Hands-on", "shop (closed) · Hands-on"]);
+    expect(autonomyTabs(named, EMPTY_AUTONOMY_POLICY).map((tab) => tab.suffix)).toEqual(["Hands-on", "Hands-on"]);
   });
 });
 

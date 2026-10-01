@@ -35,7 +35,7 @@ export type SettingsGroupKey = "agents" | "precedents" | "data";
  * opens today.
  */
 export const SETTINGS_GROUPS: ReadonlyArray<{ key: SettingsGroupKey; title: string; hint: string; opens: boolean }> = [
-  { key: "agents", title: "Agents", hint: "roles, models, fallbacks, sign-in and agent tools", opens: true },
+  { key: "agents", title: "Agents", hint: "Manager, Worker, Reviewer, Orchestrator — provider, model, mode", opens: true },
   { key: "precedents", title: "Precedents", hint: "your standing answers", opens: true },
   { key: "data", title: "Data", hint: "data folder, trace storage, remove settings", opens: true },
 ];
@@ -210,8 +210,10 @@ export function dataGroupState(
 // ---------------------------------------------------------------------------
 
 /** What the advice cadence means, in one line. */
-export const ADVICE_MEANING =
-  "After this many finished requests in a project, the Orchestrator reviews its figures and asks you about anything worth changing. 0 turns advice off.";
+export const ADVICE_MEANING = "0 turns advice off. Advice comes to the Inbox as a proposal you accept or not.";
+
+/** The advice field's words, around its value (the approved mockup). */
+export const ADVICE_FIELD = { before: "Review the workflow every", after: "finished requests" } as const;
 
 /** The cadence in words. */
 export function adviceCadenceText(everyFinished: number): string {
@@ -251,6 +253,10 @@ export interface AdviceCadenceView {
   meaning: string;
   /** The value being edited, in words. */
   valueText: string;
+  /** The value as its field shows it. */
+  inputText: string;
+  /** What a screen reader says for the field. */
+  accessibilityLabel: string;
   decrease: CadenceButton;
   increase: CadenceButton;
   /** Enabled while the edited value differs from the stored one. */
@@ -268,6 +274,8 @@ export function adviceCadenceView(input: { stored: number; draft: number; defaul
     title: "Orchestrator advice",
     meaning: ADVICE_MEANING,
     valueText: adviceCadenceText(draft),
+    inputText: String(draft),
+    accessibilityLabel: `Advice cadence: ${adviceCadenceText(draft)}`,
     decrease: { enabled: !saving && lower !== draft, label: "−", accessibilityLabel: `Advice cadence: lower to ${spoken(lower)}` },
     increase: { enabled: !saving && higher !== draft, label: "+", accessibilityLabel: `Advice cadence: raise to ${spoken(higher)}` },
     save: {
@@ -289,6 +297,8 @@ export function adviceCadenceView(input: { stored: number; draft: number; defaul
 /** The header of a group: what it shows and what a screen reader says. */
 export interface GroupHeaderView {
   title: string;
+  /** What the group holds, after its title in muted text. */
+  hint: string;
   marker: "▸" | "▾" | null;
   state: GroupState;
   accessibilityLabel: string;
@@ -297,10 +307,11 @@ export interface GroupHeaderView {
 export function groupHeaderView(key: SettingsGroupKey, state: GroupState, expanded: boolean): GroupHeaderView {
   const group = SETTINGS_GROUPS.find((entry) => entry.key === key)!;
   if (!group.opens) {
-    return { title: group.title, marker: null, state, accessibilityLabel: `${group.title}: ${state.text}` };
+    return { title: group.title, hint: group.hint, marker: null, state, accessibilityLabel: `${group.title}: ${state.text}` };
   }
   return {
     title: group.title,
+    hint: group.hint,
     marker: expanded ? "▾" : "▸",
     state,
     accessibilityLabel: `${group.title}, ${group.hint}: ${state.text}. ${expanded ? "Collapse" : "Expand"}.`,

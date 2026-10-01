@@ -44,14 +44,14 @@ import type {
   InsightsWindow,
 } from "../shared/contracts";
 import { decisionKindOf, deliveryKindOf, isAnswerable, policyPredictorOf, realEffects, type Decision, type Effect } from "../shared/decisions";
-import { ago, confidenceSuffix, excerptLine, formatCost, formatTokens, localTimeText, type Bar, type OverviewCard } from "./format";
+import { ago, confidenceSuffix, excerptLine, formatCost, formatTokens, localTimeText, type OverviewCard } from "./format";
 import type { Tone } from "./tone";
 import { agentDots, stageView } from "./orchestrator-model";
 import { timeOrNull } from "../shared/time";
 import { handoffBriefReplaces, holdsHandoffBrief } from "../shared/handoff";
 import { plural, shorten } from "../shared/text";
 import { LEVELS, type AutonomyLevelReading } from "../shared/autonomy";
-import { ROLE_LABELS, WINDOW_LABELS } from "./insights-model";
+import { WINDOW_LABELS, WINDOW_SHORT_LABELS, processCells, roleTokenRows, turnsCell, type RoleTokenRow } from "./insights-model";
 import { DONE_UNVERIFIED_LABEL, checksText, claimCountsText, isShownVerification, verificationDetailLines } from "./verification-view";
 
 /** How often Projects reads its rows and an open project's requests while they show. */
@@ -306,6 +306,8 @@ export interface WorkRowView {
   beads: string | null;
   /** The project's autonomy level by name (`Cruise`, `Custom`); null until `autonomy.policy` answered. */
   level: string | null;
+  /** The Projects list's muted line under the name: `2 active · 1 stalled · Cruise`, or `idle · Hands-on`. */
+  line: string;
   accessibilityLabel: string;
 }
 
@@ -369,6 +371,11 @@ export function workRows(input: {
     const time = working && movedAt !== null ? ago(movedAt, input.now) : null;
     const beads = beadFigure(overview);
     const level = levelNameOf(input.levels, workspace.id);
+    const active = overview === undefined ? agents.filter((agent) => agent.tone === "success").length : runningCount(overview);
+    const stuck = (project?.openSignals ?? []).filter((signal) => signal.signal === "stuck").length;
+    const stalled = project?.state === "stalled" ? Math.max(1, stuck) : stuck;
+    const counts = active === 0 && stalled === 0 ? ["idle"] : [active > 0 ? `${active} active` : null, stalled > 0 ? `${stalled} stalled` : null];
+    const line = [...counts, level].filter((part): part is string => part !== null).join(" · ");
     return {
       workspaceId: workspace.id,
       label: workspace.label,
@@ -379,6 +386,7 @@ export function workRows(input: {
       time,
       beads,
       level,
+      line,
       accessibilityLabel: [
         workspace.label,
         request,
@@ -1042,49 +1050,79 @@ export function agentTokenFigures(
 }
 
 // ---------------------------------------------------------------------------
-// Overview (change-014 outcome 5): the project at a glance — four figures,
-// the tokens read by role, the open requests and a way to all of them. The
-// figures come from `insights.summary` for the project, the requests from the
-// Requests tab's own reads (`traces.list`, `decisions.list`).
+// Overview (change-014 outcome 5; the fidelity pass draws it as the approved
+// Projects artboard): four figures in one strip, the tokens read by role, the
+// requests as a table — the open ones, then the newest finished one, the
+// older ones counted —, and how the work ran. The figures come from
+// `insights.summary` for the project, the requests from the Requests tab's own
+// reads (`traces.list`, `decisions.list`) and, for a stall, the coordinator's
+// facts (`orchestrator.state`).
 // ---------------------------------------------------------------------------
 
 /** How many open requests the Overview lists; the rest are one press away, in Requests. */
 export const OVERVIEW_OPEN_MAX = 3;
-export const OVERVIEW_OPEN_TITLE = "Open requests";
-export const OVERVIEW_NO_OPEN = "No request is open.";
+export const OVERVIEW_OPEN_TITLE = "Requests";
+export const OVERVIEW_NO_OPEN = "No request on record in this project yet.";
 export const OVERVIEW_TOKENS_TITLE = "Tokens by role";
 export const OVERVIEW_TOKENS_NOTE =
   "Context read per turn, summed. Claude counts every model call of a turn, Codex and OpenCode only the last, so roles on different providers are not exactly comparable.";
 export const OVERVIEW_NO_TOKENS = "No turn read any tokens in this period.";
+export const OVERVIEW_PROCESS_TITLE = "How the work ran";
 export const ALL_REQUESTS_LABEL = "All requests ▸";
-
-/** The letter each role's turns are counted under in the Turns figure. */
-const ROLE_LETTERS: Readonly<Record<string, string>> = { manager: "M", worker: "W", reviewer: "R", orchestrator: "O" };
+/** The Requests table's columns, as the mockup heads them. */
+export const OVERVIEW_REQUEST_COLUMNS = ["Request", "Size", "State", "Worker", "Tokens"] as const;
 
 export interface OverviewRequestRow {
   key: string;
   title: string;
-  /** `Needs you` (warning) or `Running` (info). */
+  /** `Large`, or `—` when no size was reported. */
+  size: string;
+  /** `Needs you` (warning), `Stalled` (muted), `Running` (plain), `Finished · verified` (info), … */
   state: { text: string; tone: Tone };
-  /** `Medium · started 2 h ago · 1.2M tokens`. */
-  meta: string;
+  /** The first Worker's short id, `—` for none. */
+  worker: string;
+  /** Tokens of the request (input, cached and output). */
+  tokens: string;
   accessibilityLabel: string;
 }
 
 export interface ProjectOverviewView {
   /** Requests in the window, turns, tokens read, waiting on you — `—` while unknown, never 0. */
   figures: OverviewCard[];
-  tokensByRole: Bar[];
+  /** `· last 30 days, context read per turn`: said after the Tokens by role heading. */
+  tokensScope: string;
+  tokensByRole: RoleTokenRow[];
   /** Said instead of the bars; null when there are bars. */
   tokensEmpty: string | null;
-  /** The newest open requests, at most `OVERVIEW_OPEN_MAX`; null until the requests were read. */
+  /** The open requests (at most `OVERVIEW_OPEN_MAX`) then the newest finished one; null until the requests were read. */
   requests: OverviewRequestRow[] | null;
+  /** `5 older finished requests`, or null. */
+  older: string | null;
   /** `2 more open requests in Requests`, or null. */
   more: string | null;
+  /** How the work ran: reviews, questions reaching you, the Orchestrator's interventions. */
+  process: Array<{ label: string; value: string }>;
 }
 
-function shareText(part: number, whole: number): string {
-  return whole <= 0 ? "—" : `${Math.round((100 * part) / whole)} %`;
+/** A request's state as the table writes it, in the mockup's colours. */
+export function overviewRequestState(request: Pick<RequestSummary, "state" | "verification" | "requestId">, stalledRequestId: string | null): { text: string; tone: Tone } {
+  const open = request.state === "running" || request.state === "waiting_user";
+  if (open && stalledRequestId !== null && request.requestId === stalledRequestId) return { text: "Stalled", tone: "muted" };
+  switch (request.state) {
+    case "waiting_user":
+      return { text: "Needs you", tone: "warning" };
+    case "running":
+      return { text: "Running", tone: "plain" };
+    case "completed":
+      if (!isShownVerification(request.verification)) return { text: "Finished", tone: "info" };
+      return request.verification.unverified ? { text: "Finished · unverified", tone: "warning" } : { text: "Finished · verified", tone: "info" };
+    case "stopped":
+      return { text: "Stopped", tone: "muted" };
+    case "failed":
+      return { text: "Failed", tone: "danger" };
+    default:
+      return { text: "—", tone: "muted" };
+  }
 }
 
 /** The Overview of one project, from what has been read so far (each input undefined until it answered). */
@@ -1093,58 +1131,58 @@ export function projectOverviewView(input: {
   window: InsightsWindow;
   requests: readonly RequestSummary[] | undefined;
   decisions: readonly Decision[] | undefined;
+  /** The request the coordinator saw stall (`orchestrator.state`: the project `stalled`, its current request); null for none. */
+  stalledRequestId?: string | null;
   now: Date;
 }): ProjectOverviewView {
-  const { summary, window, now } = input;
-  const turns = summary === undefined ? null : ROLE_LABELS.reduce((sum, [role]) => sum + summary.turnsByRole[role], 0);
+  const { summary, window } = input;
   const read = summary?.context?.tokensRead;
   const waiting = input.decisions === undefined ? null : input.decisions.filter((decision) => isAnswerable(decision)).length;
+  const turns = turnsCell(summary);
   const figures: OverviewCard[] = [
     {
-      label: `Requests · ${WINDOW_LABELS[window]}`,
+      label: `Requests · ${WINDOW_SHORT_LABELS[window]}`,
       value: summary === undefined ? "—" : String(summary.requests.inWindow),
       hint: summary === undefined ? "" : `${summary.requests.finished} finished`,
     },
-    {
-      label: "Turns",
-      value: turns === null ? "—" : String(turns),
-      hint:
-        summary === undefined
-          ? ""
-          : ROLE_LABELS.filter(([role]) => ROLE_LETTERS[role] !== undefined && summary.turnsByRole[role] > 0)
-              .map(([role]) => `${ROLE_LETTERS[role]} ${summary.turnsByRole[role]}`)
-              .join(" · "),
-    },
+    { label: "Turns", value: turns.value, hint: turns.hint ?? "" },
     { label: "Tokens read", value: read === undefined ? "—" : formatTokens(Math.round(read.total)), hint: read === undefined ? "" : "context read per turn" },
     { label: "Waiting on you", value: waiting === null ? "—" : String(waiting), hint: waiting === null ? "" : waiting === 1 ? "open decision" : "open decisions" },
   ];
-  const tokensByRole: Bar[] =
-    read === undefined
-      ? []
-      : ROLE_LABELS.filter(([role]) => read.byRole[role] > 0).map(([role, label]) => ({
-          label,
-          value: read.byRole[role],
-          display: `${formatTokens(Math.round(read.byRole[role]))} · ${shareText(read.byRole[role], read.total)}`,
-        }));
-  const open = input.requests?.filter((request) => request.state === "running" || request.state === "waiting_user");
+  const tokensByRole = roleTokenRows(summary?.context);
+  const stalled = input.stalledRequestId ?? null;
+  const isOpen = (request: RequestSummary) => request.state === "running" || request.state === "waiting_user";
+  const open = input.requests?.filter(isOpen);
+  const closed = input.requests?.filter((request) => !isOpen(request));
+  const row = (request: RequestSummary): OverviewRequestRow => {
+    const title = shorten(excerptLine(request.excerpt), 120);
+    const state = overviewRequestState(request, stalled);
+    const usage = request.usage;
+    const tokens = formatTokens(usage.inputTokens + usage.cachedInputTokens + usage.outputTokens);
+    const size = request.tier ?? "—";
+    const worker = request.workerIds[0]?.slice(0, 8) ?? "—";
+    return {
+      key: request.traceId,
+      title,
+      size,
+      state,
+      worker,
+      tokens,
+      accessibilityLabel: `${title}. ${state.text}. Size ${size}. ${tokens} tokens`,
+    };
+  };
   const requests =
-    open === undefined
-      ? null
-      : open.slice(0, OVERVIEW_OPEN_MAX).map((request): OverviewRequestRow => {
-          const title = shorten(excerptLine(request.excerpt), 120);
-          const state = request.state === "waiting_user" ? { text: "Needs you", tone: "warning" as const } : { text: "Running", tone: "info" as const };
-          const usage = request.usage;
-          const meta = [request.tier, `started ${ago(request.requestedAt, now)}`, `${formatTokens(usage.inputTokens + usage.cachedInputTokens + usage.outputTokens)} tokens`]
-            .filter((part) => part !== null)
-            .join(" · ");
-          return { key: request.traceId, title, state, meta, accessibilityLabel: `${title}. ${state.text}. ${meta}` };
-        });
+    open === undefined || closed === undefined ? null : [...open.slice(0, OVERVIEW_OPEN_MAX), ...closed.slice(0, 1)].map(row);
   const hidden = open === undefined ? 0 : open.length - OVERVIEW_OPEN_MAX;
+  const older = closed === undefined ? 0 : closed.length - 1;
   return {
     figures,
+    tokensScope: `· ${window === "all" ? "everything recorded" : `last ${WINDOW_LABELS[window]}`}, context read per turn`,
     tokensByRole,
-    tokensEmpty: summary === undefined || tokensByRole.length > 0 ? null : OVERVIEW_NO_TOKENS,
+    tokensEmpty: summary === undefined || tokensByRole.some((entry) => entry.recorded) ? null : OVERVIEW_NO_TOKENS,
     requests,
+    older: older > 0 ? plural(older, "older finished request") : null,
     more: hidden > 0 ? `${plural(hidden, "more open request")} in Requests` : null,
+    process: processCells(summary),
   };
 }

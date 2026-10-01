@@ -4,14 +4,19 @@
  * Overview, Requests, Beads, Metrics and Agents. What is shown and in which
  * order is `work-model.ts`; this file reads the data and draws it.
  *
- * - `WorkScreen`: one row per workspace (most recent activity first) with the
- *   running dot, the current request, its stage, the agents, its autonomy
- *   level (`autonomy.policy`'s `levels`) and when it last moved.
- *   `orchestrator.state` is read every `WORK_POLL_MS` only while the rows show
- *   (the screen is mounted only then).
- * - `ProjectPage`: Overview (four figures and the tokens read by role from
- *   `insights.summary` for the workspace, the open requests from the Requests
- *   tab's own reads, and the autonomy level, which opens Settings), Metrics
+ * - `WorkScreen` (the approved Projects artboard, change-014 fidelity pass):
+ *   a 260px list of the projects (most recent activity first), each a name
+ *   and a muted line — `2 active · 1 stalled · Cruise` from
+ *   `workspaces.overview`, `orchestrator.state` and `autonomy.policy` —, and
+ *   beside it the chosen project's page, the most recent one until another is
+ *   chosen. A phone shows the list, then the page with a ←. Open Manager runs
+ *   the surface's one Manager launcher (`launch-manager.ts`).
+ *   `orchestrator.state` is read every `WORK_POLL_MS` only while it shows.
+ * - `ProjectPage`: a header — the name, its directory, Open Manager and
+ *   Autonomy: <Level> (which opens Settings) — and five underline tabs.
+ *   Overview (four figures and the tokens read by role from `insights.summary`
+ *   for the workspace, the requests as a table from the Requests tab's own
+ *   reads, and how the work ran), Metrics
  *   (`insights.tsx`: what the Insights section showed, for this project),
  *   Requests (a stage bar, evidence lines and a timeline per
  *   request, from `traces.list`, `traces.get` and `decisions.list`), Beads (the
@@ -27,54 +32,60 @@
  *   context trend; the Agents tab gives each listed agent's over its life,
  *   under the tree. Both are read only while they show.
  *
- * Layout: `layout.compact` (a phone) puts a row on two lines, draws the stage
+ * Layout: `layout.compact` (a phone) shows the list or the page, draws the stage
  * bar as five segments with its stage written under them, stacks the evidence
  * lines, and puts a timeline event's time and tag above its text. A wide screen
- * keeps a row on one line, writes the five stages with the current one bold,
+ * writes the five stages with the current one bold,
  * puts the evidence lines side by side and the timeline in columns, all in a
  * column of readable width.
  *
  * Client rules: React Native primitives only, colours from the theme
  * (`toneColor`), accessibility roles and labels on every pressable, ids only
- * under Details.
+ * under Details — but the Overview's Requests table, whose Worker column the
+ * artboard writes as a short id.
  */
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { useRpc } from "@getpaseo/plugin/client";
+import { usePaseo, useRpc } from "@getpaseo/plugin/client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState, type ReactNode } from "react";
-import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
+import { useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
+import { ActivityIndicator, Platform, Pressable, ScrollView, Text, View } from "react-native";
 import {
   DECISION_LIST_MAX,
   agentsListRpc,
   autonomyPolicyRpc,
   decisionsListRpc,
   insightsSummaryRpc,
+  managerEnsureRpc,
   orchestratorStateRpc,
   tracesAgentsRpc,
   tracesGetRpc,
   tracesListRpc,
+  type InsightsWindow,
   type WorkspaceOverview,
 } from "../shared/contracts";
 import type { Decision } from "../shared/decisions";
 import { AGENT_TREE_POLL_MS } from "./agent-tree";
 import { BeadsScreen } from "./beads-screen";
-import { INSIGHTS_STALE_MS, ProjectMetrics, insightsQueryKey } from "./insights";
-import { INSIGHTS_DEFAULT_WINDOW } from "./insights-model";
+import { FigureStrip, INSIGHTS_STALE_MS, ProjectMetrics, RoleTokenBars, SectionHeading, insightsQueryKey } from "./insights";
+import { INSIGHTS_DEFAULT_WINDOW, WINDOW_SEGMENTS } from "./insights-model";
+import { managerLauncher } from "./launch-manager";
 import { AUTONOMY_POLICY_KEY } from "./settings-autonomy-model";
 import { TraceActions } from "./dashboard-actions";
 import { dashboardStyles } from "./styles";
 import { toneColor } from "./tone";
 import { errorMessageOf } from "./errors";
 import type { ClosedWorkspace, StoredWorkspace } from "./surface-view";
+import { MONO, Segmented, SectionLabel, TextTabs } from "./text-tabs";
 import { AgentTreeView, toLoadable } from "./tree";
 import { WhyScreen } from "./why";
-import { BarChart, Button, StatCards, StatusTabs, ToneText, WorkspaceScreenHeader, type Styles, type Theme } from "./ui";
+import { ToneText, type Styles, type Theme } from "./ui";
 import {
   ALL_REQUESTS_LABEL,
   NO_REQUESTS_TEXT,
   OVERVIEW_NO_OPEN,
   OVERVIEW_OPEN_TITLE,
-  OVERVIEW_TOKENS_NOTE,
+  OVERVIEW_PROCESS_TITLE,
+  OVERVIEW_REQUEST_COLUMNS,
   OVERVIEW_TOKENS_TITLE,
   PROJECT_TABS,
   TOKEN_FIGURES_TITLE,
@@ -90,6 +101,7 @@ import {
   type AgentTokensView,
   type ContextTrendView,
   type EvidenceLine,
+  type OverviewRequestRow,
   type ProjectOverviewView,
   type ProjectTab,
   type RequestCardView,
@@ -101,8 +113,11 @@ import {
   type WorkspaceEntry,
 } from "./work-model";
 
-/** Widest a Projects column grows on a large screen, so a line stays readable. */
-const WIDE_COLUMN = 1100;
+/** The width of the Projects list beside a project's page (the Projects artboard's aside). */
+export const PROJECTS_ASIDE_WIDTH = 260;
+
+/** Widest the Requests column grows on a large screen (the main pane's width in the artboard). */
+const WIDE_COLUMN = 1000;
 
 export const workQueryKeys = {
   projects: ["paseo-bm", "work", "projects"] as const,
@@ -111,10 +126,12 @@ export const workQueryKeys = {
   decisions: (workspaceId: string) => ["paseo-bm", "work", "decisions", workspaceId] as const,
   /** `traces.agents`: of one request, or (no trace) of the Agents tab. */
   tokens: (workspaceId: string, traceId?: string) => ["paseo-bm", "work", "tokens", workspaceId, traceId ?? "agents"] as const,
+  /** Each workspace's directory (`workspaces.list`), named under a project's title. */
+  directories: ["paseo-bm", "work", "directories"] as const,
 };
 
 function column(compact: boolean, gap: number) {
-  return { gap, width: "100%" as const, maxWidth: compact ? undefined : WIDE_COLUMN, alignSelf: "center" as const };
+  return { gap, width: "100%" as const, maxWidth: compact ? undefined : WIDE_COLUMN, alignSelf: "flex-start" as const };
 }
 
 // ---------------------------------------------------------------------------
@@ -135,150 +152,111 @@ export function AgentMarks({ agents, styles, theme }: { agents: WorkRowView["age
   );
 }
 
-/** One project: two lines on a phone, one line on a wide screen. The whole row opens the project. */
+/**
+ * One project in the Projects list (the artboard's aside): a full-width row,
+ * the name in weight 500 and a muted line `2 active · 1 stalled · Cruise`; the
+ * selected one on surface2 with a 3px accent bar at its left. The whole row
+ * opens the project.
+ */
 export function WorkRowItem({
   row,
-  dot,
+  selected,
   onOpen,
-  compact,
-  styles,
   theme,
 }: {
   row: WorkRowView;
-  dot: ReactNode;
+  selected: boolean;
   onOpen: () => void;
-  compact: boolean;
-  styles: Styles;
   theme: Theme;
 }) {
-  const name = (
-    <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexShrink: 1, width: compact ? undefined : "26%" }}>
-      <Text style={[styles.sectionTitle, { flexShrink: 1 }]} numberOfLines={1}>
-        {row.label}
-      </Text>
-      {dot}
-    </View>
-  );
-  const status = (
-    <ToneText tone={row.status.tone} numberOfLines={1} styles={styles} theme={theme}>
-      {row.status.text}
-    </ToneText>
-  );
-  const request =
-    row.request === null ? null : (
-      <Text style={[styles.body, { color: theme.colors.foreground, flexShrink: 1 }]} numberOfLines={1}>
-        {row.request}
-      </Text>
-    );
-  const beads = row.beads === null ? null : <Text style={styles.body}>{row.beads}</Text>;
-  const level = row.level === null ? null : <Text style={styles.body} numberOfLines={1}>{row.level}</Text>;
-  const time = row.time === null ? null : <Text style={styles.body}>{row.time}</Text>;
+  const { colors } = theme;
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={row.accessibilityLabel}
+      accessibilityState={{ selected }}
       onPress={onOpen}
-      style={[styles.card, { gap: 4 }]}
+      style={{ gap: 4, paddingVertical: 12, paddingHorizontal: 20, backgroundColor: selected ? colors.surface2 : "transparent" }}
     >
-      {compact ? (
-        <>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-            {name}
-            <View style={{ flex: 1 }} />
-            {time}
-          </View>
-          <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-            {request}
-            {status}
-            <AgentMarks agents={row.agents} styles={styles} theme={theme} />
-            {beads}
-            {level}
-          </View>
-        </>
-      ) : (
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
-          {name}
-          <View style={{ flex: 1 }}>{request ?? <Text style={styles.body} numberOfLines={1}>{row.detail}</Text>}</View>
-          {status}
-          {beads}
-          <AgentMarks agents={row.agents} styles={styles} theme={theme} />
-          {level}
-          <View style={{ minWidth: 72, alignItems: "flex-end" }}>{time}</View>
-        </View>
-      )}
+      <View style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, backgroundColor: selected ? colors.accent : "transparent" }} />
+      <Text style={{ fontSize: 14, fontWeight: "500", color: colors.foreground }} numberOfLines={1}>
+        {row.label}
+      </Text>
+      <Text style={{ fontSize: 12, color: colors.foregroundMuted }} numberOfLines={1}>
+        {row.line}
+      </Text>
     </Pressable>
   );
 }
 
-/** The Projects list: the projects, then the history of workspaces Paseo no longer lists. */
+/**
+ * The Projects list: the projects, then the history of workspaces Paseo no
+ * longer lists, then the plugin's version. The artboard's 260px aside on a wide
+ * screen; the whole screen on a phone, until a project is chosen.
+ */
 export function WorkList({
   rows,
   closed,
   loading,
   error,
-  status,
   footer,
-  renderDot,
+  selectedId,
   onOpen,
   compact,
-  styles,
   theme,
 }: {
   rows: readonly WorkRowView[];
   closed: readonly ClosedWorkspace[];
   loading: boolean;
   error: string | null;
-  status?: ReactNode;
   footer?: string;
-  renderDot: (workspaceId: string) => ReactNode;
+  /** The project whose page shows beside the list; null on a phone's list. */
+  selectedId: string | null;
   onOpen: (workspaceId: string, label: string) => void;
   compact: boolean;
-  styles: Styles;
   theme: Theme;
 }) {
+  const { colors } = theme;
+  const muted = { fontSize: 13, color: colors.foregroundMuted, paddingHorizontal: 20 };
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
-      <View style={column(compact, styles.content.gap)}>
-        {status}
-        {loading ? <ActivityIndicator color={styles.spinner.color} accessibilityLabel="Reading the projects" /> : null}
-        {error === null ? null : (
-          <ToneText tone="danger" styles={styles} theme={theme}>{`Could not load the workspaces. ${error}`}</ToneText>
-        )}
-        {!loading && error === null && rows.length === 0 ? <Text style={styles.body}>No workspaces on this host yet.</Text> : null}
-        {rows.map((row) => (
-          <WorkRowItem
-            key={row.workspaceId}
-            row={row}
-            dot={renderDot(row.workspaceId)}
-            onOpen={() => onOpen(row.workspaceId, row.label)}
-            compact={compact}
-            styles={styles}
-            theme={theme}
-          />
-        ))}
-        {closed.length === 0 ? null : (
-          <Text accessibilityRole="header" style={[styles.sectionTitle, { marginTop: 8 }]}>
-            Closed workspaces with history
-          </Text>
-        )}
-        {closed.map((entry) => (
+    <ScrollView
+      accessibilityLabel="Projects"
+      style={compact ? { flex: 1 } : { width: PROJECTS_ASIDE_WIDTH, flexGrow: 0, borderRightWidth: 1, borderRightColor: colors.border }}
+      contentContainerStyle={{ paddingVertical: 20 }}
+    >
+      {loading ? <ActivityIndicator color={colors.foregroundMuted} accessibilityLabel="Reading the projects" /> : null}
+      {error === null ? null : <Text style={[muted, { color: colors.statusDanger }]}>{`Could not load the workspaces. ${error}`}</Text>}
+      {!loading && error === null && rows.length === 0 ? <Text style={muted}>No workspaces on this host yet.</Text> : null}
+      {rows.map((row) => (
+        <WorkRowItem key={row.workspaceId} row={row} selected={row.workspaceId === selectedId} onOpen={() => onOpen(row.workspaceId, row.label)} theme={theme} />
+      ))}
+      {closed.length === 0 ? null : (
+        <View style={{ paddingHorizontal: 20, paddingTop: 20, paddingBottom: 8 }}>
+          <SectionLabel theme={theme}>Closed workspaces with history</SectionLabel>
+        </View>
+      )}
+      {closed.map((entry) => {
+        const on = entry.workspaceId === selectedId;
+        return (
           <Pressable
             key={entry.workspaceId}
             accessibilityRole="button"
             accessibilityLabel={`Open the requests of the closed workspace ${entry.label}`}
+            accessibilityState={{ selected: on }}
             onPress={() => onOpen(entry.workspaceId, entry.label)}
-            style={[styles.card, { gap: 2 }]}
+            style={{ gap: 4, paddingVertical: 12, paddingHorizontal: 20, backgroundColor: on ? colors.surface2 : "transparent" }}
           >
-            <Text style={styles.sectionTitle} numberOfLines={1}>
+            <View style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, backgroundColor: on ? colors.accent : "transparent" }} />
+            <Text style={{ fontSize: 14, fontWeight: "500", color: colors.foreground }} numberOfLines={1}>
               {entry.label}
             </Text>
-            <Text style={styles.body} numberOfLines={compact ? 2 : 1}>
+            <Text style={{ fontSize: 12, color: colors.foregroundMuted }} numberOfLines={compact ? 2 : 1}>
               {entry.detail}
             </Text>
           </Pressable>
-        ))}
-        {footer === undefined ? null : <Text style={[styles.body, { fontSize: 11, marginTop: 8 }]}>{footer}</Text>}
-      </View>
+        );
+      })}
+      {footer === undefined ? null : <Text style={{ fontSize: 11, color: colors.foregroundMuted, paddingHorizontal: 20, paddingTop: 20 }}>{footer}</Text>}
     </ScrollView>
   );
 }
@@ -576,9 +554,32 @@ export function RequestCard({
   );
 }
 
-/** The project page's first rows: ←, the project, Chat, and the five tabs. */
+/** A secondary button of the page header: 1px border, transparent, square. */
+function HeaderButton({ label, a11y, onPress, disabled, theme }: { label: string; a11y: string; onPress: () => void; disabled?: boolean; theme: Theme }) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={a11y}
+      accessibilityState={disabled === undefined ? undefined : { disabled, busy: disabled }}
+      disabled={disabled}
+      onPress={onPress}
+      style={{ borderWidth: 1, borderColor: theme.colors.border, paddingVertical: 8, paddingHorizontal: 14, opacity: disabled === true ? 0.5 : 1 }}
+    >
+      <Text style={{ fontSize: 14, color: theme.colors.foreground }}>{label}</Text>
+    </Pressable>
+  );
+}
+
+/**
+ * The project page's header (the Projects artboard): the name 22/600 with its
+ * directory in mono under it; at the right Open Manager and Autonomy: <Level>
+ * (which opens Settings), the Metrics period before them while Metrics shows;
+ * then the five tabs as underline text tabs. A phone puts a ← first. In the
+ * workspace's own Beads tab (no name) only the tabs are drawn.
+ */
 export function ProjectHeader({
   label,
+  directory,
   tab,
   onTab,
   onBack,
@@ -586,10 +587,15 @@ export function ProjectHeader({
   status,
   onChat,
   chatBusy,
-  styles,
+  level,
+  onOpenSettings,
+  extra,
+  theme,
 }: {
   /** Null in a workspace's own Beads tab, which already lives in its workspace. */
   label: string | null;
+  /** The workspace's directory; null when not known. */
+  directory?: string | null;
   tab: ProjectTab;
   onTab: (tab: ProjectTab) => void;
   onBack?: () => void;
@@ -597,34 +603,76 @@ export function ProjectHeader({
   status?: ReactNode;
   onChat?: () => void;
   chatBusy: boolean;
-  styles: Styles;
+  /** The project's level by name; null until `autonomy.policy` answered. */
+  level?: string | null;
+  onOpenSettings?: () => void;
+  /** Drawn first on the right: the Metrics period. */
+  extra?: ReactNode;
+  theme: Theme;
 }) {
+  const { colors } = theme;
+  const autonomy = level === undefined || level === null ? null : `Autonomy: ${level}`;
   return (
-    <>
-      <WorkspaceScreenHeader
-        title={label}
-        onBack={onBack}
-        backLabel={backLabel ?? "Back"}
-        status={status}
-        styles={styles}
-        right={
-          onChat === undefined ? null : (
-            <Button
-              label={chatBusy ? "Opening…" : "Chat ▸"}
-              kind="secondary"
-              accessibilityLabel={label === null ? "Chat with the Beads Manager of this project" : `Chat with the Beads Manager of ${label}`}
-              accessibilityState={{ disabled: chatBusy, busy: chatBusy }}
-              disabled={chatBusy}
-              onPress={onChat}
-              style={{ opacity: chatBusy ? 0.5 : 1 }}
-              styles={styles}
-            />
-          )
-        }
+    <View style={{ gap: 16 }}>
+      {label === null ? null : (
+        <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 16 }}>
+          {onBack === undefined ? null : (
+            <Pressable accessibilityRole="button" accessibilityLabel={backLabel ?? "Back"} onPress={onBack} style={{ paddingVertical: 4, paddingRight: 4 }}>
+              <Text style={{ fontSize: 18, color: colors.foregroundMuted }}>←</Text>
+            </Pressable>
+          )}
+          <View style={{ gap: 4, flexShrink: 1, minWidth: 0 }}>
+            <Text accessibilityRole="header" style={{ fontSize: 22, fontWeight: "600", color: colors.foreground }} numberOfLines={1}>
+              {label}
+            </Text>
+            <Text style={{ fontFamily: MONO, fontSize: 12, color: colors.foregroundMuted }} numberOfLines={1} selectable>
+              {directory ?? "—"}
+            </Text>
+          </View>
+          <View style={{ flex: 1 }} />
+          <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+            {extra}
+            {onChat === undefined ? null : (
+              <HeaderButton
+                label={chatBusy ? "Opening…" : "Open Manager"}
+                a11y={`Chat with the Beads Manager of ${label}`}
+                onPress={onChat}
+                disabled={chatBusy}
+                theme={theme}
+              />
+            )}
+            {autonomy === null ? null : onOpenSettings === undefined ? (
+              <Text style={{ fontSize: 14, color: colors.foregroundMuted }}>{autonomy}</Text>
+            ) : (
+              <HeaderButton label={autonomy} a11y={`${autonomy}. Open Settings to change it`} onPress={onOpenSettings} theme={theme} />
+            )}
+          </View>
+        </View>
+      )}
+      {status}
+      <TextTabs
+        tabs={PROJECT_TABS.map((entry) => ({ key: entry.key, label: entry.label }))}
+        selected={tab}
+        onSelect={(key) => onTab(key as ProjectTab)}
+        theme={theme}
+        divider
       />
-      <StatusTabs tabs={PROJECT_TABS} selected={tab} onSelect={(key) => onTab(key as ProjectTab)} styles={styles} />
-    </>
+    </View>
   );
+}
+
+/** The project directories, by workspace id (`workspaces.list`); shared by every project page. */
+function useDirectories(): ReadonlyMap<string, string> {
+  const paseo = usePaseo();
+  const listed = useQuery({
+    queryKey: workQueryKeys.directories,
+    queryFn: async () => {
+      const result = await paseo.workspaces.list({});
+      return result.entries.map((entry) => [entry.id, entry.workspaceDirectory] as const);
+    },
+    staleTime: 60_000,
+  });
+  return useMemo(() => new Map(listed.data ?? []), [listed.data]);
 }
 
 // ---------------------------------------------------------------------------
@@ -641,19 +689,34 @@ export interface WorkScreenProps {
   closed: readonly ClosedWorkspace[];
   status?: ReactNode;
   footer?: string;
-  renderDot: (workspaceId: string) => ReactNode;
-  onOpen: (workspaceId: string, label: string) => void;
+  /** No longer drawn: a row says `2 active` in words (the artboard has no dot). Kept so an older caller still type-checks. */
+  renderDot?: (workspaceId: string) => ReactNode;
+  /** No longer called: a chosen project's page shows beside the list, on this screen. Kept so an older caller still type-checks. */
+  onOpen?: (workspaceId: string, label: string) => void;
+  /** The surface's props, for the project page (its Beads tab and its agents); a minimal set when absent. */
+  surface?: PluginSurfaceProps;
+  /** Opens Settings, where the autonomy level is set; without it the level is named, not pressable. */
+  onOpenSettings?: () => void;
+  /** A project to show (the Inbox or the Command Center asked for it), and its tab; a new `nonce` asks again. */
+  request?: { workspaceId: string; tab: ProjectTab; nonce: number } | null;
 }
 
-/** The Projects list: the project rows. Mounted only while it shows, so the projects are read only then. */
+/**
+ * Projects (the Projects artboard): the list of projects as a 260px aside, and
+ * the chosen project's page beside it — the most recent one until another is
+ * chosen. A phone shows the list first and the page once one is chosen, with
+ * a ← back to the list. Mounted only while it shows, so the projects are read
+ * only then.
+ */
 export function WorkScreen(props: WorkScreenProps) {
   const { theme, compact } = props;
-  const styles = useMemo(() => dashboardStyles(theme, compact), [theme, compact]);
   const getState = useRpc(orchestratorStateRpc);
   const readPolicy = useRpc(autonomyPolicyRpc);
+  const ensure = useRpc(managerEnsureRpc);
   const projects = useQuery({ queryKey: workQueryKeys.projects, queryFn: () => getState({}), refetchInterval: WORK_POLL_MS });
   // Each project's level; Settings reads and writes this same query, so a level set there shows here.
   const policy = useQuery({ queryKey: AUTONOMY_POLICY_KEY, queryFn: () => readPolicy({}) });
+  const launcher = useSyncExternalStore(managerLauncher.subscribe, managerLauncher.getState, managerLauncher.getState);
   const rows = workRows({
     workspaces: props.workspaces ?? [],
     projects: projects.data?.projects ?? null,
@@ -661,20 +724,73 @@ export function WorkScreen(props: WorkScreenProps) {
     ...(policy.data === undefined ? {} : { levels: policy.data.levels }),
     now: new Date(),
   });
-  return (
+  // The project the owner chose (or that was asked for), and its tab.
+  const [chosen, setChosen] = useState<{ workspaceId: string; tab: ProjectTab } | null>(null);
+  const [seen, setSeen] = useState<number | null>(null);
+  if (props.request != null && props.request.nonce !== seen) {
+    setSeen(props.request.nonce);
+    setChosen({ workspaceId: props.request.workspaceId, tab: props.request.tab });
+  }
+  // With none chosen, a wide screen shows the most recent project; a phone shows the list.
+  const known = (workspaceId: string) => rows.some((row) => row.workspaceId === workspaceId) || props.closed.some((entry) => entry.workspaceId === workspaceId);
+  const current = chosen !== null && (known(chosen.workspaceId) || props.workspaces === undefined) ? chosen : compact ? null : rows[0] === undefined ? null : { workspaceId: rows[0].workspaceId, tab: "overview" as ProjectTab };
+  const surface: PluginSurfaceProps = props.surface ?? {
+    theme,
+    host: { id: "paseo-bm", label: "Beads Manager" },
+    layout: { compact, platform: Platform.OS === "ios" || Platform.OS === "android" ? Platform.OS : "web" },
+  };
+  const openAgent = surface.navigation?.openAgent;
+  // The page shows beside the list, so choosing a project stays on this screen (`onOpen` is not called).
+  const open = (workspaceId: string) => {
+    const closed = props.closed.find((entry) => entry.workspaceId === workspaceId);
+    // A closed workspace opens on Requests, where its history's actions are.
+    setChosen({ workspaceId, tab: closed === undefined ? "overview" : "requests" });
+  };
+  const list = (
     <WorkList
       rows={rows}
       closed={props.closed}
       loading={props.workspaces === undefined && props.workspacesError === null}
       error={props.workspacesError}
-      status={props.status}
       footer={props.footer}
-      renderDot={props.renderDot}
-      onOpen={props.onOpen}
+      selectedId={current?.workspaceId ?? null}
+      onOpen={open}
       compact={compact}
-      styles={styles}
       theme={theme}
     />
+  );
+  const row = current === null ? undefined : rows.find((entry) => entry.workspaceId === current.workspaceId);
+  const closedEntry = current === null ? undefined : props.closed.find((entry) => entry.workspaceId === current.workspaceId);
+  const page =
+    current === null ? null : (
+      <ProjectPage
+        key={`${current.workspaceId}:${current.tab}`}
+        {...surface}
+        workspaceId={current.workspaceId}
+        label={row?.label ?? closedEntry?.label ?? current.workspaceId}
+        initialTab={current.tab}
+        {...(closedEntry === undefined ? {} : { closed: closedEntry.state })}
+        {...(compact ? { onBack: () => setChosen(null), backLabel: "Back to Projects" } : {})}
+        status={props.status}
+        // A closed workspace has history only: no Manager to chat with.
+        onChat={openAgent === undefined || closedEntry !== undefined ? undefined : () => void managerLauncher.launch(current.workspaceId, { ensure, openAgent })}
+        chatBusy={launcher.status === "pending" && launcher.workspaceId === current.workspaceId}
+        onOpenSettings={props.onOpenSettings}
+      />
+    );
+  if (compact) return <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>{page ?? <>{props.status}{list}</>}</View>;
+  return (
+    <View style={{ flex: 1, flexDirection: "row", backgroundColor: theme.colors.surface0 }}>
+      {list}
+      <View style={{ flex: 1, minWidth: 0 }}>
+        {page ?? (
+          <View style={{ paddingVertical: 28, paddingHorizontal: 36, gap: 16 }}>
+            {props.status}
+            <Text style={{ fontSize: 14, color: theme.colors.foregroundMuted }}>Choose a project to see its page.</Text>
+          </View>
+        )}
+      </View>
+    </View>
   );
 }
 
@@ -854,7 +970,7 @@ function RequestsTab({
   if (why !== null) return <WhyScreen workspaceId={workspaceId} requestId={why} onBack={() => setWhy(null)} compact={compact} theme={theme} />;
 
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
+    <ScrollView style={styles.screen} contentContainerStyle={{ paddingTop: compact ? 16 : 24, paddingHorizontal: compact ? 16 : 36, paddingBottom: 64 }}>
       <View style={column(compact, styles.content.gap)}>
         {traces.isError ? (
           <ToneText tone="danger" styles={styles} theme={theme}>{`Could not read the requests. ${errorMessageOf(traces.error)}`}</ToneText>
@@ -876,106 +992,171 @@ function RequestsTab({
   );
 }
 
+/** The Requests table's column widths on a wide screen: Size, State, Worker, Tokens (the request takes the rest). */
+const REQUEST_COLUMN_WIDTHS = [90, 120, 110, 90] as const;
+
+/** The Overview's Requests table: a header row, then a row per request divided by 1px rules. Hook-free. */
+export function OverviewRequestsTable({ rows, onOpen, compact, theme }: { rows: readonly OverviewRequestRow[]; onOpen: () => void; compact: boolean; theme: Theme }) {
+  const { colors } = theme;
+  const head = { fontSize: 12, fontWeight: "500" as const, textTransform: "uppercase" as const, letterSpacing: 0.72, color: colors.foregroundMuted };
+  if (compact) {
+    return (
+      <View style={{ borderTopWidth: 1, borderTopColor: colors.border }}>
+        {rows.map((row) => (
+          <Pressable
+            key={row.key}
+            accessibilityRole="button"
+            accessibilityLabel={`${row.accessibilityLabel}. Open in Requests`}
+            onPress={onOpen}
+            style={{ gap: 4, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.border }}
+          >
+            <Text style={{ fontSize: 14, color: colors.foreground }} numberOfLines={2}>
+              {row.title}
+            </Text>
+            <Text style={{ fontSize: 12, color: colors.foregroundMuted }}>
+              <Text style={{ color: toneColor(theme, row.state.tone) }}>{row.state.text}</Text>
+              {` · ${row.size} · `}
+              <Text style={{ fontFamily: MONO }}>{row.worker}</Text>
+              {` · ${row.tokens}`}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+    );
+  }
+  const [size, state, worker, tokens] = REQUEST_COLUMN_WIDTHS;
+  return (
+    <View>
+      <View style={{ flexDirection: "row", paddingBottom: 8, borderBottomWidth: 1, borderBottomColor: colors.border }}>
+        <Text style={[head, { flex: 1 }]}>{OVERVIEW_REQUEST_COLUMNS[0]}</Text>
+        <Text style={[head, { width: size }]}>{OVERVIEW_REQUEST_COLUMNS[1]}</Text>
+        <Text style={[head, { width: state }]}>{OVERVIEW_REQUEST_COLUMNS[2]}</Text>
+        <Text style={[head, { width: worker }]}>{OVERVIEW_REQUEST_COLUMNS[3]}</Text>
+        <Text style={[head, { width: tokens, textAlign: "right" }]}>{OVERVIEW_REQUEST_COLUMNS[4]}</Text>
+      </View>
+      {rows.map((row) => (
+        <Pressable
+          key={row.key}
+          accessibilityRole="button"
+          accessibilityLabel={`${row.accessibilityLabel}. Open in Requests`}
+          onPress={onOpen}
+          style={{ flexDirection: "row", alignItems: "center", paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: colors.border }}
+        >
+          <Text style={{ flex: 1, minWidth: 0, fontSize: 14, color: colors.foreground, paddingRight: 12 }} numberOfLines={1}>
+            {row.title}
+          </Text>
+          <Text style={{ width: size, fontSize: 14, color: colors.foreground }}>{row.size}</Text>
+          <Text style={{ width: state, fontSize: 14, color: toneColor(theme, row.state.tone) }} numberOfLines={1}>
+            {row.state.text}
+          </Text>
+          <Text style={{ width: worker, fontFamily: MONO, fontSize: 12, color: colors.foreground }}>{row.worker}</Text>
+          <Text style={{ width: tokens, textAlign: "right", fontFamily: MONO, fontSize: 14, color: colors.foreground }}>{row.tokens}</Text>
+        </Pressable>
+      ))}
+    </View>
+  );
+}
+
+/** The Overview's How the work ran: three cells in one bordered box. Hook-free. */
+function ProcessCells({ cells, compact, theme }: { cells: ProjectOverviewView["process"]; compact: boolean; theme: Theme }) {
+  const { colors } = theme;
+  return (
+    <View style={{ flexDirection: compact ? "column" : "row", borderWidth: 1, borderColor: colors.border }}>
+      {cells.map((cell, index) => (
+        <View
+          key={cell.label}
+          accessibilityLabel={`${cell.label}: ${cell.value}`}
+          style={{
+            flex: compact ? undefined : 1,
+            gap: 4,
+            paddingVertical: 14,
+            paddingHorizontal: 18,
+            ...(index === 0 ? {} : compact ? { borderTopWidth: 1, borderTopColor: colors.border } : { borderLeftWidth: 1, borderLeftColor: colors.border }),
+          }}
+        >
+          <Text style={{ fontSize: 13, color: colors.foregroundMuted }}>{cell.label}</Text>
+          <Text style={{ fontSize: 18, fontWeight: "600", color: colors.foreground }}>{cell.value}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
 /**
- * The Overview tab but its data (change-014 outcome 5): the autonomy level —
- * a button to Settings where the host can open it —, four figures, the tokens
- * read by role, and the open requests with a way to all of them. Hook-free.
+ * The Overview tab but its data (the Projects artboard): the four figures in
+ * one strip, Tokens by role, the Requests table with the older finished ones
+ * counted, and How the work ran. The autonomy level is the page header's.
+ * Hook-free.
  */
 export function ProjectOverviewBody({
   view,
-  level,
   error,
-  onOpenSettings,
   onRequests,
   compact,
   styles,
   theme,
 }: {
   view: ProjectOverviewView;
-  /** The project's level by name; null until `autonomy.policy` answered. */
-  level: string | null;
   /** Why the figures could not be read; null when they could (or are still being read). */
   error: string | null;
-  /** Opens Settings; undefined where the page cannot (the workspace's own Beads tab). */
-  onOpenSettings?: () => void;
   onRequests: () => void;
   compact: boolean;
   styles: Styles;
   theme: Theme;
 }) {
-  const autonomy = level === null ? null : `Autonomy: ${level}`;
+  const { colors } = theme;
+  const muted = { fontSize: 13, color: colors.foregroundMuted };
+  const textButton = (label: string, a11y: string) => (
+    <Pressable accessibilityRole="button" accessibilityLabel={a11y} onPress={onRequests} style={{ alignSelf: "flex-start", paddingVertical: 4 }}>
+      <Text style={{ fontSize: 14, color: colors.foregroundMuted }}>{label}</Text>
+    </Pressable>
+  );
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
-      <View style={column(compact, styles.content.gap)}>
-        {autonomy === null ? null : onOpenSettings === undefined ? (
-          <Text style={styles.body}>{autonomy}</Text>
-        ) : (
-          <View style={styles.chipRow}>
-            <Button
-              label={autonomy}
-              kind="secondary"
-              accessibilityLabel={`${autonomy}. Open Settings to change it`}
-              onPress={onOpenSettings}
-              styles={styles}
-            />
-          </View>
-        )}
-        {error === null ? null : <ToneText tone="danger" styles={styles} theme={theme}>{`Could not read the figures. ${error}`}</ToneText>}
-        <StatCards cards={view.figures} styles={styles} />
-        {view.tokensEmpty !== null ? (
-          <Text style={styles.body}>{view.tokensEmpty}</Text>
-        ) : view.tokensByRole.length === 0 ? null : (
-          <>
-            <BarChart title={OVERVIEW_TOKENS_TITLE} bars={view.tokensByRole} styles={styles} labelWidth={100} />
-            <Text style={[styles.body, { fontSize: 11 }]}>{OVERVIEW_TOKENS_NOTE}</Text>
-          </>
-        )}
-        <Text accessibilityRole="header" style={styles.sectionTitle}>
-          {OVERVIEW_OPEN_TITLE}
-        </Text>
+    <View style={{ gap: 28 }}>
+      {error === null ? null : <ToneText tone="danger" styles={styles} theme={theme}>{`Could not read the figures. ${error}`}</ToneText>}
+      <FigureStrip
+        cells={view.figures.map((figure) => ({
+          label: figure.label,
+          value: figure.value,
+          ...(figure.label === "Waiting on you" && figure.value !== "—" ? { valueColor: colors.statusWarning } : {}),
+        }))}
+        compact={compact}
+        theme={theme}
+      />
+      <View style={{ gap: 12 }}>
+        <SectionHeading title={OVERVIEW_TOKENS_TITLE} tail={view.tokensScope} theme={theme} />
+        {view.tokensEmpty !== null ? <Text style={muted}>{view.tokensEmpty}</Text> : <RoleTokenBars rows={view.tokensByRole} theme={theme} />}
+      </View>
+      <View>
+        <View style={{ marginBottom: 12 }}>
+          <SectionHeading title={OVERVIEW_OPEN_TITLE} theme={theme} />
+        </View>
         {view.requests === null ? <ActivityIndicator color={styles.spinner.color} accessibilityLabel="Reading the requests" /> : null}
-        {view.requests !== null && view.requests.length === 0 ? <Text style={styles.body}>{OVERVIEW_NO_OPEN}</Text> : null}
-        {(view.requests ?? []).map((row) => (
-          <Pressable
-            key={row.key}
-            accessibilityRole="button"
-            accessibilityLabel={`${row.accessibilityLabel}. Open in Requests`}
-            onPress={onRequests}
-            style={[styles.card, { gap: 2 }]}
-          >
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-              <Text style={[styles.body, { color: theme.colors.foreground, flex: 1 }]} numberOfLines={1}>
-                {row.title}
-              </Text>
-              <ToneText tone={row.state.tone} numberOfLines={1} styles={styles} theme={theme}>
-                {row.state.text}
-              </ToneText>
-            </View>
-            <Text style={styles.body} numberOfLines={1}>
-              {row.meta}
-            </Text>
-          </Pressable>
-        ))}
-        {view.more === null ? null : <Text style={styles.body}>{view.more}</Text>}
-        <View style={styles.chipRow}>
-          <Button label={ALL_REQUESTS_LABEL} kind="secondary" accessibilityLabel="Open every request of this project" onPress={onRequests} styles={styles} />
+        {view.requests !== null && view.requests.length === 0 ? <Text style={muted}>{OVERVIEW_NO_OPEN}</Text> : null}
+        {view.requests === null || view.requests.length === 0 ? null : <OverviewRequestsTable rows={view.requests} onOpen={onRequests} compact={compact} theme={theme} />}
+        <View style={{ flexDirection: "row", flexWrap: "wrap", columnGap: 20, marginTop: 12 }}>
+          {view.more === null ? null : textButton(view.more, "Open the other open requests in Requests")}
+          {view.older === null ? null : textButton(view.older, "Open the older finished requests in Requests")}
+          {view.older === null && view.more === null ? textButton(ALL_REQUESTS_LABEL, "Open every request of this project") : null}
         </View>
       </View>
-    </ScrollView>
+      <View style={{ gap: 10 }}>
+        <SectionHeading title={OVERVIEW_PROCESS_TITLE} theme={theme} />
+        <ProcessCells cells={view.process} compact={compact} theme={theme} />
+      </View>
+    </View>
   );
 }
 
-/** The Overview tab: the Requests tab's reads (shared by key) and the project's summary over the default period. */
+/** The Overview tab: the Requests tab's reads (shared by key), the coordinator's facts and the project's summary over the default period. */
 function OverviewTab({
   workspaceId,
-  onOpenSettings,
   onRequests,
   compact,
   styles,
   theme,
 }: {
   workspaceId: string;
-  onOpenSettings?: () => void;
   onRequests: () => void;
   compact: boolean;
   styles: Styles;
@@ -984,7 +1165,7 @@ function OverviewTab({
   const listTraces = useRpc(tracesListRpc);
   const listDecisions = useRpc(decisionsListRpc);
   const readSummary = useRpc(insightsSummaryRpc);
-  const readPolicy = useRpc(autonomyPolicyRpc);
+  const getState = useRpc(orchestratorStateRpc);
   const traces = useQuery({
     queryKey: workQueryKeys.traces(workspaceId),
     queryFn: () => listTraces({ workspaceId }),
@@ -1001,28 +1182,20 @@ function OverviewTab({
     queryFn: () => readSummary({ window: INSIGHTS_DEFAULT_WINDOW, workspaceId }),
     staleTime: INSIGHTS_STALE_MS,
   });
-  const policy = useQuery({ queryKey: AUTONOMY_POLICY_KEY, queryFn: () => readPolicy({}) });
+  // The project rows' own query: a stalled project names the request that stalled.
+  const projects = useQuery({ queryKey: workQueryKeys.projects, queryFn: () => getState({}), refetchInterval: WORK_POLL_MS });
+  const project = projects.data?.projects.find((entry) => entry.workspaceId === workspaceId);
   const requests = useMemo(() => (traces.data === undefined ? undefined : requestSummaries(traces.data.traces)), [traces.data]);
   const view = projectOverviewView({
     summary: summary.data,
     window: INSIGHTS_DEFAULT_WINDOW,
     requests,
     decisions: decisions.data?.decisions,
+    stalledRequestId: project?.state === "stalled" ? (project.currentRequest?.requestId ?? null) : null,
     now: new Date(),
   });
   const error = summary.isError ? errorMessageOf(summary.error) : traces.isError ? errorMessageOf(traces.error) : null;
-  return (
-    <ProjectOverviewBody
-      view={view}
-      level={levelNameOf(policy.data?.levels, workspaceId)}
-      error={error}
-      onOpenSettings={onOpenSettings}
-      onRequests={onRequests}
-      compact={compact}
-      styles={styles}
-      theme={theme}
-    />
-  );
+  return <ProjectOverviewBody view={view} error={error} onRequests={onRequests} compact={compact} styles={styles} theme={theme} />;
 }
 
 function AgentsTab({
@@ -1082,18 +1255,36 @@ export interface ProjectPageProps extends PluginSurfaceProps {
   onOpenSettings?: () => void;
 }
 
+/** The main pane's padding and width (the Projects artboard: 28 / 36 / 64, at most 1000 wide); Beads uses the full width. */
+const PANE = { top: 28, side: 36, bottom: 64, width: 1000 } as const;
+
 /** A project: Overview · Requests · Beads · Metrics · Agents under one header. */
 export function ProjectPage(props: ProjectPageProps) {
   const { workspaceId, label, initialTab, closed, onBack, backLabel, status, onChat, chatBusy, onOpenSettings, ...surface } = props;
   const { theme, layout, navigation } = surface;
-  const styles = useMemo(() => dashboardStyles(theme, layout.compact), [theme, layout.compact]);
+  const compact = layout.compact;
+  const styles = useMemo(() => dashboardStyles(theme, compact), [theme, compact]);
   const [tab, setTab] = useState<ProjectTab>(initialTab);
+  // The Metrics period, chosen in the header (the ProjectMetrics artboard).
+  const [window, setWindow] = useState<InsightsWindow>(INSIGHTS_DEFAULT_WINDOW);
+  const readPolicy = useRpc(autonomyPolicyRpc);
+  // Settings reads and writes this same query, so a level set there shows here.
+  const policy = useQuery({ queryKey: AUTONOMY_POLICY_KEY, queryFn: () => readPolicy({}) });
+  const directories = useDirectories();
   const openAgent = navigation?.openAgent;
+  const side = compact ? 16 : PANE.side;
+  const width = tab === "beads" ? undefined : PANE.width + 2 * side;
+  const scrolled = (body: ReactNode) => (
+    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingTop: compact ? 16 : PANE.top, paddingHorizontal: side, paddingBottom: PANE.bottom }}>
+      <View style={{ width: "100%", maxWidth: PANE.width }}>{body}</View>
+    </ScrollView>
+  );
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
-      <View style={{ paddingHorizontal: styles.content.padding, paddingTop: styles.content.padding, gap: styles.content.gap }}>
+      <View style={{ paddingHorizontal: side, paddingTop: compact ? 16 : PANE.top, width: "100%", maxWidth: width }}>
         <ProjectHeader
           label={label}
+          directory={directories.get(workspaceId) ?? null}
           tab={tab}
           onTab={setTab}
           onBack={onBack}
@@ -1101,34 +1292,34 @@ export function ProjectPage(props: ProjectPageProps) {
           status={status}
           onChat={onChat}
           chatBusy={chatBusy === true}
-          styles={styles}
+          level={levelNameOf(policy.data?.levels, workspaceId)}
+          onOpenSettings={onOpenSettings}
+          extra={
+            tab === "metrics" ? (
+              <Segmented segments={WINDOW_SEGMENTS} selected={window} onSelect={(key) => setWindow(key as InsightsWindow)} theme={theme} />
+            ) : null
+          }
+          theme={theme}
         />
       </View>
       <View style={{ flex: 1 }}>
         {tab === "overview" ? (
-          <OverviewTab
-            workspaceId={workspaceId}
-            onOpenSettings={onOpenSettings}
-            onRequests={() => setTab("requests")}
-            compact={layout.compact}
-            styles={styles}
-            theme={theme}
-          />
+          scrolled(<OverviewTab workspaceId={workspaceId} onRequests={() => setTab("requests")} compact={compact} styles={styles} theme={theme} />)
         ) : tab === "requests" ? (
           <RequestsTab
             workspaceId={workspaceId}
             closed={closed}
             openAgent={openAgent === undefined ? undefined : (agentId) => openAgent({ agentId })}
-            compact={layout.compact}
+            compact={compact}
             styles={styles}
             theme={theme}
           />
         ) : tab === "beads" ? (
           <BeadsScreen {...surface} workspaceId={workspaceId} />
         ) : tab === "metrics" ? (
-          <ProjectMetrics workspaceId={workspaceId} label={label} compact={layout.compact} theme={theme} />
+          scrolled(<ProjectMetrics workspaceId={workspaceId} label={label} window={window} compact={compact} theme={theme} />)
         ) : (
-          <AgentsTab workspaceId={workspaceId} openAgent={openAgent} compact={layout.compact} styles={styles} theme={theme} />
+          <AgentsTab workspaceId={workspaceId} openAgent={openAgent} compact={compact} styles={styles} theme={theme} />
         )}
       </View>
     </View>

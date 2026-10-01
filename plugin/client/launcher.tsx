@@ -4,9 +4,10 @@
  * in `launch-manager.ts`, which is tested without a renderer.
  *
  * It is the section router of the management surface (autonomy design §A.12,
- * change-014 outcome 5): it opens on the Inbox, and a row of tabs switches
- * Inbox · Projects · Settings · Tools & skills, the Inbox tab carrying the
- * count of what needs the owner (DQ-3). Projects is `work.tsx` (the projects,
+ * change-014 outcome 5): it opens on the Inbox, and the shell header
+ * (`shell-header.tsx`, the approved mockup's bar) switches Inbox · Projects ·
+ * Settings · Tools & skills, the Inbox tab carrying the count of what needs
+ * the owner (DQ-3), and shows the Orchestrator's status. Projects is `work.tsx` (the projects,
  * and a project's Overview · Requests · Beads · Metrics · Agents, Metrics
  * being `insights.tsx`); Settings is `settings-section.tsx`, built from the
  * Setup screen's pieces — so nothing that existed is out of reach; Tools &
@@ -25,13 +26,10 @@ import { ToolsScreen } from "./tools-screen";
 import { InboxScreen, useInbox } from "./inbox";
 import { insightsProjects } from "./insights-model";
 import { inboxTab } from "./inbox-model";
-import { StatusTabs } from "./ui";
-import { ProjectPage, WorkScreen } from "./work";
+import { WorkScreen } from "./work";
 import {
   SURFACE_HOME_VIEW,
   SURFACE_SECTIONS,
-  backLabelOf,
-  backOf,
   overviewPolling,
   closedWorkspaces,
   launcherNotices,
@@ -45,7 +43,8 @@ import {
   type SurfaceView,
   type SurfaceWorkspace,
 } from "./surface-view";
-import { dashboardStyles } from "./styles";
+import { ShellHeader } from "./shell-header";
+import type { TextTab } from "./text-tabs";
 import { toneColor, type Tone } from "./tone";
 import { managerEnsureRpc, tracesWorkspacesRpc, workspacesOverviewRpc } from "../shared/contracts";
 import { PLUGIN_VERSION } from "../shared/version";
@@ -168,57 +167,6 @@ export async function readReduceMotion(): Promise<boolean> {
   }
 }
 
-function useReduceMotion(): boolean {
-  const [reduceMotion, setReduceMotion] = useState(false);
-  useEffect(() => {
-    let live = true;
-    void readReduceMotion().then((value) => {
-      if (live) setReduceMotion(value);
-    });
-    return () => {
-      live = false;
-    };
-  }, []);
-  return reduceMotion;
-}
-
-function RunningDot(props: {
-  counts: RunningAgentCounts | undefined;
-  theme: PluginTheme;
-  styles: ReturnType<typeof launcherStyles>;
-  /** The dot alone (project rows name the agents themselves); the words stay in its accessibility label. */
-  bare?: boolean;
-}) {
-  const { counts, theme, styles, bare } = props;
-  const reduceMotion = useReduceMotion();
-  const state = runningDotState(counts, reduceMotion);
-  const opacity = useRef(new Animated.Value(DIM_OPACITY)).current;
-  // Restarting on `animate` and `opacity` alone keeps the loop through a poll
-  // that only changed the counts, so the dot does not blink back to full.
-  useEffect(() => (state === null ? undefined : applyDotPulse(opacity, state)), [
-    opacity,
-    state?.animate,
-    state?.opacity,
-  ]);
-  if (state === null) return null;
-  return (
-    <View style={styles.stat} accessibilityLabel={state.label}>
-      <Animated.View
-        style={{ width: 8, height: 8, borderRadius: 0, opacity, backgroundColor: toneColor(theme, state.tone) }}
-      />
-      {/* An idle row says it with the dim dot alone; spelling out "nothing is
-          running" on every quiet project is noise. The accessibility label
-          above carries the words in both states. */}
-      {state.total === 0 || bare === true ? null : (
-        // The dot carries the colour; the words stay muted (change-014 outcome 6).
-        <Text style={[styles.statText, { color: theme.colors.foregroundMuted }]} numberOfLines={1}>
-          {state.label}
-        </Text>
-      )}
-    </View>
-  );
-}
-
 /**
  * The surface's status strip: a slash command's notice (tap to dismiss), a host
  * too old to open agents, and the state of the last Manager launch. Built once
@@ -303,7 +251,6 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
     launcherNotices.peek,
   );
   const styles = useMemo(() => launcherStyles(theme, layout.compact), [theme, layout.compact]);
-  const tabStyles = useMemo(() => dashboardStyles(theme, layout.compact), [theme, layout.compact]);
 
   const workspaces = useQuery({
     queryKey: ["paseo-bm", "launcher", "workspaces"],
@@ -322,13 +269,24 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
     },
   });
 
+  // Settings and Tools name a project by its own name, as the mockup does (change-014).
+  const projectNames = useMemo(() => (workspaces.data ?? []).map((workspace) => ({ id: workspace.id, screenTitle: workspace.label })), [workspaces.data]);
+  // A project page opened from elsewhere (the Inbox, the Command Center) shows beside the Projects list:
+  // each opening is one request to the list, numbered so the same project can be asked for again.
+  const requestCount = useRef(0);
+  const projectTabNow = projectTabOf(view);
+  const projectRequest = useMemo(
+    () => (projectTabNow !== null && project !== null ? { workspaceId: project.id, tab: projectTabNow, nonce: (requestCount.current += 1) } : null),
+    [view, project?.id],
+  );
   // A project's name for the Inbox: open workspaces first, then the history of closed ones.
   const projectOf = useMemo(() => {
     const names = new Map<string, string>();
     for (const closed of stored.data?.workspaces ?? []) {
       if (closed.lastKnownName !== null) names.set(closed.workspaceId, closed.lastKnownName);
     }
-    for (const workspace of workspaces.data ?? []) names.set(workspace.id, workspace.screenTitle);
+    // The project's own name, as the mockup's group headings show it (change-014).
+    for (const workspace of workspaces.data ?? []) names.set(workspace.id, workspace.label);
     return (workspaceId: string) => names.get(workspaceId) ?? null;
   }, [stored.data, workspaces.data]);
   // Read every INBOX_POLL_MS while the Inbox shows, kept otherwise for the tab's count.
@@ -376,25 +334,30 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
     };
   }, [ensure, openAgent]);
 
-  const pending = state.status === "pending";
-  // Every ← goes where `backOf` says: a project's page to the Projects list.
-  // A section's own screen has no ←: the tabs reach it.
-  const goBack = () => setView(backOf(view) ?? SURFACE_HOME_VIEW);
 
   // The section tabs, above every view: Inbox (with its count) · Projects · Settings · Tools & skills.
-  const tabs = SURFACE_SECTIONS.map((section) =>
-    section.key === "inbox" ? inboxTab(inbox.view?.count ?? null) : { key: section.key, label: section.label },
-  );
+  const tabs: TextTab[] = SURFACE_SECTIONS.map((section) => {
+    if (section.key !== "inbox") return { key: section.key, label: section.label };
+    const tab = inboxTab(inbox.view?.count ?? null);
+    return {
+      key: tab.key,
+      label: tab.label,
+      badge: tab.count ?? null,
+      accessibilityLabel: tab.hint === undefined ? tab.label : `${tab.label}: ${tab.hint}`,
+    };
+  });
+  // The shell (the mockup's header): the brand, the section nav and the
+  // Orchestrator's status in one bar, the section's own screen below it.
   const framed = (screen: ReactNode) => (
     <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
-      <View style={{ paddingHorizontal: tabStyles.content.padding, paddingTop: tabStyles.content.padding }}>
-        <StatusTabs
-          tabs={tabs}
-          selected={sectionOf(view)}
-          onSelect={(key) => setView(sectionHomeOf(key as SurfaceSection))}
-          styles={tabStyles}
-        />
-      </View>
+      <ShellHeader
+        tabs={tabs}
+        selected={sectionOf(view)}
+        onSelect={(key) => setView(sectionHomeOf(key as SurfaceSection))}
+        theme={theme}
+        compact={layout.compact}
+        navigation={navigation}
+      />
       <View style={{ flex: 1 }}>{screen}</View>
     </View>
   );
@@ -418,36 +381,14 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
   if (view === "settings") {
     // Settings (experience concept §4.4, change-014 outcome 5): projects named as the Projects list names them.
     return framed(
-      <SettingsScreen {...props} projects={insightsProjects(workspaces.data ?? [], stored.data?.workspaces ?? [])} status={status} />,
+      <SettingsScreen {...props} projects={insightsProjects(projectNames, stored.data?.workspaces ?? [])} status={status} />,
     );
   }
 
   if (view === "tools") {
     // Tools & skills (change-014 outcome 5): the props Settings gets.
     return framed(
-      <ToolsScreen {...props} projects={insightsProjects(workspaces.data ?? [], stored.data?.workspaces ?? [])} status={status} />,
-    );
-  }
-
-  const projectTab = projectTabOf(view);
-  if (projectTab !== null && project !== null) {
-    // A project's page (experience concept §4.2), opened on the tab its view names.
-    return framed(
-      <ProjectPage
-        key={`${project.id}:${view}`}
-        {...props}
-        workspaceId={project.id}
-        label={project.label}
-        initialTab={projectTab}
-        closed={project.closed}
-        onBack={goBack}
-        backLabel={backLabelOf(view) ?? undefined}
-        status={status}
-        // A closed workspace has history only: no Manager to chat with.
-        onChat={openAgent === undefined || project.closed !== undefined ? undefined : () => void managerLauncher.launch(project.id, { ensure, openAgent })}
-        chatBusy={pending && state.workspaceId === project.id}
-        onOpenSettings={() => setView("settings")}
-      />,
+      <ToolsScreen {...props} projects={insightsProjects(projectNames, stored.data?.workspaces ?? [])} status={status} />,
     );
   }
 
@@ -468,17 +409,10 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
       closed={closedWorkspaces(stored.data?.workspaces ?? [], workspaces.data?.map((workspace) => workspace.id) ?? [])}
       status={status}
       footer={`paseo-bm ${PLUGIN_VERSION}`}
-      renderDot={(workspaceId) => (
-        <RunningDot counts={overviewById.get(workspaceId)?.runningAgents} theme={theme} styles={styles} bare />
-      )}
-      onOpen={(workspaceId, label) => {
-        const known = workspaces.data?.find((workspace) => workspace.id === workspaceId);
-        // A workspace Paseo no longer lists: its page offers what can be done with its history.
-        const closed = known === undefined ? stored.data?.workspaces.find((entry) => entry.workspaceId === workspaceId)?.state : undefined;
-        setProject({ id: workspaceId, label: known?.screenTitle ?? label, ...(closed === undefined ? {} : { closed }) });
-        // A closed workspace opens on Requests, where its history's actions are.
-        setView(closed === undefined ? "project-overview" : "project-requests");
-      }}
+      // The list and the chosen project's page side by side (change-014, the mockup's Projects).
+      surface={props}
+      onOpenSettings={() => setView("settings")}
+      request={projectRequest}
     />,
   );
 }

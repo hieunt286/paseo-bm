@@ -1,9 +1,11 @@
 /**
  * Settings → Coordination's compaction and handoff cards (autonomy design
- * §G.5–§G.7; bead `7gxw.9`): each mechanism its own card, with its switch,
- * its thresholds with − and + inside their bounds, Save and the defaults;
- * and below them the review budget card (§C.4, §G.7; bead `7gxw.12`): each
- * tier's review calls with − and + inside 2–8, Save and the defaults.
+ * §G.5–§G.7; bead `7gxw.9`; drawn as the approved mockup): each mechanism its
+ * own card, with its switch, how often it helped, and its thresholds as
+ * number fields read in their own units ("390 K", "50 %") inside their
+ * bounds, then Save; and the review budget card (§C.4, §G.7; bead `7gxw.12`):
+ * each tier's review calls as a number field inside 2–8, then Save. The − and
+ * + steps and each card's own defaults stay here for callers that step.
  *
  * - **The switch** saves at once. Turning off needs nothing more (§G.8: off
  *   at once); turning on asks first, Cancel being the default, because it
@@ -48,30 +50,34 @@ export const MECHANISM_THRESHOLDS: Readonly<Record<CoordinationMechanism, readon
 /** The edited values not saved yet. */
 export type ThresholdDraft = Partial<Record<ThresholdKey, number>>;
 
-const MECHANISM_WORDS: Readonly<Record<CoordinationMechanism, { title: string; word: string; meaning: string; note: string | null; onBody: string }>> = {
+const MECHANISM_WORDS: Readonly<
+  Record<CoordinationMechanism, { title: string; heading: string; word: string; meaning: string; note: string | null; onBody: string }>
+> = {
   compact: {
     title: "Compaction",
+    heading: "Compact",
     word: "compaction",
-    meaning: "When an agent's turns grow heavy, the Orchestrator may have it compact its conversation, without asking you.",
+    meaning: "Shrink a Manager's or Worker's conversation at a safe point, then restore what matters from the records.",
     note: "A Claude turn is judged by its tokens read, a Codex or OpenCode turn by how full its context is.",
     onBody: "The Orchestrator may then have a Manager or a Worker compact its conversation without asking you.",
   },
   handoff: {
     title: "Handoff",
+    heading: "Handoff",
     word: "handoff",
-    meaning: "When a request grows very heavy, the Orchestrator may have the Manager hand it to a fresh Worker with a brief, without asking you.",
+    meaning: "Move a heavy request to a fresh Worker with a brief and the old Worker's note.",
     note: null,
     onBody: "The Orchestrator may then have the Manager hand a heavy request to a fresh Worker without asking you.",
   },
 };
 
 const THRESHOLD_WORDS: Readonly<Record<ThresholdKey, { label: string; spoken: string }>> = {
-  "compact.managerTokensPerTurn": { label: "Manager turn", spoken: "Manager turn threshold" },
-  "compact.workerTokensPerTurn": { label: "Worker turn", spoken: "Worker turn threshold" },
-  "compact.contextShare": { label: "Context", spoken: "Context threshold" },
-  "compact.maxPerAgent": { label: "Per agent", spoken: "Compactions per agent" },
-  "handoff.requestTokens": { label: "Request", spoken: "Request threshold" },
-  "handoff.maxPerRequest": { label: "Per request", spoken: "Handoffs per request" },
+  "compact.managerTokensPerTurn": { label: "Manager reads more than, per turn", spoken: "Manager turn threshold" },
+  "compact.workerTokensPerTurn": { label: "Worker reads more than, per turn", spoken: "Worker turn threshold" },
+  "compact.contextShare": { label: "Or its context window is fuller than", spoken: "Context threshold" },
+  "compact.maxPerAgent": { label: "At most, per agent", spoken: "Compactions per agent" },
+  "handoff.requestTokens": { label: "A request has read more than", spoken: "Request threshold" },
+  "handoff.maxPerRequest": { label: "At most, per request", spoken: "Handoffs per request" },
 };
 
 const TOKEN_KEYS: ReadonlySet<ThresholdKey> = new Set(["compact.managerTokensPerTurn", "compact.workerTokensPerTurn", "handoff.requestTokens"]);
@@ -93,6 +99,80 @@ export function thresholdValueText(key: ThresholdKey, value: number): string {
   if (TOKEN_KEYS.has(key)) return `${tokenCountText(value)} tokens read`;
   if (key === "compact.contextShare") return `${Math.round(value * 100)}% of the window`;
   return `at most ${value}`;
+}
+
+/** The numeric settings a field of the Coordination cards edits as text. */
+export type CoordinationNumberKey = keyof typeof COORDINATION_BOUNDS;
+
+/** A setting as its field shows it (the approved mockup): "390 K", "5.7 M", "50 %", "2". */
+export function coordinationInputText(key: CoordinationNumberKey, value: number): string {
+  if (TOKEN_KEYS.has(key as ThresholdKey)) {
+    if (value >= 1_000_000) return `${trimmed(value / 1_000_000)} M`;
+    if (value >= 1_000) return `${trimmed(value / 1_000)} K`;
+    return String(value);
+  }
+  if (key === "compact.contextShare") return `${Math.round(value * 100)} %`;
+  return String(value);
+}
+
+/** What a field's label says, for a refusal: its own label, or the setting in a few words. */
+const FIELD_NAMES: Readonly<Partial<Record<CoordinationNumberKey, string>>> = {
+  "advice.everyFinished": "Review the workflow every",
+  "review.smallBudget": "Small",
+  "review.mediumBudget": "Medium",
+  "review.largeBudget": "Large",
+};
+
+/**
+ * A field's text as a value: a token count with an optional K or M ("390 K",
+ * "5.7M", "390000"), the context share in percent ("50 %", "50"), any other
+ * a whole number. Outside its bounds, or not a number, it says why, in the
+ * field's own units.
+ */
+export function parseCoordinationInput(key: CoordinationNumberKey, text: string): { value: number; error: null } | { value: null; error: string } {
+  const bounds = COORDINATION_BOUNDS[key];
+  const name = FIELD_NAMES[key] ?? THRESHOLD_WORDS[key as ThresholdKey]?.label ?? key;
+  const range = `${coordinationInputText(key, bounds.min)} to ${coordinationInputText(key, bounds.max)}`;
+  const refuse = { value: null, error: `${name}: a number from ${range}.` } as const;
+  const trimmedText = text.trim();
+  let value: number;
+  if (TOKEN_KEYS.has(key as ThresholdKey)) {
+    const match = /^(\d+(?:\.\d+)?)\s*([kKmM])?$/.exec(trimmedText);
+    if (match === null) return refuse;
+    const unit = match[2]?.toLowerCase();
+    value = Math.round(Number(match[1]) * (unit === "m" ? 1_000_000 : unit === "k" ? 1_000 : 1));
+  } else if (key === "compact.contextShare") {
+    const match = /^(\d+(?:\.\d+)?)\s*%?$/.exec(trimmedText);
+    if (match === null) return refuse;
+    value = Math.round(Number(match[1])) / 100;
+  } else {
+    if (!/^\d+$/.test(trimmedText)) return refuse;
+    value = Number(trimmedText);
+  }
+  if (!(value >= bounds.min && value <= bounds.max)) return refuse;
+  return { value, error: null };
+}
+
+/** The text of the fields being typed in, by setting; a field not in it shows its value. */
+export type CoordinationInputs = Partial<Record<CoordinationNumberKey, string>>;
+
+/** The refusals of the fields being typed in, in the given order. */
+export function inputErrorsOf(keys: readonly CoordinationNumberKey[], inputs: CoordinationInputs): string[] {
+  return keys.flatMap((key) => {
+    const text = inputs[key];
+    if (text === undefined) return [];
+    const parsed = parseCoordinationInput(key, text);
+    return parsed.error === null ? [] : [parsed.error];
+  });
+}
+
+/**
+ * How often the mechanism helped, beside its switch: the A-12 figures the
+ * guard switched it off on ("helped 6 of 10"); "helped —" while there are none.
+ */
+export function helpedText(mechanism: CoordinationMechanism, settings: CoordinationSettings): string {
+  const off = settings.guard[mechanism].switchedOff;
+  return off === null ? "helped —" : `helped ${off.met} of ${off.checked}`;
 }
 
 /** 1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8 per power of ten: a token threshold's steps, about ten per decade. */
@@ -169,6 +249,10 @@ export interface ThresholdRowView {
   key: ThresholdKey;
   label: string;
   valueText: string;
+  /** The value as its field shows it: "390 K". */
+  inputText: string;
+  /** What a screen reader says for the field. */
+  accessibilityLabel: string;
   decrease: StepButton;
   increase: StepButton;
 }
@@ -176,6 +260,8 @@ export interface ThresholdRowView {
 export interface MechanismCardView {
   mechanism: CoordinationMechanism;
   title: string;
+  /** "helped 6 of 10", "helped —". */
+  helped: string;
   meaning: string;
   /** How a turn is judged; null when there is nothing to add. */
   note: string | null;
@@ -225,6 +311,8 @@ export function mechanismCardView(input: {
       key,
       label: THRESHOLD_WORDS[key].label,
       valueText: thresholdValueText(key, value),
+      inputText: coordinationInputText(key, value),
+      accessibilityLabel: `${spoken}: ${thresholdValueText(key, value)}`,
       decrease: { enabled: !saving && lower !== value, label: "−", accessibilityLabel: `${spoken}: lower to ${thresholdValueText(key, lower)}` },
       increase: { enabled: !saving && higher !== value, label: "+", accessibilityLabel: `${spoken}: raise to ${thresholdValueText(key, higher)}` },
     };
@@ -233,7 +321,8 @@ export function mechanismCardView(input: {
   const atDefaults = MECHANISM_THRESHOLDS[mechanism].every((key) => thresholdValueOf(settings, draft, key) === storedValue(defaults, key));
   return {
     mechanism,
-    title: words.title,
+    title: words.heading,
+    helped: helpedText(mechanism, settings),
     meaning: words.meaning,
     note: words.note,
     status: mechanismStatus(mechanism, settings, now),
@@ -276,7 +365,7 @@ export type ReviewBudgetDraft = Partial<Record<ReviewBudgetKey, number>>;
 /** The card's words. */
 export const REVIEW_BUDGET_WORDS = {
   title: "Review budget",
-  meaning: "Review calls per request, by size: past them, the Worker asks you before another. Never below one review and its re-review.",
+  meaning: "Review calls a request may use before the Worker asks you.",
   note: "A new Worker gets these; one already working keeps the budget it started with.",
 } as const;
 
@@ -320,6 +409,8 @@ export interface ReviewBudgetRowView {
   key: ReviewBudgetKey;
   label: string;
   valueText: string;
+  inputText: string;
+  accessibilityLabel: string;
   decrease: StepButton;
   increase: StepButton;
 }
@@ -353,6 +444,8 @@ export function reviewBudgetCardView(input: {
       key,
       label: tier,
       valueText: reviewBudgetValueText(value),
+      inputText: String(value),
+      accessibilityLabel: `${spoken}: ${reviewBudgetValueText(value)}`,
       decrease: { enabled: !saving && lower !== value, label: "−", accessibilityLabel: `${spoken}: lower to ${reviewBudgetValueText(lower)}` },
       increase: { enabled: !saving && higher !== value, label: "+", accessibilityLabel: `${spoken}: raise to ${reviewBudgetValueText(higher)}` },
     };

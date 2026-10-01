@@ -8,16 +8,14 @@ import type { Decision } from "../plugin/shared/decisions";
 /**
  * The decision card's options must never run past the card (owner report,
  * 2026-09-30: a long recommended option overflowed the card to the right edge
- * of the chat). Short answers stay side by side; once one is a sentence, every
- * option takes the card's width and its text wraps.
+ * of the chat). As the approved mockup draws them (change-014), every option
+ * is a full-width row — key letter, label, mark — and its label wraps.
  */
 
 // The root tsconfig has no `jsx`, so the .tsx module loads through a non-literal specifier.
 const cardPath = "../plugin/client/chat-card.tsx";
-const { DecisionCardBody, optionsStacked, OPTION_ROW_MAX_CHARS } = (await import(cardPath)) as {
+const { DecisionCardBody } = (await import(cardPath)) as {
   DecisionCardBody: (props: Record<string, unknown>) => unknown;
-  optionsStacked: (labels: readonly string[]) => boolean;
-  OPTION_ROW_MAX_CHARS: number;
 };
 
 const styles = new Proxy({}, { get: (_target, key) => ({ name: String(key) }) });
@@ -84,32 +82,27 @@ const optionButtons = (nodes: Array<RNode | string>) =>
   pressables(nodes).filter((node) => String(node.props["accessibilityLabel"]).startsWith("Answer: "));
 
 describe("decision options never run past the card", () => {
-  it("stacks the options once one label is a sentence", () => {
-    expect(optionsStacked(["Yes", "Hold"])).toBe(false);
-    expect(optionsStacked(["x".repeat(OPTION_ROW_MAX_CHARS)])).toBe(false);
-    expect(optionsStacked(["Yes", "x".repeat(OPTION_ROW_MAX_CHARS + 1)])).toBe(true);
+  const flat = (style: unknown) => [style].flat(Infinity).reduce<Record<string, unknown>>((all, part) => ({ ...all, ...(part as object) }), {});
+
+  it("draws every option as a full-width row whose label wraps — a sentence-long one and a short one alike", () => {
+    for (const labels of [[LONG, "Keep 0.4.1 pinned", "Pin HEAD, no label"], ["Yes", "Hold"]]) {
+      const nodes = draw(labels);
+      const buttons = optionButtons(nodes);
+      expect(buttons).toHaveLength(labels.length);
+      for (const button of buttons) {
+        expect(flat(button.props["style"])).toMatchObject({ alignSelf: "stretch", flexDirection: "row", alignItems: "flex-start" });
+        const label = button.children.filter((child): child is RNode => typeof child !== "string" && child.type === "Text")[1]!;
+        expect(flat(label.props["style"])).toMatchObject({ flex: 1, flexShrink: 1, textAlign: "left" });
+      }
+    }
+    expect(texts(draw([LONG, "Keep 0.4.1 pinned"])).some((text) => text.startsWith("Ghim lại sang commit HEAD"))).toBe(true);
   });
 
-  it("draws a sentence-long option full width, left-aligned and wrapping — every option, not only the long one", () => {
-    const nodes = draw([LONG, "Keep 0.4.1 pinned", "Pin HEAD, no label"]);
-    expect(texts(nodes).some((text) => text.startsWith("Ghim lại sang commit HEAD"))).toBe(true);
-    const buttons = optionButtons(nodes);
-    expect(buttons).toHaveLength(3);
-    for (const button of buttons) {
-      const style = (button.props["style"] as object[]).reduce((all, part) => ({ ...all, ...part }), {});
-      expect(style).toMatchObject({ alignSelf: "stretch", alignItems: "flex-start" });
-      const label = (button.children.find((child): child is RNode => typeof child !== "string" && child.type === "Text")!).props["style"] as object[];
-      expect(label.reduce((all, part) => ({ ...all, ...part }), {})).toMatchObject({ flexShrink: 1, textAlign: "left" });
-    }
-  });
-
-  it("keeps short options side by side, still allowed to shrink within the card", () => {
-    const buttons = optionButtons(draw(["Yes", "Hold"]));
-    expect(buttons).toHaveLength(2);
-    for (const button of buttons) {
-      const style = (button.props["style"] as object[]).reduce((all, part) => ({ ...all, ...part }), {});
-      expect(style).toMatchObject({ maxWidth: "100%", flexShrink: 1 });
-      expect(style).not.toHaveProperty("alignSelf");
-    }
+  it("puts the key letter first and the recommended mark last, the recommended row filled with the accent", () => {
+    const [first, second] = optionButtons(draw(["Yes", "Hold"]));
+    expect(texts([first!])).toEqual(["a", "Yes", "Recommended"]);
+    expect(texts([second!])).toEqual(["b", "Hold"]);
+    expect(flat(first!.props["style"])).toMatchObject({ backgroundColor: "#accent" });
+    expect(flat(second!.props["style"])).toMatchObject({ backgroundColor: "transparent", borderWidth: 1, borderColor: "#border" });
   });
 });

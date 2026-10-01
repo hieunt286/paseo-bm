@@ -6,6 +6,7 @@
  *   first time, restarted when it lost its tools or its instructions are
  *   outdated (Orchestrator design §3.3, §5.1) — and the note that a new one
  *   replaced the old;
+ * - the same said in the shell header's right side (`orchestratorHeaderView`);
  * - the stage bar and the M W R letters that Work's project rows use
  *   (design §6B.7); their times are written by `format.ts`.
  *
@@ -133,6 +134,51 @@ export function orchestratorLineView(
   return warning === null
     ? { title, action: "open", label: `${OPEN_CHAT_LABEL} ▸`, agentId: agent.id, warning: null, replaced: replacedLine(state, now) }
     : { title, action: "restart", label: `${RECREATE_LABEL}…`, agentId: agent.id, warning, replaced: replacedLine(state, now) };
+}
+
+// ---------------------------------------------------------------------------
+// The shell header's Orchestrator status (change-014 fidelity pass, the
+// mockup's header): the line above, said in one short muted phrase.
+// ---------------------------------------------------------------------------
+
+/** The header's text button before the Orchestrator exists; it opens the same Open dialog as the line. */
+export const HEADER_START_LABEL = "Start…";
+
+/**
+ * The projects the Orchestrator watches: those whose autonomy level is above
+ * Hands-on (a level 1–4, or a custom mix). A project absent from `levels` is
+ * at Hands-on. Null until `autonomy.policy` answered.
+ */
+export function watchedProjectCount(levels: Readonly<Record<string, number | "custom">> | undefined): number | null {
+  if (levels === undefined) return null;
+  return Object.values(levels).filter((reading) => reading !== 0).length;
+}
+
+export interface OrchestratorHeaderView {
+  /** The 8px square: accent while the Orchestrator exists, muted before. */
+  dot: "accent" | "muted";
+  /** `Orchestrator idle · 2 projects watched`, `Orchestrator not open`. */
+  text: string;
+  /** What pressing does — the line's action (`orchestratorLineView`). */
+  action: OrchestratorLineView["action"];
+  /** The text button beside the status (`Start…`, `Start a new Orchestrator…`); null when the status itself opens the chat. */
+  button: string | null;
+  agentId: string | null;
+  warning: string | null;
+  replaced: string | null;
+}
+
+export function orchestratorHeaderView(
+  state: Pick<OrchestratorStateOutput, "agent" | "previousCount" | "toolsStale" | "outdated">,
+  levels: Readonly<Record<string, number | "custom">> | undefined,
+  now: Date,
+): OrchestratorHeaderView {
+  const line = orchestratorLineView(state, now);
+  const base = { action: line.action, agentId: line.agentId, warning: line.warning, replaced: line.replaced };
+  if (state.agent === null) return { ...base, dot: "muted", text: "Orchestrator not open", button: HEADER_START_LABEL };
+  const watched = watchedProjectCount(levels);
+  const text = `Orchestrator ${agentStateOf(state.agent)}${watched === null ? "" : ` · ${watched} project${watched === 1 ? "" : "s"} watched`}`;
+  return { ...base, dot: "accent", text, button: line.action === "restart" ? line.label : null };
 }
 
 // ---------------------------------------------------------------------------

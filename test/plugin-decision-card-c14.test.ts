@@ -7,7 +7,8 @@ import {
   ASK_UI_IDLE,
   DECISION_POLL_MS,
   DECISION_UI_IDLE,
-  SUGGESTS_PREFIX,
+  RECOMMENDED_MARK,
+  SUGGESTS_MARK,
   decisionCardView,
   runDecisionAsk,
   threadPollMs,
@@ -91,24 +92,24 @@ function thread(id: string, ...entries: Array<["owner" | "asker", string]>): Dec
 }
 
 describe("the Orchestrator's proposal on the card (change-014 outcome 2)", () => {
-  it("makes the suggested option the primary one, labelled, with its reason under the options; the recommended keeps its ★ as secondary", () => {
+  it("makes the suggested option the primary one, marked, with its reason under the options; the recommended keeps its mark as secondary", () => {
     const shown = view(predicted());
-    expect(shown.options.map(({ key, label, primary }) => ({ key, label, primary }))).toEqual([
-      { key: "a", label: "Push contract only ★", primary: false },
-      { key: "b", label: "Push both and publish", primary: false },
-      { key: "c", label: `${SUGGESTS_PREFIX}Hold`, primary: true },
+    expect(shown.options.map(({ key, label, mark, primary }) => ({ key, label, mark, primary }))).toEqual([
+      { key: "a", label: "Push contract only", mark: RECOMMENDED_MARK, primary: false },
+      { key: "b", label: "Push both and publish", mark: null, primary: false },
+      { key: "c", label: "Hold", mark: SUGGESTS_MARK, primary: true },
     ]);
     expect(shown.options[2]!.accessibilityLabel).toBe("Answer: Hold (the Orchestrator suggests it)");
     expect(shown.options[0]!.accessibilityLabel).toBe("Answer: Push contract only (recommended); allows push");
     expect(shown.proposal).toBe("Orchestrator: Hold until the contract tests pass.");
     expect(shown.details).toContain("Orchestrator suggests: c at 2026-09-29T07:41:00.000Z");
     const nodes = draw(shown);
-    expect(texts(nodes)).toEqual(expect.arrayContaining(["Orchestrator suggests · Hold", "Push contract only ★", "Orchestrator: Hold until the contract tests pass."]));
+    expect(texts(nodes)).toEqual(expect.arrayContaining(["Hold", "Orchestrator suggests", "Push contract only", "Recommended", "Orchestrator: Hold until the contract tests pass."]));
   });
 
   it("marks both on one button when the Orchestrator suggests the recommended option", () => {
     const shown = view(predicted("a"));
-    expect(shown.options[0]).toMatchObject({ label: `${SUGGESTS_PREFIX}Push contract only ★`, primary: true, accessibilityLabel: "Answer: Push contract only (the Orchestrator suggests it; recommended); allows push" });
+    expect(shown.options[0]).toMatchObject({ label: "Push contract only", mark: `${SUGGESTS_MARK} · ${RECOMMENDED_MARK}`, primary: true, accessibilityLabel: "Answer: Push contract only (the Orchestrator suggests it; recommended); allows push" });
     expect(shown.options.filter((option) => option.primary)).toHaveLength(1);
   });
 
@@ -151,16 +152,22 @@ describe("Ask back on the card (change-014 outcome 3)", () => {
     for (const id of ["h:agent-worker:perm-1", "f:fb-000000000d02", "r:5b1e"]) expect(view(makeDecision({ id })).askBack).toBeNull();
   });
 
-  it("a held action carries the danger bar; a Worker's open question leaves the bar to its chip", () => {
-    expect(view(makeDecision({ id: "h:agent-worker:perm-1" })).frame.bar).toBe("danger");
-    expect(view(makeDecision()).frame.bar).toBeUndefined();
+  it("a held action carries the danger bar and its kind label; a Worker's open question the warning ones; a settled one neither colour", () => {
+    expect(view(makeDecision({ id: "h:agent-worker:perm-1" })).frame).toMatchObject({ bar: "danger", label: { tone: "danger" }, icon: "Lock" });
+    expect(view(makeDecision({ id: "h:agent-worker:perm-1" })).frame.label?.text).toMatch(/^HELD ACTION · [A-Z]+$/);
+    expect(view(makeDecision()).frame).toMatchObject({ bar: "warning", chip: null, recipient: null });
+    expect(view(makeDecision()).frame.label?.text).toMatch(/^DECISION · [A-Z]+$/);
+    const answered = answerDecision(makeDecision(), { via: "inbox", optionKey: "c", at: "2026-09-29T07:44:00.000Z" });
+    if (!answered.ok) throw new Error(answered.message);
+    expect(view(answered.decision).frame.bar).toBeUndefined();
+    expect(view(answered.decision).frame.label?.tone).toBe("muted");
   });
 
   it("draws no Ask back without its handlers (a card drawn read-only)", () => {
     expect(texts(draw(view(makeDecision())))).not.toContain("Ask back");
   });
 
-  it("opens a box with Cancel first; Send is enabled only with text; the options stay usable", () => {
+  it("opens a one-line box with Send then Cancel (the mockup's order); Send is enabled only with text; the options stay usable", () => {
     const on = askHandlers();
     const onChoose = vi.fn();
     const empty = view(makeDecision(), { ask: { ...ASK_UI_IDLE, text: "" } });
@@ -169,7 +176,7 @@ describe("Ask back on the card (change-014 outcome 3)", () => {
     const written = view(makeDecision(), { ask: { ...ASK_UI_IDLE, text: "Which tests?" } });
     const nodes = draw(written, { onAsk: on, askText: "Which tests?", onChoose });
     const all = labels(nodes);
-    expect(all.indexOf("Cancel the question")).toBeLessThan(all.indexOf("Send your question to the Worker"));
+    expect(all.indexOf("Send your question to the Worker")).toBeLessThan(all.indexOf("Cancel the question"));
     expect(all).not.toContain("Ask the Worker a question before you decide");
     const send = pressables(nodes).find((node) => node.props["accessibilityLabel"] === "Send your question to the Worker")!;
     expect(send.props["disabled"]).toBe(false);

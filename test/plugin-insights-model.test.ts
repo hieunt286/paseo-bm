@@ -20,7 +20,17 @@ import {
   REVIEW_LIFT_TITLE,
   UNNAMED_PROJECT,
   WINDOW_TABS,
+  CLOSED_PER_DAY_MAX,
+  TOKENS_BY_ROLE_NOTE,
+  WINDOW_SEGMENTS,
   autonomyFiguresView,
+  beadStatusBar,
+  closedPerDay,
+  featureBars,
+  leadTimes,
+  metricsView,
+  processRows,
+  roleTokenRows,
   beadsFiguresView,
   coordinationCards,
   costCards,
@@ -173,6 +183,23 @@ function summary(overrides: Partial<InsightsSummary> = {}): InsightsSummary {
   };
 }
 
+const STRIP_SPREAD = { count: 4, median: 4_000_000, p75: 6_000_000, p80: 6_000_000, p90: 8_000_000, max: 9_000_000 };
+const NO_SPREAD = { count: 0, median: null, p75: null, p80: null, p90: null, max: null };
+const SPREAD_BY_ROLE = (all: typeof NO_SPREAD | typeof STRIP_SPREAD) => ({ all, byRole: { manager: NO_SPREAD, worker: NO_SPREAD, reviewer: NO_SPREAD, orchestrator: NO_SPREAD, unknown: NO_SPREAD } });
+/** Context figures for the Metrics strip: 20M read over 4 requests. */
+const CONTEXT_FOR_STRIP: NonNullable<InsightsSummary["context"]> = {
+  turns: { withUsage: 23, byProvider: { claude: 23, codex: 0, opencode: 0, unknown: 0 }, repeated: 0, withToolCalls: 20 },
+  tokensRead: {
+    total: 20_000_000,
+    byRole: roles(2_000_000, 17_000_000, 1_000_000),
+    perTurn: SPREAD_BY_ROLE(NO_SPREAD),
+    perRequest: SPREAD_BY_ROLE(STRIP_SPREAD),
+    perAgent: SPREAD_BY_ROLE(NO_SPREAD),
+    heaviestRequests: [],
+  },
+  contextEstimate: { reported: 23, estimated: 0, unknown: 0, perTurn: SPREAD_BY_ROLE(NO_SPREAD), shareOfWindow: NO_SPREAD },
+  orchestrator: { wakes: 0, wakesWithUsage: 0, tokens: null, perFinishedRequest: null },
+};
 const EMPTY_ROLES = roles(0, 0, 0);
 const nothing = summary({
   requests: { inWindow: 0, finished: 0 },
@@ -548,85 +575,202 @@ describe("autonomy by class is read only (ADR-025)", () => {
   });
 });
 
-describe("the Metrics tab", () => {
-  const body = (overrides: Record<string, unknown> = {}) =>
-    renderTree(
-      MetricsBody({
-        window: "30d",
-        projectLabel: "main · app",
-        view: insightsView(summary(), NOW),
-        loading: false,
-        error: null,
-        beads: { kind: "choose", text: BEADS_CHOOSE_PROJECT },
-        autonomy: { kind: "choose", text: AUTONOMY_CHOOSE_PROJECT },
-        onWindow: noop,
-        onRefresh: noop,
-        styles,
-        theme,
-        ...overrides,
-      }),
-    );
+/** The Metrics tab's view over `summary()` and `BEADS`, unless told otherwise. */
+const metricsOf = (overrides: Partial<Parameters<typeof metricsView>[0]> = {}) =>
+  metricsView({ summary: summary(), all: summary(), beads: BEADS, window: "30d", projects: [], now: NOW, ...overrides });
 
-  it("reads top to bottom: the window, scope, flow, cost, beads, autonomy, then review lift — no title and no project tabs", () => {
-    const shown = texts(body());
+const metricsBody = (overrides: Record<string, unknown> = {}) =>
+  renderTree(
+    MetricsBody({
+      view: metricsOf(),
+      loading: false,
+      error: null,
+      beadsError: null,
+      autonomy: { kind: "choose", text: AUTONOMY_CHOOSE_PROJECT },
+      onRefresh: noop,
+      styles,
+      theme,
+      ...overrides,
+    }),
+  );
+
+describe("the Metrics tab: the model", () => {
+  const beadAt = (id: string, created: string, closed: string | null, overrides: Partial<BeadRow> = {}) =>
+    bead(id, closed === null ? "open" : "closed", { createdAt: created, closedAt: closed, ...overrides });
+
+  it("names the periods short, mapped onto the server's windows", () => {
+    expect(WINDOW_SEGMENTS.map((segment) => [segment.key, segment.label])).toEqual([
+      ["7d", "7 d"],
+      ["30d", "30 d"],
+      ["90d", "90 d"],
+      ["all", "All"],
+    ]);
+    expect(WINDOW_SEGMENTS.map((segment) => segment.accessibilityLabel)).toEqual(["Last 7 days", "Last 30 days", "Last 90 days", "Everything recorded"]);
+  });
+
+  it("takes the lead time of the work beads closed in the period: median, p90 and how many, epics left out", () => {
+    const beads = [
+      beadAt("a", "2026-09-26T09:00:00.000Z", "2026-09-26T09:18:00.000Z"),
+      beadAt("b", "2026-09-26T09:00:00.000Z", "2026-09-26T10:00:00.000Z"),
+      beadAt("c", "2026-09-26T09:00:00.000Z", "2026-09-26T09:10:00.000Z"),
+      beadAt("e", "2026-09-01T09:00:00.000Z", "2026-09-26T09:00:00.000Z", { issueType: "epic" }),
+      beadAt("old", "2026-08-01T09:00:00.000Z", "2026-08-02T09:00:00.000Z"),
+      beadAt("open", "2026-09-26T09:00:00.000Z", null),
+    ];
+    expect(leadTimes(beads, "7d", NOW)).toEqual({ median: 18 * 60_000, p90: 60 * 60_000, count: 3 });
+    expect(leadTimes(beads, "all", NOW).count).toBe(4);
+    expect(leadTimes([], "30d", NOW)).toEqual({ median: null, p90: null, count: 0 });
+  });
+
+  it("counts the beads closed per local day in the period, only days with one, oldest first", () => {
+    const local = (day: number, hour: number) => new Date(2026, 8, day, hour).toISOString();
+    const beads = [
+      beadAt("a", local(1, 8), local(17, 10)),
+      beadAt("b", local(1, 8), local(26, 9)),
+      beadAt("c", local(1, 8), local(26, 23)),
+      beadAt("d", local(1, 8), null),
+    ];
+    expect(closedPerDay(beads, "30d", NOW)).toEqual([
+      { key: "2026-09-17", label: "17 Sep", value: 1 },
+      { key: "2026-09-26", label: "26 Sep", value: 2 },
+    ]);
+    expect(closedPerDay(beads, "7d", NOW).map((day) => day.label)).toEqual(["26 Sep"]);
+    const many = Array.from({ length: 20 }, (_, index) => beadAt(`m${index}`, local(1, 8), new Date(2026, 8, 1 + index, 12).toISOString()));
+    expect(closedPerDay(many, "all", NOW)).toHaveLength(CLOSED_PER_DAY_MAX);
+  });
+
+  it("splits the bead status bar into closed, deferred and open, and says how many open ones are ready", () => {
+    const view = beadStatusBar([...BEADS, bead("bm-4", "deferred")]);
+    expect(view.segments.map((segment) => [segment.label, segment.share])).toEqual([
+      ["Closed 1", 0.25],
+      ["Deferred 1", 0.25],
+      ["Open 2 · 1 ready", 0.5],
+    ]);
+    expect(beadStatusBar([]).segments.every((segment) => segment.share === 0)).toBe(true);
+  });
+
+  it("counts beads per feature, most first, a bead with none left out", () => {
+    const beads = [
+      bead("a", "open", { labels: ["feature:site", "area:x"] }),
+      bead("b", "open", { labels: ["feature:core"] }),
+      bead("c", "closed", { labels: ["feature:core"] }),
+      bead("d", "open"),
+    ];
+    expect(featureBars(beads).map((bar) => [bar.label, bar.display])).toEqual([
+      ["core", "2"],
+      ["site", "1"],
+    ]);
+  });
+
+  it("has five figures: beads closed of all, lead time, requests, tokens per request, turns — a dash when unknown", () => {
+    expect(metricsOf({ summary: summary({ context: CONTEXT_FOR_STRIP }) }).strip).toEqual([
+      { label: "Beads closed", value: "1", unit: "/ 3", hint: null },
+      { label: "Lead time · median", value: "2 d", unit: null, hint: "p90 2 d · 1 task" },
+      { label: "Requests", value: "4", unit: null, hint: null },
+      { label: "Tokens per request", value: "5.0M", unit: null, hint: "context read" },
+      { label: "Turns", value: "23", unit: null, hint: "M 12 · W 8 · R 3" },
+    ]);
+    expect(metricsOf({ summary: undefined, beads: undefined }).strip.map((cell) => cell.value)).toEqual(["—", "—", "—", "—", "—"]);
+  });
+
+  it("tells how the work ran in this project beside all projects", () => {
+    const rows = processRows(summary(), undefined);
+    expect(rows.map((row) => [row.label, row.project, row.all])).toEqual([
+      ["Questions reaching you per finished request", "0.3", "—"],
+      ["Reviews per reviewed request", formatPerRequest(REVIEW_LIFT.all.reviewsPerRequest), "—"],
+      ["Median time to finished", "1 h 20 min", "—"],
+      ["Turns cut by Paseo · stalls", "1 · —", "—"],
+      ["Your wait · median", "2 min 55 s", "—"],
+      ["Failed turns", "2", "—"],
+    ]);
+  });
+
+  it("orders tokens by role Worker first, leaves the Orchestrator out of Metrics, and says nothing for an older server", () => {
+    const view = metricsOf({ summary: summary({ context: CONTEXT_FOR_STRIP }) });
+    expect(view.roleTokens.map((row) => row.label)).toEqual(["Worker", "Manager", "Reviewer"]);
+    expect(roleTokenRows(undefined)).toEqual([]);
+  });
+});
+
+describe("the Metrics tab", () => {
+  it("reads top to bottom as the artboard: the strip, bead status, closed per day, by feature, tokens by role, how the work ran; then what it showed before", () => {
+    const shown = texts(metricsBody());
     expect(shown).not.toContain("Insights");
-    expect(shown).not.toContain("All projects");
-    const order = ["7 days", "30 days", "90 days", "All time", "Refresh", "Last 30 days · main · app", "Flow", "Questions per request", "Requests per day · last 14 days", "Cost", "Tokens per request by role", "Beads", BEADS_CHOOSE_PROJECT, AUTONOMY_TITLE, AUTONOMY_NOTE, AUTONOMY_CHOOSE_PROJECT, REVIEW_LIFT_TITLE, REVIEW_LIFT_NOTE, "Small", "Medium"];
+    const order = [
+      "Beads closed",
+      "Lead time · median",
+      "Requests",
+      "Tokens per request",
+      "Turns",
+      "Bead status",
+      "Closed 1",
+      "Closed per day",
+      "22 Sep",
+      "By feature",
+      "Tokens by role",
+      TOKENS_BY_ROLE_NOTE,
+      "How the work ran",
+      "Measure",
+      "This project",
+      "All projects",
+      "Questions reaching you per finished request",
+      "Orchestrator interventions",
+      COORDINATION_NOTE,
+      "Answers",
+      AUTONOMY_TITLE,
+      AUTONOMY_NOTE,
+      AUTONOMY_CHOOSE_PROJECT,
+      REVIEW_LIFT_TITLE,
+      REVIEW_LIFT_NOTE,
+      "Small",
+      "Medium",
+      "Refresh",
+    ];
     const positions = order.map((text) => shown.indexOf(text));
-    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions.every((position) => position >= 0), order.filter((text) => !shown.includes(text)).join(" | ")).toBe(true);
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
   });
 
-  it("every pressable is a labelled button or tab; the window tabs call back with their key", () => {
-    const onWindow = vi.fn();
+  it("every pressable is a labelled button; Refresh reads again", () => {
     const onRefresh = vi.fn();
-    const nodes = body({ onWindow, onRefresh });
-    const buttons = pressables(nodes);
+    const buttons = pressables(metricsBody({ onRefresh }));
     for (const button of buttons) {
-      expect(["button", "tab"]).toContain(button.props.accessibilityRole);
+      expect(button.props.accessibilityRole).toBe("button");
       expect(typeof button.props.accessibilityLabel).toBe("string");
     }
-    const byLabel = (label: string) => buttons.find((button) => button.props.accessibilityLabel === label)!;
-    (byLabel("7 days").props.onPress as () => void)();
-    (byLabel("Refresh the figures").props.onPress as () => void)();
-    expect(onWindow).toHaveBeenCalledWith("7d");
+    (buttons.find((button) => button.props.accessibilityLabel === "Refresh the figures")!.props.onPress as () => void)();
     expect(onRefresh).toHaveBeenCalledTimes(1);
-    expect(byLabel("30 days").props.accessibilityState).toEqual({ selected: true });
-    expect(buttons.map((button) => button.props.accessibilityLabel)).toEqual(["7 days", "30 days", "90 days", "All time", "Refresh the figures"]);
   });
 
   it("shows no id: projects by name only", () => {
-    const shown = texts(body({ beads: { kind: "loading" }, autonomy: autonomyOf() })).join("\n");
-    expect(shown).toContain("Last 30 days · main · app");
+    const shown = texts(metricsBody({ autonomy: autonomyOf() })).join("\n");
     expect(shown).not.toContain("wks_a");
   });
 
   it("while loading, a spinner; on a failed read, the reason in the danger colour", () => {
-    const loading = allNodes(body({ view: null, loading: true }));
+    const loading = allNodes(metricsBody({ view: metricsOf({ summary: undefined, beads: undefined }), loading: true }));
     expect(loading.some((node) => node.type === "ActivityIndicator")).toBe(true);
-    const failed = allNodes(body({ view: null, error: "E_DATA_HOME_UNAVAILABLE" }));
+    const failed = allNodes(metricsBody({ view: metricsOf({ summary: undefined }), error: "E_DATA_HOME_UNAVAILABLE", beadsError: "boom" }));
     const line = failed.find((node) => node.type === "Text" && texts([node])[0] === "Could not read the figures. E_DATA_HOME_UNAVAILABLE");
     expect(line).toBeDefined();
     expect(JSON.stringify(line!.props.style)).toContain("#statusDanger");
+    expect(texts(failed)).toContain("Could not read the beads. boom");
   });
 
   it("an empty period says so instead of drawing zeros", () => {
     const shown = texts(renderTree(InsightsFigures({ view: insightsView(nothing, NOW), styles })));
     expect(shown).toEqual([INSIGHTS_EMPTY]);
+    expect(texts(metricsBody({ view: metricsOf({ summary: nothing }) }))).toContain(INSIGHTS_EMPTY);
   });
 
-  it("has no placeholder left: autonomy is drawn from the ledger, review lift from the summary", async () => {
-    const shown = texts(body());
+  it("has no placeholder left: autonomy is drawn from the ledger, review lift from the summary", () => {
+    const shown = texts(metricsBody());
     expect(shown.find((text) => text.startsWith("Arrives with Phase"))).toBeUndefined();
-    expect(shown.filter((text) => text === AUTONOMY_TITLE)).toHaveLength(1);
-    expect(shown.filter((text) => text === REVIEW_LIFT_TITLE)).toHaveLength(1);
-    expect(Object.keys(insightsModule)).not.toContain("PhasePlaceholders");
-    expect(Object.keys(await import("../plugin/client/insights-model"))).not.toContain("PHASE_PLACEHOLDERS");
   });
 
   it("draws the chosen project's autonomy at the width it is given", () => {
     const direction = (compact: boolean) => {
-      const tree = body({ projectId: "wks_a", beads: { kind: "loading" }, autonomy: autonomyOf(), compact });
+      const tree = metricsBody({ autonomy: autonomyOf(), compact });
       const row = allNodes(tree).find((node) => node.type === "View" && String(node.props.accessibilityLabel).startsWith("Scope, Shadow"))!;
       return ((row.children[1] as RNode).props.style as { flexDirection: string }).flexDirection;
     };
@@ -719,22 +863,7 @@ describe("cost: tokens read per request and the heaviest requests (autonomy desi
     }
     // The screen hands its width down: the heaviest requests stack on a phone.
     const direction = (compact: boolean) => {
-      const tree = renderTree(
-        MetricsBody({
-          window: "30d",
-          projectLabel: "main · app",
-          view: insightsView(withContext(), NOW, PROJECTS),
-          loading: false,
-          error: null,
-          beads: { kind: "choose", text: BEADS_CHOOSE_PROJECT },
-          autonomy: { kind: "choose", text: AUTONOMY_CHOOSE_PROJECT },
-          compact,
-          onWindow: noop,
-          onRefresh: noop,
-          styles,
-          theme,
-        }),
-      );
+      const tree = metricsBody({ view: metricsOf({ summary: withContext(), projects: PROJECTS }), compact });
       const heavy = allNodes(tree).find((node) => node.type === "View" && node.props.accessibilityLabel === row.accessibilityLabel)!;
       return (heavy.props.style as Record<string, unknown>).flexDirection;
     };
@@ -800,24 +929,7 @@ describe("review lift (autonomy design §C.4)", () => {
   });
 
   it("draws the section after autonomy, its empty state, and nothing for an older server", () => {
-    const draw = (view: ReturnType<typeof insightsView>) =>
-      texts(
-        renderTree(
-          MetricsBody({
-            window: "30d",
-            projectLabel: "main · app",
-            view,
-            loading: false,
-            error: null,
-            beads: { kind: "choose", text: BEADS_CHOOSE_PROJECT },
-            autonomy: { kind: "choose", text: AUTONOMY_CHOOSE_PROJECT },
-            onWindow: noop,
-            onRefresh: noop,
-            styles,
-            theme,
-          }),
-        ),
-      );
+    const draw = (view: ReturnType<typeof insightsView>) => texts(metricsBody({ view: { ...metricsOf(), insights: view } })).filter((text) => text !== "Refresh");
     const shown = draw(insightsView(summary(), NOW));
     const order = [AUTONOMY_TITLE, REVIEW_LIFT_TITLE, REVIEW_LIFT_NOTE, "Small", "3 requests reviewed", "Medium", "9 of 12 findings fixed on re-review · 5 batches reviewed once", "Size not reported"];
     const positions = order.map((text) => shown.indexOf(text));

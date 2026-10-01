@@ -6,6 +6,10 @@ import {
   changedReviewBudget,
   changedThresholds,
   coordinationDefaultsDraft,
+  coordinationInputText,
+  helpedText,
+  inputErrorsOf,
+  parseCoordinationInput,
   coordinationResetView,
   defaultsDraft,
   mechanismCardView,
@@ -74,27 +78,63 @@ describe("the thresholds' words and steps", () => {
   });
 });
 
+describe("the fields' text (the approved mockup's number inputs)", () => {
+  it("shows a token count with K or M, the context share in percent, a count as it is", () => {
+    expect(coordinationInputText("compact.managerTokensPerTurn", 390_000)).toBe("390 K");
+    expect(coordinationInputText("compact.workerTokensPerTurn", 5_700_000)).toBe("5.7 M");
+    expect(coordinationInputText("handoff.requestTokens", 150_000_000)).toBe("150 M");
+    expect(coordinationInputText("compact.contextShare", 0.5)).toBe("50 %");
+    expect(coordinationInputText("compact.maxPerAgent", 2)).toBe("2");
+    expect(coordinationInputText("advice.everyFinished", 0)).toBe("0");
+  });
+
+  it("reads typed text in the same units, and refuses what is not a number or is out of bounds, in the field's own words", () => {
+    expect(parseCoordinationInput("compact.managerTokensPerTurn", "400k")).toEqual({ value: 400_000, error: null });
+    expect(parseCoordinationInput("compact.managerTokensPerTurn", " 1.2 M ")).toEqual({ value: 1_200_000, error: null });
+    expect(parseCoordinationInput("compact.managerTokensPerTurn", "390000")).toEqual({ value: 390_000, error: null });
+    expect(parseCoordinationInput("compact.contextShare", "55 %")).toEqual({ value: 0.55, error: null });
+    expect(parseCoordinationInput("compact.contextShare", "60")).toEqual({ value: 0.6, error: null });
+    expect(parseCoordinationInput("review.largeBudget", "6")).toEqual({ value: 6, error: null });
+    expect(parseCoordinationInput("advice.everyFinished", "0")).toEqual({ value: 0, error: null });
+    expect(parseCoordinationInput("compact.maxPerAgent", "9")).toEqual({ value: null, error: "At most, per agent: a number from 1 to 5." });
+    expect(parseCoordinationInput("compact.managerTokensPerTurn", "lots").error).toBe("Manager reads more than, per turn: a number from 50 K to 100 M.");
+    expect(parseCoordinationInput("compact.contextShare", "95").error).toBe("Or its context window is fuller than: a number from 10 % to 90 %.");
+    expect(parseCoordinationInput("review.smallBudget", "1").error).toBe("Small: a number from 2 to 8.");
+    expect(parseCoordinationInput("advice.everyFinished", "2.5").error).toBe("Review the workflow every: a number from 0 to 50.");
+    expect(inputErrorsOf(["compact.maxPerAgent", "compact.contextShare"], { "compact.maxPerAgent": "3", "compact.contextShare": "x" })).toEqual([
+      "Or its context window is fuller than: a number from 10 % to 90 %.",
+    ]);
+  });
+
+  it("says how often a mechanism helped by the figures paseo-bm switched it off on, else a dash", () => {
+    expect(helpedText("compact", D)).toBe("helped —");
+    expect(helpedText("handoff", switchedOff("handoff"))).toBe("helped 6 of 10");
+  });
+});
+
 describe("a mechanism's card (autonomy design §G.7)", () => {
   it("at the defaults: On, Turn off, each threshold with − and +, nothing to save, no defaults to restore", () => {
     const card = view();
-    expect(card).toMatchObject({ title: "Compaction", status: { text: "On", tone: "success" }, save: { enabled: false, label: "Save" }, reset: null });
-    expect(card.meaning).toBe("When an agent's turns grow heavy, the Orchestrator may have it compact its conversation, without asking you.");
+    expect(card).toMatchObject({ title: "Compact", helped: "helped —", status: { text: "On", tone: "success" }, save: { enabled: false, label: "Save" }, reset: null });
+    expect(card.meaning).toBe("Shrink a Manager's or Worker's conversation at a safe point, then restore what matters from the records.");
     expect(card.note).toBe("A Claude turn is judged by its tokens read, a Codex or OpenCode turn by how full its context is.");
     expect(card.toggle).toEqual({ turnsOn: false, enabled: true, label: "Turn off", accessibilityLabel: "Turn compaction off now" });
-    expect(card.rows.map((row) => [row.label, row.valueText])).toEqual([
-      ["Manager turn", "390k tokens read"],
-      ["Worker turn", "5.7M tokens read"],
-      ["Context", "50% of the window"],
-      ["Per agent", "at most 2"],
+    expect(card.rows.map((row) => [row.label, row.valueText, row.inputText])).toEqual([
+      ["Manager reads more than, per turn", "390k tokens read", "390 K"],
+      ["Worker reads more than, per turn", "5.7M tokens read", "5.7 M"],
+      ["Or its context window is fuller than", "50% of the window", "50 %"],
+      ["At most, per agent", "at most 2", "2"],
     ]);
+    expect(card.rows[0]!.accessibilityLabel).toBe("Manager turn threshold: 390k tokens read");
     expect(card.rows[0]!.decrease).toEqual({ enabled: true, label: "−", accessibilityLabel: "Manager turn threshold: lower to 300k tokens read" });
     expect(card.rows[0]!.increase).toEqual({ enabled: true, label: "+", accessibilityLabel: "Manager turn threshold: raise to 400k tokens read" });
     const handoff = view({ mechanism: "handoff" });
     expect(handoff.title).toBe("Handoff");
     expect(handoff.note).toBeNull();
-    expect(handoff.rows.map((row) => [row.label, row.valueText])).toEqual([
-      ["Request", "150M tokens read"],
-      ["Per request", "at most 2"],
+    expect(handoff.meaning).toBe("Move a heavy request to a fresh Worker with a brief and the old Worker's note.");
+    expect(handoff.rows.map((row) => [row.label, row.inputText])).toEqual([
+      ["A request has read more than", "150 M"],
+      ["At most, per request", "2"],
     ]);
     expect(MECHANISM_THRESHOLDS.handoff).toEqual(["handoff.requestTokens", "handoff.maxPerRequest"]);
   });
@@ -182,75 +222,66 @@ describe("MechanismCard (hook-free)", () => {
   const draw = (props: Record<string, unknown>) =>
     renderTree(
       MechanismCard({
+        inputs: {},
         dialog: null,
         busy: false,
         error: null,
         onToggle: noop,
         onConfirm: noop,
         onCancel: noop,
-        onStep: noop,
+        onInput: noop,
         onSave: noop,
-        onReset: noop,
         styles,
         theme,
         ...props,
       }),
     );
+  const inputsOf = (nodes: ReturnType<typeof draw>) => allNodes(nodes).filter((node) => node.type === "TextInput");
 
-  it("draws the title and switch, the status, the meaning, each threshold with − and +, the note, Save and the defaults; every pressable a labelled button", () => {
-    const onStep = vi.fn();
+  it("draws the title, what it does, how often it helped and the square switch, then each threshold as a labelled number field; Save only once a field changed", () => {
+    const atRest = draw({ view: view() });
+    expect(texts(atRest)).toEqual([
+      "Compact",
+      view().meaning,
+      "helped —",
+      "Manager reads more than, per turn",
+      "Worker reads more than, per turn",
+      "Or its context window is fuller than",
+      "At most, per agent",
+    ]);
+    expect(inputsOf(atRest).map((input) => input.props.value)).toEqual(["390 K", "5.7 M", "50 %", "2"]);
+    expect(inputsOf(atRest).map((input) => input.props.accessibilityLabel)).toEqual(view().rows.map((row) => row.accessibilityLabel));
+    const [toggle] = pressables(atRest);
+    expect(toggle!.props).toMatchObject({ accessibilityRole: "switch", accessibilityLabel: "Turn compaction off now", accessibilityState: { checked: true, disabled: false } });
+    expect(pressables(atRest)).toHaveLength(1);
+
+    const onInput = vi.fn();
     const onToggle = vi.fn();
     const onSave = vi.fn();
-    const onReset = vi.fn();
     const card = view({ draft: { "compact.workerTokensPerTurn": 6_000_000 } });
-    const nodes = draw({ view: card, onStep, onToggle, onSave, onReset });
-    expect(texts(nodes)).toEqual([
-      "Compaction",
-      "Turn off",
-      "On",
-      card.meaning,
-      "Manager turn",
-      "−",
-      "390k tokens read",
-      "+",
-      "Worker turn",
-      "−",
-      "6M tokens read",
-      "+",
-      "Context",
-      "−",
-      "50% of the window",
-      "+",
-      "Per agent",
-      "−",
-      "at most 2",
-      "+",
-      card.note,
-      "Save",
-      "Use the defaults",
-    ]);
+    const nodes = draw({ view: card, inputs: { "compact.workerTokensPerTurn": "6M" }, onInput, onToggle, onSave });
+    expect(inputsOf(nodes).map((input) => input.props.value)).toEqual(["390 K", "6M", "50 %", "2"]);
+    (inputsOf(nodes)[0]!.props.onChangeText as (text: string) => void)("400k");
+    expect(onInput.mock.calls).toEqual([["compact.managerTokensPerTurn", "400k"]]);
     const buttons = pressables(nodes);
-    expect(buttons.every((button) => button.props.accessibilityRole === "button" && typeof button.props.accessibilityLabel === "string")).toBe(true);
-    expect(buttons.map((button) => button.props.accessibilityLabel)).toContain("Worker turn threshold: raise to 8M tokens read");
+    expect(buttons.map((button) => button.props.accessibilityRole)).toEqual(["switch", "button"]);
+    expect(buttons[1]!.props.accessibilityLabel).toBe("Save the compaction thresholds");
     for (const button of buttons) (button.props.onPress as () => void)();
     expect(onToggle).toHaveBeenCalledOnce();
-    expect(onStep.mock.calls).toEqual([
-      ["compact.managerTokensPerTurn", -1],
-      ["compact.managerTokensPerTurn", 1],
-      ["compact.workerTokensPerTurn", -1],
-      ["compact.workerTokensPerTurn", 1],
-      ["compact.contextShare", -1],
-      ["compact.contextShare", 1],
-      ["compact.maxPerAgent", -1],
-      ["compact.maxPerAgent", 1],
-    ]);
     expect(onSave).toHaveBeenCalledOnce();
-    expect(onReset).toHaveBeenCalledOnce();
-    const status = allNodes(nodes).find((node) => node.type === "Text" && texts([node])[0] === "On")!;
-    expect(JSON.stringify(status.props.style)).toContain("#statusSuccess");
   });
 
-  it("while turning on is asked: the switch gives way to the confirmation, Cancel first; a failed save shows in the danger colour", () => {
+  it("refuses a field out of bounds in the danger colour, with Save off", () => {
+    const nodes = draw({ view: view({ draft: { "compact.contextShare": 0.6 } }), inputs: { "compact.maxPerAgent": "9" } });
+    const refusal = allNodes(nodes).find((node) => node.type === "Text" && texts([node])[0] === "At most, per agent: a number from 1 to 5.")!;
+    expect(JSON.stringify(refusal.props.style)).toContain("#statusDanger");
+    const save = pressables(nodes).find((button) => button.props.accessibilityRole === "button")!;
+    expect(save.props.disabled).toBe(true);
+    const field = allNodes(nodes).filter((node) => node.type === "TextInput")[3]!;
+    expect(JSON.stringify(field.props.style)).toContain("#statusDanger");
+  });
+
+  it("while turning on is asked: the switch is held and the confirmation opens under the header, Cancel first; paseo-bm's switch-off and a failed save show in their colours", () => {
     const settings = switchedOff("compact");
     const onCancel = vi.fn();
     const onConfirm = vi.fn();
@@ -261,13 +292,14 @@ describe("MechanismCard (hook-free)", () => {
       onConfirm,
       error: "E_COORDINATION_WRITE_FAILED: cannot save the coordination settings",
     });
-    const labels = pressables(nodes).map((button) => texts([button])[0]);
-    expect(labels).not.toContain("Turn on…");
-    expect(labels.slice(0, 2)).toEqual(["Cancel", "Turn on"]);
-    (pressables(nodes)[0]!.props.onPress as () => void)();
-    (pressables(nodes)[1]!.props.onPress as () => void)();
+    const [toggle, ...buttons] = pressables(nodes);
+    expect(toggle!.props).toMatchObject({ accessibilityRole: "switch", accessibilityState: { checked: false, disabled: true } });
+    expect(buttons.map((button) => texts([button])[0]).slice(0, 2)).toEqual(["Cancel", "Turn on"]);
+    (buttons[0]!.props.onPress as () => void)();
+    (buttons[1]!.props.onPress as () => void)();
     expect(onCancel).toHaveBeenCalledOnce();
     expect(onConfirm).toHaveBeenCalledOnce();
+    expect(texts(nodes)).toContain("helped 6 of 10");
     const status = allNodes(nodes).find((node) => node.type === "Text" && texts([node])[0]?.startsWith("Switched off by paseo-bm"))!;
     expect(JSON.stringify(status.props.style)).toContain("#statusWarning");
     const error = allNodes(nodes).find((node) => node.type === "Text" && texts([node])[0]?.startsWith("E_COORDINATION_WRITE_FAILED"))!;
@@ -336,45 +368,28 @@ describe("the review budget card (autonomy design §G.7)", () => {
     expect(card.reset).toMatchObject({ enabled: false });
   });
 
-  it("ReviewBudgetCard (hook-free): the title, the meaning, each tier with − and +, the note, Save and the defaults; every pressable a labelled button", () => {
-    const onStep = vi.fn();
+  it("ReviewBudgetCard (hook-free): the title, Small, Medium and Large as joined number fields, what the budget means, Save once a tier changed", () => {
+    const onInput = vi.fn();
     const onSave = vi.fn();
-    const onReset = vi.fn();
+    const draw = (props: Record<string, unknown>) =>
+      renderTree(ReviewBudgetCard({ view: budgetView(), inputs: {}, busy: false, error: null, onInput, onSave, styles, theme, ...props }));
+    const atRest = draw({});
+    expect(texts(atRest)).toEqual(["Review budget", "Small", "Medium", "Large", "Review calls a request may use before the Worker asks you."]);
+    expect(pressables(atRest)).toHaveLength(0);
+    const fields = allNodes(atRest).filter((node) => node.type === "TextInput");
+    expect(fields.map((field) => field.props.value)).toEqual(["2", "2", "4"]);
+    expect(fields[2]!.props.accessibilityLabel).toBe("Review budget of a Large request: 4 review calls");
+    (fields[2]!.props.onChangeText as (text: string) => void)("6");
+    expect(onInput.mock.calls).toEqual([["review.largeBudget", "6"]]);
+
     const card = budgetView({ draft: { "review.largeBudget": 6 } });
-    const nodes = renderTree(ReviewBudgetCard({ view: card, error: null, onStep, onSave, onReset, styles, theme }));
-    expect(texts(nodes)).toEqual([
-      "Review budget",
-      card.meaning,
-      "Small",
-      "−",
-      "2 review calls",
-      "+",
-      "Medium",
-      "−",
-      "2 review calls",
-      "+",
-      "Large",
-      "−",
-      "6 review calls",
-      "+",
-      card.note,
-      "Save",
-      "Use the defaults",
-    ]);
-    const buttons = pressables(nodes);
-    expect(buttons.every((button) => button.props.accessibilityRole === "button" && typeof button.props.accessibilityLabel === "string")).toBe(true);
-    for (const button of buttons) (button.props.onPress as () => void)();
-    expect(onStep.mock.calls).toEqual([
-      ["review.smallBudget", -1],
-      ["review.smallBudget", 1],
-      ["review.mediumBudget", -1],
-      ["review.mediumBudget", 1],
-      ["review.largeBudget", -1],
-      ["review.largeBudget", 1],
-    ]);
+    const changed = draw({ view: card, inputs: { "review.largeBudget": "6" } });
+    const [save] = pressables(changed);
+    expect(texts([save!])).toEqual(["Save"]);
+    expect(save!.props.accessibilityLabel).toBe("Save the review budget");
+    (save!.props.onPress as () => void)();
     expect(onSave).toHaveBeenCalledOnce();
-    expect(onReset).toHaveBeenCalledOnce();
-    const failed = renderTree(ReviewBudgetCard({ view: card, error: "E_COORDINATION_INVALID: review.largeBudget must be a whole number from 2 to 8", onStep, onSave, onReset, styles, theme }));
+    const failed = draw({ view: card, error: "E_COORDINATION_INVALID: review.largeBudget must be a whole number from 2 to 8" });
     const error = allNodes(failed).find((node) => node.type === "Text" && texts([node])[0]?.startsWith("E_COORDINATION_INVALID"))!;
     expect(JSON.stringify(error.props.style)).toContain("#statusDanger");
   });

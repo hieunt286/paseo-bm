@@ -19,7 +19,7 @@ import {
   OVERVIEW_NO_OPEN,
   OVERVIEW_NO_TOKENS,
   OVERVIEW_OPEN_MAX,
-  OVERVIEW_OPEN_TITLE,
+  OVERVIEW_PROCESS_TITLE,
   OVERVIEW_TOKENS_TITLE,
   NO_AGENT_TOKENS_TEXT,
   NO_REQUEST_TOKENS_TEXT,
@@ -31,6 +31,7 @@ import {
   contextTrendView,
   evidenceLines,
   levelNameOf,
+  overviewRequestState,
   projectOverviewView,
   projectStageFacts,
   requestCardView,
@@ -58,7 +59,6 @@ import { allNodes, pressables, renderTree, textOf, texts, type RNode } from "./h
 
 // The root tsconfig has no `jsx`, so the .tsx modules load through non-literal specifiers.
 const workPath = "../plugin/client/work.tsx";
-const uiPath = "../plugin/client/ui.tsx";
 const insightsPath = "../plugin/client/insights.tsx";
 const treePath = "../plugin/client/tree.tsx";
 type Component = (props: Record<string, unknown>) => unknown;
@@ -81,7 +81,6 @@ const { StageBarRow, WorkRowItem, WorkList, RequestCard, TimelineList, EvidenceL
 >;
 const { BeadsFigures } = (await import(insightsPath)) as { BeadsFigures: Component };
 const { AgentTreeView } = (await import(treePath)) as { AgentTreeView: Component };
-const { WorkspaceScreenHeader } = (await import(uiPath)) as { WorkspaceScreenHeader: Component };
 
 const styles = new Proxy({}, { get: (_target, key) => (key === "content" ? { padding: 12, gap: 8 } : { name: String(key) }) });
 const theme = { colors: new Proxy({}, { get: (_target, key) => `#${String(key)}` }) };
@@ -655,7 +654,6 @@ describe("a request card", () => {
 // ---------------------------------------------------------------------------
 
 const bar: StageBarView = stageBar({ stage: "build", waiting: true, ended: null })!;
-const labelled = (nodes: Array<RNode | string>) => allNodes(nodes).filter((node) => node.props.accessibilityLabel !== undefined);
 
 describe("the stage bar on screen", () => {
   it("is five segments with the stage written under them on a phone", () => {
@@ -694,29 +692,36 @@ describe("a project row on screen", () => {
     time: "2 min ago",
     beads: "2 in progress",
     level: "Cruise",
+    line: "2 active · 1 stalled · Cruise",
     accessibilityLabel: "xspace. Open the project",
   };
 
-  it("is one pressable per row, labelled, on two lines on a phone and one on a wide screen", () => {
+  it("is one full-width pressable per project: the name and its muted line; the selected one on surface2 with the accent bar", () => {
     const onOpen = vi.fn();
-    for (const compact of [true, false]) {
-      const tree = renderTree(WorkRowItem({ row, dot: "DOT", onOpen, compact, styles, theme }));
+    for (const selected of [true, false]) {
+      const tree = renderTree(WorkRowItem({ row, selected, onOpen, theme }));
       const [press] = pressables(tree);
-      expect(press!.props).toMatchObject({ accessibilityRole: "button", accessibilityLabel: "xspace. Open the project" });
+      expect(press!.props).toMatchObject({ accessibilityRole: "button", accessibilityLabel: "xspace. Open the project", accessibilityState: { selected } });
       (press!.props.onPress as () => void)();
-      expect(texts(tree)).toEqual(expect.arrayContaining(["xspace", "Migrate fee list…", "▸ Build", "W", "2 in progress", "Cruise", "2 min ago"]));
-      expect(allNodes(tree).some((node) => node.children.includes("DOT"))).toBe(true);
-      const lines = (press!.children as RNode[]).filter((child) => typeof child !== "string" && child.type === "View");
-      expect(lines, String(compact)).toHaveLength(compact ? 2 : 1);
+      expect(texts(tree)).toEqual(["xspace", "2 active · 1 stalled · Cruise"]);
+      expect(JSON.stringify(press!.props.style)).toContain(selected ? "#surface2" : "transparent");
+      expect(JSON.stringify(tree).includes("#accent")).toBe(selected);
     }
     expect(onOpen).toHaveBeenCalledTimes(2);
   });
 
-  it("colours the status and the agent letters only through toneColor", () => {
-    const tree = renderTree(WorkRowItem({ row, dot: null, onOpen: noop, compact: false, styles, theme }));
-    const stage = allNodes(tree).find((node) => node.type === "Text" && textOf(node) === "▸ Build")!;
-    expect(JSON.stringify(stage.props.style)).toContain("#accent");
-    const letter = allNodes(tree).find((node) => node.type === "Text" && textOf(node) === "W")!;
+  it("says how many agents are active and stalled, or idle, and the level", () => {
+    const input = { workspaces: [{ id: "ws-a", label: "shop", detail: "" }], projects: null, now: NOW };
+    const running = new Map([["ws-a", { workspaceId: "ws-a", runningAgents: { manager: 1, worker: 1, reviewer: 0 } } as unknown as WorkspaceOverview]]);
+    expect(workRows({ ...input, overview: running, levels: { "ws-a": 2 } })[0]!.line).toBe("2 active · Cruise");
+    expect(workRows({ ...input, overview: new Map(), levels: {} })[0]!.line).toBe("idle · Hands-on");
+    expect(workRows({ ...input, overview: new Map() })[0]!.line).toBe("idle");
+    const stalled = { workspaceId: "ws-a", state: "stalled", lastActivityAt: at(9), openSignals: [] } as unknown as OrchestratorProjectRow;
+    expect(workRows({ ...input, projects: [stalled], overview: running, levels: { "ws-a": 2 } })[0]!.line).toBe("2 active · 1 stalled · Cruise");
+  });
+
+  it("colours the agent letters only through toneColor", () => {
+    const letter = allNodes(renderTree(AgentMarks({ agents: row.agents, styles, theme }))).find((node) => node.type === "Text" && textOf(node) === "W")!;
     expect(JSON.stringify(letter.props.style)).toContain("#statusSuccess");
     expect(renderTree(AgentMarks({ agents: [], styles, theme }))).toEqual([]);
   });
@@ -726,29 +731,27 @@ describe("a project row on screen", () => {
     const tree = renderTree(
       WorkList({
         rows: [row],
-        closed: [{ workspaceId: "ws-z", label: "old", detail: "archived" }],
+        closed: [{ workspaceId: "ws-z", label: "old", detail: "archived", state: "archived" }],
         loading: false,
         error: null,
-        status: "STATUS",
         footer: "paseo-bm 0.5.0",
-        renderDot: (workspaceId: string) => `DOT ${workspaceId}`,
+        selectedId: "ws-a",
         onOpen,
         compact: false,
-        styles,
         theme,
       }),
     );
-    expect(texts(tree)).toEqual(expect.arrayContaining(["Closed workspaces with history", "old", "paseo-bm 0.5.0"]));
-    // Each project row draws the dot `renderDot` gives for its workspace (the surface passes the running dot).
-    const projectRow = pressables(tree).find((node) => JSON.stringify(node).includes(`DOT ${row.workspaceId}`));
-    expect(projectRow?.props.accessibilityRole).toBe("button");
-    expect(JSON.stringify(tree).match(/DOT /g)).toHaveLength(1);
+    expect(texts(tree)).toEqual(expect.arrayContaining(["xspace", "Closed workspaces with history", "old", "paseo-bm 0.5.0"]));
+    const project = pressables(tree).find((node) => node.props.accessibilityLabel === "xspace. Open the project")!;
+    expect(project.props.accessibilityState).toEqual({ selected: true });
+    (project.props.onPress as () => void)();
+    expect(onOpen).toHaveBeenCalledWith("ws-a", "xspace");
     const closed = pressables(tree).find((node) => node.props.accessibilityLabel === "Open the requests of the closed workspace old")!;
     (closed.props.onPress as () => void)();
     expect(onOpen).toHaveBeenCalledWith("ws-z", "old");
-    const empty = renderTree(WorkList({ rows: [], closed: [], loading: false, error: null, renderDot: () => null, onOpen, compact: true, styles, theme }));
+    const empty = renderTree(WorkList({ rows: [], closed: [], loading: false, error: null, selectedId: null, onOpen, compact: true, theme }));
     expect(texts(empty)).toEqual(["No workspaces on this host yet."]);
-    const failed = renderTree(WorkList({ rows: [], closed: [], loading: false, error: "boom", renderDot: () => null, onOpen, compact: true, styles, theme }));
+    const failed = renderTree(WorkList({ rows: [], closed: [], loading: false, error: "boom", selectedId: null, onOpen, compact: true, theme }));
     expect(texts(failed)).toEqual(["Could not load the workspaces. boom"]);
   });
 });
@@ -823,35 +826,42 @@ describe("a request card on screen", () => {
 });
 
 describe("the project page's header", () => {
-  it("has the five tabs, Overview · Requests · Beads · Metrics · Agents, and Chat only on a host that can open agents", () => {
+  it("has the name, its directory, Open Manager, Autonomy: <Level> and the five tabs as underline text tabs", () => {
     expect(PROJECT_TABS.map((tab) => tab.label)).toEqual(["Overview", "Requests", "Beads", "Metrics", "Agents"]);
     expect(PROJECT_TABS.map((tab) => tab.key)).toEqual(["overview", "requests", "beads", "metrics", "agents"]);
     const onTab = vi.fn();
     const onChat = vi.fn();
-    const tree = renderTree(ProjectHeader({ label: "xspace", tab: "requests", onTab, onChat, chatBusy: false, styles }));
-    expect(texts(tree)).toEqual(expect.arrayContaining(["xspace", "Chat ▸", "Overview", "Requests", "Beads", "Metrics", "Agents"]));
-    const chat = pressables(tree).find((node) => node.props.accessibilityLabel === "Chat with the Beads Manager of xspace")!;
-    (chat.props.onPress as () => void)();
-    expect(onChat).toHaveBeenCalled();
+    const onOpenSettings = vi.fn();
+    const tree = renderTree(
+      ProjectHeader({ label: "xspace", directory: "/work/xspace", tab: "requests", onTab, onChat, chatBusy: false, level: "Cruise", onOpenSettings, extra: "PERIOD", status: "STATUS", theme }),
+    );
+    expect(texts(tree)).toEqual(["xspace", "/work/xspace", "Open Manager", "Autonomy: Cruise", "Overview", "Requests", "Beads", "Metrics", "Agents"]);
+    expect(JSON.stringify(tree)).toContain("PERIOD");
+    expect(JSON.stringify(tree)).toContain("STATUS");
+    const press = (label: string) => (pressables(tree).find((node) => node.props.accessibilityLabel === label)!.props.onPress as () => void)();
+    press("Chat with the Beads Manager of xspace");
+    press("Autonomy: Cruise. Open Settings to change it");
+    expect([onChat, onOpenSettings].map((fn) => fn.mock.calls.length)).toEqual([1, 1]);
     const beads = pressables(tree).find((node) => node.props.accessibilityRole === "tab" && textOf(node) === "Beads")!;
     (beads.props.onPress as () => void)();
     expect(onTab).toHaveBeenCalledWith("beads");
-    const busy = renderTree(ProjectHeader({ label: "xspace", tab: "beads", onTab, onChat, chatBusy: true, styles }));
+    expect(pressables(tree).find((node) => node.props.accessibilityRole === "tab" && textOf(node) === "Requests")!.props.accessibilityState).toEqual({ selected: true });
+    const busy = renderTree(ProjectHeader({ label: "xspace", tab: "beads", onTab, onChat, chatBusy: true, theme }));
     expect(pressables(busy).find((node) => node.props.accessibilityLabel?.toString().startsWith("Chat"))!.props).toMatchObject({ disabled: true });
-    const old = renderTree(ProjectHeader({ label: "xspace", tab: "agents", onTab, chatBusy: false, styles }));
-    expect(texts(old).includes("Chat ▸")).toBe(false);
-    expect(labelled(old).length).toBeGreaterThan(0);
+    expect(texts(busy)).toContain("Opening…");
+    // No host to open agents: no Open Manager; no Settings: the level named, not pressable; no directory: a dash.
+    const old = renderTree(ProjectHeader({ label: "xspace", tab: "agents", onTab, chatBusy: false, level: "Custom", theme }));
+    expect(texts(old)).toEqual(["xspace", "—", "Autonomy: Custom", "Overview", "Requests", "Beads", "Metrics", "Agents"]);
     // In the workspace's own Beads tab: no title and no ←, the tabs as everywhere.
-    const inTab = renderTree(ProjectHeader({ label: null, tab: "beads", onTab, chatBusy: false, styles }));
+    const inTab = renderTree(ProjectHeader({ label: null, tab: "beads", onTab, chatBusy: false, theme }));
     expect(texts(inTab)).toEqual(["Overview", "Requests", "Beads", "Metrics", "Agents"]);
   });
 
-  it("is the header the Beads board draws too, with the surface's status strip right under it (F3)", () => {
+  it("puts a ← before the name on a phone, labelled with where it leads", () => {
     const onBack = vi.fn();
-    const page = renderTree(ProjectHeader({ label: "xspace", tab: "requests", onTab: noop, onBack, backLabel: "Back to Projects", status: "STATUS", chatBusy: false, styles }));
-    const shared = renderTree(WorkspaceScreenHeader({ title: "xspace", onBack, backLabel: "Back to Projects", status: "STATUS", right: null, styles }));
-    expect(shared.at(-1)).toBe("STATUS");
-    expect(page.slice(0, shared.length)).toEqual(shared);
+    const tree = renderTree(ProjectHeader({ label: "xspace", tab: "overview", onTab: noop, onBack, backLabel: "Back to Projects", chatBusy: false, theme }));
+    (pressables(tree).find((node) => node.props.accessibilityLabel === "Back to Projects")!.props.onPress as () => void)();
+    expect(onBack).toHaveBeenCalled();
   });
 });
 
@@ -1238,6 +1248,12 @@ function overviewSummary(withContext = true): InsightsSummary {
   return {
     requests: { inWindow: 8, finished: 5 },
     turnsByRole: ROLES(160, 123, 30),
+    questions: { perFinishedRequest: { asked: 9, reachedOwner: 5.625, answeredByAgents: 3 } },
+    reviewLift: { all: { reviewsPerRequest: 5.28 } },
+    interventions: [
+      { kind: "answer", recorded: 4, met: 3, missed: 0, unknown: 1, pending: 0, share: 1 },
+      { kind: "stop", recorded: 1, met: 0, missed: 1, unknown: 0, pending: 0, share: 0 },
+    ],
     ...(withContext ? { context: { tokensRead: { total: 578_800_000, byRole: ROLES(18_300_000, 554_300_000, 6_200_000) } } } : {}),
   } as unknown as InsightsSummary;
 }
@@ -1250,76 +1266,128 @@ describe("a project's Overview: the model", () => {
     const decisions = [makeDecision({ id: "q:1" }), makeDecision({ id: "q:2" }), makeDecision({ id: "q:3", status: "withdrawn" })];
     const view = projectOverviewView({ summary: overviewSummary(), window: "30d", requests: [], decisions, now: NOW });
     expect(view.figures).toEqual([
-      { label: "Requests · 30 days", value: "8", hint: "5 finished" },
+      { label: "Requests · 30 d", value: "8", hint: "5 finished" },
       { label: "Turns", value: "313", hint: "M 160 · W 123 · R 30" },
       { label: "Tokens read", value: "578.8M", hint: "context read per turn" },
       { label: "Waiting on you", value: "2", hint: "open decisions" },
     ]);
     const unread = projectOverviewView({ summary: undefined, window: "7d", requests: undefined, decisions: undefined, now: NOW });
     expect(unread.figures.map((figure) => [figure.label, figure.value])).toEqual([
-      ["Requests · 7 days", "—"],
+      ["Requests · 7 d", "—"],
       ["Turns", "—"],
       ["Tokens read", "—"],
       ["Waiting on you", "—"],
     ]);
-    expect([unread.requests, unread.tokensEmpty, unread.more]).toEqual([null, null, null]);
+    expect([unread.requests, unread.tokensEmpty, unread.more, unread.older]).toEqual([null, null, null, null]);
+    expect(unread.process).toEqual([
+      { label: "Reviews per reviewed request", value: "—" },
+      { label: "Questions reaching you per request", value: "—" },
+      { label: "Orchestrator interventions", value: "—" },
+    ]);
+    expect(view.process.map((cell) => cell.value)).toEqual(["5.3", "5.6", "5 · 3 helped"]);
   });
 
-  it("draws the tokens read by role with their share, roles with none left out; a server without context says so", () => {
+  it("draws the tokens read by role, Worker first, with their share; the Orchestrator not recorded; a server without context says so", () => {
     const view = projectOverviewView({ summary: overviewSummary(), window: "30d", requests: [], decisions: [], now: NOW });
-    expect(view.tokensByRole.map((bar) => [bar.label, bar.display])).toEqual([
-      ["Manager", "18.3M · 3 %"],
-      ["Worker", "554.3M · 96 %"],
-      ["Reviewer", "6.2M · 1 %"],
+    expect(view.tokensByRole.map((row) => [row.label, row.value, Math.round(row.share * 1000) / 10, row.recorded])).toEqual([
+      ["Worker", "554.3M", 95.8, true],
+      ["Manager", "18.3M", 3.2, true],
+      ["Reviewer", "6.2M", 1.1, true],
+      ["Orchestrator", "not recorded", 0, false],
     ]);
+    expect(view.tokensScope).toBe("· last 30 days, context read per turn");
     expect(view.tokensEmpty).toBeNull();
     const older = projectOverviewView({ summary: overviewSummary(false), window: "30d", requests: [], decisions: [], now: NOW });
     expect([older.tokensByRole, older.tokensEmpty, older.figures[2]!.value]).toEqual([[], OVERVIEW_NO_TOKENS, "—"]);
   });
 
-  it("lists the newest open requests, at most a few, and counts the rest; finished ones are left to Requests", () => {
+  it("lists the newest open requests, at most a few, then the newest finished one, and counts the rest", () => {
     const view = projectOverviewView({
       summary: overviewSummary(),
       window: "30d",
-      requests: openRequests(["waiting_user", "running", "completed", "running", "running"]),
+      requests: openRequests(["waiting_user", "running", "completed", "running", "running", "completed", "failed"]),
       decisions: [],
+      stalledRequestId: "req-1",
       now: NOW,
     });
     expect(OVERVIEW_OPEN_MAX).toBe(3);
-    expect(view.requests!.map((row) => [row.title, row.state.text, row.state.tone])).toEqual([
-      ["Request 0", "Needs you", "warning"],
-      ["Request 1", "Running", "info"],
-      ["Request 3", "Running", "info"],
+    expect(view.requests!.map((row) => [row.title, row.size, row.state.text, row.state.tone, row.worker, row.tokens])).toEqual([
+      ["Request 0", "Large", "Needs you", "warning", "wrk-aaaa", "802k"],
+      ["Request 1", "—", "Stalled", "muted", "wrk-aaaa", "802k"],
+      ["Request 3", "—", "Running", "plain", "wrk-aaaa", "802k"],
+      ["Request 2", "—", "Finished", "info", "wrk-aaaa", "802k"],
     ]);
-    expect(view.requests![0]!.meta).toBe("Large · started 3 h ago · 802k tokens");
+    expect(view.requests![0]!.accessibilityLabel).toBe("Request 0. Needs you. Size Large. 802k tokens");
     expect(view.more).toBe("1 more open request in Requests");
-    expect(projectOverviewView({ summary: undefined, window: "30d", requests: openRequests(["completed"]), decisions: [], now: NOW }).requests).toEqual([]);
+    expect(view.older).toBe("2 older finished requests");
+    const one = projectOverviewView({ summary: undefined, window: "30d", requests: openRequests(["completed"]), decisions: [], now: NOW });
+    expect([one.requests!.map((row) => row.title), one.older]).toEqual([["Request 0"], null]);
+  });
+
+  it("says a finish is verified or not, in the mockup's colours", () => {
+    const verification = (unverified: boolean) => ({ checks: "detected", unverified, named: [], files: [], beads: [] }) as unknown as TraceVerification;
+    const finished = (unverified: boolean) => ({ state: "completed" as const, requestId: "r", verification: verification(unverified) });
+    expect(overviewRequestState(finished(false), null)).toEqual({ text: "Finished · verified", tone: "info" });
+    expect(overviewRequestState(finished(true), null)).toEqual({ text: "Finished · unverified", tone: "warning" });
+    expect(overviewRequestState({ state: "stopped", requestId: "r" }, null)).toEqual({ text: "Stopped", tone: "muted" });
+    expect(overviewRequestState({ state: "failed", requestId: "r" }, null)).toEqual({ text: "Failed", tone: "danger" });
+    // A stall is told only of an open request.
+    expect(overviewRequestState({ state: "completed", requestId: "r" }, "r")).toEqual({ text: "Finished", tone: "info" });
   });
 });
 
 describe("a project's Overview on screen", () => {
-  const view = projectOverviewView({ summary: overviewSummary(), window: "30d", requests: openRequests(["waiting_user"]), decisions: [], now: NOW });
+  const view = projectOverviewView({ summary: overviewSummary(), window: "30d", requests: openRequests(["waiting_user", "completed", "completed"]), decisions: [], now: NOW });
 
-  it("leads with the autonomy level, which opens Settings, then the figures, the tokens by role and the open requests", () => {
-    const onOpenSettings = vi.fn();
+  it("draws the figure strip, the tokens by role, the requests table and how the work ran, in the artboard's order", () => {
     const onRequests = vi.fn();
-    const tree = renderTree(ProjectOverviewBody({ view, level: "Cruise", error: null, onOpenSettings, onRequests, compact: true, styles, theme }));
+    const tree = renderTree(ProjectOverviewBody({ view, error: null, onRequests, compact: false, styles, theme }));
     const shown = texts(tree);
-    const order = ["Autonomy: Cruise", "Requests · 30 days", "Turns", "Tokens read", "Waiting on you", OVERVIEW_TOKENS_TITLE, OVERVIEW_OPEN_TITLE, "Request 0", "Needs you", ALL_REQUESTS_LABEL];
-    expect(order.map((text) => shown.indexOf(text))).toEqual([...order.map((text) => shown.indexOf(text))].sort((a, b) => a - b));
-    expect(order.every((text) => shown.includes(text))).toBe(true);
+    const order = [
+      "Requests · 30 d",
+      "Turns",
+      "Tokens read",
+      "Waiting on you",
+      "Worker",
+      "554.3M",
+      "Orchestrator",
+      "not recorded",
+      "Request",
+      "Size",
+      "State",
+      "Tokens",
+      "Request 0",
+      "Large",
+      "Needs you",
+      "Request 1",
+      "1 older finished request",
+      OVERVIEW_PROCESS_TITLE,
+      "Reviews per reviewed request",
+      "Orchestrator interventions",
+      "5 · 3 helped",
+    ];
+    const positions = order.map((text) => shown.indexOf(text));
+    expect(positions.every((position) => position >= 0), shown.join(" | ")).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+    expect(shown).toContain(`${OVERVIEW_TOKENS_TITLE} ${view.tokensScope}`);
+    // The state in its tone's colour; the Worker bar in the accent, the Reviewer's amber.
+    const state = allNodes(tree).find((node) => node.type === "Text" && textOf(node) === "Needs you")!;
+    expect(JSON.stringify(state.props.style)).toContain("#statusWarning");
+    expect(JSON.stringify(tree)).toContain("#accent");
     const press = (label: string) => (pressables(tree).find((node) => node.props.accessibilityLabel === label)!.props.onPress as () => void)();
-    press("Autonomy: Cruise. Open Settings to change it");
-    expect(onOpenSettings).toHaveBeenCalledTimes(1);
-    press("Open every request of this project");
+    press("Open the older finished requests in Requests");
     press(`${view.requests![0]!.accessibilityLabel}. Open in Requests`);
     expect(onRequests).toHaveBeenCalledTimes(2);
   });
 
-  it("names the level without a button where Settings cannot be opened, and says when nothing is open", () => {
+  it("stacks a request on a phone, says when nothing is on record, and the reason a read failed", () => {
+    const phone = texts(renderTree(ProjectOverviewBody({ view, error: null, onRequests: noop, compact: true, styles, theme })));
+    expect(phone).toContain("Request 0");
+    expect(phone).not.toContain("Size");
     const empty = projectOverviewView({ summary: overviewSummary(), window: "30d", requests: [], decisions: [], now: NOW });
-    const tree = renderTree(ProjectOverviewBody({ view: empty, level: "Custom", error: "boom", onRequests: noop, compact: false, styles, theme }));
-    expect(texts(tree)).toEqual(expect.arrayContaining(["Autonomy: Custom", "Could not read the figures. boom", OVERVIEW_NO_OPEN]));
+    const tree = renderTree(ProjectOverviewBody({ view: empty, error: "boom", onRequests: noop, compact: false, styles, theme }));
+    expect(texts(tree)).toEqual(expect.arrayContaining(["Could not read the figures. boom", OVERVIEW_NO_OPEN, ALL_REQUESTS_LABEL]));
     expect(pressables(tree).map((node) => node.props.accessibilityLabel)).toEqual(["Open every request of this project"]);
   });
 });
+

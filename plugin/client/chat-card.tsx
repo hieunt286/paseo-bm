@@ -39,7 +39,8 @@
 import { type PluginTimelineItemProps, useRpc } from "@getpaseo/plugin/client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState, type ReactNode } from "react";
-import { Text, TextInput, View } from "react-native";
+import { Pressable, Text, TextInput, View } from "react-native";
+import { Icon } from "@getpaseo/plugin/client/react-native";
 import {
   chatPeersRpc,
   decisionsAnswerRpc,
@@ -70,6 +71,7 @@ import {
   threadPollMs,
   type AskBackView,
   type AskUi,
+  type DecisionButton,
   type DecisionCardView,
   type DecisionChoice,
   type DecisionUi,
@@ -87,10 +89,11 @@ import {
   type PrecedentUi,
 } from "./chat-card-precedent";
 import { fallbackMarkdown, markdownOf } from "./chat-card-markdown";
-import { RADIUS, dashboardStyles } from "./styles";
+import { dashboardStyles } from "./styles";
+import { MONO, SectionLabel } from "./text-tabs";
 import { MarkdownView } from "./markdown-view";
 import { PRECEDENTS_QUERY_KEY } from "./settings-autonomy-model";
-import { Button, CardFrame, CompactLine, ConfirmBlock, ToneText, type Styles, type Theme } from "./ui";
+import { Button, CardFrame, CompactLine, ConfirmBlock, ToneText, type CardJoin, type Styles, type Theme } from "./ui";
 
 /** Peers change rarely; one lookup per chat is plenty. */
 const PEERS_STALE_MS = 30_000;
@@ -178,6 +181,7 @@ function MessageCardView({ theme, layout, agentId, item, timestamp }: PluginTime
       detailsOpen={details}
       onToggleDetails={() => setDetails(!details)}
       details={<DetailsBody lines={detailLinesOf(card, owner, verification)} text={card.text} styles={styles} theme={theme} compact={layout.compact} />}
+      compact={layout.compact}
       styles={styles}
       theme={theme}
     />
@@ -235,6 +239,7 @@ export function DecisionCard({
   initial,
   poll = true,
   onSettled,
+  join,
   theme,
   compact,
 }: {
@@ -254,6 +259,8 @@ export function DecisionCard({
   poll?: boolean;
   /** Told the decision as the owner's tap on this card left it. */
   onSettled?: (decision: Decision) => void;
+  /** Where the card sits in an Inbox group's joined stack; alone in a chat. */
+  join?: CardJoin;
   theme: Theme;
   compact: boolean;
 }) {
@@ -425,6 +432,7 @@ export function DecisionCard({
         save: () => void keepAsPrecedent(),
       }}
       text={card.text}
+      join={join}
       styles={styles}
       theme={theme}
       compact={compact}
@@ -442,57 +450,80 @@ export interface AskHandlers {
 
 /** A text box on a card: square, one border, colours from the theme. */
 function boxStyle(styles: Styles, theme: Theme) {
-  return [styles.mono, { minHeight: 56, borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS, padding: 8 }];
+  return [styles.mono, { minHeight: 56, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 0, padding: 8 }];
+}
+
+/** The mockup's one-line input: the page colour, one border, 10×12 padding. */
+function inputStyle(theme: Theme) {
+  return {
+    flex: 1,
+    minWidth: 0,
+    color: theme.colors.foreground,
+    backgroundColor: theme.colors.surface0,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: 0,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    fontSize: 14,
+  };
 }
 
 /**
  * The conversation of an asked-back decision (oldest first, "You" and the
- * asker), the open box with Cancel first, and the line under them: not
- * delivered, waiting for the asker, or what the last Send could not do.
- * Hook-free. The Ask back button itself sits beside Own words….
+ * asker, a 76px name column under a divider), the one-line ask box with Send
+ * and Cancel, and the line under them: not delivered, waiting for the asker,
+ * or what the last Send could not do. Hook-free. The Ask back button itself
+ * sits beside Own words… on the card's last row.
  */
 export function AskBackBlock({ view, text, on, styles, theme }: { view: AskBackView; text: string; on: AskHandlers; styles: Styles; theme: Theme }) {
   const box = view.box;
   if (view.conversation.length === 0 && box === null && view.status === null) return null;
+  const { colors } = theme;
   return (
-    <View style={{ gap: 6 }}>
-      {view.conversation.length === 0 ? null : (
-        <View style={{ gap: 4 }}>
-          <Text style={styles.sectionLabel}>Conversation</Text>
-          {view.conversation.map((entry) => (
-            <View key={entry.key} style={{ flexDirection: "row", gap: 8 }}>
-              <Text style={[styles.body, { minWidth: 72 }]}>{entry.who}</Text>
-              <Text style={[styles.body, { flex: 1, color: theme.colors.foreground }]} selectable>
-                {entry.text}
-              </Text>
-            </View>
-          ))}
+    <View style={{ gap: 10, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 12 }}>
+      {view.conversation.length === 0 ? null : <SectionLabel theme={theme}>Conversation</SectionLabel>}
+      {view.conversation.map((entry) => (
+        <View key={entry.key} style={{ flexDirection: "row", gap: 12 }}>
+          <Text style={{ width: 76, color: colors.foregroundMuted, fontSize: 13 }}>{entry.who}</Text>
+          <Text style={{ flex: 1, color: colors.foreground, fontSize: 14 }} selectable>
+            {entry.text}
+          </Text>
         </View>
-      )}
+      ))}
       {box === null ? null : (
-        <View style={{ gap: 6 }}>
+        <View style={{ flexDirection: "row", gap: 8, alignItems: "stretch" }}>
           <TextInput
             value={text}
             onChangeText={on.text}
             editable={!box.busy}
-            multiline
             accessibilityLabel={box.label}
             placeholder={box.placeholder}
-            placeholderTextColor={theme.colors.foregroundMuted}
-            style={boxStyle(styles, theme)}
+            placeholderTextColor={colors.foregroundMuted}
+            onSubmitEditing={box.sendEnabled ? on.send : undefined}
+            style={inputStyle(theme)}
           />
-          <View style={styles.chipRow}>
-            {box.busy ? null : <Button label="Cancel" kind="secondary" accessibilityLabel="Cancel the question" onPress={on.cancel} styles={styles} />}
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Send your question to ${box.label.replace(/^Ask /, "")}`}
+            accessibilityState={{ disabled: !box.sendEnabled }}
+            disabled={!box.sendEnabled}
+            onPress={on.send}
+            style={{ justifyContent: "center", paddingHorizontal: 16, backgroundColor: colors.foreground, opacity: box.sendEnabled ? 1 : 0.5 }}
+          >
+            <Text style={{ color: colors.surface0, fontSize: 14, fontWeight: "500" }}>{box.busy ? "Sending…" : "Send"}</Text>
+          </Pressable>
+          {box.busy ? null : (
             <Button
-              label={box.busy ? "Sending…" : "Send"}
-              kind="primary"
-              accessibilityLabel={`Send your question to ${box.label.replace(/^Ask /, "")}`}
-              accessibilityState={{ disabled: !box.sendEnabled }}
-              disabled={!box.sendEnabled}
-              onPress={on.send}
+              label="Cancel"
+              kind="secondary"
+              accessibilityLabel="Cancel the question"
+              onPress={on.cancel}
+              style={{ justifyContent: "center", paddingHorizontal: 14, borderRadius: 0 }}
+              textStyle={{ color: colors.foregroundMuted }}
               styles={styles}
             />
-          </View>
+          )}
         </View>
       )}
       {view.status === null ? null : (
@@ -501,6 +532,21 @@ export function AskBackBlock({ view, text, on, styles, theme }: { view: AskBackV
         </ToneText>
       )}
     </View>
+  );
+}
+
+/** Ask back with its small chat icon: a secondary button of the card's last row. */
+function AskBackButton({ label, onPress, styles, theme }: { label: string; onPress: () => void; styles: Styles; theme: Theme }) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      onPress={onPress}
+      style={[styles.secondaryButton, { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 8, paddingHorizontal: 12, borderRadius: 0 }]}
+    >
+      <Icon name="MessageSquare" size={14} color={theme.colors.foreground} />
+      <Text style={[styles.secondaryButtonText, { fontSize: 13 }]}>Ask back</Text>
+    </Pressable>
   );
 }
 
@@ -524,7 +570,7 @@ export function PrecedentOffer({ view, on, styles, theme }: { view: PrecedentOff
     <View style={{ gap: 6 }}>
       {view.offer === null ? null : (
         <View style={styles.chipRow}>
-          <Button label={view.offer.label} kind="secondary" accessibilityLabel={view.offer.accessibilityLabel} onPress={on.open} styles={styles} />
+          <Button label={view.offer.label} kind="secondary" size="small" accessibilityLabel={view.offer.accessibilityLabel} onPress={on.open} styles={styles} />
         </View>
       )}
       {form === null ? null : (
@@ -548,6 +594,7 @@ export function PrecedentOffer({ view, on, styles, theme }: { view: PrecedentOff
                 key={choice.scope}
                 label={choice.label}
                 kind={choice.selected ? "primary" : "secondary"}
+                size="small"
                 accessibilityRole="radio"
                 accessibilityLabel={choice.accessibilityLabel}
                 accessibilityState={{ selected: choice.selected, disabled: form.busy }}
@@ -559,11 +606,12 @@ export function PrecedentOffer({ view, on, styles, theme }: { view: PrecedentOff
           </View>
           <View style={styles.chipRow}>
             {form.busy ? null : (
-              <Button label={form.cancelLabel} kind="secondary" accessibilityLabel={form.cancelLabel} onPress={on.cancel} styles={styles} />
+              <Button label={form.cancelLabel} kind="secondary" size="small" accessibilityLabel={form.cancelLabel} onPress={on.cancel} styles={styles} />
             )}
             <Button
               label={form.saveLabel}
               kind="primary"
+              size="small"
               accessibilityLabel={form.saveAccessibilityLabel}
               accessibilityState={{ disabled: !form.saveEnabled }}
               disabled={!form.saveEnabled}
@@ -578,31 +626,57 @@ export function PrecedentOffer({ view, on, styles, theme }: { view: PrecedentOff
   );
 }
 
-/** The longest option label that still sits in a row of chips; a longer one stacks the options. */
-export const OPTION_ROW_MAX_CHARS = 32;
-
 /**
- * Whether a decision's options stack: short answers ("Yes", "Hold") sit side
- * by side; once one is a sentence, each option takes the card's width and its
- * text wraps, so nothing runs past the card.
+ * One option as the mockup draws it: a full-width row — the key letter in
+ * mono, the label (wrapping), and at the right its mark ("Recommended",
+ * "Orchestrator suggests") in small capitals. The primary option is filled
+ * with the accent; the others are outlined. Hook-free.
  */
-export function optionsStacked(labels: readonly string[]): boolean {
-  return labels.some((label) => label.length > OPTION_ROW_MAX_CHARS);
+export function OptionRow({ option, off, onChoose, theme }: { option: DecisionButton; off: boolean; onChoose: (key: string) => void; theme: Theme }) {
+  const { colors } = theme;
+  const on = option.primary;
+  const ink = on ? colors.accentForeground : colors.foreground;
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={option.accessibilityLabel}
+      accessibilityState={{ disabled: off }}
+      disabled={off}
+      onPress={() => onChoose(option.key)}
+      style={{
+        alignSelf: "stretch",
+        flexDirection: "row",
+        alignItems: "flex-start",
+        gap: 12,
+        paddingVertical: 12,
+        paddingHorizontal: 14,
+        borderWidth: 1,
+        borderColor: on ? colors.accent : colors.border,
+        backgroundColor: on ? colors.accent : "transparent",
+        opacity: off ? 0.5 : 1,
+      }}
+    >
+      <Text style={{ fontFamily: MONO, fontSize: 14, lineHeight: 20, fontWeight: on ? "500" : "400", color: on ? ink : colors.foregroundMuted }}>{option.key}</Text>
+      <Text style={{ flex: 1, flexShrink: 1, fontSize: 14, lineHeight: 20, color: ink, textAlign: "left" }}>{option.label}</Text>
+      {option.mark === null ? null : (
+        <Text style={{ fontSize: 12, lineHeight: 20, textTransform: "uppercase", color: on ? ink : colors.foregroundMuted, opacity: on ? 0.9 : 1 }}>{option.mark}</Text>
+      )}
+    </Pressable>
+  );
 }
 
-// A row item in React Native does not shrink by default: without these a long
-// label widens its button past the card instead of wrapping.
-const OPTION_STACK = { gap: 6 };
-const STACKED_OPTION = { alignSelf: "stretch" as const, alignItems: "flex-start" as const };
-const ROW_OPTION = { maxWidth: "100%" as const, flexShrink: 1 };
-const OPTION_TEXT = { flexShrink: 1, textAlign: "left" as const };
+/** The held action's two buttons, as the mockup has them: Deny outlined, then Allow once filled. */
+const HELD_BUTTON = { paddingVertical: 8, paddingHorizontal: 16, borderRadius: 0 };
 
 /**
- * What a decision card draws, from its view: the frame, then the options (the
- * recommended one the primary action), "Own words…", the in-place
- * confirmation with Cancel first, or the two buttons of a decision that needs
- * confirmation; on an answered one, Save as precedent when `precedent` offers
- * it. Hook-free.
+ * What a decision card draws, from its view, in the mockup's order: the
+ * frame's meta line, title and body; the precedent suggestion; the in-place
+ * confirmation with Cancel first, or the options as full-width rows (a held
+ * action's Deny / Allow once as two buttons) and the Orchestrator's reason
+ * under them; the own-words box; the conversation and the ask box; then one
+ * row — Ask back, Own words…, Keep open / Close as answered for a decision
+ * that needs confirmation — with Details at its right; on an answered one,
+ * Save as precedent when `precedent` offers it. Hook-free.
  */
 export function DecisionCardBody({
   view,
@@ -623,6 +697,7 @@ export function DecisionCardBody({
   precedent = null,
   onPrecedent,
   text,
+  join,
   styles,
   theme,
   compact,
@@ -649,22 +724,26 @@ export function DecisionCardBody({
   precedent?: PrecedentOfferView | null;
   onPrecedent?: PrecedentHandlers;
   text: string;
+  /** Where the card sits in an Inbox group's joined stack; alone in a chat. */
+  join?: CardJoin;
   styles: Styles;
   theme: Theme;
   compact: boolean;
 }) {
   const off = ui.busy;
   const actions: ReactNode[] = [];
+  const footer: ReactNode[] = [];
   if (suggestion !== null) {
     const use = suggestion.use;
     actions.push(
       <View key="suggestion" style={{ gap: 6 }}>
-        <ToneText tone="info" style={{ fontSize: 12 }} styles={styles} theme={theme}>{suggestion.line}</ToneText>
+        <ToneText tone="info" style={{ fontSize: 13 }} styles={styles} theme={theme}>{suggestion.line}</ToneText>
         {use === null || onUseSuggestion === undefined ? null : (
           <View style={styles.chipRow}>
             <Button
               label={use.label}
               kind="secondary"
+              size="small"
               accessibilityLabel={use.accessibilityLabel}
               accessibilityState={{ disabled: off }}
               disabled={off}
@@ -690,11 +769,12 @@ export function DecisionCardBody({
       />,
     );
   }
-  if (view.options.length > 0) {
-    const stacked = optionsStacked(view.options.map((option) => option.label));
+  if (view.options.length > 0 && view.held) {
+    // Deny first, outlined; Allow once filled — the order the mockup draws.
+    const ordered = [...view.options].sort((a, b) => Number(a.primary) - Number(b.primary));
     actions.push(
-      <View key="options" style={stacked ? OPTION_STACK : styles.chipRow}>
-        {view.options.map((option) => (
+      <View key="options" style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+        {ordered.map((option) => (
           <Button
             key={option.key}
             label={option.label}
@@ -703,100 +783,101 @@ export function DecisionCardBody({
             accessibilityState={{ disabled: off }}
             disabled={off}
             onPress={() => onChoose(option.key)}
-            style={[stacked ? STACKED_OPTION : ROW_OPTION, { opacity: off ? 0.5 : 1 }]}
-            textStyle={OPTION_TEXT}
+            style={[HELD_BUTTON, { opacity: off ? 0.5 : 1 }]}
             styles={styles}
           />
+        ))}
+      </View>,
+    );
+  } else if (view.options.length > 0) {
+    actions.push(
+      <View key="options" style={{ gap: 6 }}>
+        {view.options.map((option) => (
+          <OptionRow key={option.key} option={option} off={off} onChoose={onChoose} theme={theme} />
         ))}
       </View>,
     );
   }
   if (view.proposal !== null) {
     actions.push(
-      <ToneText key="proposal" tone="muted" style={{ fontSize: 12 }} numberOfLines={1} styles={styles} theme={theme}>
+      <ToneText key="proposal" tone="muted" style={{ fontSize: 13 }} numberOfLines={1} styles={styles} theme={theme}>
         {view.proposal}
       </ToneText>,
+    );
+  }
+  if (view.ownWords && view.confirm === null && ui.words !== null) {
+    actions.push(
+      <View key="words" style={{ gap: 6 }}>
+        <TextInput
+          value={ui.words}
+          onChangeText={onWords}
+          editable={!off}
+          multiline
+          accessibilityLabel="Your answer in your own words"
+          placeholder="Your answer"
+          placeholderTextColor={theme.colors.foregroundMuted}
+          style={boxStyle(styles, theme)}
+        />
+        <View style={styles.chipRow}>
+          <Button label="Cancel" kind="secondary" size="small" accessibilityLabel="Cancel" onPress={onCancel} styles={styles} />
+          <Button
+            label={off ? "Sending…" : "Send"}
+            kind="primary"
+            size="small"
+            accessibilityLabel="Send your answer"
+            accessibilityState={{ disabled: off || ui.words.trim() === "" }}
+            disabled={off || ui.words.trim() === ""}
+            onPress={onSendWords}
+            styles={styles}
+          />
+        </View>
+      </View>,
     );
   }
   const ask = onAsk === undefined ? null : view.askBack;
   if (ask !== null && onAsk !== undefined) {
     actions.push(<AskBackBlock key="ask" view={ask} text={askText} on={onAsk} styles={styles} theme={theme} />);
+    if (ask.offered) footer.push(<AskBackButton key="ask-back" label={ask.accessibilityLabel} onPress={onAsk.open} styles={styles} theme={theme} />);
   }
-  const askButton =
-    ask === null || onAsk === undefined || !ask.offered ? null : (
-      <Button key="ask-back" label="Ask back" kind="secondary" accessibilityLabel={ask.accessibilityLabel} onPress={onAsk.open} styles={styles} />
-    );
-  if (view.ownWords && view.confirm === null) {
-    actions.push(
-      ui.words === null ? (
-        <View key="words" style={styles.chipRow}>
-          {askButton}
-          <Button
-            label="Own words…"
-            kind="secondary"
-            accessibilityLabel="Answer in your own words"
-            accessibilityState={{ disabled: off }}
-            disabled={off}
-            onPress={onOpenWords}
-            styles={styles}
-          />
-        </View>
-      ) : (
-        <View key="words" style={{ gap: 6 }}>
-          <TextInput
-            value={ui.words}
-            onChangeText={onWords}
-            editable={!off}
-            multiline
-            accessibilityLabel="Your answer in your own words"
-            placeholder="Your answer"
-            placeholderTextColor={theme.colors.foregroundMuted}
-            style={boxStyle(styles, theme)}
-          />
-          <View style={styles.chipRow}>
-            <Button label="Cancel" kind="secondary" accessibilityLabel="Cancel" onPress={onCancel} styles={styles} />
-            <Button
-              label={off ? "Sending…" : "Send"}
-              kind="primary"
-              accessibilityLabel="Send your answer"
-              accessibilityState={{ disabled: off || ui.words.trim() === "" }}
-              disabled={off || ui.words.trim() === ""}
-              onPress={onSendWords}
-              styles={styles}
-            />
-          </View>
-        </View>
-      ),
-    );
-  } else if (askButton !== null) {
-    actions.push(
-      <View key="words" style={styles.chipRow}>
-        {askButton}
-      </View>,
+  if (view.ownWords && view.confirm === null && ui.words === null) {
+    footer.push(
+      <Button
+        key="own-words"
+        label="Own words…"
+        kind="secondary"
+        size="small"
+        accessibilityLabel="Answer in your own words"
+        accessibilityState={{ disabled: off }}
+        disabled={off}
+        onPress={onOpenWords}
+        styles={styles}
+      />,
     );
   }
   if (view.confirmChat) {
-    actions.push(
-      <View key="chat" style={styles.chipRow}>
-        <Button
-          label="Keep open"
-          kind="secondary"
-          accessibilityLabel="Keep the decision open"
-          accessibilityState={{ disabled: off }}
-          disabled={off}
-          onPress={() => onCloseInChat(false)}
-          styles={styles}
-        />
-        <Button
-          label="Close as answered"
-          kind="secondary"
-          accessibilityLabel="Close the decision as answered"
-          accessibilityState={{ disabled: off }}
-          disabled={off}
-          onPress={() => onCloseInChat(true)}
-          styles={styles}
-        />
-      </View>,
+    footer.push(
+      <Button
+        key="keep-open"
+        label="Keep open"
+        kind="secondary"
+        size="small"
+        accessibilityLabel="Keep the decision open"
+        accessibilityState={{ disabled: off }}
+        disabled={off}
+        onPress={() => onCloseInChat(false)}
+        styles={styles}
+      />,
+      <Button
+        key="close-answered"
+        label="Close as answered"
+        kind="secondary"
+        size="small"
+        accessibilityLabel="Close the decision as answered"
+        accessibilityState={{ disabled: off }}
+        disabled={off}
+        onPress={() => onCloseInChat(true)}
+        styles={styles}
+      />,
     );
   }
   if (precedent !== null && onPrecedent !== undefined) {
@@ -806,9 +887,12 @@ export function DecisionCardBody({
     <CardFrame
       view={view.frame}
       actions={actions.length === 0 ? null : actions}
+      footer={footer.length === 0 ? null : footer}
       detailsOpen={detailsOpen}
       onToggleDetails={onToggleDetails}
       details={<DetailsBody lines={view.details} text={text} styles={styles} theme={theme} compact={compact} />}
+      join={join}
+      compact={compact}
       styles={styles}
       theme={theme}
     />

@@ -47,6 +47,14 @@ export interface CardFrameView {
    * Absent: derived from the outline, then the chip (`kindBarOf`).
    */
   bar?: Tone | null;
+  /**
+   * The card's kind at the right of its meta line, in small mono capitals and
+   * the kind's colour (`DECISION · SCOPE`; change-014 mockup); absent or null
+   * for none.
+   */
+  label?: { text: string; tone: Tone } | null;
+  /** The 16px icon at the left of the meta line, a Lucide name; absent: the actor's role icon. */
+  icon?: string | null;
   /** One line under the actions: an outcome or an error. */
   status: { text: string; tone: Tone } | null;
 }

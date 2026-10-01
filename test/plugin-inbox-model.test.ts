@@ -14,7 +14,13 @@ import {
   RESEND_FOLLOW_UP_MS,
   UNKNOWN_PROJECT,
   alertRowOf,
+  decidedHeading,
   emptySentence,
+  filterOfDecision,
+  inboxProjects,
+  needsYouSummary,
+  projectHeading,
+  OTHER_GROUP,
   fallbackOutcomeOf,
   inboxTab,
   inboxView,
@@ -469,7 +475,7 @@ describe("the drawn Inbox pieces", () => {
     const onToggle = vi.fn();
     const onRun = vi.fn();
     const closed = renderTree(AlertRow({ row, expanded: false, onToggle, onRun, resend: undefined, compact: false, styles, theme }));
-    expect(texts(closed)).toEqual(["●", "A Worker looks stuck · shop", "4 min ago ▸", "Open Worker"]);
+    expect(texts(closed)).toEqual(["A Worker looks stuck · 4 min ago", "A Worker looks stuck", " · 4 min ago", "Open Worker"]);
     const [toggle, action] = pressables(closed);
     expect(toggle!.props["accessibilityLabel"]).toBe("A Worker looks stuck · shop, 4 min ago. Show the details");
     expect(toggle!.props["accessibilityState"]).toEqual({ expanded: false });
@@ -478,8 +484,10 @@ describe("the drawn Inbox pieces", () => {
     (action!.props["onPress"] as () => void)();
     expect(onToggle).toHaveBeenCalledOnce();
     expect(onRun).toHaveBeenCalledWith(row.action);
-    // The dot takes the alert's tone from the theme.
-    expect((allNodes(closed).find((node) => node.type === "Text")!.props["style"] as unknown[])[1]).toEqual({ color: "#statusWarning" });
+    // The icon takes the alert's tone from the theme; the bar stays calm (muted).
+    expect(allNodes(closed).find((node) => node.type === "Icon")!.props).toMatchObject({ size: 16, color: "#statusWarning" });
+    const bar = (closed[0] as RNode).children.at(-1) as RNode;
+    expect(bar.props["style"]).toMatchObject({ position: "absolute", width: 3, backgroundColor: "#foregroundMuted" });
 
     const open = renderTree(AlertRow({ row, expanded: true, onToggle, onRun, resend: undefined, compact: false, styles, theme }));
     expect(texts(open)).toEqual(expect.arrayContaining(["no tool call for 20 min", `Alert: stuck:${DECISION_WS}:wrk-1`]));
@@ -674,7 +682,9 @@ describe("Decided for you: what the policy and precedents answered since the own
     const onToggle = vi.fn();
     const onOverride = vi.fn();
     const closed = renderTree(DigestRowView({ row, expanded: false, onToggle, onOverride, state: undefined, compact: false, styles, theme }));
-    expect(texts(closed)).toEqual(["✓", "Which date format on the invoices? → dd/mm/yyyy", "2 min ago ▸", "shop · your earlier policy", POLICY_REASON, "Override"]);
+    // The mockup's line: "<project> · <what> → <answer>" and, muted, ", by <who>"; the reason and the time once opened.
+    expect(texts(closed)).toEqual(["shop · Which date format on the invoices? → dd/mm/yyyy, by your earlier policy", ", by your earlier policy", "Override"]);
+    expect(allNodes(closed).find((node) => node.type === "Icon")!.props).toMatchObject({ name: "Check", color: "#accent" });
     expect(texts(closed).join(" ")).not.toContain(byPolicy.id);
     const [toggle, override] = pressables(closed);
     expect(toggle!.props["accessibilityLabel"]).toBe(`${row.accessibilityLabel}. Show the details`);
@@ -687,7 +697,7 @@ describe("Decided for you: what the policy and precedents answered since the own
     expect(onOverride).toHaveBeenCalledWith(byPolicy.id);
 
     const open = renderTree(DigestRowView({ row, expanded: true, onToggle, onOverride, state: undefined, compact: false, styles, theme }));
-    expect(texts(open)).toEqual(expect.arrayContaining([`Decision: ${byPolicy.id}`, "Request: req-A", "Class: scope"]));
+    expect(texts(open)).toEqual(expect.arrayContaining([POLICY_REASON, "2 min ago · your earlier policy", `Decision: ${byPolicy.id}`, "Request: req-A", "Class: scope"]));
   });
 
   it("puts Override under the line on a phone and at its end on a wide screen; greys it while it runs and says a failure", () => {
@@ -896,32 +906,35 @@ describe("Decided for you: the Orchestrator's interventions since the owner last
     expect(DECIDED_FOR_YOU_EMPTY).toBe("Nothing was decided for you since you last looked.");
   });
 
-  it("draws a line with its mark, why and outcome in the outcome's colour, nothing to press but the line; the ids only when opened", () => {
+  it("draws a line with what it did and Why? — no Override; why and the outcome in the outcome's colour, and the ids, once opened", () => {
     const row = interventionRowOf(unblock, input());
     const onToggle = vi.fn();
     const onOverride = vi.fn();
     const closed = renderTree(DigestRowView({ row, expanded: false, onToggle, onOverride, state: undefined, compact: false, styles, theme }));
-    expect(texts(closed)).toEqual([
-      "↪",
-      "Unblocked the Worker",
-      "3 min ago ▸",
-      "shop · the Orchestrator",
-      "The request stopped moving: Told it to rerun the failing test once, then report.",
-      "Met · expected: the request moves again within 15 min",
-    ]);
-    const outcome = allNodes(closed).find((node) => node.type === "Text" && textOf(node).startsWith("Met ·"))!;
-    expect(outcome.props["style"]).toEqual([{ name: "body" }, { color: "#statusSuccess" }]);
-    const [toggle, ...rest] = pressables(closed);
+    expect(texts(closed)).toEqual(["shop · Unblocked the Worker · Orchestrator", " · Orchestrator", "Why?"]);
+    const [toggle, why, ...rest] = pressables(closed);
     expect(rest).toEqual([]);
     expect(toggle!.props["accessibilityRole"]).toBe("button");
     expect(toggle!.props["accessibilityLabel"]).toBe(`${row.accessibilityLabel}. Show the details`);
     (toggle!.props["onPress"] as () => void)();
-    expect(onToggle).toHaveBeenCalledOnce();
+    (why!.props["onPress"] as () => void)();
+    expect(onToggle).toHaveBeenCalledTimes(2);
     expect(onOverride).not.toHaveBeenCalled();
     expect(texts(closed).join(" ")).not.toContain("iv-unblock-3");
 
     const open = renderTree(DigestRowView({ row, expanded: true, onToggle, onOverride, state: undefined, compact: false, styles, theme }));
-    expect(texts(open)).toEqual(expect.arrayContaining(["Intervention: iv-unblock-3", "Command: cmd-1", "Request: req-A", "Agent: wrk-7"]));
+    expect(texts(open)).toEqual(
+      expect.arrayContaining([
+        "The request stopped moving: Told it to rerun the failing test once, then report.",
+        "Met · expected: the request moves again within 15 min",
+        "Intervention: iv-unblock-3",
+        "Command: cmd-1",
+        "Request: req-A",
+        "Agent: wrk-7",
+      ]),
+    );
+    const outcome = allNodes(open).find((node) => node.type === "Text" && textOf(node).startsWith("Met ·"))!;
+    expect(outcome.props["style"]).toEqual([{ name: "body" }, { color: "#statusSuccess" }]);
   });
 
   it("fits a phone and a wide screen: the line stacks on a phone, runs across on a wide screen, and clamps until opened", () => {
@@ -935,10 +948,10 @@ describe("Decided for you: the Orchestrator's interventions since the owner last
     expect(pressables(draw(true))[0]!.props["style"]).toMatchObject({ flex: undefined });
     for (const compact of [true, false]) {
       expect(texts(draw(compact))).toEqual(texts(draw(!compact)));
-      expect(pressables(draw(compact))).toHaveLength(1);
-      const reason = allNodes(draw(compact)).find((node) => node.type === "Text" && textOf(node).startsWith("The request stopped moving"))!;
-      expect(reason.props["numberOfLines"]).toBe(2);
-      const opened = allNodes(draw(compact, true)).find((node) => node.type === "Text" && textOf(node).startsWith("The request stopped moving"))!;
+      expect(pressables(draw(compact))).toHaveLength(2);
+      const line = allNodes(draw(compact)).find((node) => node.type === "Text" && textOf(node).startsWith("shop · Unblocked"))!;
+      expect(line.props["numberOfLines"]).toBe(2);
+      const opened = allNodes(draw(compact, true)).find((node) => node.type === "Text" && textOf(node).startsWith("shop · Unblocked"))!;
       expect(opened.props["numberOfLines"]).toBeUndefined();
     }
   });
@@ -970,7 +983,7 @@ describe("the writers-observed alert (autonomy design §F.1; bead i8fc.1)", () =
     const row = alertRowOf(observed, input());
     for (const compact of [true, false]) {
       const closed = renderTree(AlertRow({ row, expanded: false, onToggle: noop, onRun: noop, resend: undefined, compact, styles, theme }));
-      expect(texts(closed), `compact ${compact}`).toEqual(["●", "Two agents edited one file at the same time · shop", "6 min ago ▸", "Open project"]);
+      expect(texts(closed), `compact ${compact}`).toEqual(["Two agents edited one file at the same time · 6 min ago", "Two agents edited one file at the same time", " · 6 min ago", "Open project"]);
       expect(((closed[0] as RNode).children[0] as RNode).props["style"]).toMatchObject({ flexDirection: compact ? "column" : "row" });
       const [toggle, open] = pressables(closed);
       expect(toggle!.props["accessibilityLabel"]).toBe("Two agents edited one file at the same time · shop, 6 min ago. Show the details");
@@ -1002,12 +1015,17 @@ describe("a held request in the Inbox (§D.2)", () => {
     expect(groups.flatMap((group) => group.items)).toHaveLength(1);
     const item = groups[0]!.items[0]!;
     const shown = decisionCardView({ card: item.card, lookup: { state: "found", decision }, agents: [], ui: DECISION_UI_IDLE, cardAt: new Date(decision.askedAt), now: NOW });
-    expect(shown.frame.title).toContain("`git push origin main`");
-    expect(shown.frame.body).toEqual([HELD_CARD_LINE]);
+    // The mockup's title: "Run `<command>`?", the reason a muted line under it.
+    expect(shown.frame.title).toBe("Run `git push origin main`?");
+    expect(shown.frame.body).toEqual(["Held: git push origin main.", HELD_CARD_LINE]);
+    expect(shown.frame.label?.text).toMatch(/^HELD ACTION · /);
+    expect(shown.held).toBe(true);
+    // Allow once is the primary button; drawn Deny first, then Allow once, and no Ask back.
     expect(shown.options.map((option) => [option.label, option.primary, option.confirm])).toEqual([
-      ["Allow once", false, true],
+      ["Allow once", true, true],
       ["Deny", false, false],
     ]);
+    expect(shown.askBack).toBeNull();
     expect(shown.ownWords).toBe(false);
     expect(choiceNeedsConfirmation(decision, { optionKey: "allow" })).toBe(true);
     // The confirmation defaults to Cancel.
@@ -1031,5 +1049,89 @@ describe("a held request in the Inbox (§D.2)", () => {
     const row = digestRowOf(answered.decision, input());
     expect(row.what).toContain("Allow once");
     expect(row.override).toBeNull();
+  });
+});
+
+// ── Needs you as the approved mockup draws it (change-014 fidelity) ─────────
+
+describe("Needs you as project groups, with a filter (change-014 mockup)", () => {
+  const held = makeDecision({ id: "h:agent-worker:perm-9", askedBy: { role: "plugin", agentId: "agent-worker" }, askedAt: minutesAgo(3), round: null });
+  const view = inboxView(
+    input({
+      decisions: [question("req-A", 1, 12), held, question("req-B", 1, 2, { workspaceId: WS2 })],
+      alerts: [alert("request-stalled", "req-A", 9), alert("coordination-off", "compact", 5, { workspaceId: null }), alert("stuck", "wrk-9", 4, { workspaceId: "wks_gone" })],
+    }),
+  );
+
+  it("puts each project's decisions, held actions and alerts in one group, the project-less alerts last under Other", () => {
+    const groups = inboxProjects(view, "all");
+    expect(groups.map((group) => [group.label, group.items.length, group.alerts.length, group.open])).toEqual([
+      ["shop", 2, 1, 3],
+      ["xspace-master-data", 1, 0, 1],
+      ["a closed project", 0, 1, 1],
+      [OTHER_GROUP, 0, 1, 1],
+    ]);
+    expect(groups.map(projectHeading)).toEqual(["shop · 3", "xspace-master-data · 1", "a closed project · 1", "Other · 1"]);
+    expect(needsYouSummary(groups)).toBe("6 items in 3 projects");
+  });
+
+  it("filters to the open decisions, the held actions or the alerts, dropping a group left empty", () => {
+    expect(filterOfDecision(held)).toBe("actions");
+    expect(filterOfDecision(question("req-A", 1, 1))).toBe("decisions");
+    expect(inboxProjects(view, "decisions").map((group) => [group.label, group.items.map((item) => item.decision.id)])).toEqual([
+      ["shop", ["q:req-A:Q1"]],
+      ["xspace-master-data", ["q:req-B:Q1"]],
+    ]);
+    expect(inboxProjects(view, "actions").map((group) => [group.label, group.items.length, group.alerts.length])).toEqual([["shop", 1, 0]]);
+    expect(inboxProjects(view, "alerts").map((group) => [group.label, group.items.length, group.alerts.length])).toEqual([
+      ["shop", 0, 1],
+      ["a closed project", 0, 1],
+      [OTHER_GROUP, 0, 1],
+    ]);
+  });
+
+  it("names the Decided-for-you section with what it holds", () => {
+    expect(decidedHeading(2)).toBe("Decided for you · since you last looked · 2");
+    expect(needsYouSummary([])).toBe("0 items");
+  });
+
+  it("draws a held action as Deny, then Allow once filled — and no option rows", () => {
+    const heldOf = heldDecisionOf({
+      agentId: "agent-worker",
+      permissionId: "perm-2",
+      workspaceId: DECISION_WS,
+      requestId: "req-A",
+      question: "The Worker asks to run `git push origin main`. Held: git push origin main. Allow it once?",
+      findings: boundaryVerdictOfCommand("git push origin main", { cwd: "/work/app", workspaceDirectory: "/work/app" }).findings,
+      at: minutesAgo(1),
+    });
+    const shown = decisionCardView({ card: needsYouGroups(input({ decisions: [heldOf] }))[0]!.items[0]!.card, lookup: { state: "found", decision: heldOf }, agents: [], ui: DECISION_UI_IDLE, cardAt: NOW, now: NOW });
+    const nodes = renderTree(
+      DecisionCardBody({
+        view: shown,
+        ui: DECISION_UI_IDLE,
+        detailsOpen: false,
+        onToggleDetails: noop,
+        onChoose: noop,
+        onOpenWords: noop,
+        onWords: noop,
+        onSendWords: noop,
+        onCancel: noop,
+        onConfirm: noop,
+        onCloseInChat: noop,
+        onAsk: { open: noop, text: noop, cancel: noop, send: noop },
+        text: "",
+        styles,
+        theme,
+        compact: false,
+      }),
+    );
+    const buttons = pressables(nodes);
+    expect(buttons.map((node) => textOf(node))).toEqual(["Deny", "Allow once", "Details"]);
+    expect(buttons[1]!.props["style"]).toEqual([{ name: "button" }, { paddingVertical: 8, paddingHorizontal: 16, borderRadius: 0 }, { opacity: 1 }]);
+    // The command in backticks is drawn as inline code inside the title.
+    expect(texts(nodes)).toEqual(expect.arrayContaining(["Run git push origin main?", "git push origin main"]));
+    const code = allNodes(nodes).find((node) => node.type === "Text" && textOf(node) === "git push origin main")!;
+    expect(code.props["style"]).toMatchObject({ backgroundColor: "#surface0", borderColor: "#border" });
   });
 });

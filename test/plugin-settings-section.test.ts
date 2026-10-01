@@ -120,7 +120,7 @@ describe("More's groups (change-014 outcome 5)", () => {
   it("are Agents, Precedents and Data, in that order, all folded at first", () => {
     expect(SETTINGS_GROUPS.map((group) => group.title)).toEqual(["Agents", "Precedents", "Data"]);
     expect(SETTINGS_GROUPS.map((group) => group.hint)).toEqual([
-      "roles, models, fallbacks, sign-in and agent tools",
+      "Manager, Worker, Reviewer, Orchestrator — provider, model, mode",
       "your standing answers",
       "data folder, trace storage, remove settings",
     ]);
@@ -251,8 +251,7 @@ describe("the Coordination group (autonomy design §G.7)", () => {
 
   it("says what the cadence means in one line", () => {
     expect(ADVICE_MEANING.split("\n")).toHaveLength(1);
-    expect(ADVICE_MEANING).toMatch(/finished requests/);
-    expect(ADVICE_MEANING).toMatch(/0 turns advice off\.$/);
+    expect(ADVICE_MEANING).toBe("0 turns advice off. Advice comes to the Inbox as a proposal you accept or not.");
   });
 
   it("steps within 0 and 50", () => {
@@ -289,40 +288,40 @@ describe("the Coordination group (autonomy design §G.7)", () => {
     expect([saving.decrease.enabled, saving.increase.enabled, saving.reset?.enabled]).toEqual([false, false, false]);
   });
 
-  it("is a card with the meaning, − value +, Save and the default, each pressable labelled (hook-free)", () => {
-    const onStep = vi.fn();
+  it("is a card: Review the workflow every [n] finished requests, what 0 does, and Save only once the value changed (hook-free)", () => {
+    const onInput = vi.fn();
     const onSave = vi.fn();
-    const onReset = vi.fn();
+    const atRest = renderTree(
+      AdviceCadenceRow({ view: adviceCadenceView({ stored: 5, draft: 5, defaultValue: 5, saving: false }), input: null, busy: false, error: null, onInput, onSave, styles, theme }),
+    );
+    expect(texts(atRest)).toEqual(["Orchestrator advice", "Review the workflow every", "finished requests", ADVICE_MEANING]);
+    expect(pressables(atRest)).toHaveLength(0);
+    const [field] = allNodes(atRest).filter((node) => node.type === "TextInput");
+    expect(field!.props).toMatchObject({ value: "5", accessibilityLabel: "Advice cadence: Advice after every 5 finished requests", editable: true });
+    (field!.props.onChangeText as (text: string) => void)("3");
+    expect(onInput.mock.calls).toEqual([["3"]]);
+
     const view = adviceCadenceView({ stored: 5, draft: 3, defaultValue: 5, saving: false });
-    const nodes = renderTree(AdviceCadenceRow({ view, error: null, onStep, onSave, onReset, styles, theme }));
-    expect(texts(nodes)).toEqual(["Orchestrator advice", ADVICE_MEANING, "−", "Advice after every 3 finished requests", "+", "Save", "Use the default (5)"]);
-    const buttons = pressables(nodes);
-    expect(buttons.map((button) => button.props.accessibilityRole)).toEqual(["button", "button", "button", "button"]);
-    expect(buttons.map((button) => button.props.accessibilityLabel)).toEqual([
-      "Advice cadence: lower to 2",
-      "Advice cadence: raise to 4",
-      "Save the advice cadence: Advice after every 3 finished requests",
-      "Set the advice cadence back to its default: Advice after every 5 finished requests",
-    ]);
-    for (const button of buttons) expect(button.props.accessibilityState).toEqual({ disabled: false });
-    (buttons[0]!.props.onPress as () => void)();
-    (buttons[1]!.props.onPress as () => void)();
-    (buttons[2]!.props.onPress as () => void)();
-    (buttons[3]!.props.onPress as () => void)();
-    expect(onStep.mock.calls).toEqual([[-1], [1]]);
+    const changed = renderTree(AdviceCadenceRow({ view, input: "3", busy: false, error: null, onInput, onSave, styles, theme }));
+    const [save] = pressables(changed);
+    expect(texts([save!])).toEqual(["Save"]);
+    expect(save!.props.accessibilityLabel).toBe("Save the advice cadence: Advice after every 3 finished requests");
+    expect(save!.props.accessibilityState).toEqual({ disabled: false });
+    (save!.props.onPress as () => void)();
     expect(onSave).toHaveBeenCalledOnce();
-    expect(onReset).toHaveBeenCalledOnce();
   });
 
-  it("disables Save for an unchanged value and shows a failed save in the danger colour", () => {
+  it("refuses a value out of 0 to 50 with Save off, and shows a failed save in the danger colour", () => {
     const view = adviceCadenceView({ stored: 5, draft: 5, defaultValue: 5, saving: false });
+    const refused = renderTree(AdviceCadenceRow({ view, input: "99", busy: false, error: null, onInput: noop, onSave: noop, styles, theme }));
+    expect(texts(refused)).toContain("Review the workflow every: a number from 0 to 50.");
+    expect(pressables(refused)[0]!.props.disabled).toBe(true);
     const nodes = renderTree(
-      AdviceCadenceRow({ view, error: "E_COORDINATION_INVALID: nothing was saved", onStep: noop, onSave: noop, onReset: noop, styles, theme }),
+      AdviceCadenceRow({ view, input: null, busy: false, error: "E_COORDINATION_INVALID: nothing was saved", onInput: noop, onSave: noop, styles, theme }),
     );
     const save = pressables(nodes).find((button) => texts([button])[0] === "Save")!;
     expect(save.props.disabled).toBe(true);
     expect(save.props.accessibilityState).toEqual({ disabled: true });
-    expect(pressables(nodes)).toHaveLength(3);
     const error = allNodes(nodes).find((node) => node.type === "Text" && texts([node])[0]?.startsWith("E_COORDINATION_INVALID"))!;
     expect(JSON.stringify(error.props.style)).toContain("#statusDanger");
   });
@@ -338,16 +337,19 @@ describe("the group header (hook-free)", () => {
     const [button] = pressables(folded);
     expect(button!.props.accessibilityRole).toBe("button");
     expect(button!.props.accessibilityState).toEqual({ expanded: false });
-    expect(button!.props.accessibilityLabel).toBe("Agents, roles, models, fallbacks, sign-in and agent tools: Agent tools off. Expand.");
-    expect(texts(folded)).toEqual(["▸ Agents", "Agent tools off"]);
+    expect(button!.props.accessibilityLabel).toBe("Agents, Manager, Worker, Reviewer, Orchestrator — provider, model, mode: Agent tools off. Expand.");
+    // "Title · what it holds" at the left, the state and › at the right (the approved mockup).
+    expect(texts(folded)).toEqual(["Agents · Manager, Worker, Reviewer, Orchestrator — provider, model, mode", " · Manager, Worker, Reviewer, Orchestrator — provider, model, mode", "Agent tools off ›"]);
     // The state line is drawn in its tone's colour, through the theme.
-    const state = allNodes(folded).find((node) => node.type === "Text" && texts([node])[0] === "Agent tools off")!;
+    const state = allNodes(folded).find((node) => node.type === "Text" && texts([node])[0] === "Agent tools off ›")!;
     expect(JSON.stringify(state.props.style)).toContain("#statusWarning");
     (button!.props.onPress as () => void)();
     expect(onToggle).toHaveBeenCalledOnce();
 
     const open = header(groupHeaderView("data", { text: "32 MB of traces", tone: "muted" }, true));
-    expect(texts(open)[0]).toBe("▾ Data");
+    expect(texts(open)[2]).toBe("32 MB of traces ⌄");
+    // A state with nothing wrong is muted, as the mockup draws it.
+    expect(JSON.stringify(allNodes(open).find((node) => node.type === "Text" && texts([node])[0] === "32 MB of traces ⌄")!.props.style)).toContain("#foregroundMuted");
     expect(pressables(open)[0]!.props.accessibilityState).toEqual({ expanded: true });
     expect(pressables(open)[0]!.props.accessibilityLabel).toMatch(/Collapse\.$/);
   });
@@ -355,7 +357,7 @@ describe("the group header (hook-free)", () => {
   it("opens Precedents like the others: one button with its count", () => {
     const nodes = header(groupHeaderView("precedents", { text: "2 active", tone: "muted" }, false));
     expect(pressables(nodes)).toHaveLength(1);
-    expect(texts(nodes)).toEqual(["▸ Precedents", "2 active"]);
+    expect(texts(nodes)).toEqual(["Precedents · your standing answers", " · your standing answers", "2 active ›"]);
     expect((nodes[0] as RNode).props.accessibilityLabel).toBe("Precedents, your standing answers: 2 active. Expand.");
   });
 });

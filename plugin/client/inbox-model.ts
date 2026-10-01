@@ -27,6 +27,12 @@
  *    one file in overlapping turns (`writers-observed`, §F.1) open the
  *    project; the file and the agents are in its detail.
  *
+ * As drawn (change-014, the approved mockup): Needs you and Alerts are one
+ * list of project groups (`inboxProjects`) — each project's decisions, held
+ * actions and alerts together, the alerts with no project last under
+ * `Other` — with a filter (All · Decisions · Actions · Alerts); Decided for
+ * you follows.
+ *
  * An empty Inbox is one sentence with a way to Projects. The Inbox tab's label
  * carries the count of unsettled decisions and alerts (DQ-3: no sidebar badge).
  *
@@ -107,6 +113,12 @@ export interface InboxGroup {
 export interface InboxAlertRow {
   key: string;
   tone: Tone;
+  /** The project the alert is about, to group it with; null for none (it goes to the "Other" group). */
+  workspaceId: string | null;
+  /** `<what happened>`: the row's lead, in its project's group. */
+  what: string;
+  /** The project's name, for its group. */
+  project: string;
   /** `<what happened> · <project>`. */
   text: string;
   /** `12 min ago`. */
@@ -139,6 +151,10 @@ export interface DigestOutcome {
 interface DigestLine {
   /** Unique within the section: the decision's id, or `intervention:<id>`. Never shown. */
   key: string;
+  /** The project's name, the line's lead (the mockup's `<project> · <what> → <answer>`). */
+  project: string;
+  /** Who decided or acted: `the Orchestrator`, `your precedent`, …. */
+  by: string;
   /** A decision: `<question> → <answer>`. An intervention: what the Orchestrator did, and for whom. */
   what: string;
   /** `<project> · <who decided>`, or `<project> · the Orchestrator`. */
@@ -347,11 +363,15 @@ export function resendFollowUps(
     })
     .sort((a, b) => Date.parse(a.decidedAt ?? a.detectedAt) - Date.parse(b.decidedAt ?? b.detectedAt))
     .map((incident) => {
-      const text = `The new Reviewer has not appeared · ${projectName(incident.workspaceId, input.projectOf)}`;
+      const project = projectName(incident.workspaceId, input.projectOf);
+      const text = `The new Reviewer has not appeared · ${project}`;
       const time = ago(incident.decidedAt ?? incident.detectedAt, input.now);
       return {
         key: `resend:${incident.id}`,
         tone: "warning" as const,
+        workspaceId: incident.workspaceId,
+        what: "The new Reviewer has not appeared",
+        project,
         text,
         time,
         accessibilityLabel: `${text}, switched ${time}`,
@@ -398,6 +418,10 @@ export function alertRowOf(alert: Alert, input: Pick<InboxInput, "projectOf" | "
   return {
     key: alert.key,
     tone: words.tone,
+    // An alert about every project (`coordination-off`) belongs to none of them.
+    workspaceId: alert.kind === "coordination-off" ? null : alert.workspaceId,
+    what,
+    project: where,
     text,
     time,
     accessibilityLabel: `${text}, ${time}`,
@@ -610,13 +634,16 @@ function interventionDetails(entry: DigestIntervention): string[] {
 export function interventionRowOf(entry: DigestIntervention, input: Pick<InboxInput, "projectOf" | "now">): DigestInterventionRow {
   const target = entry.targetRole === null ? null : TARGET_WORDS[entry.targetRole];
   const what = INTERVENTION_WHAT[entry.kind](target);
-  const where = `${projectName(entry.workspaceId, input.projectOf)} · the Orchestrator`;
+  const project = projectName(entry.workspaceId, input.projectOf);
+  const where = `${project} · the Orchestrator`;
   const trigger = triggerWords(entry.trigger, entry.signal);
   const outcome = digestOutcomeOf(entry);
   const time = ago(entry.at, input.now);
   return {
     kind: "intervention",
     key: `intervention:${entry.id}`,
+    project,
+    by: "the Orchestrator",
     interventionKind: entry.kind,
     what,
     where,
@@ -649,13 +676,17 @@ export function digestRowOf(
   const answer = decision.answer;
   const question = questionLine(decision.question, 80);
   const what = `${question} → ${answerLine(decision)}`;
-  const where = `${projectName(decision.workspaceId, input.projectOf)} · ${decidedByWords(decision)}`;
+  const project = projectName(decision.workspaceId, input.projectOf);
+  const by = decidedByWords(decision);
+  const where = `${project} · ${by}`;
   const time = ago(answer?.at ?? decision.settledAt, input.now);
   const overrideId = overrideIdOf(decision);
   const outcome = answered === null ? null : digestOutcomeOf(answered);
   return {
     kind: "decision",
     key: decision.id,
+    project,
+    by,
     decisionId: decision.id,
     what,
     where,
@@ -750,6 +781,104 @@ export function inboxView(input: InboxInput): InboxView {
 export function inboxTab(count: number | null): { key: "inbox"; label: string; count?: number; hint?: string } {
   if (count === null || count === 0) return { key: "inbox", label: "Inbox", ...(count === 0 ? { hint: "nothing needs you" } : {}) };
   return { key: "inbox", label: "Inbox", count, hint: `${plural(count, "item needs", "items need")} you` };
+}
+
+// ---------------------------------------------------------------------------
+// Needs you, as the approved mockup draws it (change-014): one group per
+// project holding its decisions, held actions and alerts, and a filter.
+// ---------------------------------------------------------------------------
+
+/** The Inbox's filter (client state): everything, the open decisions, the held actions, or the alerts. */
+export type InboxFilter = "all" | "decisions" | "actions" | "alerts";
+
+export const INBOX_FILTERS: ReadonlyArray<{ key: InboxFilter; label: string; accessibilityLabel: string }> = [
+  { key: "all", label: "All", accessibilityLabel: "Show everything that needs you" },
+  { key: "decisions", label: "Decisions", accessibilityLabel: "Show only the decisions" },
+  { key: "actions", label: "Actions", accessibilityLabel: "Show only the held actions" },
+  { key: "alerts", label: "Alerts", accessibilityLabel: "Show only the alerts" },
+];
+
+/** The group of the alerts that name no project: last. */
+export const OTHER_GROUP = "Other";
+
+/** One project's group: its decisions and held actions, then its alerts. */
+export interface InboxProject {
+  /** The workspace id, or `other` for the alerts with none. */
+  key: string;
+  workspaceId: string | null;
+  /** The project's name only (never `label · directory`), or `OTHER_GROUP`. */
+  label: string;
+  items: InboxDecisionItem[];
+  alerts: InboxAlertRow[];
+  /** An asking agent of this project, for `chat.peers`; null when none is known. */
+  peersOf: string | null;
+  /** What in the group still waits: its unsettled items and its alerts. */
+  open: number;
+}
+
+/** Which filter a Needs-you decision falls under: a held request (`h:`) is an action; every other kind a decision. */
+export function filterOfDecision(decision: Pick<Decision, "id">): "decisions" | "actions" {
+  return decisionKindOf(decision.id) === "held" ? "actions" : "decisions";
+}
+
+/**
+ * Needs you as groups: one per project, in the order of `needsYou.groups`
+ * (the oldest question first), then the projects with only alerts in alert
+ * order, then `Other` for the alerts that name no project. `filter` keeps
+ * only its kind; a group left with nothing is not drawn.
+ */
+export function inboxProjects(view: Pick<InboxView, "needsYou" | "alerts">, filter: InboxFilter): InboxProject[] {
+  const projects = new Map<string, InboxProject>();
+  const groupOf = (workspaceId: string | null, label: string, peersOf: string | null): InboxProject => {
+    const key = workspaceId ?? "other";
+    let project = projects.get(key);
+    if (project === undefined) {
+      project = { key, workspaceId, label, items: [], alerts: [], peersOf, open: 0 };
+      projects.set(key, project);
+    }
+    return project;
+  };
+  for (const group of view.needsYou.groups) {
+    const project = groupOf(group.workspaceId, group.label, group.peersOf);
+    for (const item of group.items) {
+      if (filter !== "all" && filter !== filterOfDecision(item.decision)) continue;
+      project.items.push(item);
+      if (!item.settledHere) project.open += 1;
+    }
+  }
+  if (filter === "all" || filter === "alerts") {
+    for (const row of view.alerts.rows) {
+      const project = row.workspaceId === null ? null : groupOf(row.workspaceId, row.project, null);
+      // The project-less ones wait until the end, so `Other` is last.
+      if (project === null) continue;
+      project.alerts.push(row);
+      project.open += 1;
+    }
+    for (const row of view.alerts.rows) {
+      if (row.workspaceId !== null) continue;
+      const other = groupOf(null, OTHER_GROUP, null);
+      other.alerts.push(row);
+      other.open += 1;
+    }
+  }
+  return [...projects.values()].filter((project) => project.items.length > 0 || project.alerts.length > 0);
+}
+
+/** The title row's count: `4 items in 2 projects` (`Other` is not a project). */
+export function needsYouSummary(projects: readonly InboxProject[]): string {
+  const items = projects.reduce((sum, project) => sum + project.open, 0);
+  const named = projects.filter((project) => project.workspaceId !== null && project.open > 0).length;
+  return named === 0 ? plural(items, "item") : `${plural(items, "item")} in ${plural(named, "project")}`;
+}
+
+/** A group's label: `<project> · n`, or the name alone when nothing in it waits. */
+export function projectHeading(project: Pick<InboxProject, "label" | "open">): string {
+  return project.open === 0 ? project.label : `${project.label} · ${project.open}`;
+}
+
+/** Decided for you's label: what was decided since the owner last looked, and how many. */
+export function decidedHeading(count: number): string {
+  return `Decided for you · since you last looked · ${count}`;
 }
 
 /** Section headings, with their counts. */

@@ -7,7 +7,10 @@ import {
   TOOLS_STALE_TEXT,
   agentDots,
   agentStateOf,
+  HEADER_START_LABEL,
   headerTitle,
+  orchestratorHeaderView,
+  watchedProjectCount,
   openDialog,
   orchestratorLineView,
   recreateDialog,
@@ -124,6 +127,43 @@ describe("the Orchestrator line", () => {
     expect(replacedLine({ agent: { id: "o", status: "idle", workspaceId: null } }, NOW)).toBeNull();
     // The chat button opens the newest Orchestrator: the state's agent.
     expect(orchestratorLineView(stateOf({ agent, previousCount: 1 }), NOW).agentId).toBe("o2");
+  });
+});
+
+describe("the shell header's Orchestrator status", () => {
+  const AGENT = { id: "orc-1", status: "idle", workspaceId: null };
+
+  it("counts the projects above Hands-on as watched, custom included; null before the policy answers", () => {
+    expect(watchedProjectCount(undefined)).toBeNull();
+    expect(watchedProjectCount({})).toBe(0);
+    expect(watchedProjectCount({ a: 0, b: 2, c: "custom", d: 4 })).toBe(3);
+  });
+
+  it("says not open with the Start… text button and a muted square", () => {
+    expect(orchestratorHeaderView(EMPTY, { a: 2 }, NOW)).toEqual({
+      dot: "muted",
+      text: "Orchestrator not open",
+      action: "start",
+      button: HEADER_START_LABEL,
+      agentId: null,
+      warning: null,
+      replaced: null,
+    });
+    expect(HEADER_START_LABEL).toBe("Start…");
+  });
+
+  it("says idle or running with the watched count, the status itself opening the chat", () => {
+    const view = orchestratorHeaderView(stateOf({ agent: AGENT }), { a: 2, b: 0, c: 1 }, NOW);
+    expect(view).toMatchObject({ dot: "accent", text: "Orchestrator idle · 2 projects watched", action: "open", button: null, agentId: "orc-1" });
+    expect(orchestratorHeaderView(stateOf({ agent: { ...AGENT, status: "running" } }), { a: 1 }, NOW).text).toBe(
+      "Orchestrator running · 1 project watched",
+    );
+    expect(orchestratorHeaderView(stateOf({ agent: AGENT }), undefined, NOW).text).toBe("Orchestrator idle");
+  });
+
+  it("offers the restart as a text button when the Orchestrator lost its tools", () => {
+    const view = orchestratorHeaderView(stateOf({ agent: AGENT, toolsStale: true }), {}, NOW);
+    expect(view).toMatchObject({ action: "restart", button: "Start a new Orchestrator…", warning: TOOLS_STALE_TEXT, text: "Orchestrator idle · 0 projects watched" });
   });
 });
 

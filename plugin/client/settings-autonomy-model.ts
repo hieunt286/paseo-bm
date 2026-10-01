@@ -96,8 +96,18 @@ export const DECIDER_WORDS: Readonly<Record<ClassDecider, string>> = {
   owner: "You",
 };
 
-/** What the three words of the class list mean, in one line under it. */
-export const DECIDER_LEGEND = "Orchestrator: it decides, you can override · You approve: it proposes, you approve · You: you decide";
+/** What the three words of the class list mean, one entry each, in the legend under it (the approved mockup). */
+export const DECIDER_LEGEND_ENTRIES: ReadonlyArray<{ decider: ClassDecider; text: string }> = [
+  { decider: "orchestrator", text: "Orchestrator decides, you can override" },
+  { decider: "approve", text: "Orchestrator proposes, you approve" },
+  { decider: "owner", text: "You decide" },
+];
+
+/** The legend in one line, as a screen reader says it. */
+export const DECIDER_LEGEND = DECIDER_LEGEND_ENTRIES.map((entry) => entry.text).join(" · ");
+
+/** The class list's own names (the approved mockup): "Technical" for the reversible technical class, the others as everywhere. */
+export const LEVEL_CLASS_LABELS: Readonly<Record<DecisionClass, string>> = { ...CLASS_LABELS, "reversible-technical": "Technical" };
 
 /** The class list's order: the five Cruise classes, then cost, release, data and security — the order the levels add them in. */
 export const AUTONOMY_CLASS_ORDER: readonly DecisionClass[] = [
@@ -228,11 +238,14 @@ export function shownProjectOf(projects: readonly AutonomyProject[], chosen: str
   return projects.find((project) => project.id === chosen) ?? projects[0] ?? null;
 }
 
-/** The project tabs: each project by name with its level. */
-export function autonomyTabs(projects: readonly AutonomyProject[], policy: AutonomyPolicy): Array<{ key: string; label: string; hint: string }> {
+/** The project tabs: each project by name, its level after it (in muted mono). */
+export function autonomyTabs(
+  projects: readonly AutonomyProject[],
+  policy: AutonomyPolicy,
+): Array<{ key: string; label: string; suffix: string; accessibilityLabel: string }> {
   return projects.map((project) => {
     const level = levelText(levelOf(policy, project.id));
-    return { key: project.id, label: `${project.label} · ${level}`, hint: `level ${level}` };
+    return { key: project.id, label: project.label, suffix: level, accessibilityLabel: `${project.label}, level ${level}` };
   });
 }
 
@@ -242,6 +255,8 @@ export interface LevelStopView {
   name: string;
   label: string;
   selected: boolean;
+  /** Where the stop is against the level shown: below it (filled faintly), the one shown, or above it; every stop is above while the project reads Custom. */
+  place: "below" | "selected" | "above";
   enabled: boolean;
   accessibilityLabel: string;
 }
@@ -276,9 +291,11 @@ export interface AutonomyLevelView {
   /** "Level: Cruise", "Level: Custom". */
   levelLine: string;
   stops: LevelStopView[];
+  /** How far the slider's track is filled: the shown level's share of the way from the first stop to the last; 0 while Custom. */
+  fill: number;
   summary: string;
   classes: LevelClassView[];
-  legend: string;
+  legend: ReadonlyArray<{ decider: ClassDecider; text: string }>;
   /** Turbo or Full auto being confirmed: the level and its confirmation, Cancel first; else null. */
   confirm: { level: AutonomyLevel; dialog: ConfirmDialog } | null;
   boundary: AutonomyBoundaryView;
@@ -339,16 +356,18 @@ export function autonomyLevelView(input: {
         name: definition.name,
         label: `${definition.level} ${definition.name}`,
         selected,
+        place: selected ? "selected" : shown !== "custom" && definition.level < shown ? "below" : "above",
         enabled: !busy && !selected,
         accessibilityLabel: `Level ${definition.level}: ${definition.name}`,
       };
     }),
+    fill: shown === "custom" ? 0 : shown / (LEVELS.length - 1),
     summary: shown === "custom" ? CUSTOM_SUMMARY : LEVEL_SUMMARIES[shown],
     classes: AUTONOMY_CLASS_ORDER.map((decisionClass) => {
       const decider = shown === "custom" ? deciderOfCell(policy, project.id, decisionClass) : deciderAtLevel(shown, decisionClass);
-      return { decisionClass, label: CLASS_LABELS[decisionClass], decider, who: DECIDER_WORDS[decider] };
+      return { decisionClass, label: LEVEL_CLASS_LABELS[decisionClass], decider, who: DECIDER_WORDS[decider] };
     }),
-    legend: DECIDER_LEGEND,
+    legend: DECIDER_LEGEND_ENTRIES,
     confirm: confirming === null ? null : { level: confirming, dialog: levelConfirmDialog(confirming, project.label) },
     boundary: boundaryView(policy, project, busy, input.confirmingBoundary ?? null),
   };

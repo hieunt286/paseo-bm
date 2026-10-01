@@ -483,19 +483,22 @@ const found = (decision: Decision): DecisionLookup => ({ state: "found", decisio
 describe("the decision card's view (experience concept §5.2)", () => {
   it("offers the options while open: the recommended one is the primary action, a release asks for confirmation", () => {
     const shown = view(found(questionDecision()));
+    // The mockup's meta line: the asker and when, the kind and class at the right in the kind colour; the effects are said aloud per option and in Details.
     expect(shown.frame).toMatchObject({
       actor: { mark: "worker", name: "Worker · Contact redesign" },
-      recipient: "you",
+      recipient: null,
       authority: null,
       time: "asked 12 min ago",
-      chip: { text: "Needs decision", tone: "warning" },
+      chip: null,
+      label: { text: "DECISION · RELEASE", tone: "warning" },
+      bar: "warning",
       title: "Storage — where does the list live?",
-      tag: "effects: push",
+      tag: null,
       body: [],
     });
     expect(shown.options).toEqual([
-      { key: "a", label: "the existing table: no migration. ★", primary: true, confirm: false, accessibilityLabel: "Answer: the existing table: no migration. (recommended)" },
-      { key: "b", label: "a file on disk: simplest.", primary: false, confirm: true, accessibilityLabel: "Answer: a file on disk: simplest.; allows push" },
+      { key: "a", label: "the existing table: no migration.", mark: "Recommended", primary: true, confirm: false, accessibilityLabel: "Answer: the existing table: no migration. (recommended)" },
+      { key: "b", label: "a file on disk: simplest.", mark: null, primary: false, confirm: true, accessibilityLabel: "Answer: a file on disk: simplest.; allows push" },
     ]);
     expect(shown).toMatchObject({ ownWords: true, confirmChat: false, confirm: null });
     // Ids, effects per option and the subject are in Details.
@@ -766,13 +769,15 @@ describe("the drawn decision card", () => {
     const nodes = drawDecision(view(found(questionDecision())), DECISION_UI_IDLE, false, { onChoose });
     const shown = texts(nodes);
     expect(shown).toEqual(
-      expect.arrayContaining(["Worker · Contact redesign", "→ you", "asked 12 min ago", "Needs decision", "Storage — where does the list live?", "effects: push", "the existing table: no migration. ★", "Own words…", "Details ▸"]),
+      expect.arrayContaining(["Worker · Contact redesign", "DECISION · RELEASE", "Storage — where does the list live?", "a", "the existing table: no migration.", "Recommended", "Own words…", "Details"]),
     );
+    // The meta line: the asker in full contrast, then " · asked 12 min ago" muted.
+    expect(shown).toContain("Worker · Contact redesign · asked 12 min ago");
     expect(labels(nodes)).toEqual(["Answer: the existing table: no migration. (recommended)", "Answer: a file on disk: simplest.; allows push", "Answer in your own words", "Show details"]);
     const [primary, secondary] = pressables(nodes);
-    // The middle style is the options' layout (row or stacked), pinned by test/plugin-decision-options-layout.test.ts.
-    expect(primary!.props["style"]).toEqual([{ name: "button" }, expect.any(Object), { opacity: 1 }]);
-    expect(secondary!.props["style"]).toEqual([{ name: "secondaryButton" }, expect.any(Object), { opacity: 1 }]);
+    // The rows' layout is pinned by test/plugin-decision-options-layout.test.ts: the primary filled with the accent, the other outlined.
+    expect(primary!.props["style"]).toMatchObject({ backgroundColor: "#accent", opacity: 1 });
+    expect(secondary!.props["style"]).toMatchObject({ backgroundColor: "transparent", borderColor: "#border", opacity: 1 });
     (primary!.props["onPress"] as () => void)();
     expect(onChoose).toHaveBeenCalledWith("a");
     // No id on the face; Details is closed.
@@ -822,7 +827,7 @@ describe("the drawn decision card", () => {
   it("shows the ids and the whole message only when Details is open", () => {
     const nodes = drawDecision(view(found(questionDecision())), DECISION_UI_IDLE, true);
     const shown = texts(nodes);
-    expect(shown).toEqual(expect.arrayContaining([`Decision: ${Q_ID}`, `Request: ${REQ}`, "Details ▾"]));
+    expect(shown).toEqual(expect.arrayContaining([`Decision: ${Q_ID}`, `Request: ${REQ}`, "Details"]));
     expect(labels(nodes).at(-1)).toBe("Hide details");
   });
 
@@ -842,17 +847,18 @@ describe("the frame and the compact line, drawn", () => {
     const nodes = renderTree(CardFrame({ view: shown, details: null, detailsOpen: false, onToggleDetails: noop, styles, theme }));
     expect(texts(nodes)).toEqual(expect.arrayContaining(["one", "two", "three"]));
     expect(texts(nodes)).not.toContain("four");
-    // A settled (finished) card has no bar and no coloured border.
+    // A settled (finished) card has no bar: its box is the mockup's — surface1, one theme border, square, 20×24.
     const outer = nodes[0] as RNode;
-    expect(outer.props["style"]).toEqual([{ name: "card" }, { gap: 6, marginVertical: 4 }, null]);
-    // A card at work: a muted bar, 3 px, from its info chip.
+    expect(outer.props["style"]).toMatchObject({ backgroundColor: "#surface1", borderWidth: 1, borderColor: "#border", borderLeftWidth: 1, borderRadius: 0, paddingVertical: 20, paddingHorizontal: 24 });
+    expect((outer.children[0] as RNode).props["style"]).not.toHaveProperty("position", "absolute");
+    // A card at work: a muted bar, 3 px, from its info chip, standing where the left border was.
     const working = renderTree(CardFrame({ view: frameOf(card(REPORT)), details: null, detailsOpen: false, onToggleDetails: noop, styles, theme }))[0] as RNode;
-    expect((working.props["style"] as unknown[])[2]).toEqual({ borderLeftWidth: 3, borderLeftColor: "#foregroundMuted" });
-    // Colour only on the left bar: no element of either card colours a whole border.
-    const styleKeys = (tree: Array<RNode | string>) =>
-      allNodes(tree).flatMap((node) => [node.props["style"]].flat(Infinity).flatMap((style) => (typeof style === "object" && style !== null ? Object.keys(style) : [])));
-    const keys = [...styleKeys(nodes), ...styleKeys([working])];
-    expect(keys.filter((key) => key.startsWith("borderLeft"))).toEqual(["borderLeftWidth", "borderLeftColor"]);
+    expect(working.props["style"]).toMatchObject({ borderLeftWidth: 0, borderColor: "#border" });
+    expect((working.children[0] as RNode).props["style"]).toEqual({ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, backgroundColor: "#foregroundMuted" });
+    // Colour only on the bar: no element of either card has a coloured border.
+    const borderColours = (tree: Array<RNode | string>) =>
+      allNodes(tree).flatMap((node) => [node.props["style"]].flat(Infinity).flatMap((style) => (typeof style === "object" && style !== null && "borderColor" in style ? [(style as { borderColor: unknown }).borderColor] : [])));
+    expect(new Set([...borderColours(nodes), ...borderColours([working])])).toEqual(new Set(["#border"]));
   });
 
   it("derives the kind bar from the card's own bar, its outline, then its chip", () => {
@@ -1258,6 +1264,7 @@ describe("the finished card reads its request's finish (autonomy design §C.3, �
   it("draws the warning chip and the warning kind bar in the frame", () => {
     const nodes = renderTree(CardFrame({ view: finishedFrame(unverified), details: null, detailsOpen: false, onToggleDetails: noop, styles, theme }));
     expect(texts(nodes)).toContain("Finished — unverified");
-    expect((nodes[0] as RNode).props["style"]).toEqual([{ name: "card" }, { gap: 6, marginVertical: 4 }, { borderLeftWidth: 3, borderLeftColor: "#statusWarning" }]);
+    const bar = (nodes[0] as RNode).children[0] as RNode;
+    expect(bar.props["style"]).toEqual({ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, backgroundColor: "#statusWarning" });
   });
 });

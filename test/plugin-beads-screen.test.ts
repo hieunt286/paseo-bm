@@ -14,8 +14,15 @@ import {
 import type { DashboardPaseo } from "../plugin/server/paseo-directory";
 import { fakePaseo } from "./helpers/fake-paseo";
 import {
+  BEAD_ACTIONS_NOTE,
   EMPTY_FILTER,
   actionSpec,
+  beadFacts,
+  beadHeadLine,
+  beadRowMeta,
+  boardBucket,
+  boardColumns,
+  featureOf,
   activeFilters,
   previewValues,
   sortBeads,
@@ -40,6 +47,7 @@ import {
 } from "../plugin/client/beads-model";
 import { TRACE_STORE_SCHEMA_VERSION, type BeadRow, type BeadStats } from "../plugin/shared/contracts";
 import { localTimeText } from "../plugin/client/format";
+import { pressables, renderTree, texts } from "./helpers/element-tree";
 
 /**
  * The Beads screen (design delta 20260916-beads-screen): list, detail, five
@@ -613,5 +621,117 @@ describe("done / total at the top of the Beads screen (delta 20260918e, Q11)", (
 
   it("writes the figure the same way for any counts", () => {
     expect(doneText({ closed: 12, total: 40 })).toEqual({ text: "✓ 12 / 40 done", label: "12 of 40 beads done, epics not counted" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The board as the approved ProjectBeads artboard draws it (change-014 fidelity pass).
+// ---------------------------------------------------------------------------
+
+// The root tsconfig has no `jsx`, so the .tsx module loads through a non-literal specifier.
+const screenPath = "../plugin/client/beads-screen.tsx";
+type Component = (props: Record<string, unknown>) => unknown;
+const { BoardBeadRow, BoardColumnView, ShowClosedToggle } = (await import(screenPath)) as Record<"BoardBeadRow" | "BoardColumnView" | "ShowClosedToggle", Component>;
+const theme = { colors: new Proxy({}, { get: (_target, key) => `#${String(key)}` }) };
+
+describe("the board as the artboard draws it: In progress · Ready · Open epics · Deferred, Blocked when one is, Closed while shown", () => {
+  const NOW = new Date("2026-10-01T12:00:00.000Z");
+  const full = (id: string, overrides: Partial<BeadRow> = {}): BeadRow => ({
+    id,
+    title: `Bead ${id}`,
+    status: "open",
+    issueType: "task",
+    priority: 1,
+    labels: [],
+    createdAt: "2026-09-30T10:00:00.000Z",
+    updatedAt: "2026-09-30T10:00:00.000Z",
+    closedAt: null,
+    ready: true,
+    parentId: null,
+    work: null,
+    ...overrides,
+  });
+  const epic = full("e1", { issueType: "epic", ready: false, labels: ["feature:site"] });
+  const beads = [
+    full("r1", { labels: ["feature:site", "area:verify"], parentId: "e1" }),
+    epic,
+    full("d1", { status: "deferred", ready: false, parentId: "e1" }),
+    full("c1", { status: "closed", closedAt: "2026-10-01T09:00:00.000Z", parentId: "e1" }),
+    full("p1", { status: "in_progress", ready: false }),
+  ];
+
+  it("puts each bead in its column, keeps the four columns even when empty, and adds Blocked only when a bead is blocked", () => {
+    expect(boardBucket(epic)).toBe("open_epics");
+    expect(boardBucket(full("x", { status: "blocked" }))).toBe("blocked");
+    expect(boardBucket(full("x", { ready: false }))).toBe("blocked");
+    const hidden = boardColumns(beads, { showClosed: false });
+    expect(hidden.columns.map((column) => [column.title, column.total])).toEqual([
+      ["In progress", 1],
+      ["Ready", 1],
+      ["Open epics", 1],
+      ["Deferred", 1],
+    ]);
+    expect([hidden.visible, hidden.closed]).toEqual([4, 1]);
+    const shown = boardColumns([...beads, full("b1", { ready: false })], { showClosed: true });
+    expect(shown.columns.map((column) => column.title)).toEqual(["In progress", "Ready", "Open epics", "Deferred", "Blocked", "Closed"]);
+    expect(boardColumns([], { showClosed: false }).columns.map((column) => column.total)).toEqual([0, 0, 0, 0]);
+  });
+
+  it("writes a row's meta: an epic's children, a closed bead's time, else priority, type and its first label that is not a feature", () => {
+    expect(beadRowMeta(epic, beads, NOW)).toBe("epic · 1 / 3");
+    expect(beadRowMeta(beads[0]!, beads, NOW)).toBe("P1 · task · area:verify");
+    expect(beadRowMeta(beads[3]!, beads, NOW)).toBe(`closed ${localTimeText(new Date("2026-10-01T09:00:00.000Z"), NOW)}`);
+    expect(beadRowMeta(beads[4]!, beads, NOW)).toBe("In progress · no Worker recorded on it");
+  });
+
+  it("gives the detail its head line and Status · Feature · Parent · Worker", () => {
+    expect(beadHeadLine(beads[0]!)).toBe("r1 · task · P1");
+    expect(beadFacts(beads[0]!, beads, NOW)).toEqual([
+      { key: "Status", value: "Ready", mono: false },
+      { key: "Feature", value: "site", mono: true },
+      { key: "Parent", value: "e1", mono: true },
+      { key: "Worker", value: "none yet", mono: false },
+    ]);
+    expect(beadFacts(epic, beads, NOW)[0]!.value).toBe("Open · 1 of 3 children closed");
+    expect(beadFacts(beads[2]!, beads, NOW)[0]!.value).toBe("Deferred");
+    expect(featureOf(full("x"))).toBeNull();
+  });
+
+  it("labels the actions as the artboard does, and says every action asks first", () => {
+    expect(actionsFor({ status: "open" }).map((action) => actionSpec(action, { id: "x", status: "open" }).label)).toEqual(["Ask Manager to implement", "Close…", "Delete…"]);
+    expect(BEAD_ACTIONS_NOTE).toBe("Every action asks first, then goes to this project's Manager. This screen never writes the bead store.");
+  });
+
+  it("draws a row as id, title and meta, the selected one on surface2 with the accent bar", () => {
+    const onSelect = vi.fn();
+    for (const selected of [true, false]) {
+      const tree = renderTree(BoardBeadRow({ bead: beads[0]!, meta: "P1 · task", selected, onSelect, theme }));
+      const [press] = pressables(tree);
+      expect(texts(tree)).toEqual(["r1", "Bead r1", "P1 · task"]);
+      expect(press!.props.accessibilityState).toEqual({ selected });
+      expect(JSON.stringify(press!.props.style)).toContain(selected ? "#surface2" : "transparent");
+      expect(JSON.stringify(tree).includes("#accent")).toBe(selected);
+      (press!.props.onPress as () => void)();
+    }
+    expect(onSelect).toHaveBeenCalledTimes(2);
+  });
+
+  it("heads a column with its title and count, and says Nothing here when empty", () => {
+    const [ready] = boardColumns([beads[0]!], { showClosed: false }).columns.filter((column) => column.bucket === "ready");
+    const tree = renderTree(BoardColumnView({ column: ready, renderBead: (bead: BeadRow) => bead.id, last: false, theme }));
+    expect(texts(tree)).toEqual(["Ready", "1"]);
+    expect(JSON.stringify(tree)).toContain("r1");
+    const [empty] = boardColumns([], { showClosed: false }).columns;
+    expect(texts(renderTree(BoardColumnView({ column: empty, renderBead: () => null, last: true, theme })))).toEqual(["In progress", "0", "Nothing here"]);
+  });
+
+  it("draws Show closed as a checkbox that says how many beads are closed", () => {
+    const onToggle = vi.fn();
+    const tree = renderTree(ShowClosedToggle({ on: true, count: 43, onToggle, theme }));
+    const [press] = pressables(tree);
+    expect(press!.props).toMatchObject({ accessibilityRole: "checkbox", accessibilityState: { checked: true }, accessibilityLabel: "Show closed beads (43)" });
+    expect(texts(tree)).toContain("Show closed (43)");
+    (press!.props.onPress as () => void)();
+    expect(onToggle).toHaveBeenCalled();
   });
 });

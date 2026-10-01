@@ -22,17 +22,20 @@ const source = (file: string) => readFileSync(fileURLToPath(new URL(`../plugin/c
 describe("launcher.tsx: the Beads Manager surface", () => {
   const launcher = source("launcher.tsx");
 
+  it("draws every section under the shell header, with no button-styled tabs", () => {
+    expect(launcher.match(/<ShellHeader\b/g)).toHaveLength(1);
+    expect(launcher).not.toMatch(/StatusTabs/);
+    const header = source("shell-header.tsx");
+    expect(header).toMatch(/<TextTabs\b[^>]*height=\{SHELL_HEADER_HEIGHT\}/);
+    expect(header).toMatch(/useOrchestratorActions\(navigation, HEADER_STATE_POLL_MS\)/);
+  });
+
   it("builds the status strip once and places it on the main screen, the workspace list and a project's page", () => {
     expect(launcher.match(/<LauncherStatus\b/g)).toHaveLength(1);
     expect(launcher).toMatch(/<SettingsScreen\b.*\bstatus=\{status\}/);
     expect(launcher).toMatch(/<ToolsScreen\b.*\bstatus=\{status\}/);
-    // The Projects list and a project's page get it too (work.tsx draws it under their headers).
+    // The Projects screen — the list and the chosen project's page beside it — gets it too (work.tsx draws it, F3).
     expect(launcher).toMatch(/<WorkScreen\b[\s\S]*?\bstatus=\{status\}/);
-    expect(launcher).toMatch(/<ProjectPage\b[\s\S]*?\bstatus=\{status\}/);
-    // On a project's page inside the surface (F3).
-    const start = launcher.indexOf("<ProjectPage");
-    expect(start).toBeGreaterThan(0);
-    expect(launcher.slice(start, launcher.indexOf("/>", start))).toMatch(/status=\{status\}/);
   });
 
   it("shows Settings and Tools & skills with the same props — the named projects and the strip —, and no Setup or Insights screen", () => {
@@ -44,9 +47,10 @@ describe("launcher.tsx: the Beads Manager surface", () => {
   });
 
   it("opens a project's page on its Overview, a closed workspace's on Requests, and its Autonomy action on Settings", () => {
-    expect(launcher).toMatch(/setView\(closed === undefined \? "project-overview" : "project-requests"\)/);
-    const start = launcher.indexOf("<ProjectPage");
-    expect(launcher.slice(start, launcher.indexOf("/>", start))).toMatch(/onOpenSettings=\{\(\) => setView\("settings"\)\}/);
+    // The Projects screen chooses the tab (work.tsx); the launcher hands it the way to Settings.
+    expect(source("work.tsx")).toMatch(/tab: closed === undefined \? "overview" : "requests"/);
+    const start = launcher.indexOf("<WorkScreen");
+    expect(launcher.slice(start, launcher.indexOf("/>,", start))).toMatch(/onOpenSettings=\{\(\) => setView\("settings"\)\}/);
   });
 
   it("renders workspaces.data in the order it arrives (most recent activity first; delta 20260918f §4.5)", () => {
@@ -55,22 +59,14 @@ describe("launcher.tsx: the Beads Manager surface", () => {
     expect(launcher).toMatch(/workspaces=\{workspaces\.data\?\.map\(\(workspace\) => \(\{/);
   });
 
-  it("draws each workspace row's running dot from the overview's runningAgents, animated", () => {
-    // The Projects list draws each project row through `renderDot` (work.tsx, rendered in plugin-work-model.test.ts), with the dot alone.
-    expect(launcher).toMatch(/renderDot=\{\(workspaceId\) => \(\s*<RunningDot\b[^>]*counts=\{overviewById\.get\(workspaceId\)\?\.runningAgents\}[^>]*\bbare\b/);
-    expect(launcher).toMatch(/<Animated\.View\b/);
-  });
-
-  it("labels the ← of a project's page from backLabelOf, and every ← goes back through one helper (F4, S5)", () => {
-    const start = launcher.indexOf("<ProjectPage");
-    const element = launcher.slice(start, launcher.indexOf("/>", start));
-    expect(element).toMatch(/backLabel=\{backLabelOf\(view\)/);
-    expect(element).toMatch(/onBack=\{goBack\}/);
-    // The back navigation is written once, inside `goBack`.
-    expect(launcher.match(/setView\(backOf\(view\) \?\? SURFACE_HOME_VIEW\)/g)).toHaveLength(1);
-    expect(launcher).toMatch(/const goBack = \(\) => setView\(backOf\(view\) \?\? SURFACE_HOME_VIEW\);/);
-    // The workspace list is the Projects section's own screen, reached by its tab: no ← of its own.
-    expect(launcher.match(/onPress=\{goBack\}/g)).toBeNull();
+  it("shows a project's page beside the Projects list: one WorkScreen, asked for a project by a numbered request (change-014)", () => {
+    expect(launcher).not.toMatch(/<ProjectPage\b/);
+    const start = launcher.indexOf("<WorkScreen");
+    const element = launcher.slice(start, launcher.indexOf("/>,", start));
+    expect(element).toMatch(/surface=\{props\}/);
+    expect(element).toMatch(/onOpenSettings=\{\(\) => setView\("settings"\)\}/);
+    expect(element).toMatch(/request=\{projectRequest\}/);
+    expect(launcher).toMatch(/nonce: \(requestCount\.current \+= 1\)/);
   });
 
   it("reads the workspace figures through overviewPolling (F5)", () => {
@@ -79,10 +75,6 @@ describe("launcher.tsx: the Beads Manager surface", () => {
     expect(launcher.slice(start, launcher.indexOf("});", start))).toMatch(/\.\.\.overviewPolling\(view\)/);
   });
 
-  it("hands a project's page a closed workspace's state, and offers no chat for it", () => {
-    expect(launcher).toMatch(/closed=\{project\.closed\}/);
-    expect(launcher).toMatch(/project\.closed !== undefined \? undefined/);
-  });
 });
 
 describe("settings-section.tsx: the Settings screen", () => {
@@ -214,20 +206,23 @@ describe("beads-screen.tsx and chat-beads-panel.tsx: the Beads board and the cha
     expect(screen.slice(start, screen.indexOf("right=", start))).toMatch(/status=\{status\}/);
   });
 
-  it("draws the shared bead row, as the chat's bead panel does", () => {
-    expect(screen).toMatch(/<BeadRowCard/);
+  it("shares the bead detail's reads and actions with the chat's bead panel, which keeps its own row", () => {
+    expect(screen.match(/useBeadAction\(workspaceId, bead\)/g)).toHaveLength(2);
     expect(source("chat-beads-panel.tsx")).toMatch(/<BeadRowCard/);
+    expect(source("chat-beads-panel.tsx")).toMatch(/<BeadDetailPanel/);
   });
 
-  it("is the board first, measuring its own width, with the status tabs and no overview figures", () => {
-    expect(screen).toMatch(/<KanbanBoard/);
-    expect(screen).toMatch(/<StatusTabs/);
-    expect(screen).toMatch(/onLayout=\{\(event\) => setBoardWidth\(event\.nativeEvent\.layout\.width\)\}/);
-    // The figures are the Metrics tab's (plugin-work-model.test.ts renders them there).
-    expect(screen).not.toMatch(/<StatCards|<BarChart|<BeadsFigures/);
+  it("is the artboard's filter bar, then the board beside the 380px detail; no button-styled tabs and no overview figures", () => {
     const body = screen.slice(screen.indexOf("export function BeadsScreen("));
-    expect(body.indexOf("<KanbanBoard")).toBeGreaterThan(0);
-    expect(body.indexOf("beads`}</Text>")).toBeLessThan(body.indexOf("Filters and sort"));
+    // Features as a segmented control, Show closed, Filter · Sort — in that order — then the board and the detail.
+    const order = ["<Segmented", "<ShowClosedToggle", "`Filter · Sort$", "Filters and sort, folded", "<BoardColumnView", "BEAD_DETAIL_WIDTH"];
+    const positions = order.map((text) => body.indexOf(text));
+    expect(positions.every((position) => position > 0), String(positions)).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+    expect(screen).toMatch(/boardColumns\(shown, \{ showClosed \}\)/);
+    expect(screen).not.toMatch(/StatusTabs|<KanbanBoard/);
+    // The figures are the Metrics tab's (plugin-insights-model.test.ts renders them there).
+    expect(screen).not.toMatch(/<StatCards|<BarChart|<BeadsFigures/);
   });
 });
 
@@ -250,9 +245,24 @@ describe("work.tsx: a project's page", () => {
 
   it("draws Overview · Requests · Beads · Metrics · Agents, Metrics being the project's insights (change-014 outcome 5)", () => {
     const page = work.slice(work.indexOf("export function ProjectPage("));
-    expect(page).toMatch(/tab === "overview" \? \(\s*<OverviewTab\b/);
-    expect(page).toMatch(/tab === "metrics" \? \(\s*<ProjectMetrics workspaceId=\{workspaceId\} label=\{label\}/);
+    expect(page).toMatch(/tab === "overview" \? \(\s*scrolled\(<OverviewTab\b/);
+    expect(page).toMatch(/tab === "metrics" \? \(\s*scrolled\(<ProjectMetrics workspaceId=\{workspaceId\} label=\{label\} window=\{window\}/);
     expect(page).toMatch(/onRequests=\{\(\) => setTab\("requests"\)\}/);
+    // The Metrics period sits in the header, as a segmented control.
+    expect(page).toMatch(/tab === "metrics" \? \(\s*<Segmented segments=\{WINDOW_SEGMENTS\}/);
+    // The header's level comes from the shared policy query.
+    expect(page).toMatch(/queryKey: AUTONOMY_POLICY_KEY/);
+    expect(page).toMatch(/level=\{levelNameOf\(policy\.data\?\.levels, workspaceId\)\}/);
+    expect(work).not.toMatch(/StatusTabs|WorkspaceScreenHeader/);
+  });
+
+  it("is the Projects artboard: the list as an aside, the chosen project's page beside it, the most recent by default", () => {
+    const screen = work.slice(work.indexOf("export function WorkScreen("), work.indexOf("/** One request with its detail"));
+    expect(screen).toMatch(/<WorkList\b/);
+    expect(screen).toMatch(/<ProjectPage\b/);
+    expect(screen).toMatch(/rows\[0\] === undefined \? null : \{ workspaceId: rows\[0\]\.workspaceId, tab: "overview" as ProjectTab \}/);
+    // Open Manager runs the surface's one launcher.
+    expect(screen).toMatch(/managerLauncher\.launch\(current\.workspaceId, \{ ensure, openAgent \}\)/);
   });
 
   it("reads the Overview from the Requests tab's queries, the Metrics tab's summary and the shared policy query", () => {
@@ -260,8 +270,8 @@ describe("work.tsx: a project's page", () => {
     expect(tab).toMatch(/queryKey: workQueryKeys\.traces\(workspaceId\)/);
     expect(tab).toMatch(/queryKey: workQueryKeys\.decisions\(workspaceId\)/);
     expect(tab).toMatch(/queryKey: insightsQueryKey\(INSIGHTS_DEFAULT_WINDOW, workspaceId\)/);
-    expect(tab).toMatch(/queryKey: AUTONOMY_POLICY_KEY/);
-    expect(tab).toMatch(/level=\{levelNameOf\(policy\.data\?\.levels, workspaceId\)\}/);
+    // A stall is the coordinator's fact, from the project rows' own query.
+    expect(tab).toMatch(/queryKey: workQueryKeys\.projects/);
   });
 
   it("names each project row's autonomy level from autonomy.policy's levels", () => {
@@ -274,10 +284,12 @@ describe("work.tsx: a project's page", () => {
 describe("insights.tsx: a project's Metrics tab", () => {
   const insights = source("insights.tsx");
 
-  it("reads insights.summary for its workspace with the window tabs, and offers no Delegate? (ADR-025)", () => {
+  it("reads insights.summary for its workspace and for all projects over the header's period, and offers no Delegate? (ADR-025)", () => {
     const tab = insights.slice(insights.indexOf("export function ProjectMetrics("));
     expect(tab).toMatch(/queryFn: \(\) => readSummary\(\{ window, workspaceId \}\)/);
-    expect(insights).toMatch(/<StatusTabs tabs=\{WINDOW_TABS\}/);
+    expect(tab).toMatch(/queryFn: \(\) => readSummary\(\{ window \}\)/);
+    expect(tab).toMatch(/queryFn: \(\) => listBeads\(\{ workspaceId \}\)/);
+    expect(insights).not.toMatch(/StatusTabs/);
     expect(insights).not.toMatch(/autonomySetRpc|Delegate|<InsightsScreen|export function InsightsScreen/);
   });
 });

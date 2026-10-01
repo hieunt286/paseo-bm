@@ -17,6 +17,7 @@ import { Pressable, Text, View, type AccessibilityRole, type AccessibilityState,
 import { barShare, type Bar } from "./format";
 import { KIND_BAR_WIDTH, RADIUS, type dashboardStyles } from "./styles";
 import { ROLE_MARK, toneColor, type Badge, type RoleMarkKind, type Tone } from "./tone";
+import { MONO } from "./text-tabs";
 import type { ConfirmDialog } from "./ui-types";
 import { MAX_BODY_LINES } from "./chat-card-parse";
 import { NOTICE_DOT, kindBarOf, type CardFrameView } from "./chat-card-frame";
@@ -24,14 +25,25 @@ import { NOTICE_DOT, kindBarOf, type CardFrameView } from "./chat-card-frame";
 export type Styles = ReturnType<typeof dashboardStyles>;
 export type Theme = PluginSurfaceProps["theme"];
 
-/** The three looks of a button: filled (the one to take), outlined, and outlined in the danger colour. */
-export type ButtonKind = "primary" | "secondary" | "danger";
+/**
+ * The looks of a button: filled (the one to take), outlined, outlined in the
+ * danger colour, and a text button — no border, muted (the mockup's
+ * "Details", "Why?").
+ */
+export type ButtonKind = "primary" | "secondary" | "danger" | "text";
 
 const BUTTON_STYLES = {
   primary: { box: "button", text: "buttonText" },
   secondary: { box: "secondaryButton", text: "secondaryButtonText" },
   danger: { box: "dangerButton", text: "dangerButtonText" },
+  text: { box: "secondaryButton", text: "body" },
 } as const satisfies Record<ButtonKind, { box: keyof Styles; text: keyof Styles }>;
+
+/** The mockup's small button (8×12 padding, 13px, square), for the cards' and the Inbox's rows. */
+const SMALL_BOX: ViewStyle = { paddingVertical: 8, paddingHorizontal: 12, borderRadius: 0 };
+const SMALL_TEXT: TextStyle = { fontSize: 13 };
+/** A text button has no border and little side padding. */
+const TEXT_BOX: ViewStyle = { borderWidth: 0, paddingHorizontal: 4 };
 
 /** `base`, then `extra` flattened after it; `base` itself when there is no extra. */
 function withBase<T>(base: T, extra: StyleProp<T> | undefined): StyleProp<T> {
@@ -48,6 +60,7 @@ function withBase<T>(base: T, extra: StyleProp<T> | undefined): StyleProp<T> {
 export function Button({
   label,
   kind,
+  size,
   style,
   textStyle,
   styles,
@@ -55,6 +68,8 @@ export function Button({
 }: {
   label: string;
   kind: ButtonKind;
+  /** `small`: the mockup's row buttons (Ask back, Own words…, Override, an alert's action). */
+  size?: "small";
   style?: StyleProp<ViewStyle>;
   textStyle?: StyleProp<TextStyle>;
   styles: Styles;
@@ -65,9 +80,11 @@ export function Button({
   disabled?: boolean;
 }) {
   const look = BUTTON_STYLES[kind];
+  const box = size === "small" || kind === "text" ? { ...styles[look.box], ...(size === "small" ? SMALL_BOX : {}), ...(kind === "text" ? TEXT_BOX : {}) } : styles[look.box];
+  const text = size === "small" || kind === "text" ? { ...styles[look.text], ...SMALL_TEXT } : styles[look.text];
   return (
-    <Pressable accessibilityRole="button" {...press} style={withBase<ViewStyle>(styles[look.box], style)}>
-      <Text style={withBase<TextStyle>(styles[look.text], textStyle)}>{label}</Text>
+    <Pressable accessibilityRole="button" {...press} style={withBase<ViewStyle>(box, style)}>
+      <Text style={withBase<TextStyle>(text, textStyle)}>{label}</Text>
     </Pressable>
   );
 }
@@ -479,73 +496,163 @@ export function ConfirmBlock({ dialog, busy, busyLabel, onConfirm, onCancel, sty
   );
 }
 
+/** Where a card sits among others: alone (a chat), the first of a joined stack, or one after it (no top border). */
+export type CardJoin = "alone" | "first" | "next";
+
+/**
+ * The box of a card as the approved mockup draws it (change-014): surface1,
+ * one 1px border and square corners, 20×24 padding (16×24 for a one-line
+ * card such as an alert), no left border when a kind bar stands there, and in
+ * a joined stack (an Inbox project group) no gap and no top border after the
+ * first. Pure, so the Inbox's alert and outcome rows use it too.
+ */
+export function cardBoxStyle(
+  theme: Theme,
+  options: { compact: boolean; join?: CardJoin; bar: boolean; row?: boolean },
+): ViewStyle {
+  const join = options.join ?? "alone";
+  const vertical = options.row ? (options.compact ? 12 : 16) : options.compact ? 14 : 20;
+  return {
+    position: "relative",
+    gap: options.row ? 12 : options.compact ? 10 : 14,
+    paddingVertical: vertical,
+    paddingHorizontal: options.compact ? 16 : 24,
+    borderRadius: 0,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderLeftWidth: options.bar ? 0 : 1,
+    borderTopWidth: join === "next" ? 0 : 1,
+    backgroundColor: theme.colors.surface1,
+    ...(join === "alone" ? { marginVertical: 4 } : {}),
+  };
+}
+
+/** The 3px bar at a card's left that marks its kind: the only colour on the frame. */
+export function KindBar({ tone, theme }: { tone: Tone; theme: Theme }) {
+  return (
+    <View
+      style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: KIND_BAR_WIDTH, backgroundColor: toneColor(theme, tone) }}
+    />
+  );
+}
+
+/**
+ * A card's title, 17/600: text in backticks is drawn as inline code (the
+ * mockup's "Run `git push origin main`?"), in mono on the page colour with a
+ * 1px border.
+ */
+export function CardTitle({ text, open, compact, theme }: { text: string; open: boolean; compact: boolean; theme: Theme }) {
+  const parts = text.split("`");
+  // An odd count of backticks leaves the last one as it was written.
+  const coded = parts.length % 2 === 1;
+  return (
+    <Text
+      accessibilityRole="header"
+      style={{ color: theme.colors.foreground, fontSize: compact ? 15 : 17, fontWeight: "600", lineHeight: compact ? 21 : 24 }}
+      numberOfLines={open ? undefined : 3}
+    >
+      {coded && parts.length > 1
+        ? parts.map((part, index) =>
+            index % 2 === 0 ? (
+              part
+            ) : (
+              <Text
+                key={`${index}:${part}`}
+                style={{
+                  fontFamily: MONO,
+                  fontWeight: "400",
+                  backgroundColor: theme.colors.surface0,
+                  borderWidth: 1,
+                  borderColor: theme.colors.border,
+                  paddingHorizontal: 6,
+                  paddingVertical: 2,
+                }}
+              >
+                {part}
+              </Text>
+            ),
+          )
+        : text}
+    </Text>
+  );
+}
+
+/** A small kind label in mono capitals: a card's kind and class, a status, a tag. */
+function MetaLabel({ text, colour }: { text: string; colour: string }) {
+  return (
+    <Text style={{ fontFamily: MONO, fontSize: 12, color: colour, textTransform: "uppercase" }} numberOfLines={1}>
+      {text}
+    </Text>
+  );
+}
+
 /**
  * The one frame of every card (experience concept §5.1, autonomy design
- * §A.12), in the chats and in the Inbox:
+ * §A.12), in the chats and in the Inbox, as the approved mockup draws it
+ * (change-014):
  *
  * ```
- * ┌ <mark> <Actor> → <Recipient> · <authority>                 <time> ┐
- * │ <STATUS CHIP>  <title>                                     <tag> │
- * │ <body: at most 3 lines>                                          │
- * │ <actions: one primary>                                Details ▸  │
- * └──────────────────────────────────────────────────────────────────┘
+ * ▌ <icon> <Actor> → <Recipient> · <authority> · <time>    <STATUS> <KIND · CLASS> <tag>
+ * ▌ <title, 17/600>
+ * ▌ <body: at most 3 lines>
+ * ▌ <actions>
+ * ▌ <footer buttons>                                                        Details
  * ```
  *
  * Hook-free: the view comes from the card models (`cardFrameOf`,
- * `decisionCardView`), the actions and Details are passed in. Ids belong in
- * Details only. The only colour on the frame is the 3 px bar at its left that
- * marks the card's kind (`kindBarOf`; change-014 outcome 6); a settled card
- * has none, and the border stays the theme's.
+ * `decisionCardView`), the actions, the footer and Details are passed in. Ids
+ * belong in Details only. The only colour on the frame is the 3 px bar at its
+ * left that marks the card's kind (`kindBarOf`; change-014 outcome 6) and the
+ * kind label in the same colour; a settled card has no bar. `join` stacks the
+ * card in an Inbox group.
  */
 export function CardFrame({
   view,
   actions,
+  footer,
   details,
   detailsOpen,
   onToggleDetails,
+  join,
+  compact = false,
   styles,
   theme,
 }: {
   view: CardFrameView;
   actions?: ReactNode;
+  /** Buttons on the Details row, at its left (Ask back, Own words…). */
+  footer?: ReactNode;
   details: ReactNode;
   detailsOpen: boolean;
   onToggleDetails: () => void;
+  join?: CardJoin;
+  compact?: boolean;
   styles: Styles;
   theme: Theme;
 }) {
+  const { colors } = theme;
   const barTone = kindBarOf(view);
-  const bar = barTone === null ? null : { borderLeftWidth: KIND_BAR_WIDTH, borderLeftColor: toneColor(theme, barTone) };
+  const icon = view.icon ?? (view.actor.mark === null ? null : ROLE_MARK[view.actor.mark].icon);
+  const rest = `${view.recipient === null ? "" : ` → ${view.recipient}`}${[view.authority, view.time]
+    .filter((part) => part !== null && part !== "")
+    .map((part) => ` · ${part}`)
+    .join("")}`;
   return (
-    <View style={[styles.card, { gap: 6, marginVertical: 4 }, bar]}>
-      <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
-        <View style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-          {view.actor.mark === null ? null : <RoleMark kind={view.actor.mark} theme={theme} size={20} />}
-          <Text style={[styles.body, { color: theme.colors.foreground, fontWeight: "600" }]} numberOfLines={1}>
-            {view.actor.name}
-          </Text>
-          {view.recipient === null ? null : (
-            <Text style={styles.body} numberOfLines={1}>
-              {`→ ${view.recipient}`}
-            </Text>
-          )}
-          {view.authority === null ? null : (
-            <Text style={styles.body} numberOfLines={1}>
-              {`· ${view.authority}`}
-            </Text>
-          )}
-        </View>
-        <Text style={styles.body}>{view.time}</Text>
+    <View style={cardBoxStyle(theme, { compact, join: join ?? "alone", bar: barTone !== null })}>
+      {barTone === null ? null : <KindBar tone={barTone} theme={theme} />}
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 10, flexWrap: compact ? "wrap" : "nowrap" }}>
+        {icon === null ? null : <Icon name={icon} size={16} color={colors.foregroundMuted} />}
+        <Text style={{ flex: 1, flexShrink: 1, minWidth: 120, fontSize: 13, color: colors.foregroundMuted }} numberOfLines={detailsOpen ? undefined : 1}>
+          <Text style={{ color: colors.foreground }}>{view.actor.name}</Text>
+          {rest}
+        </Text>
+        {view.chip === null ? null : <MetaLabel text={view.chip.text} colour={toneColor(theme, view.chip.tone)} />}
+        {view.label == null ? null : <MetaLabel text={view.label.text} colour={toneColor(theme, view.label.tone)} />}
+        {/* Neutral: a tag is read, never told apart by colour alone. */}
+        {view.tag === null ? null : <MetaLabel text={view.tag} colour={colors.foregroundMuted} />}
       </View>
 
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        {view.chip === null ? null : <Chip badge={view.chip} styles={styles} theme={theme} />}
-        <Text style={[styles.sectionTitle, { flex: 1, minWidth: 160 }]} numberOfLines={detailsOpen ? undefined : 2}>
-          {view.title}
-        </Text>
-        {/* Neutral: a tag is read, never told apart by colour alone. */}
-        {view.tag === null ? null : <Text style={[styles.badge, { color: theme.colors.foregroundMuted }]}>{view.tag}</Text>}
-      </View>
+      <CardTitle text={view.title} open={detailsOpen} compact={compact} theme={theme} />
 
       {view.body.slice(0, MAX_BODY_LINES).map((line, index) => (
         <Text key={`${index}:${line}`} style={styles.body} numberOfLines={detailsOpen ? undefined : 2}>
@@ -553,20 +660,24 @@ export function CardFrame({
         </Text>
       ))}
 
-      {actions === undefined || actions === null ? null : <View style={{ gap: 6 }}>{actions}</View>}
+      {actions === undefined || actions === null ? null : <View style={{ gap: 10 }}>{actions}</View>}
 
-      <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        {footer}
         <Button
-          label={detailsOpen ? "Details ▾" : "Details ▸"}
-          kind="secondary"
+          label="Details"
+          kind="text"
           accessibilityLabel={detailsOpen ? "Hide details" : "Show details"}
           accessibilityState={{ expanded: detailsOpen }}
           onPress={onToggleDetails}
+          style={{ marginLeft: "auto" }}
           styles={styles}
         />
       </View>
       {view.status === null ? null : <ToneText tone={view.status.tone} styles={styles} theme={theme}>{view.status.text}</ToneText>}
-      {detailsOpen ? <View style={[styles.card, { backgroundColor: theme.colors.surface0, gap: 4 }]}>{details}</View> : null}
+      {detailsOpen ? (
+        <View style={{ gap: 4, padding: 12, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface0 }}>{details}</View>
+      ) : null}
     </View>
   );
 }

@@ -291,11 +291,14 @@ with each agent's status, and **Beads in this chat** (per agent) lists the beads
 
 The Inbox is read every 5 seconds while you look at it.
 
-- **The Orchestrator line**, first. Before there is one: **Start the Orchestrator…**, which asks
+- **The Orchestrator's status** is at the right of the header on every screen ("Orchestrator idle ·
+  N projects watched"); press it to open the Orchestrator's chat. The Inbox lists what needs you per
+  project, and the filter at the top shows All, Decisions, Actions (held actions) or Alerts. Before
+  there is an Orchestrator the header shows **Start…**, which asks
   first, Cancel first — the provider · model, and "Reads the work of every paseo-bm project on this
-  machine; uses tokens." — and creates it only when you confirm. After that: **Orchestrator chat ▸**.
+  machine; uses tokens." — and creates it only when you confirm.
   When the Orchestrator lost its tools (it was started before paseo-bm restarted) or runs on older
-  instructions, the line says why and offers **Start a new Orchestrator…**; the old one stays in your
+  instructions, the header says why and offers **Start a new Orchestrator…**; the old one stays in your
   agent list. For a day after a new one replaced an older one, it says "New Orchestrator since 2 h
   ago — the old chat is no longer used." See [The Orchestrator](#the-orchestrator-one-coordinator-for-every-project).
 - **Needs you** — every open decision, grouped by project, the oldest question first: a Worker's
