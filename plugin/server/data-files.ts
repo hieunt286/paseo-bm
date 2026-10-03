@@ -27,6 +27,7 @@ import {
   closeSync,
   constants as fsConstants,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -293,6 +294,13 @@ export interface JsonFileStoreOptions<T extends object> {
    * reads as `empty()` and the next write replaces it.
    */
   keepUnusable?: boolean;
+  /**
+   * `read` keeps the parsed content while the file's identity (mtime, size,
+   * inode) does not change, so a file read at every turn end is parsed once
+   * per change; a write through the store drops it. The value is shared:
+   * callers never mutate what `read` returns.
+   */
+  cached?: boolean;
 }
 
 /** What a read found: the content, and why a file that exists was not used. */
@@ -314,6 +322,24 @@ export interface JsonFileStore<T extends object> {
   /** `readForWrite`, `change`, then `write` what it returns; null from `change` writes nothing and returns null. */
   update(change: (current: T) => T): T;
   update(change: (current: T) => T | null): T | null;
+}
+
+/** Parsed files of the `cached` stores, by path. */
+const readCache = new Map<string, { key: string; value: unknown }>();
+
+/** The identity of the file at `path` (mtime, size, inode), or null when it cannot be read. */
+function fileKeyOf(path: string): string | null {
+  try {
+    const stat = lstatSync(path);
+    return `${stat.mtimeMs}:${stat.size}:${stat.ino}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Drops every `cached` store's parsed files; tests only. */
+export function clearJsonFileCache(): void {
+  readCache.clear();
 }
 
 /**
@@ -386,8 +412,20 @@ export function createJsonFileStore<T extends object>(options: JsonFileStoreOpti
     const body: Record<string, unknown> = { [versionKey]: version, ...capped };
     body[versionKey] = version;
     ensureDataDir(home, dir, codes.unwritable);
+    readCache.delete(path);
     writeFileAtomically(home, path, `${JSON.stringify(body, null, 2)}\n`, codes.unwritable);
+    readCache.delete(path);
     return capped;
+  };
+
+  const read = (): T => {
+    if (options.cached !== true) return inspect().value;
+    const key = fileKeyOf(path);
+    const kept = readCache.get(path);
+    if (key !== null && kept !== undefined && kept.key === key) return kept.value as T;
+    const value = inspect().value;
+    if (key !== null) readCache.set(path, { key, value });
+    return value;
   };
 
   function update(change: (current: T) => T): T;
@@ -400,7 +438,7 @@ export function createJsonFileStore<T extends object>(options: JsonFileStoreOpti
   return {
     path,
     inspect,
-    read: () => inspect().value,
+    read,
     readForWrite,
     write(value) {
       readForWrite();

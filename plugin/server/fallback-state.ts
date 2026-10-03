@@ -38,13 +38,12 @@
 import type { PluginLifecycleEvents, PluginServerContext } from "@getpaseo/plugin/server";
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
-import { roleOfProvider } from "./agent-role";
+import { PARENT_AGENT_LABEL, roleOfProvider } from "./agent-role";
 import { aliasBases } from "./alias-bases";
 import { redactText, sliceLastTurn, type CollectorPaseo } from "./collector";
 import { capBy, createJsonFileStore, type JsonFileRead, type JsonFileStore } from "./data-files";
 import { classifyTurn, quietReply } from "./fallback-detect";
 import { chainOf, issueOf, readRoleFallback, type FallbackChain } from "./fallback-settings";
-import { PARENT_AGENT_LABEL } from "./manager";
 import { providerId } from "./provider-id";
 import { asRecord, availableProviders, nonEmpty, reasonOf } from "./role-choices";
 import { dataHomeOf } from "./role-instructions";

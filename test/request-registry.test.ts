@@ -12,11 +12,11 @@ import {
   creatorIsBound,
   knownRequestIdOf,
   requestIdAt,
-  sightCreatedWorker,
   sightRequestId,
   type RegisteredRequest,
 } from "../plugin/server/request-registry";
 import { clearBindingCache, createBindingStore } from "../plugin/server/agent-bindings";
+import { settleCreatedAgent } from "../plugin/server/creation-settle";
 import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store";
 import { collectTurn } from "../plugin/server/collector";
 import { bmAgentsOf } from "../plugin/server/paseo-directory";
@@ -95,9 +95,9 @@ function traceRecord(overrides: Partial<TraceRecord>): TraceRecord {
 }
 
 /** Binds `agentId` in the data folder's binding store, as a plugin creation does. */
-function bind(home: string, agentId: string, role: "manager" | "worker" | "reviewer" = "manager", creationTools = true): void {
+function bind(home: string, agentId: string, role: "manager" | "worker" | "reviewer" = "manager"): void {
   const store = createBindingStore(home);
-  const { token, tokenSha256 } = store.issue({ role, workspaceId: WS, creationTools });
+  const { token, tokenSha256 } = store.issue({ role, workspaceId: WS });
   store.attach(token, role);
   store.settle(tokenSha256, agentId);
 }
@@ -216,10 +216,11 @@ describe("the hand path and the bound path (design §16.4)", () => {
     expect(registry.get(WS, "req-20261003T090000Z")).toMatchObject({ source: "agent-typed", managerId: "mgr-1", workerIds: [] });
     // agent.created of a Worker it made by hand.
     const paseo = { agents: { ref: () => ({ refresh: async () => ({ agent: { labels: { "bm.requestId": "req-20261003T090000Z", "paseo.parent-agent-id": "mgr-1" } } }) }) } };
-    expect(await sightCreatedWorker({ id: "wrk-1", provider: "bm-worker/claude-opus-5", parentAgentId: "mgr-1", workspaceId: WS }, paseo, { home })).toBe(true);
+    await settleCreatedAgent({ id: "wrk-1", provider: "bm-worker/claude-opus-5", parentAgentId: "mgr-1", workspaceId: WS }, paseo, { home, bindings: null, log: () => {} });
     expect(registry.get(WS, "req-20261003T090000Z")?.workerIds).toEqual(["wrk-1"]);
     // Not a Worker, a Reviewer's sighting, an id of another shape: nothing.
-    expect(await sightCreatedWorker({ id: "rev-1", provider: "bm-reviewer", parentAgentId: "wrk-1", workspaceId: WS }, paseo, { home })).toBe(false);
+    await settleCreatedAgent({ id: "rev-1", provider: "bm-reviewer", parentAgentId: "wrk-1", workspaceId: WS }, paseo, { home, bindings: null, log: () => {} });
+    expect(registry.get(WS, "req-20261003T090000Z")?.workerIds).toEqual(["wrk-1"]);
     expect(sightRequestId({ workspaceId: WS, requestId: "req-20261003T090001Z", role: "reviewer", agentId: "rev-1", parentAgentId: "wrk-1" }, { home })).toBe(false);
     expect(sightRequestId({ workspaceId: WS, requestId: "req-A", role: "worker", agentId: "wrk-1", parentAgentId: "mgr-1" }, { home })).toBe(false);
     expect(registry.list(WS).map((entry) => entry.requestId)).toEqual(["req-20261003T090000Z"]);
@@ -272,16 +273,6 @@ describe("the hand path and the bound path (design §16.4)", () => {
     // A revoked parent binding is not a live one: its Workers are read as the hand path.
     createBindingStore(home).revokeAgent("mgr-bound");
     expect(knownRequestIdOf(worker, { home, log })).toBe("req-20261003T090000Z");
-  });
-
-  it("a Manager bound before the creation tools (ship point B) keeps its Workers on the hand path", () => {
-    const home = dataFolder();
-    bind(home, "mgr-b", "manager", false);
-    const log = (): void => {};
-    const worker = { id: "wrk-b", workspaceId: WS, labels: { "bm.requestId": "req-20261003T100000Z", "paseo.parent-agent-id": "mgr-b" } };
-    expect(creatorIsBound(worker, createBindingStore(home).list())).toBe(false);
-    expect(knownRequestIdOf(worker, { home, log })).toBe("req-20261003T100000Z");
-    expect(sightRequestId({ workspaceId: WS, requestId: "req-20261003T100000Z", role: "worker", agentId: "wrk-b", parentAgentId: "mgr-b" }, { home })).toBe(true);
   });
 });
 

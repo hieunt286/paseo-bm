@@ -10,7 +10,7 @@
  * use): the target checks, the owner's word in the chat and the
  * Orchestrator's own id all read that one walk.
  */
-import { listAllAgents, roleOfProvider } from "./agent-role";
+import { listAllAgents, parentOf, roleOfProvider } from "./agent-role";
 import type { DashboardPaseo } from "./paseo-directory";
 import type { BmEvent } from "./event-bus";
 import type { LiveTimelinePaseo } from "./live-timeline";
@@ -63,10 +63,6 @@ export function json(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
-export function fixThese(name: string, issues: readonly string[]): string {
-  return `The call was refused. Fix these and call ${name} again:\n${issues.map((issue) => `- ${issue}`).join("\n")}`;
-}
-
 /** Timeline pages a tool reads back at most; a provider streams a reply in many chunks. */
 export const MESSAGE_PAGES = 5;
 export const MESSAGE_PAGE_LIMIT = 200;
@@ -103,12 +99,6 @@ export function agentListOf(paseo: Pick<OrchestratorToolsPaseo, "agents">): () =
 function requestLabelOf(agent: Record<string, unknown>, id: string, workspaceId: string | null, home: string | null): string | null {
   const labels = (agent["labels"] ?? {}) as Record<string, unknown>;
   return knownRequestIdOf({ id, workspaceId, labels, parentAgentId: parentOf(agent) }, { home });
-}
-
-function parentOf(agent: Record<string, unknown>): string | null {
-  const labels = (agent["labels"] ?? {}) as Record<string, unknown>;
-  const parent = labels["paseo.parent-agent-id"] ?? agent["parentAgentId"];
-  return typeof parent === "string" && parent !== "" ? parent : null;
 }
 
 /** The paseo-bm Managers, Workers and Reviewers of a walk, by their provider. */

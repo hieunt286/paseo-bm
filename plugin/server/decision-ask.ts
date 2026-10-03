@@ -57,6 +57,7 @@ import { findOrchestratorAgent, type OrchestratorAgentPaseo } from "./orchestrat
 import type { DashboardPaseo } from "./paseo-directory";
 import { cutText } from "./request-render";
 import { READ_FAILED, coded, errorText, logOf, requireDataHome, type RpcHomeDeps, type RpcLogDeps } from "./rpc-kit";
+import { fixThese } from "./tool-kit";
 
 /** The longest decision question quoted in a `BM-ASK`. */
 export const ASK_QUOTED_QUESTION_MAX_CHARS = 300;
@@ -250,7 +251,7 @@ export function createWorkerTools(deps: WorkerToolsDeps = {}): ServerTools {
       const face = faces.find((candidate) => candidate.name === name);
       if (face === undefined) return { ok: false, text: `Unknown tool: ${name}` };
       const issues = schemaIssues(face.inputSchema, input);
-      if (issues.length > 0) return { ok: false, text: `The call was refused. Fix these and call ${name} again:\n${issues.map((issue) => `- ${issue}`).join("\n")}` };
+      if (issues.length > 0) return fixThese(name, issues);
       let home: string | null;
       try {
         home = resolveDataHome(deps).home;

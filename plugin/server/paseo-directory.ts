@@ -10,7 +10,7 @@
  * that is not in the list has no directory (null) — it may simply have been
  * archived — and each caller says what that means for it.
  */
-import { listAllAgents, roleOfAgent } from "./agent-role";
+import { listAllAgents, parentOf, roleOfAgent } from "./agent-role";
 import type { AgentFacts } from "./traces";
 import { withoutRoleMarker } from "./role-title";
 import { knownRequestIdOf } from "./request-registry";
@@ -135,7 +135,7 @@ export async function bmAgentsOf(
     if (fact === null || id === "") continue;
     if (fact.role === "orchestrator" && options.includeOrchestrator !== true) continue;
     const labels = (agent["labels"] ?? {}) as Record<string, string>;
-    const parentAgentId = labels["paseo.parent-agent-id"] ?? (agent["parentAgentId"] as string | null) ?? null;
+    const parentAgentId = parentOf(agent);
     const workspaceId = typeof agent["workspaceId"] === "string" ? agent["workspaceId"] : null;
     const facts: AgentFacts = {
       id,

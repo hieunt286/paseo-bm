@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import type { PluginBeforeRequests, PluginServerContext } from "@getpaseo/plugin/server";
 import { roleOfProvider } from "./agent-role";
 import { TOOL_PROVIDERS, boundTokenOf, boundUrlOf, withAgentTools, withoutAgentTools, type AgentToolsEndpoint } from "./agent-tools";
-import { hasCreationTools, isBoundRole } from "./agent-bindings";
+import { isBoundRole } from "./agent-bindings";
 import { aliasBases } from "./alias-bases";
 import { providerId } from "./provider-id";
 import {
@@ -576,20 +576,30 @@ export function applyAgentTools(request: AgentCreateRequest, tools: RoleHookTool
     // Every role has its own path. The Orchestrator's carries the endpoint's secret and serves its
     // read tools and its decision and command tools — and it never gets Paseo's tools (orchestrator design §3.1, §5.1).
     let url = roleUrl;
-    let creationTools = false;
+    let bound = false;
     if (isBoundRole(role) && tools.bindings !== null && tools.bindings !== undefined) {
       const token = boundTokenOf(request.config, role, roleUrl);
       // The last step of the hook: after this nothing drops the URL, so the attachment is true.
       if (token !== null && tools.bindings.attach(token, role)) {
         url = boundUrlOf(roleUrl, token);
-        // Issued with the creation tools (design §16.6): those are pre-approved too.
-        creationTools = hasCreationTools(tools.bindings.callerOf(token, role));
+        // Bound (design §16.6): its delivering and creating tools are pre-approved too.
+        bound = true;
       }
     }
-    const config = withAgentTools(request.config, role, url, creationTools);
+    const config = withAgentTools(request.config, role, url, bound);
     return config === undefined ? undefined : { ...request, config };
   } catch {
     return undefined;
+  }
+}
+
+/** True when `request` still carries the bound URL of its role: `applyAgentTools` kept it, so the binding was attached. Never throws. */
+function keepsBoundUrl(request: AgentCreateRequest, tools: RoleHookTools | null): boolean {
+  try {
+    const role = roleOfProvider(request.config.provider);
+    return tools !== null && isBoundRole(role) && boundTokenOf(request.config, role, tools.urlFor(role)) !== null;
+  } catch {
+    return false;
   }
 }
 
@@ -641,17 +651,17 @@ export function registerRoleHook(host: RoleHookHost, tools: RoleHookTools | null
         const plain = withoutToolServer(request) ?? request;
         return marked(applyRoleInstructions(plain) ?? (plain === request ? undefined : plain), request);
       }
-      const configured = applyRoleConfig(
-        request,
-        prepared.modes,
-        prepared.facts,
-        prepared.profileModeId,
-        prepared.profile,
-        prepared.features,
-        { posture: prepared.boundary, base: prepared.base },
-      );
+      const configure = (from: AgentCreateRequest, facts: RuntimeFacts) =>
+        applyRoleConfig(from, prepared.modes, facts, prepared.profileModeId, prepared.profile, prepared.features, { posture: prepared.boundary, base: prepared.base });
       rememberBoundaryOf(request, prepared.boundary);
-      return marked(applyAgentTools(configured ?? request, tools, prepared.base) ?? configured, request);
+      const configured = configure(request, prepared.facts);
+      const tooled = applyAgentTools(configured ?? request, tools, prepared.base) ?? configured;
+      if (!bound || keepsBoundUrl(tooled ?? request, tools)) return marked(tooled, request);
+      // The binding could not record its attachment: the agent gets the role path and is unbound, so its
+      // Runtime facts get the hand path back (design §16.12).
+      const plain = withoutToolServer(request) ?? request;
+      const unbound = configure(plain, { ...prepared.facts, bound: false });
+      return marked(applyAgentTools(unbound ?? plain, tools, prepared.base) ?? unbound ?? (plain === request ? undefined : plain), request);
     })();
   });
   return typeof remove === "function" ? remove : () => {};

@@ -85,7 +85,7 @@ import {
   type BoundaryVerdict,
   type HeldFinding,
 } from "../shared/effectful-actions";
-import { listAllAgents, roleOfProvider } from "./agent-role";
+import { listAllAgents, parentOf, roleOfProvider } from "./agent-role";
 import { actionBoundaryOfPrompt } from "./role-instructions";
 import { BOUNDARY_LABEL, BOUNDARY_PROVIDERS } from "./role-mode";
 import { aliasBases } from "./alias-bases";
@@ -151,7 +151,6 @@ const BASES_TTL_MS = 60_000;
 /** How many answered requests are remembered, so a scan and an event never answer the same one twice. */
 const ANSWERED_MEMORY = 2000;
 
-const PARENT_AGENT_LABEL = "paseo.parent-agent-id";
 const REPLACED_BY_LABEL = "bm.replacedBy";
 
 // ---------------------------------------------------------------------------
@@ -604,12 +603,12 @@ export function createActionBoundary(deps: ActionBoundaryDeps = {}): ActionBound
    */
   const requestOfAgent = async (paseo: BoundaryPaseo, agent: BoundaryAgent, snapshot: BoundaryAgentSnapshot | null): Promise<string | null> => {
     const home = homeOf();
-    const parentId = text(agent.parentAgentId ?? null) ?? text(snapshot?.labels?.[PARENT_AGENT_LABEL]);
+    const parentId = parentOf({ parentAgentId: agent.parentAgentId, labels: snapshot?.labels });
     const own = knownRequestIdOf({ id: agent.id, workspaceId: agent.workspaceId, labels: snapshot?.labels ?? null, parentAgentId: parentId }, { home, log });
     if (own !== null || parentId === null) return own;
     const parent = await snapshotOf(paseo, parentId);
     return knownRequestIdOf(
-      { id: parentId, workspaceId: agent.workspaceId, labels: parent?.labels ?? null, parentAgentId: text(parent?.labels?.[PARENT_AGENT_LABEL]) },
+      { id: parentId, workspaceId: agent.workspaceId, labels: parent?.labels ?? null, parentAgentId: parentOf(parent) },
       { home, log },
     );
   };
@@ -868,7 +867,7 @@ export function createActionBoundary(deps: ActionBoundaryDeps = {}): ActionBound
         const agent: BoundaryAgent = {
           id: snapshot.id,
           workspaceId: text(snapshot.workspaceId),
-          parentAgentId: text(snapshot.labels?.[PARENT_AGENT_LABEL]),
+          parentAgentId: parentOf({ labels: snapshot.labels }),
           provider: String(snapshot.provider),
           cwd: text(snapshot.cwd) ?? "",
         };

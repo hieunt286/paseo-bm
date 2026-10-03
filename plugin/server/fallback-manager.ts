@@ -61,7 +61,7 @@ export interface ManagerSwitchDeps {
    * tools, when its base provider can take them (design §16.5, §16.6); the
    * endpoint's binder in the plugin, none (unbound) when absent.
    */
-  binder?: AgentBinder | null;
+  binder?: AgentBinder;
 }
 
 /** The mode and features the replacement Manager starts with, by the candidate provider's capability. */
@@ -144,7 +144,7 @@ export function createManagerSwitch(deps: ManagerSwitchDeps = {}): FallbackActio
         labels: { [REPLACES_LABEL]: current.agentId, ...(posture.modeId !== undefined ? { [MODE_SET_LABEL]: posture.modeId } : {}) },
         prompt,
         readInstructions: (workspaceId) => readInstructions(paseo, workspaceId),
-        binder: deps.binder ?? null,
+        binder: deps.binder,
         log,
       });
     } catch (error) {

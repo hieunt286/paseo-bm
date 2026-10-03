@@ -88,8 +88,8 @@ import {
 import { andChainOf, brActions, shellSucceeded } from "../shared/shell";
 import { shorten } from "../shared/text";
 import { timeOrNull } from "../shared/time";
-import { createBindingStore, creationMayExist, isCreationBound, type AgentBinder } from "./agent-bindings";
-import { listAllAgents, roleOfProvider } from "./agent-role";
+import { createBindingStore, creationMayExist, liveBindingOf, type AgentBinder } from "./agent-bindings";
+import { listAllAgents, parentOf, roleOfProvider } from "./agent-role";
 import { redactText, sliceLastTurn } from "./collector";
 import { COMMAND_LIMIT_MESSAGE, HANDOFF_OFF_MESSAGE, commandRefusalOf, sendCommand } from "./command-send";
 import { createPluginWorker, workerProfileOf, type WorkerCreationPaseo } from "./create-worker";
@@ -521,7 +521,7 @@ export interface HandoffRunnerDeps extends DataHomeDeps {
    * the endpoint's binder, read when one is created. None: the successor is
    * created unbound.
    */
-  binder?: () => AgentBinder | null;
+  binder?: () => AgentBinder;
 }
 
 /** The fields of the `agent.created` event's agent the successor check reads. */
@@ -620,7 +620,7 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
 
   async function askNote(entry: HandoffEntry, paseo: unknown): Promise<"asked" | "queued" | "waiting"> {
     const home = homeOf();
-    const bound = home !== null && workerIsBound(home, entry.workerId);
+    const bound = home !== null && isBound(home, entry.workerId);
     const item: BatchItem = { key: entry.id, line: noteRequestOf(entry, { bound }), isCurrent: currentAt(entry.id, now().getTime()) };
     const [outcome] = await queue.enqueueBatch(entry.workerId, noteBatch, [item], paseo as NoticePaseo | undefined);
     return outcome === "sent" ? "asked" : outcome === "queued" ? "queued" : "waiting";
@@ -652,7 +652,7 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
     const manager = await snapshotOf(paseo, entry.managerId);
     if (manager === null || nonEmpty(manager["archivedAt"]) !== null) return end(store, entry, "no-manager");
     // Design §16.9: a bound Manager is only informed; the plugin creates the successor, busy Manager or not.
-    if (managerIsBound(home, entry.managerId)) return succeed(home, entry, paseo);
+    if (isBound(home, entry.managerId)) return succeed(home, entry, paseo);
     const status = nonEmpty(manager["status"]);
     if (status === "running" || status === "initializing" || othersQueued(queue, entry.managerId)) return;
     const result = await sendCommand({
@@ -685,23 +685,17 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
     store.update(entry.id, (current) => ({ ...current, state: "commanded", commandId: result.id, commandSentAt: now().toISOString() }));
   }
 
-  /** True when `agentId` has a live binding issued with the creation tools. Never throws. */
-  function creationBound(home: string, agentId: string): boolean {
+  /**
+   * True when `agentId` has a live binding (`liveBindingOf`): a bound Manager's
+   * successor is the plugin's to create (design §16.9), a bound Worker's
+   * `bm_report` stores and delivers (§16.7). Never throws.
+   */
+  function isBound(home: string, agentId: string): boolean {
     try {
-      return isCreationBound(agentId, createBindingStore(home).list());
+      return liveBindingOf(createBindingStore(home).list(), agentId) !== null;
     } catch {
       return false;
     }
-  }
-
-  /** The handoff's Manager is bound with the creation tools (design §16.9). */
-  function managerIsBound(home: string, managerId: string): boolean {
-    return creationBound(home, managerId);
-  }
-
-  /** The outgoing Worker is bound with the creation tools: its `bm_report` stores and delivers (§16.7). */
-  function workerIsBound(home: string, workerId: string): boolean {
-    return creationBound(home, workerId);
   }
 
   /**
@@ -796,7 +790,7 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
             roleOfProvider(agent["provider"]) === "worker" &&
             nonEmpty(agent["archivedAt"]) === null &&
             nonEmpty(labels[HANDOFF_FROM_LABEL]) === entry.workerId &&
-            (nonEmpty(agent["parentAgentId"]) ?? nonEmpty(labels["paseo.parent-agent-id"])) === entry.managerId &&
+            parentOf(agent) === entry.managerId &&
             (nonEmpty(agent["workspaceId"]) ?? entry.workspaceId) === entry.workspaceId
           );
         });
@@ -853,7 +847,7 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
             model: profile.model,
             labels: { [HANDOFF_FROM_LABEL]: entry.workerId },
           },
-          { binder: deps.binder?.() ?? null, log },
+          { binder: deps.binder?.(), log },
         ));
       } catch (error) {
         // Paseo threw after the hook kept the token: it may have created the successor. The entry stays
@@ -947,7 +941,7 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
         if (home === null) return null;
         const store = storeOf(home);
         if (store.list().some((candidate) => candidate.successorId === agent.id)) return null;
-        const parent = nonEmpty(agent.parentAgentId) ?? nonEmpty(labels["paseo.parent-agent-id"]) ?? nonEmpty(snapshot?.["parentAgentId"]);
+        const parent = parentOf(agent) ?? parentOf(snapshot);
         const workspaceId = nonEmpty(agent.workspaceId) ?? nonEmpty(snapshot?.["workspaceId"]);
         const requestLabel = nonEmpty(labels["bm.requestId"]);
         // The label alone is not trusted: the handoff's own Manager, in its workspace, for its request.

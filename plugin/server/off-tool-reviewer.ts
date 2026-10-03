@@ -33,7 +33,7 @@
  */
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { roleOfProvider } from "./agent-role";
-import type { AgentBinding, BindingStore } from "./agent-bindings";
+import { liveBindingOf, type AgentBinding, type BindingStore } from "./agent-bindings";
 import { createAlertStore, type AlertInput } from "./alert-store";
 import type { BmEvent, WorkerSignalEvent } from "./event-bus";
 import { isPluginReviewer, pluginCreationsSettled } from "./review-tools";
@@ -60,16 +60,14 @@ export interface CreatedAgent {
 
 /**
  * The off-tool decision (design §16.8), one function: the finding when `agent`
- * is a Reviewer whose parent is a Worker bound with the creation tools and
- * which is not the plugin's own creation; null otherwise. Pure over
+ * is a Reviewer whose parent is a bound Worker and which is not the plugin's
+ * own creation; null otherwise. Pure over
  * `bindings` and `isOwn`.
  */
 export function offToolReviewerOf(agent: CreatedAgent, bindings: readonly AgentBinding[], isOwn: (agentId: string) => boolean = isPluginReviewer): OffToolReviewer | null {
   if (roleOfProvider(agent.provider) !== "reviewer" || agent.parentAgentId === null) return null;
-  const worker = bindings.find(
-    (binding) => binding.agentId === agent.parentAgentId && binding.role === "worker" && binding.state === "bound" && binding.creationTools,
-  );
-  if (worker === undefined) return null;
+  const worker = liveBindingOf(bindings, agent.parentAgentId, "worker");
+  if (worker === null) return null;
   // The plugin's own: a binding of its own (bound or revoked), or created by createPluginReviewer.
   if (bindings.some((binding) => binding.agentId === agent.id) || isOwn(agent.id)) return null;
   return { reviewerId: agent.id, workerId: worker.agentId!, workspaceId: agent.workspaceId ?? worker.workspaceId, requestId: worker.requestId };

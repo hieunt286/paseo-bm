@@ -7,8 +7,8 @@
  *   value a Manager's Runtime facts name, §7.2), `cwd` given, `parent` = the
  *   Manager, title `Beads Worker`, labels `bm.role`, `bm.requestId`,
  *   `bm.version` (and the caller's extra ones, `bm.handoffFrom` for a handoff
- *   successor), and a token with a binding issued with the creation tools when
- *   the profile's base provider can carry one (`binderOf` issues none on any
+ *   successor), and a token with a binding when the profile's base provider
+ *   can carry one (`binderOf` issues none on any
  *   other provider: that Worker is unbound and keeps the hand path). The
  *   `agent.create` hook still runs, so the Worker gets its instructions, its
  *   profile's thinking and features, and the action boundary.
@@ -24,9 +24,8 @@
  * reused, even when Paseo then refuses the Worker. Nothing here throws into
  * the endpoint.
  */
-import { createBound, guardActingTool, hasCreationTools, withoutTokenPaths, type AgentBinder, type ToolCaller } from "./agent-bindings";
+import { NO_BINDER, createBound, withoutTokenPaths, type AgentBinder, type ToolCaller } from "./agent-bindings";
 import { aliasBases } from "./alias-bases";
-import { resolveDataHome } from "./data-home";
 import type { ServerToolAnswer, ServerTools } from "./decision-tools";
 import { AGENT_TOOLS_OFF_TOOL_MESSAGE, agentToolsOff } from "./manager";
 import { listedWorkspaces, type DashboardPaseo } from "./paseo-directory";
@@ -34,6 +33,7 @@ import { createRequestRegistry } from "./request-registry";
 import { asRecord, nonEmpty, reasonOf } from "./role-choices";
 import { creationProjectOf, modeFactsOf } from "./role-instructions";
 import { profileOf } from "./role-mode";
+import { actingTools, boundAs, fixThese, refused, withoutNulls } from "./tool-kit";
 import { boundToolFacesFor, schemaIssues } from "../shared/bm-tools";
 import { briefLineOf } from "../shared/notices";
 import { PLUGIN_VERSION } from "../shared/version";
@@ -44,9 +44,7 @@ export const WORKER_PROFILE_ID = "bm-worker";
 export const WORKER_TITLE = "Beads Worker";
 export const CREATE_WORKER_TOOL = "bm_create_worker";
 
-/** Design §16.6, common rules: every delivering or creating tool without a usable data folder. */
-export const NO_DATA_FOLDER_MESSAGE = "paseo-bm has no usable data folder; tell the owner in one line and stop.";
-/** The caller is not a Manager bound with the creation tools: it creates its Worker by hand. */
+/** The caller is not a bound Manager: it creates its Worker by hand. */
 export const NOT_BOUND_MESSAGE =
   "bm_create_worker is only for a Manager paseo-bm created with its own tools, and you are not one: create the Worker with create_agent as your instructions say. Nothing was created.";
 /** No Paseo handle has reached the plugin yet (as the Orchestrator's tools say, design §7.4). */
@@ -143,7 +141,7 @@ export interface PluginWorkerSpec {
 
 export interface PluginWorkerDeps {
   /** Binds the Worker when its base provider can take the tools; none (unbound) when absent. */
-  binder?: AgentBinder | null;
+  binder?: AgentBinder;
   log?: (message: string) => void;
 }
 
@@ -160,8 +158,8 @@ export async function createPluginWorker(paseo: WorkerCreationPaseo, spec: Plugi
   const modeId = facts.workerModeNone === true ? undefined : (facts.workerModeId ?? undefined);
   const base = (await aliasBases(paseo))[WORKER_PROFILE_ID] ?? null;
   const created = await createBound(
-    deps.binder,
-    { role: "worker", base, workspaceId: spec.workspaceId, requestId: spec.requestId, parentId: spec.managerId, creationTools: true },
+    deps.binder ?? NO_BINDER,
+    { role: "worker", base, workspaceId: spec.workspaceId, requestId: spec.requestId, parentId: spec.managerId },
     (mcpServers) =>
       paseo.agents.create({
         config: {
@@ -203,22 +201,12 @@ export async function folderOfAgent(paseo: unknown, agentId: string, workspaceId
 
 export interface WorkerCreationToolDeps {
   /** The binder of the endpoint (read when a call comes); none (unbound Workers) when absent. */
-  binder?: () => AgentBinder | null;
+  binder?: () => AgentBinder;
   /** The last Paseo handle a hook or RPC brought; null before any did. */
   paseo: () => unknown;
-  /** The data folder; `resolveDataHome` by default. Null: no usable data folder. */
-  home?: () => string | null;
+  /** The data folder (the endpoint's: it serves no tools without one). */
+  home: () => string;
   log?: (message: string) => void;
-}
-
-const refused = (text: string): ServerToolAnswer => ({ ok: false, text });
-
-/** `input` without a `null` size: a model often sends `null` for a field it leaves out. */
-function withoutNullSize(input: unknown): unknown {
-  if (input === null || typeof input !== "object" || Array.isArray(input)) return input;
-  const record = { ...(input as Record<string, unknown>) };
-  if (record["size"] === null) delete record["size"];
-  return record;
 }
 
 /**
@@ -228,25 +216,18 @@ function withoutNullSize(input: unknown): unknown {
  */
 export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerTools {
   const log = deps.log ?? ((message: string) => console.warn(message));
-  const homeOf = (): string | null => {
-    try {
-      return deps.home !== undefined ? deps.home() : resolveDataHome().home;
-    } catch {
-      return null;
-    }
-  };
   const faces = boundToolFacesFor("manager");
   const face = faces.find((candidate) => candidate.name === CREATE_WORKER_TOOL)!;
 
-  const run = async (raw: unknown, caller: ToolCaller | null): Promise<ServerToolAnswer> => {
-    if (caller === null || caller.role !== "manager" || caller.agentId === null || !hasCreationTools(caller)) return refused(NOT_BOUND_MESSAGE);
+  const run = async (raw: unknown, toolCaller: ToolCaller | null): Promise<ServerToolAnswer> => {
+    const caller = boundAs(toolCaller, "manager");
+    if (caller === null) return refused(NOT_BOUND_MESSAGE);
     const managerId = caller.agentId;
-    const input = withoutNullSize(raw);
+    const input = withoutNulls(raw);
     const issues = schemaIssues(face.inputSchema, input);
-    if (issues.length > 0) return refused(`The call was refused. Fix these and call ${CREATE_WORKER_TOOL} again:\n${issues.map((issue) => `- ${issue}`).join("\n")}`);
+    if (issues.length > 0) return fixThese(CREATE_WORKER_TOOL, issues);
     const { request, size, context } = input as CreateWorkerInput;
-    const home = homeOf();
-    if (home === null) return refused(NO_DATA_FOLDER_MESSAGE);
+    const home = deps.home();
     const paseo = deps.paseo();
     if (paseo === null || paseo === undefined) return refused(NO_PASEO_MESSAGE);
     // A Worker gets Paseo's tools only when it is created: one made now could not create a Reviewer.
@@ -271,7 +252,7 @@ export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerT
       ({ workerId } = await createPluginWorker(
         paseo as WorkerCreationPaseo,
         { workspaceId: caller.workspaceId, requestId, managerId, cwd, prompt, model: profile.model },
-        { binder: deps.binder?.() ?? null, log },
+        { binder: deps.binder?.(), log },
       ));
     } catch (error) {
       // Paseo's refusal, verbatim but for a token path (design §16.5: a token never reaches an agent or a log).
@@ -289,17 +270,5 @@ export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerT
     return { ok: true, text: JSON.stringify({ workerId, requestId }) };
   };
 
-  const guarded = guardActingTool(run);
-  return {
-    faces,
-    has: (name) => name === CREATE_WORKER_TOOL,
-    async call(name, input, caller) {
-      if (name !== CREATE_WORKER_TOOL) return { ok: false, text: `Unknown tool: ${name}` };
-      try {
-        return await guarded(input, caller ?? null);
-      } catch (error) {
-        return { ok: false, text: `The tool failed: ${reasonOf(error)}. Nothing was created; try again later, or tell the owner.` };
-      }
-    },
-  };
+  return actingTools(faces, { [CREATE_WORKER_TOOL]: run }, "Nothing was created");
 }

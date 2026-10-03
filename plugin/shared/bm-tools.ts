@@ -183,7 +183,7 @@ function placeholderPaths(value: unknown, path = "input"): string[] {
  * `value` without its `null` (or `undefined`) fields: a model often sends
  * `null` for a field it leaves out, and a caller in code writes `undefined`.
  */
-function withoutNulls(value: unknown): unknown {
+export function withoutNulls(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(withoutNulls);
   if (value === null || typeof value !== "object") return value;
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item != null).map(([key, item]) => [key, withoutNulls(item)]));

@@ -50,13 +50,14 @@
  * and gets the role's builder-only tools — never a 404, so a lost binding file
  * never costs an agent its tools. A token never reaches a log line or a result.
  *
- * A caller bound with the tools of ship point C (design §16.6) gets its
- * role's delivering tools (`deliver-tools.ts`) instead of the builders of the
- * same name: its `bm_report`, `bm_review` and `bm_answers` store and deliver
- * (or propose), and it has `bm_questions` (Worker) and `bm_tell_worker`
- * (Manager). Every other caller of those builder names still gets the pure
- * builder, with its send line. A Worker bound with them also has
- * `bm_create_reviewer` and `bm_rereview` (`review-tools.ts`, design §16.8).
+ * A bound caller (design §16.6) gets its role's delivering tools
+ * (`deliver-tools.ts`) instead of the builders of the same name: its
+ * `bm_report`, `bm_review` and `bm_answers` store and deliver (or propose),
+ * and it has `bm_questions` (Worker) and `bm_tell_worker` (Manager). Every
+ * other caller of those builder names still gets the pure builder, with its
+ * send line. A bound Manager also has `bm_create_worker` (`create-worker.ts`),
+ * a bound Worker `bm_create_reviewer` and `bm_rereview` (`review-tools.ts`,
+ * design §16.8).
  *
  * Nothing here throws into the plugin: a failure is one log line and no tools.
  */
@@ -64,12 +65,11 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { lstatSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { boundToolFacesFor, serverToolsFor, toolNamed, toolFacesFor, type ToolRole, type ToolFace } from "../shared/bm-tools";
+import { serverToolsFor, toolNamed, toolFacesFor, type ToolRole, type ToolFace } from "../shared/bm-tools";
 import {
   AGENT_TOOLS_SERVER,
   NO_BINDER,
   createBindingStore,
-  hasCreationTools,
   isBindingToken,
   isBoundRole,
   type AgentBinder,
@@ -150,8 +150,8 @@ export const BUILDER_SEND_LINES: Readonly<Record<string, string>> = {
  * The answer to one JSON-RPC message for `role`, or null for a notification.
  * Pure: the transport is `startAgentTools`. The Orchestrator's tool calls are
  * not answered here — they read and write plugin data — but by
- * `answerOrchestrator`. `bound`: the caller was issued the creation tools
- * (design §16.6), so `tools/list` shows them too.
+ * `answerOrchestrator`. `bound`: the caller is bound (design §16.6), so
+ * `tools/list` shows its delivering and creating tools too.
  */
 export function answer(role: ToolRole, message: unknown, bound = false): JsonRpcReply | null {
   if (message === null || typeof message !== "object" || Array.isArray(message)) return failure(null, -32600, "Invalid Request");
@@ -211,23 +211,31 @@ export async function answerWithServerTools(
   tools: Pick<ServerTools, "has" | "call">,
   caller: ToolCaller | null = null,
 ): Promise<JsonRpcReply | null> {
+  return (await serve(role, message, tools, caller)).reply;
+}
+
+/** `answerWithServerTools`, and whether one of `tools` answered the call (`served`) rather than a builder or an error. */
+async function serve(
+  role: ToolRole,
+  message: unknown,
+  tools: Pick<ServerTools, "has" | "call">,
+  caller: ToolCaller | null,
+): Promise<{ reply: JsonRpcReply | null; served: boolean }> {
   const { id, method, params } = (message ?? {}) as JsonRpcRequest;
-  // A caller issued the creation tools lists them (design §16.6); every other caller, today's list.
-  const bound = hasCreationTools(caller);
-  if (method !== "tools/call" || id === undefined || message === null || typeof message !== "object" || Array.isArray(message)) {
-    return answer(role, message, bound);
-  }
+  // A bound (or pending) caller lists its delivering and creating tools (design §16.6); every other caller, the builders.
+  const bound = caller !== null;
+  const built = () => ({ reply: answer(role, message, bound), served: false });
+  if (method !== "tools/call" || id === undefined || message === null || typeof message !== "object" || Array.isArray(message)) return built();
   const call = (params ?? {}) as { name?: unknown; arguments?: unknown };
   if (typeof call.name !== "string" || !tools.has(call.name)) {
-    return role === "orchestrator" ? failure(id, -32602, `Unknown tool: ${String(call.name)}`) : answer(role, message, bound);
+    return role === "orchestrator" ? { reply: failure(id, -32602, `Unknown tool: ${String(call.name)}`), served: false } : built();
   }
   // A builder's name (bm_report, bm_review, bm_answers) delivers only for a bound caller (design §16.6);
   // every other caller gets the builder, as before.
-  if (!bound && role !== "orchestrator" && toolNamed(call.name)?.role === role) return answer(role, message, bound);
+  if (!bound && role !== "orchestrator" && toolNamed(call.name)?.role === role) return built();
   const result = await tools.call(call.name, call.arguments ?? {}, caller);
-  return result.ok
-    ? reply(id, { content: [{ type: "text", text: result.text }] })
-    : reply(id, { content: [{ type: "text", text: result.text }], isError: true });
+  const content = [{ type: "text", text: result.text }];
+  return { reply: reply(id, result.ok ? { content } : { content, isError: true }), served: true };
 }
 
 /** A new secret for the Orchestrator's path; `startAgentTools` keeps it on disk. */
@@ -252,11 +260,6 @@ export function routeOfPath(path: string, secret: string): { role: ToolRole; tok
   if (match !== null) return { role: match[1] as ToolRole, token: match[2] ?? null };
   const orchestrator = /^\/mcp\/orchestrator\/([0-9a-f]+)\/?$/.exec(path);
   return orchestrator !== null && sameSecret(orchestrator[1]!, secret) ? { role: "orchestrator", token: null } : null;
-}
-
-/** The role a path serves; the Orchestrator's only with the right secret. */
-export function roleOfPath(path: string, secret: string): ToolRole | null {
-  return routeOfPath(path, secret)?.role ?? null;
 }
 
 /**
@@ -303,16 +306,14 @@ function send(response: ServerResponse, status: number, body?: unknown): void {
 
 interface HandleContext {
   secret: string;
-  orchestrator: OrchestratorTools;
-  manager: ServerTools;
-  worker: ServerTools;
-  reviewer: ServerTools;
+  /** Every role's server-run tools; the Orchestrator's are its own. */
+  tools: { orchestrator: OrchestratorTools } & Record<Exclude<ToolRole, "orchestrator">, ServerTools>;
   /** The per-agent bindings (design §16.5); null without a data folder. */
   bindings: BindingStore | null;
   log: (line: string) => void;
 }
 
-async function handle(request: IncomingMessage, response: ServerResponse, { secret, orchestrator, manager, worker, reviewer, bindings, log }: HandleContext): Promise<void> {
+async function handle(request: IncomingMessage, response: ServerResponse, { secret, tools, bindings, log }: HandleContext): Promise<void> {
   // An agent's MCP client sends no Origin; a web page always does.
   if (request.headers.origin !== undefined) return send(response, 403);
   const host = (request.headers.host ?? "").replace(/:\d+$/, "").toLowerCase();
@@ -338,22 +339,11 @@ async function handle(request: IncomingMessage, response: ServerResponse, { secr
   const who = caller === null ? "" : caller.agentId === null ? " (binding still pending)" : ` (agent ${caller.agentId})`;
   const answered: Array<JsonRpcReply | null> = [];
   for (const message of messages) {
-    const reply =
-      role === "orchestrator"
-        ? await answerOrchestrator(message, orchestrator)
-        : role === "manager"
-          ? await answerWithServerTools(role, message, manager, caller)
-          : role === "worker"
-            ? await answerWithServerTools(role, message, worker, caller)
-            : await answerWithServerTools(role, message, reviewer, caller);
+    const { reply, served } = role === "orchestrator" ? { reply: await answerOrchestrator(message, tools.orchestrator), served: true } : await serve(role, message, tools[role], caller);
     // One line per call of a real tool, for the numbers of AT-5; an unknown tool is not worth one.
     if (reply !== null && "result" in reply && (message as JsonRpcRequest).method === "tools/call") {
       const name = String(((message as JsonRpcRequest).params as { name?: unknown }).name);
       const refused = (reply.result as { isError?: boolean }).isError === true;
-      // A bound tool of a builder's name is served only for a bound caller; anyone else got the builder.
-      const served =
-        serverToolsFor(role).some((face) => face.name === name) ||
-        (boundToolFacesFor(role).some((face) => face.name === name) && (hasCreationTools(caller) || toolNamed(name)?.role !== role));
       log(
         role === "orchestrator"
           ? `[paseo-bm] ${name} ${refused ? "refused a call" : "answered"} for the orchestrator`
@@ -594,7 +584,7 @@ export function binderOf(
       }
     },
     settle: (issued, agentId) => bindings.settle(issued.tokenSha256, agentId),
-    discard: (issued) => (bindings.discard(issued.tokenSha256) === "kept" ? "kept" : undefined),
+    discard: (issued) => bindings.discard(issued.tokenSha256),
   };
 }
 
@@ -665,7 +655,7 @@ export function startAgentTools(options: StartOptions = {}): AgentToolsEndpoint 
   );
   const reviewer = delivering.reviewer;
   const server = createServer((request, response) => {
-    handle(request, response, { secret, orchestrator, manager, worker, reviewer, bindings, log }).catch(() => send(response, 500));
+    handle(request, response, { secret, tools: { orchestrator, manager, worker, reviewer }, bindings, log }).catch(() => send(response, 500));
   });
   const ready = (async () => {
     try {
@@ -749,8 +739,8 @@ export function boundTokenOf(config: unknown, role: BoundRole, roleUrl: string |
  * `config` with the role's tool server added and its tools pre-approved, or
  * undefined when there is nothing to add (no URL, not a role with tools).
  * Keeps every server and approval already there; a `paseo-bm` entry is
- * replaced by `url`. `bound`: the agent is bound with the creation tools
- * (design §16.6), which are pre-approved too.
+ * replaced by `url`. `bound`: the agent is bound (design §16.6): its
+ * delivering and creating tools are pre-approved too.
  */
 export function withAgentTools<C extends object>(config: C, role: ToolRole, url: string | null, bound = false): C | undefined {
   if (url === null) return undefined;

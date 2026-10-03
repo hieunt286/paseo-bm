@@ -1299,7 +1299,24 @@ describe("before(\"agent.create\") — a bound creation (design §16.5)", () => 
     expect(String(bound?.config.systemPrompt)).not.toContain(HAND_PATH_HEADING);
     expect(String(bound?.config.systemPrompt)).not.toContain("Reviewer mode:");
     expect(String(bound?.config.systemPrompt).startsWith(workerMd.trimEnd())).toBe(true);
-    expect(bound?.config.toolPolicy).toEqual(plain?.config.toolPolicy);
+    // Bound: its delivering and creating tools are pre-approved beside the builders (design §16.6).
+    const approved = (request: AgentCreateRequest | undefined) => request?.config.toolPolicy?.preapproved?.map((grant) => grant.tool);
+    expect(approved(plain)).toEqual(["bm_report", "bm_reply"]);
+    expect(approved(bound)).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_reply"]);
+  });
+
+  it("a binding that cannot record its attachment: the role path, and Runtime facts with the hand path, as an unbound creation's", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const bindings = createBindingStore(join(root, ".paseo-bm"));
+    const issued = binderOf(roleUrl, bindings, () => {}).issue({ role: "worker", base: "claude", workspaceId: "wks_1" })!;
+    // Pending when the hook starts, but its attachment cannot be written at the end.
+    const created = await hookWith({ ...bindings, attach: () => false })({ provider: "bm-worker/claude-opus-5", cwd: "/repo", mcpServers: { "paseo-bm": issued.mcpServer } });
+    expect(created?.config.mcpServers).toEqual({ "paseo-bm": { type: "http", url: roleUrl("worker"), alwaysLoad: true } });
+    expect(String(created?.config.systemPrompt)).toContain(`\n${HAND_PATH_HEADING}\n`);
+    expect(created?.config.toolPolicy?.preapproved?.map((grant) => grant.tool)).toEqual(["bm_report", "bm_reply"]);
+    const plain = await hookWith(bindings)({ provider: "bm-worker/claude-opus-5", cwd: "/repo" });
+    expect(created?.config.systemPrompt).toBe(plain?.config.systemPrompt);
+    expect(bindings.list()[0]?.attachedAt).toBeNull();
   });
 
   it("rewrites a foreign URL and attaches nothing; removes a paseo-bm entry on a provider without tools", async () => {

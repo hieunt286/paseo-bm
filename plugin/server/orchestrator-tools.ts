@@ -69,7 +69,6 @@ import { createOrchestratorStore } from "./orchestrator-store";
 import {
   Refusal,
   agentListOf,
-  fixThese,
   refuse,
   type OrchestratorToolsPaseo,
   type ServerToolResult,
@@ -79,6 +78,7 @@ import { bmRepo, type RepoInput, type RepoToolDeps } from "./repo-tool";
 import { ORCHESTRATOR_SERVER_TOOLS, schemaIssues, type ReadDetail, type ToolFace } from "../shared/bm-tools";
 import { DashboardError } from "../shared/contracts";
 import { errorText } from "./rpc-kit";
+import { fixThese } from "./tool-kit";
 
 export interface OrchestratorToolsDeps extends DataHomeDeps, CommandToolDeps, DecideToolDeps, RepoToolDeps, Pick<CoordinationToolDeps, "compaction" | "handoff"> {
   now?: () => Date;
@@ -132,7 +132,7 @@ export function createOrchestratorTools(deps: OrchestratorToolsDeps = {}): Orche
   const run = async (name: string, input: unknown): Promise<ServerToolResult> => {
     const face = faces.find((candidate) => candidate.name === name)!;
     const issues = schemaIssues(face.inputSchema, input);
-    if (issues.length > 0) return { ok: false, text: fixThese(name, issues) };
+    if (issues.length > 0) return fixThese(name, issues);
     const context = contextOf();
     switch (name) {
       case "bm_projects":

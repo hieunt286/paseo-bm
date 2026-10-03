@@ -39,7 +39,7 @@
  */
 import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
 import { roleOfProvider } from "./agent-role";
-import type { BindingStore } from "./agent-bindings";
+import { liveBindingOf, type BindingStore } from "./agent-bindings";
 import { parseReviews } from "./bm-report";
 import { joinStreamedText, sliceLastTurn } from "./collector";
 import type { NoticePaseo, NoticeQueue } from "./notice-queue";
@@ -120,7 +120,7 @@ interface ReviewerContext {
   requestId: string;
   batchId: string;
   workerId: string;
-  /** True for a Reviewer bound with the creation tools: its `bm_review` delivers. */
+  /** True for a bound Reviewer: its `bm_review` delivers. */
   bound: boolean;
 }
 
@@ -130,12 +130,12 @@ interface ReviewerContext {
  * among its Reviewers) and its parent. Null for any other agent. Never throws.
  */
 function reviewerContextOf(agent: TurnEndedEvent["agent"], deps: Pick<NoVerdictDeps, "bindings" | "home">, log: (message: string) => void): ReviewerContext | null {
-  const binding = deps.bindings?.bindingOfAgent(agent.id) ?? null;
-  if (binding !== null && binding.role === "reviewer" && binding.state === "bound" && binding.creationTools) {
+  const binding = liveBindingOf(deps.bindings?.list() ?? [], agent.id);
+  if (binding?.role === "reviewer") {
     if (binding.requestId === null || binding.batchId === null || binding.parentId === null) return null;
     return { workspaceId: binding.workspaceId, requestId: binding.requestId, batchId: binding.batchId, workerId: binding.parentId, bound: true };
   }
-  if (binding !== null && binding.state === "bound") return null;
+  if (binding !== null) return null;
   if (agent.workspaceId === null) return null;
   for (const request of createRequestRegistry(deps.home, { log }).list(agent.workspaceId)) {
     const batch = request.reviews.batches.find((entry) => entry.reviewerIds.includes(agent.id));

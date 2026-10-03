@@ -22,6 +22,7 @@ import { DECISIONS_TOOL_LIMIT, MANAGER_SERVER_TOOLS, schemaIssues, type Decision
 import { UNSETTLED_STATUSES, decisionClassOf, type Decision, type DecisionStatus, type PreparedAction } from "../shared/decisions";
 import { preparedChangeTextOf } from "../shared/prepared-changes";
 import { timeOrZero } from "../shared/time";
+import { fixThese } from "./tool-kit";
 
 /** The longest owner's words `bm_decisions` hands out per decision; the rest is cut in the middle. */
 export const DECISION_WORDS_MAX_CHARS = 1_000;
@@ -159,7 +160,7 @@ export function createManagerTools(deps: ManagerToolsDeps = {}): ServerTools {
       const face = faces.find((candidate) => candidate.name === name);
       if (face === undefined) return { ok: false, text: `Unknown tool: ${name}` };
       const issues = schemaIssues(face.inputSchema, input);
-      if (issues.length > 0) return { ok: false, text: `The call was refused. Fix these and call ${name} again:\n${issues.map((issue) => `- ${issue}`).join("\n")}` };
+      if (issues.length > 0) return fixThese(name, issues);
       const { requestId, status } = input as { requestId: string; status?: DecisionsToolStatus };
       try {
         const home = resolveDataHome(deps).home;

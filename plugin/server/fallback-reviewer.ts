@@ -29,7 +29,7 @@
  * before the Worker got the instructions, the card offers **Resend to Worker**,
  * which sends the same message again.
  */
-import type { AgentBinder, BindingStore } from "./agent-bindings";
+import { liveBindingOf, type AgentBinder, type BindingStore } from "./agent-bindings";
 import { folderOfAgent } from "./create-worker";
 import { unusableDataHomeMessage } from "./data-home";
 import { createRequestRegistry, type ReviewBatch } from "./request-registry";
@@ -40,7 +40,7 @@ import { readIncidents, updateIncidents } from "./fallback-state";
 import { FALLBACK_NOTICE_MARKER } from "./notices";
 import { enqueue as defaultEnqueue, type NoticeOutcome, type NoticePaseo } from "./notice-queue";
 import { setAgentLabels, type CliResult } from "./paseo-cli";
-import { roleOfProvider } from "./agent-role";
+import { parentOf, roleOfProvider } from "./agent-role";
 import { asRecord, availableProviders, nonEmpty, reasonOf } from "./role-choices";
 import { REVIEWER_FALLBACK_MODE, REVIEWER_FALLBACK_PROVIDERS, dataHomeOf } from "./role-instructions";
 import { capabilityOf, chooseModeId, featuresFor, modesFor, runPostureOf } from "./role-mode";
@@ -48,7 +48,6 @@ import { DashboardError, type FallbackIncident } from "../shared/contracts";
 
 /** Label a replacement agent carries: the id of the agent it replaces. */
 const REPLACES_LABEL = "bm.replaces";
-const PARENT_AGENT_LABEL = "paseo.parent-agent-id";
 const REQUEST_ID_LABEL = "bm.requestId";
 const REPLACED_BY_LABEL = "bm.replacedBy";
 
@@ -106,7 +105,7 @@ export interface ReviewerFallbackDeps {
    */
   bindings?: () => BindingStore | null;
   /** Binds the replacement Reviewer (the endpoint's binder); none (unbound) when absent. */
-  binder?: AgentBinder | null;
+  binder?: AgentBinder;
 }
 
 /** The informational line a bound Worker gets once its Reviewer was replaced (design §16.9). */
@@ -130,8 +129,8 @@ export function boundBatchOf(
 ): { requestId: string; batch: ReviewBatch } | null {
   try {
     if (bindings === null || incident.parentId === null) return null;
-    const worker = bindings.list().find((binding) => binding.agentId === incident.parentId && binding.role === "worker" && binding.state === "bound" && binding.creationTools);
-    if (worker === undefined) return null;
+    const worker = liveBindingOf(bindings.list(), incident.parentId, "worker");
+    if (worker === null) return null;
     const requestId = worker.requestId ?? incident.requestId;
     if (requestId === null) return null;
     const request = createRequestRegistry(home, { log }).get(incident.workspaceId, requestId);
@@ -183,7 +182,7 @@ async function switchBoundReviewer(
         labels: { [REPLACES_LABEL]: incident.agentId },
         title: FALLBACK_REVIEWER_TITLE,
       },
-      { binder: deps.binder ?? null, log },
+      { binder: deps.binder, log },
     ));
   } catch (error) {
     const detail = `could not create the fallback Reviewer on ${candidate.alias}/${candidate.model}: ${reasonOf(error)}`;
@@ -293,7 +292,7 @@ export async function linkReplacementReviewer(
     const replaces = nonEmpty(labels[REPLACES_LABEL]);
     if (replaces === null) return null;
     const workspaceId = nonEmpty(snapshot?.["workspaceId"]);
-    const parentId = nonEmpty(labels[PARENT_AGENT_LABEL]) ?? nonEmpty(snapshot?.["parentAgentId"]);
+    const parentId = parentOf(snapshot);
     const requestId = nonEmpty(labels[REQUEST_ID_LABEL]);
     const home = deps.home === undefined ? dataHomeOf() : deps.home;
     if (home === null) return null;

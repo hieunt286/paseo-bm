@@ -57,7 +57,6 @@ import { preparedChangeFactsOf } from "./prepared-changes";
 import { isFinishedUnverifiedNow } from "./request-trace";
 import {
   Refusal,
-  fixThese,
   json,
   orchestratorIdOf,
   refuse,
@@ -95,6 +94,7 @@ import { commandInputProblems, type CommandTo, type DeclaredCommandIntent } from
 import { preparedChangeCheckOf, preparedChangeLinesOf, preparedChangeOfInput, type PreparedChangeFacts, type PreparedChangeInput } from "../shared/prepared-changes";
 import { timeOrZero } from "../shared/time";
 import { errorText } from "./rpc-kit";
+import { fixThese } from "./tool-kit";
 
 /** What the decision tools read of the plugin's deps. */
 export interface DecideToolDeps extends ToolDeps {
@@ -265,7 +265,7 @@ export async function bmAskOwner(input: AskOwnerInput, context: ToolContext, dep
         : `input.question: with the recommendation and the lines saying what each change applies (${question.length - askedQuestionOf(input.question, input.recommendation).length} characters) it must be at most ${room - (question.length - askedQuestionOf(input.question, input.recommendation).length)} characters in all`,
     );
   }
-  if (problems.length > 0) return { ok: false, text: fixThese("bm_ask_owner", problems) };
+  if (problems.length > 0) return fixThese("bm_ask_owner", problems);
   const preparedChange = carriesPreparedChange({ options });
 
   const replaced = input.separate === true ? null : replacedByAsk(input.workspaceId, requestId, input.subject ?? null, context.home);

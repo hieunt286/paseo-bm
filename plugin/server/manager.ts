@@ -29,7 +29,7 @@ import type { AgentNode } from "../shared/contracts";
 import { rolesCreatedSentence } from "../shared/roles-created";
 import { PLUGIN_VERSION } from "../shared/version";
 import { setAgentLabel, setAgentMode, type PaseoCliDeps } from "./paseo-cli";
-import { listAllAgents, roleOfAgent } from "./agent-role";
+import { PARENT_AGENT_LABEL, listAllAgents, roleOfAgent } from "./agent-role";
 import { providerId } from "./provider-id";
 import { withoutRoleMarker } from "./role-title";
 import { AUTO_APPROVE_FEATURE, capabilityOf, featuresFor, managerModeFor, modesFor, runPostureOf } from "./role-mode";
@@ -40,7 +40,7 @@ import { ensureRoles, type EnsureRolesResult } from "./setup-roles";
 import { recordTools } from "./tools-check";
 import { INSTRUCTIONS_LABEL, currentInstructionsHash, hasOutdatedInstructions } from "./instructions-label";
 import { createAlertStore } from "./alert-store";
-import { createBound, type AgentBinder } from "./agent-bindings";
+import { NO_BINDER, createBound, type AgentBinder } from "./agent-bindings";
 import { aliasBases } from "./alias-bases";
 import { alertKeyOf } from "../shared/alerts";
 
@@ -211,7 +211,7 @@ export interface EnsureManagerDeps {
    * the tools (design §16.5), with the creation tools (§16.6); the endpoint's
    * binder in the plugin, none (unbound) when absent.
    */
-  binder?: AgentBinder | null;
+  binder?: AgentBinder;
 }
 
 export interface EnsureManagerResult {
@@ -588,7 +588,7 @@ async function createFromProfile(deps: EnsureManagerDeps, workspaceId: string, e
     labels: chosenMode !== undefined ? { [MODE_SET_LABEL]: chosenMode } : {},
     readInstructions: deps.readInstructions,
     version: deps.version,
-    binder: deps.binder ?? null,
+    binder: deps.binder,
     log: deps.log,
   });
 }
@@ -638,14 +638,14 @@ export async function createManager(
   const source = alias === MANAGER_PROFILE_ID ? `profile "${MANAGER_PROFILE_ID}"` : `provider "${selection}"`;
 
   // Design §16.5: bound to its own tool path when its alias's base provider can take the tools,
-  // with the creation tools (§16.6, ship point C): `bm_create_worker`.
-  const binder = options.binder ?? null;
-  const base = binder === null ? null : ((await aliasBases(paseo))[alias] ?? null);
+  // with its creating tool (§16.6): `bm_create_worker`.
+  const binder = options.binder ?? NO_BINDER;
+  const base = binder === NO_BINDER ? null : ((await aliasBases(paseo))[alias] ?? null);
   let handle: ManagerAgentHandle;
   try {
     handle = await createBound(
       binder,
-      { role: "manager", base, workspaceId, creationTools: true },
+      { role: "manager", base, workspaceId },
       (mcpServers) =>
         paseo.workspaces.ref(workspaceId).agents.create({
           config: {
@@ -757,8 +757,6 @@ async function switchOnce(manager: ManagerAgentSnapshot, deps: EnsureManagerDeps
 // `agents.list` (WP-112, Technical Design §7.3, REQ-025a)
 // ---------------------------------------------------------------------------
 
-/** Label Paseo sets on an agent created by another agent (AGENTS.md, verified). */
-export const PARENT_AGENT_LABEL = "paseo.parent-agent-id";
 
 /** Snapshot fields `agents.list` reads. `PaseoAgent` is structurally assignable. */
 export interface ListedAgentSnapshot {

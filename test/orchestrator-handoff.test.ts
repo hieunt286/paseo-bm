@@ -215,7 +215,7 @@ function daemon(
 /** Read-only git as the brief runs it: a branch and a diff stat. */
 const git = async (args: readonly string[]) => ({ stdout: args.includes("rev-parse") ? "feature/invoice-date\n" : " 3 files changed, 40 insertions(+), 5 deletions(-)\n" });
 
-function runnerOf(binder?: () => AgentBinder | null): HandoffRunner {
+function runnerOf(binder?: () => AgentBinder): HandoffRunner {
   return createHandoffRunner({
     ...(binder === undefined ? {} : { binder }),
     home: () => home,
@@ -532,9 +532,9 @@ describe("the whole sequence (design §G.6) with the one fake daemon", () => {
 describe("a bound Manager: the plugin creates the successor, the Manager is informed only (design §16.9)", () => {
   const ROLE_URL = (role: string) => `http://127.0.0.1:4567/mcp/${role}`;
 
-  /** The Manager's binding as `manager.ensure` leaves it: issued (with or without the creation tools), attached, bound. */
-  function bindManager(bindings: BindingStore, creationTools: boolean): void {
-    const { token, tokenSha256 } = bindings.issue({ role: "manager", workspaceId: WORKSPACE_ID, creationTools });
+  /** The Manager's binding as `manager.ensure` leaves it: issued, attached, bound. */
+  function bindManager(bindings: BindingStore): void {
+    const { token, tokenSha256 } = bindings.issue({ role: "manager", workspaceId: WORKSPACE_ID });
     bindings.attach(token, "manager");
     bindings.settle(tokenSha256, MANAGER);
   }
@@ -590,7 +590,7 @@ describe("a bound Manager: the plugin creates the successor, the Manager is info
   async function cutMidCreation(): Promise<{ fake: FakePaseo<unknown>; next: HandoffRunner }> {
     await store(...heavyRequest());
     const bindings = createBindingStore(home);
-    bindManager(bindings, true);
+    bindManager(bindings);
     createRequestRegistry(home).register(WORKSPACE_ID, REQUEST, { source: "tool", managerId: MANAGER, workerId: WORKER });
     let entered!: () => void;
     const inCreation = new Promise<void>((resolve) => {
@@ -626,7 +626,7 @@ describe("a bound Manager: the plugin creates the successor, the Manager is info
   it("from the stored brief to a bound successor: labels, token, BM-BRIEF line, workerIds, BM-REPLACED, and an informational command the loop guard counts", async () => {
     await store(...heavyRequest());
     const bindings = createBindingStore(home);
-    bindManager(bindings, true);
+    bindManager(bindings);
     // The request as bm_create_worker registered it: the bound Manager is its managerId.
     createRequestRegistry(home).register(WORKSPACE_ID, REQUEST, { source: "tool", managerId: MANAGER, workerId: WORKER });
     const fake = boundDaemon(bindings);
@@ -651,7 +651,7 @@ describe("a bound Manager: the plugin creates the successor, the Manager is info
     expect(prompt).toBe(`BM-BRIEF worker requestId: ${REQUEST}\n${entry!.brief}`);
     expect(originOf({ text: prompt, clientMessageId: "m-1" })).toBe("plugin-prompt");
     // A bound token, with the creation tools.
-    expect(bindings.bindingOfAgent(successorId)).toMatchObject({ role: "worker", state: "bound", requestId: REQUEST, parentId: MANAGER, creationTools: true });
+    expect(bindings.bindingOfAgent(successorId)).toMatchObject({ role: "worker", state: "bound", requestId: REQUEST, parentId: MANAGER });
 
     // The request keeps its id and its Manager; the successor is its newest Worker.
     expect(createRequestRegistry(home).get(WORKSPACE_ID, REQUEST)).toMatchObject({ managerId: MANAGER, workerIds: [WORKER, successorId] });
@@ -684,7 +684,7 @@ describe("a bound Manager: the plugin creates the successor, the Manager is info
   it("an agent.created that arrives while the plugin is still finishing the handoff completes nothing", async () => {
     await store(...heavyRequest());
     const bindings = createBindingStore(home);
-    bindManager(bindings, true);
+    bindManager(bindings);
     let early: Promise<unknown> | null = null;
     let runner: HandoffRunner | null = null;
     // The successor exists and the Manager is being told: the event comes now, before the handoff is marked done.
@@ -704,7 +704,7 @@ describe("a bound Manager: the plugin creates the successor, the Manager is info
   it("two turn ends at once create exactly one successor: the first claims the brief (briefed → creating), the second finds it claimed", async () => {
     await store(...heavyRequest());
     const bindings = createBindingStore(home);
-    bindManager(bindings, true);
+    bindManager(bindings);
     createRequestRegistry(home).register(WORKSPACE_ID, REQUEST, { source: "tool", managerId: MANAGER, workerId: WORKER });
     const fake = boundDaemon(bindings);
     const runner = runnerOf(() => binderOf(ROLE_URL, bindings, () => {}));
@@ -767,7 +767,7 @@ describe("a bound Manager: the plugin creates the successor, the Manager is info
   it("Paseo errs after the hook kept the token: the handoff stays creating, and the successor's agent.created completes it", async () => {
     await store(...heavyRequest());
     const bindings = createBindingStore(home);
-    bindManager(bindings, true);
+    bindManager(bindings);
     createRequestRegistry(home).register(WORKSPACE_ID, REQUEST, { source: "tool", managerId: MANAGER, workerId: WORKER });
     const fake = boundDaemon(bindings, {
       afterHook: async () => {
@@ -789,7 +789,7 @@ describe("a bound Manager: the plugin creates the successor, the Manager is info
   it("refused before anything is created: at the loop guard, and when Paseo refuses the successor", async () => {
     await store(...heavyRequest());
     const bindings = createBindingStore(home);
-    bindManager(bindings, true);
+    bindManager(bindings);
     const fake = boundDaemon(bindings);
     // Twelve commands for the request went out after the handoff was accepted.
     await upToTheBrief(fake, runnerOf(() => binderOf(ROLE_URL, bindings, () => {})), () => {
@@ -807,7 +807,7 @@ describe("a bound Manager: the plugin creates the successor, the Manager is info
   it("Paseo refuses the successor: the handoff ends refused, and nothing is sent or labelled", async () => {
     await store(...heavyRequest());
     const bindings = createBindingStore(home);
-    bindManager(bindings, true);
+    bindManager(bindings);
     const fake = boundDaemon(bindings, {
       created: () => {
         throw new Error("Provider 'bm-worker' is not available");
@@ -823,12 +823,15 @@ describe("a bound Manager: the plugin creates the successor, the Manager is info
   });
 
   it.each([
-    ["an unbound Manager", null],
-    ["a Manager bound before the creation tools", false],
-  ] as const)("%s keeps today's flow: it is commanded to create the successor itself", async (_what, bind) => {
+    ["an unbound Manager", false],
+    ["a Manager whose binding was revoked", true],
+  ] as const)("%s keeps today's flow: it is commanded to create the successor itself", async (_what, revoked) => {
     await store(...heavyRequest());
     const bindings = createBindingStore(home);
-    if (bind !== null) bindManager(bindings, bind);
+    if (revoked) {
+      bindManager(bindings);
+      bindings.revokeAgent(MANAGER);
+    }
     const fake = boundDaemon(bindings);
     await upToTheBrief(fake, runnerOf(() => binderOf(ROLE_URL, bindings, () => {})));
     expect(fake.creates).toEqual([]);
@@ -839,25 +842,24 @@ describe("a bound Manager: the plugin creates the successor, the Manager is info
 });
 
 describe("the note request follows the outgoing Worker's binding (design §16.7)", () => {
-  /** The Worker's binding as `bm_create_worker` leaves it: issued, attached, bound; with or without the creation tools. */
-  function bindWorker(creationTools: boolean): void {
+  /** The Worker's binding as `bm_create_worker` leaves it: issued, attached, bound. */
+  function bindWorker(): void {
     const bindings = createBindingStore(home);
-    const { token, tokenSha256 } = bindings.issue({ role: "worker", workspaceId: WORKSPACE_ID, requestId: REQUEST, parentId: MANAGER, creationTools });
+    const { token, tokenSha256 } = bindings.issue({ role: "worker", workspaceId: WORKSPACE_ID, requestId: REQUEST, parentId: MANAGER });
     bindings.attach(token, "worker");
     bindings.settle(tokenSha256, WORKER);
   }
 
-  it("a Worker bound with the creation tools is asked to call bm_report, which stores and delivers the note", async () => {
+  it("a bound Worker is asked to call bm_report, which stores and delivers the note", async () => {
     await store(...heavyRequest());
-    bindWorker(true);
+    bindWorker();
     const fake = daemon();
     expect((await handoff(toolsOf(fake))).ok).toBe(true);
     expect(fake.sends).toEqual([{ id: WORKER, text: noteRequestOf({ requestId: REQUEST }, { bound: true }) }]);
   });
 
-  it("an unbound Worker, or one bound before the creation tools, is asked to post the block", async () => {
+  it("an unbound Worker is asked to post the block", async () => {
     await store(...heavyRequest());
-    bindWorker(false);
     const fake = daemon();
     expect((await handoff(toolsOf(fake))).ok).toBe(true);
     expect(fake.sends).toEqual([{ id: WORKER, text: noteRequestOf({ requestId: REQUEST }) }]);

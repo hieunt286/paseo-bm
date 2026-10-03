@@ -4,18 +4,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   AGENT_TOOLS_SERVER,
+  NO_BINDER,
   PENDING_CALLER_MESSAGE,
   clearBindingCache,
   createBindingStore,
-  hasCreationTools,
-  isCreationBound,
+  liveBindingOf,
   type BindingStore,
   type ToolCaller,
 } from "../plugin/server/agent-bindings";
 import { binderOf } from "../plugin/server/agent-tools";
 import {
   NOT_BOUND_MESSAGE,
-  NO_DATA_FOLDER_MESSAGE,
   NO_PASEO_MESSAGE,
   NO_WORKER_PROFILE_MESSAGE,
   SCOPE_LINE,
@@ -60,8 +59,8 @@ function dataFolder(): string {
   return home;
 }
 
-/** The Manager a token path names once its binding, issued with the creation tools, is bound. */
-const BOUND_MANAGER: ToolCaller = { agentId: MANAGER, role: "manager", workspaceId: WS, requestId: null, parentId: null, batchId: null, creationTools: true };
+/** The Manager a token path names once its binding is bound. */
+const BOUND_MANAGER: ToolCaller = { agentId: MANAGER, role: "manager", workspaceId: WS, requestId: null, parentId: null, batchId: null };
 
 interface DaemonOptions {
   base?: string;
@@ -107,9 +106,9 @@ function daemon(options: DaemonOptions = {}) {
   });
 }
 
-function toolsOf(home: string | null, fake: ReturnType<typeof daemon> | null, store: BindingStore | null, logs: string[] = []) {
+function toolsOf(home: string, fake: ReturnType<typeof daemon> | null, store: BindingStore | null, logs: string[] = []) {
   return createWorkerCreationTools({
-    binder: () => (store === null ? null : binderOf(ROLE_URL, store, (line) => logs.push(line))),
+    binder: () => (store === null ? NO_BINDER : binderOf(ROLE_URL, store, (line) => logs.push(line))),
     paseo: () => fake?.paseo ?? null,
     home: () => home,
     log: (line) => logs.push(line),
@@ -175,9 +174,9 @@ describe("bm_create_worker creates the Worker of a new request (design §16.6)",
 
     // The registry names the caller as the request's Manager, the Worker its first.
     expect(createRequestRegistry(home).get(WS, requestId)).toMatchObject({ source: "tool", managerId: MANAGER, workerIds: [workerId] });
-    // Bound, with the creation tools: its children's ids will come from its tools.
-    expect(store.bindingOfAgent(workerId)).toMatchObject({ role: "worker", state: "bound", workspaceId: WS, requestId, parentId: MANAGER, creationTools: true });
-    expect(isCreationBound(workerId, store.list())).toBe(true);
+    // Bound: its children's ids will come from its tools.
+    expect(store.bindingOfAgent(workerId)).toMatchObject({ role: "worker", state: "bound", workspaceId: WS, requestId, parentId: MANAGER });
+    expect(liveBindingOf(store.list(), workerId, "worker")).not.toBeNull();
     // No token in the answer or a log line.
     const token = url.slice(-64);
     expect([answer.text, ...logs].join("\n")).not.toContain(token);
@@ -221,19 +220,13 @@ describe("bm_create_worker refuses, creating nothing (design §16.6)", () => {
     expect(existsSync(join(home, REQUESTS_DIR_NAME))).toBe(false);
   };
 
-  it("a caller that is not a Manager bound with the creation tools", async () => {
+  it("a caller that is not a bound Manager", async () => {
     const home = dataFolder();
     const store = createBindingStore(home);
     const fake = daemon({ store });
     const tools = toolsOf(home, fake, store);
-    const callers: Array<ToolCaller | null> = [
-      null,
-      { ...BOUND_MANAGER, creationTools: undefined },
-      { ...BOUND_MANAGER, role: "worker" },
-    ];
+    const callers: Array<ToolCaller | null> = [null, { ...BOUND_MANAGER, role: "worker" }];
     for (const caller of callers) expect(await tools.call("bm_create_worker", INPUT, caller)).toEqual({ ok: false, text: NOT_BOUND_MESSAGE });
-    expect(hasCreationTools(null)).toBe(false);
-    expect(hasCreationTools(BOUND_MANAGER)).toBe(true);
     nothingCreated(home, fake, store);
   });
 
@@ -266,12 +259,11 @@ describe("bm_create_worker refuses, creating nothing (design §16.6)", () => {
     nothingCreated(home, fake, store);
   });
 
-  it("no usable data folder, no Paseo handle, Paseo's agent tools off, no bm-worker profile", async () => {
+  it("no Paseo handle, Paseo's agent tools off, no bm-worker profile", async () => {
     const home = dataFolder();
     const store = createBindingStore(home);
     const cases: Array<[string, ReturnType<typeof toolsOf>, ReturnType<typeof daemon>]> = [];
     const plain = daemon({ store });
-    cases.push([NO_DATA_FOLDER_MESSAGE, toolsOf(null, plain, store), plain]);
     cases.push([NO_PASEO_MESSAGE, toolsOf(home, null, store), plain]);
     const off = daemon({ store, toolsOff: true });
     cases.push([AGENT_TOOLS_OFF_TOOL_MESSAGE, toolsOf(home, off, store), off]);
@@ -281,7 +273,6 @@ describe("bm_create_worker refuses, creating nothing (design §16.6)", () => {
       expect(await tools.call("bm_create_worker", INPUT, BOUND_MANAGER)).toEqual({ ok: false, text });
       nothingCreated(home, fake, store);
     }
-    expect(NO_DATA_FOLDER_MESSAGE).toBe("paseo-bm has no usable data folder; tell the owner in one line and stop.");
     // The agent's own refusal, not the fallback Switch's wording (no Settings step, no Switch).
     expect(AGENT_TOOLS_OFF_TOOL_MESSAGE).toBe(
       "paseo-bm cannot create agents while Paseo's agent tools are off; nothing was created. Tell the owner in one line and stop.",

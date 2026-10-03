@@ -6,7 +6,6 @@ import { PENDING_CALLER_MESSAGE, type ToolCaller } from "../plugin/server/agent-
 import { BUILDER_SEND_LINES, answer, answerWithServerTools, withAgentTools } from "../plugin/server/agent-tools";
 import { createAlertStore } from "../plugin/server/alert-store";
 import { clearStartMarks, currentTurnStartOf, noteTurnStart, relayRequestIdOf } from "../plugin/server/collector";
-import { NO_DATA_FOLDER_MESSAGE } from "../plugin/server/create-worker";
 import { clearMaterialiserMemory, materialiseTurn } from "../plugin/server/decision-materialiser";
 import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
 import {
@@ -68,9 +67,9 @@ function dataFolder(): string {
   return home;
 }
 
-const WORKER_CALLER: ToolCaller = { agentId: WORKER, role: "worker", workspaceId: WS, requestId: REQ, parentId: MANAGER, batchId: null, creationTools: true };
-const REVIEWER_CALLER: ToolCaller = { agentId: REVIEWER, role: "reviewer", workspaceId: WS, requestId: REQ, parentId: WORKER, batchId: "b1", creationTools: true };
-const MANAGER_CALLER: ToolCaller = { agentId: MANAGER, role: "manager", workspaceId: WS, requestId: null, parentId: null, batchId: null, creationTools: true };
+const WORKER_CALLER: ToolCaller = { agentId: WORKER, role: "worker", workspaceId: WS, requestId: REQ, parentId: MANAGER, batchId: null };
+const REVIEWER_CALLER: ToolCaller = { agentId: REVIEWER, role: "reviewer", workspaceId: WS, requestId: REQ, parentId: WORKER, batchId: "b1" };
+const MANAGER_CALLER: ToolCaller = { agentId: MANAGER, role: "manager", workspaceId: WS, requestId: null, parentId: null, batchId: null };
 
 type Agent = { id: string; provider: string; status: string; workspaceId: string; labels: Record<string, string> };
 const AGENTS: Agent[] = [
@@ -79,8 +78,8 @@ const AGENTS: Agent[] = [
   { id: REVIEWER, provider: "bm-reviewer/claude-opus-5", status: "idle", workspaceId: WS, labels: { "bm.role": "reviewer", "bm.requestId": REQ, "bm.batchId": "b1" } },
 ];
 
-function setup(options: { home?: string | null; agents?: Agent[]; paseo?: boolean; turnStart?: string | null } = {}) {
-  const home = options.home === undefined ? dataFolder() : options.home;
+function setup(options: { home?: string; agents?: Agent[]; paseo?: boolean; turnStart?: string | null } = {}) {
+  const home = options.home ?? dataFolder();
   const fake = fakePaseo({ agents: options.agents ?? AGENTS });
   const queue = createNoticeQueue({ log: () => {} });
   const logs: string[] = [];
@@ -107,7 +106,7 @@ function setup(options: { home?: string | null; agents?: Agent[]; paseo?: boolea
   const tick = (ms: number) => {
     clock = new Date(clock.getTime() + ms);
   };
-  return { home: home!, fake, queue, logs, opened, tools, tick, stopsAsked };
+  return { home, fake, queue, logs, opened, tools, tick, stopsAsked };
 }
 
 /** The request as bm_create_worker registers it: its Manager, its Worker. */
@@ -308,13 +307,12 @@ describe("bm_report for a bound Worker (design §16.6)", () => {
     expect(fake.sends).toEqual([]);
   });
 
-  it("refuses a pending binding, no data folder, no Paseo handle, and a caller that is not bound", async () => {
+  it("refuses a pending binding, no Paseo handle, and a caller that is not bound", async () => {
     expect(await setup().tools.worker.call("bm_report", REPORT, { ...WORKER_CALLER, agentId: null })).toEqual({ ok: false, text: PENDING_CALLER_MESSAGE });
-    expect(await setup({ home: null }).tools.worker.call("bm_report", REPORT, WORKER_CALLER)).toEqual({ ok: false, text: NO_DATA_FOLDER_MESSAGE });
     const offline = setup({ paseo: false });
     expect(await offline.tools.worker.call("bm_report", REPORT, WORKER_CALLER)).toEqual({ ok: false, text: NO_PASEO_DELIVERY_MESSAGE });
     expect(existsSync(join(offline.home, OUTBOX_DIR_NAME))).toBe(false);
-    for (const caller of [null, { ...WORKER_CALLER, creationTools: undefined }, { ...WORKER_CALLER, role: "reviewer" as const }]) {
+    for (const caller of [null, { ...WORKER_CALLER, role: "reviewer" as const }]) {
       expect(await setup().tools.worker.call("bm_report", REPORT, caller)).toEqual({ ok: false, text: DELIVERY_NOT_BOUND_MESSAGE });
     }
   });
@@ -358,9 +356,6 @@ describe("bm_report for a bound Worker (design §16.6)", () => {
     const content = (reply as { result: { content: Array<{ text: string }> } }).result.content;
     expect(content[0]!.text).toMatch(/^BM-REPORT\nrequestId: req-20261003T100000Z\nphase: stopped\n/);
     expect(content[1]!.text).toBe(BUILDER_SEND_LINES["bm_report"]);
-    // A Worker bound before ship point C is unbound for these tools too.
-    const before = await answerWithServerTools("worker", call("bm_report", REPORT), tools.worker, { ...WORKER_CALLER, creationTools: undefined });
-    expect((before as { result: { content: unknown[] } }).result.content).toHaveLength(2);
     // A bound one reaches the delivering tool.
     const bound = await answerWithServerTools("worker", call("bm_report", { ...REPORT, requestId: OTHER_REQ }), tools.worker, WORKER_CALLER);
     expect((bound as { result: { isError?: boolean } }).result.isError).toBe(true);
@@ -460,10 +455,9 @@ describe("bm_questions for a bound Worker (design §16.6)", () => {
     expect(createDecisionStore(home).list({ workspaceId: WS })).toEqual([]);
   });
 
-  it("refuses an unbound or pending caller and a missing data folder", async () => {
+  it("refuses an unbound or pending caller", async () => {
     expect(await setup().tools.worker.call("bm_questions", { questions: [QUESTION()] }, null)).toEqual({ ok: false, text: QUESTIONS_NOT_BOUND_MESSAGE });
     expect(await setup().tools.worker.call("bm_questions", { questions: [QUESTION()] }, { ...WORKER_CALLER, agentId: null })).toEqual({ ok: false, text: PENDING_CALLER_MESSAGE });
-    expect(await setup({ home: null }).tools.worker.call("bm_questions", { questions: [QUESTION()] }, WORKER_CALLER)).toEqual({ ok: false, text: NO_DATA_FOLDER_MESSAGE });
   });
 });
 
@@ -495,7 +489,6 @@ describe("bm_review for a bound Reviewer (design §16.6)", () => {
     expect(await tools.reviewer.call("bm_review", REVIEW, { ...REVIEWER_CALLER, agentId: null })).toEqual({ ok: false, text: PENDING_CALLER_MESSAGE });
     expect(existsSync(join(home, OUTBOX_DIR_NAME))).toBe(false);
     expect(fake.sends).toEqual([]);
-    expect(await setup({ home: null }).tools.reviewer.call("bm_review", REVIEW, REVIEWER_CALLER)).toEqual({ ok: false, text: NO_DATA_FOLDER_MESSAGE });
   });
 
   it("an unbound Reviewer still gets the builder and its send line", async () => {

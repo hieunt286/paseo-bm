@@ -163,10 +163,10 @@ describe("notifyChildFactChange", () => {
     process.env["PASEO_BM_HOME"] = join(root, "data");
     try {
       const bindings = createBindingStore(join(root, "data"));
-      const { token, tokenSha256 } = bindings.issue({ role: "manager", workspaceId: "wks_1", creationTools: true });
+      const { token, tokenSha256 } = bindings.issue({ role: "manager", workspaceId: "wks_1" });
       bindings.attach(token, "manager");
       bindings.settle(tokenSha256, "m-idle");
-      bindings.issue({ role: "manager", workspaceId: "wks_1", creationTools: true });
+      bindings.issue({ role: "manager", workspaceId: "wks_1" });
       const enqueue = vi.fn(async () => "sent" as const);
       const fake = daemonWith([...MANAGERS]);
       expect(await notifyChildFactChange("worker", WORKER_LINE, NEW_WORKER_LINE, fake.paseo, { enqueue })).toBe(1);

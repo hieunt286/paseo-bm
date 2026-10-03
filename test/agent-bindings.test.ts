@@ -15,7 +15,6 @@ import {
   createBindingSweep,
   createBound,
   creationMayExist,
-  guardActingTool,
   pendingCallerRefusal,
   registerBindingLifecycle,
   tokenHashOf,
@@ -86,7 +85,6 @@ describe("the binding store (design §16.5)", () => {
           requestId: REQ,
           parentId: "mgr-1",
           batchId: null,
-          creationTools: false,
           createdAt: T0.toISOString(),
           attachedAt: null,
           boundAt: null,
@@ -216,7 +214,6 @@ describe("the binding store (design §16.5)", () => {
       requestId: null,
       parentId: null,
       batchId: null,
-      creationTools: false,
       createdAt: T0.toISOString(),
       attachedAt: T0.toISOString(),
       boundAt: T0.toISOString(),
@@ -274,11 +271,12 @@ describe("the binding store (design §16.5)", () => {
 
 /** Stub server-run tools: one that delivers, one that creates (both behind the shared guard), one that says who called. */
 function stubTools(ran: string[]): ServerTools {
-  const acting = (name: string) =>
-    guardActingTool(async () => {
-      ran.push(name);
-      return { ok: true, text: `${name} done` };
-    });
+  const acting = (name: string) => async (_input: unknown, caller: ToolCaller | null) => {
+    const refusal = pendingCallerRefusal(caller);
+    if (refusal !== null) return { ok: false, text: refusal };
+    ran.push(name);
+    return { ok: true, text: `${name} done` };
+  };
   const tools: Record<string, (input: unknown, caller: ToolCaller | null) => Promise<{ ok: boolean; text: string }>> = {
     bm_stub_deliver: acting("bm_stub_deliver"),
     bm_stub_create: acting("bm_stub_create"),
@@ -330,8 +328,8 @@ describe("the endpoint's token paths (design §16.5)", () => {
     const token = bindIn(endpoint.bindings!, "worker", "agent-w1");
     const answered = await call(boundUrl(endpoint, "worker", token), "bm_stub_whoami");
     expect(JSON.parse(answered.body.result.content[0].text)).toEqual({ agentId: "agent-w1", role: "worker", workspaceId: WS, requestId: REQ, parentId: "mgr-1", batchId: null });
-    // The log line names the bound agent (a stub is not one of the role's listed server tools, hence its wording).
-    expect(logs).toEqual(["[paseo-bm] bm_stub_whoami built a block for a worker (agent agent-w1)"]);
+    // The log line names the bound agent; a server tool answered it.
+    expect(logs).toEqual(["[paseo-bm] bm_stub_whoami answered for a worker (agent agent-w1)"]);
   });
 
   it("a pending token: every tool that delivers or creates refuses with 'try again in a moment', and runs nothing", async () => {
@@ -437,7 +435,8 @@ describe("binding a creation (design §16.5)", () => {
     const kept = applyAgentTools(request("bm-worker-fallback-1/gpt", issued.mcpServer.url), tools, "codex");
     expect(kept?.config.mcpServers?.[AGENT_TOOLS_SERVER]).toEqual({ type: "http", url: issued.mcpServer.url, alwaysLoad: true });
     expect(kept?.config.mcpServers?.["other"]).toEqual({ type: "http", url: "http://x/mcp" });
-    expect(kept?.config.toolPolicy?.preapproved).toEqual(["bm_report", "bm_reply"].map((tool) => ({ kind: "mcp", server: AGENT_TOOLS_SERVER, tool })));
+    // Bound: its delivering and creating tools are pre-approved too (design §16.6).
+    expect(kept?.config.toolPolicy?.preapproved).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_reply"].map((tool) => ({ kind: "mcp", server: AGENT_TOOLS_SERVER, tool })));
     expect(store.list()[0]).toMatchObject({ state: "pending", attachedAt: T0.toISOString() });
 
     // Foreign: another port, an unknown token, or another role's binding — rewritten to the role path.
@@ -541,38 +540,39 @@ describe("a creation Paseo did not settle (review of ADR-027's creation paths)",
     const home = dataFolder();
     const clock = { now: T0 };
     const store = storeAt(home, clock);
-    const reviewer = store.issue({ role: "reviewer", workspaceId: WS, requestId: REQ, parentId: "wrk-1", batchId: "b1", creationTools: true });
+    const reviewer = store.issue({ role: "reviewer", workspaceId: WS, requestId: REQ, parentId: "wrk-1", batchId: "b1" });
     store.attach(reviewer.token, "reviewer");
-    const worker = store.issue({ role: "worker", workspaceId: WS, requestId: REQ, parentId: "mgr-1", creationTools: true });
+    const worker = store.issue({ role: "worker", workspaceId: WS, requestId: REQ, parentId: "mgr-1" });
     store.attach(worker.token, "worker");
     const unattached = store.issue({ role: "reviewer", workspaceId: WS, requestId: REQ, parentId: "wrk-1", batchId: "b2" });
     const created = (over: Partial<Parameters<BindingStore["settleCreated"]>[0]>) => ({ agentId: "rev-1", role: "reviewer" as const, parentId: "wrk-1", workspaceId: WS, requestId: REQ, batchId: "b1", ...over });
 
     // Another parent, workspace, batch or request, an unattached binding, or no parent: nothing.
-    expect(store.settleCreated(created({ parentId: "wrk-2" }))).toBeNull();
-    expect(store.settleCreated(created({ workspaceId: "wks_other" }))).toBeNull();
-    expect(store.settleCreated(created({ batchId: "b9" }))).toBeNull();
-    expect(store.settleCreated(created({ requestId: "req-20261003T110000Z" }))).toBeNull();
-    expect(store.settleCreated(created({ batchId: "b2" }))).toBeNull();
-    expect(store.settleCreated(created({ parentId: null }))).toBeNull();
+    const none = { binding: null, settledNow: false };
+    expect(store.settleCreated(created({ parentId: "wrk-2" }))).toEqual(none);
+    expect(store.settleCreated(created({ workspaceId: "wks_other" }))).toEqual(none);
+    expect(store.settleCreated(created({ batchId: "b9" }))).toEqual(none);
+    expect(store.settleCreated(created({ requestId: "req-20261003T110000Z" }))).toEqual(none);
+    expect(store.settleCreated(created({ batchId: "b2" }))).toEqual(none);
+    expect(store.settleCreated(created({ parentId: null }))).toEqual(none);
 
     clock.now = later(5_000);
-    expect(store.settleCreated(created({}))).toMatchObject({ tokenSha256: reviewer.tokenSha256, state: "bound", agentId: "rev-1", boundAt: later(5_000).toISOString() });
+    expect(store.settleCreated(created({}))).toMatchObject({ binding: { tokenSha256: reviewer.tokenSha256, state: "bound", agentId: "rev-1", boundAt: later(5_000).toISOString() }, settledNow: true });
     // Seen again: its own binding, unchanged.
-    expect(store.settleCreated(created({}))).toMatchObject({ agentId: "rev-1", boundAt: later(5_000).toISOString() });
+    expect(store.settleCreated(created({}))).toMatchObject({ binding: { agentId: "rev-1", boundAt: later(5_000).toISOString() }, settledNow: false });
     // agents.create returned after all: the binding is bound to that agent, and discard keeps it.
     expect(store.settle(reviewer.tokenSha256, "rev-1")).toBe("bound");
     expect(store.discard(reviewer.tokenSha256)).toBe("kept");
 
     // A Worker by its request.
-    expect(store.settleCreated({ agentId: "wrk-9", role: "worker", parentId: "mgr-1", workspaceId: WS, requestId: REQ, batchId: null })).toMatchObject({ tokenSha256: worker.tokenSha256, agentId: "wrk-9" });
+    expect(store.settleCreated({ agentId: "wrk-9", role: "worker", parentId: "mgr-1", workspaceId: WS, requestId: REQ, batchId: null })).toMatchObject({ binding: { tokenSha256: worker.tokenSha256, agentId: "wrk-9" }, settledNow: true });
     expect(store.list().find((binding) => binding.tokenSha256 === unattached.tokenSha256)?.state).toBe("pending");
 
     // Past its ten minutes, a pending binding settles nothing.
     const late = store.issue({ role: "reviewer", workspaceId: WS, requestId: REQ, parentId: "wrk-1", batchId: "b3" });
     store.attach(late.token, "reviewer");
     clock.now = later(5_000 + PENDING_TTL_MS + 1);
-    expect(store.settleCreated(created({ agentId: "rev-3", batchId: "b3" }))).toBeNull();
+    expect(store.settleCreated(created({ agentId: "rev-3", batchId: "b3" }))).toEqual({ binding: null, settledNow: false });
   });
 
   it("withoutTokenPaths cuts every token path, and the token itself, from a text", () => {

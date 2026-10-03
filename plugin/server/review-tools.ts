@@ -46,15 +46,15 @@
  * throws into the endpoint.
  */
 import { join } from "node:path";
-import { PENDING_TTL_MS, createBound, creationMayExist, guardActingTool, hasCreationTools, withoutTokenPaths, type AgentBinder, type ToolCaller } from "./agent-bindings";
+import { NO_BINDER, PENDING_TTL_MS, createBound, creationMayExist, withoutTokenPaths, type AgentBinder, type ToolCaller } from "./agent-bindings";
 import { aliasBases } from "./alias-bases";
 import { parseReviews } from "./bm-report";
 import { readReviewBudget } from "./coordination-rpc";
-import { NO_DATA_FOLDER_MESSAGE, folderOfAgent } from "./create-worker";
+import { folderOfAgent } from "./create-worker";
 import { resolveDataHome, TRACES_DIR_NAME } from "./data-home";
 import type { ServerToolAnswer, ServerTools } from "./decision-tools";
 import { AGENT_TOOLS_OFF_TOOL_MESSAGE, agentToolsOff } from "./manager";
-import type { NoticeOutcome, NoticePaseo, NoticeQueue } from "./notice-queue";
+import type { NoticeQueue } from "./notice-queue";
 import { createOutbox, deliverRecord, newRecordId, type OutboxDeps, type OutboxRecord } from "./outbox";
 import type { DashboardPaseo } from "./paseo-directory";
 import { createRequestRegistry, type RegisteredRequest, type ReviewBatch } from "./request-registry";
@@ -62,6 +62,7 @@ import { requestReviewCountOf } from "./request-trace";
 import { asRecord, nonEmpty, reasonOf } from "./role-choices";
 import { creationProjectOf, modeFactsOf } from "./role-instructions";
 import { profileOf } from "./role-mode";
+import { actingTools, answered, boundAs, deliveryOf, fixThese, outboxDepsOf, refused, withoutNulls, type BoundCaller } from "./tool-kit";
 import type { ReconstructedTrace } from "./traces";
 import { CREATE_REVIEWER_FACE, REREVIEW_FACE, createReviewerRules, schemaIssues, type CreateReviewerInput } from "../shared/bm-tools";
 import type { Tier } from "../shared/contracts";
@@ -78,7 +79,7 @@ export const REVIEWER_PROFILE_ID = "bm-reviewer";
 /** Title of every Reviewer the plugin creates for a batch. */
 export const REVIEWER_TITLE = "Beads Reviewer";
 
-/** The caller is not a Worker bound with the creation tools. */
+/** The caller is not a bound Worker. */
 export const REVIEW_NOT_BOUND_MESSAGE =
   "bm_create_reviewer and bm_rereview are only for a Worker paseo-bm created with its own tools, and you are not one: work with Reviewers as your instructions say. Nothing was created or sent.";
 /** No Paseo handle has reached the plugin yet. */
@@ -208,14 +209,13 @@ export interface PluginReviewerSpec {
 /**
  * Creates one Reviewer for a batch of a bound Worker (design §16.6, §16.9):
  * `parent` = the Worker, the labels, and a binding of role reviewer for the
- * same request and batch, issued with the tools of ship point C so its
- * `bm_review` delivers. The `agent.create` hook still runs, so it gets its
+ * same request and batch, so its `bm_review` delivers. The `agent.create` hook still runs, so it gets its
  * instructions. Throws what Paseo threw, after the binding was discarded.
  */
 export async function createPluginReviewer(
   paseo: ReviewerCreationPaseo,
   spec: PluginReviewerSpec,
-  deps: { binder?: AgentBinder | null; log?: (message: string) => void } = {},
+  deps: { binder?: AgentBinder; log?: (message: string) => void } = {},
 ): Promise<{ reviewerId: string }> {
   const log = deps.log ?? ((message: string) => console.warn(message));
   // Marked under way BEFORE Paseo is asked: its agent.created may come before agents.create returns.
@@ -228,8 +228,8 @@ export async function createPluginReviewer(
   inFlight.set(spec.workerId, pending);
   try {
     const created = await createBound(
-      deps.binder,
-      { role: "reviewer", base: spec.base, workspaceId: spec.workspaceId, requestId: spec.requestId, parentId: spec.workerId, batchId: spec.batchId, creationTools: true },
+      deps.binder ?? NO_BINDER,
+      { role: "reviewer", base: spec.base, workspaceId: spec.workspaceId, requestId: spec.requestId, parentId: spec.workerId, batchId: spec.batchId },
       (mcpServers) =>
         paseo.agents.create({
           config: {
@@ -456,11 +456,11 @@ export function applyReviewBudgetGrants(
 
 export interface ReviewToolDeps {
   /** The binder of the endpoint (read when a call comes); none (unbound Reviewers) when absent. */
-  binder?: () => AgentBinder | null;
+  binder?: () => AgentBinder;
   /** The last Paseo handle a hook or RPC brought; null before any did. */
   paseo: () => unknown;
-  /** The data folder; `resolveDataHome` by default. Null: no usable data folder. */
-  home?: () => string | null;
+  /** The data folder (the endpoint's: it serves no tools without one). */
+  home: () => string;
   log?: (message: string) => void;
   now?: () => Date;
   /** The notice queue a re-review goes through; the plugin's shared one by default. */
@@ -469,32 +469,17 @@ export interface ReviewToolDeps {
   outbox?: Pick<OutboxDeps, "newId" | "env">;
 }
 
-const refused = (text: string): ServerToolAnswer => ({ ok: false, text });
-const answered = (value: unknown): ServerToolAnswer => ({ ok: true, text: JSON.stringify(value) });
-const fixThese = (tool: string, issues: readonly string[]): ServerToolAnswer =>
-  refused(`The call was refused. Fix these and call ${tool} again:\n${issues.map((issue) => `- ${issue}`).join("\n")}`);
-
-/** `value` without its `null` fields: a model often sends `null` for a field it leaves out. */
-function withoutNulls(value: unknown): unknown {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
-  return Object.fromEntries(Object.entries(value).filter(([, item]) => item != null));
-}
-
-type BoundWorker = ToolCaller & { agentId: string; requestId: string };
+type BoundWorker = BoundCaller & { requestId: string };
 
 function boundWorkerOf(caller: ToolCaller | null): BoundWorker | null | "no-request" {
-  if (caller === null || caller.role !== "worker" || caller.agentId === null || !hasCreationTools(caller)) return null;
-  return caller.requestId === null ? "no-request" : (caller as BoundWorker);
+  const worker = boundAs(caller, "worker");
+  if (worker === null) return null;
+  return worker.requestId === null ? "no-request" : (worker as BoundWorker);
 }
 
 /** The `reviewCalls` a tool answers: `<n> of <ceiling>`. */
 function callsLine(calls: number, ceiling: number): string {
   return `${calls} of ${ceiling}`;
-}
-
-/** The delivery state a tool reports for a notice outcome. */
-function deliveryOf(outcome: NoticeOutcome): "sent" | "queued" | "dropped" {
-  return outcome === "sent" ? "sent" : outcome === "dropped" ? "dropped" : "queued";
 }
 
 /**
@@ -505,13 +490,6 @@ function deliveryOf(outcome: NoticeOutcome): "sent" | "queued" | "dropped" {
 export function createReviewTools(deps: ReviewToolDeps): ServerTools {
   const log = deps.log ?? ((message: string) => console.warn(message));
   const now = deps.now ?? (() => new Date());
-  const homeOf = (): string | null => {
-    try {
-      return deps.home !== undefined ? deps.home() : resolveDataHome().home;
-    } catch {
-      return null;
-    }
-  };
   const paseoOf = (): unknown => {
     const paseo = deps.paseo();
     return paseo === null || paseo === undefined ? null : paseo;
@@ -562,8 +540,7 @@ export function createReviewTools(deps: ReviewToolDeps): ServerTools {
     const typed = input as CreateReviewerInput;
     const broken = createReviewerRules(typed);
     if (broken.length > 0) return fixThese(CREATE_REVIEWER_TOOL, broken);
-    const home = homeOf();
-    if (home === null) return refused(NO_DATA_FOLDER_MESSAGE);
+    const home = deps.home();
     const paseo = paseoOf();
     if (paseo === null) return refused(NO_PASEO_REVIEW_MESSAGE);
     // A Reviewer gets Paseo's tools only when it is created, and a Worker without them could not cancel it (§16.6).
@@ -632,7 +609,7 @@ export function createReviewTools(deps: ReviewToolDeps): ServerTools {
             base,
             modeId,
           },
-          { binder: deps.binder?.() ?? null, log },
+          { binder: deps.binder?.(), log },
         ));
       } catch (error) {
         // Paseo's refusal, verbatim but for a token path (design §16.5: a token never reaches an agent or a log).
@@ -696,8 +673,7 @@ export function createReviewTools(deps: ReviewToolDeps): ServerTools {
     const shape = schemaIssues(REREVIEW_FACE.inputSchema, input);
     if (shape.length > 0) return fixThese(REREVIEW_TOOL, shape);
     const { batchId, fixed } = input as { batchId: string; fixed: string };
-    const home = homeOf();
-    if (home === null) return refused(NO_DATA_FOLDER_MESSAGE);
+    const home = deps.home();
     const paseo = paseoOf();
     if (paseo === null) return refused(NO_PASEO_REVIEW_MESSAGE);
     const nothing = "Nothing was sent.";
@@ -729,7 +705,7 @@ export function createReviewTools(deps: ReviewToolDeps): ServerTools {
       if (over !== null) return refused(over);
 
       // The record first (§16.7), then its call under its id, then the delivery.
-      const outboxDeps = { home, now, log, ...deps.outbox, ...(deps.queue === undefined ? {} : { queue: deps.queue }), paseo: paseo as NoticePaseo };
+      const outboxDeps = outboxDepsOf(home, { ...deps, now, log }, paseo);
       const outbox = createOutbox(home, outboxDeps);
       let record: OutboxRecord;
       try {
@@ -776,21 +752,5 @@ export function createReviewTools(deps: ReviewToolDeps): ServerTools {
     });
   };
 
-  const runs: Record<string, (input: unknown, caller: ToolCaller | null) => Promise<ServerToolAnswer>> = {
-    [CREATE_REVIEWER_TOOL]: guardActingTool(create),
-    [REREVIEW_TOOL]: guardActingTool(rereview),
-  };
-  return {
-    faces: [CREATE_REVIEWER_FACE, REREVIEW_FACE],
-    has: (name) => Object.hasOwn(runs, name),
-    async call(name, input, caller) {
-      const run = runs[name];
-      if (run === undefined) return { ok: false, text: `Unknown tool: ${name}` };
-      try {
-        return await run(input, caller ?? null);
-      } catch (error) {
-        return { ok: false, text: `The tool failed: ${reasonOf(error)}. Nothing was created or sent; try again later, or tell the owner.` };
-      }
-    },
-  };
+  return actingTools([CREATE_REVIEWER_FACE, REREVIEW_FACE], { [CREATE_REVIEWER_TOOL]: create, [REREVIEW_TOOL]: rereview }, "Nothing was created or sent");
 }

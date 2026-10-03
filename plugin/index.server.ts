@@ -7,7 +7,6 @@ import { registerDashboardRpcs } from "./server/dashboard-rpc";
 import { registerRoleHook } from "./server/role-hook";
 import { startAgentTools, toolsStaleSince } from "./server/agent-tools";
 import { createBindingSweep, registerBindingLifecycle } from "./server/agent-bindings";
-import { sightCreatedWorker } from "./server/request-registry";
 import { describeRoles } from "./server/roles";
 import { registerStopPropagation } from "./server/stop-propagation";
 import { registerAgentLabels } from "./server/agent-labels";
@@ -243,7 +242,6 @@ export default function contribute(server: PluginServerContext): () => void {
     },
     async (agent, paseo) => {
       // Design §16.4: the request of a new Worker an unbound Manager created is registered at first sight.
-      await sightCreatedWorker(agent, paseo);
       // Design §16.5, §16.8: a Worker or Reviewer the plugin created whose creation a reload or Paseo's late
       // error left unsettled gets its binding and its registry entry now, so it is never taken for off-tool.
       await settleCreatedAgent(agent, paseo, { home: dataHome(), bindings: agentTools.bindings });

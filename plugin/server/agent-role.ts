@@ -52,6 +52,19 @@ export function roleOfProvider(provider: unknown): BmRole | null {
   return fallbackAliasOf(id)?.role ?? null;
 }
 
+/** Label Paseo sets on an agent created by another agent (AGENTS.md, verified). */
+export const PARENT_AGENT_LABEL = "paseo.parent-agent-id";
+
+/**
+ * The agent that created `agent`: its explicit `parentAgentId` (`agent.created`,
+ * a snapshot), else its `paseo.parent-agent-id` label; null for neither. Never throws.
+ */
+export function parentOf(agent: { parentAgentId?: unknown; labels?: unknown } | null | undefined): string | null {
+  const text = (value: unknown): string | null => (typeof value === "string" && value.trim() !== "" ? value : null);
+  const labels = agent?.labels;
+  return text(agent?.parentAgentId) ?? (labels !== null && typeof labels === "object" ? text((labels as Record<string, unknown>)[PARENT_AGENT_LABEL]) : null);
+}
+
 /** The `bm.role` label's value when it names a role, else null. Never throws. */
 export function roleLabelOf(labels: unknown): BmRole | null {
   if (labels === null || typeof labels !== "object") return null;

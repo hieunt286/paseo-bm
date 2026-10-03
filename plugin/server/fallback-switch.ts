@@ -23,7 +23,7 @@
  *    creation (the old Worker cannot be read) creates nothing and leaves the
  *    incident pending.
  */
-import { createBound, type AgentBinder } from "./agent-bindings";
+import { NO_BINDER, createBound, type AgentBinder } from "./agent-bindings";
 import { createRequestRegistry, sightRequestId } from "./request-registry";
 import { unusableDataHomeMessage } from "./data-home";
 import { createLocationResolver, resolveLocationFromPaseo } from "./collector";
@@ -78,7 +78,7 @@ export interface SwitchDeps {
    * can take the tools (design §16.5), with the creation tools (§16.6); the
    * endpoint's binder in the plugin, none (unbound) when absent.
    */
-  binder?: AgentBinder | null;
+  binder?: AgentBinder;
 }
 
 let queue: Promise<unknown> = Promise.resolve();
@@ -179,10 +179,9 @@ export function createWorkerSwitch(deps: SwitchDeps = {}): FallbackAction {
           workspaceId: current.workspaceId,
           requestId: current.requestId,
           parentId: current.managerId,
-          creationTools: true,
         };
         created = await createBound(
-          deps.binder,
+          deps.binder ?? NO_BINDER,
           binding,
           (mcpServers) =>
             api.agents.create({

@@ -1189,7 +1189,7 @@ describe("manager.ensure — a new Manager bound to its own tool path (design §
       };
       const fake = daemonWith();
       const result = await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), binder: attaching, log: () => {} });
-      expect(bindings.bindingOfAgent(result.agentId)).toMatchObject({ state: "bound", role: "manager", workspaceId: WS, requestId: null, parentId: null, creationTools: true });
+      expect(bindings.bindingOfAgent(result.agentId)).toMatchObject({ state: "bound", role: "manager", workspaceId: WS, requestId: null, parentId: null });
     } finally {
       rmSync(dataHome, { recursive: true, force: true });
     }

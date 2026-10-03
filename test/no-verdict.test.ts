@@ -48,7 +48,7 @@ function dataFolder(): string {
 
 /** A binding the plugin issued and the hook attached, bound to `agentId`. */
 function bind(store: BindingStore, agentId: string, input: { role: "reviewer" | "worker"; requestId: string; parentId: string; batchId?: string | null }): void {
-  const { token, tokenSha256 } = store.issue({ ...input, workspaceId: WS, creationTools: true });
+  const { token, tokenSha256 } = store.issue({ ...input, workspaceId: WS });
   store.attach(token, input.role);
   store.settle(tokenSha256, agentId);
 }

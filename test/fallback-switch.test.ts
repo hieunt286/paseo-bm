@@ -314,7 +314,7 @@ describe("switch (Worker) — bound to its own tool path (design §16.5) and app
     await expect(action(incident(), paseo, { home })).resolves.toMatchObject({ status: "switched", replacementId: NEW });
     const config = create.mock.calls[0]![0].config as Record<string, unknown>;
     expect(config["mcpServers"]).toEqual({ "paseo-bm": { type: "http", url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:4567\/mcp\/worker\/[0-9a-f]{64}$/), alwaysLoad: true } });
-    expect(bindings.bindingOfAgent(NEW)).toMatchObject({ state: "bound", role: "worker", workspaceId: "wks_1", requestId: REQ, parentId: MANAGER, creationTools: true });
+    expect(bindings.bindingOfAgent(NEW)).toMatchObject({ state: "bound", role: "worker", workspaceId: "wks_1", requestId: REQ, parentId: MANAGER });
     // The token is in the creation config only, never in a log line.
     const token = String((config["mcpServers"] as Record<string, { url: string }>)["paseo-bm"]!.url).slice(-64);
     expect(JSON.stringify(log.mock.calls)).not.toContain(token);

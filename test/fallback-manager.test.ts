@@ -148,7 +148,7 @@ describe("switch (Manager)", () => {
     await expect(action(incident(), paseo, { home })).resolves.toMatchObject({ status: "switched", replacementId: NEW });
     const config = create.mock.calls[0]![0].config as Record<string, unknown>;
     expect(config["mcpServers"]).toEqual({ "paseo-bm": { type: "http", url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:4567\/mcp\/manager\/[0-9a-f]{64}$/), alwaysLoad: true } });
-    expect(bindings.bindingOfAgent(NEW)).toMatchObject({ state: "bound", role: "manager", workspaceId: WS, creationTools: true });
+    expect(bindings.bindingOfAgent(NEW)).toMatchObject({ state: "bound", role: "manager", workspaceId: WS });
   });
 
   it("creates one Manager through createManager with the exact provider, mode, labels and prompt, then records switched", async () => {

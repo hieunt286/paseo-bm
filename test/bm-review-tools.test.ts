@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { PENDING_CALLER_MESSAGE, PENDING_TTL_MS, clearBindingCache, createBindingStore, type BindingStore, type ToolCaller } from "../plugin/server/agent-bindings";
 import { settleCreatedAgent } from "../plugin/server/creation-settle";
 import { answer, binderOf, withAgentTools } from "../plugin/server/agent-tools";
-import { NO_DATA_FOLDER_MESSAGE } from "../plugin/server/create-worker";
 import { clearDecisionStoreCache } from "../plugin/server/decision-store";
 import { AGENT_TOOLS_OFF_TOOL_MESSAGE } from "../plugin/server/manager";
 import { createNoticeQueue } from "../plugin/server/notice-queue";
@@ -74,7 +73,7 @@ function dataFolder(): string {
   return home;
 }
 
-const WORKER_CALLER: ToolCaller = { agentId: WORKER, role: "worker", workspaceId: WS, requestId: REQ, parentId: MANAGER, batchId: null, creationTools: true };
+const WORKER_CALLER: ToolCaller = { agentId: WORKER, role: "worker", workspaceId: WS, requestId: REQ, parentId: MANAGER, batchId: null };
 
 interface DaemonOptions {
   toolsOff?: boolean;
@@ -119,17 +118,17 @@ function register(home: string, tier: "Small" | "Medium" | "Large" | null = "Sma
   if (tier !== null) registry.noteReport(WS, REQ, { tier, phase: "received", at: T0.toISOString() });
 }
 
-function setup(options: DaemonOptions & { home?: string | null; tier?: "Small" | "Medium" | "Large" | null; paseo?: boolean } = {}) {
-  const home = options.home === undefined ? dataFolder() : options.home;
-  const store = home === null ? null : createBindingStore(home);
-  const fake = daemon({ ...options, ...(store === null ? {} : { store }) });
-  if (home !== null) register(home, options.tier === undefined ? "Small" : options.tier);
+function setup(options: DaemonOptions & { tier?: "Small" | "Medium" | "Large" | null; paseo?: boolean } = {}) {
+  const home = dataFolder();
+  const store = createBindingStore(home);
+  const fake = daemon({ ...options, store });
+  register(home, options.tier === undefined ? "Small" : options.tier);
   const queue = createNoticeQueue({ log: () => {} });
   const logs: string[] = [];
   let clock = T0;
   let n = 0;
   const tools = createReviewTools({
-    binder: () => (store === null ? null : binderOf(ROLE_URL, store, (line) => logs.push(line))),
+    binder: () => binderOf(ROLE_URL, store, (line) => logs.push(line)),
     paseo: () => (options.paseo === false ? null : fake.paseo),
     home: () => home,
     log: (line) => logs.push(line),
@@ -140,10 +139,10 @@ function setup(options: DaemonOptions & { home?: string | null; tier?: "Small" |
   const tick = (ms = 60_000) => {
     clock = new Date(clock.getTime() + ms);
   };
-  const location = { tracesDir: join(home ?? "/nowhere", "traces") };
+  const location = { tracesDir: join(home, "traces") };
   /** The Dashboard's count: the request's trace as `workspaceTracesOf` rebuilds it for `traces.list`. */
   const dashboard = async (): Promise<number | null> => {
-    const { traces } = await workspaceTracesOf({ location, paseo: fake.paseo as never, home: home! }, WS);
+    const { traces } = await workspaceTracesOf({ location, paseo: fake.paseo as never, home }, WS);
     return traces.find((trace) => trace.requestId === REQ)?.reviewCalls ?? null;
   };
   /** One recorded turn of an agent, at the clock. */
@@ -151,7 +150,7 @@ function setup(options: DaemonOptions & { home?: string | null; tier?: "Small" |
     const at = clock.toISOString();
     await appendRecord(location, turn({ agentId, role, workspaceId: WS, requestId: REQ, at, endedAt: at, turnId: `t-${at}`, sent: text === null ? [] : [msg(agentId, at, text, "agent")], ...extra }));
   };
-  return { home: home!, store: store!, fake, queue, logs, tools, tick, dashboard, record, location };
+  return { home, store, fake, queue, logs, tools, tick, dashboard, record, location };
 }
 
 const INPUT = { batchId: "b1", stages: ["implementation"], scope: "src/date.ts and its test, commit abc123.", checks: "npm test: 412 passed." };
@@ -199,7 +198,7 @@ describe("bm_create_reviewer (design §16.6)", () => {
     expect(originOf({ text: prompt, clientMessageId: "sdk" })).not.toBe("user");
 
     // The binding: a Reviewer of the same request and batch, under its Worker, with the tools of ship point C.
-    expect(store.bindingOfAgent("created-1")).toMatchObject({ role: "reviewer", state: "bound", requestId: REQ, batchId: "b1", parentId: WORKER, creationTools: true });
+    expect(store.bindingOfAgent("created-1")).toMatchObject({ role: "reviewer", state: "bound", requestId: REQ, batchId: "b1", parentId: WORKER });
     expect(isPluginReviewer("created-1")).toBe(true);
     // The registry: the batch, its brief, its one call.
     const batch = createRequestRegistry(home).get(WS, REQ)!.reviews.batches[0]!;
@@ -208,7 +207,7 @@ describe("bm_create_reviewer (design §16.6)", () => {
     expect(batch.brief).not.toMatch(/criteria/i);
   });
 
-  it("refuses an unbound caller, a pending binding, no data folder, no Paseo, agent tools off, no report yet — creating nothing", async () => {
+  it("refuses an unbound caller, a pending binding, no Paseo, agent tools off, no report yet — creating nothing", async () => {
     const off = setup({ toolsOff: true });
     // The agent's own line (tell the owner, stop), never the fallback Switch's wording.
     expect(await off.tools.call("bm_create_reviewer", INPUT, WORKER_CALLER)).toEqual({ ok: false, text: AGENT_TOOLS_OFF_TOOL_MESSAGE });
@@ -217,9 +216,8 @@ describe("bm_create_reviewer (design §16.6)", () => {
 
     const { tools, fake, home } = setup();
     expect(await tools.call("bm_create_reviewer", INPUT, null)).toEqual({ ok: false, text: REVIEW_NOT_BOUND_MESSAGE });
-    expect(await tools.call("bm_create_reviewer", INPUT, { ...WORKER_CALLER, creationTools: false })).toEqual({ ok: false, text: REVIEW_NOT_BOUND_MESSAGE });
+    expect(await tools.call("bm_create_reviewer", INPUT, { ...WORKER_CALLER, role: "manager" })).toEqual({ ok: false, text: REVIEW_NOT_BOUND_MESSAGE });
     expect(await tools.call("bm_create_reviewer", INPUT, { ...WORKER_CALLER, agentId: null })).toEqual({ ok: false, text: PENDING_CALLER_MESSAGE });
-    expect(await setup({ home: null }).tools.call("bm_create_reviewer", INPUT, WORKER_CALLER)).toEqual({ ok: false, text: NO_DATA_FOLDER_MESSAGE });
     expect((await setup({ paseo: false }).tools.call("bm_create_reviewer", INPUT, WORKER_CALLER)).ok).toBe(false);
     const fresh = setup({ tier: null });
     expect(await fresh.tools.call("bm_create_reviewer", INPUT, WORKER_CALLER)).toEqual({ ok: false, text: NO_REPORT_YET_MESSAGE });
@@ -271,8 +269,7 @@ describe("bm_create_reviewer (design §16.6)", () => {
     // agent.created of the Reviewer Paseo did create: its binding is bound and the registry names it.
     clearPluginReviewers();
     const seen = fakePaseo({ agents: [{ id: "rev-late", provider: "bm-reviewer/gpt-5.6", workspaceId: WS, labels: { "bm.role": "reviewer", "bm.requestId": REQ, "bm.batchId": "b1", "paseo.parent-agent-id": WORKER } }] });
-    const settled = await settleCreatedAgent({ id: "rev-late", provider: "bm-reviewer/gpt-5.6", parentAgentId: WORKER, workspaceId: WS }, seen.paseo, { home, bindings: store, log: () => {} });
-    expect(settled).toMatchObject({ own: true, repairedCallId: "out-000000000001" });
+    await settleCreatedAgent({ id: "rev-late", provider: "bm-reviewer/gpt-5.6", parentAgentId: WORKER, workspaceId: WS }, seen.paseo, { home, bindings: store, log: () => {} });
     expect(store.bindingOfAgent("rev-late")).toMatchObject({ state: "bound", role: "reviewer", batchId: "b1" });
     expect(createRequestRegistry(home).get(WS, REQ)!.reviews.batches[0]).toMatchObject({ reviewerIds: ["rev-late"], calls: [{ callId: "out-000000000001", reviewerId: "rev-late" }] });
     expect(isPluginReviewer("rev-late")).toBe(true);

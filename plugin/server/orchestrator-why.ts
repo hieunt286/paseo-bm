@@ -22,7 +22,8 @@
  */
 import { redactText } from "./collector";
 import { chainsOfBead, chainsOfDecision, chainsOfFile, type DecisionLink, type Link, type LinkSource, type LinksDeps, type RequestChain } from "./links";
-import { fixThese, workingAgentsOf, type ServerToolResult, type ToolContext } from "./orchestrator-tool-context";
+import { workingAgentsOf, type ServerToolResult, type ToolContext } from "./orchestrator-tool-context";
+import { fixThese } from "./tool-kit";
 import type { RepoToolDeps } from "./repo-tool";
 import { REQUEST_MAX_CHARS, cutText } from "./request-render";
 import { storedWorkspaceIds } from "./trace-store";
@@ -310,7 +311,7 @@ export async function bmWhy(input: WhyInput, context: ToolContext, deps: RepoToo
   const given = WHY_LOOKUPS.filter((key) => input[key] !== undefined);
   if (given.length !== 1) {
     const issue = given.length === 0 ? "input: give one of bead, file or decision" : `input: give only one of bead, file or decision, not ${given.join(" and ")}`;
-    return { ok: false, text: fixThese("bm_why", [issue]) };
+    return fixThese("bm_why", [issue]);
   }
   const kind: WhyLookup = given[0]!;
   const id = input[kind]!;

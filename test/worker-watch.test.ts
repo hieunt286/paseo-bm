@@ -1011,7 +1011,7 @@ describe("the off-tool-review signal (design §16.8)", () => {
     await seed();
     inScope();
     const bindings = createBindingStore(home);
-    const { token, tokenSha256 } = bindings.issue({ role: "worker", workspaceId: WORKSPACE_ID, requestId: REQUEST_ID, parentId: MANAGER, creationTools: true });
+    const { token, tokenSha256 } = bindings.issue({ role: "worker", workspaceId: WORKSPACE_ID, requestId: REQUEST_ID, parentId: MANAGER });
     bindings.attach(token, "worker");
     bindings.settle(tokenSha256, WORKER);
     const { fake, watch } = watching([managerAgent(), workerAgent(), orchestratorAgent()]);

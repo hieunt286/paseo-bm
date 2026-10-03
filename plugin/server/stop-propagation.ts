@@ -1,7 +1,6 @@
 import type { PluginLifecycleEvents, PluginServerContext } from "@getpaseo/plugin/server";
-import { PARENT_AGENT_LABEL } from "./manager";
 import { REVIEWER_STOP_NOTICE_PREFIX, WORKER_STOP_NOTICE } from "./notices";
-import { listAllAgents, roleOfAgent, roleOfProvider } from "./agent-role";
+import { PARENT_AGENT_LABEL, listAllAgents, roleOfAgent, roleOfProvider } from "./agent-role";
 import { cancelAgent, type CancelResult } from "./paseo-cli";
 import { errorText } from "./rpc-kit";
 

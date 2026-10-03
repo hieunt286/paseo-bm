@@ -16,10 +16,11 @@
  *   earliest record). Never again.
  * - **The hand path keeps working**: an id an unbound Manager typed is
  *   registered `agent-typed` when the plugin first sees it — the collector's
- *   record, or `agent.created` of its Worker (`sightRequestId`).
+ *   record, or `agent.created` of its Worker (`creation-settle.ts`), both
+ *   through `sightRequestId`.
  * - **The bound path is checked** (ADR-027 decision 7): for an agent whose
  *   creator is bound — its parent has a live binding, or the plugin created it
- *   itself (`agent-bindings.ts`) — a `bm.requestId` that is not registered
+ *   itself (`agent-bindings.ts`, `liveBindingOf`) — a `bm.requestId` that is not registered
  *   counts as missing and is logged once per agent per run.
  *   `knownRequestIdOf` is the one way the plugin reads that label.
  * - **Bounds**: at most 2,000 requests per workspace; the oldest finished go
@@ -28,15 +29,15 @@
  *
  * Readers never throw; a store that cannot be read reads as empty.
  */
-import { lstatSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import { roleOfProvider } from "./agent-role";
-import { createBindingStore, type AgentBinding } from "./agent-bindings";
-import { createJsonFileStore, entriesOf, type JsonFileStore } from "./data-files";
+import { parentOf } from "./agent-role";
+import { createBindingStore, liveBindingOf, type AgentBinding } from "./agent-bindings";
+import { clearJsonFileCache, createJsonFileStore, entriesOf, type JsonFileStore } from "./data-files";
 import { createOutbox } from "./outbox";
 import { dataHome } from "./rpc-kit";
 import { WORKSPACE_ID_PATTERN, readRecords } from "./trace-store";
+import { timeOrZero } from "../shared/time";
 
 /** The registry's folder in the data folder (§16.4); the cleanup button deletes it (§7.13.7). */
 export const REQUESTS_DIR_NAME = "requests";
@@ -47,8 +48,6 @@ export const MAX_REQUESTS_PER_WORKSPACE = 2_000;
 export const REQUEST_ID_PATTERN = /^req-\d{8}T\d{6}Z$/;
 /** The label the hand path carries the request on. */
 export const REQUEST_ID_LABEL = "bm.requestId";
-/** The label Paseo puts on an agent another agent created (AGENTS.md). */
-const PARENT_AGENT_LABEL = "paseo.parent-agent-id";
 
 export type RequestSource = "tool" | "backfill" | "agent-typed";
 
@@ -93,11 +92,6 @@ function nonEmpty(value: unknown): string | null {
   return typeof value === "string" && value.trim() !== "" ? value : null;
 }
 
-const timeOf = (iso: string | null): number => {
-  const at = iso === null ? Number.NaN : Date.parse(iso);
-  return Number.isNaN(at) ? 0 : at;
-};
-
 function newEntry(workspaceId: string, requestId: string, createdAt: string, source: RequestSource, managerId: string | null, workerIds: string[]): RegisteredRequest {
   return { requestId, workspaceId, createdAt, source, managerId, workerIds, tier: null, finishedAt: null, reviews: { batches: [], grants: [] } };
 }
@@ -110,7 +104,7 @@ function newEntry(workspaceId: string, requestId: string, createdAt: string, sou
 export function capRequests(workspaceId: string, requests: readonly RegisteredRequest[], keep: (workspaceId: string, requestId: string) => boolean): RegisteredRequest[] {
   const excess = requests.length - MAX_REQUESTS_PER_WORKSPACE;
   if (excess <= 0) return requests.slice();
-  const rank = (request: RegisteredRequest): number => (request.finishedAt !== null ? 0 : 1e15) + timeOf(request.createdAt);
+  const rank = (request: RegisteredRequest): number => (request.finishedAt !== null ? 0 : 1e15) + timeOrZero(request.createdAt);
   const drop = new Set(
     requests
       .map((request, index) => ({ request, index }))
@@ -136,7 +130,7 @@ export function requestsFromTraces(home: string, workspaceId: string, log: (mess
       const requestId = record.requestId;
       if (requestId === null || !REQUEST_ID_PATTERN.test(requestId)) continue;
       const createdAt = record.startedAt ?? record.at;
-      const at = timeOf(createdAt);
+      const at = timeOrZero(createdAt);
       const entry = found.get(requestId) ?? { at, createdAt, managers: [], workers: [] };
       if (at < entry.at) {
         entry.at = at;
@@ -256,21 +250,9 @@ export function outboxKeeps(home: string): (workspaceId: string, requestId: stri
   };
 }
 
-/** Parsed files by path, kept while the file's identity (mtime, size, inode) does not change. */
-const readCache = new Map<string, { key: string; requests: RegisteredRequest[] }>();
-
-function fileKeyOf(path: string): string | null {
-  try {
-    const stat = lstatSync(path);
-    return `${stat.mtimeMs}:${stat.size}:${stat.ino}`;
-  } catch {
-    return null;
-  }
-}
-
 /** Drops the read cache and the once-per-run log memory; tests only. */
 export function clearRequestRegistryCache(): void {
-  readCache.clear();
+  clearJsonFileCache();
   loggedAgents.clear();
 }
 
@@ -295,18 +277,13 @@ export function createRequestRegistry(home: string, deps: RequestRegistryDeps = 
       codes: { unwritable: "E_TRACE_STORE_UNWRITABLE" },
       // The ids of requests in flight: a file that cannot be read is fixed or deleted by hand, never replaced.
       keepUnusable: true,
+      cached: true,
     });
 
   const list = (workspaceId: string): RegisteredRequest[] => {
     if (!isUsableWorkspaceId(workspaceId)) return [];
     try {
-      const file = fileOf(workspaceId);
-      const key = fileKeyOf(file.path);
-      const cached = readCache.get(file.path);
-      if (key !== null && cached !== undefined && cached.key === key) return cached.requests;
-      const requests = file.read().requests;
-      if (key !== null) readCache.set(file.path, { key, requests });
-      return requests;
+      return fileOf(workspaceId).read().requests;
     } catch {
       return [];
     }
@@ -316,7 +293,6 @@ export function createRequestRegistry(home: string, deps: RequestRegistryDeps = 
   const update = (workspaceId: string, change: (requests: RegisteredRequest[]) => RegisteredRequest[] | null): void => {
     if (!isUsableWorkspaceId(workspaceId)) throw new Error(`workspace id is not usable as a file name: ${JSON.stringify(workspaceId)}`);
     const file = fileOf(workspaceId);
-    readCache.delete(file.path);
     // Backfill once: only the write that creates the file reads the trace store.
     const created = file.inspect().state === "missing";
     file.update((current) => {
@@ -324,7 +300,6 @@ export function createRequestRegistry(home: string, deps: RequestRegistryDeps = 
       const next = change(start);
       return next === null ? null : { requests: next };
     });
-    readCache.delete(file.path);
   };
 
   return {
@@ -505,26 +480,14 @@ export interface RequestTrustDeps {
 /** Agents whose unregistered label was logged in this run: one line per agent (§16.4). */
 const loggedAgents = new Set<string>();
 
-function parentOf(agent: Pick<RequestAgent, "labels" | "parentAgentId">): string | null {
-  return nonEmpty(agent.parentAgentId) ?? nonEmpty(agent.labels?.[PARENT_AGENT_LABEL]);
-}
-
 /**
  * True when `agent`'s creator is bound (§16.4): the plugin created it itself
  * with a token (it has a binding of its own, live or revoked), or its parent
- * has a live (bound) binding issued with the creation tools
- * (`creationTools`); a parent bound before them still creates by hand.
- * Pure over `bindings`.
+ * has a live (bound) binding (`liveBindingOf`). Pure over `bindings`.
  */
 export function creatorIsBound(agent: Pick<RequestAgent, "id" | "labels" | "parentAgentId">, bindings: readonly AgentBinding[]): boolean {
   if (bindings.some((binding) => binding.agentId === agent.id && binding.state !== "pending")) return true;
-  const parent = parentOf(agent);
-  return parent !== null && bindings.some((binding) => binding.agentId === parent && binding.state === "bound" && binding.creationTools);
-}
-
-/** True when `agentId` has a live binding issued with the creation tools: such a Manager's ids come only from its tools. */
-function isBoundAgent(agentId: string, bindings: readonly AgentBinding[]): boolean {
-  return bindings.some((binding) => binding.agentId === agentId && binding.state === "bound" && binding.creationTools);
+  return liveBindingOf(bindings, parentOf(agent)) !== null;
 }
 
 function homeOf(deps: RequestTrustDeps): string | null {
@@ -589,7 +552,7 @@ export function sightRequestId(sighting: RequestSighting, deps: RequestTrustDeps
     if (home === null) return false;
     const bindings = createBindingStore(home).list();
     const managerId = role === "manager" ? agentId : parentAgentId;
-    if (role === "manager" ? isBoundAgent(agentId, bindings) : creatorIsBound({ id: agentId, parentAgentId }, bindings)) return false;
+    if (role === "manager" ? liveBindingOf(bindings, agentId) !== null : creatorIsBound({ id: agentId, parentAgentId }, bindings)) return false;
     const registry = createRequestRegistry(home, { ...deps, log });
     const known = registry.get(workspaceId, requestId);
     // Seen before, with this Worker: nothing to write (the usual case, every turn).
@@ -597,33 +560,6 @@ export function sightRequestId(sighting: RequestSighting, deps: RequestTrustDeps
     return registry.register(workspaceId, requestId, { source: "agent-typed", managerId, workerId: role === "worker" ? agentId : null }) !== null;
   } catch (error) {
     log(`[paseo-bm] could not register request ${requestId} of workspace ${workspaceId}: ${error instanceof Error ? error.message : String(error)}`);
-    return false;
-  }
-}
-
-/** The SDK slice `sightCreatedWorker` reads: one agent's snapshot, for its labels. */
-export interface SightingPaseo {
-  agents: { ref(agentId: string): { refresh(): Promise<{ agent?: { labels?: Record<string, unknown> | null } | null } | null> } };
-}
-
-/**
- * `agent.created` of a Worker (§16.4): the request its label names is
- * registered when its creator is unbound (`sightRequestId`). Never throws.
- */
-export async function sightCreatedWorker(
-  agent: { id: string; provider: unknown; parentAgentId: string | null; workspaceId: string | null },
-  paseo: unknown,
-  deps: RequestTrustDeps = {},
-): Promise<boolean> {
-  try {
-    if (roleOfProvider(agent.provider) !== "worker" || agent.workspaceId === null) return false;
-    const api = paseo as Partial<SightingPaseo> | null | undefined;
-    if (typeof api?.agents?.ref !== "function") return false;
-    const labels = (await api.agents.ref(agent.id).refresh())?.agent?.labels ?? null;
-    const requestId = nonEmpty(labels?.[REQUEST_ID_LABEL]);
-    const parentAgentId = agent.parentAgentId ?? nonEmpty(labels?.[PARENT_AGENT_LABEL]);
-    return sightRequestId({ workspaceId: agent.workspaceId, requestId, role: "worker", agentId: agent.id, parentAgentId }, deps);
-  } catch {
     return false;
   }
 }

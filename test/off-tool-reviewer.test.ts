@@ -59,8 +59,8 @@ function dataFolder(): string {
   return home;
 }
 
-function bindWorker(store: BindingStore, agentId: string, creationTools = true): void {
-  const { token, tokenSha256 } = store.issue({ role: "worker", workspaceId: WS, requestId: REQ, parentId: MANAGER, creationTools });
+function bindWorker(store: BindingStore, agentId: string): void {
+  const { token, tokenSha256 } = store.issue({ role: "worker", workspaceId: WS, requestId: REQ, parentId: MANAGER });
   store.attach(token, "worker");
   store.settle(tokenSha256, agentId);
 }
@@ -89,16 +89,17 @@ function setup() {
 const created = (id: string, parentAgentId: string | null, provider = "bm-reviewer/gpt-5.6") => ({ id, provider, parentAgentId, workspaceId: WS });
 
 describe("the off-tool decision (design §16.8)", () => {
-  it("a Reviewer whose parent is a Worker bound with the creation tools, and which the plugin did not create, is off-tool", () => {
+  it("a Reviewer whose parent is a bound Worker, and which the plugin did not create, is off-tool", () => {
     const { store } = setup();
-    bindWorker(store, HAND_WORKER, false);
+    bindWorker(store, HAND_WORKER);
+    store.revokeAgent(HAND_WORKER);
     const bindings = store.list();
     expect(offToolReviewerOf(created("rev-1", WORKER), bindings, () => false)).toEqual({ reviewerId: "rev-1", workerId: WORKER, workspaceId: WS, requestId: REQ });
     // A fallback alias runs the role in its name.
     expect(offToolReviewerOf(created("rev-1", WORKER, "bm-reviewer-fallback-1/claude-sonnet-5"), bindings, () => false)).not.toBeNull();
     // The plugin's own: created by createPluginReviewer, or with a binding of its own.
     expect(offToolReviewerOf(created("rev-1", WORKER), bindings, (id) => id === "rev-1")).toBeNull();
-    // A Worker bound before the creation tools, an unbound Worker, no parent, not a Reviewer.
+    // A Worker whose binding was revoked, an unbound Worker, no parent, not a Reviewer.
     expect(offToolReviewerOf(created("rev-1", HAND_WORKER), bindings, () => false)).toBeNull();
     expect(offToolReviewerOf(created("rev-1", "agent-nobody"), bindings, () => false)).toBeNull();
     expect(offToolReviewerOf(created("rev-1", null), bindings, () => false)).toBeNull();
@@ -214,12 +215,12 @@ describe("the plugin's own Reviewer whose creation was cut short (design §16.5,
   it("a bound Reviewer: agent.created settles its attached pending binding and names it in the registry, so it is not off-tool", async () => {
     const { home, store, deps, published, cancelled } = setup();
     cutShort(home);
-    const { token } = store.issue({ role: "reviewer", workspaceId: WS, requestId: REQ, parentId: WORKER, batchId: "b1", creationTools: true });
+    const { token } = store.issue({ role: "reviewer", workspaceId: WS, requestId: REQ, parentId: WORKER, batchId: "b1" });
     store.attach(token, "reviewer");
     const fake = daemonWith("rev-1", WORKER);
-    const settled = await settleCreatedAgent(created("rev-1", WORKER), fake.paseo, { home, bindings: store, log: () => {} });
-    expect(settled).toMatchObject({ own: true, repairedCallId: CALL });
-    expect(store.bindingOfAgent("rev-1")).toMatchObject({ state: "bound", role: "reviewer", batchId: "b1", parentId: WORKER, creationTools: true });
+    await settleCreatedAgent(created("rev-1", WORKER), fake.paseo, { home, bindings: store, log: () => {} });
+    expect(isPluginReviewer("rev-1")).toBe(true);
+    expect(store.bindingOfAgent("rev-1")).toMatchObject({ state: "bound", role: "reviewer", batchId: "b1", parentId: WORKER });
     expect(createRequestRegistry(home).get(WS, REQ)!.reviews.batches[0]).toMatchObject({ reviewerIds: ["rev-1"], calls: [{ callId: CALL, reviewerId: "rev-1" }] });
     expect(await checkOffToolReviewer(created("rev-1", WORKER), fake.paseo, deps)).toBeNull();
     expect(createAlertStore(home).list({ open: true })).toEqual([]);
@@ -230,8 +231,9 @@ describe("the plugin's own Reviewer whose creation was cut short (design §16.5,
   it("an unbound one (a provider without tools): the registry names it because its parent is the request's Worker", async () => {
     const { home, store, deps } = setup();
     cutShort(home);
-    const settled = await settleCreatedAgent(created("rev-pi", WORKER), daemonWith("rev-pi", WORKER).paseo, { home, bindings: store, log: () => {} });
-    expect(settled).toMatchObject({ own: true, binding: null, repairedCallId: CALL });
+    await settleCreatedAgent(created("rev-pi", WORKER), daemonWith("rev-pi", WORKER).paseo, { home, bindings: store, log: () => {} });
+    expect(store.bindingOfAgent("rev-pi")).toBeNull();
+    expect(createRequestRegistry(home).get(WS, REQ)!.reviews.batches[0]).toMatchObject({ reviewerIds: ["rev-pi"], calls: [{ callId: CALL, reviewerId: "rev-pi" }] });
     expect(isPluginReviewer("rev-pi")).toBe(true);
     expect(await checkOffToolReviewer(created("rev-pi", WORKER), null, deps)).toBeNull();
   });
@@ -241,11 +243,13 @@ describe("the plugin's own Reviewer whose creation was cut short (design §16.5,
     cutShort(home);
     bindWorker(store, "agent-other-worker");
     // Not the request's Worker: the label alone is not trusted.
-    expect(await settleCreatedAgent(created("rev-x", "agent-other-worker"), daemonWith("rev-x", "agent-other-worker").paseo, { home, bindings: store, log: () => {} })).toMatchObject({ own: false });
+    await settleCreatedAgent(created("rev-x", "agent-other-worker"), daemonWith("rev-x", "agent-other-worker").paseo, { home, bindings: store, log: () => {} });
+    expect(isPluginReviewer("rev-x")).toBe(false);
     expect(createRequestRegistry(home).get(WS, REQ)!.reviews.batches[0]!.reviewerIds).toEqual([]);
     // The batch named once: a second Reviewer with the same labels is off-tool.
     await settleCreatedAgent(created("rev-1", WORKER), daemonWith("rev-1", WORKER).paseo, { home, bindings: store, log: () => {} });
-    expect(await settleCreatedAgent(created("rev-2", WORKER), daemonWith("rev-2", WORKER).paseo, { home, bindings: store, log: () => {} })).toMatchObject({ own: false });
+    await settleCreatedAgent(created("rev-2", WORKER), daemonWith("rev-2", WORKER).paseo, { home, bindings: store, log: () => {} });
+    expect(isPluginReviewer("rev-2")).toBe(false);
     expect(await checkOffToolReviewer(created("rev-2", WORKER), null, deps)).not.toBeNull();
   });
 });

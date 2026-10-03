@@ -17,8 +17,8 @@
  *
  * Common rules (§16.6): a refusal is `{ ok: false }` (the endpoint's
  * `isError`), one line per reason, and nothing is written, created or sent; a
- * pending binding is refused by the shared guard ("try again in a moment");
- * no usable data folder → `NO_DATA_FOLDER_MESSAGE`. **The binding is the
+ * pending binding is refused by the shared guard ("try again in a moment",
+ * `tool-kit.ts`). **The binding is the
  * authority for the request**: a bound Worker's or Reviewer's call whose input
  * `requestId` (or a Reviewer's `batchId`) differs from its binding's is
  * refused, naming both. **A bound Manager's requests** are only those whose
@@ -26,14 +26,12 @@
  *
  * Nothing here throws into the endpoint: a failure is one refusal line.
  */
-import { guardActingTool, hasCreationTools, type ToolCaller } from "./agent-bindings";
-import { NO_DATA_FOLDER_MESSAGE } from "./create-worker";
-import { resolveDataHome } from "./data-home";
+import type { ToolCaller } from "./agent-bindings";
 import { answersKindOf, soleWorkerOfRequest } from "./decision-delivery";
 import { expireQuestionsOf, openQuestions, type OpenContext, type OpenableQuestion } from "./decision-materialiser";
 import { createDecisionStore, type DecisionStore } from "./decision-store";
 import type { ServerToolAnswer, ServerTools } from "./decision-tools";
-import type { NoticeOutcome, NoticePaseo, NoticeQueue } from "./notice-queue";
+import type { NoticeQueue } from "./notice-queue";
 import { clearOffToolAlertsOfRequest } from "./off-tool-reviewer";
 import { stopRunningReviewers, type StopPaseo } from "./stop-propagation";
 import { OUTBOX_SETTLED_MS, clearDroppedAlert, createOutbox, deliverRecord, isOpenRecord, type OutboxDeps, type OutboxRecord } from "./outbox";
@@ -41,6 +39,7 @@ import type { DashboardPaseo } from "./paseo-directory";
 import { proposeAnswers } from "./proposed-answers";
 import { createRequestRegistry, type RegisteredRequest } from "./request-registry";
 import { reasonOf } from "./role-choices";
+import { actingTools, answered, boundAs, deliveryOf, fixThese, outboxDepsOf, refused, withoutNulls, type DeliveryState } from "./tool-kit";
 import { timeOrZero } from "../shared/time";
 import {
   BOUND_ANSWERS_TOOL,
@@ -52,7 +51,6 @@ import {
   schemaIssues,
   type AgentTool,
   type QuestionsInput,
-  type ToolFace,
 } from "../shared/bm-tools";
 import { decisionKindOf, isAnswerable, questionDecisionId, type Decision } from "../shared/decisions";
 
@@ -70,14 +68,11 @@ export const TELL_NOT_BOUND_MESSAGE =
 /** A bound builder name reached with a caller that is not bound (the endpoint answers unbound callers with the builders). */
 export const DELIVERY_NOT_BOUND_MESSAGE = "This tool delivers only for an agent paseo-bm created with its own tools. Nothing was stored or sent.";
 
-/** The answer a delivering tool gives: what was stored and how its delivery went. */
-export type DeliveryState = "sent" | "queued" | "dropped";
-
 export interface DeliveringToolDeps {
   /** The last Paseo handle a hook or RPC brought; null before any did. */
   paseo: () => unknown;
-  /** The data folder; `resolveDataHome` by default. Null: no usable data folder. */
-  home?: () => string | null;
+  /** The data folder (the endpoint's: it serves no tools without one). */
+  home: () => string;
   log?: (message: string) => void;
   now?: () => Date;
   /** The notice queue deliveries go through; the plugin's shared one by default. */
@@ -105,18 +100,6 @@ export interface DeliveringTools {
   reviewer: ServerTools;
   /** `bm_answers`, `bm_tell_worker`. */
   manager: ServerTools;
-}
-
-const refused = (text: string): ServerToolAnswer => ({ ok: false, text });
-const answered = (value: unknown): ServerToolAnswer => ({ ok: true, text: JSON.stringify(value) });
-const fixThese = (tool: string, issues: readonly string[]): ServerToolAnswer =>
-  refused(`The call was refused. Fix these and call ${tool} again:\n${issues.map((issue) => `- ${issue}`).join("\n")}`);
-
-/** A bound caller of `role` with an agent: issued the tools of ship point C. */
-type BoundCaller = ToolCaller & { agentId: string };
-
-function boundAs(caller: ToolCaller | null, role: ToolCaller["role"]): BoundCaller | null {
-  return caller !== null && caller.role === role && caller.agentId !== null && hasCreationTools(caller) ? (caller as BoundCaller) : null;
 }
 
 /** The input's `field` when it is a string, else null. */
@@ -161,21 +144,9 @@ export function batchesAwaitingVerdict(request: RegisteredRequest | null, record
   });
 }
 
-/** The delivery state a tool reports for a notice outcome (`replaced`: a newer copy of the same record waits). */
-function deliveryOf(outcome: NoticeOutcome): DeliveryState {
-  return outcome === "sent" ? "sent" : outcome === "dropped" ? "dropped" : "queued";
-}
-
 export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools {
   const log = deps.log ?? ((message: string) => console.warn(message));
   const now = deps.now ?? (() => new Date());
-  const homeOf = (): string | null => {
-    try {
-      return deps.home !== undefined ? deps.home() : resolveDataHome().home;
-    } catch {
-      return null;
-    }
-  };
   const paseoOf = (): unknown => {
     const paseo = deps.paseo();
     return paseo === null || paseo === undefined ? null : paseo;
@@ -189,7 +160,7 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     paseo: unknown,
     before: (record: OutboxRecord) => void = () => {},
   ): Promise<ServerToolAnswer | { record: OutboxRecord; delivery: DeliveryState }> => {
-    const outboxDeps = { home, now, log, ...deps.outbox, ...(deps.queue === undefined ? {} : { queue: deps.queue }), paseo: paseo as NoticePaseo };
+    const outboxDeps = outboxDepsOf(home, { ...deps, now, log }, paseo);
     let record: OutboxRecord;
     try {
       record = createOutbox(home, outboxDeps).add(workspaceId, init);
@@ -219,12 +190,11 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     if (mismatch !== null) return refused(mismatch);
     const built = build(BOUND_REPORT_TOOL, input);
     if ("ok" in built) return built;
-    const home = homeOf();
-    if (home === null) return refused(NO_DATA_FOLDER_MESSAGE);
+    const home = deps.home();
     const paseo = paseoOf();
     if (paseo === null) return refused(NO_PASEO_DELIVERY_MESSAGE);
     if (worker.parentId === null) return refused("paseo-bm does not know the Manager that created you, so it cannot deliver your report; tell the owner in one line and stop. Nothing was stored or sent.");
-    const { phase, tier, waitingOn } = withoutNullFields(input) as { phase: string; tier: { level: "Small" | "Medium" | "Large" }; waitingOn?: string[] };
+    const { phase, tier, waitingOn } = withoutNulls(input) as { phase: string; tier: { level: "Small" | "Medium" | "Large" }; waitingOn?: string[] };
     const requestId = worker.requestId;
     if (phase === "finished") {
       // A review the request has running ends before `finished` (F3); `stopped` and `blocked` are never held for it.
@@ -303,14 +273,13 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     const worker = boundAs(caller, "worker");
     if (worker === null) return refused(QUESTIONS_NOT_BOUND_MESSAGE);
     if (worker.requestId === null) return refused("paseo-bm does not know your request, so it cannot open your questions; tell the owner in one line and stop. Nothing was opened.");
-    const input = withoutNullFields(raw);
+    const input = withoutNulls(raw);
     const shape = schemaIssues(QUESTIONS_FACE.inputSchema, input);
     if (shape.length > 0) return fixThese(QUESTIONS_TOOL, shape);
     const typed = input as QuestionsInput;
     const broken = questionsRules(typed);
     if (broken.length > 0) return fixThese(QUESTIONS_TOOL, broken);
-    const home = homeOf();
-    if (home === null) return refused(NO_DATA_FOLDER_MESSAGE);
+    const home = deps.home();
     const requestId = worker.requestId;
     const store = createDecisionStore(home, { log });
     // A question it asks again must be one of this request's.
@@ -393,8 +362,7 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     if (mismatch !== null) return refused(mismatch);
     const built = build(BOUND_REVIEW_TOOL, input);
     if ("ok" in built) return built;
-    const home = homeOf();
-    if (home === null) return refused(NO_DATA_FOLDER_MESSAGE);
+    const home = deps.home();
     const paseo = paseoOf();
     if (paseo === null) return refused(NO_PASEO_DELIVERY_MESSAGE);
     if (reviewer.parentId === null) return refused("paseo-bm does not know the Worker that created you, so it cannot deliver your review; make the BM-REVIEW block your final answer. Nothing was stored or sent.");
@@ -429,9 +397,8 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     if (manager === null) return refused(DELIVERY_NOT_BOUND_MESSAGE);
     const built = build(BOUND_ANSWERS_TOOL, input);
     if ("ok" in built) return built;
-    const home = homeOf();
-    if (home === null) return refused(NO_DATA_FOLDER_MESSAGE);
-    const { requestId, answers: given } = withoutNullFields(input) as { requestId: string; answers: Array<{ id: string; option?: string; optionText?: string; other?: string }> };
+    const home = deps.home();
+    const { requestId, answers: given } = withoutNulls(input) as { requestId: string; answers: Array<{ id: string; option?: string; optionText?: string; other?: string }> };
     const nothing = "Nothing was recorded.";
     const request = managersRequest(home, manager.workspaceId, requestId, manager.agentId, nothing);
     if ("ok" in request) return request;
@@ -463,12 +430,11 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
   const tell = async (raw: unknown, caller: ToolCaller | null): Promise<ServerToolAnswer> => {
     const manager = boundAs(caller, "manager");
     if (manager === null) return refused(TELL_NOT_BOUND_MESSAGE);
-    const input = withoutNullFields(raw);
+    const input = withoutNulls(raw);
     const shape = schemaIssues(TELL_WORKER_FACE.inputSchema, input);
     if (shape.length > 0) return fixThese(TELL_WORKER_TOOL, shape);
     const { requestId, text, source } = input as { requestId: string; text: string; source?: string };
-    const home = homeOf();
-    if (home === null) return refused(NO_DATA_FOLDER_MESSAGE);
+    const home = deps.home();
     const nothing = "Nothing was sent.";
     const request = managersRequest(home, manager.workspaceId, requestId, manager.agentId, nothing);
     if ("ok" in request) return request;
@@ -489,33 +455,10 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
 
   // -------------------------------------------------------------------------
 
-  const toolsOf = (faces: readonly ToolFace[], runs: Record<string, (input: unknown, caller: ToolCaller | null) => Promise<ServerToolAnswer>>): ServerTools => {
-    const guarded = Object.fromEntries(Object.entries(runs).map(([name, run]) => [name, guardActingTool(run)]));
-    return {
-      faces,
-      has: (name) => Object.hasOwn(guarded, name),
-      async call(name, input, caller) {
-        const run = guarded[name];
-        if (run === undefined) return { ok: false, text: `Unknown tool: ${name}` };
-        try {
-          return await run(input, caller ?? null);
-        } catch (error) {
-          return { ok: false, text: `The tool failed: ${reasonOf(error)}. Nothing was stored or sent; try again later, or tell the owner.` };
-        }
-      },
-    };
-  };
-
+  const nothingDone = "Nothing was stored or sent";
   return {
-    worker: toolsOf([BOUND_REPORT_TOOL, QUESTIONS_FACE], { bm_report: report, [QUESTIONS_TOOL]: questions }),
-    reviewer: toolsOf([BOUND_REVIEW_TOOL], { bm_review: review }),
-    manager: toolsOf([TELL_WORKER_FACE, BOUND_ANSWERS_TOOL], { [TELL_WORKER_TOOL]: tell, bm_answers: answers }),
+    worker: actingTools([BOUND_REPORT_TOOL, QUESTIONS_FACE], { bm_report: report, [QUESTIONS_TOOL]: questions }, nothingDone),
+    reviewer: actingTools([BOUND_REVIEW_TOOL], { bm_review: review }, nothingDone),
+    manager: actingTools([TELL_WORKER_FACE, BOUND_ANSWERS_TOOL], { [TELL_WORKER_TOOL]: tell, bm_answers: answers }, nothingDone),
   };
-}
-
-/** `value` without its `null` fields, at every depth: a model often sends `null` for a field it leaves out. */
-function withoutNullFields(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(withoutNullFields);
-  if (value === null || typeof value !== "object") return value;
-  return Object.fromEntries(Object.entries(value).filter(([, item]) => item != null).map(([key, item]) => [key, withoutNullFields(item)]));
 }

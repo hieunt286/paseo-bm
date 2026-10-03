@@ -252,7 +252,7 @@ describe("Switch for a bound Worker's Reviewer (design §16.9)", () => {
   function boundWorld(options: { bindWorker?: boolean } = {}) {
     const store = createBindingStore(home);
     if (options.bindWorker !== false) {
-      const { token, tokenSha256 } = store.issue({ role: "worker", workspaceId: "wks_1", requestId: REQ, parentId: MANAGER, creationTools: true });
+      const { token, tokenSha256 } = store.issue({ role: "worker", workspaceId: "wks_1", requestId: REQ, parentId: MANAGER });
       store.attach(token, "worker");
       store.settle(tokenSha256, WORKER);
     }
@@ -293,7 +293,7 @@ describe("Switch for a bound Worker's Reviewer (design §16.9)", () => {
       labels: { "bm.role": "reviewer", "bm.requestId": REQ, "bm.batchId": "b1", "bm.version": PLUGIN_VERSION, "bm.replaces": OLD },
     });
     expect(options.prompt).toBe(`${reviewerBriefLineOf(REQ, "b1", CALL)}\n${BRIEF}`);
-    expect(store.bindingOfAgent("created-1")).toMatchObject({ role: "reviewer", state: "bound", requestId: REQ, batchId: "b1", parentId: WORKER, creationTools: true });
+    expect(store.bindingOfAgent("created-1")).toMatchObject({ role: "reviewer", state: "bound", requestId: REQ, batchId: "b1", parentId: WORKER });
     expect(after).toMatchObject({ status: "switched", replacementId: "created-1", decidedAt: "2026-09-22T05:05:00.000Z" });
     expect(setLabels).toHaveBeenCalledWith(OLD, { "bm.replacedBy": "created-1" });
     expect(createRequestRegistry(home).get("wks_1", REQ)!.reviews.batches[0]).toMatchObject({ reviewerIds: [OLD, "created-1"], calls: [{ callId: CALL }] });

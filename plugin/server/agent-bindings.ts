@@ -35,12 +35,12 @@
  * tools — an unknown token is simply an unbound caller.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { lstatSync } from "node:fs";
 import { z } from "zod";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { listAllAgents } from "./agent-role";
-import { capBy, createJsonFileStore, entriesOf, type JsonFileStore } from "./data-files";
+import { capBy, clearJsonFileCache, createJsonFileStore, entriesOf, type JsonFileStore } from "./data-files";
 import { UI_DIR_NAME } from "./data-home";
+import { timeOrZero } from "../shared/time";
 
 /** Name of the MCP server in an agent's config; Claude shows the tools as `mcp__paseo-bm__<tool>` (`agent-tools.ts` re-exports it). */
 export const AGENT_TOOLS_SERVER = "paseo-bm";
@@ -74,14 +74,6 @@ const bindingSchema = z.object({
   requestId: z.string().nullable(),
   parentId: z.string().nullable(),
   batchId: z.string().nullable(),
-  /**
-   * True when the agent was issued its binding together with the tools that
-   * create (`bm_create_worker`, `bm_create_reviewer`, ship point C): only then
-   * do its children's request ids come from those tools alone (§16.4). A
-   * binding issued before them (ship point B) leaves its children on the hand
-   * path. Absent in older files: false.
-   */
-  creationTools: z.boolean().default(false),
   createdAt: z.string(),
   attachedAt: isoOrNull,
   boundAt: isoOrNull,
@@ -90,7 +82,11 @@ const bindingSchema = z.object({
 
 export type AgentBinding = z.infer<typeof bindingSchema>;
 
-/** Who calls a tool through a token path (§16.5); `agentId: null` while the binding is still pending. */
+/**
+ * Who calls a tool through a token path (§16.5): a bound agent, which lists
+ * and runs its role's delivering and creating tools (§16.6); `agentId: null`
+ * while the binding is still pending.
+ */
 export interface ToolCaller {
   agentId: string | null;
   role: BoundRole;
@@ -98,26 +94,16 @@ export interface ToolCaller {
   requestId: string | null;
   parentId: string | null;
   batchId: string | null;
-  /**
-   * True when the binding was issued with the creation tools (ship point C,
-   * design §16.6): only then does the caller list and run them. Absent
-   * otherwise.
-   */
-  creationTools?: boolean;
-}
-
-/** True when `caller` is bound (or pending) with the creation tools (design §16.6). */
-export function hasCreationTools(caller: ToolCaller | null | undefined): boolean {
-  return caller !== null && caller !== undefined && caller.creationTools === true;
 }
 
 /**
- * True when `agentId` has a live (bound) binding issued with the creation
- * tools: the plugin's tools create its children, so it is "bound" for §16.4
- * and §16.9. Pure over `bindings`.
+ * The live (bound) binding of `agentId` — of `role` when given — or null: the
+ * plugin's tools create that agent's children and carry its blocks, so it is
+ * "bound" for §16.4, §16.8 and §16.9. Pure over `bindings`.
  */
-export function isCreationBound(agentId: string, bindings: readonly AgentBinding[]): boolean {
-  return bindings.some((binding) => binding.agentId === agentId && binding.state === "bound" && binding.creationTools);
+export function liveBindingOf(bindings: readonly AgentBinding[], agentId: string | null, role?: BoundRole): AgentBinding | null {
+  if (agentId === null) return null;
+  return bindings.find((binding) => binding.agentId === agentId && binding.state === "bound" && (role === undefined || binding.role === role)) ?? null;
 }
 
 /** What a binding is issued for: everything but the agent, which does not exist yet. */
@@ -127,8 +113,6 @@ export interface BindingInput {
   requestId?: string | null;
   parentId?: string | null;
   batchId?: string | null;
-  /** The agent gets the creation tools with this binding (§16.4); false until ship point C. */
-  creationTools?: boolean;
 }
 
 export function isBoundRole(value: unknown): value is BoundRole {
@@ -149,22 +133,17 @@ export function isBindingToken(value: unknown): value is string {
   return typeof value === "string" && TOKEN_PATTERN.test(value);
 }
 
-const timeOf = (iso: string | null): number => {
-  const at = iso === null ? Number.NaN : Date.parse(iso);
-  return Number.isNaN(at) ? 0 : at;
-};
-
 /** True when `binding` is past its time at `now`: pending over ten minutes, revoked over seven days. */
 export function isExpired(binding: AgentBinding, now: number): boolean {
-  if (binding.state === "pending") return now - timeOf(binding.createdAt) > PENDING_TTL_MS;
-  if (binding.state === "revoked") return now - timeOf(binding.revokedAt) > REVOKED_TTL_MS;
+  if (binding.state === "pending") return now - timeOrZero(binding.createdAt) > PENDING_TTL_MS;
+  if (binding.state === "revoked") return now - timeOrZero(binding.revokedAt) > REVOKED_TTL_MS;
   return false;
 }
 
 /** The bindings kept at `now`: the expired ones out, then at most `MAX_BINDINGS`, the oldest revoked ones first to go. */
 export function capBindings(bindings: readonly AgentBinding[], now: number): AgentBinding[] {
   const live = bindings.filter((binding) => !isExpired(binding, now));
-  return capBy(live, MAX_BINDINGS, (binding) => (binding.state === "revoked" ? timeOf(binding.revokedAt) : Number.MAX_SAFE_INTEGER));
+  return capBy(live, MAX_BINDINGS, (binding) => (binding.state === "revoked" ? timeOrZero(binding.revokedAt) : Number.MAX_SAFE_INTEGER));
 }
 
 export interface BindingStore {
@@ -196,9 +175,9 @@ export interface BindingStore {
    * the one attached, unexpired `pending` binding of that role, parent and
    * workspace — and `bm.batchId` (a Reviewer) or `bm.requestId` (a Worker) —
    * becomes `bound` to it. Returns the agent's binding (one it already had
-   * included), or null. Never throws.
+   * included, `settledNow: false`), or null. Never throws.
    */
-  settleCreated(agent: CreatedBindingAgent): AgentBinding | null;
+  settleCreated(agent: CreatedBindingAgent): { binding: AgentBinding | null; settledNow: boolean };
   /** The caller a token path names: bound → its agent, pending → `agentId: null`; unknown, revoked or another role's → null. Never throws. */
   callerOf(token: string, role: BoundRole): ToolCaller | null;
   /** `agent.archived`: every bound binding of `agentId` is revoked. Returns how many. Never throws. */
@@ -229,21 +208,9 @@ export interface CreatedBindingAgent {
   batchId: string | null;
 }
 
-/** Parsed files by path, kept while the file's identity (mtime, size, inode) does not change. */
-const readCache = new Map<string, { key: string; bindings: AgentBinding[] }>();
-
-function fileKeyOf(path: string): string | null {
-  try {
-    const stat = lstatSync(path);
-    return `${stat.mtimeMs}:${stat.size}:${stat.ino}`;
-  } catch {
-    return null;
-  }
-}
-
 /** Drops the read cache; tests only. */
 export function clearBindingCache(): void {
-  readCache.clear();
+  clearJsonFileCache();
 }
 
 export interface BindingStoreDeps {
@@ -265,21 +232,13 @@ export function createBindingStore(home: string, deps: BindingStoreDeps = {}): B
     empty: () => ({ bindings: [] }),
     cap: (value) => ({ bindings: capBindings(value.bindings, now().getTime()) }),
     codes: { unwritable: "E_TRACE_STORE_UNWRITABLE" },
+    cached: true,
   });
-
-  const stored = (): AgentBinding[] => {
-    const key = fileKeyOf(file.path);
-    const cached = readCache.get(file.path);
-    if (key !== null && cached !== undefined && cached.key === key) return cached.bindings;
-    const bindings = file.read().bindings;
-    if (key !== null) readCache.set(file.path, { key, bindings });
-    return bindings;
-  };
 
   const list = (): AgentBinding[] => {
     try {
       const at = now().getTime();
-      return stored().filter((binding) => !isExpired(binding, at));
+      return file.read().bindings.filter((binding) => !isExpired(binding, at));
     } catch {
       return [];
     }
@@ -287,12 +246,10 @@ export function createBindingStore(home: string, deps: BindingStoreDeps = {}): B
 
   /** One read-modify-write; `change` returns null to write nothing. Throws on a write failure. */
   const update = (change: (bindings: AgentBinding[]) => AgentBinding[] | null): void => {
-    readCache.delete(file.path);
     file.update((current) => {
       const next = change(current.bindings);
       return next === null ? null : { bindings: next };
     });
-    readCache.delete(file.path);
   };
 
   /** `update` that never throws: a failure is one log line naming what was being done. */
@@ -327,7 +284,6 @@ export function createBindingStore(home: string, deps: BindingStoreDeps = {}): B
         requestId: input.requestId ?? null,
         parentId: input.parentId ?? null,
         batchId: input.batchId ?? null,
-        creationTools: input.creationTools ?? false,
         createdAt: now().toISOString(),
         attachedAt: null,
         boundAt: null,
@@ -393,10 +349,11 @@ export function createBindingStore(home: string, deps: BindingStoreDeps = {}): B
     },
     settleCreated(agent) {
       const own = list().find((binding) => binding.agentId === agent.agentId) ?? null;
-      if (own !== null) return own;
-      if (agent.parentId === null) return null;
+      if (own !== null) return { binding: own, settledNow: false };
+      const none = { binding: null, settledNow: false };
+      if (agent.parentId === null) return none;
       const key = agent.role === "reviewer" ? agent.batchId : agent.role === "worker" ? agent.requestId : null;
-      if (key === null) return null;
+      if (key === null) return none;
       // Set inside the update, which runs synchronously.
       let settled = null as AgentBinding | null;
       const at = now();
@@ -414,12 +371,12 @@ export function createBindingStore(home: string, deps: BindingStoreDeps = {}): B
                 ? binding.batchId === key && (agent.requestId === null || binding.requestId === agent.requestId)
                 : binding.requestId === key),
           )
-          .sort((a, b) => timeOf(a.createdAt) - timeOf(b.createdAt))[0];
+          .sort((a, b) => timeOrZero(a.createdAt) - timeOrZero(b.createdAt))[0];
         if (candidate === undefined) return null;
         settled = { ...candidate, state: "bound" as const, agentId: agent.agentId, boundAt: at.toISOString() };
         return bindings.map((entry) => (entry === candidate ? settled! : entry));
       });
-      return settled;
+      return settled === null ? none : { binding: settled, settledNow: true };
     },
     callerOf(token, role) {
       if (!isBindingToken(token)) return null;
@@ -434,7 +391,6 @@ export function createBindingStore(home: string, deps: BindingStoreDeps = {}): B
         requestId: binding.requestId,
         parentId: binding.parentId,
         batchId: binding.batchId,
-        ...(binding.creationTools ? { creationTools: true } : {}),
       };
     },
     revokeAgent(agentId) {
@@ -456,7 +412,7 @@ export function createBindingStore(home: string, deps: BindingStoreDeps = {}): B
         const next = bindings.filter((binding) => {
           if (binding.agentId === null || listed.has(binding.agentId)) return true;
           // Bound while the list was being read: Paseo may not have shown it yet.
-          if (timeOf(binding.boundAt ?? binding.createdAt) >= since.getTime()) return true;
+          if (timeOrZero(binding.boundAt ?? binding.createdAt) >= since.getTime()) return true;
           removed += 1;
           return false;
         });
@@ -475,22 +431,12 @@ export function createBindingStore(home: string, deps: BindingStoreDeps = {}): B
 /**
  * The refusal every delivering or creating tool gives a caller whose binding
  * is still pending (`agentId: null`), or null when the call may go on. A
- * builder-only caller (`null`) and a bound one pass. One check, shared, so no
- * tool can forget it; read-only tools do not use it.
+ * builder-only caller (`null`) and a bound one pass. One check, shared
+ * (`tool-kit.ts` `actingTools`), so no tool can forget it; read-only tools do
+ * not use it.
  */
 export function pendingCallerRefusal(caller: ToolCaller | null): string | null {
   return caller !== null && caller.agentId === null ? PENDING_CALLER_MESSAGE : null;
-}
-
-/** A tool that acts, behind the shared guard: a pending caller is refused before `run` is reached. */
-export function guardActingTool<A extends { ok: boolean; text: string }>(
-  run: (input: unknown, caller: ToolCaller | null) => Promise<A>,
-): (input: unknown, caller: ToolCaller | null) => Promise<A | { ok: false; text: string }> {
-  return async (input, caller) => {
-    const refusal = pendingCallerRefusal(caller);
-    if (refusal !== null) return { ok: false, text: refusal };
-    return run(input, caller);
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -515,12 +461,12 @@ export interface AgentBinder {
   issue(request: BindingRequest): IssuedBinding | null;
   /** `agents.create` returned. Never throws. */
   settle(issued: IssuedBinding, agentId: string): "bound" | "unbound";
-  /** `agents.create` threw; `"kept"` when the binding was attached and is kept (see `BindingStore.discard`). Never throws. */
-  discard(issued: IssuedBinding): void | "kept";
+  /** `agents.create` threw: the store's outcome (see `BindingStore.discard`). Never throws. */
+  discard(issued: IssuedBinding): "deleted" | "kept" | "none";
 }
 
 /** The binder that never binds: no endpoint, or a caller without one. */
-export const NO_BINDER: AgentBinder = { issue: () => null, settle: () => "unbound", discard: () => {} };
+export const NO_BINDER: AgentBinder = { issue: () => null, settle: () => "unbound", discard: () => "none" };
 
 /** A token path of the agents' endpoint (`/mcp/<role>/<64 hex>`), wherever it appears in a text. */
 const TOKEN_PATH = /\/mcp\/(worker|reviewer|manager|orchestrator)\/[0-9a-f]{64}/gi;
@@ -551,14 +497,14 @@ export function creationMayExist(error: unknown): boolean {
  * id, never the token.
  */
 export async function createBound<T extends { id: string }>(
-  binder: AgentBinder | null | undefined,
+  binder: AgentBinder,
   request: BindingRequest,
   create: (mcpServers: Record<string, IssuedBinding["mcpServer"]> | undefined) => Promise<T>,
   log: (message: string) => void = (message) => console.warn(message),
 ): Promise<T> {
   let issued: IssuedBinding | null = null;
   try {
-    issued = binder?.issue(request) ?? null;
+    issued = binder.issue(request);
   } catch {
     issued = null;
   }
@@ -566,7 +512,7 @@ export async function createBound<T extends { id: string }>(
   try {
     created = await create(issued === null ? undefined : { [AGENT_TOOLS_SERVER]: issued.mcpServer });
   } catch (error) {
-    const kept = issued !== null && binder?.discard(issued) === "kept";
+    const kept = issued !== null && binder.discard(issued) === "kept";
     const message = error instanceof Error ? error.message : String(error);
     const clean = withoutTokenPaths(message, issued === null ? null : issued.mcpServer.url.slice(-64));
     if (clean === message && !kept && error instanceof Error) throw error;
@@ -575,7 +521,7 @@ export async function createBound<T extends { id: string }>(
     if (kept) thrown.mayExist = true;
     throw thrown;
   }
-  if (issued !== null && binder !== null && binder !== undefined) {
+  if (issued !== null) {
     const outcome = binder.settle(issued, created.id);
     log(
       outcome === "bound"
