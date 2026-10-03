@@ -873,6 +873,7 @@ Rows up to 2026-10-02 are archived in [paseo-bm-revision-history-to-20261002.md]
 | 2026-10-02 | hieu.nt10 (owner decision; written by Claude) | §7.3.6, §7.12: `roles.instructions` is back, read only — what a new agent of a role is created with, shown in Settings → More → Agents (base PRD REQ-032 d); the additional-instructions editor stays retired |
 | 2026-10-03 | hieu.nt10 (owner decision; written by Claude) | §16 added: the design of ADR-027 (agents write the content; the plugin's code creates, routes and delivers), developed in five steps and shipped at three points (steps 3–5 as one build); one review counter shared by the tools and the Dashboard, off-tool Reviewers detected, grants never answered by a precedent, bindings only where an endpoint is attached, markers classified before `clientMessageId`; pointer lines in §5.1, §7.1, §7.2, §7.4–§7.11, §9, §10, §12 until each ship point folds them in |
 | 2026-10-03 | Claude (owner's delegation) | §16 checked against ADR-027, PRD REQ-037 and the code by an independent review and its re-check; fixes applied (step-3 live check moved to step 4, "creator is bound" defined, S5's reach). `design-ready` PASS |
+| 2026-10-03 | Claude (owner's delegation) | §16.5, §16.6, §16.7: six details settled at the bead polish |
 
 ## 15. History
 
@@ -1059,15 +1060,17 @@ Only the token's SHA-256 is stored; the token itself exists in the agent's MCP c
 | removed | `pending` for more than 10 minutes | The binding is deleted |
 | `revoked` | `agent.archived` | Marked revoked |
 | removed | revoked for 7 days | The binding is deleted |
+| removed | at plugin start, its agent is no longer in `paseo.agents.list()` | The binding is deleted. This sweep covers a deleted agent without relying on a delete event |
 
 The file holds at most 5,000 bindings; past that, the oldest revoked ones go first.
 
 **Endpoint.**
 - **Routing.** `roleOfPath` also accepts `/mcp/<role>/<64 hex>`. The endpoint hashes the token and looks it up:
   - a `bound` binding of that role → the call carries `caller = { agentId, role, workspaceId, requestId, parentId, batchId }`;
-  - a `pending` binding → `caller` with `agentId: null`, and every delivering tool refuses with "try again in a moment";
+  - a `pending` binding → `caller` with `agentId: null`, and every delivering **or creating** tool refuses with "try again in a moment": nothing is created, stored or sent;
   - an unknown, revoked or wrong-role token → `caller = null`: the role's **builder-only** tools, never a 404. A lost binding file must not cost an agent its tools.
 - **Tool interface.** `ServerTools.call(name, input)` becomes `call(name, input, caller)`.
+- **S4's second factor**, when S4 requires it (§16.1), applies to every tool a bound caller uses that acts — creating and delivering alike (`bm_create_worker`, `bm_create_reviewer`, `bm_rereview`, `bm_report`, `bm_questions`, `bm_review`, `bm_answers`, `bm_tell_worker`); read-only tools (`bm_decisions`) are excepted. It is one shared check beside the pending one.
 - **What a token never does.** A token never appears in a log line, an RPC result, an MCP result or a trace; log lines name the agent id.
 
 **The creation hook** (`withAgentTools`, `agent-tools.ts:511`):
@@ -1100,6 +1103,8 @@ Two creations at the same moment therefore never share a binding.
 - No usable data folder → every delivering or creating tool refuses with `paseo-bm has no usable data folder; tell the owner in one line and stop.`.
 - The creation tools refuse, as the fallback Switch does, while Paseo's agent tools are off: `AGENT_TOOLS_OFF_SWITCH_MESSAGE`. An agent without them could not cancel a Reviewer (§16.1, S5).
 - Bound callers get every tool in the table; unbound callers get only the builders marked "unbound".
+- **The binding is the authority for the request.** A bound Worker's or Reviewer's call whose input `requestId` differs from its binding's is refused, naming both ids, and nothing is stored or sent. The input field is read only from unbound (builder-only) callers.
+- **A bound Manager's requests.** `bm_answers` and `bm_tell_worker` accept only a `requestId` whose registry record names the caller as its `managerId`: the Manager that called `bm_create_worker`, or the Manager a handoff successor was created under (§16.9). Any other `requestId` is refused.
 
 | Tool | Role (unbound?) | Input | Does | Returns |
 |---|---|---|---|---|
@@ -1144,6 +1149,8 @@ Two creations at the same moment therefore never share a binding.
 4. **After a reload.** At the first hook or RPC with a Paseo handle, every `pending` or `queued` record is enqueued again. A `queued` one may reach its target twice across a reload; the receiver's card and the collector drop the second by its record id. This is the trade-off `decision-delivery.ts` already makes: losing a report is worse than a repeat.
 
 **Bounds.** Records stay until `delivered` or `dropped`. After that, at most 500 per workspace are kept for 7 days: `handoff.ts` and `compaction.ts` read the newest report records from here. Cleanup deletes `outbox/`.
+
+**Compaction.** `compaction.ts` reads a bound agent's reports from its `report` outbox records (`pending` or `delivered`) as it reads a `BM-REPORT` block today.
 
 **The marker line.** Every delivery's first line is `BM-DELIVERY <kind> <recordId>`, and the text follows:
 
