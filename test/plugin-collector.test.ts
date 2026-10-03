@@ -1047,6 +1047,15 @@ describe("tool-built reports and reviews from the outbox (design §16.7)", () =>
     expect(traceRecordSchema.parse(built!.record).reports[0]?.recordId).toBe(made.id);
   });
 
+  it("counts a block the plugin relayed from the turn's own reply once (an unbound Worker's report, K7)", async () => {
+    noteTurnStart(asEvent(turnEnded()), () => at(2));
+    // The relay stores the record at the turn end, possibly before the collector reads the outbox.
+    outboxAt(3).add(WS, { kind: "report", requestId: REQ, from: "agent-worker", to: "agent-manager", text: BLOCK });
+    const built = await buildRecord(asEvent(turnEnded({ timeline: [userMessage("go"), assistantMessage(`Done.\n\n${BLOCK}`)] })), { location, now: () => at(4) });
+    expect(built?.record.reports).toHaveLength(1);
+    expect(built?.record.reports[0]).toMatchObject({ requestId: REQ, phase: "finished" });
+  });
+
   it("adds a Reviewer's review records to its own record's reviews", async () => {
     const reviewer = { ...turnEnded().agent, id: "agent-reviewer", provider: "bm-reviewer/gpt-5.6", parentAgentId: "agent-worker" };
     const made = outboxAt(3).add(WS, { kind: "review", requestId: REQ, batchId: "b1", from: "agent-reviewer", to: "agent-worker", text: REVIEW });

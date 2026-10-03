@@ -52,10 +52,8 @@ export const NO_PASEO_MESSAGE = "paseo-bm has no connection to Paseo yet; try ag
 /** The `bm-worker` profile is missing (or Paseo's configuration cannot be read). */
 export const NO_WORKER_PROFILE_MESSAGE =
   'There is no "bm-worker" profile on this machine, so no Worker can be created; tell the owner to open Beads Manager → Settings. Nothing was created.';
-/** The line `workerBriefOf` puts after the size: the scope rule of every request. */
+/** The line `workerBriefOf` puts after the repository: the scope rule of every request. */
 export const SCOPE_LINE = "Do only what the request asks. Anything extra is a suggestion for the owner, not work.";
-
-export type WorkerSize = "Small" | "Medium" | "Large";
 
 /** One fact the Manager passes, with where it comes from. */
 export interface ContextFact {
@@ -63,10 +61,13 @@ export interface ContextFact {
   source: string;
 }
 
-/** What `bm_create_worker` takes (design §16.6). */
+/**
+ * What `bm_create_worker` takes (design §16.6). No `size`: a size the owner
+ * stated stays in the request, in their words (ADR-027, amended 2026-10-03).
+ * A `size` an agent on older instructions still passes is accepted and ignored.
+ */
 export interface CreateWorkerInput {
   request: string;
-  size?: WorkerSize;
   context: ContextFact[];
 }
 
@@ -76,11 +77,10 @@ const oneLine = (text: string): string => text.replace(/\s*\r?\n\s*/g, " ").trim
 /**
  * The first prompt of a Worker created by `bm_create_worker` (design §16.6):
  * the `BM-BRIEF` line, the request verbatim in a quoted block, the request id,
- * the repository and its `.beads/`, the size when the owner stated one, the
- * scope rule, the Manager's id, then `Context:` with each fact and its source.
- * Pure.
+ * the repository and its `.beads/`, the scope rule, the Manager's id, then
+ * `Context:` with each fact and its source. Pure.
  */
-export function workerBriefOf(input: { requestId: string; request: string; cwd: string; managerId: string; size?: WorkerSize | null; context: readonly ContextFact[] }): string {
+export function workerBriefOf(input: { requestId: string; request: string; cwd: string; managerId: string; context: readonly ContextFact[] }): string {
   const quoted = input.request
     .replace(/\r\n/g, "\n")
     .split("\n")
@@ -94,7 +94,6 @@ export function workerBriefOf(input: { requestId: string; request: string; cwd: 
     "",
     `requestId: ${input.requestId}`,
     `repository: ${repository} (beads in ${repository}/.beads/)`,
-    ...(input.size === undefined || input.size === null ? [] : [`size: ${input.size} (the owner stated it)`]),
     SCOPE_LINE,
     `managerAgentId: ${input.managerId}`,
     "Context:",
@@ -223,10 +222,12 @@ export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerT
     const caller = boundAs(toolCaller, "manager");
     if (caller === null) return refused(NOT_BOUND_MESSAGE);
     const managerId = caller.agentId;
-    const input = withoutNulls(raw);
+    // An agent on older instructions may still pass `size`: accepted and ignored (the request carries it).
+    const given = withoutNulls(raw);
+    const input = given !== null && typeof given === "object" && !Array.isArray(given) ? Object.fromEntries(Object.entries(given).filter(([key]) => key !== "size")) : given;
     const issues = schemaIssues(face.inputSchema, input);
     if (issues.length > 0) return fixThese(CREATE_WORKER_TOOL, issues);
-    const { request, size, context } = input as CreateWorkerInput;
+    const { request, context } = input as unknown as CreateWorkerInput;
     const home = deps.home();
     const paseo = deps.paseo();
     if (paseo === null || paseo === undefined) return refused(NO_PASEO_MESSAGE);
@@ -248,7 +249,7 @@ export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerT
 
     let workerId: string;
     try {
-      const prompt = workerBriefOf({ requestId, request, cwd, managerId, size: size ?? null, context });
+      const prompt = workerBriefOf({ requestId, request, cwd, managerId, context });
       ({ workerId } = await createPluginWorker(
         paseo as WorkerCreationPaseo,
         { workspaceId: caller.workspaceId, requestId, managerId, cwd, prompt, model: profile.model },

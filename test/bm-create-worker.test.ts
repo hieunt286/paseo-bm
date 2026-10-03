@@ -26,6 +26,7 @@ import { AGENT_TOOLS_OFF_SWITCH_MESSAGE, AGENT_TOOLS_OFF_TOOL_MESSAGE } from "..
 import { REQUEST_ID_PATTERN, REQUESTS_DIR_NAME, clearRequestRegistryCache, createRequestRegistry } from "../plugin/server/request-registry";
 import { applyAgentTools, type AgentCreateRequest } from "../plugin/server/role-hook";
 import { forgetModes } from "../plugin/server/role-mode";
+import { boundToolFacesFor } from "../plugin/shared/bm-tools";
 import { originOf } from "../plugin/shared/message-origin";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
 import { fakePaseo, type FakeCreateRequest } from "./helpers/fake-paseo";
@@ -162,7 +163,6 @@ describe("bm_create_worker creates the Worker of a new request (design §16.6)",
         "",
         `requestId: ${requestId}`,
         `repository: ${FOLDER} (beads in ${FOLDER}/.beads/)`,
-        "size: Medium (the owner stated it)",
         SCOPE_LINE,
         `managerAgentId: ${MANAGER}`,
         "Context:",
@@ -183,7 +183,7 @@ describe("bm_create_worker creates the Worker of a new request (design §16.6)",
     expect(logs).toEqual([`[paseo-bm] worker ${workerId} is bound to its own tool path.`]);
   });
 
-  it("every call is a new request: a second call gets its own id, and no size line when none was stated", async () => {
+  it("every call is a new request: a second call gets its own id; a size passed by an agent on older instructions is ignored (ADR-027 amended)", async () => {
     const home = dataFolder();
     const store = createBindingStore(home);
     const fake = daemon({ store });
@@ -195,7 +195,10 @@ describe("bm_create_worker creates the Worker of a new request (design §16.6)",
     expect(requestId).not.toBe(first.requestId);
     const prompt = fake.creates[1]!.options.prompt!;
     expect(prompt).not.toMatch(/^size:/m);
+    expect(fake.creates[0]!.options.prompt!).not.toMatch(/^size:/m);
     expect(prompt.endsWith("Context:\n- none")).toBe(true);
+    // The tool lists no size: the owner's size stays in the request, in their words.
+    expect(JSON.stringify(boundToolFacesFor("manager").find((face) => face.name === "bm_create_worker")!.inputSchema)).not.toContain('"size"');
     expect(createRequestRegistry(home).list(WS).map((entry) => entry.requestId)).toEqual([first.requestId, requestId]);
   });
 
@@ -252,7 +255,6 @@ describe("bm_create_worker refuses, creating nothing (design §16.6)", () => {
     expect(answer.text.split("\n")).toEqual([
       "The call was refused. Fix these and call bm_create_worker again:",
       "- input.request: is required",
-      "- input.size: must be one of Small, Medium, Large",
       "- input.context: takes at most 20 items",
       "- input.how: is not a field of this tool",
     ]);

@@ -367,7 +367,8 @@ describe("the tool list", () => {
     expect(toolsFor("orchestrator")).toEqual([]);
     for (const tool of AGENT_TOOLS) {
       expect(tool.inputSchema.type).toBe("object");
-      expect(tool.description).toMatch(/send it verbatim/);
+      // Each builder says what becomes of its block: sent verbatim, or written in the reply for the plugin to relay (bm_report).
+      expect(tool.description).toMatch(/send it verbatim|write the block in your reply/);
     }
   });
 

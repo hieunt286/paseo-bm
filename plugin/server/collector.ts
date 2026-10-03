@@ -688,8 +688,12 @@ export async function buildRecord(
   if (role === "worker" || role === "reviewer") {
     const from = startedAt ?? (entries.length > 0 ? (timed[0]?.at ?? null) : null);
     const stored = outboxBlocksOf(readOutbox(deps, event.agent.workspaceId, event.agent.id, from, endedAt), event.agent.id);
-    reports.push(...stored.reports);
-    reviews.push(...stored.reviews);
+    // A block the plugin relayed from this turn's own reply (an unbound Worker's report, an unbound
+    // Reviewer's review) is already read from the message: counted once.
+    const written = new Set(reports.map((report) => `${report.requestId}|${report.phase}`));
+    const writtenReviews = new Set(reviews.map((review) => `${review.batchId}|${review.verdict}`));
+    reports.push(...stored.reports.filter((report) => !written.has(`${report.requestId}|${report.phase}`)));
+    reviews.push(...stored.reviews.filter((review) => !writtenReviews.has(`${review.batchId}|${review.verdict}`)));
   }
 
   // Design §16.4: the agent's label only as far as the plugin trusts it — an agent whose creator is

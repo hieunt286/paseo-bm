@@ -19,6 +19,7 @@ import type { FallbackAction } from "./server/fallback-rpc";
 import { createWorkerSwitch } from "./server/fallback-switch";
 import { createFallbackWaiter } from "./server/fallback-wait";
 import { checkNoVerdict } from "./server/no-verdict";
+import { relayUnboundBlocks } from "./server/unbound-relay";
 import { cancelOffToolReviewer, checkOffToolReviewer, registerOffToolAlertClear, registerOffToolTurnCancel } from "./server/off-tool-reviewer";
 import { settleCreatedAgent } from "./server/creation-settle";
 import { applyReviewBudgetGrants } from "./server/review-tools";
@@ -291,10 +292,18 @@ export default function contribute(server: PluginServerContext): () => void {
   const removeFallbackDetection = registerFallbackDetection(server, {
     onPaseo: armWaits,
     // Design §16.10: once the fallback detection of a bound Reviewer's turn ran, a turn without a
-    // verdict sends its Worker one no-verdict delivery per review call.
+    // verdict sends its Worker one no-verdict delivery per review call. ADR-027 decision 9 (amended):
+    // an unbound Worker's BM-REPORT blocks in its reply are relayed to its parent as report records.
     afterDetection: async (event, { paseo, classified }) => {
       const home = dataHome();
       if (home === null || paseo === undefined) return undefined;
+      await relayUnboundBlocks(event, {
+        home,
+        paseo,
+        bindings: agentTools.bindings,
+        onOpened: (opened, handle) => eventBus.decisionsOpened(opened, handle),
+        onSettled: (decisions, context) => onDecisionsSettled(decisions, context),
+      });
       return checkNoVerdict(event, { home, paseo, bindings: agentTools.bindings, classified });
     },
   });

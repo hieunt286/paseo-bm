@@ -4,7 +4,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   ALLOWED_BY_NAME,
+  ASK_USER_QUESTION,
   DENIED_MESSAGE,
+  QUESTION_DENIED_MESSAGES,
   REPLACED_MESSAGE,
   codexCommandOf,
   codexMcpToolOf,
@@ -379,7 +381,7 @@ describe("allow or hold (§D.2, §D.4)", () => {
     expect(await raise(boundary, fake, manager, bash("m1", "git push"))).toBe("ignored");
     expect(await raise(boundary, fake, opencode, bash("o1", "git push"))).toBe("ignored");
     const reviewer = worker({ id: REVIEWER, provider: "bm-reviewer" });
-    expect(await boundary.onRequested({ agent: hookAgent(reviewer), request: { id: "q1", name: "AskUserQuestion", kind: "question" } }, fake.paseo)).toBe("ignored");
+    expect(await boundary.onRequested({ agent: hookAgent(reviewer), request: { id: "p1", name: "ExitPlanMode", kind: "plan" } }, fake.paseo)).toBe("ignored");
     expect(fake.permissions).toEqual([]);
     expect(decisions().list()).toEqual([]);
   });
@@ -636,5 +638,69 @@ describe("the agents under the boundary (change-010 C5)", () => {
     expect(isHeldOpen(decisions(), WORKER, "x1")).toBe(false);
     // Still pending: nothing allowed it silently.
     expect((fake.byId(WORKER)!.pendingPermissions as unknown[]).map((request) => (request as { id: string }).id)).toEqual(["x1"]);
+  });
+});
+
+/**
+ * ADR-027 (amended 2026-10-03): Claude's `AskUserQuestion` box never reaches
+ * the owner in paseo-bm, so the plugin denies it for every Manager, Worker and
+ * Reviewer — boundary on or off, any base provider — with a plain deny naming
+ * the role's channel. Paseo 0.9 raises it as `name: "AskUserQuestion"`,
+ * `kind: "question"` (`resolvePermissionKind` in its Claude provider).
+ */
+describe("AskUserQuestion is denied with the role's channel (ADR-027, amended)", () => {
+  const question = (id: string): BoundaryRequest =>
+    ({
+      id,
+      provider: "claude",
+      name: ASK_USER_QUESTION,
+      kind: "question",
+      title: "Hi, Ann! or Hi Ann!?",
+      input: { questions: [{ question: "Hi, Ann! or Hi Ann!?", options: [{ label: "Hi, Ann!" }, { label: "Hi Ann!" }] }] },
+      suggestions: [{ type: "addRules", destination: "localSettings" }],
+    }) as BoundaryRequest;
+
+  it("each role gets a plain deny naming its own channel, whatever its boundary or base provider", async () => {
+    const boundary = boundaryOf({ "bm-worker": "opencode", "bm-reviewer": "codex", "bm-manager": "claude" });
+    const manager = worker({ id: "m-1", provider: "bm-manager/claude-haiku-4-5", labels: { "bm.role": "manager" } });
+    // Boundary off, and a base provider the boundary never answers for.
+    const offWorker = worker({ labels: { "bm.role": "worker", "bm.requestId": DECISION_REQUEST, "bm.boundary": "off" } });
+    const reviewer = worker({ id: REVIEWER, provider: "bm-reviewer/gpt-5.6", labels: { "bm.role": "reviewer" } });
+    const fake = daemon([manager, offWorker, reviewer]);
+    expect(await raise(boundary, fake, manager, question("q-m"))).toBe("denied-question");
+    expect(await raise(boundary, fake, offWorker, question("q-w"))).toBe("denied-question");
+    expect(await raise(boundary, fake, reviewer, question("q-r"))).toBe("denied-question");
+    expect(fake.permissions).toEqual([
+      { id: "m-1", requestId: "q-m", response: { behavior: "deny", message: QUESTION_DENIED_MESSAGES.manager } },
+      { id: WORKER, requestId: "q-w", response: { behavior: "deny", message: QUESTION_DENIED_MESSAGES.worker } },
+      { id: REVIEWER, requestId: "q-r", response: { behavior: "deny", message: QUESTION_DENIED_MESSAGES.reviewer } },
+    ]);
+    // Each names its channel: the reply, bm_questions, notChecked.
+    expect(QUESTION_DENIED_MESSAGES.manager).toContain("Ask the owner in your reply");
+    expect(QUESTION_DENIED_MESSAGES.worker).toContain("bm_questions");
+    expect(QUESTION_DENIED_MESSAGES.reviewer).toContain("notChecked");
+    // Nothing held, nothing opened; the same request is never answered twice.
+    expect(decisions().list()).toEqual([]);
+    expect(await boundary.onRequested({ agent: hookAgent(manager), request: question("q-m") }, fake.paseo)).toBe("ignored");
+    expect(fake.permissions).toHaveLength(3);
+  });
+
+  it("an agent that is not a Manager, Worker or Reviewer keeps Paseo's own box", async () => {
+    const boundary = boundaryOf();
+    const other = worker({ id: "x", provider: "claude", labels: {} });
+    const orchestrator = worker({ id: "o", provider: "bm-orchestrator/claude-opus-5", labels: { "bm.role": "orchestrator" } });
+    const fake = daemon([other, orchestrator]);
+    expect(await raise(boundary, fake, other, question("q-x"))).toBe("ignored");
+    expect(await raise(boundary, fake, orchestrator, question("q-o"))).toBe("ignored");
+    expect(fake.permissions).toEqual([]);
+  });
+
+  it("the restart scan denies a box left pending while nobody watched", async () => {
+    const boundary = boundaryOf();
+    const manager = worker({ id: "m-1", provider: "bm-manager/claude-haiku-4-5", labels: { "bm.role": "manager" }, pendingPermissions: [question("q-old")] });
+    const fake = daemon([manager]);
+    const result = await boundary.scan(fake.paseo);
+    expect(result.requests).toEqual([{ key: "m-1|q-old", outcome: "denied-question" }]);
+    expect(fake.permissions).toEqual([{ id: "m-1", requestId: "q-old", response: { behavior: "deny", message: QUESTION_DENIED_MESSAGES.manager } }]);
   });
 });

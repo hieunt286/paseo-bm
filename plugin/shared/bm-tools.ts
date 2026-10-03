@@ -1479,14 +1479,13 @@ export const BOUND_SERVER_TOOLS: readonly ToolFace[] = [
     name: "bm_create_worker",
     role: "manager",
     description:
-      "Create the Worker of one new request of the owner: paseo-bm generates its requestId, creates the Worker in your folder with its labels, mode and tools, and gives it its first prompt — the request verbatim, the requestId, the repository, the size when the owner stated one, your id and the context you pass. Every call is a new request, a BM-NEW-REQUEST included. Returns JSON { workerId, requestId }.",
+      "Create the Worker of one new request of the owner: paseo-bm generates its requestId, creates the Worker in your folder with its labels, mode and tools, and gives it its first prompt — the request verbatim (a size the owner stated stays in it), the requestId, the repository, your id and the context you pass. Every call is a new request, a BM-NEW-REQUEST included. Returns JSON { workerId, requestId }.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       required: ["request", "context"],
       properties: {
-        request: { type: "string", minLength: 1, maxLength: CREATE_WORKER_LIMITS.request, description: "The owner's request, verbatim." },
-        size: { type: "string", enum: TIERS, description: "Only when the owner stated the size; leave it out otherwise." },
+        request: { type: "string", minLength: 1, maxLength: CREATE_WORKER_LIMITS.request, description: "The owner's request, verbatim: every sentence of it, a size or a review they asked for included." },
         context: {
           type: "array",
           maxItems: CREATE_WORKER_LIMITS.contextItems,
@@ -1524,11 +1523,12 @@ export const AGENT_TOOLS: readonly AgentTool[] = [
   tool<ReportInput>({
     name: "bm_report",
     role: "worker",
-    description: "Build your BM-REPORT (and its BM-QUESTIONS when blocked). It delivers nothing: send the block yourself, as the last line of its answer says.",
+    description: "Build your BM-REPORT (and its BM-QUESTIONS when blocked). It delivers nothing itself: write the block in your reply, as the last line of its answer says, and the plugin delivers it to the agent that created you (never send it yourself).",
     inputSchema: REPORT_SCHEMA,
     rules: reportRules,
     build: buildReport,
     kinds: (input) => (input.phase === "blocked" ? ["BM-REPORT", "BM-QUESTIONS"] : ["BM-REPORT"]),
+    suffix: "Arguments are JSON: leave out a field you have nothing for. Returns the block. On error, fix the listed fields and call again.",
   }),
   REVIEW_BUILDER,
   ANSWERS_BUILDER,

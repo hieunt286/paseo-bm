@@ -98,9 +98,8 @@ export interface RuntimeFacts {
 
 /**
  * The part of an unbound agent's Runtime facts that holds the hand-written
- * path (design §16.12, ADR-027 decision 9): exactly what the role files no
- * longer teach, and the role's one send line of §16.5 (`BUILDER_SEND_LINES`
- * in `agent-tools.ts`, pinned equal by the tests). Agent-facing, so English.
+ * path (design §16.12, ADR-027 decision 9): only what differs from the role
+ * file for an agent without the delivering tools. Agent-facing, so English.
  * No line of it starts with `## ` or `Action boundary:`, and none holds
  * ` mode: `, so the readers of the facts section still find what they read.
  */
@@ -109,21 +108,34 @@ export const HAND_PATH_HEADING = "### Without paseo-bm's tools";
 /**
  * Paseo's send tool, named so no provider can take another messaging tool for
  * it (acceptance finding F2: an unbound Claude Worker used Claude Code's own
- * `SendMessage`, which reaches no Paseo agent). The same words as the send
- * line of `BUILDER_SEND_LINES.bm_report` in `agent-tools.ts`.
+ * `SendMessage`, which reaches no Paseo agent).
  */
 export const PASEO_SEND_TOOL = "Paseo's `send_agent_prompt` tool (the paseo MCP server's; not Claude Code's SendMessage or any other messaging tool)";
 
-const HAND_PATH_LEAD =
-  "You were created without paseo-bm's delivering tools, so this part replaces what your role file says about them, and a missing `bm_` tool is no reason to stop here.";
+/**
+ * The send step a builder-only answer ends with (design §16.5), the one place
+ * these lines are written: `agent-tools.ts` serves them after the block, and
+ * the hand paths below use the same words. Since ADR-027's amendment of
+ * 2026-10-03 no block is sent by hand: the plugin delivers what the agent
+ * writes in its reply — an unbound Worker's report (`unbound-relay.ts`), an
+ * unbound Reviewer's final review (`no-verdict.ts`), an unbound Manager's
+ * answers (the materialiser).
+ */
+export const BUILDER_SEND_LINES: { readonly [tool: string]: string | undefined; readonly bm_report: string; readonly bm_review: string; readonly bm_answers: string } = {
+  bm_report: "Nothing is delivered yet: write this block in your reply, exactly as it is; the plugin delivers it to the agent that created you. Never send it yourself.",
+  bm_review: "Make this block your final answer, exactly as it is.",
+  bm_answers: "Put this block in your reply to the owner; the plugin delivers it. Send the Worker nothing.",
+};
 
-/** The Worker's hand path: asking, the Reviewer, the re-review, the budget and reporting by hand. */
+const HAND_PATH_LEAD = "You were created without paseo-bm's delivering tools, so this part replaces what your role file says about them.";
+
+/** The Worker's hand path: asking, the Reviewer, the re-review, the budget and reporting without the tools. */
 export const WORKER_HAND_PATH = [
   HAND_PATH_HEADING,
   "",
-  `${HAND_PATH_LEAD} \`bm_questions\`, \`bm_create_reviewer\` and \`bm_rereview\` are not yours. Where your role file says your \`bm_\` tools store and deliver, or to report with \`bm_report\`, for you \`bm_report\` only BUILDS the block: nothing reaches your Manager until you send that block yourself with ${PASEO_SEND_TOOL}.`,
+  `${HAND_PATH_LEAD} \`bm_questions\`, \`bm_create_reviewer\` and \`bm_rereview\` are not yours, and your \`bm_report\` only BUILDS a block: write each block in your reply, exactly as built, and the plugin delivers it to the agent that created you. Never send a block yourself.`,
   "",
-  "**Asking.** Number your questions `Q1`, `Q2`, … across the request, at most 5 per round, each one line with exactly one recommended, and give each a `class` (riskiest first: security, data, release, cost, dependency, environment, scope, preference, reversible-technical; the riskier when unsure). Send them with `blocked` through `bm_report` (its `questions`), then end the turn. Without `bm_report`, write the block yourself:",
+  "**Asking.** Ask with `blocked` through `bm_report`'s `questions`, then end the turn: number them `Q1`, `Q2`, … across the request and give each a `class` (riskiest first: security, data, release, cost, dependency, environment, scope, preference, reversible-technical; the riskier when unsure). Without `bm_report`, write the block yourself:",
   "",
   "```",
   "BM-QUESTIONS",
@@ -133,11 +145,11 @@ export const WORKER_HAND_PATH = [
   "- b: a new table: needs a migration, which makes this request Large. [effects: migration]",
   "```",
   "",
-  "Answers come as `BM-DELIVERY answers`, then `Continue <requestId>.` and a `BM-ANSWERS` block — `Q1: a — …` picks that option, `Q2: other — …` is the owner's words. Waiting on another request or Worker goes on the report's `blockers` line.",
+  "Waiting on another request or Worker goes on the report's `blockers` line.",
   "",
-  "**Reviewing.** Create the Reviewer with Paseo's `create_agent`: profile `bm-reviewer`, provider `bm-reviewer/<model of the profile>`, labels `bm.role` = `reviewer`, `bm.requestId` = the request's `req-…`, `bm.batchId` = the batch id, `bm.version` = yours if readable; `settings.modeId` exactly as your `## Runtime facts` say (missing: send `blocked` with Paseo's refusal). Tell it the `requestId`, the `batchId`, exactly what to review, the stage (`implementation`; before it `plan` or `beads`, plus `documents` when you wrote any) and, for an implementation batch, the checks you ran with their output — never its criteria or format. `changes-required`: fix every **blocking** finding, then ask the same Reviewer for the re-review with Paseo's `send_agent_prompt`. A review call past your budget the owner did not ask for: send `blocked` and ask; a yes covers only what the owner said (\"one more\", \"until it is clean\"). A Reviewer that ends on a provider error (usage limit, credit, login, provider unavailable) is not a review: create no other, end your turn without a report, and wait for the plugin's `BM-FALLBACK`.",
+  `**Reviewing.** Create the Reviewer with Paseo's \`create_agent\`: profile \`bm-reviewer\`, provider \`bm-reviewer/<model of the profile>\`, labels \`bm.role\` = \`reviewer\`, \`bm.requestId\` = the request's \`req-…\`, \`bm.batchId\` = the batch id, \`bm.version\` = yours if readable; \`settings.modeId\` exactly as your \`## Runtime facts\` say (missing: report \`blocked\` with Paseo's refusal). Its first prompt carries what your role file gives \`bm_create_reviewer\`. For the re-review, ask the same Reviewer with ${PASEO_SEND_TOOL}. Count your review calls yourself: one past your budget that the owner did not ask for is a \`blocked\` report and a question.`,
   "",
-  "**Reporting.** Build each report with `bm_report` and send what it returns verbatim to Manager with Paseo's `send_agent_prompt` (its agent id is in your first prompt; without one, post in your chat). Only without `bm_report`, write the block yourself (`none` for empty fields; a `blocked` one is followed by its `BM-QUESTIONS`):",
+  "**Reporting.** Build each report with `bm_report`. Only without it, write the block yourself (`none` for empty fields; a `blocked` one is followed by its `BM-QUESTIONS`):",
   "",
   "```",
   "BM-REPORT",
@@ -156,7 +168,7 @@ export const WORKER_HAND_PATH = [
   "blockers: <what you wait for; the owner only through BM-QUESTIONS>",
   "```",
   "",
-  "Nothing is delivered yet: send this block, exactly as it is, with Paseo's `send_agent_prompt` tool (the paseo MCP server's; not Claude Code's SendMessage or any other messaging tool) to the agent that created you, by the agent id your first prompt gives for it, with `notifyOnFinish: false`.",
+  "A review the request needs or the owner asked for ends before `finished`: report `finished` only after its verdict reaches you.",
 ].join("\n");
 
 /** The Manager's hand path: creating and telling a Worker, the owner's answers, a handoff. */
@@ -165,13 +177,13 @@ export const MANAGER_HAND_PATH = [
   "",
   `${HAND_PATH_LEAD} \`bm_create_worker\` and \`bm_tell_worker\` are not yours; \`bm_answers\`, if you have it, only builds a block.`,
   "",
-  '**Creating the Worker.** Create a `requestId` = `req-` + current UTC time as `YYYYMMDDTHHMMSSZ`, then **one** Worker in this workspace with `create_agent`, right the first time: call `list_profiles` **once**; `provider` = `bm-worker/<model of the profile>`; labels `bm.role` = `worker`, `bm.requestId` = the `requestId` (the Dashboard groups by it), `bm.version` = yours if readable; `settings.modeId` exactly as your `## Runtime facts` say. The `initialPrompt`, in order: the owner\'s request **verbatim** in a quoted block — all of their words for this change, every sentence (a size, a question to ask or a review included), never cut or reworded; the `requestId`; the repository path and `.beads/`; a size only if the owner stated one; "Do only what the request asks. Anything extra is a suggestion for the owner, not work."; your agent id (`echo "$PASEO_AGENT_ID"`); then **Context**, each fact with its source. A failed creation: cancel a broken agent it left.',
+  '**Creating the Worker.** Create a `requestId` = `req-` + current UTC time as `YYYYMMDDTHHMMSSZ`, then **one** Worker in this workspace with `create_agent`, right the first time: call `list_profiles` **once**; `provider` = `bm-worker/<model of the profile>`; labels `bm.role` = `worker`, `bm.requestId` = the `requestId` (the Dashboard groups by it), `bm.version` = yours if readable; `settings.modeId` exactly as your `## Runtime facts` say. The `initialPrompt`, in order: the owner\'s request **verbatim** in a quoted block — all of their words for this change, every sentence (a size, a question to ask or a review included), never cut or reworded; the `requestId`; the repository path and `.beads/`; "Do only what the request asks. Anything extra is a suggestion for the owner, not work."; then **Context**, each fact with its source. A failed creation: cancel a broken agent it left.',
   "",
   `**Telling a Worker.** Send the owner's words or a fact with ${PASEO_SEND_TOOL}: \`Continue <requestId>.\`, then the words or the fact and its source. **Never send to a Worker that is \`running\`:** it would lose that turn's work. Hold the owner's words, say so, and send them at its turn end.`,
   "",
-  "**Answers.** Write one `BM-ANSWERS` block per request with `bm_answers`, or without it by hand: `BM-ANSWERS`, `requestId: <requestId>`, then per answer `Q6: a — <the option as the Worker wrote it>` or `Q7: other — <the owner's own words>`. Put this block in your reply to the owner; the plugin delivers it. Send the Worker nothing.",
+  `**Answers.** Write one \`BM-ANSWERS\` block per request with \`bm_answers\`, or without it by hand: \`BM-ANSWERS\`, \`requestId: <requestId>\`, then per answer \`Q6: a — <the option as the Worker wrote it>\` or \`Q7: other — <the owner's own words>\`. ${BUILDER_SEND_LINES.bm_answers}`,
   "",
-  "**Following.** Reports arrive as the Worker's own messages. A turn end with no new report: an error or a waiting permission, tell the owner; otherwise one status line.",
+  "**Following.** Paseo wakes you at each turn end of a Worker you created. A turn end with no new report: an error or a waiting permission, tell the owner; otherwise one status line.",
   "",
   "**A handoff** (`intent: handoff`): create the new Worker as it says, for the same `requestId`, with `bm.handoffFrom` = the old Worker's id and its brief verbatim as `initialPrompt`; then tell the old Worker it is replaced.",
 ].join("\n");
@@ -180,7 +192,7 @@ export const MANAGER_HAND_PATH = [
 export const REVIEWER_HAND_PATH = [
   HAND_PATH_HEADING,
   "",
-  `${HAND_PATH_LEAD} \`bm_review\`, if you have it, returns your answer as a block. Make this block your final answer, exactly as it is. Only without that tool, answer exactly this block (\`none\` for empty fields, \`findings: none\` for none; \`checked\` and \`notChecked\` may run over several lines, each line after the first indented):`,
+  `${HAND_PATH_LEAD} \`bm_review\`, if you have it, returns your answer as a block. ${BUILDER_SEND_LINES.bm_review} Only without that tool, answer exactly this block (\`none\` for empty fields, \`findings: none\` for none; \`checked\` and \`notChecked\` may run over several lines, each line after the first indented):`,
   "",
   "```",
   "BM-REVIEW",

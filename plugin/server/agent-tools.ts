@@ -86,6 +86,7 @@ import { createWorkerTools } from "./decision-ask";
 import { createDeliveringTools, type DeliveringTools } from "./deliver-tools";
 import { createReviewTools } from "./review-tools";
 import { currentTurnStartOf } from "./collector";
+import { BUILDER_SEND_LINES } from "./role-instructions";
 import type { Decision } from "../shared/decisions";
 import { assertNoSymlinkOnPath, ensureStoreDir, writeStoreFileAtomically } from "./trace-store";
 
@@ -132,19 +133,12 @@ function describe(tool: ToolFace) {
 }
 
 /**
- * The send step a builder-only answer ends with (design §16.5): an unbound
- * agent briefed by a shorter role file may not know what to do with the block.
- * It is the answer's last content item, after the block, so the block itself
- * stays exactly what `checkBlocks` checked. The report's line names Paseo's
- * tool unambiguously (acceptance finding F2: an unbound Claude Worker sent
- * its block with Claude Code's own `SendMessage`, which reaches no Paseo agent).
+ * The send step a builder-only answer ends with (design §16.5), after the
+ * block, so the block itself stays exactly what `checkBlocks` checked. Written
+ * once, in `role-instructions.ts`, beside the hand paths that use the same
+ * words.
  */
-export const BUILDER_SEND_LINES: Readonly<Record<string, string>> = {
-  bm_report:
-    "Nothing is delivered yet: send this block, exactly as it is, with Paseo's `send_agent_prompt` tool (the paseo MCP server's; not Claude Code's SendMessage or any other messaging tool) to the agent that created you, by the agent id your first prompt gives for it, with `notifyOnFinish: false`.",
-  bm_review: "Make this block your final answer, exactly as it is.",
-  bm_answers: "Put this block in your reply to the owner; the plugin delivers it. Send the Worker nothing.",
-};
+export { BUILDER_SEND_LINES };
 
 /**
  * The answer to one JSON-RPC message for `role`, or null for a notification.

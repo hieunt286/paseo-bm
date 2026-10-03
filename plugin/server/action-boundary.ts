@@ -50,6 +50,15 @@
  *   agent's open `h:` decisions are withdrawn and its requests denied; an open
  *   `h:` decision whose request is no longer pending is withdrawn.
  *
+ * - **`AskUserQuestion`** (ADR-027, amended 2026-10-03): Claude's interactive
+ *   box (`name: "AskUserQuestion"`, `kind: "question"`, Paseo 0.9
+ *   `resolvePermissionKind`) is denied for every Manager, Worker and Reviewer,
+ *   boundary on or off, whatever the base provider, with a plain deny whose
+ *   message names the role's channel (`QUESTION_DENIED_MESSAGES`). The owner
+ *   answers paseo-bm's questions on decision cards and in the chat, never in
+ *   that box. The only request outside the boundary's scope it answers; the
+ *   restart scan denies one left pending too.
+ *
  * Never throws into Paseo: a failure is one log line, and a request the
  * plugin could not answer waits in Paseo's own prompt for the owner.
  */
@@ -141,6 +150,17 @@ export const ALLOWED_MCP_SERVERS: ReadonlySet<string> = new Set(["paseo", "paseo
 /** What a deny tells the agent. */
 export const DENIED_MESSAGE = "The owner denied this request. Do not try it another way; ask the owner if it is still needed.";
 export const REPLACED_MESSAGE = "You were replaced by another agent for this request. Stop: do not run anything else.";
+
+/** Claude's interactive question tool: never the owner's channel in paseo-bm (ADR-027, amended). */
+export const ASK_USER_QUESTION = "AskUserQuestion";
+
+/** What the deny of an `AskUserQuestion` tells each role: the channel it asks through instead. */
+export const QUESTION_DENIED_MESSAGES: Readonly<Record<"manager" | "worker" | "reviewer", string>> = {
+  manager: "This question box does not reach the owner in paseo-bm. Ask the owner in your reply instead, then end your turn.",
+  worker:
+    "This question box does not reach the owner in paseo-bm. Ask with bm_questions (without it, in your report's questions, as your instructions say), then report blocked.",
+  reviewer: "This question box does not reach anyone in paseo-bm. Do not ask: put what you could not decide or check in notChecked and give your verdict.",
+};
 
 /** The longest command or path quoted in a held decision's question. */
 export const HELD_QUOTE_CHARS = 400;
@@ -509,6 +529,8 @@ export type RequestOutcome =
   | "held"
   /** The agent was replaced: denied. */
   | "denied-replaced"
+  /** An `AskUserQuestion` of a Manager, Worker or Reviewer: denied with the role's channel. */
+  | "denied-question"
   /** Held effects, but no data folder or project to hold them in: left to Paseo's own prompt. */
   | "left";
 
@@ -707,10 +729,28 @@ export function createActionBoundary(deps: ActionBoundaryDeps = {}): ActionBound
     return true;
   }
 
+  /** Denies an `AskUserQuestion` with the role's channel, once per request. */
+  async function denyQuestion(paseo: BoundaryPaseo, agentId: string, role: keyof typeof QUESTION_DENIED_MESSAGES, requestId: string): Promise<RequestOutcome> {
+    const key = `${agentId}|${requestId}`;
+    if (inFlight.has(key) || answered.has(key)) return "ignored";
+    inFlight.add(key);
+    try {
+      await respond(paseo, agentId, requestId, { behavior: "deny", message: QUESTION_DENIED_MESSAGES[role] });
+      remember(key);
+      return "denied-question";
+    } finally {
+      inFlight.delete(key);
+    }
+  }
+
   async function onRequested(event: { agent: BoundaryAgent; request: BoundaryRequest }, paseoValue: unknown, known: BoundaryAgentSnapshot | null = null): Promise<RequestOutcome> {
     const { agent, request } = event;
     try {
       const role = roleOfProvider(agent?.provider);
+      // Every Manager, Worker and Reviewer, boundary on or off: the box never reaches the owner.
+      if ((role === "manager" || role === "worker" || role === "reviewer") && request?.name === ASK_USER_QUESTION && typeof request.id === "string" && isBoundaryPaseo(paseoValue)) {
+        return await denyQuestion(paseoValue, agent.id, role, request.id);
+      }
       if (role !== "worker" && role !== "reviewer") return "ignored";
       if (request?.kind !== "tool" || typeof request.id !== "string" || typeof request.name !== "string") return "ignored";
       if (!isBoundaryPaseo(paseoValue)) return "ignored";
@@ -861,8 +901,19 @@ export function createActionBoundary(deps: ActionBoundaryDeps = {}): ActionBound
       const live = new Map<string, { agent: BoundaryAgentSnapshot; pending: Set<string> }>();
       for (const snapshot of agents) {
         const role = roleOfProvider(snapshot.provider);
-        if ((role !== "worker" && role !== "reviewer") || text(snapshot.archivedAt) !== null) continue;
+        if ((role !== "manager" && role !== "worker" && role !== "reviewer") || text(snapshot.archivedAt) !== null) continue;
         const pending = Array.isArray(snapshot.pendingPermissions) ? (snapshot.pendingPermissions as unknown[]).map(record) : [];
+        // An `AskUserQuestion` left pending while nobody watched: denied with the role's channel.
+        for (const request of pending) {
+          if (request["name"] !== ASK_USER_QUESTION || typeof request["id"] !== "string") continue;
+          try {
+            const outcome = await denyQuestion(paseo, snapshot.id, role, request["id"]);
+            if (outcome !== "ignored") result.requests.push({ key: `${snapshot.id}|${request["id"]}`, outcome });
+          } catch (error) {
+            log(`[paseo-bm] could not deny the question box ${request["id"]} of ${snapshot.id}: ${errorText(error)}`);
+          }
+        }
+        if (role === "manager") continue;
         live.set(snapshot.id, { agent: snapshot, pending: new Set(pending.map((entry) => String(entry["id"]))) });
         const agent: BoundaryAgent = {
           id: snapshot.id,
