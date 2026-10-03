@@ -156,3 +156,25 @@ Manager from `manager.ensure` (`bound`, `creationTools: true`, 85 prompt lines, 
 ### 8.6 Clean-up
 
 The daemon's status was read first (`pid 64853`, `127.0.0.1:6918`, the test home), then `stop-daemon.sh` stopped it; afterwards nothing listened on 6918 and no process referenced the test home, and the work folder (Paseo home, data folder, both repos) was deleted. The owner's daemon on 6767 kept running, untouched.
+
+## 9. bm-w6bh re-run (role text for H1–H3)
+
+| Field | Value |
+|---|---|
+| Daemon | isolated, `start-daemon.sh` on port **6921**, home and data folder under the session scratchpad (`w6bh/live/`); `injectIntoAgents` on in that test config only. The owner's `~/.paseo`, `~/.paseo-bm` and port 6767 were untouched |
+| Plugin | the branch's `plugin/` with bead `bm-w6bh`'s text (build current), `paseo plugin add <repo>/plugin` → `status: running`; reloaded once (`paseo plugin reload`) after the H3 wording moved into rule 3 |
+| Roles | `setup.ensure-roles`; Manager, Worker and Reviewer set to `claude/claude-haiku-4-5` with `roles.save-settings` |
+| Target repos | `hand` (unbound), `demo` and `demo2` (bound), by `new-workspace.sh`, each with `br init` committed. No remote |
+| Owner actions | requests with `send.mjs` / `create-agent.mjs`; questions answered with `decisions.answer { via: "inbox" }`; one Reviewer `npm test` allowed once; two Manager `AskUserQuestion` boxes denied ("The Worker should ask me that; I will answer on the decision card."). No request named a tool |
+| Window | 14:22–14:31 UTC |
+
+| # | Check | Result |
+|---|---|---|
+| H1 | Unbound Manager (`create-agent.mjs bm-manager claude-haiku-4-5 - bypassPermissions`) given two sentences: "Add a farewell(name) function … with a node:test unit test. Have a Reviewer check it before you report it finished." | **Pass** — the Worker's `initialPrompt` opens with both sentences in one quoted block, character for character; the Worker created a Reviewer (`b1`, `pass`) |
+| H2 | Bound Medium request: subtract and multiply with tests, "Have a Reviewer review only subtract and its test, in a review batch of its own." | **Pass** — the `b1` Reviewer read the whole `math.js` (multiply included), returned `pass` with **0** findings; `multiply` and its test stayed; `npm test` 2/2. No finding cut requested work |
+| H3 (first wording, Questions section) | Q1 answered in the Inbox at 14:25:25; owner asked "Where does my request stand? Is anything still waiting on me?" at 14:25:46 | **Fail** — the Manager made no tool call and said the Worker was "waiting on your answer to Q1" |
+| H3 (final wording, rule 3) | Fresh bound Manager in `demo2`; Q1 answered in the Inbox at 14:29:17; the same owner question at 14:29:33 | **Pass** — `bm_decisions` called twice (`unsettled`, then no filter), then "Your question was answered — you chose "divide" … Nothing is waiting on you" |
+
+Other observations (outside this bead): both bound Managers still opened an `AskUserQuestion` box for the question the owner asked the Worker to ask (F4 recurs on Haiku); the unbound Manager's brief carried no Manager agent id and an invented `requestId` (`req-20261003T120000Z`), and its Worker sent no `BM-REPORT` to it (0 in the Manager's timeline); that Worker also loaded Claude Code's `update-config` skill to approve its Reviewer's permission (the turn was cut before it wrote anything: no `.claude/` in the repo, `~/.claude/settings.json` unchanged); `demo2`'s `bm_create_worker.request` left out "This is Small." and passed it as `size`. No agent committed, pushed or removed anything.
+
+Clean-up: the daemon's status was read first (`pid 55570`, `127.0.0.1:6921`, the test home), then `stop-daemon.sh` stopped it; afterwards nothing listened on 6921 and no process referenced the test home, and the work folder was deleted. The owner's daemon on 6767 kept running, untouched.

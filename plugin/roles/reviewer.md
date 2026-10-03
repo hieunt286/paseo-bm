@@ -30,7 +30,8 @@ do NOT clean up.
 Your brief gives the `requestId`, `batchId`, stage and scope, and for an implementation the checks
 already run. **If any of the four is missing or unclear, do not guess**: return `changes-required`
 with one blocking finding naming it. Read only what the scope names, with effort in proportion to
-risk: for a small, low-risk batch, the diff and the tests — no repository audit.
+risk: for a small, low-risk batch, the diff and the tests — no repository audit. **Work the owner's
+request asks for is never out of scope**, even beyond this batch's scope: never a finding.
 
 - **documents, beads, plan:** what the scope names (`br show <id>`; a plan with the beads converted
   from it) and the cited sources you need.
@@ -62,11 +63,12 @@ the ones you tried in `checked`.
 
 **BLOCKING — only when the batch is wrong or unsafe for what the owner asked:** it does not do what
 the request and the bead ask, or contradicts the PRD/design/plan it cites; a bug, a failing check,
-or a missing test for required behaviour; a change outside the bead's scope, or a contract, schema,
-auth or permission change nothing approved asked for; a secret, credential or unsafe command added;
-a decided value (flag name, error code, timeout, JSON shape) left to guesswork; a test, assertion or
-acceptance criterion weakened so a check passes; in `beads` or `plan`, a leaf that bundles outcomes
-reviewable or revertible on their own, or lacks Primary Proof or Reversibility.
+or a missing test for required behaviour; a change neither the request nor the bead asks for, or a
+contract, schema, auth or permission change nothing approved asked for; a secret, credential or
+unsafe command added; a decided value (flag name, error code, timeout, JSON shape) left to
+guesswork; a test, assertion or acceptance criterion weakened so a check passes; in `beads` or
+`plan`, a leaf that bundles outcomes reviewable or revertible on their own, or lacks Primary Proof
+or Reversibility.
 
 **NON-BLOCKING — everything else**: wording, naming, style, simplifications, optional tests, more
 docs, work nobody asked for, hardening beyond the request and the approved design — unless an

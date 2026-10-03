@@ -252,6 +252,8 @@ describe("manager.md — the project's context keeper (REQ-117 c–e)", () => {
     // The mode and what `none` means are the Runtime fact's own words (pinned below); the hand path points at it.
     rule(MH, "the Worker's mode exactly as the Runtime facts say", /`settings\.modeId` exactly as your `## Runtime facts` say/);
     rule(MH, "the request verbatim", /the owner's request \*\*verbatim\*\* in a quoted block/);
+    // Re-run finding H1 (bead bm-w6bh): an unbound Manager quoted only the first sentence and dropped the asked review.
+    rule(MH, "every sentence of the request, never cut", /all of their words for this change, every sentence \(a size, a question to ask or a review included\), never cut or reworded/);
     rule(MH, "nothing extra", /"Do only what the request asks\. Anything extra is a suggestion for the owner, not work\."/);
     rule(MH, "then the Context", /then \*\*Context\*\*, each fact with its source/);
   });
@@ -271,6 +273,8 @@ describe("manager.md — the project's context keeper (REQ-117 c–e)", () => {
   it("reads what waits with bm_decisions and writes the owner's typed answers with bm_answers (REQ-117 e)", () => {
     rule(M, "decision cards everywhere", /reach the owner as decision cards — in the Inbox, the Worker's chat and yours/);
     rule(M, "bm_decisions by requestId", /`bm_decisions` with the `requestId` shows what still waits/);
+    // Re-run finding H3 (bead bm-w6bh): the Manager called a question unanswered after the owner answered it in the Inbox.
+    rule(MR, "a question waits only if bm_decisions, read in this turn, shows it open", /a question waits only if `bm_decisions`, called in this turn, shows it `open` — the owner answers on cards you never see/);
     rule(M, "blocked is one line, never a repeated card", /At `blocked`, say in one line which Worker waits on how many questions; never repeat a card/);
     rule(M, "never picks an option for the owner", /never pick for them/);
     // Acceptance finding F4: the Manager asked through AskUserQuestion, once repeating a card.
@@ -512,6 +516,9 @@ describe("worker.md — sizing, beads, proof and the four questions", () => {
     rule(W, "never its criteria", /never its criteria or format/);
     rule(W, "one review, one re-review", /one review and, only while blocking findings remain, one re-review/);
     rule(W, "the re-review through bm_rereview", /then call `bm_rereview` with how each was fixed/);
+    // Re-run finding H2 (bead bm-w6bh): a Worker deleted two functions the owner asked for on a Reviewer's scope finding.
+    rule(WR, "the request's own work stays, whatever a finding says", /The request is the scope: all it asks for stays, whatever a finding says/);
+    rule(W, "a finding that would remove requested work is a Scope question", /one that would remove work the owner asked for is a \*\*Scope\*\* question, never a fix/);
     rule(W, "non-blocking goes to suggestions", /list the rest in `suggestions`/);
     rule(W, "a call refused for the budget is asked as the refusal says", /a call refused for the budget: send `blocked` and ask as the refusal says/);
     rule(W, "a provider error is not a review", /is not a review: create no other/);
@@ -614,6 +621,9 @@ describe("reviewer.md — review against the request, blocking vs not, one resul
     rule(R, "blocking", /\*\*BLOCKING — only when the batch is wrong or unsafe for what the owner asked:\*\*/);
     rule(R, "non-blocking", /\*\*NON-BLOCKING — everything else\*\*/);
     rule(R, "never upgrade a suggestion", /Never upgrade a suggestion/);
+    // Re-run finding H2 (bead bm-w6bh): a Reviewer flagged multiply and divide, which the owner asked for, as out of scope.
+    rule(R, "requested work is never out of scope", /\*\*Work the owner's request asks for is never out of scope\*\*, even beyond this batch's scope: never a finding/);
+    rule(R, "a scope finding needs a change neither the request nor the bead asks for", /a change neither the request nor the bead asks for/);
     rule(R, "the pair", /is \*\*blocking\*\* — an exploitable defect in what this batch built; .* is \*\*non-blocking\*\* — protection nobody asked for/);
   });
 
