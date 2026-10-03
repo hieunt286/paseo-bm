@@ -7,6 +7,7 @@ import {
   OUTBOX_SETTLED_LIMIT,
   OUTBOX_SETTLED_MS,
   capOutbox,
+  clearDroppedAlert,
   createOutbox,
   createOutboxResend,
   deliverRecord,
@@ -236,6 +237,39 @@ describe("delivery", () => {
     expect(w.sends).toEqual([]);
     expect(createOutbox(home).get(WS, record.id)).toMatchObject({ state: "dropped", reason: "the target is archived, closed or gone" });
     expect(createAlertStore(home).list({ open: true }).map((alert) => alert.kind)).toEqual(["delivery-dropped"]);
+  });
+
+  it("clears the request's delivery-dropped alert when a later record of it is delivered, never on an earlier one", async () => {
+    const home = dataFolder();
+    let clock = T0;
+    const w = world({ "mgr-1": { status: "running" }, "wrk-1": { status: "idle" } });
+    const d = { ...deps(home, w, [], () => clock) };
+    // An earlier record, still queued, then a drop.
+    const earlier = await storeAndDeliver(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: REPORT }, d);
+    expect(earlier.outcome).toBe("queued");
+    clock = new Date(T0.getTime() + 60_000);
+    await storeAndDeliver(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-gone", text: REPORT }, d);
+    const open = () => createAlertStore(home).list({ open: true }).map((alert) => `${alert.kind}:${alert.subject}`);
+    expect(open()).toEqual([`delivery-dropped:${REQ}`]);
+    // The earlier record reaches its target after the drop: the alert stays.
+    clock = new Date(T0.getTime() + 120_000);
+    w.set("mgr-1", { status: "idle" });
+    await w.turnEnded("mgr-1");
+    expect(createOutbox(home).get(WS, earlier.record.id)?.state).toBe("delivered");
+    expect(open()).toEqual([`delivery-dropped:${REQ}`]);
+    // A later record of another request changes nothing; a later one of this request clears it.
+    await storeAndDeliver(WS, { kind: "message", requestId: "req-20261003T110000Z", from: "mgr-1", to: "wrk-1", text: "Go on." }, d);
+    expect(open()).toEqual([`delivery-dropped:${REQ}`]);
+    w.set("wrk-1", { status: "idle" });
+    await storeAndDeliver(WS, { kind: "message", requestId: REQ, from: "mgr-1", to: "wrk-1", text: "Go on." }, d);
+    expect(open()).toEqual([]);
+  });
+
+  it("clearDroppedAlert clears the request's alert outright when its request finished or stopped", () => {
+    const home = dataFolder();
+    createAlertStore(home).raise({ workspaceId: WS, kind: "delivery-dropped", subject: REQ, detail: "x" });
+    expect(clearDroppedAlert(home, WS, REQ, null)).toEqual([`delivery-dropped:${WS}:${REQ}`]);
+    expect(createAlertStore(home).list({ open: true })).toEqual([]);
   });
 
   it("sends nothing when the record cannot be written", async () => {

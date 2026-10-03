@@ -91,6 +91,16 @@ const SKILL = /^[a-z0-9][a-z0-9-]*$/i;
 /** `b<n>: <finding>`; up to two short label words may sit before the colon (`b1 re-review: …`). */
 const FINDING_OPEN = /^b\d+(?: [A-Za-z][\w-]*){0,2}: \S[\s\S]*$/;
 const BLOCKERS_QUESTIONS = new RegExp(`^(\\d+) questions?: (Q\\d+(?:, Q\\d+)*) ${DASH} see BM-QUESTIONS\\b`);
+/** How a bound Worker's blocked report names the open questions it waits on (design §16.6, §16.11: `bm_report`'s `waitingOn`). */
+export const WAITING_ON_OWNER_PREFIX = "waiting on the owner:";
+/** How it names the other request or Worker it waits for (`bm_report`'s `waitingFor`). */
+export const WAITING_FOR_PREFIX = "waiting for:";
+/**
+ * The `blockers` of a blocked report that carries no `BM-QUESTIONS`: a bound
+ * Worker asked with `bm_questions` before and names what it waits on instead
+ * (design §16.11). Nothing else may leave its questions out.
+ */
+const BLOCKERS_WAITING = /^(?:waiting on the owner: Q\d+(?:, Q\d+)*(?:\.|$)|waiting for: \S)/;
 
 const REVIEW_FIELDS = ["requestId", "batchId", "reviewKind", "verdict", "checked", "findings", "notChecked"] as const;
 /** The free-text fields of BM-REVIEW: their value may run over several indented lines. */
@@ -296,7 +306,7 @@ function checkReport(block: RawBlock, questions: RawBlock | undefined, issue: (f
 
   if (phase === "blocked") {
     if (questions === undefined) {
-      issue(null, "a blocked report must be followed by a BM-QUESTIONS block in the same message");
+      if (!BLOCKERS_WAITING.test(seen.get("blockers") ?? "")) issue(null, "a blocked report must be followed by a BM-QUESTIONS block in the same message");
     } else {
       const ids = questionIds(questions);
       const match = BLOCKERS_QUESTIONS.exec(seen.get("blockers") ?? "");

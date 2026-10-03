@@ -307,12 +307,34 @@ export function preparedChangeRefusalText(decisionId: string): string {
   return `decision ${decisionId} carries a prepared change of the owner's settings; only the owner answers it`;
 }
 
+/**
+ * The subject of a question that asks the owner for more review calls (design
+ * §16.8): its options may carry a `grant`, and no precedent ever answers it.
+ */
+export const REVIEW_BUDGET_SUBJECT = "review-budget";
+/** The most review calls one `{ calls: n }` grant adds (design §16.6, §16.8). */
+export const MAX_REVIEW_GRANT_CALLS = 10;
+
+/**
+ * What choosing an option of a `review-budget` question grants (design §16.8):
+ * `{ calls: n }` raises the request's ceiling by n, `{ untilClean: b }` lets
+ * batch b go on until it passes. Additive on the option; only a
+ * `review-budget` question carries one (`bm_questions`).
+ */
+export const reviewGrantSchema = z.union([
+  z.object({ calls: z.number().int().min(1).max(MAX_REVIEW_GRANT_CALLS) }).strict(),
+  z.object({ untilClean: z.string().regex(/^b\d+$/) }).strict(),
+]);
+export type ReviewGrant = z.infer<typeof reviewGrantSchema>;
+
 export const decisionOptionSchema = z.object({
   key: z.string().regex(OPTION_KEY_PATTERN),
   label: z.string().min(1).max(MAX_DECISION_LABEL_CHARS),
   recommended: z.boolean(),
   effects: z.array(effectSchema).max(EFFECTS.length),
   action: preparedActionSchema.optional(),
+  /** A `review-budget` question's grant (design §16.8); absent on every other option. */
+  grant: reviewGrantSchema.optional(),
 });
 export type DecisionOption = z.infer<typeof decisionOptionSchema>;
 

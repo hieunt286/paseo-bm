@@ -226,6 +226,17 @@ describe("BM-REPORT rules", () => {
     expect(issuesOf(prose)).toEqual(['blockers: must start "2 questions: Q11, Q12 — see BM-QUESTIONS"']);
   });
 
+  it("a bound Worker's blocked report carries no BM-QUESTIONS when blockers names what it waits on (design §16.11)", () => {
+    expect(issuesOf(report({ phase: "blocked", blockers: "waiting on the owner: Q2, Q3" }))).toEqual([]);
+    expect(issuesOf(report({ phase: "blocked", blockers: "waiting on the owner: Q2. waiting for: request req-20261003T090000Z" }))).toEqual([]);
+    expect(issuesOf(report({ phase: "blocked", blockers: "waiting for: request req-20261003T090000Z. Suggestion (not done): a test" }))).toEqual([]);
+    expect(issuesOf(report({ phase: "stopped" }))).toEqual([]);
+    // Anything else still needs its questions.
+    for (const blockers of ["waiting on the owner: soon", "waiting for:", "waiting on the owner: Q2 and Q3"]) {
+      expect(issuesOf(report({ phase: "blocked", blockers })), blockers).toEqual(["-: a blocked report must be followed by a BM-QUESTIONS block in the same message"]);
+    }
+  });
+
   it("the marker is a bare line, and the block has no blank line inside", () => {
     expect(issuesOf(report().replace("BM-REPORT", "**BM-REPORT**"))).toEqual(["-: the block must start with the bare line BM-REPORT"]);
     const gap = report().replace("\nfilesChanged:", "\n\nfilesChanged:");

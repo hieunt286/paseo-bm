@@ -50,6 +50,13 @@
  * and gets the role's builder-only tools — never a 404, so a lost binding file
  * never costs an agent its tools. A token never reaches a log line or a result.
  *
+ * A caller bound with the tools of ship point C (design §16.6) gets its
+ * role's delivering tools (`deliver-tools.ts`) instead of the builders of the
+ * same name: its `bm_report`, `bm_review` and `bm_answers` store and deliver
+ * (or propose), and it has `bm_questions` (Worker) and `bm_tell_worker`
+ * (Manager). Every other caller of those builder names still gets the pure
+ * builder, with its send line.
+ *
  * Nothing here throws into the plugin: a failure is one log line and no tools.
  */
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -75,6 +82,9 @@ import { createWorkerCreationTools } from "./create-worker";
 import { createManagerTools, type ServerTools } from "./decision-tools";
 import { createOrchestratorTools, type OrchestratorTools } from "./orchestrator-tools";
 import { createWorkerTools } from "./decision-ask";
+import { createDeliveringTools, type DeliveringTools } from "./deliver-tools";
+import { currentTurnStartOf } from "./collector";
+import type { Decision } from "../shared/decisions";
 import { assertNoSymlinkOnPath, ensureStoreDir, writeStoreFileAtomically } from "./trace-store";
 
 /** Name of the MCP server in an agent's config; Claude shows the tools as `mcp__paseo-bm__<tool>`. */
@@ -207,6 +217,9 @@ export async function answerWithServerTools(
   if (typeof call.name !== "string" || !tools.has(call.name)) {
     return role === "orchestrator" ? failure(id, -32602, `Unknown tool: ${String(call.name)}`) : answer(role, message, bound);
   }
+  // A builder's name (bm_report, bm_review, bm_answers) delivers only for a bound caller (design §16.6);
+  // every other caller gets the builder, as before.
+  if (!bound && role !== "orchestrator" && toolNamed(call.name)?.role === role) return answer(role, message, bound);
   const result = await tools.call(call.name, call.arguments ?? {}, caller);
   return result.ok
     ? reply(id, { content: [{ type: "text", text: result.text }] })
@@ -289,12 +302,13 @@ interface HandleContext {
   orchestrator: OrchestratorTools;
   manager: ServerTools;
   worker: ServerTools;
+  reviewer: ServerTools;
   /** The per-agent bindings (design §16.5); null without a data folder. */
   bindings: BindingStore | null;
   log: (line: string) => void;
 }
 
-async function handle(request: IncomingMessage, response: ServerResponse, { secret, orchestrator, manager, worker, bindings, log }: HandleContext): Promise<void> {
+async function handle(request: IncomingMessage, response: ServerResponse, { secret, orchestrator, manager, worker, reviewer, bindings, log }: HandleContext): Promise<void> {
   // An agent's MCP client sends no Origin; a web page always does.
   if (request.headers.origin !== undefined) return send(response, 403);
   const host = (request.headers.host ?? "").replace(/:\d+$/, "").toLowerCase();
@@ -327,12 +341,15 @@ async function handle(request: IncomingMessage, response: ServerResponse, { secr
           ? await answerWithServerTools(role, message, manager, caller)
           : role === "worker"
             ? await answerWithServerTools(role, message, worker, caller)
-            : answer(role, message);
+            : await answerWithServerTools(role, message, reviewer, caller);
     // One line per call of a real tool, for the numbers of AT-5; an unknown tool is not worth one.
     if (reply !== null && "result" in reply && (message as JsonRpcRequest).method === "tools/call") {
       const name = String(((message as JsonRpcRequest).params as { name?: unknown }).name);
       const refused = (reply.result as { isError?: boolean }).isError === true;
-      const served = [...serverToolsFor(role), ...boundToolFacesFor(role)].some((face) => face.name === name);
+      // A bound tool of a builder's name is served only for a bound caller; anyone else got the builder.
+      const served =
+        serverToolsFor(role).some((face) => face.name === name) ||
+        (boundToolFacesFor(role).some((face) => face.name === name) && (hasCreationTools(caller) || toolNamed(name)?.role !== role));
       log(
         role === "orchestrator"
           ? `[paseo-bm] ${name} ${refused ? "refused a call" : "answered"} for the orchestrator`
@@ -510,6 +527,15 @@ export interface StartOptions {
   createWorker?: ServerTools;
   /** The Worker's server-run tools (`bm_reply`, change-014 Ask back); `createWorkerTools()` by default. */
   worker?: ServerTools;
+  /**
+   * The bound agents' delivering tools (design §16.6: `bm_report`,
+   * `bm_questions`, `bm_review`, `bm_answers`, `bm_tell_worker`), served
+   * beside each role's others; `createDeliveringTools` with this endpoint's
+   * Paseo handle and data folder by default.
+   */
+  delivering?: DeliveringTools;
+  /** Decisions a bound Worker's `bm_questions` opened: their `decision.opened` events (the event bus). */
+  onDecisionsOpened?: (opened: readonly Decision[], paseo: unknown) => unknown;
   /** The per-agent bindings; the data folder's `ui/agent-bindings.json` by default (design §16.5). */
   bindings?: BindingStore | null;
   /** The clock that stamps a new secret's `secretSince`; tests only. */
@@ -596,7 +622,7 @@ export function startAgentTools(options: StartOptions = {}): AgentToolsEndpoint 
   }
   const path = resolved.path;
   const orchestrator = options.orchestrator ?? createOrchestratorTools();
-  const worker = options.worker ?? createWorkerTools();
+  const baseWorker = options.worker ?? createWorkerTools();
   const { secret, since: secretSince } = orchestratorSecretOf(secretPathOf(path), (options.now ?? (() => new Date()))(), log);
   // Beside the port and the secret: `<data folder>/ui/agent-bindings.json` (design §16.5).
   const bindings = options.bindings !== undefined ? options.bindings : bindingStoreBeside(path, log);
@@ -607,12 +633,26 @@ export function startAgentTools(options: StartOptions = {}): AgentToolsEndpoint 
   // The last Paseo handle a hook or RPC brought: the creating tools need one (design §16.6).
   let paseoHandle: unknown = null;
   const home = dirname(dirname(path));
+  const delivering =
+    options.delivering ??
+    createDeliveringTools({
+      paseo: () => paseoHandle,
+      home: () => home,
+      log,
+      turnStartOf: currentTurnStartOf,
+      ...(options.onDecisionsOpened === undefined ? {} : { onOpened: options.onDecisionsOpened }),
+    });
   const manager = joinServerTools(
-    options.manager ?? createManagerTools(),
-    options.createWorker ?? createWorkerCreationTools({ binder: () => binder, paseo: () => paseoHandle, home: () => home, log }),
+    joinServerTools(
+      options.manager ?? createManagerTools(),
+      options.createWorker ?? createWorkerCreationTools({ binder: () => binder, paseo: () => paseoHandle, home: () => home, log }),
+    ),
+    delivering.manager,
   );
+  const worker = joinServerTools(baseWorker, delivering.worker);
+  const reviewer = delivering.reviewer;
   const server = createServer((request, response) => {
-    handle(request, response, { secret, orchestrator, manager, worker, bindings, log }).catch(() => send(response, 500));
+    handle(request, response, { secret, orchestrator, manager, worker, reviewer, bindings, log }).catch(() => send(response, 500));
   });
   const ready = (async () => {
     try {

@@ -5,6 +5,10 @@ import { toChatCards } from "../plugin/client/chat-card-parse";
 import { cardFrameOf } from "../plugin/client/chat-card-frame";
 import {
   AGENT_TOOLS,
+  BOUND_REPORT_TOOL,
+  QUESTIONS_FACE,
+  TELL_WORKER_FACE,
+  questionsRules,
   MANAGER_SERVER_TOOLS,
   ORCHESTRATOR_SERVER_TOOLS,
   WORKER_SERVER_TOOLS,
@@ -108,7 +112,7 @@ describe("bm_report", () => {
     expect(bad.ok).toBe(false);
     expect(!bad.ok && bad.issues).toEqual(
       expect.arrayContaining([
-        "input.phase: must be one of received, beads-done, blocked, finished",
+        "input.phase: must be one of received, beads-done, blocked, finished, stopped",
         "input.tier.level: must be one of Small, Medium, Large",
         "input.extra: is not a field of this tool",
       ]),
@@ -227,6 +231,68 @@ describe("bm_report", () => {
       expect(question).not.toHaveProperty("subject");
       expect(question!.options[0]).not.toHaveProperty("effects");
     });
+  });
+});
+
+describe("the bound tools (design §16.6)", () => {
+  const base = { requestId: REQ, tier: { level: "Medium" }, buildAndTests: "npm test: pass" };
+  const bound = (input: unknown) => BOUND_REPORT_TOOL.run(input);
+
+  it("bm_report builds a stopped report, bound or not", () => {
+    clean(text(run("bm_report", { ...base, phase: "stopped" })));
+    clean(text(bound({ ...base, phase: "stopped" })));
+    expect(text(bound({ ...base, phase: "stopped" }))).toContain("phase: stopped");
+  });
+
+  it("a bound blocked report names what it waits on in blockers, with no BM-QUESTIONS", () => {
+    const block = text(bound({ ...base, phase: "blocked", waitingOn: [`q:${REQ}:Q3`, `q:${REQ}:Q1`, `q:${REQ}:Q3`] }));
+    clean(block);
+    expect(block).toContain("blockers: waiting on the owner: Q1, Q3");
+    expect(block).not.toContain("BM-QUESTIONS");
+    const both = text(bound({ ...base, phase: "blocked", waitingOn: [`q:${REQ}:Q1`], waitingFor: "request req-20260924T000000Z\n(its schema)", blockers: "the CI is red" }));
+    clean(both);
+    expect(both).toContain("blockers: waiting on the owner: Q1. waiting for: request req-20260924T000000Z (its schema). the CI is red");
+  });
+
+  it("a bound bm_report refuses questions, a blocked report that waits on nothing, waits outside blocked and another request's question", () => {
+    const issues = (input: unknown) => {
+      const result = bound(input);
+      return result.ok ? [] : result.issues;
+    };
+    expect(issues({ ...base, phase: "blocked", questions: [] })).toEqual(["input.questions: is not a field of this tool"]);
+    expect(issues({ ...base, phase: "blocked" })[0]).toMatch(/^input\.waitingOn: a blocked report names what it waits on/);
+    expect(issues({ ...base, phase: "finished", waitingOn: [`q:${REQ}:Q1`] })).toEqual(["input.waitingOn: only a blocked report waits; leave it out"]);
+    expect(issues({ ...base, phase: "blocked", waitingOn: ["q:req-20260924T000000Z:Q1"] })).toEqual([`input.waitingOn[0]: q:req-20260924T000000Z:Q1 is not a question of ${REQ}`]);
+    expect(issues({ ...base, phase: "blocked", waitingOn: ["Q1"] })[0]).toMatch(/^input\.waitingOn\[0\]: must match/);
+    expect(issues({ ...base, phase: "blocked", waitingFor: "x".repeat(501) })).toEqual(["input.waitingFor: must be at most 500 characters"]);
+  });
+
+  it("bm_questions' rules: one recommended, keys in order, a grant only on review-budget and exactly one kind of grant", () => {
+    const options = (over: Array<Record<string, unknown>> = []) => [
+      { key: "a", text: "Yes", effects: ["none"], recommended: true, ...over[0] },
+      { key: "b", text: "No", effects: ["none"], ...over[1] },
+    ];
+    const question = (over: Record<string, unknown> = {}) => ({ text: "More reviews?", subject: "review-budget", class: "cost", options: options(), ...over });
+    expect(schemaIssues(QUESTIONS_FACE.inputSchema, { questions: [question()] })).toEqual([]);
+    expect(questionsRules({ questions: [question({ options: options([{ grant: { calls: 2 } }, { grant: { untilClean: "b1" } }]) })] } as never)).toEqual([]);
+    expect(questionsRules({ questions: [question({ subject: "push", options: options([{ grant: { calls: 2 } }]) })] } as never)).toEqual([
+      'input.questions[0].options[0].grant: only a question of subject "review-budget" grants',
+    ]);
+    expect(questionsRules({ questions: [question({ options: options([{ grant: {} }]) })] } as never)).toEqual(["input.questions[0].options[0].grant: give exactly one of calls or untilClean"]);
+    expect(questionsRules({ questions: [question({ options: options([{ recommended: false }]) })] } as never)).toEqual(["input.questions[0].options: exactly one option is recommended (found 0)"]);
+    expect(questionsRules({ questions: [question({ options: options([{}, { key: "c" }]) })] } as never)).toEqual(["input.questions[0].options[1].key: must be b (keys run a, b, c … in order)"]);
+    expect(schemaIssues(QUESTIONS_FACE.inputSchema, { questions: [question({ options: options([{ grant: { calls: 11 } }]) })] })).toEqual([
+      "input.questions[0].options[0].grant.calls: must be at most 10",
+    ]);
+    expect(schemaIssues(QUESTIONS_FACE.inputSchema, { questions: Array.from({ length: 6 }, () => question()) })).toEqual(["input.questions: takes at most 5 items"]);
+  });
+
+  it("bm_tell_worker's limits: text at most 8,000 characters, source at most 300", () => {
+    expect(schemaIssues(TELL_WORKER_FACE.inputSchema, { requestId: REQ, text: "x".repeat(8_000), source: "y".repeat(300) })).toEqual([]);
+    expect(schemaIssues(TELL_WORKER_FACE.inputSchema, { requestId: REQ, text: "x".repeat(8_001), source: "y".repeat(301) })).toEqual([
+      "input.text: must be at most 8000 characters",
+      "input.source: must be at most 300 characters",
+    ]);
   });
 });
 

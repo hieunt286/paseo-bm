@@ -1092,6 +1092,14 @@ Built (ship point B); described in §7.4.
 
 **As built (beads .7, .19).** `create-worker.ts`: `createPluginWorker` is the one creation path, used by `bm_create_worker` and the handoff successor. It takes the Worker's mode from `modeFactsOf("manager")` (the Worker rules, the action boundary included), creates `bm-worker/<model>` with `parent` = the Manager, title `Beads Worker`, `cwd` = the Manager's folder as Paseo reports it, and a binding issued with the creation tools; the brief carries a `managerAgentId:` line. `ToolCaller` has an optional `creationTools` (`hasCreationTools`, `isCreationBound`). `toolFacesFor(role, bound)` / `BOUND_SERVER_TOOLS`: a Manager bound with the creation tools gets `bm_create_worker`, `bm_answers`, `bm_decisions`; any other Manager keeps today's list. Bindings from `createManager`, the fallback Worker and the fallback Manager carry `creationTools: true`. A Paseo refusal removes the binding and leaves the request in the registry with no Worker. `NO_DATA_FOLDER_MESSAGE` answers when the data folder is unusable.
 
+
+**As built (beads .11, .22, .23, .24).** `deliver-tools.ts`. A caller bound with the creation tools gets the delivering `bm_report` and `bm_review` in place of the builders; every other caller keeps the builder and its send line, and the endpoint routes Reviewers through the server tools.
+- **`bm_report`** drops `questions` and takes `waitingOn` (open `q:` ids of the request, ≤ 10) and `waitingFor` (≤ 500 characters), both only with `phase: blocked`; `blockers` reads `waiting on the owner: Q1, Q3. waiting for: <text>`. It stores the record first; a `finished` report runs `expireQuestionsOf` (extracted from the materialiser), `stopped` expires nothing; `noteReport` sets the registry's `finishedAt` only for `finished`. It returns `{ recordId, delivery: sent | queued | dropped }`. `bm_review` also refuses a mismatched `batchId`.
+- **`bm_questions`** runs `openQuestions`, the materialiser's open path extracted and shared; it requires `key` (a, b, … in order), at least one `effects`, `subject` and `class`, refuses a `supersedes` naming no question of the request, records a precedent-answered question's delivery as `sent`, and passes what it opened to `eventBus.decisionsOpened`. Precedents never answer `subject: review-budget`.
+- **`bm_answers`** (`proposed-answers.ts`) keys proposals by the Manager and the collector's turn start mark (`currentTurnStartOf`); with no start mark (a reload during the turn) it refuses. "Open" means open or needs-confirmation; an option the question lacks is refused.
+- **`bm_tell_worker`** delivers the marker line, `Continue <id>.`, the text, then `source:` when given; a replaced Worker resolves to its successor; `relayRequestIdOf` also reads the `requestId` of a `bm_tell_worker` call.
+- **`delivery-dropped`** clears when a record of the request created at or after the alert is delivered, or when `bm_report` sends `finished` or `stopped` (`clearDroppedAlert`).
+
 ### 16.7 The outbox and the delivery markers (step 4)
 
 **Store.** `<data folder>/outbox/<workspaceId>.json`, `0600`, a `createJsonFileStore` store with a mutex.
@@ -1253,6 +1261,9 @@ When all three hold, the plugin stores and delivers a `no-verdict` record to its
 
 
 **As built (bead .10).** `stopped` counts as a working phase in `stageOf` and is skipped by `workPhaseOf`; labels "Stopped" (chip) and "<name> stopped" (timeline). Trace lines written before keep reading; `v` stays 1.
+
+
+**As built (bead .11, .22).** Two further additive changes: `checkBlocks` accepts a `blocked` report with no `BM-QUESTIONS` when its `blockers` line starts with `waiting on the owner: Q…` or `waiting for: …` (a bound Worker's questions are decisions, not a block); a decision option may carry `grant` (`{ calls: 1–10 } | { untilClean: "b<n>" }`, `shared/decisions.ts`) for review-budget grants (§16.8). An older build drops `grant` when it rewrites the decision.
 
 ### 16.12 Role files (step 5; ADR-027 decisions 8–9)
 

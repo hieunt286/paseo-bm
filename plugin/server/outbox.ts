@@ -17,7 +17,9 @@
  * 3. the outcome is recorded: `sent` → `delivered`, `queued` → `queued` (the
  *    queue's `onSent` marks it `delivered` when it goes out), `dropped` →
  *    `dropped` with its reason, one log line and the `delivery-dropped` Inbox
- *    alert naming the request.
+ *    alert naming the request. That alert clears when a later record of the
+ *    same request is delivered, or when the request reports `finished` or
+ *    `stopped` (`clearDroppedAlert`, from `bm_report`).
  *
  * A state only moves forward (`pending` → `queued` → `delivered` | `dropped`),
  * so a callback that arrives before the outcome it follows changes nothing.
@@ -263,6 +265,8 @@ export interface OutboxDeliveryDeps extends OutboxDeps {
   log?: (message: string) => void;
   /** Raises the `delivery-dropped` alert; the data folder's alert store by default. */
   raiseAlert?: (input: AlertInput) => void;
+  /** Clears the request's `delivery-dropped` alert raised before a delivered record (`clearDroppedAlert`); the data folder's alert store by default. */
+  clearAlert?: (workspaceId: string, record: OutboxRecord) => void;
 }
 
 /** The `delivery-dropped` alert of a record (§16.7): about its request, the record in its detail. */
@@ -273,6 +277,23 @@ export function droppedAlertOf(workspaceId: string, record: OutboxRecord): Alert
     subject: record.requestId,
     detail: `The ${record.kind} ${record.id} from ${record.from} to ${record.to} was not delivered: ${record.reason ?? "not delivered"}.`,
   };
+}
+
+/**
+ * Clears the `delivery-dropped` alert of `requestId` (§16.7, As built): a
+ * later record of the request was delivered — `after` is its creation time,
+ * and an alert raised after it stays — or the request reported `finished` or
+ * `stopped` (`after` null). Returns the cleared keys. Throws when the alert
+ * store cannot be written.
+ */
+export function clearDroppedAlert(home: string, workspaceId: string, requestId: string, after: string | null, deps: Pick<OutboxDeps, "now"> = {}): string[] {
+  return createAlertStore(home, deps).clearWhere(
+    (alert) =>
+      alert.kind === "delivery-dropped" &&
+      alert.workspaceId === workspaceId &&
+      alert.subject === requestId &&
+      (after === null || timeOrZero(after) >= timeOrZero(alert.since)),
+  );
 }
 
 /**
@@ -288,7 +309,17 @@ export async function deliverRecord(workspaceId: string, record: OutboxRecord, d
   const settle = (state: "queued" | "delivered" | "dropped", reason: string | null = null): void => {
     try {
       const result = outbox.settle(workspaceId, record.id, state, reason);
-      if (result === null || !result.changed || state !== "dropped") return;
+      if (result === null || !result.changed) return;
+      if (state === "delivered") {
+        // A later record of the request reached its target: the request's earlier drop is over.
+        try {
+          (deps.clearAlert ?? ((at: string, delivered: OutboxRecord) => void clearDroppedAlert(deps.home, at, delivered.requestId, delivered.createdAt, deps)))(workspaceId, result.record);
+        } catch (error) {
+          log(`[paseo-bm] could not clear the delivery-dropped alert of request ${record.requestId}: ${errorText(error)}`);
+        }
+        return;
+      }
+      if (state !== "dropped") return;
       log(`[paseo-bm] the ${record.kind} ${record.id} of request ${record.requestId} to ${record.to} was not delivered: ${result.record.reason ?? "not delivered"}.`);
       try {
         (deps.raiseAlert ?? ((input: AlertInput) => void createAlertStore(deps.home, deps).raise(input)))(droppedAlertOf(workspaceId, result.record));

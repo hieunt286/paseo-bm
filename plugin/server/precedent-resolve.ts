@@ -15,6 +15,8 @@
  *   not an intervention of the Orchestrator's and is not logged as one.
  *   Called where decisions open: the materialiser (`q:`), `bm_ask_owner`
  *   (`o:`) and the fallback incidents (`f:`, when their delivery can run).
+ *   The subject `review-budget` is never answered by a precedent (design
+ *   §16.8): one grant covers exactly the scope it states.
  * - **Suggested only** (a fallback incident's decision whose options the
  *   precedent names none of): the decision stays open and nothing is written;
  *   its card shows the precedent as a suggestion (`client/chat-card-precedent.ts`).
@@ -26,7 +28,7 @@
  * Never throws: a failure is one log line, and a decision it could not
  * resolve simply stays open for the owner.
  */
-import { answerDecision, decisionClassOf, type Decision } from "../shared/decisions";
+import { REVIEW_BUDGET_SUBJECT, answerDecision, decisionClassOf, type Decision } from "../shared/decisions";
 import { precedentReasonOf, precedentResolutionOf, precedentsContradictedBy, type Precedent } from "../shared/precedents";
 import { createDecisionStore, type DecisionStore } from "./decision-store";
 import { createPrecedentStore } from "./precedent-store";
@@ -72,6 +74,8 @@ export function resolveByPrecedent(decision: Decision, deps: PrecedentResolveDep
   const log = deps.log ?? defaultLog;
   const unchanged = (precedent: Precedent | null): PrecedentResolveResult => ({ decision, resolved: false, precedent });
   if (decision.status !== "open" || decision.subject === null) return unchanged(null);
+  // Design §16.8: one answer to a review budget covers exactly the scope it states, so no precedent answers it.
+  if (decision.subject === REVIEW_BUDGET_SUBJECT) return unchanged(null);
   const resolution = precedentResolutionOf(decision, activePrecedentsOf(decision.workspaceId, deps), deps.now);
   if (resolution === null) return unchanged(null);
   if (resolution.kind === "suggest") return unchanged(resolution.precedent);

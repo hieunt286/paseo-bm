@@ -186,6 +186,14 @@ export interface RequestRegistry {
   register(workspaceId: string, requestId: string, init: { source: RequestSource; managerId?: string | null; workerId?: string | null }): RegisteredRequest | null;
   /** Appends `workerId` to a registered request's Workers; false when the request is not registered. Throws when the file cannot be written. */
   addWorker(workspaceId: string, requestId: string, workerId: string): boolean;
+  /**
+   * A report of the request was stored (design §16.6, `bm_report`): `tier`
+   * becomes the report's, and `finishedAt` is `at` for a `finished` report and
+   * null for any other phase (a request its Worker goes on with is not
+   * finished; a stopped one is not either). False when the request is not
+   * registered. Throws when the file cannot be written.
+   */
+  noteReport(workspaceId: string, requestId: string, report: { tier: "Small" | "Medium" | "Large"; phase: string; at: string }): boolean;
 }
 
 /**
@@ -331,6 +339,19 @@ export function createRequestRegistry(home: string, deps: RequestRegistryDeps = 
         const request = requests[index]!;
         if (request.workerIds.includes(workerId)) return null;
         return requests.map((entry, at) => (at === index ? { ...entry, workerIds: [...entry.workerIds, workerId] } : entry));
+      });
+      return found;
+    },
+    noteReport(workspaceId, requestId, report) {
+      let found = false;
+      update(workspaceId, (requests) => {
+        const index = requests.findIndex((request) => request.requestId === requestId);
+        if (index === -1) return null;
+        found = true;
+        const request = requests[index]!;
+        const finishedAt = report.phase === "finished" ? report.at : null;
+        if (request.tier === report.tier && request.finishedAt === finishedAt) return null;
+        return requests.map((entry, at) => (at === index ? { ...entry, tier: report.tier, finishedAt } : entry));
       });
       return found;
     },

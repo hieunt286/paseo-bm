@@ -544,6 +544,21 @@ export function noteTurnStart(event: TurnStartedEvent, now: () => Date = () => n
   startMarks.set(markKey(event.agent.id, event.turnId), now().toISOString());
 }
 
+/**
+ * The start of `agentId`'s running turn as `noteTurnStart` marked it (the
+ * newest mark of the agent; a turn's mark goes when its record is written),
+ * or null — none after a plugin reload during the turn. `bm_answers` keys a
+ * bound Manager's proposed answers by it (design §16.6).
+ */
+export function currentTurnStartOf(agentId: string): string | null {
+  const prefix = `${agentId}::`;
+  let newest: string | null = null;
+  for (const [key, at] of startMarks) {
+    if (key.startsWith(prefix) && (newest === null || at > newest)) newest = at;
+  }
+  return newest;
+}
+
 /** Test helper: forget every start mark. */
 export function clearStartMarks(): void {
   startMarks.clear();
@@ -558,17 +573,28 @@ export function clearStartMarks(): void {
  */
 const RELAY_REQUEST_ID = /^\s*[*_`]*Continue[*_`]*\s+[*_`]*(req-\d{8}T\d{6}Z)\b/;
 
+/** A bound Manager's tool that delivers to a request's Worker (design §16.6): its `requestId` names the request it resumes. */
+const TELL_WORKER_TOOL = "bm_tell_worker";
+const REQUEST_ID_INPUT = /^req-\d{8}T\d{6}Z$/;
+
 /**
- * The request a `send_agent_prompt` tool call resumes, or null. The tool name
- * may carry an MCP prefix (`mcp__paseo__send_agent_prompt`), so only the part
- * after the last `__` is compared.
+ * The request a `send_agent_prompt` tool call resumes — its prompt opens with
+ * `Continue <requestId>` — or the one a bound Manager's `bm_tell_worker` call
+ * names (design §16.6: the plugin delivers `Continue <requestId>.` for it), or
+ * null. The tool name may carry an MCP prefix (`mcp__paseo__send_agent_prompt`,
+ * `mcp__paseo-bm__bm_tell_worker`, `paseo-bm.bm_tell_worker`), so only the
+ * part after the last `__` (and, for `bm_tell_worker`, a `<server>.` prefix) is compared.
  */
 export function relayRequestIdOf(item: TimelineItem): string | null {
   if (item.type !== "tool_call") return null;
   const call = item as { name?: unknown; detail?: { input?: unknown } };
-  if (typeof call.name !== "string" || call.name.split("__").pop() !== "send_agent_prompt") return null;
+  if (typeof call.name !== "string") return null;
+  const name = call.name.split("__").pop()!;
   const input = call.detail?.input;
-  const prompt = input !== null && typeof input === "object" ? (input as { prompt?: unknown }).prompt : undefined;
+  const fields = input !== null && typeof input === "object" ? (input as { prompt?: unknown; requestId?: unknown }) : undefined;
+  if (name === TELL_WORKER_TOOL || name.endsWith(`.${TELL_WORKER_TOOL}`)) return typeof fields?.requestId === "string" && REQUEST_ID_INPUT.test(fields.requestId) ? fields.requestId : null;
+  if (name !== "send_agent_prompt") return null;
+  const prompt = fields?.prompt;
   return typeof prompt === "string" ? (RELAY_REQUEST_ID.exec(prompt)?.[1] ?? null) : null;
 }
 

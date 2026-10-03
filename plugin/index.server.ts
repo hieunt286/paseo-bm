@@ -187,6 +187,9 @@ export default function contribute(server: PluginServerContext): () => void {
       // Autonomy design §G.6: bm_handoff hands its handoff to the runner the turn ends below advance.
       handoff: handoffs,
     }),
+    // Design §16.6: a bound Worker's bm_questions opens decisions outside a recorded turn; the policy's
+    // decision.opened events go to the Orchestrator as a fallback incident's do.
+    onDecisionsOpened: (opened, paseo) => eventBus.decisionsOpened(opened, paseo),
   });
   // Orchestrator design §8: the `orchestrator.*` RPCs. An Orchestrator created
   // before the endpoint's stored secret was made has an old URL (§5.1).

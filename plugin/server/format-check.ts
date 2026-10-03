@@ -36,12 +36,18 @@
  *   Manager is woken after every Worker turn and a Worker when its Reviewer
  *   finishes (both `notifyOnFinish` by default). Answers have no such
  *   guarantee: that notice may never go, and the card chip still shows.
+ * - **Never to a block a tool delivered.** A sender with a tool-built outbox
+ *   record of the block's request and kind (a bound Worker's report, a bound
+ *   Reviewer's review, design §16.7) is skipped: its block went out through the
+ *   tool, which checked it; the forgiving readers and this check stay for
+ *   unbound agents.
  * - **Bounded.** One notice per distinct block, at most `MAX_NOTICES` per
  *   sender, request and kind. State lives in memory; a reload starts afresh
  *   and never re-reads old blocks.
  *
  * Nothing here throws into an agent's turn end: a failure costs one log line.
  */
+import { dirname } from "node:path";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { checkBlocks, issueText, type BlockKind, type CheckedBlock } from "../shared/bm-format";
 import { roleOfProvider, type BmRole } from "./agent-role";
@@ -51,6 +57,7 @@ import { bmAgentsOf, type DashboardPaseo } from "./paseo-directory";
 import { FORMAT_NOTICE_MARKER } from "./notices";
 import { originOf } from "../shared/message-origin";
 import { readRecords } from "./trace-store";
+import { createOutbox, type OutboxRecord } from "./outbox";
 import { requestIdOfAgent, type AgentFacts } from "./traces";
 import { errorText } from "./rpc-kit";
 
@@ -121,6 +128,39 @@ export interface FormatDeps {
   /** Pause between own-turn re-reads; tests pass an instant one. */
   sleep?: (ms: number) => Promise<void>;
   homedir?: () => string;
+  /**
+   * The workspace's outbox records (design §16.7): a sender with a tool-built
+   * record of the block's request and kind is never told. The data folder's
+   * outbox by default; none when it cannot be read.
+   */
+  toolRecordsOf?: (workspaceId: string) => Promise<ReadonlyArray<Pick<OutboxRecord, "from" | "kind" | "requestId">>>;
+}
+
+/** The outbox record a tool builds for each kind of block a bound agent delivers (design §16.6); `BM-ANSWERS` has none. */
+const RECORD_KIND_OF: Partial<Record<BlockKind, OutboxRecord["kind"]>> = { "BM-REPORT": "report", "BM-QUESTIONS": "report", "BM-REVIEW": "review" };
+
+async function defaultToolRecordsOf(deps: FormatDeps, workspaceId: string): Promise<ReadonlyArray<Pick<OutboxRecord, "from" | "kind" | "requestId">>> {
+  try {
+    const location = await requireLocation(directoryOf(deps.paseo), { homedir: deps.homedir });
+    return createOutbox(dirname(location.tracesDir)).list(workspaceId);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * True when `senderId` has a tool-built record (an outbox `report` or `review`,
+ * design §16.7) of the unit's request and kind: a bound agent's block was
+ * built and delivered by its tool, so a block in its words is not checked —
+ * a bound Reviewer's one-line close, or a stray copy, never earns a
+ * `BM-FORMAT` (design §7.6, §16.6). A unit naming no request matches any
+ * record of the kind.
+ */
+async function hasToolRecord(deps: FormatDeps, workspaceId: string | null, senderId: string, unit: Pick<Unit, "kind" | "requestId">): Promise<boolean> {
+  const kind = RECORD_KIND_OF[unit.kind];
+  if (kind === undefined || workspaceId === null) return false;
+  const records = await (deps.toolRecordsOf ?? ((ws: string) => defaultToolRecordsOf(deps, ws)))(workspaceId);
+  return records.some((record) => record.from === senderId && record.kind === kind && (unit.requestId === null || record.requestId === unit.requestId));
 }
 
 export type FormatOutcome = "ignored" | "checked";
@@ -284,6 +324,11 @@ async function detect(event: FormatTurnEvent, role: BmRole, deps: FormatDeps, lo
       continue;
     }
     const key = `${sender.id}|${unit.requestId ?? "?"}|${unit.kind}`;
+    if (unit.issues.length > 0 && (await hasToolRecord(deps, event.agent.workspaceId, sender.id, unit))) {
+      deps.state.pending.delete(key);
+      log(`[paseo-bm] a ${unit.kind} for ${unit.requestId ?? "an unknown request"} from ${sender.id} breaks the template, but its tool built and delivered that block; no BM-FORMAT sent.`);
+      continue;
+    }
     if (unit.issues.length === 0) {
       deps.state.pending.delete(key);
       continue;

@@ -12,7 +12,12 @@
  * | a Worker | the owner's typed messages holding `BM-ANSWERS` | settles the named decisions, `via: chat-worker` (c) |
  * | a Worker | any other owner text while its request has open questions | marks those asked before it `needs-confirmation` (c) |
  * | a Manager | inbound messages that are not the owner's, holding a `finished` `BM-REPORT` | expires that request's unsettled questions asked up to it (§A.3) |
+ * | a bound Manager whose inbound messages include the owner's typed one | the answers it proposed with `bm_answers` in this turn (`proposed-answers.ts`) | settles them, `via: chat-manager` (design §16.6); without the owner's message they are dropped |
  *
+ * A bound Worker's questions and its `finished` report reach no Manager as
+ * blocks: `bm_questions` opens them through the same open path
+ * (`openQuestions`) and `bm_report` expires through the same expiry
+ * (`expireQuestionsOf`), both in `deliver-tools.ts`.
  * - **Origin.** A trace message's `origin` is `user` only when it was typed in
  *   the app (it carries `clientMessageId` and is not a plugin notice); a
  *   `BM-COMMAND` and every plugin notice are `agent` (`collector.ts`). A
@@ -96,6 +101,7 @@ import {
   type Decision,
   type DecisionOption,
   type DecisionReversal,
+  type ReviewGrant,
 } from "../shared/decisions";
 import { parseCommandBlock } from "../shared/orchestrator-command";
 import { BR_REOPEN } from "../shared/shell";
@@ -105,6 +111,7 @@ import type { OnDecisionsSettled } from "./decision-rpc";
 import { isPluginNotice } from "./notices";
 import { resolveAtOpen } from "./policy-resolve";
 import { supersedePrecedentsBy } from "./precedent-resolve";
+import { takeProposedAnswers } from "./proposed-answers";
 import type { TraceStoreLocation } from "./trace-store";
 import { errorText } from "./rpc-kit";
 
@@ -379,26 +386,37 @@ export const workerOfRequest: WorkerLookup = async ({ requestId, workspaceId, ma
   return workers.length === 1 ? workers[0]!.facts.id : null;
 };
 
-interface Context {
+/**
+ * What opening questions writes through and reports to (§A.5 a): the
+ * materialiser's turn context, or a bound Worker's `bm_questions` (design
+ * §16.6), which shares the open path.
+ */
+export interface OpenContext {
   /** The data folder: the precedents are read from it (§B.6). */
   home: string;
   store: DecisionStore;
-  record: TraceRecord;
+  workspaceId: string;
+  /** Now, as ISO. */
   now: string;
   log: (message: string) => void;
+  outcome: Pick<MaterialiseOutcome, "opened" | "superseded" | "answered" | "reversed">;
+}
+
+interface Context extends OpenContext {
+  record: TraceRecord;
   outcome: MaterialiseOutcome;
 }
 
-function questionsOfRequest(context: Context, requestId: string): Decision[] {
+function questionsOfRequest(context: Pick<OpenContext, "store" | "workspaceId">, requestId: string): Decision[] {
   return context.store
-    .list({ workspaceId: context.record.workspaceId, requestId })
+    .list({ workspaceId: context.workspaceId, requestId })
     .filter((decision) => decisionKindOf(decision.id) === "question");
 }
 
 /** The request's Worker questions and the owner's overrides of them (§B.7): what its `finished` report expires. */
-function expirableOfRequest(context: Context, requestId: string): Decision[] {
+function expirableOfRequest(context: Pick<OpenContext, "store" | "workspaceId">, requestId: string): Decision[] {
   return context.store
-    .list({ workspaceId: context.record.workspaceId, requestId })
+    .list({ workspaceId: context.workspaceId, requestId })
     .filter((decision) => deliveryKindOf(decision) === "question");
 }
 
@@ -407,13 +425,13 @@ function expirableOfRequest(context: Context, requestId: string): Decision[] {
  * earlier than the answer, and it is not recorded yet; writes nothing
  * otherwise.
  */
-function reverse(context: Context, id: string, reversal: DecisionReversal): void {
+function reverse(context: Pick<OpenContext, "store" | "workspaceId" | "log" | "outcome">, id: string, reversal: DecisionReversal): void {
   try {
-    const decision = context.store.get(id, context.record.workspaceId);
+    const decision = context.store.get(id, context.workspaceId);
     if (decision === null || decision.status !== "answered" || decision.answer === null) return;
     if (Date.parse(reversal.at) < Date.parse(decision.answer.at)) return;
     if ((decision.reversals ?? []).some((entry) => entry.kind === reversal.kind && entry.ref === reversal.ref)) return;
-    const mutation = context.store.transition(id, (current) => recordReversal(current, reversal), context.record.workspaceId);
+    const mutation = context.store.transition(id, (current) => recordReversal(current, reversal), context.workspaceId);
     if (mutation.status === "updated" && (mutation.decision.reversals?.length ?? 0) > (decision.reversals?.length ?? 0)) {
       context.outcome.reversed.push(mutation.decision);
     }
@@ -440,13 +458,23 @@ function reverseReopened(context: Context): void {
   }
 }
 
-function optionsOf(question: Question): DecisionOption[] {
+/** A question to open: a `BM-QUESTIONS` block's, or a bound Worker's `bm_questions` (design §16.6), whose options may carry a grant. */
+export type OpenableQuestion = Omit<Question, "options"> & { options: Array<Question["options"][number] & { grant?: ReviewGrant }> };
+
+function optionsOf(question: OpenableQuestion): DecisionOption[] {
   return question.options.map((option) => ({
     key: option.key,
     label: option.text.trim() === "" ? option.key : option.text,
     recommended: option.recommended,
     effects: option.effects ?? [],
+    ...(option.grant === undefined ? {} : { grant: option.grant }),
   }));
+}
+
+/** The questions of `questions` not stored yet for the request. */
+function freshQuestions(context: Pick<OpenContext, "store" | "workspaceId">, requestId: string, questions: readonly OpenableQuestion[]): OpenableQuestion[] {
+  const ids = new Set(questionsOfRequest(context, requestId).map((decision) => decision.id));
+  return questions.filter((question) => !ids.has(questionDecisionId(requestId, question.id)));
 }
 
 /** Opens the questions of one `BM-QUESTIONS` block (§A.5 a). */
@@ -456,16 +484,39 @@ async function openBlock(
   message: TraceMessage,
   askedBy: () => Promise<string | null>,
 ): Promise<void> {
-  const { store, record } = context;
-  const existing = questionsOfRequest(context, block.requestId);
-  const ids = new Set(existing.map((decision) => decision.id));
-  const fresh = block.questions.filter((question) => !ids.has(questionDecisionId(block.requestId, question.id)));
+  if (freshQuestions(context, block.requestId, block.questions).length === 0) return;
+  const agentId = await askedBy();
+  openQuestions(context, { requestId: block.requestId, questions: block.questions, askedBy: agentId, askedAt: validIso(message.at, context.now) });
+}
+
+/**
+ * The shared open path (§A.5 a; design §16.6): opens each question of
+ * `questions` not stored yet as `q:<requestId>:<Qn>`, asked by the Worker
+ * `askedBy` at `askedAt` — its class checked against its options' effects,
+ * superseding the question it names or one of the same text, its round shared
+ * with the others, its recommended option as the prediction — and lets an
+ * active precedent answer it at once (`resolveAtOpen`; never on a subject a
+ * precedent already answered in the request, never on `review-budget`).
+ * Records what it opened, superseded, answered and reversed in
+ * `context.outcome`. Synchronous, so a caller that numbers the questions
+ * first opens them before anything else reads the store. Never throws: a
+ * failure is one log line.
+ */
+export function openQuestions(
+  context: OpenContext,
+  input: { requestId: string; questions: readonly OpenableQuestion[]; askedBy: string | null; askedAt: string },
+): void {
+  const { store } = context;
+  const requestId = input.requestId;
+  const existing = questionsOfRequest(context, requestId);
+  const fresh = freshQuestions(context, requestId, input.questions);
   if (fresh.length === 0) return;
 
-  const storedRound = existing.find((decision) => block.questions.some((question) => decision.id === questionDecisionId(block.requestId, question.id)))?.round;
+  const storedRound = existing.find((decision) => input.questions.some((question) => decision.id === questionDecisionId(requestId, question.id)))?.round;
   const round = storedRound ?? existing.reduce((highest, decision) => Math.max(highest, decision.round ?? 0), 0) + 1;
-  const agentId = await askedBy();
-  const askedAt = validIso(message.at, context.now);
+  const agentId = input.askedBy;
+  const askedAt = input.askedAt;
+  const block = { requestId };
 
   for (const question of fresh) {
     const id = questionDecisionId(block.requestId, question.id);
@@ -481,7 +532,7 @@ async function openBlock(
     const options = optionsOf(question);
     const decision: Decision = {
       id,
-      workspaceId: record.workspaceId,
+      workspaceId: context.workspaceId,
       requestId: block.requestId,
       askedBy: { role: "worker", agentId },
       askedAt,
@@ -537,18 +588,18 @@ async function openBlock(
 }
 
 /** Settles the decisions one `BM-ANSWERS` block names. */
-function settleBlock(context: Context, block: { requestId: string; answers: Answer[] }, via: AnswerVia, at: string): void {
+function settleBlock(context: Context, block: { requestId: string; answers: readonly Answer[] }, via: AnswerVia, at: string): void {
   for (const answer of block.answers) {
     const id = questionDecisionId(block.requestId, answer.id);
     try {
-      const decision = context.store.get(id, context.record.workspaceId);
+      const decision = context.store.get(id, context.workspaceId);
       if (decision === null) continue;
       const input = answerInputOf(decision, answer.text);
       if (input === null) continue;
       const mutation = context.store.transition(
         id,
         (current) => answerDecision(current, { via, at, ...("optionKey" in input ? { optionKey: input.optionKey } : { words: input.words }) }),
-        context.record.workspaceId,
+        context.workspaceId,
       );
       if (mutation.status === "updated") {
         context.outcome.answered.push(mutation.decision);
@@ -576,7 +627,7 @@ function markOpen(context: Context, requestId: string, message: TraceMessage, vi
       const mutation = context.store.transition(
         decision.id,
         (current) => markNeedsConfirmation(current, { via, at }),
-        context.record.workspaceId,
+        context.workspaceId,
       );
       if (mutation.status === "updated") context.outcome.marked.push(mutation.decision);
     } catch (error) {
@@ -626,11 +677,21 @@ async function materialiseManager(context: Context, deps: MaterialiserDeps): Pro
     if (block !== null && block.questions.length > 0) await openBlock(context, block, message, askedBy(block.requestId));
   }
 
-  // (b) The Manager's own block settles nothing unless the owner typed in this turn.
+  // (b) The Manager's own block settles nothing unless the owner typed in this turn. Neither do the
+  // answers a bound Manager proposed with bm_answers in this turn (design §16.6): taken now, either way.
+  const proposed = takeProposedAnswers(record.agentId, record.startedAt);
   const owner = record.sent.filter((message) => message.origin === "user");
-  if (owner.length === 0) return;
+  if (owner.length === 0) {
+    if (proposed.length > 0) {
+      context.log(
+        `[paseo-bm] the answers Manager ${record.agentId} proposed for ${proposed.map((entry) => entry.requestId).join(", ")} were not settled: its turn holds no message of the owner's.`,
+      );
+    }
+    return;
+  }
   const at = validIso(owner.at(-1)!.at, context.now);
   for (const block of replyBlocks(record)) settleBlock(context, block, "chat-manager", at);
+  for (const block of proposed) settleBlock(context, block, "chat-manager", at);
 }
 
 /**
@@ -653,6 +714,29 @@ function finishedReportsOf(context: Context): Array<{ requestId: string; at: str
 }
 
 /**
+ * The shared expiry (§A.3; design §16.6, a bound Worker's `finished`
+ * `bm_report`): every Worker question of `requestId`, and the owner's
+ * override of one (§B.7), still unsettled and asked no later than `at`
+ * becomes `expired` at `at`, each in its own write re-checked on the stored
+ * decision, so an answer given meanwhile stands. Returns the expired ones.
+ * Never throws: a failure is one log line.
+ */
+export function expireQuestionsOf(context: Pick<OpenContext, "store" | "workspaceId" | "log">, requestId: string, at: string): Decision[] {
+  const until = Date.parse(at);
+  const expired: Decision[] = [];
+  for (const decision of expirableOfRequest(context, requestId)) {
+    if (!isAnswerable(decision) || !(Date.parse(decision.askedAt) <= until)) continue;
+    try {
+      const mutation = context.store.transition(decision.id, (current) => expireDecision(current, { at }), context.workspaceId);
+      if (mutation.status === "updated") expired.push(mutation.decision);
+    } catch (error) {
+      context.log(`[paseo-bm] could not expire decision ${decision.id}: ${errorText(error)}`);
+    }
+  }
+  return expired;
+}
+
+/**
  * Expiry (§A.3): a request's `finished` report expires its Worker questions,
  * and the owner's overrides of them (§B.7), still unsettled and asked no later
  * than the report — the Worker no longer
@@ -660,18 +744,7 @@ function finishedReportsOf(context: Context): Array<{ requestId: string; at: str
  * decision, so an answer given meanwhile stands.
  */
 function expireFinished(context: Context): void {
-  for (const report of finishedReportsOf(context)) {
-    const until = Date.parse(report.at);
-    for (const decision of expirableOfRequest(context, report.requestId)) {
-      if (!isAnswerable(decision) || !(Date.parse(decision.askedAt) <= until)) continue;
-      try {
-        const mutation = context.store.transition(decision.id, (current) => expireDecision(current, { at: report.at }), context.record.workspaceId);
-        if (mutation.status === "updated") context.outcome.expired.push(mutation.decision);
-      } catch (error) {
-        context.log(`[paseo-bm] could not expire decision ${decision.id}: ${errorText(error)}`);
-      }
-    }
-  }
+  for (const report of finishedReportsOf(context)) context.outcome.expired.push(...expireQuestionsOf(context, report.requestId, report.at));
   // A question opened and expired in this same turn is handed on as stored, so no event asks about it.
   if (context.outcome.expired.length === 0) return;
   const expired = new Map(context.outcome.expired.map((decision) => [decision.id, decision]));
@@ -706,6 +779,7 @@ export async function materialiseTurn(record: TraceRecord, deps: MaterialiserDep
     const context: Context = {
       home: deps.home,
       store: createDecisionStore(deps.home, { log }),
+      workspaceId: record.workspaceId,
       record,
       now: (deps.now ?? (() => new Date()))().toISOString(),
       log,

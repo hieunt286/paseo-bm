@@ -387,6 +387,35 @@ describe("reviews and answers", () => {
   });
 });
 
+describe("a block a tool built and delivered (design §16.6, §16.7)", () => {
+  const badReview = ["BM-REVIEW", `requestId: ${REQ}`, "batchId: b1", "reviewKind: first", "verdict: approved", "checked: the diff", "findings: none", "notChecked: none"].join("\n");
+
+  it("never tells a sender with a tool-built record of the block's request and kind", async () => {
+    const { sends, deps, logs } = world([manager(), worker(), reviewer()]);
+    const records = [
+      { from: "rev", kind: "review" as const, requestId: REQ },
+      { from: "wrk", kind: "report" as const, requestId: REQ },
+    ];
+    const bound = { ...deps, toolRecordsOf: async (workspaceId: string) => (workspaceId === WS ? records : []) };
+    // A bound Reviewer's close that quotes a broken block, and a stray copy of a broken report.
+    await checkTurnFormat(turn(reviewer(), [received("please review"), said(`Done.\n\n${badReview}`)]), bound);
+    await checkTurnFormat(turn(manager(), [received(report("blocked", false))]), bound);
+    expect(sends).toEqual([]);
+    expect(deps.state.pending.size).toBe(0);
+    expect(logs.filter((line) => line.includes("its tool built and delivered that block"))).toHaveLength(2);
+  });
+
+  it("still tells an unbound sender, or one whose record is of another request or kind", async () => {
+    const { sends, deps } = world([manager(), worker(), reviewer()]);
+    const records = [
+      { from: "rev", kind: "review" as const, requestId: "req-20260918T000000Z" },
+      { from: "rev", kind: "report" as const, requestId: REQ },
+    ];
+    await checkTurnFormat(turn(reviewer(), [received("please review"), said(badReview)]), { ...deps, toolRecordsOf: async () => records });
+    expect(sends.map((send) => send.id)).toEqual(["rev"]);
+  });
+});
+
 describe("robustness", () => {
   it("ignores other providers and never throws on malformed events", async () => {
     const { sends, deps } = world([manager(), worker()]);

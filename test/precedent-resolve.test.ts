@@ -292,6 +292,25 @@ describe("resolving a decision at open", () => {
 // The owner's differing answer supersedes (REQ-124 c).
 // ---------------------------------------------------------------------------
 
+describe("the review budget (design §16.8)", () => {
+  it("a precedent never answers a review-budget question: one grant covers exactly the scope it states", () => {
+    save({ subject: "review-budget", text: "Two more calls" });
+    const budget = question({
+      subject: "review-budget",
+      class: "cost",
+      question: "Review budget reached: allow more review calls?",
+      options: [
+        { key: "a", label: "Two more calls", recommended: true, effects: ["none"], grant: { calls: 2 } },
+        { key: "b", label: "No more reviews", recommended: false, effects: ["none"] },
+      ],
+    });
+    const result = openAndResolve(budget);
+    expect(result).toMatchObject({ resolved: false, precedent: null });
+    expect(decisions().get(budget.id, DECISION_WS)).toMatchObject({ status: "open", answer: null });
+    expect(decisions().get(budget.id, DECISION_WS)?.options[0]?.grant).toEqual({ calls: 2 });
+  });
+});
+
 describe("an owner's answer on the same subject", () => {
   const rpcDeps = () => ({ env: { PASEO_BM_HOME: home }, homedir: () => root, now: () => NOW, log });
 

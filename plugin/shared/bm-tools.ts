@@ -39,7 +39,7 @@
  * check built with Zod (the daemon's copy of Zod is the host's, not ours).
  */
 import { AUTONOMY_MODES } from "./autonomy";
-import { checkBlocks, issueText, type BlockKind } from "./bm-format";
+import { WAITING_FOR_PREFIX, WAITING_ON_OWNER_PREFIX, checkBlocks, issueText, type BlockKind } from "./bm-format";
 import { MAX_OPTIONS, MAX_SUBJECT_CHARS } from "./bm-questions";
 import { COORDINATION_KEYS, coordinationRuleOf } from "./coordination";
 import {
@@ -50,9 +50,11 @@ import {
   MAX_ASK_OWNER_LABEL_CHARS,
   MAX_ASK_OWNER_OPTIONS,
   MAX_ASK_OWNER_RECOMMENDATION_CHARS,
+  MAX_DECISION_LABEL_CHARS,
   MAX_DECISION_TEXT_CHARS,
   OPTION_KEY_PATTERN,
   PREPARED_CHANGE_KINDS,
+  REVIEW_BUDGET_SUBJECT,
   SUBJECT_PATTERN,
   type DecisionClass,
 } from "./decisions";
@@ -103,6 +105,8 @@ const BATCH_ID: JsonSchema = { type: "string", pattern: "^b\\d+$", description: 
 const TEXT: JsonSchema = { type: "string", minLength: 1 };
 const PROSE: JsonSchema = { type: "string", minLength: 1, maxLength: 4000 };
 const TIERS = ["Small", "Medium", "Large"] as const;
+/** A report's phases; `stopped` is a stopped run's (design §16.6, §16.11). */
+const REPORT_PHASES = ["received", "beads-done", "blocked", "finished", "stopped"] as const;
 const QUESTION_ID: JsonSchema = { type: "string", pattern: "^Q[1-9]\\d{0,2}$", description: "Q1, Q2, … counted across the whole request." };
 /** What the question reader takes for a recommendation, anywhere in an option. */
 const RECOMMENDED_MARK = /[([]\s*recommended\s*[)\]]/i;
@@ -257,6 +261,8 @@ interface BlockToolSpec<T> {
   build: (input: T) => string;
   /** The blocks `build` writes for this input, in order. */
   kinds: (input: T) => BlockKind[];
+  /** What the description ends with; how to send the block (`SEND`) by default. A bound tool delivers it itself. */
+  suffix?: string;
 }
 
 const SEND = "Arguments are JSON: leave out a field you have nothing for. Returns the block; send it verbatim, as the whole block, in the message you were going to send. On error, fix the listed fields and call again.";
@@ -265,7 +271,7 @@ function tool<T>(spec: BlockToolSpec<T>): AgentTool {
   return {
     name: spec.name,
     role: spec.role,
-    description: `${spec.description} ${SEND}`,
+    description: `${spec.description} ${spec.suffix ?? SEND}`,
     inputSchema: spec.inputSchema,
     run(raw) {
       const input = withoutNulls(raw);
@@ -295,7 +301,7 @@ function tool<T>(spec: BlockToolSpec<T>): AgentTool {
 
 interface ReportInput {
   requestId: string;
-  phase: "received" | "beads-done" | "blocked" | "finished";
+  phase: "received" | "beads-done" | "blocked" | "finished" | "stopped";
   tier: { level: (typeof TIERS)[number]; changedFrom?: (typeof TIERS)[number]; reason?: string; note?: string };
   filesChanged?: string[];
   beadsCreated?: string[];
@@ -318,6 +324,10 @@ interface ReportInput {
     class?: DecisionClass;
     options: Array<{ text: string; recommended?: boolean; effects?: Array<(typeof EFFECTS)[number]> }>;
   }>;
+  /** A bound Worker's blocked report (design §16.6): the open questions (`q:` ids) it waits on. */
+  waitingOn?: string[];
+  /** A bound Worker's blocked report: the other request or Worker it waits for. */
+  waitingFor?: string;
 }
 
 /** Empty is `[]` or left out; a model used to the text template writes `none`, which is not JSON (live run, 2026-09-24). */
@@ -369,7 +379,11 @@ const REPORT_SCHEMA: JsonSchema = {
   required: ["requestId", "phase", "tier", "buildAndTests"],
   properties: {
     requestId: REQUEST_ID,
-    phase: { type: "string", enum: ["received", "beads-done", "blocked", "finished"] },
+    phase: {
+      type: "string",
+      enum: REPORT_PHASES,
+      description: "stopped when your run was stopped before the work was done; never finished then.",
+    },
     tier: {
       type: "object",
       additionalProperties: false,
@@ -484,9 +498,30 @@ function splitBlockers(blockers: string | undefined): { waits: string | null; su
   return { waits: waits === "" || NOTHING.test(waits) ? null : line(waits), suggested: rest.map((part) => part.replace(/^[\s.;,]+|[\s.;,]+$/g, "")).filter((part) => part !== "") };
 }
 
+/** `Qn` of a `q:<requestId>:<Qn>` decision id. */
+function questionNumberOf(decisionId: string): string {
+  return decisionId.slice(decisionId.lastIndexOf(":") + 1);
+}
+
+/**
+ * What a bound Worker's blocked report waits on (design §16.6, §16.11), as
+ * its `blockers` line opens: `waiting on the owner: Q2, Q3`, then `waiting
+ * for: <the other request or Worker>`; null when it names neither.
+ */
+function waitingText(input: Pick<ReportInput, "waitingOn" | "waitingFor">): string | null {
+  const numbers = [...new Set((input.waitingOn ?? []).map(questionNumberOf))].sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)));
+  const parts = [
+    numbers.length === 0 ? null : `${WAITING_ON_OWNER_PREFIX} ${numbers.join(", ")}`,
+    input.waitingFor === undefined || line(input.waitingFor) === "" ? null : `${WAITING_FOR_PREFIX} ${line(input.waitingFor)}`,
+  ].filter((part): part is string => part !== null);
+  return parts.length === 0 ? null : parts.join(". ");
+}
+
 function blockersText(input: ReportInput): string {
   const ids = (input.questions ?? []).map((question) => question.id);
-  const asked = input.phase === "blocked" ? `${ids.length} ${ids.length === 1 ? "question" : "questions"}: ${ids.join(", ")} — see BM-QUESTIONS` : null;
+  const waiting = input.phase === "blocked" ? waitingText(input) : null;
+  const asked =
+    waiting !== null ? waiting : input.phase === "blocked" ? `${ids.length} ${ids.length === 1 ? "question" : "questions"}: ${ids.join(", ")} — see BM-QUESTIONS` : null;
   const { waits: own, suggested: fromBlockers } = splitBlockers(input.blockers);
   const suggested = [...fromBlockers, ...(input.suggestions ?? [])]
     .map((entry) => item(entry.replace(/^\s*suggestion \(not done\):\s*/i, "")))
@@ -525,7 +560,7 @@ function buildReport(input: ReportInput): string {
     `blockers: ${blockersText(input)}`,
     ...(input.handoffNote === undefined || line(input.handoffNote) === "" ? [] : [`handoffNote: ${line(input.handoffNote)}`]),
   ];
-  if (input.phase !== "blocked") return lines.join("\n");
+  if (input.phase !== "blocked" || input.questions === undefined) return lines.join("\n");
   const asked = ["BM-QUESTIONS", `requestId: ${input.requestId}`];
   // Tags in the documented order (autonomy design §A.5, §B.9): subject, supersedes, class; "(recommended)" before effects.
   for (const question of input.questions ?? []) {
@@ -542,12 +577,17 @@ function buildReport(input: ReportInput): string {
   return `${lines.join("\n")}\n\n${asked.join("\n")}`;
 }
 
-function reportRules(input: ReportInput): string[] {
+function tierRules(input: Pick<ReportInput, "tier">): string[] {
   const out: string[] = [];
   const { tier } = input;
   if (tier.changedFrom !== undefined && tier.reason === undefined) out.push("input.tier.reason: is required with changedFrom");
   if (tier.changedFrom === undefined && tier.reason !== undefined) out.push("input.tier.reason: only with changedFrom; put other words in note");
   if (tier.changedFrom !== undefined && tier.changedFrom === tier.level) out.push("input.tier.changedFrom: equals level; leave it out when the tier did not change");
+  return out;
+}
+
+function reportRules(input: ReportInput): string[] {
+  const out = tierRules(input);
   if (input.phase === "blocked" && (input.questions ?? []).length === 0) out.push("input.questions: a blocked report needs its questions");
   if (input.phase !== "blocked" && input.questions !== undefined) out.push("input.questions: only a blocked report asks; put anything else in blockers");
   (input.questions ?? []).forEach((question, q) => {
@@ -1131,10 +1171,227 @@ export const MANAGER_SERVER_TOOLS: readonly ToolFace[] = [
 /** `bm_create_worker`'s bounds (design §16.6). */
 export const CREATE_WORKER_LIMITS = { request: 20_000, contextItems: 20, fact: 500, source: 200 } as const;
 
+// ---------------------------------------------------------------------------
+// The bound agents' delivering tools (design §16.6, ADR-027 decision 4).
+// ---------------------------------------------------------------------------
+
+/** The bounds of the bound delivering tools (design §16.6). */
+export const DELIVERING_LIMITS = { waitingFor: 500, waitingOn: 10, questions: 5, tellText: 8_000, tellSource: 300, grantCalls: 10 } as const;
+/** The subject a question for more review calls carries (design §16.8). */
+const REVIEW_BUDGET = REVIEW_BUDGET_SUBJECT;
+/** A `q:` decision id: `q:<requestId>:<Qn>`. */
+export const QUESTION_DECISION_ID_SOURCE = "^q:req-\\d{8}T\\d{6}Z:Q[1-9]\\d{0,2}$";
+
+/** What a bound tool's description ends with: it delivers, so there is nothing to send. */
+const DELIVERED = "Arguments are JSON: leave out a field you have nothing for. On error, fix the listed fields and call again; nothing was stored or sent.";
+
+/** `bm_report`'s fields without `questions`: a bound Worker asks with `bm_questions`. */
+const BOUND_REPORT_PROPERTIES: Record<string, JsonSchema> = Object.fromEntries(Object.entries(REPORT_SCHEMA.properties!).filter(([key]) => key !== "questions"));
+
+const BOUND_REPORT_SCHEMA: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["requestId", "phase", "tier", "buildAndTests"],
+  properties: {
+    ...BOUND_REPORT_PROPERTIES,
+    requestId: { ...REQUEST_ID, description: "Your request's id, as your first prompt gave it." },
+    blockers: { ...TEXT, description: "Anything else that holds the work up; omit when nothing does. When blocked, the tool writes what you wait on itself." },
+    waitingOn: {
+      type: "array",
+      minItems: 1,
+      maxItems: DELIVERING_LIMITS.waitingOn,
+      items: { type: "string", pattern: QUESTION_DECISION_ID_SOURCE, description: "A decisionId bm_questions gave you." },
+      description: "Only when blocked: the open questions of your request you wait on, by the decisionId bm_questions returned. The only way to wait on the owner.",
+    },
+    waitingFor: {
+      type: "string",
+      minLength: 1,
+      maxLength: DELIVERING_LIMITS.waitingFor,
+      description: "Only when blocked: the other request or Worker you wait for, and why, in one line.",
+    },
+  },
+};
+
+function boundReportRules(input: ReportInput): string[] {
+  const out = tierRules(input);
+  const waits = (input.waitingOn?.length ?? 0) > 0 || input.waitingFor !== undefined;
+  if (input.phase === "blocked" && !waits) out.push("input.waitingOn: a blocked report names what it waits on: waitingOn (open questions from bm_questions) or waitingFor (another request or Worker), or both");
+  if (input.phase !== "blocked" && input.waitingOn !== undefined) out.push("input.waitingOn: only a blocked report waits; leave it out");
+  if (input.phase !== "blocked" && input.waitingFor !== undefined) out.push("input.waitingFor: only a blocked report waits; leave it out");
+  (input.waitingOn ?? []).forEach((id, index) => {
+    if (!id.startsWith(`q:${input.requestId}:`)) out.push(`input.waitingOn[${index}]: ${id} is not a question of ${input.requestId}`);
+  });
+  return out;
+}
+
+/** `bm_report` for a bound Worker: built and checked as the builder's, then stored and delivered by the plugin. */
+export const BOUND_REPORT_TOOL: AgentTool = tool<ReportInput>({
+  name: "bm_report",
+  role: "worker",
+  description:
+    "Report to your Manager: paseo-bm builds your BM-REPORT, stores it and delivers it to the Manager that created you, at its next idle moment. phase: received first, beads-done, blocked (with waitingOn or waitingFor), finished when the request is done, stopped when your run was stopped. Ask the owner with bm_questions, never here. Returns JSON { recordId, delivery } — delivery sent, queued (the Manager is busy; it arrives at its next idle moment) or dropped.",
+  inputSchema: BOUND_REPORT_SCHEMA,
+  rules: boundReportRules,
+  build: buildReport,
+  kinds: () => ["BM-REPORT"],
+  suffix: DELIVERED,
+});
+
+/** `bm_review` for a bound Reviewer: built and checked as the builder's, then delivered to its Worker. */
+export const BOUND_REVIEW_TOOL: AgentTool = tool<ReviewInput>({
+  name: "bm_review",
+  role: "reviewer",
+  description:
+    "Send your verdict: paseo-bm builds your BM-REVIEW of your batch, stores it and delivers it to the Worker that created you. Then end your turn with one line; do not repeat the review. Returns JSON { recordId, delivery }.",
+  inputSchema: REVIEW_SCHEMA,
+  rules: (input) =>
+    (["checked", "notChecked"] as const).filter((key) => prose(input[key]) === "").map((key) => `input.${key}: has no text once code fences and quote marks are removed`),
+  build: buildReview,
+  kinds: () => ["BM-REVIEW"],
+  suffix: DELIVERED,
+});
+
+/** `bm_answers` for a bound Manager: the owner's answers in its chat, proposed for this turn. */
+export const BOUND_ANSWERS_TOOL: AgentTool = tool<AnswersInput>({
+  name: "bm_answers",
+  role: "manager",
+  description:
+    "Record the answers the owner gave to a Worker's open questions in your chat, in this turn. paseo-bm settles them when your turn ends, and only if this turn holds the owner's own message; the plugin then delivers them to the Worker. Never relay an answer as text. Only open questions (Qn) of a request of yours. Returns JSON { proposed: [Qn…] }.",
+  inputSchema: ANSWERS_SCHEMA,
+  rules: answersRules,
+  build: buildAnswers,
+  kinds: () => ["BM-ANSWERS"],
+  suffix: DELIVERED,
+});
+
+/** What `bm_questions` takes (design §16.6). */
+export interface QuestionsInput {
+  questions: Array<{
+    text: string;
+    subject: string;
+    class: DecisionClass;
+    supersedes?: string;
+    options: Array<{
+      key: string;
+      text: string;
+      effects: Array<(typeof EFFECTS)[number]>;
+      recommended?: boolean;
+      grant?: { calls?: number; untilClean?: string };
+    }>;
+  }>;
+}
+
+export const QUESTIONS_FACE: ToolFace = {
+  name: "bm_questions",
+  role: "worker",
+  description: `Ask the owner: paseo-bm opens each question as a decision the owner answers in paseo-bm, numbers it after your request's last Qn, and delivers the answer to you when it comes. A question an owner precedent answers at once comes back answered: carry on with that answer. Then report blocked with waitingOn naming the open ones, unless you can carry on with what does not depend on them. Exactly one recommended option per question. A question of subject "${REVIEW_BUDGET}" may give options a grant ({ calls: n } or { untilClean: batchId }). Returns JSON [{ qn, decisionId, state, answer? }]. ${DELIVERED}`,
+  inputSchema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["questions"],
+    properties: {
+      questions: {
+        type: "array",
+        minItems: 1,
+        maxItems: DELIVERING_LIMITS.questions,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["text", "subject", "class", "options"],
+          properties: {
+            text: { type: "string", minLength: 1, maxLength: MAX_DECISION_TEXT_CHARS, description: "The topic, then the question, for the owner." },
+            subject: {
+              type: "string",
+              pattern: SUBJECT_PATTERN.source,
+              description: `A short slug naming what is decided, such as push-backends: lowercase letters, digits and -, at most 60 characters. Keep it when you ask the same thing again; "${REVIEW_BUDGET}" for more review calls.`,
+            },
+            class: CLASS_FIELD,
+            supersedes: { ...QUESTION_ID, description: "The earlier question of this request that this one asks again, such as Q2; leave it out for a new question." },
+            options: {
+              type: "array",
+              minItems: 2,
+              maxItems: MAX_OPTIONS,
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: ["key", "text", "effects"],
+                properties: {
+                  key: { type: "string", pattern: "^[a-h]$", description: "a, b, c … in order." },
+                  text: { type: "string", minLength: 1, maxLength: MAX_DECISION_LABEL_CHARS, description: "The option and what it costs." },
+                  effects: {
+                    type: "array",
+                    minItems: 1,
+                    maxItems: EFFECTS.length,
+                    items: { type: "string", enum: EFFECTS },
+                    description: 'What choosing it lets you do beyond the workspace or the undoable, such as push or migration; ["none"] when nothing of the kind.',
+                  },
+                  recommended: { type: "boolean", description: "True on exactly one option." },
+                  grant: {
+                    type: "object",
+                    additionalProperties: false,
+                    description: `Only on a "${REVIEW_BUDGET}" question: what choosing this option grants — { calls: n } (1-${DELIVERING_LIMITS.grantCalls} more review calls) or { untilClean: "<batchId>" }. Leave it out on the option that grants nothing.`,
+                    properties: {
+                      calls: { type: "integer", minimum: 1, maximum: DELIVERING_LIMITS.grantCalls },
+                      untilClean: BATCH_ID,
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+};
+
+/** What the schema cannot say about `bm_questions` (design §16.6); one line per problem. Pure. */
+export function questionsRules(input: QuestionsInput): string[] {
+  const out: string[] = [];
+  input.questions.forEach((question, q) => {
+    const path = `input.questions[${q}]`;
+    const recommended = question.options.filter((option) => option.recommended === true).length;
+    if (recommended !== 1) out.push(`${path}.options: exactly one option is recommended (found ${recommended})`);
+    question.options.forEach((option, o) => {
+      const at = `${path}.options[${o}]`;
+      const expected = String.fromCharCode(97 + o);
+      if (option.key !== expected) out.push(`${at}.key: must be ${expected} (keys run a, b, c … in order)`);
+      if (RECOMMENDED_MARK.test(option.text)) out.push(`${at}.text: leave out "(recommended)"; set recommended: true instead`);
+      if (option.effects.includes("none") && new Set(option.effects).size > 1) out.push(`${at}.effects: "none" stands alone; leave it out when the option has effects`);
+      if (option.grant === undefined) return;
+      if (question.subject !== REVIEW_BUDGET) out.push(`${at}.grant: only a question of subject "${REVIEW_BUDGET}" grants`);
+      const kinds = (option.grant.calls === undefined ? 0 : 1) + (option.grant.untilClean === undefined ? 0 : 1);
+      if (kinds !== 1) out.push(`${at}.grant: give exactly one of calls or untilClean`);
+    });
+  });
+  return out;
+}
+
+/** `bm_tell_worker`'s face (design §16.6): the owner's words and facts to a request's Worker. */
+export const TELL_WORKER_FACE: ToolFace = {
+  name: "bm_tell_worker",
+  role: "manager",
+  description:
+    "Give a request's Worker the owner's words or a fact it needs: paseo-bm delivers them to that request's one live Worker at its next idle moment, never into a running turn. Only a request of yours. Returns JSON { workerId, delivery }.",
+  inputSchema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["requestId", "text"],
+    properties: {
+      requestId: { ...REQUEST_ID, description: "The request, as bm_create_worker gave it." },
+      text: { type: "string", minLength: 1, maxLength: DELIVERING_LIMITS.tellText, description: "The owner's words, verbatim, or the fact." },
+      source: { type: "string", minLength: 1, maxLength: DELIVERING_LIMITS.tellSource, description: "Where it comes from: the owner's message, a document, a decision id." },
+    },
+  },
+};
+
 /**
  * The tools only a bound agent issued the creation tools has (design §16.6,
- * ADR-027 ship point C), run on the plugin server: they create agents. An
- * unbound agent — and one bound before ship point C — never lists them.
+ * ADR-027 ship point C), run on the plugin server: they create agents, or
+ * store and deliver what the agent built. The bound versions of `bm_report`,
+ * `bm_review` and `bm_answers` take the builders' place on a bound agent's
+ * list. An unbound agent — and one bound before ship point C — never lists
+ * them.
  */
 export const BOUND_SERVER_TOOLS: readonly ToolFace[] = [
   {
@@ -1166,11 +1423,21 @@ export const BOUND_SERVER_TOOLS: readonly ToolFace[] = [
       },
     },
   },
+  TELL_WORKER_FACE,
+  BOUND_ANSWERS_TOOL,
+  BOUND_REPORT_TOOL,
+  QUESTIONS_FACE,
+  BOUND_REVIEW_TOOL,
 ];
 
-/** The faces only a creation-bound `role` lists (`BOUND_SERVER_TOOLS`). */
+/** The faces only a creation-bound `role` lists (`BOUND_SERVER_TOOLS`), in the order its list shows them. */
 export function boundToolFacesFor(role: ToolRole): ToolFace[] {
   return BOUND_SERVER_TOOLS.filter((candidate) => candidate.role === role);
+}
+
+/** The bound block tools that build before the plugin stores and delivers (`bm_report`, `bm_review`, `bm_answers`). */
+export function boundBlockToolNamed(name: string): AgentTool | undefined {
+  return [BOUND_REPORT_TOOL, BOUND_REVIEW_TOOL, BOUND_ANSWERS_TOOL].find((candidate) => candidate.name === name);
 }
 
 // ---------------------------------------------------------------------------
@@ -1226,12 +1493,17 @@ export function serverToolsFor(role: ToolRole): ToolFace[] {
  * `bm_decisions`.
  */
 export function toolFacesFor(role: ToolRole, bound = false): ToolFace[] {
+  const own = bound ? boundToolFacesFor(role) : [];
+  // A bound tool of a builder's name (bm_report, bm_review, bm_answers) takes the builder's place.
+  const taken = new Set(own.map((face) => face.name));
   return [
-    ...(bound ? boundToolFacesFor(role) : []),
-    ...ORCHESTRATOR_SERVER_TOOLS.filter((candidate) => candidate.role === role),
-    ...toolsFor(role),
-    ...WORKER_SERVER_TOOLS.filter((candidate) => candidate.role === role),
-    ...MANAGER_SERVER_TOOLS.filter((candidate) => candidate.role === role),
+    ...own,
+    ...[
+      ...ORCHESTRATOR_SERVER_TOOLS.filter((candidate) => candidate.role === role),
+      ...toolsFor(role),
+      ...WORKER_SERVER_TOOLS.filter((candidate) => candidate.role === role),
+      ...MANAGER_SERVER_TOOLS.filter((candidate) => candidate.role === role),
+    ].filter((face) => !taken.has(face.name)),
   ];
 }
 

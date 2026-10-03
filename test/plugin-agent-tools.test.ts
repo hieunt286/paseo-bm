@@ -647,17 +647,26 @@ describe("bm_create_worker on the bound Manager's list only (design §16.6)", ()
     const { endpoint } = await start();
     const store = endpoint.bindings!;
     const list = async (url: string) => (await rpc(url, { jsonrpc: "2.0", id: 1, method: "tools/list" })).body.result.tools.map((tool: { name: string }) => tool.name);
-    expect(await list(`${endpoint.urlFor("manager")!}/${bindManager(store, "agent-m1", true)}`)).toEqual(["bm_create_worker", "bm_answers", "bm_decisions"]);
+    expect(await list(`${endpoint.urlFor("manager")!}/${bindManager(store, "agent-m1", true)}`)).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_decisions"]);
     expect(await list(endpoint.urlFor("manager")!)).toEqual(["bm_answers", "bm_decisions"]);
     expect(await list(`${endpoint.urlFor("manager")!}/${bindManager(store, "agent-m0", false)}`)).toEqual(["bm_answers", "bm_decisions"]);
     // A pending binding issued with them lists them; calling waits for the binding (the shared guard).
     const pending = store.issue({ role: "manager", workspaceId: "wks_1", creationTools: true }).token;
     expect(await list(`${endpoint.urlFor("manager")!}/${pending}`)).toContain("bm_create_worker");
-    // The Worker's and Reviewer's lists do not change.
+    // On the role path the Worker's and Reviewer's lists do not change; bound, they deliver (design §16.6).
     expect(await list(endpoint.urlFor("worker")!)).toEqual(["bm_report", "bm_reply"]);
+    expect(await list(endpoint.urlFor("reviewer")!)).toEqual(["bm_review"]);
+    const bindAs = (role: "worker" | "reviewer", agentId: string) => {
+      const { token, tokenSha256 } = store.issue({ role, workspaceId: "wks_1", requestId: "req-20261003T100000Z", parentId: "agent-m1", batchId: role === "reviewer" ? "b1" : null, creationTools: true });
+      store.attach(token, role);
+      store.settle(tokenSha256, agentId);
+      return token;
+    };
+    expect(await list(`${endpoint.urlFor("worker")!}/${bindAs("worker", "agent-w1")}`)).toEqual(["bm_report", "bm_questions", "bm_reply"]);
+    expect(await list(`${endpoint.urlFor("reviewer")!}/${bindAs("reviewer", "agent-r1")}`)).toEqual(["bm_review"]);
     expect(toolFacesFor("manager").map((face) => face.name)).not.toContain("bm_create_worker");
-    expect(toolFacesFor("manager", true).map((face) => face.name)).toEqual(["bm_create_worker", "bm_answers", "bm_decisions"]);
-    expect(toolFacesFor("worker", true)).toEqual(toolFacesFor("worker"));
+    expect(toolFacesFor("manager", true).map((face) => face.name)).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_decisions"]);
+    expect(toolFacesFor("worker", true).map((face) => face.name)).toEqual(["bm_report", "bm_questions", "bm_reply"]);
   });
 
   it("refuses an unbound caller with one line, creating nothing, and logs it as a served tool", async () => {
@@ -681,7 +690,7 @@ describe("bm_create_worker on the bound Manager's list only (design §16.6)", ()
       const request = { config: { provider: "bm-manager/claude-opus-5", cwd: "/repo", mcpServers: { [AGENT_TOOLS_SERVER]: { type: "http", url: `${urlFor("manager")}/${token}` } } } } as unknown as AgentCreateRequest;
       return applyAgentTools(request, { urlFor, bindings: store }, "claude")?.config.toolPolicy?.preapproved?.map((grant) => grant.tool);
     };
-    expect(created(true)).toEqual(["bm_create_worker", "bm_answers", "bm_decisions"]);
+    expect(created(true)).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_decisions"]);
     expect(created(false)).toEqual(["bm_answers", "bm_decisions"]);
     // A creation without a token: the role path and today's list.
     expect(applyAgentTools({ config: { provider: "bm-manager", cwd: "/repo" } } as unknown as AgentCreateRequest, { urlFor, bindings: store }, "claude")?.config.toolPolicy?.preapproved?.map((grant) => grant.tool)).toEqual([
