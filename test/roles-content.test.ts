@@ -549,10 +549,12 @@ describe("worker.md — sizing, beads, proof and the four questions", () => {
     expect(briefClosingOf("w-1")).toContain("Nothing counts as done until you prove it again");
   });
 
-  it("treats only a stop message or an empty resume as a stop, and stops its Reviewers first", () => {
+  it("treats only a stop message or an empty resume as a stop; the plugin, not the Worker, cancels its Reviewers", () => {
     rule(W, "what a stop is", /\*\*A turn is a STOP only if it brings\*\*/);
     verbatim(W, "`BM-STOP`");
-    rule(W, "cancels its Reviewers, cancel only", /call `cancel_agent` on every Reviewer you created that is still running \(cancel only\)/);
+    // Spike S5 passed (bead .16): stop-propagation.ts cancels a stopped Worker's running Reviewers.
+    expect(W).not.toMatch(/cancel_agent/);
+    rule(W, "does nothing else on a stop", /\*\*On a stop:\*\* do nothing else — no new agent, build, test, edit or bead change/);
     // Base PRD REQ-025 (c): a stopped run reports `stopped`, never `finished`.
     rule(W, "then stopped, never finished, and idle", /send `stopped`, never `finished`, saying exactly where you stopped/);
   });
@@ -605,9 +607,10 @@ describe("reviewer.md — review against the request, blocking vs not, one resul
     expect(REVIEWER_HAND_PATH).toContain(BUILDER_SEND_LINES["bm_review"]);
   });
 
-  it("answers any stop with one line", () => {
-    // ADR-027 decision 8: stays until a real cancel exists (bead .16).
-    verbatim(R, "`STOP: The Beads Worker that created you was stopped by the user.`", "`BM-REVIEW STOPPED`");
+  it("answers a stop message with one line and no tool; the plugin cancels it otherwise", () => {
+    // Spike S5 passed (bead .16): the plugin cancels a stopped Worker's Reviewers; its fallback notice says what to do.
+    expect(R).not.toMatch(/BM-REVIEW STOPPED|STOP: The Beads Worker/);
+    rule(R, "a stop message: no tool, one line", /\*\*If a message stops you\*\*, call no\s+tool and end your turn with one line/);
   });
 });
 

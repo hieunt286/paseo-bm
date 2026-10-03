@@ -163,8 +163,7 @@ report it as interrupted by the Orchestrator.
 wait, OR **nothing at all** right after a turn that was cut off; one starting `BM-STOP` always is.
 An instruction, a correction, an answer, "continue", a delivery, a Reviewer's finish notification
 or `BM-INTERRUPTED` is not. "Stop after this bead": do what it says. Truly unsure: ask in one line
-and wait. **On a stop, in this order:** (1) call `cancel_agent` on every Reviewer you created that
-is still running (cancel only); (2) do nothing else — no new agent, build, test, edit or bead
-change; (3) send `stopped`, never `finished`, saying exactly where you stopped (files, bead in
-progress, beads not done, open findings), then stay idle. A Reviewer finishing after a real stop
-does not resume the work.
+and wait. **On a stop:** do nothing else — no new agent, build, test, edit or bead change; send
+`stopped`, never `finished`, saying exactly where you stopped (files, bead in progress, beads not
+done, open findings), then stay idle. A Reviewer finishing after a real stop does not resume the
+work.

@@ -13,8 +13,11 @@
  *    idle moment — nothing else queued for it — the plugin asks for its note.
  *    At most `HANDOFF_SAFE_POINT_WAIT_MS`.
  * 2. **The note** (`BM-HANDOFF`, `noteRequestOf`): `bm_report` with
- *    `handoffNote`, posted in the Worker's own chat, which the collector
- *    records as the report's `handoffNote`. The Worker's turn the request
+ *    `handoffNote`. A Worker bound with the creation tools calls it and the
+ *    tool stores and delivers the report (its outbox record, which the
+ *    collector puts in the Worker's turn record); an unbound Worker posts the
+ *    block it returns in its own chat. Either way the collector records it as
+ *    the report's `handoffNote`. The Worker's turn the request
  *    started carries it or not; with none, or after `NOTE_WAIT_MS` at any
  *    recorded turn, the plugin goes on without it.
  * 3. **The brief** (`handoffBriefOf`): built on the fallback Worker handover's
@@ -223,17 +226,30 @@ export async function handoffSafeNow(
 // The note.
 // ---------------------------------------------------------------------------
 
-/** The plugin's request for the outgoing Worker's note (design §G.6 step 1). */
-export function noteRequestOf(entry: Pick<HandoffEntry, "requestId">): string {
+/**
+ * The plugin's request for the outgoing Worker's note (design §G.6 step 1).
+ * A Worker bound with the creation tools (`bound`, design §16.5) calls
+ * `bm_report`, which stores and delivers the report; an unbound one posts the
+ * block its builder returns in its own chat.
+ */
+export function noteRequestOf(entry: Pick<HandoffEntry, "requestId">, options: { bound?: boolean } = {}): string {
+  const what = `call bm_report for ${entry.requestId} with the phase and facts of your last report and handoffNote — what you tried and what is next, at most 1,500 characters`;
   return [
     HANDOFF_NOTICE_MARKER,
     `From the paseo-bm plugin, not the owner: the Orchestrator hands request ${entry.requestId} over to a new Worker, who starts from a brief the plugin builds from its records.`,
-    `Write your handoff note now: call bm_report for ${entry.requestId} with the phase and facts of your last report and handoffNote — what you tried and what is next, at most 1,500 characters — and post the block it returns as your reply here; do not send it to your Manager.`,
+    options.bound === true
+      ? `Write your handoff note now: ${what}. The tool stores the note and delivers the report; send nothing else.`
+      : `Write your handoff note now: ${what} — and post the block it returns as your reply here; do not send it to your Manager.`,
     "Then end this turn and start nothing new: your Manager tells you when the new Worker takes over.",
   ].join("\n");
 }
 
-/** The note in a Worker's turn: `handoffNote` of a report of the request, in its chat or sent; null when it wrote none. */
+/**
+ * The note in a Worker's turn: `handoffNote` of a report of the request — in
+ * its chat or sent (unbound), or stored by its `bm_report` (bound: the
+ * collector puts the outbox record's report in the turn record); null when it
+ * wrote none.
+ */
 export function noteIn(record: TraceRecord, items: readonly unknown[], requestId: string): string | null {
   const reports = [...record.reports, ...sentReportsIn(items, record.agentId, record.endedAt ?? record.at)];
   const found = reports.filter((report) => report.handoffNote !== undefined && (report.requestId === null || report.requestId === requestId)).at(-1);
@@ -590,7 +606,9 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
     };
 
   async function askNote(entry: HandoffEntry, paseo: unknown): Promise<"asked" | "queued" | "waiting"> {
-    const item: BatchItem = { key: entry.id, line: noteRequestOf(entry), isCurrent: currentAt(entry.id, now().getTime()) };
+    const home = homeOf();
+    const bound = home !== null && workerIsBound(home, entry.workerId);
+    const item: BatchItem = { key: entry.id, line: noteRequestOf(entry, { bound }), isCurrent: currentAt(entry.id, now().getTime()) };
     const [outcome] = await queue.enqueueBatch(entry.workerId, noteBatch, [item], paseo as NoticePaseo | undefined);
     return outcome === "sent" ? "asked" : outcome === "queued" ? "queued" : "waiting";
   }
@@ -654,13 +672,23 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
     store.update(entry.id, (current) => ({ ...current, state: "commanded", commandId: result.id, commandSentAt: now().toISOString() }));
   }
 
-  /** True when the handoff's Manager has a live binding issued with the creation tools (design §16.9). Never throws. */
-  function managerIsBound(home: string, managerId: string): boolean {
+  /** True when `agentId` has a live binding issued with the creation tools. Never throws. */
+  function creationBound(home: string, agentId: string): boolean {
     try {
-      return isCreationBound(managerId, createBindingStore(home).list());
+      return isCreationBound(agentId, createBindingStore(home).list());
     } catch {
       return false;
     }
+  }
+
+  /** The handoff's Manager is bound with the creation tools (design §16.9). */
+  function managerIsBound(home: string, managerId: string): boolean {
+    return creationBound(home, managerId);
+  }
+
+  /** The outgoing Worker is bound with the creation tools: its `bm_report` stores and delivers (§16.7). */
+  function workerIsBound(home: string, workerId: string): boolean {
+    return creationBound(home, workerId);
   }
 
   /**

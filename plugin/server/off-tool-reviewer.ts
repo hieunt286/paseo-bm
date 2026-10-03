@@ -18,10 +18,9 @@
  *    its request reports `finished` or `stopped` — `bm_report`);
  * 3. raises a `worker.signal` of kind `off-tool-review` for the Orchestrator,
  *    where the policy's scope covers the project (the event bus filters it);
- * 4. hands the finding to `cancel`, the hook point where bead
- *    bm-agent-tools-1upv.16 (WP-714, S5 passed) cancels the Reviewer. Until
- *    then nothing is cancelled: one off-tool review can run before the owner
- *    sees the alert (the accepted residual).
+ * 4. hands the finding to `cancel`: in the plugin `cancelOffToolReviewer`,
+ *    which cancels the Reviewer's turn at once through the Paseo CLI (spike
+ *    S5, `paseo-cli.ts`). A failed cancel is logged and the alert stays.
  *
  * Nothing here throws into the event handler.
  */
@@ -31,7 +30,9 @@ import type { AgentBinding, BindingStore } from "./agent-bindings";
 import { createAlertStore, type AlertInput } from "./alert-store";
 import type { BmEvent, WorkerSignalEvent } from "./event-bus";
 import { isPluginReviewer, pluginCreationsSettled } from "./review-tools";
+import { cancelAgent } from "./paseo-cli";
 import { reasonOf } from "./role-choices";
+import type { CancelAgent } from "./stop-propagation";
 
 /** A Reviewer a bound Worker created outside its tools. */
 export interface OffToolReviewer {
@@ -90,9 +91,8 @@ export interface OffToolDeps {
   /** Publishes the `worker.signal` event (the event bus); none without it. */
   publish?: (events: readonly BmEvent[], paseo?: unknown) => Promise<unknown>;
   /**
-   * The cancel of an off-tool Reviewer: the hook point of bead
-   * bm-agent-tools-1upv.16 (WP-714, S5 passed). Nothing is cancelled until it
-   * is given.
+   * The cancel of an off-tool Reviewer (§16.8 step 4): `cancelOffToolReviewer`
+   * in the plugin. Nothing is cancelled when it is absent.
    */
   cancel?: (finding: OffToolReviewer, paseo: unknown) => Promise<unknown>;
   now?: () => Date;
@@ -145,6 +145,49 @@ export async function checkOffToolReviewer(agent: CreatedAgent, paseo: unknown, 
     log(`[paseo-bm] the off-tool check of ${agent.id} failed: ${reasonOf(error)}`);
     return null;
   }
+}
+
+/**
+ * How long to wait before each further try of an off-tool Reviewer's cancel
+ * that stopped nothing: `agent.created` can arrive before the Reviewer's first
+ * turn starts, and a cancel of an idle agent is a no-op (spike S5).
+ */
+export const OFF_TOOL_CANCEL_WAITS_MS: readonly number[] = [500, 1_000, 2_000];
+
+export interface OffToolCancelDeps {
+  /** `cancelAgent` of `paseo-cli.ts` by default. */
+  cancel?: CancelAgent;
+  /** The waits before each further try; `OFF_TOOL_CANCEL_WAITS_MS` by default. */
+  waits?: readonly number[];
+  sleep?: (ms: number) => Promise<void>;
+  log?: (message: string) => void;
+}
+
+/**
+ * Cancels an off-tool Reviewer's turn at once (design §16.8 step 4) through
+ * the Paseo CLI: `paseo agent stop <id>`, with the whole id only. A cancel
+ * that stopped nothing — the turn had not started yet — is tried again after
+ * each of `waits`. Resolves true when a turn was cancelled, false when none
+ * ran by the last try. Throws with the CLI's reason (the agent id, never a
+ * token) when a cancel fails, so `checkOffToolReviewer` logs it; the alert
+ * stays either way.
+ */
+export async function cancelOffToolReviewer(finding: OffToolReviewer, deps: OffToolCancelDeps = {}): Promise<boolean> {
+  const cancel = deps.cancel ?? ((agentId: string) => cancelAgent(agentId));
+  const waits = deps.waits ?? OFF_TOOL_CANCEL_WAITS_MS;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const log = deps.log ?? ((message: string) => console.warn(message));
+  for (let attempt = 0; attempt <= waits.length; attempt += 1) {
+    if (attempt > 0) await sleep(waits[attempt - 1]!);
+    const result = await cancel(finding.reviewerId);
+    if (!result.ok) throw new Error(result.reason);
+    if (result.stopped) {
+      log(`[paseo-bm] cancelled the off-tool Reviewer ${finding.reviewerId} of Worker ${finding.workerId}.`);
+      return true;
+    }
+  }
+  log(`[paseo-bm] the off-tool Reviewer ${finding.reviewerId} had no running turn to cancel.`);
+  return false;
 }
 
 /** Clears the `off-tool-reviewer` alert of an archived Reviewer; returns the cleared keys. Never throws. */

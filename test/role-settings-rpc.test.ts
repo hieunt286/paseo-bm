@@ -8,7 +8,7 @@ import { forgetModelCosts } from "../plugin/server/model-costs";
 import { noticeQueue } from "../plugin/server/notice-queue";
 import { LOOKUP_TIMEOUT_MS, forgetModes } from "../plugin/server/role-mode";
 import { createPrecedentStore } from "../plugin/server/precedent-store";
-import { BASE_INSTRUCTIONS, OWNER_PRECEDENTS_HEADING, currentInstructions } from "../plugin/server/role-instructions";
+import { BASE_INSTRUCTIONS, HAND_PATH_HEADING, OWNER_PRECEDENTS_HEADING, RUNTIME_FACTS_HEADING, currentInstructions } from "../plugin/server/role-instructions";
 import { PRECEDENT_SCOPE_ALL } from "../plugin/shared/precedents";
 import {
   canonicalJson,
@@ -875,6 +875,31 @@ describe("roles.instructions (design §7.12, base PRD REQ-032 d)", () => {
       expect(shown).toEqual({ role, text: await currentInstructions(role, modes, { homedir: () => root }), workspaceId: null });
       expect(shown.text).toContain(BASE_INSTRUCTIONS[role].trimEnd());
     }
+  });
+
+  it("shows the bound text on a provider that can carry paseo-bm's tools, the unbound text with its hand path otherwise (design §16.12)", async () => {
+    const extending = (bases: Record<string, string>) => ({
+      ...modes,
+      config: { get: async () => ({ config: { providers: Object.fromEntries(Object.entries(bases).map(([alias, base]) => [alias, { extends: base }])), agentProfiles: [] } }) },
+    });
+    const onTools = extending({ "bm-manager": "claude", "bm-worker": "codex", "bm-reviewer": "opencode", "bm-orchestrator": "claude" });
+    const offTools = extending({ "bm-manager": "pi", "bm-worker": "copilot", "bm-reviewer": "pi", "bm-orchestrator": "pi" });
+    for (const role of ["manager", "worker", "reviewer"] as const) {
+      const bound = await handleRolesInstructions({ role }, onTools, { homedir: () => root });
+      expect(bound.text, role).toBe(await currentInstructions(role, onTools, { homedir: () => root, bound: true }));
+      expect(bound.text, role).not.toContain(HAND_PATH_HEADING);
+      expect(bound.text, role).not.toMatch(/ mode: .*when you create a/);
+      const unbound = await handleRolesInstructions({ role }, offTools, { homedir: () => root });
+      expect(unbound.text, role).toBe(await currentInstructions(role, offTools, { homedir: () => root }));
+      expect(unbound.text, role).toContain(`${HAND_PATH_HEADING}`);
+      expect(unbound.text, role).toContain(RUNTIME_FACTS_HEADING);
+    }
+    // The child mode line is the hand path's: shown to an unbound Worker, never to a bound one.
+    expect((await handleRolesInstructions({ role: "worker" }, offTools, { homedir: () => root })).text).toMatch(/Reviewer mode: .*when you create a Reviewer/);
+    // The Orchestrator has no hand path: the same text on either provider.
+    expect((await handleRolesInstructions({ role: "orchestrator" }, onTools, { homedir: () => root })).text).toBe(
+      (await handleRolesInstructions({ role: "orchestrator" }, offTools, { homedir: () => root })).text,
+    );
   });
 
   it("adds a project's own precedents for that project, never another project's", async () => {

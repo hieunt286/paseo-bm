@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as PaseoCli from "../plugin/server/paseo-cli";
 import { createDecisionStore } from "../plugin/server/decision-store";
 import { syncFallbackDecisions } from "../plugin/server/fallback-decisions";
 import { handleFallbackAct, type FallbackActions } from "../plugin/server/fallback-rpc";
@@ -9,7 +10,6 @@ import { ROLE_FALLBACK_STATE_FILE } from "../plugin/server/fallback-state";
 import { FALLBACK_WORKER_TITLE, createWorkerSwitch } from "../plugin/server/fallback-switch";
 import { AGENT_TOOLS_OFF_SWITCH_MESSAGE } from "../plugin/server/manager";
 import { forgetModes } from "../plugin/server/role-mode";
-import { REVIEWER_STOP_NOTICE } from "../plugin/server/stop-propagation";
 import type { FallbackIncident } from "../plugin/shared/contracts";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
 import { fakePaseo } from "./helpers/fake-paseo";
@@ -22,7 +22,22 @@ import { applyAgentTools, type AgentCreateRequest } from "../plugin/server/role-
  * Delta 20260921 §4.4.7 (REQ-065 d): "Switch" creates the replacement Worker on
  * the candidate's fallback alias. Fake daemon, temporary install home; the
  * handover is stubbed (its own tests cover it).
+ *
+ * The Paseo CLI's cancel is replaced for the whole file: the old Worker's
+ * running Reviewers are cancelled through it (spike S5), and nothing here may
+ * start the real `paseo` binary.
  */
+const cli = vi.hoisted(() => ({ cancelled: [] as string[] }));
+vi.mock("../plugin/server/paseo-cli", async (importOriginal) => {
+  const actual = await importOriginal<typeof PaseoCli>();
+  return {
+    ...actual,
+    cancelAgent: async (agentId: string) => {
+      cli.cancelled.push(agentId);
+      return { ok: true as const, stopped: true };
+    },
+  };
+});
 
 const OLD = "wrk-1";
 const NEW = "wrk-2";
@@ -174,12 +189,14 @@ describe("switch (Worker)", () => {
     expect(log).toHaveBeenCalledWith(expect.stringMatching(/^\[paseo-bm\] could not label Worker wrk-1 as replaced by wrk-2: paseo: command not found/));
   });
 
-  it("stops the old Worker's running Reviewers, never its idle ones", async () => {
+  it("cancels the old Worker's running Reviewers, never its idle ones", async () => {
     write([incident()]);
+    cli.cancelled.length = 0;
     const { paseo, sent } = daemonWith({ reviewers: [{ id: "rev-running", status: "running" }, { id: "rev-idle", status: "idle" }] });
     const { action } = switcher({ stopReviewers: undefined });
     await action(incident(), paseo, { home });
-    expect(sent).toEqual([{ id: "rev-running", text: REVIEWER_STOP_NOTICE }]);
+    expect(cli.cancelled).toEqual(["rev-running"]);
+    expect(sent).toEqual([]);
   });
 
   it("records failed with the error when the creation fails, and never goes back to pending", async () => {

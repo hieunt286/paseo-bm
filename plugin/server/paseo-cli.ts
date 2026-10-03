@@ -12,6 +12,12 @@
  * Every argument is checked before it reaches the command line. A value that
  * starts with `-` would be read as a flag, so ids, modes and labels must start
  * with a letter or digit and hold nothing but the characters Paseo uses.
+ *
+ * Since spike S5 (ADR-027; run note
+ * `docs/archive/operations/paseo-bm-agent-tools-spikes-20261003.md` §4) the
+ * plugin also cancels an agent's running turn: `paseo agent stop <id> --json`
+ * (`cancelAgent`). That command also takes an id PREFIX, `--all` and `--cwd`,
+ * so only a whole agent id (a UUID) is ever passed, and never those flags.
  */
 import { execFile } from "node:child_process";
 import { findTool } from "./setup-tools";
@@ -61,7 +67,8 @@ function firstLine(output: string): string {
   return line.length > 200 ? `${line.slice(0, 200)}…` : line;
 }
 
-async function runPaseo(args: string[], deps: PaseoCliDeps): Promise<CliResult> {
+/** Runs `paseo <args>` and keeps its output on success. */
+async function runPaseoOutput(args: string[], deps: PaseoCliDeps): Promise<{ ok: true; output: string } | { ok: false; reason: string }> {
   const binary = (deps.find ?? (() => findTool("paseo")))();
   if (binary === null) return { ok: false, reason: "the `paseo` command was not found" };
   let outcome: CliOutcome;
@@ -75,7 +82,12 @@ async function runPaseo(args: string[], deps: PaseoCliDeps): Promise<CliResult> 
     const detail = firstLine(outcome.output);
     return { ok: false, reason: `\`paseo ${args.slice(0, 2).join(" ")}\` exited with ${outcome.code}${detail === "" ? "" : `: ${detail}`}` };
   }
-  return { ok: true };
+  return { ok: true, output: outcome.output };
+}
+
+async function runPaseo(args: string[], deps: PaseoCliDeps): Promise<CliResult> {
+  const result = await runPaseoOutput(args, deps);
+  return result.ok ? { ok: true } : result;
 }
 
 /** `paseo agent mode <id> <mode> --json`. */
@@ -128,4 +140,54 @@ export function setAgentLabels(agentId: string, labels: Readonly<Record<string, 
   }
   args.push("--json");
   return runPaseo(args, deps);
+}
+
+/**
+ * A whole Paseo agent id: a UUID. `paseo agent stop` matches an id PREFIX too
+ * (spike S5), so anything shorter could stop agents the plugin never meant.
+ */
+const FULL_AGENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isFullAgentId(id: string): boolean {
+  return FULL_AGENT_ID.test(id) && isSafeAgentId(id);
+}
+
+/**
+ * The outcome of a cancel: `stopped` says whether the agent had a running turn
+ * that the command ended (`false`: it was idle, and the command was a no-op).
+ */
+export type CancelResult = { ok: true; stopped: boolean } | { ok: false; reason: string };
+
+/** The `agentIds` of `paseo agent stop --json` (`{"stoppedCount": n, "agentIds": [...]}`), or null when unreadable. */
+function stoppedIdsOf(output: string): string[] | null {
+  const start = output.indexOf("{");
+  const end = output.lastIndexOf("}");
+  if (start === -1 || end < start) return null;
+  try {
+    const parsed = JSON.parse(output.slice(start, end + 1)) as { agentIds?: unknown };
+    return Array.isArray(parsed.agentIds) ? parsed.agentIds.filter((id): id is string => typeof id === "string") : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `paseo agent stop <id> --json`: cancels the agent's running turn, as the
+ * owner's Stop does (the turn ends `canceled`, reason `Interrupted`); a no-op
+ * for an idle agent. Verified from the daemon process by spike S5: the daemon
+ * and every other agent are untouched.
+ *
+ * Only a whole agent id is passed (`isFullAgentId`), never `--all` or `--cwd`.
+ * A command that reports stopping any other agent is a failure, named in the
+ * reason. Never throws.
+ */
+export async function cancelAgent(agentId: string, deps: PaseoCliDeps = {}): Promise<CancelResult> {
+  if (!isFullAgentId(agentId)) return { ok: false, reason: `refusing an agent id that is not a whole id "${agentId}"` };
+  const result = await runPaseoOutput(["agent", "stop", agentId, "--json"], deps);
+  if (!result.ok) return result;
+  const ids = stoppedIdsOf(result.output);
+  if (ids === null) return { ok: true, stopped: false };
+  const others = ids.filter((id) => id !== agentId);
+  if (others.length > 0) return { ok: false, reason: `\`paseo agent stop\` also stopped ${others.join(", ")}` };
+  return { ok: true, stopped: ids.includes(agentId) };
 }

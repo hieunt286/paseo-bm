@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as PaseoCli from "../plugin/server/paseo-cli";
 import contribute from "../plugin/index.server";
 import {
   REVIEWER_STOP_NOTICE,
@@ -13,8 +14,27 @@ import { fakePaseo } from "./helpers/fake-paseo";
 /**
  * bm-wq6 (REQ-026f): when the user stops a Beads Worker, Paseo only cancels the
  * Worker's turn. The plugin hears `agent.turn_ended` with a canceled outcome and
- * interrupts each running Reviewer of that Worker with a fixed stop notice.
+ * cancels each running Reviewer of that Worker through the Paseo CLI (spike S5,
+ * bead bm-agent-tools-1upv.16); only when that cancel fails does it send the
+ * fixed stop notice instead.
+ *
+ * `cancelAgent` is replaced for the whole file: nothing here may start the real
+ * `paseo` binary or reach a daemon. It records each id and stops it, unless
+ * `cli.refuse` holds a reason for that id.
  */
+const cli = vi.hoisted(() => ({ cancelled: [] as string[], refuse: new Map<string, string>() }));
+vi.mock("../plugin/server/paseo-cli", async (importOriginal) => {
+  const actual = await importOriginal<typeof PaseoCli>();
+  return {
+    ...actual,
+    cancelAgent: async (agentId: string) => {
+      const reason = cli.refuse.get(agentId);
+      if (reason !== undefined) return { ok: false as const, reason };
+      cli.cancelled.push(agentId);
+      return { ok: true as const, stopped: true };
+    },
+  };
+});
 
 const WORKER = "worker-1";
 const WS = "ws-1";
@@ -115,6 +135,8 @@ function setup() {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  cli.cancelled.length = 0;
+  cli.refuse.clear();
 });
 
 afterEach(() => {
@@ -123,10 +145,11 @@ afterEach(() => {
 });
 
 describe("on(\"agent.turn_ended\") stop propagation", () => {
-  it("exports the exact stop notice", () => {
+  it("exports the exact stop notice, which says itself what to do", () => {
     expect(REVIEWER_STOP_NOTICE).toBe(
-      'STOP: The Beads Worker that created you was stopped by the user. Stop this review now: do not read files, run commands or call any tool; reply with the single line "BM-REVIEW STOPPED" and end your turn.',
+      "STOP: The Beads Worker that created you was stopped by the user. Stop this review now: do not read files, run commands or call any tool; reply with one line saying you stopped, and end your turn.",
     );
+    expect(REVIEWER_STOP_NOTICE).not.toContain("BM-REVIEW");
     expect(STOP_RECHECK_MS).toBe(500);
   });
 
@@ -157,7 +180,7 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     expect(hooks.get("agent.archived")).toHaveLength(3);
   });
 
-  it("sends the notice only to the stopped Worker's running Reviewers (idle Worker on refresh)", async () => {
+  it("cancels only the stopped Worker's running Reviewers (idle Worker on refresh)", async () => {
     const { run } = setup();
     const { paseo, sends, listCalls } = daemonWith({
       agents: [
@@ -175,10 +198,8 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
       statuses: { [WORKER]: ["idle"] },
     });
     await run(event(), paseo);
-    expect(sends).toEqual([
-      { id: "rev-a", text: REVIEWER_STOP_NOTICE },
-      { id: "rev-b", text: REVIEWER_STOP_NOTICE },
-    ]);
+    expect(cli.cancelled).toEqual(["rev-a", "rev-b"]);
+    expect(sends).toEqual([]);
     // Nine Reviewers and the stopped Worker itself: five pages of two.
     expect(listCalls.length).toBe(5);
     // Parent label only since delta 20260918g §4.2: the reviewer role is decided
@@ -199,7 +220,8 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
       statuses: { [WORKER]: ["idle"] },
     });
     await propagateWorkerStop(event() as never, { paseo: paseo as never });
-    expect(sends).toEqual([{ id: "rev-plain", text: REVIEWER_STOP_NOTICE }]);
+    expect(cli.cancelled).toEqual(["rev-plain"]);
+    expect(sends).toEqual([]);
   });
 
   it("does nothing when an Orchestrator's turn is canceled, and never stops an Orchestrator child of the Worker (orchestrator design §3.2)", async () => {
@@ -209,23 +231,27 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
       await propagateWorkerStop(event(provider) as never, { paseo: paseo as never });
     }
     expect(listCalls).toEqual([]);
+    expect(cli.cancelled).toEqual([]);
     expect(sends).toEqual([]);
     await propagateWorkerStop(event() as never, { paseo: paseo as never });
-    expect(sends).toEqual([{ id: "rev-a", text: REVIEWER_STOP_NOTICE }]);
+    expect(cli.cancelled).toEqual(["rev-a"]);
+    expect(sends).toEqual([]);
   });
 
   it("recognises a bm-worker/<model> provider", async () => {
     const { run } = setup();
     const { paseo, sends } = daemonWith({ agents: [reviewer("rev-a")], statuses: { [WORKER]: ["idle"] } });
     await run(event("bm-worker/gpt-5.6-sol"), paseo);
-    expect(sends).toEqual([{ id: "rev-a", text: REVIEWER_STOP_NOTICE }]);
+    expect(cli.cancelled).toEqual(["rev-a"]);
+    expect(sends).toEqual([]);
   });
 
   it("recognises a fallback Worker bm-worker-fallback-1/<model> (delta 20260921 §4.4.1)", async () => {
     const { run } = setup();
     const { paseo, sends } = daemonWith({ agents: [reviewer("rev-a")], statuses: { [WORKER]: ["idle"] } });
     await run(event("bm-worker-fallback-1/qwen3-coder"), paseo);
-    expect(sends).toEqual([{ id: "rev-a", text: REVIEWER_STOP_NOTICE }]);
+    expect(cli.cancelled).toEqual(["rev-a"]);
+    expect(sends).toEqual([]);
   });
 
   it("does nothing when the Worker is still running after the re-check (a message replaced the turn)", async () => {
@@ -237,6 +263,7 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     await run(event(), paseo);
     expect(refreshes.filter((id) => id === WORKER)).toHaveLength(2);
     expect(paseo.agents.list).not.toHaveBeenCalled();
+    expect(cli.cancelled).toEqual([]);
     expect(sends).toEqual([]);
   });
 
@@ -249,11 +276,13 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     const pending = Promise.resolve(hooks.get("agent.turn_ended")![0]!(event(), { paseo, signal: new AbortController().signal }));
     await vi.advanceTimersByTimeAsync(STOP_RECHECK_MS - 1);
     expect(refreshes.filter((id) => id === WORKER)).toHaveLength(1);
+    expect(cli.cancelled).toEqual([]);
     expect(sends).toEqual([]);
     await vi.advanceTimersByTimeAsync(1);
     await pending;
     expect(refreshes.filter((id) => id === WORKER)).toHaveLength(2);
-    expect(sends).toEqual([{ id: "rev-a", text: REVIEWER_STOP_NOTICE }]);
+    expect(cli.cancelled).toEqual(["rev-a"]);
+    expect(sends).toEqual([]);
   });
 
   it.each([
@@ -269,6 +298,7 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     await run(ev, paseo);
     expect(paseo.agents.ref).not.toHaveBeenCalled();
     expect(paseo.agents.list).not.toHaveBeenCalled();
+    expect(cli.cancelled).toEqual([]);
     expect(sends).toEqual([]);
   });
 
@@ -279,7 +309,8 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
       statuses: { [WORKER]: ["idle"], "rev-a": ["idle"] },
     });
     await run(event(), paseo);
-    expect(sends).toEqual([{ id: "rev-b", text: REVIEWER_STOP_NOTICE }]);
+    expect(cli.cancelled).toEqual(["rev-b"]);
+    expect(sends).toEqual([]);
   });
 
   it("resolves and logs when list rejects", async () => {
@@ -287,23 +318,56 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     const { run } = setup();
     const { paseo, sends } = daemonWith({ agents: [reviewer("rev-a")], statuses: { [WORKER]: ["idle"] }, listError: new Error("daemon gone") });
     await run(event(), paseo);
+    expect(cli.cancelled).toEqual([]);
     expect(sends).toEqual([]);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]![0])).toMatch(/^\[paseo-bm\] stop propagation: .*daemon gone/);
   });
 
-  it("resolves, logs and carries on with the next Reviewer when send rejects", async () => {
+  it("when a cancel fails, logs it (the id and the reason) and sends the stop notice instead", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { run } = setup();
+    cli.refuse.set("rev-a", "the `paseo` command was not found");
+    const { paseo, sends } = daemonWith({ agents: [reviewer("rev-a"), reviewer("rev-b")], statuses: { [WORKER]: ["idle"] } });
+    await run(event(), paseo);
+    expect(cli.cancelled).toEqual(["rev-b"]);
+    expect(sends).toEqual([{ id: "rev-a", text: REVIEWER_STOP_NOTICE }]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toBe(
+      "[paseo-bm] stop propagation: could not cancel Reviewer rev-a (the `paseo` command was not found); asking it to stop instead.",
+    );
+  });
+
+  it("uses the cancel it is given, and a cancel that throws counts as failed", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { paseo, sends } = daemonWith({ agents: [reviewer("rev-a"), reviewer("rev-b")], statuses: { [WORKER]: ["idle"] } });
+    const given: string[] = [];
+    const cancel = async (agentId: string) => {
+      given.push(agentId);
+      if (agentId === "rev-a") throw new Error("spawn failed");
+      return { ok: true as const, stopped: false };
+    };
+    await propagateWorkerStop(event() as never, { paseo: paseo as never, cancel });
+    expect(given).toEqual(["rev-a", "rev-b"]);
+    expect(cli.cancelled).toEqual([]);
+    expect(sends).toEqual([{ id: "rev-a", text: REVIEWER_STOP_NOTICE }]);
+    expect(String(warn.mock.calls[0]![0])).toMatch(/could not cancel Reviewer rev-a \(spawn failed\)/);
+  });
+
+  it("resolves, logs and carries on with the next Reviewer when the fallback send rejects", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { run } = setup();
+    cli.refuse.set("rev-a", "exited with 1");
     const { paseo, sends } = daemonWith({
       agents: [reviewer("rev-a"), reviewer("rev-b")],
       statuses: { [WORKER]: ["idle"] },
       sendError: { "rev-a": new Error("send refused") },
     });
     await run(event(), paseo);
-    expect(sends).toEqual([{ id: "rev-b", text: REVIEWER_STOP_NOTICE }]);
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0]![0])).toMatch(/^\[paseo-bm\] stop propagation: .*rev-a.*send refused/);
+    expect(cli.cancelled).toEqual(["rev-b"]);
+    expect(sends).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(String(warn.mock.calls[1]![0])).toMatch(/^\[paseo-bm\] stop propagation: .*rev-a.*send refused/);
   });
 
   it("resolves and logs when the Worker cannot be re-read", async () => {
@@ -312,6 +376,7 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     handle(WORKER).refresh.mockRejectedValue(new Error("no snapshot"));
     const { run } = setup();
     await run(event(), paseo);
+    expect(cli.cancelled).toEqual([]);
     expect(sends).toEqual([]);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]![0])).toMatch(/^\[paseo-bm\] stop propagation: .*no snapshot/);
@@ -324,6 +389,7 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     const controller = new AbortController();
     controller.abort();
     await run(event(), paseo, controller.signal);
+    expect(cli.cancelled).toEqual([]);
     expect(sends).toEqual([]);
     expect(warn).not.toHaveBeenCalled();
   });
@@ -339,6 +405,7 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     controller.abort();
     await vi.advanceTimersByTimeAsync(STOP_RECHECK_MS);
     await expect(pending).resolves.toBeUndefined();
+    expect(cli.cancelled).toEqual([]);
     expect(sends).toEqual([]);
     expect(paseo.agents.list).not.toHaveBeenCalled();
   });
@@ -351,6 +418,7 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     const { run } = setup();
     const { paseo, sends } = daemonWith({ agents: [reviewer("rev-a")] });
     await run(ev as unknown as Event, paseo);
+    expect(cli.cancelled).toEqual([]);
     expect(sends).toEqual([]);
   });
 
@@ -418,8 +486,9 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
 /**
  * `/bm-worker-stop-all` (delta 20260917e §4.4).
  *
- * Paseo gives plugins no agent cancel, so this ASKS: a `send()` on a running
- * agent replaces the turn it is in with one carrying a stop notice. Every case
+ * A Worker is ASKED: a `send()` on a running agent replaces the turn it is in
+ * with `BM-STOP`. A Reviewer is cancelled through the Paseo CLI (spike S5), and
+ * asked with the stop notice only when that cancel fails. Every case
  * below guards one of the three promises the command makes — the Manager is
  * never touched, only this workspace is touched, and an archived agent is never
  * resurrected.
@@ -441,13 +510,22 @@ describe("stopAllInWorkspace", () => {
     labels: { "bm.role": "manager" },
   });
 
-  it("asks every running Worker and Reviewer of the workspace", async () => {
+  it("asks every running Worker of the workspace and cancels every running Reviewer", async () => {
     const { paseo, sends } = daemonWith({ agents: [worker("w1"), reviewer("rev-a")] });
     const result = await stopAllInWorkspace(paseo as never, WS);
     expect(result).toEqual({ workers: 1, reviewers: 1, skipped: 0 });
-    expect(sends.map((s) => s.id).sort()).toEqual(["rev-a", "w1"]);
-    expect(sends.find((s) => s.id === "w1")?.text).toBe(WORKER_STOP_NOTICE);
-    expect(sends.find((s) => s.id === "rev-a")?.text).toBe(REVIEWER_STOP_NOTICE);
+    expect(sends).toEqual([{ id: "w1", text: WORKER_STOP_NOTICE }]);
+    expect(cli.cancelled).toEqual(["rev-a"]);
+  });
+
+  it("asks a Reviewer with the stop notice when its cancel fails, and logs it", async () => {
+    cli.refuse.set("rev-a", "refusing an agent id that is not a whole id");
+    const { paseo, sends } = daemonWith({ agents: [reviewer("rev-a")] });
+    const logged: string[] = [];
+    const result = await stopAllInWorkspace(paseo as never, WS, (message) => logged.push(message));
+    expect(result).toEqual({ workers: 0, reviewers: 1, skipped: 0 });
+    expect(sends).toEqual([{ id: "rev-a", text: REVIEWER_STOP_NOTICE }]);
+    expect(logged).toEqual(["[paseo-bm] stop propagation: could not cancel Reviewer rev-a (refusing an agent id that is not a whole id); asking it to stop instead."]);
   });
 
   it("never asks the Manager, whatever the daemon's filter returns", async () => {
@@ -484,6 +562,7 @@ describe("stopAllInWorkspace", () => {
   it("skips an agent that stopped running between the listing and the send", async () => {
     const { paseo, sends } = daemonWith({ agents: [worker("w1")], statuses: { w1: ["idle"] } });
     const result = await stopAllInWorkspace(paseo as never, WS);
+    expect(cli.cancelled).toEqual([]);
     expect(sends).toEqual([]);
     expect(result).toEqual({ workers: 0, reviewers: 0, skipped: 1 });
   });
@@ -510,13 +589,8 @@ describe("stopAllInWorkspace", () => {
     });
     const result = await stopAllInWorkspace(paseo as never, WS);
     expect(result).toEqual({ workers: 1, reviewers: 1, skipped: 0 });
-    expect(sends).toEqual(
-      expect.arrayContaining([
-        { id: "w-plain", text: WORKER_STOP_NOTICE },
-        { id: "rev-plain", text: REVIEWER_STOP_NOTICE },
-      ]),
-    );
-    expect(sends).toHaveLength(2);
+    expect(sends).toEqual([{ id: "w-plain", text: WORKER_STOP_NOTICE }]);
+    expect(cli.cancelled).toEqual(["rev-plain"]);
   });
 
   it("never asks a Manager, labelled or recognised only by its bm-manager provider", async () => {

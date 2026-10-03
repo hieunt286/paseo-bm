@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CLI_TIMEOUT_MS, isSafeAgentId, setAgentLabel, setAgentMode, type PaseoCliDeps } from "../plugin/server/paseo-cli";
+import { CLI_TIMEOUT_MS, cancelAgent, isFullAgentId, isSafeAgentId, setAgentLabel, setAgentMode, type PaseoCliDeps } from "../plugin/server/paseo-cli";
 import { managerEnsureRpc } from "../plugin/shared/contracts";
 
 /**
@@ -72,6 +72,63 @@ describe("paseo CLI commands", () => {
     expect(isSafeAgentId("29e658b5-55eb-42b3-b0b4-aeed22eca3b7")).toBe(true);
     expect(isSafeAgentId("-29e658b5")).toBe(false);
     expect(isSafeAgentId("")).toBe(false);
+  });
+});
+
+/**
+ * The plugin's cancel (spike S5, bead bm-agent-tools-1upv.16): `paseo agent
+ * stop <id> --json`. The command also takes an id prefix, `--all` and `--cwd`,
+ * so only a whole agent id may reach it.
+ */
+describe("cancelAgent", () => {
+  const ID = "5ea413fa-1b2c-4d5e-8f90-a1b2c3d4e5f6";
+
+  it("runs exactly `paseo agent stop <id> --json`, with the 5 s budget, and reads whether it stopped a turn", async () => {
+    const { deps, runs } = fake({ code: 0, output: `{"stoppedCount":1,"agentIds":["${ID}"]}`, timedOut: false });
+
+    expect(await cancelAgent(ID, deps)).toEqual({ ok: true, stopped: true });
+    expect(runs).toEqual([{ file: "/opt/fake/paseo", args: ["agent", "stop", ID, "--json"], timeoutMs: CLI_TIMEOUT_MS }]);
+  });
+
+  it("an idle agent is a no-op: ok, nothing stopped; unreadable output reads the same", async () => {
+    expect(await cancelAgent(ID, fake({ code: 0, output: '{"stoppedCount":0,"agentIds":[]}', timedOut: false }).deps)).toEqual({ ok: true, stopped: false });
+    expect(await cancelAgent(ID, fake({ code: 0, output: "done", timedOut: false }).deps)).toEqual({ ok: true, stopped: false });
+  });
+
+  it.each([
+    ["a prefix of an id", "5ea413fa"],
+    ["a short id", "rev-a"],
+    ["a flag", "--all"],
+    ["a cwd flag", "--cwd"],
+    ["an id with a trailing flag", `${ID} --all`],
+    ["an empty id", ""],
+  ])("refuses %s before anything runs", async (_label, id) => {
+    const { deps, runs } = fake();
+
+    const result = await cancelAgent(id, deps);
+
+    expect(result.ok).toBe(false);
+    expect(runs).toEqual([]);
+  });
+
+  it("a command that reports stopping another agent is a failure naming it", async () => {
+    const other = "0a1b2c3d-1b2c-4d5e-8f90-a1b2c3d4e5f6";
+    const { deps } = fake({ code: 0, output: `{"stoppedCount":2,"agentIds":["${ID}","${other}"]}`, timedOut: false });
+
+    expect(await cancelAgent(ID, deps)).toEqual({ ok: false, reason: `\`paseo agent stop\` also stopped ${other}` });
+  });
+
+  it("a failing, missing or slow command is a reason, never an exception", async () => {
+    expect(await cancelAgent(ID, fake({ code: 3, output: "no such agent\n", timedOut: false }).deps)).toEqual({ ok: false, reason: "`paseo agent stop` exited with 3: no such agent" });
+    expect(await cancelAgent(ID, { find: () => null, run: async () => ({ code: 0, output: "", timedOut: false }) })).toEqual({ ok: false, reason: "the `paseo` command was not found" });
+    expect(await cancelAgent(ID, fake({ code: 1, output: "", timedOut: true }).deps)).toEqual({ ok: false, reason: `\`paseo agent stop\` took longer than ${CLI_TIMEOUT_MS} ms` });
+  });
+
+  it("isFullAgentId accepts a UUID only", () => {
+    expect(isFullAgentId(ID)).toBe(true);
+    expect(isFullAgentId(ID.toUpperCase())).toBe(true);
+    expect(isFullAgentId(ID.slice(0, -1))).toBe(false);
+    expect(isFullAgentId("agent-worker")).toBe(false);
   });
 });
 

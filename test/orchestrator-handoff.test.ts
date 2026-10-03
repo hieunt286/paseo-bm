@@ -8,6 +8,8 @@ import { COMMAND_LIMIT_PER_REQUEST, HANDOFF_OFF_MESSAGE, commandsSentFor, sendCo
 import { WORKER_TITLE } from "../plugin/server/create-worker";
 import { createRequestRegistry } from "../plugin/server/request-registry";
 import { applyAgentTools, type AgentCreateRequest } from "../plugin/server/role-hook";
+import { outboxBlocksOf } from "../plugin/server/collector";
+import type { OutboxRecord } from "../plugin/server/outbox";
 import { originOf } from "../plugin/shared/message-origin";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
 import { createCoordinationStore } from "../plugin/server/coordination-store";
@@ -694,6 +696,32 @@ describe("a bound Manager: the plugin creates the successor, the Manager is info
   });
 });
 
+describe("the note request follows the outgoing Worker's binding (design §16.7)", () => {
+  /** The Worker's binding as `bm_create_worker` leaves it: issued, attached, bound; with or without the creation tools. */
+  function bindWorker(creationTools: boolean): void {
+    const bindings = createBindingStore(home);
+    const { token, tokenSha256 } = bindings.issue({ role: "worker", workspaceId: WORKSPACE_ID, requestId: REQUEST, parentId: MANAGER, creationTools });
+    bindings.attach(token, "worker");
+    bindings.settle(tokenSha256, WORKER);
+  }
+
+  it("a Worker bound with the creation tools is asked to call bm_report, which stores and delivers the note", async () => {
+    await store(...heavyRequest());
+    bindWorker(true);
+    const fake = daemon();
+    expect((await handoff(toolsOf(fake))).ok).toBe(true);
+    expect(fake.sends).toEqual([{ id: WORKER, text: noteRequestOf({ requestId: REQUEST }, { bound: true }) }]);
+  });
+
+  it("an unbound Worker, or one bound before the creation tools, is asked to post the block", async () => {
+    await store(...heavyRequest());
+    bindWorker(false);
+    const fake = daemon();
+    expect((await handoff(toolsOf(fake))).ok).toBe(true);
+    expect(fake.sends).toEqual([{ id: WORKER, text: noteRequestOf({ requestId: REQUEST }) }]);
+  });
+});
+
 describe("the pieces", () => {
   it("a safe point: a bead closed with evidence, beads-done or bead-implemented, or a review verdict of its own Reviewer since its turn before", () => {
     expect(handoffSafePointIn(workerTurn(10, { evidence: [ran("br close bm-d1 --reason ok", iso(T0))] }))).toBe(true);
@@ -717,6 +745,39 @@ describe("the pieces", () => {
     expect(noteIn(withNote, [], "req-20260930T120000Z")).toBeNull();
     expect(noteRequestOf({ requestId: REQUEST })).toMatch(/^BM-HANDOFF\n/);
     expect(noteRequestOf({ requestId: REQUEST })).toContain("call bm_report for req-20260930T100000Z with the phase and facts of your last report and handoffNote");
+  });
+
+  it("the note request: an unbound Worker posts the block; a bound one lets bm_report store and deliver it", () => {
+    const unbound = noteRequestOf({ requestId: REQUEST });
+    expect(unbound).toBe(noteRequestOf({ requestId: REQUEST }, { bound: false }));
+    expect(unbound).toContain("— and post the block it returns as your reply here; do not send it to your Manager.");
+    const bound = noteRequestOf({ requestId: REQUEST }, { bound: true });
+    expect(bound.split("\n")[0]).toBe(HANDOFF_NOTICE_MARKER);
+    expect(isPluginNotice(bound)).toBe(true);
+    expect(bound).toContain(
+      `Write your handoff note now: call bm_report for ${REQUEST} with the phase and facts of your last report and handoffNote — what you tried and what is next, at most 1,500 characters. The tool stores the note and delivers the report; send nothing else.`,
+    );
+    expect(bound).not.toMatch(/post the block|do not send it to your Manager/);
+    expect(bound.split("\n").at(-1)).toBe(unbound.split("\n").at(-1));
+  });
+
+  it("the note is found in each path: posted in the chat, sent with send_agent_prompt (unbound), or stored by bm_report (bound)", () => {
+    const block = `BM-REPORT\nrequestId: ${REQUEST}\nphase: beads-done\ntier: Large (changed: no)\nfilesChanged: none\nbeadsCreated: none\nbeadsUpdated: none\nbeadsClosed: bm-d1\nbeadsReady: bm-d2\nreviewFindingsOpen: none\nbuildAndTests: not run\nskillsUsed: none\ndecided: none\nblockers: none\nhandoffNote: Next: bm-d2.`;
+    const at = iso(T0 + 32 * MIN);
+    // Unbound, posted: the collector parses the chat into the turn's reports.
+    expect(noteIn(workerTurn(32, { reports: parseReports(block, { agentId: WORKER, at }) }), [], REQUEST)).toBe("Next: bm-d2.");
+    // Unbound, sent to the Manager by hand: read from the turn's send_agent_prompt call.
+    const sentItems = [{ type: "tool_call", name: "mcp__paseo__send_agent_prompt", detail: { input: { agentId: MANAGER, prompt: block } } }];
+    expect(noteIn(workerTurn(32), sentItems, REQUEST)).toBe("Next: bm-d2.");
+    // Bound: bm_report wrote an outbox record, which the collector puts in the Worker's turn record.
+    const stored: OutboxRecord = { id: "out-000000000001", kind: "report", requestId: REQUEST, batchId: null, from: WORKER, to: MANAGER, text: block, createdAt: at, state: "delivered", outcomeAt: at, reason: null };
+    const { reports } = outboxBlocksOf([stored], WORKER);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]!.recordId).toBe(stored.id);
+    expect(noteIn(workerTurn(32, { reports }), [], REQUEST)).toBe("Next: bm-d2.");
+    // Its bm_report tool call in the timeline is no block: the record is the one source, read once.
+    const toolItems = [{ type: "tool_call", name: "mcp__paseo-bm__bm_report", detail: { input: { requestId: REQUEST, phase: "beads-done", handoffNote: "Next: bm-d2." } } }];
+    expect(noteIn(workerTurn(32, { reports }), toolItems, REQUEST)).toBe("Next: bm-d2.");
   });
 
   it("the brief is bounded: a long note is cut first, and the closing paragraph always stays", async () => {

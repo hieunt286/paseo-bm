@@ -618,12 +618,14 @@ export { dataHome as dataHomeOf } from "./rpc-kit";
  * Full instructions for a role as they apply now, falling back to the base:
  * what a Manager is created with (`manager.ensure`, a fallback Manager), so it
  * carries the owner's precedents of `workspaceId` and the global ones, and the
- * Worker mode its project's action boundary switch gives (§D.2).
+ * Worker mode its project's action boundary switch gives (§D.2). With
+ * `bound`, the text of a bound agent (design §16.12): no child mode line and
+ * no hand-written path.
  */
 export async function currentInstructions(
   role: Role,
   paseo: unknown,
-  deps: { homedir?: () => string; cwd?: string; workspaceId?: string } = {},
+  deps: { homedir?: () => string; cwd?: string; workspaceId?: string; bound?: boolean } = {},
 ): Promise<string> {
   const home = deps.homedir === undefined ? {} : { homedir: deps.homedir };
   const read = (workspaceId: string | undefined) => readActivePrecedents(home, workspaceId);
@@ -633,6 +635,7 @@ export async function currentInstructions(
     reviewBudget: () => readReviewBudget(home),
     // The project's action boundary switch (§D.2): the Manager is told the Worker mode of its project.
     boundaryOn: (workspaceId) => boundaryOf(readAutonomyPolicy(home), workspaceId) !== null,
+    ...(deps.bound === true ? { bound: true } : {}),
   });
   return fullInstructions(role, facts);
 }

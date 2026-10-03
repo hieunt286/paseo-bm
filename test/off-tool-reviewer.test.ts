@@ -6,7 +6,16 @@ import { clearBindingCache, createBindingStore, type BindingStore } from "../plu
 import { binderOf } from "../plugin/server/agent-tools";
 import { createAlertStore } from "../plugin/server/alert-store";
 import type { BmEvent } from "../plugin/server/event-bus";
-import { checkOffToolReviewer, clearOffToolAlert, clearOffToolAlertsOfRequest, offToolReviewerOf, type OffToolReviewer } from "../plugin/server/off-tool-reviewer";
+import {
+  OFF_TOOL_CANCEL_WAITS_MS,
+  cancelOffToolReviewer,
+  checkOffToolReviewer,
+  clearOffToolAlert,
+  clearOffToolAlertsOfRequest,
+  offToolReviewerOf,
+  type OffToolReviewer,
+} from "../plugin/server/off-tool-reviewer";
+import type { CancelResult } from "../plugin/server/paseo-cli";
 import { clearRequestRegistryCache } from "../plugin/server/request-registry";
 import { clearPluginReviewers, createPluginReviewer, type ReviewerCreationPaseo } from "../plugin/server/review-tools";
 import { applyAgentTools, type AgentCreateRequest } from "../plugin/server/role-hook";
@@ -19,8 +28,9 @@ import { msg, turn } from "./fixtures/orchestrator-traces";
  * Off-tool Reviewers (design §16.8; ADR-027 decision 10): a Reviewer a bound
  * Worker creates with Paseo's create_agent is counted, raises the
  * `off-tool-reviewer` Inbox alert and an `off-tool-review` worker.signal, and
- * goes to the cancel hook of bead .16; the plugin's own Reviewers, and one an
- * unbound Worker creates, raise neither.
+ * is cancelled at once through the Paseo CLI (spike S5, bead .16:
+ * `cancelOffToolReviewer`, here with a fake cancel); the plugin's own
+ * Reviewers, and one an unbound Worker creates, raise neither.
  */
 
 const WS = "wks_1";
@@ -184,5 +194,62 @@ describe("an off-tool Reviewer (design §16.8)", () => {
     expect(await checkOffToolReviewer(created("rev-2", HAND_WORKER), null, deps)).toBeNull();
     expect(createAlertStore(home).list({ open: true })).toEqual([]);
     expect(published).toEqual([]);
+  });
+});
+
+describe("cancelling an off-tool Reviewer (design §16.8 step 4, spike S5)", () => {
+  const FINDING: OffToolReviewer = { reviewerId: "5ea413fa-1b2c-4d5e-8f90-a1b2c3d4e5f6", workerId: WORKER, workspaceId: WS, requestId: REQ };
+
+  /** A fake cancel answering `answers` in turn (the last one sticks), and the waits it was given. */
+  function fakeCancel(...answers: CancelResult[]) {
+    const ids: string[] = [];
+    const slept: number[] = [];
+    const logs: string[] = [];
+    const deps = {
+      cancel: async (agentId: string) => {
+        ids.push(agentId);
+        return answers[Math.min(ids.length, answers.length) - 1]!;
+      },
+      sleep: async (ms: number) => {
+        slept.push(ms);
+      },
+      log: (message: string) => logs.push(message),
+    };
+    return { deps, ids, slept, logs };
+  }
+
+  it("cancels the Reviewer's running turn at once, by its id", async () => {
+    const { deps, ids, slept, logs } = fakeCancel({ ok: true, stopped: true });
+    expect(await cancelOffToolReviewer(FINDING, deps)).toBe(true);
+    expect(ids).toEqual([FINDING.reviewerId]);
+    expect(slept).toEqual([]);
+    expect(logs).toEqual([`[paseo-bm] cancelled the off-tool Reviewer ${FINDING.reviewerId} of Worker ${WORKER}.`]);
+  });
+
+  it("tries again while its first turn has not started, and gives up after the last wait", async () => {
+    const started = fakeCancel({ ok: true, stopped: false }, { ok: true, stopped: true });
+    expect(await cancelOffToolReviewer(FINDING, started.deps)).toBe(true);
+    expect(started.slept).toEqual([OFF_TOOL_CANCEL_WAITS_MS[0]]);
+
+    const never = fakeCancel({ ok: true, stopped: false });
+    expect(await cancelOffToolReviewer(FINDING, never.deps)).toBe(false);
+    expect(never.ids).toHaveLength(OFF_TOOL_CANCEL_WAITS_MS.length + 1);
+    expect(never.slept).toEqual([...OFF_TOOL_CANCEL_WAITS_MS]);
+    expect(never.logs).toEqual([`[paseo-bm] the off-tool Reviewer ${FINDING.reviewerId} had no running turn to cancel.`]);
+  });
+
+  it("a failed cancel is logged with the Reviewer's id, and the alert stays", async () => {
+    const { home, deps } = setup();
+    const logs: string[] = [];
+    const failing = fakeCancel({ ok: false, reason: "the `paseo` command was not found" });
+    const finding = await checkOffToolReviewer(created("rev-1", WORKER), null, {
+      ...deps,
+      log: (message: string) => logs.push(message),
+      cancel: (found: OffToolReviewer) => cancelOffToolReviewer(found, failing.deps),
+    });
+    expect(finding).not.toBeNull();
+    expect(failing.ids).toEqual(["rev-1"]);
+    expect(logs).toContain("[paseo-bm] could not cancel the off-tool Reviewer rev-1: the `paseo` command was not found");
+    expect(createAlertStore(home).list({ open: true }).map((alert) => alert.subject)).toEqual(["rev-1"]);
   });
 });

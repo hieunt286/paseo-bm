@@ -84,6 +84,7 @@ function setup(options: { home?: string | null; agents?: Agent[]; paseo?: boolea
   const queue = createNoticeQueue({ log: () => {} });
   const logs: string[] = [];
   const opened: Decision[][] = [];
+  const stopsAsked: Array<{ workerId: string; workspaceId: string }> = [];
   let clock = T0;
   let n = 0;
   const deps: DeliveringToolDeps = {
@@ -97,12 +98,15 @@ function setup(options: { home?: string | null; agents?: Agent[]; paseo?: boolea
       opened.push([...decisions]);
     },
     turnStartOf: () => (options.turnStart === undefined ? T0.toISOString() : options.turnStart),
+    stopReviewers: async (_paseo, workerId, workspaceId) => {
+      stopsAsked.push({ workerId, workspaceId });
+    },
   };
   const tools = createDeliveringTools(deps);
   const tick = (ms: number) => {
     clock = new Date(clock.getTime() + ms);
   };
-  return { home: home!, fake, queue, logs, opened, tools, tick };
+  return { home: home!, fake, queue, logs, opened, tools, tick, stopsAsked };
 }
 
 /** The request as bm_create_worker registers it: its Manager, its Worker. */
@@ -173,6 +177,15 @@ describe("bm_report for a bound Worker (design §16.6)", () => {
     expect(originOf({ text: fake.sends[0]!.text, clientMessageId: "sdk" })).toBe("plugin-notice");
     expect(parseDelivery(fake.sends[0]!.text)?.kind).toBe("report");
     expect(createRequestRegistry(home).get(WS, REQ)).toMatchObject({ tier: "Medium", finishedAt: null });
+  });
+
+  it("a stopped report stops the Worker's running Reviewers (design §7.9); finished does not", async () => {
+    const { home, tools, stopsAsked } = setup();
+    register(home);
+    expect((await tools.worker.call("bm_report", { ...REPORT, phase: "finished" }, WORKER_CALLER)).ok).toBe(true);
+    expect(stopsAsked).toEqual([]);
+    expect((await tools.worker.call("bm_report", { ...REPORT, phase: "stopped" }, WORKER_CALLER)).ok).toBe(true);
+    expect(stopsAsked).toEqual([{ workerId: WORKER, workspaceId: WS }]);
   });
 
   it("finished expires the request's earlier unsettled questions and records finishedAt; stopped expires nothing", async () => {

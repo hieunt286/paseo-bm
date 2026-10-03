@@ -9,7 +9,9 @@
  *   `revision` that `roles.save-settings` must send back.
  * - `roles.options` lists what the Edit form may offer for one BASE provider,
  *   from `providers.listModels`, `listModes`, `listFeatures` and `costOf`.
- * - `roles.instructions` shows what a new agent of a role is created with.
+ * - `roles.instructions` shows what a new agent of a role is created with:
+ *   the bound text when the role's provider can carry paseo-bm's tools
+ *   (`TOOL_PROVIDERS`), the unbound one with its hand-written path otherwise.
  *
  * Neither handler throws anything but a coded `DashboardError`: a lookup that
  * fails, times out or answers an `error` becomes an empty list or `unknown`
@@ -33,7 +35,8 @@ import {
   type ProviderCapability,
 } from "./role-mode";
 import { errorText } from "./rpc-kit";
-import { currentInstructions } from "./role-instructions";
+import { TOOL_PROVIDERS } from "./agent-tools";
+import { baseProviderOf, currentInstructions } from "./role-instructions";
 import {
   DashboardError,
   rolesInstructionsRpc,
@@ -338,17 +341,24 @@ export async function handleRolesSaveSettings(
 /**
  * Handler body of `roles.instructions` (design §7.12, base PRD REQ-032 d):
  * what a new agent of `role` is created with now, built by the very function
- * the creation paths use, so the view never drifts from them. Only reads;
- * a lookup that fails leaves its fact out, as at a creation.
+ * the creation paths use, so the view never drifts from them. A Manager,
+ * Worker or Reviewer whose alias extends a provider that can carry paseo-bm's
+ * tools (`TOOL_PROVIDERS`) is shown bound (design §16.12: no child mode line,
+ * no hand-written path); on any other provider, or when the base provider
+ * cannot be read, unbound. Only reads; a lookup that fails leaves its fact
+ * out, as at a creation.
  */
 export async function handleRolesInstructions(
   input: { role: SetupRoleWithOrchestrator; workspaceId?: string },
   paseo: unknown,
   deps: { homedir?: () => string } = {},
 ): Promise<RolesInstructions> {
+  const base = input.role === "orchestrator" ? null : await baseProviderOf(paseo, PROVIDER_IDS[input.role]);
+  const bound = base !== null && TOOL_PROVIDERS.includes(base);
   const text = await currentInstructions(input.role, paseo, {
     ...(deps.homedir === undefined ? {} : { homedir: deps.homedir }),
     ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
+    ...(bound ? { bound: true } : {}),
   });
   return { role: input.role, text, workspaceId: input.workspaceId ?? null };
 }

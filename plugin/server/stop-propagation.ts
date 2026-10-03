@@ -2,17 +2,21 @@ import type { PluginLifecycleEvents, PluginServerContext } from "@getpaseo/plugi
 import { PARENT_AGENT_LABEL } from "./manager";
 import { REVIEWER_STOP_NOTICE_PREFIX, WORKER_STOP_NOTICE } from "./notices";
 import { listAllAgents, roleOfAgent, roleOfProvider } from "./agent-role";
+import { cancelAgent, type CancelResult } from "./paseo-cli";
 import { errorText } from "./rpc-kit";
 
 /**
  * Stop propagation from a Beads Worker to its running Reviewers (bm-wq6, REQ-026f).
  *
- * When the user stops a Worker (app Stop button or `paseo stop`), Paseo 0.8
+ * When the user stops a Worker (app Stop button or `paseo stop`), Paseo
  * interrupts only the Worker's turn; a Reviewer the Worker created keeps
- * running. Paseo gives plugins no agent cancel, so the closest supported
- * interrupt is used: `PaseoAgentHandle.send()` on a running agent replaces its
- * current turn with a new one carrying a fixed stop notice, which
- * `roles/reviewer.md` answers with one line and no tool calls.
+ * running. The SDK gives plugins no agent cancel, but the Paseo CLI does:
+ * since spike S5 (ADR-027 decisions 8 and 10, design §16.12) each running
+ * Reviewer is cancelled with `paseo agent stop <id>` through `paseo-cli.ts`
+ * (`cancelAgent`). Only when that cancel fails — no `paseo` binary, an id that
+ * is not a whole one, a CLI error — is the failure logged and the Reviewer
+ * asked instead: `PaseoAgentHandle.send()` replaces its turn with the fixed
+ * stop notice, which says itself what to do.
  *
  * SDK facts this relies on (checked against @getpaseo/plugin 0.8.0 and
  * @getpaseo/client 0.8.0 typings, not guessed):
@@ -39,11 +43,18 @@ export const REVIEWER_ROLE_VALUE = "reviewer";
 export const STOP_RECHECK_MS = 500;
 
 /**
- * The notice sent to each running Reviewer of a stopped Worker. `roles/reviewer.md`
- * recognises it verbatim; do not reword it without changing the role.
+ * The notice a running Reviewer of a stopped Worker gets when the plugin could
+ * not cancel it. Self-contained since spike S5: `roles/reviewer.md` no longer
+ * carries a stop answer of its own. Its first words are the notice marker
+ * (`REVIEWER_STOP_NOTICE_PREFIX`); keep them.
  */
 export const REVIEWER_STOP_NOTICE =
-  `${REVIEWER_STOP_NOTICE_PREFIX} by the user. Stop this review now: do not read files, run commands or call any tool; reply with the single line "BM-REVIEW STOPPED" and end your turn.`;
+  `${REVIEWER_STOP_NOTICE_PREFIX} by the user. Stop this review now: do not read files, run commands or call any tool; reply with one line saying you stopped, and end your turn.`;
+
+/** Cancels one agent's running turn; `cancelAgent` of `paseo-cli.ts` by default. */
+export type CancelAgent = (agentId: string) => Promise<CancelResult>;
+
+const defaultCancel: CancelAgent = (agentId) => cancelAgent(agentId);
 
 const LOG_PREFIX = "[paseo-bm] stop propagation:";
 
@@ -86,6 +97,15 @@ export type TurnEndedEvent = PluginLifecycleEvents["agent.turn_ended"];
 export interface StopPropagationContext {
   paseo: StopPaseo;
   signal?: AbortSignal;
+  /** The Reviewer cancel; `cancelAgent` of `paseo-cli.ts` by default. */
+  cancel?: CancelAgent;
+}
+
+/** The options of `stopRunningReviewers`. */
+export interface StopReviewersOptions {
+  signal?: AbortSignal;
+  /** The Reviewer cancel; `cancelAgent` of `paseo-cli.ts` by default. */
+  cancel?: CancelAgent;
 }
 
 function isAborted(signal: AbortSignal | undefined): boolean {
@@ -158,18 +178,45 @@ async function listRunningReviewers(
 }
 
 /**
- * Sends `REVIEWER_STOP_NOTICE` to every running Reviewer of `workerId` (in
- * `workspaceId` when known), re-reading each one just before the send and
- * skipping it unless it is still running. Returns the ids it sent to. Never
- * throws: a failure costs one log line; an aborted `signal` ends it quietly.
- * Also used when a fallback Worker replaces a stopped one (delta 20260921 §4.4.7).
+ * Stops one running Reviewer: cancels its turn through the Paseo CLI (spike
+ * S5); when the cancel fails, logs why (the agent id and the CLI's reason,
+ * never a token) and asks it with `REVIEWER_STOP_NOTICE` instead. Returns how
+ * it was stopped. Throws only when that send throws.
+ */
+export async function stopReviewer(
+  handle: Pick<StopAgentHandle, "send">,
+  reviewerId: string,
+  cancel: CancelAgent,
+  log: (message: string) => void,
+): Promise<"cancelled" | "asked"> {
+  let result: CancelResult;
+  try {
+    result = await cancel(reviewerId);
+  } catch (error) {
+    result = { ok: false, reason: errorText(error) };
+  }
+  if (result.ok) return "cancelled";
+  log(`${LOG_PREFIX} could not cancel Reviewer ${reviewerId} (${result.reason}); asking it to stop instead.`);
+  await handle.send(REVIEWER_STOP_NOTICE);
+  return "asked";
+}
+
+/**
+ * Stops every running Reviewer of `workerId` (in `workspaceId` when known):
+ * re-reads each one just before and skips it unless it is still running, then
+ * cancels it (`stopReviewer`: the stop notice only when the cancel fails).
+ * Returns the ids it stopped or asked. Never throws: a failure costs one log
+ * line; an aborted `signal` ends it quietly. Also used when a fallback Worker
+ * replaces a stopped one (delta 20260921 §4.4.7).
  */
 export async function stopRunningReviewers(
   paseo: StopPaseo,
   workerId: string,
   workspaceId: string | null,
-  signal?: AbortSignal,
+  options: StopReviewersOptions = {},
 ): Promise<string[]> {
+  const signal = options.signal;
+  const cancel = options.cancel ?? defaultCancel;
   const stopped: string[] = [];
   let reviewers: StopAgentSnapshot[];
   try {
@@ -187,7 +234,7 @@ export async function stopRunningReviewers(
       const fresh = await handle.refresh();
       if (isAborted(signal)) return stopped;
       if (!isRunningReviewerOf(fresh?.agent, workerId, workspaceId)) continue;
-      await handle.send(REVIEWER_STOP_NOTICE);
+      await stopReviewer(handle, reviewer.id, cancel, (message) => console.warn(message));
       stopped.push(reviewer.id);
     } catch (error) {
       if (isAborted(signal)) return stopped;
@@ -204,9 +251,10 @@ export async function stopRunningReviewers(
  * 1. Ignore anything but a canceled turn of a `bm-worker`.
  * 2. Re-read the Worker; if it is `running`, wait `STOP_RECHECK_MS` once and
  *    read again. Still `running` means a message replaced the turn: stop here.
- * 3. List the Worker's running, non-archived `bm.role=reviewer` children in its
- *    workspace; re-read each one just before sending and skip it unless it is
- *    still running; send `REVIEWER_STOP_NOTICE`.
+ * 3. List the Worker's running, non-archived Reviewer children in its
+ *    workspace; re-read each one just before and skip it unless it is still
+ *    running; cancel it (`stopReviewer`: the stop notice only when the cancel
+ *    fails).
  */
 export async function propagateWorkerStop(
   event: TurnEndedEvent,
@@ -237,7 +285,10 @@ export async function propagateWorkerStop(
     }
 
     const workspaceId = event.agent.workspaceId ?? worker?.workspaceId ?? null;
-    await stopRunningReviewers(paseo, workerId, workspaceId, signal);
+    await stopRunningReviewers(paseo, workerId, workspaceId, {
+      ...(signal === undefined ? {} : { signal }),
+      ...(context.cancel === undefined ? {} : { cancel: context.cancel }),
+    });
   } catch (error) {
     if (!isAborted(signal)) {
       console.warn(`${LOG_PREFIX} unexpected failure: ${errorText(error)}`);
@@ -254,7 +305,7 @@ export type StopPropagationHost = Partial<Pick<PluginServerContext, "on" | "befo
  * lifecycle hooks at all (no `before` either), where `registerRoleHook` has
  * already logged the one line for that host.
  */
-export function registerStopPropagation(host: StopPropagationHost): () => void {
+export function registerStopPropagation(host: StopPropagationHost, deps: { cancel?: CancelAgent } = {}): () => void {
   if (typeof host.on !== "function") {
     if (typeof host.before === "function") {
       console.warn(
@@ -264,7 +315,7 @@ export function registerStopPropagation(host: StopPropagationHost): () => void {
     return () => {};
   }
   const remove = host.on("agent.turn_ended", (event, context) =>
-    propagateWorkerStop(event, { paseo: context?.paseo, signal: context?.signal }),
+    propagateWorkerStop(event, { paseo: context?.paseo, signal: context?.signal, ...(deps.cancel === undefined ? {} : { cancel: deps.cancel }) }),
   );
   return typeof remove === "function" ? remove : () => {};
 }
@@ -302,13 +353,15 @@ async function listByRole(paseo: StopPaseo, role: string, workspaceId: string): 
 }
 
 /**
- * Asks every running Worker and Reviewer of one workspace to stop.
+ * Asks every running Worker of one workspace to stop, and stops its running
+ * Reviewers.
  *
- * **This asks; it does not force.** Paseo gives plugins no agent cancel, so the
- * only supported interrupt is `send()` on a running agent, which replaces the
- * turn it is in with one carrying a stop notice. Everything downstream — the
- * command's reply to the user, the wording in the role files — has to say
- * "asked to stop", never "stopped".
+ * **A Worker is asked, not forced:** `send()` on a running agent replaces the
+ * turn it is in with `BM-STOP`, so the Worker reports `stopped` by its stop
+ * rule. Everything downstream — the command's reply to the user, the wording
+ * in the role files — has to say "asked to stop", never "stopped". **A
+ * Reviewer is cancelled** through the Paseo CLI (spike S5, `stopReviewer`),
+ * and asked with the stop notice only when that cancel fails.
  *
  * Three rules the loop exists to keep:
  * - **The Manager is never touched.** It is the user's point of contact, and the
@@ -325,6 +378,7 @@ export async function stopAllInWorkspace(
   paseo: StopPaseo,
   workspaceId: string,
   log: (message: string) => void = (message) => console.warn(message),
+  cancel: CancelAgent = defaultCancel,
 ): Promise<StopAllResult> {
   const result: StopAllResult = { workers: 0, reviewers: 0, skipped: 0 };
   const targets: Array<{ agent: StopAgentSnapshot; role: string; notice: string }> = [
@@ -349,9 +403,14 @@ export async function stopAllInWorkspace(
       continue;
     }
     try {
-      await paseo.agents.ref(target.agent.id).send(target.notice);
-      if (target.role === WORKER_ROLE_VALUE) result.workers += 1;
-      else result.reviewers += 1;
+      const handle = paseo.agents.ref(target.agent.id);
+      if (target.role === WORKER_ROLE_VALUE) {
+        await handle.send(target.notice);
+        result.workers += 1;
+      } else {
+        await stopReviewer(handle, target.agent.id, cancel, log);
+        result.reviewers += 1;
+      }
     } catch (error) {
       result.skipped += 1;
       log(`${LOG_PREFIX} could not ask ${target.agent.id} to stop (${error instanceof Error ? error.message : String(error)}).`);

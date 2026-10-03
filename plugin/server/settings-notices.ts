@@ -15,6 +15,10 @@
  * The queue lives in memory; lost on a plugin reload, the agent falls back to
  * today's behaviour (Paseo refuses the creation, the agent sends `blocked`).
  *
+ * A bound creator (design §16.5) is never told: its Runtime facts carry no
+ * child mode line (§16.12), because its tools create the child with its mode
+ * (§16.6). Unbound creators keep the notice.
+ *
  * The line follows the creator's project (autonomy design §D.2, change-010
  * C5; live check 2026-10-01 F4): in a project whose action boundary is on, a
  * Manager is told the Worker's boundary mode (and a Worker the Reviewer's),
@@ -22,10 +26,11 @@
  */
 import { boundaryOf } from "../shared/autonomy";
 import { listAllAgents, roleOfAgent, type BmRole } from "./agent-role";
+import { createBindingStore } from "./agent-bindings";
 import { readAutonomyPolicy } from "./autonomy-rpc";
 import { SETTINGS_NOTICE_MARKER } from "./notices";
 import { enqueue as defaultEnqueue, type NoticeOutcome, type NoticePaseo } from "./notice-queue";
-import { RUNTIME_FACTS_HEADING, modeFactsOf, runtimeFactsText } from "./role-instructions";
+import { RUNTIME_FACTS_HEADING, dataHomeOf, modeFactsOf, runtimeFactsText } from "./role-instructions";
 import type { BoundarySwitch } from "./role-mode";
 
 /** Which role's Runtime facts carry the child mode of each saved role. */
@@ -108,6 +113,27 @@ export interface SettingsNoticeDeps {
   log?: (message: string) => void;
   /** Whether a project's action boundary is on; the owner's policy by default (`autonomy/policy.json`). */
   boundaryOn?: (workspaceId: string) => boolean;
+  /**
+   * Whether an agent was created bound (design §16.5): a binding of it, live
+   * or revoked, in the data folder's binding store by default.
+   */
+  isBound?: (agentId: string) => boolean;
+}
+
+/** `isBound` from the data folder's binding store; nothing is bound when it cannot be read. Never throws. */
+function boundFromStore(): (agentId: string) => boolean {
+  let ids: Set<string> | null = null;
+  return (agentId) => {
+    if (ids === null) {
+      try {
+        const home = dataHomeOf();
+        ids = new Set(home === null ? [] : createBindingStore(home).list().flatMap((binding) => (binding.agentId === null || binding.state === "pending" ? [] : [binding.agentId])));
+      } catch {
+        ids = new Set();
+      }
+    }
+    return ids.has(agentId);
+  };
 }
 
 /** The line a creator in a project whose boundary is on (or not) gets. */
@@ -138,7 +164,9 @@ export async function notifyChildFactChange(
   const log = deps.log ?? ((message: string) => console.warn(message));
   try {
     const agents = await listAllAgents((options) => paseo.agents.list(options), { includeArchived: false });
-    const targets = agents.filter((agent) => !agent.archivedAt && roleOfAgent(agent)?.role === creator);
+    // A bound creator has no child mode line to replace (§16.12).
+    const isBound = deps.isBound ?? boundFromStore();
+    const targets = agents.filter((agent) => !agent.archivedAt && roleOfAgent(agent)?.role === creator && !isBound(agent.id));
     // The project matters only when a project under the boundary is told something else.
     const perProject = lineFor(after, true) !== lineFor(after, false) || lineFor(before, true) !== lineFor(before, false);
     let policyOn: ((workspaceId: string) => boolean) | undefined = deps.boundaryOn;

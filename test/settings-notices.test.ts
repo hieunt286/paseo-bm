@@ -1,4 +1,8 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { createBindingStore } from "../plugin/server/agent-bindings";
 import { createNoticeQueue } from "../plugin/server/notice-queue";
 import { isPluginNotice } from "../plugin/server/notices";
 import { childFactLine, childFactLines, notifyChildFactChange, settingsNotice, type SettingsPaseo } from "../plugin/server/settings-notices";
@@ -137,6 +141,41 @@ describe("notifyChildFactChange", () => {
     await notifyChildFactChange("worker", WORKER_LINE, NEW_WORKER_LINE, fake.paseo, { enqueue });
     await notifyChildFactChange("reviewer", "", REVIEWER_LINE, fake.paseo, { enqueue });
     expect(enqueue.mock.calls.map((call) => (call as unknown[])[0])).toEqual(["m-idle", "m-busy", "w-1", "w-fallback"]);
+  });
+
+  it("skips a bound creator, whose Runtime facts carry no child mode line (design §16.12); unbound ones are still told", async () => {
+    const queue = createNoticeQueue({ log: () => {} });
+    const fake = daemonWith([...MANAGERS, ...WORKERS]);
+    const bound = new Set(["m-idle", "w-fallback"]);
+    const isBound = vi.fn((agentId: string) => bound.has(agentId));
+    expect(await notifyChildFactChange("worker", WORKER_LINE, NEW_WORKER_LINE, fake.paseo, { enqueue: queue.enqueue, isBound })).toBe(1);
+    expect(fake.sends).toEqual([]);
+    expect(queue.pending("m-idle")).toEqual([]);
+    expect(queue.pending("m-busy")).toEqual([{ kind: "BM-SETTINGS", text: settingsNotice(NEW_WORKER_LINE) }]);
+    expect(await notifyChildFactChange("reviewer", "", REVIEWER_LINE, fake.paseo, { enqueue: queue.enqueue, isBound })).toBe(1);
+    expect(fake.sends).toEqual([{ id: "w-1", text: settingsNotice(REVIEWER_LINE) }]);
+    expect(queue.pending("w-fallback")).toEqual([]);
+  });
+
+  it("reads who is bound from the data folder's binding store by default: a bound or revoked binding, never a pending one", async () => {
+    const root = mkdtempSync(join(tmpdir(), "bm-settings-notices-"));
+    const previous = process.env["PASEO_BM_HOME"];
+    process.env["PASEO_BM_HOME"] = join(root, "data");
+    try {
+      const bindings = createBindingStore(join(root, "data"));
+      const { token, tokenSha256 } = bindings.issue({ role: "manager", workspaceId: "wks_1", creationTools: true });
+      bindings.attach(token, "manager");
+      bindings.settle(tokenSha256, "m-idle");
+      bindings.issue({ role: "manager", workspaceId: "wks_1", creationTools: true });
+      const enqueue = vi.fn(async () => "sent" as const);
+      const fake = daemonWith([...MANAGERS]);
+      expect(await notifyChildFactChange("worker", WORKER_LINE, NEW_WORKER_LINE, fake.paseo, { enqueue })).toBe(1);
+      expect(enqueue.mock.calls.map((call) => (call as unknown[])[0])).toEqual(["m-busy"]);
+    } finally {
+      if (previous === undefined) delete process.env["PASEO_BM_HOME"];
+      else process.env["PASEO_BM_HOME"] = previous;
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("never throws: a failed agent list costs one log line and notifies nobody", async () => {

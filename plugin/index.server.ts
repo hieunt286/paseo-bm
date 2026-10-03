@@ -20,7 +20,7 @@ import type { FallbackAction } from "./server/fallback-rpc";
 import { createWorkerSwitch } from "./server/fallback-switch";
 import { createFallbackWaiter } from "./server/fallback-wait";
 import { checkNoVerdict } from "./server/no-verdict";
-import { checkOffToolReviewer, registerOffToolAlertClear } from "./server/off-tool-reviewer";
+import { cancelOffToolReviewer, checkOffToolReviewer, registerOffToolAlertClear } from "./server/off-tool-reviewer";
 import { applyReviewBudgetGrants } from "./server/review-tools";
 import { createBudgetTold } from "./server/budget-told";
 import { registerFormatCheck } from "./server/format-check";
@@ -244,11 +244,17 @@ export default function contribute(server: PluginServerContext): () => void {
       // Design §16.4: the request of a new Worker an unbound Manager created is registered at first sight.
       await sightCreatedWorker(agent, paseo);
       // Design §16.8: a Reviewer a bound Worker created outside its tools is an Inbox alert and an
-      // off-tool-review signal. Bead bm-agent-tools-1upv.16 adds its cancel (the `cancel` hook point).
+      // off-tool-review signal, and is cancelled at once through the Paseo CLI (spike S5).
       await checkOffToolReviewer(agent, paseo, {
         home: dataHome(),
         bindings: agentTools.bindings,
         publish: (events, handle) => eventBus.publish(events, handle),
+        // Not awaited: its tries wait for the Reviewer's first turn, and the handoff check below must not.
+        cancel: async (finding) => {
+          void cancelOffToolReviewer(finding).catch((error: unknown) =>
+            console.warn(`[paseo-bm] could not cancel the off-tool Reviewer ${finding.reviewerId}: ${error instanceof Error ? error.message : String(error)}`),
+          );
+        },
       });
       return handoffs.agentCreated(agent, paseo);
     },

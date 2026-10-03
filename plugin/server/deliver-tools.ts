@@ -35,6 +35,7 @@ import { createDecisionStore, type DecisionStore } from "./decision-store";
 import type { ServerToolAnswer, ServerTools } from "./decision-tools";
 import type { NoticeOutcome, NoticePaseo, NoticeQueue } from "./notice-queue";
 import { clearOffToolAlertsOfRequest } from "./off-tool-reviewer";
+import { stopRunningReviewers, type StopPaseo } from "./stop-propagation";
 import { clearDroppedAlert, createOutbox, deliverRecord, type OutboxDeps, type OutboxRecord } from "./outbox";
 import type { DashboardPaseo } from "./paseo-directory";
 import { proposeAnswers } from "./proposed-answers";
@@ -88,6 +89,12 @@ export interface DeliveringToolDeps {
   turnStartOf?: (agentId: string) => string | null;
   /** The request's sole live Worker; `soleWorkerOfRequest` by default. */
   workerOf?: (input: { workspaceId: string; requestId: string; home: string }, paseo: DashboardPaseo) => Promise<string | null>;
+  /**
+   * Stops a Worker's running Reviewers when it reports `stopped` (design §7.9):
+   * the Worker no longer cancels them itself, and a stop typed in its chat
+   * reaches no Stop-button hook. `stopRunningReviewers` by default.
+   */
+  stopReviewers?: (paseo: unknown, workerId: string, workspaceId: string) => Promise<unknown>;
 }
 
 export interface DeliveringTools {
@@ -227,6 +234,11 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
       },
     );
     if ("ok" in stored) return stored;
+    if (phase === "stopped") {
+      // Not awaited: the report is answered at once; a failure costs one log line.
+      const stop = deps.stopReviewers ?? ((handle, workerId, workspaceId) => stopRunningReviewers(handle as StopPaseo, workerId, workspaceId));
+      void stop(paseo, worker.agentId, worker.workspaceId).catch((error: unknown) => log(`[paseo-bm] could not stop the Reviewers of Worker ${worker.agentId}: ${reasonOf(error)}`));
+    }
     return answered({ recordId: stored.record.id, delivery: stored.delivery });
   };
 
