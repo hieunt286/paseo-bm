@@ -7,10 +7,12 @@
  *
  * Applied by the `before("agent.create")` hook to every creation it handles,
  * whoever asks for it. A creation without a title is left alone, so Paseo's
- * own naming still applies to it. paseo-bm's own screens show the title
+ * own naming still applies to it; `createTitleMarker` marks that name at the
+ * agent's first turn. paseo-bm's own screens show the title
  * without it (`withoutRoleMarker`), where the role is named anyway.
  */
 import { roleOfProvider, type BmRole } from "./agent-role";
+import { MAX_AGENT_TITLE_CHARS, setAgentTitle, type PaseoCliDeps } from "./paseo-cli";
 
 /** The marker of each role, followed by `TITLE_MARKER_SEPARATOR`. */
 export const ROLE_TITLE_MARKERS: Readonly<Record<BmRole, string>> = {
@@ -58,4 +60,73 @@ export function applyRoleTitle<T extends { config: { provider?: unknown; title?:
   } catch {
     return undefined;
   }
+}
+
+/** The SDK slice `createTitleMarker` reads an agent's current title with. */
+export interface TitlePaseo {
+  agents: { ref(id: string): { refresh(): Promise<{ agent: { title?: string | null } } | null> } };
+}
+
+export interface TitleMarkerDeps {
+  cli?: PaseoCliDeps;
+  log?: (message: string) => void;
+}
+
+export type RemarkOutcome = "not-bm" | "already-marked" | "no-title" | "marked" | "failed";
+
+/**
+ * Puts the marker back on a paseo-bm agent whose title Paseo set after its
+ * creation. Clearing an agent's conversation in the app archives it and
+ * creates a new one with no title; Paseo then names it from its first message
+ * (`prepareAgentMessage`, Paseo 0.9.2) without going through
+ * `before("agent.create")`, so the marker is missing from then on.
+ *
+ * Called from `on("agent.turn_started")`, which comes after that naming. The
+ * event's `title` is the one the agent was created with, so a title that is
+ * not marked there is read again from a fresh snapshot. Each agent is settled
+ * once per plugin process: a later rename by the owner stays as it is.
+ */
+export function createTitleMarker(deps: TitleMarkerDeps = {}) {
+  const log = deps.log ?? ((message: string) => console.warn(message));
+  const settled = new Set<string>();
+
+  async function remark(agent: { id: string; provider: unknown; title?: string | null }, paseo: TitlePaseo): Promise<RemarkOutcome> {
+    const role = roleOfProvider(agent.provider);
+    if (role === null) return "not-bm";
+    if (settled.has(agent.id)) return "already-marked";
+    if (isMarked(role, agent.title)) {
+      settled.add(agent.id);
+      return "already-marked";
+    }
+    // Marked before the first await: two turns starting together check it once.
+    settled.add(agent.id);
+    try {
+      const title = (await paseo.agents.ref(agent.id).refresh())?.agent.title ?? null;
+      if (typeof title !== "string" || title.trim() === "") {
+        settled.delete(agent.id);
+        return "no-title";
+      }
+      if (isMarked(role, title)) return "already-marked";
+      const marked = withRoleMarker(role, withoutRoleMarker(title)).slice(0, MAX_AGENT_TITLE_CHARS);
+      const result = await setAgentTitle(agent.id, marked, deps.cli);
+      if (!result.ok) {
+        settled.delete(agent.id);
+        log(`[paseo-bm] could not mark the title of ${agent.id}: ${result.reason}`);
+        return "failed";
+      }
+      return "marked";
+    } catch (error) {
+      settled.delete(agent.id);
+      log(`[paseo-bm] could not mark the title of ${agent.id}: ${error instanceof Error ? error.message : String(error)}`);
+      return "failed";
+    }
+  }
+
+  return { remark };
+}
+
+export type TitleMarker = ReturnType<typeof createTitleMarker>;
+
+function isMarked(role: BmRole, title: string | null | undefined): boolean {
+  return typeof title === "string" && title.startsWith(`${ROLE_TITLE_MARKERS[role]}${TITLE_MARKER_SEPARATOR}`);
 }

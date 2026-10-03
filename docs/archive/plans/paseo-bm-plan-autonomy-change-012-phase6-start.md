@@ -4,7 +4,7 @@
 |---|---|
 | Change ID | `autonomy-change-012` |
 | Short name | Phase 6 start re-check |
-| Original plans | [Phase 6](./paseo-bm-plan-autonomy-phase6.md) (Active); the combined field period of [change-006](./paseo-bm-plan-autonomy-change-006-build-then-field.md) (bead `bm-autonomy-phase6-i8fc.6`) and the phase exits it holds |
+| Original plans | [Phase 6](../../plans/paseo-bm-plan-autonomy-phase6.md) (Active); the combined field period of [change-006](paseo-bm-plan-autonomy-change-006-build-then-field.md) (bead `bm-autonomy-phase6-i8fc.6`) and the phase exits it holds |
 | Status | Applied — approved by Claude under the owner's delegation; plan, designs and the bead edits of §4 (made through `br`, 2026-10-01) |
 | Owner | hieu.nt10 |
 | Created | 2026-10-01, bead `bm-autonomy-phase6-i8fc.2` |
@@ -15,7 +15,7 @@
 
 The Phase 6 start re-checked design Part F (its §F.3 decisions, change-003), the Phase 6 plan, evaluation design §6–§7 and the Phase 6 beads against:
 - **Phase 5 as built:** `3e5v.2`, `.3`, `.4` and `.6` are closed on `npm run verify` green. The live check of `3e5v.5` is not run yet.
-- **The Phase 4 live check** ([run note](../archive/operations/paseo-bm-phase4-live-check-20261001.md)) and the fixes to its findings recorded in design §D.2 ("After the Phase 4 live check").
+- **The Phase 4 live check** ([run note](../operations/paseo-bm-phase4-live-check-20261001.md)) and the fixes to its findings recorded in design §D.2 ("After the Phase 4 live check").
 - **`i8fc.1`** (`writers-observed`), closed.
 - **The code as built** after Phases 1–5 and the consolidation.
 - **The field data available now** (§2).

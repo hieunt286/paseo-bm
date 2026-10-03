@@ -4,8 +4,8 @@
 |---|---|
 | Change ID | `autonomy-change-013` |
 | Short name | Delegation without eligibility |
-| Original plans | [Phase 2](./paseo-bm-plan-autonomy-phase2.md) (WP-204 promotion and demotion, WP-208 exit); [change-007](./paseo-bm-plan-autonomy-change-007-phase2-start.md) C2 (the delegation window); [change-012](./paseo-bm-plan-autonomy-change-012-phase6-start.md) C3 (the combined field period's close and a fix installed mid-window) |
-| Status | Applied — the owner's decision of 2026-10-01 ([ADR-023](../adr/ADR-023-delegation-without-eligibility.md)); PRD, designs, GUIDE, code and the bead edits of §4 (made through `br`, 2026-10-01) |
+| Original plans | [Phase 2](../../plans/paseo-bm-plan-autonomy-phase2.md) (WP-204 promotion and demotion, WP-208 exit); [change-007](paseo-bm-plan-autonomy-change-007-phase2-start.md) C2 (the delegation window); [change-012](paseo-bm-plan-autonomy-change-012-phase6-start.md) C3 (the combined field period's close and a fix installed mid-window) |
+| Status | Applied — the owner's decision of 2026-10-01 ([ADR-023](../../adr/ADR-023-delegation-without-eligibility.md)); PRD, designs, GUIDE, code and the bead edits of §4 (made through `br`, 2026-10-01) |
 | Owner | hieu.nt10 |
 | Created | 2026-10-01 |
 | Accepted | 2026-10-01 — the owner: "Remove this condition from the product entirely; the machinery is too cumbersome. The user turns delegation on whenever they like." |

@@ -331,12 +331,25 @@ describe("registerAgentLabels", () => {
     expect(remove).toHaveBeenCalledTimes(2);
   });
 
+  it("hands every turn_started agent to the title marker (a cleared conversation loses its marker)", () => {
+    const handlers: Record<string, (event: unknown, context: unknown) => unknown> = {};
+    const host = { on: vi.fn((name: string, handler: (event: unknown, context: unknown) => unknown) => ((handlers[name] = handler), () => {})) };
+    const titles = { remark: vi.fn(async () => "marked" as const) };
+    const { paseo } = daemonWith({});
+    registerAgentLabels(host as never, createAgentLabeller({ cli: fakeCli().cli, log: () => {} }), {}, undefined, titles);
+
+    handlers["agent.turn_started"]!({ agent: { id: "m1", provider: "bm-manager", title: null }, turnId: null }, { paseo });
+    handlers["agent.turn_started"]!(null, { paseo });
+    expect(titles.remark).toHaveBeenCalledTimes(1);
+    expect(titles.remark).toHaveBeenCalledWith({ id: "m1", provider: "bm-manager", title: null }, paseo);
+  });
+
   it("is a no-op on a host without on()", () => {
     expect(() => registerAgentLabels({})()).not.toThrow();
   });
 });
 
-describe("the once-per-run label scan (owner decision Q6 a, design §4.5 errata)", () => {
+describe("the once-per-run label scan (owner decision Q6 a, design §7.1)", () => {
   /** The shared fake SDK holding these agents; with `listError`, every listing rejects with it. */
   function scanPaseo(agents: Array<ScanAgentSnapshot & LabelAgentSnapshot>, listError?: Error) {
     const fake = fakePaseo<ScanPaseo>({ agents });

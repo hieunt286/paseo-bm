@@ -245,6 +245,25 @@ export const rolesSettingsRpc = defineRpc({
   }),
 });
 
+/**
+ * `roles.instructions` — read only: the instructions a new agent of `role`
+ * is created with now (design §7.12; base PRD REQ-032 d): the role file, then
+ * its Runtime facts and the owner's precedents — those of `workspaceId` and
+ * the global ones, or the global ones alone without it. The same text the
+ * `agent.create` hook and `manager.ensure` write (`currentInstructions`).
+ * Agents already running keep the instructions they were created with.
+ */
+export const rolesInstructionsRpc = defineRpc({
+  name: "roles.instructions",
+  input: z.object({ role: setupRoleWithOrchestratorSchema, workspaceId: workspaceIdSchema.optional() }),
+  output: z.object({
+    role: setupRoleWithOrchestratorSchema,
+    text: z.string(),
+    /** The project whose precedents are in `text`; `null` when only the global ones are. */
+    workspaceId: workspaceIdSchema.nullable(),
+  }),
+});
+
 /** A model a role can run, as `providers.listModels` lists it; `cost` from its `metadata.cost` (§4.2.7). */
 export const roleModelOptionSchema = z.object({
   id: z.string(),
@@ -333,3 +352,4 @@ export type RolesSettings = z.infer<typeof rolesSettingsRpc.output>;
 export type RoleModelOption = z.infer<typeof roleModelOptionSchema>;
 export type RoleModeOption = z.infer<typeof roleModeOptionSchema>;
 export type RolesOptions = z.infer<typeof rolesOptionsRpc.output>;
+export type RolesInstructions = z.infer<typeof rolesInstructionsRpc.output>;

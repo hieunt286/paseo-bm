@@ -28,7 +28,7 @@
  *   have seen the sender's newest block yet, so there the notice goes only if
  *   the checking side has received nothing since the block was checked (its
  *   `lastUserMessageAt` still equals the mark); otherwise it waits for the
- *   checking side's next turn end, which decides (design §4.7 errata).
+ *   checking side's next turn end, which decides (design §7.6).
  * - **A later chance always comes for reports and reviews.** A pending notice is
  *   looked at again at the next turn end of (1) the checking side, (2) the
  *   receiving side — the Manager for reports, the Worker for answers, the
@@ -125,7 +125,7 @@ export interface FormatDeps {
 export type FormatOutcome = "ignored" | "checked";
 
 /**
- * The notice, word for word from design §4.7 — except for a block that carried
+ * The notice, word for word from design §7.6 — except for a block that carried
  * QUESTIONS to the user, where it must not ask for a re-send.
  *
  * `unitsOf` merges a `BM-QUESTIONS` block into the `BM-REPORT` above it, because

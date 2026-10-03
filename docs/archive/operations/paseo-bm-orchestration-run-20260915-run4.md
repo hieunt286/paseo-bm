@@ -3,7 +3,7 @@
 | Trường | Giá trị |
 |---|---|
 | Bead | `bm-wp-117-9vy.2` (WP-117) |
-| Checklist | [`paseo-bm-orchestration-checklist.md`](../../operations/paseo-bm-orchestration-checklist.md) bản `bb94b44` (F-1 → F-9), runbook [`paseo-bm-orchestration-runbook.md`](paseo-bm-orchestration-runbook.md) |
+| Checklist | [`paseo-bm-orchestration-checklist.md`](paseo-bm-orchestration-checklist.md) bản `bb94b44` (F-1 → F-9), runbook [`paseo-bm-orchestration-runbook.md`](paseo-bm-orchestration-runbook.md) |
 | Lượt trước | [Lượt 2](paseo-bm-orchestration-run-20260915.md) — chưa đạt |
 | Người chạy | Claude (Opus 5), chạy toàn bộ trên máy thật theo lựa chọn của owner |
 | Payload | `0.1.0-alpha.0` dựng từ commit `1f7f034` (tarball r4), cài lại 13:26Z; plugin **tự reload** sau khi cài (`bm-i52`), `doctor` mã 0 |

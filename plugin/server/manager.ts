@@ -65,7 +65,7 @@ export const MANAGER_TITLE = "Beads Manager";
 
 /**
  * Error codes this RPC can report. Taken from the single Phase 1 registry in
- * Technical Design §4.4 (no code is minted in place); §7.3 names `E_PROVIDER_UNAVAILABLE`.
+ * Technical Design §7.12 (no code is minted in place); §7.3 names `E_PROVIDER_UNAVAILABLE`.
  */
 export type ManagerEnsureErrorCode = "E_PROVIDER_UNAVAILABLE";
 

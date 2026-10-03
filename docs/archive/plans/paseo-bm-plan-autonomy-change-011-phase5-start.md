@@ -4,7 +4,7 @@
 |---|---|
 | Change ID | `autonomy-change-011` |
 | Short name | Phase 5 start re-check |
-| Original plans | [Phase 5](./paseo-bm-plan-autonomy-phase5.md) (Active); the combined field period of [change-006](./paseo-bm-plan-autonomy-change-006-build-then-field.md) (bead `bm-autonomy-phase6-i8fc.6`) |
+| Original plans | [Phase 5](../../plans/paseo-bm-plan-autonomy-phase5.md) (Active); the combined field period of [change-006](paseo-bm-plan-autonomy-change-006-build-then-field.md) (bead `bm-autonomy-phase6-i8fc.6`) |
 | Status | Applied — approved by Claude under the owner's delegation; plan, design and the bead edits of §4 (made through `br`, 2026-10-01; new bead `bm-autonomy-phase5-3e5v.6`) |
 | Owner | hieu.nt10 |
 | Created | 2026-10-01, bead `bm-autonomy-phase5-3e5v.1` |

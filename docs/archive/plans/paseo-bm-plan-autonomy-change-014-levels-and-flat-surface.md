@@ -5,7 +5,7 @@
 | Status | Active |
 | Date | 2026-10-01 |
 | Owner | hieu.nt10 (decided; the owner delegated the build to Claude: "I give you the right to decide on your own; carry it through to completion") |
-| Decisions | [ADR-025](../adr/ADR-025-autonomy-levels.md) |
+| Decisions | [ADR-025](../../adr/ADR-025-autonomy-levels.md) |
 | Mockup | the owner's approved design canvas "Beads Manager — flat redesign" (2026-10-01): Inbox, Projects (Overview · Requests · Beads · Metrics · Agents), Settings, Tools & skills |
 | Plan-ready | PASS — 2026-10-01 — Claude under the owner's delegation |
 

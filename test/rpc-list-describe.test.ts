@@ -304,6 +304,7 @@ describe("plugin server entry — agents.list and roles.describe", () => {
       "precedents.list",
       "precedents.save",
       "roles.describe",
+      "roles.instructions",
       "roles.options",
       "roles.save-fallback",
       "roles.save-settings",

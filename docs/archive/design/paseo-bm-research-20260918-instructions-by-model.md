@@ -5,7 +5,7 @@
 | ID | `research-20260918-instructions-by-model` |
 | Request | `req-20260918T011706Z` (part 3 of the request) |
 | Bead | `bm-wp-248-uxpe` |
-| Design | [design-delta-20260918](../archive/design/paseo-bm-delta-20260918-manager-mode-model-metrics.md) §4.5 (questions R1–R6, source rule) |
+| Design | [design-delta-20260918](paseo-bm-delta-20260918-manager-mode-model-metrics.md) §4.5 (questions R1–R6, source rule) |
 | Scope | Claude Code / `claude-opus-5` (Manager, Worker); Codex / `gpt-5.6-sol` (Reviewer); one paragraph on OpenCode (Q35) |
 | Nature | **Investigation only.** No change to `plugin/roles/*.md` (Q33). Every suggestion in §7 is for the owner to decide, as a new request |
 | Date | 2026-09-18 — author: Beads Worker (`claude-opus-5`) |

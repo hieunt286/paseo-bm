@@ -31,7 +31,7 @@ A **combined** prerelease of the whole delta 20260921 ([PRD delta](../archive/pr
 
 ## Known risks
 
-- **Auto switch has been checked only in part.** Release condition REQ-067 (c) is met: one real incident, a refusal from Anthropic, was classified correctly by the pattern set (`L4`, [checklist 18.1](../operations/paseo-bm-worker-fallback-checklist.md)). The remaining acceptance items for Auto switch (18.2 → 18.6: the automatic switch, the automatic wait, the no-candidate case) have **not been measured on a real daemon**. Auto switch is **off** by default; turn it on per role.
+- **Auto switch has been checked only in part.** Release condition REQ-067 (c) is met: one real incident, a refusal from Anthropic, was classified correctly by the pattern set (`L4`, [checklist 18.1](../archive/operations/paseo-bm-worker-fallback-checklist.md)). The remaining acceptance items for Auto switch (18.2 → 18.6: the automatic switch, the automatic wait, the no-candidate case) have **not been measured on a real daemon**. Auto switch is **off** by default; turn it on per role.
 - **No usage check before an agent is created** (REQ-067 d): the candidate may be out of quota as well, and the replacement agent's own incident then walks the chain again.
 - One misclassified failure creates one agent too many — that costs money, and it puts two agents in the same code at once.
 

@@ -4,7 +4,7 @@
 |---|---|
 | Change ID | `autonomy-change-010` |
 | Short name | Boundary per project |
-| Original plans | [Phase 4](./paseo-bm-plan-autonomy-phase4.md) (Active); [change-009](./paseo-bm-plan-autonomy-change-009-phase4-start.md) C2, C3, C9; the combined field period of [change-006](./paseo-bm-plan-autonomy-change-006-build-then-field.md) (bead `bm-autonomy-phase6-i8fc.6`) |
+| Original plans | [Phase 4](../../plans/paseo-bm-plan-autonomy-phase4.md) (Active); [change-009](paseo-bm-plan-autonomy-change-009-phase4-start.md) C2, C3, C9; the combined field period of [change-006](paseo-bm-plan-autonomy-change-006-build-then-field.md) (bead `bm-autonomy-phase6-i8fc.6`) |
 | Status | Applied — the owner's decision of 2026-10-01; details decided by Claude under the owner's delegation |
 | Owner | hieu.nt10 |
 | Created | 2026-10-01, after bead `bm-autonomy-phase4-loga.3` closed with change-009 C9's field estimate failing its gate |

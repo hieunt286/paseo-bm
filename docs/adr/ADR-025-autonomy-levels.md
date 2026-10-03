@@ -6,7 +6,7 @@
 | Date | 2026-10-01 |
 | Owner | hieu.nt10 |
 | Supersedes | [ADR-018](ADR-018-calibrated-autonomy-per-class.md) decision 3, that release, data, security and cost are never delegable. Also its automatic demotion on reversal, which [ADR-023](ADR-023-delegation-without-eligibility.md) decision 6 kept. And the predictor choice in ADR-018 decision 5 and ADR-023 decision 1. ADR-018's classes, the decision store, shadow, the agreement ledger and precedents stand. |
-| Related | [Calibrated autonomy PRD](../product/paseo-bm-autonomy-prd.md) · [Autonomy design](../design/paseo-bm-autonomy.md) Part B · [Dashboard design](../design/paseo-bm-dashboard.md) · [change-014](../plans/paseo-bm-plan-autonomy-change-014-levels-and-flat-surface.md) |
+| Related | [Calibrated autonomy PRD](../product/paseo-bm-autonomy-prd.md) · [Autonomy design](../design/paseo-bm-autonomy.md) Part B · [Dashboard design](../design/paseo-bm-dashboard.md) · [change-014](../archive/plans/paseo-bm-plan-autonomy-change-014-levels-and-flat-surface.md) |
 | The owner's decisions | 2026-10-01, on the Settings screen: "a simple slider per project for delegating to the Orchestrator". Level 0: no intervention. Level 1: it may intervene, but it goes to the Inbox for approval before it runs. Level 2: it decides technical, preference, scope, environment and dependency questions. Level 3: as level 2, plus cost, release and data. Level 4: as level 3, plus security. Further: "When I override, just record it; do not lower the project." "Levels 3 and 4: agreed, drop the constraint." "Agreed: drop the choice of who predicts." |
 
 ## Context

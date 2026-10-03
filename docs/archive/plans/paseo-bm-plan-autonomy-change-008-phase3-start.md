@@ -4,7 +4,7 @@
 |---|---|
 | Change ID | `autonomy-change-008` |
 | Short name | Phase 3 start re-check |
-| Original plans | [Phase 3](./paseo-bm-plan-autonomy-phase3.md) (Active); the combined field period of [change-006](./paseo-bm-plan-autonomy-change-006-build-then-field.md) (bead `bm-autonomy-phase6-i8fc.6`) |
+| Original plans | [Phase 3](../../plans/paseo-bm-plan-autonomy-phase3.md) (Active); the combined field period of [change-006](paseo-bm-plan-autonomy-change-006-build-then-field.md) (bead `bm-autonomy-phase6-i8fc.6`) |
 | Status | Applied — plan, design and the bead edits of §4 (made through `br`, 2026-09-30; new bead `bm-autonomy-phase3-7gxw.12`) |
 | Owner | hieu.nt10 |
 | Created | 2026-09-30, bead `bm-autonomy-phase3-7gxw.1` |
@@ -14,9 +14,9 @@
 ## 1. Change summary
 
 The Phase 3 start re-checked design Part C, Part G's Phase 3 sections (§G.5–§G.8) and the Phase 3 beads against three things:
-- Phase 2 as built, and its live check on an isolated daemon (bead `bm-autonomy-phase2-t9lm.17`, [run note](../archive/operations/paseo-bm-phase2-live-check-20260930.md));
-- the context-fields run of Phase 2 ([run note](../archive/operations/paseo-bm-context-fields-run-20260930.md)), which already sent `/compact` to all three providers;
-- the field data available on 2026-09-30 ([baseline report §6](../operations/paseo-bm-eval-baseline.md#6-phase-3-start--the-compaction-and-handoff-defaults-from-the-field-data-available-on-2026-09-30)).
+- Phase 2 as built, and its live check on an isolated daemon (bead `bm-autonomy-phase2-t9lm.17`, [run note](../operations/paseo-bm-phase2-live-check-20260930.md));
+- the context-fields run of Phase 2 ([run note](../operations/paseo-bm-context-fields-run-20260930.md)), which already sent `/compact` to all three providers;
+- the field data available on 2026-09-30 ([baseline report §6](../../operations/paseo-bm-eval-baseline.md#6-phase-3-start--the-compaction-and-handoff-defaults-from-the-field-data-available-on-2026-09-30)).
 
 The Phase 3 defaults are derived there (§G.7 as built): compaction at 390,000 tokens read per turn for a Manager and 5,700,000 for a Worker, handoff at 150,000,000 tokens read per request.
 

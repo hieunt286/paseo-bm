@@ -1,6 +1,7 @@
 /**
- * `roles.settings` and `roles.options`: the data of the Roles & models section
- * of Settings → Agents (delta 20260921 §4.3.2, REQ-064 a/b). Both only read.
+ * `roles.settings`, `roles.options` and `roles.instructions`: the data of the
+ * Roles & models section of Settings → Agents (delta 20260921 §4.3.2,
+ * REQ-064 a/b; REQ-032 d). All three only read.
  *
  * - `roles.settings` describes the four roles from ONE `config.get()`. The
  *   SDK view is flat (design F12): `config.providers` is `agents.providers`,
@@ -8,6 +9,7 @@
  *   `revision` that `roles.save-settings` must send back.
  * - `roles.options` lists what the Edit form may offer for one BASE provider,
  *   from `providers.listModels`, `listModes`, `listFeatures` and `costOf`.
+ * - `roles.instructions` shows what a new agent of a role is created with.
  *
  * Neither handler throws anything but a coded `DashboardError`: a lookup that
  * fails, times out or answers an `error` becomes an empty list or `unknown`
@@ -31,8 +33,10 @@ import {
   type ProviderCapability,
 } from "./role-mode";
 import { errorText } from "./rpc-kit";
+import { currentInstructions } from "./role-instructions";
 import {
   DashboardError,
+  rolesInstructionsRpc,
   rolesOptionsRpc,
   rolesSaveFallbackRpc,
   rolesSaveSettingsRpc,
@@ -42,6 +46,7 @@ import {
   type RoleModeOption,
   type RoleModelOption,
   type RoleSetting,
+  type RolesInstructions,
   type RolesOptions,
   type RolesSettings,
 } from "../shared/contracts";
@@ -330,9 +335,28 @@ export async function handleRolesSaveSettings(
 // Registration.
 // ---------------------------------------------------------------------------
 
-/** Registers `roles.settings`, `roles.options`, `roles.save-settings` and `roles.save-fallback` (§4.4.3). */
+/**
+ * Handler body of `roles.instructions` (design §7.12, base PRD REQ-032 d):
+ * what a new agent of `role` is created with now, built by the very function
+ * the creation paths use, so the view never drifts from them. Only reads;
+ * a lookup that fails leaves its fact out, as at a creation.
+ */
+export async function handleRolesInstructions(
+  input: { role: SetupRoleWithOrchestrator; workspaceId?: string },
+  paseo: unknown,
+  deps: { homedir?: () => string } = {},
+): Promise<RolesInstructions> {
+  const text = await currentInstructions(input.role, paseo, {
+    ...(deps.homedir === undefined ? {} : { homedir: deps.homedir }),
+    ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
+  });
+  return { role: input.role, text, workspaceId: input.workspaceId ?? null };
+}
+
+/** Registers `roles.settings`, `roles.options`, `roles.instructions`, `roles.save-settings` and `roles.save-fallback` (§4.4.3). */
 export function registerRoleSettingsRpcs(server: PluginServerContext): void {
   server.handle(rolesSettingsRpc, (_input, context) => handleRolesSettings(context.paseo));
+  server.handle(rolesInstructionsRpc, (input, context) => handleRolesInstructions(input, context.paseo));
   server.handle(rolesOptionsRpc, (input, context) => handleRolesOptions(input, context.paseo));
   server.handle(rolesSaveSettingsRpc, (input, context) => handleRolesSaveSettings(input, context.paseo));
   server.handle(rolesSaveFallbackRpc, (input, context) => handleRolesSaveFallback(input, context.paseo));

@@ -178,7 +178,7 @@ const PROFILE_ROLES: ReadonlySet<Role | null> = new Set<Role>(["worker", "review
  * Orchestrator's own profile when the creator named another one, or `undefined` when nothing changes.
  * Never throws. The correction is one `[paseo-bm]` log line and nothing else:
  * its log file (`model-corrections.json`) went with its only reader, the
- * `agent.model-corrected` rule (autonomy design §B.9).
+ * `agent.model-corrected` rule (orchestrator design §4.3).
  *
  * The role files tell the creator to pass `bm-<role>/<model of the profile>`,
  * but a Manager reads the profile once and keeps it: after the user moved the

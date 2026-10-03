@@ -7,7 +7,7 @@
 // ---------------------------------------------------------------------------
 // Error codes.
 //
-// Registered in the single product-wide registry (base design §4.4, delta
+// Registered in the single product-wide registry (base design §7.12, delta
 // `design-delta-20260916-trace-store`). They travel over the plugin RPC channel
 // so they have no CLI exit code.
 // ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Living during the programme — Phase 0 closed 2026-09-29; phases append their field figures |
+| Status | Living during the programme — Phase 0 closed 2026-09-29; the combined field period is open (§6.8, bead `bm-autonomy-phase6-i8fc.6`); the suite waits for the programme evaluation (§2) |
 | Owner | hieu.nt10 |
 | Requirements | [Calibrated autonomy PRD](../product/paseo-bm-autonomy-prd.md) REQ-102, metrics A-1 → A-11 |
 | Method | [Evaluation design](../design/paseo-bm-evaluation.md) §4 (definitions), §5 (replay), §6 (suite), §7 (this report) |
@@ -54,7 +54,7 @@ Consistency with PRD Appendix A (one-off queries of the same day): asked 379 vs 
 
 ## 2. Suite baseline
 
-*Moved to the programme evaluation (Phase 6 WP-604), owner decision 2026-09-29: the suite runs once, after all other work — S1–S8, twice each, on `paseo-bm-plugin@0.4.1` and on the final build. Until then each phase adds its field replay below §1 and its live-check notes.*
+The suite runs once, in the programme evaluation after all other work (Phase 6 WP-604, bead `bm-autonomy-phase6-i8fc.5`, change-001): S1–S8, twice each, on `paseo-bm-plugin@0.4.1` and on the final build. Not run yet; the field figures are in §1, §5 and §6.
 
 ## 3. Caveats found in the field numbers
 
@@ -184,11 +184,11 @@ The binding constraint is agreement, not the class mix. The recommended option a
 - precedents;
 - fewer questions asked.
 
-Only Phase 2's shadow measures these. [Change-007](../plans/paseo-bm-plan-autonomy-change-007-phase2-start.md) lets the combined field period measure them. The Phase 2 exit (bead `t9lm.18`) judges the target, and re-sets it with per-class evidence if it is not met.
+Only Phase 2's shadow measures these. [Change-007](../archive/plans/paseo-bm-plan-autonomy-change-007-phase2-start.md) lets the combined field period measure them. The Phase 2 exit (bead `t9lm.18`) judges the target, and re-sets it with per-class evidence if it is not met.
 
 ## 6. Phase 3 start — the compaction and handoff defaults from the field data available on 2026-09-30
 
-Bead `bm-autonomy-phase3-7gxw.1`. Under change-006 the Phase 3 defaults are derived at the phase start from the Phase 2 measurement (`eval-metrics` `context`, the replay's candidates) over the field data available now. The Phase 2 exit re-checks them in the combined field period (beads `t9lm.18`, `i8fc.6`). [Change-008](../plans/paseo-bm-plan-autonomy-change-008-phase3-start.md) records what the re-check changed.
+Bead `bm-autonomy-phase3-7gxw.1`. Under change-006 the Phase 3 defaults are derived at the phase start from the Phase 2 measurement (`eval-metrics` `context`, the replay's candidates) over the field data available now. The Phase 2 exit re-checks them in the combined field period (beads `t9lm.18`, `i8fc.6`). [Change-008](../archive/plans/paseo-bm-plan-autonomy-change-008-phase3-start.md) records what the re-check changed.
 
 ```bash
 npm run -s eval:replay -- --json                                    # whole store
@@ -308,46 +308,27 @@ Read-only replay of the whole store after bead `i8fc.1`: 0 pairs of agents writi
 | Review lift: blocking findings per batch | 1.55 (supplementary reference 1.45) |
 | Reviews per reviewed request | 5.28 |
 
-**Reinstalled** 2026-10-01T01:25:47Z: `paseo-bm-builds/final-rc2-f5e9610` (commit `f5e9610`, ADR-023: delegation without an eligibility gate). Per change-012 C3 and change-013, only A-4/A-5 restart, counted per class from its delegation; every other figure keeps the window that started at 00:28:54Z.
+**Reinstalls during the window.** Each build is in `paseo-bm-builds/` on the owner's machine:
 
-**Reinstalled** 2026-10-01T01:42:47Z: `paseo-bm-builds/final-rc3-af22009` (commit `af22009`, a bug fix the owner reported: a Worker's question awaiting confirmation keeps its options, and an owner message no longer marks questions asked after it). No figure restarts: the fix changes which questions are marked, not how a question is counted.
-
-**Reinstalled** 2026-10-01T01:50:18Z: `paseo-bm-builds/final-rc4-cccdcbb` (commit `cccdcbb`, a bug fix the owner reported: after a reload the Orchestrator's tools refused every call until a new agent was created; between 01:42:47Z and 01:50:18Z its 9 calls were refused, so its turns in that span sent nothing). No figure restarts.
-
-**Reinstalled** 2026-10-01T02:27:20Z: `paseo-bm-builds/final-rc5-588a210` (commit `588a210`, ADR-024: `BM-INTERRUPTED` for a turn Paseo cut short, and waiting on the owner read from the decision store by the stall pass). No figure restarts. A `BM-INTERRUPTED` goes only to Managers and Workers, so it adds turns there (A-8 tokens, slightly), never Orchestrator wakes (A-7).
-
-**Reinstalled** 2026-10-01T04:56:27Z: `paseo-bm-builds/final-rc6-98b08e2` (commit `98b08e2`, ADR-025 and change-014: autonomy levels, no owner-only class, no demotion, the Orchestrator as the only predictor, Ask back, the Projects / Settings / Tools & skills surface, a flat style). Both projects' stored policy reads as Cruise (the five Cruise classes delegated, predictions on), so no cell changed at the install. From here A-4/A-5 per class count any class delegated by a level change from that change; the hard-owner classes can now be delegated (Turbo, Full auto), and demotion no longer exists, so A-5's demotion figures stop.
-
-**Reinstalled** 2026-10-01T06:20:53Z: `paseo-bm-builds/final-rc7-ae76459` (commit `ae76459`, the change-014 fidelity pass: the surface's layout as the approved mockup; client only, no figure affected).
-
-**Reinstalled** 2026-10-01: `paseo-bm-builds/final-rc8-50cdda0` (commit `50cdda0`, Tools & skills no longer waits on every visit; no figure affected).
-
-**Reinstalled** 2026-10-01T07:21:13Z: `paseo-bm-builds/final-rc9-8d93197` (commit `8d93197`, the phone layout; client only, no figure affected).
-
-**Reinstalled** 2026-10-01T09:11:59Z: `paseo-bm-builds/final-rc10-65e0d3d` (commit `65e0d3d`, the role marker in agent titles; new agents only, no figure affected). A Worker was mid-turn; the owner chose to install at once.
-
-**Reinstalled** 2026-10-01T11:24:53Z: `paseo-bm-builds/final-rc11-8159e17-bundled` (commit `8159e17`, `plugin-package/` of 0.5.2: the same code bundled, ADR-026; no figure affected). The owner checked every screen in the app: normal.
+| Installed (UTC) | Build | Commit and what it changed | Figures |
+|---|---|---|---|
+| 2026-10-01T01:25:47Z | `final-rc2-f5e9610` | `f5e9610`, ADR-023: delegation without an eligibility gate | Only A-4/A-5 restart, counted per class from its delegation (change-012 C3, change-013); every other figure keeps the window from 00:28:54Z |
+| 2026-10-01T01:42:47Z | `final-rc3-af22009` | `af22009`, a bug the owner reported: a Worker's question awaiting confirmation keeps its options, and an owner message no longer marks questions asked after it | None restart: the fix changes which questions are marked, not how a question is counted |
+| 2026-10-01T01:50:18Z | `final-rc4-cccdcbb` | `cccdcbb`, a bug the owner reported: after a reload the Orchestrator's tools refused every call until a new agent was created; between 01:42:47Z and 01:50:18Z its 9 calls were refused, so its turns in that span sent nothing | None restart |
+| 2026-10-01T02:27:20Z | `final-rc5-588a210` | `588a210`, ADR-024: `BM-INTERRUPTED` for a turn Paseo cut short, and waiting on the owner read from the decision store by the stall pass | None restart. A `BM-INTERRUPTED` goes only to Managers and Workers, so it adds turns there (A-8 tokens, slightly), never Orchestrator wakes (A-7) |
+| 2026-10-01T04:56:27Z | `final-rc6-98b08e2` | `98b08e2`, ADR-025 and change-014: autonomy levels, no owner-only class, no demotion, the Orchestrator as the only predictor, Ask back, the Projects / Settings / Tools & skills surface, a flat style | Both projects' stored policy reads as Cruise (the five Cruise classes delegated, predictions on), so no cell changed at the install. From here A-4/A-5 per class count any class delegated by a level change; the hard-owner classes can be delegated (Turbo, Full auto), and A-5's demotion figures stop |
+| 2026-10-01T06:20:53Z | `final-rc7-ae76459` | `ae76459`, the change-014 fidelity pass: the surface's layout as the approved mockup; client only | None affected |
+| 2026-10-01 | `final-rc8-50cdda0` | `50cdda0`, Tools & skills no longer waits on every visit | None affected |
+| 2026-10-01T07:21:13Z | `final-rc9-8d93197` | `8d93197`, the phone layout; client only | None affected |
+| 2026-10-01T09:11:59Z | `final-rc10-65e0d3d` | `65e0d3d`, the role marker in agent titles; new agents only. A Worker was mid-turn; the owner chose to install at once | None affected |
+| 2026-10-01T11:24:53Z | `final-rc11-8159e17-bundled` | `8159e17`, `plugin-package/` of 0.5.2: the same code bundled (ADR-026). The owner checked every screen in the app: normal | None affected |
 
 The owner chooses per project, in Settings → Autonomy, the action boundary (change-010) and the challenger; the choices are recorded here when made.
 
 ## Revision History
 
+Rows up to 2026-10-02 are archived in [paseo-bm-eval-baseline-revision-history-to-20261002.md](../archive/operations/paseo-bm-eval-baseline-revision-history-to-20261002.md); git holds the full audit trail.
+
 | Date | Author | Change |
 |---|---|---|
-| 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the bundled 0.5.2 package (`8159e17`) |
-| 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the role marker in agent titles (`65e0d3d`) |
-| 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the phone layout (`8d93197`) |
-| 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the Tools & skills speed fix (`50cdda0`) |
-| 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the fidelity pass (`ae76459`) |
-| 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with ADR-025 / change-014 (`98b08e2`) |
-| 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with ADR-024 (`588a210`) |
-| 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the Orchestrator handle fix (`cccdcbb`) |
-| 2026-10-01 | Claude (owner's request) | §6.8: reinstalled with the needs-confirmation fix (`af22009`) |
-| 2026-10-01 | Claude (owner's request) | §6.8: the final build installed and the pre-install reference recorded (bead `i8fc.6`) |
-| 2026-10-01 | Claude (owner's delegation) | How to reproduce: the A-10 links audit command (bead `bm-autonomy-phase5-3e5v.6`) |
-| 2026-09-30 | Claude (owner's delegation) | §6.7: writers observed on the field store (bead `i8fc.1`) |
-| 2026-09-30 | Claude (owner's delegation) | §6.6: review figures corrected for a double count (beads `7gxw.5`, `7gxw.12`) |
-| 2026-09-30 | Claude (owner's delegation) | §6 Phase 3 start (bead `bm-autonomy-phase3-7gxw.1`, change-008): the compaction and handoff defaults from the whole store (62 requests, 2,056 turns; the Phase 1 build 1 request): Manager 390,000 and Worker 5,700,000 tokens read per turn, 150,000,000 per request; the candidates and their upper-bound savings; the pre-install reference for the Phase 3 exit |
-| 2026-09-30 | Claude (owner's delegation) | §5 Phase 2 start (bead `bm-autonomy-phase2-t9lm.1`): the field data available on 2026-09-30 (earlier field, the Phase 1 build's one request, the fixed build unused), the class mix by declared effects and by a labelled text estimate, A-1 against ≤ 1.5 — kept; the store lost workspace histories during the check, so §1–§4 stay the reference as recorded |
-| 2026-09-29 | Claude (owner's delegation) | Targets confirmed (§4); the suite section moved to the programme evaluation (autonomy change-001) |
-| 2026-09-29 | hieu.nt10 (written by Claude) | Created with the field baseline (bead `bm-autonomy-phase0-m1ih.8`) |
+| 2026-10-02 | Claude (owner request) | Documentation restructure: earlier rows moved to the archive; stale, retired and duplicated content condensed to the current state (section numbers and REQ ids kept) |

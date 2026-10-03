@@ -7,13 +7,13 @@
 | Owner | hieu.nt10 |
 | Phase | **Phase O1 MVP** (Orchestrator PRD §9) |
 | Decision | [ADR-013](../../adr/ADR-013-orchestrator-assess-and-nudge.md) (Accepted 2026-09-28) |
-| Requirements | [Orchestrator PRD](../../product/paseo-bm-orchestrator-prd.md) REQ-071 → REQ-080 (Accepted 2026-09-28) |
+| Requirements | [Orchestrator PRD](../product/paseo-bm-orchestrator-prd.md) REQ-071 → REQ-080 (Accepted 2026-09-28) |
 | Technical Design | [paseo-bm-orchestrator.md](../../design/paseo-bm-orchestrator.md) §1 → §12 (Active 2026-09-28) · [paseo-bm.md](../../design/paseo-bm.md) §6.2, §7.2, §7.12, §7.13 · [paseo-bm-dashboard.md](../../design/paseo-bm-dashboard.md) §6, §11.3, §12 |
 | Target release | **None in this plan.** The owner tests the finished work and only then decides the version and the release (owner, 2026-09-28) |
 
 ## 0. Routing Decision
 
-Canonical owner: [Orchestrator PRD §0](../../product/paseo-bm-orchestrator-prd.md#0-routing-decision) (brownfield; new product outcomes, new consumed contracts — RPCs and a `BM-*` notice — a write to the user's Paseo configuration, a new trust boundary, several independent outcomes). Execution path: plan → converter. This plan adds nothing to it.
+Canonical owner: [Orchestrator PRD §0](../product/paseo-bm-orchestrator-prd.md#0-routing-decision) (brownfield; new product outcomes, new consumed contracts — RPCs and a `BM-*` notice — a write to the user's Paseo configuration, a new trust boundary, several independent outcomes). Execution path: plan → converter. This plan adds nothing to it.
 
 ## 1. MVP-Lock
 

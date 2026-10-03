@@ -12,7 +12,8 @@
  *   saves with its card's Save, which shows once something changed.
  * - **More**, three joined rows, each "Title · what it holds" with its state
  *   and ›, opening its body under it: **Agents** (the roles
- *   with their fallback chains, sign-in, Paseo's agent tools), **Precedents**
+ *   with their fallback chains and the instructions each is created with,
+ *   sign-in, Paseo's agent tools), **Precedents**
  *   (`settings-precedents.tsx`) and **Data** (the data folder, the trace
  *   storage with its cleanup per workspace, removing paseo-bm's settings).
  *
@@ -670,7 +671,7 @@ export function SettingsScreen({ theme, layout, status: statusStrip, projects = 
               {warning}
             </ToneText>
           ))}
-      <RolesSection styles={styles} theme={theme} />
+      <RolesSection compact={layout.compact} styles={styles} theme={theme} />
       {data === undefined ? null : <AgentToolsBlockView status={data} onDone={refetch} styles={styles} theme={theme} />}
       {data === undefined || signInRows(data).length === 0 ? null : (
         <View style={[styles.card, { gap: 6 }]}>

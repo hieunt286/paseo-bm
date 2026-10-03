@@ -6,7 +6,7 @@
 | Date | 2026-09-29 |
 | Owner | hieu.nt10 |
 | Amends | [ADR-015](ADR-015-orchestrator-autopilot-per-project.md) decision 4 ("commands go to Managers only") and [ADR-011](ADR-011-manager-coordinates-workers.md) (the Manager is the Worker's only coordinator) for Autopilot projects; ADR-015's other decisions stand |
-| Related | [Orchestrator PRD](../product/paseo-bm-orchestrator-prd.md) · [Orchestrator Design](../design/paseo-bm-orchestrator.md) §6B, §9 · [ADR-013](ADR-013-orchestrator-assess-and-nudge.md) (why the plugin itself never interrupts) |
+| Related | [Orchestrator PRD](../archive/product/paseo-bm-orchestrator-prd.md) · [Orchestrator Design](../design/paseo-bm-orchestrator.md) §6B, §9 · [ADR-013](ADR-013-orchestrator-assess-and-nudge.md) (why the plugin itself never interrupts) |
 | The owner's decisions | 2026-09-29, after reviewing the Orchestrator's role: (1) watch running Workers, (2) let the Orchestrator correct a Worker directly, (3) a rule gate on big decisions, (4) read-only repo access and per-project notes, (5) a coordinator's dashboard, (6) structured, readable command cards in the chats |
 
 ## Context

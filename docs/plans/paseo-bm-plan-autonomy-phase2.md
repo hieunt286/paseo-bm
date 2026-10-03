@@ -2,15 +2,15 @@
 
 | Field | Value |
 |---|---|
-| Status | Active — amended by [change-005](./paseo-bm-plan-autonomy-change-005-coordination-control.md) and, at the phase start, [change-007](./paseo-bm-plan-autonomy-change-007-phase2-start.md); converted to beads 2026-09-30 at the owner's request; re-checked at the phase start against what the previous phase measured (the phase's first bead) |
+| Status | Active — built and shipped in 0.5.0; the phase exit (`bm-autonomy-phase2-t9lm.18`) is open, judged in the combined field period (bead `bm-autonomy-phase6-i8fc.6`). Amended by [change-005](../archive/plans/paseo-bm-plan-autonomy-change-005-coordination-control.md) and [change-007](../archive/plans/paseo-bm-plan-autonomy-change-007-phase2-start.md) |
 | Plan-ready | PASS — 2026-09-30 — Claude under the owner's delegation (hieu.nt10 asked to convert the reviewed plans; `plan-ready-for-beads` self-evaluated) |
 | Owner | hieu.nt10 |
 | Routing decision | [PRD §0](../product/paseo-bm-autonomy-prd.md#0-routing-decision) |
 | Requirements | [Calibrated autonomy PRD](../product/paseo-bm-autonomy-prd.md) Phase 2 MVP: REQ-120 → REQ-128 |
 | Technical Design | [paseo-bm-autonomy.md](../design/paseo-bm-autonomy.md) Part B; Part G §G.1–§G.4, §G.7 (measurement, intervention log, advice) |
 | ADR | [ADR-018](../adr/ADR-018-calibrated-autonomy-per-class.md), [ADR-021](../adr/ADR-021-orchestrator-measured-coordination-controller.md) |
-| Starts after | Phase 1 MVP exit — since change-006, the previous phase **as built** (its code and isolated live check); its field exit is judged in the combined field period at the end |
-| Target release | None — one release for the whole programme |
+| Starts after | Phase 1 MVP exit — in practice the previous phase **as built** (its code and isolated live check, change-006); its field exit is judged in the combined field period |
+| Target release | 0.5.0 — one release for the whole programme |
 
 ## 1. MVP-Lock
 
@@ -64,13 +64,13 @@ Pure ledger, policy and precedent logic by unit tests; fake-SDK tests for delega
 
 | Date | Who | Change |
 |---|---|---|
-| 2026-09-30 | Claude (owner's delegation) | Phase 2 start (bead `t9lm.1`), re-checked against the field data available now (baseline report §5); A-1's target kept. [Change-007](./paseo-bm-plan-autonomy-change-007-phase2-start.md) makes these changes (beads `t9lm.4`, `.6`, `.7`, `.11`, `.18`, `.21`, `.26` and `i8fc.6` to be edited through `br`), and confirms every other §B.9 and §G.1–§G.4 decision: <br>• §1 exit: the delegation window, and a definition of the active project. <br>• WP-205: the challenger predicts for `owner` and `shadow` cells. <br>• WP-208: the challenger question at install. <br>• WP-209: the Orchestrator's tokens per wake |
-| 2026-09-30 | hieu.nt10 (drafted by Claude) | [change-006](./paseo-bm-plan-autonomy-change-006-build-then-field.md): built without waiting for the previous phase's field gate; this phase's exit is judged in the combined field period on the final build |
+| 2026-09-30 | Claude (owner's delegation) | Phase 2 start (bead `t9lm.1`), re-checked against the field data available now (baseline report §5); A-1's target kept. [Change-007](../archive/plans/paseo-bm-plan-autonomy-change-007-phase2-start.md) makes these changes (beads `t9lm.4`, `.6`, `.7`, `.11`, `.18`, `.21`, `.26` and `i8fc.6` to be edited through `br`), and confirms every other §B.9 and §G.1–§G.4 decision: <br>• §1 exit: the delegation window, and a definition of the active project. <br>• WP-205: the challenger predicts for `owner` and `shadow` cells. <br>• WP-208: the challenger question at install. <br>• WP-209: the Orchestrator's tokens per wake |
+| 2026-09-30 | hieu.nt10 (drafted by Claude) | [change-006](../archive/plans/paseo-bm-plan-autonomy-change-006-build-then-field.md): built without waiting for the previous phase's field gate; this phase's exit is judged in the combined field period on the final build |
 | 2026-09-30 | Claude | Beads polished (second pass): WP-209's bead split into recording and provider verification (`t9lm.21`), figures and replay candidates (`t9lm.26`) and screens (`t9lm.27`) — decomposition only; the start and exit beads aligned with Part G (the exit derives and records the Phase 3 defaults); `t9lm.22` says which event a command answers; `t9lm.16` names advice as the assessment's replacement |
-| 2026-09-30 | hieu.nt10 (drafted by Claude) | [change-005](./paseo-bm-plan-autonomy-change-005-coordination-control.md): WP-209 measurement, WP-210 intervention log, WP-211 advice and Settings → Coordination (ADR-021, design Part G); the exit widened |
-| 2026-09-30 | Claude (owner's delegation) | Beads polished; [change-003](./paseo-bm-plan-autonomy-change-003-decisions-at-conversion.md) applied: design §B.9 decisions; new beads `bm-autonomy-phase2-t9lm.19` (policy authority for an Orchestrator command that answers no decision, replacing Autopilot's) and `.20` (A-4/A-5); `.5`'s negative test corrected; `bm_assessment` retired in `.16` |
+| 2026-09-30 | hieu.nt10 (drafted by Claude) | [change-005](../archive/plans/paseo-bm-plan-autonomy-change-005-coordination-control.md): WP-209 measurement, WP-210 intervention log, WP-211 advice and Settings → Coordination (ADR-021, design Part G); the exit widened |
+| 2026-09-30 | Claude (owner's delegation) | Beads polished; [change-003](../archive/plans/paseo-bm-plan-autonomy-change-003-decisions-at-conversion.md) applied: design §B.9 decisions; new beads `bm-autonomy-phase2-t9lm.19` (policy authority for an Orchestrator command that answers no decision, replacing Autopilot's) and `.20` (A-4/A-5); `.5`'s negative test corrected; `bm_assessment` retired in `.16` |
 | 2026-09-30 | Claude (owner's delegation) | **Active**, `plan-ready-for-beads` PASS, converted to beads at the owner's request: epic `bm-autonomy-phase2-t9lm` with 18 leaves, the first a phase-start re-check whose assumptions list is settled through a delta; the phase-start re-check stays, as the phase's first bead, and changes the beads through a delta if the previous phase's figures call for it |
-| 2026-09-29 | Claude (owner's delegation) | Plan review after Phase 1 ([change-002](./paseo-bm-plan-autonomy-change-002-phase1-as-built.md)): what Phase 2 inherits; WP-202 names the Autopilot pieces left on the server and moves the suite driver from Autopilot to the policy (E-2); WP-203 asks predictions only where delegation is possible and counts them as a wake's action; WP-205 takes over the wake rule; A-7 in the exit |
+| 2026-09-29 | Claude (owner's delegation) | Plan review after Phase 1 ([change-002](../archive/plans/paseo-bm-plan-autonomy-change-002-phase1-as-built.md)): what Phase 2 inherits; WP-202 names the Autopilot pieces left on the server and moves the suite driver from Autopilot to the policy (E-2); WP-203 asks predictions only where delegation is possible and counts them as a wake's action; WP-205 takes over the wake rule; A-7 in the exit |
 | 2026-09-29 | Claude (owner's delegation) | WP-202 carries the scope change of the live watch and events when Autopilot goes (found in Phase 1 bead .11) |
 | 2026-09-29 | hieu.nt10 (drafted by Claude) | Plan review: role-instruction updates made explicit per WP |
 | 2026-09-29 | hieu.nt10 (drafted by Claude) | Plan review: the phase exit uses the field replay and a small live check instead of the suite (owner decision: the suite runs once at the programme's end, Phase 6 WP-604) |

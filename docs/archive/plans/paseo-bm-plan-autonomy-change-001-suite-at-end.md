@@ -4,7 +4,7 @@
 |---|---|
 | Change ID | `autonomy-change-001` |
 | Short name | Suite at the end; review fixes for the Active plans |
-| Original plans | [Phase 0](../archive/plans/paseo-bm-plan-autonomy-phase0.md), [Phase 1a](../archive/plans/paseo-bm-plan-autonomy-phase1a.md), [Phase 1b](./paseo-bm-plan-autonomy-phase1b.md) (all Active) |
+| Original plans | [Phase 0](paseo-bm-plan-autonomy-phase0.md), [Phase 1a](paseo-bm-plan-autonomy-phase1a.md), [Phase 1b](../../plans/paseo-bm-plan-autonomy-phase1b.md) (all Active) |
 | Status | Applied |
 | Owner | hieu.nt10 |
 | Created | 2026-09-29 |

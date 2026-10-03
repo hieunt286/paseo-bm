@@ -502,7 +502,7 @@ Mỗi phần hoàn tác bằng cách revert tệp của nó. Dữ liệu lưu b�
 
 ## 9. Đánh giá — tách chỉ dẫn thành reference/template và thư mục theo provider (Q2)
 
-**Owner hỏi:** file md quá dài thì có nên tách reference/template riêng cho agent tham chiếu, và có nên có thư mục chỉ dẫn riêng cho Claude Code, OpenCode, Codex không? **Owner chốt (a):** chưa tách, ghi lại đánh giá. Đánh giá dựa trên [báo cáo research-20260918-instructions-by-model](../../design/paseo-bm-research-20260918-instructions-by-model.md) (R1–R6) và mã hiện tại.
+**Owner hỏi:** file md quá dài thì có nên tách reference/template riêng cho agent tham chiếu, và có nên có thư mục chỉ dẫn riêng cho Claude Code, OpenCode, Codex không? **Owner chốt (a):** chưa tách, ghi lại đánh giá. Đánh giá dựa trên [báo cáo research-20260918-instructions-by-model](paseo-bm-research-20260918-instructions-by-model.md) (R1–R6) và mã hiện tại.
 
 **Làm được không — được, về kỹ thuật:**
 

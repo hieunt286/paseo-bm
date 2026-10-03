@@ -4,7 +4,7 @@
 |---|---|
 | Change ID | `autonomy-change-007` |
 | Short name | Phase 2 start re-check |
-| Original plans | [Phase 2](./paseo-bm-plan-autonomy-phase2.md) (Active); the combined field period of [change-006](./paseo-bm-plan-autonomy-change-006-build-then-field.md) (bead `bm-autonomy-phase6-i8fc.6`) |
+| Original plans | [Phase 2](../../plans/paseo-bm-plan-autonomy-phase2.md) (Active); the combined field period of [change-006](paseo-bm-plan-autonomy-change-006-build-then-field.md) (bead `bm-autonomy-phase6-i8fc.6`) |
 | Status | Applied — plan, design and the bead edits of §4 (made through `br` by the coordinator, 2026-09-30) |
 | Owner | hieu.nt10 |
 | Created | 2026-09-30, bead `bm-autonomy-phase2-t9lm.1` |
@@ -14,7 +14,7 @@
 ## 1. Change summary
 
 The Phase 2 start re-checked design Part B, Part G's Phase 2 sections and the plan's WP-201 → WP-211 against two things:
-- the field data available on 2026-09-30 ([baseline report §5](../operations/paseo-bm-eval-baseline.md#5-phase-2-start--the-field-data-available-on-2026-09-30));
+- the field data available on 2026-09-30 ([baseline report §5](../../operations/paseo-bm-eval-baseline.md#5-phase-2-start--the-field-data-available-on-2026-09-30));
 - Part A as built.
 
 A-1's target (≤ 1.5) is **kept**: the class mix does not show that the delegable classes cannot reach it. The re-check found three problems that would stop the phase from ever showing whether it can:

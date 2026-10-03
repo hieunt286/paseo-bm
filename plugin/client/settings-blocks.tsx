@@ -21,6 +21,7 @@ import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import {
+  rolesInstructionsRpc,
   rolesOptionsRpc,
   rolesSaveFallbackRpc,
   rolesSaveSettingsRpc,
@@ -70,6 +71,8 @@ import {
   fallbackDraftOf,
   fallbackEntryText,
   fallbackPriceText,
+  instructionsButtonLabel,
+  instructionsNote,
   isSettingsConflict,
   moveFallback,
   providerLabel,
@@ -91,6 +94,7 @@ import {
   type RoleFormView,
   type SetupRole,
 } from "./settings-roles-model";
+import { MarkdownView } from "./markdown-view";
 import { Button, Chip, ConfirmBlock, RoleMark, ToneText, type Styles, type Theme } from "./ui";
 
 /**
@@ -335,7 +339,7 @@ function useRoleForm(role: SetupRole, setting: RoleSetting, available: readonly 
 }
 
 /**
- * The Edit form of one role (design §4.3.1). `revision` is the one the form
+ * The Edit form of one role (design §7.3.6). `revision` is the one the form
  * was opened with: a save against a configuration changed since then is
  * refused with `E_ROLE_SETTINGS_CONFLICT`, and only reopening takes the new one.
  */
@@ -655,10 +659,38 @@ export function ReviewerFamilyNoteView({ note, styles, theme }: { note: Badge | 
 }
 
 /**
- * "Roles & models": one row per role in the order `roles.settings` returns,
- * each with an Edit form; under the Reviewer's, the same-family line.
+ * A role's instructions as a new agent of it is created with them now, read
+ * only (`roles.instructions`, design §7.12; base PRD REQ-032 d), read when
+ * opened. The editor of additional instructions stays retired (autonomy
+ * design §B.8): this only shows.
  */
-export function RolesSection({ styles, theme }: { styles: Styles; theme: Theme }) {
+export function RoleInstructionsView({ role, label, compact, styles, theme }: {
+  role: SetupRole;
+  label: string;
+  compact: boolean;
+  styles: Styles;
+  theme: Theme;
+}) {
+  const getInstructions = useRpc(rolesInstructionsRpc);
+  const instructions = useQuery({ queryKey: ["paseo-bm", "setup", "instructions", role], queryFn: () => getInstructions({ role }) });
+  return (
+    <View style={[styles.card, { backgroundColor: theme.colors.surface0, gap: 6 }]}>
+      <Text style={[styles.body, { fontSize: 11 }]}>{instructionsNote(role, label)}</Text>
+      {instructions.isPending ? <ActivityIndicator color={styles.spinner.color} /> : null}
+      {instructions.isError ? (
+        <ToneText tone="danger" styles={styles} theme={theme}>{errorMessageOf(instructions.error)}</ToneText>
+      ) : null}
+      {instructions.data === undefined ? null : <MarkdownView source={instructions.data.text} theme={theme} compact={compact} />}
+    </View>
+  );
+}
+
+/**
+ * "Roles & models": one row per role in the order `roles.settings` returns,
+ * each with an Edit form and its instructions to read; under the Reviewer's,
+ * the same-family line.
+ */
+export function RolesSection({ compact = false, styles, theme }: { compact?: boolean; styles: Styles; theme: Theme }) {
   const getSettings = useRpc(rolesSettingsRpc);
   const getOptions = useRpc(rolesOptionsRpc);
   const settings = useQuery({ queryKey: ROLES_SETTINGS_KEY, queryFn: () => getSettings({}) });
@@ -671,6 +703,7 @@ export function RolesSection({ styles, theme }: { styles: Styles; theme: Theme }
   const rows = data === undefined ? [] : roleRows(data, optionsOf);
   const familyNote = data === undefined ? null : reviewerFamilyNote(data);
   const [editing, setEditing] = useState<{ role: SetupRole; revision: string } | null>(null);
+  const [reading, setReading] = useState<SetupRole | null>(null);
   const [notes, setNotes] = useState<{ role: SetupRole; lines: Badge[] } | null>(null);
 
   return (
@@ -684,6 +717,7 @@ export function RolesSection({ styles, theme }: { styles: Styles; theme: Theme }
         <View style={[styles.card, { gap: 10 }]}>
           {rows.map((row) => {
             const open = editing?.role === row.role;
+            const shown = reading === row.role;
             return (
               <View key={row.role} style={{ gap: 6 }}>
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -692,6 +726,14 @@ export function RolesSection({ styles, theme }: { styles: Styles; theme: Theme }
                   <Text style={[styles.body, { flex: 1, minWidth: 160 }]} selectable>
                     {row.text}
                   </Text>
+                  <Button
+                    label={instructionsButtonLabel(shown)}
+                    kind="secondary"
+                    accessibilityLabel={shown ? `Hide the ${row.label} instructions` : `Show the instructions a new ${row.label} is created with`}
+                    accessibilityState={{ expanded: shown }}
+                    onPress={() => setReading(shown ? null : row.role)}
+                    styles={styles}
+                  />
                   <Button
                     label={open ? "Close" : "Edit"}
                     kind="secondary"
@@ -705,6 +747,7 @@ export function RolesSection({ styles, theme }: { styles: Styles; theme: Theme }
                   />
                 </View>
                 {row.role === "reviewer" ? <ReviewerFamilyNoteView note={familyNote} styles={styles} theme={theme} /> : null}
+                {shown ? <RoleInstructionsView role={row.role} label={row.label} compact={compact} styles={styles} theme={theme} /> : null}
                 <ReviewerFamilyNoteView note={roleBoundaryNote(row.setting)} styles={styles} theme={theme} />
                 {notes?.role === row.role
                   ? notes.lines.map((line, index) => (

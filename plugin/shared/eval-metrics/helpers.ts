@@ -7,7 +7,7 @@
  * This module is `shared/`: no Node and no React Native imports.
  */
 import type { TraceRecord } from "../contracts";
-import { EVAL_ROLES, type EvalRole, type EvalWindow, type RoleCounts } from "./types";
+import { EVAL_ROLES, type EvalRole, type EvalWindow, type RoleCounts, type TokenProvider } from "./types";
 import { timeOrNull } from "../time";
 
 // ── Small pure helpers (the scoring reuses them) ────────────────────────────
@@ -124,8 +124,41 @@ export function recordStart(record: TraceRecord): number | null {
   return times.length === 0 ? null : Math.min(...times);
 }
 
+/**
+ * The provider whose token counting a turn follows. A record keeps its
+ * provider alias (`bm-worker`), not the alias's base, so the model id is the
+ * sign: OpenCode names its models `<provider>/<model>`; Claude's start with
+ * `claude` (or are Claude Code's `opus` / `sonnet` / `haiku`); Codex's are
+ * OpenAI's (`gpt-…`, `o3`, `codex-…`). A snapshot naming one of the three as
+ * its provider is taken at its word. Anything else is unknown.
+ */
+export function tokenProviderOf(record: Pick<TraceRecord, "runtime" | "usage">): TokenProvider {
+  const provider = record.runtime?.provider ?? null;
+  if (provider === "claude" || provider === "codex" || provider === "opencode") return provider;
+  const model = (record.runtime?.model ?? record.usage?.model ?? "").trim().toLowerCase();
+  if (model === "") return "unknown";
+  if (model.includes("/")) return "opencode";
+  if (/^claude(?:-|$)|^(?:opus|sonnet|haiku)(?:$|[-[])/.test(model)) return "claude";
+  if (/^(?:gpt|codex)(?:-|$)|^o\d/.test(model)) return "codex";
+  return "unknown";
+}
+
+/**
+ * A turn's input tokens that were NOT read from cache. Codex reports its
+ * cached tokens as part of `inputTokens` (run note 2026-09-30 §4), so they are
+ * taken out; Claude and OpenCode report the two apart. Every sum and every
+ * price adds `cachedInputTokens` beside this, never beside the raw count, or a
+ * Codex turn's cache is counted twice.
+ */
+export function freshInputTokensOf(record: Pick<TraceRecord, "runtime" | "usage">): number {
+  const usage = record.usage;
+  if (usage === null) return 0;
+  return tokenProviderOf(record) === "codex" ? Math.max(0, usage.inputTokens - usage.cachedInputTokens) : usage.inputTokens;
+}
+
+/** A turn's tokens: fresh input + cached input + output, each counted once. */
 export const tokensOf = (record: TraceRecord): number =>
-  record.usage === null ? 0 : record.usage.inputTokens + record.usage.cachedInputTokens + record.usage.outputTokens;
+  record.usage === null ? 0 : freshInputTokensOf(record) + record.usage.cachedInputTokens + record.usage.outputTokens;
 
 export const zeroRoles = (): RoleCounts => ({ manager: 0, worker: 0, reviewer: 0, orchestrator: 0, unknown: 0 });
 export const roleOf = (record: TraceRecord): EvalRole => ((EVAL_ROLES as readonly string[]).includes(record.role) ? record.role : "unknown");

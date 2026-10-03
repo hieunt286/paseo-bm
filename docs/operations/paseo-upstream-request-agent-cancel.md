@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Draft — not sent** |
+| Status | **Draft — not sent.** Still open: nothing verified up to Paseo 0.9.2 (AGENTS.md, *Verified facts about Paseo*) gives a plugin an agent cancel or says who canceled a turn; the plugin SDK paseo-bm builds against is still 0.8.0. The workaround below is what paseo-bm 0.5.2 ships (`plugin/server/stop-propagation.ts`; the Stop section of `plugin/roles/worker.md`). Related verified fact: a plugin's `send()` to a running agent replaces its turn, and Claude Code reports the cut as the user's (paseo-bm tells the two apart by structure, ADR-024) |
 | Target | Paseo maintainers (`@getpaseo/plugin`, `@getpaseo/client`) |
 | Checked against | `@getpaseo/plugin` 0.8.0, `@getpaseo/client` 0.8.0, Paseo daemon 0.8.0 |
 | Origin | paseo-bm bead `bm-wq6` (orchestration acceptance run 4, fixture F-8a); design errata in `docs/design/paseo-bm.md` §2.6 D |
@@ -159,7 +159,3 @@ remove it.
 
 Both paths depend on agents following their instructions, which is why we
 would like a real cancel.
-
----
-
-*Revision 2026-09-25: still open and not sent. The workaround described above is what paseo-bm 0.3.0 ships (`plugin/server/stop-propagation.ts`; the Worker's Stop section in `plugin/roles/worker.md`). Not re-checked against the Paseo 0.9.x plugin SDK.*

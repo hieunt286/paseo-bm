@@ -4,7 +4,7 @@
 |---|---|
 | Change ID | `autonomy-change-009` |
 | Short name | Phase 4 start re-check |
-| Original plans | [Phase 4](./paseo-bm-plan-autonomy-phase4.md) (Active); the combined field period of [change-006](./paseo-bm-plan-autonomy-change-006-build-then-field.md) (bead `bm-autonomy-phase6-i8fc.6`) |
+| Original plans | [Phase 4](../../plans/paseo-bm-plan-autonomy-phase4.md) (Active); the combined field period of [change-006](paseo-bm-plan-autonomy-change-006-build-then-field.md) (bead `bm-autonomy-phase6-i8fc.6`) |
 | Status | Applied — approved by Claude under the owner's delegation; plan, design and the bead edits of §4 (made through `br`, 2026-10-01) |
 | Owner | hieu.nt10 |
 | Created | 2026-10-01, bead `bm-autonomy-phase4-loga.2` |
@@ -14,7 +14,7 @@
 ## 1. Change summary
 
 The Phase 4 start re-checked design Part D, its §D.4 decisions (change-003) and the Phase 4 beads against:
-- **the spike** (bead `loga.1`, [run note](../archive/operations/paseo-bm-action-boundary-spike-20260930.md)) and [ADR-019](../adr/ADR-019-action-boundary-permission-events.md)'s decision record: **Accepted for Claude and Codex, OpenCode keeps detection**;
+- **the spike** (bead `loga.1`, [run note](../operations/paseo-bm-action-boundary-spike-20260930.md)) and [ADR-019](../../adr/ADR-019-action-boundary-permission-events.md)'s decision record: **Accepted for Claude and Codex, OpenCode keeps detection**;
 - **the code as built** after Phases 1–3 and the consolidation (module names, the mode rule, the decision kinds, A-6's grants, the fake SDK);
 - **the field data available now** (read-only replay of 2026-09-30T16:55Z, numbers only; the data folder's paths, sizes and times were the same before and after).
 

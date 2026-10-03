@@ -6,7 +6,7 @@
 | Plan-ready | PASS — 2026-09-29 — hieu.nt10 (owner approved items 1–6 of the role review) |
 | Owner | hieu.nt10 |
 | Decision | [ADR-016](../../adr/ADR-016-orchestrator-coordinates-workers-live.md) |
-| Requirements | [Orchestrator PRD](../../product/paseo-bm-orchestrator-prd.md) REQ-071 (d), REQ-083 → REQ-087 |
+| Requirements | [Orchestrator PRD](../product/paseo-bm-orchestrator-prd.md) REQ-071 (d), REQ-083 → REQ-087 |
 | Technical Design | [paseo-bm-orchestrator.md](../../design/paseo-bm-orchestrator.md) §6B, §9 |
 | Target release | None — the owner tests on the real daemon, then decides |
 

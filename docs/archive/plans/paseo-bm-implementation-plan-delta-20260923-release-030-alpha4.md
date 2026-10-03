@@ -99,7 +99,7 @@ Delta này **không thêm một test nào** — nó không đổi mã sản ph�
 
 - **Kết quả:** ghi chú `0.3.0-alpha.4` mô tả đúng một bản gộp; mục 18.1 của checklist có kết quả thật; README không còn nói bản hiện hành là `0.2.0-alpha.*`.
 - **REQ/AC:** REQ-067 (c) — điều kiện phát hành phải được kiểm và ghi lại trước bước phát hành.
-- **Design refs:** [checklist nghiệm thu](../../operations/paseo-bm-worker-fallback-checklist.md) mục 18.1; [release runbook](../../operations/paseo-bm-release-runbook.md) §2.
+- **Design refs:** [checklist nghiệm thu](../operations/paseo-bm-worker-fallback-checklist.md) mục 18.1; [release runbook](../../operations/paseo-bm-release-runbook.md) §2.
 - **Phạm vi:** đúng ba file — `docs/releases/paseo-bm-release-notes-0.3.0-alpha.4.md`, `docs/operations/paseo-bm-worker-fallback-checklist.md`, `README.md`.
 - **Nội dung bắt buộc của ghi chú:** (a) bỏ khối trích dẫn "Chưa phát hành" và nói bản này **gộp** phase 2a-13 → 2a-18, có liên kết tới năm ghi chú theo phase; (b) thêm bản vá nút Beads (`bm-n99t`); (c) mục **"Hoàn tác"** sửa đường lùi từ `0.3.0-alpha.3` thành **`0.2.0-alpha.1`** — số trung gian không tồn tại trên npm — và nói rõ hạ bản là bỏ toàn bộ delta 20260921, theo đúng §5; (d) mục **"Tương thích"** sửa theo: câu "cài lại một bản trước … coi cả file là không dùng được" được viết cho `0.3.0-alpha.3`, không đúng cho `0.2.0-alpha.1` (bản đó không đọc `role-fallback.json`), nên phải nói đúng bản nào áp dụng.
 - **Nội dung bắt buộc của checklist 18.1:** cột "Kết quả" ghi **Đạt** kèm bằng chứng đọc được: id sự cố, `signal`, `message`, `class`, mẫu nào khớp, ngày đọc.

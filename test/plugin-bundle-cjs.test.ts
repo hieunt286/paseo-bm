@@ -254,6 +254,7 @@ describe.each([
       "precedents.list",
       "precedents.save",
       "roles.describe",
+      "roles.instructions",
       "roles.options",
       "roles.save-fallback",
       "roles.save-settings",

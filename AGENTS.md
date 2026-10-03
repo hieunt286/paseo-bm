@@ -15,7 +15,7 @@ Read this before touching anything in this repository.
 
 **Everything in this repository is written in English** (owner decision, 2026-09-28: the product is global). That covers this file, `plugin/roles/*.md` and every system prompt; commit messages, release notes and the release runbook; and every living document in `docs/` — PRDs, designs, ADRs, plans, operations, the docs index. New documents are written in English from the start.
 
-- **One exception: `docs/archive/`** is the historical record and stays in Vietnamese, as it was written. It is never edited, and code comments cite its files by name and section.
+- **One exception: `docs/archive/`** is the historical record and keeps the language it was written in (Vietnamese before 2026-09-28). It is never edited — only a link is re-pointed when its target moves — and code comments cite its files by name and section.
 - A quote of a user or of an agent keeps its meaning in English; do not paste Vietnamese into a living document.
 - The release notes are published verbatim as the GitHub Release body, so they are read by everyone, not only by this project.
 - Docs that the product's Worker generates in a *target* repo follow that repo's existing language, defaulting to English.
@@ -82,7 +82,7 @@ What breaks the listing, so do not do it:
   of the migration command, the only place that tarball is still built).
 
 The registry entry lives in the other repository, at `registry/paseo-bm.json` in
-`paseo-cafe/paseo-cafe`, and declares `path: "plugin"` with `package: "paseo-bm-plugin"`. Two
+`paseo-cafe/paseo-cafe`, and declares `path: "plugin-package"` with `package: "paseo-bm-plugin"`. Two
 things cost a red run to learn there:
 
 - Their CI runs Biome over the entry: **short arrays stay on one line**. `JSON.stringify(x, null, 2)`
@@ -98,18 +98,22 @@ things cost a red run to learn there:
 ```
 AGENTS.md              this file (CLAUDE.md is a symlink to it)
 docs/README.md         index of the docs: start here
-docs/product/          PRDs (Accepted, living): paseo-bm-prd.md, paseo-bm-dashboard-prd.md
-docs/design/           Technical Designs (Active, living): paseo-bm.md, paseo-bm-dashboard.md,
-                       plus the research note on instructions by provider
-docs/adr/              ADR-001..025; which are in force is in the docs index
-docs/operations/       living only: release runbook, acceptance checklists (install,
-                       orchestration, worker fallback), the paseo.cafe listing record,
-                       open requests to upstream Paseo
-docs/releases/         release notes, one file per version (the GitHub Release body)
-docs/archive/          history, never edited: merged deltas (design/, product/), completed
-                       plans (plans/), run records and diagnoses (operations/). Code comments
-                       cite deltas by name and section; find them here
+docs/product/          PRDs (living): paseo-bm-prd.md, paseo-bm-dashboard-prd.md,
+                       paseo-bm-autonomy-prd.md
+docs/design/           Technical Designs (living): paseo-bm.md, paseo-bm-dashboard.md,
+                       paseo-bm-orchestrator.md, paseo-bm-autonomy.md, paseo-bm-evaluation.md.
+                       Code cites them by section: never renumber a section
+docs/adr/              ADR-001..026; their status is in the docs index
 docs/plans/            created only for a piece of Designed work; archived when it completes
+                       (now: the autonomy programme's phase plans, open for their field exits)
+docs/operations/       living only: release runbook, the paseo.cafe listing record, the
+                       evaluation baseline, the specialist admission template, drafts of
+                       requests to upstream Paseo
+docs/releases/         release notes, one file per version (the GitHub Release body)
+docs/archive/          history, never edited; docs/archive/README.md indexes it: merged deltas
+                       and change-deltas, superseded PRDs and concepts, completed plans, run
+                       records, spikes, old acceptance checklists, and each living doc's
+                       Revision History up to 2026-10-02. Code cites these by name; find them here
 .beads/                bead graph; issues.jsonl is tracked, *.db is gitignored
 plugin/                Paseo plugin source: what is edited, typechecked and tested; has its own
                        package.json, README.md, LICENSE, and images/ for the listing
@@ -154,7 +158,7 @@ agent may do is Designed; rewording without changing behaviour is Direct.
 How the lanes are held:
 
 - **Look before you ask.** The design, ADRs and code already answer most questions; read the part you need instead of re-deriving it. A flag name, error code, timeout, JSON shape or label convention is decided in the design — if one is genuinely missing, surface the gap instead of inventing it.
-- **Docs are living.** The PRD, the Technical Design and the ADR index describe the product **as it is now**. Change them in place in the same commit as the code, with one Revision History line when the change is not a correction. No delta files for new work: the old deltas live in `docs/archive/`, kept only because code comments cite them. An ADR is never rewritten — a new ADR supersedes it. A run record, a diagnosis or a completed plan goes to `docs/archive/` when its work is done.
+- **Docs are living.** The PRD, the Technical Design and the ADR index describe the product **as it is now**. Change them in place in the same commit as the code, with one Revision History line when the change is not a correction; a doc describes what is, not how it got there (no "previously", no edit dates in the text). Never renumber a section or an id that code cites — retire a section to a one-line stub instead. No delta files for new work: the old deltas live in `docs/archive/`, kept only because code comments cite them. An ADR is never rewritten — a new ADR supersedes it. A run record, a diagnosis or a completed plan goes to `docs/archive/` when its work is done.
 - **PRD states outcomes, design states detail.** Theme tokens, labels, pixel values and limits belong in the design, code and tests, so a screen tweak never becomes a requirement change.
 - **A plan belongs to one piece of Designed work** and is closed (`Status: Completed`) when its beads are; it is not a standing contract for later work.
 - **Gates apply only where their artifact exists.** Report them honestly; a skipped gate is an exception, never a pass.
@@ -242,7 +246,7 @@ Checked against a live daemon, Paseo CLI/daemon 0.8.0:
 - The daemon resolves a new agent's mode in `resolveMcpCreateAgent` **before** `before("agent.create")` runs: an explicit mode is used; a child of the same provider inherits the parent's mode; a child of an unattended parent gets the target provider's unattended mode; otherwise it **throws** `cannot inherit mode … Pass an explicit mode`. The hook then receives that resolved config and may change it (only `cwd` is immutable). So a hook can correct a mode but cannot rescue a creation the daemon already refused — a Manager that is not unattended must pass the Worker's mode itself. A Worker in `bypassPermissions` does not get the unattended path either: a Reviewer it creates without a mode is **refused**, not given `full-access` (`cannot inherit mode 'bypassPermissions' from caller … Pass an explicit mode. Available: auto, auto-review, full-access`, seen by two Workers on 2026-09-18), so the Worker passes the Reviewer mode named in its own `## Runtime facts`.
 - The plugin SDK **cannot change the mode or the labels of an agent that already exists**: `PaseoAgentHandle` has no setter for either, `DaemonClient.setAgentMode` is not handed to plugins, and `before("agent.session_open")` can only change `env`. The Paseo CLI can: `paseo agent mode <id> <mode> [--json]` and `paseo agent update <id> --label <k=v> [--json]`. `manager.ensure` uses them (via `plugin/server/paseo-cli.ts`, `execFile` without a shell) to switch a Manager created before delta 20260918 once, marked by the `bm.modeSet` label. Running the CLI from inside the daemon process **works on a real daemon** (2026-09-18: two pre-existing Managers were switched and labelled; a Manager switched back to `default` by hand stayed there after `manager.ensure`).
 - An agent snapshot (from `get_agent_status` or the `agent` of a `timeline.refetch` payload) carries both the **configured** values (`model`, `thinkingOptionId`, `effectiveThinkingOptionId`, `currentModeId`) and the **running** ones in `runtimeInfo { model, thinkingOptionId, modeId }`; prefer `runtimeInfo`. `persistence.metadata.systemPrompt` holds the exact system prompt the agent was given. A Codex Reviewer with no thinking set ran at effective `xhigh` with a 258,400-token window; a Claude Worker has 1,000,000.
-- Paseo delivers `config.systemPrompt` differently per provider: Claude gets it as `append` to the `claude_code` preset (after the whole preset, which brings its own memory, `AskUserQuestion` and commit instructions), with `CLAUDE.md` injected into the conversation, not the system prompt; Codex gets it as `developerInstructions` (after a collaboration mode's own `developer_instructions`), with each `AGENTS.md` as a separate user-role message; OpenCode gets it as `system`. A daemon-level `appendSystemPrompt` (empty unless configured) follows it in all three. Details and sources: `docs/design/paseo-bm-research-20260918-instructions-by-model.md`.
+- Paseo delivers `config.systemPrompt` differently per provider: Claude gets it as `append` to the `claude_code` preset (after the whole preset, which brings its own memory, `AskUserQuestion` and commit instructions), with `CLAUDE.md` injected into the conversation, not the system prompt; Codex gets it as `developerInstructions` (after a collaboration mode's own `developer_instructions`), with each `AGENTS.md` as a separate user-role message; OpenCode gets it as `system`. A daemon-level `appendSystemPrompt` (empty unless configured) follows it in all three. Details and sources: `docs/archive/design/paseo-bm-research-20260918-instructions-by-model.md`.
 - A plugin's server process **can serve its own MCP endpoint** and give it to agents (verified 2026-09-24, Claude): `node:http` listening on `127.0.0.1` inside the plugin process works, and `before("agent.create")` returning `config.mcpServers["<name>"] = { type: "http", url, alwaysLoad: true }` plus `config.toolPolicy.preapproved = [{ kind: "mcp", server, tool }]` gives the new agent the tool as `mcp__<name>__<tool>`, with **no permission prompt**. Without `alwaysLoad` Claude hides the tool behind a ToolSearch step. Agents that already exist never get it (`agent.session_open` changes only `env`). paseo-bm's endpoint: ADR-010, `plugin/server/agent-tools.ts`.
 - **`toolPolicy` is refused outright on a provider that cannot pre-approve MCP tools.** Paseo 0.8 `applyProviderConfiguration` throws `Provider '<id>' cannot preapprove exact MCP tools for unattended execution` — the agent is never created — unless the provider's contract has `applyToolPolicy`: only **claude, codex, opencode** (`PROVIDER_CONTRACTS.supportsExactMcpPreapproval`); Pi, Oh My Pi, Copilot and other ACP providers do not. It also throws when a grant names a server missing from `mcpServers`. For Codex, `applyCodexToolPolicy` turns the grants into `mcp_servers.<server>.enabled_tools` plus `tools.<tool>.approval_mode = "approve"`. Verified 2026-09-24 through fallback aliases: a Codex agent created through Paseo calls the tool (shown as `paseo-bm.bm_review`) with no approval prompt; an OpenCode creation carrying `toolPolicy` is accepted; a Pi creation without it succeeds. The creation hook reads the alias's base provider with `config.get()` → `config.providers[<alias>].extends` (the SDK's shape; the file keeps them under `agents.providers`).
 - Paseo **0.9.2** `daemon status --json` has **no `cliVersion`** (it still has `home`, `daemonVersion`, `listen`); `paseo --version` prints the bare CLI version. The 0.4.0 migration command's adapter falls back to it (bm-qh4c). `plugin ls` / `plugin logs --json` kept their 0.8 shape.

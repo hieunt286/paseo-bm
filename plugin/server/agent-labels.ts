@@ -38,6 +38,7 @@ import { checkWorkerTools, type ToolsPaseo } from "./tools-check";
 import { linkReplacementReviewer } from "./fallback-reviewer";
 import { checkRolePairing, type PairingPaseo, type RolePairingDeps } from "./role-pairing";
 import { errorText } from "./rpc-kit";
+import { createTitleMarker, type TitleMarker, type TitlePaseo } from "./role-title";
 
 /** The snapshot fields this module reads; `PaseoAgent` is structurally assignable. */
 export interface LabelAgentSnapshot {
@@ -233,7 +234,8 @@ export type AgentLabelsHost = Partial<Pick<PluginServerContext, "on">>;
 /**
  * Registers `on("agent.created")` (label the new agent, and check the role
  * pairing: `role-pairing.ts`, design §A.10) and `on("agent.turn_started")`
- * (start the once-per-run scan) and returns their remover; a no-op on a host
+ * (start the once-per-run scan, and put the role marker back on a title
+ * Paseo set after the creation: `role-title.ts`) and returns their remover; a no-op on a host
  * without `on` (the stop propagation already logs that host's one line).
  * Neither handler waits for the scan. `pairing` is where a mismatch goes (the
  * Inbox alerts store once the event bus is wired, a log line until then).
@@ -245,6 +247,7 @@ export function registerAgentLabels(
   labeller: AgentLabeller = createAgentLabeller(),
   pairing: RolePairingDeps = {},
   onCreated?: (agent: { id: string; provider: unknown; parentAgentId: string | null; workspaceId: string | null }, paseo: unknown) => Promise<unknown>,
+  titles: TitleMarker = createTitleMarker(),
 ): () => void {
   if (typeof host.on !== "function") return () => {};
   const removers = [
@@ -306,12 +309,20 @@ export function registerAgentLabels(
         }
       }
     }),
-    host.on("agent.turn_started", (_event, context) => {
+    host.on("agent.turn_started", (event, context) => {
       try {
         const paseo: ScanPaseo = context.paseo;
         void labeller.scanOnce(paseo);
       } catch (error) {
         console.warn(`[paseo-bm] starting the label scan failed: ${errorText(error)}`);
+      }
+      // An agent Paseo named after its creation (a cleared conversation) gets its role marker back.
+      const agent = (event as { agent?: { id?: unknown; provider?: unknown; title?: unknown } } | null)?.agent;
+      if (typeof agent?.id === "string") {
+        void titles.remark(
+          { id: agent.id, provider: agent.provider, title: typeof agent.title === "string" ? agent.title : null },
+          (context as { paseo?: unknown } | null)?.paseo as TitlePaseo,
+        );
       }
     }),
   ];

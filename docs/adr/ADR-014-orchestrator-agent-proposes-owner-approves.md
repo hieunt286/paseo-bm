@@ -6,7 +6,7 @@
 | Date | 2026-09-28 |
 | Owner | hieu.nt10 |
 | Supersedes | [ADR-013](ADR-013-orchestrator-assess-and-nudge.md) (assessment agent per click, `BM-NUDGE` sent by the plugin) — built, tested, rejected by the owner before any release |
-| Related | [Orchestrator PRD](../product/paseo-bm-orchestrator-prd.md) (REQ-073, REQ-075, REQ-076, REQ-079) · [Orchestrator Design](../design/paseo-bm-orchestrator.md) · [ADR-005](ADR-005-manager-as-agent.md) (agents belong to the user) · [ADR-007](ADR-007-dashboard-trace-store.md) (trace store) · [ADR-010](ADR-010-plugin-hosted-agent-tools.md) (plugin-hosted MCP tools — extended by decision 3) · [ADR-011](ADR-011-manager-coordinates-workers.md) (the Manager coordinates its Workers) |
+| Related | [Orchestrator PRD](../archive/product/paseo-bm-orchestrator-prd.md) (REQ-073, REQ-075, REQ-076, REQ-079) · [Orchestrator Design](../design/paseo-bm-orchestrator.md) · [ADR-005](ADR-005-manager-as-agent.md) (agents belong to the user) · [ADR-007](ADR-007-dashboard-trace-store.md) (trace store) · [ADR-010](ADR-010-plugin-hosted-agent-tools.md) (plugin-hosted MCP tools — extended by decision 3) · [ADR-011](ADR-011-manager-coordinates-workers.md) (the Manager coordinates its Workers) |
 | Amends | REQ-047 of the [Dashboard PRD](../product/paseo-bm-dashboard-prd.md): the Dashboard stays read-only; the Orchestrator's actions below are the only exception |
 | The owner's decisions | 2026-09-28: one agent for the whole machine that the user chats with; step in on stalled work (5 min with no agent running, 15 min waiting for the user, review loops or broken reports); commands may say anything the user could say; **every command waits for the owner's click**; the display is short and general |
 

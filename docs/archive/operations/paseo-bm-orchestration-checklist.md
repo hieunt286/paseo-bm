@@ -4,7 +4,7 @@
 |---|---|
 | Status | Active — used for the acceptance of the Manager → Worker → Reviewer loop on a real daemon |
 | Applies to | paseo-bm `0.3.0`; role instructions `plugin/roles/{manager,worker,reviewer}.md` as of 2026-09-25; review budget `plugin/server/review-budget.ts` |
-| Metrics | [PRD M-10 → M-18](../product/paseo-bm-prd.md#2-goals--success-metrics); how they are measured in §5 is adjusted to the current role instructions |
+| Metrics | [PRD M-10 → M-18](../../product/paseo-bm-prd.md#2-goals--success-metrics); how they are measured in §5 is adjusted to the current role instructions |
 | Toolkit | `~/bm-acceptance/20260915/kit/` (outside the repo): `make-baseline.sh`, `prepare-fixture.sh`, `snapshot.sh`, `scan-timeline.sh`, `permit-runner.mjs`, `extras/` |
 | Replaces | the old orchestration acceptance runbook (`paseo-bm-orchestration-runbook.md`) — its sequence of steps now lives in §2 and §4 |
 

@@ -96,7 +96,7 @@ export {
   type VerificationFigures,
   type WorkerReadingFigures,
 } from "./eval-metrics/admission";
-export { answerChoiceOf, median, normaliseQuestionText, percentile, recordStart, workspaceOfStallKey, type AnswerChoice } from "./eval-metrics/helpers";
+export { answerChoiceOf, freshInputTokensOf, median, normaliseQuestionText, percentile, recordStart, workspaceOfStallKey, type AnswerChoice } from "./eval-metrics/helpers";
 export {
   BRIEF_CHARACTERS,
   BRIEF_TOKENS,

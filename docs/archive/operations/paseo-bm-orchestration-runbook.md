@@ -5,7 +5,7 @@
 | Status | Ready to run |
 | Date | 2026-09-15 |
 | Owner | hieu.nt10 (người chạy) · Claude (chuẩn bị và chấm) |
-| Checklist gốc | [paseo-bm-orchestration-checklist.md](../../operations/paseo-bm-orchestration-checklist.md) — tài liệu này chỉ là trình tự thao tác, **luật chấm nằm ở checklist** |
+| Checklist gốc | [paseo-bm-orchestration-checklist.md](paseo-bm-orchestration-checklist.md) — tài liệu này chỉ là trình tự thao tác, **luật chấm nằm ở checklist** |
 | Bead | `bm-wp-117-9vy.2` · `bm-bdk` (F-5a/F-5b, F-6 → F-9) |
 | Bộ công cụ | `~/bm-acceptance/20260915/kit/` (ngoài repo, dùng một lần) |
 

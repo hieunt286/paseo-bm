@@ -8,7 +8,7 @@
  * (`traces.ts`).
  */
 import { byAt } from "../shared/order";
-import { turnTokensOf } from "../shared/eval-metrics";
+import { freshInputTokensOf, turnTokensOf } from "../shared/eval-metrics";
 import { CONTEXT_TREND_MAX } from "../shared/contracts";
 import type { AgentTokenFigures, RuntimeRow, TraceRecord, Usage } from "../shared/contracts";
 import type { ReconstructedTrace } from "./traces";
@@ -27,6 +27,12 @@ export function effectiveModel(record: Pick<TraceRecord, "runtime" | "usage">): 
  * Sums the tokens a trace used. Cost is left unpriced here (`unavailable`):
  * WP-209 owns the price table and applies it, so this module never has to know
  * about money.
+ *
+ * The sum's `inputTokens` is the input NOT read from cache
+ * (`freshInputTokensOf`): a Codex turn reports its cached tokens inside its
+ * input, and adding or pricing them again beside `cachedInputTokens` counted
+ * them twice. So fresh input + cached + output is the true total everywhere a
+ * summed usage is shown, and each part is priced at its own rate.
  */
 export function summariseUsage(trace: ReconstructedTrace): Usage {
   let inputTokens = 0;
@@ -35,7 +41,7 @@ export function summariseUsage(trace: ReconstructedTrace): Usage {
   let model: string | null = null;
   for (const record of trace.records) {
     if (record.usage === null) continue;
-    inputTokens += record.usage.inputTokens;
+    inputTokens += freshInputTokensOf(record);
     cachedInputTokens += record.usage.cachedInputTokens;
     outputTokens += record.usage.outputTokens;
     // The model the turn ran on, so a part priced below is priced as what ran.

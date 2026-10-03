@@ -42,6 +42,33 @@ export const SETUP_ROLES: ReadonlyArray<{ role: SetupRole; label: string; mark: 
 /** Shown under the Roles & models rows at all times. */
 export const ROLES_APPLY_NOTICE = "Changes apply to agents created after you save. Running agents keep their model and thinking.";
 
+// ---------------------------------------------------------------------------
+// A role's instructions, read only (design §7.12 `roles.instructions`, base PRD REQ-032 d).
+// ---------------------------------------------------------------------------
+
+/** The row button that opens and closes a role's instructions. */
+export function instructionsButtonLabel(open: boolean): string {
+  return open ? "Hide instructions" : "Instructions";
+}
+
+/**
+ * Above a role's instructions: what the text holds for this role, and what a
+ * creation adds to it (`runtimeFactsText`): a project's own precedents for the
+ * Manager and the Worker, and for the Worker and the Reviewer a line on the
+ * project's action boundary when its provider has one (`boundaryPostureOf`).
+ */
+export function instructionsNote(role: SetupRole, label: string): string {
+  const parts =
+    role === "manager"
+      ? "its role instructions, its runtime facts and your global precedents. Created in a project, it also gets that project's precedents"
+      : role === "worker"
+        ? "its role instructions, its runtime facts and your global precedents. Created in a project, it also gets that project's precedents and may get a line on its action boundary"
+        : role === "reviewer"
+          ? "its role instructions. Created in a project, it may also get a line on its action boundary"
+          : "its role instructions";
+  return `What a new ${label} is created with now: ${parts}. Running agents keep the instructions they started with.`;
+}
+
 /** What a save refused with `E_ROLE_SETTINGS_CONFLICT` says, word for word. */
 export const ROLES_CONFLICT_MESSAGE = "The configuration changed elsewhere; reopen Roles & models.";
 

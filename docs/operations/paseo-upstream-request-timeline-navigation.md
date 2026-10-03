@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Draft — not sent** |
+| Status | **Draft — not sent.** Still open: no verified fact up to Paseo 0.9.2 (AGENTS.md, *Verified facts about Paseo*) gives a timeline renderer `navigation`, and the plugin SDK paseo-bm builds against is still 0.8.0. In paseo-bm 0.5.2 the card's Worker name is still plain text (`plugin/client/chat-card*.ts(x)`); the screens that use `navigation.openAgent` are now the Inbox and Projects screens (`inbox.tsx`, `beads-screen.tsx`, `tree.tsx`, `work.tsx` in `plugin/client/`), not the retired Metric screen named below |
 | Target | Paseo maintainers (`@getpaseo/plugin`) |
 | Checked against | `@getpaseo/plugin` 0.8.0, `@getpaseo/client` 0.8.0 (type declarations only) |
 | Origin | paseo-bm request `req-20260918T041426Z`, batch `b4`, owner decision Q12 (a); bead `bm-wp-257-card-b4-zwx7.4`; PRD delta `docs/archive/product/paseo-bm-prd-delta-20260918d-card-replies.md` §1.3 |
@@ -95,7 +95,3 @@ agent list or from paseo-bm's Metric screen, which does have `navigation`. When 
 Paseo release passes `navigation` to timeline renderers, the card's name becomes
 a button that calls `navigation.openAgent({ agentId })`, shown only when the
 field is present.
-
----
-
-*Revision 2026-09-25: still open and not sent. Re-read against paseo-bm 0.3.0 (the card's Worker name is still plain text; the Metric and Beads screens use `navigation.openAgent`). Not re-checked against the Paseo 0.9.x plugin SDK.*

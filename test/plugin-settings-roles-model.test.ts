@@ -10,6 +10,8 @@ import {
   addFallback,
   applySavedRole,
   canAddFallback,
+  instructionsButtonLabel,
+  instructionsNote,
   entryAsSetting,
   entryOfDraft,
   fallbackAutoRetiredNotice,
@@ -565,5 +567,29 @@ describe("the action boundary per role (§D.2, §D.4)", () => {
     }
     expect(roleBoundaryNote(role({ role: "manager" }))).toBeNull();
     expect(roleBoundaryNote(role({ role: "orchestrator" }))).toBeNull();
+  });
+});
+
+describe("a role's instructions, read only (design §7.12, base PRD REQ-032 d)", () => {
+  it("opens and closes from one row button", () => {
+    expect(instructionsButtonLabel(false)).toBe("Instructions");
+    expect(instructionsButtonLabel(true)).toBe("Hide instructions");
+  });
+
+  it("says what each role's text holds, what a creation adds, and that running agents keep theirs", () => {
+    for (const { role, label } of SETUP_ROLES) {
+      const note = instructionsNote(role, label);
+      expect(note.startsWith(`What a new ${label} is created with now: its role instructions`)).toBe(true);
+      expect(note.endsWith("Running agents keep the instructions they started with.")).toBe(true);
+    }
+    // Precedents go to the Manager and the Worker only; the boundary line to the Worker and the Reviewer only (runtimeFactsText).
+    expect(instructionsNote("manager", "Manager")).toContain("that project's precedents");
+    expect(instructionsNote("manager", "Manager")).not.toContain("action boundary");
+    expect(instructionsNote("worker", "Worker")).toContain("precedents and may get a line on its action boundary");
+    expect(instructionsNote("reviewer", "Reviewer")).not.toContain("precedents");
+    expect(instructionsNote("reviewer", "Reviewer")).toContain("action boundary");
+    expect(instructionsNote("orchestrator", "Orchestrator")).toBe(
+      "What a new Orchestrator is created with now: its role instructions. Running agents keep the instructions they started with.",
+    );
   });
 });

@@ -4,8 +4,8 @@
 |---|---|
 | Status | **Draft** (2026-09-29) — a concept for the owner's review, not a design to implement from. On approval its decisions move into the Phase 1 Technical Design, and this file is archived |
 | Owner | hieu.nt10 (GitHub: hieunt286) |
-| Requirements source | [Calibrated autonomy PRD](../product/paseo-bm-autonomy-prd.md) (Review): REQ-111, REQ-112, REQ-118, REQ-125, REQ-130, REQ-151 |
-| Replaces, on approval | The screen and card sections of the [Dashboard design](./paseo-bm-dashboard.md) §11 and the tab of the [Orchestrator design](./paseo-bm-orchestrator.md) §9 |
+| Requirements source | [Calibrated autonomy PRD](../../product/paseo-bm-autonomy-prd.md) (Review): REQ-111, REQ-112, REQ-118, REQ-125, REQ-130, REQ-151 |
+| Replaces, on approval | The screen and card sections of the [Dashboard design](../../design/paseo-bm-dashboard.md) §11 and the tab of the [Orchestrator design](../../design/paseo-bm-orchestrator.md) §9 |
 | Method | Looked at the product as a first-time owner would, from the shipped screenshots (`plugin/images/`), GUIDE.md, and the owner's session of 2026-09-29; no code read for this pass |
 
 ## 1. What a fresh eye sees today
@@ -127,7 +127,7 @@ Cost        tokens/request 1.6 M (−18 %) · Worker 91 % · Reviewer 5 %
 Review      blocking findings/batch 0.6 · acted on 100 %
 ```
 
-Each figure opens its breakdown. The `[ Delegate? ]` button is a shortcut on any class that may be delegated and is not yet: there is no threshold, and the figures are information ([ADR-023](../adr/ADR-023-delegation-without-eligibility.md)).
+Each figure opens its breakdown. The `[ Delegate? ]` button is a shortcut on any class that may be delegated and is not yet: there is no threshold, and the figures are information ([ADR-023](../../adr/ADR-023-delegation-without-eligibility.md)).
 
 ### 4.4 Settings
 

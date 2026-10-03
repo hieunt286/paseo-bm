@@ -4,7 +4,7 @@
 |---|---|
 | Change ID | `autonomy-change-003` |
 | Short name | Decisions at conversion; bead polish |
-| Original plans | [Phase 2](./paseo-bm-plan-autonomy-phase2.md), [Phase 3](./paseo-bm-plan-autonomy-phase3.md), [Phase 4](./paseo-bm-plan-autonomy-phase4.md), [Phase 5](./paseo-bm-plan-autonomy-phase5.md), [Phase 6](./paseo-bm-plan-autonomy-phase6.md) (Active) |
+| Original plans | [Phase 2](../../plans/paseo-bm-plan-autonomy-phase2.md), [Phase 3](../../plans/paseo-bm-plan-autonomy-phase3.md), [Phase 4](../../plans/paseo-bm-plan-autonomy-phase4.md), [Phase 5](../../plans/paseo-bm-plan-autonomy-phase5.md), [Phase 6](../../plans/paseo-bm-plan-autonomy-phase6.md) (Active) |
 | Status | Applied |
 | Owner | hieu.nt10 |
 | Created | 2026-09-30 |

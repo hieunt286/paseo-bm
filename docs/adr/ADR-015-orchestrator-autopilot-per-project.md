@@ -6,7 +6,7 @@
 | Date | 2026-09-29 |
 | Owner | hieu.nt10 |
 | Supersedes | [ADR-014](ADR-014-orchestrator-agent-proposes-owner-approves.md) decisions 4 ("only the owner's click sends") and 5 (wake only on stalls); ADR-014's other decisions stand |
-| Related | [Orchestrator PRD](../product/paseo-bm-orchestrator-prd.md) · [Orchestrator Design](../design/paseo-bm-orchestrator.md) · [ADR-011](ADR-011-manager-coordinates-workers.md) |
+| Related | [Orchestrator PRD](../archive/product/paseo-bm-orchestrator-prd.md) · [Orchestrator Design](../design/paseo-bm-orchestrator.md) · [ADR-011](ADR-011-manager-coordinates-workers.md) |
 | The owner's decisions | 2026-09-29, after using ADR-014 on the real daemon ("it does nothing on its own and makes me relay and confirm a lot"): **Autopilot per project** — the Orchestrator answers its agents' questions and commands the Manager without asking; it reacts **as soon as** an agent asks the owner something or reports a step finished; limits kept: **no commit, push or deploy for the owner**, **no touching real data**, **ask the owner on big decisions**; nothing else limited |
 
 ## Context

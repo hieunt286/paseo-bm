@@ -6,7 +6,7 @@
 | Date | 2026-10-01 |
 | Owner | hieu.nt10 |
 | Supersedes | [ADR-018](ADR-018-calibrated-autonomy-per-class.md) decision 4's promotion rule — "proposed by evidence", and a cell may become `delegate` only at ≥ 90 % agreement over ≥ 20 decisions across two weeks with no reversal; its decision 5's "the predictor that earned it"; and its consequence "two weeks of data is the minimum before any cell can be delegated". Every other part of ADR-018 stands: the classes, the matrix, shadow and the agreement ledger, automatic demotion, the four hard-owner classes, precedents |
-| Related | [Calibrated autonomy PRD](../product/paseo-bm-autonomy-prd.md) REQ-121, REQ-122, REQ-123, Q-105 · [Autonomy design](../design/paseo-bm-autonomy.md) §B.2–§B.4, §B.9, §A.12, §G.4 · [change-013](../plans/paseo-bm-plan-autonomy-change-013-delegation-without-eligibility.md) |
+| Related | [Calibrated autonomy PRD](../product/paseo-bm-autonomy-prd.md) REQ-121, REQ-122, REQ-123, Q-105 · [Autonomy design](../design/paseo-bm-autonomy.md) §B.2–§B.4, §B.9, §A.12, §G.4 · [change-013](../archive/plans/paseo-bm-plan-autonomy-change-013-delegation-without-eligibility.md) |
 | The owner's decisions | 2026-10-01, on the eligibility gate: "Remove this condition from the product entirely; the machinery is too cumbersome. The user turns delegation on whenever they like." |
 
 ## Context
@@ -43,7 +43,7 @@ On the field data the gate was never met. The baseline counted 0 eligible cells:
   - no re-check of the ledger after every answer;
   - no difference between what Settings and Insights may set;
   - one confirmation text shared by both.
-- **The field evaluation changes where it measured the gate** ([change-013](../plans/paseo-bm-plan-autonomy-change-013-delegation-without-eligibility.md)):
+- **The field evaluation changes where it measured the gate** ([change-013](../archive/plans/paseo-bm-plan-autonomy-change-013-delegation-without-eligibility.md)):
   - A-4 and A-5 per delegated class count from that class's delegation;
   - the Phase 2 exit's checks of eligibility no longer exist;
   - the delegation window counts from the owner's first delegation.

@@ -7,14 +7,14 @@
 | Owner | hieu.nt10 |
 | Phase | **Phase O1 MVP** (Orchestrator PRD §9, rewritten 2026-09-28) |
 | Decision | [ADR-014](../../adr/ADR-014-orchestrator-agent-proposes-owner-approves.md) (Accepted 2026-09-28), superseding ADR-013 |
-| Requirements | [Orchestrator PRD](../../product/paseo-bm-orchestrator-prd.md) REQ-071 → REQ-080 (Accepted 2026-09-28) |
+| Requirements | [Orchestrator PRD](../product/paseo-bm-orchestrator-prd.md) REQ-071 → REQ-080 (Accepted 2026-09-28) |
 | Technical Design | [paseo-bm-orchestrator.md](../../design/paseo-bm-orchestrator.md) §1 → §13 (Active 2026-09-28) |
 | Starting point | The first design's code, implemented and uncommitted on `main` ([its plan](paseo-bm-plan-orchestrator.md)); design §11 says what is kept and removed |
 | Target release | **None in this plan.** The owner tests the finished work and then decides the version |
 
 ## 0. Routing Decision
 
-Canonical owner: [Orchestrator PRD §0](../../product/paseo-bm-orchestrator-prd.md#0-routing-decision). Execution path: plan → converter. This plan adds nothing to it.
+Canonical owner: [Orchestrator PRD §0](../product/paseo-bm-orchestrator-prd.md#0-routing-decision). Execution path: plan → converter. This plan adds nothing to it.
 
 ## 1. MVP-Lock
 

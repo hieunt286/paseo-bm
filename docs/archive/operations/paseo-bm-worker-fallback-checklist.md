@@ -2,8 +2,8 @@
 
 | Field | Value |
 |---|---|
-| Status | Active — checks on a real daemon the role-settings and fallback features present in `0.3.0`. **Its installer steps are out of date:** the `node dist/index.js install` / `doctor` / `--role` commands belong to the 0.3.x installer, which 0.4.0 replaced by the plugin's Settings (roles and fallback chains) and whose source is gone from the tree since [ADR-022](../adr/ADR-022-retirements-after-code-review.md). Until this checklist is rewritten, run those steps through Settings → Agents instead; the fallback Auto switch is retired too (ADR-022 decision 4) |
-| Source | [PRD delta §5](../archive/product/paseo-bm-prd-delta-20260921-worker-fallback-and-role-settings.md#5-bằng-chứng-thành-công), [design delta §8](../archive/design/paseo-bm-delta-20260921-worker-fallback-and-role-settings.md#8-testing-strategy), [plan delta §1.3](../archive/plans/paseo-bm-implementation-plan-delta-20260921-worker-fallback-and-role-settings.md#13-điều-kiện-ra) |
+| Status | Active — checks on a real daemon the role-settings and fallback features present in `0.3.0`. **Its installer steps are out of date:** the `node dist/index.js install` / `doctor` / `--role` commands belong to the 0.3.x installer, which 0.4.0 replaced by the plugin's Settings (roles and fallback chains) and whose source is gone from the tree since [ADR-022](../../adr/ADR-022-retirements-after-code-review.md). Until this checklist is rewritten, run those steps through Settings → Agents instead; the fallback Auto switch is retired too (ADR-022 decision 4) |
+| Source | [PRD delta §5](../product/paseo-bm-prd-delta-20260921-worker-fallback-and-role-settings.md#5-bằng-chứng-thành-công), [design delta §8](../design/paseo-bm-delta-20260921-worker-fallback-and-role-settings.md#8-testing-strategy), [plan delta §1.3](../plans/paseo-bm-implementation-plan-delta-20260921-worker-fallback-and-role-settings.md#13-điều-kiện-ra) |
 | Run by | the owner (hieu.nt10), on a real daemon |
 | Scoring rule | An item not measured yet is recorded as **Not measured**, never as Pass. An item that fails is recorded as **Fail** with the measurement |
 
@@ -97,7 +97,7 @@ Needs a fallback chain for the Reviewer and for the Manager (Beads Manager → S
 
 ## Environment delegated (REQ-067, replaces the Auto switch since ADR-022)
 
-The Auto switch was retired ([ADR-022](../adr/ADR-022-retirements-after-code-review.md) decision 4): a role's policy is **Ask me** or **Off**, and an incident is answered without the owner only where the owner delegates the **Environment** class for the project (Settings → Autonomy) or a precedent answers it. Item 18.1 still comes first: the patterns must classify at least one real incident correctly.
+The Auto switch was retired ([ADR-022](../../adr/ADR-022-retirements-after-code-review.md) decision 4): a role's policy is **Ask me** or **Off**, and an incident is answered without the owner only where the owner delegates the **Environment** class for the project (Settings → Autonomy) or a precedent answers it. Item 18.1 still comes first: the patterns must classify at least one real incident correctly.
 
 | # | Check | How | Expected result | Result |
 |---|---|---|---|---|

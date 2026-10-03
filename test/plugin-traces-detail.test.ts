@@ -365,6 +365,33 @@ describe("usage and sub-agents", () => {
     });
   });
 
+  describe("Codex's cached tokens, which its input already holds (run note 2026-09-30 §4)", () => {
+    const codexTurn = { inputTokens: 400_000, cachedInputTokens: 300_000, outputTokens: 3_000, costUsd: null, costBasis: "unavailable" as const, model: "gpt-5.6-sol", pricesUpdatedAt: null };
+
+    it("sums a Codex turn's input without its cached part, so nothing is counted twice", () => {
+      const { trace: built } = trace([record({ sent: [msg("x")], usage: codexTurn })], []);
+      expect(summariseUsage(built)).toMatchObject({ inputTokens: 100_000, cachedInputTokens: 300_000, outputTokens: 3_000 });
+    });
+
+    it("prices a Codex turn's cached part at the cache rate only", () => {
+      const listed = new Map([["gpt-5.6-sol", { price: { inputUsdPerMTok: 2, cacheReadUsdPerMTok: 0.2, outputUsdPerMTok: 10 }, updatedAt: "2026-10-02" }]]);
+      const { trace: built } = trace([record({ sent: [msg("x")], usage: codexTurn })], []);
+      // 100k fresh × $2 + 300k cached × $0.2 + 3k out × $10 = $0.2 + $0.06 + $0.03.
+      expect(usageOfTrace(built, (usage) => priceUsage(usage, listed)).usage.costUsd).toBe(0.29);
+    });
+
+    it("keeps a Claude turn's input as reported: Claude counts the cache apart", () => {
+      const claudeTurn = { ...codexTurn, model: "claude-opus-5" };
+      const { trace: built } = trace([record({ sent: [msg("x")], usage: claudeTurn })], []);
+      expect(summariseUsage(built)).toMatchObject({ inputTokens: 400_000, cachedInputTokens: 300_000 });
+    });
+
+    it("never goes below zero on a Codex turn that reports more cached than input", () => {
+      const { trace: built } = trace([record({ sent: [msg("x")], usage: { ...codexTurn, inputTokens: 10 } })], []);
+      expect(summariseUsage(built).inputTokens).toBe(0);
+    });
+  });
+
   describe("a total priced per model (delta 20260917-workflow-skills §5.4)", () => {
     const tokens = (model: string | null, inputTokens: number, cachedInputTokens: number, outputTokens: number) => ({
       inputTokens,
@@ -375,7 +402,8 @@ describe("usage and sub-agents", () => {
       model,
       pricesUpdatedAt: null,
     });
-    // Opus: 1M in ($5) + 2M cached ($1) + 0.1M out ($2.5) = $8.5; Codex model not in the table.
+    // Opus: 1M in ($5) + 2M cached ($1) + 0.1M out ($2.5) = $8.5; Codex model not in the table,
+    // and its 400k input already holds its 300k cached: 100k fresh + 300k cached + 3k out = 403k.
     const opus = tokens("claude-opus-5", 1_000_000, 2_000_000, 100_000);
     const codex = tokens("gpt-5.6-sol", 400_000, 300_000, 3_000);
     const mixed = (reviewerLast: boolean) => {
@@ -389,7 +417,7 @@ describe("usage and sub-agents", () => {
       const { trace: built } = mixed(reviewerLast);
       const { usage, notice } = usageOfTrace(built, priceUsage);
       expect(usage).toMatchObject({
-        inputTokens: 1_400_000,
+        inputTokens: 1_100_000,
         cachedInputTokens: 2_300_000,
         outputTokens: 103_000,
         costUsd: 8.5,
@@ -397,7 +425,7 @@ describe("usage and sub-agents", () => {
         model: null,
       });
       expect(usage.pricesUpdatedAt).not.toBeNull();
-      expect(notice).toBe("Cost excludes 703000 tokens from models without a price: gpt-5.6-sol.");
+      expect(notice).toBe("Cost excludes 403000 tokens from models without a price: gpt-5.6-sol.");
     });
 
     it("makes the total equal the sum of the per-agent costs the detail shows, and shows the notice", () => {
@@ -412,7 +440,7 @@ describe("usage and sub-agents", () => {
       const perAgent = shown.usageByAgent.reduce((sum, entry) => sum + (entry.usage.costUsd ?? 0), 0);
       expect(shown.usageByAgent.length).toBeGreaterThanOrEqual(2);
       expect(shown.usage.costUsd).toBe(perAgent);
-      expect(shown.notices).toContain("Cost excludes 703000 tokens from models without a price: gpt-5.6-sol.");
+      expect(shown.notices).toContain("Cost excludes 403000 tokens from models without a price: gpt-5.6-sol.");
     });
 
     it("treats a provider-qualified model id as the same model (review bm-wp-220-nvk.1)", () => {
@@ -458,7 +486,7 @@ describe("usage and sub-agents", () => {
       const { trace: built } = trace(records, []);
       const { usage, notice } = usageOfTrace(built, priceUsage);
       expect(usage).toMatchObject({ costUsd: null, costBasis: "unavailable", model: "gpt-5.6-sol" });
-      expect(notice).toBe("Cost excludes 703000 tokens from models without a price: gpt-5.6-sol.");
+      expect(notice).toBe("Cost excludes 403000 tokens from models without a price: gpt-5.6-sol.");
     });
   });
 

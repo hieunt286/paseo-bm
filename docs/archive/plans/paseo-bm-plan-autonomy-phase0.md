@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Status | Completed (2026-09-29) |
-| Plan-ready | PASS — 2026-09-29 — hieu.nt10 (design approved, E-1/E-2 answered, review suggestions accepted); amended by [change-001](../../plans/paseo-bm-plan-autonomy-change-001-suite-at-end.md) |
+| Plan-ready | PASS — 2026-09-29 — hieu.nt10 (design approved, E-1/E-2 answered, review suggestions accepted); amended by [change-001](paseo-bm-plan-autonomy-change-001-suite-at-end.md) |
 | Owner | hieu.nt10 |
 | Routing decision | [PRD §0](../../product/paseo-bm-autonomy-prd.md#0-routing-decision) — plan → converter, one phase at a time |
 | Requirements | [Calibrated autonomy PRD](../../product/paseo-bm-autonomy-prd.md) REQ-100 → REQ-103 (Phase 0 — Baseline), metrics A-1 → A-11 |

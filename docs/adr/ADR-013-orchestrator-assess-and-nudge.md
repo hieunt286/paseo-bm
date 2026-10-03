@@ -5,7 +5,7 @@
 | Status | **Superseded** by [ADR-014](ADR-014-orchestrator-agent-proposes-owner-approves.md) (2026-09-28) — was Accepted 2026-09-28; built and tested, rejected by the owner before any release |
 | Date | 2026-09-28 |
 | Owner | hieu.nt10 |
-| Related | [Orchestrator PRD](../product/paseo-bm-orchestrator-prd.md) (REQ-075, REQ-078, REQ-079) · [Orchestrator Design](../design/paseo-bm-orchestrator.md) · [ADR-005](ADR-005-manager-as-agent.md) (agents belong to the user) · [ADR-007](ADR-007-dashboard-trace-store.md) (trace store) · [ADR-010](ADR-010-plugin-hosted-agent-tools.md) (MCP tools with no side effects — unchanged) · [ADR-012](ADR-012-plugin-is-the-product.md) (the plugin creates roles) |
+| Related | [Orchestrator PRD](../archive/product/paseo-bm-orchestrator-prd.md) (REQ-075, REQ-078, REQ-079) · [Orchestrator Design](../design/paseo-bm-orchestrator.md) · [ADR-005](ADR-005-manager-as-agent.md) (agents belong to the user) · [ADR-007](ADR-007-dashboard-trace-store.md) (trace store) · [ADR-010](ADR-010-plugin-hosted-agent-tools.md) (MCP tools with no side effects — unchanged) · [ADR-012](ADR-012-plugin-is-the-product.md) (the plugin creates roles) |
 | Amends | REQ-047 of the [Dashboard PRD](../product/paseo-bm-dashboard-prd.md): the Dashboard stays read-only; the two actions below are the only exception and belong to the Orchestrator |
 | The owner's decisions | 2026-09-28: intervention yes, but behind a flag that is off by default, and only in the form of nudging running agents; observe only paseo-bm's agents; assessment by an LLM only on a click, with a new role `bm-orchestrator` |
 

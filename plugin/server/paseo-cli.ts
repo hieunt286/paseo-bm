@@ -94,6 +94,22 @@ export function setAgentLabel(agentId: string, key: string, value: string, deps:
   return runPaseo(["agent", "update", agentId, "--label", `${key}=${value}`, "--json"], deps);
 }
 
+/** Paseo's longest explicit agent title (`MAX_EXPLICIT_AGENT_TITLE_CHARS`, 0.9.2). */
+export const MAX_AGENT_TITLE_CHARS = 200;
+
+/**
+ * `paseo agent update <id> --name <title> --json`: Paseo sets the agent's
+ * title from `--name`. A title that would be read as a flag, is blank, holds a
+ * line break or is longer than Paseo allows is refused.
+ */
+export function setAgentTitle(agentId: string, title: string, deps: PaseoCliDeps = {}): Promise<CliResult> {
+  if (!isSafeAgentId(agentId)) return Promise.resolve({ ok: false, reason: `refusing an unexpected agent id "${agentId}"` });
+  if (title.trim() === "" || title.startsWith("-") || /[\r\n]/.test(title) || title.length > MAX_AGENT_TITLE_CHARS) {
+    return Promise.resolve({ ok: false, reason: "refusing an unexpected title" });
+  }
+  return runPaseo(["agent", "update", agentId, "--name", title, "--json"], deps);
+}
+
 /**
  * `paseo agent update <id> --label <k>=<v> [--label <k>=<v> …] --json`: one
  * command for several labels. Paseo adds or sets each label and removes none

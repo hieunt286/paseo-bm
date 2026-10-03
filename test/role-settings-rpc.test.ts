@@ -7,8 +7,12 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { forgetModelCosts } from "../plugin/server/model-costs";
 import { noticeQueue } from "../plugin/server/notice-queue";
 import { LOOKUP_TIMEOUT_MS, forgetModes } from "../plugin/server/role-mode";
+import { createPrecedentStore } from "../plugin/server/precedent-store";
+import { BASE_INSTRUCTIONS, OWNER_PRECEDENTS_HEADING, currentInstructions } from "../plugin/server/role-instructions";
+import { PRECEDENT_SCOPE_ALL } from "../plugin/shared/precedents";
 import {
   canonicalJson,
+  handleRolesInstructions,
   handleRolesOptions,
   handleRolesSaveSettings,
   handleRolesSettings,
@@ -602,8 +606,8 @@ describe("registration", () => {
       },
     } as unknown as PluginServerContext;
     registerRoleSettingsRpcs(server);
-    // roles.save-settings joined them with bead kj1p.3, roles.save-fallback with 332y.2.
-    expect([...handlers.keys()].sort()).toEqual(["roles.options", "roles.save-fallback", "roles.save-settings", "roles.settings"]);
+    // roles.save-settings joined them with bead kj1p.3, roles.save-fallback with 332y.2, roles.instructions on the owner's decision of 2026-10-02.
+    expect([...handlers.keys()].sort()).toEqual(["roles.instructions", "roles.options", "roles.save-fallback", "roles.save-settings", "roles.settings"]);
 
     const { paseo } = daemonWith();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -828,11 +832,12 @@ describe("roles.save-settings (delta 20260921 §4.3.3–§4.3.4, REQ-064 b/c/e/f
     ).rejects.toMatchObject({ code: "E_ROLE_SETTINGS_INVALID" });
   });
 
-  it("registers roles.save-settings next to the two read RPCs, then roles.save-fallback", () => {
+  it("registers roles.save-settings next to the three read RPCs, then roles.save-fallback", () => {
     const handle = vi.fn();
     registerRoleSettingsRpcs({ handle } as unknown as PluginServerContext);
     expect(handle.mock.calls.map((call) => (call[0] as { name: string }).name)).toEqual([
       "roles.settings",
+      "roles.instructions",
       "roles.options",
       "roles.save-settings",
       "roles.save-fallback",
@@ -852,5 +857,44 @@ describe("roles.settings providers (the Edit form's Provider picker)", () => {
       ],
     });
     expect((await handleRolesSettings(paseo, { log })).providers).toEqual(["claude", "pi"]);
+  });
+});
+
+describe("roles.instructions (design §7.12, base PRD REQ-032 d)", () => {
+  const modes = { providers: { listModes: async () => ({ modes: [{ id: "full-access", colorTier: "dangerous" }, { id: "auto", colorTier: "moderate" }] }) } };
+  let root: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "bm-roles-instructions-"));
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  it("shows each role exactly what the creation paths write (currentInstructions), with the global precedents only", async () => {
+    for (const role of ["manager", "worker", "reviewer", "orchestrator"] as const) {
+      const shown = await handleRolesInstructions({ role }, modes, { homedir: () => root });
+      expect(shown).toEqual({ role, text: await currentInstructions(role, modes, { homedir: () => root }), workspaceId: null });
+      expect(shown.text).toContain(BASE_INSTRUCTIONS[role].trimEnd());
+    }
+  });
+
+  it("adds a project's own precedents for that project, never another project's", async () => {
+    const store = createPrecedentStore(join(root, ".paseo-bm"));
+    const now = new Date();
+    store.save({ scope: PRECEDENT_SCOPE_ALL, subject: "everywhere", text: "Use pnpm.", sourceDecisionId: null, expiresInDays: 30 }, now);
+    store.save({ scope: "ws-1", subject: "here", text: "Ship on Fridays.", sourceDecisionId: null, expiresInDays: 30 }, now);
+    store.save({ scope: "ws-2", subject: "elsewhere", text: "Never ship.", sourceDecisionId: null, expiresInDays: 30 }, now);
+
+    const global = await handleRolesInstructions({ role: "manager" }, modes, { homedir: () => root });
+    expect(global.text).toContain(OWNER_PRECEDENTS_HEADING);
+    expect(global.text).toContain("`everywhere`");
+    expect(global.text).not.toContain("`here`");
+
+    const project = await handleRolesInstructions({ role: "manager", workspaceId: "ws-1" }, modes, { homedir: () => root });
+    expect(project.workspaceId).toBe("ws-1");
+    expect(project.text).toContain("`everywhere`");
+    expect(project.text).toContain("`here`");
+    expect(project.text).not.toContain("`elsewhere`");
+    // The Reviewer and the Orchestrator never get precedents.
+    expect((await handleRolesInstructions({ role: "reviewer", workspaceId: "ws-1" }, modes, { homedir: () => root })).text).not.toContain(OWNER_PRECEDENTS_HEADING);
   });
 });

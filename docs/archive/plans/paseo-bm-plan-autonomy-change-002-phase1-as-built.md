@@ -4,7 +4,7 @@
 |---|---|
 | Change ID | `autonomy-change-002` |
 | Short name | Phase 1 as built; the exit's install path; inheritance to Phases 2–6 |
-| Original plans | [Phase 1a](../archive/plans/paseo-bm-plan-autonomy-phase1a.md) (Completed by this delta), [Phase 1b](./paseo-bm-plan-autonomy-phase1b.md) (Active) |
+| Original plans | [Phase 1a](paseo-bm-plan-autonomy-phase1a.md) (Completed by this delta), [Phase 1b](../../plans/paseo-bm-plan-autonomy-phase1b.md) (Active) |
 | Status | Applied |
 | Owner | hieu.nt10 |
 | Created | 2026-09-29 |

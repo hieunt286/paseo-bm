@@ -5,7 +5,7 @@
 | Status | PASS |
 | Date | 2026-09-15 |
 | Người chạy | hieu.nt10 (thao tác trong terminal) · Claude (chuẩn bị, chấm, sửa lỗi) |
-| Checklist | [paseo-bm-phase1a-checklist.md](../../operations/paseo-bm-install-checklist.md) |
+| Checklist | [paseo-bm-phase1a-checklist.md](paseo-bm-install-checklist.md) |
 | Bead | `bm-wp-120-b2e.1.2` |
 | Máy | macOS, Paseo CLI/daemon 0.8.0, Node v26.8.2, npm 11.19.1 |
 | Bằng chứng | `~/bm-acceptance/20260915/phase1a/evidence-attempt1` … `evidence-attempt5`, `evidence` (lượt đo lại M-2) — ngoài repo |

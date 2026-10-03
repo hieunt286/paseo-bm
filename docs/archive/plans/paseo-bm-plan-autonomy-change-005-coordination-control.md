@@ -4,7 +4,7 @@
 |---|---|
 | Change ID | `autonomy-change-005` |
 | Short name | The Orchestrator as a measured coordination controller |
-| Original plans | [Phase 2](./paseo-bm-plan-autonomy-phase2.md), [Phase 3](./paseo-bm-plan-autonomy-phase3.md) (Active) |
+| Original plans | [Phase 2](../../plans/paseo-bm-plan-autonomy-phase2.md), [Phase 3](../../plans/paseo-bm-plan-autonomy-phase3.md) (Active) |
 | Status | Applied |
 | Owner | hieu.nt10 |
 | Created | 2026-09-30 |

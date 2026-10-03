@@ -3,7 +3,7 @@
 | Trường | Giá trị |
 |---|---|
 | Bead | `bm-wp-117-9vy.2` (WP-117) |
-| Checklist | [`paseo-bm-orchestration-checklist.md`](../../operations/paseo-bm-orchestration-checklist.md), runbook [`paseo-bm-orchestration-runbook.md`](paseo-bm-orchestration-runbook.md) |
+| Checklist | [`paseo-bm-orchestration-checklist.md`](paseo-bm-orchestration-checklist.md), runbook [`paseo-bm-orchestration-runbook.md`](paseo-bm-orchestration-runbook.md) |
 | Người chạy | Claude (Opus 5), chạy toàn bộ trên máy thật theo lựa chọn của owner; owner chấm lại |
 | Payload | `0.1.0-alpha.0` dựng từ commit `29ab373` (F-1), cài lại từ `3cf656d` (F-2 → F-5), `paseo plugin reload` → `Plugin ready`, `doctor` mã 0 |
 | Vai trò | Manager `claude/claude-opus-5`, Worker `claude/claude-opus-5`, Reviewer `codex/gpt-5.6-sol` |

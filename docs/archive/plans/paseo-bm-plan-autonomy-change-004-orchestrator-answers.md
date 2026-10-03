@@ -4,7 +4,7 @@
 |---|---|
 | Change ID | `autonomy-change-004` |
 | Short name | `bm_decide` in Phase 1; decision options that wrap |
-| Original plans | [Phase 1b](./paseo-bm-plan-autonomy-phase1b.md) (Active), [Phase 2](./paseo-bm-plan-autonomy-phase2.md) (Active) |
+| Original plans | [Phase 1b](../../plans/paseo-bm-plan-autonomy-phase1b.md) (Active), [Phase 2](../../plans/paseo-bm-plan-autonomy-phase2.md) (Active) |
 | Status | Applied |
 | Owner | hieu.nt10 |
 | Created | 2026-09-30 |

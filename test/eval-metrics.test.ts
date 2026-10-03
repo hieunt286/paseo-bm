@@ -2320,3 +2320,14 @@ describe("admission evidence per error class (autonomy design §F.2; bead i8fc.3
     expect(computeEvalMetrics(input)).toEqual(STORE_METRICS);
   });
 });
+
+describe("A-8 never counts Codex's cached tokens twice (run note 2026-09-30 §4)", () => {
+  it("adds a Codex turn as its input (which holds its cached) plus output", () => {
+    const m = metrics([
+      turn({ at: at(1), requestId: R, startedAt: at(0), usage: reported("claude-opus-5", 10, 20, 5) }),
+      turn({ agentId: REVIEWER, role: "reviewer", at: at(2), requestId: R, usage: reported("gpt-5.6-luna", 21_573, 21_248, 5) }),
+      finishedAt(at(3)),
+    ]);
+    expect(m.a8.tokens.byRole).toMatchObject({ manager: 35, reviewer: 21_578 });
+  });
+});

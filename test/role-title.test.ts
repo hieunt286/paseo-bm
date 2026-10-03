@@ -45,3 +45,57 @@ describe("withoutRoleMarker", () => {
     expect(withoutRoleMarker(undefined)).toBeUndefined();
   });
 });
+
+describe("createTitleMarker: a title Paseo set after the creation (a cleared conversation)", () => {
+  async function setup(title: string | null, cliCode = 0) {
+    const { createTitleMarker } = await import("../plugin/server/role-title");
+    const calls: string[][] = [];
+    const refreshes: string[] = [];
+    const logs: string[] = [];
+    const marker = createTitleMarker({
+      cli: { find: () => "/bin/paseo", run: async (_file, args) => (calls.push(args), { code: cliCode, output: "", timedOut: false }) },
+      log: (message) => logs.push(message),
+    });
+    const paseo = { agents: { ref: (id: string) => ({ refresh: async () => (refreshes.push(id), { agent: { title } }) }) } };
+    return { marker, paseo, calls, refreshes, logs };
+  }
+
+  it("puts the marker back on the name Paseo gave the agent, once", async () => {
+    const { marker, paseo, calls } = await setup("Project còn nhiều bead chưa xong");
+    expect(await marker.remark({ id: "a1", provider: "bm-manager", title: null }, paseo)).toBe("marked");
+    expect(calls).toEqual([["agent", "update", "a1", "--name", "🟣 M · Project còn nhiều bead chưa xong", "--json"]]);
+    expect(await marker.remark({ id: "a1", provider: "bm-manager", title: null }, paseo)).toBe("already-marked");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("swaps another role's marker for the agent's own", async () => {
+    const { marker, paseo, calls } = await setup("🟣 M · Fix login");
+    expect(await marker.remark({ id: "w1", provider: "bm-worker/gpt-5.6-sol", title: null }, paseo)).toBe("marked");
+    expect(calls[0]?.[4]).toBe("🔵 W · Fix login");
+  });
+
+  it("reads nothing for an agent whose event title is already marked, or another provider", async () => {
+    const { marker, paseo, calls, refreshes } = await setup("x");
+    expect(await marker.remark({ id: "a1", provider: "bm-worker", title: "🔵 W · Fix" }, paseo)).toBe("already-marked");
+    expect(await marker.remark({ id: "a2", provider: "claude", title: null }, paseo)).toBe("not-bm");
+    expect(refreshes).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
+  it("leaves an agent with no title yet, or already marked, without a command", async () => {
+    const empty = await setup(null);
+    expect(await empty.marker.remark({ id: "a1", provider: "bm-worker", title: null }, empty.paseo)).toBe("no-title");
+    expect(empty.calls).toEqual([]);
+    const marked = await setup("🔵 W · Fix");
+    expect(await marked.marker.remark({ id: "a1", provider: "bm-worker", title: null }, marked.paseo)).toBe("already-marked");
+    expect(marked.calls).toEqual([]);
+  });
+
+  it("logs a failed command and tries again at the next turn", async () => {
+    const { marker, paseo, calls, logs } = await setup("Fix", 1);
+    expect(await marker.remark({ id: "a1", provider: "bm-worker", title: null }, paseo)).toBe("failed");
+    expect(logs[0]).toContain("could not mark the title of a1");
+    expect(await marker.remark({ id: "a1", provider: "bm-worker", title: null }, paseo)).toBe("failed");
+    expect(calls).toHaveLength(2);
+  });
+});

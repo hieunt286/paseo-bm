@@ -33,9 +33,8 @@ export const REVIEWER_ROLE_VALUE = "reviewer";
 
 /**
  * Wait before the single re-check of a Worker that still reads `running` right
- * after its turn was canceled. Mirrors the plugin poll interval of Technical Design §4.7
- * (`PLUGIN_POLL_INTERVAL_MS` in the CLI, which the plugin bundle cannot import);
- * it is not a new product timeout.
+ * after its turn was canceled: the half-second poll interval the retired
+ * installer CLI used; it is not a new product timeout.
  */
 export const STOP_RECHECK_MS = 500;
 

@@ -5,7 +5,7 @@
 | Bead | `bm-wp-214-jvg.2` (WP-214) |
 | Phạm vi | Chỉ số **D-1 → D-11** của [PRD Dashboard §2](../../product/paseo-bm-dashboard-prd.md) |
 | Phiên bản kiểm | payload `0.2.0-alpha.0` (chưa phát hành) |
-| Mẫu | Theo [checklist nghiệm thu điều phối](../../operations/paseo-bm-orchestration-checklist.md) của WP-117 |
+| Mẫu | Theo [checklist nghiệm thu điều phối](paseo-bm-orchestration-checklist.md) của WP-117 |
 | Nguyên tắc ghi điểm | Chỉ số nào không đạt thì ghi **Không** kèm số đo. **Không bao giờ ghi PASS cho một chỉ số chưa đo.** |
 
 ## 1. Vì sao phải chạy thật

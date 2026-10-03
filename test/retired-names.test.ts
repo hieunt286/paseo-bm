@@ -211,9 +211,10 @@ describe("the workflow assessment, its suggestions and its rule flags (autonomy 
 });
 
 describe("the additional instructions and role-extras.json (autonomy design §B.8)", () => {
-  it("are no RPC and no error code", () => {
+  it("are no RPC and no error code; the read-only roles.instructions is back (base PRD REQ-032 d)", () => {
     const names = registeredRpcNames();
-    for (const retired of ["roles.instructions", "roles.save-extra"]) expect(names).not.toContain(retired);
+    expect(names).not.toContain("roles.save-extra");
+    expect(names).toContain("roles.instructions");
     for (const code of ["E_ROLE_EXTRA_CHANGED", "E_ROLE_EXTRA_INVALID"]) expect(DASHBOARD_ERROR_CODES).not.toContain(code);
   });
 

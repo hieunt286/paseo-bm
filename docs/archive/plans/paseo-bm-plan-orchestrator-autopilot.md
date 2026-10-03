@@ -6,7 +6,7 @@
 | Plan-ready | PASS — 2026-09-29 — hieu.nt10 (owner decided Autopilot per project, reaction on questions/finished steps and the limits, and asked to optimise flow and UI) |
 | Owner | hieu.nt10 |
 | Decision | [ADR-015](../../adr/ADR-015-orchestrator-autopilot-per-project.md) |
-| Requirements | [Orchestrator PRD](../../product/paseo-bm-orchestrator-prd.md) REQ-071, REQ-073, REQ-076, REQ-079, REQ-082 (2026-09-29) |
+| Requirements | [Orchestrator PRD](../product/paseo-bm-orchestrator-prd.md) REQ-071, REQ-073, REQ-076, REQ-079, REQ-082 (2026-09-29) |
 | Technical Design | [paseo-bm-orchestrator.md](../../design/paseo-bm-orchestrator.md) §6, §6A, §8, §9, §10 |
 | Target release | None — the owner tests on the real daemon, then decides |
 

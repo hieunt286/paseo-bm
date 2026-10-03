@@ -4,7 +4,7 @@
 |---|---|
 | Status | Active — acceptance of the only install path of 0.4.0: npm plugin, set-up in Settings, migration, removal |
 | Applies to | `paseo-bm-plugin` and `paseo-bm` `0.4.0`; Paseo CLI/daemon **0.9.2** (0.9.2 no longer has `cliVersion` in `daemon status --json`; the adapter falls back to `paseo --version` on its own) |
-| Related | [PRD](../product/paseo-bm-prd.md) · [Design §7.13, §11, §13](../design/paseo-bm.md) · [Design §4.3–§4.6](../design/paseo-bm.md) · [ADR-012](../adr/ADR-012-plugin-is-the-product.md) · [Plan 0.4.0](../archive/plans/paseo-bm-plan-040-single-source.md) |
+| Related | [PRD](../../product/paseo-bm-prd.md) · [Design §7.13, §11, §13](../../design/paseo-bm.md) · [Design §4.3–§4.6](../../design/paseo-bm.md) · [ADR-012](../../adr/ADR-012-plugin-is-the-product.md) · [Plan 0.4.0](../plans/paseo-bm-plan-040-single-source.md) |
 | Origin | Rewritten from the 0.3.x installer checklist (`bm-wp-407-prerelease-8t7x.2`); the old installer no longer exists in 0.4.0 |
 
 This document describes **how to run and how to score**; it contains no measurements. Each run copies section 10 into its own run record at `docs/archive/operations/paseo-bm-install-run-<YYYYMMDD>.md`. Thresholds are taken verbatim from the PRD and the design; the checklist sets no new threshold. Run it when a release changes the install path, changes Settings' set-up blocks, changes the migration command, or when moving to a new Paseo version.

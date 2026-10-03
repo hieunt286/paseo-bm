@@ -1,6 +1,6 @@
 /**
  * The trace of the request that just had a turn, rebuilt once per finished turn
- * (Orchestrator design §4.1, §6.2), and the `RuleInput` the rules read from it.
+ * (Orchestrator design §4.1, §6), and the `RuleInput` the rules read from it.
  *
  * `review-budget.ts` rebuilt this on its own; the rules need the same trace,
  * so the rebuild lives here and every check shares it.
