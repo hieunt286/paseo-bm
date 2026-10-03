@@ -60,6 +60,7 @@ An ADR is never rewritten; a later ADR supersedes or amends it.
 | [024](adr/ADR-024-structure-tells-stops-and-waits.md) | A cut turn is told from the owner's stop by structure (`BM-INTERRUPTED`) | Accepted |
 | [025](adr/ADR-025-autonomy-levels.md) | Five autonomy levels per project; no owner-only class; overrides recorded | Accepted |
 | [026](adr/ADR-026-published-plugin-is-bundled.md) | The published plugin is `plugin-package/`, each entry bundled | Accepted |
+| [027](adr/ADR-027-agents-write-content-code-carries-it.md) | Agents write the content; the plugin's code creates, routes and delivers | Accepted |
 
 ## Work in progress — `plans/`
 
@@ -68,6 +69,7 @@ A plan exists only for a piece of Designed work and moves to the archive when it
 | Plan | State |
 |---|---|
 | Autonomy programme: [phase1b](plans/paseo-bm-plan-autonomy-phase1b.md), [phase2](plans/paseo-bm-plan-autonomy-phase2.md), [phase3](plans/paseo-bm-plan-autonomy-phase3.md), [phase4](plans/paseo-bm-plan-autonomy-phase4.md), [phase5](plans/paseo-bm-plan-autonomy-phase5.md), [phase6](plans/paseo-bm-plan-autonomy-phase6.md) | Every phase is built and shipped in 0.5.0. What is open is each phase's exit, judged together in the combined field period (bead `bm-autonomy-phase6-i8fc.6`), then the programme evaluation. The change-deltas 001–014 are applied and [archived](archive/README.md#the-autonomy-programmes-change-deltas) |
+| [Agent tools that create and deliver](plans/paseo-bm-plan-agent-tools-delivery.md) (ADR-027) | Active, plan-ready PASS: fourteen work packages in ADR-027's five steps, spikes first; installing on the owner's daemon waits for the field period |
 
 ## Running it — `operations/`
 
