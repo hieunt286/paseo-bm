@@ -24,7 +24,7 @@
  * reused, even when Paseo then refuses the Worker. Nothing here throws into
  * the endpoint.
  */
-import { createBound, guardActingTool, hasCreationTools, type AgentBinder, type ToolCaller } from "./agent-bindings";
+import { createBound, guardActingTool, hasCreationTools, withoutTokenPaths, type AgentBinder, type ToolCaller } from "./agent-bindings";
 import { aliasBases } from "./alias-bases";
 import { resolveDataHome } from "./data-home";
 import type { ServerToolAnswer, ServerTools } from "./decision-tools";
@@ -274,9 +274,11 @@ export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerT
         { binder: deps.binder?.() ?? null, log },
       ));
     } catch (error) {
-      // Paseo's refusal, verbatim. The registry keeps the request with no Worker, so its id is never reused.
-      log(`[paseo-bm] ${CREATE_WORKER_TOOL} could not create the Worker of request ${requestId} for Manager ${managerId}: ${reasonOf(error)}`);
-      return refused(`Paseo refused to create the Worker: ${reasonOf(error)}`);
+      // Paseo's refusal, verbatim but for a token path (design §16.5: a token never reaches an agent or a log).
+      // The registry keeps the request with no Worker, so its id is never reused.
+      const reason = withoutTokenPaths(reasonOf(error));
+      log(`[paseo-bm] ${CREATE_WORKER_TOOL} could not create the Worker of request ${requestId} for Manager ${managerId}: ${reason}`);
+      return refused(`Paseo refused to create the Worker: ${reason}`);
     }
 
     try {

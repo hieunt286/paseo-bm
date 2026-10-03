@@ -102,3 +102,4 @@ Each was applied to the phase plans, the designs and the beads; the plans in `do
 | [plan-orchestrator-coordination](plans/paseo-bm-plan-orchestrator-coordination.md) (ADR-016) | 2026-09-29 | [orchestrator-coordination-run-20260929](operations/paseo-bm-orchestrator-coordination-run-20260929.md) |
 | [plan-autonomy-phase0](plans/paseo-bm-plan-autonomy-phase0.md) | 2026-09-29 | the [evaluation baseline](../operations/paseo-bm-eval-baseline.md) |
 | [plan-autonomy-phase1a](plans/paseo-bm-plan-autonomy-phase1a.md) | 2026-09-29 | — |
+| [plan-agent-tools-delivery](plans/paseo-bm-plan-agent-tools-delivery.md) (ADR-027) | 2026-10-03 | [agent-tools-acceptance-20261003](operations/paseo-bm-agent-tools-acceptance-20261003.md) |

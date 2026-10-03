@@ -56,6 +56,19 @@
  * step 5. An unbound Manager keeps steps 4–5 as above: it would otherwise act
  * on the brief and create a second successor.
  *
+ * **Exactly one successor.** Before it creates, the plugin moves the entry
+ * from `briefed` to `creating` in one compare-and-set (`claimCreation`): a
+ * second turn end that reaches the same entry finds it claimed and creates
+ * nothing, and no turn end advances a `creating` entry. A creation that
+ * Paseo refused before the hook kept the token ends the handoff `refused`;
+ * one that threw after (`creationMayExist`) stays `creating`. A `creating`
+ * entry this run is not creating — a reload cut its creation, or Paseo threw
+ * after creating — is settled from Paseo: a live Worker labelled
+ * `bm.handoffFrom` = the outgoing Worker whose parent is the Manager
+ * completes it (at its `agent.created`, or at the next recorded turn from
+ * the agent list), with the registry entry and the Manager's information;
+ * with none within `CREATING_WAIT_MS` it ends `dropped`, `no-successor`.
+ *
  * The owner's Settings switch stops it at once: every step reads
  * `handoff.enabled` first and drops the handoff when it is off.
  *
@@ -75,8 +88,8 @@ import {
 import { andChainOf, brActions, shellSucceeded } from "../shared/shell";
 import { shorten } from "../shared/text";
 import { timeOrNull } from "../shared/time";
-import { createBindingStore, isCreationBound, type AgentBinder } from "./agent-bindings";
-import { roleOfProvider } from "./agent-role";
+import { createBindingStore, creationMayExist, isCreationBound, type AgentBinder } from "./agent-bindings";
+import { listAllAgents, roleOfProvider } from "./agent-role";
 import { redactText, sliceLastTurn } from "./collector";
 import { COMMAND_LIMIT_MESSAGE, HANDOFF_OFF_MESSAGE, commandRefusalOf, sendCommand } from "./command-send";
 import { createPluginWorker, workerProfileOf, type WorkerCreationPaseo } from "./create-worker";
@@ -708,18 +721,108 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
     return done;
   }
 
-  /** Outgoing Workers whose successor the plugin is creating now: their `agent.created` completes nothing. */
+  /** Outgoing Workers whose successor the plugin is creating now, in this run: their `agent.created` completes nothing. */
   const creating = new Set<string>();
 
+  /** The checks of the Manager's informational command: the send's own, as `sendCommand` runs them. */
+  const checksOf = (home: string, entry: HandoffEntry) => ({
+    home,
+    now: now(),
+    workspaceId: entry.workspaceId,
+    backstop: false,
+    loopGuard: "refuse" as const,
+    log,
+    ...(deps.store === undefined ? {} : { store: deps.store }),
+  });
+
   /**
-   * A bound Manager's handoff (design §16.9): the send's checks first, so a
-   * refusal creates nothing; then the successor, its registry entry, the
-   * Manager's informational command and the outgoing Worker's notice.
+   * The successor the plugin created for a bound Manager exists: its registry
+   * entry (design §16.4: the request keeps its id and its Manager), the
+   * Manager's informational command through the one pipeline (counted by the
+   * loop guard), and the outgoing Worker labelled and told (`complete`).
    */
-  async function succeed(home: string, entry: HandoffEntry, paseo: unknown): Promise<void> {
+  async function finishCreated(home: string, entry: HandoffEntry, successorId: string, paseo: unknown): Promise<HandoffEntry | null> {
+    try {
+      createRequestRegistry(home, { log }).register(entry.workspaceId, entry.requestId, { source: "agent-typed", managerId: entry.managerId, workerId: successorId });
+    } catch (error) {
+      log(`[paseo-bm] could not add Worker ${successorId} to request ${entry.requestId}: ${errorText(error)}`);
+    }
+    const result = await sendCommand({
+      ...checksOf(home, entry),
+      paseo: paseo as NoticePaseo,
+      command: handoffInfoCommandOf(entry, successorId),
+      targetId: entry.managerId,
+      copyTo: null,
+      grantOf: null,
+      approved: [],
+      loopGuard: "count",
+      intervention: null,
+      queue,
+      ...(deps.redactEnv === undefined ? {} : { redactEnv: deps.redactEnv }),
+    });
+    if (!result.ok) log(`[paseo-bm] Manager ${entry.managerId} was not told that Worker ${successorId} took over request ${entry.requestId}: ${result.reason}`);
+    else if (result.unrecorded !== null) log(`[paseo-bm] the handoff command of ${entry.id} went out but was not recorded: ${result.unrecorded}`);
+    return complete(storeOf(home), entry, successorId, paseo, result.ok ? { commandId: result.id, commandSentAt: now().toISOString() } : {});
+  }
+
+  /**
+   * A `creating` entry this run is not creating (a reload cut its creation,
+   * or Paseo threw after creating): the live Worker labelled `bm.handoffFrom`
+   * = its outgoing Worker, created by its Manager in its workspace, completes
+   * it. Null when Paseo lists none (or cannot be read). Never throws.
+   */
+  async function reconcileCreating(home: string, entry: HandoffEntry, paseo: unknown): Promise<HandoffEntry | null> {
+    try {
+      const list = (paseo as { agents?: { list?: unknown } } | null)?.agents?.list;
+      if (typeof list !== "function") return null;
+      const agents = await listAllAgents(
+        (options: { filter: { labels: Record<string, string>; includeArchived: boolean }; page: { limit: number; cursor?: string } }) =>
+          (list as (options: unknown) => Promise<{ entries: Array<{ agent: unknown }>; pageInfo?: { nextCursor: string | null; hasMore: boolean } }>).call(
+            (paseo as { agents: unknown }).agents,
+            options,
+          ),
+        { labels: { [HANDOFF_FROM_LABEL]: entry.workerId }, includeArchived: false },
+      );
+      const taken = new Set(storeOf(home).list().map((candidate) => candidate.successorId));
+      const found = agents
+        .map((agent) => asRecord(agent))
+        .find((agent) => {
+          if (agent === null) return false;
+          const labels = asRecord(agent["labels"]) ?? {};
+          const id = nonEmpty(agent["id"]);
+          return (
+            id !== null &&
+            !taken.has(id) &&
+            roleOfProvider(agent["provider"]) === "worker" &&
+            nonEmpty(agent["archivedAt"]) === null &&
+            nonEmpty(labels[HANDOFF_FROM_LABEL]) === entry.workerId &&
+            (nonEmpty(agent["parentAgentId"]) ?? nonEmpty(labels["paseo.parent-agent-id"])) === entry.managerId &&
+            (nonEmpty(agent["workspaceId"]) ?? entry.workspaceId) === entry.workspaceId
+          );
+        });
+      const successorId = nonEmpty(found?.["id"]);
+      if (successorId === null) return null;
+      log(`[paseo-bm] handoff ${entry.id}: Worker ${successorId} is the successor the plugin was creating; it completes the handoff.`);
+      return await finishCreated(home, entry, successorId, paseo);
+    } catch (error) {
+      log(`[paseo-bm] could not look for the successor of handoff ${entry.id}: ${errorText(error)}`);
+      return null;
+    }
+  }
+
+  /**
+   * A bound Manager's handoff (design §16.9): claimed first (`briefed` →
+   * `creating`, compare-and-set: only one caller creates), then the send's
+   * checks, so a refusal creates nothing; then the successor, its registry
+   * entry, the Manager's informational command and the outgoing Worker's notice.
+   */
+  async function succeed(home: string, briefed: HandoffEntry, paseo: unknown): Promise<void> {
     const store = storeOf(home);
-    if (entry.brief === null) return;
-    const check = { home, now: now(), workspaceId: entry.workspaceId, backstop: false, loopGuard: "refuse" as const, log, ...(deps.store === undefined ? {} : { store: deps.store }) };
+    if (briefed.brief === null) return;
+    // Exactly one successor: a second turn end, or one after a reload, finds the entry claimed.
+    const entry = store.claimCreation(briefed.id);
+    if (entry === null || entry.brief === null) return;
+    const check = checksOf(home, entry);
     const refusal = commandRefusalOf({ ...check, command: handoffInfoCommandOf(entry, entry.workerId) });
     if (refusal !== null) {
       log(`[paseo-bm] the handoff ${entry.id} created no successor: ${refusal}`);
@@ -753,31 +856,16 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
           { binder: deps.binder?.() ?? null, log },
         ));
       } catch (error) {
+        // Paseo threw after the hook kept the token: it may have created the successor. The entry stays
+        // `creating`; its agent.created, or the agent list at a later turn end, settles it.
+        if (creationMayExist(error)) {
+          log(`[paseo-bm] the handoff ${entry.id}: Paseo answered the successor's creation with an error after it may have created it (${errorText(error)}); waiting for it to appear.`);
+          return;
+        }
         return refuse(`Paseo refused to create it: ${errorText(error)}`);
       }
-      // Design §16.4: the request keeps its id and its Manager; the successor is its newest Worker.
-      try {
-        createRequestRegistry(home, { log }).register(entry.workspaceId, entry.requestId, { source: "agent-typed", managerId: entry.managerId, workerId: successorId });
-      } catch (error) {
-        log(`[paseo-bm] could not add Worker ${successorId} to request ${entry.requestId}: ${errorText(error)}`);
-      }
-      // The Manager is informed through the one pipeline; checked above, so it counts and is not refused now.
-      const result = await sendCommand({
-        ...check,
-        paseo: paseo as NoticePaseo,
-        command: handoffInfoCommandOf(entry, successorId),
-        targetId: entry.managerId,
-        copyTo: null,
-        grantOf: null,
-        approved: [],
-        loopGuard: "count",
-        intervention: null,
-        queue,
-        ...(deps.redactEnv === undefined ? {} : { redactEnv: deps.redactEnv }),
-      });
-      if (!result.ok) log(`[paseo-bm] Manager ${entry.managerId} was not told that Worker ${successorId} took over request ${entry.requestId}: ${result.reason}`);
-      else if (result.unrecorded !== null) log(`[paseo-bm] the handoff command of ${entry.id} went out but was not recorded: ${result.unrecorded}`);
-      await complete(store, entry, successorId, paseo, result.ok ? { commandId: result.id, commandSentAt: now().toISOString() } : {});
+      // Checked above, so the Manager's information counts and is not refused now.
+      await finishCreated(home, entry, successorId, paseo);
     } finally {
       creating.delete(entry.workerId);
     }
@@ -801,8 +889,13 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
         const home = homeOf();
         if (home === null) return;
         const store = storeOf(home);
+        // A `creating` entry this run is not creating is settled from Paseo before any bound ends it.
+        for (const entry of store.list()) {
+          if (entry.state === "creating" && !creating.has(entry.workerId)) await reconcileCreating(home, entry, paseo);
+        }
         store.expire();
-        const pending = store.list().filter((entry) => isPendingHandoffState(entry.state) && entry.state !== "commanded");
+        // `commanded` waits for the Manager's successor, `creating` for the plugin's own: neither is advanced here.
+        const pending = store.list().filter((entry) => isPendingHandoffState(entry.state) && entry.state !== "commanded" && entry.state !== "creating");
         if (pending.length === 0) return;
         const enabled = readCoordinationSettings({ home, log }).handoff.enabled;
         const timeline = (event as { timeline?: unknown } | null | undefined)?.timeline;
@@ -864,7 +957,8 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
             (candidate) =>
               candidate.workerId === from &&
               candidate.successorId === null &&
-              (candidate.state === "commanded" || (candidate.state === "failed" && candidate.ending === "no-successor")) &&
+              // `creating`: the plugin's own creation, which a reload (or Paseo's late error) left unsettled.
+              (candidate.state === "commanded" || candidate.state === "creating" || (candidate.state === "failed" && candidate.ending === "no-successor")) &&
               candidate.workspaceId === workspaceId &&
               candidate.managerId === parent &&
               (requestLabel === null || requestLabel === candidate.requestId),
@@ -874,6 +968,7 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
           log(`[paseo-bm] Worker ${agent.id} carries ${HANDOFF_FROM_LABEL}=${from}, but no handoff of that Worker by its Manager waits for it.`);
           return null;
         }
+        if (entry.state === "creating") return await finishCreated(home, entry, agent.id, paseo);
         return await complete(store, entry, agent.id, paseo);
       } catch (error) {
         log(`[paseo-bm] linking the successor Worker ${agent.id} failed: ${errorText(error)}`);

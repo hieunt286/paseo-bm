@@ -68,6 +68,8 @@ interface DaemonOptions {
   toolsOff?: boolean;
   profile?: boolean;
   refuse?: string;
+  /** Paseo refuses, echoing the MCP server URL of the creation config (its token path included). */
+  refuseEchoingUrl?: boolean;
   /** The `agent.create` hook's part: keeps the token URL (`applyAgentTools`), as the real hook does. */
   store?: BindingStore;
 }
@@ -93,6 +95,10 @@ function daemon(options: DaemonOptions = {}) {
     },
     created: (request: FakeCreateRequest) => {
       if (options.refuse !== undefined) throw new Error(options.refuse);
+      if (options.refuseEchoingUrl === true) {
+        const servers = request.config["mcpServers"] as Record<string, { url: string }> | undefined;
+        throw new Error(`MCP server ${AGENT_TOOLS_SERVER} (${servers?.[AGENT_TOOLS_SERVER]?.url ?? "none"}) failed to start`);
+      }
       if (options.store !== undefined) {
         applyAgentTools({ config: { ...request.config, cwd: request.cwd } } as unknown as AgentCreateRequest, { urlFor: ROLE_URL, bindings: options.store }, base);
       }
@@ -318,6 +324,22 @@ describe("bm_create_worker refuses, creating nothing (design §16.6)", () => {
     const ids = createRequestRegistry(home).list(WS).map((entry) => entry.requestId);
     expect(ids).toHaveLength(2);
     expect(new Set(ids).size).toBe(2);
+  });
+});
+
+describe("a token never reaches the agent (design §16.5)", () => {
+  it("Paseo's refusal that echoes the token path reaches the Manager and the log with the path cut", async () => {
+    const home = dataFolder();
+    const store = createBindingStore(home);
+    const logs: string[] = [];
+    const fake = daemon({ store, refuseEchoingUrl: true });
+    const answer = await toolsOf(home, fake, store, logs).call("bm_create_worker", INPUT, BOUND_MANAGER);
+    const token = ((fake.creates[0]!.options.config["mcpServers"] as Record<string, { url: string }>)[AGENT_TOOLS_SERVER]!.url).slice(-64);
+    expect(token).toMatch(/^[0-9a-f]{64}$/);
+    expect(answer).toEqual({ ok: false, text: `Paseo refused to create the Worker: MCP server ${AGENT_TOOLS_SERVER} (http://127.0.0.1:4567/mcp/worker/…) failed to start` });
+    expect(logs.join("\n")).toContain("/mcp/worker/…");
+    expect(logs.join("\n")).not.toContain(token);
+    expect(store.list()).toEqual([]);
   });
 });
 

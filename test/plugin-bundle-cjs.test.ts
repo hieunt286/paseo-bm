@@ -297,7 +297,9 @@ describe.each([
     expect(onHooks.get("agent.permission_requested")).toHaveLength(1);
     expect(onHooks.get("agent.permission_resolved")).toHaveLength(2);
     expect(onHooks.get("agent.turn_ended")).toHaveLength(4);
-    expect(onHooks.get("agent.turn_started")).toHaveLength(3);
+    // The collector, the label scan and the outdated-agents pass, plus the off-tool Reviewer's
+    // turn cancel (design §16.8 step 4).
+    expect(onHooks.get("agent.turn_started")).toHaveLength(4);
     // Design §16.5: an archived agent's tool binding is revoked, beside the outdated-agents clear;
     // design §16.8: an archived off-tool Reviewer's Inbox alert is cleared. The §16.10 no-verdict
     // check runs inside the fallback detection's turn_ended handler, so turn_ended stays at four.

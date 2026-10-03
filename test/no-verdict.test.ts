@@ -175,6 +175,59 @@ describe("a missing verdict (design §16.10)", () => {
   });
 });
 
+describe("a plugin-created Reviewer that ended up unbound (design §16.10)", () => {
+  const PI_REVIEWER = "agent-pi-reviewer";
+  const CALL_3 = "out-000000000b01";
+
+  /** The batch b2 a bound Worker opened with bm_create_reviewer; its Reviewer is on Pi, so it has no token. */
+  function unboundSetup() {
+    const base = setup();
+    base.registry.addReviewCall(WS, REQ, "b2", { callId: CALL_3, kind: "create", reviewerId: "", at: iso(1) }, "Review batch b2.");
+    base.registry.noteReviewer(WS, REQ, "b2", PI_REVIEWER, CALL_3);
+    return base;
+  }
+
+  const piTurn = (reply: string, prompt = `${reviewerBriefLineOf(REQ, "b2", CALL_3)}\nReview batch b2.`) => ({
+    agent: { id: PI_REVIEWER, provider: "bm-reviewer-fallback-1/pi-model", workspaceId: WS, parentAgentId: WORKER, cwd: "/repo", title: null },
+    turnId: "t",
+    outcome: { kind: "completed" },
+    timeline: [
+      { type: "user_message", text: prompt },
+      { type: "assistant_message", text: "I read the diff.\n\nBM-REVIEW\nrequestId: " },
+      { type: "assistant_message", text: `${REQ}\nbatchId: b2\nverdict: changes-requested\n- severity: blocking — the date parser drops the time zone` },
+    ],
+  });
+
+  it("its final BM-REVIEW is stored and delivered to its Worker as a review record, once per review call", async () => {
+    const { home, fake, check } = unboundSetup();
+    expect(await check(piTurn(""))).toBe("review-delivered");
+    const reviews = createOutbox(home).list(WS).filter((record) => record.kind === "review");
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]).toMatchObject({ kind: "review", requestId: REQ, batchId: "b2", from: PI_REVIEWER, to: WORKER, state: "delivered" });
+    expect(reviews[0]!.text).toBe(`BM-REVIEW\nrequestId: ${REQ}\nbatchId: b2\nverdict: changes-requested\n- severity: blocking — the date parser drops the time zone`);
+    expect(fake.sends).toEqual([{ id: WORKER, text: `BM-DELIVERY review ${reviews[0]!.id}\n${reviews[0]!.text}` }]);
+    expect(noVerdicts(home)).toEqual([]);
+    // The same call ending again: its verdict is there, nothing more is sent.
+    expect(await check(piTurn(""))).toBe("verdict");
+    expect(fake.sends).toHaveLength(1);
+  });
+
+  it("a turn without a BM-REVIEW gets the no-verdict record, as a bound Reviewer's does", async () => {
+    const { home, fake, check } = unboundSetup();
+    const turnWithout = { ...piTurn(""), timeline: [{ type: "user_message", text: `${reviewerBriefLineOf(REQ, "b2", CALL_3)}\nReview batch b2.` }, { type: "assistant_message", text: "I could not finish." }] };
+    expect(await check(turnWithout)).toBe("sent");
+    expect(noVerdicts(home)).toMatchObject([{ requestId: REQ, batchId: "b2", from: PI_REVIEWER, to: WORKER }]);
+    expect(fake.sends.map((sent) => parseDelivery(sent.text)?.kind)).toEqual(["no-verdict"]);
+    expect(await check(turnWithout)).toBe("already-sent");
+  });
+
+  it("a Reviewer no batch names (a hand-made one) is still left to Paseo's own wake", async () => {
+    const { check, fake } = unboundSetup();
+    expect(await check({ ...piTurn(""), agent: { ...piTurn("").agent, id: "agent-other-reviewer" } })).toBe("not-bound-reviewer");
+    expect(fake.sends).toEqual([]);
+  });
+});
+
 describe("wake-ups (design §16.10)", () => {
   it("a plugin-created Worker's turn end without a report sends its Manager nothing", async () => {
     const { home, fake, check } = setup();

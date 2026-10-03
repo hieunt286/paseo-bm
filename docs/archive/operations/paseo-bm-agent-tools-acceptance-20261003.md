@@ -89,3 +89,70 @@ The Pi agent itself stayed `running` with no output for 9 minutes; `paseo agent 
 ## 7. Clean-up
 
 The daemon's status was read first (`pid 559`, `127.0.0.1:6917`, the test home), then `stop-daemon.sh` stopped it; afterwards nothing listened on 6917 and no process referenced the test home, and the work folder (Paseo home, data folder, both repos) was deleted. The owner's daemon on 6767 kept running, untouched. Scratch helpers lived only in the session scratchpad. Claude Code wrote its own transcripts of the test turns under the real `~/.claude/projects/`, as every run of this kit does; one test agent's `SendMessage` also reached another local Claude Code session (F2).
+
+## 8. Re-run after fixes (commit `1334bad`)
+
+| Field | Value |
+|---|---|
+| Daemon | isolated, `start-daemon.sh` on port **6918**, home and data folder under the session scratchpad (`accept17b/`); `injectIntoAgents` on in that test config only. The owner's `~/.paseo`, `~/.paseo-bm` and port 6767 were untouched |
+| Plugin | the branch's `plugin/` at `1334bad` (build current), `paseo plugin add <repo>/plugin` → `status: running`, the only plugin |
+| Roles | `setup.ensure-roles` (four roles), all four set to `claude/claude-haiku-4-5` with `roles.save-settings` |
+| Target repos | `demo` (bound) and `hand` (unbound), made by `new-workspace.sh`, each with `br init` committed. No remote |
+| Owner actions | requests with `send.mjs`; questions answered with `decisions.answer { via: "inbox" }`; nine Reviewer `Bash` requests allowed once by hand (five `npm test`/`node --test`, two `npm test` piped to `head`/`tail`, one `br show`, one `git diff`); nothing auto-allowed. No request text named a tool. One owner nudge named the server (below) |
+| Window | 13:19–13:38 UTC |
+
+### 8.1 Results
+
+| # | Check | Result |
+|---|---|---|
+| R1 | Unbound hand path: the Worker's report reaches its Paseo parent (F2) | **Pass** — new finding H1 on the hand Manager's brief |
+| R2 | Bound Medium request with an owner-asked review (F3, F5, F6) | **Pass** — `finished` only after the last verdict; a probe `finished` during a review refused; brief verbatim; no commit. Role findings H2, H3 |
+| R3 | Review-budget grant (F1) | **Pass** — a question without a grant refused; a `{ calls: 2 }` yes let exactly two calls through, the next refused. Observation H4 |
+| R4 | Manager's `AskUserQuestion` (F4) | **Pass** — 0 calls by either Manager (0 by all nine agents) |
+
+### 8.2 R1 — unbound hand path
+
+`create-agent.mjs bm-manager claude-haiku-4-5 - bypassPermissions` in `hand` with the request "Add a farewell(name) function in farewell.js that returns "Bye, <name>!", with a node:test unit test. It is Small. Have a Reviewer check it." Records as in S2: `/mcp/<role>` without a token, builders only, `### Without paseo-bm's tools` in the Manager's (100 lines), Worker's (216) and Reviewers' (118) prompts; no binding.
+
+| Step | Observed |
+|---|---|
+| Manager → Worker | `list_profiles`, `create_agent` `bm-worker/claude-haiku-4-5`, labels `bm.role`, `bm.requestId` `req-20261003T132100Z`, `settings.modeId` `bypassPermissions`, `Manager agent: <id>` in the brief. The quoted request held only its **first sentence**: "It is Small" became `Size: Small` and "Have a Reviewer check it." was dropped (H1) |
+| Worker → Manager (1) | `bm_report` builder → `mcp__paseo__send_agent_prompt` to the Manager's id, `notifyOnFinish: false`, block exactly as built, at 13:21:39 — **arrived** in the Manager's timeline. `finished` with no review, since the brief asked for none |
+| Manager → Reviewer | the Manager created a Reviewer itself (`create_agent` `bm-reviewer/…`, asked for `bypassPermissions`, the hook started it in `auto`); the plugin raised `pairing-mismatch` for it at 13:22:17 (as designed, §A.10). That Reviewer used the builder `bm_review` after one `BM-FORMAT` (`batchId: none`) |
+| Owner → Worker | "I also asked for a Reviewer to check this change. Please have a Reviewer of yours check farewell.js and its test." |
+| Worker → Reviewer | `create_agent` `bm-reviewer/claude-haiku-4-5` with `requestId`, `batchId b1`, stage, checks; started in `auto`. Its final answer was a hand-written `BM-REVIEW … verdict: pass` (13:24:35) |
+| Worker → Manager (2) | after the verdict: `bm_report` builder, then `mcp__paseo__send_agent_prompt`, `notifyOnFinish: false`, at 13:24:43 (8 s after the verdict) — **arrived** |
+
+Every hand-path send: `create_agent` `initialPrompt` ×3 (Manager → Worker, Manager → Reviewer, Worker → Reviewer) and `mcp__paseo__send_agent_prompt` ×2 (Worker → Manager). **0** `SendMessage` and **0** other messaging tools (one Worker `ToolSearch "permission respond"` listed `SendMessage`; it was not called). The Manager's timeline holds **2** `BM-REPORT`, both `finished`. The builder's answer is two text parts (block, then the send line); Paseo's timeline shows them joined (`blockers: noneNothing is delivered yet: …`), and the Worker sent only the block both times.
+
+### 8.3 R2 — bound Medium request
+
+Manager from `manager.ensure` (`bound`, `creationTools: true`, 85 prompt lines, token URL). Owner, 13:25:26: "Add subtract, multiply and divide functions to math.js (divide throws when dividing by 0), with node:test unit tests in test/math.test.js. Treat this as Medium. Have a Reviewer review each function in its own review batch."
+
+- **Brief verbatim:** `bm_create_worker.request` equals the owner's text character for character; `size: Medium`; three `context` facts each quoting it. **Pass (F5).**
+- **Tool names:** the Worker first called `mcp__paseo_bm__bm_report` (underscore) twice, found nothing with `ToolSearch`, and ended its turn at 13:26:02 saying the tools were "not actually available". The owner's nudge "Your paseo-bm tools are there, under the server name paseo-bm with a hyphen. Please carry on with the request." recovered it (it named the server, not a tool). Same slip as C's b1 Reviewer in the first run.
+- **Reviews:** b1, b2 created (`2 of 2`), b3 refused (budget). b2 `pass`. b1 `changes-required`: "multiply and divide are outside the declared scope" — the Worker **deleted** `multiply` and `divide` and their tests (13:28:33, H2). The Manager read the next report, told the owner the scope was now narrower than asked and asked whether to restore them; on the owner's "Yes: all three functions must stay. Tell the Worker to restore multiply and divide." it sent one `bm_tell_worker`; the Worker restored them (5/5 tests). After the grants (8.4) and a scope question Q4 the owner answered `a`: b1 re-review `changes-required` (same scope reading), b3 `changes-required` then `pass` on re-review, b1 second re-review `pass` at 13:37:09.
+- **`finished` waits for the verdict:** the Worker's only `finished` was at **13:37:13**, 4 s after the last verdict; at 13:32:09, with b1 and b3 running, it wrote "I'll wait for the review results … before reporting finished". **Probe:** at 13:36:00.368, 0.4 s after the b3 re-review call, `bm_report { phase: finished }` with the Worker's token was refused: `a review of batch b3 has no verdict yet: wait for its delivery, then report finished / Nothing was stored or sent.` **Pass (F3).**
+- **Manager on reviews:** before the `finished` report it never called a review passed or clean; its lines named reports, blocks and questions. After `finished`: "All three functions … reviews complete, 5/5 tests passing. Ready to merge." **Pass (F3, `manager.md`).** It twice told the owner Q4 was unanswered after the owner had answered it on the card ("proceeded … without waiting for your answer to Q4", 13:35:13; asked again 13:36:10) (H3).
+- **Rule 1:** no `git add`, `commit`, `push`, `reset` or `rm` by any agent; `demo` still has its two commits (`init`, `beads`) with `math.js`, `.beads/issues.jsonl` modified and `test/` untracked; `npm test` 5/5. `hand` likewise uncommitted. **Pass (F6).** The deletion of `multiply`/`divide` (H2) was a scope action, not a rule-1 one.
+- **Tool path:** Manager `bm_create_worker` 1, `bm_tell_worker` 1, `bm_decisions` 6; Worker `bm_report` 9 (+3 refused: 2 underscore names, 1 `blocked` without `waitingOn`), `bm_questions` 6 (+1 refused: an option without `effects`), `bm_create_reviewer` 3 (+1 refused), `bm_rereview` 3 (+3 refused). Bound agents made **0** `send_agent_prompt` and **0** `create_agent` calls; every report, review, message and answer arrived as a `BM-DELIVERY` (Manager: `report` 9; Worker: `review` 6, `message` 1, `answers` 4), outbox `delivered` for each. Q1 and Q2 (never answered) were `expired` by `finished`. Plugin log: no warning or error.
+
+### 8.4 R3 — review budget
+
+- **Without a grant:** `bm_questions` with the Worker's token, `subject: review-budget`, two options and no `grant` (13:30:19) → `The call was refused … a "review-budget" question gives at least one option a grant ({ calls: n } or { untilClean: "<batchId>" }); without one, the owner's yes grants nothing`; no decision was opened (still Q1, Q2). **Pass (F1).**
+- **The Worker's own questions:** 5 `review-budget` questions (Q1, Q2, Q3, Q5, Q6), each with a `grant` on at least one option (`calls 1`, `calls 2`/`1`, `calls 2`/`1`, `calls 2`, `untilClean b1`).
+- **Grant:** Q3 answered `a` (`{ calls: 2 }`) at 13:31:53 → registry `grants [{ Q3, calls 2 }]`; exactly two calls passed (b1 re-review 13:31:57, b3 create 13:32:00). The next call (probe `bm_rereview` b3 with the Worker's token, 13:34:40) was refused: `Review budget reached … 4 of 4 review calls (Medium) … Nothing was created or sent.` **Pass.**
+- Q5 (`{ calls: 2 }`, "for b1 and b3 re-reviews") answered `a`: the b3 re-review passed; the b1 one was refused by the one-re-review-per-batch rule (`Batch b1 has had its one re-review … grant { untilClean: "b1" }`), so the owner's yes to two calls bought one (H4). Q6 (`untilClean b1`) answered `a` → b1's second re-review passed. Total 6 review calls.
+
+### 8.5 New findings
+
+| # | Kind | Where | Observed | Expected |
+|---|---|---|---|---|
+| H1 | Role adherence (hand path) | `role-instructions.ts` Manager hand path ("the owner's request **verbatim** in a quoted block") | The unbound Manager quoted only the request's first sentence; "Have a Reviewer check it." was dropped, the Worker reported `finished` without a review, and the Manager created the Reviewer itself (`pairing-mismatch` alert) | The whole request in the quote, as the bound path's `bm_create_worker` now gets it |
+| H2 | Role adherence | `worker.md` (Reviewing: "fix every blocking finding") | A Haiku Reviewer read the batch scope as "only these lines may change" and asked to remove the other functions; the Worker deleted two functions the owner asked for. The Manager caught it | A finding that contradicts the owner's request is a question for the owner, not a fix |
+| H3 | Role adherence | `manager.md` (decisions) | The Manager said Q4 was unanswered and asked the owner again after the owner had answered it on the card (its `bm_decisions` calls filtered `status: open`) | Check answered decisions before saying a question waits |
+| H4 | Observation | `bm_questions` description, §16.8 | A `{ calls: n }` grant does not lift the one-re-review-per-batch limit, so a question offering "2 more calls for b1 and b3 re-reviews" delivered one | The `bm_questions` text could say that a second re-review of one batch needs `untilClean` |
+
+### 8.6 Clean-up
+
+The daemon's status was read first (`pid 64853`, `127.0.0.1:6918`, the test home), then `stop-daemon.sh` stopped it; afterwards nothing listened on 6918 and no process referenced the test home, and the work folder (Paseo home, data folder, both repos) was deleted. The owner's daemon on 6767 kept running, untouched.

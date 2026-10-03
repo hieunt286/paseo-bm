@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PENDING_CALLER_MESSAGE, clearBindingCache, createBindingStore, type BindingStore, type ToolCaller } from "../plugin/server/agent-bindings";
+import { PENDING_CALLER_MESSAGE, PENDING_TTL_MS, clearBindingCache, createBindingStore, type BindingStore, type ToolCaller } from "../plugin/server/agent-bindings";
+import { settleCreatedAgent } from "../plugin/server/creation-settle";
 import { answer, binderOf, withAgentTools } from "../plugin/server/agent-tools";
 import { NO_DATA_FOLDER_MESSAGE } from "../plugin/server/create-worker";
 import { clearDecisionStoreCache } from "../plugin/server/decision-store";
@@ -79,6 +80,8 @@ interface DaemonOptions {
   toolsOff?: boolean;
   profile?: boolean;
   refuse?: string;
+  /** Paseo answers with this error after the hook kept the token (null: it creates the agent). */
+  refuseAfterHook?: () => string | null;
   store?: BindingStore;
   onSend?: (message: { id: string; text: string }) => void;
 }
@@ -101,6 +104,8 @@ function daemon(options: DaemonOptions = {}) {
       if (options.store !== undefined) {
         applyAgentTools({ config: { ...request.config, cwd: request.cwd } } as unknown as AgentCreateRequest, { urlFor: ROLE_URL, bindings: options.store }, "codex");
       }
+      const late = options.refuseAfterHook?.() ?? null;
+      if (late !== null) throw new Error(late);
       return {};
     },
     ...(options.onSend === undefined ? {} : { onSend: options.onSend }),
@@ -244,6 +249,49 @@ describe("bm_create_reviewer (design §16.6)", () => {
     expect(fake.creates).toHaveLength(1);
     expect(createRequestRegistry(home).get(WS, REQ)!.reviews.batches).toEqual([]);
     expect(store.list()).toEqual([]);
+  });
+
+  it("Paseo's error after the hook kept the token: the call is kept for agent.created, which names its Reviewer; the token never reaches the Worker", async () => {
+    let late: string | null = `socket hang up at ${ROLE_URL("reviewer")}/${"e".repeat(64)}`;
+    const { tools, home, store, logs } = setup({ refuseAfterHook: () => late });
+    const result = await tools.call("bm_create_reviewer", INPUT, WORKER_CALLER);
+    expect(result.ok).toBe(false);
+    expect(result.text).toBe(
+      `Paseo answered with an error after it may have created the Reviewer: socket hang up at ${ROLE_URL("reviewer")}/…. If the Reviewer appears, its review reaches you as usual; if not, batch b1 is free again in 10 minutes, or open a new batch.`,
+    );
+    expect(logs.join("\n")).not.toContain("e".repeat(64));
+    // The call stays, with no Reviewer yet; the binding stays pending (attached).
+    expect(createRequestRegistry(home).get(WS, REQ)!.reviews.batches).toMatchObject([{ batchId: "b1", reviewerIds: [], calls: [{ callId: "out-000000000001", kind: "create", reviewerId: "" }] }]);
+    expect(store.list()).toMatchObject([{ role: "reviewer", state: "pending", batchId: "b1", parentId: WORKER }]);
+    // Meanwhile the batch is neither free nor re-reviewable.
+    late = null;
+    expect((await tools.call("bm_create_reviewer", INPUT, WORKER_CALLER)).text).toContain("The Reviewer of batch b1 is still being created");
+    expect((await tools.call("bm_rereview", { batchId: "b1", fixed: "x" }, WORKER_CALLER)).text).toContain("The Reviewer of batch b1 is still being created");
+
+    // agent.created of the Reviewer Paseo did create: its binding is bound and the registry names it.
+    clearPluginReviewers();
+    const seen = fakePaseo({ agents: [{ id: "rev-late", provider: "bm-reviewer/gpt-5.6", workspaceId: WS, labels: { "bm.role": "reviewer", "bm.requestId": REQ, "bm.batchId": "b1", "paseo.parent-agent-id": WORKER } }] });
+    const settled = await settleCreatedAgent({ id: "rev-late", provider: "bm-reviewer/gpt-5.6", parentAgentId: WORKER, workspaceId: WS }, seen.paseo, { home, bindings: store, log: () => {} });
+    expect(settled).toMatchObject({ own: true, repairedCallId: "out-000000000001" });
+    expect(store.bindingOfAgent("rev-late")).toMatchObject({ state: "bound", role: "reviewer", batchId: "b1" });
+    expect(createRequestRegistry(home).get(WS, REQ)!.reviews.batches[0]).toMatchObject({ reviewerIds: ["rev-late"], calls: [{ callId: "out-000000000001", reviewerId: "rev-late" }] });
+    expect(isPluginReviewer("rev-late")).toBe(true);
+  });
+
+  it("a create call still without a Reviewer after the pending time is cleared: the batch is free again", async () => {
+    let late: string | null = "socket hang up";
+    const { tools, home, fake, tick } = setup({ refuseAfterHook: () => late });
+    expect((await tools.call("bm_create_reviewer", INPUT, WORKER_CALLER)).ok).toBe(false);
+    late = null;
+    tick(PENDING_TTL_MS + 1_000);
+    // bm_rereview of that batch: cleared, so there is no batch to re-review.
+    expect((await tools.call("bm_rereview", { batchId: "b1", fixed: "x" }, WORKER_CALLER)).text).toContain("knows no batch b1");
+    expect(createRequestRegistry(home).get(WS, REQ)!.reviews.batches).toEqual([]);
+    // And bm_create_reviewer opens it again, once.
+    const again = await tools.call("bm_create_reviewer", INPUT, WORKER_CALLER);
+    expect(again.ok).toBe(true);
+    expect(fake.creates).toHaveLength(2);
+    expect(createRequestRegistry(home).get(WS, REQ)!.reviews.batches).toMatchObject([{ batchId: "b1", reviewerIds: [parsed(again)["reviewerId"]], calls: [{ kind: "create" }] }]);
   });
 
   it("no bm-reviewer profile: refused, nothing created", async () => {
@@ -456,6 +504,25 @@ describe("the review-budget grant (design §16.8)", () => {
     const byPrecedent = { ...answered(budgetQuestion({ calls: 3 }, `q:${REQ}:Q2`), "a"), answer: { ...answered(budgetQuestion({ calls: 3 }, `q:${REQ}:Q2`), "a").answer!, by: "precedent" as const } };
     expect(applyReviewBudgetGrants([byPrecedent], { home })).toEqual([]);
     expect(createRequestRegistry(home).get(WS, REQ)!.reviews.grants.map((grant) => grant.calls)).toEqual([1]);
+  });
+
+  it("the owner's policy grants at most { calls: 2 }: a larger or untilClean option is never its choice, and such an answer grants nothing", () => {
+    const home = dataFolder();
+    register(home, "Small");
+    const policy: AutonomyPolicy = { projects: { [WS]: { cost: { mode: "delegate", at: T0.toISOString() } } }, challenger: {} };
+    // Within the cap: the policy may choose it.
+    expect(decideRefusalOf(policy, budgetQuestion({ calls: 2 }), { optionKey: "a", finishedUnverified: false })).toBeNull();
+    // Over the cap, or until clean: refused, the question waits for the owner; its no-grant option stays the policy's.
+    for (const grant of [{ calls: 3 }, { untilClean: "b1" }]) {
+      const question = budgetQuestion(grant);
+      expect(decideRefusalOf(policy, question, { optionKey: "a", finishedUnverified: false })).toMatch(/grants more review calls than the owner's policy may .*leave decision .* to the owner/);
+      expect(decideRefusalOf(policy, question, { optionKey: "b", finishedUnverified: false })).toBeNull();
+    }
+    // Should a policy answer ever carry one, it grants nothing; the owner's own answer grants it.
+    expect(applyReviewBudgetGrants([answered(budgetQuestion({ calls: 3 }), "a", "policy")], { home })).toEqual([]);
+    expect(applyReviewBudgetGrants([answered(budgetQuestion({ untilClean: "b1" }, `q:${REQ}:Q2`), "a", "policy")], { home })).toEqual([]);
+    expect(applyReviewBudgetGrants([answered(budgetQuestion({ calls: 3 }, `q:${REQ}:Q3`), "a")], { home })).toEqual([`q:${REQ}:Q3`]);
+    expect(createRequestRegistry(home).get(WS, REQ)!.reviews.grants.map((grant) => grant.calls)).toEqual([3]);
   });
 
   it("an untilClean grant: its calls are counted but not refused, its one-re-review limit lifted, until the batch passes", async () => {

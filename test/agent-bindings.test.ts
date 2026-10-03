@@ -14,6 +14,7 @@ import {
   createBindingStore,
   createBindingSweep,
   createBound,
+  creationMayExist,
   guardActingTool,
   pendingCallerRefusal,
   registerBindingLifecycle,
@@ -21,6 +22,7 @@ import {
   type AgentBinding,
   type BindingStore,
   type ToolCaller,
+  withoutTokenPaths,
 } from "../plugin/server/agent-bindings";
 import { BUILDER_SEND_LINES, binderOf, boundTokenOf, routeOfPath, startAgentTools, type AgentToolsEndpoint } from "../plugin/server/agent-tools";
 import type { ServerTools } from "../plugin/server/decision-tools";
@@ -519,5 +521,94 @@ describe("a token is never logged or returned", () => {
     // On disk, only hashes.
     const file = readFileSync(endpoint.bindings!.path, "utf8");
     for (const token of [bound, pending]) expect(file).not.toContain(token);
+  });
+});
+
+describe("a creation Paseo did not settle (review of ADR-027's creation paths)", () => {
+  it("discard keeps an attached binding (the agent may exist) and deletes an unattached one", () => {
+    const home = dataFolder();
+    const store = storeAt(home, { now: T0 });
+    const attached = store.issue({ role: "reviewer", workspaceId: WS, requestId: REQ, parentId: "wrk-1", batchId: "b1" });
+    store.attach(attached.token, "reviewer");
+    const plain = store.issue({ role: "reviewer", workspaceId: WS, requestId: REQ, parentId: "wrk-1", batchId: "b2" });
+    expect(store.discard(attached.tokenSha256)).toBe("kept");
+    expect(store.discard(plain.tokenSha256)).toBe("deleted");
+    expect(store.discard("f".repeat(64))).toBe("none");
+    expect(store.list().map((binding) => [binding.batchId, binding.state])).toEqual([["b1", "pending"]]);
+  });
+
+  it("settleCreated binds the one attached pending binding of that role, parent, workspace and batch or request; settle afterwards agrees", () => {
+    const home = dataFolder();
+    const clock = { now: T0 };
+    const store = storeAt(home, clock);
+    const reviewer = store.issue({ role: "reviewer", workspaceId: WS, requestId: REQ, parentId: "wrk-1", batchId: "b1", creationTools: true });
+    store.attach(reviewer.token, "reviewer");
+    const worker = store.issue({ role: "worker", workspaceId: WS, requestId: REQ, parentId: "mgr-1", creationTools: true });
+    store.attach(worker.token, "worker");
+    const unattached = store.issue({ role: "reviewer", workspaceId: WS, requestId: REQ, parentId: "wrk-1", batchId: "b2" });
+    const created = (over: Partial<Parameters<BindingStore["settleCreated"]>[0]>) => ({ agentId: "rev-1", role: "reviewer" as const, parentId: "wrk-1", workspaceId: WS, requestId: REQ, batchId: "b1", ...over });
+
+    // Another parent, workspace, batch or request, an unattached binding, or no parent: nothing.
+    expect(store.settleCreated(created({ parentId: "wrk-2" }))).toBeNull();
+    expect(store.settleCreated(created({ workspaceId: "wks_other" }))).toBeNull();
+    expect(store.settleCreated(created({ batchId: "b9" }))).toBeNull();
+    expect(store.settleCreated(created({ requestId: "req-20261003T110000Z" }))).toBeNull();
+    expect(store.settleCreated(created({ batchId: "b2" }))).toBeNull();
+    expect(store.settleCreated(created({ parentId: null }))).toBeNull();
+
+    clock.now = later(5_000);
+    expect(store.settleCreated(created({}))).toMatchObject({ tokenSha256: reviewer.tokenSha256, state: "bound", agentId: "rev-1", boundAt: later(5_000).toISOString() });
+    // Seen again: its own binding, unchanged.
+    expect(store.settleCreated(created({}))).toMatchObject({ agentId: "rev-1", boundAt: later(5_000).toISOString() });
+    // agents.create returned after all: the binding is bound to that agent, and discard keeps it.
+    expect(store.settle(reviewer.tokenSha256, "rev-1")).toBe("bound");
+    expect(store.discard(reviewer.tokenSha256)).toBe("kept");
+
+    // A Worker by its request.
+    expect(store.settleCreated({ agentId: "wrk-9", role: "worker", parentId: "mgr-1", workspaceId: WS, requestId: REQ, batchId: null })).toMatchObject({ tokenSha256: worker.tokenSha256, agentId: "wrk-9" });
+    expect(store.list().find((binding) => binding.tokenSha256 === unattached.tokenSha256)?.state).toBe("pending");
+
+    // Past its ten minutes, a pending binding settles nothing.
+    const late = store.issue({ role: "reviewer", workspaceId: WS, requestId: REQ, parentId: "wrk-1", batchId: "b3" });
+    store.attach(late.token, "reviewer");
+    clock.now = later(5_000 + PENDING_TTL_MS + 1);
+    expect(store.settleCreated(created({ agentId: "rev-3", batchId: "b3" }))).toBeNull();
+  });
+
+  it("withoutTokenPaths cuts every token path, and the token itself, from a text", () => {
+    const token = "ab".repeat(32);
+    const text = `MCP server paseo-bm at http://127.0.0.1:4567/mcp/reviewer/${token} refused; also /mcp/worker/${"c".repeat(64)} and ${token}`;
+    const cut = withoutTokenPaths(text, token);
+    expect(cut).toBe("MCP server paseo-bm at http://127.0.0.1:4567/mcp/reviewer/… refused; also /mcp/worker/… and …");
+    expect(withoutTokenPaths("no path here")).toBe("no path here");
+  });
+
+  it("createBound: Paseo's error loses every token path, and is marked mayExist when the hook had kept the token", async () => {
+    const home = dataFolder();
+    const store = storeAt(home, { now: T0 });
+    const binder = binderOf(ROLE_URL, store, () => {});
+    const urls: string[] = [];
+    // Refused before the hook: the binding goes, the error is plain but loses the URL it echoed.
+    const before = await createBound(binder, { role: "worker", base: "claude", workspaceId: WS, requestId: REQ }, async (mcpServers) => {
+      urls.push(mcpServers![AGENT_TOOLS_SERVER]!.url);
+      throw new Error(`cannot start MCP server ${mcpServers![AGENT_TOOLS_SERVER]!.url}`);
+    }).catch((error: unknown) => error as Error);
+    expect(before.message).toBe("cannot start MCP server http://127.0.0.1:4567/mcp/worker/…");
+    expect(creationMayExist(before)).toBe(false);
+    expect(store.list()).toEqual([]);
+
+    // Refused after the hook kept the token: the binding stays pending for agent.created, the error says so.
+    const after = await createBound(binder, { role: "reviewer", base: "codex", workspaceId: WS, requestId: REQ, parentId: "wrk-1", batchId: "b1" }, async (mcpServers) => {
+      urls.push(mcpServers![AGENT_TOOLS_SERVER]!.url);
+      applyAgentTools({ config: { provider: "bm-reviewer/x", cwd: "/repo", mcpServers } } as unknown as AgentCreateRequest, { urlFor: ROLE_URL, bindings: store }, "codex");
+      throw new Error("socket hang up");
+    }).catch((error: unknown) => error as Error);
+    expect(after.message).toBe("socket hang up");
+    expect(creationMayExist(after)).toBe(true);
+    expect(store.list()).toMatchObject([{ role: "reviewer", state: "pending", batchId: "b1" }]);
+    for (const url of urls) {
+      expect(before.message).not.toContain(url.slice(-64));
+      expect(after.message).not.toContain(url.slice(-64));
+    }
   });
 });

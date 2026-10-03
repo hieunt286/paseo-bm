@@ -314,6 +314,12 @@ export function preparedChangeRefusalText(decisionId: string): string {
 export const REVIEW_BUDGET_SUBJECT = "review-budget";
 /** The most review calls one `{ calls: n }` grant adds (design §16.6, §16.8). */
 export const MAX_REVIEW_GRANT_CALLS = 10;
+/**
+ * The most review calls a grant the owner's policy chooses may add (design
+ * §16.8): where `cost` is delegated, an answer `by: policy` grants at most
+ * `{ calls: 2 }`; a larger grant or an `untilClean` one is the owner's.
+ */
+export const MAX_POLICY_REVIEW_GRANT_CALLS = 2;
 
 /**
  * What choosing an option of a `review-budget` question grants (design §16.8):
@@ -326,6 +332,11 @@ export const reviewGrantSchema = z.union([
   z.object({ untilClean: z.string().regex(/^b\d+$/) }).strict(),
 ]);
 export type ReviewGrant = z.infer<typeof reviewGrantSchema>;
+
+/** True for a grant the owner's policy may choose: `{ calls: n }` with n at most `MAX_POLICY_REVIEW_GRANT_CALLS` (design §16.8). Pure. */
+export function policyMayGrant(grant: ReviewGrant | undefined): boolean {
+  return grant === undefined || ("calls" in grant && grant.calls <= MAX_POLICY_REVIEW_GRANT_CALLS);
+}
 
 export const decisionOptionSchema = z.object({
   key: z.string().regex(OPTION_KEY_PATTERN),

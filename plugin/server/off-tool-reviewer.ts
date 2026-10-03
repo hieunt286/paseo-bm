@@ -21,6 +21,13 @@
  * 4. hands the finding to `cancel`: in the plugin `cancelOffToolReviewer`,
  *    which cancels the Reviewer's turn at once through the Paseo CLI (spike
  *    S5, `paseo-cli.ts`). A failed cancel is logged and the alert stays.
+ *    Its tries end after a few seconds, so every later turn the Reviewer
+ *    starts while its alert is open is cancelled too, at its
+ *    `agent.turn_started` (`registerOffToolTurnCancel`).
+ *
+ * The plugin's own Reviewer is never one: a binding of its own — settled at
+ * `agent.created` when a reload or Paseo's late error left it pending
+ * (`creation-settle.ts`) — or `isPluginReviewer`.
  *
  * Nothing here throws into the event handler.
  */
@@ -216,6 +223,39 @@ export function clearOffToolAlertsOfRequest(home: string | null, workspaceId: st
   } catch {
     return [];
   }
+}
+
+/**
+ * Registers `on("agent.turn_started")`: a Reviewer whose `off-tool-reviewer`
+ * alert is open has the turn it just started cancelled through the Paseo CLI
+ * (design §16.8 step 4) — `cancelOffToolReviewer`'s tries stop after a few
+ * seconds, and this catches every later turn, a reload included. Returns its
+ * remover. Never throws into the event.
+ */
+export function registerOffToolTurnCancel(
+  host: Partial<Pick<PluginServerContext, "on">>,
+  home: () => string | null,
+  deps: { cancel?: CancelAgent; log?: (message: string) => void } = {},
+): () => void {
+  if (typeof host.on !== "function") return () => {};
+  const cancel = deps.cancel ?? ((agentId: string) => cancelAgent(agentId));
+  const log = deps.log ?? ((message: string) => console.warn(message));
+  const remove = host.on("agent.turn_started", async (event) => {
+    try {
+      const agent = (event as { agent?: { id?: unknown; provider?: unknown } } | null)?.agent;
+      if (typeof agent?.id !== "string" || agent.id === "" || roleOfProvider(agent.provider) !== "reviewer") return;
+      const at = home();
+      if (at === null) return;
+      const open = createAlertStore(at).list({ open: true, kinds: ["off-tool-reviewer"], subject: agent.id });
+      if (open.length === 0) return;
+      const result = await cancel(agent.id);
+      if (!result.ok) log(`[paseo-bm] could not cancel the turn the off-tool Reviewer ${agent.id} started: ${result.reason}`);
+      else if (result.stopped) log(`[paseo-bm] cancelled the turn the off-tool Reviewer ${agent.id} started.`);
+    } catch (error) {
+      log(`[paseo-bm] the off-tool turn check failed: ${reasonOf(error)}`);
+    }
+  });
+  return typeof remove === "function" ? remove : () => {};
 }
 
 /** Registers `on("agent.archived")`, which clears an archived Reviewer's `off-tool-reviewer` alert, and returns its remover. */

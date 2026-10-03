@@ -20,7 +20,8 @@ import type { FallbackAction } from "./server/fallback-rpc";
 import { createWorkerSwitch } from "./server/fallback-switch";
 import { createFallbackWaiter } from "./server/fallback-wait";
 import { checkNoVerdict } from "./server/no-verdict";
-import { cancelOffToolReviewer, checkOffToolReviewer, registerOffToolAlertClear } from "./server/off-tool-reviewer";
+import { cancelOffToolReviewer, checkOffToolReviewer, registerOffToolAlertClear, registerOffToolTurnCancel } from "./server/off-tool-reviewer";
+import { settleCreatedAgent } from "./server/creation-settle";
 import { applyReviewBudgetGrants } from "./server/review-tools";
 import { createBudgetTold } from "./server/budget-told";
 import { registerFormatCheck } from "./server/format-check";
@@ -243,6 +244,9 @@ export default function contribute(server: PluginServerContext): () => void {
     async (agent, paseo) => {
       // Design §16.4: the request of a new Worker an unbound Manager created is registered at first sight.
       await sightCreatedWorker(agent, paseo);
+      // Design §16.5, §16.8: a Worker or Reviewer the plugin created whose creation a reload or Paseo's late
+      // error left unsettled gets its binding and its registry entry now, so it is never taken for off-tool.
+      await settleCreatedAgent(agent, paseo, { home: dataHome(), bindings: agentTools.bindings });
       // Design §16.8: a Reviewer a bound Worker created outside its tools is an Inbox alert and an
       // off-tool-review signal, and is cancelled at once through the Paseo CLI (spike S5).
       await checkOffToolReviewer(agent, paseo, {
@@ -300,6 +304,8 @@ export default function contribute(server: PluginServerContext): () => void {
   });
   // Design §16.8: an archived off-tool Reviewer's alert is cleared.
   const removeOffToolAlertClear = registerOffToolAlertClear(server, () => dataHome());
+  // Design §16.8 step 4: every turn an off-tool Reviewer starts while its alert is open is cancelled too.
+  const removeOffToolTurnCancel = registerOffToolTurnCancel(server, () => dataHome());
   // delta 20260921 §4.4.6: fallback.incidents and fallback.act; a new pending
   // incident becomes the owner's decision f:<incidentId> (autonomy design §A.5 d).
   // "Switch": the plugin creates a replacement Worker (§4.4.7) or Manager
@@ -463,6 +469,7 @@ export default function contribute(server: PluginServerContext): () => void {
     noticeQueue.remove();
     removeFallbackDetection();
     removeOffToolAlertClear();
+    removeOffToolTurnCancel();
     removeFallbackRpcs();
     fallbackWaiter.clear();
     removeCollector();

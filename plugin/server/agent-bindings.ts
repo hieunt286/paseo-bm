@@ -19,8 +19,12 @@
  * Lifecycle (§16.5): `pending` is written before `agents.create`; the
  * creation hook records `attachedAt` when it keeps the token URL; the binding
  * becomes `bound` when `agents.create` returns AND `attachedAt` is set, and is
- * deleted otherwise (the agent is then unbound), when the creation throws, or
- * when it stays `pending` for more than ten minutes. `agent.archived` revokes
+ * deleted otherwise (the agent is then unbound), when the creation throws
+ * before the hook attached it, or when it stays `pending` for more than ten
+ * minutes. An attached binding outlives a creation that threw, and a plugin
+ * reload: Paseo may still have created the agent, so `agent.created` settles
+ * it by the agent's role, parent and `bm.batchId` / `bm.requestId` labels
+ * (`settleCreated`). `agent.archived` revokes
  * it; a revoked binding goes seven days later; the first Paseo handle of a
  * plugin run sweeps away every binding whose agent Paseo no longer lists. At
  * most 5,000 bindings are kept, the oldest revoked ones dropped first.
@@ -179,8 +183,22 @@ export interface BindingStore {
    * hook attached it, and is deleted otherwise (the agent is unbound). Never throws.
    */
   settle(tokenSha256: string, agentId: string): "bound" | "unbound";
-  /** `agents.create` threw: the binding is deleted. Never throws. */
-  discard(tokenSha256: string): void;
+  /**
+   * `agents.create` threw: an unattached binding is deleted; an attached one is
+   * kept (`"kept"`) for `agent.created` to settle, or its ten minutes to end:
+   * the hook ran, so Paseo may have created the agent. One `agent.created`
+   * already bound is kept too (`"kept"`): the agent exists. Never throws.
+   */
+  discard(tokenSha256: string): "deleted" | "kept" | "none";
+  /**
+   * `agent.created` of an agent the plugin may have created while its own
+   * `agents.create` did not settle the binding (it threw, or a reload lost it):
+   * the one attached, unexpired `pending` binding of that role, parent and
+   * workspace — and `bm.batchId` (a Reviewer) or `bm.requestId` (a Worker) —
+   * becomes `bound` to it. Returns the agent's binding (one it already had
+   * included), or null. Never throws.
+   */
+  settleCreated(agent: CreatedBindingAgent): AgentBinding | null;
   /** The caller a token path names: bound → its agent, pending → `agentId: null`; unknown, revoked or another role's → null. Never throws. */
   callerOf(token: string, role: BoundRole): ToolCaller | null;
   /** `agent.archived`: every bound binding of `agentId` is revoked. Returns how many. Never throws. */
@@ -197,6 +215,18 @@ export interface BindingStore {
 
 interface BindingsFile {
   bindings: AgentBinding[];
+}
+
+/** What `settleCreated` matches a new agent by: `agent.created` and the agent's labels. */
+export interface CreatedBindingAgent {
+  agentId: string;
+  role: BoundRole;
+  parentId: string | null;
+  workspaceId: string | null;
+  /** Its `bm.requestId` label. */
+  requestId: string | null;
+  /** Its `bm.batchId` label (a Reviewer). */
+  batchId: string | null;
 }
 
 /** Parsed files by path, kept while the file's identity (mtime, size, inode) does not change. */
@@ -325,6 +355,11 @@ export function createBindingStore(home: string, deps: BindingStoreDeps = {}): B
       let outcome: "bound" | "unbound" = "unbound";
       const at = now().toISOString();
       quietly(`settle the binding of agent ${agentId}`, (bindings) => {
+        // `agent.created` came first and settled it to this agent already (`settleCreated`).
+        if (bindings.some((entry) => entry.tokenSha256 === tokenSha256 && entry.state === "bound" && entry.agentId === agentId)) {
+          outcome = "bound";
+          return null;
+        }
         const binding = bindings.find((entry) => entry.tokenSha256 === tokenSha256 && entry.state === "pending");
         if (binding === undefined) return null;
         // Never bound without the hook's word that the agent got the token URL.
@@ -337,10 +372,54 @@ export function createBindingStore(home: string, deps: BindingStoreDeps = {}): B
       return outcome;
     },
     discard(tokenSha256) {
+      let outcome: "deleted" | "kept" | "none" = "none";
       quietly("remove a binding whose agent was not created", (bindings) => {
-        const next = bindings.filter((binding) => !(binding.tokenSha256 === tokenSha256 && binding.state === "pending"));
-        return next.length === bindings.length ? null : next;
+        // `agent.created` already settled it to the new agent (`settleCreated`): the agent exists.
+        if (bindings.some((entry) => entry.tokenSha256 === tokenSha256 && entry.state === "bound")) {
+          outcome = "kept";
+          return null;
+        }
+        const binding = bindings.find((entry) => entry.tokenSha256 === tokenSha256 && entry.state === "pending");
+        if (binding === undefined) return null;
+        // The hook kept the token URL: Paseo may have created the agent after all.
+        if (binding.attachedAt !== null) {
+          outcome = "kept";
+          return null;
+        }
+        outcome = "deleted";
+        return bindings.filter((entry) => entry !== binding);
       });
+      return outcome;
+    },
+    settleCreated(agent) {
+      const own = list().find((binding) => binding.agentId === agent.agentId) ?? null;
+      if (own !== null) return own;
+      if (agent.parentId === null) return null;
+      const key = agent.role === "reviewer" ? agent.batchId : agent.role === "worker" ? agent.requestId : null;
+      if (key === null) return null;
+      // Set inside the update, which runs synchronously.
+      let settled = null as AgentBinding | null;
+      const at = now();
+      quietly(`settle the binding of the new agent ${agent.agentId}`, (bindings) => {
+        const candidate = bindings
+          .filter(
+            (binding) =>
+              binding.state === "pending" &&
+              binding.attachedAt !== null &&
+              !isExpired(binding, at.getTime()) &&
+              binding.role === agent.role &&
+              binding.parentId === agent.parentId &&
+              (agent.workspaceId === null || binding.workspaceId === agent.workspaceId) &&
+              (agent.role === "reviewer"
+                ? binding.batchId === key && (agent.requestId === null || binding.requestId === agent.requestId)
+                : binding.requestId === key),
+          )
+          .sort((a, b) => timeOf(a.createdAt) - timeOf(b.createdAt))[0];
+        if (candidate === undefined) return null;
+        settled = { ...candidate, state: "bound" as const, agentId: agent.agentId, boundAt: at.toISOString() };
+        return bindings.map((entry) => (entry === candidate ? settled! : entry));
+      });
+      return settled;
     },
     callerOf(token, role) {
       if (!isBindingToken(token)) return null;
@@ -436,18 +515,39 @@ export interface AgentBinder {
   issue(request: BindingRequest): IssuedBinding | null;
   /** `agents.create` returned. Never throws. */
   settle(issued: IssuedBinding, agentId: string): "bound" | "unbound";
-  /** `agents.create` threw. Never throws. */
-  discard(issued: IssuedBinding): void;
+  /** `agents.create` threw; `"kept"` when the binding was attached and is kept (see `BindingStore.discard`). Never throws. */
+  discard(issued: IssuedBinding): void | "kept";
 }
 
 /** The binder that never binds: no endpoint, or a caller without one. */
 export const NO_BINDER: AgentBinder = { issue: () => null, settle: () => "unbound", discard: () => {} };
 
+/** A token path of the agents' endpoint (`/mcp/<role>/<64 hex>`), wherever it appears in a text. */
+const TOKEN_PATH = /\/mcp\/(worker|reviewer|manager|orchestrator)\/[0-9a-f]{64}/gi;
+
+/**
+ * `text` with every token path of the agents' endpoint cut to its role path
+ * (`/mcp/<role>/…`), and `token` itself wherever it appears: what Paseo
+ * echoes of a refused creation's config never carries a token on to an agent
+ * or a log. Pure.
+ */
+export function withoutTokenPaths(text: string, token: string | null = null): string {
+  const cut = text.replace(TOKEN_PATH, (_path, role: string) => `/mcp/${role}/…`);
+  return token === null || token === "" ? cut : cut.split(token).join("…");
+}
+
+/** True when `error` came from a creation whose hook had already kept the token URL: Paseo may have created the agent (`createBound`). */
+export function creationMayExist(error: unknown): boolean {
+  return error instanceof Error && (error as Error & { mayExist?: unknown }).mayExist === true;
+}
+
 /**
  * Creates an agent through `create`, bound when `binder` issues a token: the
  * MCP servers `create` must put in the creation config (the token URL under
  * `AGENT_TOOLS_SERVER`), or undefined for an unbound creation. A
- * creation that throws discards the binding and rethrows. Logs name the agent
+ * creation that throws discards the binding and rethrows, with every token
+ * path cut from its message (`withoutTokenPaths`), marked `mayExist` when the
+ * binding was attached and is kept (`creationMayExist`). Logs name the agent
  * id, never the token.
  */
 export async function createBound<T extends { id: string }>(
@@ -466,8 +566,14 @@ export async function createBound<T extends { id: string }>(
   try {
     created = await create(issued === null ? undefined : { [AGENT_TOOLS_SERVER]: issued.mcpServer });
   } catch (error) {
-    if (issued !== null) binder?.discard(issued);
-    throw error;
+    const kept = issued !== null && binder?.discard(issued) === "kept";
+    const message = error instanceof Error ? error.message : String(error);
+    const clean = withoutTokenPaths(message, issued === null ? null : issued.mcpServer.url.slice(-64));
+    if (clean === message && !kept && error instanceof Error) throw error;
+    const thrown = new Error(clean) as Error & { mayExist?: boolean };
+    if (error instanceof Error) thrown.name = error.name;
+    if (kept) thrown.mayExist = true;
+    throw thrown;
   }
   if (issued !== null && binder !== null && binder !== undefined) {
     const outcome = binder.settle(issued, created.id);

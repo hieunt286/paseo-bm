@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  CREATING_WAIT_MS,
   HANDOFFS_DIR_NAME,
   HANDOFF_FILE_VERSION,
   HANDOFF_SAFE_POINT_WAIT_MS,
@@ -73,6 +74,7 @@ describe("the store", () => {
       brief: null,
       commandId: null,
       commandSentAt: null,
+      creatingAt: null,
       successorId: null,
       successorAt: null,
       endedAt: null,
@@ -96,6 +98,23 @@ describe("the store", () => {
     expect(store().update("../evil", (entry) => entry)).toBeNull();
     expect(store().get("../evil")).toBeNull();
     expect(store().update("h9", (entry) => entry)).toBeNull();
+  });
+
+  it("claimCreation moves a briefed entry to creating once (compare-and-set); a file without creatingAt reads as null", () => {
+    store().add(input);
+    expect(store().claimCreation("h1")).toBeNull();
+    store().update("h1", (entry) => ({ ...entry, state: "briefed", briefAt: iso(T0), brief: "b" }));
+    clock = new Date(T0 + MIN);
+    expect(store().claimCreation("h1")).toMatchObject({ state: "creating", creatingAt: iso(T0 + MIN) });
+    // A second caller — a concurrent turn end, or one after a reload — gets nothing.
+    expect(store().claimCreation("h1")).toBeNull();
+    expect(store().claimCreation("h9")).toBeNull();
+    expect(store().get("h1")).toMatchObject({ state: "creating", creatingAt: iso(T0 + MIN) });
+    // An older build's file has no creatingAt.
+    const older: Partial<HandoffEntry> = { ...store().get("h1")! };
+    delete older.creatingAt;
+    writeFileSync(join(dir(), "h7.json"), JSON.stringify({ version: HANDOFF_FILE_VERSION, handoff: { ...older, id: "h7", state: "briefed" } }));
+    expect(store().get("h7")).toMatchObject({ state: "briefed", creatingAt: null });
   });
 
   it("skips a corrupt, invalid or newer file on its own, and never writes over a newer one", () => {
@@ -135,6 +154,13 @@ describe("pending, done and stale (design §G.6, §G.7)", () => {
     expect(staleEndingOf(entryOf({ state: "noting", noteAskedAt: iso(T0) }), T0 + 5 * 60 * MIN)).toBeNull();
     expect(staleEndingOf(entryOf({ state: "briefed", briefAt: iso(T0) }), T0 + MANAGER_WAIT_MS + 1)).toBe("manager-busy");
     expect(staleEndingOf(entryOf({ state: "commanded", commandSentAt: iso(T0) }), T0 + SUCCESSOR_WAIT_MS + 1)).toBe("no-successor");
+    // A successor the plugin was creating: 10 minutes, then it ends dropped (no command went out).
+    const creating = entryOf({ state: "creating", creatingAt: iso(T0) });
+    expect(CREATING_WAIT_MS).toBe(10 * MIN);
+    expect(staleEndingOf(creating, T0 + CREATING_WAIT_MS)).toBeNull();
+    expect(staleEndingOf(creating, T0 + CREATING_WAIT_MS + 1)).toBe("no-successor");
+    expect(endedHandoff(creating, "no-successor", iso(T0))).toMatchObject({ state: "dropped", ending: "no-successor" });
+    expect(pendingHandoffOf([creating], REQUEST, T0)).toEqual(creating);
     expect(staleEndingOf(entryOf({ state: "done" }), T0 + 10 * 60 * MIN)).toBeNull();
     expect(endedHandoff(waiting, "off", iso(T0))).toMatchObject({ state: "dropped", ending: "off", endedAt: iso(T0) });
     expect(endedHandoff({ ...waiting, commandSentAt: iso(T0) }, "no-successor", iso(T0))).toMatchObject({ state: "failed" });

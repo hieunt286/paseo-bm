@@ -11,11 +11,15 @@
  *   and where its sequence stands (`handoff.ts`): `waiting` for the Worker's
  *   idle moment after a safe point; `noting` once the note was asked for;
  *   `briefed` once the brief is built and the command waits for the Manager's
- *   idle moment; `commanded` once the `BM-COMMAND` went out; `done` when the
+ *   idle moment; `creating` while the plugin creates the successor itself
+ *   for a bound Manager (design §16.9: moved there from `briefed` by one
+ *   compare-and-set, `claimCreation`, so two turn ends or a reload never
+ *   create two); `commanded` once the `BM-COMMAND` went out; `done` when the
  *   successor appeared with `bm.handoffFrom`. It ends without a successor as
  *   `dropped` (before the command went out: no safe point, handoff turned
  *   off, the request finished, no Manager, the loop guard or another refusal
- *   of the send, the Manager busy too long) or `failed` (after it: the Manager could not be reached, or
+ *   of the send, the Manager busy too long, a successor the plugin was creating
+ *   that never appeared within `CREATING_WAIT_MS`) or `failed` (after it: the Manager could not be reached, or
  *   created no successor in time). An entry past its bound reads as ended
  *   (`staleEndingOf`) until a write records it.
  * - **Its handoffs so far** (`handoffsDoneOf`) are the request's entries
@@ -59,10 +63,16 @@ export const NOTE_WAIT_MS = 10 * 60_000;
 export const MANAGER_WAIT_MS = 30 * 60_000;
 /** How long after the command the plugin waits for the successor (`agent.created` with `bm.handoffFrom`). */
 export const SUCCESSOR_WAIT_MS = 30 * 60_000;
+/**
+ * How long a successor the plugin is creating (`creating`) may take to appear
+ * before the handoff ends `no-successor`: a binding's pending time
+ * (`agent-bindings.ts` `PENDING_TTL_MS`).
+ */
+export const CREATING_WAIT_MS = 10 * 60_000;
 /** The longest reason kept, as a command's `why` (`MAX_COMMAND_WHY_CHARS`). */
 export const MAX_HANDOFF_REASON_CHARS = MAX_COMMAND_WHY_CHARS;
 
-export const HANDOFF_STATES = ["waiting", "noting", "briefed", "commanded", "done", "dropped", "failed"] as const;
+export const HANDOFF_STATES = ["waiting", "noting", "briefed", "creating", "commanded", "done", "dropped", "failed"] as const;
 export type HandoffState = (typeof HANDOFF_STATES)[number];
 /** Why an entry ended without a successor. */
 export const HANDOFF_ENDINGS = ["no-safe-point", "off", "finished", "no-manager", "loop-guard", "refused", "manager-busy", "unreachable", "no-successor"] as const;
@@ -97,6 +107,8 @@ export const handoffEntrySchema = z.object({
   /** The command to the Manager, as the commands store records it. */
   commandId: z.string().min(1).nullable(),
   commandSentAt: time.nullable(),
+  /** When the plugin began creating the successor for a bound Manager (`creating`); null otherwise. Absent in older files. */
+  creatingAt: time.nullable().default(null),
   /** The successor Worker, once `agent.created` showed it. */
   successorId: z.string().min(1).nullable(),
   successorAt: time.nullable(),
@@ -125,20 +137,27 @@ export interface HandoffStore {
   add(input: HandoffInput): HandoffEntry;
   /** Changes one entry in one write; `change` returning it unchanged writes nothing. Returns the entry as stored, or null when it is not there. */
   update(id: string, change: (entry: HandoffEntry) => HandoffEntry): HandoffEntry | null;
+  /**
+   * Moves a `briefed` entry to `creating` at now, in one write, only when it is
+   * `briefed` now (compare-and-set): the one caller that gets the entry back
+   * creates the successor; every other gets null. Never throws on a missing entry.
+   */
+  claimCreation(id: string): HandoffEntry | null;
   /** Ends every entry past its bound (`staleEndingOf`) at now; returns the entries it ended. */
   expire(): HandoffEntry[];
 }
 
 /** Pending: not ended, whatever its step. */
 export function isPendingHandoffState(state: HandoffState): boolean {
-  return state === "waiting" || state === "noting" || state === "briefed" || state === "commanded";
+  return state === "waiting" || state === "noting" || state === "briefed" || state === "creating" || state === "commanded";
 }
 
 /**
  * How a pending entry ends at `now` once past its bound: `no-safe-point` for
  * one `waiting` longer than `HANDOFF_SAFE_POINT_WAIT_MS`, `manager-busy` for a
  * brief not sent within `MANAGER_WAIT_MS`, `no-successor` for a command with
- * no successor within `SUCCESSOR_WAIT_MS`. A `noting` entry has no ending of
+ * no successor within `SUCCESSOR_WAIT_MS` or a creation the plugin began with
+ * no successor within `CREATING_WAIT_MS`. A `noting` entry has no ending of
  * its own: past `NOTE_WAIT_MS` it goes on without the note. Null while it is
  * within its bound, or not pending. Pure.
  */
@@ -153,6 +172,8 @@ export function staleEndingOf(entry: HandoffEntry, now: Date | number): HandoffE
       return past(entry.requestedAt, HANDOFF_SAFE_POINT_WAIT_MS) ? "no-safe-point" : null;
     case "briefed":
       return past(entry.briefAt, MANAGER_WAIT_MS) ? "manager-busy" : null;
+    case "creating":
+      return past(entry.creatingAt, CREATING_WAIT_MS) ? "no-successor" : null;
     case "commanded":
       return past(entry.commandSentAt, SUCCESSOR_WAIT_MS) ? "no-successor" : null;
     default:
@@ -246,6 +267,7 @@ export function createHandoffStore(home: string, deps: HandoffStoreDeps = {}): H
         brief: null,
         commandId: null,
         commandSentAt: null,
+        creatingAt: null,
         successorId: null,
         successorAt: null,
         endedAt: null,
@@ -255,6 +277,15 @@ export function createHandoffStore(home: string, deps: HandoffStoreDeps = {}): H
       return entry;
     },
     update,
+    claimCreation(id) {
+      let claimed = false;
+      const next = update(id, (current) => {
+        if (current.state !== "briefed") return current;
+        claimed = true;
+        return { ...current, state: "creating", creatingAt: now().toISOString() };
+      });
+      return claimed ? next : null;
+    },
     expire() {
       const at = now();
       const ended: HandoffEntry[] = [];

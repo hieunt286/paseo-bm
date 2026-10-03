@@ -325,8 +325,9 @@ describe("every label-trusting site reads knownRequestIdOf (design §16.4)", () 
       .filter((name) => direct.test(readFileSync(join(dir, name), "utf8")))
       .sort();
     // The registry itself; the collector's raw read, handed to knownRequestIdOf in the same function;
-    // a replacement Reviewer's and a handoff successor's match against what the plugin recorded.
-    expect(readers).toEqual(["collector.ts", "fallback-reviewer.ts", "handoff.ts", "request-registry.ts"]);
+    // a replacement Reviewer's and a handoff successor's match against what the plugin recorded;
+    // a late-settled creation's match against the pending binding the plugin issued (creation-settle.ts).
+    expect(readers).toEqual(["collector.ts", "creation-settle.ts", "fallback-reviewer.ts", "handoff.ts", "request-registry.ts"]);
     for (const site of ["paseo-directory.ts", "orchestrator-tool-context.ts", "fallback-state.ts", "action-boundary.ts", "collector.ts"]) {
       expect(readFileSync(join(dir, site), "utf8"), site).toContain("knownRequestIdOf(");
     }

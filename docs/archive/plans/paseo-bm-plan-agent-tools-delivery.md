@@ -2,13 +2,13 @@
 
 | Field | Value |
 |---|---|
-| Status | Active |
+| Status | Completed (2026-10-03): ADR-027 built in three ship points (A, B, C), accepted on an isolated daemon and folded into the base design (§5.5, §7.4, §7.7, §7.9, §7.10, §7.14–§7.16, §9, §10, §12); installing on the owner's daemon and the release are the owner's |
 | Plan-ready | PASS — 2026-10-03 — Claude under the owner's delegation (`plan-ready-for-beads` self-evaluated after an independent `reviewing-plan` pass and its re-check) |
 | Owner | hieu.nt10 |
-| Routing decision | [ADR-027 § Routing Decision](../adr/ADR-027-agents-write-content-code-carries-it.md#routing-decision) |
-| Requirements | [PRD](../product/paseo-bm-prd.md) REQ-037 (amended 2026-10-03), REQ-025 (c), (d), (f), M-17; [autonomy PRD](../product/paseo-bm-autonomy-prd.md) REQ-117 (b), (e) |
-| Decision | [ADR-027](../adr/ADR-027-agents-write-content-code-carries-it.md) decisions 1–11, Scope C1–C20 |
-| Technical Design | [paseo-bm.md](../design/paseo-bm.md) §16 |
+| Routing decision | [ADR-027 § Routing Decision](../../adr/ADR-027-agents-write-content-code-carries-it.md#routing-decision) |
+| Requirements | [PRD](../../product/paseo-bm-prd.md) REQ-037 (amended 2026-10-03), REQ-025 (c), (d), (f), M-17; [autonomy PRD](../../product/paseo-bm-autonomy-prd.md) REQ-117 (b), (e) |
+| Decision | [ADR-027](../../adr/ADR-027-agents-write-content-code-carries-it.md) decisions 1–11, Scope C1–C20 |
+| Technical Design | [paseo-bm.md](../../design/paseo-bm.md) §16 |
 | Starts after | Nothing for building. **Installing** a build with any WP below on the owner's daemon waits until the combined field period (`bm-autonomy-phase6-i8fc.6`) holds its window (ADR-027 Routing Decision) |
 | Target release | None in this plan: the owner tests, then picks the version and releases |
 | Beads | bm-agent-tools-1upv |
@@ -92,4 +92,6 @@ Q1 and Q2 are answered (ADR-027). The spikes may still amend ADR-027 and §16 (W
 | 2026-10-03 | Claude (owner's delegation; review decisions D-A–D-K) | Phase named; Plan-ready Pending; three ship points (A, B, and C = steps 3–5 as one build) with a Ship column and a fold-back at each; OD-1–OD-3 decided (§3); WP-707's exit on one counter, off-tool Reviewers and grants never answered by a precedent; WP-704 binds only where an endpoint is attached; WP-705's one backfill and `agent-typed` ids; WP-708's `no-verdict` per review call; WP-710's `waitingOn`/`waitingFor`; new WP-713 (step-4 live check) and WP-714 (the S5-pass cancel) |
 | 2026-10-03 | Claude (owner's delegation) | `plan-ready-for-beads` PASS after an independent review and re-check (14 WPs over the 8-WP warning, accepted: five steps, three ship points); BM-BUDGET line settled in ADR-027 decision 10; Status Active |
 | 2026-10-03 | Claude (`converting-plan-to-beads`, owner request) | Converted to beads: bm-agent-tools-1upv, 18 leaves |
-| 2026-10-03 | Claude (owner's delegation) | WP-703 done: S1, S2, S4, S5 all passed, no amendment ([run note](../archive/operations/paseo-bm-agent-tools-spikes-20261003.md)); WP-714 applies. Ship point A built (WP-701, WP-702). Open for the owner before ship point C is installed: the token's exposure on disk and in `ps` (design §16.13) |
+| 2026-10-03 | Claude (owner's delegation) | WP-703 done: S1, S2, S4, S5 all passed, no amendment ([run note](../operations/paseo-bm-agent-tools-spikes-20261003.md)); WP-714 applies. Ship point A built (WP-701, WP-702). Open for the owner before ship point C is installed: the token's exposure on disk and in `ps` (design §16.13) |
+| 2026-10-03 | Claude (owner's delegation) | Ship points B and C built; ship point C accepted on an isolated daemon ([run note](../operations/paseo-bm-agent-tools-acceptance-20261003.md)); design §16 folded into §5–§12 (WP-712); Status Completed, plan archived |
+| 2026-10-03 | Claude (owner's delegation) | `feature-done` PASS (standard profile): all 25 beads of bm-agent-tools-1upv closed; `npm run build` + `npm run verify` green (5132 + 3 + 134 tests, typecheck, lint), `npm run test:eval` 134; acceptance recorded (docs/archive/operations/paseo-bm-agent-tools-acceptance-20261003.md, with its re-run); the pre-release review of the agent-creation paths (design §9) done and its findings fixed; backward compatibility shown by tests and the hand-path run; migration N/A. Follow-up outside this plan: bm-w6bh. No release: the owner's call |

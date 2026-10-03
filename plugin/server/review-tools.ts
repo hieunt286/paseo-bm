@@ -30,7 +30,15 @@
  * - **The plugin's own Reviewers** (`createPluginReviewer`) are remembered
  *   while and after they are created, so the off-tool check
  *   (`off-tool-reviewer.ts`) never flags one, the replacement Reviewer of
- *   §16.9 (`fallback-reviewer.ts`) included.
+ *   §16.9 (`fallback-reviewer.ts`) included; one whose creation a reload or
+ *   Paseo's late error cut short is settled at `agent.created`
+ *   (`creation-settle.ts`).
+ * - **A creation call with no Reviewer** (`reviewerId` empty): Paseo threw
+ *   after the hook kept the token (`creationMayExist`), or a reload cut the
+ *   creation. The call is kept, so `agent.created` can name its Reviewer;
+ *   one still empty after `PENDING_TTL_MS` (a binding's pending time) is
+ *   cleared by the next `bm_create_reviewer` or `bm_rereview` of its batch
+ *   (`clearStaleCreateCalls`), which then starts from a free batch.
  *
  * Common rules (§16.6): a refusal is one line per reason and creates, stores or
  * sends nothing; a pending binding is refused by the shared guard; the request
@@ -38,7 +46,7 @@
  * throws into the endpoint.
  */
 import { join } from "node:path";
-import { createBound, guardActingTool, hasCreationTools, type AgentBinder, type ToolCaller } from "./agent-bindings";
+import { PENDING_TTL_MS, createBound, creationMayExist, guardActingTool, hasCreationTools, withoutTokenPaths, type AgentBinder, type ToolCaller } from "./agent-bindings";
 import { aliasBases } from "./alias-bases";
 import { parseReviews } from "./bm-report";
 import { readReviewBudget } from "./coordination-rpc";
@@ -57,7 +65,7 @@ import { profileOf } from "./role-mode";
 import type { ReconstructedTrace } from "./traces";
 import { CREATE_REVIEWER_FACE, REREVIEW_FACE, createReviewerRules, schemaIssues, type CreateReviewerInput } from "../shared/bm-tools";
 import type { Tier } from "../shared/contracts";
-import { REVIEW_BUDGET_SUBJECT, type Decision } from "../shared/decisions";
+import { REVIEW_BUDGET_SUBJECT, policyMayGrant, type Decision } from "../shared/decisions";
 import { overReviewCeiling, reviewCeilingOf } from "../shared/orchestrator-rules";
 import type { RuleReviewGrant } from "../shared/rule-input";
 import { reviewerBriefLineOf } from "../shared/notices";
@@ -152,7 +160,8 @@ export function clearPluginReviewers(): void {
   inFlight.clear();
 }
 
-function rememberReviewer(agentId: string): void {
+/** Remembers `agentId` as a Reviewer the plugin created (`createPluginReviewer`, or settled at `agent.created`). */
+export function markPluginReviewer(agentId: string): void {
   pluginReviewers.add(agentId);
   if (pluginReviewers.size <= PLUGIN_REVIEWERS_LIMIT) return;
   const oldest = pluginReviewers.values().next().value;
@@ -237,7 +246,7 @@ export async function createPluginReviewer(
         }),
       log,
     );
-    rememberReviewer(created.id);
+    markPluginReviewer(created.id);
     return { reviewerId: created.id };
   } finally {
     done();
@@ -345,6 +354,35 @@ export function budgetRefusal(state: ReviewBudgetState, requestId: string, batch
   return budgetRefusalOf({ requestId, calls: state.calls, budget: state.ceiling, tier: state.tier, batchId });
 }
 
+/** True for a create call whose Reviewer never got its id: Paseo's late error, or a reload in the creation. */
+function isEmptyCreateCall(call: ReviewBatch["calls"][number]): boolean {
+  return call.kind === "create" && call.reviewerId === "";
+}
+
+/**
+ * Clears the request's create calls whose Reviewer never appeared within
+ * `PENDING_TTL_MS` of the call (design §16.8): a batch with no Reviewer and
+ * only such a call is free again. Returns the request as it stands after.
+ * Throws when the registry cannot be written.
+ */
+export function clearStaleCreateCalls(home: string, request: RegisteredRequest, now: Date, log: (message: string) => void): RegisteredRequest {
+  const stale = request.reviews.batches
+    .filter((batch) => batch.reviewerIds.length === 0)
+    .flatMap((batch) => batch.calls.filter((call) => isEmptyCreateCall(call) && now.getTime() - (Date.parse(call.at) || 0) > PENDING_TTL_MS));
+  if (stale.length === 0) return request;
+  const registry = createRequestRegistry(home, { log });
+  for (const call of stale) {
+    registry.removeReviewCall(request.workspaceId, request.requestId, call.callId);
+    log(`[paseo-bm] the review call ${call.callId} of ${request.requestId} created no Reviewer in time; its batch is free again.`);
+  }
+  return registry.get(request.workspaceId, request.requestId) ?? request;
+}
+
+/** The answer to a call on a batch whose Reviewer is still being created (an empty create call, within its time). */
+function stillCreatingOf(batchId: string, nothing: string): ServerToolAnswer {
+  return refused(`The Reviewer of batch ${batchId} is still being created; try again in a moment, or open a new batch. ${nothing}`);
+}
+
 /** Runs the review tools of one request one at a time: a check and its record never interleave with another call's. */
 const queues = new Map<string, Promise<unknown>>();
 function serialised<T>(key: string, work: () => Promise<T>): Promise<T> {
@@ -392,6 +430,11 @@ export function applyReviewBudgetGrants(
     const key = decision.answer.optionKey;
     const grant = key === null ? undefined : decision.options.find((option) => option.key === key)?.grant;
     if (grant === undefined) continue;
+    // The owner's policy grants at most { calls: 2 } (bm_decide refuses more); should one ever have, it grants nothing.
+    if (decision.answer.by === "policy" && !policyMayGrant(grant)) {
+      log(`[paseo-bm] the review-budget answer of ${decision.id} by the owner's policy grants more than it may; nothing was granted.`);
+      continue;
+    }
     try {
       const outcome = createRequestRegistry(home, { log }).addGrant(decision.workspaceId, decision.requestId!, {
         decisionId: decision.id,
@@ -530,8 +573,15 @@ export function createReviewTools(deps: ReviewToolDeps): ServerTools {
     return serialised(`${worker.workspaceId}:${worker.requestId}`, async () => {
       const found = await standing(home, paseo, worker, nothing);
       if ("ok" in found) return found;
-      const { request, state } = found;
+      const { state } = found;
+      let request: RegisteredRequest;
+      try {
+        request = clearStaleCreateCalls(home, found.request, now(), log);
+      } catch (error) {
+        return refused(`paseo-bm could not write its request registry (${reasonOf(error)}); nothing was created. Tell the owner in one line.`);
+      }
       const batch = request.reviews.batches.find((entry) => entry.batchId === typed.batchId);
+      if (batch !== undefined && batch.reviewerIds.length === 0 && batch.calls.some(isEmptyCreateCall)) return stillCreatingOf(typed.batchId, nothing);
       if (batch !== undefined && (batch.reviewerIds.length > 0 || batch.calls.some((call) => call.kind === "create"))) {
         return refused(`Batch ${typed.batchId} already has a Reviewer: use bm_rereview for its re-review, or open a new batch. ${nothing}`);
       }
@@ -585,14 +635,29 @@ export function createReviewTools(deps: ReviewToolDeps): ServerTools {
           { binder: deps.binder?.() ?? null, log },
         ));
       } catch (error) {
+        // Paseo's refusal, verbatim but for a token path (design §16.5: a token never reaches an agent or a log).
+        const reason = withoutTokenPaths(reasonOf(error));
+        // Paseo threw after the hook kept the token: the Reviewer may exist. The call stays, so its
+        // agent.created names it (creation-settle.ts); otherwise it is cleared after PENDING_TTL_MS.
+        if (creationMayExist(error)) {
+          const named = registryOf(home)
+            .get(worker.workspaceId, request.requestId)
+            ?.reviews.batches.find((entry) => entry.batchId === typed.batchId)
+            ?.calls.find((call) => call.callId === callId && call.reviewerId !== "");
+          if (named !== undefined) return answered({ reviewerId: named.reviewerId, batchId: typed.batchId, reviewCalls: await countAfter(home, paseo, worker, state) });
+          log(`[paseo-bm] ${CREATE_REVIEWER_TOOL}: Paseo answered the Reviewer of batch ${typed.batchId} for Worker ${worker.agentId} with an error after it may have created it: ${reason}`);
+          return refused(
+            `Paseo answered with an error after it may have created the Reviewer: ${reason}. If the Reviewer appears, its review reaches you as usual; if not, batch ${typed.batchId} is free again in 10 minutes, or open a new batch.`,
+          );
+        }
         // A failed creation removes its call: it never happened.
         try {
           registryOf(home).removeReviewCall(worker.workspaceId, request.requestId, callId);
         } catch (removal) {
           log(`[paseo-bm] could not remove the failed review call ${callId} of ${request.requestId}: ${reasonOf(removal)}`);
         }
-        log(`[paseo-bm] ${CREATE_REVIEWER_TOOL} could not create the Reviewer of batch ${typed.batchId} for Worker ${worker.agentId}: ${reasonOf(error)}`);
-        return refused(`Paseo refused to create the Reviewer: ${reasonOf(error)}. ${nothing}`);
+        log(`[paseo-bm] ${CREATE_REVIEWER_TOOL} could not create the Reviewer of batch ${typed.batchId} for Worker ${worker.agentId}: ${reason}`);
+        return refused(`Paseo refused to create the Reviewer: ${reason}. ${nothing}`);
       }
 
       try {
@@ -638,9 +703,16 @@ export function createReviewTools(deps: ReviewToolDeps): ServerTools {
     const nothing = "Nothing was sent.";
 
     return serialised(`${worker.workspaceId}:${worker.requestId}`, async () => {
-      const known = registryOf(home).get(worker.workspaceId, worker.requestId);
+      const stored = registryOf(home).get(worker.workspaceId, worker.requestId);
+      let known: RegisteredRequest | null;
+      try {
+        known = stored === null ? null : clearStaleCreateCalls(home, stored, now(), log);
+      } catch (error) {
+        return refused(`paseo-bm could not write its request registry (${reasonOf(error)}); nothing was sent. Tell the owner in one line.`);
+      }
       const batch = known?.reviews.batches.find((entry) => entry.batchId === batchId);
       if (known === null || batch === undefined) return refused(`paseo-bm knows no batch ${batchId} of ${worker.requestId}: open it with bm_create_reviewer. ${nothing}`);
+      if (batch.reviewerIds.length === 0 && batch.calls.some(isEmptyCreateCall)) return stillCreatingOf(batchId, nothing);
       const target = await liveReviewerOf(paseo, batch);
       if (target === null) return refused(`Batch ${batchId} has no Reviewer yet: create it with bm_create_reviewer. ${nothing}`);
       if ("archived" in target) return refused(`Reviewer ${target.archived} of batch ${batchId} is archived: create a new batch with bm_create_reviewer. ${nothing}`);

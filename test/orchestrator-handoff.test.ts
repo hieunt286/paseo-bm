@@ -28,7 +28,7 @@ import {
   replacedNoticeOf,
   type HandoffRunner,
 } from "../plugin/server/handoff";
-import { HANDOFFS_DIR_NAME, MANAGER_WAIT_MS, NOTE_WAIT_MS, SUCCESSOR_WAIT_MS, createHandoffStore, type HandoffEntry } from "../plugin/server/handoff-store";
+import { CREATING_WAIT_MS, HANDOFFS_DIR_NAME, MANAGER_WAIT_MS, NOTE_WAIT_MS, SUCCESSOR_WAIT_MS, createHandoffStore, type HandoffEntry } from "../plugin/server/handoff-store";
 import { createInterventionStore } from "../plugin/server/intervention-store";
 import { createNoticeQueue, type NoticeQueue } from "../plugin/server/notice-queue";
 import { ORCHESTRATOR_INSTRUCTIONS_HASH } from "../plugin/server/orchestrator-agent";
@@ -540,20 +540,77 @@ describe("a bound Manager: the plugin creates the successor, the Manager is info
   }
 
   /** The daemon with a bm-worker profile on Claude; each creation runs the hook's part that keeps the token URL. */
-  function boundDaemon(bindings: BindingStore, hooks: { created?: (request: FakeCreateRequest) => void; onSend?: (message: { id: string; text: string }) => void } = {}): FakePaseo<unknown> {
+  function boundDaemon(
+    bindings: BindingStore,
+    hooks: {
+      created?: (request: FakeCreateRequest) => void;
+      onSend?: (message: { id: string; text: string }) => void;
+      /** Runs after the hook kept the token URL: it may hold the creation, or throw as Paseo's late error. */
+      afterHook?: () => Promise<void>;
+    } = {},
+  ): FakePaseo<unknown> {
     const created = hooks.created ?? (() => {});
     return daemon({
       extra: {
         ...(hooks.onSend === undefined ? {} : { onSend: hooks.onSend }),
         config: { agentProfiles: [{ id: "bm-worker", provider: "bm-worker", model: "claude-opus-5" }], providers: { "bm-worker": { extends: "claude" } }, mcp: { injectIntoAgents: true } },
         providers: { modes: { "bm-worker": [{ id: "default", colorTier: "safe" }, { id: "bypassPermissions", colorTier: "dangerous" }] } },
-        created: (request) => {
+        created: async (request) => {
           created(request);
           applyAgentTools({ config: { ...request.config, cwd: request.cwd } } as unknown as AgentCreateRequest, { urlFor: ROLE_URL, bindings }, "claude");
+          await hooks.afterHook?.();
           return {};
         },
       },
     });
+  }
+
+  /** The note turn of the outgoing Worker, at minute 32: the turn that builds the brief and creates the successor. */
+  function noteTurn(): TraceRecord {
+    const posted = `BM-REPORT\nrequestId: ${REQUEST}\nphase: beads-done\ntier: Large (changed: no)\nfilesChanged: src/invoice/date.ts\nbeadsCreated: none\nbeadsUpdated: none\nbeadsClosed: bm-d1\nbeadsReady: bm-d2\nreviewFindingsOpen: none\nbuildAndTests: \`npm test\` pass\nskillsUsed: none\ndecided: none\nblockers: none\nhandoffNote: Parsing is done; next, bm-d2.`;
+    return workerTurn(32, { startedAt: iso(T0 + 31 * MIN), reports: parseReports(posted, { agentId: WORKER, at: iso(T0 + 32 * MIN) }) });
+  }
+
+  /** The successor as Paseo lists it once created: labelled bm.handoffFrom, under the Manager. */
+  const SUCCESSOR = "agent-successor";
+  const successorAgent = () => ({
+    id: SUCCESSOR,
+    provider: "bm-worker/claude-opus-5",
+    status: "idle",
+    workspaceId: WORKSPACE_ID,
+    labels: { "bm.role": "worker", "bm.requestId": REQUEST, [HANDOFF_FROM_LABEL]: WORKER, "paseo.parent-agent-id": MANAGER },
+    createdAt: iso(T0 + 33 * MIN),
+    archivedAt: null,
+  });
+
+  /**
+   * Run 1 accepts the handoff, builds the brief and starts creating the successor, then is cut (a reload):
+   * its creation never returns. Returns the daemon and run 2's runner, which knows nothing of run 1.
+   */
+  async function cutMidCreation(): Promise<{ fake: FakePaseo<unknown>; next: HandoffRunner }> {
+    await store(...heavyRequest());
+    const bindings = createBindingStore(home);
+    bindManager(bindings, true);
+    createRequestRegistry(home).register(WORKSPACE_ID, REQUEST, { source: "tool", managerId: MANAGER, workerId: WORKER });
+    let entered!: () => void;
+    const inCreation = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    // The creation reaches Paseo, which creates the agent, and never answers this run.
+    const fake = boundDaemon(bindings, {
+      afterHook: () => {
+        entered();
+        return new Promise<void>(() => {});
+      },
+    });
+    const first = runnerOf(() => binderOf(ROLE_URL, bindings, () => {}));
+    await handoff(toolsOf(fake, first));
+    clock = new Date(T0 + 32 * MIN);
+    fake.byId(WORKER)!.status = "idle";
+    void first.turnRecorded({ agent: { id: WORKER }, timeline: [] }, noteTurn(), fake.paseo);
+    await inCreation;
+    expect(handoffs().list()[0]).toMatchObject({ state: "creating", creatingAt: clock.toISOString(), successorId: null });
+    return { fake, next: runnerOf(() => binderOf(ROLE_URL, bindings, () => {})) };
   }
 
   /** The handoff accepted, the note asked, and the note turn recorded: the step where the successor is made. */
@@ -642,6 +699,91 @@ describe("a bound Manager: the plugin creates the successor, the Manager is info
     expect(handoffs().list()[0]).toMatchObject({ state: "done", successorId: "created-1" });
     expect(labelled).toHaveLength(1);
     expect(logs.join("\n")).not.toMatch(/no handoff of that Worker/);
+  });
+
+  it("two turn ends at once create exactly one successor: the first claims the brief (briefed → creating), the second finds it claimed", async () => {
+    await store(...heavyRequest());
+    const bindings = createBindingStore(home);
+    bindManager(bindings, true);
+    createRequestRegistry(home).register(WORKSPACE_ID, REQUEST, { source: "tool", managerId: MANAGER, workerId: WORKER });
+    const fake = boundDaemon(bindings);
+    const runner = runnerOf(() => binderOf(ROLE_URL, bindings, () => {}));
+    await handoff(toolsOf(fake, runner));
+    clock = new Date(T0 + 32 * MIN);
+    fake.byId(WORKER)!.status = "idle";
+    // The same turn end delivered twice, concurrently (and a third while the creation runs).
+    await Promise.all([
+      runner.turnRecorded({ agent: { id: WORKER }, timeline: [] }, noteTurn(), fake.paseo),
+      runner.turnRecorded({ agent: { id: WORKER }, timeline: [] }, noteTurn(), fake.paseo),
+      runner.turnRecorded({ agent: { id: MANAGER }, timeline: [] }, null, fake.paseo),
+    ]);
+    expect(fake.creates).toHaveLength(1);
+    expect(handoffs().list()).toMatchObject([{ state: "done", successorId: "created-1" }]);
+    expect(createRequestRegistry(home).get(WORKSPACE_ID, REQUEST)!.workerIds).toEqual([WORKER, "created-1"]);
+    expect(fake.sends.map((sent) => sent.id)).toEqual([WORKER, MANAGER, WORKER]);
+    expect(labelled).toHaveLength(1);
+  });
+
+  it("a reload during the creation: the next run completes it from Paseo's agent list, with no second successor", async () => {
+    const { fake, next } = await cutMidCreation();
+    // Paseo did create it; run 1 never heard back.
+    fake.agents.push(successorAgent());
+    clock = new Date(T0 + 34 * MIN);
+    await next.turnRecorded({ agent: { id: MANAGER }, timeline: [] }, null, fake.paseo);
+    expect(fake.creates).toHaveLength(1);
+    expect(handoffs().list()[0]).toMatchObject({ state: "done", successorId: SUCCESSOR, ending: null });
+    expect(createRequestRegistry(home).get(WORKSPACE_ID, REQUEST)).toMatchObject({ managerId: MANAGER, workerIds: [WORKER, SUCCESSOR] });
+    expect(fake.sends.map((sent) => sent.id)).toEqual([WORKER, MANAGER, WORKER]);
+    expect(parseCommandBlock(fake.sends[1]!.text)!.body).toBe(handoffInfoOf(handoffs().list()[0]!, SUCCESSOR));
+    expect(labelled).toEqual([{ id: WORKER, labels: { [REPLACED_BY_LABEL]: SUCCESSOR } }]);
+    // A later turn end does nothing more.
+    await next.turnRecorded({ agent: { id: MANAGER }, timeline: [] }, null, fake.paseo);
+    expect(fake.creates).toHaveLength(1);
+    expect(fake.sends).toHaveLength(3);
+  });
+
+  it("a reload during the creation: the successor's agent.created in the next run completes it", async () => {
+    const { fake, next } = await cutMidCreation();
+    fake.agents.push(successorAgent());
+    const done = await next.agentCreated({ id: SUCCESSOR, provider: "bm-worker/claude-opus-5", parentAgentId: MANAGER, workspaceId: WORKSPACE_ID }, fake.paseo);
+    expect(done).toMatchObject({ state: "done", successorId: SUCCESSOR });
+    expect(fake.creates).toHaveLength(1);
+    expect(createRequestRegistry(home).get(WORKSPACE_ID, REQUEST)!.workerIds).toEqual([WORKER, SUCCESSOR]);
+    expect(fake.sends.map((sent) => sent.id)).toEqual([WORKER, MANAGER, WORKER]);
+  });
+
+  it("a reload during the creation and no successor ever appears: it ends dropped, no-successor, and nothing is created again", async () => {
+    const { fake, next } = await cutMidCreation();
+    clock = new Date(clock.getTime() + CREATING_WAIT_MS - 1_000);
+    await next.turnRecorded({ agent: { id: MANAGER }, timeline: [] }, null, fake.paseo);
+    expect(handoffs().list()[0]).toMatchObject({ state: "creating" });
+    clock = new Date(clock.getTime() + 2_000);
+    await next.turnRecorded({ agent: { id: MANAGER }, timeline: [] }, null, fake.paseo);
+    expect(handoffs().list()[0]).toMatchObject({ state: "dropped", ending: "no-successor", successorId: null });
+    expect(fake.creates).toHaveLength(1);
+    expect(fake.sends.map((sent) => sent.id)).toEqual([WORKER]);
+  });
+
+  it("Paseo errs after the hook kept the token: the handoff stays creating, and the successor's agent.created completes it", async () => {
+    await store(...heavyRequest());
+    const bindings = createBindingStore(home);
+    bindManager(bindings, true);
+    createRequestRegistry(home).register(WORKSPACE_ID, REQUEST, { source: "tool", managerId: MANAGER, workerId: WORKER });
+    const fake = boundDaemon(bindings, {
+      afterHook: async () => {
+        throw new Error("socket hang up");
+      },
+    });
+    const runner = runnerOf(() => binderOf(ROLE_URL, bindings, () => {}));
+    await upToTheBrief(fake, runner);
+    expect(handoffs().list()[0]).toMatchObject({ state: "creating", successorId: null });
+    expect(logs.join("\n")).toContain("waiting for it to appear");
+    expect(fake.sends.map((sent) => sent.id)).toEqual([WORKER]);
+    // The binding stays pending, for agent.created to settle (creation-settle.ts).
+    expect(bindings.list().filter((binding) => binding.role === "worker")).toMatchObject([{ state: "pending", requestId: REQUEST, parentId: MANAGER }]);
+    fake.agents.push(successorAgent());
+    expect(await runner.agentCreated({ id: SUCCESSOR, provider: "bm-worker/claude-opus-5", parentAgentId: MANAGER, workspaceId: WORKSPACE_ID }, fake.paseo)).toMatchObject({ state: "done", successorId: SUCCESSOR });
+    expect(fake.sends.map((sent) => sent.id)).toEqual([WORKER, MANAGER, WORKER]);
   });
 
   it("refused before anything is created: at the loop guard, and when Paseo refuses the successor", async () => {

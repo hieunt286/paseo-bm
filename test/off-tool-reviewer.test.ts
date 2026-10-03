@@ -13,11 +13,13 @@ import {
   clearOffToolAlert,
   clearOffToolAlertsOfRequest,
   offToolReviewerOf,
+  registerOffToolTurnCancel,
   type OffToolReviewer,
 } from "../plugin/server/off-tool-reviewer";
+import { settleCreatedAgent } from "../plugin/server/creation-settle";
 import type { CancelResult } from "../plugin/server/paseo-cli";
-import { clearRequestRegistryCache } from "../plugin/server/request-registry";
-import { clearPluginReviewers, createPluginReviewer, type ReviewerCreationPaseo } from "../plugin/server/review-tools";
+import { clearRequestRegistryCache, createRequestRegistry } from "../plugin/server/request-registry";
+import { clearPluginReviewers, createPluginReviewer, isPluginReviewer, type ReviewerCreationPaseo } from "../plugin/server/review-tools";
 import { applyAgentTools, type AgentCreateRequest } from "../plugin/server/role-hook";
 import { reconstructTraces, type AgentFacts } from "../plugin/server/traces";
 import { alertKeyOf } from "../plugin/shared/alerts";
@@ -194,6 +196,86 @@ describe("an off-tool Reviewer (design §16.8)", () => {
     expect(await checkOffToolReviewer(created("rev-2", HAND_WORKER), null, deps)).toBeNull();
     expect(createAlertStore(home).list({ open: true })).toEqual([]);
     expect(published).toEqual([]);
+  });
+});
+
+describe("the plugin's own Reviewer whose creation was cut short (design §16.5, §16.8)", () => {
+  const CALL = "out-000000000c01";
+
+  /** bm_create_reviewer's state when a reload cut it, or Paseo threw after the hook kept the token: the call recorded, no Reviewer named. */
+  function cutShort(home: string) {
+    const registry = createRequestRegistry(home, { backfill: () => [] });
+    registry.register(WS, REQ, { source: "tool", managerId: MANAGER, workerId: WORKER });
+    registry.addReviewCall(WS, REQ, "b1", { callId: CALL, kind: "create", reviewerId: "", at: T0.toISOString() }, "Review batch b1.");
+  }
+  const daemonWith = (id: string, parent: string, batchId = "b1") =>
+    fakePaseo({ agents: [{ id, provider: "bm-reviewer/gpt-5.6", workspaceId: WS, labels: { "bm.role": "reviewer", "bm.requestId": REQ, "bm.batchId": batchId, "paseo.parent-agent-id": parent } }] });
+
+  it("a bound Reviewer: agent.created settles its attached pending binding and names it in the registry, so it is not off-tool", async () => {
+    const { home, store, deps, published, cancelled } = setup();
+    cutShort(home);
+    const { token } = store.issue({ role: "reviewer", workspaceId: WS, requestId: REQ, parentId: WORKER, batchId: "b1", creationTools: true });
+    store.attach(token, "reviewer");
+    const fake = daemonWith("rev-1", WORKER);
+    const settled = await settleCreatedAgent(created("rev-1", WORKER), fake.paseo, { home, bindings: store, log: () => {} });
+    expect(settled).toMatchObject({ own: true, repairedCallId: CALL });
+    expect(store.bindingOfAgent("rev-1")).toMatchObject({ state: "bound", role: "reviewer", batchId: "b1", parentId: WORKER, creationTools: true });
+    expect(createRequestRegistry(home).get(WS, REQ)!.reviews.batches[0]).toMatchObject({ reviewerIds: ["rev-1"], calls: [{ callId: CALL, reviewerId: "rev-1" }] });
+    expect(await checkOffToolReviewer(created("rev-1", WORKER), fake.paseo, deps)).toBeNull();
+    expect(createAlertStore(home).list({ open: true })).toEqual([]);
+    expect(published).toEqual([]);
+    expect(cancelled).toEqual([]);
+  });
+
+  it("an unbound one (a provider without tools): the registry names it because its parent is the request's Worker", async () => {
+    const { home, store, deps } = setup();
+    cutShort(home);
+    const settled = await settleCreatedAgent(created("rev-pi", WORKER), daemonWith("rev-pi", WORKER).paseo, { home, bindings: store, log: () => {} });
+    expect(settled).toMatchObject({ own: true, binding: null, repairedCallId: CALL });
+    expect(isPluginReviewer("rev-pi")).toBe(true);
+    expect(await checkOffToolReviewer(created("rev-pi", WORKER), null, deps)).toBeNull();
+  });
+
+  it("a Reviewer that only copies the labels is not settled: another parent, or the batch already named", async () => {
+    const { home, store, deps } = setup();
+    cutShort(home);
+    bindWorker(store, "agent-other-worker");
+    // Not the request's Worker: the label alone is not trusted.
+    expect(await settleCreatedAgent(created("rev-x", "agent-other-worker"), daemonWith("rev-x", "agent-other-worker").paseo, { home, bindings: store, log: () => {} })).toMatchObject({ own: false });
+    expect(createRequestRegistry(home).get(WS, REQ)!.reviews.batches[0]!.reviewerIds).toEqual([]);
+    // The batch named once: a second Reviewer with the same labels is off-tool.
+    await settleCreatedAgent(created("rev-1", WORKER), daemonWith("rev-1", WORKER).paseo, { home, bindings: store, log: () => {} });
+    expect(await settleCreatedAgent(created("rev-2", WORKER), daemonWith("rev-2", WORKER).paseo, { home, bindings: store, log: () => {} })).toMatchObject({ own: false });
+    expect(await checkOffToolReviewer(created("rev-2", WORKER), null, deps)).not.toBeNull();
+  });
+});
+
+describe("an off-tool Reviewer's later turns (design §16.8 step 4)", () => {
+  it("every turn it starts while its alert is open is cancelled; any other Reviewer's turn is left alone", async () => {
+    const { home, deps } = setup();
+    await checkOffToolReviewer(created("rev-1", WORKER), null, deps);
+    const handlers: Array<(event: unknown) => Promise<void>> = [];
+    const host = { on: (_name: string, handler: (event: unknown) => Promise<void>) => (handlers.push(handler), () => {}) };
+    const ids: string[] = [];
+    const logs: string[] = [];
+    registerOffToolTurnCancel(host as never, () => home, {
+      cancel: async (agentId: string) => {
+        ids.push(agentId);
+        return { ok: true, stopped: true };
+      },
+      log: (line) => logs.push(line),
+    });
+    expect(handlers).toHaveLength(1);
+    const started = (id: string, provider = "bm-reviewer/gpt-5.6") => handlers[0]!({ agent: { id, provider, workspaceId: WS, parentAgentId: WORKER, cwd: "/repo", title: null }, turnId: "t" });
+    await started("rev-1");
+    await started("rev-2");
+    await started("rev-1", "bm-worker/claude-opus-5");
+    expect(ids).toEqual(["rev-1"]);
+    expect(logs).toEqual(["[paseo-bm] cancelled the turn the off-tool Reviewer rev-1 started."]);
+    // Archived (its alert cleared): its turns are no longer cancelled.
+    clearOffToolAlert(home, "rev-1");
+    await started("rev-1");
+    expect(ids).toEqual(["rev-1"]);
   });
 });
 

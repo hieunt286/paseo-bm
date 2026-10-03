@@ -594,7 +594,7 @@ export function binderOf(
       }
     },
     settle: (issued, agentId) => bindings.settle(issued.tokenSha256, agentId),
-    discard: (issued) => bindings.discard(issued.tokenSha256),
+    discard: (issued) => (bindings.discard(issued.tokenSha256) === "kept" ? "kept" : undefined),
   };
 }
 

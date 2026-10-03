@@ -162,11 +162,12 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     // design §A.11), plus the action boundary's two permission hooks (§D.2),
     // plus the interruption watch's permission_resolved (ADR-024),
     // plus the binding lifecycle's agent.archived (design §16.5),
-    // plus the off-tool Reviewer alert's clear on agent.archived (design §16.8).
+    // plus the off-tool Reviewer alert's clear on agent.archived (design §16.8),
+    // plus the off-tool Reviewer's turn cancel on agent.turn_started (§16.8 step 4).
     // The no-verdict check (§16.10) rides on the fallback detection's
     // turn_ended handler (its afterDetection), so it adds no hook.
     // The question–answer ledger's turn_ended is retired (§A.14).
-    expect(server.on).toHaveBeenCalledTimes(14);
+    expect(server.on).toHaveBeenCalledTimes(15);
     expect([...hooks.keys()].sort()).toEqual([
       "agent.archived",
       "agent.created",
@@ -425,15 +426,16 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
   it("removes the hook on cleanup", () => {
     const { cleanup, hooks, removers } = setup();
     cleanup();
-    // Fourteen removals, one per registration: this hook, the WP-205
+    // Fifteen removals, one per registration: this hook, the WP-205
     // collector's turn_started and turn_ended, delta 20260918g's agent.created,
     // turn_started scan and turn_ended BM-FORMAT check, delta 20260921's
     // fallback detection (turn_ended, which also runs the §16.10 no-verdict
     // check), the outdated-agents pass (turn_started, agent.archived), the
     // action boundary (permission_requested, permission_resolved; §D.2), the
     // interruption watch (permission_resolved; ADR-024), the binding
-    // lifecycle (agent.archived; §16.5) and the off-tool Reviewer alert's
-    // clear (agent.archived; §16.8). The map must end up empty.
+    // lifecycle (agent.archived; §16.5), the off-tool Reviewer alert's
+    // clear (agent.archived; §16.8) and its turn cancel (agent.turn_started;
+    // §16.8 step 4). The map must end up empty.
     expect([...removers].sort()).toEqual([
       "agent.archived",
       "agent.archived",
@@ -446,6 +448,7 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
       "agent.turn_ended",
       "agent.turn_ended",
       "agent.turn_ended",
+      "agent.turn_started",
       "agent.turn_started",
       "agent.turn_started",
       "agent.turn_started",

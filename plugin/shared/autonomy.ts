@@ -5,8 +5,11 @@ import {
   decisionClassSchema,
   decisionKindOf,
   DECISION_CLASSES,
+  MAX_POLICY_REVIEW_GRANT_CALLS,
   notOpenRefusalOf,
+  policyMayGrant,
   preparedChangeRefusalText,
+  REVIEW_BUDGET_SUBJECT,
   type Decision,
   type DecisionClass,
   type DecisionOption,
@@ -388,7 +391,21 @@ export function decideRefusalOf(
   if (modeOf(policy, decision.workspaceId, decisionClass) !== "delegate") {
     return `${decisionClass} is not delegated to you in project ${decision.workspaceId}; the owner decides it, so leave it to the owner`;
   }
-  return choice === undefined ? null : unverifiedFinishRefusalOf(decision, choice.optionKey, choice.finishedUnverified);
+  if (choice === undefined) return null;
+  return reviewGrantRefusalOf(decision, choice.optionKey) ?? unverifiedFinishRefusalOf(decision, choice.optionKey, choice.finishedUnverified);
+}
+
+/**
+ * Why the owner's policy may not choose `optionKey` of a `review-budget`
+ * question (design §16.8), or null when it may: an option granting more than
+ * `{ calls: MAX_POLICY_REVIEW_GRANT_CALLS }`, or `{ untilClean }`, is the
+ * owner's — the question then waits for them. Pure.
+ */
+export function reviewGrantRefusalOf(decision: Pick<Decision, "id" | "subject" | "options">, optionKey: string): string | null {
+  if (decision.subject !== REVIEW_BUDGET_SUBJECT) return null;
+  const option = decision.options.find((entry) => entry.key === optionKey);
+  if (option === undefined || policyMayGrant(option.grant)) return null;
+  return `option ${optionKey} of ${decision.id} grants more review calls than the owner's policy may (at most { calls: ${MAX_POLICY_REVIEW_GRANT_CALLS} }, never untilClean); choose a smaller grant or none, or leave decision ${decision.id} to the owner`;
 }
 
 /**

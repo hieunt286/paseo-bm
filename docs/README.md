@@ -69,7 +69,6 @@ A plan exists only for a piece of Designed work and moves to the archive when it
 | Plan | State |
 |---|---|
 | Autonomy programme: [phase1b](plans/paseo-bm-plan-autonomy-phase1b.md), [phase2](plans/paseo-bm-plan-autonomy-phase2.md), [phase3](plans/paseo-bm-plan-autonomy-phase3.md), [phase4](plans/paseo-bm-plan-autonomy-phase4.md), [phase5](plans/paseo-bm-plan-autonomy-phase5.md), [phase6](plans/paseo-bm-plan-autonomy-phase6.md) | Every phase is built and shipped in 0.5.0. What is open is each phase's exit, judged together in the combined field period (bead `bm-autonomy-phase6-i8fc.6`), then the programme evaluation. The change-deltas 001–014 are applied and [archived](archive/README.md#the-autonomy-programmes-change-deltas) |
-| [Agent tools that create and deliver](plans/paseo-bm-plan-agent-tools-delivery.md) (ADR-027) | Active, plan-ready PASS: fourteen work packages in ADR-027's five steps, spikes first; installing on the owner's daemon waits for the field period |
 
 ## Running it — `operations/`
 
