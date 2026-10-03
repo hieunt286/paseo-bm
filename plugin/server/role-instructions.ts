@@ -88,11 +88,113 @@ export interface RuntimeFacts {
   actionBoundary?: BoundaryPosture;
   /**
    * The agent is bound (design §16.5): the plugin created it with its own
-   * tool token and the creation hook kept that URL. Its Runtime facts carry no
-   * hand-path templates once the role files teach the tools (§16.12, step 5);
-   * until then the text is the same either way. Absent: unbound.
+   * tool token and the creation hook kept that URL. Its Runtime facts then
+   * carry neither the `### Without paseo-bm's tools` part nor the child mode
+   * line, both of which serve only creating and sending by hand (§16.12).
+   * Absent: unbound.
    */
   bound?: boolean;
+}
+
+/**
+ * The part of an unbound agent's Runtime facts that holds the hand-written
+ * path (design §16.12, ADR-027 decision 9): exactly what the role files no
+ * longer teach, and the role's one send line of §16.5 (`BUILDER_SEND_LINES`
+ * in `agent-tools.ts`, pinned equal by the tests). Agent-facing, so English.
+ * No line of it starts with `## ` or `Action boundary:`, and none holds
+ * ` mode: `, so the readers of the facts section still find what they read.
+ */
+export const HAND_PATH_HEADING = "### Without paseo-bm's tools";
+
+const HAND_PATH_LEAD =
+  "You were created without paseo-bm's delivering tools, so this part replaces what your role file says about them, and a missing `bm_` tool is no reason to stop here.";
+
+/** The Worker's hand path: asking, the Reviewer, the re-review, the budget and reporting by hand. */
+export const WORKER_HAND_PATH = [
+  HAND_PATH_HEADING,
+  "",
+  `${HAND_PATH_LEAD} \`bm_questions\`, \`bm_create_reviewer\` and \`bm_rereview\` are not yours; \`bm_report\`, if you have it, only builds a block.`,
+  "",
+  "**Asking.** Number your questions `Q1`, `Q2`, … across the request, at most 5 per round, each one line with exactly one recommended, and give each a `class` (riskiest first: security, data, release, cost, dependency, environment, scope, preference, reversible-technical; the riskier when unsure). Send them with `blocked` through `bm_report` (its `questions`), then end the turn. Without `bm_report`, write the block yourself:",
+  "",
+  "```",
+  "BM-QUESTIONS",
+  "requestId: req-20260917T010956Z",
+  'Q1: Storage — the request says "save the user list" but not where. [subject: user-list-storage] [class: data]',
+  "- a: the existing Postgres `users` table: no migration, ready today. (recommended) [effects: none]",
+  "- b: a new table: needs a migration, which makes this request Large. [effects: migration]",
+  "```",
+  "",
+  "Answers come as `BM-DELIVERY answers`, then `Continue <requestId>.` and a `BM-ANSWERS` block — `Q1: a — …` picks that option, `Q2: other — …` is the owner's words. Waiting on another request or Worker goes on the report's `blockers` line.",
+  "",
+  "**Reviewing.** Create the Reviewer with Paseo's `create_agent`: profile `bm-reviewer`, provider `bm-reviewer/<model of the profile>`, labels `bm.role` = `reviewer`, `bm.requestId` = the request's `req-…`, `bm.batchId` = the batch id, `bm.version` = yours if readable; `settings.modeId` exactly as your `## Runtime facts` say (missing: send `blocked` with Paseo's refusal). Tell it the `requestId`, the `batchId`, exactly what to review, the stage (`implementation`; before it `plan` or `beads`, plus `documents` when you wrote any) and, for an implementation batch, the checks you ran with their output — never its criteria or format. `changes-required`: fix every **blocking** finding, then ask the same Reviewer for the re-review with `send_agent_prompt`. A review call past your budget the owner did not ask for: send `blocked` and ask; a yes covers only what the owner said (\"one more\", \"until it is clean\"). A Reviewer that ends on a provider error (usage limit, credit, login, provider unavailable) is not a review: create no other, end your turn without a report, and wait for the plugin's `BM-FALLBACK`.",
+  "",
+  "**Reporting.** Build each report with `bm_report` and send what it returns verbatim to Manager (its agent id is in your first prompt; without one, post in your chat). Only without `bm_report`, write the block yourself (`none` for empty fields; a `blocked` one is followed by its `BM-QUESTIONS`):",
+  "",
+  "```",
+  "BM-REPORT",
+  "requestId: <requestId>",
+  "phase: received | beads-done | blocked | finished | stopped",
+  "tier: Small | Medium | Large (changed: no | from <old tier>, reason)",
+  "filesChanged: <paths>",
+  "beadsCreated: <ids>",
+  "beadsUpdated: <ids>",
+  "beadsClosed: <ids>",
+  "beadsReady: <ids>",
+  "reviewFindingsOpen: <batchId: finding; ...>",
+  "buildAndTests: <each check exactly as run, in backticks, pass/fail; or not run>",
+  "skillsUsed: <skill names, comma-separated>",
+  "decided: <choice> — <why>; <choice> — <why>",
+  "blockers: <what you wait for; the owner only through BM-QUESTIONS>",
+  "```",
+  "",
+  "Send this block with `send_agent_prompt` to the agent that created you (its id is in your first prompt), with `notifyOnFinish: false`.",
+].join("\n");
+
+/** The Manager's hand path: creating and telling a Worker, the owner's answers, a handoff. */
+export const MANAGER_HAND_PATH = [
+  HAND_PATH_HEADING,
+  "",
+  `${HAND_PATH_LEAD} \`bm_create_worker\` and \`bm_tell_worker\` are not yours; \`bm_answers\`, if you have it, only builds a block.`,
+  "",
+  '**Creating the Worker.** Create a `requestId` = `req-` + current UTC time as `YYYYMMDDTHHMMSSZ`, then **one** Worker in this workspace with `create_agent`, right the first time: call `list_profiles` **once**; `provider` = `bm-worker/<model of the profile>`; labels `bm.role` = `worker`, `bm.requestId` = the `requestId` (the Dashboard groups by it), `bm.version` = yours if readable; `settings.modeId` exactly as your `## Runtime facts` say. The `initialPrompt`, in order: the owner\'s request **verbatim** in a quoted block; the `requestId`; the repository path and `.beads/`; a size only if the owner stated one; "Do only what the request asks. Anything extra is a suggestion for the owner, not work."; your agent id (`echo "$PASEO_AGENT_ID"`); then **Context**, each fact with its source. A failed creation: cancel a broken agent it left.',
+  "",
+  "**Telling a Worker.** Send the owner's words or a fact with `send_agent_prompt`: `Continue <requestId>.`, then the words or the fact and its source. **Never send to a Worker that is `running`:** it would lose that turn's work. Hold the owner's words, say so, and send them at its turn end.",
+  "",
+  "**Answers.** Write one `BM-ANSWERS` block per request with `bm_answers`, or without it by hand: `BM-ANSWERS`, `requestId: <requestId>`, then per answer `Q6: a — <the option as the Worker wrote it>` or `Q7: other — <the owner's own words>`. Put this block in your reply to the owner; the plugin delivers it. Send the Worker nothing.",
+  "",
+  "**Following.** Reports arrive as the Worker's own messages. A turn end with no new report: an error or a waiting permission, tell the owner; otherwise one status line.",
+  "",
+  "**A handoff** (`intent: handoff`): create the new Worker as it says, for the same `requestId`, with `bm.handoffFrom` = the old Worker's id and its brief verbatim as `initialPrompt`; then tell the old Worker it is replaced.",
+].join("\n");
+
+/** The Reviewer's hand path: the `BM-REVIEW` block and `BM-FORMAT`. */
+export const REVIEWER_HAND_PATH = [
+  HAND_PATH_HEADING,
+  "",
+  `${HAND_PATH_LEAD} \`bm_review\`, if you have it, returns your answer as a block. Make this block your final answer, exactly as it is. Only without that tool, answer exactly this block (\`none\` for empty fields, \`findings: none\` for none; \`checked\` and \`notChecked\` may run over several lines, each line after the first indented):`,
+  "",
+  "```",
+  "BM-REVIEW",
+  "requestId: <requestId>",
+  "batchId: <batchId>",
+  "reviewKind: first | re-review",
+  "verdict: pass | changes-required",
+  "checked: <what you read and ran: document paths, bead ids, diff paths, test results, abuse cases tried>",
+  "findings:",
+  "- severity: blocking | non-blocking",
+  "  location: <file:line, a bead id, or a document heading>",
+  "  reason: <why this is a problem>",
+  "  suggestedFix: <what should change>",
+  "notChecked: <anything in the scope you could not check, and why>",
+  "```",
+  "",
+  "A message that starts with `BM-FORMAT` is the plugin's: answer with the whole corrected `BM-REVIEW` block only; do not review again.",
+].join("\n");
+
+/** The hand path of a role, or null for the Orchestrator, which has no hand path (§16.12). */
+export function handPathOf(role: Role): string | null {
+  return role === "worker" ? WORKER_HAND_PATH : role === "manager" ? MANAGER_HAND_PATH : role === "reviewer" ? REVIEWER_HAND_PATH : null;
 }
 
 /** The `Action boundary` facts line's key; `agent-labels.ts` and the permission handler read it back. */
@@ -167,24 +269,31 @@ export const REVIEWER_FALLBACK_PROVIDERS: readonly string[] = ["claude", "codex"
 export const RUNTIME_FACTS_HEADING = "## Runtime facts";
 
 /**
- * The Runtime facts section for a role, then its `## Owner precedents` part
- * (the Manager and the Worker only, at most `MAX_INJECTED_PRECEDENTS`), or ""
- * when there is nothing to state.
+ * The Runtime facts section for a role — its fact lines, then, for an unbound
+ * Manager, Worker or Reviewer, the `### Without paseo-bm's tools` part
+ * (design §16.12) — then its `## Owner precedents` part (the Manager and the
+ * Worker only, at most `MAX_INJECTED_PRECEDENTS`), or "" when there is
+ * nothing to state.
  */
 export function runtimeFactsText(role: Role, facts: RuntimeFacts = {}): string {
   const trimmed = (value: string | null | undefined) => (typeof value === "string" ? value.trim() : "");
   const child = role === "manager" ? "Worker" : role === "worker" ? "Reviewer" : null;
   if (child === null && role !== "reviewer") return "";
+  const bound = facts.bound === true;
   const lines: string[] = [];
   const none = role === "manager" ? facts.workerModeNone === true : facts.reviewerModeNone === true;
   const mode = role === "manager" ? trimmed(facts.workerModeId) : trimmed(facts.reviewerModeId);
-  if (child !== null && none) lines.push(`${child} mode: none — do not pass \`settings.modeId\` when you create a ${child}; Paseo sets it.`);
-  else if (child !== null && mode !== "") lines.push(`${child} mode: \`${mode}\` — pass it as \`settings.modeId\` when you create a ${child}.`);
+  // §16.12: the child mode is for creating the child by hand; a bound agent's tools create it with its mode (§16.6).
+  if (child !== null && !bound && none) lines.push(`${child} mode: none — do not pass \`settings.modeId\` when you create a ${child}; Paseo sets it.`);
+  else if (child !== null && !bound && mode !== "") lines.push(`${child} mode: \`${mode}\` — pass it as \`settings.modeId\` when you create a ${child}.`);
   if (role === "manager" && facts.workerSkillsMissing !== undefined) lines.push(workerSkillsLine(facts.workerSkillsMissing));
   if (role === "worker" && facts.reviewBudget !== undefined) lines.push(reviewBudgetLine(facts.reviewBudget));
   // Autonomy design §D.2: whether this Worker or Reviewer runs under the action boundary.
   if ((role === "worker" || role === "reviewer") && facts.actionBoundary !== undefined) lines.push(actionBoundaryLine(facts.actionBoundary));
-  const parts = lines.length === 0 ? [] : [`${RUNTIME_FACTS_HEADING}\n\n${lines.join("\n")}`];
+  // ADR-027 decision 9: the hand-written path, for an unbound agent only.
+  const handPath = bound ? null : handPathOf(role);
+  const body = [lines.join("\n"), handPath ?? ""].filter((part) => part !== "").join("\n\n");
+  const parts = body === "" ? [] : [`${RUNTIME_FACTS_HEADING}\n\n${body}`];
   // The owner's precedents are the Manager's and the Worker's only (§B.6).
   const precedents = child === null ? [] : (facts.precedents ?? []).slice(0, MAX_INJECTED_PRECEDENTS);
   if (precedents.length > 0) parts.push(`${OWNER_PRECEDENTS_HEADING}\n\n${precedents.map(precedentLine).join("\n")}`);
@@ -193,7 +302,8 @@ export function runtimeFactsText(role: Role, facts: RuntimeFacts = {}): string {
 
 /**
  * Base instructions, then the Runtime facts and the owner's precedents. With
- * no facts this is the base, byte for byte.
+ * no facts this is the base and, for a Manager, Worker or Reviewer, the hand
+ * path of an unbound agent (§16.12); the Orchestrator's is its base, byte for byte.
  */
 export function fullInstructions(role: Role, facts: RuntimeFacts = {}): string {
   const base = BASE_INSTRUCTIONS[role];

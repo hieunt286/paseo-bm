@@ -26,6 +26,7 @@ import {
 } from "./role-mode";
 import {
   BASE_INSTRUCTIONS,
+  HAND_PATH_HEADING,
   OWNER_PRECEDENTS_HEADING,
   RUNTIME_FACTS_HEADING,
   creationProjectOf,
@@ -103,13 +104,14 @@ export function applyRoleInstructions(request: AgentCreateRequest, facts: Runtim
     const instructions = fullInstructions(role, facts);
 
     const existing = typeof config.systemPrompt === "string" ? config.systemPrompt : "";
-    if (existing.includes(instructions)) return undefined;
     // Built by the plugin's own creator (`manager.ensure`) from the same parts,
     // read a moment earlier: keep it rather than add a second copy of them.
     const built = base.trimEnd();
-    if ([RUNTIME_FACTS_HEADING, OWNER_PRECEDENTS_HEADING].some((next) => existing.includes(`${built}\n\n${next}`))) {
-      return undefined;
-    }
+    const prebuilt = [RUNTIME_FACTS_HEADING, OWNER_PRECEDENTS_HEADING].some((next) => existing.includes(`${built}\n\n${next}`));
+    // Unless the agent is bound (design §16.12): that creator could not know it, so the hand path it wrote goes.
+    const rebuilt = prebuilt && facts.bound === true ? withoutHandPath(existing, built, instructions) : null;
+    if (rebuilt !== null) return { ...request, config: { ...config, systemPrompt: rebuilt } };
+    if (existing.includes(instructions) || prebuilt) return undefined;
     let systemPrompt: string;
     if (existing.includes(base)) {
       // Set by an older call with the base only: upgrade it in place.
@@ -121,6 +123,20 @@ export function applyRoleInstructions(request: AgentCreateRequest, facts: Runtim
   } catch {
     return undefined;
   }
+}
+
+/**
+ * A prompt built from the role's parts before the hook knew the agent is bound
+ * (`manager.ensure` reads the instructions first), with that built part —
+ * from the role text up to `ROLE_PROMPT_SEPARATOR` or the end — replaced by
+ * the bound `instructions`; null when the built part holds no hand path.
+ */
+function withoutHandPath(existing: string, built: string, instructions: string): string | null {
+  const start = existing.indexOf(built);
+  const separator = existing.indexOf(ROLE_PROMPT_SEPARATOR, start);
+  const end = separator === -1 ? existing.length : separator;
+  if (!existing.slice(start, end).includes(`\n${HAND_PATH_HEADING}\n`)) return null;
+  return `${existing.slice(0, start)}${instructions}${existing.slice(end)}`;
 }
 
 /**

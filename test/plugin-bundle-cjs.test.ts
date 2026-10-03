@@ -6,6 +6,7 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { rolePaseoToolsPolicy } from "../plugin/server/setup-roles";
+import { REVIEWER_HAND_PATH, WORKER_HAND_PATH } from "../plugin/server/role-instructions";
 import { fakePaseo } from "./helpers/fake-paseo";
 
 // The entry resolves the install home from $HOME when Paseo's config names no
@@ -330,12 +331,13 @@ describe.each([
       (await hook({ request: { config } }, { paseo })) as { config: { systemPrompt?: string } } | undefined;
     // This fake host lists no modes, so the bundled hook also gives the Worker
     // the fallback Reviewer mode `auto` (delta 20260918g §4.9, Q4 a / Q9 a), and
-    // the owner's review budget, here its defaults (bead 7gxw.12).
+    // the owner's review budget, here its defaults (bead 7gxw.12). Created without a token, it is unbound
+    // and gets the hand path after its facts lines (design §16.12).
     expect((await run({ provider: "bm-worker/gpt-5.6-sol", cwd: "/repo" }))?.config.systemPrompt).toBe(
-      `${workerMd.trimEnd()}\n\n## Runtime facts\n\nReviewer mode: \`auto\` — pass it as \`settings.modeId\` when you create a Reviewer.\nReview calls per request: Small 2, Medium 2, Large 4.\n${BOUNDARY_UNKNOWN}\n`,
+      `${workerMd.trimEnd()}\n\n## Runtime facts\n\nReviewer mode: \`auto\` — pass it as \`settings.modeId\` when you create a Reviewer.\nReview calls per request: Small 2, Medium 2, Large 4.\n${BOUNDARY_UNKNOWN}\n\n${WORKER_HAND_PATH}\n`,
     );
     // A Worker's and a Reviewer's own facts say whether they run under the action boundary (autonomy design §D.2).
-    expect((await run({ provider: "bm-reviewer", cwd: "/repo" }))?.config.systemPrompt).toBe(`${reviewerMd.trimEnd()}\n\n## Runtime facts\n\n${BOUNDARY_UNKNOWN}\n`);
+    expect((await run({ provider: "bm-reviewer", cwd: "/repo" }))?.config.systemPrompt).toBe(`${reviewerMd.trimEnd()}\n\n## Runtime facts\n\n${BOUNDARY_UNKNOWN}\n\n${REVIEWER_HAND_PATH}\n`);
     // A Manager that already carries its full instructions (base + Runtime facts) is left alone.
     expect(await run({ provider: "bm-manager", cwd: "/repo", systemPrompt: prompt })).toBeUndefined();
     // Another provider's agent is answered at once, without a lookup.

@@ -46,8 +46,8 @@ nothing to do: do not reply.
 - `worker.signal` — a hint, not a verdict: `stuck` (a long build is not stuck; a
   hung Worker is its Manager's to cancel), `permission` (only the owner grants
   it), `danger` (unless the owner asked for it, stop it with
-  `bm_direct_worker`), `failing`, `heavy`, `outside`: correct the Worker when
-  you see the cause.
+  `bm_direct_worker`), `failing`, `heavy`, `outside`, `off-tool-review`:
+  correct the Worker when you see the cause.
 - `writers.observed` — two agents wrote one file in overlapping turns: check it
   with `bm_repo`; if one change may have undone the other, tell its Manager.
 - `advice.due` — read the project's `bm_findings`; ask the owner with

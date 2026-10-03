@@ -1,6 +1,5 @@
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { WORKER_HAND_PATH } from "../plugin/server/role-instructions";
 import {
   looksLikeReport,
   parseBeadIdList,
@@ -267,8 +266,8 @@ describe("report parsing", () => {
     expect(report?.unparsedFields).toEqual([]);
   });
 
-  it("reads every field of the block worker.md tells the Worker to send (delta 20260917-workflow-skills; no guardrail since delta 20260917c)", () => {
-    const worker = readFileSync(fileURLToPath(new URL("../plugin/roles/worker.md", import.meta.url)), "utf8");
+  it("reads every field of the block an unbound Worker's hand path tells it to send (delta 20260917-workflow-skills; no guardrail since delta 20260917c; design §16.12)", () => {
+    const worker = WORKER_HAND_PATH;
     const start = worker.indexOf("BM-REPORT\nrequestId");
     const template = worker.slice(start, worker.indexOf("```", start)).trimEnd().split("\n");
     const sample: Record<string, string> = {

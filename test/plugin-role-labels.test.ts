@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MANAGER_INSTRUCTIONS } from "../plugin/server/manager-instructions";
 import { WORKER_INSTRUCTIONS } from "../plugin/server/worker-instructions";
+import { MANAGER_HAND_PATH, WORKER_HAND_PATH } from "../plugin/server/role-instructions";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
 import { reconstructTraces, type AgentFacts } from "../plugin/server/traces";
 import { TRACE_STORE_SCHEMA_VERSION, type TraceRecord } from "../plugin/shared/contracts";
@@ -18,32 +19,37 @@ import { TRACE_STORE_SCHEMA_VERSION, type TraceRecord } from "../plugin/shared/c
  */
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+/**
+ * ADR-027 step 5 (design §16.12): a bound agent's tools set the labels
+ * (`bm_create_worker`, `bm_create_reviewer`); the creation recipes, labels
+ * included, are the hand path of an unbound agent's Runtime facts.
+ */
 const managerMd = readFileSync(join(repoRoot, "plugin", "roles", "manager.md"), "utf8");
 const workerMd = readFileSync(join(repoRoot, "plugin", "roles", "worker.md"), "utf8");
 
-describe("manager.md", () => {
+describe("the unbound Manager's hand path", () => {
   it("tells the Manager to label the Worker with bm.requestId in the approved format", () => {
-    expect(managerMd).toContain("`bm.requestId`");
-    expect(managerMd).toContain("`req-` + current UTC time");
-    expect(managerMd).toContain("`bm.requestId` = the `requestId`");
+    expect(MANAGER_HAND_PATH).toContain("`bm.requestId`");
+    expect(MANAGER_HAND_PATH).toContain("`req-` + current UTC time");
+    expect(MANAGER_HAND_PATH).toContain("`bm.requestId` = the `requestId`");
   });
 
   it("still asks for bm.role and bm.version", () => {
-    expect(managerMd).toContain("`bm.role` = `worker`");
-    expect(managerMd).toContain("`bm.version`");
+    expect(MANAGER_HAND_PATH).toContain("`bm.role` = `worker`");
+    expect(MANAGER_HAND_PATH).toContain("`bm.version`");
   });
 });
 
-describe("worker.md", () => {
+describe("the unbound Worker's hand path", () => {
   it("tells the Worker to label the Reviewer with bm.requestId and bm.batchId", () => {
-    expect(workerMd).toContain("`bm.requestId`");
-    expect(workerMd).toContain("`bm.batchId`");
-    expect(workerMd).toContain("`bm.batchId` = the batch id");
+    expect(WORKER_HAND_PATH).toContain("`bm.requestId`");
+    expect(WORKER_HAND_PATH).toContain("`bm.batchId`");
+    expect(WORKER_HAND_PATH).toContain("`bm.batchId` = the batch id");
   });
 
   it("still asks for bm.role and bm.version", () => {
-    expect(workerMd).toContain("`bm.role` = `reviewer`");
-    expect(workerMd).toContain("`bm.version`");
+    expect(WORKER_HAND_PATH).toContain("`bm.role` = `reviewer`");
+    expect(WORKER_HAND_PATH).toContain("`bm.version`");
   });
 });
 

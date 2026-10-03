@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import contribute from "../plugin/index.server";
 import { ROLE_PROMPT_SEPARATOR, applyAgentTools, applyRoleInstructions, applyRoleModel, chooseModeId, registerRoleHook, workspaceOfFolder, type AgentCreateRequest, type ProviderMode } from "../plugin/server/role-hook";
 import { LOOKUP_TIMEOUT_MS, ROLE_GETS_MODE, TIMED_OUT, capabilityOf, forgetModes, modesFor, runPostureOf, withTimeout } from "../plugin/server/role-mode";
-import { OWNER_PRECEDENTS_HEADING, currentInstructions } from "../plugin/server/role-instructions";
+import { HAND_PATH_HEADING, MANAGER_HAND_PATH, OWNER_PRECEDENTS_HEADING, REVIEWER_HAND_PATH, WORKER_HAND_PATH, currentInstructions } from "../plugin/server/role-instructions";
 import { createCoordinationStore } from "../plugin/server/coordination-store";
 import { createAutonomyStore } from "../plugin/server/autonomy-store";
 import { BOUNDARY_MODES, boundaryPostureOf, creatorModeOffBoundary } from "../plugin/server/role-mode";
@@ -55,10 +55,14 @@ const BUDGET_LINE = "Review calls per request: Small 2, Medium 2, Large 4.";
  */
 const BOUNDARY_UNKNOWN = "Action boundary: off — the project could not be told from the agent's folder";
 const BOUNDARY_OFF = "Action boundary: off — the project's boundary is off";
+/** Every creation the hook cannot tell is bound gets the hand path of design §16.12 after its facts lines. */
 const workerFacts = (reviewerMode: string, boundary = BOUNDARY_UNKNOWN) =>
-  `${workerMd.trimEnd()}\n\n## Runtime facts\n\nReviewer mode: \`${reviewerMode}\` — pass it as \`settings.modeId\` when you create a Reviewer.\n${BUDGET_LINE}\n${boundary}\n`;
+  `${workerMd.trimEnd()}\n\n## Runtime facts\n\nReviewer mode: \`${reviewerMode}\` — pass it as \`settings.modeId\` when you create a Reviewer.\n${BUDGET_LINE}\n${boundary}\n\n${WORKER_HAND_PATH}\n`;
 const workerWithFallback = workerFacts("auto");
-const reviewerWith = (boundary = BOUNDARY_UNKNOWN) => `${reviewerMd.trimEnd()}\n\n## Runtime facts\n\n${boundary}\n`;
+const reviewerWith = (boundary = BOUNDARY_UNKNOWN) => `${reviewerMd.trimEnd()}\n\n## Runtime facts\n\n${boundary}\n\n${REVIEWER_HAND_PATH}\n`;
+/** An unbound agent with no facts line: its role text and its hand path. */
+const managerUnbound = `${managerMd.trimEnd()}\n\n## Runtime facts\n\n${MANAGER_HAND_PATH}\n`;
+const workerUnbound = `${workerMd.trimEnd()}\n\n## Runtime facts\n\n${WORKER_HAND_PATH}\n`;
 
 // The fallback prefers a list read earlier in the run; start every test without one.
 beforeEach(() => forgetModes());
@@ -152,13 +156,13 @@ describe("before(\"agent.create\") role hook", () => {
 
   it("sets roles/manager.md for a bm-manager created without it", async () => {
     const { run } = setup();
-    expect((await run({ config: { provider: "bm-manager/opus", cwd: "/repo" } }))?.config?.systemPrompt).toBe(managerMd);
-    expect((await run({ config: { provider: "bm-manager", cwd: "/repo", systemPrompt: "   " } }))?.config?.systemPrompt).toBe(managerMd);
+    expect((await run({ config: { provider: "bm-manager/opus", cwd: "/repo" } }))?.config?.systemPrompt).toBe(managerUnbound);
+    expect((await run({ config: { provider: "bm-manager", cwd: "/repo", systemPrompt: "   " } }))?.config?.systemPrompt).toBe(managerUnbound);
   });
 
   it("leaves a bm-manager created by manager.ensure unchanged", async () => {
     const { run } = setup();
-    expect((await run({ config: { provider: "bm-manager/opus", cwd: "/repo", systemPrompt: managerMd } }))).toBeUndefined();
+    expect((await run({ config: { provider: "bm-manager/opus", cwd: "/repo", systemPrompt: managerUnbound } }))).toBeUndefined();
   });
 
   it("does not touch agents of other providers", async () => {
@@ -186,7 +190,7 @@ describe("before(\"agent.create\") role hook", () => {
   });
 
   it("replaces a non-string systemPrompt with the instructions", async () => {
-    expect(applyRoleInstructions({ config: { provider: "bm-worker", systemPrompt: 7 } } as never)?.config.systemPrompt).toBe(workerMd);
+    expect(applyRoleInstructions({ config: { provider: "bm-worker", systemPrompt: 7 } } as never)?.config.systemPrompt).toBe(workerUnbound);
   });
 
   it("removes the hook on cleanup", async () => {
@@ -350,7 +354,7 @@ describe("before(\"agent.create\") start mode", () => {
     const { run } = setup({ providers: { listModes: () => never }, config: { get: () => never } });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const result = await run({ config: { provider: "bm-worker", cwd: "/repo" } });
-    expect(result?.config?.systemPrompt).toBe(workerMd);
+    expect(result?.config?.systemPrompt).toBe(workerUnbound);
     expect(result?.config).not.toHaveProperty("modeId");
     expect(String(warn.mock.calls.at(-1)?.[0])).toMatch(/took longer than \d+ ms/);
   }, 20000);
@@ -403,7 +407,7 @@ describe("before(\"agent.create\") start mode", () => {
     const { run } = setup(paseo);
     const prompt = String((await run({ config: { provider: "bm-manager", cwd: "/repo" } }))?.config?.systemPrompt);
     expect(prompt).toBe(
-      `${managerMd.trimEnd()}\n\n## Runtime facts\n\nWorker mode: \`bypassPermissions\` — pass it as \`settings.modeId\` when you create a Worker.\n`,
+      `${managerMd.trimEnd()}\n\n## Runtime facts\n\nWorker mode: \`bypassPermissions\` — pass it as \`settings.modeId\` when you create a Worker.\n\n${MANAGER_HAND_PATH}\n`,
     );
     // Written once: a Manager whose prompt already carries it is left alone.
     expect(await run({ config: { provider: "bm-manager", cwd: "/repo", systemPrompt: prompt } })).toBeUndefined();
@@ -413,7 +417,7 @@ describe("before(\"agent.create\") start mode", () => {
     const { paseo } = paseoWith(async () => ({ modes: [], error: "provider not ready" }));
     const { run } = setup(paseo);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect((await run({ config: { provider: "bm-manager", cwd: "/repo" } }))?.config?.systemPrompt).toBe(managerMd);
+    expect((await run({ config: { provider: "bm-manager", cwd: "/repo" } }))?.config?.systemPrompt).toBe(managerUnbound);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]![0])).toMatch(/bm-worker.*provider not ready/);
   });
@@ -1034,7 +1038,7 @@ describe("before(\"agent.create\") — the owner's precedents (design §B.6)", (
     writePrecedents([entry("expired", { expiresAt: "2000-01-01T00:00:00.000Z" }), entry("theirs", { scope: "ws-2" })]);
     expect((await run({ config: { provider: "bm-worker", cwd: "/repo" } }))?.config?.systemPrompt).toBe(workerFacts("auto", BOUNDARY_OFF));
     writeFileSync(join(dataHome, "autonomy", "precedents.json"), "{ not json");
-    expect((await run({ config: { provider: "bm-manager", cwd: "/repo" } }))?.config?.systemPrompt).toBe(managerMd);
+    expect((await run({ config: { provider: "bm-manager", cwd: "/repo" } }))?.config?.systemPrompt).toBe(managerUnbound);
   });
 
   it("keeps a Manager's prompt that manager.ensure already built with its precedents, without a second copy", async () => {
@@ -1254,7 +1258,7 @@ describe("before(\"agent.create\") — the action boundary per project (autonomy
     const never = new Promise(() => {});
     const { run } = setup({ ...host({ "bm-worker": "claude" }), workspaces: { list: () => never }, providers: { listModes: () => never } });
     const result = await run({ config: { provider: "bm-worker", cwd: "/on", modeId: "default" } });
-    expect(result?.config?.systemPrompt).toBe(workerMd);
+    expect(result?.config?.systemPrompt).toBe(workerUnbound);
     expect(result?.config?.modeId).toBe("default");
     expect(boundaryLine(result)).toBeNull();
     // Outside the boundary, so agent.created labels it off (live check 2026-10-01 F1).
@@ -1290,8 +1294,11 @@ describe("before(\"agent.create\") — a bound creation (design §16.5)", () => 
     expect(bindings.list()[0]?.attachedAt).not.toBeNull();
     const plain = await create({ provider: "bm-worker/claude-opus-5", cwd: "/repo" });
     expect(plain?.config.mcpServers).toEqual({ "paseo-bm": { type: "http", url: roleUrl("worker"), alwaysLoad: true } });
-    // No agent sees a change in this step: the role text and its facts are the same.
-    expect(bound?.config.systemPrompt).toBe(plain?.config.systemPrompt);
+    // Design §16.12: the same role text; only the unbound creation gets the hand path and the child mode line.
+    expect(String(plain?.config.systemPrompt)).toContain(`\n${HAND_PATH_HEADING}\n`);
+    expect(String(bound?.config.systemPrompt)).not.toContain(HAND_PATH_HEADING);
+    expect(String(bound?.config.systemPrompt)).not.toContain("Reviewer mode:");
+    expect(String(bound?.config.systemPrompt).startsWith(workerMd.trimEnd())).toBe(true);
     expect(bound?.config.toolPolicy).toEqual(plain?.config.toolPolicy);
   });
 

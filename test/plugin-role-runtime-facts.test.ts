@@ -5,7 +5,11 @@ import { join } from "node:path";
 import {
   ACTION_BOUNDARY_KEY,
   BASE_INSTRUCTIONS,
+  HAND_PATH_HEADING,
+  MANAGER_HAND_PATH,
   MAX_INJECTED_PRECEDENTS,
+  REVIEWER_HAND_PATH,
+  WORKER_HAND_PATH,
   OWNER_PRECEDENTS_HEADING,
   RUNTIME_FACTS_HEADING,
   currentInstructions,
@@ -23,6 +27,7 @@ import { createAutonomyStore } from "../plugin/server/autonomy-store";
 import { createCoordinationStore } from "../plugin/server/coordination-store";
 import { forgetModes } from "../plugin/server/role-mode";
 import { currentInstructionsHash, instructionsHashOf, roleTextOf } from "../plugin/server/instructions-label";
+import { ROLE_PROMPT_SEPARATOR, applyRoleInstructions, type AgentCreateRequest } from "../plugin/server/role-hook";
 import { PRECEDENT_SCOPE_ALL, type Precedent } from "../plugin/shared/precedents";
 
 /**
@@ -39,47 +44,51 @@ import { PRECEDENT_SCOPE_ALL, type Precedent } from "../plugin/shared/precedents
 const LINE = "Worker mode: `bypassPermissions` — pass it as `settings.modeId` when you create a Worker.";
 const DEFAULT_BUDGET = { Small: 2, Medium: 2, Large: 4 };
 const REVIEWER_LINE = "Reviewer mode: `auto` — pass it as `settings.modeId` when you create a Reviewer.";
+const HAND = { manager: MANAGER_HAND_PATH, worker: WORKER_HAND_PATH, reviewer: REVIEWER_HAND_PATH } as const;
+/** An unbound agent's Runtime facts (design §16.12): the heading, the fact lines, then its hand path. */
+const unbound = (role: keyof typeof HAND, ...lines: string[]) => `${RUNTIME_FACTS_HEADING}\n\n${lines.length === 0 ? "" : `${lines.join("\n")}\n\n`}${HAND[role]}`;
 
 describe("runtimeFactsText", () => {
   it("states the Worker mode for the Manager, word for word", () => {
-    expect(runtimeFactsText("manager", { workerModeId: "bypassPermissions" })).toBe(`${RUNTIME_FACTS_HEADING}\n\n${LINE}`);
+    expect(runtimeFactsText("manager", { workerModeId: "bypassPermissions" })).toBe(unbound("manager", LINE));
   });
 
   it("states the Reviewer mode for the Worker, word for word", () => {
-    expect(runtimeFactsText("worker", { reviewerModeId: "auto" })).toBe(`${RUNTIME_FACTS_HEADING}\n\n${REVIEWER_LINE}`);
+    expect(runtimeFactsText("worker", { reviewerModeId: "auto" })).toBe(unbound("worker", REVIEWER_LINE));
   });
 
-  it("says nothing without a mode, or for the other roles", () => {
-    expect(runtimeFactsText("manager", {})).toBe("");
-    expect(runtimeFactsText("manager", { workerModeId: "  " })).toBe("");
-    expect(runtimeFactsText("manager", { workerModeId: null })).toBe("");
-    expect(runtimeFactsText("manager", { reviewerModeId: "auto" })).toBe("");
-    expect(runtimeFactsText("worker", {})).toBe("");
-    expect(runtimeFactsText("worker", { reviewerModeId: "  " })).toBe("");
-    expect(runtimeFactsText("worker", { reviewerModeId: null })).toBe("");
-    expect(runtimeFactsText("worker", { workerModeId: "bypassPermissions" })).toBe("");
-    expect(runtimeFactsText("reviewer", { workerModeId: "bypassPermissions" })).toBe("");
-    expect(runtimeFactsText("reviewer", { reviewerModeId: "auto" })).toBe("");
+  it("writes no mode line without a mode, or for the other roles: an unbound agent's facts are then its hand path alone", () => {
+    expect(runtimeFactsText("manager", {})).toBe(unbound("manager"));
+    expect(runtimeFactsText("manager", { workerModeId: "  " })).toBe(unbound("manager"));
+    expect(runtimeFactsText("manager", { workerModeId: null })).toBe(unbound("manager"));
+    expect(runtimeFactsText("manager", { reviewerModeId: "auto" })).toBe(unbound("manager"));
+    expect(runtimeFactsText("worker", {})).toBe(unbound("worker"));
+    expect(runtimeFactsText("worker", { reviewerModeId: "  " })).toBe(unbound("worker"));
+    expect(runtimeFactsText("worker", { reviewerModeId: null })).toBe(unbound("worker"));
+    expect(runtimeFactsText("worker", { workerModeId: "bypassPermissions" })).toBe(unbound("worker"));
+    expect(runtimeFactsText("reviewer", { workerModeId: "bypassPermissions" })).toBe(unbound("reviewer"));
+    expect(runtimeFactsText("reviewer", { reviewerModeId: "auto" })).toBe(unbound("reviewer"));
+    expect(runtimeFactsText("orchestrator", { workerModeId: "auto" })).toBe("");
   });
 });
 
 describe("fullInstructions with Runtime facts", () => {
   const base = BASE_INSTRUCTIONS.manager;
 
-  it("is the base, byte for byte, with no facts", () => {
-    expect(fullInstructions("manager", {})).toBe(base);
-    expect(fullInstructions("manager")).toBe(base);
+  it("is the base and the hand path with no facts (unbound), and the base, byte for byte, for a bound agent or the Orchestrator", () => {
+    expect(fullInstructions("manager", {})).toBe(`${base.trimEnd()}\n\n${unbound("manager")}\n`);
+    expect(fullInstructions("manager")).toBe(`${base.trimEnd()}\n\n${unbound("manager")}\n`);
+    expect(fullInstructions("manager", { bound: true })).toBe(base);
+    expect(fullInstructions("orchestrator")).toBe(BASE_INSTRUCTIONS.orchestrator);
   });
 
   it("puts the facts after the role text", () => {
-    expect(fullInstructions("manager", { workerModeId: "bypassPermissions" })).toBe(
-      `${base.trimEnd()}\n\n${RUNTIME_FACTS_HEADING}\n\n${LINE}\n`,
-    );
+    expect(fullInstructions("manager", { workerModeId: "bypassPermissions" })).toBe(`${base.trimEnd()}\n\n${unbound("manager", LINE)}\n`);
   });
 
-  it("puts the Worker's Reviewer mode after its role text, and ends there: nothing the owner writes is appended (autonomy design §B.8)", () => {
+  it("puts the Worker's Reviewer mode after its role text, then its hand path: nothing the owner writes is appended (autonomy design §B.8)", () => {
     const text = fullInstructions("worker", { reviewerModeId: "auto" });
-    expect(text).toBe(`${BASE_INSTRUCTIONS.worker.trimEnd()}\n\n${RUNTIME_FACTS_HEADING}\n\n${REVIEWER_LINE}\n`);
+    expect(text).toBe(`${BASE_INSTRUCTIONS.worker.trimEnd()}\n\n${unbound("worker", REVIEWER_LINE)}\n`);
   });
 });
 
@@ -203,7 +212,7 @@ describe("currentInstructions (the manager.ensure path)", () => {
     // With no data folder the review budget reads its defaults (bead 7gxw.12).
     expect(worker).toBe(fullInstructions("worker", { reviewerModeId: "auto", reviewBudget: DEFAULT_BUDGET }));
     expect(worker).toContain("Reviewer mode: `auto`");
-    expect(await currentInstructions("reviewer", api, { homedir: () => "/nonexistent-home-for-test" })).toBe(BASE_INSTRUCTIONS.reviewer);
+    expect(await currentInstructions("reviewer", api, { homedir: () => "/nonexistent-home-for-test" })).toBe(fullInstructions("reviewer", {}));
   });
 });
 
@@ -216,12 +225,12 @@ describe("Runtime facts by provider capability (delta 20260921 §4.2.3, REQ-063 
 
   it("says 'none' for a child whose provider has no modes, word for word", () => {
     expect(runtimeFactsText("manager", { workerModeNone: true })).toBe(
-      `${RUNTIME_FACTS_HEADING}\n\nWorker mode: none — do not pass \`settings.modeId\` when you create a Worker; Paseo sets it.`,
+      unbound("manager", "Worker mode: none — do not pass `settings.modeId` when you create a Worker; Paseo sets it."),
     );
     expect(runtimeFactsText("worker", { reviewerModeNone: true })).toBe(
-      `${RUNTIME_FACTS_HEADING}\n\nReviewer mode: none — do not pass \`settings.modeId\` when you create a Reviewer; Paseo sets it.`,
+      unbound("worker", "Reviewer mode: none — do not pass `settings.modeId` when you create a Reviewer; Paseo sets it."),
     );
-    expect(runtimeFactsText("reviewer", { reviewerModeNone: true })).toBe("");
+    expect(runtimeFactsText("reviewer", { reviewerModeNone: true })).toBe(unbound("reviewer"));
   });
 
   it("names none for a Pi Worker or Reviewer", async () => {
@@ -249,12 +258,12 @@ describe("Runtime facts by provider capability (delta 20260921 §4.2.3, REQ-063 
     warn.mockRestore();
   });
 
-  it("tells the creators, in their role files, to pass exactly what the Runtime facts say — whose 'none' line says to pass nothing", async () => {
-    const { readFileSync } = await import("node:fs");
-    const read = (name: string) => readFileSync(new URL(`../plugin/roles/${name}.md`, import.meta.url), "utf8").replace(/\s+/g, " ");
-    // Bead 81y2.24: the role files no longer repeat the 'none' rule; the fact line itself says it (pinned word for word above).
-    expect(read("manager")).toContain("`settings.modeId` exactly as your `## Runtime facts` say");
-    expect(read("worker")).toContain("`settings.modeId` exactly as your `## Runtime facts` say");
+  it("tells the creators, in their hand path, to pass exactly what the Runtime facts say — whose 'none' line says to pass nothing", async () => {
+    const flat = (text: string) => text.replace(/\s+/g, " ");
+    // Bead 81y2.24: the 'none' rule is the fact line's own (pinned word for word above). Design §16.12: creating by
+    // hand is an unbound agent's, so the hand path, not the role file, points at the mode.
+    expect(flat(MANAGER_HAND_PATH)).toContain("`settings.modeId` exactly as your `## Runtime facts` say");
+    expect(flat(WORKER_HAND_PATH)).toContain("`settings.modeId` exactly as your `## Runtime facts` say");
     expect(runtimeFactsText("manager", { workerModeNone: true })).toContain("do not pass `settings.modeId`");
     expect(runtimeFactsText("worker", { reviewerModeNone: true })).toContain("do not pass `settings.modeId`");
   });
@@ -291,16 +300,14 @@ describe("Worker skills in the Manager's Runtime facts", () => {
     const facts = await runtimeFactsOf("manager", paseoExtending("codex"), "/repo", () => {}, status(["polishing-beads", "architecture-premise-audit"]));
     expect(facts.workerSkillsMissing).toEqual(["polishing-beads"]);
     expect(runtimeFactsText("manager", facts)).toBe(
-      `${RUNTIME_FACTS_HEADING}\n\nWorker skills: missing \`polishing-beads\` — tell the user once, when you confirm the Worker, that it works with lower quality, and point to Beads Manager → Tools & skills.`,
+      unbound("manager", "Worker skills: missing `polishing-beads` — tell the user once, when you confirm the Worker, that it works with lower quality, and point to Beads Manager → Tools & skills."),
     );
   });
 
   it("says all present, and sits after the mode line", async () => {
     const facts = await runtimeFactsOf("manager", paseoExtending("claude"), "/repo", () => {}, status(["polishing-beads"]));
     expect(facts.workerSkillsMissing).toEqual([]);
-    expect(runtimeFactsText("manager", { workerModeId: "bypassPermissions", workerSkillsMissing: [] })).toBe(
-      `${RUNTIME_FACTS_HEADING}\n\n${LINE}\nWorker skills: all present.`,
-    );
+    expect(runtimeFactsText("manager", { workerModeId: "bypassPermissions", workerSkillsMissing: [] })).toBe(unbound("manager", LINE, "Worker skills: all present."));
   });
 
   it("writes no line when the provider or the skills cannot be read, and never throws", async () => {
@@ -312,7 +319,7 @@ describe("Worker skills in the Manager's Runtime facts", () => {
     expect((await runtimeFactsOf("manager", paseoExtending("codex"), "/repo", (m) => log.push(m), broken)).workerSkillsMissing).toBeUndefined();
     expect(log.join("\n")).toContain("checking the Worker's skills failed");
     // The Worker and the Reviewer never get the line.
-    expect(runtimeFactsText("worker", { workerSkillsMissing: ["x"] })).toBe("");
+    expect(runtimeFactsText("worker", { workerSkillsMissing: ["x"] })).toBe(unbound("worker"));
   });
 });
 
@@ -344,7 +351,7 @@ describe("## Owner precedents (autonomy design §B.6, §B.9; PRD REQ-124 b, REQ-
       precedents: [fact(precedent("a", { subject: "user-list-storage", text: "The existing users table." })), fact(precedent("b", { scope: PRECEDENT_SCOPE_ALL }))],
     };
     expect(runtimeFactsText("manager", facts)).toBe(
-      `${RUNTIME_FACTS_HEADING}\n\n${LINE}\n\n${OWNER_PRECEDENTS_HEADING}\n\n` +
+      `${unbound("manager", LINE)}\n\n${OWNER_PRECEDENTS_HEADING}\n\n` +
         "- `user-list-storage` — The existing users table. (this project, until 2099-10-20)\n" +
         "- `subject-b` — Answer b. (all projects, until 2099-10-20)",
     );
@@ -352,17 +359,20 @@ describe("## Owner precedents (autonomy design §B.6, §B.9; PRD REQ-124 b, REQ-
 
   it("stands alone without other facts, keeps a text on one line, and names no heading when there are none", () => {
     const multiline = fact(precedent("m", { text: "Use pnpm.\n\n  Never npm." }));
-    expect(runtimeFactsText("worker", { precedents: [multiline] })).toBe(
+    expect(runtimeFactsText("worker", { bound: true, precedents: [multiline] })).toBe(
       `${OWNER_PRECEDENTS_HEADING}\n\n- \`subject-m\` — Use pnpm. Never npm. (this project, until 2099-10-20)`,
     );
+    expect(runtimeFactsText("worker", { precedents: [multiline] })).toBe(
+      `${unbound("worker")}\n\n${OWNER_PRECEDENTS_HEADING}\n\n- \`subject-m\` — Use pnpm. Never npm. (this project, until 2099-10-20)`,
+    );
     expect(precedentLine(multiline)).not.toContain("\n");
-    expect(runtimeFactsText("worker", { precedents: [] })).toBe("");
-    expect(runtimeFactsText("worker", { reviewerModeId: "auto", precedents: [] })).toBe(`${RUNTIME_FACTS_HEADING}\n\n${REVIEWER_LINE}`);
+    expect(runtimeFactsText("worker", { bound: true, precedents: [] })).toBe("");
+    expect(runtimeFactsText("worker", { reviewerModeId: "auto", precedents: [] })).toBe(unbound("worker", REVIEWER_LINE));
   });
 
   it("gives them only to the Manager and the Worker, at most 20", () => {
     const many = Array.from({ length: 25 }, (_, i) => fact(precedent(String(i))));
-    expect(runtimeFactsText("reviewer", { precedents: many })).toBe("");
+    expect(runtimeFactsText("reviewer", { precedents: many })).toBe(unbound("reviewer"));
     expect(runtimeFactsText("orchestrator", { precedents: many })).toBe("");
     const text = runtimeFactsText("worker", { precedents: many });
     expect(text.split("\n").filter((line) => line.startsWith("- `"))).toHaveLength(MAX_INJECTED_PRECEDENTS);
@@ -374,7 +384,7 @@ describe("## Owner precedents (autonomy design §B.6, §B.9; PRD REQ-124 b, REQ-
   it("puts them after the role text, and keeps the role text whole: the bm.instructions label stays the role file's", () => {
     const text = fullInstructions("worker", { precedents: [fact(precedent("a"))] });
     expect(text).toBe(
-      `${BASE_INSTRUCTIONS.worker.trimEnd()}\n\n${OWNER_PRECEDENTS_HEADING}\n\n- \`subject-a\` — Answer a. (this project, until 2099-10-20)\n`,
+      `${BASE_INSTRUCTIONS.worker.trimEnd()}\n\n${unbound("worker")}\n\n${OWNER_PRECEDENTS_HEADING}\n\n- \`subject-a\` — Answer a. (this project, until 2099-10-20)\n`,
     );
     // agent-labels.ts labels an agent whose prompt holds its role text; the label is that text's hash.
     expect(text).toContain(roleTextOf("worker"));
@@ -460,9 +470,12 @@ describe("the review budget in a new Worker's Runtime facts", () => {
 
   it("states the budget per tier after the Reviewer mode, word for word, and only for the Worker", () => {
     expect(reviewBudgetLine(budget)).toBe(BUDGET_LINE);
-    expect(runtimeFactsText("worker", { reviewerModeId: "auto", reviewBudget: budget })).toBe(`${RUNTIME_FACTS_HEADING}\n\n${REVIEWER_LINE}\n${BUDGET_LINE}`);
-    expect(runtimeFactsText("worker", { reviewBudget: budget })).toBe(`${RUNTIME_FACTS_HEADING}\n\n${BUDGET_LINE}`);
-    for (const role of ["manager", "reviewer", "orchestrator"] as const) expect(runtimeFactsText(role, { reviewBudget: budget }), role).toBe("");
+    expect(runtimeFactsText("worker", { reviewerModeId: "auto", reviewBudget: budget })).toBe(unbound("worker", REVIEWER_LINE, BUDGET_LINE));
+    expect(runtimeFactsText("worker", { reviewBudget: budget })).toBe(unbound("worker", BUDGET_LINE));
+    // A bound Worker keeps the budget line: its tools enforce the budget, and the role file points at the line.
+    expect(runtimeFactsText("worker", { bound: true, reviewerModeId: "auto", reviewBudget: budget })).toBe(`${RUNTIME_FACTS_HEADING}\n\n${BUDGET_LINE}`);
+    for (const role of ["manager", "reviewer"] as const) expect(runtimeFactsText(role, { reviewBudget: budget }), role).toBe(unbound(role));
+    expect(runtimeFactsText("orchestrator", { reviewBudget: budget })).toBe("");
   });
 
   it("reads it when a Worker is created, never without the creation's lookup, and never for another role", async () => {
@@ -490,7 +503,7 @@ describe("the review budget in a new Worker's Runtime facts", () => {
       const api = { providers: { listModes: async () => ({ modes: [{ id: "auto", colorTier: "moderate" }] }) } };
       const worker = await currentInstructions("worker", api, { homedir: () => root });
       expect(worker).toBe(fullInstructions("worker", { reviewerModeId: "auto", reviewBudget: budget }));
-      expect(worker.endsWith(`${REVIEWER_LINE}\n${BUDGET_LINE}\n`)).toBe(true);
+      expect(worker.endsWith(`${REVIEWER_LINE}\n${BUDGET_LINE}\n\n${WORKER_HAND_PATH}\n`)).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -520,10 +533,11 @@ describe("the Action boundary facts line and the child mode by the project's swi
     expect(actionBoundaryLine({ on: true, modeId: "default" })).toBe("Action boundary: on");
     expect(actionBoundaryLine(OFF)).toBe("Action boundary: off — the project's boundary is off");
     expect(runtimeFactsText("worker", { reviewerModeId: "default", actionBoundary: { on: true, modeId: "default" } })).toBe(
-      `${RUNTIME_FACTS_HEADING}\n\nReviewer mode: \`default\` — pass it as \`settings.modeId\` when you create a Reviewer.\nAction boundary: on`,
+      unbound("worker", "Reviewer mode: `default` — pass it as `settings.modeId` when you create a Reviewer.", "Action boundary: on"),
     );
-    expect(runtimeFactsText("reviewer", { actionBoundary: OFF })).toBe(`${RUNTIME_FACTS_HEADING}\n\nAction boundary: off — the project's boundary is off`);
-    expect(runtimeFactsText("manager", { actionBoundary: { on: true, modeId: "default" } })).toBe("");
+    expect(runtimeFactsText("reviewer", { actionBoundary: OFF })).toBe(unbound("reviewer", "Action boundary: off — the project's boundary is off"));
+    expect(runtimeFactsText("reviewer", { bound: true, actionBoundary: OFF })).toBe(`${RUNTIME_FACTS_HEADING}\n\nAction boundary: off — the project's boundary is off`);
+    expect(runtimeFactsText("manager", { actionBoundary: { on: true, modeId: "default" } })).toBe(unbound("manager"));
     expect(runtimeFactsText("orchestrator", { actionBoundary: { on: true, modeId: "default" } })).toBe("");
     // A Reviewer never gets the owner's precedents, even beside its line.
     expect(runtimeFactsText("reviewer", { actionBoundary: OFF, precedents: [{ subject: "s", text: "t", scope: "all", expiresAt: "2099-01-01T00:00:00.000Z" }] })).not.toContain(OWNER_PRECEDENTS_HEADING);
@@ -583,15 +597,62 @@ describe("the Action boundary facts line and the child mode by the project's swi
   });
 });
 
-describe("a bound agent's Runtime facts (design §16.5)", () => {
-  it("says the agent is bound when the creation hook kept its token URL, and writes the same text until step 5", async () => {
+describe("a bound agent's Runtime facts and an unbound agent's hand path (design §16.5, §16.12; ADR-027 decision 9)", () => {
+  it("says the agent is bound when the creation hook kept its token URL", async () => {
     const api = { providers: { listModes: vi.fn(async () => ({ modes: [] })) } };
     const lookup = { read: () => [], boundary: "off" as const, reviewBudget: () => ({ Small: 2, Medium: 2, Large: 4 }) };
-    const bound = await runtimeFactsOf("reviewer", api, "/repo", () => {}, undefined, { ...lookup, bound: true });
-    const unbound = await runtimeFactsOf("reviewer", api, "/repo", () => {}, undefined, lookup);
-    expect(bound).toEqual({ bound: true });
-    expect(unbound).toEqual({});
-    expect(runtimeFactsText("reviewer", bound)).toBe(runtimeFactsText("reviewer", unbound));
-    expect(fullInstructions("worker", { bound: true })).toBe(BASE_INSTRUCTIONS.worker);
+    expect(await runtimeFactsOf("reviewer", api, "/repo", () => {}, undefined, { ...lookup, bound: true })).toEqual({ bound: true });
+    expect(await runtimeFactsOf("reviewer", api, "/repo", () => {}, undefined, lookup)).toEqual({});
+  });
+
+  it.each(["manager", "worker", "reviewer"] as const)("gives the %s's `### Without paseo-bm's tools` part to an unbound agent only", (role) => {
+    expect(runtimeFactsText(role, {})).toContain(`\n${HAND_PATH_HEADING}\n`);
+    expect(fullInstructions(role, {})).toContain(HAND[role]);
+    expect(runtimeFactsText(role, { bound: true })).not.toContain(HAND_PATH_HEADING);
+    expect(fullInstructions(role, { bound: true })).toBe(BASE_INSTRUCTIONS[role]);
+    // The role file itself never carries it.
+    expect(BASE_INSTRUCTIONS[role]).not.toContain(HAND_PATH_HEADING);
+  });
+
+  it("never gives the Orchestrator a hand path", () => {
+    expect(runtimeFactsText("orchestrator", {})).toBe("");
+    expect(fullInstructions("orchestrator", { bound: true })).toBe(BASE_INSTRUCTIONS.orchestrator);
+  });
+
+  it("drops the child mode line for a bound Manager or Worker: its tools create the child with its mode (§16.6)", () => {
+    expect(runtimeFactsText("manager", { bound: true, workerModeId: "bypassPermissions", workerSkillsMissing: [] })).toBe(`${RUNTIME_FACTS_HEADING}\n\nWorker skills: all present.`);
+    expect(runtimeFactsText("worker", { bound: true, reviewerModeNone: true })).toBe("");
+    expect(runtimeFactsText("manager", { bound: true, workerModeNone: true })).toBe("");
+  });
+
+  it("gives an unbound Worker the BM-REPORT phase line with `stopped` (base PRD REQ-025 c)", () => {
+    expect(runtimeFactsText("worker", {})).toContain("\nphase: received | beads-done | blocked | finished | stopped\n");
+  });
+
+  it("keeps the facts readers working on an unbound agent's prompt: the boundary line, and BM-SETTINGS' mode line", () => {
+    const prompt = fullInstructions("worker", { reviewerModeId: "auto", actionBoundary: { on: true, modeId: "default" } });
+    expect(actionBoundaryOfPrompt(prompt)).toBe("on");
+    expect(actionBoundaryOfPrompt(fullInstructions("reviewer", {}))).toBeNull();
+    const facts = runtimeFactsText("worker", { reviewerModeNone: true }).split("\n");
+    expect(facts.filter((line) => / mode: /.test(line))).toEqual(["Reviewer mode: none — do not pass `settings.modeId` when you create a Reviewer; Paseo sets it."]);
+  });
+
+  it("the creation hook rebuilds a Manager prompt built before it knew the agent is bound, without the hand path (manager.ensure)", () => {
+    const facts = { workerModeId: "auto", workerSkillsMissing: [] as string[] };
+    const prebuilt = fullInstructions("manager", facts);
+    const request = (systemPrompt: string) => ({ config: { provider: "bm-manager", cwd: "/repo", systemPrompt } }) as unknown as AgentCreateRequest;
+    // Unbound: the prompt the creator built is kept as it is.
+    expect(applyRoleInstructions(request(prebuilt), facts)).toBeUndefined();
+    // Bound: rebuilt from the hook's own facts, the hand path and the mode line gone, anything after the separator kept.
+    const bound = { ...facts, bound: true };
+    const rebuilt = applyRoleInstructions(request(prebuilt), bound)?.config.systemPrompt;
+    expect(rebuilt).toBe(fullInstructions("manager", bound));
+    expect(rebuilt).not.toContain(HAND_PATH_HEADING);
+    const withExtra = applyRoleInstructions(request(`${prebuilt}${ROLE_PROMPT_SEPARATOR}Owner's own prompt.`), bound)?.config.systemPrompt;
+    expect(withExtra).toBe(`${fullInstructions("manager", bound)}${ROLE_PROMPT_SEPARATOR}Owner's own prompt.`);
+    // A bound prompt already without the hand path is kept.
+    expect(applyRoleInstructions(request(fullInstructions("manager", bound)), bound)).toBeUndefined();
+    // With no facts line left, the bound text is the base alone.
+    expect(applyRoleInstructions(request(fullInstructions("manager", {})), { bound: true })?.config.systemPrompt).toBe(BASE_INSTRUCTIONS.manager);
   });
 });

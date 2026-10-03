@@ -28,7 +28,8 @@ describe("role instructions: the additional instructions are retired (autonomy d
   it("reach agents through the create hook as the base, and upgrade a base-only prompt in place", () => {
     const worker = applyRoleInstructions({ config: { provider: "bm-worker", cwd: "/r" } } as never);
     expect(worker?.config.systemPrompt).toBe(fullInstructions("worker"));
-    expect(fullInstructions("worker")).toBe(BASE_INSTRUCTIONS.worker);
+    // An unbound agent's facts carry its hand path (design §16.12); a bound one with no facts is the base alone.
+    expect(fullInstructions("worker", { bound: true })).toBe(BASE_INSTRUCTIONS.worker);
     const facts = { workerModeId: "bypassPermissions" };
     const manager = applyRoleInstructions({ config: { provider: "bm-manager", cwd: "/r", systemPrompt: BASE_INSTRUCTIONS.manager } } as never, facts);
     expect(manager?.config.systemPrompt).toBe(fullInstructions("manager", facts));
