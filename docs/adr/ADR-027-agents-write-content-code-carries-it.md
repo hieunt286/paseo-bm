@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Status | **Accepted** (2026-10-03) — the owner answered Q1 and Q2; spikes S1–S5 gate the steps that need them |
-| Amended | 2026-10-03, before any step was built, by Claude under the owner's delegation after the plan and design review: three ship points (Order); one review counter and the off-tool Reviewer (decision 10); the registry on the bound path (decision 7) |
+| Amended | 2026-10-03, after spike S4: the owner accepted that a tool token, which an agent with a shell can read from the agent record or `ps`, identifies the caller for correctness and is not a security boundary; role files name agent records and tokens as secrets (design §16.13). Earlier the same day, before any step was built, by Claude under the owner's delegation after the plan and design review: three ship points (Order); one review counter and the off-tool Reviewer (decision 10); the registry on the bound path (decision 7) |
 | Date | 2026-10-02 |
 | Owner | hieu.nt10 |
 | The owner's decisions | 2026-10-03: Q1 (a) — keep providers without MCP pre-approval on the hand-written path; Q2 (b) — the tool refuses a review call past the budget unless a decision grants more |
