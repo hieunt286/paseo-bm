@@ -10,16 +10,19 @@
  * | `bm_rereview` | checks the budget and the batch's one re-review, stores a `message` outbox record, records the call (`kind: rereview`, the record id as `callId`) and delivers `BM-DELIVERY message <recordId>` to the batch's newest live Reviewer |
  *
  * - **One counter.** The count that enforces is the count the Dashboard shows:
- *   `requestReviewCountOf` (`request-trace.ts`) reads the request's trace as
- *   `workspaceTracesOf` rebuilds it, whose `reviewCalls` is `reviewCallsOf`
- *   over the activity stream and the registry's call records together
- *   (`traces.ts`). The registry holds call records, never a total.
+ *   `requestReviewCountOf` (`request-trace.ts`) reads the `reviewCalls` of the
+ *   request's trace as `workspaceTracesOf` rebuilds it — `reviewCallsOf` over
+ *   the activity stream and the registry's call records together
+ *   (`traces.ts`) — or, before the request has a trace, `reviewCallsOf` over
+ *   its Reviewers' records. The registry holds call records, never a total.
  * - **The budget** is the owner's `review.<tier>Budget` (Settings →
  *   Coordination) for the tier of the request's newest report record (the
  *   registry's `tier`, which `bm_report` writes). The ceiling is that budget
- *   plus every `{ calls: n }` grant; a live `{ untilClean: b }` grant lets
+ *   plus every `{ calls: n }` grant. A live `{ untilClean: b }` grant lets
  *   batch b go on past it and lifts its one-re-review limit until b has a
- *   `pass` verdict. Its calls are counted all the same.
+ *   `pass` verdict; its tool calls are counted, but left out of the
+ *   comparison while the grant is live (`ruleReviewGrantOf`: the same
+ *   `overReviewCeiling` the Orchestrator's rule and the Manager's notice use).
  * - **Records before acts.** A call is recorded before the tool creates or
  *   sends; a failed creation or send removes it. The tools of one request run
  *   one at a time (`serialised`), so two calls never pass one check.
@@ -27,12 +30,12 @@
  *   decision — by the owner, or by the policy where `cost` is delegated —
  *   appends its chosen option's grant to the request; a precedent never
  *   answers one (`precedent-resolve.ts`).
- * - **The plugin's own Reviewers** (`createPluginReviewer`) are remembered
- *   while and after they are created, so the off-tool check
- *   (`off-tool-reviewer.ts`) never flags one, the replacement Reviewer of
- *   §16.9 (`fallback-reviewer.ts`) included; one whose creation a reload or
- *   Paseo's late error cut short is settled at `agent.created`
- *   (`creation-settle.ts`).
+ * - **The plugin's own Reviewers** (`createPluginReviewer`) are named in
+ *   their batch's `reviewerIds` before the creation counts as done, so the
+ *   off-tool check (`off-tool-reviewer.ts`), which waits for creations under
+ *   way, never flags one — the replacement Reviewer of §16.9
+ *   (`fallback-reviewer.ts`) included; one whose creation a reload or Paseo's
+ *   late error cut short is named at `agent.created` (`creation-settle.ts`).
  * - **A creation call with no Reviewer** (`reviewerId` empty): Paseo threw
  *   after the hook kept the token (`creationMayExist`), or a reload cut the
  *   creation. The call is kept, so `agent.created` can name its Reviewer;
@@ -133,16 +136,8 @@ export function reviewerPromptOf(requestId: string, batchId: string, callId: str
 // The plugin's own Reviewers (design §16.8: never off-tool).
 // ---------------------------------------------------------------------------
 
-/** Reviewers the plugin created in this run, newest last; at most this many are kept. */
-const PLUGIN_REVIEWERS_LIMIT = 2_000;
-const pluginReviewers = new Set<string>();
 /** Creations under way, by the Worker they are for. */
 const inFlight = new Map<string, Set<Promise<unknown>>>();
-
-/** True when the plugin created Reviewer `agentId` itself (in this run). */
-export function isPluginReviewer(agentId: string): boolean {
-  return pluginReviewers.has(agentId);
-}
 
 /**
  * Waits for every Reviewer creation under way for Worker `parentId`: Paseo's
@@ -153,20 +148,6 @@ export async function pluginCreationsSettled(parentId: string): Promise<void> {
   const pending = inFlight.get(parentId);
   if (pending === undefined) return;
   await Promise.allSettled([...pending]);
-}
-
-/** Test-only: forgets the plugin's Reviewers. */
-export function clearPluginReviewers(): void {
-  pluginReviewers.clear();
-  inFlight.clear();
-}
-
-/** Remembers `agentId` as a Reviewer the plugin created (`createPluginReviewer`, or settled at `agent.created`). */
-export function markPluginReviewer(agentId: string): void {
-  pluginReviewers.add(agentId);
-  if (pluginReviewers.size <= PLUGIN_REVIEWERS_LIMIT) return;
-  const oldest = pluginReviewers.values().next().value;
-  if (oldest !== undefined) pluginReviewers.delete(oldest);
 }
 
 /** The SDK slice a plugin-created Reviewer needs; `PaseoApi` is structurally assignable. */
@@ -190,6 +171,8 @@ export interface PluginReviewerSpec {
   /** The Worker: the Reviewer's `parent`, and the binding's. */
   workerId: string;
   batchId: string;
+  /** The create call it answers (`bm_create_reviewer`), which the registry then names it on; none for a replacement (§16.9). */
+  callId?: string | null;
   cwd: string;
   /** Its first prompt, starting with its `BM-BRIEF reviewer … call:` line. */
   prompt: string;
@@ -210,12 +193,15 @@ export interface PluginReviewerSpec {
  * Creates one Reviewer for a batch of a bound Worker (design §16.6, §16.9):
  * `parent` = the Worker, the labels, and a binding of role reviewer for the
  * same request and batch, so its `bm_review` delivers. The `agent.create` hook still runs, so it gets its
- * instructions. Throws what Paseo threw, after the binding was discarded.
+ * instructions. The registry names it in its batch (`noteReviewer`, on
+ * `spec.callId` when given) before the creation counts as done, so the
+ * off-tool check, which waits for it, knows it as the plugin's own. Throws
+ * what Paseo threw, after the binding was discarded.
  */
 export async function createPluginReviewer(
   paseo: ReviewerCreationPaseo,
   spec: PluginReviewerSpec,
-  deps: { binder?: AgentBinder; log?: (message: string) => void } = {},
+  deps: { home: string; binder?: AgentBinder; log?: (message: string) => void },
 ): Promise<{ reviewerId: string }> {
   const log = deps.log ?? ((message: string) => console.warn(message));
   // Marked under way BEFORE Paseo is asked: its agent.created may come before agents.create returns.
@@ -246,7 +232,11 @@ export async function createPluginReviewer(
         }),
       log,
     );
-    markPluginReviewer(created.id);
+    try {
+      createRequestRegistry(deps.home, { log }).noteReviewer(spec.workspaceId, spec.requestId, spec.batchId, created.id, spec.callId ?? null);
+    } catch (error) {
+      log(`[paseo-bm] could not add Reviewer ${created.id} to batch ${spec.batchId} of ${spec.requestId}: ${reasonOf(error)}`);
+    }
     return { reviewerId: created.id };
   } finally {
     done();
@@ -264,27 +254,6 @@ export function isPassVerdict(verdict: string | null | undefined): boolean {
   return typeof verdict === "string" && /^\s*pass\b/i.test(verdict);
 }
 
-/**
- * True when batch `batchId` of the request has a `pass` verdict: a tool-built
- * review in the outbox, or a review on its trace. Never throws.
- */
-export function batchPassed(home: string, workspaceId: string, requestId: string, batchId: string, trace: Pick<ReconstructedTrace, "reviews"> | null = null): boolean {
-  try {
-    if (trace?.reviews.some((review) => review.batchId === batchId && isPassVerdict(review.verdict)) === true) return true;
-    return createOutbox(home)
-      .list(workspaceId)
-      .some(
-        (record) =>
-          record.kind === "review" &&
-          record.requestId === requestId &&
-          record.batchId === batchId &&
-          parseReviews(record.text, { agentId: record.from, at: record.createdAt }).some((review) => isPassVerdict(review.verdict)),
-      );
-  } catch {
-    return false;
-  }
-}
-
 /** Where a request stands against its budget (design §16.8). */
 export interface ReviewBudgetState {
   tier: Tier;
@@ -298,6 +267,8 @@ export interface ReviewBudgetState {
   calls: number;
   /** The batches a live `{ untilClean: b }` grant covers. */
   untilClean: Set<string>;
+  /** The tool calls of every batch an untilClean grant covers, live or spent (`exemptCallsOf`): left out of the comparison. */
+  exempt: number;
 }
 
 /** The sum of a request's `{ calls: n }` grants. */
@@ -326,31 +297,72 @@ export async function reviewBudgetStateOf(deps: BudgetDeps, request: RegisteredR
   const budget = readReviewBudget({ home: deps.home, log: deps.log })[request.tier];
   const granted = grantedCallsOf(request);
   const untilClean = liveUntilCleanBatchesOf(deps.home, request, trace);
-  return { tier: request.tier, budget, granted, ceiling: reviewCeilingOf(budget, granted), calls, untilClean };
+  return { tier: request.tier, budget, granted, ceiling: reviewCeilingOf(budget, granted), calls, untilClean, exempt: exemptCallsOf(request) };
 }
 
-/** The batches of the request's `{ untilClean: b }` grants that have not passed yet: the live ones (§16.8). Never throws. */
-export function liveUntilCleanBatchesOf(home: string, request: Pick<RegisteredRequest, "workspaceId" | "requestId" | "reviews">, trace: Pick<ReconstructedTrace, "reviews"> | null): Set<string> {
-  return new Set(
-    request.reviews.grants
-      .map((grant) => grant.untilCleanBatch)
-      .filter((batchId): batchId is string => batchId !== null)
-      .filter((batchId) => !batchPassed(home, request.workspaceId, request.requestId, batchId, trace)),
+type GrantedRequest = Pick<RegisteredRequest, "workspaceId" | "requestId" | "reviews">;
+
+/**
+ * The batches of the request's `{ untilClean: b }` grants that have not passed
+ * yet: the live ones (§16.8). A pass on the trace settles one; the outbox is
+ * read once, and only for the rest. Never throws.
+ */
+export function liveUntilCleanBatchesOf(home: string, request: GrantedRequest, trace: Pick<ReconstructedTrace, "reviews"> | null): Set<string> {
+  const passedOnTrace = (batchId: string): boolean => trace?.reviews.some((review) => review.batchId === batchId && isPassVerdict(review.verdict)) === true;
+  const open = [...new Set(request.reviews.grants.map((grant) => grant.untilCleanBatch))].filter(
+    (batchId): batchId is string => batchId !== null && !passedOnTrace(batchId),
   );
+  if (open.length === 0) return new Set();
+  let passed: Set<string>;
+  try {
+    passed = new Set(
+      createOutbox(home)
+        .list(request.workspaceId)
+        .filter(
+          (record) =>
+            record.kind === "review" &&
+            record.requestId === request.requestId &&
+            record.batchId !== null &&
+            parseReviews(record.text, { agentId: record.from, at: record.createdAt }).some((review) => isPassVerdict(review.verdict)),
+        )
+        .map((record) => record.batchId!),
+    );
+  } catch {
+    passed = new Set();
+  }
+  return new Set(open.filter((batchId) => !passed.has(batchId)));
 }
 
 /**
- * The request's grants as the Orchestrator's `review.over-budget` rule reads
- * them (`RuleInput.reviewGrant`): the same sum and the same live untilClean
- * batches the tools enforce with. Never throws.
+ * The tool calls of every batch an `{ untilClean: b }` grant covers, live or
+ * spent (§16.8): the owner granted that batch what it needs, so its calls
+ * never count against the ceiling — before or after it passes, so whether
+ * another batch is allowed never depends on when b passed. They still count
+ * in the displayed review count. Pure.
  */
-export function ruleReviewGrantOf(home: string, request: Pick<RegisteredRequest, "workspaceId" | "requestId" | "reviews">, trace: Pick<ReconstructedTrace, "reviews"> | null): RuleReviewGrant {
-  return { calls: grantedCallsOf(request), untilClean: liveUntilCleanBatchesOf(home, request, trace).size > 0 };
+export function exemptCallsOf(request: Pick<RegisteredRequest, "reviews">): number {
+  const covered = new Set(request.reviews.grants.map((grant) => grant.untilCleanBatch).filter((batchId): batchId is string => batchId !== null));
+  return request.reviews.batches.filter((batch) => covered.has(batch.batchId)).reduce((sum, batch) => sum + batch.calls.length, 0);
 }
 
-/** The refusal of one more call of `batchId`, or null when it may go (§16.8). */
+/**
+ * The request's grants as every budget check reads them (§16.8): the
+ * Orchestrator's `review.over-budget` rule (`RuleInput.reviewGrant`), the
+ * Manager's notice (`overrunOf`) and, through `reviewBudgetStateOf`, the
+ * tools — the sum of its `{ calls: n }` grants and the calls of every
+ * batch an untilClean grant covers. Pure.
+ */
+export function ruleReviewGrantOf(request: Pick<RegisteredRequest, "reviews">): RuleReviewGrant {
+  return { calls: grantedCallsOf(request), exempt: exemptCallsOf(request) };
+}
+
+/**
+ * The refusal of one more call of `batchId`, or null when it may go (§16.8): a
+ * batch a live untilClean grant covers always may; any other call may while
+ * the count after it, its exempt calls left out, stays within the ceiling.
+ */
 export function budgetRefusal(state: ReviewBudgetState, requestId: string, batchId: string): string | null {
-  if (!overReviewCeiling(state.calls + 1, state.ceiling, state.untilClean.has(batchId))) return null;
+  if (state.untilClean.has(batchId) || !overReviewCeiling(state.calls + 1, state.exempt, state.ceiling)) return null;
   return budgetRefusalOf({ requestId, calls: state.calls, budget: state.ceiling, tier: state.tier, batchId });
 }
 
@@ -472,9 +484,9 @@ function boundWorkerOf(caller: ToolCaller | null): BoundWorker | null | "no-requ
   return worker.requestId === null ? "no-request" : (worker as BoundWorker);
 }
 
-/** The `reviewCalls` a tool answers: `<n> of <ceiling>`. */
-function callsLine(calls: number, ceiling: number): string {
-  return `${calls} of ${ceiling}`;
+/** The `reviewCalls` a tool answers after its call: `<n> of <ceiling>`, the call counted (the tools of a request run one at a time). */
+function callsAfter(before: ReviewBudgetState): string {
+  return `${before.calls + 1} of ${before.ceiling}`;
 }
 
 /**
@@ -508,17 +520,6 @@ export function createReviewTools(deps: ReviewToolDeps): ServerTools {
     }
     if (state === null) return refused(NO_REPORT_YET_MESSAGE);
     return { request, state };
-  };
-
-  /** The count after a call, as the Dashboard shows it; the ceiling with it. */
-  const countAfter = async (home: string, paseo: unknown, worker: BoundWorker, before: ReviewBudgetState): Promise<string> => {
-    try {
-      const request = registryOf(home).get(worker.workspaceId, worker.requestId);
-      const state = request === null ? null : await reviewBudgetStateOf({ home, paseo, log }, request);
-      return state === null ? callsLine(before.calls + 1, before.ceiling) : callsLine(state.calls, state.ceiling);
-    } catch {
-      return callsLine(before.calls + 1, before.ceiling);
-    }
   };
 
   // -------------------------------------------------------------------------
@@ -603,8 +604,9 @@ export function createReviewTools(deps: ReviewToolDeps): ServerTools {
             model: profile.model,
             base,
             modeId,
+            callId,
           },
-          { binder: deps.binder?.(), log },
+          { home, binder: deps.binder?.(), log },
         ));
       } catch (error) {
         // Paseo's refusal, verbatim but for a token path (design §16.5: a token never reaches an agent or a log).
@@ -616,10 +618,10 @@ export function createReviewTools(deps: ReviewToolDeps): ServerTools {
             .get(worker.workspaceId, request.requestId)
             ?.reviews.batches.find((entry) => entry.batchId === typed.batchId)
             ?.calls.find((call) => call.callId === callId && call.reviewerId !== "");
-          if (named !== undefined) return answered({ reviewerId: named.reviewerId, batchId: typed.batchId, reviewCalls: await countAfter(home, paseo, worker, state) });
+          if (named !== undefined) return answered({ reviewerId: named.reviewerId, batchId: typed.batchId, reviewCalls: callsAfter(state) });
           log(`[paseo-bm] ${CREATE_REVIEWER_TOOL}: Paseo answered the Reviewer of batch ${typed.batchId} for Worker ${worker.agentId} with an error after it may have created it: ${reason}`);
           return refused(
-            `Paseo answered with an error after it may have created the Reviewer: ${reason}. If the Reviewer appears, its review reaches you as usual; if not, batch ${typed.batchId} is free again in 10 minutes, or open a new batch.`,
+            `Paseo answered with an error after it may have created the Reviewer: ${reason}. If the Reviewer appears, its review reaches you as usual; if not, batch ${typed.batchId} is free again in ${PENDING_TTL_MS / 60_000} minutes, or open a new batch.`,
           );
         }
         // A failed creation removes its call: it never happened.
@@ -632,12 +634,7 @@ export function createReviewTools(deps: ReviewToolDeps): ServerTools {
         return refused(`Paseo refused to create the Reviewer: ${reason}. ${nothing}`);
       }
 
-      try {
-        registryOf(home).noteReviewer(worker.workspaceId, request.requestId, typed.batchId, reviewerId, callId);
-      } catch (error) {
-        log(`[paseo-bm] could not add Reviewer ${reviewerId} to batch ${typed.batchId} of ${request.requestId}: ${reasonOf(error)}`);
-      }
-      return answered({ reviewerId, batchId: typed.batchId, reviewCalls: await countAfter(home, paseo, worker, state) });
+      return answered({ reviewerId, batchId: typed.batchId, reviewCalls: callsAfter(state) });
     });
   };
 
@@ -743,7 +740,7 @@ export function createReviewTools(deps: ReviewToolDeps): ServerTools {
         }
         return refused(`paseo-bm could not deliver the re-review to Reviewer ${target.reviewerId}; it was not counted. Create a new batch with bm_create_reviewer, or tell the owner in one line.`);
       }
-      return answered({ reviewerId: target.reviewerId, delivery, reviewCalls: await countAfter(home, paseo, worker, state) });
+      return answered({ reviewerId: target.reviewerId, delivery, reviewCalls: callsAfter(state) });
     });
   };
 

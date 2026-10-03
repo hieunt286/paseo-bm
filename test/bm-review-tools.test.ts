@@ -15,19 +15,20 @@ import {
   NO_REPORT_YET_MESSAGE,
   REVIEW_NOT_BOUND_MESSAGE,
   applyReviewBudgetGrants,
+  budgetRefusal,
   budgetRefusalOf,
-  clearPluginReviewers,
   createReviewTools,
-  isPluginReviewer,
   rereviewLineOf,
+  reviewBudgetStateOf,
   ruleReviewGrantOf,
 } from "../plugin/server/review-tools";
+import { REVIEW_BUDGET, overrunOf } from "../plugin/server/review-budget";
 import { flagsOf } from "../plugin/shared/orchestrator-rules";
 import type { RuleReviewGrant } from "../plugin/shared/rule-input";
 import { applyAgentTools, type AgentCreateRequest } from "../plugin/server/role-hook";
 import { forgetModes } from "../plugin/server/role-mode";
 import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store";
-import { reviewCallCountOf } from "../plugin/server/traces";
+import { reviewCallsOf, type ReconstructedTrace } from "../plugin/server/traces";
 import { toolFacesFor } from "../plugin/shared/bm-tools";
 import { decideRefusalOf, type AutonomyPolicy } from "../plugin/shared/autonomy";
 import { answerDecision, type Decision } from "../plugin/shared/decisions";
@@ -60,7 +61,6 @@ afterEach(() => {
   clearRequestRegistryCache();
   clearDecisionStoreCache();
   clearTraceStoreCache();
-  clearPluginReviewers();
   forgetModes();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -199,8 +199,7 @@ describe("bm_create_reviewer (design §16.6)", () => {
 
     // The binding: a Reviewer of the same request and batch, under its Worker, with the tools of ship point C.
     expect(store.bindingOfAgent("created-1")).toMatchObject({ role: "reviewer", state: "bound", requestId: REQ, batchId: "b1", parentId: WORKER });
-    expect(isPluginReviewer("created-1")).toBe(true);
-    // The registry: the batch, its brief, its one call.
+    // The registry: the batch, its brief, its one call — the Reviewer named on it, so it is the plugin's own.
     const batch = createRequestRegistry(home).get(WS, REQ)!.reviews.batches[0]!;
     expect(batch).toMatchObject({ batchId: "b1", reviewerIds: ["created-1"], calls: [{ callId: "out-000000000001", kind: "create", reviewerId: "created-1" }] });
     expect(prompt.endsWith(batch.brief)).toBe(true);
@@ -267,12 +266,10 @@ describe("bm_create_reviewer (design §16.6)", () => {
     expect((await tools.call("bm_rereview", { batchId: "b1", fixed: "x" }, WORKER_CALLER)).text).toContain("The Reviewer of batch b1 is still being created");
 
     // agent.created of the Reviewer Paseo did create: its binding is bound and the registry names it.
-    clearPluginReviewers();
     const seen = fakePaseo({ agents: [{ id: "rev-late", provider: "bm-reviewer/gpt-5.6", workspaceId: WS, labels: { "bm.role": "reviewer", "bm.requestId": REQ, "bm.batchId": "b1", "paseo.parent-agent-id": WORKER } }] });
     await settleCreatedAgent({ id: "rev-late", provider: "bm-reviewer/gpt-5.6", parentAgentId: WORKER, workspaceId: WS }, seen.paseo, { home, bindings: store, log: () => {} });
     expect(store.bindingOfAgent("rev-late")).toMatchObject({ state: "bound", role: "reviewer", batchId: "b1" });
     expect(createRequestRegistry(home).get(WS, REQ)!.reviews.batches[0]).toMatchObject({ reviewerIds: ["rev-late"], calls: [{ callId: "out-000000000001", reviewerId: "rev-late" }] });
-    expect(isPluginReviewer("rev-late")).toBe(true);
   });
 
   it("a create call still without a Reviewer after the pending time is cleared: the batch is free again", async () => {
@@ -413,7 +410,7 @@ describe("one counter: the tools enforce with the number the Dashboard shows (de
     expect(await dashboard()).toBe(3);
   });
 
-  it("reviewCallCountOf: the union, counted once by id, with the off-tool calls apart", () => {
+  it("reviewCallsOf: the union of tool records and the activity stream, counted once by id", () => {
     const reviewer = "rev-1";
     const records = [
       turn({ agentId: reviewer, role: "reviewer", sent: [msg(reviewer, "2026-10-03T10:00:00.000Z", `${reviewerBriefLineOf(REQ, "b1", "out-aaaaaaaaaaaa")}\nReview batch b1.`)] }),
@@ -423,11 +420,12 @@ describe("one counter: the tools enforce with the number the Dashboard shows (de
       turn({ agentId: reviewer, role: "reviewer", sent: [msg(reviewer, "2026-10-03T10:30:00.000Z", "BM-FORMAT your block broke its template.")] }),
     ];
     const tool = [{ callId: "out-aaaaaaaaaaaa" }, { callId: "out-bbbbbbbbbbbb" }, { callId: "out-cccccccccccc" }];
-    expect(reviewCallCountOf([reviewer], records, [], tool)).toEqual({ calls: 4, toolCalls: 3, offTool: 1 });
-    expect(reviewCallCountOf([reviewer], records)).toEqual({ calls: 3, toolCalls: 0, offTool: 3 });
+    // Three tool calls, two of them seen by id, and one hand-sent message.
+    expect(reviewCallsOf([reviewer], records, [], tool)).toBe(4);
+    expect(reviewCallsOf([reviewer], records)).toBe(3);
     // Tool records alone are a count, not "unknown".
-    expect(reviewCallCountOf(["rev-unrecorded"], [], [], tool)?.calls).toBe(3);
-    expect(reviewCallCountOf(["rev-unrecorded"], [])).toBeNull();
+    expect(reviewCallsOf(["rev-unrecorded"], [], [], tool)).toBe(3);
+    expect(reviewCallsOf(["rev-unrecorded"], [])).toBeNull();
   });
 });
 
@@ -483,8 +481,8 @@ describe("the review-budget grant (design §16.8)", () => {
     expect(fake.creates).toHaveLength(4);
 
     // The Orchestrator's review.over-budget rule reads the same ceiling: 4 calls of a granted Small request are not flagged.
-    const grant = ruleReviewGrantOf(home, createRequestRegistry(home).get(WS, REQ)!, null);
-    expect(grant).toEqual({ calls: 2, untilClean: false });
+    const grant = ruleReviewGrantOf(createRequestRegistry(home).get(WS, REQ)!);
+    expect(grant).toEqual({ calls: 2, exempt: 0 });
     expect(overBudgetState(4, grant)).toBeUndefined();
     expect(overBudgetState(4)).toBe("raised");
     expect(overBudgetState(5, grant)).toBe("raised");
@@ -537,18 +535,85 @@ describe("the review-budget grant (design §16.8)", () => {
     fake.byId("created-1")!.status = "idle";
     tick();
     expect(parsed(await tools.call("bm_rereview", { batchId: "b1", fixed: "fix 3" }, WORKER_CALLER))["reviewCalls"]).toBe("4 of 2");
-    // Another batch is not covered.
-    expect((await tools.call("bm_create_reviewer", { ...INPUT, batchId: "b2" }, WORKER_CALLER)).text).toContain("Review budget reached");
 
-    // A live untilClean grant: the rule does not flag its 4 calls either.
-    expect(ruleReviewGrantOf(home, createRequestRegistry(home).get(WS, REQ)!, null)).toEqual({ calls: 0, untilClean: true });
-    expect(overBudgetState(4, ruleReviewGrantOf(home, createRequestRegistry(home).get(WS, REQ)!, null))).toBeUndefined();
+    // A live untilClean grant: its 4 calls are left out, so the rule does not flag them either.
+    expect(ruleReviewGrantOf(createRequestRegistry(home).get(WS, REQ)!)).toEqual({ calls: 0, exempt: 4 });
+    expect(overBudgetState(4, ruleReviewGrantOf(createRequestRegistry(home).get(WS, REQ)!))).toBeUndefined();
 
-    // b1 passes: the grant ends.
+    // b1 passes: the grant is spent, but its calls stay left out — whether another batch is allowed never
+    // depends on when b1 passed (§7.7). b2 starts from the untouched budget.
     createOutbox(home).add(WS, { kind: "review", requestId: REQ, batchId: "b1", from: "created-1", to: WORKER, text: "BM-REVIEW\nrequestId: " + REQ + "\nbatchId: b1\nverdict: pass\n" });
-    expect(ruleReviewGrantOf(home, createRequestRegistry(home).get(WS, REQ)!, null)).toEqual({ calls: 0, untilClean: false });
+    expect(ruleReviewGrantOf(createRequestRegistry(home).get(WS, REQ)!)).toEqual({ calls: 0, exempt: 4 });
     fake.byId("created-1")!.status = "idle";
     tick();
     expect((await tools.call("bm_rereview", { batchId: "b1", fixed: "fix 4" }, WORKER_CALLER)).text).toContain("has had its one re-review");
+    expect((await tools.call("bm_create_reviewer", { ...INPUT, batchId: "b2" }, WORKER_CALLER)).ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// One ceiling (design §16.8): the tools, the rule and the Manager's notice.
+// ---------------------------------------------------------------------------
+
+describe("one ceiling: the review tools, the Orchestrator's rule and the Manager's notice agree (design §16.8)", () => {
+  /** `n` tool calls of batch `batchId` in the registry: a create, then re-reviews. */
+  function callsOf(home: string, batchId: string, n: number): void {
+    const registry = createRequestRegistry(home);
+    for (let i = 0; i < n; i += 1) {
+      const callId = `out-${batchId}${String(i).padStart(10, "0")}`;
+      registry.addReviewCall(WS, REQ, batchId, { callId, kind: i === 0 ? "create" : "rereview", reviewerId: `rev-${batchId}`, at: T0.toISOString() }, "brief");
+    }
+  }
+
+  /** The request's trace as the notice reads it: only what `overrunOf` looks at. */
+  const traceWith = (reviewCalls: number) => ({ requestId: REQ, tier: "Small", reviewCalls, managerAgentId: MANAGER }) as unknown as ReconstructedTrace;
+
+  /**
+   * What each check says now, and of one more call of `batchId`: the tools'
+   * refusal of it, and the rule and the notice on the count after it (a call
+   * of a live untilClean batch is exempt too).
+   */
+  async function verdicts(home: string, paseo: unknown, batchId: string) {
+    const request = createRequestRegistry(home).get(WS, REQ)!;
+    const state = (await reviewBudgetStateOf({ home, paseo, log: () => {} }, request))!;
+    const grant = ruleReviewGrantOf(request);
+    expect(grant).toEqual({ calls: state.granted, exempt: state.exempt });
+    const after = { calls: grant.calls, exempt: grant.exempt + (state.untilClean.has(batchId) ? 1 : 0) };
+    return {
+      calls: state.calls,
+      now: { rule: overBudgetState(state.calls, grant) === "raised", notice: overrunOf(traceWith(state.calls), REVIEW_BUDGET, grant) !== null },
+      next: {
+        tool: budgetRefusal(state, REQ, batchId) !== null,
+        rule: overBudgetState(state.calls + 1, after) === "raised",
+        notice: overrunOf(traceWith(state.calls + 1), REVIEW_BUDGET, after) !== null,
+      },
+    };
+  }
+
+  it("granted calls: within at the raised ceiling; the call past it is refused, flagged and noticed alike", async () => {
+    const { home, fake } = setup({ tier: "Small" });
+    callsOf(home, "b1", 2);
+    callsOf(home, "b2", 2);
+    createRequestRegistry(home).addGrant(WS, REQ, { decisionId: `q:${REQ}:Q1`, calls: 2, untilCleanBatch: null });
+    expect(await verdicts(home, fake.paseo, "b3")).toEqual({ calls: 4, now: { rule: false, notice: false }, next: { tool: true, rule: true, notice: true } });
+  });
+
+  it("a live untilClean batch: its calls are left out by all three, for its own calls and another batch's", async () => {
+    const { home, fake } = setup({ tier: "Small" });
+    callsOf(home, "b1", 4);
+    createRequestRegistry(home).addGrant(WS, REQ, { decisionId: `q:${REQ}:Q1`, calls: null, untilCleanBatch: "b1" });
+    const within = { calls: 4, now: { rule: false, notice: false }, next: { tool: false, rule: false, notice: false } };
+    expect(await verdicts(home, fake.paseo, "b1")).toEqual(within);
+    expect(await verdicts(home, fake.paseo, "b2")).toEqual(within);
+  });
+
+  it("a passed untilClean batch: its calls stay left out by all three, so another batch never depends on when it passed", async () => {
+    const { home, fake } = setup({ tier: "Small" });
+    callsOf(home, "b1", 4);
+    createRequestRegistry(home).addGrant(WS, REQ, { decisionId: `q:${REQ}:Q1`, calls: null, untilCleanBatch: "b1" });
+    createOutbox(home).add(WS, { kind: "review", requestId: REQ, batchId: "b1", from: "rev-b1", to: WORKER, text: `BM-REVIEW\nrequestId: ${REQ}\nbatchId: b1\nverdict: pass\n` });
+    const within = { calls: 4, now: { rule: false, notice: false }, next: { tool: false, rule: false, notice: false } };
+    expect(await verdicts(home, fake.paseo, "b1")).toEqual(within);
+    expect(await verdicts(home, fake.paseo, "b2")).toEqual(within);
   });
 });

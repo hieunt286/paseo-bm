@@ -26,8 +26,8 @@
  *   usually WAKES the Manager, so a notice found at the Worker's turn end is
  *   deferred — which is why the MANAGER's own turn end is checked too, and is
  *   often the moment the notice can finally go out (review b1, B2).
- * - `PaseoAgentHandle.send()` on a running agent REPLACES its current turn —
- *   `stop-propagation.ts` relies on exactly that to interrupt a Reviewer. A
+ * - `PaseoAgentHandle.send()` on a running agent REPLACES its current turn
+ *   (AGENTS.md: a message Paseo delivers to a running agent cuts its turn). A
  *   Manager in the middle of answering the user must not be cut off, so the
  *   notice is sent only when `refresh()` says the Manager is not `running`.
  * - A Manager turn is attributed to the request whose `requestId: req-…` it
@@ -38,14 +38,16 @@
  * cancels anything.
  *
  * Since ADR-027 a bound Worker's review tools refuse every call past its
- * request's budget (design §16.8, `review-tools.ts`); this notice still goes
- * to the Manager for an overrun on every request, bound ones included, where
- * only off-tool calls can make one (`overrunOf`).
+ * request's ceiling (design §16.8, `review-tools.ts`); this notice still goes
+ * to the Manager for an overrun on every request, bound ones included, by the
+ * same comparison (`overrunOf`, `overReviewCeiling`).
  */
 import { dirname } from "node:path";
 import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
 import type { Tier } from "../shared/contracts";
 import { DEFAULT_COORDINATION_SETTINGS, reviewBudgetOf, type ReviewBudget } from "../shared/coordination";
+import { overReviewCeiling, reviewCeilingOf } from "../shared/orchestrator-rules";
+import type { RuleReviewGrant } from "../shared/rule-input";
 import { readReviewBudget } from "./coordination-rpc";
 import type { DashboardPaseo } from "./paseo-directory";
 import { BUDGET_NOTICE_MARKER } from "./notices";
@@ -53,9 +55,8 @@ import { roleOfProvider } from "./agent-role";
 import type { TraceStoreLocation } from "./trace-store";
 import type { BudgetTold } from "./budget-told";
 import type { ReconstructedTrace } from "./traces";
-import { registeredRequestsOf, requestTraceOf } from "./request-trace";
-import type { RegisteredRequest } from "./request-registry";
-import { grantedCallsOf } from "./review-tools";
+import { requestTraceOf } from "./request-trace";
+import { ruleReviewGrantOf } from "./review-tools";
 
 /**
  * Total review calls per request, by tier, by default (PRD delta
@@ -98,32 +99,25 @@ export interface BudgetOverrun {
   managerAgentId: string;
 }
 
-/** What the check reads of a request's registry entry (design §16.4, §16.8): its review batches and grants. */
-export type BudgetRequest = Pick<RegisteredRequest, "reviews">;
-
 /**
  * The overrun of one reconstructed request against `reviewBudget` (the
  * defaults unless given), or `null` when it is within budget, or when its
  * tier, its call count, its request id or its Manager is not known — an
  * unknown number never produces a notice.
  *
- * With the request's registry entry (design §16.8) the ceiling is the budget
- * plus its `{ calls: n }` grants, and the tool calls of a batch an
- * `{ untilClean }` grant covers are left out of the comparison: the tools
- * refused every call past the ceiling, and those they let through were
- * granted. So on a bound request only off-tool calls — a message sent to a
- * Reviewer by hand, an off-tool Reviewer — make an overrun. The notice still
- * names the whole count.
+ * With the request's grants (design §16.8; `ruleReviewGrantOf`, as the
+ * Orchestrator's rule and the review tools read them) the ceiling is the
+ * budget plus its `{ calls: n }` grants, and the tool calls of the batches
+ * whose `{ untilClean }` grant is still live are left out of the comparison
+ * (`overReviewCeiling`). The notice still names the whole count.
  */
-export function overrunOf(trace: ReconstructedTrace, reviewBudget: ReviewBudget = REVIEW_BUDGET, request: BudgetRequest | null = null): BudgetOverrun | null {
+export function overrunOf(trace: ReconstructedTrace, reviewBudget: ReviewBudget = REVIEW_BUDGET, grant: RuleReviewGrant | null = null): BudgetOverrun | null {
   if (trace.requestId === null || trace.tier === null || trace.reviewCalls === null) return null;
   if (trace.managerAgentId === null) return null;
   const base = reviewBudget[trace.tier];
   if (base === undefined) return null;
-  const budget = request === null ? base : base + grantedCallsOf(request);
-  const covered = new Set(request?.reviews.grants.map((grant) => grant.untilCleanBatch).filter((batchId) => batchId !== null) ?? []);
-  const granted = request === null ? 0 : request.reviews.batches.filter((batch) => covered.has(batch.batchId)).reduce((sum, batch) => sum + batch.calls.length, 0);
-  if (trace.reviewCalls - granted <= budget) return null;
+  const budget = reviewCeilingOf(base, grant?.calls ?? 0);
+  if (!overReviewCeiling(trace.reviewCalls, grant?.exempt ?? 0, budget)) return null;
   return {
     requestId: trace.requestId,
     tier: trace.tier,
@@ -199,13 +193,11 @@ export async function checkReviewBudget(event: TurnEndedEvent, deps: BudgetDeps)
     } else {
       // The same rebuild the Orchestrator's rules read (request-trace.ts), against
       // the owner's budget in the same data folder as the traces (§G.7).
+      const home = dirname(deps.location.tracesDir);
       const found = await requestTraceOf(deps, workspaceId, agent.id);
-      // Design §16.8: a bound request's grants and tool calls, from the registry beside the traces.
-      const request =
-        found === null || found.trace.requestId === null
-          ? null
-          : (registeredRequestsOf({ location: deps.location, home: dirname(deps.location.tracesDir) }, workspaceId).find((entry) => entry.requestId === found.trace.requestId) ?? null);
-      over = found === null ? undefined : (overrunOf(found.trace, readReviewBudget({ home: dirname(deps.location.tracesDir), log }), request) ?? undefined);
+      // Design §16.8: the request's grants, from the registry the rebuild read beside the traces.
+      const grant = found?.request === null || found?.request === undefined ? null : ruleReviewGrantOf(found.request);
+      over = found === null ? undefined : (overrunOf(found.trace, readReviewBudget({ home, log }), grant) ?? undefined);
       if (over === undefined) return "within";
       pending.set(keyOf(over), over);
     }

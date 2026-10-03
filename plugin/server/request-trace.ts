@@ -25,15 +25,7 @@ import { errorText } from "./rpc-kit";
 import { reviewerReplacementsFor } from "./fallback-state";
 import { agentFactsOf, type DashboardPaseo } from "./paseo-directory";
 import { readRecords, readWorkspaceMeta, storedWorkspaceIds, type TraceStoreLocation } from "./trace-store";
-import {
-  handoffSuccessorsOf,
-  reconstructTraces,
-  reviewCallCountOf,
-  toolCallsOf,
-  type AgentFacts,
-  type ReconstructedTrace,
-  type ReviewCallCount,
-} from "./traces";
+import { handoffSuccessorsOf, reconstructTraces, reviewCallsOf, toolCallsOf, type AgentFacts, type ReconstructedTrace } from "./traces";
 import { createRequestRegistry, type RegisteredRequest } from "./request-registry";
 import { timeOrZero } from "../shared/time";
 import { dirname } from "node:path";
@@ -65,6 +57,8 @@ export interface WorkspaceTraces {
   records: TraceRecord[];
   agents: Map<string, AgentFacts>;
   traces: ReconstructedTrace[];
+  /** The workspace's requests in the request registry, as the rebuild read them (`registeredRequestsOf`). */
+  requests: RegisteredRequest[];
   /** What reading the store had to say: a newer schema, unreadable lines (`readRecords`). */
   notices: string[];
 }
@@ -141,10 +135,12 @@ export function waitingSinceOf(trace: ReconstructedTrace): string | null {
   return endedAt > 0 && endedAt < timeOrZero(last.at) ? carrier!.endedAt : last.at;
 }
 
-/** One request's trace, with the live facts of its agents beside it. */
+/** One request's trace, with the live facts of its agents and its registry entry beside it. */
 export interface RequestTrace {
   trace: ReconstructedTrace;
   agents: Map<string, AgentFacts>;
+  /** The request in the request registry (design §16.4), as the rebuild read it; null when it holds none. */
+  request: RegisteredRequest | null;
 }
 
 /**
@@ -168,7 +164,7 @@ export async function workspaceTracesOf(deps: RequestTraceDeps, workspaceId: str
   // Design §16.8: the request registry's review tool records, counted with the activity stream.
   const requests = registeredRequestsOf(deps, workspaceId);
   const traces = reconstructTraces({ records, agents: [...agents.values()], replacementIds, requests });
-  return { records, agents, traces, notices };
+  return { records, agents, traces, requests, notices };
 }
 
 /**
@@ -189,8 +185,6 @@ export function registeredRequestsOf(deps: Pick<RequestTraceDeps, "location" | "
 export interface RequestReviewCount {
   /** The one count (`reviewCallsOf`); 0 when nothing was recorded yet. */
   calls: number;
-  /** The breakdown: tool records and off-tool calls (`reviewCallCountOf`). */
-  count: ReviewCallCount | null;
   /** The request's rebuilt trace, when the store holds one. */
   trace: ReconstructedTrace | null;
 }
@@ -199,27 +193,22 @@ export interface RequestReviewCount {
  * The review calls of one request, by the one function the Dashboard shows
  * (design §16.8): the request's trace rebuilt exactly as `workspaceTracesOf`
  * rebuilds it for the Dashboard, its `reviewCalls` read; with no trace of it
- * yet (no Manager turn recorded), the same `reviewCallCountOf` over the
+ * yet (no Manager turn recorded), the same `reviewCallsOf` over the
  * Reviewers labelled with the request or created by one of its Workers and its
  * tool records. Rejects when the store cannot be read.
  */
 export async function requestReviewCountOf(deps: RequestTraceDeps, workspaceId: string, requestId: string): Promise<RequestReviewCount> {
-  const { records, agents, traces } = await workspaceTracesOf(deps, workspaceId);
-  const request = registeredRequestsOf(deps, workspaceId).find((entry) => entry.requestId === requestId) ?? null;
+  const { records, agents, traces, requests } = await workspaceTracesOf(deps, workspaceId);
   const trace = traces.find((candidate) => candidate.requestId === requestId) ?? null;
-  const replacementIds = deps.replacementIds ?? (await reviewerReplacementsFor({ home: deps.home }));
-  const workerIds = new Set([...(request?.workerIds ?? []), ...(trace?.workerIds ?? [])]);
-  const reviewerIds =
-    trace !== null
-      ? trace.reviewerIds
-      : [...agents.values()]
-          .filter((agent) => agent.role === "reviewer" && (agent.requestIdLabel === requestId || (agent.parentAgentId !== null && workerIds.has(agent.parentAgentId))))
-          .map((agent) => agent.id);
-  const ownRecords = trace !== null ? trace.records : records;
-  const count = reviewCallCountOf(reviewerIds, ownRecords, replacementIds, toolCallsOf(request));
   // The trace's own figure when there is one: the very number the Dashboard shows.
-  const calls = trace !== null ? (trace.reviewCalls ?? 0) : (count?.calls ?? 0);
-  return { calls, count, trace };
+  if (trace !== null) return { calls: trace.reviewCalls ?? 0, trace };
+  const request = requests.find((entry) => entry.requestId === requestId) ?? null;
+  const replacementIds = deps.replacementIds ?? (await reviewerReplacementsFor({ home: deps.home }));
+  const workerIds = new Set(request?.workerIds ?? []);
+  const reviewerIds = [...agents.values()]
+    .filter((agent) => agent.role === "reviewer" && (agent.requestIdLabel === requestId || (agent.parentAgentId !== null && workerIds.has(agent.parentAgentId))))
+    .map((agent) => agent.id);
+  return { calls: reviewCallsOf(reviewerIds, records, replacementIds, toolCallsOf(request)) ?? 0, trace: null };
 }
 
 /** The request a Worker or Reviewer belongs to, or undefined when it is linked to none. */
@@ -251,9 +240,10 @@ export async function requestTraceOf(
   workspaceId: string,
   agentId: string,
 ): Promise<RequestTrace | null> {
-  const { agents, traces } = await workspaceTracesOf(deps, workspaceId);
+  const { agents, traces, requests } = await workspaceTracesOf(deps, workspaceId);
   const trace = traceOfAgent(traces, agentId);
-  return trace === undefined ? null : { trace, agents };
+  if (trace === undefined) return null;
+  return { trace, agents, request: trace.requestId === null ? null : (requests.find((entry) => entry.requestId === trace.requestId) ?? null) };
 }
 
 /** A request to read: by its id, else the one an agent (a Worker or Reviewer) belongs to. */

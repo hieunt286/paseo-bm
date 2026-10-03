@@ -47,7 +47,7 @@ describe("the retired rules (autonomy design §B.9)", () => {
   it("leaves review.over-budget alone in the catalogue", () => {
     expect(RULE_IDS).toEqual(["review.over-budget"]);
     // Their helpers went with them; the process-document test stays for the Worker watch and the replay.
-    // reviewCeilingOf and overReviewCeiling: the one ceiling the review tools and this rule share (design §16.8).
+    // reviewCeilingOf and overReviewCeiling: the one ceiling the review tools, this rule and the Manager's notice share (design §16.8).
     expect(Object.keys(rules).sort()).toEqual(["EXCERPT_MAX_CHARS", "excerptOf", "flagsOf", "isProcessDocumentPath", "overReviewCeiling", "reviewCeilingOf"]);
   });
 
@@ -84,19 +84,21 @@ describe("review.over-budget", () => {
     expect(only(unknownCalls.input, unknownCalls.facts, "review.over-budget")).toBeUndefined();
   });
 
-  it("a granted request is not over budget: its grants raise the ceiling, a live untilClean grant lifts it (design §16.8)", () => {
+  it("a granted request is not over budget: its grants raise the ceiling, a live untilClean batch's calls are left out (design §16.8)", () => {
     // Medium budget 2, 4 calls: raised without a grant.
     const { input, facts } = cleanWith({ reviewCalls: 4 });
     expect(only(input, facts, "review.over-budget")?.state).toBe("raised");
-    expect(only({ ...input, reviewGrant: { calls: 2, untilClean: false } }, facts, "review.over-budget")).toBeUndefined();
-    const past = only({ ...input, reviewCalls: 5, reviewGrant: { calls: 2, untilClean: false } }, facts, "review.over-budget");
+    expect(only({ ...input, reviewGrant: { calls: 2, exempt: 0 } }, facts, "review.over-budget")).toBeUndefined();
+    const past = only({ ...input, reviewCalls: 5, reviewGrant: { calls: 2, exempt: 0 } }, facts, "review.over-budget");
     expect(past?.observed).toBe("The Medium request made 5 review calls, over its budget of 2 plus 2 granted.");
-    expect(only({ ...input, reviewCalls: 9, reviewGrant: { calls: 0, untilClean: true } }, facts, "review.over-budget")).toBeUndefined();
-    // The same function the review tools refuse with: one more call past the ceiling, unless untilClean.
+    // 9 calls, 7 of them in a live untilClean batch: within; one more outside it, past.
+    expect(only({ ...input, reviewCalls: 9, reviewGrant: { calls: 0, exempt: 7 } }, facts, "review.over-budget")).toBeUndefined();
+    expect(only({ ...input, reviewCalls: 10, reviewGrant: { calls: 0, exempt: 7 } }, facts, "review.over-budget")?.state).toBe("raised");
+    // The same comparison the review tools and the Manager's notice make: calls − exempt > budget + granted.
     expect(rules.reviewCeilingOf(2, 2)).toBe(4);
-    expect(rules.overReviewCeiling(4, 4, false)).toBe(false);
-    expect(rules.overReviewCeiling(5, 4, false)).toBe(true);
-    expect(rules.overReviewCeiling(5, 4, true)).toBe(false);
+    expect(rules.overReviewCeiling(4, 0, 4)).toBe(false);
+    expect(rules.overReviewCeiling(5, 0, 4)).toBe(true);
+    expect(rules.overReviewCeiling(5, 1, 4)).toBe(false);
   });
 
   it("reads the budget from facts, not from server code", () => {

@@ -754,11 +754,15 @@ describe("a bound Manager: the plugin creates the successor, the Manager is info
 
   it("a reload during the creation and no successor ever appears: it ends dropped, no-successor, and nothing is created again", async () => {
     const { fake, next } = await cutMidCreation();
+    const lookups = () => fake.lists.filter((options) => options.filter?.labels?.[HANDOFF_FROM_LABEL] === WORKER).length;
     clock = new Date(clock.getTime() + CREATING_WAIT_MS - 1_000);
     await next.turnRecorded({ agent: { id: MANAGER }, timeline: [] }, null, fake.paseo);
     expect(handoffs().list()[0]).toMatchObject({ state: "creating" });
+    // Looked up in Paseo once per run: a later successor completes it at its own agent.created.
+    expect(lookups()).toBe(1);
     clock = new Date(clock.getTime() + 2_000);
     await next.turnRecorded({ agent: { id: MANAGER }, timeline: [] }, null, fake.paseo);
+    expect(lookups()).toBe(1);
     expect(handoffs().list()[0]).toMatchObject({ state: "dropped", ending: "no-successor", successorId: null });
     expect(fake.creates).toHaveLength(1);
     expect(fake.sends.map((sent) => sent.id)).toEqual([WORKER]);

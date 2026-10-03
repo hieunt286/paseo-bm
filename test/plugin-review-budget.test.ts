@@ -663,27 +663,14 @@ describe("the review-budget notice survives a reload", () => {
   });
 });
 
-// Design §16.8: a bound request's tools refuse every call past its ceiling; the notice is for off-tool overruns.
+// Design §16.8: a bound request's tools refuse every call past its ceiling; the notice compares the same way.
 describe("a bound request (design §16.8)", () => {
-  const bound = (grants: Array<{ calls: number | null; untilCleanBatch: string | null }>, batches: Array<{ batchId: string; calls: number }> = []) => ({
-    reviews: {
-      grants: grants.map((grant, index) => ({ decisionId: `q:${REQ}:Q${index + 1}`, ...grant })),
-      batches: batches.map((batch) => ({
-        batchId: batch.batchId,
-        reviewerIds: [],
-        brief: "",
-        calls: Array.from({ length: batch.calls }, (_, index) => ({ callId: `out-00000000000${index}`, kind: "create" as const, reviewerId: "r", at: "2026-09-17T01:00:00.000Z" })),
-      })),
-    },
-  });
-
-  it("the ceiling is the budget plus the calls granted; an untilClean batch's tool calls are granted", () => {
-    expect(overrunOf(trace({ tier: "Small", reviewCalls: 4 }), REVIEW_BUDGET, bound([{ calls: 2, untilCleanBatch: null }]))).toBeNull();
-    expect(overrunOf(trace({ tier: "Small", reviewCalls: 5 }), REVIEW_BUDGET, bound([{ calls: 2, untilCleanBatch: null }]))).toMatchObject({ calls: 5, budget: 4 });
-    // b1's three tool calls went on under its untilClean grant: within, until off-tool calls pass the ceiling.
-    const clean = bound([{ calls: null, untilCleanBatch: "b1" }], [{ batchId: "b1", calls: 3 }]);
-    expect(overrunOf(trace({ tier: "Small", reviewCalls: 5 }), REVIEW_BUDGET, clean)).toBeNull();
-    expect(overrunOf(trace({ tier: "Small", reviewCalls: 6 }), REVIEW_BUDGET, clean)).toMatchObject({ calls: 6, budget: 2 });
+  it("the ceiling is the budget plus the calls granted; a live untilClean batch's calls are left out", () => {
+    expect(overrunOf(trace({ tier: "Small", reviewCalls: 4 }), REVIEW_BUDGET, { calls: 2, exempt: 0 })).toBeNull();
+    expect(overrunOf(trace({ tier: "Small", reviewCalls: 5 }), REVIEW_BUDGET, { calls: 2, exempt: 0 })).toMatchObject({ calls: 5, budget: 4 });
+    // A live untilClean batch's three tool calls: within, until other calls pass the ceiling.
+    expect(overrunOf(trace({ tier: "Small", reviewCalls: 5 }), REVIEW_BUDGET, { calls: 0, exempt: 3 })).toBeNull();
+    expect(overrunOf(trace({ tier: "Small", reviewCalls: 6 }), REVIEW_BUDGET, { calls: 0, exempt: 3 })).toMatchObject({ calls: 6, budget: 2 });
   });
 
   it("still sends BM-BUDGET for an overrun on a bound request: tool calls and hand-sent messages, by the one counter", async () => {

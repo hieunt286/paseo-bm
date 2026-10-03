@@ -717,6 +717,8 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
 
   /** Outgoing Workers whose successor the plugin is creating now, in this run: their `agent.created` completes nothing. */
   const creating = new Set<string>();
+  /** `creating` entries this run already looked up in Paseo (`reconcileCreating`). */
+  const reconciled = new Set<string>();
 
   /** The checks of the Manager's informational command: the send's own, as `sendCommand` runs them. */
   const checksOf = (home: string, entry: HandoffEntry) => ({
@@ -883,9 +885,12 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
         const home = homeOf();
         if (home === null) return;
         const store = storeOf(home);
-        // A `creating` entry this run is not creating is settled from Paseo before any bound ends it.
+        // A `creating` entry this run is not creating is looked up in Paseo once per run, before any bound ends it;
+        // a successor that appears later completes it at its own agent.created.
         for (const entry of store.list()) {
-          if (entry.state === "creating" && !creating.has(entry.workerId)) await reconcileCreating(home, entry, paseo);
+          if (entry.state !== "creating" || creating.has(entry.workerId) || reconciled.has(entry.id)) continue;
+          reconciled.add(entry.id);
+          await reconcileCreating(home, entry, paseo);
         }
         store.expire();
         // `commanded` waits for the Manager's successor, `creating` for the plugin's own: neither is advanced here.

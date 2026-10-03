@@ -251,11 +251,9 @@ export default function contribute(server: PluginServerContext): () => void {
         home: dataHome(),
         bindings: agentTools.bindings,
         publish: (events, handle) => eventBus.publish(events, handle),
-        // Not awaited: its tries wait for the Reviewer's first turn, and the handoff check below must not.
+        // Not awaited: the handoff check below does not wait for the CLI. It never rejects.
         cancel: async (finding) => {
-          void cancelOffToolReviewer(finding).catch((error: unknown) =>
-            console.warn(`[paseo-bm] could not cancel the off-tool Reviewer ${finding.reviewerId}: ${error instanceof Error ? error.message : String(error)}`),
-          );
+          void cancelOffToolReviewer(finding);
         },
       });
       return handoffs.agentCreated(agent, paseo);

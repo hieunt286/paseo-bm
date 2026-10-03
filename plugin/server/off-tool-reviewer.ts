@@ -4,11 +4,11 @@
  * A bound Worker keeps Paseo's `create_agent`: the tools policy is per alias
  * (ADR-020), and withholding it would break older Workers on the same alias.
  * So it could create a Reviewer around its budget. On `agent.created`, a
- * `bm-reviewer` (or fallback alias) whose `parentAgentId` is a Worker bound
- * with the creation tools, and which is not one of the plugin's own creations
- * (no binding of its own, not created by `createPluginReviewer` — the
- * replacement Reviewer of §16.9 included), is an **off-tool Reviewer**
- * (`offToolReviewerOf`). The plugin then:
+ * `bm-reviewer` (or fallback alias) whose `parentAgentId` is a bound Worker,
+ * and which is not one of the plugin's own creations (no binding of its own,
+ * not named in a batch of the Worker's request — the replacement Reviewer of
+ * §16.9 included), is an **off-tool Reviewer** (`offToolReviewerOf`). The
+ * plugin then:
  *
  * 1. counts it — nothing to do here: `reviewCallsOf` counts every message a
  *    Reviewer of the request received, and an off-tool Reviewer is one by its
@@ -19,15 +19,18 @@
  * 3. raises a `worker.signal` of kind `off-tool-review` for the Orchestrator,
  *    where the policy's scope covers the project (the event bus filters it);
  * 4. hands the finding to `cancel`: in the plugin `cancelOffToolReviewer`,
- *    which cancels the Reviewer's turn at once through the Paseo CLI (spike
- *    S5, `paseo-cli.ts`). A failed cancel is logged and the alert stays.
- *    Its tries end after a few seconds, so every later turn the Reviewer
- *    starts while its alert is open is cancelled too, at its
- *    `agent.turn_started` (`registerOffToolTurnCancel`).
+ *    which cancels the Reviewer's turn once, at once, through the Paseo CLI
+ *    (spike S5, `paseo-cli.ts`). A failed cancel is logged and the alert
+ *    stays. `agent.created` can come before the Reviewer's first turn starts,
+ *    where that cancel stops nothing; every turn the Reviewer starts while its
+ *    alert is open is cancelled at its `agent.turn_started`
+ *    (`registerOffToolTurnCancel`), the first one included.
  *
  * The plugin's own Reviewer is never one: a binding of its own — settled at
  * `agent.created` when a reload or Paseo's late error left it pending
- * (`creation-settle.ts`) — or `isPluginReviewer`.
+ * (`creation-settle.ts`) — or its name in a batch of the Worker's request
+ * (`createPluginReviewer` writes it before its creation counts as done, and
+ * the check waits for the creations under way: `pluginCreationsSettled`).
  *
  * Nothing here throws into the event handler.
  */
@@ -36,7 +39,8 @@ import { roleOfProvider } from "./agent-role";
 import { liveBindingOf, type AgentBinding, type BindingStore } from "./agent-bindings";
 import { createAlertStore, type AlertInput } from "./alert-store";
 import type { BmEvent, WorkerSignalEvent } from "./event-bus";
-import { isPluginReviewer, pluginCreationsSettled } from "./review-tools";
+import { createRequestRegistry, type RegisteredRequest } from "./request-registry";
+import { pluginCreationsSettled } from "./review-tools";
 import { cancelAgent } from "./paseo-cli";
 import { reasonOf } from "./role-choices";
 import type { CancelAgent } from "./stop-propagation";
@@ -58,19 +62,24 @@ export interface CreatedAgent {
   workspaceId: string | null;
 }
 
+/** Reads one request of the registry: the Worker's, whose batches name the plugin's own Reviewers. */
+export type RequestOf = (workspaceId: string, requestId: string) => Pick<RegisteredRequest, "reviews"> | null;
+
 /**
  * The off-tool decision (design §16.8), one function: the finding when `agent`
  * is a Reviewer whose parent is a bound Worker and which is not the plugin's
- * own creation; null otherwise. Pure over
- * `bindings` and `isOwn`.
+ * own creation; null otherwise. Pure over `bindings` and `requestOf`.
  */
-export function offToolReviewerOf(agent: CreatedAgent, bindings: readonly AgentBinding[], isOwn: (agentId: string) => boolean = isPluginReviewer): OffToolReviewer | null {
+export function offToolReviewerOf(agent: CreatedAgent, bindings: readonly AgentBinding[], requestOf: RequestOf): OffToolReviewer | null {
   if (roleOfProvider(agent.provider) !== "reviewer" || agent.parentAgentId === null) return null;
   const worker = liveBindingOf(bindings, agent.parentAgentId, "worker");
   if (worker === null) return null;
-  // The plugin's own: a binding of its own (bound or revoked), or created by createPluginReviewer.
-  if (bindings.some((binding) => binding.agentId === agent.id) || isOwn(agent.id)) return null;
-  return { reviewerId: agent.id, workerId: worker.agentId!, workspaceId: agent.workspaceId ?? worker.workspaceId, requestId: worker.requestId };
+  const workspaceId = agent.workspaceId ?? worker.workspaceId;
+  // The plugin's own: a binding of its own (bound or revoked), or named in a batch of the Worker's request.
+  if (bindings.some((binding) => binding.agentId === agent.id)) return null;
+  const request = worker.requestId === null ? null : requestOf(workspaceId, worker.requestId);
+  if (request?.reviews.batches.some((batch) => batch.reviewerIds.includes(agent.id)) === true) return null;
+  return { reviewerId: agent.id, workerId: worker.agentId!, workspaceId, requestId: worker.requestId };
 }
 
 /** The `off-tool-reviewer` alert of a finding: about the Reviewer, the Worker and the request in its detail. */
@@ -97,27 +106,27 @@ export interface OffToolDeps {
   publish?: (events: readonly BmEvent[], paseo?: unknown) => Promise<unknown>;
   /**
    * The cancel of an off-tool Reviewer (§16.8 step 4): `cancelOffToolReviewer`
-   * in the plugin. Nothing is cancelled when it is absent.
+   * in the plugin, which never rejects. Nothing is cancelled when it is absent.
    */
   cancel?: (finding: OffToolReviewer, paseo: unknown) => Promise<unknown>;
   now?: () => Date;
   log?: (message: string) => void;
-  /** The plugin's own Reviewers; `isPluginReviewer` by default. */
-  isOwn?: (agentId: string) => boolean;
 }
 
 /**
  * `agent.created` of any agent: an off-tool Reviewer raises its alert and its
  * signal, and goes to the cancel hook. Waits first for the plugin's own
  * Reviewer creations under way for that Worker, whose `agent.created` can come
- * before their id is known. Returns the finding, or null. Never throws.
+ * before their id is known (and before the registry names them). Returns the
+ * finding, or null. Never throws.
  */
 export async function checkOffToolReviewer(agent: CreatedAgent, paseo: unknown, deps: OffToolDeps): Promise<OffToolReviewer | null> {
   const log = deps.log ?? ((message: string) => console.warn(message));
   try {
     if (roleOfProvider(agent.provider) !== "reviewer" || agent.parentAgentId === null || deps.bindings === null || deps.home === null) return null;
     await pluginCreationsSettled(agent.parentAgentId);
-    const finding = offToolReviewerOf(agent, deps.bindings.list(), deps.isOwn ?? isPluginReviewer);
+    const registry = createRequestRegistry(deps.home, { log });
+    const finding = offToolReviewerOf(agent, deps.bindings.list(), (workspaceId, requestId) => registry.get(workspaceId, requestId));
     if (finding === null) return null;
     log(`[paseo-bm] Worker ${finding.workerId} created Reviewer ${finding.reviewerId} outside its tools (request ${finding.requestId ?? "not known"}).`);
     const raised = createAlertStore(deps.home, deps.now === undefined ? {} : { now: deps.now }).raise(offToolAlertOf(finding));
@@ -138,13 +147,7 @@ export async function checkOffToolReviewer(agent: CreatedAgent, paseo: unknown, 
         log(`[paseo-bm] could not publish the off-tool-review signal of ${finding.reviewerId}: ${reasonOf(error)}`);
       }
     }
-    if (deps.cancel !== undefined) {
-      try {
-        await deps.cancel(finding, paseo);
-      } catch (error) {
-        log(`[paseo-bm] could not cancel the off-tool Reviewer ${finding.reviewerId}: ${reasonOf(error)}`);
-      }
-    }
+    if (deps.cancel !== undefined) await deps.cancel(finding, paseo);
     return finding;
   } catch (error) {
     log(`[paseo-bm] the off-tool check of ${agent.id} failed: ${reasonOf(error)}`);
@@ -153,46 +156,28 @@ export async function checkOffToolReviewer(agent: CreatedAgent, paseo: unknown, 
 }
 
 /**
- * How long to wait before each further try of an off-tool Reviewer's cancel
- * that stopped nothing: `agent.created` can arrive before the Reviewer's first
- * turn starts, and a cancel of an idle agent is a no-op (spike S5).
+ * Cancels an off-tool Reviewer's turn once, at once (design §16.8 step 4),
+ * through the Paseo CLI: `paseo agent stop <id>`, with the whole id only. A
+ * turn that has not started yet is cancelled when it starts
+ * (`registerOffToolTurnCancel`). Resolves true when a turn was cancelled.
+ * Never rejects: a failed cancel is logged with the CLI's reason (the agent
+ * id, never a token), and the alert stays.
  */
-export const OFF_TOOL_CANCEL_WAITS_MS: readonly number[] = [500, 1_000, 2_000];
-
-export interface OffToolCancelDeps {
-  /** `cancelAgent` of `paseo-cli.ts` by default. */
-  cancel?: CancelAgent;
-  /** The waits before each further try; `OFF_TOOL_CANCEL_WAITS_MS` by default. */
-  waits?: readonly number[];
-  sleep?: (ms: number) => Promise<void>;
-  log?: (message: string) => void;
-}
-
-/**
- * Cancels an off-tool Reviewer's turn at once (design §16.8 step 4) through
- * the Paseo CLI: `paseo agent stop <id>`, with the whole id only. A cancel
- * that stopped nothing — the turn had not started yet — is tried again after
- * each of `waits`. Resolves true when a turn was cancelled, false when none
- * ran by the last try. Throws with the CLI's reason (the agent id, never a
- * token) when a cancel fails, so `checkOffToolReviewer` logs it; the alert
- * stays either way.
- */
-export async function cancelOffToolReviewer(finding: OffToolReviewer, deps: OffToolCancelDeps = {}): Promise<boolean> {
+export async function cancelOffToolReviewer(
+  finding: OffToolReviewer,
+  deps: { cancel?: CancelAgent; log?: (message: string) => void } = {},
+): Promise<boolean> {
   const cancel = deps.cancel ?? ((agentId: string) => cancelAgent(agentId));
-  const waits = deps.waits ?? OFF_TOOL_CANCEL_WAITS_MS;
-  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const log = deps.log ?? ((message: string) => console.warn(message));
-  for (let attempt = 0; attempt <= waits.length; attempt += 1) {
-    if (attempt > 0) await sleep(waits[attempt - 1]!);
+  try {
     const result = await cancel(finding.reviewerId);
     if (!result.ok) throw new Error(result.reason);
-    if (result.stopped) {
-      log(`[paseo-bm] cancelled the off-tool Reviewer ${finding.reviewerId} of Worker ${finding.workerId}.`);
-      return true;
-    }
+    if (result.stopped) log(`[paseo-bm] cancelled the off-tool Reviewer ${finding.reviewerId} of Worker ${finding.workerId}.`);
+    return result.stopped;
+  } catch (error) {
+    log(`[paseo-bm] could not cancel the off-tool Reviewer ${finding.reviewerId}: ${reasonOf(error)}`);
+    return false;
   }
-  log(`[paseo-bm] the off-tool Reviewer ${finding.reviewerId} had no running turn to cancel.`);
-  return false;
 }
 
 /** Clears the `off-tool-reviewer` alert of an archived Reviewer; returns the cleared keys. Never throws. */
@@ -226,9 +211,9 @@ export function clearOffToolAlertsOfRequest(home: string | null, workspaceId: st
 /**
  * Registers `on("agent.turn_started")`: a Reviewer whose `off-tool-reviewer`
  * alert is open has the turn it just started cancelled through the Paseo CLI
- * (design §16.8 step 4) — `cancelOffToolReviewer`'s tries stop after a few
- * seconds, and this catches every later turn, a reload included. Returns its
- * remover. Never throws into the event.
+ * (design §16.8 step 4) — its first turn, when `agent.created` came before it
+ * and `cancelOffToolReviewer` found nothing to stop, and every later one, a
+ * reload included. Returns its remover. Never throws into the event.
  */
 export function registerOffToolTurnCancel(
   host: Partial<Pick<PluginServerContext, "on">>,

@@ -473,19 +473,11 @@ export interface ReviewToolCall {
   callId: string;
 }
 
-/** The one count of a request's review calls, and where they came from (design §16.8). */
-export interface ReviewCallCount {
-  /** Every review call, counted once: the union of the tool records and the calls seen in the activity stream. */
-  calls: number;
-  /** The tool records among them (`bm_create_reviewer`, `bm_rereview`). */
-  toolCalls: number;
-  /** Calls no tool record covers: a hand-sent message to a Reviewer, an off-tool Reviewer's prompt. */
-  offTool: number;
-}
-
 /**
- * The review calls of a request, counted once (design §16.8; the Dashboard and
- * the review tools read this one function):
+ * The number of review calls of a request, each counted once (design §16.8;
+ * the Dashboard, the review tools and every budget check read this one
+ * function): the union of the tool records and the calls seen in the
+ * activity stream.
  *
  * - **Tool records** (`toolCalls`, the registry's `reviews.batches[].calls`)
  *   are calls, each by its `callId`.
@@ -508,12 +500,12 @@ export interface ReviewCallCount {
  * Null when nothing was recorded at all — no Reviewer turn and no tool record:
  * the number is unknown, not zero.
  */
-export function reviewCallCountOf(
+export function reviewCallsOf(
   reviewerIds: readonly string[],
   records: readonly TraceRecord[],
   replacementIds: Iterable<string> = [],
   toolCalls: readonly ReviewToolCall[] = [],
-): ReviewCallCount | null {
+): number | null {
   // Replacements whose resend has not been met yet.
   const resendPending = new Set(replacementIds);
   const toolIds = new Set(toolCalls.map((call) => call.callId));
@@ -544,19 +536,7 @@ export function reviewCallCountOf(
   // not zero. The owner's workspace showed "6 reviewers · 0 review calls" for
   // exactly this reason.
   if (!seen) return null;
-  const all = new Set([...toolIds, ...seenIds]);
-  const offTool = anonymous + [...seenIds].filter((id) => !toolIds.has(id)).length;
-  return { calls: all.size + anonymous, toolCalls: toolIds.size, offTool };
-}
-
-/** Number of review requests a request's Reviewers received (`reviewCallCountOf`'s `calls`). */
-export function reviewCallsOf(
-  reviewerIds: readonly string[],
-  records: readonly TraceRecord[],
-  replacementIds: Iterable<string> = [],
-  toolCalls: readonly ReviewToolCall[] = [],
-): number | null {
-  return reviewCallCountOf(reviewerIds, records, replacementIds, toolCalls)?.calls ?? null;
+  return new Set([...toolIds, ...seenIds]).size + anonymous;
 }
 
 /**

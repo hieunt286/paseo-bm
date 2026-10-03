@@ -51,7 +51,7 @@ import { parseReviews } from "./bm-report";
 import { joinStreamedText, sliceLastTurn } from "./collector";
 import type { NoticePaseo, NoticeQueue } from "./notice-queue";
 import { createOutbox, storeAndDeliver, type OutboxDeps } from "./outbox";
-import { createRequestRegistry, type ReviewCall } from "./request-registry";
+import { createRequestRegistry, newestCallOf, type ReviewCall } from "./request-registry";
 import { reasonOf } from "./role-choices";
 import { NO_VERDICT_SENTENCE, reviewCallIdOf } from "../shared/notices";
 import { timeOrZero } from "../shared/time";
@@ -181,8 +181,7 @@ export async function checkNoVerdict(event: TurnEndedEvent, deps: NoVerdictDeps)
     if (batch === undefined || batch.calls.length === 0) return "no-call";
     // The call this turn answered: the one its first message names, else the batch's newest.
     const named = reviewCallIdOf(turnPromptOf(event));
-    const newest = [...batch.calls].sort((a, b) => timeOrZero(a.at) - timeOrZero(b.at)).at(-1)!;
-    const call: ReviewCall = (named === null ? undefined : batch.calls.find((entry) => entry.callId === named)) ?? newest;
+    const call: ReviewCall = (named === null ? undefined : batch.calls.find((entry) => entry.callId === named)) ?? newestCallOf(batch)!;
     const since = timeOrZero(call.at);
 
     const outbox = createOutbox(deps.home, { ...(deps.now === undefined ? {} : { now: deps.now }), ...deps.outbox });

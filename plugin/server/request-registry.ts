@@ -230,6 +230,19 @@ export type ReviewBatch = RegisteredRequest["reviews"]["batches"][number];
 export function isEmptyCreateCall(call: Pick<ReviewCall, "kind" | "reviewerId">): boolean {
   return call.kind === "create" && call.reviewerId === "";
 }
+/**
+ * The newest call of a batch by its time (of those `keep` accepts; the last
+ * in the batch's order on a tie), or undefined when it has none: the call a
+ * turn or a replacement answers when nothing names one (design §16.9,
+ * §16.10), and the call `finished` waits on (§16.15).
+ */
+export function newestCallOf(batch: Pick<ReviewBatch, "calls">, keep: (call: ReviewCall) => boolean = () => true): ReviewCall | undefined {
+  let newest: ReviewCall | undefined;
+  for (const call of batch.calls) {
+    if (keep(call) && (newest === undefined || timeOrZero(call.at) >= timeOrZero(newest.at))) newest = call;
+  }
+  return newest;
+}
 /** One grant of a `review-budget` decision (design §16.4, §16.8). */
 export type ReviewBudgetGrant = RegisteredRequest["reviews"]["grants"][number];
 

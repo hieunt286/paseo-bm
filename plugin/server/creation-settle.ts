@@ -22,16 +22,17 @@
  * - **the registry** (a Reviewer): a create call of its labelled batch with
  *   an empty `reviewerId` gets it (`noteReviewer`) once no creation of its
  *   Worker is under way in this run (`pluginCreationsSettled`) — when the
- *   binding settled here proves it, or its parent is the request's Worker —
- *   and it is remembered as the plugin's own (`markPluginReviewer`).
+ *   binding settled here proves it, or its parent is the request's Worker.
+ *   A Reviewer its batch already names (`createPluginReviewer` names its
+ *   own before the creation counts as done) is left as it is.
  *
- * A Reviewer settled either way is the plugin's own, never off-tool. Nothing
- * here throws into the event handler.
+ * A Reviewer settled either way is the plugin's own — named in its batch —
+ * never off-tool. Nothing here throws into the event handler.
  */
 import { parentOf, roleOfProvider } from "./agent-role";
 import type { BindingStore } from "./agent-bindings";
 import { REQUEST_ID_LABEL, createRequestRegistry, sightRequestId } from "./request-registry";
-import { isPluginReviewer, markPluginReviewer, pluginCreationsSettled } from "./review-tools";
+import { pluginCreationsSettled } from "./review-tools";
 import { asRecord, nonEmpty, reasonOf } from "./role-choices";
 
 /** The new agent as `agent.created` names it. */
@@ -87,7 +88,6 @@ export async function settleCreatedAgent(agent: SettledAgent, paseo: unknown, de
       return;
     }
 
-    if (isPluginReviewer(agent.id)) return;
     const forRequest = settledHere?.requestId ?? requestId;
     const forBatch = settledHere?.batchId ?? batchId;
     if (workspaceId === null || forRequest === null || forBatch === null || parentId === null) return;
@@ -95,16 +95,12 @@ export async function settleCreatedAgent(agent: SettledAgent, paseo: unknown, de
     const request = registry.get(workspaceId, forRequest);
     const batch = request?.reviews.batches.find((entry) => entry.batchId === forBatch);
     if (request === null || batch === undefined) return;
-    if (batch.reviewerIds.includes(agent.id)) {
-      markPluginReviewer(agent.id);
-      return;
-    }
+    if (batch.reviewerIds.includes(agent.id)) return;
     // The label alone is not trusted: the binding settled here, or the request's own Worker as its parent.
     if (settledHere === null && !request.workerIds.includes(parentId)) return;
     const call = batch.calls.find((entry) => entry.kind === "create" && entry.reviewerId === "");
     if (call === undefined) return;
     registry.noteReviewer(workspaceId, forRequest, forBatch, agent.id, call.callId);
-    markPluginReviewer(agent.id);
     log(`[paseo-bm] Reviewer ${agent.id} is the one the review call ${call.callId} of batch ${forBatch} created; the registry now names it.`);
   } catch (error) {
     log(`[paseo-bm] settling the new agent ${agent.id} failed: ${reasonOf(error)}`);

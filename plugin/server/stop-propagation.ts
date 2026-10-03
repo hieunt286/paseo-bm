@@ -179,25 +179,24 @@ async function listRunningReviewers(
 /**
  * Stops one running Reviewer: cancels its turn through the Paseo CLI (spike
  * S5); when the cancel fails, logs why (the agent id and the CLI's reason,
- * never a token) and asks it with `REVIEWER_STOP_NOTICE` instead. Returns how
- * it was stopped. Throws only when that send throws.
+ * never a token) and asks it with `REVIEWER_STOP_NOTICE` instead. Throws
+ * only when that send throws.
  */
 export async function stopReviewer(
   handle: Pick<StopAgentHandle, "send">,
   reviewerId: string,
   cancel: CancelAgent,
   log: (message: string) => void,
-): Promise<"cancelled" | "asked"> {
+): Promise<void> {
   let result: CancelResult;
   try {
     result = await cancel(reviewerId);
   } catch (error) {
     result = { ok: false, reason: errorText(error) };
   }
-  if (result.ok) return "cancelled";
+  if (result.ok) return;
   log(`${LOG_PREFIX} could not cancel Reviewer ${reviewerId} (${result.reason}); asking it to stop instead.`);
   await handle.send(REVIEWER_STOP_NOTICE);
-  return "asked";
 }
 
 /**
@@ -304,7 +303,7 @@ export type StopPropagationHost = Partial<Pick<PluginServerContext, "on" | "befo
  * lifecycle hooks at all (no `before` either), where `registerRoleHook` has
  * already logged the one line for that host.
  */
-export function registerStopPropagation(host: StopPropagationHost, deps: { cancel?: CancelAgent } = {}): () => void {
+export function registerStopPropagation(host: StopPropagationHost): () => void {
   if (typeof host.on !== "function") {
     if (typeof host.before === "function") {
       console.warn(
@@ -313,9 +312,7 @@ export function registerStopPropagation(host: StopPropagationHost, deps: { cance
     }
     return () => {};
   }
-  const remove = host.on("agent.turn_ended", (event, context) =>
-    propagateWorkerStop(event, { paseo: context?.paseo, signal: context?.signal, ...(deps.cancel === undefined ? {} : { cancel: deps.cancel }) }),
-  );
+  const remove = host.on("agent.turn_ended", (event, context) => propagateWorkerStop(event, { paseo: context?.paseo, signal: context?.signal }));
   return typeof remove === "function" ? remove : () => {};
 }
 

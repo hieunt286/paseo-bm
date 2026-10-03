@@ -32,9 +32,8 @@
 import { liveBindingOf, type AgentBinder, type BindingStore } from "./agent-bindings";
 import { folderOfAgent } from "./create-worker";
 import { unusableDataHomeMessage } from "./data-home";
-import { createRequestRegistry, type ReviewBatch } from "./request-registry";
+import { createRequestRegistry, newestCallOf, type ReviewBatch } from "./request-registry";
 import { createPluginReviewer, reviewerPromptOf, type ReviewerCreationPaseo } from "./review-tools";
-import { timeOrZero } from "../shared/time";
 import { aliasBases, decidePending, fallbackNotice, type FallbackAction, type FallbackRpcDeps } from "./fallback-rpc";
 import { readIncidents, updateIncidents } from "./fallback-state";
 import { FALLBACK_NOTICE_MARKER } from "./notices";
@@ -158,7 +157,7 @@ async function switchBoundReviewer(
   const workerId = incident.parentId!;
   const { requestId, batch } = bound;
   // The call it replaces: the batch's newest; the new Reviewer's first line carries its id, so it is counted once.
-  const call = [...batch.calls].sort((a, b) => timeOrZero(a.at) - timeOrZero(b.at)).at(-1);
+  const call = newestCallOf(batch);
   if (call === undefined) throw new DashboardError("E_FALLBACK_CREATE_FAILED", `batch ${batch.batchId} of ${requestId} has no review call to hand over`);
   const cwd = await folderOfAgent(paseo, workerId, incident.workspaceId);
   if (cwd === null) throw new DashboardError("E_FALLBACK_CREATE_FAILED", `the folder of Worker ${workerId} cannot be read; try again`);
@@ -182,17 +181,12 @@ async function switchBoundReviewer(
         labels: { [REPLACES_LABEL]: incident.agentId },
         title: FALLBACK_REVIEWER_TITLE,
       },
-      { binder: deps.binder, log },
+      { home, binder: deps.binder, log },
     ));
   } catch (error) {
     const detail = `could not create the fallback Reviewer on ${candidate.alias}/${candidate.model}: ${reasonOf(error)}`;
     await decidePending(home, incident.id, (entry) => ({ ...entry, status: "failed", decidedAt: now().toISOString(), error: detail }), log);
     throw new DashboardError("E_FALLBACK_CREATE_FAILED", detail);
-  }
-  try {
-    createRequestRegistry(home, { log }).noteReviewer(incident.workspaceId, requestId, batch.batchId, reviewerId);
-  } catch (error) {
-    log(`[paseo-bm] could not add Reviewer ${reviewerId} to batch ${batch.batchId} of ${requestId}: ${reasonOf(error)}`);
   }
   try {
     const labelled = await (deps.setLabels ?? ((id: string, labels: Record<string, string>) => setAgentLabels(id, labels)))(incident.agentId, { [REPLACED_BY_LABEL]: reviewerId });

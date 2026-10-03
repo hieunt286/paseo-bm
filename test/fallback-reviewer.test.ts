@@ -8,7 +8,6 @@ import { createAlertStore } from "../plugin/server/alert-store";
 import { createReviewerResend, createReviewerSwitch, linkReplacementReviewer, replacedReviewerLine, reviewerInstructions } from "../plugin/server/fallback-reviewer";
 import { checkOffToolReviewer } from "../plugin/server/off-tool-reviewer";
 import { clearRequestRegistryCache, createRequestRegistry } from "../plugin/server/request-registry";
-import { clearPluginReviewers } from "../plugin/server/review-tools";
 import { applyAgentTools, type AgentCreateRequest } from "../plugin/server/role-hook";
 import { reviewCallsOf } from "../plugin/server/traces";
 import { reviewerBriefLineOf } from "../plugin/shared/notices";
@@ -245,7 +244,6 @@ describe("Switch for a bound Worker's Reviewer (design §16.9)", () => {
   afterEach(() => {
     clearBindingCache();
     clearRequestRegistryCache();
-    clearPluginReviewers();
   });
 
   /** The Worker bound with the creation tools, and the batch its Reviewer `OLD` was created for. */

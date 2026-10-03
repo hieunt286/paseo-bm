@@ -37,7 +37,7 @@ import { stopRunningReviewers, type StopPaseo } from "./stop-propagation";
 import { OUTBOX_SETTLED_MS, clearDroppedAlert, createOutbox, isOpenRecord, storeAndDeliver, type OutboxDeps, type OutboxInit, type OutboxRecord } from "./outbox";
 import type { DashboardPaseo } from "./paseo-directory";
 import { proposeAnswers } from "./proposed-answers";
-import { createRequestRegistry, isEmptyCreateCall, type RegisteredRequest, type ReviewCall } from "./request-registry";
+import { createRequestRegistry, isEmptyCreateCall, newestCallOf, type RegisteredRequest, type ReviewCall } from "./request-registry";
 import { reasonOf } from "./role-choices";
 import { actingTools, answered, boundAs, deliveryOf, fixThese, outboxDepsOf, refused, withoutNulls, type DeliveryState } from "./tool-kit";
 import { timeOrZero } from "../shared/time";
@@ -135,8 +135,10 @@ export function batchesAwaitingVerdict(request: RegisteredRequest | null, record
   const stale = (call: ReviewCall): boolean =>
     isEmptyCreateCall(call) && now.getTime() - timeOrZero(call.at) > PENDING_TTL_MS;
   return request.reviews.batches.flatMap((batch) => {
-    const newest = batch.calls.filter((call) => !stale(call)).reduce<number | null>((latest, call) => Math.max(latest ?? Number.NEGATIVE_INFINITY, timeOrZero(call.at)), null);
-    if (newest === null || now.getTime() - newest > OUTBOX_SETTLED_MS) return [];
+    const call = newestCallOf(batch, (entry) => !stale(entry));
+    if (call === undefined) return [];
+    const newest = timeOrZero(call.at);
+    if (now.getTime() - newest > OUTBOX_SETTLED_MS) return [];
     const settled = records.some(
       (record) =>
         (record.kind === "review" || record.kind === "no-verdict") &&

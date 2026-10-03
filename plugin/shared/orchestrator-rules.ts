@@ -99,22 +99,21 @@ export function isProcessDocumentPath(path: string): boolean {
 
 /**
  * A request's review ceiling (design §16.8): the owner's budget for its tier
- * plus the calls the request's review-budget grants added. The review tools
- * (`server/review-tools.ts`) refuse past it and this rule flags past it, with
- * this one function.
+ * plus the calls the request's review-budget grants added.
  */
 export function reviewCeilingOf(budget: number, granted: number): number {
   return budget + granted;
 }
 
 /**
- * True when `calls` review calls are past the ceiling — unless a live
- * `{ untilClean }` grant covers the batch (design §16.8): its calls are counted
- * but never over budget. The review tools ask it of one more call; this rule
- * asks it of the calls made.
+ * True when `calls` review calls are past the ceiling once the `exempt` ones
+ * are left out — the calls of batches whose `{ untilClean }` grant is still
+ * live (design §16.8; `ruleReviewGrantOf` in `server/review-tools.ts`). The one
+ * comparison the review tools (of the calls after one more), this rule and
+ * the Manager's budget notice (`overrunOf`) all make.
  */
-export function overReviewCeiling(calls: number, ceiling: number, untilClean: boolean): boolean {
-  return !untilClean && calls > ceiling;
+export function overReviewCeiling(calls: number, exempt: number, ceiling: number): boolean {
+  return calls - exempt > ceiling;
 }
 
 /** A message a Reviewer received that is not a review call (`reviewCallsOf` in `server/traces.ts`). */
@@ -127,12 +126,12 @@ function overBudget(input: RuleInput, facts: RuleFacts): Flag | null {
     .filter((message) => message.role === "reviewer" && !isPluginNotice(message.text) && !REVIEW_BLOCK.test(message.text))
     .map((message) => ({ agentId: message.agentId, at: message.at, kind: "sent", excerpt: message.text }));
   const why = "Review calls past the tier's budget cost time and tokens the size of the request does not justify.";
-  // Design §16.8: the request's grants raise its ceiling, and a live untilClean grant lifts it.
+  // Design §16.8: the request's grants raise its ceiling, and the calls of a live untilClean batch are left out.
   const granted = input.reviewGrant?.calls ?? 0;
-  const untilClean = input.reviewGrant?.untilClean ?? false;
+  const exempt = input.reviewGrant?.exempt ?? 0;
   if (input.tier === null) {
     const smallest = Math.min(...Object.values(facts.reviewBudget));
-    if (!overReviewCeiling(calls, reviewCeilingOf(smallest, granted), untilClean)) return null;
+    if (!overReviewCeiling(calls, exempt, reviewCeilingOf(smallest, granted))) return null;
     return flag(
       "review.over-budget",
       "warning",
@@ -143,7 +142,7 @@ function overBudget(input: RuleInput, facts: RuleFacts): Flag | null {
     );
   }
   const budget = facts.reviewBudget[input.tier];
-  if (!overReviewCeiling(calls, reviewCeilingOf(budget, granted), untilClean)) return null;
+  if (!overReviewCeiling(calls, exempt, reviewCeilingOf(budget, granted))) return null;
   const over = granted > 0 ? `over its budget of ${budget} plus ${granted} granted` : `over its budget of ${budget}`;
   return flag(
     "review.over-budget",

@@ -39,8 +39,9 @@ export interface RuleInput {
   reviewCalls: number | null;
   /**
    * The request's review-budget grants (design §16.8), from the request
-   * registry: `calls`, the sum of its `{ calls: n }` grants; `untilClean`, true
-   * while an `{ untilClean }` grant's batch has not passed. Absent: none.
+   * registry (`ruleReviewGrantOf`): `calls`, the sum of its `{ calls: n }`
+   * grants; `exempt`, the tool calls of the batches whose `{ untilClean }`
+   * grant is still live. Absent: none.
    */
   reviewGrant?: RuleReviewGrant;
   /** Every inbound message of every agent of the request, oldest first. */
@@ -49,6 +50,8 @@ export interface RuleInput {
 
 /** A request's review-budget grants, as the rule reads them (`RuleInput.reviewGrant`). */
 export interface RuleReviewGrant {
+  /** Σ of the `{ calls: n }` grants: added to the ceiling. */
   calls: number;
-  untilClean: boolean;
+  /** Calls of batches a live `{ untilClean }` grant covers: left out of the count. */
+  exempt: number;
 }

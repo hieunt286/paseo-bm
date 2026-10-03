@@ -45,6 +45,7 @@ import { INTERVENTION_WINDOW_MS } from "../shared/interventions";
 import { MAX_HANDOFF_NOTE_CHARS } from "../shared/handoff";
 import { MAX_COMMAND_BODY_CHARS, MAX_COMMAND_WHY_CHARS } from "../shared/orchestrator-command";
 import { timeOrNull } from "../shared/time";
+import { PENDING_TTL_MS } from "./agent-bindings";
 import { assertNoSymlink, createJsonFileStore } from "./data-files";
 
 /** The folder under the data folder (design §G.6 step 2). */
@@ -65,10 +66,9 @@ export const MANAGER_WAIT_MS = 30 * 60_000;
 export const SUCCESSOR_WAIT_MS = 30 * 60_000;
 /**
  * How long a successor the plugin is creating (`creating`) may take to appear
- * before the handoff ends `no-successor`: a binding's pending time
- * (`agent-bindings.ts` `PENDING_TTL_MS`).
+ * before the handoff ends `no-successor`: a binding's pending time.
  */
-export const CREATING_WAIT_MS = 10 * 60_000;
+export const CREATING_WAIT_MS = PENDING_TTL_MS;
 /** The longest reason kept, as a command's `why` (`MAX_COMMAND_WHY_CHARS`). */
 export const MAX_HANDOFF_REASON_CHARS = MAX_COMMAND_WHY_CHARS;
 

@@ -58,7 +58,7 @@ import { createDecisionStore } from "./decision-store";
 import { isAnswerable } from "../shared/decisions";
 import { createEventBus, eventScopeOf, type BmEvent, type EventBus, type StallReason } from "./event-bus";
 import { agentsOf, type OrchestratorStatePaseo } from "./orchestrator-state";
-import { lastActivityOf, recentWorkspacesOf, registeredRequestsOf, requestKeyOf, ruleInputOf, workspaceTracesOf } from "./request-trace";
+import { lastActivityOf, recentWorkspacesOf, requestKeyOf, ruleInputOf, workspaceTracesOf } from "./request-trace";
 import { ruleReviewGrantOf } from "./review-tools";
 import type { TraceStoreLocation } from "./trace-store";
 import type { AgentFacts, ReconstructedTrace } from "./traces";
@@ -271,22 +271,21 @@ export function createStallWatcher(deps: StallWatcherDeps = {}): StallWatcher {
     for (const { workspaceId } of recentWorkspacesOf(location, since)) {
       if (!live()) return result("off");
       try {
-        const { agents, traces } = await workspaceTracesOf(
+        const { agents, traces, requests: registered } = await workspaceTracesOf(
           { location, paseo: handle as unknown as DashboardPaseo, home, allAgents: snapshot.bm },
           workspaceId,
         );
         if (!live()) return result("off");
         const waitingRequests = unsettledRequestsOf(home, workspaceId, log);
-        // Design §16.8: a request's review-budget grants raise its ceiling, as the review tools enforce it.
-        const registered = registeredRequestsOf({ location, home }, workspaceId);
         for (const trace of traces) {
           // The group of agents linked to no request has no Manager to name.
           if (trace.managerAgentId === null || timeOrZero(lastActivityOf(trace)) < since) continue;
           const requestKey = requestKeyOf(trace);
           examined.add(`${workspaceId}::${requestKey}`);
           const waitsOnOwner = waitingRequests === null ? null : trace.requestId !== null && waitingRequests.has(trace.requestId);
+          // Design §16.8: the request's review-budget grants, read as the review tools enforce them.
           const request = trace.requestId === null ? undefined : registered.find((entry) => entry.requestId === trace.requestId);
-          const grant = request === undefined ? undefined : ruleReviewGrantOf(home, request, trace);
+          const grant = request === undefined ? undefined : ruleReviewGrantOf(request);
           const held = stallReasonsOf(trace, agents, flagsOf(ruleInputOf(trace, grant), facts), at, waitsOnOwner);
           if (held.length === 0) {
             done.cleared.push(...alerts.clearWhere((alert) => alert.kind === "request-stalled" && alert.workspaceId === workspaceId && alert.subject === requestKey));

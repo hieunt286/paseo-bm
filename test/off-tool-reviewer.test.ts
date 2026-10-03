@@ -7,7 +7,6 @@ import { binderOf } from "../plugin/server/agent-tools";
 import { createAlertStore } from "../plugin/server/alert-store";
 import type { BmEvent } from "../plugin/server/event-bus";
 import {
-  OFF_TOOL_CANCEL_WAITS_MS,
   cancelOffToolReviewer,
   checkOffToolReviewer,
   clearOffToolAlert,
@@ -19,7 +18,7 @@ import {
 import { settleCreatedAgent } from "../plugin/server/creation-settle";
 import type { CancelResult } from "../plugin/server/paseo-cli";
 import { clearRequestRegistryCache, createRequestRegistry } from "../plugin/server/request-registry";
-import { clearPluginReviewers, createPluginReviewer, isPluginReviewer, type ReviewerCreationPaseo } from "../plugin/server/review-tools";
+import { createPluginReviewer, type ReviewerCreationPaseo } from "../plugin/server/review-tools";
 import { applyAgentTools, type AgentCreateRequest } from "../plugin/server/role-hook";
 import { reconstructTraces, type AgentFacts } from "../plugin/server/traces";
 import { alertKeyOf } from "../plugin/shared/alerts";
@@ -31,8 +30,10 @@ import { msg, turn } from "./fixtures/orchestrator-traces";
  * Worker creates with Paseo's create_agent is counted, raises the
  * `off-tool-reviewer` Inbox alert and an `off-tool-review` worker.signal, and
  * is cancelled at once through the Paseo CLI (spike S5, bead .16:
- * `cancelOffToolReviewer`, here with a fake cancel); the plugin's own
- * Reviewers, and one an unbound Worker creates, raise neither.
+ * `cancelOffToolReviewer`, here with a fake cancel), and every turn it starts
+ * after; the plugin's own Reviewers — a binding of their own, or named in a
+ * batch of the Worker's request — and one an unbound Worker creates, raise
+ * neither.
  */
 
 const WS = "wks_1";
@@ -47,7 +48,6 @@ const roots: string[] = [];
 afterEach(() => {
   clearBindingCache();
   clearRequestRegistryCache();
-  clearPluginReviewers();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -94,16 +94,20 @@ describe("the off-tool decision (design §16.8)", () => {
     bindWorker(store, HAND_WORKER);
     store.revokeAgent(HAND_WORKER);
     const bindings = store.list();
-    expect(offToolReviewerOf(created("rev-1", WORKER), bindings, () => false)).toEqual({ reviewerId: "rev-1", workerId: WORKER, workspaceId: WS, requestId: REQ });
+    const none = () => null;
+    expect(offToolReviewerOf(created("rev-1", WORKER), bindings, none)).toEqual({ reviewerId: "rev-1", workerId: WORKER, workspaceId: WS, requestId: REQ });
     // A fallback alias runs the role in its name.
-    expect(offToolReviewerOf(created("rev-1", WORKER, "bm-reviewer-fallback-1/claude-sonnet-5"), bindings, () => false)).not.toBeNull();
-    // The plugin's own: created by createPluginReviewer, or with a binding of its own.
-    expect(offToolReviewerOf(created("rev-1", WORKER), bindings, (id) => id === "rev-1")).toBeNull();
+    expect(offToolReviewerOf(created("rev-1", WORKER, "bm-reviewer-fallback-1/claude-sonnet-5"), bindings, none)).not.toBeNull();
+    // The plugin's own: named in a batch of the Worker's request (createPluginReviewer), or with a binding of its own.
+    const named = (reviewerIds: string[]) => (workspaceId: string, requestId: string) =>
+      workspaceId === WS && requestId === REQ ? { reviews: { batches: [{ batchId: "b1", reviewerIds, brief: "", calls: [] }], grants: [] } } : null;
+    expect(offToolReviewerOf(created("rev-1", WORKER), bindings, named(["rev-1"]))).toBeNull();
+    expect(offToolReviewerOf(created("rev-1", WORKER), bindings, named(["rev-0"]))).not.toBeNull();
     // A Worker whose binding was revoked, an unbound Worker, no parent, not a Reviewer.
-    expect(offToolReviewerOf(created("rev-1", HAND_WORKER), bindings, () => false)).toBeNull();
-    expect(offToolReviewerOf(created("rev-1", "agent-nobody"), bindings, () => false)).toBeNull();
-    expect(offToolReviewerOf(created("rev-1", null), bindings, () => false)).toBeNull();
-    expect(offToolReviewerOf(created("wrk-9", WORKER, "bm-worker/claude-opus-5"), bindings, () => false)).toBeNull();
+    expect(offToolReviewerOf(created("rev-1", HAND_WORKER), bindings, none)).toBeNull();
+    expect(offToolReviewerOf(created("rev-1", "agent-nobody"), bindings, none)).toBeNull();
+    expect(offToolReviewerOf(created("rev-1", null), bindings, none)).toBeNull();
+    expect(offToolReviewerOf(created("wrk-9", WORKER, "bm-worker/claude-opus-5"), bindings, none)).toBeNull();
   });
 });
 
@@ -181,12 +185,40 @@ describe("an off-tool Reviewer (design §16.8)", () => {
     const { reviewerId } = await createPluginReviewer(
       fake.paseo as unknown as ReviewerCreationPaseo,
       { workspaceId: WS, requestId: REQ, workerId: WORKER, batchId: "b1", cwd: "/repo", prompt: "BM-BRIEF reviewer …", alias: "bm-reviewer", model: "gpt-5.6", base: "codex" },
-      { binder: binderOf(ROLE_URL, store, () => {}), log: () => {} },
+      { home, binder: binderOf(ROLE_URL, store, () => {}), log: () => {} },
     );
     expect(reviewerId).toBe("created-1");
     expect(await sight).toBeNull();
     // Seen again afterwards (a replay): still its own.
     expect(await checkOffToolReviewer(created("created-1", WORKER), null, deps)).toBeNull();
+    expect(createAlertStore(home).list({ open: true })).toEqual([]);
+    expect(published).toEqual([]);
+    expect(cancelled).toEqual([]);
+  });
+
+  it("an unbound Reviewer the plugin created (no binding of its own): the registry names it before its agent.created, which came before its id, is checked", async () => {
+    const { home, store, deps, published, cancelled } = setup();
+    const CALL = "out-000000000c02";
+    const registry = createRequestRegistry(home, { backfill: () => [] });
+    registry.register(WS, REQ, { source: "tool", managerId: MANAGER, workerId: WORKER });
+    registry.addReviewCall(WS, REQ, "b1", { callId: CALL, kind: "create", reviewerId: "", at: T0.toISOString() }, "Review batch b1.");
+    let sight: Promise<OffToolReviewer | null> | null = null;
+    const fake = fakePaseo({
+      config: { providers: { "bm-reviewer": { extends: "pi" } } },
+      created: (_request: FakeCreateRequest, { n }) => {
+        // Paseo's agent.created, while agents.create has not returned yet.
+        sight = checkOffToolReviewer(created(`created-${n}`, WORKER), null, deps);
+        return {};
+      },
+    });
+    const { reviewerId } = await createPluginReviewer(
+      fake.paseo as unknown as ReviewerCreationPaseo,
+      { workspaceId: WS, requestId: REQ, workerId: WORKER, batchId: "b1", callId: CALL, cwd: "/repo", prompt: "BM-BRIEF reviewer …", alias: "bm-reviewer", model: "pi-1", base: "pi" },
+      { home, log: () => {} },
+    );
+    expect(store.bindingOfAgent(reviewerId)).toBeNull();
+    expect(await sight).toBeNull();
+    expect(createRequestRegistry(home).get(WS, REQ)!.reviews.batches[0]).toMatchObject({ reviewerIds: [reviewerId], calls: [{ callId: CALL, reviewerId }] });
     expect(createAlertStore(home).list({ open: true })).toEqual([]);
     expect(published).toEqual([]);
     expect(cancelled).toEqual([]);
@@ -219,7 +251,6 @@ describe("the plugin's own Reviewer whose creation was cut short (design §16.5,
     store.attach(token, "reviewer");
     const fake = daemonWith("rev-1", WORKER);
     await settleCreatedAgent(created("rev-1", WORKER), fake.paseo, { home, bindings: store, log: () => {} });
-    expect(isPluginReviewer("rev-1")).toBe(true);
     expect(store.bindingOfAgent("rev-1")).toMatchObject({ state: "bound", role: "reviewer", batchId: "b1", parentId: WORKER });
     expect(createRequestRegistry(home).get(WS, REQ)!.reviews.batches[0]).toMatchObject({ reviewerIds: ["rev-1"], calls: [{ callId: CALL, reviewerId: "rev-1" }] });
     expect(await checkOffToolReviewer(created("rev-1", WORKER), fake.paseo, deps)).toBeNull();
@@ -234,7 +265,6 @@ describe("the plugin's own Reviewer whose creation was cut short (design §16.5,
     await settleCreatedAgent(created("rev-pi", WORKER), daemonWith("rev-pi", WORKER).paseo, { home, bindings: store, log: () => {} });
     expect(store.bindingOfAgent("rev-pi")).toBeNull();
     expect(createRequestRegistry(home).get(WS, REQ)!.reviews.batches[0]).toMatchObject({ reviewerIds: ["rev-pi"], calls: [{ callId: CALL, reviewerId: "rev-pi" }] });
-    expect(isPluginReviewer("rev-pi")).toBe(true);
     expect(await checkOffToolReviewer(created("rev-pi", WORKER), null, deps)).toBeNull();
   });
 
@@ -244,12 +274,11 @@ describe("the plugin's own Reviewer whose creation was cut short (design §16.5,
     bindWorker(store, "agent-other-worker");
     // Not the request's Worker: the label alone is not trusted.
     await settleCreatedAgent(created("rev-x", "agent-other-worker"), daemonWith("rev-x", "agent-other-worker").paseo, { home, bindings: store, log: () => {} });
-    expect(isPluginReviewer("rev-x")).toBe(false);
     expect(createRequestRegistry(home).get(WS, REQ)!.reviews.batches[0]!.reviewerIds).toEqual([]);
     // The batch named once: a second Reviewer with the same labels is off-tool.
     await settleCreatedAgent(created("rev-1", WORKER), daemonWith("rev-1", WORKER).paseo, { home, bindings: store, log: () => {} });
     await settleCreatedAgent(created("rev-2", WORKER), daemonWith("rev-2", WORKER).paseo, { home, bindings: store, log: () => {} });
-    expect(isPluginReviewer("rev-2")).toBe(false);
+    expect(createRequestRegistry(home).get(WS, REQ)!.reviews.batches[0]!.reviewerIds).toEqual(["rev-1"]);
     expect(await checkOffToolReviewer(created("rev-2", WORKER), null, deps)).not.toBeNull();
   });
 });
@@ -286,56 +315,49 @@ describe("an off-tool Reviewer's later turns (design §16.8 step 4)", () => {
 describe("cancelling an off-tool Reviewer (design §16.8 step 4, spike S5)", () => {
   const FINDING: OffToolReviewer = { reviewerId: "5ea413fa-1b2c-4d5e-8f90-a1b2c3d4e5f6", workerId: WORKER, workspaceId: WS, requestId: REQ };
 
-  /** A fake cancel answering `answers` in turn (the last one sticks), and the waits it was given. */
-  function fakeCancel(...answers: CancelResult[]) {
+  /** A fake cancel answering `answer` (or throwing it), with the ids it was given and the lines logged. */
+  function fakeCancel(answer: CancelResult | Error) {
     const ids: string[] = [];
-    const slept: number[] = [];
     const logs: string[] = [];
     const deps = {
       cancel: async (agentId: string) => {
         ids.push(agentId);
-        return answers[Math.min(ids.length, answers.length) - 1]!;
-      },
-      sleep: async (ms: number) => {
-        slept.push(ms);
+        if (answer instanceof Error) throw answer;
+        return answer;
       },
       log: (message: string) => logs.push(message),
     };
-    return { deps, ids, slept, logs };
+    return { deps, ids, logs };
   }
 
   it("cancels the Reviewer's running turn at once, by its id", async () => {
-    const { deps, ids, slept, logs } = fakeCancel({ ok: true, stopped: true });
+    const { deps, ids, logs } = fakeCancel({ ok: true, stopped: true });
     expect(await cancelOffToolReviewer(FINDING, deps)).toBe(true);
     expect(ids).toEqual([FINDING.reviewerId]);
-    expect(slept).toEqual([]);
     expect(logs).toEqual([`[paseo-bm] cancelled the off-tool Reviewer ${FINDING.reviewerId} of Worker ${WORKER}.`]);
   });
 
-  it("tries again while its first turn has not started, and gives up after the last wait", async () => {
-    const started = fakeCancel({ ok: true, stopped: false }, { ok: true, stopped: true });
-    expect(await cancelOffToolReviewer(FINDING, started.deps)).toBe(true);
-    expect(started.slept).toEqual([OFF_TOOL_CANCEL_WAITS_MS[0]]);
-
-    const never = fakeCancel({ ok: true, stopped: false });
-    expect(await cancelOffToolReviewer(FINDING, never.deps)).toBe(false);
-    expect(never.ids).toHaveLength(OFF_TOOL_CANCEL_WAITS_MS.length + 1);
-    expect(never.slept).toEqual([...OFF_TOOL_CANCEL_WAITS_MS]);
-    expect(never.logs).toEqual([`[paseo-bm] the off-tool Reviewer ${FINDING.reviewerId} had no running turn to cancel.`]);
+  it("tries once: a turn that has not started yet is left to the turn_started hook", async () => {
+    const { deps, ids, logs } = fakeCancel({ ok: true, stopped: false });
+    expect(await cancelOffToolReviewer(FINDING, deps)).toBe(false);
+    expect(ids).toEqual([FINDING.reviewerId]);
+    expect(logs).toEqual([]);
   });
 
-  it("a failed cancel is logged with the Reviewer's id, and the alert stays", async () => {
+  it("a failed or throwing cancel is logged with the Reviewer's id, never rejects, and the alert stays", async () => {
     const { home, deps } = setup();
-    const logs: string[] = [];
     const failing = fakeCancel({ ok: false, reason: "the `paseo` command was not found" });
     const finding = await checkOffToolReviewer(created("rev-1", WORKER), null, {
       ...deps,
-      log: (message: string) => logs.push(message),
       cancel: (found: OffToolReviewer) => cancelOffToolReviewer(found, failing.deps),
     });
     expect(finding).not.toBeNull();
     expect(failing.ids).toEqual(["rev-1"]);
-    expect(logs).toContain("[paseo-bm] could not cancel the off-tool Reviewer rev-1: the `paseo` command was not found");
+    expect(failing.logs).toEqual(["[paseo-bm] could not cancel the off-tool Reviewer rev-1: the `paseo` command was not found"]);
     expect(createAlertStore(home).list({ open: true }).map((alert) => alert.subject)).toEqual(["rev-1"]);
+
+    const throwing = fakeCancel(new Error("spawn failed"));
+    expect(await cancelOffToolReviewer(FINDING, throwing.deps)).toBe(false);
+    expect(throwing.logs).toEqual([`[paseo-bm] could not cancel the off-tool Reviewer ${FINDING.reviewerId}: spawn failed`]);
   });
 });
