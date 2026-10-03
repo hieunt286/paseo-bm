@@ -13,7 +13,7 @@
  *    idle moment — nothing else queued for it — the plugin asks for its note.
  *    At most `HANDOFF_SAFE_POINT_WAIT_MS`.
  * 2. **The note** (`BM-HANDOFF`, `noteRequestOf`): `bm_report` with
- *    `handoffNote`. A Worker bound with the creation tools calls it and the
+ *    `handoffNote`. A bound Worker calls it and the
  *    tool stores and delivers the report (its outbox record, which the
  *    collector puts in the Worker's turn record); an unbound Worker posts the
  *    block it returns in its own chat. Either way the collector records it as
@@ -43,7 +43,7 @@
  *    archived. At most `SUCCESSOR_WAIT_MS` (a later one still completes it).
  *
  * **A bound Manager** (design §16.9; ADR-027 decision 2): when the request's
- * Manager has a live binding issued with the creation tools, steps 4–5 are
+ * Manager has a live binding, steps 4–5 are
  * the plugin's. Once the brief is built, the plugin creates the successor
  * itself (`create-worker.ts`): `parent` = the Manager, the labels
  * `bm_create_worker` sets plus `bm.handoffFrom`, a bound token, and the
@@ -241,7 +241,7 @@ export async function handoffSafeNow(
 
 /**
  * The plugin's request for the outgoing Worker's note (design §G.6 step 1).
- * A Worker bound with the creation tools (`bound`, design §16.5) calls
+ * A bound Worker (`bound`, design §16.5) calls
  * `bm_report`, which stores and delivers the report; an unbound one posts the
  * block its builder returns in its own chat.
  */

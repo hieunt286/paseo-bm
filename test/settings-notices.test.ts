@@ -9,6 +9,7 @@ import { childFactLine, childFactLines, notifyChildFactChange, settingsNotice, t
 import { reviewCallsOf } from "../plugin/server/traces";
 import type { TraceRecord } from "../plugin/shared/contracts";
 import { fakePaseo } from "./helpers/fake-paseo";
+import { bindAgent } from "./helpers/bindings";
 
 /**
  * Delta 20260921 §4.3.5 (REQ-064 d): after a save that changes a child role's
@@ -163,9 +164,7 @@ describe("notifyChildFactChange", () => {
     process.env["PASEO_BM_HOME"] = join(root, "data");
     try {
       const bindings = createBindingStore(join(root, "data"));
-      const { token, tokenSha256 } = bindings.issue({ role: "manager", workspaceId: "wks_1" });
-      bindings.attach(token, "manager");
-      bindings.settle(tokenSha256, "m-idle");
+      bindAgent(bindings, "m-idle", { role: "manager", workspaceId: "wks_1" });
       bindings.issue({ role: "manager", workspaceId: "wks_1" });
       const enqueue = vi.fn(async () => "sent" as const);
       const fake = daemonWith([...MANAGERS]);

@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   OUTBOX_DIR_NAME,
@@ -29,6 +28,7 @@ import { REDACTED } from "../plugin/server/collector";
 import { CLEANUP_DELETES } from "../plugin/server/setup-machine";
 import { NO_VERDICT_SENTENCE, OUTBOX_RECORD_ID_PATTERN, isPluginNotice, parseDelivery } from "../plugin/shared/notices";
 import { originOf } from "../plugin/shared/message-origin";
+import { dataFolder, removeDataFolders } from "./helpers/data-folder";
 
 /**
  * The outbox (design §16.7, ADR-027 decision 4): every record is written
@@ -41,19 +41,10 @@ import { originOf } from "../plugin/shared/message-origin";
 const WS = "wks_1";
 const REQ = "req-20261003T100000Z";
 const T0 = new Date("2026-10-03T10:00:00.000Z");
-const roots: string[] = [];
-
-function dataFolder(): string {
-  const root = mkdtempSync(join(tmpdir(), "bm-outbox-"));
-  roots.push(root);
-  const home = join(root, ".paseo-bm");
-  mkdirSync(home);
-  return home;
-}
 
 afterEach(() => {
   clearRequestRegistryCache();
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  removeDataFolders();
 });
 
 type Agent = { status: string; archivedAt?: string | null };

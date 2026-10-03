@@ -1,7 +1,4 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { clearBindingCache, createBindingStore, type BindingStore } from "../plugin/server/agent-bindings";
 import { binderOf } from "../plugin/server/agent-tools";
 import { createAlertStore } from "../plugin/server/alert-store";
@@ -24,6 +21,8 @@ import { reconstructTraces, type AgentFacts } from "../plugin/server/traces";
 import { alertKeyOf } from "../plugin/shared/alerts";
 import { fakePaseo, type FakeCreateRequest } from "./helpers/fake-paseo";
 import { msg, turn } from "./fixtures/orchestrator-traces";
+import { dataFolder, removeDataFolders } from "./helpers/data-folder";
+import { bindAgent } from "./helpers/bindings";
 
 /**
  * Off-tool Reviewers (design §16.8; ADR-027 decision 10): a Reviewer a bound
@@ -43,27 +42,14 @@ const WORKER = "agent-worker";
 const HAND_WORKER = "agent-hand-worker";
 const ROLE_URL = (role: string) => `http://127.0.0.1:4567/mcp/${role}`;
 const T0 = new Date("2026-10-03T10:00:00.000Z");
-const roots: string[] = [];
 
 afterEach(() => {
   clearBindingCache();
   clearRequestRegistryCache();
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  removeDataFolders();
 });
 
-function dataFolder(): string {
-  const root = mkdtempSync(join(tmpdir(), "bm-off-tool-"));
-  roots.push(root);
-  const home = join(root, ".paseo-bm");
-  mkdirSync(home);
-  return home;
-}
-
-function bindWorker(store: BindingStore, agentId: string): void {
-  const { token, tokenSha256 } = store.issue({ role: "worker", workspaceId: WS, requestId: REQ, parentId: MANAGER });
-  store.attach(token, "worker");
-  store.settle(tokenSha256, agentId);
-}
+const bindWorker = (store: BindingStore, agentId: string) => bindAgent(store, agentId, { role: "worker", workspaceId: WS, requestId: REQ, parentId: MANAGER });
 
 function setup() {
   const home = dataFolder();

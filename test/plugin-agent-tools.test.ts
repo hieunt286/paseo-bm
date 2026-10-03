@@ -27,6 +27,7 @@ import { applyAgentTools, registerRoleHook, type AgentCreateRequest } from "../p
 import { createBindingStore, type BindingStore } from "../plugin/server/agent-bindings";
 import { NOT_BOUND_MESSAGE } from "../plugin/server/create-worker";
 import { toolFacesFor } from "../plugin/shared/bm-tools";
+import { bindAgent } from "./helpers/bindings";
 
 /**
  * The agent tools endpoint (design delta 20260924b-agent-tools, AT-2): a real
@@ -638,10 +639,7 @@ describe("the creation hook's part", () => {
 describe("bm_create_worker on the bound Manager's list only (design §16.6)", () => {
   /** A Manager binding as a plugin creation leaves it: issued, attached, settled. */
   function bindManager(store: BindingStore, agentId: string): string {
-    const { token, tokenSha256 } = store.issue({ role: "manager", workspaceId: "wks_1" });
-    store.attach(token, "manager");
-    store.settle(tokenSha256, agentId);
-    return token;
+    return bindAgent(store, agentId, { role: "manager", workspaceId: "wks_1" });
   }
 
   it("lists it for a bound Manager, and never on the role path", async () => {
@@ -656,12 +654,8 @@ describe("bm_create_worker on the bound Manager's list only (design §16.6)", ()
     // On the role path the Worker's and Reviewer's lists do not change; bound, they deliver (design §16.6).
     expect(await list(endpoint.urlFor("worker")!)).toEqual(["bm_report", "bm_reply"]);
     expect(await list(endpoint.urlFor("reviewer")!)).toEqual(["bm_review"]);
-    const bindAs = (role: "worker" | "reviewer", agentId: string) => {
-      const { token, tokenSha256 } = store.issue({ role, workspaceId: "wks_1", requestId: "req-20261003T100000Z", parentId: "agent-m1", batchId: role === "reviewer" ? "b1" : null });
-      store.attach(token, role);
-      store.settle(tokenSha256, agentId);
-      return token;
-    };
+    const bindAs = (role: "worker" | "reviewer", agentId: string) =>
+      bindAgent(store, agentId, { role, workspaceId: "wks_1", requestId: "req-20261003T100000Z", parentId: "agent-m1", batchId: role === "reviewer" ? "b1" : null });
     expect(await list(`${endpoint.urlFor("worker")!}/${bindAs("worker", "agent-w1")}`)).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_reply"]);
     expect(await list(`${endpoint.urlFor("reviewer")!}/${bindAs("reviewer", "agent-r1")}`)).toEqual(["bm_review"]);
     expect(toolFacesFor("manager").map((face) => face.name)).not.toContain("bm_create_worker");

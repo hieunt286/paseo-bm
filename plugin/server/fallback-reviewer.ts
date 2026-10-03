@@ -2,8 +2,7 @@
  * Fallback for a stopped Reviewer (delta 20260921 §4.5.1, REQ-066 b; design
  * §16.9).
  *
- * **A bound Worker's Reviewer** (its Worker was bound with the creation tools
- * and the registry holds the Reviewer's batch): on **Switch** the plugin
+ * **A bound Worker's Reviewer** (its Worker is bound and the registry holds the Reviewer's batch): on **Switch** the plugin
  * creates the replacement itself (`createPluginReviewer`, as
  * `bm_create_reviewer` does) — `bm-reviewer-fallback-<n>/<model>`, the
  * Reviewer mode rules, `parent` = the Worker, labels `bm.role`,
@@ -117,7 +116,7 @@ export const FALLBACK_REVIEWER_TITLE = "Beads Reviewer (fallback)";
 
 /**
  * The batch of a bound Worker's Reviewer (design §16.9): the Worker is bound
- * with the creation tools and the registry holds a batch of the request with
+ * and the registry holds a batch of the request with
  * that Reviewer; null otherwise (the recipe). Never throws.
  */
 export function boundBatchOf(

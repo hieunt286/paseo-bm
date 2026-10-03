@@ -119,6 +119,8 @@ describe("formatNotice", () => {
     expect(formatNotice("BM-ANSWERS", REQ, ["x"])).toContain("If you have the bm_answers tool, build the block with it.");
     // A blocked report is not re-sent: the tool is for the next one.
     expect(formatNotice("BM-REPORT", REQ, ["x"], true)).toContain("If you have the bm_report tool, build your next report with it.");
+    // A block the plugin relays from the sender's reply is corrected in the reply.
+    expect(formatNotice("BM-REPORT", REQ, ["x"], false, true).split("\n").at(-1)).toMatch(/^Write the whole corrected block again in your reply, in one message; the plugin delivers it\./);
     expect(formatNotice("BM-REVIEW", REQ, ["x"]).split("\n").at(-1)).toBe(
       "Answer with the whole corrected BM-REVIEW block as your final message; do not review again.",
     );
@@ -332,9 +334,9 @@ describe("reviews and answers", () => {
     expect(sends.map((send) => send.id)).toEqual(["rev"]);
   });
 
-  it("does not check a Worker's own assistant messages, nor a review that arrives in its chat", async () => {
+  it("does not check a bound Worker's own assistant messages, nor a review that arrives in its chat", async () => {
     const { sends, deps } = world([manager(), worker(), reviewer()]);
-    await checkTurnFormat(turn(worker(), [received(`Agent rev finished.\n${badReview}`), said(report("blocked", false))]), deps);
+    await checkTurnFormat(turn(worker(), [received(`Agent rev finished.\n${badReview}`), said(report("blocked", false))]), { ...deps, isBound: (id) => id === "wrk" });
     expect(sends).toEqual([]);
   });
 
@@ -396,13 +398,35 @@ describe("a block a tool built and delivered (design §16.6, §16.7)", () => {
       { from: "rev", kind: "review" as const, requestId: REQ },
       { from: "wrk", kind: "report" as const, requestId: REQ },
     ];
-    const bound = { ...deps, toolRecordsOf: async (workspaceId: string) => (workspaceId === WS ? records : []) };
+    const bound = { ...deps, isBound: () => true, toolRecordsOf: async (workspaceId: string) => (workspaceId === WS ? records : []) };
     // A bound Reviewer's close that quotes a broken block, and a stray copy of a broken report.
     await checkTurnFormat(turn(reviewer(), [received("please review"), said(`Done.\n\n${badReview}`)]), bound);
     await checkTurnFormat(turn(manager(), [received(report("blocked", false))]), bound);
     expect(sends).toEqual([]);
     expect(deps.state.pending.size).toBe(0);
     expect(logs.filter((line) => line.includes("its tool built and delivered that block"))).toHaveLength(2);
+  });
+
+  it("checks a report the plugin relayed from an unbound Worker's reply; never a bound Worker's tool-built one", async () => {
+    const records = [{ from: "wrk", kind: "report" as const, requestId: REQ }];
+    const fine = report("finished", false);
+    const broken = fine.replace("buildAndTests: not run\n", "");
+    // Unbound with a parent: the relay stored its block as a record, and the Manager only sees a BM-DELIVERY.
+    const relayed = world([manager(), worker()]);
+    const unbound = { ...relayed.deps, toolRecordsOf: async () => records };
+    await checkTurnFormat(turn(manager(), [received(`BM-DELIVERY report out-0123456789ab\n${broken}`)]), unbound);
+    expect(relayed.sends).toEqual([]);
+    await checkTurnFormat(turn(worker(), [said(fine)]), unbound);
+    expect(relayed.sends).toEqual([]);
+    await checkTurnFormat(turn(worker(), [said(`Here is my report.\n\n${broken}`)]), unbound);
+    expect(relayed.sends.map((send) => send.id)).toEqual(["wrk"]);
+    expect(relayed.sends[0]!.text).toContain("Write the whole corrected block again in your reply");
+    // Bound: the same broken block in its reply and in the Manager's chat earns nothing.
+    const tooled = world([manager(), worker()]);
+    const bound = { ...tooled.deps, isBound: (id: string) => id === "wrk", toolRecordsOf: async () => records };
+    await checkTurnFormat(turn(worker(), [said(broken)]), bound);
+    await checkTurnFormat(turn(manager(), [received(broken)]), bound);
+    expect(tooled.sends).toEqual([]);
   });
 
   it("still tells an unbound sender, or one whose record is of another request or kind", async () => {

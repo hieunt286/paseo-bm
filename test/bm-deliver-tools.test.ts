@@ -1,8 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { PENDING_CALLER_MESSAGE, PENDING_TTL_MS, type ToolCaller } from "../plugin/server/agent-bindings";
+import { PENDING_CALLER_MESSAGE, PENDING_TTL_MS } from "../plugin/server/agent-bindings";
 import { BUILDER_SEND_LINES, answer, answerWithServerTools, withAgentTools } from "../plugin/server/agent-tools";
 import { createAlertStore } from "../plugin/server/alert-store";
 import { clearStartMarks, currentTurnStartOf, noteTurnStart, relayRequestIdOf } from "../plugin/server/collector";
@@ -32,6 +31,8 @@ import { parseDelivery } from "../plugin/shared/notices";
 import { originOf } from "../plugin/shared/message-origin";
 import { msg, turn } from "./fixtures/orchestrator-traces";
 import { fakePaseo } from "./helpers/fake-paseo";
+import { dataFolder, removeDataFolders } from "./helpers/data-folder";
+import { MANAGER_CALLER, REVIEWER_CALLER, WORKER_CALLER } from "./helpers/bindings";
 
 /**
  * The bound agents' delivering tools (design §16.6, §16.7; ADR-027 decisions
@@ -48,7 +49,6 @@ const MANAGER = "agent-manager";
 const WORKER = "agent-worker";
 const REVIEWER = "agent-reviewer";
 const T0 = new Date("2026-10-03T10:05:00.000Z");
-const roots: string[] = [];
 
 afterEach(() => {
   clearRequestRegistryCache();
@@ -56,20 +56,9 @@ afterEach(() => {
   clearProposedAnswers();
   clearMaterialiserMemory();
   clearStartMarks();
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  removeDataFolders();
 });
 
-function dataFolder(): string {
-  const root = mkdtempSync(join(tmpdir(), "bm-deliver-tools-"));
-  roots.push(root);
-  const home = join(root, ".paseo-bm");
-  mkdirSync(home);
-  return home;
-}
-
-const WORKER_CALLER: ToolCaller = { agentId: WORKER, role: "worker", workspaceId: WS, requestId: REQ, parentId: MANAGER, batchId: null };
-const REVIEWER_CALLER: ToolCaller = { agentId: REVIEWER, role: "reviewer", workspaceId: WS, requestId: REQ, parentId: WORKER, batchId: "b1" };
-const MANAGER_CALLER: ToolCaller = { agentId: MANAGER, role: "manager", workspaceId: WS, requestId: null, parentId: null, batchId: null };
 
 type Agent = { id: string; provider: string; status: string; workspaceId: string; labels: Record<string, string> };
 const AGENTS: Agent[] = [

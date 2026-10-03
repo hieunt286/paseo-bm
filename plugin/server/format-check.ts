@@ -14,8 +14,14 @@
  * | Block                      | Checked at the turn end of | Sender (told)                     |
  * |----------------------------|----------------------------|-----------------------------------|
  * | BM-REPORT (+ BM-QUESTIONS) | the Manager                | the one Worker with that request  |
+ * | BM-REPORT (+ BM-QUESTIONS) | an unbound Worker (its own)| the Worker itself                 |
  * | BM-ANSWERS                 | the Worker                 | its parent, when it is a Manager  |
  * | BM-REVIEW                  | the Reviewer (its own)     | the Reviewer itself               |
+ *
+ * An unbound Worker with a parent writes its report in its reply and the
+ * plugin relays it (`unbound-relay.ts`) as a `BM-DELIVERY` — a plugin notice,
+ * which the Manager's check does not read — so its own reply is where its
+ * block is checked, and its notice asks for the corrected block in its reply.
  *
  * Rules this module must never lose:
  * - **Never into a running turn.** `send()` on a running agent replaces its
@@ -36,11 +42,12 @@
  *   Manager is woken after every Worker turn and a Worker when its Reviewer
  *   finishes (both `notifyOnFinish` by default). Answers have no such
  *   guarantee: that notice may never go, and the card chip still shows.
- * - **Never to a block a tool delivered.** A sender with a tool-built outbox
- *   record of the block's request and kind (a bound Worker's report, a bound
- *   Reviewer's review, design §16.7) is skipped: its block went out through the
- *   tool, which checked it; the forgiving readers and this check stay for
- *   unbound agents.
+ * - **Never to a block a tool delivered.** A bound sender (a live binding)
+ *   with an outbox record of the block's request and kind (a bound Worker's
+ *   report, a bound Reviewer's review, design §16.7) is skipped: its block
+ *   went out through the tool, which checked it. A record the plugin relayed
+ *   for an unbound agent (`unbound-relay.ts`, `no-verdict.ts`) is not
+ *   tool-built: the forgiving readers and this check stay for unbound agents.
  * - **Bounded.** One notice per distinct block, at most `MAX_NOTICES` per
  *   sender, request and kind. State lives in memory; a reload starts afresh
  *   and never re-reads old blocks.
@@ -50,7 +57,8 @@
 import { dirname } from "node:path";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { checkBlocks, issueText, type BlockKind, type CheckedBlock } from "../shared/bm-format";
-import { roleOfProvider, type BmRole } from "./agent-role";
+import { parentOf, roleOfProvider, type BmRole } from "./agent-role";
+import { liveBindingOf, type BindingStore } from "./agent-bindings";
 import { joinStreamedText, sliceLastTurn } from "./collector";
 import { requireLocation } from "./dashboard-rpc";
 import { bmAgentsOf, type DashboardPaseo } from "./paseo-directory";
@@ -105,6 +113,8 @@ interface Pending {
   hash: string;
   /** The block put questions in front of the user; the notice must not ask for a re-send. */
   carriesQuestions: boolean;
+  /** The sender wrote the block in its own reply, which the plugin relays: the correction goes there too. */
+  inReply: boolean;
 }
 
 export interface FormatState {
@@ -134,6 +144,11 @@ export interface FormatDeps {
    * outbox by default; none when it cannot be read.
    */
   toolRecordsOf?: (workspaceId: string) => Promise<ReadonlyArray<Pick<OutboxRecord, "from" | "kind" | "requestId">>>;
+  /**
+   * True when `agentId` has a live binding (design §16.5): its blocks go out
+   * through its tools. None is bound by default.
+   */
+  isBound?: (agentId: string) => boolean;
 }
 
 /** The outbox record a tool builds for each kind of block a bound agent delivers (design §16.6); `BM-ANSWERS` has none. */
@@ -149,16 +164,17 @@ async function defaultToolRecordsOf(deps: FormatDeps, workspaceId: string): Prom
 }
 
 /**
- * True when `senderId` has a tool-built record (an outbox `report` or `review`,
- * design §16.7) of the unit's request and kind: a bound agent's block was
- * built and delivered by its tool, so a block in its words is not checked —
- * a bound Reviewer's one-line close, or a stray copy, never earns a
- * `BM-FORMAT` (design §7.6, §16.6). A unit naming no request matches any
- * record of the kind.
+ * True when `senderId` is bound and has a tool-built record (an outbox
+ * `report` or `review`, design §16.7) of the unit's request and kind: a bound
+ * agent's block was built and delivered by its tool, so a block in its words
+ * is not checked — a bound Reviewer's one-line close, or a stray copy, never
+ * earns a `BM-FORMAT` (design §7.6, §16.6). A record of an unbound sender is
+ * one the plugin relayed from its words, which nothing checked. A unit naming
+ * no request matches any record of the kind.
  */
 async function hasToolRecord(deps: FormatDeps, workspaceId: string | null, senderId: string, unit: Pick<Unit, "kind" | "requestId">): Promise<boolean> {
   const kind = RECORD_KIND_OF[unit.kind];
-  if (kind === undefined || workspaceId === null) return false;
+  if (kind === undefined || workspaceId === null || deps.isBound?.(senderId) !== true) return false;
   const records = await (deps.toolRecordsOf ?? ((ws: string) => defaultToolRecordsOf(deps, ws)))(workspaceId);
   return records.some((record) => record.from === senderId && record.kind === kind && (unit.requestId === null || record.requestId === unit.requestId));
 }
@@ -177,13 +193,15 @@ export type FormatOutcome = "ignored" | "checked";
  * the notice does not help: it only moves the second card to after the user has
  * answered. The notice therefore says what is wrong and asks for nothing.
  */
-export function formatNotice(kind: BlockKind, requestId: string | null, issues: readonly string[], carriesQuestions = false): string {
+export function formatNotice(kind: BlockKind, requestId: string | null, issues: readonly string[], carriesQuestions = false, inReply = false): string {
   const last =
     kind === "BM-REVIEW"
       ? "Answer with the whole corrected BM-REVIEW block as your final message; do not review again."
       : carriesQuestions
         ? "Do NOT send this block again: its BM-QUESTIONS would reach the user a second time. Leave the report as it stands, apply the correction to your next one, and carry on exactly where you were. Do not mention this notice to the user."
-        : "Send the whole corrected block again, to the same agent as before, in one message. Change nothing else and do not redo any work; then carry on exactly where you were. Do not mention this notice to the user.";
+        : inReply
+          ? "Write the whole corrected block again in your reply, in one message; the plugin delivers it. Change nothing else and do not redo any work; then carry on exactly where you were. Do not mention this notice to the user."
+          : "Send the whole corrected block again, to the same agent as before, in one message. Change nothing else and do not redo any work; then carry on exactly where you were. Do not mention this notice to the user.";
   return [
     `${FORMAT_NOTICE_MARKER} requestId: ${requestId ?? "unknown"}`,
     `Your last ${kind} broke the template:`,
@@ -286,17 +304,18 @@ async function detect(event: FormatTurnEvent, role: BmRole, deps: FormatDeps, lo
   const items = joinStreamedText(sliceLastTurn(Array.isArray(event.timeline) ? event.timeline : []))
     .map(textItem)
     .filter((item): item is TimelineText => item !== null);
-  const wanted: BlockKind = role === "manager" ? "BM-REPORT" : role === "worker" ? "BM-ANSWERS" : "BM-REVIEW";
-  // Received from another agent (origin `agent`, design §16.2: no clientMessageId, neither a plugin notice nor a plugin prompt) — or, for a Reviewer, its own words.
-  const sources = items.filter((item) =>
-    role === "reviewer"
-      ? item.type === "assistant_message"
-      : item.type === "user_message" && originOf({ text: item.text, clientMessageId: item.clientMessageId }) === "agent",
-  );
+  // An unbound Worker with a parent: its own reports are relayed from its reply, so they are checked there.
+  const workerParent = role === "worker" && deps.isBound?.(event.agent.id) !== true ? parentOf(event.agent) : null;
+  // Received from another agent (origin `agent`, design §16.2: no clientMessageId, neither a plugin notice nor a plugin prompt) — or the agent's own words.
+  const wanted = (item: TimelineText, kind: BlockKind): boolean => {
+    if (item.type === "assistant_message") return role === "reviewer" ? kind === "BM-REVIEW" : workerParent !== null && kind === "BM-REPORT";
+    if (role === "reviewer" || originOf({ text: item.text, clientMessageId: item.clientMessageId }) !== "agent") return false;
+    return kind === (role === "manager" ? "BM-REPORT" : "BM-ANSWERS");
+  };
   const latest = new Map<string, Unit>();
-  for (const item of sources) {
+  for (const item of items) {
     for (const unit of unitsOf(checkBlocks(item.text))) {
-      if (unit.kind !== wanted) continue;
+      if (!wanted(item, unit.kind)) continue;
       latest.set(`${unit.kind}|${unit.requestId ?? "?"}`, unit);
     }
   }
@@ -307,7 +326,11 @@ async function detect(event: FormatTurnEvent, role: BmRole, deps: FormatDeps, lo
   for (const unit of latest.values()) {
     let sender: { id: string; role: BmRole } | null;
     let receiverId: string | null;
-    if (role === "manager") {
+    const inReply = role === "worker" && unit.kind === "BM-REPORT";
+    if (inReply) {
+      sender = { id: event.agent.id, role: "worker" };
+      receiverId = workerParent;
+    } else if (role === "manager") {
       const worker = event.agent.workspaceId === null ? null : await workerOf(deps, event.agent.workspaceId, unit.requestId);
       sender = worker === null ? null : { id: worker.id, role: "worker" };
       receiverId = event.agent.id;
@@ -351,6 +374,7 @@ async function detect(event: FormatTurnEvent, role: BmRole, deps: FormatDeps, lo
       issues: unit.issues,
       hash,
       carriesQuestions: unit.carriesQuestions,
+      inReply,
     });
   }
 }
@@ -391,7 +415,7 @@ async function flush(endedId: string, deps: FormatDeps, log: (message: string) =
         continue;
       }
       if (isBusy(sender)) continue;
-      await deps.paseo.agents.ref(entry.senderId).send(formatNotice(entry.kind, entry.requestId, entry.issues, entry.carriesQuestions));
+      await deps.paseo.agents.ref(entry.senderId).send(formatNotice(entry.kind, entry.requestId, entry.issues, entry.carriesQuestions, entry.inReply));
       deps.state.pending.delete(entry.key);
       deps.state.sent.set(counted, (deps.state.sent.get(counted) ?? 0) + 1);
       deps.state.notifiedBlocks.add(entry.hash);
@@ -429,11 +453,16 @@ export async function checkTurnFormat(event: FormatTurnEvent, deps: FormatDeps):
 
 export type FormatHost = Partial<Pick<PluginServerContext, "on">>;
 
-/** Registers the check on `agent.turn_ended`; a no-op on a host without `on`. */
-export function registerFormatCheck(host: FormatHost, state: FormatState = createFormatState()): () => void {
+/**
+ * Registers the check on `agent.turn_ended`; a no-op on a host without `on`.
+ * `bindings` reads the per-agent bindings (design §16.5); without them no
+ * sender counts as bound.
+ */
+export function registerFormatCheck(host: FormatHost, state: FormatState = createFormatState(), bindings: () => BindingStore | null = () => null): () => void {
   if (typeof host.on !== "function") return () => {};
+  const isBound = (agentId: string) => liveBindingOf(bindings()?.list() ?? [], agentId) !== null;
   const remove = host.on("agent.turn_ended", async (event, context) => {
-    await checkTurnFormat(event as unknown as FormatTurnEvent, { paseo: context.paseo as unknown as FormatPaseo, state });
+    await checkTurnFormat(event as unknown as FormatTurnEvent, { paseo: context.paseo as unknown as FormatPaseo, state, isBound });
   });
   return typeof remove === "function" ? remove : () => {};
 }

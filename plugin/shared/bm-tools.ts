@@ -1467,7 +1467,7 @@ export const REREVIEW_FACE: ToolFace = {
 };
 
 /**
- * The tools only a bound agent issued the creation tools has (design §16.6,
+ * The tools only a bound agent has (design §16.6,
  * ADR-027 ship point C), run on the plugin server: they create agents, or
  * store and deliver what the agent built. The bound versions of `bm_report`,
  * `bm_review` and `bm_answers` take the builders' place on a bound agent's
@@ -1546,7 +1546,7 @@ export function serverToolsFor(role: ToolRole): ToolFace[] {
 
 /**
  * Every tool an endpoint lists for `role`, and the creation hook pre-approves:
- * for an agent bound with the creation tools (`bound`, design §16.6) its
+ * for a bound agent (`bound`, design §16.6) its
  * creating tools first; then the Orchestrator's server-run tools, the role's
  * own tools, the Worker's server-run `bm_reply` and the Manager's server-run
  * `bm_decisions`.

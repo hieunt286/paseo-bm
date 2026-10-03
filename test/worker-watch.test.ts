@@ -36,6 +36,7 @@ import { heldDecisionOf } from "../plugin/server/action-boundary";
 import { createDecisionStore } from "../plugin/server/decision-store";
 import { answerDecision, withdrawDecision } from "../plugin/shared/decisions";
 import { boundaryVerdictOfCommand } from "../plugin/shared/effectful-actions";
+import { bindAgent } from "./helpers/bindings";
 
 /**
  * The live watch of running Workers (Orchestrator design §6B.3, ADR-016
@@ -1011,9 +1012,7 @@ describe("the off-tool-review signal (design §16.8)", () => {
     await seed();
     inScope();
     const bindings = createBindingStore(home);
-    const { token, tokenSha256 } = bindings.issue({ role: "worker", workspaceId: WORKSPACE_ID, requestId: REQUEST_ID, parentId: MANAGER });
-    bindings.attach(token, "worker");
-    bindings.settle(tokenSha256, WORKER);
+    bindAgent(bindings, WORKER, { role: "worker", workspaceId: WORKSPACE_ID, requestId: REQUEST_ID, parentId: MANAGER });
     const { fake, watch } = watching([managerAgent(), workerAgent(), orchestratorAgent()]);
     const bus = createEventBus({ ...deps, queue });
     bus.usePaseo(fake.paseo);

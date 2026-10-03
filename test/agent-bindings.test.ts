@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   AGENT_TOOLS_SERVER,
@@ -26,6 +25,7 @@ import {
 import { BUILDER_SEND_LINES, binderOf, boundTokenOf, routeOfPath, startAgentTools, type AgentToolsEndpoint } from "../plugin/server/agent-tools";
 import type { ServerTools } from "../plugin/server/decision-tools";
 import { applyAgentTools, pendingBoundToken, type AgentCreateRequest } from "../plugin/server/role-hook";
+import { dataFolder, removeDataFolders } from "./helpers/data-folder";
 
 /**
  * Per-agent tool bindings (design §16.5, ADR-027 decisions 3 and 9): the
@@ -37,16 +37,7 @@ import { applyAgentTools, pendingBoundToken, type AgentCreateRequest } from "../
 const T0 = new Date("2026-10-03T10:00:00.000Z");
 const WS = "wks_1";
 const REQ = "req-20261003T100000Z";
-const roots: string[] = [];
 const endpoints: AgentToolsEndpoint[] = [];
-
-function dataFolder(): string {
-  const root = mkdtempSync(join(tmpdir(), "bm-bindings-"));
-  roots.push(root);
-  const home = join(root, ".paseo-bm");
-  mkdirSync(home);
-  return home;
-}
 
 /** A store whose clock the test moves. */
 function storeAt(home: string, clock: { now: Date }, log: string[] = []): BindingStore {
@@ -58,7 +49,7 @@ const later = (ms: number): Date => new Date(T0.getTime() + ms);
 afterEach(async () => {
   await Promise.all(endpoints.splice(0).map((endpoint) => endpoint.close()));
   clearBindingCache();
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  removeDataFolders();
 });
 
 describe("the binding store (design §16.5)", () => {

@@ -103,6 +103,18 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/** Runs a creation whose lookups never answer past the hook's one budget, on fake timers: no real five-second wait. */
+async function pastLookupBudget<T>(work: () => Promise<T>): Promise<T> {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    const pending = work();
+    await vi.advanceTimersByTimeAsync(LOOKUP_TIMEOUT_MS);
+    return await pending;
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
 describe("before(\"agent.create\") role hook", () => {
   it("registers exactly one agent.create hook", async () => {
     const { server, hooks } = setup();
@@ -353,11 +365,11 @@ describe("before(\"agent.create\") start mode", () => {
     const never = new Promise(() => {});
     const { run } = setup({ providers: { listModes: () => never }, config: { get: () => never } });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const result = await run({ config: { provider: "bm-worker", cwd: "/repo" } });
+    const result = await pastLookupBudget(() => run({ config: { provider: "bm-worker", cwd: "/repo" } }));
     expect(result?.config?.systemPrompt).toBe(workerUnbound);
     expect(result?.config).not.toHaveProperty("modeId");
     expect(String(warn.mock.calls.at(-1)?.[0])).toMatch(/took longer than \d+ ms/);
-  }, 20000);
+  });
 
   it("keeps a Worker's chosen mode, looking up its own modes only to learn the provider's class (delta 20260921 §4.2.1)", async () => {
     const { spy, paseo } = paseoWith(async () => ({ modes: CLAUDE_MODES }));
@@ -584,11 +596,11 @@ describe("before(\"agent.create\") profile thinking and features (delta 20260921
     const never = new Promise(() => {});
     const { run } = setup({ providers: { listModes: async () => ({ modes: CLAUDE_MODES }) }, config: { get: () => never } });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const result = await run({ config: { provider: "bm-worker/claude-opus-5", cwd: "/repo", modeId: "bypassPermissions" } });
+    const result = await pastLookupBudget(() => run({ config: { provider: "bm-worker/claude-opus-5", cwd: "/repo", modeId: "bypassPermissions" } }));
     expect(result?.config?.systemPrompt).toContain(workerMd.trimEnd());
     expect(result?.config).not.toHaveProperty("thinkingOptionId");
     expect(warn.mock.calls.some((call) => /took longer than \d+ ms/.test(String(call[0])))).toBe(true);
-  }, 20000);
+  });
 });
 
 describe("run posture by provider capability (delta 20260921 §4.2.1–§4.2.2, REQ-063)", () => {
@@ -1257,13 +1269,13 @@ describe("before(\"agent.create\") — the action boundary per project (autonomy
     forgetCreatedBoundaries();
     const never = new Promise(() => {});
     const { run } = setup({ ...host({ "bm-worker": "claude" }), workspaces: { list: () => never }, providers: { listModes: () => never } });
-    const result = await run({ config: { provider: "bm-worker", cwd: "/on", modeId: "default" } });
+    const result = await pastLookupBudget(() => run({ config: { provider: "bm-worker", cwd: "/on", modeId: "default" } }));
     expect(result?.config?.systemPrompt).toBe(workerUnbound);
     expect(result?.config?.modeId).toBe("default");
     expect(boundaryLine(result)).toBeNull();
     // Outside the boundary, so agent.created labels it off (live check 2026-10-01 F1).
     expect(takeCreatedBoundary("bm-worker", "/on")).toBe("off");
-  }, 20000);
+  });
 });
 
 describe("before(\"agent.create\") — a bound creation (design §16.5)", () => {

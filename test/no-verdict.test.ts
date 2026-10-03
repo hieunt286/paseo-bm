@@ -1,8 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { clearBindingCache, createBindingStore, type BindingStore } from "../plugin/server/agent-bindings";
+import { clearBindingCache, createBindingStore } from "../plugin/server/agent-bindings";
 import { createBudgetTold } from "../plugin/server/budget-told";
 import { batchesAwaitingVerdict } from "../plugin/server/deliver-tools";
 import { registerFallbackDetection } from "../plugin/server/fallback-state";
@@ -13,6 +11,8 @@ import { clearRequestRegistryCache, createRequestRegistry } from "../plugin/serv
 import { checkReviewBudget, type BudgetOverrun, type BudgetPaseo } from "../plugin/server/review-budget";
 import { NO_VERDICT_SENTENCE, parseDelivery, reviewerBriefLineOf } from "../plugin/shared/notices";
 import { fakePaseo } from "./helpers/fake-paseo";
+import { dataFolder, removeDataFolders } from "./helpers/data-folder";
+import { bindAgent } from "./helpers/bindings";
 
 /**
  * Wake-ups and a missing verdict (design §16.10; ADR-027 decision 11, spike S2
@@ -31,36 +31,20 @@ const REVIEWER = "agent-reviewer";
 const CALL_1 = "out-000000000a01";
 const CALL_2 = "out-000000000a02";
 const T0 = new Date("2026-10-03T10:00:00.000Z");
-const roots: string[] = [];
 
 afterEach(() => {
   clearBindingCache();
   clearRequestRegistryCache();
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  removeDataFolders();
 });
-
-function dataFolder(): string {
-  const root = mkdtempSync(join(tmpdir(), "bm-no-verdict-"));
-  roots.push(root);
-  const home = join(root, ".paseo-bm");
-  mkdirSync(home);
-  return home;
-}
-
-/** A binding the plugin issued and the hook attached, bound to `agentId`. */
-function bind(store: BindingStore, agentId: string, input: { role: "reviewer" | "worker"; requestId: string; parentId: string; batchId?: string | null }): void {
-  const { token, tokenSha256 } = store.issue({ ...input, workspaceId: WS });
-  store.attach(token, input.role);
-  store.settle(tokenSha256, agentId);
-}
 
 const iso = (minutes: number) => new Date(T0.getTime() + minutes * 60_000).toISOString();
 
 function setup() {
   const home = dataFolder();
   const store = createBindingStore(home);
-  bind(store, WORKER, { role: "worker", requestId: REQ, parentId: MANAGER });
-  bind(store, REVIEWER, { role: "reviewer", requestId: REQ, parentId: WORKER, batchId: "b1" });
+  bindAgent(store, WORKER, { role: "worker", workspaceId: WS, requestId: REQ, parentId: MANAGER });
+  bindAgent(store, REVIEWER, { role: "reviewer", workspaceId: WS, requestId: REQ, parentId: WORKER, batchId: "b1" });
   const registry = createRequestRegistry(home, { backfill: () => [] });
   registry.register(WS, REQ, { source: "tool", managerId: MANAGER, workerId: WORKER });
   registry.addReviewCall(WS, REQ, "b1", { callId: CALL_1, kind: "create", reviewerId: "", at: iso(0) }, "Review batch b1.");

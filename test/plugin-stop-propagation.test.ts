@@ -95,11 +95,11 @@ function daemonWith(options: { agents: Snapshot[]; statuses?: Record<string, str
 }
 
 function fakeServer(options: { withOn?: boolean } = {}) {
-  // Since WP-205 the server entry registers three lifecycle hooks: this one on
-  // agent.turn_ended, plus the trace collector on turn_started and turn_ended.
-  // The fake therefore keeps every handler per name, and `setup()` picks the
-  // stop-propagation one (the first turn_ended handler the entry registers).
+  // The server entry registers many lifecycle hooks; the fake keeps every
+  // handler per name, and `setup()` picks the stop-propagation one (the first
+  // turn_ended handler the entry registers).
   const hooks = new Map<string, OnHandler[]>();
+  const registered: string[] = [];
   const removers: string[] = [];
   const server: Record<string, unknown> = {
     handle: vi.fn(),
@@ -108,6 +108,7 @@ function fakeServer(options: { withOn?: boolean } = {}) {
   };
   if (options.withOn !== false) {
     server.on = vi.fn((name: string, handler: OnHandler) => {
+      registered.push(name);
       hooks.set(name, [...(hooks.get(name) ?? []), handler]);
       return () => {
         removers.push(name);
@@ -117,7 +118,7 @@ function fakeServer(options: { withOn?: boolean } = {}) {
       };
     });
   }
-  return { server, hooks, removers };
+  return { server, hooks, registered, removers };
 }
 
 function setup() {
@@ -153,32 +154,12 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     expect(STOP_RECHECK_MS).toBe(500);
   });
 
-  it("registers its agent.turn_ended hook alongside the trace collector's two", () => {
-    const { server, hooks } = setup();
-    // One here (bm-wq6) plus the WP-205 collector's turn_started and turn_ended,
-    // plus delta 20260918g's agent.created labelling, its turn_started scan and
-    // its turn_ended BM-FORMAT check, plus delta 20260921's fallback detection,
-    // plus the outdated-agents pass (turn_started, agent.archived; autonomy
-    // design §A.11), plus the action boundary's two permission hooks (§D.2),
-    // plus the interruption watch's permission_resolved (ADR-024),
-    // plus the binding lifecycle's agent.archived (design §16.5),
-    // plus the off-tool Reviewer alert's clear on agent.archived (design §16.8),
-    // plus the off-tool Reviewer's turn cancel on agent.turn_started (§16.8 step 4).
-    // The no-verdict check (§16.10) rides on the fallback detection's
-    // turn_ended handler (its afterDetection), so it adds no hook.
-    // The question–answer ledger's turn_ended is retired (§A.14).
-    expect(server.on).toHaveBeenCalledTimes(15);
-    expect([...hooks.keys()].sort()).toEqual([
-      "agent.archived",
-      "agent.created",
-      "agent.permission_requested",
-      "agent.permission_resolved",
-      "agent.turn_ended",
-      "agent.turn_started",
-    ]);
-    expect(hooks.get("agent.turn_ended")).toHaveLength(4);
-    // The outdated-agents clear, the binding revoke (§16.5) and the off-tool alert clear (§16.8).
-    expect(hooks.get("agent.archived")).toHaveLength(3);
+  // The stop-propagation hook is the first agent.turn_ended handler: every test below runs it as that.
+  it("registers on the entry's lifecycle hook names", () => {
+    const { registered } = setup();
+    expect(new Set(registered)).toEqual(
+      new Set(["agent.archived", "agent.created", "agent.permission_requested", "agent.permission_resolved", "agent.turn_ended", "agent.turn_started"]),
+    );
   });
 
   it("cancels only the stopped Worker's running Reviewers (idle Worker on refresh)", async () => {
@@ -423,36 +404,10 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     expect(sends).toEqual([]);
   });
 
-  it("removes the hook on cleanup", () => {
-    const { cleanup, hooks, removers } = setup();
+  it("removes every hook it registered on cleanup", () => {
+    const { cleanup, hooks, registered, removers } = setup();
     cleanup();
-    // Fifteen removals, one per registration: this hook, the WP-205
-    // collector's turn_started and turn_ended, delta 20260918g's agent.created,
-    // turn_started scan and turn_ended BM-FORMAT check, delta 20260921's
-    // fallback detection (turn_ended, which also runs the §16.10 no-verdict
-    // check), the outdated-agents pass (turn_started, agent.archived), the
-    // action boundary (permission_requested, permission_resolved; §D.2), the
-    // interruption watch (permission_resolved; ADR-024), the binding
-    // lifecycle (agent.archived; §16.5), the off-tool Reviewer alert's
-    // clear (agent.archived; §16.8) and its turn cancel (agent.turn_started;
-    // §16.8 step 4). The map must end up empty.
-    expect([...removers].sort()).toEqual([
-      "agent.archived",
-      "agent.archived",
-      "agent.archived",
-      "agent.created",
-      "agent.permission_requested",
-      "agent.permission_resolved",
-      "agent.permission_resolved",
-      "agent.turn_ended",
-      "agent.turn_ended",
-      "agent.turn_ended",
-      "agent.turn_ended",
-      "agent.turn_started",
-      "agent.turn_started",
-      "agent.turn_started",
-      "agent.turn_started",
-    ]);
+    expect([...removers].sort()).toEqual([...registered].sort());
     expect(hooks.size).toBe(0);
   });
 

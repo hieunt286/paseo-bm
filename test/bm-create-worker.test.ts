@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   AGENT_TOOLS_SERVER,
@@ -30,6 +29,8 @@ import { boundToolFacesFor } from "../plugin/shared/bm-tools";
 import { originOf } from "../plugin/shared/message-origin";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
 import { fakePaseo, type FakeCreateRequest } from "./helpers/fake-paseo";
+import { dataFolder, removeDataFolders } from "./helpers/data-folder";
+import { MANAGER_CALLER } from "./helpers/bindings";
 
 /**
  * `bm_create_worker` for a bound Manager (design §16.6; ADR-027 decisions 2
@@ -43,25 +44,13 @@ const WS = "wks_1";
 const MANAGER = "agent-manager";
 const FOLDER = "/work/invoice-app";
 const ROLE_URL = (role: string) => `http://127.0.0.1:4567/mcp/${role}`;
-const roots: string[] = [];
 
 afterEach(() => {
   clearBindingCache();
   clearRequestRegistryCache();
   forgetModes();
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  removeDataFolders();
 });
-
-function dataFolder(): string {
-  const root = mkdtempSync(join(tmpdir(), "bm-create-worker-"));
-  roots.push(root);
-  const home = join(root, ".paseo-bm");
-  mkdirSync(home);
-  return home;
-}
-
-/** The Manager a token path names once its binding is bound. */
-const BOUND_MANAGER: ToolCaller = { agentId: MANAGER, role: "manager", workspaceId: WS, requestId: null, parentId: null, batchId: null };
 
 interface DaemonOptions {
   base?: string;
@@ -131,7 +120,7 @@ describe("bm_create_worker creates the Worker of a new request (design §16.6)",
     const store = createBindingStore(home);
     const fake = daemon({ store });
     const logs: string[] = [];
-    const answer = await toolsOf(home, fake, store, logs).call("bm_create_worker", INPUT, BOUND_MANAGER);
+    const answer = await toolsOf(home, fake, store, logs).call("bm_create_worker", INPUT, MANAGER_CALLER);
 
     expect(answer.ok).toBe(true);
     const { workerId, requestId } = JSON.parse(answer.text) as { workerId: string; requestId: string };
@@ -188,8 +177,8 @@ describe("bm_create_worker creates the Worker of a new request (design §16.6)",
     const store = createBindingStore(home);
     const fake = daemon({ store });
     const tools = toolsOf(home, fake, store);
-    const first = JSON.parse((await tools.call("bm_create_worker", INPUT, BOUND_MANAGER)).text) as { requestId: string };
-    const second = await tools.call("bm_create_worker", { request: "Add a CSV export.", size: null, context: [] }, BOUND_MANAGER);
+    const first = JSON.parse((await tools.call("bm_create_worker", INPUT, MANAGER_CALLER)).text) as { requestId: string };
+    const second = await tools.call("bm_create_worker", { request: "Add a CSV export.", size: null, context: [] }, MANAGER_CALLER);
     expect(second.ok).toBe(true);
     const { requestId } = JSON.parse(second.text) as { requestId: string };
     expect(requestId).not.toBe(first.requestId);
@@ -206,7 +195,7 @@ describe("bm_create_worker creates the Worker of a new request (design §16.6)",
     const home = dataFolder();
     const store = createBindingStore(home);
     const fake = daemon({ base: "pi", store });
-    const answer = await toolsOf(home, fake, store).call("bm_create_worker", INPUT, BOUND_MANAGER);
+    const answer = await toolsOf(home, fake, store).call("bm_create_worker", INPUT, MANAGER_CALLER);
     expect(answer.ok).toBe(true);
     const { workerId, requestId } = JSON.parse(answer.text) as { workerId: string; requestId: string };
     expect(fake.creates[0]!.options.config["mcpServers"]).toBeUndefined();
@@ -228,7 +217,7 @@ describe("bm_create_worker refuses, creating nothing (design §16.6)", () => {
     const store = createBindingStore(home);
     const fake = daemon({ store });
     const tools = toolsOf(home, fake, store);
-    const callers: Array<ToolCaller | null> = [null, { ...BOUND_MANAGER, role: "worker" }];
+    const callers: Array<ToolCaller | null> = [null, { ...MANAGER_CALLER, role: "worker" }];
     for (const caller of callers) expect(await tools.call("bm_create_worker", INPUT, caller)).toEqual({ ok: false, text: NOT_BOUND_MESSAGE });
     nothingCreated(home, fake, store);
   });
@@ -237,7 +226,7 @@ describe("bm_create_worker refuses, creating nothing (design §16.6)", () => {
     const home = dataFolder();
     const store = createBindingStore(home);
     const fake = daemon({ store });
-    expect(await toolsOf(home, fake, store).call("bm_create_worker", INPUT, { ...BOUND_MANAGER, agentId: null })).toEqual({ ok: false, text: PENDING_CALLER_MESSAGE });
+    expect(await toolsOf(home, fake, store).call("bm_create_worker", INPUT, { ...MANAGER_CALLER, agentId: null })).toEqual({ ok: false, text: PENDING_CALLER_MESSAGE });
     expect(PENDING_CALLER_MESSAGE).toMatch(/try again in a moment/);
     nothingCreated(home, fake, store);
   });
@@ -249,7 +238,7 @@ describe("bm_create_worker refuses, creating nothing (design §16.6)", () => {
     const answer = await toolsOf(home, fake, store).call(
       "bm_create_worker",
       { size: "Huge", context: Array.from({ length: 21 }, () => ({ fact: "f", source: "s" })), how: "x" },
-      BOUND_MANAGER,
+      MANAGER_CALLER,
     );
     expect(answer.ok).toBe(false);
     expect(answer.text.split("\n")).toEqual([
@@ -272,7 +261,7 @@ describe("bm_create_worker refuses, creating nothing (design §16.6)", () => {
     const noProfile = daemon({ store, profile: false });
     cases.push([NO_WORKER_PROFILE_MESSAGE, toolsOf(home, noProfile, store), noProfile]);
     for (const [text, tools, fake] of cases) {
-      expect(await tools.call("bm_create_worker", INPUT, BOUND_MANAGER)).toEqual({ ok: false, text });
+      expect(await tools.call("bm_create_worker", INPUT, MANAGER_CALLER)).toEqual({ ok: false, text });
       nothingCreated(home, fake, store);
     }
     // The agent's own refusal, not the fallback Switch's wording (no Settings step, no Switch).
@@ -289,7 +278,7 @@ describe("bm_create_worker refuses, creating nothing (design §16.6)", () => {
     const fake = daemon({ store });
     // A file where the registry's folder goes: the write fails.
     writeFileSync(join(home, REQUESTS_DIR_NAME), "not a folder");
-    const answer = await toolsOf(home, fake, store).call("bm_create_worker", INPUT, BOUND_MANAGER);
+    const answer = await toolsOf(home, fake, store).call("bm_create_worker", INPUT, MANAGER_CALLER);
     expect(answer.ok).toBe(false);
     expect(answer.text).toMatch(/^paseo-bm could not write its request registry \(.+\); nothing was created\. Tell the owner in one line\.$/);
     expect(fake.creates).toEqual([]);
@@ -302,7 +291,7 @@ describe("bm_create_worker refuses, creating nothing (design §16.6)", () => {
     const logs: string[] = [];
     const fake = daemon({ store, refuse: "Provider 'bm-worker' is not available" });
     const tools = toolsOf(home, fake, store, logs);
-    const answer = await tools.call("bm_create_worker", INPUT, BOUND_MANAGER);
+    const answer = await tools.call("bm_create_worker", INPUT, MANAGER_CALLER);
     expect(answer).toEqual({ ok: false, text: "Paseo refused to create the Worker: Provider 'bm-worker' is not available" });
     // It asked with a token, and that binding is gone.
     expect(fake.creates).toHaveLength(1);
@@ -313,7 +302,7 @@ describe("bm_create_worker refuses, creating nothing (design §16.6)", () => {
     expect(fake.agents.map((agent) => agent.id)).toEqual([MANAGER]);
     expect(logs.at(-1)).toBe(`[paseo-bm] bm_create_worker could not create the Worker of request ${kept!.requestId} for Manager ${MANAGER}: Provider 'bm-worker' is not available`);
     // The next call gets another id.
-    await tools.call("bm_create_worker", INPUT, BOUND_MANAGER);
+    await tools.call("bm_create_worker", INPUT, MANAGER_CALLER);
     const ids = createRequestRegistry(home).list(WS).map((entry) => entry.requestId);
     expect(ids).toHaveLength(2);
     expect(new Set(ids).size).toBe(2);
@@ -326,7 +315,7 @@ describe("a token never reaches the agent (design §16.5)", () => {
     const store = createBindingStore(home);
     const logs: string[] = [];
     const fake = daemon({ store, refuseEchoingUrl: true });
-    const answer = await toolsOf(home, fake, store, logs).call("bm_create_worker", INPUT, BOUND_MANAGER);
+    const answer = await toolsOf(home, fake, store, logs).call("bm_create_worker", INPUT, MANAGER_CALLER);
     const token = ((fake.creates[0]!.options.config["mcpServers"] as Record<string, { url: string }>)[AGENT_TOOLS_SERVER]!.url).slice(-64);
     expect(token).toMatch(/^[0-9a-f]{64}$/);
     expect(answer).toEqual({ ok: false, text: `Paseo refused to create the Worker: MCP server ${AGENT_TOOLS_SERVER} (http://127.0.0.1:4567/mcp/worker/…) failed to start` });

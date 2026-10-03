@@ -133,7 +133,7 @@ afterEach(() => {
 });
 
 describe("switch (Manager)", () => {
-  it("binds the replacement Manager to its own tool path, with the creation tools (design §16.5, §16.6)", async () => {
+  it("binds the replacement Manager to its own tool path, with its role's tools (design §16.5, §16.6)", async () => {
     write([incident()]);
     const bindings = createBindingStore(home);
     const roleUrl = (role: string) => `http://127.0.0.1:4567/mcp/${role}`;

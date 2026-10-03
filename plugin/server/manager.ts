@@ -208,7 +208,7 @@ export interface EnsureManagerDeps {
   home?: string | null;
   /**
    * Binds a new Manager to its own tool path when its base provider can take
-   * the tools (design §16.5), with the creation tools (§16.6); the endpoint's
+   * the tools (design §16.5), with its role's tools (§16.6); the endpoint's
    * binder in the plugin, none (unbound) when absent.
    */
   binder?: AgentBinder;

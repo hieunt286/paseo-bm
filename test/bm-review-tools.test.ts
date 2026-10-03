@@ -1,8 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PENDING_CALLER_MESSAGE, PENDING_TTL_MS, clearBindingCache, createBindingStore, type BindingStore, type ToolCaller } from "../plugin/server/agent-bindings";
+import { PENDING_CALLER_MESSAGE, PENDING_TTL_MS, clearBindingCache, createBindingStore, type BindingStore } from "../plugin/server/agent-bindings";
 import { settleCreatedAgent } from "../plugin/server/creation-settle";
 import { answer, binderOf, withAgentTools } from "../plugin/server/agent-tools";
 import { clearDecisionStoreCache } from "../plugin/server/decision-store";
@@ -38,6 +36,8 @@ import { PLUGIN_VERSION } from "../plugin/shared/version";
 import { makeDecision } from "./helpers/decisions";
 import { fakePaseo, type FakeCreateRequest } from "./helpers/fake-paseo";
 import { msg, turn } from "./fixtures/orchestrator-traces";
+import { dataFolder, removeDataFolders } from "./helpers/data-folder";
+import { WORKER_CALLER } from "./helpers/bindings";
 
 /**
  * The enforced review budget (design §16.6, §16.8; ADR-027 decisions 2 and
@@ -54,7 +54,6 @@ const WORKER = "agent-worker";
 const FOLDER = "/work/invoice-app";
 const ROLE_URL = (role: string) => `http://127.0.0.1:4567/mcp/${role}`;
 const T0 = new Date("2026-10-03T10:05:00.000Z");
-const roots: string[] = [];
 
 afterEach(() => {
   clearBindingCache();
@@ -62,18 +61,9 @@ afterEach(() => {
   clearDecisionStoreCache();
   clearTraceStoreCache();
   forgetModes();
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  removeDataFolders();
 });
 
-function dataFolder(): string {
-  const root = mkdtempSync(join(tmpdir(), "bm-review-tools-"));
-  roots.push(root);
-  const home = join(root, ".paseo-bm");
-  mkdirSync(home);
-  return home;
-}
-
-const WORKER_CALLER: ToolCaller = { agentId: WORKER, role: "worker", workspaceId: WS, requestId: REQ, parentId: MANAGER, batchId: null };
 
 interface DaemonOptions {
   toolsOff?: boolean;

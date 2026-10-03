@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -25,6 +24,8 @@ import { workingAgents } from "../plugin/server/orchestrator-tool-context";
 import { CLEANUP_DELETES } from "../plugin/server/setup-machine";
 import { checkBlocks } from "../plugin/shared/bm-format";
 import { TRACE_STORE_SCHEMA_VERSION, type TraceRecord } from "../plugin/shared/contracts";
+import { dataFolder, removeDataFolders } from "./helpers/data-folder";
+import { bindAgent } from "./helpers/bindings";
 
 /**
  * The request registry (design §16.4, ADR-027 decisions 2 and 7): the store,
@@ -36,21 +37,12 @@ import { TRACE_STORE_SCHEMA_VERSION, type TraceRecord } from "../plugin/shared/c
 
 const WS = "wks_1";
 const T0 = new Date("2026-10-03T10:00:00.400Z");
-const roots: string[] = [];
-
-function dataFolder(): string {
-  const root = mkdtempSync(join(tmpdir(), "bm-registry-"));
-  roots.push(root);
-  const home = join(root, ".paseo-bm");
-  mkdirSync(home);
-  return home;
-}
 
 afterEach(() => {
   clearRequestRegistryCache();
   clearBindingCache();
   clearTraceStoreCache();
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  removeDataFolders();
 });
 
 function request(requestId: string, overrides: Partial<RegisteredRequest> = {}): RegisteredRequest {
@@ -96,10 +88,7 @@ function traceRecord(overrides: Partial<TraceRecord>): TraceRecord {
 
 /** Binds `agentId` in the data folder's binding store, as a plugin creation does. */
 function bind(home: string, agentId: string, role: "manager" | "worker" | "reviewer" = "manager"): void {
-  const store = createBindingStore(home);
-  const { token, tokenSha256 } = store.issue({ role, workspaceId: WS });
-  store.attach(token, role);
-  store.settle(tokenSha256, agentId);
+  bindAgent(createBindingStore(home), agentId, { role, workspaceId: WS });
 }
 
 describe("the store (design §16.4)", () => {

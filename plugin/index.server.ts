@@ -266,8 +266,9 @@ export default function contribute(server: PluginServerContext): () => void {
   // check's agent.turn_ended hook and runs after it, so a BM-FORMAT notice sent
   // at the same turn end is never replaced by a queued one.
   const noticeQueue = registerNoticeQueue(server);
-  // delta 20260918g §4.7: the sender of a BM-* block that breaks its template is told (BM-FORMAT).
-  const removeFormatCheck = registerFormatCheck(noticeQueue.host);
+  // delta 20260918g §4.7: the sender of a BM-* block that breaks its template is told (BM-FORMAT);
+  // a bound sender's tool-built block is never checked (design §16.7).
+  const removeFormatCheck = registerFormatCheck(noticeQueue.host, undefined, () => agentTools.bindings);
   // delta 20260917c §4.7: the plugin counts the review budget and tells the
   // Manager once per request; it never stops an agent.
   // Kept on disk (delta: diagnosis 2026-09-23 fault L5): a reload used to wipe
@@ -317,7 +318,7 @@ export default function contribute(server: PluginServerContext): () => void {
   // (§4.5.2); for a Reviewer it tells the Worker how to create the
   // replacement itself (§4.5.1).
   const switches: Record<FallbackIncident["role"], FallbackAction> = {
-    // Design §16.5, §16.6: a replacement Worker or Manager is bound to its own tool path, with the creation tools.
+    // Design §16.5, §16.6: a replacement Worker or Manager is bound to its own tool path, with its delivering and creating tools.
     worker: createWorkerSwitch({ binder: agentTools.binder }),
     // Design §16.9: a bound Worker's replacement Reviewer is created by the plugin, bound by the endpoint's binder.
     reviewer: createReviewerSwitch({ binder: agentTools.binder, bindings: () => agentTools.bindings }),

@@ -45,6 +45,7 @@ import { HANDOFF_NOTICE_MARKER, REPLACED_NOTICE_MARKER, isPluginNotice } from ".
 import { COORDINATION_HANDOFF_AUTHORITY, parseCommandBlock } from "../plugin/shared/orchestrator-command";
 import { fakePaseo, type FakeCreateRequest, type FakePaseo, type FakePaseoOptions } from "./helpers/fake-paseo";
 import { MANAGER, REVIEWER, WORKER, WORKSPACE_ID, msg, report, turn } from "./fixtures/orchestrator-traces";
+import { bindAgent } from "./helpers/bindings";
 
 /**
  * Handoff through the Manager (autonomy design §G.6; PRD REQ-135; change-008
@@ -534,9 +535,7 @@ describe("a bound Manager: the plugin creates the successor, the Manager is info
 
   /** The Manager's binding as `manager.ensure` leaves it: issued, attached, bound. */
   function bindManager(bindings: BindingStore): void {
-    const { token, tokenSha256 } = bindings.issue({ role: "manager", workspaceId: WORKSPACE_ID });
-    bindings.attach(token, "manager");
-    bindings.settle(tokenSha256, MANAGER);
+    bindAgent(bindings, MANAGER, { role: "manager", workspaceId: WORKSPACE_ID });
   }
 
   /** The daemon with a bm-worker profile on Claude; each creation runs the hook's part that keeps the token URL. */
@@ -650,7 +649,7 @@ describe("a bound Manager: the plugin creates the successor, the Manager is info
     expect(prompt.split("\n").slice(0, 2)).toEqual([`BM-BRIEF worker requestId: ${REQUEST}`, `${HANDOFF_BRIEF_MARKER} ${entry!.id}`]);
     expect(prompt).toBe(`BM-BRIEF worker requestId: ${REQUEST}\n${entry!.brief}`);
     expect(originOf({ text: prompt, clientMessageId: "m-1" })).toBe("plugin-prompt");
-    // A bound token, with the creation tools.
+    // A bound token.
     expect(bindings.bindingOfAgent(successorId)).toMatchObject({ role: "worker", state: "bound", requestId: REQUEST, parentId: MANAGER });
 
     // The request keeps its id and its Manager; the successor is its newest Worker.
@@ -848,10 +847,7 @@ describe("a bound Manager: the plugin creates the successor, the Manager is info
 describe("the note request follows the outgoing Worker's binding (design §16.7)", () => {
   /** The Worker's binding as `bm_create_worker` leaves it: issued, attached, bound. */
   function bindWorker(): void {
-    const bindings = createBindingStore(home);
-    const { token, tokenSha256 } = bindings.issue({ role: "worker", workspaceId: WORKSPACE_ID, requestId: REQUEST, parentId: MANAGER });
-    bindings.attach(token, "worker");
-    bindings.settle(tokenSha256, WORKER);
+    bindAgent(createBindingStore(home), WORKER, { role: "worker", workspaceId: WORKSPACE_ID, requestId: REQUEST, parentId: MANAGER });
   }
 
   it("a bound Worker is asked to call bm_report, which stores and delivers the note", async () => {

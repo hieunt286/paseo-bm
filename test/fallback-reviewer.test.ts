@@ -18,6 +18,7 @@ import { ROLE_FALLBACK_STATE_FILE } from "../plugin/server/fallback-state";
 import { forgetModes } from "../plugin/server/role-mode";
 import type { FallbackIncident } from "../plugin/shared/contracts";
 import { fakePaseo, type FakeCreateRequest } from "./helpers/fake-paseo";
+import { bindAgent } from "./helpers/bindings";
 
 /**
  * Delta 20260921 §4.5.1 (REQ-066 b): a stopped Reviewer is replaced by its
@@ -246,14 +247,10 @@ describe("Switch for a bound Worker's Reviewer (design §16.9)", () => {
     clearRequestRegistryCache();
   });
 
-  /** The Worker bound with the creation tools, and the batch its Reviewer `OLD` was created for. */
+  /** The bound Worker, and the batch its Reviewer `OLD` was created for. */
   function boundWorld(options: { bindWorker?: boolean } = {}) {
     const store = createBindingStore(home);
-    if (options.bindWorker !== false) {
-      const { token, tokenSha256 } = store.issue({ role: "worker", workspaceId: "wks_1", requestId: REQ, parentId: MANAGER });
-      store.attach(token, "worker");
-      store.settle(tokenSha256, WORKER);
-    }
+    if (options.bindWorker !== false) bindAgent(store, WORKER, { role: "worker", workspaceId: "wks_1", requestId: REQ, parentId: MANAGER });
     const registry = createRequestRegistry(home, { backfill: () => [] });
     registry.register("wks_1", REQ, { source: "tool", managerId: MANAGER, workerId: WORKER });
     registry.addReviewCall("wks_1", REQ, "b1", { callId: CALL, kind: "create", reviewerId: "", at: "2026-09-22T04:50:00.000Z" }, BRIEF);

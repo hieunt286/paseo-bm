@@ -107,8 +107,8 @@ export function reviewCeilingOf(budget: number, granted: number): number {
 
 /**
  * True when `calls` review calls are past the ceiling once the `exempt` ones
- * are left out — the calls of batches whose `{ untilClean }` grant is still
- * live (design §16.8; `ruleReviewGrantOf` in `server/review-tools.ts`). The one
+ * are left out — the calls of every batch an `{ untilClean }` grant covers,
+ * live or spent (design §16.8; `ruleReviewGrantOf` in `server/review-tools.ts`). The one
  * comparison the review tools (of the calls after one more), this rule and
  * the Manager's budget notice (`overrunOf`) all make.
  */
