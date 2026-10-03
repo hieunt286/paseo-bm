@@ -97,6 +97,26 @@ export function isProcessDocumentPath(path: string): boolean {
 
 // ── review.over-budget ──────────────────────────────────────────────────────
 
+/**
+ * A request's review ceiling (design §16.8): the owner's budget for its tier
+ * plus the calls the request's review-budget grants added. The review tools
+ * (`server/review-tools.ts`) refuse past it and this rule flags past it, with
+ * this one function.
+ */
+export function reviewCeilingOf(budget: number, granted: number): number {
+  return budget + granted;
+}
+
+/**
+ * True when `calls` review calls are past the ceiling — unless a live
+ * `{ untilClean }` grant covers the batch (design §16.8): its calls are counted
+ * but never over budget. The review tools ask it of one more call; this rule
+ * asks it of the calls made.
+ */
+export function overReviewCeiling(calls: number, ceiling: number, untilClean: boolean): boolean {
+  return !untilClean && calls > ceiling;
+}
+
 /** A message a Reviewer received that is not a review call (`reviewCallsOf` in `server/traces.ts`). */
 const REVIEW_BLOCK = /^\s*>?\s*(?:[-*]\s*)?bm-review\b/im;
 
@@ -107,9 +127,12 @@ function overBudget(input: RuleInput, facts: RuleFacts): Flag | null {
     .filter((message) => message.role === "reviewer" && !isPluginNotice(message.text) && !REVIEW_BLOCK.test(message.text))
     .map((message) => ({ agentId: message.agentId, at: message.at, kind: "sent", excerpt: message.text }));
   const why = "Review calls past the tier's budget cost time and tokens the size of the request does not justify.";
+  // Design §16.8: the request's grants raise its ceiling, and a live untilClean grant lifts it.
+  const granted = input.reviewGrant?.calls ?? 0;
+  const untilClean = input.reviewGrant?.untilClean ?? false;
   if (input.tier === null) {
     const smallest = Math.min(...Object.values(facts.reviewBudget));
-    if (calls <= smallest) return null;
+    if (!overReviewCeiling(calls, reviewCeilingOf(smallest, granted), untilClean)) return null;
     return flag(
       "review.over-budget",
       "warning",
@@ -120,12 +143,13 @@ function overBudget(input: RuleInput, facts: RuleFacts): Flag | null {
     );
   }
   const budget = facts.reviewBudget[input.tier];
-  if (calls <= budget) return null;
+  if (!overReviewCeiling(calls, reviewCeilingOf(budget, granted), untilClean)) return null;
+  const over = granted > 0 ? `over its budget of ${budget} plus ${granted} granted` : `over its budget of ${budget}`;
   return flag(
     "review.over-budget",
     "warning",
     "raised",
-    `The ${input.tier} request made ${plural(calls, "review call")}, over its budget of ${budget}.`,
+    `The ${input.tier} request made ${plural(calls, "review call")}, ${over}.`,
     why,
     evidence,
   );

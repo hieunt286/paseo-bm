@@ -253,6 +253,8 @@ export const ALERT_WORDS: Readonly<Record<AlertKind, { what: string; tone: Tone;
   "fallback-failed": { what: "A fallback action failed; the agent is still stopped", tone: "danger", opens: "project", agentWord: "" },
   // Design §16.7: a report, review or message an agent's tool stored never reached its target; the record is in the detail.
   "delivery-dropped": { what: "A report or message could not be delivered", tone: "warning", opens: "project", agentWord: "" },
+  // Design §16.8: a bound Worker created a Reviewer with create_agent; its Worker and request are in the detail.
+  "off-tool-reviewer": { what: "A Worker created a Reviewer outside its tools", tone: "warning", opens: "agent", agentWord: "Reviewer" },
   // Autonomy design §G.3, §G.7: `coordinationOffWhat` names the mechanism.
   "coordination-off": { what: "Compaction or handoff was switched off: below its target", tone: "warning", opens: null, agentWord: "" },
   // Autonomy design §D.2 (change-010 C6): a Worker or Reviewer only watched in a project whose boundary is on.
@@ -565,6 +567,7 @@ const SIGNAL_REASON: Readonly<Record<WorkerSignal, string>> = {
   failing: "The Worker's command kept failing",
   heavy: "The Worker used heavy process for small work",
   outside: "The Worker edited outside the project",
+  "off-tool-review": "The Worker created a Reviewer outside its tools",
 };
 
 /** What set an intervention off (its trigger), as the start of its reason. */

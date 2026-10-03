@@ -28,7 +28,7 @@ import { createBound, guardActingTool, hasCreationTools, type AgentBinder, type 
 import { aliasBases } from "./alias-bases";
 import { resolveDataHome } from "./data-home";
 import type { ServerToolAnswer, ServerTools } from "./decision-tools";
-import { AGENT_TOOLS_OFF_SWITCH_MESSAGE, agentToolsOff } from "./manager";
+import { AGENT_TOOLS_OFF_TOOL_MESSAGE, agentToolsOff } from "./manager";
 import { listedWorkspaces, type DashboardPaseo } from "./paseo-directory";
 import { createRequestRegistry } from "./request-registry";
 import { asRecord, nonEmpty, reasonOf } from "./role-choices";
@@ -250,7 +250,7 @@ export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerT
     const paseo = deps.paseo();
     if (paseo === null || paseo === undefined) return refused(NO_PASEO_MESSAGE);
     // A Worker gets Paseo's tools only when it is created: one made now could not create a Reviewer.
-    if (await agentToolsOff(paseo)) return refused(AGENT_TOOLS_OFF_SWITCH_MESSAGE);
+    if (await agentToolsOff(paseo)) return refused(AGENT_TOOLS_OFF_TOOL_MESSAGE);
     const profile = await workerProfileOf(paseo, log);
     if (profile === null) return refused(NO_WORKER_PROFILE_MESSAGE);
     // The Manager's own folder, read from Paseo — never a folder the agent typed.

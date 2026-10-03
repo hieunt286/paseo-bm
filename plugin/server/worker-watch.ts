@@ -46,6 +46,10 @@
  *   allowance for 10 minutes (`openDangerAllowance`): the only time the
  *   Orchestrator may interrupt it (design §6B.4). The plugin itself never
  *   interrupts anyone.
+ * - **`off-tool-review`** is the seventh signal, not the pass's: a bound
+ *   Worker created a Reviewer outside its tools (design §16.8,
+ *   `off-tool-reviewer.ts` raises it with its `off-tool-reviewer` alert at the
+ *   Reviewer's creation). No pass raises or clears it.
  * - **Events only to the Orchestrator**, through the event bus: batched, never
  *   into a running turn, dropped when settled before delivery. Nothing is ever
  *   sent to the owner, a Manager, a Worker or a Reviewer here.
@@ -99,6 +103,9 @@ export const SIGNAL_ALERT_KINDS: Readonly<Partial<Record<WorkerSignal, AlertKind
   stuck: "stuck",
   permission: "permission-waiting",
   danger: "danger",
+  // Design §16.8: raised with its alert at the off-tool Reviewer's creation (`off-tool-reviewer.ts`), never
+  // by a pass; the alert is about the Reviewer and outlives the Worker's turn (not in WORKER_ALERT_KINDS).
+  "off-tool-review": "off-tool-reviewer",
 };
 
 /** The alert kinds a Worker's signals raise. */

@@ -19,6 +19,9 @@ import { createReviewerResend, createReviewerSwitch } from "./server/fallback-re
 import type { FallbackAction } from "./server/fallback-rpc";
 import { createWorkerSwitch } from "./server/fallback-switch";
 import { createFallbackWaiter } from "./server/fallback-wait";
+import { checkNoVerdict } from "./server/no-verdict";
+import { checkOffToolReviewer, registerOffToolAlertClear } from "./server/off-tool-reviewer";
+import { applyReviewBudgetGrants } from "./server/review-tools";
 import { createBudgetTold } from "./server/budget-told";
 import { registerFormatCheck } from "./server/format-check";
 import { registerNoticeQueue } from "./server/notice-queue";
@@ -240,6 +243,13 @@ export default function contribute(server: PluginServerContext): () => void {
     async (agent, paseo) => {
       // Design §16.4: the request of a new Worker an unbound Manager created is registered at first sight.
       await sightCreatedWorker(agent, paseo);
+      // Design §16.8: a Reviewer a bound Worker created outside its tools is an Inbox alert and an
+      // off-tool-review signal. Bead bm-agent-tools-1upv.16 adds its cancel (the `cancel` hook point).
+      await checkOffToolReviewer(agent, paseo, {
+        home: dataHome(),
+        bindings: agentTools.bindings,
+        publish: (events, handle) => eventBus.publish(events, handle),
+      });
       return handoffs.agentCreated(agent, paseo);
     },
   );
@@ -272,7 +282,18 @@ export default function contribute(server: PluginServerContext): () => void {
     syncFallbackDecisionsOnce();
     shareHandle(paseo);
   };
-  const removeFallbackDetection = registerFallbackDetection(server, { onPaseo: armWaits });
+  const removeFallbackDetection = registerFallbackDetection(server, {
+    onPaseo: armWaits,
+    // Design §16.10: once the fallback detection of a bound Reviewer's turn ran, a turn without a
+    // verdict sends its Worker one no-verdict delivery per review call.
+    afterDetection: async (event, { paseo, classified }) => {
+      const home = dataHome();
+      if (home === null || paseo === undefined) return undefined;
+      return checkNoVerdict(event, { home, paseo, bindings: agentTools.bindings, classified });
+    },
+  });
+  // Design §16.8: an archived off-tool Reviewer's alert is cleared.
+  const removeOffToolAlertClear = registerOffToolAlertClear(server, () => dataHome());
   // delta 20260921 §4.4.6: fallback.incidents and fallback.act; a new pending
   // incident becomes the owner's decision f:<incidentId> (autonomy design §A.5 d).
   // "Switch": the plugin creates a replacement Worker (§4.4.7) or Manager
@@ -281,7 +302,8 @@ export default function contribute(server: PluginServerContext): () => void {
   const switches: Record<FallbackIncident["role"], FallbackAction> = {
     // Design §16.5, §16.6: a replacement Worker or Manager is bound to its own tool path, with the creation tools.
     worker: createWorkerSwitch({ binder: agentTools.binder }),
-    reviewer: createReviewerSwitch(),
+    // Design §16.9: a bound Worker's replacement Reviewer is created by the plugin, bound by the endpoint's binder.
+    reviewer: createReviewerSwitch({ binder: agentTools.binder, bindings: () => agentTools.bindings }),
     manager: createManagerSwitch({ binder: agentTools.binder }),
   };
   const switchByRole: FallbackAction = (incident, paseo, deps) => switches[incident.role](incident, paseo, deps);
@@ -321,7 +343,12 @@ export default function contribute(server: PluginServerContext): () => void {
     // Autonomy design §D.2: the owner's Allow or Deny of a held request answers it, exactly once.
     held: actionBoundary.onSettled,
   });
-  const onDecisionsSettled: OnDecisionsSettled = deliverSettled;
+  // Design §16.8: an answered review-budget decision — by the owner, or by the policy where cost is
+  // delegated (bm_decide) — grants its chosen option's review calls before its answer is delivered.
+  const onDecisionsSettled: OnDecisionsSettled = (decisions, context) => {
+    applyReviewBudgetGrants(decisions);
+    return deliverSettled(decisions, context);
+  };
   registerDecisionRpcs(server, { onSettled: onDecisionsSettled });
   // Change-014 outcome 3 (Ask back): the owner asks the asker of an open q:/o: decision; the BM-ASK
   // notice goes through the notice queue, the asker replies with bm_reply (or BM-REPLY in its chat).
@@ -429,6 +456,7 @@ export default function contribute(server: PluginServerContext): () => void {
     removeFormatCheck();
     noticeQueue.remove();
     removeFallbackDetection();
+    removeOffToolAlertClear();
     removeFallbackRpcs();
     fallbackWaiter.clear();
     removeCollector();

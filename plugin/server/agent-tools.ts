@@ -55,7 +55,8 @@
  * same name: its `bm_report`, `bm_review` and `bm_answers` store and deliver
  * (or propose), and it has `bm_questions` (Worker) and `bm_tell_worker`
  * (Manager). Every other caller of those builder names still gets the pure
- * builder, with its send line.
+ * builder, with its send line. A Worker bound with them also has
+ * `bm_create_reviewer` and `bm_rereview` (`review-tools.ts`, design §16.8).
  *
  * Nothing here throws into the plugin: a failure is one log line and no tools.
  */
@@ -83,6 +84,7 @@ import { createManagerTools, type ServerTools } from "./decision-tools";
 import { createOrchestratorTools, type OrchestratorTools } from "./orchestrator-tools";
 import { createWorkerTools } from "./decision-ask";
 import { createDeliveringTools, type DeliveringTools } from "./deliver-tools";
+import { createReviewTools } from "./review-tools";
 import { currentTurnStartOf } from "./collector";
 import type { Decision } from "../shared/decisions";
 import { assertNoSymlinkOnPath, ensureStoreDir, writeStoreFileAtomically } from "./trace-store";
@@ -534,6 +536,12 @@ export interface StartOptions {
    * Paseo handle and data folder by default.
    */
   delivering?: DeliveringTools;
+  /**
+   * The bound Worker's review tools (design §16.6, §16.8: `bm_create_reviewer`,
+   * `bm_rereview`), served beside its others; `createReviewTools` with this
+   * endpoint's binder, Paseo handle and data folder by default.
+   */
+  reviewTools?: ServerTools;
   /** Decisions a bound Worker's `bm_questions` opened: their `decision.opened` events (the event bus). */
   onDecisionsOpened?: (opened: readonly Decision[], paseo: unknown) => unknown;
   /** The per-agent bindings; the data folder's `ui/agent-bindings.json` by default (design §16.5). */
@@ -649,7 +657,10 @@ export function startAgentTools(options: StartOptions = {}): AgentToolsEndpoint 
     ),
     delivering.manager,
   );
-  const worker = joinServerTools(baseWorker, delivering.worker);
+  const worker = joinServerTools(
+    joinServerTools(baseWorker, delivering.worker),
+    options.reviewTools ?? createReviewTools({ binder: () => binder, paseo: () => paseoHandle, home: () => home, log }),
+  );
   const reviewer = delivering.reviewer;
   const server = createServer((request, response) => {
     handle(request, response, { secret, orchestrator, manager, worker, reviewer, bindings, log }).catch(() => send(response, 500));

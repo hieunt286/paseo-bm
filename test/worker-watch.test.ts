@@ -7,6 +7,8 @@ import { isPluginNotice } from "../plugin/server/notices";
 import { ORCHESTRATOR_INSTRUCTIONS_HASH } from "../plugin/server/orchestrator-agent";
 import { createOrchestratorStore } from "../plugin/server/orchestrator-store";
 import { createAlertStore } from "../plugin/server/alert-store";
+import { createBindingStore } from "../plugin/server/agent-bindings";
+import { checkOffToolReviewer } from "../plugin/server/off-tool-reviewer";
 import { createAutonomyStore } from "../plugin/server/autonomy-store";
 import { createEventBus } from "../plugin/server/event-bus";
 import { STALL_PASS_MS, createStallWatcher, type StallWatcher, type StallWatcherDeps } from "../plugin/server/stall-watcher";
@@ -18,6 +20,7 @@ import {
   WORKER_PASS_MS,
   WORKER_TAIL_ENTRIES,
   SIGNAL_ALERT_KINDS,
+  clearWorkerTurnSignals,
   dangerOfCommand,
   pendingCallIdsOf,
   workerSignalsOf,
@@ -999,5 +1002,38 @@ describe("the action boundary's held requests in the watch (§D.2, change-009 C7
     })();
     await watch.workerPass();
     expect(scanned).toEqual([fake.paseo]);
+  });
+});
+
+// Design §16.8: the off-tool-review signal is raised at an off-tool Reviewer's creation, not by a pass.
+describe("the off-tool-review signal (design §16.8)", () => {
+  it("reaches the Orchestrator as a worker.signal line in scope; its alert is about the Reviewer and neither a pass nor the Worker's turn end clears it", async () => {
+    await seed();
+    inScope();
+    const bindings = createBindingStore(home);
+    const { token, tokenSha256 } = bindings.issue({ role: "worker", workspaceId: WORKSPACE_ID, requestId: REQUEST_ID, parentId: MANAGER, creationTools: true });
+    bindings.attach(token, "worker");
+    bindings.settle(tokenSha256, WORKER);
+    const { fake, watch } = watching([managerAgent(), workerAgent(), orchestratorAgent()]);
+    const bus = createEventBus({ ...deps, queue });
+    bus.usePaseo(fake.paseo);
+
+    const finding = await checkOffToolReviewer({ id: "rev-off", provider: "bm-reviewer/gpt-5.6", parentAgentId: WORKER, workspaceId: WORKSPACE_ID }, fake.paseo, {
+      home,
+      bindings,
+      now: () => clock,
+      log: () => {},
+      publish: (events, handle) => bus.publish(events, handle),
+    });
+    expect(finding).toMatchObject({ reviewerId: "rev-off", workerId: WORKER, requestId: REQUEST_ID });
+    expect(SIGNAL_ALERT_KINDS["off-tool-review"]).toBe("off-tool-reviewer");
+    expect(eventLines(fake.sends)).toEqual([
+      expect.stringMatching(new RegExp(`^- worker\\.signal off-tool-review — project ${WORKSPACE_ID}, Worker ${WORKER}, request ${REQUEST_ID}, since \\S+\\. Look with bm_agent_messages\\.`)),
+    ]);
+
+    const key = alertKeyOf("off-tool-reviewer", WORKSPACE_ID, "rev-off");
+    await watch.workerPass();
+    expect(clearWorkerTurnSignals(home, WORKER)).toEqual([]);
+    expect(alerts().isOpen(key)).toBe(true);
   });
 });

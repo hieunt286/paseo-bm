@@ -410,6 +410,15 @@ export const AGENT_TOOLS_OFF_SWITCH_MESSAGE =
   'Press "Allow agent tools…" in Settings → Agents, then choose Switch again.';
 
 /**
+ * The refusal an agent reads from a creating tool (`bm_create_worker`,
+ * `bm_create_reviewer`) while Paseo's agent tools are off: an agent created
+ * now would never get them. Unlike `AGENT_TOOLS_OFF_SWITCH_MESSAGE` it names no
+ * Settings step and no Switch — the owner, not the agent, turns them on.
+ */
+export const AGENT_TOOLS_OFF_TOOL_MESSAGE =
+  "paseo-bm cannot create agents while Paseo's agent tools are off; nothing was created. Tell the owner in one line and stop.";
+
+/**
  * True only when Paseo says the switch is off; a config it cannot read says
  * nothing. `=== false` on purpose: the SDK view always holds a boolean (a
  * missing key reads `false`, design §5.3), so an absent value means the view

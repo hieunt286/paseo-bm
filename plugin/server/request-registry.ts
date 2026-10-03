@@ -194,7 +194,45 @@ export interface RequestRegistry {
    * registered. Throws when the file cannot be written.
    */
   noteReport(workspaceId: string, requestId: string, report: { tier: "Small" | "Medium" | "Large"; phase: string; at: string }): boolean;
+  /**
+   * Records one review call (design §16.8), in one write: `bm_create_reviewer`
+   * opens the batch with its brief (`kind: create`, refused with
+   * `"batch-taken"` when the batch already has a Reviewer or a creation call);
+   * `bm_rereview` adds to an existing batch (`"no-batch"` otherwise). The call
+   * is written BEFORE the tool creates or sends. Throws when the file cannot
+   * be written.
+   */
+  addReviewCall(
+    workspaceId: string,
+    requestId: string,
+    batchId: string,
+    call: ReviewCall,
+    brief?: string,
+  ): "added" | "no-request" | "no-batch" | "batch-taken";
+  /**
+   * A failed creation or send removes its call (design §16.8); a batch left
+   * with neither a call nor a Reviewer goes with it. Throws when the file
+   * cannot be written.
+   */
+  removeReviewCall(workspaceId: string, requestId: string, callId: string): boolean;
+  /**
+   * The Reviewer a creation call made: set on the call and appended to its
+   * batch's Reviewers (newest last). Throws when the file cannot be written.
+   */
+  noteReviewer(workspaceId: string, requestId: string, batchId: string, reviewerId: string, callId?: string | null): boolean;
+  /**
+   * Appends an answered `review-budget` decision's grant (design §16.8), once
+   * per decision. Throws when the file cannot be written.
+   */
+  addGrant(workspaceId: string, requestId: string, grant: ReviewBudgetGrant): "added" | "known" | "no-request";
 }
+
+/** One review call the registry holds (design §16.4). */
+export type ReviewCall = z.infer<typeof reviewCallSchema>;
+/** One review batch of a request (design §16.4). */
+export type ReviewBatch = RegisteredRequest["reviews"]["batches"][number];
+/** One grant of a `review-budget` decision (design §16.4, §16.8). */
+export type ReviewBudgetGrant = RegisteredRequest["reviews"]["grants"][number];
 
 /**
  * The registry's default drop guard (§16.4): a request with a `pending` or
@@ -355,7 +393,94 @@ export function createRequestRegistry(home: string, deps: RequestRegistryDeps = 
       });
       return found;
     },
+    addReviewCall(workspaceId, requestId, batchId, call, brief) {
+      let outcome: "added" | "no-request" | "no-batch" | "batch-taken" = "no-request";
+      update(workspaceId, (requests) =>
+        withRequest(requests, requestId, (request) => {
+          const batches = request.reviews.batches;
+          const index = batches.findIndex((batch) => batch.batchId === batchId);
+          const batch = index === -1 ? null : batches[index]!;
+          if (call.kind === "create") {
+            if (batch !== null && (batch.reviewerIds.length > 0 || batch.calls.some((entry) => entry.kind === "create"))) {
+              outcome = "batch-taken";
+              return null;
+            }
+            const opened = { batchId, reviewerIds: batch?.reviewerIds ?? [], brief: brief ?? batch?.brief ?? "", calls: [...(batch?.calls ?? []), call] };
+            outcome = "added";
+            return { ...request, reviews: { ...request.reviews, batches: batch === null ? [...batches, opened] : batches.map((entry, at) => (at === index ? opened : entry)) } };
+          }
+          if (batch === null) {
+            outcome = "no-batch";
+            return null;
+          }
+          outcome = "added";
+          return { ...request, reviews: { ...request.reviews, batches: batches.map((entry, at) => (at === index ? { ...entry, calls: [...entry.calls, call] } : entry)) } };
+        }),
+      );
+      return outcome;
+    },
+    removeReviewCall(workspaceId, requestId, callId) {
+      let removed = false;
+      update(workspaceId, (requests) =>
+        withRequest(requests, requestId, (request) => {
+          const batches = request.reviews.batches
+            .map((batch) => {
+              const calls = batch.calls.filter((call) => call.callId !== callId);
+              if (calls.length !== batch.calls.length) removed = true;
+              return { ...batch, calls };
+            })
+            // A batch whose only call failed was never opened.
+            .filter((batch) => batch.calls.length > 0 || batch.reviewerIds.length > 0);
+          return removed ? { ...request, reviews: { ...request.reviews, batches } } : null;
+        }),
+      );
+      return removed;
+    },
+    noteReviewer(workspaceId, requestId, batchId, reviewerId, callId = null) {
+      let noted = false;
+      update(workspaceId, (requests) =>
+        withRequest(requests, requestId, (request) => {
+          const index = request.reviews.batches.findIndex((batch) => batch.batchId === batchId);
+          if (index === -1) return null;
+          noted = true;
+          const batch = request.reviews.batches[index]!;
+          const next = {
+            ...batch,
+            reviewerIds: batch.reviewerIds.includes(reviewerId) ? batch.reviewerIds : [...batch.reviewerIds, reviewerId],
+            calls: batch.calls.map((call) => (callId !== null && call.callId === callId ? { ...call, reviewerId } : call)),
+          };
+          return { ...request, reviews: { ...request.reviews, batches: request.reviews.batches.map((entry, at) => (at === index ? next : entry)) } };
+        }),
+      );
+      return noted;
+    },
+    addGrant(workspaceId, requestId, grant) {
+      let outcome: "added" | "known" | "no-request" = "no-request";
+      update(workspaceId, (requests) =>
+        withRequest(requests, requestId, (request) => {
+          if (request.reviews.grants.some((entry) => entry.decisionId === grant.decisionId)) {
+            outcome = "known";
+            return null;
+          }
+          outcome = "added";
+          return { ...request, reviews: { ...request.reviews, grants: [...request.reviews.grants, grant] } };
+        }),
+      );
+      return outcome;
+    },
   };
+}
+
+/** `requests` with `requestId`'s entry changed by `change` (null: nothing to write), or null when it is not registered. */
+function withRequest(
+  requests: RegisteredRequest[],
+  requestId: string,
+  change: (request: RegisteredRequest) => RegisteredRequest | null,
+): RegisteredRequest[] | null {
+  const index = requests.findIndex((request) => request.requestId === requestId);
+  if (index === -1) return null;
+  const next = change(requests[index]!);
+  return next === null ? null : requests.map((request, at) => (at === index ? next : request));
 }
 
 // ---------------------------------------------------------------------------

@@ -1385,6 +1385,79 @@ export const TELL_WORKER_FACE: ToolFace = {
   },
 };
 
+/** The bounds of `bm_create_reviewer` and `bm_rereview` (design §16.6). */
+export const REVIEW_TOOL_LIMITS = { scope: 4_000, checks: 8_000, fixed: 4_000, stages: 3 } as const;
+/** The stages a Reviewer can be asked to review (design §16.6). */
+export const REVIEW_STAGES = ["implementation", "plan", "beads", "documents"] as const;
+export type ReviewStage = (typeof REVIEW_STAGES)[number];
+
+/** What `bm_create_reviewer` takes (design §16.6). */
+export interface CreateReviewerInput {
+  batchId: string;
+  stages: ReviewStage[];
+  scope: string;
+  checks?: string;
+}
+
+/** `bm_create_reviewer`'s face (design §16.6): a bound Worker creates the Reviewer of one batch, within its request's review budget. */
+export const CREATE_REVIEWER_FACE: ToolFace = {
+  name: "bm_create_reviewer",
+  role: "worker",
+  description:
+    "Create the Reviewer of one new batch of your request: paseo-bm checks your request's review budget, creates the Reviewer in your folder with its labels, mode and tools, and gives it its first prompt — the stages, the scope and the checks you ran. Its verdict reaches you as a delivery; you do not wait on it. Send your received report first. Refused, creating nothing, when the batch already has a Reviewer (use bm_rereview) or the budget is reached (ask the owner with bm_questions, subject review-budget). Returns JSON { reviewerId, batchId, reviewCalls }. " +
+    DELIVERED,
+  inputSchema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["batchId", "stages", "scope"],
+    properties: {
+      batchId: { ...BATCH_ID, description: "The new batch: b1, b2, … in order." },
+      stages: {
+        type: "array",
+        minItems: 1,
+        maxItems: REVIEW_TOOL_LIMITS.stages,
+        items: { type: "string", enum: REVIEW_STAGES },
+        description: "What the Reviewer reviews in this batch: implementation, plan, beads, documents (one to three).",
+      },
+      scope: { type: "string", minLength: 1, maxLength: REVIEW_TOOL_LIMITS.scope, description: "What to review: the files, beads or documents, and the commit or diff." },
+      checks: {
+        type: "string",
+        minLength: 1,
+        maxLength: REVIEW_TOOL_LIMITS.checks,
+        description: "Required with implementation: the checks you ran and their result.",
+      },
+    },
+  },
+};
+
+/** What the schema cannot say about `bm_create_reviewer` (design §16.6); one line per problem. Pure. */
+export function createReviewerRules(input: CreateReviewerInput): string[] {
+  const out: string[] = [];
+  if (new Set(input.stages).size !== input.stages.length) out.push("input.stages: name each stage once");
+  if (input.stages.includes("implementation") && (input.checks === undefined || input.checks.trim() === "")) {
+    out.push("input.checks: an implementation review needs the checks you ran and their result");
+  }
+  return out;
+}
+
+/** `bm_rereview`'s face (design §16.6): the batch's one re-review, within the review budget. */
+export const REREVIEW_FACE: ToolFace = {
+  name: "bm_rereview",
+  role: "worker",
+  description:
+    "Ask a batch's Reviewer to check your fixes: paseo-bm delivers the re-review to that batch's Reviewer at its next idle moment, within your request's review budget. One re-review per batch unless the owner granted more. Returns JSON { reviewerId, delivery, reviewCalls }. " +
+    DELIVERED,
+  inputSchema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["batchId", "fixed"],
+    properties: {
+      batchId: { ...BATCH_ID, description: "The batch bm_create_reviewer opened." },
+      fixed: { type: "string", minLength: 1, maxLength: REVIEW_TOOL_LIMITS.fixed, description: "How each blocking finding was fixed." },
+    },
+  },
+};
+
 /**
  * The tools only a bound agent issued the creation tools has (design §16.6,
  * ADR-027 ship point C), run on the plugin server: they create agents, or
@@ -1427,6 +1500,8 @@ export const BOUND_SERVER_TOOLS: readonly ToolFace[] = [
   BOUND_ANSWERS_TOOL,
   BOUND_REPORT_TOOL,
   QUESTIONS_FACE,
+  CREATE_REVIEWER_FACE,
+  REREVIEW_FACE,
   BOUND_REVIEW_TOOL,
 ];
 

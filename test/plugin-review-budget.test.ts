@@ -22,6 +22,8 @@ import { createCoordinationStore } from "../plugin/server/coordination-store";
 import { readReviewBudget } from "../plugin/server/coordination-rpc";
 import { ruleInputOf } from "../plugin/server/request-trace";
 import { flagsOf } from "../plugin/shared/orchestrator-rules";
+import { createRequestRegistry } from "../plugin/server/request-registry";
+import { reviewerBriefLineOf } from "../plugin/shared/notices";
 
 /**
  * delta 20260917c §4.7 (REQ-037 errata): the plugin counts review calls and
@@ -658,6 +660,54 @@ describe("the review-budget notice survives a reload", () => {
     expect(notices.join(" ")).toContain("newer than this plugin understands");
     // Not written, and not a failure either: the refusal costs no second line (code review 2026-09-30 §3.1).
     expect(notices.join(" ")).not.toContain("could not record");
+  });
+});
+
+// Design §16.8: a bound request's tools refuse every call past its ceiling; the notice is for off-tool overruns.
+describe("a bound request (design §16.8)", () => {
+  const bound = (grants: Array<{ calls: number | null; untilCleanBatch: string | null }>, batches: Array<{ batchId: string; calls: number }> = []) => ({
+    reviews: {
+      grants: grants.map((grant, index) => ({ decisionId: `q:${REQ}:Q${index + 1}`, ...grant })),
+      batches: batches.map((batch) => ({
+        batchId: batch.batchId,
+        reviewerIds: [],
+        brief: "",
+        calls: Array.from({ length: batch.calls }, (_, index) => ({ callId: `out-00000000000${index}`, kind: "create" as const, reviewerId: "r", at: "2026-09-17T01:00:00.000Z" })),
+      })),
+    },
+  });
+
+  it("the ceiling is the budget plus the calls granted; an untilClean batch's tool calls are granted", () => {
+    expect(overrunOf(trace({ tier: "Small", reviewCalls: 4 }), REVIEW_BUDGET, bound([{ calls: 2, untilCleanBatch: null }]))).toBeNull();
+    expect(overrunOf(trace({ tier: "Small", reviewCalls: 5 }), REVIEW_BUDGET, bound([{ calls: 2, untilCleanBatch: null }]))).toMatchObject({ calls: 5, budget: 4 });
+    // b1's three tool calls went on under its untilClean grant: within, until off-tool calls pass the ceiling.
+    const clean = bound([{ calls: null, untilCleanBatch: "b1" }], [{ batchId: "b1", calls: 3 }]);
+    expect(overrunOf(trace({ tier: "Small", reviewCalls: 5 }), REVIEW_BUDGET, clean)).toBeNull();
+    expect(overrunOf(trace({ tier: "Small", reviewCalls: 6 }), REVIEW_BUDGET, clean)).toMatchObject({ calls: 6, budget: 2 });
+  });
+
+  it("still sends BM-BUDGET for an overrun on a bound request: tool calls and hand-sent messages, by the one counter", async () => {
+    await seedRequest();
+    // The registry beside the traces: one tool call and a grant of one more.
+    const registry = createRequestRegistry(home, { backfill: () => [] });
+    registry.register(WS, REQ, { source: "tool", managerId: MANAGER, workerId: WORKER });
+    registry.addReviewCall(WS, REQ, "b1", { callId: "out-0000000000b1", kind: "create", reviewerId: "agent-rev-2", at: "2026-09-17T01:04:00.000Z" }, "brief");
+    registry.addGrant(WS, REQ, { decisionId: `q:${REQ}:Q1`, calls: 1, untilCleanBatch: null });
+    // The tool call's own prompt, counted once with its record.
+    await appendRecord(
+      location,
+      turn({ agentId: "agent-rev-2", role: "reviewer", turnId: "turn-4", requestId: REQ, parentAgentId: WORKER, at: "2026-09-17T01:04:30.000Z", sent: [msg("agent-rev-2", "2026-09-17T01:04:30.000Z", `${reviewerBriefLineOf(REQ, "b1", "out-0000000000b1")}\nReview batch b1.`)] }),
+    );
+    const { paseo, sends } = daemonWith();
+    const told = createBudgetTold(() => {});
+    const pending = new Map<string, BudgetOverrun>();
+    // One hand call (seedRequest's) and one tool call: 2 of a ceiling of 3.
+    expect(await checkReviewBudget(ended("agent-rev-2", "bm-reviewer/gpt"), { location, paseo, told, pending })).toBe("within");
+    // Two more messages sent to a Reviewer by hand: off-tool, past the ceiling.
+    await reviewCall("agent-rev-1", 6);
+    await reviewCall("agent-rev-1", 7);
+    expect(await checkReviewBudget(ended("agent-rev-1", "bm-reviewer/gpt"), { location, paseo, told, pending })).toBe("sent");
+    expect(sends[0]!.text).toBe(budgetNotice({ requestId: REQ, tier: "Small", calls: 4, budget: 3, managerAgentId: MANAGER }));
   });
 });
 

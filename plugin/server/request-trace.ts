@@ -16,7 +16,7 @@
  * module for it (code review 2026-09-30 §4), and their one scan of recent
  * requests (`recentWorkspacesOf`, `recentTracesOf`, §3.5).
  */
-import type { RuleInput, RuleMessage } from "../shared/rule-input";
+import type { RuleInput, RuleMessage, RuleReviewGrant } from "../shared/rule-input";
 import type { ParsedReport, TraceRecord, TraceWorkspaceMeta } from "../shared/contracts";
 import { isFinishedUnverified, requestFinishOf, verificationOf, type RequestFinish } from "../shared/evidence";
 import { byAt } from "../shared/order";
@@ -28,10 +28,15 @@ import { readRecords, readWorkspaceMeta, storedWorkspaceIds, type TraceStoreLoca
 import {
   handoffSuccessorsOf,
   reconstructTraces,
+  reviewCallCountOf,
+  toolCallsOf,
   type AgentFacts,
   type ReconstructedTrace,
+  type ReviewCallCount,
 } from "./traces";
+import { createRequestRegistry, type RegisteredRequest } from "./request-registry";
 import { timeOrZero } from "../shared/time";
+import { dirname } from "node:path";
 
 export interface RequestTraceDeps {
   location: TraceStoreLocation;
@@ -160,8 +165,61 @@ export async function workspaceTracesOf(deps: RequestTraceDeps, workspaceId: str
         ),
     deps.replacementIds ?? reviewerReplacementsFor({ home: deps.home }),
   ]);
-  const traces = reconstructTraces({ records, agents: [...agents.values()], replacementIds });
+  // Design §16.8: the request registry's review tool records, counted with the activity stream.
+  const requests = registeredRequestsOf(deps, workspaceId);
+  const traces = reconstructTraces({ records, agents: [...agents.values()], replacementIds, requests });
   return { records, agents, traces, notices };
+}
+
+/**
+ * The workspace's requests in the request registry (design §16.4) of the data
+ * folder the traces are in (`deps.home`, else the trace store's parent). Never
+ * throws: a registry that cannot be read is none.
+ */
+export function registeredRequestsOf(deps: Pick<RequestTraceDeps, "location" | "home">, workspaceId: string): RegisteredRequest[] {
+  try {
+    const home = deps.home ?? dirname(deps.location.tracesDir);
+    return createRequestRegistry(home, { log: () => {} }).list(workspaceId);
+  } catch {
+    return [];
+  }
+}
+
+/** A request's review calls as the Dashboard counts them (design §16.8), and the trace they were read from. */
+export interface RequestReviewCount {
+  /** The one count (`reviewCallsOf`); 0 when nothing was recorded yet. */
+  calls: number;
+  /** The breakdown: tool records and off-tool calls (`reviewCallCountOf`). */
+  count: ReviewCallCount | null;
+  /** The request's rebuilt trace, when the store holds one. */
+  trace: ReconstructedTrace | null;
+}
+
+/**
+ * The review calls of one request, by the one function the Dashboard shows
+ * (design §16.8): the request's trace rebuilt exactly as `workspaceTracesOf`
+ * rebuilds it for the Dashboard, its `reviewCalls` read; with no trace of it
+ * yet (no Manager turn recorded), the same `reviewCallCountOf` over the
+ * Reviewers labelled with the request or created by one of its Workers and its
+ * tool records. Rejects when the store cannot be read.
+ */
+export async function requestReviewCountOf(deps: RequestTraceDeps, workspaceId: string, requestId: string): Promise<RequestReviewCount> {
+  const { records, agents, traces } = await workspaceTracesOf(deps, workspaceId);
+  const request = registeredRequestsOf(deps, workspaceId).find((entry) => entry.requestId === requestId) ?? null;
+  const trace = traces.find((candidate) => candidate.requestId === requestId) ?? null;
+  const replacementIds = deps.replacementIds ?? (await reviewerReplacementsFor({ home: deps.home }));
+  const workerIds = new Set([...(request?.workerIds ?? []), ...(trace?.workerIds ?? [])]);
+  const reviewerIds =
+    trace !== null
+      ? trace.reviewerIds
+      : [...agents.values()]
+          .filter((agent) => agent.role === "reviewer" && (agent.requestIdLabel === requestId || (agent.parentAgentId !== null && workerIds.has(agent.parentAgentId))))
+          .map((agent) => agent.id);
+  const ownRecords = trace !== null ? trace.records : records;
+  const count = reviewCallCountOf(reviewerIds, ownRecords, replacementIds, toolCallsOf(request));
+  // The trace's own figure when there is one: the very number the Dashboard shows.
+  const calls = trace !== null ? (trace.reviewCalls ?? 0) : (count?.calls ?? 0);
+  return { calls, count, trace };
 }
 
 /** The request a Worker or Reviewer belongs to, or undefined when it is linked to none. */
@@ -311,14 +369,17 @@ function messagesOf(records: readonly TraceRecord[], pick: (record: TraceRecord)
 
 /**
  * What the rule reads about one request. Pure: the trace in, one `RuleInput`
- * out, everything from the trace's own records.
+ * out, everything from the trace's own records — and the request's
+ * review-budget grants when the caller read them (`ruleReviewGrantOf`, design
+ * §16.8).
  */
-export function ruleInputOf(trace: ReconstructedTrace): RuleInput {
+export function ruleInputOf(trace: ReconstructedTrace, reviewGrant?: RuleReviewGrant): RuleInput {
   return {
     traceId: trace.traceId,
     requestId: trace.requestId,
     tier: trace.tier,
     reviewCalls: trace.reviewCalls,
     inbound: messagesOf(trace.records, (record) => record.sent),
+    ...(reviewGrant === undefined ? {} : { reviewGrant }),
   };
 }

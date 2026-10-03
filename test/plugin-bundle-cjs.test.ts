@@ -297,8 +297,10 @@ describe.each([
     expect(onHooks.get("agent.permission_resolved")).toHaveLength(2);
     expect(onHooks.get("agent.turn_ended")).toHaveLength(4);
     expect(onHooks.get("agent.turn_started")).toHaveLength(3);
-    // Design §16.5: an archived agent's tool binding is revoked, beside the outdated-agents clear.
-    expect(onHooks.get("agent.archived")).toHaveLength(2);
+    // Design §16.5: an archived agent's tool binding is revoked, beside the outdated-agents clear;
+    // design §16.8: an archived off-tool Reviewer's Inbox alert is cleared. The §16.10 no-verdict
+    // check runs inside the fallback detection's turn_ended handler, so turn_ended stays at four.
+    expect(onHooks.get("agent.archived")).toHaveLength(3);
     expect(onHooks.get("agent.created")).toHaveLength(1);
 
     const { paseo, created } = daemon();

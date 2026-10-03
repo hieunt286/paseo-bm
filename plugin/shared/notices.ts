@@ -299,3 +299,30 @@ export function isPluginPrompt(text: unknown): boolean {
 export function briefLineOf(role: string, requestId: string | null): string {
   return `${BRIEF_PROMPT_MARKER} ${role} requestId: ${requestId ?? "none"}`;
 }
+
+/**
+ * A Reviewer's `BM-BRIEF` first line (design §16.6, §16.8): `BM-BRIEF reviewer
+ * requestId: <id> batchId: <b> call: <callId>`. The `callId` is the review
+ * call's tool record in the request registry, so the prompt and its record are
+ * one call; a replacement Reviewer's brief carries the replaced call's id
+ * (§16.9).
+ */
+export function reviewerBriefLineOf(requestId: string, batchId: string, callId: string): string {
+  return `${briefLineOf("reviewer", requestId)} batchId: ${batchId} call: ${callId}`;
+}
+
+const REVIEWER_BRIEF_LINE = new RegExp(`^${BRIEF_PROMPT_MARKER}[ \\t]+reviewer[ \\t]+requestId:[ \\t]*\\S+[ \\t]+batchId:[ \\t]*(\\S+)[ \\t]+call:[ \\t]*(out-[0-9a-f]{12})[ \\t]*(?:\\r?\\n|$)`);
+
+/**
+ * The review call a message to a Reviewer names (design §16.8): the `callId`
+ * of a `BM-BRIEF reviewer … call:` prompt, or the record id of a
+ * `BM-DELIVERY message` re-review; null for any other text — a hand-sent
+ * message is an off-tool call without an id. Pure.
+ */
+export function reviewCallIdOf(text: unknown): string | null {
+  if (typeof text !== "string") return null;
+  const brief = REVIEWER_BRIEF_LINE.exec(text);
+  if (brief !== null) return brief[2]!;
+  const delivery = parseDelivery(text);
+  return delivery !== null && delivery.kind === "message" ? delivery.recordId : null;
+}

@@ -36,6 +36,11 @@
  *
  * Lifecycle belongs to the user (ADR-005): nothing here archives, deletes or
  * cancels anything.
+ *
+ * Since ADR-027 a bound Worker's review tools refuse every call past its
+ * request's budget (design §16.8, `review-tools.ts`); this notice still goes
+ * to the Manager for an overrun on every request, bound ones included, where
+ * only off-tool calls can make one (`overrunOf`).
  */
 import { dirname } from "node:path";
 import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
@@ -48,7 +53,9 @@ import { roleOfProvider } from "./agent-role";
 import type { TraceStoreLocation } from "./trace-store";
 import type { BudgetTold } from "./budget-told";
 import type { ReconstructedTrace } from "./traces";
-import { requestTraceOf } from "./request-trace";
+import { registeredRequestsOf, requestTraceOf } from "./request-trace";
+import type { RegisteredRequest } from "./request-registry";
+import { grantedCallsOf } from "./review-tools";
 
 /**
  * Total review calls per request, by tier, by default (PRD delta
@@ -91,17 +98,32 @@ export interface BudgetOverrun {
   managerAgentId: string;
 }
 
+/** What the check reads of a request's registry entry (design §16.4, §16.8): its review batches and grants. */
+export type BudgetRequest = Pick<RegisteredRequest, "reviews">;
+
 /**
  * The overrun of one reconstructed request against `reviewBudget` (the
  * defaults unless given), or `null` when it is within budget, or when its
  * tier, its call count, its request id or its Manager is not known — an
  * unknown number never produces a notice.
+ *
+ * With the request's registry entry (design §16.8) the ceiling is the budget
+ * plus its `{ calls: n }` grants, and the tool calls of a batch an
+ * `{ untilClean }` grant covers are left out of the comparison: the tools
+ * refused every call past the ceiling, and those they let through were
+ * granted. So on a bound request only off-tool calls — a message sent to a
+ * Reviewer by hand, an off-tool Reviewer — make an overrun. The notice still
+ * names the whole count.
  */
-export function overrunOf(trace: ReconstructedTrace, reviewBudget: ReviewBudget = REVIEW_BUDGET): BudgetOverrun | null {
+export function overrunOf(trace: ReconstructedTrace, reviewBudget: ReviewBudget = REVIEW_BUDGET, request: BudgetRequest | null = null): BudgetOverrun | null {
   if (trace.requestId === null || trace.tier === null || trace.reviewCalls === null) return null;
   if (trace.managerAgentId === null) return null;
-  const budget = reviewBudget[trace.tier];
-  if (budget === undefined || trace.reviewCalls <= budget) return null;
+  const base = reviewBudget[trace.tier];
+  if (base === undefined) return null;
+  const budget = request === null ? base : base + grantedCallsOf(request);
+  const covered = new Set(request?.reviews.grants.map((grant) => grant.untilCleanBatch).filter((batchId) => batchId !== null) ?? []);
+  const granted = request === null ? 0 : request.reviews.batches.filter((batch) => covered.has(batch.batchId)).reduce((sum, batch) => sum + batch.calls.length, 0);
+  if (trace.reviewCalls - granted <= budget) return null;
   return {
     requestId: trace.requestId,
     tier: trace.tier,
@@ -178,7 +200,12 @@ export async function checkReviewBudget(event: TurnEndedEvent, deps: BudgetDeps)
       // The same rebuild the Orchestrator's rules read (request-trace.ts), against
       // the owner's budget in the same data folder as the traces (§G.7).
       const found = await requestTraceOf(deps, workspaceId, agent.id);
-      over = found === null ? undefined : (overrunOf(found.trace, readReviewBudget({ home: dirname(deps.location.tracesDir), log })) ?? undefined);
+      // Design §16.8: a bound request's grants and tool calls, from the registry beside the traces.
+      const request =
+        found === null || found.trace.requestId === null
+          ? null
+          : (registeredRequestsOf({ location: deps.location, home: dirname(deps.location.tracesDir) }, workspaceId).find((entry) => entry.requestId === found.trace.requestId) ?? null);
+      over = found === null ? undefined : (overrunOf(found.trace, readReviewBudget({ home: dirname(deps.location.tracesDir), log }), request) ?? undefined);
       if (over === undefined) return "within";
       pending.set(keyOf(over), over);
     }

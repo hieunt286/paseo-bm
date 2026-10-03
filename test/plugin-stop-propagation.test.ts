@@ -137,10 +137,13 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     // its turn_ended BM-FORMAT check, plus delta 20260921's fallback detection,
     // plus the outdated-agents pass (turn_started, agent.archived; autonomy
     // design §A.11), plus the action boundary's two permission hooks (§D.2),
-    // plus the interruption watch's permission_resolved (ADR-024).
-    // plus the binding lifecycle's agent.archived (design §16.5).
+    // plus the interruption watch's permission_resolved (ADR-024),
+    // plus the binding lifecycle's agent.archived (design §16.5),
+    // plus the off-tool Reviewer alert's clear on agent.archived (design §16.8).
+    // The no-verdict check (§16.10) rides on the fallback detection's
+    // turn_ended handler (its afterDetection), so it adds no hook.
     // The question–answer ledger's turn_ended is retired (§A.14).
-    expect(server.on).toHaveBeenCalledTimes(13);
+    expect(server.on).toHaveBeenCalledTimes(14);
     expect([...hooks.keys()].sort()).toEqual([
       "agent.archived",
       "agent.created",
@@ -150,6 +153,8 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
       "agent.turn_started",
     ]);
     expect(hooks.get("agent.turn_ended")).toHaveLength(4);
+    // The outdated-agents clear, the binding revoke (§16.5) and the off-tool alert clear (§16.8).
+    expect(hooks.get("agent.archived")).toHaveLength(3);
   });
 
   it("sends the notice only to the stopped Worker's running Reviewers (idle Worker on refresh)", async () => {
@@ -352,14 +357,17 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
   it("removes the hook on cleanup", () => {
     const { cleanup, hooks, removers } = setup();
     cleanup();
-    // Twelve removals: this hook, the WP-205 collector's turn_started and
-    // turn_ended, delta 20260918g's agent.created, turn_started scan and
-    // turn_ended BM-FORMAT check, delta 20260921's fallback detection
-    // (turn_ended), the outdated-agents pass (turn_started, agent.archived),
-    // the action boundary (permission_requested, permission_resolved; §D.2)
-    // and the interruption watch (permission_resolved; ADR-024).
-    // The map must end up empty.
+    // Fourteen removals, one per registration: this hook, the WP-205
+    // collector's turn_started and turn_ended, delta 20260918g's agent.created,
+    // turn_started scan and turn_ended BM-FORMAT check, delta 20260921's
+    // fallback detection (turn_ended, which also runs the §16.10 no-verdict
+    // check), the outdated-agents pass (turn_started, agent.archived), the
+    // action boundary (permission_requested, permission_resolved; §D.2), the
+    // interruption watch (permission_resolved; ADR-024), the binding
+    // lifecycle (agent.archived; §16.5) and the off-tool Reviewer alert's
+    // clear (agent.archived; §16.8). The map must end up empty.
     expect([...removers].sort()).toEqual([
+      "agent.archived",
       "agent.archived",
       "agent.archived",
       "agent.created",

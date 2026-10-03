@@ -48,6 +48,7 @@ import { readReviewBudget } from "./coordination-rpc";
 import { asRecord, nonEmpty } from "./role-choices";
 import { TRUNCATION_MARKER, readRecords, type TraceStoreLocation } from "./trace-store";
 import { reconstructTraces } from "./traces";
+import { registeredRequestsOf } from "./request-trace";
 import { FALLBACK_CLASS_LABELS } from "../shared/bm-fallback";
 import type { ChatPeer, FallbackIncident, ParsedReport, Tier, TraceRecord } from "../shared/contracts";
 import { decisionKindOf, isAnswerable, type Decision } from "../shared/decisions";
@@ -228,7 +229,9 @@ export async function workerHandoverFacts(subject: { workspaceId: string; reques
         agentFactsOf(deps.paseo as DashboardPaseo, workspaceId),
         deps.incidents === undefined ? reviewerReplacementsFor() : reviewerReplacementIds(deps.incidents ?? []),
       ]);
-      return reconstructTraces({ records, agents: [...facts.values()], replacementIds }).find((trace) => trace.requestId === requestId) ?? null;
+      // Design §16.8: with the request registry's review tool records, as the Dashboard counts them.
+      const requests = registeredRequestsOf({ location: deps.location! }, workspaceId);
+      return reconstructTraces({ records, agents: [...facts.values()], replacementIds, requests }).find((trace) => trace.requestId === requestId) ?? null;
     }),
     within(budget, () => firstUserMessage(deps.paseo, subject.agentId)),
     within(budget, () => questionDecisionsOf(deps.location, workspaceId)),

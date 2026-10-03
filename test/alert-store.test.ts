@@ -42,7 +42,7 @@ afterEach(() => {
 });
 
 describe("the alerts file", () => {
-  it("names the eleven kinds of the design", () => {
+  it("names the twelve kinds of the design", () => {
     expect(ALERT_KINDS).toEqual([
       "request-stalled",
       "permission-waiting",
@@ -53,12 +53,16 @@ describe("the alerts file", () => {
       "outdated-agent",
       "fallback-failed",
       "delivery-dropped",
+      "off-tool-reviewer",
       "coordination-off",
       "boundary-off",
     ]);
     // Compaction or handoff switched off below A-12's target (§G.3, §G.7): one per mechanism, for every project.
     expect(alertKeyOf("coordination-off", null, "compact")).toBe("coordination-off:-:compact");
     expect(alertKeyOf("stuck", WS, "agent-w")).toBe(`stuck:${WS}:agent-w`);
+    // Design §16.8: an off-tool Reviewer, keyed by the Reviewer; its Worker and request are in the detail.
+    expect(alertKeyOf("off-tool-reviewer", WS, "agent-r")).toBe(`off-tool-reviewer:${WS}:agent-r`);
+    expect(ALERT_KINDS.indexOf("off-tool-reviewer")).toBe(ALERT_KINDS.indexOf("delivery-dropped") + 1);
     expect(alertKeyOf("pairing-mismatch", null, "agent-w")).toBe("pairing-mismatch:-:agent-w");
     // Two agents wrote one file in overlapping turns (§F.1): keyed by project and file, relative to the workspace folder.
     expect(alertKeyOf("writers-observed", WS, "src/math.js")).toBe(`writers-observed:${WS}:src/math.js`);

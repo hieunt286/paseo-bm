@@ -18,7 +18,7 @@
  * `trace-usage.ts`, the Dashboard's rows in `trace-views.ts`.
  */
 import { looksLikeReport, ownReviewsOf, requestIdFromText } from "./bm-report";
-import { isPluginNotice } from "./notices";
+import { isPluginNotice, reviewCallIdOf } from "./notices";
 import { byAt, uniqueBy } from "../shared/order";
 import type {
   Confidence,
@@ -478,25 +478,58 @@ function bucketByTime(buckets: Bucket[], createdAt: string | null): Bucket | nul
   return before.length === 1 ? (before[0] ?? null) : null;
 }
 
+/** A review call the request registry holds (design §16.4, §16.8): only its id is counted. */
+export interface ReviewToolCall {
+  callId: string;
+}
+
+/** The one count of a request's review calls, and where they came from (design §16.8). */
+export interface ReviewCallCount {
+  /** Every review call, counted once: the union of the tool records and the calls seen in the activity stream. */
+  calls: number;
+  /** The tool records among them (`bm_create_reviewer`, `bm_rereview`). */
+  toolCalls: number;
+  /** Calls no tool record covers: a hand-sent message to a Reviewer, an off-tool Reviewer's prompt. */
+  offTool: number;
+}
+
 /**
- * Number of review requests a Reviewer received: its inbound non-`BM-REVIEW` messages.
+ * The review calls of a request, counted once (design §16.8; the Dashboard and
+ * the review tools read this one function):
+ *
+ * - **Tool records** (`toolCalls`, the registry's `reviews.batches[].calls`)
+ *   are calls, each by its `callId`.
+ * - **The activity stream**: every message a Reviewer of `reviewerIds`
+ *   received, but a `BM-REVIEW` and a plugin notice. A `BM-BRIEF reviewer …
+ *   call: <callId>` prompt and a `BM-DELIVERY message <recordId>` re-review
+ *   (recognised although it is a notice) name their call's id, so each is the
+ *   same call as its tool record. Every other message is a call of its own: a
+ *   hand-sent message is an off-tool call.
  *
  * `replacementIds` are Reviewers that took over from one stopped on its
  * provider plan (delta 20260921 §4.5.1). The Worker sends each of them,
  * unchanged, the review message the old one got: the same review call, so the
  * FIRST message each would count is skipped and every later one counts. A
  * replacement the Worker did not label `bm.replaces` is not in the set and its
- * resend IS counted — the safe failure: `BM-BUDGET`, and the Manager asks the user.
+ * resend IS counted — the safe failure: `BM-BUDGET`, and the Manager asks the
+ * user. A plugin-created replacement's first message carries the replaced
+ * call's id (§16.9), so it is the same call either way.
+ *
+ * Null when nothing was recorded at all — no Reviewer turn and no tool record:
+ * the number is unknown, not zero.
  */
-export function reviewCallsOf(
+export function reviewCallCountOf(
   reviewerIds: readonly string[],
   records: readonly TraceRecord[],
   replacementIds: Iterable<string> = [],
-): number | null {
+  toolCalls: readonly ReviewToolCall[] = [],
+): ReviewCallCount | null {
   // Replacements whose resend has not been met yet.
   const resendPending = new Set(replacementIds);
-  let calls = 0;
-  let seen = false;
+  const toolIds = new Set(toolCalls.map((call) => call.callId));
+  const seenIds = new Set<string>();
+  let anonymous = 0;
+  let seen = toolIds.size > 0;
   for (const record of records) {
     if (!reviewerIds.includes(record.agentId)) continue;
     seen = true;
@@ -504,15 +537,36 @@ export function reviewCallsOf(
       // Neither a Reviewer's own BM-REVIEW nor the plugin's stop notice
       // (stop-propagation.ts) is a review request.
       if (/^\s*>?\s*(?:[-*]\s*)?bm-review\b/im.test(message.text)) continue;
+      const callId = reviewCallIdOf(message.text);
+      if (callId !== null) {
+        // The same call as its tool record: counted once, by its id.
+        resendPending.delete(record.agentId);
+        seenIds.add(callId);
+        continue;
+      }
       if (isPluginNotice(message.text)) continue;
       if (resendPending.delete(record.agentId)) continue;
-      calls += 1;
+      anonymous += 1;
     }
   }
   // No Reviewer turn was recorded (collection started later, or the records
-  // were deleted): the number of calls is unknown, not zero. The owner's
-  // workspace showed "6 reviewers · 0 review calls" for exactly this reason.
-  return seen ? calls : null;
+  // were deleted) and no tool recorded a call: the number of calls is unknown,
+  // not zero. The owner's workspace showed "6 reviewers · 0 review calls" for
+  // exactly this reason.
+  if (!seen) return null;
+  const all = new Set([...toolIds, ...seenIds]);
+  const offTool = anonymous + [...seenIds].filter((id) => !toolIds.has(id)).length;
+  return { calls: all.size + anonymous, toolCalls: toolIds.size, offTool };
+}
+
+/** Number of review requests a request's Reviewers received (`reviewCallCountOf`'s `calls`). */
+export function reviewCallsOf(
+  reviewerIds: readonly string[],
+  records: readonly TraceRecord[],
+  replacementIds: Iterable<string> = [],
+  toolCalls: readonly ReviewToolCall[] = [],
+): number | null {
+  return reviewCallCountOf(reviewerIds, records, replacementIds, toolCalls)?.calls ?? null;
 }
 
 /**
@@ -587,6 +641,25 @@ export interface ReconstructOptions {
    * message is not a new review call (`reviewCallsOf`). None by default.
    */
   replacementIds?: Iterable<string>;
+  /**
+   * The workspace's requests in the request registry (design §16.4): their
+   * Workers and their review tool records, which `reviewCallsOf` counts with
+   * the activity stream (§16.8). None by default.
+   */
+  requests?: readonly RequestReviewFacts[];
+}
+
+/** What a trace reads of a request's registry entry (design §16.4, §16.8). */
+export interface RequestReviewFacts {
+  requestId: string;
+  /** Every Worker of the request, newest last. */
+  workerIds: readonly string[];
+  reviews: { batches: ReadonlyArray<{ calls: readonly ReviewToolCall[] }> };
+}
+
+/** The review tool records of a request's registry entry, every batch's. */
+export function toolCallsOf(request: RequestReviewFacts | null | undefined): ReviewToolCall[] {
+  return request === null || request === undefined ? [] : request.reviews.batches.flatMap((batch) => batch.calls);
 }
 
 /**
@@ -599,6 +672,7 @@ export interface ReconstructOptions {
 export function reconstructTraces(options: ReconstructOptions): ReconstructedTrace[] {
   const { records, agents } = options;
   const replacementIds = new Set(options.replacementIds ?? []);
+  const requests = options.requests ?? [];
   const ordered = [...records].sort(byAt);
   const agentById = new Map(agents.map((agent) => [agent.id, agent]));
   const { buckets, byRequestId: byRequest } = openBuckets(ordered);
@@ -701,10 +775,13 @@ export function reconstructTraces(options: ReconstructOptions): ReconstructedTra
         continue;
       }
     }
+    // Design §16.8: a Reviewer whose parent is one of a registered request's Workers is that request's.
+    const registered = agent.parentAgentId === null ? undefined : requests.find((request) => request.workerIds.includes(agent.parentAgentId!));
     const owner =
       agent.parentAgentId === null
         ? undefined
-        : buckets.find((bucket) => bucket.trace.workerIds.includes(agent.parentAgentId!));
+        : (buckets.find((bucket) => bucket.trace.workerIds.includes(agent.parentAgentId!)) ??
+          (registered === undefined ? undefined : byRequest.get(registered.requestId)));
     if (owner !== undefined) {
       owner.trace.reviewerIds.push(agent.id);
       continue;
@@ -770,7 +847,9 @@ export function reconstructTraces(options: ReconstructOptions): ReconstructedTra
     const lastGuardrail = [...trace.reports].reverse().find((report) => report.guardrail !== null);
     trace.guardrailReported = lastGuardrail?.guardrail ?? null;
     trace.tier = [...trace.reports].reverse().find((report) => report.tier !== null)?.tier ?? null;
-    trace.reviewCalls = reviewCallsOf(trace.reviewerIds, trace.records, replacementIds);
+    // Design §16.8: the one counter, with the request's tool records from the registry.
+    const registeredRequest = trace.requestId === null ? undefined : requests.find((request) => request.requestId === trace.requestId);
+    trace.reviewCalls = reviewCallsOf(trace.reviewerIds, trace.records, replacementIds, toolCallsOf(registeredRequest));
 
     const missing = [
       ...new Set([

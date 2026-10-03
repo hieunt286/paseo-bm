@@ -5,7 +5,7 @@
  *
  * | Tool | Caller | Does |
  * |---|---|---|
- * | `bm_report` | bound Worker | builds and checks the `BM-REPORT`, stores a `report` outbox record, delivers it to the Manager that created the Worker; `finished` expires the request's unsettled questions; the registry's `tier` and `finishedAt` follow it |
+ * | `bm_report` | bound Worker | builds and checks the `BM-REPORT`, stores a `report` outbox record, delivers it to the Manager that created the Worker; `finished` expires the request's unsettled questions; `finished` or `stopped` clears its `delivery-dropped` and `off-tool-reviewer` alerts; the registry's `tier` and `finishedAt` follow it |
  * | `bm_questions` | bound Worker | opens each question through the materialiser's shared open path (`openQuestions`), numbered after the request's highest `Qn` |
  * | `bm_review` | bound Reviewer | builds and checks the `BM-REVIEW`, stores a `review` record for its batch, delivers it to its Worker |
  * | `bm_answers` | bound Manager | checks each `Qn` is an open question of a request of its own and proposes the answers for its current turn (`proposed-answers.ts`); the materialiser settles them at the turn's end only with the owner's own message in it |
@@ -34,6 +34,7 @@ import { expireQuestionsOf, openQuestions, type OpenContext, type OpenableQuesti
 import { createDecisionStore, type DecisionStore } from "./decision-store";
 import type { ServerToolAnswer, ServerTools } from "./decision-tools";
 import type { NoticeOutcome, NoticePaseo, NoticeQueue } from "./notice-queue";
+import { clearOffToolAlertsOfRequest } from "./off-tool-reviewer";
 import { clearDroppedAlert, createOutbox, deliverRecord, type OutboxDeps, type OutboxRecord } from "./outbox";
 import type { DashboardPaseo } from "./paseo-directory";
 import { proposeAnswers } from "./proposed-answers";
@@ -220,6 +221,8 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
           } catch (error) {
             log(`[paseo-bm] could not clear the delivery-dropped alert of request ${requestId}: ${reasonOf(error)}`);
           }
+          // Design §16.8: an ended request's off-tool Reviewer alerts end with it.
+          clearOffToolAlertsOfRequest(home, worker.workspaceId, requestId, { now });
         }
       },
     );

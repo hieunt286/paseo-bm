@@ -1,9 +1,22 @@
 /**
- * Fallback for a stopped Reviewer (delta 20260921 §4.5.1, REQ-066 b).
+ * Fallback for a stopped Reviewer (delta 20260921 §4.5.1, REQ-066 b; design
+ * §16.9).
  *
- * A Reviewer is created by its Worker, and Paseo wakes the Worker when the
- * Reviewer ends a turn. A Reviewer the plugin created itself would never be
- * heard by the Worker, so on **Switch** the plugin creates NO agent: it marks
+ * **A bound Worker's Reviewer** (its Worker was bound with the creation tools
+ * and the registry holds the Reviewer's batch): on **Switch** the plugin
+ * creates the replacement itself (`createPluginReviewer`, as
+ * `bm_create_reviewer` does) — `bm-reviewer-fallback-<n>/<model>`, the
+ * Reviewer mode rules, `parent` = the Worker, labels `bm.role`,
+ * `bm.requestId`, `bm.batchId`, `bm.version`, `bm.replaces`, a bound token
+ * for the same batch — with the batch's stored brief behind a `BM-BRIEF
+ * reviewer` line carrying the replaced call's `callId`: the same review call,
+ * counted once, and never off-tool. The incident is `switched` with the
+ * replacement, the old Reviewer gets `bm.replacedBy`, and the Worker an
+ * informational `BM-FALLBACK`: its review reaches it as a delivery, as before.
+ *
+ * **An unbound Worker** keeps today's recipe. A Reviewer it created is heard
+ * only through Paseo's wake of its creator, so a Reviewer the plugin created
+ * would never reach it: on **Switch** the plugin creates NO agent: it marks
  * the incident `switched` and sends the parent Worker (through the notice
  * queue) a `BM-FALLBACK` whose closing lines are the exact `create_agent`
  * call to make — alias, mode, thinking, labels with `bm.replaces` — and the
@@ -16,7 +29,12 @@
  * before the Worker got the instructions, the card offers **Resend to Worker**,
  * which sends the same message again.
  */
+import type { AgentBinder, BindingStore } from "./agent-bindings";
+import { folderOfAgent } from "./create-worker";
 import { unusableDataHomeMessage } from "./data-home";
+import { createRequestRegistry, type ReviewBatch } from "./request-registry";
+import { createPluginReviewer, reviewerPromptOf, type ReviewerCreationPaseo } from "./review-tools";
+import { timeOrZero } from "../shared/time";
 import { aliasBases, decidePending, fallbackNotice, type FallbackAction, type FallbackRpcDeps } from "./fallback-rpc";
 import { readIncidents, updateIncidents } from "./fallback-state";
 import { FALLBACK_NOTICE_MARKER } from "./notices";
@@ -81,6 +99,120 @@ export interface ReviewerFallbackDeps {
   setLabels?: (agentId: string, labels: Record<string, string>) => Promise<CliResult>;
   /** The data folder (tests); looked up otherwise. */
   home?: string | null;
+  /**
+   * The per-agent bindings (design §16.5): a Worker bound with the creation
+   * tools gets its replacement Reviewer from the plugin (§16.9). None: every
+   * Worker keeps the recipe.
+   */
+  bindings?: () => BindingStore | null;
+  /** Binds the replacement Reviewer (the endpoint's binder); none (unbound) when absent. */
+  binder?: AgentBinder | null;
+}
+
+/** The informational line a bound Worker gets once its Reviewer was replaced (design §16.9). */
+export function replacedReviewerLine(oldId: string, newId: string, batchId: string): string {
+  return `Reviewer ${oldId} was replaced by ${newId} for batch ${batchId}; its review reaches you as before.`;
+}
+
+/** Title of a replacement Reviewer the plugin creates. */
+export const FALLBACK_REVIEWER_TITLE = "Beads Reviewer (fallback)";
+
+/**
+ * The batch of a bound Worker's Reviewer (design §16.9): the Worker is bound
+ * with the creation tools and the registry holds a batch of the request with
+ * that Reviewer; null otherwise (the recipe). Never throws.
+ */
+export function boundBatchOf(
+  incident: FallbackIncident,
+  home: string,
+  bindings: BindingStore | null,
+  log: (message: string) => void,
+): { requestId: string; batch: ReviewBatch } | null {
+  try {
+    if (bindings === null || incident.parentId === null) return null;
+    const worker = bindings.list().find((binding) => binding.agentId === incident.parentId && binding.role === "worker" && binding.state === "bound" && binding.creationTools);
+    if (worker === undefined) return null;
+    const requestId = worker.requestId ?? incident.requestId;
+    if (requestId === null) return null;
+    const request = createRequestRegistry(home, { log }).get(incident.workspaceId, requestId);
+    const batch = request?.reviews.batches.find((entry) => entry.reviewerIds.includes(incident.agentId));
+    return batch === undefined ? null : { requestId, batch };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The plugin creates the replacement of a bound Worker's Reviewer (design
+ * §16.9) and decides the incident; see the module comment. A creation that
+ * fails records `failed`, so a repeated click never creates two.
+ */
+async function switchBoundReviewer(
+  incident: FallbackIncident,
+  bound: { requestId: string; batch: ReviewBatch },
+  paseo: unknown,
+  home: string,
+  deps: ReviewerFallbackDeps & { now: () => Date; log: (message: string) => void },
+): Promise<FallbackIncident> {
+  const { log, now } = deps;
+  const candidate = incident.candidate!;
+  const workerId = incident.parentId!;
+  const { requestId, batch } = bound;
+  // The call it replaces: the batch's newest; the new Reviewer's first line carries its id, so it is counted once.
+  const call = [...batch.calls].sort((a, b) => timeOrZero(a.at) - timeOrZero(b.at)).at(-1);
+  if (call === undefined) throw new DashboardError("E_FALLBACK_CREATE_FAILED", `batch ${batch.batchId} of ${requestId} has no review call to hand over`);
+  const cwd = await folderOfAgent(paseo, workerId, incident.workspaceId);
+  if (cwd === null) throw new DashboardError("E_FALLBACK_CREATE_FAILED", `the folder of Worker ${workerId} cannot be read; try again`);
+  const mode = await reviewerModeFor(paseo, candidate, log);
+  let reviewerId: string;
+  try {
+    ({ reviewerId } = await createPluginReviewer(
+      paseo as ReviewerCreationPaseo,
+      {
+        workspaceId: incident.workspaceId,
+        requestId,
+        workerId,
+        batchId: batch.batchId,
+        cwd,
+        prompt: reviewerPromptOf(requestId, batch.batchId, call.callId, batch.brief),
+        alias: candidate.alias,
+        model: candidate.model,
+        base: candidate.baseProvider,
+        modeId: mode,
+        thinkingOptionId: candidate.thinkingOptionId,
+        labels: { [REPLACES_LABEL]: incident.agentId },
+        title: FALLBACK_REVIEWER_TITLE,
+      },
+      { binder: deps.binder ?? null, log },
+    ));
+  } catch (error) {
+    const detail = `could not create the fallback Reviewer on ${candidate.alias}/${candidate.model}: ${reasonOf(error)}`;
+    await decidePending(home, incident.id, (entry) => ({ ...entry, status: "failed", decidedAt: now().toISOString(), error: detail }), log);
+    throw new DashboardError("E_FALLBACK_CREATE_FAILED", detail);
+  }
+  try {
+    createRequestRegistry(home, { log }).noteReviewer(incident.workspaceId, requestId, batch.batchId, reviewerId);
+  } catch (error) {
+    log(`[paseo-bm] could not add Reviewer ${reviewerId} to batch ${batch.batchId} of ${requestId}: ${reasonOf(error)}`);
+  }
+  try {
+    const labelled = await (deps.setLabels ?? ((id: string, labels: Record<string, string>) => setAgentLabels(id, labels)))(incident.agentId, { [REPLACED_BY_LABEL]: reviewerId });
+    if (!labelled.ok) log(`[paseo-bm] could not label Reviewer ${incident.agentId} as replaced by ${reviewerId}: ${labelled.reason}`);
+  } catch (error) {
+    log(`[paseo-bm] could not label Reviewer ${incident.agentId} as replaced by ${reviewerId}: ${reasonOf(error)}`);
+  }
+  const switched = await decidePending(
+    home,
+    incident.id,
+    (entry) => ({ ...entry, status: "switched", decidedAt: now().toISOString(), replacementId: reviewerId }),
+    log,
+  );
+  // Information only: the review reaches the Worker as a delivery (§16.7), as before.
+  const bases = await aliasBases(paseo);
+  const text = fallbackNotice(switched, (alias) => bases[alias] ?? null, replacedReviewerLine(incident.agentId, reviewerId, batch.batchId));
+  const outcome = await (deps.enqueue ?? defaultEnqueue)(workerId, FALLBACK_NOTICE_MARKER, text, paseo as NoticePaseo);
+  if (outcome === "dropped") log(`[paseo-bm] the Worker ${workerId} could not be told that Reviewer ${incident.agentId} was replaced by ${reviewerId}.`);
+  return switched;
 }
 
 /** Sends the Worker its BM-FALLBACK with the instructions; the outcome of the queue. */
@@ -115,6 +247,9 @@ export function createReviewerSwitch(deps: ReviewerFallbackDeps = {}): FallbackA
     if (available !== null && !available.has(candidate.baseProvider)) {
       throw new DashboardError("E_FALLBACK_NO_CANDIDATE", `${candidate.baseProvider} is not available in Paseo right now`);
     }
+    // Design §16.9: a bound Worker's Reviewer is replaced by the plugin itself.
+    const bound = boundBatchOf(incident, home, deps.bindings?.() ?? null, log);
+    if (bound !== null) return switchBoundReviewer(incident, bound, paseo, home, { ...deps, now, log });
     const switched = await decidePending(home, incident.id, (entry) => ({ ...entry, status: "switched", decidedAt: now().toISOString() }), log);
     await tellWorker(switched, paseo, deps);
     return switched;

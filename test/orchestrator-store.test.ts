@@ -399,7 +399,7 @@ describe("stalls.json: interrupt allowances (design §6B.3; autonomy design §A.
   const TURN = "2026-09-28T09:58:00.000Z";
 
   it("builds and parses allowance keys, and refuses the keys it cannot read back", () => {
-    expect(WORKER_SIGNALS).toEqual(["stuck", "permission", "danger", "failing", "heavy", "outside"]);
+    expect(WORKER_SIGNALS).toEqual(["stuck", "permission", "danger", "failing", "heavy", "outside", "off-tool-review"]);
     const allowance = dangerOpenKey(WS, "wkr-1", TURN);
     expect(allowance).toBe(`${WS}::wkr-1::danger-open@${TURN}`);
     expect(parseDangerOpenKey(allowance)).toEqual({ workspaceId: WS, workerId: "wkr-1", openedAt: TURN });

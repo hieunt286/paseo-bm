@@ -662,11 +662,11 @@ describe("bm_create_worker on the bound Manager's list only (design §16.6)", ()
       store.settle(tokenSha256, agentId);
       return token;
     };
-    expect(await list(`${endpoint.urlFor("worker")!}/${bindAs("worker", "agent-w1")}`)).toEqual(["bm_report", "bm_questions", "bm_reply"]);
+    expect(await list(`${endpoint.urlFor("worker")!}/${bindAs("worker", "agent-w1")}`)).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_reply"]);
     expect(await list(`${endpoint.urlFor("reviewer")!}/${bindAs("reviewer", "agent-r1")}`)).toEqual(["bm_review"]);
     expect(toolFacesFor("manager").map((face) => face.name)).not.toContain("bm_create_worker");
     expect(toolFacesFor("manager", true).map((face) => face.name)).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_decisions"]);
-    expect(toolFacesFor("worker", true).map((face) => face.name)).toEqual(["bm_report", "bm_questions", "bm_reply"]);
+    expect(toolFacesFor("worker", true).map((face) => face.name)).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_reply"]);
   });
 
   it("refuses an unbound caller with one line, creating nothing, and logs it as a served tool", async () => {

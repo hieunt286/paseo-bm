@@ -190,9 +190,11 @@ export type StallEntry = z.infer<typeof stallEntrySchema>;
  * The signals the live watch raises on a running Worker, in the order of
  * design §6B.3. `stuck`, `permission` and `danger`
  * are Inbox alerts too; each signal is one `worker.signal` event per Worker
- * turn (autonomy design §A.8).
+ * turn (autonomy design §A.8). `off-tool-review` is raised when a bound
+ * Worker creates a Reviewer outside its tools (design §16.8,
+ * `off-tool-reviewer.ts`), with its `off-tool-reviewer` alert.
  */
-export const WORKER_SIGNALS = ["stuck", "permission", "danger", "failing", "heavy", "outside"] as const;
+export const WORKER_SIGNALS = ["stuck", "permission", "danger", "failing", "heavy", "outside", "off-tool-review"] as const;
 export const workerSignalSchema = z.enum(WORKER_SIGNALS);
 export type WorkerSignal = z.infer<typeof workerSignalSchema>;
 

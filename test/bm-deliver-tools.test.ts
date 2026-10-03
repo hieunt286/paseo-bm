@@ -18,6 +18,7 @@ import {
   type DeliveringToolDeps,
 } from "../plugin/server/deliver-tools";
 import { noteIn } from "../plugin/server/handoff";
+import { offToolAlertOf } from "../plugin/server/off-tool-reviewer";
 import { createNoticeQueue } from "../plugin/server/notice-queue";
 import { OUTBOX_DIR_NAME, createOutbox } from "../plugin/server/outbox";
 import { createPrecedentStore } from "../plugin/server/precedent-store";
@@ -131,7 +132,7 @@ const call = (name: string, args: unknown) => ({ jsonrpc: "2.0", id: 1, method: 
 
 describe("the bound lists (design §16.6)", () => {
   it("a bound Worker, Reviewer and Manager list their delivering tools; unbound agents keep today's lists", () => {
-    expect(toolFacesFor("worker", true).map((face) => face.name)).toEqual(["bm_report", "bm_questions", "bm_reply"]);
+    expect(toolFacesFor("worker", true).map((face) => face.name)).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_reply"]);
     expect(toolFacesFor("reviewer", true).map((face) => face.name)).toEqual(["bm_review"]);
     expect(toolFacesFor("manager", true).map((face) => face.name)).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_decisions"]);
     expect(toolFacesFor("worker").map((face) => face.name)).toEqual(["bm_report", "bm_reply"]);
@@ -147,7 +148,7 @@ describe("the bound lists (design §16.6)", () => {
   it("the hook pre-approves exactly the bound list", () => {
     const empty: { toolPolicy?: { preapproved?: Array<{ tool: string }> } } = {};
     const tools = (role: "worker" | "reviewer" | "manager") => withAgentTools(empty, role, "http://127.0.0.1:1/mcp/x", true)?.toolPolicy?.preapproved?.map((grant) => grant.tool);
-    expect(tools("worker")).toEqual(["bm_report", "bm_questions", "bm_reply"]);
+    expect(tools("worker")).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_reply"]);
     expect(tools("reviewer")).toEqual(["bm_review"]);
     expect(tools("manager")).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_decisions"]);
     expect(answer("reviewer", { jsonrpc: "2.0", id: 1, method: "tools/list" }, true)).toMatchObject({ result: { tools: [{ name: "bm_review" }] } });
@@ -267,6 +268,20 @@ describe("bm_report for a bound Worker (design §16.6)", () => {
     alerts.raise({ workspaceId: WS, kind: "delivery-dropped", subject: OTHER_REQ, detail: "The report out-y was not delivered." });
     expect((await tools.worker.call("bm_report", { ...REPORT, phase: "stopped" }, WORKER_CALLER)).ok).toBe(true);
     expect(createAlertStore(home).list({ open: true }).map((alert) => alert.subject)).toEqual([OTHER_REQ]);
+  });
+
+  it("finished or stopped clears the request's off-tool-reviewer alerts (design §16.8); received clears nothing", async () => {
+    for (const phase of ["finished", "stopped"] as const) {
+      const { home, tools } = setup();
+      register(home);
+      const alerts = createAlertStore(home);
+      alerts.raise(offToolAlertOf({ reviewerId: "rev-1", workerId: WORKER, workspaceId: WS, requestId: REQ }));
+      alerts.raise(offToolAlertOf({ reviewerId: "rev-2", workerId: "agent-other-worker", workspaceId: WS, requestId: OTHER_REQ }));
+      expect((await tools.worker.call("bm_report", REPORT, WORKER_CALLER)).ok).toBe(true);
+      expect(createAlertStore(home).list({ open: true }).map((alert) => alert.subject).sort()).toEqual(["rev-1", "rev-2"]);
+      expect((await tools.worker.call("bm_report", { ...REPORT, phase }, WORKER_CALLER)).ok, phase).toBe(true);
+      expect(createAlertStore(home).list({ open: true }).map((alert) => alert.subject), phase).toEqual(["rev-2"]);
+    }
   });
 
   it("an unbound Worker still gets the builder and its send line, the phase stopped included", async () => {

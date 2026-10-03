@@ -23,7 +23,7 @@ import {
   createWorkerCreationTools,
   workerBriefOf,
 } from "../plugin/server/create-worker";
-import { AGENT_TOOLS_OFF_SWITCH_MESSAGE } from "../plugin/server/manager";
+import { AGENT_TOOLS_OFF_SWITCH_MESSAGE, AGENT_TOOLS_OFF_TOOL_MESSAGE } from "../plugin/server/manager";
 import { REQUEST_ID_PATTERN, REQUESTS_DIR_NAME, clearRequestRegistryCache, createRequestRegistry } from "../plugin/server/request-registry";
 import { applyAgentTools, type AgentCreateRequest } from "../plugin/server/role-hook";
 import { forgetModes } from "../plugin/server/role-mode";
@@ -268,7 +268,7 @@ describe("bm_create_worker refuses, creating nothing (design §16.6)", () => {
     cases.push([NO_DATA_FOLDER_MESSAGE, toolsOf(null, plain, store), plain]);
     cases.push([NO_PASEO_MESSAGE, toolsOf(home, null, store), plain]);
     const off = daemon({ store, toolsOff: true });
-    cases.push([AGENT_TOOLS_OFF_SWITCH_MESSAGE, toolsOf(home, off, store), off]);
+    cases.push([AGENT_TOOLS_OFF_TOOL_MESSAGE, toolsOf(home, off, store), off]);
     const noProfile = daemon({ store, profile: false });
     cases.push([NO_WORKER_PROFILE_MESSAGE, toolsOf(home, noProfile, store), noProfile]);
     for (const [text, tools, fake] of cases) {
@@ -276,6 +276,12 @@ describe("bm_create_worker refuses, creating nothing (design §16.6)", () => {
       nothingCreated(home, fake, store);
     }
     expect(NO_DATA_FOLDER_MESSAGE).toBe("paseo-bm has no usable data folder; tell the owner in one line and stop.");
+    // The agent's own refusal, not the fallback Switch's wording (no Settings step, no Switch).
+    expect(AGENT_TOOLS_OFF_TOOL_MESSAGE).toBe(
+      "paseo-bm cannot create agents while Paseo's agent tools are off; nothing was created. Tell the owner in one line and stop.",
+    );
+    expect(AGENT_TOOLS_OFF_TOOL_MESSAGE).not.toBe(AGENT_TOOLS_OFF_SWITCH_MESSAGE);
+    expect(AGENT_TOOLS_OFF_TOOL_MESSAGE).not.toMatch(/Switch|Settings/);
   });
 
   it("a registry that cannot be written: nothing created", async () => {

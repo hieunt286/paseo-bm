@@ -1196,6 +1196,9 @@ Nothing was created or sent.
 - **On a bound request** an overrun can only come from off-tool calls, since the tools refuse every other one. Calls the tool refused never happened, and calls it counted are within the ceiling.
 - **Unbound agents** see no change: the Worker asks per its role file.
 
+
+**As built (beads .8, .20).** `review-tools.ts` holds `bm_create_reviewer`, `bm_rereview`, the budget logic and `applyReviewBudgetGrants` (run inside the decision settlement hook); calls for one request run one at a time. `reviewCallCountOf` (`traces.ts`) counts calls once by id over the registry's call records (`addReviewCall`, `removeReviewCall`, `noteReviewer`, `addGrant`) and the activity stream; a Reviewer whose parent is in the registry's `workerIds` belongs to that request. The ceiling shown and enforced is budget plus granted calls (`reviewCeilingOf`, `overReviewCeiling` in `shared/orchestrator-rules.ts`), which the Orchestrator's `review.over-budget` rule uses too; a live `untilClean` grant is never flagged. A failed creation or send removes its call. While Paseo's agent tools are off, the creating tools refuse with `AGENT_TOOLS_OFF_TOOL_MESSAGE`. `off-tool-reviewer.ts`: `offToolReviewerOf` decides; its `cancel` dependency is where the plugin's cancel plugs in; the `off-tool-reviewer` alert clears when the Reviewer is archived or its request reports `finished` or `stopped`. `overrunOf` leaves out every call of a batch with an `untilClean` grant, so the informational `BM-BUDGET` is lenient there.
+
 ### 16.9 Replacement Reviewer and handoff successor (step 3)
 
 **Replacement Reviewer** (fallback Switch, §7.10), for a bound Worker:
@@ -1223,6 +1226,9 @@ Nothing was created or sent.
 
 **As built (bead .19).** For a Manager bound with the creation tools, `handoff.ts` checks the command first (`commandRefusalOf`, extracted from `sendCommand`), creates the successor without waiting for the Manager to be idle, registers it, sends `handoffInfoCommandOf` counted by the loop guard (`loopGuard: "count"`) and completes the handoff; a successor's own `agent.created` arriving meanwhile completes nothing. Endings reuse `loop-guard`, `off`, `refused`. An unbound Manager, or one bound before the creation tools, keeps today's flow.
 
+
+**As built (bead .21).** The replacement Reviewer is created by `createPluginReviewer` (shared with `bm_create_reviewer`), which `fallback-reviewer.ts` calls with the endpoint's binder and bindings.
+
 ### 16.10 Wake-ups and a missing verdict (step 3; ADR-027 decision 11)
 
 **Wake-ups.** A Worker created by `bm_create_worker` or a Reviewer created by `bm_create_reviewer` has its creator as `parent`, but the creator did not call `create_agent`, so Paseo's `notifyOnFinish` wake does not apply (S2: a child created through the SDK with `parent` never woke its parent; one created with MCP `create_agent` did, within 24 ms). The parent is woken only by deliveries (§16.7) and by the plugin's own notices.
@@ -1239,6 +1245,9 @@ What the Manager no longer does:
 A `no-verdict` is sent at most once per review call, so a batch whose re-review also ends without a verdict gets a second one.
 
 When all three hold, the plugin stores and delivers a `no-verdict` record to its Worker (§16.7). A `canceled` turn sends nothing, since the Worker stopped it. A provider-error turn with an incident is the fallback's.
+
+
+**As built (bead .9).** `no-verdict.ts` runs inside the fallback detection's `agent.turn_ended` handler (an `afterDetection` hook; no hook of its own), after the detection, so a turn classified as a provider failure sends no `no-verdict`. It finds the review call from the turn's first message, else the batch's newest call.
 
 ### 16.11 On-disk contract changes (steps 3–4)
 

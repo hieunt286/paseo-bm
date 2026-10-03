@@ -35,7 +35,7 @@
  *
  * Never throws into an agent turn: every failure costs one `[paseo-bm]` line.
  */
-import type { PluginServerContext } from "@getpaseo/plugin/server";
+import type { PluginLifecycleEvents, PluginServerContext } from "@getpaseo/plugin/server";
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { roleOfProvider } from "./agent-role";
@@ -529,6 +529,12 @@ export interface RegisterFallbackOptions {
   home?: () => string | null;
   /** Hears the SDK handle of every paseo-bm turn end (the wait timers are set again from it, §4.4.9). */
   onPaseo?: (paseo: unknown) => void;
+  /**
+   * Runs for every paseo-bm turn end once the fallback detection of that turn
+   * is done (design §16.10: the missing-verdict check), told whether the turn
+   * was classified as a provider failure. Its failure is one log line.
+   */
+  afterDetection?: (event: PluginLifecycleEvents["agent.turn_ended"], context: { paseo: unknown; classified: boolean }) => Promise<unknown>;
 }
 
 /**
@@ -550,31 +556,45 @@ export function registerFallbackDetection(host: FallbackHost, options: RegisterF
     knownHome = dataHomeOf();
     return knownHome;
   };
+  /** Classifies the turn and records its incident; true when the turn is a provider failure (the fallback's). */
+  const detect = async (event: Parameters<NonNullable<RegisterFallbackOptions["afterDetection"]>>[0], paseo: unknown): Promise<boolean> => {
+    const outcome = event?.outcome?.kind;
+    if (outcome !== "failed" && outcome !== "completed") return false;
+    const text =
+      outcome === "failed"
+        ? nonEmpty((event.outcome as { error?: { message?: unknown } }).error?.message)
+        : quietReply(sliceLastTurn(Array.isArray(event.timeline) ? event.timeline : []));
+    if (text === null) return false;
+    if (paseo === undefined) return false;
+    const home = homeOf();
+    if (home === null) return false;
+    const patterns = readRoleFallback(home, log).file.patterns ?? null;
+    const signal = await classifyTurn(event, { paseo: paseo as CollectorPaseo, patterns, log });
+    if (signal === null) return false;
+    await recordIncident(event, signal, { paseo, home, log, ...(options.now === undefined ? {} : { now: options.now }) });
+    return true;
+  };
   const remove = host.on("agent.turn_ended", async (event, context) => {
+    let classified = false;
+    let paseo: unknown;
     try {
-      const outcome = event?.outcome?.kind;
       const role = roleOfProvider(event?.agent?.provider);
       if (role === null) return;
-      const handle = (context as { paseo?: unknown } | undefined)?.paseo;
-      if (handle !== undefined) options.onPaseo?.(handle);
+      paseo = (context as { paseo?: unknown } | undefined)?.paseo;
+      if (paseo !== undefined) options.onPaseo?.(paseo);
       // The Orchestrator has no fallback chain: nothing to read for its turn (orchestrator design §3.1).
       if (role === "orchestrator") return;
-      if (outcome !== "failed" && outcome !== "completed") return;
-      const text =
-        outcome === "failed"
-          ? nonEmpty((event.outcome as { error?: { message?: unknown } }).error?.message)
-          : quietReply(sliceLastTurn(Array.isArray(event.timeline) ? event.timeline : []));
-      if (text === null) return;
-      const paseo = (context as { paseo?: unknown } | undefined)?.paseo;
-      if (paseo === undefined) return;
-      const home = homeOf();
-      if (home === null) return;
-      const patterns = readRoleFallback(home, log).file.patterns ?? null;
-      const signal = await classifyTurn(event, { paseo: paseo as CollectorPaseo, patterns, log });
-      if (signal === null) return;
-      await recordIncident(event, signal, { paseo, home, log, ...(options.now === undefined ? {} : { now: options.now }) });
+      classified = await detect(event, paseo);
     } catch (error) {
+      // A failed classification is not known to be a provider failure.
       log(`[paseo-bm] fallback detection failed: ${reasonOf(error)}`);
+    }
+    // Design §16.10: what must run after the detection of this very turn (the missing-verdict check).
+    if (options.afterDetection === undefined || roleOfProvider(event?.agent?.provider) === null) return;
+    try {
+      await options.afterDetection(event, { paseo, classified });
+    } catch (error) {
+      log(`[paseo-bm] a check after the fallback detection failed: ${reasonOf(error)}`);
     }
   });
   return () => {

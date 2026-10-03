@@ -37,6 +37,18 @@ export interface RuleInput {
   tier: Tier | null;
   /** Null when no Reviewer turn was recorded: unknown, not zero. */
   reviewCalls: number | null;
+  /**
+   * The request's review-budget grants (design §16.8), from the request
+   * registry: `calls`, the sum of its `{ calls: n }` grants; `untilClean`, true
+   * while an `{ untilClean }` grant's batch has not passed. Absent: none.
+   */
+  reviewGrant?: RuleReviewGrant;
   /** Every inbound message of every agent of the request, oldest first. */
   inbound: RuleMessage[];
+}
+
+/** A request's review-budget grants, as the rule reads them (`RuleInput.reviewGrant`). */
+export interface RuleReviewGrant {
+  calls: number;
+  untilClean: boolean;
 }
