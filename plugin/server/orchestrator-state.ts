@@ -276,8 +276,13 @@ export function projectAgentsOf(
   };
 }
 
-/** The last report's phases that mean the Worker is at work between received and finished. */
-const WORKING_PHASES: ReadonlySet<string> = new Set(["documents-done", "beads-done", "bead-implemented"]);
+/**
+ * The last report's phases that mean the request is between received and
+ * finished. `stopped` (design §16.11) is neither finished nor waiting on the
+ * owner: a stopped request with nothing running is in progress, and the stall
+ * pass says it stalled.
+ */
+const WORKING_PHASES: ReadonlySet<string> = new Set(["documents-done", "beads-done", "bead-implemented", "stopped"]);
 
 /**
  * Where the project's newest request stands (design §6B.7): `reviewing` while
@@ -299,12 +304,12 @@ export function stageOf(
   return "received";
 }
 
-/** The phase of the last report that names a stage (`blocked` names none), or null. */
+/** The phase of the last report that names a stage (`blocked` and `stopped` name none), or null. */
 export function workPhaseOf(trace: Pick<ReconstructedTrace, "reports"> | null): ReportPhase | null {
   if (trace === null) return null;
   for (let index = trace.reports.length - 1; index >= 0; index -= 1) {
     const phase = trace.reports[index]!.phase;
-    if (phase !== null && phase !== "blocked") return phase;
+    if (phase !== null && phase !== "blocked" && phase !== "stopped") return phase;
   }
   return null;
 }

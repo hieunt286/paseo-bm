@@ -12,7 +12,10 @@ import { managerIdNotice } from "../plugin/server/settings-notices";
 import type { FallbackIncident } from "../plugin/shared/contracts";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
 import { currentInstructionsHash } from "../plugin/server/instructions-label";
-import { fakePaseo } from "./helpers/fake-paseo";
+import { createBindingStore } from "../plugin/server/agent-bindings";
+import { binderOf } from "../plugin/server/agent-tools";
+import { applyAgentTools, type AgentCreateRequest } from "../plugin/server/role-hook";
+import { fakePaseo, type FakePaseoOptions } from "./helpers/fake-paseo";
 
 /**
  * Delta 20260921 §4.5.2 (REQ-066 c): "Switch" for a stopped Manager creates the
@@ -55,7 +58,7 @@ const incident = (overrides: Partial<FallbackIncident> = {}): FallbackIncident =
 });
 
 /** The workspace's Manager `OLD` and its Workers, on a machine that is already set up; a creation makes `NEW`. */
-function daemon(options: { create?: () => Promise<never>; oldLabels?: Record<string, string>; injectIntoAgents?: boolean } = {}) {
+function daemon(options: { create?: () => Promise<never>; created?: FakePaseoOptions["created"]; oldLabels?: Record<string, string>; injectIntoAgents?: boolean } = {}) {
   const fake = fakePaseo({
     agents: [
       { id: OLD, workspaceId: WS, status: "idle", provider: "bm-manager", labels: { "bm.role": "manager", "bm.modeSet": "bypassPermissions", ...options.oldLabels }, createdAt: "2026-09-22T01:00:00.000Z" },
@@ -79,6 +82,7 @@ function daemon(options: { create?: () => Promise<never>; oldLabels?: Record<str
         "bm-worker": { extends: "claude", paseoTools: rolePaseoToolsPolicy("worker") },
         "bm-reviewer": { extends: "claude", paseoTools: rolePaseoToolsPolicy("reviewer") },
         "bm-orchestrator": { extends: "claude", paseoTools: rolePaseoToolsPolicy("orchestrator") },
+        "bm-manager-fallback-1": { extends: "claude" },
       },
       agentProfiles: [
         { id: "bm-manager", provider: "bm-manager", model: "claude-sonnet-5" },
@@ -88,7 +92,7 @@ function daemon(options: { create?: () => Promise<never>; oldLabels?: Record<str
       ],
       ...(options.injectIntoAgents === undefined ? {} : { mcp: { injectIntoAgents: options.injectIntoAgents } }),
     },
-    created: options.create ?? (() => ({ id: NEW, createdAt: "2026-09-22T06:05:00.000Z", capabilities: { supportsMcpServers: true } })),
+    created: options.created ?? options.create ?? (() => ({ id: NEW, createdAt: "2026-09-22T06:05:00.000Z", capabilities: { supportsMcpServers: true } })),
   });
   return { paseo: fake.paseo, create: fake.api.workspaces.ref(WS).agents.create, agents: fake.agents };
 }
@@ -129,6 +133,24 @@ afterEach(() => {
 });
 
 describe("switch (Manager)", () => {
+  it("binds the replacement Manager to its own tool path, with the creation tools (design §16.5, §16.6)", async () => {
+    write([incident()]);
+    const bindings = createBindingStore(home);
+    const roleUrl = (role: string) => `http://127.0.0.1:4567/mcp/${role}`;
+    const { paseo, create } = daemon({
+      created: (request) => {
+        // The hook's part: it keeps the token URL.
+        applyAgentTools({ config: { ...request.config, cwd: "/repo" } } as unknown as AgentCreateRequest, { urlFor: roleUrl, bindings }, "claude");
+        return { id: NEW, createdAt: "2026-09-22T06:05:00.000Z", capabilities: { supportsMcpServers: true } };
+      },
+    });
+    const { action } = switcher({ binder: binderOf(roleUrl, bindings, () => {}) });
+    await expect(action(incident(), paseo, { home })).resolves.toMatchObject({ status: "switched", replacementId: NEW });
+    const config = create.mock.calls[0]![0].config as Record<string, unknown>;
+    expect(config["mcpServers"]).toEqual({ "paseo-bm": { type: "http", url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:4567\/mcp\/manager\/[0-9a-f]{64}$/), alwaysLoad: true } });
+    expect(bindings.bindingOfAgent(NEW)).toMatchObject({ state: "bound", role: "manager", workspaceId: WS, creationTools: true });
+  });
+
   it("creates one Manager through createManager with the exact provider, mode, labels and prompt, then records switched", async () => {
     write([incident()]);
     const { paseo, create } = daemon();

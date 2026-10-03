@@ -273,6 +273,47 @@ describe("the plugin's own notices", () => {
   });
 });
 
+describe("outbox deliveries (design §16.7)", () => {
+  const RECORD = "out-0123456789ab";
+  // Every delivery the plugin sends carries a clientMessageId, like the owner's words.
+  const delivered = (text: string) => cards(text, "user_message", "sdk-message-id");
+
+  it("draw a delivered report or review as the same card as the block, received, and never as the owner's words", () => {
+    const report = delivered(`BM-DELIVERY report ${RECORD}\n${REPORT}`)!;
+    expect(report).toHaveLength(1);
+    expect(report[0]).toMatchObject({ type: "progress", direction: "received", requestId: REQ, formatIssues: [], report: { phase: "beads-done", tier: "Large" }, text: REPORT });
+    expect(delivered(`BM-DELIVERY report ${RECORD}\n${FINISHED}`)![0]).toMatchObject({ type: "finished", direction: "received" });
+    // A blocked report that asks: one decision card per question, as in the Worker's own message.
+    expect(delivered(`BM-DELIVERY report ${RECORD}\n${ASKING}`)!.map((c) => [c.type, c.decision?.id])).toEqual([
+      ["decision", `q:${REQ}:Q6`],
+      ["decision", `q:${REQ}:Q7`],
+    ]);
+    const review = delivered(`BM-DELIVERY review ${RECORD}\n${REVIEW}`)!;
+    expect(review[0]).toMatchObject({ type: "verdict", direction: "received", review: { verdict: "pass", batchId: "b1", blocking: 0 } });
+    for (const c of [...report, ...review]) expect(chatCardSchema.parse(c)).toEqual(c);
+  });
+
+  it("draw a message, a no-verdict and a report whose block does not parse as a notice line", () => {
+    const [message] = delivered(`BM-DELIVERY message ${RECORD}\nContinue ${REQ}. Please fix the failing test.`)!;
+    expect(message).toMatchObject({ type: "notice", direction: "received", requestId: REQ, notice: { marker: "BM-DELIVERY", what: "A message", tone: "muted" } });
+    const noVerdict = [
+      `BM-DELIVERY no-verdict ${RECORD}`,
+      `requestId: ${REQ}`,
+      "batchId: b2",
+      "reviewer: rev-1",
+      "The Reviewer ended its turn without a verdict. Ask it once more with bm_rereview, or report this batch as not reviewed.",
+    ].join("\n");
+    const [missing] = delivered(noVerdict)!;
+    expect(missing).toMatchObject({ type: "notice", requestId: REQ, gist: "Batch b2", notice: { what: "The Reviewer ended its turn without a verdict", tone: "warning" } });
+    expect(delivered(`BM-DELIVERY report ${RECORD}\nnothing here`)![0]).toMatchObject({ type: "notice", notice: { marker: "BM-DELIVERY", what: "A report" } });
+    for (const c of [message!, missing!]) expect(chatCardSchema.parse(c)).toEqual(c);
+  });
+
+  it("leave the answers delivery (BM-DELIVERY answers) a notice, as before", () => {
+    expect(delivered(`BM-DELIVERY answers\nContinue ${REQ}.\n\nBM-ANSWERS\nrequestId: ${REQ}\nQ1: a — keep`)![0]).toMatchObject({ type: "notice", notice: { marker: "BM-DELIVERY" } });
+  });
+});
+
 describe("who sent it and who gets it", () => {
   it("in the Manager's chat, a report and its questions come from the Worker of that request", () => {
     const { from, to } = partiesOf(card(REPORT), manager, [worker, otherWorker, reviewer]);

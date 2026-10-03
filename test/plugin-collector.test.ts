@@ -22,6 +22,8 @@ import { clearTraceStoreCache, readRecords, withWorkspaceLock } from "../plugin/
 import { reconstructTraces } from "../plugin/server/traces";
 import { TRACE_STORE_SCHEMA_VERSION, evidenceSchema, traceRecordSchema, traceRuntimeSchema } from "../plugin/shared/contracts";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
+import { createOutbox } from "../plugin/server/outbox";
+import { parseReports } from "../plugin/server/bm-report";
 
 /**
  * WP-205: the turn collector.
@@ -1006,6 +1008,67 @@ describe("plugin notices and streamed chunks", () => {
     expect(relayed?.record.reviews).toEqual([]);
     const worker = await buildRecord(asEvent(turnEnded({ timeline: [userMessage(review), assistantMessage(review)] })), { location: null });
     expect(worker?.record.reviews).toEqual([]);
+  });
+});
+
+describe("tool-built reports and reviews from the outbox (design §16.7)", () => {
+  const REQ = "req-20261003T100000Z";
+  const BLOCK = [
+    "BM-REPORT",
+    `requestId: ${REQ}`,
+    "phase: finished",
+    "tier: Small (changed: no)",
+    "filesChanged: src/a.ts",
+    "beadsCreated: none",
+    "beadsUpdated: none",
+    "beadsClosed: none",
+    "beadsReady: none",
+    "reviewFindingsOpen: none",
+    "buildAndTests: `npm test` pass",
+    "skillsUsed: none",
+    "decided: none",
+    "blockers: none",
+  ].join("\n");
+  const REVIEW = `BM-REVIEW\nrequestId: ${REQ}\nbatchId: b1\nverdict: pass\nfindings: none`;
+  const at = (minute: number) => new Date(Date.UTC(2026, 9, 3, 10, minute, 0));
+  const outboxAt = (minute: number) => createOutbox(home, { now: () => at(minute) });
+
+  it("adds a Worker's report records created during its turn to its own record, once, with recordId", async () => {
+    const before = outboxAt(1).add(WS, { kind: "report", requestId: REQ, from: "agent-worker", to: "agent-manager", text: BLOCK.replace("phase: finished", "phase: received") });
+    noteTurnStart(asEvent(turnEnded()), () => at(2));
+    const made = outboxAt(3).add(WS, { kind: "report", requestId: REQ, from: "agent-worker", to: "agent-manager", text: BLOCK });
+    outboxAt(3).add(WS, { kind: "report", requestId: REQ, from: "agent-other", to: "agent-manager", text: BLOCK });
+    outboxAt(3).add(WS, { kind: "message", requestId: REQ, from: "agent-worker", to: "agent-manager", text: "Done." });
+    const built = await buildRecord(asEvent(turnEnded({ timeline: [userMessage("go"), assistantMessage("Done, reported.")] })), { location, now: () => at(4) });
+    expect(built?.record.reports).toMatchObject([{ agentId: "agent-worker", requestId: REQ, phase: "finished", recordId: made.id, at: at(3).toISOString() }]);
+    expect(built?.record.reports.map((report) => report.recordId)).not.toContain(before.id);
+    expect(built?.record.requestId).toBe(REQ);
+    // It round-trips through the trace record schema.
+    expect(traceRecordSchema.parse(built!.record).reports[0]?.recordId).toBe(made.id);
+  });
+
+  it("adds a Reviewer's review records to its own record's reviews", async () => {
+    const reviewer = { ...turnEnded().agent, id: "agent-reviewer", provider: "bm-reviewer/gpt-5.6", parentAgentId: "agent-worker" };
+    const made = outboxAt(3).add(WS, { kind: "review", requestId: REQ, batchId: "b1", from: "agent-reviewer", to: "agent-worker", text: REVIEW });
+    const built = await buildRecord(asEvent(turnEnded({ agent: reviewer, timeline: [userMessage("review b1")] })), { location, now: () => at(4) });
+    expect(built?.record.reviews).toMatchObject([{ agentId: "agent-reviewer", batchId: "b1", verdict: "pass", recordId: made.id }]);
+  });
+
+  it("never parses a delivery for reports: the Manager that receives it records a message from the plugin, not the owner", async () => {
+    const delivery = `BM-DELIVERY report out-0123456789ab\n${BLOCK}`;
+    const manager = { ...turnEnded().agent, id: "agent-manager", provider: "bm-manager", parentAgentId: null };
+    const built = await buildRecord(
+      asEvent(turnEnded({ agent: manager, timeline: [{ type: "user_message" as const, text: delivery, clientMessageId: "sdk-1" }, assistantMessage("Noted.")] })),
+      { location: null },
+    );
+    expect(built?.record.reports).toEqual([]);
+    expect(built?.record.sent[0]?.origin).toBe("agent");
+  });
+
+  it("the lenient reader takes phase stopped, and an old record without recordId still reads", () => {
+    expect(parseReports(BLOCK.replace("phase: finished", "phase: stopped"), { agentId: "w", at: "t" })[0]?.phase).toBe("stopped");
+    const old = { agentId: "w", at: "t", requestId: REQ, phase: "finished", tier: null, filesChanged: [], beadsCreated: [], beadsUpdated: [], beadsClosed: [], beadsReady: [], reviewFindingsOpen: null, buildAndTests: null, blockers: null, guardrail: null, unparsedFields: [] };
+    expect(traceRecordSchema.shape.reports.element.parse(old).recordId).toBeUndefined();
   });
 });
 

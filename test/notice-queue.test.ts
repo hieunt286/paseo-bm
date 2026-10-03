@@ -281,6 +281,69 @@ describe("enqueue", () => {
     expect(sends).toEqual([]);
   });
 
+  describe("a single notice's callbacks (design §16.7, the outbox)", () => {
+    const told = () => {
+      const events: string[] = [];
+      return {
+        events,
+        callbacks: {
+          onSent: (target: string, kind: string) => events.push(`sent ${target} ${kind}`),
+          onDropped: (target: string, kind: string, reason: string) => events.push(`dropped ${target} ${kind}: ${reason}`),
+        },
+      };
+    };
+
+    it("onSent fires when the notice goes out at once, and when it goes out at a later turn end", async () => {
+      const { paseo, set, queue, turnEnded } = world({ mgr: { status: "idle" }, wrk: { status: "running" } });
+      const now = told();
+      await expect(queue.enqueue("mgr", "report:out-000000000001", "BM-DELIVERY report out-000000000001\nx", paseo, now.callbacks)).resolves.toBe("sent");
+      expect(now.events).toEqual(["sent mgr report:out-000000000001"]);
+      const later = told();
+      await expect(queue.enqueue("wrk", "message:out-000000000002", "BM-DELIVERY message out-000000000002\ny", paseo, later.callbacks)).resolves.toBe("queued");
+      expect(later.events).toEqual([]);
+      set("wrk", { status: "idle" });
+      await turnEnded("wrk");
+      expect(later.events).toEqual(["sent wrk message:out-000000000002"]);
+    });
+
+    it("onDropped fires for a queued notice whose target is gone, or whose send failed — never for one replaced or cleared", async () => {
+      const { paseo, failing, set, queue, turnEnded } = world({ mgr: { status: "running" }, wrk: { status: "running" } });
+      const gone = told();
+      await queue.enqueue("mgr", "report:out-000000000001", "one", paseo, gone.callbacks);
+      set("mgr", { status: "idle", archivedAt: "2026-10-03T10:00:00.000Z" });
+      await turnEnded("mgr");
+      expect(gone.events).toEqual(["dropped mgr report:out-000000000001: the target is archived, closed or gone"]);
+
+      const failed = told();
+      failing.add("two");
+      await queue.enqueue("wrk", "report:out-000000000002", "two", paseo, failed.callbacks);
+      set("wrk", { status: "idle" });
+      await turnEnded("wrk");
+      expect(failed.events).toEqual(["dropped wrk report:out-000000000002: the send failed: daemon said no"]);
+
+      const replaced = told();
+      const cleared = told();
+      set("wrk", { status: "running" });
+      await queue.enqueue("wrk", "BM-TOOLS", "old", paseo, replaced.callbacks);
+      await queue.enqueue("wrk", "BM-TOOLS", "new", paseo, cleared.callbacks);
+      queue.clear();
+      expect(replaced.events).toEqual([]);
+      expect(cleared.events).toEqual([]);
+    });
+
+    it("a throwing callback costs one log line and nothing else", async () => {
+      const { paseo, sends, logs, queue } = world({ mgr: { status: "idle" } });
+      const outcome = await queue.enqueue("mgr", "BM-TOOLS", "tools", paseo, {
+        onSent: () => {
+          throw new Error("store is gone");
+        },
+      });
+      expect(outcome).toBe("sent");
+      expect(sends).toHaveLength(1);
+      expect(logs).toEqual(["[paseo-bm] after the BM-TOOLS notice to mgr was sent: store is gone"]);
+    });
+  });
+
   it.each([
     ["no target", "", "BM-TOOLS", "tools"],
     ["no kind", "mgr", " ", "tools"],

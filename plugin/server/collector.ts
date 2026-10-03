@@ -48,6 +48,7 @@ import { roleOfProvider, type BmRole } from "./agent-role";
 import { providerId } from "./provider-id";
 import { BOUNDARY_LABEL } from "./role-mode";
 import { knownRequestIdOf, sightRequestId } from "./request-registry";
+import { recordsCreatedBy, type OutboxRecord } from "./outbox";
 import {
   TraceStoreLockTimeout,
   appendRecord,
@@ -136,6 +137,28 @@ export interface CollectorDeps {
    * turn and only for a message that would otherwise be the owner's.
    */
   pluginSent?: (agentId: string, text: string, at: string | null) => boolean;
+  /**
+   * The `report` and `review` outbox records an agent created from `from`
+   * (null: no lower bound) to `to` (design §16.7). By default the outbox of
+   * the data folder the trace store lives in.
+   */
+  outboxRecords?: (workspaceId: string, agentId: string, from: string | null, to: string) => OutboxRecord[];
+}
+
+/**
+ * The reports and reviews a bound agent's tools stored during its turn
+ * (design §16.7): parsed from the outbox records themselves — never from a
+ * delivery's text — each with its `recordId`, so a reader keeps it once.
+ */
+export function outboxBlocksOf(records: readonly OutboxRecord[], agentId: string): { reports: ParsedReport[]; reviews: ParsedReview[] } {
+  const reports: ParsedReport[] = [];
+  const reviews: ParsedReview[] = [];
+  for (const record of records) {
+    const context = { agentId, at: record.createdAt };
+    if (record.kind === "report") reports.push(...parseReports(record.text, context).slice(0, 1).map((report) => ({ ...report, recordId: record.id })));
+    if (record.kind === "review") reviews.push(...parseReviews(record.text, context).slice(0, 1).map((review) => ({ ...review, recordId: record.id })));
+  }
+  return { reports, reviews };
 }
 
 /**
@@ -623,12 +646,24 @@ export async function buildRecord(
       received.push(message);
     }
     // A plugin notice quotes block names ("- BM-REVIEW checked: is missing"),
-    // which parsed as a review with the verdict "checked: is missing".
+    // which parsed as a review with the verdict "checked: is missing". An
+    // outbox delivery (`BM-DELIVERY report|review`, design §16.7) is one too:
+    // its report is recorded once, in its sender's turn, from the record.
     if (isPluginNotice(safe) || notice) continue;
     reports.push(...parseReports(safe, { agentId: event.agent.id, at }));
     // A review is its Reviewer's own reply: a block quoted in its prompt or
     // relayed by a Worker or Manager is the same review again (bead 7gxw.12).
     if (role === "reviewer" && item.type === "assistant_message") reviews.push(...parseReviews(safe, { agentId: event.agent.id, at }));
+  }
+
+  // Design §16.7: what a Worker's or Reviewer's tools stored during this turn goes in its own record,
+  // read from the outbox — from the turn's start mark (else its first timed item) to now.
+  const startedAt = startMarks.get(markKey(event.agent.id, event.turnId)) ?? null;
+  if (role === "worker" || role === "reviewer") {
+    const from = startedAt ?? (entries.length > 0 ? (timed[0]?.at ?? null) : null);
+    const stored = outboxBlocksOf(readOutbox(deps, event.agent.workspaceId, event.agent.id, from, endedAt), event.agent.id);
+    reports.push(...stored.reports);
+    reviews.push(...stored.reviews);
   }
 
   // Design §16.4: the agent's label only as far as the plugin trusts it — an agent whose creator is
@@ -660,7 +695,7 @@ export async function buildRecord(
     requestId: knownLabel ?? requestIdFromReports ?? requestIdFromPrompt ?? relayRequestId,
     parentAgentId: event.agent.parentAgentId,
     agentCreatedAt: null,
-    startedAt: startMarks.get(markKey(event.agent.id, event.turnId)) ?? null,
+    startedAt,
     endedAt,
     outcome: event.outcome.kind,
     sent,
@@ -676,6 +711,16 @@ export async function buildRecord(
 
   const cwd = typeof event.agent.cwd === "string" && event.agent.cwd !== "" ? event.agent.cwd : null;
   return { record, workspaceName: cwd === null ? null : basename(cwd) };
+}
+
+/** The outbox records of `deps`, or of the data folder beside the trace store. Never throws: none on a failure. */
+function readOutbox(deps: CollectorDeps, workspaceId: string, agentId: string, from: string | null, to: string): OutboxRecord[] {
+  try {
+    if (deps.outboxRecords !== undefined) return deps.outboxRecords(workspaceId, agentId, from, to);
+    return deps.location === null ? [] : recordsCreatedBy(dirname(deps.location.tracesDir), workspaceId, agentId, from, to);
+  } catch {
+    return [];
+  }
 }
 
 /**

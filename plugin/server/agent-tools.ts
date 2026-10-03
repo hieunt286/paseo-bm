@@ -56,11 +56,12 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { lstatSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { serverToolsFor, toolNamed, toolFacesFor, type ToolRole, type ToolFace } from "../shared/bm-tools";
+import { boundToolFacesFor, serverToolsFor, toolNamed, toolFacesFor, type ToolRole, type ToolFace } from "../shared/bm-tools";
 import {
   AGENT_TOOLS_SERVER,
   NO_BINDER,
   createBindingStore,
+  hasCreationTools,
   isBindingToken,
   isBoundRole,
   type AgentBinder,
@@ -70,6 +71,7 @@ import {
 } from "./agent-bindings";
 import { ensureDataHome, resolveDataHome, type DataHomeDeps } from "./data-home";
 import { UI_DIR_NAME } from "./data-home";
+import { createWorkerCreationTools } from "./create-worker";
 import { createManagerTools, type ServerTools } from "./decision-tools";
 import { createOrchestratorTools, type OrchestratorTools } from "./orchestrator-tools";
 import { createWorkerTools } from "./decision-ask";
@@ -134,9 +136,10 @@ export const BUILDER_SEND_LINES: Readonly<Record<string, string>> = {
  * The answer to one JSON-RPC message for `role`, or null for a notification.
  * Pure: the transport is `startAgentTools`. The Orchestrator's tool calls are
  * not answered here — they read and write plugin data — but by
- * `answerOrchestrator`.
+ * `answerOrchestrator`. `bound`: the caller was issued the creation tools
+ * (design §16.6), so `tools/list` shows them too.
  */
-export function answer(role: ToolRole, message: unknown): JsonRpcReply | null {
+export function answer(role: ToolRole, message: unknown, bound = false): JsonRpcReply | null {
   if (message === null || typeof message !== "object" || Array.isArray(message)) return failure(null, -32600, "Invalid Request");
   const { id, method, params } = message as JsonRpcRequest;
   if (typeof method !== "string") return failure(id, -32600, "Invalid Request");
@@ -151,7 +154,7 @@ export function answer(role: ToolRole, message: unknown): JsonRpcReply | null {
     case "ping":
       return reply(id, {});
     case "tools/list":
-      return reply(id, { tools: toolFacesFor(role).map(describe) });
+      return reply(id, { tools: toolFacesFor(role, bound).map(describe) });
     case "tools/call": {
       if (role === "orchestrator") return failure(id, -32603, "The Orchestrator's tools run on the plugin server");
       const call = (params ?? {}) as { name?: unknown; arguments?: unknown };
@@ -195,12 +198,14 @@ export async function answerWithServerTools(
   caller: ToolCaller | null = null,
 ): Promise<JsonRpcReply | null> {
   const { id, method, params } = (message ?? {}) as JsonRpcRequest;
+  // A caller issued the creation tools lists them (design §16.6); every other caller, today's list.
+  const bound = hasCreationTools(caller);
   if (method !== "tools/call" || id === undefined || message === null || typeof message !== "object" || Array.isArray(message)) {
-    return answer(role, message);
+    return answer(role, message, bound);
   }
   const call = (params ?? {}) as { name?: unknown; arguments?: unknown };
   if (typeof call.name !== "string" || !tools.has(call.name)) {
-    return role === "orchestrator" ? failure(id, -32602, `Unknown tool: ${String(call.name)}`) : answer(role, message);
+    return role === "orchestrator" ? failure(id, -32602, `Unknown tool: ${String(call.name)}`) : answer(role, message, bound);
   }
   const result = await tools.call(call.name, call.arguments ?? {}, caller);
   return result.ok
@@ -327,7 +332,7 @@ async function handle(request: IncomingMessage, response: ServerResponse, { secr
     if (reply !== null && "result" in reply && (message as JsonRpcRequest).method === "tools/call") {
       const name = String(((message as JsonRpcRequest).params as { name?: unknown }).name);
       const refused = (reply.result as { isError?: boolean }).isError === true;
-      const served = serverToolsFor(role).some((face) => face.name === name);
+      const served = [...serverToolsFor(role), ...boundToolFacesFor(role)].some((face) => face.name === name);
       log(
         role === "orchestrator"
           ? `[paseo-bm] ${name} ${refused ? "refused a call" : "answered"} for the orchestrator`
@@ -497,12 +502,30 @@ export interface StartOptions {
   orchestrator?: OrchestratorTools;
   /** The Manager's server-run tools (`bm_decisions`); `createManagerTools()` by default. */
   manager?: ServerTools;
+  /**
+   * The bound Manager's creating tool (`bm_create_worker`, design §16.6),
+   * served beside `manager`; `createWorkerCreationTools` with this endpoint's
+   * binder, Paseo handle and data folder by default.
+   */
+  createWorker?: ServerTools;
   /** The Worker's server-run tools (`bm_reply`, change-014 Ask back); `createWorkerTools()` by default. */
   worker?: ServerTools;
   /** The per-agent bindings; the data folder's `ui/agent-bindings.json` by default (design §16.5). */
   bindings?: BindingStore | null;
   /** The clock that stamps a new secret's `secretSince`; tests only. */
   now?: () => Date;
+}
+
+/**
+ * Two sets of server-run tools as one: a name `first` has is its; any other is
+ * `second`'s. The faces are both lists.
+ */
+export function joinServerTools(first: ServerTools, second: ServerTools): ServerTools {
+  return {
+    faces: [...first.faces, ...second.faces],
+    has: (name) => first.has(name) || second.has(name),
+    call: (name, input, caller) => (first.has(name) ? first.call(name, input, caller) : second.call(name, input, caller)),
+  };
 }
 
 /** The URL of a bound agent's own tool path, `<role URL>/<token>` (design §16.5). */
@@ -573,12 +596,21 @@ export function startAgentTools(options: StartOptions = {}): AgentToolsEndpoint 
   }
   const path = resolved.path;
   const orchestrator = options.orchestrator ?? createOrchestratorTools();
-  const manager = options.manager ?? createManagerTools();
   const worker = options.worker ?? createWorkerTools();
   const { secret, since: secretSince } = orchestratorSecretOf(secretPathOf(path), (options.now ?? (() => new Date()))(), log);
   // Beside the port and the secret: `<data folder>/ui/agent-bindings.json` (design §16.5).
   const bindings = options.bindings !== undefined ? options.bindings : bindingStoreBeside(path, log);
   let port: number | null = null;
+  const urlFor = (role: ToolRole): string | null =>
+    port === null ? null : `http://127.0.0.1:${port}/mcp/${role}${role === "orchestrator" ? `/${secret}` : ""}`;
+  const binder = binderOf(urlFor, bindings, log);
+  // The last Paseo handle a hook or RPC brought: the creating tools need one (design §16.6).
+  let paseoHandle: unknown = null;
+  const home = dirname(dirname(path));
+  const manager = joinServerTools(
+    options.manager ?? createManagerTools(),
+    options.createWorker ?? createWorkerCreationTools({ binder: () => binder, paseo: () => paseoHandle, home: () => home, log }),
+  );
   const server = createServer((request, response) => {
     handle(request, response, { secret, orchestrator, manager, worker, bindings, log }).catch(() => send(response, 500));
   });
@@ -599,13 +631,14 @@ export function startAgentTools(options: StartOptions = {}): AgentToolsEndpoint 
       log(`[paseo-bm] the agent tools endpoint failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   })();
-  const urlFor = (role: ToolRole): string | null =>
-    port === null ? null : `http://127.0.0.1:${port}/mcp/${role}${role === "orchestrator" ? `/${secret}` : ""}`;
   return {
     urlFor,
     bindings,
-    binder: binderOf(urlFor, bindings, log),
-    usePaseo: (paseo) => orchestrator.usePaseo(paseo),
+    binder,
+    usePaseo: (paseo) => {
+      if (paseo !== null && paseo !== undefined) paseoHandle = paseo;
+      orchestrator.usePaseo(paseo);
+    },
     secretSince,
     ready,
     // After `ready`: closing a server whose listen is still pending leaves that listen unanswered.
@@ -663,13 +696,14 @@ export function boundTokenOf(config: unknown, role: BoundRole, roleUrl: string |
  * `config` with the role's tool server added and its tools pre-approved, or
  * undefined when there is nothing to add (no URL, not a role with tools).
  * Keeps every server and approval already there; a `paseo-bm` entry is
- * replaced by `url`.
+ * replaced by `url`. `bound`: the agent is bound with the creation tools
+ * (design §16.6), which are pre-approved too.
  */
-export function withAgentTools<C extends object>(config: C, role: ToolRole, url: string | null): C | undefined {
+export function withAgentTools<C extends object>(config: C, role: ToolRole, url: string | null, bound = false): C | undefined {
   if (url === null) return undefined;
   const current = config as C & ToolConfig;
   const approved = current.toolPolicy?.preapproved ?? [];
-  const ours = toolFacesFor(role)
+  const ours = toolFacesFor(role, bound)
     .map((tool) => ({ kind: "mcp" as const, server: AGENT_TOOLS_SERVER, tool: tool.name }))
     .filter((ref) => !approved.some((known) => known.server === ref.server && known.tool === ref.tool));
   return {

@@ -233,6 +233,32 @@ function delivered(outcome: string): outcome is "sent" | "queued" {
   return outcome === "sent" || outcome === "queued";
 }
 
+/** What the checks of a send read (`commandRefusalOf`). */
+export type CommandCheck = Pick<CommandSend, "home" | "now" | "workspaceId" | "command" | "backstop" | "loopGuard" | "interrupt" | "store" | "log">;
+
+/**
+ * Why `spec` would be refused before anything leaves (the module comment's
+ * step 1), or null when it would go. Reads only: a caller that must act
+ * before the send — the plugin-created handoff successor (design §16.9) —
+ * checks first, so a refusal still creates nothing.
+ */
+export function commandRefusalOf(spec: CommandCheck): string | null {
+  const log = spec.log ?? ((message: string) => console.warn(message));
+  const { command, workspaceId, home, now } = spec;
+  const problems = commandInputProblems(command);
+  if (problems.length > 0) return `the command cannot be sent as a BM-COMMAND block: ${problems.join("; ")}`;
+  // A handoff goes on the owner's Settings switch, read now: off, it sends nothing (change-008 C3).
+  if (command.authority === COORDINATION_HANDOFF_AUTHORITY && !readCoordinationSettings({ home, log }).handoff.enabled) return HANDOFF_OFF_MESSAGE;
+  if (spec.backstop) {
+    const undeclared = undeclaredCategoriesOf(`${command.re}\n${command.body}`, command.effects ?? []);
+    if (undeclared.length > 0) return undeclaredRefusalOf(undeclared);
+  }
+  // The loop guard: an Orchestrator and a Manager answering each other stop here, before anything is sent.
+  if (spec.loopGuard === "refuse" && loopGuardFull(home, workspaceId, command.requestId ?? null, now, spec.store)) return COMMAND_LIMIT_MESSAGE;
+  if (spec.interrupt !== undefined && spec.interrupt.open !== true) return INTERRUPT_REFUSED_MESSAGE;
+  return null;
+}
+
 /**
  * Sends one command of the Orchestrator's (see the module comment). Resolves
  * with a refusal rather than throwing; only a queue that throws rejects —
@@ -241,21 +267,11 @@ function delivered(outcome: string): outcome is "sent" | "queued" {
 export async function sendCommand(spec: CommandSend): Promise<CommandSendResult> {
   const log = spec.log ?? ((message: string) => console.warn(message));
   const { command, workspaceId, home, now } = spec;
-  const refused = (reason: string): CommandSendResult => ({ ok: false, stage: "check", reason });
 
-  const problems = commandInputProblems(command);
-  if (problems.length > 0) return refused(`the command cannot be sent as a BM-COMMAND block: ${problems.join("; ")}`);
-  // A handoff goes on the owner's Settings switch, read now: off, it sends nothing (change-008 C3).
-  if (command.authority === COORDINATION_HANDOFF_AUTHORITY && !readCoordinationSettings({ home, log }).handoff.enabled) return refused(HANDOFF_OFF_MESSAGE);
-  if (spec.backstop) {
-    const undeclared = undeclaredCategoriesOf(`${command.re}\n${command.body}`, command.effects ?? []);
-    if (undeclared.length > 0) return refused(undeclaredRefusalOf(undeclared));
-  }
-  // The loop guard: an Orchestrator and a Manager answering each other stop here, before anything is sent.
+  const refusal = commandRefusalOf(spec);
+  if (refusal !== null) return { ok: false, stage: "check", reason: refusal };
   const requestId = command.requestId ?? null;
-  if (spec.loopGuard === "refuse" && loopGuardFull(home, workspaceId, requestId, now, spec.store)) return refused(COMMAND_LIMIT_MESSAGE);
   const interrupt = spec.interrupt !== undefined;
-  if (interrupt && spec.interrupt?.open !== true) return refused(INTERRUPT_REFUSED_MESSAGE);
 
   const text = commandBlockOf(command);
   const id = (spec.store?.newId ?? randomUUID)();
@@ -264,7 +280,7 @@ export async function sendCommand(spec: CommandSend): Promise<CommandSendResult>
   const queue = spec.queue ?? noticeQueue;
 
   const release = claimGrant(spec.grantOf);
-  if (release === null) return refused(`the grant of decision ${spec.grantOf} is being used by another command`);
+  if (release === null) return { ok: false, stage: "check", reason: `the grant of decision ${spec.grantOf} is being used by another command` };
   let outcome: "sent" | "queued";
   if (interrupt) {
     // The one send that replaces a running turn: the danger allowance is open (ADR-016 decision 2).

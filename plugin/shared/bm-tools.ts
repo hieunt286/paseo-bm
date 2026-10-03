@@ -1128,6 +1128,51 @@ export const MANAGER_SERVER_TOOLS: readonly ToolFace[] = [
   },
 ];
 
+/** `bm_create_worker`'s bounds (design §16.6). */
+export const CREATE_WORKER_LIMITS = { request: 20_000, contextItems: 20, fact: 500, source: 200 } as const;
+
+/**
+ * The tools only a bound agent issued the creation tools has (design §16.6,
+ * ADR-027 ship point C), run on the plugin server: they create agents. An
+ * unbound agent — and one bound before ship point C — never lists them.
+ */
+export const BOUND_SERVER_TOOLS: readonly ToolFace[] = [
+  {
+    name: "bm_create_worker",
+    role: "manager",
+    description:
+      "Create the Worker of one new request of the owner: paseo-bm generates its requestId, creates the Worker in your folder with its labels, mode and tools, and gives it its first prompt — the request verbatim, the requestId, the repository, the size when the owner stated one, your id and the context you pass. Every call is a new request, a BM-NEW-REQUEST included. Returns JSON { workerId, requestId }.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["request", "context"],
+      properties: {
+        request: { type: "string", minLength: 1, maxLength: CREATE_WORKER_LIMITS.request, description: "The owner's request, verbatim." },
+        size: { type: "string", enum: TIERS, description: "Only when the owner stated the size; leave it out otherwise." },
+        context: {
+          type: "array",
+          maxItems: CREATE_WORKER_LIMITS.contextItems,
+          description: "Facts that bear on the request — the owner's goals, earlier decisions, precedents, related requests — each with its source. Facts, never how to do the work. An empty list when there are none.",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["fact", "source"],
+            properties: {
+              fact: { type: "string", minLength: 1, maxLength: CREATE_WORKER_LIMITS.fact },
+              source: { type: "string", minLength: 1, maxLength: CREATE_WORKER_LIMITS.source, description: "Where the fact comes from: a message, a document, a decision id, a Worker id." },
+            },
+          },
+        },
+      },
+    },
+  },
+];
+
+/** The faces only a creation-bound `role` lists (`BOUND_SERVER_TOOLS`). */
+export function boundToolFacesFor(role: ToolRole): ToolFace[] {
+  return BOUND_SERVER_TOOLS.filter((candidate) => candidate.role === role);
+}
+
 // ---------------------------------------------------------------------------
 
 export const AGENT_TOOLS: readonly AgentTool[] = [
@@ -1175,11 +1220,14 @@ export function serverToolsFor(role: ToolRole): ToolFace[] {
 
 /**
  * Every tool an endpoint lists for `role`, and the creation hook pre-approves:
- * the Orchestrator's server-run tools first, then the role's own tools, then
- * the Worker's server-run `bm_reply`, then the Manager's server-run `bm_decisions`.
+ * for an agent bound with the creation tools (`bound`, design §16.6) its
+ * creating tools first; then the Orchestrator's server-run tools, the role's
+ * own tools, the Worker's server-run `bm_reply` and the Manager's server-run
+ * `bm_decisions`.
  */
-export function toolFacesFor(role: ToolRole): ToolFace[] {
+export function toolFacesFor(role: ToolRole, bound = false): ToolFace[] {
   return [
+    ...(bound ? boundToolFacesFor(role) : []),
     ...ORCHESTRATOR_SERVER_TOOLS.filter((candidate) => candidate.role === role),
     ...toolsFor(role),
     ...WORKER_SERVER_TOOLS.filter((candidate) => candidate.role === role),

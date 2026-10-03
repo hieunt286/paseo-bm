@@ -52,6 +52,7 @@ describe("the alerts file", () => {
       "pairing-mismatch",
       "outdated-agent",
       "fallback-failed",
+      "delivery-dropped",
       "coordination-off",
       "boundary-off",
     ]);

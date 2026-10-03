@@ -125,7 +125,13 @@ export const guardrailReportSchema = z.object({
   raw: z.string(),
 });
 
-/** Milestone of a `BM-REPORT` block (roles/worker.md, Reporting). */
+/**
+ * Milestone of a `BM-REPORT` block (roles/worker.md, Reporting). `stopped`
+ * (design §16.11) is a bound Worker's report on a stop: not finished and not
+ * blocked, so every reader treats it as neither. A build older than it fails
+ * to read a record holding one and skips that record (the downgrade exception
+ * of §16.11).
+ */
 export const reportPhaseSchema = z.enum([
   "received",
   "documents-done",
@@ -133,6 +139,7 @@ export const reportPhaseSchema = z.enum([
   "bead-implemented",
   "blocked",
   "finished",
+  "stopped",
 ]);
 
 /**
@@ -175,6 +182,12 @@ export const parsedReportSchema = z.object({
    * existed still pass `traceRecordSchema` (the store drops undeclared keys).
    */
   incompleteFields: z.array(z.string()).default([]),
+  /**
+   * The outbox record a tool-built report came from (design §16.7, §16.11):
+   * the same report is read once per record id. Absent on a report parsed
+   * from a message's text.
+   */
+  recordId: z.string().optional(),
 });
 
 /** One parsed `BM-REVIEW` from a Reviewer (roles/reviewer.md). */
@@ -184,6 +197,8 @@ export const parsedReviewSchema = z.object({
   batchId: z.string().nullable(),
   verdict: z.string().nullable(),
   blockingCount: z.number().int().nonnegative().nullable(),
+  /** The outbox record a tool-built review came from (design §16.7, §16.11); absent otherwise. */
+  recordId: z.string().optional(),
 });
 
 /** A message the Dashboard shows as "sent" or "received" (REQ-043a, REQ-043b). */

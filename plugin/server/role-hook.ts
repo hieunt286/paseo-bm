@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import type { PluginBeforeRequests, PluginServerContext } from "@getpaseo/plugin/server";
 import { roleOfProvider } from "./agent-role";
 import { TOOL_PROVIDERS, boundTokenOf, boundUrlOf, withAgentTools, withoutAgentTools, type AgentToolsEndpoint } from "./agent-tools";
-import { isBoundRole } from "./agent-bindings";
+import { hasCreationTools, isBoundRole } from "./agent-bindings";
 import { aliasBases } from "./alias-bases";
 import { providerId } from "./provider-id";
 import {
@@ -560,12 +560,17 @@ export function applyAgentTools(request: AgentCreateRequest, tools: RoleHookTool
     // Every role has its own path. The Orchestrator's carries the endpoint's secret and serves its
     // read tools and its decision and command tools — and it never gets Paseo's tools (orchestrator design §3.1, §5.1).
     let url = roleUrl;
+    let creationTools = false;
     if (isBoundRole(role) && tools.bindings !== null && tools.bindings !== undefined) {
       const token = boundTokenOf(request.config, role, roleUrl);
       // The last step of the hook: after this nothing drops the URL, so the attachment is true.
-      if (token !== null && tools.bindings.attach(token, role)) url = boundUrlOf(roleUrl, token);
+      if (token !== null && tools.bindings.attach(token, role)) {
+        url = boundUrlOf(roleUrl, token);
+        // Issued with the creation tools (design §16.6): those are pre-approved too.
+        creationTools = hasCreationTools(tools.bindings.callerOf(token, role));
+      }
     }
-    const config = withAgentTools(request.config, role, url);
+    const config = withAgentTools(request.config, role, url, creationTools);
     return config === undefined ? undefined : { ...request, config };
   } catch {
     return undefined;

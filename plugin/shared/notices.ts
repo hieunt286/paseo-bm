@@ -105,6 +105,47 @@ export const ANSWER_NOTICE_MARKER = "BM-ANSWER";
 export const DELIVERY_NOTICE_MARKER = "BM-DELIVERY";
 
 /**
+ * The kinds of an outbox record (design §16.7): what a bound agent's tool
+ * stored and the plugin delivers, each as `BM-DELIVERY <kind> <recordId>` on
+ * its first line, the text after it.
+ */
+export const DELIVERY_KINDS = ["report", "review", "message", "no-verdict"] as const;
+export type DeliveryKind = (typeof DELIVERY_KINDS)[number];
+
+/** An outbox record's id: `out-` + 12 lowercase hex digits. */
+export const OUTBOX_RECORD_ID_PATTERN = /^out-[0-9a-f]{12}$/;
+
+/** The fixed sentence of a `no-verdict` delivery (design §16.7). */
+export const NO_VERDICT_SENTENCE =
+  "The Reviewer ended its turn without a verdict. Ask it once more with bm_rereview, or report this batch as not reviewed.";
+
+/** The first line of a delivery: `BM-DELIVERY <kind> <recordId>`. */
+export function deliveryLineOf(kind: DeliveryKind, recordId: string): string {
+  return `${DELIVERY_NOTICE_MARKER} ${kind} ${recordId}`;
+}
+
+/** A delivery's marker line read back. */
+export interface ParsedDelivery {
+  kind: DeliveryKind;
+  recordId: string;
+  /** Everything after the marker line. */
+  body: string;
+}
+
+const DELIVERY_LINE = new RegExp(`^${DELIVERY_NOTICE_MARKER}[ \\t]+(${DELIVERY_KINDS.join("|")})[ \\t]+(out-[0-9a-f]{12})[ \\t]*(?:\\r?\\n|$)`);
+
+/**
+ * The kind, record id and text of an outbox delivery, or null for any other
+ * text — `BM-DELIVERY answers` included, which carries no record id. Pure.
+ */
+export function parseDelivery(text: unknown): ParsedDelivery | null {
+  if (typeof text !== "string") return null;
+  const found = DELIVERY_LINE.exec(text);
+  if (found === null) return null;
+  return { kind: found[1] as DeliveryKind, recordId: found[2]!, body: text.slice(found[0].length) };
+}
+
+/**
  * First line of the state brief the plugin sends a Manager or a Worker right
  * after the compaction the Orchestrator asked for (`server/compaction.ts`,
  * autonomy design §G.5 step 4): what the stores hold, so what matters is

@@ -242,9 +242,21 @@ const MISSING_REQUEST_TEXT =
  * while holding F-2's reports, and F-1's state, tier and guardrail were then
  * read off F-2's `finished` report. A report that names a different request is
  * never evidence about this one, whatever record it arrived in.
+ *
+ * A tool-built report carries its outbox `recordId` (design §16.7): one the
+ * request already holds (`held`), or one earlier in `reports`, is the same
+ * report again — a delivery that reached its target twice across a reload —
+ * and is dropped.
  */
-function reportsBelongingTo(requestId: string | null, reports: readonly ParsedReport[]): ParsedReport[] {
-  return reports.filter((report) => report.requestId === null || report.requestId === requestId);
+export function reportsBelongingTo(requestId: string | null, reports: readonly ParsedReport[], held: readonly ParsedReport[] = []): ParsedReport[] {
+  const seen = new Set(held.flatMap((report) => (report.recordId === undefined ? [] : [report.recordId])));
+  return reports.filter((report) => {
+    if (report.requestId !== null && report.requestId !== requestId) return false;
+    if (report.recordId === undefined) return true;
+    if (seen.has(report.recordId)) return false;
+    seen.add(report.recordId);
+    return true;
+  });
 }
 
 /**
@@ -305,7 +317,7 @@ function openBuckets(records: readonly TraceRecord[]): { buckets: Bucket[]; byRe
     if (at < bucket.from) bucket.from = at;
     if (bucket.to < record.at) bucket.to = record.at;
     bucket.trace.records.push(record);
-    bucket.trace.reports.push(...reportsBelongingTo(bucket.trace.requestId, record.reports));
+    bucket.trace.reports.push(...reportsBelongingTo(bucket.trace.requestId, record.reports, bucket.trace.reports));
     bucket.trace.reviews.push(...ownReviewsOf(record));
   };
 
@@ -618,7 +630,7 @@ export function reconstructTraces(options: ReconstructOptions): ReconstructedTra
     for (const report of record.reports) {
       const bucket = report.requestId === null ? undefined : byRequest.get(report.requestId);
       if (bucket === undefined) continue;
-      bucket.trace.reports.push(report);
+      bucket.trace.reports.push(...reportsBelongingTo(bucket.trace.requestId, [report], bucket.trace.reports));
       if (bucket.to < record.at) bucket.to = record.at;
     }
   }
@@ -718,7 +730,7 @@ export function reconstructTraces(options: ReconstructOptions): ReconstructedTra
     const take = (record: TraceRecord): void => {
       held.add(record);
       trace.records.push(record);
-      trace.reports.push(...reportsBelongingTo(trace.requestId, record.reports));
+      trace.reports.push(...reportsBelongingTo(trace.requestId, record.reports, trace.reports));
       // Only a Reviewer's own answers: a quoted or relayed block is the same review again (bead 7gxw.12).
       trace.reviews.push(...ownReviewsOf(record));
     };
@@ -743,13 +755,14 @@ export function reconstructTraces(options: ReconstructOptions): ReconstructedTra
     // whichever report was appended last). The same report also arrives twice —
     // from a Worker's turn and from the Manager turn quoting it — as two parsed
     // objects, so it is de-duplicated on the design's key, not on identity.
+    // A tool-built report or review is keyed by its outbox record (design §16.7).
     trace.reports = uniqueBy(
       [...trace.reports].sort(byAt),
-      (report) => `${report.agentId}|${report.phase ?? ""}|${report.requestId ?? ""}|${report.at}`,
+      (report) => (report.recordId !== undefined ? `record:${report.recordId}` : `${report.agentId}|${report.phase ?? ""}|${report.requestId ?? ""}|${report.at}`),
     );
     trace.reviews = uniqueBy(
       [...trace.reviews].sort(byAt),
-      (review) => `${review.agentId}|${review.batchId ?? ""}|${review.verdict ?? ""}|${review.at}`,
+      (review) => (review.recordId !== undefined ? `record:${review.recordId}` : `${review.agentId}|${review.batchId ?? ""}|${review.verdict ?? ""}|${review.at}`),
     );
     trace.records.sort(byAt);
     trace.segments = segmentsOf(trace);

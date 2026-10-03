@@ -41,6 +41,7 @@ const PHASES: readonly ReportPhase[] = [
   "bead-implemented",
   "blocked",
   "finished",
+  "stopped",
 ];
 
 const TIERS: readonly Tier[] = ["Small", "Medium", "Large"];

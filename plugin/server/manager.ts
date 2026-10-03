@@ -208,8 +208,8 @@ export interface EnsureManagerDeps {
   home?: string | null;
   /**
    * Binds a new Manager to its own tool path when its base provider can take
-   * the tools (design §16.5); the endpoint's binder in the plugin, none
-   * (unbound) when absent. Its tools stay builders in this step.
+   * the tools (design §16.5), with the creation tools (§16.6); the endpoint's
+   * binder in the plugin, none (unbound) when absent.
    */
   binder?: AgentBinder | null;
 }
@@ -628,14 +628,15 @@ export async function createManager(
   const alias = providerId(selection) ?? selection;
   const source = alias === MANAGER_PROFILE_ID ? `profile "${MANAGER_PROFILE_ID}"` : `provider "${selection}"`;
 
-  // Design §16.5: bound to its own tool path when its alias's base provider can take the tools.
+  // Design §16.5: bound to its own tool path when its alias's base provider can take the tools,
+  // with the creation tools (§16.6, ship point C): `bm_create_worker`.
   const binder = options.binder ?? null;
   const base = binder === null ? null : ((await aliasBases(paseo))[alias] ?? null);
   let handle: ManagerAgentHandle;
   try {
     handle = await createBound(
       binder,
-      { role: "manager", base, workspaceId },
+      { role: "manager", base, workspaceId, creationTools: true },
       (mcpServers) =>
         paseo.workspaces.ref(workspaceId).agents.create({
           config: {

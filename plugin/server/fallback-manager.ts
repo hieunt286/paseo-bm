@@ -21,6 +21,7 @@
  * 7. A creation that fails records `failed` and returns
  *    `E_FALLBACK_CREATE_FAILED`, never back to `pending`.
  */
+import type { AgentBinder } from "./agent-bindings";
 import { unusableDataHomeMessage } from "./data-home";
 import { peersOfWorkspace } from "./chat-peers";
 import { createLocationResolver, resolveLocationFromPaseo } from "./collector";
@@ -55,6 +56,12 @@ export interface ManagerSwitchDeps {
   handover?: (incident: FallbackIncident, deps: { paseo: unknown; location: TraceStoreLocation | null; incidents: readonly FallbackIncident[] | null }) => Promise<string>;
   /** The workspace trace store; the collector's resolver by default. */
   location?: (paseo: unknown) => Promise<TraceStoreLocation | null>;
+  /**
+   * Binds the replacement Manager to its own tool path, with the creation
+   * tools, when its base provider can take them (design §16.5, §16.6); the
+   * endpoint's binder in the plugin, none (unbound) when absent.
+   */
+  binder?: AgentBinder | null;
 }
 
 /** The mode and features the replacement Manager starts with, by the candidate provider's capability. */
@@ -137,6 +144,8 @@ export function createManagerSwitch(deps: ManagerSwitchDeps = {}): FallbackActio
         labels: { [REPLACES_LABEL]: current.agentId, ...(posture.modeId !== undefined ? { [MODE_SET_LABEL]: posture.modeId } : {}) },
         prompt,
         readInstructions: (workspaceId) => readInstructions(paseo, workspaceId),
+        binder: deps.binder ?? null,
+        log,
       });
     } catch (error) {
       const detail = `could not create the fallback Manager on ${candidate.alias}/${candidate.model}: ${reasonOf(error)}`;

@@ -23,8 +23,8 @@
  *   counts as missing and is logged once per agent per run.
  *   `knownRequestIdOf` is the one way the plugin reads that label.
  * - **Bounds**: at most 2,000 requests per workspace; the oldest finished go
- *   first, then the oldest; a request `keepRequest` holds (a pending outbox
- *   record, step 4) is never dropped.
+ *   first, then the oldest; a request with a `pending` or `queued` outbox
+ *   record (`outbox.ts`, §16.7) is never dropped.
  *
  * Readers never throw; a store that cannot be read reads as empty.
  */
@@ -34,6 +34,7 @@ import { z } from "zod";
 import { roleOfProvider } from "./agent-role";
 import { createBindingStore, type AgentBinding } from "./agent-bindings";
 import { createJsonFileStore, entriesOf, type JsonFileStore } from "./data-files";
+import { createOutbox } from "./outbox";
 import { dataHome } from "./rpc-kit";
 import { WORKSPACE_ID_PATTERN, readRecords } from "./trace-store";
 
@@ -161,8 +162,8 @@ export interface RequestRegistryDeps {
   /** The requests a new workspace file starts with; that workspace's trace records by default (`requestsFromTraces`). */
   backfill?: (workspaceId: string) => RegisteredRequest[];
   /**
-   * True for a request the bound must not drop: one with a pending outbox
-   * record. The outbox (design §16.7) plugs in here; none by default.
+   * True for a request the bound must not drop: one with a `pending` or
+   * `queued` outbox record (design §16.7) — the data folder's outbox by default.
    */
   keepRequest?: (workspaceId: string, requestId: string) => boolean;
 }
@@ -187,6 +188,28 @@ export interface RequestRegistry {
   addWorker(workspaceId: string, requestId: string, workerId: string): boolean;
 }
 
+/**
+ * The registry's default drop guard (§16.4): a request with a `pending` or
+ * `queued` outbox record. Each guard reads the outbox once, at its first
+ * question, so make one per trim.
+ * A store that cannot be read keeps nothing.
+ */
+export function outboxKeeps(home: string): (workspaceId: string, requestId: string) => boolean {
+  let read: { workspaceId: string; open: Set<string> } | null = null;
+  return (workspaceId, requestId) => {
+    if (read === null || read.workspaceId !== workspaceId) {
+      const open = new Set(
+        createOutbox(home)
+          .list(workspaceId)
+          .filter((record) => record.state === "pending" || record.state === "queued")
+          .map((record) => record.requestId),
+      );
+      read = { workspaceId, open };
+    }
+    return read.open.has(requestId);
+  };
+}
+
 /** Parsed files by path, kept while the file's identity (mtime, size, inode) does not change. */
 const readCache = new Map<string, { key: string; requests: RegisteredRequest[] }>();
 
@@ -209,7 +232,8 @@ export function clearRequestRegistryCache(): void {
 export function createRequestRegistry(home: string, deps: RequestRegistryDeps = {}): RequestRegistry {
   const now = deps.now ?? (() => new Date());
   const log = deps.log ?? ((message: string) => console.warn(message));
-  const keep = deps.keepRequest ?? (() => false);
+  // A fresh read of the outbox per trim: the guard must see the records of now.
+  const keepFor = (): ((workspaceId: string, requestId: string) => boolean) => deps.keepRequest ?? outboxKeeps(home);
   const backfill = deps.backfill ?? ((workspaceId: string) => requestsFromTraces(home, workspaceId, log));
 
   const fileOf = (workspaceId: string): JsonFileStore<RegistryFile> =>
@@ -221,7 +245,7 @@ export function createRequestRegistry(home: string, deps: RequestRegistryDeps = 
       versionKey: "schemaVersion",
       parse: (body) => ({ requests: entriesOf(requestSchema, body["requests"]) }),
       empty: () => ({ requests: [] }),
-      cap: (value) => ({ requests: capRequests(workspaceId, value.requests, keep) }),
+      cap: (value) => ({ requests: capRequests(workspaceId, value.requests, keepFor()) }),
       codes: { unwritable: "E_TRACE_STORE_UNWRITABLE" },
       // The ids of requests in flight: a file that cannot be read is fixed or deleted by hand, never replaced.
       keepUnusable: true,

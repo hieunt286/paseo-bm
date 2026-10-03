@@ -187,7 +187,9 @@ describe("BM-REPORT rules", () => {
 
   it("requestId, phase and tier values", () => {
     expect(issuesOf(report({ requestId: "req-2026-09-18" }))).toEqual(['requestId: must look like req-YYYYMMDDTHHMMSSZ (got "req-2026-09-18")']);
-    expect(issuesOf(report({ phase: "done" }))).toEqual(['phase: must be one of received, beads-done, blocked, finished (got "done")']);
+    expect(issuesOf(report({ phase: "done" }))).toEqual(['phase: must be one of received, beads-done, blocked, finished, stopped (got "done")']);
+    // Design §16.11: a bound Worker's report on a stop is a valid phase, with no questions after it.
+    expect(issuesOf(report({ phase: "stopped" }))).toEqual([]);
     expect(issuesOf(report({ tier: "Large" }))).toEqual([
       'tier: must be "Small|Medium|Large (changed: no)" or "… (changed: from <tier>, <reason>)"; a short note may follow either',
     ]);

@@ -75,8 +75,8 @@ export interface SwitchDeps {
   location?: (paseo: unknown) => Promise<TraceStoreLocation | null>;
   /**
    * Binds the replacement Worker to its own tool path when its base provider
-   * can take the tools (design §16.5); the endpoint's binder in the plugin,
-   * none (unbound) when absent. Its tools stay builders in this step.
+   * can take the tools (design §16.5), with the creation tools (§16.6); the
+   * endpoint's binder in the plugin, none (unbound) when absent.
    */
   binder?: AgentBinder | null;
 }
@@ -179,6 +179,7 @@ export function createWorkerSwitch(deps: SwitchDeps = {}): FallbackAction {
           workspaceId: current.workspaceId,
           requestId: current.requestId,
           parentId: current.managerId,
+          creationTools: true,
         };
         created = await createBound(
           deps.binder,

@@ -7,7 +7,8 @@ import { z } from "zod";
  * wrong role, an agent on older instructions, a fallback action that failed,
  * compaction or handoff switched off below A-12's target (§G.3, §G.7), two agents writing one file
  * in overlapping turns (§F.1), a Worker or Reviewer running without the
- * action boundary in a project where it is on (§D.2, change-010 C6).
+ * action boundary in a project where it is on (§D.2, change-010 C6), a
+ * report, review or message the plugin could not deliver (design §16.7).
  *
  * Kept in `<data folder>/inbox/alerts.json` (`server/alert-store.ts`), shared
  * here so the Inbox (part b) reads the same shape. An alert is data the Inbox
@@ -28,6 +29,7 @@ export const ALERT_KINDS = [
   "pairing-mismatch",
   "outdated-agent",
   "fallback-failed",
+  "delivery-dropped",
   "coordination-off",
   "boundary-off",
 ] as const;
@@ -46,7 +48,8 @@ export const MAX_ALERT_DETAIL_CHARS = 300;
  * the request key (`request-stalled`), the Worker's id (`permission-waiting`,
  * `danger`, `stuck`), the agent's id (`pairing-mismatch`, `outdated-agent`,
  * `boundary-off`),
- * the decision's id (`fallback-failed`) or the mechanism
+ * the decision's id (`fallback-failed`), the request's id (`delivery-dropped`,
+ * the record in its detail) or the mechanism
  * (`coordination-off`: `compact` or `handoff`, for every project) or the file,
  * relative to the workspace folder (`writers-observed`).
  * `workspaceId` is null when the project is not known (an agent created

@@ -2,7 +2,14 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createBindingStore, type AgentBinder, type BindingStore } from "../plugin/server/agent-bindings";
+import { binderOf } from "../plugin/server/agent-tools";
 import { COMMAND_LIMIT_PER_REQUEST, HANDOFF_OFF_MESSAGE, commandsSentFor, sendCommand } from "../plugin/server/command-send";
+import { WORKER_TITLE } from "../plugin/server/create-worker";
+import { createRequestRegistry } from "../plugin/server/request-registry";
+import { applyAgentTools, type AgentCreateRequest } from "../plugin/server/role-hook";
+import { originOf } from "../plugin/shared/message-origin";
+import { PLUGIN_VERSION } from "../plugin/shared/version";
 import { createCoordinationStore } from "../plugin/server/coordination-store";
 import { clearDecisionStoreCache } from "../plugin/server/decision-store";
 import {
@@ -12,6 +19,7 @@ import {
   createHandoffRunner,
   handoffBriefOf,
   handoffCommandOf,
+  handoffInfoOf,
   handoffSafePointIn,
   noteIn,
   noteRequestOf,
@@ -33,7 +41,7 @@ import { requestFinishOf } from "../plugin/shared/evidence";
 import { HANDOFF_BRIEF_MARKER, holdsHandoffBrief } from "../plugin/shared/handoff";
 import { HANDOFF_NOTICE_MARKER, REPLACED_NOTICE_MARKER, isPluginNotice } from "../plugin/shared/notices";
 import { COORDINATION_HANDOFF_AUTHORITY, parseCommandBlock } from "../plugin/shared/orchestrator-command";
-import { fakePaseo, type FakePaseo } from "./helpers/fake-paseo";
+import { fakePaseo, type FakeCreateRequest, type FakePaseo, type FakePaseoOptions } from "./helpers/fake-paseo";
 import { MANAGER, REVIEWER, WORKER, WORKSPACE_ID, msg, report, turn } from "./fixtures/orchestrator-traces";
 
 /**
@@ -156,8 +164,11 @@ async function store(...records: TraceRecord[]): Promise<void> {
 }
 
 /** The daemon: an Orchestrator, a Manager, its Worker of the request and the Worker's Reviewer. */
-function daemon(options: { worker?: string; manager?: string; workerLabels?: Record<string, string>; workerArchived?: boolean; managerArchived?: boolean } = {}): FakePaseo<unknown> {
+function daemon(
+  options: { worker?: string; manager?: string; workerLabels?: Record<string, string>; workerArchived?: boolean; managerArchived?: boolean; extra?: Partial<FakePaseoOptions> } = {},
+): FakePaseo<unknown> {
   return fakePaseo({
+    ...options.extra,
     agents: [
       {
         id: ORCHESTRATOR,
@@ -202,8 +213,9 @@ function daemon(options: { worker?: string; manager?: string; workerLabels?: Rec
 /** Read-only git as the brief runs it: a branch and a diff stat. */
 const git = async (args: readonly string[]) => ({ stdout: args.includes("rev-parse") ? "feature/invoice-date\n" : " 3 files changed, 40 insertions(+), 5 deletions(-)\n" });
 
-function runnerOf(): HandoffRunner {
+function runnerOf(binder?: () => AgentBinder | null): HandoffRunner {
   return createHandoffRunner({
+    ...(binder === undefined ? {} : { binder }),
     home: () => home,
     now: () => clock,
     queue,
@@ -512,6 +524,173 @@ describe("the whole sequence (design §G.6) with the one fake daemon", () => {
     );
     clock = new Date(clock.getTime() + 60 * MIN);
     expect(handoffs().expire().map((ended) => [ended.id, ended.state, ended.ending])).toEqual([[waiting.id, "dropped", "no-safe-point"]]);
+  });
+});
+
+describe("a bound Manager: the plugin creates the successor, the Manager is informed only (design §16.9)", () => {
+  const ROLE_URL = (role: string) => `http://127.0.0.1:4567/mcp/${role}`;
+
+  /** The Manager's binding as `manager.ensure` leaves it: issued (with or without the creation tools), attached, bound. */
+  function bindManager(bindings: BindingStore, creationTools: boolean): void {
+    const { token, tokenSha256 } = bindings.issue({ role: "manager", workspaceId: WORKSPACE_ID, creationTools });
+    bindings.attach(token, "manager");
+    bindings.settle(tokenSha256, MANAGER);
+  }
+
+  /** The daemon with a bm-worker profile on Claude; each creation runs the hook's part that keeps the token URL. */
+  function boundDaemon(bindings: BindingStore, hooks: { created?: (request: FakeCreateRequest) => void; onSend?: (message: { id: string; text: string }) => void } = {}): FakePaseo<unknown> {
+    const created = hooks.created ?? (() => {});
+    return daemon({
+      extra: {
+        ...(hooks.onSend === undefined ? {} : { onSend: hooks.onSend }),
+        config: { agentProfiles: [{ id: "bm-worker", provider: "bm-worker", model: "claude-opus-5" }], providers: { "bm-worker": { extends: "claude" } }, mcp: { injectIntoAgents: true } },
+        providers: { modes: { "bm-worker": [{ id: "default", colorTier: "safe" }, { id: "bypassPermissions", colorTier: "dangerous" }] } },
+        created: (request) => {
+          created(request);
+          applyAgentTools({ config: { ...request.config, cwd: request.cwd } } as unknown as AgentCreateRequest, { urlFor: ROLE_URL, bindings }, "claude");
+          return {};
+        },
+      },
+    });
+  }
+
+  /** The handoff accepted, the note asked, and the note turn recorded: the step where the successor is made. */
+  async function upToTheBrief(fake: FakePaseo<unknown>, runner: HandoffRunner, between: () => void = () => {}): Promise<void> {
+    await handoff(toolsOf(fake, runner));
+    between();
+    clock = new Date(T0 + 32 * MIN);
+    const posted = `BM-REPORT\nrequestId: ${REQUEST}\nphase: beads-done\ntier: Large (changed: no)\nfilesChanged: src/invoice/date.ts\nbeadsCreated: none\nbeadsUpdated: none\nbeadsClosed: bm-d1\nbeadsReady: bm-d2\nreviewFindingsOpen: none\nbuildAndTests: \`npm test\` pass\nskillsUsed: none\ndecided: none\nblockers: none\nhandoffNote: Parsing is done; next, bm-d2.`;
+    fake.byId(WORKER)!.status = "idle";
+    await runner.turnRecorded({ agent: { id: WORKER }, timeline: [] }, workerTurn(32, { startedAt: iso(T0 + 31 * MIN), reports: parseReports(posted, { agentId: WORKER, at: iso(T0 + 32 * MIN) }) }), fake.paseo);
+  }
+
+  it("from the stored brief to a bound successor: labels, token, BM-BRIEF line, workerIds, BM-REPLACED, and an informational command the loop guard counts", async () => {
+    await store(...heavyRequest());
+    const bindings = createBindingStore(home);
+    bindManager(bindings, true);
+    // The request as bm_create_worker registered it: the bound Manager is its managerId.
+    createRequestRegistry(home).register(WORKSPACE_ID, REQUEST, { source: "tool", managerId: MANAGER, workerId: WORKER });
+    const fake = boundDaemon(bindings);
+    const runner = runnerOf(() => binderOf(ROLE_URL, bindings, (line) => logs.push(line)));
+    await upToTheBrief(fake, runner);
+
+    // The plugin created the successor itself, once.
+    expect(fake.creates).toHaveLength(1);
+    const [entry] = handoffs().list();
+    const successorId = entry!.successorId!;
+    expect(successorId).toBe("created-1");
+    const { options } = fake.creates[0]!;
+    expect(options).toMatchObject({
+      config: { provider: "bm-worker/claude-opus-5", modeId: "bypassPermissions" },
+      cwd: "/work/invoice-app",
+      parent: MANAGER,
+      title: WORKER_TITLE,
+      labels: { "bm.role": "worker", "bm.requestId": REQUEST, "bm.version": PLUGIN_VERSION, [HANDOFF_FROM_LABEL]: WORKER },
+    });
+    const prompt = options.prompt!;
+    expect(prompt.split("\n").slice(0, 2)).toEqual([`BM-BRIEF worker requestId: ${REQUEST}`, `${HANDOFF_BRIEF_MARKER} ${entry!.id}`]);
+    expect(prompt).toBe(`BM-BRIEF worker requestId: ${REQUEST}\n${entry!.brief}`);
+    expect(originOf({ text: prompt, clientMessageId: "m-1" })).toBe("plugin-prompt");
+    // A bound token, with the creation tools.
+    expect(bindings.bindingOfAgent(successorId)).toMatchObject({ role: "worker", state: "bound", requestId: REQUEST, parentId: MANAGER, creationTools: true });
+
+    // The request keeps its id and its Manager; the successor is its newest Worker.
+    expect(createRequestRegistry(home).get(WORKSPACE_ID, REQUEST)).toMatchObject({ managerId: MANAGER, workerIds: [WORKER, successorId] });
+
+    // The note request, the Manager's information, then the outgoing Worker's BM-REPLACED.
+    expect(fake.sends.map((sent) => sent.id)).toEqual([WORKER, MANAGER, WORKER]);
+    const block = parseCommandBlock(fake.sends[1]!.text)!;
+    expect(block).toMatchObject({ from: "orchestrator", to: "manager", requestId: REQUEST, intent: "handoff", authority: COORDINATION_HANDOFF_AUTHORITY, effects: [], approved: [] });
+    expect(block.body).toBe(handoffInfoOf(entry!, successorId));
+    expect(block.body).toContain(`from Worker ${WORKER} to Worker ${successorId}`);
+    expect(block.body).toContain("Nothing is asked of you");
+    expect(block.body).not.toContain("create_agent");
+    expect(block.body).not.toContain(HANDOFF_BRIEF_MARKER);
+    expect(fake.sends[2]!.text).toBe(replacedNoticeOf({ requestId: REQUEST }, successorId));
+    // Counted by the loop guard.
+    expect(commandsSentFor(createOrchestratorStore(home).listCommands(), WORKSPACE_ID, REQUEST, clock)).toBe(1);
+    expect(entry).toMatchObject({ state: "done", ending: null, commandId: createOrchestratorStore(home).listCommands()[0]!.id });
+    expect(labelled).toEqual([{ id: WORKER, labels: { [REPLACED_BY_LABEL]: successorId } }]);
+    expect(fake.archives).toEqual([]);
+
+    // Its agent.created completes nothing more, and says nothing.
+    expect(await runner.agentCreated({ id: successorId, provider: "bm-worker/claude-opus-5", parentAgentId: MANAGER, workspaceId: WORKSPACE_ID }, fake.paseo)).toBeNull();
+    expect(logs.join("\n")).not.toMatch(/no handoff of that Worker/);
+    expect(fake.sends).toHaveLength(3);
+    expect(labelled).toHaveLength(1);
+    // Created under the Worker's Manager: the pairing holds.
+    expect(await checkRolePairing({ id: successorId, provider: "bm-worker/claude-opus-5", parentAgentId: MANAGER, workspaceId: WORKSPACE_ID }, fake.paseo as never, { raiseAlert: () => {} })).toBe("paired");
+  });
+
+  it("an agent.created that arrives while the plugin is still finishing the handoff completes nothing", async () => {
+    await store(...heavyRequest());
+    const bindings = createBindingStore(home);
+    bindManager(bindings, true);
+    let early: Promise<unknown> | null = null;
+    let runner: HandoffRunner | null = null;
+    // The successor exists and the Manager is being told: the event comes now, before the handoff is marked done.
+    const fake: FakePaseo<unknown> = boundDaemon(bindings, {
+      onSend: ({ id }) => {
+        if (id === MANAGER && early === null) early = runner!.agentCreated({ id: "created-1", provider: "bm-worker/claude-opus-5", parentAgentId: MANAGER, workspaceId: WORKSPACE_ID }, fake.paseo);
+      },
+    });
+    runner = runnerOf(() => binderOf(ROLE_URL, bindings, () => {}));
+    await upToTheBrief(fake, runner);
+    expect(await early).toBeNull();
+    expect(handoffs().list()[0]).toMatchObject({ state: "done", successorId: "created-1" });
+    expect(labelled).toHaveLength(1);
+    expect(logs.join("\n")).not.toMatch(/no handoff of that Worker/);
+  });
+
+  it("refused before anything is created: at the loop guard, and when Paseo refuses the successor", async () => {
+    await store(...heavyRequest());
+    const bindings = createBindingStore(home);
+    bindManager(bindings, true);
+    const fake = boundDaemon(bindings);
+    // Twelve commands for the request went out after the handoff was accepted.
+    await upToTheBrief(fake, runnerOf(() => binderOf(ROLE_URL, bindings, () => {})), () => {
+      const orchestrator = createOrchestratorStore(home, { now: () => clock });
+      for (let n = 0; n < COMMAND_LIMIT_PER_REQUEST; n += 1) {
+        orchestrator.appendCommand({ id: `c${n}`, workspaceId: WORKSPACE_ID, managerId: MANAGER, requestId: REQUEST, situation: "s", command: "c", reason: "r", sentText: "BM-COMMAND", outcome: "sent" });
+      }
+    });
+    expect(fake.creates).toEqual([]);
+    expect(handoffs().list()[0]).toMatchObject({ state: "dropped", ending: "loop-guard", successorId: null });
+    expect(fake.sends.map((sent) => sent.id)).toEqual([WORKER]);
+    expect(labelled).toEqual([]);
+  });
+
+  it("Paseo refuses the successor: the handoff ends refused, and nothing is sent or labelled", async () => {
+    await store(...heavyRequest());
+    const bindings = createBindingStore(home);
+    bindManager(bindings, true);
+    const fake = boundDaemon(bindings, {
+      created: () => {
+        throw new Error("Provider 'bm-worker' is not available");
+      },
+    });
+    await upToTheBrief(fake, runnerOf(() => binderOf(ROLE_URL, bindings, () => {})));
+    expect(handoffs().list()[0]).toMatchObject({ state: "dropped", ending: "refused", successorId: null });
+    expect(logs.join("\n")).toContain("created no successor: Paseo refused to create it: Provider 'bm-worker' is not available");
+    expect(fake.sends.map((sent) => sent.id)).toEqual([WORKER]);
+    expect(labelled).toEqual([]);
+    // The binding the plugin issued for it is gone; only the Manager's stays.
+    expect(bindings.list().map((binding) => binding.agentId)).toEqual([MANAGER]);
+  });
+
+  it.each([
+    ["an unbound Manager", null],
+    ["a Manager bound before the creation tools", false],
+  ] as const)("%s keeps today's flow: it is commanded to create the successor itself", async (_what, bind) => {
+    await store(...heavyRequest());
+    const bindings = createBindingStore(home);
+    if (bind !== null) bindManager(bindings, bind);
+    const fake = boundDaemon(bindings);
+    await upToTheBrief(fake, runnerOf(() => binderOf(ROLE_URL, bindings, () => {})));
+    expect(fake.creates).toEqual([]);
+    expect(fake.sends.map((sent) => sent.id)).toEqual([WORKER, MANAGER]);
+    expect(parseCommandBlock(fake.sends[1]!.text)!.body).toContain(`${HANDOFF_FROM_LABEL} = ${WORKER}`);
+    expect(handoffs().list()[0]).toMatchObject({ state: "commanded", successorId: null });
   });
 });
 

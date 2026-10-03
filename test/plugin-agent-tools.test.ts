@@ -24,6 +24,9 @@ import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/d
 import { answerDecision } from "../plugin/shared/decisions";
 import { makeDecision } from "./helpers/decisions";
 import { applyAgentTools, registerRoleHook, type AgentCreateRequest } from "../plugin/server/role-hook";
+import { createBindingStore, type BindingStore } from "../plugin/server/agent-bindings";
+import { NOT_BOUND_MESSAGE } from "../plugin/server/create-worker";
+import { toolFacesFor } from "../plugin/shared/bm-tools";
 
 /**
  * The agent tools endpoint (design delta 20260924b-agent-tools, AT-2): a real
@@ -628,5 +631,62 @@ describe("the creation hook's part", () => {
     // No readable config: no tools either.
     expect((await create("bm-manager", {}))?.config.toolPolicy).toBeUndefined();
     expect(await create("claude", { paseo })).toBeUndefined();
+  });
+});
+
+describe("bm_create_worker on the bound Manager's list only (design §16.6)", () => {
+  /** A Manager binding as a plugin creation leaves it: issued (with or without the creation tools), attached, settled. */
+  function bindManager(store: BindingStore, agentId: string, creationTools: boolean): string {
+    const { token, tokenSha256 } = store.issue({ role: "manager", workspaceId: "wks_1", creationTools });
+    store.attach(token, "manager");
+    store.settle(tokenSha256, agentId);
+    return token;
+  }
+
+  it("lists it for a Manager bound with the creation tools, and never on the role path or for one bound before them", async () => {
+    const { endpoint } = await start();
+    const store = endpoint.bindings!;
+    const list = async (url: string) => (await rpc(url, { jsonrpc: "2.0", id: 1, method: "tools/list" })).body.result.tools.map((tool: { name: string }) => tool.name);
+    expect(await list(`${endpoint.urlFor("manager")!}/${bindManager(store, "agent-m1", true)}`)).toEqual(["bm_create_worker", "bm_answers", "bm_decisions"]);
+    expect(await list(endpoint.urlFor("manager")!)).toEqual(["bm_answers", "bm_decisions"]);
+    expect(await list(`${endpoint.urlFor("manager")!}/${bindManager(store, "agent-m0", false)}`)).toEqual(["bm_answers", "bm_decisions"]);
+    // A pending binding issued with them lists them; calling waits for the binding (the shared guard).
+    const pending = store.issue({ role: "manager", workspaceId: "wks_1", creationTools: true }).token;
+    expect(await list(`${endpoint.urlFor("manager")!}/${pending}`)).toContain("bm_create_worker");
+    // The Worker's and Reviewer's lists do not change.
+    expect(await list(endpoint.urlFor("worker")!)).toEqual(["bm_report", "bm_reply"]);
+    expect(toolFacesFor("manager").map((face) => face.name)).not.toContain("bm_create_worker");
+    expect(toolFacesFor("manager", true).map((face) => face.name)).toEqual(["bm_create_worker", "bm_answers", "bm_decisions"]);
+    expect(toolFacesFor("worker", true)).toEqual(toolFacesFor("worker"));
+  });
+
+  it("refuses an unbound caller with one line, creating nothing, and logs it as a served tool", async () => {
+    const { endpoint, logs } = await start();
+    const args = { request: "Fix the date format.", context: [] };
+    const refused = await rpc(endpoint.urlFor("manager")!, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "bm_create_worker", arguments: args } });
+    expect(refused.body.result).toEqual({ content: [{ type: "text", text: NOT_BOUND_MESSAGE }], isError: true });
+    const before = `${endpoint.urlFor("manager")!}/${bindManager(endpoint.bindings!, "agent-m0", false)}`;
+    expect((await rpc(before, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "bm_create_worker", arguments: args } })).body.result.content[0].text).toBe(NOT_BOUND_MESSAGE);
+    expect(logs).toEqual(["[paseo-bm] bm_create_worker refused a call for a manager", "[paseo-bm] bm_create_worker refused a call for a manager (agent agent-m0)"]);
+    // Another role's path does not have it at all.
+    expect((await rpc(endpoint.urlFor("worker")!, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "bm_create_worker", arguments: args } })).body.error.code).toBe(-32602);
+  });
+
+  it("the hook pre-approves it for a Manager creation bound with the creation tools only", () => {
+    const dir = home();
+    const store = createBindingStore(join(dir, ".paseo-bm"));
+    const urlFor = (role: string) => `http://127.0.0.1:4567/mcp/${role}`;
+    const created = (creationTools: boolean) => {
+      const { token } = store.issue({ role: "manager", workspaceId: "wks_1", creationTools });
+      const request = { config: { provider: "bm-manager/claude-opus-5", cwd: "/repo", mcpServers: { [AGENT_TOOLS_SERVER]: { type: "http", url: `${urlFor("manager")}/${token}` } } } } as unknown as AgentCreateRequest;
+      return applyAgentTools(request, { urlFor, bindings: store }, "claude")?.config.toolPolicy?.preapproved?.map((grant) => grant.tool);
+    };
+    expect(created(true)).toEqual(["bm_create_worker", "bm_answers", "bm_decisions"]);
+    expect(created(false)).toEqual(["bm_answers", "bm_decisions"]);
+    // A creation without a token: the role path and today's list.
+    expect(applyAgentTools({ config: { provider: "bm-manager", cwd: "/repo" } } as unknown as AgentCreateRequest, { urlFor, bindings: store }, "claude")?.config.toolPolicy?.preapproved?.map((grant) => grant.tool)).toEqual([
+      "bm_answers",
+      "bm_decisions",
+    ]);
   });
 });

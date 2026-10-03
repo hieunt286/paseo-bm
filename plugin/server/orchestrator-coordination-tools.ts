@@ -216,7 +216,8 @@ export async function bmCompact(input: CompactInput, context: ToolContext, deps:
     reason: shorten(redactText(input.reason, context.env), MAX_COMPACTION_REASON_CHARS),
   });
   const runner = deps.compaction ?? createCompactionRunner({ home: () => context.home, now: () => context.now, log, redactEnv: context.env });
-  const safe = await safeIdleMoment({ id, role, status: target.status }, context.paseo, runner.queue);
+  // Design §16.7: a bound Worker's report is read from the outbox of this data folder.
+  const safe = await safeIdleMoment({ id, role, status: target.status, workspaceId }, context.paseo, runner.queue, { home: context.home });
   const started = await runner.begin(entry, context.paseo, safe);
 
   const minutes = Math.round(SAFE_POINT_WAIT_MS / 60_000);

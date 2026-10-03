@@ -14,9 +14,10 @@
  * | `progress` | a `BM-REPORT` that is not `finished` and asks nothing |
  * | `finished` | a `finished` `BM-REPORT` |
  * | `verdict` | a `BM-REVIEW` |
+ * | (the same) | a `BM-DELIVERY report` or `review` of the outbox (design §16.7): the card of the block after its marker line, `received` |
  * | `brief` | another agent's message that names a request (a request brief, a review request) |
  * | `action` | a delivered `BM-COMMAND` (v2, v1 still read) |
- * | `notice` | every other plugin notice, and a Manager's copy of a Worker command: one compact line |
+ * | `notice` | every other plugin notice (a `BM-DELIVERY message` or `no-verdict` included), and a Manager's copy of a Worker command: one compact line |
  *
  * There is no other question UI: no reply box, no answered chip, no "Mark as
  * answered", no "Use recommendations", no question rows. One question has one
@@ -45,7 +46,16 @@ import { looksLikeReport, parseReports, parseReviews, requestIdFromText } from "
 import { parseQuestions } from "../shared/bm-questions";
 import { checkBlocks, issueText } from "../shared/bm-format";
 import { BM_FALLBACK_MARKER, FALLBACK_CLASS_LABELS, parseFallbackNotice } from "../shared/bm-fallback";
-import { ANSWER_NOTICE_MARKER, EVENTS_NOTICE_MARKER, HANDOFF_NOTICE_MARKER, REPLACED_NOTICE_MARKER, STATE_NOTICE_MARKER, noticeMarkerOf } from "../shared/notices";
+import {
+  ANSWER_NOTICE_MARKER,
+  DELIVERY_NOTICE_MARKER,
+  EVENTS_NOTICE_MARKER,
+  HANDOFF_NOTICE_MARKER,
+  REPLACED_NOTICE_MARKER,
+  STATE_NOTICE_MARKER,
+  noticeMarkerOf,
+  parseDelivery,
+} from "../shared/notices";
 import {
   COMMAND_FROM,
   COMMAND_INTENTS,
@@ -222,6 +232,9 @@ export function toChatCards(item: ChatItem, phase: "streaming" | "complete"): Ch
     // its first line, as the plugin writes it, before that test.
     const origin = originOf({ text, clientMessageId: item.clientMessageId });
     if (origin === "plugin-notice") {
+      // An outbox report or review (design §16.7): the cards of the block after its marker line.
+      const delivered = deliveredBlockCardsOf(text);
+      if (delivered !== undefined) return delivered;
       const own = pluginCardOf(text);
       return own === undefined ? undefined : [own];
     }
@@ -235,11 +248,19 @@ export function toChatCards(item: ChatItem, phase: "streaming" | "complete"): Ch
   } else {
     return undefined;
   }
+  return blockCardsOf(text, direction, false);
+}
 
+/**
+ * The cards of a message's blocks: a report (or its questions), a review, or
+ * — a received message that names a request, unless `blocksOnly` — a brief.
+ * Undefined when there is none.
+ */
+function blockCardsOf(text: string, direction: ChatCard["direction"], blocksOnly: boolean): ChatCard[] | undefined {
   const context = { agentId: "", at: "" };
   const isReport = looksLikeReport(text);
   const isReview = REVIEW_MARKER.test(text);
-  const namesRequest = BARE_REQUEST_ID.test(text) || requestIdFromText(text) !== null;
+  const namesRequest = !blocksOnly && (BARE_REQUEST_ID.test(text) || requestIdFromText(text) !== null);
   if (!isReport && !isReview && (direction === "sent" || !namesRequest)) return undefined;
 
   // A block that lists the allowed values ("phase: received | finished", "verdict:
@@ -341,6 +362,10 @@ function pluginCardOf(text: string): ChatCard | undefined {
   }
   const marker = noticeMarkerOf(text);
   if (marker === null) return undefined;
+  if (marker === DELIVERY_NOTICE_MARKER) {
+    const delivered = deliveryCardOf(text);
+    if (delivered !== null) return delivered;
+  }
   if (marker === ANSWER_NOTICE_MARKER) {
     const answered = answerNoticeDecisionOf(text);
     if (answered !== null) return answered;
@@ -353,6 +378,40 @@ function pluginCardOf(text: string): ChatCard | undefined {
 }
 
 const LINE_OF = (key: string) => new RegExp(`^${key}:[ \\t]*(.*)$`, "m");
+
+/** What a delivery's notice line says (design §16.7). */
+const DELIVERY_WORDS: Readonly<Record<"message" | "no-verdict", { what: string; tone: Tone }>> = {
+  message: { what: "A message", tone: "muted" },
+  "no-verdict": { what: "The Reviewer ended its turn without a verdict", tone: "warning" },
+};
+
+/**
+ * The cards of an outbox `report` or `review` delivery (design §16.7): the
+ * same cards as the block itself, `received`, from the text after the marker
+ * line. Undefined for any other text, and for one whose block does not parse.
+ */
+function deliveredBlockCardsOf(text: string): ChatCard[] | undefined {
+  const delivery = parseDelivery(text);
+  if (delivery === null || (delivery.kind !== "report" && delivery.kind !== "review")) return undefined;
+  const cards = blockCardsOf(delivery.body, "received", true);
+  return cards === undefined || cards.length === 0 ? undefined : cards;
+}
+
+/**
+ * The notice line of an outbox delivery (design §16.7), or null for any other
+ * `BM-DELIVERY` (the answers the plugin delivers): a message, a no-verdict, or
+ * a report or review whose block does not parse.
+ */
+function deliveryCardOf(text: string): ChatCard | null {
+  const delivery = parseDelivery(text);
+  if (delivery === null) return null;
+  const words = delivery.kind === "message" || delivery.kind === "no-verdict" ? DELIVERY_WORDS[delivery.kind] : { what: `A ${delivery.kind}`, tone: "muted" as Tone };
+  const requestId = requestIdFromText(delivery.body) ?? BARE_REQUEST_ID.exec(delivery.body)?.[0] ?? null;
+  const batchId = LINE_OF("batchId").exec(delivery.body)?.[1]?.trim() ?? "";
+  // A no-verdict's body is fields and the fixed sentence: its batch says the rest.
+  const gist = delivery.kind === "no-verdict" ? (batchId === "" ? "" : `Batch ${batchId}`) : gistOf(delivery.body);
+  return noticeCard(text, requestId, { marker: DELIVERY_NOTICE_MARKER, what: words.what, tone: words.tone, project: null }, gist);
+}
 
 /** The decision card of a `BM-ANSWER` notice (autonomy design §A.6), or null when it names no decision. */
 function answerNoticeDecisionOf(text: string): ChatCard | null {

@@ -216,6 +216,52 @@ describe("append and read round trip", () => {
   });
 });
 
+describe("recordId and the phase stopped (design §16.11)", () => {
+  const report = (overrides: Record<string, unknown> = {}) => ({
+    agentId: "agent-worker",
+    at: "2026-09-16T10:00:00.000Z",
+    requestId: "req-20260916T100000Z",
+    phase: "stopped" as const,
+    tier: null,
+    filesChanged: [],
+    beadsCreated: [],
+    beadsUpdated: [],
+    beadsClosed: [],
+    beadsReady: [],
+    reviewFindingsOpen: null,
+    buildAndTests: null,
+    blockers: "stopped at bead x-1",
+    guardrail: null,
+    unparsedFields: [],
+    incompleteFields: [],
+    skillsUsed: [],
+    ...overrides,
+  });
+
+  it("keeps a tool-built report's and review's recordId and a stopped phase; the record version stays 1", async () => {
+    const review = { agentId: "agent-reviewer", at: "2026-09-16T10:00:00.000Z", batchId: "b1", verdict: "pass", blockingCount: 0, recordId: "out-0000000000c2" };
+    await appendRecord(location, record({ reports: [report({ recordId: "out-0000000000c1" })], reviews: [review] }));
+    clearTraceStoreCache();
+    const [read] = readRecords(location, WS).records;
+    expect(TRACE_STORE_SCHEMA_VERSION).toBe(1);
+    expect(read?.v).toBe(1);
+    expect(read?.reports[0]).toMatchObject({ phase: "stopped", recordId: "out-0000000000c1" });
+    expect(read?.reviews[0]?.recordId).toBe("out-0000000000c2");
+  });
+
+  it("still reads an old store: a line written before either field", async () => {
+    const path = join(location.tracesDir, WS, "events-202609.jsonl");
+    await appendRecord(location, record({ turnId: "turn-new" }));
+    const old = record({ turnId: "turn-old", at: "2026-09-16T09:00:00.000Z", reports: [report({ phase: "finished" })] });
+    appendFileSync(path, `${JSON.stringify(old)}\n`);
+    clearTraceStoreCache();
+    const result = readRecords(location, WS);
+    expect(result.skippedLines).toBe(0);
+    expect(result.records.map((entry) => entry.turnId).sort()).toEqual(["turn-new", "turn-old"]);
+    expect(result.records.find((entry) => entry.turnId === "turn-old")?.reports[0]?.recordId).toBeUndefined();
+  });
+});
+
 describe("tolerant reading", () => {
   it("skips a malformed line and keeps the rest", async () => {
     await appendRecord(location, record());

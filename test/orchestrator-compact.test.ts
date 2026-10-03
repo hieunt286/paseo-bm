@@ -11,6 +11,7 @@ import {
   compactCommandOf,
   createCompactionRunner,
   reportedIn,
+  safeIdleMoment,
   stateBriefOf,
   type CompactionRunner,
 } from "../plugin/server/compaction";
@@ -32,6 +33,7 @@ import { ORCHESTRATOR_INSTRUCTIONS_HASH } from "../plugin/server/orchestrator-ag
 import { ORCHESTRATOR_DIR_NAME } from "../plugin/server/orchestrator-store";
 import { createOrchestratorTools, type OrchestratorTools } from "../plugin/server/orchestrator-tools";
 import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store";
+import { createOutbox } from "../plugin/server/outbox";
 import type { Evidence, TraceRecord, Usage } from "../plugin/shared/contracts";
 import { answerDecision } from "../plugin/shared/decisions";
 import { STATE_NOTICE_MARKER, isPluginNotice } from "../plugin/shared/notices";
@@ -492,6 +494,34 @@ describe("the sequence (design §G.5): idle after a safe point, the /compact onc
     // A report of an earlier turn does not count: the last turn starts at its user message.
     expect(reportedIn([reportCall, { type: "user_message", text: "BM-STATE …" }, { type: "assistant_message", text: "noted" }])).toBe(false);
     expect(reportedIn([{ type: "user_message", text: "go" }, { ...reportCall, detail: { input: { prompt: "Please look at Q1." } } }])).toBe(false);
+  });
+});
+
+describe("a bound Worker's safe point: its report outbox records (design §16.7)", () => {
+  const addReport = (minute: number, state: "pending" | "delivered" | "queued" = "pending") => {
+    const outbox = createOutbox(home, { now: () => new Date(T0 + minute * MIN) });
+    const record = outbox.add(WORKSPACE_ID, { kind: "report", requestId: REQUEST, from: WORKER, to: MANAGER, text: `BM-REPORT\nrequestId: ${REQUEST}\nphase: finished` });
+    if (state !== "pending") outbox.settle(WORKSPACE_ID, record.id, state);
+    return record;
+  };
+  const worker = { id: WORKER, role: "worker" as const, status: "idle", workspaceId: WORKSPACE_ID };
+
+  it("finds the newest report from a pending or delivered record created in its last turn, where its timeline holds no BM-REPORT", async () => {
+    const fake = daemon({ timeline: busyTimeline });
+    // The busy timeline's last turn starts at minute 1 and sent no report block.
+    expect(await safeIdleMoment(worker, fake.paseo, queue, { home })).toBe(false);
+    addReport(0);
+    expect(await safeIdleMoment(worker, fake.paseo, queue, { home })).toBe(false);
+    addReport(2, "delivered");
+    expect(await safeIdleMoment(worker, fake.paseo, queue, { home })).toBe(true);
+  });
+
+  it("counts a pending record too, never another agent's, and still reads an unbound Worker's BM-REPORT text", async () => {
+    addReport(2);
+    expect(await safeIdleMoment(worker, daemon({ timeline: busyTimeline }).paseo, queue, { home })).toBe(true);
+    expect(await safeIdleMoment({ ...worker, id: REVIEWER }, daemon({ timeline: busyTimeline }).paseo, queue, { home })).toBe(false);
+    // The hand path: the report block in the timeline, no outbox at all.
+    expect(await safeIdleMoment(worker, daemon({ timeline: reportedTimeline }).paseo, queue, { home: join(root, "elsewhere") })).toBe(true);
   });
 });
 

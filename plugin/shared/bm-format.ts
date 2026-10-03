@@ -72,7 +72,8 @@ const HANDOFF_NOTE_FIELD = "handoffNote";
 const KNOWN_REPORT_FIELDS: readonly string[] = [...REPORT_FIELDS, HANDOFF_NOTE_FIELD];
 /** Fields a report may leave out: `decided` came later, and older Workers never write it; `handoffNote` only when asked. */
 const OPTIONAL_REPORT_FIELDS: ReadonlySet<string> = new Set(["decided", HANDOFF_NOTE_FIELD]);
-const PHASES = ["received", "beads-done", "blocked", "finished"];
+/** `stopped` (design §16.11): a bound Worker's report on a stop. */
+const PHASES = ["received", "beads-done", "blocked", "finished", "stopped"];
 const TIER_SHELL = /^(?:Small|Medium|Large) \(changed: ([\s\S]+)\)$/;
 /**
  * The same shell with a note AFTER the closing parenthesis, which is what

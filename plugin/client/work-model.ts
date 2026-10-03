@@ -112,6 +112,8 @@ const REPORT_STAGE: Readonly<Record<ReportPhase, WorkStage | null>> = {
   "bead-implemented": "build",
   blocked: null,
   finished: "done",
+  // Design §16.11: a stop names no stage; the stage before it stands.
+  stopped: null,
 };
 
 function latest(times: ReadonlyArray<string | null | undefined>): number | null {
@@ -655,6 +657,9 @@ function reportEvent(report: ParsedReport, name: string): Omit<TimelineEvent, "k
       return { kind: "blocked", text: `${name} is blocked${report.blockers === null ? "" : `: ${shorten(report.blockers, 100)}`}`, tag: null, tone: "warning" };
     case "finished":
       return { kind: "finished", text: `${name} finished`, tag: report.buildAndTests === null ? null : "checks reported", tone: "success" };
+    case "stopped":
+      // Design §16.11: not finished, not waiting on the owner.
+      return { kind: "report", text: `${name} stopped${report.blockers === null ? "" : `: ${shorten(report.blockers, 100)}`}`, tag: null, tone: "warning" };
     default:
       // A report whose milestone could not be read is an unknown step: not drawn.
       return null;

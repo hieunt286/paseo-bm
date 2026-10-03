@@ -1089,6 +1089,9 @@ Built (ship point B); described in §7.4.
 | Bound Reviewer | `bm_review` |
 | Unbound agents | today's lists |
 
+
+**As built (beads .7, .19).** `create-worker.ts`: `createPluginWorker` is the one creation path, used by `bm_create_worker` and the handoff successor. It takes the Worker's mode from `modeFactsOf("manager")` (the Worker rules, the action boundary included), creates `bm-worker/<model>` with `parent` = the Manager, title `Beads Worker`, `cwd` = the Manager's folder as Paseo reports it, and a binding issued with the creation tools; the brief carries a `managerAgentId:` line. `ToolCaller` has an optional `creationTools` (`hasCreationTools`, `isCreationBound`). `toolFacesFor(role, bound)` / `BOUND_SERVER_TOOLS`: a Manager bound with the creation tools gets `bm_create_worker`, `bm_answers`, `bm_decisions`; any other Manager keeps today's list. Bindings from `createManager`, the fallback Worker and the fallback Manager carry `creationTools: true`. A Paseo refusal removes the binding and leaves the request in the registry with no Worker. `NO_DATA_FOLDER_MESSAGE` answers when the data folder is unusable.
+
 ### 16.7 The outbox and the delivery markers (step 4)
 
 **Store.** `<data folder>/outbox/<workspaceId>.json`, `0600`, a `createJsonFileStore` store with a mutex.
@@ -1130,6 +1133,9 @@ Built (ship point B); described in §7.4.
 - **Card parser.** For `BM-DELIVERY report|review` it draws the same card as today's block (`direction: "received"`) from the text after the marker line. For `message` and `no-verdict` it draws a notice card.
 - **Collector.** It never parses a delivery for reports. A tool-built report or review is written into the **sender's** turn record: at the Worker's or Reviewer's turn end, the collector adds that agent's outbox records created during the turn to `reports` / `reviews`, each with `recordId`. So the Dashboard, Projects, `evidence.ts` and the replay read them where they read reports now, once.
 - **Deduplication.** `reportsBelongingTo` drops a second report with the same `recordId`.
+
+
+**As built (bead .10).** `server/outbox.ts`: `storeAndDeliver` / `deliverRecord`; `createOutboxResend` runs from the first Paseo handle of a run. States only move forward. The notice queue's `enqueue(..., callbacks?: { onSent, onDropped })` marks a record delivered or dropped; neither fires on a replace or `clear()`. A dropped record raises the Inbox alert `delivery-dropped` (subject the requestId, the record in `detail`, after `fallback-failed` in the kind order); it clears when a later record of the same request is delivered or the request is finished or stopped. Card wording: a message → "A message"; a missing verdict → "The Reviewer ended its turn without a verdict" (warning, gist "Batch <id>"). The registry's default `keepRequest` is `outboxKeeps(home)`. Cards are drawn per message, so a delivery received twice draws twice; the trace drops the repeat by `recordId`.
 
 ### 16.8 The review budget, enforced (step 3; ADR-027 decision 10)
 
@@ -1206,6 +1212,9 @@ Nothing was created or sent.
 - **What the Manager gets.** The `BM-COMMAND intent: handoff` still goes through `command-send.ts`, so the loop guard counts it, but as information: the body says which Worker replaced which and that nothing is asked of the Manager.
 - **An unbound Manager** (older instructions) keeps today's flow and creates the successor itself. Otherwise it would act on the brief and make a second successor.
 
+
+**As built (bead .19).** For a Manager bound with the creation tools, `handoff.ts` checks the command first (`commandRefusalOf`, extracted from `sendCommand`), creates the successor without waiting for the Manager to be idle, registers it, sends `handoffInfoCommandOf` counted by the loop guard (`loopGuard: "count"`) and completes the handoff; a successor's own `agent.created` arriving meanwhile completes nothing. Endings reuse `loop-guard`, `off`, `refused`. An unbound Manager, or one bound before the creation tools, keeps today's flow.
+
 ### 16.10 Wake-ups and a missing verdict (step 3; ADR-027 decision 11)
 
 **Wake-ups.** A Worker created by `bm_create_worker` or a Reviewer created by `bm_create_reviewer` has its creator as `parent`, but the creator did not call `create_agent`, so Paseo's `notifyOnFinish` wake does not apply (S2: a child created through the SDK with `parent` never woke its parent; one created with MCP `create_agent` did, within 24 ms). The parent is woken only by deliveries (§16.7) and by the plugin's own notices.
@@ -1241,6 +1250,9 @@ When all three hold, the plugin stores and delivers a `no-verdict` record to its
 `setup.cleanup` (§7.13.7) deletes `requests/` and `outbox/`; `ui/agent-bindings.json` goes with the rest of `ui/`.
 
 **The `BM-REPORT` text** is unchanged except for the phase value `stopped`, which `checkBlocks` and the lenient reader accept. A bound `blocked` report's `waitingOn` and `waitingFor` are written into its `blockers` line, so no new field is persisted.
+
+
+**As built (bead .10).** `stopped` counts as a working phase in `stageOf` and is skipped by `workPhaseOf`; labels "Stopped" (chip) and "<name> stopped" (timeline). Trace lines written before keep reading; `v` stays 1.
 
 ### 16.12 Role files (step 5; ADR-027 decisions 8–9)
 

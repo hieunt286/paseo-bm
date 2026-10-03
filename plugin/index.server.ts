@@ -22,6 +22,8 @@ import { createFallbackWaiter } from "./server/fallback-wait";
 import { createBudgetTold } from "./server/budget-told";
 import { registerFormatCheck } from "./server/format-check";
 import { registerNoticeQueue } from "./server/notice-queue";
+import { createOutboxResend } from "./server/outbox";
+import { dataHome } from "./server/rpc-kit";
 import { currentInstructions } from "./server/role-instructions";
 import { registerSetupRpcs } from "./server/setup-rpc";
 import { registerRoleSettingsRpcs } from "./server/role-settings-rpc";
@@ -109,7 +111,7 @@ export default function contribute(server: PluginServerContext): () => void {
       paseo,
       // The base, the Runtime facts with the workspace's precedents, and the role's additional instructions, when any.
       readInstructions: (workspaceId) => currentInstructions("manager", paseo, { workspaceId }),
-      // Design §16.5: a new Manager is bound to its own tool path (its tools stay builders in this step).
+      // Design §16.5, §16.6: a new Manager is bound to its own tool path, with bm_create_worker.
       binder: agentTools.binder,
     });
     if (result.otherManagerIds.length > 0) {
@@ -160,7 +162,8 @@ export default function contribute(server: PluginServerContext): () => void {
   // Autonomy design §G.6: the handoffs the Orchestrator asks for with bm_handoff, kept in the data
   // folder; each recorded turn takes their next step (the note request at the Worker's safe point,
   // the brief, the command to its Manager), and `agent.created` completes one when its successor appears.
-  const handoffs = createHandoffRunner();
+  // Design §16.9: for a bound Manager the runner creates the successor itself, bound by the endpoint's binder.
+  const handoffs = createHandoffRunner({ binder: () => agentTools.binder });
   // The stall pass (always on: stalled work is an Inbox alert) and the live
   // Worker watch (its stuck, permission and danger alerts for every project)
   // publish through it, for the projects in the policy's scope only. Neither
@@ -195,8 +198,11 @@ export default function contribute(server: PluginServerContext): () => void {
   // Design §16.5: the per-agent tool bindings. The first handle of a run sweeps away the bindings of
   // agents Paseo no longer lists; an archived agent's binding is revoked (registered below).
   const bindingSweep = createBindingSweep(() => agentTools.bindings);
+  // Design §16.7: after a reload, the first handle of the run delivers every pending or queued outbox record again.
+  const outboxResend = createOutboxResend({ home: () => dataHome() });
   const shareHandle = (paseo: unknown): void => {
     void bindingSweep.run(paseo);
+    void outboxResend.run(paseo);
     agentTools.usePaseo(paseo);
     stallWatcher.usePaseo(paseo);
     eventBus.usePaseo(paseo);
@@ -270,10 +276,10 @@ export default function contribute(server: PluginServerContext): () => void {
   // (§4.5.2); for a Reviewer it tells the Worker how to create the
   // replacement itself (§4.5.1).
   const switches: Record<FallbackIncident["role"], FallbackAction> = {
-    // Design §16.5: the replacement Worker is bound to its own tool path (its tools stay builders in this step).
+    // Design §16.5, §16.6: a replacement Worker or Manager is bound to its own tool path, with the creation tools.
     worker: createWorkerSwitch({ binder: agentTools.binder }),
     reviewer: createReviewerSwitch(),
-    manager: createManagerSwitch(),
+    manager: createManagerSwitch({ binder: agentTools.binder }),
   };
   const switchByRole: FallbackAction = (incident, paseo, deps) => switches[incident.role](incident, paseo, deps);
   const fallbackActions: FallbackActions = { switch: switchByRole, wait: fallbackWaiter.wait, resend: createReviewerResend() };

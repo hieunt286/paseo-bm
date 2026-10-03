@@ -7,6 +7,7 @@ import { AUTONOMY_DIR_NAME, createAutonomyStore } from "../plugin/server/autonom
 import { createInterventionStore } from "../plugin/server/intervention-store";
 import { cleanupPaseoBm } from "../plugin/server/setup-machine";
 import { REQUESTS_DIR_NAME, createRequestRegistry } from "../plugin/server/request-registry";
+import { OUTBOX_DIR_NAME, createOutbox } from "../plugin/server/outbox";
 import { createBindingStore } from "../plugin/server/agent-bindings";
 import { ensureRoles, markCleanedUpThisRun } from "../plugin/server/setup-roles";
 import { readSetupState, updateSetupState } from "../plugin/server/setup-state";
@@ -305,6 +306,19 @@ describe("deleting the data too", () => {
     expect(result.data?.deleted).toContain(REQUESTS_DIR_NAME);
     expect(existsSync(join(dataHome, REQUESTS_DIR_NAME))).toBe(false);
     expect(existsSync(join(dataHome, "ui", "agent-bindings.json"))).toBe(false);
+  });
+
+  it("deletes the outbox with the rest (design §16.7)", async () => {
+    const daemon = daemonWith();
+    fillDataHome();
+    createOutbox(dataHome).add("w1", { kind: "report", requestId: "req-20261003T100000Z", from: "wrk-1", to: "mgr-1", text: "BM-REPORT" });
+    expect(existsSync(join(dataHome, OUTBOX_DIR_NAME, "w1.json"))).toBe(true);
+
+    const result = await cleanupPaseoBm(daemon.paseo, { deleteData: true }, deps());
+
+    expect(result.data?.deleted).toContain(OUTBOX_DIR_NAME);
+    expect(existsSync(join(dataHome, OUTBOX_DIR_NAME))).toBe(false);
+    expect(result.data?.kept.join("\n")).not.toContain(OUTBOX_DIR_NAME);
   });
 
   it("deletes the intervention log with orchestrator/ (autonomy design §G.3)", async () => {

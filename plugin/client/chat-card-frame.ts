@@ -92,6 +92,8 @@ const PHASE_WORDS: Readonly<Record<string, { chip: Badge; title: string }>> = {
   "beads-done": { chip: { text: "Working", tone: "info" }, title: "Beads planned" },
   "bead-implemented": { chip: { text: "Working", tone: "info" }, title: "A bead is done" },
   blocked: { chip: { text: "Blocked", tone: "warning" }, title: "Blocked" },
+  // Design §16.11: a bound Worker's report on a stop; not finished, not blocked.
+  stopped: { chip: { text: "Stopped", tone: "warning" }, title: "Stopped" },
 };
 
 function beadsLine(report: ReportFacts): string | null {

@@ -5,7 +5,8 @@
  * kept in `compaction-store.ts` so a reload continues it.
  *
  * 1. **The idle moment after a safe point.** A Worker's, right after a turn
- *    that sent a report (`reportedIn`); a Manager's, whenever it is idle with
+ *    that sent a report (`reportedIn`; a bound Worker's report is its newest
+ *    `report` outbox record, `pending` or `delivered`, design §16.7); a Manager's, whenever it is idle with
  *    no notice queued for it. It is looked for when `bm_compact` is called
  *    (`safeIdleMoment`) and at each recorded turn end of the target
  *    (`turnRecorded`, the collector's `onRecorded`); never inside a running
@@ -59,7 +60,8 @@ import { createDecisionStore } from "./decision-store";
 import { noticeQueue, type BatchItem, type NoticeBatch, type NoticePaseo, type NoticeQueue } from "./notice-queue";
 import { readRecords } from "./trace-store";
 import { reconstructTraces, type ReconstructedTrace } from "./traces";
-import { errorText } from "./rpc-kit";
+import { dataHome, errorText } from "./rpc-kit";
+import { newestReportRecordOf } from "./outbox";
 
 /**
  * What Claude is told to keep (design §G.5 step 2): the request and the
@@ -120,15 +122,41 @@ export function reportedIn(items: readonly unknown[]): boolean {
   });
 }
 
-/** The newest timeline items of an agent, oldest first: one page from the tail; none when it cannot be read. */
-async function tailItemsOf(paseo: unknown, agentId: string): Promise<unknown[]> {
+/** The newest timeline entries of an agent, oldest first: one page from the tail; none when it cannot be read. */
+async function tailEntriesOf(paseo: unknown, agentId: string): Promise<Array<{ item: unknown; timestamp: string | null }>> {
   try {
     const ref = (paseo as { agents?: { ref?: (id: string) => { timeline?: { refetch?: (options: Record<string, unknown>) => Promise<unknown> } } } } | null)
       ?.agents?.ref?.(agentId);
-    const payload = (await ref?.timeline?.refetch?.({ direction: "tail", limit: 200 })) as { entries?: Array<{ item?: unknown }> } | undefined;
-    return (payload?.entries ?? []).map((entry) => entry.item).filter((item) => item !== undefined && item !== null);
+    const payload = (await ref?.timeline?.refetch?.({ direction: "tail", limit: 200 })) as { entries?: Array<{ item?: unknown; timestamp?: unknown }> } | undefined;
+    return (payload?.entries ?? [])
+      .filter((entry) => entry.item !== undefined && entry.item !== null)
+      .map((entry) => ({ item: entry.item, timestamp: typeof entry.timestamp === "string" ? entry.timestamp : null }));
   } catch {
     return [];
+  }
+}
+
+/**
+ * When the last turn in these entries started: the timestamp of its
+ * `user_message` (`sliceLastTurn`), or null when it has none.
+ */
+function lastTurnStartOf(entries: ReadonlyArray<{ item: unknown; timestamp: string | null }>): string | null {
+  const first = sliceLastTurn(entries, (entry) => entry.item)[0];
+  const type = (first?.item as { type?: unknown } | null | undefined)?.type;
+  return type === "user_message" ? (first?.timestamp ?? null) : null;
+}
+
+/**
+ * Whether a bound agent sent a report in its last turn (design §16.7): its
+ * newest `report` outbox record, `pending` or `delivered`, created at or after
+ * that turn's start. Never throws.
+ */
+export function reportRecordedSince(home: string | null, workspaceId: string | null, agentId: string, since: string | null): boolean {
+  if (home === null || workspaceId === null || since === null) return false;
+  try {
+    return newestReportRecordOf(home, workspaceId, agentId, since) !== null;
+  } catch {
+    return false;
   }
 }
 
@@ -139,18 +167,23 @@ function othersQueued(queue: Pick<NoticeQueue, "pending">, agentId: string): boo
 
 /**
  * Whether `target` is at an idle moment after a safe point now: not running,
- * no notice queued for it, and — a Worker — its last turn sent a report.
- * Reads one page of a Worker's timeline. Never throws.
+ * no notice queued for it, and — a Worker — its last turn sent a report: a
+ * `BM-REPORT` block in its timeline (the hand path), or a `report` outbox
+ * record of a bound Worker (design §16.7). Reads one page of a Worker's
+ * timeline. Never throws.
  */
 export async function safeIdleMoment(
-  target: { id: string; role: CoordinationRole; status: string },
+  target: { id: string; role: CoordinationRole; status: string; workspaceId?: string | null },
   paseo: unknown,
   queue: Pick<NoticeQueue, "pending"> = noticeQueue,
+  deps: { home?: string | null } = {},
 ): Promise<boolean> {
   if (target.status === "running" || target.status === "initializing") return false;
   if (othersQueued(queue, target.id)) return false;
   if (target.role === "manager") return true;
-  return reportedIn(await tailItemsOf(paseo, target.id));
+  const entries = await tailEntriesOf(paseo, target.id);
+  if (reportedIn(entries.map((entry) => entry.item))) return true;
+  return reportRecordedSince(dataHome(deps.home === undefined ? {} : { home: deps.home }), target.workspaceId ?? null, target.id, lastTurnStartOf(entries));
 }
 
 /** Whether a recorded turn shows a completed compaction at or after `sentAt` (a few seconds of clock slack). */

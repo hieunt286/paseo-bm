@@ -23,6 +23,11 @@
  *   whose hook context brings one. `"dropped"`: bad input, the target is
  *   archived, closed or gone, or its send failed. `"replaced"`: a newer notice
  *   of the same kind for the same target took its place before it went out.
+ *   `callbacks` (design §16.7, the outbox): `onSent(targetId, kind)` once the
+ *   notice went out — at once or at a later turn end — as a batch has its
+ *   own; `onDropped(targetId, kind, reason)` when a queued notice is dropped
+ *   later (target gone, send failed). Neither is called for a notice replaced
+ *   or forgotten by `clear()` (a reload), and a throw costs one log line.
  * - `noticeQueue`: the one shared queue `enqueue` uses. `createNoticeQueue()`
  *   makes a private one (tests).
  * - `enqueueBatch(targetId, batch, items, paseo?)` → one `NoticeOutcome` per
@@ -136,9 +141,17 @@ export interface BatchItem {
   isCurrent?: () => boolean;
 }
 
+/** What a single notice's sender is told about it later (design §16.7). */
+export interface NoticeCallbacks {
+  /** The notice went out. */
+  onSent?(targetId: string, kind: NoticeKind): void;
+  /** The notice was dropped: the target is archived, closed or gone, or the send failed. */
+  onDropped?(targetId: string, kind: NoticeKind, reason: string): void;
+}
+
 export interface NoticeQueue {
   /** Sends now when the target is idle, otherwise holds the notice for its next turn end. Never rejects. */
-  enqueue(targetId: string, kind: NoticeKind, text: string, paseo?: NoticePaseo): Promise<NoticeOutcome>;
+  enqueue(targetId: string, kind: NoticeKind, text: string, paseo?: NoticePaseo, callbacks?: NoticeCallbacks): Promise<NoticeOutcome>;
   /** Queues every item, then delivers once: the batched items pending at the idle moment go as one message. Never rejects. */
   enqueueBatch(targetId: string, batch: NoticeBatch, items: readonly BatchItem[], paseo?: NoticePaseo): Promise<NoticeOutcome[]>;
   /** One `agent.turn_ended`: delivers the ended agent's queued notices when it is idle. Never rejects. */
@@ -160,6 +173,8 @@ interface Entry extends QueuedNotice {
   batch?: NoticeBatch;
   itemKey?: string;
   isCurrent?: () => boolean;
+  /** Set on a single notice whose sender wants its outcome. */
+  callbacks?: NoticeCallbacks;
 }
 
 type DeliveryStep = "empty" | "unknown" | "gone" | "busy" | "sent" | "failed" | "settled";
@@ -238,6 +253,16 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
     }
   }
 
+  /** Tells a single notice's sender what became of it; a throw is logged. */
+  function tell(targetId: string, entry: Entry, outcome: "sent" | "dropped", reason = ""): void {
+    try {
+      if (outcome === "sent") entry.callbacks?.onSent?.(targetId, entry.kind);
+      else entry.callbacks?.onDropped?.(targetId, entry.kind, reason);
+    } catch (error) {
+      log(`[paseo-bm] after the ${entry.kind} notice to ${targetId} was ${outcome}: ${errorText(error)}`);
+    }
+  }
+
   function dropAll(targetId: string): void {
     const list = queued.get(targetId) ?? [];
     queued.delete(targetId);
@@ -246,6 +271,7 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
     log(
       `[paseo-bm] ${targetId} is archived, closed or gone; dropped its queued notices (${list.map((entry) => entry.kind).join(", ")}).`,
     );
+    for (const entry of list) tell(targetId, entry, "dropped", "the target is archived, closed or gone");
   }
 
   /** One look at the target: sends its oldest notice when it is idle. */
@@ -285,6 +311,7 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
     try {
       await paseo.agents.ref(targetId).send(text);
       for (const entry of sending) entry.state = "sent";
+      if (batch === undefined) tell(targetId, sending[0]!, "sent");
       if (batch?.onSent !== undefined) {
         try {
           batch.onSent(targetId, sending.map((entry) => entry.itemKey ?? entry.kind));
@@ -301,6 +328,7 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
         else awaitingEnd.set(targetId, list);
       }
       log(`[paseo-bm] could not send the ${what} notice to ${targetId}: ${errorText(error)}; dropped it.`);
+      if (batch === undefined) tell(targetId, sending[0]!, "dropped", `the send failed: ${errorText(error)}`);
       return "failed";
     }
   }
@@ -330,13 +358,14 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
     }
   }
 
-  async function enqueue(targetId: string, kind: NoticeKind, text: string, paseo?: NoticePaseo): Promise<NoticeOutcome> {
+  async function enqueue(targetId: string, kind: NoticeKind, text: string, paseo?: NoticePaseo, callbacks?: NoticeCallbacks): Promise<NoticeOutcome> {
     try {
       if (!nonEmpty(targetId) || !nonEmpty(kind) || !nonEmpty(text)) {
         log("[paseo-bm] a plugin notice without a target, a kind or a text was not queued.");
         return "dropped";
       }
       const entry: Entry = { kind, text, state: "queued" };
+      if (callbacks !== undefined) entry.callbacks = callbacks;
       put(targetId, entry);
       const handle = handleFor(paseo);
       if (handle !== null) await deliver(targetId, handle);
@@ -418,8 +447,8 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
 export const noticeQueue: NoticeQueue = createNoticeQueue();
 
 /** `noticeQueue.enqueue`: send now when `targetId` is idle, otherwise at its next turn end. Never rejects. */
-export function enqueue(targetId: string, kind: NoticeKind, text: string, paseo?: NoticePaseo): Promise<NoticeOutcome> {
-  return noticeQueue.enqueue(targetId, kind, text, paseo);
+export function enqueue(targetId: string, kind: NoticeKind, text: string, paseo?: NoticePaseo, callbacks?: NoticeCallbacks): Promise<NoticeOutcome> {
+  return noticeQueue.enqueue(targetId, kind, text, paseo, callbacks);
 }
 
 export type NoticeHost = Partial<Pick<PluginServerContext, "on">>;

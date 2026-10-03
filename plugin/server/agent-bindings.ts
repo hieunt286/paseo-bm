@@ -94,6 +94,26 @@ export interface ToolCaller {
   requestId: string | null;
   parentId: string | null;
   batchId: string | null;
+  /**
+   * True when the binding was issued with the creation tools (ship point C,
+   * design §16.6): only then does the caller list and run them. Absent
+   * otherwise.
+   */
+  creationTools?: boolean;
+}
+
+/** True when `caller` is bound (or pending) with the creation tools (design §16.6). */
+export function hasCreationTools(caller: ToolCaller | null | undefined): boolean {
+  return caller !== null && caller !== undefined && caller.creationTools === true;
+}
+
+/**
+ * True when `agentId` has a live (bound) binding issued with the creation
+ * tools: the plugin's tools create its children, so it is "bound" for §16.4
+ * and §16.9. Pure over `bindings`.
+ */
+export function isCreationBound(agentId: string, bindings: readonly AgentBinding[]): boolean {
+  return bindings.some((binding) => binding.agentId === agentId && binding.state === "bound" && binding.creationTools);
 }
 
 /** What a binding is issued for: everything but the agent, which does not exist yet. */
@@ -335,6 +355,7 @@ export function createBindingStore(home: string, deps: BindingStoreDeps = {}): B
         requestId: binding.requestId,
         parentId: binding.parentId,
         batchId: binding.batchId,
+        ...(binding.creationTools ? { creationTools: true } : {}),
       };
     },
     revokeAgent(agentId) {

@@ -5,6 +5,7 @@ import { requestIdFromText } from "../plugin/server/bm-report";
 import {
   blocksCompletion,
   reconstructTraces,
+  reportsBelongingTo,
   requestIdOfAgent,
   reviewCallsOf,
   stateOf,
@@ -448,6 +449,46 @@ describe("counts stay distinct", () => {
       expect(counted(new Set(["rev-2"]))).toBe(2);
       expect(counted(["rev-2"])).toBe(2);
     });
+  });
+});
+
+describe("tool-built reports and reviews (design §16.7, §16.11)", () => {
+  const managerA = managerTurn("req-A", "2026-09-16T10:00:00.000Z");
+
+  it("reportsBelongingTo drops a second report with the same recordId, held or in the same list", () => {
+    const first = report({ recordId: "out-0000000000a1" });
+    const again = report({ recordId: "out-0000000000a1", at: "2026-09-16T10:06:00.000Z" });
+    const other = report({ recordId: "out-0000000000a2" });
+    const typed = report();
+    expect(reportsBelongingTo("req-A", [first, again, other, typed])).toEqual([first, other, typed]);
+    expect(reportsBelongingTo("req-A", [again, other], [first])).toEqual([other]);
+    // A report of another request still never belongs here.
+    expect(reportsBelongingTo("req-A", [report({ requestId: "req-B", recordId: "out-0000000000a3" })])).toEqual([]);
+  });
+
+  it("keeps a tool-built report once when two turns of its Worker hold the same record, and a review once per record", () => {
+    const delivered = report({ recordId: "out-0000000000b1", phase: "finished" });
+    const review = { agentId: "r1", at: "2026-09-16T10:04:00.000Z", batchId: "b1", verdict: "pass", blockingCount: 0, recordId: "out-0000000000b2" };
+    const traces = reconstructTraces({
+      records: [
+        managerA,
+        record({ agentId: "w1", role: "worker", requestId: "req-A", at: "2026-09-16T10:05:00.000Z", turnId: "t1", reports: [delivered] }),
+        // A turn after a reload with no start mark reads the same record again.
+        record({ agentId: "w1", role: "worker", requestId: "req-A", at: "2026-09-16T10:09:00.000Z", turnId: "t2", reports: [{ ...delivered, at: "2026-09-16T10:05:00.000Z" }] }),
+        record({ agentId: "r1", role: "reviewer", requestId: "req-A", parentAgentId: "w1", at: "2026-09-16T10:04:00.000Z", reviews: [review] }),
+        record({ agentId: "r1", role: "reviewer", requestId: "req-A", parentAgentId: "w1", at: "2026-09-16T10:04:30.000Z", turnId: "t3", reviews: [{ ...review, at: "2026-09-16T10:04:10.000Z" }] }),
+      ],
+      agents: [agent({ id: "w1", requestIdLabel: "req-A" }), agent({ id: "r1", role: "reviewer", parentAgentId: "w1", requestIdLabel: "req-A", batchIdLabel: "b1" })],
+    });
+    const trace = traces.find((entry) => entry.requestId === "req-A")!;
+    expect(trace.reports.map((entry) => entry.recordId)).toEqual(["out-0000000000b1"]);
+    expect(trace.reviews.map((entry) => entry.recordId)).toEqual(["out-0000000000b2"]);
+  });
+
+  it("reads a stopped report as neither finished nor waiting on the owner", () => {
+    const agents = new Map<string, AgentFacts>([["w1", agent({ id: "w1" })]]);
+    expect(stateOf({ workerIds: ["w1"], reviewerIds: [], reports: [report({ phase: "stopped" })] }, agents, [])).toBe("stopped");
+    expect(stateOf({ workerIds: ["w1"], reviewerIds: [], reports: [report({ phase: "stopped" })] }, agents, [])).not.toBe("waiting_user");
   });
 });
 
