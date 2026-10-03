@@ -5,7 +5,7 @@
  *
  * | Tool | Caller | Does |
  * |---|---|---|
- * | `bm_report` | bound Worker | builds and checks the `BM-REPORT`, stores a `report` outbox record, delivers it to the Manager that created the Worker; `finished` expires the request's unsettled questions; `finished` or `stopped` clears its `delivery-dropped` and `off-tool-reviewer` alerts; the registry's `tier` and `finishedAt` follow it |
+ * | `bm_report` | bound Worker | builds and checks the `BM-REPORT`, stores a `report` outbox record, delivers it to the Manager that created the Worker; `finished` is refused while a review call of the request has no verdict delivered (`batchesAwaitingVerdict`); `finished` expires the request's unsettled questions; `finished` or `stopped` clears its `delivery-dropped` and `off-tool-reviewer` alerts; the registry's `tier` and `finishedAt` follow it |
  * | `bm_questions` | bound Worker | opens each question through the materialiser's shared open path (`openQuestions`), numbered after the request's highest `Qn` |
  * | `bm_review` | bound Reviewer | builds and checks the `BM-REVIEW`, stores a `review` record for its batch, delivers it to its Worker |
  * | `bm_answers` | bound Manager | checks each `Qn` is an open question of a request of its own and proposes the answers for its current turn (`proposed-answers.ts`); the materialiser settles them at the turn's end only with the owner's own message in it |
@@ -36,11 +36,12 @@ import type { ServerToolAnswer, ServerTools } from "./decision-tools";
 import type { NoticeOutcome, NoticePaseo, NoticeQueue } from "./notice-queue";
 import { clearOffToolAlertsOfRequest } from "./off-tool-reviewer";
 import { stopRunningReviewers, type StopPaseo } from "./stop-propagation";
-import { clearDroppedAlert, createOutbox, deliverRecord, type OutboxDeps, type OutboxRecord } from "./outbox";
+import { OUTBOX_SETTLED_MS, clearDroppedAlert, createOutbox, deliverRecord, isOpenRecord, type OutboxDeps, type OutboxRecord } from "./outbox";
 import type { DashboardPaseo } from "./paseo-directory";
 import { proposeAnswers } from "./proposed-answers";
 import { createRequestRegistry, type RegisteredRequest } from "./request-registry";
 import { reasonOf } from "./role-choices";
+import { timeOrZero } from "../shared/time";
 import {
   BOUND_ANSWERS_TOOL,
   BOUND_REPORT_TOOL,
@@ -131,6 +132,35 @@ function bindingMismatch(field: "requestId" | "batchId", given: string | null, b
   return `${field} ${given} is not yours: paseo-bm created you for ${what} ${bound}. Use ${bound}. Nothing was stored or sent.`;
 }
 
+/**
+ * The batches of `request` whose newest review call has no verdict delivered
+ * yet (design §16.6, `bm_report`; acceptance finding F3): no `review` or
+ * `no-verdict` record of that batch, created at or after the call, has
+ * settled. A verdict still `pending` or `queued` has not reached the Worker,
+ * so it does not count; a `dropped` one does (its alert is the owner's). A
+ * `no-verdict` settles the call: the Worker reports the batch as not reviewed.
+ * A call older than the outbox keeps settled records (`OUTBOX_SETTLED_MS`)
+ * counts as settled, since its verdict can no longer be read. Off-tool
+ * Reviewers are not registry calls: the plugin cancels them at once (§16.8),
+ * so none of them owes a verdict. Pure.
+ */
+export function batchesAwaitingVerdict(request: RegisteredRequest | null, records: readonly OutboxRecord[], now: Date): string[] {
+  if (request === null) return [];
+  return request.reviews.batches.flatMap((batch) => {
+    const newest = batch.calls.reduce<number | null>((latest, call) => Math.max(latest ?? Number.NEGATIVE_INFINITY, timeOrZero(call.at)), null);
+    if (newest === null || now.getTime() - newest > OUTBOX_SETTLED_MS) return [];
+    const settled = records.some(
+      (record) =>
+        (record.kind === "review" || record.kind === "no-verdict") &&
+        record.requestId === request.requestId &&
+        record.batchId === batch.batchId &&
+        timeOrZero(record.createdAt) >= newest &&
+        !isOpenRecord(record),
+    );
+    return settled ? [] : [batch.batchId];
+  });
+}
+
 /** The delivery state a tool reports for a notice outcome (`replaced`: a newer copy of the same record waits). */
 function deliveryOf(outcome: NoticeOutcome): DeliveryState {
   return outcome === "sent" ? "sent" : outcome === "dropped" ? "dropped" : "queued";
@@ -196,6 +226,15 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     if (worker.parentId === null) return refused("paseo-bm does not know the Manager that created you, so it cannot deliver your report; tell the owner in one line and stop. Nothing was stored or sent.");
     const { phase, tier, waitingOn } = withoutNullFields(input) as { phase: string; tier: { level: "Small" | "Medium" | "Large" }; waitingOn?: string[] };
     const requestId = worker.requestId;
+    if (phase === "finished") {
+      // A review the request has running ends before `finished` (F3); `stopped` and `blocked` are never held for it.
+      const waiting = batchesAwaitingVerdict(createRequestRegistry(home, { log }).get(worker.workspaceId, requestId), createOutbox(home, { now }).list(worker.workspaceId), now());
+      if (waiting.length > 0) {
+        return refused(
+          [...waiting.map((batchId) => `a review of batch ${batchId} has no verdict yet: wait for its delivery, then report finished`), "Nothing was stored or sent."].join("\n"),
+        );
+      }
+    }
     const store = createDecisionStore(home, { log });
     // Only open questions of this request: the owner can still answer them.
     const notOpen = (waitingOn ?? []).filter((id) => {

@@ -14,13 +14,14 @@ import {
   NO_PASEO_DELIVERY_MESSAGE,
   QUESTIONS_NOT_BOUND_MESSAGE,
   TELL_NOT_BOUND_MESSAGE,
+  batchesAwaitingVerdict,
   createDeliveringTools,
   type DeliveringToolDeps,
 } from "../plugin/server/deliver-tools";
 import { noteIn } from "../plugin/server/handoff";
 import { offToolAlertOf } from "../plugin/server/off-tool-reviewer";
 import { createNoticeQueue } from "../plugin/server/notice-queue";
-import { OUTBOX_DIR_NAME, createOutbox } from "../plugin/server/outbox";
+import { OUTBOX_DIR_NAME, OUTBOX_SETTLED_MS, createOutbox } from "../plugin/server/outbox";
 import { createPrecedentStore } from "../plugin/server/precedent-store";
 import { clearProposedAnswers, proposedAnswersOf } from "../plugin/server/proposed-answers";
 import { clearRequestRegistryCache, createRequestRegistry } from "../plugin/server/request-registry";
@@ -186,6 +187,60 @@ describe("bm_report for a bound Worker (design §16.6)", () => {
     expect(stopsAsked).toEqual([]);
     expect((await tools.worker.call("bm_report", { ...REPORT, phase: "stopped" }, WORKER_CALLER)).ok).toBe(true);
     expect(stopsAsked).toEqual([{ workerId: WORKER, workspaceId: WS }]);
+  });
+
+  it("finished waits for every review call's verdict to reach the Worker; stopped and blocked never wait (acceptance finding F3)", async () => {
+    const { home, fake, tools, tick } = setup();
+    register(home);
+    const at = (ms: number) => new Date(T0.getTime() + ms);
+    const registry = createRequestRegistry(home);
+    expect(registry.addReviewCall(WS, REQ, "b1", { callId: "call-1", kind: "create", reviewerId: REVIEWER, at: T0.toISOString() }, "Review src/a.ts")).toBe("added");
+    tick(1_000);
+    const finished = { ...REPORT, phase: "finished" };
+    const waiting = { ok: false, text: "a review of batch b1 has no verdict yet: wait for its delivery, then report finished\nNothing was stored or sent." };
+    expect(await tools.worker.call("bm_report", finished, WORKER_CALLER)).toEqual(waiting);
+    expect(existsSync(join(home, OUTBOX_DIR_NAME))).toBe(false);
+    expect(fake.sends).toEqual([]);
+    expect(createRequestRegistry(home).get(WS, REQ)).toMatchObject({ tier: null, finishedAt: null });
+    for (const other of [{ ...REPORT, phase: "blocked", waitingFor: "the verdict of b1" }, { ...REPORT, phase: "stopped" }]) {
+      expect((await tools.worker.call("bm_report", other, WORKER_CALLER)).ok, other.phase).toBe(true);
+    }
+    // A verdict stored but still on its way (the Worker is busy) has not reached it.
+    const outbox = createOutbox(home, { now: () => at(2_000) });
+    const verdict = outbox.add(WS, { kind: "review", requestId: REQ, batchId: "b1", from: REVIEWER, to: WORKER, text: "BM-REVIEW" });
+    expect(await tools.worker.call("bm_report", finished, WORKER_CALLER)).toEqual(waiting);
+    outbox.settle(WS, verdict.id, "delivered");
+    expect((await tools.worker.call("bm_report", finished, WORKER_CALLER)).ok).toBe(true);
+    // A re-review is a new call: the verdict before it does not answer it; a no-verdict delivery settles it.
+    tick(10_000);
+    expect(registry.addReviewCall(WS, REQ, "b1", { callId: "call-2", kind: "rereview", reviewerId: REVIEWER, at: at(11_000).toISOString() })).toBe("added");
+    expect(registry.addReviewCall(WS, REQ, "b2", { callId: "call-3", kind: "create", reviewerId: "agent-reviewer-2", at: at(11_000).toISOString() }, "Review src/b.ts")).toBe("added");
+    expect(await tools.worker.call("bm_report", finished, WORKER_CALLER)).toEqual({
+      ok: false,
+      text: "a review of batch b1 has no verdict yet: wait for its delivery, then report finished\na review of batch b2 has no verdict yet: wait for its delivery, then report finished\nNothing was stored or sent.",
+    });
+    const late = createOutbox(home, { now: () => at(12_000) });
+    late.settle(WS, late.add(WS, { kind: "no-verdict", requestId: REQ, batchId: "b1", from: REVIEWER, to: WORKER, text: "no verdict" }).id, "delivered");
+    late.settle(WS, late.add(WS, { kind: "review", requestId: REQ, batchId: "b2", from: "agent-reviewer-2", to: WORKER, text: "BM-REVIEW" }).id, "dropped", "gone");
+    expect((await tools.worker.call("bm_report", finished, WORKER_CALLER)).ok).toBe(true);
+  });
+
+  it("batchesAwaitingVerdict: another request's or batch's record settles nothing; a call older than the outbox keeps settled records counts as settled", () => {
+    const home = dataFolder();
+    register(home);
+    const registry = createRequestRegistry(home);
+    registry.addReviewCall(WS, REQ, "b1", { callId: "call-1", kind: "create", reviewerId: REVIEWER, at: T0.toISOString() }, "Review");
+    const outbox = createOutbox(home, { now: () => new Date(T0.getTime() + 1_000) });
+    for (const init of [
+      { requestId: OTHER_REQ, batchId: "b1" },
+      { requestId: REQ, batchId: "b2" },
+    ]) {
+      outbox.settle(WS, outbox.add(WS, { kind: "review", ...init, from: REVIEWER, to: WORKER, text: "BM-REVIEW" }).id, "delivered");
+    }
+    const request = registry.get(WS, REQ);
+    expect(batchesAwaitingVerdict(request, outbox.list(WS), T0)).toEqual(["b1"]);
+    expect(batchesAwaitingVerdict(request, outbox.list(WS), new Date(T0.getTime() + OUTBOX_SETTLED_MS + 1))).toEqual([]);
+    expect(batchesAwaitingVerdict(null, [], T0)).toEqual([]);
   });
 
   it("finished expires the request's earlier unsettled questions and records finishedAt; stopped expires nothing", async () => {
@@ -387,6 +442,11 @@ describe("bm_questions for a bound Worker (design §16.6)", () => {
       [{ questions: [QUESTION({ options: [{ key: "a", text: "x", effects: ["none"], recommended: true }, { key: "b", text: "y", effects: ["none"], recommended: true }] })] }, "exactly one option is recommended (found 2)"],
       [{ questions: [QUESTION({ options: [{ key: "a", text: "x", effects: ["none"], recommended: true, grant: { calls: 2 } }, { key: "b", text: "y", effects: ["none"] }] })] }, 'input.questions[0].options[0].grant: only a question of subject "review-budget" grants'],
       [{ questions: [QUESTION({ subject: "review-budget", options: [{ key: "a", text: "x", effects: ["none"], recommended: true, grant: { calls: 2, untilClean: "b1" } }, { key: "b", text: "y", effects: ["none"] }] })] }, "give exactly one of calls or untilClean"],
+      // Acceptance finding F1: without a grant on any option, the owner's yes would grant nothing.
+      [
+        { questions: [QUESTION({ subject: "review-budget", class: "cost", options: [{ key: "a", text: "Two more calls", effects: ["none"], recommended: true }, { key: "b", text: "No", effects: ["none"] }] })] },
+        'input.questions[0].options: a "review-budget" question gives at least one option a grant',
+      ],
       [{ questions: [QUESTION({ options: [{ key: "b", text: "x", effects: ["none"], recommended: true }, { key: "c", text: "y", effects: ["none"] }] })] }, "input.questions[0].options[0].key: must be a"],
       [{ questions: [QUESTION({ supersedes: "Q9" })] }, `input.questions[0].supersedes: Q9 is not a question of ${REQ}`],
       [{ questions: [QUESTION({ class: undefined })] }, "input.questions[0].class: is required"],

@@ -141,7 +141,9 @@ their output — never its criteria or format. `changes-required`: fix every **b
 then call `bm_rereview` with how each was fixed. Fix a non-blocking one only if it is your own slip
 needing no review; list the rest in `suggestions`. Blocking findings left after the re-review, or a
 call refused for the budget: send `blocked` and ask as the refusal says; a yes covers only what the
-owner chose. A Reviewer that ends on a provider error is not a review: create no other.
+owner chose. A Reviewer that ends on a provider error is not a review: create no other. A review
+the request needs or the owner asked for ends before `finished`: send `finished` only after its
+verdict reaches you; after a `no-verdict` delivery instead, report that batch as not reviewed.
 
 ## Reporting
 
@@ -165,5 +167,4 @@ An instruction, a correction, an answer, "continue", a delivery, a Reviewer's fi
 or `BM-INTERRUPTED` is not. "Stop after this bead": do what it says. Truly unsure: ask in one line
 and wait. **On a stop:** do nothing else — no new agent, build, test, edit or bead change; send
 `stopped`, never `finished`, saying exactly where you stopped (files, bead in progress, beads not
-done, open findings), then stay idle. A Reviewer finishing after a real stop does not resume the
-work.
+done, open findings), then stay idle. A Reviewer finishing after a real stop resumes nothing.

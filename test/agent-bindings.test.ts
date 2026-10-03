@@ -395,7 +395,7 @@ describe("the endpoint's token paths (design §16.5)", () => {
       expect(content.at(-1)!.text, name).toBe(BUILDER_SEND_LINES[name]);
     }
     expect(BUILDER_SEND_LINES).toEqual({
-      bm_report: "Send this block with `send_agent_prompt` to the agent that created you (its id is in your first prompt), with `notifyOnFinish: false`.",
+      bm_report: expect.stringContaining("Paseo's `send_agent_prompt` tool"),
       bm_review: "Make this block your final answer, exactly as it is.",
       bm_answers: "Put this block in your reply to the owner; the plugin delivers it. Send the Worker nothing.",
     });

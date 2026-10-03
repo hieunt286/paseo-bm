@@ -106,6 +106,14 @@ export interface RuntimeFacts {
  */
 export const HAND_PATH_HEADING = "### Without paseo-bm's tools";
 
+/**
+ * Paseo's send tool, named so no provider can take another messaging tool for
+ * it (acceptance finding F2: an unbound Claude Worker used Claude Code's own
+ * `SendMessage`, which reaches no Paseo agent). The same words as the send
+ * line of `BUILDER_SEND_LINES.bm_report` in `agent-tools.ts`.
+ */
+export const PASEO_SEND_TOOL = "Paseo's `send_agent_prompt` tool (the paseo MCP server's; not Claude Code's SendMessage or any other messaging tool)";
+
 const HAND_PATH_LEAD =
   "You were created without paseo-bm's delivering tools, so this part replaces what your role file says about them, and a missing `bm_` tool is no reason to stop here.";
 
@@ -113,7 +121,7 @@ const HAND_PATH_LEAD =
 export const WORKER_HAND_PATH = [
   HAND_PATH_HEADING,
   "",
-  `${HAND_PATH_LEAD} \`bm_questions\`, \`bm_create_reviewer\` and \`bm_rereview\` are not yours; \`bm_report\`, if you have it, only builds a block.`,
+  `${HAND_PATH_LEAD} \`bm_questions\`, \`bm_create_reviewer\` and \`bm_rereview\` are not yours. Where your role file says your \`bm_\` tools store and deliver, or to report with \`bm_report\`, for you \`bm_report\` only BUILDS the block: nothing reaches your Manager until you send that block yourself with ${PASEO_SEND_TOOL}.`,
   "",
   "**Asking.** Number your questions `Q1`, `Q2`, … across the request, at most 5 per round, each one line with exactly one recommended, and give each a `class` (riskiest first: security, data, release, cost, dependency, environment, scope, preference, reversible-technical; the riskier when unsure). Send them with `blocked` through `bm_report` (its `questions`), then end the turn. Without `bm_report`, write the block yourself:",
   "",
@@ -127,9 +135,9 @@ export const WORKER_HAND_PATH = [
   "",
   "Answers come as `BM-DELIVERY answers`, then `Continue <requestId>.` and a `BM-ANSWERS` block — `Q1: a — …` picks that option, `Q2: other — …` is the owner's words. Waiting on another request or Worker goes on the report's `blockers` line.",
   "",
-  "**Reviewing.** Create the Reviewer with Paseo's `create_agent`: profile `bm-reviewer`, provider `bm-reviewer/<model of the profile>`, labels `bm.role` = `reviewer`, `bm.requestId` = the request's `req-…`, `bm.batchId` = the batch id, `bm.version` = yours if readable; `settings.modeId` exactly as your `## Runtime facts` say (missing: send `blocked` with Paseo's refusal). Tell it the `requestId`, the `batchId`, exactly what to review, the stage (`implementation`; before it `plan` or `beads`, plus `documents` when you wrote any) and, for an implementation batch, the checks you ran with their output — never its criteria or format. `changes-required`: fix every **blocking** finding, then ask the same Reviewer for the re-review with `send_agent_prompt`. A review call past your budget the owner did not ask for: send `blocked` and ask; a yes covers only what the owner said (\"one more\", \"until it is clean\"). A Reviewer that ends on a provider error (usage limit, credit, login, provider unavailable) is not a review: create no other, end your turn without a report, and wait for the plugin's `BM-FALLBACK`.",
+  "**Reviewing.** Create the Reviewer with Paseo's `create_agent`: profile `bm-reviewer`, provider `bm-reviewer/<model of the profile>`, labels `bm.role` = `reviewer`, `bm.requestId` = the request's `req-…`, `bm.batchId` = the batch id, `bm.version` = yours if readable; `settings.modeId` exactly as your `## Runtime facts` say (missing: send `blocked` with Paseo's refusal). Tell it the `requestId`, the `batchId`, exactly what to review, the stage (`implementation`; before it `plan` or `beads`, plus `documents` when you wrote any) and, for an implementation batch, the checks you ran with their output — never its criteria or format. `changes-required`: fix every **blocking** finding, then ask the same Reviewer for the re-review with Paseo's `send_agent_prompt`. A review call past your budget the owner did not ask for: send `blocked` and ask; a yes covers only what the owner said (\"one more\", \"until it is clean\"). A Reviewer that ends on a provider error (usage limit, credit, login, provider unavailable) is not a review: create no other, end your turn without a report, and wait for the plugin's `BM-FALLBACK`.",
   "",
-  "**Reporting.** Build each report with `bm_report` and send what it returns verbatim to Manager (its agent id is in your first prompt; without one, post in your chat). Only without `bm_report`, write the block yourself (`none` for empty fields; a `blocked` one is followed by its `BM-QUESTIONS`):",
+  "**Reporting.** Build each report with `bm_report` and send what it returns verbatim to Manager with Paseo's `send_agent_prompt` (its agent id is in your first prompt; without one, post in your chat). Only without `bm_report`, write the block yourself (`none` for empty fields; a `blocked` one is followed by its `BM-QUESTIONS`):",
   "",
   "```",
   "BM-REPORT",
@@ -148,7 +156,7 @@ export const WORKER_HAND_PATH = [
   "blockers: <what you wait for; the owner only through BM-QUESTIONS>",
   "```",
   "",
-  "Send this block with `send_agent_prompt` to the agent that created you (its id is in your first prompt), with `notifyOnFinish: false`.",
+  "Nothing is delivered yet: send this block, exactly as it is, with Paseo's `send_agent_prompt` tool (the paseo MCP server's; not Claude Code's SendMessage or any other messaging tool) to the agent that created you, by the agent id your first prompt gives for it, with `notifyOnFinish: false`.",
 ].join("\n");
 
 /** The Manager's hand path: creating and telling a Worker, the owner's answers, a handoff. */
@@ -159,7 +167,7 @@ export const MANAGER_HAND_PATH = [
   "",
   '**Creating the Worker.** Create a `requestId` = `req-` + current UTC time as `YYYYMMDDTHHMMSSZ`, then **one** Worker in this workspace with `create_agent`, right the first time: call `list_profiles` **once**; `provider` = `bm-worker/<model of the profile>`; labels `bm.role` = `worker`, `bm.requestId` = the `requestId` (the Dashboard groups by it), `bm.version` = yours if readable; `settings.modeId` exactly as your `## Runtime facts` say. The `initialPrompt`, in order: the owner\'s request **verbatim** in a quoted block; the `requestId`; the repository path and `.beads/`; a size only if the owner stated one; "Do only what the request asks. Anything extra is a suggestion for the owner, not work."; your agent id (`echo "$PASEO_AGENT_ID"`); then **Context**, each fact with its source. A failed creation: cancel a broken agent it left.',
   "",
-  "**Telling a Worker.** Send the owner's words or a fact with `send_agent_prompt`: `Continue <requestId>.`, then the words or the fact and its source. **Never send to a Worker that is `running`:** it would lose that turn's work. Hold the owner's words, say so, and send them at its turn end.",
+  `**Telling a Worker.** Send the owner's words or a fact with ${PASEO_SEND_TOOL}: \`Continue <requestId>.\`, then the words or the fact and its source. **Never send to a Worker that is \`running\`:** it would lose that turn's work. Hold the owner's words, say so, and send them at its turn end.`,
   "",
   "**Answers.** Write one `BM-ANSWERS` block per request with `bm_answers`, or without it by hand: `BM-ANSWERS`, `requestId: <requestId>`, then per answer `Q6: a — <the option as the Worker wrote it>` or `Q7: other — <the owner's own words>`. Put this block in your reply to the owner; the plugin delivers it. Send the Worker nothing.",
   "",

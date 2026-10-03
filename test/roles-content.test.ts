@@ -20,6 +20,7 @@ import {
   HAND_PATH_HEADING,
   MANAGER_HAND_PATH,
   OWNER_PRECEDENTS_HEADING,
+  PASEO_SEND_TOOL,
   REVIEWER_HAND_PATH,
   WORKER_HAND_PATH,
   runtimeFactsText,
@@ -197,6 +198,8 @@ describe("manager.md — the project's context keeper (REQ-117 c–e)", () => {
   it("M3, M4, M5 — says only what it saw; cancels a run only for a named reason; no secrets", () => {
     rule(MR, "never more than it sees", /NEVER SAY MORE THAN YOU CAN SEE/);
     rule(MR, "says when it does not know", /say that you do not know/);
+    // Acceptance finding F3: a Manager told the owner a review was clean with no verdict yet.
+    rule(MR, "a review passed only when its delivery says so", /A review passed or is clean only when its delivery says so/);
     rule(MR, "agents belong to the owner", /AGENTS BELONG TO THE OWNER/);
     rule(MR, "cancel is the one change, for named reasons", /only cancel a run \(`cancel_agent`\): a Worker stuck or off course, one the owner asks to stop, a broken creation/);
     rule(MR, "no secrets, including the environment", /NEVER READ OR PRINT SECRETS\*\* — the environment/);
@@ -237,6 +240,8 @@ describe("manager.md — the project's context keeper (REQ-117 c–e)", () => {
 
   it("creates the Worker through bm_create_worker and briefs it with that context; the recipe is the unbound Manager's", () => {
     rule(M, "the request verbatim to bm_create_worker", /Give `bm_create_worker` the owner's request \*\*verbatim\*\*, a size only if the owner stated one/);
+    // Acceptance finding F5: two of four briefs replaced the owner's words with an answer or a summary.
+    rule(M, "request is all the owner's words, context the rest", /`request` is all of the owner's words for this change \(what to ask or review included\), never a paraphrase or an answer; what you add goes in `context`/);
     rule(M, "a Context of what bears on it", /as \*\*Context\*\* what of these and of your `## Owner precedents` bears on it/);
     rule(M, "context is facts, not how to do the work", /facts, never how to do the work/);
     rule(M, "a collision is named in the brief", /When another Worker writes the same files, beads or history, one fact names it/);
@@ -268,6 +273,8 @@ describe("manager.md — the project's context keeper (REQ-117 c–e)", () => {
     rule(M, "bm_decisions by requestId", /`bm_decisions` with the `requestId` shows what still waits/);
     rule(M, "blocked is one line, never a repeated card", /At `blocked`, say in one line which Worker waits on how many questions; never repeat a card/);
     rule(M, "never picks an option for the owner", /never pick for them/);
+    // Acceptance finding F4: the Manager asked through AskUserQuestion, once repeating a card.
+    rule(M, "an interactive box returns nothing: ask in the reply", /An interactive box such as `AskUserQuestion` returns nothing here: ask the owner in your reply/);
     // The hand format is the unbound Manager's (design §16.12).
     expect(M).not.toMatch(/`Q6: a —|`Q7: other —/);
     verbatim(MH, "`Q6: a — <the option as the Worker wrote it>`", "`Q7: other — <the owner's own words>`");
@@ -508,6 +515,8 @@ describe("worker.md — sizing, beads, proof and the four questions", () => {
     rule(W, "non-blocking goes to suggestions", /list the rest in `suggestions`/);
     rule(W, "a call refused for the budget is asked as the refusal says", /a call refused for the budget: send `blocked` and ask as the refusal says/);
     rule(W, "a provider error is not a review", /is not a review: create no other/);
+    // Acceptance finding F3: a Small Worker reported finished 42 s before the verdict it had asked for.
+    rule(W, "finished only after the verdict, or reports the batch as not reviewed", /ends before `finished`: send `finished` only after its verdict reaches you; after a `no-verdict` delivery instead, report that batch as not reviewed/);
     // Design §16.8, §16.12: a bound Worker's text never teaches `create_agent` for Reviewers, nor sending by hand.
     expect(W).not.toMatch(/create_agent|send_agent_prompt|notifyOnFinish|list_profiles|settings\.modeId|bm\.batchId/);
     verbatim(WORKER_HAND_PATH, "`bm.role` = `reviewer`", "`bm.requestId`", "`bm.batchId` = the batch id", "`bm.version`");
@@ -515,7 +524,7 @@ describe("worker.md — sizing, beads, proof and the four questions", () => {
     // The mode, and what `none` means, are the Runtime fact's own words (bead 81y2.24); a refusal is the owner's to hear.
     rule(WH, "the Reviewer's mode exactly as the Runtime facts say", /`settings\.modeId` exactly as your `## Runtime facts` say/);
     rule(WH, "a refused creation is blocked with Paseo's refusal", /send `blocked` with Paseo's refusal/);
-    rule(WH, "the same Reviewer re-reviews", /ask the same Reviewer for the re-review with `send_agent_prompt`/);
+    rule(WH, "the same Reviewer re-reviews", /ask the same Reviewer for the re-review with Paseo's `send_agent_prompt`/);
     rule(WH, "a call past the budget is asked", /A review call past your budget the owner did not ask for: send `blocked` and ask/);
     rule(WH, "a provider error is not a review", /is not a review: create no other, end your turn without a report, and wait for the plugin's `BM-FALLBACK`/);
   });
@@ -533,7 +542,21 @@ describe("worker.md — sizing, beads, proof and the four questions", () => {
     expect(template).toContain("phase: received | beads-done | blocked | finished | stopped");
     // The one send line of §16.5, word for word as a builder's answer ends.
     expect(WORKER_HAND_PATH).toContain(BUILDER_SEND_LINES["bm_report"]);
-    rule(WH, "send_agent_prompt without a wake-up", /`send_agent_prompt` to the agent that created you \(its id is in your first prompt\), with `notifyOnFinish: false`/);
+    rule(WH, "send_agent_prompt without a wake-up", /to the agent that created you, by the agent id your first prompt gives for it, with `notifyOnFinish: false`/);
+  });
+
+  it("names Paseo's send tool so it cannot be taken for another messaging tool, and tells an unbound Worker that bm_report delivers nothing (acceptance finding F2)", () => {
+    // An unbound Claude Worker sent its block with Claude Code's own SendMessage, which reaches no Paseo agent.
+    expect(PASEO_SEND_TOOL).toBe("Paseo's `send_agent_prompt` tool (the paseo MCP server's; not Claude Code's SendMessage or any other messaging tool)");
+    expect(BUILDER_SEND_LINES["bm_report"]).toBe(
+      `Nothing is delivered yet: send this block, exactly as it is, with ${PASEO_SEND_TOOL} to the agent that created you, by the agent id your first prompt gives for it, with \`notifyOnFinish: false\`.`,
+    );
+    // The hand path overrides the role file's "store and deliver", which unbound Workers also read.
+    verbatim(W, "**Your `bm_` tools** store and deliver");
+    verbatim(WORKER_HAND_PATH, `for you \`bm_report\` only BUILDS the block: nothing reaches your Manager until you send that block yourself with ${PASEO_SEND_TOOL}.`);
+    verbatim(MANAGER_HAND_PATH, `**Telling a Worker.** Send the owner's words or a fact with ${PASEO_SEND_TOOL}:`);
+    // Every send by hand names Paseo's tool, never the bare name alone.
+    for (const text of [WORKER_HAND_PATH, MANAGER_HAND_PATH]) expect(text).not.toMatch(/(?<!Paseo's )`send_agent_prompt`/);
   });
 
   it("hands notices to the notices, and follows a BM-COMMAND within its rules", () => {

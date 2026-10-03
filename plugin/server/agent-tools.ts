@@ -135,11 +135,13 @@ function describe(tool: ToolFace) {
  * The send step a builder-only answer ends with (design §16.5): an unbound
  * agent briefed by a shorter role file may not know what to do with the block.
  * It is the answer's last content item, after the block, so the block itself
- * stays exactly what `checkBlocks` checked.
+ * stays exactly what `checkBlocks` checked. The report's line names Paseo's
+ * tool unambiguously (acceptance finding F2: an unbound Claude Worker sent
+ * its block with Claude Code's own `SendMessage`, which reaches no Paseo agent).
  */
 export const BUILDER_SEND_LINES: Readonly<Record<string, string>> = {
   bm_report:
-    "Send this block with `send_agent_prompt` to the agent that created you (its id is in your first prompt), with `notifyOnFinish: false`.",
+    "Nothing is delivered yet: send this block, exactly as it is, with Paseo's `send_agent_prompt` tool (the paseo MCP server's; not Claude Code's SendMessage or any other messaging tool) to the agent that created you, by the agent id your first prompt gives for it, with `notifyOnFinish: false`.",
   bm_review: "Make this block your final answer, exactly as it is.",
   bm_answers: "Put this block in your reply to the owner; the plugin delivers it. Send the Worker nothing.",
 };

@@ -267,20 +267,26 @@ describe("the bound tools (design §16.6)", () => {
     expect(issues({ ...base, phase: "blocked", waitingFor: "x".repeat(501) })).toEqual(["input.waitingFor: must be at most 500 characters"]);
   });
 
-  it("bm_questions' rules: one recommended, keys in order, a grant only on review-budget and exactly one kind of grant", () => {
+  it("bm_questions' rules: one recommended, keys in order, a grant only on review-budget, at least one there, and exactly one kind of grant", () => {
     const options = (over: Array<Record<string, unknown>> = []) => [
       { key: "a", text: "Yes", effects: ["none"], recommended: true, ...over[0] },
       { key: "b", text: "No", effects: ["none"], ...over[1] },
     ];
-    const question = (over: Record<string, unknown> = {}) => ({ text: "More reviews?", subject: "review-budget", class: "cost", options: options(), ...over });
+    const question = (over: Record<string, unknown> = {}) => ({ text: "More reviews?", subject: "review-budget", class: "cost", options: options([{ grant: { calls: 2 } }]), ...over });
     expect(schemaIssues(QUESTIONS_FACE.inputSchema, { questions: [question()] })).toEqual([]);
+    expect(questionsRules({ questions: [question()] } as never)).toEqual([]);
+    // Acceptance finding F1: a review-budget question with no grant on any option lets the owner's yes grant nothing.
+    expect(questionsRules({ questions: [question({ options: options() })] } as never)).toEqual([
+      'input.questions[0].options: a "review-budget" question gives at least one option a grant ({ calls: n } or { untilClean: "<batchId>" }); without one, the owner\'s yes grants nothing',
+    ]);
+    expect(questionsRules({ questions: [question({ subject: "push", options: options() })] } as never)).toEqual([]);
     expect(questionsRules({ questions: [question({ options: options([{ grant: { calls: 2 } }, { grant: { untilClean: "b1" } }]) })] } as never)).toEqual([]);
     expect(questionsRules({ questions: [question({ subject: "push", options: options([{ grant: { calls: 2 } }]) })] } as never)).toEqual([
       'input.questions[0].options[0].grant: only a question of subject "review-budget" grants',
     ]);
     expect(questionsRules({ questions: [question({ options: options([{ grant: {} }]) })] } as never)).toEqual(["input.questions[0].options[0].grant: give exactly one of calls or untilClean"]);
-    expect(questionsRules({ questions: [question({ options: options([{ recommended: false }]) })] } as never)).toEqual(["input.questions[0].options: exactly one option is recommended (found 0)"]);
-    expect(questionsRules({ questions: [question({ options: options([{}, { key: "c" }]) })] } as never)).toEqual(["input.questions[0].options[1].key: must be b (keys run a, b, c … in order)"]);
+    expect(questionsRules({ questions: [question({ options: options([{ recommended: false, grant: { calls: 2 } }]) })] } as never)).toEqual(["input.questions[0].options: exactly one option is recommended (found 0)"]);
+    expect(questionsRules({ questions: [question({ options: options([{ grant: { calls: 2 } }, { key: "c" }]) })] } as never)).toEqual(["input.questions[0].options[1].key: must be b (keys run a, b, c … in order)"]);
     expect(schemaIssues(QUESTIONS_FACE.inputSchema, { questions: [question({ options: options([{ grant: { calls: 11 } }]) })] })).toEqual([
       "input.questions[0].options[0].grant.calls: must be at most 10",
     ]);

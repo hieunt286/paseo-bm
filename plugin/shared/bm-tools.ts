@@ -1284,7 +1284,7 @@ export interface QuestionsInput {
 export const QUESTIONS_FACE: ToolFace = {
   name: "bm_questions",
   role: "worker",
-  description: `Ask the owner: paseo-bm opens each question as a decision the owner answers in paseo-bm, numbers it after your request's last Qn, and delivers the answer to you when it comes. A question an owner precedent answers at once comes back answered: carry on with that answer. Then report blocked with waitingOn naming the open ones, unless you can carry on with what does not depend on them. Exactly one recommended option per question. A question of subject "${REVIEW_BUDGET}" may give options a grant ({ calls: n } or { untilClean: batchId }). Returns JSON [{ qn, decisionId, state, answer? }]. ${DELIVERED}`,
+  description: `Ask the owner: paseo-bm opens each question as a decision the owner answers in paseo-bm, numbers it after your request's last Qn, and delivers the answer to you when it comes. A question an owner precedent answers at once comes back answered: carry on with that answer. Then report blocked with waitingOn naming the open ones, unless you can carry on with what does not depend on them. Exactly one recommended option per question. A question of subject "${REVIEW_BUDGET}" gives at least one option a grant ({ calls: n } or { untilClean: batchId }); leave it out on the option that grants nothing. Returns JSON [{ qn, decisionId, state, answer? }]. ${DELIVERED}`,
   inputSchema: {
     type: "object",
     additionalProperties: false,
@@ -1352,6 +1352,10 @@ export function questionsRules(input: QuestionsInput): string[] {
     const path = `input.questions[${q}]`;
     const recommended = question.options.filter((option) => option.recommended === true).length;
     if (recommended !== 1) out.push(`${path}.options: exactly one option is recommended (found ${recommended})`);
+    // Design §16.8: the owner's yes to more review calls is the chosen option's grant; without one, answering grants nothing.
+    if (question.subject === REVIEW_BUDGET && !question.options.some((option) => option.grant !== undefined)) {
+      out.push(`${path}.options: a "${REVIEW_BUDGET}" question gives at least one option a grant ({ calls: n } or { untilClean: "<batchId>" }); without one, the owner's yes grants nothing`);
+    }
     question.options.forEach((option, o) => {
       const at = `${path}.options[${o}]`;
       const expected = String.fromCharCode(97 + o);
@@ -1521,7 +1525,7 @@ export const AGENT_TOOLS: readonly AgentTool[] = [
   tool<ReportInput>({
     name: "bm_report",
     role: "worker",
-    description: "Build your BM-REPORT (and its BM-QUESTIONS when blocked).",
+    description: "Build your BM-REPORT (and its BM-QUESTIONS when blocked). It delivers nothing: send the block yourself, as the last line of its answer says.",
     inputSchema: REPORT_SCHEMA,
     rules: reportRules,
     build: buildReport,
