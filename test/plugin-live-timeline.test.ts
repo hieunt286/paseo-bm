@@ -99,6 +99,21 @@ describe("reading an agent's timeline", () => {
     }
   });
 
+  it("keeps the plugin's first prompts out of the owner's words, with or without clientMessageId (design §16.2)", async () => {
+    const { paseo } = daemonWith({
+      w1: [
+        [
+          { item: typed("BM-BRIEF worker requestId: req-20261003T090000Z\nBM-HANDOVER\nrole: worker"), timestamp: "2026-10-03T08:00:00.000Z" },
+          { item: typed("BM-HANDOFF-BRIEF h1\nrequestId: req-20261003T090000Z"), timestamp: "2026-10-03T08:00:01.000Z" },
+          { item: relayed("BM-BRIEF worker requestId: none"), timestamp: "2026-10-03T08:00:02.000Z" },
+          { item: typed("Add a PDF export."), timestamp: "2026-10-03T08:01:00.000Z" },
+        ],
+      ],
+    });
+    const extras = await readLiveExtras(paseo, ["w1"], {});
+    expect(extras.userMessages.map((message) => message.text)).toEqual(["Add a PDF export."]);
+  });
+
   it("adds nothing for an agent it cannot read, or a host without timeline access", async () => {
     const fake = daemonWith({});
     fake.handle("gone").timeline.refetch.mockRejectedValue(new Error("unknown agent"));

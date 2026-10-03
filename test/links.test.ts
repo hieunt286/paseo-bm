@@ -156,11 +156,11 @@ function records(): TraceRecord[] {
 }
 
 const AGENTS = [
-  { id: MANAGER, workspaceId: WORKSPACE_ID, status: "idle", labels: { "bm.role": "manager" } },
-  { id: W1, workspaceId: WORKSPACE_ID, status: "idle", createdAt: at(0, 45), labels: { "bm.role": "worker", "bm.requestId": REQ_A, "paseo.parent-agent-id": MANAGER } },
-  { id: W2, workspaceId: WORKSPACE_ID, status: "idle", createdAt: at(5), labels: { "bm.role": "worker", "bm.requestId": REQ_A, "bm.handoffFrom": W1, "paseo.parent-agent-id": MANAGER } },
-  { id: REVIEWER, workspaceId: WORKSPACE_ID, status: "idle", createdAt: at(7), labels: { "bm.role": "reviewer", "bm.requestId": REQ_A, "paseo.parent-agent-id": W2 } },
-  { id: W3, workspaceId: WORKSPACE_ID, status: "idle", createdAt: at(15, 15), labels: { "bm.role": "worker", "bm.requestId": REQ_B, "paseo.parent-agent-id": MANAGER } },
+  { id: MANAGER, workspaceId: WORKSPACE_ID, status: "idle", provider: "bm-manager", labels: { "bm.role": "manager" } },
+  { id: W1, workspaceId: WORKSPACE_ID, status: "idle", createdAt: at(0, 45), provider: "bm-worker", labels: { "bm.role": "worker", "bm.requestId": REQ_A, "paseo.parent-agent-id": MANAGER } },
+  { id: W2, workspaceId: WORKSPACE_ID, status: "idle", createdAt: at(5), provider: "bm-worker", labels: { "bm.role": "worker", "bm.requestId": REQ_A, "bm.handoffFrom": W1, "paseo.parent-agent-id": MANAGER } },
+  { id: REVIEWER, workspaceId: WORKSPACE_ID, status: "idle", createdAt: at(7), provider: "bm-reviewer", labels: { "bm.role": "reviewer", "bm.requestId": REQ_A, "paseo.parent-agent-id": W2 } },
+  { id: W3, workspaceId: WORKSPACE_ID, status: "idle", createdAt: at(15, 15), provider: "bm-worker", labels: { "bm.role": "worker", "bm.requestId": REQ_B, "paseo.parent-agent-id": MANAGER } },
 ];
 
 const answeredAt = at(4, 30);

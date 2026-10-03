@@ -264,14 +264,14 @@ Accepted limit (ADR-008 decision 3, ADR-012 Consequences): a change in the app t
 
 ### 7.1 Recognising an agent's role (`agent-role.ts`, `agent-labels.ts`)
 
-- `roleOfAgent(agent)`: label `bm.role` ∈ {`manager`, `worker`, `reviewer`, `orchestrator`} → `{ role, labelled: true }`; otherwise `roleOfProvider(providerId(agent.provider))` → `{ role, labelled: false }`; otherwise `null`. `providerId` drops everything after the **first** `/` (OpenCode models contain `/`, for example `bm-worker/anthropic/claude-sonnet-4-6`). `roleOfProvider` recognises the four main aliases and `^bm-(manager|worker|reviewer)-fallback-([1-3])$` (the Orchestrator has no fallback alias).
+- `roleOfAgent(agent)`: the role comes **only from the provider**, `roleOfProvider(providerId(agent.provider))` → `{ role, labelled }`, with `labelled` true exactly when the `bm.role` label equals that role; otherwise `null`. A `bm.role` label alone never gives a role, so no agent can claim one by label (ADR-027 decision 6). A label that disagrees with the provider — another role, an unknown value, or any value on a non-`bm-*` provider — is logged once per agent id per plugin run (`console.warn`): `[paseo-bm] agent <id> is labelled bm.role=<label> but runs on <provider>; its role is <role | none>`. `roleLabelOf(labels)` reads the label when it names a role. `providerId` drops everything after the **first** `/` (OpenCode models contain `/`, for example `bm-worker/anthropic/claude-sonnet-4-6`). `roleOfProvider` recognises the four main aliases and `^bm-(manager|worker|reviewer)-fallback-([1-3])$` (the Orchestrator has no fallback alias).
 - Every place that looks for agents (the Manager, the agent tree, the chat card, stopping agents, Projects, the budget, fallback) uses `roleOfAgent` and `listAllAgents`, a function that walks every page (`pageInfo.hasMore` / `nextCursor`).
 - **Labels:** `bm.role`, `bm.version` (set by the plugin when it creates a Manager); `bm.requestId`, `bm.batchId` (set by agents following their role instructions); `bm.modeSet` (§7.3); `bm.replaces`, `bm.replacedBy` (§7.10); `paseo.parent-agent-id` (set by Paseo).
-- `on("agent.created")`: a `bm-*` agent without a valid `bm.role` is labelled with one command `paseo agent update <id> --label bm.role=<role> [--label bm.modeSet=<current mode>] --json` (a Manager also gets `bm.modeSet`, taken from `runtimeInfo.modeId`, then `currentModeId`). At most once per id per plugin run; a failure costs only a log line.
+- `on("agent.created")`: a `bm-*` agent whose `bm.role` is missing or unknown is labelled with one command `paseo agent update <id> --label bm.role=<role> [--label bm.modeSet=<current mode>] --json` (a Manager also gets `bm.modeSet`, taken from `runtimeInfo.modeId`, then `currentModeId`). At most once per id per plugin run; a failure costs only a log line. A valid label that disagrees with the provider is logged, never rewritten.
 - **One sweep per load:** the plugin has no Paseo handle while loading, so the sweep starts at the first `agent.turn_started` or `agent.created`; it lists the non-archived agents and labels the `bm-*` agents missing a label.
-- Because labelling is best effort, recognising the role by provider is the guarantee; an agent recognised only by provider shows the chip "Not started by paseo-bm" on the card and `· no label` in the agent tree.
+- The label is display: an agent whose role label is missing shows the chip "Not started by paseo-bm" on the card and `· no label` in the agent tree. `agents.list` still lists an agent that carries a `bm.role` label on a provider with no role, with role `unknown`.
 
-*ADR-027 (step 1) takes the role from the provider only, and (step 3) reads `bm.requestId` only when it is registered: §16.3, §16.4.*
+*ADR-027 (step 3) reads `bm.requestId` only when it is registered: §16.4.*
 
 ### 7.2 The `before("agent.create")` hook (`role-hook.ts`)
 
@@ -385,7 +385,14 @@ Each tool has a JSON Schema (what the model sees, and also the shape check); for
 
 ### 7.5 Plugin notices
 
-**Identification.** The SDK always attaches a `messageId` to `PaseoAgentHandle.send()` and the daemon stores it as `clientMessageId` — exactly the field that tells a message the user typed from one an agent relayed. The plugin's notices are therefore recognised by **text prefix** (`plugin/shared/notices.ts`, `isPluginNotice`) and excluded from `origin: "user"`, from request content and from review counting. Prefixes: `BM-BUDGET`, `STOP: The Beads Worker that created you was stopped`, `BM-STOP`, `BM-FORMAT`, `BM-TOOLS`, `BM-SETTINGS`, `BM-FALLBACK`, `BM-RESUME`, `BM-EVENTS` (the Orchestrator's batched events, autonomy design §A.8), `BM-COMMAND` (Design Orchestrator §6B.1), and, as whole words only, `BM-ANSWER` (the owner's answer to an Orchestrator decision), `BM-DELIVERY` (answers delivered to a Worker, autonomy design §A.6), `BM-ASK` (the owner's question about an open decision, change-014) and `BM-INTERRUPTED` (ADR-024). A notice no build sends any more is still recognised, so stored history never counts it as the owner's words: the 0.4.x notice that told a Manager its Worker had been answered directly (`RETIRED_NOTICE_MARKERS` in `shared/notices.ts`). `BM-HANDOVER` is the opening prompt of a replacement agent and is not in the list. `BM-NEW-REQUEST` is the user's message (§7.9) and is not in the list either.
+**Identification.** The SDK always attaches a `messageId` to `PaseoAgentHandle.send()` and the daemon stores it as `clientMessageId` — exactly the field that tells a message the user typed from one an agent relayed. So one classifier, `originOf` in `plugin/shared/message-origin.ts` (pure, no Node API, so the client's card parser uses the same rules), gives every `user_message` one of four origins, checking in this order:
+
+1. **`plugin-notice`** — the first line starts with a notice marker (`PREFIXES`, `isPluginNotice`): `BM-BUDGET`, `STOP: The Beads Worker that created you was stopped`, `BM-STOP`, `BM-FORMAT`, `BM-TOOLS`, `BM-SETTINGS`, `BM-FALLBACK`, `BM-RESUME`, `BM-EVENTS` (the Orchestrator's batched events, autonomy design §A.8), `BM-COMMAND` (Design Orchestrator §6B.1), and, as whole words only, `BM-ANSWER` (the owner's answer to an Orchestrator decision), `BM-DELIVERY` (deliveries to a Worker, autonomy design §A.6), `BM-ASK` (the owner's question about an open decision, change-014) and `BM-INTERRUPTED` (ADR-024). A notice no build sends any more is still recognised, so stored history never counts it as the owner's words (`RETIRED_NOTICE_MARKERS`).
+2. **`plugin-prompt`** — the first line is a prompt marker (`promptMarkerOf`, `isPluginPrompt`): **`BM-BRIEF`** (whole word), which `briefLineOf(role, requestId)` writes as `BM-BRIEF <role> requestId: <id | none>` at the top of every first prompt the plugin writes — the Orchestrator's (`orchestrator requestId: none`) and both fallback handovers (`worker` with the incident's request, `manager` with `none`); and, for prompts written before that line, `BM-HANDOFF-BRIEF` (whole word, including the brief a Manager sends as a successor's first message), `BM-HANDOVER` and the Orchestrator's old opening words (`ORCHESTRATOR_FIRST_PROMPT_START`), as prefixes.
+3. **`agent`** — no `clientMessageId`: another agent sent it with `send_agent_prompt`.
+4. **`owner`** — everything else, unless the compaction send log (`compaction-store.ts`) holds it, which makes the plugin's `/compact` a `plugin-notice`. `BM-NEW-REQUEST` (§7.9) and what the plugin sends on the owner's click (a Beads-screen action, `bead-actions.ts`) carry no marker and stay the owner's words and authority.
+
+Markers come first, so a marker can never give a message the owner's origin, and neither plugin origin carries authority (`command-authority.ts`, the action boundary check it in code). The users of `originOf` are the collector (it persists `origin: user` for `owner` and `agent` for the rest, so the trace schema is unchanged; a plugin prompt is stored as `agent`), `isOwnerWord` in `orchestrator-agent.ts` (which `command-authority.ts` calls), the fallback handover's owner-message filter, the live timeline (plugin prompts are not owner messages), `bm_agent_messages` (`from: plugin` for either plugin origin), the format check (checks `agent` only, so it ignores plugin prompts) and the client card parser (`plugin-notice` → the plugin's card, `plugin-prompt` and `owner` → left to Paseo, `agent` → a block card). `decision-materialiser.ts` and `interruption-watch.ts` read the collector's persisted `origin`. Records already written keep their stored `origin`; live reads classify old messages by the same rules.
 
 **Notice queue** (`notice-queue.ts`). A `send()` to a running agent **replaces** its current turn, so a notice to an agent that may be running goes through the queue: `refresh()` right before; target not `running`/`initializing` → send now; otherwise keep it in memory and send at the target's next `agent.turn_ended`. One notice per idle moment (a notice opens a turn; when that turn ends, the next one is sent). A new notice of the same kind for the same target replaces the old one. Target archived, closed or gone → dropped, one log line (`send()` unarchives an agent — ADR-005). Keyed by agent id and kind, never by turn id (Paseo reuses turn ids). Lost when the plugin reloads. The queue hangs on the format checker's `agent.turn_ended` hook and runs **after** it.
 
@@ -408,7 +415,7 @@ Each tool has a JSON Schema (what the model sees, and also the shape check); for
 
 An agent created before a notice existed reads it as an ordinary message; each text says by itself what the agent must do.
 
-*ADR-027 (step 1) moves origin detection into one classifier, and (step 4) adds the `BM-DELIVERY report|review|message|no-verdict` deliveries: §16.2, §16.7.*
+*ADR-027 (step 4) adds the `BM-DELIVERY report|review|message|no-verdict` deliveries: §16.7.*
 
 ### 7.6 `BM-*` blocks and format checks (`shared/bm-format.ts`, `server/format-check.ts`)
 
@@ -874,6 +881,8 @@ Rows up to 2026-10-02 are archived in [paseo-bm-revision-history-to-20261002.md]
 | 2026-10-03 | hieu.nt10 (owner decision; written by Claude) | §16 added: the design of ADR-027 (agents write the content; the plugin's code creates, routes and delivers), developed in five steps and shipped at three points (steps 3–5 as one build); one review counter shared by the tools and the Dashboard, off-tool Reviewers detected, grants never answered by a precedent, bindings only where an endpoint is attached, markers classified before `clientMessageId`; pointer lines in §5.1, §7.1, §7.2, §7.4–§7.11, §9, §10, §12 until each ship point folds them in |
 | 2026-10-03 | Claude (owner's delegation) | §16 checked against ADR-027, PRD REQ-037 and the code by an independent review and its re-check; fixes applied (step-3 live check moved to step 4, "creator is bound" defined, S5's reach). `design-ready` PASS |
 | 2026-10-03 | Claude (owner's delegation) | §16.5, §16.6, §16.7: six details settled at the bead polish |
+| 2026-10-03 | Claude (owner's delegation) | Ship point A built (beads bm-agent-tools-1upv.1, .2): §7.1 takes the role from the provider only, §7.5 describes the origin classifier and the `BM-BRIEF` prompt line; §16.2 and §16.3 are stubs |
+| 2026-10-03 | Claude (owner's delegation) | Spikes S1, S2, S4, S5 passed (bead bm-agent-tools-1upv.4, run note 2026-10-03): §16.1, §16.10 and §16.13 record the results; the token's exposure on disk and in `ps` is open for the owner |
 
 ## 15. History
 
@@ -928,7 +937,7 @@ Terms used below:
   - The tier and the "report received first" checks read report records that only step 4's `bm_report` writes.
 - **Steps 3 and 4 cannot work without step 5.** The tools must arrive with the role files that teach them. A bound agent still briefed by today's text would improvise the hand path beside its tools: creating Reviewers with `create_agent`, or sending blocks with `send_agent_prompt`.
 
-The spikes are owned by hieu.nt10, run by Claude, and all open on 2026-10-03. They run on an isolated daemon (`scripts/manual-test/`). Each one's result goes into AGENTS.md's *Verified facts* and a run note in `docs/archive/operations/`.
+The spikes are owned by hieu.nt10 and were run by Claude on 2026-10-03: **all four passed** ([run note](../archive/operations/paseo-bm-agent-tools-spikes-20261003.md); AGENTS.md *Verified facts*), so every "Pass →" branch below is the one built. They run on an isolated daemon (`scripts/manual-test/`). Each one's result goes into AGENTS.md's *Verified facts* and a run note in `docs/archive/operations/`.
 
 | Spike | Question | Pass → | Fail → |
 |---|---|---|---|
@@ -947,57 +956,11 @@ The spikes are owned by hieu.nt10, run by Claude, and all open on 2026-10-03. Th
 
 ### 16.2 The origin classifier (step 1)
 
-**Module.** `plugin/shared/message-origin.ts`, pure, with no Node API, so the client's card parser imports the same rules.
-
-```ts
-type MessageOrigin = "owner" | "plugin-notice" | "plugin-prompt" | "agent";
-originOf(message: { text: string; clientMessageId?: unknown }, opts?: { pluginSent?: (text: string) => boolean }): MessageOrigin
-```
-
-It is called only for a `user_message`; an `assistant_message` is its agent's own. The rules apply in order:
-
-1. **The first line starts with a notice marker → `plugin-notice`.** The markers are `PREFIXES` in `shared/notices.ts`, unchanged, with the same whole-word rules. The same applies when `opts.pluginSent(text)` is true: the compaction send log, used only for `/compact` (`compaction-store.ts`).
-2. **The first line is a prompt marker → `plugin-prompt`.** The prompt markers are:
-   - **`BM-BRIEF`**, a whole word: the first line of every first prompt the plugin writes from step 3 on, `BM-BRIEF <role> requestId: <id | none>` (a Reviewer's adds `batchId: <b> call: <id>`, §16.8);
-   - the ones in use today, kept so stored history still reads right: `BM-HANDOVER` (fallback handover), `BM-HANDOFF-BRIEF` (handoff brief, including the one an unbound Manager sends as a successor's first message) and `ORCHESTRATOR_FIRST_PROMPT_START` (`orchestrator-agent.ts`).
-
-   Step 1 also puts a `BM-BRIEF` line before the Orchestrator's first prompt and before a fallback `BM-HANDOVER`.
-3. **No `clientMessageId` → `agent`.** Another agent sent it with `send_agent_prompt` (AGENTS.md: 43/43 such messages carry none).
-4. **Otherwise → `owner`.** This includes `BM-NEW-REQUEST` (§7.9) and what the plugin sends on the owner's click (`bead-actions.ts:86`): both carry no marker and stay the owner's words and authority.
-
-**Why markers come first.**
-- **Plugin prompts are recognised either way.** A `BM-BRIEF` prompt is a plugin prompt whether or not Paseo attaches `clientMessageId` to a creation prompt (S1).
-- **A marker never gives a message the owner's origin.** An agent that writes a marker gets `plugin-notice` or `plugin-prompt`, never `owner`.
-- **Neither plugin origin carries authority.** Authority is checked in code (`command-authority.ts`, the action boundary).
-- **What a forged marker can still do.** An agent's message starting `BM-DELIVERY report` would only draw a card. The collector takes reports from the outbox, never from a delivery's text (§16.7), so no state follows from it.
-
-**What it replaces.**
-
-| Module | Today | With the classifier |
-|---|---|---|
-| `collector.ts` (`origin`, line ~615) | `clientMessageId && !isPluginNotice`, plus the send log | `originOf(...)`; the persisted `origin` stays `user` (owner) or `agent` (everything else), so the trace schema does not change |
-| `orchestrator-agent.ts:130` (`isOwnerWord`, which `command-authority.ts:131` calls) | owner word: `clientMessageId`, not a notice, not the first prompt | `originOf(...) === "owner"` |
-| `fallback-handover.ts:330` | skips notices and `BM-HANDOVER` | keeps `owner` only |
-| `live-timeline.ts:110` | the same test | `originOf` |
-| `orchestrator-read-tools.ts:244` | `from: user / agent / plugin / self` | `plugin` = either plugin origin |
-| `format-check.ts:253` | checks a `user_message` without `clientMessageId`, not a notice | checks `agent` only |
-| `client/chat-card-parse.ts` | `pluginCardOf` first, then `clientMessageId` → left to Paseo | `plugin-notice` → `pluginCardOf`; `plugin-prompt` and `owner` → left to Paseo; `agent` → a block card as today |
-
-Two modules consume the collector's persisted `origin` and change only through it: `decision-materialiser.ts` and `interruption-watch.ts`.
-
-**Compatibility.** Records already written keep their stored `origin`. Live reads of history — the timeline, `bm_agent_messages`, the card parser — classify old messages by the same rules, and the legacy prompt markers keep old first prompts out of `owner`.
-
-**Results.**
-- **Existing messages.** The classifier keeps every existing message's result: markers were already checked before `clientMessageId`.
-- **What step 1 adds.** The `plugin-prompt` origin for the prompt markers. Those messages stop counting as the owner's words where a module did not exclude them already.
+Built (ship point A); described in §7.5.
 
 ### 16.3 Role from the provider (step 1)
 
-- **`roleOfAgent(agent)`** (`server/agent-role.ts`) now returns `roleOfProvider(providerId(agent.provider))`. When the result is a role, `labelled` is `true` iff the `bm.role` label equals it.
-- **A disagreeing label.** An agent whose `bm.role` disagrees with its provider gets one log line per agent per plugin run: `[paseo-bm] agent <id> is labelled bm.role=<label> but runs on <provider>; its role is <role | none>`.
-- **A label without a `bm-*` provider** gives no role.
-- **What keeps working.** The "Not started by paseo-bm" chip and the `· no label` mark keep their meaning, since `labelled` is still exact.
-- **Tests.** Every `roleOfAgent` call site is covered by its module's tests. A fixture that gives a `bm.role` label to a non-`bm-*` provider changes expectation (no role), and one new test pins the disagreement log.
+Built (ship point A); described in §7.1.
 
 ### 16.4 The request registry (step 3)
 
@@ -1161,7 +1124,7 @@ Two creations at the same moment therefore never share a binding.
 | `message` | the follow-up or re-review text |
 | `no-verdict` | `requestId`, `batchId`, `reviewer`, and "The Reviewer ended its turn without a verdict. Ask it once more with bm_rereview, or report this batch as not reviewed." |
 
-`BM-DELIVERY` is already a whole-word notice marker, so every delivery is `plugin-notice` (§16.2).
+`BM-DELIVERY` is already a whole-word notice marker, so every delivery is `plugin-notice` (§7.5).
 
 **Where reports and reviews are recorded.**
 - **Card parser.** For `BM-DELIVERY report|review` it draws the same card as today's block (`direction: "received"`) from the text after the marker line. For `message` and `no-verdict` it draws a notice card.
@@ -1245,7 +1208,7 @@ Nothing was created or sent.
 
 ### 16.10 Wake-ups and a missing verdict (step 3; ADR-027 decision 11)
 
-**Wake-ups.** A Worker created by `bm_create_worker` or a Reviewer created by `bm_create_reviewer` has its creator as `parent`, but the creator did not call `create_agent`, so Paseo's `notifyOnFinish` wake does not apply (to be confirmed by S2). The parent is woken only by deliveries (§16.7) and by the plugin's own notices.
+**Wake-ups.** A Worker created by `bm_create_worker` or a Reviewer created by `bm_create_reviewer` has its creator as `parent`, but the creator did not call `create_agent`, so Paseo's `notifyOnFinish` wake does not apply (S2: a child created through the SDK with `parent` never woke its parent; one created with MCP `create_agent` did, within 24 ms). The parent is woken only by deliveries (§16.7) and by the plugin's own notices.
 
 What the Manager no longer does:
 - It no longer turns "a Worker turn ended with no report" into a message to the owner.
@@ -1305,7 +1268,7 @@ When all three hold, the plugin stores and delivers a `no-verdict` record to its
 - **What a token is.** A capability for one agent's tools, on loopback only, behind the same `Origin`, `Host` and body checks as today (§7.4).
 - **How it is kept.** Hashed at rest, never logged or returned.
 - **What it allows.** The worst a stolen token allows is acting as that one agent within its tools: reporting, asking, creating a Reviewer within the budget. It cannot reach another request: every tool takes the request from the binding, never from the input.
-- **S4.** It decides whether the second factor of §16.1 is needed.
+- **S4 passed on the read surfaces it named**, so tokens alone identify the caller and no second factor is built. **Open for the owner:** the token URL is also in the agent record `$PASEO_HOME/agents/<slug>/<id>.json` (mode 0644) and, for Claude, in the provider process's arguments (`ps`), so an agent with a shell or file-read tool can read another agent's token; the planned second factor would not close that, since the same file names the agent id. Decided before ship point C is installed.
 - **Agent creation by the plugin.** It joins the review-before-release list of §9: `bm_create_worker`, `bm_create_reviewer`, the replacement Reviewer and the handoff successor.
 
 **Reliability.**

@@ -200,3 +200,61 @@ export function noticeMarkerOf(text: unknown): string | null {
   if (text.startsWith(REVIEWER_STOP_NOTICE_PREFIX)) return "STOP";
   return PREFIXES.find((prefix) => startsWithMarker(text, prefix)) ?? null;
 }
+
+// ---------------------------------------------------------------------------
+// Prompt markers (design §16.2, ADR-027 decision 5): the first line of a
+// FIRST prompt the plugin writes for an agent. Unlike a notice, such a prompt
+// starts an agent's work, so it is drawn as Paseo draws it — but, like a
+// notice, it is never the owner's words (`shared/message-origin.ts`).
+// ---------------------------------------------------------------------------
+
+/**
+ * First word of every first prompt the plugin writes: `BM-BRIEF <role>
+ * requestId: <id | none>` (`briefLineOf`). Matched as a whole word.
+ */
+export const BRIEF_PROMPT_MARKER = "BM-BRIEF";
+
+/** First line of a fallback handover (`server/fallback-handover.ts`), after its `BM-BRIEF` line. */
+export const HANDOVER_PROMPT_MARKER = "BM-HANDOVER";
+
+/**
+ * First line of a handoff brief (`shared/handoff.ts` `HANDOFF_BRIEF_MARKER`),
+ * including the one an unbound Manager sends as a successor's first message.
+ * Matched as a whole word.
+ */
+export const HANDOFF_BRIEF_PROMPT_MARKER = "BM-HANDOFF-BRIEF";
+
+/**
+ * How the first message of every Orchestrator starts in the versions before
+ * its `BM-BRIEF` line (`server/orchestrator-agent.ts`): kept so stored history
+ * still reads right.
+ */
+export const ORCHESTRATOR_PROMPT_START = "The user opened you from ";
+
+const PROMPT_MARKERS: readonly string[] = [BRIEF_PROMPT_MARKER, HANDOVER_PROMPT_MARKER, HANDOFF_BRIEF_PROMPT_MARKER, ORCHESTRATOR_PROMPT_START];
+
+/** Prompt markers that count only as a whole word: followed by whitespace or nothing. */
+const WHOLE_WORD_PROMPT_MARKERS: ReadonlySet<string> = new Set([BRIEF_PROMPT_MARKER, HANDOFF_BRIEF_PROMPT_MARKER]);
+
+/** The prompt marker this text starts with, or null. */
+export function promptMarkerOf(text: unknown): string | null {
+  if (typeof text !== "string") return null;
+  return (
+    PROMPT_MARKERS.find((marker) => {
+      if (!text.startsWith(marker)) return false;
+      if (!WHOLE_WORD_PROMPT_MARKERS.has(marker)) return true;
+      const next = text.charAt(marker.length);
+      return next === "" || /\s/.test(next);
+    }) ?? null
+  );
+}
+
+/** True when this text is one of the plugin's first prompts, not a person's words. */
+export function isPluginPrompt(text: unknown): boolean {
+  return promptMarkerOf(text) !== null;
+}
+
+/** The `BM-BRIEF` first line: `BM-BRIEF <role> requestId: <id | none>`. */
+export function briefLineOf(role: string, requestId: string | null): string {
+  return `${BRIEF_PROMPT_MARKER} ${role} requestId: ${requestId ?? "none"}`;
+}

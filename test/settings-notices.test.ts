@@ -77,6 +77,9 @@ describe("notifyChildFactChange", () => {
   const OTHERS: Agent[] = [
     { id: "r-1", provider: "bm-reviewer", labels: { "bm.role": "reviewer" }, status: "idle" },
     { id: "mine", provider: "claude", status: "idle" },
+    // A bm.role label alone makes no Manager or Worker (design §16.3): never told.
+    { id: "label-only-manager", provider: "claude", labels: { "bm.role": "manager" }, status: "idle" },
+    { id: "label-only-worker", provider: "codex", labels: { "bm.role": "worker" }, status: "idle" },
   ];
 
   it("sends a changed Worker line now to an idle Manager and at its turn end to a running one; never to archived agents or other roles", async () => {

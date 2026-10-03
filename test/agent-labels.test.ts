@@ -92,6 +92,12 @@ describe("createAgentLabeller().labelAgent", () => {
     expect(runs).toEqual([]);
   });
 
+  it("leaves a valid bm.role that disagrees with the provider as it is: the label is display only (design §16.3)", async () => {
+    const { labeller, paseo, runs } = setup({ w1: { labels: { "bm.role": "reviewer" } } });
+    expect(await labeller.labelAgent("w1", "bm-worker", paseo)).toBe("already-labelled");
+    expect(runs).toEqual([]);
+  });
+
   it("does not even read an agent of another provider", async () => {
     const { labeller, paseo, runs, refreshes } = setup({ c1: { labels: {} } });
     expect(await labeller.labelAgent("c1", "claude", paseo)).toBe("not-bm");
@@ -375,6 +381,9 @@ describe("the once-per-run label scan (owner decision Q6 a, design §7.1)", () =
       { id: "w1", provider: "bm-worker", labels: { "bm.role": "worker" } },
       { id: "c1", provider: "claude", labels: {} },
       { id: "m-archived", provider: "bm-manager", labels: {}, archivedAt: "2026-09-18T00:00:00.000Z" },
+      // A label alone is no role, and a disagreeing label is display only (design §16.3): neither is written.
+      { id: "c-labelled", provider: "claude", labels: { "bm.role": "worker" } },
+      { id: "w-mislabelled", provider: "bm-worker", labels: { "bm.role": "reviewer" } },
     ]);
     const cliFake = fakeCli();
     const labeller = createAgentLabeller({ cli: cliFake.cli, log: () => {} });

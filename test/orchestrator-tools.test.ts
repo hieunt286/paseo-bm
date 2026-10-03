@@ -359,6 +359,20 @@ describe("bm_agent_messages (design §5.2)", () => {
     expect(two.messages.map((message) => message.at)).toEqual([at(2), at(3)]);
   });
 
+  it("reads the plugin's first prompts as plugin, with or without clientMessageId (design §16.2)", async () => {
+    const fixture = clean();
+    const prompts: Entry[][] = [
+      [
+        { item: { type: "user_message", text: "BM-BRIEF manager requestId: none\nBM-HANDOVER\nrole: manager", clientMessageId: "c-1" }, timestamp: at(0) },
+        { item: { type: "user_message", text: "BM-HANDOVER\nrole: manager" }, timestamp: at(1) },
+        { item: { type: "user_message", text: "Fix the build.", clientMessageId: "c-2" }, timestamp: at(2) },
+      ],
+    ];
+    const { paseo } = daemonWith(fixture.agents.map((facts) => snapshotOf(facts)), { [MANAGER]: prompts });
+    const answer = jsonOf(await toolsWith(paseo).call("bm_agent_messages", { agentId: MANAGER, detail: "full" })) as { messages: Array<{ from: string }> };
+    expect(answer.messages.map((message) => message.from)).toEqual(["plugin", "plugin", "user"]);
+  });
+
   it("refuses an agent that is not a paseo-bm Manager, Worker or Reviewer by its provider, and reads nothing of it", async () => {
     const fixture = clean();
     const others = [

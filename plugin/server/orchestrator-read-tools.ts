@@ -26,7 +26,7 @@ import { readTraceContext, traceDetailOf } from "./dashboard-rpc";
 import { bmAgentsOf, listedWorkspaces } from "./paseo-directory";
 import type { DataHomeDeps } from "./data-home";
 import { readTimelinePages } from "./live-timeline";
-import { isPluginNotice } from "./notices";
+import { isPluginOrigin, originOf } from "../shared/message-origin";
 import { createAlertStore } from "./alert-store";
 import { createDecisionStore } from "./decision-store";
 import {
@@ -236,20 +236,16 @@ export async function bmAgentMessages(input: { agentId: string; limit?: number; 
     const safe = redactText(String(item.text), context.env);
     if (safe.trim() === "") return [];
     const text = cutText(safe, maxChars);
+    // A `user_message`'s origin (design §16.2): either plugin origin, a notice or a first prompt, reads `plugin`.
+    const origin = item.type === "assistant_message" ? null : originOf({ text: safe, clientMessageId: item.clientMessageId });
     const from: TimelineMessage["from"] =
-      item.type === "assistant_message"
-        ? "self"
-        : isPluginNotice(safe)
-          ? "plugin"
-          : typeof item.clientMessageId === "string"
-            ? "user"
-            : "agent";
+      origin === null ? "self" : isPluginOrigin(origin) ? "plugin" : origin === "owner" ? "user" : "agent";
     return [{ at: item.at, from, text, truncated: text !== safe }];
   });
   const returned = messages.slice(-limit);
   const answer = json({
     agent: { id: agent.id, role: agent.role, title: agent.title, status: agent.status, workspaceId: agent.workspaceId },
-    // `self`: the agent's own reply; `user`: typed by the user in Paseo; `agent`: sent by another agent; `plugin`: a paseo-bm notice.
+    // `self`: the agent's own reply; `user`: typed by the user in Paseo; `agent`: sent by another agent; `plugin`: a paseo-bm notice or first prompt.
     messages: returned,
   });
   // Cut by the summary: a message's text, or messages `full` would have returned for the same limit.

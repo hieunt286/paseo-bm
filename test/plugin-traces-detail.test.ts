@@ -753,7 +753,7 @@ describe("read RPC handlers", () => {
   it("lists traces newest first with the store size and notices", async () => {
     await seed();
     const paseo = daemonWith([
-      { id: "w1", workspaceId: WS, status: "idle", createdAt: "2026-09-16T10:00:10.000Z", labels: { "bm.role": "worker", "bm.requestId": "req-A" } },
+      { id: "w1", workspaceId: WS, status: "idle", createdAt: "2026-09-16T10:00:10.000Z", provider: "bm-worker", labels: { "bm.role": "worker", "bm.requestId": "req-A" } },
     ]);
     const result = await handleTracesList({ workspaceId: WS }, paseo);
     expect(result.traces).toHaveLength(1);
@@ -771,7 +771,7 @@ describe("read RPC handlers", () => {
   it("gets one trace by id and fails a missing id with the coded error", async () => {
     await seed();
     const paseo = daemonWith([
-      { id: "w1", workspaceId: WS, status: "idle", createdAt: "2026-09-16T10:00:10.000Z", labels: { "bm.role": "worker", "bm.requestId": "req-A" } },
+      { id: "w1", workspaceId: WS, status: "idle", createdAt: "2026-09-16T10:00:10.000Z", provider: "bm-worker", labels: { "bm.role": "worker", "bm.requestId": "req-A" } },
     ]);
     const listed = await handleTracesList({ workspaceId: WS }, paseo);
     const traceId = listed.traces[0]!.traceId;
@@ -791,7 +791,7 @@ describe("read RPC handlers", () => {
     createCompactionStore(home, { now: () => new Date("2026-09-16T10:05:00.000Z") }).logSend("w1", "/compact", "cmp-1");
     const typed = (text: string) => ({ type: "user_message", text, messageId: "m", clientMessageId: "c" });
     const paseo = fakePaseo<DashboardPaseo>({
-      agents: [{ id: "w1", workspaceId: WS, status: "idle", createdAt: "2026-09-16T10:00:10.000Z", labels: { "bm.role": "worker", "bm.requestId": "req-A" } }],
+      agents: [{ id: "w1", workspaceId: WS, status: "idle", createdAt: "2026-09-16T10:00:10.000Z", provider: "bm-worker", labels: { "bm.role": "worker", "bm.requestId": "req-A" } }],
       workspaces: [{ id: WS, directory: workspace }],
       timelines: {
         w1: [
@@ -815,7 +815,7 @@ describe("read RPC handlers", () => {
     });
     clearTraceStoreCache();
     const paseo = daemonWith([
-      { id: "w1", workspaceId: WS, status: "idle", createdAt: "2026-09-16T10:00:10.000Z", labels: { "bm.role": "worker", "bm.requestId": "req-A" } },
+      { id: "w1", workspaceId: WS, status: "idle", createdAt: "2026-09-16T10:00:10.000Z", provider: "bm-worker", labels: { "bm.role": "worker", "bm.requestId": "req-A" } },
     ]);
     const traceId = (await handleTracesList({ workspaceId: WS }, paseo)).traces[0]!.traceId;
     const steps = (await handleTracesGet({ workspaceId: WS, traceId }, paseo)).trace.workflowSteps;
@@ -834,7 +834,7 @@ describe("read RPC handlers", () => {
     writeWorkspaceMeta(location, WS, { lastKnownName: "repo", lastKnownDirectory: workspace, lastSeenAt: "2026-09-16T10:10:00.000Z" });
     clearTraceStoreCache();
     // The Worker is still listed; its workspace no longer is.
-    const gone = daemonWith([{ id: "w1", workspaceId: WS, status: "idle", createdAt: "2026-09-16T10:00:10.000Z", labels: { "bm.role": "worker", "bm.requestId": "req-A" } }], []);
+    const gone = daemonWith([{ id: "w1", workspaceId: WS, status: "idle", createdAt: "2026-09-16T10:00:10.000Z", provider: "bm-worker", labels: { "bm.role": "worker", "bm.requestId": "req-A" } }], []);
     const traceId = (await handleTracesList({ workspaceId: WS }, gone)).traces[0]!.traceId;
     const steps = (await handleTracesGet({ workspaceId: WS, traceId }, gone)).trace.workflowSteps;
     expect(steps.find((row) => row.step === "design")).toMatchObject({ status: "done", confidence: "inferred" });
@@ -1133,6 +1133,7 @@ describe("tokens and context per agent (traces.agents)", () => {
       workspaceId: WS,
       status: "idle",
       createdAt: "2026-09-16T10:00:10.000Z",
+      provider: `bm-${role}`,
       labels: { "bm.role": role, ...(role === "manager" ? {} : { "bm.requestId": "req-A" }) },
       ...extra,
     });

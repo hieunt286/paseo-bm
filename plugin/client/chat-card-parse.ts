@@ -57,6 +57,7 @@ import {
 } from "../shared/orchestrator-command";
 import { ASKER_ROLES, DECISION_ID_PATTERN, effectSchema, questionDecisionId } from "../shared/decisions";
 import { reportPhaseSchema } from "../shared/contracts";
+import { originOf } from "../shared/message-origin";
 import { eventsNoticeOf } from "./chat-card-events";
 import type { Tone } from "./tone";
 import { shorten } from "../shared/text";
@@ -214,17 +215,19 @@ function base(type: CardType, direction: ChatCard["direction"], text: string, re
 export function toChatCards(item: ChatItem, phase: "streaming" | "complete"): ChatCard[] | undefined {
   if (typeof item.text !== "string" || item.text.trim() === "") return undefined;
   const text = item.text;
-  // The plugin's own notice. Paseo stores a `clientMessageId` on it like on
-  // the user's words (`server/notices.ts`), so it is told apart by its first
-  // line, as the plugin writes it, before that test.
-  if (item.type === "user_message") {
-    const own = pluginCardOf(text);
-    if (own !== undefined) return [own];
-  }
   let direction: ChatCard["direction"];
   if (item.type === "user_message") {
-    // Typed by the user in Paseo's app: the user's own words, left to Paseo.
-    if (typeof item.clientMessageId === "string") return undefined;
+    // Who sent it (design §16.2). The plugin's own notice: Paseo stores a
+    // `clientMessageId` on it like on the user's words, so it is told apart by
+    // its first line, as the plugin writes it, before that test.
+    const origin = originOf({ text, clientMessageId: item.clientMessageId });
+    if (origin === "plugin-notice") {
+      const own = pluginCardOf(text);
+      return own === undefined ? undefined : [own];
+    }
+    // The plugin's first prompt to an agent, or the owner's own words typed in
+    // Paseo's app (or sent on their click): left to Paseo.
+    if (origin !== "agent") return undefined;
     direction = "received";
   } else if (item.type === "assistant_message") {
     if (phase !== "complete") return undefined;

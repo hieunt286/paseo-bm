@@ -200,7 +200,7 @@ describe("traces.delete handler", () => {
     await appendRecord(location, record({ agentId: "agent-manager", role: "manager", turnId: "m-A", sent: [{ agentId: null, at: "2026-09-16T09:59:00.000Z", text: "do A", truncated: false }] }));
     await appendRecord(location, record({ agentId: "agent-manager", role: "manager", turnId: "m-B", requestId: "req-B", at: "2026-09-16T10:30:00.000Z", sent: [{ agentId: null, at: "2026-09-16T10:30:00.000Z", text: "do B", truncated: false }] }));
     clearTraceStoreCache();
-    const paseo = daemonWith({ agents: [{ id: "agent-running", workspaceId: WS, status: "running", labels: { "bm.role": "worker", "bm.requestId": "req-B" } }] });
+    const paseo = daemonWith({ agents: [{ id: "agent-running", workspaceId: WS, status: "running", provider: "bm-worker", labels: { "bm.role": "worker", "bm.requestId": "req-B" } }] });
     const all = await handleTracesDelete({ workspaceId: WS, scope: { allOfWorkspace: true }, dryRun: true }, paseo);
     expect(all.deleted.running).toBe(1);
     const onlyA = await handleTracesDelete({ workspaceId: WS, scope: { traceId: "req:req-A" }, dryRun: true }, paseo);
@@ -324,9 +324,9 @@ describe("review calls of a Reviewer that replaced a stopped one (delta 20260921
     const labels = (role: string) => ({ "bm.role": role, "bm.requestId": "req-A", "paseo.parent-agent-id": role === "worker" ? "agent-manager" : "agent-worker" });
     const paseo = daemonWith({
       agents: [
-        { id: "agent-worker", workspaceId: WS, status: "idle", labels: labels("worker") },
-        { id: "agent-rev-1", workspaceId: WS, status: "idle", labels: labels("reviewer") },
-        { id: "agent-rev-2", workspaceId: WS, status: "idle", labels: labels("reviewer") },
+        { id: "agent-worker", workspaceId: WS, status: "idle", provider: "bm-worker", labels: labels("worker") },
+        { id: "agent-rev-1", workspaceId: WS, status: "idle", provider: "bm-reviewer", labels: labels("reviewer") },
+        { id: "agent-rev-2", workspaceId: WS, status: "idle", provider: "bm-reviewer", labels: labels("reviewer") },
       ],
     });
     const reviewCalls = async () =>

@@ -48,7 +48,8 @@ import { roleOfProvider, type BmRole } from "./agent-role";
 import { joinStreamedText, sliceLastTurn } from "./collector";
 import { requireLocation } from "./dashboard-rpc";
 import { bmAgentsOf, type DashboardPaseo } from "./paseo-directory";
-import { FORMAT_NOTICE_MARKER, isPluginNotice } from "./notices";
+import { FORMAT_NOTICE_MARKER } from "./notices";
+import { originOf } from "../shared/message-origin";
 import { readRecords } from "./trace-store";
 import { requestIdOfAgent, type AgentFacts } from "./traces";
 import { errorText } from "./rpc-kit";
@@ -246,11 +247,11 @@ async function detect(event: FormatTurnEvent, role: BmRole, deps: FormatDeps, lo
     .map(textItem)
     .filter((item): item is TimelineText => item !== null);
   const wanted: BlockKind = role === "manager" ? "BM-REPORT" : role === "worker" ? "BM-ANSWERS" : "BM-REVIEW";
-  // Received from another agent (no clientMessageId, not the plugin's own notice) — or, for a Reviewer, its own words.
+  // Received from another agent (origin `agent`, design §16.2: no clientMessageId, neither a plugin notice nor a plugin prompt) — or, for a Reviewer, its own words.
   const sources = items.filter((item) =>
     role === "reviewer"
       ? item.type === "assistant_message"
-      : item.type === "user_message" && typeof item.clientMessageId !== "string" && !isPluginNotice(item.text),
+      : item.type === "user_message" && originOf({ text: item.text, clientMessageId: item.clientMessageId }) === "agent",
   );
   const latest = new Map<string, Unit>();
   for (const item of sources) {

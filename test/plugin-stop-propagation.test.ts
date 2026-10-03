@@ -40,6 +40,7 @@ function reviewer(id: string, overrides: Partial<Snapshot> = {}, labels: Record<
     id,
     workspaceId: WS,
     status: "running",
+    provider: "bm-reviewer",
     labels: { "bm.role": "reviewer", "paseo.parent-agent-id": WORKER, ...labels },
     ...overrides,
   };
@@ -158,8 +159,10 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
         reviewer("rev-other-worker", {}, { "paseo.parent-agent-id": "worker-2" }),
         reviewer("rev-idle", { status: "idle" }),
         reviewer("rev-archived", { archivedAt: "2026-09-15T12:00:00.000Z" }),
-        reviewer("child-not-reviewer", {}, { "bm.role": "worker" }),
-        reviewer("child-unlabeled", {}, { "bm.role": "" }),
+        reviewer("child-not-reviewer", { provider: "bm-worker" }, { "bm.role": "worker" }),
+        reviewer("child-unlabeled", { provider: "claude" }, { "bm.role": "" }),
+        // A bm.role label alone never makes a Reviewer (design §16.3).
+        reviewer("child-label-only", { provider: "claude" }),
         reviewer("rev-other-ws", { workspaceId: "ws-2" }),
         reviewer("rev-b"),
       ],
@@ -170,10 +173,10 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
       { id: "rev-a", text: REVIEWER_STOP_NOTICE },
       { id: "rev-b", text: REVIEWER_STOP_NOTICE },
     ]);
-    // Eight Reviewers and the stopped Worker itself: five pages of two.
+    // Nine Reviewers and the stopped Worker itself: five pages of two.
     expect(listCalls.length).toBe(5);
     // Parent label only since delta 20260918g §4.2: the reviewer role is decided
-    // per agent (label, else bm-reviewer provider), not by the daemon's filter.
+    // per agent (by the bm-reviewer provider), not by the daemon's filter.
     expect(listCalls[0]).toEqual({
       filter: { labels: { "paseo.parent-agent-id": WORKER }, includeArchived: false },
       page: { limit: 200 },
@@ -416,6 +419,7 @@ describe("stopAllInWorkspace", () => {
     id,
     workspaceId: WS,
     status: "running",
+    provider: "bm-worker",
     labels: { "bm.role": "worker" },
     ...overrides,
   });
@@ -423,6 +427,7 @@ describe("stopAllInWorkspace", () => {
     id,
     workspaceId: WS,
     status: "running",
+    provider: "bm-manager",
     labels: { "bm.role": "manager" },
   });
 
@@ -520,7 +525,7 @@ describe("stopAllInWorkspace", () => {
   it("never asks the Orchestrator's assessment agent, labelled or recognised only by its provider (orchestrator design §3.2)", async () => {
     const { paseo, sends, refreshes } = daemonWith({
       agents: [
-        { id: "orc-labelled", workspaceId: WS, status: "running", labels: { "bm.role": "orchestrator" } },
+        { id: "orc-labelled", workspaceId: WS, status: "running", labels: { "bm.role": "orchestrator" }, provider: "bm-orchestrator" },
         { id: "orc-plain", workspaceId: WS, status: "running", labels: {}, provider: "bm-orchestrator/claude-opus-5" },
         worker("w1"),
       ],

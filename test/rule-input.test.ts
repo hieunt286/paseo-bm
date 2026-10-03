@@ -254,7 +254,7 @@ afterEach(() => {
 
 /** The shared fake SDK with the Manager, the request's Worker and Reviewer, and a second Worker still running. */
 function daemon(): DashboardPaseo {
-  const agent = (id: string, labels: Record<string, string>, status = "idle") => ({ id, workspaceId: WS, status, labels });
+  const agent = (id: string, labels: Record<string, string>, status = "idle") => ({ id, workspaceId: WS, status, provider: `bm-${labels["bm.role"]}`, labels });
   return fakePaseo<DashboardPaseo>({
     agents: [
       agent(MANAGER, { "bm.role": "manager" }),

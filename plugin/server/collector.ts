@@ -41,6 +41,7 @@ import type { PluginLifecycleEvents, PluginServerContext } from "@getpaseo/plugi
 import { parseReports, parseReviews, requestIdFromText } from "./bm-report";
 import { pluginSentMatcher } from "./compaction-store";
 import { isPluginNotice } from "./notices";
+import { originOf } from "../shared/message-origin";
 import { stripNewRequestMarker } from "../shared/new-request";
 import { resolveDataHome } from "./data-home";
 import { roleOfProvider, type BmRole } from "./agent-role";
@@ -603,25 +604,26 @@ export async function buildRecord(
     // here and the message stays theirs (delta 20260917f §4.1).
     const safe = stripNewRequestMarker(redactText(text, env));
     const message: TraceMessage = { agentId: event.agent.id, at, text: safe, truncated: false };
-    // The plugin's `/compact` (autonomy design §G.5): a `user_message` with a
-    // `clientMessageId` and no marker, told apart only by the plugin's send log.
-    let sentByPlugin = false;
+    // Who sent it (design §16.2, `originOf`): the plugin's notices and first
+    // prompts by their marker, its `/compact` (autonomy design §G.5) by its send
+    // log, another agent by a missing `clientMessageId` (15/15 typed vs 43/43
+    // agent reports on the owner's Manager). Only the owner's own words are
+    // stored as `user`, so the trace schema keeps its two values.
+    let notice = false;
     if (item.type === "user_message") {
-      // Typed in Paseo's app → `clientMessageId`; sent by an agent → none.
-      // Verified on the owner's Manager: 15/15 typed vs 43/43 agent reports.
-      // The plugin's own notices carry a clientMessageId too (the SDK adds one),
-      // so they are recognised by their text instead (review b2), and what the
-      // plugin sent for a compaction by its send log.
-      const typed = typeof (item as { clientMessageId?: unknown }).clientMessageId === "string" && !isPluginNotice(safe);
-      sentByPlugin = typed && pluginSent(event.agent.id, text, at);
-      message.origin = typed && !sentByPlugin ? "user" : "agent";
+      const origin = originOf(
+        { text: safe, clientMessageId: (item as { clientMessageId?: unknown }).clientMessageId },
+        { pluginSent: () => pluginSent(event.agent.id, text, at) },
+      );
+      notice = origin === "plugin-notice";
+      message.origin = origin === "owner" ? "user" : "agent";
       sent.push(message);
     } else {
       received.push(message);
     }
     // A plugin notice quotes block names ("- BM-REVIEW checked: is missing"),
     // which parsed as a review with the verdict "checked: is missing".
-    if (isPluginNotice(safe) || sentByPlugin) continue;
+    if (isPluginNotice(safe) || notice) continue;
     reports.push(...parseReports(safe, { agentId: event.agent.id, at }));
     // A review is its Reviewer's own reply: a block quoted in its prompt or
     // relayed by a Worker or Manager is the same review again (bead 7gxw.12).

@@ -38,9 +38,9 @@ const t = (minute: number) => `2026-09-15T08:${String(minute).padStart(2, "0")}:
 describe("agents.list — tree", () => {
   it("full tree: Manager → Worker → Reviewer, parent links and fields preserved", async () => {
     const { paseo, lists } = directory([
-      agent({ id: "rev", createdAt: t(3), labels: { "bm.role": "reviewer", "paseo.parent-agent-id": "wrk" } }),
-      agent({ id: "mgr", createdAt: t(1), title: "Beads Manager", status: "running", labels: { "bm.role": "manager" } }),
-      agent({ id: "wrk", createdAt: t(2), labels: { "bm.role": "worker", "paseo.parent-agent-id": "mgr" } }),
+      agent({ id: "rev", createdAt: t(3), provider: "bm-reviewer", labels: { "bm.role": "reviewer", "paseo.parent-agent-id": "wrk" } }),
+      agent({ id: "mgr", createdAt: t(1), title: "Beads Manager", status: "running", provider: "bm-manager", labels: { "bm.role": "manager" } }),
+      agent({ id: "wrk", createdAt: t(2), provider: "bm-worker", labels: { "bm.role": "worker", "paseo.parent-agent-id": "mgr" } }),
     ]);
 
     const output = await listWorkspaceAgents({ workspaceId: WS }, { paseo });
@@ -58,10 +58,10 @@ describe("agents.list — tree", () => {
 
   it("names the agent that replaced one, by its bm.replacedBy label or by a switched incident (delta 20260921 §4.4.8)", async () => {
     const { paseo } = directory([
-      agent({ id: "mgr", createdAt: t(1), labels: { "bm.role": "manager" } }),
-      agent({ id: "wrk", createdAt: t(2), labels: { "bm.role": "worker", "paseo.parent-agent-id": "mgr", "bm.replacedBy": "wrk-2" } }),
-      agent({ id: "wrk-2", createdAt: t(3), labels: { "bm.role": "worker", "paseo.parent-agent-id": "mgr" } }),
-      agent({ id: "rev", createdAt: t(4), labels: { "bm.role": "reviewer", "paseo.parent-agent-id": "wrk" } }),
+      agent({ id: "mgr", createdAt: t(1), provider: "bm-manager", labels: { "bm.role": "manager" } }),
+      agent({ id: "wrk", createdAt: t(2), provider: "bm-worker", labels: { "bm.role": "worker", "paseo.parent-agent-id": "mgr", "bm.replacedBy": "wrk-2" } }),
+      agent({ id: "wrk-2", createdAt: t(3), provider: "bm-worker", labels: { "bm.role": "worker", "paseo.parent-agent-id": "mgr" } }),
+      agent({ id: "rev", createdAt: t(4), provider: "bm-reviewer", labels: { "bm.role": "reviewer", "paseo.parent-agent-id": "wrk" } }),
     ]);
     const { agents } = await listWorkspaceAgents({ workspaceId: WS }, { paseo, replacements: new Map([["rev", "rev-2"]]) });
     expect(agents.map((a) => [a.id, a.replacedBy])).toEqual([
@@ -74,8 +74,8 @@ describe("agents.list — tree", () => {
 
   it("lists the Orchestrator as a paseo-bm agent, by its label or by its provider (orchestrator design §3.2)", async () => {
     const { paseo } = directory([
-      agent({ id: "mgr", createdAt: t(1), labels: { "bm.role": "manager" } }),
-      agent({ id: "orc", createdAt: t(2), labels: { "bm.role": "orchestrator" } }),
+      agent({ id: "mgr", createdAt: t(1), provider: "bm-manager", labels: { "bm.role": "manager" } }),
+      agent({ id: "orc", createdAt: t(2), provider: "bm-orchestrator", labels: { "bm.role": "orchestrator" } }),
       agent({ id: "orc-2", createdAt: t(3), provider: "bm-orchestrator/claude-opus-5", labels: {} }),
     ]);
     const output = await listWorkspaceAgents({ workspaceId: WS }, { paseo });
@@ -88,19 +88,22 @@ describe("agents.list — tree", () => {
 
   it("agent with missing or foreign bm.role label: role unknown, no error", async () => {
     const { paseo } = directory([
-      agent({ id: "mgr", createdAt: t(1), labels: { "bm.role": "manager" } }),
+      agent({ id: "mgr", createdAt: t(1), provider: "bm-manager", labels: { "bm.role": "manager" } }),
       agent({ id: "wrk", createdAt: t(2), title: null, labels: { "paseo.parent-agent-id": "mgr" } }),
       agent({ id: "rev", createdAt: t(3), labels: { "paseo.parent-agent-id": "wrk" } }),
       agent({ id: "odd", createdAt: t(4), labels: { "bm.role": "planner" } }),
+      // A valid bm.role on another provider is no role (design §16.3): still listed, role unknown.
+      agent({ id: "label-only", createdAt: t(5), provider: "claude", labels: { "bm.role": "manager" } }),
     ]);
 
     const { agents } = await listWorkspaceAgents({ workspaceId: WS }, { paseo });
 
-    expect(agents.map((a) => [a.id, a.role, a.parentId])).toEqual([
-      ["mgr", "manager", null],
-      ["wrk", "unknown", "mgr"],
-      ["rev", "unknown", "wrk"],
-      ["odd", "unknown", null],
+    expect(agents.map((a) => [a.id, a.role, a.parentId, a.labelled])).toEqual([
+      ["mgr", "manager", null, true],
+      ["wrk", "unknown", "mgr", false],
+      ["rev", "unknown", "wrk", false],
+      ["odd", "unknown", null, false],
+      ["label-only", "unknown", null, false],
     ]);
     expect(agents[1]!.title).toBeNull();
     expect(() => agentsListRpc.output.parse({ agents })).not.toThrow();
@@ -123,10 +126,10 @@ describe("agents.list — tree", () => {
 
   it("orphaned Worker (Manager deleted or archived) still listed as a root with its Reviewer", async () => {
     const { paseo } = directory([
-      agent({ id: "mgr-archived", createdAt: t(0), archivedAt: t(5), labels: { "bm.role": "manager" } }),
-      agent({ id: "wrk-1", createdAt: t(1), labels: { "bm.role": "worker", "paseo.parent-agent-id": "mgr-deleted" } }),
-      agent({ id: "wrk-2", createdAt: t(2), labels: { "bm.role": "worker", "paseo.parent-agent-id": "mgr-archived" } }),
-      agent({ id: "rev", createdAt: t(3), labels: { "bm.role": "reviewer", "paseo.parent-agent-id": "wrk-1" } }),
+      agent({ id: "mgr-archived", createdAt: t(0), archivedAt: t(5), provider: "bm-manager", labels: { "bm.role": "manager" } }),
+      agent({ id: "wrk-1", createdAt: t(1), provider: "bm-worker", labels: { "bm.role": "worker", "paseo.parent-agent-id": "mgr-deleted" } }),
+      agent({ id: "wrk-2", createdAt: t(2), provider: "bm-worker", labels: { "bm.role": "worker", "paseo.parent-agent-id": "mgr-archived" } }),
+      agent({ id: "rev", createdAt: t(3), provider: "bm-reviewer", labels: { "bm.role": "reviewer", "paseo.parent-agent-id": "wrk-1" } }),
     ]);
 
     const { agents } = await listWorkspaceAgents({ workspaceId: WS }, { paseo });
@@ -147,8 +150,8 @@ describe("agents.list — tree", () => {
     const { paseo, lists } = directory(
       [
         agent({ id: "user-agent", createdAt: t(0) }),
-        agent({ id: "other-mgr", createdAt: t(1), workspaceId: "ws-2", labels: { "bm.role": "manager" } }),
-        agent({ id: "mgr", createdAt: t(2), status: "closed", labels: { "bm.role": "manager" } }),
+        agent({ id: "other-mgr", createdAt: t(1), workspaceId: "ws-2", provider: "bm-manager", labels: { "bm.role": "manager" } }),
+        agent({ id: "mgr", createdAt: t(2), status: "closed", provider: "bm-manager", labels: { "bm.role": "manager" } }),
         agent({ id: "wrk", createdAt: t(3), labels: { "paseo.parent-agent-id": "mgr" } }),
       ],
       1,
@@ -326,7 +329,7 @@ describe("plugin server entry — agents.list and roles.describe", () => {
     ]);
 
     const listHandler = handle.mock.calls.find(([c]) => c === agentsListRpc)![1];
-    const { paseo } = directory([agent({ id: "mgr", labels: { "bm.role": "manager" } })]);
+    const { paseo } = directory([agent({ id: "mgr", provider: "bm-manager", labels: { "bm.role": "manager" } })]);
     const output = await listHandler({ workspaceId: WS }, { paseo });
     expect(output.agents.map((a: { id: string }) => a.id)).toEqual(["mgr"]);
   });

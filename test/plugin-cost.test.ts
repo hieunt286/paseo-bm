@@ -410,8 +410,8 @@ describe("the Dashboard read RPCs price from the listed rates", () => {
     const answers: Record<string, unknown> = { "bm-worker": modelList([KIMI, QWEN, SONNET_LISTED]), "bm-reviewer": modelList([GPT]) };
     const fake = fakePaseo<DashboardPaseo>({
       agents: [
-        { id: "w1", workspaceId: WS, status: "idle", createdAt: "2026-09-21T10:00:10.000Z", labels: { "bm.role": "worker", "bm.requestId": "req-A" } },
-        { id: "r1", workspaceId: WS, status: "idle", createdAt: "2026-09-21T10:00:20.000Z", labels: { "bm.role": "reviewer", "bm.requestId": "req-A", "paseo.parent-agent-id": "w1" } },
+        { id: "w1", workspaceId: WS, status: "idle", createdAt: "2026-09-21T10:00:10.000Z", provider: "bm-worker", labels: { "bm.role": "worker", "bm.requestId": "req-A" } },
+        { id: "r1", workspaceId: WS, status: "idle", createdAt: "2026-09-21T10:00:20.000Z", provider: "bm-reviewer", labels: { "bm.role": "reviewer", "bm.requestId": "req-A", "paseo.parent-agent-id": "w1" } },
       ],
       workspaces: [{ id: WS, directory: workspace }],
       providers: { models: (provider) => answers[provider] ?? modelList([]) },

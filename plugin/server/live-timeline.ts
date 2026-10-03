@@ -16,16 +16,16 @@
  * newest page and `startCursor`; `direction: "before"` with that cursor pages
  * back. Real agents needed 2–5 pages of 200 and under 200 ms.
  *
- * A typed message is the owner's only when the plugin did not send it: its
- * notices are told apart by their marker, and what it sent for a compaction
- * (the `/compact`) by its send log, through the collector's own matcher
- * (`pluginSentBeside`, autonomy design §G.5) — the same reading the recorded
- * turns get.
+ * A typed message is the owner's only when its origin is `owner` (`originOf`,
+ * design §16.2): the plugin's notices and first prompts are told apart by their
+ * marker, and what it sent for a compaction (the `/compact`) by its send log,
+ * through the collector's own matcher (`pluginSentBeside`, autonomy design
+ * §G.5) — the same reading the recorded turns get.
  */
 import { redactText, skillsFromItem } from "./collector";
-import { isPluginNotice } from "./notices";
 import { MAX_MESSAGE_CHARS, TRUNCATION_MARKER } from "./trace-store";
 import type { TraceMessage } from "../shared/contracts";
+import { originOf } from "../shared/message-origin";
 import { byAt, uniqueBy } from "../shared/order";
 
 /** A long-lived agent is read at most this far back. */
@@ -105,14 +105,10 @@ async function readAgent(paseo: LiveTimelinePaseo, agentId: string, out: LiveExt
       if (item === undefined || item === null) continue;
       const at = typeof entry.timestamp === "string" ? entry.timestamp : null;
       for (const skill of skillsFromItem(item as never)) out.skills.push({ agentId, skill, at });
-      if (
-        item.type === "user_message" &&
-        typeof item.clientMessageId === "string" &&
-        typeof item.text === "string" &&
-        !isPluginNotice(item.text) &&
-        !pluginSent(agentId, item.text, at)
-      ) {
-        const { text, truncated } = capped(redactText(item.text, env));
+      if (item.type !== "user_message" || typeof item.text !== "string") continue;
+      const raw = item.text;
+      if (originOf({ text: raw, clientMessageId: item.clientMessageId }, { pluginSent: () => pluginSent(agentId, raw, at) }) === "owner") {
+        const { text, truncated } = capped(redactText(raw, env));
         out.userMessages.push({ agentId, at: at ?? "", text, truncated, origin: "user" });
       }
     }

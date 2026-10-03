@@ -471,6 +471,7 @@ describe("pending and error states", () => {
       workspaceId: WS,
       createdAt: `2026-09-15T0${8 + i}:00:00.000Z`,
       status: "idle",
+      provider: "bm-manager",
       labels: { "bm.role": "manager" },
       archivedAt: null,
     }));

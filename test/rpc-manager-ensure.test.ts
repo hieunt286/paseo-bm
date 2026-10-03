@@ -105,6 +105,7 @@ function agent(overrides: Partial<ManagerAgentSnapshot> & { id: string }): Manag
     workspaceId: WS,
     createdAt: "2026-09-15T08:00:00.000Z",
     status: "idle",
+    provider: "bm-manager",
     labels: { "bm.role": "manager", "bm.version": "0.1.0-alpha.0" },
     archivedAt: null,
     ...overrides,
@@ -170,7 +171,7 @@ describe("manager.ensure — no Manager yet", () => {
     const fake = daemonWith({
       agents: [
         // Not a Manager, and a Manager of another workspace: neither counts.
-        agent({ id: "worker-1", labels: { "bm.role": "worker" } }),
+        agent({ id: "worker-1", provider: "bm-worker", labels: { "bm.role": "worker" } }),
         agent({ id: "other-ws-manager", workspaceId: "ws-2" }),
       ],
     });
@@ -528,6 +529,16 @@ describe("manager.ensure — a Manager without the bm.role label (delta 20260918
     expect(result.created).toBe(true);
     expect(fake.createCalls).toHaveLength(1);
   });
+
+  it("does not take another provider's agent for a Manager because it carries bm.role=manager (design §16.3)", async () => {
+    const fake = daemonWith({ agents: [agent({ id: "label-only", provider: "claude" })] });
+
+    const result = await ensureManager({ workspaceId: WS }, deps(fake.paseo));
+
+    expect(result.created).toBe(true);
+    expect(result.otherManagerIds).toEqual([]);
+    expect(fake.createCalls).toHaveLength(1);
+  });
 });
 
 describe("manager.ensure — creation fails", () => {
@@ -552,7 +563,7 @@ describe("manager.ensure — creation fails", () => {
     "agent created but already failed (%s): coded error, archives exactly that agent",
     async (_label, createdSnapshot) => {
       const fake = daemonWith({
-        agents: [agent({ id: "worker-1", labels: { "bm.role": "worker" } })],
+        agents: [agent({ id: "worker-1", provider: "bm-worker", labels: { "bm.role": "worker" } })],
         createdSnapshot,
       });
 

@@ -191,9 +191,10 @@ describe("which agents are looked at", () => {
       expect(await classifyTurn(asEvent(turn({ agent })), value)).toBeNull();
       expect(refetch).not.toHaveBeenCalled();
     }
-    // The bm.role label decides over the provider, as everywhere else.
+    // The provider decides, never the label (design §16.3): a Worker labelled
+    // bm.role=orchestrator still has a fallback chain.
     const labelled = deps({ labels: { "bm.role": "orchestrator" }, lastUsage: { outputTokens: 0 } });
-    expect(await classifyTurn(asEvent(failed(LIMIT)), labelled.value)).toBeNull();
+    expect(await classifyTurn(asEvent(failed(LIMIT)), labelled.value)).toMatchObject({ class: "L1" });
   });
 
   it("an agent with a bm.replacedBy label -> null", async () => {

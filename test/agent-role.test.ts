@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import { listAllAgents, roleOfAgent, roleOfProvider } from "../plugin/server/agent-role";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { listAllAgents, resetRoleDisagreementLog, roleLabelOf, roleOfAgent, roleOfProvider } from "../plugin/server/agent-role";
 import { handleChatPeers } from "../plugin/server/chat-rpc";
 import { agentFactsOf, bmAgentsOf, type DashboardPaseo } from "../plugin/server/paseo-directory";
 import { FALLBACK_ROLES, fallbackAlias, fallbackAliasOf, positionOfAlias } from "../plugin/shared/fallback";
@@ -69,19 +69,31 @@ function directory(agents: Agent[], timelines: Record<string, unknown[]> = {}): 
   return fake;
 }
 
-describe("roleOfAgent", () => {
-  it("takes a valid bm.role label first", () => {
-    expect(roleOfAgent({ labels: { "bm.role": "reviewer" }, provider: "bm-worker" })).toEqual({ role: "reviewer", labelled: true });
+describe("roleOfAgent (design §16.3: the provider decides, the label is display only)", () => {
+  let lines: string[];
+  beforeEach(() => {
+    lines = [];
+    resetRoleDisagreementLog((line) => lines.push(line));
+  });
+  afterEach(() => resetRoleDisagreementLog());
+
+  it("takes the role from the provider; labelled is true iff the bm.role label names that role", () => {
+    expect(roleOfAgent({ labels: { "bm.role": "reviewer" }, provider: "bm-reviewer" })).toEqual({ role: "reviewer", labelled: true });
     expect(roleOfAgent({ labels: { "bm.role": "orchestrator" }, provider: "bm-orchestrator" })).toEqual({ role: "orchestrator", labelled: true });
+    expect(roleOfAgent({ labels: { "bm.role": "worker" }, provider: "bm-worker-fallback-2/qwen" })).toEqual({ role: "worker", labelled: true });
+    expect(roleOfAgent({ labels: {}, provider: "bm-manager" })).toEqual({ role: "manager", labelled: false });
+    expect(roleOfAgent({ provider: "bm-reviewer/gpt-5.6-sol" })).toEqual({ role: "reviewer", labelled: false });
   });
 
-  it("falls back to the provider when the label is missing or unknown", () => {
-    expect(roleOfAgent({ labels: {}, provider: "bm-manager" })).toEqual({ role: "manager", labelled: false });
-    expect(roleOfAgent({ labels: { "bm.role": "boss" }, provider: "bm-worker/claude-opus-5" })).toEqual({
-      role: "worker",
-      labelled: false,
-    });
-    expect(roleOfAgent({ provider: "bm-reviewer/gpt-5.6-sol" })).toEqual({ role: "reviewer", labelled: false });
+  it("never lets a label beat the provider: a disagreeing or unknown label gives the provider's role, unlabelled", () => {
+    expect(roleOfAgent({ labels: { "bm.role": "reviewer" }, provider: "bm-worker" })).toEqual({ role: "worker", labelled: false });
+    expect(roleOfAgent({ labels: { "bm.role": "boss" }, provider: "bm-worker/claude-opus-5" })).toEqual({ role: "worker", labelled: false });
+  });
+
+  it("gives no role to an agent that only carries a bm.role label (non-bm-* provider or none)", () => {
+    expect(roleOfAgent({ labels: { "bm.role": "manager" }, provider: "claude" })).toBeNull();
+    expect(roleOfAgent({ labels: { "bm.role": "worker" }, provider: "codex/gpt-5.4" })).toBeNull();
+    expect(roleOfAgent({ labels: { "bm.role": "reviewer" } })).toBeNull();
   });
 
   it("returns null for any other agent and for malformed input, without throwing", () => {
@@ -91,6 +103,36 @@ describe("roleOfAgent", () => {
     for (const bad of [null, undefined, 42, "bm-worker", { labels: "x", provider: 7 }]) {
       expect(roleOfAgent(bad)).toBeNull();
     }
+  });
+
+  it("logs a disagreeing label once per agent per plugin run, never twice, and never an agreeing or missing one", () => {
+    const mislabelled = { id: "a-1", labels: { "bm.role": "manager" }, provider: "bm-worker/claude-opus-5" };
+    const labelOnly = { id: "a-2", labels: { "bm.role": "worker" }, provider: "claude" };
+    for (let n = 0; n < 3; n++) {
+      roleOfAgent(mislabelled);
+      roleOfAgent(labelOnly);
+      roleOfAgent({ id: "a-3", labels: { "bm.role": "worker" }, provider: "bm-worker" });
+      roleOfAgent({ id: "a-4", labels: {}, provider: "bm-reviewer" });
+      roleOfAgent({ id: "a-5", labels: {}, provider: "claude" });
+    }
+    expect(lines).toEqual([
+      "[paseo-bm] agent a-1 is labelled bm.role=manager but runs on bm-worker/claude-opus-5; its role is worker",
+      "[paseo-bm] agent a-2 is labelled bm.role=worker but runs on claude; its role is none",
+    ]);
+    // A new plugin run logs it again, once.
+    resetRoleDisagreementLog((line) => lines.push(line));
+    roleOfAgent(mislabelled);
+    roleOfAgent(mislabelled);
+    expect(lines).toHaveLength(3);
+  });
+});
+
+describe("roleLabelOf", () => {
+  it("reads a bm.role label that names a role, and nothing else", () => {
+    expect(roleLabelOf({ "bm.role": "worker" })).toBe("worker");
+    expect(roleLabelOf({ "bm.role": "boss" })).toBeNull();
+    expect(roleLabelOf({})).toBeNull();
+    expect(roleLabelOf(null)).toBeNull();
   });
 });
 
@@ -176,7 +218,7 @@ describe("bmAgentsOf", () => {
 
   it("lists the Orchestrator's assessment agent only when asked, so no trace rebuild or chat peer meets it (orchestrator design §3.2)", async () => {
     const orchestrators: Agent[] = [
-      { id: "o1", workspaceId: WORKSPACE, status: "running", labels: { "bm.role": "orchestrator" } },
+      { id: "o1", workspaceId: WORKSPACE, provider: "bm-orchestrator", status: "running", labels: { "bm.role": "orchestrator" } },
       { id: "o2", workspaceId: WORKSPACE, provider: "bm-orchestrator/claude-opus-5", status: "idle", labels: {} },
     ];
     const paseo = directory([...refactorDependency(), ...orchestrators]);

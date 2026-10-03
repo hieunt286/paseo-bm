@@ -370,6 +370,15 @@ describe("reviews and answers", () => {
     expect(paseo.agents.list).not.toHaveBeenCalled();
   });
 
+  it("never checks the plugin's first prompts: a BM-BRIEF or a handoff brief that quotes a broken block is no agent's message (design §16.2)", async () => {
+    const answers = `BM-ANSWERS\nrequestId: ${REQ}\nQ1 a`;
+    for (const prompt of [`BM-BRIEF worker requestId: ${REQ}\n${answers}`, `BM-HANDOFF-BRIEF h1\nrequestId: ${REQ}\n${answers}`]) {
+      const { sends, deps } = world([manager(), worker()]);
+      await checkTurnFormat(turn(worker(), [received(prompt)]), deps);
+      expect(sends, prompt).toEqual([]);
+    }
+  });
+
   it("tells the Manager when a relayed BM-ANSWERS breaks the template", async () => {
     const { sends, deps } = world([manager(), worker()]);
     await checkTurnFormat(turn(worker(), [received(`Continue ${REQ}.\nBM-ANSWERS\nrequestId: ${REQ}\nQ1 a`)]), deps);

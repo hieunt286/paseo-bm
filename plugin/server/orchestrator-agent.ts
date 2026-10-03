@@ -48,7 +48,8 @@ import { availableProviders } from "./role-choices";
 import { capabilityOf, chooseModeId, featuresFor, modesFor, profileOf, runPostureOf } from "./role-mode";
 import { TRACES_DIR_NAME, ensureDataHome, type DataHomeDeps } from "./data-home";
 import { readTimelinePages, type LiveTimelinePaseo } from "./live-timeline";
-import { isPluginNotice } from "./notices";
+import { ORCHESTRATOR_PROMPT_START, briefLineOf } from "./notices";
+import { originOf } from "../shared/message-origin";
 import { ORCHESTRATOR_INSTRUCTIONS } from "./orchestrator-instructions";
 import { INSTRUCTIONS_LABEL, instructionsHashOf } from "./instructions-label";
 import { orchestratorDirOf } from "./orchestrator-store";
@@ -102,15 +103,18 @@ the Beads Orchestrator agent.
 `;
 
 /**
- * How the first message of every Orchestrator starts, in every version of the
- * plugin: the rest of its first line (where it was opened from) and of the
- * message (its tools) changes, so the chat check matches these words, never
- * the whole text.
+ * How the first message of an Orchestrator started before its `BM-BRIEF` line
+ * (design §16.2), and how its second line starts now: the rest of that line
+ * (where it was opened from) and of the message (its tools) changes, so the
+ * chat check matches these words, never the whole text. A legacy prompt
+ * marker (`shared/notices.ts`), so old first prompts stay out of the owner's
+ * words.
  */
-export const ORCHESTRATOR_FIRST_PROMPT_START = "The user opened you from ";
+export const ORCHESTRATOR_FIRST_PROMPT_START = ORCHESTRATOR_PROMPT_START;
 
-/** The first message of a new Orchestrator: its tools, and to wait for the user. */
+/** The first message of a new Orchestrator: its `BM-BRIEF` line, its tools, and to wait for the user. */
 export const ORCHESTRATOR_FIRST_PROMPT = [
+  briefLineOf("orchestrator", null),
   `${ORCHESTRATOR_FIRST_PROMPT_START}the Inbox of Beads Manager (paseo-bm).`,
   "Your tools: bm_projects (where the paseo-bm projects stand), bm_request (one request), bm_agent_messages (recent messages of a paseo-bm agent), bm_decisions (the owner's decisions, their answers and grants), bm_repo (read-only git in a project's workspace), bm_note (your notes on a project), bm_findings (a project's measured findings, for advice), bm_why (why a bead, a changed file or a decision exists: the chain behind it), bm_ask_owner (put a decision to the owner, with a prepared command or change per option), bm_decide (answer a Worker's stored question with one of its options, where the owner delegated its class to you), bm_predict (predict the owner's answer when asked), bm_send_command (a command to a project's Manager, within the owner's authority), bm_direct_worker (correct a Worker, on the same terms; its Manager gets a copy), bm_compact (have a Manager or a Worker compact its context at its next safe point, within the owner's Settings), bm_handoff (have a Worker's request handed to a new Worker at its next safe point, within the owner's Settings) and bm_reply (reply to the owner's question about one of your open decisions, after a BM-ASK; the decision stays open).",
   "Do not look at any project yet. Reply with one short line saying you are ready, then wait for the user.",
@@ -118,18 +122,19 @@ export const ORCHESTRATOR_FIRST_PROMPT = [
 
 /**
  * True when a timeline item of the Orchestrator's chat is the owner's own
- * words (design §6A (b), ADR-015 decision 3): a `user_message` carrying
- * `clientMessageId` — typed in the app — that is neither one of the plugin's
- * notices (`BM-EVENTS`, `BM-ANSWER`, …: the notice queue sends through the
- * app's own path, so the text tells them apart), nor the plugin's first prompt
- * of any version (`ORCHESTRATOR_FIRST_PROMPT_START`).
+ * words (design §6A (b), ADR-015 decision 3): a non-empty `user_message` whose
+ * origin is `owner` (`originOf`, design §16.2) — typed in the app, so carrying
+ * `clientMessageId`, and neither one of the plugin's notices (`BM-EVENTS`,
+ * `BM-ANSWER`, …: the notice queue sends through the app's own path, so the
+ * text tells them apart) nor one of its first prompts (`BM-BRIEF`, or the
+ * Orchestrator's first words of any older version).
  */
 export function isOwnerWord(item: unknown): boolean {
   const message = item as { type?: unknown; text?: unknown; clientMessageId?: unknown } | null | undefined;
   if (message?.type !== "user_message" || typeof message.text !== "string") return false;
-  if (typeof message.clientMessageId !== "string" || message.clientMessageId === "") return false;
+  if (message.clientMessageId === "") return false;
   const text = message.text.trim();
-  return text !== "" && !isPluginNotice(text) && !text.startsWith(ORCHESTRATOR_FIRST_PROMPT_START);
+  return text !== "" && originOf({ text, clientMessageId: message.clientMessageId }) === "owner";
 }
 
 /** A current Orchestrator older than this is replaced by a fresh one at a wake-up (design §6B.6) … */

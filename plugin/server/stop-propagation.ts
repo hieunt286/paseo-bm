@@ -129,7 +129,7 @@ function isRunningReviewerOf(
   const labels = agent.labels ?? {};
   return (
     labels[PARENT_AGENT_LABEL] === workerId &&
-    // By label, or by the bm-reviewer provider when the label is missing (delta 20260918g §4.2).
+    // By the bm-reviewer provider; the bm.role label does not decide (design §16.3).
     roleOfAgent(agent)?.role === REVIEWER_ROLE_VALUE &&
     !agent.archivedAt &&
     agent.status === "running" &&
@@ -288,11 +288,11 @@ export interface StopAllResult {
 /**
  * Every non-archived agent of one role in one workspace, walking all pages.
  *
- * Listed with no label filter and decided by `roleOfAgent` (delta 20260918g
- * §4.2): a Worker or Reviewer started without the bm.role label is found by its
- * provider. The role is decided per agent here, never by the daemon's filter, so
- * nothing this command never promised to touch — the Manager above all — can
- * slip in: a Manager's role is `manager` by label and by provider alike.
+ * Listed with no label filter and decided by `roleOfAgent`, which reads the
+ * provider only (design §16.3): a Worker or Reviewer started without the
+ * bm.role label is found, and a label alone never makes an agent one. The role
+ * is decided per agent here, never by the daemon's filter, so nothing this
+ * command never promised to touch — the Manager above all — can slip in.
  */
 async function listByRole(paseo: StopPaseo, role: string, workspaceId: string): Promise<StopAgentSnapshot[]> {
   const all = await listAllAgents((options) => paseo.agents.list(options), { includeArchived: false });
@@ -313,7 +313,7 @@ async function listByRole(paseo: StopPaseo, role: string, workspaceId: string): 
  * Three rules the loop exists to keep:
  * - **The Manager is never touched.** It is the user's point of contact, and the
  *   command's own name only promises Workers. Only the worker and reviewer
- *   roles are ever collected, by label or by provider.
+ *   roles are ever collected, by provider (design §16.3).
  * - **One workspace only** (owner decision Q28). A machine-wide stop is too
  *   large a consequence for one mistyped line.
  * - **An archived agent is skipped**, because `send()` would UN-archive it, and

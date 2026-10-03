@@ -146,7 +146,7 @@ describe("actions go to the Manager, never to the store", () => {
   });
 
   it("ensures a Manager and sends it the request", async () => {
-    const fake = daemonWith({ agents: [{ id: "mgr-1", workspaceId: WS, status: "idle", labels: { "bm.role": "manager" } }] });
+    const fake = daemonWith({ agents: [{ id: "mgr-1", workspaceId: WS, status: "idle", provider: "bm-manager", labels: { "bm.role": "manager" } }] });
     const ensure = vi.fn<(workspaceId: string) => Promise<{ agentId: string; created: boolean }>>(async () => ({
       agentId: "mgr-1",
       created: true,
@@ -203,7 +203,7 @@ describe("list and get handlers", () => {
     });
     clearTraceStoreCache();
     // A daemon answers a bm.role=worker query with agents that carry that label.
-    const { paseo } = daemonWith({ agents: [{ id: "w1", workspaceId: WS, status: "idle", title: "Worker for C", labels: { "bm.role": "worker" } }] });
+    const { paseo } = daemonWith({ agents: [{ id: "w1", workspaceId: WS, status: "idle", title: "Worker for C", provider: "bm-worker", labels: { "bm.role": "worker" } }] });
     // From 0.4.0 the store is found with `resolveDataHome` (design §5.1), not
     // through the plugin path Paseo registered.
     const listWithStore = async () => {
@@ -241,9 +241,9 @@ describe("workspaces.overview", () => {
         { id: "m2", workspaceId: "wks_nobeads", status: "running", labels: {} },
       ],
     };
-    // Each agent carries the bm.role label of its group, as the daemon's would.
+    // Each agent runs on its group's bm-* provider and carries its bm.role label, as the daemon's would.
     const labelled = Object.entries(byRole).flatMap(([role, agents]) =>
-      agents.map((agent) => ({ ...agent, labels: { ...agent.labels, "bm.role": role } })),
+      agents.map((agent) => ({ ...agent, provider: `bm-${role}`, labels: { ...agent.labels, "bm.role": role } })),
     );
     const { paseo } = daemonWith({
       agents: labelled,
@@ -276,7 +276,7 @@ describe("workspaces.overview", () => {
    * was happening — this case goes red if anyone reverts to that.
    */
   it("reports a workspace as busy when only a Reviewer is running", async () => {
-    const { paseo } = daemonWith({ agents: [{ id: "r1", workspaceId: WS, status: "running", labels: { "bm.role": "reviewer" } }] });
+    const { paseo } = daemonWith({ agents: [{ id: "r1", workspaceId: WS, status: "running", provider: "bm-reviewer", labels: { "bm.role": "reviewer" } }] });
     const { workspaces } = await handleWorkspacesOverview(paseo);
     const row = workspaces[0]!;
     expect(row.runningAgents).toEqual({ manager: 0, worker: 0, reviewer: 1, orchestrator: 0 });
@@ -290,9 +290,9 @@ describe("workspaces.overview", () => {
   it("counts a running Orchestrator assessment as a paseo-bm agent, by its label or its provider (orchestrator design §3.2)", async () => {
     const { paseo } = daemonWith({
       agents: [
-        { id: "o1", workspaceId: WS, status: "running", labels: { "bm.role": "orchestrator" } },
+        { id: "o1", workspaceId: WS, status: "running", provider: "bm-orchestrator", labels: { "bm.role": "orchestrator" } },
         { id: "o2", workspaceId: WS, status: "running", provider: "bm-orchestrator/claude-opus-5", labels: {} },
-        { id: "o3", workspaceId: WS, status: "idle", labels: { "bm.role": "orchestrator" } },
+        { id: "o3", workspaceId: WS, status: "idle", provider: "bm-orchestrator", labels: { "bm.role": "orchestrator" } },
       ],
     });
     const { workspaces } = await handleWorkspacesOverview(paseo);

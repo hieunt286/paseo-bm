@@ -926,6 +926,7 @@ describe("chat.peers", () => {
     workspaceId,
     status: "idle",
     title: `${role} ${id}`,
+    provider: `bm-${role}`,
     labels: { "bm.role": role, ...labels },
   });
   /** The shared fake SDK with the agents of two workspaces, and any `more`. */

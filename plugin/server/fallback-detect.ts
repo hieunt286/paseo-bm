@@ -37,7 +37,7 @@
 import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
 import { FALLBACK_ROLES } from "../shared/fallback";
 import { compilePatterns, isFallbackClass, matchClass, type FallbackClass, type UserPatterns } from "../shared/fallback-patterns";
-import { roleOfAgent, roleOfProvider } from "./agent-role";
+import { roleOfProvider } from "./agent-role";
 import { parseReports, parseReviews } from "./bm-report";
 import { REFETCH_LIMIT, sliceLastTurn, timestampsForTurn, type CollectorPaseo } from "./collector";
 import { isPluginNotice } from "./notices";
@@ -142,10 +142,9 @@ async function readAgent(
  * for a canceled turn, an agent outside `FALLBACK_ROLES`, an agent already
  * replaced, and any failure (logged once).
  *
- * The event carries no labels, so the provider filters first: an agent whose
- * provider is not a paseo-bm alias of a fallback role is never fetched. The
- * snapshot's labels then decide as `roleOfAgent` does, the `bm.role` label
- * winning over the provider.
+ * The role comes from the provider alone (design §16.3), so an agent whose
+ * provider is not a paseo-bm alias of a fallback role is never fetched; the
+ * snapshot is read only for its `bm.replacedBy` label and its usage.
  */
 export async function classifyTurn(event: TurnEndedEvent, deps: FallbackDetectDeps): Promise<FallbackSignal | null> {
   const log = deps.log ?? ((message: string) => console.warn(message));
@@ -169,7 +168,6 @@ export async function classifyTurn(event: TurnEndedEvent, deps: FallbackDetectDe
     if (!isFallbackClass(found)) return null;
 
     const { labels, usage } = await readAgent(deps.paseo, agent.id, event.turnId);
-    if (!isFallbackRole(roleOfAgent({ provider: agent.provider, labels })?.role)) return null;
     if (Object.prototype.hasOwnProperty.call(labels, REPLACED_BY_LABEL)) return null;
     if (outcome.kind === "completed" && !quietTokens(usage, items)) return null;
     return { class: found, signal: outcome.kind, message };

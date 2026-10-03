@@ -1,22 +1,22 @@
 /**
- * Which paseo-bm role an agent has (delta 20260918g §4.1, REQ-061 a).
+ * Which paseo-bm role an agent has (design §16.3, ADR-027 decision 6).
  *
- * The `bm.role` label is the usual answer, but it is not the only one: an agent
- * started from Paseo's own new-agent flow with a paseo-bm profile runs the role
- * (the `before("agent.create")` hook gives it the instructions) and carries no
- * label at all, because that hook can change `{ config, env }` only. The owner's
- * "Refactor Dependency" Manager was such an agent, and every lookup that
- * filtered on the label treated its chat as "not paseo-bm's" (bead bm-llmg).
- * So the provider decides whenever the label does not.
+ * The provider decides, and only the provider: `bm-<role>`, `bm-<role>/<model>`
+ * and the fallback aliases `bm-<role>-fallback-<n>` run their role, any other
+ * provider runs none. The `bm.role` label is display only: it says whether the
+ * agent was labelled (`RoleFact.labelled`), never which role it has, so no
+ * agent can claim a role by carrying a label. An agent whose label disagrees
+ * with its provider is logged once per plugin run.
  *
- * Pure apart from `listAllAgents`, which only calls the `list` it is given.
+ * Pure apart from that log and `listAllAgents`, which only calls the `list`
+ * it is given.
  */
 import { fallbackAliasOf } from "../shared/fallback";
 import { providerId } from "./provider-id";
 
 export type BmRole = "manager" | "worker" | "reviewer" | "orchestrator";
 
-/** The role, and whether it came from the `bm.role` label (true) or only from the provider (false). */
+/** The role (from the provider), and whether the `bm.role` label names that same role (true) or not (false). */
 export interface RoleFact {
   role: BmRole;
   labelled: boolean;
@@ -52,20 +52,50 @@ export function roleOfProvider(provider: unknown): BmRole | null {
   return fallbackAliasOf(id)?.role ?? null;
 }
 
+/** The `bm.role` label's value when it names a role, else null. Never throws. */
+export function roleLabelOf(labels: unknown): BmRole | null {
+  if (labels === null || typeof labels !== "object") return null;
+  const label = (labels as Record<string, unknown>)[ROLE_LABEL];
+  return typeof label === "string" && ROLES.has(label) ? (label as BmRole) : null;
+}
+
+/** Agents already logged for a disagreeing label in this plugin run. */
+const disagreementLogged = new Set<string>();
+let logDisagreement: (line: string) => void = (line) => console.warn(line);
+
 /**
- * The role of an agent snapshot, or null when it is not a paseo-bm agent.
- * A valid `bm.role` label wins; otherwise the provider decides, which also
- * covers a label holding an unknown value. Never throws.
+ * Test seam: routes the disagreement log to `log` (`console.warn` when
+ * omitted) and forgets which agents were logged, as a new plugin run would.
+ */
+export function resetRoleDisagreementLog(log?: (line: string) => void): void {
+  disagreementLogged.clear();
+  logDisagreement = log ?? ((line) => console.warn(line));
+}
+
+function noteDisagreement(id: unknown, label: unknown, provider: unknown, role: BmRole | null): void {
+  if (typeof id !== "string" || id === "" || disagreementLogged.has(id)) return;
+  disagreementLogged.add(id);
+  logDisagreement(
+    `[paseo-bm] agent ${id} is labelled bm.role=${String(label)} but runs on ${String(provider)}; its role is ${role ?? "none"}`,
+  );
+}
+
+/**
+ * The role of an agent snapshot, or null when it is not a paseo-bm agent: the
+ * provider's role (design §16.3). `labelled` is true iff the `bm.role` label
+ * equals that role. A `bm.role` label that disagrees with the provider (a
+ * different role, an unknown value, or any value on a non-`bm-*` provider) is
+ * logged once per agent per plugin run and otherwise ignored. Never throws.
  */
 export function roleOfAgent(agent: unknown): RoleFact | null {
   try {
     if (agent === null || typeof agent !== "object") return null;
-    const { labels, provider } = agent as { labels?: unknown; provider?: unknown };
+    const { id, labels, provider } = agent as { id?: unknown; labels?: unknown; provider?: unknown };
     const label =
       labels !== null && typeof labels === "object" ? (labels as Record<string, unknown>)[ROLE_LABEL] : undefined;
-    if (typeof label === "string" && ROLES.has(label)) return { role: label as BmRole, labelled: true };
     const role = roleOfProvider(provider);
-    return role === null ? null : { role, labelled: false };
+    if (label !== undefined && label !== role) noteDisagreement(id, label, provider, role);
+    return role === null ? null : { role, labelled: label === role };
   } catch {
     return null;
   }

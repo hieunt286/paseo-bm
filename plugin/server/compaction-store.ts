@@ -315,9 +315,10 @@ export function createCompactionStore(home: string, deps: CompactionStoreDeps = 
 
 /**
  * The collector's reading of the send log in the data folder `home`
- * (`isPluginSent`), read once on first use; a log that cannot be read is
- * empty — the message then stays what its `clientMessageId` says. Never
- * throws.
+ * (`isPluginSent`), read once on first use: the `pluginSent` option of
+ * `originOf` (`shared/message-origin.ts`, design §16.2), bound to one agent and
+ * time by each caller. A log that cannot be read is empty — the message then
+ * stays what the other rules say. Never throws.
  */
 export function pluginSentMatcher(home: string | null): (agentId: string, text: string, at: string | null) => boolean {
   let log: readonly SendLogEntry[] | null = null;

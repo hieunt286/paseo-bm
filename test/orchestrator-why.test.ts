@@ -102,9 +102,9 @@ function records(): TraceRecord[] {
 }
 
 const AGENTS = [
-  { id: MANAGER, workspaceId: WORKSPACE_ID, status: "idle", labels: { "bm.role": "manager" } },
-  { id: W1, workspaceId: WORKSPACE_ID, status: "idle", createdAt: at(0, 45), labels: { "bm.role": "worker", "bm.requestId": REQ_A, "paseo.parent-agent-id": MANAGER } },
-  { id: W3, workspaceId: WORKSPACE_ID, status: "idle", createdAt: at(15, 15), labels: { "bm.role": "worker", "bm.requestId": REQ_B, "paseo.parent-agent-id": MANAGER } },
+  { id: MANAGER, workspaceId: WORKSPACE_ID, status: "idle", provider: "bm-manager", labels: { "bm.role": "manager" } },
+  { id: W1, workspaceId: WORKSPACE_ID, status: "idle", createdAt: at(0, 45), provider: "bm-worker", labels: { "bm.role": "worker", "bm.requestId": REQ_A, "paseo.parent-agent-id": MANAGER } },
+  { id: W3, workspaceId: WORKSPACE_ID, status: "idle", createdAt: at(15, 15), provider: "bm-worker", labels: { "bm.role": "worker", "bm.requestId": REQ_B, "paseo.parent-agent-id": MANAGER } },
 ];
 
 const DECISIONS: Decision[] = [
@@ -339,8 +339,8 @@ describe("bm_why's bound and masking on a large chain (autonomy design §A.9, §
   });
 
   const agents = [
-    { id: MANAGER, workspaceId: WORKSPACE_ID, status: "idle", labels: { "bm.role": "manager" } },
-    { id: W_BIG, workspaceId: WORKSPACE_ID, status: "idle", createdAt: at(30, 20), labels: { "bm.role": "worker", "bm.requestId": REQ_BIG, "paseo.parent-agent-id": MANAGER } },
+    { id: MANAGER, workspaceId: WORKSPACE_ID, status: "idle", provider: "bm-manager", labels: { "bm.role": "manager" } },
+    { id: W_BIG, workspaceId: WORKSPACE_ID, status: "idle", createdAt: at(30, 20), provider: "bm-worker", labels: { "bm.role": "worker", "bm.requestId": REQ_BIG, "paseo.parent-agent-id": MANAGER } },
   ];
 
   it("keeps the summary within 4,000 characters, the note first and the longest lists cut, every secret masked", async () => {

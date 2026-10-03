@@ -257,10 +257,10 @@ describe("tree building: four datasets", () => {
       ...extra,
     });
     const store = [
-      snap("mgr", { "bm.role": "manager" }),
+      snap("mgr", { "bm.role": "manager" }, { provider: "bm-manager" }),
       snap("w-unlabeled", { "paseo.parent-agent-id": "mgr" }),
-      snap("w-orphan", { "bm.role": "worker", "paseo.parent-agent-id": "gone" }),
-      snap("other-ws", { "bm.role": "manager" }, { workspaceId: "ws-2" }),
+      snap("w-orphan", { "bm.role": "worker", "paseo.parent-agent-id": "gone" }, { provider: "bm-worker" }),
+      snap("other-ws", { "bm.role": "manager" }, { workspaceId: "ws-2", provider: "bm-manager" }),
     ];
     const paseo: AgentDirectoryPaseo = {
       agents: {

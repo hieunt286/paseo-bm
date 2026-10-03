@@ -95,7 +95,7 @@ export interface ManagerAgentSnapshot {
   createdAt: string;
   status: string;
   labels: Record<string, string>;
-  /** Provider selection (`bm-manager` or `bm-manager/<model>`); decides the role when the label is missing. */
+  /** Provider selection (`bm-manager` or `bm-manager/<model>`); decides the role (design §16.3). */
   provider?: string;
   archivedAt?: string | null;
   providerUnavailable?: boolean;
@@ -737,7 +737,7 @@ export interface ListedAgentSnapshot {
   createdAt: string;
   updatedAt: string;
   labels: Record<string, string>;
-  /** Provider selection; decides the role when the `bm.role` label is missing. */
+  /** Provider selection; decides the role (design §16.3). */
   provider?: string;
   archivedAt?: string | null;
 }
@@ -759,7 +759,7 @@ export interface AgentDirectoryPaseo {
   };
 }
 
-/** The label's role, else the provider's (delta 20260918g §4.1), else `unknown`. */
+/** The provider's role (design §16.3), else `unknown`. */
 function roleOf(agent: ListedAgentSnapshot): AgentNode["role"] {
   return roleOfAgent(agent)?.role ?? "unknown";
 }
@@ -775,8 +775,9 @@ function oldestFirst(a: ListedAgentSnapshot, b: ListedAgentSnapshot): number {
  * Handler body of `agents.list`: the non-archived paseo-bm agents of one
  * workspace, flat, oldest first.
  *
- * Membership: an agent with a paseo-bm role — by its `bm.role` label or, when
- * that is missing, by its `bm-*` provider (delta 20260918g) — plus every agent
+ * Membership: an agent with a paseo-bm role — by its `bm-*` provider (design
+ * §16.3) — or carrying any `bm.role` label (shown with role `unknown` when its
+ * provider runs no role), plus every agent
  * that descends from one through `paseo.parent-agent-id` (an agent of another
  * provider under a Worker still shows up, with role `unknown`). A node without a
  * valid label is `labelled: false`; nothing here throws on labels.
@@ -800,8 +801,8 @@ export async function listWorkspaceAgents(
     (agent) => agent.workspaceId === input.workspaceId && !agent.archivedAt,
   );
 
-  // Roots: every agent with a paseo-bm role, by label or by provider, and — as
-  // before delta 20260918g — any agent carrying a `bm.role` label at all.
+  // Roots: every agent with a paseo-bm role (by provider), and — as before
+  // delta 20260918g — any agent carrying a `bm.role` label at all.
   const members = new Set(
     inWorkspace
       .filter((agent) => roleOfAgent(agent) !== null || agent.labels[MANAGER_ROLE_LABEL] !== undefined)

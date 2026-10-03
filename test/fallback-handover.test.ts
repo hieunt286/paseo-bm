@@ -103,9 +103,9 @@ function daemonWith(timeline: Array<{ type: string; text?: string }> = [], revie
   const entries = timeline.map((item) => ({ item }));
   return fakePaseo({
     agents: [
-      { id: MANAGER, workspaceId: WS, status: "idle", labels: { "bm.role": "manager" } },
-      { id: WORKER, workspaceId: WS, status: "idle", labels: labels("worker", MANAGER) },
-      ...reviewers.map((id) => ({ id, workspaceId: WS, status: "idle", labels: labels("reviewer", WORKER) })),
+      { id: MANAGER, workspaceId: WS, status: "idle", provider: "bm-manager", labels: { "bm.role": "manager" } },
+      { id: WORKER, workspaceId: WS, status: "idle", provider: "bm-worker", labels: labels("worker", MANAGER) },
+      ...reviewers.map((id) => ({ id, workspaceId: WS, status: "idle", provider: "bm-reviewer", labels: labels("reviewer", WORKER) })),
     ],
     timelines: { [WORKER]: { pages: [entries.slice(0, 1), entries.slice(1)] } },
   });
@@ -177,6 +177,8 @@ describe("workerHandover", () => {
 
     expect(await workerHandover(incident(), { paseo, location })).toBe(
       [
+        // The plugin's first-prompt line (design §16.2), then the handover's own marker.
+        `BM-BRIEF worker requestId: ${REQ}`,
         "BM-HANDOVER",
         "role: worker",
         `requestId: ${REQ}`,
@@ -209,7 +211,9 @@ describe("workerHandover", () => {
 
   it("reads unknown / none / unavailable for what it cannot find, and never throws", async () => {
     const { paseo } = daemonWith([]);
-    const text = await workerHandover(incident({ managerId: null }), { paseo, location: null });
+    const text = await workerHandover(incident({ managerId: null, requestId: null }), { paseo, location: null });
+    // No request: the BM-BRIEF line says none.
+    expect(text.split("\n").slice(0, 2)).toEqual(["BM-BRIEF worker requestId: none", "BM-HANDOVER"]);
     expect(text).toContain("\nmanagerAgentId: none\n");
     expect(text).toContain("\nlastReport: none\ntier: unknown\nfilesChanged: unknown\n");
     expect(text).toContain("\nreviewCalls: unknown\n");
@@ -342,11 +346,12 @@ describe("managerHandover", () => {
     id,
     workspaceId: WS,
     status: "idle",
+    provider: "bm-worker",
     labels: { "bm.role": "worker", "bm.requestId": requestId, "paseo.parent-agent-id": MANAGER, ...labels },
     ...extra,
   });
   const AGENTS = [
-    { id: MANAGER, workspaceId: WS, status: "error", labels: { "bm.role": "manager" } },
+    { id: MANAGER, workspaceId: WS, status: "error", provider: "bm-manager", labels: { "bm.role": "manager" } },
     worker(WORKER_A, REQ_A),
     worker(WORKER_B, REQ_B, { status: "running" }),
     // Replaced by its label; by a switched incident only; archived; closed; in another workspace.
@@ -356,7 +361,7 @@ describe("managerHandover", () => {
     // (A closed Worker keeps its request in the pill's one-Worker rule, so it carries a request of its own.)
     worker("agent-worker-closed", "req-20260922T003000Z", { status: "closed" }),
     worker("agent-worker-elsewhere", REQ_A, { workspaceId: "wks_other" }),
-    { id: "agent-rev-a", workspaceId: WS, status: "idle", labels: { "bm.role": "reviewer", "bm.requestId": REQ_A, "paseo.parent-agent-id": WORKER_A } },
+    { id: "agent-rev-a", workspaceId: WS, status: "idle", provider: "bm-reviewer", labels: { "bm.role": "reviewer", "bm.requestId": REQ_A, "paseo.parent-agent-id": WORKER_A } },
   ];
   const SNAPSHOTS: Record<string, Record<string, unknown>> = {
     [WORKER_A]: { provider: "bm-worker/claude-opus-5", model: "claude-opus-5", runtimeInfo: { provider: "claude", model: "claude-opus-5-20260901" } },
@@ -422,6 +427,7 @@ describe("managerHandover", () => {
 
     expect(await managerHandover(managerIncident(), { paseo, location, incidents: INCIDENTS, env: ENV, log })).toBe(
       [
+        "BM-BRIEF manager requestId: none",
         "BM-HANDOVER",
         "role: manager",
         `workspaceId: ${WS}`,
@@ -477,6 +483,8 @@ describe("managerHandover", () => {
       [
         typed("Fix the build.", "c1"),
         typed("BM-HANDOVER\nrole: manager", "c2"),
+        // A handover of this build starts with its BM-BRIEF line (design §16.2): a plugin prompt, never the owner's words.
+        typed("BM-BRIEF manager requestId: none\nBM-HANDOVER\nrole: manager", "c4"),
         relayed("Worker agent-worker-a: progress update, tests pass."),
         relayed(asking(REQ_A, ["Q1"])),
         typed("BM-SETTINGS\nManager agent id: `agent-x`", "c3"),

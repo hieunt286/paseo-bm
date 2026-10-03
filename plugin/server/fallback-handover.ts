@@ -20,7 +20,10 @@
  * | `workers` | live, non-replaced Workers of the workspace (`bmAgentsOf`, `liveWorkersOf`); provider and model from each one's snapshot; last report as for the Worker |
  * | `openQuestions` | the decision store: each listed Worker's unsettled questions, by its request |
  * | `openIncidents` | the workspace's other `pending` or `waiting` incidents |
- * | user's messages | the three newest `user_message` items WITH `clientMessageId` (the user's own words) in the old Manager's timeline, neither a plugin notice nor what the plugin's send log says it sent (a `/compact`, autonomy design §G.5) |
+ * | user's messages | the three newest `user_message` items of origin `owner` (`originOf`, design §16.2: typed in the app, neither a plugin notice, a plugin prompt, nor what the plugin's send log says it sent — a `/compact`, autonomy design §G.5) in the old Manager's timeline |
+ *
+ * Both start with a `BM-BRIEF <receiving role> requestId: <id | none>` line
+ * (design §16.2), then the `BM-HANDOVER` line.
  *
  * The facts of the Worker handover (`workerHandoverFacts`) are also what the
  * successor's brief of a handoff is built on (`handoff.ts`, autonomy design
@@ -37,7 +40,7 @@ import { pluginSentBeside, redactText } from "./collector";
 import { createDecisionStore } from "./decision-store";
 import { replacementsOf, reviewerReplacementIds, reviewerReplacementsFor } from "./fallback-state";
 import { LIVE_MAX_PAGES, LIVE_PAGE_LIMIT, readTimelinePages, type LiveTimelinePaseo } from "./live-timeline";
-import { isPluginNotice } from "./notices";
+import { HANDOVER_PROMPT_MARKER, briefLineOf } from "./notices";
 import { agentFactsOf, bmAgentsOf, type DashboardPaseo } from "./paseo-directory";
 import { providerId } from "./provider-id";
 import { REVIEW_BUDGET } from "./review-budget";
@@ -48,9 +51,10 @@ import { reconstructTraces } from "./traces";
 import { FALLBACK_CLASS_LABELS } from "../shared/bm-fallback";
 import type { ChatPeer, FallbackIncident, ParsedReport, Tier, TraceRecord } from "../shared/contracts";
 import { decisionKindOf, isAnswerable, type Decision } from "../shared/decisions";
+import { originOf } from "../shared/message-origin";
 
-/** First line of the handover. */
-export const HANDOVER_MARKER = "BM-HANDOVER";
+/** The handover's marker line, right after its `BM-BRIEF` line (design §16.2): a legacy prompt marker in `shared/notices.ts`. */
+export const HANDOVER_MARKER = HANDOVER_PROMPT_MARKER;
 
 /** Budget of the whole handover (§4.4.8). */
 export const HANDOVER_BUDGET_MS = 5000;
@@ -247,6 +251,7 @@ export async function workerHandover(incident: FallbackIncident, deps: HandoverD
   const { report, tier, reviewCalls, questions, original } = await workerHandoverFacts({ workspaceId: incident.workspaceId, requestId, agentId: incident.agentId }, deps);
 
   return [
+    briefLineOf("worker", requestId),
     HANDOVER_MARKER,
     "role: worker",
     `requestId: ${requestId ?? "unknown"}`,
@@ -317,18 +322,20 @@ export function liveWorkersOf<P extends Pick<ChatPeer, "role" | "status" | "arch
 export type PluginSent = (agentId: string, text: string, at: string | null) => boolean;
 
 /**
- * The text of a message the user typed in the app: a `user_message` with
- * `clientMessageId` (AGENTS.md), and neither a plugin notice, a handover, nor
- * what the plugin's send log says it sent that agent — the `/compact` of a
+ * The text of a message the user typed in the app: a `user_message` of origin
+ * `owner` (`originOf`, design §16.2) — so with `clientMessageId` (AGENTS.md),
+ * and neither a plugin notice, a plugin prompt (a handover, of either shape),
+ * nor what the plugin's send log says it sent that agent: the `/compact` of a
  * compaction carries a `clientMessageId` and no marker (autonomy design §G.5),
  * so it reads as the plugin's, as the collector reads it, never the owner's.
  */
 function typedText(entry: { item?: unknown; timestamp?: unknown }, agentId: string, pluginSent: PluginSent): string | null {
   const message = entry.item as { type?: unknown; text?: unknown; clientMessageId?: unknown } | null | undefined;
-  if (message?.type !== "user_message" || typeof message.clientMessageId !== "string") return null;
+  if (message?.type !== "user_message") return null;
   const text = nonEmpty(message.text);
-  if (text === null || isPluginNotice(text) || text.startsWith(HANDOVER_MARKER)) return null;
-  return pluginSent(agentId, text, typeof entry.timestamp === "string" ? entry.timestamp : null) ? null : text;
+  if (text === null) return null;
+  const at = typeof entry.timestamp === "string" ? entry.timestamp : null;
+  return originOf({ text, clientMessageId: message.clientMessageId }, { pluginSent: () => pluginSent(agentId, text, at) }) === "owner" ? text : null;
 }
 
 /** A quoted user message: masked first, so a secret across the cut is masked whole, then cut. */
@@ -438,6 +445,7 @@ export async function managerHandover(incident: FallbackIncident, deps: ManagerH
   if (late.length > 0) log(`[paseo-bm] the handover of incident ${incident.id} could not read ${late.join(", ")} within ${budget} ms; those parts read unknown.`);
 
   return [
+    briefLineOf("manager", null),
     HANDOVER_MARKER,
     "role: manager",
     `workspaceId: ${workspaceId}`,

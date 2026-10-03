@@ -1504,3 +1504,36 @@ describe("what the plugin sent for a compaction", () => {
     expect(lookups).toEqual([]);
   });
 });
+
+/**
+ * Design §16.2: a first prompt the plugin writes (`BM-BRIEF`, or a legacy
+ * `BM-HANDOVER` / `BM-HANDOFF-BRIEF` / Orchestrator first prompt) is never the
+ * owner's words, whether or not Paseo attaches a `clientMessageId` to it. The
+ * persisted origin keeps its two values: `agent` for everything but the owner.
+ */
+describe("the plugin's first prompts", () => {
+  const typed = (text: string) => ({ type: "user_message" as const, text, messageId: "m1", clientMessageId: "c1" });
+  const relayed = (text: string) => ({ type: "user_message" as const, text, messageId: "m1" });
+
+  it("are stored as agent, with or without clientMessageId, and never looked up in the send log; the owner's words stay user", async () => {
+    const lookups: string[] = [];
+    const pluginSent = (_agentId: string, text: string) => {
+      lookups.push(text);
+      return false;
+    };
+    const prompts = [
+      "BM-BRIEF worker requestId: req-20261003T090000Z\nBM-HANDOVER\nrole: worker",
+      "BM-HANDOVER\nrole: worker\nrequestId: req-20261003T090000Z",
+      "BM-HANDOFF-BRIEF h1\nrole: worker\nrequestId: req-20261003T090000Z",
+    ];
+    for (const prompt of prompts) {
+      for (const item of [typed(prompt), relayed(prompt)]) {
+        const built = await buildRecord(asEvent(turnEnded({ timeline: [item] })), { location: null, pluginSent });
+        expect(built?.record.sent, prompt).toMatchObject([{ origin: "agent" }]);
+      }
+    }
+    expect(lookups).toEqual([]);
+    const owner = await buildRecord(asEvent(turnEnded({ timeline: [typed("BM-BRIEFING notes: ship it")] })), { location: null, pluginSent });
+    expect(owner?.record.sent).toMatchObject([{ origin: "user" }]);
+  });
+});

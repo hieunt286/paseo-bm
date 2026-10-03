@@ -74,6 +74,8 @@ describe("outdatedAgentOf", () => {
     expect(outdatedAgentOf(agent({ id: "w3", status: "closed" }), NOW)).toBeNull();
     expect(outdatedAgentOf(agent({ id: "o1", provider: "bm-orchestrator", labels: { "bm.role": "orchestrator" } }), NOW)).toBeNull();
     expect(outdatedAgentOf(agent({ id: "c1", provider: "claude", labels: {} }), NOW)).toBeNull();
+    // A bm.role label alone is no role (design §16.3).
+    expect(outdatedAgentOf(agent({ id: "c2", provider: "claude", labels: { "bm.role": "worker" } }), NOW)).toBeNull();
   });
 
   it("gives a new agent without the label time for its stamp, but not one with another hash", () => {
@@ -237,6 +239,7 @@ describe("the boundary-off alert (§D.2, change-010 C6)", () => {
       ["a Manager", off({ id: "i", provider: "bm-manager", labels: current("manager") }), { ...config, bases: { "bm-manager": "claude" } }],
       ["archived", off({ id: "j", archivedAt: AFTER }), config],
       ["replaced", off({ id: "k", labels: { ...current("worker"), "bm.replacedBy": "w2" } }), config],
+      ["a bm.role label alone (design §16.3)", off({ id: "l", provider: "claude" }), { ...config, bases: { ...config.bases, claude: "claude" } }],
     ] as const) {
       expect(boundaryOffAgentOf(snapshot, policy, own), why).toBeNull();
     }

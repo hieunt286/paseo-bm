@@ -28,7 +28,7 @@
  * line. Nothing here throws, and each agent is handled at most once per run.
  */
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { listAllAgents, roleOfAgent, roleOfProvider, type BmRole } from "./agent-role";
+import { listAllAgents, roleLabelOf, roleOfAgent, roleOfProvider, type BmRole } from "./agent-role";
 import { INSTRUCTIONS_LABEL, currentInstructionsHash, roleTextOf } from "./instructions-label";
 import { actionBoundaryOfPrompt } from "./role-instructions";
 import { BOUNDARY_LABEL } from "./role-mode";
@@ -169,7 +169,10 @@ export function createAgentLabeller(deps: AgentLabelsDeps = {}) {
       }
       const current = snapshot.labels ?? {};
       const labels: Record<string, string> = {};
-      const addRole = !roleDone && roleOfAgent({ labels: current })?.labelled !== true;
+      // Only a missing or unknown `bm.role` is written: a valid label that
+      // disagrees with the provider is display only (design §16.3) and is left
+      // as the user or Paseo set it; `roleOfAgent` logs the disagreement.
+      const addRole = !roleDone && roleLabelOf(current) === null;
       if (addRole) {
         labels["bm.role"] = role;
         if (role === "manager") {
@@ -217,7 +220,7 @@ export function createAgentLabeller(deps: AgentLabelsDeps = {}) {
         return;
       }
       for (const agent of agents) {
-        if (!agent || agent.archivedAt || roleOfAgent(agent)?.labelled !== false) continue;
+        if (!agent || agent.archivedAt || roleOfAgent(agent) === null || roleLabelOf(agent.labels) !== null) continue;
         await labelAgent(agent.id, agent.provider, paseo);
       }
     })();
