@@ -498,7 +498,7 @@ describe("the sequence (design §G.5): idle after a safe point, the /compact onc
 });
 
 describe("a bound Worker's safe point: its report outbox records (design §16.7)", () => {
-  const addReport = (minute: number, state: "pending" | "delivered" | "queued" = "pending") => {
+  const addReport = (minute: number, state: "pending" | "delivered" = "pending") => {
     const outbox = createOutbox(home, { now: () => new Date(T0 + minute * MIN) });
     const record = outbox.add(WORKSPACE_ID, { kind: "report", requestId: REQUEST, from: WORKER, to: MANAGER, text: `BM-REPORT\nrequestId: ${REQUEST}\nphase: finished` });
     if (state !== "pending") outbox.settle(WORKSPACE_ID, record.id, state);

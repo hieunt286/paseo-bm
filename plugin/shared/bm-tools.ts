@@ -39,7 +39,7 @@
  * check built with Zod (the daemon's copy of Zod is the host's, not ours).
  */
 import { AUTONOMY_MODES } from "./autonomy";
-import { WAITING_FOR_PREFIX, WAITING_ON_OWNER_PREFIX, checkBlocks, issueText, type BlockKind } from "./bm-format";
+import { REPORT_PHASES, WAITING_FOR_PREFIX, WAITING_ON_OWNER_PREFIX, checkBlocks, issueText, type BlockKind } from "./bm-format";
 import { MAX_OPTIONS, MAX_SUBJECT_CHARS } from "./bm-questions";
 import { COORDINATION_KEYS, coordinationRuleOf } from "./coordination";
 import {
@@ -105,8 +105,6 @@ const BATCH_ID: JsonSchema = { type: "string", pattern: "^b\\d+$", description: 
 const TEXT: JsonSchema = { type: "string", minLength: 1 };
 const PROSE: JsonSchema = { type: "string", minLength: 1, maxLength: 4000 };
 const TIERS = ["Small", "Medium", "Large"] as const;
-/** A report's phases; `stopped` is a stopped run's (design §16.6, §16.11). */
-const REPORT_PHASES = ["received", "beads-done", "blocked", "finished", "stopped"] as const;
 const QUESTION_ID: JsonSchema = { type: "string", pattern: "^Q[1-9]\\d{0,2}$", description: "Q1, Q2, … counted across the whole request." };
 /** What the question reader takes for a recommendation, anywhere in an option. */
 const RECOMMENDED_MARK = /[([]\s*recommended\s*[)\]]/i;
@@ -1177,8 +1175,6 @@ export const CREATE_WORKER_LIMITS = { request: 20_000, contextItems: 20, fact: 5
 
 /** The bounds of the bound delivering tools (design §16.6). */
 export const DELIVERING_LIMITS = { waitingFor: 500, waitingOn: 10, questions: 5, tellText: 8_000, tellSource: 300, grantCalls: 10 } as const;
-/** The subject a question for more review calls carries (design §16.8). */
-const REVIEW_BUDGET = REVIEW_BUDGET_SUBJECT;
 /** A `q:` decision id: `q:<requestId>:<Qn>`. */
 export const QUESTION_DECISION_ID_SOURCE = "^q:req-\\d{8}T\\d{6}Z:Q[1-9]\\d{0,2}$";
 
@@ -1237,32 +1233,40 @@ export const BOUND_REPORT_TOOL: AgentTool = tool<ReportInput>({
   suffix: DELIVERED,
 });
 
-/** `bm_review` for a bound Reviewer: built and checked as the builder's, then delivered to its Worker. */
-export const BOUND_REVIEW_TOOL: AgentTool = tool<ReviewInput>({
+/** The builder `bm_review` (an unbound Reviewer's): it returns the block to send. */
+const REVIEW_BUILDER: AgentTool = tool<ReviewInput>({
   name: "bm_review",
   role: "reviewer",
-  description:
-    "Send your verdict: paseo-bm builds your BM-REVIEW of your batch, stores it and delivers it to the Worker that created you. Then end your turn with one line; do not repeat the review. Returns JSON { recordId, delivery }.",
+  description: "Build your BM-REVIEW.",
   inputSchema: REVIEW_SCHEMA,
   rules: (input) =>
     (["checked", "notChecked"] as const).filter((key) => prose(input[key]) === "").map((key) => `input.${key}: has no text once code fences and quote marks are removed`),
   build: buildReview,
   kinds: () => ["BM-REVIEW"],
-  suffix: DELIVERED,
 });
 
-/** `bm_answers` for a bound Manager: the owner's answers in its chat, proposed for this turn. */
-export const BOUND_ANSWERS_TOOL: AgentTool = tool<AnswersInput>({
+/** The builder `bm_answers` (an unbound Manager's): it returns the block to put in its reply. */
+const ANSWERS_BUILDER: AgentTool = tool<AnswersInput>({
   name: "bm_answers",
   role: "manager",
-  description:
-    "Record the answers the owner gave to a Worker's open questions in your chat, in this turn. paseo-bm settles them when your turn ends, and only if this turn holds the owner's own message; the plugin then delivers them to the Worker. Never relay an answer as text. Only open questions (Qn) of a request of yours. Returns JSON { proposed: [Qn…] }.",
+  description: "Build the BM-ANSWERS block for the owner's answers given in your chat: put it in your reply to the owner, and the plugin delivers it to the Worker (never send it yourself).",
   inputSchema: ANSWERS_SCHEMA,
   rules: answersRules,
   build: buildAnswers,
   kinds: () => ["BM-ANSWERS"],
-  suffix: DELIVERED,
 });
+
+/** `bm_review` for a bound Reviewer: the builder's checks, then delivered to its Worker. */
+export const BOUND_REVIEW_TOOL: AgentTool = {
+  ...REVIEW_BUILDER,
+  description: `Send your verdict: paseo-bm builds your BM-REVIEW of your batch, stores it and delivers it to the Worker that created you. Then end your turn with one line; do not repeat the review. Returns JSON { recordId, delivery }. ${DELIVERED}`,
+};
+
+/** `bm_answers` for a bound Manager: the owner's answers in its chat, proposed for this turn. */
+export const BOUND_ANSWERS_TOOL: AgentTool = {
+  ...ANSWERS_BUILDER,
+  description: `Record the answers the owner gave to a Worker's open questions in your chat, in this turn. paseo-bm settles them when your turn ends, and only if this turn holds the owner's own message; the plugin then delivers them to the Worker. Never relay an answer as text. Only open questions (Qn) of a request of yours. Returns JSON { proposed: [Qn…] }. ${DELIVERED}`,
+};
 
 /** What `bm_questions` takes (design §16.6). */
 export interface QuestionsInput {
@@ -1284,7 +1288,7 @@ export interface QuestionsInput {
 export const QUESTIONS_FACE: ToolFace = {
   name: "bm_questions",
   role: "worker",
-  description: `Ask the owner: paseo-bm opens each question as a decision the owner answers in paseo-bm, numbers it after your request's last Qn, and delivers the answer to you when it comes. A question an owner precedent answers at once comes back answered: carry on with that answer. Then report blocked with waitingOn naming the open ones, unless you can carry on with what does not depend on them. Exactly one recommended option per question. A question of subject "${REVIEW_BUDGET}" gives at least one option a grant ({ calls: n } or { untilClean: batchId }); leave it out on the option that grants nothing. Returns JSON [{ qn, decisionId, state, answer? }]. ${DELIVERED}`,
+  description: `Ask the owner: paseo-bm opens each question as a decision the owner answers in paseo-bm, numbers it after your request's last Qn, and delivers the answer to you when it comes. A question an owner precedent answers at once comes back answered: carry on with that answer. Then report blocked with waitingOn naming the open ones, unless you can carry on with what does not depend on them. Exactly one recommended option per question. A question of subject "${REVIEW_BUDGET_SUBJECT}" gives at least one option a grant ({ calls: n } or { untilClean: batchId }); leave it out on the option that grants nothing. Returns JSON [{ qn, decisionId, state, answer? }]. ${DELIVERED}`,
   inputSchema: {
     type: "object",
     additionalProperties: false,
@@ -1303,7 +1307,7 @@ export const QUESTIONS_FACE: ToolFace = {
             subject: {
               type: "string",
               pattern: SUBJECT_PATTERN.source,
-              description: `A short slug naming what is decided, such as push-backends: lowercase letters, digits and -, at most 60 characters. Keep it when you ask the same thing again; "${REVIEW_BUDGET}" for more review calls.`,
+              description: `A short slug naming what is decided, such as push-backends: lowercase letters, digits and -, at most 60 characters. Keep it when you ask the same thing again; "${REVIEW_BUDGET_SUBJECT}" for more review calls.`,
             },
             class: CLASS_FIELD,
             supersedes: { ...QUESTION_ID, description: "The earlier question of this request that this one asks again, such as Q2; leave it out for a new question." },
@@ -1329,7 +1333,7 @@ export const QUESTIONS_FACE: ToolFace = {
                   grant: {
                     type: "object",
                     additionalProperties: false,
-                    description: `Only on a "${REVIEW_BUDGET}" question: what choosing this option grants — { calls: n } (1-${DELIVERING_LIMITS.grantCalls} more review calls) or { untilClean: "<batchId>" }. Leave it out on the option that grants nothing.`,
+                    description: `Only on a "${REVIEW_BUDGET_SUBJECT}" question: what choosing this option grants — { calls: n } (1-${DELIVERING_LIMITS.grantCalls} more review calls) or { untilClean: "<batchId>" }. Leave it out on the option that grants nothing.`,
                     properties: {
                       calls: { type: "integer", minimum: 1, maximum: DELIVERING_LIMITS.grantCalls },
                       untilClean: BATCH_ID,
@@ -1353,8 +1357,8 @@ export function questionsRules(input: QuestionsInput): string[] {
     const recommended = question.options.filter((option) => option.recommended === true).length;
     if (recommended !== 1) out.push(`${path}.options: exactly one option is recommended (found ${recommended})`);
     // Design §16.8: the owner's yes to more review calls is the chosen option's grant; without one, answering grants nothing.
-    if (question.subject === REVIEW_BUDGET && !question.options.some((option) => option.grant !== undefined)) {
-      out.push(`${path}.options: a "${REVIEW_BUDGET}" question gives at least one option a grant ({ calls: n } or { untilClean: "<batchId>" }); without one, the owner's yes grants nothing`);
+    if (question.subject === REVIEW_BUDGET_SUBJECT && !question.options.some((option) => option.grant !== undefined)) {
+      out.push(`${path}.options: a "${REVIEW_BUDGET_SUBJECT}" question gives at least one option a grant ({ calls: n } or { untilClean: "<batchId>" }); without one, the owner's yes grants nothing`);
     }
     question.options.forEach((option, o) => {
       const at = `${path}.options[${o}]`;
@@ -1363,7 +1367,7 @@ export function questionsRules(input: QuestionsInput): string[] {
       if (RECOMMENDED_MARK.test(option.text)) out.push(`${at}.text: leave out "(recommended)"; set recommended: true instead`);
       if (option.effects.includes("none") && new Set(option.effects).size > 1) out.push(`${at}.effects: "none" stands alone; leave it out when the option has effects`);
       if (option.grant === undefined) return;
-      if (question.subject !== REVIEW_BUDGET) out.push(`${at}.grant: only a question of subject "${REVIEW_BUDGET}" grants`);
+      if (question.subject !== REVIEW_BUDGET_SUBJECT) out.push(`${at}.grant: only a question of subject "${REVIEW_BUDGET_SUBJECT}" grants`);
       const kinds = (option.grant.calls === undefined ? 0 : 1) + (option.grant.untilClean === undefined ? 0 : 1);
       if (kinds !== 1) out.push(`${at}.grant: give exactly one of calls or untilClean`);
     });
@@ -1514,11 +1518,6 @@ export function boundToolFacesFor(role: ToolRole): ToolFace[] {
   return BOUND_SERVER_TOOLS.filter((candidate) => candidate.role === role);
 }
 
-/** The bound block tools that build before the plugin stores and delivers (`bm_report`, `bm_review`, `bm_answers`). */
-export function boundBlockToolNamed(name: string): AgentTool | undefined {
-  return [BOUND_REPORT_TOOL, BOUND_REVIEW_TOOL, BOUND_ANSWERS_TOOL].find((candidate) => candidate.name === name);
-}
-
 // ---------------------------------------------------------------------------
 
 export const AGENT_TOOLS: readonly AgentTool[] = [
@@ -1531,27 +1530,8 @@ export const AGENT_TOOLS: readonly AgentTool[] = [
     build: buildReport,
     kinds: (input) => (input.phase === "blocked" ? ["BM-REPORT", "BM-QUESTIONS"] : ["BM-REPORT"]),
   }),
-  tool<ReviewInput>({
-    name: "bm_review",
-    role: "reviewer",
-    description: "Build your BM-REVIEW.",
-    inputSchema: REVIEW_SCHEMA,
-    rules: (input) =>
-      (["checked", "notChecked"] as const)
-        .filter((key) => prose(input[key]) === "")
-        .map((key) => `input.${key}: has no text once code fences and quote marks are removed`),
-    build: buildReview,
-    kinds: () => ["BM-REVIEW"],
-  }),
-  tool<AnswersInput>({
-    name: "bm_answers",
-    role: "manager",
-    description: "Build the BM-ANSWERS block for the owner's answers given in your chat: put it in your reply to the owner, and the plugin delivers it to the Worker (never send it yourself).",
-    inputSchema: ANSWERS_SCHEMA,
-    rules: answersRules,
-    build: buildAnswers,
-    kinds: () => ["BM-ANSWERS"],
-  }),
+  REVIEW_BUILDER,
+  ANSWERS_BUILDER,
 ];
 
 /** The tools that run here, in this module: the block tools. */

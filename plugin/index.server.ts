@@ -204,7 +204,7 @@ export default function contribute(server: PluginServerContext): () => void {
   // Design §16.5: the per-agent tool bindings. The first handle of a run sweeps away the bindings of
   // agents Paseo no longer lists; an archived agent's binding is revoked (registered below).
   const bindingSweep = createBindingSweep(() => agentTools.bindings);
-  // Design §16.7: after a reload, the first handle of the run delivers every pending or queued outbox record again.
+  // Design §16.7: after a reload, the first handle of the run delivers every pending outbox record again.
   const outboxResend = createOutboxResend({ home: () => dataHome() });
   const shareHandle = (paseo: unknown): void => {
     void bindingSweep.run(paseo);

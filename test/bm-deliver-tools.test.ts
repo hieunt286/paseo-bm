@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PENDING_CALLER_MESSAGE, type ToolCaller } from "../plugin/server/agent-bindings";
+import { PENDING_CALLER_MESSAGE, PENDING_TTL_MS, type ToolCaller } from "../plugin/server/agent-bindings";
 import { BUILDER_SEND_LINES, answer, answerWithServerTools, withAgentTools } from "../plugin/server/agent-tools";
 import { createAlertStore } from "../plugin/server/alert-store";
 import { clearStartMarks, currentTurnStartOf, noteTurnStart, relayRequestIdOf } from "../plugin/server/collector";
@@ -221,6 +221,21 @@ describe("bm_report for a bound Worker (design §16.6)", () => {
     const late = createOutbox(home, { now: () => at(12_000) });
     late.settle(WS, late.add(WS, { kind: "no-verdict", requestId: REQ, batchId: "b1", from: REVIEWER, to: WORKER, text: "no verdict" }).id, "delivered");
     late.settle(WS, late.add(WS, { kind: "review", requestId: REQ, batchId: "b2", from: "agent-reviewer-2", to: WORKER, text: "BM-REVIEW" }).id, "dropped", "gone");
+    expect((await tools.worker.call("bm_report", finished, WORKER_CALLER)).ok).toBe(true);
+  });
+
+  it("finished is not held by a create call whose Reviewer never appeared once the pending time is over (K2)", async () => {
+    const { home, tools, tick } = setup();
+    register(home);
+    // Paseo failed the creation after the hook kept the token: the call stays empty, no Reviewer comes.
+    expect(createRequestRegistry(home).addReviewCall(WS, REQ, "b1", { callId: "call-1", kind: "create", reviewerId: "", at: T0.toISOString() }, "Review src/a.ts")).toBe("added");
+    const finished = { ...REPORT, phase: "finished" };
+    tick(1_000);
+    expect(await tools.worker.call("bm_report", finished, WORKER_CALLER)).toEqual({
+      ok: false,
+      text: "a review of batch b1 has no verdict yet: wait for its delivery, then report finished\nNothing was stored or sent.",
+    });
+    tick(PENDING_TTL_MS);
     expect((await tools.worker.call("bm_report", finished, WORKER_CALLER)).ok).toBe(true);
   });
 

@@ -24,8 +24,8 @@
  *   counts as missing and is logged once per agent per run.
  *   `knownRequestIdOf` is the one way the plugin reads that label.
  * - **Bounds**: at most 2,000 requests per workspace; the oldest finished go
- *   first, then the oldest; a request with a `pending` or `queued` outbox
- *   record (`outbox.ts`, §16.7) is never dropped.
+ *   first, then the oldest; a request with a `pending` outbox record
+ *   (`outbox.ts`, §16.7) is never dropped.
  *
  * Readers never throw; a store that cannot be read reads as empty.
  */
@@ -34,7 +34,7 @@ import { z } from "zod";
 import { parentOf } from "./agent-role";
 import { createBindingStore, liveBindingOf, type AgentBinding } from "./agent-bindings";
 import { clearJsonFileCache, createJsonFileStore, entriesOf, type JsonFileStore } from "./data-files";
-import { createOutbox } from "./outbox";
+import { createOutbox, isOpenRecord } from "./outbox";
 import { dataHome } from "./rpc-kit";
 import { WORKSPACE_ID_PATTERN, readRecords } from "./trace-store";
 import { timeOrZero } from "../shared/time";
@@ -225,12 +225,17 @@ export interface RequestRegistry {
 export type ReviewCall = z.infer<typeof reviewCallSchema>;
 /** One review batch of a request (design §16.4). */
 export type ReviewBatch = RegisteredRequest["reviews"]["batches"][number];
+
+/** True for a create call whose Reviewer never got its id: Paseo's late error, or a reload in the creation. */
+export function isEmptyCreateCall(call: Pick<ReviewCall, "kind" | "reviewerId">): boolean {
+  return call.kind === "create" && call.reviewerId === "";
+}
 /** One grant of a `review-budget` decision (design §16.4, §16.8). */
 export type ReviewBudgetGrant = RegisteredRequest["reviews"]["grants"][number];
 
 /**
- * The registry's default drop guard (§16.4): a request with a `pending` or
- * `queued` outbox record. Each guard reads the outbox once, at its first
+ * The registry's default drop guard (§16.4): a request with a `pending`
+ * outbox record. Each guard reads the outbox once, at its first
  * question, so make one per trim.
  * A store that cannot be read keeps nothing.
  */
@@ -241,7 +246,7 @@ export function outboxKeeps(home: string): (workspaceId: string, requestId: stri
       const open = new Set(
         createOutbox(home)
           .list(workspaceId)
-          .filter((record) => record.state === "pending" || record.state === "queued")
+          .filter(isOpenRecord)
           .map((record) => record.requestId),
       );
       read = { workspaceId, open };

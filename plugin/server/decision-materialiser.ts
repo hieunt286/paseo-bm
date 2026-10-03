@@ -471,9 +471,9 @@ function optionsOf(question: OpenableQuestion): DecisionOption[] {
   }));
 }
 
-/** The questions of `questions` not stored yet for the request. */
-function freshQuestions(context: Pick<OpenContext, "store" | "workspaceId">, requestId: string, questions: readonly OpenableQuestion[]): OpenableQuestion[] {
-  const ids = new Set(questionsOfRequest(context, requestId).map((decision) => decision.id));
+/** The questions of `questions` not among the request's stored ones (`existing`). */
+function freshQuestions(existing: readonly Decision[], requestId: string, questions: readonly OpenableQuestion[]): OpenableQuestion[] {
+  const ids = new Set(existing.map((decision) => decision.id));
   return questions.filter((question) => !ids.has(questionDecisionId(requestId, question.id)));
 }
 
@@ -484,7 +484,7 @@ async function openBlock(
   message: TraceMessage,
   askedBy: () => Promise<string | null>,
 ): Promise<void> {
-  if (freshQuestions(context, block.requestId, block.questions).length === 0) return;
+  if (freshQuestions(questionsOfRequest(context, block.requestId), block.requestId, block.questions).length === 0) return;
   const agentId = await askedBy();
   openQuestions(context, { requestId: block.requestId, questions: block.questions, askedBy: agentId, askedAt: validIso(message.at, context.now) });
 }
@@ -509,20 +509,19 @@ export function openQuestions(
   const { store } = context;
   const requestId = input.requestId;
   const existing = questionsOfRequest(context, requestId);
-  const fresh = freshQuestions(context, requestId, input.questions);
+  const fresh = freshQuestions(existing, requestId, input.questions);
   if (fresh.length === 0) return;
 
   const storedRound = existing.find((decision) => input.questions.some((question) => decision.id === questionDecisionId(requestId, question.id)))?.round;
   const round = storedRound ?? existing.reduce((highest, decision) => Math.max(highest, decision.round ?? 0), 0) + 1;
   const agentId = input.askedBy;
   const askedAt = input.askedAt;
-  const block = { requestId };
 
-  for (const question of fresh) {
-    const id = questionDecisionId(block.requestId, question.id);
-    // Read again for each: an earlier question of this block may have superseded one.
-    const current = questionsOfRequest(context, block.requestId);
-    const tagged = question.supersedes === undefined ? null : questionDecisionId(block.requestId, question.supersedes);
+  for (const [index, question] of fresh.entries()) {
+    const id = questionDecisionId(requestId, question.id);
+    // Read again after the first: an earlier question of this block may have superseded one.
+    const current = index === 0 ? existing : questionsOfRequest(context, requestId);
+    const tagged = question.supersedes === undefined ? null : questionDecisionId(requestId, question.supersedes);
     const byTag = tagged !== null && current.some((decision) => decision.id === tagged) ? tagged : null;
     const text = normalisedQuestion(question.text);
     const byText =
@@ -533,7 +532,7 @@ export function openQuestions(
     const decision: Decision = {
       id,
       workspaceId: context.workspaceId,
-      requestId: block.requestId,
+      requestId,
       askedBy: { role: "worker", agentId },
       askedAt,
       round,
@@ -577,9 +576,10 @@ export function openQuestions(
       context.log(`[paseo-bm] could not open decision ${id}: ${errorText(error)}`);
     }
     // Reversal kind (1): asked again with the subject of an answered question of
-    // this request. An unsettled one was superseded above, which is no reversal.
+    // this request. An unsettled one was superseded above, which is no reversal;
+    // opening this one changed no answered one, so `current` still holds them.
     if (!created || decision.subject === null) continue;
-    for (const earlier of questionsOfRequest(context, block.requestId)) {
+    for (const earlier of current) {
       if (earlier.id !== id && earlier.status === "answered" && earlier.subject === decision.subject) {
         reverse(context, earlier.id, { kind: "re-asked", at: askedAt, ref: id });
       }

@@ -12,6 +12,7 @@ import {
   createOutboxResend,
   deliverRecord,
   deliveryTextOf,
+  dropsCovered,
   newestReportRecordOf,
   storeAndDeliver,
   type OutboxRecord,
@@ -84,6 +85,9 @@ function world(initial: Record<string, Agent>) {
 
 const REPORT = `BM-REPORT\nrequestId: ${REQ}\nphase: finished\ntier: Small (changed: no)\nblockers: none`;
 
+/** A record as the outbox holds it now. */
+const stored = (home: string, id: string, workspaceId = WS) => createOutbox(home).list(workspaceId).find((record) => record.id === id);
+
 function deps(home: string, w: ReturnType<typeof world>, logs: string[] = [], clock = () => T0) {
   let n = 0;
   return {
@@ -113,14 +117,26 @@ describe("the store", () => {
     expect(readFileSync(path, "utf8")).not.toContain("hunter2");
   });
 
-  it("moves a state only forward, and never changes a settled record", () => {
+  it("settles a pending record once, and never changes a settled record", () => {
     const home = dataFolder();
     const outbox = createOutbox(home, { now: () => T0 });
     const { id } = outbox.add(WS, { kind: "message", requestId: REQ, from: "mgr-1", to: "wrk-1", text: "Continue." });
     expect(outbox.settle(WS, id, "delivered")?.changed).toBe(true);
-    expect(outbox.settle(WS, id, "queued")).toMatchObject({ changed: false, record: { state: "delivered" } });
     expect(outbox.settle(WS, id, "dropped", "gone")).toMatchObject({ changed: false, record: { state: "delivered", reason: null } });
     expect(outbox.settle(WS, "out-ffffffffffff", "delivered")).toBeNull();
+  });
+
+  it("stores a withheld record settled at once, with its reason; nothing settles it again and a reload never sends it", async () => {
+    const home = dataFolder();
+    const outbox = createOutbox(home, { now: () => T0 });
+    const record = outbox.add(WS, { kind: "no-verdict", requestId: REQ, batchId: "b1", from: "rev-1", to: "wrk-1", text: "no verdict" }, "the turn was canceled");
+    expect(record).toMatchObject({ state: "withheld", outcomeAt: T0.toISOString(), reason: "the turn was canceled" });
+    expect(outbox.settle(WS, record.id, "delivered")).toMatchObject({ changed: false, record: { state: "withheld" } });
+    const w = world({ "wrk-1": { status: "idle" } });
+    await createOutboxResend({ home: () => home, queue: w.queue, log: () => {} }).run(w.paseo);
+    expect(w.sends).toEqual([]);
+    // No drop: it never holds a delivery-dropped alert open.
+    expect(dropsCovered(createOutbox(home).list(WS), REQ)).toBe(true);
   });
 
   it("reads a newer schemaVersion as empty and never writes it", () => {
@@ -151,12 +167,12 @@ describe("the store", () => {
     const old = new Date(T0.getTime() - OUTBOX_SETTLED_MS - 1).toISOString();
     const records = [
       record(1, "pending", null),
-      record(2, "queued", null),
+      record(2, "pending", null),
       record(3, "delivered", old),
       ...Array.from({ length: OUTBOX_SETTLED_LIMIT + 2 }, (_, index) => record(10 + index, "delivered", new Date(T0.getTime() - (OUTBOX_SETTLED_LIMIT + 2 - index) * 1000).toISOString())),
     ];
     const kept = capOutbox(records, T0);
-    expect(kept.slice(0, 2).map((entry) => entry.state)).toEqual(["pending", "queued"]);
+    expect(kept.slice(0, 2).map((entry) => entry.state)).toEqual(["pending", "pending"]);
     expect(kept.some((entry) => entry.id === records[2]!.id)).toBe(false);
     expect(kept.filter((entry) => entry.state === "delivered")).toHaveLength(OUTBOX_SETTLED_LIMIT);
     // The two oldest settled ones went.
@@ -174,7 +190,7 @@ describe("delivery", () => {
     const w = world({ "mgr-1": { status: "idle" } });
     const { record, outcome } = await storeAndDeliver(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: REPORT }, deps(home, w));
     expect(outcome).toBe("sent");
-    expect(record.state).toBe("delivered");
+    expect(stored(home, record.id)?.state).toBe("delivered");
     expect(w.sends).toEqual([{ id: "mgr-1", text: `BM-DELIVERY report ${record.id}\n${REPORT}` }]);
     expect(w.sends[0]!.text).toBe(deliveryTextOf(record));
     // The plugin's, never the owner's — though Paseo stores a clientMessageId on it.
@@ -183,16 +199,38 @@ describe("delivery", () => {
     expect(parseDelivery(w.sends[0]!.text)).toEqual({ kind: "report", recordId: record.id, body: REPORT });
   });
 
-  it("holds a record for a running target as queued; the queue's onSent marks it delivered at the target's idle moment", async () => {
+  it("keeps a record for a running target pending while the queue holds it; the queue's onSent marks it delivered at the target's idle moment", async () => {
     const home = dataFolder();
     const w = world({ "wrk-1": { status: "running" } });
     const { record, outcome } = await storeAndDeliver(WS, { kind: "message", requestId: REQ, from: "mgr-1", to: "wrk-1", text: "Continue." }, deps(home, w));
     expect(outcome).toBe("queued");
-    expect(createOutbox(home).get(WS, record.id)?.state).toBe("queued");
+    expect(stored(home, record.id)?.state).toBe("pending");
     w.set("wrk-1", { status: "idle" });
     await w.turnEnded("wrk-1");
     expect(w.sends).toHaveLength(1);
-    expect(createOutbox(home).get(WS, record.id)).toMatchObject({ state: "delivered", outcomeAt: T0.toISOString() });
+    expect(stored(home, record.id)).toMatchObject({ state: "delivered", outcomeAt: T0.toISOString() });
+  });
+
+  it("runs the step before delivery once the record is stored; a throw there is one log line and the record still goes", async () => {
+    const home = dataFolder();
+    const w = world({ "mgr-1": { status: "idle" } });
+    const logs: string[] = [];
+    const seen: string[] = [];
+    const { record } = await storeAndDeliver(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: REPORT }, deps(home, w, logs), (made) => {
+      seen.push(stored(home, made.id)?.state ?? "missing");
+      throw new Error("registry unwritable");
+    });
+    expect(seen).toEqual(["pending"]);
+    expect(logs).toEqual([`[paseo-bm] after storing the report ${record.id}: registry unwritable`]);
+    expect(stored(home, record.id)?.state).toBe("delivered");
+  });
+
+  it("an input the queue refuses is dropped at once, without a callback", async () => {
+    const home = dataFolder();
+    const w = world({});
+    const record = createOutbox(home, { now: () => T0 }).add(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: REPORT });
+    expect(await deliverRecord(WS, record, { ...deps(home, w), queue: { enqueue: async () => "dropped" } })).toBe("dropped");
+    expect(stored(home, record.id)).toMatchObject({ state: "dropped", reason: "the notice queue refused it" });
   });
 
   it("never lets a newer record replace an older one: both go, in creation order, one per idle moment", async () => {
@@ -217,7 +255,7 @@ describe("delivery", () => {
     const logs: string[] = [];
     const { record, outcome } = await storeAndDeliver(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-gone", text: REPORT }, deps(home, w, logs));
     expect(outcome).toBe("dropped");
-    expect(record).toMatchObject({ state: "dropped", reason: "the target is archived, closed or gone", outcomeAt: T0.toISOString() });
+    expect(stored(home, record.id)).toMatchObject({ state: "dropped", reason: "the target is archived, closed or gone", outcomeAt: T0.toISOString() });
     expect(logs.filter((line) => line.includes(record.id))).toHaveLength(1);
     const alerts = createAlertStore(home).list({ open: true });
     expect(alerts).toMatchObject([{ kind: "delivery-dropped", workspaceId: WS, subject: REQ, key: `delivery-dropped:${WS}:${REQ}` }]);
@@ -235,34 +273,56 @@ describe("delivery", () => {
     w.set("wrk-1", { status: "idle", archivedAt: "2026-10-03T10:01:00.000Z" });
     await w.turnEnded("wrk-1");
     expect(w.sends).toEqual([]);
-    expect(createOutbox(home).get(WS, record.id)).toMatchObject({ state: "dropped", reason: "the target is archived, closed or gone" });
+    expect(stored(home, record.id)).toMatchObject({ state: "dropped", reason: "the target is archived, closed or gone" });
     expect(createAlertStore(home).list({ open: true }).map((alert) => alert.kind)).toEqual(["delivery-dropped"]);
   });
 
-  it("clears the request's delivery-dropped alert when a later record of it is delivered, never on an earlier one", async () => {
+  it("clears the request's delivery-dropped alert only when a later record with the dropped one's target and kind is delivered (K4)", async () => {
     const home = dataFolder();
     let clock = T0;
     const w = world({ "mgr-1": { status: "running" }, "wrk-1": { status: "idle" } });
     const d = { ...deps(home, w, [], () => clock) };
-    // An earlier record, still queued, then a drop.
+    // An earlier report, still waiting in the queue, then a report the queue drops (its send fails).
     const earlier = await storeAndDeliver(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: REPORT }, d);
     expect(earlier.outcome).toBe("queued");
     clock = new Date(T0.getTime() + 60_000);
-    await storeAndDeliver(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-gone", text: REPORT }, d);
+    const failing = { enqueue: async (_to: string, kind: string, _text: string, _paseo: unknown, callbacks?: { onDropped?: (to: string, kind: string, reason: string) => void }) => {
+      callbacks?.onDropped?.("mgr-1", kind, "the send failed: socket closed");
+      return "dropped" as const;
+    } };
+    const lost = await storeAndDeliver(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: `${REPORT}\nlost` }, { ...d, queue: failing });
+    expect(stored(home, lost.record.id)).toMatchObject({ state: "dropped", reason: "the send failed: socket closed" });
     const open = () => createAlertStore(home).list({ open: true }).map((alert) => `${alert.kind}:${alert.subject}`);
     expect(open()).toEqual([`delivery-dropped:${REQ}`]);
-    // The earlier record reaches its target after the drop: the alert stays.
+    // The earlier report reaches the Manager after the drop: it was created before it, so the alert stays.
     clock = new Date(T0.getTime() + 120_000);
     w.set("mgr-1", { status: "idle" });
     await w.turnEnded("mgr-1");
-    expect(createOutbox(home).get(WS, earlier.record.id)?.state).toBe("delivered");
+    expect(stored(home, earlier.record.id)?.state).toBe("delivered");
     expect(open()).toEqual([`delivery-dropped:${REQ}`]);
-    // A later record of another request changes nothing; a later one of this request clears it.
+    // A message to the Worker, of this request or another, never clears a report lost on its way to the Manager.
     await storeAndDeliver(WS, { kind: "message", requestId: "req-20261003T110000Z", from: "mgr-1", to: "wrk-1", text: "Go on." }, d);
-    expect(open()).toEqual([`delivery-dropped:${REQ}`]);
     w.set("wrk-1", { status: "idle" });
     await storeAndDeliver(WS, { kind: "message", requestId: REQ, from: "mgr-1", to: "wrk-1", text: "Go on." }, d);
+    expect(open()).toEqual([`delivery-dropped:${REQ}`]);
+    // A later report of the request delivered to the same Manager clears it.
+    w.set("mgr-1", { status: "idle" });
+    await storeAndDeliver(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: REPORT }, d);
     expect(open()).toEqual([]);
+  });
+
+  it("dropsCovered: every drop of the request needs a delivered record with its target and kind, created at or after the drop", () => {
+    const at = (minutes: number) => new Date(T0.getTime() + minutes * 60_000).toISOString();
+    const base = { kind: "report" as const, requestId: REQ, batchId: null, from: "wrk-1", to: "mgr-1", text: "x", reason: null };
+    const drop: OutboxRecord = { ...base, id: "out-000000000001", createdAt: at(0), state: "dropped", outcomeAt: at(1), reason: "gone" };
+    const delivered = (id: string, minutes: number, over: Partial<OutboxRecord> = {}): OutboxRecord => ({ ...base, id, createdAt: at(minutes), state: "delivered", outcomeAt: at(minutes), ...over });
+    expect(dropsCovered([drop], REQ)).toBe(false);
+    expect(dropsCovered([drop, delivered("out-000000000002", 0)], REQ)).toBe(false);
+    expect(dropsCovered([drop, delivered("out-000000000003", 2, { kind: "message" })], REQ)).toBe(false);
+    expect(dropsCovered([drop, delivered("out-000000000004", 2, { to: "wrk-1" })], REQ)).toBe(false);
+    expect(dropsCovered([drop, delivered("out-000000000005", 2, { requestId: "req-20261003T110000Z" })], REQ)).toBe(false);
+    expect(dropsCovered([drop, delivered("out-000000000006", 2)], REQ)).toBe(true);
+    expect(dropsCovered([drop], "req-20261003T110000Z")).toBe(true);
   });
 
   it("clearDroppedAlert clears the request's alert outright when its request finished or stopped", () => {
@@ -283,15 +343,16 @@ describe("delivery", () => {
 });
 
 describe("after a reload", () => {
-  it("enqueues every pending and queued record again at the first handle, once per run; delivered and dropped ones stay", async () => {
+  it("enqueues every pending record again at the first handle, once per run, one the queue held included; settled ones stay", async () => {
     const home = dataFolder();
     const before = world({ "mgr-1": { status: "running" } });
     const d = deps(home, before);
     const queued = (await storeAndDeliver(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: REPORT }, d)).record;
+    const withheld = createOutbox(home, d).add(WS, { kind: "no-verdict", requestId: REQ, batchId: "b1", from: "rev-1", to: "wrk-1", text: "no verdict" }, "canceled");
     const pending = createOutbox(home, d).add("wks_2", { kind: "review", requestId: REQ, batchId: "b1", from: "rev-1", to: "wrk-2", text: "BM-REVIEW\nverdict: pass" });
     const done = createOutbox(home, d).add(WS, { kind: "message", requestId: REQ, from: "mgr-1", to: "wrk-1", text: "Done." });
     createOutbox(home).settle(WS, done.id, "delivered");
-    expect(queued.state).toBe("queued");
+    expect(stored(home, queued.id)?.state).toBe("pending");
 
     // The reload: the queue forgot what it held; the outbox did not.
     before.queue.clear();
@@ -299,8 +360,9 @@ describe("after a reload", () => {
     const resend = createOutboxResend({ home: () => home, queue: after.queue, log: () => {} });
     await resend.run(after.paseo);
     expect(after.sends.map((send) => parseDelivery(send.text)?.recordId).sort()).toEqual([queued.id, pending.id].sort());
-    expect(createOutbox(home).get(WS, queued.id)?.state).toBe("delivered");
-    expect(createOutbox(home).get("wks_2", pending.id)?.state).toBe("delivered");
+    expect(stored(home, queued.id)?.state).toBe("delivered");
+    expect(stored(home, pending.id, "wks_2")?.state).toBe("delivered");
+    expect(stored(home, withheld.id)?.state).toBe("withheld");
 
     await resend.run(after.paseo);
     expect(after.sends).toHaveLength(2);
@@ -325,30 +387,34 @@ describe("after a reload", () => {
     w.set("mgr-1", { status: "idle" });
     expect(await deliverRecord(WS, record, deps(home, w))).toBe("sent");
     expect(createOutbox(home).list(WS)).toHaveLength(1);
-    expect(createOutbox(home).get(WS, record.id)?.state).toBe("delivered");
+    expect(stored(home, record.id)?.state).toBe("delivered");
   });
 });
 
 describe("readers", () => {
-  it("finds a bound agent's newest report among its pending and delivered records", () => {
+  it("finds a bound agent's newest report among its pending and delivered records, one the queue holds included (K5)", async () => {
     const home = dataFolder();
     let clock = T0;
     const outbox = createOutbox(home, { now: () => clock });
-    outbox.add(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: "old" });
+    const old = outbox.add(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: "old" });
+    outbox.settle(WS, old.id, "delivered");
     clock = new Date(T0.getTime() + 60_000);
-    const newest = outbox.add(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: "new" });
+    // Held by the queue while the Manager runs: still pending.
+    const w = world({ "mgr-1": { status: "running" } });
+    const held = await storeAndDeliver(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: "held" }, { ...deps(home, w, [], () => clock), newId: () => "out-0000000000b1" });
+    expect(held.outcome).toBe("queued");
     clock = new Date(T0.getTime() + 120_000);
-    const queued = outbox.add(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: "queued" });
-    outbox.settle(WS, queued.id, "queued");
+    const lost = outbox.add(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: "lost" });
+    outbox.settle(WS, lost.id, "dropped", "gone");
     outbox.add(WS, { kind: "message", requestId: REQ, from: "wrk-1", to: "mgr-1", text: "msg" });
-    expect(newestReportRecordOf(home, WS, "wrk-1")?.id).toBe(newest.id);
+    expect(newestReportRecordOf(home, WS, "wrk-1")?.id).toBe(held.record.id);
     expect(newestReportRecordOf(home, WS, "wrk-1", new Date(T0.getTime() + 90_000).toISOString())).toBeNull();
     expect(newestReportRecordOf(home, WS, "wrk-2")).toBeNull();
   });
 });
 
 describe("the request registry's bound (design §16.4)", () => {
-  it("never drops a request with a pending or queued outbox record when trimming to 2,000", () => {
+  it("never drops a request with a pending outbox record when trimming to 2,000", () => {
     const home = dataFolder();
     const id = (index: number) => `req-20250101T${String(Math.floor(index / 3600)).padStart(2, "0")}${String(Math.floor(index / 60) % 60).padStart(2, "0")}${String(index % 60).padStart(2, "0")}Z`;
     const entry = (index: number): RegisteredRequest => ({
@@ -364,8 +430,7 @@ describe("the request registry's bound (design §16.4)", () => {
     });
     const outbox = createOutbox(home, { now: () => T0 });
     outbox.add(WS, { kind: "report", requestId: id(0), from: "w", to: "m", text: "pending" });
-    const queued = outbox.add(WS, { kind: "report", requestId: id(1), from: "w", to: "m", text: "queued" });
-    outbox.settle(WS, queued.id, "queued");
+    outbox.add(WS, { kind: "report", requestId: id(1), from: "w", to: "m", text: "held by the queue" });
     const delivered = outbox.add(WS, { kind: "report", requestId: id(2), from: "w", to: "m", text: "delivered" });
     outbox.settle(WS, delivered.id, "delivered");
 

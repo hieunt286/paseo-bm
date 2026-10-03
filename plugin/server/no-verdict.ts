@@ -17,7 +17,7 @@
  *
  * - the outcome is `completed`, or `failed`, and the fallback detection found
  *   no provider failure in the turn (a turn with a fallback incident is the
- *   fallback's); a `canceled` turn sends nothing: the Worker stopped it;
+ *   fallback's);
  * - no `review` record exists for its batch since the turn's review call —
  *   the call its first message names (`BM-BRIEF reviewer … call:`,
  *   `BM-DELIVERY message <id>`), else the batch's newest call;
@@ -25,6 +25,13 @@
  *
  * At most one per review call: a re-review that also ends without a verdict
  * gets a second one.
+ *
+ * **A `canceled` turn** is the owner's Stop, or the stop of its Worker
+ * reaching it (§7.9): the Worker no longer cancels a Reviewer itself. Nothing
+ * is sent — a stopped Worker must not be woken — but the call still has to
+ * settle, or the Worker's `bm_report finished` would wait for a verdict that
+ * never comes (`batchesAwaitingVerdict`, for 7 days). So the same
+ * `no-verdict` record is stored `withheld`: settled, never delivered.
  *
  * **A plugin-created Reviewer that ended up unbound** — its base provider is
  * outside `TOOL_PROVIDERS` (Pi, Copilot), or the hook never kept its token —
@@ -54,6 +61,7 @@ type TurnEndedEvent = PluginLifecycleEvents["agent.turn_ended"];
 /** What one check did, for the tests and the log. */
 export type NoVerdictOutcome =
   | "sent"
+  | "withheld"
   | "review-delivered"
   | "not-bound-reviewer"
   | "outcome"
@@ -161,10 +169,11 @@ export async function checkNoVerdict(event: TurnEndedEvent, deps: NoVerdictDeps)
     const context = reviewerContextOf(agent, deps, log);
     if (context === null) return "not-bound-reviewer";
     const outcome = (event.outcome as { kind?: unknown } | undefined)?.kind;
-    // A canceled turn was the Worker's stop; any other kind is not a finished review turn.
-    if (outcome !== "completed" && outcome !== "failed") return "outcome";
+    const canceled = outcome === "canceled";
+    // Any other kind is not a finished review turn.
+    if (!canceled && outcome !== "completed" && outcome !== "failed") return "outcome";
     // A provider failure is the fallback's (an incident, its card and its switch).
-    if (deps.classified) return "fallback";
+    if (!canceled && deps.classified) return "fallback";
 
     const { requestId, batchId, workerId, workspaceId } = context;
     const request = createRequestRegistry(deps.home, { log }).get(workspaceId, requestId);
@@ -179,6 +188,12 @@ export async function checkNoVerdict(event: TurnEndedEvent, deps: NoVerdictDeps)
     const outbox = createOutbox(deps.home, { ...(deps.now === undefined ? {} : { now: deps.now }), ...deps.outbox });
     const records = outbox.list(workspaceId).filter((record) => record.requestId === requestId && record.batchId === batchId && timeOrZero(record.createdAt) >= since);
     if (records.some((record) => record.kind === "review")) return "verdict";
+    const noVerdict = { kind: "no-verdict" as const, requestId, batchId, from: agent.id, to: workerId, text: noVerdictTextOf({ requestId, batchId, reviewerId: agent.id }) };
+    if (canceled) {
+      if (records.some((record) => record.kind === "no-verdict")) return "already-sent";
+      outbox.add(workspaceId, noVerdict, "the Reviewer's turn was canceled: nothing was sent, so its stopped Worker is not woken");
+      return "withheld";
+    }
     const delivery = {
       home: deps.home,
       log,
@@ -199,11 +214,7 @@ export async function checkNoVerdict(event: TurnEndedEvent, deps: NoVerdictDeps)
     // Once per (batchId, callId): a no-verdict created after the call is this call's.
     if (records.some((record) => record.kind === "no-verdict")) return "already-sent";
 
-    await storeAndDeliver(
-      workspaceId,
-      { kind: "no-verdict", requestId, batchId, from: agent.id, to: workerId, text: noVerdictTextOf({ requestId, batchId, reviewerId: agent.id }) },
-      delivery,
-    );
+    await storeAndDeliver(workspaceId, noVerdict, delivery);
     return "sent";
   } catch (error) {
     log(`[paseo-bm] the missing-verdict check of ${event?.agent?.id ?? "(unknown)"} failed: ${reasonOf(error)}`);

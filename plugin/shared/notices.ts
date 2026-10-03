@@ -113,7 +113,8 @@ export const DELIVERY_KINDS = ["report", "review", "message", "no-verdict"] as c
 export type DeliveryKind = (typeof DELIVERY_KINDS)[number];
 
 /** An outbox record's id: `out-` + 12 lowercase hex digits. */
-export const OUTBOX_RECORD_ID_PATTERN = /^out-[0-9a-f]{12}$/;
+const OUTBOX_RECORD_ID_SOURCE = "out-[0-9a-f]{12}";
+export const OUTBOX_RECORD_ID_PATTERN = new RegExp(`^${OUTBOX_RECORD_ID_SOURCE}$`);
 
 /** The fixed sentence of a `no-verdict` delivery (design §16.7). */
 export const NO_VERDICT_SENTENCE =
@@ -132,7 +133,7 @@ export interface ParsedDelivery {
   body: string;
 }
 
-const DELIVERY_LINE = new RegExp(`^${DELIVERY_NOTICE_MARKER}[ \\t]+(${DELIVERY_KINDS.join("|")})[ \\t]+(out-[0-9a-f]{12})[ \\t]*(?:\\r?\\n|$)`);
+const DELIVERY_LINE = new RegExp(`^${DELIVERY_NOTICE_MARKER}[ \\t]+(${DELIVERY_KINDS.join("|")})[ \\t]+(${OUTBOX_RECORD_ID_SOURCE})[ \\t]*(?:\\r?\\n|$)`);
 
 /**
  * The kind, record id and text of an outbox delivery, or null for any other
@@ -311,7 +312,7 @@ export function reviewerBriefLineOf(requestId: string, batchId: string, callId: 
   return `${briefLineOf("reviewer", requestId)} batchId: ${batchId} call: ${callId}`;
 }
 
-const REVIEWER_BRIEF_LINE = new RegExp(`^${BRIEF_PROMPT_MARKER}[ \\t]+reviewer[ \\t]+requestId:[ \\t]*\\S+[ \\t]+batchId:[ \\t]*(\\S+)[ \\t]+call:[ \\t]*(out-[0-9a-f]{12})[ \\t]*(?:\\r?\\n|$)`);
+const REVIEWER_BRIEF_LINE = new RegExp(`^${BRIEF_PROMPT_MARKER}[ \\t]+reviewer[ \\t]+requestId:[ \\t]*\\S+[ \\t]+batchId:[ \\t]*(\\S+)[ \\t]+call:[ \\t]*(${OUTBOX_RECORD_ID_SOURCE})[ \\t]*(?:\\r?\\n|$)`);
 
 /**
  * The review call a message to a Reviewer names (design §16.8): the `callId`

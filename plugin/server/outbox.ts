@@ -4,35 +4,42 @@
  * the plugin delivers it, so a plugin reload never loses it.
  *
  * One file per workspace, `<data folder>/outbox/<workspaceId>.json`, in a
- * `0700` folder, `0600`, a `createJsonFileStore` file: atomic temp → fsync →
+ * `0700` folder, `0600`, a `createJsonFileStore` file (read through its
+ * `cached` option: it is read at every turn end): atomic temp → fsync →
  * rename, no symlink, a newer `schemaVersion` read as empty and never written.
  * Every write is one synchronous read-modify-write: the plugin server is one
  * thread, so that is the file's mutex.
  *
- * **Delivery** (`deliverRecord`, `storeAndDeliver`):
+ * **Delivery** (`storeAndDeliver`, `deliverRecord`):
  * 1. the record is written `pending` first;
  * 2. it goes to the notice queue as `enqueue(to, "<kind>:<id>", text)` — a
  *    kind of its own, so "the newest of a kind replaces the older" never
  *    applies — with `BM-DELIVERY <kind> <recordId>` as its first line;
- * 3. the outcome is recorded: `sent` → `delivered`, `queued` → `queued` (the
- *    queue's `onSent` marks it `delivered` when it goes out), `dropped` →
- *    `dropped` with its reason, one log line and the `delivery-dropped` Inbox
- *    alert naming the request. That alert clears when a later record of the
- *    same request is delivered, or when the request reports `finished` or
- *    `stopped` (`clearDroppedAlert`, from `bm_report`).
+ * 3. the queue's callbacks record the outcome: `onSent` → `delivered` (at
+ *    once, or at the target's idle moment), `onDropped` → `dropped` with its
+ *    reason, one log line and the `delivery-dropped` Inbox alert naming the
+ *    request; an input the queue refuses outright is `dropped` too. A record
+ *    the queue holds stays `pending`. The alert clears when every drop of the
+ *    request is followed by a delivered record with the same target and kind,
+ *    or when the request reports `finished` or `stopped` (`clearDroppedAlert`).
  *
- * A state only moves forward (`pending` → `queued` → `delivered` | `dropped`),
- * so a callback that arrives before the outcome it follows changes nothing.
+ * A record only moves from `pending` to `delivered` or `dropped`, and a
+ * settled record never changes. A record can also be stored `withheld`:
+ * settled at once and never sent (`add`'s `withheld`; the no-verdict of a
+ * canceled Reviewer turn, which must not wake its stopped Worker). It raises
+ * no alert and is no drop.
  *
  * **After a reload** (`createOutboxResend`): at the first hook or RPC with a
- * Paseo handle, every `pending` or `queued` record of every workspace is
- * enqueued again. A `queued` one may reach its target twice; the receiver's
- * card and the collector drop the second by its record id.
+ * Paseo handle, every `pending` record of every workspace is enqueued again.
+ * One sent just before the reload, whose outcome was not written yet, reaches
+ * its target twice: nothing drops the second copy (the agent reads both), and
+ * the trace reconstruction counts it once, by its record id.
  *
  * **Bounds**: a record stays until it is `delivered` or `dropped`; of those, at
  * most `OUTBOX_SETTLED_LIMIT` per workspace are kept, for `OUTBOX_SETTLED_MS`
- * (`handoff.ts` and `compaction.ts` read the newest report records here).
- * `setup.cleanup` deletes `outbox/`.
+ * (`compaction.ts` reads the newest report records here, the collector and
+ * `format-check.ts` a bound agent's records, the request registry's trim the
+ * open ones). `setup.cleanup` deletes `outbox/`.
  *
  * Readers never throw; a store that cannot be read reads as empty.
  */
@@ -57,8 +64,7 @@ export const OUTBOX_SETTLED_LIMIT = 500;
 /** How long a delivered or dropped record is kept (§16.7): 7 days. */
 export const OUTBOX_SETTLED_MS = 7 * 24 * 60 * 60 * 1000;
 
-export const OUTBOX_STATES = ["pending", "queued", "delivered", "dropped"] as const;
-export type OutboxState = (typeof OUTBOX_STATES)[number];
+const OUTBOX_STATES = ["pending", "delivered", "dropped", "withheld"] as const;
 
 const recordSchema = z.object({
   id: z.string().regex(OUTBOX_RECORD_ID_PATTERN),
@@ -91,11 +97,9 @@ interface OutboxFile {
   records: OutboxRecord[];
 }
 
-const RANK: Readonly<Record<OutboxState, number>> = { pending: 0, queued: 1, delivered: 2, dropped: 2 };
-
 /** True for a record still to be delivered. */
 export function isOpenRecord(record: Pick<OutboxRecord, "state">): boolean {
-  return record.state === "pending" || record.state === "queued";
+  return record.state === "pending";
 }
 
 function isUsableWorkspaceId(workspaceId: unknown): workspaceId is string {
@@ -129,20 +133,20 @@ export interface OutboxDeps {
 }
 
 export interface Outbox {
-  /** The workspace's records, oldest first. Never throws: none for a file that cannot be read. */
+  /** The workspace's records, oldest first (shared with the read cache: never mutate them). Never throws: none for a file that cannot be read. */
   list(workspaceId: string): OutboxRecord[];
-  /** One record, or null. Never throws. */
-  get(workspaceId: string, id: string): OutboxRecord | null;
-  /** Stores a new `pending` record (text masked). Throws when the file cannot be written. */
-  add(workspaceId: string, init: OutboxInit): OutboxRecord;
   /**
-   * Moves a record forward to `state` (never back, and a settled record never
-   * changes); returns the record as it is now, or null when there is none.
-   * `reason` is kept for `dropped`. Throws when the file cannot be written.
+   * Stores a new `pending` record (text masked) — or, with `withheld`, one
+   * settled `withheld` for that reason, which nothing delivers. Throws when
+   * the file cannot be written.
    */
-  settle(workspaceId: string, id: string, state: Exclude<OutboxState, "pending">, reason?: string | null): { record: OutboxRecord; changed: boolean } | null;
-  /** True while a `pending` or `queued` record of `requestId` exists. Never throws. */
-  hasOpen(workspaceId: string, requestId: string): boolean;
+  add(workspaceId: string, init: OutboxInit, withheld?: string): OutboxRecord;
+  /**
+   * Settles a `pending` record as `delivered` or `dropped` (a settled record
+   * never changes); returns the record as it is now, or null when there is
+   * none. `reason` is kept for `dropped`. Throws when the file cannot be written.
+   */
+  settle(workspaceId: string, id: string, state: "delivered" | "dropped", reason?: string | null): { record: OutboxRecord; changed: boolean } | null;
   /** The workspaces with an outbox file. Never throws. */
   workspaces(): string[];
 }
@@ -165,31 +169,30 @@ export function createOutbox(home: string, deps: OutboxDeps = {}): Outbox {
       codes: { unwritable: "E_TRACE_STORE_UNWRITABLE" },
       // Reports in flight: a file that cannot be read is fixed or deleted by hand, never replaced.
       keepUnusable: true,
+      cached: true,
     });
-
-  const list = (workspaceId: string): OutboxRecord[] => {
-    if (!isUsableWorkspaceId(workspaceId)) return [];
-    try {
-      return fileOf(workspaceId).read().records;
-    } catch {
-      return [];
-    }
-  };
 
   const requireWorkspace = (workspaceId: string): void => {
     if (!isUsableWorkspaceId(workspaceId)) throw new Error(`workspace id is not usable as a file name: ${JSON.stringify(workspaceId)}`);
   };
 
   return {
-    list,
-    get: (workspaceId, id) => list(workspaceId).find((record) => record.id === id) ?? null,
-    add(workspaceId, init) {
+    list(workspaceId) {
+      if (!isUsableWorkspaceId(workspaceId)) return [];
+      try {
+        return fileOf(workspaceId).read().records;
+      } catch {
+        return [];
+      }
+    },
+    add(workspaceId, init, withheld) {
       requireWorkspace(workspaceId);
       let made: OutboxRecord | null = null;
       fileOf(workspaceId).update((current) => {
         const taken = new Set(current.records.map((record) => record.id));
         let id = newId();
         while (taken.has(id)) id = newId();
+        const at = now().toISOString();
         made = recordSchema.parse({
           id,
           kind: init.kind,
@@ -198,10 +201,10 @@ export function createOutbox(home: string, deps: OutboxDeps = {}): Outbox {
           from: init.from,
           to: init.to,
           text: redactText(init.text, deps.env ?? process.env),
-          createdAt: now().toISOString(),
-          state: "pending",
-          outcomeAt: null,
-          reason: null,
+          createdAt: at,
+          state: withheld === undefined ? "pending" : "withheld",
+          outcomeAt: withheld === undefined ? null : at,
+          reason: withheld ?? null,
         });
         return { records: [...current.records, made] };
       });
@@ -214,19 +217,15 @@ export function createOutbox(home: string, deps: OutboxDeps = {}): Outbox {
         const index = current.records.findIndex((record) => record.id === id);
         if (index === -1) return null;
         const found = current.records[index]!;
-        if (!isOpenRecord(found) || RANK[state] <= RANK[found.state]) {
+        if (!isOpenRecord(found)) {
           result = { record: found, changed: false };
           return null;
         }
-        const settled = state === "queued" ? null : now().toISOString();
-        const next: OutboxRecord = { ...found, state, outcomeAt: settled, reason: state === "dropped" ? (reason ?? "not delivered") : null };
+        const next: OutboxRecord = { ...found, state, outcomeAt: now().toISOString(), reason: state === "dropped" ? (reason ?? "not delivered") : null };
         result = { record: next, changed: true };
         return { records: current.records.map((record, at) => (at === index ? next : record)) };
       });
       return result;
-    },
-    hasOpen(workspaceId, requestId) {
-      return list(workspaceId).some((record) => record.requestId === requestId && isOpenRecord(record));
     },
     workspaces() {
       try {
@@ -263,14 +262,10 @@ export interface OutboxDeliveryDeps extends OutboxDeps {
   /** The caller's Paseo handle; the queue's last one when absent. */
   paseo?: NoticePaseo;
   log?: (message: string) => void;
-  /** Raises the `delivery-dropped` alert; the data folder's alert store by default. */
-  raiseAlert?: (input: AlertInput) => void;
-  /** Clears the request's `delivery-dropped` alert raised before a delivered record (`clearDroppedAlert`); the data folder's alert store by default. */
-  clearAlert?: (workspaceId: string, record: OutboxRecord) => void;
 }
 
 /** The `delivery-dropped` alert of a record (§16.7): about its request, the record in its detail. */
-export function droppedAlertOf(workspaceId: string, record: OutboxRecord): AlertInput {
+function droppedAlertOf(workspaceId: string, record: OutboxRecord): AlertInput {
   return {
     workspaceId,
     kind: "delivery-dropped",
@@ -280,49 +275,60 @@ export function droppedAlertOf(workspaceId: string, record: OutboxRecord): Alert
 }
 
 /**
- * Clears the `delivery-dropped` alert of `requestId` (§16.7, As built): a
- * later record of the request was delivered — `after` is its creation time,
- * and an alert raised after it stays — or the request reported `finished` or
- * `stopped` (`after` null). Returns the cleared keys. Throws when the alert
- * store cannot be written.
+ * True when every `dropped` record of `requestId` is followed by a delivered
+ * record of the request with the same target and kind, created at or after
+ * the drop (K4: a message to the Worker never covers a report lost on its
+ * way to the Manager). Pure.
  */
-export function clearDroppedAlert(home: string, workspaceId: string, requestId: string, after: string | null, deps: Pick<OutboxDeps, "now"> = {}): string[] {
-  return createAlertStore(home, deps).clearWhere(
-    (alert) =>
-      alert.kind === "delivery-dropped" &&
-      alert.workspaceId === workspaceId &&
-      alert.subject === requestId &&
-      (after === null || timeOrZero(after) >= timeOrZero(alert.since)),
-  );
+export function dropsCovered(records: readonly OutboxRecord[], requestId: string): boolean {
+  const ofRequest = records.filter((record) => record.requestId === requestId);
+  return ofRequest
+    .filter((record) => record.state === "dropped")
+    .every((drop) =>
+      ofRequest.some(
+        (later) => later.state === "delivered" && later.to === drop.to && later.kind === drop.kind && timeOrZero(later.createdAt) >= timeOrZero(drop.outcomeAt ?? drop.createdAt),
+      ),
+    );
 }
 
 /**
- * Hands one record to the notice queue and records the outcome (§16.7 steps
- * 2–3). Never rejects: a store failure is one log line, and the record stays
- * as it was, to be sent again after a reload.
+ * Clears the `delivery-dropped` alert of `requestId` (§16.7, As built): when
+ * `delivered` (a record of the request that just reached its target) leaves
+ * every drop of the request covered (`dropsCovered`), or outright when the
+ * request reported `finished` or `stopped` (`delivered` null). Returns the
+ * cleared keys. Throws when the alert store cannot be written.
+ */
+export function clearDroppedAlert(home: string, workspaceId: string, requestId: string, delivered: OutboxRecord | null, deps: Pick<OutboxDeps, "now"> = {}): string[] {
+  if (delivered !== null && !dropsCovered(createOutbox(home).list(workspaceId), requestId)) return [];
+  return createAlertStore(home, deps).clearWhere((alert) => alert.kind === "delivery-dropped" && alert.workspaceId === workspaceId && alert.subject === requestId);
+}
+
+/**
+ * Hands one record to the notice queue; the queue's callbacks record its
+ * outcome (§16.7 steps 2–3). Never rejects: a store failure is one log line,
+ * and the record stays as it was, to be sent again after a reload.
  */
 export async function deliverRecord(workspaceId: string, record: OutboxRecord, deps: OutboxDeliveryDeps): Promise<NoticeOutcome> {
   const log = deps.log ?? ((message: string) => console.warn(message));
-  const outbox = createOutbox(deps.home, deps);
   const queue = deps.queue ?? noticeQueue;
+  let told = false;
 
-  const settle = (state: "queued" | "delivered" | "dropped", reason: string | null = null): void => {
+  const settle = (state: "delivered" | "dropped", reason: string | null = null): void => {
+    told = true;
     try {
-      const result = outbox.settle(workspaceId, record.id, state, reason);
+      const result = createOutbox(deps.home, deps).settle(workspaceId, record.id, state, reason);
       if (result === null || !result.changed) return;
       if (state === "delivered") {
-        // A later record of the request reached its target: the request's earlier drop is over.
         try {
-          (deps.clearAlert ?? ((at: string, delivered: OutboxRecord) => void clearDroppedAlert(deps.home, at, delivered.requestId, delivered.createdAt, deps)))(workspaceId, result.record);
+          clearDroppedAlert(deps.home, workspaceId, record.requestId, result.record, deps);
         } catch (error) {
           log(`[paseo-bm] could not clear the delivery-dropped alert of request ${record.requestId}: ${errorText(error)}`);
         }
         return;
       }
-      if (state !== "dropped") return;
       log(`[paseo-bm] the ${record.kind} ${record.id} of request ${record.requestId} to ${record.to} was not delivered: ${result.record.reason ?? "not delivered"}.`);
       try {
-        (deps.raiseAlert ?? ((input: AlertInput) => void createAlertStore(deps.home, deps).raise(input)))(droppedAlertOf(workspaceId, result.record));
+        createAlertStore(deps.home, deps).raise(droppedAlertOf(workspaceId, result.record));
       } catch (error) {
         log(`[paseo-bm] could not raise the delivery-dropped alert of ${record.id}: ${errorText(error)}`);
       }
@@ -336,10 +342,8 @@ export async function deliverRecord(workspaceId: string, record: OutboxRecord, d
       onSent: () => settle("delivered"),
       onDropped: (_targetId, _kind, reason) => settle("dropped", reason),
     });
-    if (outcome === "sent") settle("delivered");
-    else if (outcome === "queued") settle("queued");
-    else if (outcome === "dropped") settle("dropped", "the notice queue refused it");
-    // `replaced`: a newer copy of this very record is queued; its own outcome settles it.
+    // An input the queue refuses outright calls no callback; `queued` and `replaced` settle later.
+    if (outcome === "dropped" && !told) settle("dropped", "the notice queue refused it");
     return outcome;
   } catch (error) {
     log(`[paseo-bm] could not deliver the ${record.kind} ${record.id}: ${errorText(error)}`);
@@ -348,34 +352,24 @@ export async function deliverRecord(workspaceId: string, record: OutboxRecord, d
 }
 
 /**
- * Stores `init` as a `pending` record, then delivers it (§16.7). Throws only
- * when the record cannot be written — nothing is sent then.
+ * Stores `init` as a `pending` record, runs `before` once it is stored (a
+ * throw there is one log line: the record is delivered all the same), then
+ * delivers it (§16.7). Returns the record as stored and the queue's outcome.
+ * Throws only when the record cannot be written — nothing is sent then.
  */
-export async function storeAndDeliver(workspaceId: string, init: OutboxInit, deps: OutboxDeliveryDeps): Promise<{ record: OutboxRecord; outcome: NoticeOutcome }> {
+export async function storeAndDeliver(
+  workspaceId: string,
+  init: OutboxInit,
+  deps: OutboxDeliveryDeps,
+  before: (record: OutboxRecord) => void = () => {},
+): Promise<{ record: OutboxRecord; outcome: NoticeOutcome }> {
   const record = createOutbox(deps.home, deps).add(workspaceId, init);
-  const outcome = await deliverRecord(workspaceId, record, deps);
-  return { record: createOutbox(deps.home, deps).get(workspaceId, record.id) ?? record, outcome };
-}
-
-/**
- * Enqueues every `pending` or `queued` record of every workspace again
- * (§16.7 step 4); returns how many. Never rejects.
- */
-export async function redeliverOpen(deps: OutboxDeliveryDeps): Promise<number> {
-  const log = deps.log ?? ((message: string) => console.warn(message));
-  let count = 0;
   try {
-    const outbox = createOutbox(deps.home, deps);
-    for (const workspaceId of outbox.workspaces()) {
-      for (const record of outbox.list(workspaceId).filter(isOpenRecord)) {
-        count += 1;
-        await deliverRecord(workspaceId, record, deps);
-      }
-    }
+    before(record);
   } catch (error) {
-    log(`[paseo-bm] could not deliver the outbox again: ${errorText(error)}`);
+    (deps.log ?? ((message: string) => console.warn(message)))(`[paseo-bm] after storing the ${record.kind} ${record.id}: ${errorText(error)}`);
   }
-  return count;
+  return { record, outcome: await deliverRecord(workspaceId, record, deps) };
 }
 
 export interface OutboxResend {
@@ -383,7 +377,11 @@ export interface OutboxResend {
   run(paseo: unknown): Promise<void>;
 }
 
-/** Re-sends the outbox once per run, at the first hook or RPC that brings a Paseo handle (§16.7 step 4). */
+/**
+ * Re-sends the outbox once per run, at the first hook or RPC that brings a
+ * Paseo handle (§16.7): every `pending` record of every workspace is enqueued
+ * again.
+ */
 export function createOutboxResend(deps: Omit<OutboxDeliveryDeps, "home" | "paseo"> & { home: () => string | null }): OutboxResend {
   let done = false;
   return {
@@ -393,7 +391,11 @@ export function createOutboxResend(deps: Omit<OutboxDeliveryDeps, "home" | "pase
       try {
         const home = deps.home();
         if (home === null) return;
-        await redeliverOpen({ ...deps, home, paseo: paseo as NoticePaseo });
+        const delivery: OutboxDeliveryDeps = { ...deps, home, paseo: paseo as NoticePaseo };
+        const outbox = createOutbox(home, delivery);
+        for (const workspaceId of outbox.workspaces()) {
+          for (const record of outbox.list(workspaceId).filter(isOpenRecord)) await deliverRecord(workspaceId, record, delivery);
+        }
       } catch (error) {
         (deps.log ?? ((message: string) => console.warn(message)))(`[paseo-bm] could not deliver the outbox again: ${errorText(error)}`);
       }

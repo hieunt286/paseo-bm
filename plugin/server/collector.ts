@@ -47,7 +47,7 @@ import { resolveDataHome } from "./data-home";
 import { roleOfProvider, type BmRole } from "./agent-role";
 import { providerId } from "./provider-id";
 import { BOUNDARY_LABEL } from "./role-mode";
-import { knownRequestIdOf, sightRequestId } from "./request-registry";
+import { REQUEST_ID_PATTERN, knownRequestIdOf, sightRequestId } from "./request-registry";
 import { recordsCreatedBy, type OutboxRecord } from "./outbox";
 import {
   TraceStoreLockTimeout,
@@ -65,6 +65,7 @@ import {
   type TraceRuntime,
   type Usage,
 } from "../shared/contracts";
+import { TELL_WORKER_FACE } from "../shared/bm-tools";
 import { PLUGIN_VERSION } from "../shared/version";
 
 /** Timeline entries read back per turn when timestamps have to be recovered. */
@@ -574,8 +575,7 @@ export function clearStartMarks(): void {
 const RELAY_REQUEST_ID = /^\s*[*_`]*Continue[*_`]*\s+[*_`]*(req-\d{8}T\d{6}Z)\b/;
 
 /** A bound Manager's tool that delivers to a request's Worker (design §16.6): its `requestId` names the request it resumes. */
-const TELL_WORKER_TOOL = "bm_tell_worker";
-const REQUEST_ID_INPUT = /^req-\d{8}T\d{6}Z$/;
+const TELL_WORKER_TOOL = TELL_WORKER_FACE.name;
 
 /**
  * The request a `send_agent_prompt` tool call resumes — its prompt opens with
@@ -592,7 +592,7 @@ export function relayRequestIdOf(item: TimelineItem): string | null {
   const name = call.name.split("__").pop()!;
   const input = call.detail?.input;
   const fields = input !== null && typeof input === "object" ? (input as { prompt?: unknown; requestId?: unknown }) : undefined;
-  if (name === TELL_WORKER_TOOL || name.endsWith(`.${TELL_WORKER_TOOL}`)) return typeof fields?.requestId === "string" && REQUEST_ID_INPUT.test(fields.requestId) ? fields.requestId : null;
+  if (name === TELL_WORKER_TOOL || name.endsWith(`.${TELL_WORKER_TOOL}`)) return typeof fields?.requestId === "string" && REQUEST_ID_PATTERN.test(fields.requestId) ? fields.requestId : null;
   if (name !== "send_agent_prompt") return null;
   const prompt = fields?.prompt;
   return typeof prompt === "string" ? (RELAY_REQUEST_ID.exec(prompt)?.[1] ?? null) : null;

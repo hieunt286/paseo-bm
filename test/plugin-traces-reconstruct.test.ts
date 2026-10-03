@@ -455,13 +455,12 @@ describe("counts stay distinct", () => {
 describe("tool-built reports and reviews (design §16.7, §16.11)", () => {
   const managerA = managerTurn("req-A", "2026-09-16T10:00:00.000Z");
 
-  it("reportsBelongingTo drops a second report with the same recordId, held or in the same list", () => {
+  it("reportsBelongingTo keeps the request's reports and those naming none; the trace's de-duplication drops a repeated recordId", () => {
     const first = report({ recordId: "out-0000000000a1" });
-    const again = report({ recordId: "out-0000000000a1", at: "2026-09-16T10:06:00.000Z" });
     const other = report({ recordId: "out-0000000000a2" });
     const typed = report();
-    expect(reportsBelongingTo("req-A", [first, again, other, typed])).toEqual([first, other, typed]);
-    expect(reportsBelongingTo("req-A", [again, other], [first])).toEqual([other]);
+    const unnamed = report({ requestId: null });
+    expect(reportsBelongingTo("req-A", [first, other, typed, unnamed])).toEqual([first, other, typed, unnamed]);
     // A report of another request still never belongs here.
     expect(reportsBelongingTo("req-A", [report({ requestId: "req-B", recordId: "out-0000000000a3" })])).toEqual([]);
   });

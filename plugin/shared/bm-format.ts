@@ -72,8 +72,8 @@ const HANDOFF_NOTE_FIELD = "handoffNote";
 const KNOWN_REPORT_FIELDS: readonly string[] = [...REPORT_FIELDS, HANDOFF_NOTE_FIELD];
 /** Fields a report may leave out: `decided` came later, and older Workers never write it; `handoffNote` only when asked. */
 const OPTIONAL_REPORT_FIELDS: ReadonlySet<string> = new Set(["decided", HANDOFF_NOTE_FIELD]);
-/** `stopped` (design §16.11): a bound Worker's report on a stop. */
-const PHASES = ["received", "beads-done", "blocked", "finished", "stopped"];
+/** A report's phases; `stopped` (design §16.11) is a bound Worker's report on a stop. */
+export const REPORT_PHASES = ["received", "beads-done", "blocked", "finished", "stopped"] as const;
 const TIER_SHELL = /^(?:Small|Medium|Large) \(changed: ([\s\S]+)\)$/;
 /**
  * The same shell with a note AFTER the closing parenthesis, which is what
@@ -98,9 +98,10 @@ export const WAITING_FOR_PREFIX = "waiting for:";
 /**
  * The `blockers` of a blocked report that carries no `BM-QUESTIONS`: a bound
  * Worker asked with `bm_questions` before and names what it waits on instead
- * (design §16.11). Nothing else may leave its questions out.
+ * (design §16.11). Nothing else may leave its questions out. Built from the
+ * prefixes `bm_report` writes (they hold no regex metacharacters).
  */
-const BLOCKERS_WAITING = /^(?:waiting on the owner: Q\d+(?:, Q\d+)*(?:\.|$)|waiting for: \S)/;
+const BLOCKERS_WAITING = new RegExp(`^(?:${WAITING_ON_OWNER_PREFIX} Q\\d+(?:, Q\\d+)*(?:\\.|$)|${WAITING_FOR_PREFIX} \\S)`);
 
 const REVIEW_FIELDS = ["requestId", "batchId", "reviewKind", "verdict", "checked", "findings", "notChecked"] as const;
 /** The free-text fields of BM-REVIEW: their value may run over several indented lines. */
@@ -277,7 +278,7 @@ function checkReport(block: RawBlock, questions: RawBlock | undefined, issue: (f
   const requestId = seen.get("requestId");
   if (requestId !== undefined && !REQUEST_ID.test(requestId)) issue("requestId", `must look like req-YYYYMMDDTHHMMSSZ (got "${shorten(requestId, QUOTED_CHARS)}")`);
   const phase = seen.get("phase");
-  if (phase !== undefined && !PHASES.includes(phase)) issue("phase", `must be one of ${PHASES.join(", ")} (got "${shorten(phase, QUOTED_CHARS)}")`);
+  if (phase !== undefined && !(REPORT_PHASES as readonly string[]).includes(phase)) issue("phase", `must be one of ${REPORT_PHASES.join(", ")} (got "${shorten(phase, QUOTED_CHARS)}")`);
   const tier = seen.get("tier");
   if (tier !== undefined && !tierIsWellFormed(tier)) {
     issue("tier", 'must be "Small|Medium|Large (changed: no)" or "… (changed: from <tier>, <reason>)"; a short note may follow either');

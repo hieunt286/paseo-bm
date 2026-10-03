@@ -26,7 +26,7 @@
  *
  * Nothing here throws into the endpoint: a failure is one refusal line.
  */
-import type { ToolCaller } from "./agent-bindings";
+import { PENDING_TTL_MS, type ToolCaller } from "./agent-bindings";
 import { answersKindOf, soleWorkerOfRequest } from "./decision-delivery";
 import { expireQuestionsOf, openQuestions, type OpenContext, type OpenableQuestion } from "./decision-materialiser";
 import { createDecisionStore, type DecisionStore } from "./decision-store";
@@ -34,10 +34,10 @@ import type { ServerToolAnswer, ServerTools } from "./decision-tools";
 import type { NoticeQueue } from "./notice-queue";
 import { clearOffToolAlertsOfRequest } from "./off-tool-reviewer";
 import { stopRunningReviewers, type StopPaseo } from "./stop-propagation";
-import { OUTBOX_SETTLED_MS, clearDroppedAlert, createOutbox, deliverRecord, isOpenRecord, type OutboxDeps, type OutboxRecord } from "./outbox";
+import { OUTBOX_SETTLED_MS, clearDroppedAlert, createOutbox, isOpenRecord, storeAndDeliver, type OutboxDeps, type OutboxInit, type OutboxRecord } from "./outbox";
 import type { DashboardPaseo } from "./paseo-directory";
 import { proposeAnswers } from "./proposed-answers";
-import { createRequestRegistry, type RegisteredRequest } from "./request-registry";
+import { createRequestRegistry, isEmptyCreateCall, type RegisteredRequest, type ReviewCall } from "./request-registry";
 import { reasonOf } from "./role-choices";
 import { actingTools, answered, boundAs, deliveryOf, fixThese, outboxDepsOf, refused, withoutNulls, type DeliveryState } from "./tool-kit";
 import { timeOrZero } from "../shared/time";
@@ -54,8 +54,8 @@ import {
 } from "../shared/bm-tools";
 import { decisionKindOf, isAnswerable, questionDecisionId, type Decision } from "../shared/decisions";
 
-export const QUESTIONS_TOOL = "bm_questions";
-export const TELL_WORKER_TOOL = "bm_tell_worker";
+const QUESTIONS_TOOL = QUESTIONS_FACE.name;
+const TELL_WORKER_TOOL = TELL_WORKER_FACE.name;
 
 /** No Paseo handle has reached the plugin yet (as `bm_create_worker` says, design §7.4). */
 export const NO_PASEO_DELIVERY_MESSAGE = "paseo-bm has no connection to Paseo yet; try again in a moment. Nothing was stored or sent.";
@@ -119,18 +119,23 @@ function bindingMismatch(field: "requestId" | "batchId", given: string | null, b
  * The batches of `request` whose newest review call has no verdict delivered
  * yet (design §16.6, `bm_report`; acceptance finding F3): no `review` or
  * `no-verdict` record of that batch, created at or after the call, has
- * settled. A verdict still `pending` or `queued` has not reached the Worker,
- * so it does not count; a `dropped` one does (its alert is the owner's). A
- * `no-verdict` settles the call: the Worker reports the batch as not reviewed.
- * A call older than the outbox keeps settled records (`OUTBOX_SETTLED_MS`)
- * counts as settled, since its verdict can no longer be read. Off-tool
- * Reviewers are not registry calls: the plugin cancels them at once (§16.8),
- * so none of them owes a verdict. Pure.
+ * settled. A verdict still `pending` has not reached the Worker, so it does
+ * not count; a `dropped` one does (its alert is the owner's). A `no-verdict`
+ * settles the call: the Worker reports the batch as not reviewed — the one
+ * `withheld` for a canceled Reviewer turn too (`no-verdict.ts`). A call older
+ * than the outbox keeps settled records (`OUTBOX_SETTLED_MS`) counts as
+ * settled, since its verdict can no longer be read; so does a create call
+ * that got no Reviewer within `PENDING_TTL_MS` (Paseo failed the creation:
+ * no Reviewer will ever answer it). Off-tool Reviewers are not registry calls:
+ * the plugin cancels them at once (§16.8), so none of them owes a verdict.
+ * Pure.
  */
 export function batchesAwaitingVerdict(request: RegisteredRequest | null, records: readonly OutboxRecord[], now: Date): string[] {
   if (request === null) return [];
+  const stale = (call: ReviewCall): boolean =>
+    isEmptyCreateCall(call) && now.getTime() - timeOrZero(call.at) > PENDING_TTL_MS;
   return request.reviews.batches.flatMap((batch) => {
-    const newest = batch.calls.reduce<number | null>((latest, call) => Math.max(latest ?? Number.NEGATIVE_INFINITY, timeOrZero(call.at)), null);
+    const newest = batch.calls.filter((call) => !stale(call)).reduce<number | null>((latest, call) => Math.max(latest ?? Number.NEGATIVE_INFINITY, timeOrZero(call.at)), null);
     if (newest === null || now.getTime() - newest > OUTBOX_SETTLED_MS) return [];
     const settled = records.some(
       (record) =>
@@ -152,24 +157,20 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     return paseo === null || paseo === undefined ? null : paseo;
   };
 
-  /** Stores `init` (`pending`, written first), runs `before` once it is stored, then delivers it (§16.7). */
+  /** `storeAndDeliver` (§16.7) for a tool: a record that cannot be stored is the refusal. */
   const storeThenDeliver = async (
     home: string,
     workspaceId: string,
-    init: { kind: OutboxRecord["kind"]; requestId: string; batchId?: string | null; from: string; to: string; text: string },
+    init: OutboxInit,
     paseo: unknown,
-    before: (record: OutboxRecord) => void = () => {},
+    before?: (record: OutboxRecord) => void,
   ): Promise<ServerToolAnswer | { record: OutboxRecord; delivery: DeliveryState }> => {
-    const outboxDeps = outboxDepsOf(home, { ...deps, now, log }, paseo);
-    let record: OutboxRecord;
     try {
-      record = createOutbox(home, outboxDeps).add(workspaceId, init);
+      const { record, outcome } = await storeAndDeliver(workspaceId, init, outboxDepsOf(home, { ...deps, now, log }, paseo), before);
+      return { record, delivery: deliveryOf(outcome) };
     } catch (error) {
       return refused(`paseo-bm could not store your ${init.kind} (${reasonOf(error)}); nothing was sent. Tell the owner in one line.`);
     }
-    before(record);
-    const outcome = await deliverRecord(workspaceId, record, outboxDeps);
-    return { record, delivery: deliveryOf(outcome) };
   };
 
   /** One run of a bound block tool's builder: its text, or the refusal listing each problem. */

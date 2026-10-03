@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { clearBindingCache, createBindingStore, type BindingStore } from "../plugin/server/agent-bindings";
 import { createBudgetTold } from "../plugin/server/budget-told";
+import { batchesAwaitingVerdict } from "../plugin/server/deliver-tools";
 import { registerFallbackDetection } from "../plugin/server/fallback-state";
 import { checkNoVerdict, noVerdictTextOf } from "../plugin/server/no-verdict";
 import { createNoticeQueue } from "../plugin/server/notice-queue";
@@ -18,8 +19,8 @@ import { fakePaseo } from "./helpers/fake-paseo";
  * passed), on recorded turn sequences: a plugin-created Worker's turn end
  * sends its Manager nothing; a bound Reviewer's turn that ends without a
  * verdict sends its Worker one `no-verdict` delivery per review call, after
- * the fallback detection ran; a canceled turn, or one with a fallback
- * incident, sends none.
+ * the fallback detection ran; a turn with a fallback incident sends none, and
+ * a canceled one stores its no-verdict withheld: settled, never sent.
  */
 
 const WS = "wks_1";
@@ -138,14 +139,29 @@ describe("a missing verdict (design §16.10)", () => {
     expect(fake.sends).toEqual([]);
   });
 
-  it("a failed turn with no fallback incident sends one; a canceled turn, or one the fallback classified, sends none", async () => {
-    const canceled = setup();
-    expect(await canceled.check(reviewerTurn("canceled"))).toBe("outcome");
-    expect(await canceled.check(reviewerTurn("failed", undefined, { error: { message: "You've hit your usage limit." } }), true)).toBe("fallback");
-    expect(noVerdicts(canceled.home)).toEqual([]);
-    expect(canceled.fake.sends).toEqual([]);
-    expect(await canceled.check(reviewerTurn("failed", undefined, { error: { message: "tool crashed" } }))).toBe("sent");
-    expect(noVerdicts(canceled.home)).toHaveLength(1);
+  it("a failed turn with no fallback incident sends one; one the fallback classified, or of another outcome, sends none", async () => {
+    const failed = setup();
+    expect(await failed.check(reviewerTurn("interrupted"))).toBe("outcome");
+    expect(await failed.check(reviewerTurn("failed", undefined, { error: { message: "You've hit your usage limit." } }), true)).toBe("fallback");
+    expect(noVerdicts(failed.home)).toEqual([]);
+    expect(failed.fake.sends).toEqual([]);
+    expect(await failed.check(reviewerTurn("failed", undefined, { error: { message: "tool crashed" } }))).toBe("sent");
+    expect(noVerdicts(failed.home)).toHaveLength(1);
+  });
+
+  it("a canceled turn (the owner's Stop) stores its no-verdict withheld, wakes nobody, and frees the Worker's finished (K1)", async () => {
+    const { home, fake, check, registry, clock } = setup();
+    // The 7-day block: a call nothing settled holds bm_report finished.
+    expect(batchesAwaitingVerdict(registry.get(WS, REQ), createOutbox(home).list(WS), clock())).toEqual(["b1"]);
+    expect(await check(reviewerTurn("canceled"))).toBe("withheld");
+    expect(noVerdicts(home)).toMatchObject([
+      { requestId: REQ, batchId: "b1", from: REVIEWER, to: WORKER, state: "withheld", text: noVerdictTextOf({ requestId: REQ, batchId: "b1", reviewerId: REVIEWER }) },
+    ]);
+    expect(fake.sends).toEqual([]);
+    expect(batchesAwaitingVerdict(registry.get(WS, REQ), createOutbox(home).list(WS), clock())).toEqual([]);
+    // Once per call, as a sent one; even a fallback-classified cancel stores no second one.
+    expect(await check(reviewerTurn("canceled"), true)).toBe("already-sent");
+    expect(noVerdicts(home)).toHaveLength(1);
   });
 
   it("an unbound Reviewer keeps today's path: Paseo wakes its creator, the plugin sends nothing", async () => {
@@ -219,6 +235,13 @@ describe("a plugin-created Reviewer that ended up unbound (design §16.10)", () 
     expect(noVerdicts(home)).toMatchObject([{ requestId: REQ, batchId: "b2", from: PI_REVIEWER, to: WORKER }]);
     expect(fake.sends.map((sent) => parseDelivery(sent.text)?.kind)).toEqual(["no-verdict"]);
     expect(await check(turnWithout)).toBe("already-sent");
+  });
+
+  it("its canceled turn stores the no-verdict withheld too, and relays nothing", async () => {
+    const { home, fake, check } = unboundSetup();
+    expect(await check({ ...piTurn(""), outcome: { kind: "canceled" } })).toBe("withheld");
+    expect(noVerdicts(home)).toMatchObject([{ batchId: "b2", from: PI_REVIEWER, to: WORKER, state: "withheld" }]);
+    expect(fake.sends).toEqual([]);
   });
 
   it("a Reviewer no batch names (a hand-made one) is still left to Paseo's own wake", async () => {

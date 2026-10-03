@@ -57,7 +57,7 @@ import { AGENT_TOOLS_OFF_TOOL_MESSAGE, agentToolsOff } from "./manager";
 import type { NoticeQueue } from "./notice-queue";
 import { createOutbox, deliverRecord, newRecordId, type OutboxDeps, type OutboxRecord } from "./outbox";
 import type { DashboardPaseo } from "./paseo-directory";
-import { createRequestRegistry, type RegisteredRequest, type ReviewBatch } from "./request-registry";
+import { createRequestRegistry, isEmptyCreateCall, type RegisteredRequest, type ReviewBatch } from "./request-registry";
 import { requestReviewCountOf } from "./request-trace";
 import { asRecord, nonEmpty, reasonOf } from "./role-choices";
 import { creationProjectOf, modeFactsOf } from "./role-instructions";
@@ -352,11 +352,6 @@ export function ruleReviewGrantOf(home: string, request: Pick<RegisteredRequest,
 export function budgetRefusal(state: ReviewBudgetState, requestId: string, batchId: string): string | null {
   if (!overReviewCeiling(state.calls + 1, state.ceiling, state.untilClean.has(batchId))) return null;
   return budgetRefusalOf({ requestId, calls: state.calls, budget: state.ceiling, tier: state.tier, batchId });
-}
-
-/** True for a create call whose Reviewer never got its id: Paseo's late error, or a reload in the creation. */
-function isEmptyCreateCall(call: ReviewBatch["calls"][number]): boolean {
-  return call.kind === "create" && call.reviewerId === "";
 }
 
 /**
