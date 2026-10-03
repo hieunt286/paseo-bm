@@ -1,7 +1,8 @@
 import { resolve } from "node:path";
 import type { PluginBeforeRequests, PluginServerContext } from "@getpaseo/plugin/server";
 import { roleOfProvider } from "./agent-role";
-import { TOOL_PROVIDERS, withAgentTools, type AgentToolsEndpoint } from "./agent-tools";
+import { TOOL_PROVIDERS, boundTokenOf, boundUrlOf, withAgentTools, withoutAgentTools, type AgentToolsEndpoint } from "./agent-tools";
+import { isBoundRole } from "./agent-bindings";
 import { aliasBases } from "./alias-bases";
 import { providerId } from "./provider-id";
 import {
@@ -422,6 +423,8 @@ export async function workspaceOfFolder(paseo: unknown, folder: string): Promise
 async function prepare(
   request: AgentCreateRequest,
   paseo: unknown,
+  /** The creation carries the token URL of a pending binding (§16.5): its Runtime facts say it is bound. */
+  bound = false,
 ): Promise<{
   modes: ProviderMode[] | null;
   facts: RuntimeFacts;
@@ -467,6 +470,7 @@ async function prepare(
       : await runtimeFactsOf(role, paseo, cwd, undefined, undefined, {
           ...(project.workspaceId === null ? {} : { workspaceId: project.workspaceId }),
           boundary: project.boundary,
+          ...(bound ? { bound: true } : {}),
         });
   const base = id === null ? null : ((await aliasBases(paseo))[id] ?? null);
   const boundary = boundaryPostureOf({ role, base, project: project.boundary, modes, profileModeId });
@@ -505,32 +509,74 @@ function isBmRequest(request: AgentCreateRequest): boolean {
 /** The part of the server context this hook needs; `before` is absent on older hosts. */
 export type RoleHookHost = Partial<Pick<PluginServerContext, "before">>;
 
-/**
- * The request with the role's tool server added (design delta
- * 20260924b-agent-tools, ADR-010), or `undefined` when there is nothing to
- * add: not a paseo-bm agent, no endpoint listening, or a base provider that
- * is unknown or cannot take pre-approved tools (`TOOL_PROVIDERS`) — Paseo
- * would refuse to create that agent at all. Never throws.
- */
-export function applyAgentTools(
-  request: AgentCreateRequest,
-  tools: Pick<AgentToolsEndpoint, "urlFor"> | null,
-  base: string | null,
-): AgentCreateRequest | undefined {
+/** The request without a `paseo-bm` MCP server entry, or `undefined` when it has none (`withoutAgentTools`). Never throws. */
+function withoutToolServer(request: AgentCreateRequest): AgentCreateRequest | undefined {
   try {
-    if (tools === null || base === null || !TOOL_PROVIDERS.includes(base)) return undefined;
-    const role = roleOfProvider(request.config.provider);
-    // Every role has its own path. The Orchestrator's carries the endpoint's secret and serves its
-    // read tools and its decision and command tools — and it never gets Paseo's tools (orchestrator design §3.1, §5.1).
-    const config = role === null ? undefined : withAgentTools(request.config, role, tools.urlFor(role));
+    const config = withoutAgentTools(request.config);
     return config === undefined ? undefined : { ...request, config };
   } catch {
     return undefined;
   }
 }
 
-/** The part of the endpoint the hook uses; `usePaseo` hands the Orchestrator's tools the hook's Paseo handle. */
-export type RoleHookTools = Pick<AgentToolsEndpoint, "urlFor"> & Partial<Pick<AgentToolsEndpoint, "usePaseo">>;
+/**
+ * The token of the bound URL a creation the plugin itself made carries, when
+ * its binding is pending for the agent's role (design §16.5), else null. Reads
+ * only: `applyAgentTools` records the attachment. Never throws.
+ */
+export function pendingBoundToken(request: AgentCreateRequest, tools: RoleHookTools | null): string | null {
+  try {
+    const role = roleOfProvider(request.config.provider);
+    if (tools === null || tools.bindings === null || tools.bindings === undefined || !isBoundRole(role)) return null;
+    const token = boundTokenOf(request.config, role, tools.urlFor(role));
+    return token !== null && tools.bindings.isPending(token, role) ? token : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The request with the role's tool server added (design delta
+ * 20260924b-agent-tools, ADR-010; design §16.5), or `undefined` when nothing
+ * changes. Never throws.
+ *
+ * - Not a paseo-bm agent: nothing.
+ * - A base provider that is unknown or cannot take pre-approved tools
+ *   (`TOOL_PROVIDERS`), or no endpoint listening: no tools — Paseo would
+ *   refuse a `toolPolicy` there — and any `paseo-bm` server entry the
+ *   creation carried is removed.
+ * - A creation carrying the bound URL of a pending binding of its role, on
+ *   the endpoint's own port: that URL is kept and the binding records
+ *   `attachedAt`, so it can become `bound` once `agents.create` returns.
+ * - Any other creation gets the role path `urlFor(role)`, as before, and is
+ *   unbound; a foreign `paseo-bm` URL is rewritten.
+ */
+export function applyAgentTools(request: AgentCreateRequest, tools: RoleHookTools | null, base: string | null): AgentCreateRequest | undefined {
+  try {
+    const role = roleOfProvider(request.config.provider);
+    if (role === null) return undefined;
+    const roleUrl = tools === null ? null : tools.urlFor(role);
+    if (tools === null || roleUrl === null || base === null || !TOOL_PROVIDERS.includes(base)) return withoutToolServer(request);
+    // Every role has its own path. The Orchestrator's carries the endpoint's secret and serves its
+    // read tools and its decision and command tools — and it never gets Paseo's tools (orchestrator design §3.1, §5.1).
+    let url = roleUrl;
+    if (isBoundRole(role) && tools.bindings !== null && tools.bindings !== undefined) {
+      const token = boundTokenOf(request.config, role, roleUrl);
+      // The last step of the hook: after this nothing drops the URL, so the attachment is true.
+      if (token !== null && tools.bindings.attach(token, role)) url = boundUrlOf(roleUrl, token);
+    }
+    const config = withAgentTools(request.config, role, url);
+    return config === undefined ? undefined : { ...request, config };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The part of the endpoint the hook uses; `usePaseo` hands the Orchestrator's
+ * tools the hook's Paseo handle, `bindings` tells a bound creation (§16.5).
+ */
+export type RoleHookTools = Pick<AgentToolsEndpoint, "urlFor"> & Partial<Pick<AgentToolsEndpoint, "usePaseo" | "bindings">>;
 
 /**
  * Registers the `before("agent.create")` hook and returns its remover. On a
@@ -558,17 +604,21 @@ export function registerRoleHook(host: RoleHookHost, tools: RoleHookTools | null
       // The tools' handle never costs an agent its creation.
     }
     return (async () => {
+      // A creation the plugin itself made with a token URL (§16.5): read now, attached at the very end.
+      const bound = pendingBoundToken(request, tools) !== null;
       // The host fails the whole creation if this hook takes longer than 30 s,
       // so everything it looks up is raced as ONE budget: a slow daemon costs
       // the mode and the facts, never the agent.
-      const prepared = await withTimeout(prepare(request, paseo), LOOKUP_TIMEOUT_MS);
+      const prepared = await withTimeout(prepare(request, paseo, bound), LOOKUP_TIMEOUT_MS);
       if (prepared === TIMED_OUT) {
         console.warn(
           `[paseo-bm] preparing the role config took longer than ${LOOKUP_TIMEOUT_MS} ms; the agent starts with its role instructions only.`,
         );
         // The base provider is unknown here, so no tools: an agent Paseo refuses would cost more than a hand-written block.
+        // A token URL the plugin put there goes too: never attached, its binding is dropped and the agent is unbound.
         rememberBoundaryOf(request, null);
-        return marked(applyRoleInstructions(request), request);
+        const plain = withoutToolServer(request) ?? request;
+        return marked(applyRoleInstructions(plain) ?? (plain === request ? undefined : plain), request);
       }
       const configured = applyRoleConfig(
         request,

@@ -6,6 +6,8 @@ import { COORDINATION_DIR_NAME, createCoordinationStore } from "../plugin/server
 import { AUTONOMY_DIR_NAME, createAutonomyStore } from "../plugin/server/autonomy-store";
 import { createInterventionStore } from "../plugin/server/intervention-store";
 import { cleanupPaseoBm } from "../plugin/server/setup-machine";
+import { REQUESTS_DIR_NAME, createRequestRegistry } from "../plugin/server/request-registry";
+import { createBindingStore } from "../plugin/server/agent-bindings";
 import { ensureRoles, markCleanedUpThisRun } from "../plugin/server/setup-roles";
 import { readSetupState, updateSetupState } from "../plugin/server/setup-state";
 import { setupCleanupRpc } from "../plugin/shared/contracts";
@@ -288,6 +290,21 @@ describe("deleting the data too", () => {
     expect(result.data?.deleted).toContain(AUTONOMY_DIR_NAME);
     expect(existsSync(join(dataHome, AUTONOMY_DIR_NAME))).toBe(false);
     expect(result.data?.kept.join("\n")).not.toContain(AUTONOMY_DIR_NAME);
+  });
+
+  it("deletes the request registry and the agent tool bindings with the rest (design §16.4, §16.5)", async () => {
+    const daemon = daemonWith();
+    fillDataHome();
+    createRequestRegistry(dataHome, { backfill: () => [] }).generate("w1", { managerId: "mgr-1" });
+    createBindingStore(dataHome).issue({ role: "worker", workspaceId: "w1" });
+    expect(existsSync(join(dataHome, REQUESTS_DIR_NAME, "w1.json"))).toBe(true);
+    expect(existsSync(join(dataHome, "ui", "agent-bindings.json"))).toBe(true);
+
+    const result = await cleanupPaseoBm(daemon.paseo, { deleteData: true }, deps());
+
+    expect(result.data?.deleted).toContain(REQUESTS_DIR_NAME);
+    expect(existsSync(join(dataHome, REQUESTS_DIR_NAME))).toBe(false);
+    expect(existsSync(join(dataHome, "ui", "agent-bindings.json"))).toBe(false);
   });
 
   it("deletes the intervention log with orchestrator/ (autonomy design §G.3)", async () => {

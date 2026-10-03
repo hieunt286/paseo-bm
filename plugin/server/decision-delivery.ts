@@ -152,7 +152,8 @@ export async function soleWorkerOfRequest(
   paseo: DashboardPaseo,
 ): Promise<string | null> {
   const replacements = replacementsOf(readIncidents(input.home, () => {}).incidents);
-  const peers = (await bmAgentsOf(paseo))
+  // The request each agent's label names, as far as the plugin trusts it (design §16.4, `knownRequestIdOf`).
+  const peers = (await bmAgentsOf(paseo, { home: input.home }))
     .filter((agent) => agent.workspaceId === input.workspaceId)
     .map(({ facts }) => ({
       id: facts.id,

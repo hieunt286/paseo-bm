@@ -40,6 +40,8 @@ import { ensureRoles, type EnsureRolesResult } from "./setup-roles";
 import { recordTools } from "./tools-check";
 import { INSTRUCTIONS_LABEL, currentInstructionsHash, hasOutdatedInstructions } from "./instructions-label";
 import { createAlertStore } from "./alert-store";
+import { createBound, type AgentBinder } from "./agent-bindings";
+import { aliasBases } from "./alias-bases";
 import { alertKeyOf } from "../shared/alerts";
 
 /** Label key and value that identify a paseo-bm Manager (Technical Design §7.1). */
@@ -143,6 +145,8 @@ export interface ManagerPaseo {
             thinkingOptionId?: string;
             featureValues?: Record<string, unknown>;
             systemPrompt?: string;
+            /** The Manager's own tool path, when it is bound (design §16.5). */
+            mcpServers?: Record<string, { type: "http"; url: string; alwaysLoad?: boolean }>;
           };
           title?: string;
           labels?: Record<string, string>;
@@ -202,6 +206,12 @@ export interface EnsureManagerDeps {
    * tests pass one.
    */
   home?: string | null;
+  /**
+   * Binds a new Manager to its own tool path when its base provider can take
+   * the tools (design §16.5); the endpoint's binder in the plugin, none
+   * (unbound) when absent. Its tools stay builders in this step.
+   */
+  binder?: AgentBinder | null;
 }
 
 export interface EnsureManagerResult {
@@ -569,11 +579,13 @@ async function createFromProfile(deps: EnsureManagerDeps, workspaceId: string, e
     labels: chosenMode !== undefined ? { [MODE_SET_LABEL]: chosenMode } : {},
     readInstructions: deps.readInstructions,
     version: deps.version,
+    binder: deps.binder ?? null,
+    log: deps.log,
   });
 }
 
 /** What `createManager` creates; the caller has already decided the provider, mode and thinking. */
-export interface CreateManagerOptions extends Pick<EnsureManagerDeps, "readInstructions" | "version"> {
+export interface CreateManagerOptions extends Pick<EnsureManagerDeps, "readInstructions" | "version" | "binder" | "log"> {
   /** `provider/model`: `bm-manager/<model>` from the profile, or `bm-manager-fallback-<n>/<model>` for a replacement. */
   providerSelection: string;
   modeId?: string;
@@ -616,26 +628,36 @@ export async function createManager(
   const alias = providerId(selection) ?? selection;
   const source = alias === MANAGER_PROFILE_ID ? `profile "${MANAGER_PROFILE_ID}"` : `provider "${selection}"`;
 
+  // Design §16.5: bound to its own tool path when its alias's base provider can take the tools.
+  const binder = options.binder ?? null;
+  const base = binder === null ? null : ((await aliasBases(paseo))[alias] ?? null);
   let handle: ManagerAgentHandle;
   try {
-    handle = await paseo.workspaces.ref(workspaceId).agents.create({
-      config: {
-        provider: selection,
-        ...(modeId !== undefined ? { modeId } : {}),
-        ...(thinkingOptionId !== undefined ? { thinkingOptionId } : {}),
-        ...(featureValues !== undefined ? { featureValues } : {}),
-        systemPrompt,
-      },
-      title: MANAGER_TITLE,
-      labels: {
-        [MANAGER_ROLE_LABEL]: MANAGER_ROLE_VALUE,
-        [VERSION_LABEL]: options.version ?? PLUGIN_VERSION,
-        // The hash of the role text the creation hook gives it (autonomy design §A.11).
-        [INSTRUCTIONS_LABEL]: currentInstructionsHash("manager"),
-        ...options.labels,
-      },
-      ...(prompt !== undefined ? { prompt } : {}),
-    });
+    handle = await createBound(
+      binder,
+      { role: "manager", base, workspaceId },
+      (mcpServers) =>
+        paseo.workspaces.ref(workspaceId).agents.create({
+          config: {
+            provider: selection,
+            ...(modeId !== undefined ? { modeId } : {}),
+            ...(thinkingOptionId !== undefined ? { thinkingOptionId } : {}),
+            ...(featureValues !== undefined ? { featureValues } : {}),
+            systemPrompt,
+            ...(mcpServers !== undefined ? { mcpServers } : {}),
+          },
+          title: MANAGER_TITLE,
+          labels: {
+            [MANAGER_ROLE_LABEL]: MANAGER_ROLE_VALUE,
+            [VERSION_LABEL]: options.version ?? PLUGIN_VERSION,
+            // The hash of the role text the creation hook gives it (autonomy design §A.11).
+            [INSTRUCTIONS_LABEL]: currentInstructionsHash("manager"),
+            ...options.labels,
+          },
+          ...(prompt !== undefined ? { prompt } : {}),
+        }),
+      options.log,
+    );
   } catch (cause) {
     throw new ManagerEnsureError(
       "E_PROVIDER_UNAVAILABLE",

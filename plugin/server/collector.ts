@@ -47,6 +47,7 @@ import { resolveDataHome } from "./data-home";
 import { roleOfProvider, type BmRole } from "./agent-role";
 import { providerId } from "./provider-id";
 import { BOUNDARY_LABEL } from "./role-mode";
+import { knownRequestIdOf, sightRequestId } from "./request-registry";
 import {
   TraceStoreLockTimeout,
   appendRecord,
@@ -630,6 +631,17 @@ export async function buildRecord(
     if (role === "reviewer" && item.type === "assistant_message") reviews.push(...parseReviews(safe, { agentId: event.agent.id, at }));
   }
 
+  // Design §16.4: the agent's label only as far as the plugin trusts it — an agent whose creator is
+  // bound must carry a registered id; the hand path's label is read as before.
+  const knownLabel = knownRequestIdOf(
+    {
+      id: event.agent.id,
+      workspaceId: event.agent.workspaceId,
+      labels: requestIdLabel === null ? {} : { "bm.requestId": requestIdLabel },
+      parentAgentId: event.agent.parentAgentId,
+    },
+    { home: deps.location === null ? undefined : dirname(deps.location.tracesDir), ...(deps.log === undefined ? {} : { log: deps.log }) },
+  );
   const requestIdFromReports = reports.find((report) => report.requestId !== null)?.requestId ?? null;
   // The same tolerant pattern the reconstruction uses: real prompts write the
   // id as "- `requestId`: `req-…`" (WP-214 acceptance finding).
@@ -645,7 +657,7 @@ export async function buildRecord(
     turnId: event.turnId,
     // Last resort: the Manager's own `Continue <requestId>.` relay. A user's
     // answer otherwise shows as its own request row until the next report.
-    requestId: requestIdLabel ?? requestIdFromReports ?? requestIdFromPrompt ?? relayRequestId,
+    requestId: knownLabel ?? requestIdFromReports ?? requestIdFromPrompt ?? relayRequestId,
     parentAgentId: event.agent.parentAgentId,
     agentCreatedAt: null,
     startedAt: startMarks.get(markKey(event.agent.id, event.turnId)) ?? null,
@@ -687,6 +699,18 @@ export async function collectTurn(event: TurnEndedEvent, deps: CollectorDeps): P
 
     await appendRecord(deps.location, built.record, { timeoutMs: deps.lockTimeoutMs });
     startMarks.delete(markKey(event.agent.id, event.turnId));
+    // Design §16.4: the first sighting of a request an unbound Manager issued registers it
+    // (`agent-typed`); under a bound Manager nothing is registered. Never throws.
+    sightRequestId(
+      {
+        workspaceId: built.record.workspaceId,
+        requestId: built.record.requestId,
+        role: built.record.role,
+        agentId: built.record.agentId,
+        parentAgentId: built.record.parentAgentId,
+      },
+      { home: dirname(deps.location.tracesDir), log },
+    );
 
     try {
       writeWorkspaceMeta(deps.location, built.record.workspaceId, {

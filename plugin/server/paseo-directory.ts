@@ -13,6 +13,8 @@
 import { listAllAgents, roleOfAgent } from "./agent-role";
 import type { AgentFacts } from "./traces";
 import { withoutRoleMarker } from "./role-title";
+import { knownRequestIdOf } from "./request-registry";
+import { dataHome } from "./rpc-kit";
 
 /** The SDK slice the Dashboard and these readers use. `PaseoApi` is structurally assignable. */
 export interface DashboardPaseo {
@@ -97,10 +99,16 @@ export async function agentFactsOf(
  * asks for it: it is a paseo-bm agent the user sees and archives, but no part
  * of a request, so nothing that rebuilds a trace or picks a chat peer may meet
  * it (orchestrator design §3.2).
+ *
+ * `requestIdLabel` is the agent's `bm.requestId` as far as the plugin trusts
+ * it (`knownRequestIdOf`, design §16.4): every reader of these facts — trace
+ * linking, `soleWorkerOfRequest`, the materialiser's asker, the format-check
+ * sender — reads the label through it. `home` is the data folder the registry
+ * and the bindings are read from; looked up when absent.
  */
 export async function bmAgentsOf(
   paseo: DashboardPaseo,
-  options: { includeOrchestrator?: boolean } = {},
+  options: { includeOrchestrator?: boolean; home?: string | null } = {},
 ): Promise<Array<{ workspaceId: string | null; facts: AgentFacts }>> {
   let listed: Array<Record<string, unknown>>;
   try {
@@ -119,20 +127,25 @@ export async function bmAgentsOf(
     return [];
   }
   const out: Array<{ workspaceId: string | null; facts: AgentFacts }> = [];
+  // Read once for the walk: every label below is checked against the same data folder.
+  const home = options.home !== undefined ? options.home : dataHome();
   for (const agent of listed) {
     const fact = roleOfAgent(agent);
     const id = String(agent["id"] ?? "");
     if (fact === null || id === "") continue;
     if (fact.role === "orchestrator" && options.includeOrchestrator !== true) continue;
     const labels = (agent["labels"] ?? {}) as Record<string, string>;
+    const parentAgentId = labels["paseo.parent-agent-id"] ?? (agent["parentAgentId"] as string | null) ?? null;
+    const workspaceId = typeof agent["workspaceId"] === "string" ? agent["workspaceId"] : null;
     const facts: AgentFacts = {
       id,
       role: fact.role,
       labelled: fact.labelled,
       status: String(agent["status"] ?? "closed"),
-      parentAgentId: labels["paseo.parent-agent-id"] ?? (agent["parentAgentId"] as string | null) ?? null,
+      parentAgentId,
       createdAt: typeof agent["createdAt"] === "string" ? (agent["createdAt"] as string) : null,
-      requestIdLabel: labels["bm.requestId"] ?? null,
+      // Design §16.4: the label only as far as the plugin trusts it.
+      requestIdLabel: knownRequestIdOf({ id, workspaceId, labels, parentAgentId }, { home }),
       batchIdLabel: labels["bm.batchId"] ?? null,
       archived: typeof agent["archivedAt"] === "string" && agent["archivedAt"] !== "",
       title: typeof agent["title"] === "string" ? withoutRoleMarker(agent["title"] as string) : null,
@@ -140,7 +153,7 @@ export async function bmAgentsOf(
       // Autonomy design §G.6: the Worker it took the request over from, only when labelled.
       ...(typeof labels["bm.handoffFrom"] === "string" && labels["bm.handoffFrom"] !== "" ? { handoffFrom: labels["bm.handoffFrom"] } : {}),
     };
-    out.push({ workspaceId: typeof agent["workspaceId"] === "string" ? agent["workspaceId"] : null, facts });
+    out.push({ workspaceId, facts });
   }
   return out;
 }

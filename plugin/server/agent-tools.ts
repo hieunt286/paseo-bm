@@ -40,6 +40,16 @@
  * the owner opened the day before with a dead URL ("Error POSTing to
  * endpoint"). `secretSince` is when the stored secret was made.
  *
+ * An agent the plugin creates itself, on a provider that can take the tools,
+ * gets its own path instead: `/mcp/<worker|reviewer|manager>/<token>`, backed
+ * by a binding in `ui/agent-bindings.json` (design §16.5, `agent-bindings.ts`).
+ * The endpoint hashes the token and looks it up: a bound binding of the path's
+ * role is the caller (`ToolCaller`) the server-run tools receive; a pending one
+ * is a caller without an agent, whom every tool that acts refuses ("try again
+ * in a moment"); an unknown, revoked or other role's token is no caller at all
+ * and gets the role's builder-only tools — never a 404, so a lost binding file
+ * never costs an agent its tools. A token never reaches a log line or a result.
+ *
  * Nothing here throws into the plugin: a failure is one log line and no tools.
  */
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -47,6 +57,17 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { lstatSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { serverToolsFor, toolNamed, toolFacesFor, type ToolRole, type ToolFace } from "../shared/bm-tools";
+import {
+  AGENT_TOOLS_SERVER,
+  NO_BINDER,
+  createBindingStore,
+  isBindingToken,
+  isBoundRole,
+  type AgentBinder,
+  type BindingStore,
+  type BoundRole,
+  type ToolCaller,
+} from "./agent-bindings";
 import { ensureDataHome, resolveDataHome, type DataHomeDeps } from "./data-home";
 import { UI_DIR_NAME } from "./data-home";
 import { createManagerTools, type ServerTools } from "./decision-tools";
@@ -55,7 +76,7 @@ import { createWorkerTools } from "./decision-ask";
 import { assertNoSymlinkOnPath, ensureStoreDir, writeStoreFileAtomically } from "./trace-store";
 
 /** Name of the MCP server in an agent's config; Claude shows the tools as `mcp__paseo-bm__<tool>`. */
-export const AGENT_TOOLS_SERVER = "paseo-bm";
+export { AGENT_TOOLS_SERVER };
 export const MAX_BODY_BYTES = 1_000_000;
 /**
  * The providers Paseo can pre-approve an MCP tool for. For any other, a
@@ -97,6 +118,19 @@ function describe(tool: ToolFace) {
 }
 
 /**
+ * The send step a builder-only answer ends with (design §16.5): an unbound
+ * agent briefed by a shorter role file may not know what to do with the block.
+ * It is the answer's last content item, after the block, so the block itself
+ * stays exactly what `checkBlocks` checked.
+ */
+export const BUILDER_SEND_LINES: Readonly<Record<string, string>> = {
+  bm_report:
+    "Send this block with `send_agent_prompt` to the agent that created you (its id is in your first prompt), with `notifyOnFinish: false`.",
+  bm_review: "Make this block your final answer, exactly as it is.",
+  bm_answers: "Put this block in your reply to the owner; the plugin delivers it. Send the Worker nothing.",
+};
+
+/**
  * The answer to one JSON-RPC message for `role`, or null for a notification.
  * Pure: the transport is `startAgentTools`. The Orchestrator's tool calls are
  * not answered here — they read and write plugin data — but by
@@ -125,8 +159,9 @@ export function answer(role: ToolRole, message: unknown): JsonRpcReply | null {
       const tool = typeof call.name === "string" ? toolNamed(call.name) : undefined;
       if (tool === undefined || tool.role !== role) return failure(id, -32602, `Unknown tool: ${String(call.name)}`);
       const result = tool.run(call.arguments ?? {});
+      const sendLine = BUILDER_SEND_LINES[tool.name];
       return result.ok
-        ? reply(id, { content: [{ type: "text", text: result.text }] })
+        ? reply(id, { content: [{ type: "text", text: result.text }, ...(sendLine === undefined ? [] : [{ type: "text", text: sendLine }])] })
         : reply(id, {
             content: [{ type: "text", text: `The block was not built. Fix these and call ${tool.name} again:\n${result.issues.map((issue) => `- ${issue}`).join("\n")}` }],
             isError: true,
@@ -150,9 +185,15 @@ export async function answerOrchestrator(message: unknown, tools: OrchestratorTo
  * `answer` for `role`, with calls of the tools `tools` has run by them (the
  * Orchestrator's, or the Manager's `bm_decisions`); every other message is the
  * pure `answer`'s. For the Orchestrator, a tool `tools` does not have is a
- * JSON-RPC error.
+ * JSON-RPC error. `caller` is who a token path names (design §16.5), or null
+ * on the role path; the tools receive it.
  */
-export async function answerWithServerTools(role: ToolRole, message: unknown, tools: Pick<ServerTools, "has" | "call">): Promise<JsonRpcReply | null> {
+export async function answerWithServerTools(
+  role: ToolRole,
+  message: unknown,
+  tools: Pick<ServerTools, "has" | "call">,
+  caller: ToolCaller | null = null,
+): Promise<JsonRpcReply | null> {
   const { id, method, params } = (message ?? {}) as JsonRpcRequest;
   if (method !== "tools/call" || id === undefined || message === null || typeof message !== "object" || Array.isArray(message)) {
     return answer(role, message);
@@ -161,7 +202,7 @@ export async function answerWithServerTools(role: ToolRole, message: unknown, to
   if (typeof call.name !== "string" || !tools.has(call.name)) {
     return role === "orchestrator" ? failure(id, -32602, `Unknown tool: ${String(call.name)}`) : answer(role, message);
   }
-  const result = await tools.call(call.name, call.arguments ?? {});
+  const result = await tools.call(call.name, call.arguments ?? {}, caller);
   return result.ok
     ? reply(id, { content: [{ type: "text", text: result.text }] })
     : reply(id, { content: [{ type: "text", text: result.text }], isError: true });
@@ -178,12 +219,37 @@ function sameSecret(given: string, secret: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+/**
+ * What a path serves: the role, and the per-agent token of a bound path
+ * (`/mcp/<worker|reviewer|manager>/<64 hex>`, design §16.5), else null. The
+ * Orchestrator's only with the right secret. A token is only its shape here;
+ * the endpoint looks it up.
+ */
+export function routeOfPath(path: string, secret: string): { role: ToolRole; token: string | null } | null {
+  const match = /^\/mcp\/(worker|reviewer|manager)(?:\/([0-9a-f]{64}))?\/?$/.exec(path);
+  if (match !== null) return { role: match[1] as ToolRole, token: match[2] ?? null };
+  const orchestrator = /^\/mcp\/orchestrator\/([0-9a-f]+)\/?$/.exec(path);
+  return orchestrator !== null && sameSecret(orchestrator[1]!, secret) ? { role: "orchestrator", token: null } : null;
+}
+
 /** The role a path serves; the Orchestrator's only with the right secret. */
 export function roleOfPath(path: string, secret: string): ToolRole | null {
-  const match = /^\/mcp\/(worker|reviewer|manager)\/?$/.exec(path);
-  if (match !== null) return match[1] as ToolRole;
-  const orchestrator = /^\/mcp\/orchestrator\/([0-9a-f]+)\/?$/.exec(path);
-  return orchestrator !== null && sameSecret(orchestrator[1]!, secret) ? "orchestrator" : null;
+  return routeOfPath(path, secret)?.role ?? null;
+}
+
+/**
+ * The caller a token path names (design §16.5): the binding's agent when it
+ * is bound to `role`, an agent-less caller while it is pending, and null —
+ * the role's builder-only tools — for no token, an unknown, revoked or other
+ * role's token, or no binding store. Never throws.
+ */
+export function callerOfRoute(route: { role: ToolRole; token: string | null }, bindings: BindingStore | null): ToolCaller | null {
+  if (route.token === null || bindings === null || !isBoundRole(route.role)) return null;
+  try {
+    return bindings.callerOf(route.token, route.role);
+  } catch {
+    return null;
+  }
 }
 
 function readBody(request: IncomingMessage): Promise<string | null> {
@@ -218,16 +284,19 @@ interface HandleContext {
   orchestrator: OrchestratorTools;
   manager: ServerTools;
   worker: ServerTools;
+  /** The per-agent bindings (design §16.5); null without a data folder. */
+  bindings: BindingStore | null;
   log: (line: string) => void;
 }
 
-async function handle(request: IncomingMessage, response: ServerResponse, { secret, orchestrator, manager, worker, log }: HandleContext): Promise<void> {
+async function handle(request: IncomingMessage, response: ServerResponse, { secret, orchestrator, manager, worker, bindings, log }: HandleContext): Promise<void> {
   // An agent's MCP client sends no Origin; a web page always does.
   if (request.headers.origin !== undefined) return send(response, 403);
   const host = (request.headers.host ?? "").replace(/:\d+$/, "").toLowerCase();
   if (host !== "127.0.0.1" && host !== "localhost") return send(response, 403);
-  const role = roleOfPath(new URL(request.url ?? "/", "http://127.0.0.1").pathname, secret);
-  if (role === null) return send(response, 404);
+  const route = routeOfPath(new URL(request.url ?? "/", "http://127.0.0.1").pathname, secret);
+  if (route === null) return send(response, 404);
+  const role = route.role;
   // Streamable HTTP lets a client open a server-sent event stream with GET; there is nothing to stream.
   if (request.method !== "POST") return send(response, 405);
   const body = await readBody(request);
@@ -240,15 +309,19 @@ async function handle(request: IncomingMessage, response: ServerResponse, { secr
   }
   if (Array.isArray(parsed) && parsed.length === 0) return send(response, 400, failure(null, -32600, "Invalid Request"));
   const messages = Array.isArray(parsed) ? parsed : [parsed];
+  // Looked up once per request: who the token path names, if anyone (design §16.5).
+  const caller = callerOfRoute(route, bindings);
+  // Log lines name the bound agent, never the token.
+  const who = caller === null ? "" : caller.agentId === null ? " (binding still pending)" : ` (agent ${caller.agentId})`;
   const answered: Array<JsonRpcReply | null> = [];
   for (const message of messages) {
     const reply =
       role === "orchestrator"
         ? await answerOrchestrator(message, orchestrator)
         : role === "manager"
-          ? await answerWithServerTools(role, message, manager)
+          ? await answerWithServerTools(role, message, manager, caller)
           : role === "worker"
-            ? await answerWithServerTools(role, message, worker)
+            ? await answerWithServerTools(role, message, worker, caller)
             : answer(role, message);
     // One line per call of a real tool, for the numbers of AT-5; an unknown tool is not worth one.
     if (reply !== null && "result" in reply && (message as JsonRpcRequest).method === "tools/call") {
@@ -259,8 +332,8 @@ async function handle(request: IncomingMessage, response: ServerResponse, { secr
         role === "orchestrator"
           ? `[paseo-bm] ${name} ${refused ? "refused a call" : "answered"} for the orchestrator`
           : served
-            ? `[paseo-bm] ${name} ${refused ? "refused a call" : "answered"} for a ${role}`
-            : `[paseo-bm] ${name} ${refused ? "refused its input" : "built a block"} for a ${role}`,
+            ? `[paseo-bm] ${name} ${refused ? "refused a call" : "answered"} for a ${role}${who}`
+            : `[paseo-bm] ${name} ${refused ? "refused its input" : "built a block"} for a ${role}${who}`,
       );
     }
     answered.push(reply);
@@ -322,6 +395,16 @@ function savePort(path: string, port: number, log: (line: string) => void): void
     saveState(path, { schemaVersion: STATE_VERSION, port });
   } catch (error) {
     log(`[paseo-bm] could not save the agent tools port: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** The binding store of the data folder the port file `statePath` is in, or null when it cannot be opened. */
+function bindingStoreBeside(statePath: string, log: (line: string) => void): BindingStore | null {
+  try {
+    return createBindingStore(dirname(dirname(statePath)), { log });
+  } catch (error) {
+    log(`[paseo-bm] the agent tool bindings cannot be used; every agent keeps its role path: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
   }
 }
 
@@ -389,6 +472,10 @@ function listen(server: Server, port: number): Promise<number | null> {
 export interface AgentToolsEndpoint {
   /** The URL of `role`'s tools, or null while the endpoint is not listening; the Orchestrator's carries the secret. */
   urlFor(role: ToolRole): string | null;
+  /** The per-agent bindings (design §16.5); null when the data folder cannot be used. */
+  readonly bindings: BindingStore | null;
+  /** Issues and settles the bindings of the agents the plugin creates itself (a fallback Worker, a Manager). */
+  readonly binder: AgentBinder;
   /** Hands the Orchestrator's tools a Paseo handle from a hook or RPC context (`orchestrator-tools.ts`). */
   usePaseo(paseo: unknown): void;
   /**
@@ -412,8 +499,44 @@ export interface StartOptions {
   manager?: ServerTools;
   /** The Worker's server-run tools (`bm_reply`, change-014 Ask back); `createWorkerTools()` by default. */
   worker?: ServerTools;
+  /** The per-agent bindings; the data folder's `ui/agent-bindings.json` by default (design §16.5). */
+  bindings?: BindingStore | null;
   /** The clock that stamps a new secret's `secretSince`; tests only. */
   now?: () => Date;
+}
+
+/** The URL of a bound agent's own tool path, `<role URL>/<token>` (design §16.5). */
+export function boundUrlOf(roleUrl: string, token: string): string {
+  return `${roleUrl}/${token}`;
+}
+
+/**
+ * The binder of an endpoint (design §16.5): a token only for a base provider
+ * in `TOOL_PROVIDERS` while the endpoint listens and the store can be
+ * written. Never throws; a failure is one log line and an unbound agent.
+ */
+export function binderOf(
+  urlFor: (role: ToolRole) => string | null,
+  bindings: BindingStore | null,
+  log: (line: string) => void,
+): AgentBinder {
+  if (bindings === null) return NO_BINDER;
+  return {
+    issue(request) {
+      if (request.base === null || !TOOL_PROVIDERS.includes(request.base)) return null;
+      const roleUrl = urlFor(request.role);
+      if (roleUrl === null) return null;
+      try {
+        const { token, tokenSha256 } = bindings.issue(request);
+        return { tokenSha256, mcpServer: { type: "http", url: boundUrlOf(roleUrl, token), alwaysLoad: true } };
+      } catch (error) {
+        log(`[paseo-bm] could not issue a tool binding for a new ${request.role}; it is created unbound: ${error instanceof Error ? error.message : String(error)}`);
+        return null;
+      }
+    },
+    settle: (issued, agentId) => bindings.settle(issued.tokenSha256, agentId),
+    discard: (issued) => bindings.discard(issued.tokenSha256),
+  };
 }
 
 /**
@@ -438,16 +561,26 @@ export function startAgentTools(options: StartOptions = {}): AgentToolsEndpoint 
     log(
       `[paseo-bm] the agent tools endpoint cannot use the paseo-bm data folder (${resolved.reason}); agents write their BM-* blocks by hand.`,
     );
-    return { urlFor: () => null, usePaseo: () => {}, secretSince: null, ready: Promise.resolve(), close: async () => {} };
+    return {
+      urlFor: () => null,
+      bindings: null,
+      binder: NO_BINDER,
+      usePaseo: () => {},
+      secretSince: null,
+      ready: Promise.resolve(),
+      close: async () => {},
+    };
   }
   const path = resolved.path;
   const orchestrator = options.orchestrator ?? createOrchestratorTools();
   const manager = options.manager ?? createManagerTools();
   const worker = options.worker ?? createWorkerTools();
   const { secret, since: secretSince } = orchestratorSecretOf(secretPathOf(path), (options.now ?? (() => new Date()))(), log);
+  // Beside the port and the secret: `<data folder>/ui/agent-bindings.json` (design §16.5).
+  const bindings = options.bindings !== undefined ? options.bindings : bindingStoreBeside(path, log);
   let port: number | null = null;
   const server = createServer((request, response) => {
-    handle(request, response, { secret, orchestrator, manager, worker, log }).catch(() => send(response, 500));
+    handle(request, response, { secret, orchestrator, manager, worker, bindings, log }).catch(() => send(response, 500));
   });
   const ready = (async () => {
     try {
@@ -466,8 +599,12 @@ export function startAgentTools(options: StartOptions = {}): AgentToolsEndpoint 
       log(`[paseo-bm] the agent tools endpoint failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   })();
+  const urlFor = (role: ToolRole): string | null =>
+    port === null ? null : `http://127.0.0.1:${port}/mcp/${role}${role === "orchestrator" ? `/${secret}` : ""}`;
   return {
-    urlFor: (role) => (port === null ? null : `http://127.0.0.1:${port}/mcp/${role}${role === "orchestrator" ? `/${secret}` : ""}`),
+    urlFor,
+    bindings,
+    binder: binderOf(urlFor, bindings, log),
     usePaseo: (paseo) => orchestrator.usePaseo(paseo),
     secretSince,
     ready,
@@ -493,9 +630,40 @@ interface ToolConfig {
 }
 
 /**
+ * `config` without a `paseo-bm` MCP server entry, or undefined when it has
+ * none (design §16.5): on a base provider outside `TOOL_PROVIDERS` that
+ * entry would give the agent tools that are not pre-approved. Every other
+ * server is kept.
+ */
+export function withoutAgentTools<C extends object>(config: C): C | undefined {
+  const servers = (config as C & ToolConfig).mcpServers;
+  if (servers === null || typeof servers !== "object" || !(AGENT_TOOLS_SERVER in servers)) return undefined;
+  const rest = { ...servers };
+  delete rest[AGENT_TOOLS_SERVER];
+  return { ...config, mcpServers: rest };
+}
+
+/**
+ * The token of the bound URL `config` already carries for `role`, or null
+ * (design §16.5): `config.mcpServers["paseo-bm"].url` must be exactly
+ * `<roleUrl>/<64 hex>` — the endpoint's own port and role path. Whether the
+ * token is pending is the binding store's to say.
+ */
+export function boundTokenOf(config: unknown, role: BoundRole, roleUrl: string | null): string | null {
+  if (roleUrl === null) return null;
+  const servers = (config as ToolConfig | null | undefined)?.mcpServers;
+  const entry = servers !== null && typeof servers === "object" ? (servers[AGENT_TOOLS_SERVER] as { url?: unknown } | null | undefined) : undefined;
+  const url = entry !== null && typeof entry === "object" ? entry.url : undefined;
+  if (typeof url !== "string" || !url.startsWith(`${roleUrl}/`)) return null;
+  const token = url.slice(roleUrl.length + 1);
+  return isBindingToken(token) ? token : null;
+}
+
+/**
  * `config` with the role's tool server added and its tools pre-approved, or
  * undefined when there is nothing to add (no URL, not a role with tools).
- * Keeps every server and approval already there.
+ * Keeps every server and approval already there; a `paseo-bm` entry is
+ * replaced by `url`.
  */
 export function withAgentTools<C extends object>(config: C, role: ToolRole, url: string | null): C | undefined {
   if (url === null) return undefined;

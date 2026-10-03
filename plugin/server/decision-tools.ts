@@ -13,6 +13,7 @@
  * folder, never repairs a file), so the Manager's tools stay side-effect free
  * (ADR-010). No Paseo handle is needed.
  */
+import type { ToolCaller } from "./agent-bindings";
 import { cutText } from "./request-render";
 import { redactText } from "./collector";
 import { resolveDataHome, type DataHomeDeps } from "./data-home";
@@ -32,8 +33,13 @@ export type ServerToolAnswer = { ok: boolean; text: string };
 export interface ServerTools {
   readonly faces: readonly ToolFace[];
   has(name: string): boolean;
-  /** Runs one tool. Never throws. */
-  call(name: string, input: unknown): Promise<ServerToolAnswer>;
+  /**
+   * Runs one tool for `caller` (design §16.5): the bound agent a token path
+   * names (`agentId: null` while its binding is pending), or null on the role
+   * path — an unbound caller, whose tools only build or read. The endpoint
+   * always passes it; absent reads as null. Never throws.
+   */
+  call(name: string, input: unknown, caller?: ToolCaller | null): Promise<ServerToolAnswer>;
 }
 
 export interface DecisionsQuery {

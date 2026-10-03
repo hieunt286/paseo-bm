@@ -582,3 +582,16 @@ describe("the Action boundary facts line and the child mode by the project's swi
     expect((await runtimeFactsOf("worker", noList, "/off", () => {}, undefined, { workspaceOf: async () => "ws-off" })).reviewerModeId).toBe("auto");
   });
 });
+
+describe("a bound agent's Runtime facts (design §16.5)", () => {
+  it("says the agent is bound when the creation hook kept its token URL, and writes the same text until step 5", async () => {
+    const api = { providers: { listModes: vi.fn(async () => ({ modes: [] })) } };
+    const lookup = { read: () => [], boundary: "off" as const, reviewBudget: () => ({ Small: 2, Medium: 2, Large: 4 }) };
+    const bound = await runtimeFactsOf("reviewer", api, "/repo", () => {}, undefined, { ...lookup, bound: true });
+    const unbound = await runtimeFactsOf("reviewer", api, "/repo", () => {}, undefined, lookup);
+    expect(bound).toEqual({ bound: true });
+    expect(unbound).toEqual({});
+    expect(runtimeFactsText("reviewer", bound)).toBe(runtimeFactsText("reviewer", unbound));
+    expect(fullInstructions("worker", { bound: true })).toBe(BASE_INSTRUCTIONS.worker);
+  });
+});

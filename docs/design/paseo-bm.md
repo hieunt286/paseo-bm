@@ -176,7 +176,7 @@ A candidate from step 1 or 2 must pass the same safety rules as the installer (`
 
 **Who reads the data folder.** Most go through a single function: `rpc-kit.ts` `dataHome(deps)` (re-exported as `role-instructions.ts` `dataHomeOf`) — synchronous, no `paseo` parameter, returns `string | null`, never throws; it wraps `resolveDataHome` and takes only `home`. Used in `manager.ts`, `role-hook.ts`, `setup-rpc.ts`, `dashboard-rpc.ts`, `fallback-settings.ts`, `fallback-state.ts`, `fallback-rpc.ts`, `fallback-switch.ts`, `fallback-wait.ts`, `fallback-reviewer.ts`; the stores receive the folder from the caller (`budget-told.ts`, `decision-store.ts`, `alert-store.ts`, `orchestrator-store.ts`). Six modules call `resolveDataHome` directly because they also need `tracesDir` or `reason`: `agent-tools.ts`, `collector.ts`, `dashboard-rpc.ts`, `setup-machine.ts`, `setup-rpc.ts`, `setup-state.ts` — `dashboard-rpc.ts` and `setup-rpc.ts` take both paths, depending on what each spot needs. `trace-store.ts` does not look for the folder itself: it receives `tracesDir` from the caller. Nothing reads the old installer's `install.json` (§7.13.6). The tools endpoint's port lives in `<data folder>/ui/agent-tools.json`, written atomically with symlink blocking, mode `0600`.
 
-*ADR-027 adds three stores to the data folder: `requests/` (§16.4), `ui/agent-bindings.json` (§16.5) and `outbox/` (§16.7).*
+**ADR-027 stores.** `ui/agent-bindings.json` holds the per-agent tool bindings (`0600`; §7.4) and `requests/<workspaceId>.json` the request registry (§16.4). *Ship point C adds `outbox/` (§16.7).*
 
 ### 5.2 The `~/.paseo-bm/home.json` pointer (0.4.0)
 
@@ -317,7 +317,7 @@ Worker skills: all present.
 - The two lookups, mode and skills, run in parallel. Runtime facts are outside the embedded copy, so the `roles/*.md` files and the embedded copy still match byte for byte.
 - A live agent whose Runtime facts line changes (the user changes the mode/provider of the child role) is told with `BM-SETTINGS` (§7.5).
 
-*ADR-027 (step 2) keeps a bound tool URL, and (step 5) gives the hand-path templates only to unbound agents: §16.5, §16.12.*
+*The hook keeps a bound tool URL and removes `paseo-bm` for a provider without tools (§7.4, per-agent bindings). ADR-027 (step 5) gives the hand-path templates only to unbound agents: §16.12.*
 
 ### 7.3 Manager (`manager.ts`)
 
@@ -381,7 +381,70 @@ The UI belongs to Design Dashboard; the server:
 
 Each tool has a JSON Schema (what the model sees, and also the shape check); for the block tools the semantics are checked with `checkBlocks` on the very text built. The Orchestrator's read and propose tools are checked by their schema alone (`ORCHESTRATOR_SERVER_TOOLS` in `shared/bm-tools.ts`, which also supports `minimum`/`maximum`). For the other block tools, `null` fields are dropped before checking; values that look like placeholders (`<…>`, `a | b`) are refused, because `checkBlocks` would skip the whole block; for `bm_report`, `tier.reason` is required if and only if `changedFrom` is present, and `changedFrom` must differ from `level`. Wrong input → an MCP result `isError: true` listing the error of each field; the agent fixes it and calls again in the same turn.
 
-*ADR-027 adds per-agent paths and tools that create and deliver for bound agents: §16.5, §16.6.*
+**Per-agent bindings** (`agent-bindings.ts`; ADR-027 decision 3, ship point B). The plugin binds the agents it creates itself — the Manager (`createManager` through `createBound`, §7.3) and the fallback Worker (§7.10) — and, from ship point C, the Workers and Reviewers its creation tools make (§16.6).
+
+- **Token.** 32 random bytes in hex, made when the plugin is about to create an agent.
+- **Only where an endpoint is attached** (ADR-027 decision 9, Q1 a).
+  - The plugin issues a token only when the new agent's alias has a base provider in `TOOL_PROVIDERS` (`claude`, `codex`, `opencode`).
+  - A binding becomes `bound` only when the creation hook actually attached the endpoint with that token, which the hook records as `attachedAt`.
+  - A provider that cannot pre-approve MCP tools (Pi, Copilot) therefore never has a bound agent. Its agents are unbound and keep the hand path.
+- **Path.** `/mcp/<worker|reviewer|manager>/<token>`. The Orchestrator keeps its own secret path (§7.4).
+- **Store.** `<data folder>/ui/agent-bindings.json`, `0600`, next to `orchestrator-endpoint.json`, a `createJsonFileStore` store:
+
+```ts
+{ schemaVersion: 1,
+  bindings: Array<{ tokenSha256: string, role: "manager" | "worker" | "reviewer",
+                    state: "pending" | "bound" | "revoked",
+                    agentId: string | null, workspaceId: string, requestId: string | null,
+                    parentId: string | null, batchId: string | null,
+                    creationTools: boolean,   // issued with the creation tools (ship point C); false before
+                    createdAt: string, attachedAt: string | null, boundAt: string | null, revokedAt: string | null }> }
+```
+
+Only the token's SHA-256 is stored; the token itself exists in the agent's MCP configuration and in the plugin's memory while it creates the agent.
+
+**Lifecycle.**
+
+| Step | When | What happens |
+|---|---|---|
+| `pending` | before `agents.create` | Written with everything but `agentId` |
+| attached | the hook keeps the token URL | `attachedAt` set |
+| `bound` | `agents.create` returns and `attachedAt` is set | `agentId` set |
+| removed | `agents.create` returns without `attachedAt` | The binding is deleted, and the agent is unbound |
+| removed | `agents.create` throws | The binding is deleted |
+| removed | `pending` for more than 10 minutes | The binding is deleted |
+| `revoked` | `agent.archived` | Marked revoked |
+| removed | revoked for 7 days | The binding is deleted |
+| removed | at plugin start, its agent is no longer in `paseo.agents.list()` | The binding is deleted. This sweep covers a deleted agent without relying on a delete event |
+
+The file holds at most 5,000 bindings; past that, the oldest revoked ones go first.
+
+**Endpoint.**
+- **Routing.** `roleOfPath` also accepts `/mcp/<role>/<64 hex>`. The endpoint hashes the token and looks it up:
+  - a `bound` binding of that role → the call carries `caller = { agentId, role, workspaceId, requestId, parentId, batchId }`;
+  - a `pending` binding → `caller` with `agentId: null`, and every delivering **or creating** tool refuses with "try again in a moment": nothing is created, stored or sent;
+  - an unknown, revoked or wrong-role token → `caller = null`: the role's **builder-only** tools, never a 404. A lost binding file must not cost an agent its tools.
+- **Tool interface.** `ServerTools.call(name, input)` becomes `call(name, input, caller)`.
+- **No second factor.** Spike S4 passed and the owner accepted the token's exposure on disk and in `ps` (§16.13): the token alone identifies the caller. The pending refusal is one shared guard (`guardActingTool`, `PENDING_CALLER_MESSAGE`) every acting tool goes through.
+- **What a token never does.** A token never appears in a log line, an RPC result, an MCP result or a trace; a tool call's log line names the agent (`(agent <id>)`).
+
+**The creation hook** (`withAgentTools`, `agent-tools.ts:511`):
+- **A provider without tools.** For a base provider outside `TOOL_PROVIDERS`, the hook removes any `paseo-bm` entry from `mcpServers`: there it would give the agent tools that are not pre-approved.
+- **A bound URL is kept.** When `config.mcpServers["paseo-bm"].url` has the shape `http://127.0.0.1:<port>/mcp/<role>/<64 hex>`, its token hashes to a `pending` binding of the agent's role, and the port is the endpoint's, the hook keeps that URL instead of overwriting it.
+- **Pre-approval.** The hook pre-approves the bound role's tool list; until ship point C those are the builders.
+- **Runtime facts.** It tells `runtimeFactsOf` that the agent is bound (`bound: true`); until ship point C this changes no text.
+- **Order and timeout.** Keeping the URL is the hook's last step. A creation whose hook times out loses the URL, and its binding is deleted.
+- **Any other creation** gets `urlFor(role)`, the role path without a token, as today, and is unbound.
+
+**Builder-only answers name the send step** as a second content item (`BUILDER_SEND_LINES`), because an unbound agent briefed by a shorter role file may not know it:
+
+| Tool | Line appended to its answer |
+|---|---|
+| `bm_report` | ``Send this block with `send_agent_prompt` to the agent that created you (its id is in your first prompt), with `notifyOnFinish: false`.`` |
+| `bm_review` | `Make this block your final answer, exactly as it is.` |
+| `bm_answers` | `Put this block in your reply to the owner; the plugin delivers it. Send the Worker nothing.` |
+
+*ADR-027 (ship point C) adds the tools that create and deliver for bound agents: §16.6.*
 
 ### 7.5 Plugin notices
 
@@ -744,7 +807,7 @@ Retired by [ADR-022](../adr/ADR-022-retirements-after-code-review.md) decision 2
 
 1. `removeAllBmEntries` (§6.2) in **one** patch: every `bm-*` provider (the three roles and every fallback alias), every `bm-*` profile, and `mcp.injectIntoAgents = agentTools.previous` when `setup-state.agentTools` exists **and** the current value is `true` (`agentTools: "restored"`); the switch is on but not because of paseo-bm → kept, `"left-on"` (the screen says that whoever wants it off can turn it off in Paseo); the switch is off → `"off"`. Patch fails or read-back mismatch → `E_SETUP_WRITE_FAILED`, no later step runs.
 2. Set `cleanedUpThisRun`; write `setup-state.cleanedUpAt` and `agentTools: null` — always, even when `deleteData` is `true`, because `ui/setup-state.json` is never deleted (step 3).
-3. `deleteData: true` (the screen sends it only after a second confirmation; the default is to keep): delete **exactly the entries the plugin created** in the data folder: `traces/`, everything in `ui/` **except `ui/setup-state.json`**, `role-extras.json`, `role-fallback.json`, `role-fallback-state.json`, `orchestrator/` ([Design Orchestrator](./paseo-bm-orchestrator.md) §5); each entry is `lstat`ed first, and a symlink is skipped and listed in `kept`. `ui/setup-state.json` is always kept (and listed in `kept`) because it carries `cleanedUpAt`: without it, a plugin reload before the user removes the plugin would recreate the roles by itself (REQ-012 e). The data folder is therefore never deleted entirely by this button. `home.json`, `install.json`, `plugin/`, `backups/`, `.lock` and anything unknown **are kept** and listed in `kept` (they are not the plugin's; if the plugin is running from a directory install, its own code is inside `plugin/`). An error deleting an entry → listed in `kept` with the reason, not thrown.
+3. `deleteData: true` (the screen sends it only after a second confirmation; the default is to keep): delete **exactly the entries the plugin created** in the data folder: `traces/`, everything in `ui/` **except `ui/setup-state.json`**, `role-extras.json`, `role-fallback.json`, `role-fallback-state.json`, `requests/` (the request registry, §16.4), `orchestrator/` ([Design Orchestrator](./paseo-bm-orchestrator.md) §5); each entry is `lstat`ed first, and a symlink is skipped and listed in `kept`. `ui/setup-state.json` is always kept (and listed in `kept`) because it carries `cleanedUpAt`: without it, a plugin reload before the user removes the plugin would recreate the roles by itself (REQ-012 e). The data folder is therefore never deleted entirely by this button. `home.json`, `install.json`, `plugin/`, `backups/`, `.lock` and anything unknown **are kept** and listed in `kept` (they are not the plugin's; if the plugin is running from a directory install, its own code is inside `plugin/`). An error deleting an entry → listed in `kept` with the reason, not thrown.
 4. Not touched: existing agents (the confirmation screen says that agents running on a `bm-*` role will fail when they start a new turn, so archive them first), skills, `br`/`bv`, `pluginsEnabled`, `plugins`, every entry without the `bm-` prefix.
 5. The plugin does not remove itself (`paseo plugin remove` from inside the plugin stops the very process running the command): `nextCommand` is the command the user runs next. Removing the plugin without clicking the button → the `bm-*` entries and `injectIntoAgents` remain; the README and the listing caveat say so clearly.
 
@@ -883,6 +946,7 @@ Rows up to 2026-10-02 are archived in [paseo-bm-revision-history-to-20261002.md]
 | 2026-10-03 | Claude (owner's delegation) | §16.5, §16.6, §16.7: six details settled at the bead polish |
 | 2026-10-03 | Claude (owner's delegation) | Ship point A built (beads bm-agent-tools-1upv.1, .2): §7.1 takes the role from the provider only, §7.5 describes the origin classifier and the `BM-BRIEF` prompt line; §16.2 and §16.3 are stubs |
 | 2026-10-03 | Claude (owner's delegation) | Spikes S1, S2, S4, S5 passed (bead bm-agent-tools-1upv.4, run note 2026-10-03): §16.1, §16.10 and §16.13 record the results; the token's exposure on disk and in `ps` is open for the owner |
+| 2026-10-03 | Claude (owner's delegation) | Ship point B built (beads bm-agent-tools-1upv.5, .6): §7.4 describes the per-agent bindings, §7.2 the hook keeping a bound URL, §5.1 and §7.13.7 the new stores; §16.5 is a stub; §16.4 defines a bound creator by `creationTools`. The request registry (§16.4) is built and stays in §16 until ship point C |
 
 ## 15. History
 
@@ -985,78 +1049,14 @@ Built (ship point A); described in §7.1.
 - **Generating a `requestId`.** `req-` + the current UTC time as `YYYYMMDDTHHMMSSZ`, under the file's mutex. If that id exists, add one second until it is free: the format stays the one `checkBlocks` and every reader accept.
 - **Backfill, once.** When a workspace's file is created, it is filled from the `requestId`s of that workspace's trace records (`source: "backfill"`, `createdAt` = the earliest record's time). It never backfills again.
 - **The hand path keeps working.** After the backfill, a `requestId` issued by an **unbound** Manager is registered when the plugin first sees it (the collector's record, or `agent.created` of its Worker) with `source: "agent-typed"`. That is today's behaviour, kept for the hand path.
-- **The bound path is checked** (ADR-027 decision 7). "The creator is bound" means the agent's `parentAgentId` (from `agent.created`, AGENTS.md) has a live binding in the binding store (§16.5), or the agent was created by the plugin itself. For an agent whose creator is bound, a `bm.requestId` that is not registered counts as missing and is logged. The bound path's ids come only from the tools.
+- **The bound path is checked** (ADR-027 decision 7). "The creator is bound" means the agent's `parentAgentId` (from `agent.created`, AGENTS.md) has a live binding in the binding store (§7.4) issued with the creation tools (`creationTools`, from ship point C), or the agent was created by the plugin itself. A Manager bound at ship point B has no creation tools, so its Workers stay on the hand path. For an agent whose creator is bound, a `bm.requestId` that is not registered counts as missing and is logged. The bound path's ids come only from the tools.
 - **Reading `bm.requestId`.** `knownRequestIdOf(agent)` follows the two rules above. For an agent whose creator is bound, it returns `null` for an unregistered id and logs one line per agent per run. Every place that trusts the label today calls `knownRequestIdOf` instead: trace linking, `soleWorkerOfRequest`, the materialiser's asker, the format-check sender, the fallback incident, the action boundary and the Orchestrator's tool scope.
 - **Bounds.** At most 2,000 requests per workspace. Past that, the oldest finished ones go first, and a request with a pending outbox record is never dropped.
 - **Cleanup.** `setup.cleanup` deletes `requests/` with the data (§7.13.7).
 
 ### 16.5 Per-agent bindings (step 2)
 
-- **Token.** 32 random bytes in hex, made when the plugin is about to create an agent.
-- **Only where an endpoint is attached** (ADR-027 decision 9, Q1 a).
-  - The plugin issues a token only when the new agent's alias has a base provider in `TOOL_PROVIDERS` (`claude`, `codex`, `opencode`).
-  - A binding becomes `bound` only when the creation hook actually attached the endpoint with that token, which the hook records as `attachedAt`.
-  - A provider that cannot pre-approve MCP tools (Pi, Copilot) therefore never has a bound agent. Its agents are unbound and keep the hand path.
-- **Path.** `/mcp/<worker|reviewer|manager>/<token>`. The Orchestrator keeps its own secret path (§7.4).
-- **Store.** `<data folder>/ui/agent-bindings.json`, `0600`, next to `orchestrator-endpoint.json`, a `createJsonFileStore` store:
-
-```ts
-{ schemaVersion: 1,
-  bindings: Array<{ tokenSha256: string, role: "manager" | "worker" | "reviewer",
-                    state: "pending" | "bound" | "revoked",
-                    agentId: string | null, workspaceId: string, requestId: string | null,
-                    parentId: string | null, batchId: string | null,
-                    createdAt: string, attachedAt: string | null, boundAt: string | null, revokedAt: string | null }> }
-```
-
-Only the token's SHA-256 is stored; the token itself exists in the agent's MCP configuration and in the plugin's memory while it creates the agent.
-
-**Lifecycle.**
-
-| Step | When | What happens |
-|---|---|---|
-| `pending` | before `agents.create` | Written with everything but `agentId` |
-| attached | the hook keeps the token URL | `attachedAt` set |
-| `bound` | `agents.create` returns and `attachedAt` is set | `agentId` set |
-| removed | `agents.create` returns without `attachedAt` | The binding is deleted, and the agent is unbound |
-| removed | `agents.create` throws | The binding is deleted |
-| removed | `pending` for more than 10 minutes | The binding is deleted |
-| `revoked` | `agent.archived` | Marked revoked |
-| removed | revoked for 7 days | The binding is deleted |
-| removed | at plugin start, its agent is no longer in `paseo.agents.list()` | The binding is deleted. This sweep covers a deleted agent without relying on a delete event |
-
-The file holds at most 5,000 bindings; past that, the oldest revoked ones go first.
-
-**Endpoint.**
-- **Routing.** `roleOfPath` also accepts `/mcp/<role>/<64 hex>`. The endpoint hashes the token and looks it up:
-  - a `bound` binding of that role → the call carries `caller = { agentId, role, workspaceId, requestId, parentId, batchId }`;
-  - a `pending` binding → `caller` with `agentId: null`, and every delivering **or creating** tool refuses with "try again in a moment": nothing is created, stored or sent;
-  - an unknown, revoked or wrong-role token → `caller = null`: the role's **builder-only** tools, never a 404. A lost binding file must not cost an agent its tools.
-- **Tool interface.** `ServerTools.call(name, input)` becomes `call(name, input, caller)`.
-- **S4's second factor**, when S4 requires it (§16.1), applies to every tool a bound caller uses that acts — creating and delivering alike (`bm_create_worker`, `bm_create_reviewer`, `bm_rereview`, `bm_report`, `bm_questions`, `bm_review`, `bm_answers`, `bm_tell_worker`); read-only tools (`bm_decisions`) are excepted. It is one shared check beside the pending one.
-- **What a token never does.** A token never appears in a log line, an RPC result, an MCP result or a trace; log lines name the agent id.
-
-**The creation hook** (`withAgentTools`, `agent-tools.ts:511`):
-- **A provider without tools.** For a base provider outside `TOOL_PROVIDERS`, the hook removes any `paseo-bm` entry from `mcpServers`: there it would give the agent tools that are not pre-approved.
-- **A bound URL is kept.** When `config.mcpServers["paseo-bm"].url` has the shape `http://127.0.0.1:<port>/mcp/<role>/<64 hex>`, its token hashes to a `pending` binding of the agent's role, and the port is the endpoint's, the hook keeps that URL instead of overwriting it.
-- **Pre-approval.** The hook pre-approves the bound role's full tool list (§16.6).
-- **Runtime facts.** It tells `runtimeFactsOf` that the agent is bound, so its Runtime facts carry no hand-path templates (§16.12).
-- **Any other creation** gets `urlFor(role)`, the role path without a token, as today, and is unbound.
-
-**S1 fallback.** If a creation config cannot carry `mcpServers`:
-1. The hook itself issues the token for a creation whose title carries the plugin's one-time nonce suffix ` ·bm<8 hex>`.
-2. It writes the binding as `pending` keyed by the nonce.
-3. On `agent.created` with that nonce the binding becomes `bound`, and the plugin removes the suffix with `paseo agent update <id> --name` (as `createTitleMarker` already does for the role marker).
-
-Two creations at the same moment therefore never share a binding.
-
-**Builder-only answers name the send step**, because an unbound agent briefed by a shorter role file may not know it:
-
-| Tool | Line appended to its answer |
-|---|---|
-| `bm_report` | ``Send this block with `send_agent_prompt` to the agent that created you (its id is in your first prompt), with `notifyOnFinish: false`.`` |
-| `bm_review` | `Make this block your final answer, exactly as it is.` |
-| `bm_answers` | `Put this block in your reply to the owner; the plugin delivers it. Send the Worker nothing.` |
+Built (ship point B); described in §7.4.
 
 ### 16.6 The tools
 

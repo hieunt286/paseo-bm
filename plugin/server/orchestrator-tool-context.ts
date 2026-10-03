@@ -17,6 +17,8 @@ import type { LiveTimelinePaseo } from "./live-timeline";
 import { findOrchestratorAgent, type OrchestratorAgentPaseo, type OrchestratorAgentSnapshot } from "./orchestrator-agent";
 import type { OrchestratorStore, OrchestratorStoreDeps } from "./orchestrator-store";
 import { storedWorkspaceIds, type TraceStoreLocation } from "./trace-store";
+import { knownRequestIdOf } from "./request-registry";
+import { dataHome } from "./rpc-kit";
 
 /** The SDK slice the tools use. `PaseoApi` is structurally assignable. */
 export type OrchestratorToolsPaseo = DashboardPaseo & LiveTimelinePaseo;
@@ -93,9 +95,14 @@ export function agentListOf(paseo: Pick<OrchestratorToolsPaseo, "agents">): () =
   return () => (walk ??= listAgents(paseo));
 }
 
-function requestLabelOf(agent: Record<string, unknown>): string | null {
-  const label = ((agent["labels"] ?? {}) as Record<string, unknown>)["bm.requestId"];
-  return typeof label === "string" && label !== "" ? label : null;
+/**
+ * An agent's `bm.requestId` as far as the plugin trusts it (design §16.4,
+ * `knownRequestIdOf`): the Orchestrator's tools scope a Worker to a request
+ * through it.
+ */
+function requestLabelOf(agent: Record<string, unknown>, id: string, workspaceId: string | null, home: string | null): string | null {
+  const labels = (agent["labels"] ?? {}) as Record<string, unknown>;
+  return knownRequestIdOf({ id, workspaceId, labels, parentAgentId: parentOf(agent) }, { home });
 }
 
 function parentOf(agent: Record<string, unknown>): string | null {
@@ -106,22 +113,25 @@ function parentOf(agent: Record<string, unknown>): string | null {
 
 /** The paseo-bm Managers, Workers and Reviewers of a walk, by their provider. */
 function workingAgentsIn(listed: ReadonlyArray<Record<string, unknown>>) {
+  // One data folder for the walk: the labels are checked against its registry and bindings.
+  const home = dataHome();
   return listed.flatMap((agent) => {
     const role = roleOfProvider(agent["provider"]);
     const id = typeof agent["id"] === "string" ? agent["id"] : "";
     if (id === "" || (role !== "manager" && role !== "worker" && role !== "reviewer")) return [];
+    const workspaceId = typeof agent["workspaceId"] === "string" ? agent["workspaceId"] : null;
     return [
       {
         id,
         role,
-        workspaceId: typeof agent["workspaceId"] === "string" ? agent["workspaceId"] : null,
+        workspaceId,
         title: typeof agent["title"] === "string" ? agent["title"] : null,
         status: typeof agent["status"] === "string" ? agent["status"] : "closed",
         archived: typeof agent["archivedAt"] === "string" && agent["archivedAt"] !== "",
         // The agent that created it: a Worker's Manager (`paseo.parent-agent-id`, AGENTS.md).
         parentAgentId: parentOf(agent),
         // A Worker's request (`bm.requestId`), or null.
-        requestIdLabel: requestLabelOf(agent),
+        requestIdLabel: requestLabelOf(agent, id, workspaceId, home),
       },
     ];
   });

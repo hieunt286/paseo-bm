@@ -138,8 +138,9 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     // plus the outdated-agents pass (turn_started, agent.archived; autonomy
     // design §A.11), plus the action boundary's two permission hooks (§D.2),
     // plus the interruption watch's permission_resolved (ADR-024).
+    // plus the binding lifecycle's agent.archived (design §16.5).
     // The question–answer ledger's turn_ended is retired (§A.14).
-    expect(server.on).toHaveBeenCalledTimes(12);
+    expect(server.on).toHaveBeenCalledTimes(13);
     expect([...hooks.keys()].sort()).toEqual([
       "agent.archived",
       "agent.created",
@@ -359,6 +360,7 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
     // and the interruption watch (permission_resolved; ADR-024).
     // The map must end up empty.
     expect([...removers].sort()).toEqual([
+      "agent.archived",
       "agent.archived",
       "agent.created",
       "agent.permission_requested",

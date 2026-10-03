@@ -6,6 +6,8 @@ import { checkReviewBudget, type BudgetOverrun, type BudgetPaseo } from "./serve
 import { registerDashboardRpcs } from "./server/dashboard-rpc";
 import { registerRoleHook } from "./server/role-hook";
 import { startAgentTools, toolsStaleSince } from "./server/agent-tools";
+import { createBindingSweep, registerBindingLifecycle } from "./server/agent-bindings";
+import { sightCreatedWorker } from "./server/request-registry";
 import { describeRoles } from "./server/roles";
 import { registerStopPropagation } from "./server/stop-propagation";
 import { registerAgentLabels } from "./server/agent-labels";
@@ -107,6 +109,8 @@ export default function contribute(server: PluginServerContext): () => void {
       paseo,
       // The base, the Runtime facts with the workspace's precedents, and the role's additional instructions, when any.
       readInstructions: (workspaceId) => currentInstructions("manager", paseo, { workspaceId }),
+      // Design §16.5: a new Manager is bound to its own tool path (its tools stay builders in this step).
+      binder: agentTools.binder,
     });
     if (result.otherManagerIds.length > 0) {
       console.warn(
@@ -128,7 +132,10 @@ export default function contribute(server: PluginServerContext): () => void {
   server.handle(rolesDescribeRpc, (_input, { paseo }) => describeRoles({ paseo }));
   registerDashboardRpcs(server, {
     ensureManager: async (workspaceId, paseo) => {
-      const result = await ensureManager({ workspaceId }, { paseo: paseo as never, readInstructions: (id) => currentInstructions("manager", paseo, { workspaceId: id }) });
+      const result = await ensureManager(
+        { workspaceId },
+        { paseo: paseo as never, readInstructions: (id) => currentInstructions("manager", paseo, { workspaceId: id }), binder: agentTools.binder },
+      );
       // This path shows no launcher notice, so the log is the only place a mode problem surfaces.
       if (result.modeNotice !== null) console.warn(`[paseo-bm] ${result.modeNotice}`);
       if (result.toolsNotice !== null) console.warn(`[paseo-bm] ${result.toolsNotice}`);
@@ -185,7 +192,11 @@ export default function contribute(server: PluginServerContext): () => void {
   // handed to everything that keeps the last handle, so after a plugin reload the first turn start, Inbox
   // read or creation is enough — before, only a paseo-bm creation reached the agents' tools, and the
   // Orchestrator's tools refused every call until a new agent was created.
+  // Design §16.5: the per-agent tool bindings. The first handle of a run sweeps away the bindings of
+  // agents Paseo no longer lists; an archived agent's binding is revoked (registered below).
+  const bindingSweep = createBindingSweep(() => agentTools.bindings);
   const shareHandle = (paseo: unknown): void => {
+    void bindingSweep.run(paseo);
     agentTools.usePaseo(paseo);
     stallWatcher.usePaseo(paseo);
     eventBus.usePaseo(paseo);
@@ -199,7 +210,10 @@ export default function contribute(server: PluginServerContext): () => void {
   const removeRoleHook = registerRoleHook(server, {
     urlFor: (role) => agentTools.urlFor(role),
     usePaseo: shareHandle,
+    // Design §16.5: the hook keeps the bound URL of a creation the plugin made itself.
+    bindings: agentTools.bindings,
   });
+  const removeBindingLifecycle = registerBindingLifecycle(server, () => agentTools.bindings);
   const removeActionBoundary = actionBoundary.register(server);
   const removeStopPropagation = registerStopPropagation(server);
   // delta 20260918g §4.5: a bm-* agent created without its bm.role label gets it.
@@ -214,7 +228,11 @@ export default function contribute(server: PluginServerContext): () => void {
         raiseInboxAlert(rolePairingAlertOf(mismatch));
       },
     },
-    (agent, paseo) => handoffs.agentCreated(agent, paseo),
+    async (agent, paseo) => {
+      // Design §16.4: the request of a new Worker an unbound Manager created is registered at first sight.
+      await sightCreatedWorker(agent, paseo);
+      return handoffs.agentCreated(agent, paseo);
+    },
   );
   // delta 20260921 §4.2.4 (F13): a plugin notice to an agent that may be running
   // (BM-TOOLS, BM-SETTINGS, BM-FALLBACK, BM-DELIVERY) waits in memory for that agent's next
@@ -252,7 +270,8 @@ export default function contribute(server: PluginServerContext): () => void {
   // (§4.5.2); for a Reviewer it tells the Worker how to create the
   // replacement itself (§4.5.1).
   const switches: Record<FallbackIncident["role"], FallbackAction> = {
-    worker: createWorkerSwitch(),
+    // Design §16.5: the replacement Worker is bound to its own tool path (its tools stay builders in this step).
+    worker: createWorkerSwitch({ binder: agentTools.binder }),
     reviewer: createReviewerSwitch(),
     manager: createManagerSwitch(),
   };
@@ -393,6 +412,7 @@ export default function contribute(server: PluginServerContext): () => void {
   });
   return () => {
     removeRoleHook();
+    removeBindingLifecycle();
     removeActionBoundary();
     removeStopPropagation();
     removeAgentLabels();

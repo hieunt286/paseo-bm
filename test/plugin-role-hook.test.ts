@@ -12,6 +12,8 @@ import { createAutonomyStore } from "../plugin/server/autonomy-store";
 import { BOUNDARY_MODES, boundaryPostureOf, creatorModeOffBoundary } from "../plugin/server/role-mode";
 import { currentInstructionsHash, instructionsHashOf, roleTextOf } from "../plugin/server/instructions-label";
 import { forgetCreatedBoundaries, takeCreatedBoundary } from "../plugin/server/created-boundary";
+import { clearBindingCache, createBindingStore, type BindingStore } from "../plugin/server/agent-bindings";
+import { binderOf } from "../plugin/server/agent-tools";
 
 // The entry resolves the install home from $HOME when Paseo's config names no
 // plugin path; point it at an empty directory so this machine's real
@@ -1258,4 +1260,50 @@ describe("before(\"agent.create\") — the action boundary per project (autonomy
     // Outside the boundary, so agent.created labels it off (live check 2026-10-01 F1).
     expect(takeCreatedBoundary("bm-worker", "/on")).toBe("off");
   }, 20000);
+});
+
+describe("before(\"agent.create\") — a bound creation (design §16.5)", () => {
+  const roleUrl = (role: string) => `http://127.0.0.1:4567/mcp/${role}`;
+  const paseo = { config: { get: async () => ({ config: { providers: { "bm-worker": { extends: "claude" }, "bm-worker-fallback-1": { extends: "pi" } } } }) } };
+  let root: string;
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "bm-hook-bound-"));
+    mkdirSync(join(root, ".paseo-bm"));
+  });
+  afterEach(() => {
+    clearBindingCache();
+    rmSync(root, { recursive: true, force: true });
+  });
+  function hookWith(bindings: BindingStore) {
+    let hook: ((input: { request: AgentCreateRequest }, context: unknown) => unknown) | undefined;
+    registerRoleHook({ before: ((_name: string, handler: typeof hook) => ((hook = handler), () => {})) as never }, { urlFor: roleUrl, bindings });
+    return async (config: Record<string, unknown>) => (await hook!({ request: { config } as unknown as AgentCreateRequest }, { paseo })) as AgentCreateRequest | undefined;
+  }
+
+  it("keeps the token URL of a pending binding and attaches it; the same creation without a token gets the role path and the same prompt", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const bindings = createBindingStore(join(root, ".paseo-bm"));
+    const issued = binderOf(roleUrl, bindings, () => {}).issue({ role: "worker", base: "claude", workspaceId: "wks_1" })!;
+    const create = hookWith(bindings);
+    const bound = await create({ provider: "bm-worker/claude-opus-5", cwd: "/repo", mcpServers: { "paseo-bm": issued.mcpServer } });
+    expect(bound?.config.mcpServers).toEqual({ "paseo-bm": issued.mcpServer });
+    expect(bindings.list()[0]?.attachedAt).not.toBeNull();
+    const plain = await create({ provider: "bm-worker/claude-opus-5", cwd: "/repo" });
+    expect(plain?.config.mcpServers).toEqual({ "paseo-bm": { type: "http", url: roleUrl("worker"), alwaysLoad: true } });
+    // No agent sees a change in this step: the role text and its facts are the same.
+    expect(bound?.config.systemPrompt).toBe(plain?.config.systemPrompt);
+    expect(bound?.config.toolPolicy).toEqual(plain?.config.toolPolicy);
+  });
+
+  it("rewrites a foreign URL and attaches nothing; removes a paseo-bm entry on a provider without tools", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const bindings = createBindingStore(join(root, ".paseo-bm"));
+    const create = hookWith(bindings);
+    const foreign = await create({ provider: "bm-worker/claude-opus-5", cwd: "/repo", mcpServers: { "paseo-bm": { type: "http", url: `${roleUrl("worker")}/${"d".repeat(64)}` } } });
+    expect(foreign?.config.mcpServers).toEqual({ "paseo-bm": { type: "http", url: roleUrl("worker"), alwaysLoad: true } });
+    const onPi = await create({ provider: "bm-worker-fallback-1/pi-default", cwd: "/repo", mcpServers: { "paseo-bm": { type: "http", url: roleUrl("worker") }, keep: { type: "http", url: "http://x" } } });
+    expect(onPi?.config.mcpServers).toEqual({ keep: { type: "http", url: "http://x" } });
+    expect(onPi?.config.toolPolicy).toBeUndefined();
+    expect(bindings.list()).toEqual([]);
+  });
 });

@@ -13,6 +13,10 @@ import { REVIEWER_STOP_NOTICE } from "../plugin/server/stop-propagation";
 import type { FallbackIncident } from "../plugin/shared/contracts";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
 import { fakePaseo } from "./helpers/fake-paseo";
+import { createBindingStore } from "../plugin/server/agent-bindings";
+import { binderOf } from "../plugin/server/agent-tools";
+import { createRequestRegistry } from "../plugin/server/request-registry";
+import { applyAgentTools, type AgentCreateRequest } from "../plugin/server/role-hook";
 
 /**
  * Delta 20260921 §4.4.7 (REQ-065 d): "Switch" creates the replacement Worker on
@@ -273,5 +277,42 @@ describe("fallback.act switch", () => {
     expect(after).toMatchObject({ status: "switched", replacementId: NEW });
     expect(sent.filter((entry) => entry.id === MANAGER || entry.text.startsWith("BM-FALLBACK"))).toEqual([]);
     expect(createDecisionStore(home).get("f:fb-0000000000cc")).toMatchObject({ status: "withdrawn" });
+  });
+});
+
+describe("switch (Worker) — bound to its own tool path (design §16.5) and appended to its request (§16.4)", () => {
+  const roleUrl = (role: string) => `http://127.0.0.1:4567/mcp/${role}`;
+
+  it("creates the replacement with a token URL, binds it once the hook attached it, and adds it to the request's Workers", async () => {
+    write([incident()]);
+    const bindings = createBindingStore(home);
+    const binder = binderOf(roleUrl, bindings, () => {});
+    // The daemon runs the creation hook before the agent exists: here, the hook's tool step.
+    const hooked = (request: { config: Record<string, unknown> }) => {
+      applyAgentTools({ config: { ...request.config, cwd: "/repo" } } as unknown as AgentCreateRequest, { urlFor: roleUrl, bindings }, "codex");
+      return { id: NEW };
+    };
+    const { paseo, create } = daemonWith({ create: hooked as never });
+    const { action } = switcher({ binder });
+    await expect(action(incident(), paseo, { home })).resolves.toMatchObject({ status: "switched", replacementId: NEW });
+    const config = create.mock.calls[0]![0].config as Record<string, unknown>;
+    expect(config["mcpServers"]).toEqual({ "paseo-bm": { type: "http", url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:4567\/mcp\/worker\/[0-9a-f]{64}$/), alwaysLoad: true } });
+    expect(bindings.bindingOfAgent(NEW)).toMatchObject({ state: "bound", role: "worker", workspaceId: "wks_1", requestId: REQ, parentId: MANAGER });
+    // The token is in the creation config only, never in a log line.
+    const token = String((config["mcpServers"] as Record<string, { url: string }>)["paseo-bm"]!.url).slice(-64);
+    expect(JSON.stringify(log.mock.calls)).not.toContain(token);
+    // Design §16.4: the request keeps its id, and the replacement is its newest Worker.
+    expect(createRequestRegistry(home).get("wks_1", REQ)).toMatchObject({ source: "agent-typed", managerId: MANAGER, workerIds: [OLD, NEW] });
+  });
+
+  it("creates an unbound replacement on a provider without tools, and leaves no binding", async () => {
+    const pi = { ...CANDIDATE, position: 3, alias: "bm-worker-fallback-3", baseProvider: "pi", model: "pi-default", thinkingOptionId: null, modeId: null };
+    write([incident({ candidate: pi })]);
+    const bindings = createBindingStore(home);
+    const { paseo, create } = daemonWith();
+    const { action } = switcher({ binder: binderOf(roleUrl, bindings, () => {}) });
+    await action(incident({ candidate: pi }), paseo, { home });
+    expect(create.mock.calls[0]![0].config).toEqual({ provider: "bm-worker-fallback-3/pi-default" });
+    expect(bindings.list()).toEqual([]);
   });
 });

@@ -50,6 +50,7 @@ import { asRecord, availableProviders, nonEmpty, reasonOf } from "./role-choices
 import { dataHomeOf } from "./role-instructions";
 import { TIMED_OUT, withTimeout } from "./role-mode";
 import { dataHome } from "./rpc-kit";
+import { knownRequestIdOf } from "./request-registry";
 import { fallbackAlias, positionOfAlias } from "../shared/fallback";
 import { fallbackIncidentSchema, type BmRole, type FallbackIncident } from "../shared/contracts";
 import type { FallbackClass } from "../shared/fallback-patterns";
@@ -436,7 +437,9 @@ export async function recordIncident(
     const chain = chainOf(readRoleFallback(deps.home, log).file, role);
     const snapshot = await snapshotOf(deps.paseo, agentId);
     const labels = labelsOf(snapshot);
-    const requestId = role === "manager" ? null : nonEmpty(labels["bm.requestId"]);
+    // Design §16.4: the incident's request is the label only as far as the plugin trusts it.
+    const requestId =
+      role === "manager" ? null : knownRequestIdOf({ id: agentId, workspaceId, labels, parentAgentId: nonEmpty(labels[PARENT_AGENT_LABEL]) }, { home: deps.home, log });
     const agentModel = modelOf(snapshot);
     const alias = providerId(agentProvider) ?? agentProvider;
     const bases = await aliasBases(deps.paseo);

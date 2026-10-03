@@ -21,6 +21,8 @@ import { createAlertStore } from "../plugin/server/alert-store";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
 import { currentInstructionsHash } from "../plugin/server/instructions-label";
 import { fakePaseo } from "./helpers/fake-paseo";
+import { createBindingStore } from "../plugin/server/agent-bindings";
+import { binderOf } from "../plugin/server/agent-tools";
 
 const MANAGER_HASH = currentInstructionsHash("manager");
 
@@ -1145,5 +1147,64 @@ describe("createManager — the one path that creates a Manager (delta 20260921 
 
     expect((error as ManagerEnsureError).code).toBe("E_PROVIDER_UNAVAILABLE");
     expect((error as Error).message).toBe(`E_PROVIDER_UNAVAILABLE: could not create the Manager ${named}: usage limit`);
+  });
+});
+
+describe("manager.ensure — a new Manager bound to its own tool path (design §16.5)", () => {
+  const roleUrl = (role: string) => `http://127.0.0.1:4567/mcp/${role}`;
+
+  it("passes a token URL on a provider that can take the tools; a creation the hook never attached leaves the Manager unbound", async () => {
+    const dataHome = mkdtempSync(join(isolatedHome, "bm-bind-"));
+    try {
+      const bindings = createBindingStore(dataHome);
+      const logs: string[] = [];
+      const fake = daemonWith();
+      await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), binder: binderOf(roleUrl, bindings, () => {}), log: (line) => logs.push(line) });
+      const config = fake.createCalls[0]!.options.config as Record<string, unknown>;
+      expect(config["mcpServers"]).toEqual({ "paseo-bm": { type: "http", url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:4567\/mcp\/manager\/[0-9a-f]{64}$/), alwaysLoad: true } });
+      // The fake daemon runs no creation hook, so nothing attached the token: no binding is left.
+      expect(bindings.list()).toEqual([]);
+      expect(logs).toContain("[paseo-bm] manager created-1 was created without its tool token attached; it is unbound and keeps the role path.");
+      const token = String((config["mcpServers"] as Record<string, { url: string }>)["paseo-bm"]!.url).slice(-64);
+      expect(logs.join("\n")).not.toContain(token);
+    } finally {
+      rmSync(dataHome, { recursive: true, force: true });
+    }
+  });
+
+  it("binds the Manager when the hook attached its token", async () => {
+    const dataHome = mkdtempSync(join(isolatedHome, "bm-bind-"));
+    try {
+      const bindings = createBindingStore(dataHome);
+      const binder = binderOf(roleUrl, bindings, () => {});
+      // The hook's part, run as the daemon would before handing the agent back.
+      const attaching: typeof binder = {
+        issue: (request) => {
+          const issued = binder.issue(request);
+          if (issued !== null) bindings.attach(issued.mcpServer.url.slice(-64), "manager");
+          return issued;
+        },
+        settle: binder.settle,
+        discard: binder.discard,
+      };
+      const fake = daemonWith();
+      const result = await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), binder: attaching, log: () => {} });
+      expect(bindings.bindingOfAgent(result.agentId)).toMatchObject({ state: "bound", role: "manager", workspaceId: WS, requestId: null, parentId: null });
+    } finally {
+      rmSync(dataHome, { recursive: true, force: true });
+    }
+  });
+
+  it("issues no token for a Manager on Pi", async () => {
+    const dataHome = mkdtempSync(join(isolatedHome, "bm-bind-"));
+    try {
+      const bindings = createBindingStore(dataHome);
+      const fake = daemonWith({ providers: { ...roleAliases(), "bm-manager": { extends: "pi", label: "Beads Manager", paseoTools: rolePaseoToolsPolicy("manager") } } });
+      await ensureManager({ workspaceId: WS }, { ...deps(fake.paseo), binder: binderOf(roleUrl, bindings, () => {}), log: () => {} });
+      expect(fake.createCalls[0]!.options.config).not.toHaveProperty("mcpServers");
+      expect(bindings.list()).toEqual([]);
+    } finally {
+      rmSync(dataHome, { recursive: true, force: true });
+    }
   });
 });

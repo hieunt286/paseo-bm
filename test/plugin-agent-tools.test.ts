@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   AGENT_TOOLS_SERVER,
+  BUILDER_SEND_LINES,
   MAX_BODY_BYTES,
   answer,
   roleOfPath,
@@ -90,6 +91,8 @@ describe("the MCP conversation", () => {
     });
     expect(called.body.result.isError).toBeUndefined();
     expect(called.body.result.content[0].text).toMatch(/^BM-REPORT\nrequestId: req-20260924T065116Z\nphase: received/);
+    // Design §16.5: a builder-only answer ends with its send step.
+    expect(called.body.result.content.at(-1).text).toBe(BUILDER_SEND_LINES["bm_report"]);
   });
 
   it("returns the input's problems as a tool error the agent can act on", async () => {
@@ -195,6 +198,9 @@ describe("the Orchestrator's endpoint (orchestrator design §5.1)", () => {
     expect(roleOfPath("/mcp/orchestrator/ab", "")).toBeNull();
     expect(roleOfPath("/mcp/worker", "ab")).toBe("worker");
     expect(roleOfPath("/mcp/worker/ab", "ab")).toBeNull();
+    // Design §16.5: a bound agent's own path, `/mcp/<role>/<64 hex>`; the Orchestrator's secret never opens it.
+    expect(roleOfPath(`/mcp/worker/${"ab".repeat(32)}`, "ab")).toBe("worker");
+    expect(roleOfPath(`/mcp/reviewer/${"ab".repeat(32)}/`, "")).toBe("reviewer");
   });
 
   it("refuses a call before any Paseo handle arrived, records nothing, and logs one line per call", async () => {

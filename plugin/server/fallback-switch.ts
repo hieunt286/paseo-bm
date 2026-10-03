@@ -23,6 +23,8 @@
  *    creation (the old Worker cannot be read) creates nothing and leaves the
  *    incident pending.
  */
+import { createBound, type AgentBinder } from "./agent-bindings";
+import { createRequestRegistry, sightRequestId } from "./request-registry";
 import { unusableDataHomeMessage } from "./data-home";
 import { createLocationResolver, resolveLocationFromPaseo } from "./collector";
 import { decidePending, type FallbackAction, type FallbackRpcDeps } from "./fallback-rpc";
@@ -71,6 +73,12 @@ export interface SwitchDeps {
   handover?: (incident: FallbackIncident, deps: { paseo: unknown; location: TraceStoreLocation | null }) => Promise<string>;
   /** The workspace trace store; the collector's resolver by default. */
   location?: (paseo: unknown) => Promise<TraceStoreLocation | null>;
+  /**
+   * Binds the replacement Worker to its own tool path when its base provider
+   * can take the tools (design §16.5); the endpoint's binder in the plugin,
+   * none (unbound) when absent. Its tools stay builders in this step.
+   */
+  binder?: AgentBinder | null;
 }
 
 let queue: Promise<unknown> = Promise.resolve();
@@ -80,6 +88,23 @@ function serialised<T>(work: () => Promise<T>): Promise<T> {
   const run = queue.then(work, work);
   queue = run.catch(() => undefined);
   return run;
+}
+
+/**
+ * Appends the replacement Worker to its request's registry entry (design
+ * §16.4: `workerIds`, newest last). A request an unbound Manager issued is
+ * registered first if the plugin had not seen it yet; one under a bound
+ * Manager is never created here. Never throws; a failure is one log line.
+ */
+function noteReplacementWorker(home: string, incident: FallbackIncident, workerId: string, log: (message: string) => void): void {
+  const { workspaceId, requestId } = incident;
+  if (requestId === null) return;
+  try {
+    sightRequestId({ workspaceId, requestId, role: "worker", agentId: incident.agentId, parentAgentId: incident.managerId }, { home, log });
+    createRequestRegistry(home, { log }).addWorker(workspaceId, requestId, workerId);
+  } catch (error) {
+    log(`[paseo-bm] could not add Worker ${workerId} to request ${requestId}: ${reasonOf(error)}`);
+  }
 }
 
 /** The `switch` action of `fallback.act`, for the Worker. */
@@ -147,27 +172,45 @@ export function createWorkerSwitch(deps: SwitchDeps = {}): FallbackAction {
       const featureValues = posture?.featureValues ?? undefined;
       let created: { id: string };
       try {
-        created = await api.agents.create({
-          config: {
-            provider: `${alias}/${candidate.model}`,
-            ...(candidate.thinkingOptionId !== null ? { thinkingOptionId: candidate.thinkingOptionId } : {}),
-            ...(modeId !== undefined && capability !== "none" ? { modeId } : {}),
-            ...(featureValues !== undefined ? { featureValues } : {}),
-          },
-          cwd,
-          ...(current.managerId !== null ? { parent: current.managerId } : {}),
-          title: FALLBACK_WORKER_TITLE,
-          labels: {
-            "bm.role": "worker",
-            ...(current.requestId !== null ? { "bm.requestId": current.requestId } : {}),
-            "bm.version": PLUGIN_VERSION,
-            [REPLACES_LABEL]: current.agentId,
-          },
-          prompt,
-        });
+        // Design §16.5: bound to its own tool path when the candidate's provider can take the tools.
+        const binding = {
+          role: "worker" as const,
+          base: candidate.baseProvider,
+          workspaceId: current.workspaceId,
+          requestId: current.requestId,
+          parentId: current.managerId,
+        };
+        created = await createBound(
+          deps.binder,
+          binding,
+          (mcpServers) =>
+            api.agents.create({
+              config: {
+                provider: `${alias}/${candidate.model}`,
+                ...(candidate.thinkingOptionId !== null ? { thinkingOptionId: candidate.thinkingOptionId } : {}),
+                ...(modeId !== undefined && capability !== "none" ? { modeId } : {}),
+                ...(featureValues !== undefined ? { featureValues } : {}),
+                ...(mcpServers !== undefined ? { mcpServers } : {}),
+              },
+              cwd,
+              ...(current.managerId !== null ? { parent: current.managerId } : {}),
+              title: FALLBACK_WORKER_TITLE,
+              labels: {
+                "bm.role": "worker",
+                ...(current.requestId !== null ? { "bm.requestId": current.requestId } : {}),
+                "bm.version": PLUGIN_VERSION,
+                [REPLACES_LABEL]: current.agentId,
+              },
+              prompt,
+            }),
+          log,
+        );
       } catch (error) {
         return fail(`could not create the fallback Worker on ${alias}/${candidate.model}: ${reasonOf(error)}`);
       }
+
+      // Design §16.4: the request keeps its id, and its registry entry gains the replacement as its newest Worker.
+      noteReplacementWorker(home, current, created.id, log);
 
       // 5. Mark the old Worker; the incident's replacementId excludes it even if this fails.
       try {

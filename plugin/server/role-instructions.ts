@@ -86,6 +86,13 @@ export interface RuntimeFacts {
    * budget, or the plugin was down).
    */
   actionBoundary?: BoundaryPosture;
+  /**
+   * The agent is bound (design §16.5): the plugin created it with its own
+   * tool token and the creation hook kept that URL. Its Runtime facts carry no
+   * hand-path templates once the role files teach the tools (§16.12, step 5);
+   * until then the text is the same either way. Absent: unbound.
+   */
+  bound?: boolean;
 }
 
 /** The `Action boundary` facts line's key; `agent-labels.ts` and the permission handler read it back. */
@@ -224,6 +231,8 @@ export interface CreationLookup extends PrecedentLookup {
   boundary?: BoundarySwitch;
   /** Whether a project's boundary is on; the owner's policy by default (`autonomy/policy.json`). */
   boundaryOn?: (workspaceId: string) => boolean;
+  /** The creation hook kept the agent's bound tool URL (design §16.5): the facts say it is bound. */
+  bound?: boolean;
 }
 
 /**
@@ -286,7 +295,9 @@ export async function runtimeFactsOf(
     lookup === undefined ? Promise.resolve({}) : precedentFactsOf(role, cwd, lookup, log),
   ]);
   const budgetFacts = role === "worker" && precedents !== undefined ? reviewBudgetFactsOf(precedents, log) : {};
-  return { ...modes, ...skillFacts, ...precedentFacts, ...budgetFacts };
+  // Design §16.5: the hook says whether it kept a bound tool URL; §16.12 (step 5) reads it.
+  const boundFacts: RuntimeFacts = precedents?.bound === true ? { bound: true } : {};
+  return { ...modes, ...skillFacts, ...precedentFacts, ...budgetFacts, ...boundFacts };
 }
 
 /** A new Worker's review budget (§G.7): the owner's, else the defaults; never throws. */

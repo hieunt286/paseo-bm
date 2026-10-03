@@ -38,6 +38,7 @@ import { INBOX_DIR_NAME } from "./alert-store";
 import { COORDINATION_DIR_NAME } from "./coordination-store";
 import { HANDOFFS_DIR_NAME } from "./handoff-store";
 import { AUTONOMY_DIR_NAME } from "./autonomy-store";
+import { REQUESTS_DIR_NAME } from "./request-registry";
 import { UI_DIR_NAME } from "./data-home";
 import { TIMED_OUT, withTimeout } from "./role-mode";
 import { ROLE_NAMES, markCleanedUpThisRun, roleId, type RoleName } from "./setup-roles";
@@ -237,6 +238,8 @@ export const CLEANUP_DELETES: readonly string[] = [
   AUTONOMY_DIR_NAME,
   // Autonomy design §G.6: and the handoffs with their briefs.
   HANDOFFS_DIR_NAME,
+  // Design §16.4: and the request registry (`ui/agent-bindings.json` goes with the rest of `ui/`).
+  REQUESTS_DIR_NAME,
 ];
 
 export type CleanupDeps = SetupStateDeps & { now?: () => Date };

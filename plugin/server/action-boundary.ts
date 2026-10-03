@@ -95,6 +95,7 @@ import { createDecisionStore, type DecisionStore } from "./decision-store";
 import type { OnDecisionsSettled } from "./decision-rpc";
 import { providerId } from "./provider-id";
 import { dataHome, errorText } from "./rpc-kit";
+import { knownRequestIdOf } from "./request-registry";
 
 /** The base providers the spike passed (ADR-019 decision record): their Workers and Reviewers run under the boundary. */
 export const BOUNDARY_BASE_PROVIDERS: ReadonlySet<string> = new Set(BOUNDARY_PROVIDERS);
@@ -151,7 +152,6 @@ const BASES_TTL_MS = 60_000;
 const ANSWERED_MEMORY = 2000;
 
 const PARENT_AGENT_LABEL = "paseo.parent-agent-id";
-const REQUEST_ID_LABEL = "bm.requestId";
 const REPLACED_BY_LABEL = "bm.replacedBy";
 
 // ---------------------------------------------------------------------------
@@ -597,13 +597,21 @@ export function createActionBoundary(deps: ActionBoundaryDeps = {}): ActionBound
     }
   };
 
-  /** The paseo-bm request an agent works for: its `bm.requestId`, else (a Reviewer) its creator's. */
+  /**
+   * The paseo-bm request an agent works for: its `bm.requestId`, else (a
+   * Reviewer) its creator's — each as far as the plugin trusts it (design
+   * §16.4, `knownRequestIdOf`).
+   */
   const requestOfAgent = async (paseo: BoundaryPaseo, agent: BoundaryAgent, snapshot: BoundaryAgentSnapshot | null): Promise<string | null> => {
-    const own = text(snapshot?.labels?.[REQUEST_ID_LABEL]);
-    if (own !== null) return own;
+    const home = homeOf();
     const parentId = text(agent.parentAgentId ?? null) ?? text(snapshot?.labels?.[PARENT_AGENT_LABEL]);
-    if (parentId === null) return null;
-    return text((await snapshotOf(paseo, parentId))?.labels?.[REQUEST_ID_LABEL]);
+    const own = knownRequestIdOf({ id: agent.id, workspaceId: agent.workspaceId, labels: snapshot?.labels ?? null, parentAgentId: parentId }, { home, log });
+    if (own !== null || parentId === null) return own;
+    const parent = await snapshotOf(paseo, parentId);
+    return knownRequestIdOf(
+      { id: parentId, workspaceId: agent.workspaceId, labels: parent?.labels ?? null, parentAgentId: text(parent?.labels?.[PARENT_AGENT_LABEL]) },
+      { home, log },
+    );
   };
 
   async function decide(event: { agent: BoundaryAgent; request: BoundaryRequest }, paseo: BoundaryPaseo, known: BoundaryAgentSnapshot | null): Promise<RequestOutcome> {
