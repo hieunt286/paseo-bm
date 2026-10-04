@@ -92,7 +92,7 @@ import { createBindingStore, creationMayExist, liveBindingOf, type AgentBinder }
 import { listAllAgents, parentOf, roleOfProvider } from "./agent-role";
 import { redactText, sliceLastTurn } from "./collector";
 import { COMMAND_LIMIT_MESSAGE, HANDOFF_OFF_MESSAGE, commandRefusalOf, sendCommand } from "./command-send";
-import { createPluginWorker, workerProfileOf, type WorkerCreationPaseo } from "./create-worker";
+import { createPluginWorker, workerProfileOf, workerTitleOf, type WorkerCreationPaseo } from "./create-worker";
 import { readCoordinationSettings } from "./coordination-rpc";
 import { TRACES_DIR_NAME, resolveDataHome, type DataHomeDeps } from "./data-home";
 import { workerHandoverFacts } from "./fallback-handover";
@@ -846,6 +846,7 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
             managerId: entry.managerId,
             cwd,
             prompt: `${briefLineOf("worker", entry.requestId)}\n${entry.brief}`,
+            title: workerTitleOf(requestOfBrief(entry.brief) ?? ""),
             model: profile.model,
             labels: { [HANDOFF_FROM_LABEL]: entry.workerId },
           },

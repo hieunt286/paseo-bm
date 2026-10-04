@@ -238,8 +238,11 @@ export function toChatCards(item: ChatItem, phase: "streaming" | "complete"): Ch
       const own = pluginCardOf(text);
       return own === undefined ? undefined : [own];
     }
-    // The plugin's first prompt to an agent, or the owner's own words typed in
-    // Paseo's app (or sent on their click): left to Paseo.
+    // A plugin-created agent's first prompt is a request brief: draw it with
+    // the same readable card as an agent-relayed brief, while keeping its
+    // `plugin-prompt` origin (and therefore never treating it as the owner's
+    // words). The owner's own words stay with Paseo.
+    if (origin === "plugin-prompt") return blockCardsOf(text, "received", false);
     if (origin !== "agent") return undefined;
     direction = "received";
   } else if (item.type === "assistant_message") {

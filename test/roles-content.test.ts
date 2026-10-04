@@ -703,7 +703,8 @@ describe("orchestrator.md — decides what reaches it, verifies, declares effect
     // Autonomy design §E.2 (bead 3e5v.3): one line on when to read a chain with bm_why.
     keys(O, "reads why with bm_why before acting on it", "before acting on a claim about why", "`bm_why`");
     rule(O, "keeps notes", /one short note per decision, preference or standing instruction/);
-    rule(O, "without its tools: one line and stop", /Without (them|the tools), say so in one line and stop/);
+    rule(O, "without its tools: try once, then one line and stop", /Without (them|the tools), say\s+so in one line and stop—but only after you attempted the named tool once/);
+    keys(O, "a tool is unavailable only after discovery or transport fails", "tool-discovery or transport error", "Input validation", "policy refusal", "proves it is callable", "Never infer that a tool is missing", "because you have not called it yet");
   });
 
   it("knows what reaches it: the owner's messages, BM-EVENTS lines and BM-ANSWER notices", () => {

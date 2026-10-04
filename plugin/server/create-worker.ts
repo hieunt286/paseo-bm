@@ -5,7 +5,7 @@
  * - `createPluginWorker` is the one creation: `bm-worker/<model>` from the
  *   `bm-worker` profile, the mode by the Worker rules (`modeFactsOf`, the same
  *   value a Manager's Runtime facts name, §7.2), `cwd` given, `parent` = the
- *   Manager, title `Beads Worker`, labels `bm.role`, `bm.requestId`,
+ *   Manager, a concise title derived from the owner's request, labels `bm.role`, `bm.requestId`,
  *   `bm.version` (and the caller's extra ones, `bm.handoffFrom` for a handoff
  *   successor), and a token with a binding when the profile's base provider
  *   can carry one (`binderOf` issues none on any
@@ -36,12 +36,16 @@ import { profileOf } from "./role-mode";
 import { actingTools, boundAs, fixThese, refused, withoutNulls } from "./tool-kit";
 import { boundToolFacesFor, schemaIssues } from "../shared/bm-tools";
 import { briefLineOf } from "../shared/notices";
+import { shorten } from "../shared/text";
 import { PLUGIN_VERSION } from "../shared/version";
+import { redactText } from "./collector";
 
 /** The profile and alias a plugin-created Worker is made from. */
 export const WORKER_PROFILE_ID = "bm-worker";
-/** Title of every Worker the plugin creates for a request (a fallback Worker has its own). */
+/** Fallback title when an older stored handoff has no request text. */
 export const WORKER_TITLE = "Beads Worker";
+/** A request's masked meaning in the tab; `applyRoleTitle` adds the Worker marker. */
+export const workerTitleOf = (request: string, env: NodeJS.ProcessEnv = process.env): string => shorten(redactText(request, env), 72) || WORKER_TITLE;
 export const CREATE_WORKER_TOOL = "bm_create_worker";
 
 /** The caller is not a bound Manager: it creates its Worker by hand. */
@@ -132,6 +136,8 @@ export interface PluginWorkerSpec {
   cwd: string;
   /** Its first prompt, starting with its `BM-BRIEF` line. */
   prompt: string;
+  /** The semantic title derived from the owner's request. */
+  title: string;
   /** The `bm-worker` profile's model (`workerProfileOf`). */
   model: string | null;
   /** Labels beside `bm.role`, `bm.requestId` and `bm.version` (`bm.handoffFrom`). */
@@ -168,7 +174,7 @@ export async function createPluginWorker(paseo: WorkerCreationPaseo, spec: Plugi
         },
         cwd: spec.cwd,
         parent: spec.managerId,
-        title: WORKER_TITLE,
+        title: spec.title,
         labels: { "bm.role": "worker", "bm.requestId": spec.requestId, "bm.version": PLUGIN_VERSION, ...spec.labels },
         prompt: spec.prompt,
       }),
@@ -252,7 +258,7 @@ export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerT
       const prompt = workerBriefOf({ requestId, request, cwd, managerId, context });
       ({ workerId } = await createPluginWorker(
         paseo as WorkerCreationPaseo,
-        { workspaceId: caller.workspaceId, requestId, managerId, cwd, prompt, model: profile.model },
+        { workspaceId: caller.workspaceId, requestId, managerId, cwd, prompt, title: workerTitleOf(request), model: profile.model },
         { binder: deps.binder?.(), log },
       ));
     } catch (error) {

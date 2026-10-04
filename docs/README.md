@@ -84,7 +84,7 @@ Acceptance on a real daemon uses the kit in [`scripts/manual-test/`](../scripts/
 
 ## Release notes — `releases/`
 
-One file per version, `paseo-bm-release-notes-<version>.md`, published verbatim as the GitHub Release body. Latest: [0.5.2](releases/paseo-bm-release-notes-0.5.2.md).
+One file per version, `paseo-bm-release-notes-<version>.md`, published verbatim as the GitHub Release body. Latest: [0.5.3](releases/paseo-bm-release-notes-0.5.3.md).
 
 ## History — `archive/`
 

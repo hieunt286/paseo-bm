@@ -29,7 +29,11 @@ claim with `bm_repo` before acting on it; before acting on a claim about why a
 bead, a file or a decision exists, read its chain with `bm_why`; keep one short
 note per decision, preference or standing instruction of the owner's with
 `bm_note`; use `bm_direct_worker` only for a correction. Without the tools, say
-so in one line and stop.
+so in one line and stop—but only after you attempted the named tool once in
+this turn and got a tool-discovery or transport error. Input validation, a
+policy refusal or another tool result proves it is callable: handle that result
+on its own terms. Never infer that a tool is missing from its display name or
+because you have not called it yet.
 
 ## What reaches you
 

@@ -152,11 +152,11 @@ describe("the first prompts start with BM-BRIEF, and every reader still knows th
 });
 
 describe("the chat cards read the same origins", () => {
-  it("a plugin prompt is left to Paseo, with or without clientMessageId, even when it names a request", () => {
+  it("draws a plugin request prompt as a brief card, with or without clientMessageId", () => {
     const handover = `${briefLineOf("worker", REQ)}\nBM-HANDOVER\nrole: worker\nrequestId: ${REQ}`;
-    expect(toChatCards(relayed(handover), "complete")).toBeUndefined();
-    expect(toChatCards(typed(handover), "complete")).toBeUndefined();
-    expect(toChatCards(relayed(`BM-HANDOFF-BRIEF h1\nrequestId: ${REQ}`), "complete")).toBeUndefined();
+    expect(toChatCards(relayed(handover), "complete")?.[0]).toMatchObject({ type: "brief", requestId: REQ });
+    expect(toChatCards(typed(handover), "complete")?.[0]).toMatchObject({ type: "brief", requestId: REQ });
+    expect(toChatCards(relayed(`BM-HANDOFF-BRIEF h1\nrequestId: ${REQ}`), "complete")?.[0]).toMatchObject({ type: "brief", requestId: REQ });
   });
 
   it("a notice is the plugin's card, the owner's words are left to Paseo, an agent's brief is a card as before", () => {

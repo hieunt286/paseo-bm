@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createBindingStore, type AgentBinder, type BindingStore } from "../plugin/server/agent-bindings";
 import { binderOf } from "../plugin/server/agent-tools";
 import { COMMAND_LIMIT_PER_REQUEST, HANDOFF_OFF_MESSAGE, commandsSentFor, sendCommand } from "../plugin/server/command-send";
-import { WORKER_TITLE } from "../plugin/server/create-worker";
 import { createRequestRegistry } from "../plugin/server/request-registry";
 import { applyAgentTools, type AgentCreateRequest } from "../plugin/server/role-hook";
 import { outboxBlocksOf } from "../plugin/server/collector";
@@ -642,7 +641,7 @@ describe("a bound Manager: the plugin creates the successor, the Manager is info
       config: { provider: "bm-worker/claude-opus-5", modeId: "bypassPermissions" },
       cwd: "/work/invoice-app",
       parent: MANAGER,
-      title: WORKER_TITLE,
+      title: "Fix the invoice date format; call the API with --token [redacted] to ch…",
       labels: { "bm.role": "worker", "bm.requestId": REQUEST, "bm.version": PLUGIN_VERSION, [HANDOFF_FROM_LABEL]: WORKER },
     });
     const prompt = options.prompt!;

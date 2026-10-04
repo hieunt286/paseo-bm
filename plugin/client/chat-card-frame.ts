@@ -260,7 +260,14 @@ export function cardFrameOf(card: ChatCard, context: FrameContext): CardFrameVie
     }
     case "brief": {
       const lines = meaningfulLines(card.text, false);
-      return { ...frame, title: lines[0] ?? card.gist, body: withIssues(card, lines.slice(1, 1 + MAX_BODY_LINES)) };
+      const isPluginBrief = /^BM-BRIEF(?:\s|$)/.test(card.text.trimStart());
+      const visible = lines;
+      return {
+        ...frame,
+        chip: isPluginBrief ? { text: "Request", tone: "info" } : frame.chip,
+        title: isPluginBrief ? "Request brief" : (visible[0] ?? card.gist),
+        body: withIssues(card, isPluginBrief ? visible.slice(0, MAX_BODY_LINES) : visible.slice(1, 1 + MAX_BODY_LINES)),
+      };
     }
     case "action": {
       const command = card.command!;

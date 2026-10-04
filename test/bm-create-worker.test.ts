@@ -18,6 +18,7 @@ import {
   NO_WORKER_PROFILE_MESSAGE,
   SCOPE_LINE,
   WORKER_TITLE,
+  workerTitleOf,
   createWorkerCreationTools,
   workerBriefOf,
 } from "../plugin/server/create-worker";
@@ -132,7 +133,7 @@ describe("bm_create_worker creates the Worker of a new request (design §16.6)",
       config: { provider: "bm-worker/claude-opus-5", modeId: "bypassPermissions" },
       cwd: FOLDER,
       parent: MANAGER,
-      title: WORKER_TITLE,
+      title: "Fix the invoice date format. Use the owner's locale.",
       labels: { "bm.role": "worker", "bm.requestId": requestId, "bm.version": PLUGIN_VERSION },
     });
     expect(Object.keys(options.labels!).sort()).toEqual(["bm.requestId", "bm.role", "bm.version"]);
@@ -170,6 +171,16 @@ describe("bm_create_worker creates the Worker of a new request (design §16.6)",
     const token = url.slice(-64);
     expect([answer.text, ...logs].join("\n")).not.toContain(token);
     expect(logs).toEqual([`[paseo-bm] worker ${workerId} is bound to its own tool path.`]);
+  });
+
+  it("derives a concise single-line title from the owner's request", () => {
+    expect(workerTitleOf("  Add CSV export.\nUse the current filters.  ")).toBe("Add CSV export. Use the current filters.");
+    expect(workerTitleOf(" ")).toBe(WORKER_TITLE);
+    expect(workerTitleOf("Deploy with --token hidden-value", {})).toBe("Deploy with --token [redacted]");
+    expect(workerTitleOf("Use daemon-key to inspect the run", { PASEO_DAEMON_PASSWORD: "daemon-key" })).toBe("Use [redacted] to inspect the run");
+    const title = workerTitleOf("Make this request title meaningful even when the owner's request is much longer than a useful tab title can be");
+    expect(title).toHaveLength(72);
+    expect(title.endsWith("…")).toBe(true);
   });
 
   it("every call is a new request: a second call gets its own id; a size passed by an agent on older instructions is ignored (ADR-027 amended)", async () => {

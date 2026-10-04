@@ -404,6 +404,16 @@ describe("the one frame: actor → recipient · authority · time, one chip, ≤
     expect(view.body).toEqual(["Decision: apply the 5-line fix to R3", "Go ahead.", "Then report."]);
   });
 
+  it("shows a BM-BRIEF as a request card without exposing its marker on the face", () => {
+    const prompt = `BM-BRIEF worker requestId: ${REQ}\nThe owner's request, verbatim:\n> Make this request easier to read.\nrequestId: ${REQ}`;
+    const promptCard = cards(prompt, "user_message", "plugin-message-id")![0]!;
+    const view = frameOf(promptCard, worker, [manager]);
+    expect(promptCard).toMatchObject({ type: "brief", requestId: REQ });
+    expect(view).toMatchObject({ chip: { text: "Request", tone: "info" }, title: "Request brief" });
+    expect(view.body).toEqual(["The owner's request, verbatim:", "Make this request easier to read.", `requestId: ${REQ}`]);
+    expect(faceOf(view)).not.toContain("BM-BRIEF");
+  });
+
   it("never shows more than three body lines, and no id of its own on the card's face", () => {
     for (const c of [card(REPORT), card(FINISHED), card(REVIEW, "assistant_message")]) {
       const view = frameOf(c, c.direction === "sent" ? reviewer : manager);
