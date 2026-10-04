@@ -1,295 +1,140 @@
 # AGENTS.md — paseo-bm
 
-Read this before touching anything in this repository.
+This file is the working guide for agents in this repository. Keep it concise and durable. Product
+requirements, implementation details, research findings, and historical evidence belong in the
+canonical documents linked below, not in this file.
 
-## What this project is
+## Mission and sources of truth
 
-`paseo-bm` (BM = Beads Management) is a Paseo plugin, published to npm as `paseo-bm-plugin` and listed on [paseo.cafe](https://paseo.cafe); users install it from the listing or with `paseo plugin add npm:paseo-bm-plugin` (Paseo 0.9+). It does two things:
+`paseo-bm` is a Paseo plugin that installs and coordinates the Beads Manager, Worker, Reviewer, and
+Orchestrator roles. The shipped npm package is `paseo-bm-plugin`; the old `paseo-bm` installer ended
+at version 0.4.0 and remains deprecated on npm, while its source lives only in Git history at the
+`v0.4.0` tag.
 
-1. **Sets itself up.** On first use it creates its three agent roles; its Settings section asks before each step that grants something (Paseo's agent tools for every agent, skills through the third-party `skills` CLI, `br`/`bv`) and removes its own settings on request. The old `npx paseo-bm` installer is retired: its last version, 0.4.0, only moves a 0.3.x directory install to the npm plugin.
-2. **Provides an agent orchestration loop.** After install, the user chats with **Beads Manager** (an agent). Manager answers what it can read itself and hands every change to a **Beads Worker** (a peer agent in the same workspace). Worker sizes the request and uses only the process that size needs: a small change is done and proved directly; larger work gets beads, documents where they are needed, and a **Reviewer** sub-agent. The user can chat directly with Worker, and only the user may archive or delete an agent. The behaviour itself lives in `plugin/roles/*.md`.
+Before changing an area, read only the relevant source of truth:
 
-**Current state:** shipped on npm (0.4.x) and listed on paseo.cafe. The work now is maintenance and new features on a running product.
+- [`docs/README.md`](docs/README.md) — documentation map and current document statuses.
+- `docs/product/` — user outcomes and requirements.
+- `docs/design/` — current technical behavior and contracts.
+- `docs/adr/` — durable decisions; never rewrite an ADR, supersede it with a new one.
+- `docs/operations/` — release, listing, evaluation, and manual-operation procedures.
+- `docs/archive/` — immutable historical evidence; never edit it.
+- `plugin/roles/` — exact behavior of each agent role.
 
-## Language rule
+Search first, then open the smallest relevant section. Do not copy detailed facts from these sources
+into this guide.
 
-**Everything in this repository is written in English** (owner decision, 2026-09-28: the product is global). That covers this file, `plugin/roles/*.md` and every system prompt; commit messages, release notes and the release runbook; and every living document in `docs/` — PRDs, designs, ADRs, plans, operations, the docs index. New documents are written in English from the start.
+## Language and documentation
 
-- **One exception: `docs/archive/`** is the historical record and keeps the language it was written in (Vietnamese before 2026-09-28). It is never edited — only a link is re-pointed when its target moves — and code comments cite its files by name and section.
-- A quote of a user or of an agent keeps its meaning in English; do not paste Vietnamese into a living document.
-- The release notes are published verbatim as the GitHub Release body, so they are read by everyone, not only by this project.
-- Docs that the product's Worker generates in a *target* repo follow that repo's existing language, defaulting to English.
+Everything in this repository is written in English: code-facing text, role prompts, living docs,
+release notes, and commit messages. `docs/archive/` preserves its original language and content.
 
-## Tech stack
+Living documentation describes the product as it works now. Update an existing PRD or design in
+place, preserve cited section numbers and requirement IDs, and add a Revision History entry for a
+real change. Do not create delta documents for ordinary work. A plan exists only for one piece of
+Designed work and is archived when complete.
 
-| Area | Choice |
-|---|---|
-| Language / runtime | TypeScript, ESM, Node >= 22 |
-| Build | `npm run build` regenerates `plugin/package.json`'s version, `PLUGIN_VERSION`, the role-instruction modules and **`plugin-package/`**, the published form: each entry bundled into one file by esbuild ([ADR-026](docs/adr/ADR-026-published-plugin-is-bundled.md); `scripts/generate-*.mjs`). Run it after any change to `plugin/`, or `test/plugin-package.test.ts` goes red. `tsup` also bundles the eval scripts (`tsup.eval.config.ts`) |
-| Test | Vitest, three projects (`vitest.workspace.ts`): `default`, `bench`, `eval`. Every test gets a fake `$HOME`; a test that runs a tool puts a fake binary on `PATH` |
-| Lint / types | ESLint, `tsc --noEmit` |
-| Plugin payload | Paseo plugin API v0.8: split `index.client.tsx` + `index.server.ts`, Zod contracts in `shared/`, React Native primitives only in `client/` |
-| Issue tracking | Beads via `br`; `.beads/issues.jsonl` is the source of truth |
-| Release | GitHub Release → npm trusted publishing (OIDC) with provenance; the workflow sets the dist-tag from the version: prereleases to `next`, stable releases to `latest` |
+## Repository map
 
-**Hard packaging rule:** no `preinstall` / `postinstall` scripts — downloading the package must never modify the user's machine. `prepack` is fine because it runs on the publisher's machine.
+- `plugin/` — source of the Paseo plugin.
+- `plugin-package/` — generated published bundle; never hand-edit it.
+- `test/` — Vitest product, benchmark, and evaluation tests.
+- `scripts/` — generators, packed smoke checks, evaluation tooling, and manual-test helpers.
+- `.beads/` — issue graph; change it only through `br`.
+- `docs/` — living product, design, ADR, plan, operation, release, and archived records.
 
-### One published package (two until 0.4.0)
+The stack is TypeScript ESM on Node 22+, with Vitest, ESLint, TypeScript, tsup, and esbuild. The
+client uses React Native primitives; server/client contracts live under `plugin/shared/`.
 
-Since 0.4.1 a release publishes **one npm package, `paseo-bm-plugin`**, from `release.yml`:
+## Choose the lightest safe lane
 
-| Package | What it is | Root of its tarball | Published |
-|---|---|---|---|
-| `paseo-bm-plugin` | the product: `plugin-package/`, generated from the source in `plugin/` (ADR-026) | **a loadable plugin**: `paseo-plugin.json` + the two bundled entries `index.client.tsx` + `index.server.ts`, with `package.json`, `README.md`, `LICENSE` | every release |
-| `paseo-bm` | the migration command you run with `npx`, once | `dist/` only — no `plugin/`, no manifest | last at **0.4.0**; deprecated on npm; its source lives only at the `v0.4.0` tag |
+State the lane before starting and raise it when new risk appears.
 
-Up to 0.4.0 both packages were published at the same version from the same run. The root
-`package.json` is `"private": true` and has no `bin`, `files` or `prepack`: it is the one
-hand-edited version source, the scripts and the devDependencies, and it is never published. The
-migration command's source was deleted from this repository
-([ADR-022](docs/adr/ADR-022-retirements-after-code-review.md) decision 1); if it ever needs a fix,
-the fix is made on a branch from the `v0.4.0` tag, as the
-[release runbook](docs/operations/paseo-bm-release-runbook.md) §7 says.
+- **Direct** — one local, reversible change with no consumed contract or durable decision change.
+  Implement it, update describing docs, and verify it. No bead, plan, or review is required.
+- **Tracked** — several ordered outcomes, work spanning sessions, or a handoff. Create short manual
+  beads and close each with evidence.
+- **Designed** — changes to consumed contracts or stored formats; credentials, permissions, agent
+  modes, or safety boundaries; writes outside the install home; publishing/package architecture;
+  dependencies; irreversible work; or agent-role behavior. Use `feature-workflow`, update the
+  applicable PRD/design, add an ADR only for a durable new decision, and create a plan only when the
+  work has a real dependency graph.
 
-This exists because [paseo.cafe](https://paseo.cafe) lists paseo-bm, and its security scan
-demands a Paseo runtime entry at the plugin root — reading the npm tarball root whatever the
-entry's `path` says. An installer tarball can never satisfy that. See
-[ADR-009](docs/adr/ADR-009-payload-as-npm-package.md) and
-[the listing record](docs/operations/paseo-bm-cafe-listing-20260923.md). The same scan refuses a graph over
-**200 files or 2,000,000 bytes** in Git *and* in the tarball, which is why what is listed and
-published is the bundled `plugin-package/` ([ADR-026](docs/adr/ADR-026-published-plugin-is-bundled.md)).
-Never hand-edit `plugin-package/`; never put a file there the build does not write.
+Treat rewording as Direct only when behavior and obligations remain unchanged.
 
-**From 0.4.0 the plugin is the whole product** ([ADR-012](docs/adr/ADR-012-plugin-is-the-product.md)):
-`paseo-bm` carries no copy of the payload, does one thing — move a 0.3.x directory install to
-`npm:paseo-bm-plugin` — and 0.4.0 is its last release. Two copies of the payload on one machine is
-exactly what its only job exists to end, so nothing may put `plugin/` back into that tarball.
+## Working method
 
-What breaks the listing, so do not do it:
+1. Read the user request, `git status --short`, and the relevant source-of-truth sections.
+2. Preserve every pre-existing worktree change. Never revert, overwrite, stage, or reformat work
+   you do not own.
+3. Confirm scope and identify the proof before editing. Ask only when the repository cannot answer
+   a decision that changes scope, safety, data, compatibility, or an irreversible action.
+4. Make the smallest coherent change. Avoid opportunistic cleanup.
+5. Run the narrowest meaningful check after the last edit, then the broader required checks for the
+   affected area.
+6. Report what changed, the exact checks and results, and any remaining risk or follow-up.
 
-- **Letting the versions drift.** `package.json`, `plugin/package.json` and `PLUGIN_VERSION` must
-  match; the build writes the last two and a test fails when they disagree. Their validator
-  compares the version in git against the one it resolves on npm.
-- **Renaming `release.yml`.** npm's trusted-publisher entries for *both* packages point at this
-  workflow by file name (`paseo-bm`'s is kept for a possible fix of the migration command).
-- **Forgetting the dist-tag.** Their `resolveNpmPackage` reads `paseo-bm-plugin@latest`. Since
-  0.3.0 `release.yml` sets the tag from the version — prerelease to `next`, stable to `latest` —
-  so a stable release needs no manual step. Pointing `next` at a stable version, or moving either
-  tag by hand, still needs a one-time password and is the owner's step, not an agent's.
-- **Adding a `test` script to `plugin/package.json` to win the listing's health badge.** There is
-  no test in `plugin/`; a script that exists to turn a check green is a fake check.
-- **Putting anything at the installer tarball's root that looks like a plugin** (on a fix branch
-  of the migration command, the only place that tarball is still built).
+Use repository skills when their trigger applies. Do not create process artifacts merely to record
+work already completed.
 
-The registry entry lives in the other repository, at `registry/paseo-bm.json` in
-`paseo-cafe/paseo-cafe`, and declares `path: "plugin-package"` with `package: "paseo-bm-plugin"`. Two
-things cost a red run to learn there:
+## Beads
 
-- Their CI runs Biome over the entry: **short arrays stay on one line**. `JSON.stringify(x, null, 2)`
-  expands them and fails the job before it reaches validation.
-- **Never write a file, local or remote, from a value you have not checked is non-empty, and never
-  let a shell chain continue past a failed step.** A `python3 … <<'PY'` block that exits non-zero
-  does not stop the `cmd && cmd` line after it: on 2026-09-23 that truncated the entry on the PR
-  branch to zero bytes, in someone else's repository. Guard the value (`test -s`, `test -n`) or put
-  the whole sequence inside one script that stops on error.
-
-## Repository layout
-
-```
-AGENTS.md              this file (CLAUDE.md is a symlink to it)
-docs/README.md         index of the docs: start here
-docs/product/          PRDs (living): paseo-bm-prd.md, paseo-bm-dashboard-prd.md,
-                       paseo-bm-autonomy-prd.md
-docs/design/           Technical Designs (living): paseo-bm.md, paseo-bm-dashboard.md,
-                       paseo-bm-orchestrator.md, paseo-bm-autonomy.md, paseo-bm-evaluation.md.
-                       Code cites them by section: never renumber a section
-docs/adr/              ADR-001..026; their status is in the docs index
-docs/plans/            created only for a piece of Designed work; archived when it completes
-                       (now: the autonomy programme's phase plans, open for their field exits)
-docs/operations/       living only: release runbook, the paseo.cafe listing record, the
-                       evaluation baseline, the specialist admission template, drafts of
-                       requests to upstream Paseo
-docs/releases/         release notes, one file per version (the GitHub Release body)
-docs/archive/          history, never edited; docs/archive/README.md indexes it: merged deltas
-                       and change-deltas, superseded PRDs and concepts, completed plans, run
-                       records, spikes, old acceptance checklists, and each living doc's
-                       Revision History up to 2026-10-02. Code cites these by name; find them here
-.beads/                bead graph; issues.jsonl is tracked, *.db is gitignored
-plugin/                Paseo plugin source: what is edited, typechecked and tested; has its own
-                       package.json, README.md, LICENSE, and images/ for the listing
-plugin-package/        GENERATED by `npm run build` (ADR-026): the published and listed form —
-                       the two entries bundled, the manifest, package.json, README.md, LICENSE,
-                       images/; committed because paseo.cafe reads Git
-scripts/               the build's generators, the packed smoke (`smoke:packed`), the eval
-                       tooling (eval/) and the isolated-daemon kit (manual-test/)
-test/                  Vitest tests of the plugin and the eval tooling
-```
-
-There is deliberately **no `paseo-plugin.json` at the repo root**. One existed for a day while
-the paseo.cafe entry pointed at the repository root; the entry now declares
-`path: "plugin-package"`, so nothing reads a root manifest and a stray one would make
-`paseo plugin add` find a plugin that cannot load. A test asserts that the only manifests are in
-`plugin/` and `plugin-package/`.
-
-## Process: risk picks the lane
-
-Rigor follows the risk of the change, never its size or the habit of the last change. Pick
-the lightest lane that fits, say which one in a line, and move up when you learn more.
-The product is shipped (0.4.x); this repository is in maintenance, not in a build-out phase.
-
-| Lane | When | What it takes |
-|---|---|---|
-| **Direct** | Local and easy to undo: a bug fix, a screen, wording or style change, a refactor, a test, tooling, a doc correction — anything that changes none of the contracts below | Just do it. Update the docs that describe what you changed, in place. Proof = the verification commands below, green. No bead, no plan, no gate, no Reviewer |
-| **Tracked** | Still low-risk, but several outcomes with an order between them, or work that will span sessions or be handed over | Beads written by hand (`br create`), closed on evidence. No plan and no gate unless a trigger below appears |
-| **Designed** | Any of the **triggers** below | `feature-workflow`: the design (and PRD when the user-facing outcome changes) edited in place, an ADR for a durable decision, a plan and beads when there is a real dependency graph, and the gates that apply |
-
-**Triggers for Designed** — a change that:
-
-- changes a contract others consume: `install.json` / trace-store / any on-disk schema, the `BM-*` block formats and notices, plugin RPC contracts in `plugin/shared/contracts.ts` (the barrel over `plugin/shared/contracts/*`) read across versions;
-- writes to the user's Paseo configuration, agent skill directories or anything outside the install home;
-- touches credentials, permissions, agent modes or anything the safety boundaries below guard;
-- touches release, publishing or the one-published-package rule;
-- adds a dependency or changes the architecture (overturns or adds an ADR);
-- cannot be undone.
-
-The **role files** (`plugin/roles/*.md`) are product behaviour for every user: changing what an
-agent may do is Designed; rewording without changing behaviour is Direct.
-
-How the lanes are held:
-
-- **Look before you ask.** The design, ADRs and code already answer most questions; read the part you need instead of re-deriving it. A flag name, error code, timeout, JSON shape or label convention is decided in the design — if one is genuinely missing, surface the gap instead of inventing it.
-- **Docs are living.** The PRD, the Technical Design and the ADR index describe the product **as it is now**. Change them in place in the same commit as the code, with one Revision History line when the change is not a correction; a doc describes what is, not how it got there (no "previously", no edit dates in the text). Never renumber a section or an id that code cites — retire a section to a one-line stub instead. No delta files for new work: the old deltas live in `docs/archive/`, kept only because code comments cite them. An ADR is never rewritten — a new ADR supersedes it. A run record, a diagnosis or a completed plan goes to `docs/archive/` when its work is done.
-- **PRD states outcomes, design states detail.** Theme tokens, labels, pixel values and limits belong in the design, code and tests, so a screen tweak never becomes a requirement change.
-- **A plan belongs to one piece of Designed work** and is closed (`Status: Completed`) when its beads are; it is not a standing contract for later work.
-- **Gates apply only where their artifact exists.** Report them honestly; a skipped gate is an exception, never a pass.
-- **No bookkeeping after the fact.** Never create a bead to record work already done, and do not make a commit that only moves beads — bead state goes in the same commit as the work.
-
-## Working with beads (`br`)
-
-`br` is the issue tracker (Rust + SQLite + JSONL). `.beads/issues.jsonl` is the committed source of truth; the `.db` files are local caches and are gitignored.
-
-### Conventions in this repo
-
-- IDs start with `bm-`; beads converted from a plan also carry the work package (`bm-wp-115-51j.2`).
-- Every bead carries `feature:<slug>`; beads converted from a plan also carry `phase:*` and `wp:wp-NNN`.
-- Epics mirror a plan's work packages; leaves are the executable units.
-- Leaf descriptions are self-contained on purpose: an implementer must be able to work from the bead alone, without opening the plan.
-
-### Daily commands
+Use Beads only for Tracked and Designed work.
 
 ```bash
-br ready                  # what can be started right now — always start here
-br show <id>              # full bead: objective, scope, AC, proof, provenance
-br list --json            # machine-readable listing
+br ready
+br show <id>
 br update <id> --status in_progress
 br close <id> --reason "<evidence>"
-br dep tree <id>          # why something is blocked
-br dep add <issue> <depends-on>
-br lint -s all            # template check across the graph
-br dep cycles             # must always report no cycles
+br dep tree <id>
+br lint -s all
+br dep cycles
 ```
 
-### Rules
+- Start from `br ready`; never force a blocked bead.
+- One leaf is one reversible, observable outcome with its tests or evidence included.
+- Every bead carries `feature:<slug>`. Tasks use `## Acceptance Criteria`; epics use
+  `## Success Criteria`.
+- Close only after reading the named proof pass. “Done” is not evidence.
+- Never delete beads or hand-edit `.beads/issues.jsonl`; split or merge through `br` and preserve
+  provenance.
+- A bead may be clarified but may not acquire new scope.
 
-Beads are for the Tracked and Designed lanes; Direct work has none.
+`bv` and `bva` are read-only views over the same graph.
 
-- **When you use beads, take them from `br ready`.** Do not start a blocked bead.
-- **Close with evidence.** The reason must point at the bead's Acceptance Criteria — a command that ran, a test that passed, an observation made. "Done" is not a reason.
-- **Never delete beads.** Split or merge instead, and record `Split-from: <id>` in the Provenance section.
-- **Never hand-edit `.beads/issues.jsonl`.** Go through `br` so the database and the JSONL stay consistent.
-- **A bead does not grow new scope.** It may be re-worded for clarity; new scope is new work in its own lane.
-- **Keep a hand-written bead short:** objective, acceptance criteria, how it is proved. The long leaf template is for beads converted from a plan.
+## Non-negotiable constraints
 
-### `br` gotchas that will bite you
+- Do not commit, push, publish, install or upgrade dependencies, modify real user data/configuration,
+  or operate a live daemon unless the owner explicitly asks.
+- Never read, store, or print credentials, tokens, private keys, `.env` files, or agent records.
+- Do not weaken tests or acceptance criteria to make a check pass.
+- Do not run `paseo daemon stop` or `paseo daemon restart` during development.
+- Do not add install-time scripts. Downloading the npm package must not mutate the user's machine.
+- Keep `package.json`, generated plugin versions, and `PLUGIN_VERSION` aligned through the build.
+- Keep `.github/workflows/release.yml` named exactly as-is; trusted publishing depends on it.
+- There is no root `paseo-plugin.json`. The only manifests belong in `plugin/` and generated
+  `plugin-package/`.
+- The published package is generated: after changing `plugin/`, run `npm run build` and commit the
+  resulting `plugin-package/` changes with the source change.
 
-- A value starting with `-` is parsed as a flag. Use `--description=<text>`, not `--description <text>`.
-- `br show <id> --json` returns an **array**, not an object.
-- `br lint` wants `## Acceptance Criteria` in tasks and `## Success Criteria` in epics. Keep those headings.
+## Verification
 
-## Viewing progress (`bv`, `bva`)
-
-- `bv` — kanban and list views over the same `.beads` directory.
-- `bva` — reporting TUI: totals, phase progress from `phase:*` and `wp:*` labels, dependency leverage, and automatic findings. Run it in any directory that has `.beads/`.
-
-Both read the bead data directly and are safe to run alongside `br`. They are read-only tools for orientation; all changes go through `br`.
-
-## Verified facts about Paseo (do not re-derive these)
-
-Checked against a live daemon, Paseo CLI/daemon 0.8.0:
-
-- `paseo plugin install <dir>` succeeds **even when `pluginsEnabled` is off**, returning `status: "disabled"`. So "register the plugin first, ask for consent second" is a valid order.
-- A plugin's `enabled` field is its own switch and is always true after install. Only `status` reflects reality (`running` vs `disabled`). **Check `status`, never `enabled`.**
-- `paseo plugin remove` does **not** delete a local directory source, and it leaves an empty `plugins: {}` key behind. That key belongs to Paseo; do not clean it up.
-- An agent created by another agent is still a first-class agent in the workspace — it only carries a `paseo.parent-agent-id` label. The user can open, message, stop, archive or delete it directly.
-- `daemon.mcp.injectIntoAgents` defaults to **off**, and turning it on grants Paseo tools to **every** agent on the machine, not just ours.
-- Never run `paseo daemon restart` or `stop`: it can kill a running agent.
-- `paseo plugin install` refuses an id that is already configured (`Plugin ID "<id>" is already configured; choose another ID with --id`), and there is no command that changes a directory plugin's path (`update` is Git-only). A directory plugin can only be re-pointed by `paseo plugin remove <id>` followed by `paseo plugin install <new dir> --id <id>`. If the new plugin fails to start, Paseo keeps the `plugins[id]` entry it already wrote, so a fallback must `remove` again before reinstalling the old directory. On failure, `--json` prints `{"error": {"name": "DaemonRpcError", "code": "handler_error", "message": "Request failed: <reason>"}}` and exits non-zero.
-- Rewriting the files of a directory plugin in place does not reload it: Paseo keeps running the bundle it compiled before. `paseo plugin reload <id> --json` reloads it without touching the daemon (log: `Plugin stopped` → `Loading plugin` → `Plugin ready`) and prints `{ id, path, enabled, status }`.
-- A `daemon.agentProfiles[]` entry is `{ id, name, provider, model?, icon?, color?, modeId?, thinkingOptionId?, featureValues?, notes? }` (Zod schema in the Paseo 0.8 app bundle, passthrough). The key is **`provider`** and it is required — there is no `providerId`. `providerId` exists only in our own `install.json` role records.
-- An agent snapshot's `lastUsage` mixes two scopes: `inputTokens` / `cachedInputTokens` / `outputTokens` are **this turn's**, but **`totalCostUsd` is the agent's running session total**. Measured across twelve Manager turns on a real daemon it only ever rose (0.3956 → 0.4492 → 0.6749 → … → 2.2712) while the token counts beside it went up and down. Never sum it per turn; estimate cost from the per-turn tokens instead.
-- A message one agent sends another with `send_agent_prompt` arrives as a **`user_message`** timeline item, indistinguishable from a real user message. A Worker's progress update to its Manager therefore looks exactly like a new user request, and no wording test separates them reliably.
-- A `user_message` typed in the Paseo app carries **`clientMessageId`**; one sent by an agent with `send_agent_prompt` does not (15/15 vs 43/43 on a real Manager). That field — not the wording — is how to tell the user's own messages from relayed ones.
-- Claude Code loads a skill as a `tool_call` named **`Skill`** whose `plain_text` detail has `label` = the skill name ("Launching skill: feature-workflow"). Reading `<skill>/SKILL.md` is the fallback signal for other providers; listing or `test -f` is only a check.
-- `timeline.refetch()` entries carry `turnId`, but a `turn_ended` event's `turnId` can be **null**; when it is, there is no turn boundary to filter on and the whole conversation comes back.
-- An agent created by another agent through Paseo's `create_agent` MCP tool gets **no system prompt**: the tool has no system-prompt parameter. A plugin injects one with the server hook `before("agent.create", ({ request }) => …)`, which runs for every agent creation and may return a modified `{ config, env }`; paseo-bm keys it on `config.provider` (`bm-*`, possibly `<id>/<model>`).
-- Paseo sets **`PASEO_AGENT_ID`** (and `PASEO_AGENT_CWD`) in every agent's environment. An agent that needs its own id reads that one variable; it never has to dump or search the environment.
-- `send_agent_prompt` and `create_agent` take **`notifyOnFinish`** (default `true`): the caller is woken each time the other agent ends a turn. A Worker's `BM-REPORT` sent with the default wakes the Worker again when the Manager finishes reading it.
-- `br` 0.2.10: `br update <id> --status in_progress` **refuses a bead whose blockers are still open** (`cannot claim blocked issue`; only `--force` overrides), and `br reopen <id>` works on a closed bead.
-- `br` 0.2.10: a child bead is **blocked while its parent is blocked**, so a bead that depends on its own children deadlocks. Split a bead into siblings under the same parent and move the dependency edges instead.
-- `br` read commands (`show`, `list`, `ready`, `lint`, `dep tree`) do not write `.beads/` files, even when `issues.jsonl` is newer than the database.
-- Paseo **reuses turn ids inside one agent**: on a real store one Manager had `foreground-turn-1`, `-2` and `-3` twice each, eight minutes apart, and its Worker had `foreground-turn-1` twice. Nothing may treat `(agentId, turnId)` as unique.
-- Paseo lets a plugin contribute **slash commands**: `client.addSlashCommand({ name, description, argumentHint, context, onSubmit })`, `context` being `"workspace"` or `"agent"`. `onSubmit` receives `args: string` plus `paseo`, `rpc`, `openSurface`, `openSettings`, `openPanel` and the workspace (and agent). It has **no channel to report success** — the composer only shows a message when `onSubmit` REJECTS, as an error toast — so a command that has something to say posts it to a surface instead of throwing.
-- The client SDK can message an agent: `paseo.agents.ref(id).send(text)`. That is the same path the app uses, so the text is recorded as a **real user message** (it carries `clientMessageId`).
-- Paseo's renderer is **Expo + `react-native-web`**; its bundle ships `PanResponder`, `Animated`, `LayoutAnimation`. Gestures and animation work in a plugin surface, but **`useNativeDriver` must be `false`**. A `.tsx` under `plugin/client/` may import `react-native`; a file under `test/` must **not** import it as a value — react-native's types pull the DOM lib into the root tsconfig program and `setTimeout` starts resolving to the DOM overload, breaking unrelated files. `import type` is fine.
-- A message timestamp in a trace record **can be the write time**. The collector takes it from the timeline only when `timeline.refetch` answers; when that call fails it stamps every message of the record with `now()`. Never treat a stored message time as a real timeline time.
-- `providers.listModes("bm-worker")` (and `bm-reviewer`) resolves the paseo-bm provider alias to the underlying provider and returns its modes as `{ id, label, colorTier }`, with `colorTier` one of `planning`, `safe`, `moderate`, `dangerous` (read-only probe, 2026-09-17: Claude → plan, default, acceptEdits, auto, bypassPermissions; Codex → auto, auto-review, full-access). Pass the bare id, not `bm-worker/<model>`.
-- The daemon resolves a new agent's mode in `resolveMcpCreateAgent` **before** `before("agent.create")` runs: an explicit mode is used; a child of the same provider inherits the parent's mode; a child of an unattended parent gets the target provider's unattended mode; otherwise it **throws** `cannot inherit mode … Pass an explicit mode`. The hook then receives that resolved config and may change it (only `cwd` is immutable). So a hook can correct a mode but cannot rescue a creation the daemon already refused — a Manager that is not unattended must pass the Worker's mode itself. A Worker in `bypassPermissions` does not get the unattended path either: a Reviewer it creates without a mode is **refused**, not given `full-access` (`cannot inherit mode 'bypassPermissions' from caller … Pass an explicit mode. Available: auto, auto-review, full-access`, seen by two Workers on 2026-09-18), so the Worker passes the Reviewer mode named in its own `## Runtime facts`.
-- The plugin SDK **cannot change the mode or the labels of an agent that already exists**: `PaseoAgentHandle` has no setter for either, `DaemonClient.setAgentMode` is not handed to plugins, and `before("agent.session_open")` can only change `env`. The Paseo CLI can: `paseo agent mode <id> <mode> [--json]` and `paseo agent update <id> --label <k=v> [--json]`. `manager.ensure` uses them (via `plugin/server/paseo-cli.ts`, `execFile` without a shell) to switch a Manager created before delta 20260918 once, marked by the `bm.modeSet` label. Running the CLI from inside the daemon process **works on a real daemon** (2026-09-18: two pre-existing Managers were switched and labelled; a Manager switched back to `default` by hand stayed there after `manager.ensure`).
-- An agent snapshot (from `get_agent_status` or the `agent` of a `timeline.refetch` payload) carries both the **configured** values (`model`, `thinkingOptionId`, `effectiveThinkingOptionId`, `currentModeId`) and the **running** ones in `runtimeInfo { model, thinkingOptionId, modeId }`; prefer `runtimeInfo`. `persistence.metadata.systemPrompt` holds the exact system prompt the agent was given. A Codex Reviewer with no thinking set ran at effective `xhigh` with a 258,400-token window; a Claude Worker has 1,000,000.
-- Paseo delivers `config.systemPrompt` differently per provider: Claude gets it as `append` to the `claude_code` preset (after the whole preset, which brings its own memory, `AskUserQuestion` and commit instructions), with `CLAUDE.md` injected into the conversation, not the system prompt; Codex gets it as `developerInstructions` (after a collaboration mode's own `developer_instructions`), with each `AGENTS.md` as a separate user-role message; OpenCode gets it as `system`. A daemon-level `appendSystemPrompt` (empty unless configured) follows it in all three. Details and sources: `docs/archive/design/paseo-bm-research-20260918-instructions-by-model.md`.
-- A plugin's server process **can serve its own MCP endpoint** and give it to agents (verified 2026-09-24, Claude): `node:http` listening on `127.0.0.1` inside the plugin process works, and `before("agent.create")` returning `config.mcpServers["<name>"] = { type: "http", url, alwaysLoad: true }` plus `config.toolPolicy.preapproved = [{ kind: "mcp", server, tool }]` gives the new agent the tool as `mcp__<name>__<tool>`, with **no permission prompt**. Without `alwaysLoad` Claude hides the tool behind a ToolSearch step. Agents that already exist never get it (`agent.session_open` changes only `env`). paseo-bm's endpoint: ADR-010, `plugin/server/agent-tools.ts`.
-- **`toolPolicy` is refused outright on a provider that cannot pre-approve MCP tools.** Paseo 0.8 `applyProviderConfiguration` throws `Provider '<id>' cannot preapprove exact MCP tools for unattended execution` — the agent is never created — unless the provider's contract has `applyToolPolicy`: only **claude, codex, opencode** (`PROVIDER_CONTRACTS.supportsExactMcpPreapproval`); Pi, Oh My Pi, Copilot and other ACP providers do not. It also throws when a grant names a server missing from `mcpServers`. For Codex, `applyCodexToolPolicy` turns the grants into `mcp_servers.<server>.enabled_tools` plus `tools.<tool>.approval_mode = "approve"`. Verified 2026-09-24 through fallback aliases: a Codex agent created through Paseo calls the tool (shown as `paseo-bm.bm_review`) with no approval prompt; an OpenCode creation carrying `toolPolicy` is accepted; a Pi creation without it succeeds. The creation hook reads the alias's base provider with `config.get()` → `config.providers[<alias>].extends` (the SDK's shape; the file keeps them under `agents.providers`).
-- Paseo **0.9.2** `daemon status --json` has **no `cliVersion`** (it still has `home`, `daemonVersion`, `listen`); `paseo --version` prints the bare CLI version. The 0.4.0 migration command's adapter falls back to it (bm-qh4c). `plugin ls` / `plugin logs --json` kept their 0.8 shape.
-- Paseo 0.9.2 `before("agent.create")` **does not see the creating agent** (verified 2026-09-29, isolated daemon + probe plugin): the request is `{ config, env }` only — `config` keys `provider, cwd, modeId, model, thinkingOptionId, title` (plus `featureValues` / `providerOptions` / `mcpServers` / `toolPolicy` when set), `env` empty for an MCP `create_agent`; the daemon's `createAgentInternal` passes nothing else, and the `paseo.parent-agent-id` label goes to the create options, not the hook. The **`agent.created`** event does carry it, as `agent.parentAgentId` (the caller's id for an MCP creation, `null` for a client `createAgent` with no parent). Role pairing is therefore checked there (`plugin/server/role-pairing.ts`).
-- A **throw from `before("agent.create")` surfaces cleanly** to an agent's `create_agent` (verified 2026-09-29): the tool returns `isError: true` with the text `Plugin <plugin id> before agent.create failed: <the thrown message>`, and no agent is created (the hook runs before any agent state is written). The daemon runs plugins' `before` hooks in plugin-id order and stops at the first throw.
-- **A plugin answers a permission request** with the SDK in its hook or RPC context: `context.paseo.agents.ref(agentId).respondToPermission({ requestId, response })` (Paseo 0.9.2, verified 2026-09-30 on an isolated daemon; round trip ≤ 1 ms; `@getpaseo/plugin`'s typings do not show it, `@getpaseo/client`'s `PaseoApi` does). A plain `{ behavior: "allow" }` is allow-once everywhere; Claude requests offer `suggestions` (permanent allow rules in the workspace's local settings, `setMode acceptEdits`) and OpenCode requests `actions` (`allow_always`) — never take them. `paseo permit ls | allow | deny` answers the same requests from the CLI. Unanswered requests **wait indefinitely** (15 min measured, Claude and Codex, turn still `running`), also while the plugin is disabled, and sit in the agent snapshot's `pendingPermissions` with the whole request, where the app shows them. **Nothing is replayed to a restarted plugin**: it reads them from `paseo.agents.list()`. `agent.permission_resolved` arrives for Claude and Codex, **never for OpenCode**. Run note: `docs/archive/operations/paseo-bm-action-boundary-spike-20260930.md`.
-- **Which calls raise a request** (same run): Claude `default` — every edit/write, every non-read-only `Bash`, `WebFetch`, every MCP tool (`mcp__paseo__*` included); `acceptEdits` — the same minus edits inside the workspace; **`auto` — none** (its classifier decided; push, `DROP TABLE`, `rm -rf` outside all ran). Codex `auto` (`on-request`, `workspace-write`) — only when the model escalates (`rm -rf` outside, an `apply_patch` outside); in-workspace effects run unseen, network and outside writes fail in the sandbox; **`auto-review` — none reach the plugin** (the auto-reviewer approved a push and an `rm -rf`). `providerOptions.approval_policy: "untrusted"` makes Codex ask for every command but known-safe reads and for every file change; with `sandbox_mode: "workspace-write"` an **allowed command still runs sandboxed** (an allowed `curl` / `git push` failed), with `"danger-full-access"` it runs. `providerOptions.web_search: "disabled"` removes Codex's server-side `web_search`, which never raises a request. OpenCode follows the user's own OpenCode config (here `bash: allow`: nothing asked); `OPENCODE_PERMISSION` in the creation `env` (Paseo then starts a dedicated OpenCode server) makes `bash`, `webfetch`, `external_directory` ask, but OpenCode-plugin tools and MCP tools still do not. Every request had `kind: "tool"`.
-- **What a request carries:** Claude `Bash` → `detail.command`, **no cwd**; `Edit`/`Write` → `detail.filePath` (absolute); `WebFetch` → `detail.url`. Codex `CodexBash` → `detail.command` (unwrapped from `/bin/zsh -lc`) and `detail.cwd`. **Codex `CodexFileChange` carries no path** — only `metadata.itemId`; the path is on the pending timeline `tool_call` whose `callId` equals that id (`status: "running"`, `detail.filePath` relative inside the workspace, absolute outside), found by `timeline.refetch({ direction: "tail" })` 5/5 times in ≤ 3 ms. OpenCode `bash` → `detail.command`, no cwd; `webfetch` → `input.metadata.url`; `external_directory` → `input.metadata.command` and `directories`.
-
-- **Token counts differ per provider** (verified 2026-09-30 on an isolated daemon, Paseo 0.9.2; run note `docs/archive/operations/paseo-bm-context-fields-run-20260930.md`): Claude's `lastUsage` tokens are the **sum over the turn's model calls**; Codex and OpenCode report only the **last model call**, and Codex's `cachedInputTokens` are already inside its `inputTokens`. `contextWindowUsedTokens` / `contextWindowMaxTokens` are reported by all three at every turn end and mean the same thing — prefer them for context size. A `/compact` turn reports 0 tokens (Claude, Codex) or repeats the previous turn's (OpenCode); a Codex `/compact` runs as a separate `autonomous-…` turn with no user message.
-- **`/compact <focus>` honours the focus on Claude only** (verified 2026-09-30 on an isolated daemon, Paseo 0.9.2; run note `docs/archive/operations/paseo-bm-compaction-spike-20260930.md`): Claude Code receives the whole text, and its summary kept what the focus named and dropped what it excluded. Paseo passes nothing after `/compact` to Codex (`thread/compact/start { threadId }`) or OpenCode (`session.summarize` with the model only), so their compactions are generic. The message is a `user_message` with `clientMessageId` on all three (on Codex with `turnId` null), so it reads as the user's own. The context reported right after a compaction understates the real one: Claude 2,748 and Codex 4,817 against 23,970 and 16,807 at the next turn end, and OpenCode repeats the figure from before. Read it at the next turn end. Only Claude reports `totalCostUsd`, and the compaction's own model call is in no turn's usage.
-- **Codex with `approval_policy: "untrusted"` asks before every MCP tool call that `toolPolicy` did not pre-approve** (verified 2026-10-01 on an isolated daemon, Paseo 0.9.2, `gpt-5.6-luna`; run note `docs/archive/operations/paseo-bm-phase4-live-check-20261001.md`).
-  - **The request's shape:** `name: "CodexMcpElicitation"`, `kind: "tool"`, `title` "MCP approval: <server>", `metadata.serverName`, and `input { mode: "form", requestedSchema, url: null }`. The tool name is only inside `description` (`… run tool "<tool>"?`); the arguments are not in the request.
-  - **Which calls ask:** Paseo's own agent tools asked, even `list_agents`. paseo-bm's pre-approved `bm_report` ran without a request. So did `git add && git commit`, which the spike had seen ask.
-  - **On Claude `default`:** `mcp__paseo__send_agent_prompt` asks. These raised no request: `Read`, `ToolSearch`, `ListAgents`, `TaskCreate`, `Skill`, `Task` (and its sub-agent's read-only `ls`), and paseo-bm's pre-approved tools.
-- **A message Paseo delivers to a running agent cuts its turn, and Claude Code calls the cut the user's** (verified 2026-10-01 on the owner's store and Claude transcripts). Every cut seen was an agent it created finishing (`notifyOnFinish`, `<paseo-system> Agent … finished`); a plugin's `send()` to a running agent replaces its turn the same way (the notice queue's K10).
-  - **What the transcript shows:** the running tool call returns "The user doesn't want to proceed with this tool use … STOP what you are doing and wait for the user", then `[Request interrupted by user for tool use]`. A `cancel_agent` cut this way had already taken effect.
-  - **What the trace store shows:** the cut turn has `outcome: "canceled"`, and the next turn starts within about 2 s with no `user_message`; the `<paseo-system>` notice is not in the timeline.
-  - **Scale:** 126 cuts in two weeks of the owner's store; in at least 10 of them the agent stopped and waited for an owner who had said nothing.
-  - **How paseo-bm handles it:** structure tells a cut from the owner's stop (ADR-024, `interruption-watch.ts`); never match the words.
-- **A plugin's `agents.create` keeps a plugin-chosen MCP URL, and the agent uses it** (ADR-027 S1, verified 2026-10-03 on an isolated daemon, Paseo 0.10.2; run note `docs/archive/operations/paseo-bm-agent-tools-spikes-20261003.md`): `paseo.workspaces.ref(ws).agents.create({ config: { provider, mcpServers: { <name>: { type: "http", url } } }, … })` reaches `before("agent.create")` with that entry unchanged; a hook that keeps it and adds `alwaysLoad` plus a `toolPolicy` grant gives the agent the tool, and a Claude agent in `default` mode called exactly that URL's tool with no permission request. **A creation `prompt` arrives as a `user_message` without `clientMessageId`** (keys `messageId`, `text`, `type`).
-- **Paseo does not wake the parent of an agent a plugin created with the SDK's `parent`** (ADR-027 S2, same run): the parent stayed idle after the child's turn ended, while a child made by Paseo's MCP `create_agent` (`notifyOnFinish: true`) woke the same parent 24 ms after its turn ended. The finish notification is set up only for `kind: "mcp"` creations (0.10.2 `create-agent/create.js`). Such a creation still sets the `paseo.parent-agent-id` label, and **`agent.created` carries `parentAgentId`** = the SDK's `parent`.
-- **No Paseo read surface shows another agent's `mcpServers` URL, but the URL is not secret** (ADR-027 S4, same run, Claude and Codex): an SDK snapshot (`refresh`, `current`, `agents.list`, `timeline.refetch`), `get_agent_status`, `list_agents`, `get_agent_activity` and `paseo inspect --json` carry no URL; `persistence.metadata.toolPolicy` names the server and tool only. The URL **is** in the agent record `$PASEO_HOME/agents/<cwd slug>/<agent id>.json` (mode `0644`, under `config.mcpServers` and `persistence.metadata.mcpServers`) and, for Claude only, in the provider process's arguments (`--mcp-config {"mcpServers":…}`, readable with `ps -axww` by any process of the same user). An agent with a shell or file-read tool can therefore read another agent's token.
-- **The plugin can cancel a running agent with `paseo agent stop <id> --json`** (ADR-027 S5, same run), run with `execFile` from the plugin process: exit 0 in 577 ms, `{ stoppedCount: 1, agentIds: [id] }`, the turn ends `canceled` with reason `Interrupted` and its running shell process is killed; the daemon (same pid), the plugin and other agents are untouched. On an idle agent it is a no-op (`stoppedCount: 0`). The CLI also accepts an id **prefix**, `--all` and `--cwd`: pass only a full, checked id. The canceled outcome is the same as the owner's Stop.
-
-## Safety boundaries when working in this repo
-
-- Do not commit or push unless the user asks.
-- Do not modify the user's real Paseo configuration (`~/.paseo/config.json`), their agent skill directories, or install plugins onto their daemon as a side effect of development work.
-- Do not run `npm install`, `npx`, or publish anything without being asked.
-- Treat credentials as untouchable: this product's entire security story is that it never reads, stores, or prints them.
-
-## Verification before declaring work done
+Choose checks proportionate to the change and run each after the final edit.
 
 ```bash
-npm run typecheck && npm run lint && npm test && npm run build
-npm run test:bench && npm run test:eval                           # when you touched what they cover
-br lint -s all && br dep cycles                                   # only when you changed beads
+npm run typecheck
+npm run lint
+npm test
+npm run build
+npm run test:bench          # when benchmarked paths change
+npm run test:eval           # when evaluation tooling changes
+npm run smoke:packed        # when packaging changes
+br lint -s all              # when beads change
+br dep cycles               # when bead dependencies change
 ```
 
-`npm test` runs the product tests only (the `default` project in `vitest.workspace.ts`).
-`npm run test:bench` runs the two wall-clock benchmarks (collector, traces) one file at a time,
-and `npm run test:eval` the eval-tooling tests (`scripts/eval`); `npm run verify` runs typecheck,
-typecheck:plugin, lint, all three test runs and the build. One file:
-`npm test -- test/<name>.test.ts`, `npm run test:bench -- test/<name>-benchmark.test.ts`,
+`npm run verify` runs type checks, lint, all test projects, and the build. For focused work, use
+`npm test -- test/<name>.test.ts`, `npm run test:bench -- test/<name>-benchmark.test.ts`, or
 `npm run test:eval -- test/eval-<name>.test.ts`.
+
+Never claim a check you did not watch pass. If a check fails, fix the cause or report the failure.

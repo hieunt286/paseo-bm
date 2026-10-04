@@ -38,6 +38,7 @@ import {
 import { listedWorkspaces, type DashboardPaseo } from "./paseo-directory";
 import { rememberCreatedBoundary } from "./created-boundary";
 import { applyRoleTitle } from "./role-title";
+import { suppressCodexNativeDelegation } from "./provider-native-delegation";
 
 /**
  * Role instructions injected into every paseo-bm agent at creation (bm-hld).
@@ -369,6 +370,18 @@ function withoutCreatorBoundaryMode(request: AgentCreateRequest, base: string | 
 export interface BoundaryInput {
   posture: BoundaryPosture | null;
   base: string | null;
+}
+
+/**
+ * Inactive prototype seam for composing the Codex native-delegation adapter
+ * after this hook has resolved an alias's base provider. Production creation
+ * does not call it until a separate rollout decision is made.
+ */
+export function applyNativeDelegationPrototype(
+  request: AgentCreateRequest,
+  baseProvider: string | null,
+): AgentCreateRequest | undefined {
+  return suppressCodexNativeDelegation(request, baseProvider);
 }
 
 /** Instructions, profile settings and start posture together; `undefined` when none changes. */
