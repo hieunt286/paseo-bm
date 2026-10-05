@@ -2,6 +2,8 @@
 
 paseo-bm adds a focused agent team and project dashboard to [Paseo](https://paseo.sh). Describe a change to the Beads Manager; a Worker implements and proves it, a Reviewer checks larger work, and the optional Orchestrator helps coordinate projects at the autonomy level you choose.
 
+Visit the [paseo-bm website](https://paseo-bm.erai.pro/) for a guided overview of the plugin.
+
 ![The Inbox: decisions, held actions and alerts by project](plugin/images/01-inbox.jpg)
 
 ## What you get
@@ -67,7 +69,7 @@ If you originally installed paseo-bm with the retired `npx` installer, follow th
 
 ## Learn more
 
-- [Guided tour](https://paseo-bm.erai.pro)
+- [Plugin website and guided tour](https://paseo-bm.erai.pro/)
 - [Full guide](GUIDE.md)
 - [Release notes](docs/releases/)
 - [Product and technical documentation](docs/README.md)

@@ -2,6 +2,8 @@
 
 paseo-bm is a small agent team and project dashboard for [Paseo](https://paseo.sh). Tell the Beads Manager what outcome you want; a Worker implements and proves it, a Reviewer checks larger work, and the optional Orchestrator helps coordinate projects at the autonomy level you choose.
 
+Visit the [paseo-bm website](https://paseo-bm.erai.pro/) for a guided overview of the plugin.
+
 ![The Inbox: decisions, held actions and alerts by project](images/01-inbox.jpg)
 
 ## What is included
@@ -68,7 +70,7 @@ Do **not** choose another id. Follow the [migration guide](https://github.com/hi
 
 ## Links
 
-- [Guided tour](https://paseo-bm.erai.pro)
+- [Plugin website and guided tour](https://paseo-bm.erai.pro/)
 - [Full guide](https://github.com/hieunt286/paseo-bm/blob/main/GUIDE.md)
 - [Release notes](https://github.com/hieunt286/paseo-bm/tree/main/docs/releases)
 - Troubleshooting: `paseo plugin ls` and `paseo plugin logs paseo-bm`
