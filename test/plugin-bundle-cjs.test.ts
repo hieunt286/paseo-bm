@@ -273,6 +273,7 @@ describe.each([
       "traces.list",
       "traces.reassign",
       "traces.workspaces",
+      "updates.check",
       "workspaces.overview",
     ]);
     expect([...beforeHooks.keys()]).toEqual(["agent.create"]);

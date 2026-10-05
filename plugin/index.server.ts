@@ -41,6 +41,7 @@ import { registerCoordinationRpcs } from "./server/coordination-rpc";
 import { registerAutonomyRpcs } from "./server/autonomy-rpc";
 import { registerAutonomyLedgerRpcs } from "./server/autonomy-ledger-rpc";
 import { registerLinksRpcs } from "./server/links-rpc";
+import { registerUpdateRpcs } from "./server/update-check";
 import { createDecisionMaterialiser } from "./server/decision-materialiser";
 import { createQuestionDecisionDelivery } from "./server/decision-delivery";
 import { registerOrchestratorRpcs } from "./server/orchestrator-rpc";
@@ -404,6 +405,8 @@ export default function contribute(server: PluginServerContext): () => void {
   registerAutonomyLedgerRpcs(server);
   // Autonomy design §E.2, §E.4: Work → request → Why?, the chain behind a request, read-only.
   registerLinksRpcs(server);
+  // REQ-173: a bounded npm metadata read, cached at most once per local day.
+  registerUpdateRpcs(server);
   // Autonomy design §A.5 a–c: the BM-QUESTIONS and BM-ANSWERS of a recorded
   // Manager or Worker turn open, supersede and settle stored decisions; §B.3:
   // they record predictions at open and reversals (a re-ask, a cited br reopen).

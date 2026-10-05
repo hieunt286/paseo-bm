@@ -325,6 +325,7 @@ describe("plugin server entry — agents.list and roles.describe", () => {
       "traces.list",
       "traces.reassign",
       "traces.workspaces",
+      "updates.check",
       "workspaces.overview",
     ]);
 

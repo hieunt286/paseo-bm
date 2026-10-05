@@ -39,11 +39,18 @@ describe("launcher.tsx: the Beads Manager surface", () => {
   });
 
   it("shows Settings and Tools & skills with the same props — the named projects and the strip —, and no Setup or Insights screen", () => {
-    expect(launcher).toMatch(/<SettingsScreen \{\.\.\.props\} projects=\{insightsProjects\(.*\)\} status=\{status\} \/>/);
+    expect(launcher).toMatch(/<SettingsScreen \{\.\.\.props\} projects=\{insightsProjects\(.*\)\} status=\{status\} updates=\{updates\} \/>/);
     expect(launcher).toMatch(/<ToolsScreen \{\.\.\.props\} projects=\{insightsProjects\(.*\)\} status=\{status\} \/>/);
     expect(launcher).not.toMatch(/<SetupScreen\b/);
     // Insights is no section (change-014 outcome 5): its figures are a project's Metrics tab.
     expect(launcher).not.toMatch(/<InsightsScreen\b|"insights"/);
+  });
+
+  it("checks updates on surface mount, shows the Settings indicator, and gives Settings the shared result", () => {
+    expect(launcher).toMatch(/const updates = useUpdateStatus\(\)/);
+    expect(launcher).toMatch(/indicatorIcon: updates\.data\?\.updateAvailable === true \? "Download" : null/);
+    expect(source("update-status.ts")).toMatch(/queryFn: \(\) => check\(\{ force: false \}\)/);
+    expect(source("update-status.ts")).toMatch(/mutationFn: \(\) => check\(\{ force: true \}\)/);
   });
 
   it("opens a project's page on its Overview, a closed workspace's on Requests, and its Autonomy action on Settings", () => {

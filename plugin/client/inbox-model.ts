@@ -33,8 +33,8 @@
  * `Other` — with a filter (All · Decisions · Actions · Alerts); Decided for
  * you follows.
  *
- * An empty Inbox is one sentence with a way to Projects. The Inbox tab's label
- * carries the count of unsettled decisions and alerts (DQ-3: no sidebar badge).
+ * An empty Inbox is one sentence with a way to Projects. The Inbox tab and
+ * custom sidebar item share the count of unsettled decisions and alerts.
  *
  * Pure: no React, no React Native, no `server/` import. Ids appear only in
  * `details`, never in a line the owner reads first.
@@ -782,7 +782,17 @@ export function inboxView(input: InboxInput): InboxView {
   };
 }
 
-/** The Inbox tab: its label carries the count (DQ-3: there is no sidebar badge). */
+/**
+ * Attention count shared by the Inbox tab and the plugin sidebar item.
+ *
+ * Both RPCs already return only work that is still open, so this deliberately
+ * does not count Decided for you or fallback history.
+ */
+export function inboxAttentionCount(decisions: readonly Decision[], alerts: readonly Alert[]): number {
+  return decisions.length + alerts.length;
+}
+
+/** The Inbox tab: its label carries the same count as the sidebar item. */
 export function inboxTab(count: number | null): { key: "inbox"; label: string; count?: number; hint?: string } {
   if (count === null || count === 0) return { key: "inbox", label: "Inbox", ...(count === 0 ? { hint: "nothing needs you" } : {}) };
   return { key: "inbox", label: "Inbox", count, hint: `${plural(count, "item needs", "items need")} you` };
@@ -890,4 +900,3 @@ export function decidedHeading(count: number): string {
 export function sectionHeading(title: "Needs you" | "Decided for you" | "Alerts", count: number): string {
   return `${title} · ${count}`;
 }
-

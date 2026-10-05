@@ -23,6 +23,7 @@ import {
   OTHER_GROUP,
   fallbackOutcomeOf,
   inboxTab,
+  inboxAttentionCount,
   inboxView,
   needsYouGroups,
   orderedAlerts,
@@ -263,7 +264,12 @@ describe("the empty Inbox and the sections", () => {
   });
 });
 
-describe("the Inbox tab carries the count (DQ-3: no sidebar badge)", () => {
+describe("the Inbox tab and sidebar share the attention count", () => {
+  it("counts only the open decisions and alerts supplied by their Inbox RPCs", () => {
+    expect(inboxAttentionCount([question("req-A", 1, 1), question("req-A", 2, 2)], [alert("stuck", "wrk-1", 3)])).toBe(3);
+    expect(inboxAttentionCount([], [])).toBe(0);
+  });
+
   it("counts the unsettled decisions and the alerts, follow-ups included", () => {
     const shown = inboxView(
       input({

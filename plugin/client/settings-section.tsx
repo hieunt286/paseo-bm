@@ -110,6 +110,7 @@ import { AgentToolsBlockView, CleanupBlock, CommandLine, RolesSection, useBusyAc
 import { PrecedentsBlock } from "./settings-precedents";
 import { Button, ToneText, type Styles, type Theme } from "./ui";
 import { toneColor } from "./tone";
+import { updateCheckedText, type UpdateStatusQuery } from "./update-status";
 
 /** The query Settings and Tools & skills read: the roles ensured, then the status. */
 export const SETUP_STATUS_KEY = ["paseo-bm", "setup", "status"] as const;
@@ -121,6 +122,42 @@ export interface SettingsScreenProps extends PluginSurfaceProps {
   status?: ReactNode;
   /** Projects the surface knows by name, as Insights names them: the Autonomy group's tabs and the precedents' projects. */
   projects?: readonly InsightsProject[];
+  /** The surface-level check, shared with the Settings tab indicator. */
+  updates?: UpdateStatusQuery;
+}
+
+export function UpdatesBlock({ updates, compact, styles, theme }: { updates: UpdateStatusQuery; compact: boolean; styles: Styles; theme: Theme }) {
+  const result = updates.data;
+  const inlineError = updates.error ?? result?.error?.message ?? null;
+  return (
+    <View style={{ gap: 10 }} testID="settings-updates">
+      <SettingsSectionHeading title="Updates" meaning="Checks the paseo-bm-plugin package on npm. Nothing is installed automatically." state={null} compact={compact} styles={styles} theme={theme} />
+      <View style={[styles.card, { gap: 6 }]}>
+        {updates.isPending ? <ActivityIndicator color={styles.spinner.color} /> : null}
+        {result === undefined ? null : (
+          <>
+            <Text style={styles.body}>{`Installed ${result.installedVersion}`}</Text>
+            <Text style={styles.body}>{result.latestVersion === null ? "Latest version unavailable" : `Latest ${result.latestVersion}`}</Text>
+            <ToneText tone={result.updateAvailable === true ? "warning" : "muted"} styles={styles} theme={theme}>
+              {result.updateAvailable === true ? "An update is available." : result.updateAvailable === false ? "You are up to date." : "Update status is unknown."}
+            </ToneText>
+            <Text style={[styles.body, { fontSize: 11 }]}>{updateCheckedText(result.checkedAt)}</Text>
+          </>
+        )}
+        {inlineError === null ? null : <ToneText tone="danger" styles={styles} theme={theme}>{inlineError}</ToneText>}
+        <Button
+          label={updates.checking ? "Checking…" : "Check for updates"}
+          kind="secondary"
+          accessibilityLabel="Check npm for a newer paseo-bm-plugin version"
+          accessibilityState={{ disabled: updates.checking, busy: updates.checking }}
+          disabled={updates.checking}
+          onPress={updates.checkNow}
+          style={{ alignSelf: "flex-start" }}
+          styles={styles}
+        />
+      </View>
+    </View>
+  );
 }
 
 /**
@@ -597,7 +634,7 @@ export function sectionContentStyle(maxWidth: number, compact: boolean) {
   };
 }
 
-export function SettingsScreen({ theme, layout, status: statusStrip, projects = [] }: SettingsScreenProps) {
+export function SettingsScreen({ theme, layout, status: statusStrip, projects = [], updates }: SettingsScreenProps) {
   const styles = useMemo(() => dashboardStyles(theme, layout.compact), [theme, layout.compact]);
   const ensure = useRpc(setupEnsureRolesRpc);
   const listStored = useRpc(tracesWorkspacesRpc);
@@ -791,6 +828,7 @@ export function SettingsScreen({ theme, layout, status: statusStrip, projects = 
       {status.isError ? (
         <ToneText tone="danger" styles={styles} theme={theme}>{errorMessageOf(status.error)}</ToneText>
       ) : null}
+      {updates === undefined ? null : <UpdatesBlock updates={updates} compact={layout.compact} styles={styles} theme={theme} />}
       <View style={{ gap: layout.compact ? 12 : 18 }}>
         <SettingsSectionHeading title="Autonomy" meaning={AUTONOMY_MEANING} state={null} size="page" compact={layout.compact} styles={styles} theme={theme} />
         {autonomyGroup}

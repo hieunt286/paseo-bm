@@ -47,7 +47,7 @@ This feature turns that data into a readable screen, and **keeps** it: the agent
 1. Answer four questions by eye, without reading the conversation: *how many Workers and how many Reviewer rounds did a request break down into? what was sent, what was received, how long did it take, how much did it cost? did it create beads, and which? which feature-workflow steps did it go through?*
 2. Show the state of the workspace's beads store right beside it, so the user can decide whether to hand over new work.
 3. **Keep history** across plugin reloads, daemon restarts and even the user deleting agents — but let the user **delete it** when it is no longer needed.
-4. Open no new risk: the Dashboard creates no agents, sends no prompts, goes to no network, and writes only to its own trace store.
+4. Open no new risk: the Dashboard creates no agents, sends no prompts, and writes only to its own trace store. The management surface's narrowly scoped `paseo-bm-plugin` version check is the only network exception (autonomy PRD REQ-173); Dashboard data, prices and metrics never use the network.
 
 **Metrics (measured in the acceptance run on a real daemon, using the existing orchestration acceptance kit)**
 
@@ -59,7 +59,7 @@ This feature turns that data into a readable screen, and **keeps** it: the agent
 | D-4 | Beads produced by the request | The list of beads created/updated/closed matches **5/5** against the before–after difference of `.beads/issues.jsonl` for that very request |
 | D-5 | Feature-workflow step table | **0** cells marked "done" without specific evidence, and **0** cells marked "not done" without a Worker statement allowing that step to be skipped; the rest are marked "unknown" |
 | D-6 | Beads statistics | Matches `br stats` (total, open, in_progress, blocked, closed) and `br ready` exactly on **3** different repos, one of which has no `.beads/` |
-| D-7 | Negative evidence | Across the whole acceptance run: **0** files written outside paseo-bm's trace store, **0** agents created/stopped/archived by the Dashboard, **0** network calls, **0** writes to the user's repo |
+| D-7 | Negative evidence | Across the whole acceptance run: **0** files written outside paseo-bm's data folder, **0** agents created/stopped/archived by the Dashboard, **0** writes to the user's repo, and **0** network calls except requests made by the explicit version-check path of autonomy PRD REQ-173 |
 | D-8 | Durable trace | The traces of 5/5 sample requests still read intact after: a plugin reload, a daemon restart, **and** the user archiving and then deleting the corresponding Worker |
 | D-9 | Deleting traces | Delete 1 trace and delete all traces of a workspace: the trace disappears from the screen, the store size drops accordingly, and **0** other files on the machine change (file system snapshot before–after) |
 | D-10 | Tokens and cost | Every money amount carries the label "estimated" with the date of the price table; a model without a price shows **only** tokens, no money; and **no** figure sums the cumulative session cost the provider reports |
@@ -154,7 +154,7 @@ Priority: **P2** = required for Phase 2a MVP; **P3** = later, not blocking.
 | Performance | Meet D-1. Recording a trace is an append operation, must not slow an agent's turn noticeably (target: under 50 ms per turn) and never blocks the agent on error. Reads are paged and capped. No cron, no watcher, no background loop. |
 | Accuracy over completeness | When unsure, say "unknown". One wrong figure that looks trustworthy destroys trust in the whole screen; an "unknown" cell does not. |
 | Storage | The trace store has a schema version and a migration path; data from an old version is not lost on upgrade. Atomic writes so that a half-written record does not corrupt a file. |
-| Safety and privacy | Redact secrets **before writing**; permissions `0600`/`0700`; no credentials; no environment variables; no writes outside the store; no network. |
+| Safety and privacy | Redact secrets **before writing**; permissions `0600`/`0700`; no credentials; no environment variables; no writes outside the store. Dashboard data, metrics and prices make no network calls; only the version-check path of autonomy PRD REQ-173 may query npm. |
 | Compatibility | The three existing RPCs (`manager.ensure`, `agents.list`, `roles.describe`) do not change; the structure of `install.json` does not change in a way that breaks older versions; no plugin reinstall is needed to use this feature (updating the payload per REQ-010 is enough). A Paseo host missing an API switches off exactly that part with a notice, without crashing the plugin. |
 | Interface | React Native primitives only, every colour from `theme.colors`, accessibility labels on every pressable element, usable in `compact` mode. Interface text is written in **English**, like the existing interface. |
 | Testing | Trace grouping logic, `BM-REPORT` reading, time computation, process step inference, reading and writing the trace store, deleting traces, and cost computation all live in pure modules, testable without a renderer. Plus one acceptance run on a real daemon for D-2 → D-10. |
