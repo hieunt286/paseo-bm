@@ -49,7 +49,7 @@ import {
   type ClassDecider,
 } from "./settings-autonomy-model";
 import { SquareSwitch, useBusyAction } from "./settings-blocks";
-import { MONO, TextTabs } from "./text-tabs";
+import { MONO } from "./text-tabs";
 import { ConfirmBlock, ToneText, type Styles, type Theme } from "./ui";
 import type { ConfirmDialog } from "./ui-types";
 
@@ -342,14 +342,14 @@ export function ProjectPicker({ tabs, selected, open, onToggle, onSelect, theme 
 
 /**
  * The Autonomy group's body (its title and meaning are the section's
- * heading): the project tabs — text tabs, each project by name with its level
- * in muted mono —, the chosen project's level panel and its action boundary.
+ * heading): one dropdown-style project picker, each project by name with its
+ * level in muted mono, then the chosen project's level panel and its action boundary.
  * A change returns the whole policy, which `onSaved` puts in the shared query.
  */
 export function AutonomyGroup({ policy, projects, compact = false, onSaved, styles, theme }: {
   policy: AutonomyPolicy;
   projects: readonly InsightsProject[];
-  /** A phone: the project picker instead of the tabs, the compact level panel. */
+  /** A phone: the compact level panel. */
   compact?: boolean;
   onSaved: (policy: AutonomyPolicy) => void;
   styles: Styles;
@@ -389,18 +389,14 @@ export function AutonomyGroup({ policy, projects, compact = false, onSaved, styl
   };
   return (
     <View style={{ gap: compact ? 12 : 18 }}>
-      {compact ? (
-        <ProjectPicker
-          tabs={autonomyTabs(list, policy)}
-          selected={project.id}
-          open={pickerOpen}
-          onToggle={() => setPickerOpen((current) => !current)}
-          onSelect={choose}
-          theme={theme}
-        />
-      ) : (
-        <TextTabs tabs={autonomyTabs(list, policy)} selected={project.id} divider wrap onSelect={choose} theme={theme} />
-      )}
+      <ProjectPicker
+        tabs={autonomyTabs(list, policy)}
+        selected={project.id}
+        open={pickerOpen}
+        onToggle={() => setPickerOpen((current) => !current)}
+        onSelect={choose}
+        theme={theme}
+      />
       <LevelControl
         view={view}
         error={error}

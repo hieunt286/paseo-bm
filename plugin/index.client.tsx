@@ -16,6 +16,7 @@ import { ChatCardView } from "./client/chat-card";
 import { ChatBeadsPanel } from "./client/chat-beads-panel";
 import { BeadsTabPanel } from "./client/beads-tab";
 import { registerBeadsHeaderButtons } from "./client/beads-header-button";
+import { registerBeadsManagerSidebarItem } from "./client/sidebar-item";
 
 /**
  * A chat item as paseo-bm cards (v2, autonomy design §A.12), or nothing (the
@@ -136,12 +137,7 @@ export default function contribute(client: PluginClientContext): () => void {
   // Register the surface before the sidebar item that points at it.
   const removers = [
     client.addSurface(LAUNCHER_SURFACE_ID, ManagerLauncherSurface),
-    client.addSidebarItem({
-      id: LAUNCHER_SURFACE_ID,
-      title: "Beads Manager",
-      icon: LAUNCHER_ICON,
-      surface: LAUNCHER_SURFACE_ID,
-    }),
+    registerBeadsManagerSidebarItem(client),
     client.addCommandCenterItem({
       id: "open-beads-manager",
       title: "Open Beads Manager",

@@ -10,6 +10,7 @@
  */
 import type { ReactNode } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
+import { Icon } from "@getpaseo/plugin/client/react-native";
 import type { Theme } from "./ui";
 
 export interface TextTab {
@@ -19,6 +20,8 @@ export interface TextTab {
   badge?: number | null;
   /** Something drawn after the label (a level name in muted mono, for example). */
   suffix?: string | null;
+  /** Attention icon shown after the label (Settings uses it for an available update). */
+  indicatorIcon?: string | null;
   accessibilityLabel?: string;
 }
 
@@ -86,6 +89,7 @@ export function TextTabs({
             }}
           >
             <Text style={{ color: on ? colors.foreground : colors.foregroundMuted, fontSize: 14, fontWeight: on ? "500" : "400" }}>{tab.label}</Text>
+            {tab.indicatorIcon ? <Icon name={tab.indicatorIcon} size={14} color={colors.statusWarning} /> : null}
             {tab.suffix ? <Text style={{ color: colors.foregroundMuted, fontSize: 12, fontFamily: MONO }}>{tab.suffix}</Text> : null}
             {tab.badge !== undefined && tab.badge !== null && tab.badge > 0 ? (
               <Text

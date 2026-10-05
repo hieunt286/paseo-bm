@@ -39,11 +39,18 @@ describe("launcher.tsx: the Beads Manager surface", () => {
   });
 
   it("shows Settings and Tools & skills with the same props — the named projects and the strip —, and no Setup or Insights screen", () => {
-    expect(launcher).toMatch(/<SettingsScreen \{\.\.\.props\} projects=\{insightsProjects\(.*\)\} status=\{status\} \/>/);
+    expect(launcher).toMatch(/<SettingsScreen \{\.\.\.props\} projects=\{insightsProjects\(.*\)\} status=\{status\} updates=\{updates\} \/>/);
     expect(launcher).toMatch(/<ToolsScreen \{\.\.\.props\} projects=\{insightsProjects\(.*\)\} status=\{status\} \/>/);
     expect(launcher).not.toMatch(/<SetupScreen\b/);
     // Insights is no section (change-014 outcome 5): its figures are a project's Metrics tab.
     expect(launcher).not.toMatch(/<InsightsScreen\b|"insights"/);
+  });
+
+  it("checks updates on surface mount, shows the Settings indicator, and gives Settings the shared result", () => {
+    expect(launcher).toMatch(/const updates = useUpdateStatus\(\)/);
+    expect(launcher).toMatch(/indicatorIcon: updates\.data\?\.updateAvailable === true \? "Download" : null/);
+    expect(source("update-status.ts")).toMatch(/queryFn: \(\) => check\(\{ force: false \}\)/);
+    expect(source("update-status.ts")).toMatch(/mutationFn: \(\) => check\(\{ force: true \}\)/);
   });
 
   it("opens a project's page on its Overview, a closed workspace's on Requests, and its Autonomy action on Settings", () => {
@@ -161,6 +168,12 @@ describe("settings-autonomy.tsx and settings-precedents.tsx: the Autonomy group 
   const autonomy = source("settings-autonomy.tsx");
   const code = autonomy.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
 
+  it("uses one project picker on every layout instead of project tabs", () => {
+    const group = code.slice(code.indexOf("export function AutonomyGroup"));
+    expect(group.match(/<ProjectPicker\b/g)).toHaveLength(1);
+    expect(group).not.toMatch(/<TextTabs\b|compact\s*\?\s*\(\s*<ProjectPicker/);
+  });
+
   it("sets a level only through autonomy.set-level: at once, or from its confirmation's own button (ADR-025)", () => {
     expect(autonomy).toMatch(/useRpc\(autonomySetLevelRpc\)/);
     // A press sets at once only when the model says so; Turbo and Full auto only ask.
@@ -228,6 +241,14 @@ describe("beads-screen.tsx and chat-beads-panel.tsx: the Beads board and the cha
     expect(screen).not.toMatch(/StatusTabs|<KanbanBoard/);
     // The figures are the Metrics tab's (plugin-insights-model.test.ts renders them there).
     expect(screen).not.toMatch(/<StatCards|<BarChart|<BeadsFigures/);
+  });
+
+  it("puts the compact detail directly under the selected bead instead of after the column", () => {
+    const body = screen.slice(screen.indexOf("export function BeadsScreen("));
+    expect(body).toMatch(/if \(!compact \|\| selected\?\.id !== bead\.id \|\| detail === null\) return row;/);
+    expect(body).toMatch(/<View key=\{bead\.id\}>\s*\{row\}\s*<View[^>]*>\{detail\}<\/View>/);
+    const compact = body.slice(body.indexOf("if (compact)"), body.indexOf("return (\n    <View style={{ flex: 1", body.indexOf("if (compact)")));
+    expect(compact).not.toMatch(/\{detail === null \? null/);
   });
 });
 

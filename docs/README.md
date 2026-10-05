@@ -84,7 +84,7 @@ Acceptance on a real daemon uses the kit in [`scripts/manual-test/`](../scripts/
 
 ## Release notes — `releases/`
 
-One file per version, `paseo-bm-release-notes-<version>.md`, published verbatim as the GitHub Release body. Latest: [0.5.3](releases/paseo-bm-release-notes-0.5.3.md).
+This is the **single authored changelog source**. Add one file per version, `paseo-bm-release-notes-<version>.md`; the release workflow uses it verbatim as the GitHub Release body, and `npm run build` validates and embeds the same content for the plugin's Settings view. Never maintain a second changelog in a README or generated package file. Latest in this tree: [0.5.3](releases/paseo-bm-release-notes-0.5.3.md).
 
 ## History — `archive/`
 

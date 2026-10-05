@@ -59,9 +59,14 @@ type ClientEntry = (client: unknown) => () => void;
 const clientEntryPath = "../plugin/index.client.tsx";
 const surfacePath = "../plugin/client/launcher.tsx";
 const beadsTabPath = "../plugin/client/beads-tab.tsx";
+const sidebarItemPath = "../plugin/client/sidebar-item.tsx";
 const { default: clientContribute } = (await import(clientEntryPath)) as { default: ClientEntry };
 const { ManagerLauncherSurface } = (await import(surfacePath)) as { ManagerLauncherSurface: unknown };
 const { BeadsTabPanel } = (await import(beadsTabPath)) as { BeadsTabPanel: unknown };
+const { BeadsManagerSidebarItem, registerBeadsManagerSidebarItem } = (await import(sidebarItemPath)) as {
+  BeadsManagerSidebarItem: unknown;
+  registerBeadsManagerSidebarItem: (client: unknown) => () => void;
+};
 
 const WS = "ws-1";
 
@@ -250,6 +255,21 @@ describe("client entry registrations", () => {
         "renderer:bm-message",
       ].sort(),
     );
+  });
+
+  it("uses Paseo's custom footer item when available and keeps the legacy item as fallback", () => {
+    const addSidebarFooterItem = vi.fn((item: { id: string; Component: unknown }) => {
+      void item;
+      return vi.fn();
+    });
+    const addSidebarItem = vi.fn(() => vi.fn());
+    const openSurface = vi.fn();
+    registerBeadsManagerSidebarItem({ addSidebarFooterItem, addSidebarItem, openSurface } as never);
+
+    expect(addSidebarFooterItem).toHaveBeenCalledOnce();
+    expect(addSidebarFooterItem.mock.calls[0]![0]).toMatchObject({ id: LAUNCHER_SURFACE_ID });
+    expect(addSidebarFooterItem.mock.calls[0]![0].Component).not.toBe(BeadsManagerSidebarItem);
+    expect(addSidebarItem).not.toHaveBeenCalled();
   });
 
   it("adds one \"Beads\" tab to the workspace + menu, ahead of \"Beads agents\" (delta 20260918e)", () => {

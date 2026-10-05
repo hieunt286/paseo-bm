@@ -7,7 +7,7 @@
  * change-014 outcome 5): it opens on the Inbox, and the shell header
  * (`shell-header.tsx`, the approved mockup's bar) switches Inbox · Projects ·
  * Settings · Tools & skills, the Inbox tab carrying the count of what needs
- * the owner (DQ-3), and shows the Orchestrator's status. Projects is `work.tsx` (the projects,
+ * the owner, and shows the Orchestrator's status. Projects is `work.tsx` (the projects,
  * and a project's Overview · Requests · Beads · Metrics · Agents, Metrics
  * being `insights.tsx`); Settings is `settings-section.tsx`, built from the
  * Setup screen's pieces — so nothing that existed is out of reach; Tools &
@@ -57,6 +57,7 @@ import {
   type StatusLine,
 } from "./launch-manager";
 import { errorMessageOf } from "./errors";
+import { useUpdateStatus } from "./update-status";
 
 interface WorkspaceRow {
   id: string;
@@ -304,6 +305,9 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
     projectOf,
     can: { openAgent: openAgent !== undefined, openWorkspace: navigation?.openWorkspace !== undefined },
   });
+  // Mounting this surface performs one cached automatic check. The provider,
+  // not the view, enforces the same-local-day network limit.
+  const updates = useUpdateStatus();
 
   // Open a section when a Command Center item queued one.
   useEffect(() => {
@@ -346,6 +350,9 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
 
   // The section tabs, above every view: Inbox (with its count) · Projects · Settings · Tools & skills.
   const tabs: TextTab[] = SURFACE_SECTIONS.map((section) => {
+    if (section.key === "settings") {
+      return { key: section.key, label: section.label, indicatorIcon: updates.data?.updateAvailable === true ? "Download" : null };
+    }
     if (section.key !== "inbox") return { key: section.key, label: section.label };
     const tab = inboxTab(inbox.view?.count ?? null);
     return {
@@ -390,7 +397,7 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
   if (view === "settings") {
     // Settings (experience concept §4.4, change-014 outcome 5): projects named as the Projects list names them.
     return framed(
-      <SettingsScreen {...props} projects={insightsProjects(projectNames, stored.data?.workspaces ?? [])} status={status} />,
+      <SettingsScreen {...props} projects={insightsProjects(projectNames, stored.data?.workspaces ?? [])} status={status} updates={updates} />,
     );
   }
 

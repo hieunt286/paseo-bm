@@ -44,14 +44,87 @@ import { allNodes, pressables, renderTree, texts, type RNode } from "./helpers/e
 // The root tsconfig has no `jsx`, so the .tsx module loads through a non-literal specifier.
 const sectionPath = "../plugin/client/settings-section.tsx";
 type Component = (props: Record<string, unknown>) => unknown;
-const { AdviceCadenceRow, SettingsGroupHeader, SettingsSectionHeading, RolesLineView, StorageRowView, sectionContentStyle } = (await import(sectionPath)) as {
+const { AdviceCadenceRow, SettingsGroupHeader, SettingsSectionHeading, RolesLineView, StorageRowView, UpdatesBlock, sectionContentStyle } = (await import(sectionPath)) as {
   sectionContentStyle: (maxWidth: number, compact: boolean) => Record<string, unknown>;
   AdviceCadenceRow: Component;
   SettingsGroupHeader: Component;
   SettingsSectionHeading: Component;
   RolesLineView: Component;
   StorageRowView: Component;
+  UpdatesBlock: Component;
 };
+
+describe("Updates", () => {
+  it("shows installed/latest/check time, the available state, and forces a manual check", () => {
+    const checkNow = vi.fn();
+    const requestInstall = vi.fn();
+    const tree = renderTree(UpdatesBlock({
+      updates: {
+        data: {
+          installedVersion: "0.5.3",
+          latestVersion: "0.6.0",
+          updateAvailable: true,
+          checkedAt: "2026-10-05T01:00:00.000Z",
+          source: "network",
+          error: null,
+        },
+        isPending: false,
+        error: null,
+        checking: false,
+        checkNow,
+        confirmingInstall: false,
+        installing: false,
+        installResult: null,
+        requestInstall,
+        cancelInstall: vi.fn(),
+        confirmInstall: vi.fn(),
+      },
+      compact: false,
+      styles,
+      theme,
+    }));
+    expect(texts(tree)).toEqual(expect.arrayContaining(["Installed 0.5.3", "Latest 0.6.0", "An update is available.", "Check for updates"]));
+    const button = pressables(tree).find((node) => node.props.accessibilityLabel === "Check npm for a newer paseo-bm-plugin version");
+    expect(button).toBeDefined();
+    const onPress = button!.props.onPress;
+    if (typeof onPress !== "function") throw new Error("update button has no press handler");
+    onPress();
+    expect(checkNow).toHaveBeenCalledOnce();
+    const update = pressables(tree).find((node) => node.props.accessibilityLabel === "Update paseo-bm now");
+    expect(update).toBeDefined();
+    if (typeof update!.props.onPress !== "function") throw new Error("Update now has no press handler");
+    update!.props.onPress();
+    expect(requestInstall).toHaveBeenCalledOnce();
+  });
+
+  it("shows a cancel-first confirmation and the update outcome", () => {
+    const confirmInstall = vi.fn();
+    const tree = renderTree(UpdatesBlock({
+      updates: {
+        data: { installedVersion: "0.5.3", latestVersion: "0.5.4", updateAvailable: true, checkedAt: null, source: "cache", error: null },
+        isPending: false,
+        error: null,
+        checking: false,
+        checkNow: vi.fn(),
+        confirmingInstall: true,
+        installing: false,
+        installResult: { outcome: "unknown", message: "Run `paseo plugin ls`.", command: "paseo plugin update paseo-bm", error: { code: "E_UPDATE_RESULT_UNKNOWN", message: "unknown" } },
+        requestInstall: vi.fn(),
+        cancelInstall: vi.fn(),
+        confirmInstall,
+      },
+      compact: false,
+      styles,
+      theme,
+    }));
+    expect(texts(tree)).toEqual(expect.arrayContaining(["Update paseo-bm 0.5.3 → 0.5.4?", "Cancel", "Update now", "Run `paseo plugin ls`."]));
+    const confirm = pressables(tree).find((node) => node.props.accessibilityLabel === "Update now");
+    expect(confirm).toBeDefined();
+    if (typeof confirm!.props.onPress !== "function") throw new Error("confirm button has no press handler");
+    confirm!.props.onPress();
+    expect(confirmInstall).toHaveBeenCalledOnce();
+  });
+});
 const blocksPath = "../plugin/client/settings-blocks.tsx";
 const { CleanupDataView, ReviewerFamilyNoteView, RoleFields, RunResultView } = (await import(blocksPath)) as {
   CleanupDataView: Component;

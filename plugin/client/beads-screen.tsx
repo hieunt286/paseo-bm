@@ -12,7 +12,7 @@
  * On a phone (the MobileBeads artboard) everything scrolls as one, under the
  * project page's header: the features scroll sideways, the columns are one at
  * a time behind a segmented control of equal cells with short names, and the
- * selected bead's detail sits in a bordered panel under the column, its
+ * selected bead's detail sits in a bordered panel directly under its row, its
  * actions as a full-width Ask Manager to implement over a two-column grid.
  *
  * The overview figures (status, progress, by type, by priority, time) are the
@@ -599,21 +599,30 @@ export function BeadsScreen({
   const columns = compact ? board.columns.filter((column) => column.bucket === phoneBucket) : board.columns;
   const pad = compact ? 16 : 32;
 
-  const renderBead = (bead: BeadRow) => (
-    <BoardBeadRow
-      key={bead.id}
-      bead={bead}
-      meta={beadRowMeta(bead, rows, now)}
-      selected={selected?.id === bead.id}
-      onSelect={() => setSelectedId(bead.id)}
-      theme={theme}
-      compact={compact}
-    />
-  );
   const detail =
     selected === null ? null : (
       <BeadDetailAside key={selected.id} workspaceId={workspaceId} bead={selected} all={rows} styles={styles} theme={theme} navigation={navigation} compact={compact} />
     );
+  const renderBead = (bead: BeadRow) => {
+    const row = (
+      <BoardBeadRow
+        key={bead.id}
+        bead={bead}
+        meta={beadRowMeta(bead, rows, now)}
+        selected={selected?.id === bead.id}
+        onSelect={() => setSelectedId(bead.id)}
+        theme={theme}
+        compact={compact}
+      />
+    );
+    if (!compact || selected?.id !== bead.id || detail === null) return row;
+    return (
+      <View key={bead.id}>
+        {row}
+        <View style={{ borderBottomWidth: 1, borderBottomColor: colors.border, backgroundColor: colors.surface1, padding: 16 }}>{detail}</View>
+      </View>
+    );
+  };
 
   const screenHeader =
     workspaceLabel === undefined && onBack === undefined && status === undefined ? null : (
@@ -794,7 +803,7 @@ export function BeadsScreen({
 
   // A phone (the MobileBeads artboard): one scroll — the page header, the features, a row of
   // done · Show closed · Filter · Sort, the column chooser, the column's beads, then the
-  // selected bead's detail in a bordered panel under them.
+  // selected bead's detail directly under its row.
   if (compact) {
     return (
       <ScrollView style={{ flex: 1, backgroundColor: colors.surface0 }} contentContainerStyle={{ paddingTop: 16, paddingHorizontal: pad, paddingBottom: 40, gap: 14 }}>
@@ -827,7 +836,6 @@ export function BeadsScreen({
                 {column.hidden > 0 ? <Text style={{ paddingVertical: 10, fontSize: 12, color: colors.foregroundMuted }}>{`${column.hidden} more not shown`}</Text> : null}
               </View>
             ))}
-        {detail === null ? null : <View style={{ borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface1, padding: 16 }}>{detail}</View>}
       </ScrollView>
     );
   }

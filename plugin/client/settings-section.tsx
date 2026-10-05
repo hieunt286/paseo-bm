@@ -38,7 +38,7 @@
 import { type PluginSurfaceProps, useRpc, useSettings } from "@getpaseo/plugin/client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState, type ReactNode } from "react";
-import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
+import { ActivityIndicator, Linking, Pressable, ScrollView, Text, View } from "react-native";
 import {
   autonomyPolicyRpc,
   coordinationSetRpc,
@@ -108,8 +108,10 @@ import {
 } from "./settings-machine-model";
 import { AgentToolsBlockView, CleanupBlock, CommandLine, RolesSection, useBusyAction } from "./settings-blocks";
 import { PrecedentsBlock } from "./settings-precedents";
-import { Button, ToneText, type Styles, type Theme } from "./ui";
+import { Button, ConfirmBlock, ToneText, type Styles, type Theme } from "./ui";
 import { toneColor } from "./tone";
+import { updateCheckedText, type UpdateStatusQuery } from "./update-status";
+import { releaseNotesView } from "./release-notes-model";
 
 /** The query Settings and Tools & skills read: the roles ensured, then the status. */
 export const SETUP_STATUS_KEY = ["paseo-bm", "setup", "status"] as const;
@@ -121,6 +123,128 @@ export interface SettingsScreenProps extends PluginSurfaceProps {
   status?: ReactNode;
   /** Projects the surface knows by name, as Insights names them: the Autonomy group's tabs and the precedents' projects. */
   projects?: readonly InsightsProject[];
+  /** The surface-level check, shared with the Settings tab indicator. */
+  updates?: UpdateStatusQuery;
+}
+
+export function UpdatesBlock({ updates, compact, styles, theme }: { updates: UpdateStatusQuery; compact: boolean; styles: Styles; theme: Theme }) {
+  const result = updates.data;
+  const inlineError = updates.error ?? result?.error?.message ?? null;
+  return (
+    <View style={{ gap: 10 }} testID="settings-updates">
+      <SettingsSectionHeading title="Updates" meaning="Checks the paseo-bm-plugin package on npm. Nothing is installed automatically." state={null} compact={compact} styles={styles} theme={theme} />
+      <View style={[styles.card, { gap: 6 }]}>
+        {updates.isPending ? <ActivityIndicator color={styles.spinner.color} /> : null}
+        {result === undefined ? null : (
+          <>
+            <Text style={styles.body}>{`Installed ${result.installedVersion}`}</Text>
+            <Text style={styles.body}>{result.latestVersion === null ? "Latest version unavailable" : `Latest ${result.latestVersion}`}</Text>
+            <ToneText tone={result.updateAvailable === true ? "warning" : "muted"} styles={styles} theme={theme}>
+              {result.updateAvailable === true ? "An update is available." : result.updateAvailable === false ? "You are up to date." : "Update status is unknown."}
+            </ToneText>
+            <Text style={[styles.body, { fontSize: 11 }]}>{updateCheckedText(result.checkedAt)}</Text>
+          </>
+        )}
+        {inlineError === null ? null : <ToneText tone="danger" styles={styles} theme={theme}>{inlineError}</ToneText>}
+        <View style={styles.chipRow}>
+          <Button
+            label={updates.checking ? "Checking…" : "Check for updates"}
+            kind="secondary"
+            accessibilityLabel="Check npm for a newer paseo-bm-plugin version"
+            accessibilityState={{ disabled: updates.checking, busy: updates.checking }}
+            disabled={updates.checking}
+            onPress={updates.checkNow}
+            styles={styles}
+          />
+          {result?.updateAvailable === true && !updates.confirmingInstall ? (
+            <Button
+              label="Update now"
+              kind="primary"
+              accessibilityLabel="Update paseo-bm now"
+              onPress={updates.requestInstall}
+              styles={styles}
+            />
+          ) : null}
+        </View>
+        {updates.confirmingInstall ? (
+          <ConfirmBlock
+            dialog={{
+              title: `Update paseo-bm ${result?.installedVersion ?? ""} → ${result?.latestVersion ?? "latest"}?`,
+              body: "This runs `paseo plugin update paseo-bm`. The plugin will reload; no update runs from Check for updates.",
+              confirmLabel: "Update now",
+              cancelLabel: "Cancel",
+              defaultAction: "cancel",
+            }}
+            busy={updates.installing}
+            busyLabel="Updating…"
+            onConfirm={updates.confirmInstall}
+            onCancel={updates.cancelInstall}
+            styles={styles}
+            theme={theme}
+          />
+        ) : null}
+        {updates.installResult === null ? null : (
+          <ToneText tone={updates.installResult.outcome === "updated" ? "success" : updates.installResult.outcome === "unknown" ? "warning" : "danger"} styles={styles} theme={theme}>
+            {updates.installResult.message}
+          </ToneText>
+        )}
+      </View>
+    </View>
+  );
+}
+
+export function ReleaseNotesBlock({ installedVersion, latestVersion, selectedVersion, onSelect, styles, theme }: {
+  installedVersion: string | null;
+  latestVersion: string | null;
+  selectedVersion: string | null;
+  onSelect: (version: string) => void;
+  styles: Styles;
+  theme: Theme;
+}) {
+  const view = releaseNotesView(installedVersion, latestVersion, selectedVersion);
+  return (
+    <View style={{ gap: 10 }} testID="settings-release-notes">
+      <SettingsSectionHeading title="Release notes" meaning="One source: the same docs/releases files used for each GitHub release." state={null} compact={false} styles={styles} theme={theme} />
+      <View style={[styles.card, { gap: 10 }]}>
+        <View style={styles.chipRow}>
+          {view.notes.map((note) => (
+            <Button
+              key={note.version}
+              label={note.version}
+              kind={view.selectedVersion === note.version ? "primary" : "secondary"}
+              size="small"
+              accessibilityLabel={`Show release notes for ${note.version}`}
+              onPress={() => onSelect(note.version)}
+              styles={styles}
+            />
+          ))}
+        </View>
+        {view.selected === null ? (
+          <ToneText tone="warning" styles={styles} theme={theme}>Release notes for {view.selectedVersion ?? "this version"} are not bundled.</ToneText>
+        ) : (
+          <View style={{ gap: 7 }}>
+            <Text style={styles.sectionTitle}>{view.selected.title}</Text>
+            {view.selected.blocks.map((block, index) => (
+              <Text
+                key={`${block.kind}-${index}`}
+                selectable
+                style={block.kind === "heading" ? styles.sectionTitle : [styles.body, block.kind === "code" ? { fontFamily: "monospace" } : {}, block.kind === "bullet" ? { paddingLeft: 10 } : {}]}
+              >
+                {block.kind === "bullet" ? `• ${block.text}` : block.text}
+              </Text>
+            ))}
+          </View>
+        )}
+        <Button
+          label="View this release on GitHub"
+          kind="secondary"
+          accessibilityLabel={`Open release notes source for ${view.selectedVersion ?? "latest"}`}
+          onPress={() => { void Linking.openURL(view.sourceUrl); }}
+          styles={styles}
+        />
+      </View>
+    </View>
+  );
 }
 
 /**
@@ -597,7 +721,7 @@ export function sectionContentStyle(maxWidth: number, compact: boolean) {
   };
 }
 
-export function SettingsScreen({ theme, layout, status: statusStrip, projects = [] }: SettingsScreenProps) {
+export function SettingsScreen({ theme, layout, status: statusStrip, projects = [], updates }: SettingsScreenProps) {
   const styles = useMemo(() => dashboardStyles(theme, layout.compact), [theme, layout.compact]);
   const ensure = useRpc(setupEnsureRolesRpc);
   const listStored = useRpc(tracesWorkspacesRpc);
@@ -618,6 +742,7 @@ export function SettingsScreen({ theme, layout, status: statusStrip, projects = 
   const [openStorage, setOpenStorage] = useState<string | null>(null);
   const [dismissedRoles, setDismissedRoles] = useState(false);
   const [rolesBusy, setRolesBusy] = useState(false);
+  const [releaseVersion, setReleaseVersion] = useState<string | null>(null);
 
   const data = status.data;
   const cleanedUp = data?.ensured?.skipped === "cleaned-up";
@@ -791,6 +916,17 @@ export function SettingsScreen({ theme, layout, status: statusStrip, projects = 
       {status.isError ? (
         <ToneText tone="danger" styles={styles} theme={theme}>{errorMessageOf(status.error)}</ToneText>
       ) : null}
+      {updates === undefined ? null : <UpdatesBlock updates={updates} compact={layout.compact} styles={styles} theme={theme} />}
+      {updates === undefined ? null : (
+        <ReleaseNotesBlock
+          installedVersion={updates.data?.installedVersion ?? PLUGIN_VERSION}
+          latestVersion={updates.data?.latestVersion ?? null}
+          selectedVersion={releaseVersion}
+          onSelect={setReleaseVersion}
+          styles={styles}
+          theme={theme}
+        />
+      )}
       <View style={{ gap: layout.compact ? 12 : 18 }}>
         <SettingsSectionHeading title="Autonomy" meaning={AUTONOMY_MEANING} state={null} size="page" compact={layout.compact} styles={styles} theme={theme} />
         {autonomyGroup}

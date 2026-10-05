@@ -6,7 +6,7 @@
 | Workflow | [`.github/workflows/release.yml`](../../.github/workflows/release.yml) — the real publish runs only on a **GitHub Release** event (`release: published`); a manual run (`workflow_dispatch`) is a rehearsal and stops at `npm publish --dry-run` |
 | Packages | **`paseo-bm-plugin`** only, published from `plugin-package/`, which `npm run build` generates from `plugin/` with each entry bundled ([ADR-026](../adr/ADR-026-published-plugin-is-bundled.md)). `paseo-bm`, the migration command, was last published at `0.4.0` and is deprecated on npm; its source lives only at the `v0.4.0` tag, and the root `package.json` is `"private": true` with no `bin`, `files` or `prepack` (§7 if the command ever needs a fix) |
 | Dist-tag | The workflow picks it from the version: with a `-` (a prerelease, `0.4.0-alpha.0` for instance) → `next`; without one (stable, `0.4.0` for instance) → `latest` |
-| Release notes | `docs/releases/paseo-bm-release-notes-<version>.md`, used as the body of the GitHub Release |
+| Release notes | `docs/releases/paseo-bm-release-notes-<version>.md`, the single authored changelog source: used as the GitHub Release body and embedded into the plugin by `npm run build` |
 | Underlying decisions | [ADR-009](../adr/ADR-009-payload-as-npm-package.md) (the payload as its own package); [ADR-012](../adr/ADR-012-plugin-is-the-product.md) (the plugin is the product, `paseo-bm` stops at `0.4.0`); [ADR-022](../adr/ADR-022-retirements-after-code-review.md) decision 1 (the command's source deleted, a fix made from its tag); [design delta 20260925b](../archive/design/paseo-bm-delta-20260925b-stable-release.md) §2 (the dist-tag follows the kind of version) |
 
 ## 0. Rules that do not change
@@ -27,7 +27,7 @@
    npm run verify         # typecheck, typecheck:plugin, lint, test, test:bench, test:eval, build
    ```
    Verifying before building, after a version change, goes red because the two generated sources do not agree yet.
-3. **Write the release notes** at `docs/releases/paseo-bm-release-notes-<version>.md`, **in English**, following the shape of the most recent one: what this version brings, what to know when upgrading, rollback, evidence, sources. Name every change in the behaviour of the agents (`plugin/roles/*.md`) and of the screens.
+3. **Write the release notes once** at `docs/releases/paseo-bm-release-notes-<version>.md`, **in English**, following the shape of the most recent one: what this version brings, what to know when upgrading, rollback, evidence, sources. Name every change in the behaviour of the agents (`plugin/roles/*.md`) and of the screens. `npm run build` validates and embeds this same file for Settings; do not copy changelog prose into either README or hand-edit the generated catalog.
 4. **Verify on exactly the tree that will be tagged.** If the working tree holds another session's unfinished work, measure in a clean worktree:
    ```bash
    WT=$(mktemp -d) && git worktree add --detach "$WT" <commit>
