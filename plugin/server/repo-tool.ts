@@ -5,6 +5,10 @@
  * folder inside it, or reads one file there. Nothing here writes to a
  * repository, fetches, pushes or runs a hook, and no file whose name marks it
  * as a secret is read: credentials are untouchable (AGENTS.md).
+ *
+ * The Main's `bm_repo` (missions design §4) is the same reader (`repoIn`),
+ * limited to its mission's charter repos (`memory-tools.ts`), plus `read`: a
+ * window of lines of one file.
  */
 import { execFile } from "node:child_process";
 import { readFileSync, realpathSync, statSync } from "node:fs";
@@ -15,7 +19,7 @@ import { listedWorkspaces } from "./paseo-directory";
 import { refuse, requireProject, type ServerToolResult, type ToolContext } from "./orchestrator-tool-context";
 import { firstLine } from "./request-trace";
 import { readWorkspaceMeta } from "./trace-store";
-import type { RepoAction } from "../shared/bm-tools";
+import type { MainRepoAction } from "../shared/bm-tools";
 import { errorText } from "./rpc-kit";
 
 /** `bm_repo` (design §6B.4): the longest output handed out … */
@@ -24,6 +28,8 @@ export const REPO_OUTPUT_MAX_CHARS = 20_000;
 export const REPO_FILE_MAX_BYTES = 200 * 1024;
 /** … and how long one git command may run. */
 export const REPO_TIMEOUT_MS = 10_000;
+/** The lines the Main's `read` shows when it names none (missions design §4). */
+export const REPO_READ_LINES = 400;
 
 /**
  * What every git command of `bm_repo` starts with: no pager, no colour, and
@@ -50,9 +56,14 @@ export interface RepoToolDeps {
 
 export interface RepoInput {
   workspaceId: string;
-  action: RepoAction;
+  /** `read` is the Main's only (missions design §4). */
+  action: MainRepoAction;
+  /** A sub-folder to run in; for `read`, the file. */
   path?: string;
   file?: string;
+  /** `read`: the first line (1-based) and how many lines. */
+  from?: number;
+  lines?: number;
 }
 
 /** The environment git runs in: no prompt, no optional lock, no lazy fetch, and no repository named by the plugin's own environment. */
@@ -119,11 +130,24 @@ export async function bmRepo(input: RepoInput, context: ToolContext, deps: RepoT
   const listed = await listedWorkspaces(context.paseo);
   const directory =
     listed?.find((entry) => entry.id === input.workspaceId)?.directory ?? readWorkspaceMeta(context.location, input.workspaceId)?.lastKnownDirectory ?? null;
+  return repoIn(input, directory, context.env, deps);
+}
+
+/**
+ * `bm_repo`'s reader in the project folder `directory` (null: not known), its
+ * checks above `bmRepo`'s. `read` (the Main's, missions design §4) reads
+ * `path` as the file, as it is now, and shows `lines` lines from line `from`
+ * (`REPO_READ_LINES` from line 1 by default). Throws a `Refusal`.
+ */
+export async function repoIn(input: RepoInput, directory: string | null, env: NodeJS.ProcessEnv, deps: RepoToolDeps): Promise<ServerToolResult> {
   if (directory === null) refuse(`the folder of project ${input.workspaceId} is not known`);
+  const reading = input.action === "read";
+  const path = reading ? undefined : input.path;
+  const file = reading ? input.path : input.file;
   const root = realOf(directory, `the project's folder ${directory}`);
-  const cwd = input.path === undefined ? root : realOf(resolve(root, input.path), `${input.path} (in the project's folder)`);
-  if (!within(root, cwd)) refuse(`${input.path} is outside the project's folder`);
-  if (!statSync(cwd).isDirectory()) refuse(`${input.path} is not a folder`);
+  const cwd = path === undefined ? root : realOf(resolve(root, path), `${path} (in the project's folder)`);
+  if (!within(root, cwd)) refuse(`${path} is outside the project's folder`);
+  if (!statSync(cwd).isDirectory()) refuse(`${path} is not a folder`);
   if (relative(root, cwd).split(sep).includes(".git")) refuse("the .git folder is not readable with bm_repo");
   const git = deps.git ?? runGit;
   const where = relative(root, cwd) || ".";
@@ -132,7 +156,7 @@ export async function bmRepo(input: RepoInput, context: ToolContext, deps: RepoT
     try {
       return (await git([...GIT_READ_ONLY_PREFIX, ...args], { cwd, maxBytes })).stdout;
     } catch (error) {
-      return refuse(gitFailure(error, args[0] ?? "", context.env));
+      return refuse(gitFailure(error, args[0] ?? "", env));
     }
   };
 
@@ -155,15 +179,15 @@ export async function bmRepo(input: RepoInput, context: ToolContext, deps: RepoT
       output = await run(["log", "--oneline", "-20", "--no-decorate"]);
       break;
     default: {
-      if (input.file === undefined) refuse("show needs file: a path relative to the folder, or HEAD:<path> for its committed version");
-      const committed = input.file.startsWith("HEAD:");
-      const name = committed ? input.file.slice("HEAD:".length) : input.file;
+      if (file === undefined) refuse(reading ? "read needs path: a file relative to the project's folder" : "show needs file: a path relative to the folder, or HEAD:<path> for its committed version");
+      const committed = !reading && file.startsWith("HEAD:");
+      const name = committed ? file.slice("HEAD:".length) : file;
       if (name === "" || isAbsolute(name)) refuse("file must be a path relative to the folder");
       const target = resolve(cwd, name);
-      if (!within(root, target)) refuse(`${input.file} is outside the project's folder`);
-      const refuseSecret = (path: string): void => {
-        if (relative(root, path).split(sep).includes(".git")) refuse("the .git folder is not readable with bm_repo");
-        if (SECRET_FILE_NAME.test(basename(path))) refuse(`${input.file} may hold secrets; bm_repo does not read it`);
+      if (!within(root, target)) refuse(`${file} is outside the project's folder`);
+      const refuseSecret = (candidate: string): void => {
+        if (relative(root, candidate).split(sep).includes(".git")) refuse("the .git folder is not readable with bm_repo");
+        if (SECRET_FILE_NAME.test(basename(candidate))) refuse(`${file} may hold secrets; bm_repo does not read it`);
       };
       refuseSecret(target);
       const relativeName = relative(cwd, target).split(sep).join("/");
@@ -172,26 +196,35 @@ export async function bmRepo(input: RepoInput, context: ToolContext, deps: RepoT
         output = await run(["show", "--no-textconv", `HEAD:./${relativeName}`]);
         break;
       }
-      const real = realOf(target, input.file);
-      if (!within(root, real)) refuse(`${input.file} leads outside the project's folder`);
+      const real = realOf(target, file);
+      if (!within(root, real)) refuse(`${file} leads outside the project's folder`);
       refuseSecret(real);
       const stat = statSync(real);
-      if (!stat.isFile()) refuse(`${input.file} is not a file`);
-      if (stat.size > REPO_FILE_MAX_BYTES) refuse(`${input.file} is larger than ${REPO_FILE_MAX_BYTES / 1024} KB`);
+      if (!stat.isFile()) refuse(`${file} is not a file`);
+      if (stat.size > REPO_FILE_MAX_BYTES) refuse(`${file} is larger than ${REPO_FILE_MAX_BYTES / 1024} KB`);
       // A file git ignores is often local configuration or data: not read (exit 0 = ignored, 1 = not).
       const ignored = await git([...GIT_READ_ONLY_PREFIX, "check-ignore", "-q", "--", relative(cwd, real)], { cwd, maxBytes: 64 * 1024 }).then(
         () => true,
-        (error: unknown) => ((error as { code?: unknown }).code === 1 ? false : refuse(gitFailure(error, "check-ignore", context.env))),
+        (error: unknown) => ((error as { code?: unknown }).code === 1 ? false : refuse(gitFailure(error, "check-ignore", env))),
       );
-      if (ignored) refuse(`${input.file} is ignored by git; bm_repo reads only files git tracks or would track`);
+      if (ignored) refuse(`${file} is ignored by git; bm_repo reads only files git tracks or would track`);
       const content = readFileSync(real, "utf8");
-      if (content.includes("\u0000")) refuse(`${input.file} is not a text file`);
+      if (content.includes("\u0000")) refuse(`${file} is not a text file`);
+      if (reading) {
+        const lines = content.split("\n");
+        const from = input.from ?? 1;
+        if (from > lines.length) refuse(`${file} has ${lines.length} lines`);
+        const shown = lines.slice(from - 1, from - 1 + (input.lines ?? REPO_READ_LINES));
+        title = `${relativeName} lines ${from}–${from - 1 + shown.length} of ${lines.length} (as it is now)`;
+        output = shown.join("\n");
+        break;
+      }
       title = `${relativeName} (as it is now)`;
       output = content;
       break;
     }
   }
-  const safe = redactText(output, context.env);
+  const safe = redactText(output, env);
   const text = cutText(safe.trimEnd() === "" ? "(no output)" : safe.trimEnd(), REPO_OUTPUT_MAX_CHARS);
   return { ok: true, text: `${title} — in ${where} of project ${input.workspaceId}\n\n${text}` };
 }

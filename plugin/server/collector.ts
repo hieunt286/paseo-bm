@@ -47,7 +47,8 @@ import { resolveDataHome } from "./data-home";
 import { roleOfProvider, type BmRole } from "./agent-role";
 import { providerId } from "./provider-id";
 import { BOUNDARY_LABEL } from "./role-mode";
-import { REQUEST_ID_PATTERN, knownRequestIdOf, sightRequestId } from "./request-registry";
+import { REQUEST_ID_PATTERN, createRequestRegistry, knownRequestIdOf, sightRequestId } from "./request-registry";
+import { requestIndex } from "./mission-roster";
 import { recordsCreatedBy, type OutboxRecord } from "./outbox";
 import {
   TraceStoreLockTimeout,
@@ -683,11 +684,16 @@ export async function buildRecord(
   }
 
   // Design §16.7: what a Worker's or Reviewer's tools stored during this turn goes in its own record,
-  // read from the outbox — from the turn's start mark (else its first timed item) to now.
+  // read from the outbox — from the turn's start mark (else its first timed item) to now. A Main's tools
+  // store in the repos of its requests (missions design §6): its turn reads those outboxes.
   const startedAt = startMarks.get(markKey(event.agent.id, event.turnId)) ?? null;
-  if (role === "worker" || role === "reviewer") {
+  const outboxes = role === "worker" || role === "reviewer" ? [event.agent.workspaceId] : role === "manager" ? mainReposOf(deps, event.agent.id) : [];
+  if (outboxes.length > 0) {
     const from = startedAt ?? (entries.length > 0 ? (timed[0]?.at ?? null) : null);
-    const stored = outboxBlocksOf(readOutbox(deps, event.agent.workspaceId, event.agent.id, from, endedAt), event.agent.id);
+    const stored = outboxBlocksOf(
+      outboxes.flatMap((workspaceId) => readOutbox(deps, workspaceId, event.agent.id, from, endedAt)),
+      event.agent.id,
+    );
     // A block the plugin relayed from this turn's own reply (an unbound Worker's report, an unbound
     // Reviewer's review) is already read from the message: counted once.
     const written = new Set(reports.map((report) => `${report.requestId}|${report.phase}`));
@@ -741,6 +747,23 @@ export async function buildRecord(
 
   const cwd = typeof event.agent.cwd === "string" && event.agent.cwd !== "" ? event.agent.cwd : null;
   return { record, workspaceName: cwd === null ? null : basename(cwd) };
+}
+
+/**
+ * The repos of the mission requests whose registry Manager is `agentId`
+ * (missions design §6): where a Main's tools store. None for any other
+ * Manager, or without a store. Never throws.
+ */
+function mainReposOf(deps: CollectorDeps, agentId: string): string[] {
+  if (deps.location === null) return [];
+  const home = dirname(deps.location.tracesDir);
+  try {
+    const registry = createRequestRegistry(home, { log: () => {} });
+    const repos = [...requestIndex(home)].filter(([requestId, place]) => registry.get(place.workspaceId, requestId)?.managerId === agentId).map(([, place]) => place.workspaceId);
+    return [...new Set(repos)];
+  } catch {
+    return [];
+  }
 }
 
 /** The outbox records of `deps`, or of the data folder beside the trace store. Never throws: none on a failure. */

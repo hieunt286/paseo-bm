@@ -429,12 +429,33 @@ const PEER_WORDS: Readonly<Record<(typeof PEER_DELIVERY_KINDS)[number], string>>
 /** `from: project "<title>" (<workspaceId>)`, then a `peer`'s or `peer-reply`'s request and a `peer-reply`'s phase. */
 const PEER_FROM = /^from: project ("(?:[^"\\\n]|\\.)*") \([^)\n]*\)(?:, request ([^,\s]+))?(?:, phase: (\S+))?/m;
 
+/** `from: mission <CODE> "<name>", main <id>`: a `mission` link's ask (missions design §4). */
+const MISSION_FROM = /^from: mission (\S+) ("(?:[^"\\\n]|\\.)*")/m;
+
+/** What `bm_link_workers` tells each of its two Workers: one sentence, no `link:` or `from:` line (missions design §4). */
+const LINK_INTRO = /^Your Main linked you\b/;
+
 /**
  * The notice line of a peer delivery (design §7.17.4): from which project,
  * gist = the first line of the quoted text. No request id: the one in its body
  * is the other project's; a `peer-reply` names it as text only, with its phase.
+ * Another mission's ask names its mission; a Main's link of two Workers is
+ * its own sentence.
  */
 function peerCardOf(text: string, body: string, words: string): ChatCard {
+  const notice = { marker: DELIVERY_NOTICE_MARKER, tone: "muted" as Tone, project: null };
+  if (LINK_INTRO.test(body.trimStart())) return noticeCard(text, null, { ...notice, what: "Your Main linked you with another Worker" }, gistOf(body));
+  const quote = gistOf(body.split("\n").filter((line) => line.startsWith(">")).join("\n"));
+  const mission = MISSION_FROM.exec(body);
+  if (mission !== null) {
+    let name = "";
+    try {
+      name = ` ${String(JSON.parse(mission[2]!))}`;
+    } catch {
+      // A broken name is left out.
+    }
+    return noticeCard(text, null, { ...notice, what: `${words.replace(/project$/, "mission")} ${mission[1]}${name}` }, quote);
+  }
   const from = PEER_FROM.exec(body);
   let title = "?";
   try {
@@ -444,8 +465,7 @@ function peerCardOf(text: string, body: string, words: string): ChatCard {
   }
   const phase = from?.[3];
   const what = `${words} ${title}${phase === undefined ? "" : ` (${phase}) · request ${from?.[2] ?? "?"}`}`;
-  const quote = body.split("\n").filter((line) => line.startsWith(">")).join("\n");
-  return noticeCard(text, null, { marker: DELIVERY_NOTICE_MARKER, what, tone: "muted", project: null }, gistOf(quote));
+  return noticeCard(text, null, { ...notice, what }, quote);
 }
 
 /** The decision card of a `BM-ANSWER` notice (autonomy design §A.6), or null when it names no decision. */

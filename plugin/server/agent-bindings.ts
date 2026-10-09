@@ -42,6 +42,11 @@
  * raise `outdated-agent` for the Manager that claimed it (`expiredHooks`,
  * `removeExpiredHook`).
  *
+ * A Main's binding (missions design §3.3) also carries its `missionId`: set
+ * when the plugin creates the Main (`createMain`), and by `assignMission` when
+ * an unassigned Main gets its mission or a cleared conversation's successor is
+ * claimed. A cache, as the registry's is (§2.3): an older build drops it.
+ *
  * Every function is synchronous on the file (the plugin server is one
  * thread, so a read-modify-write cannot interleave with another) and the
  * lookups never throw: a lost or unreadable file must never cost an agent its
@@ -108,6 +113,8 @@ const bindingSchema = z.object({
   origin: z.literal("hook").optional(),
   /** Design §7.17.7: the agent whose session the hook-bound creation opened — the only one this binding settles to. */
   claimedBy: z.string().min(1).optional(),
+  /** Missions design §3.3: the mission of a Main. Optional, so `BINDINGS_VERSION` stays 1. */
+  missionId: z.string().min(1).optional(),
 });
 
 export type AgentBinding = z.infer<typeof bindingSchema>;
@@ -124,6 +131,8 @@ export interface ToolCaller {
   requestId: string | null;
   parentId: string | null;
   batchId: string | null;
+  /** A Main's mission (missions design §3.3); absent for every other caller. */
+  missionId?: string | null;
 }
 
 /**
@@ -145,6 +154,8 @@ export interface BindingInput {
   batchId?: string | null;
   /** `hook`: the creation hook issued it for a Manager the owner opened (§7.17.7). */
   origin?: BindingOrigin;
+  /** A Main's mission (missions design §3.3). */
+  missionId?: string | null;
 }
 
 export function isBoundRole(value: unknown): value is BoundRole {
@@ -273,6 +284,18 @@ export interface BindingStore {
   sweep(listed: ReadonlySet<string>, since: Date): number;
   /** The binding of `agentId` (bound or revoked), or null. Never throws. */
   bindingOfAgent(agentId: string): AgentBinding | null;
+  /**
+   * Missions design §3.3: the Main `agentId` belongs to `missionId` — its bound
+   * binding, or the pending hook binding it claimed, gets the field. False when
+   * it has neither. Never throws.
+   */
+  assignMission(agentId: string, missionId: string): boolean;
+  /**
+   * Missions design §3.4 step 3: the Worker `agentId` reports to `parentId`
+   * (its mission's new Main) — its bound binding, or the pending hook binding
+   * it claimed, gets the parent. False when it has neither. Never throws.
+   */
+  reparent(agentId: string, parentId: string): boolean;
 }
 
 interface BindingsFile {
@@ -374,6 +397,7 @@ export function createBindingStore(home: string, deps: BindingStoreDeps = {}): B
         boundAt: null,
         revokedAt: null,
         ...(input.origin === "hook" ? { origin: "hook" as const } : {}),
+        ...(typeof input.missionId === "string" && input.missionId !== "" ? { missionId: input.missionId } : {}),
       };
       update((bindings) => [...bindings, bindingSchema.parse(binding)]);
       return { token, tokenSha256 };
@@ -539,6 +563,7 @@ export function createBindingStore(home: string, deps: BindingStoreDeps = {}): B
         requestId: binding.requestId,
         parentId: binding.parentId,
         batchId: binding.batchId,
+        ...(binding.missionId !== undefined ? { missionId: binding.missionId } : {}),
       };
     },
     revokeAgent(agentId) {
@@ -569,6 +594,40 @@ export function createBindingStore(home: string, deps: BindingStoreDeps = {}): B
       return removed;
     },
     bindingOfAgent: (agentId) => list().find((binding) => binding.agentId === agentId) ?? null,
+    assignMission(agentId, missionId) {
+      if (agentId === "" || missionId === "") return false;
+      let found = false;
+      const written = quietly(`record the mission of the Main ${agentId}`, (bindings) => {
+        let changed = false;
+        const next = bindings.map((binding) => {
+          const own = (binding.state === "bound" && binding.agentId === agentId) || (binding.state === "pending" && binding.claimedBy === agentId);
+          if (!own) return binding;
+          found = true;
+          if (binding.missionId === missionId) return binding;
+          changed = true;
+          return { ...binding, missionId };
+        });
+        return changed ? next : null;
+      });
+      return written && found;
+    },
+    reparent(agentId, parentId) {
+      if (agentId === "" || parentId === "") return false;
+      let found = false;
+      const written = quietly(`re-point the binding of ${agentId} to ${parentId}`, (bindings) => {
+        let changed = false;
+        const next = bindings.map((binding) => {
+          const own = (binding.state === "bound" && binding.agentId === agentId) || (binding.state === "pending" && binding.claimedBy === agentId);
+          if (!own) return binding;
+          found = true;
+          if (binding.parentId === parentId) return binding;
+          changed = true;
+          return { ...binding, parentId };
+        });
+        return changed ? next : null;
+      });
+      return written && found;
+    },
   };
 }
 

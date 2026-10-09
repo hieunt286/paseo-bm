@@ -467,7 +467,7 @@ function snapshotDir(dir: string, skip: readonly string[] = []): Record<string, 
 }
 
 /** paseo-bm's data folder outside its own stores: where the retired role instructions were, and anything else kept there. */
-const dataOutsideStores = () => snapshotDir(home, ["orchestrator", "traces", "decisions", "inbox", "handoffs"]);
+const dataOutsideStores = () => snapshotDir(home, ["orchestrator", "traces", "decisions", "inbox", "handoffs", "memory", "missions"]);
 
 /**
  * The owner puts a project in the events' scope (autonomy design §A.8): one

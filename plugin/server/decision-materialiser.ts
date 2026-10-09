@@ -13,6 +13,7 @@
  * | a Worker | any other owner text while its request has open questions | marks those asked before it `needs-confirmation` (c) |
  * | a Manager | inbound messages that are not the owner's, holding a `finished` `BM-REPORT` | expires that request's unsettled questions asked up to it (§A.3) |
  * | a bound Manager whose inbound messages include the owner's typed one | the answers it proposed with `bm_answers` in this turn (`proposed-answers.ts`) | settles them, `via: chat-manager` (design §16.6); without the owner's message they are dropped |
+ * | a Main whose inbound messages include the owner's typed one | the mission it proposed with `bm_mission_start` in this turn (`proposed-mission-starts.ts`) | records it (`mission-tools.ts` `settleMissionStart`, missions design §4); without the owner's message it is dropped |
  *
  * A bound Worker's questions and its `finished` report reach no Manager as
  * blocks: `bm_questions` opens them through the same open path
@@ -47,6 +48,11 @@
  * - **Delegation** (autonomy design §B.5). A question in a `delegate` cell is
  *   not answered here: the event bus asks the Orchestrator to decide it
  *   (`decision.opened`, `bm_decide`).
+ * - **Owner only** (missions design §5). A question the Worker marks
+ *   `ownerOnly`, or one of whose options asserts something about the owner
+ *   (`ownerFactOf`, logged), opens `ownerOnly: true`: no precedent, policy,
+ *   Main or Orchestrator answers it, and a Manager's or Main's `BM-ANSWERS`
+ *   or `bm_answers` for it is refused (`answerDecision`) and logged.
  * - **Round.** A block's questions share one round: the round of any of them
  *   already stored, else one more than the request's highest stored round.
  * - **Expiry.** A request's `finished` report means its Worker no longer
@@ -72,6 +78,13 @@
  *   `afterTurn` sees every record: the answers' delivery (`decision-delivery.ts`)
  *   marks a queued block that reached a Worker `sent`, and re-delivers after a
  *   reload.
+ *
+ * - **Repo** (missions design §6). A request's decisions live in its Worker's
+ *   repo: a Main works in the Missions home, so each block, answer, report
+ *   and cited question is read and written in the repo the request index
+ *   (`requestIndexOf`) gives its request, and its Worker is looked up there;
+ *   a proposed answer in the workspace `bm_answers` checked it in. A request
+ *   of no mission keeps the turn's own workspace.
  *
  * The block readers (`readableOf`, `questionBlockOf`, `answerBlockOf`) came
  * from the question–answer ledger this store replaced (autonomy design §A.14).
@@ -99,6 +112,7 @@ import {
   isAnswerable,
   markNeedsConfirmation,
   openingPrediction,
+  ownerFactOf,
   questionDecisionId,
   recordReversal,
   type AnswerVia,
@@ -118,6 +132,9 @@ import { isPluginNotice } from "./notices";
 import { resolveAtOpen } from "./policy-resolve";
 import { supersedePrecedentsBy } from "./precedent-resolve";
 import { takeProposedAnswers } from "./proposed-answers";
+import { settleMissionStart } from "./mission-tools";
+import { requestIndexOf } from "./mission-roster";
+import type { PaseoCliDeps } from "./paseo-cli";
 import { applyReviewBudgetGrants, policyGrantCapAt } from "./review-tools";
 import type { TraceStoreLocation } from "./trace-store";
 import { errorText } from "./rpc-kit";
@@ -338,6 +355,8 @@ export interface MaterialiserDeps {
   workerOf?: WorkerLookup;
   /** Called with every record after it is materialised and settled (the answers' delivery, §A.6); a no-op by default. */
   afterTurn?: AfterTurn;
+  /** The `paseo` CLI that labels and titles a Main whose mission this turn recorded; the real one by default. */
+  cli?: PaseoCliDeps;
 }
 
 /** What runs after a recorded turn is materialised: the answers' delivery notes arrivals and resumes (§A.6). */
@@ -414,6 +433,16 @@ interface Context extends OpenContext {
   outcome: MaterialiseOutcome;
 }
 
+/**
+ * The context in the workspace of `requestId`'s decisions (missions design
+ * §6): its repo from the request index, else the context's own — a request
+ * of no mission, or none.
+ */
+function inRepoOf<T extends Pick<OpenContext, "home" | "workspaceId">>(context: T, requestId: string | null): T {
+  const workspaceId = (requestId === null ? null : requestIndexOf(context.home, requestId)?.workspaceId) ?? context.workspaceId;
+  return workspaceId === context.workspaceId ? context : { ...context, workspaceId };
+}
+
 function questionsOfRequest(context: Pick<OpenContext, "store" | "workspaceId">, requestId: string): Decision[] {
   return context.store
     .list({ workspaceId: context.workspaceId, requestId })
@@ -459,14 +488,19 @@ function reverseReopened(context: Context): void {
       const at = validIso(evidence.at ?? record.endedAt, context.now);
       const beads = reopen.beads.length === 0 ? [LAST_TOUCHED_BEAD] : reopen.beads;
       for (const id of cited) {
-        for (const bead of beads) reverse(context, id, { kind: "reopened", at, ref: bead });
+        const placed = inRepoOf(context, decisionKindOf(id) === "question" ? (ANY_REQUEST_ID.exec(id)?.[1] ?? null) : null);
+        for (const bead of beads) reverse(placed, id, { kind: "reopened", at, ref: bead });
       }
     }
   }
 }
 
-/** A question to open: a `BM-QUESTIONS` block's, or a bound Worker's `bm_questions` (design §16.6), whose options may carry a grant. */
-export type OpenableQuestion = Omit<Question, "options"> & { options: Array<Question["options"][number] & { grant?: ReviewGrant }> };
+/**
+ * A question to open: a `BM-QUESTIONS` block's, or a bound Worker's
+ * `bm_questions` (design §16.6), whose options may carry a grant and which
+ * may say it asks a fact only the owner knows (`ownerOnly`, missions design §5).
+ */
+export type OpenableQuestion = Omit<Question, "options"> & { options: Array<Question["options"][number] & { grant?: ReviewGrant }>; ownerOnly?: boolean };
 
 function optionsOf(question: OpenableQuestion): DecisionOption[] {
   return question.options.map((option) => ({
@@ -566,6 +600,9 @@ export function openQuestions(
         ? null
         : (current.find((decision) => decision.id !== id && (decision.status === "open" || decision.status === "needs-confirmation") && normalisedQuestion(decision.question) === text)?.id ?? null);
     const options = optionsOf(question);
+    // Missions design §5: the Worker's word, or the guard on an option that asserts something about the owner.
+    const ownerFact = question.ownerOnly === true ? null : ownerFactOf(options);
+    if (ownerFact !== null) context.log(`[paseo-bm] ${id} is the owner's to answer: its option "${ownerFact.slice(0, 80)}" asserts something about the owner.`);
     const decision: Decision = {
       id,
       workspaceId: context.workspaceId,
@@ -588,6 +625,7 @@ export function openQuestions(
       supersededBy: null,
       // The option the Worker recommends is the recommended predictor's prediction (§B.3).
       prediction: openingPrediction(options),
+      ...(question.ownerOnly === true || ownerFact !== null ? { ownerOnly: true } : {}),
     };
     let created = false;
     try {
@@ -625,8 +663,9 @@ export function openQuestions(
   }
 }
 
-/** Settles the decisions one `BM-ANSWERS` block names. */
-function settleBlock(context: Context, block: { requestId: string; answers: readonly Answer[] }, via: AnswerVia, at: string): void {
+/** Settles the decisions one `BM-ANSWERS` block names, in its request's repo. */
+function settleBlock(turn: Context, block: { requestId: string; answers: readonly Answer[] }, via: AnswerVia, at: string): void {
+  const context = inRepoOf(turn, block.requestId);
   for (const answer of block.answers) {
     const id = questionDecisionId(block.requestId, answer.id);
     try {
@@ -645,6 +684,9 @@ function settleBlock(context: Context, block: { requestId: string; answers: read
         supersedePrecedentsBy(mutation.decision, { home: context.home, now: new Date(context.now), log: context.log });
       } else if (mutation.status === "refused" && mutation.refusal === "settled" && !(mutation.decision.answer?.via === via && mutation.decision.answer.at === at)) {
         // Design §7.17.8 c: a chat answer to a question already settled (on its card) is refused, never silently; a turn read again is not one.
+        context.log(`[paseo-bm] the ${via} answer to ${id} was not recorded: ${mutation.message}.`);
+      } else if (mutation.status === "refused" && mutation.decision.ownerOnly === true) {
+        // Missions design §5: a Manager's or Main's answer to an owner-only fact is refused, never silently.
         context.log(`[paseo-bm] the ${via} answer to ${id} was not recorded: ${mutation.message}.`);
       }
     } catch (error) {
@@ -700,7 +742,7 @@ async function materialiseManager(context: Context, deps: MaterialiserDeps): Pro
   const askedBy = (requestId: string) => () => {
     let found = workers.get(requestId);
     if (found === undefined) {
-      found = (deps.workerOf ?? workerOfRequest)({ requestId, workspaceId: record.workspaceId, managerId: record.agentId }, deps.paseo).catch(
+      found = (deps.workerOf ?? workerOfRequest)({ requestId, workspaceId: inRepoOf(context, requestId).workspaceId, managerId: record.agentId }, deps.paseo).catch(
         (error: unknown) => {
           context.log(`[paseo-bm] could not find the Worker of ${requestId}: ${errorText(error)}`);
           return null;
@@ -715,13 +757,15 @@ async function materialiseManager(context: Context, deps: MaterialiserDeps): Pro
   for (const message of record.sent) {
     if (message.origin === "user") continue;
     const block = questionBlockOf(message.text);
-    if (block !== null && block.questions.length > 0) await openBlock(context, block, message, askedBy(block.requestId));
+    if (block !== null && block.questions.length > 0) await openBlock(inRepoOf(context, block.requestId), block, message, askedBy(block.requestId));
   }
 
   // (b) The Manager's own block settles nothing unless the owner typed in this turn. Neither do the
   // answers a bound Manager proposed with bm_answers in this turn (design §16.6): taken now, either way.
   const proposed = takeProposedAnswers(record.agentId, record.startedAt);
   const owner = record.sent.filter((message) => message.origin === "user");
+  // Missions design §4: a Main's bm_mission_start of this turn is recorded on the same rule.
+  await settleMissionStart(record.agentId, record.startedAt, owner.length > 0, { home: context.home, log: context.log, ...(deps.cli === undefined ? {} : { cli: deps.cli }) });
   if (owner.length === 0) {
     if (proposed.length > 0) {
       context.log(
@@ -732,7 +776,7 @@ async function materialiseManager(context: Context, deps: MaterialiserDeps): Pro
   }
   const at = validIso(owner.at(-1)!.at, context.now);
   for (const block of replyBlocks(record)) settleBlock(context, block, "chat-manager", at);
-  for (const block of proposed) settleBlock(context, block, "chat-manager", at);
+  for (const block of proposed) settleBlock({ ...context, workspaceId: block.workspaceId }, block, "chat-manager", at);
 }
 
 /**
@@ -785,7 +829,7 @@ export function expireQuestionsOf(context: Pick<OpenContext, "store" | "workspac
  * decision, so an answer given meanwhile stands.
  */
 function expireFinished(context: Context): void {
-  for (const report of finishedReportsOf(context)) context.outcome.expired.push(...expireQuestionsOf(context, report.requestId, report.at));
+  for (const report of finishedReportsOf(context)) context.outcome.expired.push(...expireQuestionsOf(inRepoOf(context, report.requestId), report.requestId, report.at));
   // A question opened and expired in this same turn is handed on as stored, so no event asks about it.
   if (context.outcome.expired.length === 0) return;
   const expired = new Map(context.outcome.expired.map((decision) => [decision.id, decision]));

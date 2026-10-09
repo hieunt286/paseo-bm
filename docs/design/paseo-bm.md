@@ -1029,7 +1029,7 @@ When all three hold, the plugin stores and delivers a `no-verdict` record to the
 
 ### 7.17 Projects ask each other: peer links (`peer-links.ts`, `peer-tools.ts`; ADR-028)
 
-Built 2026-10-09 (ADR-028; beads `bm-peer-links-j8r3.1`–`.12`). Base PRD REQ-175 → REQ-183.
+Built 2026-10-09 (ADR-028; beads `bm-peer-links-j8r3.1`–`.12`). Base PRD REQ-175 → REQ-183. For a Worker whose request belongs to a **mission**, an ask goes to its own Main and Workers are linked by their Main ([missions design](./paseo-bm-missions.md) §2.6, §5; ADR-029); the `project` routing below stays for requests without a mission.
 
 A **project** is a Paseo workspace. The **asker** is the agent of project A that asks; the **answering side** is project B: its Beads Manager, and the Worker of the request that takes the ask.
 

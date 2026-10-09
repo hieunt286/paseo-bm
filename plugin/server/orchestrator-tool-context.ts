@@ -16,8 +16,11 @@ import type { BmEvent } from "./event-bus";
 import type { LiveTimelinePaseo } from "./live-timeline";
 import { findOrchestratorAgent, type OrchestratorAgentPaseo, type OrchestratorAgentSnapshot } from "./orchestrator-agent";
 import type { OrchestratorStore, OrchestratorStoreDeps } from "./orchestrator-store";
+import { isPluginHome } from "./plugin-homes";
 import { storedWorkspaceIds, type TraceStoreLocation } from "./trace-store";
 import { knownRequestIdOf } from "./request-registry";
+import { requestIndex, requestIndexOf } from "./mission-roster";
+import { createMissionStore, type Mission } from "./mission-store";
 import { dataHome } from "./rpc-kit";
 
 /** The SDK slice the tools use. `PaseoApi` is structurally assignable. */
@@ -165,17 +168,65 @@ export async function wakeEventsNow(context: Pick<ToolContext, "listed">, deps: 
   return orchestratorId === null ? [] : wakeEventsOf(orchestratorId);
 }
 
-/** The non-archived paseo-bm Manager `managerId` of `workspaceId`, or a refusal saying which of these it is not. */
-export async function requireManager(input: { workspaceId: string; managerId: string }, context: ToolContext) {
-  const manager = (await workingAgentsOf(context)).find((candidate) => candidate.id === input.managerId);
-  if (manager === undefined || manager.role !== "manager") refuse(`${input.managerId} is not a paseo-bm Manager; use a managerId bm_projects gave`);
-  if (manager.workspaceId !== input.workspaceId) refuse(`Manager ${input.managerId} does not belong to project ${input.workspaceId}`);
-  if (manager.archived) refuse(`Manager ${input.managerId} is archived; nothing can be sent to it`);
+/** The mission `requestId` belongs to (its roster, missions design §2.3), or null for none or a request of no mission. Never throws. */
+export function missionOfRequest(home: string, requestId: string | null): Mission | null {
+  const place = requestId === null ? null : requestIndexOf(home, requestId);
+  return place === null ? null : createMissionStore(home).get(place.missionId);
+}
+
+/** A repo's Mains (missions design §6): the current Main of each mission whose roster has a request in `workspaceId`. Reads only; never throws. */
+export function repoMainsOf(home: string, workspaceId: string): Set<string> {
+  const missionIds = new Set([...requestIndex(home).values()].filter((place) => place.workspaceId === workspaceId).map((place) => place.missionId));
+  const missions = createMissionStore(home);
+  return new Set([...missionIds].flatMap((missionId) => missions.get(missionId)?.mainId ?? []));
+}
+
+/** True when `agent` belongs to project `workspaceId`: it lives there, or it is one of the repo's Mains (`repoMainsOf`). */
+export function belongsToProject(agent: { id: string; workspaceId: string | null }, workspaceId: string, home: string): boolean {
+  return agent.workspaceId === workspaceId || repoMainsOf(home, workspaceId).has(agent.id);
+}
+
+/** The mission whose `mainHistory` holds `agentId`, an open one first, or null. Never throws. */
+function missionOfMain(home: string, agentId: string): Mission | null {
+  const missions = createMissionStore(home);
+  const held = missions.list().flatMap((entry) => {
+    const mission = missions.get(entry.missionId);
+    return mission?.mainHistory.some((change) => change.agentId === agentId) === true ? [mission] : [];
+  });
+  return held.find((mission) => mission.state === "open") ?? held[0] ?? null;
+}
+
+/**
+ * Who a command named to Manager `managerId` about `requestId` goes to
+ * (missions design §3.4, §6): when `managerId` is a Main the request's
+ * mission has had, the mission's current Main; with no request, the current
+ * Main of the mission whose `mainHistory` holds `managerId`; else `managerId`
+ * itself.
+ */
+export function commandManagerIdOf(home: string, managerId: string, requestId: string | null): string {
+  const mission = requestId === null ? missionOfMain(home, managerId) : missionOfRequest(home, requestId);
+  if (mission?.mainId == null) return managerId;
+  return mission.mainHistory.some((entry) => entry.agentId === managerId) ? mission.mainId : managerId;
+}
+
+/**
+ * The non-archived paseo-bm Manager a command of project `workspaceId` named
+ * to `managerId` goes to (`commandManagerIdOf`), or a refusal saying which of
+ * these it is not. A Main in the Missions home belongs to the repos its
+ * missions have requests in (`belongsToProject`).
+ */
+export async function requireManager(input: { workspaceId: string; managerId: string; requestId?: string | null }, context: ToolContext) {
+  const managerId = commandManagerIdOf(context.home, input.managerId, input.requestId ?? null);
+  const manager = (await workingAgentsOf(context)).find((candidate) => candidate.id === managerId);
+  if (manager === undefined || manager.role !== "manager") refuse(`${managerId} is not a paseo-bm Manager; use a managerId bm_projects gave`);
+  if (!belongsToProject(manager, input.workspaceId, context.home)) refuse(`Manager ${managerId} does not belong to project ${input.workspaceId}`);
+  if (manager.archived) refuse(`Manager ${managerId} is archived; nothing can be sent to it`);
   return manager;
 }
 
-/** Refuses a workspace that is not a paseo-bm project: none of its turns is stored and none of its agents is paseo-bm's. */
+/** Refuses a workspace that is not a paseo-bm project: a plugin home (missions design §3.1), or none of its turns is stored and none of its agents is paseo-bm's. */
 export async function requireProject(workspaceId: string, context: ToolContext): Promise<void> {
+  if (isPluginHome(workspaceId, context.home)) refuse(`${workspaceId} is a paseo-bm home, not a project; use the workspaceId bm_projects gave`);
   if (storedWorkspaceIds(context.location).includes(workspaceId)) return;
   if ((await workingAgentsOf(context)).some((agent) => agent.workspaceId === workspaceId)) return;
   refuse(`no paseo-bm project ${workspaceId}; use the workspaceId bm_projects gave`);

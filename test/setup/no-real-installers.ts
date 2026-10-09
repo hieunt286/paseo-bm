@@ -24,6 +24,18 @@ const testHome = mkdtempSync(join(tmpdir(), `bm-test-home-${process.pid}-`));
 process.env["HOME"] = testHome;
 process.env["USERPROFILE"] = testHome;
 delete process.env["PASEO_BM_HOME"];
+
+/**
+ * No test reaches a real Paseo daemon. A suite run from inside a Paseo agent
+ * inherits `PASEO_HOME` (the owner's `~/.paseo`) and the agent's `PASEO_*`
+ * variables, so a module that shells out to the real `paseo` CLI — a label or
+ * title update through `paseo-cli.ts` — would talk to the owner's live daemon.
+ * `PASEO_HOME` points at an empty folder of this worker instead, where no
+ * daemon listens, and the agent's own variables are dropped; a test that wants
+ * a CLI injects one.
+ */
+process.env["PASEO_HOME"] = join(testHome, ".paseo");
+for (const name of ["PASEO_CLI", "PASEO_AGENT_ID", "PASEO_AGENT_CWD", "PASEO_HOST"]) delete process.env[name];
 process.on("exit", () => {
   rmSync(testHome, { recursive: true, force: true });
 });

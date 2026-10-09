@@ -22,6 +22,7 @@ import { bmAgentsOf } from "../plugin/server/paseo-directory";
 import { soleWorkerOfRequest } from "../plugin/server/decision-delivery";
 import { workingAgents } from "../plugin/server/orchestrator-tool-context";
 import { CLEANUP_DELETES } from "../plugin/server/setup-machine";
+import { createMissionRoster } from "../plugin/server/mission-roster";
 import { checkBlocks } from "../plugin/shared/bm-format";
 import { TRACE_STORE_SCHEMA_VERSION, type TraceRecord } from "../plugin/shared/contracts";
 import { dataFolder, removeDataFolders } from "./helpers/data-folder";
@@ -106,6 +107,19 @@ describe("the store (design §16.4)", () => {
     const [checked] = checkBlocks(block);
     expect(checked?.requestId).toBe(made.requestId);
     expect(checked?.issues.filter((issue) => issue.field === "requestId")).toEqual([]);
+  });
+
+  it("never repeats an id across workspaces or the mission rosters' request index (missions design §2.3)", () => {
+    const home = dataFolder();
+    const registry = createRequestRegistry(home, { now: () => T0, backfill: () => [] });
+    const first = registry.generate(WS, { managerId: "main-1" });
+    const second = registry.generate("wks_2", { managerId: "main-1" });
+    expect(first.requestId).toBe("req-20261003T100000Z");
+    expect(second.requestId).toBe("req-20261003T100001Z");
+    // An id only a roster holds (its registry entry dropped or not written yet) is taken too.
+    createMissionRoster(home).add("mis-0000000001", { requestId: "req-20261003T100002Z", workspaceId: "wks_3", topic: "x" });
+    expect(registry.generate("wks_3", { managerId: "main-1" }).requestId).toBe("req-20261003T100003Z");
+    expect(registry.generate(WS, { managerId: "main-1" }).requestId).toBe("req-20261003T100004Z");
   });
 
   it("writes atomically: the folder 0700, the file 0600, no temporary file left, schemaVersion first", () => {

@@ -29,3 +29,4 @@ export * from "./contracts/insights";
 export * from "./contracts/autonomy";
 export * from "./contracts/links";
 export * from "./contracts/updates";
+export * from "./contracts/missions";

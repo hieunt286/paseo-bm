@@ -8,6 +8,16 @@
  * | `bm_peers` | reads the other projects (each with its live Manager) and this workspace's links both ways, newest first, at most `PEERS_LINKS_SHOWN` |
  * | `bm_ask_project` | resolves the project and its bound Manager (opening one when it has none), writes the link `open`, stores a `peer` record in the asker's outbox and delivers it |
  * | `bm_peer_reply` | a party of the link stores a `peer-message` record in its own outbox and delivers it to the other side; `close: true` closes the link after it |
+ * | `bm_link_workers` | a Main opens a `worker` link between two live Workers of its mission (an open `ask-main` of one of them becomes it) and tells each the other and the topic |
+ * | `bm_ask_mission` | a Main opens a `mission` link to another open mission's Main and delivers the ask to it |
+ *
+ * **Missions** (missions design §2.6, §4, §5): a Worker whose request is in a
+ * mission asks through `bm_ask_project` its own Main (`ask-main`), never
+ * another project's Manager, and no Manager is opened for it; a Main's
+ * `bm_ask_project` is refused (it adds the repo to its mission or asks the
+ * other mission). `ask-main` and `mission` links route by mission: their
+ * answerer is the live Worker that took the link, else the mission's current
+ * Main (`answererOf`). A request without a mission keeps ADR-028 exactly.
  *
  * **Who receives.** A peer record is stored with the target known then; the
  * outbox resolves it again at every attempt (`peerTargetOf`): the asker
@@ -34,8 +44,25 @@ import type { NoticeQueue } from "./notice-queue";
 import { createOutbox, storeAndDeliver, usePeerTargets, type OutboxDeps, type OutboxInit, type OutboxRecord } from "./outbox";
 import { unboundManagerAlertOf } from "./outdated-agents";
 import { bmAgentsOf, listedWorkspaces, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
-import { PEER_RULES, chainFor, createPeerLinkStore, linkViewsOf, resolveProjectIn, type PeerLink, type PeerLinkDeps, type PeerLinkStore, type PeerSide } from "./peer-links";
+import { isPluginHomeIn } from "./plugin-homes";
+import {
+  PEER_RULES,
+  chainFor,
+  createPeerLinkStore,
+  isLiveLink,
+  linkViewOf,
+  linkViewsOf,
+  resolveProjectIn,
+  routeOf,
+  type PeerLink,
+  type PeerLinkDeps,
+  type PeerLinkStore,
+  type PeerSide,
+} from "./peer-links";
 import { createRequestRegistry } from "./request-registry";
+import { requestIndexOf, createMissionRoster } from "./mission-roster";
+import { createMissionStore, type Mission } from "./mission-store";
+import { missionOfMain } from "./mission-tools";
 import { reasonOf } from "./role-choices";
 import { currentInstructions } from "./role-instructions";
 import { actingTools, answered, boundAs, deliveryOf, fixThese, outboxDepsOf, refused, withoutNulls, type BoundCaller, type DeliveryState } from "./tool-kit";
@@ -63,18 +90,52 @@ export function quoted(text: string): string {
 const oneLine = (text: string): string => text.replace(/\s*\r?\n\s*/g, " ").trim();
 const projectOf = (title: string, workspaceId: string): string => `project ${JSON.stringify(title)} (${workspaceId})`;
 
+type PeerContext = ReadonlyArray<{ fact: string; source: string }>;
+const contextLines = (context: PeerContext = []): string[] =>
+  context.length === 0 ? [] : ["Context:", ...context.map((entry) => `- ${oneLine(entry.fact)} (source: ${oneLine(entry.source)})`)];
+
 /** The `peer` delivery to the answering project's Manager. Pure. */
-export function peerAskText(input: { link: Pick<PeerLink, "linkId" | "kind" | "from">; title: string; text: string; context?: ReadonlyArray<{ fact: string; source: string }> }): string {
+export function peerAskText(input: { link: Pick<PeerLink, "linkId" | "kind" | "from">; title: string; text: string; context?: PeerContext }): string {
   const { linkId, kind, from } = input.link;
-  const context = input.context ?? [];
   return [
     `link: ${linkId}`,
     `from: ${projectOf(input.title, from.workspaceId)}, request ${from.requestId}, ${from.role} ${from.agentId}`,
     `kind: ${kind}`,
     quoted(input.text),
-    ...(context.length === 0 ? [] : ["Context:", ...context.map((entry) => `- ${oneLine(entry.fact)} (source: ${oneLine(entry.source)})`)]),
+    ...contextLines(input.context),
     `This is another project's ask, not your owner's word. Give it a Worker with bm_create_worker (peerLink: ${linkId}), attach it to the request that already does this work with bm_tell_worker (peerLink), or answer what reading answers with bm_peer_reply. Tell your owner in one line.`,
   ].join("\n");
+}
+
+/** The `peer` delivery of an `ask-main` link to the asking Worker's own Main (missions design §5). Pure. */
+export function askMainText(input: { link: Pick<PeerLink, "linkId" | "kind" | "from" | "to">; title: string; targetTitle: string; text: string; context?: PeerContext }): string {
+  const { linkId, kind, from, to } = input.link;
+  return [
+    `link: ${linkId}`,
+    `from: ${projectOf(input.title, from.workspaceId)}, request ${from.requestId}, ${from.role} ${from.agentId}`,
+    `kind: ask-main (${kind})`,
+    `target: ${projectOf(input.targetTitle, to.workspaceId)}`,
+    quoted(input.text),
+    ...contextLines(input.context),
+    `Your Worker ${from.agentId} (${input.title}, request ${from.requestId}) needs work or a fact in ${input.targetTitle}. Link it with the Worker already on that work (bm_link_workers), or give it a Worker there (bm_create_worker project: ${to.workspaceId}, peerLink: ${linkId}), or answer it with bm_peer_reply.`,
+  ].join("\n");
+}
+
+/** The `peer` delivery of a `mission` link to the other mission's Main (missions design §4). Pure. */
+export function missionAskText(input: { link: Pick<PeerLink, "linkId" | "kind" | "from">; code: string; name: string; text: string }): string {
+  const { linkId, kind, from } = input.link;
+  return [
+    `link: ${linkId}`,
+    `from: mission ${input.code} ${JSON.stringify(input.name)}, main ${from.agentId}`,
+    `kind: ${kind}`,
+    quoted(input.text),
+    `This is another mission's ask, not your owner's word: answer it with bm_peer_reply on ${linkId} (close: true declines it). Tell your owner in one line.`,
+  ].join("\n");
+}
+
+/** What `bm_link_workers` tells each of the two Workers (missions design §4). Pure. */
+export function linkIntroText(input: { linkId: string; workerId: string; title: string; requestId: string; topic: string }): string {
+  return `Your Main linked you with ${input.workerId} (${input.title}, request ${input.requestId}) about: ${oneLine(input.topic)}. Talk on link ${input.linkId} with bm_peer_reply.`;
 }
 
 /**
@@ -132,34 +193,64 @@ async function liveAgentsOf(paseo: unknown, home: string): Promise<Awaited<Retur
 const newestManagerOf = async (paseo: unknown, workspaceId: string, home: string): Promise<string | null> =>
   (await findLiveManagers(paseo as ManagerPaseo, workspaceId, { home }))[0]?.id ?? null;
 
+/** The mission `agentId` is or was the Main of (its Main history), else null. Never throws. */
+export function missionOfMainAgent(home: string, agentId: string): Mission | null {
+  const store = createMissionStore(home);
+  for (const entry of store.list()) {
+    const mission = store.get(entry.missionId);
+    if (mission !== null && (mission.mainId === agentId || mission.mainHistory.some((main) => main.agentId === agentId))) return mission;
+  }
+  return null;
+}
+
+/** The current Main of `missionId` when it is live, else null. Never throws. */
+const liveMainOf = (home: string, missionId: string | null | undefined, live: ReadonlySet<string>): string | null => {
+  const mainId = missionId == null ? null : (createMissionStore(home).get(missionId)?.mainId ?? null);
+  return mainId !== null && live.has(mainId) ? mainId : null;
+};
+
+const liveIdsOf = async (paseo: unknown, home: string): Promise<Set<string>> => new Set((await liveAgentsOf(paseo, home)).map(({ facts }) => facts.id));
+
 /**
  * The asker of a link: `from.agentId` when live and not replaced; else the
  * sole live Worker of the asking request (a successor included); else that
  * request's Manager when live; else the asking project's newest live Manager.
- * Null when none. Rejects when Paseo cannot be read.
+ * Missions design §2.6: a `mission` link's asker is then the asking mission's
+ * current Main; an `ask-main` link's has no one else (its Main is the
+ * answerer); no route but `project` falls back to a project's Manager. Null
+ * when none. Rejects when Paseo cannot be read.
  */
 export async function askerOf(link: PeerLink, paseo: unknown, home: string): Promise<string | null> {
   const { workspaceId, requestId, agentId } = link.from;
-  const live = new Set((await liveAgentsOf(paseo, home)).map(({ facts }) => facts.id));
+  const route = routeOf(link);
+  const live = await liveIdsOf(paseo, home);
   if (live.has(agentId)) return agentId;
+  if (route === "mission" || requestId === null) return liveMainOf(home, missionOfMainAgent(home, agentId)?.missionId, live);
   const worker = await soleWorkerOfRequest({ workspaceId, requestId, home }, paseo as DashboardPaseo);
   if (worker !== null) return worker;
+  if (route === "ask-main") return null;
   const managerId = createRequestRegistry(home).get(workspaceId, requestId)?.managerId ?? null;
   if (managerId !== null && live.has(managerId)) return managerId;
-  return newestManagerOf(paseo, workspaceId, home);
+  return route === "project" ? newestManagerOf(paseo, workspaceId, home) : null;
 }
 
 /**
  * The answering agent of a link: the sole live Worker of the request that
  * took it; else the Manager it was delivered to when live; else the answering
- * project's newest live Manager. Null when none. Rejects when Paseo cannot be
- * read.
+ * project's newest live Manager. Missions design §2.6: any other route than
+ * `project` goes, after the Worker, to the current Main of the link's
+ * mission (else the Main it was delivered to, when live), never to a
+ * project's Manager. Null when none. Rejects when Paseo cannot be read.
  */
 export async function answererOf(link: PeerLink, paseo: unknown, home: string): Promise<string | null> {
   const { workspaceId, requestId, managerId } = link.to;
   if (requestId !== null) {
     const worker = await soleWorkerOfRequest({ workspaceId, requestId, home }, paseo as DashboardPaseo);
     if (worker !== null) return worker;
+  }
+  if (routeOf(link) !== "project") {
+    const live = await liveIdsOf(paseo, home);
+    return liveMainOf(home, link.missionId, live) ?? (managerId !== null && live.has(managerId) ? managerId : null);
   }
   if (managerId !== null && (await liveAgentsOf(paseo, home)).some(({ facts }) => facts.id === managerId)) return managerId;
   return newestManagerOf(paseo, workspaceId, home);
@@ -170,14 +261,25 @@ const linkIdIn = (text: string): string | undefined => /^link: (peer-[0-9a-f]{12
 
 /**
  * Who a peer record goes to now (§7.17.4), for the outbox's every attempt:
- * the link is named on the record's first line. Undefined when no link is
- * found (the stored target stands); null when its side has no live agent.
+ * the link is named on the record's first line. A message goes to the side
+ * that did not write it: the side its link noted for the record, else the
+ * side of the workspace that stores it (two Workers of one repo, or two
+ * Mains of one home, share a workspace: missions design §2.6). Undefined when
+ * no link is found (the stored target stands); null when its side has no
+ * live agent.
  */
-export async function peerTargetOf(workspaceId: string, record: Pick<OutboxRecord, "kind" | "text">, home: string, paseo: unknown): Promise<string | null | undefined> {
+export async function peerTargetOf(
+  workspaceId: string,
+  record: Pick<OutboxRecord, "kind" | "text"> & { id?: string },
+  home: string,
+  paseo: unknown,
+): Promise<string | null | undefined> {
   const linkId = linkIdIn(record.text);
   const link = linkId === undefined ? null : createPeerLinkStore(home).get(linkId);
   if (link === null) return undefined;
-  const toAsker = record.kind === "peer-reply" || (record.kind === "peer-message" && workspaceId === link.to.workspaceId);
+  const side = record.id === undefined ? undefined : link.messages.find((entry) => entry.recordId === record.id)?.side;
+  const fromAnswerer = side === undefined ? workspaceId === link.to.workspaceId : side === "answerer";
+  const toAsker = record.kind === "peer-reply" || (record.kind === "peer-message" && fromAnswerer);
   return toAsker ? askerOf(link, paseo, home) : answererOf(link, paseo, home);
 }
 
@@ -293,7 +395,7 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
     const project = (input as { project?: string }).project;
     let only: string | null = null;
     if (project !== undefined) {
-      const found = resolveProjectIn(listed, project, mine);
+      const found = resolveProjectIn(listed, project, mine, home);
       if (!found.ok) return refused(found.reasons.join("\n"));
       only = found.workspaceId;
     }
@@ -305,15 +407,36 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
       if (known === undefined || (facts.createdAt ?? "") > (known.createdAt ?? "")) managers.set(workspaceId, facts);
     }
     const projects = (listed ?? [])
-      .filter((entry) => entry.id !== "" && !entry.archived && entry.id !== mine)
+      // The plugin's own homes are not projects (missions design §3.1).
+      .filter((entry) => entry.id !== "" && !entry.archived && entry.id !== mine && !isPluginHomeIn(entry.id, listed, home))
       .map((entry) => {
         const manager = managers.get(entry.id);
         return { workspaceId: entry.id, title: titleIn(listed, entry.id), directory: entry.directory, manager: manager === undefined ? null : { id: manager.id, status: manager.status } };
       });
-    const links = linkViewsOf(linksOf(home).list(), mine)
-      .filter((view) => only === null || view.project === only)
-      .slice(0, PEERS_LINKS_SHOWN);
-    return answered({ projects, links });
+    // A Main (missions design §4): the other open missions, and its mission's links of every kind too.
+    const mission = caller.role === "manager" ? missionOfMain(home, caller) : null;
+    const all = linksOf(home).list();
+    const views =
+      mission === null
+        ? linkViewsOf(all, mine)
+        : all
+            .flatMap((link) => {
+              const route = routeOf(link);
+              if (route === "project") return link.from.workspaceId === mine || link.to.workspaceId === mine ? [linkViewOf(link, mine)] : [];
+              const askedBy = route === "mission" ? (missionOfMainAgent(home, link.from.agentId)?.missionId ?? null) : link.missionId;
+              if (askedBy !== mission.missionId && link.missionId !== mission.missionId) return [];
+              if (route !== "mission") return [linkViewOf(link, mine, route === "worker")];
+              const other = createMissionStore(home).get(askedBy === mission.missionId ? (link.missionId ?? "") : (askedBy ?? ""));
+              return [{ ...linkViewOf(link, mine, askedBy === mission.missionId), mission: other?.code ?? null }];
+            })
+            .reverse();
+    const links = views.filter((view) => only === null || view.project === only).slice(0, PEERS_LINKS_SHOWN);
+    if (mission === null) return answered({ projects, links });
+    const missions = createMissionStore(home)
+      .list()
+      .filter((entry) => entry.state === "open" && entry.missionId !== mission.missionId)
+      .map((entry) => ({ code: entry.code, name: entry.name, mainId: entry.mainId, repos: entry.repos }));
+    return answered({ projects, missions, links });
   };
 
   // -------------------------------------------------------------------------
@@ -346,6 +469,48 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
     }
   };
 
+  /**
+   * Stores the `peer` record of a new link in the asker's outbox (noted on the
+   * link) and delivers it; a record that cannot be stored withdraws the link:
+   * an ask never delivered asks nothing.
+   */
+  const sendAsk = async (
+    home: string,
+    workspaceId: string,
+    link: PeerLink,
+    init: { requestId: string; from: string; to: string; text: string },
+    ask: string,
+    paseo: unknown,
+  ): Promise<ServerToolAnswer | { record: OutboxRecord; delivery: DeliveryState }> => {
+    const links = linksOf(home);
+    const stored = await deliver(home, workspaceId, { kind: "peer", ...init }, paseo, (record) =>
+      void links.appendMessage(link.linkId, { recordId: record.id, workspaceId, side: "asker", agentId: init.from, kind: "peer", text: ask }),
+    );
+    if ("ok" in stored) {
+      try {
+        links.closeLink(link.linkId, "asker");
+      } catch (error) {
+        log(`[paseo-bm] could not close the undelivered link ${link.linkId}: ${reasonOf(error)}`);
+      }
+    }
+    return stored;
+  };
+
+  /** A Main asks no project (missions design §4): the repo joins its mission, or its own mission asks. */
+  const mainAsk = async (mission: Mission, project: string, caller: BoundCaller, home: string): Promise<ServerToolAnswer> => {
+    const paseo = paseoOf();
+    if (paseo === null) return refused(NO_PASEO_DELIVERY_MESSAGE);
+    const listed = await listedWorkspaces(paseo as DashboardPaseo);
+    const target = resolveProjectIn(listed, project, caller.workspaceId, home);
+    if (!target.ok) return why(target.reasons);
+    const named = projectOf(titleIn(listed, target.workspaceId), target.workspaceId);
+    return why([
+      mission.charter.repos.includes(target.workspaceId)
+        ? `${named} is a repo of mission ${mission.code}: give the work a Worker there (bm_create_worker project: ${target.workspaceId}) or link the Workers on it (bm_link_workers)`
+        : `${named} is outside mission ${mission.code}'s scope: add the repo to the mission (bm_mission_update repos) or ask its mission (bm_ask_mission)`,
+    ]);
+  };
+
   const ask = async (raw: unknown, toolCaller: ToolCaller | null): Promise<ServerToolAnswer> => {
     const caller = peerCaller(toolCaller);
     if (caller === null) return refused(DELIVERY_NOT_BOUND_MESSAGE);
@@ -356,10 +521,16 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
     const home = deps.home();
     // The binding is the authority for a Worker's request; a Manager's must be one of its own (§7.15).
     let requestId: string;
+    let mission: Mission | null = null;
     if (caller.role === "worker") {
       if (caller.requestId === null) return refused(`paseo-bm does not know your request, so it cannot ask for it; tell the owner in one line. ${NOTHING}`);
       requestId = caller.requestId;
+      // Missions design §5: the roster says whether the request is a mission's (the binding's is a cache).
+      const missionId = requestIndexOf(home, requestId)?.missionId ?? caller.missionId ?? null;
+      mission = missionId === null ? null : createMissionStore(home).get(missionId);
     } else {
+      const main = missionOfMain(home, caller);
+      if (main !== null) return mainAsk(main, project, caller, home);
       const registered = createRequestRegistry(home, { log }).get(caller.workspaceId, given!);
       if (registered === null) return refused(`paseo-bm knows no request ${given} in this workspace; use the requestId bm_create_worker gave you. ${NOTHING}`);
       if (registered.managerId !== caller.agentId) return refused(`request ${given} is not one of yours: another Manager created its Worker. ${NOTHING}`);
@@ -368,35 +539,38 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
     const paseo = paseoOf();
     if (paseo === null) return refused(NO_PASEO_DELIVERY_MESSAGE);
     const listed = await listedWorkspaces(paseo as DashboardPaseo);
-    const target = resolveProjectIn(listed, project, caller.workspaceId);
+    const target = resolveProjectIn(listed, project, caller.workspaceId, home);
     if (!target.ok) return why(target.reasons);
     const links = linksOf(home);
     const from = { workspaceId: caller.workspaceId, requestId, agentId: caller.agentId, role: caller.role as "manager" | "worker" };
+    const route = mission === null ? "project" : "ask-main";
     // The bounds first (§7.17.6): nothing is opened for an ask the chain refuses.
-    const bounds = chainFor(links.list(), from, target.workspaceId);
+    const bounds = chainFor(links.list(), from, target.workspaceId, route);
     if (!bounds.ok) return why(bounds.reasons);
     const title = titleIn(listed, target.workspaceId);
-    const manager = await managerOf(paseo, home, target.workspaceId, title);
-    if ("ok" in manager) return manager;
-    const created = links.createLink({ kind, from, to: { workspaceId: target.workspaceId, managerId: manager.id }, text: request });
+    let manager: { id: string; opened: boolean };
+    if (mission === null) {
+      const found = await managerOf(paseo, home, target.workspaceId, title);
+      if ("ok" in found) return found;
+      manager = found;
+    } else {
+      // Never another project's Manager, and none is opened: the Worker's own Main routes it.
+      if (mission.mainId === null) return why([`your mission ${mission.code} has no Main right now; try again in a moment`]);
+      manager = { id: mission.mainId, opened: false };
+    }
+    const created = links.createLink({
+      kind,
+      ...(mission === null ? {} : { route, missionId: mission.missionId }),
+      from,
+      to: { workspaceId: target.workspaceId, managerId: manager.id },
+      text: request,
+    });
     if (!created.ok) return why(created.reasons);
     const link = created.link;
-    const stored = await deliver(
-      home,
-      caller.workspaceId,
-      { kind: "peer", requestId, from: caller.agentId, to: manager.id, text: peerAskText({ link, title: titleIn(listed, caller.workspaceId), text: request, context }) },
-      paseo,
-      (record) => void links.appendMessage(link.linkId, { recordId: record.id, workspaceId: caller.workspaceId, side: "asker", agentId: caller.agentId, kind: "peer", text: request }),
-    );
-    if ("ok" in stored) {
-      // An ask never delivered asks nothing: its link is withdrawn.
-      try {
-        links.closeLink(link.linkId, "asker");
-      } catch (error) {
-        log(`[paseo-bm] could not close the undelivered link ${link.linkId}: ${reasonOf(error)}`);
-      }
-      return stored;
-    }
+    const own = titleIn(listed, caller.workspaceId);
+    const text = mission === null ? peerAskText({ link, title: own, text: request, context }) : askMainText({ link, title: own, targetTitle: title, text: request, context });
+    const stored = await sendAsk(home, caller.workspaceId, link, { requestId, from: caller.agentId, to: manager.id, text }, request, paseo);
+    if ("ok" in stored) return stored;
     return answered({ linkId: link.linkId, project: target.workspaceId, managerId: manager.id, delivery: stored.delivery, openedManager: manager.opened });
   };
 
@@ -408,16 +582,28 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
    * The caller's side of `link`, or null when it is no party (§7.17.3): the
    * asker, a Worker of the asking request or that request's Manager; or the
    * answering project's Manager, or a Worker of the request that took it.
+   * Missions design §2.6: the answering side of an `ask-main` or `mission`
+   * link is the current Main of its mission, and the asking side of a
+   * `mission` link the asking mission's current Main; a `worker` link has
+   * only its two Workers.
    */
   const sideOf = (link: PeerLink, caller: BoundCaller, home: string): PeerSide | null => {
-    if (caller.workspaceId === link.from.workspaceId) {
-      if (caller.agentId === link.from.agentId) return "asker";
-      if (caller.role === "worker") return caller.requestId === link.from.requestId ? "asker" : null;
-      return createRequestRegistry(home, { log }).get(link.from.workspaceId, link.from.requestId)?.managerId === caller.agentId ? "asker" : null;
+    if (caller.agentId === link.from.agentId) return "asker";
+    if (caller.role === "worker") {
+      if (caller.workspaceId === link.from.workspaceId && caller.requestId === link.from.requestId) return "asker";
+      return caller.workspaceId === link.to.workspaceId && link.to.requestId !== null && caller.requestId === link.to.requestId ? "answerer" : null;
     }
-    if (caller.workspaceId !== link.to.workspaceId) return null;
-    if (caller.role === "manager") return "answerer";
-    return link.to.requestId !== null && caller.requestId === link.to.requestId ? "answerer" : null;
+    const route = routeOf(link);
+    if (route === "project") {
+      if (caller.workspaceId === link.from.workspaceId) {
+        return link.from.requestId !== null && createRequestRegistry(home, { log }).get(link.from.workspaceId, link.from.requestId)?.managerId === caller.agentId ? "asker" : null;
+      }
+      return caller.workspaceId === link.to.workspaceId ? "answerer" : null;
+    }
+    const mission = route === "worker" ? null : missionOfMain(home, caller);
+    if (mission === null) return null;
+    if (mission.missionId === link.missionId) return "answerer";
+    return route === "mission" && missionOfMainAgent(home, link.from.agentId)?.missionId === mission.missionId ? "asker" : null;
   };
 
   const reply = async (raw: unknown, toolCaller: ToolCaller | null): Promise<ServerToolAnswer> => {
@@ -439,7 +625,7 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
     const paseo = paseoOf();
     if (paseo === null) return refused(NO_PASEO_DELIVERY_MESSAGE);
     // The caller's request; the answering Manager's on a link no request took yet is the link itself (§7.17.3).
-    const requestId = caller.role === "worker" ? caller.requestId! : side === "asker" ? link.from.requestId : (link.to.requestId ?? link.linkId);
+    const requestId = caller.role === "worker" ? caller.requestId! : ((side === "asker" ? link.from.requestId : link.to.requestId) ?? link.linkId);
     // The target known now; the outbox resolves it again before the send (§7.17.4).
     const to = (side === "asker" ? (link.to.workerId ?? link.to.managerId) : link.from.agentId) ?? (await answererOf(link, paseo, home));
     if (to === null) return refused(`no live agent is left on the other side of link ${linkId}. ${NOTHING}`);
@@ -454,7 +640,128 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
     return answered({ recordId: stored.record.id, to: sent.to, delivery: stored.delivery, state: links.get(linkId)?.state ?? link.state });
   };
 
-  const runs = { bm_peers: peers, bm_ask_project: ask, bm_peer_reply: reply };
+  // -------------------------------------------------------------------------
+  // A Main's links (missions design §4, §5).
+  // -------------------------------------------------------------------------
+
+  /** The caller as the current Main of a mission, or its refusal. */
+  const mainOf = (toolCaller: ToolCaller | null, home: string): { main: BoundCaller; mission: Mission } | ServerToolAnswer => {
+    const main = boundAs(toolCaller, "manager");
+    if (main === null) return refused(DELIVERY_NOT_BOUND_MESSAGE);
+    const mission = missionOfMain(home, main);
+    return mission === null ? refused(`You are not the Main of a mission: only a Main links its Workers or asks another mission. ${NOTHING}`) : { main, mission };
+  };
+
+  const linkWorkers = async (raw: unknown, toolCaller: ToolCaller | null): Promise<ServerToolAnswer> => {
+    const home = deps.home();
+    const found = mainOf(toolCaller, home);
+    if ("ok" in found) return found;
+    const { main, mission } = found;
+    const input = withoutNulls(raw);
+    const shape = schemaIssues(faceOf("manager", "bm_link_workers").inputSchema, input);
+    if (shape.length > 0) return fixThese("bm_link_workers", shape);
+    const { requestIds, topic } = input as { requestIds: [string, string]; topic: string };
+    if (requestIds[0] === requestIds[1]) return fixThese("bm_link_workers", ["input.requestIds: name two different requests"]);
+    const paseo = paseoOf();
+    if (paseo === null) return refused(NO_PASEO_DELIVERY_MESSAGE);
+    // Both live requests of the caller's mission, each with its live Worker.
+    const roster = createMissionRoster(home);
+    const registry = createRequestRegistry(home, { log });
+    const reasons: string[] = [];
+    const sides: Array<{ workspaceId: string; requestId: string; workerId: string }> = [];
+    for (const [index, requestId] of requestIds.entries()) {
+      const entry = roster.get(mission.missionId, requestId);
+      if (entry === null) {
+        reasons.push(`input.requestIds[${index}]: ${requestId} is not a request of mission ${mission.code} (bm_mission lists them)`);
+        continue;
+      }
+      const running = entry.state === "active" && (registry.get(entry.workspaceId, requestId)?.finishedAt ?? null) === null;
+      const workerId = running ? await soleWorkerOfRequest({ workspaceId: entry.workspaceId, requestId, home }, paseo as DashboardPaseo) : null;
+      if (workerId === null) reasons.push(`input.requestIds[${index}]: request ${requestId} has no live Worker`);
+      else sides.push({ workspaceId: entry.workspaceId, requestId, workerId });
+    }
+    if (reasons.length > 0) return why(reasons);
+    const [a, b] = sides as [(typeof sides)[number], (typeof sides)[number]];
+    const links = linksOf(home);
+    const all = links.list();
+    const holds = (link: PeerLink, side: typeof a, end: "from" | "to") => link[end].workspaceId === side.workspaceId && link[end].requestId === side.requestId;
+    const between = all.find((link) => isLiveLink(link) && ((holds(link, a, "from") && holds(link, b, "to")) || (holds(link, b, "from") && holds(link, a, "to"))));
+    if (between !== undefined) return why([`requests ${a.requestId} and ${b.requestId} have a live link already: ${between.linkId}`]);
+    // An open ask one of them made its Main becomes the link, taken by the other (§5).
+    const asked = all.filter((link) => routeOf(link) === "ask-main" && link.state === "open" && link.missionId === mission.missionId && (holds(link, a, "from") || holds(link, b, "from"))).at(-1);
+    const result =
+      asked === undefined
+        ? links.createLink({
+            kind: "work",
+            route: "worker",
+            missionId: mission.missionId,
+            from: { workspaceId: a.workspaceId, requestId: a.requestId, agentId: a.workerId, role: "worker" },
+            to: { workspaceId: b.workspaceId, managerId: main.agentId, requestId: b.requestId, workerId: b.workerId },
+            text: topic,
+          })
+        : links.turnToWorker(asked.linkId, { ...(holds(asked, a, "from") ? b : a), managerId: main.agentId });
+    if (!result.ok) return why(result.reasons);
+    const link = result.link;
+    const listed = await listedWorkspaces(paseo as DashboardPaseo);
+    const delivery: Record<string, DeliveryState> = {};
+    for (const [self, other] of [
+      [a, b],
+      [b, a],
+    ] as const) {
+      const text = linkIntroText({ linkId: link.linkId, workerId: other.workerId, title: titleIn(listed, other.workspaceId), requestId: other.requestId, topic });
+      const stored = await deliver(home, self.workspaceId, { kind: "peer-message", requestId: self.requestId, from: main.agentId, to: self.workerId, text }, paseo, () => {});
+      if ("ok" in stored) return stored;
+      delivery[self.requestId] = stored.delivery;
+    }
+    try {
+      createMissionStore(home, { now }).appendJournal(mission.missionId, {
+        kind: "link",
+        by: main.agentId,
+        text: `The Main linked request ${a.requestId} (${a.workspaceId}) with ${b.requestId} (${b.workspaceId}) on ${link.linkId}: ${topic}`,
+        ref: link.linkId,
+      });
+    } catch (error) {
+      log(`[paseo-bm] could not add link ${link.linkId} to the journal of mission ${mission.code}: ${reasonOf(error)}`);
+    }
+    return answered({ linkId: link.linkId, delivery });
+  };
+
+  const askMission = async (raw: unknown, toolCaller: ToolCaller | null): Promise<ServerToolAnswer> => {
+    const home = deps.home();
+    const found = mainOf(toolCaller, home);
+    if ("ok" in found) return found;
+    const { main, mission } = found;
+    const input = withoutNulls(raw);
+    const shape = schemaIssues(faceOf("manager", "bm_ask_mission").inputSchema, input);
+    if (shape.length > 0) return fixThese("bm_ask_mission", shape);
+    const { mission: code, text, kind = "work" } = input as { mission: string; text: string; kind?: "work" | "question" };
+    const entry = createMissionStore(home).byCode(code);
+    if (entry === null) return why([`unknown mission ${code} (bm_peers lists the missions)`]);
+    if (entry.missionId === mission.missionId) return why([`mission ${code} is your own; ask your Workers, or link them with bm_link_workers`]);
+    if (entry.state !== "open") return why([`mission ${code} is closed`]);
+    if (entry.mainId === null) return why([`mission ${code} has no Main right now; try again in a moment`]);
+    const paseo = paseoOf();
+    if (paseo === null) return refused(NO_PASEO_DELIVERY_MESSAGE);
+    const mainId = entry.mainId;
+    const links = linksOf(home);
+    const created = links.createLink({
+      kind,
+      route: "mission",
+      missionId: entry.missionId,
+      from: { workspaceId: main.workspaceId, requestId: null, agentId: main.agentId, role: "manager" },
+      to: { workspaceId: liveBindingOf(createBindingStore(home, { log }).list(), mainId, "manager")?.workspaceId ?? main.workspaceId, managerId: mainId },
+      text,
+    });
+    if (!created.ok) return why(created.reasons);
+    const link = created.link;
+    const message = missionAskText({ link, code: mission.code, name: mission.name, text });
+    // No asking request: the record is kept under the link id (§7.17.3).
+    const stored = await sendAsk(home, main.workspaceId, link, { requestId: link.linkId, from: main.agentId, to: mainId, text: message }, text, paseo);
+    if ("ok" in stored) return stored;
+    return answered({ linkId: link.linkId, mission: entry.code, mainId, delivery: stored.delivery });
+  };
+
+  const runs = { bm_peers: peers, bm_ask_project: ask, bm_peer_reply: reply, bm_link_workers: linkWorkers, bm_ask_mission: askMission };
   const toolsOf = (role: "manager" | "worker"): ServerTools =>
     actingTools(
       boundToolFacesFor(role).filter((face) => Object.hasOwn(runs, face.name)),

@@ -40,6 +40,10 @@
  *   nothing, sends nothing and is no intervention; A-7 counts it as its
  *   wake's action.
  *
+ * Neither decides nor predicts an `ownerOnly` question, nor a Worker's
+ * question of a request of a mission: that is its Main's (`bm_answer_worker`)
+ * or the owner's (missions design §5, §8; `outsideMissions`).
+ *
  * `bm_decide` and `bm_predict` write through one step, `transitionUnderPolicy`.
  * Nothing here sends to an agent.
  */
@@ -58,6 +62,8 @@ import { isFinishedUnverifiedNow } from "./request-trace";
 import { policyGrantCapAt } from "./review-tools";
 import {
   Refusal,
+  belongsToProject,
+  commandManagerIdOf,
   json,
   orchestratorIdOf,
   refuse,
@@ -71,7 +77,8 @@ import {
 } from "./orchestrator-tool-context";
 import { resolveAtOpen } from "./policy-resolve";
 import { undeclaredCategoriesOf } from "../shared/decision-gate";
-import { actsOnFinish, decideRefusalOf, predictionRefusalOf, type AutonomyPolicy } from "../shared/autonomy";
+import { actsOnFinish, decideRefusalOf, missionQuestionRefusalOf, predictionRefusalOf, type AutonomyPolicy } from "../shared/autonomy";
+import { requestIndexOf } from "./mission-roster";
 import {
   MAX_ANSWER_REASON_CHARS,
   MAX_ASK_OWNER_OPTIONS,
@@ -206,7 +213,7 @@ function replacedByAsk(workspaceId: string, requestId: string | null, subject: s
  * refuses.
  */
 export async function bmAskOwner(input: AskOwnerInput, context: ToolContext, deps: DecideToolDeps): Promise<ServerToolResult> {
-  if (input.managerId !== undefined) await requireManager({ workspaceId: input.workspaceId, managerId: input.managerId }, context);
+  if (input.managerId !== undefined) await requireManager({ workspaceId: input.workspaceId, managerId: input.managerId, requestId: input.requestId ?? null }, context);
   else await requireProject(input.workspaceId, context);
   const requestId = input.requestId ?? null;
   const id = `o:${(deps.newId ?? randomUUID)()}`;
@@ -243,10 +250,12 @@ export async function bmAskOwner(input: AskOwnerInput, context: ToolContext, dep
     if (command === undefined) return entry;
     const at = `input.options[${index}].command`;
     const role = command.to === "manager" ? "Manager" : "Worker";
-    const target = agents.find((agent) => agent.id === command.agentId);
-    if (target === undefined || target.role !== command.to) problems.push(`${at}.agentId: ${command.agentId} is not a paseo-bm ${role}; use an id bm_projects or bm_request gave`);
-    else if (target.workspaceId !== input.workspaceId) problems.push(`${at}.agentId: ${role} ${command.agentId} does not belong to project ${input.workspaceId}`);
-    else if (target.archived) problems.push(`${at}.agentId: ${role} ${command.agentId} is archived; nothing can be sent to it`);
+    // A command to a mission request's Main names the mission's current Main (missions design §6).
+    const agentId = command.to === "manager" ? commandManagerIdOf(context.home, command.agentId, requestId) : command.agentId;
+    const target = agents.find((agent) => agent.id === agentId);
+    if (target === undefined || target.role !== command.to) problems.push(`${at}.agentId: ${agentId} is not a paseo-bm ${role}; use an id bm_projects or bm_request gave`);
+    else if (!belongsToProject(target, input.workspaceId, context.home)) problems.push(`${at}.agentId: ${role} ${agentId} does not belong to project ${input.workspaceId}`);
+    else if (target.archived) problems.push(`${at}.agentId: ${role} ${agentId} is archived; nothing can be sent to it`);
     const action = { to: command.to, intent: command.intent, body: command.body, effects };
     const block = preparedCommandOf({ id, requestId }, { label }, action, effects);
     problems.push(...commandInputProblems(block).map((problem) => `${at}: ${problem}`));
@@ -254,7 +263,7 @@ export async function bmAskOwner(input: AskOwnerInput, context: ToolContext, dep
     if (undeclared.length > 0) {
       problems.push(`${at}: the text shows ${undeclared.join(", ")} that the option's effects do not declare; declare the effect on the option`);
     }
-    return { ...entry, action: { kind: "command", agentId: command.agentId, ...action, body: command.body.trim() } };
+    return { ...entry, action: { kind: "command", agentId, ...action, body: command.body.trim() } };
   });
   // The owner reads what each prepared change applies on the question itself (autonomy design §G.4).
   const changeLines = preparedChangeLinesOf(options);
@@ -413,6 +422,15 @@ export interface DecideInput {
   reason: string;
 }
 
+/**
+ * Missions design §8: a Worker's question of a mission request is its Main's
+ * or the owner's, never the Orchestrator's — the refusal, else `rule`'s.
+ */
+function outsideMissions(home: string, rule: (policy: AutonomyPolicy, decision: Decision) => string | null) {
+  return (policy: AutonomyPolicy, decision: Decision): string | null =>
+    missionQuestionRefusalOf(decision, decision.requestId === null ? null : (requestIndexOf(home, decision.requestId)?.missionId ?? null)) ?? rule(policy, decision);
+}
+
 /** What one tool writes under the owner's policy (`transitionUnderPolicy`). */
 interface PolicyTransition {
   /** The rule of the owner's policy that must allow the write, on the decision as read and again as stored; null when it does. */
@@ -544,7 +562,7 @@ export async function bmDecide(input: DecideInput, context: ToolContext, deps: D
     // The write reads the decision again and refuses what it cannot read.
   }
   const { decision: answered, store } = transitionUnderPolicy(input, context, {
-    refusalOf: (policy, decision) => decideRefusalOf(policy, decision, { optionKey: input.optionKey, finishedUnverified, grantCap }),
+    refusalOf: outsideMissions(context.home, (policy, decision) => decideRefusalOf(policy, decision, { optionKey: input.optionKey, finishedUnverified, grantCap })),
     idsFrom: "a decision.opened line or bm_decisions gave",
     what: "the answer to",
     change: (current, { reason, at }) =>
@@ -589,7 +607,7 @@ export async function bmDecide(input: DecideInput, context: ToolContext, deps: D
  */
 export function bmPredict(input: DecideInput, context: ToolContext): ServerToolResult {
   const { decision: predicted } = transitionUnderPolicy(input, context, {
-    refusalOf: predictionRefusalOf,
+    refusalOf: outsideMissions(context.home, predictionRefusalOf),
     idsFrom: "a decision.opened line gave",
     what: "the prediction for",
     change: (current, { reason, at }) => {

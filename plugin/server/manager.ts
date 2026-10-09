@@ -31,7 +31,8 @@ import { PLUGIN_VERSION } from "../shared/version";
 import { setAgentLabel, setAgentMode, type PaseoCliDeps } from "./paseo-cli";
 import { PARENT_AGENT_LABEL, listAllAgents, roleOfAgent } from "./agent-role";
 import { providerId } from "./provider-id";
-import { withoutRoleMarker } from "./role-title";
+import { MISSION_CODE_LABEL, MISSION_ID_LABEL, UNASSIGNED_MAIN_TITLE, mainTitleOf, withRoleMarker, withoutRoleMarker } from "./role-title";
+import { createMissionStore, type Mission } from "./mission-store";
 import { AUTO_APPROVE_FEATURE, capabilityOf, featuresFor, managerModeFor, modesFor, runPostureOf } from "./role-mode";
 import { workspaceDirectory, type DashboardPaseo } from "./paseo-directory";
 import { readIncidents } from "./fallback-state";
@@ -44,6 +45,8 @@ import { NO_BINDER, createBound, type AgentBinder } from "./agent-bindings";
 import { aliasBases } from "./alias-bases";
 import { alertKeyOf } from "../shared/alerts";
 import { hasUnboundManagerAlert } from "./outdated-agents";
+import { missionManagerOf } from "./mission-roster";
+import { knownRequestIdOf } from "./request-registry";
 
 /** Label key and value that identify a paseo-bm Manager (Technical Design §7.1). */
 export const MANAGER_ROLE_LABEL = "bm.role";
@@ -347,7 +350,7 @@ function startedBroken(snapshot: ManagerAgentSnapshot | null): boolean {
  * produced an agent on some other provider would be worse than a sentence
  * telling the user where to look.
  */
-async function ensureRolesFor(paseo: ManagerPaseo, log?: (message: string) => void): Promise<EnsureRolesResult> {
+export async function ensureRolesFor(paseo: ManagerPaseo, log?: (message: string) => void): Promise<EnsureRolesResult> {
   let ensured: EnsureRolesResult;
   try {
     ensured = await ensureRoles(paseo, log === undefined ? {} : { log });
@@ -374,7 +377,7 @@ async function ensureRolesFor(paseo: ManagerPaseo, log?: (message: string) => vo
  * call, because the switch is Paseo's and the user can turn it off at any time
  * — and with it off the Manager cannot create a Worker at all.
  */
-async function setupNoticeFor(paseo: ManagerPaseo, ensured: EnsureRolesResult): Promise<string | null> {
+export async function setupNoticeFor(paseo: ManagerPaseo, ensured: EnsureRolesResult): Promise<string | null> {
   const sentences: string[] = [];
   const roles = rolesSentence(ensured);
   if (roles !== null) sentences.push(roles);
@@ -435,7 +438,10 @@ export async function agentToolsOff(paseo: unknown): Promise<boolean> {
 }
 
 /**
- * Handler body of `manager.ensure`.
+ * The per-workspace Manager: what `manager.ensure` did before missions. The
+ * RPC now goes through `handleManagerEnsure` (`mission-legacy.ts`, missions
+ * design §3.6), which opens a mission's Main and comes here only for a plugin
+ * home or with no data folder.
  *
  * With `replaceOutdated`, a live Manager on older instructions (its
  * `bm.instructions` label is not this build's, autonomy PRD §11 rule 3) is
@@ -518,10 +524,16 @@ async function markReplaced(old: ManagerAgentSnapshot, newId: string, workspaceI
 /**
  * Creates the workspace's Manager from the `bm-manager` profile: the path of
  * `manager.ensure` when there is no live Manager, or when an outdated one is
- * replaced; and of `bm_ask_project` for a project with no live Manager
- * (design §7.17.2), which never creates roles.
+ * replaced; of `bm_ask_project` for a project with no live Manager
+ * (design §7.17.2), which never creates roles; and of a Main (`createMain`,
+ * missions design §3.3), with its title, labels, mission and brief in `main`.
  */
-export async function createFromProfile(deps: EnsureManagerDeps, workspaceId: string, ensured: EnsureRolesResult): Promise<CreateManagerResult> {
+export async function createFromProfile(
+  deps: EnsureManagerDeps,
+  workspaceId: string,
+  ensured: EnsureRolesResult,
+  main?: Pick<CreateManagerOptions, "title" | "missionId" | "prompt"> & { labels: Record<string, string> },
+): Promise<CreateManagerResult> {
   const { paseo } = deps;
 
   // A Manager gets Paseo's tools when it is created, never later: one created
@@ -590,11 +602,14 @@ export async function createFromProfile(deps: EnsureManagerDeps, workspaceId: st
     modeId,
     thinkingOptionId: profile.thinkingOptionId,
     featureValues,
-    labels: chosenMode !== undefined ? { [MODE_SET_LABEL]: chosenMode } : {},
+    labels: { ...(chosenMode !== undefined ? { [MODE_SET_LABEL]: chosenMode } : {}), ...main?.labels },
     readInstructions: deps.readInstructions,
     version: deps.version,
     binder: deps.binder,
     log: deps.log,
+    ...(main?.title !== undefined ? { title: main.title } : {}),
+    ...(main?.missionId !== undefined ? { missionId: main.missionId } : {}),
+    ...(main?.prompt !== undefined ? { prompt: main.prompt } : {}),
   });
 }
 
@@ -611,8 +626,12 @@ export interface CreateManagerOptions extends Pick<EnsureManagerDeps, "readInstr
    * for a replacement (delta 20260921 §4.5.2).
    */
   labels: Record<string, string>;
-  /** The Manager's first message: a replacement's `BM-HANDOVER`. None when absent. */
+  /** The Manager's first message: a replacement's `BM-HANDOVER`, a Main's brief. None when absent. */
   prompt?: string;
+  /** The title; `MANAGER_TITLE` when absent. A Main's is `mainTitleOf` (missions design §3.2). */
+  title?: string;
+  /** A Main's mission, written on its binding (missions design §3.3); null or absent for an unassigned Main or a Manager. */
+  missionId?: string | null;
 }
 
 export interface CreateManagerResult {
@@ -650,7 +669,7 @@ export async function createManager(
   try {
     handle = await createBound(
       binder,
-      { role: "manager", base, workspaceId },
+      { role: "manager", base, workspaceId, ...(options.missionId ? { missionId: options.missionId } : {}) },
       (mcpServers) =>
         paseo.workspaces.ref(workspaceId).agents.create({
           config: {
@@ -661,7 +680,7 @@ export async function createManager(
             systemPrompt,
             ...(mcpServers !== undefined ? { mcpServers } : {}),
           },
-          title: MANAGER_TITLE,
+          title: options.title ?? MANAGER_TITLE,
           labels: {
             [MANAGER_ROLE_LABEL]: MANAGER_ROLE_VALUE,
             [VERSION_LABEL]: options.version ?? PLUGIN_VERSION,
@@ -704,6 +723,90 @@ export async function createManager(
       ? `This Manager runs on ${selection} without Paseo tools (on Pi this means pi-mcp-adapter is missing): it cannot create or message a Worker.`
       : null;
   return { agentId: handle.id, toolsNotice };
+}
+
+// ---------------------------------------------------------------------------
+// Mains (missions design §3.2, §3.3).
+// ---------------------------------------------------------------------------
+
+/** What `createMain` creates. */
+export interface MainSpec {
+  /** The Missions home's workspace (`ensureMissionsHome`). */
+  homeWorkspaceId: string;
+  /** The Main's mission; null for an unassigned Main (§3.3). */
+  mission: Pick<Mission, "missionId" | "code" | "name"> | null;
+  /** Its first prompt: the brief of §3.5 (`mainBriefOf`). */
+  prompt: string;
+  /** Why it becomes the mission's Main, for `mainHistory`; `created` by default. */
+  reason?: Mission["mainHistory"][number]["reason"];
+  /** The Main it replaces: labelled `bm.replaces` (§3.4 step 1). */
+  replaces?: string | null;
+}
+
+/**
+ * Creates a Main in the Missions home (missions design §3.3) through
+ * `createFromProfile` — never `ensureRolesFor`, so a tool may call it: the
+ * labels of §3.2 (`bm.missionId`, `bm.missionCode` beside `bm.role` and
+ * `bm.version`; none for an unassigned Main), the title `mainTitleOf`
+ * (`UNASSIGNED_MAIN_TITLE` unassigned), a binding `{ role: "manager",
+ * workspaceId: <home>, missionId }` and the brief as its first prompt. The
+ * mission's `mainId` becomes it and `mainHistory` gains the entry, with a
+ * `main` journal line; a failed write there costs one log line, never the
+ * Main. Throws `ManagerEnsureError` as `createFromProfile` does.
+ */
+export async function createMain(spec: MainSpec, deps: EnsureManagerDeps, ensured: EnsureRolesResult = NO_ROLES_CREATED): Promise<CreateManagerResult> {
+  const { mission } = spec;
+  const labels: Record<string, string> = {
+    ...(mission === null ? {} : { [MISSION_ID_LABEL]: mission.missionId, [MISSION_CODE_LABEL]: mission.code }),
+    ...(spec.replaces ? { "bm.replaces": spec.replaces } : {}),
+  };
+  const created = await createFromProfile(deps, spec.homeWorkspaceId, ensured, {
+    title: mission === null ? withRoleMarker("manager", UNASSIGNED_MAIN_TITLE) : mainTitleOf(mission.code, mission.name),
+    labels,
+    missionId: mission?.missionId ?? null,
+    prompt: spec.prompt,
+  });
+  const home = deps.home !== undefined ? deps.home : dataHomeOf();
+  if (mission !== null && home !== null) {
+    try {
+      const store = createMissionStore(home);
+      const set = store.setMain(mission.missionId, created.agentId, spec.reason ?? "created");
+      if (!set.ok) throw new Error(set.reasons.join("; "));
+      store.appendJournal(mission.missionId, {
+        kind: "main",
+        by: "plugin",
+        text: spec.replaces ? `Main ${created.agentId} replaces ${spec.replaces} (${spec.reason ?? "replaced"}).` : `Main ${created.agentId} created.`,
+        ref: created.agentId,
+      });
+    } catch (error) {
+      (deps.log ?? ((message: string) => console.warn(message)))(
+        `[paseo-bm] Main ${created.agentId} of mission ${mission.missionId} was created, but the mission could not record it: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  return created;
+}
+
+/** No role created: what a caller that did not set the machine up passes `createFromProfile`. */
+const NO_ROLES_CREATED: EnsureRolesResult = { created: [], baseProvider: null, model: null, skipped: null };
+
+/**
+ * The live Mains of a mission (missions design §3.2), the newest first: the
+ * `bm-manager` agents labelled `bm.missionId=<missionId>`, neither archived
+ * nor closed, skipping one marked `bm.replacedBy`. The label filter is checked
+ * again here, so a host that ignores it cannot make another agent the Main.
+ */
+export async function findMain(paseo: Pick<ManagerPaseo, "agents">, missionId: string): Promise<ManagerAgentSnapshot[]> {
+  const all = await listAllAgents((options) => paseo.agents.list(options), { labels: { [MISSION_ID_LABEL]: missionId }, includeArchived: false });
+  return all
+    .filter(
+      (agent) =>
+        agent.labels?.[MISSION_ID_LABEL] === missionId &&
+        roleOfAgent(agent)?.role === "manager" &&
+        isLive(agent) &&
+        agent.labels?.[REPLACED_BY_LABEL] === undefined,
+    )
+    .sort(newestFirst);
 }
 
 /**
@@ -819,7 +922,10 @@ function oldestFirst(a: ListedAgentSnapshot, b: ListedAgentSnapshot): number {
  *
  * `parentId` is the parent label only when that parent is in the result. A
  * parent that was deleted or archived yields `null`, so an orphaned Worker is a
- * root the client can still draw. Read-only: nothing is stopped or archived.
+ * root the client can still draw. A Worker of a mission's request has its
+ * current Main (the registry's `managerId`) as parent, and that Main, which
+ * lives in the Missions home, is listed too (missions design §6). Read-only:
+ * nothing is stopped or archived.
  */
 export async function listWorkspaceAgents(
   input: { workspaceId: string },
@@ -827,6 +933,8 @@ export async function listWorkspaceAgents(
     paseo: AgentDirectoryPaseo;
     /** Agent id → its replacement, from `switched` fallback incidents (delta 20260921 §4.4.8). */
     replacements?: ReadonlyMap<string, string>;
+    /** The data folder, whose request registry names a mission request's Main; looked up by default. */
+    home?: string | null;
   },
 ): Promise<{ agents: AgentNode[] }> {
   const all = await listAllAgents((options) => deps.paseo.agents.list(options), {
@@ -855,11 +963,21 @@ export async function listWorkspaceAgents(
     }
   }
 
-  const agents = inWorkspace
-    .filter((agent) => members.has(agent.id))
+  // Missions design §6: a Worker's Main, from the registry; the Main joins the list from the home.
+  const home = deps.home !== undefined ? deps.home : dataHomeOf();
+  const mainOf = new Map<string, string>();
+  for (const agent of inWorkspace) {
+    const requestId = members.has(agent.id) && roleOfAgent(agent)?.role === "worker" ? knownRequestIdOf({ id: agent.id, workspaceId: agent.workspaceId ?? null, labels: agent.labels, parentAgentId: agent.labels[PARENT_AGENT_LABEL] ?? null }, { home }) : null;
+    const main = missionManagerOf(home, requestId);
+    if (main !== null && all.some((candidate) => candidate.id === main && !candidate.archivedAt)) mainOf.set(agent.id, main);
+  }
+  const mains = all.filter((agent) => !members.has(agent.id) && [...mainOf.values()].includes(agent.id));
+  for (const main of mains) members.add(main.id);
+
+  const agents = [...mains, ...inWorkspace.filter((agent) => members.has(agent.id))]
     .sort(oldestFirst)
     .map((agent): AgentNode => {
-      const parent = agent.labels[PARENT_AGENT_LABEL];
+      const parent = mainOf.get(agent.id) ?? agent.labels[PARENT_AGENT_LABEL];
       return {
         id: agent.id,
         role: roleOf(agent),

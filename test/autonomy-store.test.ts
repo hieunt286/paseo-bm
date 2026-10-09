@@ -71,11 +71,11 @@ afterEach(() => {
 });
 
 describe("the policy's vocabulary (shared/autonomy.ts)", () => {
-  it("has three modes, the ledger's two measured predictions, and no class that cannot be delegated (ADR-025)", () => {
+  it("has three modes, the ledger's three measured predictions (the mission Main's, missions design §8), and no class that cannot be delegated (ADR-025)", () => {
     expect(AUTONOMY_FILE_VERSION).toBe(1);
     expect(AUTONOMY_MODES).toEqual(["owner", "shadow", "delegate"]);
     // The agreement ledger's prediction keys: measured, not chosen.
-    expect(PREDICTORS).toEqual(["recommended", "orchestrator"]);
+    expect(PREDICTORS).toEqual(["recommended", "orchestrator", "main"]);
     expect(DECISION_CLASSES.filter((decisionClass) => !canDelegate(decisionClass))).toEqual([]);
   });
 

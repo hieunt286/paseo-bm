@@ -48,7 +48,8 @@ import { sliceLastTurn } from "./collector";
 import { agentsOf, type OrchestratorStatePaseo } from "./orchestrator-state";
 import { baseProviderOf } from "./role-instructions";
 import { enqueue as enqueueNotice, type NoticeOutcome, type NoticePaseo } from "./notice-queue";
-import { errorText } from "./rpc-kit";
+import { dataHome, errorText } from "./rpc-kit";
+import { missionManagerOf } from "./mission-roster";
 import type { TraceRecord } from "../shared/contracts";
 import { originOf } from "../shared/message-origin";
 import { INTERRUPTED_NOTICE_MARKER } from "../shared/notices";
@@ -146,6 +147,8 @@ export interface InterruptionWatchDeps {
   baseProvider?: (paseo: unknown, alias: string) => Promise<string | null>;
   /** Timers; tests use fake ones. */
   setTimer?: (run: () => void, ms: number) => unknown;
+  /** The data folder, whose request registry names a mission request's Main; looked up by default. */
+  home?: () => string | null;
 }
 
 export interface InterruptionWatch {
@@ -195,8 +198,11 @@ export function createInterruptionWatch(deps: InterruptionWatchDeps = {}): Inter
     if (generation.get(agentId) !== seen) return;
     const self = snapshot.bm.find((entry) => entry.facts.id === agentId)?.facts.status ?? null;
     if (self === null || self === "running" || self === "initializing") return;
-    // An agent that went on with its work has an agent it created running.
-    if (snapshot.bm.some((entry) => entry.facts.parentAgentId === agentId && !entry.facts.archived && entry.facts.status === "running")) return;
+    // An agent that went on with its work has an agent it created running: a Worker of a mission's
+    // request is its current Main's (the registry's, missions design §3.4 step 4), else its parent label's.
+    const home = (deps.home ?? (() => dataHome()))();
+    const parentOf = ({ facts }: (typeof snapshot.bm)[number]) => (facts.role === "worker" ? missionManagerOf(home, facts.requestIdLabel) : null) ?? facts.parentAgentId;
+    if (snapshot.bm.some((entry) => !entry.facts.archived && entry.facts.status === "running" && parentOf(entry) === agentId)) return;
     lastNotice.set(agentId, now());
     const outcome = await enqueue(agentId, INTERRUPTED_KIND, interruptedNoticeText(cutAt), paseo as NoticePaseo);
     log(`[paseo-bm] ${INTERRUPTED_KIND} to ${agentId} (cut at ${cutAt}): ${outcome}`);

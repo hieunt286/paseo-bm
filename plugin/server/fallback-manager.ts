@@ -20,6 +20,13 @@
  *    incident's open decision, if the card decided it.
  * 7. A creation that fails records `failed` and returns
  *    `E_FALLBACK_CREATE_FAILED`, never back to `pending`.
+ *
+ * **A Main** (missions design §3.4): the stopped Manager is the Main of an
+ * open mission. The replacement is created in the same place (the Missions
+ * home) as a Main — its mission's labels, title, binding mission and Runtime
+ * facts, the brief of §3.5 before the handover — and steps 4 and 5 are the
+ * one replacement path, `replaceMain` (reason `fallback`): the mission's
+ * requests, Workers, queued notices and pending records go to it.
  */
 import type { AgentBinder } from "./agent-bindings";
 import { unusableDataHomeMessage } from "./data-home";
@@ -35,8 +42,13 @@ import { enqueue as defaultEnqueue, type NoticeOutcome, type NoticePaseo } from 
 import { SETTINGS_NOTICE_MARKER } from "./notices";
 import { setAgentLabels, type CliResult } from "./paseo-cli";
 import { asRecord, availableProviders, nonEmpty, reasonOf } from "./role-choices";
-import { currentInstructions } from "./role-instructions";
+import { currentInstructions, type MainFacts } from "./role-instructions";
 import { capabilityOf, featuresFor, managerModeFor, modesFor, runPostureOf } from "./role-mode";
+import { replaceMain } from "./mission-replace";
+import { createMissionStore, type Mission } from "./mission-store";
+import { mainBriefOf, mainFactsOf } from "./missions-home";
+import { noticeQueue, type NoticeCallbacks } from "./notice-queue";
+import { MISSION_CODE_LABEL, MISSION_ID_LABEL, mainTitleOf } from "./role-title";
 import { managerIdNotice } from "./settings-notices";
 import type { TraceStoreLocation } from "./trace-store";
 import { DashboardError, type FallbackIncident } from "../shared/contracts";
@@ -49,9 +61,11 @@ export interface ManagerSwitchDeps {
   now?: () => Date;
   /** `setAgentLabels` of `paseo-cli.ts` by default. */
   setLabels?: (agentId: string, labels: Record<string, string>) => Promise<CliResult>;
-  enqueue?: (targetId: string, kind: string, text: string, paseo?: NoticePaseo) => Promise<NoticeOutcome>;
-  /** The Manager instructions for its workspace; `currentInstructions("manager", paseo, { workspaceId })` by default. */
-  readInstructions?: (paseo: unknown, workspaceId: string) => Promise<string>;
+  /** Retitles a replaced Main (`replaceMain` step 5); `setAgentTitle` of `paseo-cli.ts` by default. */
+  setTitle?: (agentId: string, title: string) => Promise<CliResult>;
+  enqueue?: (targetId: string, kind: string, text: string, paseo?: NoticePaseo, callbacks?: NoticeCallbacks) => Promise<NoticeOutcome>;
+  /** The Manager instructions for its workspace (a Main's with its mission's facts); `currentInstructions("manager", …)` by default. */
+  readInstructions?: (paseo: unknown, workspaceId: string, main?: MainFacts) => Promise<string>;
   /** `managerHandover` by default. */
   handover?: (incident: FallbackIncident, deps: { paseo: unknown; location: TraceStoreLocation | null; incidents: readonly FallbackIncident[] | null }) => Promise<string>;
   /** The workspace trace store; the collector's resolver by default. */
@@ -88,12 +102,24 @@ async function postureFor(
   return candidate.modeId === null ? {} : { modeId: candidate.modeId };
 }
 
+/** The open mission whose Main `agentId` is, or null for a per-workspace Manager. Never throws. */
+function mainMissionOf(home: string, agentId: string): Mission | null {
+  try {
+    const store = createMissionStore(home);
+    const entry = store.list().find((mission) => mission.state === "open" && mission.mainId === agentId);
+    return entry === undefined ? null : store.get(entry.missionId);
+  } catch {
+    return null;
+  }
+}
+
 /** The `switch` action of `fallback.act` for a Manager. */
 export function createManagerSwitch(deps: ManagerSwitchDeps = {}): FallbackAction {
   const log = deps.log ?? ((message: string) => console.warn(message));
   const setLabels = deps.setLabels ?? ((agentId: string, labels: Record<string, string>) => setAgentLabels(agentId, labels));
   const enqueue = deps.enqueue ?? defaultEnqueue;
-  const readInstructions = deps.readInstructions ?? ((paseo: unknown, workspaceId: string) => currentInstructions("manager", paseo, { workspaceId }));
+  const readInstructions =
+    deps.readInstructions ?? ((paseo: unknown, workspaceId: string, main?: MainFacts) => currentInstructions("manager", paseo, { workspaceId, ...(main === undefined ? {} : { main }) }));
   const handover = deps.handover ?? managerHandover;
   const location = deps.location ?? createLocationResolver(resolveLocationFromPaseo);
 
@@ -129,8 +155,10 @@ export function createManagerSwitch(deps: ManagerSwitchDeps = {}): FallbackActio
     // Nothing was created: the incident stays pending.
     if (await agentToolsOff(paseo)) throw new DashboardError("E_FALLBACK_CREATE_FAILED", AGENT_TOOLS_OFF_SWITCH_MESSAGE);
 
-    // 2. The handover, within its own budget.
-    const prompt = await handover(current, { paseo, location: await location(paseo).catch(() => null), incidents });
+    // 2. The handover, within its own budget; a Main's successor reads its mission's brief first (§3.5).
+    const mission = mainMissionOf(home, current.agentId);
+    const handed = await handover(current, { paseo, location: await location(paseo).catch(() => null), incidents });
+    const prompt = mission === null ? handed : `${await mainBriefOf(paseo, home, mission)}\n\n${handed}`;
 
     // 3. The replacement Manager, through the same path as manager.ensure.
     const posture = await postureFor(paseo, candidate, log);
@@ -141,9 +169,14 @@ export function createManagerSwitch(deps: ManagerSwitchDeps = {}): FallbackActio
         ...(posture.modeId !== undefined ? { modeId: posture.modeId } : {}),
         ...(candidate.thinkingOptionId !== null ? { thinkingOptionId: candidate.thinkingOptionId } : {}),
         ...(posture.featureValues !== undefined ? { featureValues: posture.featureValues } : {}),
-        labels: { [REPLACES_LABEL]: current.agentId, ...(posture.modeId !== undefined ? { [MODE_SET_LABEL]: posture.modeId } : {}) },
+        labels: {
+          [REPLACES_LABEL]: current.agentId,
+          ...(posture.modeId !== undefined ? { [MODE_SET_LABEL]: posture.modeId } : {}),
+          ...(mission === null ? {} : { [MISSION_ID_LABEL]: mission.missionId, [MISSION_CODE_LABEL]: mission.code }),
+        },
         prompt,
-        readInstructions: (workspaceId) => readInstructions(paseo, workspaceId),
+        ...(mission === null ? {} : { title: mainTitleOf(mission.code, mission.name), missionId: mission.missionId }),
+        readInstructions: (workspaceId) => readInstructions(paseo, workspaceId, ...(mission === null ? [] : [mainFactsOf(home, mission.missionId)])),
         binder: deps.binder,
         log,
       });
@@ -151,6 +184,22 @@ export function createManagerSwitch(deps: ManagerSwitchDeps = {}): FallbackActio
       const detail = `could not create the fallback Manager on ${candidate.alias}/${candidate.model}: ${reasonOf(error)}`;
       await decidePending(home, current.id, (entry) => ({ ...entry, status: "failed", decidedAt: now().toISOString(), error: detail }), log);
       throw new DashboardError("E_FALLBACK_CREATE_FAILED", detail);
+    }
+
+    // 4. and 5. for a Main: the one replacement path (§3.4).
+    if (mission !== null) {
+      const replaced = await replaceMain(mission.missionId, created.agentId, "fallback", {
+        home,
+        paseo,
+        replaced: current.agentId,
+        queue: { enqueue, retarget: noticeQueue.retarget },
+        setLabel: (agentId, key, value) => setLabels(agentId, { [key]: value }),
+        ...(deps.setTitle !== undefined ? { setTitle: deps.setTitle } : {}),
+        now,
+        log,
+      });
+      if (!replaced.ok) log(`[paseo-bm] Main ${created.agentId} replaces ${current.agentId}, but the replacement could not complete: ${replaced.reasons.join("; ")}`);
+      return decidePending(home, current.id, (entry) => ({ ...entry, status: "switched", decidedAt: now().toISOString(), replacementId: created.agentId }), log);
     }
 
     // 4. Mark the old Manager; Beads Manager also skips it by the incident.

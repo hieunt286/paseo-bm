@@ -472,6 +472,9 @@ describe("Dashboard error codes", () => {
       // Change-014 outcome 3: decisions.ask (Ask back).
       "E_DECISION_NOT_ASKABLE",
       "E_DECISION_ASK_INVALID",
+      // Missions design §3.3, §3.4: missions.create and mission.ensure.
+      "E_MISSION_INVALID",
+      "E_MISSION_WRITE_FAILED",
     ]);
   });
 

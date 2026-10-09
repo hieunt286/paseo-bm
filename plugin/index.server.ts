@@ -1,6 +1,6 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { MANAGER_INSTRUCTIONS } from "./server/manager-instructions";
-import { ensureManager, listWorkspaceAgents } from "./server/manager";
+import { listWorkspaceAgents } from "./server/manager";
 import { registerCollector } from "./server/collector";
 import { checkReviewBudget, type BudgetOverrun, type BudgetPaseo } from "./server/review-budget";
 import { registerDashboardRpcs } from "./server/dashboard-rpc";
@@ -28,7 +28,6 @@ import { registerFormatCheck } from "./server/format-check";
 import { registerNoticeQueue } from "./server/notice-queue";
 import { createOutboxResend } from "./server/outbox";
 import { dataHome } from "./server/rpc-kit";
-import { currentInstructions } from "./server/role-instructions";
 import { registerSetupRpcs } from "./server/setup-rpc";
 import { registerRoleSettingsRpcs } from "./server/role-settings-rpc";
 import { registerChatRpcs } from "./server/chat-rpc";
@@ -63,6 +62,8 @@ import { createOutdatedAgentsPass, registerOutdatedAgents } from "./server/outda
 import { createInterventionCheck } from "./server/intervention-store";
 import { createCoordinationGuard } from "./server/coordination-guard";
 import { createActionBoundary } from "./server/action-boundary";
+import { registerMissionsHome } from "./server/missions-home";
+import { adoptComposerManager, createLegacyMigration, handleManagerEnsure } from "./server/mission-legacy";
 import { agentsListRpc, managerEnsureRpc, rolesDescribeRpc, type FallbackIncident } from "./shared/contracts";
 import { dashboardSettings } from "./shared/settings";
 
@@ -112,14 +113,11 @@ export function readManagerInstructions(): Promise<string> {
  * function"). Guarded by test/plugin-bundle-cjs.test.ts.
  */
 export default function contribute(server: PluginServerContext): () => void {
+  // Missions design §3.6: manager.ensure opens the Main of the workspace's mission (a one-repo mission made
+  // from its Manager, or a new one); a new Main is bound to its own tool path by the endpoint's binder.
+  const missionDeps = { binder: () => agentTools.binder, bindings: () => agentTools.bindings };
   server.handle(managerEnsureRpc, async (input, { paseo }) => {
-    const result = await ensureManager(input, {
-      paseo,
-      // The base, the Runtime facts with the workspace's precedents, and the role's additional instructions, when any.
-      readInstructions: (workspaceId) => currentInstructions("manager", paseo, { workspaceId }),
-      // Design §16.5, §16.6: a new Manager is bound to its own tool path, with bm_create_worker.
-      binder: agentTools.binder,
-    });
+    const result = await handleManagerEnsure(input, paseo, missionDeps);
     if (result.otherManagerIds.length > 0) {
       console.warn(
         `[paseo-bm] workspace ${input.workspaceId} has ${result.otherManagerIds.length + 1} live Managers; using ${result.agentId} (labelled Managers first, then the newest). Left untouched: ${result.otherManagerIds.join(", ")}.`,
@@ -140,10 +138,7 @@ export default function contribute(server: PluginServerContext): () => void {
   server.handle(rolesDescribeRpc, (_input, { paseo }) => describeRoles({ paseo }));
   registerDashboardRpcs(server, {
     ensureManager: async (workspaceId, paseo) => {
-      const result = await ensureManager(
-        { workspaceId },
-        { paseo: paseo as never, readInstructions: (id) => currentInstructions("manager", paseo, { workspaceId: id }), binder: agentTools.binder },
-      );
+      const result = await handleManagerEnsure({ workspaceId }, paseo as never, missionDeps);
       // This path shows no launcher notice, so the log is the only place a mode problem surfaces.
       if (result.modeNotice !== null) console.warn(`[paseo-bm] ${result.modeNotice}`);
       if (result.toolsNotice !== null) console.warn(`[paseo-bm] ${result.toolsNotice}`);
@@ -201,6 +196,8 @@ export default function contribute(server: PluginServerContext): () => void {
     // Design §16.6: a bound Worker's bm_questions opens decisions outside a recorded turn; the policy's
     // decision.opened events go to the Orchestrator as a fallback incident's do.
     onDecisionsOpened: (opened, paseo) => eventBus.decisionsOpened(opened, paseo),
+    // Missions design §4: a Main's bm_answer_worker answers take the delivery the owner's answers take.
+    onDecisionsSettled: (decisions, context) => onDecisionsSettled(decisions, context),
   });
   // Orchestrator design §8: the `orchestrator.*` RPCs. An Orchestrator created
   // before the endpoint's stored secret was made has an old URL (§5.1).
@@ -214,8 +211,11 @@ export default function contribute(server: PluginServerContext): () => void {
   const bindingSweep = createBindingSweep(() => agentTools.bindings);
   // Design §16.7: after a reload, the first handle of the run delivers every pending outbox record again.
   const outboxResend = createOutboxResend({ home: () => dataHome() });
+  // Missions design §3.6: the first handle of the run turns each workspace's bound Manager into a one-repo mission.
+  const legacyMigration = createLegacyMigration(missionDeps);
   const shareHandle = (paseo: unknown): void => {
     void bindingSweep.run(paseo);
+    void legacyMigration.run(paseo);
     void outboxResend.run(paseo);
     agentTools.usePaseo(paseo);
     stallWatcher.usePaseo(paseo);
@@ -234,6 +234,9 @@ export default function contribute(server: PluginServerContext): () => void {
     bindings: agentTools.bindings,
   });
   const removeBindingLifecycle = registerBindingLifecycle(server, () => agentTools.bindings);
+  // Missions design §3.1–§3.3: missions.create and mission.ensure create Mains in the Missions home, bound by
+  // the endpoint's binder; a Main archived by a cleared conversation is succeeded by the new bm-manager of the home.
+  const missionsHome = registerMissionsHome(server, { binder: () => agentTools.binder, bindings: () => agentTools.bindings });
   const removeActionBoundary = actionBoundary.register(server);
   const removeStopPropagation = registerStopPropagation(server);
   // delta 20260918g §4.5: a bm-* agent created without its bm.role label gets it.
@@ -253,6 +256,10 @@ export default function contribute(server: PluginServerContext): () => void {
       // Design §16.5, §16.8: a Worker or Reviewer the plugin created whose creation a reload or Paseo's late
       // error left unsettled gets its binding and its registry entry now, so it is never taken for off-tool.
       await settleCreatedAgent(agent, paseo, { home: dataHome(), bindings: agentTools.bindings });
+      // Missions design §3.3: once its binding settled, a new bm-manager of the Missions home may be a Main's successor.
+      await missionsHome.succession.agentCreated(agent, paseo);
+      // Missions design §3.6: a composer's bm-manager in a repo workspace is an extra agent, or its mission's Main.
+      await adoptComposerManager(agent, paseo, missionDeps);
       // Design §16.8: a Reviewer a bound Worker created outside its tools is an Inbox alert and an
       // off-tool-review signal, and is cancelled at once through the Paseo CLI (spike S5).
       await checkOffToolReviewer(agent, paseo, {
@@ -478,6 +485,7 @@ export default function contribute(server: PluginServerContext): () => void {
   return () => {
     removeRoleHook();
     removeBindingLifecycle();
+    missionsHome.remove();
     removeActionBoundary();
     removeStopPropagation();
     removeAgentLabels();

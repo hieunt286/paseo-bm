@@ -18,6 +18,18 @@ import { workspaceIdSchema } from "./persisted";
 // question to the owner, read and answered the same way on every surface.
 // ---------------------------------------------------------------------------
 
+/**
+ * A decision as `decisions.list`, `.get` and `.answer` return it: a stored
+ * decision, or a mission's `m:<missionId>:<n>` decision (missions design
+ * §4.1, `server/mission-decisions.ts`), whose ids the per-workspace pattern
+ * does not take.
+ */
+const missionDecisionIdSchema = z.string().regex(/^m:mis-[0-9a-f]{10}:[1-9]\d{0,5}$/);
+export const ownerDecisionSchema = z.union([
+  decisionSchema,
+  decisionSchema.safeExtend({ id: missionDecisionIdSchema, supersedes: missionDecisionIdSchema.nullable(), supersededBy: missionDecisionIdSchema.nullable() }),
+]);
+
 /** Most decisions `decisions.list` returns, and its default. */
 export const DECISION_LIST_MAX = 500;
 export const DECISION_LIST_DEFAULT = 200;
@@ -30,6 +42,11 @@ export const DECISION_LIST_DEFAULT = 200;
  * - `workspace`: every stored decision of `workspaceId`, newest asked first.
  * - `request`: every stored decision of `requestId` (in `workspaceId` when
  *   given, else in any workspace), newest asked first.
+ *
+ * A mission's `m:` decisions (missions design §4.1) are stored with the
+ * mission id as their `workspaceId`: `inbox` without a `workspaceId` lists
+ * every mission's unsettled ones too, and a mission id as the `workspaceId`
+ * lists that mission's.
  *
  * `status` keeps only that status. At most `limit` come back; `truncated`
  * says more matched. No usable data folder reads as none.
@@ -50,14 +67,14 @@ export const decisionsListRpc = defineRpc({
     .refine((input) => input.scope !== "request" || input.requestId !== undefined, {
       message: "scope request needs a requestId",
     }),
-  output: z.object({ decisions: z.array(decisionSchema), truncated: z.boolean() }),
+  output: z.object({ decisions: z.array(ownerDecisionSchema), truncated: z.boolean() }),
 });
 
 /** `decisions.get` — one decision; unknown → `E_DECISION_NOT_FOUND`. */
 export const decisionsGetRpc = defineRpc({
   name: "decisions.get",
   input: z.object({ id: z.string().min(1) }),
-  output: z.object({ decision: decisionSchema }),
+  output: z.object({ decision: ownerDecisionSchema }),
 });
 
 /**
@@ -81,7 +98,7 @@ export const decisionsAnswerRpc = defineRpc({
     confirmed: z.literal(true).optional(),
     via: z.enum(["inbox", "chat-card"]).optional(),
   }),
-  output: z.object({ decision: decisionSchema }),
+  output: z.object({ decision: ownerDecisionSchema }),
 });
 
 /**

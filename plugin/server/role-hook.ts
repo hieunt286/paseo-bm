@@ -39,6 +39,8 @@ import { listedWorkspaces, type DashboardPaseo } from "./paseo-directory";
 import { rememberCreatedBoundary } from "./created-boundary";
 import { applyRoleTitle } from "./role-title";
 import { suppressCodexNativeDelegation } from "./provider-native-delegation";
+import { isMissionsHome, mainFactsOf } from "./missions-home";
+import { dataHome } from "./rpc-kit";
 
 /**
  * Role instructions injected into every paseo-bm agent at creation (bm-hld).
@@ -72,6 +74,11 @@ import { suppressCodexNativeDelegation } from "./provider-native-delegation";
  * module also registers reads it with the new agent's id and claims the
  * binding for that agent (`claimHookBinding`), which is the only agent the
  * binding ever settles to.
+ *
+ * A Manager created in the Missions home is a Main (missions design §3.3,
+ * §3.5): its Runtime facts name its mission — the one its pending binding
+ * carries (`createMain`), none for a Manager the owner opened there, which
+ * is an unassigned Main — the mission level's cells and its repos' levels.
  *
  * Provider ids map to roles through `roleOfProvider` (agent-role.ts), the
  * same rule every lookup uses to tell paseo-bm agents apart (delta 20260918g):
@@ -462,6 +469,8 @@ async function prepare(
   paseo: unknown,
   /** The creation carries the token URL of a pending binding (§16.5): its Runtime facts say it is bound. */
   bound = false,
+  /** The mission that pending binding is for (a Main, missions design §3.3); null for none. */
+  missionId: string | null = null,
 ): Promise<{
   modes: ProviderMode[] | null;
   facts: RuntimeFacts;
@@ -513,9 +522,13 @@ async function prepare(
         });
   const base = id === null ? null : ((await aliasBases(paseo))[id] ?? null);
   const boundary = boundaryPostureOf({ role, base, project: project.boundary, modes, profileModeId });
+  // Missions design §3.5: a Manager created in the Missions home is a Main.
+  const home = role === "manager" ? dataHome() : null;
+  const main = home !== null && (isMissionsHome(project.workspaceId, home) || isMissionsHome(cwd, home)) ? mainFactsOf(home, missionId) : null;
+  const withMain = main === null ? facts : { ...facts, main };
   return {
     modes,
-    facts: boundary === null ? facts : { ...facts, actionBoundary: boundary },
+    facts: boundary === null ? withMain : { ...withMain, actionBoundary: boundary },
     profileModeId,
     profile,
     features,
@@ -710,6 +723,15 @@ export function claimHookBinding(request: SessionOpenRequest, tools: RoleHookToo
   }
 }
 
+/** The mission a Main's pending binding carries (missions design §3.3), or null. Never throws. */
+function missionOfToken(token: string, tools: RoleHookTools | null): string | null {
+  try {
+    return tools?.bindings?.callerOf(token, "manager")?.missionId ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** True when `request` still carries the bound URL of its role: `applyAgentTools` kept it, so the binding was attached. Never throws. */
 function keepsBoundUrl(request: AgentCreateRequest, tools: RoleHookTools | null): boolean {
   try {
@@ -772,11 +794,14 @@ export function registerRoleHook(host: RoleHookHost, tools: RoleHookTools | null
     }
     return (async () => {
       // A creation the plugin itself made with a token URL (§16.5): read now, attached at the very end.
-      const bound = pendingBoundToken(request, tools) !== null;
+      const token = pendingBoundToken(request, tools);
+      const bound = token !== null;
+      // Missions design §3.3: a Main the plugin creates carries its mission on its binding.
+      const missionId = token === null ? null : missionOfToken(token, tools);
       // The host fails the whole creation if this hook takes longer than 30 s,
       // so everything it looks up is raced as ONE budget: a slow daemon costs
       // the mode and the facts, never the agent.
-      const prepared = await withTimeout(prepare(request, paseo, bound), LOOKUP_TIMEOUT_MS);
+      const prepared = await withTimeout(prepare(request, paseo, bound, missionId), LOOKUP_TIMEOUT_MS);
       if (prepared === TIMED_OUT) {
         console.warn(
           `[paseo-bm] preparing the role config took longer than ${LOOKUP_TIMEOUT_MS} ms; the agent starts with its role instructions only.`,

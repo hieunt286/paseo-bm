@@ -50,6 +50,7 @@ import {
   inboxDigestRpc,
   inboxSeenRpc,
   managerEnsureRpc,
+  missionEnsureRpc,
   workspacesOverviewRpc,
   type ChatPeer,
 } from "../shared/contracts";
@@ -106,6 +107,9 @@ export interface InboxData {
   resending: ResendState;
   /** Replaces the workspace's outdated Manager, then hands the new Manager's id to `onReplaced`. */
   replaceManager: (workspaceId: string, onReplaced: (agentId: string) => void) => void;
+  /** Opens a mission's Main, replacing an outdated one when `replace` (missions design §3.6), then hands its id to `onOpened`. */
+  openMain: (missionId: string, replace: boolean, onOpened: (agentId: string) => void) => void;
+  /** Keyed by the workspace (`replaceManager`) or the mission (`openMain`). */
   replacing: ResendState;
   /** Overrides a decision answered for the owner (autonomy design §B.7): it comes back to Needs you. */
   override: (decisionId: string) => void;
@@ -136,6 +140,7 @@ export function useInbox({
   const listOverview = useRpc(workspacesOverviewRpc);
   const act = useRpc(fallbackActRpc);
   const ensureManager = useRpc(managerEnsureRpc);
+  const ensureMission = useRpc(missionEnsureRpc);
   const markSeen = useRpc(inboxSeenRpc);
   const readDigest = useRpc(inboxDigestRpc);
   const overrideDecision = useRpc(decisionsOverrideRpc);
@@ -226,22 +231,23 @@ export function useInbox({
     );
   };
 
-  const replaceManager = (workspaceId: string, onReplaced: (agentId: string) => void) => {
-    setReplacing((current) => ({ ...current, [workspaceId]: { busy: true, error: null } }));
-    ensureManager({ workspaceId, replaceOutdated: true }).then(
+  const track = (key: string, call: Promise<{ agentId: string }>, failed: string, onDone: (agentId: string) => void) => {
+    setReplacing((current) => ({ ...current, [key]: { busy: true, error: null } }));
+    call.then(
       (result) => {
-        setReplacing((current) => Object.fromEntries(Object.entries(current).filter(([id]) => id !== workspaceId)));
+        setReplacing((current) => Object.fromEntries(Object.entries(current).filter(([id]) => id !== key)));
         void queryClient.invalidateQueries({ queryKey: inboxQueryKeys.alerts });
-        onReplaced(result.agentId);
+        onDone(result.agentId);
       },
       (error: unknown) => {
-        setReplacing((current) => ({
-          ...current,
-          [workspaceId]: { busy: false, error: `Could not replace the Manager: ${errorMessageOf(error)}` },
-        }));
+        setReplacing((current) => ({ ...current, [key]: { busy: false, error: `${failed}: ${errorMessageOf(error)}` } }));
       },
     );
   };
+  const replaceManager = (workspaceId: string, onReplaced: (agentId: string) => void) =>
+    track(workspaceId, ensureManager({ workspaceId, replaceOutdated: true }), "Could not replace the Manager", onReplaced);
+  const openMain = (missionId: string, replace: boolean, onOpened: (agentId: string) => void) =>
+    track(missionId, ensureMission({ missionId, ...(replace ? { replace: "outdated" as const } : {}) }), replace ? "Could not replace the Main" : "Could not open the Main", onOpened);
 
   const override = (decisionId: string) => {
     setOverriding((current) => ({ ...current, [decisionId]: { busy: true, error: null } }));
@@ -265,6 +271,7 @@ export function useInbox({
     resend,
     resending,
     replaceManager,
+    openMain,
     replacing,
     override,
     overriding,
@@ -654,7 +661,9 @@ function InboxProjectView({
               ? data.resending[row.action.incidentId]
               : row.action?.kind === "replace-manager"
                 ? data.replacing[row.action.workspaceId]
-                : undefined
+                : row.action?.kind === "open-main"
+                  ? data.replacing[row.action.missionId]
+                  : undefined
           }
           compact={compact}
           join={joinNext()}
@@ -692,6 +701,7 @@ export function InboxScreen({ theme, layout, navigation, data, status, onOpenWor
     if (action.kind === "open-agent") navigation?.openAgent({ agentId: action.agentId });
     else if (action.kind === "open-project") navigation?.openWorkspace({ workspaceId: action.workspaceId });
     else if (action.kind === "replace-manager") data.replaceManager(action.workspaceId, (agentId) => navigation?.openAgent({ agentId }));
+    else if (action.kind === "open-main") data.openMain(action.missionId, action.replace, (agentId) => navigation?.openAgent({ agentId }));
     else data.resend(action.incidentId);
   };
   const toggle = (key: string) => {

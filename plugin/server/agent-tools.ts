@@ -59,7 +59,11 @@
  * a bound Worker `bm_create_reviewer` and `bm_rereview` (`review-tools.ts`,
  * design §16.8). A bound Manager and Worker also have the peer tools
  * (`peer-tools.ts`, design §7.17.3): `bm_peers`, `bm_ask_project`,
- * `bm_peer_reply`.
+ * `bm_peer_reply`. A bound Manager also has the mission tools
+ * (`mission-tools.ts`, missions design §4): `bm_mission`,
+ * `bm_mission_start`, `bm_mission_update`, which only a Main can use, and
+ * with a bound Worker `bm_memory` (`memory-tools.ts`, missions design §2.5),
+ * beside a Main's own `bm_repo`.
  *
  * An unbound Manager's `bm_answers` is checked first (design §7.17.8 c,
  * `settledAnswersRefusalOf`): a `Qn` whose `q:<requestId>:Qn` is found in
@@ -94,6 +98,9 @@ import { createWorkerTools } from "./decision-ask";
 import { createDeliveringTools, type DeliveringTools } from "./deliver-tools";
 import { createReviewTools } from "./review-tools";
 import { createPeerTools, type PeerTools } from "./peer-tools";
+import { createMissionTools } from "./mission-tools";
+import type { OnDecisionsSettled } from "./decision-rpc";
+import { createMemoryTools } from "./memory-tools";
 import { currentTurnStartOf } from "./collector";
 import { BUILDER_SEND_LINES } from "./role-instructions";
 import { answeredByText, isAnswerable, questionDecisionId, type Decision } from "../shared/decisions";
@@ -592,8 +599,16 @@ export interface StartOptions {
    * binder, Paseo handle and data folder by default.
    */
   peerTools?: PeerTools;
+  /**
+   * The bound Manager's mission tools (missions design §4: `bm_mission`,
+   * `bm_mission_start`, `bm_mission_update`); `createMissionTools` with this
+   * endpoint's Paseo handle and data folder by default.
+   */
+  missionTools?: ServerTools;
   /** Decisions a bound Worker's `bm_questions` opened: their `decision.opened` events (the event bus). */
   onDecisionsOpened?: (opened: readonly Decision[], paseo: unknown) => unknown;
+  /** Where a Main's `bm_answer_worker` answers go (missions design §4): the delivery the owner's answers take. */
+  onDecisionsSettled?: OnDecisionsSettled;
   /** The per-agent bindings; the data folder's `ui/agent-bindings.json` by default (design §16.5). */
   bindings?: BindingStore | null;
   /** The clock that stamps a new secret's `secretSince`; tests only. */
@@ -701,6 +716,8 @@ export function startAgentTools(options: StartOptions = {}): AgentToolsEndpoint 
       ...(options.onDecisionsOpened === undefined ? {} : { onOpened: options.onDecisionsOpened }),
     });
   const peer = options.peerTools ?? createPeerTools({ binder: () => binder, paseo: () => paseoHandle, home: () => home, log });
+  // Missions design §2.5, §4, §5: bm_memory for a Main and a Worker, and the Main's bm_repo.
+  const memory = createMemoryTools({ paseo: () => paseoHandle, home: () => home });
   const manager = joinServerTools(
     joinServerTools(
       joinServerTools(
@@ -709,14 +726,24 @@ export function startAgentTools(options: StartOptions = {}): AgentToolsEndpoint 
       ),
       delivering.manager,
     ),
-    peer.manager,
+    joinServerTools(
+      joinServerTools(peer.manager, options.missionTools ??
+          createMissionTools({
+            paseo: () => paseoHandle,
+            home: () => home,
+            log,
+            turnStartOf: currentTurnStartOf,
+            ...(options.onDecisionsSettled === undefined ? {} : { onSettled: options.onDecisionsSettled }),
+          })),
+      memory.manager,
+    ),
   );
   const worker = joinServerTools(
     joinServerTools(
       joinServerTools(baseWorker, delivering.worker),
       options.reviewTools ?? createReviewTools({ binder: () => binder, paseo: () => paseoHandle, home: () => home, log }),
     ),
-    peer.worker,
+    joinServerTools(peer.worker, memory.worker),
   );
   const reviewer = delivering.reviewer;
   const server = createServer((request, response) => {

@@ -15,6 +15,8 @@ import { currentInstructionsHash } from "../plugin/server/instructions-label";
 import { createBindingStore } from "../plugin/server/agent-bindings";
 import { binderOf } from "../plugin/server/agent-tools";
 import { applyAgentTools, type AgentCreateRequest } from "../plugin/server/role-hook";
+import { createMissionRoster } from "../plugin/server/mission-roster";
+import { createMissionStore } from "../plugin/server/mission-store";
 import { fakePaseo, type FakePaseoOptions } from "./helpers/fake-paseo";
 
 /**
@@ -106,18 +108,20 @@ const NOW = () => new Date("2026-09-22T06:05:00.000Z");
 
 function switcher(overrides: Parameters<typeof createManagerSwitch>[0] = {}) {
   const setLabels = vi.fn(async () => ({ ok: true as const }));
+  const setTitle = vi.fn(async () => ({ ok: true as const }));
   const enqueue = vi.fn<(target: string, kind: string, text: string) => Promise<"sent" | "queued">>(async (target) => (target === "wrk-busy" ? "queued" : "sent"));
   const action = createManagerSwitch({
     log,
     now: NOW,
     setLabels,
+    setTitle,
     enqueue,
     readInstructions: async () => INSTRUCTIONS,
     handover: async () => HANDOVER,
     location: async () => null,
     ...overrides,
   });
-  return { action, setLabels, enqueue };
+  return { action, setLabels, setTitle, enqueue };
 }
 
 beforeEach(() => {
@@ -166,6 +170,32 @@ describe("switch (Manager)", () => {
     expect(setLabels).toHaveBeenCalledWith(OLD, { "bm.replacedBy": NEW });
     expect(after).toMatchObject({ status: "switched", replacementId: NEW, decidedAt: "2026-09-22T06:05:00.000Z" });
     expect(read()[0]).toMatchObject({ status: "switched", replacementId: NEW });
+  });
+
+  it("a Main's switch creates its successor as a Main and replaces it through replaceMain (missions design §3.4)", async () => {
+    write([incident()]);
+    const MISSION = "mis-0123456789";
+    createMissionStore(home, { newId: () => MISSION }).create({ code: "WEB", name: "Website", goal: "", repos: [], createdBy: "owner", mainId: OLD });
+    createMissionRoster(home).add(MISSION, { requestId: "req-20261009T100000Z", workspaceId: WS, topic: "Export", workerId: "wrk-idle" });
+    const { paseo, create } = daemon();
+    const { action, setLabels, setTitle, enqueue } = switcher();
+    await expect(action(incident(), paseo, { home })).resolves.toMatchObject({ status: "switched", replacementId: NEW });
+    const request = create.mock.calls[0]![0];
+    expect(request.title).toBe("🟣 M · WEB Website");
+    expect(request.labels).toMatchObject({ "bm.missionId": MISSION, "bm.missionCode": "WEB", "bm.replaces": OLD });
+    expect(request.prompt?.startsWith("BM-BRIEF manager requestId: none mission: WEB")).toBe(true);
+    expect(request.prompt?.endsWith(HANDOVER)).toBe(true);
+    expect(createMissionStore(home).get(MISSION)!.mainHistory.map((entry) => [entry.agentId, entry.reason])).toEqual([
+      [OLD, "created"],
+      [NEW, "fallback"],
+    ]);
+    expect(setLabels).toHaveBeenCalledWith(OLD, { "bm.replacedBy": NEW });
+    expect(setTitle).toHaveBeenCalledWith(OLD, "🟣 M · WEB Website · replaced");
+    expect(setLabels).toHaveBeenCalledWith("wrk-idle", { "paseo.parent-agent-id": NEW });
+    expect(enqueue.mock.calls.map((call) => [call[0], call[1]])).toEqual([
+      ["wrk-idle", "BM-SETTINGS"],
+      ["wrk-busy", "BM-SETTINGS"],
+    ]);
   });
 
   it("tells every live, non-replaced Worker of the workspace the new Manager's id (queued for a running one)", async () => {

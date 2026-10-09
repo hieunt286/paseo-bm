@@ -19,6 +19,7 @@ import {
 } from "../plugin/server/deliver-tools";
 import { noteIn, peerBlockOf } from "../plugin/server/handoff";
 import { CUT_NOTE_LINE, clearSeenTurns, createInterruptionWatch } from "../plugin/server/interruption-watch";
+import { createMissionRoster } from "../plugin/server/mission-roster";
 import { PEER_RULES, createPeerLinkStore } from "../plugin/server/peer-links";
 import { peerReplyText } from "../plugin/server/peer-tools";
 import { offToolAlertOf } from "../plugin/server/off-tool-reviewer";
@@ -132,9 +133,9 @@ const call = (name: string, args: unknown) => ({ jsonrpc: "2.0", id: 1, method: 
 
 describe("the bound lists (design §16.6)", () => {
   it("a bound Worker, Reviewer and Manager list their delivering tools; unbound agents keep today's lists", () => {
-    expect(toolFacesFor("worker", true).map((face) => face.name)).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_reply"]);
+    expect(toolFacesFor("worker", true).map((face) => face.name)).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_memory", "bm_reply"]);
     expect(toolFacesFor("reviewer", true).map((face) => face.name)).toEqual(["bm_review"]);
-    expect(toolFacesFor("manager", true).map((face) => face.name)).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_decisions"]);
+    expect(toolFacesFor("manager", true).map((face) => face.name)).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission", "bm_decisions"]);
     expect(toolFacesFor("worker").map((face) => face.name)).toEqual(["bm_report", "bm_reply"]);
     expect(toolFacesFor("reviewer").map((face) => face.name)).toEqual(["bm_review"]);
     expect(toolFacesFor("manager").map((face) => face.name)).toEqual(["bm_answers", "bm_decisions"]);
@@ -148,9 +149,9 @@ describe("the bound lists (design §16.6)", () => {
   it("the hook pre-approves exactly the bound list", () => {
     const empty: { toolPolicy?: { preapproved?: Array<{ tool: string }> } } = {};
     const tools = (role: "worker" | "reviewer" | "manager") => withAgentTools(empty, role, "http://127.0.0.1:1/mcp/x", true)?.toolPolicy?.preapproved?.map((grant) => grant.tool);
-    expect(tools("worker")).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_reply"]);
+    expect(tools("worker")).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_memory", "bm_reply"]);
     expect(tools("reviewer")).toEqual(["bm_review"]);
-    expect(tools("manager")).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_decisions"]);
+    expect(tools("manager")).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission", "bm_decisions"]);
     expect(answer("reviewer", { jsonrpc: "2.0", id: 1, method: "tools/list" }, true)).toMatchObject({ result: { tools: [{ name: "bm_review" }] } });
   });
 });
@@ -359,6 +360,30 @@ describe("bm_report for a bound Worker (design §16.6)", () => {
       expect((await tools.worker.call("bm_report", { ...REPORT, phase }, WORKER_CALLER)).ok, phase).toBe(true);
       expect(createAlertStore(home).list({ open: true }).map((alert) => alert.subject), phase).toEqual(["rev-2"]);
     }
+  });
+
+  it("a mission request's roster state follows its reports: finished, then active again on a later report, then stopped (missions design §2.3)", async () => {
+    const { home, tools } = setup();
+    register(home);
+    const roster = createMissionRoster(home);
+    roster.add("mis-0123456789", { requestId: REQ, workspaceId: WS, topic: "Export", workerId: WORKER });
+    const state = () => createMissionRoster(home).get("mis-0123456789", REQ)?.state;
+    expect((await tools.worker.call("bm_report", REPORT, WORKER_CALLER)).ok).toBe(true);
+    expect(state()).toBe("active");
+    expect((await tools.worker.call("bm_report", { ...REPORT, phase: "finished" }, WORKER_CALLER)).ok).toBe(true);
+    expect(state()).toBe("finished");
+    // A follow-up through bm_tell_worker reopened the work.
+    expect((await tools.worker.call("bm_report", REPORT, WORKER_CALLER)).ok).toBe(true);
+    expect(state()).toBe("active");
+    expect((await tools.worker.call("bm_report", { ...REPORT, phase: "stopped" }, WORKER_CALLER)).ok).toBe(true);
+    expect(state()).toBe("stopped");
+  });
+
+  it("a request of no mission: a finished report writes no roster", async () => {
+    const { home, tools } = setup();
+    register(home);
+    expect((await tools.worker.call("bm_report", { ...REPORT, phase: "finished" }, WORKER_CALLER)).ok).toBe(true);
+    expect(existsSync(join(home, "missions"))).toBe(false);
   });
 
   it("an unbound Worker still gets the builder and its send line, the phase stopped included", async () => {
@@ -585,6 +610,36 @@ describe("bm_answers for a bound Manager: proposed, settled only with the owner'
     expect(proposedAnswersOf(MANAGER, START)).toEqual([]);
   });
 
+  it("a Main's request in another repo: checked and proposed there, settled there at its turn's end (missions design §6)", async () => {
+    const MAIN = "agent-main";
+    const BACK = "wks_back";
+    const HOME_WS = "wks_home";
+    const context = setup();
+    const { home, tools } = context;
+    createRequestRegistry(home, { backfill: () => [] }).register(BACK, REQ, { source: "tool", managerId: MAIN, workerId: WORKER });
+    createMissionRoster(home).add("mis-0123456789", { requestId: REQ, workspaceId: BACK, topic: "Orders API", workerId: WORKER });
+    await tools.worker.call("bm_questions", { questions: [QUESTION()] }, { ...WORKER_CALLER, workspaceId: BACK, parentId: MAIN });
+    expect(createDecisionStore(home).get(`q:${REQ}:Q1`, BACK)?.status).toBe("open");
+    const caller = { ...MANAGER_CALLER, agentId: MAIN, workspaceId: HOME_WS, missionId: "mis-0123456789" };
+    expect(parsed(await tools.manager.call("bm_answers", ANSWERS, caller))).toEqual({ proposed: ["Q1"] });
+    expect(proposedAnswersOf(MAIN, START)).toEqual([{ workspaceId: BACK, requestId: REQ, answers: [{ id: "Q1", text: "a — Push contract only" }] }]);
+    const record = turn({ agentId: MAIN, role: "manager", workspaceId: HOME_WS, startedAt: START, endedAt: new Date(T0.getTime() + 60_000).toISOString(), sent: [msg(MAIN, new Date(T0.getTime() + 10_000).toISOString(), "a", "user")] });
+    await materialise(home, record);
+    expect(createDecisionStore(home).get(`q:${REQ}:Q1`, BACK)).toMatchObject({ status: "answered", answer: { by: "owner", via: "chat-manager", optionKey: "a" } });
+    expect(createDecisionStore(home).list({ workspaceId: HOME_WS })).toEqual([]);
+  });
+
+  it("a Worker's ownerOnly question is stored so; the Manager's bm_answers refuses it, proposing nothing (missions design §5)", async () => {
+    const context = setup();
+    register(context.home);
+    await context.tools.worker.call("bm_questions", { questions: [QUESTION({ ownerOnly: true, subject: "npm-login", text: "Is npm logged in?" })] }, WORKER_CALLER);
+    expect(createDecisionStore(context.home).get(`q:${REQ}:Q1`, WS)).toMatchObject({ status: "open", ownerOnly: true });
+    const result = await context.tools.manager.call("bm_answers", ANSWERS, MANAGER_CALLER);
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain(`input.answers[0]: q:${REQ}:Q1 asks a fact only the owner knows (ownerOnly)`);
+    expect(proposedAnswersOf(MANAGER, START)).toEqual([]);
+  });
+
   it("an unbound Manager still gets the builder and its send line", async () => {
     const { tools } = setup();
     const reply = await answerWithServerTools("manager", call("bm_answers", ANSWERS), tools.manager, null);
@@ -630,6 +685,25 @@ describe("bm_tell_worker for a bound Manager (design §16.6)", () => {
     register(home);
     expect(parsed(await tools.manager.call("bm_tell_worker", TELL, MANAGER_CALLER))).toEqual({ workerId: successor.id, delivery: "sent" });
     expect(fake.sends.map((send) => send.id)).toEqual([successor.id]);
+  });
+
+  it("a Main's request in another repo: found through the request index, its Worker reached there, the message kept in that repo's outbox (missions design §4)", async () => {
+    const MAIN = "agent-main";
+    const BACK = "wks_back";
+    const worker: Agent = { id: "agent-back-worker", provider: "bm-worker/claude-opus-5", status: "idle", workspaceId: BACK, labels: { "bm.role": "worker", "bm.requestId": REQ, "paseo.parent-agent-id": MAIN } };
+    const main: Agent = { id: MAIN, provider: "bm-manager/claude-opus-5", status: "idle", workspaceId: "wks_home", labels: { "bm.role": "manager" } };
+    const { home, fake, tools } = setup({ agents: [main, worker] });
+    createRequestRegistry(home, { backfill: () => [] }).register(BACK, REQ, { source: "tool", managerId: MAIN, workerId: worker.id });
+    createMissionRoster(home).add("mis-0123456789", { requestId: REQ, workspaceId: BACK, topic: "Orders API", workerId: worker.id });
+    const caller = { ...MANAGER_CALLER, agentId: MAIN, workspaceId: "wks_home", missionId: "mis-0123456789" };
+    expect(parsed(await tools.manager.call("bm_tell_worker", TELL, caller))).toEqual({ workerId: worker.id, delivery: "sent" });
+    expect(fake.sends.map((send) => send.id)).toEqual([worker.id]);
+    expect(createOutbox(home).list(BACK)).toMatchObject([{ kind: "message", requestId: REQ, from: MAIN, to: worker.id }]);
+    expect(createOutbox(home).list("wks_home")).toEqual([]);
+    // Still only the request's Manager: another Main is refused.
+    expect((await tools.manager.call("bm_tell_worker", TELL, { ...caller, agentId: "agent-other-main" })).text).toBe(
+      `request ${REQ} is not one of yours: another Manager created its Worker. Nothing was sent.`,
+    );
   });
 
   it("refuses an unknown request, another Manager's, no live Worker, and an unbound caller, sending nothing", async () => {

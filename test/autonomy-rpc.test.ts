@@ -625,7 +625,7 @@ describe("a reversal is only recorded (ADR-025 decision 4: no demotion)", () => 
 });
 
 describe("registration", () => {
-  it("registers the six policy RPCs and the three precedent RPCs, and their codes are in the registry", () => {
+  it("registers the six policy RPCs, the two mission level RPCs and the three precedent RPCs, and their codes are in the registry", () => {
     const handle = vi.fn();
     registerAutonomyRpcs({ handle } as unknown as Parameters<typeof registerAutonomyRpcs>[0], deps);
     expect(handle.mock.calls.map(([contract]) => (contract as { name: string }).name)).toEqual([
@@ -635,6 +635,8 @@ describe("registration", () => {
       "autonomy.reset",
       "autonomy.set-challenger",
       "autonomy.set-boundary",
+      "autonomy.set-mission-level",
+      "autonomy.set-mission-cell",
       "precedents.list",
       "precedents.save",
       "precedents.end",

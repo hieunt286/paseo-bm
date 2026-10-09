@@ -75,8 +75,9 @@ function questionNumber(decisionId: string): number {
  * the `BM-ANSWERS` block of `decisions` in question order — an option as
  * `Qn: a — <label>`, the owner's words as `Qn: other — <words>`. A question an
  * owner precedent answered (autonomy design §B.6) is cited on its own line
- * above the block, with the precedent's id and subject; one the owner's policy
- * answered (§B.5) reads exactly as the owner's. Throws when a
+ * above the block, with the precedent's id and subject; one the mission's Main
+ * answered (missions design §4) is cited as the Main's, with its reason; one
+ * the owner's policy answered (§B.5) reads exactly as the owner's. Throws when a
  * decision carries neither (a confirmed chat answer), as `answersText` does.
  */
 export function answersMessageOf(requestId: string, decisions: readonly Decision[]): string {
@@ -95,6 +96,10 @@ export function answersMessageOf(requestId: string, decisions: readonly Decision
     if (answer?.by === "precedent") {
       const subject = decision.subject === null ? "" : ` on "${decision.subject}"`;
       cited.push(`${questionIdOf(decision.id)} was answered by the owner's precedent ${answer.precedentId ?? ""}${subject}: it is the owner's standing answer.`);
+    }
+    // Missions design §4: the Main's answer is its own, never the owner's, and grants nothing.
+    if (answer?.by === "main") {
+      cited.push(`${questionIdOf(decision.id)} was answered by your mission's Main, not the owner${answer.reason === undefined ? "" : ` (${answer.reason})`}: it grants nothing beyond your rules.`);
     }
   }
   const citations = cited.length === 0 ? "" : `\n${cited.join("\n")}`;

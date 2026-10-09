@@ -52,7 +52,7 @@ import { noticeQueue, type NoticePaseo, type NoticeQueue } from "./notice-queue"
 import { commandKindOf } from "./orchestrator-state";
 import { findOrchestratorAgent, type OrchestratorAgentPaseo } from "./orchestrator-agent";
 import type { OrchestratorStoreDeps } from "./orchestrator-store";
-import { workingAgents, type OrchestratorToolsPaseo } from "./orchestrator-tool-context";
+import { belongsToProject, commandManagerIdOf, workingAgents, type OrchestratorToolsPaseo } from "./orchestrator-tool-context";
 import { applyPreparedChange, type PreparedChangeResult } from "./prepared-changes";
 import { firstLine } from "./request-trace";
 import { dataHomeOf } from "./role-instructions";
@@ -167,12 +167,14 @@ export function createOrchestratorDecisionDelivery(deps: OrchestratorDeliveryDep
     } catch (error) {
       return failed(`the agents could not be listed: ${errorText(error)}`);
     }
-    const target = agents.find((agent) => agent.id === action.agentId);
-    if (target === undefined || target.role !== action.to || target.workspaceId !== decision.workspaceId || target.archived) {
-      return failed(`${action.agentId} is no longer a live paseo-bm ${action.to} of project ${decision.workspaceId}`);
+    // A command to a mission request's Main goes to the mission's current Main (missions design §6).
+    const targetId = action.to === "manager" ? commandManagerIdOf(home, action.agentId, decision.requestId) : action.agentId;
+    const target = agents.find((agent) => agent.id === targetId);
+    if (target === undefined || target.role !== action.to || !belongsToProject(target, decision.workspaceId, home) || target.archived) {
+      return failed(`${targetId} is no longer a live paseo-bm ${action.to} of project ${decision.workspaceId}`);
     }
-    // The copy `bm_direct_worker` sends (ADR-016 decision 2): the Worker's own Manager, when it is one of the project.
-    const copyTo = action.to === "worker" ? (copyRecipientOf(agents, target, decision.workspaceId)?.id ?? null) : null;
+    // The copy `bm_direct_worker` sends (ADR-016 decision 2): the Worker's request's Main, else its own Manager of the project.
+    const copyTo = action.to === "worker" ? (copyRecipientOf(agents, target, decision.workspaceId, home)?.id ?? null) : null;
     let sent: CommandSendResult;
     try {
       sent = await sendCommand({

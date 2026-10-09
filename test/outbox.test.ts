@@ -14,6 +14,7 @@ import {
   deliveryTextOf,
   dropsCovered,
   newestReportRecordOf,
+  reportPhaseOf,
   storeAndDeliver,
   usePeerTargets,
   type OutboxRecord,
@@ -496,6 +497,28 @@ describe("readers", () => {
     expect(newestReportRecordOf(home, WS, "wrk-1")?.id).toBe(held.record.id);
     expect(newestReportRecordOf(home, WS, "wrk-1", new Date(T0.getTime() + 90_000).toISOString())).toBeNull();
     expect(newestReportRecordOf(home, WS, "wrk-2")).toBeNull();
+  });
+
+  it("newest is by createdAt, a tie broken by the phase's rank, not by the file's order (missions acceptance 2026-10-09)", () => {
+    const home = dataFolder();
+    let clock = T0;
+    const outbox = createOutbox(home, { now: () => clock });
+    const block = (phase: string) => ["BM-REPORT", `requestId: ${REQ}`, `phase: ${phase}`, "tier: Small"].join("\n");
+    // Two reports in one second: finished written first, received after it in the file.
+    const finished = outbox.add(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: block("finished") });
+    outbox.add(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: block("received") });
+    expect(newestReportRecordOf(home, WS, "wrk-1")?.id).toBe(finished.id);
+    expect(reportPhaseOf(newestReportRecordOf(home, WS, "wrk-1")!.text)).toBe("finished");
+    // blocked outranks beads-done, which outranks received; stopped ranks with finished.
+    outbox.add(WS, { kind: "report", requestId: REQ, from: "wrk-2", to: "mgr-1", text: block("beads-done") });
+    const blocked = outbox.add(WS, { kind: "report", requestId: REQ, from: "wrk-2", to: "mgr-1", text: block("blocked") });
+    outbox.add(WS, { kind: "report", requestId: REQ, from: "wrk-2", to: "mgr-1", text: block("received") });
+    expect(newestReportRecordOf(home, WS, "wrk-2")?.id).toBe(blocked.id);
+    // A later report wins whatever its phase: a follow-up reopened the work.
+    clock = new Date(T0.getTime() + 1_000);
+    const later = outbox.add(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: block("received") });
+    expect(newestReportRecordOf(home, WS, "wrk-1")?.id).toBe(later.id);
+    expect(reportPhaseOf("no phase here")).toBeNull();
   });
 });
 

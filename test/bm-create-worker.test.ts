@@ -32,7 +32,12 @@ import { forgetModes } from "../plugin/server/role-mode";
 import { boundToolFacesFor } from "../plugin/shared/bm-tools";
 import { originOf } from "../plugin/shared/message-origin";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
-import { fakePaseo, type FakeCreateRequest } from "./helpers/fake-paseo";
+import { createMemoryStore } from "../plugin/server/memory-store";
+import { createMissionAutonomyStore } from "../plugin/server/mission-autonomy-store";
+import { clearRequestIndexCache, createMissionRoster, requestIndexOf } from "../plugin/server/mission-roster";
+import { createMissionStore } from "../plugin/server/mission-store";
+import { ensureMissionsHome, missionsHomeDirOf } from "../plugin/server/missions-home";
+import { fakePaseo, type FakeAgent, type FakeCreateRequest } from "./helpers/fake-paseo";
 import { dataFolder, removeDataFolders } from "./helpers/data-folder";
 import { MANAGER_CALLER } from "./helpers/bindings";
 
@@ -53,6 +58,7 @@ afterEach(() => {
   clearBindingCache();
   clearRequestRegistryCache();
   clearJsonFileCache();
+  clearRequestIndexCache();
   forgetModes();
   removeDataFolders();
 });
@@ -66,13 +72,16 @@ interface DaemonOptions {
   refuseEchoingUrl?: boolean;
   /** The `agent.create` hook's part: keeps the token URL (`applyAgentTools`), as the real hook does. */
   store?: BindingStore;
+  /** Agents and workspaces beside (agents) or instead of (workspaces) the default ones. */
+  agents?: FakeAgent[];
+  workspaces?: Array<Record<string, unknown>>;
 }
 
 function daemon(options: DaemonOptions = {}) {
   const base = options.base ?? "claude";
   return fakePaseo({
-    agents: [{ id: MANAGER, provider: "bm-manager/claude-opus-5", status: "running", workspaceId: WS, cwd: FOLDER, labels: { "bm.role": "manager" } }],
-    workspaces: [
+    agents: [{ id: MANAGER, provider: "bm-manager/claude-opus-5", status: "running", workspaceId: WS, cwd: FOLDER, labels: { "bm.role": "manager" } }, ...(options.agents ?? [])],
+    workspaces: options.workspaces ?? [
       { id: WS, directory: FOLDER },
       { id: "wks_front", directory: "/work/front" },
     ],
@@ -438,3 +447,156 @@ function nothingCreatedIn(home: string, fake: ReturnType<typeof daemon>, store: 
   expect(store.list()).toEqual([]);
   expect(existsSync(join(home, REQUESTS_DIR_NAME))).toBe(false);
 }
+
+describe("bm_create_worker for a Main: Workers in the mission's repos (missions design §3.3, §4, §7)", () => {
+  const MAIN = "agent-main";
+  const BACK = "wks_back";
+  const BACK_FOLDER = "/work/back";
+  const PLAN = "Step 2 of 3: the orders API before the screens.";
+
+  /** A daemon with the Missions home (holding the Main), the two repos, an archived one and the Orchestrator's home. */
+  async function missionDaemon(home: string, store: BindingStore | undefined) {
+    const homeFolder = missionsHomeDirOf(home);
+    const fake = daemon({
+      ...(store === undefined ? {} : { store }),
+      agents: [{ id: MAIN, provider: "bm-manager/claude-opus-5", status: "running", workspaceId: "wks_home", cwd: homeFolder, labels: { "bm.role": "manager" } }],
+      workspaces: [
+        { id: "wks_home", directory: homeFolder },
+        { id: WS, directory: FOLDER },
+        { id: BACK, directory: BACK_FOLDER },
+        { id: "wks_old", directory: "/work/old", archivedAt: "2026-10-01T00:00:00.000Z" },
+        { id: "wks_orch", directory: join(home, "orchestrator", "home") },
+      ],
+    });
+    await ensureMissionsHome(fake.paseo as never, { home });
+    return fake;
+  }
+
+  function mission(home: string, repos: string[]): { missionId: string; caller: ToolCaller } {
+    const created = createMissionStore(home).create({ code: "SHOP", name: "Shop revamp", goal: "Orders end to end.", repos, createdBy: "owner", mainId: MAIN });
+    if (!created.ok) throw new Error(created.reasons.join("; "));
+    const missionId = created.mission.missionId;
+    return { missionId, caller: { agentId: MAIN, role: "manager", workspaceId: "wks_home", requestId: null, parentId: null, batchId: null, missionId } };
+  }
+
+  it("a Worker for repo B is created in B's workspace, bound, registered and listed in the roster there, with the mission in its brief", async () => {
+    const home = dataFolder();
+    const store = createBindingStore(home);
+    const fake = await missionDaemon(home, store);
+    const { missionId, caller } = mission(home, [WS, BACK]);
+    createMissionStore(home).update(missionId, (current) => ({
+      ...current,
+      contracts: [
+        { id: "C1", title: "Orders API", providerRepo: BACK, consumerRepos: [WS], text: "GET /api/orders → { id, total }", version: 2, updatedAt: "2026-10-09T00:00:00.000Z", source: "plan" },
+        { id: "C2", title: "Theme tokens", providerRepo: WS, consumerRepos: [], text: "colors", version: 1, updatedAt: "2026-10-09T00:00:00.000Z", source: "plan" },
+      ],
+    }));
+    const memory = createMemoryStore(home);
+    const by = { role: "owner" as const, agentId: null, missionId: null };
+    memory.add(BACK, { kind: "contract", text: "Totals are integers in cents.", source: "owner, 2026-10-01", by });
+    for (let n = 1; n <= 31; n += 1) memory.add(BACK, { kind: "fact", text: `Fact ${n}.`, source: `note ${n}`, by });
+
+    const answer = await toolsOf(home, fake, store).call("bm_create_worker", { request: "Build the orders API.", context: [], project: BACK, planStep: PLAN }, caller);
+    expect(answer.ok, answer.text).toBe(true);
+    const { workerId, requestId } = JSON.parse(answer.text) as { workerId: string; requestId: string };
+
+    // Placed through the repo's workspace: no cwd, so Paseo gives it B's folder, never the home's.
+    expect(fake.creates).toHaveLength(1);
+    expect(fake.creates[0]!.workspaceId).toBe(BACK);
+    expect(fake.api.workspaces.ref).toHaveBeenCalledWith(BACK);
+    const { options } = fake.creates[0]!;
+    expect(options.cwd).toBeUndefined();
+    expect(options).toMatchObject({ parent: MAIN, labels: { "bm.role": "worker", "bm.requestId": requestId }, config: { modeId: "bypassPermissions" } });
+    // Bound, registered and listed in B, with the mission.
+    expect(store.bindingOfAgent(workerId)).toMatchObject({ role: "worker", state: "bound", workspaceId: BACK, requestId, parentId: MAIN, missionId });
+    expect(createRequestRegistry(home).get(BACK, requestId)).toMatchObject({ source: "tool", managerId: MAIN, missionId, workerIds: [workerId] });
+    expect(createRequestRegistry(home).list("wks_home")).toEqual([]);
+    expect(createMissionRoster(home).get(missionId, requestId)).toMatchObject({ workspaceId: BACK, workerIds: [workerId], topic: "Build the orders API.", state: "active" });
+    expect(requestIndexOf(home, requestId)).toEqual({ missionId, workspaceId: BACK });
+    expect(createMissionStore(home).journal(missionId).at(-1)).toMatchObject({ kind: "worker", by: MAIN, ref: requestId });
+
+    // The brief: B's folder, then the mission, the plan step, the contracts touching B, and B's memory (the newest 30 and every contract).
+    const lines = options.prompt!.split("\n");
+    expect(lines).toContain(`repository: ${BACK_FOLDER} (beads in ${BACK_FOLDER}/.beads/)`);
+    const from = lines.indexOf(`managerAgentId: ${MAIN}`);
+    expect(lines.slice(from + 1, from + 6)).toEqual([
+      "mission: SHOP Shop revamp",
+      `plan: ${PLAN}`,
+      "Mission contracts touching back:",
+      "- C1 v2 Orders API (provider back; consumers invoice-app): GET /api/orders → { id, total }",
+      "Project memory (back):",
+    ]);
+    const memoryLines = lines.slice(from + 6, lines.indexOf("Context:"));
+    expect(memoryLines).toHaveLength(31);
+    expect(memoryLines[0]).toBe("- contract: Totals are integers in cents. (source: owner, 2026-10-01)");
+    expect(memoryLines[1]).toBe("- fact: Fact 2. (source: note 2)");
+    expect(memoryLines.at(-1)).toBe("- fact: Fact 31. (source: note 31)");
+  });
+
+  it("a one-repo mission needs no project: its only repo", async () => {
+    const home = dataFolder();
+    const store = createBindingStore(home);
+    const fake = await missionDaemon(home, store);
+    const { caller } = mission(home, [BACK]);
+    const answer = await toolsOf(home, fake, store).call("bm_create_worker", { request: "Fix the totals.", context: [] }, caller);
+    expect(answer.ok, answer.text).toBe(true);
+    const { requestId } = JSON.parse(answer.text) as { requestId: string };
+    expect(fake.creates[0]!.workspaceId).toBe(BACK);
+    expect(createRequestRegistry(home).get(BACK, requestId)).toMatchObject({ managerId: MAIN });
+  });
+
+  it("refuses, creating nothing: no project of several, one outside the scope, archived, a plugin home, a closed mission, project from a Manager of no mission, an unassigned Main", async () => {
+    const home = dataFolder();
+    const store = createBindingStore(home);
+    const fake = await missionDaemon(home, store);
+    const { missionId, caller } = mission(home, [WS, BACK, "wks_old", "wks_home", "wks_orch"]);
+    const tools = toolsOf(home, fake, store);
+    const call = (input: Record<string, unknown>, as: ToolCaller = caller) => tools.call("bm_create_worker", { request: "Do it.", context: [], ...input }, as);
+    expect(await call({})).toEqual({
+      ok: false,
+      text: "input.project: mission SHOP works in 5 repos — wks_1 (invoice-app), wks_back (back), wks_old (old), wks_home (home), wks_orch (home); name the one the Worker works in\nNothing was created.",
+    });
+    expect((await call({ project: "wks_front" })).text).toBe(
+      "project wks_front is outside mission SHOP's scope (wks_1 (invoice-app), wks_back (back), wks_old (old), wks_home (home), wks_orch (home)); add it with bm_mission_update repos first\nNothing was created.",
+    );
+    expect((await call({ project: "wks_old" })).text).toBe("project wks_old is archived or no longer listed in Paseo\nNothing was created.");
+    expect((await call({ project: "wks_home" })).text).toBe("project wks_home is a paseo-bm home, not a repo\nNothing was created.");
+    expect((await call({ project: "wks_orch" })).text).toBe("project wks_orch is a paseo-bm home, not a repo\nNothing was created.");
+    createMissionStore(home).update(missionId, (current) => ({ ...current, state: "closed", closedAt: "2026-10-09T00:00:00.000Z" }));
+    expect((await call({ project: BACK })).text).toBe("mission SHOP is closed\nNothing was created.");
+    expect(await call({ project: BACK }, MANAGER_CALLER)).toEqual({ ok: false, text: "project and planStep are for the Main of a mission, and you are none: leave them out. Nothing was created." });
+    expect(await call({}, { ...caller, agentId: "agent-unassigned", missionId: null })).toEqual({
+      ok: false,
+      text: "You have no mission yet: record it with bm_mission_start before you create a Worker. Nothing was created.",
+    });
+    nothingCreatedIn(home, fake, store);
+  });
+
+  it("the staffing rule: without staffing delegated, one live Worker per repo and the budget's Workers in all; delegated, neither", async () => {
+    const home = dataFolder();
+    const store = createBindingStore(home);
+    const fake = await missionDaemon(home, store);
+    const { missionId, caller } = mission(home, [WS, BACK]);
+    createMissionAutonomyStore(home).setLevel(missionId, 1);
+    createMissionStore(home).update(missionId, (current) => ({ ...current, charter: { ...current.charter, budget: { requests: null, workers: 1, reviewCalls: null, days: null } } }));
+    const tools = toolsOf(home, fake, store);
+    const call = (project: string) => tools.call("bm_create_worker", { request: "Do it.", context: [], project }, caller);
+    const first = await call(BACK);
+    expect(first.ok, first.text).toBe(true);
+    const { requestId } = JSON.parse(first.text) as { requestId: string };
+    const ask = "staffing is not delegated in this mission, so ask the owner first";
+    expect((await call(BACK)).text).toBe(
+      [
+        `mission SHOP already has a live Worker in back (request ${requestId}): give it the work with bm_tell_worker, or ${ask}`,
+        `mission SHOP has 1 live Workers and its budget allows 1: ${ask}`,
+        "Nothing was created.",
+      ].join("\n"),
+    );
+    expect((await call(WS)).text).toBe(`mission SHOP has 1 live Workers and its budget allows 1: ${ask}\nNothing was created.`);
+    expect(fake.creates).toHaveLength(1);
+    // Delegated (the default level), the Main staffs as it sees fit.
+    createMissionAutonomyStore(home).setLevel(missionId, 2);
+    expect((await call(BACK)).ok).toBe(true);
+    expect(fake.creates).toHaveLength(2);
+  });
+});

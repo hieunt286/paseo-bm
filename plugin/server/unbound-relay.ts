@@ -34,7 +34,8 @@
  * request's unsettled questions (`expireQuestionsOf`) — what the Manager's
  * turn end did for a hand-sent block, which a `BM-DELIVERY` (a plugin notice)
  * no longer reaches. A `finished` or `stopped` report clears the request's
- * `delivery-dropped` alert, as `bm_report` does. Opened decisions go to
+ * `delivery-dropped` alert, as `bm_report` does, and a report of a mission
+ * request sets its roster state (`noteRosterReport`). Opened decisions go to
  * `onOpened` (the event bus), and a question a precedent answered at once to
  * `onSettled` (its delivery to the Worker). A `stopped` report written in the
  * first turn after a Paseo cut (`followsPaseoCut`) carries `CUT_NOTE_LINE` in
@@ -46,6 +47,7 @@ import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
 import { parentOf, roleOfProvider } from "./agent-role";
 import { liveBindingOf, type BindingStore } from "./agent-bindings";
 import { joinStreamedText, redactText, sliceLastTurn } from "./collector";
+import { missionManagerOf, noteRosterReport } from "./mission-roster";
 import { createDecisionStore } from "./decision-store";
 import type { OnDecisionsSettled } from "./decision-rpc";
 import { expireQuestionsOf, openQuestions, type OpenContext } from "./decision-materialiser";
@@ -184,8 +186,12 @@ export async function relayUnboundBlocks(event: TurnEndedEvent, deps: RelayDeps)
     const written = writtenReportsOf(timeline);
     outcome.status = "done";
     if (written.length === 0) return outcome;
-    const parentId = await parentOfWorker(agent, deps.paseo);
-    if (parentId === null) return { ...outcome, status: "no-parent" };
+    // Missions design §3.4 step 4: a request of a mission reports to its current Main (the
+    // registry's `managerId`); the parent label is read only for a request without one.
+    const mains = new Map(written.map((report) => [report.requestId, missionManagerOf(deps.home, report.requestId)]));
+    const byLabel = [...mains.values()].includes(null);
+    const parentId = byLabel ? await parentOfWorker(agent, deps.paseo) : null;
+    if (byLabel && parentId === null) return { ...outcome, status: "no-parent" };
 
     const workspaceId = agent.workspaceId;
     const now = deps.now ?? (() => new Date());
@@ -227,10 +233,11 @@ export async function relayUnboundBlocks(event: TurnEndedEvent, deps: RelayDeps)
         continue;
       }
       const sent = cut && report.phase === "stopped" ? `${report.text}\n\n${CUT_NOTE_LINE}` : report.text;
-      const { record } = await storeAndDeliver(workspaceId, { kind: "report", requestId: report.requestId, from: agent.id, to: parentId, text: sent }, delivery, () => {
+      const { record } = await storeAndDeliver(workspaceId, { kind: "report", requestId: report.requestId, from: agent.id, to: (mains.get(report.requestId) ?? parentId)!, text: sent }, delivery, () => {
         openOf(report, at);
         if (report.phase === "finished") expireQuestionsOf({ store, workspaceId, log }, report.requestId, at);
         if (report.phase === "finished" || report.phase === "stopped") clearDroppedAlert(deps.home, workspaceId, report.requestId, null, { now });
+        noteRosterReport(deps.home, report.requestId, report.phase, log);
       });
       outcome.relayed.push(record.id);
     }

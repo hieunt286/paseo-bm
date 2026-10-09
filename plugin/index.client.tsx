@@ -1,10 +1,10 @@
-import type { PluginClientContext, PluginWorkspaceCommandContext } from "@getpaseo/plugin/client";
+import type { PluginClientContext, PluginGlobalCommandContext, PluginWorkspaceCommandContext } from "@getpaseo/plugin/client";
 import {
   LAUNCHER_ICON,
   LAUNCHER_SURFACE_ID,
   selectFromCommandCenter,
 } from "./client/launch-manager";
-import { agentsStopAllRpc, managerEnsureRpc } from "./shared/contracts";
+import { agentsStopAllRpc, managerEnsureRpc, missionsCreateRpc } from "./shared/contracts";
 import { NEW_REQUEST_MARKER } from "./shared/new-request";
 import { ManagerLauncherSurface } from "./client/launcher";
 import { AGENT_TREE_ICON, AGENT_TREE_PANEL_ID } from "./client/agent-tree";
@@ -109,6 +109,22 @@ async function runWorkerStopAll(context: WorkspaceCommand): Promise<void> {
   context.openSurface(LAUNCHER_SURFACE_ID);
 }
 
+/** What the surface says after "New mission": a command context cannot open the agent itself. */
+const NEW_MISSION_NOTICE = "Started a new mission's Main in the Missions home workspace. Open it there and tell it what the mission is.";
+
+/**
+ * The Command Center's "New mission" (missions design §3.3, Phase 1): an
+ * unassigned Main in the Missions home, whose first message asks the owner
+ * the mission's name, code, goal and repositories. A command context has no
+ * way to open an agent, so the Beads Manager surface says where it is; a
+ * failure rejects, which Paseo shows as an error.
+ */
+async function runNewMission(context: PluginGlobalCommandContext): Promise<void> {
+  await context.rpc(missionsCreateRpc, {});
+  launcherNotices.put(NEW_MISSION_NOTICE);
+  context.openSurface(LAUNCHER_SURFACE_ID);
+}
+
 /**
  * Client entry of the paseo-bm plugin (Technical Design §8).
  *
@@ -164,6 +180,15 @@ export default function contribute(client: PluginClientContext): () => void {
       keywords: ["beads", "inbox", "decisions", "alerts", "paseo-bm"],
       context: "global",
       onSelect: (context) => selectSectionFromCommandCenter(context, LAUNCHER_SURFACE_ID, "inbox"),
+    }),
+    // Missions design §3.3: an unassigned Main in the Missions home. From anywhere: a mission spans repos.
+    client.addCommandCenterItem({
+      id: "new-beads-mission",
+      title: "New mission",
+      icon: "Target",
+      keywords: ["beads", "mission", "main", "new", "paseo-bm"],
+      context: "global",
+      onSelect: (context) => runNewMission(context),
     }),
     client.addSlashCommand({
       name: "bm-worker-new",

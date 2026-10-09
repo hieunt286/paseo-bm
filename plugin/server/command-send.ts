@@ -44,6 +44,7 @@ import { interventionOfCommand, recordIntervention } from "./intervention-store"
 import { noticeQueue, type NoticePaseo, type NoticeQueue } from "./notice-queue";
 import { commandKindOf } from "./orchestrator-state";
 import { createOrchestratorStore, type OrchestratorStoreDeps } from "./orchestrator-store";
+import { missionOfRequest } from "./orchestrator-tool-context";
 import { undeclaredCategoriesOf, undeclaredRefusalOf } from "../shared/decision-gate";
 import { useGrant, type Effect } from "../shared/decisions";
 import { isSentCommand, type Proposal } from "../shared/orchestrator";
@@ -154,11 +155,21 @@ export interface CommandAgent {
 
 /**
  * Who gets the `copy: yes` block of a command to a Worker (ADR-016 decision
- * 2): the Worker's own Manager — the agent that created it — when that is a
- * non-archived paseo-bm Manager of the project; else null.
+ * 2): the current Main of the Worker's request's mission (missions design
+ * §6) when the request has one, else the Worker's own Manager — the agent
+ * that created it — when that is a Manager of the project; either only when
+ * it is a non-archived paseo-bm Manager. Else null.
  */
-export function copyRecipientOf<A extends CommandAgent>(agents: readonly A[], worker: { parentAgentId: string | null }, workspaceId: string): A | null {
-  return agents.find((agent) => agent.id === worker.parentAgentId && agent.role === "manager" && !agent.archived && agent.workspaceId === workspaceId) ?? null;
+export function copyRecipientOf<A extends CommandAgent>(
+  agents: readonly A[],
+  worker: { parentAgentId: string | null; requestIdLabel?: string | null },
+  workspaceId: string,
+  home: string,
+): A | null {
+  const mainId = missionOfRequest(home, worker.requestIdLabel ?? null)?.mainId ?? null;
+  const live = (agent: A) => agent.role === "manager" && !agent.archived;
+  if (mainId !== null) return agents.find((agent) => agent.id === mainId && live(agent)) ?? null;
+  return agents.find((agent) => agent.id === worker.parentAgentId && live(agent) && agent.workspaceId === workspaceId) ?? null;
 }
 
 // ---------------------------------------------------------------------------

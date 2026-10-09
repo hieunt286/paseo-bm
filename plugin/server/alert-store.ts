@@ -1,9 +1,9 @@
 /**
  * The Inbox alerts store (autonomy design §A.8): `<data folder>/inbox/alerts.json`
- * = `{ version: 1, entries: { <key>: { workspaceId, kind, subject, since, clearedAt, detail?, role? } } }`.
+ * = `{ version: 1, entries: { <key>: { workspaceId, kind, subject, since, clearedAt, detail?, role?, missionId? } } }`.
  *
  * An alert is raised **once per key** — raising an open key changes nothing but
- * its `detail` — and cleared when its condition ends (an agent runs again, the
+ * its `detail`, `role` and `missionId` — and cleared when its condition ends (an agent runs again, the
  * permission is answered, the Worker's turn ends, the incident is resolved). A
  * cleared key raised again opens afresh with a new `since`. Alerts are data the
  * Inbox reads: nothing here ever messages the owner or an agent.
@@ -56,6 +56,8 @@ export interface AlertInput {
   detail?: string | null;
   /** The agent's role, on an `outdated-agent` alert. */
   role?: AlertRole;
+  /** The mission whose Main the Inbox opens or replaces, on an `outdated-agent` alert (missions design §3.6). */
+  missionId?: string;
 }
 
 export interface RaiseAlertResult {
@@ -75,7 +77,7 @@ export interface AlertFilter {
 export interface AlertStore {
   /** `<data folder>/inbox/alerts.json`. */
   readonly path: string;
-  /** Opens the alert of this key, or only updates its `detail` when it is open already. */
+  /** Opens the alert of this key, or only updates its `detail`, `role` and `missionId` when it is open already. */
   raise(input: AlertInput): RaiseAlertResult;
   /** Clears an open alert. False when nothing was open under that key. */
   clear(key: string): boolean;
@@ -142,8 +144,14 @@ export function createAlertStore(home: string, deps: AlertStoreDeps = {}): Alert
       const { entries } = read();
       const existing = entries[key];
       if (existing !== undefined && existing.clearedAt === null) {
-        if (detail === undefined || existing.detail === detail) return { raised: false, alert: view(key, existing) };
-        const updated = alertEntrySchema.parse({ ...existing, detail });
+        const same = (detail === undefined || existing.detail === detail) && (input.role === undefined || existing.role === input.role) && (input.missionId === undefined || existing.missionId === input.missionId);
+        if (same) return { raised: false, alert: view(key, existing) };
+        const updated = alertEntrySchema.parse({
+          ...existing,
+          ...(detail === undefined ? {} : { detail }),
+          ...(input.role === undefined ? {} : { role: input.role }),
+          ...(input.missionId === undefined ? {} : { missionId: input.missionId }),
+        });
         write({ ...entries, [key]: updated });
         return { raised: false, alert: view(key, updated) };
       }
@@ -155,6 +163,7 @@ export function createAlertStore(home: string, deps: AlertStoreDeps = {}): Alert
         clearedAt: null,
         ...(detail === undefined ? {} : { detail }),
         ...(input.role === undefined ? {} : { role: input.role }),
+        ...(input.missionId === undefined ? {} : { missionId: input.missionId }),
       });
       write({ ...entries, [key]: entry });
       return { raised: true, alert: view(key, entry) };

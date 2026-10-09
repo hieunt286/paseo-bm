@@ -413,6 +413,23 @@ describe("Alerts", () => {
     expect(alertRowOf(alert("outdated-agent", "mgr-1", 3), input()).action).toMatchObject({ kind: "open-agent" });
   });
 
+  it("replaces an outdated Main through its mission, and opens the mission's Main from an extra Manager (missions design §3.6)", () => {
+    expect(alertRowOf(alert("outdated-agent", "main-1", 3, { missionId: "mis-0123456789" }), input()).action).toEqual({
+      kind: "open-main",
+      missionId: "mis-0123456789",
+      replace: true,
+      label: "Replace Main",
+      accessibilityLabel: "Replace the mission's Main with one on the current instructions",
+    });
+    expect(alertRowOf(alert("outdated-agent", "mgr-extra", 3, { role: "manager", missionId: "mis-0123456789" }), input()).action).toEqual({
+      kind: "open-main",
+      missionId: "mis-0123456789",
+      replace: false,
+      label: "Open Main",
+      accessibilityLabel: "Open the Main of this project's mission",
+    });
+  });
+
   it("names a request whose ask another project leaves unanswered, after request-stalled, and opens its project (design §7.17.5)", () => {
     const detail = "peer-000000000001: project wks_b has not taken it for 10 minutes";
     const row = alertRowOf(alert("peer-unanswered", "req-20261009T100000Z", 3, { detail }), input());

@@ -16,8 +16,14 @@ type CustomSidebarClient = PluginClientContext & {
    * Added after the legacy static `addSidebarItem` API. Paseo 0.11 throws
    * without a non-blank `title`, and the throw fails the plugin's whole client.
    */
-  addSidebarFooterItem?: (contribution: { id: string; title: string; Component: ComponentType<PluginHostProps> }) => () => void;
+  addSidebarFooterItem?: (contribution: { id: string; title: string; Component: ComponentType<SidebarFooterItemProps> }) => () => void;
 };
+
+/**
+ * Paseo 0.11 hands a sidebar item `openScreen`, which closes the mobile drawer
+ * before it navigates; `client.openSurface` navigates behind the open drawer.
+ */
+type SidebarFooterItemProps = PluginHostProps & { openScreen?: (input: { screenId: string }) => void };
 
 export function BeadsManagerSidebarItem({ theme, onOpen }: PluginHostProps & { onOpen: () => void }) {
   const listDecisions = useRpc(decisionsListRpc);
@@ -59,7 +65,12 @@ export function BeadsManagerSidebarItem({ theme, onOpen }: PluginHostProps & { o
 export function registerBeadsManagerSidebarItem(client: PluginClientContext): () => void {
   const custom = (client as CustomSidebarClient).addSidebarFooterItem;
   if (typeof custom === "function") {
-    const SidebarItem = (props: PluginHostProps) => <BeadsManagerSidebarItem {...props} onOpen={() => client.openSurface(LAUNCHER_SURFACE_ID)} />;
+    const SidebarItem = (props: SidebarFooterItemProps) => (
+      <BeadsManagerSidebarItem
+        {...props}
+        onOpen={() => (props.openScreen ? props.openScreen({ screenId: LAUNCHER_SURFACE_ID }) : client.openSurface(LAUNCHER_SURFACE_ID))}
+      />
+    );
     return custom.call(client, { id: LAUNCHER_SURFACE_ID, title: "Beads Manager", Component: SidebarItem });
   }
   return client.addSidebarItem({

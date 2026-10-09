@@ -47,6 +47,7 @@ import {
   type OrchestratorAgentSnapshot,
 } from "./orchestrator-agent";
 import { createOrchestratorStore, type OrchestratorStore } from "./orchestrator-store";
+import { missionOfRequest, repoMainsOf } from "./orchestrator-tool-context";
 import { firstLine, lastActivityOf, recentTracesOf, recentWorkspacesOf, requestKeyOf, waitingSinceOf, workspaceTracesOf, type WorkspaceTraces } from "./request-trace";
 import { READ_FAILED, coded, requireDataHome } from "./rpc-kit";
 import { readWorkspaceMeta, type TraceStoreLocation } from "./trace-store";
@@ -229,9 +230,13 @@ export function workspaceLabelOf(workspaceId: string, listed: readonly ListedWor
 // orchestrator.state
 // ---------------------------------------------------------------------------
 
-/** The project's Manager: the one of its newest request when still there, else the newest non-archived one. */
-function projectManagerOf(agents: ReadonlyMap<string, AgentFacts>, newestManagerId: string | null): AgentFacts | null {
-  const managers = [...agents.values()].filter((agent) => agent.role === "manager" && !agent.archived);
+/**
+ * The project's Manager: the one of its newest request when still there, else
+ * the newest non-archived one, of its own Managers and its Mains (`mains`,
+ * which live in the Missions home: missions design §6).
+ */
+function projectManagerOf(agents: ReadonlyMap<string, AgentFacts>, newestManagerId: string | null, mains: readonly AgentFacts[] = []): AgentFacts | null {
+  const managers = [...agents.values(), ...mains].filter((agent) => agent.role === "manager" && !agent.archived);
   return (
     managers.find((agent) => agent.id === newestManagerId) ??
     managers.sort((a, b) => timeOrZero(b.createdAt) - timeOrZero(a.createdAt) || (a.id < b.id ? 1 : -1))[0] ??
@@ -426,6 +431,7 @@ export async function handleOrchestratorState(
     return traces;
   };
   const labelOf = (workspaceId: string) => workspaceLabelOf(workspaceId, listed, location);
+  const bmFacts = new Map(agents.bm.map((entry) => [entry.facts.id, entry.facts] as const));
 
   const since = now.getTime() - PROJECTS_SINCE_DAYS * 86_400_000;
   const running = new Set(
@@ -444,7 +450,10 @@ export async function handleOrchestratorState(
     const recent = recentTracesOf(traces, since);
     if (recent.length === 0 && !running.has(workspaceId)) continue;
     const newest = recent[0];
-    const manager = projectManagerOf(facts, newest?.trace.managerAgentId ?? null);
+    // A mission request's Manager is its mission's current Main (missions design §6).
+    const newestMainId = newest === undefined ? null : (missionOfRequest(home, newest.trace.requestId)?.mainId ?? null);
+    const mains = [...repoMainsOf(home, workspaceId)].flatMap((id) => (facts.has(id) ? [] : (bmFacts.get(id) ?? [])));
+    const manager = projectManagerOf(facts, newestMainId ?? newest?.trace.managerAgentId ?? null, mains);
     const state: OrchestratorProjectRow["state"] = running.has(workspaceId)
       ? "running"
       : stalled.has(workspaceId)

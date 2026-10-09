@@ -22,11 +22,16 @@
  * Open decisions are never evicted; of the settled ones the 500 newest (by
  * `settledAt`) are kept per workspace. Reads across workspaces go through a
  * per-file cache keyed by mtime and size, refreshed by every write from here.
+ *
+ * Every answer is written through `transition`, so it is where the owner's
+ * answer to a request's question becomes project memory (missions design
+ * §2.5, `rememberOwnerAnswer`).
  */
 import { lstatSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { DashboardError, type DashboardErrorCode } from "../shared/contracts";
 import {
+  decisionKindOf,
   decisionSchema,
   isSettledStatus,
   supersedeDecision,
@@ -36,6 +41,7 @@ import {
   type TransitionResult,
 } from "../shared/decisions";
 import { assertNoSymlink, capBy, createJsonFileStore, type JsonFileStore } from "./data-files";
+import { createMemoryStore } from "./memory-store";
 import { WORKSPACE_ID_PATTERN, assertWorkspaceId } from "./trace-store";
 import { timeOrZero } from "../shared/time";
 
@@ -157,6 +163,34 @@ function writeFailed(detail: string, cause?: unknown): DashboardError {
  * The store rooted at the data folder `home` (from `resolveDataHome`).
  * Creating it touches nothing on disk.
  */
+/**
+ * Missions design §2.5: when the owner answers a request's question (`q:`),
+ * the repo's project memory gains a `decision` entry by the plugin — the
+ * question and the answer, its source the decision id. An answer given again
+ * (reopened, then answered) supersedes the entry it left. Never throws: a
+ * failure is one log line, and the answer stands.
+ */
+function rememberOwnerAnswer(home: string, previous: Decision, next: Decision, log: (message: string) => void): void {
+  const answer = next.answer;
+  if (next.status !== "answered" || previous.status === "answered" || answer?.by !== "owner" || decisionKindOf(next.id) !== "question") return;
+  const said = answer.optionKey === null ? answer.words : (next.options.find((option) => option.key === answer.optionKey)?.label ?? answer.optionKey);
+  const source = `the owner's answer to ${next.id}`;
+  try {
+    const memory = createMemoryStore(home);
+    const earlier = memory.active(next.workspaceId).find((entry) => entry.by.role === "plugin" && entry.source === source)?.id ?? null;
+    const added = memory.add(next.workspaceId, {
+      kind: "decision",
+      text: `${next.question} — the owner: ${said ?? ""}`,
+      source,
+      by: { role: "plugin", agentId: null, missionId: null },
+      supersedes: earlier,
+    });
+    if (!added.ok) log(`[paseo-bm] the owner's answer to ${next.id} was not added to the project memory: ${added.reasons.join("; ")}`);
+  } catch (error) {
+    log(`[paseo-bm] the owner's answer to ${next.id} was not added to the project memory: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 export function createDecisionStore(home: string, deps: DecisionStoreDeps = {}): DecisionStore {
   const log = deps.log ?? ((message: string) => console.warn(message));
   const dir = decisionsDirOf(home);
@@ -322,6 +356,7 @@ export function createDecisionStore(home: string, deps: DecisionStoreDeps = {}):
       }
       found.entries[found.index] = next;
       write(found.workspaceId, found.entries);
+      rememberOwnerAnswer(home, previous, next, log);
       return { status: "updated", decision: next, previous };
     },
 

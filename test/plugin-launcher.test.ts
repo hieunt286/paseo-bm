@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,9 +7,11 @@ import type { ManagerAgentSnapshot, ManagerPaseo } from "../plugin/server/manage
 import serverContribute from "../plugin/index.server";
 import { rolePaseoToolsPolicy } from "../plugin/server/setup-roles";
 import { fakePaseo } from "./helpers/fake-paseo";
-import { managerEnsureRpc } from "../plugin/shared/contracts";
+import { clearJsonFileCache } from "../plugin/server/data-files";
+import { createMissionStore } from "../plugin/server/mission-store";
+import { managerEnsureRpc, missionsCreateRpc } from "../plugin/shared/contracts";
 import { createSlot } from "../plugin/client/slot";
-import { sectionRequests } from "../plugin/client/surface-view";
+import { launcherNotices, sectionRequests } from "../plugin/client/surface-view";
 import {
   LAUNCHER_ICON,
   LAUNCHER_SURFACE_ID,
@@ -38,6 +40,17 @@ beforeAll(() => {
 afterAll(() => {
   process.env.HOME = realHome;
   rmSync(isolatedHome, { recursive: true, force: true });
+});
+// Missions design §3.6: manager.ensure writes missions; each test starts from an empty data folder.
+let dataHome: string;
+beforeEach(() => {
+  dataHome = mkdtempSync(join(isolatedHome, "bm-data-"));
+  process.env.PASEO_BM_HOME = dataHome;
+});
+afterEach(() => {
+  delete process.env.PASEO_BM_HOME;
+  clearJsonFileCache();
+  rmSync(dataHome, { recursive: true, force: true });
 });
 
 /**
@@ -217,14 +230,17 @@ describe("client entry registrations", () => {
     expect(fake.sidebarItems).toEqual([
       { id: LAUNCHER_SURFACE_ID, title: "Beads Manager", icon: "Bot", surface: LAUNCHER_SURFACE_ID },
     ]);
-    // Three: "Open Beads Manager" (WP-113), "Open Beads project" (the
-    // workspace's project page in Projects) and "Open Beads Inbox" (autonomy design §A.12).
-    expect(fake.commandItems).toHaveLength(3);
+    // Four: "Open Beads Manager" (WP-113), "Open Beads project" (the
+    // workspace's project page in Projects), "Open Beads Inbox" (autonomy design §A.12)
+    // and "New mission" (missions design §3.3).
+    expect(fake.commandItems).toHaveLength(4);
     expect(fake.commandItems.map((item) => item.id)).toEqual([
       "open-beads-manager",
       "open-beads-project",
       "open-beads-inbox",
+      "new-beads-mission",
     ]);
+    expect(fake.commandItems[3]).toMatchObject({ title: "New mission", icon: "Target", context: "global" });
     expect(fake.commandItems[1]).toMatchObject({ title: "Open Beads project", context: "workspace" });
     expect(fake.commandItems[2]).toMatchObject({ title: "Open Beads Inbox", icon: "Inbox", context: "global" });
     expect(fake.settingsScreens.map((screen) => screen.id)).toEqual(["paseo-bm-settings"]);
@@ -244,6 +260,7 @@ describe("client entry registrations", () => {
         "command:open-beads-manager",
         "command:open-beads-project",
         "command:open-beads-inbox",
+        "command:new-beads-mission",
         "slash:bm-worker-new",
         "slash:bm-worker-stop-all",
         "settings:paseo-bm-settings",
@@ -255,6 +272,17 @@ describe("client entry registrations", () => {
         "renderer:bm-message",
       ].sort(),
     );
+  });
+
+  it("New mission creates an unassigned Main through missions.create and says where it is on the surface (missions design §3.3)", async () => {
+    const fake = fakeClient();
+    clientContribute(fake.client);
+    const rpc = vi.fn(async () => ({ missionId: null, agentId: "main-1", created: true }));
+    const openSurface = vi.fn();
+    await fake.commandItems.find((item) => item.id === "new-beads-mission")!.onSelect({ context: "global", rpc, openSurface });
+    expect(rpc).toHaveBeenCalledWith(missionsCreateRpc, {});
+    expect(openSurface).toHaveBeenCalledWith(LAUNCHER_SURFACE_ID);
+    expect(launcherNotices.take()).toMatch(/^Started a new mission's Main in the Missions home workspace\./);
   });
 
   it("uses Paseo's custom footer item when available and keeps the legacy item as fallback", () => {
@@ -271,6 +299,25 @@ describe("client entry registrations", () => {
     expect(addSidebarFooterItem.mock.calls[0]![0]).toMatchObject({ id: LAUNCHER_SURFACE_ID, title: "Beads Manager" });
     expect(addSidebarFooterItem.mock.calls[0]![0].Component).not.toBe(BeadsManagerSidebarItem);
     expect(addSidebarItem).not.toHaveBeenCalled();
+  });
+
+  it("opens Beads Manager through the host's openScreen, which closes the mobile drawer first", () => {
+    const addSidebarFooterItem = vi.fn((item: { Component: (props: Record<string, unknown>) => { props: { onOpen: () => void } } }) => {
+      void item;
+      return vi.fn();
+    });
+    const openSurface = vi.fn();
+    registerBeadsManagerSidebarItem({ addSidebarFooterItem, addSidebarItem: vi.fn(), openSurface } as never);
+    const { Component } = addSidebarFooterItem.mock.calls[0]![0];
+
+    const openScreen = vi.fn();
+    Component({ openScreen }).props.onOpen();
+    expect(openScreen).toHaveBeenCalledWith({ screenId: LAUNCHER_SURFACE_ID });
+    expect(openSurface).not.toHaveBeenCalled();
+
+    // A host that passes no openScreen still opens the surface.
+    Component({}).props.onOpen();
+    expect(openSurface).toHaveBeenCalledWith(LAUNCHER_SURFACE_ID);
   });
 
   it("adds one \"Beads\" tab to the workspace + menu, ahead of \"Beads agents\" (delta 20260918e)", () => {
@@ -497,6 +544,8 @@ describe("pending and error states", () => {
       archivedAt: null,
     }));
     const sdk = daemonWith(managers);
+    // The one-repo mission made from the workspace's Manager (missions design §3.6).
+    createMissionStore(dataHome).create({ code: "WSA", name: "ws", goal: "", repos: [WS], createdBy: "legacy", legacyWorkspaceId: WS, mainId: "mgr-new" });
     const ensure = wiredEnsure(sdk.paseo);
     const opened: string[] = [];
     const launcher = createManagerLauncher();
@@ -513,10 +562,10 @@ describe("pending and error states", () => {
     expect(opened).toEqual(["mgr-new"]);
     expect(sdk.agents.every((a) => !a.archivedAt)).toBe(true);
     expect(describeLauncherState(launcher.getState())).toEqual([
-      { tone: "muted", text: "Reopened the existing Beads Manager for this workspace." },
+      { tone: "muted", text: "Opened the Main of this project's mission." },
       {
         tone: "warning",
-        text: "This workspace has 1 other live Beads Manager (mgr-old). The newest one was opened; nothing was archived or deleted.",
+        text: "This project has 1 other live Beads Manager (mgr-old). The mission's Main was opened; the others are flagged in the Inbox, and nothing was archived or deleted.",
       },
     ]);
   });
@@ -535,7 +584,7 @@ describe("pending and error states", () => {
 
     expect(openAgent).toHaveBeenCalledWith({ agentId: "mgr-1" });
     expect(describeLauncherState(launcher.getState())).toEqual([
-      { tone: "muted", text: "Reopened the existing Beads Manager for this workspace." },
+      { tone: "muted", text: "Opened the Main of this project's mission." },
       { tone: "warning", text: modeNotice },
     ]);
   });
@@ -554,7 +603,7 @@ describe("pending and error states", () => {
     });
 
     expect(describeLauncherState(launcher.getState())).toEqual([
-      { tone: "muted", text: "Started a new Beads Manager for this workspace." },
+      { tone: "muted", text: "Started the Main of this project's mission." },
     ]);
   });
 });

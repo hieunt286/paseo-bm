@@ -209,6 +209,8 @@ describe.each([
   it("loads, registers every RPC, and manager.ensure / roles.describe run without throwing", async () => {
     const code = await bundleServerEntry(entryPoint);
     const contribute = loadBundle(code);
+    // The published entry minifies identifiers but keeps names (ADR-030): a stack trace still names the function.
+    expect(contribute.name).toBe("contribute");
 
     const { server, handlers, beforeHooks, onHooks } = fakeServer();
     const cleanup = contribute(server);
@@ -225,6 +227,8 @@ describe.each([
       "autonomy.set-boundary",
       "autonomy.set-challenger",
       "autonomy.set-level",
+      "autonomy.set-mission-cell",
+      "autonomy.set-mission-level",
       "beads.action",
       "beads.get",
       "beads.list",
@@ -248,6 +252,8 @@ describe.each([
       "insights.summary",
       "links.why",
       "manager.ensure",
+      "mission.ensure",
+      "missions.create",
       "orchestrator.open",
       "orchestrator.open-preview",
       "orchestrator.state",
@@ -306,7 +312,8 @@ describe.each([
     // Design §16.5: an archived agent's tool binding is revoked, beside the outdated-agents clear;
     // design §16.8: an archived off-tool Reviewer's Inbox alert is cleared. The §16.10 no-verdict
     // check runs inside the fallback detection's turn_ended handler, so turn_ended stays at four.
-    expect(onHooks.get("agent.archived")).toHaveLength(3);
+    // Missions design §3.3: an archived Main's open mission awaits its successor.
+    expect(onHooks.get("agent.archived")).toHaveLength(4);
     expect(onHooks.get("agent.created")).toHaveLength(1);
 
     const { paseo, created } = daemon();
@@ -318,7 +325,8 @@ describe.each([
     // §3). Which skills this machine has is not the test's business.
     const prompt = created[0]!.options.config["systemPrompt"] as string;
     expect(prompt.startsWith(managerMd.trimEnd())).toBe(true);
-    expect(prompt).toMatch(/\n## Runtime facts\n\n(?:Worker mode: [^\n]*\n)?Worker skills: (all present\.|missing `)/);
+    // Missions design §3.5, §3.6: the workspace's Manager is now a one-repo mission's Main, whose facts open with the mission lines.
+    expect(prompt).toMatch(/\n## Runtime facts\n\n(?:Mission[^\n]*\n|Repo levels: [^\n]*\n)*(?:Worker mode: [^\n]*\n)?Worker skills: (all present\.|missing `)/);
 
     const described = await handlers.get("roles.describe")!({}, { paseo });
     expect(described).toEqual({
@@ -343,8 +351,13 @@ describe.each([
     );
     // A Worker's and a Reviewer's own facts say whether they run under the action boundary (autonomy design §D.2).
     expect((await run({ provider: "bm-reviewer", cwd: "/repo" }))?.config.systemPrompt).toBe(`${reviewerMd.trimEnd()}\n\n## Runtime facts\n\n${BOUNDARY_UNKNOWN}\n\n${REVIEWER_HAND_PATH}\n`);
-    // A Manager that already carries its full instructions (base + Runtime facts) is left alone.
-    expect(await run({ provider: "bm-manager", cwd: "/repo", systemPrompt: prompt })).toBeUndefined();
+    // A Manager that already carries its full instructions (base + Runtime facts) is left alone. The prompt is
+    // the hook's own for that creation: since missions (design §3.5) a Main's facts depend on where it is
+    // created, so the one `manager.ensure` gave a Main in the Missions home is not a repo Manager's.
+    const repoManager = (await run({ provider: "bm-manager", cwd: "/repo" }))?.config as Record<string, unknown> | undefined;
+    expect(String(repoManager?.["systemPrompt"]).startsWith(managerMd.trimEnd())).toBe(true);
+    // Run again on its own output, the hook changes nothing (it may answer the same config back).
+    expect((await run(repoManager!))?.config ?? repoManager).toEqual(repoManager);
     // Another provider's agent is answered at once, without a lookup.
     expect(hook({ request: { config: { provider: "claude", cwd: "/repo" } } }, { paseo })).toBeUndefined();
 

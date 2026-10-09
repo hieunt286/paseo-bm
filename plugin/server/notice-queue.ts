@@ -28,6 +28,8 @@
  *   own; `onDropped(targetId, kind, reason)` when a queued notice is dropped
  *   later (target gone, send failed). Neither is called for a notice replaced
  *   or forgotten by `clear()` (a reload), and a throw costs one log line.
+ * - `retarget(oldId, newId, paseo?)` (missions design §3.4): when a Main is
+ *   replaced, what is queued for the old one is queued for its successor.
  * - `noticeQueue`: the one shared queue `enqueue` uses. `createNoticeQueue()`
  *   makes a private one (tests).
  * - `enqueueBatch(targetId, batch, items, paseo?)` → one `NoticeOutcome` per
@@ -156,6 +158,13 @@ export interface NoticeQueue {
   enqueueBatch(targetId: string, batch: NoticeBatch, items: readonly BatchItem[], paseo?: NoticePaseo): Promise<NoticeOutcome[]>;
   /** One `agent.turn_ended`: delivers the ended agent's queued notices when it is idle. Never rejects. */
   turnEnded(event: unknown, paseo?: unknown): Promise<void>;
+  /**
+   * Missions design §3.4: every notice queued for `oldId` is queued for
+   * `newId` instead (in order; a moved notice replaces one of the same kind
+   * already queued there), with its callbacks, then delivered as any other.
+   * Returns how many moved. Never rejects.
+   */
+  retarget(oldId: string, newId: string, paseo?: NoticePaseo): Promise<number>;
   /** What is queued for `targetId`, oldest first (a copy). */
   pending(targetId: string): QueuedNotice[];
   /** Forgets every queued notice and the remembered Paseo handle. */
@@ -429,10 +438,26 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
     }
   }
 
+  async function retarget(oldId: string, newId: string, paseo?: NoticePaseo): Promise<number> {
+    try {
+      if (!nonEmpty(oldId) || !nonEmpty(newId) || oldId === newId) return 0;
+      const moved = queued.get(oldId) ?? [];
+      queued.delete(oldId);
+      for (const entry of moved) put(newId, entry);
+      const handle = handleFor(paseo);
+      if (moved.length > 0 && handle !== null) await deliver(newId, handle);
+      return moved.length;
+    } catch (error) {
+      log(`[paseo-bm] moving the notices queued for ${String(oldId)} to ${String(newId)} failed: ${errorText(error)}`);
+      return 0;
+    }
+  }
+
   return {
     enqueue,
     enqueueBatch,
     turnEnded,
+    retarget,
     pending: (targetId) => (queued.get(targetId) ?? []).map(({ kind, text }) => ({ kind, text })),
     clear() {
       for (const list of queued.values()) for (const entry of list) entry.state = "dropped";

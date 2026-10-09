@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>paseo-bm — Missions screen mockup (draft for approval)</title>
+<style>
+  /* Colours stand for the theme tokens the plugin uses (no literal colours in code):
+     surface0, surface1, border, foreground, foregroundMuted, accent, accentForeground,
+     statusWarning, statusDanger, statusSuccess. Radius 2. */
+  :root { --s0:#0f1115; --s1:#161a20; --s2:#1c2129; --b:#2a303a; --fg:#e6e8eb; --mu:#8b93a1;
+          --ac:#7c93ff; --acf:#0b0d12; --wa:#e3a33b; --da:#e5534b; --ok:#3fb27f; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#07080a; color:var(--fg); font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif; }
+  h1.page { font-size:15px; color:var(--mu); font-weight:500; margin:24px 32px 8px; }
+  .note { margin:0 32px 24px; color:var(--mu); font-size:12px; max-width:1100px; }
+  .boards { display:flex; flex-wrap:wrap; gap:32px; padding:0 32px 48px; align-items:flex-start; }
+  .board { background:var(--s0); border:1px solid var(--b); border-radius:6px; overflow:hidden; }
+  .board > .cap { font-size:11px; color:var(--mu); padding:6px 10px; border-bottom:1px solid var(--b); background:#0b0d11; }
+  .desk { width:1040px; } .phone { width:390px; }
+  .tabs { display:flex; gap:18px; padding:12px 24px 0; border-bottom:1px solid var(--b); }
+  .phone .tabs { padding:10px 12px 0; gap:12px; overflow:hidden; }
+  .tab { padding:0 0 10px; color:var(--mu); font-size:13px; }
+  .tab.on { color:var(--fg); border-bottom:2px solid var(--ac); }
+  .content { padding:24px; display:flex; flex-direction:column; gap:12px; }
+  .phone .content { padding:12px; gap:8px; }
+  .title { font-size:24px; font-weight:600; } .phone .title { font-size:18px; }
+  .row { display:flex; align-items:center; gap:10px; } .between { justify-content:space-between; }
+  .wrap { flex-wrap:wrap; }
+  .label { color:var(--mu); font-size:12px; font-weight:500; text-transform:uppercase; letter-spacing:.6px; }
+  .muted { color:var(--mu); } .small { font-size:12px; } .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
+  .card { background:var(--s1); border:1px solid var(--b); border-radius:2px; padding:14px; display:flex; flex-direction:column; gap:8px; position:relative; }
+  .phone .card { padding:10px; gap:6px; }
+  .bar { position:absolute; left:0; top:0; bottom:0; width:3px; }
+  .btn { padding:9px 14px; border-radius:2px; font-size:13px; border:1px solid var(--b); background:transparent; color:var(--fg); }
+  .btn.pri { background:var(--ac); color:var(--acf); border-color:var(--ac); }
+  .btn.dan { border-color:var(--da); color:var(--da); }
+  .chip { display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--fg); padding:2px 8px; border:1px solid var(--b); border-radius:2px; background:var(--s2); }
+  .sq { width:7px; height:7px; display:inline-block; }
+  .code { font-weight:700; letter-spacing:.5px; }
+  .prog { height:4px; background:var(--s2); border-radius:2px; overflow:hidden; } .prog > i { display:block; height:100%; background:var(--ac); }
+  .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+  .grid3 { display:grid; grid-template-columns: repeat(3,1fr); gap:10px; }
+  .stat { background:var(--s1); border:1px solid var(--b); border-radius:2px; padding:12px; }
+  .stat b { font-size:20px; display:block; } .phone .stat b { font-size:16px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  td, th { text-align:left; padding:7px 8px; border-bottom:1px solid var(--b); vertical-align:top; }
+  th { color:var(--mu); font-weight:500; font-size:12px; }
+  .ok{color:var(--ok)} .wa{color:var(--wa)} .da{color:var(--da)} .ac{color:var(--ac)}
+  .crit { display:flex; gap:8px; align-items:flex-start; font-size:13px; } .box { width:14px; height:14px; border:1px solid var(--b); border-radius:2px; flex:none; margin-top:2px; }
+  .box.met { background:var(--ok); border-color:var(--ok); } .box.drop { background:var(--s2); }
+  .seg { display:flex; border:1px solid var(--b); border-radius:2px; overflow:hidden; } .seg span { padding:6px 10px; font-size:12px; color:var(--mu); border-right:1px solid var(--b); } .seg span:last-child{border-right:none} .seg span.on { background:var(--ac); color:var(--acf); }
+  .journal div { font-size:12px; color:var(--mu); padding:3px 0; border-bottom:1px dashed var(--b); } .journal b { color:var(--fg); font-weight:500; }
+  .input { border:1px solid var(--b); background:var(--s0); border-radius:2px; padding:8px 10px; color:var(--mu); font-size:13px; }
+</style>
+</head>
+<body>
+<h1 class="page">paseo-bm · Missions screen — mockup for the owner's approval (2026-10-09, draft 1)</h1>
+<p class="note">Design: docs/design/paseo-bm-missions.md §10. Missions becomes a section of the Beads Manager surface, between Inbox and Projects. Four artboards: the list and a mission's page, at desktop and phone widths. Colours stand for theme tokens. Nothing here is built until you approve it — comment on what to add, remove, rename or move.</p>
+
+<div class="boards">
+
+<!-- ============ A. Desktop · list ============ -->
+<div class="board desk">
+  <div class="cap">A · Desktop — Missions (list)</div>
+  <div class="tabs"><span class="tab">Inbox</span><span class="tab on">Missions</span><span class="tab">Projects</span><span class="tab">Settings</span><span class="tab">Tools &amp; skills</span></div>
+  <div class="content">
+    <div class="row between"><span class="title">Missions</span><span class="row"><span class="btn pri">New mission</span></span></div>
+    <span class="body muted">One Main per goal. A mission spans the repositories it needs; you name it, you close it.</span>
+    <div class="row"><span class="label">Open · 2</span></div>
+
+    <div class="card"><span class="bar" style="background:var(--ac)"></span>
+      <div class="row between"><div class="row"><span class="code">AIX</span><span style="font-weight:600">AI Assistant ↔ xOne</span><span class="chip"><span class="sq" style="background:var(--ok)"></span>Main idle</span></div><span class="small muted">level 2 · proceed, staffing</span></div>
+      <div class="row wrap"><span class="chip">xspace-ai-assistant</span><span class="chip">ai-assistant</span><span class="small muted">3 live Workers · 7 requests</span></div>
+      <div class="row between"><div style="flex:1"><div class="prog"><i style="width:45%"></i></div></div><span class="small" style="margin-left:12px">Done criteria 5 of 11</span></div>
+      <div class="row wrap"><span class="chip"><span class="sq" style="background:var(--wa)"></span>2 questions for you</span><span class="chip"><span class="sq" style="background:var(--wa)"></span>Governor: 4 Workers on one area — nudged 12 min ago</span></div>
+    </div>
+
+    <div class="card"><span class="bar" style="background:var(--ac)"></span>
+      <div class="row between"><div class="row"><span class="code">ORA</span><span style="font-weight:600">Oracle V0.0.4 fixes</span><span class="chip"><span class="sq" style="background:var(--ac)"></span>Main working</span></div><span class="small muted">level 2 · proceed, staffing</span></div>
+      <div class="row wrap"><span class="chip">ai-assistant</span><span class="small muted">1 live Worker · 1 request</span></div>
+      <div class="row between"><div style="flex:1"><div class="prog"><i style="width:66%"></i></div></div><span class="small" style="margin-left:12px">Done criteria 2 of 3</span></div>
+      <div class="row wrap"><span class="small muted">No questions · no signals</span></div>
+    </div>
+
+    <div class="row"><span class="label">Closed · 1</span></div>
+    <div class="card" style="opacity:.7"><div class="row between"><div class="row"><span class="code">PRD1</span><span>PRD for AI Assistant UI</span></div><span class="small muted">closed 2026-10-08 · xspace-ai-assistant</span></div></div>
+  </div>
+</div>
+
+<!-- ============ B. Desktop · mission page ============ -->
+<div class="board desk">
+  <div class="cap">B · Desktop — a mission's page</div>
+  <div class="tabs"><span class="tab">Inbox</span><span class="tab on">Missions</span><span class="tab">Projects</span><span class="tab">Settings</span><span class="tab">Tools &amp; skills</span></div>
+  <div class="content">
+    <div class="row between">
+      <div class="row"><span class="muted">Missions ›</span><span class="code" style="font-size:20px">AIX</span><span class="title" style="font-size:20px">AI Assistant ↔ xOne</span></div>
+      <div class="row"><span class="btn pri">Open Main</span><span class="btn">Rename</span><span class="btn dan">Close mission</span></div>
+    </div>
+    <div class="grid3">
+      <div class="stat"><span class="small muted">Done criteria</span><b>5 / 11</b></div>
+      <div class="stat"><span class="small muted">Live Workers</span><b>3</b><span class="small muted">budget 4</span></div>
+      <div class="stat"><span class="small muted">Questions for you</span><b class="wa">2</b></div>
+    </div>
+
+    <div class="grid2">
+      <div class="card"><span class="label">Charter · confirmed 2026-10-09</span>
+        <div><span class="small muted">Goal</span><div>The AI Assistant UI chats with the backend, which answers through xOne; the UI never calls xOne directly.</div></div>
+        <div><span class="small muted">Repositories</span><div class="row wrap" style="margin-top:4px"><span class="chip">xspace-ai-assistant</span><span class="chip">ai-assistant</span><span class="btn" style="padding:3px 8px">+ Add</span></div></div>
+        <div><span class="small muted">Not in this mission</span><div class="small">Shell registration (xspace-shell) · mobile layout</div></div>
+        <div><span class="small muted">Done criteria</span>
+          <div class="crit"><span class="box met"></span><span>D1 Chat UI talks to backend endpoint /api/chat</span></div>
+          <div class="crit"><span class="box met"></span><span>D2 N1–N4 business cards rendered</span></div>
+          <div class="crit"><span class="box"></span><span>D6 N10–N25 platform screens</span></div>
+          <div class="crit"><span class="box drop"></span><span class="muted">D9 Direct xOne preview — dropped</span></div>
+          <span class="small ac">+ 7 more</span></div>
+      </div>
+      <div class="card"><span class="label">Mission level</span>
+        <div class="seg"><span>0</span><span>1</span><span class="on">2</span><span>3</span><span>4</span></div>
+        <div class="small"><span class="ok">The Main decides:</span> going on to the next step · creating Workers</div>
+        <div class="small"><span class="muted">Yours:</span> adding a repository · Workers' questions your repos keep for you · splitting the mission</div>
+        <span class="label" style="margin-top:6px">Governor</span>
+        <div class="small"><span class="wa">Mess:</span> 4 Workers wrote <span class="mono">docs/01-prd.md</span> today (threshold 2) — Main nudged 12 min ago, re-plan due in 18 min</div>
+        <div class="small"><span class="ok">Overengineering, drift, budget:</span> within the charter</div>
+      </div>
+    </div>
+
+    <div class="card"><span class="label">Workers by repository</span>
+      <table>
+        <tr><th>Repository</th><th>Request · topic</th><th>Worker</th><th>Phase</th><th>Links</th></tr>
+        <tr><td>xspace-ai-assistant</td><td><span class="mono">req-…042844Z</span> N10–N25 platform UI</td><td>🔵 0545c7a</td><td><span class="ac">working</span></td><td>↔ ai-assistant · 3</td></tr>
+        <tr><td>xspace-ai-assistant</td><td><span class="mono">req-…061148Z</span> 13 English keys</td><td>🔵 0989dc4</td><td><span class="ok">finished</span></td><td>—</td></tr>
+        <tr><td>ai-assistant</td><td><span class="mono">req-…064157Z</span> Backend for N10–N25</td><td>🔵 733918b</td><td><span class="wa">blocked · Q1 for you</span></td><td>↔ xspace-ai-assistant · 3</td></tr>
+      </table>
+    </div>
+
+    <div class="grid2">
+      <div class="card"><span class="label">Contracts between repositories</span>
+        <table>
+          <tr><th>Contract</th><th>Provider → consumers</th><th>Version</th></tr>
+          <tr><td>C1 GET /api/greeting</td><td>ai-assistant → xspace-ai-assistant</td><td>v2 · 09:41</td></tr>
+          <tr><td>C2 403 CAPABILITY_DISABLED</td><td>ai-assistant → xspace-ai-assistant</td><td>v1 · 06:10</td></tr>
+        </table></div>
+      <div class="card"><span class="label">Journal</span>
+        <div class="journal">
+          <div><b>09:41</b> contract C1 v2 — 400 for a missing name</div>
+          <div><b>09:30</b> linked 0545c7a ↔ 733918b about N10–N25 endpoints</div>
+          <div><b>09:12</b> criterion D2 met — cards render with backend data</div>
+          <div><b>08:55</b> governor nudge — 4 Workers on docs/01-prd.md</div>
+          <div><b>08:40</b> plan updated — Phase 3 design before code</div>
+        </div></div>
+    </div>
+
+    <div class="card"><div class="row between"><span class="label">Plan</span><span class="small muted">updated 08:40 by the Main · read-only</span></div>
+      <div class="small">1. PRD extended (done) · 2. Backend PRD §6.1 (done) · 3. Design + ADR-010…015 (in progress) · 4. Implementation N10–N25 · 5. Acceptance on dev</div></div>
+  </div>
+</div>
+
+<!-- ============ C. Phone · list ============ -->
+<div class="board phone">
+  <div class="cap">C · Phone — Missions (list)</div>
+  <div class="tabs"><span class="tab">Inbox</span><span class="tab on">Missions</span><span class="tab">Projects</span><span class="tab">Settings</span></div>
+  <div class="content">
+    <div class="row between"><span class="title">Missions</span><span class="btn pri" style="padding:7px 10px">New</span></div>
+    <div class="card"><span class="bar" style="background:var(--ac)"></span>
+      <div class="row"><span class="code">AIX</span><span style="font-weight:600">AI Assistant ↔ xOne</span></div>
+      <div class="small muted">2 repositories · 3 live Workers · Main idle</div>
+      <div class="prog"><i style="width:45%"></i></div>
+      <div class="small">Done 5 of 11 · <span class="wa">2 questions</span> · <span class="wa">1 signal</span></div>
+    </div>
+    <div class="card"><span class="bar" style="background:var(--ac)"></span>
+      <div class="row"><span class="code">ORA</span><span style="font-weight:600">Oracle V0.0.4 fixes</span></div>
+      <div class="small muted">1 repository · 1 live Worker · Main working</div>
+      <div class="prog"><i style="width:66%"></i></div>
+      <div class="small">Done 2 of 3</div>
+    </div>
+    <div class="small muted">Closed · 1</div>
+  </div>
+</div>
+
+<!-- ============ D. Phone · mission page ============ -->
+<div class="board phone">
+  <div class="cap">D · Phone — a mission's page</div>
+  <div class="tabs"><span class="tab">Inbox</span><span class="tab on">Missions</span><span class="tab">Projects</span><span class="tab">Settings</span></div>
+  <div class="content">
+    <div class="small muted">Missions ›</div>
+    <div class="row"><span class="code" style="font-size:18px">AIX</span><span class="title">AI Assistant ↔ xOne</span></div>
+    <div class="row"><span class="btn pri" style="flex:1;text-align:center">Open Main</span><span class="btn">⋯</span></div>
+    <div class="grid3"><div class="stat"><span class="small muted">Done</span><b>5/11</b></div><div class="stat"><span class="small muted">Workers</span><b>3</b></div><div class="stat"><span class="small muted">For you</span><b class="wa">2</b></div></div>
+    <div class="card"><span class="label">Charter</span><div class="small">The AI Assistant UI chats with the backend, which answers through xOne; the UI never calls xOne directly.</div><div class="row wrap"><span class="chip">xspace-ai-assistant</span><span class="chip">ai-assistant</span></div></div>
+    <div class="card"><span class="label">Governor</span><div class="small"><span class="wa">Mess:</span> 4 Workers wrote docs/01-prd.md today — Main nudged</div></div>
+    <div class="card"><span class="label">Workers</span>
+      <div class="small"><b>xspace-ai-assistant</b> · N10–N25 platform UI · <span class="ac">working</span></div>
+      <div class="small"><b>ai-assistant</b> · Backend for N10–N25 · <span class="wa">blocked</span></div>
+      <div class="small muted">+ 1 finished</div></div>
+    <div class="card"><span class="label">Mission level</span><div class="seg"><span>0</span><span>1</span><span class="on">2</span><span>3</span><span>4</span></div><div class="small muted">The Main goes on and creates Workers by itself.</div></div>
+    <div class="row wrap"><span class="chip">Contracts · 2</span><span class="chip">Journal</span><span class="chip">Plan</span><span class="chip">Project memory</span></div>
+  </div>
+</div>
+
+<!-- ============ E. Desktop · new mission ============ -->
+<div class="board desk" style="width:640px">
+  <div class="cap">E · Desktop — New mission (you name it)</div>
+  <div class="content">
+    <span class="title" style="font-size:20px">New mission</span>
+    <div class="row" style="gap:12px"><div style="flex:3"><span class="small muted">Name</span><div class="input">AI Assistant ↔ xOne</div></div><div style="flex:1"><span class="small muted">Short code</span><div class="input mono">AIX</div></div></div>
+    <div><span class="small muted">Goal (the Main can draft the rest of the charter with you)</span><div class="input" style="height:64px">The AI Assistant UI chats with the backend, which answers through xOne.</div></div>
+    <div><span class="small muted">Repositories</span><div class="row wrap" style="margin-top:4px"><span class="chip"><span class="sq" style="background:var(--ac)"></span>xspace-ai-assistant</span><span class="chip"><span class="sq" style="background:var(--ac)"></span>ai-assistant</span><span class="chip" style="color:var(--mu)">paseo-bm</span><span class="chip" style="color:var(--mu)">paseo-bm site</span></div></div>
+    <div><span class="small muted">Mission level</span><div class="seg" style="margin-top:4px;width:fit-content"><span>0</span><span>1</span><span class="on">2</span><span>3</span><span>4</span></div><div class="small muted" style="margin-top:4px">Level 2: the Main goes on to next steps and creates Workers by itself.</div></div>
+    <div class="row" style="justify-content:flex-end"><span class="btn">Cancel</span><span class="btn pri">Create and open Main</span></div>
+  </div>
+</div>
+
+<!-- ============ F. Desktop · project memory ============ -->
+<div class="board desk" style="width:640px">
+  <div class="cap">F · Desktop — Project memory (read-only view, from a mission's page or Projects)</div>
+  <div class="content">
+    <div class="row between"><span class="title" style="font-size:20px">Memory · ai-assistant</span><span class="small muted">42 entries</span></div>
+    <table>
+      <tr><th>Kind</th><th>Entry</th><th>Source</th></tr>
+      <tr><td><span class="chip">decision</span></td><td>appCode is fixed to ai-assistant for now</td><td class="small muted">owner, Q2 · 2026-10-09</td></tr>
+      <tr><td><span class="chip">contract</span></td><td>403 CAPABILITY_DISABLED when a feature is off (contract 11 §2.1)</td><td class="small muted">Worker 733918b</td></tr>
+      <tr><td><span class="chip">convention</span></td><td>Local runs send principal JSON, never a raw Bearer</td><td class="small muted">Worker 7d4e9bf</td></tr>
+      <tr><td><span class="chip">precedent</span></td><td>The UI never calls xOne directly</td><td class="small muted">owner · all projects</td></tr>
+    </table>
+  </div>
+</div>
+
+</div>
+</body>
+</html>

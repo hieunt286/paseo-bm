@@ -181,15 +181,16 @@ export async function checkReviewBudget(event: TurnEndedEvent, deps: BudgetDeps)
     const role = roleOfProvider(agent?.provider);
     const workspaceId = agent?.workspaceId ?? null;
     if (role === null || role === "orchestrator" || workspaceId === null) return "ignored";
-    const keyOf = (found: BudgetOverrun): string => `${workspaceId}::${found.requestId}`;
-
     let over: BudgetOverrun | undefined;
+    let key: string;
     if (role === "manager") {
       // A Manager turn end only FLUSHES what a Worker or Reviewer turn end
       // already found — usually the notice deferred moments ago because this
-      // Manager was still answering the Worker's last report.
-      over = [...pending.values()].find((found) => keyOf(found) === `${workspaceId}::${found.requestId}` && found.managerAgentId === agent.id);
-      if (over === undefined) return "within";
+      // Manager was still answering the Worker's last report. Its key is the
+      // request's workspace: a Main lives in the Missions home, its requests in their repos.
+      const flushed = [...pending.entries()].find(([, found]) => found.managerAgentId === agent.id);
+      if (flushed === undefined) return "within";
+      [key, over] = flushed;
     } else {
       // The same rebuild the Orchestrator's rules read (request-trace.ts), against
       // the owner's budget in the same data folder as the traces (§G.7).
@@ -199,10 +200,10 @@ export async function checkReviewBudget(event: TurnEndedEvent, deps: BudgetDeps)
       const grant = found?.request === null || found?.request === undefined ? null : ruleReviewGrantOf(found.request);
       over = found === null ? undefined : (overrunOf(found.trace, readReviewBudget({ home, log }), grant) ?? undefined);
       if (over === undefined) return "within";
-      pending.set(keyOf(over), over);
+      key = `${workspaceId}::${over.requestId}`;
+      pending.set(key, over);
     }
 
-    const key = keyOf(over);
     // Claimed BEFORE any await: two turn ends handled at once must not both
     // send. The claim also carries the call count, so the SAME overrun is
     // announced once while a LATER one still gets through (fault L5).

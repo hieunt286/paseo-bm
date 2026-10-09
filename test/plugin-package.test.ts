@@ -97,8 +97,13 @@ describe("plugin-package/ (ADR-026)", () => {
 
   it.each(["index.server.ts", "index.client.tsx"])("%s default-exports the entry's hoisted contribute function", (name) => {
     // Paseo's eager interop copies the default export at load: only a hoisted function survives (plugin-bundle-cjs.test.ts).
+    // Local identifiers are minified (ADR-030), so the default export's local name is read from the export clause.
     const code = read(name);
-    expect(code).toMatch(/\bfunction contribute\(/);
-    expect(code).toMatch(/export\s*\{[^}]*\bcontribute as default\b/);
+    const local = /export\s*\{[^}]*?([\w$]+) as default\b/.exec(code)?.[1];
+    expect(local).toBeDefined();
+    const escaped = local!.replace(/\$/g, "\\$");
+    expect(code).toMatch(new RegExp(`(?:^|[^\\w$.])function ${escaped}\\(`));
+    // keepNames restores the source name, so a stack trace still names the function.
+    expect(code).toMatch(new RegExp(`\\(${escaped},"contribute"\\)`));
   });
 });

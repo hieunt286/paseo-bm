@@ -29,7 +29,8 @@ import { stopAllInWorkspace, type StopPaseo } from "./stop-propagation";
 import { fallbackCountsOf, incidentsIn, reviewerReplacementIds } from "./fallback-state";
 import { agentFactsOf, bmAgentsOf, directoryIn, listedWorkspaces, workspaceDirectory, type DashboardPaseo } from "./paseo-directory";
 import { workspaceTracesOf } from "./request-trace";
-import { requireDataHome } from "./rpc-kit";
+import { isPluginHomeIn } from "./plugin-homes";
+import { dataHome, requireDataHome, type RpcHomeDeps } from "./rpc-kit";
 import { createOrchestratorStore } from "./orchestrator-store";
 import { createDecisionStore } from "./decision-store";
 import type { AgentFacts, ReconstructedTrace } from "./traces";
@@ -390,16 +391,24 @@ export async function handleTracesReassign(
   };
 }
 
-/** `traces.workspaces`: stored workspaces with their current state, for the launcher. */
+/**
+ * `traces.workspaces`: stored workspaces with their current state, for the
+ * launcher. The plugin's own homes are not projects (missions design §3.1):
+ * they are left out, and `homes` names the listed ones so the launcher leaves
+ * them out of its own `workspaces.list` too.
+ */
 export async function handleTracesWorkspaces(
   paseo: DashboardPaseo,
   deps: { homedir?: () => string } = {},
 ): Promise<{
   workspaces: Array<WorkspaceClassification & { lastSeenAt: string | null; bytes: number }>;
+  homes: string[];
 }> {
-  const location = await requireLocation(paseo, deps);
-  const classified = classifyWorkspaces(location, await listedWorkspaces(paseo));
+  const { home, location } = await requireInstallHome(paseo, deps);
+  const listed = await listedWorkspaces(paseo);
+  const classified = classifyWorkspaces(location, listed).filter((entry) => !isPluginHomeIn(entry.workspaceId, listed, home));
   return {
+    homes: (listed ?? []).filter((entry) => entry.id !== "" && isPluginHomeIn(entry.id, listed, home)).map((entry) => entry.id),
     workspaces: classified.map((entry) => ({
       ...entry,
       lastSeenAt: readWorkspaceMeta(location, entry.workspaceId)?.lastSeenAt ?? null,
@@ -429,14 +438,16 @@ export async function handleAgentsStopAll(
  * busy". Counting Workers alone left the screen still during the parts of a
  * request where the user most wants to see something happening. A running
  * Orchestrator assessment counts too, under its own key (orchestrator design
- * §3.2).
+ * §3.2). The plugin's own homes are not projects and are left out (missions
+ * design §3.1).
  */
-export async function handleWorkspacesOverview(paseo: DashboardPaseo): Promise<{ workspaces: WorkspaceOverview[] }> {
+export async function handleWorkspacesOverview(paseo: DashboardPaseo, deps: RpcHomeDeps = {}): Promise<{ workspaces: WorkspaceOverview[] }> {
   const listed = (await listedWorkspaces(paseo)) ?? [];
   const agents = await bmAgentsOf(paseo, { includeOrchestrator: true });
+  const home = dataHome(deps);
   return {
     workspaces: listed
-      .filter((entry) => !entry.archived && entry.id !== "")
+      .filter((entry) => !entry.archived && entry.id !== "" && !isPluginHomeIn(entry.id, listed, home))
       .map((entry) => {
         let beads: WorkspaceOverview["beads"] = null;
         if (entry.directory !== null) {

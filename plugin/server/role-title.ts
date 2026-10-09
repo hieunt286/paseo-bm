@@ -12,7 +12,9 @@
  * without it (`withoutRoleMarker`), where the role is named anyway.
  */
 import { roleOfProvider, type BmRole } from "./agent-role";
+import { createMissionStore } from "./mission-store";
 import { MAX_AGENT_TITLE_CHARS, setAgentTitle, type PaseoCliDeps } from "./paseo-cli";
+import { dataHome } from "./rpc-kit";
 
 /** The marker of each role, followed by `TITLE_MARKER_SEPARATOR`. */
 export const ROLE_TITLE_MARKERS: Readonly<Record<BmRole, string>> = {
@@ -24,6 +26,47 @@ export const ROLE_TITLE_MARKERS: Readonly<Record<BmRole, string>> = {
 
 /** Between the marker and the title. */
 export const TITLE_MARKER_SEPARATOR = " · ";
+
+/** A Main's mission (missions design §3.2): `bm.missionId=<missionId>`, `bm.missionCode=<code>`. */
+export const MISSION_ID_LABEL = "bm.missionId";
+export const MISSION_CODE_LABEL = "bm.missionCode";
+
+/** The label that marks a replaced agent (`mission-replace.ts`, `fallback-detect.ts`). */
+const REPLACED_BY_LABEL = "bm.replacedBy";
+
+/** What an unassigned Main is called until `bm_mission_start` names its mission (§3.3). */
+export const UNASSIGNED_MAIN_TITLE = "New mission";
+
+/**
+ * A Main's title, marked (§3.2): `🟣 M · <code> <name>`, at most
+ * `MAX_AGENT_TITLE_CHARS`, the name on one line and cut at a word end. Pure.
+ */
+export function mainTitleOf(code: string, name: string): string {
+  return titleWithin(code, name, MAX_AGENT_TITLE_CHARS);
+}
+
+/** After a replaced Main's mission title (§3.4 step 5). */
+export const REPLACED_MAIN_SUFFIX = " · replaced";
+
+/**
+ * A replaced Main's title (§3.4 step 5): `mainTitleOf` + `REPLACED_MAIN_SUFFIX`,
+ * the name cut so the whole stays within `MAX_AGENT_TITLE_CHARS`. Pure.
+ */
+export function replacedMainTitleOf(code: string, name: string): string {
+  return `${titleWithin(code, name, MAX_AGENT_TITLE_CHARS - REPLACED_MAIN_SUFFIX.length)}${REPLACED_MAIN_SUFFIX}`;
+}
+
+/** `🟣 M · <code> <name>` in at most `limit` characters, the name on one line and cut at a word end. */
+function titleWithin(code: string, name: string, limit: number): string {
+  const prefix = withRoleMarker("manager", code);
+  const room = limit - prefix.length - 1;
+  const plain = name.replace(/\s+/g, " ").trim();
+  if (plain === "" || room <= 0) return prefix.slice(0, limit);
+  if (plain.length <= room) return `${prefix} ${plain}`;
+  const cut = plain.slice(0, room + 1);
+  const end = cut.lastIndexOf(" ");
+  return `${prefix} ${(end > 0 ? cut.slice(0, end) : plain.slice(0, room)).trimEnd()}`;
+}
 
 /** `title` with its role's marker in front, or the title unchanged when it already has one. */
 export function withRoleMarker(role: BmRole, title: string): string {
@@ -64,12 +107,24 @@ export function applyRoleTitle<T extends { config: { provider?: unknown; title?:
 
 /** The SDK slice `createTitleMarker` reads an agent's current title with. */
 export interface TitlePaseo {
-  agents: { ref(id: string): { refresh(): Promise<{ agent: { title?: string | null } } | null> } };
+  agents: { ref(id: string): { refresh(): Promise<{ agent: { title?: string | null; labels?: Record<string, string> | null } } | null> } };
 }
 
 export interface TitleMarkerDeps {
   cli?: PaseoCliDeps;
   log?: (message: string) => void;
+  /** A mission's code and name (§3.2); the data folder's mission store by default. */
+  missionOf?: (missionId: string) => { code: string; name: string } | null;
+}
+
+/** The mission of the data folder, or null. Never throws. */
+function storedMission(missionId: string): { code: string; name: string } | null {
+  try {
+    const home = dataHome();
+    return home === null ? null : createMissionStore(home).get(missionId);
+  } catch {
+    return null;
+  }
 }
 
 export type RemarkOutcome = "not-bm" | "already-marked" | "no-title" | "marked" | "failed";
@@ -85,9 +140,15 @@ export type RemarkOutcome = "not-bm" | "already-marked" | "no-title" | "marked" 
  * event's `title` is the one the agent was created with, so a title that is
  * not marked there is read again from a fresh snapshot. Each agent is settled
  * once per plugin process: a later rename by the owner stays as it is.
+ *
+ * A Main labelled `bm.missionId` (missions design §3.2) gets its whole title
+ * back from its mission (`mainTitleOf`), not only the marker, untitled or not;
+ * one labelled `bm.replacedBy` as well (§3.4 step 5) gets `replacedMainTitleOf`,
+ * never the mission title its successor carries.
  */
 export function createTitleMarker(deps: TitleMarkerDeps = {}) {
   const log = deps.log ?? ((message: string) => console.warn(message));
+  const missionOf = deps.missionOf ?? storedMission;
   const settled = new Set<string>();
 
   async function remark(agent: { id: string; provider: unknown; title?: string | null }, paseo: TitlePaseo): Promise<RemarkOutcome> {
@@ -101,13 +162,18 @@ export function createTitleMarker(deps: TitleMarkerDeps = {}) {
     // Marked before the first await: two turns starting together check it once.
     settled.add(agent.id);
     try {
-      const title = (await paseo.agents.ref(agent.id).refresh())?.agent.title ?? null;
-      if (typeof title !== "string" || title.trim() === "") {
+      const snapshot = (await paseo.agents.ref(agent.id).refresh())?.agent;
+      const title = snapshot?.title ?? null;
+      const missionId = role === "manager" ? snapshot?.labels?.[MISSION_ID_LABEL] : undefined;
+      const mission = typeof missionId === "string" && missionId !== "" ? missionOf(missionId) : null;
+      const replaced = typeof snapshot?.labels?.[REPLACED_BY_LABEL] === "string";
+      const wanted = mission === null ? null : (replaced ? replacedMainTitleOf : mainTitleOf)(mission.code, mission.name);
+      if (wanted === null && (typeof title !== "string" || title.trim() === "")) {
         settled.delete(agent.id);
         return "no-title";
       }
-      if (isMarked(role, title)) return "already-marked";
-      const marked = withRoleMarker(role, withoutRoleMarker(title)).slice(0, MAX_AGENT_TITLE_CHARS);
+      if (wanted === null ? isMarked(role, title) : title === wanted) return "already-marked";
+      const marked = wanted ?? withRoleMarker(role, withoutRoleMarker(title as string)).slice(0, MAX_AGENT_TITLE_CHARS);
       const result = await setAgentTitle(agent.id, marked, deps.cli);
       if (!result.ok) {
         settled.delete(agent.id);

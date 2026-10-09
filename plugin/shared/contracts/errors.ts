@@ -85,6 +85,11 @@ export const DASHBOARD_ERROR_CODES = [
   // blank question.
   "E_DECISION_NOT_ASKABLE",
   "E_DECISION_ASK_INVALID",
+  // Missions design §3.3, §3.4: missions.create and mission.ensure — input the
+  // rules refuse (a code taken or of another shape, a repo that is not a listed
+  // project, an unknown or closed mission); the mission store cannot be written.
+  "E_MISSION_INVALID",
+  "E_MISSION_WRITE_FAILED",
 ] as const;
 
 export type DashboardErrorCode = (typeof DASHBOARD_ERROR_CODES)[number];

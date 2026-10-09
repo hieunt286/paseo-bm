@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { clearBindingCache, createBindingStore, type BindingStore } from "../plugin/server/agent-bindings";
 import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
 import { CUT_NOTE_LINE, clearSeenTurns, createInterruptionWatch } from "../plugin/server/interruption-watch";
+import { createMissionRoster } from "../plugin/server/mission-roster";
 import { createNoticeQueue } from "../plugin/server/notice-queue";
 import { createOutbox } from "../plugin/server/outbox";
 import { clearRequestRegistryCache, createRequestRegistry } from "../plugin/server/request-registry";
@@ -130,6 +131,20 @@ describe("an unbound Worker's blocks reach its parent (ADR-027 decision 9, amend
     expect(createDecisionStore(home).get(`q:${REQ}:Q1`, WS)?.status).toBe("expired");
     // The first delivery started a Manager turn: the second waits for its idle moment, never cutting it.
     expect(reports(home).map((record) => record.state)).toEqual(["delivered", "pending"]);
+  });
+
+  it("a relayed report of a mission request sets its roster state: finished, then active again on a later report (missions design §2.3)", async () => {
+    const { home, relay, turn } = setup();
+    createMissionRoster(home).add("mis-0123456789", { requestId: REQ, workspaceId: WS, topic: "Greeting", workerId: WORKER });
+    const state = () => createMissionRoster(home).get("mis-0123456789", REQ)?.state;
+    await relay(turn([REPORT_FINISHED]));
+    expect(state()).toBe("finished");
+    await relay(turn([REPORT_RECEIVED]));
+    expect(state()).toBe("active");
+    // A request of no mission has no roster to change.
+    const other = setup();
+    await other.relay(other.turn([REPORT_FINISHED]));
+    expect(createMissionRoster(other.home).list("mis-0123456789")).toEqual([]);
   });
 
   it("relays a block once: the same turn end read again, and a block the turn sent by hand, are skipped", async () => {

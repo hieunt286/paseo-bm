@@ -128,6 +128,7 @@ const ANSWERED_BY: Readonly<Record<NonNullable<Decision["answeredBy"]>, string>>
   orchestrator: "the Orchestrator",
   policy: "your policy",
   precedent: "a standing answer",
+  main: "the mission's Main",
 };
 
 function decisionStatusText(decision: Decision): string {

@@ -393,11 +393,11 @@ describe("the Orchestrator's Phase 1 answer (change-004): read, never written", 
 describe("delegated answers, predictions and reversals (autonomy design §B.3, §B.9)", () => {
   const predicted = { recommended: { optionKey: "a" }, orchestrator: { optionKey: "c", reason: "Hold until the review is in.", at: AT } };
 
-  it("answer.by is owner, orchestrator, policy or precedent (change-007 C4); two predictors; three reversal kinds", () => {
-    expect(ANSWER_BY).toEqual(["owner", "orchestrator", "policy", "precedent"]);
-    expect(PREDICTORS).toEqual(["recommended", "orchestrator"]);
+  it("answer.by is owner, orchestrator, policy, precedent or main (change-007 C4; missions design §4); three predictors; three reversal kinds", () => {
+    expect(ANSWER_BY).toEqual(["owner", "orchestrator", "policy", "precedent", "main"]);
+    expect(PREDICTORS).toEqual(["recommended", "orchestrator", "main"]);
     expect(REVERSAL_KINDS).toEqual(["re-asked", "overridden", "reopened"]);
-    expect(ANSWER_BY.map(answeredByText)).toEqual(["the owner", "the Orchestrator", "the policy", "an owner precedent"]);
+    expect(ANSWER_BY.map(answeredByText)).toEqual(["the owner", "the Orchestrator", "the policy", "an owner precedent", "the mission's Main"]);
   });
 
   it("a policy answer is an option and names no predictor (ADR-025); a precedent answer names its precedent, in words or an option", () => {

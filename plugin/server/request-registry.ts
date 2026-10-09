@@ -10,7 +10,10 @@
  *
  * - **Generating a `requestId`**: `req-` + the current UTC second as
  *   `YYYYMMDDTHHMMSSZ`; a taken id moves one second on until it is free, so
- *   the format stays the one `checkBlocks` and every reader accept.
+ *   the format stays the one `checkBlocks` and every reader accept. An id is
+ *   taken when **any** workspace's registry or the request index of the
+ *   mission rosters holds it (missions design §2.3), so a Main creating
+ *   Workers in two repos in one second gets two ids.
  * - **Backfill, once**: when a workspace's file is created, it is filled from
  *   that workspace's trace records (`source: "backfill"`, `createdAt` = the
  *   earliest record). Never again.
@@ -29,11 +32,13 @@
  *
  * Readers never throw; a store that cannot be read reads as empty.
  */
+import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { parentOf } from "./agent-role";
 import { createBindingStore, liveBindingOf, type AgentBinding } from "./agent-bindings";
-import { clearJsonFileCache, createJsonFileStore, entriesOf, type JsonFileStore } from "./data-files";
+import { assertNoSymlink, clearJsonFileCache, createJsonFileStore, entriesOf, type JsonFileStore } from "./data-files";
+import { clearRequestIndexCache, missionManagerOf, requestIndex } from "./mission-roster";
 import { createOutbox, isOpenRecord } from "./outbox";
 import { dataHome } from "./rpc-kit";
 import { WORKSPACE_ID_PATTERN, readRecords } from "./trace-store";
@@ -64,6 +69,8 @@ const requestSchema = z.object({
   createdAt: z.string(),
   source: z.enum(["tool", "backfill", "agent-typed"]),
   managerId: z.string().nullable(),
+  /** Missions design §2.3: the request's mission, a cache of the roster (an older build drops it; readers fall back to the request index). */
+  missionId: z.string().min(1).optional(),
   workerIds: z.array(z.string()),
   tier: z.enum(["Small", "Medium", "Large"]).nullable(),
   finishedAt: z.string().nullable(),
@@ -169,8 +176,8 @@ export interface RequestRegistry {
   get(workspaceId: string, requestId: string): RegisteredRequest | null;
   /** True when the workspace's registry holds `requestId`. Never throws. */
   has(workspaceId: string, requestId: string): boolean;
-  /** A new request with a fresh id (`source: "tool"`). Throws when the file cannot be written. */
-  generate(workspaceId: string, init: { managerId: string | null }): RegisteredRequest;
+  /** A new request with a fresh id (`source: "tool"`), with its mission when it has one (§2.3). Throws when the file cannot be written. */
+  generate(workspaceId: string, init: { managerId: string | null; missionId?: string | null }): RegisteredRequest;
   /**
    * Registers `requestId` when the workspace does not hold it yet, and adds
    * `workerId` to its Workers (newest last) and `managerId` when it has none.
@@ -180,6 +187,12 @@ export interface RequestRegistry {
   register(workspaceId: string, requestId: string, init: { source: RequestSource; managerId?: string | null; workerId?: string | null }): RegisteredRequest | null;
   /** Appends `workerId` to a registered request's Workers; false when the request is not registered. Throws when the file cannot be written. */
   addWorker(workspaceId: string, requestId: string, workerId: string): boolean;
+  /**
+   * Missions design §3.4 step 2: the request's Manager becomes `managerId` (a
+   * mission's new Main). False when the request is not registered. Throws when
+   * the file cannot be written.
+   */
+  reassignManager(workspaceId: string, requestId: string, managerId: string): boolean;
   /**
    * A report of the request was stored (design §16.6, `bm_report`): `tier`
    * becomes the report's, and `finishedAt` is `at` for a `finished` report and
@@ -271,6 +284,7 @@ export function outboxKeeps(home: string): (workspaceId: string, requestId: stri
 /** Drops the read cache and the once-per-run log memory; tests only. */
 export function clearRequestRegistryCache(): void {
   clearJsonFileCache();
+  clearRequestIndexCache();
   loggedAgents.clear();
 }
 
@@ -297,6 +311,23 @@ export function createRequestRegistry(home: string, deps: RequestRegistryDeps = 
       keepUnusable: true,
       cached: true,
     });
+
+  /** Every request id of every workspace's registry and of the request index (§2.3). Never throws. */
+  const machineWideIds = (): Set<string> => {
+    const ids = new Set(requestIndex(home).keys());
+    let names: string[];
+    try {
+      assertNoSymlink(home, join(home, REQUESTS_DIR_NAME), "E_TRACE_STORE_UNWRITABLE");
+      names = readdirSync(join(home, REQUESTS_DIR_NAME));
+    } catch {
+      return ids;
+    }
+    for (const name of names) {
+      if (!name.endsWith(".json")) continue;
+      for (const request of list(name.slice(0, -".json".length))) ids.add(request.requestId);
+    }
+    return ids;
+  };
 
   const list = (workspaceId: string): RegisteredRequest[] => {
     if (!isUsableWorkspaceId(workspaceId)) return [];
@@ -326,8 +357,9 @@ export function createRequestRegistry(home: string, deps: RequestRegistryDeps = 
     has: (workspaceId, requestId) => list(workspaceId).some((request) => request.requestId === requestId),
     generate(workspaceId, init) {
       let made: RegisteredRequest | null = null;
+      const elsewhere = machineWideIds();
       update(workspaceId, (requests) => {
-        const taken = new Set(requests.map((request) => request.requestId));
+        const taken = new Set([...elsewhere, ...requests.map((request) => request.requestId)]);
         const at = now();
         let second = Math.floor(at.getTime() / 1000) * 1000;
         let requestId = requestIdAt(new Date(second));
@@ -335,7 +367,8 @@ export function createRequestRegistry(home: string, deps: RequestRegistryDeps = 
           second += 1000;
           requestId = requestIdAt(new Date(second));
         }
-        made = newEntry(workspaceId, requestId, at.toISOString(), "tool", init.managerId, []);
+        const entry = newEntry(workspaceId, requestId, at.toISOString(), "tool", init.managerId, []);
+        made = typeof init.missionId === "string" && init.missionId !== "" ? { ...entry, missionId: init.missionId } : entry;
         return [...requests, made];
       });
       return made!;
@@ -370,6 +403,17 @@ export function createRequestRegistry(home: string, deps: RequestRegistryDeps = 
         const request = requests[index]!;
         if (request.workerIds.includes(workerId)) return null;
         return requests.map((entry, at) => (at === index ? { ...entry, workerIds: [...entry.workerIds, workerId] } : entry));
+      });
+      return found;
+    },
+    reassignManager(workspaceId, requestId, managerId) {
+      let found = false;
+      update(workspaceId, (requests) => {
+        const index = requests.findIndex((request) => request.requestId === requestId);
+        if (index === -1) return null;
+        found = true;
+        if (requests[index]!.managerId === managerId) return null;
+        return requests.map((entry, at) => (at === index ? { ...entry, managerId } : entry));
       });
       return found;
     },
@@ -569,7 +613,8 @@ export function sightRequestId(sighting: RequestSighting, deps: RequestTrustDeps
     const home = homeOf(deps);
     if (home === null) return false;
     const bindings = createBindingStore(home).list();
-    const managerId = role === "manager" ? agentId : parentAgentId;
+    // Missions design §3.4 step 4: a Worker of a mission's request is its current Main's (the registry's), the parent label otherwise.
+    const managerId = role === "manager" ? agentId : (missionManagerOf(home, requestId) ?? parentAgentId);
     if (role === "manager" ? liveBindingOf(bindings, agentId) !== null : creatorIsBound({ id: agentId, parentAgentId }, bindings)) return false;
     const registry = createRequestRegistry(home, { ...deps, log });
     const known = registry.get(workspaceId, requestId);

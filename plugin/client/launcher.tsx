@@ -27,6 +27,7 @@ import { InboxScreen, useInbox } from "./inbox";
 import { insightsProjects } from "./insights-model";
 import { inboxTab } from "./inbox-model";
 import { WorkScreen } from "./work";
+import { projectWorkspacesOf } from "./work-model";
 import {
   SURFACE_HOME_VIEW,
   SURFACE_SECTIONS,
@@ -279,8 +280,10 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
     },
   });
 
+  // Every project list leaves the plugin's own homes out (missions design §3.1).
+  const projectWorkspaces = useMemo(() => projectWorkspacesOf(workspaces.data, stored.data, stored.isError), [workspaces.data, stored.data, stored.isError]);
   // Settings and Tools name a project by its own name, as the mockup does (change-014).
-  const projectNames = useMemo(() => (workspaces.data ?? []).map((workspace) => ({ id: workspace.id, screenTitle: workspace.label })), [workspaces.data]);
+  const projectNames = useMemo(() => (projectWorkspaces ?? []).map((workspace) => ({ id: workspace.id, screenTitle: workspace.label })), [projectWorkspaces]);
   // A project page opened from elsewhere (the Inbox, the Command Center) shows beside the Projects list:
   // each opening is one request to the list, numbered so the same project can be asked for again.
   const requestCount = useRef(0);
@@ -296,9 +299,9 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
       if (closed.lastKnownName !== null) names.set(closed.workspaceId, closed.lastKnownName);
     }
     // The project's own name, as the mockup's group headings show it (change-014).
-    for (const workspace of workspaces.data ?? []) names.set(workspace.id, workspace.label);
+    for (const workspace of projectWorkspaces ?? []) names.set(workspace.id, workspace.label);
     return (workspaceId: string) => names.get(workspaceId) ?? null;
-  }, [stored.data, workspaces.data]);
+  }, [stored.data, projectWorkspaces]);
   // Read every INBOX_POLL_MS while the Inbox shows, kept otherwise for the tab's count.
   const inbox = useInbox({
     visible: view === "inbox",
@@ -415,14 +418,14 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
     <WorkScreen
       theme={theme}
       compact={layout.compact}
-      workspaces={workspaces.data?.map((workspace) => ({
+      workspaces={projectWorkspaces?.map((workspace) => ({
         id: workspace.id,
         label: workspace.label,
         detail: workspace.detail === workspace.label ? "" : workspace.detail,
       }))}
       workspacesError={workspaces.isError ? errorMessageOf(workspaces.error) : null}
       overview={overviewById}
-      closed={closedWorkspaces(stored.data?.workspaces ?? [], workspaces.data?.map((workspace) => workspace.id) ?? [])}
+      closed={closedWorkspaces(stored.data?.workspaces ?? [], projectWorkspaces?.map((workspace) => workspace.id) ?? [])}
       status={status}
       footer={`paseo-bm ${PLUGIN_VERSION}`}
       // The list and the chosen project's page side by side (change-014, the mockup's Projects).

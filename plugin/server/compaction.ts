@@ -61,7 +61,9 @@ import { noticeQueue, type BatchItem, type NoticeBatch, type NoticePaseo, type N
 import { readRecords } from "./trace-store";
 import { reconstructTraces, type ReconstructedTrace } from "./traces";
 import { dataHome, errorText } from "./rpc-kit";
-import { newestReportRecordOf } from "./outbox";
+import { newestReportRecordOf, reportPhaseOf } from "./outbox";
+import { createMissionStore } from "./mission-store";
+import { createMissionRoster } from "./mission-roster";
 
 /**
  * What Claude is told to keep (design §G.5 step 2): the request and the
@@ -257,8 +259,46 @@ function workerBrief(entry: CompactionEntry, trace: ReconstructedTrace | undefin
   ];
 }
 
-/** The Manager's brief: its newest requests with where they stand, and the owner's newest words to it. */
-function managerBrief(entry: CompactionEntry, traces: readonly ReconstructedTrace[], decisions: readonly Decision[], records: readonly TraceRecord[], env: NodeJS.ProcessEnv): string[] {
+/**
+ * A Main's requests (missions design §3.5, §6): its open mission's active
+ * roster requests, newest first, each in its repo with its newest Worker,
+ * its newest report's phase and its open decisions. Null for an agent that is
+ * no open mission's Main. Never throws: a store that cannot be read is null.
+ */
+function missionRequestLines(entry: CompactionEntry, home: string, env: NodeJS.ProcessEnv): string[] | null {
+  try {
+    const mission = createMissionStore(home).list().find((candidate) => candidate.state === "open" && candidate.mainId === entry.agentId);
+    if (mission === undefined) return null;
+    const decisions = createDecisionStore(home, { log: () => {} });
+    const lines = createMissionRoster(home)
+      .list(mission.missionId)
+      .filter((request) => request.state === "active")
+      .reverse()
+      .slice(0, 5)
+      .map((request) => {
+        const worker = request.workerIds.at(-1) ?? null;
+        const report = worker === null ? null : newestReportRecordOf(home, request.workspaceId, worker);
+        const open = decisions
+          .list({ workspaceId: request.workspaceId, requestId: request.requestId })
+          .filter((decision) => decision.status === "open" || decision.status === "needs-confirmation").length;
+        const asked = request.topic === "" ? "" : `; asked: ${shorten(redactText(request.topic, env), 240)}`;
+        return `- ${request.requestId}: ${(report === null ? null : reportPhaseOf(report.text)) ?? "no report yet"}, in ${request.workspaceId}, Worker ${worker ?? "unknown"}, open decisions ${open}${asked}`;
+      });
+    return [`mission: ${mission.code} ${mission.name}`, ...(lines.length === 0 ? ["requests: none open"] : ["requests (newest first):", ...lines]), "Read the whole mission with bm_mission."];
+  } catch {
+    return null;
+  }
+}
+
+/** The Manager's brief: its newest requests with where they stand, and the owner's newest words to it; a Main's requests from its mission. */
+function managerBrief(
+  entry: CompactionEntry,
+  traces: readonly ReconstructedTrace[],
+  decisions: readonly Decision[],
+  records: readonly TraceRecord[],
+  env: NodeJS.ProcessEnv,
+  mission: string[] | null,
+): string[] {
   const own = traces
     .filter((trace) => trace.requestId !== null && trace.managerAgentId === entry.agentId)
     .sort((a, b) => (timeOrNull(b.requestedAt) ?? 0) - (timeOrNull(a.requestedAt) ?? 0))
@@ -278,7 +318,7 @@ function managerBrief(entry: CompactionEntry, traces: readonly ReconstructedTrac
   };
   return [
     "role: manager",
-    ...(own.length === 0 ? ["requests: none recorded"] : ["requests (newest first):", ...own.map(requestLine)]),
+    ...(mission ?? (own.length === 0 ? ["requests: none recorded"] : ["requests (newest first):", ...own.map(requestLine)])),
     ...(owner.length === 0 ? ["ownerSaid: nothing recorded"] : ["ownerSaid (newest last):", ...owner.map((message) => `- ${message.at}: ${shorten(redactText(message.text, env), 400)}`)]),
   ];
 }
@@ -313,7 +353,7 @@ export function stateBriefOf(entry: CompactionEntry, home: string, env: NodeJS.P
   const body =
     entry.role === "worker"
       ? workerBrief(entry, traces.find((trace) => trace.requestId !== null && trace.requestId === entry.requestId), decisions, env)
-      : managerBrief(entry, traces, decisions, records, env);
+      : managerBrief(entry, traces, decisions, records, env, missionRequestLines(entry, home, env));
   const text = [STATE_NOTICE_MARKER, BRIEF_INTRO, ...body].join("\n");
   return text.length <= STATE_BRIEF_MAX_CHARS ? text : `${text.slice(0, STATE_BRIEF_MAX_CHARS - 2).trimEnd()}\n…`;
 }

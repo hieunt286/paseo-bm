@@ -44,6 +44,17 @@
  * `requestId` may be a link id (the answering Manager's message on a link no
  * request took yet).
  *
+ * **Records addressed to a Main** (missions design §3.4, "resolve at
+ * delivery"): any other record whose `to` is, or was, the Main of its
+ * request's mission (the mission's `mainId` or `mainHistory`, or the
+ * request's registry `managerId`) goes to the mission's current Main, resolved
+ * at every attempt and after a queue drop (`mainTargetOf`; at most
+ * `PEER_RETARGETS` times per delivery), the new target written on the record
+ * first. While the mission is open, such a record the queue drops with no
+ * other Main to go to is never `dropped`: it stays `pending` (one log line),
+ * and the mission's next Main gets it (`mission-replace.ts` delivers it again)
+ * — a cleared conversation archives the old Main before its successor exists.
+ *
  * **After a reload** (`createOutboxResend`): at the first hook or RPC with a
  * Paseo handle, every `pending` record of every workspace is enqueued again.
  * One sent just before the reload, whose outcome was not written yet, reaches
@@ -66,7 +77,10 @@ import { DELIVERY_KINDS, OUTBOX_RECORD_ID_PATTERN, PEER_DELIVERY_KINDS, delivery
 import { createAlertStore, type AlertInput } from "./alert-store";
 import { redactText } from "./collector";
 import { capBy, createJsonFileStore, entriesOf, type JsonFileStore } from "./data-files";
+import { requestIndexOf } from "./mission-roster";
+import { createMissionStore } from "./mission-store";
 import { noticeQueue, type NoticeOutcome, type NoticePaseo, type NoticeQueue } from "./notice-queue";
+import { createRequestRegistry } from "./request-registry";
 import { errorText } from "./rpc-kit";
 import { WORKSPACE_ID_PATTERN } from "./trace-store";
 import { timeOrZero } from "../shared/time";
@@ -301,6 +315,26 @@ export function usePeerTargets(resolve: PeerTargetResolver, delivered: PeerDeliv
   peerTargets.delivered = delivered;
 }
 
+/**
+ * Who a record addressed to a Main goes to now (missions design §3.4): the
+ * current Main of its request's mission, and whether the mission is open
+ * (`hold`: a drop keeps it pending); null for a record of no mission, or one
+ * whose `to` was never that mission's Main (a Worker, a Reviewer). Never throws.
+ */
+export function mainTargetOf(home: string, workspaceId: string, record: Pick<OutboxRecord, "requestId" | "to">): { to: string; hold: boolean } | null {
+  try {
+    const request = createRequestRegistry(home).get(workspaceId, record.requestId);
+    const missionId = request?.missionId ?? requestIndexOf(home, record.requestId)?.missionId ?? null;
+    const mission = missionId === null ? null : createMissionStore(home).get(missionId);
+    if (mission === null) return null;
+    const mains = new Set([...mission.mainHistory.map((entry) => entry.agentId), mission.mainId, request?.managerId ?? null]);
+    if (!mains.has(record.to)) return null;
+    return { to: mission.mainId ?? record.to, hold: mission.state === "open" };
+  } catch {
+    return null;
+  }
+}
+
 export interface OutboxDeliveryDeps extends OutboxDeps {
   /** The data folder. */
   home: string;
@@ -399,6 +433,9 @@ export async function deliverRecord(workspaceId: string, given: OutboxRecord, de
   const peerTarget =
     resolve !== null && isPeer && paseo !== undefined ? (): Promise<string | null | undefined> => resolve(workspaceId, record, deps.home, paseo).catch(() => undefined) : null;
 
+  /** The mission's current Main for a record addressed to a Main (§3.4); null for any other record and every peer kind. */
+  const mainTarget = isPeer ? null : () => mainTargetOf(deps.home, workspaceId, record);
+
   /** Writes a new target on the record before its send; false when the stored record is settled already (nothing to send). */
   const retarget = (to: string): boolean => {
     try {
@@ -443,6 +480,15 @@ export async function deliverRecord(workspaceId: string, given: OutboxRecord, de
    * for every other kind, it is `dropped`. Null when settled here.
    */
   const dropped = (reason: string, retargets: number): Promise<NoticeOutcome> | null => {
+    const main = mainTarget?.() ?? null;
+    if (main !== null) {
+      // §3.4: the mission's Main now, else held for its next Main while the mission is open.
+      if (main.to !== record.to && retargets < PEER_RETARGETS) return retarget(main.to) ? attempt(retargets + 1) : Promise.resolve("dropped");
+      if (main.hold) {
+        log(`[paseo-bm] the ${record.kind} ${record.id} of request ${record.requestId} to the Main ${record.to} was not delivered (${reason}); it waits for the mission's next Main.`);
+        return Promise.resolve("queued");
+      }
+    }
     if (peerTarget === null || retargets >= PEER_RETARGETS) {
       settle("dropped", reason);
       return null;
@@ -466,6 +512,9 @@ export async function deliverRecord(workspaceId: string, given: OutboxRecord, de
     }
     if (to !== undefined && to !== record.to) retarget(to);
   }
+  // §3.4: a record addressed to a Main goes to the mission's Main now.
+  const main = mainTarget?.() ?? null;
+  if (main !== null && main.to !== record.to) retarget(main.to);
   return attempt(0);
 }
 
@@ -538,18 +587,51 @@ export function recordsCreatedBy(home: string, workspaceId: string, agentId: str
     });
 }
 
+/** The `phase:` of a report block, or null. Pure. */
+export function reportPhaseOf(text: string): string | null {
+  return /^phase:[ \t]*(\S+)/m.exec(text)?.[1] ?? null;
+}
+
+/**
+ * How far a phase is along, for two reports created in the same second
+ * (missions acceptance, 2026-10-09: `received` and `finished` in one turn):
+ * `stopped` and `finished` > `blocked` > the working phases > `received`.
+ */
+function phaseRank(phase: string | null): number {
+  switch (phase) {
+    case "finished":
+    case "stopped":
+      return 3;
+    case "blocked":
+      return 2;
+    case "documents-done":
+    case "beads-done":
+    case "bead-implemented":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
 /**
  * The newest `report` record of `agentId` that is `pending` or `delivered`
  * (§16.7: how `compaction.ts` reads a bound agent's reports), created at or
- * after `since` when given. Never throws.
+ * after `since` when given. Newest is by `createdAt`, ties broken by the
+ * phase's rank (`phaseRank`), then by the file's order: the file's order alone
+ * is not the order of creation. Never throws.
  */
 export function newestReportRecordOf(home: string, workspaceId: string, agentId: string, since: string | null = null): OutboxRecord | null {
   const lower = since === null ? Number.NEGATIVE_INFINITY : timeOrZero(since);
-  return (
-    createOutbox(home)
-      .list(workspaceId)
-      .filter((record) => record.from === agentId && record.kind === "report" && (record.state === "pending" || record.state === "delivered"))
-      .filter((record) => timeOrZero(record.createdAt) >= lower)
-      .at(-1) ?? null
-  );
+  let newest: OutboxRecord | null = null;
+  for (const record of createOutbox(home).list(workspaceId)) {
+    if (record.from !== agentId || record.kind !== "report" || (record.state !== "pending" && record.state !== "delivered")) continue;
+    const at = timeOrZero(record.createdAt);
+    if (at < lower) continue;
+    if (newest !== null) {
+      const best = timeOrZero(newest.createdAt);
+      if (at < best || (at === best && phaseRank(reportPhaseOf(record.text)) < phaseRank(reportPhaseOf(newest.text)))) continue;
+    }
+    newest = record;
+  }
+  return newest;
 }

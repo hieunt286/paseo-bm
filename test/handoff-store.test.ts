@@ -66,6 +66,7 @@ describe("the store", () => {
     expect(entry).toEqual({
       id: "h1",
       ...input,
+      missionId: null,
       state: "waiting",
       requestedAt: iso(T0),
       noteAskedAt: null,

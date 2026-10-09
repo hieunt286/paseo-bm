@@ -32,6 +32,7 @@
 - Amended: 2026-09-25 — [ADR-012](../adr/ADR-012-plugin-is-the-product.md), the owner's decision: a single source; Designed lane (PRD, Technical Design, ADR edited in place)
 - Amended: 2026-10-03 — [ADR-027](../adr/ADR-027-agents-write-content-code-carries-it.md), whose own Routing Decision governs that work: REQ-037, REQ-025 (c), M-17 and the §9 Phase 3 row
 - Amended: 2026-10-09 — [ADR-028](../adr/ADR-028-projects-ask-each-other-through-the-plugin.md), whose own Routing Decision governs that work: REQ-175 → REQ-183, M-19 → M-21, the §3 and §9 rows of that date
+- Amended: 2026-10-09 — [ADR-029](../adr/ADR-029-missions-mains-and-a-process-governor.md) and the [missions PRD](./paseo-bm-missions-prd.md), whose own routing governs that work: REQ-020 (b) and REQ-021 (a) (a Main per mission, Workers in any repository of it), REQ-176 → REQ-178 for Workers of a mission (asks go to their own Main)
 
 ## 1. Context
 
@@ -361,6 +362,7 @@ Rows up to 2026-10-02 are archived in [paseo-bm-prd-revision-history-to-20261002
 | 2026-10-04 | hieu.nt10 (owner request; written by Codex) | REQ-021 (g): plugin-created Workers use concise request-derived titles while preserving the Worker role marker and colour; handoff successors use the same rule. `prd-ready`: PASS |
 | 2026-10-09 | hieu.nt10 (owner request; written by Claude) | REQ-175 → REQ-183, M-19 → M-21, §3 and §9 rows: projects ask each other through the plugin, every Manager is bound, the noise that cost owner turns removed ([ADR-028](../adr/ADR-028-projects-ask-each-other-through-the-plugin.md)). `prd-ready`: PASS (approved by Claude under the owner's delegation, 2026-10-09) |
 | 2026-10-09 | Claude (owner's delegation) | §9: "Projects ask each other" built and accepted (M-19 = 0, M-20 = 0.1 s, M-21 = 0); not yet released |
+| 2026-10-09 | hieu.nt10 (owner decisions; written by Claude) | §0: amended by ADR-029 and the missions PRD (REQ-020 b, REQ-021 a, REQ-176 → REQ-178 for Workers of a mission) |
 
 ## 12. Appendix A — Survey of the recommended skills source
 

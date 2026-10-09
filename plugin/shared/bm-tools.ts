@@ -740,6 +740,9 @@ export const AGENT_MESSAGES_SUMMARY = { count: 5, maxChars: 1_500 } as const;
 /** What `bm_repo` can run (design §6B.4); each is a fixed read-only git command. */
 export const REPO_ACTIONS = ["status", "diff-stat", "log", "show"] as const;
 export type RepoAction = (typeof REPO_ACTIONS)[number];
+/** The Main's `bm_repo` (missions design §4): the same, plus `read`, a window of one file's lines. */
+export const MAIN_REPO_ACTIONS = [...REPO_ACTIONS, "read"] as const;
+export type MainRepoAction = (typeof MAIN_REPO_ACTIONS)[number];
 /** How many decisions `bm_decisions` returns (autonomy design §A.9): newest asked first. */
 export const DECISIONS_TOOL_LIMIT = { min: 1, max: 50, default: 20 } as const;
 /** `bm_decisions`' status filter: one status, or `unsettled` for `open` and `needs-confirmation` together. */
@@ -1312,6 +1315,8 @@ export interface QuestionsInput {
     subject: string;
     class: DecisionClass;
     supersedes?: string;
+    /** A fact only the owner knows (missions design §5). */
+    ownerOnly?: boolean;
     options: Array<{
       key: string;
       text: string;
@@ -1348,6 +1353,10 @@ export const QUESTIONS_FACE: ToolFace = {
             },
             class: CLASS_FIELD,
             supersedes: { ...QUESTION_ID, description: "The earlier question of this request that this one asks again, such as Q2; leave it out for a new question." },
+            ownerOnly: {
+              type: "boolean",
+              description: "True when only the owner knows the answer: a login, an account or user id, a port of the owner's machine, a personal choice. Then only the owner answers it.",
+            },
             options: {
               type: "array",
               minItems: 2,
@@ -1536,13 +1545,13 @@ function peerFaces(role: "manager" | "worker"): ToolFace[] {
       name: "bm_peers",
       role,
       description:
-        "Read the other projects you can ask (Paseo workspaces, each with its live Manager) and this project's peer links both ways, newest first: who asked whom, the requests, the state and the newest message. project narrows the links to one project. Read-only. Returns JSON { projects, links }.",
+        "Read the other projects you can ask (Paseo workspaces, each with its live Manager) and this project's peer links both ways, newest first: who asked whom, the requests, the state and the newest message; a Main also reads the other open missions and its mission's links of every kind. project narrows the links to one project. Read-only. Returns JSON { projects, links } (a Main: and missions).",
       inputSchema: { type: "object", additionalProperties: false, properties: { project: PROJECT } },
     },
     {
       name: "bm_ask_project",
       role,
-      description: `Ask another project for work or an answer: paseo-bm stores the ask as a peer link and delivers it to that project's Manager (opening one when it has none). Never message another project's agents yourself. Its reply reaches you as a BM-DELIVERY peer-reply; talk on the link with bm_peer_reply. Returns JSON { linkId, project, managerId, delivery, openedManager }. ${DELIVERED}`,
+      description: `Ask another project for work or an answer: paseo-bm stores the ask as a peer link and delivers it to that project's Manager (opening one when it has none) — or, for a Worker of a mission, to its own Main, who links it with the Worker on that work or gives it one there. A Main asks no project: it adds the repo to its mission or asks its mission (bm_ask_mission). Never message another project's agents yourself. Its reply reaches you as a BM-DELIVERY peer-reply; talk on the link with bm_peer_reply. Returns JSON { linkId, project, managerId, delivery, openedManager }. ${DELIVERED}`,
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -1574,6 +1583,273 @@ function peerFaces(role: "manager" | "worker"): ToolFace[] {
   ];
 }
 
+// ---------------------------------------------------------------------------
+// The Main's mission tools (missions design §4; ADR-029), run by
+// `server/mission-tools.ts`.
+// ---------------------------------------------------------------------------
+
+/** The bounds of the mission tools (missions design §2.1, §4). */
+export const MISSION_TOOL_LIMITS = {
+  name: 80,
+  goal: 4_000,
+  nonGoal: 300,
+  nonGoals: 20,
+  criterion: 500,
+  evidence: 500,
+  criteria: 20,
+  plan: 20_000,
+  contractTitle: 200,
+  contractText: 4_000,
+  contractSource: 300,
+  contracts: 10,
+  repos: 20,
+  repo: 4_096,
+} as const;
+/** A mission's short code: 2 to 8 capital letters or digits, a letter first. */
+export const MISSION_CODE_SOURCE = "^[A-Z][A-Z0-9]{1,7}$";
+
+const MISSION_REPO: JsonSchema = { type: "string", minLength: 1, maxLength: MISSION_TOOL_LIMITS.repo, description: "A repository: its workspace id, or its absolute folder." };
+const MISSION_REPOS: JsonSchema = { type: "array", minItems: 1, maxItems: MISSION_TOOL_LIMITS.repos, items: MISSION_REPO };
+const BUDGET_VALUE: JsonSchema = { type: "integer", minimum: 0 };
+
+/** How long after a Worker's question its Main may still answer it (missions design §8 rule 2); then it is the owner's. */
+export const MAIN_ANSWER_MINUTES = 10;
+
+/** `bm_mission`, `bm_mission_start`, `bm_mission_update` and `bm_answer_worker`: a bound Manager lists them; only a Main can use them. */
+export const MISSION_TOOL_FACES: readonly ToolFace[] = [
+  {
+    name: "bm_mission",
+    role: "manager",
+    description:
+      "Read your mission: its charter (goal, repos, non-goals, done criteria, budget, whether the owner confirmed it), plan and contracts; each request of its roster with its repo, Worker, phase and newest report; your Workers' open questions and the mission's open owner cards (m:); the mission level; the newest 50 journal lines. Read-only. Returns JSON.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+  },
+  {
+    name: "bm_mission_start",
+    role: "manager",
+    description: `Record the mission the owner named — an unassigned Main's first act: its name, short code, goal and repositories, in the owner's words. Call it in the turn of the owner's answer: paseo-bm records the mission when that turn ends, only if the turn holds the owner's own message, and makes you its Main. Returns JSON { proposed }. ${DELIVERED}`,
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["name", "code", "goal", "repos"],
+      properties: {
+        name: { type: "string", minLength: 1, maxLength: MISSION_TOOL_LIMITS.name, description: "The mission's name, as the owner gave it." },
+        code: { type: "string", pattern: MISSION_CODE_SOURCE, description: "The owner's short code: 2 to 8 capital letters or digits, a letter first." },
+        goal: { type: "string", minLength: 1, maxLength: MISSION_TOOL_LIMITS.goal, description: "The mission's goal, in the owner's words." },
+        repos: { ...MISSION_REPOS, description: "The repositories the mission works in." },
+      },
+    },
+  },
+  {
+    name: "bm_mission_update",
+    role: "manager",
+    description: `Change your mission. Written at once: plan (the whole text), contracts (add one, or a new version of one by id), a new done criterion, a criterion's status open or met (met with its evidence), and adding a repo when the mission level delegates scope-repo. Everything else — name, code, goal, nonGoals, budget, confirmCharter, close, removing a repo, rewording or dropping a criterion, adding a repo otherwise — opens one owner card (m:) with "apply" and "keep as is", which paseo-bm applies when the owner taps apply. Returns JSON { applied, decisionId }. ${DELIVERED}`,
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        name: { type: "string", minLength: 1, maxLength: MISSION_TOOL_LIMITS.name },
+        code: { type: "string", pattern: MISSION_CODE_SOURCE },
+        goal: { type: "string", minLength: 1, maxLength: MISSION_TOOL_LIMITS.goal },
+        nonGoals: {
+          type: "array",
+          maxItems: MISSION_TOOL_LIMITS.nonGoals,
+          items: { type: "string", minLength: 1, maxLength: MISSION_TOOL_LIMITS.nonGoal },
+          description: "The whole list of non-goals as it should be.",
+        },
+        doneCriteria: {
+          type: "array",
+          minItems: 1,
+          maxItems: MISSION_TOOL_LIMITS.criteria,
+          description: "Without id: a new criterion (text). With id: its new text, or its status — met needs evidence; dropped goes to the owner.",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              id: { type: "string", pattern: "^D\\d{1,4}$" },
+              text: { type: "string", minLength: 1, maxLength: MISSION_TOOL_LIMITS.criterion },
+              status: { type: "string", enum: ["open", "met", "dropped"] },
+              evidence: { type: "string", minLength: 1, maxLength: MISSION_TOOL_LIMITS.evidence, description: "What shows the criterion is met: a request, a report, a commit." },
+            },
+          },
+        },
+        budget: {
+          type: "object",
+          additionalProperties: false,
+          description: "The whole budget as it should be; a field left out has no limit, an empty object removes the budget.",
+          properties: { requests: BUDGET_VALUE, workers: BUDGET_VALUE, reviewCalls: BUDGET_VALUE, days: BUDGET_VALUE },
+        },
+        plan: { type: "string", minLength: 1, maxLength: MISSION_TOOL_LIMITS.plan, description: "The whole plan as it should be." },
+        contracts: {
+          type: "array",
+          minItems: 1,
+          maxItems: MISSION_TOOL_LIMITS.contracts,
+          description: "Without id: a new contract (title, providerRepo, text, source). With id: its new version (text, source).",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["text", "source"],
+            properties: {
+              id: { type: "string", pattern: "^C\\d{1,4}$" },
+              title: { type: "string", minLength: 1, maxLength: MISSION_TOOL_LIMITS.contractTitle },
+              providerRepo: MISSION_REPO,
+              consumerRepos: { type: "array", maxItems: MISSION_TOOL_LIMITS.repos, items: MISSION_REPO },
+              text: { type: "string", minLength: 1, maxLength: MISSION_TOOL_LIMITS.contractText },
+              source: { type: "string", minLength: 1, maxLength: MISSION_TOOL_LIMITS.contractSource, description: "Where the contract comes from: a document, a decision, a request." },
+            },
+          },
+        },
+        repos: {
+          type: "object",
+          additionalProperties: false,
+          properties: { add: MISSION_REPOS, remove: MISSION_REPOS },
+        },
+        confirmCharter: { type: "boolean", description: "True: ask the owner to confirm the charter as it stands." },
+        close: { type: "boolean", description: "True: ask the owner to close the mission (refused while a Worker of it runs)." },
+      },
+    },
+  },
+  {
+    name: "bm_answer_worker",
+    role: "manager",
+    description: `Answer your Workers' open questions (Qn) yourself, as the mission's Main, where paseo-bm lets you: a class the repo delegates, or one your mission level delegates (answer-technical: scope, preference, reversible-technical; answer-effects: the rest). In a shadow cell you may not decide, your choice is recorded as your recommendation and the owner decides. paseo-bm delivers your answer to the Worker as yours, never the owner's, and it grants nothing: an effect it allows still passes the repo's action boundary. Refused for an ownerOnly question, a question asked more than ${MAIN_ANSWER_MINUTES} minutes ago (it is the owner's then), a settled one, an option with a grant or a change, or a request outside your mission. Returns JSON [{ qn, decisionId, state }]. ${DELIVERED}`,
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["requestId", "answers"],
+      properties: {
+        requestId: { ...REQUEST_ID, description: "The request of your mission whose questions you answer (bm_mission lists them)." },
+        answers: {
+          type: "array",
+          minItems: 1,
+          maxItems: 5,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["qn", "option", "why"],
+            properties: {
+              qn: QUESTION_ID,
+              option: { type: "string", pattern: "^[a-h]$", description: "The option you choose." },
+              why: { type: "string", minLength: 1, maxLength: 300, description: "Why, in one line, from the mission's goal and plan." },
+            },
+          },
+        },
+      },
+    },
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Project memory and the Main's bm_repo (missions design §2.5, §4, §5;
+// ADR-029), run by `server/memory-tools.ts`.
+// ---------------------------------------------------------------------------
+
+/** The bounds of `bm_memory` and the Main's `bm_repo` (missions design §2.5, §4); `text` and `source` are the memory store's. */
+export const MEMORY_TOOL_LIMITS = { text: 1_000, source: 300, query: 200, why: 300, from: 1_000_000, lines: 2_000 } as const;
+/** What a Main adds to a repo's memory; a Worker adds the last three (§5). A `precedent` is the owner's, read through. */
+export const MEMORY_ADD_KINDS = ["decision", "fact", "convention", "contract"] as const;
+export const WORKER_MEMORY_KINDS = ["fact", "convention", "contract"] as const;
+
+function memoryFace(role: "manager" | "worker"): ToolFace {
+  const main = role === "manager";
+  return {
+    name: "bm_memory",
+    role,
+    description: main
+      ? `Read or curate the project memory of a repo of your mission: what it decided, learnt and agreed, for the Workers and Mains after you. op read (query narrows it) lists its active entries and the owner's precedents; add stores one (kind, text, source); remove (id, why) retires one, its why in the mission's journal. At most 300 active entries a repo: past that, add is refused until you remove some. The owner's answers to your Workers' questions are added by paseo-bm. Returns JSON. ${DELIVERED}`
+      : `Read or add to the project memory of your own repo: what it decided, learnt and agreed, for the Workers after you. op read (query narrows it) lists its active entries and the owner's precedents; add stores one fact, convention or contract (kind, text, source). Returns JSON. ${DELIVERED}`,
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: main ? ["project", "op"] : ["op"],
+      properties: {
+        project: {
+          type: "string",
+          pattern: WORKSPACE_ID_SOURCE,
+          description: main ? "The workspace id of a repo of your mission (bm_mission lists them)." : "Your own repo's workspace id; leave it out for your repo.",
+        },
+        op: { type: "string", enum: main ? ["read", "add", "remove"] : ["read", "add"] },
+        query: { type: "string", minLength: 1, maxLength: MEMORY_TOOL_LIMITS.query, description: "read: only the entries whose text or source holds these words." },
+        kind: { type: "string", enum: main ? MEMORY_ADD_KINDS : WORKER_MEMORY_KINDS, description: "add: what the entry is." },
+        text: { type: "string", minLength: 1, maxLength: MEMORY_TOOL_LIMITS.text, description: "add: the entry, one self-contained statement." },
+        source: { type: "string", minLength: 1, maxLength: MEMORY_TOOL_LIMITS.source, description: "add: where it comes from: a request, a decision id, a document, a commit." },
+        ...(main
+          ? {
+              id: { type: "string", pattern: "^mem-[0-9a-f]{10}$", description: "remove: the entry, mem-…, as read gave it." },
+              why: { type: "string", minLength: 1, maxLength: MEMORY_TOOL_LIMITS.why, description: "remove: why it no longer holds, in one line." },
+            }
+          : {}),
+      },
+    },
+  };
+}
+
+/** `bm_memory` for a Main and a Worker, and the Main's `bm_repo`: a bound Manager lists them; only a Main can use its two. */
+export const MEMORY_TOOL_FACES: readonly ToolFace[] = [
+  memoryFace("manager"),
+  {
+    name: "bm_repo",
+    role: "manager",
+    description:
+      "Check a repo of your mission for yourself, read-only: git status, the diff stat (staged and unstaged), the last 20 commits, one file (show: as committed with HEAD:<path>, or as it is now), or read: a window of a file's lines (path, from, lines). Only the repos of your mission's charter, inside their folders; no file whose name marks a secret, nothing git ignores. Nothing is written, fetched or pushed. Returns text, redacted and capped.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["workspaceId", "action"],
+      properties: {
+        workspaceId: { ...WORKSPACE_ID, description: "The workspace id of a repo of your mission (bm_mission lists them)." },
+        action: { type: "string", enum: MAIN_REPO_ACTIONS, description: "status | diff-stat | log | show (needs file) | read (needs path)." },
+        path: { type: "string", minLength: 1, maxLength: 500, description: "read: the file, relative to the repo's folder. Otherwise a sub-folder to run in." },
+        file: { type: "string", minLength: 1, maxLength: 500, description: "For show: a file relative to the folder, or HEAD:<file> for its committed version." },
+        from: { type: "integer", minimum: 1, maximum: MEMORY_TOOL_LIMITS.from, description: "read: the first line, 1 by default." },
+        lines: { type: "integer", minimum: 1, maximum: MEMORY_TOOL_LIMITS.lines, description: "read: how many lines, 400 by default." },
+      },
+    },
+  },
+  memoryFace("worker"),
+];
+
+// ---------------------------------------------------------------------------
+// The Main's link tools (missions design §2.6, §4, §5), run by
+// `server/peer-tools.ts`.
+// ---------------------------------------------------------------------------
+
+/** The bounds of the Main's link tools (missions design §4). */
+export const MISSION_LINK_LIMITS = { topic: 2_000 } as const;
+
+/** `bm_link_workers` and `bm_ask_mission`: a bound Manager lists them; only a Main can use them. */
+export const MISSION_LINK_FACES: readonly ToolFace[] = [
+  {
+    name: "bm_link_workers",
+    role: "manager",
+    description: `Link two live Workers of your mission that must agree on something — in any repos, the same one included: paseo-bm opens a peer link between them (an open ask one of them made you becomes that link) and tells each who the other is and the topic; they talk on it with bm_peer_reply. Returns JSON { linkId, delivery }. ${DELIVERED}`,
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["requestIds", "topic"],
+      properties: {
+        requestIds: { type: "array", minItems: 2, maxItems: 2, items: REQUEST_ID, description: "The two requests of your mission whose Workers talk, as bm_mission lists them." },
+        topic: { type: "string", minLength: 1, maxLength: MISSION_LINK_LIMITS.topic, description: "What they must agree on." },
+      },
+    },
+  },
+  {
+    name: "bm_ask_mission",
+    role: "manager",
+    description: `Ask another mission's Main for work or an answer: paseo-bm stores the ask as a peer link and delivers it to that Main, who answers with bm_peer_reply. Never message another mission's agents yourself. Returns JSON { linkId, mission, mainId, delivery }. ${DELIVERED}`,
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["mission", "text"],
+      properties: {
+        mission: { type: "string", pattern: MISSION_CODE_SOURCE, description: "The other mission's code (bm_peers lists the missions)." },
+        text: { type: "string", minLength: 1, maxLength: PEER_TOOL_LIMITS.request, description: "The ask in full: what is needed, why, and the contract you expect back." },
+        kind: { type: "string", enum: ["work", "question"], description: "work (the default): the mission does something; question: what reading answers." },
+      },
+    },
+  },
+];
+
 /**
  * The tools only a bound agent has (design §16.6,
  * ADR-027 ship point C), run on the plugin server: they create agents, or
@@ -1587,7 +1863,7 @@ export const BOUND_SERVER_TOOLS: readonly ToolFace[] = [
     name: "bm_create_worker",
     role: "manager",
     description:
-      "Create the Worker of one new request of the owner: paseo-bm generates its requestId, creates the Worker in your folder with its labels, mode and tools, and gives it its first prompt — the request verbatim (a size the owner stated stays in it), the requestId, the repository, your id and the context you pass. Every call is a new request, a BM-NEW-REQUEST included. Returns JSON { workerId, requestId }.",
+      "Create the Worker of one new request of the owner: paseo-bm generates its requestId, creates the Worker in your folder (a Main: in the repo `project` names) with its labels, mode and tools, and gives it its first prompt — the request verbatim (a size the owner stated stays in it), the requestId, the repository, your id and the context you pass. Every call is a new request, a BM-NEW-REQUEST included. Returns JSON { workerId, requestId }.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1601,6 +1877,13 @@ export const BOUND_SERVER_TOOLS: readonly ToolFace[] = [
           items: CONTEXT_ITEM,
         },
         peerLink: { ...PEER_LINK, description: `${PEER_LINK.description} request is then your own words of what you hand over.` },
+        // Missions design §4: a Main creates its Workers in the repos of its mission.
+        project: {
+          type: "string",
+          pattern: WORKSPACE_ID_SOURCE,
+          description: "A Main only: the workspace id of the mission's repo the Worker works in (bm_mission lists them). Required when the mission has more than one repo.",
+        },
+        planStep: { type: "string", minLength: 1, maxLength: 300, description: "A Main only: where this request sits in the mission's plan, in one line." },
       },
     },
   },
@@ -1613,6 +1896,9 @@ export const BOUND_SERVER_TOOLS: readonly ToolFace[] = [
   BOUND_REVIEW_TOOL,
   ...peerFaces("manager"),
   ...peerFaces("worker"),
+  ...MISSION_TOOL_FACES,
+  ...MEMORY_TOOL_FACES,
+  ...MISSION_LINK_FACES,
 ];
 
 /** The faces only a creation-bound `role` lists (`BOUND_SERVER_TOOLS`), in the order its list shows them. */

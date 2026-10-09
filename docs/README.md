@@ -13,6 +13,7 @@ A PRD states **the outcome the user gets**; colours, labels, limits and numbers 
 | [paseo-bm-prd.md](product/paseo-bm-prd.md) | Install and machine set-up, the Manager / Worker / Reviewer loop, safety boundaries, review, reporting, provider fallback |
 | [paseo-bm-dashboard-prd.md](product/paseo-bm-dashboard-prd.md) | The trace store and the history it keeps (its screen requirements are replaced by the autonomy PRD, REQ-118) |
 | [paseo-bm-autonomy-prd.md](product/paseo-bm-autonomy-prd.md) | Calibrated autonomy: the Orchestrator, decisions as stored objects, autonomy levels per project, evidence, the action boundary, traceability, specialisation on evidence |
+| [paseo-bm-missions-prd.md](product/paseo-bm-missions-prd.md) | Missions and their Mains: one owner-facing Main per goal across repositories, a shared home, project memory, two autonomy layers, the Orchestrator as process governor (ADR-029) |
 
 ## How the product does it — `design/`
 
@@ -25,6 +26,7 @@ Code cites designs by name and section ("autonomy design §G.2", "design §7.13"
 | [paseo-bm-orchestrator.md](design/paseo-bm-orchestrator.md) | The Orchestrator agent: role and tools, rules and signals, the stall pass, Autopilot, `BM-COMMAND`, live coordination, the gate, the `orchestrator.*` RPCs |
 | [paseo-bm-autonomy.md](design/paseo-bm-autonomy.md) | The autonomy programme, Parts A–G: decision objects and typed handoffs, autonomy per class and level, evidence, the action boundary, traceability, specialisation, coordination control |
 | [paseo-bm-evaluation.md](design/paseo-bm-evaluation.md) | Metric definitions A-1 → A-11, the replay over the trace store, the evaluation suite on an isolated daemon |
+| [paseo-bm-missions.md](design/paseo-bm-missions.md) | Missions: the stores (mission, journal, roster, mission level, project memory), the home and the Main, the Main's tools, Main-side lookups, the two autonomy layers, the governor (figures, ladder, arbitration, splits), the Missions screen |
 
 Each role's behaviour lives in its own instructions, which the designs do not copy: [`manager.md`](../plugin/roles/manager.md), [`worker.md`](../plugin/roles/worker.md), [`reviewer.md`](../plugin/roles/reviewer.md), [`orchestrator.md`](../plugin/roles/orchestrator.md).
 
@@ -59,9 +61,11 @@ An ADR is never rewritten; a later ADR supersedes or amends it.
 | [023](adr/ADR-023-delegation-without-eligibility.md) | No eligibility gate; agreement is information | Accepted; partly superseded by 025 |
 | [024](adr/ADR-024-structure-tells-stops-and-waits.md) | A cut turn is told from the owner's stop by structure (`BM-INTERRUPTED`) | Accepted |
 | [025](adr/ADR-025-autonomy-levels.md) | Five autonomy levels per project; no owner-only class; overrides recorded | Accepted |
-| [026](adr/ADR-026-published-plugin-is-bundled.md) | The published plugin is `plugin-package/`, each entry bundled | Accepted |
+| [026](adr/ADR-026-published-plugin-is-bundled.md) | The published plugin is `plugin-package/`, each entry bundled | Accepted; decisions 2 and 6 amended by 030 |
 | [027](adr/ADR-027-agents-write-content-code-carries-it.md) | Agents write the content; the plugin's code creates, routes and delivers | Accepted |
-| [028](adr/ADR-028-projects-ask-each-other-through-the-plugin.md) | Projects ask each other through the plugin: peer links; every Manager bound | Accepted |
+| [028](adr/ADR-028-projects-ask-each-other-through-the-plugin.md) | Projects ask each other through the plugin: peer links; every Manager bound | Accepted; decision 3 superseded by 029 |
+| [029](adr/ADR-029-missions-mains-and-a-process-governor.md) | Missions and their Mains in a shared home; the Orchestrator governs the process | Accepted |
+| [030](adr/ADR-030-published-bundle-minifies-identifiers.md) | The published bundle minifies identifiers and keeps names | Accepted |
 
 ## Work in progress — `plans/`
 

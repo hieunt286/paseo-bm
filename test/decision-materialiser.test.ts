@@ -19,6 +19,7 @@ import { DECISIONS_DIR_NAME, clearDecisionStoreCache, createDecisionStore } from
 import { handleDecisionsAnswer, handleDecisionsList } from "../plugin/server/decision-rpc";
 import { createAutonomyStore } from "../plugin/server/autonomy-store";
 import { createRequestRegistry } from "../plugin/server/request-registry";
+import { createMissionRoster } from "../plugin/server/mission-roster";
 import { applyReviewBudgetGrants, policyGrantCapAt } from "../plugin/server/review-tools";
 import { createPrecedentStore } from "../plugin/server/precedent-store";
 import { decideRefusalOf, predictionRefusalOf, type AutonomyPolicy } from "../plugin/shared/autonomy";
@@ -845,5 +846,49 @@ describe("owner precedents (autonomy design §B.6)", () => {
     expect(policyGrantCapAt(home, WORKSPACE_ID, REQUEST)).toBe(0);
     expect(decideRefusalOf(createAutonomyStore(home).read(), get("Q4")!, { optionKey: "a", finishedUnverified: false, grantCap: 0 })).toMatch(/at most \{ calls: 0 \} now/);
     expect(logs).toEqual([]);
+  });
+});
+
+describe("a Main's turn in the Missions home (missions design §6)", () => {
+  const HOME_WS = "wks_home";
+  const MAIN = "agent-main";
+  const finished = ["BM-REPORT", `requestId: ${REQUEST}`, "phase: finished", "tier: Medium", "buildAndTests: npm test: pass", "blockers: none"].join("\n");
+  const mainTurn = (overrides: Partial<TraceRecord>): TraceRecord => managerTurn({ agentId: MAIN, workspaceId: HOME_WS, ...overrides });
+  const homeBytes = () => existsSync(join(home, DECISIONS_DIR_NAME, `${HOME_WS}.json`));
+  /** REQUEST lives in the repo WORKSPACE_ID, of a mission whose Main works in the home. */
+  const placeInRepo = () => createMissionRoster(home).add("mis-0123456789", { requestId: REQUEST, workspaceId: WORKSPACE_ID, topic: "Orders API" });
+
+  it("opens, settles in chat, expires and reverses each request's decisions in its repo, and looks its Worker up there", async () => {
+    placeInRepo();
+    const lookups: unknown[] = [];
+    const workerOf: MaterialiserDeps["workerOf"] = async (input) => {
+      lookups.push(input);
+      return WORKER;
+    };
+    await materialiseTurn(mainTurn({ sent: [msg(MAIN, at(2), report(ROUND_ONE), "agent")] }), deps({ workerOf }));
+    expect(lookups).toEqual([{ requestId: REQUEST, workspaceId: WORKSPACE_ID, managerId: MAIN }]);
+    expect(get("Q1")).toMatchObject({ status: "open", workspaceId: WORKSPACE_ID, askedBy: { agentId: WORKER } });
+
+    const reply = ["BM-ANSWERS", `requestId: ${REQUEST}`, "Q1: a — Push contract only"].join("\n");
+    const answered = await materialiseTurn(mainTurn({ sent: [msg(MAIN, at(6), "Contract only.", "user")], received: [msg(MAIN, at(7), reply)] }), deps({ workerOf }));
+    expect(answered.answered.map((decision) => decision.id)).toEqual([idOf("Q1")]);
+    expect(get("Q1")).toMatchObject({ status: "answered", answer: { by: "owner", via: "chat-manager", optionKey: "a" } });
+
+    const reopen = `br reopen bm-3 --reason "the owner reversed q:${REQUEST}:Q1"`;
+    const reversed = await materialiseTurn(mainTurn({ endedAt: at(8), evidence: [{ kind: "shell", detail: reopen, agentId: MAIN, at: at(8) }] }), deps({ workerOf }));
+    expect(reversed.reversed.map((decision) => decision.id)).toEqual([idOf("Q1")]);
+    expect(get("Q1")?.reversals).toEqual([{ kind: "reopened", at: at(8), ref: "bm-3" }]);
+
+    const expired = await materialiseTurn(mainTurn({ sent: [msg(MAIN, at(9), finished, "agent")] }), deps({ workerOf }));
+    expect(expired.expired.map((decision) => decision.id)).toEqual([idOf("Q2")]);
+    expect(get("Q2")?.status).toBe("expired");
+    // Nothing lands in the Main's own workspace.
+    expect(homeBytes()).toBe(false);
+  });
+
+  it("a request of no mission keeps the turn's own workspace", async () => {
+    await materialiseTurn(mainTurn({ sent: [msg(MAIN, at(2), report(ROUND_ONE), "agent")] }), deps());
+    expect(store().get(idOf("Q1"), HOME_WS)?.status).toBe("open");
+    expect(get("Q1")).toBeNull();
   });
 });

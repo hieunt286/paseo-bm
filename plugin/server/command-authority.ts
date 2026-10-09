@@ -457,7 +457,8 @@ function unrecordedText(said: string, problem: string): string {
 
 /**
  * `bm_send_command` (design §6A, §6B.1; autonomy design §A.7): checks the
- * Manager, then the authority and what it covers (`authorityOf`), then sends
+ * Manager (a mission request's goes to its mission's current Main,
+ * `requireManager`), then the authority and what it covers (`authorityOf`), then sends
  * through the one pipeline (`sendOwnCommand`): the block, the backstop and
  * the loop guard, and only then the `BM-COMMAND` block through the notice
  * queue, spending the decision's grant once it is delivered. Its `re:` is the
@@ -521,9 +522,9 @@ export interface DirectInput extends Declared {
  * Delivered as `BM-COMMAND to: worker` through the notice queue (at the
  * Worker's turn end), or with `interrupt: true` — allowed only while that
  * Worker's interrupt allowance is open (`isDangerOpen`) — sent at once, which
- * replaces its running turn. Once the Worker has it, its Manager (the agent
- * that created it, when that is a non-archived paseo-bm Manager of the
- * project, `copyRecipientOf`) gets the same block with `copy: yes` through
+ * replaces its running turn. Once the Worker has it, its Manager (its
+ * request's mission's current Main, else the agent that created it, when that
+ * is a non-archived paseo-bm Manager, `copyRecipientOf`) gets the same block with `copy: yes` through
  * the queue. Recorded `sent` with `to: "worker"`, `workerId`, and the Manager that got the copy as
  * `managerId` (null when the Worker has none). Every refusal comes before
  * anything is sent. A stop is checked by the backstop like any command: its
@@ -547,7 +548,7 @@ export async function bmDirectWorker(input: DirectInput, context: ToolContext, d
     DIRECT_REFUSED_MESSAGE,
     deps.log,
   );
-  const manager = copyRecipientOf(agents, worker, input.workspaceId);
+  const manager = copyRecipientOf(agents, worker, input.workspaceId, context.home);
   const command: CommandInput = {
     from: "orchestrator",
     via: "chat",

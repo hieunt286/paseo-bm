@@ -15,6 +15,7 @@ import { insightsSummaryRpc, type InsightsSummary, type InsightsSummaryInput, ty
 import { computeEvalMetrics, type EvalMetrics, type EvalWindow } from "../shared/eval-metrics";
 import { INTERVENTION_KINDS } from "../shared/interventions";
 import { evalInputsOf, isReadableFolder, readStore, selectWorkspaces, workspaceDirectoriesOf } from "./eval-store";
+import { isPluginHome } from "./plugin-homes";
 import { dataHome, logOf, type RpcHomeDeps, type RpcLogDeps } from "./rpc-kit";
 
 /** `log`: where an unreadable store is reported; `console.warn` by default. */
@@ -121,7 +122,10 @@ export function handleInsightsSummary(input: InsightsSummaryInput, deps: Insight
   if (home === null || !isReadableFolder(home)) {
     return insightsSummaryOf(input.window, computeEvalMetrics({ records: [], window }), { malformedLines: 0, unreadableFiles: 0 }, false);
   }
-  const store = readStore(home);
+  const read = readStore(home);
+  // The plugin's own homes are not projects (missions design §3.1): their turns (a Main's) are left out.
+  const homes = new Set([...read.workspaces].filter(([id, meta]) => isPluginHome(meta.directory, home) || isPluginHome(id, home)).map(([id]) => id));
+  const store = homes.size === 0 ? read : { ...read, records: read.records.filter((record) => !homes.has(record.workspaceId)) };
   const selection = selectWorkspaces(store, input.workspaceId === undefined ? null : new Set([input.workspaceId]));
   if (store.unknowns.unreadableFiles > 0) {
     logOf(deps)(`[paseo-bm] Insights skipped ${store.unknowns.unreadableFiles} unreadable file(s) of the data folder`);

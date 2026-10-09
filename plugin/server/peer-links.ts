@@ -26,6 +26,14 @@
  *   most `MAX_PEER_CHAIN_DEPTH` deep and never back to one of its workspaces.
  * - **A project** (§7.17.2) is a workspace Paseo lists, named by its id or by
  *   an absolute folder it is or contains (`resolveProject`).
+ * - **Routes** (missions design §2.6): a link's `route` is `project` (ADR-028,
+ *   the default: a stored link without one is a `project` link, and a new one
+ *   is written without it), `ask-main` (a mission Worker → its own Main, about
+ *   the repo `to.workspaceId`), `worker` (between two Workers of one Main,
+ *   `taken` at once) or `mission` (a Main → another mission's Main; no asking
+ *   request, `from.requestId` null). Every other route carries `missionId`:
+ *   the mission whose Main answers it. "A project cannot ask itself" holds for
+ *   `project` and `ask-main`; the chain rule for `project` only.
  *
  * Readers never throw; a store that cannot be read reads as empty. Changes
  * throw only when the file cannot be written; a change the rules refuse is a
@@ -38,6 +46,7 @@ import { OUTBOX_RECORD_ID_PATTERN } from "../shared/notices";
 import { redactText } from "./collector";
 import { createJsonFileStore, entriesOf, type JsonFileStore } from "./data-files";
 import { listedWorkspaces, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
+import { isPluginHomeIn } from "./plugin-homes";
 import { REQUEST_ID_PATTERN } from "./request-registry";
 import { timeOrZero } from "../shared/time";
 
@@ -68,6 +77,9 @@ export const PEER_RULES = [
 export const PEER_LINK_STATES = ["open", "taken", "answered", "closed"] as const;
 export type PeerLinkState = (typeof PEER_LINK_STATES)[number];
 export type PeerSide = "asker" | "answerer";
+/** How a link routes (missions design §2.6); a stored link without one is `project`. */
+export const PEER_LINK_ROUTES = ["project", "ask-main", "worker", "mission"] as const;
+export type PeerLinkRoute = (typeof PEER_LINK_ROUTES)[number];
 /** The delivery kinds a link's messages are stored under (§7.17.4). */
 export const PEER_MESSAGE_KINDS = ["peer", "peer-reply", "peer-message"] as const;
 
@@ -88,9 +100,13 @@ const linkSchema = z.object({
   linkId: z.string().regex(PEER_LINK_ID_PATTERN),
   createdAt: z.string(),
   kind: z.enum(["work", "question"]),
+  // Missions design §2.6: absent for a `project` link.
+  route: z.enum(PEER_LINK_ROUTES).optional(),
+  missionId: z.string().min(1).nullable().optional(),
   from: z.object({
     workspaceId: z.string().min(1),
-    requestId: z.string().regex(REQUEST_ID_PATTERN),
+    // Null only on a `mission` link: a Main asks for no request.
+    requestId: z.string().regex(REQUEST_ID_PATTERN).nullable(),
     agentId: z.string().min(1),
     role: z.enum(["manager", "worker"]),
   }),
@@ -120,6 +136,11 @@ interface PeerLinksFile {
 
 /** A change the store made, or why it refused (one line per reason). */
 export type PeerLinkResult = { ok: true; link: PeerLink } | { ok: false; reasons: string[] };
+
+/** The route of a link (missions design §2.6): `project` when it names none. */
+export function routeOf(link: Pick<PeerLink, "route">): PeerLinkRoute {
+  return link.route ?? "project";
+}
 
 /** True for a link still asking: `open` or `taken`. */
 export function isLiveLink(link: Pick<PeerLink, "state">): boolean {
@@ -166,12 +187,17 @@ export function linksOfRequestIn(links: readonly PeerLink[], workspaceId: string
   );
 }
 
-/** A link as `bm_peers` and the Orchestrator's `bm_projects` list it (§7.17.3, §7.17.5), seen from `workspaceId`. Pure. */
-export function linkViewOf(link: PeerLink, workspaceId: string) {
-  const asked = link.from.workspaceId === workspaceId;
+/**
+ * A link as `bm_peers` and the Orchestrator's `bm_projects` list it (§7.17.3,
+ * §7.17.5), seen from `workspaceId` (`asked`: whether that side asked it); a
+ * link of another route than `project` names it. Pure.
+ */
+export function linkViewOf(link: PeerLink, workspaceId: string, asked = link.from.workspaceId === workspaceId) {
   const newest = link.messages.at(-1);
+  const route = routeOf(link);
   return {
     linkId: link.linkId,
+    ...(route === "project" ? {} : { route }),
     direction: asked ? "asked" : "asked of us",
     project: asked ? link.to.workspaceId : link.from.workspaceId,
     ourRequestId: asked ? link.from.requestId : link.to.requestId,
@@ -193,9 +219,17 @@ export function linkViewsOf(links: readonly PeerLink[], workspaceId: string): Ar
 /** What a new link asks: who asks, of which workspace. */
 export interface NewPeerLink {
   kind: "work" | "question";
+  /** `project` by default (missions design §2.6). */
+  route?: PeerLinkRoute;
+  /** The mission whose Main answers a link of another route than `project`. */
+  missionId?: string | null;
   from: PeerLink["from"];
-  /** The answering workspace, and the Manager the ask is delivered to (null when none yet). */
-  to: { workspaceId: string; managerId: string | null };
+  /**
+   * The answering workspace, and the Manager the ask is delivered to (null
+   * when none yet); a `worker` link names the request and Worker that take it
+   * at once (`taken`).
+   */
+  to: { workspaceId: string; managerId: string | null; requestId?: string; workerId?: string };
   /** The ask in full; masked and kept to `MAX_PEER_TEXT`. */
   text: string;
 }
@@ -212,19 +246,27 @@ export interface NewPeerLink {
  * `MAX_LIVE_LINKS_PER_REQUEST` live links already, a depth past
  * `MAX_PEER_CHAIN_DEPTH`, and a target already in the chain (naming the live
  * link to reply on).
+ *
+ * Missions design §2.6: asking its own workspace is refused for `project` and
+ * `ask-main` only; the chain (only `project` links carried count) for
+ * `project` only — any other route starts `{ workspaces: [A], depth: 1 }`.
  */
 export function chainFor(
   links: readonly PeerLink[],
   from: Pick<PeerLink["from"], "workspaceId" | "requestId">,
   targetWorkspaceId: string,
+  route: PeerLinkRoute = "project",
 ): { ok: true; chain: PeerLink["chain"] } | { ok: false; reasons: string[] } {
   const reasons: string[] = [];
-  if (targetWorkspaceId === from.workspaceId) reasons.push("a project cannot ask itself; ask another project");
-  const live = linksOfRequestIn(links, from.workspaceId, from.requestId, "asker").filter(isLiveLink);
+  if ((route === "project" || route === "ask-main") && targetWorkspaceId === from.workspaceId) reasons.push("a project cannot ask itself; ask another project");
+  const requestId = from.requestId;
+  if (requestId === null) return reasons.length > 0 ? { ok: false, reasons } : { ok: true, chain: { workspaces: [from.workspaceId], depth: 1 } };
+  const live = linksOfRequestIn(links, from.workspaceId, requestId, "asker").filter(isLiveLink);
   if (live.length >= MAX_LIVE_LINKS_PER_REQUEST) {
-    reasons.push(`request ${from.requestId} already has ${live.length} live links (at most ${MAX_LIVE_LINKS_PER_REQUEST}); close one with bm_peer_reply close: true first`);
+    reasons.push(`request ${requestId} already has ${live.length} live links (at most ${MAX_LIVE_LINKS_PER_REQUEST}); close one with bm_peer_reply close: true first`);
   }
-  const carried = linksOfRequestIn(links, from.workspaceId, from.requestId, "answerer").filter(isLiveLink);
+  if (route !== "project") return reasons.length > 0 ? { ok: false, reasons } : { ok: true, chain: { workspaces: [from.workspaceId], depth: 1 } };
+  const carried = linksOfRequestIn(links, from.workspaceId, requestId, "answerer").filter((link) => isLiveLink(link) && routeOf(link) === "project");
   const workspaces = [...new Set([...carried.flatMap((link) => link.chain.workspaces.filter((id) => id !== from.workspaceId)), from.workspaceId])];
   const depth = carried.length === 0 ? 1 : Math.max(...carried.map((link) => link.chain.depth)) + 1;
   if (depth > MAX_PEER_CHAIN_DEPTH) {
@@ -283,6 +325,12 @@ export interface PeerLinkStore {
    * be written.
    */
   takeLink(linkId: string, by: { workspaceId: string; requestId: string; workerId: string | null; managerId?: string }): PeerLinkResult;
+  /**
+   * Missions design §5: an `open` `ask-main` link becomes a `worker` link
+   * `taken` by `to` (the request a Main links it with). Refused: another
+   * route, a link that is not `open`. Throws when the file cannot be written.
+   */
+  turnToWorker(linkId: string, to: { workspaceId: string; requestId: string; workerId: string; managerId: string }): PeerLinkResult;
   /** Appends a message to a link that is not `closed` (once per record id; the oldest past `MAX_PEER_MESSAGES` go). Throws when the file cannot be written. */
   appendMessage(linkId: string, message: NewPeerMessage): PeerLinkResult;
   /** A `finished` reply was delivered: `taken` → `answered`; an `answered` link stays so. Throws when the file cannot be written. */
@@ -359,25 +407,29 @@ export function createPeerLinkStore(home: string, deps: PeerLinkDeps = {}): Peer
     createLink(init) {
       let result: PeerLinkResult = { ok: false, reasons: ["the link was not written"] };
       file.update((current) => {
-        const chain = chainFor(current.links, init.from, init.to.workspaceId);
+        const route = init.route ?? "project";
+        const chain = chainFor(current.links, init.from, init.to.workspaceId, route);
         if (!chain.ok) {
           result = chain;
           return null;
         }
-        const taken = new Set(current.links.map((link) => link.linkId));
+        const used = new Set(current.links.map((link) => link.linkId));
         let linkId = newId();
-        while (taken.has(linkId)) linkId = newId();
+        while (used.has(linkId)) linkId = newId();
+        const at = now().toISOString();
+        const taken = init.to.requestId !== undefined;
         const link = linkSchema.parse({
           linkId,
-          createdAt: now().toISOString(),
+          createdAt: at,
           kind: init.kind,
+          ...(route === "project" ? {} : { route, missionId: init.missionId ?? null }),
           from: { ...init.from },
-          to: { workspaceId: init.to.workspaceId, managerId: init.to.managerId, requestId: null, workerId: null },
+          to: { workspaceId: init.to.workspaceId, managerId: init.to.managerId, requestId: init.to.requestId ?? null, workerId: init.to.workerId ?? null },
           chain: chain.chain,
           waitingSince: null,
           text: redactText(init.text, env).slice(0, MAX_PEER_TEXT),
-          state: "open",
-          takenAt: null,
+          state: taken ? "taken" : "open",
+          takenAt: taken ? at : null,
           answeredAt: null,
           closedAt: null,
           closedBy: null,
@@ -402,6 +454,12 @@ export function createPeerLinkStore(home: string, deps: PeerLinkDeps = {}): Peer
         // The request that holds it already (`taken` or `answered`): a successor Worker is noted, the state kept.
         if (by.workerId === null || link.to.workerId === by.workerId) return null;
         return { ...link, to: { ...link.to, workerId: by.workerId } };
+      });
+    },
+    turnToWorker(linkId, to) {
+      return change(linkId, (link) => {
+        if (routeOf(link) !== "ask-main" || link.state !== "open") return { reasons: [`link ${linkId} is not an open ask of a Worker to its Main`] };
+        return { ...link, route: "worker", state: "taken", to: { ...to }, takenAt: now().toISOString() };
       });
     },
     appendMessage(linkId, message) {
@@ -486,10 +544,11 @@ function isInsideFolder(root: string, path: string): boolean {
  *   that one directory are ambiguous. Matched as `workspaceOfFolder` matches
  *   (`role-hook.ts`, resolved paths), widened to a folder inside.
  *
- * Refused, naming what was given: an unknown project, an archived one, the
- * caller's own workspace, and an unreadable list.
+ * Refused, naming what was given: an unknown project, an archived one, a
+ * plugin home of `home` (missions design §3.1), the caller's own workspace,
+ * and an unreadable list.
  */
-export function resolveProjectIn(listed: readonly ListedWorkspace[] | null, input: string, callerWorkspaceId: string): ProjectResolution {
+export function resolveProjectIn(listed: readonly ListedWorkspace[] | null, input: string, callerWorkspaceId: string, home?: string | null): ProjectResolution {
   const given = typeof input === "string" ? input.trim() : "";
   if (given === "") return { ok: false, reasons: ["project is empty; give a workspace id or an absolute folder (bm_peers lists them)"] };
   if (listed === null) return { ok: false, reasons: [`cannot read Paseo's workspaces to find project ${JSON.stringify(given)}; try again`] };
@@ -507,17 +566,18 @@ export function resolveProjectIn(listed: readonly ListedWorkspace[] | null, inpu
   if (unarchived.length === 0) return { ok: false, reasons: [`project ${JSON.stringify(given)} is archived`] };
   if (unarchived.length > 1) return { ok: false, reasons: [`project ${JSON.stringify(given)} names more than one workspace (${unarchived.map((entry) => entry.id).join(", ")}); give its workspace id`] };
   const workspace = unarchived[0]!;
+  if (isPluginHomeIn(workspace.id, [workspace], home)) return { ok: false, reasons: [`project ${JSON.stringify(given)} is a paseo-bm home, not a project; ask another project`] };
   if (workspace.id === callerWorkspaceId) return { ok: false, reasons: [`project ${JSON.stringify(given)} is your own workspace; ask another project`] };
   return { ok: true, workspaceId: workspace.id, directory: workspace.directory };
 }
 
 /** `resolveProjectIn` over the workspaces Paseo lists now (`listedWorkspaces`). Never throws. */
-export async function resolveProject(paseo: DashboardPaseo, input: string, callerWorkspaceId: string): Promise<ProjectResolution> {
+export async function resolveProject(paseo: DashboardPaseo, input: string, callerWorkspaceId: string, home?: string | null): Promise<ProjectResolution> {
   let listed: ListedWorkspace[] | null;
   try {
     listed = await listedWorkspaces(paseo);
   } catch {
     listed = null;
   }
-  return resolveProjectIn(listed, input, callerWorkspaceId);
+  return resolveProjectIn(listed, input, callerWorkspaceId, home);
 }

@@ -14,7 +14,8 @@
  *   prediction is not in its cell: one with no recommended option has no
  *   recommended prediction, and one opened before predictions were recorded
  *   has none at all (change-007 §3.3).
- * - **Delegated** figures count answers `by: policy | precedent`, with the
+ * - **Delegated** figures count answers `by: policy | precedent` (a mission
+ *   Main's `by: main` as the policy's, predictor `main`), with the
  *   decisions overridden from the digest and those reversed in any way.
  * - A `by: orchestrator` answer (Phase 1's `bm_decide`, change-004) is neither
  *   the owner's nor delegated: it is in no figure (change-007 C4).
@@ -185,15 +186,17 @@ export function agreementLedger(decisions: readonly Decision[], options: Agreeme
       continue;
     }
 
-    if (answer.by === "policy" || answer.by === "precedent") {
+    if (answer.by === "policy" || answer.by === "precedent" || answer.by === "main") {
+      // Missions design §8: a mission Main's answer counts as the policy's, its predictor `main`.
+      const by = answer.by === "main" ? "policy" : answer.by;
       const predictor = policyPredictorOf(decision);
-      const key = `${decision.workspaceId}\u0000${decisionClass}\u0000${answer.by}\u0000${predictor ?? ""}`;
+      const key = `${decision.workspaceId}\u0000${decisionClass}\u0000${by}\u0000${predictor ?? ""}`;
       let cell = delegated.get(key);
       if (cell === undefined) {
         cell = {
           workspaceId: decision.workspaceId,
           class: decisionClass,
-          by: answer.by,
+          by,
           predictor,
           count: 0,
           overridden: 0,

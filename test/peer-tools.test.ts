@@ -7,10 +7,14 @@ import { clearJsonFileCache } from "../plugin/server/data-files";
 import { DELIVERY_NOT_BOUND_MESSAGE, NO_PASEO_DELIVERY_MESSAGE } from "../plugin/server/deliver-tools";
 import { AGENT_TOOLS_OFF_TOOL_MESSAGE } from "../plugin/server/manager";
 import { createNoticeQueue, type NoticePaseo } from "../plugin/server/notice-queue";
+import { orchestratorHomeOf } from "../plugin/server/orchestrator-agent";
 import { OUTBOX_DIR_NAME, createOutbox, createOutboxResend, deliverRecord } from "../plugin/server/outbox";
 import { UNBOUND_MANAGER_DETAIL } from "../plugin/server/outdated-agents";
 import { MAX_LIVE_LINKS_PER_REQUEST, createPeerLinkStore, type PeerLink } from "../plugin/server/peer-links";
 import { PEERS_LINKS_SHOWN, answererOf, askerOf, createPeerTools, peerDelivered, peerMessageText, peerReplyText, type PeerToolDeps } from "../plugin/server/peer-tools";
+import { openLinkOf } from "../plugin/server/create-worker";
+import { clearRequestIndexCache, createMissionRoster } from "../plugin/server/mission-roster";
+import { createMissionStore } from "../plugin/server/mission-store";
 import { clearRequestRegistryCache, createRequestRegistry } from "../plugin/server/request-registry";
 import { REDACTED } from "../plugin/server/collector";
 import { DELIVERY_KINDS, parseDelivery } from "../plugin/shared/notices";
@@ -36,6 +40,7 @@ const T0 = new Date("2026-10-08T12:00:00.000Z");
 const LINK = "peer-000000000001";
 
 afterEach(() => {
+  clearRequestIndexCache();
   clearRequestRegistryCache();
   clearJsonFileCache();
   removeDataFolders();
@@ -67,11 +72,11 @@ const MANAGER_B: ToolCaller = { agentId: "mgr-b", role: "manager", workspaceId: 
 
 const ASK = { project: B, request: "Add GET /api/orders returning { id, total }.\nNeeded for the orders page.", context: [{ fact: "The page lists orders", source: "owner's message" }] };
 
-function setup(options: { agents?: FakeAgent[]; paseo?: boolean; config?: Record<string, unknown>; bindB?: boolean; openManager?: PeerToolDeps["openManager"] } = {}) {
+function setup(options: { agents?: FakeAgent[]; paseo?: boolean; config?: Record<string, unknown>; bindB?: boolean; openManager?: PeerToolDeps["openManager"]; workspaces?: (home: string) => Array<Record<string, unknown>> } = {}) {
   const home = dataFolder();
   const agents = options.agents ?? AGENTS;
   const ids = [...agents.map((entry) => entry.id), "mgr-new", "wrk-a2", "wrk-b", "wrk-x"];
-  const fake = fakePaseo({ agents, workspaces: WORKSPACES, statuses: Object.fromEntries(ids.map((id) => [id, ["idle"]])), config: options.config ?? { mcp: { injectIntoAgents: true } } });
+  const fake = fakePaseo({ agents, workspaces: options.workspaces?.(home) ?? WORKSPACES, statuses: Object.fromEntries(ids.map((id) => [id, ["idle"]])), config: options.config ?? { mcp: { injectIntoAgents: true } } });
   const queue = createNoticeQueue({ log: () => {} });
   const logs: string[] = [];
   const opened: string[] = [];
@@ -472,9 +477,257 @@ describe("bm_peers", () => {
     expect(PEERS_LINKS_SHOWN).toBe(30);
   });
 
+  it("lists no plugin home and refuses one named (missions design §3.1)", async () => {
+    const { call } = setup({ workspaces: (home) => [...WORKSPACES, { id: "wks_orch", directory: orchestratorHomeOf(home) }] });
+    const mine = parsed(await call("worker", "bm_peers", {}, WORKER_A));
+    expect((mine["projects"] as Array<{ workspaceId: string }>).map((project) => project.workspaceId)).toEqual([B]);
+    expect((await call("worker", "bm_peers", { project: "wks_orch" }, WORKER_A)).text).toContain('project "wks_orch" is a paseo-bm home, not a project');
+  });
+
   it("refuses an unbound caller and a project it cannot name", async () => {
     const { call } = setup();
     expect(await call("manager", "bm_peers", {}, null)).toEqual({ ok: false, text: DELIVERY_NOT_BOUND_MESSAGE });
     expect((await call("worker", "bm_peers", { project: "wks_none" }, WORKER_A)).text).toContain('unknown project "wks_none"');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Missions (missions design §2.6, §4, §5).
+// ---------------------------------------------------------------------------
+
+describe("links of a mission (missions design §2.6, §4, §5)", () => {
+  const HOME_WS = "wks_home";
+  const C = "wks_c";
+  const REQ_M = "req-20261009T100000Z";
+  const REQ_N = "req-20261009T110000Z";
+  const REQ_P = "req-20261009T120000Z";
+  const SHOP = "mis-0000000001";
+  const OPS = "mis-0000000002";
+  const MAIN = agent("main-1", HOME_WS, "manager");
+  const MAIN2 = agent("main-2", HOME_WS, "manager");
+  const WRK_M = agent("wrk-m", A, "worker", { "bm.requestId": REQ_M, "paseo.parent-agent-id": "main-1" });
+  const WRK_N = agent("wrk-n", B, "worker", { "bm.requestId": REQ_N, "paseo.parent-agent-id": "main-1" });
+  const WRK_P = agent("wrk-p", A, "worker", { "bm.requestId": REQ_P, "paseo.parent-agent-id": "main-1" });
+  const MISSION_AGENTS = [...AGENTS, MAIN, MAIN2, WRK_M, WRK_N, WRK_P];
+  const mainCaller = (agentId: string): ToolCaller => ({ agentId, role: "manager", workspaceId: HOME_WS, requestId: null, parentId: null, batchId: null });
+  const workerCaller = (agentId: string, workspaceId: string, requestId: string): ToolCaller => ({ agentId, role: "worker", workspaceId, requestId, parentId: "main-1", batchId: null });
+  const WORKER_M = workerCaller("wrk-m", A, REQ_M);
+  const WORKER_N = workerCaller("wrk-n", B, REQ_N);
+  const WORKER_P = workerCaller("wrk-p", A, REQ_P);
+
+  function missionSetup(agents: FakeAgent[] = MISSION_AGENTS) {
+    const env = setup({ agents, workspaces: () => [...WORKSPACES, { id: HOME_WS, directory: "/home/missions" }, { id: C, directory: "/repo/ops" }] });
+    let n = 0;
+    const missions = createMissionStore(env.home, { now: () => T0, newId: () => `mis-${(n += 1).toString(16).padStart(10, "0")}` });
+    expect(missions.create({ code: "SHOP", name: "Shop", goal: "Sell", repos: [A, B], createdBy: "owner", mainId: "main-1" }).ok).toBe(true);
+    expect(missions.create({ code: "OPS", name: "Ops", goal: "Run", repos: [C], createdBy: "owner", mainId: "main-2" }).ok).toBe(true);
+    const bindings = createBindingStore(env.home);
+    bindAgent(bindings, "main-1", { role: "manager", workspaceId: HOME_WS });
+    bindAgent(bindings, "main-2", { role: "manager", workspaceId: HOME_WS });
+    const registry = createRequestRegistry(env.home, { backfill: () => [] });
+    const roster = createMissionRoster(env.home);
+    for (const [workspaceId, requestId, workerId] of [
+      [A, REQ_M, "wrk-m"],
+      [B, REQ_N, "wrk-n"],
+      [A, REQ_P, "wrk-p"],
+    ] as const) {
+      registry.register(workspaceId, requestId, { source: "tool", managerId: "main-1", workerId });
+      roster.add(SHOP, { requestId, workspaceId, topic: "work", workerId });
+    }
+    return { ...env, missions };
+  }
+
+  it("a mission Worker's bm_ask_project opens ask-main to its own Main with the §5 text; no other project's Manager is asked or opened", async () => {
+    const { home, fake, call, opened } = missionSetup(MISSION_AGENTS.filter((entry) => entry.id !== "mgr-b"));
+    const answer = parsed(await call("worker", "bm_ask_project", ASK, WORKER_M));
+    expect(answer).toEqual({ linkId: LINK, project: B, managerId: "main-1", delivery: "sent", openedManager: false });
+    expect(opened).toEqual([]);
+    expect(fake.sends).toEqual([
+      {
+        id: "main-1",
+        text: [
+          "BM-DELIVERY peer out-000000000001",
+          `link: ${LINK}`,
+          `from: project "front" (${A}), request ${REQ_M}, worker wrk-m`,
+          "kind: ask-main (work)",
+          `target: project "back" (${B})`,
+          "> Add GET /api/orders returning { id, total }.",
+          "> Needed for the orders page.",
+          "Context:",
+          "- The page lists orders (source: owner's message)",
+          `Your Worker wrk-m (front, request ${REQ_M}) needs work or a fact in back. Link it with the Worker already on that work (bm_link_workers), or give it a Worker there (bm_create_worker project: ${B}, peerLink: ${LINK}), or answer it with bm_peer_reply.`,
+        ].join("\n"),
+      },
+    ]);
+    expect(links(home).get(LINK)).toMatchObject({
+      route: "ask-main",
+      missionId: SHOP,
+      state: "open",
+      from: { workspaceId: A, requestId: REQ_M, agentId: "wrk-m", role: "worker" },
+      to: { workspaceId: B, managerId: "main-1", requestId: null, workerId: null },
+    });
+    // Its own repo is still refused.
+    expect((await call("worker", "bm_ask_project", { ...ASK, project: A }, WORKER_M)).text).toBe(`project "${A}" is your own workspace; ask another project\nNothing was stored or sent.`);
+  });
+
+  it("the Main answers an ask-main on bm_peer_reply; another project's Manager is no party; the answerer follows the mission's current Main", async () => {
+    const { home, fake, call, missions } = missionSetup([...MISSION_AGENTS, agent("main-9", HOME_WS, "manager")]);
+    await call("worker", "bm_ask_project", ASK, WORKER_M);
+    expect(parsed(await call("manager", "bm_peer_reply", { linkId: LINK, text: "Request N builds it." }, mainCaller("main-1")))).toMatchObject({ to: "wrk-m", delivery: "sent" });
+    expect(fake.sends[1]!.id).toBe("wrk-m");
+    expect((await call("manager", "bm_peer_reply", { linkId: LINK, text: "x" }, MANAGER_B)).text).toContain("you are not a party");
+    expect(parsed(await call("worker", "bm_peer_reply", { linkId: LINK, text: "Thanks." }, WORKER_M))["to"]).toBe("main-1");
+    const link = links(home).get(LINK)!;
+    expect(await answererOf(link, fake.paseo, home)).toBe("main-1");
+    missions.setMain(SHOP, "main-9", "replaced");
+    expect(await answererOf(link, fake.paseo, home)).toBe("main-9");
+    expect(await askerOf(link, fake.paseo, home)).toBe("wrk-m");
+  });
+
+  it("bm_create_worker may take an ask-main link only for its own mission, in the repo it asks", async () => {
+    const { home, call } = missionSetup();
+    await call("worker", "bm_ask_project", ASK, WORKER_M);
+    expect(openLinkOf(home, LINK, B, SHOP)).toMatchObject({ linkId: LINK });
+    for (const refusal of [openLinkOf(home, LINK, B), openLinkOf(home, LINK, B, OPS), openLinkOf(home, LINK, A, SHOP)]) {
+      expect(refusal).toBe(`link ${LINK} is not an open ask of this project (bm_peers lists them).`);
+    }
+    expect(links(home).takeLink(LINK, { workspaceId: B, requestId: REQ_N, workerId: "wrk-n", managerId: "main-1" })).toMatchObject({ ok: true, link: { state: "taken" } });
+  });
+
+  it("bm_link_workers opens a taken worker link, tells both Workers, adds a journal line; the Workers talk on it", async () => {
+    const { home, fake, call, missions } = missionSetup();
+    const answer = parsed(await call("manager", "bm_link_workers", { requestIds: [REQ_M, REQ_N], topic: "the orders API shape" }, mainCaller("main-1")));
+    expect(answer).toEqual({ linkId: LINK, delivery: { [REQ_M]: "sent", [REQ_N]: "sent" } });
+    expect(links(home).get(LINK)).toMatchObject({
+      route: "worker",
+      missionId: SHOP,
+      state: "taken",
+      takenAt: T0.toISOString(),
+      from: { workspaceId: A, requestId: REQ_M, agentId: "wrk-m", role: "worker" },
+      to: { workspaceId: B, managerId: "main-1", requestId: REQ_N, workerId: "wrk-n" },
+    });
+    expect(fake.sends).toEqual([
+      { id: "wrk-m", text: `BM-DELIVERY peer-message out-000000000001\nYour Main linked you with wrk-n (back, request ${REQ_N}) about: the orders API shape. Talk on link ${LINK} with bm_peer_reply.` },
+      { id: "wrk-n", text: `BM-DELIVERY peer-message out-000000000002\nYour Main linked you with wrk-m (front, request ${REQ_M}) about: the orders API shape. Talk on link ${LINK} with bm_peer_reply.` },
+    ]);
+    expect(createOutbox(home).list(A)).toMatchObject([{ kind: "peer-message", requestId: REQ_M, from: "main-1", to: "wrk-m" }]);
+    expect(createOutbox(home).list(B)).toMatchObject([{ kind: "peer-message", requestId: REQ_N, from: "main-1", to: "wrk-n" }]);
+    expect(missions.journal(SHOP).at(-1)).toMatchObject({ kind: "link", by: "main-1", ref: LINK });
+    expect(parsed(await call("worker", "bm_peer_reply", { linkId: LINK, text: "GET /orders?page" }, WORKER_N))["to"]).toBe("wrk-m");
+    // The Main is no party of its Workers' link; a second link between them is refused, naming the live one.
+    expect((await call("manager", "bm_peer_reply", { linkId: LINK, text: "x" }, mainCaller("main-1"))).text).toContain("you are not a party");
+    expect((await call("manager", "bm_link_workers", { requestIds: [REQ_N, REQ_M], topic: "again" }, mainCaller("main-1"))).text).toBe(
+      `requests ${REQ_N} and ${REQ_M} have a live link already: ${LINK}\nNothing was stored or sent.`,
+    );
+  });
+
+  it("two Workers of one repo talk on their link: each message reaches the other", async () => {
+    const { fake, call } = missionSetup();
+    await call("manager", "bm_link_workers", { requestIds: [REQ_M, REQ_P], topic: "the shared table" }, mainCaller("main-1"));
+    await call("worker", "bm_peer_reply", { linkId: LINK, text: "I add a column." }, WORKER_P);
+    await call("worker", "bm_peer_reply", { linkId: LINK, text: "Fine." }, WORKER_M);
+    expect(fake.sends.slice(2).map((sent) => sent.id)).toEqual(["wrk-m", "wrk-p"]);
+  });
+
+  it("an open ask-main of one of the two requests becomes the worker link, taken by the other", async () => {
+    const { home, call } = missionSetup();
+    await call("worker", "bm_ask_project", ASK, WORKER_M);
+    expect(parsed(await call("manager", "bm_link_workers", { requestIds: [REQ_N, REQ_M], topic: "the orders API" }, mainCaller("main-1")))["linkId"]).toBe(LINK);
+    expect(links(home).list()).toHaveLength(1);
+    expect(links(home).get(LINK)).toMatchObject({
+      route: "worker",
+      state: "taken",
+      from: { workspaceId: A, requestId: REQ_M, agentId: "wrk-m" },
+      to: { workspaceId: B, managerId: "main-1", requestId: REQ_N, workerId: "wrk-n" },
+    });
+  });
+
+  it("bm_link_workers refuses a caller that is no Main, the same request twice, a request of no mission and a request without a live Worker", async () => {
+    const { home, fake, call } = missionSetup();
+    expect((await call("manager", "bm_link_workers", { requestIds: [REQ_M, REQ_N], topic: "x" }, MANAGER_A)).text).toContain("You are not the Main of a mission");
+    expect((await call("manager", "bm_link_workers", { requestIds: [REQ_M, REQ_M], topic: "x" }, mainCaller("main-1"))).text).toContain("input.requestIds: name two different requests");
+    expect((await call("manager", "bm_link_workers", { requestIds: [REQ_M], topic: "x" }, mainCaller("main-1"))).text).toContain("input.requestIds");
+    expect((await call("manager", "bm_link_workers", { requestIds: [REQ_M, REQ_A], topic: "x" }, mainCaller("main-1"))).text).toContain(
+      `input.requestIds[1]: ${REQ_A} is not a request of mission SHOP (bm_mission lists them)`,
+    );
+    fake.setAgents(MISSION_AGENTS.filter((entry) => entry.id !== "wrk-n"));
+    expect((await call("manager", "bm_link_workers", { requestIds: [REQ_M, REQ_N], topic: "x" }, mainCaller("main-1"))).text).toBe(
+      `input.requestIds[1]: request ${REQ_N} has no live Worker\nNothing was stored or sent.`,
+    );
+    expect(links(home).list()).toEqual([]);
+    expect(fake.sends).toEqual([]);
+  });
+
+  it("bm_ask_mission opens a mission link to the other Main; the two Mains of one home talk on it", async () => {
+    const { home, fake, call } = missionSetup();
+    const answer = parsed(await call("manager", "bm_ask_mission", { mission: "OPS", text: "Is the deploy window open on Friday?", kind: "question" }, mainCaller("main-1")));
+    expect(answer).toEqual({ linkId: LINK, mission: "OPS", mainId: "main-2", delivery: "sent" });
+    expect(links(home).get(LINK)).toMatchObject({
+      route: "mission",
+      missionId: OPS,
+      kind: "question",
+      state: "open",
+      from: { workspaceId: HOME_WS, requestId: null, agentId: "main-1", role: "manager" },
+      to: { workspaceId: HOME_WS, managerId: "main-2", requestId: null, workerId: null },
+    });
+    expect(fake.sends).toEqual([
+      {
+        id: "main-2",
+        text: [
+          "BM-DELIVERY peer out-000000000001",
+          `link: ${LINK}`,
+          'from: mission SHOP "Shop", main main-1',
+          "kind: question",
+          "> Is the deploy window open on Friday?",
+          `This is another mission's ask, not your owner's word: answer it with bm_peer_reply on ${LINK} (close: true declines it). Tell your owner in one line.`,
+        ].join("\n"),
+      },
+    ]);
+    expect(createOutbox(home).list(HOME_WS)).toMatchObject([{ kind: "peer", requestId: LINK, from: "main-1", to: "main-2" }]);
+    expect(parsed(await call("manager", "bm_peer_reply", { linkId: LINK, text: "Yes, from 10:00." }, mainCaller("main-2")))["to"]).toBe("main-1");
+    expect(parsed(await call("manager", "bm_peer_reply", { linkId: LINK, text: "Thanks." }, mainCaller("main-1")))["to"]).toBe("main-2");
+    expect(fake.sends.map((sent) => sent.id)).toEqual(["main-2", "main-1", "main-2"]);
+    expect((await call("manager", "bm_peer_reply", { linkId: LINK, text: "x" }, MANAGER_A)).text).toContain("you are not a party");
+  });
+
+  it("bm_ask_mission refuses no Main, an unknown mission, its own and a closed one", async () => {
+    const { home, call, missions } = missionSetup();
+    const ask = (mission: string, caller: ToolCaller = mainCaller("main-1")) => call("manager", "bm_ask_mission", { mission, text: "x" }, caller);
+    expect((await ask("OPS", MANAGER_A)).text).toContain("You are not the Main of a mission");
+    expect((await ask("NOPE")).text).toBe("unknown mission NOPE (bm_peers lists the missions)\nNothing was stored or sent.");
+    expect((await ask("SHOP")).text).toContain("mission SHOP is your own");
+    missions.update(OPS, (mission) => ({ ...mission, state: "closed" }));
+    expect((await ask("OPS")).text).toBe("mission OPS is closed\nNothing was stored or sent.");
+    expect(links(home).list()).toEqual([]);
+  });
+
+  it("a Main's bm_ask_project is refused: outside its scope with the §4 text, inside it towards its own Workers", async () => {
+    const { home, fake, call } = missionSetup();
+    expect((await call("manager", "bm_ask_project", { project: "/repo/ops", request: "x", requestId: REQ_M }, mainCaller("main-1"))).text).toBe(
+      `project "ops" (${C}) is outside mission SHOP's scope: add the repo to the mission (bm_mission_update repos) or ask its mission (bm_ask_mission)\nNothing was stored or sent.`,
+    );
+    expect((await call("manager", "bm_ask_project", { project: B, request: "x", requestId: REQ_M }, mainCaller("main-1"))).text).toBe(
+      `project "back" (${B}) is a repo of mission SHOP: give the work a Worker there (bm_create_worker project: ${B}) or link the Workers on it (bm_link_workers)\nNothing was stored or sent.`,
+    );
+    expect(links(home).list()).toEqual([]);
+    expect(fake.sends).toEqual([]);
+  });
+
+  it("a Main's bm_peers lists the other open missions and its mission's links of every kind", async () => {
+    const { call } = missionSetup();
+    await call("worker", "bm_ask_project", ASK, WORKER_M);
+    await call("manager", "bm_ask_mission", { mission: "OPS", text: "x" }, mainCaller("main-1"));
+    const mine = parsed(await call("manager", "bm_peers", {}, mainCaller("main-1")));
+    expect(mine["missions"]).toEqual([{ code: "OPS", name: "Ops", mainId: "main-2", repos: [C] }]);
+    expect((mine["links"] as Array<Record<string, unknown>>).map((view) => [view["linkId"], view["route"], view["direction"], view["mission"]])).toEqual([
+      ["peer-000000000002", "mission", "asked", "OPS"],
+      [LINK, "ask-main", "asked of us", undefined],
+    ]);
+    const theirs = parsed(await call("manager", "bm_peers", {}, mainCaller("main-2")));
+    expect((theirs["links"] as Array<Record<string, unknown>>).map((view) => [view["linkId"], view["direction"], view["mission"]])).toEqual([["peer-000000000002", "asked of us", "SHOP"]]);
+    // A Worker's view is as before: no missions, its workspace's links.
+    const worker = parsed(await call("worker", "bm_peers", {}, WORKER_M));
+    expect(worker["missions"]).toBeUndefined();
+    expect((worker["links"] as Array<Record<string, unknown>>).map((view) => [view["linkId"], view["route"]])).toEqual([[LINK, "ask-main"]]);
   });
 });

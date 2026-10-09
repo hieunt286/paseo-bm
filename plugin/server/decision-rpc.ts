@@ -15,6 +15,11 @@
  * with `bm_decide` on the owner's policy (`orchestrator-decide-tools.ts`, autonomy
  * design §B.5), so its answer reaches the Worker, or runs the incident's
  * action, exactly as the owner's does.
+ *
+ * A mission's `m:` decisions (missions design §4.1) live in their mission's
+ * own store (`mission-decisions.ts`): `decisions.list` and `.get` read them
+ * too, and `decisions.answer` records the owner's answer there and has the
+ * plugin apply the mission change it chose (`mission-tools.ts`).
  */
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import {
@@ -42,6 +47,10 @@ import {
   type TransitionRefusal,
 } from "../shared/decisions";
 import { createDecisionStore, type DecisionMutation, type DecisionStore } from "./decision-store";
+import { createMissionDecisionStore, isMissionDecisionId } from "./mission-decisions";
+import { MISSION_ID_PATTERN, createMissionStore } from "./mission-store";
+import { applyMissionDecision, missionAnswerRefusalsOf } from "./mission-tools";
+import type { PaseoCliDeps } from "./paseo-cli";
 import { handleDecisionsOverride, ownerViewsOf } from "./decision-override";
 import { supersedePrecedentsBy } from "./precedent-resolve";
 import { READ_FAILED, coded, dataHome, errorText, logOf, requireDataHome, type RpcHomeDeps } from "./rpc-kit";
@@ -87,6 +96,8 @@ export type DecisionRpcDeps = RpcHomeDeps & {
   onSettled?: OnDecisionsSettled;
   /** Where a failing `onSettled` is reported; `console.warn` by default. */
   log?: (message: string) => void;
+  /** The `paseo` CLI that retitles a Main after an applied `m:` change; the real one by default. */
+  cli?: PaseoCliDeps;
 };
 
 function storeOf(deps: DecisionRpcDeps, what: string): DecisionStore {
@@ -139,6 +150,51 @@ function reread(store: DecisionStore, decision: Decision): Decision {
 }
 
 // ---------------------------------------------------------------------------
+// Mission decisions (missions design §4.1): `m:<missionId>:<n>`, in each
+// mission's own store, answered here by the owner only.
+// ---------------------------------------------------------------------------
+
+/**
+ * The `m:` decisions `decisions.list` adds: with no `workspaceId`, every
+ * mission's (unsettled ones only for the Inbox); with a mission id as the
+ * `workspaceId`, that mission's; none for any other workspace. Never throws.
+ */
+function missionDecisionsOf(home: string, workspaceId: string | undefined, inbox: boolean): Decision[] {
+  if (workspaceId !== undefined && !MISSION_ID_PATTERN.test(workspaceId)) return [];
+  try {
+    const store = createMissionDecisionStore(home);
+    const missions = workspaceId === undefined ? createMissionStore(home).list().map((entry) => entry.missionId) : [workspaceId];
+    return missions.flatMap((missionId) => store.list(missionId, inbox ? UNSETTLED_STATUSES : undefined));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * `decisions.answer` of an `m:` decision: the change the chosen option
+ * carries is checked first (`E_MISSION_INVALID`, nothing written), then the
+ * owner's answer is recorded and the plugin applies the change
+ * (`mission-tools.ts`), then tells the mission's Main what the owner decided.
+ */
+async function answerMissionDecision(input: DecisionsAnswerInput, paseo: unknown, deps: DecisionRpcDeps): Promise<DecisionOutput> {
+  const home = requireDataHome(deps, "answer the decision");
+  const store = createMissionDecisionStore(home);
+  const at = deps.now?.() ?? new Date();
+  const current = reading("read the decision", () => store.get(input.id));
+  if (current === null) throw new DashboardError("E_DECISION_NOT_FOUND", `no decision ${input.id}`);
+  const refusals = await missionAnswerRefusalsOf(current, input.optionKey ?? null, paseo, home);
+  if (refusals.length > 0) throw new DashboardError("E_MISSION_INVALID", refusals.join("; "));
+  const mutation = writing("answer the decision", () =>
+    store.transition(input.id, (decision) =>
+      answerDecision(decision, { via: input.via ?? "inbox", optionKey: input.optionKey ?? null, words: input.words ?? null, at: at.toISOString() }),
+    ),
+  );
+  const settled = settledOrThrow(input.id, mutation);
+  await applyMissionDecision(settled, { home, now: at, log: logOf(deps), paseo, ...(deps.cli === undefined ? {} : { cli: deps.cli }) });
+  return { decision: store.get(settled.id) ?? settled };
+}
+
+// ---------------------------------------------------------------------------
 // Handlers.
 // ---------------------------------------------------------------------------
 
@@ -148,13 +204,14 @@ export function handleDecisionsList(input: DecisionsListInput, deps: DecisionRpc
   if (home === null) return { decisions: [], truncated: false };
   const store = createDecisionStore(home, deps.log === undefined ? {} : { log: deps.log });
   const inbox = input.scope === "inbox";
-  const matched = reading("read the decisions", () =>
-    store.list({
+  const matched = reading("read the decisions", () => [
+    ...store.list({
       ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
       ...(input.scope === "request" && input.requestId !== undefined ? { requestId: input.requestId } : {}),
       ...(inbox ? { statuses: UNSETTLED_STATUSES } : {}),
     }),
-  ).filter((decision) => input.status === undefined || decision.status === input.status);
+    ...(input.scope === "request" ? [] : missionDecisionsOf(home, input.workspaceId, inbox)),
+  ]).filter((decision) => input.status === undefined || decision.status === input.status);
   const direction = inbox ? 1 : -1;
   const ordered = matched
     .map((decision, index) => ({ decision, index }))
@@ -168,7 +225,9 @@ export function handleDecisionsList(input: DecisionsListInput, deps: DecisionRpc
 /** `decisions.get` (§A.6). An unsettled decision comes with the Orchestrator's proposal only at a level of 1 or more (`ownerViewsOf`). */
 export function handleDecisionsGet(input: DecisionsGetInput, deps: DecisionRpcDeps = {}): DecisionOutput {
   const store = storeOf(deps, "read the decision");
-  const decision = reading("read the decision", () => store.get(input.id));
+  const decision = reading("read the decision", () =>
+    isMissionDecisionId(input.id) ? createMissionDecisionStore(requireDataHome(deps, "read the decision")).get(input.id) : store.get(input.id),
+  );
   if (decision === null) throw new DashboardError("E_DECISION_NOT_FOUND", `no decision ${input.id}`);
   return { decision: ownerViewsOf(deps)(decision) };
 }
@@ -188,6 +247,7 @@ export async function handleDecisionsAnswer(
   if (hasOption === hasWords) {
     throw new DashboardError("E_DECISION_ANSWER_INVALID", "answer with exactly one of optionKey or words");
   }
+  if (isMissionDecisionId(input.id)) return answerMissionDecision(input, paseo, deps);
   const store = storeOf(deps, "answer the decision");
   const at = (deps.now?.() ?? new Date()).toISOString();
   // One synchronous block: nothing can settle the decision between the read and the write.

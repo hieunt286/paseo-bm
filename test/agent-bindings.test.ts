@@ -429,7 +429,7 @@ describe("binding a creation (design §16.5)", () => {
     expect(kept?.config.mcpServers?.[AGENT_TOOLS_SERVER]).toEqual({ type: "http", url: issued.mcpServer.url, alwaysLoad: true });
     expect(kept?.config.mcpServers?.["other"]).toEqual({ type: "http", url: "http://x/mcp" });
     // Bound: its delivering and creating tools are pre-approved too (design §16.6).
-    expect(kept?.config.toolPolicy?.preapproved).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_reply"].map((tool) => ({ kind: "mcp", server: AGENT_TOOLS_SERVER, tool })));
+    expect(kept?.config.toolPolicy?.preapproved).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_memory", "bm_reply"].map((tool) => ({ kind: "mcp", server: AGENT_TOOLS_SERVER, tool })));
     expect(store.list()[0]).toMatchObject({ state: "pending", attachedAt: T0.toISOString() });
 
     // Foreign: another port, an unknown token, or another role's binding — rewritten to the role path.

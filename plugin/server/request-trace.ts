@@ -25,9 +25,10 @@ import { errorText } from "./rpc-kit";
 import { reviewerReplacementsFor } from "./fallback-state";
 import { agentFactsOf, type DashboardPaseo } from "./paseo-directory";
 import { readRecords, readWorkspaceMeta, storedWorkspaceIds, type TraceStoreLocation } from "./trace-store";
-import { handoffSuccessorsOf, reconstructTraces, reviewCallsOf, toolCallsOf, type AgentFacts, type ReconstructedTrace } from "./traces";
+import { handoffSuccessorsOf, reconstructTraces, reviewCallsOf, toolCallsOf, type AgentFacts, type ReconstructedTrace, type RequestReviewFacts } from "./traces";
 import { createRequestRegistry, type RegisteredRequest } from "./request-registry";
 import { isLiveLink, type PeerLink } from "./peer-links";
+import { createMissionRoster, requestIndexOf } from "./mission-roster";
 import { timeOrZero } from "../shared/time";
 import { dirname } from "node:path";
 
@@ -187,8 +188,35 @@ export async function workspaceTracesOf(deps: RequestTraceDeps, workspaceId: str
   ]);
   // Design §16.8: the request registry's review tool records, counted with the activity stream.
   const requests = registeredRequestsOf(deps, workspaceId);
-  const traces = reconstructTraces({ records, agents: [...agents.values()], replacementIds, requests });
+  const traces = reconstructTraces({ records, agents: [...agents.values()], replacementIds, requests: withMissionsOf(homeOf(deps), requests) });
   return { records, agents, traces, requests, notices };
+}
+
+function homeOf(deps: Pick<RequestTraceDeps, "location" | "home">): string {
+  return deps.home ?? dirname(deps.location.tracesDir);
+}
+
+/**
+ * Missions design §6: each request of a mission with its mission (the
+ * entry's, else the request index's) and its roster topic, so the rebuild
+ * finds its Main in the registry. Never throws: a store that cannot be read
+ * leaves the requests as they are.
+ */
+function withMissionsOf(home: string, requests: readonly RegisteredRequest[]): RequestReviewFacts[] {
+  try {
+    const roster = createMissionRoster(home);
+    return requests.map((request) => {
+      const missionId = request.missionId ?? requestIndexOf(home, request.requestId)?.missionId;
+      return missionId === undefined ? request : { ...request, missionId, topic: roster.get(missionId, request.requestId)?.topic ?? null };
+    });
+  } catch {
+    return [...requests];
+  }
+}
+
+/** The workspace a request's records are traced in: its repo for a request of a mission (the request index), else `fallback`. */
+export function requestWorkspaceOf(home: string, requestId: string | null, fallback: string): string {
+  return requestId === null ? fallback : (requestIndexOf(home, requestId)?.workspaceId ?? fallback);
 }
 
 /**
@@ -198,8 +226,7 @@ export async function workspaceTracesOf(deps: RequestTraceDeps, workspaceId: str
  */
 export function registeredRequestsOf(deps: Pick<RequestTraceDeps, "location" | "home">, workspaceId: string): RegisteredRequest[] {
   try {
-    const home = deps.home ?? dirname(deps.location.tracesDir);
-    return createRequestRegistry(home, { log: () => {} }).list(workspaceId);
+    return createRequestRegistry(homeOf(deps), { log: () => {} }).list(workspaceId);
   } catch {
     return [];
   }
@@ -349,11 +376,15 @@ export async function unverifiedFinishesOf(
   const finished = record.reports.filter((report) => report.phase === "finished");
   if (finished.length === 0) return none;
   try {
-    const { traces, agents } = await workspaceTracesOf(deps, record.workspaceId);
-    const workspaceDirectory = workspaceDirectoryOf(deps.location, record.workspaceId);
+    // Missions design §6: a Main's turn is traced under the home; each request is read in its repo.
+    const read = new Map<string, Promise<WorkspaceTraces>>();
     const unverified = new Set<ParsedReport>();
     for (const report of finished) {
       const requestId = report.requestId ?? record.requestId;
+      const workspaceId = requestWorkspaceOf(homeOf(deps), requestId, record.workspaceId);
+      if (!read.has(workspaceId)) read.set(workspaceId, workspaceTracesOf(deps, workspaceId));
+      const { traces, agents } = await read.get(workspaceId)!;
+      const workspaceDirectory = workspaceDirectoryOf(deps.location, workspaceId);
       const trace = (requestId === null ? undefined : traceOfRequest(traces, { requestId })) ?? traceOfManagerTurn(traces, record.agentId);
       if (trace === undefined) continue;
       const handoffSuccessors = new Set(handoffSuccessorsOf(trace, agents).keys());

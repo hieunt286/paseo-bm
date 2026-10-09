@@ -327,6 +327,21 @@ export function waitingByWorkspace(decisions: readonly Pick<Decision, "workspace
   return counts;
 }
 
+/**
+ * The workspaces with the plugin's own homes left out (missions design §3.1):
+ * `homes` from `traces.workspaces`. Undefined until that answered (`settled`
+ * when it failed: then none is known), so a home never shows for a moment.
+ */
+export function projectWorkspacesOf<T extends { id: string }>(
+  workspaces: readonly T[] | undefined,
+  stored: { homes?: readonly string[] } | undefined,
+  settled: boolean,
+): T[] | undefined {
+  if (workspaces === undefined || (stored === undefined && !settled)) return undefined;
+  const homes = new Set(stored?.homes ?? []);
+  return workspaces.filter((workspace) => !homes.has(workspace.id));
+}
+
 function runningCount(overview: WorkspaceOverview | undefined): number {
   if (overview === undefined) return 0;
   const running = overview.runningAgents;

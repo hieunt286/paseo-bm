@@ -1314,7 +1314,7 @@ describe("before(\"agent.create\") — a bound creation (design §16.5)", () => 
     // Bound: its delivering and creating tools are pre-approved beside the builders (design §16.6).
     const approved = (request: AgentCreateRequest | undefined) => request?.config.toolPolicy?.preapproved?.map((grant) => grant.tool);
     expect(approved(plain)).toEqual(["bm_report", "bm_reply"]);
-    expect(approved(bound)).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_reply"]);
+    expect(approved(bound)).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_memory", "bm_reply"]);
   });
 
   it("a binding that cannot record its attachment: the role path, and Runtime facts with the hand path, as an unbound creation's", async () => {

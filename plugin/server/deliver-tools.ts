@@ -5,11 +5,11 @@
  *
  * | Tool | Caller | Does |
  * |---|---|---|
- * | `bm_report` | bound Worker | builds and checks the `BM-REPORT`, stores a `report` outbox record, delivers it to the Manager that created the Worker; `finished` is refused while a review call of the request has no verdict delivered (`batchesAwaitingVerdict`); `finished` expires the request's unsettled questions; `finished` or `stopped` clears its `delivery-dropped` and `off-tool-reviewer` alerts; the registry's `tier` and `finishedAt` follow it |
+ * | `bm_report` | bound Worker | builds and checks the `BM-REPORT`, stores a `report` outbox record, delivers it to the Manager that created the Worker; `finished` is refused while a review call of the request has no verdict delivered (`batchesAwaitingVerdict`); `finished` expires the request's unsettled questions; `finished` or `stopped` clears its `delivery-dropped` and `off-tool-reviewer` alerts; the registry's `tier` and `finishedAt`, and a mission request's roster state (`noteRosterReport`), follow it |
  * | `bm_questions` | bound Worker | opens each question through the materialiser's shared open path (`openQuestions`), numbered after the request's highest `Qn` |
  * | `bm_review` | bound Reviewer | builds and checks the `BM-REVIEW`, stores a `review` record for its batch, delivers it to its Worker |
  * | `bm_answers` | bound Manager | checks each `Qn` is an open question of a request of its own and proposes the answers for its current turn (`proposed-answers.ts`); the materialiser settles them at the turn's end only with the owner's own message in it |
- * | `bm_tell_worker` | bound Manager | stores a `message` record and delivers `Continue <requestId>.`, the owner's words and their source to the request's sole live Worker; with `peerLink` the request takes that open link (a bound Worker only) and the message carries its `peer:` block and rules |
+ * | `bm_tell_worker` | bound Manager | stores a `message` record in the request's repo (the request index's, missions design §4) and delivers `Continue <requestId>.`, the owner's words and their source to the request's sole live Worker; with `peerLink` the request takes that open link (a bound Worker only) and the message carries its `peer:` block and rules |
  *
  * **Peer links** (design §7.17.3): `finished` of a request that carries a
  * `taken` or `answered` link needs `forPeer`; `waitingOnPeers` (blocked only)
@@ -42,6 +42,8 @@ import { PENDING_TTL_MS, createBindingStore, liveBindingOf, type ToolCaller } fr
 import { openLinkOf, unboundPeerReason } from "./create-worker";
 import { CUT_NOTE_LINE, followsPaseoCut } from "./interruption-watch";
 import { readTimelinePages, type LiveTimelinePaseo } from "./live-timeline";
+import { noteRosterReport, requestIndexOf } from "./mission-roster";
+import { createMissionStore } from "./mission-store";
 import { createPeerLinkStore, type PeerLink } from "./peer-links";
 import { peerBriefOf, peerReplyText, titleIn } from "./peer-tools";
 import { answersKindOf, soleWorkerOfRequest } from "./decision-delivery";
@@ -70,7 +72,7 @@ import {
   type AgentTool,
   type QuestionsInput,
 } from "../shared/bm-tools";
-import { decisionKindOf, isAnswerable, questionDecisionId, type Decision } from "../shared/decisions";
+import { decisionKindOf, isAnswerable, ownerOnlyRefusalText, questionDecisionId, type Decision } from "../shared/decisions";
 
 const QUESTIONS_TOOL = QUESTIONS_FACE.name;
 const TELL_WORKER_TOOL = TELL_WORKER_FACE.name;
@@ -330,6 +332,8 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
         } catch (error) {
           log(`[paseo-bm] could not note the report of request ${requestId} in the registry: ${reasonOf(error)}`);
         }
+        // Missions design §2.3: a mission request's roster state follows its reports.
+        noteRosterReport(home, requestId, phase, log);
         if (phase === "finished" || phase === "stopped") {
           try {
             clearDroppedAlert(home, worker.workspaceId, requestId, null, { now });
@@ -405,6 +409,7 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
       subject: question.subject,
       class: question.class,
       ...(question.supersedes === undefined ? {} : { supersedes: question.supersedes }),
+      ...(question.ownerOnly === true ? { ownerOnly: true } : {}),
       options: question.options.map((option) => ({
         key: option.key,
         text: option.text,
@@ -486,11 +491,19 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
   // The bound Manager's requests (design §16.6).
   // -------------------------------------------------------------------------
 
-  /** The request when its registry record names `managerId` as its Manager; otherwise the refusal. */
+  /**
+   * The request when its registry record names `managerId` as its Manager;
+   * otherwise the refusal. A request of a mission is read in its repo's
+   * registry (`requestIndexOf`, missions design §6), so its `workspaceId` may
+   * differ from the caller's.
+   */
   const managersRequest = (home: string, workspaceId: string, requestId: string, managerId: string, nothing: string): RegisteredRequest | ServerToolAnswer => {
-    const request = createRequestRegistry(home, { log }).get(workspaceId, requestId);
+    const place = requestIndexOf(home, requestId);
+    const request = createRequestRegistry(home, { log }).get(place?.workspaceId ?? workspaceId, requestId);
     if (request === null) return refused(`paseo-bm knows no request ${requestId} in this workspace; use the requestId bm_create_worker gave you. ${nothing}`);
-    if (request.managerId !== managerId) return refused(`request ${requestId} is not one of yours: another Manager created its Worker. ${nothing}`);
+    // Missions design §3.4: the mission's current Main owns every request of its roster.
+    const isMain = place !== null && createMissionStore(home).get(place.missionId)?.mainId === managerId;
+    if (request.managerId !== managerId && !isMain) return refused(`request ${requestId} is not one of yours: another Manager created its Worker. ${nothing}`);
     return request;
   };
 
@@ -510,8 +523,11 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     if ("ok" in request) return request;
     const store = createDecisionStore(home, { log });
     const issues = given.flatMap((answer, index) => {
-      const decision = store.get(questionDecisionId(requestId, answer.id), manager.workspaceId);
+      // The request's repo holds its decisions: a Main's Worker lives there (missions design §6).
+      const decision = store.get(questionDecisionId(requestId, answer.id), request.workspaceId);
       if (decision === null || !isAnswerable(decision)) return [`input.answers[${index}]: ${answer.id} is not an open question of ${requestId}; read them with bm_decisions`];
+      // Missions design §5: an owner-only fact is answered on its card or in the Worker's chat, never relayed.
+      if (decision.ownerOnly === true) return [`input.answers[${index}]: ${ownerOnlyRefusalText(decision.id)}; tell the owner so`];
       if (answer.option !== undefined && !decision.options.some((option) => option.key === answer.option)) {
         return [`input.answers[${index}].option: ${answer.id} has no option ${answer.option}`];
       }
@@ -523,6 +539,7 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
       return refused("paseo-bm cannot tie these answers to your current turn (it may have reloaded during it); tell the owner to answer on the question's card. Nothing was recorded.");
     }
     proposeAnswers(manager.agentId, turnStartedAt, {
+      workspaceId: request.workspaceId,
       requestId,
       answers: given.map((answer) => ({ id: answer.id, text: answer.other !== undefined ? `other — ${answer.other}` : `${answer.option} — ${answer.optionText ?? ""}` })),
     });
@@ -544,11 +561,13 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     const nothing = "Nothing was sent.";
     const request = managersRequest(home, manager.workspaceId, requestId, manager.agentId, nothing);
     if ("ok" in request) return request;
+    // The request's repo: a Main's Worker lives there, not in the Main's home (missions design §4).
+    const workspaceId = request.workspaceId;
     const paseo = paseoOf();
     if (paseo === null) return refused(NO_PASEO_DELIVERY_MESSAGE);
     let workerId: string | null;
     try {
-      workerId = await (deps.workerOf ?? soleWorkerOfRequest)({ workspaceId: manager.workspaceId, requestId, home }, paseo as DashboardPaseo);
+      workerId = await (deps.workerOf ?? soleWorkerOfRequest)({ workspaceId, requestId, home }, paseo as DashboardPaseo);
     } catch (error) {
       return refused(`paseo-bm could not read the Workers of ${requestId} (${reasonOf(error)}); try again in a moment. ${nothing}`);
     }
@@ -556,7 +575,7 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     // §7.17.3: the request takes an open link of this workspace when its Worker is bound.
     let peer: string[] = [];
     if (peerLink !== undefined) {
-      const link = openLinkOf(home, peerLink, manager.workspaceId);
+      const link = openLinkOf(home, peerLink, workspaceId);
       if (typeof link === "string") return refused(`${link} ${nothing}`);
       if (liveBindingOf(createBindingStore(home, { log }).list(), workerId, "worker") === null) return refused(`${unboundPeerReason(peerLink)} ${nothing}`);
       peer = peerBriefOf(link, titleIn(await listedWorkspaces(paseo as DashboardPaseo), link.from.workspaceId));
@@ -569,10 +588,10 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     ].join("\n");
     const to = workerId;
     const take = (): void => {
-      const taken = createPeerLinkStore(home, { now }).takeLink(peerLink!, { workspaceId: manager.workspaceId, requestId, workerId: to, managerId: manager.agentId });
+      const taken = createPeerLinkStore(home, { now }).takeLink(peerLink!, { workspaceId, requestId, workerId: to, managerId: manager.agentId });
       if (!taken.ok) log(`[paseo-bm] request ${requestId} could not take link ${peerLink}: ${taken.reasons.join("; ")}`);
     };
-    const stored = await storeThenDeliver(home, manager.workspaceId, { kind: "message", requestId, from: manager.agentId, to: workerId, text: message }, paseo, peerLink === undefined ? undefined : take);
+    const stored = await storeThenDeliver(home, workspaceId, { kind: "message", requestId, from: manager.agentId, to: workerId, text: message }, paseo, peerLink === undefined ? undefined : take);
     if ("ok" in stored) return stored;
     return answered({ workerId, delivery: stored.delivery });
   };

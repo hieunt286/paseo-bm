@@ -14,9 +14,11 @@ import {
   createPeerLinkStore,
   gistOf,
   isLiveLink,
+  linkViewOf,
   newLinkId,
   resolveProject,
   resolveProjectIn,
+  routeOf,
   type NewPeerLink,
   type PeerLink,
 } from "../plugin/server/peer-links";
@@ -514,6 +516,68 @@ describe("resolving a project (design §7.17.2)", () => {
     await expect(resolveProject(live, "/work/api/src", A)).resolves.toMatchObject({ ok: true, workspaceId: B });
     await expect(resolveProject(live, C, A)).resolves.toMatchObject({ ok: false });
     await expect(resolveProject(paseo(new Error("down")), B, A)).resolves.toMatchObject({ ok: false });
+  });
+});
+
+describe("routes (missions design §2.6)", () => {
+  const MIS = "mis-0000000001";
+  const asker = { workspaceId: A, requestId: REQ_A, agentId: "wrk-a", role: "worker" as const };
+
+  it("a project link is written as before, without route or missionId; any other route carries both", () => {
+    const links = store(dataFolder());
+    const plain = created(links.createLink(ask()));
+    expect("route" in plain || "missionId" in plain).toBe(false);
+    expect(routeOf(plain)).toBe("project");
+    const main = created(links.createLink(ask({ route: "ask-main", missionId: MIS, to: { workspaceId: B, managerId: "main-1" } })));
+    expect(main).toMatchObject({ route: "ask-main", missionId: MIS, state: "open", to: { workspaceId: B, managerId: "main-1", requestId: null, workerId: null } });
+    expect(links.get(main.linkId)).toEqual(main);
+  });
+
+  it("an ask-main link cannot ask its own repo; a worker link may join two Workers of one repo, taken at once", () => {
+    const links = store(dataFolder());
+    expect(links.createLink(ask({ route: "ask-main", missionId: MIS, to: { workspaceId: A, managerId: "main-1" } }))).toEqual({
+      ok: false,
+      reasons: ["a project cannot ask itself; ask another project"],
+    });
+    const pair = created(links.createLink(ask({ route: "worker", missionId: MIS, to: { workspaceId: A, managerId: "main-1", requestId: REQ_B, workerId: "wrk-b" } })));
+    expect(pair).toMatchObject({ state: "taken", takenAt: T0.toISOString(), to: { workspaceId: A, requestId: REQ_B, workerId: "wrk-b" }, chain: { workspaces: [A], depth: 1 } });
+    expect(links.linksOfRequest(A, REQ_B, "answerer").map((entry) => entry.linkId)).toEqual([pair.linkId]);
+  });
+
+  it("the chain rule is for project links only: a request carrying a worker link starts a fresh chain, and may ask its asker's repo", () => {
+    const links = store(dataFolder());
+    created(links.createLink(ask({ route: "worker", missionId: MIS, to: { workspaceId: B, managerId: "main-1", requestId: REQ_B, workerId: "wrk-b" } })));
+    const fromB = { workspaceId: B, requestId: REQ_B };
+    expect(chainFor(links.list(), fromB, A)).toEqual({ ok: true, chain: { workspaces: [B], depth: 1 } });
+    expect(chainFor(links.list(), fromB, A, "ask-main")).toEqual({ ok: true, chain: { workspaces: [B], depth: 1 } });
+    // The live-links bound still counts every route.
+    for (let index = 1; index < MAX_LIVE_LINKS_PER_REQUEST; index += 1) created(links.createLink(ask({ route: "ask-main", missionId: MIS, to: { workspaceId: C, managerId: "main-1" } })));
+    expect(chainFor(links.list(), asker, C, "ask-main")).toMatchObject({ ok: false });
+  });
+
+  it("a mission link has no asking request: no bound per request, and its own home is no refusal", () => {
+    const links = store(dataFolder());
+    const from = { workspaceId: "wks_home", requestId: null, agentId: "main-1", role: "manager" as const };
+    const made = created(links.createLink(ask({ route: "mission", missionId: MIS, from, to: { workspaceId: "wks_home", managerId: "main-2" } })));
+    expect(made).toMatchObject({ route: "mission", missionId: MIS, from: { requestId: null }, state: "open", chain: { workspaces: ["wks_home"], depth: 1 } });
+    expect(linkViewOf(made, "wks_home", false)).toMatchObject({ route: "mission", direction: "asked of us", ourRequestId: null, theirRequestId: null });
+  });
+
+  it("turnToWorker turns an open ask-main into a worker link taken by the other request; nothing else", () => {
+    const links = store(dataFolder());
+    const asked = created(links.createLink(ask({ route: "ask-main", missionId: MIS, to: { workspaceId: B, managerId: "main-1" } })));
+    const to = { workspaceId: C, requestId: REQ_C, workerId: "wrk-c", managerId: "main-1" };
+    expect(links.turnToWorker(asked.linkId, to)).toMatchObject({ ok: true, link: { route: "worker", state: "taken", takenAt: T0.toISOString(), to, from: asker } });
+    const refusal = { ok: false, reasons: [`link ${asked.linkId} is not an open ask of a Worker to its Main`] };
+    expect(links.turnToWorker(asked.linkId, to)).toEqual(refusal);
+    const plain = created(links.createLink(ask()));
+    expect(links.turnToWorker(plain.linkId, to)).toEqual({ ok: false, reasons: [`link ${plain.linkId} is not an open ask of a Worker to its Main`] });
+  });
+
+  it("a stored link of an older build reads as a project link", () => {
+    const view = linkViewOf(link(), A);
+    expect(routeOf(link())).toBe("project");
+    expect("route" in view).toBe(false);
   });
 });
 

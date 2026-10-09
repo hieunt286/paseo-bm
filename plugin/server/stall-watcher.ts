@@ -76,6 +76,7 @@ import type { TraceStoreLocation } from "./trace-store";
 import type { AgentFacts, ReconstructedTrace } from "./traces";
 import { flagsOf, type Flag } from "../shared/orchestrator-rules";
 import { roleOfProvider } from "./agent-role";
+import { isPluginHome } from "./plugin-homes";
 import { WORKER_PASS_MS, clearWorkerTurnSignals, runWorkerPass, workerPassResult, type PermissionFirstSeen, type WorkerPassResult } from "./worker-watch";
 import { errorText } from "./rpc-kit";
 import { timeOrZero } from "../shared/time";
@@ -321,6 +322,8 @@ export function createStallWatcher(deps: StallWatcherDeps = {}): StallWatcher {
     /** The requests whose newest report is `finished` or `stopped`: `<workspaceId>::<requestId>`; they raise no `peer-unanswered`. */
     const ended = new Set<string>();
     const noteUnanswered = (link: PeerLink, why: string): void => {
+      // A Main's ask of another mission has no asking request (missions design §2.6).
+      if (link.from.requestId === null) return;
       const key = `${link.from.workspaceId}::${link.from.requestId}`;
       if (ended.has(key)) return;
       const entry = unanswered.get(key) ?? { workspaceId: link.from.workspaceId, requestId: link.from.requestId, why: new Map<string, string>() };
@@ -328,9 +331,11 @@ export function createStallWatcher(deps: StallWatcherDeps = {}): StallWatcher {
       unanswered.set(key, entry);
     };
 
-    // A workspace the store did not see in 24 hours has no request in the window.
+    // A workspace the store did not see in 24 hours has no request in the window. A Main's turns are
+    // traced under its home, never a project: its requests are watched in their repos (missions design §6).
     for (const { workspaceId } of recentWorkspacesOf(location, since)) {
       if (!live()) return result("off");
+      if (isPluginHome(workspaceId, home)) continue;
       try {
         const { agents, traces, requests: registered } = await workspaceTracesOf(
           { location, paseo: handle as unknown as DashboardPaseo, home, allAgents: snapshot.bm },

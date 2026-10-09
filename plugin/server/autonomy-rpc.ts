@@ -25,6 +25,13 @@
  *   project's action boundary on or off (§D.2, change-010: off by default).
  *   Both directions need `confirmed: true` (`E_AUTONOMY_NOT_CONFIRMED`); off
  *   removes the entry and clears the project's `boundary-off` alerts.
+ * - `autonomy.set-mission-level { missionId, level, confirmed? }` and
+ *   `autonomy.set-mission-cell { missionId, class, mode, confirmed? }` set a
+ *   mission's level, or one of its cells (missions design §2.4, §8) in the
+ *   mission level store (`mission-autonomy-store.ts`): levels 3–4 and a
+ *   `delegate` cell need `confirmed: true`; a mission the store does not
+ *   hold is `E_AUTONOMY_INVALID`. `autonomy.policy` adds every open
+ *   mission's level as `missions`.
  *
  * Every input is checked before the data folder is looked at, so a refusal
  * never depends on the machine; every refusal writes nothing. No usable data
@@ -60,10 +67,13 @@ import {
   autonomySetBoundaryRpc,
   autonomySetChallengerRpc,
   autonomySetLevelRpc,
+  autonomySetMissionCellRpc,
+  autonomySetMissionLevelRpc,
   autonomySetRpc,
   precedentsEndRpc,
   precedentsListRpc,
   precedentsSaveRpc,
+  type AutonomyMissionOutput,
   type AutonomyPolicyOutput,
   type AutonomySetOutput,
   type PrecedentsEndOutput,
@@ -76,17 +86,22 @@ import {
   checkAutonomySetBoundary,
   checkAutonomySetChallenger,
   checkAutonomySetLevel,
+  checkMissionSetCell,
+  checkMissionSetLevel,
   isPolicyWorkspaceId,
   levelOf,
   levelsOf,
   policyOfProject,
   type AutonomyPolicy,
+  type MissionAutonomy,
 } from "../shared/autonomy";
 import type { Alert } from "../shared/alerts";
 import { PRECEDENT_ID_PATTERN, checkPrecedentSaveInput, precedentDraftOf, type Precedent } from "../shared/precedents";
 import { createAlertStore } from "./alert-store";
 import { createAutonomyStore, currentPolicy, invalidWorkspace } from "./autonomy-store";
 import { createDecisionStore } from "./decision-store";
+import { createMissionAutonomyStore, type MissionAutonomyStore } from "./mission-autonomy-store";
+import { createMissionStore } from "./mission-store";
 import { createPrecedentStore, type PrecedentStoreDeps } from "./precedent-store";
 import { READ_FAILED, coded, dataHome, errorText, logOf, readOr, requireDataHome, type RpcHomeDeps } from "./rpc-kit";
 
@@ -110,11 +125,49 @@ export function readAutonomyPolicy(deps: AutonomyRpcDeps = {}): AutonomyPolicy {
   return currentPolicy(home, (reason) => logOf(deps)(`[paseo-bm] could not read the autonomy policy: ${reason}`));
 }
 
-/** `autonomy.policy`: reads only; with each project's level (ADR-025). */
+/** Every open mission's level and cells (missions design §2.4); none with no data folder or a store that cannot be read. Never throws. */
+function missionLevelsOf(deps: AutonomyRpcDeps): Record<string, MissionAutonomy> {
+  return readOr(deps, "the mission levels", {}, (home) => {
+    const levels = createMissionAutonomyStore(home);
+    const open = createMissionStore(home).list().filter((entry) => entry.state === "open");
+    return Object.fromEntries(open.map((entry) => [entry.missionId, levels.get(entry.missionId)]));
+  });
+}
+
+/** `autonomy.policy`: reads only; with each project's level (ADR-025), and each open mission's (`missions`, when there is one). */
 export function handleAutonomyPolicy(input: { workspaceId?: string } = {}, deps: AutonomyRpcDeps = {}): AutonomyPolicyOutput {
   const policy = readAutonomyPolicy(deps);
-  if (input.workspaceId === undefined) return { policy, levels: levelsOf(policy) };
-  return { policy: policyOfProject(policy, input.workspaceId), levels: { [input.workspaceId]: levelOf(policy, input.workspaceId) } };
+  const missions = missionLevelsOf(deps);
+  const withMissions = Object.keys(missions).length === 0 ? {} : { missions };
+  if (input.workspaceId === undefined) return { policy, levels: levelsOf(policy), ...withMissions };
+  return { policy: policyOfProject(policy, input.workspaceId), levels: { [input.workspaceId]: levelOf(policy, input.workspaceId) }, ...withMissions };
+}
+
+/** Runs a mission level write: the mission must be one the mission store holds (`E_AUTONOMY_INVALID`); a write failure is `E_AUTONOMY_WRITE_FAILED`. */
+function writingMission(deps: AutonomyRpcDeps, missionId: string, run: (store: MissionAutonomyStore) => MissionAutonomy): AutonomyMissionOutput {
+  const home = requireDataHome(deps, "save");
+  const mission = coded(READ_FAILED, "read the mission", () => createMissionStore(home).get(missionId));
+  if (mission === null) throw new DashboardError("E_AUTONOMY_INVALID", `missionId ${JSON.stringify(missionId)} is not a mission of paseo-bm; nothing was saved`);
+  return coded("E_AUTONOMY_WRITE_FAILED", "save the mission level", () => ({
+    missionId,
+    autonomy: run(createMissionAutonomyStore(home, deps.now === undefined ? {} : { now: deps.now })),
+  }));
+}
+
+/** `autonomy.set-mission-level`: one mission's level (missions design §2.4), checked before the data folder. */
+export function handleAutonomySetMissionLevel(input: unknown, deps: AutonomyRpcDeps = {}): AutonomyMissionOutput {
+  const checked = checkMissionSetLevel(input);
+  if ("refusal" in checked) throw new DashboardError(checked.refusal.code, checked.refusal.detail);
+  const { change } = checked;
+  return writingMission(deps, change.missionId, (store) => store.setLevel(change.missionId, change.level));
+}
+
+/** `autonomy.set-mission-cell`: one mission cell (missions design §2.4), checked before the data folder; the level follows the cells. */
+export function handleAutonomySetMissionCell(input: unknown, deps: AutonomyRpcDeps = {}): AutonomyMissionOutput {
+  const checked = checkMissionSetCell(input);
+  if ("refusal" in checked) throw new DashboardError(checked.refusal.code, checked.refusal.detail);
+  const { change } = checked;
+  return writingMission(deps, change.missionId, (store) => store.setCell(change.missionId, change.class, change.mode));
 }
 
 /** Runs a write with the data folder, coded by rpc-kit `coded` as `E_AUTONOMY_WRITE_FAILED`. */
@@ -252,6 +305,8 @@ export function registerAutonomyRpcs(server: PluginServerContext, deps: Autonomy
   server.handle(autonomyResetRpc, (input) => handleAutonomyReset(input, deps));
   server.handle(autonomySetChallengerRpc, (input) => handleAutonomySetChallenger(input, deps));
   server.handle(autonomySetBoundaryRpc, (input) => handleAutonomySetBoundary(input, deps));
+  server.handle(autonomySetMissionLevelRpc, (input) => handleAutonomySetMissionLevel(input, deps));
+  server.handle(autonomySetMissionCellRpc, (input) => handleAutonomySetMissionCell(input, deps));
   server.handle(precedentsListRpc, (input) => handlePrecedentsList(input, deps));
   server.handle(precedentsSaveRpc, (input) => handlePrecedentsSave(input, deps));
   server.handle(precedentsEndRpc, (input) => handlePrecedentsEnd(input, deps));

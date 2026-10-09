@@ -114,11 +114,13 @@ import { noticeQueue, type BatchItem, type NoticeBatch, type NoticeQueue } from 
 import { EVENTS_NOTICE_MARKER } from "./notices";
 import { wakeableOrchestrator, type OrchestratorAgentDeps, type OrchestratorAgentPaseo, type OrchestratorAgentSnapshot } from "./orchestrator-agent";
 import { createOrchestratorStore } from "./orchestrator-store";
-import { EMPTY_AUTONOMY_POLICY, decideRefusalOf, predictionRefusalOf, projectsAboveOwner, type AutonomyPolicy } from "../shared/autonomy";
+import { EMPTY_AUTONOMY_POLICY, decideRefusalOf, missionQuestionRefusalOf, predictionRefusalOf, projectsAboveOwner, type AutonomyPolicy } from "../shared/autonomy";
 import type { Decision } from "../shared/decisions";
 import { namesFailingChecks } from "../shared/interventions";
 import type { WakeUsage, WorkerSignal } from "../shared/orchestrator";
 import type { ParsedReport, TraceRecord } from "../shared/contracts";
+import { isPluginHome } from "./plugin-homes";
+import { missionManagerOf, requestIndexOf } from "./mission-roster";
 import { errorText } from "./rpc-kit";
 import { timeOrNull } from "../shared/time";
 
@@ -501,27 +503,44 @@ const readsFinishes = (record: TraceRecord | null | undefined): record is TraceR
 /** The Manager a finish is told to: the recording Manager, else the Worker's parent, else the Worker. */
 const managerOf = (record: TraceRecord): string => (record.role === "manager" ? record.agentId : (record.parentAgentId ?? record.agentId));
 
+/** Where a request of a mission lives and its current Main (missions design §6); null for a request of no mission. */
+export interface FinishPlace {
+  workspaceId: string;
+  managerId: string | null;
+}
+
+/** The place of a request of a mission in the data folder `home`, or null. Never throws. */
+export function finishPlaceOf(home: string | null, requestId: string): FinishPlace | null {
+  const place = home === null ? null : requestIndexOf(home, requestId);
+  return place === null ? null : { workspaceId: place.workspaceId, managerId: missionManagerOf(home, requestId) };
+}
+
 /**
  * `request.finished` for each `finished` report recorded in a Manager's or a
  * Worker's turn (`readsFinishes`) that shows work left (§A.8) or leaves its request finished-unverified
  * (design §C.3; `isUnverified`, read from the request's records by the caller,
- * `unverifiedFinishesOf`), which the event carries as `unverified: true`. Pure.
+ * `unverifiedFinishesOf`), which the event carries as `unverified: true`.
+ * A request of a mission (`placeOf`) is its repo's, told to its current Main
+ * (missions design §6), wherever its turn was recorded. Pure.
  */
 export function requestFinishedEventsOf(
   record: TraceRecord | null | undefined,
   isUnverified: (report: ParsedReport) => boolean = () => false,
+  placeOf: (requestId: string) => FinishPlace | null = () => null,
 ): RequestFinishedEvent[] {
   if (!readsFinishes(record)) return [];
   return record.reports.flatMap((report): RequestFinishedEvent[] => {
     if (report.phase !== "finished") return [];
     const unverified = isUnverified(report);
     if (!unverified && !workLeftOf(report)) return [];
+    const requestId = report.requestId ?? record.requestId;
+    const place = requestId === null ? null : placeOf(requestId);
     return [
       {
         type: "request.finished",
-        workspaceId: record.workspaceId,
-        requestId: report.requestId ?? record.requestId,
-        managerId: managerOf(record),
+        workspaceId: place?.workspaceId ?? record.workspaceId,
+        requestId,
+        managerId: place?.managerId ?? managerOf(record),
         at: report.at,
         ...(unverified ? { unverified: true as const } : {}),
       },
@@ -564,11 +583,17 @@ export function eventPolicyOf(home: string, log: (message: string) => void = (me
  * The projects whose `request.finished`, `request.stalled`, `worker.signal`
  * and `writers.observed` reach the Orchestrator (design §A.8 Scope,
  * change-007 C1; §F.1): those with a
- * class above `owner` in the owner's policy. A policy that cannot be read is
- * the empty scope, the safe side, with one log line. Never throws.
+ * class above `owner` in the owner's policy, never a plugin home (missions
+ * design §3.1). A policy that cannot be read is the empty scope, the safe
+ * side, with one log line. Never throws.
  */
 export function eventScopeOf(home: string, log: (message: string) => void = (message) => console.warn(message)): Set<string> {
-  return projectsAboveOwner(eventPolicyOf(home, log));
+  return scopeOfPolicy(eventPolicyOf(home, log), home);
+}
+
+/** `eventScopeOf` of a policy already read. */
+function scopeOfPolicy(policy: AutonomyPolicy, home: string): Set<string> {
+  return new Set([...projectsAboveOwner(policy)].filter((workspaceId) => !isPluginHome(workspaceId, home)));
 }
 
 /**
@@ -669,7 +694,10 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
     if (!readsFinishes(record)) return record;
     const reports = record.reports.filter((report) => {
       if (report.phase !== "finished") return true;
-      const key = JSON.stringify([record.workspaceId, report.requestId ?? record.requestId, { ...report, agentId: null, at: null, recordId: null }]);
+      const requestId = report.requestId ?? record.requestId;
+      // Missions design §6: the request's workspace, so a Main's copy in the home and its Worker's in the repo are one finish.
+      const workspaceId = (requestId === null ? null : finishPlaceOf(homeOf(), requestId))?.workspaceId ?? record.workspaceId;
+      const key = JSON.stringify([workspaceId, requestId, { ...report, agentId: null, at: null, recordId: null }]);
       const first = finishes.get(key);
       if (first === undefined) finishes.set(key, record.role);
       if (finishes.size > PUBLISHED_KEYS_LIMIT) finishes.delete(finishes.keys().next().value!);
@@ -756,7 +784,7 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
     (event: BmEvent, key: string, home: string) =>
     (): boolean => {
       const policy = eventPolicyOf(home, log);
-      if (!isInEventScope(event, projectsAboveOwner(policy))) return false;
+      if (!isInEventScope(event, scopeOfPolicy(policy, home))) return false;
       switch (event.type) {
         case "decision.opened": {
           const decision = createDecisionStore(home, { log }).get(event.decisionId, event.workspaceId);
@@ -840,7 +868,13 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
   /** `decision.opened` for new decisions: the policy decides which ask the Orchestrator something (§B.9); read only when one opened. */
   const openedEventsOf = (opened: readonly Decision[]): DecisionOpenedEvent[] => {
     const home = opened.length === 0 ? null : homeOf();
-    return decisionOpenedEventsOf(opened, home === null ? EMPTY_AUTONOMY_POLICY : eventPolicyOf(home, log));
+    if (home === null) return decisionOpenedEventsOf(opened);
+    // Missions design §8: a Worker's question of a mission request is its Main's, never asked of the Orchestrator.
+    const missionOf = (decision: Decision) => (decision.requestId === null ? null : (requestIndexOf(home, decision.requestId)?.missionId ?? null));
+    return decisionOpenedEventsOf(
+      opened.filter((decision) => missionQuestionRefusalOf(decision, missionOf(decision)) === null),
+      eventPolicyOf(home, log),
+    );
   };
 
   /**
@@ -939,7 +973,7 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
     publish,
     turnRecorded(record, opened, paseo, isUnverified) {
       const finished = unseenFinishesOf(record);
-      return publish([...openedEventsOf(opened), ...requestFinishedEventsOf(finished, isUnverified), ...adviceDueOf(finished), ...thresholdCrossedOf(record)], paseo);
+      return publish([...openedEventsOf(opened), ...requestFinishedEventsOf(finished, isUnverified, (requestId) => finishPlaceOf(homeOf(), requestId)), ...adviceDueOf(finished), ...thresholdCrossedOf(record)], paseo);
     },
     decisionsOpened(opened, paseo) {
       return publish(openedEventsOf(opened), paseo);

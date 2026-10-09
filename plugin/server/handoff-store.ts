@@ -27,6 +27,13 @@
  *   the `threshold.crossed` cycle (design §G.7), and the newest one's time is
  *   where the request's tokens are counted from again.
  *
+ * - **A request of a mission** (missions design §3.4): the entry keeps its
+ *   `missionId` (from the request index when `add` is not given it), and a
+ *   pending entry whose `managerId` is an earlier Main of that mission reads
+ *   with the mission's current Main — so a Main replaced mid-handoff never
+ *   loses it: the successor gets the command and creates the Worker. The next
+ *   write keeps the current Main.
+ *
  * The file rules are every store's (`data-files.ts` `createJsonFileStore`):
  * the folder is created `0700` only by a write, never by a read; each file is
  * `0600` and replaced atomically; a symlink is refused; a missing, corrupt or
@@ -47,6 +54,8 @@ import { MAX_COMMAND_BODY_CHARS, MAX_COMMAND_WHY_CHARS } from "../shared/orchest
 import { timeOrNull } from "../shared/time";
 import { PENDING_TTL_MS } from "./agent-bindings";
 import { assertNoSymlink, createJsonFileStore } from "./data-files";
+import { requestIndexOf } from "./mission-roster";
+import { createMissionStore } from "./mission-store";
 
 /** The folder under the data folder (design §G.6 step 2). */
 export const HANDOFFS_DIR_NAME = "handoffs";
@@ -90,6 +99,8 @@ export const handoffEntrySchema = z.object({
   workerId: z.string().min(1),
   /** Its Manager, who gets the command and creates the successor. */
   managerId: z.string().min(1),
+  /** The request's mission (missions design §3.4); null for a request of none. Absent in older files. */
+  missionId: z.string().min(1).nullable().default(null),
   /** The `handoff` intervention it is logged as; null when that record failed. */
   interventionId: z.string().min(1).nullable(),
   /** The Orchestrator's reason, masked, on one line. */
@@ -118,7 +129,7 @@ export const handoffEntrySchema = z.object({
 export type HandoffEntry = z.infer<typeof handoffEntrySchema>;
 
 /** What `add` takes; the rest starts as `waiting`, at now. */
-export type HandoffInput = Pick<HandoffEntry, "workspaceId" | "requestId" | "workerId" | "managerId" | "interventionId" | "reason">;
+export type HandoffInput = Pick<HandoffEntry, "workspaceId" | "requestId" | "workerId" | "managerId" | "interventionId" | "reason"> & { missionId?: string | null };
 
 export interface HandoffStoreDeps {
   now?: () => Date;
@@ -218,7 +229,19 @@ export function createHandoffStore(home: string, deps: HandoffStoreDeps = {}): H
       empty: () => ({ handoff: null }),
       codes: { unwritable: "E_TRACE_STORE_UNWRITABLE" },
     });
-  const read = (id: string): HandoffEntry | null => (HANDOFF_ID.test(id) ? fileOf(id).read().handoff : null);
+  /** A pending entry of a mission names the mission's current Main when its own was an earlier one (§3.4). */
+  const withCurrentMain = (entry: HandoffEntry | null): HandoffEntry | null => {
+    if (entry === null || entry.missionId === null || !isPendingHandoffState(entry.state)) return entry;
+    try {
+      const mission = createMissionStore(home).get(entry.missionId);
+      const mainId = mission?.mainId ?? null;
+      if (mainId === null || mainId === entry.managerId || !mission!.mainHistory.some((main) => main.agentId === entry.managerId)) return entry;
+      return { ...entry, managerId: mainId };
+    } catch {
+      return entry;
+    }
+  };
+  const read = (id: string): HandoffEntry | null => (HANDOFF_ID.test(id) ? withCurrentMain(fileOf(id).read().handoff) : null);
 
   const list = (): HandoffEntry[] => {
     // Before the read, so a symlinked folder is refused rather than followed.
@@ -244,7 +267,7 @@ export function createHandoffStore(home: string, deps: HandoffStoreDeps = {}): H
     let stored = null as HandoffEntry | null;
     fileOf(id).update((current) => {
       if (current.handoff === null) return null;
-      const after = handoffEntrySchema.parse(change(current.handoff));
+      const after = handoffEntrySchema.parse(change(withCurrentMain(current.handoff)!));
       stored = after;
       return JSON.stringify(after) === JSON.stringify(current.handoff) ? null : { handoff: after };
     });
@@ -259,6 +282,7 @@ export function createHandoffStore(home: string, deps: HandoffStoreDeps = {}): H
       const entry = handoffEntrySchema.parse({
         id: newId(),
         ...input,
+        missionId: input.missionId ?? requestIndexOf(home, input.requestId)?.missionId ?? null,
         state: "waiting",
         requestedAt: now().toISOString(),
         noteAskedAt: null,

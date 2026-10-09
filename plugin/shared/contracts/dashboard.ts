@@ -496,6 +496,8 @@ export const tracesWorkspacesRpc = defineRpc({
         bytes: z.number().int().nonnegative(),
       }),
     ),
+    /** The listed plugin homes (missions design §3.1), which no project list shows; absent from an older server. */
+    homes: z.array(workspaceIdSchema).optional(),
   }),
 });
 

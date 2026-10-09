@@ -170,6 +170,7 @@ describe("client entry registration", () => {
         "command:open-beads-manager",
         "command:open-beads-project",
         "command:open-beads-inbox",
+        "command:new-beads-mission",
         "settings:paseo-bm-settings",
         `panel:${AGENT_TREE_PANEL_ID}`,
         "panel:bm-chat-beads",

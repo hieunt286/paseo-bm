@@ -94,6 +94,41 @@ export interface RuntimeFacts {
    * Absent: unbound.
    */
   bound?: boolean;
+  /**
+   * The agent is a Main (missions design §3.5): created in the Missions home.
+   * Its facts then name its mission, the mission level's cells and the levels
+   * of the repos in scope. Absent: a per-workspace Manager.
+   */
+  main?: MainFacts;
+}
+
+/** A Main's Runtime facts (missions design §3.5). */
+export interface MainFacts {
+  /** Its mission; null for an unassigned Main (§3.3). */
+  mission: { missionId: string; code: string; name: string } | null;
+  /** The mission level and which classes it delegates (§2.4); absent for an unassigned Main. */
+  level?: { level: number; delegated: readonly string[]; owner: readonly string[] };
+  /** The autonomy level of each repo in scope (autonomy design ADR-025), in charter order. */
+  repoLevels?: ReadonlyArray<{ workspaceId: string; level: number | "custom" }>;
+}
+
+/** The `Mission` facts lines of a Main (§3.5). Agent-facing, so English. Pure. */
+export function mainFactsLines(main: MainFacts): string[] {
+  if (main.mission === null) {
+    return [
+      "Mission: none yet — you are an unassigned Main. Ask the owner, in one short message, the mission's name, a short code (2 to 8 capital letters or digits, a letter first), its goal and the repositories it works in; then record them with `bm_mission_start`.",
+    ];
+  }
+  const { code, name, missionId } = main.mission;
+  const lines = [`Mission: \`${code}\` ${name} (${missionId}). Read it whole with \`bm_mission\`.`];
+  if (main.level !== undefined) {
+    const list = (names: readonly string[]) => (names.length === 0 ? "none" : names.join(", "));
+    lines.push(`Mission level: ${main.level.level} — delegated: ${list(main.level.delegated)}; the owner's: ${list(main.level.owner)}.`);
+  }
+  if (main.repoLevels !== undefined && main.repoLevels.length > 0) {
+    lines.push(`Repo levels: ${main.repoLevels.map((repo) => `${repo.workspaceId} ${repo.level}`).join(", ")}.`);
+  }
+  return lines;
 }
 
 /**
@@ -300,7 +335,8 @@ export function runtimeFactsText(role: Role, facts: RuntimeFacts = {}): string {
   const child = role === "manager" ? "Worker" : role === "worker" ? "Reviewer" : null;
   if (child === null && role !== "reviewer") return "";
   const bound = facts.bound === true;
-  const lines: string[] = [];
+  // Missions design §3.5: a Main's mission comes first.
+  const lines: string[] = role === "manager" && facts.main !== undefined ? mainFactsLines(facts.main) : [];
   const none = role === "manager" ? facts.workerModeNone === true : facts.reviewerModeNone === true;
   const mode = role === "manager" ? trimmed(facts.workerModeId) : trimmed(facts.reviewerModeId);
   // §16.12: the child mode is for creating the child by hand; a bound agent's tools create it with its mode (§16.6).
@@ -645,7 +681,7 @@ export { dataHome as dataHomeOf } from "./rpc-kit";
 export async function currentInstructions(
   role: Role,
   paseo: unknown,
-  deps: { homedir?: () => string; cwd?: string; workspaceId?: string; bound?: boolean } = {},
+  deps: { homedir?: () => string; cwd?: string; workspaceId?: string; bound?: boolean; main?: MainFacts } = {},
 ): Promise<string> {
   const home = deps.homedir === undefined ? {} : { homedir: deps.homedir };
   const read = (workspaceId: string | undefined) => readActivePrecedents(home, workspaceId);
@@ -657,5 +693,6 @@ export async function currentInstructions(
     boundaryOn: (workspaceId) => boundaryOf(readAutonomyPolicy(home), workspaceId) !== null,
     ...(deps.bound === true ? { bound: true } : {}),
   });
-  return fullInstructions(role, facts);
+  // Missions design §3.5: a Main's mission facts (its precedents are the global ones: the home has none).
+  return fullInstructions(role, deps.main === undefined ? facts : { ...facts, main: deps.main });
 }

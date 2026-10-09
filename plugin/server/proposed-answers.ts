@@ -9,6 +9,11 @@
  * materialiser takes the proposals of that turn at its end: it settles them
  * only when the turn holds the owner's own message, and drops them otherwise.
  *
+ * A proposal names the workspace its request's decisions live in — a Main's
+ * Workers live in the mission's repos, not the Main's home (missions design
+ * §6) — so the proposals are keyed by the Manager and, within its turn, by
+ * workspace and request.
+ *
  * Nothing here is written to disk: a plugin reload during the turn loses the
  * proposals, and the owner answers on the card. Bounded: one turn per
  * Manager, at most `MAX_PROPOSALS` Managers, the oldest dropped first.
@@ -20,6 +25,8 @@ export const MAX_PROPOSALS = 200;
 
 /** One proposal: the request and its answers, as a `BM-ANSWERS` block reads (`Qn`, `a — label` or `other — words`). */
 export interface ProposedAnswers {
+  /** The workspace the request's decisions live in (its repo). */
+  workspaceId: string;
   requestId: string;
   answers: Answer[];
 }
@@ -29,14 +36,14 @@ const held = new Map<string, { startedAt: string; list: ProposedAnswers[] }>();
 
 /**
  * Holds `proposal` for the Manager's turn that started at `turnStartedAt`. A
- * later proposal of the same request and question in the same turn replaces
+ * later proposal of the same workspace, request and question in the same turn replaces
  * the earlier answer; one of a newer turn replaces what an older turn left,
  * which ended without a record.
  */
 export function proposeAnswers(managerId: string, turnStartedAt: string, proposal: ProposedAnswers): void {
   const current = held.get(managerId);
   const kept = (current?.startedAt === turnStartedAt ? current.list : []).map((entry) =>
-    entry.requestId !== proposal.requestId ? entry : { ...entry, answers: entry.answers.filter((answer) => !proposal.answers.some((next) => next.id === answer.id)) },
+    entry.requestId !== proposal.requestId || entry.workspaceId !== proposal.workspaceId ? entry : { ...entry, answers: entry.answers.filter((answer) => !proposal.answers.some((next) => next.id === answer.id)) },
   );
   held.delete(managerId);
   held.set(managerId, { startedAt: turnStartedAt, list: [...kept.filter((entry) => entry.answers.length > 0), proposal] });
@@ -58,6 +65,11 @@ export function takeProposedAnswers(managerId: string, turnStartedAt: string | n
   if (current === undefined || current.startedAt > turnStartedAt) return [];
   held.delete(managerId);
   return current.startedAt === turnStartedAt ? current.list : [];
+}
+
+/** Missions design §3.4: forgets the proposals held for `managerId`, a Main just replaced (the owner's words stay in the chat); true when there was any. */
+export function dropProposedAnswersOf(managerId: string): boolean {
+  return held.delete(managerId);
 }
 
 /** What is held for one Manager turn, without taking it; tests only. */

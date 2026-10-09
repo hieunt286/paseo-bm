@@ -52,6 +52,7 @@ import { joinStreamedText, sliceLastTurn } from "./collector";
 import type { NoticePaseo, NoticeQueue } from "./notice-queue";
 import { createOutbox, storeAndDeliver, type OutboxDeps } from "./outbox";
 import { createRequestRegistry, newestCallOf, type ReviewCall } from "./request-registry";
+import { requestIndexOf } from "./mission-roster";
 import { reasonOf } from "./role-choices";
 import { NO_VERDICT_SENTENCE, reviewCallIdOf } from "../shared/notices";
 import { timeOrZero } from "../shared/time";
@@ -141,7 +142,9 @@ function reviewerContextOf(agent: TurnEndedEvent["agent"], deps: Pick<NoVerdictD
   const binding = liveBindingOf(deps.bindings?.list() ?? [], agent.id);
   if (binding?.role === "reviewer") {
     if (binding.requestId === null || binding.batchId === null || binding.parentId === null) return null;
-    return { workspaceId: binding.workspaceId, requestId: binding.requestId, batchId: binding.batchId, workerId: binding.parentId, bound: true };
+    // Missions design §6: the request's repo from the request index, else the binding's workspace.
+    const workspaceId = requestIndexOf(deps.home, binding.requestId)?.workspaceId ?? binding.workspaceId;
+    return { workspaceId, requestId: binding.requestId, batchId: binding.batchId, workerId: binding.parentId, bound: true };
   }
   if (binding !== null) return null;
   if (agent.workspaceId === null) return null;

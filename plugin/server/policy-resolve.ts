@@ -9,8 +9,9 @@
  *
  * Called where decisions open: the materialiser (`q:`), `bm_ask_owner` (`o:`)
  * and a new fallback incident's listener (`f:`, when its action can run). An
- * override (`r:`) and a decision that carries a prepared change of the
- * owner's settings (§G.4) are left open: only the owner answers them. The
+ * override (`r:`), a decision that carries a prepared change of the
+ * owner's settings (§G.4) and an `ownerOnly` question (missions design §5)
+ * are left open: only the owner answers them. The
  * caller hands `answered` to `onSettled`. Never throws: a failure is one log
  * line, and the decision stays open for the owner.
  */
@@ -44,6 +45,8 @@ export function resolveAtOpen(decision: Decision, deps: ResolveAtOpenDeps): Reso
   if (decisionKindOf(decision.id) === "override") return { decision, answered: null, by: null, precedent: null };
   // Autonomy design §G.4: a prepared change of the owner's settings waits for the owner; nobody else answers it.
   if (carriesPreparedChange(decision)) return { decision, answered: null, by: null, precedent: null };
+  // Missions design §5: a fact only the owner knows waits for the owner; no precedent answers it.
+  if (decision.ownerOnly === true) return { decision, answered: null, by: null, precedent: null };
   const byPrecedent = deps.skipPrecedent === true ? null : resolveByPrecedent(decision, deps);
   const answered = byPrecedent?.resolved === true ? byPrecedent.decision : null;
   return { decision: answered ?? byPrecedent?.decision ?? decision, answered, by: answered === null ? null : "precedent", precedent: byPrecedent?.precedent ?? null };

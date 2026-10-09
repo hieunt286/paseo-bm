@@ -105,6 +105,7 @@ import type { OnDecisionsSettled } from "./decision-rpc";
 import { providerId } from "./provider-id";
 import { dataHome, errorText } from "./rpc-kit";
 import { knownRequestIdOf } from "./request-registry";
+import { createBindingStore, liveBindingOf } from "./agent-bindings";
 
 /** The base providers the spike passed (ADR-019 decision record): their Workers and Reviewers run under the boundary. */
 export const BOUNDARY_BASE_PROVIDERS: ReadonlySet<string> = new Set(BOUNDARY_PROVIDERS);
@@ -619,12 +620,20 @@ export function createActionBoundary(deps: ActionBoundaryDeps = {}): ActionBound
   };
 
   /**
-   * The paseo-bm request an agent works for: its `bm.requestId`, else (a
-   * Reviewer) its creator's — each as far as the plugin trusts it (design
-   * §16.4, `knownRequestIdOf`).
+   * The paseo-bm request an agent works for: its live binding's (missions
+   * design §6: a Worker of a Main has its parent in the Missions home, not in
+   * its own workspace), else its `bm.requestId`, else (a Reviewer) its
+   * creator's — each label as far as the plugin trusts it (design §16.4,
+   * `knownRequestIdOf`).
    */
   const requestOfAgent = async (paseo: BoundaryPaseo, agent: BoundaryAgent, snapshot: BoundaryAgentSnapshot | null): Promise<string | null> => {
     const home = homeOf();
+    try {
+      const bound = home === null ? null : liveBindingOf(createBindingStore(home).list(), agent.id)?.requestId;
+      if (bound !== null && bound !== undefined) return bound;
+    } catch {
+      // The labels below, as before.
+    }
     const parentId = parentOf({ parentAgentId: agent.parentAgentId, labels: snapshot?.labels });
     const own = knownRequestIdOf({ id: agent.id, workspaceId: agent.workspaceId, labels: snapshot?.labels ?? null, parentAgentId: parentId }, { home, log });
     if (own !== null || parentId === null) return own;

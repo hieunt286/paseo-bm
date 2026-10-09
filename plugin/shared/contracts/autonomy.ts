@@ -7,6 +7,9 @@ import {
   autonomySetChallengerInputSchema,
   autonomySetInputSchema,
   autonomySetLevelInputSchema,
+  missionAutonomySchema,
+  missionSetCellInputSchema,
+  missionSetLevelInputSchema,
 } from "../autonomy";
 import { agreementLedgerSchema } from "../autonomy-ledger";
 import { precedentSaveInputSchema, precedentSchema } from "../precedents";
@@ -54,12 +57,49 @@ export type AutonomyLedgerOutput = z.infer<typeof autonomyLedgerRpc.output>;
  * (`levelOf`, ADR-025) — 0–4, or `custom` when they match no level — for every
  * project the policy names, and for `workspaceId` always (an unknown project
  * is 0). An absent cell is `owner`; no usable data folder, or a store that
- * cannot be read, reads as the empty policy (every cell `owner`).
+ * cannot be read, reads as the empty policy (every cell `owner`). `missions`
+ * (missions design §2.4; additive, absent with no open mission): each open
+ * mission's level and cells, the default level's for one never set.
  */
 export const autonomyPolicyRpc = defineRpc({
   name: "autonomy.policy",
   input: z.object({ workspaceId: workspaceIdSchema.optional() }),
-  output: z.object({ policy: autonomyPolicySchema, levels: z.record(z.string().min(1), autonomyLevelReadingSchema) }),
+  output: z.object({
+    policy: autonomyPolicySchema,
+    levels: z.record(z.string().min(1), autonomyLevelReadingSchema),
+    missions: z.record(z.string().min(1), missionAutonomySchema).optional(),
+  }),
+});
+
+/** What the mission level RPCs return: the mission's level and cells as written. */
+const missionAutonomyOutput = z.object({ missionId: z.string().min(1), autonomy: missionAutonomySchema });
+
+/**
+ * `autonomy.set-mission-level` — one mission's level `{ missionId, level,
+ * confirmed? }` (missions design §2.4, §8): what its Main may do on its own,
+ * every cell set to the level's. 3 and 4 (the Main answers its Workers'
+ * questions) without `confirmed: true` → `E_AUTONOMY_NOT_CONFIRMED`; a
+ * mission id that is not one, or names no mission → `E_AUTONOMY_INVALID`; no
+ * usable data folder → `E_DATA_HOME_UNAVAILABLE`; a store that cannot be
+ * written → `E_AUTONOMY_WRITE_FAILED`. Nothing is written on any refusal.
+ * Sends nothing to any agent.
+ */
+export const autonomySetMissionLevelRpc = defineRpc({
+  name: "autonomy.set-mission-level",
+  input: missionSetLevelInputSchema,
+  output: missionAutonomyOutput,
+});
+
+/**
+ * `autonomy.set-mission-cell` — one mission cell `{ missionId, class, mode,
+ * confirmed? }` (missions design §2.4); the level follows the cells.
+ * `delegate` without `confirmed: true` → `E_AUTONOMY_NOT_CONFIRMED`; the
+ * other refusals as `autonomy.set-mission-level`'s.
+ */
+export const autonomySetMissionCellRpc = defineRpc({
+  name: "autonomy.set-mission-cell",
+  input: missionSetCellInputSchema,
+  output: missionAutonomyOutput,
 });
 
 /**
@@ -146,6 +186,7 @@ export const autonomySetBoundaryRpc = defineRpc({
 
 export type AutonomyPolicyOutput = z.infer<typeof autonomyPolicyRpc.output>;
 export type AutonomySetOutput = z.infer<typeof autonomySetRpc.output>;
+export type AutonomyMissionOutput = z.infer<typeof autonomySetMissionLevelRpc.output>;
 
 // ---------------------------------------------------------------------------
 // Precedents (autonomy design §B.6, §B.9; PRD REQ-124): the owner's standing

@@ -154,7 +154,7 @@ const parsed = (result: { ok: boolean; text: string }) => JSON.parse(result.text
 
 describe("the bound Worker's list (design §16.6)", () => {
   it("lists and pre-approves bm_create_reviewer and bm_rereview after bm_questions; an unbound Worker never lists them", () => {
-    const names = ["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_reply"];
+    const names = ["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_memory", "bm_reply"];
     expect(toolFacesFor("worker", true).map((face) => face.name)).toEqual(names);
     expect(toolFacesFor("worker").map((face) => face.name)).toEqual(["bm_report", "bm_reply"]);
     const empty: { toolPolicy?: { preapproved?: Array<{ tool: string }> } } = {};

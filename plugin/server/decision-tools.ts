@@ -21,6 +21,7 @@ import { createDecisionStore, type DecisionFilter } from "./decision-store";
 import { DECISIONS_TOOL_LIMIT, MANAGER_SERVER_TOOLS, schemaIssues, type DecisionsToolStatus, type ToolFace } from "../shared/bm-tools";
 import { UNSETTLED_STATUSES, decisionClassOf, type Decision, type DecisionStatus, type PreparedAction } from "../shared/decisions";
 import { preparedChangeTextOf } from "../shared/prepared-changes";
+import { missionChangeLinesOf } from "../shared/mission-change";
 import { timeOrZero } from "../shared/time";
 import { fixThese } from "./tool-kit";
 
@@ -63,6 +64,9 @@ function actionLineOf(action: PreparedAction | undefined): string | null {
     case "permission":
       // Autonomy design §D.2: a held permission request, answered by the plugin once the owner chooses.
       return `${action.allow ? "allow" : "deny"} permission request ${action.requestId} of ${action.agentId}, sent by the plugin only when the owner chooses it`;
+    case "mission-change":
+      // Missions design §4.1: applied by the plugin on the owner's tap only.
+      return `the plugin changes mission ${action.missionId}: ${missionChangeLinesOf(action.change).join("; ")}, only when the owner chooses it`;
     default:
       // Autonomy design §G.4: a change of the owner's settings, applied only on the owner's own answer.
       return `${action.kind}: the plugin ${preparedChangeTextOf(action)}, only when the owner chooses it`;

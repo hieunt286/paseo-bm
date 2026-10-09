@@ -17,7 +17,8 @@
  *   whenever the summary left something out.
  * - `bm_projects` also counts each project's live peer links
  *   (`counts.openLinks`) and lists them in full (`links`, as `bm_peers` does;
- *   design §7.17.5).
+ *   design §7.17.5), and lists a repo's Mains (`repoMainsOf`, missions
+ *   design §6) among its `managers` beside the Managers living there.
  * - `bm_note` (§6B.4) keeps the Orchestrator's notes about a project, which
  *   `bm_projects` returns.
  *
@@ -38,11 +39,13 @@ import {
   MESSAGE_PAGE_LIMIT,
   json,
   refuse,
+  repoMainsOf,
   requireProject,
   workingAgentsOf,
   type ServerToolResult,
   type ToolContext,
 } from "./orchestrator-tool-context";
+import { isPluginHomeIn } from "./plugin-homes";
 import { buildRequestContent, cutText } from "./request-render";
 import { firstLine, recentTracesOf, recentWorkspacesOf, requestKeyOf, waitingSinceOf, workspaceTracesOf } from "./request-trace";
 import { readWorkspaceMeta } from "./trace-store";
@@ -121,7 +124,8 @@ export async function bmProjects(input: { sinceHours?: number; detail?: ReadDeta
 
   // A workspace is active when the store saw a turn in the period, or one of its agents runs now.
   const running = new Set(allAgents.filter((entry) => entry.facts.status === "running" && entry.workspaceId !== null).map((entry) => entry.workspaceId!));
-  const candidates = recentWorkspacesOf(context.location, since, running);
+  // The plugin's own homes are not projects (missions design §3.1).
+  const candidates = recentWorkspacesOf(context.location, since, running).filter(({ workspaceId }) => !isPluginHomeIn(workspaceId, listed, context.home));
 
   const projects: Array<{ lastActivityAt: string | null } & Record<string, unknown>> = [];
   let leftOut = false;
@@ -134,7 +138,10 @@ export async function bmProjects(input: { sinceHours?: number; detail?: ReadDeta
     if (recent.length === 0 && !running.has(workspaceId)) continue;
     const directory = listed?.find((entry) => entry.id === workspaceId)?.directory ?? null;
     const meta = readWorkspaceMeta(context.location, workspaceId);
-    const managers = [...agents.values()]
+    // The repo's Mains live in the Missions home (missions design §6).
+    const mains = repoMainsOf(context.home, workspaceId);
+    const homeMains = allAgents.flatMap((entry) => (mains.has(entry.facts.id) && !agents.has(entry.facts.id) ? [entry.facts] : []));
+    const managers = [...agents.values(), ...homeMains]
       .filter((agent) => agent.role === "manager" && !agent.archived)
       .map((agent) => ({ id: agent.id, title: agent.title ?? null, status: agent.status }));
     if (!full) {

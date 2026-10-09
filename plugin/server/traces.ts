@@ -625,11 +625,42 @@ export interface RequestReviewFacts {
   /** Every Worker of the request, newest last. */
   workerIds: readonly string[];
   reviews: { batches: ReadonlyArray<{ calls: readonly ReviewToolCall[] }> };
+  /** Missions design §6: the request's mission (the entry's, else the request index's); absent for a request of no mission. */
+  missionId?: string;
+  /** The request's Manager, the mission's current Main for a request of a mission. */
+  managerId?: string | null;
+  createdAt?: string;
+  /** The roster's topic of a request of a mission: its text when no Main turn of it is here. */
+  topic?: string | null;
 }
 
 /** The review tool records of a request's registry entry, every batch's. */
 export function toolCallsOf(request: RequestReviewFacts | null | undefined): ReviewToolCall[] {
   return request === null || request === undefined ? [] : request.reviews.batches.flatMap((batch) => batch.calls);
+}
+
+/** A trace with nothing linked to it yet, requested at `requestedAt`. */
+function emptyTrace(requestedAt: string): ReconstructedTrace {
+  return {
+    traceId: "unknown",
+    requestId: null,
+    requestedAt,
+    requestText: null,
+    managerAgentId: null,
+    workerIds: [],
+    reviewerIds: [],
+    records: [],
+    reports: [],
+    reviews: [],
+    reviewCalls: null,
+    guardrailReported: null,
+    tier: null,
+    state: "unknown",
+    linking: "unknown",
+    agentsMissing: [],
+    notices: [],
+    segments: [],
+  };
 }
 
 /**
@@ -647,26 +678,38 @@ export function reconstructTraces(options: ReconstructOptions): ReconstructedTra
   const agentById = new Map(agents.map((agent) => [agent.id, agent]));
   const { buckets, byRequestId: byRequest } = openBuckets(ordered);
 
-  const unknown: ReconstructedTrace = {
-    traceId: "unknown",
-    requestId: null,
-    requestedAt: ordered[0]?.at ?? "",
-    requestText: null,
-    managerAgentId: null,
-    workerIds: [],
-    reviewerIds: [],
-    records: [],
-    reports: [],
-    reviews: [],
-    reviewCalls: null,
-    guardrailReported: null,
-    tier: null,
-    state: "unknown",
-    linking: "unknown",
-    agentsMissing: [],
-    notices: ["These agents could not be linked to a request."],
-    segments: [],
-  };
+  const unknown: ReconstructedTrace = { ...emptyTrace(ordered[0]?.at ?? ""), notices: ["These agents could not be linked to a request."] };
+
+  // Missions design §6: a request of a mission belongs to its current Main, the registry's `managerId`;
+  // the Main's own turns are traced under the Missions home, so the request opens its row here
+  // from the registry once a Worker or a record of this workspace names it.
+  for (const request of requests) {
+    if (request.missionId === undefined || (request.managerId ?? null) === null) continue;
+    const known = byRequest.get(request.requestId);
+    if (known !== undefined) {
+      known.trace.managerAgentId = request.managerId!;
+      continue;
+    }
+    const named =
+      ordered.some((record) => record.requestId === request.requestId) ||
+      agents.some((agent) => agent.requestIdLabel === request.requestId || request.workerIds.includes(agent.id));
+    if (!named) continue;
+    const at = request.createdAt ?? ordered.find((record) => record.requestId === request.requestId)?.at ?? "";
+    const bucket: Bucket = {
+      trace: {
+        ...emptyTrace(at),
+        traceId: `req:${request.requestId}`,
+        requestId: request.requestId,
+        requestText: request.topic ?? null,
+        managerAgentId: request.managerId!,
+        linking: "exact",
+      },
+      from: at,
+      to: at,
+    };
+    buckets.push(bucket);
+    byRequest.set(request.requestId, bucket);
+  }
 
   // Reports that arrived in the Manager's timeline belong to the trace they name.
   for (const record of ordered) {

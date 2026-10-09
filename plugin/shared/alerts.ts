@@ -64,7 +64,10 @@ export const MAX_ALERT_DETAIL_CHARS = 300;
  * optional short line, already redacted: why the request stalled, what the
  * permission asks, which risky command ran. `role` is set on an
  * `outdated-agent` alert: the Inbox offers to replace a Manager and only to
- * open a Worker or a Reviewer.
+ * open a Worker or a Reviewer. `missionId` is set on the `outdated-agent` alert
+ * of a Main, or of an extra Manager of a repo a mission holds (missions design
+ * §3.6, §6): the Inbox opens or replaces that mission's Main
+ * (`mission.ensure`) instead of calling `manager.ensure`.
  */
 export const alertEntrySchema = z.object({
   workspaceId: z.string().min(1).nullable(),
@@ -74,6 +77,7 @@ export const alertEntrySchema = z.object({
   clearedAt: z.string().nullable(),
   detail: z.string().max(MAX_ALERT_DETAIL_CHARS).optional(),
   role: alertRoleSchema.optional(),
+  missionId: z.string().min(1).optional(),
 });
 export type AlertEntry = z.infer<typeof alertEntrySchema>;
 

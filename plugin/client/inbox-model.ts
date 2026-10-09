@@ -82,7 +82,9 @@ export type InboxAction =
   | { kind: "open-agent"; agentId: string; label: string; accessibilityLabel: string }
   | { kind: "open-project"; workspaceId: string; label: string; accessibilityLabel: string }
   | { kind: "resend"; incidentId: string; label: string; accessibilityLabel: string }
-  | { kind: "replace-manager"; workspaceId: string; label: string; accessibilityLabel: string };
+  | { kind: "replace-manager"; workspaceId: string; label: string; accessibilityLabel: string }
+  /** `mission.ensure { missionId }` (missions design §3.6), with `replace: "outdated"` when `replace`. */
+  | { kind: "open-main"; missionId: string; replace: boolean; label: string; accessibilityLabel: string };
 
 /** What became of a fallback incident after its decision (a follow-up of the cards review). */
 export interface FallbackOutcome {
@@ -398,6 +400,12 @@ export function resendFollowUps(
 
 function alertAction(alert: Alert, can: InboxInput["can"]): InboxAction | null {
   const words = ALERT_WORDS[alert.kind];
+  // Missions design §3.6: an outdated Main is replaced through its mission; an extra Manager opens its mission's Main.
+  if (alert.kind === "outdated-agent" && alert.missionId !== undefined) {
+    return alert.role === "manager"
+      ? { kind: "open-main", missionId: alert.missionId, replace: false, label: "Open Main", accessibilityLabel: "Open the Main of this project's mission" }
+      : { kind: "open-main", missionId: alert.missionId, replace: true, label: "Replace Main", accessibilityLabel: "Replace the mission's Main with one on the current instructions" };
+  }
   // A Manager on older instructions is replaced (the old one stays, marked); a Worker or Reviewer only opened.
   if (alert.kind === "outdated-agent" && alert.role === "manager" && alert.workspaceId !== null) {
     return {

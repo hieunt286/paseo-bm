@@ -28,6 +28,9 @@ import { createCoordinationStore } from "../plugin/server/coordination-store";
 import { createRequestRegistry } from "../plugin/server/request-registry";
 import { applyReviewBudgetGrants } from "../plugin/server/review-tools";
 import { createPeerLinkStore } from "../plugin/server/peer-links";
+import { createMissionStore } from "../plugin/server/mission-store";
+import { clearRequestIndexCache, createMissionRoster } from "../plugin/server/mission-roster";
+import { handleOrchestratorState } from "../plugin/server/orchestrator-state";
 import { EMPTY_AUTONOMY_POLICY, LEVELS, decideRefusalOf, predictionRefusalOf, type AutonomyPolicy } from "../plugin/shared/autonomy";
 
 /** Cruise's classes (level 2, ADR-025), riskiest first: every class but release, data, security and cost. */
@@ -3077,5 +3080,159 @@ describe("the intervention log (autonomy design §G.3)", () => {
     expect(jsonOf(result)).toMatchObject({ outcome: "queued" });
     expect(readFileSync(logFile(), "utf8")).toBe(newer);
     expect(log).toHaveBeenCalledWith(expect.stringMatching(/^\[paseo-bm\] could not record the unblock intervention: /));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Missions design §6 last row (WP-112): Mains live in the Missions home, their requests in repos.
+// ---------------------------------------------------------------------------
+
+describe("mission requests: the Orchestrator reaches the request's current Main (missions design §6, WP-112)", () => {
+  const MISSIONS_HOME = "wks_missions";
+  const REQUEST = "req-20260926T100020Z";
+  const OLD_MAIN = "agent-main-old";
+  const MAIN = "agent-main";
+  const STRAY_MAIN = "agent-main-stray";
+  const MISSION_WORKER = "agent-mission-worker";
+
+  /** A mission (Main `OLD_MAIN`, then `MAIN`) whose roster holds `REQUEST` in the repo, and another with no request here (`STRAY_MAIN`). */
+  function missions(): void {
+    let next = 0;
+    const store = createMissionStore(home, { now: () => NOW, newId: () => `mis-00000000${++next}0` });
+    const made = store.create({ code: "EXP", name: "Export", goal: "Export invoices.", repos: [WORKSPACE_ID], createdBy: "owner", mainId: OLD_MAIN });
+    if (!made.ok) throw new Error(made.reasons.join("; "));
+    expect(store.setMain(made.mission.missionId, MAIN, "replaced").ok).toBe(true);
+    expect(createMissionRoster(home, { now: () => NOW }).add(made.mission.missionId, { requestId: REQUEST, workspaceId: WORKSPACE_ID, topic: "Export", workerId: MISSION_WORKER })).not.toBeNull();
+    expect(store.create({ code: "OTHER", name: "Other", goal: "Other work.", repos: [OTHER_WORKSPACE], createdBy: "owner", mainId: STRAY_MAIN }).ok).toBe(true);
+  }
+
+  const agents = () => [
+    { id: OLD_MAIN, provider: "bm-manager", status: "closed", workspaceId: MISSIONS_HOME, labels: { "bm.role": "manager" }, archivedAt: "2026-09-26T11:00:00.000Z", createdAt: at(0) },
+    { id: MAIN, provider: "bm-manager", status: "idle", workspaceId: MISSIONS_HOME, labels: { "bm.role": "manager" }, createdAt: at(5) },
+    { id: STRAY_MAIN, provider: "bm-manager", status: "idle", workspaceId: MISSIONS_HOME, labels: { "bm.role": "manager" }, createdAt: at(6) },
+    {
+      id: MISSION_WORKER,
+      provider: "bm-worker",
+      status: "idle",
+      workspaceId: WORKSPACE_ID,
+      labels: { "bm.role": "worker", "paseo.parent-agent-id": OLD_MAIN, "bm.requestId": REQUEST },
+      createdAt: at(1),
+    },
+    orchestratorAgent,
+  ];
+  const command = { workspaceId: WORKSPACE_ID, requestId: REQUEST, intent: "answer", effects: ["none"], command: "Q2: PDF.", reason: "The owner said PDF." };
+
+  let enqueue: ReturnType<typeof vi.fn<(target: string, kind: string, text: string, paseo?: unknown) => Promise<"sent" | "queued" | "dropped">>>;
+  beforeEach(() => {
+    clearRequestIndexCache();
+    missions();
+    delegateAll();
+    enqueue = vi.fn(async () => "sent" as const);
+    deps.queue = { enqueue };
+  });
+  afterEach(() => {
+    clearRequestIndexCache();
+    clearDecisionStoreCache();
+  });
+
+  const tools = () => toolsWith(daemonWith(agents(), { [ORCHESTRATOR]: [[pluginSays(EVENT_NOTICE, at(0))]] }).paseo);
+
+  it("bm_send_command to the request's Main in the home is accepted and delivered to it", async () => {
+    const result = await tools().call("bm_send_command", { ...command, managerId: MAIN });
+
+    expect(result.ok, result.text).toBe(true);
+    expect(enqueue.mock.calls.map((call) => call[0])).toEqual([MAIN]);
+    expect(createOrchestratorStore(home).listCommands()).toEqual([expect.objectContaining({ workspaceId: WORKSPACE_ID, managerId: MAIN, requestId: REQUEST })]);
+  });
+
+  it("a command named to an earlier Main of the mission goes to its current Main", async () => {
+    const result = await tools().call("bm_send_command", { ...command, managerId: OLD_MAIN });
+
+    expect(result.ok, result.text).toBe(true);
+    expect(enqueue.mock.calls.map((call) => call[0])).toEqual([MAIN]);
+  });
+
+  it("a Main of a mission with no request in the project is refused, as is a Main for a project without any mission", async () => {
+    expect(await tools().call("bm_send_command", { ...command, managerId: STRAY_MAIN })).toEqual({
+      ok: false,
+      text: `Refused: Manager ${STRAY_MAIN} does not belong to project ${WORKSPACE_ID}.`,
+    });
+    expect(await tools().call("bm_send_command", { ...command, workspaceId: "wks_none", requestId: "req-20260926T100099Z", managerId: MAIN })).toEqual({
+      ok: false,
+      text: `Refused: Manager ${MAIN} does not belong to project wks_none.`,
+    });
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it("bm_direct_worker copies the command to the Worker's request's current Main, not its archived creator", async () => {
+    const result = await tools().call("bm_direct_worker", { workspaceId: WORKSPACE_ID, workerId: MISSION_WORKER, re: "answer to Q2", intent: "answer", effects: ["none"], command: "Use PDF.", why: "The owner said PDF." });
+
+    expect(result.ok, result.text).toBe(true);
+    expect(enqueue.mock.calls.map((call) => call[0])).toEqual([MISSION_WORKER, MAIN]);
+    expect(jsonOf(result)).toMatchObject({ managerId: MAIN, copy: "sent" });
+  });
+
+  it("a prepared command to an earlier Main reaches the current Main once the owner chooses it", async () => {
+    const fake = daemonWith(agents(), { [ORCHESTRATOR]: [[pluginSays(EVENT_NOTICE, at(0))]] });
+    const onSettled = settledByKind({ orchestrator: createOrchestratorDecisionDelivery({ home: () => home, now: () => NOW, queue: deps.queue, log: () => {} }) });
+    const asked = await toolsWith(fake.paseo).call("bm_ask_owner", {
+      workspaceId: WORKSPACE_ID,
+      requestId: REQUEST,
+      question: "PDF or CSV?",
+      recommendation: "PDF.",
+      subject: "export-format",
+      options: [
+        { label: "PDF", effects: ["none"], recommended: true, command: { to: "manager", agentId: OLD_MAIN, intent: "answer", body: "Use PDF." } },
+        { label: "CSV", effects: ["none"] },
+      ],
+    });
+    expect(asked.ok, asked.text).toBe(true);
+    const id = (jsonOf(asked) as { decisionId: string }).decisionId;
+
+    await handleDecisionsAnswer({ id, optionKey: "a", confirmed: true, via: "inbox" }, fake.paseo, { env: { PASEO_BM_HOME: home }, homedir: () => root, now: () => NOW, onSettled });
+
+    expect(enqueue.mock.calls[0]![0]).toBe(MAIN);
+    expect(createDecisionStore(home).get(id, WORKSPACE_ID)!.delivery).toMatchObject({ to: MAIN, outcome: "sent" });
+  });
+
+  it("with no request, a command or prepared command named to an earlier Main reaches the current Main", async () => {
+    const sent = await tools().call("bm_send_command", { workspaceId: WORKSPACE_ID, intent: "answer", effects: ["none"], command: "Use PDF everywhere.", reason: "The owner said PDF.", managerId: OLD_MAIN });
+    expect(sent.ok, sent.text).toBe(true);
+    expect(enqueue.mock.calls.map((call) => call[0])).toEqual([MAIN]);
+
+    const fake = daemonWith(agents(), { [ORCHESTRATOR]: [[pluginSays(EVENT_NOTICE, at(0))]] });
+    const onSettled = settledByKind({ orchestrator: createOrchestratorDecisionDelivery({ home: () => home, now: () => NOW, queue: deps.queue, log: () => {} }) });
+    const asked = await toolsWith(fake.paseo).call("bm_ask_owner", {
+      workspaceId: WORKSPACE_ID,
+      question: "PDF or CSV for every export?",
+      recommendation: "PDF.",
+      subject: "export-format-all",
+      options: [
+        { label: "PDF", effects: ["none"], recommended: true, command: { to: "manager", agentId: OLD_MAIN, intent: "answer", body: "Use PDF." } },
+        { label: "CSV", effects: ["none"] },
+      ],
+    });
+    expect(asked.ok, asked.text).toBe(true);
+    const id = (jsonOf(asked) as { decisionId: string }).decisionId;
+
+    await handleDecisionsAnswer({ id, optionKey: "a", confirmed: true, via: "inbox" }, fake.paseo, { env: { PASEO_BM_HOME: home }, homedir: () => root, now: () => NOW, onSettled });
+
+    expect(enqueue.mock.calls.map((call) => call[0])).toEqual([MAIN, MAIN]);
+    expect(createDecisionStore(home).get(id, WORKSPACE_ID)!.delivery).toMatchObject({ to: MAIN, outcome: "sent" });
+  });
+
+  it("bm_projects lists the repo's current Main among its Managers, not an earlier or another mission's Main", async () => {
+    await store([turn({ agentId: MISSION_WORKER, role: "worker", requestId: REQUEST, parentAgentId: OLD_MAIN, sent: [msg(MISSION_WORKER, at(1), "Working on the export.")] })]);
+
+    const answer = jsonOf(await tools().call("bm_projects", { detail: "full" })) as { projects: Array<{ workspaceId: string; managers: Array<{ id: string }> }> };
+
+    expect(answer.projects.find((project) => project.workspaceId === WORKSPACE_ID)!.managers).toEqual([{ id: MAIN, title: null, status: "idle" }]);
+  });
+
+  it("orchestrator.state names the repo's Main as the project's Manager", async () => {
+    await store([turn({ agentId: MISSION_WORKER, role: "worker", requestId: REQUEST, parentAgentId: OLD_MAIN, sent: [msg(MISSION_WORKER, at(1), "Working on the export.")] })]);
+    const state = await handleOrchestratorState(daemonWith(agents()).paseo as never, { env: { PASEO_BM_HOME: home }, homedir: () => root, now: () => NOW, log: () => {} });
+
+    expect(state.projects).toEqual([expect.objectContaining({ workspaceId: WORKSPACE_ID, managerId: MAIN })]);
   });
 });

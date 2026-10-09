@@ -7,6 +7,7 @@ import {
   DECISION_CLASSES,
   MIN_POLICY_REVIEW_GRANT_CALLS,
   notOpenRefusalOf,
+  ownerOnlyRefusalText,
   policyMayGrant,
   preparedChangeRefusalText,
   REVIEW_BUDGET_SUBJECT,
@@ -283,6 +284,8 @@ export function predictionRefusalOf(policy: AutonomyPolicy, decision: Decision):
   if (decisionKindOf(decision.id) === "held") return heldIsTheOwners(decision.id);
   // Autonomy design §G.4: a change of the owner's settings is theirs alone, whoever asked it.
   if (carriesPreparedChange(decision)) return `${preparedChangeRefusalText(decision.id)}; it is not predicted`;
+  // Missions design §5: a fact only the owner knows is not predicted.
+  if (decision.ownerOnly === true) return `${ownerOnlyRefusalText(decision.id)}; it is not predicted`;
   if (decisionKindOf(decision.id) === "orchestrator") {
     return `${decision.id} is your own decision; a prediction is for a Worker's question (q:…) or a fallback incident (f:…)`;
   }
@@ -378,6 +381,8 @@ export function decideRefusalOf(
   if (decisionKindOf(decision.id) === "held") return heldIsTheOwners(decision.id);
   // Autonomy design §G.4: a change of the owner's settings is theirs alone, whoever asked it and whatever its cell.
   if (carriesPreparedChange(decision)) return `${preparedChangeRefusalText(decision.id)}; leave it to the owner`;
+  // Missions design §5: a fact only the owner knows is theirs whatever its cell.
+  if (decision.ownerOnly === true) return `${ownerOnlyRefusalText(decision.id)}; leave it to the owner`;
   if (decisionKindOf(decision.id) === "orchestrator") {
     return `${decision.id} is your own decision, and only the owner answers it; bm_decide decides a Worker's question (q:…) or a fallback incident (f:…)`;
   }
@@ -649,6 +654,134 @@ export function checkAutonomySetBoundary(input: unknown): { change: AutonomySetB
 /** The cell `autonomy.set` stores for a checked change, set at `at`. */
 export function cellOfChange(change: AutonomySetInput, at: string): AutonomyCell {
   return { mode: change.mode, at };
+}
+
+// ---------------------------------------------------------------------------
+// The mission level (missions design §2.4, §8; ADR-029).
+// ---------------------------------------------------------------------------
+
+/** What a mission's Main may do on its own, beside the repo level (§2.4). */
+export const MISSION_CLASSES = ["proceed", "staffing", "scope-repo", "answer-technical", "answer-effects", "split"] as const;
+export const missionClassSchema = z.enum(MISSION_CLASSES);
+export type MissionClass = z.infer<typeof missionClassSchema>;
+export const MISSION_LEVELS = [0, 1, 2, 3, 4] as const;
+export type MissionLevel = (typeof MISSION_LEVELS)[number];
+/** Q-200, the owner's answer of 2026-10-09: a new mission goes on to next steps and creates Workers. */
+export const DEFAULT_MISSION_LEVEL: MissionLevel = 2;
+
+/** The classes each level delegates (§2.4); every level holds the ones below it. */
+export const MISSION_LEVEL_CLASSES: Readonly<Record<MissionLevel, readonly MissionClass[]>> = {
+  0: [],
+  1: ["proceed"],
+  2: ["proceed", "staffing"],
+  3: ["proceed", "staffing", "answer-technical"],
+  4: ["proceed", "staffing", "answer-technical", "answer-effects", "scope-repo", "split"],
+};
+
+export const missionCellSchema = z.object({ mode: z.enum(["owner", "delegate"]), at: z.string() });
+export type MissionCell = z.infer<typeof missionCellSchema>;
+export const missionAutonomySchema = z.object({
+  level: autonomyLevelSchema,
+  cells: z.object(Object.fromEntries(MISSION_CLASSES.map((name) => [name, missionCellSchema])) as Record<MissionClass, typeof missionCellSchema>),
+});
+export type MissionAutonomy = z.infer<typeof missionAutonomySchema>;
+
+const missionIdSchema = z.string().regex(/^mis-[0-9a-f]{10}$/);
+
+/** `autonomy.set-mission-level`'s input: one mission's level; 3 and 4 need `confirmed: true`. */
+export const missionSetLevelInputSchema = z.object({ missionId: missionIdSchema, level: autonomyLevelSchema, confirmed: z.boolean().optional() }).strict();
+export type MissionSetLevelInput = z.infer<typeof missionSetLevelInputSchema>;
+
+/** `autonomy.set-mission-cell`'s input: one mission cell; `delegate` needs `confirmed: true`. */
+export const missionSetCellInputSchema = z
+  .object({ missionId: missionIdSchema, class: missionClassSchema, mode: missionCellSchema.shape.mode, confirmed: z.boolean().optional() })
+  .strict();
+export type MissionSetCellInput = z.infer<typeof missionSetCellInputSchema>;
+
+/** The first field of a failed parse, as `field <got> is not <expected>; nothing was saved`. */
+function missionInputRefusal(input: unknown, issue: string, expected: Readonly<Record<string, string>>): AutonomySetRefusal {
+  const field = issue in expected ? issue : "missionId";
+  const got = JSON.stringify((objectOf(input) ?? {})[field] ?? null);
+  return { code: "E_AUTONOMY_INVALID", detail: `${field} ${got} is not ${expected[field]}; nothing was saved` };
+}
+
+/**
+ * `autonomy.set-mission-level`'s check (§2.4), before anything is read or
+ * written: a mission id and a level 0–4, else `E_AUTONOMY_INVALID`; 3 or 4
+ * (the Main answers its Workers' questions) without `confirmed: true` →
+ * `E_AUTONOMY_NOT_CONFIRMED`.
+ */
+export function checkMissionSetLevel(input: unknown): { change: MissionSetLevelInput } | { refusal: AutonomySetRefusal } {
+  const parsed = missionSetLevelInputSchema.safeParse(input);
+  if (!parsed.success) {
+    return { refusal: missionInputRefusal(input, String(parsed.error.issues[0]?.path[0] ?? ""), { missionId: "a mission id", level: "a level from 0 to 4", confirmed: "true or false" }) };
+  }
+  if (parsed.data.level >= 3 && parsed.data.confirmed !== true) {
+    return {
+      refusal: { code: "E_AUTONOMY_NOT_CONFIRMED", detail: `mission level ${parsed.data.level} lets the Main answer its Workers' questions for you and needs the owner's confirmation; nothing was saved` },
+    };
+  }
+  return { change: parsed.data };
+}
+
+/**
+ * `autonomy.set-mission-cell`'s check (§2.4), before anything is read or
+ * written: a mission id, a mission class and `owner` or `delegate`, else
+ * `E_AUTONOMY_INVALID`; `delegate` without `confirmed: true` →
+ * `E_AUTONOMY_NOT_CONFIRMED`.
+ */
+export function checkMissionSetCell(input: unknown): { change: MissionSetCellInput } | { refusal: AutonomySetRefusal } {
+  const parsed = missionSetCellInputSchema.safeParse(input);
+  if (!parsed.success) {
+    const expected = { missionId: "a mission id", class: `one of ${MISSION_CLASSES.join(", ")}`, mode: "owner or delegate", confirmed: "true or false" };
+    return { refusal: missionInputRefusal(input, String(parsed.error.issues[0]?.path[0] ?? ""), expected) };
+  }
+  if (parsed.data.mode === "delegate" && parsed.data.confirmed !== true) {
+    return { refusal: { code: "E_AUTONOMY_NOT_CONFIRMED", detail: `delegating ${parsed.data.class} to the Main needs the owner's confirmation; nothing was saved` } };
+  }
+  return { change: parsed.data };
+}
+
+/** The classes whose questions the mission cell `answer-technical` covers (§8 rule 3); every other class is `answer-effects`'. */
+export const TECHNICAL_ANSWER_CLASSES: readonly DecisionClass[] = ["scope", "preference", "reversible-technical"];
+
+/** The mission cell that lets a Main answer a question of `decisionClass` in an `owner` or `shadow` repo cell (§8 rule 3). Pure. */
+export function missionAnswerCellOf(decisionClass: DecisionClass): "answer-technical" | "answer-effects" {
+  return TECHNICAL_ANSWER_CLASSES.includes(decisionClass) ? "answer-technical" : "answer-effects";
+}
+
+/**
+ * What the Main may do with an open Worker question of its mission (§8):
+ * `answer` — the repo cell of its class delegates (rule 2), or the mission
+ * cell of its group does (rule 3); `predict` — a `shadow` repo cell it may not
+ * decide: its recommendation is recorded as a prediction; else why it is the
+ * owner's. An `ownerOnly` question is the owner's (rule 1). The other checks
+ * (kind, status, options) are the caller's. Pure.
+ */
+export function mainAnswerRuleOf(
+  policy: AutonomyPolicy,
+  decision: Pick<Decision, "id" | "workspaceId" | "options" | "class" | "ownerOnly">,
+  missionDelegates: (name: MissionClass) => boolean,
+): { rule: "answer" | "predict" } | { refusal: string } {
+  if (decision.ownerOnly === true) return { refusal: ownerOnlyRefusalText(decision.id) };
+  const decisionClass = decisionClassOf(decision);
+  const repoMode = modeOf(policy, decision.workspaceId, decisionClass);
+  if (repoMode === "delegate" || missionDelegates(missionAnswerCellOf(decisionClass))) return { rule: "answer" };
+  if (repoMode === "shadow") return { rule: "predict" };
+  return {
+    refusal: `${decision.id} is ${decisionClass}, which neither its repo nor your mission level (${missionAnswerCellOf(decisionClass)}) delegates: the owner decides it; give your recommendation in your reply to the owner`,
+  };
+}
+
+/**
+ * Why the Orchestrator does not decide or predict `decision` (§8): a Worker's
+ * question of a request of a mission is its Main's (`bm_answer_worker`) or the
+ * owner's. Null for any other decision. Pure; the caller reads `missionId`
+ * from the request index.
+ */
+export function missionQuestionRefusalOf(decision: Pick<Decision, "id" | "requestId">, missionId: string | null): string | null {
+  if (missionId === null || decisionKindOf(decision.id) !== "question") return null;
+  return `${decision.id} is a question of request ${decision.requestId ?? ""} of mission ${missionId}: its Main decides it (bm_answer_worker), or the owner does; leave it`;
 }
 
 /** Why nobody but the owner predicts or decides an override (§B.7, §B.9): it is the owner's correction of an answer made for them. */

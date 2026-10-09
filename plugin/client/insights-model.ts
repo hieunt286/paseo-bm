@@ -399,6 +399,7 @@ export const AUTONOMY_NO_DATA =
 export const LEDGER_PREDICTOR_LABELS: Readonly<Record<Predictor, string>> = {
   recommended: "Recommended option",
   orchestrator: "Orchestrator",
+  main: "Mission Main",
 };
 
 /** How each kind of reversal (§B.3) reads. */

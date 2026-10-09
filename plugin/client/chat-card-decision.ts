@@ -180,6 +180,7 @@ const VIA_WHERE: Readonly<Record<AnswerVia, string>> = {
   "chat-orchestrator": " in the Orchestrator's chat",
   autopilot: " on Autopilot",
   paseo: " in Paseo's own prompt",
+  main: " by the mission's Main",
 };
 
 const CHAT_WORDS: Readonly<Record<ChatVia, string>> = {

@@ -16,6 +16,7 @@
  */
 import { z } from "zod";
 import { coordinationChangeSchema, type ReviewBudget } from "./coordination";
+import { missionChangeActionSchema } from "./mission-change";
 import type { Tier } from "./contracts";
 
 // ---------------------------------------------------------------------------
@@ -113,19 +114,21 @@ export const SETTLED_STATUSES: readonly DecisionStatus[] = ["answered", "superse
  * Orchestrator decides one in a `delegate` cell (`bm_decide`), or when the
  * action boundary allows a held request whose classes are delegated
  * (`server/action-boundary.ts`). Since ADR-025 a policy answer may grant any
- * effect its option declares.
+ * effect its option declares. `main` (missions design §4, §8): the mission's
+ * Main answered its Worker's question with `bm_answer_worker`, never with a
+ * grant; read as delegated, as the policy's.
  */
-export const ANSWER_BY = ["owner", "orchestrator", "policy", "precedent"] as const;
+export const ANSWER_BY = ["owner", "orchestrator", "policy", "precedent", "main"] as const;
 export const answerBySchema = z.enum(ANSWER_BY);
 export type AnswerBy = z.infer<typeof answerBySchema>;
 
 /**
  * The predictions the agreement ledger measures (§B.3): the option the asker
- * marked recommended, and the Orchestrator's (`bm_predict`). Measured, not
- * chosen: since ADR-025 the Orchestrator is the only one that decides a
- * delegated class, and no cell names a predictor.
+ * marked recommended, the Orchestrator's (`bm_predict`), and a mission
+ * Main's (`bm_answer_worker` in a `shadow` cell it may not decide, missions
+ * design §8). Measured, not chosen: no cell names a predictor.
  */
-export const PREDICTORS = ["recommended", "orchestrator"] as const;
+export const PREDICTORS = ["recommended", "orchestrator", "main"] as const;
 export const predictorSchema = z.enum(PREDICTORS);
 export type Predictor = z.infer<typeof predictorSchema>;
 
@@ -143,9 +146,10 @@ export type ReversalKind = z.infer<typeof reversalKindSchema>;
  * Where the answer came from (§A.3): the owner's surface or chat, or
  * `autopilot` — the Orchestrator's answer under the project's Autopilot —, or
  * `paseo`: a held request (`h:`, §D.2) the owner allowed in Paseo's own
- * permission prompt or with `paseo permit` (no paseo-bm role can answer one).
+ * permission prompt or with `paseo permit` (no paseo-bm role can answer one),
+ * or `main`: the mission's Main, with `bm_answer_worker` (missions design §4).
  */
-export const ANSWER_VIA = ["inbox", "chat-card", "chat-manager", "chat-worker", "chat-orchestrator", "autopilot", "paseo"] as const;
+export const ANSWER_VIA = ["inbox", "chat-card", "chat-manager", "chat-worker", "chat-orchestrator", "autopilot", "paseo", "main"] as const;
 export const answerViaSchema = z.enum(ANSWER_VIA);
 export type AnswerVia = z.infer<typeof answerViaSchema>;
 
@@ -274,6 +278,8 @@ export const preparedActionSchema = z.discriminatedUnion("kind", [
     requestId: z.string().min(1),
     allow: z.boolean(),
   }),
+  /** A mission change on the owner's `m:` card (missions design §4.1), applied by the plugin on the owner's tap only. */
+  missionChangeActionSchema,
 ]);
 export type PreparedAction = z.infer<typeof preparedActionSchema>;
 
@@ -300,7 +306,8 @@ export function isPreparedChange(action: PreparedAction | undefined): action is 
  * `resolveAtOpen`).
  */
 export function carriesPreparedChange(decision: Pick<Decision, "options">): boolean {
-  return decision.options.some((option) => isPreparedChange(option.action));
+  // A mission change (missions design §4.1) is the owner's alone too.
+  return decision.options.some((option) => isPreparedChange(option.action) || option.action?.kind === "mission-change");
 }
 
 /** Why a decision that carries a prepared change is only the owner's, for every refusal of another answerer. */
@@ -387,7 +394,14 @@ export const decisionAnswerSchema = z
     message: "the Orchestrator and the policy answer with an option",
   })
   .refine((answer) => answer.via !== "autopilot" || answer.by === "orchestrator" || answer.by === "policy", { message: "only an agent answers on Autopilot" })
-  .refine((answer) => answer.by !== "precedent" || answer.precedentId !== undefined, { message: "a precedent answer names its precedent" });
+  .refine((answer) => answer.by !== "precedent" || answer.precedentId !== undefined, { message: "a precedent answer names its precedent" })
+  .refine((answer) => (answer.by === "main") === (answer.via === "main"), { message: "only the mission's Main answers via main, and only via main" });
+
+const reasonedPredictionSchema = z.object({
+  optionKey: z.string().regex(OPTION_KEY_PATTERN),
+  reason: z.string().min(1).max(MAX_ANSWER_REASON_CHARS),
+  at: isoTimeSchema,
+});
 
 /**
  * What was predicted for a decision (§B.3), stored on the record: the option
@@ -395,12 +409,13 @@ export const decisionAnswerSchema = z
  * Orchestrator challenger's prediction (`bm_predict`), null until it gives
  * one. The owner sees `orchestrator` before answering only as the
  * Orchestrator's proposal, at a level of 1 or more (`ownerViewOfDecision`).
+ * `main` (additive, missions design §8): a mission Main's recommendation in a
+ * `shadow` cell it may not decide (`bm_answer_worker`).
  */
 export const decisionPredictionSchema = z.object({
   recommended: z.object({ optionKey: z.string().regex(OPTION_KEY_PATTERN) }).nullable(),
-  orchestrator: z
-    .object({ optionKey: z.string().regex(OPTION_KEY_PATTERN), reason: z.string().min(1).max(MAX_ANSWER_REASON_CHARS), at: isoTimeSchema })
-    .nullable(),
+  orchestrator: reasonedPredictionSchema.nullable(),
+  main: reasonedPredictionSchema.nullable().optional(),
 });
 export type DecisionPrediction = z.infer<typeof decisionPredictionSchema>;
 
@@ -466,6 +481,13 @@ export const decisionSchema = z
     prediction: decisionPredictionSchema.optional(),
     /** How the answer was reversed (§B.3); additive, absent or empty while it stands. */
     reversals: z.array(decisionReversalSchema).max(MAX_DECISION_REVERSALS).optional(),
+    /**
+     * A fact only the owner knows (missions design §5): the Worker said so
+     * (`bm_questions`), or an option asserts something about the owner
+     * (`ownerFactOf`). Additive, written only as true. Only the owner's card,
+     * or the owner's own words in the Worker's chat, answer it.
+     */
+    ownerOnly: z.boolean().optional(),
   })
   .superRefine((decision, context) => {
     const issue = (message: string) => context.addIssue({ code: "custom", message });
@@ -486,7 +508,7 @@ export const decisionSchema = z
     if (decision.answer?.optionKey != null && !decision.options.some((option) => option.key === decision.answer?.optionKey)) {
       issue("the answer names one of the options");
     }
-    const predicted = [decision.prediction?.recommended?.optionKey, decision.prediction?.orchestrator?.optionKey];
+    const predicted = [decision.prediction?.recommended?.optionKey, decision.prediction?.orchestrator?.optionKey, decision.prediction?.main?.optionKey];
     if (predicted.some((key) => key != null && !decision.options.some((option) => option.key === key))) issue("a prediction names one of the options");
     if ((decision.reversals?.length ?? 0) > 0 && decision.status !== "answered") issue("only an answered decision is reversed");
   });
@@ -569,11 +591,14 @@ export function decisionClassOf(decision: Pick<Decision, "id" | "options" | "cla
  * Who chose a `policy` answer (ADR-025 decision 5), for the agreement ledger
  * and the metrics: the predictor an older build stored with it; else null for
  * a held request (`h:`), which the action boundary allowed by the policy with
- * no prediction; else the Orchestrator (`bm_decide`), the only predictor. Null
- * for an answer that is not the policy's. Pure.
+ * no prediction; else the Orchestrator (`bm_decide`), the only predictor; and
+ * `main` for a mission Main's answer, read as the policy's (missions design
+ * §8). Null for any other answer. Pure.
  */
 export function policyPredictorOf(decision: Pick<Decision, "id" | "answer">): Predictor | null {
   const answer = decision.answer;
+  // Missions design §8: the Main's answer counts as the policy's, chosen by the Main.
+  if (answer?.by === "main") return "main";
   if (answer === null || answer.by !== "policy") return null;
   if (answer.predictor !== undefined) return answer.predictor;
   return decisionKindOf(decision.id) === "held" ? null : "orchestrator";
@@ -609,6 +634,39 @@ export function deliveryKindOf(decision: Pick<Decision, "id" | "supersedes">): "
 /** `q:<requestId>:<Qn>`. */
 export function questionDecisionId(requestId: string, questionId: string): string {
   return `q:${requestId}:${questionId}`;
+}
+
+/**
+ * The phrases with which an option asserts something about the owner
+ * (missions design §5), in English and Vietnamese: a question with one is
+ * `ownerOnly` whatever the Worker said.
+ */
+export const OWNER_FACT_PHRASES = [
+  "I have",
+  "I've",
+  "the owner has",
+  "I am logged in",
+  "tôi đã",
+  "tôi có",
+  "tôi đang",
+  "đã điền",
+  "đã đăng nhập",
+  "của tôi",
+] as const;
+
+const OWNER_FACT = new RegExp(
+  `(?<![\\p{L}\\p{N}])(?:${OWNER_FACT_PHRASES.map((phrase) => phrase.normalize("NFC").replace(/'/g, "['’]").replace(/ /g, "\\s+")).join("|")})(?![\\p{L}\\p{N}])`,
+  "iu",
+);
+
+/** The first option label that asserts something about the owner (`OWNER_FACT_PHRASES`), or null. Pure. */
+export function ownerFactOf(options: readonly Pick<DecisionOption, "label">[]): string | null {
+  return options.find((option) => OWNER_FACT.test(option.label.normalize("NFC")))?.label ?? null;
+}
+
+/** Why nobody but the owner answers an `ownerOnly` question (missions design §5). */
+export function ownerOnlyRefusalText(decisionId: string): string {
+  return `${decisionId} asks a fact only the owner knows (ownerOnly): only the owner answers it, on its card or in the Worker's chat`;
 }
 
 /**
@@ -670,9 +728,10 @@ const ANSWERED_BY_TEXT: Readonly<Record<AnswerBy, string>> = {
   orchestrator: "the Orchestrator",
   policy: "the policy",
   precedent: "an owner precedent",
+  main: "the mission's Main",
 };
 
-/** Who answered, for a refusal: "the owner", "the Orchestrator", "the policy" or "an owner precedent". */
+/** Who answered, for a refusal: "the owner", "the Orchestrator", "the policy", "an owner precedent" or "the mission's Main". */
 export function answeredByText(by: AnswerBy): string {
   return ANSWERED_BY_TEXT[by];
 }
@@ -762,6 +821,11 @@ export function answerDecision(decision: Decision, input: AnswerInput): Transiti
     return refuse("invalid-answer", "the Orchestrator no longer answers a decision itself; it decides through the policy (bm_decide)");
   }
   const by = input.by ?? "owner";
+  // Missions design §5: an owner-only fact is the owner's own word, never relayed through a Manager's chat.
+  if (decision.ownerOnly === true && (by !== "owner" || input.via === "chat-manager")) return refuse("invalid-answer", ownerOnlyRefusalText(decision.id));
+  // Missions design §4: the Main answers its Workers' questions only, via main.
+  if ((by === "main") !== (input.via === "main")) return refuse("invalid-answer", "only the mission's Main answers via main, and only via main");
+  if (by === "main" && decisionKindOf(decision.id) !== "question") return refuse("invalid-answer", `decision ${decision.id} is not a Worker's question; the mission's Main answers only those`);
   // Autonomy design §G.4: a prepared change of the owner's settings is the owner's alone, whoever else would answer.
   if (by !== "owner" && carriesPreparedChange(decision)) return refuse("invalid-answer", preparedChangeRefusalText(decision.id));
   // Autonomy design §D.2: a held request is allowed or denied, by the owner (the policy only as it opens); never in words, never by a precedent.
@@ -775,7 +839,7 @@ export function answerDecision(decision: Decision, input: AnswerInput): Transiti
   if ((optionKey === null) === (words === null)) {
     return refuse("invalid-answer", "an answer names exactly one option or gives the owner's own words");
   }
-  if (by === "policy" && optionKey === null) return refuse("invalid-answer", "the policy answers with one of the options");
+  if ((by === "policy" || by === "main") && optionKey === null) return refuse("invalid-answer", `${answeredByText(by)} answers with one of the options`);
   const precedentId = input.precedentId?.trim();
   if (precedentId !== undefined && (precedentId === "" || precedentId.length > MAX_PRECEDENT_ID_CHARS)) {
     return refuse("invalid-answer", `a precedent id must be 1–${MAX_PRECEDENT_ID_CHARS} characters`);
@@ -809,7 +873,8 @@ export function answerDecision(decision: Decision, input: AnswerInput): Transiti
         ...(input.class === undefined ? {} : { class: input.class }),
         ...(precedentId === undefined ? {} : { precedentId }),
       },
-      grant: effects.length === 0 ? null : { effects, expiresAt, usedAt: null },
+      // Missions design §4: the Main's answer never grants; the repo's action boundary decides its effects.
+      grant: effects.length === 0 || by === "main" ? null : { effects, expiresAt, usedAt: null },
     },
   };
 }

@@ -62,8 +62,10 @@ describe("launcher.tsx: the Beads Manager surface", () => {
 
   it("renders workspaces.data in the order it arrives (most recent activity first; delta 20260918f §4.5)", () => {
     expect(launcher).toMatch(/sort: \[\{ key: "activity_at", direction: "desc" \}\]/);
-    // The project rows are `workspaces.data` mapped one to one; `workRows` keeps that order (plugin-work-model.test.ts).
-    expect(launcher).toMatch(/workspaces=\{workspaces\.data\?\.map\(\(workspace\) => \(\{/);
+    // The project rows are `workspaces.data` without the plugin homes (`projectWorkspacesOf`, a filter that keeps the order),
+    // mapped one to one; `workRows` keeps that order (plugin-work-model.test.ts).
+    expect(launcher).toMatch(/projectWorkspacesOf\(workspaces\.data, /);
+    expect(launcher).toMatch(/workspaces=\{projectWorkspaces\?\.map\(\(workspace\) => \(\{/);
   });
 
   it("shows a project's page beside the Projects list: one WorkScreen, asked for a project by a numbered request (change-014)", () => {

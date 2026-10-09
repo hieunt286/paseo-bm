@@ -50,6 +50,7 @@ import { dataHomeOf } from "./role-instructions";
 import { TIMED_OUT, withTimeout } from "./role-mode";
 import { dataHome } from "./rpc-kit";
 import { knownRequestIdOf } from "./request-registry";
+import { missionManagerOf, requestIndexOf } from "./mission-roster";
 import { fallbackAlias, positionOfAlias } from "../shared/fallback";
 import { fallbackIncidentSchema, type BmRole, type FallbackIncident } from "../shared/contracts";
 import type { FallbackClass } from "../shared/fallback-patterns";
@@ -465,18 +466,21 @@ export async function recordIncident(
       available: await availableProviders(deps.paseo),
     });
 
-    const parentId = role === "manager" ? null : nonEmpty(labels[PARENT_AGENT_LABEL]);
+    // Missions design §3.4 step 4: a request of a mission is its current Main's (the registry's
+    // `managerId`) and its repo's; the parent labels are read only for a request without one.
+    const main = role === "manager" ? null : missionManagerOf(deps.home, requestId);
+    const parentId = role === "manager" ? null : role === "worker" && main !== null ? main : nonEmpty(labels[PARENT_AGENT_LABEL]);
     let managerId: string | null;
     if (role === "manager") managerId = agentId;
     else if (role === "worker") managerId = parentId;
-    else managerId = parentId === null ? null : nonEmpty(labelsOf(await snapshotOf(deps.paseo, parentId))[PARENT_AGENT_LABEL]);
+    else managerId = main ?? (parentId === null ? null : nonEmpty(labelsOf(await snapshotOf(deps.paseo, parentId))[PARENT_AGENT_LABEL]));
 
     const detectedAt = now().toISOString();
     const off = chain.policy === "off";
     const incident: FallbackIncident = {
       id: `fb-${(deps.randomHex ?? (() => randomBytes(6).toString("hex")))()}`,
       role,
-      workspaceId,
+      workspaceId: (requestId === null ? null : requestIndexOf(deps.home, requestId))?.workspaceId ?? workspaceId,
       requestId,
       agentId,
       agentProvider,

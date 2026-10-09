@@ -13,9 +13,10 @@
 // The bundles keep every module outside Paseo's host-provided set inside them,
 // and leave the host-provided set as imports (the same set the scan accepts):
 // the SDK, zod, react, react-native, @tanstack/react-query and Node built-ins.
-// Whitespace and syntax are minified, identifiers are not, so a stack trace
-// still names the function. Paseo compiles these files as it compiled the
-// sources: it re-bundles each entry with esbuild.
+// Whitespace, syntax and local identifiers are minified, and every function
+// and class keeps its name (`keepNames`), so a stack trace still names the
+// function (ADR-030). Paseo compiles these files as it compiled the sources: it
+// re-bundles each entry with esbuild.
 //
 // The listing's images are copied from plugin/images/ (the npm tarball does not
 // carry them). Every file in plugin-package/ is written here, and nothing else
@@ -85,6 +86,8 @@ async function bundle(file, platform, version) {
     charset: "utf8",
     minifyWhitespace: true,
     minifySyntax: true,
+    minifyIdentifiers: true,
+    keepNames: true,
     logLevel: "silent",
   });
   if (result.outputFiles.length !== 1) throw new Error(`${file}: expected one output file`);

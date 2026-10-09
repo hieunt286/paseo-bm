@@ -4,8 +4,9 @@
  * it is testable without a renderer. `launcher.tsx` renders from it.
  *
  * The client never finds or creates a Manager itself: it calls `manager.ensure`
- * for one workspace and opens the returned `agentId`. De-duplication (one
- * Manager per workspace, REQ-020b) is the server's job.
+ * for one workspace and opens the returned `agentId`: the Main of the
+ * project's mission (missions design §3.6). Which agent that is, and making a
+ * one-repo mission when there is none, is the server's job.
  *
  * Paseo 0.8 facts this is built on (checked against @getpaseo/plugin 0.8.0
  * `dist/client/contracts.d.ts`, not guessed):
@@ -180,16 +181,14 @@ export function describeLauncherState(state: LauncherState): LauncherNotice[] {
       const notices: LauncherNotice[] = [
         {
           tone: "muted",
-          text: state.created
-            ? "Started a new Beads Manager for this workspace."
-            : "Reopened the existing Beads Manager for this workspace.",
+          text: state.created ? "Started the Main of this project's mission." : "Opened the Main of this project's mission.",
         },
       ];
       const others = state.otherManagerIds.length;
       if (others > 0) {
         notices.push({
           tone: "warning",
-          text: `This workspace has ${others} other live Beads Manager${others === 1 ? "" : "s"} (${state.otherManagerIds.join(", ")}). The newest one was opened; nothing was archived or deleted.`,
+          text: `This project has ${others} other live Beads Manager${others === 1 ? "" : "s"} (${state.otherManagerIds.join(", ")}). The mission's Main was opened; the others are flagged in the Inbox, and nothing was archived or deleted.`,
         });
       }
       // The chat is already open: this only explains why the Manager may still ask for permission.

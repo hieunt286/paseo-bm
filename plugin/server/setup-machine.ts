@@ -41,6 +41,8 @@ import { AUTONOMY_DIR_NAME } from "./autonomy-store";
 import { REQUESTS_DIR_NAME } from "./request-registry";
 import { OUTBOX_DIR_NAME } from "./outbox";
 import { PEERS_DIR_NAME } from "./peer-links";
+import { MISSIONS_DIR_NAME } from "./mission-store";
+import { MEMORY_DIR_NAME } from "./memory-store";
 import { UI_DIR_NAME } from "./data-home";
 import { TIMED_OUT, withTimeout } from "./role-mode";
 import { ROLE_NAMES, markCleanedUpThisRun, roleId, type RoleName } from "./setup-roles";
@@ -246,6 +248,9 @@ export const CLEANUP_DELETES: readonly string[] = [
   OUTBOX_DIR_NAME,
   // Design §7.17.1: and the peer links between projects.
   PEERS_DIR_NAME,
+  // Missions design §2: and the missions with their rosters, journals and decisions, and the project memory.
+  MISSIONS_DIR_NAME,
+  MEMORY_DIR_NAME,
 ];
 
 export type CleanupDeps = SetupStateDeps & { now?: () => Date };

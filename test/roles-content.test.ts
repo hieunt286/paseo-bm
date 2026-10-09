@@ -127,8 +127,9 @@ describe("budgets (design §A.11)", () => {
   // Rewritten from zero on 2026-09-29: 201 / 400 / 167 / 181 lines before. ADR-027 step 5 (design §16.12): the
   // hand path moved to an unbound agent's Runtime facts, 120 / 250 / 119 lines before; §A.11's budgets stay the ceilings.
   // Peer links (design §7.17.9, bead bm-peer-links-j8r3.12): Manager 80 → 90, Worker 170 → 180.
+  // Missions (missions design §11, bead bm-missions-9qc3.16): the Manager's file is the Main's, 90 → 100.
   it.each([
-    ["manager.md", manager, 90],
+    ["manager.md", manager, 100],
     ["worker.md", worker, 180],
     ["reviewer.md", reviewer, 95],
     ["orchestrator.md", orchestrator, 100],
@@ -656,8 +657,18 @@ describe("bound role files and the unbound hand path (ADR-027 decisions 8–9)",
 
   it("each role names each of its bound tools", () => {
     // bm_reply answers a BM-ASK, whose notice says so: the role file need not (D5).
-    for (const name of ["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply"]) verbatim(W, `\`${name}\``);
+    for (const name of ["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_memory"]) verbatim(W, `\`${name}\``);
     for (const name of ["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_decisions"]) verbatim(M, `\`${name}\``);
+    // Missions design §4, §11: a Main's own tools.
+    for (const name of ["bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission"]) verbatim(M, `\`${name}\``);
+  });
+
+  it("names every tool a bound Manager or Worker lists, so none is left untaught", () => {
+    // bm_reply answers a BM-ASK, whose notice says so (D5); the block builders are the unbound agent's.
+    const untaught = new Set(["bm_reply"]);
+    for (const [role, text] of [["manager", M], ["worker", W]] as const) {
+      for (const face of toolFacesFor(role, true)) if (!untaught.has(face.name)) verbatim(text, `\`${face.name}\``);
+    }
     verbatim(R, "`bm_review`");
   });
 
@@ -847,15 +858,16 @@ describe("peer links and the owner-turn noise (design §7.17.8–9, REQ-176 c, R
   it("the Manager takes another project's ask as that project's request and asks other projects through the plugin", () => {
     keys(M, "a peer ask is never the owner's word", "`BM-DELIVERY peer`", "another project's ask", "never the owner's word");
     keys(M, "a Worker, an attachment or a reply", "`bm_create_worker` (`peerLink`)", "`bm_tell_worker` (`peerLink`)", "`bm_peer_reply`", "one line");
-    keys(M, "its own asks through bm_ask_project, never a raw message", "`bm_ask_project`", "never a raw agent message");
-    keys(M, "where another project stands is read", "Where another project stands", "`bm_peers`");
+    keys(M, "a Worker's bm_ask_project reaches its Main as ask-main", "`bm_ask_project`", "`BM-DELIVERY peer`", "`ask-main`", "as it says");
+    keys(M, "another mission only through bm_ask_mission, never a raw message", "another mission only through", "`bm_ask_mission`", "never a raw agent message");
+    keys(M, "where the others stand is read", "where the others stand", "`bm_peers`");
     keys(M, "a repeated delivery needs no reply", "repeats what you already told the owner", "no reply");
     keys(M, "its own question once, again at most at finished", "Ask it once", "goes on as briefed", "at most once", "`finished`");
     keys(M, "a stopped is the owner's only when their message or BM-STOP shows it", "`stopped` is the owner's only when", "`BM-STOP`");
   });
 
   it("the Worker asks another project without leaving its workspace and answers the one that asked", () => {
-    keys(WR, "asking another project is not leaving", "`bm_ask_project` is not leaving", "Manager and owner decide its work");
+    keys(WR, "asking another project is not leaving", "`bm_ask_project` is not leaving", "your Main", "the owner decide that work");
     keys(WR, "a peerAsk is no yes", "`peerAsk`", "another project's words", "no yes");
     keys(W, "asks, carries on, blocks only when nothing else can go on", "`bm_ask_project`", "carry on", "`waitingOnPeers`", "nothing else can go on", "`BM-DELIVERY peer-reply`");
     keys(W, "a peer brief ends finished with forPeer", "`peer:` line", "`finished` with `forPeer`", "`bm_peer_reply`");
@@ -867,6 +879,53 @@ describe("peer links and the owner-turn noise (design §7.17.8–9, REQ-176 c, R
     keys(O, "never carries words between projects", "peer links", "never carry words between projects", "command no agent to wait for you");
     keys(O, "a review budget is the Worker's question", "review budget a request needs", "Worker's question", "never ask the owner");
     keys(O, "reads a danger signal before a stop", "`danger`", "read its evidence first", "`bm_direct_worker`");
+  });
+});
+
+/**
+ * Missions design §11 (ADR-029, bead bm-missions-9qc3.16): the Manager's file
+ * is the Main's — one mission, its record, Workers in the right repo, links
+ * between them, answers within the mission level; the Worker asks through its
+ * Main, marks what only the owner knows and adds what it learns to memory.
+ * The tools' own descriptions and the deliveries carry the details.
+ */
+describe("missions — the Main's file and the Worker's side (missions design §11, REQ-186, REQ-187, REQ-189, REQ-191)", () => {
+  it("the Main keeps one mission named by its Runtime facts, records an unassigned one with bm_mission_start, and keeps the record", () => {
+    keys(M, "the Main of one mission", "**Main** of one mission");
+    keys(M, "the Runtime facts name the mission; unassigned, bm_mission_start", "`## Runtime facts` name your mission", "none yet", "`bm_mission_start`");
+    keys(M, "reads with bm_mission, keeps with bm_mission_update", "`bm_mission`", "`bm_mission_update`", "the plan", "done criterion", "evidence", "contract");
+    keys(M, "a sensitive change becomes the owner's m: card, said in one line", "the owner's `m:`", "card", "one line");
+    keys(M, "what is left comes from the done criteria", "\"What is left\"", "open done criteria");
+    keys(M, "reads repos with bm_repo and curates memory with bm_memory", "`bm_repo`", "`bm_memory`", "with its source", "remove what no longer holds");
+  });
+
+  it("gives work to Workers in the right repo, re-using the one on an area, splitting as staffing allows", () => {
+    keys(M, "more work on a held area goes to that Worker", "more work on an area a Worker holds", "`bm_tell_worker`");
+    keys(M, "a new Worker in the repo it changes", "`bm_create_worker` in the repo it changes", "`project`");
+    keys(M, "parallel parts get a Worker each, within staffing", "side by side", "a Worker each", "`staffing`");
+    keys(M, "the next planned step on proceed, else one line to the owner", "next planned step", "`proceed`", "ask in one line");
+  });
+
+  it("links Workers who must agree and records the contract; another mission only through bm_ask_mission", () => {
+    keys(M, "links Workers who must agree, records the contract", "`bm_link_workers`", "`bm_mission_update` (`contracts`)");
+    keys(MR, "linking Workers is within its agents limit", "creating, briefing and linking Workers");
+  });
+
+  it("answers Workers' questions only within the mission level, never an ownerOnly one", () => {
+    keys(MR, "never answers in the owner's place beyond the mission level", "never answer a Worker's question in the owner's", "beyond your mission level");
+    keys(M, "within the level through bm_answer_worker, never an ownerOnly question", "mission level delegates", "`bm_answer_worker`", "never an `ownerOnly`", "owner's card or words");
+  });
+
+  it("takes a BM-COMMAND on how the mission runs as process feedback", () => {
+    keys(M, "process feedback: re-plan or explain in one line", "`BM-COMMAND`", "how the mission runs", "process feedback", "re-plan", "one line");
+    keys(M, "finished reports the done criteria it meets", "At `finished`", "done criteria it meets");
+  });
+
+  it("the Worker asks other repos through its Main, marks what only the owner knows, and adds what it learns to memory", () => {
+    keys(W, "in a mission an ask reaches its Main, who links the Worker on that work", "`bm_ask_project`", "in a mission it reaches your Main", "links you with the Worker on that work");
+    keys(W, "ownerOnly for a fact only the owner knows", "`ownerOnly`", "only the owner can know", "a login", "account or user id", "port or path", "personal choice");
+    keys(W, "reads the project memory before asking", "project memory", "`bm_memory`", "the repository");
+    keys(W, "adds what it learnt to bm_memory with its source", "a fact, a convention, a contract", "`bm_memory`", "with its source");
   });
 });
 

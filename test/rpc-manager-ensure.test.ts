@@ -24,6 +24,7 @@ import { currentInstructionsHash } from "../plugin/server/instructions-label";
 import { fakePaseo } from "./helpers/fake-paseo";
 import { createBindingStore } from "../plugin/server/agent-bindings";
 import { binderOf } from "../plugin/server/agent-tools";
+import { createMissionStore } from "../plugin/server/mission-store";
 
 const MANAGER_HASH = currentInstructionsHash("manager");
 
@@ -750,40 +751,50 @@ describe("manager.ensure sets the machine up (0.4.0, ADR-012 decision 4)", () =>
 });
 
 describe("plugin server entry", () => {
-  it("registers manager.ensure and wires the handler's paseo into ensureManager", async () => {
-    const handle = vi.fn();
-    const cleanup = contribute({ handle, registerSettings: vi.fn() } as unknown as Parameters<typeof contribute>[0]);
-    expect(typeof cleanup).toBe("function");
+  it("registers manager.ensure and wires the handler's paseo into handleManagerEnsure: the Main of the workspace's mission (missions design §3.6)", async () => {
+    const dataHome = mkdtempSync(join(isolatedHome, "bm-legacy-"));
+    process.env.PASEO_BM_HOME = dataHome;
+    try {
+      // A one-repo mission made from the workspace's Manager, whose labels never reached the daemon.
+      createMissionStore(dataHome).create({ code: "WSA", name: "ws", goal: "", repos: [WS], createdBy: "legacy", legacyWorkspaceId: WS, mainId: "mgr-new" });
+      const handle = vi.fn();
+      const cleanup = contribute({ handle, registerSettings: vi.fn() } as unknown as Parameters<typeof contribute>[0]);
+      expect(typeof cleanup).toBe("function");
 
-    const registration = handle.mock.calls.find(([contract]) => contract === managerEnsureRpc);
-    expect(registration).toBeDefined();
+      const registration = handle.mock.calls.find(([contract]) => contract === managerEnsureRpc);
+      expect(registration).toBeDefined();
 
-    const fake = daemonWith({
-      agents: [
-        agent({ id: "mgr-old", createdAt: "2026-09-15T08:00:00.000Z" }),
-        agent({ id: "mgr-new", createdAt: "2026-09-15T09:00:00.000Z" }),
-      ],
-    });
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const output = await registration![1]({ workspaceId: WS }, { paseo: fake.paseo });
-    warn.mockRestore();
+      const fake = daemonWith({
+        agents: [
+          agent({ id: "mgr-old", createdAt: "2026-09-15T08:00:00.000Z" }),
+          agent({ id: "mgr-new", createdAt: "2026-09-15T09:00:00.000Z" }),
+        ],
+      });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const output = await registration![1]({ workspaceId: WS }, { paseo: fake.paseo });
+      warn.mockRestore();
 
-    expect(managerEnsureRpc.output.parse(output)).toEqual({
-      agentId: "mgr-new",
-      created: false,
-      otherManagerIds: ["mgr-old"],
-      modeNotice: null,
-      toolsNotice: null,
-      setupNotice: null,
-      replacedManagerId: null,
-    });
+      expect(managerEnsureRpc.output.parse(output)).toEqual({
+        agentId: "mgr-new",
+        created: false,
+        otherManagerIds: ["mgr-old"],
+        modeNotice: null,
+        toolsNotice: null,
+        setupNotice: null,
+        replacedManagerId: null,
+      });
+      expect(fake.createCalls).toEqual([]);
+    } finally {
+      delete process.env.PASEO_BM_HOME;
+      rmSync(dataHome, { recursive: true, force: true });
+    }
   });
 
   it("reads roles/manager.md from the payload", async () => {
     expect(await readManagerInstructions()).toBe(managerMd);
   });
 
-  it("creates the Manager with the owner's precedents of its workspace and the global ones, under the role file's label (autonomy design §B.6)", async () => {
+  it("creates a new mission's Main in the Missions home with the owner's global precedents only, under the role file's label (autonomy design §B.6, missions design §3.5, §3.6)", async () => {
     const dataHome = mkdtempSync(join(isolatedHome, "bm-precedents-"));
     process.env.PASEO_BM_HOME = dataHome;
     try {
@@ -810,12 +821,12 @@ describe("plugin server entry", () => {
       await registration![1]({ workspaceId: WS }, { paseo: fake.paseo });
       warn.mockRestore();
 
-      const { options } = fake.createCalls[0]!;
+      const { workspaceId, options } = fake.createCalls[0]!;
+      expect(workspaceId).not.toBe(WS);
       const prompt = String(options.config.systemPrompt);
       expect(prompt.startsWith(managerMd.trimEnd())).toBe(true);
-      expect(prompt).toContain(
-        "## Owner precedents\n\n- `subject-mine` — Answer mine. (this project, until 2099-10-20)\n- `subject-global` — Answer global. (all projects, until 2099-10-20)\n",
-      );
+      expect(prompt).toContain("## Owner precedents\n\n- `subject-global` — Answer global. (all projects, until 2099-10-20)\n");
+      expect(prompt).not.toContain("subject-mine");
       expect(prompt).not.toContain("subject-theirs");
       // Precedents never make a Manager outdated: the label hashes the role file only.
       expect(options.labels).toMatchObject({ "bm.instructions": MANAGER_HASH });
